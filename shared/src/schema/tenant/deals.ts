@@ -1,0 +1,53 @@
+import {
+  pgTable,
+  uuid,
+  varchar,
+  text,
+  boolean,
+  numeric,
+  bigint,
+  integer,
+  date,
+  timestamp,
+} from "drizzle-orm/pg-core";
+
+// Note: These reference public schema tables by UUID. Drizzle cross-schema references
+// are defined here for TypeScript typing. The actual FK constraints are in the SQL migration
+// because Drizzle doesn't natively handle cross-schema references.
+
+export const deals = pgTable("deals", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  dealNumber: varchar("deal_number", { length: 50 }).unique().notNull(),
+  name: varchar("name", { length: 500 }).notNull(),
+  stageId: uuid("stage_id").notNull(),
+  assignedRepId: uuid("assigned_rep_id").notNull(),
+  primaryContactId: uuid("primary_contact_id"),
+  ddEstimate: numeric("dd_estimate", { precision: 14, scale: 2 }),
+  bidEstimate: numeric("bid_estimate", { precision: 14, scale: 2 }),
+  awardedAmount: numeric("awarded_amount", { precision: 14, scale: 2 }),
+  changeOrderTotal: numeric("change_order_total", { precision: 14, scale: 2 }).default("0"),
+  description: text("description"),
+  propertyAddress: text("property_address"),
+  propertyCity: varchar("property_city", { length: 255 }),
+  propertyState: varchar("property_state", { length: 2 }),
+  propertyZip: varchar("property_zip", { length: 10 }),
+  projectTypeId: uuid("project_type_id"),
+  regionId: uuid("region_id"),
+  source: varchar("source", { length: 100 }),
+  winProbability: integer("win_probability"),
+  procoreProjectId: bigint("procore_project_id", { mode: "number" }),
+  procoreBidId: bigint("procore_bid_id", { mode: "number" }),
+  procoreLastSyncedAt: timestamp("procore_last_synced_at", { withTimezone: true }),
+  lostReasonId: uuid("lost_reason_id"),
+  lostNotes: text("lost_notes"),
+  lostCompetitor: varchar("lost_competitor", { length: 255 }),
+  lostAt: timestamp("lost_at", { withTimezone: true }),
+  expectedCloseDate: date("expected_close_date"),
+  actualCloseDate: date("actual_close_date"),
+  lastActivityAt: timestamp("last_activity_at", { withTimezone: true }),
+  stageEnteredAt: timestamp("stage_entered_at", { withTimezone: true }).defaultNow().notNull(),
+  isActive: boolean("is_active").default(true).notNull(),
+  hubspotDealId: varchar("hubspot_deal_id", { length: 50 }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+});
