@@ -1,0 +1,353 @@
+import { Router } from "express";
+import { and, eq, desc } from "drizzle-orm";
+import { dealApprovals } from "@trock-crm/shared/schema";
+import { requireRole } from "../../middleware/rbac.js";
+import { AppError } from "../../middleware/error-handler.js";
+import { eventBus } from "../../events/bus.js";
+import {
+  getDeals,
+  getDealById,
+  getDealDetail,
+  createDeal,
+  updateDeal,
+  deleteDeal,
+  getDealsForPipeline,
+  getDealSources,
+} from "./service.js";
+import { changeDealStage } from "./stage-change.js";
+import { preflightStageCheck } from "./stage-gate.js";
+
+const router = Router();
+
+// GET /api/deals — list deals (paginated, filtered, sorted)
+router.get("/", async (req, res, next) => {
+  try {
+    const filters = {
+      search: req.query.search as string | undefined,
+      stageIds: req.query.stageIds
+        ? (req.query.stageIds as string).split(",")
+        : undefined,
+      assignedRepId: req.query.assignedRepId as string | undefined,
+      projectTypeId: req.query.projectTypeId as string | undefined,
+      regionId: req.query.regionId as string | undefined,
+      source: req.query.source as string | undefined,
+      isActive: req.query.isActive === "false" ? false : true,
+      sortBy: req.query.sortBy as any,
+      sortDir: req.query.sortDir as "asc" | "desc" | undefined,
+      page: req.query.page ? parseInt(req.query.page as string, 10) : undefined,
+      limit: req.query.limit ? parseInt(req.query.limit as string, 10) : undefined,
+    };
+
+    const result = await getDeals(req.tenantDb!, filters, req.user!.role, req.user!.id);
+    await req.commitTransaction!();
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/deals/sources — distinct deal sources for filter dropdown
+router.get("/sources", async (req, res, next) => {
+  try {
+    const sources = await getDealSources(req.tenantDb!);
+    await req.commitTransaction!();
+    res.json({ sources });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/deals/pipeline — deals grouped by stage for kanban
+router.get("/pipeline", async (req, res, next) => {
+  try {
+    const filters = {
+      assignedRepId: req.query.assignedRepId as string | undefined,
+      includeDd: req.query.includeDd === "true",
+    };
+    const result = await getDealsForPipeline(
+      req.tenantDb!,
+      req.user!.role,
+      req.user!.id,
+      filters
+    );
+    await req.commitTransaction!();
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/deals/:id — single deal (basic)
+router.get("/:id", async (req, res, next) => {
+  try {
+    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+    await req.commitTransaction!();
+    res.json({ deal });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/deals/:id/detail — deal with stage history, approvals, change orders
+router.get("/:id/detail", async (req, res, next) => {
+  try {
+    const detail = await getDealDetail(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    if (!detail) throw new AppError(404, "Deal not found");
+    await req.commitTransaction!();
+    res.json({ deal: detail });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/deals — create a new deal
+router.post("/", async (req, res, next) => {
+  try {
+    const { name, stageId, assignedRepId, ...rest } = req.body;
+    if (!name || !stageId) {
+      throw new AppError(400, "Name and stageId are required");
+    }
+
+    // Rep ownership enforcement:
+    // - Reps: force assignedRepId to their own ID (ignore request body value)
+    // - Directors/admins: can assign to any user
+    let repId: string;
+    if (req.user!.role === "rep") {
+      repId = req.user!.id; // reps always own their own deals
+    } else {
+      repId = assignedRepId || req.user!.id;
+    }
+
+    const deal = await createDeal(req.tenantDb!, {
+      name,
+      stageId,
+      assignedRepId: repId,
+      ...rest,
+    });
+    await req.commitTransaction!();
+    res.status(201).json({ deal });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// PATCH /api/deals/:id — update deal fields (not stage)
+router.patch("/:id", async (req, res, next) => {
+  try {
+    const body = { ...req.body };
+
+    // Reps cannot change assignedRepId (reassign deals)
+    if (req.user!.role === "rep" && body.assignedRepId !== undefined) {
+      delete body.assignedRepId;
+    }
+
+    const deal = await updateDeal(
+      req.tenantDb!,
+      req.params.id,
+      body,
+      req.user!.role,
+      req.user!.id
+    );
+    await req.commitTransaction!();
+    res.json({ deal });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/deals/:id/stage — change deal stage (with validation)
+router.post("/:id/stage", async (req, res, next) => {
+  try {
+    const { targetStageId, overrideReason, lostReasonId, lostNotes, lostCompetitor } = req.body;
+    if (!targetStageId) {
+      throw new AppError(400, "targetStageId is required");
+    }
+
+    const result = await changeDealStage(req.tenantDb!, {
+      dealId: req.params.id,
+      targetStageId,
+      userId: req.user!.id,
+      userRole: req.user!.role,
+      overrideReason,
+      lostReasonId,
+      lostNotes,
+      lostCompetitor,
+    });
+
+    await req.commitTransaction!();
+
+    // Emit local events AFTER successful commit (for SSE push to connected clients).
+    // These are best-effort — the durable job_queue entries (inserted inside the
+    // transaction above) ensure the worker will process them regardless.
+    const eventsToEmit = (result as any)._eventsToEmit ?? [];
+    for (const event of eventsToEmit) {
+      try {
+        eventBus.emitLocal({
+          name: event.name,
+          payload: event.payload,
+          officeId: req.user!.activeOfficeId ?? req.user!.officeId,
+          userId: req.user!.id,
+          timestamp: new Date(),
+        });
+      } catch (eventErr) {
+        // Swallow — local emission is best-effort; durable jobs handle persistence
+        console.error(`[Deals] Failed to emit local event ${event.name}:`, eventErr);
+      }
+    }
+
+    res.json({
+      deal: result.deal,
+      stageHistory: result.stageHistory,
+      eventsEmitted: result.eventsEmitted,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/deals/:id/stage/preflight — check stage gate without committing
+router.post("/:id/stage/preflight", async (req, res, next) => {
+  try {
+    const { targetStageId } = req.body;
+    if (!targetStageId) {
+      throw new AppError(400, "targetStageId is required");
+    }
+
+    const result = await preflightStageCheck(
+      req.tenantDb!,
+      req.params.id,
+      targetStageId,
+      req.user!.role,
+      req.user!.id
+    );
+
+    await req.commitTransaction!();
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/deals/:id/approvals — request approval (rep creates)
+router.post("/:id/approvals", async (req, res, next) => {
+  try {
+    const { targetStageId, requiredRole } = req.body;
+    if (!targetStageId || !requiredRole) {
+      throw new AppError(400, "targetStageId and requiredRole are required");
+    }
+
+    const result = await req.tenantDb!
+      .insert(dealApprovals)
+      .values({
+        dealId: req.params.id,
+        targetStageId,
+        requiredRole,
+        requestedBy: req.user!.id,
+        status: "pending",
+      })
+      .returning();
+
+    // Emit approval.requested event for notification delivery
+    eventBus.emitLocal({
+      name: "approval.requested",
+      payload: {
+        dealId: req.params.id,
+        targetStageId,
+        requiredRole,
+        requestedBy: req.user!.id,
+        approvalId: result[0].id,
+      },
+      officeId: req.user!.activeOfficeId ?? req.user!.officeId,
+      userId: req.user!.id,
+      timestamp: new Date(),
+    });
+
+    await req.commitTransaction!();
+    res.status(201).json({ approval: result[0] });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// PATCH /api/deals/:id/approvals/:approvalId — resolve approval (director approves/rejects)
+router.patch(
+  "/:id/approvals/:approvalId",
+  requireRole("admin", "director"),
+  async (req, res, next) => {
+    try {
+      const { status, notes } = req.body;
+      if (!status || !["approved", "rejected"].includes(status)) {
+        throw new AppError(400, "status must be 'approved' or 'rejected'");
+      }
+
+      const result = await req.tenantDb!
+        .update(dealApprovals)
+        .set({
+          status,
+          notes: notes ?? null,
+          approvedBy: req.user!.id,
+          resolvedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(dealApprovals.id, req.params.approvalId as string),
+            eq(dealApprovals.dealId, req.params.id as string)
+          )
+        )
+        .returning();
+
+      if (result.length === 0) {
+        throw new AppError(404, "Approval not found");
+      }
+
+      // Emit approval.resolved event
+      eventBus.emitLocal({
+        name: "approval.resolved",
+        payload: {
+          dealId: req.params.id,
+          approvalId: req.params.approvalId as string,
+          status,
+          resolvedBy: req.user!.id,
+        },
+        officeId: req.user!.activeOfficeId ?? req.user!.officeId,
+        userId: req.user!.id,
+        timestamp: new Date(),
+      });
+
+      await req.commitTransaction!();
+      res.json({ approval: result[0] });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// GET /api/deals/:id/approvals — list approvals for a deal
+router.get("/:id/approvals", async (req, res, next) => {
+  try {
+    const approvals = await req.tenantDb!
+      .select()
+      .from(dealApprovals)
+      .where(eq(dealApprovals.dealId, req.params.id as string))
+      .orderBy(desc(dealApprovals.createdAt));
+
+    await req.commitTransaction!();
+    res.json({ approvals });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// DELETE /api/deals/:id — soft-delete (director/admin only)
+router.delete("/:id", requireRole("admin", "director"), async (req, res, next) => {
+  try {
+    await deleteDeal(req.tenantDb!, req.params.id as string, req.user!.role);
+    await req.commitTransaction!();
+    res.json({ success: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+export const dealRoutes = router;

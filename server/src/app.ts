@@ -8,6 +8,8 @@ import { officeRoutes } from "./modules/office/routes.js";
 import { notificationRoutes } from "./modules/notifications/routes.js";
 import { authMiddleware } from "./middleware/auth.js";
 import { tenantMiddleware } from "./middleware/tenant.js";
+import { dealRoutes } from "./modules/deals/routes.js";
+import { pipelineRoutes } from "./modules/pipeline/routes.js";
 
 export function createApp() {
   const app = express();
@@ -38,6 +40,10 @@ export function createApp() {
   // Tenant-scoped routes — auth + tenant middleware applied
   // All feature routes (deals, contacts, tasks, etc.) go through this chain
   const tenantRouter = Router();
+
+  // Feature routes
+  tenantRouter.use("/deals", dealRoutes);
+  tenantRouter.use("/pipeline", pipelineRoutes);
 
   // Foundation test route — proves tenant middleware works end-to-end
   tenantRouter.get("/tenant-check", async (req, res) => {

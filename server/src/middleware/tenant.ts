@@ -1,5 +1,6 @@
 import type { Request, Response, NextFunction } from "express";
 import type { PoolClient } from "pg";
+import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { pool } from "../db.js";
 import { AppError } from "./error-handler.js";
 import { drizzle } from "drizzle-orm/node-postgres";
@@ -9,7 +10,7 @@ import * as schema from "@trock-crm/shared/schema";
 declare global {
   namespace Express {
     interface Request {
-      tenantDb?: ReturnType<typeof drizzle>;
+      tenantDb?: NodePgDatabase<typeof schema>;
       officeSlug?: string;
       tenantClient?: PoolClient;
       commitTransaction: () => Promise<void>;
