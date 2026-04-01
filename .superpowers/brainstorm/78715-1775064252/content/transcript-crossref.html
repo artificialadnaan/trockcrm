@@ -1,0 +1,86 @@
+<h2>Meeting Transcript Cross-Reference</h2>
+<p class="subtitle">Every requirement from the discovery meeting mapped to the design spec — gaps highlighted</p>
+
+<div class="section">
+  <h3 style="color:#22c55e;">Covered in Spec</h3>
+  <div style="background:#0f172a;padding:16px;border-radius:8px;font-size:13px;color:#ccc;line-height:2.2;">
+    <div><span style="color:#22c55e;">&#10003;</span> <strong>Stage mapping guardrails</strong> — "7 projects incorrectly mapped to Closed Won" → Stage mapping with guardrails, procore_sync_state conflict detection (Sec 7)</div>
+    <div><span style="color:#22c55e;">&#10003;</span> <strong>Backward move prevention</strong> — "doesn't move back unless you manually move it back" → Hard gates, director override only (Sec 6)</div>
+    <div><span style="color:#22c55e;">&#10003;</span> <strong>Locked filters / preset reports</strong> — "lock in filters... everyone's looking at things the same way" → Locked company reports, is_locked=true (Sec 10)</div>
+    <div><span style="color:#22c55e;">&#10003;</span> <strong>Visual reporting</strong> — "throw a freaking pie chart in there" → Recharts: pie, bar, trend lines (Sec 10)</div>
+    <div><span style="color:#22c55e;">&#10003;</span> <strong>Simplicity / no irrelevant fields</strong> — "does way too much... simplicity is key" → T Rock-specific options only, guardrail dropdowns (Sec 15)</div>
+    <div><span style="color:#22c55e;">&#10003;</span> <strong>Contact directory</strong> — "it's got to have the contact directory" → Full contact directory with categories (Sec 4.2)</div>
+    <div><span style="color:#22c55e;">&#10003;</span> <strong>Touchpoint alerts</strong> — "doesn't stop alerting until there's been some type of email sent" → first_outreach_completed flag (Sec 4.2)</div>
+    <div><span style="color:#22c55e;">&#10003;</span> <strong>DD classification separate</strong> — "DDs have a classification of their own... doesn't go into your total" → is_active_pipeline=false (Sec 4.1)</div>
+    <div><span style="color:#22c55e;">&#10003;</span> <strong>Multi-estimate tracking</strong> — "DD estimate, then it gets estimated, then it gets sold" → dd_estimate, bid_estimate, awarded_amount, change_orders (Sec 4.2)</div>
+    <div><span style="color:#22c55e;">&#10003;</span> <strong>Stale deal alerts</strong> — "this project's been sitting here for three months... notifications" → Configurable 30/60/90 day thresholds per stage (Sec 12)</div>
+    <div><span style="color:#22c55e;">&#10003;</span> <strong>Per-rep dashboard</strong> — "Brock wants custom dashboard for himself" → Per-rep dashboard at / (Sec 10, 11)</div>
+    <div><span style="color:#22c55e;">&#10003;</span> <strong>Director drill-down</strong> — "click and go, what's open... stuff he lost" → /director/rep/:id (Sec 11)</div>
+    <div><span style="color:#22c55e;">&#10003;</span> <strong>Mandatory lost deal notes</strong> — "I don't want them to be able to close loss of job without details" → lost_reason_id + lost_notes required (Sec 4.2, 6)</div>
+    <div><span style="color:#22c55e;">&#10003;</span> <strong>Month/quarter/year tracking</strong> — "month over month or year over year" → MoM/QoQ/YoY toggles (Sec 10)</div>
+    <div><span style="color:#22c55e;">&#10003;</span> <strong>Activity tracking per rep</strong> — "how many calls are they logging? how many tasks?" → Activity tracking: calls, emails, tasks, follow-up compliance (Sec 10)</div>
+    <div><span style="color:#22c55e;">&#10003;</span> <strong>Activity drop alerts</strong> — "this guy's trying to fly under the radar" → 90-day rolling avg, flag below 1 std dev (Sec 12)</div>
+    <div><span style="color:#22c55e;">&#10003;</span> <strong>Email integration</strong> — "when a customer emails us, all the emails are in one place" → MS Graph send/receive, auto-logged (Sec 8)</div>
+    <div><span style="color:#22c55e;">&#10003;</span> <strong>Inbound email → task</strong> — "if I get an email back, put it on my task list" → email.received → task creation (Sec 3, 8)</div>
+    <div><span style="color:#22c55e;">&#10003;</span> <strong>Audit trail</strong> — "change history... who did what" → Field-level audit_log with PG triggers (Sec 4.2)</div>
+    <div><span style="color:#22c55e;">&#10003;</span> <strong>Photos in CRM</strong> — "company cam... photos... all in one place" → Native photo management with timeline, virtual folders (Sec 4.2)</div>
+    <div><span style="color:#22c55e;">&#10003;</span> <strong>Documents on deals</strong> — "documents to go from the CRM" → Files table: contracts, RFPs, estimates, COs (Sec 4.2)</div>
+    <div><span style="color:#22c55e;">&#10003;</span> <strong>Change order updates</strong> — "when change orders are going on, numbers are coming back" → Procore CO sync, trigger updates deal value (Sec 4.2, 7)</div>
+    <div><span style="color:#22c55e;">&#10003;</span> <strong>Custom report builder</strong> — "flexibility to create new ones" → Saved filter presets with JSON config (Sec 10)</div>
+    <div><span style="color:#22c55e;">&#10003;</span> <strong>Personal Procore project board</strong> — "Brock wants to see what projects he's assigned to" → /projects route, personal filterable view (Sec 11)</div>
+    <div><span style="color:#22c55e;">&#10003;</span> <strong>Multi-office / franchise</strong> — "scalable to where this company is headed" → Schema-per-office, 1 to 20+ offices (Sec 3)</div>
+    <div><span style="color:#22c55e;">&#10003;</span> <strong>Data migration cleanup</strong> — "we can't underestimate the data scope" → 3-phase migration with staging + validation UI (Sec 14)</div>
+    <div><span style="color:#22c55e;">&#10003;</span> <strong>Bid Board automation carried over</strong> — "bid board to portfolio automation will be carried over" → SyncHub retains Playwright, feeds CRM (Sec 20)</div>
+    <div><span style="color:#22c55e;">&#10003;</span> <strong>Task reminders and follow-ups</strong> — "task reminders, dates, follow ups are important" → Automated daily task list, follow-up reminders (Sec 12)</div>
+    <div><span style="color:#22c55e;">&#10003;</span> <strong>Competitor on lost deals</strong> — Added lost_competitor field (post-cross-reference fix)</div>
+    <div><span style="color:#22c55e;">&#10003;</span> <strong>Weighted pipeline</strong> — "weighted bill" → win_probability field, weighted pipeline forecast report (post-cross-reference fix)</div>
+  </div>
+</div>
+
+<div class="section">
+  <h3 style="color:#22c55e;">Correctly Deferred to Phase 2</h3>
+  <div style="background:#0f172a;padding:16px;border-radius:8px;font-size:13px;color:#ccc;line-height:2.2;">
+    <div><span style="color:#06b6d4;">→</span> <strong>AI business card scanning</strong> — "scan a business card... contact already created" → Phase 2</div>
+    <div><span style="color:#06b6d4;">→</span> <strong>AI news feed / lead generation</strong> — "AI watch all of that stuff... automatic lead" → Phase 2</div>
+    <div><span style="color:#06b6d4;">→</span> <strong>Large loss monitoring</strong> — "one of your known clients suffered a loss" → Phase 2</div>
+    <div><span style="color:#06b6d4;">→</span> <strong>AI data discrepancy detection</strong> — "your spreadsheets do not line up with your software" → Phase 2</div>
+    <div><span style="color:#06b6d4;">→</span> <strong>Relationship/influence mapping</strong> — "virtual connections... value of that contact based on how many lines go to it" → Phase 2</div>
+    <div><span style="color:#06b6d4;">→</span> <strong>Phone call recording</strong> — "capability of adding a recorded phone call" → Phase 2</div>
+    <div><span style="color:#06b6d4;">→</span> <strong>Performance anomaly detection</strong> — "this is how this guy usually performs, he's way below" → Phase 2 (basic version in Phase 1 via activity drop alerts)</div>
+  </div>
+</div>
+
+<div class="section">
+  <h3 style="color:#ef4444;">Gaps Found — Need to Add to Spec</h3>
+  <div style="background:#0f172a;padding:16px;border-radius:8px;font-size:13px;color:#ccc;line-height:2.2;">
+    <div style="margin-bottom:12px;padding:12px;background:#1e293b;border-left:3px solid #ef4444;border-radius:4px;">
+      <div style="color:#ef4444;font-weight:bold;">1. Project Type / Business Line Categories Not Defined</div>
+      <div style="margin-top:4px;">Adam explicitly listed the four buckets: <strong>Restoration, Multifamily, Commercial (new con/land dev), Service</strong>. And sub-types within Multifamily: <strong>Student Housing, Senior Living, Traditional Multifamily</strong>. Spec has <code>project_type VARCHAR(100)</code> but doesn't define the allowed values or the parent→child relationship for reporting ("show me the pie chart of those different buckets").</div>
+      <div style="margin-top:4px;color:#f59e0b;"><strong>Fix:</strong> Add <code>public.project_type_config</code> table with parent/child hierarchy. Locked dropdown values. Reports group by parent business line.</div>
+    </div>
+
+    <div style="margin-bottom:12px;padding:12px;background:#1e293b;border-left:3px solid #ef4444;border-radius:4px;">
+      <div style="color:#ef4444;font-weight:bold;">2. Region Tracking Not Defined</div>
+      <div style="margin-top:4px;">Adam mentioned <strong>"Texas region or East Coast region"</strong> as dropdown options. The spec has <code>property_state</code> but no region concept. Regions group states for reporting and filtering.</div>
+      <div style="margin-top:4px;color:#f59e0b;"><strong>Fix:</strong> Add <code>public.region_config</code> table and <code>region_id</code> FK on deals. Predefined regions with state mappings.</div>
+    </div>
+
+    <div style="margin-bottom:12px;padding:12px;background:#1e293b;border-left:3px solid #ef4444;border-radius:4px;">
+      <div style="color:#ef4444;font-weight:bold;">3. Ticketing System / Feature Request Portal Not Mentioned</div>
+      <div style="margin-top:4px;">Adnaan mentioned creating a <strong>ticketing system for issues</strong> and a <strong>feature request portal</strong>. These are external tools (not CRM features), but the spec should note their existence as part of the support infrastructure.</div>
+      <div style="margin-top:4px;color:#f59e0b;"><strong>Fix:</strong> Add note in Section 22 (Documentation) referencing the support ticketing system and feature request portal for post-launch.</div>
+    </div>
+
+    <div style="margin-bottom:12px;padding:12px;background:#1e293b;border-left:3px solid #ef4444;border-radius:4px;">
+      <div style="color:#ef4444;font-weight:bold;">4. Call Logging UI Not Explicitly Detailed</div>
+      <div style="margin-top:4px;">Meeting emphasized <strong>logging calls with notes, duration, outcome</strong>. Spec has <code>activities</code> table with <code>outcome</code> field (added in cross-ref fix), but no explicit mention of a <strong>call logging form UI</strong> as a key component in Section 11. Build tracker has it as s4-9.</div>
+      <div style="margin-top:4px;color:#f59e0b;"><strong>Fix:</strong> Add call/note/meeting logging forms to Key Components in Section 11.</div>
+    </div>
+
+    <div style="margin-bottom:12px;padding:12px;background:#1e293b;border-left:3px solid #ef4444;border-radius:4px;">
+      <div style="color:#ef4444;font-weight:bold;">5. Default Date Filter Behavior</div>
+      <div style="margin-top:4px;">Multiple people complained: <strong>"every time I pop open, it literally shows me numbers since the day we started HubSpot... not from this year"</strong>. The spec doesn't specify default date range behavior for dashboards and reports.</div>
+      <div style="margin-top:4px;color:#f59e0b;"><strong>Fix:</strong> Spec should state: all dashboards and reports default to <strong>current calendar year</strong>. Pipeline views default to <strong>active deals only</strong>. No "since inception" defaults.</div>
+    </div>
+  </div>
+</div>

@@ -119,7 +119,12 @@ Events decouple modules. When a deal is won, the deals module doesn't call proco
 | `approval.requested` | deals | notifications (director alert) |
 | `approval.resolved` | deals | notifications (rep alert), deals (stage advance) |
 
-The event bus is a Node EventEmitter for Phase 1. If scaling requires it, swap to PG LISTEN/NOTIFY or a message queue — event handler signatures don't change.
+The event bus uses two channels:
+
+- **In-process events (Node EventEmitter):** For side effects that run within the API server (e.g., `deal.stage.changed` → update deal record, log activity, send SSE notification). These are synchronous within the request lifecycle.
+- **Cross-process events (PG LISTEN/NOTIFY):** For side effects that the Worker must handle (e.g., `deal.won` → create Procore project, `email.received` → create follow-up task). The API server calls `NOTIFY` on a PG channel, the Worker listens and processes. This is durable — if the Worker is restarting, events queue in PG until the listener reconnects.
+
+For critical side effects (Procore project creation, email sync), the API also writes a job row to a `public.job_queue` table as an outbox pattern fallback. The Worker polls this table on startup to catch any events missed during downtime.
 
 ### Multi-Office Tenancy: Schema-Per-Office
 
@@ -127,15 +132,19 @@ Each office gets its own PostgreSQL schema (`office_dallas`, `office_houston`, e
 
 **Request Flow:**
 
-1. Browser sends request with JWT
-2. Auth middleware validates JWT, extracts `{ userId, officeId, role }`
-3. Office resolver looks up `office.slug` from `officeId` → `"dallas"`
-4. Schema setter runs `SET LOCAL search_path = 'office_dallas', 'public'`
-5. Audit setter runs `SET LOCAL app.current_user_id = '{userId}'`
-6. Route handler executes Drizzle query — PG resolves to the correct office schema automatically
-7. PG triggers fire (audit log, change order totals, etc.)
-8. Event bus emits domain events
-9. SSE pushes notification to user's browser
+Every API request runs inside a database transaction via middleware. This ensures `SET LOCAL` statements (search_path and current_user_id) are scoped to the request and cannot leak between concurrent requests sharing a connection pool.
+
+1. Browser sends request with JWT + optional `X-Office-Id` header (for office switching)
+2. Auth middleware validates JWT, extracts `{ userId, role, email }`. Office determined by: `X-Office-Id` header (validated against `user_office_access`) → fallback to JWT's default `officeId`
+3. Transaction middleware opens a DB transaction on a dedicated connection
+4. Office resolver looks up `office.slug` from resolved officeId → `"dallas"`
+5. Schema setter runs `SET LOCAL search_path = 'office_dallas', 'public'`
+6. Audit setter runs `SET LOCAL app.current_user_id = '{userId}'`
+7. Route handler executes Drizzle query — PG resolves to the correct office schema automatically
+8. PG triggers fire (audit log, change order totals, etc.)
+9. Transaction commits
+10. Event bus emits in-process events (SSE notifications, activity logging)
+11. PG NOTIFY emits cross-process events for Worker (Procore sync, email tasks)
 
 **Cross-Office Reporting:** Director/admin queries use `UNION ALL` across office schemas or a materialized reporting view refreshed by the worker.
 
@@ -214,6 +223,49 @@ Directors/admins who can access multiple offices.
 | procore_stage_mapping | VARCHAR(100) | Maps to Procore project status |
 | color | VARCHAR(7) | Hex color for UI badges |
 
+#### `public.project_type_config`
+
+Hierarchical project type / business line categories for deals. Locked dropdown values — users cannot create new types.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| id | UUID PK | |
+| name | VARCHAR(100) NOT NULL | |
+| slug | VARCHAR(100) UNIQUE NOT NULL | |
+| parent_id | UUID FK → project_type_config.id | NULL = top-level business line |
+| display_order | INTEGER NOT NULL | |
+| is_active | BOOLEAN DEFAULT true | |
+
+**Predefined hierarchy:**
+```
+Multifamily (parent)
+  ├── Traditional Multifamily
+  ├── Student Housing
+  └── Senior Living
+Commercial (parent)
+  ├── New Construction
+  └── Land Development
+Service (parent)
+Restoration (parent)
+```
+
+Reports group by parent business line ("show me the pie chart of those buckets") and can drill into sub-types.
+
+#### `public.region_config`
+
+Geographic regions for deal filtering and reporting.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| id | UUID PK | |
+| name | VARCHAR(100) NOT NULL | "Texas", "East Coast", "Southeast", etc. |
+| slug | VARCHAR(100) UNIQUE NOT NULL | |
+| states | TEXT[] NOT NULL | States included: ["TX"], ["NY", "NJ", "CT", "PA"] |
+| display_order | INTEGER NOT NULL | |
+| is_active | BOOLEAN DEFAULT true | |
+
+Deals reference `region_id` as a locked dropdown. Region auto-suggested from `property_state` but manually overridable.
+
 #### `public.lost_deal_reasons`
 
 | Column | Type | Notes |
@@ -241,6 +293,52 @@ Directors/admins who can access multiple offices.
 
 Report config is structured JSON — same shape scales to a visual query builder in the future.
 
+#### `public.user_graph_tokens`
+
+Per-user Microsoft Graph API token storage for email sync worker.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| id | UUID PK | |
+| user_id | UUID FK → users.id UNIQUE NOT NULL | One token set per user |
+| access_token | TEXT NOT NULL | Encrypted at rest |
+| refresh_token | TEXT NOT NULL | Encrypted at rest |
+| token_expires_at | TIMESTAMPTZ NOT NULL | |
+| scopes | TEXT[] NOT NULL | Granted Graph API scopes |
+| subscription_id | VARCHAR(255) | MS Graph webhook subscription ID |
+| subscription_expires_at | TIMESTAMPTZ | Webhook subscriptions expire after 3 days — worker renews |
+| last_delta_link | TEXT | MS Graph delta sync cursor |
+| status | ENUM('active','expired','revoked','reauth_needed') DEFAULT 'active' | |
+| last_sync_at | TIMESTAMPTZ | |
+| error_message | TEXT | Last sync error for diagnostics |
+| created_at | TIMESTAMPTZ NOT NULL DEFAULT NOW() | |
+| updated_at | TIMESTAMPTZ NOT NULL DEFAULT NOW() | |
+
+Token lifecycle:
+- Tokens acquired during OAuth flow and stored encrypted
+- Worker refreshes access tokens automatically using refresh token before expiry
+- If refresh fails (revoked consent, password change), status set to `reauth_needed` and notification sent to user
+- Admin dashboard shows token health per user
+
+#### `public.job_queue`
+
+Outbox pattern for cross-process event durability. API writes jobs, Worker polls and processes.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| id | BIGSERIAL PK | |
+| job_type | VARCHAR(100) NOT NULL | 'procore_create_project', 'email_sync', 'send_alert', etc. |
+| payload | JSONB NOT NULL | Event-specific data |
+| office_id | UUID FK → offices.id | |
+| status | ENUM('pending','processing','completed','failed','dead') DEFAULT 'pending' | |
+| attempts | INTEGER DEFAULT 0 | |
+| max_attempts | INTEGER DEFAULT 3 | |
+| last_error | TEXT | |
+| run_after | TIMESTAMPTZ NOT NULL DEFAULT NOW() | For delayed/retry scheduling |
+| created_at | TIMESTAMPTZ NOT NULL DEFAULT NOW() | |
+| completed_at | TIMESTAMPTZ | |
+| **INDEX ON (status, run_after) WHERE status = 'pending'** | | Worker poll query |
+
 #### `public.procore_sync_state`
 
 | Column | Type | Notes |
@@ -260,7 +358,7 @@ Report config is structured JSON — same shape scales to a visual query builder
 | error_message | TEXT | |
 | created_at | TIMESTAMPTZ NOT NULL DEFAULT NOW() | |
 | updated_at | TIMESTAMPTZ NOT NULL DEFAULT NOW() | |
-| **UNIQUE(entity_type, procore_id)** | | |
+| **UNIQUE(entity_type, procore_id, office_id)** | | Scoped per office to handle overlapping Procore IDs across offices |
 | **INDEX ON (sync_status) WHERE sync_status != 'synced'** | | Quick find out-of-sync |
 
 #### `public.procore_webhook_log`
@@ -305,7 +403,8 @@ These tables are duplicated in every office schema. Migration runner creates the
 | property_city | VARCHAR(255) | |
 | property_state | VARCHAR(2) | |
 | property_zip | VARCHAR(10) | |
-| project_type | VARCHAR(100) | "Commercial", "Industrial", "Healthcare", etc. |
+| project_type_id | UUID FK → public.project_type_config.id | Locked dropdown — "Multifamily > Student Housing", "Commercial > New Construction", etc. |
+| region_id | UUID FK → public.region_config.id | Auto-suggested from property_state, manually overridable |
 | source | VARCHAR(100) | "Bid Board", "Referral", "Cold Call", etc. |
 | win_probability | INTEGER | 0-100, used for weighted pipeline forecasting |
 | **Procore** | | |
@@ -370,12 +469,14 @@ PG trigger: On INSERT/UPDATE/DELETE of change_orders, recalculate `deals.change_
 | id | UUID PK | |
 | deal_id | UUID FK → deals.id NOT NULL | |
 | target_stage_id | UUID FK → public.pipeline_stage_config.id NOT NULL | |
+| required_role | ENUM('admin','director') NOT NULL | Which role must approve |
 | requested_by | UUID FK → public.users.id NOT NULL | |
-| approved_by | UUID FK → public.users.id | |
+| approved_by | UUID FK → public.users.id | Must have the `required_role` |
 | status | ENUM('pending','approved','rejected') DEFAULT 'pending' | |
 | notes | TEXT | |
 | created_at | TIMESTAMPTZ NOT NULL DEFAULT NOW() | |
 | resolved_at | TIMESTAMPTZ | |
+| **UNIQUE(deal_id, target_stage_id, required_role)** | | One approval per role per stage transition |
 
 #### `office_{slug}.contacts`
 
@@ -466,7 +567,12 @@ Synced from MS Graph API (matched contacts only).
 | sent_at | TIMESTAMPTZ NOT NULL | |
 | synced_at | TIMESTAMPTZ NOT NULL DEFAULT NOW() | |
 
-Email auto-association logic: Inbound emails matched to contacts by `from_address` → `contacts.email`. If contact has active deals, email auto-associates to the most recent active deal. Manual reassignment available.
+Email auto-association logic:
+- Inbound emails matched to contacts by `from_address` → `contacts.email`
+- If contact has **exactly 1 active deal** → auto-associate to that deal
+- If contact has **multiple active deals** → leave `deal_id` NULL, create a task for the rep to manually associate ("Email from [contact] — assign to correct deal")
+- If contact has **no active deals** → associate to contact only, no deal link
+- Manual reassignment always available on any email record
 
 #### `office_{slug}.activities`
 
@@ -536,7 +642,7 @@ Unified table for photos, documents, contracts — with full-text search, taggin
 | **INDEX GIN ON (tags)** | | Tag filtering |
 | **INDEX ON (deal_id, category, created_at DESC)** | | Deal file browser |
 | **INDEX ON (folder_path, display_name)** | | Folder navigation |
-| **CHECK (deal_id IS NOT NULL OR contact_id IS NOT NULL OR procore_project_id IS NOT NULL)** | | No orphan files |
+| **CHECK (deal_id IS NOT NULL OR contact_id IS NOT NULL OR procore_project_id IS NOT NULL OR change_order_id IS NOT NULL)** | | No orphan files |
 
 **Auto-Naming Convention:**
 - Pattern: `{DealNumber}_{Category}_{YYYY-MM-DD}_{Seq}.{ext}`
@@ -719,7 +825,7 @@ All triggers are installed per-office schema by the migration runner.
 | change_order_total_trigger | change_orders | AFTER INSERT/UPDATE/DELETE | Recalculates `deals.change_order_total` = SUM(amount) WHERE status = 'approved' |
 | stage_history_trigger | deals | AFTER UPDATE OF stage_id | Inserts row into `deal_stage_history`, computes `duration_in_previous_stage` |
 | stage_entered_at_trigger | deals | BEFORE UPDATE OF stage_id | Resets `deals.stage_entered_at = NOW()` |
-| touchpoint_trigger | activities | AFTER INSERT | Increments `contacts.touchpoint_count`, updates `last_contacted_at`, sets `first_outreach_completed = true` |
+| touchpoint_trigger | activities | AFTER INSERT WHERE type IN ('call','email','meeting') | Increments `contacts.touchpoint_count`, updates `last_contacted_at`, sets `first_outreach_completed = true`. Only fires for outreach activities — notes and task completions do not count as touchpoints. |
 | normalized_phone_trigger | contacts | BEFORE INSERT/UPDATE OF phone, mobile | Strips non-digit characters, stores in `normalized_phone` |
 
 ---
@@ -783,6 +889,22 @@ When a rep attempts to advance a deal to the next stage:
 ---
 
 ## 7. Procore Integration
+
+### Source of Truth Boundaries
+
+The CRM and Procore each own different domains:
+
+| Domain | Authority | Direction |
+|--------|-----------|-----------|
+| Deal stage, pipeline position, estimates | CRM | CRM → Procore |
+| Deal contacts, assigned rep, lost reason | CRM | CRM only (not synced) |
+| Project status, schedule, budget | Procore | Procore → CRM (read) |
+| Change orders (amounts, approval status) | Procore | Procore → CRM (read) |
+| Project creation from won deals | CRM | CRM → Procore (write) |
+| Bid Board opportunities | SyncHub | SyncHub → CRM (push) |
+| Contact company/address/phone | CRM | CRM only |
+
+When a field has a conflict, the authority system wins. `procore_sync_state.conflict_data` records the divergence for admin review but does not auto-overwrite.
 
 ### CRM as Deal Authority
 
@@ -946,6 +1068,17 @@ This JSON shape is designed to scale to a visual drag-and-drop query builder in 
 - **Desktop:** Collapsible sidebar (nav modules, office switcher, admin section), top bar (global search Cmd+K, notification bell with SSE badge, user avatar)
 - **Mobile:** Hamburger menu → slide-out sidebar. Bottom nav: Dashboard, Pipeline, Tasks, Email, More. Minimum 44x44px touch targets.
 
+### Default Date & Filter Behavior
+
+All views default to sensible, current-focused ranges — never "since inception":
+
+- **Dashboards:** Default to current calendar year. YTD metrics shown by default.
+- **Pipeline views:** Show active deals only (non-terminal stages). DD separated by toggle.
+- **Reports:** Default date range = current calendar year. User can change but saved preset overrides.
+- **Deal lists:** Default to active deals sorted by last activity. No closed/lost deals shown unless filtered.
+- **Activity views:** Default to last 30 days.
+- Filter selections persist per-user per-view in localStorage. Unlike HubSpot, they don't reset on navigation.
+
 ### Route Map
 
 **Rep Views:**
@@ -966,7 +1099,12 @@ This JSON shape is designed to scale to a visual drag-and-drop query builder in 
 - **Deal Detail:** Tabbed (Overview/Files/Email/Timeline/History). Stage advancement button with gate checklist sidebar. Estimates card, contacts list, property info.
 - **File Browser:** Virtual folder tree, drag-drop upload, tag editor, full-text search, version history. Auto-naming preview before upload.
 - **Task List:** Sections (Overdue/Today/Upcoming/Completed). Auto-prioritized. Quick actions. Mobile swipe gestures.
-- **Lost Deal Modal:** Auto-triggered on Closed Lost. Reason dropdown + notes textarea. Cannot be dismissed without completing both.
+- **Lost Deal Modal:** Auto-triggered on Closed Lost. Reason dropdown + competitor name + notes textarea. Cannot be dismissed without completing required fields.
+- **Activity Logging Forms:** Quick-action forms accessible from deal detail and contact detail:
+  - **Log Call:** Notes, duration, outcome dropdown (Connected / Left Voicemail / No Answer / Scheduled Meeting), associated deal/contact
+  - **Log Note:** Free-text note, associated deal/contact
+  - **Log Meeting:** Notes, duration, attendees, associated deal/contact
+  - All three create an activity record and update touchpoint counters
 
 ---
 
@@ -996,7 +1134,7 @@ This JSON shape is designed to scale to a visual drag-and-drop query builder in 
 
 | Service | Root Directory | Port | Environment Variables |
 |---------|---------------|------|----------------------|
-| API | `server/` | 3001 | `DATABASE_URL`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_TENANT_ID`, `PROCORE_CLIENT_ID`, `PROCORE_CLIENT_SECRET`, `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET_NAME`, `FRONTEND_URL`, `JWT_SECRET`, `RESEND_API_KEY` |
+| API | `server/` | 3001 | `DATABASE_URL`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_TENANT_ID`, `PROCORE_CLIENT_ID`, `PROCORE_CLIENT_SECRET`, `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET_NAME`, `FRONTEND_URL`, `JWT_SECRET`, `RESEND_API_KEY`, `ENCRYPTION_KEY` |
 | Worker | `worker/` | none (no HTTP) | Same DB + integration vars as API |
 | Frontend | `client/` | 3000 | `VITE_API_URL` |
 
@@ -1020,6 +1158,13 @@ This JSON shape is designed to scale to a visual drag-and-drop query builder in 
 - Field mapping transforms to CRM schema shape
 - Loaded into `migration` schema staging tables
 
+**Entity mapping (HubSpot → CRM):**
+- HubSpot Deals → `staged_deals` → `deals`
+- HubSpot Contacts → `staged_contacts` → `contacts`
+- HubSpot Companies → `staged_contacts.mapped_company` (no separate company entity — company name lives on the contact record)
+- HubSpot Emails/Notes/Calls/Meetings → `staged_activities` (all mapped to the unified activity type system)
+- HubSpot Deal-Contact Associations → `contact_deal_associations` (created during promotion phase)
+
 ### Phase 2: Validate
 - Auto-validation checks:
   - Stage names map to CRM pipeline stages
@@ -1038,8 +1183,10 @@ This JSON shape is designed to scale to a visual drag-and-drop query builder in 
 - Audit trail records the migration source
 
 ### Post-Go-Live
-- Team validates live data
-- `DROP SCHEMA migration CASCADE` cleans up staging
+- Team validates live data during post-launch support week (May 15–22)
+- Migration schema retained through stabilization period (minimum 30 days post-go-live)
+- After stabilization confirmed, `DROP SCHEMA migration CASCADE` cleans up staging
+- Raw HubSpot data archived as JSON export before schema drop (permanent backup)
 
 ---
 
@@ -1054,11 +1201,14 @@ This JSON shape is designed to scale to a visual drag-and-drop query builder in 
 | Duplicate contact creation | Hard block on exact email match (partial unique index). Fuzzy suggestions on name/company. |
 | Change order affects contract value | PG trigger recalculates `change_order_total`. Generated column `current_contract_value` is always correct. |
 | Procore and CRM update same entity | `procore_sync_state` detects timestamp conflicts. Surfaced for manual resolution. No auto-overwrite. |
-| Rep has no activity for days | Worker compares rolling baseline. Activity drop alert sent to manager. |
+| Rep has no activity for days | Worker compares rolling baseline. Activity drop alert sent to all directors in the rep's office (users WHERE office_id = rep.office_id AND role IN ('director','admin')). |
 | New contact has no outreach | `first_outreach_completed = false` keeps surfacing touchpoint alert until first activity logged. |
 | HubSpot stage doesn't map to CRM | Validation auto-flags as error. Team manually maps or discards during migration review. |
-| Procore webhooks sent twice | `procore_webhook_log` dedupes by event_type + resource_id within time window. |
-| File uploaded with no association | CHECK constraint requires at least one of deal_id, contact_id, procore_project_id. |
+| Procore webhooks sent twice | Application-level dedup: webhook handler checks `procore_webhook_log` for matching `event_type + resource_id` within a 60-second window before processing. Not a DB constraint — time-window logic handled in code. |
+| File uploaded with no association | CHECK constraint requires at least one of deal_id, contact_id, procore_project_id, change_order_id. |
+| Contact with multiple active deals receives email | Email left unassociated to deal. Task created for rep to manually assign to correct deal. |
+| Closed deal needs to be reopened | Directors can move a Closed Won/Lost deal back to any active stage via backward move override. `lost_reason_id`, `lost_notes`, `lost_at`, `actual_close_date` cleared on reopen. Stage history records the reopen. |
+| Merged contact has existing emails/tasks referencing it | Merge transfers all associations (emails, activities, tasks, files, deal associations) to the winner contact before soft-deleting the loser. FK references updated in a single transaction. |
 | Document revised multiple times | `parent_file_id` + `version` chains revisions. UI shows latest by default, version history expandable. |
 | Director needs to see all offices | `user_office_access` grants cross-office access. Cross-office queries use UNION ALL across schemas. |
 | Migration data has bad records | 3-phase workflow: extract → validate → promote. Nothing goes live without team approval. |
@@ -1072,13 +1222,18 @@ This JSON shape is designed to scale to a visual drag-and-drop query builder in 
 
 - All API routes behind JWT authentication middleware
 - httpOnly secure cookies for JWT storage (no localStorage)
+- CSRF protection: `SameSite=Strict` cookie attribute + CORS origin whitelist (only `FRONTEND_URL`)
+- Rate limiting: `express-rate-limit` — 100 req/min per user for API, 10 req/min for auth endpoints
 - RBAC enforced at middleware level before route handlers
 - Schema-per-office prevents data leakage between offices at DB level
-- Presigned R2 URLs expire after 15 minutes
+- Presigned R2 URLs expire after 15 minutes, scoped to specific object keys (least-privilege)
 - Audit log is append-only (no UPDATE/DELETE grants)
 - `SET LOCAL app.current_user_id` scoped to transaction — can't leak between requests
 - MS Graph API uses delegated permissions (user-scoped, not application-scoped)
+- Graph/Procore tokens encrypted at rest in `user_graph_tokens` (AES-256-GCM via `ENCRYPTION_KEY` env var)
+- Procore webhook signature verification: validate `X-Procore-Signature` header before processing
 - Input validation on all API endpoints (dropdowns, required fields, max lengths)
+- File upload MIME type validation — server verifies MIME matches extension, rejects mismatches
 - No raw SQL interpolation — Drizzle parameterizes all queries
 
 ---
@@ -1172,3 +1327,53 @@ Delivered alongside the platform at go-live:
 3. **Training Session** — live walkthrough with all CRM users (recorded for future onboarding)
 
 Guides are delivered as in-app help pages (accessible from the Settings menu) and as downloadable PDFs.
+
+### Post-Launch Support Infrastructure
+
+- **Issue Ticketing System** — Already built and active. Sales team submits bugs and issues for immediate resolution.
+- **Feature Request Portal** — Already built and active. Sales team submits feature ideas for prioritization.
+- Both are external to the CRM (not built into the platform). Links accessible from the CRM's Settings/Help page.
+
+---
+
+## 23. Global Search
+
+The CRM provides a unified search experience accessible via Cmd+K (desktop) or the search icon (mobile).
+
+**Implementation:**
+- Single API endpoint: `GET /api/search?q=<query>&types=deals,contacts,files`
+- Searches across three entity types simultaneously using PG full-text search:
+  - **Deals:** `deal_number`, `name`, `description`, `property_address` (weighted tsvector)
+  - **Contacts:** `first_name || last_name`, `email`, `company_name`, `phone` (weighted tsvector)
+  - **Files:** Existing `search_vector` (display_name, description, tags, notes)
+- Results grouped by entity type, ranked by relevance score
+- Each result includes: entity type badge, primary label, secondary label, deep link
+- Recent searches stored in localStorage for quick access
+- Search debounced at 300ms, minimum 2 characters
+
+**Cross-office behavior:**
+- Reps: search scoped to their office schema
+- Directors/admins: search across accessible offices (parallel queries per schema, merged results)
+
+---
+
+## 24. Integration Retry & Idempotency
+
+All external API calls (Procore, MS Graph, Resend) follow consistent retry and idempotency rules.
+
+### Retry Policy
+
+| Integration | Max Retries | Backoff | Circuit Breaker |
+|-------------|------------|---------|-----------------|
+| Procore API | 3 | Exponential (1s, 3s, 9s) | Open after 5 consecutive failures, half-open after 60s |
+| MS Graph API | 3 | Exponential (1s, 3s, 9s) | Open after 5 consecutive failures, half-open after 60s |
+| Resend (email) | 2 | Linear (5s, 10s) | None — email is best-effort |
+| R2 (presigned URL gen) | 2 | Linear (1s, 2s) | None |
+
+### Idempotency Rules
+
+- **Procore project creation:** Check `deals.procore_project_id` before creating. If already set, skip. Prevents duplicate projects on retry.
+- **Email sync:** `graph_message_id` UNIQUE constraint prevents duplicate email records regardless of how many times sync runs.
+- **Webhook processing:** `procore_webhook_log` records every webhook. Handler checks for recent duplicate (same event_type + resource_id within 60s) before processing.
+- **Job queue:** `job_queue` entries have `status` tracking. Worker sets `processing` before starting, `completed` on success. On crash, status remains `processing` — startup sweep resets stale `processing` jobs (older than 5 minutes) back to `pending`.
+- **Notification dedup:** Notifications include a `type + entity_id + date` compound check to prevent duplicate alerts for the same event on the same day.
