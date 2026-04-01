@@ -1,0 +1,25 @@
+{
+  "name": "@trock-crm/shared",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/schema/index.js",
+  "exports": {
+    "./schema": "./dist/schema/index.js",
+    "./types": "./dist/types/index.js",
+    "./utils": "./dist/utils/normalize.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "dev": "tsc --watch"
+  },
+  "dependencies": {
+    "drizzle-orm": "^0.39.3",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "drizzle-kit": "^0.30.4",
+    "@types/pg": "^8.11.10"
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "name": "trock-crm",
+  "private": true,
+  "workspaces": ["shared", "server", "worker", "client"],
+  "scripts": {
+    "dev:shared": "npm run build --workspace=shared",
+    "dev:server": "npm run dev --workspace=server",
+    "dev:worker": "npm run dev --workspace=worker",
+    "dev:client": "npm run dev --workspace=client",
+    "dev": "npm run dev:shared && concurrently \"npm:dev:shared -- --watch\" \"npm:dev:server\" \"npm:dev:worker\" \"npm:dev:client\"",
+    "build": "npm run build --workspaces",
+    "typecheck": "npm run typecheck --workspaces",
+    "test": "npm run test --workspace=server",
+    "db:generate": "drizzle-kit generate --config=shared/drizzle.config.ts",
+    "db:migrate": "tsx server/src/migrations/runner.ts",
+    "db:studio": "drizzle-kit studio --config=shared/drizzle.config.ts"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "typescript": "^5.7.3"
+  }
+}

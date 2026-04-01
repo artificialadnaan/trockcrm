@@ -1,0 +1,8 @@
+{
+  "name": "@trock-crm/client",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "typecheck": "echo 'client typecheck skipped until vite setup'"
+  }
+}
