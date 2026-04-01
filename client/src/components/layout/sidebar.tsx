@@ -3,6 +3,7 @@ import { useAuth } from "@/lib/auth";
 import {
   LayoutDashboard,
   Kanban,
+  Handshake,
   Users,
   Mail,
   CheckSquare,
@@ -18,6 +19,7 @@ import { Separator } from "@/components/ui/separator";
 
 const navItems = [
   { to: "/", icon: LayoutDashboard, label: "Dashboard", roles: ["admin", "director", "rep"] },
+  { to: "/deals", icon: Handshake, label: "Deals", roles: ["admin", "director", "rep"] },
   { to: "/pipeline", icon: Kanban, label: "Pipeline", roles: ["admin", "director", "rep"] },
   { to: "/contacts", icon: Users, label: "Contacts", roles: ["admin", "director", "rep"] },
   { to: "/email", icon: Mail, label: "Email", roles: ["admin", "director", "rep"] },

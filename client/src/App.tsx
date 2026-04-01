@@ -3,6 +3,8 @@ import type { ReactNode } from "react";
 import { AuthProvider, useAuth } from "@/lib/auth";
 import { DevUserPicker } from "@/components/auth/dev-user-picker";
 import { AppShell } from "@/components/layout/app-shell";
+import { DealListPage } from "@/pages/deals/deal-list-page";
+import { DealDetailPage } from "@/pages/deals/deal-detail-page";
 
 function Dashboard() {
   return (
@@ -44,6 +46,8 @@ export function App() {
         <Routes>
           <Route element={<AppShell />}>
             <Route path="/" element={<Dashboard />} />
+            <Route path="/deals" element={<DealListPage />} />
+            <Route path="/deals/:id" element={<DealDetailPage />} />
             <Route path="/pipeline" element={<PlaceholderPage title="Pipeline" />} />
             <Route path="/contacts" element={<PlaceholderPage title="Contacts" />} />
             <Route path="/email" element={<PlaceholderPage title="Email" />} />
