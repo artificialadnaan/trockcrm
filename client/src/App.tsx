@@ -5,6 +5,9 @@ import { DevUserPicker } from "@/components/auth/dev-user-picker";
 import { AppShell } from "@/components/layout/app-shell";
 import { DealListPage } from "@/pages/deals/deal-list-page";
 import { DealDetailPage } from "@/pages/deals/deal-detail-page";
+import { DealNewPage } from "@/pages/deals/deal-new-page";
+import { DealEditPage } from "@/pages/deals/deal-edit-page";
+import { PipelinePage } from "@/pages/pipeline/pipeline-page";
 
 function Dashboard() {
   return (
@@ -47,8 +50,10 @@ export function App() {
           <Route element={<AppShell />}>
             <Route path="/" element={<Dashboard />} />
             <Route path="/deals" element={<DealListPage />} />
+            <Route path="/deals/new" element={<DealNewPage />} />
             <Route path="/deals/:id" element={<DealDetailPage />} />
-            <Route path="/pipeline" element={<PlaceholderPage title="Pipeline" />} />
+            <Route path="/deals/:id/edit" element={<DealEditPage />} />
+            <Route path="/pipeline" element={<PipelinePage />} />
             <Route path="/contacts" element={<PlaceholderPage title="Contacts" />} />
             <Route path="/email" element={<PlaceholderPage title="Email" />} />
             <Route path="/tasks" element={<PlaceholderPage title="Tasks" />} />
