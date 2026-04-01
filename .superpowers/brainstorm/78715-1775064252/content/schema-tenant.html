@@ -1,0 +1,113 @@
+<h2>Database Schema — Per-Office Tables</h2>
+<p class="subtitle">These tables exist in each <code>office_{slug}</code> schema (e.g., <code>office_dallas.deals</code>, <code>office_houston.deals</code>)</p>
+
+<div class="section">
+  <h3>Deals & Pipeline</h3>
+
+  <div class="mockup">
+    <div class="mockup-header">office_{slug}.deals</div>
+    <div class="mockup-body" style="font-family:monospace;font-size:13px;line-height:2;color:#e0e0e0;">
+      <div><span style="color:#7c3aed;">id</span> <span style="color:#06b6d4;">UUID PK DEFAULT gen_random_uuid()</span></div>
+      <div><span style="color:#7c3aed;">deal_number</span> <span style="color:#06b6d4;">VARCHAR(50) UNIQUE NOT NULL</span> <span style="color:#888;">-- auto-generated or manual</span></div>
+      <div><span style="color:#7c3aed;">name</span> <span style="color:#06b6d4;">VARCHAR(500) NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">stage_id</span> <span style="color:#06b6d4;">UUID FK → public.pipeline_stage_config.id NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">assigned_rep_id</span> <span style="color:#06b6d4;">UUID FK → public.users.id NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">primary_contact_id</span> <span style="color:#06b6d4;">UUID FK → contacts.id</span></div>
+      <div style="margin:8px 0;border-top:1px solid #333;padding-top:8px;color:#f59e0b;">-- Estimate Values (flat columns)</div>
+      <div><span style="color:#7c3aed;">dd_estimate</span> <span style="color:#06b6d4;">NUMERIC(14,2)</span> <span style="color:#888;">-- Due Diligence estimate</span></div>
+      <div><span style="color:#7c3aed;">bid_estimate</span> <span style="color:#06b6d4;">NUMERIC(14,2)</span> <span style="color:#888;">-- bid/proposal amount</span></div>
+      <div><span style="color:#7c3aed;">awarded_amount</span> <span style="color:#06b6d4;">NUMERIC(14,2)</span> <span style="color:#888;">-- contract awarded value</span></div>
+      <div><span style="color:#7c3aed;">current_contract_value</span> <span style="color:#06b6d4;">NUMERIC(14,2) GENERATED ALWAYS AS (COALESCE(awarded_amount, 0) + change_order_total) STORED</span></div>
+      <div><span style="color:#7c3aed;">change_order_total</span> <span style="color:#06b6d4;">NUMERIC(14,2) DEFAULT 0</span> <span style="color:#888;">-- denormalized SUM from change_orders table, updated by trigger</span></div>
+      <div style="margin:8px 0;border-top:1px solid #333;padding-top:8px;color:#f59e0b;">-- Metadata</div>
+      <div><span style="color:#7c3aed;">description</span> <span style="color:#06b6d4;">TEXT</span></div>
+      <div><span style="color:#7c3aed;">property_address</span> <span style="color:#06b6d4;">TEXT</span></div>
+      <div><span style="color:#7c3aed;">property_city</span> <span style="color:#06b6d4;">VARCHAR(255)</span></div>
+      <div><span style="color:#7c3aed;">property_state</span> <span style="color:#06b6d4;">VARCHAR(2)</span></div>
+      <div><span style="color:#7c3aed;">property_zip</span> <span style="color:#06b6d4;">VARCHAR(10)</span></div>
+      <div><span style="color:#7c3aed;">project_type</span> <span style="color:#06b6d4;">VARCHAR(100)</span> <span style="color:#888;">-- "Commercial", "Industrial", "Healthcare", etc.</span></div>
+      <div><span style="color:#7c3aed;">source</span> <span style="color:#06b6d4;">VARCHAR(100)</span> <span style="color:#888;">-- "Bid Board", "Referral", "Cold Call", etc.</span></div>
+      <div style="margin:8px 0;border-top:1px solid #333;padding-top:8px;color:#f59e0b;">-- Procore Integration</div>
+      <div><span style="color:#7c3aed;">procore_project_id</span> <span style="color:#06b6d4;">BIGINT</span> <span style="color:#888;">-- linked Procore project (NULL until won)</span></div>
+      <div><span style="color:#7c3aed;">procore_bid_id</span> <span style="color:#06b6d4;">BIGINT</span> <span style="color:#888;">-- linked Procore Bid Board item</span></div>
+      <div><span style="color:#7c3aed;">procore_last_synced_at</span> <span style="color:#06b6d4;">TIMESTAMPTZ</span></div>
+      <div style="margin:8px 0;border-top:1px solid #333;padding-top:8px;color:#f59e0b;">-- Lost Deal</div>
+      <div><span style="color:#7c3aed;">lost_reason_id</span> <span style="color:#06b6d4;">UUID FK → public.lost_deal_reasons.id</span> <span style="color:#888;">-- required when stage = Closed Lost</span></div>
+      <div><span style="color:#7c3aed;">lost_notes</span> <span style="color:#06b6d4;">TEXT</span> <span style="color:#888;">-- required free-text when stage = Closed Lost</span></div>
+      <div><span style="color:#7c3aed;">lost_at</span> <span style="color:#06b6d4;">TIMESTAMPTZ</span></div>
+      <div style="margin:8px 0;border-top:1px solid #333;padding-top:8px;color:#f59e0b;">-- Dates & Lifecycle</div>
+      <div><span style="color:#7c3aed;">expected_close_date</span> <span style="color:#06b6d4;">DATE</span></div>
+      <div><span style="color:#7c3aed;">actual_close_date</span> <span style="color:#06b6d4;">DATE</span></div>
+      <div><span style="color:#7c3aed;">last_activity_at</span> <span style="color:#06b6d4;">TIMESTAMPTZ</span> <span style="color:#888;">-- updated on any deal activity (email, note, call)</span></div>
+      <div><span style="color:#7c3aed;">stage_entered_at</span> <span style="color:#06b6d4;">TIMESTAMPTZ NOT NULL DEFAULT NOW()</span> <span style="color:#888;">-- reset on stage change, used for stale alerts</span></div>
+      <div><span style="color:#7c3aed;">is_active</span> <span style="color:#06b6d4;">BOOLEAN DEFAULT true</span></div>
+      <div><span style="color:#7c3aed;">created_at</span> <span style="color:#06b6d4;">TIMESTAMPTZ NOT NULL DEFAULT NOW()</span></div>
+      <div><span style="color:#7c3aed;">updated_at</span> <span style="color:#06b6d4;">TIMESTAMPTZ NOT NULL DEFAULT NOW()</span></div>
+      <div style="margin:8px 0;border-top:1px solid #333;padding-top:8px;color:#f59e0b;">-- HubSpot Migration</div>
+      <div><span style="color:#7c3aed;">hubspot_deal_id</span> <span style="color:#06b6d4;">VARCHAR(50)</span> <span style="color:#888;">-- preserved for traceability, NULL for new deals</span></div>
+    </div>
+  </div>
+
+  <div class="mockup" style="margin-top:16px;">
+    <div class="mockup-header">office_{slug}.deal_stage_history</div>
+    <div class="mockup-body" style="font-family:monospace;font-size:13px;line-height:2;color:#e0e0e0;">
+      <div><span style="color:#888;">-- Written by PG trigger on deals.stage_id change</span></div>
+      <div><span style="color:#7c3aed;">id</span> <span style="color:#06b6d4;">UUID PK DEFAULT gen_random_uuid()</span></div>
+      <div><span style="color:#7c3aed;">deal_id</span> <span style="color:#06b6d4;">UUID FK → deals.id NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">from_stage_id</span> <span style="color:#06b6d4;">UUID FK → public.pipeline_stage_config.id</span></div>
+      <div><span style="color:#7c3aed;">to_stage_id</span> <span style="color:#06b6d4;">UUID FK → public.pipeline_stage_config.id NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">changed_by</span> <span style="color:#06b6d4;">UUID FK → public.users.id NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">is_backward_move</span> <span style="color:#06b6d4;">BOOLEAN DEFAULT false</span></div>
+      <div><span style="color:#7c3aed;">is_director_override</span> <span style="color:#06b6d4;">BOOLEAN DEFAULT false</span></div>
+      <div><span style="color:#7c3aed;">override_reason</span> <span style="color:#06b6d4;">TEXT</span> <span style="color:#888;">-- required when is_director_override = true</span></div>
+      <div><span style="color:#7c3aed;">duration_in_previous_stage</span> <span style="color:#06b6d4;">INTERVAL</span> <span style="color:#888;">-- computed from deal.stage_entered_at</span></div>
+      <div><span style="color:#7c3aed;">created_at</span> <span style="color:#06b6d4;">TIMESTAMPTZ NOT NULL DEFAULT NOW()</span></div>
+    </div>
+  </div>
+
+  <div class="mockup" style="margin-top:16px;">
+    <div class="mockup-header">office_{slug}.change_orders</div>
+    <div class="mockup-body" style="font-family:monospace;font-size:13px;line-height:2;color:#e0e0e0;">
+      <div><span style="color:#7c3aed;">id</span> <span style="color:#06b6d4;">UUID PK DEFAULT gen_random_uuid()</span></div>
+      <div><span style="color:#7c3aed;">deal_id</span> <span style="color:#06b6d4;">UUID FK → deals.id NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">co_number</span> <span style="color:#06b6d4;">INTEGER NOT NULL</span> <span style="color:#888;">-- sequential per deal</span></div>
+      <div><span style="color:#7c3aed;">title</span> <span style="color:#06b6d4;">VARCHAR(500) NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">amount</span> <span style="color:#06b6d4;">NUMERIC(14,2) NOT NULL</span> <span style="color:#888;">-- positive = addition, negative = deduction</span></div>
+      <div><span style="color:#7c3aed;">status</span> <span style="color:#06b6d4;">ENUM('pending','approved','rejected') DEFAULT 'pending'</span></div>
+      <div><span style="color:#7c3aed;">procore_co_id</span> <span style="color:#06b6d4;">BIGINT</span> <span style="color:#888;">-- linked Procore change order</span></div>
+      <div><span style="color:#7c3aed;">approved_at</span> <span style="color:#06b6d4;">TIMESTAMPTZ</span></div>
+      <div><span style="color:#7c3aed;">created_at</span> <span style="color:#06b6d4;">TIMESTAMPTZ NOT NULL DEFAULT NOW()</span></div>
+      <div><span style="color:#7c3aed;">updated_at</span> <span style="color:#06b6d4;">TIMESTAMPTZ NOT NULL DEFAULT NOW()</span></div>
+      <div><span style="color:#06b6d4;">UNIQUE(deal_id, co_number)</span></div>
+    </div>
+  </div>
+
+  <div class="mockup" style="margin-top:16px;">
+    <div class="mockup-header">office_{slug}.deal_approvals</div>
+    <div class="mockup-body" style="font-family:monospace;font-size:13px;line-height:2;color:#e0e0e0;">
+      <div><span style="color:#888;">-- Tracks required approvals for stage gates</span></div>
+      <div><span style="color:#7c3aed;">id</span> <span style="color:#06b6d4;">UUID PK DEFAULT gen_random_uuid()</span></div>
+      <div><span style="color:#7c3aed;">deal_id</span> <span style="color:#06b6d4;">UUID FK → deals.id NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">target_stage_id</span> <span style="color:#06b6d4;">UUID FK → public.pipeline_stage_config.id NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">requested_by</span> <span style="color:#06b6d4;">UUID FK → public.users.id NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">approved_by</span> <span style="color:#06b6d4;">UUID FK → public.users.id</span></div>
+      <div><span style="color:#7c3aed;">status</span> <span style="color:#06b6d4;">ENUM('pending','approved','rejected') DEFAULT 'pending'</span></div>
+      <div><span style="color:#7c3aed;">notes</span> <span style="color:#06b6d4;">TEXT</span></div>
+      <div><span style="color:#7c3aed;">created_at</span> <span style="color:#06b6d4;">TIMESTAMPTZ NOT NULL DEFAULT NOW()</span></div>
+      <div><span style="color:#7c3aed;">resolved_at</span> <span style="color:#06b6d4;">TIMESTAMPTZ</span></div>
+    </div>
+  </div>
+</div>
+
+<div style="margin-top:24px;padding:16px;background:#1a1a2e;border-radius:8px;border-left:3px solid #f59e0b;">
+  <h3 style="margin-top:0;color:#f59e0b;">Edge Cases Handled</h3>
+  <ul style="color:#ccc;margin-bottom:0;">
+    <li><strong>DD separation:</strong> <code>pipeline_stage_config.is_active_pipeline = false</code> for DD stage — reporting queries filter on this flag to exclude DD from active pipeline totals</li>
+    <li><strong>Backward move prevention:</strong> API compares <code>display_order</code> of current vs target stage. If target &lt; current AND user role != director → reject. Logged in <code>deal_stage_history</code></li>
+    <li><strong>Closed Lost enforcement:</strong> API requires <code>lost_reason_id</code> + <code>lost_notes</code> when target stage = Closed Lost. PG CHECK constraint as safety net</li>
+    <li><strong>Change order denormalization:</strong> PG trigger on <code>change_orders</code> INSERT/UPDATE/DELETE recalculates <code>deals.change_order_total</code> = SUM of approved COs</li>
+    <li><strong>Generated column:</strong> <code>current_contract_value</code> is always <code>awarded_amount + change_order_total</code> — can never be stale</li>
+    <li><strong>Stale deal detection:</strong> Worker compares <code>NOW() - stage_entered_at</code> against <code>pipeline_stage_config.stale_threshold_days</code></li>
+    <li><strong>HubSpot traceability:</strong> <code>hubspot_deal_id</code> preserved on migrated deals so team can cross-reference during validation</li>
+  </ul>
+</div>

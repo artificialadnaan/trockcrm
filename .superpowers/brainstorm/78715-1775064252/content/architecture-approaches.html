@@ -1,0 +1,137 @@
+<h2>Architecture Approaches</h2>
+<p class="subtitle">Three options for the T Rock CRM platform architecture — click to select your preference</p>
+
+<div class="options">
+  <div class="option" data-choice="a" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>Modular Monolith</h3>
+      <p><strong>Single Express server + Worker, feature modules with clear boundaries</strong></p>
+      <div style="background:#1a1a2e;padding:16px;border-radius:8px;margin:12px 0;font-family:monospace;font-size:13px;line-height:1.8;color:#e0e0e0;">
+        <div style="color:#7c3aed;font-weight:bold;margin-bottom:8px;">── server/</div>
+        <div style="padding-left:20px;">
+          <div>modules/</div>
+          <div style="padding-left:20px;color:#06b6d4;">
+            deals/ <span style="color:#888;">← routes, service, validation gates</span><br/>
+            contacts/ <span style="color:#888;">← directory, dedup, touchpoints</span><br/>
+            email/ <span style="color:#888;">← Graph API, sync, matching</span><br/>
+            procore/ <span style="color:#888;">← API client, stage mapping, webhooks</span><br/>
+            photos/ <span style="color:#888;">← R2 presigned URLs, timeline</span><br/>
+            reports/ <span style="color:#888;">← saved filters, locked reports, charts</span><br/>
+            audit/ <span style="color:#888;">← PG triggers setup, history queries</span><br/>
+            office/ <span style="color:#888;">← schema management, tenant routing</span><br/>
+            tasks/ <span style="color:#888;">← daily list, reminders, alerts</span><br/>
+            auth/ <span style="color:#888;">← MS Entra SSO, sessions, RBAC</span>
+          </div>
+        </div>
+        <div style="color:#7c3aed;font-weight:bold;margin-top:8px;">── worker/</div>
+        <div style="padding-left:20px;color:#06b6d4;">
+          jobs/ <span style="color:#888;">← stale deals, email sync, dedup scan, activity alerts</span>
+        </div>
+        <div style="color:#7c3aed;font-weight:bold;margin-top:8px;">── client/</div>
+        <div style="padding-left:20px;color:#06b6d4;">
+          React + Vite + Tailwind + shadcn/ui
+        </div>
+        <div style="color:#7c3aed;font-weight:bold;margin-top:8px;">── shared/</div>
+        <div style="padding-left:20px;color:#06b6d4;">
+          schema/ <span style="color:#888;">← Drizzle schemas, types, enums</span>
+        </div>
+      </div>
+      <div class="pros-cons">
+        <div class="pros"><h4>Pros</h4><ul>
+          <li>Simple deployment — one API service, one worker, one frontend</li>
+          <li>Modules share DB connection, auth middleware, logging</li>
+          <li>Fastest to build for April deadline</li>
+          <li>Easy to navigate — feature = folder</li>
+          <li>Same pattern as SyncHub</li>
+        </ul></div>
+        <div class="cons"><h4>Cons</h4><ul>
+          <li>Modules can leak into each other if boundaries aren't enforced</li>
+          <li>Single server handles all API traffic — fine for T Rock's scale</li>
+          <li>Large server/ directory as features grow</li>
+        </ul></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="option" data-choice="b" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>Service-Oriented (Microservices Lite)</h3>
+      <p><strong>Separate Express services per domain, shared database</strong></p>
+      <div style="background:#1a1a2e;padding:16px;border-radius:8px;margin:12px 0;font-family:monospace;font-size:13px;line-height:1.8;color:#e0e0e0;">
+        <div style="color:#7c3aed;font-weight:bold;">── services/</div>
+        <div style="padding-left:20px;color:#06b6d4;">
+          deals-api/ <span style="color:#888;">← :3001 — deals, pipeline, estimates</span><br/>
+          contacts-api/ <span style="color:#888;">← :3002 — directory, dedup</span><br/>
+          comms-api/ <span style="color:#888;">← :3003 — email, notifications</span><br/>
+          integrations-api/ <span style="color:#888;">← :3004 — Procore, HubSpot</span><br/>
+          files-api/ <span style="color:#888;">← :3005 — photos, documents, R2</span><br/>
+          gateway/ <span style="color:#888;">← :3000 — API gateway, auth, routing</span>
+        </div>
+        <div style="color:#7c3aed;font-weight:bold;margin-top:8px;">── worker/</div>
+        <div style="padding-left:20px;color:#06b6d4;">Same as Option A</div>
+        <div style="color:#7c3aed;font-weight:bold;margin-top:8px;">── client/</div>
+        <div style="padding-left:20px;color:#06b6d4;">Same as Option A</div>
+      </div>
+      <div class="pros-cons">
+        <div class="pros"><h4>Pros</h4><ul>
+          <li>True domain isolation — services can't accidentally couple</li>
+          <li>Independent scaling per service</li>
+          <li>One service can restart without affecting others</li>
+        </ul></div>
+        <div class="cons"><h4>Cons</h4><ul>
+          <li>6+ Railway services = $30-60/mo extra hosting</li>
+          <li>Inter-service communication adds latency and complexity</li>
+          <li>Overkill for &lt;100 users — adds operational overhead</li>
+          <li>Significantly more build time — won't hit April deadline</li>
+          <li>Cross-service transactions are painful (deal + contact + email in one action)</li>
+        </ul></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="option" data-choice="c" onclick="toggleSelect(this)">
+    <div class="letter">C</div>
+    <div class="content">
+      <h3>Modular Monolith + Domain Events</h3>
+      <p><strong>Option A's structure with an internal event bus for module communication</strong></p>
+      <div style="background:#1a1a2e;padding:16px;border-radius:8px;margin:12px 0;font-family:monospace;font-size:13px;line-height:1.8;color:#e0e0e0;">
+        <div style="color:#7c3aed;font-weight:bold;">── server/</div>
+        <div style="padding-left:20px;">
+          <div style="color:#06b6d4;">
+            modules/ <span style="color:#888;">← Same as Option A</span><br/>
+          </div>
+          <div style="color:#f59e0b;">
+            events/ <span style="color:#888;">← Internal event bus (EventEmitter or pg LISTEN/NOTIFY)</span><br/>
+            <span style="padding-left:20px;color:#888;">deal.stage.changed → triggers email, Procore sync, task creation</span><br/>
+            <span style="padding-left:20px;color:#888;">contact.created → triggers dedup check, touchpoint alert</span><br/>
+            <span style="padding-left:20px;color:#888;">email.received → triggers task creation, deal logging</span><br/>
+            <span style="padding-left:20px;color:#888;">deal.won → triggers Procore project creation</span>
+          </div>
+        </div>
+        <div style="color:#7c3aed;font-weight:bold;margin-top:8px;">── worker/ & client/ & shared/</div>
+        <div style="padding-left:20px;color:#06b6d4;">Same as Option A</div>
+      </div>
+      <div class="pros-cons">
+        <div class="pros"><h4>Pros</h4><ul>
+          <li>Same simplicity as Option A — single server, same folder structure</li>
+          <li>Event bus decouples modules — deal module doesn't call email module directly</li>
+          <li>Easy to trace "what happens when X" — check event handlers</li>
+          <li>Natural path to microservices later — events become message queue topics</li>
+          <li>Perfect for CRM workflows (deal won → chain of automated actions)</li>
+        </ul></div>
+        <div class="cons"><h4>Cons</h4><ul>
+          <li>Slightly more upfront design than pure Option A</li>
+          <li>Event ordering and error handling need thought</li>
+          <li>Can be over-engineered if events are used for everything</li>
+        </ul></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div style="margin-top:24px;padding:16px;background:#1a1a2e;border-radius:8px;border-left:3px solid #7c3aed;">
+  <h3 style="margin-top:0;color:#7c3aed;">⟶ Recommendation: Option C</h3>
+  <p style="color:#ccc;margin-bottom:0;">Same build speed as the modular monolith, but the event bus is a natural fit for CRM automation chains. When a deal is won, you need to: create a Procore project, send a notification, generate tasks, update reports. With direct calls, the deal module imports everything. With events, it emits <code>deal.won</code> and each module handles its piece independently. This is also the cleanest migration path to microservices or message queues if T Rock scales beyond 20 offices.</p>
+</div>

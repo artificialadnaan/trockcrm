@@ -1,0 +1,140 @@
+<h2>Database Schema — Contacts, Communications & Email</h2>
+<p class="subtitle">Per-office schema: contact directory, email sync, activity logging, and touchpoint tracking</p>
+
+<div class="section">
+  <h3>Contact Directory</h3>
+
+  <div class="mockup">
+    <div class="mockup-header">office_{slug}.contacts</div>
+    <div class="mockup-body" style="font-family:monospace;font-size:13px;line-height:2;color:#e0e0e0;">
+      <div><span style="color:#7c3aed;">id</span> <span style="color:#06b6d4;">UUID PK DEFAULT gen_random_uuid()</span></div>
+      <div><span style="color:#7c3aed;">first_name</span> <span style="color:#06b6d4;">VARCHAR(255) NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">last_name</span> <span style="color:#06b6d4;">VARCHAR(255) NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">email</span> <span style="color:#06b6d4;">VARCHAR(255)</span> <span style="color:#888;">-- UNIQUE within office schema, hard-block on duplicate</span></div>
+      <div><span style="color:#7c3aed;">phone</span> <span style="color:#06b6d4;">VARCHAR(20)</span></div>
+      <div><span style="color:#7c3aed;">mobile</span> <span style="color:#06b6d4;">VARCHAR(20)</span></div>
+      <div><span style="color:#7c3aed;">company_name</span> <span style="color:#06b6d4;">VARCHAR(500)</span></div>
+      <div><span style="color:#7c3aed;">job_title</span> <span style="color:#06b6d4;">VARCHAR(255)</span></div>
+      <div><span style="color:#7c3aed;">category</span> <span style="color:#06b6d4;">ENUM('client','subcontractor','architect','property_manager','vendor','consultant','other') NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">address</span> <span style="color:#06b6d4;">TEXT</span></div>
+      <div><span style="color:#7c3aed;">city</span> <span style="color:#06b6d4;">VARCHAR(255)</span></div>
+      <div><span style="color:#7c3aed;">state</span> <span style="color:#06b6d4;">VARCHAR(2)</span></div>
+      <div><span style="color:#7c3aed;">zip</span> <span style="color:#06b6d4;">VARCHAR(10)</span></div>
+      <div><span style="color:#7c3aed;">notes</span> <span style="color:#06b6d4;">TEXT</span></div>
+      <div style="margin:8px 0;border-top:1px solid #333;padding-top:8px;color:#f59e0b;">-- Touchpoint Tracking</div>
+      <div><span style="color:#7c3aed;">touchpoint_count</span> <span style="color:#06b6d4;">INTEGER DEFAULT 0</span> <span style="color:#888;">-- denormalized, updated by trigger on activities</span></div>
+      <div><span style="color:#7c3aed;">last_contacted_at</span> <span style="color:#06b6d4;">TIMESTAMPTZ</span></div>
+      <div><span style="color:#7c3aed;">first_outreach_completed</span> <span style="color:#06b6d4;">BOOLEAN DEFAULT false</span> <span style="color:#888;">-- false triggers touchpoint alert</span></div>
+      <div style="margin:8px 0;border-top:1px solid #333;padding-top:8px;color:#f59e0b;">-- External IDs</div>
+      <div><span style="color:#7c3aed;">procore_contact_id</span> <span style="color:#06b6d4;">BIGINT</span></div>
+      <div><span style="color:#7c3aed;">hubspot_contact_id</span> <span style="color:#06b6d4;">VARCHAR(50)</span> <span style="color:#888;">-- migration traceability</span></div>
+      <div style="margin:8px 0;border-top:1px solid #333;padding-top:8px;color:#f59e0b;">-- Dedup</div>
+      <div><span style="color:#7c3aed;">normalized_name</span> <span style="color:#06b6d4;">VARCHAR(510) GENERATED ALWAYS AS (LOWER(TRIM(first_name || ' ' || last_name))) STORED</span></div>
+      <div><span style="color:#7c3aed;">normalized_phone</span> <span style="color:#06b6d4;">VARCHAR(20)</span> <span style="color:#888;">-- digits only, set by trigger</span></div>
+      <div style="margin:8px 0;border-top:1px solid #333;padding-top:8px;color:#f59e0b;">-- Standard</div>
+      <div><span style="color:#7c3aed;">is_active</span> <span style="color:#06b6d4;">BOOLEAN DEFAULT true</span></div>
+      <div><span style="color:#7c3aed;">created_at</span> <span style="color:#06b6d4;">TIMESTAMPTZ NOT NULL DEFAULT NOW()</span></div>
+      <div><span style="color:#7c3aed;">updated_at</span> <span style="color:#06b6d4;">TIMESTAMPTZ NOT NULL DEFAULT NOW()</span></div>
+      <div style="margin:8px 0;border-top:1px solid #333;padding-top:8px;">
+        <span style="color:#06b6d4;">UNIQUE(email) WHERE email IS NOT NULL</span><br/>
+        <span style="color:#06b6d4;">INDEX ON (normalized_name, company_name)</span> <span style="color:#888;">-- fuzzy dedup scan</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="mockup" style="margin-top:16px;">
+    <div class="mockup-header">office_{slug}.contact_deal_associations</div>
+    <div class="mockup-body" style="font-family:monospace;font-size:13px;line-height:2;color:#e0e0e0;">
+      <div><span style="color:#888;">-- Many-to-many: a contact can be on multiple deals, a deal has multiple contacts</span></div>
+      <div><span style="color:#7c3aed;">id</span> <span style="color:#06b6d4;">UUID PK DEFAULT gen_random_uuid()</span></div>
+      <div><span style="color:#7c3aed;">contact_id</span> <span style="color:#06b6d4;">UUID FK → contacts.id NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">deal_id</span> <span style="color:#06b6d4;">UUID FK → deals.id NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">role</span> <span style="color:#06b6d4;">VARCHAR(100)</span> <span style="color:#888;">-- "Decision Maker", "Site Contact", "Estimator", etc.</span></div>
+      <div><span style="color:#7c3aed;">is_primary</span> <span style="color:#06b6d4;">BOOLEAN DEFAULT false</span></div>
+      <div><span style="color:#7c3aed;">created_at</span> <span style="color:#06b6d4;">TIMESTAMPTZ NOT NULL DEFAULT NOW()</span></div>
+      <div><span style="color:#06b6d4;">UNIQUE(contact_id, deal_id)</span></div>
+    </div>
+  </div>
+
+  <div class="mockup" style="margin-top:16px;">
+    <div class="mockup-header">office_{slug}.duplicate_queue</div>
+    <div class="mockup-body" style="font-family:monospace;font-size:13px;line-height:2;color:#e0e0e0;">
+      <div><span style="color:#888;">-- Populated by worker's background fuzzy dedup scan</span></div>
+      <div><span style="color:#7c3aed;">id</span> <span style="color:#06b6d4;">UUID PK DEFAULT gen_random_uuid()</span></div>
+      <div><span style="color:#7c3aed;">contact_a_id</span> <span style="color:#06b6d4;">UUID FK → contacts.id NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">contact_b_id</span> <span style="color:#06b6d4;">UUID FK → contacts.id NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">match_type</span> <span style="color:#06b6d4;">ENUM('exact_email','fuzzy_name','fuzzy_phone','company_match') NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">confidence_score</span> <span style="color:#06b6d4;">NUMERIC(3,2)</span> <span style="color:#888;">-- 0.00 to 1.00</span></div>
+      <div><span style="color:#7c3aed;">status</span> <span style="color:#06b6d4;">ENUM('pending','merged','dismissed') DEFAULT 'pending'</span></div>
+      <div><span style="color:#7c3aed;">resolved_by</span> <span style="color:#06b6d4;">UUID FK → public.users.id</span></div>
+      <div><span style="color:#7c3aed;">created_at</span> <span style="color:#06b6d4;">TIMESTAMPTZ NOT NULL DEFAULT NOW()</span></div>
+      <div><span style="color:#7c3aed;">resolved_at</span> <span style="color:#06b6d4;">TIMESTAMPTZ</span></div>
+      <div><span style="color:#06b6d4;">UNIQUE(contact_a_id, contact_b_id)</span> <span style="color:#888;">-- prevent duplicate queue entries</span></div>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>Email & Communication</h3>
+
+  <div class="mockup">
+    <div class="mockup-header">office_{slug}.emails</div>
+    <div class="mockup-body" style="font-family:monospace;font-size:13px;line-height:2;color:#e0e0e0;">
+      <div><span style="color:#888;">-- Synced from MS Graph API (matched contacts only)</span></div>
+      <div><span style="color:#7c3aed;">id</span> <span style="color:#06b6d4;">UUID PK DEFAULT gen_random_uuid()</span></div>
+      <div><span style="color:#7c3aed;">graph_message_id</span> <span style="color:#06b6d4;">VARCHAR(500) UNIQUE NOT NULL</span> <span style="color:#888;">-- MS Graph message ID for dedup</span></div>
+      <div><span style="color:#7c3aed;">graph_conversation_id</span> <span style="color:#06b6d4;">VARCHAR(500)</span> <span style="color:#888;">-- thread grouping</span></div>
+      <div><span style="color:#7c3aed;">direction</span> <span style="color:#06b6d4;">ENUM('inbound','outbound') NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">from_address</span> <span style="color:#06b6d4;">VARCHAR(255) NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">to_addresses</span> <span style="color:#06b6d4;">TEXT[] NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">cc_addresses</span> <span style="color:#06b6d4;">TEXT[]</span></div>
+      <div><span style="color:#7c3aed;">subject</span> <span style="color:#06b6d4;">VARCHAR(1000)</span></div>
+      <div><span style="color:#7c3aed;">body_preview</span> <span style="color:#06b6d4;">VARCHAR(500)</span> <span style="color:#888;">-- first 500 chars for list views</span></div>
+      <div><span style="color:#7c3aed;">body_html</span> <span style="color:#06b6d4;">TEXT</span></div>
+      <div><span style="color:#7c3aed;">has_attachments</span> <span style="color:#06b6d4;">BOOLEAN DEFAULT false</span></div>
+      <div style="margin:8px 0;border-top:1px solid #333;padding-top:8px;color:#f59e0b;">-- CRM Associations</div>
+      <div><span style="color:#7c3aed;">contact_id</span> <span style="color:#06b6d4;">UUID FK → contacts.id</span> <span style="color:#888;">-- matched by email address</span></div>
+      <div><span style="color:#7c3aed;">deal_id</span> <span style="color:#06b6d4;">UUID FK → deals.id</span> <span style="color:#888;">-- auto-matched via contact's active deals</span></div>
+      <div><span style="color:#7c3aed;">user_id</span> <span style="color:#06b6d4;">UUID FK → public.users.id NOT NULL</span> <span style="color:#888;">-- the rep whose mailbox this came from</span></div>
+      <div><span style="color:#7c3aed;">sent_at</span> <span style="color:#06b6d4;">TIMESTAMPTZ NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">synced_at</span> <span style="color:#06b6d4;">TIMESTAMPTZ NOT NULL DEFAULT NOW()</span></div>
+    </div>
+  </div>
+
+  <div class="mockup" style="margin-top:16px;">
+    <div class="mockup-header">office_{slug}.activities</div>
+    <div class="mockup-body" style="font-family:monospace;font-size:13px;line-height:2;color:#e0e0e0;">
+      <div><span style="color:#888;">-- Unified activity feed: calls, notes, meetings, emails (pointer), tasks completed</span></div>
+      <div><span style="color:#7c3aed;">id</span> <span style="color:#06b6d4;">UUID PK DEFAULT gen_random_uuid()</span></div>
+      <div><span style="color:#7c3aed;">type</span> <span style="color:#06b6d4;">ENUM('call','note','meeting','email','task_completed') NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">user_id</span> <span style="color:#06b6d4;">UUID FK → public.users.id NOT NULL</span> <span style="color:#888;">-- who performed it</span></div>
+      <div><span style="color:#7c3aed;">deal_id</span> <span style="color:#06b6d4;">UUID FK → deals.id</span></div>
+      <div><span style="color:#7c3aed;">contact_id</span> <span style="color:#06b6d4;">UUID FK → contacts.id</span></div>
+      <div><span style="color:#7c3aed;">email_id</span> <span style="color:#06b6d4;">UUID FK → emails.id</span> <span style="color:#888;">-- for type='email', links to full email record</span></div>
+      <div><span style="color:#7c3aed;">subject</span> <span style="color:#06b6d4;">VARCHAR(500)</span> <span style="color:#888;">-- "Called about site visit", "Sent estimate follow-up"</span></div>
+      <div><span style="color:#7c3aed;">body</span> <span style="color:#06b6d4;">TEXT</span> <span style="color:#888;">-- call notes, meeting notes, etc.</span></div>
+      <div><span style="color:#7c3aed;">duration_minutes</span> <span style="color:#06b6d4;">INTEGER</span> <span style="color:#888;">-- for calls/meetings</span></div>
+      <div><span style="color:#7c3aed;">occurred_at</span> <span style="color:#06b6d4;">TIMESTAMPTZ NOT NULL DEFAULT NOW()</span></div>
+      <div><span style="color:#7c3aed;">created_at</span> <span style="color:#06b6d4;">TIMESTAMPTZ NOT NULL DEFAULT NOW()</span></div>
+      <div style="margin:8px 0;border-top:1px solid #333;padding-top:8px;">
+        <span style="color:#06b6d4;">INDEX ON (user_id, occurred_at DESC)</span> <span style="color:#888;">-- rep activity feed</span><br/>
+        <span style="color:#06b6d4;">INDEX ON (deal_id, occurred_at DESC)</span> <span style="color:#888;">-- deal timeline</span><br/>
+        <span style="color:#06b6d4;">INDEX ON (contact_id, occurred_at DESC)</span> <span style="color:#888;">-- contact history</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div style="margin-top:24px;padding:16px;background:#1a1a2e;border-radius:8px;border-left:3px solid #f59e0b;">
+  <h3 style="margin-top:0;color:#f59e0b;">Edge Cases Handled</h3>
+  <ul style="color:#ccc;margin-bottom:0;">
+    <li><strong>Email dedup:</strong> <code>graph_message_id</code> is unique — same email synced twice is impossible. Learned from SyncHub's dedup key collision issue.</li>
+    <li><strong>Thread grouping:</strong> <code>graph_conversation_id</code> groups emails into threads. UI shows full thread history per deal/contact.</li>
+    <li><strong>Inbound email → task:</strong> When an inbound email matches a contact, the event bus emits <code>email.received</code> → task module creates a follow-up task on the rep's daily list.</li>
+    <li><strong>Contact dedup hard-block:</strong> Partial unique index on <code>email WHERE email IS NOT NULL</code> — DB-level enforcement. Contacts without email are allowed (site contacts with phone only).</li>
+    <li><strong>Fuzzy dedup:</strong> <code>normalized_name</code> generated column + <code>company_name</code> index lets the worker's background scan find "Bob Smith at Acme" vs "Robert Smith at ACME Inc." via Levenshtein.</li>
+    <li><strong>Touchpoint alerts:</strong> <code>first_outreach_completed = false</code> keeps surfacing the contact in the rep's task list until they make first contact. Trigger flips it when first activity is logged.</li>
+    <li><strong>Activity-based reporting:</strong> All activity types in one table with indexes on user/deal/contact + timestamp — powers the per-rep activity tracking (calls logged, emails sent, tasks completed) and activity drop detection.</li>
+    <li><strong>Email auto-association:</strong> Inbound emails matched to contacts by <code>from_address</code> → <code>contacts.email</code>. If contact has active deals, email auto-associates to the most recent active deal. Manual reassignment available.</li>
+  </ul>
+</div>

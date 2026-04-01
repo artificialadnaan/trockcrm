@@ -1,0 +1,199 @@
+<h2>Frontend — Pages, Routing & Layout</h2>
+<p class="subtitle">React + Vite + Tailwind + shadcn/ui — responsive desktop & mobile layout</p>
+
+<div class="section">
+  <h3>App Layout Structure</h3>
+  <div style="background:#0f172a;padding:20px;border-radius:12px;font-family:monospace;font-size:13px;color:#e0e0e0;">
+
+    <!-- Desktop Layout -->
+    <div style="color:#7c3aed;font-weight:bold;margin-bottom:8px;">Desktop Layout</div>
+    <div style="display:flex;border:2px solid #333;border-radius:8px;overflow:hidden;min-height:300px;">
+      <div style="width:220px;background:#1e293b;padding:12px;border-right:2px solid #333;">
+        <div style="color:#7c3aed;font-weight:bold;font-size:14px;margin-bottom:12px;">T ROCK CRM</div>
+        <div style="color:#06b6d4;font-size:12px;line-height:2.4;">
+          <div style="background:#7c3aed22;padding:2px 8px;border-radius:4px;border-left:3px solid #7c3aed;">Dashboard</div>
+          <div style="padding:2px 8px;">Pipeline</div>
+          <div style="padding:2px 8px;">Deals</div>
+          <div style="padding:2px 8px;">Contacts</div>
+          <div style="padding:2px 8px;">Email</div>
+          <div style="padding:2px 8px;">Tasks</div>
+          <div style="padding:2px 8px;">Files</div>
+          <div style="padding:2px 8px;">Reports</div>
+          <div style="padding:2px 8px;">Projects <span style="color:#888;font-size:10px;">(Procore)</span></div>
+          <div style="margin-top:12px;border-top:1px solid #333;padding-top:12px;">
+            <div style="color:#888;font-size:10px;margin-bottom:4px;">ADMIN</div>
+            <div style="padding:2px 8px;">Offices</div>
+            <div style="padding:2px 8px;">Users</div>
+            <div style="padding:2px 8px;">Pipeline Config</div>
+            <div style="padding:2px 8px;">Migration</div>
+          </div>
+          <div style="margin-top:12px;border-top:1px solid #333;padding-top:12px;">
+            <div style="color:#888;font-size:10px;">Office: Dallas ▼</div>
+          </div>
+        </div>
+      </div>
+      <div style="flex:1;padding:16px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #333;padding-bottom:8px;margin-bottom:12px;">
+          <div style="color:#ccc;font-size:14px;">Dashboard</div>
+          <div style="display:flex;gap:12px;align-items:center;">
+            <div style="color:#888;font-size:12px;">🔍 Search</div>
+            <div style="position:relative;color:#888;font-size:12px;">🔔 <span style="position:absolute;top:-4px;right:-6px;background:#ef4444;color:white;font-size:9px;border-radius:50%;width:14px;height:14px;display:flex;align-items:center;justify-content:center;">3</span></div>
+            <div style="color:#888;font-size:12px;">AQ</div>
+          </div>
+        </div>
+        <div style="color:#888;font-size:12px;">[Page Content Area]</div>
+      </div>
+    </div>
+
+    <!-- Mobile Layout -->
+    <div style="color:#7c3aed;font-weight:bold;margin:20px 0 8px;">Mobile Layout</div>
+    <div style="width:320px;border:2px solid #333;border-radius:8px;overflow:hidden;">
+      <div style="background:#1e293b;padding:8px 12px;display:flex;justify-content:space-between;align-items:center;">
+        <div style="color:#ccc;font-size:14px;">☰ &nbsp;T ROCK CRM</div>
+        <div style="display:flex;gap:8px;">
+          <span style="color:#888;font-size:12px;">🔔</span>
+          <span style="color:#888;font-size:12px;">AQ</span>
+        </div>
+      </div>
+      <div style="padding:12px;color:#888;font-size:12px;min-height:150px;">
+        [Page Content — full width, stacked layout]<br/><br/>
+        Hamburger menu → slide-out sidebar<br/>
+        Bottom nav for top 5: Dashboard, Pipeline, Tasks, Email, More
+      </div>
+      <div style="background:#1e293b;padding:8px;display:flex;justify-content:space-around;border-top:1px solid #333;">
+        <span style="color:#7c3aed;font-size:10px;text-align:center;">Home</span>
+        <span style="color:#888;font-size:10px;text-align:center;">Pipeline</span>
+        <span style="color:#888;font-size:10px;text-align:center;">Tasks</span>
+        <span style="color:#888;font-size:10px;text-align:center;">Email</span>
+        <span style="color:#888;font-size:10px;text-align:center;">More</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>Route Map</h3>
+  <div style="background:#0f172a;padding:20px;border-radius:12px;font-family:monospace;font-size:12px;color:#e0e0e0;line-height:2.4;">
+    <div style="color:#f59e0b;font-weight:bold;">Authentication</div>
+    <div style="padding-left:12px;">
+      <span style="color:#06b6d4;">/login</span> <span style="color:#888;">— MS Entra SSO redirect (dev: user picker)</span><br/>
+      <span style="color:#06b6d4;">/auth/callback</span> <span style="color:#888;">— OAuth callback handler</span>
+    </div>
+
+    <div style="color:#f59e0b;font-weight:bold;margin-top:12px;">Rep Views</div>
+    <div style="padding-left:12px;">
+      <span style="color:#06b6d4;">/</span> <span style="color:#888;">— Dashboard (my deals, my tasks, my metrics, follow-ups)</span><br/>
+      <span style="color:#06b6d4;">/pipeline</span> <span style="color:#888;">— Kanban board, drag deals between stages (with gate validation)</span><br/>
+      <span style="color:#06b6d4;">/deals</span> <span style="color:#888;">— Deal list with search, filter, sort, saved views</span><br/>
+      <span style="color:#06b6d4;">/deals/:id</span> <span style="color:#888;">— Deal detail: estimates, contacts, files, timeline, stage history, emails</span><br/>
+      <span style="color:#06b6d4;">/deals/:id/files</span> <span style="color:#888;">— File browser with virtual folders, upload, search</span><br/>
+      <span style="color:#06b6d4;">/deals/new</span> <span style="color:#888;">— Create deal form</span><br/>
+      <span style="color:#06b6d4;">/contacts</span> <span style="color:#888;">— Contact directory with search, filter by category</span><br/>
+      <span style="color:#06b6d4;">/contacts/:id</span> <span style="color:#888;">— Contact detail: deals, communication history, touchpoints, files</span><br/>
+      <span style="color:#06b6d4;">/email</span> <span style="color:#888;">— Email inbox (CRM-relevant emails only), compose, thread view</span><br/>
+      <span style="color:#06b6d4;">/email/compose</span> <span style="color:#888;">— Compose email (linked to deal/contact)</span><br/>
+      <span style="color:#06b6d4;">/tasks</span> <span style="color:#888;">— Daily task list, prioritized, filterable by type</span><br/>
+      <span style="color:#06b6d4;">/projects</span> <span style="color:#888;">— Personal Procore project board (assigned projects, filterable)</span><br/>
+      <span style="color:#06b6d4;">/reports</span> <span style="color:#888;">— Saved reports, custom report builder</span>
+    </div>
+
+    <div style="color:#f59e0b;font-weight:bold;margin-top:12px;">Director Views</div>
+    <div style="padding-left:12px;">
+      <span style="color:#06b6d4;">/director</span> <span style="color:#888;">— All reps at a glance: deals, activity, performance cards</span><br/>
+      <span style="color:#06b6d4;">/director/rep/:id</span> <span style="color:#888;">— Drill into rep: open deals, lost deals, activity feed, metrics</span><br/>
+      <span style="color:#06b6d4;">/director/approvals</span> <span style="color:#888;">— Pending approvals queue (stage gates, backward moves)</span><br/>
+      <span style="color:#06b6d4;">/director/pipeline</span> <span style="color:#888;">— Full pipeline with DD vs. true pipeline separation</span><br/>
+      <span style="color:#06b6d4;">/director/reports</span> <span style="color:#888;">— Locked company reports + MoM/QoQ/YoY charts</span>
+    </div>
+
+    <div style="color:#f59e0b;font-weight:bold;margin-top:12px;">Admin Views</div>
+    <div style="padding-left:12px;">
+      <span style="color:#06b6d4;">/admin/offices</span> <span style="color:#888;">— Office list, create/edit offices, schema provisioning</span><br/>
+      <span style="color:#06b6d4;">/admin/users</span> <span style="color:#888;">— User management, role assignment, office access</span><br/>
+      <span style="color:#06b6d4;">/admin/pipeline</span> <span style="color:#888;">— Pipeline stage configuration (requirements, thresholds, colors)</span><br/>
+      <span style="color:#06b6d4;">/admin/migration</span> <span style="color:#888;">— Migration dashboard: import runs, validation queue, promote</span><br/>
+      <span style="color:#06b6d4;">/admin/migration/deals</span> <span style="color:#888;">— Staged deals review: approve, reject, fix mappings</span><br/>
+      <span style="color:#06b6d4;">/admin/migration/contacts</span> <span style="color:#888;">— Staged contacts review: merge duplicates, fix categories</span><br/>
+      <span style="color:#06b6d4;">/admin/procore</span> <span style="color:#888;">— Procore sync status, conflict resolution, webhook log</span><br/>
+      <span style="color:#06b6d4;">/admin/audit</span> <span style="color:#888;">— Audit log viewer: filter by user, table, date range</span>
+    </div>
+
+    <div style="color:#f59e0b;font-weight:bold;margin-top:12px;">Shared Components</div>
+    <div style="padding-left:12px;">
+      <span style="color:#06b6d4;">/notifications</span> <span style="color:#888;">— Notification center (all alerts, mark read, deep links)</span><br/>
+      <span style="color:#06b6d4;">/search</span> <span style="color:#888;">— Global search: deals, contacts, files (full-text)</span><br/>
+      <span style="color:#06b6d4;">/settings</span> <span style="color:#888;">— User preferences, notification settings</span>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>Key Page Components</h3>
+  <div style="display:flex;gap:16px;flex-wrap:wrap;">
+
+    <div style="flex:1;min-width:280px;background:#1e293b;border-radius:8px;padding:16px;">
+      <div style="color:#7c3aed;font-weight:bold;margin-bottom:8px;">Deal Detail Page</div>
+      <div style="font-size:12px;color:#ccc;line-height:2;">
+        Header: deal name, stage badge, assigned rep<br/>
+        Tab bar: Overview | Files | Email | Timeline | History<br/>
+        <strong>Overview:</strong> estimates card, contacts list, property info, quick actions<br/>
+        <strong>Files:</strong> virtual folder browser, drag-drop upload, search, tags<br/>
+        <strong>Email:</strong> thread list for this deal, compose inline<br/>
+        <strong>Timeline:</strong> unified activity feed (calls, emails, notes, stage changes)<br/>
+        <strong>History:</strong> audit trail, stage change timeline with durations<br/>
+        Sidebar: stage advancement button with gate checklist
+      </div>
+    </div>
+
+    <div style="flex:1;min-width:280px;background:#1e293b;border-radius:8px;padding:16px;">
+      <div style="color:#7c3aed;font-weight:bold;margin-bottom:8px;">Pipeline (Kanban)</div>
+      <div style="font-size:12px;color:#ccc;line-height:2;">
+        Columns: DD | Estimating | Bid Sent | In Production | Close Out<br/>
+        Terminal columns (Won/Lost) as separate section below<br/>
+        Cards: deal name, value, rep avatar, days in stage, stale indicator<br/>
+        Drag to advance → gate validation modal<br/>
+        Drag backward → director override prompt<br/>
+        Toggle: DD vs. true pipeline totals in column headers<br/>
+        Filter: by rep, date range, value range, project type
+      </div>
+    </div>
+
+    <div style="flex:1;min-width:280px;background:#1e293b;border-radius:8px;padding:16px;">
+      <div style="color:#7c3aed;font-weight:bold;margin-bottom:8px;">Director Dashboard</div>
+      <div style="font-size:12px;color:#ccc;line-height:2;">
+        Rep performance cards: active deals, pipeline value, win rate, activity score<br/>
+        Click rep → drill-down with full detail<br/>
+        Charts: pipeline by stage (bar), win rate trend (line), activity by rep (bar)<br/>
+        MoM / QoQ / YoY toggles on all charts<br/>
+        Stale deal watchlist, activity drop alerts<br/>
+        Pending approvals badge
+      </div>
+    </div>
+
+    <div style="flex:1;min-width:280px;background:#1e293b;border-radius:8px;padding:16px;">
+      <div style="color:#7c3aed;font-weight:bold;margin-bottom:8px;">Task List</div>
+      <div style="font-size:12px;color:#ccc;line-height:2;">
+        Sections: Overdue | Today | Upcoming | Completed<br/>
+        Auto-prioritized: overdue first, then inbound emails, stale deals, follow-ups<br/>
+        Quick actions: complete, snooze, open deal, open contact<br/>
+        Filter by type: follow_up, stale_deal, inbound_email, approval, manual<br/>
+        Bulk complete, create manual task<br/>
+        Mobile: swipe gestures for complete/snooze
+      </div>
+    </div>
+  </div>
+</div>
+
+<div style="margin-top:24px;padding:16px;background:#1a1a2e;border-radius:8px;border-left:3px solid #f59e0b;">
+  <h3 style="margin-top:0;color:#f59e0b;">Frontend Design Decisions</h3>
+  <ul style="color:#ccc;margin-bottom:0;">
+    <li><strong>Role-based routing:</strong> Sidebar nav items and routes filtered by user role. Reps don't see admin/director sections. Directors see both rep and director views.</li>
+    <li><strong>Office switcher:</strong> Directors/admins see office dropdown in sidebar. Switching office changes the API context (different office JWT claim or header). Reps locked to their office.</li>
+    <li><strong>Global search:</strong> Command palette (Cmd+K) searches across deals, contacts, and files using PG full-text search. Results grouped by entity type.</li>
+    <li><strong>Notification bell:</strong> Badge count from SSE stream. Click opens notification center with deep links to relevant records.</li>
+    <li><strong>Mobile bottom nav:</strong> Top 5 actions always accessible. "More" expands to full nav. Touch targets minimum 44x44px per your guidelines.</li>
+    <li><strong>Charts:</strong> Recharts for all visualizations (per your stack conventions). Pie charts for pipeline distribution, bar charts for activity/performance, line charts for trends.</li>
+    <li><strong>Pipeline Kanban:</strong> Closed Won and Closed Lost are NOT drag columns — they're separate sections. Prevents accidental terminal stage drops.</li>
+    <li><strong>Lost deal modal:</strong> Triggered automatically when deal moves to Closed Lost. Reason dropdown + notes textarea. Cannot be dismissed without completing both fields.</li>
+  </ul>
+</div>

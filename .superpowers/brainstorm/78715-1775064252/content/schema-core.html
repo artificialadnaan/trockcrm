@@ -1,0 +1,90 @@
+<h2>Database Schema — Core Tables</h2>
+<p class="subtitle">Schema-per-office architecture: <code>public</code> schema for global data, <code>office_{slug}</code> schemas for tenant data. PG triggers on all audited tables.</p>
+
+<div class="section">
+  <h3>Global Schema (<code>public</code>)</h3>
+  <p>Shared across all offices — auth, config, office registry</p>
+
+  <div class="mockup">
+    <div class="mockup-header">public.offices</div>
+    <div class="mockup-body" style="font-family:monospace;font-size:13px;line-height:2;color:#e0e0e0;">
+      <div><span style="color:#7c3aed;">id</span> <span style="color:#06b6d4;">UUID PK DEFAULT gen_random_uuid()</span></div>
+      <div><span style="color:#7c3aed;">name</span> <span style="color:#06b6d4;">VARCHAR(255) NOT NULL</span> <span style="color:#888;">-- "Dallas", "Houston"</span></div>
+      <div><span style="color:#7c3aed;">slug</span> <span style="color:#06b6d4;">VARCHAR(100) UNIQUE NOT NULL</span> <span style="color:#888;">-- "dallas", "houston" (used for schema name)</span></div>
+      <div><span style="color:#7c3aed;">address</span> <span style="color:#06b6d4;">TEXT</span></div>
+      <div><span style="color:#7c3aed;">phone</span> <span style="color:#06b6d4;">VARCHAR(20)</span></div>
+      <div><span style="color:#7c3aed;">is_active</span> <span style="color:#06b6d4;">BOOLEAN DEFAULT true</span></div>
+      <div><span style="color:#7c3aed;">settings</span> <span style="color:#06b6d4;">JSONB DEFAULT '{}'</span> <span style="color:#888;">-- stale deal thresholds, notification prefs</span></div>
+      <div><span style="color:#7c3aed;">created_at</span> <span style="color:#06b6d4;">TIMESTAMPTZ NOT NULL DEFAULT NOW()</span></div>
+      <div><span style="color:#7c3aed;">updated_at</span> <span style="color:#06b6d4;">TIMESTAMPTZ NOT NULL DEFAULT NOW()</span></div>
+    </div>
+  </div>
+
+  <div class="mockup" style="margin-top:16px;">
+    <div class="mockup-header">public.users</div>
+    <div class="mockup-body" style="font-family:monospace;font-size:13px;line-height:2;color:#e0e0e0;">
+      <div><span style="color:#7c3aed;">id</span> <span style="color:#06b6d4;">UUID PK DEFAULT gen_random_uuid()</span></div>
+      <div><span style="color:#7c3aed;">email</span> <span style="color:#06b6d4;">VARCHAR(255) UNIQUE NOT NULL</span> <span style="color:#888;">-- MS Entra email</span></div>
+      <div><span style="color:#7c3aed;">display_name</span> <span style="color:#06b6d4;">VARCHAR(255) NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">azure_ad_id</span> <span style="color:#06b6d4;">VARCHAR(255) UNIQUE</span> <span style="color:#888;">-- from MS Entra token</span></div>
+      <div><span style="color:#7c3aed;">avatar_url</span> <span style="color:#06b6d4;">TEXT</span></div>
+      <div><span style="color:#7c3aed;">role</span> <span style="color:#06b6d4;">ENUM('admin','director','rep') NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">office_id</span> <span style="color:#06b6d4;">UUID FK → offices.id NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">is_active</span> <span style="color:#06b6d4;">BOOLEAN DEFAULT true</span></div>
+      <div><span style="color:#7c3aed;">notification_prefs</span> <span style="color:#06b6d4;">JSONB DEFAULT '{}'</span></div>
+      <div><span style="color:#7c3aed;">created_at</span> <span style="color:#06b6d4;">TIMESTAMPTZ NOT NULL DEFAULT NOW()</span></div>
+      <div><span style="color:#7c3aed;">updated_at</span> <span style="color:#06b6d4;">TIMESTAMPTZ NOT NULL DEFAULT NOW()</span></div>
+    </div>
+  </div>
+
+  <div class="mockup" style="margin-top:16px;">
+    <div class="mockup-header">public.user_office_access</div>
+    <div class="mockup-body" style="font-family:monospace;font-size:13px;line-height:2;color:#e0e0e0;">
+      <div><span style="color:#888;">-- Directors/admins who can access multiple offices</span></div>
+      <div><span style="color:#7c3aed;">id</span> <span style="color:#06b6d4;">UUID PK DEFAULT gen_random_uuid()</span></div>
+      <div><span style="color:#7c3aed;">user_id</span> <span style="color:#06b6d4;">UUID FK → users.id NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">office_id</span> <span style="color:#06b6d4;">UUID FK → offices.id NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">role_override</span> <span style="color:#06b6d4;">ENUM('admin','director','rep')</span> <span style="color:#888;">-- NULL = use user's default role</span></div>
+      <div><span style="color:#7c3aed;">UNIQUE(user_id, office_id)</span></div>
+    </div>
+  </div>
+
+  <div class="mockup" style="margin-top:16px;">
+    <div class="mockup-header">public.pipeline_stage_config</div>
+    <div class="mockup-body" style="font-family:monospace;font-size:13px;line-height:2;color:#e0e0e0;">
+      <div><span style="color:#888;">-- Defines allowed stages and their order, requirements, and stale thresholds</span></div>
+      <div><span style="color:#7c3aed;">id</span> <span style="color:#06b6d4;">UUID PK DEFAULT gen_random_uuid()</span></div>
+      <div><span style="color:#7c3aed;">name</span> <span style="color:#06b6d4;">VARCHAR(100) NOT NULL</span> <span style="color:#888;">-- "DD", "Estimating", "Bid Sent", etc.</span></div>
+      <div><span style="color:#7c3aed;">slug</span> <span style="color:#06b6d4;">VARCHAR(100) UNIQUE NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">display_order</span> <span style="color:#06b6d4;">INTEGER NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">is_active_pipeline</span> <span style="color:#06b6d4;">BOOLEAN DEFAULT true</span> <span style="color:#888;">-- false for DD (excluded from pipeline totals)</span></div>
+      <div><span style="color:#7c3aed;">is_terminal</span> <span style="color:#06b6d4;">BOOLEAN DEFAULT false</span> <span style="color:#888;">-- true for Closed Won, Closed Lost</span></div>
+      <div><span style="color:#7c3aed;">required_fields</span> <span style="color:#06b6d4;">JSONB DEFAULT '[]'</span> <span style="color:#888;">-- ["dd_estimate", "site_photos"] fields required to enter this stage</span></div>
+      <div><span style="color:#7c3aed;">required_documents</span> <span style="color:#06b6d4;">JSONB DEFAULT '[]'</span> <span style="color:#888;">-- ["rfp", "estimate"] document types required</span></div>
+      <div><span style="color:#7c3aed;">required_approvals</span> <span style="color:#06b6d4;">JSONB DEFAULT '[]'</span> <span style="color:#888;">-- ["director"] roles that must approve</span></div>
+      <div><span style="color:#7c3aed;">stale_threshold_days</span> <span style="color:#06b6d4;">INTEGER</span> <span style="color:#888;">-- NULL = no stale alert for this stage</span></div>
+      <div><span style="color:#7c3aed;">procore_stage_mapping</span> <span style="color:#06b6d4;">VARCHAR(100)</span> <span style="color:#888;">-- maps to Procore project status</span></div>
+      <div><span style="color:#7c3aed;">color</span> <span style="color:#06b6d4;">VARCHAR(7)</span> <span style="color:#888;">-- hex color for UI badges</span></div>
+    </div>
+  </div>
+
+  <div class="mockup" style="margin-top:16px;">
+    <div class="mockup-header">public.lost_deal_reasons</div>
+    <div class="mockup-body" style="font-family:monospace;font-size:13px;line-height:2;color:#e0e0e0;">
+      <div><span style="color:#7c3aed;">id</span> <span style="color:#06b6d4;">UUID PK DEFAULT gen_random_uuid()</span></div>
+      <div><span style="color:#7c3aed;">label</span> <span style="color:#06b6d4;">VARCHAR(255) NOT NULL</span> <span style="color:#888;">-- "Price", "Timing", "Went with competitor", etc.</span></div>
+      <div><span style="color:#7c3aed;">is_active</span> <span style="color:#06b6d4;">BOOLEAN DEFAULT true</span></div>
+      <div><span style="color:#7c3aed;">display_order</span> <span style="color:#06b6d4;">INTEGER NOT NULL</span></div>
+    </div>
+  </div>
+</div>
+
+<div style="margin-top:24px;padding:16px;background:#1a1a2e;border-radius:8px;border-left:3px solid #06b6d4;">
+  <h3 style="margin-top:0;color:#06b6d4;">Design Notes</h3>
+  <ul style="color:#ccc;margin-bottom:0;">
+    <li><strong>Users are global</strong> — a user belongs to a primary office but can access others via <code>user_office_access</code>. Admins see all offices.</li>
+    <li><strong>Pipeline config is global</strong> — all offices share the same stage definitions. Per-office stage customization is out of scope (SOW says "T Rock-specific stages").</li>
+    <li><strong>Settings JSONB</strong> — stale deal thresholds can be per-office (in <code>offices.settings</code>) or global (in <code>pipeline_stage_config.stale_threshold_days</code>). Per-office overrides win.</li>
+    <li><strong>Soft deletes</strong> — <code>is_active</code> flags instead of hard deletes. Audit trail requires we never lose records.</li>
+  </ul>
+</div>

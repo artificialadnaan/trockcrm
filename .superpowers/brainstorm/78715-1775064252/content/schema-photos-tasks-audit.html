@@ -1,0 +1,153 @@
+<h2>Database Schema — Photos, Tasks, Notifications & Audit</h2>
+<p class="subtitle">Per-office schema: file management, automated task system, real-time alerts, and field-level audit trail</p>
+
+<div class="section">
+  <h3>Photos & Documents</h3>
+
+  <div class="mockup">
+    <div class="mockup-header">office_{slug}.files</div>
+    <div class="mockup-body" style="font-family:monospace;font-size:13px;line-height:2;color:#e0e0e0;">
+      <div><span style="color:#888;">-- Unified table for photos, documents, contracts, RFPs, estimates</span></div>
+      <div><span style="color:#7c3aed;">id</span> <span style="color:#06b6d4;">UUID PK DEFAULT gen_random_uuid()</span></div>
+      <div><span style="color:#7c3aed;">category</span> <span style="color:#06b6d4;">ENUM('photo','document','contract','rfp','estimate','change_order','other') NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">filename</span> <span style="color:#06b6d4;">VARCHAR(500) NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">original_filename</span> <span style="color:#06b6d4;">VARCHAR(500) NOT NULL</span> <span style="color:#888;">-- user's original filename</span></div>
+      <div><span style="color:#7c3aed;">mime_type</span> <span style="color:#06b6d4;">VARCHAR(100) NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">file_size_bytes</span> <span style="color:#06b6d4;">BIGINT NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">r2_key</span> <span style="color:#06b6d4;">VARCHAR(1000) UNIQUE NOT NULL</span> <span style="color:#888;">-- Cloudflare R2 object key</span></div>
+      <div><span style="color:#7c3aed;">r2_bucket</span> <span style="color:#06b6d4;">VARCHAR(100) NOT NULL</span></div>
+      <div style="margin:8px 0;border-top:1px solid #333;padding-top:8px;color:#f59e0b;">-- Associations (polymorphic — at least one required)</div>
+      <div><span style="color:#7c3aed;">deal_id</span> <span style="color:#06b6d4;">UUID FK → deals.id</span></div>
+      <div><span style="color:#7c3aed;">contact_id</span> <span style="color:#06b6d4;">UUID FK → contacts.id</span></div>
+      <div><span style="color:#7c3aed;">procore_project_id</span> <span style="color:#06b6d4;">BIGINT</span> <span style="color:#888;">-- for project-level photos not tied to a deal</span></div>
+      <div style="margin:8px 0;border-top:1px solid #333;padding-top:8px;color:#f59e0b;">-- Metadata</div>
+      <div><span style="color:#7c3aed;">description</span> <span style="color:#06b6d4;">TEXT</span></div>
+      <div><span style="color:#7c3aed;">taken_at</span> <span style="color:#06b6d4;">TIMESTAMPTZ</span> <span style="color:#888;">-- photo timestamp (from EXIF or manual)</span></div>
+      <div><span style="color:#7c3aed;">uploaded_by</span> <span style="color:#06b6d4;">UUID FK → public.users.id NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">is_active</span> <span style="color:#06b6d4;">BOOLEAN DEFAULT true</span></div>
+      <div><span style="color:#7c3aed;">created_at</span> <span style="color:#06b6d4;">TIMESTAMPTZ NOT NULL DEFAULT NOW()</span></div>
+      <div style="margin:8px 0;border-top:1px solid #333;padding-top:8px;">
+        <span style="color:#06b6d4;">INDEX ON (deal_id, category, created_at DESC)</span> <span style="color:#888;">-- deal photo timeline</span><br/>
+        <span style="color:#06b6d4;">CHECK (deal_id IS NOT NULL OR contact_id IS NOT NULL OR procore_project_id IS NOT NULL)</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>Tasks & Alerts</h3>
+
+  <div class="mockup">
+    <div class="mockup-header">office_{slug}.tasks</div>
+    <div class="mockup-body" style="font-family:monospace;font-size:13px;line-height:2;color:#e0e0e0;">
+      <div><span style="color:#7c3aed;">id</span> <span style="color:#06b6d4;">UUID PK DEFAULT gen_random_uuid()</span></div>
+      <div><span style="color:#7c3aed;">title</span> <span style="color:#06b6d4;">VARCHAR(500) NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">description</span> <span style="color:#06b6d4;">TEXT</span></div>
+      <div><span style="color:#7c3aed;">type</span> <span style="color:#06b6d4;">ENUM('follow_up','stale_deal','inbound_email','approval_request','touchpoint','manual','system') NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">priority</span> <span style="color:#06b6d4;">ENUM('urgent','high','normal','low') DEFAULT 'normal'</span></div>
+      <div><span style="color:#7c3aed;">status</span> <span style="color:#06b6d4;">ENUM('pending','in_progress','completed','dismissed') DEFAULT 'pending'</span></div>
+      <div style="margin:8px 0;border-top:1px solid #333;padding-top:8px;color:#f59e0b;">-- Assignment</div>
+      <div><span style="color:#7c3aed;">assigned_to</span> <span style="color:#06b6d4;">UUID FK → public.users.id NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">created_by</span> <span style="color:#06b6d4;">UUID FK → public.users.id</span> <span style="color:#888;">-- NULL for system-generated tasks</span></div>
+      <div style="margin:8px 0;border-top:1px solid #333;padding-top:8px;color:#f59e0b;">-- Associations</div>
+      <div><span style="color:#7c3aed;">deal_id</span> <span style="color:#06b6d4;">UUID FK → deals.id</span></div>
+      <div><span style="color:#7c3aed;">contact_id</span> <span style="color:#06b6d4;">UUID FK → contacts.id</span></div>
+      <div><span style="color:#7c3aed;">email_id</span> <span style="color:#06b6d4;">UUID FK → emails.id</span> <span style="color:#888;">-- for inbound_email type</span></div>
+      <div style="margin:8px 0;border-top:1px solid #333;padding-top:8px;color:#f59e0b;">-- Scheduling</div>
+      <div><span style="color:#7c3aed;">due_date</span> <span style="color:#06b6d4;">DATE</span></div>
+      <div><span style="color:#7c3aed;">due_time</span> <span style="color:#06b6d4;">TIME</span></div>
+      <div><span style="color:#7c3aed;">remind_at</span> <span style="color:#06b6d4;">TIMESTAMPTZ</span></div>
+      <div><span style="color:#7c3aed;">completed_at</span> <span style="color:#06b6d4;">TIMESTAMPTZ</span></div>
+      <div><span style="color:#7c3aed;">is_overdue</span> <span style="color:#06b6d4;">BOOLEAN GENERATED ALWAYS AS (due_date < CURRENT_DATE AND status IN ('pending','in_progress')) STORED</span></div>
+      <div><span style="color:#7c3aed;">created_at</span> <span style="color:#06b6d4;">TIMESTAMPTZ NOT NULL DEFAULT NOW()</span></div>
+      <div><span style="color:#7c3aed;">updated_at</span> <span style="color:#06b6d4;">TIMESTAMPTZ NOT NULL DEFAULT NOW()</span></div>
+      <div style="margin:8px 0;border-top:1px solid #333;padding-top:8px;">
+        <span style="color:#06b6d4;">INDEX ON (assigned_to, status, due_date)</span> <span style="color:#888;">-- daily task list query</span><br/>
+        <span style="color:#06b6d4;">INDEX ON (assigned_to, status, priority)</span> <span style="color:#888;">-- prioritized view</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="mockup" style="margin-top:16px;">
+    <div class="mockup-header">office_{slug}.notifications</div>
+    <div class="mockup-body" style="font-family:monospace;font-size:13px;line-height:2;color:#e0e0e0;">
+      <div><span style="color:#888;">-- SSE-delivered notifications, persisted for notification center</span></div>
+      <div><span style="color:#7c3aed;">id</span> <span style="color:#06b6d4;">UUID PK DEFAULT gen_random_uuid()</span></div>
+      <div><span style="color:#7c3aed;">user_id</span> <span style="color:#06b6d4;">UUID FK → public.users.id NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">type</span> <span style="color:#06b6d4;">ENUM('stale_deal','inbound_email','task_assigned','approval_needed','activity_drop','deal_won','deal_lost','stage_change','system') NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">title</span> <span style="color:#06b6d4;">VARCHAR(500) NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">body</span> <span style="color:#06b6d4;">TEXT</span></div>
+      <div><span style="color:#7c3aed;">link</span> <span style="color:#06b6d4;">VARCHAR(1000)</span> <span style="color:#888;">-- deep link to relevant CRM page</span></div>
+      <div><span style="color:#7c3aed;">is_read</span> <span style="color:#06b6d4;">BOOLEAN DEFAULT false</span></div>
+      <div><span style="color:#7c3aed;">read_at</span> <span style="color:#06b6d4;">TIMESTAMPTZ</span></div>
+      <div><span style="color:#7c3aed;">created_at</span> <span style="color:#06b6d4;">TIMESTAMPTZ NOT NULL DEFAULT NOW()</span></div>
+      <div style="margin:8px 0;border-top:1px solid #333;padding-top:8px;">
+        <span style="color:#06b6d4;">INDEX ON (user_id, is_read, created_at DESC)</span> <span style="color:#888;">-- unread notifications query</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>Audit Trail</h3>
+
+  <div class="mockup">
+    <div class="mockup-header">office_{slug}.audit_log</div>
+    <div class="mockup-body" style="font-family:monospace;font-size:13px;line-height:2;color:#e0e0e0;">
+      <div><span style="color:#888;">-- Written by PG triggers on all audited tables. APPEND-ONLY — no updates or deletes.</span></div>
+      <div><span style="color:#7c3aed;">id</span> <span style="color:#06b6d4;">BIGSERIAL PK</span> <span style="color:#888;">-- bigint for high volume</span></div>
+      <div><span style="color:#7c3aed;">table_name</span> <span style="color:#06b6d4;">VARCHAR(100) NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">record_id</span> <span style="color:#06b6d4;">UUID NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">action</span> <span style="color:#06b6d4;">ENUM('insert','update','delete') NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">changed_by</span> <span style="color:#06b6d4;">UUID</span> <span style="color:#888;">-- set via SET app.current_user_id before queries</span></div>
+      <div><span style="color:#7c3aed;">changes</span> <span style="color:#06b6d4;">JSONB NOT NULL</span> <span style="color:#888;">-- { "field": { "old": "X", "new": "Y" } } for updates</span></div>
+      <div><span style="color:#7c3aed;">full_row</span> <span style="color:#06b6d4;">JSONB</span> <span style="color:#888;">-- full row snapshot on insert/delete</span></div>
+      <div><span style="color:#7c3aed;">ip_address</span> <span style="color:#06b6d4;">INET</span></div>
+      <div><span style="color:#7c3aed;">user_agent</span> <span style="color:#06b6d4;">VARCHAR(500)</span></div>
+      <div><span style="color:#7c3aed;">created_at</span> <span style="color:#06b6d4;">TIMESTAMPTZ NOT NULL DEFAULT NOW()</span></div>
+      <div style="margin:8px 0;border-top:1px solid #333;padding-top:8px;">
+        <span style="color:#06b6d4;">INDEX ON (table_name, record_id, created_at DESC)</span> <span style="color:#888;">-- record history</span><br/>
+        <span style="color:#06b6d4;">INDEX ON (changed_by, created_at DESC)</span> <span style="color:#888;">-- user activity audit</span><br/>
+        <span style="color:#06b6d4;">INDEX ON (created_at)</span> <span style="color:#888;">-- time-based queries, partition candidate</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>Reporting & Saved Filters</h3>
+
+  <div class="mockup">
+    <div class="mockup-header">public.saved_reports</div>
+    <div class="mockup-body" style="font-family:monospace;font-size:13px;line-height:2;color:#e0e0e0;">
+      <div><span style="color:#888;">-- Global table: locked company reports + user custom reports</span></div>
+      <div><span style="color:#7c3aed;">id</span> <span style="color:#06b6d4;">UUID PK DEFAULT gen_random_uuid()</span></div>
+      <div><span style="color:#7c3aed;">name</span> <span style="color:#06b6d4;">VARCHAR(255) NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">entity</span> <span style="color:#06b6d4;">ENUM('deals','contacts','activities','tasks') NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">config</span> <span style="color:#06b6d4;">JSONB NOT NULL</span> <span style="color:#888;">-- { filters: [], columns: [], sort: {}, chart_type: "" }</span></div>
+      <div><span style="color:#7c3aed;">is_locked</span> <span style="color:#06b6d4;">BOOLEAN DEFAULT false</span> <span style="color:#888;">-- true = company-wide preset, users can't edit</span></div>
+      <div><span style="color:#7c3aed;">is_default</span> <span style="color:#06b6d4;">BOOLEAN DEFAULT false</span> <span style="color:#888;">-- shows on dashboard by default</span></div>
+      <div><span style="color:#7c3aed;">created_by</span> <span style="color:#06b6d4;">UUID FK → public.users.id</span> <span style="color:#888;">-- NULL for system presets</span></div>
+      <div><span style="color:#7c3aed;">office_id</span> <span style="color:#06b6d4;">UUID FK → public.offices.id</span> <span style="color:#888;">-- NULL = available to all offices</span></div>
+      <div><span style="color:#7c3aed;">visibility</span> <span style="color:#06b6d4;">ENUM('private','office','company') DEFAULT 'private'</span></div>
+      <div><span style="color:#7c3aed;">created_at</span> <span style="color:#06b6d4;">TIMESTAMPTZ NOT NULL DEFAULT NOW()</span></div>
+      <div><span style="color:#7c3aed;">updated_at</span> <span style="color:#06b6d4;">TIMESTAMPTZ NOT NULL DEFAULT NOW()</span></div>
+    </div>
+  </div>
+</div>
+
+<div style="margin-top:24px;padding:16px;background:#1a1a2e;border-radius:8px;border-left:3px solid #f59e0b;">
+  <h3 style="margin-top:0;color:#f59e0b;">Edge Cases Handled</h3>
+  <ul style="color:#ccc;margin-bottom:0;">
+    <li><strong>Photo timeline ordering:</strong> <code>taken_at</code> (EXIF timestamp) used for chronological display, falls back to <code>created_at</code> if no EXIF data</li>
+    <li><strong>File orphan prevention:</strong> CHECK constraint requires at least one association (deal, contact, or procore project). No floating files.</li>
+    <li><strong>Cross-team photo sharing:</strong> File is uploaded once, associated to a deal. Sales, estimating, and PM all see it via the deal record — SOW requirement met without duplication.</li>
+    <li><strong>R2 key uniqueness:</strong> Keys use <code>{office_slug}/{entity}/{id}/{uuid}-{original_filename}</code> pattern — globally unique, human-readable in R2 console.</li>
+    <li><strong>Task auto-generation:</strong> Worker's daily cron generates tasks by scanning: overdue follow-ups (deals with last_activity_at > threshold), inbound emails (unprocessed), stale deals (stage_entered_at > threshold). Each task type has its own priority weighting.</li>
+    <li><strong>is_overdue generated column:</strong> Postgres computes this — no application logic needed. Task list queries filter on it directly.</li>
+    <li><strong>Audit append-only:</strong> No UPDATE or DELETE grants on audit_log. PG trigger writes only. Partitionable by <code>created_at</code> for long-term storage.</li>
+    <li><strong>Audit user tracking:</strong> <code>SET LOCAL app.current_user_id = '...'</code> in every transaction. PG trigger reads <code>current_setting('app.current_user_id')</code>. Middleware sets this automatically.</li>
+    <li><strong>Saved reports isolation:</strong> Locked reports (is_locked=true) can't be modified by users. Custom reports are private by default, can be shared to office or company level.</li>
+    <li><strong>Report config JSON:</strong> Structured as <code>{ filters, columns, sort, chart_type }</code> — same shape scales to a visual query builder in the future.</li>
+  </ul>
+</div>

@@ -1,0 +1,125 @@
+<h2>Enhanced File Organization & Searchability</h2>
+<p class="subtitle">Updated <code>files</code> table with tagging, folder structure, full-text search, and naming conventions</p>
+
+<div class="section">
+  <div class="mockup">
+    <div class="mockup-header">office_{slug}.files (enhanced)</div>
+    <div class="mockup-body" style="font-family:monospace;font-size:13px;line-height:2;color:#e0e0e0;">
+      <div><span style="color:#7c3aed;">id</span> <span style="color:#06b6d4;">UUID PK DEFAULT gen_random_uuid()</span></div>
+      <div style="margin:8px 0;border-top:1px solid #333;padding-top:8px;color:#f59e0b;">-- Classification & Organization</div>
+      <div><span style="color:#7c3aed;">category</span> <span style="color:#06b6d4;">ENUM('photo','contract','rfp','estimate','change_order','proposal','permit','inspection','correspondence','insurance','warranty','closeout','other') NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">subcategory</span> <span style="color:#06b6d4;">VARCHAR(100)</span> <span style="color:#888;">-- "Site Visit", "Progress", "Final Walkthrough", "Damage", etc.</span></div>
+      <div><span style="color:#7c3aed;">folder_path</span> <span style="color:#06b6d4;">VARCHAR(1000)</span> <span style="color:#888;">-- virtual folder: "Estimates/Revisions" or "Photos/Site Visits/2026-04"</span></div>
+      <div><span style="color:#7c3aed;">tags</span> <span style="color:#06b6d4;">TEXT[] DEFAULT '{}'</span> <span style="color:#888;">-- ["exterior", "roof", "before-photo", "client-approved"]</span></div>
+      <div><span style="color:#7c3aed;">display_name</span> <span style="color:#06b6d4;">VARCHAR(500) NOT NULL</span> <span style="color:#888;">-- human-readable name, auto-generated or user-set</span></div>
+      <div style="margin:8px 0;border-top:1px solid #333;padding-top:8px;color:#f59e0b;">-- Naming Convention (auto-generated)</div>
+      <div><span style="color:#7c3aed;">system_filename</span> <span style="color:#06b6d4;">VARCHAR(500) NOT NULL</span> <span style="color:#888;">-- "{DealNumber}_{Category}_{Date}_{Seq}.{ext}"</span></div>
+      <div><span style="color:#7c3aed;">original_filename</span> <span style="color:#06b6d4;">VARCHAR(500) NOT NULL</span> <span style="color:#888;">-- what the user uploaded</span></div>
+      <div style="margin:8px 0;border-top:1px solid #333;padding-top:8px;color:#f59e0b;">-- File Details</div>
+      <div><span style="color:#7c3aed;">mime_type</span> <span style="color:#06b6d4;">VARCHAR(100) NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">file_size_bytes</span> <span style="color:#06b6d4;">BIGINT NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">file_extension</span> <span style="color:#06b6d4;">VARCHAR(20) NOT NULL</span> <span style="color:#888;">-- ".pdf", ".jpg", ".xlsx"</span></div>
+      <div><span style="color:#7c3aed;">r2_key</span> <span style="color:#06b6d4;">VARCHAR(1000) UNIQUE NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">r2_bucket</span> <span style="color:#06b6d4;">VARCHAR(100) NOT NULL</span></div>
+      <div style="margin:8px 0;border-top:1px solid #333;padding-top:8px;color:#f59e0b;">-- Associations</div>
+      <div><span style="color:#7c3aed;">deal_id</span> <span style="color:#06b6d4;">UUID FK → deals.id</span></div>
+      <div><span style="color:#7c3aed;">contact_id</span> <span style="color:#06b6d4;">UUID FK → contacts.id</span></div>
+      <div><span style="color:#7c3aed;">procore_project_id</span> <span style="color:#06b6d4;">BIGINT</span></div>
+      <div><span style="color:#7c3aed;">change_order_id</span> <span style="color:#06b6d4;">UUID FK → change_orders.id</span> <span style="color:#888;">-- for CO-specific docs</span></div>
+      <div style="margin:8px 0;border-top:1px solid #333;padding-top:8px;color:#f59e0b;">-- Metadata & Search</div>
+      <div><span style="color:#7c3aed;">description</span> <span style="color:#06b6d4;">TEXT</span></div>
+      <div><span style="color:#7c3aed;">notes</span> <span style="color:#06b6d4;">TEXT</span> <span style="color:#888;">-- internal notes about this file</span></div>
+      <div><span style="color:#7c3aed;">version</span> <span style="color:#06b6d4;">INTEGER DEFAULT 1</span> <span style="color:#888;">-- for revised documents (Estimate v1, v2, v3)</span></div>
+      <div><span style="color:#7c3aed;">parent_file_id</span> <span style="color:#06b6d4;">UUID FK → files.id</span> <span style="color:#888;">-- links revisions to original</span></div>
+      <div><span style="color:#7c3aed;">taken_at</span> <span style="color:#06b6d4;">TIMESTAMPTZ</span> <span style="color:#888;">-- photo EXIF timestamp</span></div>
+      <div><span style="color:#7c3aed;">geo_lat</span> <span style="color:#06b6d4;">NUMERIC(10,7)</span> <span style="color:#888;">-- photo GPS from EXIF</span></div>
+      <div><span style="color:#7c3aed;">geo_lng</span> <span style="color:#06b6d4;">NUMERIC(10,7)</span></div>
+      <div style="margin:8px 0;border-top:1px solid #333;padding-top:8px;color:#f59e0b;">-- Full-Text Search</div>
+      <div><span style="color:#7c3aed;">search_vector</span> <span style="color:#06b6d4;">TSVECTOR GENERATED ALWAYS AS (</span></div>
+      <div style="padding-left:20px;"><span style="color:#06b6d4;">setweight(to_tsvector('english', COALESCE(display_name, '')), 'A') ||</span></div>
+      <div style="padding-left:20px;"><span style="color:#06b6d4;">setweight(to_tsvector('english', COALESCE(description, '')), 'B') ||</span></div>
+      <div style="padding-left:20px;"><span style="color:#06b6d4;">setweight(to_tsvector('english', COALESCE(notes, '')), 'C') ||</span></div>
+      <div style="padding-left:20px;"><span style="color:#06b6d4;">setweight(to_tsvector('english', COALESCE(array_to_string(tags, ' '), '')), 'B')</span></div>
+      <div><span style="color:#06b6d4;">) STORED</span></div>
+      <div style="margin:8px 0;border-top:1px solid #333;padding-top:8px;color:#f59e0b;">-- Standard</div>
+      <div><span style="color:#7c3aed;">uploaded_by</span> <span style="color:#06b6d4;">UUID FK → public.users.id NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">is_active</span> <span style="color:#06b6d4;">BOOLEAN DEFAULT true</span></div>
+      <div><span style="color:#7c3aed;">created_at</span> <span style="color:#06b6d4;">TIMESTAMPTZ NOT NULL DEFAULT NOW()</span></div>
+      <div><span style="color:#7c3aed;">updated_at</span> <span style="color:#06b6d4;">TIMESTAMPTZ NOT NULL DEFAULT NOW()</span></div>
+      <div style="margin:8px 0;border-top:1px solid #333;padding-top:8px;">
+        <span style="color:#06b6d4;">INDEX gin ON (search_vector)</span> <span style="color:#888;">-- full-text search</span><br/>
+        <span style="color:#06b6d4;">INDEX gin ON (tags)</span> <span style="color:#888;">-- tag filtering</span><br/>
+        <span style="color:#06b6d4;">INDEX ON (deal_id, category, created_at DESC)</span> <span style="color:#888;">-- deal file browser</span><br/>
+        <span style="color:#06b6d4;">INDEX ON (folder_path, display_name)</span> <span style="color:#888;">-- folder navigation</span><br/>
+        <span style="color:#06b6d4;">INDEX ON (category, file_extension)</span> <span style="color:#888;">-- filter by type</span><br/>
+        <span style="color:#06b6d4;">CHECK (deal_id IS NOT NULL OR contact_id IS NOT NULL OR procore_project_id IS NOT NULL)</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>Auto-Naming Convention</h3>
+  <div style="background:#1a1a2e;padding:16px;border-radius:8px;font-size:14px;line-height:2.2;color:#e0e0e0;">
+    <div style="color:#f59e0b;font-weight:bold;margin-bottom:8px;">System generates <code>system_filename</code> on upload:</div>
+    <div><span style="color:#06b6d4;">Pattern:</span> <code>{DealNumber}_{Category}_{YYYY-MM-DD}_{Seq}.{ext}</code></div>
+    <div style="margin:12px 0;border-top:1px solid #333;padding-top:12px;">
+      <div style="color:#888;">Examples:</div>
+      <div><code style="color:#7c3aed;">TR-2026-0142_Estimate_2026-04-15_001.pdf</code></div>
+      <div><code style="color:#7c3aed;">TR-2026-0142_Photo_2026-04-15_001.jpg</code></div>
+      <div><code style="color:#7c3aed;">TR-2026-0142_Photo_2026-04-15_002.jpg</code></div>
+      <div><code style="color:#7c3aed;">TR-2026-0142_Contract_2026-04-20_001.pdf</code></div>
+      <div><code style="color:#7c3aed;">TR-2026-0142_ChangeOrder_2026-05-01_001.pdf</code></div>
+      <div><code style="color:#7c3aed;">TR-2026-0142_RFP_2026-03-28_001.pdf</code></div>
+      <div><code style="color:#7c3aed;">TR-2026-0142_Closeout_2026-06-15_001.pdf</code></div>
+    </div>
+    <div style="margin:12px 0;border-top:1px solid #333;padding-top:12px;">
+      <div style="color:#888;">R2 key structure (mirrored folder hierarchy):</div>
+      <div><code style="color:#06b6d4;">office_dallas/deals/TR-2026-0142/photos/TR-2026-0142_Photo_2026-04-15_001.jpg</code></div>
+      <div><code style="color:#06b6d4;">office_dallas/deals/TR-2026-0142/estimates/TR-2026-0142_Estimate_2026-04-15_001.pdf</code></div>
+      <div><code style="color:#06b6d4;">office_dallas/deals/TR-2026-0142/contracts/TR-2026-0142_Contract_2026-04-20_001.pdf</code></div>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>Virtual Folder Structure (per deal)</h3>
+  <div style="background:#1a1a2e;padding:16px;border-radius:8px;font-family:monospace;font-size:13px;line-height:2;color:#e0e0e0;">
+    <div style="color:#7c3aed;font-weight:bold;">TR-2026-0142 — Acme Office Renovation</div>
+    <div style="padding-left:16px;">
+      <div style="color:#06b6d4;">Photos/</div>
+      <div style="padding-left:20px;color:#888;">
+        Site Visits/<br/>
+        Progress/<br/>
+        Final Walkthrough/<br/>
+        Damage/
+      </div>
+      <div style="color:#06b6d4;">Estimates/</div>
+      <div style="padding-left:20px;color:#888;">
+        DD Estimate/<br/>
+        Bid Estimate/<br/>
+        Revisions/
+      </div>
+      <div style="color:#06b6d4;">Contracts/</div>
+      <div style="color:#06b6d4;">RFPs/</div>
+      <div style="color:#06b6d4;">Change Orders/</div>
+      <div style="color:#06b6d4;">Permits & Inspections/</div>
+      <div style="color:#06b6d4;">Correspondence/</div>
+      <div style="color:#06b6d4;">Closeout/</div>
+    </div>
+  </div>
+</div>
+
+<div style="margin-top:24px;padding:16px;background:#1a1a2e;border-radius:8px;border-left:3px solid #f59e0b;">
+  <h3 style="margin-top:0;color:#f59e0b;">Search & Organization Features</h3>
+  <ul style="color:#ccc;margin-bottom:0;">
+    <li><strong>Full-text search:</strong> PG <code>tsvector</code> with weighted fields — display name (A), description + tags (B), notes (C). Search "roof damage exterior" finds relevant photos instantly.</li>
+    <li><strong>Tag system:</strong> Freeform tags with GIN index. Filter by tags across deals. Suggest existing tags on upload for consistency.</li>
+    <li><strong>Virtual folders:</strong> <code>folder_path</code> creates a navigable hierarchy without physical directories. Default folders auto-created per deal, custom folders allowed.</li>
+    <li><strong>Version tracking:</strong> <code>parent_file_id</code> + <code>version</code> chains document revisions. "Estimate v3" links back to v1 and v2. UI shows latest by default with version history expandable.</li>
+    <li><strong>Auto-naming:</strong> Consistent <code>{DealNumber}_{Category}_{Date}_{Seq}</code> pattern. Original filename preserved separately. Downloadable files use system name for consistency across the team.</li>
+    <li><strong>R2 key hierarchy:</strong> Mirrors the virtual folder structure. Browsable in Cloudflare R2 console if needed. Office-scoped at the top level.</li>
+    <li><strong>EXIF extraction:</strong> GPS coordinates and timestamps pulled from photo metadata on upload. Powers the photo timeline and potential future map views.</li>
+    <li><strong>Category-specific filters:</strong> "Show me all contracts across all deals" or "All site visit photos from March 2026" — indexed for fast queries.</li>
+  </ul>
+</div>

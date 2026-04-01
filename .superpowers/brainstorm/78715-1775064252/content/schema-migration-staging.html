@@ -1,0 +1,158 @@
+<h2>Database Schema — Migration Staging & Procore Sync</h2>
+<p class="subtitle">Staging tables for HubSpot data migration validation + Procore sync state tracking</p>
+
+<div class="section">
+  <h3>HubSpot Migration Staging</h3>
+  <p>These live in a dedicated <code>migration</code> schema — completely separate from live data. Dropped after go-live validation is complete.</p>
+
+  <div class="mockup">
+    <div class="mockup-header">migration.staged_deals</div>
+    <div class="mockup-body" style="font-family:monospace;font-size:13px;line-height:2;color:#e0e0e0;">
+      <div><span style="color:#7c3aed;">id</span> <span style="color:#06b6d4;">UUID PK DEFAULT gen_random_uuid()</span></div>
+      <div><span style="color:#7c3aed;">hubspot_deal_id</span> <span style="color:#06b6d4;">VARCHAR(50) UNIQUE NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">raw_data</span> <span style="color:#06b6d4;">JSONB NOT NULL</span> <span style="color:#888;">-- full HubSpot API response preserved</span></div>
+      <div style="margin:8px 0;border-top:1px solid #333;padding-top:8px;color:#f59e0b;">-- Mapped Fields (transformed to CRM schema shape)</div>
+      <div><span style="color:#7c3aed;">mapped_name</span> <span style="color:#06b6d4;">VARCHAR(500)</span></div>
+      <div><span style="color:#7c3aed;">mapped_stage</span> <span style="color:#06b6d4;">VARCHAR(100)</span></div>
+      <div><span style="color:#7c3aed;">mapped_rep_email</span> <span style="color:#06b6d4;">VARCHAR(255)</span></div>
+      <div><span style="color:#7c3aed;">mapped_amount</span> <span style="color:#06b6d4;">NUMERIC(14,2)</span></div>
+      <div><span style="color:#7c3aed;">mapped_close_date</span> <span style="color:#06b6d4;">DATE</span></div>
+      <div><span style="color:#7c3aed;">mapped_source</span> <span style="color:#06b6d4;">VARCHAR(100)</span></div>
+      <div style="margin:8px 0;border-top:1px solid #333;padding-top:8px;color:#f59e0b;">-- Validation State</div>
+      <div><span style="color:#7c3aed;">validation_status</span> <span style="color:#06b6d4;">ENUM('pending','valid','invalid','needs_review','approved','rejected') DEFAULT 'pending'</span></div>
+      <div><span style="color:#7c3aed;">validation_errors</span> <span style="color:#06b6d4;">JSONB DEFAULT '[]'</span> <span style="color:#888;">-- [{ "field": "stage", "error": "Unknown stage: Negotiation" }]</span></div>
+      <div><span style="color:#7c3aed;">validation_warnings</span> <span style="color:#06b6d4;">JSONB DEFAULT '[]'</span> <span style="color:#888;">-- [{ "field": "amount", "warning": "Amount is $0" }]</span></div>
+      <div><span style="color:#7c3aed;">reviewed_by</span> <span style="color:#06b6d4;">UUID FK → public.users.id</span></div>
+      <div><span style="color:#7c3aed;">review_notes</span> <span style="color:#06b6d4;">TEXT</span></div>
+      <div><span style="color:#7c3aed;">promoted_at</span> <span style="color:#06b6d4;">TIMESTAMPTZ</span> <span style="color:#888;">-- NULL until promoted to live</span></div>
+      <div><span style="color:#7c3aed;">promoted_deal_id</span> <span style="color:#06b6d4;">UUID</span> <span style="color:#888;">-- FK to live deal after promotion</span></div>
+      <div><span style="color:#7c3aed;">created_at</span> <span style="color:#06b6d4;">TIMESTAMPTZ NOT NULL DEFAULT NOW()</span></div>
+    </div>
+  </div>
+
+  <div class="mockup" style="margin-top:16px;">
+    <div class="mockup-header">migration.staged_contacts</div>
+    <div class="mockup-body" style="font-family:monospace;font-size:13px;line-height:2;color:#e0e0e0;">
+      <div><span style="color:#7c3aed;">id</span> <span style="color:#06b6d4;">UUID PK DEFAULT gen_random_uuid()</span></div>
+      <div><span style="color:#7c3aed;">hubspot_contact_id</span> <span style="color:#06b6d4;">VARCHAR(50) UNIQUE NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">raw_data</span> <span style="color:#06b6d4;">JSONB NOT NULL</span></div>
+      <div style="margin:8px 0;border-top:1px solid #333;padding-top:8px;color:#f59e0b;">-- Mapped Fields</div>
+      <div><span style="color:#7c3aed;">mapped_first_name</span> <span style="color:#06b6d4;">VARCHAR(255)</span></div>
+      <div><span style="color:#7c3aed;">mapped_last_name</span> <span style="color:#06b6d4;">VARCHAR(255)</span></div>
+      <div><span style="color:#7c3aed;">mapped_email</span> <span style="color:#06b6d4;">VARCHAR(255)</span></div>
+      <div><span style="color:#7c3aed;">mapped_phone</span> <span style="color:#06b6d4;">VARCHAR(20)</span></div>
+      <div><span style="color:#7c3aed;">mapped_company</span> <span style="color:#06b6d4;">VARCHAR(500)</span></div>
+      <div><span style="color:#7c3aed;">mapped_category</span> <span style="color:#06b6d4;">VARCHAR(100)</span></div>
+      <div style="margin:8px 0;border-top:1px solid #333;padding-top:8px;color:#f59e0b;">-- Dedup Detection</div>
+      <div><span style="color:#7c3aed;">duplicate_of_staged_id</span> <span style="color:#06b6d4;">UUID FK → staged_contacts.id</span> <span style="color:#888;">-- links to first occurrence</span></div>
+      <div><span style="color:#7c3aed;">duplicate_of_live_id</span> <span style="color:#06b6d4;">UUID</span> <span style="color:#888;">-- if matches existing CRM contact</span></div>
+      <div><span style="color:#7c3aed;">duplicate_confidence</span> <span style="color:#06b6d4;">NUMERIC(3,2)</span></div>
+      <div style="margin:8px 0;border-top:1px solid #333;padding-top:8px;color:#f59e0b;">-- Validation State</div>
+      <div><span style="color:#7c3aed;">validation_status</span> <span style="color:#06b6d4;">ENUM('pending','valid','invalid','duplicate','needs_review','approved','rejected','merged') DEFAULT 'pending'</span></div>
+      <div><span style="color:#7c3aed;">validation_errors</span> <span style="color:#06b6d4;">JSONB DEFAULT '[]'</span></div>
+      <div><span style="color:#7c3aed;">validation_warnings</span> <span style="color:#06b6d4;">JSONB DEFAULT '[]'</span></div>
+      <div><span style="color:#7c3aed;">reviewed_by</span> <span style="color:#06b6d4;">UUID FK → public.users.id</span></div>
+      <div><span style="color:#7c3aed;">merge_target_id</span> <span style="color:#06b6d4;">UUID</span> <span style="color:#888;">-- which contact to merge into</span></div>
+      <div><span style="color:#7c3aed;">promoted_at</span> <span style="color:#06b6d4;">TIMESTAMPTZ</span></div>
+      <div><span style="color:#7c3aed;">promoted_contact_id</span> <span style="color:#06b6d4;">UUID</span></div>
+      <div><span style="color:#7c3aed;">created_at</span> <span style="color:#06b6d4;">TIMESTAMPTZ NOT NULL DEFAULT NOW()</span></div>
+    </div>
+  </div>
+
+  <div class="mockup" style="margin-top:16px;">
+    <div class="mockup-header">migration.staged_activities</div>
+    <div class="mockup-body" style="font-family:monospace;font-size:13px;line-height:2;color:#e0e0e0;">
+      <div><span style="color:#7c3aed;">id</span> <span style="color:#06b6d4;">UUID PK DEFAULT gen_random_uuid()</span></div>
+      <div><span style="color:#7c3aed;">hubspot_activity_id</span> <span style="color:#06b6d4;">VARCHAR(50) UNIQUE NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">hubspot_deal_id</span> <span style="color:#06b6d4;">VARCHAR(50)</span> <span style="color:#888;">-- for association mapping</span></div>
+      <div><span style="color:#7c3aed;">hubspot_contact_id</span> <span style="color:#06b6d4;">VARCHAR(50)</span></div>
+      <div><span style="color:#7c3aed;">raw_data</span> <span style="color:#06b6d4;">JSONB NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">mapped_type</span> <span style="color:#06b6d4;">VARCHAR(50)</span> <span style="color:#888;">-- call, note, meeting, email, task_completed</span></div>
+      <div><span style="color:#7c3aed;">mapped_subject</span> <span style="color:#06b6d4;">VARCHAR(500)</span></div>
+      <div><span style="color:#7c3aed;">mapped_body</span> <span style="color:#06b6d4;">TEXT</span></div>
+      <div><span style="color:#7c3aed;">mapped_occurred_at</span> <span style="color:#06b6d4;">TIMESTAMPTZ</span></div>
+      <div><span style="color:#7c3aed;">validation_status</span> <span style="color:#06b6d4;">ENUM('pending','valid','invalid','orphan','approved') DEFAULT 'pending'</span></div>
+      <div><span style="color:#7c3aed;">validation_errors</span> <span style="color:#06b6d4;">JSONB DEFAULT '[]'</span></div>
+      <div><span style="color:#7c3aed;">promoted_at</span> <span style="color:#06b6d4;">TIMESTAMPTZ</span></div>
+      <div><span style="color:#7c3aed;">created_at</span> <span style="color:#06b6d4;">TIMESTAMPTZ NOT NULL DEFAULT NOW()</span></div>
+    </div>
+  </div>
+
+  <div class="mockup" style="margin-top:16px;">
+    <div class="mockup-header">migration.import_runs</div>
+    <div class="mockup-body" style="font-family:monospace;font-size:13px;line-height:2;color:#e0e0e0;">
+      <div><span style="color:#888;">-- Tracks each migration run for audit and rollback</span></div>
+      <div><span style="color:#7c3aed;">id</span> <span style="color:#06b6d4;">UUID PK DEFAULT gen_random_uuid()</span></div>
+      <div><span style="color:#7c3aed;">type</span> <span style="color:#06b6d4;">ENUM('extract','validate','promote') NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">status</span> <span style="color:#06b6d4;">ENUM('running','completed','failed','rolled_back') NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">stats</span> <span style="color:#06b6d4;">JSONB NOT NULL</span> <span style="color:#888;">-- { total: 412, valid: 389, invalid: 8, needs_review: 15 }</span></div>
+      <div><span style="color:#7c3aed;">error_log</span> <span style="color:#06b6d4;">TEXT</span></div>
+      <div><span style="color:#7c3aed;">run_by</span> <span style="color:#06b6d4;">UUID FK → public.users.id NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">started_at</span> <span style="color:#06b6d4;">TIMESTAMPTZ NOT NULL DEFAULT NOW()</span></div>
+      <div><span style="color:#7c3aed;">completed_at</span> <span style="color:#06b6d4;">TIMESTAMPTZ</span></div>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>Procore Sync State</h3>
+
+  <div class="mockup">
+    <div class="mockup-header">public.procore_sync_state</div>
+    <div class="mockup-body" style="font-family:monospace;font-size:13px;line-height:2;color:#e0e0e0;">
+      <div><span style="color:#888;">-- Tracks sync state per entity to prevent conflicts and detect drift</span></div>
+      <div><span style="color:#7c3aed;">id</span> <span style="color:#06b6d4;">UUID PK DEFAULT gen_random_uuid()</span></div>
+      <div><span style="color:#7c3aed;">entity_type</span> <span style="color:#06b6d4;">ENUM('project','bid','change_order','contact') NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">procore_id</span> <span style="color:#06b6d4;">BIGINT NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">crm_entity_type</span> <span style="color:#06b6d4;">VARCHAR(50) NOT NULL</span> <span style="color:#888;">-- 'deal', 'contact', 'change_order'</span></div>
+      <div><span style="color:#7c3aed;">crm_entity_id</span> <span style="color:#06b6d4;">UUID NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">office_id</span> <span style="color:#06b6d4;">UUID FK → public.offices.id NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">sync_direction</span> <span style="color:#06b6d4;">ENUM('crm_to_procore','procore_to_crm','bidirectional') NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">last_synced_at</span> <span style="color:#06b6d4;">TIMESTAMPTZ</span></div>
+      <div><span style="color:#7c3aed;">last_procore_updated_at</span> <span style="color:#06b6d4;">TIMESTAMPTZ</span> <span style="color:#888;">-- from Procore's updated_at field</span></div>
+      <div><span style="color:#7c3aed;">last_crm_updated_at</span> <span style="color:#06b6d4;">TIMESTAMPTZ</span></div>
+      <div><span style="color:#7c3aed;">sync_status</span> <span style="color:#06b6d4;">ENUM('synced','pending','conflict','error') DEFAULT 'synced'</span></div>
+      <div><span style="color:#7c3aed;">conflict_data</span> <span style="color:#06b6d4;">JSONB</span> <span style="color:#888;">-- { field: "status", crm: "In Production", procore: "Active" }</span></div>
+      <div><span style="color:#7c3aed;">error_message</span> <span style="color:#06b6d4;">TEXT</span></div>
+      <div><span style="color:#7c3aed;">created_at</span> <span style="color:#06b6d4;">TIMESTAMPTZ NOT NULL DEFAULT NOW()</span></div>
+      <div><span style="color:#7c3aed;">updated_at</span> <span style="color:#06b6d4;">TIMESTAMPTZ NOT NULL DEFAULT NOW()</span></div>
+      <div style="margin:8px 0;border-top:1px solid #333;padding-top:8px;">
+        <span style="color:#06b6d4;">UNIQUE(entity_type, procore_id)</span><br/>
+        <span style="color:#06b6d4;">INDEX ON (sync_status) WHERE sync_status != 'synced'</span> <span style="color:#888;">-- quick find out-of-sync</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="mockup" style="margin-top:16px;">
+    <div class="mockup-header">public.procore_webhook_log</div>
+    <div class="mockup-body" style="font-family:monospace;font-size:13px;line-height:2;color:#e0e0e0;">
+      <div><span style="color:#888;">-- Every Procore webhook received, for debugging sync issues</span></div>
+      <div><span style="color:#7c3aed;">id</span> <span style="color:#06b6d4;">BIGSERIAL PK</span></div>
+      <div><span style="color:#7c3aed;">event_type</span> <span style="color:#06b6d4;">VARCHAR(100) NOT NULL</span> <span style="color:#888;">-- "projects.update", "change_orders.create"</span></div>
+      <div><span style="color:#7c3aed;">resource_id</span> <span style="color:#06b6d4;">BIGINT NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">payload</span> <span style="color:#06b6d4;">JSONB NOT NULL</span></div>
+      <div><span style="color:#7c3aed;">processed</span> <span style="color:#06b6d4;">BOOLEAN DEFAULT false</span></div>
+      <div><span style="color:#7c3aed;">processed_at</span> <span style="color:#06b6d4;">TIMESTAMPTZ</span></div>
+      <div><span style="color:#7c3aed;">error_message</span> <span style="color:#06b6d4;">TEXT</span></div>
+      <div><span style="color:#7c3aed;">received_at</span> <span style="color:#06b6d4;">TIMESTAMPTZ NOT NULL DEFAULT NOW()</span></div>
+      <div style="margin:8px 0;border-top:1px solid #333;padding-top:8px;">
+        <span style="color:#06b6d4;">INDEX ON (processed, received_at)</span> <span style="color:#888;">-- unprocessed webhook queue</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div style="margin-top:24px;padding:16px;background:#1a1a2e;border-radius:8px;border-left:3px solid #f59e0b;">
+  <h3 style="margin-top:0;color:#f59e0b;">Migration Workflow & Edge Cases</h3>
+  <ul style="color:#ccc;margin-bottom:0;">
+    <li><strong>3-phase migration:</strong> Extract (HubSpot API → staging) → Validate (auto-checks + team review) → Promote (approved records → live CRM). Each phase tracked in <code>import_runs</code>.</li>
+    <li><strong>Raw data preserved:</strong> <code>raw_data</code> JSONB stores the full HubSpot API response. If mapping logic has a bug, you can re-map without re-extracting.</li>
+    <li><strong>Validation auto-checks:</strong> Stage names that don't map to CRM stages, $0 amounts, missing rep assignments, contacts without email or phone, orphan activities with no deal/contact match.</li>
+    <li><strong>Contact dedup at migration:</strong> Staged contacts run through the same dedup logic as live contacts. Duplicates flagged with confidence scores for team review. Merge targets selectable in the validation UI.</li>
+    <li><strong>Orphan activities:</strong> HubSpot activities that reference deleted deals or contacts get flagged as "orphan" — team decides to discard or manually associate.</li>
+    <li><strong>Rollback support:</strong> <code>promoted_deal_id</code> / <code>promoted_contact_id</code> link staged records to their live counterparts. If something goes wrong, you can identify and clean up promoted records.</li>
+    <li><strong>Schema cleanup:</strong> After go-live validation is complete, <code>DROP SCHEMA migration CASCADE</code> removes all staging data cleanly.</li>
+    <li><strong>Procore sync conflicts:</strong> <code>procore_sync_state</code> detects when both CRM and Procore update the same entity. Conflicts surfaced in admin dashboard for manual resolution — prevents the "Closed Won incident" from SyncHub.</li>
+    <li><strong>Webhook idempotency:</strong> <code>procore_webhook_log</code> dedupes by <code>event_type + resource_id</code> within a time window. Procore can send duplicate webhooks.</li>
+  </ul>
+</div>

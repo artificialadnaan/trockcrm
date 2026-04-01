@@ -1,0 +1,226 @@
+<h2>System Architecture — Full Platform Overview</h2>
+<p class="subtitle">Modular monolith with domain events, schema-per-office tenancy, and external integrations</p>
+
+<div class="section">
+  <h3>High-Level Architecture</h3>
+  <div style="background:#0f172a;padding:24px;border-radius:12px;font-family:monospace;font-size:13px;color:#e0e0e0;">
+
+    <!-- Browser Layer -->
+    <div style="text-align:center;margin-bottom:16px;">
+      <div style="display:inline-block;background:#1e293b;border:2px solid #7c3aed;border-radius:8px;padding:12px 32px;">
+        <div style="color:#7c3aed;font-weight:bold;font-size:15px;">Browser (React + Vite + Tailwind + shadcn/ui)</div>
+        <div style="color:#888;font-size:12px;margin-top:4px;">Responsive web app — desktop & mobile browsers</div>
+        <div style="display:flex;gap:16px;margin-top:8px;justify-content:center;flex-wrap:wrap;">
+          <span style="color:#06b6d4;font-size:11px;background:#0f172a;padding:2px 8px;border-radius:4px;">REST API calls</span>
+          <span style="color:#06b6d4;font-size:11px;background:#0f172a;padding:2px 8px;border-radius:4px;">SSE notifications</span>
+          <span style="color:#06b6d4;font-size:11px;background:#0f172a;padding:2px 8px;border-radius:4px;">Direct R2 upload</span>
+        </div>
+      </div>
+    </div>
+
+    <div style="text-align:center;color:#7c3aed;font-size:20px;">↓ HTTPS ↓ &nbsp;&nbsp;&nbsp;&nbsp; ↑ SSE ↑ &nbsp;&nbsp;&nbsp;&nbsp; ↗ Presigned URL → R2</div>
+
+    <!-- Railway Services -->
+    <div style="display:flex;gap:16px;margin-top:16px;flex-wrap:wrap;">
+
+      <!-- API Server -->
+      <div style="flex:1;min-width:280px;background:#1e293b;border:2px solid #06b6d4;border-radius:8px;padding:16px;">
+        <div style="color:#06b6d4;font-weight:bold;font-size:15px;border-bottom:1px solid #333;padding-bottom:8px;">Railway Service 1: API Server (Express)</div>
+        <div style="margin-top:8px;color:#ccc;">
+          <div style="color:#f59e0b;font-weight:bold;margin-top:8px;">Middleware Layer</div>
+          <div style="padding-left:12px;line-height:2;">
+            <div>→ MS Entra JWT validation</div>
+            <div>→ Office schema resolver (JWT → office_slug → SET search_path)</div>
+            <div>→ SET LOCAL app.current_user_id (for audit triggers)</div>
+            <div>→ Role-based access control (admin/director/rep)</div>
+            <div>→ Request logging</div>
+          </div>
+
+          <div style="color:#f59e0b;font-weight:bold;margin-top:12px;">Modules</div>
+          <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:4px;">
+            <span style="background:#0f172a;padding:4px 10px;border-radius:4px;color:#06b6d4;font-size:12px;">auth/</span>
+            <span style="background:#0f172a;padding:4px 10px;border-radius:4px;color:#06b6d4;font-size:12px;">deals/</span>
+            <span style="background:#0f172a;padding:4px 10px;border-radius:4px;color:#06b6d4;font-size:12px;">contacts/</span>
+            <span style="background:#0f172a;padding:4px 10px;border-radius:4px;color:#06b6d4;font-size:12px;">email/</span>
+            <span style="background:#0f172a;padding:4px 10px;border-radius:4px;color:#06b6d4;font-size:12px;">procore/</span>
+            <span style="background:#0f172a;padding:4px 10px;border-radius:4px;color:#06b6d4;font-size:12px;">photos/</span>
+            <span style="background:#0f172a;padding:4px 10px;border-radius:4px;color:#06b6d4;font-size:12px;">reports/</span>
+            <span style="background:#0f172a;padding:4px 10px;border-radius:4px;color:#06b6d4;font-size:12px;">tasks/</span>
+            <span style="background:#0f172a;padding:4px 10px;border-radius:4px;color:#06b6d4;font-size:12px;">audit/</span>
+            <span style="background:#0f172a;padding:4px 10px;border-radius:4px;color:#06b6d4;font-size:12px;">office/</span>
+            <span style="background:#0f172a;padding:4px 10px;border-radius:4px;color:#06b6d4;font-size:12px;">notifications/</span>
+            <span style="background:#0f172a;padding:4px 10px;border-radius:4px;color:#06b6d4;font-size:12px;">migration/</span>
+          </div>
+
+          <div style="color:#f59e0b;font-weight:bold;margin-top:12px;">Event Bus (EventEmitter)</div>
+          <div style="padding-left:12px;line-height:2;font-size:12px;">
+            <div><span style="color:#7c3aed;">deal.stage.changed</span> → email, procore, tasks, notifications</div>
+            <div><span style="color:#7c3aed;">deal.won</span> → procore project create, notifications, tasks</div>
+            <div><span style="color:#7c3aed;">deal.lost</span> → notifications, reports</div>
+            <div><span style="color:#7c3aed;">contact.created</span> → dedup check, touchpoint alert</div>
+            <div><span style="color:#7c3aed;">email.received</span> → task creation, deal logging, touchpoint update</div>
+            <div><span style="color:#7c3aed;">email.sent</span> → activity log, touchpoint update</div>
+            <div><span style="color:#7c3aed;">file.uploaded</span> → auto-naming, EXIF extraction</div>
+            <div><span style="color:#7c3aed;">task.completed</span> → activity log, follow-up compliance</div>
+            <div><span style="color:#7c3aed;">approval.requested</span> → director notification</div>
+            <div><span style="color:#7c3aed;">approval.resolved</span> → stage advancement, rep notification</div>
+          </div>
+
+          <div style="color:#f59e0b;font-weight:bold;margin-top:12px;">SSE Endpoint</div>
+          <div style="padding-left:12px;line-height:2;font-size:12px;">
+            <div>GET /api/notifications/stream</div>
+            <div>Per-user persistent connection, pushes real-time alerts</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Worker -->
+      <div style="flex:0.6;min-width:240px;background:#1e293b;border:2px solid #22c55e;border-radius:8px;padding:16px;">
+        <div style="color:#22c55e;font-weight:bold;font-size:15px;border-bottom:1px solid #333;padding-bottom:8px;">Railway Service 2: Worker</div>
+        <div style="margin-top:8px;color:#ccc;">
+          <div style="color:#f59e0b;font-weight:bold;">Scheduled Jobs (node-cron)</div>
+          <div style="padding-left:12px;line-height:2;font-size:12px;">
+            <div>Every 5min — Email sync (MS Graph delta)</div>
+            <div>Every 15min — Procore sync poll</div>
+            <div>Daily 6am — Generate task lists</div>
+            <div>Daily 6am — Stale deal scan</div>
+            <div>Daily 7am — Activity drop detection</div>
+            <div>Weekly — Contact dedup scan</div>
+            <div>Weekly — Audit log partition check</div>
+          </div>
+
+          <div style="color:#f59e0b;font-weight:bold;margin-top:12px;">On-Demand Jobs</div>
+          <div style="padding-left:12px;line-height:2;font-size:12px;">
+            <div>HubSpot migration extract</div>
+            <div>Migration validation</div>
+            <div>Migration promotion</div>
+            <div>Bulk data export</div>
+          </div>
+
+          <div style="color:#f59e0b;font-weight:bold;margin-top:12px;">Future (Phase 2)</div>
+          <div style="padding-left:12px;line-height:2;font-size:12px;color:#888;">
+            <div>Claude API — lead gen</div>
+            <div>Claude API — discrepancy detection</div>
+            <div>Business card OCR</div>
+            <div>Large loss monitoring</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Database Layer -->
+    <div style="text-align:center;color:#7c3aed;font-size:20px;margin:16px 0;">↕ Drizzle ORM ↕</div>
+
+    <div style="background:#1e293b;border:2px solid #f59e0b;border-radius:8px;padding:16px;">
+      <div style="color:#f59e0b;font-weight:bold;font-size:15px;border-bottom:1px solid #333;padding-bottom:8px;">Railway PostgreSQL</div>
+      <div style="display:flex;gap:16px;margin-top:12px;flex-wrap:wrap;">
+        <div style="flex:1;min-width:200px;">
+          <div style="color:#7c3aed;font-weight:bold;">public schema</div>
+          <div style="font-size:12px;line-height:1.8;color:#ccc;padding-left:8px;">
+            offices<br/>users<br/>user_office_access<br/>pipeline_stage_config<br/>lost_deal_reasons<br/>saved_reports<br/>procore_sync_state<br/>procore_webhook_log
+          </div>
+        </div>
+        <div style="flex:1;min-width:200px;">
+          <div style="color:#06b6d4;font-weight:bold;">office_dallas schema</div>
+          <div style="font-size:12px;line-height:1.8;color:#ccc;padding-left:8px;">
+            deals<br/>deal_stage_history<br/>change_orders<br/>deal_approvals<br/>contacts<br/>contact_deal_associations<br/>duplicate_queue<br/>emails<br/>activities<br/>files<br/>tasks<br/>notifications<br/>audit_log
+          </div>
+        </div>
+        <div style="flex:1;min-width:200px;">
+          <div style="color:#06b6d4;font-weight:bold;">office_houston schema</div>
+          <div style="font-size:12px;line-height:1.8;color:#888;padding-left:8px;">
+            (identical table set)<br/>
+            Isolated data silo<br/>
+            Same triggers & indexes
+          </div>
+        </div>
+        <div style="flex:1;min-width:200px;">
+          <div style="color:#888;font-weight:bold;">migration schema</div>
+          <div style="font-size:12px;line-height:1.8;color:#888;padding-left:8px;">
+            staged_deals<br/>staged_contacts<br/>staged_activities<br/>import_runs<br/><br/>(dropped after go-live)
+          </div>
+        </div>
+      </div>
+      <div style="margin-top:12px;padding-top:8px;border-top:1px solid #333;font-size:12px;color:#888;">
+        PG Triggers: audit_log writer, change_order_total updater, stage_history writer, touchpoint counter, updated_at setter
+      </div>
+    </div>
+
+    <!-- External Services -->
+    <div style="text-align:center;color:#7c3aed;font-size:20px;margin:16px 0;">↕ External Integrations ↕</div>
+
+    <div style="display:flex;gap:12px;flex-wrap:wrap;">
+      <div style="flex:1;min-width:180px;background:#1e293b;border:1px solid #666;border-radius:8px;padding:12px;text-align:center;">
+        <div style="color:#06b6d4;font-weight:bold;">Microsoft Graph API</div>
+        <div style="font-size:11px;color:#888;margin-top:4px;">
+          Entra SSO authentication<br/>
+          Send/receive email (Outlook)<br/>
+          Webhook subscriptions (inbound)<br/>
+          Delta queries (email sync)
+        </div>
+      </div>
+      <div style="flex:1;min-width:180px;background:#1e293b;border:1px solid #666;border-radius:8px;padding:12px;text-align:center;">
+        <div style="color:#06b6d4;font-weight:bold;">Procore API</div>
+        <div style="font-size:11px;color:#888;margin-top:4px;">
+          Project CRUD & stage sync<br/>
+          Change order tracking<br/>
+          Bid Board data (via SyncHub)<br/>
+          Webhook receivers
+        </div>
+      </div>
+      <div style="flex:1;min-width:180px;background:#1e293b;border:1px solid #666;border-radius:8px;padding:12px;text-align:center;">
+        <div style="color:#06b6d4;font-weight:bold;">Cloudflare R2</div>
+        <div style="font-size:11px;color:#888;margin-top:4px;">
+          Photo & document storage<br/>
+          Presigned URL uploads<br/>
+          Zero egress fees<br/>
+          ~$1.50/mo per 100GB
+        </div>
+      </div>
+      <div style="flex:1;min-width:180px;background:#1e293b;border:1px solid #666;border-radius:8px;padding:12px;text-align:center;">
+        <div style="color:#06b6d4;font-weight:bold;">HubSpot API</div>
+        <div style="font-size:11px;color:#888;margin-top:4px;">
+          One-time data migration<br/>
+          Deals, contacts, activities<br/>
+          Association mappings<br/>
+          <span style="color:#f59e0b;">Expires May 15, 2026</span>
+        </div>
+      </div>
+      <div style="flex:1;min-width:180px;background:#1e293b;border:1px solid #666;border-radius:8px;padding:12px;text-align:center;">
+        <div style="color:#06b6d4;font-weight:bold;">SyncHub v3</div>
+        <div style="font-size:11px;color:#888;margin-top:4px;">
+          Bid Board feed → CRM<br/>
+          Scoped to automation only<br/>
+          CRM owns deal lifecycle<br/>
+          Internal API or shared DB read
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>Request Flow — Schema-Per-Office Routing</h3>
+  <div style="background:#0f172a;padding:20px;border-radius:12px;font-family:monospace;font-size:13px;color:#e0e0e0;line-height:2.2;">
+    <div><span style="color:#888;">1.</span> <span style="color:#06b6d4;">Browser</span> → POST /api/deals (Authorization: Bearer {jwt})</div>
+    <div><span style="color:#888;">2.</span> <span style="color:#f59e0b;">Auth middleware</span> → validates JWT, extracts { userId, officeId, role }</div>
+    <div><span style="color:#888;">3.</span> <span style="color:#f59e0b;">Office resolver</span> → looks up office.slug from officeId → "dallas"</div>
+    <div><span style="color:#888;">4.</span> <span style="color:#f59e0b;">Schema setter</span> → <code>SET LOCAL search_path = 'office_dallas', 'public'</code></div>
+    <div><span style="color:#888;">5.</span> <span style="color:#f59e0b;">Audit setter</span> → <code>SET LOCAL app.current_user_id = '{userId}'</code></div>
+    <div><span style="color:#888;">6.</span> <span style="color:#06b6d4;">Route handler</span> → <code>db.insert(deals).values({...})</code> <span style="color:#888;">— hits office_dallas.deals</span></div>
+    <div><span style="color:#888;">7.</span> <span style="color:#22c55e;">PG trigger</span> → writes to office_dallas.audit_log automatically</div>
+    <div><span style="color:#888;">8.</span> <span style="color:#7c3aed;">Event bus</span> → emits <code>deal.created</code> → listeners fire (touchpoint alert, notification)</div>
+    <div><span style="color:#888;">9.</span> <span style="color:#06b6d4;">SSE</span> → pushes notification to assigned rep's browser</div>
+  </div>
+</div>
+
+<div style="margin-top:24px;padding:16px;background:#1a1a2e;border-radius:8px;border-left:3px solid #7c3aed;">
+  <h3 style="margin-top:0;color:#7c3aed;">Architecture Decisions Summary</h3>
+  <ul style="color:#ccc;margin-bottom:0;">
+    <li><strong>Schema routing via search_path:</strong> One middleware line sets the schema for the entire request. Drizzle queries don't need office_id filters — PG resolves the correct table automatically.</li>
+    <li><strong>Cross-office reporting:</strong> Director/admin queries use <code>UNION ALL</code> across schemas or a materialized reporting view refreshed by the worker.</li>
+    <li><strong>Event bus stays in-process:</strong> Node EventEmitter for Phase 1. If scaling requires it, swap to PG LISTEN/NOTIFY or a message queue later — event handler signatures don't change.</li>
+    <li><strong>SyncHub integration:</strong> SyncHub feeds Bid Board opportunities to the CRM via internal API or shared database read. CRM owns deal lifecycle from that point forward.</li>
+    <li><strong>Worker shares codebase:</strong> Same TypeScript, same Drizzle schemas, different entrypoint. No code duplication.</li>
+  </ul>
+</div>
