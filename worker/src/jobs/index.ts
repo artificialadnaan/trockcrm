@@ -1,4 +1,5 @@
 import { registerJobHandler } from "../queue.js";
+import { runStaleDealScan } from "./stale-deals.js";
 
 /**
  * Test handler that logs the payload. Used to validate the queue works end-to-end.
@@ -36,11 +37,28 @@ export function registerAllJobs() {
   registerJobHandler("test_echo", handleTestEcho);
   registerJobHandler("domain_event", handleDomainEvent);
 
-  // Future domain event handlers added here as features are built:
-  // domainEventHandlers.set("deal.won", handleDealWon);
-  // domainEventHandlers.set("deal.stage.changed", handleDealStageChanged);
+  // Stale deal scanner (triggered via job_queue or cron)
+  registerJobHandler("stale_deal_scan", async () => {
+    await runStaleDealScan();
+  });
 
-  console.log("[Worker] Job handlers registered:", ["test_echo", "domain_event"].join(", "));
+  // Domain event handlers for deal lifecycle
+  domainEventHandlers.set("deal.won", async (payload, officeId) => {
+    console.log(`[Worker] Deal won: ${payload.dealNumber} (${payload.dealName}) - amount: ${payload.awardedAmount}`);
+    // Future: Procore project creation, congratulations notification
+  });
+
+  domainEventHandlers.set("deal.lost", async (payload, officeId) => {
+    console.log(`[Worker] Deal lost: ${payload.dealNumber} (${payload.dealName}) - reason: ${payload.lostReasonId}`);
+    // Future: Lost deal analytics, competitor tracking
+  });
+
+  domainEventHandlers.set("deal.stage.changed", async (payload, officeId) => {
+    console.log(`[Worker] Stage changed: ${payload.dealNumber} from ${payload.fromStageName} to ${payload.toStageName}`);
+    // Future: Procore status sync, stage change email notifications
+  });
+
+  console.log("[Worker] Job handlers registered:", ["test_echo", "domain_event", "stale_deal_scan"].join(", "));
 }
 
 export { domainEventHandlers };
