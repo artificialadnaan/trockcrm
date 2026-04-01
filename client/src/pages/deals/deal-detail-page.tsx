@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import {
   ArrowLeft,
@@ -19,6 +19,7 @@ import { DealStageBadge } from "@/components/deals/deal-stage-badge";
 import { DealOverviewTab } from "@/components/deals/deal-overview-tab";
 import { DealHistoryTab } from "@/components/deals/deal-history-tab";
 import { DealTimelineTab } from "@/components/deals/deal-timeline-tab";
+import { StageChangeDialog } from "@/components/deals/stage-change-dialog";
 import { useDealDetail, deleteDeal as apiDeleteDeal } from "@/hooks/use-deals";
 import { usePipelineStages } from "@/hooks/use-pipeline-config";
 import { useAuth } from "@/lib/auth";
@@ -33,6 +34,8 @@ export function DealDetailPage() {
   const { deal, loading, error, refetch } = useDealDetail(id);
   const { stages } = usePipelineStages();
   const [activeTab, setActiveTab] = useState<Tab>("overview");
+  const [stageChangeOpen, setStageChangeOpen] = useState(false);
+  const [targetStageId, setTargetStageId] = useState<string | null>(null);
 
   if (loading) {
     return (
@@ -65,11 +68,15 @@ export function DealDetailPage() {
     (s) => s.displayOrder < (currentStage?.displayOrder ?? 0) && !s.isTerminal
   );
 
-  const handleStageChange = (targetStageId: string) => {
-    // Stage change dialog will be implemented in Task 10.
-    // For now, log the intent so the UI is wired up.
-    console.log("Stage change requested:", { dealId: deal.id, targetStageId });
-    void refetch();
+  const handleStageChange = (stageId: string) => {
+    setTargetStageId(stageId);
+    setStageChangeOpen(true);
+  };
+
+  const handleStageChangeSuccess = () => {
+    setStageChangeOpen(false);
+    setTargetStageId(null);
+    refetch();
   };
 
   const handleDelete = async () => {
@@ -244,6 +251,20 @@ export function DealDetailPage() {
       )}
       {activeTab === "timeline" && <DealTimelineTab _dealId={deal.id} />}
       {activeTab === "history" && <DealHistoryTab deal={deal} />}
+
+      {/* Stage Change Dialog */}
+      {stageChangeOpen && targetStageId && (
+        <StageChangeDialog
+          deal={deal}
+          targetStageId={targetStageId}
+          open={stageChangeOpen}
+          onOpenChange={(open) => {
+            setStageChangeOpen(open);
+            if (!open) setTargetStageId(null);
+          }}
+          onSuccess={handleStageChangeSuccess}
+        />
+      )}
     </div>
   );
 }

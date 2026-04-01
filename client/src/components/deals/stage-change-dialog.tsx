@@ -1,0 +1,292 @@
+import { useState, useEffect } from "react";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+  DialogDescription,
+} from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { DealStageBadge } from "./deal-stage-badge";
+import { StageGateChecklist } from "./stage-gate-checklist";
+import {
+  preflightStageCheck,
+  changeDealStage,
+} from "@/hooks/use-deals";
+import { useLostReasons } from "@/hooks/use-pipeline-config";
+import { AlertTriangle, ArrowRight, ArrowLeft, Shield, Loader2 } from "lucide-react";
+
+interface StageChangeDialogProps {
+  deal: { id: string; name: string; stageId: string };
+  targetStageId: string;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onSuccess: () => void;
+}
+
+export function StageChangeDialog({
+  deal,
+  targetStageId,
+  open,
+  onOpenChange,
+  onSuccess,
+}: StageChangeDialogProps) {
+  const { reasons } = useLostReasons();
+
+  const [preflight, setPreflight] = useState<Awaited<ReturnType<typeof preflightStageCheck>> | null>(null);
+  const [preflightLoading, setPreflightLoading] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Form state
+  const [overrideReason, setOverrideReason] = useState("");
+  const [lostReasonId, setLostReasonId] = useState("");
+  const [lostNotes, setLostNotes] = useState("");
+  const [lostCompetitor, setLostCompetitor] = useState("");
+
+  // Run preflight check on mount
+  useEffect(() => {
+    if (!open) return;
+    setPreflightLoading(true);
+    setError(null);
+
+    preflightStageCheck(deal.id, targetStageId)
+      .then((result) => setPreflight(result))
+      .catch((err) => setError(err instanceof Error ? err.message : "Preflight check failed"))
+      .finally(() => setPreflightLoading(false));
+  }, [deal.id, targetStageId, open]);
+
+  const handleSubmit = async () => {
+    if (!preflight) return;
+    setSubmitting(true);
+    setError(null);
+
+    try {
+      // Validate lost deal fields
+      if (preflight.targetStage.slug === "closed_lost") {
+        if (!lostReasonId) {
+          setError("Please select a reason for losing this deal.");
+          setSubmitting(false);
+          return;
+        }
+        if (!lostNotes.trim()) {
+          setError("Please provide notes about why this deal was lost.");
+          setSubmitting(false);
+          return;
+        }
+      }
+
+      // Validate override reason
+      if (preflight.requiresOverride && !overrideReason.trim()) {
+        setError("Please provide a reason for the override.");
+        setSubmitting(false);
+        return;
+      }
+
+      await changeDealStage(deal.id, targetStageId, {
+        overrideReason: preflight.requiresOverride ? overrideReason : undefined,
+        lostReasonId: preflight.targetStage.slug === "closed_lost" ? lostReasonId : undefined,
+        lostNotes: preflight.targetStage.slug === "closed_lost" ? lostNotes : undefined,
+        lostCompetitor: preflight.targetStage.slug === "closed_lost" ? lostCompetitor || undefined : undefined,
+      });
+
+      onSuccess();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Stage change failed");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const isBlocked = preflight != null && !preflight.allowed;
+  const isClosedLost = preflight?.targetStage.slug === "closed_lost";
+  const isClosedWon = preflight?.targetStage.slug === "closed_won";
+
+  // When closing as lost, the modal is NOT dismissible via overlay click or escape.
+  // The user MUST fill in all required fields and submit. For other stage changes,
+  // normal dismiss behavior applies.
+  const handleOpenChange = isClosedLost ? () => {} : onOpenChange;
+
+  return (
+    <Dialog open={open} onOpenChange={handleOpenChange}>
+      <DialogContent className="sm:max-w-[520px]" showCloseButton={!isClosedLost}>
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            {preflight?.isBackwardMove ? (
+              <>
+                <ArrowLeft className="h-5 w-5 text-orange-500" />
+                Move Deal Backward
+              </>
+            ) : isClosedLost ? (
+              <>
+                <AlertTriangle className="h-5 w-5 text-red-500" />
+                Close Deal as Lost
+              </>
+            ) : isClosedWon ? (
+              "Close Deal as Won"
+            ) : (
+              "Advance Deal Stage"
+            )}
+          </DialogTitle>
+          <DialogDescription>
+            {deal.name}
+          </DialogDescription>
+        </DialogHeader>
+
+        {preflightLoading ? (
+          <div className="flex items-center justify-center py-8">
+            <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+          </div>
+        ) : preflight ? (
+          <div className="space-y-4">
+            {/* Stage Transition Display */}
+            <div className="flex items-center gap-3 py-2">
+              <DealStageBadge stageId={preflight.currentStage.id} />
+              {preflight.isBackwardMove ? (
+                <ArrowLeft className="h-4 w-4 text-orange-500" />
+              ) : (
+                <ArrowRight className="h-4 w-4 text-green-500" />
+              )}
+              <DealStageBadge stageId={preflight.targetStage.id} />
+            </div>
+
+            {/* Blocked State */}
+            {isBlocked && (
+              <div className="p-3 bg-red-50 border border-red-200 rounded-lg">
+                <p className="text-sm text-red-700 font-medium">
+                  {preflight.blockReason}
+                </p>
+              </div>
+            )}
+
+            {/* Gate Checklist */}
+            <StageGateChecklist missingRequirements={preflight.missingRequirements} />
+
+            {/* Override Reason (for directors) */}
+            {preflight.requiresOverride && (
+              <div className="space-y-2 border-t pt-3">
+                <div className="flex items-center gap-2 text-sm font-medium text-purple-700">
+                  <Shield className="h-4 w-4" />
+                  Director Override
+                </div>
+                <Label htmlFor="overrideReason">
+                  Override Reason <span className="text-red-500">*</span>
+                </Label>
+                <Input
+                  id="overrideReason"
+                  placeholder="Why are you overriding the requirements?"
+                  value={overrideReason}
+                  onChange={(e) => setOverrideReason(e.target.value)}
+                />
+              </div>
+            )}
+
+            {/* Closed Lost Fields */}
+            {isClosedLost && (
+              <div className="space-y-3 border-t pt-3">
+                <p className="text-sm font-medium text-red-700">
+                  This deal is being closed as lost. All fields below are required.
+                </p>
+                <div className="space-y-2">
+                  <Label htmlFor="lostReason">
+                    Reason <span className="text-red-500">*</span>
+                  </Label>
+                  <Select value={lostReasonId} onValueChange={(val) => setLostReasonId(val ?? "")}>
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select reason..." />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {reasons.map((r) => (
+                        <SelectItem key={r.id} value={r.id}>
+                          {r.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="lostNotes">
+                    Notes <span className="text-red-500">*</span>
+                  </Label>
+                  <textarea
+                    id="lostNotes"
+                    className="flex min-h-[80px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    placeholder="Describe why this deal was lost..."
+                    value={lostNotes}
+                    onChange={(e) => setLostNotes(e.target.value)}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="lostCompetitor">Competitor (optional)</Label>
+                  <Input
+                    id="lostCompetitor"
+                    placeholder="Who won the deal?"
+                    value={lostCompetitor}
+                    onChange={(e) => setLostCompetitor(e.target.value)}
+                  />
+                </div>
+              </div>
+            )}
+
+            {/* Closed Won Confirmation */}
+            {isClosedWon && (
+              <div className="p-3 bg-green-50 border border-green-200 rounded-lg">
+                <p className="text-sm text-green-700">
+                  Deal marked as won. The close date will be set to today.
+                </p>
+              </div>
+            )}
+
+            {/* Error */}
+            {error && (
+              <div className="p-3 bg-red-50 border border-red-200 rounded-lg">
+                <p className="text-sm text-red-700">{error}</p>
+              </div>
+            )}
+          </div>
+        ) : (
+          error && (
+            <div className="p-3 bg-red-50 border border-red-200 rounded-lg">
+              <p className="text-sm text-red-700">{error}</p>
+            </div>
+          )
+        )}
+
+        <DialogFooter>
+          {/* Cancel button is hidden for Closed Lost -- modal is only dismissible by submitting */}
+          {!isClosedLost && (
+            <Button variant="outline" onClick={() => onOpenChange(false)}>
+              Cancel
+            </Button>
+          )}
+          <Button
+            onClick={handleSubmit}
+            disabled={isBlocked || preflightLoading || submitting}
+            variant={isClosedLost ? "destructive" : "default"}
+          >
+            {submitting && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+            {isBlocked
+              ? "Blocked"
+              : isClosedLost
+              ? "Close as Lost"
+              : isClosedWon
+              ? "Close as Won"
+              : preflight?.isBackwardMove
+              ? "Move Backward"
+              : "Advance"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
