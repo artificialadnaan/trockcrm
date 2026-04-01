@@ -276,19 +276,22 @@ export interface UpdateDealInput {
 
 /**
  * Generate a sequential deal number: TR-{YYYY}-{NNNN}
- * Uses a raw query to get the next number atomically within the transaction.
+ * Uses SELECT ... FOR UPDATE to lock the highest deal number row during the
+ * transaction, preventing concurrent collisions from parallel inserts.
  */
 async function generateDealNumber(tenantDb: TenantDb): Promise<string> {
   const year = new Date().getFullYear();
   const prefix = `TR-${year}-`;
 
-  // Find the highest existing deal number for this year
+  // Lock the highest deal number row for this year using FOR UPDATE.
+  // This prevents concurrent transactions from reading the same max value.
   const result = await tenantDb
     .select({ dealNumber: deals.dealNumber })
     .from(deals)
     .where(ilike(deals.dealNumber, `${prefix}%`))
     .orderBy(desc(deals.dealNumber))
-    .limit(1);
+    .limit(1)
+    .for("update");
 
   let nextSeq = 1;
   if (result.length > 0) {
@@ -770,8 +773,16 @@ router.post("/", async (req, res, next) => {
     if (!name || !stageId) {
       throw new AppError(400, "Name and stageId are required");
     }
-    // Default assigned rep to current user if not provided
-    const repId = assignedRepId || req.user!.id;
+
+    // Rep ownership enforcement:
+    // - Reps: force assignedRepId to their own ID (ignore request body value)
+    // - Directors/admins: can assign to any user
+    let repId: string;
+    if (req.user!.role === "rep") {
+      repId = req.user!.id; // reps always own their own deals
+    } else {
+      repId = assignedRepId || req.user!.id;
+    }
 
     const deal = await createDeal(req.tenantDb!, {
       name,
@@ -789,10 +800,17 @@ router.post("/", async (req, res, next) => {
 // PATCH /api/deals/:id — update deal fields (not stage)
 router.patch("/:id", async (req, res, next) => {
   try {
+    const body = { ...req.body };
+
+    // Reps cannot change assignedRepId (reassign deals)
+    if (req.user!.role === "rep" && body.assignedRepId !== undefined) {
+      delete body.assignedRepId;
+    }
+
     const deal = await updateDeal(
       req.tenantDb!,
       req.params.id,
-      req.body,
+      body,
       req.user!.role,
       req.user!.id
     );
@@ -882,6 +900,7 @@ import {
 } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { db } from "../../db.js";
+import { AppError } from "../../middleware/error-handler.js";
 import type { UserRole } from "@trock-crm/shared/types";
 
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -924,7 +943,8 @@ export async function validateStageGate(
   tenantDb: TenantDb,
   dealId: string,
   targetStageId: string,
-  userRole: UserRole
+  userRole: UserRole,
+  userId: string
 ): Promise<StageGateResult> {
   // Fetch current deal
   const dealResult = await tenantDb
@@ -933,9 +953,14 @@ export async function validateStageGate(
     .where(eq(deals.id, dealId))
     .limit(1);
   if (dealResult.length === 0) {
-    throw new Error("Deal not found");
+    throw new AppError(404, "Deal not found");
   }
   const deal = dealResult[0];
+
+  // Reps can only modify their own deals
+  if (userRole === "rep" && deal.assignedRepId !== userId) {
+    throw new AppError(403, "You can only modify your own deals");
+  }
 
   // Fetch current stage and target stage from public config
   const [currentStageResult, targetStageResult] = await Promise.all([
@@ -944,10 +969,10 @@ export async function validateStageGate(
   ]);
 
   if (currentStageResult.length === 0) {
-    throw new Error("Current stage config not found");
+    throw new AppError(404, "Current stage config not found");
   }
   if (targetStageResult.length === 0) {
-    throw new Error("Target stage config not found");
+    throw new AppError(404, "Pipeline stage not found");
   }
 
   const currentStage = currentStageResult[0];
@@ -1106,9 +1131,10 @@ export async function preflightStageCheck(
   tenantDb: TenantDb,
   dealId: string,
   targetStageId: string,
-  userRole: UserRole
+  userRole: UserRole,
+  userId: string
 ): Promise<StageGateResult> {
-  return validateStageGate(tenantDb, dealId, targetStageId, userRole);
+  return validateStageGate(tenantDb, dealId, targetStageId, userRole, userId);
 }
 ```
 
@@ -1123,11 +1149,12 @@ This is the orchestration layer that calls the gate validator, applies the mutat
 **File: `server/src/modules/deals/stage-change.ts`**
 
 ```typescript
-import { eq } from "drizzle-orm";
+import { eq, desc } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
   deals,
   dealStageHistory,
+  jobQueue,
   pipelineStageConfig,
 } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
@@ -1177,8 +1204,22 @@ export async function changeDealStage(
 ): Promise<StageChangeResult> {
   const { dealId, targetStageId, userId, userRole, overrideReason, lostReasonId, lostNotes, lostCompetitor } = input;
 
-  // Step 1: Validate stage gate
-  const gateResult = await validateStageGate(tenantDb, dealId, targetStageId, userRole);
+  // Same-stage no-op: if the deal is already in the target stage, return it unchanged.
+  // Do NOT update stageEnteredAt or emit events.
+  const currentDeal = await tenantDb
+    .select()
+    .from(deals)
+    .where(eq(deals.id, dealId))
+    .limit(1);
+  if (currentDeal.length === 0) {
+    throw new AppError(404, "Deal not found");
+  }
+  if (currentDeal[0].stageId === targetStageId) {
+    return { deal: currentDeal[0], stageHistory: null, eventsEmitted: [] } as any;
+  }
+
+  // Step 1: Validate stage gate (includes rep ownership check)
+  const gateResult = await validateStageGate(tenantDb, dealId, targetStageId, userRole, userId);
 
   // Step 2: Enforce rules
   if (!gateResult.allowed) {
@@ -1285,15 +1326,18 @@ export async function changeDealStage(
 
   // Update the trigger-inserted history record with override context
   // Find the record just inserted by the trigger (most recent for this deal)
+  // NOTE: Use Drizzle's desc() import (already imported at the top of service.ts;
+  // add `import { desc } from "drizzle-orm"` at the top of this file too).
   const latestHistory = await tenantDb
     .select()
     .from(dealStageHistory)
     .where(eq(dealStageHistory.dealId, dealId))
-    .orderBy(eq(dealStageHistory.createdAt, dealStageHistory.createdAt)) // newest first
+    .orderBy(desc(dealStageHistory.createdAt))
     .limit(1);
 
-  // Use raw SQL for the ORDER BY DESC since Drizzle's orderBy with desc needs import
-  const historyUpdateResult = await tenantDb.execute(
+  // Use req.tenantClient.query() for raw SQL (tenantDb.execute() does not accept
+  // a params array — it only accepts tagged template literals in Drizzle).
+  const historyUpdateResult = await req.tenantClient.query(
     `UPDATE deal_stage_history
      SET is_backward_move = $1,
          is_director_override = $2,
@@ -1314,81 +1358,90 @@ export async function changeDealStage(
       userId,
       durationInPreviousStage,
       dealId,
-    ] as any
+    ]
   );
 
-  // Step 7: Emit domain events
+  // Step 7: Outbox pattern — insert durable jobs into job_queue INSIDE the
+  // transaction so they are committed atomically with the deal update +
+  // stage history. The worker picks these up independently. Local EventEmitter
+  // (for SSE push) fires AFTER commit in the route handler (best-effort).
   const eventsEmitted: string[] = [];
-
-  // Get the officeId from the request context -- we need it for events
-  // Since we're called from the route handler, we pass officeId through
-  // For now, we use deal data + userId + a placeholder officeId that the
-  // route handler will supply via a wrapper. We'll emit events after commit
-  // in the route handler instead. Actually, let's return the events to emit
-  // and let the route handler emit them after commit.
-
   const eventsToEmit: Array<{ name: string; payload: any }> = [];
 
-  // Always emit stage changed
-  eventsToEmit.push({
-    name: DOMAIN_EVENTS.DEAL_STAGE_CHANGED,
-    payload: {
-      dealId,
-      dealName: updatedDeal.name,
-      dealNumber: updatedDeal.dealNumber,
-      fromStageId: currentStage.id,
-      fromStageName: currentStage.name,
-      toStageId: targetStage.id,
-      toStageName: targetStage.name,
-      isBackwardMove: gateResult.isBackwardMove,
-      isDirectorOverride,
-      changedBy: userId,
-    },
-  });
+  // Build stage changed payload
+  const stageChangedPayload = {
+    dealId,
+    dealName: updatedDeal.name,
+    dealNumber: updatedDeal.dealNumber,
+    fromStageId: currentStage.id,
+    fromStageName: currentStage.name,
+    toStageId: targetStage.id,
+    toStageName: targetStage.name,
+    isBackwardMove: gateResult.isBackwardMove,
+    isDirectorOverride,
+    changedBy: userId,
+  };
+
+  // Always: stage changed
+  eventsToEmit.push({ name: DOMAIN_EVENTS.DEAL_STAGE_CHANGED, payload: stageChangedPayload });
   eventsEmitted.push(DOMAIN_EVENTS.DEAL_STAGE_CHANGED);
+
+  // Durable job (inside transaction)
+  await tenantDb.insert(jobQueue).values({
+    type: "deal.stage.changed",
+    payload: stageChangedPayload,
+    status: "pending",
+  });
 
   // Closed Won
   if (targetStage.slug === "closed_won") {
-    eventsToEmit.push({
-      name: DOMAIN_EVENTS.DEAL_WON,
-      payload: {
-        dealId,
-        dealName: updatedDeal.name,
-        dealNumber: updatedDeal.dealNumber,
-        awardedAmount: updatedDeal.awardedAmount,
-        assignedRepId: updatedDeal.assignedRepId,
-      },
-    });
+    const wonPayload = {
+      dealId,
+      dealName: updatedDeal.name,
+      dealNumber: updatedDeal.dealNumber,
+      awardedAmount: updatedDeal.awardedAmount,
+      assignedRepId: updatedDeal.assignedRepId,
+    };
+    eventsToEmit.push({ name: DOMAIN_EVENTS.DEAL_WON, payload: wonPayload });
     eventsEmitted.push(DOMAIN_EVENTS.DEAL_WON);
+
+    await tenantDb.insert(jobQueue).values({
+      type: "deal.won",
+      payload: wonPayload,
+      status: "pending",
+    });
   }
 
   // Closed Lost
   if (targetStage.slug === "closed_lost") {
-    eventsToEmit.push({
-      name: DOMAIN_EVENTS.DEAL_LOST,
-      payload: {
-        dealId,
-        dealName: updatedDeal.name,
-        dealNumber: updatedDeal.dealNumber,
-        lostReasonId,
-        lostNotes,
-        lostCompetitor,
-        assignedRepId: updatedDeal.assignedRepId,
-      },
-    });
+    const lostPayload = {
+      dealId,
+      dealName: updatedDeal.name,
+      dealNumber: updatedDeal.dealNumber,
+      lostReasonId,
+      lostNotes,
+      lostCompetitor,
+      assignedRepId: updatedDeal.assignedRepId,
+    };
+    eventsToEmit.push({ name: DOMAIN_EVENTS.DEAL_LOST, payload: lostPayload });
     eventsEmitted.push(DOMAIN_EVENTS.DEAL_LOST);
+
+    await tenantDb.insert(jobQueue).values({
+      type: "deal.lost",
+      payload: lostPayload,
+      status: "pending",
+    });
   }
 
-  // NOTE: Events should be emitted AFTER the transaction commits.
-  // The route handler calls req.commitTransaction() and then emits.
-  // We store the events on a temporary property for the route to pick up.
-  // Better pattern: return them and let the route handle emission.
+  // Return events for the route handler to emit locally AFTER commitTransaction().
+  // The durable jobs in job_queue are already part of this transaction and will
+  // be visible to the worker after commit.
 
   return {
     deal: updatedDeal,
     stageHistory: (historyUpdateResult as any).rows?.[0] ?? null,
     eventsEmitted,
-    _eventsToEmit: eventsToEmit, // internal: route handler uses this
+    _eventsToEmit: eventsToEmit, // internal: route handler emits locally after commit (best-effort)
   } as any;
 }
 ```
@@ -1419,20 +1472,21 @@ router.post("/:id/stage", async (req, res, next) => {
 
     await req.commitTransaction!();
 
-    // Emit events AFTER successful commit
+    // Emit local events AFTER successful commit (for SSE push to connected clients).
+    // These are best-effort — the durable job_queue entries (inserted inside the
+    // transaction above) ensure the worker will process them regardless.
     const eventsToEmit = (result as any)._eventsToEmit ?? [];
     for (const event of eventsToEmit) {
       try {
-        await eventBus.emitAll({
-          name: event.name,
+        eventBus.emitLocal(event.name, {
           payload: event.payload,
           officeId: req.user!.activeOfficeId ?? req.user!.officeId,
           userId: req.user!.id,
           timestamp: new Date(),
         });
       } catch (eventErr) {
-        // Log but don't fail the response -- events are best-effort after commit
-        console.error(`[Deals] Failed to emit event ${event.name}:`, eventErr);
+        // Swallow — local emission is best-effort; durable jobs handle persistence
+        console.error(`[Deals] Failed to emit local event ${event.name}:`, eventErr);
       }
     }
 
@@ -1464,7 +1518,8 @@ router.post("/:id/stage/preflight", async (req, res, next) => {
       req.tenantDb!,
       req.params.id,
       targetStageId,
-      req.user!.role
+      req.user!.role,
+      req.user!.id
     );
 
     await req.commitTransaction!();
@@ -1480,10 +1535,131 @@ Add the import at the top of routes.ts:
 import { preflightStageCheck } from "./stage-gate.js";
 ```
 
+### 3d. Approval API Endpoints
+
+Add to `server/src/modules/deals/routes.ts`:
+
+```typescript
+// POST /api/deals/:id/approvals — request approval (rep creates)
+router.post("/:id/approvals", async (req, res, next) => {
+  try {
+    const { targetStageId, requiredRole } = req.body;
+    if (!targetStageId || !requiredRole) {
+      throw new AppError(400, "targetStageId and requiredRole are required");
+    }
+
+    const result = await req.tenantDb!
+      .insert(dealApprovals)
+      .values({
+        dealId: req.params.id,
+        targetStageId,
+        requiredRole,
+        requestedBy: req.user!.id,
+        status: "pending",
+      })
+      .returning();
+
+    // Emit approval.requested event for notification delivery
+    eventBus.emitLocal("approval.requested", {
+      payload: {
+        dealId: req.params.id,
+        targetStageId,
+        requiredRole,
+        requestedBy: req.user!.id,
+        approvalId: result[0].id,
+      },
+    });
+
+    await req.commitTransaction!();
+    res.status(201).json({ approval: result[0] });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// PATCH /api/deals/:id/approvals/:approvalId — resolve approval (director approves/rejects)
+router.patch(
+  "/:id/approvals/:approvalId",
+  requireRole("admin", "director"),
+  async (req, res, next) => {
+    try {
+      const { status, notes } = req.body;
+      if (!status || !["approved", "rejected"].includes(status)) {
+        throw new AppError(400, "status must be 'approved' or 'rejected'");
+      }
+
+      const result = await req.tenantDb!
+        .update(dealApprovals)
+        .set({
+          status,
+          notes: notes ?? null,
+          approvedBy: req.user!.id,
+          resolvedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(dealApprovals.id, req.params.approvalId),
+            eq(dealApprovals.dealId, req.params.id)
+          )
+        )
+        .returning();
+
+      if (result.length === 0) {
+        throw new AppError(404, "Approval not found");
+      }
+
+      // Emit approval.resolved event
+      eventBus.emitLocal("approval.resolved", {
+        payload: {
+          dealId: req.params.id,
+          approvalId: req.params.approvalId,
+          status,
+          resolvedBy: req.user!.id,
+        },
+      });
+
+      await req.commitTransaction!();
+      res.json({ approval: result[0] });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// GET /api/deals/:id/approvals — list approvals for a deal
+router.get("/:id/approvals", async (req, res, next) => {
+  try {
+    const approvals = await req.tenantDb!
+      .select()
+      .from(dealApprovals)
+      .where(eq(dealApprovals.dealId, req.params.id))
+      .orderBy(desc(dealApprovals.createdAt));
+
+    await req.commitTransaction!();
+    res.json({ approvals });
+  } catch (err) {
+    next(err);
+  }
+});
+```
+
+Add required imports at top of routes.ts:
+```typescript
+import { and, eq, desc } from "drizzle-orm";
+import { dealApprovals } from "@trock-crm/shared/schema";
+import { eventBus } from "../../events/bus.js";
+```
+
 ---
 
 ## Task 4: Deal API Tests
 
+**Prerequisite:** Install test dependencies before running tests:
+```bash
+cd server && npm install --save-dev supertest @types/supertest
+```
+
+- [ ] Install `supertest` and `@types/supertest` as devDependencies in `server/package.json`
 - [ ] Create `server/tests/modules/deals/service.test.ts`
 - [ ] Create `server/tests/modules/deals/stage-gate.test.ts`
 - [ ] Create `server/tests/modules/deals/routes.test.ts`
@@ -1494,7 +1670,7 @@ import { preflightStageCheck } from "./stage-gate.js";
 
 ```typescript
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
-import { pool } from "../../src/db.js";
+import { pool } from "../../../src/db.js";
 import { drizzle } from "drizzle-orm/node-postgres";
 import * as schema from "@trock-crm/shared/schema";
 import {
@@ -1504,7 +1680,7 @@ import {
   updateDeal,
   deleteDeal,
   getDealsForPipeline,
-} from "../../src/modules/deals/service.js";
+} from "../../../src/modules/deals/service.js";
 
 // These tests require a running PostgreSQL with the test schema provisioned.
 // Run: DATABASE_URL=postgres://... npx vitest run server/tests/modules/deals/
@@ -1676,11 +1852,11 @@ describe("Deal Service", () => {
 
 ```typescript
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { pool } from "../../src/db.js";
+import { pool } from "../../../src/db.js";
 import { drizzle } from "drizzle-orm/node-postgres";
 import * as schema from "@trock-crm/shared/schema";
-import { createDeal } from "../../src/modules/deals/service.js";
-import { validateStageGate } from "../../src/modules/deals/stage-gate.js";
+import { createDeal } from "../../../src/modules/deals/service.js";
+import { validateStageGate } from "../../../src/modules/deals/stage-gate.js";
 
 let client: any;
 let tenantDb: ReturnType<typeof drizzle>;
@@ -1717,7 +1893,7 @@ describe("Stage Gate Validation", () => {
       assignedRepId: testUserId,
     });
 
-    const result = await validateStageGate(tenantDb, deal.id, stageMap.get("estimating")!.id, "rep");
+    const result = await validateStageGate(tenantDb, deal.id, stageMap.get("estimating")!.id, "rep", testUserId);
 
     expect(result.allowed).toBe(true);
     expect(result.isBackwardMove).toBe(false);
@@ -1730,7 +1906,7 @@ describe("Stage Gate Validation", () => {
       assignedRepId: testUserId,
     });
 
-    const result = await validateStageGate(tenantDb, deal.id, stageMap.get("dd")!.id, "rep");
+    const result = await validateStageGate(tenantDb, deal.id, stageMap.get("dd")!.id, "rep", testUserId);
 
     expect(result.allowed).toBe(false);
     expect(result.isBackwardMove).toBe(true);
@@ -1744,7 +1920,7 @@ describe("Stage Gate Validation", () => {
       assignedRepId: testUserId,
     });
 
-    const result = await validateStageGate(tenantDb, deal.id, stageMap.get("dd")!.id, "director");
+    const result = await validateStageGate(tenantDb, deal.id, stageMap.get("dd")!.id, "director", testUserId);
 
     expect(result.allowed).toBe(true);
     expect(result.isBackwardMove).toBe(true);
@@ -1759,7 +1935,7 @@ describe("Stage Gate Validation", () => {
       assignedRepId: testUserId,
     });
 
-    const result = await validateStageGate(tenantDb, deal.id, stageMap.get("closed_won")!.id, "rep");
+    const result = await validateStageGate(tenantDb, deal.id, stageMap.get("closed_won")!.id, "rep", testUserId);
 
     expect(result.isTerminal).toBe(true);
     expect(result.targetStage.slug).toBe("closed_won");
@@ -1772,7 +1948,7 @@ describe("Stage Gate Validation", () => {
       assignedRepId: testUserId,
     });
 
-    const result = await validateStageGate(tenantDb, deal.id, stageMap.get("dd")!.id, "rep");
+    const result = await validateStageGate(tenantDb, deal.id, stageMap.get("dd")!.id, "rep", testUserId);
 
     expect(result.allowed).toBe(true);
     expect(result.isBackwardMove).toBe(false);
@@ -1788,8 +1964,8 @@ describe("Stage Gate Validation", () => {
 ```typescript
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import request from "supertest";
-import { createApp } from "../../src/app.js";
-import { pool } from "../../src/db.js";
+import { createApp } from "../../../src/app.js";
+import { pool } from "../../../src/db.js";
 
 const app = createApp();
 
@@ -1959,6 +2135,23 @@ describe("Deal API Routes", () => {
 - [ ] Create `worker/src/jobs/stale-deals.ts`
 - [ ] Register in `worker/src/jobs/index.ts`
 
+### Migration Note: CHECK Constraint for Closed Lost
+
+The deals table migration (from Plan 1) should include a CHECK constraint ensuring
+that deals in the `closed_lost` stage always have `lost_reason_id` and `lost_notes` set.
+Add this to the migration or as a separate migration step:
+
+```sql
+ALTER TABLE deals ADD CONSTRAINT chk_closed_lost_fields
+  CHECK (
+    stage_id != (SELECT id FROM public.pipeline_stage_config WHERE slug = 'closed_lost')
+    OR (lost_reason_id IS NOT NULL AND lost_notes IS NOT NULL AND lost_notes != '')
+  );
+```
+
+This provides a database-level safety net in addition to the application-level validation
+in `changeDealStage()`.
+
 ### 5a. Stale Deal Scanner
 
 **File: `worker/src/jobs/stale-deals.ts`**
@@ -1994,6 +2187,13 @@ export async function runStaleDealScan(): Promise<void> {
     let totalStale = 0;
 
     for (const office of offices.rows) {
+      // Validate office slug before using in SQL to prevent injection.
+      // Must match the same pattern used in office creation.
+      const slugRegex = /^[a-z][a-z0-9_]*$/;
+      if (!slugRegex.test(office.slug)) {
+        console.error(`[Worker:stale-deals] Invalid office slug: "${office.slug}" — skipping`);
+        continue;
+      }
       const schemaName = `office_${office.slug}`;
 
       // Find stale deals: join deals with pipeline config, check threshold
@@ -2025,13 +2225,14 @@ export async function runStaleDealScan(): Promise<void> {
       for (const staleDeal of staleDeals.rows) {
         // Check if a stale_deal notification already exists for this deal today
         // (avoid duplicate notifications on repeated scans)
+        // Use exact link match instead of LIKE to avoid false positives
         const existingNotification = await client.query(
           `SELECT id FROM ${schemaName}.notifications
            WHERE type = 'stale_deal'
-             AND link LIKE $1
-             AND created_at > CURRENT_DATE
+             AND link = $1
+             AND created_at >= CURRENT_DATE
            LIMIT 1`,
-          [`%/deals/${staleDeal.deal_id}%`]
+          [`/deals/${staleDeal.deal_id}`]
         );
 
         if (existingNotification.rows.length > 0) {
@@ -3890,6 +4091,12 @@ interface PipelineColumn {
   count: number;
 }
 
+interface TerminalStageInfo {
+  stage: { id: string; name: string; slug: string };
+  deals: Deal[];
+  count: number;
+}
+
 function DroppableColumn({ column, children }: { column: PipelineColumn; children: React.ReactNode }) {
   const { isOver, setNodeRef } = useDroppable({ id: column.stage.id });
 
@@ -3925,6 +4132,7 @@ export function PipelinePage() {
   const navigate = useNavigate();
   const { user } = useAuth();
   const [columns, setColumns] = useState<PipelineColumn[]>([]);
+  const [terminalStages, setTerminalStages] = useState<TerminalStageInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [showDd, setShowDd] = useState(false);
   const [activeDeal, setActiveDeal] = useState<Deal | null>(null);
@@ -3940,10 +4148,12 @@ export function PipelinePage() {
   const fetchPipeline = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await api<{ pipelineColumns: PipelineColumn[] }>(
-        `/deals/pipeline?includeDd=${showDd}`
-      );
+      const data = await api<{
+        pipelineColumns: PipelineColumn[];
+        terminalStages: TerminalStageInfo[];
+      }>(`/deals/pipeline?includeDd=${showDd}`);
       setColumns(data.pipelineColumns);
+      setTerminalStages(data.terminalStages ?? []);
     } catch (err) {
       console.error("Failed to load pipeline:", err);
     } finally {
@@ -4074,6 +4284,35 @@ export function PipelinePage() {
           {activeDeal && <DealCard deal={activeDeal} isDragging />}
         </DragOverlay>
       </DndContext>
+
+      {/* Terminal Stages Summary (Closed Won / Closed Lost) */}
+      {terminalStages.length > 0 && (
+        <div className="grid grid-cols-2 gap-4 pt-2 border-t">
+          {terminalStages.map((ts) => (
+            <Card key={ts.stage.id} className={`p-4 ${
+              ts.stage.slug === "closed_won"
+                ? "border-green-200 bg-green-50/50"
+                : "border-red-200 bg-red-50/50"
+            }`}>
+              <div className="flex items-center justify-between">
+                <div>
+                  <h4 className="text-sm font-semibold">{ts.stage.name}</h4>
+                  <p className="text-xs text-muted-foreground">
+                    {ts.count} deal{ts.count !== 1 ? "s" : ""}
+                  </p>
+                </div>
+                <Badge variant="outline" className={
+                  ts.stage.slug === "closed_won"
+                    ? "bg-green-100 text-green-700"
+                    : "bg-red-100 text-red-700"
+                }>
+                  {ts.count}
+                </Badge>
+              </div>
+            </Card>
+          ))}
+        </div>
+      )}
 
       {/* Stage Change Dialog (from drag-and-drop) */}
       {stageChangeOpen && pendingMove && (
@@ -4332,8 +4571,13 @@ export function StageChangeDialog({
   const isClosedLost = preflight?.targetStage.slug === "closed_lost";
   const isClosedWon = preflight?.targetStage.slug === "closed_won";
 
+  // When closing as lost, the modal is NOT dismissible via overlay click or escape.
+  // The user MUST fill in all required fields and submit. For other stage changes,
+  // normal dismiss behavior applies.
+  const handleOpenChange = isClosedLost ? () => {} : onOpenChange;
+
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent className="sm:max-w-[520px]">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
@@ -4410,7 +4654,7 @@ export function StageChangeDialog({
             {isClosedLost && (
               <div className="space-y-3 border-t pt-3">
                 <p className="text-sm font-medium text-red-700">
-                  Required information for closing as lost:
+                  This deal is being closed as lost. All fields below are required.
                 </p>
                 <div className="space-y-2">
                   <Label htmlFor="lostReason">
@@ -4457,8 +4701,7 @@ export function StageChangeDialog({
             {isClosedWon && (
               <div className="p-3 bg-green-50 border border-green-200 rounded-lg">
                 <p className="text-sm text-green-700">
-                  This will mark the deal as won and set the close date to today.
-                  A Procore project will be created automatically.
+                  Deal marked as won. The close date will be set to today.
                 </p>
               </div>
             )}
@@ -4479,9 +4722,12 @@ export function StageChangeDialog({
         )}
 
         <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>
-            Cancel
-          </Button>
+          {/* Cancel button is hidden for Closed Lost — modal is only dismissible by submitting */}
+          {!isClosedLost && (
+            <Button variant="outline" onClick={() => onOpenChange(false)}>
+              Cancel
+            </Button>
+          )}
           <Button
             onClick={handleSubmit}
             disabled={isBlocked || preflightLoading || submitting}
@@ -4517,7 +4763,7 @@ export function StageChangeDialog({
 **File: `client/src/components/deals/deal-form.tsx`**
 
 ```typescript
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -4569,6 +4815,13 @@ export function DealForm({ deal, onSuccess }: DealFormProps) {
 
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Default stageId when activeStages finishes loading and form stageId is still empty
+  useEffect(() => {
+    if (!isEdit && !formData.stageId && activeStages.length > 0) {
+      setFormData((prev) => ({ ...prev, stageId: activeStages[0].id }));
+    }
+  }, [activeStages, formData.stageId, isEdit]);
 
   const handleChange = (field: string, value: string) => {
     setFormData((prev) => ({ ...prev, [field]: value }));
@@ -4717,18 +4970,16 @@ export function DealForm({ deal, onSuccess }: DealFormProps) {
                   <SelectValue placeholder="Select type" />
                 </SelectTrigger>
                 <SelectContent>
-                  {projectTypeHierarchy.map((parent) => (
-                    <div key={parent.id}>
-                      <SelectItem value={parent.id} className="font-medium">
-                        {parent.name}
+                  {projectTypeHierarchy.flatMap((parent) => [
+                    <SelectItem key={parent.id} value={parent.id} className="font-medium">
+                      {parent.name}
+                    </SelectItem>,
+                    ...parent.children.map((child) => (
+                      <SelectItem key={child.id} value={child.id} className="pl-6">
+                        {child.name}
                       </SelectItem>
-                      {parent.children.map((child) => (
-                        <SelectItem key={child.id} value={child.id} className="pl-6">
-                          {child.name}
-                        </SelectItem>
-                      ))}
-                    </div>
-                  ))}
+                    )),
+                  ])}
                 </SelectContent>
               </Select>
             </div>
@@ -4942,11 +5193,71 @@ import { PipelinePage } from "@/pages/pipeline/pipeline-page";
 
 Replace the pipeline and add deals routes in the `<Route element={<AppShell />}>` block:
 ```typescript
+import { DealEditPage } from "@/pages/deals/deal-edit-page";
+```
+
+```typescript
 <Route path="/pipeline" element={<PipelinePage />} />
 <Route path="/deals" element={<DealListPage />} />
 <Route path="/deals/new" element={<DealNewPage />} />
 <Route path="/deals/:id" element={<DealDetailPage />} />
-<Route path="/deals/:id/edit" element={<DealDetailPage />} />
+<Route path="/deals/:id/edit" element={<DealEditPage />} />
+```
+
+### 12c. Deal Edit Page
+
+**File: `client/src/pages/deals/deal-edit-page.tsx`**
+
+```typescript
+import { useParams, useNavigate } from "react-router-dom";
+import { ArrowLeft, Loader2 } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { DealForm } from "@/components/deals/deal-form";
+import { useDealDetail } from "@/hooks/use-deals";
+
+export function DealEditPage() {
+  const { id } = useParams<{ id: string }>();
+  const navigate = useNavigate();
+  const { deal, loading, error } = useDealDetail(id);
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-12">
+        <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+      </div>
+    );
+  }
+
+  if (error || !deal) {
+    return (
+      <div className="text-center py-12">
+        <p className="text-red-600">{error ?? "Deal not found"}</p>
+        <Button variant="outline" className="mt-4" onClick={() => navigate("/deals")}>
+          Back to Deals
+        </Button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="-ml-2 mb-1"
+          onClick={() => navigate(`/deals/${id}`)}
+        >
+          <ArrowLeft className="h-4 w-4 mr-1" />
+          Back to Deal
+        </Button>
+        <h2 className="text-2xl font-bold">Edit Deal</h2>
+        <p className="text-sm text-muted-foreground">{deal.dealNumber} - {deal.name}</p>
+      </div>
+      <DealForm deal={deal} />
+    </div>
+  );
+}
 ```
 
 ### 12b. Update Sidebar Navigation
@@ -4982,6 +5293,9 @@ Add to the `navItems` array, after Pipeline:
 | PATCH | `/api/deals/:id` | Tenant | Update deal fields |
 | POST | `/api/deals/:id/stage` | Tenant | Change deal stage |
 | POST | `/api/deals/:id/stage/preflight` | Tenant | Validate stage gate (read-only) |
+| POST | `/api/deals/:id/approvals` | Tenant | Request approval for stage advancement |
+| PATCH | `/api/deals/:id/approvals/:approvalId` | Tenant + Director | Approve or reject an approval request |
+| GET | `/api/deals/:id/approvals` | Tenant | List approvals for a deal |
 | DELETE | `/api/deals/:id` | Tenant + Director | Soft-delete deal |
 
 ---
@@ -5005,7 +5319,13 @@ Add to the `navItems` array, after Pipeline:
 | Auto-generated deal numbers | `generateDealNumber` creates sequential `TR-{YYYY}-{NNNN}` format |
 | Filter persistence | `useDealFilters` stores/loads from localStorage |
 | Pipeline drag-and-drop | Opens `StageChangeDialog` with preflight validation before confirming |
-| Concurrent deal number generation | Runs within tenant transaction (serializable within `FOR UPDATE` lock implicit in the INSERT sequence) |
+| Concurrent deal number generation | `generateDealNumber` uses `SELECT ... FOR UPDATE` to lock highest deal number row, preventing collisions |
+| Same-stage no-op | `changeDealStage` returns early without updating `stageEnteredAt` if deal is already in target stage |
+| Rep tries to modify another rep's deal | `validateStageGate` checks `deal.assignedRepId !== userId` for reps, returns 403 |
+| Rep tries to reassign deal | Create route forces `assignedRepId = user.id` for reps; update route strips `assignedRepId` from body for reps |
+| Lost deal dismissed without data | Closed Lost modal is not dismissible via overlay/escape; Cancel button is hidden; all fields required |
+| SQL injection via office slug | Stale deal worker validates slug against `^[a-z][a-z0-9_]*$` regex before using in schema name |
+| Closed Lost missing fields at DB level | CHECK constraint ensures `lost_reason_id` and `lost_notes` are set when deal is in `closed_lost` stage |
 
 ---
 
