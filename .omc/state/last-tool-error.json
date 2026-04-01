@@ -1,7 +1,7 @@
 {
-  "tool_name": "Bash",
-  "tool_input_preview": "{\"command\":\"codex exec \\\"You are reviewing a design spec for a custom CRM platform for T Rock Construction. The spec is at docs/superpowers/specs/2026-04-01-trock-crm-design.md. Read the full spec car...",
-  "error": "Exit code 1\nNot inside a trusted directory and --skip-git-repo-check was not specified.",
-  "timestamp": "2026-04-01T18:30:13.721Z",
+  "tool_name": "Read",
+  "tool_input_preview": "{\"file_path\":\"/Users/adnaaniqbal/Developer/trock-crm/docs/superpowers/specs/2026-04-01-trock-crm-design.md\"}",
+  "error": "File content (18839 tokens) exceeds maximum allowed tokens (10000). Use offset and limit parameters to read specific portions of the file, or search for specific content instead of reading the whole file.",
+  "timestamp": "2026-04-01T19:16:54.028Z",
   "retry_count": 2
 }
