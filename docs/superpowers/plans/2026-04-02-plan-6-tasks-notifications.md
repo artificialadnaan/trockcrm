@@ -178,7 +178,9 @@ export async function getTasks(
   }
 
   // Section-based filtering
-  const today = new Date().toISOString().split("T")[0]; // YYYY-MM-DD
+  // Use office timezone (CT for T Rock) for date bucketing instead of UTC.
+  // This ensures "today" matches the user's local date, not UTC midnight.
+  const today = new Date().toLocaleDateString("en-CA", { timeZone: "America/Chicago" }); // YYYY-MM-DD in CT
 
   if (filters.section === "overdue") {
     conditions.push(
@@ -206,6 +208,11 @@ export async function getTasks(
 
   const where = conditions.length > 0 ? and(...conditions) : undefined;
 
+  // Priority rank: urgent=0, high=1, normal=2, low=3
+  const priorityRank = sql<number>`CASE ${tasks.priority}
+    WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 WHEN 'low' THEN 3 ELSE 4
+  END`;
+
   const [countResult, taskRows] = await Promise.all([
     tenantDb.select({ count: sql<number>`count(*)` }).from(tasks).where(where),
     tenantDb
@@ -213,10 +220,12 @@ export async function getTasks(
       .from(tasks)
       .where(where)
       .orderBy(
-        // Priority ordering: overdue first, then by priority, then by due date
-        filters.section === "completed"
-          ? desc(tasks.completedAt)
-          : asc(tasks.dueDate)
+        // Priority-sectioned ordering per spec:
+        // Overdue first (is_overdue DESC), then by priority rank ASC, then by due_date ASC.
+        // Completed section: order by completedAt DESC instead.
+        ...(filters.section === "completed"
+          ? [desc(tasks.completedAt)]
+          : [desc(tasks.isOverdue), asc(priorityRank), asc(tasks.dueDate)])
       )
       .limit(limit)
       .offset(offset),
@@ -238,7 +247,8 @@ export async function getTaskCounts(
   tenantDb: TenantDb,
   userId: string
 ) {
-  const today = new Date().toISOString().split("T")[0];
+  // Use office timezone (CT for T Rock) for date bucketing
+  const today = new Date().toLocaleDateString("en-CA", { timeZone: "America/Chicago" }); // YYYY-MM-DD in CT
 
   const result = await tenantDb.execute(sql`
     SELECT
@@ -253,7 +263,8 @@ export async function getTaskCounts(
       )::int AS upcoming,
       COUNT(*) FILTER (
         WHERE status IN ('completed', 'dismissed')
-          AND (completed_at >= CURRENT_DATE - INTERVAL '7 days' OR completed_at IS NULL)
+          AND (completed_at >= (CURRENT_TIMESTAMP AT TIME ZONE 'America/Chicago')::date - INTERVAL '7 days'
+               OR completed_at IS NULL)
       )::int AS completed
     FROM tasks
     WHERE assigned_to = ${userId}
@@ -532,16 +543,15 @@ router.post("/", async (req, res, next) => {
 
     await req.commitTransaction!();
 
-    // Emit task_assigned notification if assigned to someone else
+    // Emit task.assigned notification if assigned to someone else
     if (targetAssignee !== req.user!.id) {
       try {
         eventBus.emitLocal({
-          name: "task.completed", // Reusing closest event -- handler checks type
+          name: "task.assigned",
           payload: {
             taskId: task.id,
             assignedTo: targetAssignee,
             title: task.title,
-            type: "task_assigned",
           },
           officeId: req.user!.activeOfficeId ?? req.user!.officeId,
           userId: req.user!.id,
@@ -579,11 +589,31 @@ router.patch("/:id", async (req, res, next) => {
 router.post("/:id/complete", async (req, res, next) => {
   try {
     const task = await completeTask(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+
+    // Outbox pattern: insert into job_queue BEFORE committing the transaction
+    // so the event is guaranteed to be persisted even if emitLocal fails.
+    const { jobQueue } = await import("@trock-crm/shared/schema");
+    await req.tenantDb!.insert(jobQueue).values({
+      jobType: "domain_event",
+      payload: {
+        eventName: "task.completed",
+        taskId: task.id,
+        dealId: task.dealId,
+        contactId: task.contactId,
+        title: task.title,
+        type: task.type,
+        completedBy: req.user!.id,
+      },
+      officeId: req.user!.activeOfficeId ?? req.user!.officeId,
+      status: "pending",
+      runAfter: new Date(),
+    });
+
     await req.commitTransaction!();
 
-    // Emit task.completed event for activity logging
+    // Best-effort local emit for SSE push (already persisted via outbox above)
     try {
-      await eventBus.emitAll({
+      eventBus.emitLocal({
         name: "task.completed",
         payload: {
           taskId: task.id,
@@ -803,6 +833,13 @@ router.get("/", async (req, res, next) => {
       limit: req.query.limit ? parseInt(req.query.limit as string, 10) : undefined,
     };
 
+    // RBAC: If filtering by dealId, verify the user has access to this deal
+    if (filters.dealId) {
+      const { getDealById } = await import("../deals/service.js");
+      const deal = await getDealById(req.tenantDb!, filters.dealId, req.user!.role, req.user!.id);
+      if (!deal) throw new AppError(404, "Deal not found");
+    }
+
     const result = await getActivities(req.tenantDb!, filters);
     await req.commitTransaction!();
     res.json(result);
@@ -819,6 +856,13 @@ router.post("/", async (req, res, next) => {
     if (!type) throw new AppError(400, "Activity type is required");
     if (!contactId && !dealId) {
       throw new AppError(400, "At least one of contactId or dealId is required");
+    }
+
+    // RBAC: If dealId is provided, verify the user has access to this deal
+    if (dealId) {
+      const { getDealById } = await import("../deals/service.js");
+      const deal = await getDealById(req.tenantDb!, dealId, req.user!.role, req.user!.id);
+      if (!deal) throw new AppError(404, "Deal not found");
     }
 
     const activity = await createActivity(req.tenantDb!, {
@@ -840,48 +884,9 @@ router.post("/", async (req, res, next) => {
   }
 });
 
-// POST /api/contacts/:id/activities — create activity for a specific contact
-// This is the endpoint that contact-activity-tab.tsx calls
-router.post("/:contactId/activities", async (req, res, next) => {
-  try {
-    const contactId = req.params.contactId;
-    const { type, subject, body, outcome, durationMinutes, dealId, occurredAt } = req.body;
-
-    if (!type) throw new AppError(400, "Activity type is required");
-
-    const activity = await createActivity(req.tenantDb!, {
-      type,
-      userId: req.user!.id,
-      dealId: dealId ?? null,
-      contactId,
-      subject,
-      body,
-      outcome,
-      durationMinutes,
-      occurredAt,
-    });
-
-    await req.commitTransaction!();
-    res.status(201).json({ activity });
-  } catch (err) {
-    next(err);
-  }
-});
-
-// GET /api/contacts/:id/activities — get activities for a specific contact
-router.get("/:contactId/activities", async (req, res, next) => {
-  try {
-    const result = await getActivities(req.tenantDb!, {
-      contactId: req.params.contactId,
-      page: req.query.page ? parseInt(req.query.page as string, 10) : undefined,
-      limit: req.query.limit ? parseInt(req.query.limit as string, 10) : undefined,
-    });
-    await req.commitTransaction!();
-    res.json(result);
-  } catch (err) {
-    next(err);
-  }
-});
+// NOTE: Contact-scoped activity endpoints (POST/GET /api/contacts/:id/activities)
+// are mounted on the contacts router (see contacts/routes.ts in Task 2c) to avoid
+// duplicate mounting and route ambiguity. Do NOT add them here.
 
 export const activityRoutes = router;
 ```
@@ -893,14 +898,13 @@ export const activityRoutes = router;
 ```typescript
 import { activityRoutes } from "./modules/activities/routes.js";
 
-// The activity routes serve two mount points:
-// 1. /api/activities for general activity CRUD
-// 2. /api/contacts/:id/activities for the contact-specific endpoint
+// Mount activity routes at /api/activities ONLY.
+// Contact-specific activity endpoints (POST/GET /api/contacts/:id/activities) are mounted
+// directly on the contacts router (see contacts/routes.ts below) to avoid duplicate mounting.
 tenantRouter.use("/activities", activityRoutes);
-tenantRouter.use("/contacts", activityRoutes); // Mounts /:contactId/activities under /contacts
 ```
 
-**IMPORTANT:** The contacts-level activity routes (`POST /api/contacts/:id/activities` and `GET /api/contacts/:id/activities`) must NOT conflict with existing contact routes. The activity router uses `/:contactId/activities` which is distinct from the existing contact routes (`/`, `/:id`, `/:id/deals`, etc.) because of the `/activities` suffix. However, to avoid ambiguity, mount the activity router's contact-scoped paths explicitly. The safest approach is to add these two routes directly inside the existing `server/src/modules/contacts/routes.ts`:
+**IMPORTANT:** The contact-scoped activity routes (`POST /api/contacts/:id/activities` and `GET /api/contacts/:id/activities`) live on the contacts router to avoid duplicate mounting. Add these two routes directly inside the existing `server/src/modules/contacts/routes.ts`:
 
 ```typescript
 // Add at the bottom of contacts/routes.ts, before the export:
@@ -997,6 +1001,12 @@ export async function runDailyTaskGeneration(): Promise<void> {
     let totalOverdueMarked = 0;
 
     for (const office of offices.rows) {
+      // Acquire advisory lock per office to prevent concurrent runs from racing
+      await client.query("BEGIN");
+      await client.query(
+        `SELECT pg_advisory_xact_lock(hashtext('daily_task_generation_' || $1))`,
+        [office.id]
+      );
       const slugRegex = /^[a-z][a-z0-9_]*$/;
       if (!slugRegex.test(office.slug)) {
         console.error(`[Worker:daily-tasks] Invalid office slug: "${office.slug}" -- skipping`);
@@ -1004,13 +1014,18 @@ export async function runDailyTaskGeneration(): Promise<void> {
       }
       const schemaName = `office_${office.slug}`;
 
-      // Step 1: Mark overdue tasks
+      // Step 1: Mark overdue tasks as is_overdue AND escalate to 'urgent' priority
+      // Per spec: the daily job should mark existing overdue tasks as urgent priority
+      // if they aren't already, so the task list surfaces them prominently.
+      // Stale-deal and email-sync workers already CREATE those tasks; this job
+      // just ensures they are flagged correctly.
       const overdueResult = await client.query(
         `UPDATE ${schemaName}.tasks
-         SET is_overdue = true
+         SET is_overdue = true,
+             priority = CASE WHEN priority != 'urgent' THEN 'urgent' ELSE priority END
          WHERE status IN ('pending', 'in_progress')
            AND due_date < CURRENT_DATE
-           AND is_overdue = false`
+           AND (is_overdue = false OR priority != 'urgent')`
       );
       totalOverdueMarked += overdueResult.rowCount ?? 0;
 
@@ -1103,6 +1118,9 @@ export async function runDailyTaskGeneration(): Promise<void> {
         );
         totalTasksCreated++;
       }
+
+      // Release the advisory lock by committing the transaction for this office
+      await client.query("COMMIT");
     }
 
     console.log(`[Worker:daily-tasks] Complete. Marked ${totalOverdueMarked} overdue, created ${totalTasksCreated} new tasks`);
@@ -1179,6 +1197,13 @@ export async function runActivityDropDetection(): Promise<void> {
       }
       const schemaName = `office_${office.slug}`;
 
+      // Acquire advisory lock per office to prevent concurrent runs from racing
+      await client.query("BEGIN");
+      await client.query(
+        `SELECT pg_advisory_xact_lock(hashtext('activity_drop_detection_' || $1))`,
+        [office.id]
+      );
+
       // Get all active reps in this office
       const reps = await client.query(
         `SELECT id, display_name FROM public.users
@@ -1187,17 +1212,25 @@ export async function runActivityDropDetection(): Promise<void> {
       );
 
       for (const rep of reps.rows) {
-        // Calculate 90-day rolling weekly averages for outreach activities
+        // Calculate 90-day rolling weekly averages for outreach activities.
+        // Generate ALL 13 weeks in the window via generate_series and LEFT JOIN
+        // actual counts, so weeks with zero activity show as 0 (not excluded).
         const statsResult = await client.query(
-          `WITH weekly_counts AS (
-            SELECT
-              DATE_TRUNC('week', occurred_at) AS week_start,
-              COUNT(*) AS activity_count
-            FROM ${schemaName}.activities
-            WHERE user_id = $1
-              AND type IN ('call', 'meeting', 'email')
-              AND occurred_at >= NOW() - INTERVAL '90 days'
-            GROUP BY DATE_TRUNC('week', occurred_at)
+          `WITH weeks AS (
+            SELECT generate_series(
+              date_trunc('week', NOW() - interval '90 days'),
+              date_trunc('week', NOW()),
+              interval '1 week'
+            ) AS week_start
+          ),
+          weekly_counts AS (
+            SELECT w.week_start, COALESCE(COUNT(a.id), 0) AS activity_count
+            FROM weeks w
+            LEFT JOIN ${schemaName}.activities a
+              ON date_trunc('week', a.occurred_at) = w.week_start
+              AND a.user_id = $1
+              AND a.type IN ('call', 'meeting', 'email')
+            GROUP BY w.week_start
           )
           SELECT
             COALESCE(AVG(activity_count), 0)::numeric(10,2) AS avg_weekly,
@@ -1264,6 +1297,9 @@ export async function runActivityDropDetection(): Promise<void> {
           console.log(`[Worker:activity-alerts] Activity drop detected for ${rep.display_name} in ${office.slug}: ${recentCount} vs avg ${avgWeekly.toFixed(1)}`);
         }
       }
+
+      // Release the advisory lock by committing the transaction for this office
+      await client.query("COMMIT");
     }
 
     console.log(`[Worker:activity-alerts] Complete. Created ${totalAlerts} alerts`);
@@ -1310,45 +1346,48 @@ registerJobHandler("activity_drop_detection", async () => {
   await runActivityDropDetection();
 });
 
+// Add domain event handler for task.assigned -> create notification
+domainEventHandlers.set("task.assigned", async (payload, _officeId) => {
+  console.log(`[Worker] task.assigned: ${payload.taskId} — ${payload.title}`);
+
+  if (!payload.assignedTo) return;
+
+  const { pool: workerPool } = await import("../db.js");
+  const userResult = await workerPool.query(
+    "SELECT office_id FROM public.users WHERE id = $1",
+    [payload.assignedTo]
+  );
+  if (userResult.rows.length === 0) return;
+
+  const officeResult = await workerPool.query(
+    "SELECT slug FROM public.offices WHERE id = $1 AND is_active = true",
+    [userResult.rows[0].office_id]
+  );
+  if (officeResult.rows.length === 0) return;
+
+  const slug = officeResult.rows[0].slug;
+  const slugRegex = /^[a-z][a-z0-9_]*$/;
+  if (!slugRegex.test(slug)) return;
+
+  const schemaName = `office_${slug}`;
+
+  await workerPool.query(
+    `INSERT INTO ${schemaName}.notifications (user_id, type, title, body, link)
+     VALUES ($1, 'task_assigned', $2, $3, $4)`,
+    [
+      payload.assignedTo,
+      `New task assigned: ${payload.title}`,
+      payload.title,
+      "/tasks",
+    ]
+  );
+});
+
 // Add domain event handler for task.completed -> create activity record
 domainEventHandlers.set("task.completed", async (payload, _officeId) => {
   console.log(`[Worker] task.completed: ${payload.taskId} — ${payload.title}`);
 
-  // If this is a task_assigned notification signal (not an actual completion), handle separately
-  if (payload.type === "task_assigned" && payload.assignedTo) {
-    const { pool: workerPool } = await import("../db.js");
-    const userResult = await workerPool.query(
-      "SELECT office_id FROM public.users WHERE id = $1",
-      [payload.assignedTo]
-    );
-    if (userResult.rows.length === 0) return;
-
-    const officeResult = await workerPool.query(
-      "SELECT slug FROM public.offices WHERE id = $1 AND is_active = true",
-      [userResult.rows[0].office_id]
-    );
-    if (officeResult.rows.length === 0) return;
-
-    const slug = officeResult.rows[0].slug;
-    const slugRegex = /^[a-z][a-z0-9_]*$/;
-    if (!slugRegex.test(slug)) return;
-
-    const schemaName = `office_${slug}`;
-
-    await workerPool.query(
-      `INSERT INTO ${schemaName}.notifications (user_id, type, title, body, link)
-       VALUES ($1, 'task_assigned', $2, $3, $4)`,
-      [
-        payload.assignedTo,
-        `New task assigned: ${payload.title}`,
-        payload.title,
-        "/tasks",
-      ]
-    );
-    return;
-  }
-
-  // Actual task completion: create a task_completed activity
+  // Create a task_completed activity
   if (!payload.completedBy) return;
 
   const { pool: workerPool } = await import("../db.js");
@@ -1479,11 +1518,23 @@ export function initSsePush(): void {
     }
   });
 
-  // Listen for task events to push real-time updates
-  eventBus.on("task.completed", (event: any) => {
+  // Listen for task.assigned events to push real-time assignment notifications
+  eventBus.on("task.assigned", (event: any) => {
     const payload = event.payload ?? event;
     if (payload.assignedTo) {
       pushToUser(payload.assignedTo, "task_update", {
+        type: "assigned",
+        taskId: payload.taskId,
+        title: payload.title,
+      });
+    }
+  });
+
+  // Listen for task.completed events to push real-time completion updates
+  eventBus.on("task.completed", (event: any) => {
+    const payload = event.payload ?? event;
+    if (payload.completedBy) {
+      pushToUser(payload.completedBy, "task_update", {
         type: "completed",
         taskId: payload.taskId,
       });
@@ -3474,9 +3525,9 @@ Replace the route:
 <Route path="/tasks" element={<TaskListPage />} />
 ```
 
-### 12b. Add notification.created to Domain Events
+### 12b. Add TASK_ASSIGNED and NOTIFICATION_CREATED to Domain Events
 
-**File: `shared/src/types/events.ts`** -- Add the new event name:
+**File: `shared/src/types/events.ts`** -- Add the new event names:
 
 ```typescript
 export const DOMAIN_EVENTS = {
@@ -3488,13 +3539,14 @@ export const DOMAIN_EVENTS = {
   EMAIL_SENT: "email.sent",
   FILE_UPLOADED: "file.uploaded",
   TASK_COMPLETED: "task.completed",
+  TASK_ASSIGNED: "task.assigned",
   APPROVAL_REQUESTED: "approval.requested",
   APPROVAL_RESOLVED: "approval.resolved",
   NOTIFICATION_CREATED: "notification.created",
 } as const;
 ```
 
-**NOTE:** The SSE manager uses `eventBus.on("notification.created", ...)` which requires this event name. Since `DomainEventName` is derived from `DOMAIN_EVENTS`, the emitLocal call in the notification service needs this type to compile. The alternative is casting `"notification.created" as any` in the emitLocal call (as shown in Task 6a), which also works without modifying the shared types.
+**NOTE:** `TASK_ASSIGNED` is a distinct event from `TASK_COMPLETED`. Use `task.assigned` for assignment notifications instead of overloading `task.completed` with a `type: "task_assigned"` payload hack. The SSE manager listens for `notification.created` for real-time push and `task.assigned` for task assignment updates.
 
 ### 12c. Final app.ts Summary
 
@@ -3565,19 +3617,31 @@ export async function runColdLeadWarming(): Promise<void> {
       }
       const schemaName = `office_${office.slug}`;
 
+      // Acquire advisory lock per office to prevent concurrent runs from racing
+      await client.query("BEGIN");
+      await client.query(
+        `SELECT pg_advisory_xact_lock(hashtext('cold_lead_warming_' || $1))`,
+        [office.id]
+      );
+
       // Find contacts with no contact in 60+ days that have active deals
+      // NOTE: deals.stage_id is a UUID FK to public.pipeline_stage_config.
+      //       We join to pipeline_stage_config and filter by is_terminal = false.
+      //       deals has assigned_rep_id (not assigned_to).
+      //       There is no company_id on deals; company is on contacts.company_name.
       const coldLeads = await client.query(
         `SELECT DISTINCT ON (c.id)
            c.id AS contact_id,
            c.first_name,
            c.last_name,
            d.id AS deal_id,
-           d.assigned_to
+           d.assigned_rep_id
          FROM ${schemaName}.contacts c
          JOIN ${schemaName}.deals d ON d.primary_contact_id = c.id
+         JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
          WHERE c.last_contacted_at < NOW() - INTERVAL '60 days'
-           AND d.stage NOT IN ('won', 'lost', 'dead')
-           AND d.assigned_to IS NOT NULL
+           AND psc.is_terminal = false
+           AND d.assigned_rep_id IS NOT NULL
          ORDER BY c.id, c.last_contacted_at ASC`
       );
 
@@ -3600,11 +3664,14 @@ export async function runColdLeadWarming(): Promise<void> {
           `INSERT INTO ${schemaName}.tasks
            (title, type, priority, status, assigned_to, contact_id, deal_id, due_date, created_by)
            VALUES ($1, 'follow_up', 'normal', 'pending', $2, $3, $4, CURRENT_DATE, $2)`,
-          [title, lead.assigned_to, lead.contact_id, lead.deal_id]
+          [title, lead.assigned_rep_id, lead.contact_id, lead.deal_id]
         );
 
         totalTasksCreated++;
       }
+
+      // Release the advisory lock by committing the transaction for this office
+      await client.query("COMMIT");
     }
 
     console.log(`[Worker:cold-lead-warming] Complete. Created ${totalTasksCreated} cold lead warming tasks`);
@@ -3775,27 +3842,33 @@ export async function runBidDeadlineCountdown(): Promise<void> {
       const schemaName = `office_${office.slug}`;
 
       // Auto-dismiss: find countdown tasks for deals no longer in estimating/bid_sent
+      // NOTE: deals.stage_id is a UUID FK to public.pipeline_stage_config.
+      //       We join to pipeline_stage_config and filter by slug.
       const dismissResult = await client.query(
         `UPDATE ${schemaName}.tasks t
          SET status = 'dismissed', completed_at = NOW()
          FROM ${schemaName}.deals d
+         JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
          WHERE t.deal_id = d.id
            AND t.type = 'system'
            AND t.status IN ('pending', 'in_progress')
-           AND t.title LIKE 'BID DUE%' OR t.title LIKE 'Prepare final bid%' OR t.title LIKE 'Confirm bid submission%'
-           AND d.stage NOT IN ('estimating', 'bid_sent')
+           AND (t.title LIKE 'BID DUE%' OR t.title LIKE 'Prepare final bid%' OR t.title LIKE 'Confirm bid submission%')
+           AND psc.slug NOT IN ('estimating', 'bid_sent')
          RETURNING t.id`
       );
       totalTasksDismissed += dismissResult.rowCount ?? 0;
 
       // Find deals with upcoming bid deadlines
+      // NOTE: stage_id is a UUID FK; join to pipeline_stage_config for slug filtering.
+      //       assigned_rep_id is the correct column (not assigned_to).
       const deals = await client.query(
-        `SELECT id, name, expected_close_date, assigned_to
-         FROM ${schemaName}.deals
-         WHERE expected_close_date IS NOT NULL
-           AND stage IN ('estimating', 'bid_sent')
-           AND assigned_to IS NOT NULL
-           AND expected_close_date > CURRENT_DATE`
+        `SELECT d.id, d.name, d.expected_close_date, d.assigned_rep_id
+         FROM ${schemaName}.deals d
+         JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
+         WHERE d.expected_close_date IS NOT NULL
+           AND psc.slug IN ('estimating', 'bid_sent')
+           AND d.assigned_rep_id IS NOT NULL
+           AND d.expected_close_date > CURRENT_DATE`
       );
 
       for (const deal of deals.rows) {
@@ -3830,7 +3903,7 @@ export async function runBidDeadlineCountdown(): Promise<void> {
             `INSERT INTO ${schemaName}.tasks
              (title, type, priority, status, assigned_to, deal_id, due_date, created_by)
              VALUES ($1, 'system', $2, 'pending', $3, $4, $5, $3)`,
-            [threshold.title, threshold.priority, deal.assigned_to, deal.id, deal.expected_close_date]
+            [threshold.title, threshold.priority, deal.assigned_rep_id, deal.id, deal.expected_close_date]
           );
 
           totalTasksCreated++;
@@ -4090,38 +4163,45 @@ domainEventHandlers.set("deal.lost", async (payload, officeId) => {
   const competitor = payload.lostCompetitor;
   const lostDealName = payload.dealName ?? "a deal";
 
-  // Find the lost deal's primary contact and company
+  // Find the lost deal's primary contact (and their company_name from contacts)
+  // NOTE: deals has NO company_id column. Company info is on contacts.company_name.
+  //       deals.stage_id is a UUID FK to public.pipeline_stage_config.
+  //       deals.assigned_rep_id is the correct column (not assigned_to).
   const lostDealResult = await pool.query(
-    `SELECT primary_contact_id, company_id FROM ${schemaName}.deals WHERE id = $1`,
+    `SELECT d.primary_contact_id, c.company_name
+     FROM ${schemaName}.deals d
+     LEFT JOIN ${schemaName}.contacts c ON c.id = d.primary_contact_id
+     WHERE d.id = $1`,
     [payload.dealId]
   );
   if (lostDealResult.rows.length === 0) return;
 
-  const { primary_contact_id, company_id } = lostDealResult.rows[0];
+  const { primary_contact_id, company_name } = lostDealResult.rows[0];
 
-  // Find other active deals that share a contact or company with the lost deal
+  // Find other active deals that share a primary contact or company_name with the lost deal
   const activeDealConditions: string[] = [];
   const params: any[] = [payload.dealId]; // $1 = lost deal to exclude
 
   if (primary_contact_id) {
-    activeDealConditions.push(`primary_contact_id = $${params.length + 1}`);
+    activeDealConditions.push(`d.primary_contact_id = $${params.length + 1}`);
     params.push(primary_contact_id);
   }
-  if (company_id) {
-    activeDealConditions.push(`company_id = $${params.length + 1}`);
-    params.push(company_id);
+  if (company_name) {
+    activeDealConditions.push(`c.company_name = $${params.length + 1}`);
+    params.push(company_name);
   }
 
   if (activeDealConditions.length === 0) return;
 
   const activeDeals = await pool.query(
-    `SELECT d.id, d.name, d.assigned_to, c.first_name, c.last_name
+    `SELECT d.id, d.name, d.assigned_rep_id, c.first_name, c.last_name
      FROM ${schemaName}.deals d
+     JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
      LEFT JOIN ${schemaName}.contacts c ON c.id = d.primary_contact_id
      WHERE d.id != $1
-       AND d.stage NOT IN ('won', 'lost', 'dead')
+       AND psc.is_terminal = false
        AND (${activeDealConditions.join(" OR ")})
-       AND d.assigned_to IS NOT NULL`,
+       AND d.assigned_rep_id IS NOT NULL`,
     params
   );
 
@@ -4134,7 +4214,7 @@ domainEventHandlers.set("deal.lost", async (payload, officeId) => {
       `INSERT INTO ${schemaName}.tasks
        (title, type, priority, status, assigned_to, deal_id, due_date, created_by)
        VALUES ($1, 'system', 'high', 'pending', $2, $3, CURRENT_DATE, $2)`,
-      [title, deal.assigned_to, deal.id]
+      [title, deal.assigned_rep_id, deal.id]
     );
     tasksCreated++;
   }
@@ -4162,33 +4242,38 @@ domainEventHandlers.set("deal.lost", async (payload, officeId) => {
 // After the handoff tasks are created:
 
 if (payload.projectTypeId) {
-  // Find the company associated with this deal
+  // Find the company associated with this deal via primary contact's company_name
+  // NOTE: deals has NO company_id column. Company info is on contacts.company_name.
+  //       project_type_config is in the public schema (not project_types).
   const dealCompanyResult = await pool.query(
-    `SELECT d.company_id, co.name AS company_name
+    `SELECT c.company_name
      FROM ${schemaName}.deals d
-     LEFT JOIN ${schemaName}.companies co ON co.id = d.company_id
-     WHERE d.id = $1 AND d.company_id IS NOT NULL`,
+     JOIN ${schemaName}.contacts c ON c.id = d.primary_contact_id
+     WHERE d.id = $1 AND c.company_name IS NOT NULL`,
     [payload.dealId]
   );
 
   if (dealCompanyResult.rows.length > 0) {
-    const { company_id, company_name } = dealCompanyResult.rows[0];
+    const { company_name } = dealCompanyResult.rows[0];
     const companyName = company_name ?? "this company";
 
-    // Find project types that have NOT been pitched to this company
-    // Compare against all project types, excluding any already associated with won deals for this company
+    // Find project types that have NOT been pitched to contacts at this company
+    // Compare against all project types, excluding any already associated with deals
+    // where the primary contact has the same company_name
     const untappedTypes = await pool.query(
       `SELECT pt.id, pt.name
-       FROM public.project_types pt
+       FROM public.project_type_config pt
        WHERE pt.id != $1
+         AND pt.is_active = true
          AND pt.id NOT IN (
            SELECT DISTINCT d2.project_type_id
            FROM ${schemaName}.deals d2
-           WHERE d2.company_id = $2
+           JOIN ${schemaName}.contacts c2 ON c2.id = d2.primary_contact_id
+           WHERE c2.company_name = $2
              AND d2.project_type_id IS NOT NULL
          )
        LIMIT 1`,
-      [payload.projectTypeId, company_id]
+      [payload.projectTypeId, company_name]
     );
 
     if (untappedTypes.rows.length > 0) {
@@ -4259,21 +4344,26 @@ export async function runWeeklyDigest(): Promise<void> {
       const schemaName = `office_${office.slug}`;
 
       // Count stale deals (no activity in 14+ days, in active stages)
+      // NOTE: deals.stage_id is a UUID FK to public.pipeline_stage_config.
+      //       Filter active deals by joining to pipeline_stage_config where is_terminal = false.
+      //       deals has awarded_amount and bid_estimate, NOT value.
       const staleResult = await client.query(
         `SELECT COUNT(*)::int AS count
-         FROM ${schemaName}.deals
-         WHERE stage NOT IN ('won', 'lost', 'dead')
-           AND last_activity_at < NOW() - INTERVAL '14 days'`
+         FROM ${schemaName}.deals d
+         JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
+         WHERE psc.is_terminal = false
+           AND d.last_activity_at < NOW() - INTERVAL '14 days'`
       );
       const staleCount = staleResult.rows[0].count;
 
       // Count deals approaching deadline (expected_close_date within 7 days)
       const approachingResult = await client.query(
         `SELECT COUNT(*)::int AS count
-         FROM ${schemaName}.deals
-         WHERE stage NOT IN ('won', 'lost', 'dead')
-           AND expected_close_date IS NOT NULL
-           AND expected_close_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '7 days'`
+         FROM ${schemaName}.deals d
+         JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
+         WHERE psc.is_terminal = false
+           AND d.expected_close_date IS NOT NULL
+           AND d.expected_close_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '7 days'`
       );
       const approachingCount = approachingResult.rows[0].count;
 
@@ -4285,11 +4375,12 @@ export async function runWeeklyDigest(): Promise<void> {
       );
       const newDealsCount = newDealsResult.rows[0].count;
 
-      // Total pipeline value (active deals)
+      // Total pipeline value (active deals) — use COALESCE of awarded_amount falling back to bid_estimate
       const valueResult = await client.query(
-        `SELECT COALESCE(SUM(value), 0)::numeric(12,2) AS total
-         FROM ${schemaName}.deals
-         WHERE stage NOT IN ('won', 'lost', 'dead')`
+        `SELECT COALESCE(SUM(COALESCE(d.awarded_amount, d.bid_estimate, 0)), 0)::numeric(12,2) AS total
+         FROM ${schemaName}.deals d
+         JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
+         WHERE psc.is_terminal = false`
       );
       const totalValue = parseFloat(valueResult.rows[0].total);
       const formattedValue = totalValue >= 1000000
@@ -4310,10 +4401,11 @@ export async function runWeeklyDigest(): Promise<void> {
       const title = `Weekly Pipeline Review — ${staleCount} stale, ${approachingCount} approaching deadline, ${newDealsCount} new this week, ${formattedValue} total`;
 
       for (const director of directors.rows) {
+        // NOTE: tasks table has no 'link' column. Use description to store the deep link.
         await client.query(
           `INSERT INTO ${schemaName}.tasks
-           (title, type, priority, status, assigned_to, due_date, created_by, link)
-           VALUES ($1, 'system', 'normal', 'pending', $2, CURRENT_DATE, $2, '/director')`,
+           (title, description, type, priority, status, assigned_to, due_date, created_by)
+           VALUES ($1, 'View the full pipeline at /director', 'system', 'normal', 'pending', $2, CURRENT_DATE, $2)`,
           [title, director.id]
         );
         totalDigestTasks++;
@@ -4360,6 +4452,174 @@ registerJobHandler("weekly_digest", async () => {
 
 ---
 
+## Task 22: Resend Email Delivery for System Notifications
+
+- [ ] Install `resend` npm package
+- [ ] Create `server/src/services/resend-email.ts`
+- [ ] Wire into notification service for critical notification types
+
+### 22a. Install Resend Package
+
+```bash
+npm install resend
+```
+
+### 22b. System Email Service
+
+**File: `server/src/services/resend-email.ts`**
+
+```typescript
+import { Resend } from "resend";
+
+const resend = process.env.RESEND_API_KEY
+  ? new Resend(process.env.RESEND_API_KEY)
+  : null;
+
+const FROM_EMAIL = process.env.RESEND_FROM_EMAIL ?? "notifications@trock-crm.com";
+
+/**
+ * Notification types that also trigger an email via Resend.
+ * These are high-priority notifications that the user should not miss.
+ */
+const EMAIL_WORTHY_TYPES = new Set([
+  "stale_deal",
+  "activity_drop",
+  "approval_needed",
+  "inbound_email",
+]);
+
+interface SystemEmailInput {
+  to: string; // recipient email address
+  notificationType: string;
+  title: string;
+  body?: string;
+  link?: string;
+}
+
+/**
+ * Send a system notification email via Resend.
+ * Only fires for critical notification types defined in EMAIL_WORTHY_TYPES.
+ * Fails silently if Resend is not configured (RESEND_API_KEY not set).
+ */
+export async function sendSystemEmail(input: SystemEmailInput): Promise<void> {
+  if (!resend) {
+    console.warn("[Resend] RESEND_API_KEY not configured -- skipping email");
+    return;
+  }
+
+  if (!EMAIL_WORTHY_TYPES.has(input.notificationType)) {
+    return; // Not a critical notification type
+  }
+
+  try {
+    const appUrl = process.env.FRONTEND_URL ?? "https://app.trock-crm.com";
+    const deepLink = input.link ? `${appUrl}${input.link}` : appUrl;
+
+    await resend.emails.send({
+      from: FROM_EMAIL,
+      to: input.to,
+      subject: `[T Rock CRM] ${input.title}`,
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+          <div style="background: #1e293b; padding: 16px 24px; border-radius: 8px 8px 0 0;">
+            <h2 style="color: #ffffff; margin: 0; font-size: 18px;">T Rock CRM</h2>
+          </div>
+          <div style="padding: 24px; border: 1px solid #e2e8f0; border-top: 0; border-radius: 0 0 8px 8px;">
+            <h3 style="margin: 0 0 8px 0; color: #1e293b;">${input.title}</h3>
+            ${input.body ? `<p style="color: #64748b; margin: 0 0 16px 0;">${input.body}</p>` : ""}
+            <a href="${deepLink}"
+               style="display: inline-block; background: #7c3aed; color: #ffffff; padding: 10px 20px;
+                      border-radius: 6px; text-decoration: none; font-weight: 500;">
+              View in CRM
+            </a>
+          </div>
+        </div>
+      `,
+    });
+
+    console.log(`[Resend] Sent ${input.notificationType} email to ${input.to}`);
+  } catch (err) {
+    console.error(`[Resend] Failed to send ${input.notificationType} email:`, err);
+    // Fail silently -- email is supplementary to in-app notification
+  }
+}
+```
+
+### 22c. Wire into Notification Service
+
+**File: `server/src/modules/notifications/service.ts`** -- Add Resend email to `createNotification()`:
+
+After the notification is inserted and the SSE event is emitted, call `sendSystemEmail`:
+
+```typescript
+import { sendSystemEmail } from "../../services/resend-email.js";
+
+// Inside createNotification(), after the SSE emit try/catch block:
+
+// Send email for critical notification types via Resend
+if (input.recipientEmail) {
+  sendSystemEmail({
+    to: input.recipientEmail,
+    notificationType: input.type,
+    title: input.title,
+    body: input.body,
+    link: input.link,
+  }).catch((err) => {
+    console.error("[Notifications] Resend email failed:", err);
+  });
+}
+```
+
+Update the `createNotification` input type to accept an optional `recipientEmail`:
+
+```typescript
+export async function createNotification(
+  tenantDb: TenantDb,
+  input: {
+    userId: string;
+    type: string;
+    title: string;
+    body?: string;
+    link?: string;
+    recipientEmail?: string; // If provided, also sends via Resend for critical types
+  }
+)
+```
+
+### 22d. Wire into Worker Notification Inserts
+
+For worker-created notifications (stale_deal, activity_drop), look up the user's email after inserting the notification and call `sendSystemEmail`:
+
+**File: `worker/src/jobs/activity-alerts.ts`** -- After inserting the activity_drop notification:
+
+```typescript
+import { sendSystemEmail } from "../../../server/src/services/resend-email.js";
+// OR inline the Resend call if cross-package imports are not allowed:
+
+// After the notification INSERT for each director:
+const directorEmail = await client.query(
+  "SELECT email FROM public.users WHERE id = $1",
+  [director.id]
+);
+if (directorEmail.rows[0]?.email) {
+  sendSystemEmail({
+    to: directorEmail.rows[0].email,
+    notificationType: "activity_drop",
+    title,
+    body,
+    link: "/director",
+  }).catch(console.error);
+}
+```
+
+**Commit:** `feat: add Resend email delivery for critical system notifications (stale_deal, activity_drop, approval_needed, inbound_email)`
+
+**Environment Variables Required:**
+- `RESEND_API_KEY` -- API key from resend.com
+- `RESEND_FROM_EMAIL` -- verified sender email (default: `notifications@trock-crm.com`)
+
+---
+
 ## Task 21: AI-Suggested Next Action (Phase 2 Stub)
 
 - [ ] Add placeholder handler for `ai.suggest_action` domain event
@@ -4367,7 +4627,7 @@ registerJobHandler("weekly_digest", async () => {
 
 ### 21a. Register Domain Event
 
-**File: `shared/src/types/events.ts`** -- Add the new event name:
+**File: `shared/src/types/events.ts`** -- Add the new event name (cumulative with Task 12b additions):
 
 ```typescript
 export const DOMAIN_EVENTS = {
@@ -4379,6 +4639,7 @@ export const DOMAIN_EVENTS = {
   EMAIL_SENT: "email.sent",
   FILE_UPLOADED: "file.uploaded",
   TASK_COMPLETED: "task.completed",
+  TASK_ASSIGNED: "task.assigned",
   APPROVAL_REQUESTED: "approval.requested",
   APPROVAL_RESOLVED: "approval.resolved",
   NOTIFICATION_CREATED: "notification.created",
@@ -4431,7 +4692,7 @@ Execute tasks in this order to minimize blocked dependencies:
 9. **Task 9** (Task list page) -- needs Task 8
 10. **Task 10** (Notification center) -- needs Task 8
 11. **Task 11** (Activity logging forms) -- needs Task 8
-12. **Task 12** (Route wiring) -- final integration
+12. **Task 12** (Route wiring + DOMAIN_EVENTS update) -- final integration
 13. **Task 13** (Cold lead warming worker) -- needs task table + contacts/deals tables
 14. **Task 14** (Post-meeting follow-up) -- needs activity service from Task 2
 15. **Task 15** (Bid deadline countdown worker) -- needs task table + deals table
@@ -4440,6 +4701,7 @@ Execute tasks in this order to minimize blocked dependencies:
 18. **Task 18** (Competitor intelligence tasks) -- needs deal.lost handler
 19. **Task 19** (Cross-sell alert tasks) -- needs deal.won handler (after Task 17)
 20. **Task 20** (Director weekly digest worker) -- needs task table + deals table
-21. **Task 21** (AI-suggested next action stub) -- no dependencies, Phase 2 placeholder
+21. **Task 22** (Resend email for system notifications) -- needs notification service from Task 6
+22. **Task 21** (AI-suggested next action stub) -- no dependencies, Phase 2 placeholder
 
-Tasks 1-2 can run in parallel. Tasks 3-4 can run in parallel. Tasks 9-11 can run in parallel. Tasks 13, 15, 20 can run in parallel (independent worker jobs). Tasks 17, 19 must be sequential (both extend deal.won). Tasks 16, 18 are independent event handlers.
+Tasks 1-2 can run in parallel. Tasks 3-4 can run in parallel. Tasks 9-11 can run in parallel. Tasks 13, 15, 20 can run in parallel (independent worker jobs). Tasks 17, 19 must be sequential (both extend deal.won). Tasks 16, 18 are independent event handlers. Task 22 can run after Task 6.
