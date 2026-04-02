@@ -22,6 +22,11 @@ import {
   updateAssociation,
   deleteAssociation,
 } from "./association-service.js";
+import {
+  getDuplicateQueue,
+  mergeContacts,
+  dismissDuplicate,
+} from "./merge-service.js";
 import { getDealById } from "../deals/service.js";
 
 const router = Router();
@@ -114,6 +119,66 @@ router.get("/search", async (req, res, next) => {
     next(err);
   }
 });
+
+// --- Duplicate Queue & Merge ---
+
+// GET /api/contacts/duplicates — duplicate queue (director/admin only)
+router.get("/duplicates", requireRole("admin", "director"), async (req, res, next) => {
+  try {
+    const filters = {
+      status: req.query.status as string | undefined,
+      page: req.query.page ? parseInt(req.query.page as string, 10) : undefined,
+      limit: req.query.limit ? parseInt(req.query.limit as string, 10) : undefined,
+    };
+    const result = await getDuplicateQueue(req.tenantDb!, filters);
+    await req.commitTransaction!();
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/contacts/duplicates/:id/merge — merge two contacts (director/admin only)
+router.post(
+  "/duplicates/:id/merge",
+  requireRole("admin", "director"),
+  async (req, res, next) => {
+    try {
+      const { winnerId, loserId } = req.body;
+      if (!winnerId || !loserId) {
+        throw new AppError(400, "winnerId and loserId are required");
+      }
+
+      const result = await mergeContacts(
+        req.tenantDb!,
+        winnerId,
+        loserId,
+        req.user!.id,
+        req.params.id as string
+      );
+
+      await req.commitTransaction!();
+      res.json({ merge: result });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// POST /api/contacts/duplicates/:id/dismiss — dismiss a duplicate (director/admin only)
+router.post(
+  "/duplicates/:id/dismiss",
+  requireRole("admin", "director"),
+  async (req, res, next) => {
+    try {
+      const entry = await dismissDuplicate(req.tenantDb!, req.params.id as string, req.user!.id);
+      await req.commitTransaction!();
+      res.json({ entry });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
 
 // GET /api/contacts/:id — single contact
 router.get("/:id", async (req, res, next) => {
