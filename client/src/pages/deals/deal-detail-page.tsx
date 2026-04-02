@@ -20,6 +20,7 @@ import { DealEmailTab } from "@/components/email/deal-email-tab";
 import { DealOverviewTab } from "@/components/deals/deal-overview-tab";
 import { DealHistoryTab } from "@/components/deals/deal-history-tab";
 import { DealTimelineTab } from "@/components/deals/deal-timeline-tab";
+import { DealFileTab } from "@/components/files/deal-file-tab";
 import { StageChangeDialog } from "@/components/deals/stage-change-dialog";
 import { useDealDetail, deleteDeal as apiDeleteDeal } from "@/hooks/use-deals";
 import { usePipelineStages } from "@/hooks/use-pipeline-config";
@@ -240,11 +241,7 @@ export function DealDetailPage() {
 
       {/* Tab Content */}
       {activeTab === "overview" && <DealOverviewTab deal={deal} />}
-      {activeTab === "files" && (
-        <div className="text-center py-12 text-muted-foreground">
-          <p>File management coming in Plan 4: Files & Photos</p>
-        </div>
-      )}
+      {activeTab === "files" && <DealFileTab dealId={deal.id} />}
       {activeTab === "email" && <DealEmailTab dealId={deal.id} />}
       {activeTab === "timeline" && <DealTimelineTab _dealId={deal.id} />}
       {activeTab === "history" && <DealHistoryTab deal={deal} />}

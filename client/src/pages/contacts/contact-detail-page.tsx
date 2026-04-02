@@ -24,6 +24,7 @@ import { ContactTouchpointCard } from "@/components/contacts/contact-touchpoint-
 import { ContactDealsTab } from "@/components/contacts/contact-deals-tab";
 import { ContactActivityTab } from "@/components/contacts/contact-activity-tab";
 import { ContactEmailTab } from "@/components/email/contact-email-tab";
+import { ContactFileTab } from "@/components/files/contact-file-tab";
 import { useContactDetail, deleteContact as apiDeleteContact } from "@/hooks/use-contacts";
 import { useAuth } from "@/lib/auth";
 import { fullName, formatPhone, contactLocation } from "@/lib/contact-utils";
@@ -214,11 +215,7 @@ export function ContactDetailPage() {
         <ContactEmailTab contactId={contact.id} contactEmail={contact.email} />
       )}
       {activeTab === "activity" && <ContactActivityTab contactId={contact.id} />}
-      {activeTab === "files" && (
-        <div className="text-center py-12 text-muted-foreground">
-          <p>File management coming in Plan 5</p>
-        </div>
-      )}
+      {activeTab === "files" && <ContactFileTab contactId={contact.id} />}
     </div>
   );
 }
