@@ -23,11 +23,12 @@ import { ContactCategoryBadge } from "@/components/contacts/contact-category-bad
 import { ContactTouchpointCard } from "@/components/contacts/contact-touchpoint-card";
 import { ContactDealsTab } from "@/components/contacts/contact-deals-tab";
 import { ContactActivityTab } from "@/components/contacts/contact-activity-tab";
+import { ContactEmailTab } from "@/components/email/contact-email-tab";
 import { useContactDetail, deleteContact as apiDeleteContact } from "@/hooks/use-contacts";
 import { useAuth } from "@/lib/auth";
 import { fullName, formatPhone, contactLocation } from "@/lib/contact-utils";
 
-type Tab = "deals" | "activity" | "files";
+type Tab = "deals" | "email" | "activity" | "files";
 
 export function ContactDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -70,6 +71,7 @@ export function ContactDetailPage() {
 
   const tabs: { key: Tab; label: string }[] = [
     { key: "deals", label: "Deals" },
+    { key: "email", label: "Email" },
     { key: "activity", label: "Activity" },
     { key: "files", label: "Files" },
   ];
@@ -208,6 +210,9 @@ export function ContactDetailPage() {
 
       {/* Tab Content */}
       {activeTab === "deals" && <ContactDealsTab contactId={contact.id} />}
+      {activeTab === "email" && (
+        <ContactEmailTab contactId={contact.id} contactEmail={contact.email} />
+      )}
       {activeTab === "activity" && <ContactActivityTab contactId={contact.id} />}
       {activeTab === "files" && (
         <div className="text-center py-12 text-muted-foreground">

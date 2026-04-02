@@ -16,6 +16,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { DealStageBadge } from "@/components/deals/deal-stage-badge";
+import { DealEmailTab } from "@/components/email/deal-email-tab";
 import { DealOverviewTab } from "@/components/deals/deal-overview-tab";
 import { DealHistoryTab } from "@/components/deals/deal-history-tab";
 import { DealTimelineTab } from "@/components/deals/deal-timeline-tab";
@@ -244,11 +245,7 @@ export function DealDetailPage() {
           <p>File management coming in Plan 4: Files & Photos</p>
         </div>
       )}
-      {activeTab === "email" && (
-        <div className="text-center py-12 text-muted-foreground">
-          <p>Email integration coming in Plan 5: Email</p>
-        </div>
-      )}
+      {activeTab === "email" && <DealEmailTab dealId={deal.id} />}
       {activeTab === "timeline" && <DealTimelineTab _dealId={deal.id} />}
       {activeTab === "history" && <DealHistoryTab deal={deal} />}
 
