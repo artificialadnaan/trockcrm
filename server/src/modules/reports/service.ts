@@ -15,12 +15,13 @@ import { db } from "../../db.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
-/** Default to current calendar year boundaries */
+/** Default to Jan 1 of current year through today */
 function defaultDateRange(from?: string, to?: string): { from: string; to: string } {
   const year = new Date().getFullYear();
+  const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
   return {
     from: from ?? `${year}-01-01`,
-    to: to ?? `${year}-12-31`,
+    to: to ?? today,
   };
 }
 
@@ -40,13 +41,14 @@ export interface PipelineSummaryRow {
 
 /**
  * Pipeline summary grouped by stage.
+ * Shows current active pipeline state (not time-bounded by created_at).
  * @param includeDd - if false, excludes stages where is_active_pipeline = false (DD stages)
+ * @param repId - if provided, scope to a single rep's deals
  */
 export async function getPipelineSummary(
   tenantDb: TenantDb,
-  options: { includeDd?: boolean; from?: string; to?: string } = {}
+  options: { includeDd?: boolean; from?: string; to?: string; repId?: string } = {}
 ): Promise<PipelineSummaryRow[]> {
-  const { from, to } = defaultDateRange(options.from, options.to);
   const includeDd = options.includeDd ?? false;
 
   // Get all non-terminal stages
@@ -63,6 +65,11 @@ export async function getPipelineSummary(
   const stageIds = filteredStages.map((s) => s.id);
   if (stageIds.length === 0) return [];
 
+  // Active pipeline = current state, not time-bounded
+  const repFilter = options.repId
+    ? sql`AND d.assigned_rep_id = ${options.repId}`
+    : sql``;
+
   // Aggregate deal counts and values per stage
   const result = await tenantDb.execute(sql`
     SELECT
@@ -74,8 +81,7 @@ export async function getPipelineSummary(
     FROM deals d
     WHERE d.is_active = true
       AND d.stage_id = ANY(${stageIds})
-      AND d.created_at >= ${from}::timestamptz
-      AND d.created_at <= (${to}::date + INTERVAL '1 day')::timestamptz
+      ${repFilter}
     GROUP BY d.stage_id
   `);
 

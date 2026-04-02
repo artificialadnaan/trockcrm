@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { requireRole } from "../../middleware/rbac.js";
+import { requireRole, requireDirector } from "../../middleware/rbac.js";
 import { AppError } from "../../middleware/error-handler.js";
 import {
   getPipelineSummary,
@@ -34,10 +34,13 @@ const router = Router();
 // GET /api/reports/pipeline-summary?includeDd=false&from=2026-01-01&to=2026-12-31
 router.get("/pipeline-summary", async (req, res, next) => {
   try {
+    // Reps can only see their own pipeline
+    const repId = req.user!.role === "rep" ? req.user!.id : undefined;
     const data = await getPipelineSummary(req.tenantDb!, {
       includeDd: req.query.includeDd === "true",
       from: req.query.from as string | undefined,
       to: req.query.to as string | undefined,
+      repId,
     });
     await req.commitTransaction!();
     res.json({ data });
@@ -49,9 +52,12 @@ router.get("/pipeline-summary", async (req, res, next) => {
 // GET /api/reports/weighted-forecast?from=2026-01-01&to=2026-12-31
 router.get("/weighted-forecast", async (req, res, next) => {
   try {
+    // Reps can only see their own forecast
+    const repId = req.user!.role === "rep" ? req.user!.id : undefined;
     const data = await getWeightedPipelineForecast(req.tenantDb!, {
       from: req.query.from as string | undefined,
       to: req.query.to as string | undefined,
+      repId,
     });
     await req.commitTransaction!();
     res.json({ data });
@@ -61,7 +67,7 @@ router.get("/weighted-forecast", async (req, res, next) => {
 });
 
 // GET /api/reports/win-loss?from=2026-01-01&to=2026-12-31
-router.get("/win-loss", async (req, res, next) => {
+router.get("/win-loss", requireDirector, async (req, res, next) => {
   try {
     const data = await getWinLossRatioByRep(req.tenantDb!, {
       from: req.query.from as string | undefined,
@@ -77,10 +83,14 @@ router.get("/win-loss", async (req, res, next) => {
 // GET /api/reports/win-rate-trend?from=2026-01-01&to=2026-12-31&repId=uuid
 router.get("/win-rate-trend", async (req, res, next) => {
   try {
+    // Reps can only see their own data
+    const repId = req.user!.role === "rep"
+      ? req.user!.id
+      : (req.query.repId as string | undefined);
     const data = await getWinRateTrend(req.tenantDb!, {
       from: req.query.from as string | undefined,
       to: req.query.to as string | undefined,
-      repId: req.query.repId as string | undefined,
+      repId,
     });
     await req.commitTransaction!();
     res.json({ data });
@@ -90,7 +100,7 @@ router.get("/win-rate-trend", async (req, res, next) => {
 });
 
 // GET /api/reports/activity-summary?from=2026-01-01&to=2026-12-31
-router.get("/activity-summary", async (req, res, next) => {
+router.get("/activity-summary", requireDirector, async (req, res, next) => {
   try {
     const data = await getActivitySummaryByRep(req.tenantDb!, {
       from: req.query.from as string | undefined,
@@ -106,8 +116,12 @@ router.get("/activity-summary", async (req, res, next) => {
 // GET /api/reports/stale-deals?repId=uuid
 router.get("/stale-deals", async (req, res, next) => {
   try {
+    // Reps can only see their own stale deals
+    const repId = req.user!.role === "rep"
+      ? req.user!.id
+      : (req.query.repId as string | undefined);
     const data = await getStaleDeals(req.tenantDb!, {
-      repId: req.query.repId as string | undefined,
+      repId,
     });
     await req.commitTransaction!();
     res.json({ data });
@@ -131,7 +145,7 @@ router.get("/lost-by-reason", async (req, res, next) => {
 });
 
 // GET /api/reports/revenue-by-type?from=2026-01-01&to=2026-12-31
-router.get("/revenue-by-type", async (req, res, next) => {
+router.get("/revenue-by-type", requireDirector, async (req, res, next) => {
   try {
     const data = await getRevenueByProjectType(req.tenantDb!, {
       from: req.query.from as string | undefined,
@@ -145,7 +159,7 @@ router.get("/revenue-by-type", async (req, res, next) => {
 });
 
 // GET /api/reports/lead-source-roi?from=2026-01-01&to=2026-12-31
-router.get("/lead-source-roi", async (req, res, next) => {
+router.get("/lead-source-roi", requireDirector, async (req, res, next) => {
   try {
     const data = await getLeadSourceROI(req.tenantDb!, {
       from: req.query.from as string | undefined,
@@ -161,7 +175,10 @@ router.get("/lead-source-roi", async (req, res, next) => {
 // GET /api/reports/follow-up-compliance?repId=uuid&from=2026-01-01&to=2026-12-31
 router.get("/follow-up-compliance", async (req, res, next) => {
   try {
-    const repId = (req.query.repId as string) || req.user!.id;
+    // Reps can only see their own compliance data
+    const repId = req.user!.role === "rep"
+      ? req.user!.id
+      : ((req.query.repId as string) || req.user!.id);
     const data = await getFollowUpCompliance(req.tenantDb!, repId, {
       from: req.query.from as string | undefined,
       to: req.query.to as string | undefined,
