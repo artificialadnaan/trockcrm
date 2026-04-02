@@ -2,6 +2,7 @@ import { registerJobHandler } from "../queue.js";
 import { runStaleDealScan } from "./stale-deals.js";
 import { runDedupScan } from "./dedup-scan.js";
 import { runEmailSync } from "./email-sync.js";
+import { extractExif } from "./exif-extract.js";
 
 /**
  * Test handler that logs the payload. Used to validate the queue works end-to-end.
@@ -118,6 +119,18 @@ export function registerAllJobs() {
   domainEventHandlers.set("email.sent", async (payload, _officeId) => {
     console.log(`[Worker] email.sent: to ${payload.to?.join(", ")} — subject: ${payload.subject}`);
     // Future: update contact touchpoint count, last_contacted_at
+  });
+
+  // Domain event: file.uploaded -> extract EXIF metadata for photo files
+  domainEventHandlers.set("file.uploaded", async (payload, officeId) => {
+    console.log(`[Worker] file.uploaded: ${payload.fileId} (category: ${payload.category})`);
+    if (payload.category === "photo") {
+      await extractExif(payload.fileId, officeId, {
+        r2Key: payload.r2Key,
+        mimeType: payload.mimeType,
+        category: payload.category,
+      });
+    }
   });
 
   console.log("[Worker] Job handlers registered:", ["test_echo", "domain_event", "stale_deal_scan", "dedup_scan", "email_sync"].join(", "));
