@@ -1,6 +1,7 @@
 import { registerJobHandler } from "../queue.js";
 import { runStaleDealScan } from "./stale-deals.js";
 import { runDedupScan } from "./dedup-scan.js";
+import { runEmailSync } from "./email-sync.js";
 
 /**
  * Test handler that logs the payload. Used to validate the queue works end-to-end.
@@ -48,6 +49,11 @@ export function registerAllJobs() {
     await runDedupScan();
   });
 
+  // Email sync (triggered via job_queue or cron)
+  registerJobHandler("email_sync", async () => {
+    await runEmailSync();
+  });
+
   // Domain event handlers for deal lifecycle
   domainEventHandlers.set("deal.won", async (payload, officeId) => {
     console.log(`[Worker] Deal won: ${payload.dealNumber} (${payload.dealName}) - amount: ${payload.awardedAmount}`);
@@ -69,7 +75,52 @@ export function registerAllJobs() {
     // Future: trigger welcome email, HubSpot sync, etc.
   });
 
-  console.log("[Worker] Job handlers registered:", ["test_echo", "domain_event", "stale_deal_scan", "dedup_scan"].join(", "));
+  // Domain event: email.received -> create notification for rep
+  domainEventHandlers.set("email.received", async (payload, _officeId) => {
+    console.log(`[Worker] email.received: from ${payload.fromAddress} — subject: ${payload.subject}`);
+
+    // Task creation is handled inline during sync (see email-sync.ts processInboundMessage).
+    // This handler creates a notification for the user.
+    if (!payload.userId) return;
+
+    const { pool: workerPool } = await import("../db.js");
+    const userResult = await workerPool.query(
+      "SELECT office_id FROM public.users WHERE id = $1",
+      [payload.userId]
+    );
+    if (userResult.rows.length === 0) return;
+
+    const officeResult = await workerPool.query(
+      "SELECT slug FROM public.offices WHERE id = $1 AND is_active = true",
+      [userResult.rows[0].office_id]
+    );
+    if (officeResult.rows.length === 0) return;
+
+    const slug = officeResult.rows[0].slug;
+    const slugRegex = /^[a-z][a-z0-9_]*$/;
+    if (!slugRegex.test(slug)) return;
+
+    const schemaName = `office_${slug}`;
+
+    // Create notification for the rep
+    await workerPool.query(
+      `INSERT INTO ${schemaName}.notifications (user_id, type, title, body, link)
+       VALUES ($1, 'inbound_email', $2, $3, $4)`,
+      [
+        payload.userId,
+        `New email from ${payload.contactName || payload.fromAddress}`,
+        payload.subject?.substring(0, 200) ?? "New email",
+        payload.emailId ? `/email/${payload.emailId}` : "/email",
+      ]
+    );
+  });
+
+  domainEventHandlers.set("email.sent", async (payload, _officeId) => {
+    console.log(`[Worker] email.sent: to ${payload.to?.join(", ")} — subject: ${payload.subject}`);
+    // Future: update contact touchpoint count, last_contacted_at
+  });
+
+  console.log("[Worker] Job handlers registered:", ["test_echo", "domain_event", "stale_deal_scan", "dedup_scan", "email_sync"].join(", "));
 }
 
 export { domainEventHandlers };
