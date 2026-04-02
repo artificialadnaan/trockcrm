@@ -377,4 +377,49 @@ router.delete("/associations/:associationId", async (req, res, next) => {
   }
 });
 
+// POST /api/contacts/:id/activities — log an activity for a contact
+// (wires up the contact-activity-tab.tsx form)
+router.post("/:id/activities", async (req, res, next) => {
+  try {
+    const { createActivity } = await import("../activities/service.js");
+    const contactId = req.params.id;
+    const { type, subject, body, outcome, durationMinutes, dealId, occurredAt } = req.body;
+
+    if (!type) throw new AppError(400, "Activity type is required");
+
+    const activity = await createActivity(req.tenantDb!, {
+      type,
+      userId: req.user!.id,
+      dealId: dealId ?? null,
+      contactId,
+      subject,
+      body,
+      outcome,
+      durationMinutes,
+      occurredAt,
+    });
+
+    await req.commitTransaction!();
+    res.status(201).json({ activity });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/contacts/:id/activities — get activities for a contact
+router.get("/:id/activities", async (req, res, next) => {
+  try {
+    const { getActivities } = await import("../activities/service.js");
+    const result = await getActivities(req.tenantDb!, {
+      contactId: req.params.id,
+      page: req.query.page ? parseInt(req.query.page as string, 10) : undefined,
+      limit: req.query.limit ? parseInt(req.query.limit as string, 10) : undefined,
+    });
+    await req.commitTransaction!();
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
 export const contactRoutes = router;
