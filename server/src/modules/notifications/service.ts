@@ -3,6 +3,7 @@ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { notifications } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { eventBus } from "../../events/bus.js";
+import { isCriticalNotificationType, sendNotificationEmail } from "./email-delivery.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -98,6 +99,7 @@ export async function createNotification(
     title: string;
     body?: string;
     link?: string;
+    recipientEmail?: string;
   }
 ) {
   const result = await tenantDb
@@ -125,6 +127,16 @@ export async function createNotification(
   } catch (err) {
     // Best-effort -- SSE push failure should not break the request
     console.error("[Notifications] SSE push failed:", err);
+  }
+
+  // Send email for critical notification types (best-effort, non-blocking)
+  if (isCriticalNotificationType(input.type) && input.recipientEmail) {
+    sendNotificationEmail(
+      { type: input.type, title: input.title, body: input.body, link: input.link },
+      input.recipientEmail
+    ).catch((err) => {
+      console.error("[Notifications] Email delivery failed:", err);
+    });
   }
 
   return notification;

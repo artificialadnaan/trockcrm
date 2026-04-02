@@ -11,6 +11,7 @@ export const DOMAIN_EVENTS = {
   NOTIFICATION_CREATED: "notification.created",
   APPROVAL_REQUESTED: "approval.requested",
   APPROVAL_RESOLVED: "approval.resolved",
+  AI_SUGGEST_ACTION: "ai.suggest_action",
 } as const;
 
 export type DomainEventName = (typeof DOMAIN_EVENTS)[keyof typeof DOMAIN_EVENTS];
