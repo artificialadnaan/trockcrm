@@ -1,0 +1,189 @@
+import { useState, useEffect, useCallback } from "react";
+import { api } from "../lib/api";
+
+export interface MigrationSummary {
+  deals: Record<string, number>;
+  contacts: Record<string, number>;
+  activities: Record<string, number>;
+  recentRuns: ImportRun[];
+}
+
+export interface ImportRun {
+  id: string;
+  type: "extract" | "validate" | "promote";
+  status: "running" | "completed" | "failed" | "rolled_back";
+  stats: Record<string, unknown>;
+  errorLog: string | null;
+  startedAt: string;
+  completedAt: string | null;
+}
+
+export interface StagedDeal {
+  id: string;
+  hubspotDealId: string;
+  mappedName: string | null;
+  mappedStage: string | null;
+  mappedRepEmail: string | null;
+  mappedAmount: number | null;
+  mappedCloseDate: string | null;
+  mappedSource: string | null;
+  validationStatus: string;
+  validationErrors: Array<{ field: string; error: string }>;
+  validationWarnings: Array<{ field: string; warning: string }>;
+  reviewNotes: string | null;
+  promotedAt: string | null;
+}
+
+export interface StagedContact {
+  id: string;
+  hubspotContactId: string;
+  mappedFirstName: string | null;
+  mappedLastName: string | null;
+  mappedEmail: string | null;
+  mappedPhone: string | null;
+  mappedCompany: string | null;
+  mappedCategory: string;
+  duplicateOfStagedId: string | null;
+  validationStatus: string;
+  validationErrors: Array<{ field: string; error: string }>;
+  validationWarnings: Array<{ field: string; warning: string }>;
+  promotedAt: string | null;
+}
+
+export function useMigrationSummary() {
+  const [summary, setSummary] = useState<MigrationSummary | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await api<MigrationSummary>("/migration/summary");
+      setSummary(data);
+    } catch (err) {
+      setError("Failed to load migration summary");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const runValidation = async () => {
+    await api("/migration/validate", { method: "POST" });
+    await load();
+  };
+
+  useEffect(() => { load(); }, [load]);
+
+  return { summary, loading, error, refetch: load, runValidation };
+}
+
+export function useStagedDeals(validationStatus?: string) {
+  const [rows, setRows] = useState<StagedDeal[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
+  const [loading, setLoading] = useState(true);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const params = new URLSearchParams({ page: String(page), limit: "50" });
+      if (validationStatus) params.set("validationStatus", validationStatus);
+      const data = await api<{ rows: StagedDeal[]; total: number }>(
+        `/migration/deals?${params}`
+      );
+      setRows(data.rows);
+      setTotal(data.total);
+    } finally {
+      setLoading(false);
+    }
+  }, [page, validationStatus]);
+
+  const approve = async (id: string) => {
+    await api(`/migration/deals/${id}/approve`, { method: "POST" });
+    await load();
+  };
+
+  const reject = async (id: string, notes?: string) => {
+    await api(`/migration/deals/${id}/reject`, {
+      method: "POST",
+      json: { notes },
+    });
+    await load();
+  };
+
+  const batchApprove = async () => {
+    const ids = Array.from(selected);
+    if (ids.length === 0) return;
+    await api("/migration/deals/batch-approve", {
+      method: "POST",
+      json: { ids },
+    });
+    setSelected(new Set());
+    await load();
+  };
+
+  useEffect(() => { load(); }, [load]);
+
+  return { rows, total, page, setPage, loading, selected, setSelected, approve, reject, batchApprove, refetch: load };
+}
+
+export function useStagedContacts(validationStatus?: string) {
+  const [rows, setRows] = useState<StagedContact[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
+  const [loading, setLoading] = useState(true);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const params = new URLSearchParams({ page: String(page), limit: "50" });
+      if (validationStatus) params.set("validationStatus", validationStatus);
+      const data = await api<{ rows: StagedContact[]; total: number }>(
+        `/migration/contacts?${params}`
+      );
+      setRows(data.rows);
+      setTotal(data.total);
+    } finally {
+      setLoading(false);
+    }
+  }, [page, validationStatus]);
+
+  const approve = async (id: string) => {
+    await api(`/migration/contacts/${id}/approve`, { method: "POST" });
+    await load();
+  };
+
+  const reject = async (id: string, notes?: string) => {
+    await api(`/migration/contacts/${id}/reject`, {
+      method: "POST",
+      json: { notes },
+    });
+    await load();
+  };
+
+  const merge = async (id: string, mergeTargetId: string) => {
+    await api(`/migration/contacts/${id}/merge`, {
+      method: "POST",
+      json: { mergeTargetId },
+    });
+    await load();
+  };
+
+  const batchApprove = async () => {
+    const ids = Array.from(selected);
+    if (ids.length === 0) return;
+    await api("/migration/contacts/batch-approve", {
+      method: "POST",
+      json: { ids },
+    });
+    setSelected(new Set());
+    await load();
+  };
+
+  useEffect(() => { load(); }, [load]);
+
+  return { rows, total, page, setPage, loading, selected, setSelected, approve, reject, merge, batchApprove, refetch: load };
+}

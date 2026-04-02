@@ -21,6 +21,9 @@ import { DirectorRepDetail } from "@/pages/director/director-rep-detail";
 import { ReportsPage } from "@/pages/reports/reports-page";
 import { ProjectsPage } from "@/pages/projects/projects-page";
 import { ProcoreSyncPage } from "@/pages/admin/procore-sync-page";
+import { MigrationDashboardPage } from "@/pages/admin/migration/migration-dashboard-page";
+import { MigrationDealsPage } from "@/pages/admin/migration/migration-deals-page";
+import { MigrationContactsPage } from "@/pages/admin/migration/migration-contacts-page";
 
 function PlaceholderPage({ title }: { title: string }) {
   return (
@@ -74,6 +77,9 @@ export function App() {
             <Route path="/admin/pipeline" element={<PlaceholderPage title="Pipeline Config" />} />
             <Route path="/admin/merge-queue" element={<MergeQueuePage />} />
             <Route path="/admin/procore" element={<ProcoreSyncPage />} />
+            <Route path="/admin/migration" element={<MigrationDashboardPage />} />
+            <Route path="/admin/migration/deals" element={<MigrationDealsPage />} />
+            <Route path="/admin/migration/contacts" element={<MigrationContactsPage />} />
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

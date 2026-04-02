@@ -15,6 +15,7 @@ import {
   LogOut,
   GitMerge,
   Zap,
+  ArrowRightLeft,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
@@ -41,6 +42,7 @@ const adminItems = [
   { to: "/admin/users", icon: Users, label: "Users", roles: ["admin"] },
   { to: "/admin/pipeline", icon: Settings, label: "Pipeline Config", roles: ["admin"] },
   { to: "/admin/procore", icon: Zap, label: "Procore Sync", roles: ["admin"] },
+  { to: "/admin/migration", icon: ArrowRightLeft, label: "Migration", roles: ["admin"] },
 ];
 
 export function Sidebar() {
