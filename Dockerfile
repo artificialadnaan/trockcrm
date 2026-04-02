@@ -5,7 +5,7 @@ WORKDIR /app
 COPY . .
 
 # Install and build
-RUN npm ci
+RUN npm install
 RUN npm run build --workspace=shared
 RUN npm run build --workspace=server
 RUN npm run build --workspace=worker
