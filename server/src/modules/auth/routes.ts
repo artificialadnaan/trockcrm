@@ -84,4 +84,103 @@ router.post("/logout", (_req, res) => {
   res.json({ success: true });
 });
 
+// --- MS Graph OAuth (Email Integration) ---
+
+// GET /api/auth/graph/consent — redirect user to Microsoft consent screen
+router.get("/graph/consent", authMiddleware, (req, res, next) => {
+  try {
+    const { isGraphAuthConfigured, getConsentUrl } = require("../email/graph-auth.js");
+
+    if (!isGraphAuthConfigured()) {
+      // Dev mode: no Azure credentials, return mock status
+      res.json({ url: null, devMode: true, message: "Graph auth not configured — using dev mode" });
+      return;
+    }
+
+    const redirectUri = `${process.env.API_BASE_URL || "http://localhost:3001"}/api/auth/graph/callback`;
+    // Sign the state parameter to prevent tampering (binds callback to this user, expires in 10 min)
+    const jwt = require("jsonwebtoken");
+    const crypto = require("crypto");
+    const state = jwt.sign(
+      { userId: req.user!.id, nonce: crypto.randomUUID() },
+      process.env.JWT_SECRET!,
+      { expiresIn: "10m" }
+    );
+    const url = getConsentUrl(redirectUri, state);
+    res.json({ url });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/auth/graph/callback — handle Microsoft OAuth callback
+router.get("/graph/callback", async (req, res, next) => {
+  try {
+    const { exchangeCodeForTokens, isGraphAuthConfigured } = require("../email/graph-auth.js");
+
+    if (!isGraphAuthConfigured()) {
+      res.redirect(`${process.env.FRONTEND_URL || "http://localhost:5173"}/email?error=not_configured`);
+      return;
+    }
+
+    const code = req.query.code as string;
+    const stateToken = req.query.state as string;
+    const error = req.query.error as string;
+
+    if (error) {
+      console.error(`[GraphAuth] OAuth error: ${error} — ${req.query.error_description}`);
+      res.redirect(`${process.env.FRONTEND_URL || "http://localhost:5173"}/email?error=${error}`);
+      return;
+    }
+
+    if (!code || !stateToken) {
+      res.redirect(`${process.env.FRONTEND_URL || "http://localhost:5173"}/email?error=missing_code`);
+      return;
+    }
+
+    // Verify the signed state token to extract userId (prevents callback tampering)
+    const jwt = require("jsonwebtoken");
+    let userId: string;
+    try {
+      const payload = jwt.verify(stateToken, process.env.JWT_SECRET!);
+      userId = payload.userId;
+    } catch (stateErr: any) {
+      console.error("[GraphAuth] Invalid or expired state token:", stateErr.message);
+      res.redirect(`${process.env.FRONTEND_URL || "http://localhost:5173"}/email?error=invalid_state`);
+      return;
+    }
+
+    const redirectUri = `${process.env.API_BASE_URL || "http://localhost:3001"}/api/auth/graph/callback`;
+    await exchangeCodeForTokens(userId, code, redirectUri);
+
+    // Redirect back to CRM email page on success
+    res.redirect(`${process.env.FRONTEND_URL || "http://localhost:5173"}/email?connected=true`);
+  } catch (err) {
+    console.error("[GraphAuth] Callback error:", err);
+    res.redirect(`${process.env.FRONTEND_URL || "http://localhost:5173"}/email?error=exchange_failed`);
+  }
+});
+
+// GET /api/auth/graph/status — check if current user has connected Graph
+router.get("/graph/status", authMiddleware, async (req, res, next) => {
+  try {
+    const { getGraphTokenStatus } = require("../email/graph-token-service.js");
+    const status = await getGraphTokenStatus(req.user!.id);
+    res.json(status);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/auth/graph/disconnect — revoke Graph tokens
+router.post("/graph/disconnect", authMiddleware, async (req, res, next) => {
+  try {
+    const { revokeGraphTokens } = require("../email/graph-token-service.js");
+    await revokeGraphTokens(req.user!.id);
+    res.json({ success: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
 export const authRoutes = router;
