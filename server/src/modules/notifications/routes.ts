@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { authMiddleware } from "../../middleware/auth.js";
+import { registerSseConnection } from "./sse-manager.js";
 
 const router = Router();
 
@@ -15,6 +16,13 @@ router.get("/stream", authMiddleware, (req, res) => {
   // Send initial connection event
   res.write(`event: connected\ndata: ${JSON.stringify({ userId: req.user!.id })}\n\n`);
 
+  // Register this connection for real-time push
+  const cleanup = registerSseConnection(
+    req.user!.id,
+    req.user!.activeOfficeId ?? req.user!.officeId,
+    res
+  );
+
   // Keepalive ping every 30 seconds
   const keepalive = setInterval(() => {
     res.write(`: keepalive\n\n`);
@@ -23,15 +31,8 @@ router.get("/stream", authMiddleware, (req, res) => {
   // Cleanup on disconnect
   req.on("close", () => {
     clearInterval(keepalive);
+    cleanup();
   });
-
-  // TODO: In later plans, subscribe to eventBus for this user's notifications
-  // and push them as SSE events:
-  // eventBus.on("notification.created", (event) => {
-  //   if (event.payload.userId === req.user!.id) {
-  //     res.write(`event: notification\ndata: ${JSON.stringify(event.payload)}\n\n`);
-  //   }
-  // });
 });
 
 export const notificationRoutes = router;
