@@ -19,6 +19,8 @@ import { RepDashboardPage } from "@/pages/dashboard/rep-dashboard-page";
 import { DirectorDashboardPage } from "@/pages/director/director-dashboard-page";
 import { DirectorRepDetail } from "@/pages/director/director-rep-detail";
 import { ReportsPage } from "@/pages/reports/reports-page";
+import { ProjectsPage } from "@/pages/projects/projects-page";
+import { ProcoreSyncPage } from "@/pages/admin/procore-sync-page";
 
 function PlaceholderPage({ title }: { title: string }) {
   return (
@@ -64,13 +66,14 @@ export function App() {
             <Route path="/tasks" element={<TaskListPage />} />
             <Route path="/files" element={<PlaceholderPage title="Files" />} />
             <Route path="/reports" element={<ReportsPage />} />
-            <Route path="/projects" element={<PlaceholderPage title="Projects" />} />
+            <Route path="/projects" element={<ProjectsPage />} />
             <Route path="/director" element={<DirectorDashboardPage />} />
             <Route path="/director/rep/:repId" element={<DirectorRepDetail />} />
             <Route path="/admin/offices" element={<PlaceholderPage title="Offices" />} />
             <Route path="/admin/users" element={<PlaceholderPage title="Users" />} />
             <Route path="/admin/pipeline" element={<PlaceholderPage title="Pipeline Config" />} />
             <Route path="/admin/merge-queue" element={<MergeQueuePage />} />
+            <Route path="/admin/procore" element={<ProcoreSyncPage />} />
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

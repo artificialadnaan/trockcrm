@@ -203,7 +203,14 @@ export function DealOverviewTab({ deal }: DealOverviewTabProps) {
             <CardContent className="pt-4">
               <div className="flex items-center gap-2 text-sm">
                 <span className="text-muted-foreground">Procore Project:</span>
-                <span className="font-mono">#{deal.procoreProjectId}</span>
+                <a
+                  href={`https://app.procore.com/projects/${deal.procoreProjectId}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="font-mono text-blue-600 hover:underline inline-flex items-center gap-1"
+                >
+                  #{deal.procoreProjectId}
+                </a>
               </div>
               {deal.procoreLastSyncedAt && (
                 <p className="text-xs text-muted-foreground mt-1">
