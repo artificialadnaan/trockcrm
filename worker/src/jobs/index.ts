@@ -6,6 +6,9 @@ import { extractExif } from "./exif-extract.js";
 import { runDailyTaskGeneration } from "./daily-tasks.js";
 import { runActivityDropDetection } from "./activity-alerts.js";
 import { runWeeklyDigest } from "./weekly-digest.js";
+import { runColdLeadWarming } from "./cold-lead-warming.js";
+import { runBidDeadlineCountdown } from "./bid-deadline.js";
+import { addBusinessDays } from "../utils/date-helpers.js";
 
 /**
  * Test handler that logs the payload. Used to validate the queue works end-to-end.
@@ -73,10 +76,104 @@ export function registerAllJobs() {
     await runWeeklyDigest();
   });
 
+  // Cold lead warming (triggered via job_queue or cron)
+  registerJobHandler("cold_lead_warming", async () => {
+    await runColdLeadWarming();
+  });
+
+  // Bid deadline countdown (triggered via job_queue or cron)
+  registerJobHandler("bid_deadline_countdown", async () => {
+    await runBidDeadlineCountdown();
+  });
+
   // Domain event handlers for deal lifecycle
   domainEventHandlers.set("deal.won", async (payload, officeId) => {
     console.log(`[Worker] Deal won: ${payload.dealNumber} (${payload.dealName}) - amount: ${payload.awardedAmount}`);
-    // Future: Procore project creation, congratulations notification
+
+    // --- Task 17: Won deal handoff checklist ---
+    try {
+      const { pool: handoffPool } = await import("../db.js");
+
+      // Resolve office
+      let handoffOfficeId = officeId;
+      if (!handoffOfficeId && payload.assignedRepId) {
+        const userRes = await handoffPool.query(
+          "SELECT office_id FROM public.users WHERE id = $1",
+          [payload.assignedRepId]
+        );
+        handoffOfficeId = userRes.rows[0]?.office_id ?? null;
+      }
+      if (!handoffOfficeId) {
+        console.log("[Worker:handoff] Cannot resolve office — skipping handoff checklist");
+      } else {
+        const handoffOfficeRes = await handoffPool.query(
+          "SELECT slug FROM public.offices WHERE id = $1 AND is_active = true",
+          [handoffOfficeId]
+        );
+        if (handoffOfficeRes.rows.length > 0) {
+          const handoffSlug = handoffOfficeRes.rows[0].slug;
+          const slugRegex = /^[a-z][a-z0-9_]*$/;
+          if (slugRegex.test(handoffSlug)) {
+            const handoffSchema = `office_${handoffSlug}`;
+            const dealName = payload.dealName ?? "deal";
+            const assignedTo = payload.assignedRepId ?? payload.assignedTo;
+
+            if (assignedTo) {
+              // Look up primary contact name
+              let primaryContactName = "primary contact";
+              if (payload.primaryContactId) {
+                const contactResult = await handoffPool.query(
+                  `SELECT first_name, last_name FROM ${handoffSchema}.contacts WHERE id = $1`,
+                  [payload.primaryContactId]
+                );
+                if (contactResult.rows.length > 0) {
+                  const c = contactResult.rows[0];
+                  primaryContactName = `${c.first_name ?? ""} ${c.last_name ?? ""}`.trim() || "primary contact";
+                }
+              }
+
+              const today = new Date();
+              const handoffTasks = [
+                {
+                  title: `Schedule kickoff meeting for ${dealName}`,
+                  priority: "urgent",
+                  dueDate: today.toISOString().split("T")[0],
+                },
+                {
+                  title: `Send welcome packet to ${primaryContactName}`,
+                  priority: "high",
+                  dueDate: new Date(today.getTime() + 1 * 86400000).toISOString().split("T")[0],
+                },
+                {
+                  title: `Introduce project team for ${dealName}`,
+                  priority: "normal",
+                  dueDate: new Date(today.getTime() + 2 * 86400000).toISOString().split("T")[0],
+                },
+                {
+                  title: `Verify Procore project created for ${dealName}`,
+                  priority: "normal",
+                  dueDate: new Date(today.getTime() + 3 * 86400000).toISOString().split("T")[0],
+                },
+              ];
+
+              for (const task of handoffTasks) {
+                await handoffPool.query(
+                  `INSERT INTO ${handoffSchema}.tasks
+                   (title, type, priority, status, assigned_to, deal_id, due_date, created_by)
+                   VALUES ($1, 'system', $2, 'pending', $3, $4, $5, $3)`,
+                  [task.title, task.priority, assignedTo, payload.dealId, task.dueDate]
+                );
+              }
+
+              console.log(`[Worker] deal.won: created 4 handoff tasks for ${dealName}`);
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.error("[Worker:handoff] Error:", err);
+      // Non-blocking
+    }
 
     // --- Cross-sell alert ---
     try {
@@ -205,7 +302,108 @@ export function registerAllJobs() {
 
   domainEventHandlers.set("deal.lost", async (payload, officeId) => {
     console.log(`[Worker] Deal lost: ${payload.dealNumber} (${payload.dealName}) - reason: ${payload.lostReasonId}`);
-    // Future: Lost deal analytics, competitor tracking
+
+    // --- Task 18: Competitor intelligence tasks ---
+    if (!payload.lostCompetitor) return; // Only fire when competitor is known
+
+    try {
+      const { pool: workerPool } = await import("../db.js");
+
+      // Resolve office
+      let resolvedOfficeId = officeId;
+      if (!resolvedOfficeId && payload.assignedRepId) {
+        const userRes = await workerPool.query(
+          "SELECT office_id FROM public.users WHERE id = $1",
+          [payload.assignedRepId]
+        );
+        resolvedOfficeId = userRes.rows[0]?.office_id ?? null;
+      }
+      if (!resolvedOfficeId) return;
+
+      const officeResult = await workerPool.query(
+        "SELECT slug FROM public.offices WHERE id = $1 AND is_active = true",
+        [resolvedOfficeId]
+      );
+      if (officeResult.rows.length === 0) return;
+
+      const slug = officeResult.rows[0].slug;
+      const slugRegex = /^[a-z][a-z0-9_]*$/;
+      if (!slugRegex.test(slug)) return;
+      const schemaName = `office_${slug}`;
+
+      const competitor = payload.lostCompetitor;
+      const lostDealName = payload.dealName ?? "a deal";
+
+      // Find the lost deal's contacts via contact_deal_associations
+      const lostDealContacts = await workerPool.query(
+        `SELECT cda.contact_id, c.company_name, c.first_name, c.last_name
+         FROM ${schemaName}.contact_deal_associations cda
+         JOIN ${schemaName}.contacts c ON c.id = cda.contact_id
+         WHERE cda.deal_id = $1`,
+        [payload.dealId]
+      );
+
+      if (lostDealContacts.rows.length === 0) return;
+
+      const contactIds = lostDealContacts.rows.map((r: any) => r.contact_id);
+      const companyNames = lostDealContacts.rows
+        .map((r: any) => r.company_name)
+        .filter((n: string | null) => n != null);
+
+      // Find other active deals that share contacts with the lost deal
+      // via contact_deal_associations JOIN
+      const placeholders = contactIds.map((_: any, i: number) => `$${i + 2}`).join(", ");
+      const activeDeals = await workerPool.query(
+        `SELECT DISTINCT ON (d.id)
+           d.id, d.name, d.assigned_rep_id,
+           c.first_name, c.last_name
+         FROM ${schemaName}.contact_deal_associations cda
+         JOIN ${schemaName}.deals d ON d.id = cda.deal_id
+         JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
+         LEFT JOIN ${schemaName}.contacts c ON c.id = d.primary_contact_id
+         WHERE cda.contact_id IN (${placeholders})
+           AND d.id != $1
+           AND d.is_active = true
+           AND psc.is_terminal = false
+           AND d.assigned_rep_id IS NOT NULL
+         ORDER BY d.id`,
+        [payload.dealId, ...contactIds]
+      );
+
+      let tasksCreated = 0;
+      for (const deal of activeDeals.rows) {
+        const contactName = `${deal.first_name ?? ""} ${deal.last_name ?? ""}`.trim() || "contact";
+        const title = `Heads up: ${contactName} chose ${competitor} on ${lostDealName}. Review strategy for ${deal.name}`;
+
+        // Dedup: check if this exact task already exists
+        const existingTask = await workerPool.query(
+          `SELECT id FROM ${schemaName}.tasks
+           WHERE deal_id = $1
+             AND type = 'system'
+             AND title = $2
+             AND status IN ('pending', 'in_progress')
+           LIMIT 1`,
+          [deal.id, title]
+        );
+
+        if (existingTask.rows.length > 0) continue;
+
+        await workerPool.query(
+          `INSERT INTO ${schemaName}.tasks
+           (title, type, priority, status, assigned_to, deal_id, due_date, created_by)
+           VALUES ($1, 'system', 'high', 'pending', $2, $3, CURRENT_DATE, $2)`,
+          [title, deal.assigned_rep_id, deal.id]
+        );
+        tasksCreated++;
+      }
+
+      if (tasksCreated > 0) {
+        console.log(`[Worker] deal.lost: created ${tasksCreated} competitor intelligence tasks for ${competitor}`);
+      }
+    } catch (err) {
+      console.error("[Worker:competitor-intel] Error:", err);
+      // Non-blocking
+    }
   });
 
   domainEventHandlers.set("deal.stage.changed", async (payload, officeId) => {
@@ -215,7 +413,160 @@ export function registerAllJobs() {
 
   domainEventHandlers.set("contact.created", async (payload, officeId) => {
     console.log(`[Worker] contact.created: ${payload.contactId}`);
-    // Future: trigger welcome email, HubSpot sync, etc.
+
+    // --- Task 16: Create onboarding task sequence ---
+    try {
+      const { pool: workerPool } = await import("../db.js");
+
+      // Resolve officeId from the creating user if not provided
+      let resolvedOfficeId = officeId;
+      if (!resolvedOfficeId && payload.createdBy) {
+        const userRes = await workerPool.query(
+          "SELECT office_id FROM public.users WHERE id = $1",
+          [payload.createdBy]
+        );
+        resolvedOfficeId = userRes.rows[0]?.office_id ?? null;
+      }
+      if (!resolvedOfficeId) return;
+
+      const officeResult = await workerPool.query(
+        "SELECT slug FROM public.offices WHERE id = $1 AND is_active = true",
+        [resolvedOfficeId]
+      );
+      if (officeResult.rows.length === 0) return;
+
+      const slug = officeResult.rows[0].slug;
+      const slugRegex = /^[a-z][a-z0-9_]*$/;
+      if (!slugRegex.test(slug)) return;
+      const schemaName = `office_${slug}`;
+
+      const contactName = `${payload.firstName ?? ""} ${payload.lastName ?? ""}`.trim() || "new contact";
+      const createdBy = payload.createdBy;
+
+      if (!createdBy) return;
+
+      const today = new Date();
+      const day3 = new Date(today);
+      day3.setDate(day3.getDate() + 3);
+      const day7 = new Date(today);
+      day7.setDate(day7.getDate() + 7);
+
+      const onboardingTasks = [
+        {
+          title: `Send intro email to ${contactName}`,
+          type: "touchpoint",
+          priority: "high",
+          dueDate: today.toISOString().split("T")[0],
+        },
+        {
+          title: `Follow-up call with ${contactName}`,
+          type: "follow_up",
+          priority: "normal",
+          dueDate: day3.toISOString().split("T")[0],
+        },
+        {
+          title: `Check response from ${contactName}`,
+          type: "follow_up",
+          priority: "normal",
+          dueDate: day7.toISOString().split("T")[0],
+        },
+      ];
+
+      for (const task of onboardingTasks) {
+        await workerPool.query(
+          `INSERT INTO ${schemaName}.tasks
+           (title, type, priority, status, assigned_to, contact_id, due_date, created_by)
+           VALUES ($1, $2, $3, 'pending', $4, $5, $6, $4)`,
+          [task.title, task.type, task.priority, createdBy, payload.contactId, task.dueDate]
+        );
+      }
+
+      console.log(`[Worker] contact.created: created 3 onboarding tasks for ${contactName}`);
+    } catch (err) {
+      console.error("[Worker:contact-onboarding] Error:", err);
+      // Non-blocking
+    }
+  });
+
+  // Domain event: activity.created -> post-meeting follow-up task (Task 14)
+  domainEventHandlers.set("activity.created", async (payload, officeId) => {
+    console.log(`[Worker] activity.created: type=${payload.type}`);
+
+    // Only create follow-up for meeting activities
+    if (payload.type !== "meeting") return;
+
+    try {
+      const { pool: workerPool } = await import("../db.js");
+
+      // Resolve office from userId
+      let resolvedOfficeId = officeId;
+      if (!resolvedOfficeId && payload.userId) {
+        const userRes = await workerPool.query(
+          "SELECT office_id FROM public.users WHERE id = $1",
+          [payload.userId]
+        );
+        resolvedOfficeId = userRes.rows[0]?.office_id ?? null;
+      }
+      if (!resolvedOfficeId) return;
+
+      const officeResult = await workerPool.query(
+        "SELECT slug FROM public.offices WHERE id = $1 AND is_active = true",
+        [resolvedOfficeId]
+      );
+      if (officeResult.rows.length === 0) return;
+
+      const slug = officeResult.rows[0].slug;
+      const slugRegex = /^[a-z][a-z0-9_]*$/;
+      if (!slugRegex.test(slug)) return;
+      const schemaName = `office_${slug}`;
+
+      // Look up contact name if contactId is provided
+      let contactName = "contact";
+      if (payload.contactId) {
+        const contactResult = await workerPool.query(
+          `SELECT first_name, last_name FROM ${schemaName}.contacts WHERE id = $1`,
+          [payload.contactId]
+        );
+        if (contactResult.rows.length > 0) {
+          const c = contactResult.rows[0];
+          contactName = `${c.first_name ?? ""} ${c.last_name ?? ""}`.trim() || "contact";
+        }
+      }
+
+      const dueDate = addBusinessDays(new Date(), 2);
+      const title = `Send follow-up from meeting with ${contactName}`;
+
+      // Dedup: check if a follow-up task already exists for this contact+deal combo
+      const existingTask = await workerPool.query(
+        `SELECT id FROM ${schemaName}.tasks
+         WHERE assigned_to = $1
+           AND type = 'follow_up'
+           AND title = $2
+           AND status IN ('pending', 'in_progress')
+         LIMIT 1`,
+        [payload.userId, title]
+      );
+
+      if (existingTask.rows.length > 0) return;
+
+      await workerPool.query(
+        `INSERT INTO ${schemaName}.tasks
+         (title, type, priority, status, assigned_to, deal_id, contact_id, due_date, created_by)
+         VALUES ($1, 'follow_up', 'high', 'pending', $2, $3, $4, $5, $2)`,
+        [
+          title,
+          payload.userId,
+          payload.dealId ?? null,
+          payload.contactId ?? null,
+          dueDate.toISOString().split("T")[0],
+        ]
+      );
+
+      console.log(`[Worker] activity.created: created follow-up task for meeting with ${contactName}`);
+    } catch (err) {
+      console.error("[Worker:post-meeting-followup] Error:", err);
+      // Non-blocking
+    }
   });
 
   // Domain event: email.received -> create notification for rep
@@ -357,7 +708,7 @@ export function registerAllJobs() {
     }
   });
 
-  console.log("[Worker] Job handlers registered:", ["test_echo", "domain_event", "stale_deal_scan", "dedup_scan", "email_sync", "daily_task_generation", "activity_drop_detection", "weekly_digest"].join(", "));
+  console.log("[Worker] Job handlers registered:", ["test_echo", "domain_event", "stale_deal_scan", "dedup_scan", "email_sync", "daily_task_generation", "activity_drop_detection", "weekly_digest", "cold_lead_warming", "bid_deadline_countdown"].join(", "));
 }
 
 export { domainEventHandlers };

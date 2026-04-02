@@ -11,6 +11,8 @@ import { runEmailSync } from "./jobs/email-sync.js";
 import { runDailyTaskGeneration } from "./jobs/daily-tasks.js";
 import { runActivityDropDetection } from "./jobs/activity-alerts.js";
 import { runWeeklyDigest } from "./jobs/weekly-digest.js";
+import { runColdLeadWarming } from "./jobs/cold-lead-warming.js";
+import { runBidDeadlineCountdown } from "./jobs/bid-deadline.js";
 
 const POLL_INTERVAL_MS = 2000; // Poll job queue every 2 seconds
 
@@ -101,6 +103,28 @@ async function main() {
     }
   }, { timezone: "America/Chicago" });
   console.log("[Worker] Cron scheduled: weekly digest at 7:00 AM CT every Monday");
+
+  // Cold lead warming: daily at 6:15 AM CT (after daily task generation)
+  cron.schedule("15 6 * * *", async () => {
+    console.log("[Worker:cron] Running cold lead warming...");
+    try {
+      await runColdLeadWarming();
+    } catch (err) {
+      console.error("[Worker:cron] Cold lead warming failed:", err);
+    }
+  }, { timezone: "America/Chicago" });
+  console.log("[Worker] Cron scheduled: cold lead warming at 6:15 AM CT daily");
+
+  // Bid deadline countdown: daily at 6:30 AM CT
+  cron.schedule("30 6 * * *", async () => {
+    console.log("[Worker:cron] Running bid deadline countdown...");
+    try {
+      await runBidDeadlineCountdown();
+    } catch (err) {
+      console.error("[Worker:cron] Bid deadline countdown failed:", err);
+    }
+  }, { timezone: "America/Chicago" });
+  console.log("[Worker] Cron scheduled: bid deadline countdown at 6:30 AM CT daily");
 
   console.log("[Worker] Ready.");
 }
