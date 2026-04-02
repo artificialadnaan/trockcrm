@@ -1,19 +1,17 @@
-FROM node:20-alpine AS base
+FROM node:20-alpine AS builder
 WORKDIR /app
-COPY package.json package-lock.json ./
-COPY shared/package.json shared/
-COPY server/package.json server/
-COPY worker/package.json worker/
-COPY client/package.json client/
-RUN npm ci
 
-FROM base AS builder
+# Copy everything (dockerignore handles exclusions)
 COPY . .
+
+# Install and build
+RUN npm ci
 RUN npm run build --workspace=shared
 RUN npm run build --workspace=server
 RUN npm run build --workspace=worker
 RUN npm run build --workspace=client || true
 
+# API production image
 FROM node:20-alpine AS api
 WORKDIR /app
 COPY --from=builder /app/package.json /app/package-lock.json ./
@@ -24,6 +22,7 @@ COPY --from=builder /app/migrations ./migrations
 EXPOSE 3001
 CMD ["node", "server/dist/index.js"]
 
+# Worker production image
 FROM node:20-alpine AS worker
 WORKDIR /app
 COPY --from=builder /app/package.json /app/package-lock.json ./
@@ -33,6 +32,7 @@ COPY --from=builder /app/worker ./worker
 COPY --from=builder /app/migrations ./migrations
 CMD ["node", "worker/dist/index.js"]
 
+# Frontend production image
 FROM node:20-alpine AS frontend
 WORKDIR /app
 RUN npm install -g serve

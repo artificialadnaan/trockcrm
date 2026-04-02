@@ -1,0 +1,10 @@
+node_modules
+.git
+.omc
+.superpowers
+.DS_Store
+*.log
+.env
+.env.local
+docs
+crmBuild
