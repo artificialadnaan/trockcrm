@@ -41,6 +41,12 @@ function PlaceholderPage({ title }: { title: string }) {
   );
 }
 
+function HomePage() {
+  const { user } = useAuth();
+  if (user?.role === "rep") return <RepDashboardPage />;
+  return <DirectorDashboardPage />;
+}
+
 function AuthGate({ children }: { children: ReactNode }) {
   const { user, loading } = useAuth();
 
@@ -62,7 +68,7 @@ export function App() {
       <AuthGate>
         <Routes>
           <Route element={<AppShell />}>
-            <Route path="/" element={<RepDashboardPage />} />
+            <Route path="/" element={<HomePage />} />
             <Route path="/deals" element={<DealListPage />} />
             <Route path="/deals/new" element={<DealNewPage />} />
             <Route path="/deals/:id" element={<DealDetailPage />} />
