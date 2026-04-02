@@ -80,7 +80,7 @@ export async function getPipelineSummary(
       ), 0)::numeric AS total_value
     FROM deals d
     WHERE d.is_active = true
-      AND d.stage_id = ANY(${stageIds})
+      AND d.stage_id IN (${sql.join(stageIds.map(id => sql`${id}`), sql`, `)})
       ${repFilter}
     GROUP BY d.stage_id
   `);
