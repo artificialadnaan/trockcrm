@@ -15,6 +15,7 @@ import { ContactEditPage } from "@/pages/contacts/contact-edit-page";
 import { MergeQueuePage } from "@/pages/admin/merge-queue-page";
 import { EmailInboxPage } from "@/pages/email/email-inbox-page";
 import { TaskListPage } from "@/pages/tasks/task-list-page";
+import { FilesPage } from "@/pages/files/files-page";
 import { RepDashboardPage } from "@/pages/dashboard/rep-dashboard-page";
 import { DirectorDashboardPage } from "@/pages/director/director-dashboard-page";
 import { DirectorRepDetail } from "@/pages/director/director-rep-detail";
@@ -31,15 +32,6 @@ import { PipelineConfigPage } from "@/pages/admin/pipeline-config-page";
 import { AuditLogPage } from "@/pages/admin/audit-log-page";
 import { UserGuidePage } from "@/pages/admin/help/user-guide-page";
 import { AdminGuidePage } from "@/pages/admin/help/admin-guide-page";
-
-function PlaceholderPage({ title }: { title: string }) {
-  return (
-    <div>
-      <h2 className="text-2xl font-bold">{title}</h2>
-      <p className="text-muted-foreground mt-1">This page will be built in a future plan.</p>
-    </div>
-  );
-}
 
 function HomePage() {
   const { user } = useAuth();
@@ -80,7 +72,7 @@ export function App() {
             <Route path="/contacts/:id/edit" element={<ContactEditPage />} />
             <Route path="/email" element={<EmailInboxPage />} />
             <Route path="/tasks" element={<TaskListPage />} />
-            <Route path="/files" element={<PlaceholderPage title="Files" />} />
+            <Route path="/files" element={<FilesPage />} />
             <Route path="/reports" element={<ReportsPage />} />
             <Route path="/projects" element={<ProjectsPage />} />
             <Route path="/director" element={<DirectorDashboardPage />} />

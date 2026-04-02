@@ -247,7 +247,12 @@ export function DealDetailPage() {
       {activeTab === "files" && <DealFileTab dealId={deal.id} />}
       {activeTab === "email" && <DealEmailTab dealId={deal.id} />}
       {activeTab === "activity" && <DealActivityPanel dealId={deal.id} />}
-      {activeTab === "timeline" && <DealTimelineTab _dealId={deal.id} />}
+      {activeTab === "timeline" && (
+        <DealTimelineTab
+          dealId={deal.id}
+          stageHistory={deal.stageHistory}
+        />
+      )}
       {activeTab === "history" && <DealHistoryTab deal={deal} />}
 
       {/* Stage Change Dialog */}

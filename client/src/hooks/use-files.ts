@@ -65,7 +65,7 @@ export interface FolderNode {
 
 // ─── Hooks ───────────────────────────────────────────────────────────────────
 
-export function useFiles(filters: FileFilters = {}) {
+export function useFiles(filters: FileFilters = {}, options?: { enabled?: boolean }) {
   const [files, setFiles] = useState<FileRecord[]>([]);
   const [pagination, setPagination] = useState<Pagination>({
     page: 1,
@@ -75,8 +75,22 @@ export function useFiles(filters: FileFilters = {}) {
   });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const enabled = options?.enabled ?? true;
 
   const fetchFiles = useCallback(async () => {
+    if (!enabled) {
+      setFiles([]);
+      setPagination({
+        page: filters.page ?? 1,
+        limit: filters.limit ?? 50,
+        total: 0,
+        totalPages: 0,
+      });
+      setError(null);
+      setLoading(false);
+      return;
+    }
+
     setLoading(true);
     setError(null);
     try {
@@ -104,6 +118,7 @@ export function useFiles(filters: FileFilters = {}) {
       setLoading(false);
     }
   }, [
+    enabled,
     filters.dealId,
     filters.contactId,
     filters.category,

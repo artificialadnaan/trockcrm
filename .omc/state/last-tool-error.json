@@ -1,7 +1,7 @@
 {
-  "tool_name": "Read",
-  "tool_input_preview": "{\"file_path\":\"/Users/adnaaniqbal/Developer/trock-crm/server/tests/modules/procore\"}",
-  "error": "EISDIR: illegal operation on a directory, read '/Users/adnaaniqbal/Developer/trock-crm/server/tests/modules/procore'",
-  "timestamp": "2026-04-02T18:42:48.369Z",
-  "retry_count": 1
+  "tool_name": "Bash",
+  "tool_input_preview": "{\"command\":\"cat ~/.config/railway/config.json 2>/dev/null | python3 -c \\\"\\nimport json, sys\\nd = json.load(sys.stdin)\\n# Try to find token in various locations\\nfor key in ['token', 'user_token', 'api...",
+  "error": "Exit code 1\nTraceback (most recent call last):\n  File \"<string>\", line 3, in <module>\n    d = json.load(sys.stdin)\n  File \"/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/__init__.py\", line 293, in load\n    return loads(fp.read(),\n        cls=cls, object_hook=object_hook,\n        parse_float=parse_float, parse_int=parse_int,\n        parse_constant=parse_constant, object_pairs_hook=object_pairs_hook, **kw)\n  File \"/Library/Frameworks/Python.framework/Versions/3.13/lib/pytho...",
+  "timestamp": "2026-04-02T21:15:30.569Z",
+  "retry_count": 2
 }
