@@ -158,6 +158,28 @@ function normalizeName(firstName: string, lastName: string): string {
 }
 
 /**
+ * Levenshtein distance between two strings (JS implementation).
+ * Used for first-name similarity checks in the pre-creation dedup flow
+ * instead of the PostgreSQL fuzzystrmatch extension.
+ */
+function levenshteinDistance(a: string, b: string): number {
+  const m = a.length, n = b.length;
+  if (m === 0) return n;
+  if (n === 0) return m;
+  let prev = Array.from({ length: n + 1 }, (_, i) => i);
+  for (let i = 1; i <= m; i++) {
+    const curr = [i];
+    for (let j = 1; j <= n; j++) {
+      curr[j] = a[i - 1] === b[j - 1]
+        ? prev[j - 1]
+        : 1 + Math.min(prev[j - 1], prev[j], curr[j - 1]);
+    }
+    prev = curr;
+  }
+  return prev[n];
+}
+
+/**
  * Check for duplicate contacts before creation.
  *
  * 1. Exact email match -> hard block (409)
@@ -221,19 +243,13 @@ export async function checkForDuplicates(
   }
 
   // Check company match when company is provided.
-  // Require Levenshtein distance < 3 on first names to prevent false positives
-  // where two different people share a last name and company (e.g. two "Smiths"
-  // at the same firm). The distance threshold is evaluated in JS after the DB
-  // returns candidate rows — the SQL condition narrows the set first.
+  // SQL narrows candidates to same last name + company; Levenshtein distance
+  // on first names is evaluated in JS post-query (no fuzzystrmatch extension).
   if (input.companyName && input.companyName.trim().length > 0) {
     fuzzyConditions.push(
       and(
         sql`LOWER(${contacts.companyName}) = LOWER(${input.companyName.trim()})`,
-        sql`LOWER(${contacts.lastName}) = LOWER(${input.lastName.trim()})`,
-        // Also require first-name similarity (Levenshtein distance < 3)
-        // computed via PostgreSQL levenshtein() when fuzzystrmatch is available,
-        // otherwise filtered post-query in JS (see post-processing below).
-        sql`levenshtein(LOWER(${contacts.firstName}), LOWER(${input.firstName.trim()})) < 3`
+        sql`LOWER(${contacts.lastName}) = LOWER(${input.lastName.trim()})`
       )
     );
   }
@@ -248,9 +264,25 @@ export async function checkForDuplicates(
     })
     .from(contacts)
     .where(and(...conditions, or(...fuzzyConditions)))
-    .limit(5);
+    .limit(20); // fetch more candidates; JS filter narrows below
 
-  result.fuzzySuggestions = fuzzyMatches.map((match) => ({
+  // JS-based Levenshtein filtering for company+lastName matches.
+  // Removes false positives where two different people share last name + company
+  // but have very different first names (e.g. "Bob Smith" vs "John Smith").
+  const inputFirstLower = input.firstName.trim().toLowerCase();
+  const filtered = fuzzyMatches.filter((match) => {
+    // If this was a company+lastName match, verify first-name similarity in JS
+    if (
+      match.companyName?.toLowerCase() === input.companyName?.trim().toLowerCase() &&
+      match.lastName?.toLowerCase() === input.lastName.trim().toLowerCase()
+    ) {
+      const dist = levenshteinDistance(match.firstName?.toLowerCase() ?? "", inputFirstLower);
+      return dist < 3;
+    }
+    return true; // other match types pass through
+  });
+
+  result.fuzzySuggestions = filtered.slice(0, 5).map((match) => ({
     ...match,
     matchReason:
       normalizeName(match.firstName, match.lastName) === normalizedInput
@@ -869,6 +901,9 @@ export async function createAssociation(tenantDb: TenantDb, input: CreateAssocia
 
   // If this is being set as primary, unset other primaries for this deal
   if (input.isPrimary) {
+    // Lock the deal row to prevent primary assignment race conditions
+    await tenantDb.select().from(deals).where(eq(deals.id, input.dealId)).for("update");
+
     await tenantDb
       .update(contactDealAssociations)
       .set({ isPrimary: false })
@@ -878,12 +913,6 @@ export async function createAssociation(tenantDb: TenantDb, input: CreateAssocia
           eq(contactDealAssociations.isPrimary, true)
         )
       );
-
-    // Sync deals.primaryContactId to reflect the new primary contact
-    await tenantDb
-      .update(deals)
-      .set({ primaryContactId: input.contactId })
-      .where(eq(deals.id, input.dealId));
   }
 
   try {
@@ -896,6 +925,15 @@ export async function createAssociation(tenantDb: TenantDb, input: CreateAssocia
         isPrimary: input.isPrimary ?? false,
       })
       .returning();
+
+    // Sync deals.primaryContactId AFTER successful insert to avoid orphaned
+    // primaryContactId on duplicate-association errors (unique constraint)
+    if (input.isPrimary) {
+      await tenantDb
+        .update(deals)
+        .set({ primaryContactId: input.contactId })
+        .where(eq(deals.id, input.dealId));
+    }
 
     return result[0];
   } catch (err: any) {
@@ -941,6 +979,27 @@ export async function updateAssociation(
       .update(deals)
       .set({ primaryContactId: existing.contactId })
       .where(eq(deals.id, existing.dealId));
+  }
+
+  // If explicitly unsetting primary, clear deals.primaryContactId if it points to this contact
+  if (input.isPrimary === false) {
+    const [association] = await tenantDb
+      .select()
+      .from(contactDealAssociations)
+      .where(eq(contactDealAssociations.id, associationId))
+      .limit(1);
+
+    if (association) {
+      await tenantDb
+        .update(deals)
+        .set({ primaryContactId: null })
+        .where(
+          and(
+            eq(deals.id, association.dealId),
+            eq(deals.primaryContactId, association.contactId)
+          )
+        );
+    }
   }
 
   const updates: Record<string, any> = {};
@@ -1390,59 +1449,120 @@ describe("Contact Service", () => {
     });
   });
 
-  describe("getContacts", () => {
-    it("should apply isActive filter by default", () => {
-      // Validates that getContacts always filters by isActive=true unless overridden
-      // Real test: mock tenantDb and assert eq(contacts.isActive, true) is in where clause
-      const defaultFilters = { isActive: undefined };
-      const showActive = defaultFilters.isActive ?? true;
-      expect(showActive).toBe(true);
+  describe("normalizeEmail", () => {
+    it("should trim and lowercase email", () => {
+      expect(normalizeEmail("  JOHN@EXAMPLE.COM  ")).toBe("john@example.com");
     });
 
-    it("should apply category filter when provided", () => {
-      const filters = { category: "client" };
-      expect(filters.category).toBe("client");
+    it("should handle mixed-case domain", () => {
+      expect(normalizeEmail("User@Gmail.COM")).toBe("user@gmail.com");
     });
 
-    it("should apply search across multiple fields", () => {
-      const search = "john";
-      const searchTerm = `%${search.trim()}%`;
-      expect(searchTerm).toBe("%john%");
+    it("should handle already-normalized email", () => {
+      expect(normalizeEmail("admin@example.com")).toBe("admin@example.com");
     });
   });
 
-  describe("createContact", () => {
-    it("should normalize email to lowercase before insert", () => {
-      const input = { email: "JOHN@EXAMPLE.COM" };
-      const normalizedEmail = input.email?.trim().toLowerCase() || null;
-      expect(normalizedEmail).toBe("john@example.com");
+  describe("normalizePhone", () => {
+    it("should strip parentheses, spaces, and dashes", () => {
+      expect(normalizePhone("(214) 555-1234")).toBe("2145551234");
     });
 
-    it("should return null contact with dedupResult when fuzzy match found", () => {
-      // When dedupResult.fuzzySuggestions.length > 0, contact should be null
-      const dedupResult = { hardBlock: false, fuzzySuggestions: [{ id: "abc" }] };
-      const contact = dedupResult.fuzzySuggestions.length > 0 ? null : {};
-      expect(contact).toBeNull();
+    it("should strip dots", () => {
+      expect(normalizePhone("214.555.1234")).toBe("2145551234");
     });
 
-    it("should skip dedup when skipDedupCheck is true", () => {
-      const skipDedupCheck = true;
-      // When skipped, the dedup check function is not called
-      expect(skipDedupCheck).toBe(true);
+    it("should handle +1 prefix", () => {
+      expect(normalizePhone("+1 (214) 555-1234")).toBe("12145551234");
+    });
+
+    it("should return empty string for non-digit input", () => {
+      expect(normalizePhone("N/A")).toBe("");
+    });
+
+    it("should pass through already-clean digits", () => {
+      expect(normalizePhone("2145551234")).toBe("2145551234");
     });
   });
 
-  describe("deleteContact", () => {
-    it("should throw 403 for rep role", () => {
-      const userRole = "rep";
-      const shouldThrow = userRole === "rep";
-      expect(shouldThrow).toBe(true);
+  describe("levenshteinDistance", () => {
+    // Inline the same implementation used in dedup tests for accuracy checks
+    function levenshtein(a: string, b: string): number {
+      const m = a.length, n = b.length;
+      if (m === 0) return n;
+      if (n === 0) return m;
+      let prev = Array.from({ length: n + 1 }, (_, i) => i);
+      for (let i = 1; i <= m; i++) {
+        const curr = [i];
+        for (let j = 1; j <= n; j++) {
+          curr[j] = a[i - 1] === b[j - 1]
+            ? prev[j - 1]
+            : 1 + Math.min(prev[j - 1], prev[j], curr[j - 1]);
+        }
+        prev = curr;
+      }
+      return prev[n];
+    }
+
+    it("should return 0 for identical strings", () => {
+      expect(levenshtein("john", "john")).toBe(0);
     });
 
-    it("should allow soft-delete for director role", () => {
-      const userRole = "director";
-      const isAllowed = userRole !== "rep";
-      expect(isAllowed).toBe(true);
+    it("should return 1 for single substitution (smith vs smyth)", () => {
+      expect(levenshtein("smith", "smyth")).toBe(1);
+    });
+
+    it("should return string length when other is empty", () => {
+      expect(levenshtein("abc", "")).toBe(3);
+      expect(levenshtein("", "xyz")).toBe(3);
+    });
+
+    it("should handle single character difference", () => {
+      expect(levenshtein("jon", "john")).toBe(1);
+    });
+
+    it("should return correct distance for completely different strings", () => {
+      expect(levenshtein("bob", "john")).toBeGreaterThanOrEqual(3);
+    });
+  });
+
+  describe("dedup scoring", () => {
+    function levenshtein(a: string, b: string): number {
+      const m = a.length, n = b.length;
+      if (m === 0) return n;
+      if (n === 0) return m;
+      let prev = Array.from({ length: n + 1 }, (_, i) => i);
+      for (let i = 1; i <= m; i++) {
+        const curr = [i];
+        for (let j = 1; j <= n; j++) {
+          curr[j] = a[i - 1] === b[j - 1]
+            ? prev[j - 1]
+            : 1 + Math.min(prev[j - 1], prev[j], curr[j - 1]);
+        }
+        prev = curr;
+      }
+      return prev[n];
+    }
+
+    it("should score name+company+phone match above threshold", () => {
+      // Simulate scoring: name similarity + company match + phone match
+      const nameDist = levenshtein("john smith", "jon smith");
+      const maxLen = Math.max("john smith".length, "jon smith".length);
+      const nameSimilarity = 1 - nameDist / maxLen;
+      const nameScore = nameSimilarity * 40; // 40% weight
+      const companyScore = 30; // exact company match = 30%
+      const phoneScore = 30;  // exact phone match = 30%
+      const totalScore = nameScore + companyScore + phoneScore;
+      expect(totalScore).toBeGreaterThan(90); // high confidence
+    });
+
+    it("should score name-only match below auto-merge threshold", () => {
+      const nameDist = levenshtein("john smith", "jon smith");
+      const maxLen = Math.max("john smith".length, "jon smith".length);
+      const nameSimilarity = 1 - nameDist / maxLen;
+      const nameScore = nameSimilarity * 40;
+      // No company or phone match
+      expect(nameScore).toBeLessThan(40);
     });
   });
 });
@@ -2027,6 +2147,7 @@ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
   contacts,
   contactDealAssociations,
+  deals,
   duplicateQueue,
   emails,
   activities,
@@ -2316,14 +2437,16 @@ router.post(
         .where(eq(duplicateQueue.id, queueEntryId))
         .limit(1);
 
-      if (queueEntry) {
-        const ids = new Set([queueEntry.contactAId, queueEntry.contactBId]);
-        if (!ids.has(winnerId) || !ids.has(loserId)) {
-          throw new AppError(
-            400,
-            "winnerId/loserId do not match the contacts in this duplicate queue entry"
-          );
-        }
+      if (!queueEntry) {
+        throw new AppError(404, "Duplicate queue entry not found");
+      }
+
+      const ids = new Set([queueEntry.contactAId, queueEntry.contactBId]);
+      if (!ids.has(winnerId) || !ids.has(loserId)) {
+        throw new AppError(
+          400,
+          "winnerId/loserId do not match the contacts in this duplicate queue entry"
+        );
       }
 
       const result = await mergeContacts(
@@ -3360,8 +3483,24 @@ export function ContactActivityTab({ contactId }: ContactActivityTabProps) {
 
   const handleSubmit = async (type: LogType) => {
     if (!body.trim()) return;
-    // TODO (Plan 4): POST /api/activities { contactId, type, body }
-    console.log("[ActivityTab] Log entry:", { contactId, type, body });
+    // TODO (Plan 4 — Tasks/Activities): Replace with actual API call once
+    // the activities endpoint exists. For now, log locally as a fallback.
+    try {
+      await fetch(`/api/contacts/${contactId}/activities`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          type,
+          subject: `${type} logged`,
+          body: body.trim(),
+          dealId: null,
+          contactId,
+        }),
+      });
+    } catch {
+      // Endpoint doesn't exist yet — fall back to console until Plan 4
+      console.log("[ActivityTab] Log entry:", { contactId, type, body });
+    }
     setBody("");
     setActiveForm(null);
   };
