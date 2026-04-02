@@ -901,7 +901,8 @@ BEGIN
   IF NEW.contact_id IS NOT NULL AND NEW.type IN ('call', 'email', 'meeting') THEN
     UPDATE contacts
     SET touchpoint_count = touchpoint_count + 1,
-        last_contacted_at = NEW.occurred_at
+        last_contacted_at = NEW.occurred_at,
+        first_outreach_completed = TRUE
     WHERE id = NEW.contact_id;
   END IF;
   RETURN NEW;

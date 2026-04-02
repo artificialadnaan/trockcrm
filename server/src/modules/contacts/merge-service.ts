@@ -1,4 +1,4 @@
-import { eq, and, desc, sql } from "drizzle-orm";
+import { eq, and, or, desc, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
   contacts,
@@ -100,17 +100,18 @@ export async function mergeContacts(
     throw new AppError(400, "Cannot merge a contact with itself");
   }
 
-  // 1. Lock both contacts FOR UPDATE to prevent concurrent merges
-  const [winner, loser] = await Promise.all([
-    tenantDb.select().from(contacts).where(eq(contacts.id, winnerId)).for("update").limit(1),
-    tenantDb.select().from(contacts).where(eq(contacts.id, loserId)).for("update").limit(1),
-  ]);
+  // 1. Lock both contacts FOR UPDATE in deterministic order to prevent deadlocks
+  const [firstId, secondId] = winnerId < loserId ? [winnerId, loserId] : [loserId, winnerId];
+  const [first] = await tenantDb.select().from(contacts).where(eq(contacts.id, firstId)).limit(1).for("update");
+  const [second] = await tenantDb.select().from(contacts).where(eq(contacts.id, secondId)).limit(1).for("update");
+  const winnerContact0 = firstId === winnerId ? first : second;
+  const loserContact0 = firstId === loserId ? first : second;
 
   // 2. Verify both exist and are active
-  if (!winner[0]) throw new AppError(404, "Winner contact not found");
-  if (!loser[0]) throw new AppError(404, "Loser contact not found");
-  if (!winner[0].isActive) throw new AppError(400, "Winner contact is not active");
-  if (!loser[0].isActive) throw new AppError(400, "Loser contact is not active");
+  if (!winnerContact0) throw new AppError(404, "Winner contact not found");
+  if (!loserContact0) throw new AppError(404, "Loser contact not found");
+  if (!winnerContact0.isActive) throw new AppError(400, "Winner contact is not active");
+  if (!loserContact0.isActive) throw new AppError(400, "Loser contact is not active");
 
   // 3. If queueEntryId provided, validate it matches the winner/loser pair
   if (queueEntryId) {
@@ -170,8 +171,8 @@ export async function mergeContacts(
     .where(eq(tasks.contactId, loserId));
 
   // 6. Absorb missing fields from loser into winner
-  const winnerContact = winner[0];
-  const loserContact = loser[0];
+  const winnerContact = winnerContact0;
+  const loserContact = loserContact0;
   const absorb: Record<string, any> = {};
   if (!winnerContact.email && loserContact.email) absorb.email = loserContact.email;
   if (!winnerContact.phone && loserContact.phone) absorb.phone = loserContact.phone;
@@ -216,13 +217,17 @@ export async function mergeContacts(
       .where(eq(duplicateQueue.id, queueEntryId));
   }
 
-  // Also resolve any other queue entries involving these two contacts
-  await tenantDb.execute(
-    sql`UPDATE ${duplicateQueue}
-        SET status = 'merged', resolved_by = ${resolvedBy}, resolved_at = NOW()
-        WHERE status = 'pending'
-          AND (contact_a_id IN (${winnerId}, ${loserId}) AND contact_b_id IN (${winnerId}, ${loserId}))`
-  );
+  // Resolve ALL pending duplicate_queue entries that reference the loser
+  // (not just the exact winner/loser pair) since the loser no longer exists
+  await tenantDb
+    .update(duplicateQueue)
+    .set({ status: "dismissed" as any, resolvedBy, resolvedAt: new Date() })
+    .where(
+      and(
+        eq(duplicateQueue.status, "pending" as any),
+        or(eq(duplicateQueue.contactAId, loserId), eq(duplicateQueue.contactBId, loserId))
+      )
+    );
 
   return {
     winnerId,

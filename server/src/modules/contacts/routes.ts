@@ -279,7 +279,7 @@ router.get("/:id/deals", async (req, res, next) => {
     const contact = await getContactById(req.tenantDb!, req.params.id);
     if (!contact) throw new AppError(404, "Contact not found");
 
-    const associations = await getDealsForContact(req.tenantDb!, req.params.id);
+    const associations = await getDealsForContact(req.tenantDb!, req.params.id, req.user!.id, req.user!.role);
     await req.commitTransaction!();
     res.json({ associations });
   } catch (err) {

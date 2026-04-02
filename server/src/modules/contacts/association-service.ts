@@ -15,8 +15,14 @@ export interface CreateAssociationInput {
 
 /**
  * Get all deals associated with a contact.
+ * Reps only see deals assigned to them.
  */
-export async function getDealsForContact(tenantDb: TenantDb, contactId: string) {
+export async function getDealsForContact(
+  tenantDb: TenantDb,
+  contactId: string,
+  userId: string,
+  userRole: string
+) {
   const associations = await tenantDb
     .select({
       association: contactDealAssociations,
@@ -27,10 +33,17 @@ export async function getDealsForContact(tenantDb: TenantDb, contactId: string) 
     .where(eq(contactDealAssociations.contactId, contactId))
     .orderBy(desc(deals.updatedAt));
 
-  return associations.map((row) => ({
+  const mapped = associations.map((row) => ({
     ...row.association,
     deal: row.deal,
   }));
+
+  // RBAC: reps can only see deals assigned to them
+  if (userRole === "rep") {
+    return mapped.filter((a) => a.deal.assignedRepId === userId);
+  }
+
+  return mapped;
 }
 
 /**
@@ -73,10 +86,26 @@ export async function createAssociation(tenantDb: TenantDb, input: CreateAssocia
     .limit(1);
   if (!deal) throw new AppError(404, "Deal not found or inactive");
 
+  // Check if an association already exists for this contact+deal pair
+  // BEFORE clearing old primaries (avoids clearing primary when insert would fail)
+  const [existingAssoc] = await tenantDb
+    .select({ id: contactDealAssociations.id })
+    .from(contactDealAssociations)
+    .where(
+      and(
+        eq(contactDealAssociations.contactId, input.contactId),
+        eq(contactDealAssociations.dealId, input.dealId)
+      )
+    )
+    .limit(1);
+  if (existingAssoc) {
+    throw new AppError(409, "Association already exists");
+  }
+
   // If this is being set as primary, unset other primaries for this deal
   if (input.isPrimary) {
     // Lock the deal row to prevent primary assignment race conditions
-    await tenantDb.select().from(deals).where(eq(deals.id, input.dealId)).for("update");
+    await tenantDb.select().from(deals).where(eq(deals.id, input.dealId)).limit(1).for("update");
 
     await tenantDb
       .update(contactDealAssociations)
@@ -137,6 +166,9 @@ export async function updateAssociation(
       .limit(1);
 
     if (!existing) throw new AppError(404, "Association not found");
+
+    // Lock the deal row FIRST to prevent primary assignment race conditions
+    await tenantDb.select().from(deals).where(eq(deals.id, existing.dealId)).limit(1).for("update");
 
     await tenantDb
       .update(contactDealAssociations)
@@ -208,11 +240,11 @@ export async function deleteAssociation(tenantDb: TenantDb, associationId: strin
 
   const deleted = result[0];
   if (deleted.isPrimary) {
-    // Clear deals.primaryContactId since the primary association was removed
+    // Clear deals.primaryContactId only if it still points to the deleted contact
     await tenantDb
       .update(deals)
       .set({ primaryContactId: null })
-      .where(eq(deals.id, deleted.dealId));
+      .where(and(eq(deals.id, deleted.dealId), eq(deals.primaryContactId, deleted.contactId)));
   }
 
   return deleted;

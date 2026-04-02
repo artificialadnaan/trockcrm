@@ -150,23 +150,14 @@ export async function checkForDuplicates(
   // applies regardless of is_active, so inactive contacts still block creation.
   const conditions: any[] = [];
 
+  // SQL: fetch candidates by last-name match only (active + inactive).
+  // First-name similarity is evaluated in JS via Levenshtein distance so we
+  // catch typos / nicknames that an exact SQL match would miss.
   const fuzzyConditions: any[] = [
-    sql`LOWER(TRIM(${contacts.firstName} || ' ' || ${contacts.lastName})) = ${normalizedInput}`,
+    sql`LOWER(${contacts.lastName}) = LOWER(${input.lastName.trim()})`,
   ];
 
-  // Also check partial name matches (same last name + similar first name)
-  if (input.lastName.trim().length > 0) {
-    fuzzyConditions.push(
-      and(
-        sql`LOWER(${contacts.lastName}) = LOWER(${input.lastName.trim()})`,
-        sql`LOWER(${contacts.firstName}) = LOWER(${input.firstName.trim()})`
-      )
-    );
-  }
-
-  // Check company match when company is provided.
-  // SQL narrows candidates to same last name + company; Levenshtein distance
-  // on first names is evaluated in JS post-query (no fuzzystrmatch extension).
+  // Also include company+lastName matches when company is provided
   if (input.companyName && input.companyName.trim().length > 0) {
     fuzzyConditions.push(
       and(
@@ -176,7 +167,7 @@ export async function checkForDuplicates(
     );
   }
 
-  const fuzzyMatches = await tenantDb
+  const candidates = await tenantDb
     .select({
       id: contacts.id,
       firstName: contacts.firstName,
@@ -186,22 +177,13 @@ export async function checkForDuplicates(
     })
     .from(contacts)
     .where(and(...conditions, or(...fuzzyConditions)))
-    .limit(20); // fetch more candidates; JS filter narrows below
+    .limit(50); // fetch more candidates; JS Levenshtein narrows below
 
-  // JS-based Levenshtein filtering for company+lastName matches.
-  // Removes false positives where two different people share last name + company
-  // but have very different first names (e.g. "Bob Smith" vs "John Smith").
+  // JS: filter by first-name Levenshtein distance < 3 to catch typos/nicknames
   const inputFirstLower = input.firstName.trim().toLowerCase();
-  const filtered = fuzzyMatches.filter((match) => {
-    // If this was a company+lastName match, verify first-name similarity in JS
-    if (
-      match.companyName?.toLowerCase() === input.companyName?.trim().toLowerCase() &&
-      match.lastName?.toLowerCase() === input.lastName.trim().toLowerCase()
-    ) {
-      const dist = levenshteinDistance(match.firstName?.toLowerCase() ?? "", inputFirstLower);
-      return dist < 3;
-    }
-    return true; // other match types pass through
+  const filtered = candidates.filter((c) => {
+    const dist = levenshteinDistance(c.firstName?.toLowerCase() ?? "", inputFirstLower);
+    return dist < 3;
   });
 
   result.fuzzySuggestions = filtered.slice(0, 5).map((match) => ({
