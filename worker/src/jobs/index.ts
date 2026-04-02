@@ -4,6 +4,7 @@ import { runDedupScan } from "./dedup-scan.js";
 import { runEmailSync } from "./email-sync.js";
 import { extractExif } from "./exif-extract.js";
 import { runDailyTaskGeneration } from "./daily-tasks.js";
+import { runActivityDropDetection } from "./activity-alerts.js";
 
 /**
  * Test handler that logs the payload. Used to validate the queue works end-to-end.
@@ -59,6 +60,11 @@ export function registerAllJobs() {
   // Daily task generation (triggered via job_queue or cron)
   registerJobHandler("daily_task_generation", async () => {
     await runDailyTaskGeneration();
+  });
+
+  // Activity drop detection (triggered via job_queue or cron)
+  registerJobHandler("activity_drop_detection", async () => {
+    await runActivityDropDetection();
   });
 
   // Domain event handlers for deal lifecycle
@@ -122,6 +128,82 @@ export function registerAllJobs() {
     );
   });
 
+  // Domain event: task.assigned -> create notification for assignee
+  domainEventHandlers.set("task.assigned", async (payload, _officeId) => {
+    console.log(`[Worker] task.assigned: ${payload.taskId} — ${payload.title}`);
+
+    if (!payload.assignedTo) return;
+
+    const { pool: workerPool } = await import("../db.js");
+    const userResult = await workerPool.query(
+      "SELECT office_id FROM public.users WHERE id = $1",
+      [payload.assignedTo]
+    );
+    if (userResult.rows.length === 0) return;
+
+    const officeResult = await workerPool.query(
+      "SELECT slug FROM public.offices WHERE id = $1 AND is_active = true",
+      [userResult.rows[0].office_id]
+    );
+    if (officeResult.rows.length === 0) return;
+
+    const slug = officeResult.rows[0].slug;
+    const slugRegex = /^[a-z][a-z0-9_]*$/;
+    if (!slugRegex.test(slug)) return;
+
+    const schemaName = `office_${slug}`;
+
+    await workerPool.query(
+      `INSERT INTO ${schemaName}.notifications (user_id, type, title, body, link)
+       VALUES ($1, 'task_assigned', $2, $3, $4)`,
+      [
+        payload.assignedTo,
+        `New task assigned: ${payload.title}`,
+        payload.title,
+        "/tasks",
+      ]
+    );
+  });
+
+  // Domain event: task.completed -> create activity record
+  domainEventHandlers.set("task.completed", async (payload, _officeId) => {
+    console.log(`[Worker] task.completed: ${payload.taskId} — ${payload.title}`);
+
+    // Create a task_completed activity
+    if (!payload.completedBy) return;
+
+    const { pool: workerPool } = await import("../db.js");
+    const userResult = await workerPool.query(
+      "SELECT office_id FROM public.users WHERE id = $1",
+      [payload.completedBy]
+    );
+    if (userResult.rows.length === 0) return;
+
+    const officeResult = await workerPool.query(
+      "SELECT slug FROM public.offices WHERE id = $1 AND is_active = true",
+      [userResult.rows[0].office_id]
+    );
+    if (officeResult.rows.length === 0) return;
+
+    const slug = officeResult.rows[0].slug;
+    const slugRegex = /^[a-z][a-z0-9_]*$/;
+    if (!slugRegex.test(slug)) return;
+
+    const schemaName = `office_${slug}`;
+
+    await workerPool.query(
+      `INSERT INTO ${schemaName}.activities
+       (type, user_id, deal_id, contact_id, subject, occurred_at)
+       VALUES ('task_completed', $1, $2, $3, $4, NOW())`,
+      [
+        payload.completedBy,
+        payload.dealId ?? null,
+        payload.contactId ?? null,
+        `Completed: ${payload.title}`,
+      ]
+    );
+  });
+
   domainEventHandlers.set("email.sent", async (payload, _officeId) => {
     console.log(`[Worker] email.sent: to ${payload.to?.join(", ")} — subject: ${payload.subject}`);
     // Future: update contact touchpoint count, last_contacted_at
@@ -139,7 +221,7 @@ export function registerAllJobs() {
     }
   });
 
-  console.log("[Worker] Job handlers registered:", ["test_echo", "domain_event", "stale_deal_scan", "dedup_scan", "email_sync", "daily_task_generation"].join(", "));
+  console.log("[Worker] Job handlers registered:", ["test_echo", "domain_event", "stale_deal_scan", "dedup_scan", "email_sync", "daily_task_generation", "activity_drop_detection"].join(", "));
 }
 
 export { domainEventHandlers };

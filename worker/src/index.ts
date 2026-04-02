@@ -9,6 +9,7 @@ import { runStaleDealScan } from "./jobs/stale-deals.js";
 import { runDedupScan } from "./jobs/dedup-scan.js";
 import { runEmailSync } from "./jobs/email-sync.js";
 import { runDailyTaskGeneration } from "./jobs/daily-tasks.js";
+import { runActivityDropDetection } from "./jobs/activity-alerts.js";
 
 const POLL_INTERVAL_MS = 2000; // Poll job queue every 2 seconds
 
@@ -77,6 +78,17 @@ async function main() {
     }
   }, { timezone: "America/Chicago" });
   console.log("[Worker] Cron scheduled: daily task generation at 6:00 AM CT daily");
+
+  // Activity drop detection: daily at 7:00 AM CT
+  cron.schedule("0 7 * * *", async () => {
+    console.log("[Worker:cron] Running activity drop detection...");
+    try {
+      await runActivityDropDetection();
+    } catch (err) {
+      console.error("[Worker:cron] Activity drop detection failed:", err);
+    }
+  }, { timezone: "America/Chicago" });
+  console.log("[Worker] Cron scheduled: activity drop detection at 7:00 AM CT daily");
 
   console.log("[Worker] Ready.");
 }
