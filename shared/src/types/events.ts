@@ -7,6 +7,8 @@ export const DOMAIN_EVENTS = {
   EMAIL_SENT: "email.sent",
   FILE_UPLOADED: "file.uploaded",
   TASK_COMPLETED: "task.completed",
+  TASK_ASSIGNED: "task.assigned",
+  NOTIFICATION_CREATED: "notification.created",
   APPROVAL_REQUESTED: "approval.requested",
   APPROVAL_RESOLVED: "approval.resolved",
 } as const;
