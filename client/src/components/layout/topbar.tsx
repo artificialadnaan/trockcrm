@@ -1,6 +1,7 @@
-import { Bell, Search } from "lucide-react";
+import { Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { NotificationCenter } from "@/components/notifications/notification-center";
 import { useAuth } from "@/lib/auth";
 
 export function Topbar() {
@@ -24,9 +25,7 @@ export function Topbar() {
       </div>
 
       <div className="flex items-center gap-3">
-        <Button variant="ghost" size="icon" className="relative">
-          <Bell className="h-4 w-4" />
-        </Button>
+        <NotificationCenter />
         <Avatar className="h-8 w-8">
           <AvatarFallback className="bg-brand-purple text-white text-xs">
             {initials}
