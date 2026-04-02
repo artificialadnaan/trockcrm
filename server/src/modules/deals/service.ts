@@ -6,6 +6,8 @@ import {
   dealApprovals,
   changeOrders,
   pipelineStageConfig,
+  users,
+  userOfficeAccess,
 } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { db } from "../../db.js";
@@ -76,6 +78,10 @@ async function generateDealNumber(tenantDb: TenantDb): Promise<string> {
   const year = new Date().getFullYear();
   const prefix = `TR-${year}-`;
 
+  // Advisory lock on the year prefix to prevent concurrent collisions.
+  // FOR UPDATE only locks existing rows — this also protects the empty-year case.
+  await tenantDb.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${prefix}))`);
+
   // Lock the highest deal number row for this year using FOR UPDATE.
   // This prevents concurrent transactions from reading the same max value.
   const result = await tenantDb
@@ -97,6 +103,20 @@ async function generateDealNumber(tenantDb: TenantDb): Promise<string> {
   }
 
   return `${prefix}${String(nextSeq).padStart(4, "0")}`;
+}
+
+/**
+ * Validate that the assigned user exists, is active, and has access to the office.
+ */
+async function validateAssignee(tenantDb: TenantDb, assigneeId: string, officeId?: string): Promise<void> {
+  const [user] = await tenantDb.select().from(users)
+    .where(and(eq(users.id, assigneeId), eq(users.isActive, true))).limit(1);
+  if (!user) throw new AppError(400, "Assigned user not found or inactive");
+  if (officeId && user.officeId !== officeId) {
+    const [access] = await tenantDb.select().from(userOfficeAccess)
+      .where(and(eq(userOfficeAccess.userId, assigneeId), eq(userOfficeAccess.officeId, officeId))).limit(1);
+    if (!access) throw new AppError(400, "Assigned user does not have access to this office");
+  }
 }
 
 /**
@@ -271,6 +291,9 @@ export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
     throw new AppError(400, "Cannot create a deal in a terminal stage");
   }
 
+  // Validate the assigned rep exists, is active, and has office access
+  await validateAssignee(tenantDb, input.assignedRepId);
+
   const dealNumber = await generateDealNumber(tenantDb);
 
   const result = await tenantDb
@@ -319,6 +342,11 @@ export async function updateDeal(
   // Reps can only edit their own deals
   if (userRole === "rep" && existing.assignedRepId !== userId) {
     throw new AppError(403, "You can only edit your own deals");
+  }
+
+  // Validate assignee if being changed
+  if (input.assignedRepId !== undefined) {
+    await validateAssignee(tenantDb, input.assignedRepId);
   }
 
   // Build update object — only include fields that are provided

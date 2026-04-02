@@ -232,6 +232,10 @@ router.post("/:id/stage/preflight", async (req, res, next) => {
 // POST /api/deals/:id/approvals — request approval (rep creates)
 router.post("/:id/approvals", async (req, res, next) => {
   try {
+    // RBAC: verify the user has access to this deal
+    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+
     const { targetStageId, requiredRole } = req.body;
     if (!targetStageId || !requiredRole) {
       throw new AppError(400, "targetStageId and requiredRole are required");
@@ -248,22 +252,27 @@ router.post("/:id/approvals", async (req, res, next) => {
       })
       .returning();
 
-    // Emit approval.requested event for notification delivery
-    eventBus.emitLocal({
-      name: "approval.requested",
-      payload: {
-        dealId: req.params.id,
-        targetStageId,
-        requiredRole,
-        requestedBy: req.user!.id,
-        approvalId: result[0].id,
-      },
-      officeId: req.user!.activeOfficeId ?? req.user!.officeId,
-      userId: req.user!.id,
-      timestamp: new Date(),
-    });
-
     await req.commitTransaction!();
+
+    // Emit approval.requested event AFTER commit for notification delivery
+    try {
+      eventBus.emitLocal({
+        name: "approval.requested",
+        payload: {
+          dealId: req.params.id,
+          targetStageId,
+          requiredRole,
+          requestedBy: req.user!.id,
+          approvalId: result[0].id,
+        },
+        officeId: req.user!.activeOfficeId ?? req.user!.officeId,
+        userId: req.user!.id,
+        timestamp: new Date(),
+      });
+    } catch (eventErr) {
+      console.error("[Deals] Failed to emit approval.requested event:", eventErr);
+    }
+
     res.status(201).json({ approval: result[0] });
   } catch (err) {
     next(err);
@@ -281,6 +290,25 @@ router.patch(
         throw new AppError(400, "status must be 'approved' or 'rejected'");
       }
 
+      const dealId = req.params.id as string;
+      const approvalId = req.params.approvalId as string;
+
+      // RBAC: verify user has access to this deal
+      const deal = await getDealById(req.tenantDb!, dealId, req.user!.role, req.user!.id);
+      if (!deal) throw new AppError(404, "Deal not found");
+
+      // Fetch the approval and validate state + role
+      const [approval] = await req.tenantDb!.select().from(dealApprovals)
+        .where(and(eq(dealApprovals.id, approvalId), eq(dealApprovals.dealId, dealId))).limit(1);
+
+      if (!approval) throw new AppError(404, "Approval not found");
+      if (approval.status !== "pending") throw new AppError(400, "Approval already resolved");
+
+      const roleHierarchy: Record<string, number> = { rep: 0, director: 1, admin: 2 };
+      if (roleHierarchy[req.user!.role] < roleHierarchy[approval.requiredRole]) {
+        throw new AppError(403, `Requires ${approval.requiredRole} role to resolve this approval`);
+      }
+
       const result = await req.tenantDb!
         .update(dealApprovals)
         .set({
@@ -289,33 +317,29 @@ router.patch(
           approvedBy: req.user!.id,
           resolvedAt: new Date(),
         })
-        .where(
-          and(
-            eq(dealApprovals.id, req.params.approvalId as string),
-            eq(dealApprovals.dealId, req.params.id as string)
-          )
-        )
+        .where(eq(dealApprovals.id, approvalId))
         .returning();
 
-      if (result.length === 0) {
-        throw new AppError(404, "Approval not found");
+      await req.commitTransaction!();
+
+      // Emit approval.resolved event AFTER commit
+      try {
+        eventBus.emitLocal({
+          name: "approval.resolved",
+          payload: {
+            dealId,
+            approvalId,
+            status,
+            resolvedBy: req.user!.id,
+          },
+          officeId: req.user!.activeOfficeId ?? req.user!.officeId,
+          userId: req.user!.id,
+          timestamp: new Date(),
+        });
+      } catch (eventErr) {
+        console.error("[Deals] Failed to emit approval.resolved event:", eventErr);
       }
 
-      // Emit approval.resolved event
-      eventBus.emitLocal({
-        name: "approval.resolved",
-        payload: {
-          dealId: req.params.id,
-          approvalId: req.params.approvalId as string,
-          status,
-          resolvedBy: req.user!.id,
-        },
-        officeId: req.user!.activeOfficeId ?? req.user!.officeId,
-        userId: req.user!.id,
-        timestamp: new Date(),
-      });
-
-      await req.commitTransaction!();
       res.json({ approval: result[0] });
     } catch (err) {
       next(err);
@@ -326,6 +350,10 @@ router.patch(
 // GET /api/deals/:id/approvals — list approvals for a deal
 router.get("/:id/approvals", async (req, res, next) => {
   try {
+    // RBAC: verify user has access to this deal
+    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+
     const approvals = await req.tenantDb!
       .select()
       .from(dealApprovals)

@@ -12,7 +12,7 @@ import {
 import { useDroppable } from "@dnd-kit/core";
 import { Plus, Eye, EyeOff } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { DealCard } from "@/components/deals/deal-card";
 import { StageChangeDialog } from "@/components/deals/stage-change-dialog";
@@ -76,6 +76,7 @@ export function PipelinePage() {
   const [columns, setColumns] = useState<PipelineColumn[]>([]);
   const [terminalStages, setTerminalStages] = useState<TerminalStageInfo[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [showDd, setShowDd] = useState(false);
   const [activeDeal, setActiveDeal] = useState<Deal | null>(null);
   const [stageChangeOpen, setStageChangeOpen] = useState(false);
@@ -89,6 +90,7 @@ export function PipelinePage() {
 
   const fetchPipeline = useCallback(async () => {
     setLoading(true);
+    setError(null);
     try {
       const data = await api<{
         pipelineColumns: PipelineColumn[];
@@ -98,6 +100,7 @@ export function PipelinePage() {
       setTerminalStages(data.terminalStages ?? []);
     } catch (err) {
       console.error("Failed to load pipeline:", err);
+      setError("Failed to load pipeline data. Please try again.");
     } finally {
       setLoading(false);
     }
@@ -143,6 +146,21 @@ export function PipelinePage() {
             <div key={i} className="w-72 h-96 bg-muted animate-pulse rounded-lg flex-shrink-0" />
           ))}
         </div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="p-6">
+        <Card>
+          <CardContent className="p-6 text-center text-destructive">
+            {error}
+            <Button onClick={fetchPipeline} className="ml-2" variant="outline" size="sm">
+              Retry
+            </Button>
+          </CardContent>
+        </Card>
       </div>
     );
   }

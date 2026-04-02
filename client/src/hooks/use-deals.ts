@@ -159,7 +159,10 @@ export function useDealDetail(dealId: string | undefined) {
   const [error, setError] = useState<string | null>(null);
 
   const fetchDeal = useCallback(async () => {
-    if (!dealId) return;
+    if (!dealId) {
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     setError(null);
     try {

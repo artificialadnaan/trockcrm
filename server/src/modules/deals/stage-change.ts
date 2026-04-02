@@ -1,8 +1,9 @@
-import { eq, desc, sql } from "drizzle-orm";
+import { eq, and, desc, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
   deals,
   dealStageHistory,
+  dealApprovals,
   jobQueue,
 } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
@@ -51,16 +52,25 @@ export async function changeDealStage(
 ): Promise<StageChangeResult> {
   const { dealId, targetStageId, userId, userRole, overrideReason, lostReasonId, lostNotes, lostCompetitor } = input;
 
-  // Same-stage no-op: if the deal is already in the target stage, return it unchanged.
-  // Do NOT update stageEnteredAt or emit events.
+  // Lock the deal row FOR UPDATE to prevent concurrent stage changes.
   const currentDeal = await tenantDb
     .select()
     .from(deals)
     .where(eq(deals.id, dealId))
-    .limit(1);
+    .limit(1)
+    .for("update");
   if (currentDeal.length === 0) {
     throw new AppError(404, "Deal not found");
   }
+
+  // Rep ownership check: reps can only modify their own deals.
+  // Must happen before the same-stage no-op to prevent probing other reps' deals.
+  if (userRole === "rep" && currentDeal[0].assignedRepId !== userId) {
+    throw new AppError(403, "You can only modify your own deals");
+  }
+
+  // Same-stage no-op: if the deal is already in the target stage, return it unchanged.
+  // Do NOT update stageEnteredAt or emit events.
   if (currentDeal[0].stageId === targetStageId) {
     return { deal: currentDeal[0], stageHistory: null, eventsEmitted: [], _eventsToEmit: [] };
   }
@@ -98,16 +108,8 @@ export async function changeDealStage(
   const currentStage = gateResult.currentStage;
   const isReopen = currentStage.isTerminal && !targetStage.isTerminal;
 
-  // Fetch existing deal for duration calculation
-  const existingDeal = await tenantDb
-    .select()
-    .from(deals)
-    .where(eq(deals.id, dealId))
-    .limit(1);
-  if (existingDeal.length === 0) {
-    throw new AppError(404, "Deal not found");
-  }
-  const deal = existingDeal[0];
+  // Use the already-locked deal row for duration calculation (no redundant fetch)
+  const deal = currentDeal[0];
 
   // Step 5: Build deal update
   const dealUpdates: Record<string, any> = {
@@ -115,12 +117,20 @@ export async function changeDealStage(
     stageEnteredAt: new Date(),
   };
 
-  // Closed Won handling
+  // Always clear ALL terminal fields before setting new ones.
+  // This prevents stale data when moving between terminal stages
+  // (e.g., Closed Won -> Closed Lost) or reopening.
+  dealUpdates.actualCloseDate = null;
+  dealUpdates.lostReasonId = null;
+  dealUpdates.lostNotes = null;
+  dealUpdates.lostCompetitor = null;
+  dealUpdates.lostAt = null;
+
+  // Then set the fields specific to the target terminal stage
   if (targetStage.slug === "closed_won") {
     dealUpdates.actualCloseDate = new Date().toISOString().split("T")[0]; // DATE only
   }
 
-  // Closed Lost handling
   if (targetStage.slug === "closed_lost") {
     dealUpdates.lostReasonId = lostReasonId;
     dealUpdates.lostNotes = lostNotes;
@@ -128,13 +138,11 @@ export async function changeDealStage(
     dealUpdates.lostAt = new Date();
   }
 
-  // Reopen handling: clear terminal-stage fields
+  // Reopen handling: invalidate old approvals so they can't be reused
   if (isReopen) {
-    dealUpdates.actualCloseDate = null;
-    dealUpdates.lostReasonId = null;
-    dealUpdates.lostNotes = null;
-    dealUpdates.lostCompetitor = null;
-    dealUpdates.lostAt = null;
+    await tenantDb.update(dealApprovals)
+      .set({ status: "rejected", resolvedAt: new Date(), notes: "Auto-invalidated on deal reopen" })
+      .where(and(eq(dealApprovals.dealId, dealId), eq(dealApprovals.status, "approved")));
   }
 
   // Apply update
@@ -145,38 +153,32 @@ export async function changeDealStage(
     .returning();
   const updatedDeal = updatedDealResult[0];
 
-  // Step 6: Update the trigger-inserted stage history record with override context.
-  // The PG trigger on deals.stage_id fires AFTER UPDATE and inserts a basic record.
-  // We find the most recent history record for this deal and update it with the
-  // override metadata that the trigger cannot know about.
+  // Step 6: Explicitly insert stage history with all fields.
+  // The PG trigger is kept as a safety net for direct SQL updates, but we do
+  // the authoritative insert here with override metadata the trigger can't know.
 
   // Calculate duration in previous stage
   const durationInPreviousStage = deal.stageEnteredAt
     ? `${Math.floor((Date.now() - new Date(deal.stageEnteredAt).getTime()) / 1000)} seconds`
     : null;
 
-  // Update the most recent history record with override context using Drizzle sql template
-  const historyUpdateResult = await tenantDb.execute(sql`
-    UPDATE deal_stage_history
-    SET is_backward_move = ${gateResult.isBackwardMove},
-        is_director_override = ${isDirectorOverride ?? false},
-        override_reason = ${isDirectorOverride ? (overrideReason ?? null) : null},
-        changed_by = ${userId},
-        duration_in_previous_stage = ${durationInPreviousStage}::interval
-    WHERE id = (
-      SELECT id FROM deal_stage_history
-      WHERE deal_id = ${dealId}
-      ORDER BY created_at DESC
-      LIMIT 1
-    )
-    RETURNING *
-  `);
+  const historyInsertResult = await tenantDb.insert(dealStageHistory).values({
+    dealId,
+    fromStageId: currentStage.id,
+    toStageId: targetStage.id,
+    changedBy: userId,
+    isBackwardMove: gateResult.isBackwardMove,
+    isDirectorOverride: isDirectorOverride ?? false,
+    overrideReason: isDirectorOverride ? (overrideReason ?? null) : null,
+    durationInPreviousStage,
+  }).returning();
 
-  const stageHistoryRecord = (historyUpdateResult as any).rows?.[0] ?? null;
+  const stageHistoryRecord = historyInsertResult[0] ?? null;
 
   // Step 7: Outbox pattern -- insert durable jobs into job_queue INSIDE the
   // transaction so they are committed atomically with the deal update +
   // stage history. The worker picks these up independently.
+  // All jobs use jobType "domain_event" to match the worker's handler registry.
   const eventsEmitted: string[] = [];
   const eventsToEmit: Array<{ name: string; payload: any }> = [];
 
@@ -198,10 +200,10 @@ export async function changeDealStage(
   eventsToEmit.push({ name: DOMAIN_EVENTS.DEAL_STAGE_CHANGED, payload: stageChangedPayload });
   eventsEmitted.push(DOMAIN_EVENTS.DEAL_STAGE_CHANGED);
 
-  // Durable job (inside transaction)
+  // Durable job (inside transaction) — use "domain_event" to match worker handler
   await tenantDb.insert(jobQueue).values({
-    jobType: "deal.stage.changed",
-    payload: stageChangedPayload,
+    jobType: "domain_event",
+    payload: { eventName: "deal.stage.changed", ...stageChangedPayload },
     status: "pending",
   });
 
@@ -218,8 +220,8 @@ export async function changeDealStage(
     eventsEmitted.push(DOMAIN_EVENTS.DEAL_WON);
 
     await tenantDb.insert(jobQueue).values({
-      jobType: "deal.won",
-      payload: wonPayload,
+      jobType: "domain_event",
+      payload: { eventName: "deal.won", ...wonPayload },
       status: "pending",
     });
   }
@@ -239,8 +241,8 @@ export async function changeDealStage(
     eventsEmitted.push(DOMAIN_EVENTS.DEAL_LOST);
 
     await tenantDb.insert(jobQueue).values({
-      jobType: "deal.lost",
-      payload: lostPayload,
+      jobType: "domain_event",
+      payload: { eventName: "deal.lost", ...lostPayload },
       status: "pending",
     });
   }
