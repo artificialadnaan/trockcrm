@@ -43,16 +43,16 @@ export async function validateStagedDeals(): Promise<{
   const repEmails = new Set(allReps.map((r) => r.email.toLowerCase()));
 
   const BATCH = 100;
-  let offset = 0;
   let valid = 0, invalid = 0, needsReview = 0;
 
+  // Fetch pending rows WITHOUT offset — each batch updates rows out of
+  // 'pending' status, so the next fetch naturally gets the next batch.
   while (true) {
     const batch = await db
       .select()
       .from(stagedDeals)
       .where(eq(stagedDeals.validationStatus, "pending"))
-      .limit(BATCH)
-      .offset(offset);
+      .limit(BATCH);
 
     if (batch.length === 0) break;
 
@@ -107,8 +107,6 @@ export async function validateStagedDeals(): Promise<{
         })
         .where(eq(stagedDeals.id, deal.id));
     }
-
-    offset += BATCH;
   }
 
   return { valid, invalid, needsReview };
@@ -125,7 +123,6 @@ export async function validateStagedContacts(): Promise<{
   duplicates: number;
 }> {
   const BATCH = 100;
-  let offset = 0;
   let valid = 0, invalid = 0, needsReview = 0, duplicates = 0;
 
   // Build in-memory email map for staged duplicate detection
@@ -161,8 +158,7 @@ export async function validateStagedContacts(): Promise<{
       .select()
       .from(stagedContacts)
       .where(eq(stagedContacts.validationStatus, "pending"))
-      .limit(BATCH)
-      .offset(offset);
+      .limit(BATCH);
 
     if (batch.length === 0) break;
 
@@ -228,8 +224,6 @@ export async function validateStagedContacts(): Promise<{
         })
         .where(eq(stagedContacts.id, contact.id));
     }
-
-    offset += BATCH;
   }
 
   return { valid, invalid, needsReview, duplicates };
@@ -252,7 +246,6 @@ export async function validateStagedActivities(): Promise<{
   );
 
   const BATCH = 100;
-  let offset = 0;
   let valid = 0, invalid = 0, orphans = 0;
 
   while (true) {
@@ -260,8 +253,7 @@ export async function validateStagedActivities(): Promise<{
       .select()
       .from(stagedActivities)
       .where(eq(stagedActivities.validationStatus, "pending"))
-      .limit(BATCH)
-      .offset(offset);
+      .limit(BATCH);
 
     if (batch.length === 0) break;
 
@@ -294,8 +286,6 @@ export async function validateStagedActivities(): Promise<{
         .set({ validationStatus, validationErrors: errors })
         .where(eq(stagedActivities.id, activity.id));
     }
-
-    offset += BATCH;
   }
 
   return { valid, invalid, orphans };

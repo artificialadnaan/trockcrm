@@ -1,6 +1,9 @@
-import { sql } from "drizzle-orm";
+import { sql, eq } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
+import { userOfficeAccess, offices } from "@trock-crm/shared/schema";
+import { db, pool } from "../../db.js";
+import { drizzle } from "drizzle-orm/node-postgres";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -10,6 +13,7 @@ export interface SearchResult {
   primaryLabel: string;
   secondaryLabel: string;
   tertiaryLabel?: string;
+  officeSlug?: string;
   deepLink: string;
   rank: number;
 }
@@ -28,17 +32,36 @@ const MAX_RESULTS_PER_TYPE = 5;
  * Search across deals, contacts, and files using PostgreSQL full-text search.
  * Requires minimum 2-character query (enforced at route level).
  * Results are ranked by ts_rank and returned grouped by entity type.
+ *
+ * For directors/admins: queries across all accessible office schemas, merges
+ * and re-ranks results. For reps: single-office behavior (unchanged).
  */
 export async function globalSearch(
   tenantDb: TenantDb,
   query: string,
-  types: Array<"deals" | "contacts" | "files"> = ["deals", "contacts", "files"]
+  types: Array<"deals" | "contacts" | "files"> = ["deals", "contacts", "files"],
+  userRole?: string,
+  userId?: string,
 ): Promise<SearchResponse> {
   const sanitized = query.trim().replace(/[^\w\s-]/g, "").trim();
   if (sanitized.length < 2) {
     return { deals: [], contacts: [], files: [], total: 0, query };
   }
 
+  // For directors/admins, search across all accessible offices
+  if (userId && userRole && (userRole === "admin" || userRole === "director")) {
+    return crossOfficeSearch(sanitized, types, userId);
+  }
+
+  // Default: single-office search (reps)
+  return singleOfficeSearch(tenantDb, sanitized, types);
+}
+
+async function singleOfficeSearch(
+  tenantDb: TenantDb,
+  sanitized: string,
+  types: Array<"deals" | "contacts" | "files">,
+): Promise<SearchResponse> {
   const results = await Promise.allSettled([
     types.includes("deals") ? searchDeals(tenantDb, sanitized) : Promise.resolve([]),
     types.includes("contacts") ? searchContacts(tenantDb, sanitized) : Promise.resolve([]),
@@ -54,7 +77,83 @@ export async function globalSearch(
     contacts,
     files,
     total: deals.length + contacts.length + files.length,
-    query,
+    query: sanitized,
+  };
+}
+
+async function crossOfficeSearch(
+  sanitized: string,
+  types: Array<"deals" | "contacts" | "files">,
+  userId: string,
+): Promise<SearchResponse> {
+  // Get all offices this user has access to
+  const accessRows = await db
+    .select({ officeId: userOfficeAccess.officeId })
+    .from(userOfficeAccess)
+    .where(eq(userOfficeAccess.userId, userId));
+
+  const officeIds = accessRows.map((r) => r.officeId);
+
+  // Also include the user's primary office
+  const officeRows = await db
+    .select({ id: offices.id, slug: offices.slug })
+    .from(offices)
+    .where(eq(offices.isActive, true));
+
+  const accessibleOffices = officeRows.filter(
+    (o) => officeIds.includes(o.id)
+  );
+
+  // If no accessible offices, return empty
+  if (accessibleOffices.length === 0) {
+    return { deals: [], contacts: [], files: [], total: 0, query: sanitized };
+  }
+
+  // Search each office schema in parallel
+  const allDeals: SearchResult[] = [];
+  const allContacts: SearchResult[] = [];
+  const allFiles: SearchResult[] = [];
+
+  const searchPromises = accessibleOffices.map(async (office) => {
+    const client = await pool.connect();
+    try {
+      const schemaName = `office_${office.slug}`;
+      await client.query("SELECT set_config('search_path', $1, false)", [`${schemaName},public`]);
+      const officeDb = drizzle(client, { schema: undefined as any });
+
+      const results = await Promise.allSettled([
+        types.includes("deals") ? searchDeals(officeDb as any, sanitized) : Promise.resolve([]),
+        types.includes("contacts") ? searchContacts(officeDb as any, sanitized) : Promise.resolve([]),
+        types.includes("files") ? searchFiles(officeDb as any, sanitized) : Promise.resolve([]),
+      ]);
+
+      const tag = (items: SearchResult[]) =>
+        items.map((item) => ({ ...item, officeSlug: office.slug }));
+
+      if (results[0].status === "fulfilled") allDeals.push(...tag(results[0].value));
+      if (results[1].status === "fulfilled") allContacts.push(...tag(results[1].value));
+      if (results[2].status === "fulfilled") allFiles.push(...tag(results[2].value));
+    } finally {
+      client.release();
+    }
+  });
+
+  await Promise.allSettled(searchPromises);
+
+  // Re-rank: sort by rank descending, take top N
+  const sortAndLimit = (items: SearchResult[]) =>
+    items.sort((a, b) => b.rank - a.rank).slice(0, MAX_RESULTS_PER_TYPE);
+
+  const deals = sortAndLimit(allDeals);
+  const contacts = sortAndLimit(allContacts);
+  const files = sortAndLimit(allFiles);
+
+  return {
+    deals,
+    contacts,
+    files,
+    total: deals.length + contacts.length + files.length,
+    query: sanitized,
   };
 }
 

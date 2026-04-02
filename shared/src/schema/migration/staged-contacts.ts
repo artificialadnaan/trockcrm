@@ -6,12 +6,15 @@ import {
   timestamp,
   jsonb,
   numeric,
+  index,
 } from "drizzle-orm/pg-core";
 
 const migrationSchema = pgSchema("migration");
 
 export const stagedContacts = migrationSchema.table("staged_contacts", {
   id: uuid("id").primaryKey().defaultRandom(),
+  officeId: uuid("office_id"),
+  importRunId: uuid("import_run_id"),
   hubspotContactId: varchar("hubspot_contact_id", { length: 100 }).unique().notNull(),
   rawData: jsonb("raw_data").notNull(),
   mappedFirstName: varchar("mapped_first_name", { length: 255 }),
@@ -33,4 +36,6 @@ export const stagedContacts = migrationSchema.table("staged_contacts", {
   promotedContactId: uuid("promoted_contact_id"),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
-});
+}, (table) => [
+  index("staged_contacts_office_id_idx").on(table.officeId),
+]);

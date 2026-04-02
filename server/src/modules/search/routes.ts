@@ -23,7 +23,13 @@ router.get("/", async (req: Request, res: Response) => {
         ) as Array<"deals" | "contacts" | "files">)
       : (["deals", "contacts", "files"] as Array<"deals" | "contacts" | "files">);
 
-    const results = await globalSearch(req.tenantDb!, q, types);
+    const results = await globalSearch(
+      req.tenantDb!,
+      q,
+      types,
+      req.user?.role,
+      req.user?.id,
+    );
     await req.commitTransaction!();
     return res.json(results);
   } catch (err) {

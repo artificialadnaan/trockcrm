@@ -63,6 +63,64 @@ router.post(
         throw new AppError(400, "resolution must be 'accept_crm' or 'accept_procore'");
       }
 
+      // Fetch the conflict record
+      const [syncRecord] = await db
+        .select()
+        .from(procoreSyncState)
+        .where(eq(procoreSyncState.id, req.params.id as string))
+        .limit(1);
+
+      if (!syncRecord) {
+        throw new AppError(404, "Sync conflict record not found");
+      }
+
+      if (syncRecord.syncStatus !== "conflict") {
+        throw new AppError(400, "Record is not in conflict state");
+      }
+
+      const officeSlug = req.officeSlug!;
+      const schemaName = `office_${officeSlug}`;
+
+      if (resolution === "accept_crm") {
+        // Write CRM value to Procore via API
+        const companyId = process.env.PROCORE_COMPANY_ID;
+        if (!companyId) throw new AppError(500, "PROCORE_COMPANY_ID not configured");
+
+        // Get the CRM deal's current stage to push to Procore
+        const dealResult = await req.tenantClient!.query(
+          `SELECT d.id, d.name, psc.procore_stage_mapping
+           FROM deals d
+           JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
+           WHERE d.id = $1 LIMIT 1`,
+          [syncRecord.crmEntityId]
+        );
+
+        if (dealResult.rows[0]?.procore_stage_mapping) {
+          await procoreClient.patch(
+            `/rest/v1.0/companies/${companyId}/projects/${syncRecord.procoreId}`,
+            { project: { stage: dealResult.rows[0].procore_stage_mapping } }
+          );
+        }
+      } else {
+        // accept_procore: update CRM record from Procore data stored in conflict_data
+        const conflictData = syncRecord.conflictData as any;
+        if (conflictData?.procore_status) {
+          // Look up stage config that maps to this Procore status
+          const stageResult = await req.tenantClient!.query(
+            `SELECT id FROM public.pipeline_stage_config
+             WHERE procore_stage_mapping = $1 LIMIT 1`,
+            [conflictData.procore_status]
+          );
+          if (stageResult.rows[0]) {
+            await req.tenantClient!.query(
+              `UPDATE deals SET stage_id = $1, updated_at = NOW() WHERE id = $2`,
+              [stageResult.rows[0].id, syncRecord.crmEntityId]
+            );
+          }
+        }
+      }
+
+      // Only clear conflict after the authoritative update succeeds
       const result = await db
         .update(procoreSyncState)
         .set({
@@ -74,10 +132,6 @@ router.post(
         })
         .where(eq(procoreSyncState.id, req.params.id as string))
         .returning();
-
-      if (result.length === 0) {
-        throw new AppError(404, "Sync conflict record not found");
-      }
 
       await req.commitTransaction!();
       res.json({ success: true, record: result[0] });

@@ -38,7 +38,12 @@ async function main() {
   const schema = `office_${OFFICE_SLUG}`;
   const runByUserId = await getRunByUserId();
 
-  const [runRow] = await db
+  const client = await pool.connect();
+  // Bind a Drizzle instance to the transaction client so ALL operations
+  // (staging updates AND tenant inserts) use the same connection/transaction.
+  const txDb = drizzle(client);
+
+  const [runRow] = await txDb
     .insert(importRuns)
     .values({
       type: "promote",
@@ -51,8 +56,6 @@ async function main() {
 
   const runId = runRow.id;
 
-  const client = await pool.connect();
-
   try {
     await client.query("BEGIN");
     await client.query(`SET LOCAL search_path = '${schema}', 'public'`);
@@ -61,12 +64,12 @@ async function main() {
     // 1. Load reference maps
     // -----------------------------------------------------------------------
 
-    const stages = await db
+    const stages = await txDb
       .select({ id: pipelineStageConfig.id, slug: pipelineStageConfig.slug })
       .from(pipelineStageConfig);
     const stageBySlug = new Map(stages.map((s) => [s.slug, s.id]));
 
-    const repUsers = await db
+    const repUsers = await txDb
       .select({ id: users.id, email: users.email })
       .from(users)
       .where(eq(users.isActive, true));
@@ -76,7 +79,7 @@ async function main() {
     // 2. Promote contacts first (deals reference contacts)
     // -----------------------------------------------------------------------
 
-    const approvedContacts = await db
+    const approvedContacts = await txDb
       .select()
       .from(stagedContacts)
       .where(eq(stagedContacts.validationStatus, "approved"));
@@ -115,7 +118,7 @@ async function main() {
       const newContactId = insertResult.rows[0]?.id;
       if (newContactId) {
         contactIdMap.set(c.hubspotContactId, newContactId);
-        await db
+        await txDb
           .update(stagedContacts)
           .set({ promotedAt: new Date(), promotedContactId: newContactId })
           .where(eq(stagedContacts.id, c.id));
@@ -128,7 +131,7 @@ async function main() {
     // 3. Promote deals
     // -----------------------------------------------------------------------
 
-    const approvedDeals = await db
+    const approvedDeals = await txDb
       .select()
       .from(stagedDeals)
       .where(eq(stagedDeals.validationStatus, "approved"));
@@ -189,7 +192,7 @@ async function main() {
       const newDealId = insertResult.rows[0]?.id;
       if (newDealId) {
         dealIdMap.set(d.hubspotDealId, newDealId);
-        await db
+        await txDb
           .update(stagedDeals)
           .set({ promotedAt: new Date(), promotedDealId: newDealId })
           .where(eq(stagedDeals.id, d.id));
@@ -228,7 +231,7 @@ async function main() {
     // 5. Promote activities
     // -----------------------------------------------------------------------
 
-    const approvedActivities = await db
+    const approvedActivities = await txDb
       .select()
       .from(stagedActivities)
       .where(eq(stagedActivities.validationStatus, "approved"));
@@ -261,7 +264,7 @@ async function main() {
         ]
       );
 
-      await db
+      await txDb
         .update(stagedActivities)
         .set({ promotedAt: new Date() })
         .where(eq(stagedActivities.id, a.id));
@@ -279,7 +282,7 @@ async function main() {
       activities: activityCount,
     };
 
-    await db
+    await txDb
       .update(importRuns)
       .set({ status: "completed", stats, completedAt: new Date() })
       .where(eq(importRuns.id, runId));
@@ -288,7 +291,8 @@ async function main() {
   } catch (err) {
     await client.query("ROLLBACK");
     console.error("\n[migration:promote] ROLLBACK — promotion failed:", err);
-    await db
+    // After rollback, update import run status (outside transaction, still on same client)
+    await txDb
       .update(importRuns)
       .set({ status: "rolled_back", errorLog: String(err), completedAt: new Date() })
       .where(eq(importRuns.id, runId));

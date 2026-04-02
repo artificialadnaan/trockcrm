@@ -5,12 +5,15 @@ import {
   text,
   timestamp,
   jsonb,
+  index,
 } from "drizzle-orm/pg-core";
 
 const migrationSchema = pgSchema("migration");
 
 export const stagedActivities = migrationSchema.table("staged_activities", {
   id: uuid("id").primaryKey().defaultRandom(),
+  officeId: uuid("office_id"),
+  importRunId: uuid("import_run_id"),
   hubspotActivityId: varchar("hubspot_activity_id", { length: 100 }).unique().notNull(),
   hubspotDealId: varchar("hubspot_deal_id", { length: 100 }),
   hubspotContactId: varchar("hubspot_contact_id", { length: 100 }),
@@ -24,4 +27,6 @@ export const stagedActivities = migrationSchema.table("staged_activities", {
   promotedAt: timestamp("promoted_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
-});
+}, (table) => [
+  index("staged_activities_office_id_idx").on(table.officeId),
+]);

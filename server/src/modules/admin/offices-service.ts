@@ -2,6 +2,7 @@ import { eq, asc } from "drizzle-orm";
 import { offices } from "@trock-crm/shared/schema";
 import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
+import { createOffice as provisionOffice } from "../office/service.js";
 
 export async function listOffices() {
   return db
@@ -26,6 +27,12 @@ export interface CreateOfficeInput {
   phone?: string;
 }
 
+/**
+ * Create an office AND atomically provision its tenant schema.
+ * Delegates to office/service.ts which handles schema creation inside a
+ * transaction — prevents the bug where the office row exists but the
+ * tenant schema is missing.
+ */
 export async function createOffice(input: CreateOfficeInput) {
   if (!/^[a-z][a-z0-9_]*$/.test(input.slug)) {
     throw new AppError(
@@ -34,29 +41,8 @@ export async function createOffice(input: CreateOfficeInput) {
     );
   }
 
-  const existing = await db
-    .select({ id: offices.id })
-    .from(offices)
-    .where(eq(offices.slug, input.slug))
-    .limit(1);
-
-  if (existing[0]) {
-    throw new AppError(409, `Office slug "${input.slug}" is already in use`);
-  }
-
-  const [office] = await db
-    .insert(offices)
-    .values({
-      name: input.name,
-      slug: input.slug,
-      address: input.address ?? null,
-      phone: input.phone ?? null,
-      isActive: true,
-      settings: {},
-    })
-    .returning();
-
-  return office;
+  // provisionOffice does: slug validation, uniqueness check, INSERT + schema DDL in one transaction
+  return provisionOffice(input.name, input.slug, input.address, input.phone);
 }
 
 export async function updateOffice(

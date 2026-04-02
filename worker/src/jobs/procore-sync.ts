@@ -103,22 +103,32 @@ async function handleCreateProject(
   companyId: string,
   dealId: string
 ): Promise<void> {
+  // Take a per-deal advisory lock to prevent concurrent project creation
+  // for the same deal (e.g. duplicate job_queue entries or webhook replays).
+  await client.query("BEGIN");
+  await client.query(
+    `SELECT pg_advisory_xact_lock(hashtext('procore_project_' || $1))`,
+    [dealId]
+  );
+
   const dealResult = await client.query(
     `SELECT id, name, procore_project_id, property_address, property_city,
             property_state, property_zip
-     FROM ${schemaName}.deals WHERE id = $1 LIMIT 1`,
+     FROM ${schemaName}.deals WHERE id = $1 LIMIT 1 FOR UPDATE`,
     [dealId]
   );
   const deal = dealResult.rows[0];
   if (!deal) {
     console.warn(`[Procore:worker] handleCreateProject: deal ${dealId} not found`);
+    await client.query("COMMIT");
     return;
   }
-  // Idempotency guard
+  // Re-check after acquiring lock — another worker may have created the project
   if (deal.procore_project_id != null) {
     console.log(
       `[Procore:worker] Deal ${dealId} already has procore_project_id ${deal.procore_project_id} — skip`
     );
+    await client.query("COMMIT");
     return;
   }
 
@@ -157,7 +167,6 @@ async function handleCreateProject(
     procoreProjectId = project.id;
   }
 
-  await client.query("BEGIN");
   await client.query(
     `UPDATE ${schemaName}.deals
      SET procore_project_id = $1, procore_last_synced_at = NOW(), updated_at = NOW()

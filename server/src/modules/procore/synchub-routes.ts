@@ -120,7 +120,8 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
 
     await client.query("BEGIN");
 
-    // Idempotency: match by procore_bid_id if provided (most reliable)
+    // Idempotency: match by procore_bid_id first (most reliable), then by
+    // source + name as fallback to catch replays where bid_id wasn't set.
     let existingDealId: string | null = null;
     if (procore_bid_id != null) {
       const existingResult = await client.query(
@@ -130,11 +131,24 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
       existingDealId = existingResult.rows[0]?.id ?? null;
     }
 
+    // Fallback dedup: match by source + exact name (catches replays without procore_bid_id)
+    if (!existingDealId) {
+      const nameMatchResult = await client.query(
+        `SELECT id FROM ${schemaName}.deals
+         WHERE source = $1 AND LOWER(TRIM(name)) = LOWER(TRIM($2))
+         LIMIT 1`,
+        [source, name]
+      );
+      existingDealId = nameMatchResult.rows[0]?.id ?? null;
+    }
+
     if (existingDealId) {
-      // Update the existing deal's stage and bid ID
+      // Upsert: update the existing deal's stage and ensure procore_bid_id is set
       await client.query(
         `UPDATE ${schemaName}.deals
-         SET stage_id = $1, procore_bid_id = $2, updated_at = NOW()
+         SET stage_id = $1,
+             procore_bid_id = COALESCE($2, procore_bid_id),
+             updated_at = NOW()
          WHERE id = $3`,
         [stageId, procore_bid_id ?? null, existingDealId]
       );

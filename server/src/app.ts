@@ -35,6 +35,12 @@ export function createApp() {
     origin: process.env.FRONTEND_URL || "http://localhost:5173",
     credentials: true,
   }));
+
+  // Procore webhook route — public (signature-verified, no JWT).
+  // MUST be mounted BEFORE express.json() so the raw body is available for
+  // HMAC signature verification. The route uses express.raw() internally.
+  app.use("/api/webhooks/procore", procoreWebhookRoutes);
+
   app.use(express.json({ limit: "10mb" }));
   app.use(cookieParser());
   app.use("/api", apiLimiter);
@@ -43,10 +49,6 @@ export function createApp() {
   app.get("/api/health", (_req, res) => {
     res.json({ status: "ok", timestamp: new Date().toISOString() });
   });
-
-  // Procore webhook route — public (signature-verified, no JWT)
-  // Must be mounted BEFORE express.json() parses the body for this path
-  app.use("/api/webhooks/procore", procoreWebhookRoutes);
 
   // SyncHub integration — authenticated by shared secret, no tenant scope
   app.use("/api/integrations/synchub", syncHubRoutes);
