@@ -1,5 +1,5 @@
 import type { Request, Response, NextFunction } from "express";
-import { verifyJwt, getUserById, canAccessOffice } from "../modules/auth/service.js";
+import { verifyJwt, getUserById, getOfficeAccess } from "../modules/auth/service.js";
 import { AppError } from "./error-handler.js";
 import type { AuthenticatedUser } from "@trock-crm/shared/types";
 
@@ -33,20 +33,24 @@ export async function authMiddleware(req: Request, _res: Response, next: NextFun
     // Determine active office (header override or default)
     const requestedOfficeId = req.headers["x-office-id"] as string | undefined;
     let activeOfficeId = user.officeId;
+    let effectiveRole = user.role;
 
     if (requestedOfficeId && requestedOfficeId !== user.officeId) {
-      const hasAccess = await canAccessOffice(user.id, requestedOfficeId);
-      if (!hasAccess) {
+      const access = await getOfficeAccess(user.id, requestedOfficeId);
+      if (!access.hasAccess) {
         throw new AppError(403, "No access to requested office");
       }
       activeOfficeId = requestedOfficeId;
+      if (access.roleOverride) {
+        effectiveRole = access.roleOverride as typeof user.role;
+      }
     }
 
     req.user = {
       id: user.id,
       email: user.email,
       displayName: user.displayName,
-      role: user.role,
+      role: effectiveRole,
       officeId: user.officeId,
       activeOfficeId,
     };

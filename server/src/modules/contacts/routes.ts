@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { eq } from "drizzle-orm";
-import { contactDealAssociations } from "@trock-crm/shared/schema";
+import { contactDealAssociations, jobQueue } from "@trock-crm/shared/schema";
 import { requireRole } from "../../middleware/rbac.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { eventBus } from "../../events/bus.js";
@@ -221,9 +221,27 @@ router.post("/", async (req, res, next) => {
       return;
     }
 
+    // Durable outbox insert INSIDE the transaction (matches deals pattern)
+    await req.tenantDb!.insert(jobQueue).values({
+      jobType: "domain_event",
+      payload: {
+        eventName: DOMAIN_EVENTS.CONTACT_CREATED,
+        contactId: contact.id,
+        firstName: contact.firstName,
+        lastName: contact.lastName,
+        email: contact.email,
+        companyName: contact.companyName,
+        category: contact.category,
+        userId: req.user!.id,
+      },
+      officeId: req.user!.activeOfficeId ?? req.user!.officeId,
+      status: "pending",
+      runAfter: new Date(),
+    });
+
     await req.commitTransaction!();
 
-    // Emit contact.created event after commit
+    // Best-effort local emission AFTER commit (for SSE push to connected clients)
     try {
       eventBus.emitLocal({
         name: DOMAIN_EVENTS.CONTACT_CREATED,
@@ -240,7 +258,7 @@ router.post("/", async (req, res, next) => {
         timestamp: new Date(),
       });
     } catch (eventErr) {
-      console.error("[Contacts] Failed to emit contact.created event:", eventErr);
+      console.error("[Contacts] Failed to emit contact.created local event:", eventErr);
     }
 
     res.status(201).json({ contact });

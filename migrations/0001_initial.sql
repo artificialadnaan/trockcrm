@@ -867,11 +867,14 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-DO $$ BEGIN
-  CREATE TRIGGER stage_history_trigger
-    AFTER UPDATE ON deals FOR EACH ROW EXECUTE FUNCTION record_stage_history();
-EXCEPTION WHEN duplicate_object THEN NULL;
-END $$;
+-- DISABLED: stage_history_trigger creates duplicate rows because stage-change.ts
+-- now explicitly inserts history with full override/backward/duration data.
+-- See migration 0003_disable_stage_history_trigger.sql for details.
+-- DO $$ BEGIN
+--   CREATE TRIGGER stage_history_trigger
+--     AFTER UPDATE ON deals FOR EACH ROW EXECUTE FUNCTION record_stage_history();
+-- EXCEPTION WHEN duplicate_object THEN NULL;
+-- END $$;
 
 -- ---- Stage entered_at trigger ----
 -- Resets deals.stage_entered_at when stage_id changes

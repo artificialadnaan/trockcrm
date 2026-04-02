@@ -110,7 +110,7 @@ export function registerAllJobs() {
         payload.userId,
         `New email from ${payload.contactName || payload.fromAddress}`,
         payload.subject?.substring(0, 200) ?? "New email",
-        payload.emailId ? `/email/${payload.emailId}` : "/email",
+        "/email", // Link to inbox page — no per-email route exists yet
       ]
     );
   });

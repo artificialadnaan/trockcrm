@@ -2,6 +2,7 @@ import { Router } from "express";
 import { AppError } from "../../middleware/error-handler.js";
 import { eventBus } from "../../events/bus.js";
 import { DOMAIN_EVENTS } from "@trock-crm/shared/types";
+import { jobQueue } from "@trock-crm/shared/schema";
 import {
   sendEmail,
   getEmails,
@@ -44,11 +45,28 @@ router.post("/send", async (req, res, next) => {
       contactId: contactId || null,
     });
 
+    // Durable outbox insert INSIDE the transaction (matches deals pattern)
+    await req.tenantDb!.insert(jobQueue).values({
+      jobType: "domain_event",
+      payload: {
+        eventName: DOMAIN_EVENTS.EMAIL_SENT,
+        emailId: email.id,
+        to,
+        subject: subject.trim(),
+        dealId: dealId || null,
+        contactId: contactId || null,
+        userId: req.user!.id,
+      },
+      officeId: req.user!.activeOfficeId ?? req.user!.officeId,
+      status: "pending",
+      runAfter: new Date(),
+    });
+
     await req.commitTransaction!();
 
-    // Emit email.sent event after commit
+    // Best-effort local emission AFTER commit (for SSE push to connected clients)
     try {
-      await eventBus.emitAll({
+      eventBus.emitLocal({
         name: DOMAIN_EVENTS.EMAIL_SENT,
         payload: {
           emailId: email.id,
@@ -62,7 +80,7 @@ router.post("/send", async (req, res, next) => {
         timestamp: new Date(),
       });
     } catch (eventErr) {
-      console.error("[Email] Failed to emit email.sent event:", eventErr);
+      console.error("[Email] Failed to emit email.sent local event:", eventErr);
     }
 
     res.status(201).json({ email });

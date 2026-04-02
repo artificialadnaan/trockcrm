@@ -34,6 +34,7 @@ export interface CreateDealInput {
   name: string;
   stageId: string;
   assignedRepId: string;
+  officeId?: string; // Active office — used to validate assignee has access
   primaryContactId?: string;
   ddEstimate?: string;
   bidEstimate?: string;
@@ -292,7 +293,7 @@ export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
   }
 
   // Validate the assigned rep exists, is active, and has office access
-  await validateAssignee(tenantDb, input.assignedRepId);
+  await validateAssignee(tenantDb, input.assignedRepId, input.officeId);
 
   const dealNumber = await generateDealNumber(tenantDb);
 
@@ -331,7 +332,8 @@ export async function updateDeal(
   dealId: string,
   input: UpdateDealInput,
   userRole: string,
-  userId: string
+  userId: string,
+  officeId?: string,
 ) {
   // Verify deal exists and user has access
   const existing = await getDealById(tenantDb, dealId, userRole, userId);
@@ -346,7 +348,7 @@ export async function updateDeal(
 
   // Validate assignee if being changed
   if (input.assignedRepId !== undefined) {
-    await validateAssignee(tenantDb, input.assignedRepId);
+    await validateAssignee(tenantDb, input.assignedRepId, officeId);
   }
 
   // Build update object — only include fields that are provided

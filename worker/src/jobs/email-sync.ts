@@ -337,6 +337,7 @@ async function syncUserEmails(poolClient: any, tokenRow: any): Promise<void> {
         poolClient,
         schemaName,
         user_id,
+        office_id,
         msg
       );
       if (processed) totalProcessed++;
@@ -380,6 +381,7 @@ async function processInboundMessage(
   client: any,
   schemaName: string,
   userId: string,
+  officeId: string,
   msg: any
 ): Promise<boolean> {
   const graphMessageId = msg.id;
@@ -479,21 +481,25 @@ async function processInboundMessage(
     ]
   );
 
-  // Create follow-up task for EVERY inbound email from a CRM contact (per spec)
+  // Create follow-up task only if we have a clear deal association (or zero deals).
+  // If associatedDealId is null due to MULTIPLE active deals, autoAssociateRaw
+  // already created a disambiguation task — don't create a duplicate.
   const contactName =
     `${contactMatch.first_name} ${contactMatch.last_name}`.trim();
-  await client.query(
-    `INSERT INTO ${schemaName}.tasks
-     (title, type, priority, status, assigned_to, deal_id, contact_id, email_id, due_date)
-     VALUES ($1, 'inbound_email', 'high', 'pending', $2, $3, $4, $5, CURRENT_DATE)`,
-    [
-      `Reply to ${contactName}: ${subject}`,
-      userId, // assigned to the rep whose mailbox received the email
-      associatedDealId, // may be null if 0 or multiple deals
-      contactMatch.id,
-      emailId,
-    ]
-  );
+  if (associatedDealId != null) {
+    await client.query(
+      `INSERT INTO ${schemaName}.tasks
+       (title, type, priority, status, assigned_to, deal_id, contact_id, email_id, due_date)
+       VALUES ($1, 'inbound_email', 'high', 'pending', $2, $3, $4, $5, CURRENT_DATE)`,
+      [
+        `Reply to ${contactName}: ${subject}`,
+        userId, // assigned to the rep whose mailbox received the email
+        associatedDealId,
+        contactMatch.id,
+        emailId,
+      ]
+    );
+  }
 
   // Emit email.received event via job_queue
   await client.query(
@@ -509,7 +515,7 @@ async function processInboundMessage(
         subject,
         userId,
       }),
-      null, // office_id not needed for domain events dispatched by worker
+      officeId, // pass actual office so notification handler resolves correct tenant
     ]
   );
 

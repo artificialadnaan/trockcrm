@@ -6,10 +6,14 @@ import { AppError } from "../../middleware/error-handler.js";
 
 const router = Router();
 
+// Dev endpoints ONLY available when Azure SSO is not configured AND not in production.
+// In production without Azure configured, return 404 to prevent unauthorized access.
+const isDevMode = !process.env.AZURE_CLIENT_ID && process.env.NODE_ENV !== "production";
+
 // Dev-mode: list available users for picker
 router.get("/dev/users", authLimiter, async (_req, res, next) => {
   try {
-    if (process.env.AZURE_CLIENT_ID) {
+    if (!isDevMode) {
       throw new AppError(404, "Dev mode not available");
     }
     const devUsers = await getDevUsers();
@@ -22,7 +26,7 @@ router.get("/dev/users", authLimiter, async (_req, res, next) => {
 // Dev-mode: login as a specific user
 router.post("/dev/login", authLimiter, async (req, res, next) => {
   try {
-    if (process.env.AZURE_CLIENT_ID) {
+    if (!isDevMode) {
       throw new AppError(404, "Dev mode not available");
     }
     const { email } = req.body;

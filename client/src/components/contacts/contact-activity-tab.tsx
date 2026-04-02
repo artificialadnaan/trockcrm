@@ -14,12 +14,15 @@ export function ContactActivityTab({ contactId }: ContactActivityTabProps) {
   const [activeForm, setActiveForm] = useState<LogType | null>(null);
   const [body, setBody] = useState("");
 
+  const [submitError, setSubmitError] = useState<string | null>(null);
+
   const handleSubmit = async (type: LogType) => {
     if (!body.trim()) return;
+    setSubmitError(null);
     // TODO (Plan 4 -- Tasks/Activities): Replace with actual API call once
     // the activities endpoint exists. For now, log locally as a fallback.
     try {
-      await fetch(`/api/contacts/${contactId}/activities`, {
+      const res = await fetch(`/api/contacts/${contactId}/activities`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -30,12 +33,18 @@ export function ContactActivityTab({ contactId }: ContactActivityTabProps) {
           contactId,
         }),
       });
-    } catch {
-      // Endpoint doesn't exist yet -- fall back to console until Plan 4
-      console.log("[ActivityTab] Log entry:", { contactId, type, body });
+      if (!res.ok) {
+        throw new Error(`Server returned ${res.status}`);
+      }
+      setBody("");
+      setActiveForm(null);
+    } catch (err) {
+      // Endpoint doesn't exist yet -- show friendly message until Plan 4
+      console.warn("[ActivityTab] Activity endpoint not yet available:", err);
+      setSubmitError("Activity logging is not available yet. This feature is coming in a future update.");
+      setBody("");
+      setActiveForm(null);
     }
-    setBody("");
-    setActiveForm(null);
   };
 
   return (
@@ -86,6 +95,13 @@ export function ContactActivityTab({ contactId }: ContactActivityTabProps) {
             </div>
           </CardContent>
         </Card>
+      )}
+
+      {/* Info message when activity logging fails */}
+      {submitError && (
+        <div className="rounded-md bg-amber-50 border border-amber-200 p-3 text-sm text-amber-800">
+          {submitError}
+        </div>
       )}
 
       {/* Activity feed -- populated in Plan 4 */}

@@ -124,6 +124,7 @@ router.post("/", async (req, res, next) => {
       name,
       stageId,
       assignedRepId: repId,
+      officeId: req.user!.activeOfficeId,
       ...rest,
     });
     await req.commitTransaction!();
@@ -148,7 +149,8 @@ router.patch("/:id", async (req, res, next) => {
       req.params.id,
       body,
       req.user!.role,
-      req.user!.id
+      req.user!.id,
+      req.user!.activeOfficeId,
     );
     await req.commitTransaction!();
     res.json({ deal });

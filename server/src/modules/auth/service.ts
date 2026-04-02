@@ -64,17 +64,30 @@ export async function getDevUsers() {
 }
 
 export async function canAccessOffice(userId: string, officeId: string): Promise<boolean> {
-  // Check if it's the user's primary office
-  const user = await getUserById(userId);
-  if (!user) return false;
-  if (user.officeId === officeId) return true;
+  const { hasAccess } = await getOfficeAccess(userId, officeId);
+  return hasAccess;
+}
 
-  // Check user_office_access
-  const access = await db
+/**
+ * Check office access AND return the role_override if one exists.
+ * Primary office always has access with no override.
+ */
+export async function getOfficeAccess(
+  userId: string,
+  officeId: string,
+): Promise<{ hasAccess: boolean; roleOverride?: string }> {
+  const user = await getUserById(userId);
+  if (!user) return { hasAccess: false };
+  if (user.officeId === officeId) return { hasAccess: true }; // Primary office, no override
+
+  // Check user_office_access for cross-office access + role override
+  const rows = await db
     .select()
     .from(userOfficeAccess)
     .where(eq(userOfficeAccess.userId, userId))
     .limit(100);
 
-  return access.some((a) => a.officeId === officeId);
+  const access = rows.find((a) => a.officeId === officeId);
+  if (!access) return { hasAccess: false };
+  return { hasAccess: true, roleOverride: access.roleOverride || undefined };
 }
