@@ -12,6 +12,7 @@ import { dealRoutes } from "./modules/deals/routes.js";
 import { pipelineRoutes } from "./modules/pipeline/routes.js";
 import { contactRoutes } from "./modules/contacts/routes.js";
 import { emailRoutes } from "./modules/email/routes.js";
+import { fileRoutes } from "./modules/files/routes.js";
 
 export function createApp() {
   const app = express();
@@ -48,6 +49,7 @@ export function createApp() {
   tenantRouter.use("/pipeline", pipelineRoutes);
   tenantRouter.use("/contacts", contactRoutes);
   tenantRouter.use("/email", emailRoutes);
+  tenantRouter.use("/files", fileRoutes);
 
   // Foundation test route — proves tenant middleware works end-to-end
   tenantRouter.get("/tenant-check", async (req, res) => {
