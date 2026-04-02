@@ -15,15 +15,10 @@ import { ContactEditPage } from "@/pages/contacts/contact-edit-page";
 import { MergeQueuePage } from "@/pages/admin/merge-queue-page";
 import { EmailInboxPage } from "@/pages/email/email-inbox-page";
 import { TaskListPage } from "@/pages/tasks/task-list-page";
-
-function Dashboard() {
-  return (
-    <div>
-      <h2 className="text-2xl font-bold">Dashboard</h2>
-      <p className="text-muted-foreground mt-1">Welcome to T Rock CRM. Features coming soon.</p>
-    </div>
-  );
-}
+import { RepDashboardPage } from "@/pages/dashboard/rep-dashboard-page";
+import { DirectorDashboardPage } from "@/pages/director/director-dashboard-page";
+import { DirectorRepDetail } from "@/pages/director/director-rep-detail";
+import { ReportsPage } from "@/pages/reports/reports-page";
 
 function PlaceholderPage({ title }: { title: string }) {
   return (
@@ -55,7 +50,7 @@ export function App() {
       <AuthGate>
         <Routes>
           <Route element={<AppShell />}>
-            <Route path="/" element={<Dashboard />} />
+            <Route path="/" element={<RepDashboardPage />} />
             <Route path="/deals" element={<DealListPage />} />
             <Route path="/deals/new" element={<DealNewPage />} />
             <Route path="/deals/:id" element={<DealDetailPage />} />
@@ -68,9 +63,10 @@ export function App() {
             <Route path="/email" element={<EmailInboxPage />} />
             <Route path="/tasks" element={<TaskListPage />} />
             <Route path="/files" element={<PlaceholderPage title="Files" />} />
-            <Route path="/reports" element={<PlaceholderPage title="Reports" />} />
+            <Route path="/reports" element={<ReportsPage />} />
             <Route path="/projects" element={<PlaceholderPage title="Projects" />} />
-            <Route path="/director" element={<PlaceholderPage title="Director Dashboard" />} />
+            <Route path="/director" element={<DirectorDashboardPage />} />
+            <Route path="/director/rep/:repId" element={<DirectorRepDetail />} />
             <Route path="/admin/offices" element={<PlaceholderPage title="Offices" />} />
             <Route path="/admin/users" element={<PlaceholderPage title="Users" />} />
             <Route path="/admin/pipeline" element={<PlaceholderPage title="Pipeline Config" />} />

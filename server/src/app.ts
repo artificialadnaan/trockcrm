@@ -16,6 +16,8 @@ import { fileRoutes } from "./modules/files/routes.js";
 import { taskRoutes } from "./modules/tasks/routes.js";
 import { activityRoutes } from "./modules/activities/routes.js";
 import { notificationCrudRoutes } from "./modules/notifications/crud-routes.js";
+import { reportRoutes } from "./modules/reports/routes.js";
+import { dashboardRoutes } from "./modules/dashboard/routes.js";
 import { initSsePush } from "./modules/notifications/sse-manager.js";
 
 export function createApp() {
@@ -57,6 +59,8 @@ export function createApp() {
   tenantRouter.use("/tasks", taskRoutes);
   tenantRouter.use("/activities", activityRoutes);
   tenantRouter.use("/notifications", notificationCrudRoutes);
+  tenantRouter.use("/reports", reportRoutes);
+  tenantRouter.use("/dashboard", dashboardRoutes);
 
   // Foundation test route — proves tenant middleware works end-to-end
   tenantRouter.get("/tenant-check", async (req, res) => {
