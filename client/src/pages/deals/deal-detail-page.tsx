@@ -21,13 +21,15 @@ import { DealOverviewTab } from "@/components/deals/deal-overview-tab";
 import { DealHistoryTab } from "@/components/deals/deal-history-tab";
 import { DealTimelineTab } from "@/components/deals/deal-timeline-tab";
 import { DealFileTab } from "@/components/files/deal-file-tab";
+import { ActivityLogForm } from "@/components/activities/activity-log-form";
 import { StageChangeDialog } from "@/components/deals/stage-change-dialog";
+import { useActivities, createActivity } from "@/hooks/use-activities";
 import { useDealDetail, deleteDeal as apiDeleteDeal } from "@/hooks/use-deals";
 import { usePipelineStages } from "@/hooks/use-pipeline-config";
 import { useAuth } from "@/lib/auth";
 import { formatCurrency, bestEstimate } from "@/lib/deal-utils";
 
-type Tab = "overview" | "files" | "email" | "timeline" | "history";
+type Tab = "overview" | "files" | "email" | "activity" | "timeline" | "history";
 
 export function DealDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -97,6 +99,7 @@ export function DealDetailPage() {
     { key: "overview", label: "Overview" },
     { key: "files", label: "Files" },
     { key: "email", label: "Email" },
+    { key: "activity", label: "Activity" },
     { key: "timeline", label: "Timeline" },
     { key: "history", label: "History" },
   ];
@@ -243,6 +246,7 @@ export function DealDetailPage() {
       {activeTab === "overview" && <DealOverviewTab deal={deal} />}
       {activeTab === "files" && <DealFileTab dealId={deal.id} />}
       {activeTab === "email" && <DealEmailTab dealId={deal.id} />}
+      {activeTab === "activity" && <DealActivityPanel dealId={deal.id} />}
       {activeTab === "timeline" && <DealTimelineTab _dealId={deal.id} />}
       {activeTab === "history" && <DealHistoryTab deal={deal} />}
 
@@ -258,6 +262,57 @@ export function DealDetailPage() {
           }}
           onSuccess={handleStageChangeSuccess}
         />
+      )}
+    </div>
+  );
+}
+
+function DealActivityPanel({ dealId }: { dealId: string }) {
+  const { activities, loading, refetch } = useActivities({ dealId });
+
+  const handleLogActivity = async (data: {
+    type: string;
+    subject: string;
+    body: string;
+    outcome?: string;
+    durationMinutes?: number;
+  }) => {
+    await createActivity({
+      type: data.type,
+      subject: data.subject,
+      body: data.body,
+      outcome: data.outcome,
+      durationMinutes: data.durationMinutes,
+      dealId,
+    });
+    refetch();
+  };
+
+  return (
+    <div className="space-y-4">
+      <ActivityLogForm onSubmit={handleLogActivity} />
+      {loading ? (
+        <div className="h-32 bg-muted animate-pulse rounded" />
+      ) : activities.length === 0 ? (
+        <p className="text-center py-8 text-muted-foreground text-sm">
+          No activities logged for this deal yet.
+        </p>
+      ) : (
+        <div className="space-y-2">
+          {activities.map((a) => (
+            <div key={a.id} className="flex items-start gap-3 px-3 py-2.5 rounded-md border">
+              <div className="flex-1">
+                <span className="text-sm font-medium capitalize">{a.type}</span>
+                {a.body && <p className="text-sm text-muted-foreground mt-0.5 line-clamp-2">{a.body}</p>}
+                <p className="text-xs text-muted-foreground mt-1">
+                  {new Date(a.occurredAt).toLocaleDateString("en-US", {
+                    month: "short", day: "numeric", hour: "numeric", minute: "2-digit",
+                  })}
+                </p>
+              </div>
+            </div>
+          ))}
+        </div>
       )}
     </div>
   );

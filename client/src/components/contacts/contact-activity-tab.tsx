@@ -1,113 +1,115 @@
-import { useState } from "react";
-import { Phone, FileText, Calendar, Plus } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { Textarea } from "@/components/ui/textarea";
-import { Card, CardContent } from "@/components/ui/card";
+import { Phone, FileText, Calendar, Mail, CheckSquare } from "lucide-react";
+import { ActivityLogForm } from "@/components/activities/activity-log-form";
+import { useActivities, createContactActivity } from "@/hooks/use-activities";
+import type { Activity } from "@/hooks/use-activities";
 
 interface ContactActivityTabProps {
   contactId: string;
 }
 
-type LogType = "call" | "note" | "meeting";
+const typeIcons: Record<string, typeof Phone> = {
+  call: Phone,
+  note: FileText,
+  meeting: Calendar,
+  email: Mail,
+  task_completed: CheckSquare,
+};
+
+const typeLabels: Record<string, string> = {
+  call: "Call",
+  note: "Note",
+  meeting: "Meeting",
+  email: "Email",
+  task_completed: "Task Completed",
+};
+
+function formatDate(dateStr: string): string {
+  return new Date(dateStr).toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
 
 export function ContactActivityTab({ contactId }: ContactActivityTabProps) {
-  const [activeForm, setActiveForm] = useState<LogType | null>(null);
-  const [body, setBody] = useState("");
+  const { activities, loading, refetch } = useActivities({ contactId });
 
-  const [submitError, setSubmitError] = useState<string | null>(null);
-
-  const handleSubmit = async (type: LogType) => {
-    if (!body.trim()) return;
-    setSubmitError(null);
-    // TODO (Plan 4 -- Tasks/Activities): Replace with actual API call once
-    // the activities endpoint exists. For now, log locally as a fallback.
-    try {
-      const res = await fetch(`/api/contacts/${contactId}/activities`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          type,
-          subject: `${type} logged`,
-          body: body.trim(),
-          dealId: null,
-          contactId,
-        }),
-      });
-      if (!res.ok) {
-        throw new Error(`Server returned ${res.status}`);
-      }
-      setBody("");
-      setActiveForm(null);
-    } catch (err) {
-      // Endpoint doesn't exist yet -- show friendly message until Plan 4
-      console.warn("[ActivityTab] Activity endpoint not yet available:", err);
-      setSubmitError("Activity logging is not available yet. This feature is coming in a future update.");
-      setBody("");
-      setActiveForm(null);
-    }
+  const handleLogActivity = async (data: {
+    type: string;
+    subject: string;
+    body: string;
+    outcome?: string;
+    durationMinutes?: number;
+  }) => {
+    await createContactActivity(contactId, {
+      type: data.type,
+      subject: data.subject,
+      body: data.body,
+      outcome: data.outcome,
+      durationMinutes: data.durationMinutes,
+    });
+    refetch();
   };
 
   return (
     <div className="space-y-4">
-      {/* Quick-log action buttons */}
-      <div className="flex gap-2">
-        <Button
-          size="sm"
-          variant={activeForm === "call" ? "default" : "outline"}
-          onClick={() => setActiveForm(activeForm === "call" ? null : "call")}
-        >
-          <Phone className="h-4 w-4 mr-1" /> Log Call
-        </Button>
-        <Button
-          size="sm"
-          variant={activeForm === "note" ? "default" : "outline"}
-          onClick={() => setActiveForm(activeForm === "note" ? null : "note")}
-        >
-          <FileText className="h-4 w-4 mr-1" /> Add Note
-        </Button>
-        <Button
-          size="sm"
-          variant={activeForm === "meeting" ? "default" : "outline"}
-          onClick={() => setActiveForm(activeForm === "meeting" ? null : "meeting")}
-        >
-          <Calendar className="h-4 w-4 mr-1" /> Log Meeting
-        </Button>
-      </div>
+      <ActivityLogForm onSubmit={handleLogActivity} />
 
-      {/* Inline log form */}
-      {activeForm && (
-        <Card>
-          <CardContent className="pt-4 space-y-3">
-            <p className="text-sm font-medium capitalize">{activeForm} details</p>
-            <Textarea
-              placeholder={`Describe this ${activeForm}...`}
-              value={body}
-              onChange={(e) => setBody(e.target.value)}
-              rows={3}
-            />
-            <div className="flex gap-2">
-              <Button size="sm" onClick={() => handleSubmit(activeForm)}>
-                <Plus className="h-4 w-4 mr-1" /> Save
-              </Button>
-              <Button size="sm" variant="ghost" onClick={() => { setActiveForm(null); setBody(""); }}>
-                Cancel
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
-      )}
-
-      {/* Info message when activity logging fails */}
-      {submitError && (
-        <div className="rounded-md bg-amber-50 border border-amber-200 p-3 text-sm text-amber-800">
-          {submitError}
+      {/* Activity Feed */}
+      {loading ? (
+        <div className="space-y-3">
+          {[1, 2, 3].map((i) => (
+            <div key={i} className="h-16 bg-muted animate-pulse rounded-md" />
+          ))}
+        </div>
+      ) : activities.length === 0 ? (
+        <div className="text-center py-8 text-muted-foreground text-sm">
+          No activity recorded yet. Use the buttons above to log a call, note, or meeting.
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {activities.map((activity: Activity) => {
+            const IconComponent = typeIcons[activity.type] ?? FileText;
+            return (
+              <div
+                key={activity.id}
+                className="flex items-start gap-3 px-3 py-2.5 rounded-md border bg-white"
+              >
+                <div className="mt-0.5 h-8 w-8 rounded-full bg-muted flex items-center justify-center shrink-0">
+                  <IconComponent className="h-4 w-4 text-muted-foreground" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-medium">
+                      {typeLabels[activity.type] ?? activity.type}
+                    </span>
+                    {activity.outcome && (
+                      <span className="text-xs text-muted-foreground capitalize">
+                        ({activity.outcome.replace(/_/g, " ")})
+                      </span>
+                    )}
+                    {activity.durationMinutes != null && (
+                      <span className="text-xs text-muted-foreground">
+                        {activity.durationMinutes} min
+                      </span>
+                    )}
+                  </div>
+                  {activity.body && (
+                    <p className="text-sm text-muted-foreground mt-0.5 line-clamp-2">
+                      {activity.body}
+                    </p>
+                  )}
+                  <p className="text-xs text-muted-foreground mt-1">
+                    {formatDate(activity.occurredAt)}
+                  </p>
+                </div>
+              </div>
+            );
+          })}
         </div>
       )}
-
-      {/* Activity feed -- populated in Plan 4 */}
-      <div className="text-center py-8 text-muted-foreground text-sm">
-        Activity history will appear here once Plan 4 (Activities) is implemented.
-      </div>
     </div>
   );
 }
