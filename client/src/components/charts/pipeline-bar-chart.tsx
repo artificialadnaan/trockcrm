@@ -18,9 +18,19 @@ interface PipelineBarChartProps {
     totalValue: number;
   }>;
   valueKey?: "totalValue" | "dealCount";
+  valueFormatter?: (value: number) => string;
+  valueLabel?: string;
 }
 
-export function PipelineBarChart({ data, valueKey = "totalValue" }: PipelineBarChartProps) {
+export function PipelineBarChart({
+  data,
+  valueKey = "totalValue",
+  valueFormatter,
+  valueLabel,
+}: PipelineBarChartProps) {
+  const fmt = valueFormatter ?? (valueKey === "totalValue" ? formatCurrency : (v: number) => String(v));
+  const label = valueLabel ?? (valueKey === "totalValue" ? "Value" : "Deals");
+
   const formatted = data.map((d, i) => ({
     name: d.stageName,
     value: d[valueKey],
@@ -41,13 +51,10 @@ export function PipelineBarChart({ data, valueKey = "totalValue" }: PipelineBarC
         <YAxis
           tick={{ fontSize: 12, fill: "#64748b" }}
           axisLine={{ stroke: "#e2e8f0" }}
-          tickFormatter={(v) => (valueKey === "totalValue" ? formatCurrency(v) : String(v))}
+          tickFormatter={fmt}
         />
         <Tooltip
-          formatter={(value: number) => [
-            valueKey === "totalValue" ? formatCurrency(value) : value,
-            valueKey === "totalValue" ? "Value" : "Deals",
-          ]}
+          formatter={(value: number) => [fmt(value), label]}
           contentStyle={{ fontSize: 12, borderRadius: 8 }}
         />
         <Bar dataKey="value" radius={[4, 4, 0, 0]}>

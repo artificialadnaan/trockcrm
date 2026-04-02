@@ -244,7 +244,11 @@ router.get("/saved", async (req, res, next) => {
 // GET /api/reports/saved/:id -- get a single saved report
 router.get("/saved/:id", async (req, res, next) => {
   try {
-    const report = await getSavedReportById(req.params.id);
+    const report = await getSavedReportById(
+      req.params.id,
+      req.user!.id,
+      req.user!.activeOfficeId ?? req.user!.officeId
+    );
     if (!report) throw new AppError(404, "Report not found");
     await req.commitTransaction!();
     res.json({ report });

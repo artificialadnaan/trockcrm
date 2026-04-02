@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useRef } from "react";
 import {
   useSavedReports,
   executeLockedReport,
@@ -41,6 +41,9 @@ export function ReportsPage() {
   const [builderName, setBuilderName] = useState("");
   const [builderChartType, setBuilderChartType] = useState<string>("table");
 
+  // Request counter to prevent stale report responses from overwriting newer ones
+  const requestCounter = useRef(0);
+
   const lockedReports = reports.filter((r) => r.isLocked);
   const customReports = reports.filter((r) => !r.isLocked);
 
@@ -49,21 +52,33 @@ export function ReportsPage() {
     setReportData(null);
     setReportLoading(true);
 
+    const thisRequest = ++requestCounter.current;
+
     try {
       const config = report.config as any;
+      let data: any;
       if (report.isLocked && config.reportType) {
         const result = await executeLockedReport(config.reportType, {
           includeDd: config.includeDd,
         });
-        setReportData(result.data);
+        data = result.data;
       } else {
         const result = await executeCustomReport(config as ReportConfig);
-        setReportData(result.rows);
+        data = result.rows;
+      }
+
+      // Only update state if this is still the most recent request
+      if (thisRequest === requestCounter.current) {
+        setReportData(data);
       }
     } catch (err) {
-      console.error("Failed to run report:", err);
+      if (thisRequest === requestCounter.current) {
+        console.error("Failed to run report:", err);
+      }
     } finally {
-      setReportLoading(false);
+      if (thisRequest === requestCounter.current) {
+        setReportLoading(false);
+      }
     }
   }
 

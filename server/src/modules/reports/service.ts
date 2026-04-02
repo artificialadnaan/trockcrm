@@ -119,12 +119,17 @@ export interface WeightedForecastRow {
 /**
  * Weighted pipeline forecast: deal value * win_probability, grouped by expected_close_date month.
  * Only includes active, non-terminal deals with an expected_close_date.
+ * @param repId - if provided, scope to a single rep's deals
  */
 export async function getWeightedPipelineForecast(
   tenantDb: TenantDb,
-  options: { from?: string; to?: string } = {}
+  options: { from?: string; to?: string; repId?: string } = {}
 ): Promise<WeightedForecastRow[]> {
   const { from, to } = defaultDateRange(options.from, options.to);
+
+  const repFilter = options.repId
+    ? sql`AND d.assigned_rep_id = ${options.repId}`
+    : sql``;
 
   const result = await tenantDb.execute(sql`
     SELECT
@@ -144,6 +149,7 @@ export async function getWeightedPipelineForecast(
       AND d.expected_close_date IS NOT NULL
       AND d.expected_close_date >= ${from}::date
       AND d.expected_close_date <= ${to}::date
+      ${repFilter}
     GROUP BY TO_CHAR(d.expected_close_date, 'YYYY-MM')
     ORDER BY month ASC
   `);
@@ -171,8 +177,9 @@ export interface WinLossRow {
 }
 
 /**
- * Win/loss ratio per rep. Counts deals that entered Closed Won or Closed Lost
- * during the date range (using deal_stage_history.created_at for accuracy).
+ * Win/loss ratio per rep. Uses each deal's current stage (deals.stage_id) to
+ * determine outcome, avoiding double-counting deals that were reopened and
+ * re-closed. Date filter uses actual_close_date / lost_at for accuracy.
  */
 export async function getWinLossRatioByRep(
   tenantDb: TenantDb,
@@ -181,29 +188,23 @@ export async function getWinLossRatioByRep(
   const { from, to } = defaultDateRange(options.from, options.to);
 
   const result = await tenantDb.execute(sql`
-    WITH terminal_moves AS (
-      SELECT
-        d.assigned_rep_id,
-        psc.slug AS terminal_slug,
-        d.id AS deal_id,
-        COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)::numeric AS deal_value,
-        dsh.created_at
-      FROM deal_stage_history dsh
-      JOIN deals d ON d.id = dsh.deal_id
-      JOIN pipeline_stage_config psc ON psc.id = dsh.to_stage_id
-      WHERE psc.is_terminal = true
-        AND dsh.created_at >= ${from}::timestamptz
-        AND dsh.created_at <= (${to}::date + INTERVAL '1 day')::timestamptz
-    )
     SELECT
-      tm.assigned_rep_id AS rep_id,
+      d.assigned_rep_id AS rep_id,
       u.display_name AS rep_name,
-      COUNT(*) FILTER (WHERE tm.terminal_slug = 'closed_won')::int AS wins,
-      COUNT(*) FILTER (WHERE tm.terminal_slug = 'closed_lost')::int AS losses,
-      SUM(tm.deal_value) FILTER (WHERE tm.terminal_slug = 'closed_won')::numeric AS total_value
-    FROM terminal_moves tm
-    JOIN users u ON u.id = tm.assigned_rep_id
-    GROUP BY tm.assigned_rep_id, u.display_name
+      COUNT(*) FILTER (WHERE psc.slug = 'closed_won')::int AS wins,
+      COUNT(*) FILTER (WHERE psc.slug = 'closed_lost')::int AS losses,
+      COALESCE(SUM(
+        COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)
+      ) FILTER (WHERE psc.slug = 'closed_won'), 0)::numeric AS total_value
+    FROM deals d
+    JOIN pipeline_stage_config psc ON psc.id = d.stage_id
+    JOIN users u ON u.id = d.assigned_rep_id
+    WHERE psc.is_terminal = true
+      AND COALESCE(d.actual_close_date, d.lost_at, d.updated_at)
+          >= ${from}::timestamptz
+      AND COALESCE(d.actual_close_date, d.lost_at, d.updated_at)
+          <= (${to}::date + INTERVAL '1 day')::timestamptz
+    GROUP BY d.assigned_rep_id, u.display_name
     ORDER BY wins DESC
   `);
 

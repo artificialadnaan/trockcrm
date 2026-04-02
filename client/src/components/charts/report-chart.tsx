@@ -1,12 +1,19 @@
 import { PipelineBarChart } from "./pipeline-bar-chart";
 import { PipelinePieChart } from "./pipeline-pie-chart";
 import { ActivityBarChart } from "./activity-bar-chart";
-import { formatCurrency } from "./chart-colors";
+import { formatCurrency, formatCompact } from "./chart-colors";
+
+/** Format a number as a plain integer string */
+function formatInteger(value: number): string {
+  return Math.round(value).toLocaleString();
+}
 
 interface ReportChartProps {
   data: any;
   chartType: string;
   reportType?: string;
+  valueFormatter?: (value: number) => string;
+  valueKey?: string;
 }
 
 /**
@@ -14,7 +21,7 @@ interface ReportChartProps {
  * For locked reports (with reportType), maps to the appropriate chart component.
  * For custom reports, renders a generic table or chart based on chart_type.
  */
-export function ReportChart({ data, chartType, reportType }: ReportChartProps) {
+export function ReportChart({ data, chartType, reportType, valueFormatter, valueKey }: ReportChartProps) {
   if (!data) return null;
 
   // Locked report type-specific rendering
@@ -102,7 +109,14 @@ function LockedReportView({ data, reportType }: { data: any; reportType: string 
           name: d.reasonLabel,
           value: d.count,
         }));
-        return <PipelinePieChart data={pieData} />;
+        // Count-based: format as integers, not currency
+        return (
+          <PipelinePieChart
+            data={pieData}
+            valueFormatter={formatInteger}
+            valueLabel="Deals"
+          />
+        );
       }
       return <GenericTable data={[data]} />;
 

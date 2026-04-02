@@ -1,4 +1,4 @@
-import { eq, and, or, desc, sql } from "drizzle-orm";
+import { eq, and, or, desc, sql, isNull } from "drizzle-orm";
 import { savedReports } from "@trock-crm/shared/schema";
 import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
@@ -21,7 +21,7 @@ export interface UpdateSavedReportInput {
 
 /**
  * Get all reports visible to a user:
- * - locked (company-wide) reports
+ * - locked reports scoped to the caller's office (or global locked reports with no office)
  * - reports created by the user (private)
  * - reports shared to their office
  * - reports shared company-wide
@@ -35,12 +35,22 @@ export async function getSavedReports(
     .from(savedReports)
     .where(
       or(
-        eq(savedReports.isLocked, true),
+        // Locked reports: scoped to caller's office or global (officeId IS NULL)
+        and(
+          eq(savedReports.isLocked, true),
+          or(
+            eq(savedReports.officeId, officeId),
+            isNull(savedReports.officeId)
+          )
+        ),
+        // Own reports (private)
         eq(savedReports.createdBy, userId),
+        // Office-shared reports in the same office
         and(
           eq(savedReports.officeId, officeId),
           eq(savedReports.visibility, "office")
         ),
+        // Company-wide reports
         eq(savedReports.visibility, "company")
       )
     )
@@ -50,16 +60,39 @@ export async function getSavedReports(
 }
 
 /**
- * Get a single report by ID.
+ * Get a single report by ID with visibility check.
+ * - Private reports: only visible to the creator
+ * - Office reports: visible to users in the same office
+ * - Company reports: visible to all
+ * - Locked reports: visible to all
  */
-export async function getSavedReportById(reportId: string) {
+export async function getSavedReportById(
+  reportId: string,
+  userId?: string,
+  officeId?: string
+) {
   const result = await db
     .select()
     .from(savedReports)
     .where(eq(savedReports.id, reportId))
     .limit(1);
 
-  return result[0] ?? null;
+  const report = result[0] ?? null;
+  if (!report) return null;
+
+  // Locked and company-wide reports are visible to everyone
+  if (report.isLocked || report.visibility === "company") return report;
+
+  // If no user context provided, deny access to restricted reports
+  if (!userId || !officeId) return null;
+
+  // Private reports: only visible to creator
+  if (report.visibility === "private" && report.createdBy !== userId) return null;
+
+  // Office reports: visible to users in the same office
+  if (report.visibility === "office" && report.officeId !== officeId) return null;
+
+  return report;
 }
 
 /**
@@ -92,7 +125,13 @@ export async function updateSavedReport(
   input: UpdateSavedReportInput,
   userId: string
 ) {
-  const existing = await getSavedReportById(reportId);
+  // Fetch without visibility check -- ownership is verified below
+  const rows = await db
+    .select()
+    .from(savedReports)
+    .where(eq(savedReports.id, reportId))
+    .limit(1);
+  const existing = rows[0] ?? null;
   if (!existing) throw new AppError(404, "Report not found");
   if (existing.isLocked) throw new AppError(403, "Cannot edit a locked report");
   if (existing.createdBy !== userId) throw new AppError(403, "You can only edit your own reports");
@@ -119,7 +158,13 @@ export async function updateSavedReport(
  * Locked reports cannot be deleted.
  */
 export async function deleteSavedReport(reportId: string, userId: string) {
-  const existing = await getSavedReportById(reportId);
+  // Fetch without visibility check -- ownership is verified below
+  const rows = await db
+    .select()
+    .from(savedReports)
+    .where(eq(savedReports.id, reportId))
+    .limit(1);
+  const existing = rows[0] ?? null;
   if (!existing) throw new AppError(404, "Report not found");
   if (existing.isLocked) throw new AppError(403, "Cannot delete a locked report");
   if (existing.createdBy !== userId) throw new AppError(403, "You can only delete your own reports");

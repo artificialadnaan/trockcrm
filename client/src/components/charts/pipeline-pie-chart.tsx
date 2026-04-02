@@ -14,9 +14,11 @@ interface PipelinePieChartProps {
     value: number;
     color?: string;
   }>;
+  valueFormatter?: (value: number) => string;
+  valueLabel?: string;
 }
 
-export function PipelinePieChart({ data }: PipelinePieChartProps) {
+export function PipelinePieChart({ data, valueFormatter, valueLabel }: PipelinePieChartProps) {
   const chartData = data.map((d, i) => ({
     ...d,
     fill: d.color ?? getStageColor(null, i),
@@ -44,7 +46,10 @@ export function PipelinePieChart({ data }: PipelinePieChartProps) {
           ))}
         </Pie>
         <Tooltip
-          formatter={(value: number) => [formatCurrency(value), "Value"]}
+          formatter={(value: number) => [
+            (valueFormatter ?? formatCurrency)(value),
+            valueLabel ?? "Value",
+          ]}
           contentStyle={{ fontSize: 12, borderRadius: 8 }}
         />
         <Legend wrapperStyle={{ fontSize: 12 }} />
