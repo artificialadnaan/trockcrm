@@ -26,3 +26,9 @@ export { files, fileCategoryEnum } from "./tenant/files.js";
 export { tasks, taskTypeEnum, taskPriorityEnum, taskStatusEnum } from "./tenant/tasks.js";
 export { notifications, notificationTypeEnum } from "./tenant/notifications.js";
 export { auditLog, auditActionEnum } from "./tenant/audit-log.js";
+
+// Migration schema tables (staging area for HubSpot data migration)
+export { stagedDeals } from "./migration/staged-deals.js";
+export { stagedContacts } from "./migration/staged-contacts.js";
+export { stagedActivities } from "./migration/staged-activities.js";
+export { importRuns } from "./migration/import-runs.js";
