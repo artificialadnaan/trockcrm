@@ -15,6 +15,8 @@ import { emailRoutes } from "./modules/email/routes.js";
 import { fileRoutes } from "./modules/files/routes.js";
 import { taskRoutes } from "./modules/tasks/routes.js";
 import { activityRoutes } from "./modules/activities/routes.js";
+import { notificationCrudRoutes } from "./modules/notifications/crud-routes.js";
+import { initSsePush } from "./modules/notifications/sse-manager.js";
 
 export function createApp() {
   const app = express();
@@ -54,6 +56,7 @@ export function createApp() {
   tenantRouter.use("/files", fileRoutes);
   tenantRouter.use("/tasks", taskRoutes);
   tenantRouter.use("/activities", activityRoutes);
+  tenantRouter.use("/notifications", notificationCrudRoutes);
 
   // Foundation test route — proves tenant middleware works end-to-end
   tenantRouter.get("/tenant-check", async (req, res) => {
@@ -67,6 +70,9 @@ export function createApp() {
   });
 
   app.use("/api", authMiddleware, tenantMiddleware, tenantRouter);
+
+  // Initialize SSE push listeners for real-time notifications
+  initSsePush();
 
   // Error handler (must be last)
   app.use(errorHandler);
