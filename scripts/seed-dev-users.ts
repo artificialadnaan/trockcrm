@@ -17,10 +17,11 @@ async function seed() {
   await client.connect();
 
   try {
-    // Create DFW office
+    // Use existing dallas office (created by 0001_initial.sql migration)
+    // or create it if it doesn't exist
     const officeResult = await client.query(`
       INSERT INTO offices (name, slug, address, phone)
-      VALUES ('DFW Office', 'dfw', '1234 Commerce St, Dallas, TX 75201', '(214) 555-0100')
+      VALUES ('Dallas Office', 'dallas', '1234 Commerce St, Dallas, TX 75201', '(214) 555-0100')
       ON CONFLICT (slug) DO UPDATE SET name = EXCLUDED.name
       RETURNING id
     `);
