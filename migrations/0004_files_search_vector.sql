@@ -1,6 +1,11 @@
 -- Migration 0004: Add search_vector column and GIN indexes to files table
 -- NOTE: 0003 is already taken by 0003_disable_stage_history_trigger.sql.
 -- Must run per office schema (the migration runner loops across all schemas).
+--
+-- SAFETY NET: search_vector, GIN indexes, and version chain indexes are already
+-- created in 0001_initial.sql tenant DDL section. This migration exists as a
+-- safety net for any offices provisioned before the 0001 update was deployed.
+-- All statements use IF NOT EXISTS guards so re-running is harmless.
 
 -- 1. Add the generated tsvector column for full-text search.
 --    Weighted: display_name (A), description + tags (B), notes (C).

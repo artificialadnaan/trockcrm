@@ -197,6 +197,10 @@ router.get("/", async (req, res, next) => {
       throw new AppError(400, "dealId or contactId filter is required.");
     }
 
+    // Fix 4: Reps CAN query by contactId without additional access checks.
+    // Contact files are intentionally office-shared — all reps in the same
+    // office can see contact files, matching the visibility model for contacts.
+
     // If rep specifies a dealId, verify they have access to it
     if (isRep && req.query.dealId) {
       const deal = await getDealById(req.tenantDb!, req.query.dealId as string, req.user!.role, req.user!.id);
@@ -231,6 +235,8 @@ router.get("/", async (req, res, next) => {
 });
 
 // GET /api/files/tags — tag autocomplete suggestions
+// Fix 5: Tags are office-scoped metadata for autocomplete. Knowing tag names
+// does not leak file content, so no per-file RBAC check is needed here.
 router.get("/tags", async (req, res, next) => {
   try {
     const dealId = req.query.dealId as string | undefined;

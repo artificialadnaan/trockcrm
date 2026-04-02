@@ -44,6 +44,10 @@ interface PendingUpload {
   description?: string;
   tags?: string[];
   expiresAt: Date;
+  /** Set when this upload is a new version of an existing file */
+  parentFileId?: string;
+  /** Version number — defaults to 1 for new files */
+  version?: number;
 }
 
 const pendingUploads = new Map<string, PendingUpload>();
@@ -231,7 +235,9 @@ async function generateSystemFilename(
     const seq = Number(countResult[0]?.count ?? 0) + 1;
     const seqStr = String(seq).padStart(3, "0");
 
-    const systemFilename = `${deal.dealNumber}_${categoryLabel}_${dateStr}_${seqStr}${ext}`;
+    // Fix 3: Append a short random suffix so systemFilename is unique even under concurrency
+    const shortId = crypto.randomUUID().slice(0, 8);
+    const systemFilename = `${deal.dealNumber}_${categoryLabel}_${dateStr}_${seqStr}_${shortId}${ext}`;
     const displayName = systemFilename.replace(ext, "").replace(/_/g, " ");
 
     return { systemFilename, displayName };
@@ -423,12 +429,16 @@ export async function confirmUpload(
   input: ConfirmUploadInput
 ): Promise<typeof files.$inferSelect> {
   // Fix 2: Consume the pending upload token — don't trust client-supplied values
+  // Fix 7: Don't delete token until after DB insert succeeds — allows retry on
+  // transient failures. NOTE: pendingUploads is process-local (in-memory Map).
+  // This is fine for single-instance Railway deployment. If multi-instance is
+  // needed, move pending uploads to DB-backed storage (e.g. a pending_uploads table).
   const pending = pendingUploads.get(input.uploadToken);
   if (!pending || pending.expiresAt < new Date()) {
     pendingUploads.delete(input.uploadToken);
     throw new AppError(400, "Invalid or expired upload token");
   }
-  pendingUploads.delete(input.uploadToken);
+  // Do NOT delete yet — verify and insert first so client can retry on failure
 
   // ── Verify the R2 object before persisting metadata ──────────────
   if (isR2Configured()) {
@@ -471,14 +481,17 @@ export async function confirmUpload(
       changeOrderId: pending.changeOrderId ?? null,
       description: pending.description ?? null,
       notes: null,
-      version: 1,
-      parentFileId: null,
+      version: pending.version ?? 1,
+      parentFileId: pending.parentFileId ?? null,
       takenAt: input.takenAt ? new Date(input.takenAt) : null,
       geoLat: input.geoLat?.toString() ?? null,
       geoLng: input.geoLng?.toString() ?? null,
       uploadedBy: userId,
     })
     .returning();
+
+  // Fix 7: NOW delete the token — DB insert succeeded, no retry needed
+  pendingUploads.delete(input.uploadToken);
 
   return result[0];
 }
@@ -551,6 +564,14 @@ export async function uploadNewVersion(
   };
 
   const result = await requestUploadUrl(tenantDb, officeSlug, userId, mergedInput);
+
+  // Fix 1: Store version metadata in the pending upload so confirmUpload()
+  // persists the correct version and parentFileId instead of defaults.
+  const pendingEntry = pendingUploads.get(result.uploadToken);
+  if (pendingEntry) {
+    pendingEntry.parentFileId = rootFileId;
+    pendingEntry.version = newVersion;
+  }
 
   return {
     ...result,
@@ -865,10 +886,12 @@ export async function getDealPhotoTimeline(
 }> {
   const offset = (page - 1) * limit;
 
+  // Fix 6: Only show latest versions — exclude photos that have a newer version
   const conditions = and(
     eq(files.dealId, dealId),
     eq(files.category, "photo"),
-    eq(files.isActive, true)
+    eq(files.isActive, true),
+    sql`NOT EXISTS (SELECT 1 FROM files f2 WHERE f2.parent_file_id = files.id AND f2.is_active = true)`
   );
 
   const [countResult, photoRows] = await Promise.all([
