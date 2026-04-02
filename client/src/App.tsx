@@ -24,6 +24,13 @@ import { ProcoreSyncPage } from "@/pages/admin/procore-sync-page";
 import { MigrationDashboardPage } from "@/pages/admin/migration/migration-dashboard-page";
 import { MigrationDealsPage } from "@/pages/admin/migration/migration-deals-page";
 import { MigrationContactsPage } from "@/pages/admin/migration/migration-contacts-page";
+import { SearchPage } from "@/pages/search/search-page";
+import { OfficesPage } from "@/pages/admin/offices-page";
+import { UsersPage } from "@/pages/admin/users-page";
+import { PipelineConfigPage } from "@/pages/admin/pipeline-config-page";
+import { AuditLogPage } from "@/pages/admin/audit-log-page";
+import { UserGuidePage } from "@/pages/admin/help/user-guide-page";
+import { AdminGuidePage } from "@/pages/admin/help/admin-guide-page";
 
 function PlaceholderPage({ title }: { title: string }) {
   return (
@@ -72,14 +79,18 @@ export function App() {
             <Route path="/projects" element={<ProjectsPage />} />
             <Route path="/director" element={<DirectorDashboardPage />} />
             <Route path="/director/rep/:repId" element={<DirectorRepDetail />} />
-            <Route path="/admin/offices" element={<PlaceholderPage title="Offices" />} />
-            <Route path="/admin/users" element={<PlaceholderPage title="Users" />} />
-            <Route path="/admin/pipeline" element={<PlaceholderPage title="Pipeline Config" />} />
+            <Route path="/search" element={<SearchPage />} />
+            <Route path="/admin/offices" element={<OfficesPage />} />
+            <Route path="/admin/users" element={<UsersPage />} />
+            <Route path="/admin/pipeline" element={<PipelineConfigPage />} />
+            <Route path="/admin/audit" element={<AuditLogPage />} />
             <Route path="/admin/merge-queue" element={<MergeQueuePage />} />
             <Route path="/admin/procore" element={<ProcoreSyncPage />} />
             <Route path="/admin/migration" element={<MigrationDashboardPage />} />
             <Route path="/admin/migration/deals" element={<MigrationDealsPage />} />
             <Route path="/admin/migration/contacts" element={<MigrationContactsPage />} />
+            <Route path="/help/user-guide" element={<UserGuidePage />} />
+            <Route path="/help/admin-guide" element={<AdminGuidePage />} />
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

@@ -16,6 +16,9 @@ import {
   GitMerge,
   Zap,
   ArrowRightLeft,
+  ClipboardList,
+  BookOpen,
+  HelpCircle,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
