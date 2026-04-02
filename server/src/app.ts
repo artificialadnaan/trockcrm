@@ -23,6 +23,9 @@ import { procoreRoutes } from "./modules/procore/routes.js";
 import { procoreWebhookRoutes } from "./modules/procore/webhook-routes.js";
 import { syncHubRoutes } from "./modules/procore/synchub-routes.js";
 import { registerProcoreEventHandlers } from "./modules/procore/event-handlers.js";
+import { migrationRouter } from "./modules/migration/routes.js";
+import { searchRoutes } from "./modules/search/routes.js";
+import { adminRoutes } from "./modules/admin/routes.js";
 
 export function createApp() {
   const app = express();
@@ -57,6 +60,12 @@ export function createApp() {
   // SSE notification endpoint (auth required, no tenant context needed for keepalive)
   app.use("/api/notifications", notificationRoutes);
 
+  // Migration routes (auth + admin required, no tenant scope — accesses migration schema directly)
+  app.use("/api", migrationRouter);
+
+  // Admin routes (offices, users, pipeline config, audit log)
+  app.use("/api", adminRoutes);
+
   // Tenant-scoped routes — auth + tenant middleware applied
   // All feature routes (deals, contacts, tasks, etc.) go through this chain
   const tenantRouter = Router();
@@ -73,6 +82,7 @@ export function createApp() {
   tenantRouter.use("/reports", reportRoutes);
   tenantRouter.use("/dashboard", dashboardRoutes);
   tenantRouter.use("/procore", procoreRoutes);
+  tenantRouter.use("/search", searchRoutes);
 
   // Foundation test route — proves tenant middleware works end-to-end
   tenantRouter.get("/tenant-check", async (req, res) => {
