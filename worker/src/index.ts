@@ -6,6 +6,7 @@ import { pollJobs, recoverStaleJobs } from "./queue.js";
 import { registerAllJobs } from "./jobs/index.js";
 import cron from "node-cron";
 import { runStaleDealScan } from "./jobs/stale-deals.js";
+import { runDedupScan } from "./jobs/dedup-scan.js";
 
 const POLL_INTERVAL_MS = 2000; // Poll job queue every 2 seconds
 
@@ -41,6 +42,17 @@ async function main() {
     }
   }, { timezone: "America/Chicago" });
   console.log("[Worker] Cron scheduled: stale deal scan at 6:00 AM CT daily");
+
+  // Contact dedup scan: weekly on Sunday at 2:00 AM CT
+  cron.schedule("0 2 * * 0", async () => {
+    console.log("[Worker:cron] Running contact dedup scan...");
+    try {
+      await runDedupScan();
+    } catch (err) {
+      console.error("[Worker:cron] Contact dedup scan failed:", err);
+    }
+  }, { timezone: "America/Chicago" });
+  console.log("[Worker] Cron scheduled: contact dedup scan at 2:00 AM CT weekly (Sunday)");
 
   console.log("[Worker] Ready.");
 }

@@ -1,5 +1,6 @@
 import { registerJobHandler } from "../queue.js";
 import { runStaleDealScan } from "./stale-deals.js";
+import { runDedupScan } from "./dedup-scan.js";
 
 /**
  * Test handler that logs the payload. Used to validate the queue works end-to-end.
@@ -42,6 +43,11 @@ export function registerAllJobs() {
     await runStaleDealScan();
   });
 
+  // Contact dedup scanner (triggered via job_queue or cron)
+  registerJobHandler("dedup_scan", async () => {
+    await runDedupScan();
+  });
+
   // Domain event handlers for deal lifecycle
   domainEventHandlers.set("deal.won", async (payload, officeId) => {
     console.log(`[Worker] Deal won: ${payload.dealNumber} (${payload.dealName}) - amount: ${payload.awardedAmount}`);
@@ -58,7 +64,12 @@ export function registerAllJobs() {
     // Future: Procore status sync, stage change email notifications
   });
 
-  console.log("[Worker] Job handlers registered:", ["test_echo", "domain_event", "stale_deal_scan"].join(", "));
+  domainEventHandlers.set("contact.created", async (payload, officeId) => {
+    console.log(`[Worker] contact.created: ${payload.contactId}`);
+    // Future: trigger welcome email, HubSpot sync, etc.
+  });
+
+  console.log("[Worker] Job handlers registered:", ["test_echo", "domain_event", "stale_deal_scan", "dedup_scan"].join(", "));
 }
 
 export { domainEventHandlers };
