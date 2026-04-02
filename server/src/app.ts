@@ -1,6 +1,9 @@
 import express, { Router } from "express";
 import cors from "cors";
 import cookieParser from "cookie-parser";
+import { existsSync } from "fs";
+import { join, dirname } from "path";
+import { fileURLToPath } from "url";
 import { errorHandler } from "./middleware/error-handler.js";
 import { apiLimiter } from "./middleware/rate-limit.js";
 import { authRoutes } from "./modules/auth/routes.js";
@@ -104,6 +107,17 @@ export function createApp() {
 
   // Initialize SSE push listeners for real-time notifications
   initSsePush();
+
+  // Serve frontend static files in production
+  const __dirname = dirname(fileURLToPath(import.meta.url));
+  const clientDist = join(__dirname, "../../client/dist");
+  if (existsSync(clientDist)) {
+    app.use(express.static(clientDist));
+    // SPA fallback — serve index.html for non-API routes
+    app.get("/{*path}", (_req, res) => {
+      res.sendFile(join(clientDist, "index.html"));
+    });
+  }
 
   // Error handler (must be last)
   app.use(errorHandler);

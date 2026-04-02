@@ -1,5 +1,5 @@
 import jwt from "jsonwebtoken";
-import { eq } from "drizzle-orm";
+import { eq, and, like } from "drizzle-orm";
 import { db } from "../../db.js";
 import { users, userOfficeAccess } from "@trock-crm/shared/schema";
 import type { JwtClaims } from "@trock-crm/shared/types";
@@ -61,7 +61,7 @@ export async function getDevUsers() {
       officeId: users.officeId,
     })
     .from(users)
-    .where(eq(users.isActive, true));
+    .where(and(eq(users.isActive, true), like(users.email, "%@trock.dev")));
   return result;
 }
 

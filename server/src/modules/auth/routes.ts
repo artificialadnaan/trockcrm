@@ -6,10 +6,11 @@ import { AppError } from "../../middleware/error-handler.js";
 
 const router = Router();
 
-// Dev endpoints are limited to local/test environments when Azure SSO is not configured.
+// Dev mode: enabled when Azure SSO is not configured, OR when DEV_MODE is explicitly set.
+// This allows testing on Railway before OAuth credentials are provided.
 const nodeEnv = process.env.NODE_ENV;
 const isLocalDevEnv = nodeEnv === "development" || nodeEnv === "test";
-const isDevMode = !process.env.AZURE_CLIENT_ID && isLocalDevEnv;
+const isDevMode = !process.env.AZURE_CLIENT_ID && (isLocalDevEnv || process.env.DEV_MODE === "true");
 
 // Dev-mode: list available users for picker
 router.get("/dev/users", authLimiter, async (_req, res, next) => {
@@ -33,6 +34,9 @@ router.post("/dev/login", authLimiter, async (req, res, next) => {
     const { email } = req.body;
     if (!email) {
       throw new AppError(400, "Email is required");
+    }
+    if (!email.endsWith("@trock.dev")) {
+      throw new AppError(403, "Dev login restricted to test accounts");
     }
 
     const user = await getUserByEmail(email);

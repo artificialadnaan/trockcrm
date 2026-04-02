@@ -4,12 +4,11 @@ COPY . .
 ENV NODE_ENV=development
 RUN npm ci
 RUN npm run build --workspace=shared
-RUN npm run build --workspace=server
 RUN npm run build --workspace=client
 
 FROM node:20-alpine
 WORKDIR /app
-COPY --from=builder /app .
-ENV NODE_ENV=production
-EXPOSE 3001
-CMD ["node", "server/dist/index.js"]
+RUN npm install -g serve
+COPY --from=builder /app/client/dist ./dist
+EXPOSE 3000
+CMD ["serve", "dist", "-s", "-l", "3000"]

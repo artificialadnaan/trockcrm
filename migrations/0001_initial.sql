@@ -632,11 +632,7 @@ CREATE TABLE IF NOT EXISTS files (
   is_active         BOOLEAN NOT NULL DEFAULT TRUE,
   created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  search_vector     TSVECTOR GENERATED ALWAYS AS (
-    setweight(to_tsvector('english', COALESCE(display_name, '')), 'A') ||
-    setweight(to_tsvector('english', COALESCE(description, '') || ' ' || array_to_string(tags, ' ')), 'B') ||
-    setweight(to_tsvector('english', COALESCE(notes, '')), 'C')
-  ) STORED
+  search_vector     TSVECTOR
 );
 
 -- CHECK: file must be associated with at least one entity
@@ -815,6 +811,25 @@ END $$;
 DO $$ BEGIN
   CREATE TRIGGER set_files_updated_at
     BEFORE UPDATE ON files FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+-- Search vector trigger for files (PG18: array_to_string is STABLE, not IMMUTABLE, so GENERATED ALWAYS AS won't work)
+CREATE OR REPLACE FUNCTION files_search_vector_trigger()
+RETURNS TRIGGER AS $$
+BEGIN
+  NEW.search_vector :=
+    setweight(to_tsvector('english'::regconfig, COALESCE(NEW.display_name, '')), 'A') ||
+    setweight(to_tsvector('english'::regconfig, COALESCE(NEW.description, '') || ' ' || array_to_string(NEW.tags, ' ')), 'B') ||
+    setweight(to_tsvector('english'::regconfig, COALESCE(NEW.notes, '')), 'C');
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DO $$ BEGIN
+  CREATE TRIGGER files_search_vector_update
+    BEFORE INSERT OR UPDATE ON files
+    FOR EACH ROW EXECUTE FUNCTION files_search_vector_trigger();
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 
