@@ -8,6 +8,7 @@ import cron from "node-cron";
 import { runStaleDealScan } from "./jobs/stale-deals.js";
 import { runDedupScan } from "./jobs/dedup-scan.js";
 import { runEmailSync } from "./jobs/email-sync.js";
+import { runDailyTaskGeneration } from "./jobs/daily-tasks.js";
 
 const POLL_INTERVAL_MS = 2000; // Poll job queue every 2 seconds
 
@@ -65,6 +66,17 @@ async function main() {
     }
   });
   console.log("[Worker] Cron scheduled: email sync every 5 minutes");
+
+  // Daily task generation: daily at 6:00 AM CT (runs alongside stale deal scan)
+  cron.schedule("0 6 * * *", async () => {
+    console.log("[Worker:cron] Running daily task generation...");
+    try {
+      await runDailyTaskGeneration();
+    } catch (err) {
+      console.error("[Worker:cron] Daily task generation failed:", err);
+    }
+  }, { timezone: "America/Chicago" });
+  console.log("[Worker] Cron scheduled: daily task generation at 6:00 AM CT daily");
 
   console.log("[Worker] Ready.");
 }

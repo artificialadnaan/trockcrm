@@ -3,6 +3,7 @@ import { runStaleDealScan } from "./stale-deals.js";
 import { runDedupScan } from "./dedup-scan.js";
 import { runEmailSync } from "./email-sync.js";
 import { extractExif } from "./exif-extract.js";
+import { runDailyTaskGeneration } from "./daily-tasks.js";
 
 /**
  * Test handler that logs the payload. Used to validate the queue works end-to-end.
@@ -53,6 +54,11 @@ export function registerAllJobs() {
   // Email sync (triggered via job_queue or cron)
   registerJobHandler("email_sync", async () => {
     await runEmailSync();
+  });
+
+  // Daily task generation (triggered via job_queue or cron)
+  registerJobHandler("daily_task_generation", async () => {
+    await runDailyTaskGeneration();
   });
 
   // Domain event handlers for deal lifecycle
@@ -133,7 +139,7 @@ export function registerAllJobs() {
     }
   });
 
-  console.log("[Worker] Job handlers registered:", ["test_echo", "domain_event", "stale_deal_scan", "dedup_scan", "email_sync"].join(", "));
+  console.log("[Worker] Job handlers registered:", ["test_echo", "domain_event", "stale_deal_scan", "dedup_scan", "email_sync", "daily_task_generation"].join(", "));
 }
 
 export { domainEventHandlers };
