@@ -157,45 +157,64 @@ interface GraphResponse<T = any> {
   data: T;
 }
 
-// Circuit breaker state (module-level singleton)
-let consecutiveFailures = 0;
-let circuitOpenedAt: number | null = null;
+// Per-user circuit breaker state (prevents one bad mailbox from blocking all users)
+interface CircuitBreakerState {
+  consecutiveFailures: number;
+  circuitOpenedAt: number | null;
+}
+
+const breakers = new Map<string, CircuitBreakerState>();
 const CIRCUIT_FAILURE_THRESHOLD = 5;
 const CIRCUIT_HALF_OPEN_MS = 60_000; // 60 seconds
 
-function isCircuitOpen(): boolean {
-  if (consecutiveFailures < CIRCUIT_FAILURE_THRESHOLD) return false;
-  if (circuitOpenedAt == null) return false;
+function getBreaker(userId: string): CircuitBreakerState {
+  let state = breakers.get(userId);
+  if (!state) {
+    state = { consecutiveFailures: 0, circuitOpenedAt: null };
+    breakers.set(userId, state);
+  }
+  return state;
+}
+
+function isCircuitOpen(userId: string = "__global__"): boolean {
+  const state = getBreaker(userId);
+  if (state.consecutiveFailures < CIRCUIT_FAILURE_THRESHOLD) return false;
+  if (state.circuitOpenedAt == null) return false;
   // Allow a single probe request after half-open interval
-  if (Date.now() - circuitOpenedAt >= CIRCUIT_HALF_OPEN_MS) return false;
+  if (Date.now() - state.circuitOpenedAt >= CIRCUIT_HALF_OPEN_MS) return false;
   return true;
 }
 
-function recordSuccess(): void {
-  consecutiveFailures = 0;
-  circuitOpenedAt = null;
+function recordSuccess(userId: string = "__global__"): void {
+  const state = getBreaker(userId);
+  state.consecutiveFailures = 0;
+  state.circuitOpenedAt = null;
 }
 
-function recordFailure(): void {
-  consecutiveFailures++;
-  if (consecutiveFailures >= CIRCUIT_FAILURE_THRESHOLD && circuitOpenedAt == null) {
-    circuitOpenedAt = Date.now();
-    console.error(`[GraphClient] Circuit breaker OPEN after ${consecutiveFailures} consecutive failures`);
+function recordFailure(userId: string = "__global__"): void {
+  const state = getBreaker(userId);
+  state.consecutiveFailures++;
+  if (state.consecutiveFailures >= CIRCUIT_FAILURE_THRESHOLD && state.circuitOpenedAt == null) {
+    state.circuitOpenedAt = Date.now();
+    console.error(`[GraphClient] Circuit breaker OPEN for user ${userId} after ${state.consecutiveFailures} consecutive failures`);
   }
 }
 
 /**
- * Reset circuit breaker state. Useful for testing.
+ * Reset circuit breaker state. Pass userId to reset a specific user, or omit to clear all.
  */
-export function resetCircuitBreaker(): void {
-  consecutiveFailures = 0;
-  circuitOpenedAt = null;
+export function resetCircuitBreaker(userId?: string): void {
+  if (userId) {
+    breakers.delete(userId);
+  } else {
+    breakers.clear();
+  }
 }
 
 /**
  * Make an authenticated request to MS Graph API.
  * Retries up to 3 times with exponential backoff (1s, 3s, 9s).
- * Circuit breaker opens after 5 consecutive failures across all calls.
+ * Per-user circuit breaker opens after 5 consecutive failures for a given user.
  */
 export async function graphRequest<T = any>(
   options: GraphClientOptions & {
@@ -203,12 +222,13 @@ export async function graphRequest<T = any>(
     path: string;
     body?: any;
     retries?: number;
+    userId?: string; // Used for per-user circuit breaker keying
   }
 ): Promise<GraphResponse<T>> {
-  const { accessToken, method = "GET", path, body, retries = 3 } = options;
+  const { accessToken, method = "GET", path, body, retries = 3, userId = "__global__" } = options;
 
-  if (isCircuitOpen()) {
-    throw new Error("MS Graph circuit breaker is OPEN — requests blocked. Will retry after cooldown.");
+  if (isCircuitOpen(userId)) {
+    throw new Error(`MS Graph circuit breaker is OPEN for user ${userId} — requests blocked. Will retry after cooldown.`);
   }
 
   const url = path.startsWith("http") ? path : `${GRAPH_BASE_URL}${path}`;
@@ -239,25 +259,25 @@ export async function graphRequest<T = any>(
       if (res.status >= 500) {
         const backoffMs = Math.pow(3, attempt) * 1000; // 1s, 3s, 9s
         console.warn(`[GraphClient] Server error ${res.status}, retrying in ${backoffMs}ms (attempt ${attempt + 1}/${retries})`);
-        recordFailure();
+        recordFailure(userId);
         await sleep(backoffMs);
         continue;
       }
 
       // 401 Unauthorized — token expired, do NOT retry (caller should refresh)
       if (res.status === 401) {
-        recordSuccess(); // Not a server failure
+        recordSuccess(userId); // Not a server failure
         const data = await res.json().catch(() => ({}));
         return { ok: false, status: 401, data: data as T };
       }
 
       // All other responses (2xx, 4xx)
-      recordSuccess();
+      recordSuccess(userId);
       const data = res.status === 204 ? ({} as T) : await res.json().catch(() => ({} as T));
       return { ok: res.ok, status: res.status, data: data as T };
     } catch (err: any) {
       lastError = err;
-      recordFailure();
+      recordFailure(userId);
       if (attempt < retries - 1) {
         const backoffMs = Math.pow(3, attempt) * 1000;
         console.warn(`[GraphClient] Network error, retrying in ${backoffMs}ms (attempt ${attempt + 1}/${retries}): ${err.message}`);
@@ -546,9 +566,14 @@ export async function exchangeCodeForTokens(
 
   const expiresAt = result.expiresOn ?? new Date(Date.now() + 3600 * 1000);
 
+  // Use MSAL's token cache to persist the full cache (includes refresh token).
+  // MSAL doesn't directly expose refresh tokens from acquireTokenByCode;
+  // the intended pattern is to serialize the cache and use acquireTokenSilent for refresh.
+  const serializedCache = client.getTokenCache().serialize();
+
   await upsertGraphTokens(userId, {
     accessToken: result.accessToken,
-    refreshToken: (result as any).refreshToken ?? "",
+    refreshToken: serializedCache, // Store the full serialized MSAL cache (encrypted at rest)
     expiresAt,
     scopes: GRAPH_SCOPES,
   });
@@ -569,10 +594,20 @@ export async function refreshAccessToken(userId: string): Promise<string | null>
 
   try {
     const client = getMsalClient();
-    // MSAL node handles refresh token exchange via acquireTokenByRefreshToken
-    // which is available on ConfidentialClientApplication
-    const result = await (client as any).acquireTokenByRefreshToken({
-      refreshToken: stored.refreshToken,
+
+    // Deserialize the stored MSAL cache (stored.refreshToken holds the serialized cache)
+    client.getTokenCache().deserialize(stored.refreshToken);
+
+    // Get the cached account to use with acquireTokenSilent
+    const accounts = await client.getTokenCache().getAllAccounts();
+    if (accounts.length === 0) {
+      await markReauthNeeded(userId, "No cached MSAL account found — reauth required");
+      return null;
+    }
+
+    // acquireTokenSilent handles refresh token exchange internally via MSAL's cache
+    const result = await client.acquireTokenSilent({
+      account: accounts[0],
       scopes: GRAPH_SCOPES,
     });
 
@@ -583,9 +618,12 @@ export async function refreshAccessToken(userId: string): Promise<string | null>
 
     const expiresAt = result.expiresOn ?? new Date(Date.now() + 3600 * 1000);
 
+    // Re-serialize the updated cache (may contain a new refresh token)
+    const serializedCache = client.getTokenCache().serialize();
+
     await upsertGraphTokens(userId, {
       accessToken: result.accessToken,
-      refreshToken: (result as any).refreshToken ?? stored.refreshToken,
+      refreshToken: serializedCache,
       expiresAt,
       scopes: GRAPH_SCOPES,
     });
@@ -649,7 +687,14 @@ router.get("/graph/consent", authMiddleware, (req, res, next) => {
     }
 
     const redirectUri = `${process.env.API_BASE_URL || "http://localhost:3001"}/api/auth/graph/callback`;
-    const state = req.user!.id; // Pass userId in state for callback
+    // Sign the state parameter to prevent tampering (binds callback to this user, expires in 10 min)
+    const jwt = require("jsonwebtoken");
+    const crypto = require("crypto");
+    const state = jwt.sign(
+      { userId: req.user!.id, nonce: crypto.randomUUID() },
+      process.env.JWT_SECRET!,
+      { expiresIn: "10m" }
+    );
     const url = getConsentUrl(redirectUri, state);
     res.json({ url });
   } catch (err) {
@@ -668,7 +713,7 @@ router.get("/graph/callback", async (req, res, next) => {
     }
 
     const code = req.query.code as string;
-    const state = req.query.state as string; // userId
+    const stateToken = req.query.state as string;
     const error = req.query.error as string;
 
     if (error) {
@@ -677,13 +722,25 @@ router.get("/graph/callback", async (req, res, next) => {
       return;
     }
 
-    if (!code || !state) {
+    if (!code || !stateToken) {
       res.redirect(`${process.env.FRONTEND_URL || "http://localhost:5173"}/email?error=missing_code`);
       return;
     }
 
+    // Verify the signed state token to extract userId (prevents callback tampering)
+    const jwt = require("jsonwebtoken");
+    let userId: string;
+    try {
+      const payload = jwt.verify(stateToken, process.env.JWT_SECRET!);
+      userId = payload.userId;
+    } catch (stateErr: any) {
+      console.error("[GraphAuth] Invalid or expired state token:", stateErr.message);
+      res.redirect(`${process.env.FRONTEND_URL || "http://localhost:5173"}/email?error=invalid_state`);
+      return;
+    }
+
     const redirectUri = `${process.env.API_BASE_URL || "http://localhost:3001"}/api/auth/graph/callback`;
-    await exchangeCodeForTokens(state, code, redirectUri);
+    await exchangeCodeForTokens(userId, code, redirectUri);
 
     // Redirect back to CRM email page on success
     res.redirect(`${process.env.FRONTEND_URL || "http://localhost:5173"}/email?connected=true`);
@@ -806,16 +863,41 @@ export async function sendEmail(
     throw new AppError(502, `Failed to send email via Microsoft: ${JSON.stringify(result.data)}`);
   }
 
-  // Graph sendMail returns 202 with no body — generate our own message ID for tracking
-  const graphMessageId = `sent-${crypto.randomUUID()}`;
+  // Graph sendMail returns 202 with no body.
+  // Fetch the sent message from Sent Items to get the real graph_message_id,
+  // graph_conversation_id, and from_address.
+  let graphMessageId = `sent-${crypto.randomUUID()}`; // Fallback if fetch fails
+  let graphConversationId: string | null = null;
+  let fromAddress = "";
+
+  try {
+    // Brief delay to allow the message to appear in Sent Items
+    await new Promise((r) => setTimeout(r, 1500));
+
+    const sentResult = await graphRequest<any>({
+      accessToken,
+      path: `/me/mailFolders/sentItems/messages?$filter=subject eq '${input.subject.replace(/'/g, "''")}'&$top=1&$orderby=sentDateTime desc&$select=id,conversationId,from`,
+    });
+
+    if (sentResult.ok && sentResult.data.value?.length > 0) {
+      const sentMsg = sentResult.data.value[0];
+      graphMessageId = sentMsg.id ?? graphMessageId;
+      graphConversationId = sentMsg.conversationId ?? null;
+      fromAddress = sentMsg.from?.emailAddress?.address ?? "";
+    }
+  } catch (fetchErr: any) {
+    console.warn("[Email] Failed to fetch sent message from Sent Items:", fetchErr.message);
+    // Non-fatal: we still store the email with the fallback ID
+  }
 
   // Store the email record
   const [emailRecord] = await tenantDb
     .insert(emails)
     .values({
       graphMessageId,
+      graphConversationId,
       direction: "outbound",
-      fromAddress: "", // Will be filled by sync or from user profile
+      fromAddress,
       toAddresses: input.to,
       ccAddresses: input.cc ?? [],
       subject: input.subject,
@@ -962,11 +1044,12 @@ export async function getEmailById(tenantDb: TenantDb, emailId: string) {
 export async function getEmailThread(tenantDb: TenantDb, conversationId: string) {
   if (!conversationId) return [];
 
+  // Thread view: chronological order (oldest first) for natural reading context
   return tenantDb
     .select()
     .from(emails)
     .where(eq(emails.graphConversationId, conversationId))
-    .orderBy(desc(emails.sentAt));
+    .orderBy(sql`${emails.sentAt} ASC`);
 }
 
 /**
@@ -1240,8 +1323,13 @@ router.get("/", async (req, res, next) => {
 });
 
 // GET /api/email/deal/:dealId — emails for a specific deal
+// RBAC: verify user has access to this deal before returning emails
 router.get("/deal/:dealId", async (req, res, next) => {
   try {
+    // Ownership check: reuse existing getDealById which enforces RBAC
+    const { getDealById } = await import("../deals/service.js");
+    await getDealById(req.tenantDb!, req.params.dealId, req.user!);
+
     const filters = {
       dealId: req.params.dealId,
       direction: req.query.direction as "inbound" | "outbound" | undefined,
@@ -1289,10 +1377,18 @@ router.get("/thread/:conversationId", async (req, res, next) => {
 });
 
 // GET /api/email/:id — single email with full body
+// RBAC: only the email owner or a director/admin can view
 router.get("/:id", async (req, res, next) => {
   try {
     const email = await getEmailById(req.tenantDb!, req.params.id);
     if (!email) throw new AppError(404, "Email not found");
+
+    const isOwner = email.userId === req.user!.id;
+    const isAdmin = req.user!.role === "director" || req.user!.role === "admin";
+    if (!isOwner && !isAdmin) {
+      throw new AppError(403, "You do not have permission to view this email");
+    }
+
     await req.commitTransaction!();
     res.json({ email });
   } catch (err) {
@@ -1301,10 +1397,15 @@ router.get("/:id", async (req, res, next) => {
 });
 
 // POST /api/email/:id/associate — manually associate email to a deal
+// RBAC: verify user has access to the target deal before associating
 router.post("/:id/associate", async (req, res, next) => {
   try {
     const { dealId } = req.body;
     if (!dealId) throw new AppError(400, "dealId is required");
+
+    // Verify the user has access to the target deal (existing RBAC)
+    const { getDealById } = await import("../deals/service.js");
+    await getDealById(req.tenantDb!, dealId, req.user!);
 
     await associateEmailToDeal(req.tenantDb!, req.params.id, dealId);
     await req.commitTransaction!();
@@ -1390,6 +1491,21 @@ export async function runEmailSync(): Promise<void> {
 
     for (const tokenRow of tokenRows.rows) {
       try {
+        // Skip if last sync was less than 1 minute ago (prevents overlap with slow syncs)
+        if (tokenRow.last_sync_at && Date.now() - new Date(tokenRow.last_sync_at).getTime() < 60000) {
+          continue;
+        }
+
+        // Acquire per-user advisory lock to prevent concurrent syncs for the same user
+        const lockResult = await client.query(
+          'SELECT pg_try_advisory_xact_lock(hashtext($1)) AS acquired',
+          [tokenRow.user_id]
+        );
+        if (!lockResult.rows[0]?.acquired) {
+          console.log(`[Worker:email-sync] Skipping user ${tokenRow.user_id} — sync already in progress`);
+          continue;
+        }
+
         await syncUserEmails(client, tokenRow);
       } catch (err: any) {
         console.error(
@@ -1596,7 +1712,24 @@ async function processInboundMessage(
   const emailId = insertResult.rows[0].id;
 
   // Auto-associate to deal
-  await autoAssociateRaw(client, schemaName, emailId, contactMatch.id, userId);
+  const associatedDealId = await autoAssociateRaw(client, schemaName, emailId, contactMatch.id, userId);
+
+  // Create follow-up task for EVERY inbound email from a CRM contact (per spec)
+  // The multi-deal disambiguation task is handled separately in autoAssociateRaw.
+  const contactName = `${contactMatch.first_name} ${contactMatch.last_name}`.trim();
+  const repUserId = userId; // The user whose mailbox received this email
+  await client.query(
+    `INSERT INTO ${schemaName}.tasks
+     (title, type, priority, status, assigned_to, deal_id, contact_id, email_id, due_date)
+     VALUES ($1, 'inbound_email', 'high', 'pending', $2, $3, $4, $5, CURRENT_DATE)`,
+    [
+      `Reply to ${contactName}: ${subject}`,
+      repUserId,
+      associatedDealId, // may be null if 0 or multiple deals
+      contactMatch.id,
+      emailId,
+    ]
+  );
 
   // Create activity record
   await client.query(
@@ -1663,7 +1796,7 @@ async function autoAssociateRaw(
   emailId: string,
   contactId: string,
   userId: string
-): Promise<void> {
+): Promise<string | null> {
   const activeDeals = await client.query(
     `SELECT d.id AS deal_id, d.deal_number, d.name AS deal_name
      FROM ${schemaName}.deals d
@@ -1674,17 +1807,19 @@ async function autoAssociateRaw(
 
   if (activeDeals.rows.length === 1) {
     // Auto-associate to the single active deal
+    const dealId = activeDeals.rows[0].deal_id;
     await client.query(
       `UPDATE ${schemaName}.emails SET deal_id = $1 WHERE id = $2`,
-      [activeDeals.rows[0].deal_id, emailId]
+      [dealId, emailId]
     );
     // Also update the activity record
     await client.query(
       `UPDATE ${schemaName}.activities SET deal_id = $1 WHERE email_id = $2`,
-      [activeDeals.rows[0].deal_id, emailId]
+      [dealId, emailId]
     );
+    return dealId;
   } else if (activeDeals.rows.length > 1) {
-    // Multiple active deals — create task for rep
+    // Multiple active deals — create disambiguation task for rep
     const dealNames = activeDeals.rows
       .map((d: any) => `${d.deal_number} ${d.deal_name}`)
       .join(", ");
@@ -1700,8 +1835,10 @@ async function autoAssociateRaw(
         emailId,
       ]
     );
+    return null; // No auto-association — rep must choose
   }
-  // 0 active deals: contact-only association, no action needed
+  // 0 active deals: contact-only association, no deal
+  return null;
 }
 ```
 
@@ -1803,17 +1940,112 @@ Add after the dedup scan cron schedule:
   console.log("[Worker] Cron scheduled: email sync every 5 minutes");
 ```
 
+### 4d. Graph Webhook Subscriptions (Near-Real-Time Sync)
+
+The 5-minute delta sync provides the reliability baseline. For near-real-time email delivery, add Graph webhook subscriptions that trigger an immediate delta sync when new mail arrives.
+
+**Schema additions to `user_graph_tokens`:**
+
+Add `subscription_id` (text, nullable) and `subscription_expires_at` (timestamptz, nullable) columns.
+
+**Webhook subscription lifecycle:**
+
+1. **After OAuth consent** (in `exchangeCodeForTokens`): create a Graph subscription on the user's inbox:
+
+```typescript
+// Create Graph webhook subscription for near-real-time email notifications
+const subscriptionResult = await graphRequest({
+  accessToken: result.accessToken,
+  method: "POST",
+  path: "/subscriptions",
+  body: {
+    changeType: "created",
+    notificationUrl: `${process.env.API_BASE_URL}/api/webhooks/graph`,
+    resource: "me/mailFolders/inbox/messages",
+    expirationDateTime: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString(), // 3 days max
+    clientState: userId, // Verified on receipt
+  },
+});
+
+if (subscriptionResult.ok) {
+  // Store subscription_id and subscription_expires_at in user_graph_tokens
+  await db.update(userGraphTokens).set({
+    subscriptionId: subscriptionResult.data.id,
+    subscriptionExpiresAt: new Date(subscriptionResult.data.expirationDateTime),
+  }).where(eq(userGraphTokens.userId, userId));
+}
+```
+
+2. **Subscription renewal** (in worker cron, every 12 hours): renew subscriptions before they expire (Graph subscriptions last 3 days max):
+
+```typescript
+// In worker cron: renew Graph webhook subscriptions
+cron.schedule("0 */12 * * *", async () => {
+  const tokensNeedingRenewal = await client.query(
+    `SELECT user_id, subscription_id, access_token
+     FROM public.user_graph_tokens
+     WHERE status = 'active' AND subscription_id IS NOT NULL
+       AND subscription_expires_at < NOW() + INTERVAL '24 hours'`
+  );
+
+  for (const row of tokensNeedingRenewal.rows) {
+    const accessToken = decrypt(row.access_token);
+    await graphRequest({
+      accessToken,
+      method: "PATCH",
+      path: `/subscriptions/${row.subscription_id}`,
+      body: {
+        expirationDateTime: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString(),
+      },
+    });
+  }
+});
+```
+
+3. **Webhook receiver route** (add to auth routes or as a new route file):
+
+```typescript
+// POST /api/webhooks/graph — receive Graph webhook notifications
+router.post("/webhooks/graph", async (req, res) => {
+  // Graph sends a validation request on subscription creation
+  if (req.query.validationToken) {
+    res.set("Content-Type", "text/plain");
+    res.status(200).send(req.query.validationToken);
+    return;
+  }
+
+  // Process notifications
+  const notifications = req.body?.value ?? [];
+  for (const notification of notifications) {
+    const userId = notification.clientState;
+    if (!userId) continue;
+
+    // Trigger immediate delta sync for this user (enqueue via job_queue)
+    await pool.query(
+      `INSERT INTO public.job_queue (job_type, payload, status, run_after)
+       VALUES ('email_sync_user', $1, 'pending', NOW())`,
+      [JSON.stringify({ userId })]
+    );
+  }
+
+  res.status(202).send();
+});
+```
+
+**Note:** The 5-minute delta sync remains as the reliability fallback in case webhook delivery is delayed or missed. Webhooks provide near-real-time responsiveness; delta sync provides completeness guarantees.
+
 ---
 
 ## Task 5: Email-to-Task Creation (email.received -> follow-up task)
 
-This is already handled in Task 4b via the `email.received` domain event handler and the `autoAssociateRaw` function in `email-sync.ts`.
+This is handled in Task 4a's `processInboundMessage` function in `email-sync.ts`.
 
 The flow:
-1. Inbound email synced -> if contact has multiple active deals -> `inbound_email` task created for rep
-2. `email.received` domain event -> notification created for rep
-3. Rep sees notification + task in their daily list
-4. Rep manually associates email to correct deal via UI (Task 10 covers this)
+1. Inbound email synced -> follow-up task created for rep (ALL inbound emails from CRM contacts, priority: high)
+2. If contact has multiple active deals -> additional disambiguation task created for rep (priority: normal)
+3. `email.received` domain event -> notification created for rep
+4. Rep sees notification + tasks in their daily list
+5. Rep manually associates email to correct deal via UI (Task 10 covers this)
 
 No additional code needed for this task -- it is fully covered by Tasks 4a and 4b.
 
@@ -2621,6 +2853,7 @@ export function EmailRow({ email, onClick }: EmailRowProps) {
 
 ```typescript
 import { useState } from "react";
+import DOMPurify from "dompurify";
 import { Mail } from "lucide-react";
 import { EmailRow } from "./email-row";
 import { EmailThreadView } from "./email-thread-view";
@@ -2694,7 +2927,7 @@ export function EmailList({
           <div
             className="prose prose-sm max-w-none"
             dangerouslySetInnerHTML={{
-              __html: selectedEmail.bodyHtml ?? selectedEmail.bodyPreview ?? "",
+              __html: DOMPurify.sanitize(selectedEmail.bodyHtml ?? selectedEmail.bodyPreview ?? ""),
             }}
           />
         </div>
@@ -2996,6 +3229,7 @@ Displays all emails in a conversation thread, ordered chronologically.
 **File: `client/src/components/email/email-thread-view.tsx`**
 
 ```typescript
+import DOMPurify from "dompurify";
 import { ArrowLeft, ArrowDownLeft, ArrowUpRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useEmailThread } from "@/hooks/use-emails";
@@ -3074,7 +3308,7 @@ export function EmailThreadView({ conversationId, onBack }: EmailThreadViewProps
               <div
                 className="prose prose-sm max-w-none"
                 dangerouslySetInnerHTML={{
-                  __html: email.bodyHtml ?? email.bodyPreview ?? "",
+                  __html: DOMPurify.sanitize(email.bodyHtml ?? email.bodyPreview ?? ""),
                 }}
               />
             </div>
@@ -3356,7 +3590,8 @@ API_BASE_URL=https://your-api-service.railway.app
 # Server
 cd server && npm install @azure/msal-node
 
-# No new client dependencies needed — uses existing shadcn/ui components
+# Client — DOMPurify for sanitizing email HTML (prevents XSS via dangerouslySetInnerHTML)
+cd client && npm install dompurify && npm install -D @types/dompurify
 ```
 
 ---
