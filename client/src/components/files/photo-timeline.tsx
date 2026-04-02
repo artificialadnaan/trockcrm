@@ -1,9 +1,10 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect, useCallback } from "react";
 import { Camera, Download, X, ChevronLeft, ChevronRight, MapPin } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useDealPhotos, downloadFile } from "@/hooks/use-files";
 import type { FileRecord } from "@/hooks/use-files";
+import { api } from "@/lib/api";
 
 interface PhotoTimelineProps {
   dealId: string;
@@ -22,10 +23,46 @@ function formatDateHeading(date: Date): string {
   });
 }
 
+/**
+ * Fix 13: Fetch presigned download URLs for photo thumbnails.
+ * Caches URLs by file ID and refreshes them on photo list change.
+ */
+function usePhotoPreviewUrls(photos: FileRecord[]) {
+  const [urlMap, setUrlMap] = useState<Map<string, string>>(new Map());
+
+  const fetchUrls = useCallback(async () => {
+    const newMap = new Map<string, string>();
+    // Fetch URLs in parallel (batch of concurrent requests)
+    const results = await Promise.allSettled(
+      photos.map(async (photo) => {
+        const data = await api<{ url: string; filename: string }>(
+          `/files/${photo.id}/download`
+        );
+        return { id: photo.id, url: data.url };
+      })
+    );
+    for (const result of results) {
+      if (result.status === "fulfilled") {
+        newMap.set(result.value.id, result.value.url);
+      }
+    }
+    setUrlMap(newMap);
+  }, [photos]);
+
+  useEffect(() => {
+    if (photos.length > 0) {
+      fetchUrls();
+    }
+  }, [fetchUrls, photos.length]);
+
+  return urlMap;
+}
+
 export function PhotoTimeline({ dealId }: PhotoTimelineProps) {
   const [page, setPage] = useState(1);
   const { photos, pagination, loading, error } = useDealPhotos(dealId, page);
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
+  const previewUrls = usePhotoPreviewUrls(photos);
 
   // Group photos by date
   const groupedPhotos = useMemo(() => {
@@ -89,10 +126,19 @@ export function PhotoTimeline({ dealId }: PhotoTimelineProps) {
                   className="relative aspect-square rounded-lg overflow-hidden group border hover:ring-2 hover:ring-brand-purple transition-all"
                   onClick={() => setLightboxIndex(flatIdx)}
                 >
-                  {/* Thumbnail placeholder -- R2 public URLs not available */}
-                  <div className="w-full h-full bg-muted flex items-center justify-center">
-                    <Camera className="h-6 w-6 text-muted-foreground/50" />
-                  </div>
+                  {/* Fix 13: Render actual photo thumbnails via presigned URLs */}
+                  {previewUrls.get(photo.id) ? (
+                    <img
+                      src={previewUrls.get(photo.id)}
+                      alt={photo.displayName}
+                      className="object-cover w-full h-full"
+                      loading="lazy"
+                    />
+                  ) : (
+                    <div className="w-full h-full bg-muted flex items-center justify-center">
+                      <Camera className="h-6 w-6 text-muted-foreground/50" />
+                    </div>
+                  )}
                   {/* Overlay on hover */}
                   <div className="absolute inset-0 bg-black/0 group-hover:bg-black/30 transition-colors flex items-end">
                     <div className="w-full p-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
@@ -186,13 +232,21 @@ export function PhotoTimeline({ dealId }: PhotoTimelineProps) {
 
             {/* Photo Content */}
             <div className="bg-black rounded-lg overflow-hidden flex items-center justify-center min-h-[50vh]">
-              <div className="text-center text-white/60">
-                <Camera className="h-16 w-16 mx-auto mb-2" />
-                <p className="text-sm">
-                  {flatPhotos[lightboxIndex].displayName}
-                  {flatPhotos[lightboxIndex].fileExtension}
-                </p>
-              </div>
+              {previewUrls.get(flatPhotos[lightboxIndex].id) ? (
+                <img
+                  src={previewUrls.get(flatPhotos[lightboxIndex].id)}
+                  alt={flatPhotos[lightboxIndex].displayName}
+                  className="max-w-full max-h-[80vh] object-contain"
+                />
+              ) : (
+                <div className="text-center text-white/60">
+                  <Camera className="h-16 w-16 mx-auto mb-2" />
+                  <p className="text-sm">
+                    {flatPhotos[lightboxIndex].displayName}
+                    {flatPhotos[lightboxIndex].fileExtension}
+                  </p>
+                </div>
+              )}
             </div>
 
             {/* Info Bar */}

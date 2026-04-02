@@ -103,6 +103,28 @@ export async function extractExif(
 
     const schemaName = `office_${slug}`;
 
+    // Fix 10: If we extracted a takenAt date, recompute the folder_path
+    // so photos are bucketed by their actual date, not the upload time.
+    // First, read the current folder_path from the file record.
+    let newFolderPath: string | null = null;
+    if (updates.takenAt) {
+      const currentResult = await pool.query(
+        `SELECT folder_path FROM ${schemaName}.files WHERE id = $1`,
+        [fileId]
+      );
+      if (currentResult.rows.length > 0) {
+        const currentFolderPath: string | null = currentResult.rows[0].folder_path;
+        if (currentFolderPath) {
+          const exifMonth = updates.takenAt.toISOString().slice(0, 7); // "YYYY-MM"
+          // Replace the trailing YYYY-MM date bucket if present
+          const updatedPath = currentFolderPath.replace(/\d{4}-\d{2}$/, exifMonth);
+          if (updatedPath !== currentFolderPath) {
+            newFolderPath = updatedPath;
+          }
+        }
+      }
+    }
+
     // Build dynamic UPDATE query
     const setClauses: string[] = [];
     const values: unknown[] = [];
@@ -120,6 +142,10 @@ export async function extractExif(
       setClauses.push(`geo_lng = $${paramIdx++}`);
       values.push(updates.geoLng);
     }
+    if (newFolderPath) {
+      setClauses.push(`folder_path = $${paramIdx++}`);
+      values.push(newFolderPath);
+    }
 
     setClauses.push(`updated_at = NOW()`);
 
@@ -132,7 +158,8 @@ export async function extractExif(
 
     console.log(
       `[EXIF] Updated file ${fileId}: takenAt=${updates.takenAt?.toISOString() ?? "n/a"}, ` +
-      `geo=${updates.geoLat ?? "n/a"},${updates.geoLng ?? "n/a"}`
+      `geo=${updates.geoLat ?? "n/a"},${updates.geoLng ?? "n/a"}` +
+      (newFolderPath ? `, folderPath=${newFolderPath}` : "")
     );
   } catch (err) {
     // EXIF extraction is non-blocking -- log and continue

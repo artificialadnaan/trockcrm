@@ -119,6 +119,30 @@ export const CATEGORY_TO_FOLDER: Record<FileCategory, string> = {
 };
 
 /**
+ * Reverse mapping: MIME type -> allowed extensions for that MIME.
+ * Used to validate that the declared MIME type matches the file extension.
+ */
+export const MIME_TO_EXTENSIONS: Record<string, string[]> = {
+  "image/jpeg": [".jpg", ".jpeg"],
+  "image/png": [".png"],
+  "image/gif": [".gif"],
+  "image/webp": [".webp"],
+  "image/heic": [".heic"],
+  "image/heif": [".heic"],
+  "application/pdf": [".pdf"],
+  "application/msword": [".doc"],
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document": [".docx"],
+  "application/vnd.ms-excel": [".xls"],
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": [".xlsx"],
+  "text/csv": [".csv"],
+  "application/vnd.ms-powerpoint": [".ppt"],
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation": [".pptx"],
+  "text/plain": [".txt"],
+  "application/zip": [".zip"],
+  "application/x-zip-compressed": [".zip"],
+};
+
+/**
  * Map category to the R2 key path segment.
  */
 export const CATEGORY_TO_R2_SEGMENT: Record<FileCategory, string> = {

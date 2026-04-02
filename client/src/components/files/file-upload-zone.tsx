@@ -23,6 +23,7 @@ interface FileUploadZoneProps {
 }
 
 interface UploadState {
+  id: string; // Stable UUID for tracking
   file: File;
   previewName: string;
   progress: number;
@@ -63,7 +64,9 @@ export function FileUploadZone({
     async (fileList: FileList | File[]) => {
       const newFiles = Array.from(fileList);
 
+      // Fix 12: Track uploads by stable UUID instead of array index
       const uploadStates: UploadState[] = newFiles.map((file) => ({
+        id: crypto.randomUUID(),
         file,
         previewName: generatePreviewName(file.name, category, dealNumber),
         progress: 0,
@@ -72,17 +75,18 @@ export function FileUploadZone({
 
       setUploads((prev) => [...prev, ...uploadStates]);
 
-      const baseIndex = uploads.length;
+      let allSucceeded = true;
 
       for (let i = 0; i < newFiles.length; i++) {
         const file = newFiles[i];
-        const stateIndex = baseIndex + i;
+        const uploadId = uploadStates[i].id;
 
         const validationError = validateFile(file);
         if (validationError) {
+          allSucceeded = false;
           setUploads((prev) =>
-            prev.map((u, idx) =>
-              idx === stateIndex
+            prev.map((u) =>
+              u.id === uploadId
                 ? { ...u, status: "error" as const, error: validationError }
                 : u
             )
@@ -91,8 +95,8 @@ export function FileUploadZone({
         }
 
         setUploads((prev) =>
-          prev.map((u, idx) =>
-            idx === stateIndex ? { ...u, status: "uploading" as const } : u
+          prev.map((u) =>
+            u.id === uploadId ? { ...u, status: "uploading" as const } : u
           )
         );
 
@@ -106,24 +110,25 @@ export function FileUploadZone({
             tags,
             onProgress: (percent) => {
               setUploads((prev) =>
-                prev.map((u, idx) =>
-                  idx === stateIndex ? { ...u, progress: percent } : u
+                prev.map((u) =>
+                  u.id === uploadId ? { ...u, progress: percent } : u
                 )
               );
             },
           });
 
           setUploads((prev) =>
-            prev.map((u, idx) =>
-              idx === stateIndex
+            prev.map((u) =>
+              u.id === uploadId
                 ? { ...u, status: "done" as const, progress: 100 }
                 : u
             )
           );
         } catch (err: unknown) {
+          allSucceeded = false;
           setUploads((prev) =>
-            prev.map((u, idx) =>
-              idx === stateIndex
+            prev.map((u) =>
+              u.id === uploadId
                 ? {
                     ...u,
                     status: "error" as const,
@@ -135,9 +140,12 @@ export function FileUploadZone({
         }
       }
 
-      onUploadComplete?.();
+      // Fix 12: Only fire onUploadComplete when all uploads succeed
+      if (allSucceeded) {
+        onUploadComplete?.();
+      }
     },
-    [category, subcategory, dealId, contactId, tags, uploads.length, onUploadComplete, dealNumber]
+    [category, subcategory, dealId, contactId, tags, onUploadComplete, dealNumber]
   );
 
   const handleDrop = useCallback(
@@ -204,9 +212,9 @@ export function FileUploadZone({
       {/* Upload Progress List */}
       {uploads.length > 0 && (
         <div className="space-y-2">
-          {uploads.map((upload, i) => (
+          {uploads.map((upload) => (
             <div
-              key={`${upload.file.name}-${i}`}
+              key={upload.id}
               className="flex items-center gap-3 rounded-lg border p-2 text-sm"
             >
               <FileIcon className="h-4 w-4 text-muted-foreground flex-shrink-0" />

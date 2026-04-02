@@ -278,7 +278,7 @@ export async function uploadFile(input: UploadFileInput): Promise<FileRecord> {
     onProgress,
   } = input;
 
-  // Step 1: Request presigned URL
+  // Step 1: Request presigned URL (returns uploadToken for confirm step)
   const presigned = await api<{
     uploadUrl: string;
     r2Key: string;
@@ -286,6 +286,7 @@ export async function uploadFile(input: UploadFileInput): Promise<FileRecord> {
     systemFilename: string;
     displayName: string;
     folderPath: string;
+    uploadToken: string;
   }>("/files/upload-url", {
     method: "POST",
     json: {
@@ -328,25 +329,12 @@ export async function uploadFile(input: UploadFileInput): Promise<FileRecord> {
     xhr.send(file);
   });
 
-  // Step 3: Confirm upload with server
+  // Step 3: Confirm upload with server using the upload token
+  // Fix 2: Only send the uploadToken — server uses stored metadata from presign step
   const { file: fileRecord } = await api<{ file: FileRecord }>("/files/confirm-upload", {
     method: "POST",
     json: {
-      r2Key: presigned.r2Key,
-      systemFilename: presigned.systemFilename,
-      displayName: presigned.displayName,
-      folderPath: presigned.folderPath,
-      originalFilename: file.name,
-      mimeType: file.type,
-      fileSizeBytes: file.size,
-      category,
-      subcategory,
-      dealId,
-      contactId,
-      procoreProjectId,
-      changeOrderId,
-      description,
-      tags,
+      uploadToken: presigned.uploadToken,
     },
   });
 

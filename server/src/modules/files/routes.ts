@@ -1,9 +1,11 @@
 import { Router } from "express";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { files } from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
 import { eventBus } from "../../events/bus.js";
 import { DOMAIN_EVENTS } from "@trock-crm/shared/types";
+import type { FileCategory } from "@trock-crm/shared/types";
+import { FILE_CATEGORIES } from "@trock-crm/shared/types";
 import {
   requestUploadUrl,
   confirmUpload,
@@ -19,8 +21,6 @@ import {
   getDealPhotoTimeline,
 } from "./service.js";
 import { getDealById } from "../deals/service.js";
-import type { FileCategory } from "@trock-crm/shared/types";
-import { FILE_CATEGORIES } from "@trock-crm/shared/types";
 
 const router = Router();
 
@@ -84,71 +84,42 @@ router.post("/upload-url", async (req, res, next) => {
 // POST /api/files/confirm-upload — Step 2: record file metadata after upload
 router.post("/confirm-upload", async (req, res, next) => {
   try {
-    const {
-      r2Key,
-      systemFilename,
-      displayName,
-      folderPath,
-      originalFilename,
-      mimeType,
-      fileSizeBytes,
-      category,
-      subcategory,
-      dealId,
-      contactId,
-      procoreProjectId,
-      changeOrderId,
-      description,
-      tags,
-      takenAt,
-      geoLat,
-      geoLng,
-      parentFileId,
-      version,
-    } = req.body;
+    const { uploadToken, takenAt, geoLat, geoLng } = req.body;
 
-    if (!r2Key || !systemFilename || !displayName || !originalFilename || !mimeType || !fileSizeBytes || !category) {
-      throw new AppError(400, "Missing required fields for upload confirmation.");
-    }
-
-    // RBAC: validate dealId access if provided
-    if (dealId) {
-      const deal = await getDealById(req.tenantDb!, dealId, req.user!.role, req.user!.id);
-      if (!deal) throw new AppError(403, "Access denied: you do not have access to this deal.");
+    // Fix 2: Require upload token — all other metadata is server-trusted
+    if (!uploadToken) {
+      throw new AppError(400, "uploadToken is required.");
     }
 
     const file = await confirmUpload(req.tenantDb!, req.user!.id, {
-      r2Key,
-      systemFilename,
-      displayName,
-      folderPath: folderPath ?? "",
-      originalFilename,
-      mimeType,
-      fileSizeBytes: Number(fileSizeBytes),
-      category: category as FileCategory,
-      subcategory,
-      dealId,
-      contactId,
-      procoreProjectId: procoreProjectId ? Number(procoreProjectId) : undefined,
-      changeOrderId,
-      description,
-      tags,
+      uploadToken,
       takenAt,
       geoLat: geoLat ? Number(geoLat) : undefined,
       geoLng: geoLng ? Number(geoLng) : undefined,
     });
 
-    // If this is a new version, update parent_file_id and version
-    if (parentFileId && version) {
-      await req.tenantDb!
-        .update(files)
-        .set({ parentFileId, version: Number(version) })
-        .where(eq(files.id, file.id));
-    }
+    // Fix 1: Insert job into job_queue before commit so the worker picks it up.
+    // The worker processes domain_event jobs -- emitLocal alone never reached it.
+    const officeId = req.user!.activeOfficeId ?? req.user!.officeId;
+    const jobPayload = JSON.stringify({
+      eventName: "file.uploaded",
+      fileId: file.id,
+      r2Key: file.r2Key,
+      mimeType: file.mimeType,
+      dealId: file.dealId,
+      contactId: file.contactId,
+      category: file.category,
+      uploadedBy: req.user!.id,
+    });
+    // jobQueue is in the public schema — use raw SQL since tenantDb targets tenant schema.
+    await req.tenantDb!.execute(
+      sql`INSERT INTO public.job_queue (job_type, payload, office_id, status, run_after)
+          VALUES ('domain_event', ${jobPayload}::jsonb, ${officeId}::uuid, 'pending', NOW())`
+    );
 
     await req.commitTransaction!();
 
-    // Emit file.uploaded event after commit
+    // Best-effort local emit after commit (for any in-process listeners)
     try {
       eventBus.emitLocal({
         name: DOMAIN_EVENTS.FILE_UPLOADED,
@@ -161,12 +132,12 @@ router.post("/confirm-upload", async (req, res, next) => {
           category: file.category,
           uploadedBy: req.user!.id,
         },
-        officeId: req.user!.activeOfficeId ?? req.user!.officeId,
+        officeId,
         userId: req.user!.id,
         timestamp: new Date(),
       });
-    } catch (eventErr) {
-      console.error("[Files] Failed to emit file.uploaded event:", eventErr);
+    } catch (_) {
+      // Best effort — worker will handle it via job_queue
     }
 
     res.status(201).json({ file });
@@ -184,6 +155,16 @@ router.post("/:id/new-version", async (req, res, next) => {
       throw new AppError(400, "originalFilename, mimeType, and fileSizeBytes are required.");
     }
 
+    // Fix 7: RBAC — load parent file and check deal access
+    const parentFile = await getFileById(req.tenantDb!, req.params.id);
+    if (!parentFile) throw new AppError(404, "File not found");
+    if (parentFile.dealId) {
+      const deal = await getDealById(req.tenantDb!, parentFile.dealId, req.user!.role, req.user!.id);
+      if (!deal) throw new AppError(403, "Access denied: you do not have access to this deal's files.");
+    }
+
+    // Fix 5: parentFileId comes from the URL param; version is computed server-side.
+    // The client does NOT supply parentFileId or version.
     const result = await uploadNewVersion(
       req.tenantDb!,
       req.officeSlug!,
@@ -209,6 +190,19 @@ router.post("/:id/new-version", async (req, res, next) => {
 // GET /api/files — list files (paginated, filtered, sorted)
 router.get("/", async (req, res, next) => {
   try {
+    // Fix 6: For reps, require a dealId or contactId filter.
+    // Without it, reps would see all office files. Directors/admins see all.
+    const isRep = req.user!.role === "rep";
+    if (isRep && !req.query.dealId && !req.query.contactId) {
+      throw new AppError(400, "dealId or contactId filter is required.");
+    }
+
+    // If rep specifies a dealId, verify they have access to it
+    if (isRep && req.query.dealId) {
+      const deal = await getDealById(req.tenantDb!, req.query.dealId as string, req.user!.role, req.user!.id);
+      if (!deal) throw new AppError(403, "Access denied: you do not have access to this deal's files.");
+    }
+
     const filters = {
       dealId: req.query.dealId as string | undefined,
       contactId: req.query.contactId as string | undefined,
@@ -322,6 +316,14 @@ router.get("/:id/download", async (req, res, next) => {
 // GET /api/files/:id/versions — version history chain
 router.get("/:id/versions", async (req, res, next) => {
   try {
+    // Fix 7: RBAC — load file and check deal access
+    const file = await getFileById(req.tenantDb!, req.params.id);
+    if (!file) throw new AppError(404, "File not found");
+    if (file.dealId) {
+      const deal = await getDealById(req.tenantDb!, file.dealId, req.user!.role, req.user!.id);
+      if (!deal) throw new AppError(403, "Access denied: you do not have access to this deal's files.");
+    }
+
     const versions = await getFileVersions(req.tenantDb!, req.params.id);
     await req.commitTransaction!();
     res.json({ versions });
@@ -333,12 +335,16 @@ router.get("/:id/versions", async (req, res, next) => {
 // PATCH /api/files/:id — update file metadata
 router.patch("/:id", async (req, res, next) => {
   try {
-    // RBAC: deal-scoped files require deal access check
     const existing = await getFileById(req.tenantDb!, req.params.id);
     if (!existing) throw new AppError(404, "File not found");
+
+    // RBAC: deal-scoped files require deal access check
     if (existing.dealId) {
       const deal = await getDealById(req.tenantDb!, existing.dealId, req.user!.role, req.user!.id);
       if (!deal) throw new AppError(403, "Access denied: you do not have access to this deal's files.");
+    } else if (req.user!.role === "rep" && existing.uploadedBy !== req.user!.id) {
+      // Fix 8: Non-deal files (e.g. contact files) — reps can only modify files they uploaded
+      throw new AppError(403, "You can only modify files you uploaded");
     }
 
     const { displayName, description, notes, tags, category, subcategory, folderPath } = req.body;
@@ -362,19 +368,23 @@ router.patch("/:id", async (req, res, next) => {
 // DELETE /api/files/:id — soft-delete a file
 router.delete("/:id", async (req, res, next) => {
   try {
-    // RBAC: deal-scoped files require deal access + role check.
-    // Delete is restricted to director/admin for deal files, or the original uploader.
     const existing = await getFileById(req.tenantDb!, req.params.id);
     if (!existing) throw new AppError(404, "File not found");
+
+    const isAdminOrDirector = req.user!.role === "admin" || req.user!.role === "director";
+    const isUploader = existing.uploadedBy === req.user!.id;
+
     if (existing.dealId) {
+      // RBAC: deal-scoped files require deal access + role check
       const deal = await getDealById(req.tenantDb!, existing.dealId, req.user!.role, req.user!.id);
       if (!deal) throw new AppError(403, "Access denied: you do not have access to this deal's files.");
 
-      const isAdminOrDirector = req.user!.role === "admin" || req.user!.role === "director";
-      const isUploader = existing.uploadedBy === req.user!.id;
       if (!isAdminOrDirector && !isUploader) {
         throw new AppError(403, "Only admins, directors, or the original uploader can delete deal files.");
       }
+    } else if (req.user!.role === "rep" && !isUploader) {
+      // Fix 8: Non-deal files — reps can only delete files they uploaded
+      throw new AppError(403, "You can only delete files you uploaded");
     }
 
     await deleteFile(req.tenantDb!, req.params.id, req.user!.role);

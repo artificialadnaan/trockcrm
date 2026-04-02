@@ -16,12 +16,47 @@ import {
   MAX_FILE_SIZE_BYTES,
   ALLOWED_MIME_TYPES,
   ALLOWED_EXTENSIONS,
+  MIME_TO_EXTENSIONS,
   CATEGORY_TO_R2_SEGMENT,
   CATEGORY_TO_FOLDER,
   DEAL_FOLDER_TEMPLATE,
 } from "./file-constants.js";
+import crypto from "node:crypto";
 
 type TenantDb = NodePgDatabase<typeof schema>;
+
+// ─── Pending Uploads (Fix 2: bind confirm-upload to upload-url grant) ───────
+
+interface PendingUpload {
+  r2Key: string;
+  systemFilename: string;
+  displayName: string;
+  folderPath: string;
+  originalFilename: string;
+  mimeType: string;
+  fileSizeBytes: number;
+  category: FileCategory;
+  subcategory?: string;
+  dealId?: string;
+  contactId?: string;
+  procoreProjectId?: number;
+  changeOrderId?: string;
+  description?: string;
+  tags?: string[];
+  expiresAt: Date;
+}
+
+const pendingUploads = new Map<string, PendingUpload>();
+
+// Periodically clean expired pending uploads (every 5 minutes)
+setInterval(() => {
+  const now = new Date();
+  for (const [token, pending] of pendingUploads) {
+    if (pending.expiresAt < now) {
+      pendingUploads.delete(token);
+    }
+  }
+}, 5 * 60 * 1000);
 
 // ─── Interfaces ──────────────────────────────────────────────────────────────
 
@@ -51,10 +86,8 @@ export interface RequestUploadInput {
 }
 
 export interface ConfirmUploadInput {
-  /** The r2Key returned from the presigned URL request */
-  r2Key: string;
-  /** Actual file size after upload (for validation) */
-  actualSizeBytes?: number;
+  /** The upload token returned from the presigned URL request */
+  uploadToken: string;
   /** EXIF data extracted client-side (optional, server also extracts for images) */
   takenAt?: string;
   geoLat?: number;
@@ -109,6 +142,17 @@ function validateExtension(filename: string): string {
     throw new AppError(400, `File extension "${ext || "(none)"}" is not supported.`);
   }
   return ext;
+}
+
+/**
+ * Validate that the declared MIME type corresponds to the file extension.
+ * Prevents uploading a .exe disguised as image/jpeg, etc.
+ */
+function validateMimeMatchesExtension(mimeType: string, extension: string): void {
+  const expectedExts = MIME_TO_EXTENSIONS[mimeType];
+  if (!expectedExts || !expectedExts.includes(extension.toLowerCase())) {
+    throw new AppError(400, `MIME type ${mimeType} does not match extension ${extension}`);
+  }
 }
 
 /**
@@ -281,10 +325,12 @@ export async function requestUploadUrl(
   systemFilename: string;
   displayName: string;
   folderPath: string;
+  uploadToken: string;
 }> {
   // Validate everything before generating the presigned URL
   validateMimeType(input.mimeType);
   const ext = validateExtension(input.originalFilename);
+  validateMimeMatchesExtension(input.mimeType, ext); // Fix 3: MIME must match extension
   validateFileSize(input.fileSizeBytes);
   validateAssociations(input);
 
@@ -310,8 +356,8 @@ export async function requestUploadUrl(
     dealNumber = deal?.dealNumber;
   }
 
-  // Build R2 key
-  const r2Key = buildR2Key(officeSlug, {
+  // Build R2 key with UUID prefix to prevent collision (Fix 4)
+  const baseR2Key = buildR2Key(officeSlug, {
     dealNumber,
     dealId: input.dealId,
     contactId: input.contactId,
@@ -320,6 +366,10 @@ export async function requestUploadUrl(
     category: input.category,
     systemFilename,
   });
+  // Insert a UUID before the filename in the key for collision safety
+  const keyParts = baseR2Key.split("/");
+  const filename = keyParts.pop()!;
+  const r2Key = [...keyParts, `${crypto.randomUUID()}-${filename}`].join("/");
 
   // Build folder path (pass date for photo category date-bucketing)
   const folderPath = buildFolderPath(input.category, input.subcategory, now);
@@ -332,50 +382,70 @@ export async function requestUploadUrl(
     uploadResult = generateMockUploadUrl(r2Key);
   }
 
+  // Fix 2: Store pending upload and generate upload token
+  const uploadToken = crypto.randomUUID();
+  pendingUploads.set(uploadToken, {
+    r2Key,
+    systemFilename,
+    displayName,
+    folderPath,
+    originalFilename: input.originalFilename,
+    mimeType: input.mimeType,
+    fileSizeBytes: input.fileSizeBytes,
+    category: input.category,
+    subcategory: input.subcategory,
+    dealId: input.dealId,
+    contactId: input.contactId,
+    procoreProjectId: input.procoreProjectId,
+    changeOrderId: input.changeOrderId,
+    description: input.description,
+    tags: input.tags,
+    expiresAt: new Date(Date.now() + 15 * 60 * 1000),
+  });
+
   return {
     ...uploadResult,
     systemFilename,
     displayName,
     folderPath,
+    uploadToken,
   };
 }
 
 /**
  * Step 2 of upload flow: browser has uploaded the file to R2.
- * Verify the R2 object exists and matches declared metadata, then
- * create the file metadata record in the database.
+ * Consumes the pending upload token to retrieve server-trusted metadata,
+ * verifies the R2 object exists, then creates the file record.
  */
 export async function confirmUpload(
   tenantDb: TenantDb,
   userId: string,
-  input: RequestUploadInput & {
-    r2Key: string;
-    systemFilename: string;
-    displayName: string;
-    folderPath: string;
-    takenAt?: string;
-    geoLat?: number;
-    geoLng?: number;
-  }
+  input: ConfirmUploadInput
 ): Promise<typeof files.$inferSelect> {
+  // Fix 2: Consume the pending upload token — don't trust client-supplied values
+  const pending = pendingUploads.get(input.uploadToken);
+  if (!pending || pending.expiresAt < new Date()) {
+    pendingUploads.delete(input.uploadToken);
+    throw new AppError(400, "Invalid or expired upload token");
+  }
+  pendingUploads.delete(input.uploadToken);
+
   // ── Verify the R2 object before persisting metadata ──────────────
-  // HEAD the object to confirm it was actually uploaded and that the
-  // Content-Type / Content-Length match what the client declared.
   if (isR2Configured()) {
-    const head = await headObject(input.r2Key);
+    const head = await headObject(pending.r2Key);
     if (!head) {
       throw new AppError(400, "Upload verification failed: object not found in R2. The file may not have been uploaded.");
     }
-    if (head.contentType && head.contentType !== input.mimeType) {
-      throw new AppError(400, `Upload verification failed: Content-Type mismatch. Expected "${input.mimeType}", got "${head.contentType}".`);
+    if (head.contentType && head.contentType !== pending.mimeType) {
+      throw new AppError(400, `Upload verification failed: Content-Type mismatch. Expected "${pending.mimeType}", got "${head.contentType}".`);
     }
-    if (head.contentLength != null && head.contentLength !== input.fileSizeBytes) {
-      throw new AppError(400, `Upload verification failed: Content-Length mismatch. Expected ${input.fileSizeBytes} bytes, got ${head.contentLength}.`);
+    if (head.contentLength != null && head.contentLength !== pending.fileSizeBytes) {
+      throw new AppError(400, `Upload verification failed: Content-Length mismatch. Expected ${pending.fileSizeBytes} bytes, got ${head.contentLength}.`);
     }
   }
 
-  const ext = input.originalFilename.lastIndexOf(".") >= 0
-    ? input.originalFilename.substring(input.originalFilename.lastIndexOf(".")).toLowerCase()
+  const ext = pending.originalFilename.lastIndexOf(".") >= 0
+    ? pending.originalFilename.substring(pending.originalFilename.lastIndexOf(".")).toLowerCase()
     : "";
 
   const bucketName = process.env.R2_BUCKET_NAME || "trock-crm-files";
@@ -383,23 +453,23 @@ export async function confirmUpload(
   const result = await tenantDb
     .insert(files)
     .values({
-      category: input.category,
-      subcategory: input.subcategory ?? null,
-      folderPath: input.folderPath,
-      tags: input.tags ?? [],
-      displayName: input.displayName,
-      systemFilename: input.systemFilename,
-      originalFilename: input.originalFilename,
-      mimeType: input.mimeType,
-      fileSizeBytes: input.fileSizeBytes,
+      category: pending.category,
+      subcategory: pending.subcategory ?? null,
+      folderPath: pending.folderPath,
+      tags: pending.tags ?? [],
+      displayName: pending.displayName,
+      systemFilename: pending.systemFilename,
+      originalFilename: pending.originalFilename,
+      mimeType: pending.mimeType,
+      fileSizeBytes: pending.fileSizeBytes,
       fileExtension: ext,
-      r2Key: input.r2Key,
+      r2Key: pending.r2Key,
       r2Bucket: bucketName,
-      dealId: input.dealId ?? null,
-      contactId: input.contactId ?? null,
-      procoreProjectId: input.procoreProjectId ?? null,
-      changeOrderId: input.changeOrderId ?? null,
-      description: input.description ?? null,
+      dealId: pending.dealId ?? null,
+      contactId: pending.contactId ?? null,
+      procoreProjectId: pending.procoreProjectId ?? null,
+      changeOrderId: pending.changeOrderId ?? null,
+      description: pending.description ?? null,
       notes: null,
       version: 1,
       parentFileId: null,
@@ -498,6 +568,11 @@ export async function getFiles(tenantDb: TenantDb, filters: FileFilters) {
   const offset = (page - 1) * limit;
 
   const conditions: ReturnType<typeof eq>[] = [eq(files.isActive, true)];
+
+  // Fix 11: Only show latest versions — exclude files that have a newer version
+  conditions.push(
+    sql`NOT EXISTS (SELECT 1 FROM files f2 WHERE f2.parent_file_id = files.id AND f2.is_active = true)` as any
+  );
 
   if (filters.dealId) conditions.push(eq(files.dealId, filters.dealId));
   if (filters.contactId) conditions.push(eq(files.contactId, filters.contactId));
@@ -728,17 +803,42 @@ export async function getDealFolderTree(
     countMap.set(row.folderPath, Number(row.count));
   }
 
-  // Build the tree from the template
+  // Build the tree from the template.
+  // Fix 9: For photo buckets (and similar), aggregate counts by prefix
+  // so date-bucketed paths like "Photos/Site Visits/2026-04" roll up
+  // into the "Photos/Site Visits" subfolder node.
   return Object.entries(DEAL_FOLDER_TEMPLATE).map(([folderName, config]) => {
     const topPath = folderName;
     let topCount = countMap.get(topPath) ?? 0;
 
     const subfolders = config.subfolders.map((subName) => {
       const subPath = `${folderName}/${subName}`;
-      const subCount = countMap.get(subPath) ?? 0;
+      // Exact match count
+      let subCount = countMap.get(subPath) ?? 0;
+      // Also aggregate any nested paths (e.g. "Photos/Site Visits/2026-04")
+      for (const [path, count] of countMap) {
+        if (path != null && path.startsWith(subPath + "/")) {
+          subCount += count;
+        }
+      }
       topCount += subCount;
       return { name: subName, path: subPath, count: subCount };
     });
+
+    // Also aggregate any folder_path entries that are directly under the
+    // top folder but not in a known subfolder (e.g. "Photos/2026-04" with
+    // no subcategory).
+    for (const [path, count] of countMap) {
+      if (path != null && path !== topPath && path.startsWith(topPath + "/")) {
+        // Check it wasn't already counted in a subfolder
+        const isInSubfolder = config.subfolders.some(
+          (sub) => path === `${topPath}/${sub}` || path.startsWith(`${topPath}/${sub}/`)
+        );
+        if (!isInSubfolder) {
+          topCount += count;
+        }
+      }
+    }
 
     return {
       name: folderName,

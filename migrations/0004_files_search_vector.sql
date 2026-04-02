@@ -19,14 +19,17 @@ CREATE INDEX IF NOT EXISTS files_search_vector_idx ON files USING GIN (search_ve
 CREATE INDEX IF NOT EXISTS files_tags_gin_idx ON files USING GIN (tags);
 
 -- 4. Index for version chain queries (parent_file_id + version).
+-- Fix 14: IF NOT EXISTS guard for idempotency (may already exist from tenant DDL in 0001).
 CREATE INDEX IF NOT EXISTS files_version_chain_idx ON files (parent_file_id, version)
   WHERE parent_file_id IS NOT NULL;
 
 -- 5. Index for photo timeline queries (deal_id + category + taken_at).
+-- Fix 14: IF NOT EXISTS guard for idempotency.
 CREATE INDEX IF NOT EXISTS files_photo_timeline_idx
   ON files (deal_id, category, COALESCE(taken_at, created_at) DESC)
   WHERE category = 'photo' AND is_active = TRUE;
 
 -- 6. Index for contact files lookup.
+-- Fix 14: IF NOT EXISTS guard for idempotency.
 CREATE INDEX IF NOT EXISTS files_contact_idx ON files (contact_id, category, created_at DESC)
   WHERE contact_id IS NOT NULL;
