@@ -9,6 +9,7 @@ import { runWeeklyDigest } from "./weekly-digest.js";
 import { runColdLeadWarming } from "./cold-lead-warming.js";
 import { runBidDeadlineCountdown } from "./bid-deadline.js";
 import { addBusinessDays } from "../utils/date-helpers.js";
+import { handleProcoreSyncJob, handleProcoreWebhookJob, runProcoreSync } from "./procore-sync.js";
 
 /**
  * Test handler that logs the payload. Used to validate the queue works end-to-end.
@@ -84,6 +85,21 @@ export function registerAllJobs() {
   // Bid deadline countdown (triggered via job_queue or cron)
   registerJobHandler("bid_deadline_countdown", async () => {
     await runBidDeadlineCountdown();
+  });
+
+  // Procore sync job (dispatched by event handlers in the API server)
+  registerJobHandler("procore_sync", async (payload) => {
+    await handleProcoreSyncJob(payload);
+  });
+
+  // Procore webhook processing (dispatched by webhook receiver)
+  registerJobHandler("procore_webhook", async (payload) => {
+    await handleProcoreWebhookJob(payload);
+  });
+
+  // Procore periodic poll (triggered via cron)
+  registerJobHandler("procore_poll", async () => {
+    await runProcoreSync();
   });
 
   // Domain event handlers for deal lifecycle
@@ -408,7 +424,29 @@ export function registerAllJobs() {
 
   domainEventHandlers.set("deal.stage.changed", async (payload, officeId) => {
     console.log(`[Worker] Stage changed: ${payload.dealNumber} from ${payload.fromStageName} to ${payload.toStageName}`);
-    // Future: Procore status sync, stage change email notifications
+
+    // Procore stage sync: queue a job to update the Procore project status
+    if (payload.dealId && officeId && payload.toStageId) {
+      try {
+        const { pool: workerPool } = await import("../db.js");
+        await workerPool.query(
+          `INSERT INTO public.job_queue (job_type, payload, office_id, status, run_after)
+           VALUES ('procore_sync', $1::jsonb, $2, 'pending', NOW())`,
+          [
+            JSON.stringify({
+              action: "sync_stage",
+              dealId: payload.dealId,
+              crmStageId: payload.toStageId,
+              officeId,
+            }),
+            officeId,
+          ]
+        );
+        console.log(`[Worker] deal.stage.changed: queued procore_sync for deal ${payload.dealId}`);
+      } catch (err) {
+        console.error("[Worker:procore-stage-sync] Error queuing job:", err);
+      }
+    }
   });
 
   domainEventHandlers.set("contact.created", async (payload, officeId) => {
@@ -860,7 +898,7 @@ export function registerAllJobs() {
     }
   });
 
-  console.log("[Worker] Job handlers registered:", ["test_echo", "domain_event", "stale_deal_scan", "dedup_scan", "email_sync", "daily_task_generation", "activity_drop_detection", "weekly_digest", "cold_lead_warming", "bid_deadline_countdown"].join(", "));
+  console.log("[Worker] Job handlers registered:", ["test_echo", "domain_event", "stale_deal_scan", "dedup_scan", "email_sync", "daily_task_generation", "activity_drop_detection", "weekly_digest", "cold_lead_warming", "bid_deadline_countdown", "procore_sync", "procore_webhook", "procore_poll"].join(", "));
 }
 
 export { domainEventHandlers };

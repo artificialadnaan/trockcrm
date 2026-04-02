@@ -13,6 +13,7 @@ import { runActivityDropDetection } from "./jobs/activity-alerts.js";
 import { runWeeklyDigest } from "./jobs/weekly-digest.js";
 import { runColdLeadWarming } from "./jobs/cold-lead-warming.js";
 import { runBidDeadlineCountdown } from "./jobs/bid-deadline.js";
+import { runProcoreSync } from "./jobs/procore-sync.js";
 
 const POLL_INTERVAL_MS = 2000; // Poll job queue every 2 seconds
 
@@ -125,6 +126,17 @@ async function main() {
     }
   }, { timezone: "America/Chicago" });
   console.log("[Worker] Cron scheduled: bid deadline countdown at 6:30 AM CT daily");
+
+  // Procore sync poll: every 15 minutes
+  cron.schedule("*/15 * * * *", async () => {
+    console.log("[Worker:cron] Running Procore sync poll...");
+    try {
+      await runProcoreSync();
+    } catch (err) {
+      console.error("[Worker:cron] Procore sync poll failed:", err);
+    }
+  });
+  console.log("[Worker] Cron scheduled: Procore sync poll every 15 minutes");
 
   console.log("[Worker] Ready.");
 }

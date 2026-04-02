@@ -19,6 +19,10 @@ import { notificationCrudRoutes } from "./modules/notifications/crud-routes.js";
 import { reportRoutes } from "./modules/reports/routes.js";
 import { dashboardRoutes } from "./modules/dashboard/routes.js";
 import { initSsePush } from "./modules/notifications/sse-manager.js";
+import { procoreRoutes } from "./modules/procore/routes.js";
+import { procoreWebhookRoutes } from "./modules/procore/webhook-routes.js";
+import { syncHubRoutes } from "./modules/procore/synchub-routes.js";
+import { registerProcoreEventHandlers } from "./modules/procore/event-handlers.js";
 
 export function createApp() {
   const app = express();
@@ -36,6 +40,13 @@ export function createApp() {
   app.get("/api/health", (_req, res) => {
     res.json({ status: "ok", timestamp: new Date().toISOString() });
   });
+
+  // Procore webhook route — public (signature-verified, no JWT)
+  // Must be mounted BEFORE express.json() parses the body for this path
+  app.use("/api/webhooks/procore", procoreWebhookRoutes);
+
+  // SyncHub integration — authenticated by shared secret, no tenant scope
+  app.use("/api/integrations/synchub", syncHubRoutes);
 
   // Public routes (no auth required for login endpoints)
   app.use("/api/auth", authRoutes);
@@ -61,6 +72,7 @@ export function createApp() {
   tenantRouter.use("/notifications", notificationCrudRoutes);
   tenantRouter.use("/reports", reportRoutes);
   tenantRouter.use("/dashboard", dashboardRoutes);
+  tenantRouter.use("/procore", procoreRoutes);
 
   // Foundation test route — proves tenant middleware works end-to-end
   tenantRouter.get("/tenant-check", async (req, res) => {
@@ -74,6 +86,9 @@ export function createApp() {
   });
 
   app.use("/api", authMiddleware, tenantMiddleware, tenantRouter);
+
+  // Register Procore event handlers on the in-process event bus
+  registerProcoreEventHandlers();
 
   // Initialize SSE push listeners for real-time notifications
   initSsePush();
