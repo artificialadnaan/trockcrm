@@ -13,6 +13,7 @@ import {
   Settings,
   Shield,
   LogOut,
+  GitMerge,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
@@ -31,6 +32,7 @@ const navItems = [
 
 const directorItems = [
   { to: "/director", icon: Shield, label: "Director", roles: ["admin", "director"] },
+  { to: "/admin/merge-queue", icon: GitMerge, label: "Merge Queue", roles: ["admin", "director"] },
 ];
 
 const adminItems = [
