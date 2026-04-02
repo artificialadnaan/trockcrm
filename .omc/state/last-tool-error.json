@@ -1,7 +1,7 @@
 {
-  "tool_name": "Read",
-  "tool_input_preview": "{\"file_path\":\"/Users/adnaaniqbal/Developer/trock-crm/docs/superpowers/specs/2026-04-01-trock-crm-design.md\"}",
-  "error": "File content (18839 tokens) exceeds maximum allowed tokens (10000). Use offset and limit parameters to read specific portions of the file, or search for specific content instead of reading the whole file.",
-  "timestamp": "2026-04-01T19:16:54.028Z",
-  "retry_count": 2
+  "tool_name": "Bash",
+  "tool_input_preview": "{\"command\":\"cd /Users/adnaaniqbal/Developer/trock-crm/server && npx tsc --noEmit 2>&1\",\"timeout\":120000,\"description\":\"Type check server package\"}",
+  "error": "Exit code 2\nsrc/modules/email/graph-token-service.ts(33,9): error TS2353: Object literal may only specify known properties, and 'homeAccountId' does not exist in type '{ userId?: string | SQL<unknown> | PgColumn<ColumnBaseConfig<ColumnDataType, string>, {}, {}> | undefined; accessToken?: string | SQL<...> | PgColumn<...> | undefined; ... 11 more ...; lastSyncAt?: SQL<...> | ... 3 more ... | undefined; }'.\nsrc/modules/email/graph-token-service.ts(42,38): error TS2769: No overload matches this cal...",
+  "timestamp": "2026-04-02T04:49:42.254Z",
+  "retry_count": 1
 }

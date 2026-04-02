@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@azure/msal-node": "^3.3.0",
     "@trock-crm/shared": "*",
     "drizzle-orm": "^0.39.3",
     "pg": "^8.13.1",

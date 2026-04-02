@@ -101,8 +101,18 @@ router.get("/graph/consent", authMiddleware, (req, res, next) => {
     // Sign the state parameter to prevent tampering (binds callback to this user, expires in 10 min)
     const jwt = require("jsonwebtoken");
     const crypto = require("crypto");
+    const nonce = crypto.randomUUID();
+
+    // Store nonce in HttpOnly cookie so it can be verified on callback (prevents replay)
+    res.cookie("graph_auth_nonce", nonce, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "lax",
+      maxAge: 600_000, // 10 minutes
+    });
+
     const state = jwt.sign(
-      { userId: req.user!.id, nonce: crypto.randomUUID() },
+      { userId: req.user!.id, nonce },
       process.env.JWT_SECRET!,
       { expiresIn: "10m" }
     );
@@ -138,11 +148,19 @@ router.get("/graph/callback", async (req, res, next) => {
       return;
     }
 
-    // Verify the signed state token to extract userId (prevents callback tampering)
+    // Verify the signed state token and nonce cookie to prevent callback tampering + replay
     const jwt = require("jsonwebtoken");
     let userId: string;
     try {
       const payload = jwt.verify(stateToken, process.env.JWT_SECRET!);
+      const cookieNonce = req.cookies?.graph_auth_nonce;
+      if (!cookieNonce || payload.nonce !== cookieNonce) {
+        console.error("[GraphAuth] Nonce mismatch — possible OAuth state replay");
+        res.redirect(`${process.env.FRONTEND_URL || "http://localhost:5173"}/email?error=invalid_state`);
+        return;
+      }
+      // Clear the nonce cookie after successful verification (single use)
+      res.clearCookie("graph_auth_nonce");
       userId = payload.userId;
     } catch (stateErr: any) {
       console.error("[GraphAuth] Invalid or expired state token:", stateErr.message);

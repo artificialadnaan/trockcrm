@@ -27,13 +27,16 @@ function getMsalConfig(): Configuration {
   };
 }
 
-let msalInstance: ConfidentialClientApplication | null = null;
-
-function getMsalClient(): ConfidentialClientApplication {
-  if (!msalInstance) {
-    msalInstance = new ConfidentialClientApplication(getMsalConfig());
+/**
+ * Create a fresh MSAL instance per operation with an optional per-user serialized cache.
+ * This prevents token cache cross-contamination between users.
+ */
+function createMsalClient(serializedCache?: string): ConfidentialClientApplication {
+  const cca = new ConfidentialClientApplication(getMsalConfig());
+  if (serializedCache) {
+    cca.getTokenCache().deserialize(serializedCache);
   }
-  return msalInstance;
+  return cca;
 }
 
 /**
@@ -68,7 +71,8 @@ export async function exchangeCodeForTokens(
   code: string,
   redirectUri: string
 ): Promise<void> {
-  const client = getMsalClient();
+  // Create a fresh MSAL instance for this code exchange (no shared cache)
+  const client = createMsalClient();
 
   const result = await client.acquireTokenByCode({
     code,
@@ -87,9 +91,14 @@ export async function exchangeCodeForTokens(
   // the intended pattern is to serialize the cache and use acquireTokenSilent for refresh.
   const serializedCache = client.getTokenCache().serialize();
 
+  // Store the homeAccountId so we can look up the correct account on refresh,
+  // even if multiple users' caches were ever deserialized into the same instance.
+  const homeAccountId = result.account?.homeAccountId ?? null;
+
   await upsertGraphTokens(userId, {
     accessToken: result.accessToken,
     refreshToken: serializedCache, // Store the full serialized MSAL cache (encrypted at rest)
+    homeAccountId,
     expiresAt,
     scopes: GRAPH_SCOPES,
   });
@@ -109,21 +118,23 @@ export async function refreshAccessToken(userId: string): Promise<string | null>
   }
 
   try {
-    const client = getMsalClient();
+    // Create a fresh MSAL instance with only this user's serialized cache
+    const client = createMsalClient(stored.refreshToken);
 
-    // Deserialize the stored MSAL cache (stored.refreshToken holds the serialized cache)
-    client.getTokenCache().deserialize(stored.refreshToken);
-
-    // Get the cached account to use with acquireTokenSilent
+    // Look up the correct account by homeAccountId (safe for multi-user environments)
     const accounts = await client.getTokenCache().getAllAccounts();
     if (accounts.length === 0) {
       await markReauthNeeded(userId, "No cached MSAL account found — reauth required");
       return null;
     }
 
+    const account = stored.homeAccountId
+      ? accounts.find((a) => a.homeAccountId === stored.homeAccountId) ?? accounts[0]
+      : accounts[0];
+
     // acquireTokenSilent handles refresh token exchange internally via MSAL's cache
     const result = await client.acquireTokenSilent({
-      account: accounts[0],
+      account,
       scopes: GRAPH_SCOPES,
     });
 
@@ -136,10 +147,12 @@ export async function refreshAccessToken(userId: string): Promise<string | null>
 
     // Re-serialize the updated cache (may contain a new refresh token)
     const serializedCache = client.getTokenCache().serialize();
+    const homeAccountId = result.account?.homeAccountId ?? stored.homeAccountId;
 
     await upsertGraphTokens(userId, {
       accessToken: result.accessToken,
       refreshToken: serializedCache,
+      homeAccountId,
       expiresAt,
       scopes: GRAPH_SCOPES,
     });

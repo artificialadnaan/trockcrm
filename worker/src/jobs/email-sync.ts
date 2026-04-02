@@ -10,8 +10,8 @@ const TAG_LENGTH = 16;
 
 function getEncryptionKey(): Buffer {
   const hex = process.env.ENCRYPTION_KEY;
-  if (process.env.NODE_ENV === "production" && !hex) {
-    throw new Error("ENCRYPTION_KEY must be set in production");
+  if (!hex && process.env.NODE_ENV !== "test") {
+    throw new Error("ENCRYPTION_KEY must be set (64-character hex string)");
   }
   const keyHex = hex || "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
   const buf = Buffer.from(keyHex, "hex");
@@ -43,27 +43,138 @@ interface GraphFetchResult<T> {
   data: T;
 }
 
+const MAX_429_RETRIES = 3;
+
 async function graphFetch<T = any>(
   accessToken: string,
   path: string
 ): Promise<GraphFetchResult<T>> {
   const url = path.startsWith("http") ? path : `${GRAPH_BASE_URL}${path}`;
-  const res = await fetch(url, {
-    method: "GET",
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      "Content-Type": "application/json",
-    },
-  });
 
-  if (res.status === 429) {
-    const retryAfter = parseInt(res.headers.get("Retry-After") || "10", 10);
-    await new Promise((r) => setTimeout(r, retryAfter * 1000));
-    return graphFetch<T>(accessToken, path);
+  for (let retryCount = 0; retryCount <= MAX_429_RETRIES; retryCount++) {
+    const res = await fetch(url, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+    });
+
+    if (res.status === 429) {
+      if (retryCount >= MAX_429_RETRIES) {
+        throw new Error(`Rate limited (429) after ${MAX_429_RETRIES} retries for ${path}`);
+      }
+      const retryAfter = parseInt(res.headers.get("Retry-After") || "10", 10);
+      console.warn(`[Worker:email-sync] 429 rate limited, waiting ${retryAfter}s (attempt ${retryCount + 1}/${MAX_429_RETRIES})`);
+      await new Promise((r) => setTimeout(r, retryAfter * 1000));
+      continue;
+    }
+
+    const data: T = res.status === 204 ? ({} as T) : await res.json().catch(() => ({} as T));
+    return { ok: res.ok, status: res.status, data };
   }
 
-  const data: T = res.status === 204 ? ({} as T) : await res.json().catch(() => ({} as T));
-  return { ok: res.ok, status: res.status, data };
+  // Should not reach here, but TypeScript needs a return
+  throw new Error(`Unexpected exit from graphFetch retry loop for ${path}`);
+}
+
+// ---------- Inline encrypt (needed for storing refreshed tokens) ----------
+function encrypt(plaintext: string): string {
+  const key = getEncryptionKey();
+  const iv = crypto.randomBytes(IV_LENGTH);
+  const cipher = crypto.createCipheriv(ALGORITHM, key, iv);
+  const encrypted = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  const packed = Buffer.concat([iv, tag, encrypted]);
+  return packed.toString("base64");
+}
+
+/**
+ * Refresh an expired access token using MSAL cache stored in the DB (worker context).
+ * Returns the NEW encrypted access token string (for use in tokenRow.access_token),
+ * or null if refresh fails (marks reauth_needed).
+ */
+async function refreshTokenForWorker(client: any, tokenRow: any): Promise<string | null> {
+  try {
+    // Dynamically import MSAL (available in worker's node_modules)
+    const { ConfidentialClientApplication } = await import("@azure/msal-node");
+
+    const clientId = process.env.AZURE_CLIENT_ID;
+    const clientSecret = process.env.AZURE_CLIENT_SECRET;
+    const tenantId = process.env.AZURE_TENANT_ID || "common";
+    if (!clientId || !clientSecret) {
+      console.error("[Worker:email-sync] AZURE_CLIENT_ID/SECRET not set — cannot refresh token");
+      return null;
+    }
+
+    // Decrypt the stored MSAL serialized cache
+    const serializedCache = decrypt(tokenRow.refresh_token);
+
+    // Create a fresh per-user MSAL instance with only this user's cache
+    const cca = new ConfidentialClientApplication({
+      auth: { clientId, clientSecret, authority: `https://login.microsoftonline.com/${tenantId}` },
+    });
+    cca.getTokenCache().deserialize(serializedCache);
+
+    const accounts = await cca.getTokenCache().getAllAccounts();
+    if (accounts.length === 0) {
+      await client.query(
+        `UPDATE public.user_graph_tokens
+         SET status = 'reauth_needed', error_message = $1, updated_at = NOW()
+         WHERE user_id = $2`,
+        ["No cached MSAL account found during worker refresh", tokenRow.user_id]
+      );
+      return null;
+    }
+
+    // Look up by homeAccountId if stored
+    const homeAccountId = tokenRow.home_account_id;
+    const account = homeAccountId
+      ? accounts.find((a: any) => a.homeAccountId === homeAccountId) ?? accounts[0]
+      : accounts[0];
+
+    const scopes = ["Mail.Read", "Mail.Send", "Mail.ReadWrite", "User.Read", "offline_access"];
+    const result = await cca.acquireTokenSilent({ account, scopes });
+
+    if (!result?.accessToken) {
+      await client.query(
+        `UPDATE public.user_graph_tokens
+         SET status = 'reauth_needed', error_message = $1, updated_at = NOW()
+         WHERE user_id = $2`,
+        ["Token refresh returned empty response in worker", tokenRow.user_id]
+      );
+      return null;
+    }
+
+    const newExpiresAt = result.expiresOn ?? new Date(Date.now() + 3600 * 1000);
+    const newSerializedCache = cca.getTokenCache().serialize();
+    const newHomeAccountId = result.account?.homeAccountId ?? homeAccountId;
+
+    // Encrypt and store the refreshed tokens
+    const encryptedAccess = encrypt(result.accessToken);
+    const encryptedCache = encrypt(newSerializedCache);
+
+    await client.query(
+      `UPDATE public.user_graph_tokens
+       SET access_token = $1, refresh_token = $2, home_account_id = $3,
+           token_expires_at = $4, updated_at = NOW()
+       WHERE user_id = $5`,
+      [encryptedAccess, encryptedCache, newHomeAccountId, newExpiresAt, tokenRow.user_id]
+    );
+
+    console.log(`[Worker:email-sync] Refreshed token for user ${tokenRow.user_id}`);
+    // Return the NEW encrypted access token so the caller can update tokenRow
+    return encryptedAccess;
+  } catch (err: any) {
+    console.error(`[Worker:email-sync] Token refresh failed for user ${tokenRow.user_id}:`, err.message);
+    await client.query(
+      `UPDATE public.user_graph_tokens
+       SET status = 'reauth_needed', error_message = $1, updated_at = NOW()
+       WHERE user_id = $2`,
+      [`Worker refresh failed: ${err.message}`, tokenRow.user_id]
+    );
+    return null;
+  }
 }
 
 /**
@@ -85,8 +196,8 @@ export async function runEmailSync(): Promise<void> {
     // Get all users with active Graph tokens
     const tokenRows = await client.query(
       `SELECT ugt.user_id, ugt.access_token, ugt.refresh_token,
-              ugt.token_expires_at, ugt.last_delta_link, ugt.last_sync_at,
-              u.office_id, u.email AS user_email
+              ugt.home_account_id, ugt.token_expires_at, ugt.last_delta_link,
+              ugt.last_sync_at, u.office_id, u.email AS user_email
        FROM public.user_graph_tokens ugt
        JOIN public.users u ON u.id = ugt.user_id
        WHERE ugt.status = 'active' AND u.is_active = true`
@@ -109,20 +220,38 @@ export async function runEmailSync(): Promise<void> {
           continue;
         }
 
+        // Fix 4: Wrap in BEGIN/COMMIT so the advisory xact lock persists for the full sync
+        await client.query("BEGIN");
+
         // Acquire per-user advisory lock to prevent concurrent syncs for the same user
         const lockResult = await client.query(
           "SELECT pg_try_advisory_xact_lock(hashtext($1)) AS acquired",
           [tokenRow.user_id]
         );
         if (!lockResult.rows[0]?.acquired) {
+          await client.query("COMMIT");
           console.log(
             `[Worker:email-sync] Skipping user ${tokenRow.user_id} — sync already in progress`
           );
           continue;
         }
 
+        // Fix 5: Refresh token if expired before attempting sync
+        const expiresAt = new Date(tokenRow.token_expires_at);
+        const bufferMs = 5 * 60 * 1000; // refresh if within 5 minutes of expiry
+        if (expiresAt.getTime() - Date.now() < bufferMs) {
+          const refreshedToken = await refreshTokenForWorker(client, tokenRow);
+          if (!refreshedToken) {
+            await client.query("COMMIT");
+            continue; // reauth marked inside refreshTokenForWorker
+          }
+          tokenRow.access_token = refreshedToken;
+        }
+
         await syncUserEmails(client, tokenRow);
+        await client.query("COMMIT");
       } catch (err: any) {
+        await client.query("ROLLBACK").catch(() => {});
         console.error(
           `[Worker:email-sync] Failed for user ${tokenRow.user_id}:`,
           err.message
@@ -273,15 +402,13 @@ async function processInboundMessage(
     .map((r: any) => r.emailAddress?.address?.toLowerCase())
     .filter(Boolean);
 
-  // Selective sync: match addresses against contacts.email
-  // Only store emails from/to known CRM contacts
-  const allAddresses = [fromAddress, ...toAddresses, ...ccAddresses].filter(
-    Boolean
-  );
+  // Selective sync: for inbound emails, match ONLY the sender (from_address)
+  // against CRM contacts — not to/cc which are internal mailbox addresses.
+  const matchAddresses = fromAddress ? [fromAddress] : [];
   const contactMatch = await findContactByEmailRaw(
     client,
     schemaName,
-    allAddresses
+    matchAddresses
   );
 
   if (!contactMatch) {
@@ -326,13 +453,30 @@ async function processInboundMessage(
 
   const emailId = insertResult.rows[0].id;
 
-  // Auto-associate to deal
+  // Auto-associate to deal (determine dealId BEFORE creating activity/task)
   const associatedDealId = await autoAssociateRaw(
     client,
     schemaName,
     emailId,
     contactMatch.id,
     userId
+  );
+
+  // Create activity record AFTER deal association so deal_id is included in the INSERT
+  // (no separate UPDATE needed)
+  await client.query(
+    `INSERT INTO ${schemaName}.activities
+     (type, user_id, deal_id, contact_id, email_id, subject, body, occurred_at)
+     VALUES ('email', $1, $2, $3, $4, $5, $6, $7)`,
+    [
+      userId,
+      associatedDealId, // may be null if 0 or multiple deals
+      contactMatch.id,
+      emailId,
+      subject,
+      bodyPreview.substring(0, 1000),
+      sentAt,
+    ]
   );
 
   // Create follow-up task for EVERY inbound email from a CRM contact (per spec)
@@ -348,21 +492,6 @@ async function processInboundMessage(
       associatedDealId, // may be null if 0 or multiple deals
       contactMatch.id,
       emailId,
-    ]
-  );
-
-  // Create activity record
-  await client.query(
-    `INSERT INTO ${schemaName}.activities
-     (type, user_id, contact_id, email_id, subject, body, occurred_at)
-     VALUES ('email', $1, $2, $3, $4, $5, $6)`,
-    [
-      userId,
-      contactMatch.id,
-      emailId,
-      subject,
-      bodyPreview.substring(0, 1000),
-      sentAt,
     ]
   );
 
@@ -439,11 +568,8 @@ async function autoAssociateRaw(
       `UPDATE ${schemaName}.emails SET deal_id = $1 WHERE id = $2`,
       [dealId, emailId]
     );
-    // Also update the activity record
-    await client.query(
-      `UPDATE ${schemaName}.activities SET deal_id = $1 WHERE email_id = $2`,
-      [dealId, emailId]
-    );
+    // Activity record is now created AFTER auto-association with deal_id included,
+    // so no separate UPDATE is needed here.
     return dealId;
   } else if (activeDeals.rows.length > 1) {
     // Multiple active deals — create disambiguation task for rep

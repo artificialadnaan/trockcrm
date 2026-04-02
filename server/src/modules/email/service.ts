@@ -45,7 +45,8 @@ export async function sendEmail(
     throw new AppError(401, "Email not connected. Please connect your Microsoft account.", "GRAPH_AUTH_REQUIRED");
   }
 
-  // Build MS Graph sendMail payload
+  // Draft-first flow: create draft -> get real IDs -> send draft
+  // This avoids the race condition with sendMail where we have to poll Sent Items.
   const message = {
     subject: input.subject,
     body: {
@@ -60,48 +61,40 @@ export async function sendEmail(
     })),
   };
 
-  // Send via Graph API — saveToSentItems: true ensures it appears in Outlook
-  const result = await graphRequest({
+  // Step 1: Create draft — returns the message with real id + conversationId
+  const draftResult = await graphRequest<any>({
     accessToken,
     method: "POST",
-    path: "/me/sendMail",
-    body: { message, saveToSentItems: true },
+    path: "/me/messages",
+    body: message,
     userId,
   });
 
-  if (!result.ok) {
-    if (result.status === 401) {
+  if (!draftResult.ok) {
+    if (draftResult.status === 401) {
       throw new AppError(401, "Email session expired. Please reconnect your Microsoft account.", "GRAPH_AUTH_EXPIRED");
     }
-    throw new AppError(502, `Failed to send email via Microsoft: ${JSON.stringify(result.data)}`);
+    throw new AppError(502, `Failed to create email draft via Microsoft: ${JSON.stringify(draftResult.data)}`);
   }
 
-  // Graph sendMail returns 202 with no body.
-  // Fetch the sent message from Sent Items to get the real graph_message_id,
-  // graph_conversation_id, and from_address.
-  let graphMessageId = `sent-${crypto.randomUUID()}`; // Fallback if fetch fails
-  let graphConversationId: string | null = null;
-  let fromAddress = "";
+  const draft = draftResult.data;
+  const graphMessageId = draft.id ?? `sent-${crypto.randomUUID()}`;
+  const graphConversationId: string | null = draft.conversationId ?? null;
+  const fromAddress: string = draft.from?.emailAddress?.address ?? "";
 
-  try {
-    // Brief delay to allow the message to appear in Sent Items
-    await new Promise((r) => setTimeout(r, 1500));
+  // Step 2: Send the draft
+  const sendResult = await graphRequest({
+    accessToken,
+    method: "POST",
+    path: `/me/messages/${graphMessageId}/send`,
+    userId,
+  });
 
-    const sentResult = await graphRequest<any>({
-      accessToken,
-      path: `/me/mailFolders/sentItems/messages?$filter=subject eq '${input.subject.replace(/'/g, "''")}'&$top=1&$orderby=sentDateTime desc&$select=id,conversationId,from`,
-      userId,
-    });
-
-    if (sentResult.ok && sentResult.data.value?.length > 0) {
-      const sentMsg = sentResult.data.value[0];
-      graphMessageId = sentMsg.id ?? graphMessageId;
-      graphConversationId = sentMsg.conversationId ?? null;
-      fromAddress = sentMsg.from?.emailAddress?.address ?? "";
+  if (!sendResult.ok) {
+    if (sendResult.status === 401) {
+      throw new AppError(401, "Email session expired. Please reconnect your Microsoft account.", "GRAPH_AUTH_EXPIRED");
     }
-  } catch (fetchErr: any) {
-    console.warn("[Email] Failed to fetch sent message from Sent Items:", fetchErr.message);
-    // Non-fatal: we still store the email with the fallback ID
+    throw new AppError(502, `Failed to send email draft via Microsoft: ${JSON.stringify(sendResult.data)}`);
   }
 
   // Store the email record
@@ -186,12 +179,22 @@ async function createMockSentEmail(
 /**
  * Get emails with filtering, pagination, and optional deal/contact scoping.
  */
-export async function getEmails(tenantDb: TenantDb, filters: EmailFilters) {
+export async function getEmails(
+  tenantDb: TenantDb,
+  filters: EmailFilters,
+  userId?: string,
+  userRole?: string
+) {
   const page = filters.page ?? 1;
   const limit = filters.limit ?? 25;
   const offset = (page - 1) * limit;
 
   const conditions: any[] = [];
+
+  // RBAC: reps can only see their own emails; directors/admins see all
+  if (userId && userRole === "rep") {
+    conditions.push(eq(emails.userId, userId));
+  }
 
   if (filters.dealId) {
     conditions.push(eq(emails.dealId, filters.dealId));
@@ -255,14 +258,26 @@ export async function getEmailById(tenantDb: TenantDb, emailId: string) {
 /**
  * Get all emails in a thread (grouped by graph_conversation_id).
  */
-export async function getEmailThread(tenantDb: TenantDb, conversationId: string) {
+export async function getEmailThread(
+  tenantDb: TenantDb,
+  conversationId: string,
+  userId?: string,
+  userRole?: string
+) {
   if (!conversationId) return [];
+
+  const conditions: any[] = [eq(emails.graphConversationId, conversationId)];
+
+  // RBAC: reps can only see their own emails in the thread
+  if (userId && userRole === "rep") {
+    conditions.push(eq(emails.userId, userId));
+  }
 
   // Thread view: chronological order (oldest first) for natural reading context
   return tenantDb
     .select()
     .from(emails)
-    .where(eq(emails.graphConversationId, conversationId))
+    .where(and(...conditions))
     .orderBy(sql`${emails.sentAt} ASC`);
 }
 
@@ -422,6 +437,17 @@ export async function associateEmailToDeal(
     .update(emails)
     .set({ dealId })
     .where(eq(emails.id, emailId));
+
+  // Cascade: update the associated activity and task records to keep deal_id consistent
+  await tenantDb
+    .update(activities)
+    .set({ dealId })
+    .where(eq(activities.emailId, emailId));
+
+  await tenantDb
+    .update(tasks)
+    .set({ dealId })
+    .where(and(eq(tasks.emailId, emailId), eq(tasks.type, "inbound_email")));
 }
 
 /**

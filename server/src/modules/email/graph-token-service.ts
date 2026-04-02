@@ -6,6 +6,7 @@ import { encrypt, decrypt } from "../../lib/encryption.js";
 export interface TokenData {
   accessToken: string;
   refreshToken: string;
+  homeAccountId?: string | null;
   expiresAt: Date;
   scopes: string[];
 }
@@ -29,6 +30,7 @@ export async function upsertGraphTokens(userId: string, tokens: TokenData): Prom
       .set({
         accessToken: encryptedAccess,
         refreshToken: encryptedRefresh,
+        homeAccountId: tokens.homeAccountId ?? null,
         tokenExpiresAt: tokens.expiresAt,
         scopes: tokens.scopes,
         status: "active",
@@ -41,6 +43,7 @@ export async function upsertGraphTokens(userId: string, tokens: TokenData): Prom
       userId,
       accessToken: encryptedAccess,
       refreshToken: encryptedRefresh,
+      homeAccountId: tokens.homeAccountId ?? null,
       tokenExpiresAt: tokens.expiresAt,
       scopes: tokens.scopes,
       status: "active",
@@ -54,6 +57,7 @@ export async function upsertGraphTokens(userId: string, tokens: TokenData): Prom
 export async function getGraphTokens(userId: string): Promise<{
   accessToken: string;
   refreshToken: string;
+  homeAccountId: string | null;
   expiresAt: Date;
   scopes: string[];
   status: string;
@@ -71,6 +75,7 @@ export async function getGraphTokens(userId: string): Promise<{
   return {
     accessToken: decrypt(row.accessToken),
     refreshToken: decrypt(row.refreshToken),
+    homeAccountId: row.homeAccountId ?? null,
     expiresAt: row.tokenExpiresAt,
     scopes: row.scopes,
     status: row.status,
@@ -134,13 +139,8 @@ export async function getAllActiveTokenUsers(): Promise<Array<{
  * Revoke a user's Graph tokens (user-initiated disconnect).
  */
 export async function revokeGraphTokens(userId: string): Promise<void> {
-  await db
-    .update(userGraphTokens)
-    .set({
-      status: "revoked",
-      updatedAt: new Date(),
-    })
-    .where(eq(userGraphTokens.userId, userId));
+  // DELETE the token row entirely so no encrypted tokens remain on disk after disconnect
+  await db.delete(userGraphTokens).where(eq(userGraphTokens.userId, userId));
 }
 
 /**

@@ -19,6 +19,7 @@ export const userGraphTokens = pgTable("user_graph_tokens", {
     .notNull(),
   accessToken: text("access_token").notNull(),
   refreshToken: text("refresh_token").notNull(),
+  homeAccountId: text("home_account_id"),
   tokenExpiresAt: timestamp("token_expires_at", { withTimezone: true }).notNull(),
   scopes: text("scopes").array().notNull(),
   subscriptionId: varchar("subscription_id", { length: 255 }),

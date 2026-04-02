@@ -29,6 +29,12 @@ router.post("/send", async (req, res, next) => {
       throw new AppError(400, "Email body is required");
     }
 
+    // Validate dealId access if provided
+    if (dealId) {
+      const deal = await getDealById(req.tenantDb!, dealId, req.user!.role, req.user!.id);
+      if (!deal) throw new AppError(404, "Deal not found or access denied");
+    }
+
     const email = await sendEmail(req.tenantDb!, req.user!.id, {
       to,
       cc,
@@ -99,7 +105,7 @@ router.get("/deal/:dealId", async (req, res, next) => {
       limit: req.query.limit ? parseInt(req.query.limit as string, 10) : undefined,
     };
 
-    const result = await getEmails(req.tenantDb!, filters);
+    const result = await getEmails(req.tenantDb!, filters, req.user!.id, req.user!.role);
     await req.commitTransaction!();
     res.json(result);
   } catch (err) {
@@ -118,7 +124,7 @@ router.get("/contact/:contactId", async (req, res, next) => {
       limit: req.query.limit ? parseInt(req.query.limit as string, 10) : undefined,
     };
 
-    const result = await getEmails(req.tenantDb!, filters);
+    const result = await getEmails(req.tenantDb!, filters, req.user!.id, req.user!.role);
     await req.commitTransaction!();
     res.json(result);
   } catch (err) {
@@ -129,7 +135,7 @@ router.get("/contact/:contactId", async (req, res, next) => {
 // GET /api/email/thread/:conversationId — all emails in a thread
 router.get("/thread/:conversationId", async (req, res, next) => {
   try {
-    const thread = await getEmailThread(req.tenantDb!, req.params.conversationId);
+    const thread = await getEmailThread(req.tenantDb!, req.params.conversationId, req.user!.id, req.user!.role);
     await req.commitTransaction!();
     res.json({ emails: thread });
   } catch (err) {
@@ -158,11 +164,19 @@ router.get("/:id", async (req, res, next) => {
 });
 
 // POST /api/email/:id/associate — manually associate email to a deal
-// RBAC: verify user has access to the target deal before associating
+// RBAC: verify user owns the email (if rep) and has access to the target deal
 router.post("/:id/associate", async (req, res, next) => {
   try {
     const { dealId } = req.body;
     if (!dealId) throw new AppError(400, "dealId is required");
+
+    // Verify the email exists and the user has permission to modify it
+    const email = await getEmailById(req.tenantDb!, req.params.id);
+    if (!email) throw new AppError(404, "Email not found");
+
+    if (req.user!.role === "rep" && email.userId !== req.user!.id) {
+      throw new AppError(403, "You can only modify your own emails");
+    }
 
     // Verify the user has access to the target deal (existing RBAC)
     const deal = await getDealById(req.tenantDb!, dealId, req.user!.role, req.user!.id);

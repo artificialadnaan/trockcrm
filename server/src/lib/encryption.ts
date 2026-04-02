@@ -6,10 +6,10 @@ const TAG_LENGTH = 16; // 128-bit auth tag
 
 function getEncryptionKey(): Buffer {
   const hex = process.env.ENCRYPTION_KEY;
-  if (process.env.NODE_ENV === "production" && !hex) {
-    throw new Error("ENCRYPTION_KEY must be set in production");
+  if (!hex && process.env.NODE_ENV !== "test") {
+    throw new Error("ENCRYPTION_KEY must be set (64-character hex string)");
   }
-  // Dev fallback: deterministic key for local development only
+  // Test-only fallback: deterministic key for test suites
   const keyHex = hex || "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
   const buf = Buffer.from(keyHex, "hex");
   if (buf.length !== 32) {
