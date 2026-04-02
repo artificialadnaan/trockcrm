@@ -631,7 +631,12 @@ CREATE TABLE IF NOT EXISTS files (
   uploaded_by       UUID NOT NULL REFERENCES public.users(id),
   is_active         BOOLEAN NOT NULL DEFAULT TRUE,
   created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  search_vector     TSVECTOR GENERATED ALWAYS AS (
+    setweight(to_tsvector('english', COALESCE(display_name, '')), 'A') ||
+    setweight(to_tsvector('english', COALESCE(description, '') || ' ' || array_to_string(tags, ' ')), 'B') ||
+    setweight(to_tsvector('english', COALESCE(notes, '')), 'C')
+  ) STORED
 );
 
 -- CHECK: file must be associated with at least one entity
@@ -640,9 +645,20 @@ ALTER TABLE files ADD CONSTRAINT files_association_check
   CHECK (deal_id IS NOT NULL OR contact_id IS NOT NULL OR procore_project_id IS NOT NULL OR change_order_id IS NOT NULL);
 
 CREATE INDEX IF NOT EXISTS files_deal_idx
-  ON files (deal_id, category, created_at);
+  ON files (deal_id, category, created_at DESC);
 CREATE INDEX IF NOT EXISTS files_folder_idx
   ON files (folder_path, display_name);
+CREATE INDEX IF NOT EXISTS files_search_vector_idx
+  ON files USING GIN (search_vector);
+CREATE INDEX IF NOT EXISTS files_tags_gin_idx
+  ON files USING GIN (tags);
+CREATE INDEX IF NOT EXISTS files_version_chain_idx
+  ON files (parent_file_id, version) WHERE parent_file_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS files_photo_timeline_idx
+  ON files (deal_id, category, COALESCE(taken_at, created_at) DESC)
+  WHERE category = 'photo' AND is_active = TRUE;
+CREATE INDEX IF NOT EXISTS files_contact_idx
+  ON files (contact_id, category, created_at DESC) WHERE contact_id IS NOT NULL;
 
 -- ---------------------------------------------------------------------------
 -- Tasks
