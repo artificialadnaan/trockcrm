@@ -4,8 +4,13 @@ WORKDIR /app
 # Copy everything (dockerignore handles exclusions)
 COPY . .
 
-# Install and build
-RUN npm install
+# Debug: verify workspace structure
+RUN ls -la && ls -la shared/ && cat package.json | head -5
+
+# Install with explicit workspace support
+RUN npm install --workspaces --include-workspace-root
+
+# Build shared first, then services
 RUN npm run build --workspace=shared
 RUN npm run build --workspace=server
 RUN npm run build --workspace=worker
