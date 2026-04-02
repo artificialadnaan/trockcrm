@@ -1,0 +1,59 @@
+import { Router } from "express";
+import { requireRole } from "../../middleware/rbac.js";
+import { AppError } from "../../middleware/error-handler.js";
+import {
+  getRepDashboard,
+  getDirectorDashboard,
+  getRepDetail,
+} from "./service.js";
+
+const router = Router();
+
+// GET /api/dashboard/rep -- per-rep dashboard (current user)
+router.get("/rep", async (req, res, next) => {
+  try {
+    const data = await getRepDashboard(req.tenantDb!, req.user!.id);
+    await req.commitTransaction!();
+    res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/dashboard/director -- director overview (admin/director only)
+router.get(
+  "/director",
+  requireRole("admin", "director"),
+  async (req, res, next) => {
+    try {
+      const data = await getDirectorDashboard(req.tenantDb!, {
+        from: req.query.from as string | undefined,
+        to: req.query.to as string | undefined,
+      });
+      await req.commitTransaction!();
+      res.json({ data });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// GET /api/dashboard/director/rep/:repId -- drill-down into a specific rep (admin/director only)
+router.get(
+  "/director/rep/:repId",
+  requireRole("admin", "director"),
+  async (req, res, next) => {
+    try {
+      const data = await getRepDetail(req.tenantDb!, req.params.repId as string, {
+        from: req.query.from as string | undefined,
+        to: req.query.to as string | undefined,
+      });
+      await req.commitTransaction!();
+      res.json({ data });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+export const dashboardRoutes = router;
