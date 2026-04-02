@@ -30,7 +30,10 @@ server/tests/modules/files/
   └── r2-client.test.ts           # Presigned URL generation, key construction
 
 migrations/
-  └── 0003_files_search_vector.sql # Add search_vector column + GIN indexes
+  └── 0004_files_search_vector.sql # Add search_vector column + GIN indexes (renumbered from 0003 — Fix 6)
+
+worker/src/jobs/
+  └── exif-extract.ts              # EXIF extraction for photo uploads (Fix 7)
 
 client/src/hooks/
   └── use-files.ts                # File data fetching + upload mutations
@@ -295,16 +298,19 @@ function getBucket(): string {
 export async function generateUploadUrl(
   r2Key: string,
   mimeType: string,
-  maxSizeBytes: number
+  _maxSizeBytes: number
 ): Promise<{ uploadUrl: string; r2Key: string; expiresIn: number }> {
   const client = getClient();
   const bucket = getBucket();
 
+  // NOTE: Do NOT include ContentLength in the presigned PutObjectCommand.
+  // Browsers cannot set the Content-Length header on XHR/fetch uploads —
+  // the browser calculates it automatically. Including it in the signed
+  // headers causes a SignatureDoesNotMatch error.
   const command = new PutObjectCommand({
     Bucket: bucket,
     Key: r2Key,
     ContentType: mimeType,
-    ContentLength: maxSizeBytes,
   });
 
   const uploadUrl = await getSignedUrl(client, command, {
@@ -359,6 +365,30 @@ export async function objectExists(r2Key: string): Promise<boolean> {
     return true;
   } catch {
     return false;
+  }
+}
+
+/**
+ * HEAD an R2 object and return its metadata.
+ * Used by confirmUpload() to verify the object was actually written to R2
+ * and that Content-Type / Content-Length match the declared values.
+ */
+export async function headObject(
+  r2Key: string
+): Promise<{ contentType?: string; contentLength?: number } | null> {
+  const client = getClient();
+  const bucket = getBucket();
+
+  try {
+    const resp = await client.send(
+      new HeadObjectCommand({ Bucket: bucket, Key: r2Key })
+    );
+    return {
+      contentType: resp.ContentType,
+      contentLength: resp.ContentLength,
+    };
+  } catch {
+    return null;
   }
 }
 
@@ -423,6 +453,7 @@ import {
   generateDownloadUrl,
   generateMockUploadUrl,
   generateMockDownloadUrl,
+  headObject,
   isR2Configured,
 } from "../../lib/r2-client.js";
 import {
@@ -577,6 +608,14 @@ async function generateSystemFilename(
       throw new AppError(404, "Associated deal not found.");
     }
 
+    // Acquire an advisory lock scoped to (dealNumber + category + date) to
+    // prevent a race condition where concurrent uploads for the same deal,
+    // category, and date could compute the same sequence number.
+    // The lock is automatically released at the end of the transaction.
+    await tenantDb.execute(
+      sql`SELECT pg_advisory_xact_lock(hashtext(${deal.dealNumber + category + dateStr}))`
+    );
+
     // Count existing files for this deal + category + date to determine sequence
     const countResult = await tenantDb
       .select({ count: sql<number>`count(*)` })
@@ -643,16 +682,28 @@ function buildR2Key(
 
 /**
  * Build the virtual folder_path for a file.
+ * For photo category files, appends a year-month date bucket (e.g. "2026-04")
+ * derived from takenAt or createdAt so photos are organized chronologically:
+ *   Photos/Site Visits/2026-04
  */
 function buildFolderPath(
   category: FileCategory,
-  subcategory?: string
+  subcategory?: string,
+  dateForBucket?: Date
 ): string {
   const topFolder = CATEGORY_TO_FOLDER[category] || "Other";
+  let path = topFolder;
   if (subcategory) {
-    return `${topFolder}/${subcategory}`;
+    path = `${topFolder}/${subcategory}`;
   }
-  return topFolder;
+
+  // For photo files, append the year-month bucket
+  if (category === "photo" && dateForBucket) {
+    const yearMonth = dateForBucket.toISOString().slice(0, 7); // "YYYY-MM"
+    path = `${path}/${yearMonth}`;
+  }
+
+  return path;
 }
 
 // ─── Service Functions ───────────────────────────────────────────────────────
@@ -714,8 +765,8 @@ export async function requestUploadUrl(
     systemFilename,
   });
 
-  // Build folder path
-  const folderPath = buildFolderPath(input.category, input.subcategory);
+  // Build folder path (pass date for photo category date-bucketing)
+  const folderPath = buildFolderPath(input.category, input.subcategory, now);
 
   // Generate presigned URL (or mock in dev)
   let uploadResult: { uploadUrl: string; r2Key: string; expiresIn: number };
@@ -735,7 +786,8 @@ export async function requestUploadUrl(
 
 /**
  * Step 2 of upload flow: browser has uploaded the file to R2.
- * Create the file metadata record in the database.
+ * Verify the R2 object exists and matches declared metadata, then
+ * create the file metadata record in the database.
  */
 export async function confirmUpload(
   tenantDb: TenantDb,
@@ -747,6 +799,22 @@ export async function confirmUpload(
     folderPath: string;
   }
 ): Promise<typeof files.$inferSelect> {
+  // ── Verify the R2 object before persisting metadata ──────────────
+  // HEAD the object to confirm it was actually uploaded and that the
+  // Content-Type / Content-Length match what the client declared.
+  if (isR2Configured()) {
+    const head = await headObject(input.r2Key);
+    if (!head) {
+      throw new AppError(400, "Upload verification failed: object not found in R2. The file may not have been uploaded.");
+    }
+    if (head.contentType && head.contentType !== input.mimeType) {
+      throw new AppError(400, `Upload verification failed: Content-Type mismatch. Expected "${input.mimeType}", got "${head.contentType}".`);
+    }
+    if (head.contentLength != null && head.contentLength !== input.fileSizeBytes) {
+      throw new AppError(400, `Upload verification failed: Content-Length mismatch. Expected ${input.fileSizeBytes} bytes, got ${head.contentLength}.`);
+    }
+  }
+
   const ext = input.originalFilename.lastIndexOf(".") >= 0
     ? input.originalFilename.substring(input.originalFilename.lastIndexOf(".")).toLowerCase()
     : "";
@@ -1297,6 +1365,12 @@ router.post("/confirm-upload", async (req, res, next) => {
       throw new AppError(400, "Missing required fields for upload confirmation.");
     }
 
+    // RBAC: validate dealId access if provided (same pattern as email send)
+    if (dealId) {
+      const deal = await getDealById(req.tenantDb!, dealId, req.user!.role, req.user!.id);
+      if (!deal) throw new AppError(403, "Access denied: you do not have access to this deal.");
+    }
+
     const file = await confirmUpload(req.tenantDb!, req.user!.id, {
       r2Key,
       systemFilename,
@@ -1471,6 +1545,14 @@ router.get("/:id", async (req, res, next) => {
   try {
     const file = await getFileById(req.tenantDb!, req.params.id);
     if (!file) throw new AppError(404, "File not found");
+
+    // RBAC: if file has a dealId, verify the user has access to that deal.
+    // Contact/project files are office-scoped so any tenant user can view.
+    if (file.dealId) {
+      const deal = await getDealById(req.tenantDb!, file.dealId, req.user!.role, req.user!.id);
+      if (!deal) throw new AppError(403, "Access denied: you do not have access to this deal's files.");
+    }
+
     await req.commitTransaction!();
     res.json({ file });
   } catch (err) {
@@ -1481,6 +1563,15 @@ router.get("/:id", async (req, res, next) => {
 // GET /api/files/:id/download — presigned download URL
 router.get("/:id/download", async (req, res, next) => {
   try {
+    const file = await getFileById(req.tenantDb!, req.params.id);
+    if (!file) throw new AppError(404, "File not found");
+
+    // RBAC: deal-scoped files require deal access check
+    if (file.dealId) {
+      const deal = await getDealById(req.tenantDb!, file.dealId, req.user!.role, req.user!.id);
+      if (!deal) throw new AppError(403, "Access denied: you do not have access to this deal's files.");
+    }
+
     const result = await getFileDownloadUrl(req.tenantDb!, req.params.id);
     await req.commitTransaction!();
     res.json(result);
@@ -1503,6 +1594,14 @@ router.get("/:id/versions", async (req, res, next) => {
 // PATCH /api/files/:id — update file metadata
 router.patch("/:id", async (req, res, next) => {
   try {
+    // RBAC: deal-scoped files require deal access check
+    const existing = await getFileById(req.tenantDb!, req.params.id);
+    if (!existing) throw new AppError(404, "File not found");
+    if (existing.dealId) {
+      const deal = await getDealById(req.tenantDb!, existing.dealId, req.user!.role, req.user!.id);
+      if (!deal) throw new AppError(403, "Access denied: you do not have access to this deal's files.");
+    }
+
     const { displayName, description, notes, tags, category, subcategory, folderPath } = req.body;
 
     const file = await updateFile(req.tenantDb!, req.params.id, {
@@ -1524,6 +1623,21 @@ router.patch("/:id", async (req, res, next) => {
 // DELETE /api/files/:id — soft-delete a file
 router.delete("/:id", async (req, res, next) => {
   try {
+    // RBAC: deal-scoped files require deal access + role check.
+    // Delete is restricted to director/admin for deal files, or the original uploader.
+    const existing = await getFileById(req.tenantDb!, req.params.id);
+    if (!existing) throw new AppError(404, "File not found");
+    if (existing.dealId) {
+      const deal = await getDealById(req.tenantDb!, existing.dealId, req.user!.role, req.user!.id);
+      if (!deal) throw new AppError(403, "Access denied: you do not have access to this deal's files.");
+
+      const isAdminOrDirector = req.user!.role === "admin" || req.user!.role === "director";
+      const isUploader = existing.uploadedBy === req.user!.id;
+      if (!isAdminOrDirector && !isUploader) {
+        throw new AppError(403, "Only admins, directors, or the original uploader can delete deal files.");
+      }
+    }
+
     await deleteFile(req.tenantDb!, req.params.id, req.user!.role);
     await req.commitTransaction!();
     res.json({ success: true });
@@ -1534,8 +1648,9 @@ router.delete("/:id", async (req, res, next) => {
 
 // --- Dev-mode routes (only active when R2 is not configured) ---
 
-// POST /api/files/dev-upload — mock upload endpoint for dev mode
-router.post("/dev-upload", async (req, res, next) => {
+// PUT /api/files/dev-upload — mock upload endpoint for dev mode
+// Must be PUT to match the client's XHR method (presigned URLs use PUT).
+router.put("/dev-upload", async (req, res, next) => {
   try {
     if (process.env.NODE_ENV === "production") {
       throw new AppError(404, "Not found");
@@ -1588,17 +1703,18 @@ Specifically, add after the email routes line:
 
 ## Task 4: File Search Service (Full-Text via tsvector) + Migration
 
-- [ ] Create `migrations/0003_files_search_vector.sql`
+- [ ] Create `migrations/0004_files_search_vector.sql`
 - [ ] Verify migration runs against all office schemas
 
 ### 4a. Migration: Add search_vector Column + GIN Indexes
 
 The initial migration created the `files` table but did not include the `search_vector` generated column or the GIN indexes for full-text search and tag filtering. This migration adds them.
 
-**File: `migrations/0003_files_search_vector.sql`**
+**File: `migrations/0004_files_search_vector.sql`**
 
 ```sql
--- Migration 0003: Add search_vector column and GIN indexes to files table
+-- Migration 0004: Add search_vector column and GIN indexes to files table
+-- NOTE: 0003 is already taken by 0003_disable_stage_history_trigger.sql.
 -- Must run per office schema (the migration runner loops across all schemas).
 
 -- 1. Add the generated tsvector column for full-text search.
@@ -1631,7 +1747,30 @@ CREATE INDEX IF NOT EXISTS files_contact_idx ON files (contact_id, category, cre
   WHERE contact_id IS NOT NULL;
 ```
 
-### 4b. Running the Migration
+### 4b. Drizzle Schema: Add search_vector Column
+
+The `search_vector` column is managed by the migration (GENERATED ALWAYS AS ... STORED), but Drizzle needs to know about it for type inference and select queries.
+
+**File: `shared/src/schema/tenant/files.ts`** -- Add to the files table definition:
+
+```typescript
+// search_vector is a generated column managed by the migration.
+// Drizzle doesn't natively support GENERATED columns, so declare it as
+// a regular column that we never write to — the DB handles population.
+// This lets us reference it in select() and where() clauses.
+import { customType } from "drizzle-orm/pg-core";
+
+const tsvector = customType<{ data: string }>({
+  dataType() {
+    return "tsvector";
+  },
+});
+
+// Inside the files table definition, add:
+//   searchVector: tsvector("search_vector"),
+```
+
+### 4c. Running the Migration
 
 The migration must run against every office schema. Use the existing migration runner pattern:
 
@@ -1640,11 +1779,11 @@ The migration must run against every office schema. Use the existing migration r
 # npx drizzle-kit generate
 
 # Or apply the raw SQL migration manually:
-# psql $DATABASE_URL -f migrations/0003_files_search_vector.sql
+# psql $DATABASE_URL -f migrations/0004_files_search_vector.sql
 
 # For multi-office, run within each schema:
-# SET search_path = 'office_dallas', 'public'; \i migrations/0003_files_search_vector.sql
-# SET search_path = 'office_houston', 'public'; \i migrations/0003_files_search_vector.sql
+# SET search_path = 'office_dallas', 'public'; \i migrations/0004_files_search_vector.sql
+# SET search_path = 'office_houston', 'public'; \i migrations/0004_files_search_vector.sql
 ```
 
 ---
@@ -3937,6 +4076,309 @@ import { ContactFileTab } from "@/components/files/contact-file-tab";
 
 ---
 
+## Task 11: EXIF Extraction Worker Job
+
+- [ ] Create `worker/src/jobs/exif-extract.ts`
+- [ ] Register in worker job index
+- [ ] Add `exifr` npm dependency to `worker/` (or `server/` if worker shares the same package)
+
+### 11a. EXIF Extraction Job
+
+Listens for `file.uploaded` domain events for photo category files, fetches the object from R2, extracts EXIF data, and updates the file record with `takenAt`, `geoLat`, `geoLng`.
+
+**File: `worker/src/jobs/exif-extract.ts`**
+
+```typescript
+import { GetObjectCommand } from "@aws-sdk/client-s3";
+import { eq } from "drizzle-orm";
+import type { NodePgDatabase } from "drizzle-orm/node-postgres";
+import { files } from "@trock-crm/shared/schema";
+import type * as schema from "@trock-crm/shared/schema";
+import { EXIF_MIME_TYPES } from "../../server/src/modules/files/file-constants.js";
+
+// Use exifr — lightweight, supports JPEG/HEIC/WebP, no native deps
+// npm install exifr
+import exifr from "exifr";
+
+type TenantDb = NodePgDatabase<typeof schema>;
+
+interface FileUploadedEvent {
+  fileId: string;
+  r2Key: string;
+  mimeType: string;
+  dealId: string | null;
+  contactId: string | null;
+  category: string;
+  uploadedBy: string;
+}
+
+/**
+ * Extract EXIF metadata from a photo uploaded to R2.
+ * Called by the event handler when a `file.uploaded` event fires.
+ *
+ * Only runs for photo-category files with EXIF-capable MIME types
+ * (JPEG, HEIC, WebP). Skips gracefully for non-photo files.
+ */
+export async function handleExifExtraction(
+  tenantDb: TenantDb,
+  event: FileUploadedEvent,
+  r2Client: InstanceType<typeof import("@aws-sdk/client-s3").S3Client>,
+  r2Bucket: string
+): Promise<void> {
+  // Only process photo files with EXIF-capable MIME types
+  if (event.category !== "photo") return;
+  if (!EXIF_MIME_TYPES.has(event.mimeType)) return;
+
+  try {
+    // Fetch the object from R2
+    const response = await r2Client.send(
+      new GetObjectCommand({
+        Bucket: r2Bucket,
+        Key: event.r2Key,
+      })
+    );
+
+    if (!response.Body) {
+      console.error(`[EXIF] No body returned for ${event.r2Key}`);
+      return;
+    }
+
+    // Convert the readable stream to a Buffer
+    const chunks: Uint8Array[] = [];
+    const reader = response.Body as AsyncIterable<Uint8Array>;
+    for await (const chunk of reader) {
+      chunks.push(chunk);
+    }
+    const buffer = Buffer.concat(chunks);
+
+    // Extract EXIF data using exifr
+    const exif = await exifr.parse(buffer, {
+      pick: ["DateTimeOriginal", "GPSLatitude", "GPSLongitude"],
+      gps: true, // enables parsed GPS coordinates
+    });
+
+    if (!exif) {
+      console.log(`[EXIF] No EXIF data found in ${event.r2Key}`);
+      return;
+    }
+
+    // Build update payload
+    const updates: Record<string, unknown> = {};
+
+    if (exif.DateTimeOriginal instanceof Date) {
+      updates.takenAt = exif.DateTimeOriginal;
+    }
+
+    // exifr with gps:true returns latitude/longitude as numbers
+    if (typeof exif.latitude === "number" && typeof exif.longitude === "number") {
+      updates.geoLat = String(exif.latitude);
+      updates.geoLng = String(exif.longitude);
+    }
+
+    if (Object.keys(updates).length === 0) {
+      console.log(`[EXIF] No usable EXIF fields in ${event.r2Key}`);
+      return;
+    }
+
+    // Update the file record
+    await tenantDb
+      .update(files)
+      .set(updates)
+      .where(eq(files.id, event.fileId));
+
+    console.log(
+      `[EXIF] Updated file ${event.fileId}: takenAt=${updates.takenAt ?? "n/a"}, ` +
+      `geo=${updates.geoLat ?? "n/a"},${updates.geoLng ?? "n/a"}`
+    );
+  } catch (err) {
+    // EXIF extraction is non-blocking — log and continue
+    console.error(`[EXIF] Failed to extract EXIF from ${event.r2Key}:`, err);
+  }
+}
+```
+
+### 11b. Register in Worker Jobs
+
+Register the EXIF handler in the worker's event listener setup. In the file that subscribes to domain events (e.g., `worker/src/index.ts` or `server/src/events/handlers.ts`):
+
+```typescript
+import { handleExifExtraction } from "./jobs/exif-extract.js";
+
+// In the file.uploaded event handler:
+eventBus.on(DOMAIN_EVENTS.FILE_UPLOADED, async (event) => {
+  await handleExifExtraction(
+    tenantDb,
+    event.payload as FileUploadedEvent,
+    r2Client,
+    r2Bucket
+  );
+});
+```
+
+### 11c. Install Dependency
+
+```bash
+cd server && npm install exifr
+# (or cd worker && npm install exifr, depending on where the worker runs)
+```
+
+`exifr` is zero-dependency, supports JPEG/HEIC/TIFF/WebP, and ships TypeScript types.
+
+---
+
+## Task 12: Frontend -- Auto-Naming Preview in Upload Component
+
+- [ ] Add preview step in `file-upload-zone.tsx`
+- [ ] Add optional preview endpoint or client-side computation
+
+### 12a. Auto-Naming Preview
+
+After file selection but before upload, show the generated system filename so the user can see what the file will be named before confirming. Computes the preview client-side from deal number + category + date, or calls a lightweight preview endpoint.
+
+**Update `client/src/components/files/file-upload-zone.tsx`** -- add preview state and display between file selection and upload:
+
+Add a new helper function and a preview display section:
+
+```typescript
+// Add to imports:
+import { api } from "@/lib/api";
+
+// Add interface for preview data
+interface FilePreview {
+  file: File;
+  previewName: string;
+  status: "previewing" | "confirmed";
+}
+
+// Add a function to generate preview names client-side
+function generatePreviewName(
+  file: File,
+  category: FileCategory,
+  dealNumber?: string
+): string {
+  const now = new Date();
+  const dateStr = now.toISOString().split("T")[0];
+  const categoryLabel =
+    category.charAt(0).toUpperCase() + category.slice(1).replace(/_/g, "-");
+  const ext = file.name.lastIndexOf(".") >= 0
+    ? file.name.substring(file.name.lastIndexOf(".")).toLowerCase()
+    : "";
+
+  if (dealNumber) {
+    // Sequence number is estimated — actual comes from the server
+    return `${dealNumber}_${categoryLabel}_${dateStr}_###${ext}`;
+  }
+  return `${categoryLabel}_${dateStr}_######${ext}`;
+}
+```
+
+Add a `dealNumber` prop to `FileUploadZoneProps`:
+
+```typescript
+interface FileUploadZoneProps {
+  category: FileCategory;
+  subcategory?: string;
+  dealId?: string;
+  dealNumber?: string;  // NEW: pass deal number for client-side preview
+  contactId?: string;
+  tags?: string[];
+  onUploadComplete?: () => void;
+  compact?: boolean;
+}
+```
+
+Add preview state and a confirmation step between file selection and upload:
+
+```typescript
+const [previews, setPreviews] = useState<FilePreview[]>([]);
+
+// After files are selected but before uploading, show preview:
+const handleFilesWithPreview = useCallback(
+  async (fileList: FileList | File[]) => {
+    const newFiles = Array.from(fileList);
+
+    // Generate previews
+    const newPreviews: FilePreview[] = newFiles.map((file) => ({
+      file,
+      previewName: generatePreviewName(file, category, dealNumber),
+      status: "previewing" as const,
+    }));
+    setPreviews((prev) => [...prev, ...newPreviews]);
+  },
+  [category, dealNumber]
+);
+
+// User confirms upload after seeing preview
+const confirmAndUpload = useCallback(async () => {
+  const filesToUpload = previews
+    .filter((p) => p.status === "previewing")
+    .map((p) => p.file);
+  setPreviews([]);
+  await handleFiles(filesToUpload);
+}, [previews, handleFiles]);
+```
+
+Add the preview display in the JSX (between the drop zone and upload progress):
+
+```tsx
+{/* Auto-Naming Preview */}
+{previews.length > 0 && (
+  <div className="border rounded-lg p-3 space-y-2 bg-muted/30">
+    <p className="text-sm font-medium">File naming preview:</p>
+    {previews.map((preview, i) => (
+      <div key={i} className="flex items-center gap-2 text-sm">
+        <FileIcon className="h-4 w-4 text-muted-foreground flex-shrink-0" />
+        <span className="text-muted-foreground truncate">
+          {preview.file.name}
+        </span>
+        <span className="text-muted-foreground">→</span>
+        <span className="font-mono text-xs truncate">
+          {preview.previewName}
+        </span>
+      </div>
+    ))}
+    <p className="text-xs text-muted-foreground">
+      ### will be replaced with the actual sequence number.
+    </p>
+    <div className="flex gap-2 pt-1">
+      <Button size="sm" onClick={confirmAndUpload}>
+        Upload {previews.length} file{previews.length !== 1 ? "s" : ""}
+      </Button>
+      <Button
+        size="sm"
+        variant="ghost"
+        onClick={() => setPreviews([])}
+      >
+        Cancel
+      </Button>
+    </div>
+  </div>
+)}
+```
+
+Pass `dealNumber` from `DealFileTab`:
+
+**Update `client/src/components/files/deal-file-tab.tsx`:**
+
+```typescript
+// In DealFileTabProps, add dealNumber:
+interface DealFileTabProps {
+  dealId: string;
+  dealNumber?: string;  // NEW
+}
+
+// Pass it to FileUploadZone:
+<FileUploadZone
+  category={uploadCategory}
+  subcategory={uploadSubcategory}
+  dealId={dealId}
+  dealNumber={dealNumber}    // NEW
+  onUploadComplete={handleUploadComplete}
+/>
+```
+
+---
+
 ## Verification Checklist
 
 After all tasks are implemented, verify:
@@ -3957,3 +4399,15 @@ After all tasks are implemented, verify:
 - [ ] Association CHECK constraint enforced (no orphan files)
 - [ ] MIME type validation rejects unsupported types
 - [ ] 50 MB file size limit enforced
+- [ ] Presigned PUT URL does not include ContentLength (Fix 1)
+- [ ] Dev upload route uses PUT method matching client XHR (Fix 1)
+- [ ] Upload confirm HEAD-checks R2 object for existence, Content-Type, Content-Length (Fix 2)
+- [ ] GET/PATCH/DELETE /:id routes enforce deal access RBAC (Fix 3)
+- [ ] POST /confirm-upload validates dealId access (Fix 3)
+- [ ] DELETE restricted to director/admin or uploader for deal files (Fix 3)
+- [ ] Auto-naming uses pg_advisory_xact_lock to prevent sequence race (Fix 4)
+- [ ] Photo folder paths include year-month date bucket (Fix 5)
+- [ ] Migration numbered 0004 (not 0003 which is taken) (Fix 6)
+- [ ] search_vector column declared in Drizzle schema (Fix 6)
+- [ ] EXIF extraction worker job processes photo uploads (Fix 7)
+- [ ] Upload component shows auto-naming preview before upload (Fix 8)
