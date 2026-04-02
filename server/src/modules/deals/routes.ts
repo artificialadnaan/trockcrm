@@ -16,6 +16,7 @@ import {
 } from "./service.js";
 import { changeDealStage } from "./stage-change.js";
 import { preflightStageCheck } from "./stage-gate.js";
+import { getContactsForDeal } from "../contacts/association-service.js";
 
 const router = Router();
 
@@ -362,6 +363,20 @@ router.get("/:id/approvals", async (req, res, next) => {
 
     await req.commitTransaction!();
     res.json({ approvals });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/deals/:id/contacts — contacts associated with a deal
+router.get("/:id/contacts", async (req, res, next) => {
+  try {
+    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+
+    const associations = await getContactsForDeal(req.tenantDb!, req.params.id);
+    await req.commitTransaction!();
+    res.json({ associations });
   } catch (err) {
     next(err);
   }
