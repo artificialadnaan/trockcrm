@@ -6,8 +6,10 @@ import type { JwtClaims } from "@trock-crm/shared/types";
 
 function getJwtSecret(): string {
   const secret = process.env.JWT_SECRET;
-  if (process.env.NODE_ENV === "production" && !secret) {
-    throw new Error("JWT_SECRET must be set in production");
+  const nodeEnv = process.env.NODE_ENV;
+  const isLocalDevEnv = nodeEnv === "development" || nodeEnv === "test";
+  if (!secret && !isLocalDevEnv) {
+    throw new Error("JWT_SECRET must be set outside local development/test");
   }
   return secret || "dev-secret-change-in-production";
 }

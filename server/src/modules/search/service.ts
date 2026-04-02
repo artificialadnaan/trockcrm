@@ -1,7 +1,7 @@
 import { sql, eq } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
-import { userOfficeAccess, offices } from "@trock-crm/shared/schema";
+import { userOfficeAccess, offices, users } from "@trock-crm/shared/schema";
 import { db, pool } from "../../db.js";
 import { drizzle } from "drizzle-orm/node-postgres";
 
@@ -86,22 +86,32 @@ async function crossOfficeSearch(
   types: Array<"deals" | "contacts" | "files">,
   userId: string,
 ): Promise<SearchResponse> {
-  // Get all offices this user has access to
-  const accessRows = await db
-    .select({ officeId: userOfficeAccess.officeId })
-    .from(userOfficeAccess)
-    .where(eq(userOfficeAccess.userId, userId));
+  // Include both explicit cross-office access and the user's primary office.
+  const [accessRows, userRows] = await Promise.all([
+    db
+      .select({ officeId: userOfficeAccess.officeId })
+      .from(userOfficeAccess)
+      .where(eq(userOfficeAccess.userId, userId)),
+    db
+      .select({ officeId: users.officeId })
+      .from(users)
+      .where(eq(users.id, userId))
+      .limit(1),
+  ]);
 
-  const officeIds = accessRows.map((r) => r.officeId);
+  const officeIds = new Set(accessRows.map((r) => r.officeId));
+  const primaryOfficeId = userRows[0]?.officeId;
+  if (primaryOfficeId) {
+    officeIds.add(primaryOfficeId);
+  }
 
-  // Also include the user's primary office
   const officeRows = await db
     .select({ id: offices.id, slug: offices.slug })
     .from(offices)
     .where(eq(offices.isActive, true));
 
   const accessibleOffices = officeRows.filter(
-    (o) => officeIds.includes(o.id)
+    (o) => officeIds.has(o.id)
   );
 
   // If no accessible offices, return empty

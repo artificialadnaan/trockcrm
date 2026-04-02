@@ -746,66 +746,91 @@ export async function executeCustomReport(
 
   if (selectCols.length === 0) throw new Error("No valid columns selected");
 
-  // Build WHERE clause from filters
-  const whereParts: string[] = [];
+  // Build WHERE clause from filters using parameter binding for all values.
+  const whereClauses: ReturnType<typeof sql>[] = [];
   for (const filter of config.filters) {
     if (!allowed.includes(filter.field)) continue; // skip unknown fields
 
-    const col = `"${filter.field}"`; // quote column name
+    const col = sql.identifier(filter.field);
     switch (filter.op) {
       case "eq":
-        whereParts.push(`${col} = '${String(filter.value).replace(/'/g, "''")}'`);
+        if (filter.value !== undefined) {
+          whereClauses.push(sql`${col} = ${filter.value}`);
+        }
         break;
       case "neq":
-        whereParts.push(`${col} != '${String(filter.value).replace(/'/g, "''")}'`);
+        if (filter.value !== undefined) {
+          whereClauses.push(sql`${col} != ${filter.value}`);
+        }
         break;
       case "gt":
-        whereParts.push(`${col} > '${String(filter.value).replace(/'/g, "''")}'`);
+        if (filter.value !== undefined) {
+          whereClauses.push(sql`${col} > ${filter.value}`);
+        }
         break;
       case "gte":
-        whereParts.push(`${col} >= '${String(filter.value).replace(/'/g, "''")}'`);
+        if (filter.value !== undefined) {
+          whereClauses.push(sql`${col} >= ${filter.value}`);
+        }
         break;
       case "lt":
-        whereParts.push(`${col} < '${String(filter.value).replace(/'/g, "''")}'`);
+        if (filter.value !== undefined) {
+          whereClauses.push(sql`${col} < ${filter.value}`);
+        }
         break;
       case "lte":
-        whereParts.push(`${col} <= '${String(filter.value).replace(/'/g, "''")}'`);
+        if (filter.value !== undefined) {
+          whereClauses.push(sql`${col} <= ${filter.value}`);
+        }
         break;
       case "in":
         if (Array.isArray(filter.value) && filter.value.length > 0) {
-          const vals = filter.value.map((v: any) => `'${String(v).replace(/'/g, "''")}'`).join(",");
-          whereParts.push(`${col} IN (${vals})`);
+          whereClauses.push(sql`${col} IN ${filter.value}`);
         }
         break;
       case "like":
-        whereParts.push(`${col} ILIKE '%${String(filter.value).replace(/'/g, "''").replace(/%/g, "\\%")}%'`);
+        if (filter.value !== undefined) {
+          const escaped = String(filter.value).replace(/[\\%_]/g, "\\$&");
+          whereClauses.push(sql`${col} ILIKE ${`%${escaped}%`} ESCAPE '\\'`);
+        }
         break;
       case "is_null":
-        whereParts.push(`${col} IS NULL`);
+        whereClauses.push(sql`${col} IS NULL`);
         break;
       case "is_not_null":
-        whereParts.push(`${col} IS NOT NULL`);
+        whereClauses.push(sql`${col} IS NOT NULL`);
         break;
     }
   }
 
-  const whereClause = whereParts.length > 0 ? `WHERE ${whereParts.join(" AND ")}` : "";
-  const selectList = selectCols.map((c) => `"${c}"`).join(", ");
+  const whereClause = whereClauses.length > 0
+    ? sql`WHERE ${sql.join(whereClauses, sql` AND `)}`
+    : sql``;
+  const selectList = sql.join(selectCols.map((c) => sql.identifier(c)), sql`, `);
 
   // Sort
-  let orderClause = "";
+  let orderClause = sql``;
   if (config.sort && allowed.includes(config.sort.field)) {
-    const dir = config.sort.dir === "asc" ? "ASC" : "DESC";
-    orderClause = `ORDER BY "${config.sort.field}" ${dir}`;
+    const dir = config.sort.dir === "asc" ? sql`ASC` : sql`DESC`;
+    orderClause = sql`ORDER BY ${sql.identifier(config.sort.field)} ${dir}`;
   }
 
   const offset = (pagination.page - 1) * pagination.limit;
 
-  // Execute count + data queries in parallel
-  // Column names are validated against ALLOWED_COLUMNS so raw SQL is safe here
   const [countRes, dataRes] = await Promise.all([
-    tenantDb.execute(sql`SELECT COUNT(*)::int AS total FROM ${sql.identifier(entityTable)} ${whereParts.length > 0 ? sql.raw(`WHERE ${whereParts.join(" AND ")}`) : sql``}`),
-    tenantDb.execute(sql`SELECT ${sql.raw(selectList)} FROM ${sql.identifier(entityTable)} ${whereParts.length > 0 ? sql.raw(`WHERE ${whereParts.join(" AND ")}`) : sql``} ${orderClause ? sql.raw(orderClause) : sql``} LIMIT ${pagination.limit} OFFSET ${offset}`),
+    tenantDb.execute(sql`
+      SELECT COUNT(*)::int AS total
+      FROM ${sql.identifier(entityTable)}
+      ${whereClause}
+    `),
+    tenantDb.execute(sql`
+      SELECT ${selectList}
+      FROM ${sql.identifier(entityTable)}
+      ${whereClause}
+      ${orderClause}
+      LIMIT ${pagination.limit}
+      OFFSET ${offset}
+    `),
   ]);
 
   const countRows = (countRes as any).rows ?? countRes;

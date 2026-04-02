@@ -6,9 +6,10 @@ import { AppError } from "../../middleware/error-handler.js";
 
 const router = Router();
 
-// Dev endpoints ONLY available when Azure SSO is not configured AND not in production.
-// In production without Azure configured, return 404 to prevent unauthorized access.
-const isDevMode = !process.env.AZURE_CLIENT_ID && process.env.NODE_ENV !== "production";
+// Dev endpoints are limited to local/test environments when Azure SSO is not configured.
+const nodeEnv = process.env.NODE_ENV;
+const isLocalDevEnv = nodeEnv === "development" || nodeEnv === "test";
+const isDevMode = !process.env.AZURE_CLIENT_ID && isLocalDevEnv;
 
 // Dev-mode: list available users for picker
 router.get("/dev/users", authLimiter, async (_req, res, next) => {
