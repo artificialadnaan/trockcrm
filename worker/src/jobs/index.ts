@@ -5,6 +5,7 @@ import { runEmailSync } from "./email-sync.js";
 import { extractExif } from "./exif-extract.js";
 import { runDailyTaskGeneration } from "./daily-tasks.js";
 import { runActivityDropDetection } from "./activity-alerts.js";
+import { runWeeklyDigest } from "./weekly-digest.js";
 
 /**
  * Test handler that logs the payload. Used to validate the queue works end-to-end.
@@ -67,10 +68,139 @@ export function registerAllJobs() {
     await runActivityDropDetection();
   });
 
+  // Weekly digest (triggered via job_queue or cron)
+  registerJobHandler("weekly_digest", async () => {
+    await runWeeklyDigest();
+  });
+
   // Domain event handlers for deal lifecycle
   domainEventHandlers.set("deal.won", async (payload, officeId) => {
     console.log(`[Worker] Deal won: ${payload.dealNumber} (${payload.dealName}) - amount: ${payload.awardedAmount}`);
     // Future: Procore project creation, congratulations notification
+
+    // --- Cross-sell alert ---
+    try {
+      const { pool: workerPool } = await import("../db.js");
+
+      // Resolve office from assignedRepId if officeId is null
+      let resolvedOfficeId = officeId;
+      if (!resolvedOfficeId && payload.assignedRepId) {
+        const userRes = await workerPool.query(
+          "SELECT office_id FROM public.users WHERE id = $1",
+          [payload.assignedRepId]
+        );
+        resolvedOfficeId = userRes.rows[0]?.office_id ?? null;
+      }
+      if (!resolvedOfficeId) {
+        console.log("[Worker:cross-sell] Cannot resolve office — skipping cross-sell check");
+        return;
+      }
+
+      // Get office slug
+      const officeRes = await workerPool.query(
+        "SELECT slug FROM public.offices WHERE id = $1 AND is_active = true",
+        [resolvedOfficeId]
+      );
+      if (officeRes.rows.length === 0) return;
+
+      const slug = officeRes.rows[0].slug;
+      const slugRegex = /^[a-z][a-z0-9_]*$/;
+      if (!slugRegex.test(slug)) return;
+
+      const schemaName = `office_${slug}`;
+
+      // Get the won deal's project_type_id and primary contact's company_name
+      const dealRes = await workerPool.query(
+        `SELECT d.project_type_id, d.primary_contact_id, c.company_name
+         FROM ${schemaName}.deals d
+         LEFT JOIN ${schemaName}.contact_deal_associations cda
+           ON cda.deal_id = d.id AND cda.is_primary = true
+         LEFT JOIN ${schemaName}.contacts c
+           ON c.id = cda.contact_id
+         WHERE d.id = $1`,
+        [payload.dealId]
+      );
+
+      if (dealRes.rows.length === 0) return;
+
+      const { project_type_id, company_name } = dealRes.rows[0];
+      if (!project_type_id || !company_name) {
+        console.log("[Worker:cross-sell] Deal missing project_type_id or company_name — skipping");
+        return;
+      }
+
+      // Find all active project types that are NOT the won deal's type
+      const allTypesRes = await workerPool.query(
+        `SELECT id, name, parent_id FROM public.project_type_config
+         WHERE is_active = true AND id != $1`,
+        [project_type_id]
+      );
+
+      if (allTypesRes.rows.length === 0) return;
+
+      // Check which project types the company already has deals in
+      const existingTypesRes = await workerPool.query(
+        `SELECT DISTINCT d.project_type_id
+         FROM ${schemaName}.deals d
+         JOIN ${schemaName}.contact_deal_associations cda ON cda.deal_id = d.id
+         JOIN ${schemaName}.contacts c ON c.id = cda.contact_id
+         WHERE c.company_name = $1
+           AND d.project_type_id IS NOT NULL
+           AND d.is_active = true`,
+        [company_name]
+      );
+
+      const existingTypeIds = new Set(
+        existingTypesRes.rows.map((r: any) => r.project_type_id)
+      );
+
+      // Find untapped project types
+      const untappedTypes = allTypesRes.rows.filter(
+        (pt: any) => !existingTypeIds.has(pt.id)
+      );
+
+      if (untappedTypes.length === 0) {
+        console.log("[Worker:cross-sell] No untapped project types for", company_name);
+        return;
+      }
+
+      // Create a cross-sell task for each untapped type (limit to top 3 to avoid noise)
+      const tasksToCreate = untappedTypes.slice(0, 3);
+      for (const pt of tasksToCreate) {
+        // Check if a cross-sell task already exists for this company + project type
+        const existingTask = await workerPool.query(
+          `SELECT id FROM ${schemaName}.tasks
+           WHERE type = 'system'
+             AND title LIKE $1
+             AND status IN ('pending', 'in_progress')
+           LIMIT 1`,
+          [`%${pt.name}%${company_name}%`]
+        );
+
+        if (existingTask.rows.length > 0) continue;
+
+        const dueDate = new Date();
+        dueDate.setDate(dueDate.getDate() + 14);
+
+        await workerPool.query(
+          `INSERT INTO ${schemaName}.tasks
+           (title, description, type, priority, status, assigned_to, deal_id, due_date)
+           VALUES ($1, $2, 'system', 'normal', 'pending', $3, $4, $5)`,
+          [
+            `Explore ${pt.name} opportunities with ${company_name}`,
+            `${company_name} just won deal "${payload.dealName}" (${payload.dealNumber}). Consider cross-selling ${pt.name} services.`,
+            payload.assignedRepId,
+            payload.dealId,
+            dueDate.toISOString().split("T")[0],
+          ]
+        );
+
+        console.log(`[Worker:cross-sell] Created task: Explore ${pt.name} with ${company_name}`);
+      }
+    } catch (err) {
+      console.error("[Worker:cross-sell] Error:", err);
+      // Non-blocking — don't re-throw
+    }
   });
 
   domainEventHandlers.set("deal.lost", async (payload, officeId) => {
@@ -204,6 +334,12 @@ export function registerAllJobs() {
     );
   });
 
+  domainEventHandlers.set("ai.suggest_action", async (payload, officeId) => {
+    console.log("[Worker] ai.suggest_action (Phase 2 stub):", payload);
+    // Phase 2: Will call Claude API to analyze deal stage, contact touchpoints,
+    // and email history to suggest the optimal next action for the rep
+  });
+
   domainEventHandlers.set("email.sent", async (payload, _officeId) => {
     console.log(`[Worker] email.sent: to ${payload.to?.join(", ")} — subject: ${payload.subject}`);
     // Future: update contact touchpoint count, last_contacted_at
@@ -221,7 +357,7 @@ export function registerAllJobs() {
     }
   });
 
-  console.log("[Worker] Job handlers registered:", ["test_echo", "domain_event", "stale_deal_scan", "dedup_scan", "email_sync", "daily_task_generation", "activity_drop_detection"].join(", "));
+  console.log("[Worker] Job handlers registered:", ["test_echo", "domain_event", "stale_deal_scan", "dedup_scan", "email_sync", "daily_task_generation", "activity_drop_detection", "weekly_digest"].join(", "));
 }
 
 export { domainEventHandlers };

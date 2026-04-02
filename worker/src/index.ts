@@ -10,6 +10,7 @@ import { runDedupScan } from "./jobs/dedup-scan.js";
 import { runEmailSync } from "./jobs/email-sync.js";
 import { runDailyTaskGeneration } from "./jobs/daily-tasks.js";
 import { runActivityDropDetection } from "./jobs/activity-alerts.js";
+import { runWeeklyDigest } from "./jobs/weekly-digest.js";
 
 const POLL_INTERVAL_MS = 2000; // Poll job queue every 2 seconds
 
@@ -89,6 +90,17 @@ async function main() {
     }
   }, { timezone: "America/Chicago" });
   console.log("[Worker] Cron scheduled: activity drop detection at 7:00 AM CT daily");
+
+  // Weekly digest: Monday at 7:00 AM CT
+  cron.schedule("0 7 * * 1", async () => {
+    console.log("[Worker:cron] Running weekly digest...");
+    try {
+      await runWeeklyDigest();
+    } catch (err) {
+      console.error("[Worker:cron] Weekly digest failed:", err);
+    }
+  }, { timezone: "America/Chicago" });
+  console.log("[Worker] Cron scheduled: weekly digest at 7:00 AM CT every Monday");
 
   console.log("[Worker] Ready.");
 }
