@@ -6,7 +6,7 @@ import {
   stagedContacts,
   stagedActivities,
   importRuns,
-} from "@trock-crm/shared/schema/migration/index.js";
+} from "@trock-crm/shared/schema";
 import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 

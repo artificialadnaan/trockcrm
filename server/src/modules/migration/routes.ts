@@ -106,7 +106,7 @@ router.get("/migration/deals", async (req: Request, res: Response) => {
 // POST /api/migration/deals/:id/approve
 router.post("/migration/deals/:id/approve", async (req: Request, res: Response) => {
   try {
-    await approveStagedDeal(req.params.id, req.user!.id);
+    await approveStagedDeal(req.params.id as string, req.user!.id);
     return res.json({ success: true });
   } catch (err: any) {
     return res.status(err.statusCode ?? 500).json({ error: { message: err.message } });
@@ -117,7 +117,7 @@ router.post("/migration/deals/:id/approve", async (req: Request, res: Response) 
 router.post("/migration/deals/:id/reject", async (req: Request, res: Response) => {
   try {
     const { notes } = req.body as { notes?: string };
-    await rejectStagedDeal(req.params.id, req.user!.id, notes);
+    await rejectStagedDeal(req.params.id as string, req.user!.id, notes);
     return res.json({ success: true });
   } catch (err) {
     return res.status(500).json({ error: { message: String(err) } });
@@ -159,7 +159,7 @@ router.get("/migration/contacts", async (req: Request, res: Response) => {
 
 router.post("/migration/contacts/:id/approve", async (req: Request, res: Response) => {
   try {
-    await approveStagedContact(req.params.id, req.user!.id);
+    await approveStagedContact(req.params.id as string, req.user!.id);
     return res.json({ success: true });
   } catch (err) {
     return res.status(500).json({ error: { message: String(err) } });
@@ -169,7 +169,7 @@ router.post("/migration/contacts/:id/approve", async (req: Request, res: Respons
 router.post("/migration/contacts/:id/reject", async (req: Request, res: Response) => {
   try {
     const { notes } = req.body as { notes?: string };
-    await rejectStagedContact(req.params.id, req.user!.id, notes);
+    await rejectStagedContact(req.params.id as string, req.user!.id, notes);
     return res.json({ success: true });
   } catch (err) {
     return res.status(500).json({ error: { message: String(err) } });
@@ -180,7 +180,7 @@ router.post("/migration/contacts/:id/merge", async (req: Request, res: Response)
   try {
     const { mergeTargetId } = req.body as { mergeTargetId: string };
     if (!mergeTargetId) return res.status(400).json({ error: { message: "mergeTargetId required" } });
-    await mergeStagedContact(req.params.id, mergeTargetId, req.user!.id);
+    await mergeStagedContact(req.params.id as string, mergeTargetId, req.user!.id);
     return res.json({ success: true });
   } catch (err) {
     return res.status(500).json({ error: { message: String(err) } });

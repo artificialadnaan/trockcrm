@@ -45,7 +45,13 @@ const adminItems = [
   { to: "/admin/users", icon: Users, label: "Users", roles: ["admin"] },
   { to: "/admin/pipeline", icon: Settings, label: "Pipeline Config", roles: ["admin"] },
   { to: "/admin/procore", icon: Zap, label: "Procore Sync", roles: ["admin"] },
+  { to: "/admin/audit", icon: ClipboardList, label: "Audit Log", roles: ["admin", "director"] },
   { to: "/admin/migration", icon: ArrowRightLeft, label: "Migration", roles: ["admin"] },
+];
+
+const helpItems = [
+  { to: "/help/user-guide", icon: BookOpen, label: "User Guide", roles: ["admin", "director", "rep"] },
+  { to: "/help/admin-guide", icon: HelpCircle, label: "Admin Guide", roles: ["admin"] },
 ];
 
 export function Sidebar() {
@@ -109,6 +115,29 @@ export function Sidebar() {
             <Separator className="my-3 bg-slate-700" />
             <p className="px-3 text-xs text-slate-500 uppercase tracking-wider">Admin</p>
             {filterByRole(adminItems).map((item) => (
+              <NavLink
+                key={item.to}
+                to={item.to}
+                className={({ isActive }) =>
+                  `flex items-center gap-3 px-3 py-2 rounded-md text-sm transition-colors ${
+                    isActive
+                      ? "bg-sidebar-active border-l-2 border-brand-purple text-white"
+                      : "text-slate-400 hover:bg-sidebar-hover hover:text-white"
+                  }`
+                }
+              >
+                <item.icon className="h-4 w-4" />
+                {item.label}
+              </NavLink>
+            ))}
+          </>
+        )}
+
+        {filterByRole(helpItems).length > 0 && (
+          <>
+            <Separator className="my-3 bg-slate-700" />
+            <p className="px-3 text-xs text-slate-500 uppercase tracking-wider">Help</p>
+            {filterByRole(helpItems).map((item) => (
               <NavLink
                 key={item.to}
                 to={item.to}

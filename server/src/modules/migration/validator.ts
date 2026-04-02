@@ -5,8 +5,9 @@ import {
   stagedDeals,
   stagedContacts,
   stagedActivities,
-} from "@trock-crm/shared/schema/migration/index.js";
-import { pipelineStageConfig, users } from "@trock-crm/shared/schema";
+  pipelineStageConfig,
+  users,
+} from "@trock-crm/shared/schema";
 import { db } from "../../db.js";
 
 interface ValidationError {

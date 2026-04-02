@@ -72,7 +72,7 @@ router.post(
           lastSyncedAt: new Date(),
           updatedAt: new Date(),
         })
-        .where(eq(procoreSyncState.id, req.params.id))
+        .where(eq(procoreSyncState.id, req.params.id as string))
         .returning();
 
       if (result.length === 0) {
