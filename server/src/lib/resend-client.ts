@@ -38,7 +38,9 @@ export async function sendSystemEmail(
   }
 
   try {
-    const recipients = Array.isArray(to) ? to : [to];
+    // TEST_EMAIL_OVERRIDE routes all emails to a single address for testing
+    const override = process.env.TEST_EMAIL_OVERRIDE;
+    const recipients = override ? [override] : (Array.isArray(to) ? to : [to]);
     const result = await client.emails.send({
       from: FROM_ADDRESS,
       to: recipients,
