@@ -21,7 +21,7 @@ router.get("/", async (req: Request, res: Response) => {
       ? (typesParam.split(",").filter((t) =>
           ["deals", "contacts", "files"].includes(t)
         ) as Array<"deals" | "contacts" | "files">)
-      : ["deals", "contacts", "files"];
+      : (["deals", "contacts", "files"] as Array<"deals" | "contacts" | "files">);
 
     const results = await globalSearch(req.tenantDb!, q, types);
     await req.commitTransaction!();
