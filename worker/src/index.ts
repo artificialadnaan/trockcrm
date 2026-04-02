@@ -7,6 +7,7 @@ import { registerAllJobs } from "./jobs/index.js";
 import cron from "node-cron";
 import { runStaleDealScan } from "./jobs/stale-deals.js";
 import { runDedupScan } from "./jobs/dedup-scan.js";
+import { runEmailSync } from "./jobs/email-sync.js";
 
 const POLL_INTERVAL_MS = 2000; // Poll job queue every 2 seconds
 
@@ -53,6 +54,17 @@ async function main() {
     }
   }, { timezone: "America/Chicago" });
   console.log("[Worker] Cron scheduled: contact dedup scan at 2:00 AM CT weekly (Sunday)");
+
+  // Email sync: every 5 minutes
+  cron.schedule("*/5 * * * *", async () => {
+    console.log("[Worker:cron] Running email sync...");
+    try {
+      await runEmailSync();
+    } catch (err) {
+      console.error("[Worker:cron] Email sync failed:", err);
+    }
+  });
+  console.log("[Worker] Cron scheduled: email sync every 5 minutes");
 
   console.log("[Worker] Ready.");
 }

@@ -1,0 +1,469 @@
+import { pool } from "../db.js";
+import crypto from "crypto";
+
+const GRAPH_BASE_URL = "https://graph.microsoft.com/v1.0";
+
+// ---------- Inline encryption (worker can't import from server package) ----------
+const ALGORITHM = "aes-256-gcm";
+const IV_LENGTH = 16;
+const TAG_LENGTH = 16;
+
+function getEncryptionKey(): Buffer {
+  const hex = process.env.ENCRYPTION_KEY;
+  if (process.env.NODE_ENV === "production" && !hex) {
+    throw new Error("ENCRYPTION_KEY must be set in production");
+  }
+  const keyHex = hex || "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+  const buf = Buffer.from(keyHex, "hex");
+  if (buf.length !== 32) {
+    throw new Error("ENCRYPTION_KEY must be a 64-character hex string (32 bytes)");
+  }
+  return buf;
+}
+
+function decrypt(encoded: string): string {
+  const key = getEncryptionKey();
+  const packed = Buffer.from(encoded, "base64");
+  if (packed.length < IV_LENGTH + TAG_LENGTH) {
+    throw new Error("Invalid encrypted data: too short");
+  }
+  const iv = packed.subarray(0, IV_LENGTH);
+  const tag = packed.subarray(IV_LENGTH, IV_LENGTH + TAG_LENGTH);
+  const ciphertext = packed.subarray(IV_LENGTH + TAG_LENGTH);
+  const decipher = crypto.createDecipheriv(ALGORITHM, key, iv);
+  decipher.setAuthTag(tag);
+  const decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+  return decrypted.toString("utf8");
+}
+
+// ---------- Inline Graph request (worker can't import from server package) ----------
+interface GraphFetchResult<T> {
+  ok: boolean;
+  status: number;
+  data: T;
+}
+
+async function graphFetch<T = any>(
+  accessToken: string,
+  path: string
+): Promise<GraphFetchResult<T>> {
+  const url = path.startsWith("http") ? path : `${GRAPH_BASE_URL}${path}`;
+  const res = await fetch(url, {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+    },
+  });
+
+  if (res.status === 429) {
+    const retryAfter = parseInt(res.headers.get("Retry-After") || "10", 10);
+    await new Promise((r) => setTimeout(r, retryAfter * 1000));
+    return graphFetch<T>(accessToken, path);
+  }
+
+  const data: T = res.status === 204 ? ({} as T) : await res.json().catch(() => ({} as T));
+  return { ok: res.ok, status: res.status, data };
+}
+
+/**
+ * Inbound email sync job.
+ *
+ * Runs every 5 minutes. For each user with an active Graph token:
+ * 1. Use delta query to get new messages since last sync
+ * 2. For each message, match from/to addresses against contacts.email
+ * 3. If match found: store email, auto-associate to deal, create activity
+ * 4. Update delta link for next sync
+ *
+ * Selective sync: only emails from/to known CRM contacts are stored.
+ */
+export async function runEmailSync(): Promise<void> {
+  console.log("[Worker:email-sync] Starting email sync...");
+
+  const client = await pool.connect();
+  try {
+    // Get all users with active Graph tokens
+    const tokenRows = await client.query(
+      `SELECT ugt.user_id, ugt.access_token, ugt.refresh_token,
+              ugt.token_expires_at, ugt.last_delta_link, ugt.last_sync_at,
+              u.office_id, u.email AS user_email
+       FROM public.user_graph_tokens ugt
+       JOIN public.users u ON u.id = ugt.user_id
+       WHERE ugt.status = 'active' AND u.is_active = true`
+    );
+
+    if (tokenRows.rows.length === 0) {
+      console.log("[Worker:email-sync] No active Graph tokens — skipping");
+      return;
+    }
+
+    console.log(`[Worker:email-sync] Processing ${tokenRows.rows.length} users`);
+
+    for (const tokenRow of tokenRows.rows) {
+      try {
+        // Skip if last sync was less than 60 seconds ago (prevents overlap with slow syncs)
+        if (
+          tokenRow.last_sync_at &&
+          Date.now() - new Date(tokenRow.last_sync_at).getTime() < 60_000
+        ) {
+          continue;
+        }
+
+        // Acquire per-user advisory lock to prevent concurrent syncs for the same user
+        const lockResult = await client.query(
+          "SELECT pg_try_advisory_xact_lock(hashtext($1)) AS acquired",
+          [tokenRow.user_id]
+        );
+        if (!lockResult.rows[0]?.acquired) {
+          console.log(
+            `[Worker:email-sync] Skipping user ${tokenRow.user_id} — sync already in progress`
+          );
+          continue;
+        }
+
+        await syncUserEmails(client, tokenRow);
+      } catch (err: any) {
+        console.error(
+          `[Worker:email-sync] Failed for user ${tokenRow.user_id}:`,
+          err.message
+        );
+
+        // If token is invalid (401), mark for reauth
+        if (
+          err.message?.includes("401") ||
+          err.message?.includes("InvalidAuthenticationToken")
+        ) {
+          await client.query(
+            `UPDATE public.user_graph_tokens
+             SET status = 'reauth_needed', error_message = $1, updated_at = NOW()
+             WHERE user_id = $2`,
+            [`Sync failed: ${err.message}`, tokenRow.user_id]
+          );
+        }
+      }
+    }
+
+    console.log("[Worker:email-sync] Sync complete");
+  } finally {
+    client.release();
+  }
+}
+
+async function syncUserEmails(poolClient: any, tokenRow: any): Promise<void> {
+  const { user_id, access_token, last_delta_link, office_id } = tokenRow;
+
+  // Decrypt access token (stored encrypted at rest)
+  const currentAccessToken = decrypt(access_token);
+
+  // Determine delta URL
+  // First sync: use messages endpoint with select fields (last 7 days)
+  // Subsequent syncs: use the stored delta link
+  let deltaUrl: string;
+  if (last_delta_link) {
+    deltaUrl = last_delta_link;
+  } else {
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    deltaUrl = `/me/mailFolders/inbox/messages/delta?$select=id,conversationId,from,toRecipients,ccRecipients,subject,bodyPreview,body,hasAttachments,receivedDateTime&$filter=receivedDateTime ge ${sevenDaysAgo}`;
+  }
+
+  // Resolve the office schema for this user
+  const officeResult = await poolClient.query(
+    "SELECT slug FROM public.offices WHERE id = $1 AND is_active = true",
+    [office_id]
+  );
+  if (officeResult.rows.length === 0) return;
+
+  const officeSlug = officeResult.rows[0].slug;
+  const slugRegex = /^[a-z][a-z0-9_]*$/;
+  if (!slugRegex.test(officeSlug)) {
+    console.error(`[Worker:email-sync] Invalid office slug: "${officeSlug}" — skipping`);
+    return;
+  }
+  const schemaName = `office_${officeSlug}`;
+
+  // Fetch messages page by page via delta
+  let nextLink: string | null = deltaUrl;
+  let newDeltaLink: string | null = null;
+  let totalProcessed = 0;
+
+  while (nextLink) {
+    const result: GraphFetchResult<any> = await graphFetch(currentAccessToken, nextLink);
+
+    if (!result.ok) {
+      if (result.status === 401) {
+        throw new Error("401 InvalidAuthenticationToken");
+      }
+      throw new Error(
+        `Graph API error: ${result.status} ${JSON.stringify(result.data)}`
+      );
+    }
+
+    const messages = result.data.value ?? [];
+
+    for (const msg of messages) {
+      // Skip deleted/removed messages from delta (they have @removed)
+      if (msg["@removed"]) continue;
+
+      const processed = await processInboundMessage(
+        poolClient,
+        schemaName,
+        user_id,
+        msg
+      );
+      if (processed) totalProcessed++;
+    }
+
+    // Follow pagination
+    nextLink = result.data["@odata.nextLink"] ?? null;
+    // Delta link is only on the last page
+    if (result.data["@odata.deltaLink"]) {
+      newDeltaLink = result.data["@odata.deltaLink"];
+    }
+  }
+
+  // Update the delta link and last sync time
+  if (newDeltaLink) {
+    await poolClient.query(
+      `UPDATE public.user_graph_tokens
+       SET last_delta_link = $1, last_sync_at = NOW(), updated_at = NOW()
+       WHERE user_id = $2`,
+      [newDeltaLink, user_id]
+    );
+  } else {
+    await poolClient.query(
+      `UPDATE public.user_graph_tokens SET last_sync_at = NOW(), updated_at = NOW() WHERE user_id = $1`,
+      [user_id]
+    );
+  }
+
+  if (totalProcessed > 0) {
+    console.log(
+      `[Worker:email-sync] User ${user_id}: synced ${totalProcessed} new emails`
+    );
+  }
+}
+
+/**
+ * Process a single inbound message from Graph delta.
+ * Returns true if the email was stored (matched a contact), false if skipped.
+ */
+async function processInboundMessage(
+  client: any,
+  schemaName: string,
+  userId: string,
+  msg: any
+): Promise<boolean> {
+  const graphMessageId = msg.id;
+  if (!graphMessageId) return false;
+
+  // Dedup check: graph_message_id is UNIQUE
+  const existing = await client.query(
+    `SELECT id FROM ${schemaName}.emails WHERE graph_message_id = $1 LIMIT 1`,
+    [graphMessageId]
+  );
+  if (existing.rows.length > 0) return false;
+
+  // Extract addresses
+  const fromAddress =
+    msg.from?.emailAddress?.address?.toLowerCase() ?? "";
+  const toAddresses: string[] = (msg.toRecipients ?? [])
+    .map((r: any) => r.emailAddress?.address?.toLowerCase())
+    .filter(Boolean);
+  const ccAddresses: string[] = (msg.ccRecipients ?? [])
+    .map((r: any) => r.emailAddress?.address?.toLowerCase())
+    .filter(Boolean);
+
+  // Selective sync: match addresses against contacts.email
+  // Only store emails from/to known CRM contacts
+  const allAddresses = [fromAddress, ...toAddresses, ...ccAddresses].filter(
+    Boolean
+  );
+  const contactMatch = await findContactByEmailRaw(
+    client,
+    schemaName,
+    allAddresses
+  );
+
+  if (!contactMatch) {
+    // No matching contact — skip this email (selective sync)
+    return false;
+  }
+
+  const conversationId = msg.conversationId ?? null;
+  const subject = msg.subject ?? "(No Subject)";
+  const bodyPreview = (msg.bodyPreview ?? "").substring(0, 500);
+  const bodyHtml = msg.body?.content ?? "";
+  const hasAttachments = msg.hasAttachments ?? false;
+  const sentAt = msg.receivedDateTime
+    ? new Date(msg.receivedDateTime)
+    : new Date();
+
+  // Insert email record
+  const insertResult = await client.query(
+    `INSERT INTO ${schemaName}.emails
+     (graph_message_id, graph_conversation_id, direction, from_address, to_addresses, cc_addresses,
+      subject, body_preview, body_html, has_attachments, contact_id, user_id, sent_at)
+     VALUES ($1, $2, 'inbound', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+     ON CONFLICT (graph_message_id) DO NOTHING
+     RETURNING id`,
+    [
+      graphMessageId,
+      conversationId,
+      fromAddress,
+      toAddresses,
+      ccAddresses,
+      subject,
+      bodyPreview,
+      bodyHtml,
+      hasAttachments,
+      contactMatch.id,
+      userId,
+      sentAt,
+    ]
+  );
+
+  if (insertResult.rows.length === 0) return false; // Conflict — already existed
+
+  const emailId = insertResult.rows[0].id;
+
+  // Auto-associate to deal
+  const associatedDealId = await autoAssociateRaw(
+    client,
+    schemaName,
+    emailId,
+    contactMatch.id,
+    userId
+  );
+
+  // Create follow-up task for EVERY inbound email from a CRM contact (per spec)
+  const contactName =
+    `${contactMatch.first_name} ${contactMatch.last_name}`.trim();
+  await client.query(
+    `INSERT INTO ${schemaName}.tasks
+     (title, type, priority, status, assigned_to, deal_id, contact_id, email_id, due_date)
+     VALUES ($1, 'inbound_email', 'high', 'pending', $2, $3, $4, $5, CURRENT_DATE)`,
+    [
+      `Reply to ${contactName}: ${subject}`,
+      userId, // assigned to the rep whose mailbox received the email
+      associatedDealId, // may be null if 0 or multiple deals
+      contactMatch.id,
+      emailId,
+    ]
+  );
+
+  // Create activity record
+  await client.query(
+    `INSERT INTO ${schemaName}.activities
+     (type, user_id, contact_id, email_id, subject, body, occurred_at)
+     VALUES ('email', $1, $2, $3, $4, $5, $6)`,
+    [
+      userId,
+      contactMatch.id,
+      emailId,
+      subject,
+      bodyPreview.substring(0, 1000),
+      sentAt,
+    ]
+  );
+
+  // Emit email.received event via job_queue
+  await client.query(
+    `INSERT INTO public.job_queue (job_type, payload, office_id, status, run_after)
+     VALUES ('domain_event', $1, $2, 'pending', NOW())`,
+    [
+      JSON.stringify({
+        eventName: "email.received",
+        emailId,
+        contactId: contactMatch.id,
+        contactName: `${contactMatch.first_name} ${contactMatch.last_name}`,
+        fromAddress,
+        subject,
+        userId,
+      }),
+      null, // office_id not needed for domain events dispatched by worker
+    ]
+  );
+
+  return true;
+}
+
+/**
+ * Find a CRM contact by email address using raw SQL (worker context).
+ */
+async function findContactByEmailRaw(
+  client: any,
+  schemaName: string,
+  emailAddresses: string[]
+): Promise<{ id: string; first_name: string; last_name: string } | null> {
+  if (emailAddresses.length === 0) return null;
+
+  // Build parameterized IN clause
+  const placeholders = emailAddresses.map((_, i) => `$${i + 1}`).join(", ");
+  const result = await client.query(
+    `SELECT id, first_name, last_name FROM ${schemaName}.contacts
+     WHERE LOWER(email) IN (${placeholders}) AND is_active = true
+     LIMIT 1`,
+    emailAddresses.map((e) => e.toLowerCase())
+  );
+
+  return result.rows[0] ?? null;
+}
+
+/**
+ * Auto-associate an email to a deal using raw SQL (worker context).
+ *
+ * Rules:
+ * - 1 active deal for contact -> auto-associate
+ * - Multiple active deals -> leave null + create disambiguation task
+ * - 0 active deals -> contact only
+ */
+async function autoAssociateRaw(
+  client: any,
+  schemaName: string,
+  emailId: string,
+  contactId: string,
+  userId: string
+): Promise<string | null> {
+  const activeDeals = await client.query(
+    `SELECT d.id AS deal_id, d.deal_number, d.name AS deal_name
+     FROM ${schemaName}.deals d
+     JOIN ${schemaName}.contact_deal_associations cda ON cda.deal_id = d.id
+     WHERE cda.contact_id = $1 AND d.is_active = true`,
+    [contactId]
+  );
+
+  if (activeDeals.rows.length === 1) {
+    // Auto-associate to the single active deal
+    const dealId = activeDeals.rows[0].deal_id;
+    await client.query(
+      `UPDATE ${schemaName}.emails SET deal_id = $1 WHERE id = $2`,
+      [dealId, emailId]
+    );
+    // Also update the activity record
+    await client.query(
+      `UPDATE ${schemaName}.activities SET deal_id = $1 WHERE email_id = $2`,
+      [dealId, emailId]
+    );
+    return dealId;
+  } else if (activeDeals.rows.length > 1) {
+    // Multiple active deals — create disambiguation task for rep
+    const dealNames = activeDeals.rows
+      .map((d: any) => `${d.deal_number} ${d.deal_name}`)
+      .join(", ");
+    await client.query(
+      `INSERT INTO ${schemaName}.tasks
+       (title, description, type, priority, status, assigned_to, contact_id, email_id, due_date)
+       VALUES ($1, $2, 'inbound_email', 'normal', 'pending', $3, $4, $5, CURRENT_DATE)`,
+      [
+        "Associate email to correct deal",
+        `An inbound email was received for a contact with multiple active deals: ${dealNames}. Review and associate to the correct deal.`,
+        userId,
+        contactId,
+        emailId,
+      ]
+    );
+    return null; // No auto-association — rep must choose
+  }
+  // 0 active deals: contact-only association, no deal
+  return null;
+}
