@@ -387,6 +387,12 @@ router.post("/:id/activities", async (req, res, next) => {
 
     if (!type) throw new AppError(400, "Activity type is required");
 
+    // RBAC: If dealId is provided, verify the user has access to this deal
+    if (dealId) {
+      const deal = await getDealById(req.tenantDb!, dealId, req.user!.role, req.user!.id);
+      if (!deal) throw new AppError(404, "Deal not found or access denied");
+    }
+
     const activity = await createActivity(req.tenantDb!, {
       type,
       userId: req.user!.id,
@@ -399,7 +405,44 @@ router.post("/:id/activities", async (req, res, next) => {
       occurredAt,
     });
 
+    // Outbox pattern: durable event BEFORE commit so worker gets activity.created
+    await req.tenantDb!.insert(jobQueue).values({
+      jobType: "domain_event",
+      payload: {
+        eventName: DOMAIN_EVENTS.ACTIVITY_CREATED,
+        activityId: activity.id,
+        type: activity.type,
+        userId: req.user!.id,
+        dealId: activity.dealId,
+        contactId: activity.contactId,
+        subject: activity.subject,
+      },
+      officeId: req.user!.activeOfficeId ?? req.user!.officeId,
+      status: "pending",
+      runAfter: new Date(),
+    });
+
     await req.commitTransaction!();
+
+    // Best-effort local emit for SSE push
+    try {
+      eventBus.emitLocal({
+        name: DOMAIN_EVENTS.ACTIVITY_CREATED,
+        payload: {
+          activityId: activity.id,
+          type: activity.type,
+          dealId: activity.dealId,
+          contactId: activity.contactId,
+          subject: activity.subject,
+        },
+        officeId: req.user!.activeOfficeId ?? req.user!.officeId,
+        userId: req.user!.id,
+        timestamp: new Date(),
+      });
+    } catch (eventErr) {
+      console.error("[Contacts] Failed to emit activity.created event:", eventErr);
+    }
+
     res.status(201).json({ activity });
   } catch (err) {
     next(err);
@@ -407,6 +450,7 @@ router.post("/:id/activities", async (req, res, next) => {
 });
 
 // GET /api/contacts/:id/activities — get activities for a contact
+// RBAC note: contacts are office-shared, so all roles can view contact activities.
 router.get("/:id/activities", async (req, res, next) => {
   try {
     const { getActivities } = await import("../activities/service.js");

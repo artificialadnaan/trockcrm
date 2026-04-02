@@ -85,10 +85,20 @@ export async function runStaleDealScan(): Promise<void> {
         const link = `/deals/${staleDeal.deal_id}`;
 
         // Notify the assigned rep
-        await client.query(
+        const repNotifResult = await client.query(
           `INSERT INTO ${schemaName}.notifications (user_id, type, title, body, link)
-           VALUES ($1, 'stale_deal', $2, $3, $4)`,
+           VALUES ($1, 'stale_deal', $2, $3, $4)
+           RETURNING id`,
           [staleDeal.assigned_rep_id, title, body, link]
+        );
+        // PG NOTIFY so the server SSE manager can push to connected clients
+        await client.query(
+          `SELECT pg_notify('crm_events', $1)`,
+          [JSON.stringify({
+            eventName: "notification.created",
+            userId: staleDeal.assigned_rep_id,
+            notificationId: repNotifResult.rows[0]?.id,
+          })]
         );
 
         // Notify all directors/admins in this office
@@ -99,10 +109,19 @@ export async function runStaleDealScan(): Promise<void> {
         );
 
         for (const director of directors.rows) {
-          await client.query(
+          const dirNotifResult = await client.query(
             `INSERT INTO ${schemaName}.notifications (user_id, type, title, body, link)
-             VALUES ($1, 'stale_deal', $2, $3, $4)`,
+             VALUES ($1, 'stale_deal', $2, $3, $4)
+             RETURNING id`,
             [director.id, title, body, link]
+          );
+          await client.query(
+            `SELECT pg_notify('crm_events', $1)`,
+            [JSON.stringify({
+              eventName: "notification.created",
+              userId: director.id,
+              notificationId: dirNotifResult.rows[0]?.id,
+            })]
           );
         }
 

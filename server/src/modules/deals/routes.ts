@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { and, eq, desc } from "drizzle-orm";
-import { dealApprovals } from "@trock-crm/shared/schema";
+import { dealApprovals, jobQueue } from "@trock-crm/shared/schema";
 import { requireRole } from "../../middleware/rbac.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { eventBus } from "../../events/bus.js";
@@ -255,9 +255,25 @@ router.post("/:id/approvals", async (req, res, next) => {
       })
       .returning();
 
+    // Outbox pattern: durable event BEFORE commit so worker gets it
+    await req.tenantDb!.insert(jobQueue).values({
+      jobType: "domain_event",
+      payload: {
+        eventName: "approval.requested",
+        dealId: req.params.id,
+        targetStageId,
+        requiredRole,
+        requestedBy: req.user!.id,
+        approvalId: result[0].id,
+      },
+      officeId: req.user!.activeOfficeId ?? req.user!.officeId,
+      status: "pending",
+      runAfter: new Date(),
+    });
+
     await req.commitTransaction!();
 
-    // Emit approval.requested event AFTER commit for notification delivery
+    // Best-effort local emit for SSE push (already persisted via outbox above)
     try {
       eventBus.emitLocal({
         name: "approval.requested",
@@ -323,9 +339,25 @@ router.patch(
         .where(eq(dealApprovals.id, approvalId))
         .returning();
 
+      // Outbox pattern: durable event BEFORE commit so worker gets it
+      await req.tenantDb!.insert(jobQueue).values({
+        jobType: "domain_event",
+        payload: {
+          eventName: "approval.resolved",
+          dealId,
+          approvalId,
+          status,
+          requestedBy: approval.requestedBy,
+          resolvedBy: req.user!.id,
+        },
+        officeId: req.user!.activeOfficeId ?? req.user!.officeId,
+        status: "pending",
+        runAfter: new Date(),
+      });
+
       await req.commitTransaction!();
 
-      // Emit approval.resolved event AFTER commit
+      // Best-effort local emit for SSE push (already persisted via outbox above)
       try {
         eventBus.emitLocal({
           name: "approval.resolved",

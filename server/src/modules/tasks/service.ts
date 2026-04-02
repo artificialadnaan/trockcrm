@@ -170,9 +170,9 @@ export async function getTaskCounts(
         WHERE status IN ('pending', 'in_progress') AND (due_date > ${today} OR due_date IS NULL)
       )::int AS upcoming,
       COUNT(*) FILTER (
-        WHERE status IN ('completed', 'dismissed')
-          AND (completed_at >= (CURRENT_TIMESTAMP AT TIME ZONE 'America/Chicago')::date - INTERVAL '7 days'
-               OR completed_at IS NULL)
+        WHERE status = 'completed'
+          AND completed_at IS NOT NULL
+          AND completed_at >= (CURRENT_TIMESTAMP AT TIME ZONE 'America/Chicago')::date - INTERVAL '7 days'
       )::int AS completed
     FROM tasks
     WHERE assigned_to = ${userId}
@@ -275,6 +275,8 @@ export async function updateTask(
 
 /**
  * Complete a task. Sets status to 'completed' and records completedAt.
+ * Uses a conditional update to prevent race conditions — only succeeds
+ * if the task is in a completable state (pending or in_progress).
  */
 export async function completeTask(
   tenantDb: TenantDb,
@@ -282,13 +284,11 @@ export async function completeTask(
   userRole: string,
   userId: string
 ) {
+  // RBAC check: getTaskById enforces rep-only-own-tasks
   const existing = await getTaskById(tenantDb, taskId, userRole, userId);
   if (!existing) throw new AppError(404, "Task not found");
 
-  if (existing.status === "completed") {
-    throw new AppError(400, "Task is already completed");
-  }
-
+  // Conditional update: only complete if task is in a completable state
   const result = await tenantDb
     .update(tasks)
     .set({
@@ -296,8 +296,12 @@ export async function completeTask(
       completedAt: new Date(),
       isOverdue: false,
     })
-    .where(eq(tasks.id, taskId))
+    .where(and(eq(tasks.id, taskId), inArray(tasks.status, ["pending", "in_progress"])))
     .returning();
+
+  if (result.length === 0) {
+    throw new AppError(400, "Task already completed or dismissed");
+  }
 
   return result[0];
 }

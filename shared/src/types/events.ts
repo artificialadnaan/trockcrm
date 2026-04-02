@@ -6,6 +6,7 @@ export const DOMAIN_EVENTS = {
   EMAIL_RECEIVED: "email.received",
   EMAIL_SENT: "email.sent",
   FILE_UPLOADED: "file.uploaded",
+  ACTIVITY_CREATED: "activity.created",
   TASK_COMPLETED: "task.completed",
   TASK_ASSIGNED: "task.assigned",
   NOTIFICATION_CREATED: "notification.created",

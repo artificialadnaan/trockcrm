@@ -51,7 +51,7 @@ export async function runColdLeadWarming(): Promise<void> {
          JOIN ${schemaName}.contact_deal_associations cda ON cda.contact_id = c.id
          JOIN ${schemaName}.deals d ON d.id = cda.deal_id
          JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
-         WHERE c.last_contacted_at < NOW() - INTERVAL '60 days'
+         WHERE (c.last_contacted_at IS NULL OR c.last_contacted_at < NOW() - INTERVAL '60 days')
            AND c.is_active = true
            AND d.is_active = true
            AND psc.is_terminal = false

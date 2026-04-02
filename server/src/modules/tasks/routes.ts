@@ -90,9 +90,25 @@ router.post("/", async (req, res, next) => {
       remindAt,
     });
 
+    // Outbox pattern: insert durable event BEFORE commit so worker gets it
+    if (targetAssignee !== req.user!.id) {
+      await req.tenantDb!.insert(jobQueue).values({
+        jobType: "domain_event",
+        payload: {
+          eventName: "task.assigned",
+          taskId: task.id,
+          assignedTo: targetAssignee,
+          title: task.title,
+        },
+        officeId: req.user!.activeOfficeId ?? req.user!.officeId,
+        status: "pending",
+        runAfter: new Date(),
+      });
+    }
+
     await req.commitTransaction!();
 
-    // Emit task.assigned notification if assigned to someone else
+    // Best-effort local emit for SSE push (already persisted via outbox above)
     if (targetAssignee !== req.user!.id) {
       try {
         eventBus.emitLocal({
@@ -107,7 +123,7 @@ router.post("/", async (req, res, next) => {
           timestamp: new Date(),
         });
       } catch (eventErr) {
-        console.error("[Tasks] Failed to emit task event:", eventErr);
+        console.error("[Tasks] Failed to emit task.assigned event:", eventErr);
       }
     }
 
@@ -120,10 +136,17 @@ router.post("/", async (req, res, next) => {
 // PATCH /api/tasks/:id — update task fields
 router.patch("/:id", async (req, res, next) => {
   try {
+    const body = { ...req.body };
+
+    // Reps cannot reassign tasks
+    if (req.user!.role === "rep") {
+      delete body.assignedTo;
+    }
+
     const task = await updateTask(
       req.tenantDb!,
       req.params.id,
-      req.body,
+      body,
       req.user!.role,
       req.user!.id
     );

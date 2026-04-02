@@ -120,10 +120,20 @@ export async function runActivityDropDetection(): Promise<void> {
           );
 
           for (const director of directors.rows) {
-            await client.query(
+            const notifResult = await client.query(
               `INSERT INTO ${schemaName}.notifications (user_id, type, title, body, link)
-               VALUES ($1, 'activity_drop', $2, $3, $4)`,
+               VALUES ($1, 'activity_drop', $2, $3, $4)
+               RETURNING id`,
               [director.id, title, body, `/director`]
+            );
+            // PG NOTIFY so the server SSE manager can push to connected clients
+            await client.query(
+              `SELECT pg_notify('crm_events', $1)`,
+              [JSON.stringify({
+                eventName: "notification.created",
+                userId: director.id,
+                notificationId: notifResult.rows[0]?.id,
+              })]
             );
             totalAlerts++;
           }

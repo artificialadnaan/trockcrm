@@ -597,15 +597,25 @@ export function registerAllJobs() {
     const schemaName = `office_${slug}`;
 
     // Create notification for the rep
-    await workerPool.query(
+    const emailNotifResult = await workerPool.query(
       `INSERT INTO ${schemaName}.notifications (user_id, type, title, body, link)
-       VALUES ($1, 'inbound_email', $2, $3, $4)`,
+       VALUES ($1, 'inbound_email', $2, $3, $4)
+       RETURNING id`,
       [
         payload.userId,
         `New email from ${payload.contactName || payload.fromAddress}`,
         payload.subject?.substring(0, 200) ?? "New email",
         "/email", // Link to inbox page — no per-email route exists yet
       ]
+    );
+    // PG NOTIFY so the server SSE manager can push to connected clients
+    await workerPool.query(
+      `SELECT pg_notify('crm_events', $1)`,
+      [JSON.stringify({
+        eventName: "notification.created",
+        userId: payload.userId,
+        notificationId: emailNotifResult.rows[0]?.id,
+      })]
     );
   });
 
@@ -634,15 +644,25 @@ export function registerAllJobs() {
 
     const schemaName = `office_${slug}`;
 
-    await workerPool.query(
+    const taskNotifResult = await workerPool.query(
       `INSERT INTO ${schemaName}.notifications (user_id, type, title, body, link)
-       VALUES ($1, 'task_assigned', $2, $3, $4)`,
+       VALUES ($1, 'task_assigned', $2, $3, $4)
+       RETURNING id`,
       [
         payload.assignedTo,
         `New task assigned: ${payload.title}`,
         payload.title,
         "/tasks",
       ]
+    );
+    // PG NOTIFY so the server SSE manager can push to connected clients
+    await workerPool.query(
+      `SELECT pg_notify('crm_events', $1)`,
+      [JSON.stringify({
+        eventName: "notification.created",
+        userId: payload.assignedTo,
+        notificationId: taskNotifResult.rows[0]?.id,
+      })]
     );
   });
 
@@ -683,6 +703,138 @@ export function registerAllJobs() {
         `Completed: ${payload.title}`,
       ]
     );
+  });
+
+  // Domain event: approval.requested -> notify directors/admins
+  domainEventHandlers.set("approval.requested", async (payload, officeId) => {
+    console.log(`[Worker] approval.requested: deal ${payload.dealId}, approval ${payload.approvalId}`);
+
+    if (!payload.requestedBy) return;
+
+    const { pool: workerPool } = await import("../db.js");
+
+    // Resolve office from the requesting user
+    let resolvedOfficeId = officeId;
+    if (!resolvedOfficeId) {
+      const userRes = await workerPool.query(
+        "SELECT office_id FROM public.users WHERE id = $1",
+        [payload.requestedBy]
+      );
+      resolvedOfficeId = userRes.rows[0]?.office_id ?? null;
+    }
+    if (!resolvedOfficeId) return;
+
+    const officeResult = await workerPool.query(
+      "SELECT slug FROM public.offices WHERE id = $1 AND is_active = true",
+      [resolvedOfficeId]
+    );
+    if (officeResult.rows.length === 0) return;
+
+    const slug = officeResult.rows[0].slug;
+    const slugRegex = /^[a-z][a-z0-9_]*$/;
+    if (!slugRegex.test(slug)) return;
+    const schemaName = `office_${slug}`;
+
+    // Get requester name for the notification
+    const requesterRes = await workerPool.query(
+      "SELECT display_name FROM public.users WHERE id = $1",
+      [payload.requestedBy]
+    );
+    const requesterName = requesterRes.rows[0]?.display_name ?? "A rep";
+
+    // Notify all directors/admins in this office
+    const directors = await workerPool.query(
+      `SELECT id FROM public.users
+       WHERE office_id = $1 AND role IN ('director', 'admin') AND is_active = true`,
+      [resolvedOfficeId]
+    );
+
+    for (const director of directors.rows) {
+      const approvalNotifResult = await workerPool.query(
+        `INSERT INTO ${schemaName}.notifications (user_id, type, title, body, link)
+         VALUES ($1, 'approval_requested', $2, $3, $4)
+         RETURNING id`,
+        [
+          director.id,
+          `Approval requested by ${requesterName}`,
+          `Stage change approval needed for deal. Required role: ${payload.requiredRole}`,
+          `/deals/${payload.dealId}`,
+        ]
+      );
+      await workerPool.query(
+        `SELECT pg_notify('crm_events', $1)`,
+        [JSON.stringify({
+          eventName: "notification.created",
+          userId: director.id,
+          notificationId: approvalNotifResult.rows[0]?.id,
+        })]
+      );
+    }
+
+    console.log(`[Worker] approval.requested: notified ${directors.rows.length} directors/admins`);
+  });
+
+  // Domain event: approval.resolved -> notify the requesting rep
+  domainEventHandlers.set("approval.resolved", async (payload, officeId) => {
+    console.log(`[Worker] approval.resolved: deal ${payload.dealId}, status ${payload.status}`);
+
+    if (!payload.requestedBy) return;
+
+    const { pool: workerPool } = await import("../db.js");
+
+    // Resolve office
+    let resolvedOfficeId = officeId;
+    if (!resolvedOfficeId) {
+      const userRes = await workerPool.query(
+        "SELECT office_id FROM public.users WHERE id = $1",
+        [payload.requestedBy]
+      );
+      resolvedOfficeId = userRes.rows[0]?.office_id ?? null;
+    }
+    if (!resolvedOfficeId) return;
+
+    const officeResult = await workerPool.query(
+      "SELECT slug FROM public.offices WHERE id = $1 AND is_active = true",
+      [resolvedOfficeId]
+    );
+    if (officeResult.rows.length === 0) return;
+
+    const slug = officeResult.rows[0].slug;
+    const slugRegex = /^[a-z][a-z0-9_]*$/;
+    if (!slugRegex.test(slug)) return;
+    const schemaName = `office_${slug}`;
+
+    // Get resolver name
+    const resolverRes = await workerPool.query(
+      "SELECT display_name FROM public.users WHERE id = $1",
+      [payload.resolvedBy]
+    );
+    const resolverName = resolverRes.rows[0]?.display_name ?? "A director";
+
+    const statusLabel = payload.status === "approved" ? "approved" : "rejected";
+
+    // Notify the rep who requested the approval
+    const resolveNotifResult = await workerPool.query(
+      `INSERT INTO ${schemaName}.notifications (user_id, type, title, body, link)
+       VALUES ($1, 'approval_resolved', $2, $3, $4)
+       RETURNING id`,
+      [
+        payload.requestedBy,
+        `Approval ${statusLabel} by ${resolverName}`,
+        `Your stage change request was ${statusLabel}.`,
+        `/deals/${payload.dealId}`,
+      ]
+    );
+    await workerPool.query(
+      `SELECT pg_notify('crm_events', $1)`,
+      [JSON.stringify({
+        eventName: "notification.created",
+        userId: payload.requestedBy,
+        notificationId: resolveNotifResult.rows[0]?.id,
+      })]
+    );
+
+    console.log(`[Worker] approval.resolved: notified requester ${payload.requestedBy}`);
   });
 
   domainEventHandlers.set("ai.suggest_action", async (payload, officeId) => {
