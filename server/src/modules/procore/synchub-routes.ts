@@ -143,18 +143,157 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
     }
 
     if (existingDealId) {
-      // Upsert: update the existing deal's stage and ensure procore_bid_id is set
-      await client.query(
-        `UPDATE ${schemaName}.deals
-         SET stage_id = $1,
-             procore_bid_id = COALESCE($2, procore_bid_id),
-             updated_at = NOW()
-         WHERE id = $3`,
-        [stageId, procore_bid_id ?? null, existingDealId]
+      // Fetch current deal state for stage comparison
+      const currentDealResult = await client.query(
+        `SELECT stage_id, stage_entered_at FROM ${schemaName}.deals WHERE id = $1`,
+        [existingDealId]
       );
+      const currentStageId: string = currentDealResult.rows[0].stage_id;
+      const stageEnteredAt: Date | null = currentDealResult.rows[0].stage_entered_at;
+
+      const stageChanged = currentStageId !== stageId;
+
+      if (stageChanged) {
+        // Lookup display_order for both stages to detect backward moves
+        const stageOrderResult = await client.query(
+          `SELECT id, display_order FROM public.pipeline_stage_config WHERE id IN ($1, $2)`,
+          [currentStageId, stageId]
+        );
+        const orderMap = new Map<string, number>();
+        for (const row of stageOrderResult.rows) {
+          orderMap.set(row.id, row.display_order);
+        }
+        const currentOrder = orderMap.get(currentStageId) ?? 0;
+        const targetOrder = orderMap.get(stageId) ?? 0;
+        const isBackwardMove = targetOrder < currentOrder;
+
+        if (isBackwardMove) {
+          console.warn(
+            `[SyncHub] Backward stage move for deal ${existingDealId}: ` +
+            `stage ${currentStageId} (order ${currentOrder}) -> ${stageId} (order ${targetOrder}). ` +
+            `Allowing — Procore is system of record.`
+          );
+        }
+
+        // Validate stage gate — log conflicts but always allow (SyncHub is authoritative)
+        // Gate check uses raw SQL against the same tables validateStageGate() would use
+        const gateFieldsResult = await client.query(
+          `SELECT required_fields, required_documents, required_approvals
+           FROM public.pipeline_stage_config WHERE id = $1`,
+          [stageId]
+        );
+        if (gateFieldsResult.rows.length > 0) {
+          const { required_fields, required_documents, required_approvals } = gateFieldsResult.rows[0];
+          const hasGates =
+            (Array.isArray(required_fields) && required_fields.length > 0) ||
+            (Array.isArray(required_documents) && required_documents.length > 0) ||
+            (Array.isArray(required_approvals) && required_approvals.length > 0);
+          if (hasGates) {
+            console.warn(
+              `[SyncHub] Stage gate bypass for deal ${existingDealId}: ` +
+              `target stage ${stage_slug} has gate requirements ` +
+              `(fields: ${JSON.stringify(required_fields)}, ` +
+              `docs: ${JSON.stringify(required_documents)}, ` +
+              `approvals: ${JSON.stringify(required_approvals)}). ` +
+              `Bypassing — SyncHub integration is authoritative for stage changes.`
+            );
+          }
+        }
+
+        // Calculate duration in previous stage
+        const durationSql = stageEnteredAt
+          ? `(NOW() - $1::timestamptz)`
+          : null;
+
+        // Resolve a system user for changed_by (reuse the assignedRepId fallback)
+        const systemUserResult = await client.query(
+          `SELECT id FROM public.users
+           WHERE office_id = $1 AND is_active = true AND role IN ('admin', 'director')
+           ORDER BY created_at ASC LIMIT 1`,
+          [officeId]
+        );
+        const changedByUserId: string = systemUserResult.rows[0]?.id ?? assignedRepId;
+
+        // Insert stage history audit record
+        if (durationSql) {
+          await client.query(
+            `INSERT INTO ${schemaName}.deal_stage_history
+             (deal_id, from_stage_id, to_stage_id, changed_by, is_backward_move,
+              is_director_override, override_reason, duration_in_previous_stage)
+             VALUES ($1, $2, $3, $4, $5, false, $6, (NOW() - $7::timestamptz))`,
+            [
+              existingDealId,
+              currentStageId,
+              stageId,
+              changedByUserId,
+              isBackwardMove,
+              "Procore/SyncHub integration sync",
+              stageEnteredAt,
+            ]
+          );
+        } else {
+          await client.query(
+            `INSERT INTO ${schemaName}.deal_stage_history
+             (deal_id, from_stage_id, to_stage_id, changed_by, is_backward_move,
+              is_director_override, override_reason)
+             VALUES ($1, $2, $3, $4, $5, false, $6)`,
+            [
+              existingDealId,
+              currentStageId,
+              stageId,
+              changedByUserId,
+              isBackwardMove,
+              "Procore/SyncHub integration sync",
+            ]
+          );
+        }
+
+        // Emit domain event via job_queue (outbox pattern)
+        await client.query(
+          `INSERT INTO public.job_queue (job_type, payload, office_id, status, run_after)
+           VALUES ('domain_event', $1::jsonb, $2::uuid, 'pending', NOW())`,
+          [
+            JSON.stringify({
+              eventName: "deal.stage.changed",
+              dealId: existingDealId,
+              fromStageId: currentStageId,
+              toStageId: stageId,
+              isBackwardMove,
+              changedBy: "synchub_integration",
+              officeId,
+            }),
+            officeId,
+          ]
+        );
+      }
+
+      // Update deal: always sync procore_bid_id; update stage + stage_entered_at only if changed
+      if (stageChanged) {
+        await client.query(
+          `UPDATE ${schemaName}.deals
+           SET stage_id = $1,
+               stage_entered_at = NOW(),
+               procore_bid_id = COALESCE($2, procore_bid_id),
+               updated_at = NOW()
+           WHERE id = $3`,
+          [stageId, procore_bid_id ?? null, existingDealId]
+        );
+      } else {
+        await client.query(
+          `UPDATE ${schemaName}.deals
+           SET procore_bid_id = COALESCE($1, procore_bid_id),
+               updated_at = NOW()
+           WHERE id = $2`,
+          [procore_bid_id ?? null, existingDealId]
+        );
+      }
+
       await client.query("COMMIT");
-      console.log(`[SyncHub] Updated existing deal ${existingDealId} from Bid Board push`);
-      res.json({ status: "updated", deal_id: existingDealId });
+      console.log(
+        `[SyncHub] Updated existing deal ${existingDealId} from Bid Board push` +
+        (stageChanged ? ` (stage changed to ${stage_slug})` : "")
+      );
+      res.json({ status: "updated", deal_id: existingDealId, stage_changed: stageChanged });
       return;
     }
 
