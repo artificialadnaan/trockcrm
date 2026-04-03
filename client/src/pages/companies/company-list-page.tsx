@@ -139,20 +139,25 @@ export function CompanyListPage() {
                 onClick={() => navigate(`/companies/${company.id}`)}
               >
                 <div className="flex items-center justify-between gap-4">
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 mb-1">
-                      {categoryLabel && (
-                        <Badge variant="outline" className={`${colorClass} border-0 text-xs`}>
-                          {categoryLabel}
-                        </Badge>
+                  <div className="flex items-center gap-3 flex-1 min-w-0">
+                    <span className="flex-shrink-0 inline-flex items-center justify-center h-8 w-8 rounded-full bg-purple-50 text-purple-600">
+                      <Building2 className="h-4 w-4" />
+                    </span>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 mb-1">
+                        {categoryLabel && (
+                          <Badge variant="outline" className={`${colorClass} border-0 text-xs`}>
+                            {categoryLabel}
+                          </Badge>
+                        )}
+                      </div>
+                      <h3 className="font-semibold truncate">{company.name}</h3>
+                      {(company.city || company.state) && (
+                        <p className="text-xs text-muted-foreground mt-0.5">
+                          {[company.city, company.state].filter(Boolean).join(", ")}
+                        </p>
                       )}
                     </div>
-                    <h3 className="font-semibold truncate">{company.name}</h3>
-                    {(company.city || company.state) && (
-                      <p className="text-xs text-muted-foreground mt-0.5">
-                        {[company.city, company.state].filter(Boolean).join(", ")}
-                      </p>
-                    )}
                   </div>
                   <div className="text-right shrink-0 space-y-1">
                     <p className="text-xs text-muted-foreground">

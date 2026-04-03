@@ -8,16 +8,17 @@ interface StatCardProps {
   icon?: ReactNode;
   trend?: { value: number; label: string; positive?: boolean };
   className?: string;
+  valueClassName?: string;
 }
 
-export function StatCard({ title, value, subtitle, icon, trend, className = "" }: StatCardProps) {
+export function StatCard({ title, value, subtitle, icon, trend, className = "", valueClassName = "text-2xl" }: StatCardProps) {
   return (
     <Card className={className}>
       <CardContent className="p-4">
         <div className="flex items-start justify-between">
           <div className="space-y-1">
             <p className="text-sm text-muted-foreground">{title}</p>
-            <p className="text-2xl font-bold">{value}</p>
+            <p className={`${valueClassName} font-bold`}>{value}</p>
             {subtitle && (
               <p className="text-xs text-muted-foreground">{subtitle}</p>
             )}

@@ -74,16 +74,16 @@ export function ContactFilters({ filters, onFilterChange, onReset }: ContactFilt
         value={filters.sortBy ?? "updated_at"}
         onValueChange={(v) => onFilterChange({ sortBy: v ?? undefined })}
       >
-        <SelectTrigger className="w-[160px]">
-          <SelectValue placeholder="Sort By" />
+        <SelectTrigger className="w-[180px]">
+          <SelectValue placeholder="Recently Updated" />
         </SelectTrigger>
         <SelectContent>
-          <SelectItem value="updated_at">Last Updated</SelectItem>
-          <SelectItem value="name">Name</SelectItem>
-          <SelectItem value="company_name">Company</SelectItem>
-          <SelectItem value="created_at">Date Created</SelectItem>
+          <SelectItem value="updated_at">Recently Updated</SelectItem>
+          <SelectItem value="name">Name (A–Z)</SelectItem>
+          <SelectItem value="company_name">Company (A–Z)</SelectItem>
+          <SelectItem value="created_at">Newest First</SelectItem>
           <SelectItem value="last_contacted_at">Last Contacted</SelectItem>
-          <SelectItem value="touchpoint_count">Touchpoints</SelectItem>
+          <SelectItem value="touchpoint_count">Most Touchpoints</SelectItem>
         </SelectContent>
       </Select>
 

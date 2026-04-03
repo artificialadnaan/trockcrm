@@ -58,23 +58,27 @@ export function DirectorDashboardPage() {
       </div>
 
       {/* DD vs Pipeline Summary */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <StatCard
           title="True Pipeline"
           value={formatCurrency(data.ddVsPipeline.pipelineValue)}
           subtitle={`${data.ddVsPipeline.pipelineCount} deals`}
           icon={<TrendingUp className="h-5 w-5" />}
+          valueClassName="text-2xl"
         />
         <StatCard
           title="DD Pipeline"
           value={formatCurrency(data.ddVsPipeline.ddValue)}
           subtitle={`${data.ddVsPipeline.ddCount} deals`}
           icon={<BarChart3 className="h-5 w-5" />}
+          valueClassName="text-2xl"
         />
         <StatCard
           title="Total Pipeline"
           value={formatCurrency(data.ddVsPipeline.totalValue)}
           subtitle={`${data.ddVsPipeline.totalCount} deals total`}
+          className="sm:col-span-2 bg-primary/5"
+          valueClassName="text-5xl"
         />
       </div>
 
