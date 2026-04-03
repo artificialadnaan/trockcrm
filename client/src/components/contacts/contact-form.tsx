@@ -17,6 +17,7 @@ import { createContact, updateContact } from "@/hooks/use-contacts";
 import type { Contact } from "@/hooks/use-contacts";
 import { CATEGORY_LABELS } from "@/lib/contact-utils";
 import { Loader2 } from "lucide-react";
+import { CompanySelector } from "@/components/companies/company-selector";
 
 interface ContactFormProps {
   contact?: Contact;
@@ -34,6 +35,7 @@ export function ContactForm({ contact, onSuccess }: ContactFormProps) {
     phone: contact?.phone ?? "",
     mobile: contact?.mobile ?? "",
     companyName: contact?.companyName ?? "",
+    companyId: (contact as any)?.companyId ?? "",
     jobTitle: contact?.jobTitle ?? "",
     category: contact?.category ?? "client",
     address: contact?.address ?? "",
@@ -179,11 +181,11 @@ export function ContactForm({ contact, onSuccess }: ContactFormProps) {
             </Select>
           </div>
           <div className="space-y-2">
-            <Label htmlFor="companyName">Company</Label>
-            <Input
-              id="companyName"
-              value={formData.companyName}
-              onChange={(e) => handleChange("companyName", e.target.value)}
+            <Label>Company <span className="text-red-500">*</span></Label>
+            <CompanySelector
+              value={formData.companyId || null}
+              onChange={(id) => handleChange("companyId", id)}
+              required
             />
           </div>
           <div className="space-y-2">
