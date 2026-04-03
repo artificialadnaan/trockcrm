@@ -5,6 +5,8 @@ import { existsSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { errorHandler } from "./middleware/error-handler.js";
+import swaggerUi from "swagger-ui-express";
+import { apiSpec } from "./api-spec.js";
 import { apiLimiter } from "./middleware/rate-limit.js";
 import { authRoutes } from "./modules/auth/routes.js";
 import { officeRoutes } from "./modules/office/routes.js";
@@ -48,6 +50,12 @@ export function createApp() {
   app.use(express.json({ limit: "10mb" }));
   app.use(cookieParser());
   app.use("/api", apiLimiter);
+
+  // API Documentation
+  app.use("/api/docs", swaggerUi.serve, swaggerUi.setup(apiSpec, {
+    customCss: '.swagger-ui .topbar { display: none }',
+    customSiteTitle: "T Rock CRM API Docs",
+  }));
 
   // Health check
   app.get("/api/health", (_req, res) => {
