@@ -1,6 +1,7 @@
 import {
   S3Client,
   PutObjectCommand,
+  PutBucketCorsCommand,
   GetObjectCommand,
   DeleteObjectCommand,
   HeadObjectCommand,
@@ -196,6 +197,39 @@ export async function putObject(
       ContentType: mimeType,
     })
   );
+}
+
+/**
+ * Configure CORS on the R2 bucket to allow browser uploads via presigned URLs.
+ * Called once on server startup. Idempotent — safe to call multiple times.
+ */
+export async function configureR2Cors(allowedOrigins: string[]): Promise<void> {
+  if (!isR2Configured()) return;
+
+  const client = getClient();
+  const bucket = getBucket();
+
+  try {
+    await client.send(
+      new PutBucketCorsCommand({
+        Bucket: bucket,
+        CORSConfiguration: {
+          CORSRules: [
+            {
+              AllowedHeaders: ["*"],
+              AllowedMethods: ["GET", "PUT", "HEAD"],
+              AllowedOrigins: allowedOrigins,
+              ExposeHeaders: ["ETag", "Content-Length"],
+              MaxAgeSeconds: 3600,
+            },
+          ],
+        },
+      })
+    );
+    console.log(`[R2] CORS configured for bucket "${bucket}" — origins: ${allowedOrigins.join(", ")}`);
+  } catch (err) {
+    console.error("[R2] Failed to configure CORS:", err);
+  }
 }
 
 /**
