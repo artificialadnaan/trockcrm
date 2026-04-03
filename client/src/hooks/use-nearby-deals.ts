@@ -6,46 +6,84 @@ export interface NearbyDeal {
   dealNumber: string;
   name: string;
   propertyCity: string | null;
-  distance: number; // miles
+  distance: number; // miles, -1 if GPS not available
 }
 
+/**
+ * Fetch deals sorted by GPS distance when available,
+ * falling back to all active deals alphabetically.
+ */
 export function useNearbyDeals() {
   const [deals, setDeals] = useState<NearbyDeal[]>([]);
   const [gpsError, setGpsError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    if (!navigator.geolocation) {
-      setGpsError("Geolocation not supported by this browser");
-      setLoading(false);
-      return;
-    }
+    let cancelled = false;
 
-    navigator.geolocation.getCurrentPosition(
-      async (pos) => {
+    async function fetchDeals() {
+      // Try GPS first
+      let nearbyDeals: NearbyDeal[] = [];
+      let gpsOk = false;
+
+      if (navigator.geolocation) {
         try {
+          const pos = await new Promise<GeolocationPosition>((resolve, reject) => {
+            navigator.geolocation.getCurrentPosition(resolve, reject, {
+              enableHighAccuracy: true,
+              timeout: 10000,
+            });
+          });
+
           const { latitude: lat, longitude: lng } = pos.coords;
           const data = await api<{ deals: NearbyDeal[] }>(
             `/deals/nearby?lat=${lat}&lng=${lng}`
           );
-          setDeals(data.deals);
+          nearbyDeals = data.deals;
+          gpsOk = true;
         } catch (err) {
-          console.error("Failed to fetch nearby deals:", err);
-        } finally {
+          const msg = err instanceof GeolocationPositionError ? err.message : "GPS unavailable";
+          setGpsError(msg);
+        }
+      } else {
+        setGpsError("Geolocation not supported");
+      }
+
+      // If GPS worked and returned results, use those
+      if (gpsOk && nearbyDeals.length > 0) {
+        if (!cancelled) {
+          setDeals(nearbyDeals);
           setLoading(false);
         }
-      },
-      (err) => {
-        setGpsError(err.message);
-        setLoading(false);
-      },
-      { enableHighAccuracy: true, timeout: 10000 }
-    );
+        return;
+      }
+
+      // Fallback: fetch all active deals alphabetically
+      try {
+        const data = await api<{
+          deals: Array<{ id: string; dealNumber: string; name: string; propertyCity: string | null }>;
+        }>("/deals?limit=100&sortBy=name&sortDir=asc&isActive=true");
+        if (!cancelled) {
+          setDeals(
+            data.deals.map((d) => ({ ...d, distance: -1 }))
+          );
+        }
+      } catch (err) {
+        console.error("Failed to fetch deals:", err);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+
+    fetchDeals();
+    return () => { cancelled = true; };
   }, []);
 
   // Auto-select: nearest deal within 200m (~0.124 miles)
   const autoSelectedDeal =
-    deals.length > 0 && deals[0].distance < 0.124 ? deals[0] : null;
+    deals.length > 0 && deals[0].distance >= 0 && deals[0].distance < 0.124
+      ? deals[0]
+      : null;
 
   return { deals, autoSelectedDeal, gpsError, loading };
 }

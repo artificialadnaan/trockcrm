@@ -88,9 +88,6 @@ router.get("/nearby", async (req, res, next) => {
       throw new AppError(400, "Valid lat and lng query parameters are required.");
     }
 
-    const isRep = req.user!.role === "rep";
-    const userId = req.user!.id;
-
     // Haversine distance in miles — filter out NULL coords first to avoid NaN
     const haversine = sql`
       3959 * acos(
@@ -102,15 +99,12 @@ router.get("/nearby", async (req, res, next) => {
       )
     `;
 
+    // All users can see all deals — no rep filtering
     const conditions = [
       eq(deals.isActive, true),
       isNotNull(deals.propertyLat),
       isNotNull(deals.propertyLng),
     ];
-
-    if (isRep) {
-      conditions.push(eq(deals.assignedRepId, userId));
-    }
 
     const nearbyDeals = await req.tenantDb!
       .select({

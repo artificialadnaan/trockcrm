@@ -56,14 +56,7 @@ export async function getPhotoFeed(
     sql`NOT EXISTS (SELECT 1 FROM files f2 WHERE f2.parent_file_id = files.id AND f2.is_active = true)`,
   ];
 
-  // RBAC: reps only see photos from their assigned deals.
-  // NOTE: The unqualified `deals` table reference relies on tenant middleware
-  // setting search_path to the tenant schema before queries run (see server/src/middleware/tenant.ts).
-  if (userRole === "rep") {
-    conditions.push(
-      sql`${files.dealId} IN (SELECT id FROM deals WHERE assigned_rep_id = ${userId}::uuid AND is_active = TRUE)`
-    );
-  }
+  // All users can see all deal photos — no rep filtering
 
   if (filters.dealId) conditions.push(eq(files.dealId, filters.dealId));
   if (filters.uploadedBy) conditions.push(eq(files.uploadedBy, filters.uploadedBy));
@@ -136,13 +129,7 @@ export async function getNewPhotoCount(
     gte(files.createdAt, since),
   ];
 
-  // NOTE: The unqualified `deals` table reference relies on tenant middleware
-  // setting search_path to the tenant schema (see server/src/middleware/tenant.ts).
-  if (userRole === "rep") {
-    conditions.push(
-      sql`${files.dealId} IN (SELECT id FROM deals WHERE assigned_rep_id = ${userId}::uuid AND is_active = TRUE)`
-    );
-  }
+  // All users can see all deal photos — no rep filtering
 
   const [result] = await tenantDb
     .select({ count: sql<number>`count(*)` })
