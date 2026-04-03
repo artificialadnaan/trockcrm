@@ -8,13 +8,54 @@ import { pool } from "../db.js";
  * - The stage has a stale_threshold_days configured
  * - stage_entered_at is older than NOW() - threshold days
  *
- * For each stale deal found:
- * 1. Creates a notification for the assigned rep (with dedup: skip if already notified today)
- * 2. Creates a notification for all directors/admins in the rep's office
- * 3. Creates a task of type 'stale_deal' for the assigned rep (if no active task exists)
+ * Tiered escalation based on stale_escalation_tiers JSONB on pipeline_stage_config:
+ * - warning tier:    notify assigned rep only
+ * - escalation tier: notify rep + their manager (reports_to)
+ * - critical tier:   notify rep + manager + all admins/directors in the office
+ *
+ * Notification title includes the tier severity.
+ * Dedup: skip if a stale_deal notification already exists for this deal today.
+ * A stale_deal task is created for the rep if none is active.
  *
  * This job runs daily at 6am via node-cron.
  */
+
+interface EscalationTier {
+  days: number;
+  severity: "warning" | "escalation" | "critical";
+}
+
+function determineTier(daysInStage: number, tiers: EscalationTier[]): EscalationTier | null {
+  // Sort descending by days so we find the highest applicable tier
+  const sorted = [...tiers].sort((a, b) => b.days - a.days);
+  return sorted.find((t) => daysInStage >= t.days) ?? null;
+}
+
+async function sendNotification(
+  client: any,
+  schemaName: string,
+  userId: string,
+  type: string,
+  title: string,
+  body: string,
+  link: string
+): Promise<void> {
+  const result = await client.query(
+    `INSERT INTO ${schemaName}.notifications (user_id, type, title, body, link)
+     VALUES ($1, $2, $3, $4, $5)
+     RETURNING id`,
+    [userId, type, title, body, link]
+  );
+  await client.query(
+    `SELECT pg_notify('crm_events', $1)`,
+    [JSON.stringify({
+      eventName: "notification.created",
+      userId,
+      notificationId: result.rows[0]?.id,
+    })]
+  );
+}
+
 export async function runStaleDealScan(): Promise<void> {
   console.log("[Worker:stale-deals] Starting stale deal scan...");
 
@@ -29,7 +70,6 @@ export async function runStaleDealScan(): Promise<void> {
 
     for (const office of offices.rows) {
       // Validate office slug before using in SQL to prevent injection.
-      // Must match the same pattern used in office creation.
       const slugRegex = /^[a-z][a-z0-9_]*$/;
       if (!slugRegex.test(office.slug)) {
         console.error(`[Worker:stale-deals] Invalid office slug: "${office.slug}" — skipping`);
@@ -37,7 +77,8 @@ export async function runStaleDealScan(): Promise<void> {
       }
       const schemaName = `office_${office.slug}`;
 
-      // Find stale deals: join deals with pipeline config, check threshold
+      // Find stale deals: join deals with pipeline config, check threshold.
+      // Also fetch stale_escalation_tiers for tier logic.
       const staleDeals = await client.query(
         `SELECT
            d.id AS deal_id,
@@ -47,6 +88,7 @@ export async function runStaleDealScan(): Promise<void> {
            d.stage_entered_at,
            psc.name AS stage_name,
            psc.stale_threshold_days,
+           psc.stale_escalation_tiers,
            EXTRACT(DAY FROM NOW() - d.stage_entered_at)::int AS days_in_stage
          FROM ${schemaName}.deals d
          JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
@@ -65,8 +107,6 @@ export async function runStaleDealScan(): Promise<void> {
 
       for (const staleDeal of staleDeals.rows) {
         // Check if a stale_deal notification already exists for this deal today
-        // (avoid duplicate notifications on repeated scans)
-        // Use exact link match instead of LIKE to avoid false positives
         const existingNotification = await client.query(
           `SELECT id FROM ${schemaName}.notifications
            WHERE type = 'stale_deal'
@@ -80,49 +120,50 @@ export async function runStaleDealScan(): Promise<void> {
           continue; // Already notified today
         }
 
-        const title = `Stale Deal: ${staleDeal.deal_name}`;
-        const body = `${staleDeal.deal_number} has been in "${staleDeal.stage_name}" for ${staleDeal.days_in_stage} days (threshold: ${staleDeal.stale_threshold_days} days)`;
+        const daysInStage: number = staleDeal.days_in_stage;
+        const rawTiers = staleDeal.stale_escalation_tiers as EscalationTier[] | null;
+        const tiers: EscalationTier[] = Array.isArray(rawTiers) ? rawTiers : [];
+
+        const tier = determineTier(daysInStage, tiers);
+        const severity = tier?.severity ?? "warning";
+        const severityLabel = severity.charAt(0).toUpperCase() + severity.slice(1);
+
+        const title = `[${severityLabel}] Stale Deal: ${staleDeal.deal_name}`;
+        const body = `${staleDeal.deal_number} has been in "${staleDeal.stage_name}" for ${daysInStage} days (threshold: ${staleDeal.stale_threshold_days} days)`;
         const link = `/deals/${staleDeal.deal_id}`;
 
-        // Notify the assigned rep
-        const repNotifResult = await client.query(
-          `INSERT INTO ${schemaName}.notifications (user_id, type, title, body, link)
-           VALUES ($1, 'stale_deal', $2, $3, $4)
-           RETURNING id`,
-          [staleDeal.assigned_rep_id, title, body, link]
-        );
-        // PG NOTIFY so the server SSE manager can push to connected clients
-        await client.query(
-          `SELECT pg_notify('crm_events', $1)`,
-          [JSON.stringify({
-            eventName: "notification.created",
-            userId: staleDeal.assigned_rep_id,
-            notificationId: repNotifResult.rows[0]?.id,
-          })]
-        );
+        // Always notify the assigned rep
+        if (staleDeal.assigned_rep_id) {
+          await sendNotification(client, schemaName, staleDeal.assigned_rep_id, "stale_deal", title, body, link);
+        }
 
-        // Notify all directors/admins in this office
-        const directors = await client.query(
-          `SELECT id FROM public.users
-           WHERE office_id = $1 AND role IN ('director', 'admin') AND is_active = true`,
-          [office.id]
-        );
+        // Escalation tier: also notify the rep's manager (reports_to)
+        if (severity === "escalation" || severity === "critical") {
+          if (staleDeal.assigned_rep_id) {
+            const managerRes = await client.query(
+              `SELECT reports_to FROM public.users WHERE id = $1 AND is_active = true`,
+              [staleDeal.assigned_rep_id]
+            );
+            const managerId: string | null = managerRes.rows[0]?.reports_to ?? null;
+            if (managerId && managerId !== staleDeal.assigned_rep_id) {
+              await sendNotification(client, schemaName, managerId, "stale_deal", title, body, link);
+            }
+          }
+        }
 
-        for (const director of directors.rows) {
-          const dirNotifResult = await client.query(
-            `INSERT INTO ${schemaName}.notifications (user_id, type, title, body, link)
-             VALUES ($1, 'stale_deal', $2, $3, $4)
-             RETURNING id`,
-            [director.id, title, body, link]
+        // Critical tier: also notify all directors/admins in the office
+        if (severity === "critical") {
+          const admins = await client.query(
+            `SELECT id FROM public.users
+             WHERE office_id = $1 AND role IN ('director', 'admin') AND is_active = true`,
+            [office.id]
           );
-          await client.query(
-            `SELECT pg_notify('crm_events', $1)`,
-            [JSON.stringify({
-              eventName: "notification.created",
-              userId: director.id,
-              notificationId: dirNotifResult.rows[0]?.id,
-            })]
-          );
+
+          for (const admin of admins.rows) {
+            // Skip if already notified as manager above
+            if (admin.id === staleDeal.assigned_rep_id) continue;
+            await sendNotification(client, schemaName, admin.id, "stale_deal", title, body, link);
+          }
         }
 
         // Create a stale_deal task for the rep (if one doesn't exist for this deal already)

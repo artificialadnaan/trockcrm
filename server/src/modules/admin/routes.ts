@@ -222,7 +222,8 @@ async function getAccessibleOfficeSlugs(userId: string, userRole: string, primar
     return result.rows;
   }
 
-  // Director: primary office + any extra offices via user_office_access
+  // Director: primary office + any extra offices where the user has director/admin role_override.
+  // A rep-level cross-office assignment does not grant access to report metrics for that office.
   const result = await pool.query<{ id: string; name: string; slug: string }>(
     `SELECT DISTINCT o.id, o.name, o.slug
      FROM public.offices o
@@ -230,7 +231,8 @@ async function getAccessibleOfficeSlugs(userId: string, userRole: string, primar
        AND (
          o.id = $1
          OR o.id IN (
-           SELECT office_id FROM public.user_office_access WHERE user_id = $2
+           SELECT office_id FROM public.user_office_access
+           WHERE user_id = $2 AND role_override IN ('director', 'admin')
          )
        )
      ORDER BY o.name`,
@@ -262,7 +264,7 @@ router.get(
       for (const office of offices) {
         const schemaName = `office_${office.slug}`;
         try {
-          await client.query("SELECT set_config('search_path', $1, true)", [schemaName]);
+          await client.query("SELECT set_config('search_path', $1, false)", [schemaName]);
           const row = await client.query<{
             total_deals: string;
             active_deals: string;
@@ -299,7 +301,7 @@ router.get(
           });
         } finally {
           // CRITICAL: Reset search_path to public after each office query
-          await client.query("SELECT set_config('search_path', 'public', true)");
+          await client.query("SELECT set_config('search_path', 'public', false)");
         }
       }
 
@@ -336,7 +338,7 @@ router.get(
       for (const office of offices) {
         const schemaName = `office_${office.slug}`;
         try {
-          await client.query("SELECT set_config('search_path', $1, true)", [schemaName]);
+          await client.query("SELECT set_config('search_path', $1, false)", [schemaName]);
           const row = await client.query<{
             total_activities: string;
             activities_last_30: string;
@@ -377,7 +379,7 @@ router.get(
           });
         } finally {
           // CRITICAL: Reset search_path to public after each office query
-          await client.query("SELECT set_config('search_path', 'public', true)");
+          await client.query("SELECT set_config('search_path', 'public', false)");
         }
       }
 

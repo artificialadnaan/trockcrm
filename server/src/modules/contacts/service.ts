@@ -227,14 +227,9 @@ export async function getContacts(tenantDb: TenantDb, filters: ContactFilters) {
     conditions.push(ilike(contacts.companyName, `%${filters.companyName}%`));
   }
 
-  // Company filter (by company ID via companyId on deals joined through associations)
+  // Company filter (by company ID — direct column on contacts)
   if (filters.companyId) {
-    const contactIdsWithCompany = tenantDb
-      .select({ contactId: contactDealAssociations.contactId })
-      .from(contactDealAssociations)
-      .innerJoin(deals, eq(contactDealAssociations.dealId, deals.id))
-      .where(eq(deals.companyId, filters.companyId));
-    conditions.push(inArray(contacts.id, contactIdsWithCompany));
+    conditions.push(eq(contacts.companyId, filters.companyId));
   }
 
   // Job title filter

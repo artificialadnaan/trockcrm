@@ -335,12 +335,14 @@ export function registerAllJobs() {
 
       if (lossOfficeId) {
         const officeRes = await lossPool.query(
-          "SELECT slug FROM public.offices WHERE id = $1 AND is_active = true",
+          "SELECT slug, settings FROM public.offices WHERE id = $1 AND is_active = true",
           [lossOfficeId]
         );
 
         if (officeRes.rows.length > 0) {
           const slug = officeRes.rows[0].slug;
+          const officeSettings = officeRes.rows[0].settings ?? {};
+          const largeLossThreshold: number = officeSettings.largeLossThreshold ?? 100000;
           const slugRegex = /^[a-z][a-z0-9_]*$/;
 
           if (slugRegex.test(slug)) {
@@ -357,7 +359,7 @@ export function registerAllJobs() {
             const dealValue = Number(dealRes.rows[0]?.deal_value ?? 0);
             const lostNotes = dealRes.rows[0]?.lost_notes ?? payload.lostNotes ?? null;
 
-            if (dealValue >= 100000) {
+            if (dealValue >= largeLossThreshold) {
               const formattedValue = dealValue.toLocaleString("en-US", {
                 style: "currency",
                 currency: "USD",
