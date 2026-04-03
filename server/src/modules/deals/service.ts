@@ -12,6 +12,7 @@ import {
 import type * as schema from "@trock-crm/shared/schema";
 import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
+import { geocodeAddress } from "./geocode.js";
 
 // Type alias for the tenant-scoped Drizzle instance
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -321,7 +322,23 @@ export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
     })
     .returning();
 
-  return result[0];
+  const newDeal = result[0];
+
+  // Geocode property address in background (non-blocking)
+  if (input.propertyAddress && input.propertyCity && input.propertyState) {
+    geocodeAddress(input.propertyAddress, input.propertyCity, input.propertyState, input.propertyZip)
+      .then(async (coords) => {
+        if (coords) {
+          await tenantDb
+            .update(deals)
+            .set({ propertyLat: String(coords.lat), propertyLng: String(coords.lng) })
+            .where(eq(deals.id, newDeal.id));
+        }
+      })
+      .catch((err) => console.error("[Geocode] Background geocode failed:", err));
+  }
+
+  return newDeal;
 }
 
 /**
@@ -379,6 +396,32 @@ export async function updateDeal(
     .set(updates)
     .where(eq(deals.id, dealId))
     .returning();
+
+  // Re-geocode if address changed
+  const addressChanged =
+    input.propertyAddress !== undefined ||
+    input.propertyCity !== undefined ||
+    input.propertyState !== undefined;
+
+  if (addressChanged) {
+    const addr = input.propertyAddress ?? existing.propertyAddress;
+    const city = input.propertyCity ?? existing.propertyCity;
+    const state = input.propertyState ?? existing.propertyState;
+    const zip = input.propertyZip ?? existing.propertyZip;
+
+    if (addr && city && state) {
+      geocodeAddress(addr, city, state, zip)
+        .then(async (coords) => {
+          if (coords) {
+            await tenantDb
+              .update(deals)
+              .set({ propertyLat: String(coords.lat), propertyLng: String(coords.lng) })
+              .where(eq(deals.id, dealId));
+          }
+        })
+        .catch((err) => console.error("[Geocode] Background geocode failed:", err));
+    }
+  }
 
   return result[0];
 }
