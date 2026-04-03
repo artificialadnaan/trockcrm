@@ -16,7 +16,7 @@ export async function runColdLeadWarming(): Promise<void> {
   const client = await pool.connect();
   try {
     const offices = await client.query(
-      "SELECT id, slug FROM public.offices WHERE is_active = true"
+      "SELECT id, slug, settings FROM public.offices WHERE is_active = true"
     );
 
     let totalTasksCreated = 0;
@@ -29,6 +29,13 @@ export async function runColdLeadWarming(): Promise<void> {
       }
       const schemaName = `office_${office.slug}`;
 
+      const officeSettings = (office.settings ?? {}) as Record<string, unknown>;
+      const rawDays = officeSettings.contactNoTouchDays;
+      const noTouchDays =
+        typeof rawDays === "number" && rawDays >= 1
+          ? Math.floor(rawDays)
+          : 60;
+
       // Acquire advisory lock per office to prevent concurrent runs from racing
       await client.query("BEGIN");
       await client.query(
@@ -36,7 +43,7 @@ export async function runColdLeadWarming(): Promise<void> {
         [office.slug]
       );
 
-      // Find contacts with no contact in 60+ days that have active deals
+      // Find contacts with no contact in noTouchDays+ days that have active deals
       // NOTE: deals.stage_id is a UUID FK to public.pipeline_stage_config.
       //       We join to pipeline_stage_config and filter by is_terminal = false.
       //       deals has assigned_rep_id (not assigned_to).
@@ -51,12 +58,13 @@ export async function runColdLeadWarming(): Promise<void> {
          JOIN ${schemaName}.contact_deal_associations cda ON cda.contact_id = c.id
          JOIN ${schemaName}.deals d ON d.id = cda.deal_id
          JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
-         WHERE (c.last_contacted_at IS NULL OR c.last_contacted_at < NOW() - INTERVAL '60 days')
+         WHERE (c.last_contacted_at IS NULL OR c.last_contacted_at < NOW() - ($1 || ' days')::INTERVAL)
            AND c.is_active = true
            AND d.is_active = true
            AND psc.is_terminal = false
            AND d.assigned_rep_id IS NOT NULL
-         ORDER BY c.id, c.last_contacted_at ASC`
+         ORDER BY c.id, c.last_contacted_at ASC`,
+        [noTouchDays]
       );
 
       for (const lead of coldLeads.rows) {
@@ -72,7 +80,7 @@ export async function runColdLeadWarming(): Promise<void> {
 
         if (existingTask.rows.length > 0) continue;
 
-        const title = `Re-engage ${lead.first_name} ${lead.last_name} — no contact in 60+ days`;
+        const title = `Re-engage ${lead.first_name} ${lead.last_name} — no contact in ${noTouchDays}+ days`;
 
         await client.query(
           `INSERT INTO ${schemaName}.tasks

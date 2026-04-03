@@ -13,6 +13,8 @@ import {
   getLeadSourceROI,
   getFollowUpCompliance,
   getDdVsPipeline,
+  getClosedWonSummary,
+  getPipelineByRep,
   executeCustomReport,
 } from "./service.js";
 import type { ReportConfig } from "./service.js";
@@ -194,6 +196,33 @@ router.get("/follow-up-compliance", async (req, res, next) => {
 router.get("/dd-vs-pipeline", async (req, res, next) => {
   try {
     const data = await getDdVsPipeline(req.tenantDb!);
+    await req.commitTransaction!();
+    res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/reports/closed-won-summary?from=2026-01-01&to=2026-12-31
+router.get("/closed-won-summary", requireDirector, async (req, res, next) => {
+  try {
+    const data = await getClosedWonSummary(req.tenantDb!, {
+      from: req.query.from as string | undefined,
+      to: req.query.to as string | undefined,
+    });
+    await req.commitTransaction!();
+    res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/reports/pipeline-by-rep?repId=uuid
+router.get("/pipeline-by-rep", requireDirector, async (req, res, next) => {
+  try {
+    const data = await getPipelineByRep(req.tenantDb!, {
+      repId: req.query.repId as string | undefined,
+    });
     await req.commitTransaction!();
     res.json({ data });
   } catch (err) {

@@ -1,9 +1,10 @@
 import { useState } from "react";
-import { Building2, Plus, RefreshCw, CheckCircle2, XCircle } from "lucide-react";
+import { Building2, Plus, RefreshCw, CheckCircle2, XCircle, Settings2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from "@/components/ui/dialog";
@@ -18,6 +19,33 @@ export function OfficesPage() {
   const [form, setForm] = useState({ name: "", slug: "", address: "", phone: "" });
   const [saving, setSaving] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
+  const [noTouchDaysInput, setNoTouchDaysInput] = useState<Record<string, string>>({});
+  const [noTouchSaving, setNoTouchSaving] = useState<Record<string, boolean>>({});
+  const [noTouchSaved, setNoTouchSaved] = useState<Record<string, boolean>>({});
+
+  const getNoTouchDays = (office: Office): number => {
+    const v = (office.settings as Record<string, unknown>)?.contactNoTouchDays;
+    return typeof v === "number" && v >= 1 ? Math.floor(v) : 60;
+  };
+
+  const handleNoTouchSave = async (office: Office) => {
+    const raw = noTouchDaysInput[office.id];
+    const parsed = raw !== undefined ? parseInt(raw, 10) : getNoTouchDays(office);
+    if (isNaN(parsed) || parsed < 7 || parsed > 365) return;
+    setNoTouchSaving((s) => ({ ...s, [office.id]: true }));
+    try {
+      await updateOffice(office.id, {
+        settings: { ...(office.settings as Record<string, unknown>), contactNoTouchDays: parsed },
+      });
+      setNoTouchSaved((s) => ({ ...s, [office.id]: true }));
+      setNoTouchDaysInput((s) => { const next = { ...s }; delete next[office.id]; return next; });
+      setTimeout(() => setNoTouchSaved((s) => ({ ...s, [office.id]: false })), 2000);
+    } catch (err) {
+      console.error("Failed to save contact no-touch threshold:", err);
+    } finally {
+      setNoTouchSaving((s) => ({ ...s, [office.id]: false }));
+    }
+  };
 
   const handleCreate = async () => {
     setCreateError(null);
@@ -143,6 +171,69 @@ export function OfficesPage() {
           </TableBody>
         </Table>
       </div>
+
+      {/* Contact Alert Settings */}
+      <Card>
+        <CardHeader>
+          <div className="flex items-center gap-2">
+            <Settings2 className="h-4 w-4 text-gray-500" />
+            <CardTitle className="text-base">Contact Alert Settings</CardTitle>
+          </div>
+          <p className="text-sm text-gray-500 mt-1">
+            Configure how many days without contact before a cold lead warming task is created.
+          </p>
+        </CardHeader>
+        <CardContent>
+          <div className="space-y-4">
+            {offices.map((office) => {
+              const current = getNoTouchDays(office);
+              const inputVal = noTouchDaysInput[office.id] ?? String(current);
+              const isDirty = noTouchDaysInput[office.id] !== undefined && noTouchDaysInput[office.id] !== String(current);
+              const parsed = parseInt(inputVal, 10);
+              const isValid = !isNaN(parsed) && parsed >= 7 && parsed <= 365;
+              return (
+                <div key={office.id} className="flex items-center gap-4">
+                  <div className="w-40 shrink-0">
+                    <p className="text-sm font-medium text-gray-900">{office.name}</p>
+                    <p className="text-xs text-gray-400 font-mono">office_{office.slug}</p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Input
+                      type="number"
+                      min={7}
+                      max={365}
+                      className="w-24"
+                      value={inputVal}
+                      onChange={(e) =>
+                        setNoTouchDaysInput((s) => ({ ...s, [office.id]: e.target.value }))
+                      }
+                    />
+                    <Label className="text-sm text-gray-600">days</Label>
+                  </div>
+                  <Button
+                    size="sm"
+                    variant={noTouchSaved[office.id] ? "outline" : "default"}
+                    disabled={!isDirty || !isValid || noTouchSaving[office.id]}
+                    onClick={() => handleNoTouchSave(office)}
+                  >
+                    {noTouchSaving[office.id]
+                      ? "Saving..."
+                      : noTouchSaved[office.id]
+                      ? "Saved"
+                      : "Save"}
+                  </Button>
+                  {!isValid && noTouchDaysInput[office.id] !== undefined && (
+                    <p className="text-xs text-red-500">Must be between 7 and 365</p>
+                  )}
+                </div>
+              );
+            })}
+            {offices.length === 0 && !loading && (
+              <p className="text-sm text-gray-400">No active offices.</p>
+            )}
+          </div>
+        </CardContent>
+      </Card>
 
       <Dialog open={showCreate} onOpenChange={setShowCreate}>
         <DialogContent>

@@ -31,6 +31,14 @@ import { getDealById } from "../deals/service.js";
 
 const router = Router();
 
+function validateEmailIfPresent(email: unknown): void {
+  if (email != null && email !== "") {
+    if (typeof email !== "string" || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
+      throw new AppError(400, "Invalid email address format");
+    }
+  }
+}
+
 // GET /api/contacts — list contacts (paginated, filtered, sorted)
 router.get("/", async (req, res, next) => {
   try {
@@ -202,6 +210,7 @@ router.post("/", async (req, res, next) => {
     if (!rest.category) {
       throw new AppError(400, "category is required");
     }
+    validateEmailIfPresent(rest.email);
 
     const { contact, dedupResult } = await createContact(
       req.tenantDb!,
@@ -270,6 +279,7 @@ router.post("/", async (req, res, next) => {
 // PATCH /api/contacts/:id — update contact fields
 router.patch("/:id", async (req, res, next) => {
   try {
+    validateEmailIfPresent(req.body.email);
     const contact = await updateContact(req.tenantDb!, req.params.id, req.body);
     await req.commitTransaction!();
     res.json({ contact });

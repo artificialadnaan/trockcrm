@@ -4,6 +4,8 @@ import { useNavigate } from "react-router-dom";
 import { StatCard } from "@/components/dashboard/stat-card";
 import { PipelineBarChart } from "@/components/charts/pipeline-bar-chart";
 import { formatCurrency } from "@/components/charts/chart-colors";
+import { useTasks } from "@/hooks/use-tasks";
+import { TaskSection } from "@/components/tasks/task-section";
 import {
   Briefcase,
   CheckSquare,
@@ -16,6 +18,13 @@ export function RepDashboardPage() {
   const { user } = useAuth();
   const navigate = useNavigate();
   const { data, loading, error } = useRepDashboard();
+  const { tasks: overdueTasks, refetch: refetchOverdue } = useTasks({ section: "overdue" });
+  const { tasks: todayTasks, refetch: refetchToday } = useTasks({ section: "today" });
+
+  const refetchTasks = () => {
+    refetchOverdue();
+    refetchToday();
+  };
 
   if (loading) {
     return (
@@ -59,6 +68,43 @@ export function RepDashboardPage() {
           Here is your sales activity overview for {new Date().getFullYear()}.
         </p>
       </div>
+
+      {/* Today's Tasks */}
+      <Card>
+        <CardHeader className="pb-2">
+          <CardTitle className="text-base">Today's Tasks</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-2">
+          {overdueTasks.length === 0 && todayTasks.length === 0 ? (
+            <p className="text-sm text-muted-foreground py-2">
+              No tasks today — you're clear!
+            </p>
+          ) : (
+            <>
+              {overdueTasks.length > 0 && (
+                <TaskSection
+                  title="Overdue"
+                  tasks={overdueTasks}
+                  count={overdueTasks.length}
+                  variant="danger"
+                  defaultOpen={true}
+                  onUpdate={refetchTasks}
+                />
+              )}
+              {todayTasks.length > 0 && (
+                <TaskSection
+                  title="Today"
+                  tasks={todayTasks}
+                  count={todayTasks.length}
+                  variant="warning"
+                  defaultOpen={true}
+                  onUpdate={refetchTasks}
+                />
+              )}
+            </>
+          )}
+        </CardContent>
+      </Card>
 
       {/* KPI Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">

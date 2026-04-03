@@ -102,6 +102,24 @@ router.get("/:id/detail", async (req, res, next) => {
   }
 });
 
+function validateDealPayload(body: Record<string, unknown>): void {
+  const MAX_MONEY = 999999999;
+  for (const field of ["ddEstimate", "bidEstimate", "awardedAmount"] as const) {
+    const val = body[field];
+    if (val != null && val !== "") {
+      const n = Number(val);
+      if (isNaN(n) || n < 0) throw new AppError(400, `${field} must be >= 0`);
+      if (n > MAX_MONEY) throw new AppError(400, `${field} must not exceed ${MAX_MONEY}`);
+    }
+  }
+  if (body.winProbability != null && body.winProbability !== "") {
+    const wp = Number(body.winProbability);
+    if (isNaN(wp) || wp < 0 || wp > 100) {
+      throw new AppError(400, "winProbability must be between 0 and 100");
+    }
+  }
+}
+
 // POST /api/deals — create a new deal
 router.post("/", async (req, res, next) => {
   try {
@@ -109,6 +127,7 @@ router.post("/", async (req, res, next) => {
     if (!name || !stageId) {
       throw new AppError(400, "Name and stageId are required");
     }
+    validateDealPayload(req.body);
 
     // Rep ownership enforcement:
     // - Reps: force assignedRepId to their own ID (ignore request body value)
@@ -138,6 +157,7 @@ router.post("/", async (req, res, next) => {
 router.patch("/:id", async (req, res, next) => {
   try {
     const body = { ...req.body };
+    validateDealPayload(body);
 
     // Reps cannot change assignedRepId (reassign deals)
     if (req.user!.role === "rep" && body.assignedRepId !== undefined) {

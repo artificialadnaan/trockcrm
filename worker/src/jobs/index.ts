@@ -319,6 +319,91 @@ export function registerAllJobs() {
   domainEventHandlers.set("deal.lost", async (payload, officeId) => {
     console.log(`[Worker] Deal lost: ${payload.dealNumber} (${payload.dealName}) - reason: ${payload.lostReasonId}`);
 
+    // --- Large-loss alert: notify directors/admins when deal value >= $100,000 ---
+    try {
+      const { pool: lossPool } = await import("../db.js");
+
+      // Resolve office
+      let lossOfficeId = officeId;
+      if (!lossOfficeId && payload.assignedRepId) {
+        const userRes = await lossPool.query(
+          "SELECT office_id FROM public.users WHERE id = $1",
+          [payload.assignedRepId]
+        );
+        lossOfficeId = userRes.rows[0]?.office_id ?? null;
+      }
+
+      if (lossOfficeId) {
+        const officeRes = await lossPool.query(
+          "SELECT slug FROM public.offices WHERE id = $1 AND is_active = true",
+          [lossOfficeId]
+        );
+
+        if (officeRes.rows.length > 0) {
+          const slug = officeRes.rows[0].slug;
+          const slugRegex = /^[a-z][a-z0-9_]*$/;
+
+          if (slugRegex.test(slug)) {
+            const schemaName = `office_${slug}`;
+
+            // Look up deal value (awarded_amount or bid_estimate)
+            const dealRes = await lossPool.query(
+              `SELECT COALESCE(awarded_amount, bid_estimate, 0)::numeric AS deal_value,
+                      lost_notes
+               FROM ${schemaName}.deals WHERE id = $1`,
+              [payload.dealId]
+            );
+
+            const dealValue = Number(dealRes.rows[0]?.deal_value ?? 0);
+            const lostNotes = dealRes.rows[0]?.lost_notes ?? payload.lostNotes ?? null;
+
+            if (dealValue >= 100000) {
+              const formattedValue = dealValue.toLocaleString("en-US", {
+                style: "currency",
+                currency: "USD",
+                maximumFractionDigits: 0,
+              });
+
+              const title = `Large deal lost: ${payload.dealName} (${formattedValue})`;
+              const body = lostNotes
+                ? `Lost reason: ${lostNotes}`
+                : undefined;
+              const link = `/deals/${payload.dealId}`;
+
+              // Notify all directors and admins in the office
+              const directorsRes = await lossPool.query(
+                `SELECT id FROM public.users
+                 WHERE office_id = $1 AND role IN ('director', 'admin') AND is_active = true`,
+                [lossOfficeId]
+              );
+
+              for (const director of directorsRes.rows) {
+                const notifRes = await lossPool.query(
+                  `INSERT INTO ${schemaName}.notifications (user_id, type, title, body, link)
+                   VALUES ($1, 'deal_lost', $2, $3, $4)
+                   RETURNING id`,
+                  [director.id, title, body ?? null, link]
+                );
+                await lossPool.query(
+                  `SELECT pg_notify('crm_events', $1)`,
+                  [JSON.stringify({
+                    eventName: "notification.created",
+                    userId: director.id,
+                    notificationId: notifRes.rows[0]?.id,
+                  })]
+                );
+              }
+
+              console.log(`[Worker:large-loss] Notified ${directorsRes.rows.length} director(s)/admin(s) — deal value ${formattedValue}`);
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.error("[Worker:large-loss] Error:", err);
+      // Non-blocking
+    }
+
     // --- Task 18: Competitor intelligence tasks ---
     if (!payload.lostCompetitor) return; // Only fire when competitor is known
 

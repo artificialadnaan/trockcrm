@@ -683,7 +683,190 @@ export async function getDdVsPipeline(
 }
 
 // ---------------------------------------------------------------------------
-// 12. Custom Report Query Executor
+// 12. Closed-Won Summary Report
+// ---------------------------------------------------------------------------
+
+export interface ClosedWonSummaryRepRow {
+  repId: string;
+  repName: string;
+  dealCount: number;
+  totalValue: number;
+}
+
+export interface ClosedWonSummaryProjectTypeRow {
+  projectTypeId: string | null;
+  projectTypeName: string;
+  dealCount: number;
+  totalValue: number;
+}
+
+export interface ClosedWonSummary {
+  totalWonDeals: number;
+  totalWonValue: number;
+  avgCycleTimeDays: number;
+  byRep: ClosedWonSummaryRepRow[];
+  byProjectType: ClosedWonSummaryProjectTypeRow[];
+}
+
+/**
+ * Closed-won summary: total deals, total value, average cycle time,
+ * breakdown by rep and by project type.
+ * Date filter uses actual_close_date.
+ */
+export async function getClosedWonSummary(
+  tenantDb: TenantDb,
+  options: { from?: string; to?: string } = {}
+): Promise<ClosedWonSummary> {
+  const { from, to } = defaultDateRange(options.from, options.to);
+
+  const [totalsResult, repResult, typeResult] = await Promise.all([
+    tenantDb.execute(sql`
+      SELECT
+        COUNT(*)::int AS total_won_deals,
+        COALESCE(SUM(
+          COALESCE(d.awarded_amount, d.bid_estimate, 0)
+        ), 0)::numeric AS total_won_value,
+        COALESCE(AVG(
+          EXTRACT(DAY FROM d.actual_close_date::timestamp - d.created_at)
+        ), 0)::numeric AS avg_cycle_time_days
+      FROM deals d
+      JOIN pipeline_stage_config psc ON psc.id = d.stage_id
+      WHERE psc.slug = 'closed_won'
+        AND d.actual_close_date >= ${from}::date
+        AND d.actual_close_date <= ${to}::date
+    `),
+    tenantDb.execute(sql`
+      SELECT
+        d.assigned_rep_id AS rep_id,
+        u.display_name AS rep_name,
+        COUNT(*)::int AS deal_count,
+        COALESCE(SUM(
+          COALESCE(d.awarded_amount, d.bid_estimate, 0)
+        ), 0)::numeric AS total_value
+      FROM deals d
+      JOIN pipeline_stage_config psc ON psc.id = d.stage_id
+      JOIN users u ON u.id = d.assigned_rep_id
+      WHERE psc.slug = 'closed_won'
+        AND d.actual_close_date >= ${from}::date
+        AND d.actual_close_date <= ${to}::date
+      GROUP BY d.assigned_rep_id, u.display_name
+      ORDER BY total_value DESC
+    `),
+    tenantDb.execute(sql`
+      SELECT
+        d.project_type_id,
+        COALESCE(ptc.name, 'Unspecified') AS project_type_name,
+        COUNT(*)::int AS deal_count,
+        COALESCE(SUM(
+          COALESCE(d.awarded_amount, d.bid_estimate, 0)
+        ), 0)::numeric AS total_value
+      FROM deals d
+      LEFT JOIN project_type_config ptc ON ptc.id = d.project_type_id
+      JOIN pipeline_stage_config psc ON psc.id = d.stage_id
+      WHERE psc.slug = 'closed_won'
+        AND d.actual_close_date >= ${from}::date
+        AND d.actual_close_date <= ${to}::date
+      GROUP BY d.project_type_id, ptc.name
+      ORDER BY total_value DESC
+    `),
+  ]);
+
+  const totalsRows = (totalsResult as any).rows ?? totalsResult;
+  const repRows = (repResult as any).rows ?? repResult;
+  const typeRows = (typeResult as any).rows ?? typeResult;
+
+  const t = totalsRows[0] ?? {};
+
+  return {
+    totalWonDeals: Number(t.total_won_deals ?? 0),
+    totalWonValue: Number(t.total_won_value ?? 0),
+    avgCycleTimeDays: Math.round(Number(t.avg_cycle_time_days ?? 0)),
+    byRep: repRows.map((r: any) => ({
+      repId: r.rep_id,
+      repName: r.rep_name,
+      dealCount: Number(r.deal_count ?? 0),
+      totalValue: Number(r.total_value ?? 0),
+    })),
+    byProjectType: typeRows.map((r: any) => ({
+      projectTypeId: r.project_type_id,
+      projectTypeName: r.project_type_name,
+      dealCount: Number(r.deal_count ?? 0),
+      totalValue: Number(r.total_value ?? 0),
+    })),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 13. Pipeline by Rep
+// ---------------------------------------------------------------------------
+
+export interface PipelineByRepStageRow {
+  stageId: string;
+  stageName: string;
+  dealCount: number;
+  totalValue: number;
+}
+
+export interface PipelineByRepRow {
+  repId: string;
+  repName: string;
+  stages: PipelineByRepStageRow[];
+}
+
+/**
+ * Active pipeline grouped by rep, then by stage.
+ * Only includes active non-terminal deals.
+ */
+export async function getPipelineByRep(
+  tenantDb: TenantDb,
+  options: { repId?: string } = {}
+): Promise<PipelineByRepRow[]> {
+  const repFilter = options.repId
+    ? sql`AND d.assigned_rep_id = ${options.repId}`
+    : sql``;
+
+  const result = await tenantDb.execute(sql`
+    SELECT
+      d.assigned_rep_id AS rep_id,
+      u.display_name AS rep_name,
+      d.stage_id,
+      psc.name AS stage_name,
+      COUNT(*)::int AS deal_count,
+      COALESCE(SUM(
+        COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)
+      ), 0)::numeric AS total_value
+    FROM deals d
+    JOIN pipeline_stage_config psc ON psc.id = d.stage_id
+    JOIN users u ON u.id = d.assigned_rep_id
+    WHERE d.is_active = true
+      AND psc.is_terminal = false
+      ${repFilter}
+    GROUP BY d.assigned_rep_id, u.display_name, d.stage_id, psc.name, psc.display_order
+    ORDER BY u.display_name ASC, psc.display_order ASC
+  `);
+
+  const rows = (result as any).rows ?? result;
+
+  // Group by rep
+  const repMap = new Map<string, PipelineByRepRow>();
+  for (const r of rows) {
+    const repId = r.rep_id;
+    if (!repMap.has(repId)) {
+      repMap.set(repId, { repId, repName: r.rep_name, stages: [] });
+    }
+    repMap.get(repId)!.stages.push({
+      stageId: r.stage_id,
+      stageName: r.stage_name,
+      dealCount: Number(r.deal_count ?? 0),
+      totalValue: Number(r.total_value ?? 0),
+    });
+  }
+
+  return Array.from(repMap.values());
+}
+
+// ---------------------------------------------------------------------------
+// 14. Custom Report Query Executor
 // ---------------------------------------------------------------------------
 
 export interface ReportConfig {

@@ -266,6 +266,22 @@ export async function seedLockedReports(officeId: string) {
         chart_type: "bar",
       },
     },
+    {
+      name: "Closed-Won Summary",
+      entity: "deals",
+      config: {
+        reportType: "closed_won_summary",
+        chart_type: "bar",
+      },
+    },
+    {
+      name: "Pipeline by Rep",
+      entity: "deals",
+      config: {
+        reportType: "pipeline_by_rep",
+        chart_type: "bar",
+      },
+    },
   ];
 
   await db.insert(savedReports).values(

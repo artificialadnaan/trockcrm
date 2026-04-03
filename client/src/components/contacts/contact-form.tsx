@@ -47,6 +47,7 @@ export function ContactForm({ contact, onSuccess }: ContactFormProps) {
 
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [dedupSuggestions, setDedupSuggestions] = useState<Array<{
     id: string;
     firstName: string;
@@ -58,6 +59,46 @@ export function ContactForm({ contact, onSuccess }: ContactFormProps) {
 
   const handleChange = (field: string, value: string) => {
     setFormData((prev) => ({ ...prev, [field]: value }));
+    if (fieldErrors[field]) {
+      setFieldErrors((prev) => { const next = { ...prev }; delete next[field]; return next; });
+    }
+  };
+
+  const validateContactForm = (): boolean => {
+    const errs: Record<string, string> = {};
+
+    if (formData.email.trim()) {
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(formData.email.trim())) {
+        errs.email = "Invalid email address";
+      }
+    }
+
+    const validatePhone = (field: "phone" | "mobile", label: string) => {
+      const raw = formData[field].trim();
+      if (raw) {
+        const digits = raw.replace(/\D/g, "");
+        if (digits.length < 10 || digits.length > 15) {
+          errs[field] = `${label} must be 10–15 digits`;
+        }
+      }
+    };
+    validatePhone("phone", "Phone");
+    validatePhone("mobile", "Mobile");
+
+    if (formData.state.trim()) {
+      if (!/^[A-Z]{2}$/.test(formData.state.trim())) {
+        errs.state = "State must be exactly 2 uppercase letters";
+      }
+    }
+
+    if (formData.zip.trim()) {
+      if (!/^\d{5}(-\d{4})?$/.test(formData.zip.trim())) {
+        errs.zip = "ZIP must be 5 digits or 5+4 format (e.g. 75201 or 75201-1234)";
+      }
+    }
+
+    setFieldErrors(errs);
+    return Object.keys(errs).length === 0;
   };
 
   const handleSubmit = async (e: React.FormEvent, skipDedup = false) => {
@@ -70,6 +111,8 @@ export function ContactForm({ contact, onSuccess }: ContactFormProps) {
       setError("Last name is required");
       return;
     }
+
+    if (!validateContactForm()) return;
 
     setSubmitting(true);
     setError(null);
@@ -213,6 +256,7 @@ export function ContactForm({ contact, onSuccess }: ContactFormProps) {
               value={formData.email}
               onChange={(e) => handleChange("email", e.target.value)}
             />
+            {fieldErrors.email && <p className="text-xs text-red-600">{fieldErrors.email}</p>}
           </div>
           <div className="space-y-2">
             <Label htmlFor="phone">Phone</Label>
@@ -221,6 +265,7 @@ export function ContactForm({ contact, onSuccess }: ContactFormProps) {
               value={formData.phone}
               onChange={(e) => handleChange("phone", e.target.value)}
             />
+            {fieldErrors.phone && <p className="text-xs text-red-600">{fieldErrors.phone}</p>}
           </div>
           <div className="space-y-2">
             <Label htmlFor="mobile">Mobile</Label>
@@ -229,6 +274,7 @@ export function ContactForm({ contact, onSuccess }: ContactFormProps) {
               value={formData.mobile}
               onChange={(e) => handleChange("mobile", e.target.value)}
             />
+            {fieldErrors.mobile && <p className="text-xs text-red-600">{fieldErrors.mobile}</p>}
           </div>
         </CardContent>
       </Card>
@@ -264,6 +310,7 @@ export function ContactForm({ contact, onSuccess }: ContactFormProps) {
                 value={formData.state}
                 onChange={(e) => handleChange("state", e.target.value.toUpperCase())}
               />
+              {fieldErrors.state && <p className="text-xs text-red-600">{fieldErrors.state}</p>}
             </div>
             <div className="space-y-2">
               <Label htmlFor="zip">ZIP</Label>
@@ -272,6 +319,7 @@ export function ContactForm({ contact, onSuccess }: ContactFormProps) {
                 value={formData.zip}
                 onChange={(e) => handleChange("zip", e.target.value)}
               />
+              {fieldErrors.zip && <p className="text-xs text-red-600">{fieldErrors.zip}</p>}
             </div>
           </div>
         </CardContent>

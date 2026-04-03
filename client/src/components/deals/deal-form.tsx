@@ -50,6 +50,8 @@ export function DealForm({ deal, onSuccess }: DealFormProps) {
 
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  const [closeDateWarning, setCloseDateWarning] = useState<string | null>(null);
 
   // Default stageId when activeStages finishes loading and form stageId is still empty
   useEffect(() => {
@@ -60,6 +62,56 @@ export function DealForm({ deal, onSuccess }: DealFormProps) {
 
   const handleChange = (field: string, value: string) => {
     setFormData((prev) => ({ ...prev, [field]: value }));
+    if (fieldErrors[field]) {
+      setFieldErrors((prev) => { const next = { ...prev }; delete next[field]; return next; });
+    }
+  };
+
+  const validateDealForm = (): boolean => {
+    const errs: Record<string, string> = {};
+    const MAX_MONEY = 999999999;
+
+    const monetary: Array<keyof typeof formData> = ["ddEstimate", "bidEstimate", "awardedAmount"];
+    for (const field of monetary) {
+      const raw = formData[field];
+      if (raw !== "" && raw != null) {
+        const n = parseFloat(raw as string);
+        if (isNaN(n) || n < 0) {
+          errs[field] = "Must be 0 or greater";
+        } else if (n > MAX_MONEY) {
+          errs[field] = "Must not exceed $999,999,999";
+        }
+      }
+    }
+
+    if (formData.winProbability !== "") {
+      const wp = parseInt(formData.winProbability, 10);
+      if (isNaN(wp) || wp < 0 || wp > 100) {
+        errs.winProbability = "Must be between 0 and 100";
+      }
+    }
+
+    if (formData.description.length > 5000) {
+      errs.description = "Must be 5000 characters or fewer";
+    }
+
+    setFieldErrors(errs);
+
+    // Close date warning (non-blocking)
+    if (formData.expectedCloseDate) {
+      const closeDate = new Date(formData.expectedCloseDate);
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      if (closeDate < today) {
+        setCloseDateWarning("Expected close date is in the past");
+      } else {
+        setCloseDateWarning(null);
+      }
+    } else {
+      setCloseDateWarning(null);
+    }
+
+    return Object.keys(errs).length === 0;
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -72,6 +124,8 @@ export function DealForm({ deal, onSuccess }: DealFormProps) {
       setError("Stage is required");
       return;
     }
+
+    if (!validateDealForm()) return;
 
     setSubmitting(true);
     setError(null);
@@ -177,6 +231,8 @@ export function DealForm({ deal, onSuccess }: DealFormProps) {
               value={formData.description}
               onChange={(e) => handleChange("description", e.target.value)}
             />
+            <p className="text-xs text-muted-foreground">{formData.description.length}/5000</p>
+            {fieldErrors.description && <p className="text-xs text-red-600">{fieldErrors.description}</p>}
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -200,6 +256,7 @@ export function DealForm({ deal, onSuccess }: DealFormProps) {
                 value={formData.winProbability}
                 onChange={(e) => handleChange("winProbability", e.target.value)}
               />
+              {fieldErrors.winProbability && <p className="text-xs text-red-600">{fieldErrors.winProbability}</p>}
             </div>
           </div>
 
@@ -255,6 +312,7 @@ export function DealForm({ deal, onSuccess }: DealFormProps) {
               value={formData.expectedCloseDate}
               onChange={(e) => handleChange("expectedCloseDate", e.target.value)}
             />
+            {closeDateWarning && <p className="text-xs text-amber-600">{closeDateWarning}</p>}
           </div>
         </CardContent>
       </Card>
@@ -277,6 +335,7 @@ export function DealForm({ deal, onSuccess }: DealFormProps) {
                 value={formData.ddEstimate}
                 onChange={(e) => handleChange("ddEstimate", e.target.value)}
               />
+              {fieldErrors.ddEstimate && <p className="text-xs text-red-600">{fieldErrors.ddEstimate}</p>}
             </div>
             <div className="space-y-2">
               <Label htmlFor="bidEstimate">Bid Estimate ($)</Label>
@@ -289,6 +348,7 @@ export function DealForm({ deal, onSuccess }: DealFormProps) {
                 value={formData.bidEstimate}
                 onChange={(e) => handleChange("bidEstimate", e.target.value)}
               />
+              {fieldErrors.bidEstimate && <p className="text-xs text-red-600">{fieldErrors.bidEstimate}</p>}
             </div>
             <div className="space-y-2">
               <Label htmlFor="awardedAmount">Awarded Amount ($)</Label>
@@ -301,6 +361,7 @@ export function DealForm({ deal, onSuccess }: DealFormProps) {
                 value={formData.awardedAmount}
                 onChange={(e) => handleChange("awardedAmount", e.target.value)}
               />
+              {fieldErrors.awardedAmount && <p className="text-xs text-red-600">{fieldErrors.awardedAmount}</p>}
             </div>
           </div>
         </CardContent>
