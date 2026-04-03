@@ -9,13 +9,13 @@ import {
   X,
   Loader2,
   ImageIcon,
+  Plus,
+  Trash2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useNearbyDeals } from "@/hooks/use-nearby-deals";
 import { uploadFile } from "@/hooks/use-files";
-
-// ─── Constants ──────────────────────────────────────────────────────────────
 
 const SUBCATEGORIES = [
   "Progress",
@@ -28,22 +28,25 @@ const SUBCATEGORIES = [
 
 type Subcategory = (typeof SUBCATEGORIES)[number];
 
-// ─── Component ──────────────────────────────────────────────────────────────
+interface QueuedPhoto {
+  id: string;
+  file: File;
+  previewUrl: string;
+  note: string;
+  status: "pending" | "uploading" | "done" | "error";
+  error?: string;
+  progress: number;
+}
 
 export function PhotoCapturePage() {
   const { deals, autoSelectedDeal, gpsError, loading: gpsLoading } = useNearbyDeals();
 
-  // State
   const [selectedDealId, setSelectedDealId] = useState<string>("");
   const [selectedSubcategory, setSelectedSubcategory] = useState<Subcategory | null>(null);
-  const [capturedFile, setCapturedFile] = useState<File | null>(null);
-  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
-  const [note, setNote] = useState("");
+  const [queue, setQueue] = useState<QueuedPhoto[]>([]);
   const [uploading, setUploading] = useState(false);
-  const [uploadProgress, setUploadProgress] = useState(0);
-  const [uploadSuccess, setUploadSuccess] = useState(false);
-  const [uploadError, setUploadError] = useState<string | null>(null);
-  const [recentCount, setRecentCount] = useState(0);
+  const [uploadComplete, setUploadComplete] = useState(false);
+  const [sessionCount, setSessionCount] = useState(0);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -54,74 +57,105 @@ export function PhotoCapturePage() {
     }
   }, [autoSelectedDeal, selectedDealId]);
 
-  // Clean up preview URL on unmount or change
+  // Clean up preview URLs on unmount
   useEffect(() => {
     return () => {
-      if (previewUrl) URL.revokeObjectURL(previewUrl);
+      queue.forEach((p) => URL.revokeObjectURL(p.previewUrl));
     };
-  }, [previewUrl]);
+  }, []);
 
-  // Auto-reset after successful upload
+  // Auto-reset success state
   useEffect(() => {
-    if (!uploadSuccess) return;
-    const timer = setTimeout(() => {
-      setUploadSuccess(false);
-    }, 2000);
+    if (!uploadComplete) return;
+    const timer = setTimeout(() => setUploadComplete(false), 3000);
     return () => clearTimeout(timer);
-  }, [uploadSuccess]);
+  }, [uploadComplete]);
 
-  // ─── Handlers ───────────────────────────────────────────────────────────
+  // ─── Handlers ─────────────────────────────────────────────────────────
 
   function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    setCapturedFile(file);
-    if (previewUrl) URL.revokeObjectURL(previewUrl);
-    setPreviewUrl(URL.createObjectURL(file));
-    setUploadError(null);
-    // Reset file input so the same file can be re-selected
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+
+    const newPhotos: QueuedPhoto[] = Array.from(files).map((file) => ({
+      id: crypto.randomUUID(),
+      file,
+      previewUrl: URL.createObjectURL(file),
+      note: "",
+      status: "pending" as const,
+      progress: 0,
+    }));
+
+    setQueue((prev) => [...prev, ...newPhotos]);
+    setUploadComplete(false);
+    // Reset input so same file can be re-selected
     e.target.value = "";
   }
 
-  function handleRetake() {
-    setCapturedFile(null);
-    if (previewUrl) URL.revokeObjectURL(previewUrl);
-    setPreviewUrl(null);
-    setNote("");
-    setUploadError(null);
-    setUploadProgress(0);
+  function removePhoto(id: string) {
+    setQueue((prev) => {
+      const photo = prev.find((p) => p.id === id);
+      if (photo) URL.revokeObjectURL(photo.previewUrl);
+      return prev.filter((p) => p.id !== id);
+    });
   }
 
-  async function handleUpload() {
-    if (!capturedFile || !selectedDealId) return;
+  function updateNote(id: string, note: string) {
+    setQueue((prev) => prev.map((p) => (p.id === id ? { ...p, note } : p)));
+  }
+
+  async function handleUploadAll() {
+    if (!selectedDealId || queue.length === 0) return;
 
     setUploading(true);
-    setUploadProgress(0);
-    setUploadError(null);
+    const pending = queue.filter((p) => p.status === "pending" || p.status === "error");
+    let successCount = 0;
 
-    try {
-      await uploadFile({
-        file: capturedFile,
-        category: "photo",
-        subcategory: selectedSubcategory?.toLowerCase() || undefined,
-        dealId: selectedDealId,
-        description: note || undefined,
-        tags: ["field-capture"],
-        onProgress: (pct) => setUploadProgress(pct),
-      });
+    for (const photo of pending) {
+      // Mark as uploading
+      setQueue((prev) =>
+        prev.map((p) => (p.id === photo.id ? { ...p, status: "uploading", progress: 0, error: undefined } : p))
+      );
 
-      setRecentCount((c) => c + 1);
-      setUploadSuccess(true);
-      // Reset for next photo
-      setCapturedFile(null);
-      if (previewUrl) URL.revokeObjectURL(previewUrl);
-      setPreviewUrl(null);
-      setNote("");
-      setUploadProgress(0);
-    } catch (err) {
-      setUploadError(err instanceof Error ? err.message : "Upload failed");
-    } finally {
-      setUploading(false);
+      try {
+        await uploadFile({
+          file: photo.file,
+          category: "photo",
+          subcategory: selectedSubcategory?.toLowerCase() || undefined,
+          dealId: selectedDealId,
+          description: photo.note || undefined,
+          tags: ["field-capture"],
+          onProgress: (pct) => {
+            setQueue((prev) =>
+              prev.map((p) => (p.id === photo.id ? { ...p, progress: pct } : p))
+            );
+          },
+        });
+
+        setQueue((prev) =>
+          prev.map((p) => (p.id === photo.id ? { ...p, status: "done", progress: 100 } : p))
+        );
+        successCount++;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "Upload failed";
+        setQueue((prev) =>
+          prev.map((p) => (p.id === photo.id ? { ...p, status: "error", error: msg } : p))
+        );
+      }
+    }
+
+    setUploading(false);
+    setSessionCount((c) => c + successCount);
+
+    // Clear completed photos from queue after a brief delay
+    if (successCount > 0) {
+      setUploadComplete(true);
+      setTimeout(() => {
+        setQueue((prev) => {
+          prev.filter((p) => p.status === "done").forEach((p) => URL.revokeObjectURL(p.previewUrl));
+          return prev.filter((p) => p.status !== "done");
+        });
+      }, 1500);
     }
   }
 
@@ -129,42 +163,35 @@ export function PhotoCapturePage() {
     setSelectedSubcategory((prev) => (prev === sub ? null : sub));
   }
 
-  // ─── Derived ────────────────────────────────────────────────────────────
+  // ─── Derived ──────────────────────────────────────────────────────────
 
-  const sortedDeals = deals.length > 0
-    ? deals
-    : [];
-
-  const canUpload = !!capturedFile && !!selectedDealId && !uploading;
-
-  // ─── Render ─────────────────────────────────────────────────────────────
+  const pendingCount = queue.filter((p) => p.status === "pending" || p.status === "error").length;
+  const canUpload = pendingCount > 0 && !!selectedDealId && !uploading;
 
   return (
     <div className="fixed inset-0 flex flex-col bg-[#111] text-white">
-      {/* ── Top Bar ─────────────────────────────────────────────────────── */}
-      <header className="flex items-center justify-between px-4 py-3 border-b border-white/10">
+      {/* Top Bar */}
+      <header className="flex items-center justify-between px-4 py-3 border-b border-white/10 flex-shrink-0">
         <Link
           to="/"
           className="flex items-center gap-1.5 text-sm text-white/70 hover:text-white transition-colors"
         >
           <ArrowLeft className="h-4 w-4" />
-          Back to App
+          Back
         </Link>
         <h1 className="text-base font-semibold tracking-tight">T Rock Photos</h1>
-        <div className="w-[88px]" /> {/* Spacer to center title */}
+        <div className="w-16" />
       </header>
 
-      {/* ── Scrollable Content ──────────────────────────────────────────── */}
+      {/* Scrollable Content */}
       <div className="flex-1 overflow-y-auto">
         <div className="max-w-lg mx-auto px-4 py-4 space-y-5">
 
-          {/* ── Project Selector ──────────────────────────────────────── */}
+          {/* Project Selector */}
           <div className="space-y-2">
             <label className="text-xs font-medium text-white/50 uppercase tracking-wider">
               Project
             </label>
-
-            {/* GPS Status */}
             <div className="flex items-center gap-2 text-xs text-white/40">
               {gpsLoading ? (
                 <>
@@ -176,40 +203,29 @@ export function PhotoCapturePage() {
                   <MapPin className="h-3 w-3 text-amber-400" />
                   <span className="text-amber-400">GPS unavailable — showing all projects</span>
                 </>
-              ) : deals.length > 0 ? (
+              ) : autoSelectedDeal ? (
                 <>
                   <MapPin className="h-3 w-3 text-emerald-400" />
-                  <span className="text-emerald-400">
-                    Sorted by distance
-                    {autoSelectedDeal && " — nearest auto-selected"}
-                  </span>
+                  <span className="text-emerald-400">Nearest auto-selected</span>
                 </>
-              ) : (
-                <>
-                  <MapPin className="h-3 w-3" />
-                  <span>No nearby projects found</span>
-                </>
-              )}
+              ) : null}
             </div>
-
             <select
               value={selectedDealId}
               onChange={(e) => setSelectedDealId(e.target.value)}
               className="w-full rounded-lg border border-white/20 bg-white/5 px-3 py-3 text-sm text-white appearance-none focus:outline-none focus:ring-2 focus:ring-[#CC0000]/50 focus:border-[#CC0000]"
             >
-              <option value="" className="bg-[#222] text-white">
-                Select a project...
-              </option>
-              {sortedDeals.map((deal) => (
+              <option value="" className="bg-[#222] text-white">Select a project...</option>
+              {deals.map((deal) => (
                 <option key={deal.id} value={deal.id} className="bg-[#222] text-white">
                   {deal.name}
-                  {deal.distance != null ? ` — ${deal.distance.toFixed(1)} mi` : ""}
+                  {deal.distance >= 0 ? ` — ${deal.distance.toFixed(1)} mi` : ""}
                 </option>
               ))}
             </select>
           </div>
 
-          {/* ── Subcategory Quick Tags ────────────────────────────────── */}
+          {/* Subcategory Quick Tags */}
           <div className="space-y-2">
             <label className="text-xs font-medium text-white/50 uppercase tracking-wider">
               Category
@@ -232,140 +248,179 @@ export function PhotoCapturePage() {
             </div>
           </div>
 
-          {/* ── Camera / Preview Area ─────────────────────────────────── */}
-          <div className="space-y-3">
-            {/* Hidden file input */}
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="image/*"
-              capture="environment"
-              onChange={handleFileChange}
-              className="hidden"
-            />
+          {/* Camera Button — always visible to add more photos */}
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*"
+            capture="environment"
+            multiple
+            onChange={handleFileChange}
+            className="hidden"
+          />
 
-            {uploadSuccess ? (
-              /* ── Success State ────────────────────────────────────── */
-              <div className="flex flex-col items-center justify-center rounded-2xl border border-emerald-500/30 bg-emerald-500/10 py-16">
-                <CheckCircle className="h-16 w-16 text-emerald-400 mb-3" />
-                <p className="text-lg font-semibold text-emerald-300">Photo saved!</p>
-                <p className="text-sm text-white/40 mt-1">
-                  {recentCount} photo{recentCount !== 1 ? "s" : ""} this session
-                </p>
-              </div>
-            ) : capturedFile && previewUrl ? (
-              /* ── Preview State ────────────────────────────────────── */
-              <div className="space-y-3">
-                <div className="relative rounded-2xl overflow-hidden border border-white/10">
-                  <img
-                    src={previewUrl}
-                    alt="Captured photo preview"
-                    className="w-full max-h-[50vh] object-contain bg-black"
-                  />
+          <div className="flex flex-col items-center py-4">
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={!selectedDealId}
+              className={`relative flex items-center justify-center rounded-full h-24 w-24 transition-all ${
+                selectedDealId
+                  ? "bg-gradient-to-br from-[#CC0000] to-[#880000] shadow-lg shadow-[#CC0000]/25 active:scale-95"
+                  : "bg-white/10 cursor-not-allowed"
+              }`}
+            >
+              {queue.length > 0 ? (
+                <Plus className={`h-10 w-10 ${selectedDealId ? "text-white" : "text-white/30"}`} />
+              ) : (
+                <Camera className={`h-10 w-10 ${selectedDealId ? "text-white" : "text-white/30"}`} />
+              )}
+            </button>
+            <p className="text-sm text-white/40 mt-3">
+              {!selectedDealId
+                ? "Select a project to start"
+                : queue.length > 0
+                ? "Tap to add more photos"
+                : "Tap to take a photo"}
+            </p>
+          </div>
+
+          {/* Upload Complete Banner */}
+          {uploadComplete && (
+            <div className="flex items-center justify-center gap-2 rounded-xl bg-emerald-500/10 border border-emerald-500/30 py-3">
+              <CheckCircle className="h-5 w-5 text-emerald-400" />
+              <span className="text-sm font-semibold text-emerald-300">Photos uploaded!</span>
+            </div>
+          )}
+
+          {/* Photo Queue */}
+          {queue.length > 0 && (
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-medium text-white/50 uppercase tracking-wider">
+                  {queue.length} Photo{queue.length !== 1 ? "s" : ""} Ready
+                </label>
+                {pendingCount > 0 && !uploading && (
                   <button
-                    type="button"
-                    onClick={handleRetake}
-                    className="absolute top-2 right-2 rounded-full bg-black/60 p-2 text-white/80 hover:text-white transition-colors"
+                    onClick={() => {
+                      queue.forEach((p) => URL.revokeObjectURL(p.previewUrl));
+                      setQueue([]);
+                    }}
+                    className="text-xs text-white/40 hover:text-red-400 transition-colors"
                   >
-                    <X className="h-5 w-5" />
+                    Clear all
                   </button>
-                </div>
+                )}
+              </div>
 
-                {/* Note Input */}
+              <div className="grid grid-cols-2 gap-3">
+                {queue.map((photo) => (
+                  <div
+                    key={photo.id}
+                    className={`relative rounded-xl overflow-hidden border ${
+                      photo.status === "done"
+                        ? "border-emerald-500/50"
+                        : photo.status === "error"
+                        ? "border-red-500/50"
+                        : photo.status === "uploading"
+                        ? "border-[#CC0000]/50"
+                        : "border-white/10"
+                    }`}
+                  >
+                    <img
+                      src={photo.previewUrl}
+                      alt="Queued photo"
+                      className="w-full h-32 object-cover"
+                    />
+
+                    {/* Status overlay */}
+                    {photo.status === "done" && (
+                      <div className="absolute inset-0 bg-emerald-500/20 flex items-center justify-center">
+                        <CheckCircle className="h-8 w-8 text-emerald-400" />
+                      </div>
+                    )}
+                    {photo.status === "uploading" && (
+                      <div className="absolute inset-0 bg-black/40 flex items-center justify-center">
+                        <Loader2 className="h-8 w-8 text-white animate-spin" />
+                      </div>
+                    )}
+                    {photo.status === "error" && (
+                      <div className="absolute inset-0 bg-red-500/20 flex items-center justify-center">
+                        <p className="text-xs text-red-300 px-2 text-center">{photo.error}</p>
+                      </div>
+                    )}
+
+                    {/* Progress bar */}
+                    {photo.status === "uploading" && (
+                      <div className="absolute bottom-0 left-0 right-0 h-1 bg-white/10">
+                        <div
+                          className="h-full bg-[#CC0000] transition-all"
+                          style={{ width: `${photo.progress}%` }}
+                        />
+                      </div>
+                    )}
+
+                    {/* Remove button (only when pending) */}
+                    {photo.status === "pending" && !uploading && (
+                      <button
+                        type="button"
+                        onClick={() => removePhoto(photo.id)}
+                        className="absolute top-1 right-1 rounded-full bg-black/60 p-1.5 text-white/70 hover:text-white"
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+
+              {/* Optional note for the batch */}
+              {pendingCount > 0 && (
                 <Input
-                  value={note}
-                  onChange={(e) => setNote(e.target.value)}
-                  placeholder="Add a note (optional)"
+                  value={queue[0]?.note ?? ""}
+                  onChange={(e) => {
+                    const note = e.target.value;
+                    setQueue((prev) =>
+                      prev.map((p) => (p.status === "pending" ? { ...p, note } : p))
+                    );
+                  }}
+                  placeholder="Add a note for all photos (optional)"
                   className="bg-white/5 border-white/20 text-white placeholder:text-white/30 focus-visible:ring-[#CC0000]/50"
                 />
-
-                {/* Upload Progress */}
-                {uploading && (
-                  <div className="w-full rounded-full bg-white/10 h-2 overflow-hidden">
-                    <div
-                      className="h-full bg-gradient-to-r from-[#CC0000] to-[#FF4444] transition-all duration-300"
-                      style={{ width: `${uploadProgress}%` }}
-                    />
-                  </div>
-                )}
-
-                {/* Upload Error */}
-                {uploadError && (
-                  <p className="text-sm text-red-400 text-center">{uploadError}</p>
-                )}
-
-                {/* Action Buttons */}
-                <div className="flex gap-3">
-                  <Button
-                    variant="outline"
-                    onClick={handleRetake}
-                    disabled={uploading}
-                    className="flex-1 border-white/20 text-white hover:bg-white/10 hover:text-white"
-                  >
-                    Retake
-                  </Button>
-                  <Button
-                    onClick={handleUpload}
-                    disabled={!canUpload}
-                    className="flex-1 bg-gradient-to-r from-[#CC0000] to-[#B00000] hover:from-[#DD1111] hover:to-[#CC0000] text-white font-semibold"
-                  >
-                    {uploading ? (
-                      <>
-                        <Loader2 className="h-4 w-4 animate-spin mr-2" />
-                        Uploading...
-                      </>
-                    ) : (
-                      <>
-                        <Upload className="h-4 w-4 mr-2" />
-                        Upload
-                      </>
-                    )}
-                  </Button>
-                </div>
-              </div>
-            ) : (
-              /* ── Camera Button State ─────────────────────────────── */
-              <div className="flex flex-col items-center justify-center py-8">
-                <button
-                  type="button"
-                  onClick={() => fileInputRef.current?.click()}
-                  disabled={!selectedDealId}
-                  className={`relative flex items-center justify-center rounded-full h-28 w-28 transition-all ${
-                    selectedDealId
-                      ? "bg-gradient-to-br from-[#CC0000] to-[#880000] shadow-lg shadow-[#CC0000]/25 active:scale-95"
-                      : "bg-white/10 cursor-not-allowed"
-                  }`}
-                >
-                  <Camera
-                    className={`h-12 w-12 ${
-                      selectedDealId ? "text-white" : "text-white/30"
-                    }`}
-                  />
-                </button>
-                <p className="text-sm text-white/40 mt-4">
-                  {!selectedDealId
-                    ? "Select a project to start"
-                    : "Tap to take a photo"}
-                </p>
-              </div>
-            )}
-          </div>
+              )}
+            </div>
+          )}
         </div>
       </div>
 
-      {/* ── Sticky Bottom Bar ────────────────────────────────────────── */}
-      <footer className="border-t border-white/10 px-4 py-3">
-        <div className="max-w-lg mx-auto flex items-center justify-between">
-          <div className="flex items-center gap-2 text-sm text-white/40">
-            <ImageIcon className="h-4 w-4" />
-            <span>
-              {recentCount} photo{recentCount !== 1 ? "s" : ""} this session
-            </span>
-          </div>
-          {selectedDealId && (
-            <p className="text-xs text-white/30 truncate max-w-[180px]">
-              {sortedDeals.find((d) => d.id === selectedDealId)?.name}
-            </p>
+      {/* Sticky Bottom — Upload All Button */}
+      <footer className="border-t border-white/10 px-4 py-3 flex-shrink-0">
+        <div className="max-w-lg mx-auto space-y-2">
+          {canUpload ? (
+            <Button
+              onClick={handleUploadAll}
+              className="w-full bg-gradient-to-r from-[#CC0000] to-[#B00000] hover:from-[#DD1111] hover:to-[#CC0000] text-white font-bold py-6 text-base"
+            >
+              <Upload className="h-5 w-5 mr-2" />
+              Upload {pendingCount} Photo{pendingCount !== 1 ? "s" : ""}
+            </Button>
+          ) : uploading ? (
+            <Button disabled className="w-full py-6 text-base bg-white/10 text-white/50">
+              <Loader2 className="h-5 w-5 mr-2 animate-spin" />
+              Uploading...
+            </Button>
+          ) : (
+            <div className="flex items-center justify-between text-sm text-white/40">
+              <div className="flex items-center gap-2">
+                <ImageIcon className="h-4 w-4" />
+                <span>{sessionCount} uploaded this session</span>
+              </div>
+              {selectedDealId && (
+                <p className="text-xs text-white/30 truncate max-w-[180px]">
+                  {deals.find((d) => d.id === selectedDealId)?.name}
+                </p>
+              )}
+            </div>
           )}
         </div>
       </footer>
