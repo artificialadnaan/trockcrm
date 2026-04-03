@@ -39,6 +39,7 @@ import { UserGuidePage } from "@/pages/admin/help/user-guide-page";
 import { AdminGuidePage } from "@/pages/admin/help/admin-guide-page";
 import { CompanyCamPage } from "@/pages/admin/companycam-page";
 import { PhotoCapturePage } from "@/pages/photos/photo-capture-page";
+import { PhotoFeedPage } from "@/pages/photos/photo-feed-page";
 
 function HomePage() {
   const { user } = useAuth();
@@ -101,6 +102,7 @@ export function App() {
             <Route path="/admin/migration" element={<MigrationDashboardPage />} />
             <Route path="/admin/migration/deals" element={<MigrationDealsPage />} />
             <Route path="/admin/migration/contacts" element={<MigrationContactsPage />} />
+            <Route path="/photos/feed" element={<PhotoFeedPage />} />
             <Route path="/help/user-guide" element={<UserGuidePage />} />
             <Route path="/help/admin-guide" element={<AdminGuidePage />} />
           </Route>
