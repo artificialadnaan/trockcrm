@@ -1,20 +1,51 @@
 import { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, Link } from "react-router-dom";
 import {
   useDirectorDashboard,
   presetToDateRange,
   type DateRangePreset,
 } from "@/hooks/use-director-dashboard";
-import { DateRangeToggle } from "@/components/dashboard/date-range-toggle";
-import { RepPerformanceCard } from "@/components/dashboard/rep-performance-card";
-import { StaleDealList } from "@/components/dashboard/stale-deal-list";
-import { StatCard } from "@/components/dashboard/stat-card";
 import { PipelineBarChart } from "@/components/charts/pipeline-bar-chart";
 import { WinRateTrendChart } from "@/components/charts/win-rate-trend-chart";
 import { ActivityBarChart } from "@/components/charts/activity-bar-chart";
 import { formatCurrency } from "@/components/charts/chart-colors";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { TrendingUp, BarChart3 } from "lucide-react";
+import {
+  BarChart3,
+  TrendingUp,
+  Building2,
+  Activity,
+  ChevronRight,
+  AlertTriangle,
+  Bell,
+  Settings,
+  User,
+  MapPin,
+} from "lucide-react";
+
+const PRESETS: Array<{ value: DateRangePreset; label: string }> = [
+  { value: "mtd", label: "MTD" },
+  { value: "qtd", label: "QTD" },
+  { value: "ytd", label: "YTD" },
+  { value: "last_month", label: "Last Month" },
+  { value: "last_quarter", label: "Last Quarter" },
+  { value: "last_year", label: "Last Year" },
+];
+
+function getActivityLevel(score: number): { dot: string; label: string } {
+  if (score >= 70) return { dot: "bg-green-500", label: "High" };
+  if (score >= 40) return { dot: "bg-yellow-400", label: "Moderate" };
+  return { dot: "bg-red-500", label: "Review" };
+}
+
+function getInitials(name: string): string {
+  return name
+    .split(" ")
+    .map((n) => n[0])
+    .join("")
+    .toUpperCase()
+    .slice(0, 2);
+}
 
 export function DirectorDashboardPage() {
   const navigate = useNavigate();
@@ -24,136 +55,422 @@ export function DirectorDashboardPage() {
 
   if (loading) {
     return (
-      <div className="space-y-6">
-        <h2 className="text-2xl font-bold">Director Dashboard</h2>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-          {Array.from({ length: 6 }).map((_, i) => (
-            <Card key={i} className="animate-pulse">
-              <CardContent className="p-4 h-32" />
-            </Card>
+      <div className="p-6 space-y-6">
+        <div className="flex items-center justify-between">
+          <div>
+            <div className="h-8 w-64 bg-gray-200 rounded animate-pulse" />
+            <div className="h-3 w-48 bg-gray-100 rounded animate-pulse mt-2" />
+          </div>
+        </div>
+        <div className="grid grid-cols-3 gap-4">
+          {Array.from({ length: 3 }).map((_, i) => (
+            <div key={i} className="h-40 bg-gray-100 rounded-xl animate-pulse" />
           ))}
         </div>
+        <div className="h-72 bg-gray-100 rounded-xl animate-pulse" />
       </div>
     );
   }
 
   if (error) {
     return (
-      <div className="space-y-6">
-        <h2 className="text-2xl font-bold">Director Dashboard</h2>
-        <Card>
-          <CardContent className="p-6 text-center text-red-600">{error}</CardContent>
-        </Card>
+      <div className="p-6 space-y-4">
+        <h2 className="text-3xl font-black tracking-tighter uppercase">Director Dashboard</h2>
+        <div className="bg-red-50 border border-red-200 rounded-xl p-6 text-center text-red-600">
+          {error}
+        </div>
       </div>
     );
   }
 
   if (!data) return null;
 
+  const firstStaleAlert = data.staleDeals[0] ?? null;
+  const secondStaleAlert = data.staleDeals[1] ?? null;
+
   return (
-    <div className="space-y-6">
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-        <h2 className="text-2xl font-bold">Director Dashboard</h2>
-        <DateRangeToggle value={preset} onChange={setPreset} />
-      </div>
+    <div className="p-6 space-y-6 bg-gray-50 min-h-screen">
+      {/* ── Header ─────────────────────────────────────────────────────── */}
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-3xl font-black tracking-tighter uppercase text-gray-900">
+            Director Dashboard
+          </h1>
+          <p className="text-[11px] uppercase tracking-widest text-gray-400 mt-0.5">
+            Strategic Performance Overview
+          </p>
+        </div>
 
-      {/* DD vs Pipeline Summary */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-        <StatCard
-          title="True Pipeline"
-          value={formatCurrency(data.ddVsPipeline.pipelineValue)}
-          subtitle={`${data.ddVsPipeline.pipelineCount} deals`}
-          icon={<TrendingUp className="h-5 w-5" />}
-          valueClassName="text-2xl"
-          onClick={() => navigate("/pipeline")}
-        />
-        <StatCard
-          title="DD Pipeline"
-          value={formatCurrency(data.ddVsPipeline.ddValue)}
-          subtitle={`${data.ddVsPipeline.ddCount} deals`}
-          icon={<BarChart3 className="h-5 w-5" />}
-          valueClassName="text-2xl"
-          onClick={() => navigate("/deals?stage=dd")}
-        />
-        <StatCard
-          title="Total Pipeline"
-          value={formatCurrency(data.ddVsPipeline.totalValue)}
-          subtitle={`${data.ddVsPipeline.totalCount} deals total`}
-          className="sm:col-span-2 bg-primary/5"
-          valueClassName="text-5xl"
-          onClick={() => navigate("/deals")}
-        />
-      </div>
+        <div className="flex items-center gap-3">
+          {/* Date range pill */}
+          <div className="flex items-center gap-1 bg-gray-200 rounded-full px-1.5 py-1.5">
+            {PRESETS.map((p) => (
+              <button
+                key={p.value}
+                onClick={() => setPreset(p.value)}
+                className={`px-3 py-1 rounded-full text-xs font-semibold transition-all ${
+                  preset === p.value
+                    ? "bg-[#CC0000] text-white shadow-sm"
+                    : "text-gray-600 hover:text-gray-900"
+                }`}
+              >
+                {p.label}
+              </button>
+            ))}
+          </div>
 
-      {/* Rep Performance Cards */}
-      <div>
-        <h3 className="text-lg font-semibold mb-3">Sales Rep Overview</h3>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-          {data.repCards.map((rep) => (
-            <RepPerformanceCard
-              key={rep.repId}
-              rep={rep}
-              onClick={() => navigate(`/director/rep/${rep.repId}`)}
-            />
-          ))}
-          {data.repCards.length === 0 && (
-            <p className="text-muted-foreground col-span-full text-center py-4">
-              No active reps found.
-            </p>
-          )}
+          {/* Action buttons */}
+          <button className="w-8 h-8 rounded-full bg-white border border-gray-200 flex items-center justify-center text-gray-500 hover:text-gray-800 transition-colors shadow-sm">
+            <Bell className="h-4 w-4" />
+          </button>
+          <button className="w-8 h-8 rounded-full bg-white border border-gray-200 flex items-center justify-center text-gray-500 hover:text-gray-800 transition-colors shadow-sm">
+            <Settings className="h-4 w-4" />
+          </button>
+          <div className="w-8 h-8 rounded-full bg-[#CC0000] flex items-center justify-center text-white text-xs font-bold shadow-sm">
+            <User className="h-4 w-4" />
+          </div>
         </div>
       </div>
 
-      {/* Charts Row */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Pipeline by Stage */}
-        <Card
-          className="cursor-pointer hover:shadow-md transition-shadow"
+      {/* ── Metric Cards (Bento 3-col) ──────────────────────────────────── */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        {/* True Pipeline */}
+        <div
+          className="group relative bg-white rounded-xl border border-gray-200 border-b-4 border-b-red-200 hover:border-b-[#CC0000] shadow-sm p-5 cursor-pointer transition-all overflow-hidden"
           onClick={() => navigate("/pipeline")}
         >
-          <CardHeader>
-            <CardTitle>Pipeline by Stage</CardTitle>
-          </CardHeader>
-          <CardContent>
+          <div className="absolute top-3 right-3 opacity-0 group-hover:opacity-10 transition-opacity">
+            <BarChart3 className="h-16 w-16 text-gray-800" />
+          </div>
+          <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400 mb-3">
+            True Pipeline
+          </p>
+          <p className="text-5xl font-black text-gray-900 leading-none">
+            {formatCurrency(data.ddVsPipeline.pipelineValue)}
+          </p>
+          <div className="flex items-center gap-2 mt-3">
+            <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-green-100 text-green-700 text-[10px] font-bold uppercase tracking-wide">
+              {data.ddVsPipeline.pipelineCount} DEALS
+            </span>
+            <span className="text-[10px] text-gray-400 uppercase tracking-wide">Active Forecast</span>
+          </div>
+        </div>
+
+        {/* DD Pipeline */}
+        <div
+          className="group relative bg-white rounded-xl border border-gray-200 border-b-4 border-b-blue-200 hover:border-b-blue-600 shadow-sm p-5 cursor-pointer transition-all overflow-hidden"
+          onClick={() => navigate("/deals?stage=dd")}
+        >
+          <div className="absolute top-3 right-3 opacity-0 group-hover:opacity-10 transition-opacity">
+            <TrendingUp className="h-16 w-16 text-gray-800" />
+          </div>
+          <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400 mb-3">
+            DD Pipeline
+          </p>
+          <p className="text-5xl font-black text-gray-900 leading-none">
+            {formatCurrency(data.ddVsPipeline.ddValue)}
+          </p>
+          <div className="flex items-center gap-2 mt-3">
+            <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-blue-100 text-blue-700 text-[10px] font-bold uppercase tracking-wide">
+              {data.ddVsPipeline.ddCount} DEALS
+            </span>
+            <span className="text-[10px] text-gray-400 uppercase tracking-wide">Due Diligence Phase</span>
+          </div>
+        </div>
+
+        {/* Total Pipeline — red gradient */}
+        <div
+          className="relative rounded-xl p-5 cursor-pointer transition-all overflow-hidden shadow-sm"
+          style={{ background: "linear-gradient(135deg, #CC0000 0%, #991111 100%)" }}
+          onClick={() => navigate("/deals")}
+        >
+          <div className="absolute top-3 right-3 opacity-10">
+            <Building2 className="h-16 w-16 text-white" />
+          </div>
+          <p className="text-[10px] font-bold uppercase tracking-widest text-red-200 mb-3">
+            Total Pipeline
+          </p>
+          <p className="text-5xl font-black text-white leading-none">
+            {formatCurrency(data.ddVsPipeline.totalValue)}
+          </p>
+          <div className="flex items-center gap-2 mt-3">
+            <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-white/20 text-white text-[10px] font-bold uppercase tracking-wide">
+              {data.ddVsPipeline.totalCount} DEALS TOTAL
+            </span>
+          </div>
+        </div>
+      </div>
+
+      {/* ── Main Content: Table + Sidebar ───────────────────────────────── */}
+      <div className="grid grid-cols-12 gap-4">
+        {/* Sales Force Performance Table (8 cols) */}
+        <div className="col-span-12 lg:col-span-8">
+          <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+            <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
+              <h2 className="text-sm font-bold text-gray-900 uppercase tracking-wide">
+                Sales Force Performance
+              </h2>
+              <Link
+                to="/reports"
+                className="text-xs font-semibold text-[#CC0000] hover:text-red-700 flex items-center gap-1 transition-colors"
+              >
+                Full Report
+                <ChevronRight className="h-3 w-3" />
+              </Link>
+            </div>
+
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="bg-gray-100">
+                  <th className="text-left px-5 py-2.5 text-[10px] font-bold uppercase tracking-widest text-gray-500">
+                    Representative
+                  </th>
+                  <th className="text-right px-4 py-2.5 text-[10px] font-bold uppercase tracking-widest text-gray-500">
+                    Active Deals
+                  </th>
+                  <th className="text-right px-4 py-2.5 text-[10px] font-bold uppercase tracking-widest text-gray-500">
+                    Pipeline Value
+                  </th>
+                  <th className="text-right px-4 py-2.5 text-[10px] font-bold uppercase tracking-widest text-gray-500">
+                    Win Rate
+                  </th>
+                  <th className="text-right px-5 py-2.5 text-[10px] font-bold uppercase tracking-widest text-gray-500">
+                    Activity
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.repCards.length === 0 && (
+                  <tr>
+                    <td colSpan={5} className="text-center py-8 text-gray-400 text-sm">
+                      No active reps found.
+                    </td>
+                  </tr>
+                )}
+                {data.repCards.map((rep) => {
+                  const activity = getActivityLevel(rep.activityScore);
+                  return (
+                    <tr
+                      key={rep.repId}
+                      className="border-t border-gray-50 hover:bg-gray-50 transition-colors cursor-pointer"
+                      onClick={() => navigate(`/director/rep/${rep.repId}`)}
+                    >
+                      {/* Representative */}
+                      <td className="px-5 py-3">
+                        <div className="flex items-center gap-3">
+                          <div className="w-8 h-8 rounded-full bg-[#CC0000] flex items-center justify-center text-white text-[11px] font-bold flex-shrink-0">
+                            {getInitials(rep.repName)}
+                          </div>
+                          <div>
+                            <p className="text-sm font-semibold text-gray-900 leading-tight">
+                              {rep.repName}
+                            </p>
+                            <p className="text-[10px] text-gray-400 uppercase tracking-wide">
+                              Sales Rep
+                            </p>
+                          </div>
+                        </div>
+                      </td>
+
+                      {/* Active Deals */}
+                      <td className="px-4 py-3 text-right font-mono text-sm font-semibold text-gray-700">
+                        {rep.activeDeals}
+                      </td>
+
+                      {/* Pipeline Value */}
+                      <td className="px-4 py-3 text-right text-sm font-bold text-gray-900">
+                        {formatCurrency(rep.pipelineValue)}
+                      </td>
+
+                      {/* Win Rate */}
+                      <td className="px-4 py-3 text-right">
+                        <div className="flex flex-col items-end gap-1">
+                          <div className="w-20 h-1.5 bg-gray-200 rounded-full overflow-hidden">
+                            <div
+                              className="h-full bg-[#CC0000] rounded-full"
+                              style={{ width: `${Math.min(rep.winRate, 100)}%` }}
+                            />
+                          </div>
+                          <span className="text-xs text-gray-600">{rep.winRate}%</span>
+                        </div>
+                      </td>
+
+                      {/* Activity */}
+                      <td className="px-5 py-3 text-right">
+                        <div className="flex items-center justify-end gap-1.5">
+                          <span className={`w-2 h-2 rounded-full ${activity.dot}`} />
+                          <span className="text-xs text-gray-600">{activity.label}</span>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        {/* Strategic Insights Sidebar (4 cols) */}
+        <div className="col-span-12 lg:col-span-4 space-y-4">
+          {/* Strategic Alert Card */}
+          <div className="relative bg-gray-800 rounded-xl p-5 overflow-hidden">
+            {/* Decorative bg icon */}
+            <div className="absolute top-3 right-3 opacity-5">
+              <Activity className="h-24 w-24 text-white" />
+            </div>
+
+            <div className="flex items-center gap-2 mb-4">
+              <AlertTriangle className="h-4 w-4 text-amber-400" />
+              <h3 className="text-xs font-bold uppercase tracking-widest text-gray-300">
+                Strategic Alerts
+              </h3>
+            </div>
+
+            <div className="space-y-3">
+              {/* Alert 1 — red: stale deal or pipeline warning */}
+              <div className="border-l-4 border-[#CC0000] pl-3 py-1">
+                {firstStaleAlert ? (
+                  <>
+                    <p className="text-xs font-semibold text-white leading-snug">
+                      {firstStaleAlert.dealName}
+                    </p>
+                    <p className="text-[10px] text-gray-400 mt-0.5">
+                      {firstStaleAlert.daysInStage}d stale &mdash; {firstStaleAlert.repName} &mdash;{" "}
+                      {firstStaleAlert.stageName}
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <p className="text-xs font-semibold text-white leading-snug">
+                      Pipeline on track
+                    </p>
+                    <p className="text-[10px] text-gray-400 mt-0.5">
+                      No stale deals detected this period
+                    </p>
+                  </>
+                )}
+              </div>
+
+              {/* Alert 2 — blue: velocity / performance insight */}
+              <div className="border-l-4 border-blue-400 pl-3 py-1">
+                {secondStaleAlert ? (
+                  <>
+                    <p className="text-xs font-semibold text-white leading-snug">
+                      {secondStaleAlert.dealName}
+                    </p>
+                    <p className="text-[10px] text-gray-400 mt-0.5">
+                      {secondStaleAlert.daysInStage}d stale &mdash; {secondStaleAlert.repName} &mdash;{" "}
+                      {secondStaleAlert.stageName}
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <p className="text-xs font-semibold text-white leading-snug">
+                      Velocity insight
+                    </p>
+                    <p className="text-[10px] text-gray-400 mt-0.5">
+                      {data.ddVsPipeline.totalCount} active deals in pipeline
+                    </p>
+                  </>
+                )}
+              </div>
+            </div>
+
+            {data.staleDeals.length > 0 && (
+              <Link
+                to="/deals?filter=stale"
+                className="mt-4 flex items-center gap-1 text-[10px] font-semibold text-gray-400 hover:text-white transition-colors"
+              >
+                View all {data.staleDeals.length} stale deals
+                <ChevronRight className="h-3 w-3" />
+              </Link>
+            )}
+          </div>
+
+          {/* Regional Focus Card */}
+          <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-xs font-bold uppercase tracking-widest text-gray-500">
+                Regional Focus
+              </h3>
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-gray-100 text-[10px] font-semibold text-gray-600">
+                <MapPin className="h-2.5 w-2.5" />
+                Texas/S.W. Zone
+              </span>
+            </div>
+
+            {/* Map placeholder */}
+            <div className="relative w-full h-32 bg-gray-100 rounded-lg overflow-hidden flex items-center justify-center">
+              <div className="absolute inset-0 opacity-20">
+                {/* subtle grid pattern */}
+                <div
+                  className="w-full h-full"
+                  style={{
+                    backgroundImage:
+                      "linear-gradient(to right, #CBD5E1 1px, transparent 1px), linear-gradient(to bottom, #CBD5E1 1px, transparent 1px)",
+                    backgroundSize: "16px 16px",
+                  }}
+                />
+              </div>
+              <div className="relative z-10 px-3 py-1.5 rounded-full bg-[#CC0000] text-white text-[11px] font-bold shadow-md">
+                {formatCurrency(data.ddVsPipeline.totalValue)} Active Ops
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* ── Charts Row (Pipeline by Stage + Win Rate Trend) ─────────────── */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <div
+          className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden cursor-pointer hover:shadow-md transition-shadow"
+          onClick={() => navigate("/pipeline")}
+        >
+          <div className="px-5 py-4 border-b border-gray-100">
+            <h3 className="text-sm font-bold text-gray-900 uppercase tracking-wide">
+              Pipeline by Stage
+            </h3>
+          </div>
+          <div className="p-4">
             {data.pipelineByStage.length > 0 ? (
               <PipelineBarChart data={data.pipelineByStage} />
             ) : (
-              <p className="text-muted-foreground text-center py-8">No pipeline data.</p>
+              <p className="text-gray-400 text-sm text-center py-8">No pipeline data.</p>
             )}
-          </CardContent>
-        </Card>
+          </div>
+        </div>
 
-        {/* Win Rate Trend */}
-        <Card>
-          <CardHeader>
-            <CardTitle>Win Rate Trend</CardTitle>
-          </CardHeader>
-          <CardContent>
+        <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+          <div className="px-5 py-4 border-b border-gray-100">
+            <h3 className="text-sm font-bold text-gray-900 uppercase tracking-wide">
+              Win Rate Trend
+            </h3>
+          </div>
+          <div className="p-4">
             {data.winRateTrend.length > 0 ? (
               <WinRateTrendChart data={data.winRateTrend} />
             ) : (
-              <p className="text-muted-foreground text-center py-8">No closed deals yet.</p>
+              <p className="text-gray-400 text-sm text-center py-8">No closed deals yet.</p>
             )}
-          </CardContent>
-        </Card>
+          </div>
+        </div>
       </div>
 
-      {/* Activity by Rep */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Activity by Rep</CardTitle>
-        </CardHeader>
-        <CardContent>
+      {/* ── Activity by Rep ─────────────────────────────────────────────── */}
+      <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+        <div className="px-5 py-4 border-b border-gray-100">
+          <h3 className="text-sm font-bold text-gray-900 uppercase tracking-wide">
+            Activity by Rep
+          </h3>
+        </div>
+        <div className="p-4">
           {data.activityByRep.length > 0 ? (
             <ActivityBarChart data={data.activityByRep} />
           ) : (
-            <p className="text-muted-foreground text-center py-8">No activity data.</p>
+            <p className="text-gray-400 text-sm text-center py-8">No activity data.</p>
           )}
-        </CardContent>
-      </Card>
-
-      {/* Stale Deal Watchlist */}
-      <StaleDealList deals={data.staleDeals} />
+        </div>
+      </div>
     </div>
   );
 }
