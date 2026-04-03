@@ -47,6 +47,18 @@ export function CompanySelector({ value, onChange, required }: CompanySelectorPr
   const [createError, setCreateError] = useState<string | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
+  // Initialize display name from value prop
+  useEffect(() => {
+    if (value && !selectedName) {
+      // Fetch the company name for the current value
+      import("@/lib/api").then(({ api }) => {
+        api<{ company: { name: string } }>(`/companies/${value}`)
+          .then((data) => setSelectedName(data.company.name))
+          .catch(() => {});
+      });
+    }
+  }, [value, selectedName]);
+
   // Close dropdown on outside click
   useEffect(() => {
     function handleClick(e: MouseEvent) {

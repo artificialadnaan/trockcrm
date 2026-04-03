@@ -45,7 +45,7 @@ router.get("/:id", async (req, res, next) => {
     if (!company) throw new AppError(404, "Company not found");
     const stats = await getCompanyStats(req.tenantDb!, req.params.id);
     await req.commitTransaction!();
-    res.json({ ...company, ...stats });
+    res.json({ company: { ...company, ...stats } });
   } catch (err) { next(err); }
 });
 
@@ -58,7 +58,7 @@ router.post("/", async (req, res, next) => {
       name, category: category || "other", address, city, state, zip, phone, website, notes,
     });
     await req.commitTransaction!();
-    res.status(201).json(company);
+    res.status(201).json({ company });
   } catch (err) { next(err); }
 });
 
@@ -68,7 +68,7 @@ router.patch("/:id", async (req, res, next) => {
     const company = await updateCompany(req.tenantDb!, req.params.id, req.body);
     if (!company) throw new AppError(404, "Company not found");
     await req.commitTransaction!();
-    res.json(company);
+    res.json({ company });
   } catch (err) { next(err); }
 });
 

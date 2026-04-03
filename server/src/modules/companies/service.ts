@@ -1,4 +1,4 @@
-import { eq, and, ilike, asc, desc, count } from "drizzle-orm";
+import { eq, and, ilike, asc, desc, count, sql } from "drizzle-orm";
 import { companies, contacts, deals } from "@trock-crm/shared/schema";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 
@@ -9,7 +9,20 @@ function slugify(name: string): string {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-|-$/g, "")
-    .substring(0, 100);
+    .substring(0, 95); // leave room for dedup suffix
+}
+
+async function uniqueSlug(tenantDb: TenantDb, base: string, excludeId?: string): Promise<string> {
+  let slug = base;
+  let attempt = 0;
+  while (true) {
+    const conditions = [eq(companies.slug, slug)];
+    if (excludeId) conditions.push(sql`${companies.id} != ${excludeId}`);
+    const existing = await tenantDb.select({ id: companies.id }).from(companies).where(and(...conditions)).limit(1);
+    if (existing.length === 0) return slug;
+    attempt++;
+    slug = `${base}-${attempt}`;
+  }
 }
 
 export async function listCompanies(
@@ -32,7 +45,24 @@ export async function listCompanies(
 
   const [rows, totalResult] = await Promise.all([
     tenantDb
-      .select()
+      .select({
+        id: companies.id,
+        name: companies.name,
+        slug: companies.slug,
+        category: companies.category,
+        address: companies.address,
+        city: companies.city,
+        state: companies.state,
+        zip: companies.zip,
+        phone: companies.phone,
+        website: companies.website,
+        notes: companies.notes,
+        isActive: companies.isActive,
+        createdAt: companies.createdAt,
+        updatedAt: companies.updatedAt,
+        contactCount: sql<number>`(SELECT COUNT(*)::int FROM contacts WHERE contacts.company_id = ${companies.id} AND contacts.is_active = true)`,
+        dealCount: sql<number>`(SELECT COUNT(*)::int FROM deals WHERE deals.company_id = ${companies.id} AND deals.is_active = true)`,
+      })
       .from(companies)
       .where(where)
       .orderBy(asc(companies.name))
@@ -70,7 +100,7 @@ export async function createCompany(
     notes?: string;
   }
 ) {
-  const slug = slugify(data.name);
+  const slug = await uniqueSlug(tenantDb, slugify(data.name));
   const rows = await tenantDb
     .insert(companies)
     .values({
@@ -105,7 +135,7 @@ export async function updateCompany(
   }>
 ) {
   const updates: any = { ...data };
-  if (data.name) updates.slug = slugify(data.name);
+  if (data.name) updates.slug = await uniqueSlug(tenantDb, slugify(data.name), id);
   if (data.category) updates.category = data.category as any;
 
   const rows = await tenantDb
