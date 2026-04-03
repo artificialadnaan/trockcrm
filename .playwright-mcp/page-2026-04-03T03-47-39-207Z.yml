@@ -1,0 +1,179 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e20]:
+    - complementary [ref=e21]:
+      - heading "T ROCK CRM" [level=1] [ref=e23]
+      - navigation [ref=e24]:
+        - link "Dashboard" [ref=e25] [cursor=pointer]:
+          - /url: /
+          - img [ref=e26]
+          - text: Dashboard
+        - link "Deals" [ref=e31] [cursor=pointer]:
+          - /url: /deals
+          - img [ref=e32]
+          - text: Deals
+        - link "Pipeline" [ref=e37] [cursor=pointer]:
+          - /url: /pipeline
+          - img [ref=e38]
+          - text: Pipeline
+        - link "Contacts" [ref=e39] [cursor=pointer]:
+          - /url: /contacts
+          - img [ref=e40]
+          - text: Contacts
+        - link "Companies" [ref=e45] [cursor=pointer]:
+          - /url: /companies
+          - img [ref=e46]
+          - text: Companies
+        - link "Email" [ref=e50] [cursor=pointer]:
+          - /url: /email
+          - img [ref=e51]
+          - text: Email
+        - link "Tasks" [ref=e54] [cursor=pointer]:
+          - /url: /tasks
+          - img [ref=e55]
+          - text: Tasks
+        - link "Files" [ref=e58] [cursor=pointer]:
+          - /url: /files
+          - img [ref=e59]
+          - text: Files
+        - link "Reports" [ref=e64] [cursor=pointer]:
+          - /url: /reports
+          - img [ref=e65]
+          - text: Reports
+        - link "Projects" [ref=e67] [cursor=pointer]:
+          - /url: /projects
+          - img [ref=e68]
+          - text: Projects
+        - separator
+        - paragraph [ref=e72]: Director
+        - link "Director" [ref=e73] [cursor=pointer]:
+          - /url: /director
+          - img [ref=e74]
+          - text: Director
+        - link "Merge Queue" [ref=e76] [cursor=pointer]:
+          - /url: /admin/merge-queue
+          - img [ref=e77]
+          - text: Merge Queue
+        - separator
+        - paragraph [ref=e81]: Admin
+        - link "Offices" [ref=e82] [cursor=pointer]:
+          - /url: /admin/offices
+          - img [ref=e83]
+          - text: Offices
+        - link "Users" [ref=e87] [cursor=pointer]:
+          - /url: /admin/users
+          - img [ref=e88]
+          - text: Users
+        - link "Pipeline Config" [ref=e93] [cursor=pointer]:
+          - /url: /admin/pipeline
+          - img [ref=e94]
+          - text: Pipeline Config
+        - link "Procore Sync" [ref=e97] [cursor=pointer]:
+          - /url: /admin/procore
+          - img [ref=e98]
+          - text: Procore Sync
+        - link "Audit Log" [ref=e100] [cursor=pointer]:
+          - /url: /admin/audit
+          - img [ref=e101]
+          - text: Audit Log
+        - link "Migration" [ref=e104] [cursor=pointer]:
+          - /url: /admin/migration
+          - img [ref=e105]
+          - text: Migration
+        - separator
+        - paragraph [ref=e108]: Help
+        - link "User Guide" [ref=e109] [cursor=pointer]:
+          - /url: /help/user-guide
+          - img [ref=e110]
+          - text: User Guide
+        - link "Admin Guide" [ref=e112] [cursor=pointer]:
+          - /url: /help/admin-guide
+          - img [ref=e113]
+          - text: Admin Guide
+      - generic [ref=e117]:
+        - generic [ref=e118]:
+          - paragraph [ref=e119]: Admin User
+          - paragraph [ref=e120]: admin
+        - button [ref=e121] [cursor=pointer]:
+          - img
+    - generic [ref=e122]:
+      - banner [ref=e123]:
+        - button "Search ⌘K" [ref=e125] [cursor=pointer]:
+          - img [ref=e126]
+          - generic [ref=e129]: Search
+          - generic [ref=e130]: ⌘K
+        - generic [ref=e131]:
+          - button [ref=e132] [cursor=pointer]:
+            - img
+          - generic [ref=e134]: AU
+      - main [ref=e135]:
+        - generic [ref=e136]:
+          - generic [ref=e137]:
+            - heading "Director Dashboard" [level=2] [ref=e138]
+            - generic [ref=e139]:
+              - button "MTD" [ref=e140] [cursor=pointer]
+              - button "QTD" [ref=e141] [cursor=pointer]
+              - button "YTD" [ref=e142] [cursor=pointer]
+              - button "Last Month" [ref=e143] [cursor=pointer]
+              - button "Last Quarter" [ref=e144] [cursor=pointer]
+              - button "Last Year" [ref=e145] [cursor=pointer]
+          - generic [ref=e146]:
+            - generic [ref=e149]:
+              - generic [ref=e150]:
+                - paragraph [ref=e151]: True Pipeline
+                - paragraph [ref=e152]: $107.7M
+                - paragraph [ref=e153]: 372 deals
+              - img [ref=e155]
+            - generic [ref=e160]:
+              - generic [ref=e161]:
+                - paragraph [ref=e162]: DD Pipeline
+                - paragraph [ref=e163]: $49.6M
+                - paragraph [ref=e164]: 93 deals
+              - img [ref=e166]
+            - generic [ref=e171]:
+              - paragraph [ref=e172]: Total Pipeline
+              - paragraph [ref=e173]: $157.3M
+              - paragraph [ref=e174]: 465 deals total
+          - generic [ref=e175]:
+            - heading "Sales Rep Overview" [level=3] [ref=e176]
+            - generic [ref=e179] [cursor=pointer]:
+              - heading "Sales Rep" [level=3] [ref=e181]
+              - generic [ref=e182]:
+                - generic [ref=e183]:
+                  - paragraph [ref=e184]: Active Deals
+                  - paragraph [ref=e185]: "0"
+                - generic [ref=e186]:
+                  - paragraph [ref=e187]: Pipeline
+                  - paragraph [ref=e188]: $0
+                - generic [ref=e189]:
+                  - paragraph [ref=e190]: Win Rate
+                  - paragraph [ref=e191]: 0%
+                - generic [ref=e192]:
+                  - paragraph [ref=e193]: Activities
+                  - paragraph [ref=e194]: "0"
+          - generic [ref=e195]:
+            - generic [ref=e196]:
+              - generic [ref=e198]: Pipeline by Stage
+              - img [ref=e202]:
+                - generic [ref=e207]:
+                  - generic [ref=e209]: Estimating
+                  - generic [ref=e211]: Bid Sent
+                  - generic [ref=e213]: In Production
+                  - generic [ref=e215]: Close Out
+                - generic [ref=e217]:
+                  - generic [ref=e219]: $0
+                  - generic [ref=e221]: $15.0M
+                  - generic [ref=e223]: $30.0M
+                  - generic [ref=e225]: $45.0M
+                  - generic [ref=e227]: $60.0M
+            - generic [ref=e238]:
+              - generic [ref=e240]: Win Rate Trend
+              - paragraph [ref=e242]: No closed deals yet.
+          - generic [ref=e243]:
+            - generic [ref=e245]: Activity by Rep
+            - paragraph [ref=e247]: No activity data.
+          - generic [ref=e248]:
+            - generic [ref=e250]:
+              - img [ref=e251]
+              - text: Stale Deal Watchlist
+            - paragraph [ref=e254]: No stale deals. All deals are progressing on time.
+  - generic [ref=e255]: $0

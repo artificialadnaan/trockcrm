@@ -15,6 +15,9 @@ export interface FeedPhoto {
   geoLat: string | null;
   geoLng: string | null;
   uploadedBy: string;
+  dealNumber: string | null;
+  dealName: string | null;
+  uploaderName: string | null;
 }
 
 export interface FeedFilters {

@@ -158,14 +158,14 @@ export function PhotoLightbox({ photo, onClose, onPrev, onNext }: PhotoLightboxP
             </Badge>
           )}
 
-          {photo.dealId && (
+          {(photo.dealNumber || photo.dealName) && (
             <span className="text-white/50">
-              Deal: {photo.dealId}
+              Deal: {photo.dealNumber}{photo.dealName ? ` — ${photo.dealName}` : ""}
             </span>
           )}
 
           <span className="text-white/50">
-            By: {photo.uploadedBy}
+            By: {photo.uploaderName || "Unknown"}
           </span>
 
           {photo.geoLat != null && photo.geoLng != null && (

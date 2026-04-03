@@ -308,7 +308,11 @@ router.get("/photos/feed/count", async (req, res, next) => {
     if (!since) {
       throw new AppError(400, "since query parameter (ISO timestamp) is required.");
     }
-    const count = await getNewPhotoCount(req.tenantDb!, req.user!.role, req.user!.id, new Date(since));
+    const sinceDate = new Date(since);
+    if (isNaN(sinceDate.getTime())) {
+      throw new AppError(400, "since must be a valid ISO timestamp.");
+    }
+    const count = await getNewPhotoCount(req.tenantDb!, req.user!.role, req.user!.id, sinceDate);
     await req.commitTransaction!();
     res.json({ count });
   } catch (err) {

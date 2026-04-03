@@ -90,7 +90,6 @@ export function PhotoFeedPage() {
   // Filter state
   const [selectedSubcategory, setSelectedSubcategory] = useState<string>("All");
   const [selectedDateRange, setSelectedDateRange] = useState<string>("");
-  const [selectedDealId, setSelectedDealId] = useState<string>("");
 
   // Lightbox state
   const [selectedPhotoIndex, setSelectedPhotoIndex] = useState<number | null>(null);
@@ -101,14 +100,11 @@ export function PhotoFeedPage() {
     if (selectedSubcategory !== "All") {
       f.subcategory = selectedSubcategory.toLowerCase();
     }
-    if (selectedDealId) {
-      f.dealId = selectedDealId;
-    }
     const dateRange = getDateRange(selectedDateRange);
     if (dateRange.dateFrom) f.dateFrom = dateRange.dateFrom;
     if (dateRange.dateTo) f.dateTo = dateRange.dateTo;
     return f;
-  }, [selectedSubcategory, selectedDateRange, selectedDealId]);
+  }, [selectedSubcategory, selectedDateRange]);
 
   const { photos, page, totalPages, total, loading, newCount, loadNewPhotos, goToPage } =
     usePhotoFeed(filters);
@@ -188,7 +184,7 @@ export function PhotoFeedPage() {
           ))}
         </div>
 
-        {/* Date range + Deal filter row */}
+        {/* Date range filter */}
         <div className="flex items-center gap-3 flex-wrap">
           <div className="flex gap-1.5">
             {DATE_RANGES.map((dr) => (
@@ -206,14 +202,6 @@ export function PhotoFeedPage() {
               </button>
             ))}
           </div>
-
-          <input
-            type="text"
-            placeholder="Filter by Deal ID..."
-            value={selectedDealId}
-            onChange={(e) => setSelectedDealId(e.target.value)}
-            className="h-8 rounded-md border border-input bg-background px-3 text-xs w-44 focus:outline-none focus:ring-2 focus:ring-[#CC0000]/50 focus:border-[#CC0000]"
-          />
         </div>
       </div>
 
@@ -268,15 +256,20 @@ export function PhotoFeedPage() {
 
                       <div className="px-2.5 py-2 space-y-1">
                         <div className="flex items-center justify-between gap-2">
-                          {photo.dealId && (
+                          {photo.dealNumber && (
                             <span className="text-xs font-medium text-foreground truncate">
-                              {photo.dealId}
+                              {photo.dealNumber}
                             </span>
                           )}
                           <span className="text-xs text-muted-foreground shrink-0">
                             {timeAgo(photo.takenAt || photo.createdAt)}
                           </span>
                         </div>
+                        {photo.uploaderName && (
+                          <span className="text-[10px] text-muted-foreground truncate block">
+                            {photo.uploaderName}
+                          </span>
+                        )}
                         {photo.subcategory && (
                           <Badge
                             variant="secondary"

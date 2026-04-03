@@ -1,6 +1,6 @@
-import { eq, and, desc, gte, sql } from "drizzle-orm";
+import { eq, and, desc, gte, sql, type SQL } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
-import { files, deals } from "@trock-crm/shared/schema";
+import { files, deals, users } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -25,24 +25,43 @@ export async function getPhotoFeed(
   userId: string,
   filters: PhotoFeedFilters
 ): Promise<{
-  photos: Array<typeof files.$inferSelect>;
+  photos: Array<{
+    id: string;
+    displayName: string;
+    mimeType: string;
+    subcategory: string | null;
+    dealId: string | null;
+    externalUrl: string | null;
+    externalThumbnailUrl: string | null;
+    r2Key: string;
+    takenAt: Date | null;
+    createdAt: Date;
+    geoLat: string | null;
+    geoLng: string | null;
+    uploadedBy: string;
+    dealNumber: string | null;
+    dealName: string | null;
+    uploaderName: string;
+  }>;
   pagination: { page: number; limit: number; total: number; totalPages: number };
 }> {
   const page = filters.page ?? 1;
-  const limit = filters.limit ?? 40;
+  const limit = Math.min(filters.limit ?? 40, 200);
   const offset = (page - 1) * limit;
 
-  const conditions: ReturnType<typeof eq>[] = [
+  const conditions: SQL[] = [
     eq(files.category, "photo"),
     eq(files.isActive, true),
     // Exclude superseded versions
-    sql`NOT EXISTS (SELECT 1 FROM files f2 WHERE f2.parent_file_id = files.id AND f2.is_active = true)` as any,
+    sql`NOT EXISTS (SELECT 1 FROM files f2 WHERE f2.parent_file_id = files.id AND f2.is_active = true)`,
   ];
 
-  // RBAC: reps only see photos from their assigned deals
+  // RBAC: reps only see photos from their assigned deals.
+  // NOTE: The unqualified `deals` table reference relies on tenant middleware
+  // setting search_path to the tenant schema before queries run (see server/src/middleware/tenant.ts).
   if (userRole === "rep") {
     conditions.push(
-      sql`${files.dealId} IN (SELECT id FROM deals WHERE assigned_rep_id = ${userId}::uuid AND is_active = TRUE)` as any
+      sql`${files.dealId} IN (SELECT id FROM deals WHERE assigned_rep_id = ${userId}::uuid AND is_active = TRUE)`
     );
   }
 
@@ -52,12 +71,12 @@ export async function getPhotoFeed(
 
   if (filters.dateFrom) {
     conditions.push(
-      sql`COALESCE(${files.takenAt}, ${files.createdAt}) >= ${filters.dateFrom}::timestamptz` as any
+      sql`COALESCE(${files.takenAt}, ${files.createdAt}) >= ${filters.dateFrom}::timestamptz`
     );
   }
   if (filters.dateTo) {
     conditions.push(
-      sql`COALESCE(${files.takenAt}, ${files.createdAt}) <= ${filters.dateTo}::timestamptz` as any
+      sql`COALESCE(${files.takenAt}, ${files.createdAt}) <= ${filters.dateTo}::timestamptz`
     );
   }
 
@@ -66,8 +85,27 @@ export async function getPhotoFeed(
   const [countResult, photoRows] = await Promise.all([
     tenantDb.select({ count: sql<number>`count(*)` }).from(files).where(where),
     tenantDb
-      .select()
+      .select({
+        id: files.id,
+        displayName: files.displayName,
+        mimeType: files.mimeType,
+        subcategory: files.subcategory,
+        dealId: files.dealId,
+        externalUrl: files.externalUrl,
+        externalThumbnailUrl: files.externalThumbnailUrl,
+        r2Key: files.r2Key,
+        takenAt: files.takenAt,
+        createdAt: files.createdAt,
+        geoLat: files.geoLat,
+        geoLng: files.geoLng,
+        uploadedBy: files.uploadedBy,
+        dealNumber: deals.dealNumber,
+        dealName: deals.name,
+        uploaderName: sql<string>`COALESCE(${users.displayName}, 'Unknown')`.as("uploader_name"),
+      })
       .from(files)
+      .leftJoin(deals, eq(deals.id, files.dealId))
+      .leftJoin(users, eq(users.id, files.uploadedBy))
       .where(where)
       .orderBy(desc(sql`COALESCE(${files.takenAt}, ${files.createdAt})`))
       .limit(limit)
@@ -92,15 +130,17 @@ export async function getNewPhotoCount(
   userId: string,
   since: Date
 ): Promise<number> {
-  const conditions: ReturnType<typeof eq>[] = [
+  const conditions: SQL[] = [
     eq(files.category, "photo"),
     eq(files.isActive, true),
     gte(files.createdAt, since),
   ];
 
+  // NOTE: The unqualified `deals` table reference relies on tenant middleware
+  // setting search_path to the tenant schema (see server/src/middleware/tenant.ts).
   if (userRole === "rep") {
     conditions.push(
-      sql`${files.dealId} IN (SELECT id FROM deals WHERE assigned_rep_id = ${userId}::uuid AND is_active = TRUE)` as any
+      sql`${files.dealId} IN (SELECT id FROM deals WHERE assigned_rep_id = ${userId}::uuid AND is_active = TRUE)`
     );
   }
 

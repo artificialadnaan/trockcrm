@@ -22,6 +22,9 @@ async function backfill() {
     let failed = 0;
 
     for (const { schema_name } of schemas) {
+      // Validate schema name to prevent SQL injection
+      if (!/^office_[a-z0-9_]+$/.test(schema_name)) continue;
+
       const { rows: dealsToGeocode } = await client.query(`
         SELECT id, property_address, property_city, property_state, property_zip
         FROM ${schema_name}.deals
@@ -44,6 +47,7 @@ async function backfill() {
         );
 
         if (result) {
+          // schema_name already validated above via regex guard
           await client.query(
             `UPDATE ${schema_name}.deals SET property_lat = $1, property_lng = $2 WHERE id = $3`,
             [result.lat, result.lng, deal.id]
