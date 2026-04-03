@@ -63,13 +63,18 @@ export function Sidebar() {
 
   return (
     <aside className="hidden md:flex flex-col w-60 bg-sidebar-bg text-white min-h-screen">
-      <div className="p-4 flex items-center gap-2">
-        <div className="bg-white rounded-full p-0.5 flex-shrink-0">
-          <img src="/logo.png" alt="T Rock" className="h-8 w-auto" />
+      <div className="p-4 flex items-center gap-3">
+        <div className="flex-shrink-0 h-9 w-9 overflow-hidden rounded">
+          <img
+            src="/logo.png"
+            alt="T Rock"
+            className="h-[180%] w-[180%] object-cover object-[center_15%]"
+          />
         </div>
-        <h1 className="text-lg font-bold bg-gradient-to-r from-brand-red to-brand-cyan bg-clip-text text-transparent">
-          CRM
-        </h1>
+        <div className="flex flex-col leading-tight">
+          <span className="text-sm font-bold tracking-wide text-white">T ROCK</span>
+          <span className="text-[10px] font-semibold tracking-widest text-gray-400">CRM</span>
+        </div>
       </div>
 
       <nav className="flex-1 px-2 space-y-1">
