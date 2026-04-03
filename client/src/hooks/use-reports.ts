@@ -101,6 +101,8 @@ export async function executeLockedReport(
     lost_by_reason: "/reports/lost-by-reason",
     revenue_by_project_type: "/reports/revenue-by-type",
     lead_source_roi: "/reports/lead-source-roi",
+    closed_won_summary: "/reports/closed-won-summary",
+    pipeline_by_rep: "/reports/pipeline-by-rep",
   };
 
   const endpoint = endpointMap[reportType];
