@@ -1,4 +1,4 @@
--- Migration 0010: Add touchpoint_alert to notification_type enum
+-- Migration 0011: Add touchpoint_alert to notification_type enum
 -- Uses exception handling pattern for PostgreSQL enum additions
 
 DO $$

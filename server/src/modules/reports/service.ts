@@ -1164,7 +1164,7 @@ export async function getRepPerformanceComparison(
           AND dsh.created_at >= ${current.from}::timestamptz
           AND dsh.created_at <= (${current.to}::date + INTERVAL '1 day')::timestamptz
       ), 0)::numeric AS cur_won_value,
-      COALESCE(AVG(dsh.duration) FILTER (
+      COALESCE(AVG(EXTRACT(EPOCH FROM dsh.duration_in_previous_stage) / 86400) FILTER (
         WHERE psc.slug = 'closed_won'
           AND dsh.created_at >= ${current.from}::timestamptz
           AND dsh.created_at <= (${current.to}::date + INTERVAL '1 day')::timestamptz
@@ -1186,7 +1186,7 @@ export async function getRepPerformanceComparison(
           AND dsh.created_at >= ${previous.from}::timestamptz
           AND dsh.created_at <= (${previous.to}::date + INTERVAL '1 day')::timestamptz
       ), 0)::numeric AS prev_won_value,
-      COALESCE(AVG(dsh.duration) FILTER (
+      COALESCE(AVG(EXTRACT(EPOCH FROM dsh.duration_in_previous_stage) / 86400) FILTER (
         WHERE psc.slug = 'closed_won'
           AND dsh.created_at >= ${previous.from}::timestamptz
           AND dsh.created_at <= (${previous.to}::date + INTERVAL '1 day')::timestamptz

@@ -80,6 +80,11 @@ export async function handleProcoreSyncJob(jobPayload: any): Promise<void> {
       return;
     }
     const officeSlug: string = officeResult.rows[0].slug;
+    const slugRegex = /^[a-z][a-z0-9_]*$/;
+    if (!slugRegex.test(officeSlug)) {
+      console.error(`[Procore:worker] Invalid office slug: "${officeSlug}" — skipping`);
+      return;
+    }
     const schemaName = `office_${officeSlug}`;
     const companyId = process.env.PROCORE_COMPANY_ID;
     if (!companyId) throw new Error("PROCORE_COMPANY_ID must be set");
@@ -299,6 +304,11 @@ export async function handleProcoreWebhookJob(jobPayload: any): Promise<void> {
 
     const officeId: string = officeResult.rows[0].office_id;
     const officeSlug: string = officeResult.rows[0].slug;
+    const slugRegex = /^[a-z][a-z0-9_]*$/;
+    if (!slugRegex.test(officeSlug)) {
+      console.error(`[Procore:worker] Invalid office slug: "${officeSlug}" — skipping`);
+      return;
+    }
     const schemaName = `office_${officeSlug}`;
 
     await client.query("BEGIN");
@@ -720,79 +730,92 @@ export async function runProcoreSync(): Promise<void> {
     return;
   }
 
-  const client = await pool.connect();
-  try {
-    // Get all active offices
-    const officeResult = await client.query(
-      "SELECT id, slug FROM public.offices WHERE is_active = true"
-    );
+  // Fetch the list of active offices with a short-lived connection
+  let officeRows: Array<{ id: string; slug: string }> = [];
+  {
+    const listClient = await pool.connect();
+    try {
+      const officeResult = await listClient.query(
+        "SELECT id, slug FROM public.offices WHERE is_active = true"
+      );
+      officeRows = officeResult.rows;
+    } finally {
+      listClient.release();
+    }
+  }
 
-    for (const office of officeResult.rows) {
-      const officeId: string = office.id;
-      const officeSlug: string = office.slug;
-      const schemaName = `office_${officeSlug}`;
+  for (const office of officeRows) {
+    const officeId: string = office.id;
+    const officeSlug: string = office.slug;
 
-      try {
-        // Find all deals with a linked Procore project
-        const dealsResult = await client.query(
-          `SELECT id, procore_project_id, procore_last_synced_at
-           FROM ${schemaName}.deals
-           WHERE procore_project_id IS NOT NULL AND is_active = true`,
-        );
+    const slugRegex = /^[a-z][a-z0-9_]*$/;
+    if (!slugRegex.test(officeSlug)) {
+      console.error(`[Procore:worker] Invalid office slug: "${officeSlug}" — skipping`);
+      continue;
+    }
 
-        for (const deal of dealsResult.rows) {
-          const procoreProjectId: number = deal.procore_project_id;
-          const dealId: string = deal.id;
+    const schemaName = `office_${officeSlug}`;
+    const client = await pool.connect();
+    try {
+      // Find all deals with a linked Procore project
+      const dealsResult = await client.query(
+        `SELECT id, procore_project_id, procore_last_synced_at
+         FROM ${schemaName}.deals
+         WHERE procore_project_id IS NOT NULL AND is_active = true`,
+      );
 
-          try {
-            // Fetch project details
-            const project = await procoreWorkerFetch(
-              `/rest/v1.0/companies/${companyId}/projects/${procoreProjectId}`
-            );
+      for (const deal of dealsResult.rows) {
+        const procoreProjectId: number = deal.procore_project_id;
+        const dealId: string = deal.id;
 
-            // Sync project status (conflict detection included)
-            await client.query("BEGIN");
-            await syncProjectStatusToCrm(
+        try {
+          // Fetch project details
+          const project = await procoreWorkerFetch(
+            `/rest/v1.0/companies/${companyId}/projects/${procoreProjectId}`
+          );
+
+          // Sync project status (conflict detection included)
+          await client.query("BEGIN");
+          await syncProjectStatusToCrm(
+            client,
+            schemaName,
+            officeId,
+            procoreProjectId,
+            project
+          );
+
+          // Fetch and sync change orders
+          const cosResult = await procoreWorkerFetch<any[]>(
+            `/rest/v1.0/projects/${procoreProjectId}/change_orders/contracts`
+          );
+          const cos = Array.isArray(cosResult) ? cosResult : [];
+          for (const co of cos) {
+            await syncChangeOrderToCrm(
               client,
               schemaName,
               officeId,
               procoreProjectId,
-              project
-            );
-
-            // Fetch and sync change orders
-            const cosResult = await procoreWorkerFetch<any[]>(
-              `/rest/v1.0/projects/${procoreProjectId}/change_orders/contracts`
-            );
-            const cos = Array.isArray(cosResult) ? cosResult : [];
-            for (const co of cos) {
-              await syncChangeOrderToCrm(
-                client,
-                schemaName,
-                officeId,
-                procoreProjectId,
-                co
-              );
-            }
-
-            await client.query("COMMIT");
-          } catch (dealErr) {
-            await client.query("ROLLBACK").catch(() => {});
-            console.error(
-              `[Worker:procore-sync] Failed to sync project ${procoreProjectId} (deal ${dealId}):`,
-              dealErr
+              co
             );
           }
+
+          await client.query("COMMIT");
+        } catch (dealErr) {
+          await client.query("ROLLBACK").catch(() => {});
+          console.error(
+            `[Worker:procore-sync] Failed to sync project ${procoreProjectId} (deal ${dealId}):`,
+            dealErr
+          );
         }
-      } catch (officeErr) {
-        console.error(
-          `[Worker:procore-sync] Failed to process office ${officeSlug}:`,
-          officeErr
-        );
       }
+    } catch (officeErr) {
+      console.error(
+        `[Worker:procore-sync] Failed to process office ${officeSlug}:`,
+        officeErr
+      );
+    } finally {
+      client.release();
     }
-  } finally {
-    client.release();
   }
 
   console.log("[Worker:procore-sync] Poll complete");
