@@ -144,6 +144,7 @@ async function crossOfficeSearch(
       if (results[1].status === "fulfilled") allContacts.push(...tag(results[1].value));
       if (results[2].status === "fulfilled") allFiles.push(...tag(results[2].value));
     } finally {
+      await client.query("SELECT set_config('search_path', 'public', false)");
       client.release();
     }
   });

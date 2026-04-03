@@ -1,4 +1,4 @@
-import { sql } from "drizzle-orm";
+import { sql, SQL } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 
@@ -34,48 +34,40 @@ export async function getAuditLog(
   const limit = Math.min(filter.limit ?? 50, 200);
   const offset = ((filter.page ?? 1) - 1) * limit;
 
-  // Build dynamic WHERE clauses
-  const conditions: string[] = ["1=1"];
-  const params: unknown[] = [];
-  let paramIdx = 1;
+  // Build dynamic WHERE clauses using Drizzle sql template for proper parameter binding
+  const conditions: SQL[] = [sql`1=1`];
 
   if (filter.tableName) {
-    conditions.push(`al.table_name = $${paramIdx++}`);
-    params.push(filter.tableName);
+    conditions.push(sql`al.table_name = ${filter.tableName}`);
   }
   if (filter.recordId) {
-    conditions.push(`al.record_id = $${paramIdx++}`);
-    params.push(filter.recordId);
+    conditions.push(sql`al.record_id = ${filter.recordId}`);
   }
   if (filter.changedBy) {
-    conditions.push(`al.changed_by = $${paramIdx++}`);
-    params.push(filter.changedBy);
+    conditions.push(sql`al.changed_by = ${filter.changedBy}`);
   }
   if (filter.action) {
-    conditions.push(`al.action = $${paramIdx++}`);
-    params.push(filter.action);
+    conditions.push(sql`al.action = ${filter.action}`);
   }
   if (filter.fromDate) {
-    conditions.push(`al.created_at >= $${paramIdx++}::timestamptz`);
-    params.push(filter.fromDate);
+    conditions.push(sql`al.created_at >= ${filter.fromDate}::timestamptz`);
   }
   if (filter.toDate) {
-    conditions.push(`al.created_at <= ($${paramIdx++}::date + INTERVAL '1 day')::timestamptz`);
-    params.push(filter.toDate);
+    conditions.push(sql`al.created_at <= (${filter.toDate}::date + INTERVAL '1 day')::timestamptz`);
   }
 
-  const where = conditions.join(" AND ");
+  const where = conditions.reduce((acc, cond) => sql`${acc} AND ${cond}`);
 
   // Count query
   const countResult = await tenantDb.execute(
-    sql.raw(`SELECT COUNT(*)::int AS total FROM audit_log al WHERE ${where}`)
+    sql`SELECT COUNT(*)::int AS total FROM audit_log al WHERE ${where}`
   );
   const countRows = (countResult as any).rows ?? countResult;
   const total = Number(countRows[0]?.total ?? 0);
 
   // Data query -- join to public.users for changed_by display name
   const dataResult = await tenantDb.execute(
-    sql.raw(`
+    sql`
       SELECT
         al.id,
         al.table_name,
@@ -91,7 +83,7 @@ export async function getAuditLog(
       WHERE ${where}
       ORDER BY al.created_at DESC
       LIMIT ${limit} OFFSET ${offset}
-    `)
+    `
   );
 
   const dataRows = (dataResult as any).rows ?? dataResult;

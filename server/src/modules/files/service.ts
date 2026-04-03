@@ -618,10 +618,12 @@ export async function getFiles(tenantDb: TenantDb, filters: FileFilters) {
 
   // Full-text search via the search_vector column
   if (filters.search && filters.search.trim().length >= 2) {
-    const searchTerm = filters.search.trim().replace(/[^\w\s-]/g, "").split(/\s+/).join(" & ");
-    conditions.push(
-      sql`search_vector @@ to_tsquery('english', ${searchTerm})`
-    );
+    const searchTerm = filters.search.trim().replace(/[^\w\s-]/g, "").trim().split(/\s+/).filter(Boolean).join(" & ");
+    if (searchTerm.length > 0) {
+      conditions.push(
+        sql`search_vector @@ to_tsquery('english', ${searchTerm})`
+      );
+    }
   }
 
   const where = and(...conditions);

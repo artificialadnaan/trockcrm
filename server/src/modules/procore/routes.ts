@@ -63,11 +63,17 @@ router.post(
         throw new AppError(400, "resolution must be 'accept_crm' or 'accept_procore'");
       }
 
-      // Fetch the conflict record
+      // Fetch the conflict record — must belong to the current user's office
+      const officeId = req.user!.activeOfficeId ?? req.user!.officeId;
       const [syncRecord] = await db
         .select()
         .from(procoreSyncState)
-        .where(eq(procoreSyncState.id, req.params.id as string))
+        .where(
+          and(
+            eq(procoreSyncState.id, req.params.id as string),
+            eq(procoreSyncState.officeId, officeId)
+          )
+        )
         .limit(1);
 
       if (!syncRecord) {
@@ -130,7 +136,12 @@ router.post(
           lastSyncedAt: new Date(),
           updatedAt: new Date(),
         })
-        .where(eq(procoreSyncState.id, req.params.id as string))
+        .where(
+          and(
+            eq(procoreSyncState.id, req.params.id as string),
+            eq(procoreSyncState.officeId, officeId)
+          )
+        )
         .returning();
 
       await req.commitTransaction!();
@@ -144,13 +155,15 @@ router.post(
 // GET /api/procore/deals/:dealId/sync-state — sync state for a single deal
 router.get("/deals/:dealId/sync-state", async (req, res, next) => {
   try {
+    const officeId = req.user!.activeOfficeId ?? req.user!.officeId;
     const rows = await db
       .select()
       .from(procoreSyncState)
       .where(
         and(
           eq(procoreSyncState.crmEntityType, "deal"),
-          eq(procoreSyncState.crmEntityId, req.params.dealId)
+          eq(procoreSyncState.crmEntityId, req.params.dealId),
+          eq(procoreSyncState.officeId, officeId)
         )
       )
       .limit(1);
