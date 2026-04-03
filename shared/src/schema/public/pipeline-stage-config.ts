@@ -11,6 +11,7 @@ export const pipelineStageConfig = pgTable("pipeline_stage_config", {
   requiredDocuments: jsonb("required_documents").default([]).notNull(),
   requiredApprovals: jsonb("required_approvals").default([]).notNull(),
   staleThresholdDays: integer("stale_threshold_days"),
+  touchpointCadenceDays: integer("touchpoint_cadence_days").default(14),
   staleEscalationTiers: jsonb("stale_escalation_tiers").default([
     { days: 30, severity: "warning" },
     { days: 60, severity: "escalation" },
