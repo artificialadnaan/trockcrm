@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { RefreshCw, AlertTriangle, CheckCircle2, XCircle, Zap } from "lucide-react";
+import { RefreshCw, AlertTriangle, CheckCircle2, XCircle, Zap, Clock, Activity } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -32,6 +32,19 @@ interface SyncConflict {
   updatedAt: string;
 }
 
+interface SyncActivityRow {
+  id: string;
+  entityType: string;
+  procoreId: number;
+  crmEntityType: string;
+  crmEntityId: string;
+  syncDirection: string;
+  syncStatus: string;
+  lastSyncedAt: string | null;
+  errorMessage: string | null;
+  updatedAt: string;
+}
+
 interface CircuitBreaker {
   state: "closed" | "open" | "half_open";
   failures: number;
@@ -41,7 +54,52 @@ interface CircuitBreaker {
 interface SyncStatusResponse {
   summary: SyncSummary;
   conflicts: SyncConflict[];
+  recentActivity: SyncActivityRow[];
+  lastSyncedAt: string | null;
   circuit_breaker: CircuitBreaker;
+}
+
+// How stale (ms) before health turns amber/red
+const AMBER_THRESHOLD_MS = 60 * 60 * 1000;  // 1 hour
+const RED_THRESHOLD_MS   = 24 * 60 * 60 * 1000; // 24 hours
+
+function syncHealthColor(lastSyncedAt: string | null, hasErrors: boolean): "green" | "amber" | "red" {
+  if (hasErrors) return "red";
+  if (!lastSyncedAt) return "amber";
+  const age = Date.now() - new Date(lastSyncedAt).getTime();
+  if (age > RED_THRESHOLD_MS) return "red";
+  if (age > AMBER_THRESHOLD_MS) return "amber";
+  return "green";
+}
+
+function HealthDot({ color }: { color: "green" | "amber" | "red" }) {
+  const cls =
+    color === "green"
+      ? "bg-green-500"
+      : color === "amber"
+      ? "bg-amber-500"
+      : "bg-red-500";
+  return <span className={`inline-block h-2.5 w-2.5 rounded-full ${cls}`} />;
+}
+
+function directionLabel(direction: string): string {
+  if (direction === "crm_to_procore") return "CRM → Procore";
+  if (direction === "procore_to_crm") return "Procore → CRM";
+  return "Bidirectional";
+}
+
+function StatusBadge({ status }: { status: string }) {
+  const map: Record<string, string> = {
+    synced:   "bg-green-100 text-green-800",
+    pending:  "bg-gray-100 text-gray-700",
+    conflict: "bg-amber-100 text-amber-800",
+    error:    "bg-red-100 text-red-800",
+  };
+  return (
+    <Badge className={`text-xs ${map[status] ?? "bg-gray-100 text-gray-700"}`}>
+      {status}
+    </Badge>
+  );
 }
 
 export function ProcoreSyncPage() {
@@ -87,6 +145,13 @@ export function ProcoreSyncPage() {
       ? "text-red-600"
       : "text-amber-600";
 
+  const healthColor = data
+    ? syncHealthColor(data.lastSyncedAt, data.summary.error > 0)
+    : "amber";
+
+  const healthLabel =
+    healthColor === "green" ? "Healthy" : healthColor === "amber" ? "Warning" : "Degraded";
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
@@ -107,6 +172,51 @@ export function ProcoreSyncPage() {
 
       {data && (
         <>
+          {/* Sync Health card */}
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm flex items-center gap-2">
+                <Activity className="h-4 w-4 text-muted-foreground" />
+                Sync Health
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="flex items-center gap-4">
+              <div className="flex items-center gap-2">
+                <HealthDot color={healthColor} />
+                <span
+                  className={`font-semibold text-sm ${
+                    healthColor === "green"
+                      ? "text-green-700"
+                      : healthColor === "amber"
+                      ? "text-amber-700"
+                      : "text-red-700"
+                  }`}
+                >
+                  {healthLabel}
+                </span>
+              </div>
+              <div className="flex items-center gap-1.5 text-sm text-muted-foreground">
+                <Clock className="h-3.5 w-3.5" />
+                {data.lastSyncedAt ? (
+                  <span>
+                    Last synced{" "}
+                    <span className="font-medium text-gray-700">
+                      {new Date(data.lastSyncedAt).toLocaleString()}
+                    </span>
+                  </span>
+                ) : (
+                  <span>No successful syncs recorded</span>
+                )}
+              </div>
+              {data.summary.error > 0 && (
+                <div className="flex items-center gap-1.5 text-sm text-red-600">
+                  <XCircle className="h-3.5 w-3.5" />
+                  {data.summary.error} error{data.summary.error !== 1 ? "s" : ""}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
           {/* Summary cards */}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <Card>
@@ -170,6 +280,58 @@ export function ProcoreSyncPage() {
               )}
             </CardContent>
           </Card>
+
+          {/* Recent Sync Activity */}
+          <div>
+            <h2 className="text-lg font-medium text-gray-900 mb-3 flex items-center gap-2">
+              <Activity className="h-5 w-5 text-gray-500" />
+              Recent Sync Activity
+            </h2>
+            {data.recentActivity.length > 0 ? (
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Entity</TableHead>
+                    <TableHead>Procore ID</TableHead>
+                    <TableHead>Direction</TableHead>
+                    <TableHead>Status</TableHead>
+                    <TableHead>Details</TableHead>
+                    <TableHead>Updated</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {data.recentActivity.map((row) => (
+                    <TableRow key={row.id}>
+                      <TableCell>
+                        <Badge className="bg-gray-100 text-gray-700 text-xs">
+                          {row.entityType}
+                        </Badge>
+                      </TableCell>
+                      <TableCell className="font-mono text-sm">{row.procoreId}</TableCell>
+                      <TableCell className="text-sm text-muted-foreground">
+                        {directionLabel(row.syncDirection)}
+                      </TableCell>
+                      <TableCell>
+                        <StatusBadge status={row.syncStatus} />
+                      </TableCell>
+                      <TableCell className="text-sm text-muted-foreground max-w-[220px] truncate">
+                        {row.errorMessage ?? (row.syncStatus === "synced" ? "OK" : "--")}
+                      </TableCell>
+                      <TableCell className="text-sm text-muted-foreground whitespace-nowrap">
+                        {new Date(row.updatedAt).toLocaleString()}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            ) : (
+              <Card>
+                <CardContent className="py-8 text-center text-muted-foreground">
+                  No sync activity recorded yet
+                </CardContent>
+              </Card>
+            )}
+          </div>
 
           {/* Conflicts table */}
           {data.conflicts.length > 0 && (

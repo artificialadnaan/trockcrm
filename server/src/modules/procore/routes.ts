@@ -17,7 +17,7 @@ router.get(
   requireRole("admin"),
   async (req, res, next) => {
     try {
-      const [summary, conflicts] = await Promise.all([
+      const [summary, conflicts, recentActivity] = await Promise.all([
         db.execute<{ sync_status: string; count: string }>(sql`
           SELECT sync_status, COUNT(*) as count
           FROM public.procore_sync_state
@@ -28,6 +28,11 @@ router.get(
           .from(procoreSyncState)
           .where(eq(procoreSyncState.syncStatus, "conflict"))
           .orderBy(procoreSyncState.updatedAt),
+        db
+          .select()
+          .from(procoreSyncState)
+          .orderBy(sql`${procoreSyncState.updatedAt} DESC`)
+          .limit(20),
       ]);
 
       const summaryMap: Record<string, number> = {
@@ -40,10 +45,16 @@ router.get(
         summaryMap[row.sync_status] = parseInt(row.count, 10);
       }
 
+      // Most recent successful sync timestamp across all records
+      const lastSyncedAt =
+        recentActivity.find((r) => r.lastSyncedAt != null)?.lastSyncedAt ?? null;
+
       await req.commitTransaction!();
       res.json({
         summary: summaryMap,
         conflicts,
+        recentActivity,
+        lastSyncedAt,
         circuit_breaker: procoreClient.getCircuitState(),
       });
     } catch (err) {
