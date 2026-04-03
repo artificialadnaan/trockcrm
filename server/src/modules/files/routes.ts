@@ -21,6 +21,7 @@ import {
   getDealPhotoTimeline,
 } from "./service.js";
 import { getDealById } from "../deals/service.js";
+import { getPhotoFeed, getNewPhotoCount } from "./feed-service.js";
 
 const router = Router();
 
@@ -274,6 +275,42 @@ router.get("/deal/:dealId/photos", async (req, res, next) => {
     const result = await getDealPhotoTimeline(req.tenantDb!, req.params.dealId, page, limit);
     await req.commitTransaction!();
     res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/files/photos/feed — paginated cross-deal photo feed
+router.get("/photos/feed", async (req, res, next) => {
+  try {
+    const filters = {
+      dealId: req.query.dealId as string | undefined,
+      uploadedBy: req.query.uploadedBy as string | undefined,
+      subcategory: req.query.subcategory as string | undefined,
+      dateFrom: req.query.dateFrom as string | undefined,
+      dateTo: req.query.dateTo as string | undefined,
+      page: req.query.page ? parseInt(req.query.page as string, 10) : undefined,
+      limit: req.query.limit ? parseInt(req.query.limit as string, 10) : undefined,
+    };
+
+    const result = await getPhotoFeed(req.tenantDb!, req.user!.role, req.user!.id, filters);
+    await req.commitTransaction!();
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/files/photos/feed/count — count new photos since a timestamp
+router.get("/photos/feed/count", async (req, res, next) => {
+  try {
+    const since = req.query.since as string;
+    if (!since) {
+      throw new AppError(400, "since query parameter (ISO timestamp) is required.");
+    }
+    const count = await getNewPhotoCount(req.tenantDb!, req.user!.role, req.user!.id, new Date(since));
+    await req.commitTransaction!();
+    res.json({ count });
   } catch (err) {
     next(err);
   }
