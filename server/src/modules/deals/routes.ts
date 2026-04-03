@@ -1,6 +1,6 @@
 import { Router } from "express";
-import { and, eq, desc } from "drizzle-orm";
-import { dealApprovals, jobQueue } from "@trock-crm/shared/schema";
+import { and, eq, desc, isNotNull, sql } from "drizzle-orm";
+import { dealApprovals, deals, jobQueue } from "@trock-crm/shared/schema";
 import { requireRole } from "../../middleware/rbac.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { eventBus } from "../../events/bus.js";
@@ -73,6 +73,60 @@ router.get("/pipeline", async (req, res, next) => {
     );
     await req.commitTransaction!();
     res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/deals/nearby?lat=X&lng=Y — Find nearest deals by GPS coordinates
+router.get("/nearby", async (req, res, next) => {
+  try {
+    const lat = parseFloat(req.query.lat as string);
+    const lng = parseFloat(req.query.lng as string);
+
+    if (isNaN(lat) || isNaN(lng) || lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+      throw new AppError(400, "Valid lat and lng query parameters are required.");
+    }
+
+    const isRep = req.user!.role === "rep";
+    const userId = req.user!.id;
+
+    // Haversine distance in miles — filter out NULL coords first to avoid NaN
+    const haversine = sql`
+      3959 * acos(
+        LEAST(1.0, GREATEST(-1.0,
+          cos(radians(${lat})) * cos(radians(CAST(${deals.propertyLat} AS DOUBLE PRECISION)))
+          * cos(radians(CAST(${deals.propertyLng} AS DOUBLE PRECISION)) - radians(${lng}))
+          + sin(radians(${lat})) * sin(radians(CAST(${deals.propertyLat} AS DOUBLE PRECISION)))
+        ))
+      )
+    `;
+
+    const conditions = [
+      eq(deals.isActive, true),
+      isNotNull(deals.propertyLat),
+      isNotNull(deals.propertyLng),
+    ];
+
+    if (isRep) {
+      conditions.push(eq(deals.assignedRepId, userId));
+    }
+
+    const nearbyDeals = await req.tenantDb!
+      .select({
+        id: deals.id,
+        dealNumber: deals.dealNumber,
+        name: deals.name,
+        propertyCity: deals.propertyCity,
+        distance: haversine.as("distance"),
+      })
+      .from(deals)
+      .where(and(...conditions))
+      .orderBy(haversine)
+      .limit(20);
+
+    await req.commitTransaction!();
+    res.json({ deals: nearbyDeals });
   } catch (err) {
     next(err);
   }
