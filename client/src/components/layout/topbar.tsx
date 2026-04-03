@@ -43,7 +43,7 @@ export function Topbar() {
       <div className="flex items-center gap-3">
         <NotificationCenter />
         <Avatar className="h-8 w-8">
-          <AvatarFallback className="bg-brand-purple text-white text-xs">
+          <AvatarFallback className="bg-brand-red text-white text-xs">
             {initials}
           </AvatarFallback>
         </Avatar>

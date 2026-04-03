@@ -12,7 +12,7 @@ const STAGE_COLORS: Record<string, string> = {
   estimating: "bg-blue-100 text-blue-700 border-blue-200",
   bid_sent: "bg-indigo-100 text-indigo-700 border-indigo-200",
   in_production: "bg-amber-100 text-amber-700 border-amber-200",
-  close_out: "bg-purple-100 text-purple-700 border-purple-200",
+  close_out: "bg-red-100 text-red-700 border-red-200",
   closed_won: "bg-green-100 text-green-700 border-green-200",
   closed_lost: "bg-red-100 text-red-700 border-red-200",
 };

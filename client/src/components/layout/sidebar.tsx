@@ -64,7 +64,7 @@ export function Sidebar() {
   return (
     <aside className="hidden md:flex flex-col w-60 bg-sidebar-bg text-white min-h-screen">
       <div className="p-4">
-        <h1 className="text-lg font-bold bg-gradient-to-r from-brand-purple to-brand-cyan bg-clip-text text-transparent">
+        <h1 className="text-lg font-bold bg-gradient-to-r from-brand-red to-brand-cyan bg-clip-text text-transparent">
           T ROCK CRM
         </h1>
       </div>
@@ -78,7 +78,7 @@ export function Sidebar() {
             className={({ isActive }) =>
               `flex items-center gap-3 px-3 py-2 rounded-md text-sm transition-colors ${
                 isActive
-                  ? "bg-sidebar-active border-l-2 border-brand-purple text-white"
+                  ? "bg-sidebar-active border-l-2 border-brand-red text-white"
                   : "text-slate-400 hover:bg-sidebar-hover hover:text-white"
               }`
             }
@@ -99,7 +99,7 @@ export function Sidebar() {
                 className={({ isActive }) =>
                   `flex items-center gap-3 px-3 py-2 rounded-md text-sm transition-colors ${
                     isActive
-                      ? "bg-sidebar-active border-l-2 border-brand-purple text-white"
+                      ? "bg-sidebar-active border-l-2 border-brand-red text-white"
                       : "text-slate-400 hover:bg-sidebar-hover hover:text-white"
                   }`
                 }
@@ -122,7 +122,7 @@ export function Sidebar() {
                 className={({ isActive }) =>
                   `flex items-center gap-3 px-3 py-2 rounded-md text-sm transition-colors ${
                     isActive
-                      ? "bg-sidebar-active border-l-2 border-brand-purple text-white"
+                      ? "bg-sidebar-active border-l-2 border-brand-red text-white"
                       : "text-slate-400 hover:bg-sidebar-hover hover:text-white"
                   }`
                 }
@@ -145,7 +145,7 @@ export function Sidebar() {
                 className={({ isActive }) =>
                   `flex items-center gap-3 px-3 py-2 rounded-md text-sm transition-colors ${
                     isActive
-                      ? "bg-sidebar-active border-l-2 border-brand-purple text-white"
+                      ? "bg-sidebar-active border-l-2 border-brand-red text-white"
                       : "text-slate-400 hover:bg-sidebar-hover hover:text-white"
                   }`
                 }

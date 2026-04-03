@@ -15,8 +15,8 @@ interface DevUser {
 const ROLE_CONFIG: Record<string, { label: string; avatarClass: string; badgeClass: string }> = {
   admin: {
     label: "Admin — Full Access",
-    avatarClass: "bg-purple-100 text-purple-700",
-    badgeClass: "bg-purple-100 text-purple-700 border-purple-200",
+    avatarClass: "bg-red-100 text-red-700",
+    badgeClass: "bg-red-100 text-red-700 border-red-200",
   },
   director: {
     label: "Director — Team Management",
@@ -58,7 +58,7 @@ export function DevUserPicker() {
       <Card className="w-full max-w-md">
         <CardHeader>
           <CardTitle className="text-center">
-            <span className="text-brand-purple font-bold text-xl">T Rock CRM</span>
+            <span className="text-brand-red font-bold text-xl">T Rock CRM</span>
             <p className="text-xs font-normal text-muted-foreground mt-0.5 tracking-wide uppercase">
               Construction CRM Platform
             </p>

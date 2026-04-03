@@ -175,7 +175,7 @@ export function StageChangeDialog({
             {/* Override Reason (for directors) */}
             {preflight.requiresOverride && (
               <div className="space-y-2 border-t pt-3">
-                <div className="flex items-center gap-2 text-sm font-medium text-purple-700">
+                <div className="flex items-center gap-2 text-sm font-medium text-red-700">
                   <Shield className="h-4 w-4" />
                   Director Override
                 </div>

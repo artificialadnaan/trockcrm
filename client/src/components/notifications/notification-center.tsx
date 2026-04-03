@@ -14,7 +14,7 @@ import type { Notification } from "@/hooks/use-notifications";
 const typeColors: Record<string, string> = {
   stale_deal: "bg-amber-500",
   inbound_email: "bg-blue-500",
-  task_assigned: "bg-purple-500",
+  task_assigned: "bg-red-500",
   approval_needed: "bg-orange-500",
   activity_drop: "bg-red-500",
   deal_won: "bg-green-500",

@@ -120,7 +120,7 @@ export function RepDashboardPage() {
         <CardContent>
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
             <div className="text-center p-3 rounded-lg bg-slate-50">
-              <p className="text-2xl font-bold text-purple-600">{data.activityThisWeek.calls}</p>
+              <p className="text-2xl font-bold text-red-600">{data.activityThisWeek.calls}</p>
               <p className="text-xs text-muted-foreground mt-1">Calls</p>
             </div>
             <div className="text-center p-3 rounded-lg bg-slate-50">

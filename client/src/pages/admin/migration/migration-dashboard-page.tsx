@@ -9,7 +9,7 @@ import { useState } from "react";
 const STATUS_COLORS: Record<string, string> = {
   valid: "bg-green-100 text-green-800",
   approved: "bg-blue-100 text-blue-800",
-  promoted: "bg-purple-100 text-purple-800",
+  promoted: "bg-red-100 text-red-800",
   needs_review: "bg-amber-100 text-amber-800",
   invalid: "bg-red-100 text-red-800",
   duplicate: "bg-orange-100 text-orange-800",

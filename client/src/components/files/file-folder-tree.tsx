@@ -45,7 +45,7 @@ export function FileFolderTree({
       <button
         className={`w-full flex items-center gap-2 px-2 py-1.5 rounded text-sm transition-colors ${
           selectedPath === null
-            ? "bg-brand-purple/10 text-brand-purple font-medium"
+            ? "bg-brand-red/10 text-brand-red font-medium"
             : "hover:bg-accent text-foreground"
         }`}
         onClick={() => onSelectPath(null)}
@@ -79,7 +79,7 @@ export function FileFolderTree({
               <button
                 className={`flex-1 flex items-center gap-2 px-2 py-1.5 rounded text-sm transition-colors ${
                   isSelected
-                    ? "bg-brand-purple/10 text-brand-purple font-medium"
+                    ? "bg-brand-red/10 text-brand-red font-medium"
                     : "hover:bg-accent text-foreground"
                 }`}
                 onClick={() => onSelectPath(folder.path)}
@@ -103,7 +103,7 @@ export function FileFolderTree({
                   key={sub.path}
                   className={`w-full flex items-center gap-2 pl-10 pr-2 py-1.5 rounded text-sm transition-colors ${
                     selectedPath === sub.path
-                      ? "bg-brand-purple/10 text-brand-purple font-medium"
+                      ? "bg-brand-red/10 text-brand-red font-medium"
                       : "hover:bg-accent text-foreground"
                   }`}
                   onClick={() => onSelectPath(sub.path)}

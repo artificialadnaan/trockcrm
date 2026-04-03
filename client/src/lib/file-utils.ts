@@ -138,7 +138,7 @@ const CATEGORY_LABELS: Record<FileCategory, string> = {
 const CATEGORY_COLORS: Record<FileCategory, string> = {
   photo: "bg-blue-100 text-blue-700",
   contract: "bg-green-100 text-green-700",
-  rfp: "bg-purple-100 text-purple-700",
+  rfp: "bg-red-100 text-red-700",
   estimate: "bg-orange-100 text-orange-700",
   change_order: "bg-amber-100 text-amber-700",
   proposal: "bg-indigo-100 text-indigo-700",

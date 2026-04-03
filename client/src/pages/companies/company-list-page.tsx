@@ -27,7 +27,7 @@ const COMPANY_CATEGORY_LABELS: Record<string, string> = {
 const COMPANY_CATEGORY_COLORS: Record<string, string> = {
   client: "bg-blue-100 text-blue-800",
   subcontractor: "bg-orange-100 text-orange-800",
-  architect: "bg-purple-100 text-purple-800",
+  architect: "bg-red-100 text-red-800",
   property_manager: "bg-green-100 text-green-800",
   vendor: "bg-yellow-100 text-yellow-800",
   consultant: "bg-indigo-100 text-indigo-800",
@@ -140,7 +140,7 @@ export function CompanyListPage() {
               >
                 <div className="flex items-center justify-between gap-4">
                   <div className="flex items-center gap-3 flex-1 min-w-0">
-                    <span className="flex-shrink-0 inline-flex items-center justify-center h-8 w-8 rounded-full bg-purple-50 text-purple-600">
+                    <span className="flex-shrink-0 inline-flex items-center justify-center h-8 w-8 rounded-full bg-red-50 text-red-600">
                       <Building2 className="h-4 w-4" />
                     </span>
                     <div className="flex-1 min-w-0">

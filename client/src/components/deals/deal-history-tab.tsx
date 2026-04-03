@@ -54,7 +54,7 @@ export function DealHistoryTab({ deal }: DealHistoryTabProps) {
                   </Badge>
                 )}
                 {entry.isDirectorOverride && (
-                  <Badge variant="outline" className="bg-purple-100 text-purple-700 border-purple-200 text-xs">
+                  <Badge variant="outline" className="bg-red-100 text-red-700 border-red-200 text-xs">
                     <Shield className="h-3 w-3 mr-1" />
                     Override
                   </Badge>

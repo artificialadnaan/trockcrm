@@ -58,7 +58,7 @@ export function MergeDialog({
     <Card
       className={`p-4 cursor-pointer transition-colors ${
         isSelected
-          ? "ring-2 ring-brand-purple bg-purple-50"
+          ? "ring-2 ring-brand-red bg-red-50"
           : "hover:bg-muted/50"
       }`}
       onClick={() => setWinnerId(contact.id)}
@@ -70,7 +70,7 @@ export function MergeDialog({
             <ContactCategoryBadge category={contact.category} />
           </div>
           {isSelected && (
-            <Badge className="bg-brand-purple text-white">
+            <Badge className="bg-brand-red text-white">
               <Trophy className="h-3 w-3 mr-1" />
               Winner
             </Badge>

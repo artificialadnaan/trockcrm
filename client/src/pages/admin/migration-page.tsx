@@ -38,7 +38,7 @@ const STATUS_ICONS: Record<string, typeof CheckCircle2> = {
 const ENTITY_STATUS_COLORS: Record<string, string> = {
   valid: "bg-green-100 text-green-800",
   approved: "bg-blue-100 text-blue-800",
-  promoted: "bg-purple-100 text-purple-800",
+  promoted: "bg-red-100 text-red-800",
   needs_review: "bg-amber-100 text-amber-800",
   invalid: "bg-red-100 text-red-800",
   duplicate: "bg-orange-100 text-orange-800",
@@ -166,7 +166,7 @@ export function MigrationPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-semibold text-gray-900 flex items-center gap-2">
-            <Database className="h-6 w-6 text-purple-500" />
+            <Database className="h-6 w-6 text-red-500" />
             Data Migration
           </h1>
           <p className="text-sm text-muted-foreground mt-1">
@@ -210,7 +210,7 @@ export function MigrationPage() {
             </Button>
             <Button
               size="sm"
-              className="bg-purple-600 hover:bg-purple-700 text-white"
+              className="bg-red-600 hover:bg-red-700 text-white"
               onClick={handlePromote}
               disabled={actionLoading != null}
             >

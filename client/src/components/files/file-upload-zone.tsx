@@ -178,7 +178,7 @@ export function FileUploadZone({
       <div
         className={`border-2 border-dashed rounded-lg transition-colors cursor-pointer ${
           dragOver
-            ? "border-brand-purple bg-brand-purple/5"
+            ? "border-brand-red bg-brand-red/5"
             : "border-muted-foreground/25 hover:border-muted-foreground/50"
         } ${compact ? "p-4" : "p-8"}`}
         onDrop={handleDrop}
@@ -228,7 +228,7 @@ export function FileUploadZone({
                 {upload.status === "uploading" && (
                   <div className="mt-1 h-1.5 bg-muted rounded-full overflow-hidden">
                     <div
-                      className="h-full bg-brand-purple rounded-full transition-all duration-300"
+                      className="h-full bg-brand-red rounded-full transition-all duration-300"
                       style={{ width: `${upload.progress}%` }}
                     />
                   </div>
@@ -239,7 +239,7 @@ export function FileUploadZone({
               </div>
               <div className="flex-shrink-0">
                 {upload.status === "uploading" && (
-                  <Loader2 className="h-4 w-4 animate-spin text-brand-purple" />
+                  <Loader2 className="h-4 w-4 animate-spin text-brand-red" />
                 )}
                 {upload.status === "done" && (
                   <CheckCircle className="h-4 w-4 text-green-600" />

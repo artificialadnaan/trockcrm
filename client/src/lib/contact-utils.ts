@@ -15,7 +15,7 @@ export const CATEGORY_LABELS: Record<string, string> = {
 export const CATEGORY_COLORS: Record<string, string> = {
   client: "bg-blue-100 text-blue-800",
   subcontractor: "bg-orange-100 text-orange-800",
-  architect: "bg-purple-100 text-purple-800",
+  architect: "bg-red-100 text-red-800",
   property_manager: "bg-green-100 text-green-800",
   regional_manager: "bg-teal-100 text-teal-800",
   vendor: "bg-yellow-100 text-yellow-800",

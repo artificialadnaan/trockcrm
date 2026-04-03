@@ -56,7 +56,7 @@ export function DealFilters({ filters, onFilterChange, onReset }: DealFiltersPro
         >
           <SlidersHorizontal className="h-4 w-4" />
           {activeFilterCount > 0 && (
-            <span className="absolute -top-1 -right-1 h-4 w-4 rounded-full bg-brand-purple text-[10px] text-white flex items-center justify-center">
+            <span className="absolute -top-1 -right-1 h-4 w-4 rounded-full bg-brand-red text-[10px] text-white flex items-center justify-center">
               {activeFilterCount}
             </span>
           )}

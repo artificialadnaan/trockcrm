@@ -28,7 +28,7 @@ const COMPANY_CATEGORY_LABELS: Record<string, string> = {
 const COMPANY_CATEGORY_COLORS: Record<string, string> = {
   client: "bg-blue-100 text-blue-800",
   subcontractor: "bg-orange-100 text-orange-800",
-  architect: "bg-purple-100 text-purple-800",
+  architect: "bg-red-100 text-red-800",
   property_manager: "bg-green-100 text-green-800",
   vendor: "bg-yellow-100 text-yellow-800",
   consultant: "bg-indigo-100 text-indigo-800",
@@ -181,7 +181,7 @@ export function CompanyDetailPage() {
               key={tab.key}
               className={`pb-2 text-sm font-medium border-b-2 transition-colors ${
                 activeTab === tab.key
-                  ? "border-brand-purple text-foreground"
+                  ? "border-brand-red text-foreground"
                   : "border-transparent text-muted-foreground hover:text-foreground"
               }`}
               onClick={() => setActiveTab(tab.key)}

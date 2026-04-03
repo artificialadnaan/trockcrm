@@ -123,7 +123,7 @@ export function PhotoTimeline({ dealId }: PhotoTimelineProps) {
               return (
                 <button
                   key={photo.id}
-                  className="relative aspect-square rounded-lg overflow-hidden group border hover:ring-2 hover:ring-brand-purple transition-all"
+                  className="relative aspect-square rounded-lg overflow-hidden group border hover:ring-2 hover:ring-brand-red transition-all"
                   onClick={() => setLightboxIndex(flatIdx)}
                 >
                   {/* Fix 13: Render actual photo thumbnails via presigned URLs */}

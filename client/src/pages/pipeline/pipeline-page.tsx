@@ -47,7 +47,7 @@ function DroppableColumn({ column, children }: { column: PipelineColumn; childre
     <div
       ref={setNodeRef}
       className={`flex-shrink-0 w-72 flex flex-col rounded-lg transition-colors ${
-        isOver ? "bg-brand-purple/5 ring-2 ring-brand-purple/30" : "bg-muted/30"
+        isOver ? "bg-brand-red/5 ring-2 ring-brand-red/30" : "bg-muted/30"
       }`}
     >
       {/* Column Header */}

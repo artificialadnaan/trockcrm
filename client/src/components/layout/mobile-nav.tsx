@@ -27,7 +27,7 @@ export function MobileNav() {
             className={({ isActive }) =>
               `flex flex-col items-center justify-center gap-1 min-w-[3rem] min-h-[2.75rem] rounded-md transition-colors ${
                 isActive
-                  ? "text-brand-purple"
+                  ? "text-brand-red"
                   : "text-muted-foreground"
               }`
             }

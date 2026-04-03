@@ -198,7 +198,7 @@ export function ContactDetailPage() {
               key={tab.key}
               className={`pb-2 text-sm font-medium border-b-2 transition-colors ${
                 activeTab === tab.key
-                  ? "border-brand-purple text-foreground"
+                  ? "border-brand-red text-foreground"
                   : "border-transparent text-muted-foreground hover:text-foreground"
               }`}
               onClick={() => setActiveTab(tab.key)}

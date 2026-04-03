@@ -4,13 +4,13 @@
  */
 
 export const CHART_COLORS = [
-  "#7C3AED", // brand purple
+  "#CC0000", // brand red
   "#06B6D4", // brand cyan
   "#3B82F6", // blue
   "#10B981", // emerald
   "#F59E0B", // amber
-  "#EF4444", // red
-  "#8B5CF6", // violet
+  "#EF4444", // red-500
+  "#64748B", // slate
   "#EC4899", // pink
   "#14B8A6", // teal
   "#F97316", // orange

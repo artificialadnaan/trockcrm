@@ -183,7 +183,7 @@ export function CompanySelector({ value, onChange, required }: CompanySelectorPr
           <div className="border-t">
             <button
               type="button"
-              className="w-full text-left px-3 py-2 text-sm flex items-center gap-2 hover:bg-muted transition-colors text-brand-purple font-medium"
+              className="w-full text-left px-3 py-2 text-sm flex items-center gap-2 hover:bg-muted transition-colors text-brand-red font-medium"
               onClick={() => {
                 setShowInlineForm(true);
                 setNewName(query);
