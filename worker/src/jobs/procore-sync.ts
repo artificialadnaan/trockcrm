@@ -428,7 +428,8 @@ async function syncChangeOrderToCrm(
 ): Promise<void> {
   // Find the deal linked to this Procore project
   const dealResult = await client.query(
-    `SELECT id FROM ${schemaName}.deals WHERE procore_project_id = $1 LIMIT 1`,
+    `SELECT id, deal_number, assigned_rep_id, change_order_total
+     FROM ${schemaName}.deals WHERE procore_project_id = $1 LIMIT 1`,
     [procoreProjectId]
   );
   if (dealResult.rows.length === 0) {
@@ -438,11 +439,14 @@ async function syncChangeOrderToCrm(
     return;
   }
   const dealId: string = dealResult.rows[0].id;
+  const dealNumber: string = dealResult.rows[0].deal_number ?? String(procoreProjectId);
+  const assignedRepId: string = dealResult.rows[0].assigned_rep_id;
+  const oldTotal: number = parseFloat(String(dealResult.rows[0].change_order_total ?? "0")) || 0;
 
   const procoreCoId: number = procoreCo.id;
   const coNumber: number = procoreCo.number ?? 0;
   const title: string = (procoreCo.title ?? "Change Order").substring(0, 500);
-  const amount: string = String(procoreCo.grand_total ?? procoreCo.amount ?? "0");
+  const amount: number = parseFloat(String(procoreCo.grand_total ?? procoreCo.amount ?? "0")) || 0;
 
   // Map Procore CO status to CRM enum: approved/rejected/pending
   const procoreStatus: string = (procoreCo.status ?? "").toLowerCase();
@@ -471,7 +475,7 @@ async function syncChangeOrderToCrm(
   );
 
   // Recalculate change_order_total on the deal (sum of approved COs)
-  await client.query(
+  const updateResult = await client.query(
     `UPDATE ${schemaName}.deals
      SET change_order_total = (
        SELECT COALESCE(SUM(amount), 0)
@@ -480,9 +484,27 @@ async function syncChangeOrderToCrm(
      ),
      procore_last_synced_at = NOW(),
      updated_at = NOW()
-     WHERE id = $1`,
+     WHERE id = $1
+     RETURNING change_order_total`,
     [dealId]
   );
+  const newTotal: number =
+    parseFloat(String(updateResult.rows[0]?.change_order_total ?? "0")) || 0;
+
+  if (oldTotal !== newTotal) {
+    await client.query(
+      `INSERT INTO ${schemaName}.notifications
+         (id, type, title, body, user_id, is_read, created_at)
+       VALUES (gen_random_uuid(), 'system', 'Change Order Update', $1, $2, false, NOW())`,
+      [
+        `Deal ${dealNumber}: CO total changed from $${oldTotal.toFixed(2)} to $${newTotal.toFixed(2)}`,
+        assignedRepId,
+      ]
+    );
+    console.log(
+      `[Procore:sync] Notification sent for deal ${dealId}: CO total ${oldTotal} → ${newTotal}`
+    );
+  }
 
   // Upsert procore_sync_state
   await client.query(
