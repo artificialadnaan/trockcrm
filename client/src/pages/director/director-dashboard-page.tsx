@@ -65,6 +65,7 @@ export function DirectorDashboardPage() {
           subtitle={`${data.ddVsPipeline.pipelineCount} deals`}
           icon={<TrendingUp className="h-5 w-5" />}
           valueClassName="text-2xl"
+          onClick={() => navigate("/pipeline")}
         />
         <StatCard
           title="DD Pipeline"
@@ -72,6 +73,7 @@ export function DirectorDashboardPage() {
           subtitle={`${data.ddVsPipeline.ddCount} deals`}
           icon={<BarChart3 className="h-5 w-5" />}
           valueClassName="text-2xl"
+          onClick={() => navigate("/deals?stage=dd")}
         />
         <StatCard
           title="Total Pipeline"
@@ -79,6 +81,7 @@ export function DirectorDashboardPage() {
           subtitle={`${data.ddVsPipeline.totalCount} deals total`}
           className="sm:col-span-2 bg-primary/5"
           valueClassName="text-5xl"
+          onClick={() => navigate("/deals")}
         />
       </div>
 
@@ -104,7 +107,10 @@ export function DirectorDashboardPage() {
       {/* Charts Row */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Pipeline by Stage */}
-        <Card>
+        <Card
+          className="cursor-pointer hover:shadow-md transition-shadow"
+          onClick={() => navigate("/pipeline")}
+        >
           <CardHeader>
             <CardTitle>Pipeline by Stage</CardTitle>
           </CardHeader>

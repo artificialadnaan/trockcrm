@@ -140,7 +140,7 @@ export function CompanyListPage() {
               >
                 <div className="flex items-center justify-between gap-4">
                   <div className="flex items-center gap-3 flex-1 min-w-0">
-                    <span className="flex-shrink-0 inline-flex items-center justify-center h-8 w-8 rounded-full bg-red-50 text-red-600">
+                    <span className="flex-shrink-0 inline-flex items-center justify-center h-8 w-8 rounded-md bg-red-50 text-red-600">
                       <Building2 className="h-4 w-4" />
                     </span>
                     <div className="flex-1 min-w-0">

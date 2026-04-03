@@ -1,5 +1,6 @@
 import { useRepDashboard } from "@/hooks/use-dashboard";
 import { useAuth } from "@/lib/auth";
+import { useNavigate } from "react-router-dom";
 import { StatCard } from "@/components/dashboard/stat-card";
 import { PipelineBarChart } from "@/components/charts/pipeline-bar-chart";
 import { formatCurrency } from "@/components/charts/chart-colors";
@@ -13,6 +14,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
 export function RepDashboardPage() {
   const { user } = useAuth();
+  const navigate = useNavigate();
   const { data, loading, error } = useRepDashboard();
 
   if (loading) {
@@ -65,6 +67,7 @@ export function RepDashboardPage() {
           value={data.activeDeals.count}
           subtitle={formatCurrency(data.activeDeals.totalValue)}
           icon={<Briefcase className="h-5 w-5" />}
+          onClick={() => navigate("/deals")}
         />
         <StatCard
           title="Tasks Today"
@@ -76,6 +79,7 @@ export function RepDashboardPage() {
           }
           icon={<CheckSquare className="h-5 w-5" />}
           className={data.tasksToday.overdue > 0 ? "border-red-200 bg-red-50/50" : ""}
+          onClick={() => navigate("/tasks")}
         />
         <StatCard
           title="Activity This Week"
@@ -97,7 +101,10 @@ export function RepDashboardPage() {
       </div>
 
       {/* Pipeline Chart */}
-      <Card>
+      <Card
+        className="cursor-pointer hover:shadow-md transition-shadow"
+        onClick={() => navigate("/pipeline")}
+      >
         <CardHeader>
           <CardTitle>My Pipeline</CardTitle>
         </CardHeader>

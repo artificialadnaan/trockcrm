@@ -9,11 +9,15 @@ interface StatCardProps {
   trend?: { value: number; label: string; positive?: boolean };
   className?: string;
   valueClassName?: string;
+  onClick?: () => void;
 }
 
-export function StatCard({ title, value, subtitle, icon, trend, className = "", valueClassName = "text-2xl" }: StatCardProps) {
+export function StatCard({ title, value, subtitle, icon, trend, className = "", valueClassName = "text-2xl", onClick }: StatCardProps) {
   return (
-    <Card className={className}>
+    <Card
+      className={`${className}${onClick ? " cursor-pointer hover:shadow-md transition-shadow" : ""}`}
+      onClick={onClick}
+    >
       <CardContent className="p-4">
         <div className="flex items-start justify-between">
           <div className="space-y-1">

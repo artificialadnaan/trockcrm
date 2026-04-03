@@ -63,9 +63,12 @@ export function Sidebar() {
 
   return (
     <aside className="hidden md:flex flex-col w-60 bg-sidebar-bg text-white min-h-screen">
-      <div className="p-4">
+      <div className="p-4 flex items-center gap-2">
+        <div className="bg-white rounded-full p-0.5 flex-shrink-0">
+          <img src="/logo.png" alt="T Rock" className="h-8 w-auto" />
+        </div>
         <h1 className="text-lg font-bold bg-gradient-to-r from-brand-red to-brand-cyan bg-clip-text text-transparent">
-          T ROCK CRM
+          CRM
         </h1>
       </div>
 

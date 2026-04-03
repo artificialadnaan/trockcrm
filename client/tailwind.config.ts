@@ -58,10 +58,10 @@ export default {
           ring: "var(--sidebar-ring)",
           bg: "#0F172A",
           hover: "#1E293B",
-          active: "#7C3AED22",
+          active: "#CC000022",
         },
         brand: {
-          purple: "#7C3AED",
+          red: "#CC0000",
           cyan: "#06B6D4",
         },
       },
