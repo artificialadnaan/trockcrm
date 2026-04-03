@@ -28,6 +28,7 @@ import { syncHubRoutes } from "./modules/procore/synchub-routes.js";
 import { registerProcoreEventHandlers } from "./modules/procore/event-handlers.js";
 import { migrationRouter } from "./modules/migration/routes.js";
 import { searchRoutes } from "./modules/search/routes.js";
+import { companyRoutes } from "./modules/companies/routes.js";
 import { adminRoutes } from "./modules/admin/routes.js";
 
 export function createApp() {
@@ -88,6 +89,7 @@ export function createApp() {
   tenantRouter.use("/dashboard", dashboardRoutes);
   tenantRouter.use("/procore", procoreRoutes);
   tenantRouter.use("/search", searchRoutes);
+  tenantRouter.use("/companies", companyRoutes);
 
   // Foundation test route — proves tenant middleware works end-to-end
   tenantRouter.get("/tenant-check", async (req, res) => {

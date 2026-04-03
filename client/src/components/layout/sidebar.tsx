@@ -28,6 +28,7 @@ const navItems = [
   { to: "/deals", icon: Handshake, label: "Deals", roles: ["admin", "director", "rep"] },
   { to: "/pipeline", icon: Kanban, label: "Pipeline", roles: ["admin", "director", "rep"] },
   { to: "/contacts", icon: Users, label: "Contacts", roles: ["admin", "director", "rep"] },
+  { to: "/companies", icon: Building2, label: "Companies", roles: ["admin", "director", "rep"] },
   { to: "/email", icon: Mail, label: "Email", roles: ["admin", "director", "rep"] },
   { to: "/tasks", icon: CheckSquare, label: "Tasks", roles: ["admin", "director", "rep"] },
   { to: "/files", icon: FileImage, label: "Files", roles: ["admin", "director", "rep"] },

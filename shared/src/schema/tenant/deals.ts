@@ -22,6 +22,7 @@ export const deals = pgTable("deals", {
   stageId: uuid("stage_id").notNull(),
   assignedRepId: uuid("assigned_rep_id").notNull(),
   primaryContactId: uuid("primary_contact_id"),
+  companyId: uuid("company_id"),
   ddEstimate: numeric("dd_estimate", { precision: 14, scale: 2 }),
   bidEstimate: numeric("bid_estimate", { precision: 14, scale: 2 }),
   awardedAmount: numeric("awarded_amount", { precision: 14, scale: 2 }),

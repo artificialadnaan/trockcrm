@@ -24,6 +24,7 @@ export const contacts = pgTable(
     phone: varchar("phone", { length: 20 }),
     mobile: varchar("mobile", { length: 20 }),
     companyName: varchar("company_name", { length: 500 }),
+    companyId: uuid("company_id"),
     jobTitle: varchar("job_title", { length: 255 }),
     category: contactCategoryEnum("category").notNull(),
     address: text("address"),

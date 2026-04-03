@@ -12,6 +12,10 @@ import { ContactListPage } from "@/pages/contacts/contact-list-page";
 import { ContactDetailPage } from "@/pages/contacts/contact-detail-page";
 import { ContactNewPage } from "@/pages/contacts/contact-new-page";
 import { ContactEditPage } from "@/pages/contacts/contact-edit-page";
+import { CompanyListPage } from "@/pages/companies/company-list-page";
+import { CompanyDetailPage } from "@/pages/companies/company-detail-page";
+import { CompanyNewPage } from "@/pages/companies/company-new-page";
+import { CompanyEditPage } from "@/pages/companies/company-edit-page";
 import { MergeQueuePage } from "@/pages/admin/merge-queue-page";
 import { EmailInboxPage } from "@/pages/email/email-inbox-page";
 import { TaskListPage } from "@/pages/tasks/task-list-page";
@@ -70,6 +74,10 @@ export function App() {
             <Route path="/contacts/new" element={<ContactNewPage />} />
             <Route path="/contacts/:id" element={<ContactDetailPage />} />
             <Route path="/contacts/:id/edit" element={<ContactEditPage />} />
+            <Route path="/companies" element={<CompanyListPage />} />
+            <Route path="/companies/new" element={<CompanyNewPage />} />
+            <Route path="/companies/:id" element={<CompanyDetailPage />} />
+            <Route path="/companies/:id/edit" element={<CompanyEditPage />} />
             <Route path="/email" element={<EmailInboxPage />} />
             <Route path="/tasks" element={<TaskListPage />} />
             <Route path="/files" element={<FilesPage />} />
