@@ -79,6 +79,7 @@ export const NOTIFICATION_TYPES = [
   "deal_won",
   "deal_lost",
   "stage_change",
+  "touchpoint_alert",
   "system",
 ] as const;
 export type NotificationType = (typeof NOTIFICATION_TYPES)[number];
