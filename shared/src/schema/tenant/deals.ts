@@ -49,6 +49,7 @@ export const deals = pgTable("deals", {
   stageEnteredAt: timestamp("stage_entered_at", { withTimezone: true }).defaultNow().notNull(),
   isActive: boolean("is_active").default(true).notNull(),
   hubspotDealId: varchar("hubspot_deal_id", { length: 50 }),
+  companycamProjectId: varchar("companycam_project_id", { length: 50 }),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 });

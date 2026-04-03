@@ -311,6 +311,13 @@ router.get("/:id/download", async (req, res, next) => {
       if (!deal) throw new AppError(403, "Access denied: you do not have access to this deal's files.");
     }
 
+    // External files (CompanyCam etc.) — return the CDN URL directly
+    if (file.externalUrl) {
+      await req.commitTransaction!();
+      res.json({ url: file.externalUrl, filename: file.displayName + file.fileExtension });
+      return;
+    }
+
     const result = await getFileDownloadUrl(req.tenantDb!, req.params.id);
     await req.commitTransaction!();
     res.json(result);

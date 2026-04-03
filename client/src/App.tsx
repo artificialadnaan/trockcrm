@@ -37,6 +37,7 @@ import { AuditLogPage } from "@/pages/admin/audit-log-page";
 import { CrossOfficeReportsPage } from "@/pages/admin/cross-office-reports-page";
 import { UserGuidePage } from "@/pages/admin/help/user-guide-page";
 import { AdminGuidePage } from "@/pages/admin/help/admin-guide-page";
+import { CompanyCamPage } from "@/pages/admin/companycam-page";
 
 function HomePage() {
   const { user } = useAuth();
@@ -94,6 +95,7 @@ export function App() {
             <Route path="/admin/cross-office-reports" element={<CrossOfficeReportsPage />} />
             <Route path="/admin/merge-queue" element={<MergeQueuePage />} />
             <Route path="/admin/procore" element={<ProcoreSyncPage />} />
+            <Route path="/admin/companycam" element={<CompanyCamPage />} />
             <Route path="/admin/migration" element={<MigrationDashboardPage />} />
             <Route path="/admin/migration/deals" element={<MigrationDealsPage />} />
             <Route path="/admin/migration/contacts" element={<MigrationContactsPage />} />

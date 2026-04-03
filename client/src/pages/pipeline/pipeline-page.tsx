@@ -194,7 +194,7 @@ function DroppableColumn({
       </div>
 
       {/* Cards list */}
-      <div className="flex-1 p-2 space-y-2 overflow-y-auto min-h-[200px] max-h-[calc(100vh-340px)] bg-gray-50/50">
+      <div className="flex-1 p-2 space-y-2 overflow-y-auto min-h-0 bg-gray-50/50">
         {column.deals.map((deal) => (
           <PipelineCard
             key={deal.id}
@@ -232,7 +232,7 @@ export function PipelinePage() {
   const [activeDeal, setActiveDeal] = useState<Deal | null>(null);
   const [stageChangeOpen, setStageChangeOpen] = useState(false);
   const [pendingMove, setPendingMove] = useState<{ deal: Deal; targetStageId: string } | null>(null);
-  const [lastRefreshed] = useState<Date>(new Date());
+  const [lastRefreshed, setLastRefreshed] = useState<Date>(new Date());
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 8 } })
@@ -248,6 +248,7 @@ export function PipelinePage() {
       }>(`/deals/pipeline?includeDd=${showDd}`);
       setColumns(data.pipelineColumns);
       setTerminalStages(data.terminalStages ?? []);
+      setLastRefreshed(new Date());
     } catch (err) {
       console.error("Failed to load pipeline:", err);
       setError("Failed to load pipeline data. Please try again.");
@@ -340,9 +341,9 @@ export function PipelinePage() {
   }
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col h-[calc(100vh-4rem)] -m-4 md:-m-6">
       {/* Header */}
-      <div className="flex items-start justify-between px-6 pt-6 pb-4 border-b bg-white">
+      <div className="flex items-start justify-between px-6 pt-6 pb-4 border-b bg-white flex-shrink-0">
         <div>
           <h1 className="text-4xl font-black tracking-tighter text-gray-900">Deal Pipeline</h1>
           <div className="flex items-center gap-4 mt-1.5">
@@ -401,7 +402,7 @@ export function PipelinePage() {
       </div>
 
       {/* Kanban board */}
-      <div className="flex-1 overflow-x-auto overflow-y-hidden">
+      <div className="flex-1 overflow-x-auto overflow-y-hidden min-h-0">
         <DndContext
           sensors={sensors}
           onDragStart={handleDragStart}
@@ -428,7 +429,7 @@ export function PipelinePage() {
       </div>
 
       {/* Summary footer */}
-      <div className="sticky bottom-0 bg-white border-t px-6 py-3 flex items-center justify-between">
+      <div className="flex-shrink-0 bg-white border-t px-6 py-3 flex items-center justify-between">
         <div className="flex items-center gap-8">
           <div>
             <p className="text-[10px] font-black uppercase tracking-widest text-gray-400">Active Leads</p>

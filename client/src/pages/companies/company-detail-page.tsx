@@ -8,12 +8,20 @@ import {
   Globe,
   Users,
   Handshake,
+  UserPlus,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { useCompanyDetail, useCompanyContacts, useCompanyDeals } from "@/hooks/use-companies";
 import { formatPhone } from "@/lib/contact-utils";
+import { ContactForm } from "@/components/contacts/contact-form";
 
 const COMPANY_CATEGORY_LABELS: Record<string, string> = {
   client: "Client",
@@ -40,8 +48,10 @@ type Tab = "contacts" | "deals";
 export function CompanyDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const { company, loading, error } = useCompanyDetail(id);
+  const { company, loading, error, refetch: refetchCompany } = useCompanyDetail(id);
   const [activeTab, setActiveTab] = useState<Tab>("contacts");
+  const [addContactOpen, setAddContactOpen] = useState(false);
+  const [contactsKey, setContactsKey] = useState(0);
 
   if (loading) {
     return (
@@ -101,14 +111,24 @@ export function CompanyDetailPage() {
           </div>
         </div>
 
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => navigate(`/companies/${company.id}/edit`)}
-        >
-          <Edit className="h-4 w-4 mr-2" />
-          Edit
-        </Button>
+        <div className="flex gap-2">
+          <Button
+            variant="default"
+            size="sm"
+            onClick={() => setAddContactOpen(true)}
+          >
+            <UserPlus className="h-4 w-4 mr-2" />
+            Add Contact
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => navigate(`/companies/${company.id}/edit`)}
+          >
+            <Edit className="h-4 w-4 mr-2" />
+            Edit
+          </Button>
+        </div>
       </div>
 
       {/* Info Card */}
@@ -193,13 +213,36 @@ export function CompanyDetailPage() {
       </div>
 
       {/* Tab Content */}
-      {activeTab === "contacts" && <CompanyContactsTab companyId={company.id} />}
+      {activeTab === "contacts" && <CompanyContactsTab key={contactsKey} companyId={company.id} onAddContact={() => setAddContactOpen(true)} />}
       {activeTab === "deals" && <CompanyDealsTab companyId={company.id} />}
+
+      {/* Add Contact Dialog */}
+      <Dialog open={addContactOpen} onOpenChange={setAddContactOpen}>
+        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Add Contact to {company.name}</DialogTitle>
+          </DialogHeader>
+          <ContactForm
+            defaults={{
+              companyId: company.id,
+              companyName: company.name,
+              category: company.category ?? "client",
+            }}
+            onSuccess={() => {
+              setAddContactOpen(false);
+              refetchCompany();
+              setContactsKey((k) => k + 1);
+              setActiveTab("contacts");
+            }}
+            onCancel={() => setAddContactOpen(false)}
+          />
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
 
-function CompanyContactsTab({ companyId }: { companyId: string }) {
+function CompanyContactsTab({ companyId, onAddContact }: { companyId: string; onAddContact?: () => void }) {
   const navigate = useNavigate();
   const { contacts, loading, error } = useCompanyContacts(companyId);
 
@@ -222,6 +265,12 @@ function CompanyContactsTab({ companyId }: { companyId: string }) {
       <div className="text-center py-8 text-muted-foreground">
         <Users className="h-8 w-8 mx-auto mb-2 opacity-30" />
         <p className="text-sm">No contacts linked to this company.</p>
+        {onAddContact && (
+          <Button variant="outline" size="sm" className="mt-3" onClick={onAddContact}>
+            <UserPlus className="h-4 w-4 mr-2" />
+            Add First Contact
+          </Button>
+        )}
       </div>
     );
   }

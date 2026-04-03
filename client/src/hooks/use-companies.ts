@@ -146,7 +146,7 @@ export function useCompanyContacts(companyId: string | undefined) {
     fetchContacts();
   }, [fetchContacts]);
 
-  return { contacts, loading, error };
+  return { contacts, loading, error, refetch: fetchContacts };
 }
 
 export interface CompanyDeal {

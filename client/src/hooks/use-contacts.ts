@@ -9,6 +9,7 @@ export interface Contact {
   phone: string | null;
   mobile: string | null;
   companyName: string | null;
+  companyId: string | null;
   jobTitle: string | null;
   category: string;
   address: string | null;

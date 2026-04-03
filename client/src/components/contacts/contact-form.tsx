@@ -19,12 +19,20 @@ import { CATEGORY_LABELS } from "@/lib/contact-utils";
 import { Loader2 } from "lucide-react";
 import { CompanySelector } from "@/components/companies/company-selector";
 
-interface ContactFormProps {
-  contact?: Contact;
-  onSuccess?: (contact: Contact) => void;
+interface ContactFormDefaults {
+  companyId?: string;
+  companyName?: string;
+  category?: string;
 }
 
-export function ContactForm({ contact, onSuccess }: ContactFormProps) {
+interface ContactFormProps {
+  contact?: Contact;
+  defaults?: ContactFormDefaults;
+  onSuccess?: (contact: Contact) => void;
+  onCancel?: () => void;
+}
+
+export function ContactForm({ contact, defaults, onSuccess, onCancel }: ContactFormProps) {
   const navigate = useNavigate();
   const isEdit = !!contact;
 
@@ -34,10 +42,10 @@ export function ContactForm({ contact, onSuccess }: ContactFormProps) {
     email: contact?.email ?? "",
     phone: contact?.phone ?? "",
     mobile: contact?.mobile ?? "",
-    companyName: contact?.companyName ?? "",
-    companyId: (contact as any)?.companyId ?? "",
+    companyName: contact?.companyName ?? defaults?.companyName ?? "",
+    companyId: contact?.companyId ?? defaults?.companyId ?? "",
     jobTitle: contact?.jobTitle ?? "",
-    category: contact?.category ?? "client",
+    category: contact?.category ?? defaults?.category ?? "client",
     address: contact?.address ?? "",
     city: contact?.city ?? "",
     state: contact?.state ?? "",
@@ -345,7 +353,7 @@ export function ContactForm({ contact, onSuccess }: ContactFormProps) {
         <Button
           type="button"
           variant="outline"
-          onClick={() => navigate(isEdit ? `/contacts/${contact.id}` : "/contacts")}
+          onClick={() => onCancel ? onCancel() : navigate(isEdit ? `/contacts/${contact.id}` : "/contacts")}
         >
           Cancel
         </Button>

@@ -177,6 +177,28 @@ export async function deleteObject(r2Key: string): Promise<void> {
 }
 
 /**
+ * Upload a buffer directly to R2 from the server.
+ * Used for server-side imports (e.g. CompanyCam photo sync).
+ */
+export async function putObject(
+  r2Key: string,
+  body: Buffer | Uint8Array,
+  mimeType: string
+): Promise<void> {
+  const client = getClient();
+  const bucket = getBucket();
+
+  await client.send(
+    new PutObjectCommand({
+      Bucket: bucket,
+      Key: r2Key,
+      Body: body,
+      ContentType: mimeType,
+    })
+  );
+}
+
+/**
  * Dev mode: generate a mock presigned URL when R2 is not configured.
  * Returns a localhost URL so the upload flow can be tested locally.
  */
