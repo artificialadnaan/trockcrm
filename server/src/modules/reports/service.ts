@@ -1024,3 +1024,250 @@ export async function executeCustomReport(
     total: Number(countRows[0]?.total ?? 0),
   };
 }
+
+// ---------------------------------------------------------------------------
+// 15. Rep Performance Comparison (MoM / QoQ / YoY)
+// ---------------------------------------------------------------------------
+
+export interface PeriodMetrics {
+  dealsWon: number;
+  dealsLost: number;
+  totalWonValue: number;
+  activitiesLogged: number;
+  winRate: number;
+  avgDaysToClose: number;
+}
+
+export interface PeriodChange {
+  dealsWon: number;
+  dealsLost: number;
+  totalWonValue: number;
+  activitiesLogged: number;
+  winRate: number;
+  avgDaysToClose: number;
+}
+
+export interface RepPerformanceComparisonResult {
+  reps: Array<{
+    repId: string;
+    repName: string;
+    current: PeriodMetrics;
+    previous: PeriodMetrics;
+    change: PeriodChange;
+  }>;
+  periodLabel: { current: string; previous: string };
+}
+
+/** Calculate current + previous date ranges for a given period type. */
+function getPeriodRanges(period: "month" | "quarter" | "year"): {
+  current: { from: string; to: string };
+  previous: { from: string; to: string };
+  labels: { current: string; previous: string };
+} {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = now.getMonth(); // 0-indexed
+
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const lastDay = (y: number, m: number) => new Date(y, m + 1, 0).getDate();
+
+  switch (period) {
+    case "month": {
+      const curFrom = `${year}-${pad(month + 1)}-01`;
+      const curTo = `${year}-${pad(month + 1)}-${lastDay(year, month)}`;
+      const prevMonth = month === 0 ? 11 : month - 1;
+      const prevYear = month === 0 ? year - 1 : year;
+      const prevFrom = `${prevYear}-${pad(prevMonth + 1)}-01`;
+      const prevTo = `${prevYear}-${pad(prevMonth + 1)}-${lastDay(prevYear, prevMonth)}`;
+      const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+      return {
+        current: { from: curFrom, to: curTo },
+        previous: { from: prevFrom, to: prevTo },
+        labels: {
+          current: `${monthNames[month]} ${year}`,
+          previous: `${monthNames[prevMonth]} ${prevYear}`,
+        },
+      };
+    }
+    case "quarter": {
+      const curQ = Math.floor(month / 3);
+      const curQStart = curQ * 3;
+      const curFrom = `${year}-${pad(curQStart + 1)}-01`;
+      const curTo = `${year}-${pad(curQStart + 3)}-${lastDay(year, curQStart + 2)}`;
+      const prevQ = curQ === 0 ? 3 : curQ - 1;
+      const prevYear = curQ === 0 ? year - 1 : year;
+      const prevQStart = prevQ * 3;
+      const prevFrom = `${prevYear}-${pad(prevQStart + 1)}-01`;
+      const prevTo = `${prevYear}-${pad(prevQStart + 3)}-${lastDay(prevYear, prevQStart + 2)}`;
+      return {
+        current: { from: curFrom, to: curTo },
+        previous: { from: prevFrom, to: prevTo },
+        labels: {
+          current: `Q${curQ + 1} ${year}`,
+          previous: `Q${prevQ + 1} ${prevYear}`,
+        },
+      };
+    }
+    case "year": {
+      return {
+        current: { from: `${year}-01-01`, to: `${year}-12-31` },
+        previous: { from: `${year - 1}-01-01`, to: `${year - 1}-12-31` },
+        labels: {
+          current: String(year),
+          previous: String(year - 1),
+        },
+      };
+    }
+  }
+}
+
+function computeChange(current: PeriodMetrics, previous: PeriodMetrics): PeriodChange {
+  return {
+    dealsWon: current.dealsWon - previous.dealsWon,
+    dealsLost: current.dealsLost - previous.dealsLost,
+    totalWonValue: current.totalWonValue - previous.totalWonValue,
+    activitiesLogged: current.activitiesLogged - previous.activitiesLogged,
+    winRate: Math.round((current.winRate - previous.winRate) * 100) / 100,
+    avgDaysToClose: Math.round((current.avgDaysToClose - previous.avgDaysToClose) * 100) / 100,
+  };
+}
+
+/**
+ * Period-over-period performance comparison per rep.
+ * Supports month, quarter, and year comparisons.
+ */
+export async function getRepPerformanceComparison(
+  tenantDb: TenantDb,
+  period: "month" | "quarter" | "year"
+): Promise<RepPerformanceComparisonResult> {
+  const { current, previous, labels } = getPeriodRanges(period);
+
+  // Query deals won/lost and avg days to close for both periods in one query
+  const dealResult = await tenantDb.execute(sql`
+    SELECT
+      d.assigned_rep_id AS rep_id,
+      u.display_name AS rep_name,
+      COUNT(*) FILTER (
+        WHERE psc.slug = 'closed_won'
+          AND dsh.created_at >= ${current.from}::timestamptz
+          AND dsh.created_at <= (${current.to}::date + INTERVAL '1 day')::timestamptz
+      )::int AS cur_won,
+      COUNT(*) FILTER (
+        WHERE psc.slug = 'closed_lost'
+          AND dsh.created_at >= ${current.from}::timestamptz
+          AND dsh.created_at <= (${current.to}::date + INTERVAL '1 day')::timestamptz
+      )::int AS cur_lost,
+      COALESCE(SUM(
+        COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)
+      ) FILTER (
+        WHERE psc.slug = 'closed_won'
+          AND dsh.created_at >= ${current.from}::timestamptz
+          AND dsh.created_at <= (${current.to}::date + INTERVAL '1 day')::timestamptz
+      ), 0)::numeric AS cur_won_value,
+      COALESCE(AVG(dsh.duration) FILTER (
+        WHERE psc.slug = 'closed_won'
+          AND dsh.created_at >= ${current.from}::timestamptz
+          AND dsh.created_at <= (${current.to}::date + INTERVAL '1 day')::timestamptz
+      ), 0)::numeric AS cur_avg_days,
+      COUNT(*) FILTER (
+        WHERE psc.slug = 'closed_won'
+          AND dsh.created_at >= ${previous.from}::timestamptz
+          AND dsh.created_at <= (${previous.to}::date + INTERVAL '1 day')::timestamptz
+      )::int AS prev_won,
+      COUNT(*) FILTER (
+        WHERE psc.slug = 'closed_lost'
+          AND dsh.created_at >= ${previous.from}::timestamptz
+          AND dsh.created_at <= (${previous.to}::date + INTERVAL '1 day')::timestamptz
+      )::int AS prev_lost,
+      COALESCE(SUM(
+        COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)
+      ) FILTER (
+        WHERE psc.slug = 'closed_won'
+          AND dsh.created_at >= ${previous.from}::timestamptz
+          AND dsh.created_at <= (${previous.to}::date + INTERVAL '1 day')::timestamptz
+      ), 0)::numeric AS prev_won_value,
+      COALESCE(AVG(dsh.duration) FILTER (
+        WHERE psc.slug = 'closed_won'
+          AND dsh.created_at >= ${previous.from}::timestamptz
+          AND dsh.created_at <= (${previous.to}::date + INTERVAL '1 day')::timestamptz
+      ), 0)::numeric AS prev_avg_days
+    FROM deal_stage_history dsh
+    JOIN deals d ON d.id = dsh.deal_id
+    JOIN pipeline_stage_config psc ON psc.id = dsh.to_stage_id
+    JOIN users u ON u.id = d.assigned_rep_id
+    WHERE psc.is_terminal = true
+      AND (
+        (dsh.created_at >= ${previous.from}::timestamptz AND dsh.created_at <= (${current.to}::date + INTERVAL '1 day')::timestamptz)
+      )
+    GROUP BY d.assigned_rep_id, u.display_name
+    ORDER BY u.display_name ASC
+  `);
+
+  // Query activities for both periods
+  const activityResult = await tenantDb.execute(sql`
+    SELECT
+      a.user_id AS rep_id,
+      COUNT(*) FILTER (
+        WHERE a.occurred_at >= ${current.from}::timestamptz
+          AND a.occurred_at <= (${current.to}::date + INTERVAL '1 day')::timestamptz
+      )::int AS cur_activities,
+      COUNT(*) FILTER (
+        WHERE a.occurred_at >= ${previous.from}::timestamptz
+          AND a.occurred_at <= (${previous.to}::date + INTERVAL '1 day')::timestamptz
+      )::int AS prev_activities
+    FROM activities a
+    WHERE a.occurred_at >= ${previous.from}::timestamptz
+      AND a.occurred_at <= (${current.to}::date + INTERVAL '1 day')::timestamptz
+    GROUP BY a.user_id
+  `);
+
+  const dealRows = (dealResult as any).rows ?? dealResult;
+  const actRows = (activityResult as any).rows ?? activityResult;
+
+  // Build activity map
+  const actMap = new Map<string, { cur: number; prev: number }>();
+  for (const r of actRows) {
+    actMap.set(r.rep_id, {
+      cur: Number(r.cur_activities ?? 0),
+      prev: Number(r.prev_activities ?? 0),
+    });
+  }
+
+  const reps = dealRows.map((r: any) => {
+    const curWon = Number(r.cur_won ?? 0);
+    const curLost = Number(r.cur_lost ?? 0);
+    const curTotal = curWon + curLost;
+    const prevWon = Number(r.prev_won ?? 0);
+    const prevLost = Number(r.prev_lost ?? 0);
+    const prevTotal = prevWon + prevLost;
+    const act = actMap.get(r.rep_id) ?? { cur: 0, prev: 0 };
+
+    const currentMetrics: PeriodMetrics = {
+      dealsWon: curWon,
+      dealsLost: curLost,
+      totalWonValue: Number(r.cur_won_value ?? 0),
+      activitiesLogged: act.cur,
+      winRate: curTotal > 0 ? Math.round((curWon / curTotal) * 100) : 0,
+      avgDaysToClose: Math.round(Number(r.cur_avg_days ?? 0)),
+    };
+
+    const previousMetrics: PeriodMetrics = {
+      dealsWon: prevWon,
+      dealsLost: prevLost,
+      totalWonValue: Number(r.prev_won_value ?? 0),
+      activitiesLogged: act.prev,
+      winRate: prevTotal > 0 ? Math.round((prevWon / prevTotal) * 100) : 0,
+      avgDaysToClose: Math.round(Number(r.prev_avg_days ?? 0)),
+    };
+
+    return {
+      repId: r.rep_id,
+      repName: r.rep_name,
+      current: currentMetrics,
+      previous: previousMetrics,
+      change: computeChange(currentMetrics, previousMetrics),
+    };
+  });
+
+  return { reps, periodLabel: labels };
+}

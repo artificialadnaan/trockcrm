@@ -5,6 +5,7 @@ import {
   presetToDateRange,
   type DateRangePreset,
 } from "@/hooks/use-director-dashboard";
+import { useRepPerformance } from "@/hooks/use-rep-performance";
 import { PipelineBarChart } from "@/components/charts/pipeline-bar-chart";
 import { WinRateTrendChart } from "@/components/charts/win-rate-trend-chart";
 import { ActivityBarChart } from "@/components/charts/activity-bar-chart";
@@ -21,6 +22,9 @@ import {
   Settings,
   User,
   MapPin,
+  ArrowUpRight,
+  ArrowDownRight,
+  Minus,
 } from "lucide-react";
 
 const PRESETS: Array<{ value: DateRangePreset; label: string }> = [
@@ -47,11 +51,57 @@ function getInitials(name: string): string {
     .slice(0, 2);
 }
 
+const PERF_PERIODS = [
+  { value: "month" as const, label: "Month" },
+  { value: "quarter" as const, label: "Quarter" },
+  { value: "year" as const, label: "Year" },
+];
+
+function DeltaCell({ value, format = "number" }: { value: number; format?: "number" | "currency" | "percent" | "days" }) {
+  if (value === 0) {
+    return (
+      <span className="inline-flex items-center gap-0.5 text-xs text-gray-400">
+        <Minus className="h-3 w-3" />
+        {format === "currency" ? "$0" : format === "percent" ? "0%" : "0"}
+      </span>
+    );
+  }
+
+  // For avgDaysToClose, lower is better (negative = improvement)
+  const isPositiveGood = format !== "days";
+  const isGood = isPositiveGood ? value > 0 : value < 0;
+
+  const colorClass = isGood ? "text-green-600" : "text-red-500";
+  const Icon = value > 0 ? ArrowUpRight : ArrowDownRight;
+  const prefix = value > 0 ? "+" : "";
+
+  let display: string;
+  if (format === "currency") {
+    const abs = Math.abs(value);
+    display = `${prefix}${abs >= 1000 ? `$${(value / 1000).toFixed(1)}K` : `$${value.toLocaleString()}`}`;
+  } else if (format === "percent") {
+    display = `${prefix}${value}%`;
+  } else if (format === "days") {
+    display = `${prefix}${value}d`;
+  } else {
+    display = `${prefix}${value}`;
+  }
+
+  return (
+    <span className={`inline-flex items-center gap-0.5 text-xs font-semibold ${colorClass}`}>
+      <Icon className="h-3 w-3" />
+      {display}
+    </span>
+  );
+}
+
 export function DirectorDashboardPage() {
   const navigate = useNavigate();
   const [preset, setPreset] = useState<DateRangePreset>("ytd");
+  const [perfPeriod, setPerfPeriod] = useState<"month" | "quarter" | "year">("month");
   const dateRange = presetToDateRange(preset);
   const { data, loading, error } = useDirectorDashboard(dateRange);
+  const { data: perfData, loading: perfLoading } = useRepPerformance(perfPeriod);
 
   if (loading) {
     return (
@@ -454,6 +504,118 @@ export function DirectorDashboardPage() {
             )}
           </div>
         </div>
+      </div>
+
+      {/* ── Performance Trends (MoM / QoQ / YoY) ──────────────────────── */}
+      <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
+          <h3 className="text-sm font-bold text-gray-900 uppercase tracking-wide">
+            Performance Trends
+          </h3>
+          <div className="flex items-center gap-1 bg-gray-200 rounded-full px-1.5 py-1">
+            {PERF_PERIODS.map((p) => (
+              <button
+                key={p.value}
+                onClick={() => setPerfPeriod(p.value)}
+                className={`px-3 py-1 rounded-full text-xs font-semibold transition-all ${
+                  perfPeriod === p.value
+                    ? "bg-[#CC0000] text-white shadow-sm"
+                    : "text-gray-600 hover:text-gray-900"
+                }`}
+              >
+                {p.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {perfLoading ? (
+          <div className="p-8 text-center">
+            <div className="h-4 w-48 bg-gray-100 rounded animate-pulse mx-auto" />
+          </div>
+        ) : !perfData || perfData.reps.length === 0 ? (
+          <div className="p-8 text-center text-gray-400 text-sm">
+            No performance data for this period.
+          </div>
+        ) : (
+          <>
+            <div className="px-5 py-2 bg-gray-50 border-b border-gray-100">
+              <p className="text-[10px] font-semibold uppercase tracking-widest text-gray-400">
+                {perfData.periodLabel.current} vs {perfData.periodLabel.previous}
+              </p>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="bg-gray-100">
+                    <th className="text-left px-5 py-2.5 text-[10px] font-bold uppercase tracking-widest text-gray-500">
+                      Rep
+                    </th>
+                    <th className="text-right px-3 py-2.5 text-[10px] font-bold uppercase tracking-widest text-gray-500">
+                      Deals Won
+                    </th>
+                    <th className="text-right px-3 py-2.5 text-[10px] font-bold uppercase tracking-widest text-gray-500">
+                      Value Won
+                    </th>
+                    <th className="text-right px-3 py-2.5 text-[10px] font-bold uppercase tracking-widest text-gray-500">
+                      Win Rate
+                    </th>
+                    <th className="text-right px-3 py-2.5 text-[10px] font-bold uppercase tracking-widest text-gray-500">
+                      Activities
+                    </th>
+                    <th className="text-right px-5 py-2.5 text-[10px] font-bold uppercase tracking-widest text-gray-500">
+                      Avg Close
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {perfData.reps.map((rep) => (
+                    <tr
+                      key={rep.repId}
+                      className="border-t border-gray-50 hover:bg-gray-50 transition-colors"
+                    >
+                      <td className="px-5 py-3">
+                        <p className="text-sm font-semibold text-gray-900">{rep.repName}</p>
+                      </td>
+                      <td className="px-3 py-3 text-right">
+                        <div className="flex flex-col items-end gap-0.5">
+                          <span className="text-sm font-semibold text-gray-700">{rep.current.dealsWon}</span>
+                          <DeltaCell value={rep.change.dealsWon} />
+                        </div>
+                      </td>
+                      <td className="px-3 py-3 text-right">
+                        <div className="flex flex-col items-end gap-0.5">
+                          <span className="text-sm font-bold text-gray-900">
+                            {formatCurrency(rep.current.totalWonValue)}
+                          </span>
+                          <DeltaCell value={rep.change.totalWonValue} format="currency" />
+                        </div>
+                      </td>
+                      <td className="px-3 py-3 text-right">
+                        <div className="flex flex-col items-end gap-0.5">
+                          <span className="text-sm text-gray-700">{rep.current.winRate}%</span>
+                          <DeltaCell value={rep.change.winRate} format="percent" />
+                        </div>
+                      </td>
+                      <td className="px-3 py-3 text-right">
+                        <div className="flex flex-col items-end gap-0.5">
+                          <span className="text-sm text-gray-700">{rep.current.activitiesLogged}</span>
+                          <DeltaCell value={rep.change.activitiesLogged} />
+                        </div>
+                      </td>
+                      <td className="px-5 py-3 text-right">
+                        <div className="flex flex-col items-end gap-0.5">
+                          <span className="text-sm text-gray-700">{rep.current.avgDaysToClose}d</span>
+                          <DeltaCell value={rep.change.avgDaysToClose} format="days" />
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
       </div>
 
       {/* ── Activity by Rep ─────────────────────────────────────────────── */}

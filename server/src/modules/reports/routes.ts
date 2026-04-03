@@ -16,6 +16,7 @@ import {
   getClosedWonSummary,
   getPipelineByRep,
   executeCustomReport,
+  getRepPerformanceComparison,
 } from "./service.js";
 import type { ReportConfig } from "./service.js";
 import {
@@ -225,6 +226,24 @@ router.get("/pipeline-by-rep", requireDirector, async (req, res, next) => {
     });
     await req.commitTransaction!();
     res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/reports/rep-performance?period=month|quarter|year
+router.get("/rep-performance", requireDirector, async (req, res, next) => {
+  try {
+    const period = (req.query.period as string) || "month";
+    if (!["month", "quarter", "year"].includes(period)) {
+      throw new AppError(400, "period must be month, quarter, or year");
+    }
+    const result = await getRepPerformanceComparison(
+      req.tenantDb!,
+      period as "month" | "quarter" | "year"
+    );
+    await req.commitTransaction!();
+    res.json(result);
   } catch (err) {
     next(err);
   }
