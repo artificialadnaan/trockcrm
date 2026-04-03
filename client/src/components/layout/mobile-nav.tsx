@@ -2,17 +2,17 @@ import { NavLink } from "react-router-dom";
 import {
   LayoutDashboard,
   Kanban,
+  Camera,
   Users,
   CheckSquare,
-  BarChart3,
 } from "lucide-react";
 
 const mobileNavItems = [
   { to: "/", icon: LayoutDashboard, label: "Home" },
   { to: "/pipeline", icon: Kanban, label: "Pipeline" },
+  { to: "/photos/capture", icon: Camera, label: "Capture" },
   { to: "/contacts", icon: Users, label: "Contacts" },
   { to: "/tasks", icon: CheckSquare, label: "Tasks" },
-  { to: "/reports", icon: BarChart3, label: "Reports" },
 ];
 
 export function MobileNav() {

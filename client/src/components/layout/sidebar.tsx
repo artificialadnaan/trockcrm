@@ -20,6 +20,8 @@ import {
   BookOpen,
   HelpCircle,
   Globe,
+  Camera,
+  Image,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
@@ -33,6 +35,8 @@ const navItems = [
   { to: "/email", icon: Mail, label: "Email", roles: ["admin", "director", "rep"] },
   { to: "/tasks", icon: CheckSquare, label: "Tasks", roles: ["admin", "director", "rep"] },
   { to: "/files", icon: FileImage, label: "Files", roles: ["admin", "director", "rep"] },
+  { to: "/photos/capture", icon: Camera, label: "Capture", roles: ["admin", "director", "rep"] },
+  { to: "/photos/feed", icon: Image, label: "Feed", roles: ["admin", "director", "rep"] },
   { to: "/reports", icon: BarChart3, label: "Reports", roles: ["admin", "director", "rep"] },
   { to: "/projects", icon: Building2, label: "Projects", roles: ["admin", "director", "rep"] },
 ];
