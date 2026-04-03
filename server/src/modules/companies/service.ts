@@ -45,24 +45,7 @@ export async function listCompanies(
 
   const [rows, totalResult] = await Promise.all([
     tenantDb
-      .select({
-        id: companies.id,
-        name: companies.name,
-        slug: companies.slug,
-        category: companies.category,
-        address: companies.address,
-        city: companies.city,
-        state: companies.state,
-        zip: companies.zip,
-        phone: companies.phone,
-        website: companies.website,
-        notes: companies.notes,
-        isActive: companies.isActive,
-        createdAt: companies.createdAt,
-        updatedAt: companies.updatedAt,
-        contactCount: sql<number>`(SELECT COUNT(*)::int FROM contacts WHERE contacts.company_id = ${companies.id} AND contacts.is_active = true)`,
-        dealCount: sql<number>`(SELECT COUNT(*)::int FROM deals WHERE deals.company_id = ${companies.id} AND deals.is_active = true)`,
-      })
+      .select()
       .from(companies)
       .where(where)
       .orderBy(asc(companies.name))
@@ -74,7 +57,35 @@ export async function listCompanies(
       .where(where),
   ]);
 
-  return { companies: rows, total: totalResult[0]?.count ?? 0, page, limit };
+  // Batch-fetch contact and deal counts for the page of companies
+  const companyIds = rows.map((r) => r.id);
+  let countsMap = new Map<string, { contactCount: number; dealCount: number }>();
+
+  if (companyIds.length > 0) {
+    const countRows = await tenantDb.execute(sql`
+      SELECT
+        c.id,
+        (SELECT COUNT(*)::int FROM contacts WHERE contacts.company_id = c.id AND contacts.is_active = true) AS contact_count,
+        (SELECT COUNT(*)::int FROM deals WHERE deals.company_id = c.id AND deals.is_active = true) AS deal_count
+      FROM companies c
+      WHERE c.id IN (${sql.join(companyIds.map(id => sql`${id}`), sql`, `)})
+    `);
+    const countArr = (countRows as any).rows ?? countRows;
+    for (const row of countArr) {
+      countsMap.set(row.id, {
+        contactCount: Number(row.contact_count ?? 0),
+        dealCount: Number(row.deal_count ?? 0),
+      });
+    }
+  }
+
+  const companiesWithCounts = rows.map((r) => ({
+    ...r,
+    contactCount: countsMap.get(r.id)?.contactCount ?? 0,
+    dealCount: countsMap.get(r.id)?.dealCount ?? 0,
+  }));
+
+  return { companies: companiesWithCounts, total: totalResult[0]?.count ?? 0, page, limit };
 }
 
 export async function getCompanyById(tenantDb: TenantDb, id: string) {
