@@ -513,7 +513,10 @@ export function registerAllJobs() {
     console.log(`[Worker] Stage changed: ${payload.dealNumber} from ${payload.fromStageName} to ${payload.toStageName}`);
 
     // Procore stage sync: queue a job to update the Procore project status
-    if (payload.dealId && officeId && payload.toStageId) {
+    // Skip if the change originated from Procore itself (prevents infinite sync loop)
+    if (payload.changedBy === "procore_sync" || payload.changedBy === "synchub_integration") {
+      console.log(`[Worker] deal.stage.changed: skipping Procore sync — change originated from ${payload.changedBy}`);
+    } else if (payload.dealId && officeId && payload.toStageId) {
       try {
         const { pool: workerPool } = await import("../db.js");
         await workerPool.query(

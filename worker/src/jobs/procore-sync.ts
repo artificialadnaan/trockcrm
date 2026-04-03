@@ -345,11 +345,14 @@ async function syncProjectStatusToCrm(
   payload: any
 ): Promise<void> {
   const dealResult = await client.query(
-    `SELECT id, updated_at FROM ${schemaName}.deals WHERE procore_project_id = $1 LIMIT 1`,
+    `SELECT id, stage_id, stage_entered_at, updated_at
+     FROM ${schemaName}.deals WHERE procore_project_id = $1 LIMIT 1`,
     [procoreProjectId]
   );
   if (dealResult.rows.length === 0) return;
   const dealId: string = dealResult.rows[0].id;
+  const currentStageId: string = dealResult.rows[0].stage_id;
+  const stageEnteredAt: Date | null = dealResult.rows[0].stage_entered_at;
   const crmUpdatedAt: Date = dealResult.rows[0].updated_at;
 
   // Conflict detection
@@ -397,7 +400,166 @@ async function syncProjectStatusToCrm(
     }
   }
 
-  // No conflict — update procore_last_synced_at on deal
+  // --- Reverse stage sync: apply Procore stage back to CRM deal ---
+  const procoreStage: string | undefined =
+    payload.stage ?? payload.status ?? undefined;
+
+  if (procoreStage) {
+    const procoreStageKey = procoreStage.toLowerCase().trim();
+
+    // Build reverse map: Procore stage name → CRM stage
+    const reverseMapResult = await client.query(
+      `SELECT id, name, display_order, procore_stage_mapping
+       FROM public.pipeline_stage_config
+       WHERE procore_stage_mapping IS NOT NULL`
+    );
+
+    const reverseMap = new Map<
+      string,
+      { stageId: string; stageName: string; displayOrder: number; ambiguous: boolean }
+    >();
+
+    for (const row of reverseMapResult.rows) {
+      const mappingKey = (row.procore_stage_mapping as string).toLowerCase().trim();
+      if (!mappingKey) continue;
+
+      const existing = reverseMap.get(mappingKey);
+      if (existing) {
+        existing.ambiguous = true;
+        console.warn(
+          `[Procore:sync] Ambiguous reverse mapping: Procore stage "${mappingKey}" maps to ` +
+            `both "${existing.stageName}" and "${row.name}"`
+        );
+      } else {
+        reverseMap.set(mappingKey, {
+          stageId: row.id,
+          stageName: row.name,
+          displayOrder: row.display_order,
+          ambiguous: false,
+        });
+      }
+    }
+
+    const mapped = reverseMap.get(procoreStageKey);
+
+    if (mapped && mapped.ambiguous) {
+      console.warn(
+        `[Procore:sync] Skipping stage update for project ${procoreProjectId}: ` +
+          `Procore stage "${procoreStage}" maps to multiple CRM stages (ambiguous)`
+      );
+    } else if (mapped && mapped.stageId !== currentStageId) {
+      // Stage differs — apply the change
+      const targetStageId = mapped.stageId;
+
+      // Determine forward/backward move by comparing display_order
+      const currentOrderResult = await client.query(
+        `SELECT display_order FROM public.pipeline_stage_config WHERE id = $1 LIMIT 1`,
+        [currentStageId]
+      );
+      const currentOrder: number = currentOrderResult.rows[0]?.display_order ?? 0;
+      const isBackwardMove = mapped.displayOrder < currentOrder;
+
+      if (isBackwardMove) {
+        console.warn(
+          `[Procore:sync] Backward stage move for deal ${dealId}: ` +
+            `current order ${currentOrder} -> target order ${mapped.displayOrder}. ` +
+            `Allowing — Procore is system of record.`
+        );
+      }
+
+      // Resolve a system user for changed_by (FK requires a real user UUID)
+      const systemUserResult = await client.query(
+        `SELECT id FROM public.users
+         WHERE office_id = $1 AND is_active = true AND role IN ('admin', 'director')
+         ORDER BY created_at ASC LIMIT 1`,
+        [officeId]
+      );
+      const changedByUserId: string | null = systemUserResult.rows[0]?.id ?? null;
+
+      if (!changedByUserId) {
+        console.error(
+          `[Procore:sync] No admin/director user found for office ${officeId} — ` +
+            `cannot record stage history for deal ${dealId}`
+        );
+      } else {
+        // Insert deal_stage_history audit record
+        if (stageEnteredAt) {
+          await client.query(
+            `INSERT INTO ${schemaName}.deal_stage_history
+             (deal_id, from_stage_id, to_stage_id, changed_by, is_backward_move,
+              is_director_override, override_reason, duration_in_previous_stage)
+             VALUES ($1, $2, $3, $4, $5, false, $6, (NOW() - $7::timestamptz))`,
+            [
+              dealId,
+              currentStageId,
+              targetStageId,
+              changedByUserId,
+              isBackwardMove,
+              "Procore reverse sync",
+              stageEnteredAt,
+            ]
+          );
+        } else {
+          await client.query(
+            `INSERT INTO ${schemaName}.deal_stage_history
+             (deal_id, from_stage_id, to_stage_id, changed_by, is_backward_move,
+              is_director_override, override_reason)
+             VALUES ($1, $2, $3, $4, $5, false, $6)`,
+            [
+              dealId,
+              currentStageId,
+              targetStageId,
+              changedByUserId,
+              isBackwardMove,
+              "Procore reverse sync",
+            ]
+          );
+        }
+      }
+
+      // Update deal stage and stage_entered_at
+      await client.query(
+        `UPDATE ${schemaName}.deals
+         SET stage_id = $1,
+             stage_entered_at = NOW(),
+             procore_last_synced_at = NOW(),
+             updated_at = NOW()
+         WHERE id = $2`,
+        [targetStageId, dealId]
+      );
+
+      // Emit domain event via job_queue (outbox pattern)
+      await client.query(
+        `INSERT INTO public.job_queue (job_type, payload, office_id, status, run_after)
+         VALUES ('domain_event', $1::jsonb, $2::uuid, 'pending', NOW())`,
+        [
+          JSON.stringify({
+            eventName: "deal.stage.changed",
+            dealId,
+            fromStageId: currentStageId,
+            toStageId: targetStageId,
+            isBackwardMove,
+            changedBy: "procore_sync",
+            officeId,
+          }),
+          officeId,
+        ]
+      );
+
+      console.log(
+        `[Procore:sync] Reverse stage sync: deal ${dealId} moved from ` +
+          `"${currentStageId}" to "${mapped.stageName}" (${targetStageId}) via Procore project ${procoreProjectId}`
+      );
+    } else if (!mapped) {
+      console.log(
+        `[Procore:sync] No reverse mapping for Procore stage "${procoreStage}" — ` +
+          `skipping stage update for deal ${dealId}`
+      );
+    }
+    // If mapped.stageId === currentStageId, stages already match — no action needed
+  }
+
+  // Always update procore_last_synced_at and sync state (even if no stage change)
   await client.query(
     `UPDATE ${schemaName}.deals
      SET procore_last_synced_at = NOW(), updated_at = NOW() WHERE id = $1`,
