@@ -38,6 +38,7 @@ import { CrossOfficeReportsPage } from "@/pages/admin/cross-office-reports-page"
 import { UserGuidePage } from "@/pages/admin/help/user-guide-page";
 import { AdminGuidePage } from "@/pages/admin/help/admin-guide-page";
 import { CompanyCamPage } from "@/pages/admin/companycam-page";
+import { PhotoCapturePage } from "@/pages/photos/photo-capture-page";
 
 function HomePage() {
   const { user } = useAuth();
@@ -65,6 +66,7 @@ export function App() {
     <AuthProvider>
       <AuthGate>
         <Routes>
+          <Route path="/photos/capture" element={<PhotoCapturePage />} />
           <Route element={<AppShell />}>
             <Route path="/" element={<HomePage />} />
             <Route path="/deals" element={<DealListPage />} />
