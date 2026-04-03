@@ -31,8 +31,12 @@ export interface ContactFilters {
   search?: string;
   category?: string;
   companyName?: string;
+  companyId?: string;
+  jobTitle?: string;
   city?: string;
   state?: string;
+  regionId?: string;
+  dealStageId?: string;
   isActive?: boolean;
   hasOutreach?: boolean;
   sortBy?: string;
@@ -62,8 +66,12 @@ export function useContacts(filters: ContactFilters = {}) {
       if (filters.search) params.set("search", filters.search);
       if (filters.category) params.set("category", filters.category);
       if (filters.companyName) params.set("companyName", filters.companyName);
+      if (filters.companyId) params.set("companyId", filters.companyId);
+      if (filters.jobTitle) params.set("jobTitle", filters.jobTitle);
       if (filters.city) params.set("city", filters.city);
       if (filters.state) params.set("state", filters.state);
+      if (filters.regionId) params.set("regionId", filters.regionId);
+      if (filters.dealStageId) params.set("dealStageId", filters.dealStageId);
       if (filters.isActive === false) params.set("isActive", "false");
       if (filters.hasOutreach === true) params.set("hasOutreach", "true");
       if (filters.hasOutreach === false) params.set("hasOutreach", "false");
@@ -87,8 +95,12 @@ export function useContacts(filters: ContactFilters = {}) {
     filters.search,
     filters.category,
     filters.companyName,
+    filters.companyId,
+    filters.jobTitle,
     filters.city,
     filters.state,
+    filters.regionId,
+    filters.dealStageId,
     filters.isActive,
     filters.hasOutreach,
     filters.sortBy,

@@ -2,6 +2,7 @@ import { Router, type Request, type Response } from "express";
 import { authMiddleware } from "../../middleware/auth.js";
 import { requireAdmin, requireDirector } from "../../middleware/rbac.js";
 import { tenantMiddleware } from "../../middleware/tenant.js";
+import { pool } from "../../db.js";
 import {
   listOffices, getOfficeById, createOffice, updateOffice,
 } from "./offices-service.js";
@@ -200,6 +201,191 @@ router.get(
       return res.json({ tables });
     } catch (err) {
       return res.status(500).json({ error: String(err) });
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Cross-office reports (director + admin)
+// ---------------------------------------------------------------------------
+
+/**
+ * Get all office slugs the requesting user has access to.
+ * Admins see all active offices. Directors see their primary office
+ * plus any offices in user_office_access.
+ */
+async function getAccessibleOfficeSlugs(userId: string, userRole: string, primaryOfficeId: string): Promise<Array<{ id: string; name: string; slug: string }>> {
+  if (userRole === "admin") {
+    const result = await pool.query<{ id: string; name: string; slug: string }>(
+      "SELECT id, name, slug FROM public.offices WHERE is_active = true ORDER BY name"
+    );
+    return result.rows;
+  }
+
+  // Director: primary office + any extra offices via user_office_access
+  const result = await pool.query<{ id: string; name: string; slug: string }>(
+    `SELECT DISTINCT o.id, o.name, o.slug
+     FROM public.offices o
+     WHERE o.is_active = true
+       AND (
+         o.id = $1
+         OR o.id IN (
+           SELECT office_id FROM public.user_office_access WHERE user_id = $2
+         )
+       )
+     ORDER BY o.name`,
+    [primaryOfficeId, userId]
+  );
+  return result.rows;
+}
+
+// GET /api/admin/reports/cross-office-pipeline
+router.get(
+  "/admin/reports/cross-office-pipeline",
+  requireDirector,
+  async (req: Request, res: Response) => {
+    const client = await pool.connect();
+    try {
+      const user = req.user!;
+      const offices = await getAccessibleOfficeSlugs(user.id, user.role, user.activeOfficeId ?? user.officeId);
+
+      const results: Array<{
+        officeId: string;
+        officeName: string;
+        officeSlug: string;
+        totalDeals: number;
+        activeDeals: number;
+        totalPipelineValue: number;
+        totalAwardedValue: number;
+      }> = [];
+
+      for (const office of offices) {
+        const schemaName = `office_${office.slug}`;
+        try {
+          await client.query("SELECT set_config('search_path', $1, true)", [schemaName]);
+          const row = await client.query<{
+            total_deals: string;
+            active_deals: string;
+            total_pipeline_value: string;
+            total_awarded_value: string;
+          }>(
+            `SELECT
+               COUNT(*) AS total_deals,
+               COUNT(*) FILTER (WHERE is_active = true) AS active_deals,
+               COALESCE(SUM(CASE WHEN is_active = true THEN COALESCE(bid_estimate, dd_estimate, 0) ELSE 0 END), 0) AS total_pipeline_value,
+               COALESCE(SUM(COALESCE(awarded_amount, 0)), 0) AS total_awarded_value
+             FROM deals`
+          );
+          const r = row.rows[0];
+          results.push({
+            officeId: office.id,
+            officeName: office.name,
+            officeSlug: office.slug,
+            totalDeals: parseInt(r.total_deals, 10),
+            activeDeals: parseInt(r.active_deals, 10),
+            totalPipelineValue: parseFloat(r.total_pipeline_value),
+            totalAwardedValue: parseFloat(r.total_awarded_value),
+          });
+        } catch (officeErr) {
+          console.error(`[CrossOffice] Pipeline query failed for ${office.slug}:`, officeErr);
+          results.push({
+            officeId: office.id,
+            officeName: office.name,
+            officeSlug: office.slug,
+            totalDeals: 0,
+            activeDeals: 0,
+            totalPipelineValue: 0,
+            totalAwardedValue: 0,
+          });
+        } finally {
+          // CRITICAL: Reset search_path to public after each office query
+          await client.query("SELECT set_config('search_path', 'public', true)");
+        }
+      }
+
+      return res.json({ offices: results });
+    } catch (err) {
+      return res.status(500).json({ error: String(err) });
+    } finally {
+      client.release();
+    }
+  }
+);
+
+// GET /api/admin/reports/cross-office-activity
+router.get(
+  "/admin/reports/cross-office-activity",
+  requireDirector,
+  async (req: Request, res: Response) => {
+    const client = await pool.connect();
+    try {
+      const user = req.user!;
+      const offices = await getAccessibleOfficeSlugs(user.id, user.role, user.activeOfficeId ?? user.officeId);
+
+      const results: Array<{
+        officeId: string;
+        officeName: string;
+        officeSlug: string;
+        totalActivities: number;
+        activitiesLast30Days: number;
+        callCount: number;
+        emailCount: number;
+        meetingCount: number;
+      }> = [];
+
+      for (const office of offices) {
+        const schemaName = `office_${office.slug}`;
+        try {
+          await client.query("SELECT set_config('search_path', $1, true)", [schemaName]);
+          const row = await client.query<{
+            total_activities: string;
+            activities_last_30: string;
+            call_count: string;
+            email_count: string;
+            meeting_count: string;
+          }>(
+            `SELECT
+               COUNT(*) AS total_activities,
+               COUNT(*) FILTER (WHERE occurred_at >= NOW() - INTERVAL '30 days') AS activities_last_30,
+               COUNT(*) FILTER (WHERE type = 'call') AS call_count,
+               COUNT(*) FILTER (WHERE type = 'email') AS email_count,
+               COUNT(*) FILTER (WHERE type = 'meeting') AS meeting_count
+             FROM activities`
+          );
+          const r = row.rows[0];
+          results.push({
+            officeId: office.id,
+            officeName: office.name,
+            officeSlug: office.slug,
+            totalActivities: parseInt(r.total_activities, 10),
+            activitiesLast30Days: parseInt(r.activities_last_30, 10),
+            callCount: parseInt(r.call_count, 10),
+            emailCount: parseInt(r.email_count, 10),
+            meetingCount: parseInt(r.meeting_count, 10),
+          });
+        } catch (officeErr) {
+          console.error(`[CrossOffice] Activity query failed for ${office.slug}:`, officeErr);
+          results.push({
+            officeId: office.id,
+            officeName: office.name,
+            officeSlug: office.slug,
+            totalActivities: 0,
+            activitiesLast30Days: 0,
+            callCount: 0,
+            emailCount: 0,
+            meetingCount: 0,
+          });
+        } finally {
+          // CRITICAL: Reset search_path to public after each office query
+          await client.query("SELECT set_config('search_path', 'public', true)");
+        }
+      }
+
+      return res.json({ offices: results });
+    } catch (err) {
+      return res.status(500).json({ error: String(err) });
+    } finally {
+      client.release();
     }
   }
 );

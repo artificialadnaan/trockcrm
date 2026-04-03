@@ -25,6 +25,7 @@ export const users = pgTable("users", {
     .notNull(),
   isActive: boolean("is_active").default(true).notNull(),
   notificationPrefs: jsonb("notification_prefs").default({}).notNull(),
+  reportsTo: uuid("reports_to"),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 });

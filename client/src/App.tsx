@@ -34,6 +34,7 @@ import { OfficesPage } from "@/pages/admin/offices-page";
 import { UsersPage } from "@/pages/admin/users-page";
 import { PipelineConfigPage } from "@/pages/admin/pipeline-config-page";
 import { AuditLogPage } from "@/pages/admin/audit-log-page";
+import { CrossOfficeReportsPage } from "@/pages/admin/cross-office-reports-page";
 import { UserGuidePage } from "@/pages/admin/help/user-guide-page";
 import { AdminGuidePage } from "@/pages/admin/help/admin-guide-page";
 
@@ -90,6 +91,7 @@ export function App() {
             <Route path="/admin/users" element={<UsersPage />} />
             <Route path="/admin/pipeline" element={<PipelineConfigPage />} />
             <Route path="/admin/audit" element={<AuditLogPage />} />
+            <Route path="/admin/cross-office-reports" element={<CrossOfficeReportsPage />} />
             <Route path="/admin/merge-queue" element={<MergeQueuePage />} />
             <Route path="/admin/procore" element={<ProcoreSyncPage />} />
             <Route path="/admin/migration" element={<MigrationDashboardPage />} />

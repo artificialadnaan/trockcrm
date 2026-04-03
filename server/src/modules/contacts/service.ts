@@ -1,6 +1,6 @@
-import { eq, and, desc, asc, ilike, sql, or, not, isNull } from "drizzle-orm";
+import { eq, and, desc, asc, ilike, sql, or, not, isNull, inArray } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
-import { contacts } from "@trock-crm/shared/schema";
+import { contacts, contactDealAssociations, deals } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
 
@@ -10,8 +10,12 @@ export interface ContactFilters {
   search?: string;
   category?: string;
   companyName?: string;
+  companyId?: string;
+  jobTitle?: string;
   city?: string;
   state?: string;
+  regionId?: string;
+  dealStageId?: string;
   isActive?: boolean;
   hasOutreach?: boolean; // filter by first_outreach_completed
   sortBy?: "name" | "company_name" | "created_at" | "updated_at" | "last_contacted_at" | "touchpoint_count";
@@ -218,9 +222,24 @@ export async function getContacts(tenantDb: TenantDb, filters: ContactFilters) {
     conditions.push(eq(contacts.category, filters.category as any));
   }
 
-  // Company filter
+  // Company filter (name ILIKE)
   if (filters.companyName) {
     conditions.push(ilike(contacts.companyName, `%${filters.companyName}%`));
+  }
+
+  // Company filter (by company ID via companyId on deals joined through associations)
+  if (filters.companyId) {
+    const contactIdsWithCompany = tenantDb
+      .select({ contactId: contactDealAssociations.contactId })
+      .from(contactDealAssociations)
+      .innerJoin(deals, eq(contactDealAssociations.dealId, deals.id))
+      .where(eq(deals.companyId, filters.companyId));
+    conditions.push(inArray(contacts.id, contactIdsWithCompany));
+  }
+
+  // Job title filter
+  if (filters.jobTitle) {
+    conditions.push(ilike(contacts.jobTitle, `%${filters.jobTitle}%`));
   }
 
   // City filter
@@ -231,6 +250,26 @@ export async function getContacts(tenantDb: TenantDb, filters: ContactFilters) {
   // State filter
   if (filters.state) {
     conditions.push(eq(contacts.state, filters.state));
+  }
+
+  // Region filter — join through associations → deals
+  if (filters.regionId) {
+    const contactIdsInRegion = tenantDb
+      .select({ contactId: contactDealAssociations.contactId })
+      .from(contactDealAssociations)
+      .innerJoin(deals, eq(contactDealAssociations.dealId, deals.id))
+      .where(eq(deals.regionId, filters.regionId));
+    conditions.push(inArray(contacts.id, contactIdsInRegion));
+  }
+
+  // Deal stage filter — join through associations → deals
+  if (filters.dealStageId) {
+    const contactIdsInStage = tenantDb
+      .select({ contactId: contactDealAssociations.contactId })
+      .from(contactDealAssociations)
+      .innerJoin(deals, eq(contactDealAssociations.dealId, deals.id))
+      .where(eq(deals.stageId, filters.dealStageId));
+    conditions.push(inArray(contacts.id, contactIdsInStage));
   }
 
   // Outreach filter

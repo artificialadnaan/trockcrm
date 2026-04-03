@@ -46,8 +46,12 @@ router.get("/", async (req, res, next) => {
       search: req.query.search as string | undefined,
       category: req.query.category as string | undefined,
       companyName: req.query.companyName as string | undefined,
+      companyId: req.query.companyId as string | undefined,
+      jobTitle: req.query.jobTitle as string | undefined,
       city: req.query.city as string | undefined,
       state: req.query.state as string | undefined,
+      regionId: req.query.regionId as string | undefined,
+      dealStageId: req.query.dealStageId as string | undefined,
       isActive: req.query.isActive === "false" ? false : true,
       hasOutreach: req.query.hasOutreach === "true"
         ? true
