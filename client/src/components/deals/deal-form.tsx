@@ -153,7 +153,9 @@ export function DealForm({ deal, onSuccess }: DealFormProps) {
                 onValueChange={(val) => handleChange("stageId", val ?? "")}
               >
                 <SelectTrigger>
-                  <SelectValue placeholder="Select stage" />
+                  <SelectValue placeholder="Select stage">
+                    {activeStages.find((s) => s.id === formData.stageId)?.name ?? "Select stage"}
+                  </SelectValue>
                 </SelectTrigger>
                 <SelectContent>
                   {activeStages.map((s) => (
