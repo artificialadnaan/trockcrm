@@ -85,6 +85,7 @@ describe("Task Service", () => {
         "completed",
         "dismissed",
       ];
+      ];
 
       expect(TASK_STATUSES).toEqual(expectedStatuses);
       expect(taskStatusEnum.enumValues).toEqual(expectedStatuses);
