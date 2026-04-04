@@ -181,20 +181,24 @@ Allowed transitions:
 
 - `scheduled` -> `pending`
 - `scheduled` -> `dismissed`
+- `pending` -> `scheduled`
 - `pending` -> `in_progress`
 - `pending` -> `waiting_on`
 - `pending` -> `blocked`
 - `pending` -> `completed`
 - `pending` -> `dismissed`
+- `in_progress` -> `scheduled`
 - `in_progress` -> `waiting_on`
 - `in_progress` -> `blocked`
 - `in_progress` -> `completed`
 - `in_progress` -> `dismissed`
+- `waiting_on` -> `scheduled`
 - `waiting_on` -> `pending`
 - `waiting_on` -> `in_progress`
 - `waiting_on` -> `blocked`
 - `waiting_on` -> `completed`
 - `waiting_on` -> `dismissed`
+- `blocked` -> `scheduled`
 - `blocked` -> `pending`
 - `blocked` -> `in_progress`
 - `blocked` -> `waiting_on`
@@ -204,6 +208,11 @@ Allowed transitions:
 Automatic transitions:
 
 - `scheduled` -> `pending` when `scheduled_for <= now` in office-local time and the activation worker promotes it
+
+Scheduling payload rule:
+
+- any transition into `scheduled` requires a non-null `scheduled_for`
+- entering `scheduled` clears `due_date`, `due_time`, and `remind_at` unless the implementation explicitly derives them from `scheduled_for` in one deterministic step
 
 Disallowed behavior:
 
@@ -887,13 +896,17 @@ Remediation queue contract:
 - `merged_into_survivor` updates the survivor row deterministically before dismissing the duplicate:
   `priority` keeps the higher-urgency value; scheduling values are treated as a single logical payload and must be taken entirely from one source row, with the survivor row winning by default and the duplicate row winning only when the survivor has no schedule payload at all; `description` differences are preserved only in audit/history and never written back to the survivor row; and `waiting_on`/`blocked_by` may be copied only when both rows share the same status family and survivor lacks a value
 - `merged_into_survivor` does not move external linked records, notifications, or comments in the initial rollout
-- queued reminders and task-generated notification emails tied to the dismissed duplicate must be canceled or ignored by terminal-state checks before the remediation row can be marked resolved
+- send-time guard is mandatory: reminder and task-email delivery paths must re-check the task row by `task_id` and suppress sends for terminal tasks
+- queue cancellation is best-effort optimization: queued reminders and task-generated notification emails tied to the dismissed duplicate should also be canceled when possible
 
 Remediation audit event contract:
 
 - every remediation action writes a task-audit event with `schema_version`, `survivor_task_id`, `duplicate_task_id`, `resolution_action`, `preserved_field_names`, `preserved_field_snapshots`, `machine_reason`, `reviewer_note`, `actor`, and `timestamp`
 - `preserved_field_snapshots` stores normalized before/after pairs keyed by field name
-- `machine_reason` is a stable code plus optional detail text; the code must come from a controlled taxonomy and the detail text is optional
+- `machine_reason` is a typed object with `{ code, detail }`
+- `code` must come from a controlled taxonomy owned by the task migration/remediation module
+- initial required codes are: `exact_duplicate_backfill`, `schedule_payload_missing_on_survivor`, `dependency_payload_missing_on_survivor`, `manual_review_required`, `terminalized_as_duplicate`
+- `detail` is optional free text for additional operator or system context
 - timestamps in remediation audit events are stored in UTC
 - `schema_version` starts at `1` and must be bumped whenever the remediation audit event shape changes
 - automatic resolutions set `actor = system`, require a non-null `machine_reason`, and may leave `reviewer_note = null`
