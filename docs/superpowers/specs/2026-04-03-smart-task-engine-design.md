@@ -852,14 +852,13 @@ Collision remediation path:
 
 Auto-remediation criteria:
 
-- auto-dismiss is allowed only when duplicate and survivor match on all user-owned task fields: `title`, `description`, `assigned_to`, `due_date`, `due_time`, `remind_at`, plus matching `waiting_on`/`blocked_by` payloads when present
+- auto-dismiss is allowed only when duplicate and survivor match on all identity-bearing and user-owned task fields: `title`, `description`, `type`, `assigned_to`, `deal_id`, `contact_id`, `email_id`, `due_date`, `due_time`, `remind_at`, plus matching `waiting_on`/`blocked_by` payloads when present
 - auto-dismiss is allowed only when the duplicate has no extra non-terminal workflow state beyond what already exists on the survivor
 - auto-dismiss is not allowed when any user-owned field differs, when dependency payloads differ, or when the duplicate contains distinct status context that would be lost by terminalizing it
 
 Migration review artifact:
 
 - create a tenant-scoped `task_migration_review` table and an admin remediation queue backed by it
-- minimum row shape: `id`, `office_id`, `survivor_task_id`, `duplicate_task_id`, `origin_rule`, `dedupe_key`, `reason_code`, `review_status`, `resolution_action`, `created_at`, `resolved_at`, `resolved_by`
 - minimum row shape: `id`, `office_id`, `survivor_task_id`, `duplicate_task_id`, `origin_rule`, `dedupe_key`, `reason_code`, `review_status`, `resolution_action`, `reviewer_note`, `created_at`, `resolved_at`, `resolved_by`
 - `review_status` values: `pending_active_resolution`, `resolved`
 - `resolution_action` values: `dismissed_duplicate`, `merged_into_survivor`, `manually_kept_terminal`
@@ -873,8 +872,13 @@ Remediation queue contract:
 - `resolved` is not advisory; it means the duplicate row is already in a non-active state and no longer blocks unique-index enforcement
 - queue resolution is office-scoped: users may only resolve rows for offices they can access, and every resolution writes the acting user, timestamp, and action to audit history
 - `manually_kept_terminal` means the operator chose to preserve the duplicate as a terminal historical row with status `dismissed` and a required reviewer note explaining why the survivor could not fully absorb it
-- `merged_into_survivor` is allowed only for task-local data preservation in the initial rollout: copy differing `description`, `due_date`, `due_time`, `remind_at`, and `waiting_on`/`blocked_by` payload snapshots into the survivor audit/history record, then terminalize the duplicate as `dismissed`
+- `merged_into_survivor` is allowed only when every differing field is in this preservable allowlist: `description`, `due_date`, `due_time`, `remind_at`, `waiting_on`, `blocked_by`
+- `merged_into_survivor` copies those differing values into the survivor remediation audit event, then terminalizes the duplicate as `dismissed`
 - `merged_into_survivor` does not move external linked records, notifications, or comments in the initial rollout
+
+Remediation audit event contract:
+
+- every remediation action writes a task-audit event with `survivor_task_id`, `duplicate_task_id`, `resolution_action`, `preserved_field_names`, `preserved_field_snapshots`, `reviewer_note`, `actor`, and `timestamp`
 
 Duplicate remediation state machine:
 
