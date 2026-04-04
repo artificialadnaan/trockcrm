@@ -151,7 +151,7 @@ Task status becomes:
 - `started_at` is set automatically when entering `in_progress` for the first time
 - when a task exits `waiting_on`, `waiting_on` must be cleared or replaced before commit
 - when a task exits `blocked`, `blocked_by` must be cleared or replaced before commit
-- prior `waiting_on` or `blocked_by` payloads must be preserved in audit or transition-history records before they are cleared
+- prior `waiting_on` or `blocked_by` payloads must be preserved in the canonical task audit log before they are cleared
 
 Office contract:
 
@@ -740,6 +740,8 @@ Required coverage areas:
 - duplicate-collision backfill remediation behavior before active unique-index enforcement
 - migration review table and admin remediation queue lifecycle behavior
 - unique-index enforcement blocked while any duplicate remains unresolved and active
+- auto-remediation positive and negative criteria for duplicate terminalization
+- office-scoped remediation queue authorization and audit logging
 - task-related production path/deep-link behavior where changed
 - API contract verification against the generated task API spec so enums, fields, and filters cannot drift silently
 
@@ -842,20 +844,26 @@ Collision remediation path:
 - if they are safe to terminalize automatically, they are dismissed with a migration reason note
 - if they are not safe to terminalize automatically, they are moved into a dedicated migration review table and surfaced in an admin remediation queue before the unique active index is enforced
 
+Auto-remediation criteria:
+
+- auto-dismiss is allowed only when the duplicate row has no unique manual edits beyond provenance/backfill fields, no unique dependency payload that differs from the survivor, and no linked workflow state that would be lost by terminalizing it
+- auto-dismiss is not allowed when the duplicate has divergent user-owned fields, distinct waiting/blocked context, or other evidence that human review is needed
+
 Migration review artifact:
 
 - create a tenant-scoped `task_migration_review` table and an admin remediation queue backed by it
 - minimum row shape: `id`, `office_id`, `survivor_task_id`, `duplicate_task_id`, `origin_rule`, `dedupe_key`, `reason_code`, `review_status`, `resolution_action`, `created_at`, `resolved_at`, `resolved_by`
 - `review_status` values: `pending_active_resolution`, `resolved`
-- `resolution_action` values: `dismissed_duplicate`, `merged_into_survivor`, `manually_kept_terminal`
-- rows in `task_migration_review` represent non-survivor duplicates that still need operator resolution before unique-index enforcement
+- `resolution_action` values: `dismissed_duplicate`, `manually_kept_terminal`
+- `task_migration_review` is both the live remediation queue and the retained audit ledger for duplicate-remediation decisions
+- queue views show only `pending_active_resolution` rows; resolved rows remain retained for audit/history
 
 Remediation queue contract:
 
 - only admin or director users may resolve queue items
-- resolving an item must mutate the duplicate task row into a non-active terminal state or merge its relevant history/linkage into the survivor before terminalizing it
-- `merged_into_survivor` preserves linkable history by transferring safe references and recording the merge action in audit history
+- resolving an item must mutate the duplicate task row into a non-active terminal state before the item can be marked resolved
 - `resolved` is not advisory; it means the duplicate row is already in a non-active state and no longer blocks unique-index enforcement
+- queue resolution is office-scoped: users may only resolve rows for offices they can access, and every resolution writes the acting user, timestamp, and action to audit history
 
 Duplicate remediation state machine:
 
@@ -863,7 +871,7 @@ Duplicate remediation state machine:
 2. if auto-safe, terminalize the duplicate row and record a resolved remediation row
 3. if not auto-safe, create a `task_migration_review` row with `review_status = pending_active_resolution` while the duplicate row remains unresolved
 4. admin queue action must choose one allowed `resolution_action`
-5. that action must mutate the duplicate row into a non-active state or merge-then-terminalize it
+5. that action must mutate the duplicate row into a non-active state
 6. only then may the remediation row move to `resolved`
 
 Enforcement gate:
