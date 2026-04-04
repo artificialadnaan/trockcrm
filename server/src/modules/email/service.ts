@@ -5,9 +5,15 @@ import type * as schema from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
 import { graphRequest } from "../../lib/graph-client.js";
 import { getValidAccessToken, isGraphAuthConfigured } from "./graph-auth.js";
+import { evaluateTaskRules } from "../tasks/rules/evaluator.js";
+import { TASK_RULES } from "../tasks/rules/config.js";
+import { createTenantTaskRulePersistence } from "../tasks/rules/persistence.js";
 import crypto from "crypto";
 
 type TenantDb = NodePgDatabase<typeof schema>;
+type Queryable = {
+  query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<{ rows: T[] }>;
+};
 
 export interface SendEmailInput {
   to: string[];
@@ -338,6 +344,9 @@ export async function getUserEmails(tenantDb: TenantDb, userId: string, filters:
  */
 export async function autoAssociateEmailToDeal(
   tenantDb: TenantDb,
+  tenantClient: Queryable,
+  officeId: string,
+  officeSlug: string,
   emailId: string,
   contactId: string,
   userId: string
@@ -368,19 +377,35 @@ export async function autoAssociateEmailToDeal(
   }
 
   if (activeDeals.length > 1) {
-    // Multiple active deals — create a task for the rep to manually associate
-    const dealNames = activeDeals.map((d) => `${d.dealNumber} ${d.dealName}`).join(", ");
-    await tenantDb.insert(tasks).values({
-      title: "Associate email to correct deal",
-      description: `An inbound email was received for a contact with multiple active deals: ${dealNames}. Please review and associate the email to the correct deal.`,
-      type: "inbound_email",
-      priority: "normal",
-      status: "pending",
-      assignedTo: userId,
-      contactId,
-      emailId,
-      dueDate: new Date().toISOString().split("T")[0],
-    });
+    const [emailRow] = await tenantDb
+      .select({ subject: emails.subject })
+      .from(emails)
+      .where(eq(emails.id, emailId))
+      .limit(1);
+
+    const [contactRow] = await tenantDb
+      .select({ firstName: contacts.firstName, lastName: contacts.lastName })
+      .from(contacts)
+      .where(eq(contacts.id, contactId))
+      .limit(1);
+
+    await evaluateTaskRules(
+      {
+        now: new Date(),
+        officeId,
+        entityId: `email:${emailId}`,
+        sourceEvent: "email.received",
+        contactId,
+        emailId,
+        taskAssigneeId: userId,
+        contactName: `${contactRow?.firstName ?? ""} ${contactRow?.lastName ?? ""}`.trim() || "contact",
+        emailSubject: emailRow?.subject ?? "(No Subject)",
+        activeDealCount: activeDeals.length,
+        activeDealNames: activeDeals.map((d) => `${d.dealNumber} ${d.dealName}`.trim()),
+      },
+      createTenantTaskRulePersistence(tenantClient, `office_${officeSlug}`),
+      TASK_RULES
+    );
     return null;
   }
 

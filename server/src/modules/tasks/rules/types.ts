@@ -39,6 +39,11 @@ export interface TaskRuleContext extends AssignmentContext {
   dealId?: string | null;
   contactId?: string | null;
   emailId?: string | null;
+  taskAssigneeId?: string | null;
+  contactName?: string | null;
+  emailSubject?: string | null;
+  activeDealCount?: number | null;
+  activeDealNames?: string[] | null;
   stage?: string | null;
   dueAt?: Date | string | null;
   dealValue?: number | null;
@@ -54,7 +59,7 @@ export interface SystemTaskDraft {
   assignedTo: string | null;
   officeId: string;
   originRule: string;
-  sourceRule?: string;
+  sourceRule?: string | null;
   sourceEvent: string;
   dedupeKey: string;
   reasonCode: string;
@@ -63,7 +68,10 @@ export interface SystemTaskDraft {
   status?: "pending" | "scheduled" | "in_progress" | "waiting_on" | "blocked";
   dueAt?: Date | string | null;
   entitySnapshot?: Record<string, unknown> | null;
-  metadata?: Record<string, unknown>;
+  metadata?: Record<string, unknown> | null;
+  dealId?: string | null;
+  contactId?: string | null;
+  emailId?: string | null;
 }
 
 export interface TaskBusinessKey {

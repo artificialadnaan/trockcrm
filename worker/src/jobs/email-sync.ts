@@ -2,6 +2,9 @@ import { pool } from "../db.js";
 import crypto from "crypto";
 
 const GRAPH_BASE_URL = "https://graph.microsoft.com/v1.0";
+const SERVER_EVALUATOR_MODULE = "../../../server/src/modules/tasks/rules/evaluator.js" as string;
+const SERVER_TASK_RULES_MODULE = "../../../server/src/modules/tasks/rules/config.js" as string;
+const SERVER_TASK_PERSISTENCE_MODULE = "../../../server/src/modules/tasks/rules/persistence.js" as string;
 
 // ---------- Inline encryption (worker can't import from server package) ----------
 const ALGORITHM = "aes-256-gcm";
@@ -377,7 +380,7 @@ async function syncUserEmails(poolClient: any, tokenRow: any): Promise<void> {
  * Process a single inbound message from Graph delta.
  * Returns true if the email was stored (matched a contact), false if skipped.
  */
-async function processInboundMessage(
+export async function processInboundMessage(
   client: any,
   schemaName: string,
   userId: string,
@@ -456,12 +459,11 @@ async function processInboundMessage(
   const emailId = insertResult.rows[0].id;
 
   // Auto-associate to deal (determine dealId BEFORE creating activity/task)
-  const associatedDealId = await autoAssociateRaw(
+  const association = await autoAssociateRaw(
     client,
     schemaName,
     emailId,
-    contactMatch.id,
-    userId
+    contactMatch.id
   );
 
   // Create activity record AFTER deal association so deal_id is included in the INSERT
@@ -472,7 +474,7 @@ async function processInboundMessage(
      VALUES ('email', $1, $2, $3, $4, $5, $6, $7)`,
     [
       userId,
-      associatedDealId, // may be null if 0 or multiple deals
+      association.dealId, // may be null if 0 or multiple deals
       contactMatch.id,
       emailId,
       subject,
@@ -481,23 +483,24 @@ async function processInboundMessage(
     ]
   );
 
-  // Create follow-up task only if we have a clear deal association (or zero deals).
-  // If associatedDealId is null due to MULTIPLE active deals, autoAssociateRaw
-  // already created a disambiguation task — don't create a duplicate.
-  const contactName =
-    `${contactMatch.first_name} ${contactMatch.last_name}`.trim();
-  if (associatedDealId != null) {
-    await client.query(
-      `INSERT INTO ${schemaName}.tasks
-       (title, type, priority, status, assigned_to, deal_id, contact_id, email_id, due_date)
-       VALUES ($1, 'inbound_email', 'high', 'pending', $2, $3, $4, $5, CURRENT_DATE)`,
-      [
-        `Reply to ${contactName}: ${subject}`,
-        userId, // assigned to the rep whose mailbox received the email
-        associatedDealId,
-        contactMatch.id,
+  if (association.activeDealCount > 0) {
+    await evaluateInboundEmailTasks(
+      client,
+      schemaName,
+      {
+        now: new Date(),
+        officeId,
+        entityId: `email:${emailId}`,
+        sourceEvent: "email.received",
+        dealId: association.dealId,
+        contactId: contactMatch.id,
         emailId,
-      ]
+        taskAssigneeId: userId,
+        contactName: `${contactMatch.first_name} ${contactMatch.last_name}`.trim(),
+        emailSubject: subject,
+        activeDealCount: association.activeDealCount,
+        activeDealNames: association.activeDealNames,
+      }
     );
   }
 
@@ -556,9 +559,8 @@ async function autoAssociateRaw(
   client: any,
   schemaName: string,
   emailId: string,
-  contactId: string,
-  userId: string
-): Promise<string | null> {
+  contactId: string
+): Promise<{ dealId: string | null; activeDealCount: number; activeDealNames: string[] }> {
   const activeDeals = await client.query(
     `SELECT d.id AS deal_id, d.deal_number, d.name AS deal_name
      FROM ${schemaName}.deals d
@@ -566,6 +568,7 @@ async function autoAssociateRaw(
      WHERE cda.contact_id = $1 AND d.is_active = true`,
     [contactId]
   );
+  const activeDealNames = activeDeals.rows.map((d: any) => `${d.deal_number} ${d.deal_name}`);
 
   if (activeDeals.rows.length === 1) {
     // Auto-associate to the single active deal
@@ -576,26 +579,36 @@ async function autoAssociateRaw(
     );
     // Activity record is now created AFTER auto-association with deal_id included,
     // so no separate UPDATE is needed here.
-    return dealId;
-  } else if (activeDeals.rows.length > 1) {
-    // Multiple active deals — create disambiguation task for rep
-    const dealNames = activeDeals.rows
-      .map((d: any) => `${d.deal_number} ${d.deal_name}`)
-      .join(", ");
-    await client.query(
-      `INSERT INTO ${schemaName}.tasks
-       (title, description, type, priority, status, assigned_to, contact_id, email_id, due_date)
-       VALUES ($1, $2, 'inbound_email', 'normal', 'pending', $3, $4, $5, CURRENT_DATE)`,
-      [
-        "Associate email to correct deal",
-        `An inbound email was received for a contact with multiple active deals: ${dealNames}. Review and associate to the correct deal.`,
-        userId,
-        contactId,
-        emailId,
-      ]
-    );
-    return null; // No auto-association — rep must choose
+    return { dealId, activeDealCount: activeDeals.rows.length, activeDealNames };
   }
   // 0 active deals: contact-only association, no deal
-  return null;
+  return { dealId: null, activeDealCount: activeDeals.rows.length, activeDealNames };
+}
+
+async function evaluateInboundEmailTasks(
+  client: any,
+  schemaName: string,
+  context: {
+    now: Date;
+    officeId: string;
+    entityId: string;
+    sourceEvent: "email.received";
+    dealId: string | null;
+    contactId: string;
+    emailId: string;
+    taskAssigneeId: string;
+    contactName: string;
+    emailSubject: string;
+    activeDealCount: number;
+    activeDealNames: string[];
+  }
+): Promise<void> {
+  const [{ evaluateTaskRules }, { TASK_RULES }, { createTenantTaskRulePersistence }] = await Promise.all([
+    import(SERVER_EVALUATOR_MODULE),
+    import(SERVER_TASK_RULES_MODULE),
+    import(SERVER_TASK_PERSISTENCE_MODULE),
+  ]);
+
+  const taskPersistence = createTenantTaskRulePersistence(client, schemaName);
+  await evaluateTaskRules(context, taskPersistence, TASK_RULES);
 }

@@ -20,11 +20,11 @@ function mapTaskRow(row: Record<string, any>): TaskRecord {
     type: row.type,
     assignedTo: row.assigned_to,
     officeId: row.office_id ?? null,
-    originRule: row.origin_rule ?? null,
-    sourceRule: row.source_rule ?? null,
-    sourceEvent: row.source_event ?? null,
-    dedupeKey: row.dedupe_key ?? null,
-    reasonCode: row.reason_code ?? null,
+    originRule: row.origin_rule ?? "",
+    sourceRule: row.source_rule ?? undefined,
+    sourceEvent: row.source_event ?? "",
+    dedupeKey: row.dedupe_key ?? "",
+    reasonCode: row.reason_code ?? "",
     priority: row.priority,
     priorityScore: row.priority_score ?? 0,
     status: row.status,
@@ -79,11 +79,15 @@ function taskDraftColumns(draft: SystemTaskDraft) {
     dedupeKey: draft.dedupeKey,
     reasonCode: draft.reasonCode,
     entitySnapshot: draft.entitySnapshot ?? null,
+    dealId: draft.dealId ?? null,
+    contactId: draft.contactId ?? null,
+    emailId: draft.emailId ?? null,
     dueDate: toNullableDate(draft.dueAt),
     dueTime: null,
     remindAt: null,
   };
 }
+
 
 export function createTenantTaskRulePersistence(
   client: Queryable,
@@ -159,8 +163,9 @@ export function createTenantTaskRulePersistence(
       const result = await client.query(
         `INSERT INTO ${schemaName}.tasks
            (title, description, type, priority, status, assigned_to, office_id, origin_rule,
-            source_rule, source_event, dedupe_key, reason_code, entity_snapshot, due_date, due_time, remind_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+            source_rule, source_event, dedupe_key, reason_code, entity_snapshot, deal_id, contact_id,
+            email_id, due_date, due_time, remind_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
          RETURNING
            id,
            title,
@@ -205,6 +210,9 @@ export function createTenantTaskRulePersistence(
           columns.dedupeKey,
           columns.reasonCode,
           columns.entitySnapshot,
+          columns.dealId,
+          columns.contactId,
+          columns.emailId,
           columns.dueDate,
           columns.dueTime,
           columns.remindAt,
@@ -231,9 +239,12 @@ export function createTenantTaskRulePersistence(
              dedupe_key = $12,
              reason_code = $13,
              entity_snapshot = $14,
-             due_date = $15,
-             due_time = $16,
-             remind_at = $17,
+             deal_id = $15,
+             contact_id = $16,
+             email_id = $17,
+             due_date = $18,
+             due_time = $19,
+             remind_at = $20,
              updated_at = NOW()
          WHERE id = $1
          RETURNING
@@ -281,6 +292,9 @@ export function createTenantTaskRulePersistence(
           columns.dedupeKey,
           columns.reasonCode,
           columns.entitySnapshot,
+          columns.dealId,
+          columns.contactId,
+          columns.emailId,
           columns.dueDate,
           columns.dueTime,
           columns.remindAt,
@@ -288,6 +302,63 @@ export function createTenantTaskRulePersistence(
       );
 
       return mapTaskRow(result.rows[0]);
+    },
+  };
+}
+
+export function createDrizzleTaskRulePersistence(tenantDb: TenantDb): TaskRulePersistence {
+  return {
+    async findOpenTaskByBusinessKey({ originRule, dedupeKey }: TaskBusinessKey) {
+      const result = await tenantDb
+        .select()
+        .from(tasks)
+        .where(
+          and(
+            eq(tasks.originRule, originRule),
+            eq(tasks.dedupeKey, dedupeKey),
+            inArray(tasks.status, [...ACTIVE_TASK_STATUSES])
+          )
+        )
+        .orderBy(desc(tasks.updatedAt))
+        .limit(1);
+
+      return result[0] ? mapDrizzleTaskRow(result[0]) : null;
+    },
+
+    async findResolutionStateByBusinessKey({ originRule, dedupeKey }: TaskBusinessKey) {
+      const result = await tenantDb
+        .select({
+          originRule: taskResolutionState.originRule,
+          dedupeKey: taskResolutionState.dedupeKey,
+          resolutionStatus: taskResolutionState.resolutionStatus,
+          resolvedAt: taskResolutionState.resolvedAt,
+          suppressedUntil: taskResolutionState.suppressedUntil,
+        })
+        .from(taskResolutionState)
+        .where(
+          and(
+            eq(taskResolutionState.originRule, originRule),
+            eq(taskResolutionState.dedupeKey, dedupeKey)
+          )
+        )
+        .limit(1);
+
+      return result[0] ?? null;
+    },
+
+    async insertTask(draft: SystemTaskDraft) {
+      const result = await tenantDb.insert(tasks).values(taskDraftValues(draft) as any).returning();
+      return mapDrizzleTaskRow(result[0]);
+    },
+
+    async updateTask(taskId: string, draft: SystemTaskDraft) {
+      const result = await tenantDb
+        .update(tasks)
+        .set(taskDraftValues(draft) as any)
+        .where(eq(tasks.id, taskId))
+        .returning();
+
+      return mapDrizzleTaskRow(result[0]);
     },
   };
 }

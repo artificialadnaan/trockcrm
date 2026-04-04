@@ -335,4 +335,83 @@ describe("task rule evaluator", () => {
     expect(mapTaskPriorityBand(39)).toBe("normal");
     expect(mapTaskPriorityBand(10)).toBe("low");
   });
+
+  it("creates a reply-needed inbound email task for a clearly associated deal", async () => {
+    const store = createInMemoryStore();
+    const context = makeContext({
+      sourceEvent: "email.received",
+      entityId: "email:email-1",
+      dealId: "deal-1",
+      contactId: "contact-1",
+      emailId: "email-1",
+      taskAssigneeId: "user-mailbox",
+      contactName: "Casey Customer",
+      emailSubject: "Need an updated proposal",
+      activeDealCount: 1,
+      activeDealNames: ["D-1001 Alpha Roof"],
+      unreadInbound: 30,
+    });
+
+    const outcomes = await evaluateTaskRules(context, store.persistence, TASK_RULES);
+    const replyTask = store.getTask("inbound_email_reply_needed", "email:email-1:reply_needed");
+
+    expect(outcomes).toContainEqual({
+      ruleId: "inbound_email_reply_needed",
+      businessKey: {
+        originRule: "inbound_email_reply_needed",
+        dedupeKey: "email:email-1:reply_needed",
+      },
+      action: "created",
+      taskId: replyTask?.id,
+    });
+    expect(replyTask).toEqual(
+      expect.objectContaining({
+        title: "Reply to Casey Customer: Need an updated proposal",
+        type: "inbound_email",
+        assignedTo: "user-mailbox",
+        reasonCode: "reply_needed",
+      })
+    );
+  });
+
+  it("creates a disambiguation inbound email task when multiple active deals match", async () => {
+    const store = createInMemoryStore();
+    const context = makeContext({
+      sourceEvent: "email.received",
+      entityId: "email:email-2",
+      contactId: "contact-2",
+      emailId: "email-2",
+      taskAssigneeId: "user-mailbox",
+      contactName: "Taylor Customer",
+      emailSubject: "Question about my project",
+      activeDealCount: 2,
+      activeDealNames: ["D-1001 Alpha Roof", "D-1002 Beta Roof"],
+      unreadInbound: 20,
+      dealId: null,
+    });
+
+    const outcomes = await evaluateTaskRules(context, store.persistence, TASK_RULES);
+    const disambiguationTask = store.getTask(
+      "inbound_email_deal_disambiguation",
+      "email:email-2:deal_disambiguation"
+    );
+
+    expect(outcomes).toContainEqual({
+      ruleId: "inbound_email_deal_disambiguation",
+      businessKey: {
+        originRule: "inbound_email_deal_disambiguation",
+        dedupeKey: "email:email-2:deal_disambiguation",
+      },
+      action: "created",
+      taskId: disambiguationTask?.id,
+    });
+    expect(disambiguationTask).toEqual(
+      expect.objectContaining({
+        title: "Associate email to correct deal",
+        type: "inbound_email",
+        assignedTo: "user-mailbox",
+        reasonCode: "deal_disambiguation",
+      })
+    );
+  });
 });
