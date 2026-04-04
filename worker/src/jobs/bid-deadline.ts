@@ -1,5 +1,9 @@
 import { pool } from "../db.js";
 
+const SERVER_EVALUATOR_MODULE = "../../../server/src/modules/tasks/rules/evaluator.js" as string;
+const SERVER_TASK_RULES_MODULE = "../../../server/src/modules/tasks/rules/config.js" as string;
+const SERVER_TASK_PERSISTENCE_MODULE = "../../../server/src/modules/tasks/rules/persistence.js" as string;
+
 /**
  * Bid deadline countdown job.
  *
@@ -28,6 +32,12 @@ export async function runBidDeadlineCountdown(): Promise<void> {
         continue;
       }
       const schemaName = `office_${office.slug}`;
+      const [{ evaluateTaskRules }, { TASK_RULES }, { createTenantTaskRulePersistence }] = (await Promise.all([
+        import(SERVER_EVALUATOR_MODULE),
+        import(SERVER_TASK_RULES_MODULE),
+        import(SERVER_TASK_PERSISTENCE_MODULE),
+      ])) as any;
+      const taskPersistence = createTenantTaskRulePersistence(client, schemaName);
 
       // Acquire advisory lock per office to prevent concurrent runs from racing
       await client.query("BEGIN");
@@ -71,38 +81,23 @@ export async function runBidDeadlineCountdown(): Promise<void> {
         const today = new Date();
         today.setHours(0, 0, 0, 0);
         const daysUntil = Math.ceil((closeDate.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+        const outcomes = await evaluateTaskRules(
+          {
+            now: new Date(),
+            officeId: office.id,
+            entityId: `deal:${deal.id}`,
+            sourceEvent: "cron.bid_deadline",
+            dealId: deal.id,
+            dealName: deal.name,
+            dealOwnerId: deal.assigned_rep_id,
+            dueAt: deal.expected_close_date,
+            daysUntil,
+          },
+          taskPersistence,
+          TASK_RULES
+        );
 
-        // Define countdown thresholds
-        const thresholds: { days: number; title: string; priority: string }[] = [
-          { days: 14, title: `Prepare final bid for ${deal.name}`, priority: "normal" },
-          { days: 7, title: `Confirm bid submission for ${deal.name}`, priority: "high" },
-          { days: 1, title: `BID DUE TOMORROW: ${deal.name}`, priority: "urgent" },
-        ];
-
-        for (const threshold of thresholds) {
-          if (daysUntil !== threshold.days) continue;
-
-          // Dedup: check if task with matching title already exists
-          const existing = await client.query(
-            `SELECT id FROM ${schemaName}.tasks
-             WHERE deal_id = $1
-               AND title = $2
-               AND status IN ('pending', 'in_progress')
-             LIMIT 1`,
-            [deal.id, threshold.title]
-          );
-
-          if (existing.rows.length > 0) continue;
-
-          await client.query(
-            `INSERT INTO ${schemaName}.tasks
-             (title, type, priority, status, assigned_to, deal_id, due_date, created_by)
-             VALUES ($1, 'system', $2, 'pending', $3, $4, $5, $3)`,
-            [threshold.title, threshold.priority, deal.assigned_rep_id, deal.id, deal.expected_close_date]
-          );
-
-          totalTasksCreated++;
-        }
+        totalTasksCreated += outcomes.filter((outcome: any) => outcome.action === "created" || outcome.action === "updated").length;
       }
 
       // Release the advisory lock by committing the transaction for this office

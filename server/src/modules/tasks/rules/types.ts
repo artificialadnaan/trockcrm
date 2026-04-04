@@ -37,6 +37,7 @@ export interface TaskRuleContext extends AssignmentContext {
   officeId: string;
   sourceEvent: string;
   dealId?: string | null;
+  dealName?: string | null;
   contactId?: string | null;
   emailId?: string | null;
   taskAssigneeId?: string | null;
@@ -44,6 +45,8 @@ export interface TaskRuleContext extends AssignmentContext {
   emailSubject?: string | null;
   activeDealCount?: number | null;
   activeDealNames?: string[] | null;
+  daysUntil?: number | null;
+  noTouchDays?: number | null;
   stage?: string | null;
   dueAt?: Date | string | null;
   dealValue?: number | null;

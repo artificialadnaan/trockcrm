@@ -1,5 +1,9 @@
 import { pool } from "../db.js";
 
+const SERVER_EVALUATOR_MODULE = "../../../server/src/modules/tasks/rules/evaluator.js" as string;
+const SERVER_TASK_RULES_MODULE = "../../../server/src/modules/tasks/rules/config.js" as string;
+const SERVER_TASK_PERSISTENCE_MODULE = "../../../server/src/modules/tasks/rules/persistence.js" as string;
+
 /**
  * Cold lead warming job.
  *
@@ -28,6 +32,12 @@ export async function runColdLeadWarming(): Promise<void> {
         continue;
       }
       const schemaName = `office_${office.slug}`;
+      const [{ evaluateTaskRules }, { TASK_RULES }, { createTenantTaskRulePersistence }] = (await Promise.all([
+        import(SERVER_EVALUATOR_MODULE),
+        import(SERVER_TASK_RULES_MODULE),
+        import(SERVER_TASK_PERSISTENCE_MODULE),
+      ])) as any;
+      const taskPersistence = createTenantTaskRulePersistence(client, schemaName);
 
       const officeSettings = (office.settings ?? {}) as Record<string, unknown>;
       const rawDays = officeSettings.contactNoTouchDays;
@@ -68,28 +78,24 @@ export async function runColdLeadWarming(): Promise<void> {
       );
 
       for (const lead of coldLeads.rows) {
-        // Dedup: check if an active follow_up task already exists for this contact
-        const existingTask = await client.query(
-          `SELECT id FROM ${schemaName}.tasks
-           WHERE contact_id = $1
-             AND status IN ('pending', 'in_progress')
-             AND type = 'follow_up'
-           LIMIT 1`,
-          [lead.contact_id]
+        const outcomes = await evaluateTaskRules(
+          {
+            now: new Date(),
+            officeId: office.id,
+            entityId: `contact:${lead.contact_id}`,
+            sourceEvent: "cron.cold_lead_warming",
+            contactId: lead.contact_id,
+            contactName: `${lead.first_name} ${lead.last_name}`,
+            dealId: lead.deal_id,
+            dealOwnerId: lead.assigned_rep_id,
+            taskAssigneeId: lead.assigned_rep_id,
+            noTouchDays,
+          },
+          taskPersistence,
+          TASK_RULES
         );
 
-        if (existingTask.rows.length > 0) continue;
-
-        const title = `Re-engage ${lead.first_name} ${lead.last_name} — no contact in ${noTouchDays}+ days`;
-
-        await client.query(
-          `INSERT INTO ${schemaName}.tasks
-           (title, type, priority, status, assigned_to, contact_id, deal_id, due_date, created_by)
-           VALUES ($1, 'follow_up', 'normal', 'pending', $2, $3, $4, CURRENT_DATE, $2)`,
-          [title, lead.assigned_rep_id, lead.contact_id, lead.deal_id]
-        );
-
-        totalTasksCreated++;
+        totalTasksCreated += outcomes.filter((outcome: any) => outcome.action === "created" || outcome.action === "updated").length;
       }
 
       // Release the advisory lock by committing the transaction for this office
