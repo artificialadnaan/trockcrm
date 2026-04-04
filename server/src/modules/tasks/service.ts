@@ -56,6 +56,7 @@ export interface UpdateTaskInput {
 
 export interface TransitionTaskStatusInput {
   nextStatus: TaskStatus;
+  scheduledFor?: string | Date | null;
   waitingOn?: unknown;
   blockedBy?: unknown;
 }
@@ -66,7 +67,7 @@ const TERMINAL_STATUSES: TaskStatus[] = ["completed", "dismissed"];
 
 const ALLOWED_TRANSITIONS: Record<TaskStatus, TaskStatus[]> = {
   pending: ["scheduled", "in_progress", "waiting_on", "blocked", "completed", "dismissed"],
-  scheduled: ["pending", "dismissed"],
+  scheduled: ["pending", "in_progress", "waiting_on", "blocked", "completed", "dismissed"],
   in_progress: ["scheduled", "waiting_on", "blocked", "completed", "dismissed"],
   waiting_on: ["scheduled", "pending", "in_progress", "blocked", "completed", "dismissed"],
   blocked: ["scheduled", "pending", "in_progress", "waiting_on", "completed", "dismissed"],
@@ -130,11 +131,21 @@ export async function transitionTaskStatus(
     status: input.nextStatus,
   };
 
+  if (input.nextStatus === "scheduled") {
+    if (input.scheduledFor == null) {
+      throw new AppError(400, "scheduledFor is required when moving a task to scheduled");
+    }
+    updates.scheduledFor = input.scheduledFor instanceof Date ? input.scheduledFor : new Date(input.scheduledFor);
+    updates.waitingOn = null;
+    updates.blockedBy = null;
+  }
+
   if (input.nextStatus === "waiting_on") {
     if (input.waitingOn == null) {
       throw new AppError(400, "waitingOn is required when moving a task to waiting_on");
     }
     updates.waitingOn = input.waitingOn;
+    updates.blockedBy = null;
   }
 
   if (input.nextStatus === "blocked") {
@@ -142,6 +153,15 @@ export async function transitionTaskStatus(
       throw new AppError(400, "blockedBy is required when moving a task to blocked");
     }
     updates.blockedBy = input.blockedBy;
+    updates.waitingOn = null;
+  }
+
+  if (existing.status === "waiting_on" && input.nextStatus !== "waiting_on") {
+    updates.waitingOn = null;
+  }
+
+  if (existing.status === "blocked" && input.nextStatus !== "blocked") {
+    updates.blockedBy = null;
   }
 
   if (input.nextStatus === "in_progress" && existing.startedAt == null) {
@@ -151,10 +171,14 @@ export async function transitionTaskStatus(
   if (input.nextStatus === "completed") {
     updates.completedAt = new Date();
     updates.isOverdue = false;
+    updates.waitingOn = null;
+    updates.blockedBy = null;
   }
 
   if (input.nextStatus === "dismissed") {
     updates.isOverdue = false;
+    updates.waitingOn = null;
+    updates.blockedBy = null;
   }
 
   const result = await tenantDb
@@ -329,7 +353,7 @@ export async function getTaskCounts(
         AND (due_date > ${today} OR due_date IS NULL)
       )::int AS upcoming,
       COUNT(*) FILTER (
-        WHERE status = 'completed'
+        WHERE status IN ('completed', 'dismissed')
           AND completed_at IS NOT NULL
           AND completed_at >= (CURRENT_TIMESTAMP AT TIME ZONE 'America/Chicago')::date - INTERVAL '7 days'
       )::int AS completed
@@ -459,7 +483,7 @@ export async function completeTask(
       completedAt: new Date(),
       isOverdue: false,
     })
-    .where(and(eq(tasks.id, taskId), inArray(tasks.status as any, ["pending", "in_progress"] as any)))
+    .where(and(eq(tasks.id, taskId), inArray(tasks.status as any, ["pending", "in_progress", "waiting_on", "blocked"] as any)))
     .returning();
 
   if (result.length === 0) {
