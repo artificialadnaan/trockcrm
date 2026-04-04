@@ -18,6 +18,9 @@ ALTER TABLE tasks
 ALTER TABLE tasks
   ADD CONSTRAINT tasks_office_id_offices_id_fk FOREIGN KEY (office_id) REFERENCES offices(id);
 
+CREATE INDEX IF NOT EXISTS tasks_status_scheduled_for_idx
+  ON tasks (status, scheduled_for);
+
 CREATE UNIQUE INDEX IF NOT EXISTS tasks_active_origin_rule_dedupe_key_uidx
   ON tasks (origin_rule, dedupe_key)
   WHERE origin_rule IS NOT NULL
@@ -26,6 +29,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS tasks_active_origin_rule_dedupe_key_uidx
 
 CREATE INDEX IF NOT EXISTS tasks_origin_rule_reason_code_idx
   ON tasks (origin_rule, reason_code);
+
+DO $$ BEGIN
+  CREATE TYPE task_resolution_status AS ENUM ('completed', 'dismissed', 'suppressed');
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 
 CREATE TABLE IF NOT EXISTS task_resolution_state (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -44,3 +52,6 @@ CREATE TABLE IF NOT EXISTS task_resolution_state (
 
 CREATE UNIQUE INDEX IF NOT EXISTS task_resolution_state_origin_rule_dedupe_key_uidx
   ON task_resolution_state (origin_rule, dedupe_key);
+
+CREATE INDEX IF NOT EXISTS task_resolution_state_reason_code_idx
+  ON task_resolution_state (resolution_reason);

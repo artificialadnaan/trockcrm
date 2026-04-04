@@ -25,7 +25,7 @@ export { emails, emailDirectionEnum } from "./tenant/emails.js";
 export { activities, activityTypeEnum } from "./tenant/activities.js";
 export { files, fileCategoryEnum } from "./tenant/files.js";
 export { tasks, taskTypeEnum, taskPriorityEnum, taskStatusEnum } from "./tenant/tasks.js";
-export { taskResolutionState } from "./tenant/task-resolution-state.js";
+export { taskResolutionState, taskResolutionStatusEnum } from "./tenant/task-resolution-state.js";
 export { notifications, notificationTypeEnum } from "./tenant/notifications.js";
 export { auditLog, auditActionEnum } from "./tenant/audit-log.js";
 

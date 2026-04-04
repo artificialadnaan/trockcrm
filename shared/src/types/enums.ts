@@ -78,6 +78,13 @@ export const TASK_STATUSES = [
 ] as const;
 export type TaskStatus = (typeof TASK_STATUSES)[number];
 
+export const TASK_RESOLUTION_STATUSES = [
+  "completed",
+  "dismissed",
+  "suppressed",
+] as const;
+export type TaskResolutionStatus = (typeof TASK_RESOLUTION_STATUSES)[number];
+
 export const NOTIFICATION_TYPES = [
   "stale_deal",
   "inbound_email",

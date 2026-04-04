@@ -1,11 +1,10 @@
 import { Table } from "drizzle-orm";
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import {
-  TASK_STATUSES,
-} from "../../../../shared/src/types/enums.js";
+import { TASK_STATUSES, TASK_RESOLUTION_STATUSES } from "../../../../shared/src/types/enums.js";
 import {
   tasks,
   taskStatusEnum,
+  taskResolutionStatusEnum,
   taskResolutionState,
 } from "../../../../shared/src/schema/index.js";
 
@@ -76,8 +75,19 @@ describe("Task Service", () => {
       expect(types).toHaveLength(7);
     });
 
-    it("should define the smart task lifecycle on the shared enum and task table", () => {
-      expect(taskStatusEnum.enumValues).toEqual(TASK_STATUSES);
+    it("should define the smart task lifecycle contract on the shared enum and task table", () => {
+      const expectedStatuses = [
+        "pending",
+        "scheduled",
+        "in_progress",
+        "waiting_on",
+        "blocked",
+        "completed",
+        "dismissed",
+      ];
+
+      expect(TASK_STATUSES).toEqual(expectedStatuses);
+      expect(taskStatusEnum.enumValues).toEqual(expectedStatuses);
 
       const columns = tasks[Table.Symbol.Columns];
       expect(columns.officeId).toBeDefined();
@@ -90,8 +100,11 @@ describe("Task Service", () => {
 
   describe("Task Resolution State Contract", () => {
     it("should expose the close-loop suppression fields keyed by origin rule and dedupe key", () => {
+      const expectedResolutionStatuses = ["completed", "dismissed", "suppressed"];
       const columns = taskResolutionState[Table.Symbol.Columns];
 
+      expect(TASK_RESOLUTION_STATUSES).toEqual(expectedResolutionStatuses);
+      expect(taskResolutionStatusEnum.enumValues).toEqual(expectedResolutionStatuses);
       expect(Object.keys(columns)).toEqual(
         expect.arrayContaining([
           "officeId",

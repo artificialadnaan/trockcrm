@@ -1,5 +1,6 @@
 import {
   pgTable,
+  pgEnum,
   uuid,
   varchar,
   jsonb,
@@ -8,6 +9,12 @@ import {
   index,
 } from "drizzle-orm/pg-core";
 import { offices } from "../public/offices.js";
+import { TASK_RESOLUTION_STATUSES } from "../../types/enums.js";
+
+export const taskResolutionStatusEnum = pgEnum(
+  "task_resolution_status",
+  TASK_RESOLUTION_STATUSES
+);
 
 export const taskResolutionState = pgTable(
   "task_resolution_state",
@@ -17,7 +24,7 @@ export const taskResolutionState = pgTable(
     taskId: uuid("task_id").notNull(),
     originRule: varchar("origin_rule", { length: 120 }).notNull(),
     dedupeKey: varchar("dedupe_key", { length: 255 }).notNull(),
-    resolutionStatus: varchar("resolution_status", { length: 50 }).notNull(),
+    resolutionStatus: taskResolutionStatusEnum("resolution_status").notNull(),
     resolutionReason: varchar("resolution_reason", { length: 120 }),
     resolvedAt: timestamp("resolved_at", { withTimezone: true }),
     suppressedUntil: timestamp("suppressed_until", { withTimezone: true }),
