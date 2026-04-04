@@ -6,6 +6,18 @@ import { AppError } from "../../middleware/error-handler.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
+const TASK_STATUS_VALUES = [
+  "pending",
+  "scheduled",
+  "in_progress",
+  "waiting_on",
+  "blocked",
+  "completed",
+  "dismissed",
+] as const;
+
+type TaskStatus = (typeof TASK_STATUS_VALUES)[number];
+
 export interface TaskFilters {
   assignedTo?: string;
   status?: string;
@@ -40,6 +52,118 @@ export interface UpdateTaskInput {
   dueTime?: string | null;
   remindAt?: string | null;
   assignedTo?: string;
+}
+
+export interface TransitionTaskStatusInput {
+  nextStatus: TaskStatus;
+  waitingOn?: unknown;
+  blockedBy?: unknown;
+}
+
+const ACTIVE_BUCKET_STATUSES: TaskStatus[] = ["pending", "in_progress", "waiting_on", "blocked"];
+const COMPLETED_BUCKET_STATUSES: TaskStatus[] = ["completed", "dismissed"];
+const TERMINAL_STATUSES: TaskStatus[] = ["completed", "dismissed"];
+
+const ALLOWED_TRANSITIONS: Record<TaskStatus, TaskStatus[]> = {
+  pending: ["scheduled", "in_progress", "waiting_on", "blocked", "completed", "dismissed"],
+  scheduled: ["pending", "dismissed"],
+  in_progress: ["scheduled", "waiting_on", "blocked", "completed", "dismissed"],
+  waiting_on: ["scheduled", "pending", "in_progress", "blocked", "completed", "dismissed"],
+  blocked: ["scheduled", "pending", "in_progress", "waiting_on", "completed", "dismissed"],
+  completed: [],
+  dismissed: [],
+};
+
+function isTaskStatus(value: string): value is TaskStatus {
+  return (TASK_STATUS_VALUES as readonly string[]).includes(value);
+}
+
+function buildOpenTaskStatusCondition(now: Date) {
+  return or(
+    inArray(tasks.status as any, ACTIVE_BUCKET_STATUSES as any),
+    and(
+      eq(tasks.status as any, "scheduled" as any),
+      or(isNull((tasks as any).scheduledFor), sql`${(tasks as any).scheduledFor} <= ${now}`)
+    )
+  );
+}
+
+type TaskBucketCandidate = {
+  status: TaskStatus;
+  scheduledFor: Date | string | null;
+};
+
+export function isTaskIncludedInActiveBuckets(
+  task: TaskBucketCandidate,
+  now = new Date()
+) {
+  if (task.status === "scheduled") {
+    return task.scheduledFor == null || task.scheduledFor <= now;
+  }
+
+  return ACTIVE_BUCKET_STATUSES.includes(task.status);
+}
+
+export async function transitionTaskStatus(
+  tenantDb: TenantDb,
+  taskId: string,
+  input: TransitionTaskStatusInput,
+  userRole: string,
+  userId: string
+) {
+  const existing = (await getTaskById(tenantDb, taskId, userRole, userId)) as any;
+  if (!existing) throw new AppError(404, "Task not found");
+
+  if (existing.status === "completed" || existing.status === "dismissed") {
+    throw new AppError(400, `Task is already ${existing.status}`);
+  }
+
+  if (!isTaskStatus(input.nextStatus)) {
+    throw new AppError(400, "Invalid task status");
+  }
+
+  if (!ALLOWED_TRANSITIONS[existing.status as TaskStatus].includes(input.nextStatus)) {
+    throw new AppError(400, `Cannot move task from ${existing.status} to ${input.nextStatus}`);
+  }
+
+  const updates: Record<string, any> = {
+    status: input.nextStatus,
+  };
+
+  if (input.nextStatus === "waiting_on") {
+    if (input.waitingOn == null) {
+      throw new AppError(400, "waitingOn is required when moving a task to waiting_on");
+    }
+    updates.waitingOn = input.waitingOn;
+  }
+
+  if (input.nextStatus === "blocked") {
+    if (input.blockedBy == null) {
+      throw new AppError(400, "blockedBy is required when moving a task to blocked");
+    }
+    updates.blockedBy = input.blockedBy;
+  }
+
+  if (input.nextStatus === "in_progress" && existing.startedAt == null) {
+    updates.startedAt = new Date();
+  }
+
+  if (input.nextStatus === "completed") {
+    updates.completedAt = new Date();
+    updates.isOverdue = false;
+  }
+
+  if (input.nextStatus === "dismissed") {
+    updates.isOverdue = false;
+  }
+
+  const result = await tenantDb
+    .update(tasks)
+    .set(updates)
+    .where(eq(tasks.id, taskId))
+    .returning();
+
+  return result[0];
 }
 
 /**
@@ -90,28 +214,19 @@ export async function getTasks(
   // This ensures "today" matches the user's local date, not UTC midnight.
   const today = new Date().toLocaleDateString("en-CA", { timeZone: "America/Chicago" }); // YYYY-MM-DD in CT
 
+  const openStatusCondition = buildOpenTaskStatusCondition(new Date());
+
   if (filters.section === "overdue") {
-    conditions.push(
-      inArray(tasks.status, ["pending", "in_progress"]),
-      sql`${tasks.dueDate} < ${today}`
-    );
+    conditions.push(openStatusCondition, sql`${tasks.dueDate} < ${today}`);
   } else if (filters.section === "today") {
-    conditions.push(
-      inArray(tasks.status, ["pending", "in_progress"]),
-      sql`${tasks.dueDate} = ${today}`
-    );
+    conditions.push(openStatusCondition, sql`${tasks.dueDate} = ${today}`);
   } else if (filters.section === "upcoming") {
     conditions.push(
-      inArray(tasks.status, ["pending", "in_progress"]),
-      or(
-        sql`${tasks.dueDate} > ${today}`,
-        isNull(tasks.dueDate)
-      )
+      openStatusCondition,
+      or(sql`${tasks.dueDate} > ${today}`, isNull(tasks.dueDate))
     );
   } else if (filters.section === "completed") {
-    conditions.push(
-      inArray(tasks.status, ["completed", "dismissed"])
-    );
+    conditions.push(inArray(tasks.status as any, COMPLETED_BUCKET_STATUSES as any));
   }
 
   const where = conditions.length > 0 ? and(...conditions) : undefined;
@@ -184,13 +299,34 @@ export async function getTaskCounts(
   const result = await tenantDb.execute(sql`
     SELECT
       COUNT(*) FILTER (
-        WHERE status IN ('pending', 'in_progress') AND due_date < ${today}
+        WHERE (
+          status IN ('pending', 'in_progress', 'waiting_on', 'blocked')
+          OR (
+            status = 'scheduled'
+            AND (scheduled_for IS NULL OR scheduled_for <= ${new Date()})
+          )
+        )
+        AND due_date < ${today}
       )::int AS overdue,
       COUNT(*) FILTER (
-        WHERE status IN ('pending', 'in_progress') AND due_date = ${today}
+        WHERE (
+          status IN ('pending', 'in_progress', 'waiting_on', 'blocked')
+          OR (
+            status = 'scheduled'
+            AND (scheduled_for IS NULL OR scheduled_for <= ${new Date()})
+          )
+        )
+        AND due_date = ${today}
       )::int AS today,
       COUNT(*) FILTER (
-        WHERE status IN ('pending', 'in_progress') AND (due_date > ${today} OR due_date IS NULL)
+        WHERE (
+          status IN ('pending', 'in_progress', 'waiting_on', 'blocked')
+          OR (
+            status = 'scheduled'
+            AND (scheduled_for IS NULL OR scheduled_for <= ${new Date()})
+          )
+        )
+        AND (due_date > ${today} OR due_date IS NULL)
       )::int AS upcoming,
       COUNT(*) FILTER (
         WHERE status = 'completed'
@@ -226,7 +362,7 @@ export async function getTaskById(
     .where(eq(tasks.id, taskId))
     .limit(1);
 
-  const task = result[0] ?? null;
+  const task = (result[0] ?? null) as any;
   if (!task) return null;
 
   // Reps can only see their own tasks
@@ -323,7 +459,7 @@ export async function completeTask(
       completedAt: new Date(),
       isOverdue: false,
     })
-    .where(and(eq(tasks.id, taskId), inArray(tasks.status, ["pending", "in_progress"])))
+    .where(and(eq(tasks.id, taskId), inArray(tasks.status as any, ["pending", "in_progress"] as any)))
     .returning();
 
   if (result.length === 0) {
