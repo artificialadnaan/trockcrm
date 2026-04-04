@@ -8,9 +8,12 @@ import { runActivityDropDetection } from "./activity-alerts.js";
 import { runWeeklyDigest } from "./weekly-digest.js";
 import { runColdLeadWarming } from "./cold-lead-warming.js";
 import { runBidDeadlineCountdown } from "./bid-deadline.js";
-import { addBusinessDays } from "../utils/date-helpers.js";
 import { handleProcoreSyncJob, handleProcoreWebhookJob, runProcoreSync } from "./procore-sync.js";
 import { handleTaskCompletedEvent } from "./task-completed.js";
+
+const SERVER_EVALUATOR_MODULE = "../../../server/src/modules/tasks/rules/evaluator.js" as string;
+const SERVER_TASK_RULES_MODULE = "../../../server/src/modules/tasks/rules/config.js" as string;
+const SERVER_TASK_PERSISTENCE_MODULE = "../../../server/src/modules/tasks/rules/persistence.js" as string;
 
 /**
  * Test handler that logs the payload. Used to validate the queue works end-to-end.
@@ -42,6 +45,46 @@ async function handleDomainEvent(payload: any, officeId: string | null): Promise
   } else {
     console.log(`[Worker:domain_event] No handler for '${eventName}' yet — completing without action`);
   }
+}
+
+async function loadTaskRuleDependencies() {
+  const [{ evaluateTaskRules }, { TASK_RULES }, { createTenantTaskRulePersistence }] = (await Promise.all([
+    import(SERVER_EVALUATOR_MODULE),
+    import(SERVER_TASK_RULES_MODULE),
+    import(SERVER_TASK_PERSISTENCE_MODULE),
+  ])) as any;
+
+  return { evaluateTaskRules, TASK_RULES, createTenantTaskRulePersistence };
+}
+
+async function resolveOfficeSchema(
+  pool: { query: (sql: string, params?: unknown[]) => Promise<{ rows: any[] }> },
+  officeId: string | null,
+  userId?: string | null
+): Promise<{ officeId: string; schemaName: string } | null> {
+  let resolvedOfficeId = officeId;
+
+  if (!resolvedOfficeId && userId) {
+    const userRes = await pool.query("SELECT office_id FROM public.users WHERE id = $1", [userId]);
+    resolvedOfficeId = userRes.rows[0]?.office_id ?? null;
+  }
+
+  if (!resolvedOfficeId) return null;
+
+  const officeResult = await pool.query(
+    "SELECT slug FROM public.offices WHERE id = $1 AND is_active = true",
+    [resolvedOfficeId]
+  );
+  if (officeResult.rows.length === 0) return null;
+
+  const slug = officeResult.rows[0].slug;
+  const slugRegex = /^[a-z][a-z0-9_]*$/;
+  if (!slugRegex.test(slug)) return null;
+
+  return {
+    officeId: resolvedOfficeId,
+    schemaName: `office_${slug}`,
+  };
 }
 
 export function registerAllJobs() {
@@ -543,74 +586,33 @@ export function registerAllJobs() {
   domainEventHandlers.set("contact.created", async (payload, officeId) => {
     console.log(`[Worker] contact.created: ${payload.contactId}`);
 
-    // --- Task 16: Create onboarding task sequence ---
     try {
       const { pool: workerPool } = await import("../db.js");
-
-      // Resolve officeId from the creating user if not provided
-      let resolvedOfficeId = officeId;
-      if (!resolvedOfficeId && payload.createdBy) {
-        const userRes = await workerPool.query(
-          "SELECT office_id FROM public.users WHERE id = $1",
-          [payload.createdBy]
-        );
-        resolvedOfficeId = userRes.rows[0]?.office_id ?? null;
-      }
-      if (!resolvedOfficeId) return;
-
-      const officeResult = await workerPool.query(
-        "SELECT slug FROM public.offices WHERE id = $1 AND is_active = true",
-        [resolvedOfficeId]
-      );
-      if (officeResult.rows.length === 0) return;
-
-      const slug = officeResult.rows[0].slug;
-      const slugRegex = /^[a-z][a-z0-9_]*$/;
-      if (!slugRegex.test(slug)) return;
-      const schemaName = `office_${slug}`;
+      const resolved = await resolveOfficeSchema(workerPool, officeId, payload.createdBy);
+      if (!resolved || !payload.createdBy) return;
 
       const contactName = `${payload.firstName ?? ""} ${payload.lastName ?? ""}`.trim() || "new contact";
-      const createdBy = payload.createdBy;
+      const { evaluateTaskRules, TASK_RULES, createTenantTaskRulePersistence } = await loadTaskRuleDependencies();
+      const taskPersistence = createTenantTaskRulePersistence(workerPool, resolved.schemaName);
 
-      if (!createdBy) return;
-
-      const today = new Date();
-      const day3 = new Date(today);
-      day3.setDate(day3.getDate() + 3);
-      const day7 = new Date(today);
-      day7.setDate(day7.getDate() + 7);
-
-      const onboardingTasks = [
+      const outcomes = await evaluateTaskRules(
         {
-          title: `Send intro email to ${contactName}`,
-          type: "touchpoint",
-          priority: "high",
-          dueDate: today.toISOString().split("T")[0],
+          now: new Date(),
+          officeId: resolved.officeId,
+          entityId: `contact:${payload.contactId}`,
+          sourceEvent: "contact.created",
+          contactId: payload.contactId,
+          contactName,
+          taskAssigneeId: payload.createdBy,
         },
-        {
-          title: `Follow-up call with ${contactName}`,
-          type: "follow_up",
-          priority: "normal",
-          dueDate: day3.toISOString().split("T")[0],
-        },
-        {
-          title: `Check response from ${contactName}`,
-          type: "follow_up",
-          priority: "normal",
-          dueDate: day7.toISOString().split("T")[0],
-        },
-      ];
+        taskPersistence,
+        TASK_RULES
+      );
 
-      for (const task of onboardingTasks) {
-        await workerPool.query(
-          `INSERT INTO ${schemaName}.tasks
-           (title, type, priority, status, assigned_to, contact_id, due_date, created_by)
-           VALUES ($1, $2, $3, 'pending', $4, $5, $6, $4)`,
-          [task.title, task.type, task.priority, createdBy, payload.contactId, task.dueDate]
-        );
+      const createdCount = outcomes.filter((outcome: any) => outcome.action === "created" || outcome.action === "updated").length;
+      if (createdCount > 0) {
+        console.log(`[Worker] contact.created: created ${createdCount} onboarding tasks for ${contactName}`);
       }
-
-      console.log(`[Worker] contact.created: created 3 onboarding tasks for ${contactName}`);
     } catch (err) {
       console.error("[Worker:contact-onboarding] Error:", err);
       // Non-blocking
@@ -626,34 +628,14 @@ export function registerAllJobs() {
 
     try {
       const { pool: workerPool } = await import("../db.js");
-
-      // Resolve office from userId
-      let resolvedOfficeId = officeId;
-      if (!resolvedOfficeId && payload.userId) {
-        const userRes = await workerPool.query(
-          "SELECT office_id FROM public.users WHERE id = $1",
-          [payload.userId]
-        );
-        resolvedOfficeId = userRes.rows[0]?.office_id ?? null;
-      }
-      if (!resolvedOfficeId) return;
-
-      const officeResult = await workerPool.query(
-        "SELECT slug FROM public.offices WHERE id = $1 AND is_active = true",
-        [resolvedOfficeId]
-      );
-      if (officeResult.rows.length === 0) return;
-
-      const slug = officeResult.rows[0].slug;
-      const slugRegex = /^[a-z][a-z0-9_]*$/;
-      if (!slugRegex.test(slug)) return;
-      const schemaName = `office_${slug}`;
+      const resolved = await resolveOfficeSchema(workerPool, officeId, payload.userId);
+      if (!resolved || !payload.userId) return;
 
       // Look up contact name if contactId is provided
       let contactName = "contact";
       if (payload.contactId) {
         const contactResult = await workerPool.query(
-          `SELECT first_name, last_name FROM ${schemaName}.contacts WHERE id = $1`,
+          `SELECT first_name, last_name FROM ${resolved.schemaName}.contacts WHERE id = $1`,
           [payload.contactId]
         );
         if (contactResult.rows.length > 0) {
@@ -662,36 +644,28 @@ export function registerAllJobs() {
         }
       }
 
-      const dueDate = addBusinessDays(new Date(), 2);
-      const title = `Send follow-up from meeting with ${contactName}`;
+      const { evaluateTaskRules, TASK_RULES, createTenantTaskRulePersistence } = await loadTaskRuleDependencies();
+      const taskPersistence = createTenantTaskRulePersistence(workerPool, resolved.schemaName);
 
-      // Dedup: check if a follow-up task already exists for this contact+deal combo
-      const existingTask = await workerPool.query(
-        `SELECT id FROM ${schemaName}.tasks
-         WHERE assigned_to = $1
-           AND type = 'follow_up'
-           AND title = $2
-           AND status IN ('pending', 'in_progress')
-         LIMIT 1`,
-        [payload.userId, title]
+      const outcomes = await evaluateTaskRules(
+        {
+          now: new Date(),
+          officeId: resolved.officeId,
+          entityId: `activity:${payload.activityId ?? payload.contactId ?? payload.dealId ?? "meeting"}`,
+          sourceEvent: "activity.created",
+          dealId: payload.dealId ?? null,
+          contactId: payload.contactId ?? null,
+          contactName,
+          taskAssigneeId: payload.userId,
+        },
+        taskPersistence,
+        TASK_RULES
       );
 
-      if (existingTask.rows.length > 0) return;
-
-      await workerPool.query(
-        `INSERT INTO ${schemaName}.tasks
-         (title, type, priority, status, assigned_to, deal_id, contact_id, due_date, created_by)
-         VALUES ($1, 'follow_up', 'high', 'pending', $2, $3, $4, $5, $2)`,
-        [
-          title,
-          payload.userId,
-          payload.dealId ?? null,
-          payload.contactId ?? null,
-          dueDate.toISOString().split("T")[0],
-        ]
-      );
-
-      console.log(`[Worker] activity.created: created follow-up task for meeting with ${contactName}`);
+      const createdCount = outcomes.filter((outcome: any) => outcome.action === "created" || outcome.action === "updated").length;
+      if (createdCount > 0) {
+        console.log(`[Worker] activity.created: created follow-up task for meeting with ${contactName}`);
+      }
     } catch (err) {
       console.error("[Worker:post-meeting-followup] Error:", err);
       // Non-blocking

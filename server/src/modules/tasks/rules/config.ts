@@ -24,6 +24,190 @@ function buildFixedPriority(score: number) {
   });
 }
 
+function addCalendarDays(date: Date, days: number) {
+  const result = new Date(date);
+  result.setDate(result.getDate() + days);
+  return result;
+}
+
+function addBusinessDays(date: Date, days: number) {
+  const result = new Date(date);
+  let added = 0;
+
+  while (added < days) {
+    result.setDate(result.getDate() + 1);
+    const dayOfWeek = result.getDay();
+    if (dayOfWeek !== 0 && dayOfWeek !== 6) {
+      added++;
+    }
+  }
+
+  return result;
+}
+
+function buildContactOnboardingRule(
+  id: string,
+  title: string,
+  type: "touchpoint" | "follow_up",
+  dueOffsetDays: number,
+  priorityScore: number,
+  dedupeSuffix: string
+): TaskRuleDefinition {
+  return {
+    id,
+    sourceEvent: "contact.created",
+    reasonCode: id,
+    suppressionWindowDays: 0,
+    buildDedupeKey(context) {
+      if (!context.contactId || !context.taskAssigneeId) return null;
+      return `contact:${context.contactId}:assignee:${context.taskAssigneeId}:onboarding:${dedupeSuffix}`;
+    },
+    async buildTask(context) {
+      if (!context.contactId || !context.taskAssigneeId) return null;
+
+      const assignment = await assignTaskFromContext({
+        entityId: context.entityId,
+        manualOverrideId: context.taskAssigneeId,
+      });
+
+      if (!assignment.assignedTo) return null;
+
+      const priority = buildFixedPriority(priorityScore);
+      const contactName = context.contactName?.trim() || "new contact";
+
+      return {
+        title: title.replace("{contactName}", contactName),
+        type,
+        assignedTo: assignment.assignedTo,
+        officeId: context.officeId,
+        originRule: id,
+        sourceRule: id,
+        sourceEvent: context.sourceEvent,
+        dedupeKey: `contact:${context.contactId}:assignee:${context.taskAssigneeId}:onboarding:${dedupeSuffix}`,
+        reasonCode: id,
+        priority: priority.band,
+        priorityScore: priority.score,
+        status: "pending",
+        contactId: context.contactId,
+        dueAt: addCalendarDays(context.now, dueOffsetDays),
+        entitySnapshot: {
+          schemaVersion: 1,
+          entityType: "contact",
+          entityId: context.entityId,
+          officeId: context.officeId,
+          sourceEvent: context.sourceEvent,
+          contactId: context.contactId,
+          contactName,
+          summary: title.replace("{contactName}", contactName),
+        },
+        metadata: {
+          entityId: context.entityId,
+          contactId: context.contactId,
+          assignment: assignment.machineReason,
+        },
+      };
+    },
+  };
+}
+
+const contactOnboardingIntroEmailRule = buildContactOnboardingRule(
+  "contact_onboarding_intro_email",
+  "Send intro email to {contactName}",
+  "touchpoint",
+  0,
+  70,
+  "intro_email"
+);
+
+const contactOnboardingFollowUpCallRule = buildContactOnboardingRule(
+  "contact_onboarding_follow_up_call",
+  "Follow-up call with {contactName}",
+  "follow_up",
+  3,
+  50,
+  "follow_up_call"
+);
+
+const contactOnboardingCheckResponseRule = buildContactOnboardingRule(
+  "contact_onboarding_check_response",
+  "Check response from {contactName}",
+  "follow_up",
+  7,
+  50,
+  "check_response"
+);
+
+const activityMeetingFollowUpRuleId = "activity_meeting_follow_up";
+const activityMeetingFollowUpRule: TaskRuleDefinition = {
+  id: activityMeetingFollowUpRuleId,
+  sourceEvent: "activity.created",
+  reasonCode: activityMeetingFollowUpRuleId,
+  suppressionWindowDays: 0,
+  buildDedupeKey(context) {
+    if (!context.taskAssigneeId) return null;
+    if (context.contactId) {
+      return `contact:${context.contactId}:assignee:${context.taskAssigneeId}:meeting_follow_up`;
+    }
+    if (context.dealId) {
+      return `deal:${context.dealId}:assignee:${context.taskAssigneeId}:meeting_follow_up`;
+    }
+    return null;
+  },
+  async buildTask(context) {
+    if (!context.taskAssigneeId) return null;
+
+    const assignment = await assignTaskFromContext({
+      entityId: context.entityId,
+      manualOverrideId: context.taskAssigneeId,
+    });
+
+    if (!assignment.assignedTo) return null;
+
+    const priority = buildFixedPriority(70);
+    const contactName = context.contactName?.trim() || "contact";
+
+    return {
+      title: `Send follow-up from meeting with ${contactName}`,
+      description: "A meeting follow-up is needed for the assigned rep.",
+      type: "follow_up",
+      assignedTo: assignment.assignedTo,
+      officeId: context.officeId,
+      originRule: activityMeetingFollowUpRuleId,
+      sourceRule: activityMeetingFollowUpRuleId,
+      sourceEvent: context.sourceEvent,
+      dedupeKey: context.contactId
+        ? `contact:${context.contactId}:assignee:${context.taskAssigneeId}:meeting_follow_up`
+        : context.dealId
+          ? `deal:${context.dealId}:assignee:${context.taskAssigneeId}:meeting_follow_up`
+          : "",
+      reasonCode: activityMeetingFollowUpRuleId,
+      priority: priority.band,
+      priorityScore: priority.score,
+      status: "pending",
+      dealId: context.dealId ?? null,
+      contactId: context.contactId ?? null,
+      dueAt: addBusinessDays(context.now, 2),
+      entitySnapshot: {
+        schemaVersion: 1,
+        entityType: "activity",
+        entityId: context.entityId,
+        officeId: context.officeId,
+        sourceEvent: context.sourceEvent,
+        contactId: context.contactId ?? null,
+        dealId: context.dealId ?? null,
+        contactName,
+        summary: `Follow up after meeting with ${contactName}`,
+      },
+      metadata: {
+        entityId: context.entityId,
+        contactId: context.contactId ?? null,
+        dealId: context.dealId ?? null,
+        assignment: assignment.machineReason,
+      },
+    };
+  },
+};
+
 function buildBidDeadlineRule(daysUntil: number, titlePrefix: string, priorityScore: number): TaskRuleDefinition {
   const ruleId = `bid_deadline_${daysUntil}_day`;
   return {
@@ -328,6 +512,10 @@ export const TASK_RULES: TaskRuleDefinition[] = [
   staleDealRule,
   inboundEmailReplyNeededRule,
   inboundEmailDisambiguationRule,
+  contactOnboardingIntroEmailRule,
+  contactOnboardingFollowUpCallRule,
+  contactOnboardingCheckResponseRule,
+  activityMeetingFollowUpRule,
   buildBidDeadlineRule(14, "Prepare final bid for", 40),
   buildBidDeadlineRule(7, "Confirm bid submission for", 65),
   buildBidDeadlineRule(1, "BID DUE TOMORROW", 90),
