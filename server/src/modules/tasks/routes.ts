@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { jobQueue } from "@trock-crm/shared/schema";
+import { TASK_PRIORITIES, TASK_TYPES } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 import { eventBus } from "../../events/bus.js";
 import { listUsers } from "../admin/users-service.js";
@@ -19,6 +20,13 @@ const router = Router();
 // GET /api/tasks/assignees — list users for assignee picker (directors/admins)
 router.get("/assignees", async (req, res, next) => {
   try {
+    // Reps only see themselves — they can only assign tasks to themselves
+    if (req.user!.role === "rep") {
+      await req.commitTransaction!();
+      res.json({ users: [{ id: req.user!.id, displayName: req.user!.displayName }] });
+      return;
+    }
+
     const officeId = req.user!.activeOfficeId ?? req.user!.officeId;
     const rows = await listUsers(officeId);
     const users = rows
@@ -85,6 +93,12 @@ router.post("/", async (req, res, next) => {
     const { title, description, type, priority, assignedTo, dealId, contactId, dueDate, dueTime, remindAt } = req.body;
 
     if (!title) throw new AppError(400, "Title is required");
+    if (priority && !TASK_PRIORITIES.includes(priority)) {
+      throw new AppError(400, `Invalid priority. Must be one of: ${TASK_PRIORITIES.join(", ")}`);
+    }
+    if (type && !TASK_TYPES.includes(type)) {
+      throw new AppError(400, `Invalid task type. Must be one of: ${TASK_TYPES.join(", ")}`);
+    }
 
     // Reps create tasks assigned to themselves; directors/admins can assign to anyone
     const targetAssignee = req.user!.role === "rep"
@@ -152,6 +166,10 @@ router.post("/", async (req, res, next) => {
 router.patch("/:id", async (req, res, next) => {
   try {
     const body = { ...req.body };
+
+    if (body.priority && !TASK_PRIORITIES.includes(body.priority)) {
+      throw new AppError(400, `Invalid priority. Must be one of: ${TASK_PRIORITIES.join(", ")}`);
+    }
 
     // Reps cannot reassign tasks
     if (req.user!.role === "rep") {

@@ -190,6 +190,7 @@ function IndustrialTaskRow({
   };
 
   const handleClick = () => {
+    if (task.status === "completed" || task.status === "dismissed") return;
     setEditOpen(true);
   };
 

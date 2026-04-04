@@ -276,6 +276,10 @@ export async function updateTask(
   const existing = await getTaskById(tenantDb, taskId, userRole, userId);
   if (!existing) throw new AppError(404, "Task not found");
 
+  if (existing.status === "completed" || existing.status === "dismissed") {
+    throw new AppError(400, `Cannot edit a ${existing.status} task`);
+  }
+
   const updates: Record<string, any> = {};
   if (input.title !== undefined) updates.title = input.title;
   if (input.description !== undefined) updates.description = input.description;

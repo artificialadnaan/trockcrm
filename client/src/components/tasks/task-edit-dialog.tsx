@@ -44,6 +44,7 @@ export function TaskEditDialog({ task, open, onOpenChange, onUpdated }: TaskEdit
   const [assignees, setAssignees] = useState<Assignee[]>([]);
 
   const canAssign = user?.role === "admin" || user?.role === "director";
+  const isTerminal = task.status === "completed" || task.status === "dismissed";
 
   // Reset form when task changes
   useEffect(() => {
@@ -88,6 +89,12 @@ export function TaskEditDialog({ task, open, onOpenChange, onUpdated }: TaskEdit
       setSubmitting(false);
     }
   };
+
+  // Don't open the dialog for completed/dismissed tasks
+  if (isTerminal && open) {
+    onOpenChange(false);
+    return null;
+  }
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>

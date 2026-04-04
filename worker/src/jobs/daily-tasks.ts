@@ -61,6 +61,8 @@ export async function runDailyTaskGeneration(): Promise<void> {
         officeOverdueMarked += overdueResult.rowCount ?? 0;
 
         // Create notifications for assignees of overdue tasks (dedup: one per task per day)
+        // Dedup: body contains [task:{uuid}] marker. This is a text-based dedup strategy.
+        // TODO: Add a dedup_key column to notifications for robust dedup.
         await client.query(
           `INSERT INTO ${schemaName}.notifications (type, title, body, user_id, is_read)
            SELECT 'system',
@@ -74,7 +76,8 @@ export async function runDailyTaskGeneration(): Promise<void> {
              AND t.assigned_to IS NOT NULL
              AND NOT EXISTS (
                SELECT 1 FROM ${schemaName}.notifications n
-               WHERE n.type = 'system'
+               WHERE n.user_id = t.assigned_to
+                 AND n.type = 'system'
                  AND n.body LIKE '%[task:' || t.id::text || ']%'
                  AND n.created_at >= CURRENT_DATE
              )`

@@ -172,12 +172,12 @@ export function TaskCreateDialog({ onCreated, defaultDealId, defaultContactId }:
           {!defaultDealId && deals.length > 0 && (
             <div>
               <label className="text-xs text-muted-foreground mb-1 block">Link to Deal (optional)</label>
-              <Select value={dealId} onValueChange={(v) => setDealId(v ?? "")}>
+              <Select value={dealId || "__none__"} onValueChange={(v) => setDealId(v === "__none__" ? "" : (v ?? ""))}>
                 <SelectTrigger>
                   <SelectValue placeholder="No deal linked" />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="">No deal linked</SelectItem>
+                  <SelectItem value="__none__">No deal linked</SelectItem>
                   {deals.map((d) => (
                     <SelectItem key={d.id} value={d.id}>
                       {d.dealNumber} - {d.name}
