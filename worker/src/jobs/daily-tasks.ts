@@ -60,6 +60,26 @@ export async function runDailyTaskGeneration(): Promise<void> {
         );
         officeOverdueMarked += overdueResult.rowCount ?? 0;
 
+        // Create notifications for assignees of overdue tasks (dedup: one per task per day)
+        await client.query(
+          `INSERT INTO ${schemaName}.notifications (type, title, body, user_id, is_read)
+           SELECT 'system',
+                  'Overdue Task',
+                  'Task "' || t.title || '" is overdue (due ' || t.due_date::text || ') [task:' || t.id::text || ']',
+                  t.assigned_to,
+                  false
+           FROM ${schemaName}.tasks t
+           WHERE t.is_overdue = true
+             AND t.status IN ('pending', 'in_progress')
+             AND t.assigned_to IS NOT NULL
+             AND NOT EXISTS (
+               SELECT 1 FROM ${schemaName}.notifications n
+               WHERE n.type = 'system'
+                 AND n.body LIKE '%[task:' || t.id::text || ']%'
+                 AND n.created_at >= CURRENT_DATE
+             )`
+        );
+
         // Step 2: Create follow-up tasks for deals with expected_close_date within 7 days
         // Only for deals that don't already have an active follow_up task
         const upcomingDeals = await client.query(

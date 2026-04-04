@@ -7,7 +7,6 @@ import {
   DialogContent,
   DialogHeader,
   DialogTitle,
-  DialogTrigger,
 } from "@/components/ui/dialog";
 import {
   Select,
@@ -16,8 +15,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Plus } from "lucide-react";
-import { createTask } from "@/hooks/use-tasks";
+import { updateTask } from "@/hooks/use-tasks";
+import type { Task } from "@/hooks/use-tasks";
 import { useAuth } from "@/lib/auth";
 import { api } from "@/lib/api";
 
@@ -26,33 +25,35 @@ interface Assignee {
   displayName: string;
 }
 
-interface DealOption {
-  id: string;
-  dealNumber: string;
-  name: string;
+interface TaskEditDialogProps {
+  task: Task;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onUpdated: () => void;
 }
 
-interface TaskCreateDialogProps {
-  onCreated: () => void;
-  defaultDealId?: string;
-  defaultContactId?: string;
-}
-
-export function TaskCreateDialog({ onCreated, defaultDealId, defaultContactId }: TaskCreateDialogProps) {
+export function TaskEditDialog({ task, open, onOpenChange, onUpdated }: TaskEditDialogProps) {
   const { user } = useAuth();
-  const [open, setOpen] = useState(false);
-  const [title, setTitle] = useState("");
-  const [description, setDescription] = useState("");
-  const [priority, setPriority] = useState("normal");
-  const [dueDate, setDueDate] = useState("");
-  const [assignedTo, setAssignedTo] = useState("");
-  const [dealId, setDealId] = useState(defaultDealId ?? "");
+  const [title, setTitle] = useState(task.title);
+  const [description, setDescription] = useState(task.description ?? "");
+  const [priority, setPriority] = useState(task.priority);
+  const [dueDate, setDueDate] = useState(task.dueDate ?? "");
+  const [assignedTo, setAssignedTo] = useState(task.assignedTo);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [assignees, setAssignees] = useState<Assignee[]>([]);
-  const [deals, setDeals] = useState<DealOption[]>([]);
 
   const canAssign = user?.role === "admin" || user?.role === "director";
+
+  // Reset form when task changes
+  useEffect(() => {
+    setTitle(task.title);
+    setDescription(task.description ?? "");
+    setPriority(task.priority);
+    setDueDate(task.dueDate ?? "");
+    setAssignedTo(task.assignedTo);
+    setError(null);
+  }, [task]);
 
   // Fetch assignees for directors/admins
   useEffect(() => {
@@ -62,14 +63,6 @@ export function TaskCreateDialog({ onCreated, defaultDealId, defaultContactId }:
       .catch(() => setAssignees([]));
   }, [canAssign, open]);
 
-  // Fetch deals for the deal picker (only if no defaultDealId)
-  useEffect(() => {
-    if (defaultDealId || !open) return;
-    api<{ deals: DealOption[] }>("/deals?limit=50&isActive=true")
-      .then((data) => setDeals(data.deals))
-      .catch(() => setDeals([]));
-  }, [defaultDealId, open]);
-
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!title.trim()) return;
@@ -77,43 +70,30 @@ export function TaskCreateDialog({ onCreated, defaultDealId, defaultContactId }:
     setSubmitting(true);
     setError(null);
     try {
-      await createTask({
-        title: title.trim(),
-        description: description.trim() || undefined,
-        type: "manual",
-        priority,
-        dueDate: dueDate || undefined,
-        assignedTo: canAssign && assignedTo ? assignedTo : undefined,
-        dealId: dealId || defaultDealId || undefined,
-        contactId: defaultContactId,
-      } as Parameters<typeof createTask>[0]);
-      setTitle("");
-      setDescription("");
-      setPriority("normal");
-      setDueDate("");
-      setAssignedTo("");
-      setDealId(defaultDealId ?? "");
-      setOpen(false);
-      onCreated();
+      const changes: Record<string, unknown> = {};
+      if (title.trim() !== task.title) changes.title = title.trim();
+      if ((description.trim() || null) !== (task.description || null)) changes.description = description.trim() || null;
+      if (priority !== task.priority) changes.priority = priority;
+      if ((dueDate || null) !== (task.dueDate || null)) changes.dueDate = dueDate || null;
+      if (assignedTo !== task.assignedTo && canAssign) changes.assignedTo = assignedTo;
+
+      if (Object.keys(changes).length > 0) {
+        await updateTask(task.id, changes);
+      }
+      onOpenChange(false);
+      onUpdated();
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to create task");
+      setError(err instanceof Error ? err.message : "Failed to update task");
     } finally {
       setSubmitting(false);
     }
   };
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger
-        render={
-          <Button size="sm">
-            <Plus className="h-4 w-4 mr-1" /> New Task
-          </Button>
-        }
-      />
+    <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Create Task</DialogTitle>
+          <DialogTitle>Edit Task</DialogTitle>
         </DialogHeader>
         <form onSubmit={handleSubmit} className="space-y-4">
           <Input
@@ -155,9 +135,9 @@ export function TaskCreateDialog({ onCreated, defaultDealId, defaultContactId }:
           {canAssign && assignees.length > 0 && (
             <div>
               <label className="text-xs text-muted-foreground mb-1 block">Assignee</label>
-              <Select value={assignedTo} onValueChange={(v) => setAssignedTo(v ?? "")}>
+              <Select value={assignedTo} onValueChange={(v) => setAssignedTo(v ?? assignedTo)}>
                 <SelectTrigger>
-                  <SelectValue placeholder="Assign to myself" />
+                  <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
                   {assignees.map((u) => (
@@ -169,31 +149,13 @@ export function TaskCreateDialog({ onCreated, defaultDealId, defaultContactId }:
               </Select>
             </div>
           )}
-          {!defaultDealId && deals.length > 0 && (
-            <div>
-              <label className="text-xs text-muted-foreground mb-1 block">Link to Deal (optional)</label>
-              <Select value={dealId} onValueChange={(v) => setDealId(v ?? "")}>
-                <SelectTrigger>
-                  <SelectValue placeholder="No deal linked" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="">No deal linked</SelectItem>
-                  {deals.map((d) => (
-                    <SelectItem key={d.id} value={d.id}>
-                      {d.dealNumber} - {d.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-          )}
           {error && <p className="text-sm text-red-600">{error}</p>}
           <div className="flex justify-end gap-2">
-            <Button type="button" variant="ghost" onClick={() => setOpen(false)}>
+            <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>
               Cancel
             </Button>
             <Button type="submit" disabled={submitting || !title.trim()}>
-              {submitting ? "Creating..." : "Create Task"}
+              {submitting ? "Saving..." : "Save Changes"}
             </Button>
           </div>
         </form>

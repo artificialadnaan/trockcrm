@@ -14,6 +14,7 @@ import {
 import { useTasks, useTaskCounts, completeTask, dismissTask, snoozeTask } from "@/hooks/use-tasks";
 import type { Task } from "@/hooks/use-tasks";
 import { TaskCreateDialog } from "@/components/tasks/task-create-dialog";
+import { TaskEditDialog } from "@/components/tasks/task-edit-dialog";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -144,6 +145,7 @@ function IndustrialTaskRow({
 }) {
   const navigate = useNavigate();
   const [loading, setLoading] = useState(false);
+  const [editOpen, setEditOpen] = useState(false);
   const isCompleted = task.status === "completed" || task.status === "dismissed";
   const overdueDays = task.dueDate && task.isOverdue ? daysOverdue(task.dueDate) : 0;
 
@@ -188,12 +190,18 @@ function IndustrialTaskRow({
   };
 
   const handleClick = () => {
+    setEditOpen(true);
+  };
+
+  const handleNavigate = (e: React.MouseEvent) => {
+    e.stopPropagation();
     if (task.dealId) navigate(`/deals/${task.dealId}`);
     else if (task.contactId) navigate(`/contacts/${task.contactId}`);
     else if (task.emailId) navigate("/email");
   };
 
   return (
+    <>
     <div
       onClick={handleClick}
       className={`grid grid-cols-12 items-center gap-4 px-4 py-3 cursor-pointer transition-all group ${
@@ -297,9 +305,20 @@ function IndustrialTaskRow({
             </button>
           </div>
         )}
+        {(task.dealId || task.contactId || task.emailId) && (
+          <button
+            onClick={handleNavigate}
+            className="h-6 w-6 rounded flex items-center justify-center hover:bg-blue-100 transition-colors opacity-0 group-hover:opacity-100"
+            title="Go to linked record"
+          >
+            <Pencil className="h-3 w-3 text-blue-500" />
+          </button>
+        )}
         <AssigneeAvatar name={task.assignedToName} />
       </div>
     </div>
+    <TaskEditDialog task={task} open={editOpen} onOpenChange={setEditOpen} onUpdated={onUpdate} />
+    </>
   );
 }
 

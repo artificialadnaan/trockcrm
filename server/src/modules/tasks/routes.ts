@@ -2,6 +2,7 @@ import { Router } from "express";
 import { jobQueue } from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
 import { eventBus } from "../../events/bus.js";
+import { listUsers } from "../admin/users-service.js";
 import {
   getTasks,
   getTaskCounts,
@@ -14,6 +15,20 @@ import {
 } from "./service.js";
 
 const router = Router();
+
+// GET /api/tasks/assignees — list users for assignee picker (directors/admins)
+router.get("/assignees", async (req, res, next) => {
+  try {
+    const officeId = req.user!.activeOfficeId ?? req.user!.officeId;
+    const rows = await listUsers(officeId);
+    const users = rows
+      .filter((u) => u.isActive)
+      .map((u) => ({ id: u.id, displayName: u.displayName }));
+    res.json({ users });
+  } catch (err) {
+    next(err);
+  }
+});
 
 // GET /api/tasks — list tasks (paginated, filtered by section)
 router.get("/", async (req, res, next) => {

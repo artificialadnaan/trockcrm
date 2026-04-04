@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Check, X, Clock, Handshake, Users, Mail } from "lucide-react";
+import { Check, X, Clock, Handshake, Users, Mail, Pencil } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -9,6 +9,7 @@ import {
   snoozeTask as apiSnoozeTask,
 } from "@/hooks/use-tasks";
 import type { Task } from "@/hooks/use-tasks";
+import { TaskEditDialog } from "./task-edit-dialog";
 
 interface TaskRowProps {
   task: Task;
@@ -35,6 +36,7 @@ const typeIcons: Record<string, typeof Handshake> = {
 export function TaskRow({ task, onUpdate }: TaskRowProps) {
   const navigate = useNavigate();
   const [loading, setLoading] = useState(false);
+  const [editOpen, setEditOpen] = useState(false);
 
   const handleComplete = async (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -77,7 +79,11 @@ export function TaskRow({ task, onUpdate }: TaskRowProps) {
   };
 
   const handleClick = () => {
-    // Navigate to the linked entity
+    setEditOpen(true);
+  };
+
+  const handleNavigate = (e: React.MouseEvent) => {
+    e.stopPropagation();
     if (task.dealId) navigate(`/deals/${task.dealId}`);
     else if (task.contactId) navigate(`/contacts/${task.contactId}`);
     else if (task.emailId) navigate("/email");
@@ -87,6 +93,7 @@ export function TaskRow({ task, onUpdate }: TaskRowProps) {
   const isCompleted = task.status === "completed" || task.status === "dismissed";
 
   return (
+    <>
     <div
       className={`flex items-center gap-3 px-3 py-2.5 rounded-md hover:bg-muted/50 cursor-pointer transition-colors ${
         isCompleted ? "opacity-60" : ""
@@ -142,8 +149,21 @@ export function TaskRow({ task, onUpdate }: TaskRowProps) {
           >
             <X className="h-3.5 w-3.5 text-muted-foreground" />
           </Button>
+          {(task.dealId || task.contactId || task.emailId) && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7"
+              onClick={handleNavigate}
+              title="Go to linked record"
+            >
+              <Pencil className="h-3.5 w-3.5 text-blue-500" />
+            </Button>
+          )}
         </div>
       )}
     </div>
+    <TaskEditDialog task={task} open={editOpen} onOpenChange={setEditOpen} onUpdated={onUpdate} />
+    </>
   );
 }
