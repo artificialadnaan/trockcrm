@@ -11,9 +11,16 @@ import type {
 } from "../../../src/modules/tasks/rules/types.js";
 
 function createInMemoryStore(
-  initialTasks: Array<TaskRecord> = []
+  initialTasks: Array<TaskRecord> = [],
+  resolutionStates: Array<{
+    originRule: string;
+    dedupeKey: string;
+    resolutionStatus: "completed" | "dismissed" | "suppressed";
+    suppressedUntil?: Date | string | null;
+  }> = []
 ) {
   const tasks = new Map<string, Map<string, TaskRecord>>();
+  const resolutions = new Map<string, { suppressedUntil?: Date | string | null; resolutionStatus: string }>();
   const operations: Array<"insert" | "update"> = [];
   let sequence = initialTasks.length + 1;
 
@@ -30,10 +37,16 @@ function createInMemoryStore(
   for (const task of initialTasks) {
     setTask(task);
   }
+  for (const state of resolutionStates) {
+    resolutions.set(`${state.originRule}|${state.dedupeKey}`, state);
+  }
 
-  const persistence: TaskRulePersistence = {
+  const persistence: any = {
     async findOpenTaskByBusinessKey({ originRule, dedupeKey }) {
       return getTask(originRule, dedupeKey);
+    },
+    async findResolutionStateByBusinessKey({ originRule, dedupeKey }: { originRule: string; dedupeKey: string }) {
+      return resolutions.get(`${originRule}|${dedupeKey}`) ?? null;
     },
     async insertTask(draft) {
       operations.push("insert");
@@ -62,6 +75,7 @@ function createInMemoryStore(
   return {
     persistence,
     tasks,
+    resolutions,
     operations,
     countTasks() {
       return [...tasks.values()].reduce((count, byOrigin) => count + byOrigin.size, 0);
@@ -108,6 +122,31 @@ describe("task rule evaluator", () => {
       originRule: "stale_deal",
       dedupeKey: "deal:123",
     })).not.toBeNull();
+  });
+
+  it("skips regeneration when a completed resolution state exists for the same business key", async () => {
+    const store = createInMemoryStore([], [
+      {
+        originRule: "stale_deal",
+        dedupeKey: "deal:123",
+        resolutionStatus: "completed",
+        suppressedUntil: new Date("2026-04-10T00:00:00.000Z"),
+      },
+    ]);
+    const context = makeContext();
+
+    const outcomes = await evaluateTaskRules(context, store.persistence, TASK_RULES);
+
+    expect(store.countTasks()).toBe(0);
+    expect(outcomes).toContainEqual({
+      ruleId: "stale_deal",
+      businessKey: { originRule: "stale_deal", dedupeKey: "deal:123" },
+      action: "skipped",
+      reason: {
+        code: "resolution_state_suppressed",
+        detail: "stale_deal|deal:123",
+      },
+    });
   });
 
   it("skips persistence when assignment resolves to no candidate", async () => {

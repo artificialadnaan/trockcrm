@@ -217,6 +217,18 @@ router.post("/:id/transition", async (req, res, next) => {
 router.post("/:id/complete", async (req, res, next) => {
   try {
     const task = await completeTask(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    const completionPayload = {
+      taskId: task.id,
+      dealId: task.dealId,
+      contactId: task.contactId,
+      title: task.title,
+      type: task.type,
+      completedBy: req.user!.id,
+      originRule: task.originRule,
+      dedupeKey: task.dedupeKey,
+      reasonCode: task.reasonCode,
+      entitySnapshot: task.entitySnapshot,
+    };
 
     // Outbox pattern: insert into job_queue BEFORE committing the transaction
     // so the event is guaranteed to be persisted even if emitLocal fails.
@@ -224,12 +236,7 @@ router.post("/:id/complete", async (req, res, next) => {
       jobType: "domain_event",
       payload: {
         eventName: "task.completed",
-        taskId: task.id,
-        dealId: task.dealId,
-        contactId: task.contactId,
-        title: task.title,
-        type: task.type,
-        completedBy: req.user!.id,
+        ...completionPayload,
       },
       officeId: req.user!.activeOfficeId ?? req.user!.officeId,
       status: "pending",
@@ -242,14 +249,7 @@ router.post("/:id/complete", async (req, res, next) => {
     try {
       eventBus.emitLocal({
         name: "task.completed",
-        payload: {
-          taskId: task.id,
-          dealId: task.dealId,
-          contactId: task.contactId,
-          title: task.title,
-          type: task.type,
-          completedBy: req.user!.id,
-        },
+        payload: completionPayload,
         officeId: req.user!.activeOfficeId ?? req.user!.officeId,
         userId: req.user!.id,
         timestamp: new Date(),

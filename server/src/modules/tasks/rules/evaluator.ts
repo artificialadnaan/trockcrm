@@ -3,6 +3,7 @@ import type {
   RuleEvaluationOutcome,
   TaskBusinessKey,
   TaskRecord,
+  TaskResolutionStateRecord,
   TaskRuleDefinition,
   TaskRulePersistence,
   TaskRuleContext,
@@ -14,6 +15,27 @@ function makeBusinessKeyKey(key: TaskBusinessKey): readonly [string, string] {
 
 function makeSkipReason(code: string, detail: string) {
   return { code, detail };
+}
+
+function isResolutionStateActive(
+  state: TaskResolutionStateRecord,
+  now: Date
+): boolean {
+  const suppressedUntil = state.suppressedUntil ? new Date(state.suppressedUntil) : null;
+
+  if (state.resolutionStatus === "completed") {
+    return suppressedUntil == null || suppressedUntil > now;
+  }
+
+  if (state.resolutionStatus === "suppressed") {
+    return suppressedUntil == null || suppressedUntil > now;
+  }
+
+  if (state.resolutionStatus === "dismissed") {
+    return suppressedUntil != null && suppressedUntil > now;
+  }
+
+  return false;
 }
 
 export async function evaluateTaskRules(
@@ -60,6 +82,19 @@ export async function evaluateTaskRules(
       seenByOrigin.add(compositeKey[1]);
     } else {
       seenKeys.set(compositeKey[0], new Set([compositeKey[1]]));
+    }
+
+    const resolutionState = persistence.findResolutionStateByBusinessKey
+      ? await persistence.findResolutionStateByBusinessKey(businessKey)
+      : null;
+    if (resolutionState && isResolutionStateActive(resolutionState, context.now)) {
+      outcomes.push({
+        ruleId: rule.id,
+        businessKey,
+        action: "skipped",
+        reason: makeSkipReason("resolution_state_suppressed", `${businessKey.originRule}|${businessKey.dedupeKey}`),
+      });
+      continue;
     }
 
     const draft = await rule.buildTask(context);

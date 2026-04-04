@@ -69,6 +69,15 @@ export interface TaskBusinessKey {
   dedupeKey: string;
 }
 
+export type TaskResolutionStatus = "completed" | "dismissed" | "suppressed";
+
+export interface TaskResolutionStateRecord {
+  originRule: string;
+  dedupeKey: string;
+  resolutionStatus: TaskResolutionStatus;
+  suppressedUntil?: Date | string | null;
+}
+
 export interface TaskRecord extends SystemTaskDraft {
   id: string;
   status: "pending" | "scheduled" | "in_progress" | "waiting_on" | "blocked";
@@ -76,6 +85,7 @@ export interface TaskRecord extends SystemTaskDraft {
 
 export interface TaskRulePersistence {
   findOpenTaskByBusinessKey(key: TaskBusinessKey): Promise<TaskRecord | null>;
+  findResolutionStateByBusinessKey?(key: TaskBusinessKey): Promise<TaskResolutionStateRecord | null>;
   insertTask(draft: SystemTaskDraft): Promise<TaskRecord>;
   updateTask(taskId: string, draft: SystemTaskDraft): Promise<TaskRecord>;
 }

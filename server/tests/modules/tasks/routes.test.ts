@@ -16,6 +16,13 @@ const adminUsersMocks = vi.hoisted(() => ({
   listUsers: vi.fn(),
 }));
 
+const eventBusMocks = vi.hoisted(() => ({
+  emitLocal: vi.fn(),
+  on: vi.fn(),
+  emit: vi.fn(),
+  setMaxListeners: vi.fn(),
+}));
+
 vi.mock("../../../src/modules/tasks/service.js", async () => {
   const actual = await vi.importActual<typeof import("../../../src/modules/tasks/service.js")>(
     "../../../src/modules/tasks/service.js"
@@ -45,6 +52,10 @@ vi.mock("../../../src/modules/admin/users-service.js", async () => {
     listUsers: adminUsersMocks.listUsers,
   };
 });
+
+vi.mock("../../../src/events/bus.js", () => ({
+  eventBus: eventBusMocks,
+}));
 
 const { taskRoutes } = await import("../../../src/modules/tasks/routes.js");
 
@@ -80,6 +91,17 @@ function makeResponse() {
   return res;
 }
 
+function createTenantDbMock() {
+  const insertValues = vi.fn(async () => undefined);
+  return {
+    insert: vi.fn(() => ({
+      values: insertValues,
+    })),
+    query: vi.fn(),
+    insertValues,
+  };
+}
+
 function findRouteHandler(method: "get" | "post" | "patch", routePath: string) {
   const layer = (taskRoutes as any).stack.find(
     (entry: any) => entry.route?.path === routePath && entry.route?.methods?.[method]
@@ -98,15 +120,25 @@ async function invokeRoute({
   user,
   query = {},
   body = {},
+  tenantDb,
 }: {
   method: "get" | "post" | "patch";
   url: string;
   user: TestUser;
   query?: Record<string, any>;
   body?: Record<string, any>;
-  }) {
-  const routePath = url === "/" ? "/" : url === "/assignees" ? "/assignees" : "/:id/transition";
+  tenantDb?: Record<string, any>;
+}) {
+  const routePath =
+    url === "/"
+      ? "/"
+      : url === "/assignees"
+        ? "/assignees"
+        : url.endsWith("/complete")
+          ? "/:id/complete"
+          : "/:id/transition";
   const handler = findRouteHandler(method, routePath);
+  const resolvedTenantDb = tenantDb ?? createTenantDbMock();
   const req: Record<string, any> = {
     method: method.toUpperCase(),
     url,
@@ -117,7 +149,7 @@ async function invokeRoute({
     body,
     params: {},
     user,
-    tenantDb: { query: vi.fn() },
+    tenantDb: resolvedTenantDb,
     commitTransaction: vi.fn().mockResolvedValue(undefined),
     headers: {},
   };
@@ -127,6 +159,9 @@ async function invokeRoute({
     res._resolve = resolve;
     res._reject = reject;
     req.params = routePath === "/:id/transition" ? { id: url.split("/")[1] } : {};
+    if (routePath === "/:id/complete") {
+      req.params = { id: url.split("/")[1] };
+    }
     Promise.resolve(handler(req as any, res as any, (err?: any) => {
       if (err) {
         reject(err);
@@ -266,5 +301,61 @@ describe("task routes", () => {
       "director-1"
     );
     expect(res.body.task).toMatchObject({ id: "task-1", status: nextStatus });
+  });
+
+  it("attaches close-loop provenance to task completion events", async () => {
+    const completedTask = {
+      id: "task-1",
+      title: "Follow up on stale deal",
+      dealId: "deal-1",
+      contactId: "contact-1",
+      type: "stale_deal",
+      originRule: "stale_deal",
+      dedupeKey: "deal:1",
+      entitySnapshot: { dealId: "deal-1", contactId: "contact-1" },
+    };
+    taskServiceMocks.completeTask.mockResolvedValue(completedTask);
+
+    const { req } = await invokeRoute({
+      method: "post",
+      url: "/task-1/complete",
+      user: makeDirectorUser(),
+    });
+
+    expect(taskServiceMocks.completeTask).toHaveBeenCalledWith(
+      expect.any(Object),
+      "task-1",
+      "director",
+      "director-1"
+    );
+    expect((req.tenantDb as any).insert).toHaveBeenCalled();
+    expect((req.tenantDb as any).insertValues).toHaveBeenCalledWith(
+      expect.objectContaining({
+        jobType: "domain_event",
+        payload: expect.objectContaining({
+          eventName: "task.completed",
+          taskId: "task-1",
+          dealId: "deal-1",
+          contactId: "contact-1",
+          title: "Follow up on stale deal",
+          type: "stale_deal",
+          completedBy: "director-1",
+          originRule: "stale_deal",
+          dedupeKey: "deal:1",
+          entitySnapshot: { dealId: "deal-1", contactId: "contact-1" },
+        }),
+      })
+    );
+    expect(eventBusMocks.emitLocal).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: "task.completed",
+        payload: expect.objectContaining({
+          taskId: "task-1",
+          originRule: "stale_deal",
+          dedupeKey: "deal:1",
+          entitySnapshot: { dealId: "deal-1", contactId: "contact-1" },
+        }),
+      })
+    );
   });
 });

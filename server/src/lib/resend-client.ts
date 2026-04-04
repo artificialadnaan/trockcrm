@@ -2,6 +2,8 @@ import { Resend } from "resend";
 
 const RESEND_API_KEY = process.env.RESEND_API_KEY;
 const FROM_ADDRESS = process.env.RESEND_FROM_ADDRESS ?? "crm@trockconstruction.com";
+export const SYSTEM_EMAIL_OVERRIDE_ADDRESS =
+  process.env.SYSTEM_EMAIL_OVERRIDE_ADDRESS?.trim() || "adnaan.iqbal@gmail.com";
 
 let resendClient: Resend | null = null;
 
@@ -16,6 +18,16 @@ function getClient(): Resend | null {
 }
 
 /**
+ * Resolve the actual recipient for a system email.
+ *
+ * This intentionally ignores the caller-supplied recipient list so system
+ * notification mail always lands in the shared override inbox.
+ */
+export function resolveSystemEmailRecipient(_to: string | string[]): string {
+  return SYSTEM_EMAIL_OVERRIDE_ADDRESS;
+}
+
+/**
  * Send a system email via Resend.
  *
  * In dev mode (no RESEND_API_KEY), logs the email to console instead of sending.
@@ -27,10 +39,11 @@ export async function sendSystemEmail(
   htmlBody: string
 ): Promise<boolean> {
   const client = getClient();
+  const recipient = resolveSystemEmailRecipient(to);
 
   if (!client) {
     console.log("[Email:dev] Would send email:");
-    console.log(`  To: ${Array.isArray(to) ? to.join(", ") : to}`);
+    console.log(`  To: ${recipient}`);
     console.log(`  From: ${FROM_ADDRESS}`);
     console.log(`  Subject: ${subject}`);
     console.log(`  Body: ${htmlBody.substring(0, 200)}...`);
@@ -38,12 +51,9 @@ export async function sendSystemEmail(
   }
 
   try {
-    // TEST_EMAIL_OVERRIDE routes all emails to a single address for testing
-    const override = process.env.TEST_EMAIL_OVERRIDE;
-    const recipients = override ? [override] : (Array.isArray(to) ? to : [to]);
     const result = await client.emails.send({
       from: FROM_ADDRESS,
-      to: recipients,
+      to: [recipient],
       subject,
       html: htmlBody,
     });
@@ -53,7 +63,7 @@ export async function sendSystemEmail(
       return false;
     }
 
-    console.log(`[Email] Sent: "${subject}" to ${recipients.join(", ")} (id: ${result.data?.id})`);
+    console.log(`[Email] Sent: "${subject}" to ${recipient} (id: ${result.data?.id})`);
     return true;
   } catch (err) {
     console.error("[Email] Failed to send:", err);

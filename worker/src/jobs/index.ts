@@ -832,6 +832,16 @@ export function registerAllJobs() {
       ]
     );
 
+    if (payload.dealId) {
+      await workerPool.query(
+        `UPDATE ${schemaName}.deals
+         SET last_activity_at = NOW(),
+             updated_at = NOW()
+         WHERE id = $1`,
+        [payload.dealId]
+      );
+    }
+
     // If the completed task is a touchpoint and has a contact, update outreach tracking.
     // The PostgreSQL trigger only fires for call/email/meeting activity types,
     // so touchpoint task completions need explicit contact updates.
@@ -843,6 +853,32 @@ export function registerAllJobs() {
              touchpoint_count = touchpoint_count + 1
          WHERE id = $1 AND first_outreach_completed = false`,
         [payload.contactId]
+      );
+    }
+
+    if (payload.originRule && payload.dedupeKey) {
+      await workerPool.query(
+        `INSERT INTO ${schemaName}.task_resolution_state
+         (office_id, task_id, origin_rule, dedupe_key, resolution_status, resolution_reason, resolved_at, suppressed_until, entity_snapshot)
+         VALUES ($1, $2, $3, $4, 'completed', $5, NOW(), $6, $7)
+         ON CONFLICT (origin_rule, dedupe_key) DO UPDATE
+         SET office_id = EXCLUDED.office_id,
+             task_id = EXCLUDED.task_id,
+             resolution_status = EXCLUDED.resolution_status,
+             resolution_reason = EXCLUDED.resolution_reason,
+             resolved_at = EXCLUDED.resolved_at,
+             suppressed_until = EXCLUDED.suppressed_until,
+             entity_snapshot = EXCLUDED.entity_snapshot,
+             updated_at = NOW()`,
+        [
+          userResult.rows[0].office_id,
+          payload.taskId,
+          payload.originRule,
+          payload.dedupeKey,
+          payload.reasonCode ?? payload.type ?? "task_completed",
+          null,
+          payload.entitySnapshot ?? null,
+        ]
       );
     }
   });
