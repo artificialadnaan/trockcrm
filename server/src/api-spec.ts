@@ -204,7 +204,7 @@ export const apiSpec = {
             description: "Task origin type.",
           },
           priority: { type: "string", enum: ["low", "normal", "high", "urgent"], default: "normal" },
-          status: { type: "string", enum: ["pending", "completed", "dismissed", "snoozed"], default: "pending" },
+          status: { type: "string", enum: ["pending", "scheduled", "in_progress", "waiting_on", "blocked", "completed", "dismissed"], default: "pending" },
           assignedTo: { type: "string", format: "uuid" },
           createdBy: { type: "string", format: "uuid", nullable: true },
           dealId: { type: "string", format: "uuid", nullable: true },
@@ -213,6 +213,10 @@ export const apiSpec = {
           dueDate: { type: "string", format: "date", nullable: true },
           dueTime: { type: "string", nullable: true, example: "09:00:00" },
           remindAt: { type: "string", format: "date-time", nullable: true },
+          scheduledFor: { type: "string", format: "date-time", nullable: true },
+          waitingOn: { type: "object", nullable: true, additionalProperties: true },
+          blockedBy: { type: "object", nullable: true, additionalProperties: true },
+          startedAt: { type: "string", format: "date-time", nullable: true },
           completedAt: { type: "string", format: "date-time", nullable: true },
           isOverdue: { type: "boolean", default: false },
           createdAt: { type: "string", format: "date-time" },
@@ -2007,7 +2011,7 @@ export const apiSpec = {
         description: "Reps see only tasks assigned to them. Directors/admins see all tasks.",
         parameters: [
           { name: "assignedTo", in: "query", schema: { type: "string", format: "uuid" }, description: "Filter by assignee. Ignored for reps (forced to own ID)." },
-          { name: "status", in: "query", schema: { type: "string", enum: ["pending", "completed", "dismissed", "snoozed"] } },
+          { name: "status", in: "query", schema: { type: "string", enum: ["pending", "scheduled", "in_progress", "waiting_on", "blocked", "completed", "dismissed"] } },
           { name: "type", in: "query", schema: { type: "string" } },
           { name: "dealId", in: "query", schema: { type: "string", format: "uuid" } },
           { name: "contactId", in: "query", schema: { type: "string", format: "uuid" } },
@@ -2149,6 +2153,44 @@ export const apiSpec = {
               },
             },
           },
+          404: { description: "Task not found." },
+        },
+      },
+    },
+
+    "/api/tasks/{id}/transition": {
+      post: {
+        tags: ["Tasks"],
+        summary: "Transition a task lifecycle state",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string", format: "uuid" } }],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: {
+                  nextStatus: { type: "string", enum: ["pending", "scheduled", "in_progress", "waiting_on", "blocked", "completed", "dismissed"] },
+                  scheduledFor: { type: "string", format: "date-time" },
+                  waitingOn: { type: "object", additionalProperties: true },
+                  blockedBy: { type: "object", additionalProperties: true },
+                },
+                required: ["nextStatus"],
+              },
+            },
+          },
+        },
+        responses: {
+          200: {
+            description: "Task transitioned.",
+            content: {
+              "application/json": {
+                schema: { type: "object", properties: { task: { $ref: "#/components/schemas/Task" } } },
+              },
+            },
+          },
+          400: { description: "Invalid transition payload." },
+          403: { description: "Access denied." },
           404: { description: "Task not found." },
         },
       },

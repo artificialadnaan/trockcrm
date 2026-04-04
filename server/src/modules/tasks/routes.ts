@@ -10,6 +10,7 @@ import {
   getTaskById,
   createTask,
   updateTask,
+  transitionTaskStatus,
   completeTask,
   dismissTask,
   snoozeTask,
@@ -183,6 +184,31 @@ router.patch("/:id", async (req, res, next) => {
       req.user!.role,
       req.user!.id
     );
+    await req.commitTransaction!();
+    res.json({ task });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/tasks/:id/transition — move a task through the lifecycle
+router.post("/:id/transition", async (req, res, next) => {
+  try {
+    const { nextStatus, scheduledFor, waitingOn, blockedBy } = req.body;
+
+    const task = await transitionTaskStatus(
+      req.tenantDb!,
+      req.params.id,
+      {
+        nextStatus,
+        scheduledFor,
+        waitingOn,
+        blockedBy,
+      },
+      req.user!.role,
+      req.user!.id
+    );
+
     await req.commitTransaction!();
     res.json({ task });
   } catch (err) {
