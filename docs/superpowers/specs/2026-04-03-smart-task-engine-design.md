@@ -749,6 +749,7 @@ Required coverage areas:
 - auto-remediation positive and negative criteria for duplicate terminalization
 - office-scoped remediation queue authorization and audit logging
 - remediation audit-event invariants: `schema_version`, UTC timestamps, normalized before/after snapshots, and required `machine_reason` for automatic resolutions
+- schedule-payload remediation semantics: no mixed scalar minima across `scheduled_for`, `due_date`, `due_time`, and `remind_at`
 - task-related production path/deep-link behavior where changed
 - API contract verification against the generated task API spec so enums, fields, and filters cannot drift silently
 
@@ -848,7 +849,7 @@ Backfill guarantees:
 Collision remediation path:
 
 - non-survivor duplicates are not left as active legacy rows
-- if they are safe to terminalize automatically, they are dismissed with a migration reason note
+- if they are safe to terminalize automatically, they are dismissed with a required `machine_reason`
 - if they are not safe to terminalize automatically, they are moved into a dedicated migration review table and surfaced in an admin remediation queue before the unique active index is enforced
 
 Auto-remediation criteria:
@@ -883,7 +884,7 @@ Remediation queue contract:
 - `merged_into_survivor` is allowed only when every differing field is in this preservable allowlist: `description`, `priority`, `scheduled_for`, `due_date`, `due_time`, `remind_at`, `waiting_on`, `blocked_by`
 - `merged_into_survivor` is allowed only for these status pairs: `pending -> pending`, `scheduled -> scheduled`, `waiting_on -> waiting_on`, `blocked -> blocked`
 - `merged_into_survivor` updates the survivor row deterministically before dismissing the duplicate:
-  `priority` keeps the higher-urgency value, `scheduled_for` keeps the earlier non-null timestamp, `due_date`/`due_time`/`remind_at` keep the earlier non-null values, `description` appends a remediation note only when texts differ, and `waiting_on`/`blocked_by` may be copied only when both rows share the same status family and survivor lacks a value
+  `priority` keeps the higher-urgency value; scheduling values are treated as a single logical payload, so `scheduled_for` or the `(due_date, due_time, remind_at)` tuple must be copied coherently from one source row and never synthesized from mixed scalar minima; `description` is never mutated by remediation; and `waiting_on`/`blocked_by` may be copied only when both rows share the same status family and survivor lacks a value
 - `merged_into_survivor` does not move external linked records, notifications, or comments in the initial rollout
 
 Remediation audit event contract:
