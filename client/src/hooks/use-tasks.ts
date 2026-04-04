@@ -39,8 +39,16 @@ export interface Task {
 export interface TaskTransitionInput {
   nextStatus: TaskStatus;
   scheduledFor?: string | null;
-  waitingOn?: Record<string, unknown> | null;
-  blockedBy?: Record<string, unknown> | null;
+  waitingOn?: TaskLifecycleReference | Record<string, unknown> | null;
+  blockedBy?: TaskLifecycleReference | Record<string, unknown> | null;
+}
+
+export interface TaskLifecycleReference {
+  schema_version: number;
+  kind: string;
+  label: string;
+  ref_type: string;
+  ref_id: string;
 }
 
 export const TASK_STATUS_LABELS: Record<TaskStatus, string> = {
@@ -59,6 +67,93 @@ export function getTaskStatusLabel(status: string) {
 
 export function isTerminalTaskStatus(status: string) {
   return status === "completed" || status === "dismissed";
+}
+
+export const TASK_ALLOWED_TRANSITIONS: Record<TaskStatus, readonly TaskStatus[]> = {
+  pending: ["scheduled", "in_progress", "waiting_on", "blocked", "completed", "dismissed"],
+  scheduled: ["pending", "dismissed"],
+  in_progress: ["scheduled", "waiting_on", "blocked", "completed", "dismissed"],
+  waiting_on: ["scheduled", "pending", "in_progress", "blocked", "completed", "dismissed"],
+  blocked: ["scheduled", "pending", "in_progress", "waiting_on", "completed", "dismissed"],
+  completed: [],
+  dismissed: [],
+};
+
+export function canTransitionTask(status: TaskStatus, nextStatus: TaskStatus) {
+  return TASK_ALLOWED_TRANSITIONS[status].includes(nextStatus);
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" ? (value as Record<string, unknown>) : null;
+}
+
+function asString(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0 ? value : null;
+}
+
+function formatLifecycleDate(value: string | null) {
+  if (!value) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toLocaleString();
+}
+
+function getLifecycleReferenceLabel(value: unknown) {
+  const record = asRecord(value);
+  return asString(record?.label) ?? asString(record?.kind) ?? null;
+}
+
+function getLifecycleReferenceBase(task: Pick<Task, "id" | "dealId" | "contactId" | "emailId">) {
+  if (task.dealId) {
+    return { ref_type: "deal", ref_id: task.dealId };
+  }
+  if (task.contactId) {
+    return { ref_type: "contact", ref_id: task.contactId };
+  }
+  if (task.emailId) {
+    return { ref_type: "email", ref_id: task.emailId };
+  }
+  return { ref_type: "task", ref_id: task.id };
+}
+
+export function buildTaskLifecycleReference(
+  task: Pick<Task, "id" | "dealId" | "contactId" | "emailId">,
+  kind: string,
+  label: string,
+  existing?: unknown
+): TaskLifecycleReference {
+  const record = asRecord(existing);
+  const base = getLifecycleReferenceBase(task);
+  return {
+    schema_version: 1,
+    kind: asString(record?.kind) ?? kind,
+    label: label.trim() || asString(record?.label) || kind,
+    ref_type: asString(record?.ref_type) ?? base.ref_type,
+    ref_id: asString(record?.ref_id) ?? base.ref_id,
+  };
+}
+
+export function getTaskLifecycleSummary(task: Pick<Task, "status" | "scheduledFor" | "waitingOn" | "blockedBy" | "startedAt">) {
+  if (task.status === "scheduled") {
+    return formatLifecycleDate(task.scheduledFor) ? `Scheduled for ${formatLifecycleDate(task.scheduledFor)}` : "Scheduled";
+  }
+
+  if (task.status === "waiting_on") {
+    const label = getLifecycleReferenceLabel(task.waitingOn);
+    return label ? `Waiting on ${label}` : "Waiting on dependency";
+  }
+
+  if (task.status === "blocked") {
+    const label = getLifecycleReferenceLabel(task.blockedBy);
+    return label ? `Blocked by ${label}` : "Blocked by dependency";
+  }
+
+  if (task.status === "in_progress") {
+    const startedAt = formatLifecycleDate(task.startedAt);
+    return startedAt ? `Started ${startedAt}` : "In progress";
+  }
+
+  return null;
 }
 
 export interface TaskCounts {
@@ -135,20 +230,21 @@ export function useTasks(filters: TaskFilters = {}) {
   return { tasks, pagination, loading, error, refetch: fetchTasks };
 }
 
-export function useTaskCounts() {
+export function useTaskCounts(userId?: string) {
   const [counts, setCounts] = useState<TaskCounts>({ overdue: 0, today: 0, upcoming: 0, completed: 0 });
   const [loading, setLoading] = useState(true);
 
   const fetchCounts = useCallback(async () => {
     try {
-      const data = await api<{ counts: TaskCounts }>("/tasks/counts");
+      const qs = userId ? `?userId=${encodeURIComponent(userId)}` : "";
+      const data = await api<{ counts: TaskCounts }>(`/tasks/counts${qs}`);
       setCounts(data.counts);
     } catch (err) {
       console.error("Failed to load task counts:", err);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [userId]);
 
   useEffect(() => {
     fetchCounts();

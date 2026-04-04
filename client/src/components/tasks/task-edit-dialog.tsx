@@ -18,7 +18,10 @@ import {
 import {
   updateTask,
   transitionTask,
+  buildTaskLifecycleReference,
+  canTransitionTask,
   getTaskStatusLabel,
+  getTaskLifecycleSummary,
   isTerminalTaskStatus,
 } from "@/hooks/use-tasks";
 import type { Task } from "@/hooks/use-tasks";
@@ -44,6 +47,15 @@ function toDatetimeLocalValue(value: string | null) {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
+function getLifecycleLabel(payload: Record<string, unknown> | null) {
+  if (!payload) return "";
+  const label = payload.label;
+  if (typeof label === "string" && label.trim()) return label.trim();
+  const kind = payload.kind;
+  if (typeof kind === "string" && kind.trim()) return kind.trim();
+  return "";
+}
+
 export function TaskEditDialog({ task, open, onOpenChange, onUpdated }: TaskEditDialogProps) {
   const { user } = useAuth();
   const [title, setTitle] = useState(task.title);
@@ -52,8 +64,8 @@ export function TaskEditDialog({ task, open, onOpenChange, onUpdated }: TaskEdit
   const [dueDate, setDueDate] = useState(task.dueDate ?? "");
   const [assignedTo, setAssignedTo] = useState(task.assignedTo);
   const [scheduledFor, setScheduledFor] = useState(toDatetimeLocalValue(task.scheduledFor));
-  const [waitingOnText, setWaitingOnText] = useState("");
-  const [blockedByText, setBlockedByText] = useState("");
+  const [waitingOnText, setWaitingOnText] = useState(getLifecycleLabel(task.waitingOn));
+  const [blockedByText, setBlockedByText] = useState(getLifecycleLabel(task.blockedBy));
   const [submitting, setSubmitting] = useState(false);
   const [transitioning, setTransitioning] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -63,6 +75,7 @@ export function TaskEditDialog({ task, open, onOpenChange, onUpdated }: TaskEdit
   const canAssign = user?.role === "admin" || user?.role === "director";
   const isTerminal = isTerminalTaskStatus(task.status);
   const statusLabel = getTaskStatusLabel(task.status);
+  const lifecycleSummary = getTaskLifecycleSummary(task);
 
   const assigneeOptions = useMemo(() => {
     if (!canAssign) return [];
@@ -86,8 +99,8 @@ export function TaskEditDialog({ task, open, onOpenChange, onUpdated }: TaskEdit
     setDueDate(task.dueDate ?? "");
     setAssignedTo(task.assignedTo);
     setScheduledFor(toDatetimeLocalValue(task.scheduledFor));
-    setWaitingOnText("");
-    setBlockedByText("");
+    setWaitingOnText(getLifecycleLabel(task.waitingOn));
+    setBlockedByText(getLifecycleLabel(task.blockedBy));
     setError(null);
     setTransitionError(null);
   }, [task]);
@@ -104,9 +117,7 @@ export function TaskEditDialog({ task, open, onOpenChange, onUpdated }: TaskEdit
     setTransitioning(true);
     setTransitionError(null);
     try {
-      if (nextStatus === "completed") {
-        await transitionTask(task.id, { nextStatus });
-      } else if (nextStatus === "dismissed") {
+      if (nextStatus === "completed" || nextStatus === "dismissed" || nextStatus === "pending" || nextStatus === "in_progress") {
         await transitionTask(task.id, { nextStatus });
       } else if (nextStatus === "scheduled") {
         if (!scheduledFor) {
@@ -117,22 +128,22 @@ export function TaskEditDialog({ task, open, onOpenChange, onUpdated }: TaskEdit
           scheduledFor: new Date(scheduledFor).toISOString(),
         });
       } else if (nextStatus === "waiting_on") {
-        const note = waitingOnText.trim();
+        const note = waitingOnText.trim() || getLifecycleLabel(task.waitingOn) || "Waiting on dependency";
         if (!note) {
           throw new Error("Add a waiting-on note");
         }
         await transitionTask(task.id, {
           nextStatus,
-          waitingOn: { note },
+          waitingOn: buildTaskLifecycleReference(task, "manual_dependency", note, task.waitingOn),
         });
       } else if (nextStatus === "blocked") {
-        const note = blockedByText.trim();
+        const note = blockedByText.trim() || getLifecycleLabel(task.blockedBy) || "Blocked by dependency";
         if (!note) {
           throw new Error("Add a blocked-by note");
         }
         await transitionTask(task.id, {
           nextStatus,
-          blockedBy: { note },
+          blockedBy: buildTaskLifecycleReference(task, "manual_blocker", note, task.blockedBy),
         });
       } else {
         await transitionTask(task.id, { nextStatus });
@@ -238,6 +249,11 @@ export function TaskEditDialog({ task, open, onOpenChange, onUpdated }: TaskEdit
               </Select>
             </div>
           )}
+          {lifecycleSummary && (
+            <div className="rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+              {lifecycleSummary}
+            </div>
+          )}
           {!isTerminal && (
             <div className="rounded-md border bg-muted/30 p-3 space-y-3">
               <div className="flex items-center justify-between">
@@ -247,76 +263,115 @@ export function TaskEditDialog({ task, open, onOpenChange, onUpdated }: TaskEdit
                   </p>
                   <p className="text-sm font-medium">{statusLabel}</p>
                 </div>
-                <Button
-                  type="button"
-                  variant="secondary"
-                  size="sm"
-                  disabled={transitioning}
-                  onClick={() => handleTransition("in_progress")}
-                >
-                  Mark In Progress
-                </Button>
+                <div className="flex items-center gap-2">
+                  {task.status === "scheduled" ? (
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="sm"
+                      disabled={transitioning || !canTransitionTask(task.status, "pending")}
+                      onClick={() => handleTransition("pending")}
+                    >
+                      Resume to Pending
+                    </Button>
+                  ) : canTransitionTask(task.status, "in_progress") ? (
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="sm"
+                      disabled={transitioning}
+                      onClick={() => handleTransition("in_progress")}
+                    >
+                      Mark In Progress
+                    </Button>
+                  ) : null}
+                  {canTransitionTask(task.status, "dismissed") && (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      disabled={transitioning}
+                      onClick={() => handleTransition("dismissed")}
+                    >
+                      Dismiss
+                    </Button>
+                  )}
+                </div>
               </div>
+              {task.status === "scheduled" && (
+                <div className="text-xs text-muted-foreground">
+                  Scheduled for{" "}
+                  <span className="font-medium text-foreground">
+                    {scheduledFor ? new Date(scheduledFor).toLocaleString() : "unspecified"}
+                  </span>
+                </div>
+              )}
               <div className="grid gap-3">
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between gap-2">
-                    <label className="text-xs text-muted-foreground block">Schedule task</label>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      disabled={transitioning}
-                      onClick={() => handleTransition("scheduled")}
-                    >
-                      Apply
-                    </Button>
+                {task.status !== "scheduled" && canTransitionTask(task.status, "scheduled") && (
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <label className="text-xs text-muted-foreground block">Schedule task</label>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        disabled={transitioning}
+                        onClick={() => handleTransition("scheduled")}
+                      >
+                        Apply
+                      </Button>
+                    </div>
+                    <Input
+                      type="datetime-local"
+                      value={scheduledFor}
+                      onChange={(e) => setScheduledFor(e.target.value)}
+                    />
                   </div>
-                  <Input
-                    type="datetime-local"
-                    value={scheduledFor}
-                    onChange={(e) => setScheduledFor(e.target.value)}
-                  />
-                </div>
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between gap-2">
-                    <label className="text-xs text-muted-foreground block">Waiting on</label>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      disabled={transitioning}
-                      onClick={() => handleTransition("waiting_on")}
-                    >
-                      Apply
-                    </Button>
+                )}
+                {canTransitionTask(task.status, "waiting_on") && (
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <label className="text-xs text-muted-foreground block">Waiting on</label>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        disabled={transitioning}
+                        onClick={() => handleTransition("waiting_on")}
+                      >
+                        Apply
+                      </Button>
+                    </div>
+                    <Textarea
+                      value={waitingOnText}
+                      onChange={(e) => setWaitingOnText(e.target.value)}
+                      placeholder="Customer reply, internal handoff, approval, etc."
+                      rows={2}
+                    />
                   </div>
-                  <Textarea
-                    value={waitingOnText}
-                    onChange={(e) => setWaitingOnText(e.target.value)}
-                    placeholder="What is the task waiting on?"
-                    rows={2}
-                  />
-                </div>
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between gap-2">
-                    <label className="text-xs text-muted-foreground block">Blocked by</label>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      disabled={transitioning}
-                      onClick={() => handleTransition("blocked")}
-                    >
-                      Apply
-                    </Button>
+                )}
+                {canTransitionTask(task.status, "blocked") && (
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <label className="text-xs text-muted-foreground block">Blocked by</label>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        disabled={transitioning}
+                        onClick={() => handleTransition("blocked")}
+                      >
+                        Apply
+                      </Button>
+                    </div>
+                    <Textarea
+                      value={blockedByText}
+                      onChange={(e) => setBlockedByText(e.target.value)}
+                      placeholder="Approval, missing info, dependency, etc."
+                      rows={2}
+                    />
                   </div>
-                  <Textarea
-                    value={blockedByText}
-                    onChange={(e) => setBlockedByText(e.target.value)}
-                    placeholder="What is blocking the task?"
-                    rows={2}
-                  />
-                </div>
+                )}
               </div>
             </div>
           )}

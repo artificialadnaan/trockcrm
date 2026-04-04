@@ -8,11 +8,23 @@ import {
   Mail,
   Pencil,
   Play,
+  RefreshCw,
   User,
   Users,
   X,
 } from "lucide-react";
-import { useTasks, useTaskCounts, completeTask, dismissTask, snoozeTask, transitionTask, getTaskStatusLabel, isTerminalTaskStatus } from "@/hooks/use-tasks";
+import {
+  useTasks,
+  useTaskCounts,
+  completeTask,
+  dismissTask,
+  snoozeTask,
+  transitionTask,
+  getTaskStatusLabel,
+  getTaskLifecycleSummary,
+  canTransitionTask,
+  isTerminalTaskStatus,
+} from "@/hooks/use-tasks";
 import type { Task } from "@/hooks/use-tasks";
 import { TaskCreateDialog } from "@/components/tasks/task-create-dialog";
 import { TaskEditDialog } from "@/components/tasks/task-edit-dialog";
@@ -24,13 +36,14 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 // Constants
 // ---------------------------------------------------------------------------
 
-type FilterKey = "all" | "critical" | "pending" | "overdue" | "completed";
+type FilterKey = "all" | "critical" | "pending" | "scheduled" | "overdue" | "completed";
 type SortKey = "dueDate" | "priority" | "title";
 
 const FILTERS: Array<{ key: FilterKey; label: string }> = [
   { key: "all", label: "All" },
   { key: "critical", label: "Critical Path" },
   { key: "pending", label: "Pending Review" },
+  { key: "scheduled", label: "Scheduled" },
   { key: "overdue", label: "Overdue" },
   { key: "completed", label: "Completed" },
 ];
@@ -137,6 +150,13 @@ function StatusPill({ status }: { status: string }) {
   );
 }
 
+function getLifecycleLabel(payload: Record<string, unknown> | null) {
+  if (!payload) return "";
+  if (typeof payload.label === "string" && payload.label.trim()) return payload.label.trim();
+  if (typeof payload.kind === "string" && payload.kind.trim()) return payload.kind.trim();
+  return "";
+}
+
 function AssigneeAvatar({ name }: { name: string | null }) {
   if (!name) {
     return (
@@ -177,6 +197,12 @@ function IndustrialTaskRow({
   const isCompleted = isTerminalTaskStatus(task.status);
   const overdueDays = task.dueDate && task.isOverdue ? daysOverdue(task.dueDate) : 0;
   const assigneeLabel = task.assignedToName ?? "Unassigned";
+  const lifecycleSummary = getTaskLifecycleSummary(task);
+  const canResume = canTransitionTask(task.status, "pending");
+  const canStart = canTransitionTask(task.status, "in_progress");
+  const canSchedule = canTransitionTask(task.status, "scheduled");
+  const canComplete = canTransitionTask(task.status, "completed");
+  const canDismiss = canTransitionTask(task.status, "dismissed");
 
   const handleComplete = async (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -275,6 +301,9 @@ function IndustrialTaskRow({
           {task.description && (
             <p className="text-xs text-gray-500 truncate mt-0.5">{task.description}</p>
           )}
+          {lifecycleSummary && (
+            <p className="text-xs text-gray-500 truncate mt-0.5">{lifecycleSummary}</p>
+          )}
           <p className="text-xs text-gray-500 mt-0.5 truncate">{assigneeLabel}</p>
           <div className="flex items-center gap-2 mt-1">
             {task.dealId && (
@@ -326,7 +355,28 @@ function IndustrialTaskRow({
       <div className="col-span-2 flex items-center justify-end gap-2">
         {!isCompleted && (
           <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity mr-1">
-            {task.status !== "in_progress" && (
+            {canResume && (
+              <button
+                onClick={async (e) => {
+                  e.stopPropagation();
+                  setLoading(true);
+                  try {
+                    await transitionTask(task.id, { nextStatus: "pending" });
+                    onUpdate();
+                  } catch (err) {
+                    console.error("Failed to resume task:", err);
+                  } finally {
+                    setLoading(false);
+                  }
+                }}
+                disabled={loading}
+                className="h-6 w-6 rounded flex items-center justify-center hover:bg-blue-100 transition-colors"
+                title="Resume to pending"
+              >
+                <RefreshCw className="h-3 w-3 text-blue-600" />
+              </button>
+            )}
+            {canStart && (
               <button
                 onClick={handleStart}
                 disabled={loading}
@@ -336,30 +386,36 @@ function IndustrialTaskRow({
                 <Play className="h-3 w-3 text-blue-600" />
               </button>
             )}
-            <button
-              onClick={handleComplete}
-              disabled={loading}
-              className="h-6 w-6 rounded flex items-center justify-center hover:bg-green-100 transition-colors"
-              title="Complete"
-            >
-              <Check className="h-3 w-3 text-green-600" />
-            </button>
-            <button
-              onClick={handleSnooze}
-              disabled={loading}
-              className="h-6 w-6 rounded flex items-center justify-center hover:bg-amber-100 transition-colors"
-              title="Snooze"
-            >
-              <Clock className="h-3 w-3 text-amber-600" />
-            </button>
-            <button
-              onClick={handleDismiss}
-              disabled={loading}
-              className="h-6 w-6 rounded flex items-center justify-center hover:bg-gray-200 transition-colors"
-              title="Dismiss"
-            >
-              <X className="h-3 w-3 text-gray-400" />
-            </button>
+            {canSchedule && (
+              <button
+                onClick={handleSnooze}
+                disabled={loading}
+                className="h-6 w-6 rounded flex items-center justify-center hover:bg-amber-100 transition-colors"
+                title="Snooze"
+              >
+                <Clock className="h-3 w-3 text-amber-600" />
+              </button>
+            )}
+            {canComplete && (
+              <button
+                onClick={handleComplete}
+                disabled={loading}
+                className="h-6 w-6 rounded flex items-center justify-center hover:bg-green-100 transition-colors"
+                title="Complete"
+              >
+                <Check className="h-3 w-3 text-green-600" />
+              </button>
+            )}
+            {canDismiss && (
+              <button
+                onClick={handleDismiss}
+                disabled={loading}
+                className="h-6 w-6 rounded flex items-center justify-center hover:bg-gray-200 transition-colors"
+                title="Dismiss"
+              >
+                <X className="h-3 w-3 text-gray-400" />
+              </button>
+            )}
           </div>
         )}
         {(task.dealId || task.contactId || task.emailId) && (
@@ -393,10 +449,11 @@ function IndustrialTaskRow({
 export function TaskListPage() {
   const navigate = useNavigate();
   const { user } = useAuth();
-  const { counts, refetch: refetchCounts } = useTaskCounts();
   const canAssign = user?.role === "admin" || user?.role === "director";
   const [selectedAssignee, setSelectedAssignee] = useState("");
   const [assignees, setAssignees] = useState<Assignee[]>([]);
+  const assigneeFilter = selectedAssignee || undefined;
+  const { counts, refetch: refetchCounts } = useTaskCounts(assigneeFilter);
 
   useEffect(() => {
     if (!canAssign) {
@@ -419,8 +476,6 @@ export function TaskListPage() {
     };
   }, [canAssign]);
 
-  const assigneeFilter = selectedAssignee || undefined;
-
   const { tasks: overdueTasks, refetch: refetchOverdue } = useTasks({
     section: "overdue",
     assignedTo: assigneeFilter,
@@ -438,6 +493,11 @@ export function TaskListPage() {
     limit: 20,
     assignedTo: assigneeFilter,
   });
+  const { tasks: scheduledTasks, refetch: refetchScheduled } = useTasks({
+    status: "scheduled",
+    limit: 100,
+    assignedTo: assigneeFilter,
+  });
 
   const [activeFilter, setActiveFilter] = useState<FilterKey>("all");
   const [sortBy, setSortBy] = useState<SortKey>("dueDate");
@@ -449,16 +509,8 @@ export function TaskListPage() {
     refetchToday();
     refetchUpcoming();
     refetchCompleted();
+    refetchScheduled();
   };
-
-  const displayCounts = selectedAssignee
-    ? {
-        overdue: overdueTasks.length,
-        today: todayTasks.length,
-        upcoming: upcomingTasks.length,
-        completed: completedTasks.length,
-      }
-    : counts;
 
   // Merge all active tasks for filtering
   const allActiveTasks = useMemo(
@@ -476,6 +528,9 @@ export function TaskListPage() {
       case "pending":
         source = allActiveTasks.filter((t) => t.status === "pending");
         break;
+      case "scheduled":
+        source = scheduledTasks;
+        break;
       case "overdue":
         source = allActiveTasks.filter((t) => t.isOverdue);
         break;
@@ -486,7 +541,7 @@ export function TaskListPage() {
         source = allActiveTasks;
     }
     return source;
-  }, [activeFilter, allActiveTasks, completedTasks]);
+  }, [activeFilter, allActiveTasks, completedTasks, scheduledTasks]);
 
   // Apply sort
   const sortedTasks = useMemo(() => {
@@ -512,7 +567,9 @@ export function TaskListPage() {
     return copy;
   }, [filteredTasks, sortBy]);
 
-  const totalActive = displayCounts.overdue + displayCounts.today + displayCounts.upcoming;
+  const totalActive = counts.overdue + counts.today + counts.upcoming;
+  const hasActiveWorkTasks = overdueTasks.length > 0 || todayTasks.length > 0 || upcomingTasks.length > 0;
+  const hasAnyVisibleTasks = hasActiveWorkTasks || scheduledTasks.length > 0;
 
   // Top 3 overdue for alert panel
   const topOverdue = useMemo(
@@ -528,7 +585,7 @@ export function TaskListPage() {
   );
 
   // Workload utilization (simple: active / (active + completed) )
-  const totalAll = totalActive + displayCounts.completed;
+  const totalAll = totalActive + counts.completed;
   const utilizationPct = totalAll > 0 ? Math.round((totalActive / totalAll) * 100) : 0;
 
   return (
@@ -548,12 +605,16 @@ export function TaskListPage() {
                 <span className="text-gray-900 font-bold text-sm">{totalActive}</span> Active
               </span>
               <span>
-                <span className="text-[#CC0000] font-bold text-sm">{displayCounts.overdue}</span>{" "}
+                <span className="text-[#CC0000] font-bold text-sm">{counts.overdue}</span>{" "}
                 Overdue
               </span>
               <span>
-                <span className="text-green-600 font-bold text-sm">{displayCounts.completed}</span>{" "}
+                <span className="text-green-600 font-bold text-sm">{counts.completed}</span>{" "}
                 Done
+              </span>
+              <span>
+                <span className="text-slate-700 font-bold text-sm">{scheduledTasks.length}</span>{" "}
+                Scheduled
               </span>
             </div>
           </div>
@@ -579,9 +640,9 @@ export function TaskListPage() {
                   }`}
                 >
                   {f.label}
-                  {f.key === "overdue" && displayCounts.overdue > 0 && (
+                  {f.key === "overdue" && counts.overdue > 0 && (
                     <span className="ml-1.5 bg-[#CC0000] text-white text-[9px] font-bold px-1.5 py-0.5 rounded-full">
-                      {displayCounts.overdue}
+                      {counts.overdue}
                     </span>
                   )}
                 </button>
@@ -660,12 +721,23 @@ export function TaskListPage() {
           <div className="space-y-1">
             {activeFilter === "all" ? (
               <>
-                {overdueTasks.length === 0 && todayTasks.length === 0 && upcomingTasks.length === 0 ? (
+                {!hasAnyVisibleTasks ? (
                   <div className="text-center py-12 text-gray-400">
                     <p className="text-sm font-medium">No tasks match this filter</p>
                   </div>
                 ) : (
                   <>
+                    {scheduledTasks.length > 0 && (
+                      <>
+                        <div className="px-6 py-2 bg-slate-50/80 text-[10px] font-black uppercase tracking-[0.15em] text-gray-500 flex items-center gap-2">
+                          <div className="w-2 h-2 rounded-full bg-slate-500" />
+                          Scheduled ({scheduledTasks.length})
+                        </div>
+                        {scheduledTasks.map((task) => (
+                          <IndustrialTaskRow key={task.id} task={task} onUpdate={refetchAll} />
+                        ))}
+                      </>
+                    )}
                     {overdueTasks.length > 0 && (
                       <>
                         <div className="px-6 py-2 bg-red-50/50 text-[10px] font-black uppercase tracking-[0.15em] text-gray-500 flex items-center gap-2">
@@ -721,7 +793,7 @@ export function TaskListPage() {
         {/* ── Right Sidebar (4 cols) ── */}
         <div className="col-span-12 lg:col-span-4 space-y-4">
           {/* Operational Alert Card */}
-          {displayCounts.overdue > 0 && (
+          {counts.overdue > 0 && (
             <div className="bg-[#CC0000] rounded-lg p-5 text-white">
               <div className="flex items-center gap-2 mb-3">
                 <AlertTriangle className="h-4 w-4" />
@@ -730,8 +802,8 @@ export function TaskListPage() {
                 </h3>
               </div>
               <p className="text-sm font-medium leading-snug mb-4">
-                {displayCounts.overdue} critical path deliverable
-                {displayCounts.overdue !== 1 ? "s" : ""} currently overdue
+                {counts.overdue} critical path deliverable
+                {counts.overdue !== 1 ? "s" : ""} currently overdue
               </p>
               <div className="space-y-2">
                 {topOverdue.map((t) => (
@@ -776,7 +848,7 @@ export function TaskListPage() {
                   Pending
                 </span>
                 <span className="text-xl font-bold text-amber-600 tabular-nums leading-none">
-                  {displayCounts.today + displayCounts.upcoming}
+                  {counts.today + counts.upcoming}
                 </span>
               </div>
 
@@ -786,7 +858,7 @@ export function TaskListPage() {
                   Completed (7d)
                 </span>
                 <span className="text-xl font-bold text-green-600 tabular-nums leading-none">
-                  {displayCounts.completed}
+                  {counts.completed}
                 </span>
               </div>
 

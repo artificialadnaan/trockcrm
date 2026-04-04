@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Check, X, Clock, Handshake, Users, Mail, Pencil, Play } from "lucide-react";
+import { Check, X, Clock, Handshake, Users, Mail, Pencil, Play, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -9,6 +9,8 @@ import {
   snoozeTask as apiSnoozeTask,
   transitionTask,
   getTaskStatusLabel,
+  getTaskLifecycleSummary,
+  canTransitionTask,
   isTerminalTaskStatus,
 } from "@/hooks/use-tasks";
 import type { Task } from "@/hooks/use-tasks";
@@ -52,6 +54,12 @@ export function TaskRow({ task, onUpdate }: TaskRowProps) {
   const [editOpen, setEditOpen] = useState(false);
   const isTerminal = isTerminalTaskStatus(task.status);
   const assigneeLabel = task.assignedToName ?? "Unassigned";
+  const lifecycleSummary = getTaskLifecycleSummary(task);
+  const canResume = canTransitionTask(task.status, "pending");
+  const canStart = canTransitionTask(task.status, "in_progress");
+  const canSchedule = canTransitionTask(task.status, "scheduled");
+  const canComplete = canTransitionTask(task.status, "completed");
+  const canDismiss = canTransitionTask(task.status, "dismissed");
 
   const handleComplete = async (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -141,6 +149,9 @@ export function TaskRow({ task, onUpdate }: TaskRowProps) {
           </Badge>
         </div>
         <p className="text-xs text-muted-foreground truncate">{assigneeLabel}</p>
+        {lifecycleSummary && (
+          <p className="text-xs text-muted-foreground truncate">{lifecycleSummary}</p>
+        )}
         {task.dueDate && (
           <p className={`text-xs ${task.isOverdue ? "text-red-600 font-medium" : "text-muted-foreground"}`}>
             Due: {new Date(task.dueDate + "T00:00:00").toLocaleDateString()}
@@ -154,7 +165,30 @@ export function TaskRow({ task, onUpdate }: TaskRowProps) {
 
       {!isCompleted && (
         <div className="flex items-center gap-1 shrink-0">
-          {task.status !== "in_progress" && (
+          {canResume && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7"
+              onClick={async (e) => {
+                e.stopPropagation();
+                setLoading(true);
+                try {
+                  await transitionTask(task.id, { nextStatus: "pending" });
+                  onUpdate();
+                } catch (err) {
+                  console.error("Failed to resume task:", err);
+                } finally {
+                  setLoading(false);
+                }
+              }}
+              disabled={loading}
+              title="Resume to pending"
+            >
+              <RefreshCw className="h-3.5 w-3.5 text-blue-600" />
+            </Button>
+          )}
+          {canStart && (
             <Button
               variant="ghost"
               size="icon"
@@ -166,36 +200,42 @@ export function TaskRow({ task, onUpdate }: TaskRowProps) {
               <Play className="h-3.5 w-3.5 text-blue-600" />
             </Button>
           )}
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-7 w-7"
-            onClick={handleComplete}
-            disabled={loading}
-            title="Complete"
-          >
-            <Check className="h-3.5 w-3.5 text-green-600" />
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-7 w-7"
-            onClick={handleSnooze}
-            disabled={loading}
-            title="Snooze to tomorrow"
-          >
-            <Clock className="h-3.5 w-3.5 text-amber-600" />
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-7 w-7"
-            onClick={handleDismiss}
-            disabled={loading}
-            title="Dismiss"
-          >
-            <X className="h-3.5 w-3.5 text-muted-foreground" />
-          </Button>
+          {canSchedule && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7"
+              onClick={handleSnooze}
+              disabled={loading}
+              title="Snooze to tomorrow"
+            >
+              <Clock className="h-3.5 w-3.5 text-amber-600" />
+            </Button>
+          )}
+          {canComplete && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7"
+              onClick={handleComplete}
+              disabled={loading}
+              title="Complete"
+            >
+              <Check className="h-3.5 w-3.5 text-green-600" />
+            </Button>
+          )}
+          {canDismiss && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7"
+              onClick={handleDismiss}
+              disabled={loading}
+              title="Dismiss"
+            >
+              <X className="h-3.5 w-3.5 text-muted-foreground" />
+            </Button>
+          )}
           {(task.dealId || task.contactId || task.emailId) && (
             <Button
               variant="ghost"
