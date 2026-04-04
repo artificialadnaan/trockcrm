@@ -297,7 +297,7 @@ function IndustrialTaskRow({
             </button>
           </div>
         )}
-        <AssigneeAvatar name={task.assignedTo} />
+        <AssigneeAvatar name={task.assignedToName} />
       </div>
     </div>
   );

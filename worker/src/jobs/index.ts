@@ -831,6 +831,20 @@ export function registerAllJobs() {
         `Completed: ${payload.title}`,
       ]
     );
+
+    // If the completed task is a touchpoint and has a contact, update outreach tracking.
+    // The PostgreSQL trigger only fires for call/email/meeting activity types,
+    // so touchpoint task completions need explicit contact updates.
+    if (payload.type === "touchpoint" && payload.contactId) {
+      await workerPool.query(
+        `UPDATE ${schemaName}.contacts
+         SET first_outreach_completed = true,
+             last_contacted_at = NOW(),
+             touchpoint_count = touchpoint_count + 1
+         WHERE id = $1 AND first_outreach_completed = false`,
+        [payload.contactId]
+      );
+    }
   });
 
   // Domain event: approval.requested -> notify directors/admins

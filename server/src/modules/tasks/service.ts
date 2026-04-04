@@ -121,10 +121,33 @@ export async function getTasks(
     WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 WHEN 'low' THEN 3 ELSE 4
   END`;
 
+  // Subquery to resolve assignee display name from public.users
+  const assignedToName = sql<string | null>`(SELECT display_name FROM public.users WHERE id = ${tasks.assignedTo})`.as("assignedToName");
+
   const [countResult, taskRows] = await Promise.all([
     tenantDb.select({ count: sql<number>`count(*)` }).from(tasks).where(where),
     tenantDb
-      .select()
+      .select({
+        id: tasks.id,
+        title: tasks.title,
+        description: tasks.description,
+        type: tasks.type,
+        priority: tasks.priority,
+        status: tasks.status,
+        assignedTo: tasks.assignedTo,
+        assignedToName,
+        createdBy: tasks.createdBy,
+        dealId: tasks.dealId,
+        contactId: tasks.contactId,
+        emailId: tasks.emailId,
+        dueDate: tasks.dueDate,
+        dueTime: tasks.dueTime,
+        remindAt: tasks.remindAt,
+        completedAt: tasks.completedAt,
+        isOverdue: tasks.isOverdue,
+        createdAt: tasks.createdAt,
+        updatedAt: tasks.updatedAt,
+      })
       .from(tasks)
       .where(where)
       .orderBy(

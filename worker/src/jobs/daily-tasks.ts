@@ -211,7 +211,7 @@ export async function runDailyTaskGeneration(): Promise<void> {
           await client.query(
             `INSERT INTO ${schemaName}.tasks
              (type, title, description, priority, status, assigned_to, deal_id, due_date)
-             VALUES ('follow_up', $1, $2, 'medium', 'pending', $3, $4, CURRENT_DATE)`,
+             VALUES ('follow_up', $1, $2, 'normal', 'pending', $3, $4, CURRENT_DATE)`,
             [
               `Contact Follow-Up: ${row.first_name} ${row.last_name}`,
               `Touchpoint cadence overdue for ${row.first_name} ${row.last_name} on deal ${row.deal_number}. Last contact: ${lastContactText}`,

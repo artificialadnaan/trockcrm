@@ -9,6 +9,7 @@ export interface Task {
   priority: string;
   status: string;
   assignedTo: string;
+  assignedToName: string | null;
   createdBy: string | null;
   dealId: string | null;
   contactId: string | null;
