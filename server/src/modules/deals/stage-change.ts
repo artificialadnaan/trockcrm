@@ -1,10 +1,11 @@
-import { eq, and, desc, sql } from "drizzle-orm";
+import { eq, and, desc, sql, inArray } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
   deals,
   dealStageHistory,
   dealApprovals,
   jobQueue,
+  tasks,
 } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
@@ -152,6 +153,19 @@ export async function changeDealStage(
     .where(eq(deals.id, dealId))
     .returning();
   const updatedDeal = updatedDealResult[0];
+
+  // Auto-dismiss pending/in-progress tasks when deal reaches a terminal stage
+  if (targetStage.isTerminal) {
+    await tenantDb
+      .update(tasks)
+      .set({ status: "dismissed", isOverdue: false })
+      .where(
+        and(
+          eq(tasks.dealId, dealId),
+          inArray(tasks.status, ["pending", "in_progress"]),
+        )
+      );
+  }
 
   // Step 6: Explicitly insert stage history with all fields.
   // The PG trigger is kept as a safety net for direct SQL updates, but we do

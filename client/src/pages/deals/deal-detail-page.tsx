@@ -23,6 +23,7 @@ import { DealTimelineTab } from "@/components/deals/deal-timeline-tab";
 import { DealFileTab } from "@/components/files/deal-file-tab";
 import { ActivityLogForm } from "@/components/activities/activity-log-form";
 import { StageChangeDialog } from "@/components/deals/stage-change-dialog";
+import { TaskCreateDialog } from "@/components/tasks/task-create-dialog";
 import { useActivities, createActivity } from "@/hooks/use-activities";
 import { useDealDetail, deleteDeal as apiDeleteDeal } from "@/hooks/use-deals";
 import { usePipelineStages } from "@/hooks/use-pipeline-config";
@@ -196,6 +197,9 @@ export function DealDetailPage() {
               </DropdownMenuContent>
             </DropdownMenu>
           )}
+
+          {/* Create Task */}
+          <TaskCreateDialog defaultDealId={deal.id} onCreated={refetch} />
 
           {/* More Actions */}
           <DropdownMenu>

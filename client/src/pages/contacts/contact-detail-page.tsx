@@ -19,6 +19,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { TaskCreateDialog } from "@/components/tasks/task-create-dialog";
 import { ContactCategoryBadge } from "@/components/contacts/contact-category-badge";
 import { ContactTouchpointCard } from "@/components/contacts/contact-touchpoint-card";
 import { ContactDealsTab } from "@/components/contacts/contact-deals-tab";
@@ -100,25 +101,30 @@ export function ContactDetailPage() {
           )}
         </div>
 
-        <DropdownMenu>
-          <DropdownMenuTrigger
-            render={<Button variant="outline" size="icon">
-              <MoreHorizontal className="h-4 w-4" />
-            </Button>}
-          />
-          <DropdownMenuContent align="end">
-            <DropdownMenuItem onClick={() => navigate(`/contacts/${contact.id}/edit`)}>
-              <Edit className="h-4 w-4 mr-2" />
-              Edit Contact
-            </DropdownMenuItem>
-            {isDirectorOrAdmin && (
-              <DropdownMenuItem onClick={handleDelete} className="text-red-600">
-                <Trash2 className="h-4 w-4 mr-2" />
-                Delete Contact
+        <div className="flex items-center gap-2">
+          {/* Create Task */}
+          <TaskCreateDialog defaultContactId={contact.id} onCreated={() => {}} />
+
+          <DropdownMenu>
+            <DropdownMenuTrigger
+              render={<Button variant="outline" size="icon">
+                <MoreHorizontal className="h-4 w-4" />
+              </Button>}
+            />
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem onClick={() => navigate(`/contacts/${contact.id}/edit`)}>
+                <Edit className="h-4 w-4 mr-2" />
+                Edit Contact
               </DropdownMenuItem>
-            )}
-          </DropdownMenuContent>
-        </DropdownMenu>
+              {isDirectorOrAdmin && (
+                <DropdownMenuItem onClick={handleDelete} className="text-red-600">
+                  <Trash2 className="h-4 w-4 mr-2" />
+                  Delete Contact
+                </DropdownMenuItem>
+              )}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
       </div>
 
       {/* Info Cards */}

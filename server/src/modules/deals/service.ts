@@ -8,6 +8,7 @@ import {
   pipelineStageConfig,
   users,
   userOfficeAccess,
+  tasks,
 } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { db } from "../../db.js";
@@ -444,6 +445,17 @@ export async function deleteDeal(tenantDb: TenantDb, dealId: string, userRole: s
   if (result.length === 0) {
     throw new AppError(404, "Deal not found");
   }
+
+  // Auto-dismiss pending/in-progress tasks when deal is soft-deleted
+  await tenantDb
+    .update(tasks)
+    .set({ status: "dismissed", isOverdue: false })
+    .where(
+      and(
+        eq(tasks.dealId, dealId),
+        inArray(tasks.status, ["pending", "in_progress"]),
+      )
+    );
 
   return result[0];
 }
