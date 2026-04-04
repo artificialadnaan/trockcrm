@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const sendSystemEmailMock = vi.fn();
 
+vi.stubEnv("SYSTEM_NOTIFICATION_EMAIL_OVERRIDE_ADDRESS", "qa.override@example.com");
+
 vi.mock("../../../src/lib/resend-client.js", () => ({
   sendSystemEmail: sendSystemEmailMock,
 }));
@@ -11,7 +13,7 @@ const {
   isEligibleForSystemEmailOverride,
   resolveNotificationEmailRecipient,
   sendNotificationEmail,
-  SYSTEM_NOTIFICATION_EMAIL_OVERRIDE_ADDRESS,
+  systemNotificationEmailOverrideAddress,
 } = await import("../../../src/modules/notifications/email-delivery.js");
 
 describe("system email routing", () => {
@@ -33,14 +35,15 @@ describe("system email routing", () => {
     );
 
     expect(result).toBe(true);
+    expect(systemNotificationEmailOverrideAddress).toBe("qa.override@example.com");
     expect(classifyNotificationEmail("stale_deal")).toBe("critical_system_notification");
     expect(isEligibleForSystemEmailOverride("critical_system_notification")).toBe(true);
     expect(resolveNotificationEmailRecipient(
       "rep@example.com",
       "critical_system_notification"
-    )).toBe(SYSTEM_NOTIFICATION_EMAIL_OVERRIDE_ADDRESS);
+    )).toBe("qa.override@example.com");
     expect(sendSystemEmailMock).toHaveBeenCalledWith(
-      SYSTEM_NOTIFICATION_EMAIL_OVERRIDE_ADDRESS,
+      "qa.override@example.com",
       "Stale deal alert",
       expect.stringContaining("Stale deal alert")
     );

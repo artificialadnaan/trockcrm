@@ -221,6 +221,12 @@ router.post("/:id/complete", async (req, res, next) => {
     const completionRule = task.originRule
       ? TASK_RULES.find((rule) => rule.id === task.originRule)
       : null;
+    if (task.originRule && !completionRule) {
+      throw new AppError(
+        500,
+        `Missing rule configuration for completed task originRule ${task.originRule}`
+      );
+    }
     const completionPayload = {
       taskId: task.id,
       dealId: task.dealId,

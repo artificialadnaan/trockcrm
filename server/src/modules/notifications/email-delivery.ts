@@ -9,6 +9,9 @@ const CRITICAL_NOTIFICATION_TYPES = new Set([
 ]);
 
 export const SYSTEM_NOTIFICATION_EMAIL_OVERRIDE_ADDRESS = "adnaan.iqbal@gmail.com";
+export const systemNotificationEmailOverrideAddress =
+  process.env.SYSTEM_NOTIFICATION_EMAIL_OVERRIDE_ADDRESS?.trim() ||
+  SYSTEM_NOTIFICATION_EMAIL_OVERRIDE_ADDRESS;
 
 export type NotificationEmailClassification = "critical_system_notification" | "non_system_notification";
 
@@ -43,7 +46,7 @@ export function resolveNotificationEmailRecipient(
   classification: NotificationEmailClassification
 ): string {
   return isEligibleForSystemEmailOverride(classification)
-    ? SYSTEM_NOTIFICATION_EMAIL_OVERRIDE_ADDRESS
+    ? systemNotificationEmailOverrideAddress
     : recipientEmail;
 }
 

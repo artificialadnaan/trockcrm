@@ -360,4 +360,31 @@ describe("task routes", () => {
       })
     );
   });
+
+  it("fails fast when a rule-backed task has no rule config for close-loop persistence", async () => {
+    taskServiceMocks.completeTask.mockResolvedValue({
+      id: "task-1",
+      title: "Follow up on unknown rule",
+      dealId: "deal-1",
+      contactId: "contact-1",
+      type: "stale_deal",
+      originRule: "missing_rule",
+      dedupeKey: "deal:1",
+      reasonCode: "stale_deal",
+      entitySnapshot: { dealId: "deal-1", contactId: "contact-1" },
+    });
+
+    await expect(
+      invokeRoute({
+        method: "post",
+        url: "/task-1/complete",
+        user: makeDirectorUser(),
+      })
+    ).rejects.toMatchObject({
+      statusCode: 500,
+      message: "Missing rule configuration for completed task originRule missing_rule",
+    });
+
+    expect(eventBusMocks.emitLocal).not.toHaveBeenCalled();
+  });
 });
