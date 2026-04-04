@@ -54,6 +54,7 @@ Extend tasks so the system can explain why a task exists, when it should surface
 
 New task fields:
 
+- `office_id`
 - `origin_rule`
 - `source_rule`
 - `source_event`
@@ -148,6 +149,13 @@ Task status becomes:
 - `blocked_by` is required when status is `blocked`
 - `scheduled_for` is required when status is `scheduled`
 - `started_at` is set automatically when entering `in_progress` for the first time
+
+Office contract:
+
+- every task persists `office_id`
+- `office_id` is set at creation time from the active tenant office and never changes after insert, even if the task is later reassigned across users with multi-office access
+- office-local time calculations for activation and overdue semantics always resolve through the persisted task office
+- office-level fallback assignment settings also resolve through the persisted task office
 
 ### 4.4 Transition Rules
 
@@ -273,6 +281,7 @@ Structured JSON reference describing what the task is waiting on.
 
 Shape:
 
+- `schema_version`
 - `kind`
 - `label`
 - `ref_type`
@@ -289,6 +298,7 @@ Structured JSON reference describing the blocker.
 
 Shape:
 
+- `schema_version`
 - `kind`
 - `label`
 - `ref_type`
@@ -326,6 +336,22 @@ Use:
 - persist provenance-aware completion outcomes
 - suppress regenerated suggestions for the same business reason
 - preserve close-loop state even after the original task becomes terminal
+
+Resolution state contract:
+
+- authoritative lookup key is `dedupe_key` plus `origin_rule`
+- allowed `resolution_status` values are `completed`, `dismissed`, `suppressed`, `expired`
+- `completed` means the business reason was satisfied and should suppress regeneration for the configured suppression window
+- `dismissed` means the user intentionally closed the task without satisfying the business reason and does not suppress regeneration unless the rule explicitly marks the dismissal reason as suppressible
+- `suppressed` means regeneration is intentionally blocked until `suppressed_until`
+- `expired` means the suppression window has elapsed and the rule may generate a fresh task again if conditions still match
+
+Suppression rules:
+
+- completion of a system-generated task creates or updates a resolution row with `resolution_status = completed`
+- the default suppression window is rule-defined and must be explicit in the `task_rules` config
+- dismissal only creates a suppressing resolution row when the rule explicitly declares that dismissal reason as suppressible
+- regeneration checks `task_resolution_state` before materializing a new task for the same `dedupe_key` and `origin_rule`
 
 ---
 
@@ -414,7 +440,44 @@ Conflict policy:
 
 This is the required protection against concurrent cron and event evaluation.
 
-### 6.5 Event Inputs
+### 6.5 Rule Ownership and Refresh Semantics
+
+Rule-driven tasks have explicit field ownership boundaries so background evaluation cannot silently overwrite human edits.
+
+Rule-owned fields:
+
+- `source_rule`
+- `source_event`
+- `reason_code`
+- `entity_snapshot`
+- `dedupe_key`
+- `origin_rule`
+- `office_id`
+
+Rule-refreshable unless manually locked:
+
+- `priority`
+- `scheduled_for`
+- `waiting_on`
+- `blocked_by`
+
+User-owned after first manual edit:
+
+- `title`
+- `description`
+- `assigned_to`
+- `due_date`
+- `due_time`
+- `remind_at`
+
+Contract:
+
+- manual edits to user-owned fields are never overwritten by evaluator refreshes
+- if a rule wants to suggest a change to a user-owned field after manual ownership exists, it is surfaced as a recommendation or a new task state transition, not a silent overwrite
+- system transitions into terminal states always win over refresh attempts
+- implementations may use explicit manual-lock columns or equivalent metadata, but the behavior contract above is mandatory
+
+### 6.6 Event Inputs
 
 Initial triggers:
 
@@ -425,7 +488,7 @@ Initial triggers:
 - `cron.daily_task_generation`
 - `cron.cold_lead_warming`
 
-### 6.6 Migration Strategy
+### 6.7 Migration Strategy
 
 Migrate existing hardcoded automations one source at a time behind the evaluator. Do not rewrite all jobs at once.
 
@@ -524,6 +587,11 @@ Section/count behavior:
 - completed counts include only `completed`
 - dismissed tasks remain visible in task detail/history responses but never count toward completed totals in this initiative
 
+Rationale:
+
+- T Rock’s workflow treats waiting and blocked work as still-open commitments that must remain visible on dashboards until resolved
+- keeping them in active buckets preserves operational accountability while the explicit state badge explains why the task is not currently executable
+
 ### 9.2 UI
 
 Task UI changes:
@@ -576,8 +644,9 @@ This does not change user-authored CRM email sending through Microsoft Graph. It
 Implementation contract:
 
 - add a notification-email recipient override in the notification/email-delivery path
-- when the override is enabled for this environment, all system-notification emails from this initiative are sent to `adnaan.iqbal@gmail.com` regardless of the task assignee or notification recipient
+- for this initiative, the override is mandatory and routes all system-notification emails to `adnaan.iqbal@gmail.com` regardless of the task assignee or notification recipient
 - the override applies in one place, before email send, so templates and callers do not implement their own routing logic
+- the implementation should use the existing single-recipient override mechanism in the Resend send path rather than adding competing per-template overrides
 - CRM user-authored outbound email via Microsoft Graph bypasses this override entirely
 
 ---
@@ -593,11 +662,17 @@ Required coverage areas:
 - assignment resolution order
 - priority scoring and mapping
 - dedupe key generation and idempotent task materialization
+- concurrent event and cron races against the active-task unique index
 - migration parity for existing automation paths
+- mixed legacy and rule-driven rows during the compatibility window
 - close-loop completion side effects
+- suppression-state creation, expiry, and regeneration checks
+- office-local scheduled activation including DST boundary cases
+- task office persistence and office-derived activation behavior
 - assignee display-name correctness in API/UI
 - director/admin assignee filtering behavior
 - system email routing override to `adnaan.iqbal@gmail.com`
+- backfill correctness for provenance and dedupe fields where derivable
 - task-related production path/deep-link behavior where changed
 
 Testing layers:
@@ -667,13 +742,12 @@ This work is an in-place evolution of the current task module and requires an ex
 
 ### 15.1 Schema Migration Order
 
-1. add new task enum values and columns
-2. add `origin_rule` and `dedupe_key`
-3. add `task_resolution_state`
-4. add indexes for active task querying and partial unique dedupe enforcement
-5. deploy code that can read both pre-rule and rule-driven task rows
-6. migrate automation sources one at a time behind the evaluator
-7. remove legacy direct inserts after parity is verified for each source
+1. add new task enum values and new task columns, including `office_id`, `origin_rule`, and `dedupe_key`
+2. add `task_resolution_state`
+3. add indexes for active task querying and partial unique dedupe enforcement
+4. deploy code that can read both pre-rule and rule-driven task rows
+5. migrate automation sources one at a time behind the evaluator
+6. remove legacy direct inserts after parity is verified for each source
 
 ### 15.2 Backfill Rules
 
