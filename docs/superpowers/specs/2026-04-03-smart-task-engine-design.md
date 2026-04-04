@@ -511,7 +511,7 @@ Dependency-resolution contract:
 Dependency lookup contract:
 
 - dependency-cleared handlers match tasks by the structured reference fields in `waiting_on` or `blocked_by`
-- the minimum deterministic lookup tuple is `(ref_type, ref_id, status)` plus tenant office scope
+- the minimum deterministic lookup tuple is `(kind, ref_type, ref_id, status, office_id)` and may include `origin_rule` where multiple task rules can reference the same dependency target
 - implementations should add JSON-path-capable indexes or extracted generated columns for dependency lookup keys used by event handlers
 - if a dependency reference is too weak to support deterministic lookup, the rule must not rely on automatic dependency-cleared transitions for that task type
 
@@ -682,12 +682,13 @@ This does not change user-authored CRM email sending through Microsoft Graph. It
 Implementation contract:
 
 - add a notification-email recipient override in the notification/email-delivery path
-- the override applies only to emails emitted with an explicit task-engine source marker or task-engine template id from the task/notification delivery path
+- the override is governed by a centrally owned task-email classification registry in the notification/email-delivery path
+- every in-scope task-engine email template or notification source must be registered in that registry before it can send
 - notification type alone is not sufficient to trigger the override
-- any newly added task-rule-driven system email must declare that source marker or template id before it can use the override
+- unclassified task-engine system emails must fail closed in non-production verification and be treated as a release blocker for production rollout
 - for this initiative, the override is mandatory and routes those scoped system-notification emails to `adnaan.iqbal@gmail.com` regardless of the task assignee or notification recipient
 - the override applies in one place, before email send, so templates and callers do not implement their own routing logic
-- the implementation should use the existing single-recipient override mechanism in the Resend send path, but only from the task/notification delivery path that knows the notification type and can scope the override correctly
+- the implementation should use the existing single-recipient override mechanism in the Resend send path, but only from the task/notification delivery path that consults the central task-email classification registry
 - CRM user-authored outbound email via Microsoft Graph bypasses this override entirely
 
 ---
@@ -712,11 +713,14 @@ Required coverage areas:
 - resolution upserts keyed by `(origin_rule, dedupe_key)`
 - office-local scheduled activation including DST boundary cases
 - task office persistence and office-derived activation behavior
+- dependency-cleared lookup correctness using the full structured discriminator set
 - assignee display-name correctness in API/UI
 - director/admin assignee filtering behavior
 - system email routing override to `adnaan.iqbal@gmail.com`
 - scoped email-override tests proving non-task critical emails are unaffected
+- classification-registry tests that fail when an in-scope task-engine email source is unregistered
 - backfill correctness for provenance and dedupe fields where derivable
+- duplicate-collision backfill remediation behavior before active unique-index enforcement
 - task-related production path/deep-link behavior where changed
 - API contract verification against the generated task API spec so enums, fields, and filters cannot drift silently
 
@@ -808,7 +812,13 @@ Backfill guarantees:
 
 - `office_id` is fully backfilled because tenant schema context provides the source office deterministically
 - `origin_rule` and `dedupe_key` are nullable for legacy rows when safe derivation is not possible
-- if multiple legacy active rows safely derive to the same `(origin_rule, dedupe_key)`, the migration keeps the most recently updated row as the active survivor and clears provenance fields on the others so they remain legacy rows outside the new unique-key regime
+- if multiple legacy active rows safely derive to the same `(origin_rule, dedupe_key)`, the migration keeps the most recently updated row as the active survivor and moves non-survivors into an explicit remediation path
+
+Collision remediation path:
+
+- non-survivor duplicates are not left as active legacy rows
+- if they are safe to terminalize automatically, they are dismissed with a migration reason note
+- if they are not safe to terminalize automatically, they are quarantined into an operator-review report before the unique active index is enforced
 
 ### 15.3 Compatibility Window
 
