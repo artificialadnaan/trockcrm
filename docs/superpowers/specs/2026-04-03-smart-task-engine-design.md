@@ -153,9 +153,18 @@ Task status becomes:
 Office contract:
 
 - every task persists `office_id`
-- `office_id` is set at creation time from the active tenant office and never changes after insert, even if the task is later reassigned across users with multi-office access
+- `office_id` is set at creation time and never changes after insert, even if the task is later reassigned across users with multi-office access
 - office-local time calculations for activation and overdue semantics always resolve through the persisted task office
 - office-level fallback assignment settings also resolve through the persisted task office
+
+Creation-time `office_id` derivation order:
+
+1. current tenant office for request-driven manual task creation
+2. event payload office id for domain-event-driven system tasks
+3. worker iteration office id for office-scoped cron scans
+4. related entity office only if it is tenant-consistent and explicitly available in rule context
+
+If `office_id` cannot be derived deterministically, the evaluator returns a structured skip reason and does not create the task.
 
 ### 4.4 Transition Rules
 
@@ -289,8 +298,8 @@ Shape:
 
 Examples:
 
-- `{ kind: "person_reply", label: "Customer reply", ref_type: "email", ref_id: "{messageId}" }`
-- `{ kind: "internal_handoff", label: "Proposal revision from estimating", ref_type: "team", ref_id: "estimating" }`
+- `{ schema_version: 1, kind: "person_reply", label: "Customer reply", ref_type: "email", ref_id: "{messageId}" }`
+- `{ schema_version: 1, kind: "internal_handoff", label: "Proposal revision from estimating", ref_type: "team", ref_id: "estimating" }`
 
 #### `blocked_by`
 
@@ -306,8 +315,8 @@ Shape:
 
 Examples:
 
-- `{ kind: "approval", label: "Missing deal stage approval", ref_type: "deal_stage", ref_id: "{dealId}" }`
-- `{ kind: "integration", label: "Procore project not created", ref_type: "deal", ref_id: "{dealId}" }`
+- `{ schema_version: 1, kind: "approval", label: "Missing deal stage approval", ref_type: "deal_stage", ref_id: "{dealId}" }`
+- `{ schema_version: 1, kind: "integration", label: "Procore project not created", ref_type: "deal", ref_id: "{dealId}" }`
 
 #### `started_at`
 
@@ -339,19 +348,25 @@ Use:
 
 Resolution state contract:
 
-- authoritative lookup key is `dedupe_key` plus `origin_rule`
+- authoritative business key is `origin_rule` plus `dedupe_key`
 - allowed `resolution_status` values are `completed`, `dismissed`, `suppressed`, `expired`
 - `completed` means the business reason was satisfied and should suppress regeneration for the configured suppression window
 - `dismissed` means the user intentionally closed the task without satisfying the business reason and does not suppress regeneration unless the rule explicitly marks the dismissal reason as suppressible
 - `suppressed` means regeneration is intentionally blocked until `suppressed_until`
-- `expired` means the suppression window has elapsed and the rule may generate a fresh task again if conditions still match
+- `expired` is a derived evaluation state, not a persisted terminal value; it means the suppression window has elapsed and the rule may generate a fresh task again if conditions still match
 
 Suppression rules:
 
 - completion of a system-generated task creates or updates a resolution row with `resolution_status = completed`
 - the default suppression window is rule-defined and must be explicit in the `task_rules` config
 - dismissal only creates a suppressing resolution row when the rule explicitly declares that dismissal reason as suppressible
-- regeneration checks `task_resolution_state` before materializing a new task for the same `dedupe_key` and `origin_rule`
+- regeneration checks `task_resolution_state` before materializing a new task for the same `origin_rule` and `dedupe_key`
+
+Persistence contract:
+
+- add a unique index on `task_resolution_state(origin_rule, dedupe_key)`
+- resolution upserts always target that unique business key
+- when `suppressed_until <= now`, evaluators treat the row as `expired` without requiring a separate worker to persist an expiry transition
 
 ---
 
@@ -428,7 +443,7 @@ Rules:
 
 Database contract:
 
-- add a partial unique index on active system tasks scoped to `dedupe_key`
+- add a partial unique index on active system tasks scoped to `(origin_rule, dedupe_key)`
 - active means status in `scheduled`, `pending`, `in_progress`, `waiting_on`, `blocked`
 - terminal tasks (`completed`, `dismissed`) do not participate in the active unique index
 
@@ -474,6 +489,7 @@ Contract:
 
 - manual edits to user-owned fields are never overwritten by evaluator refreshes
 - if a rule wants to suggest a change to a user-owned field after manual ownership exists, it is surfaced as a recommendation or a new task state transition, not a silent overwrite
+- evaluator refreshes may not move tasks between active non-terminal statuses; non-terminal status changes happen only through explicit lifecycle transitions or the scheduled activation rule described above
 - system transitions into terminal states always win over refresh attempts
 - implementations may use explicit manual-lock columns or equivalent metadata, but the behavior contract above is mandatory
 
@@ -644,9 +660,10 @@ This does not change user-authored CRM email sending through Microsoft Graph. It
 Implementation contract:
 
 - add a notification-email recipient override in the notification/email-delivery path
-- for this initiative, the override is mandatory and routes all system-notification emails to `adnaan.iqbal@gmail.com` regardless of the task assignee or notification recipient
+- the override applies only to task-initiative notification emails: overdue task, stale deal, inbound email alert, approval-needed from this task/notification area, and any new task-rule-driven system emails introduced by this implementation
+- for this initiative, the override is mandatory and routes those scoped system-notification emails to `adnaan.iqbal@gmail.com` regardless of the task assignee or notification recipient
 - the override applies in one place, before email send, so templates and callers do not implement their own routing logic
-- the implementation should use the existing single-recipient override mechanism in the Resend send path rather than adding competing per-template overrides
+- the implementation should use the existing single-recipient override mechanism in the Resend send path, but only from the task/notification delivery path that knows the notification type and can scope the override correctly
 - CRM user-authored outbound email via Microsoft Graph bypasses this override entirely
 
 ---
@@ -752,9 +769,15 @@ This work is an in-place evolution of the current task module and requires an ex
 ### 15.2 Backfill Rules
 
 - existing manual tasks get null provenance fields
+- existing task rows get `office_id` backfilled from their tenant schema office at migration time
 - existing system-generated tasks get best-effort `origin_rule`, `source_rule`, `reason_code`, and `dedupe_key` backfills only where they can be derived safely
 - tasks without safe derivation remain null-provenance legacy rows and continue to function
 - existing `pending` tasks are not auto-converted to `scheduled`, `waiting_on`, or `blocked` during migration
+
+Backfill guarantees:
+
+- `office_id` is fully backfilled because tenant schema context provides the source office deterministically
+- `origin_rule` and `dedupe_key` are nullable for legacy rows when safe derivation is not possible
 
 ### 15.3 Compatibility Window
 
@@ -770,12 +793,14 @@ During migration:
 Required indexes include:
 
 - assignee/status/date index for active list queries
-- partial unique index on active `dedupe_key`
+- partial unique index on active `(origin_rule, dedupe_key)`
 - index on `scheduled_for` for activation scans
 - index on `origin_rule` and `reason_code` for diagnostics and reporting
+- unique index on `task_resolution_state(origin_rule, dedupe_key)`
 
 ### 15.5 Cutover Safety
 
 - each migrated source ships with parity tests and idempotency tests
+- each migration verifies enum changes, index creation, and backfill results before the source cutover is considered complete
 - production rollout should enable one migrated source at a time when possible
 - if a migrated rule path misbehaves, the source can be disabled without rolling back the entire task subsystem
