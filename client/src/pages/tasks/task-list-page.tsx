@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   AlertTriangle,
@@ -7,14 +7,18 @@ import {
   ChevronDown,
   Mail,
   Pencil,
+  Play,
   User,
   Users,
   X,
 } from "lucide-react";
-import { useTasks, useTaskCounts, completeTask, dismissTask, snoozeTask } from "@/hooks/use-tasks";
+import { useTasks, useTaskCounts, completeTask, dismissTask, snoozeTask, transitionTask, getTaskStatusLabel, isTerminalTaskStatus } from "@/hooks/use-tasks";
 import type { Task } from "@/hooks/use-tasks";
 import { TaskCreateDialog } from "@/components/tasks/task-create-dialog";
 import { TaskEditDialog } from "@/components/tasks/task-edit-dialog";
+import { useAuth } from "@/lib/auth";
+import { api } from "@/lib/api";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -43,6 +47,11 @@ const PRIORITY_ORDER: Record<string, number> = {
   normal: 2,
   low: 3,
 };
+
+interface Assignee {
+  id: string;
+  displayName: string;
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -77,7 +86,7 @@ function formatDueDate(dueDate: string): string {
 // ---------------------------------------------------------------------------
 
 function StatusDot({ task }: { task: Task }) {
-  const isCompleted = task.status === "completed" || task.status === "dismissed";
+  const isCompleted = isTerminalTaskStatus(task.status);
   if (isCompleted) {
     return <span className="h-2.5 w-2.5 rounded-full bg-green-500 shrink-0" />;
   }
@@ -105,6 +114,25 @@ function PriorityPill({ priority }: { priority: string }) {
       className={`inline-block px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider rounded-sm ${styles[priority] ?? "bg-zinc-200 text-zinc-700"}`}
     >
       {labels[priority] ?? priority}
+    </span>
+  );
+}
+
+function StatusPill({ status }: { status: string }) {
+  const styles: Record<string, string> = {
+    pending: "bg-gray-100 text-gray-700",
+    scheduled: "bg-slate-100 text-slate-700",
+    in_progress: "bg-blue-100 text-blue-800",
+    waiting_on: "bg-amber-100 text-amber-800",
+    blocked: "bg-red-100 text-red-800",
+    completed: "bg-green-100 text-green-800",
+    dismissed: "bg-zinc-100 text-zinc-600",
+  };
+  return (
+    <span
+      className={`inline-block px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider rounded-sm ${styles[status] ?? "bg-zinc-200 text-zinc-700"}`}
+    >
+      {getTaskStatusLabel(status)}
     </span>
   );
 }
@@ -146,8 +174,9 @@ function IndustrialTaskRow({
   const navigate = useNavigate();
   const [loading, setLoading] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
-  const isCompleted = task.status === "completed" || task.status === "dismissed";
+  const isCompleted = isTerminalTaskStatus(task.status);
   const overdueDays = task.dueDate && task.isOverdue ? daysOverdue(task.dueDate) : 0;
+  const assigneeLabel = task.assignedToName ?? "Unassigned";
 
   const handleComplete = async (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -175,6 +204,19 @@ function IndustrialTaskRow({
     }
   };
 
+  const handleStart = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setLoading(true);
+    try {
+      await transitionTask(task.id, { nextStatus: "in_progress" });
+      onUpdate();
+    } catch (err) {
+      console.error("Failed to start task:", err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleSnooze = async (e: React.MouseEvent) => {
     e.stopPropagation();
     const tomorrow = new Date(Date.now() + 86400000).toISOString().split("T")[0];
@@ -190,7 +232,7 @@ function IndustrialTaskRow({
   };
 
   const handleClick = () => {
-    if (task.status === "completed" || task.status === "dismissed") return;
+    if (isCompleted) return;
     setEditOpen(true);
   };
 
@@ -219,17 +261,21 @@ function IndustrialTaskRow({
           <StatusDot task={task} />
         </div>
         <div className="min-w-0 flex-1">
-          <p
-            className={`text-sm font-bold text-gray-900 truncate leading-tight ${
-              isCompleted ? "line-through text-gray-500" : ""
-            }`}
-          >
-            {isCompleted && <Check className="inline h-3.5 w-3.5 text-green-600 mr-1 -mt-0.5" />}
-            {task.title}
-          </p>
+          <div className="flex items-start gap-2 min-w-0">
+            <p
+              className={`text-sm font-bold text-gray-900 truncate leading-tight ${
+                isCompleted ? "line-through text-gray-500" : ""
+              }`}
+            >
+              {isCompleted && <Check className="inline h-3.5 w-3.5 text-green-600 mr-1 -mt-0.5" />}
+              {task.title}
+            </p>
+            <StatusPill status={task.status} />
+          </div>
           {task.description && (
             <p className="text-xs text-gray-500 truncate mt-0.5">{task.description}</p>
           )}
+          <p className="text-xs text-gray-500 mt-0.5 truncate">{assigneeLabel}</p>
           <div className="flex items-center gap-2 mt-1">
             {task.dealId && (
               <span className="text-[10px] font-mono bg-gray-200 text-gray-600 px-1.5 py-0.5 rounded-sm tracking-wide">
@@ -280,6 +326,16 @@ function IndustrialTaskRow({
       <div className="col-span-2 flex items-center justify-end gap-2">
         {!isCompleted && (
           <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity mr-1">
+            {task.status !== "in_progress" && (
+              <button
+                onClick={handleStart}
+                disabled={loading}
+                className="h-6 w-6 rounded flex items-center justify-center hover:bg-blue-100 transition-colors"
+                title="Mark in progress"
+              >
+                <Play className="h-3 w-3 text-blue-600" />
+              </button>
+            )}
             <button
               onClick={handleComplete}
               disabled={loading}
@@ -315,7 +371,14 @@ function IndustrialTaskRow({
             <Pencil className="h-3 w-3 text-blue-500" />
           </button>
         )}
-        <AssigneeAvatar name={task.assignedToName} />
+        <div className="flex items-center gap-2">
+          <div className="text-right">
+            <p className="text-xs font-medium text-gray-900 truncate max-w-[120px]">
+              {assigneeLabel}
+            </p>
+          </div>
+          <AssigneeAvatar name={task.assignedToName} />
+        </div>
       </div>
     </div>
     <TaskEditDialog task={task} open={editOpen} onOpenChange={setEditOpen} onUpdated={onUpdate} />
@@ -329,14 +392,51 @@ function IndustrialTaskRow({
 
 export function TaskListPage() {
   const navigate = useNavigate();
+  const { user } = useAuth();
   const { counts, refetch: refetchCounts } = useTaskCounts();
+  const canAssign = user?.role === "admin" || user?.role === "director";
+  const [selectedAssignee, setSelectedAssignee] = useState("");
+  const [assignees, setAssignees] = useState<Assignee[]>([]);
 
-  const { tasks: overdueTasks, refetch: refetchOverdue } = useTasks({ section: "overdue" });
-  const { tasks: todayTasks, refetch: refetchToday } = useTasks({ section: "today" });
-  const { tasks: upcomingTasks, refetch: refetchUpcoming } = useTasks({ section: "upcoming" });
+  useEffect(() => {
+    if (!canAssign) {
+      setSelectedAssignee("");
+      setAssignees([]);
+      return;
+    }
+
+    let cancelled = false;
+    api<{ users: Assignee[] }>("/tasks/assignees")
+      .then((data) => {
+        if (!cancelled) setAssignees(data.users);
+      })
+      .catch(() => {
+        if (!cancelled) setAssignees([]);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [canAssign]);
+
+  const assigneeFilter = selectedAssignee || undefined;
+
+  const { tasks: overdueTasks, refetch: refetchOverdue } = useTasks({
+    section: "overdue",
+    assignedTo: assigneeFilter,
+  });
+  const { tasks: todayTasks, refetch: refetchToday } = useTasks({
+    section: "today",
+    assignedTo: assigneeFilter,
+  });
+  const { tasks: upcomingTasks, refetch: refetchUpcoming } = useTasks({
+    section: "upcoming",
+    assignedTo: assigneeFilter,
+  });
   const { tasks: completedTasks, refetch: refetchCompleted } = useTasks({
     section: "completed",
     limit: 20,
+    assignedTo: assigneeFilter,
   });
 
   const [activeFilter, setActiveFilter] = useState<FilterKey>("all");
@@ -350,6 +450,15 @@ export function TaskListPage() {
     refetchUpcoming();
     refetchCompleted();
   };
+
+  const displayCounts = selectedAssignee
+    ? {
+        overdue: overdueTasks.length,
+        today: todayTasks.length,
+        upcoming: upcomingTasks.length,
+        completed: completedTasks.length,
+      }
+    : counts;
 
   // Merge all active tasks for filtering
   const allActiveTasks = useMemo(
@@ -403,7 +512,7 @@ export function TaskListPage() {
     return copy;
   }, [filteredTasks, sortBy]);
 
-  const totalActive = counts.overdue + counts.today + counts.upcoming;
+  const totalActive = displayCounts.overdue + displayCounts.today + displayCounts.upcoming;
 
   // Top 3 overdue for alert panel
   const topOverdue = useMemo(
@@ -419,7 +528,7 @@ export function TaskListPage() {
   );
 
   // Workload utilization (simple: active / (active + completed) )
-  const totalAll = totalActive + counts.completed;
+  const totalAll = totalActive + displayCounts.completed;
   const utilizationPct = totalAll > 0 ? Math.round((totalActive / totalAll) * 100) : 0;
 
   return (
@@ -439,10 +548,12 @@ export function TaskListPage() {
                 <span className="text-gray-900 font-bold text-sm">{totalActive}</span> Active
               </span>
               <span>
-                <span className="text-[#CC0000] font-bold text-sm">{counts.overdue}</span> Overdue
+                <span className="text-[#CC0000] font-bold text-sm">{displayCounts.overdue}</span>{" "}
+                Overdue
               </span>
               <span>
-                <span className="text-green-600 font-bold text-sm">{counts.completed}</span> Done
+                <span className="text-green-600 font-bold text-sm">{displayCounts.completed}</span>{" "}
+                Done
               </span>
             </div>
           </div>
@@ -456,11 +567,11 @@ export function TaskListPage() {
         <div className="col-span-12 lg:col-span-8 space-y-4">
           {/* Filter Bar */}
           <div className="flex items-center justify-between bg-gray-100 rounded-lg p-1.5">
-            <div className="flex items-center gap-1">
-              {FILTERS.map((f) => (
-                <button
-                  key={f.key}
-                  onClick={() => setActiveFilter(f.key)}
+          <div className="flex items-center gap-1">
+            {FILTERS.map((f) => (
+              <button
+                key={f.key}
+                onClick={() => setActiveFilter(f.key)}
                   className={`px-3.5 py-1.5 text-xs font-semibold rounded-md transition-all ${
                     activeFilter === f.key
                       ? "bg-white text-gray-900 shadow-sm"
@@ -468,44 +579,72 @@ export function TaskListPage() {
                   }`}
                 >
                   {f.label}
-                  {f.key === "overdue" && counts.overdue > 0 && (
+                  {f.key === "overdue" && displayCounts.overdue > 0 && (
                     <span className="ml-1.5 bg-[#CC0000] text-white text-[9px] font-bold px-1.5 py-0.5 rounded-full">
-                      {counts.overdue}
+                      {displayCounts.overdue}
                     </span>
                   )}
                 </button>
               ))}
             </div>
 
-            {/* Sort Dropdown */}
-            <div className="relative">
-              <button
-                onClick={() => setSortOpen(!sortOpen)}
-                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-gray-500 hover:text-gray-700 rounded-md hover:bg-gray-50 transition-all"
-              >
-                Sort By: {SORT_OPTIONS.find((s) => s.key === sortBy)?.label}
-                <ChevronDown className="h-3 w-3" />
-              </button>
-              {sortOpen && (
-                <div className="absolute right-0 top-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg z-20 py-1 min-w-[140px]">
-                  {SORT_OPTIONS.map((opt) => (
-                    <button
-                      key={opt.key}
-                      onClick={() => {
-                        setSortBy(opt.key);
-                        setSortOpen(false);
-                      }}
-                      className={`block w-full text-left px-3 py-1.5 text-xs font-medium transition-colors ${
-                        sortBy === opt.key
-                          ? "bg-gray-100 text-gray-900"
-                          : "text-gray-600 hover:bg-gray-50"
-                      }`}
-                    >
-                      {opt.label}
-                    </button>
-                  ))}
+            <div className="flex items-center gap-2">
+              {canAssign && (
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] font-bold uppercase tracking-[0.15em] text-gray-400">
+                    Assignee
+                  </span>
+                  <Select
+                    value={selectedAssignee || "__all__"}
+                    onValueChange={(value) =>
+                      setSelectedAssignee(!value || value === "__all__" ? "" : value)
+                    }
+                  >
+                    <SelectTrigger className="h-8 w-56">
+                      <SelectValue placeholder="All assignees" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__all__">All assignees</SelectItem>
+                      {assignees.map((assignee) => (
+                        <SelectItem key={assignee.id} value={assignee.id}>
+                          {assignee.displayName}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
                 </div>
               )}
+
+              {/* Sort Dropdown */}
+              <div className="relative">
+                <button
+                  onClick={() => setSortOpen(!sortOpen)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-gray-500 hover:text-gray-700 rounded-md hover:bg-gray-50 transition-all"
+                >
+                  Sort By: {SORT_OPTIONS.find((s) => s.key === sortBy)?.label}
+                  <ChevronDown className="h-3 w-3" />
+                </button>
+                {sortOpen && (
+                  <div className="absolute right-0 top-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg z-20 py-1 min-w-[140px]">
+                    {SORT_OPTIONS.map((opt) => (
+                      <button
+                        key={opt.key}
+                        onClick={() => {
+                          setSortBy(opt.key);
+                          setSortOpen(false);
+                        }}
+                        className={`block w-full text-left px-3 py-1.5 text-xs font-medium transition-colors ${
+                          sortBy === opt.key
+                            ? "bg-gray-100 text-gray-900"
+                            : "text-gray-600 hover:bg-gray-50"
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
           </div>
 
@@ -582,7 +721,7 @@ export function TaskListPage() {
         {/* ── Right Sidebar (4 cols) ── */}
         <div className="col-span-12 lg:col-span-4 space-y-4">
           {/* Operational Alert Card */}
-          {counts.overdue > 0 && (
+          {displayCounts.overdue > 0 && (
             <div className="bg-[#CC0000] rounded-lg p-5 text-white">
               <div className="flex items-center gap-2 mb-3">
                 <AlertTriangle className="h-4 w-4" />
@@ -591,8 +730,8 @@ export function TaskListPage() {
                 </h3>
               </div>
               <p className="text-sm font-medium leading-snug mb-4">
-                {counts.overdue} critical path deliverable{counts.overdue !== 1 ? "s" : ""} currently
-                overdue
+                {displayCounts.overdue} critical path deliverable
+                {displayCounts.overdue !== 1 ? "s" : ""} currently overdue
               </p>
               <div className="space-y-2">
                 {topOverdue.map((t) => (
@@ -637,7 +776,7 @@ export function TaskListPage() {
                   Pending
                 </span>
                 <span className="text-xl font-bold text-amber-600 tabular-nums leading-none">
-                  {counts.today + counts.upcoming}
+                  {displayCounts.today + displayCounts.upcoming}
                 </span>
               </div>
 
@@ -647,7 +786,7 @@ export function TaskListPage() {
                   Completed (7d)
                 </span>
                 <span className="text-xl font-bold text-green-600 tabular-nums leading-none">
-                  {counts.completed}
+                  {displayCounts.completed}
                 </span>
               </div>
 

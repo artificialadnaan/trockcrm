@@ -1,13 +1,22 @@
 import { useState, useEffect, useCallback } from "react";
 import { api } from "@/lib/api";
 
+export type TaskStatus =
+  | "pending"
+  | "scheduled"
+  | "in_progress"
+  | "waiting_on"
+  | "blocked"
+  | "completed"
+  | "dismissed";
+
 export interface Task {
   id: string;
   title: string;
   description: string | null;
   type: string;
   priority: string;
-  status: string;
+  status: TaskStatus;
   assignedTo: string;
   assignedToName: string | null;
   createdBy: string | null;
@@ -17,10 +26,39 @@ export interface Task {
   dueDate: string | null;
   dueTime: string | null;
   remindAt: string | null;
+  scheduledFor: string | null;
+  waitingOn: Record<string, unknown> | null;
+  blockedBy: Record<string, unknown> | null;
+  startedAt: string | null;
   completedAt: string | null;
   isOverdue: boolean;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface TaskTransitionInput {
+  nextStatus: TaskStatus;
+  scheduledFor?: string | null;
+  waitingOn?: Record<string, unknown> | null;
+  blockedBy?: Record<string, unknown> | null;
+}
+
+export const TASK_STATUS_LABELS: Record<TaskStatus, string> = {
+  pending: "Pending",
+  scheduled: "Scheduled",
+  in_progress: "In Progress",
+  waiting_on: "Waiting On",
+  blocked: "Blocked",
+  completed: "Completed",
+  dismissed: "Dismissed",
+};
+
+export function getTaskStatusLabel(status: string) {
+  return TASK_STATUS_LABELS[status as TaskStatus] ?? status.replace(/_/g, " ");
+}
+
+export function isTerminalTaskStatus(status: string) {
+  return status === "completed" || status === "dismissed";
 }
 
 export interface TaskCounts {
@@ -125,6 +163,10 @@ export async function createTask(input: Partial<Task> & { title: string }) {
 
 export async function updateTask(taskId: string, input: Partial<Task>) {
   return api<{ task: Task }>(`/tasks/${taskId}`, { method: "PATCH", json: input });
+}
+
+export async function transitionTask(taskId: string, input: TaskTransitionInput) {
+  return api<{ task: Task }>(`/tasks/${taskId}/transition`, { method: "POST", json: input });
 }
 
 export async function completeTask(taskId: string) {

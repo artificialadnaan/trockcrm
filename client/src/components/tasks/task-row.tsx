@@ -1,12 +1,15 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Check, X, Clock, Handshake, Users, Mail, Pencil } from "lucide-react";
+import { Check, X, Clock, Handshake, Users, Mail, Pencil, Play } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
   completeTask as apiCompleteTask,
   dismissTask as apiDismissTask,
   snoozeTask as apiSnoozeTask,
+  transitionTask,
+  getTaskStatusLabel,
+  isTerminalTaskStatus,
 } from "@/hooks/use-tasks";
 import type { Task } from "@/hooks/use-tasks";
 import { TaskEditDialog } from "./task-edit-dialog";
@@ -23,6 +26,16 @@ const priorityColors: Record<string, string> = {
   low: "bg-gray-100 text-gray-800 border-gray-200",
 };
 
+const statusColors: Record<string, string> = {
+  pending: "bg-gray-100 text-gray-700 border-gray-200",
+  scheduled: "bg-slate-100 text-slate-700 border-slate-200",
+  in_progress: "bg-blue-100 text-blue-800 border-blue-200",
+  waiting_on: "bg-amber-100 text-amber-800 border-amber-200",
+  blocked: "bg-red-100 text-red-800 border-red-200",
+  completed: "bg-green-100 text-green-800 border-green-200",
+  dismissed: "bg-zinc-100 text-zinc-500 border-zinc-200",
+};
+
 const typeIcons: Record<string, typeof Handshake> = {
   follow_up: Clock,
   stale_deal: Handshake,
@@ -37,6 +50,8 @@ export function TaskRow({ task, onUpdate }: TaskRowProps) {
   const navigate = useNavigate();
   const [loading, setLoading] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
+  const isTerminal = isTerminalTaskStatus(task.status);
+  const assigneeLabel = task.assignedToName ?? "Unassigned";
 
   const handleComplete = async (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -64,6 +79,19 @@ export function TaskRow({ task, onUpdate }: TaskRowProps) {
     }
   };
 
+  const handleStart = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setLoading(true);
+    try {
+      await transitionTask(task.id, { nextStatus: "in_progress" });
+      onUpdate();
+    } catch (err) {
+      console.error("Failed to transition task:", err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleSnooze = async (e: React.MouseEvent) => {
     e.stopPropagation();
     const tomorrow = new Date(Date.now() + 86400000).toISOString().split("T")[0];
@@ -79,6 +107,7 @@ export function TaskRow({ task, onUpdate }: TaskRowProps) {
   };
 
   const handleClick = () => {
+    if (isTerminal) return;
     setEditOpen(true);
   };
 
@@ -90,7 +119,7 @@ export function TaskRow({ task, onUpdate }: TaskRowProps) {
   };
 
   const IconComponent = typeIcons[task.type] ?? Check;
-  const isCompleted = task.status === "completed" || task.status === "dismissed";
+  const isCompleted = isTerminal;
 
   return (
     <>
@@ -103,9 +132,15 @@ export function TaskRow({ task, onUpdate }: TaskRowProps) {
       <IconComponent className="h-4 w-4 text-muted-foreground shrink-0" />
 
       <div className="flex-1 min-w-0">
-        <p className={`text-sm font-medium truncate ${isCompleted ? "line-through" : ""}`}>
-          {task.title}
-        </p>
+        <div className="flex items-center gap-2 min-w-0">
+          <p className={`text-sm font-medium truncate ${isCompleted ? "line-through" : ""}`}>
+            {task.title}
+          </p>
+          <Badge variant="outline" className={`text-[10px] uppercase tracking-wide ${statusColors[task.status] ?? "bg-gray-100 text-gray-700"}`}>
+            {getTaskStatusLabel(task.status)}
+          </Badge>
+        </div>
+        <p className="text-xs text-muted-foreground truncate">{assigneeLabel}</p>
         {task.dueDate && (
           <p className={`text-xs ${task.isOverdue ? "text-red-600 font-medium" : "text-muted-foreground"}`}>
             Due: {new Date(task.dueDate + "T00:00:00").toLocaleDateString()}
@@ -119,6 +154,18 @@ export function TaskRow({ task, onUpdate }: TaskRowProps) {
 
       {!isCompleted && (
         <div className="flex items-center gap-1 shrink-0">
+          {task.status !== "in_progress" && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7"
+              onClick={handleStart}
+              disabled={loading}
+              title="Mark in progress"
+            >
+              <Play className="h-3.5 w-3.5 text-blue-600" />
+            </Button>
+          )}
           <Button
             variant="ghost"
             size="icon"
