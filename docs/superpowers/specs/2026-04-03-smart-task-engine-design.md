@@ -400,6 +400,7 @@ Typed configuration defining:
 - entity scope
 - activation conditions
 - dedupe key generator
+- dependency-clear matching requirements, including whether `origin_rule` is mandatory for reopen transitions
 - assignment strategy override if needed
 - priority scoring inputs
 - task template builder
@@ -512,7 +513,9 @@ Dependency lookup contract:
 
 - dependency-cleared handlers match tasks by the structured reference fields in `waiting_on` or `blocked_by`
 - the minimum deterministic lookup tuple is `(kind, ref_type, ref_id, status, office_id)` and may include `origin_rule` where multiple task rules can reference the same dependency target
+- if a rule can share the same dependency tuple with another rule, `origin_rule` becomes mandatory in that rule’s dependency-clear matching requirements
 - implementations should add JSON-path-capable indexes or extracted generated columns for dependency lookup keys used by event handlers
+- handlers operate on the current dependency-reference schema version and must reject unsupported versions rather than guessing across schema shapes
 - if a dependency reference is too weak to support deterministic lookup, the rule must not rely on automatic dependency-cleared transitions for that task type
 
 ### 6.6 Event Inputs
@@ -683,6 +686,8 @@ Implementation contract:
 
 - add a notification-email recipient override in the notification/email-delivery path
 - the override is governed by a centrally owned task-email classification registry in the notification/email-delivery path
+- the registry key is a required `task_email_classification` identifier emitted by the task/notification delivery path
+- the classification value is set by the central sender wrapper, not by individual templates
 - every in-scope task-engine email template or notification source must be registered in that registry before it can send
 - notification type alone is not sufficient to trigger the override
 - unclassified task-engine system emails must fail closed in non-production verification and be treated as a release blocker for production rollout
@@ -730,6 +735,7 @@ Testing layers:
 - service tests for task create/update/complete flows
 - worker integration tests for migrated automation sources
 - client tests for lifecycle controls and assignee filtering
+- deployed-environment smoke or E2E tests for task deep links, task-generated notification URLs, and API/frontend path correctness after deployment
 
 ---
 
@@ -818,7 +824,11 @@ Collision remediation path:
 
 - non-survivor duplicates are not left as active legacy rows
 - if they are safe to terminalize automatically, they are dismissed with a migration reason note
-- if they are not safe to terminalize automatically, they are quarantined into an operator-review report before the unique active index is enforced
+- if they are not safe to terminalize automatically, they are moved into a dedicated migration review table and surfaced in an admin remediation queue before the unique active index is enforced
+
+Enforcement gate:
+
+- the partial unique active index is not created until the migration review table is empty or every remaining row has been resolved into a non-active state
 
 ### 15.3 Compatibility Window
 
@@ -828,6 +838,8 @@ During migration:
 - worker jobs that have not yet migrated may still detect candidate work
 - migrated sources must write only through the evaluator
 - direct SQL inserts into `tasks` for migrated sources are considered a bug
+- a source may not cut over to rule-driven writes until active legacy rows for that source are either safely backfilled into `(origin_rule, dedupe_key)` or covered by a temporary legacy-match suppression rule
+- temporary legacy-match suppression compares migrated-rule candidates against eligible legacy active rows using source-specific matching logic until those rows become terminal or are remediated
 
 ### 15.4 Index Requirements
 
