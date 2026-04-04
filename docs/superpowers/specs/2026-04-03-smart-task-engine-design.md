@@ -149,6 +149,8 @@ Task status becomes:
 - `blocked_by` is required when status is `blocked`
 - `scheduled_for` is required when status is `scheduled`
 - `started_at` is set automatically when entering `in_progress` for the first time
+- when a task exits `waiting_on`, `waiting_on` must be cleared or replaced before commit
+- when a task exits `blocked`, `blocked_by` must be cleared or replaced before commit
 
 Office contract:
 
@@ -406,6 +408,13 @@ Typed configuration defining:
 - task template builder
 - close-loop effects
 
+Rule-id stability contract:
+
+- `rule id` is a migration-owned stable identifier, not a display label
+- once a rule id ships to production, it is immutable for dedupe, suppression, and dependency-clear matching purposes
+- if a rule must be renamed for product language reasons, keep the stable id and change only display text
+- if a true identifier change is unavoidable, it requires an explicit data migration that rewrites persisted `origin_rule`, `source_rule`, resolution-state business keys, and any dependency-clear configuration that references the old id
+
 #### Rule evaluation service
 
 Responsible for:
@@ -516,6 +525,7 @@ Dependency lookup contract:
 - if a rule can share the same dependency tuple with another rule, `origin_rule` becomes mandatory in that rule’s dependency-clear matching requirements
 - implementations should add JSON-path-capable indexes or extracted generated columns for dependency lookup keys used by event handlers
 - handlers operate on the current dependency-reference schema version and must reject unsupported versions rather than guessing across schema shapes
+- dependency-reference schema upgrades require a migration or compatibility adapter for stored rows before older versions can be rejected in production
 - if a dependency reference is too weak to support deterministic lookup, the rule must not rely on automatic dependency-cleared transitions for that task type
 
 ### 6.6 Event Inputs
@@ -710,6 +720,7 @@ Required coverage areas:
 - priority scoring and mapping
 - dedupe key generation and idempotent task materialization
 - composite business-key behavior where the same `dedupe_key` under different `origin_rule`s does not collide
+- rule-id rename safety via explicit migration rather than config-only rename
 - concurrent event and cron races against the active-task unique index
 - migration parity for existing automation paths
 - mixed legacy and rule-driven rows during the compatibility window
@@ -726,6 +737,7 @@ Required coverage areas:
 - classification-registry tests that fail when an in-scope task-engine email source is unregistered
 - backfill correctness for provenance and dedupe fields where derivable
 - duplicate-collision backfill remediation behavior before active unique-index enforcement
+- migration review table and admin remediation queue lifecycle behavior
 - task-related production path/deep-link behavior where changed
 - API contract verification against the generated task API spec so enums, fields, and filters cannot drift silently
 
@@ -826,6 +838,14 @@ Collision remediation path:
 - if they are safe to terminalize automatically, they are dismissed with a migration reason note
 - if they are not safe to terminalize automatically, they are moved into a dedicated migration review table and surfaced in an admin remediation queue before the unique active index is enforced
 
+Migration review artifact:
+
+- create a tenant-scoped `task_migration_review` table and an admin remediation queue backed by it
+- minimum row shape: `id`, `office_id`, `survivor_task_id`, `duplicate_task_id`, `origin_rule`, `dedupe_key`, `reason_code`, `review_status`, `resolution_action`, `created_at`, `resolved_at`, `resolved_by`
+- `review_status` values: `pending`, `resolved`
+- `resolution_action` values: `dismissed_duplicate`, `merged_into_survivor`, `manually_kept_terminal`
+- rows in `task_migration_review` represent non-survivor duplicates that have been removed from the active set but still require operator confirmation or audit visibility
+
 Enforcement gate:
 
 - the partial unique active index is not created until the migration review table is empty or every remaining row has been resolved into a non-active state
@@ -840,6 +860,12 @@ During migration:
 - direct SQL inserts into `tasks` for migrated sources are considered a bug
 - a source may not cut over to rule-driven writes until active legacy rows for that source are either safely backfilled into `(origin_rule, dedupe_key)` or covered by a temporary legacy-match suppression rule
 - temporary legacy-match suppression compares migrated-rule candidates against eligible legacy active rows using source-specific matching logic until those rows become terminal or are remediated
+
+Legacy-match suppression adapter contract:
+
+- each migrated source defines an explicit adapter with match keys, office scope, precedence rules, and retirement criteria
+- adapters must prefer exact linked-entity keys first, then source-specific secondary keys only when explicitly listed in the source migration spec
+- adapters retire only when no eligible active legacy rows remain for that source
 
 ### 15.4 Index Requirements
 
