@@ -1,4 +1,4 @@
-import { Router } from "express";
+import express, { Router } from "express";
 import { eq, sql } from "drizzle-orm";
 import { files } from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
@@ -77,6 +77,92 @@ router.post("/upload-url", async (req, res, next) => {
 
     await req.commitTransaction!();
     res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/files/upload-direct — Server-side upload (bypasses CORS issues with presigned URLs)
+// Accepts raw file body with metadata in headers. The server uploads to R2 directly.
+router.post("/upload-direct", express.raw({ type: "*/*", limit: "50mb" }), async (req, res, next) => {
+  try {
+    const originalFilename = req.headers["x-original-filename"] as string;
+    const mimeType = req.headers["content-type"] as string || "application/octet-stream";
+    const category = req.headers["x-file-category"] as string;
+    const subcategory = req.headers["x-file-subcategory"] as string | undefined;
+    const dealId = req.headers["x-deal-id"] as string | undefined;
+    const contactId = req.headers["x-contact-id"] as string | undefined;
+    const description = req.headers["x-file-description"] as string | undefined;
+    const tagsRaw = req.headers["x-file-tags"] as string | undefined;
+    const tags = tagsRaw ? tagsRaw.split(",") : undefined;
+
+    if (!originalFilename || !category) {
+      throw new AppError(400, "x-original-filename and x-file-category headers are required.");
+    }
+
+    if (!FILE_CATEGORIES.includes(category as any)) {
+      throw new AppError(400, `Invalid category "${category}".`);
+    }
+
+    const body = req.body as Buffer;
+    if (!body || body.length === 0) {
+      throw new AppError(400, "Request body (file) is empty.");
+    }
+
+    // Validate deal access if dealId provided
+    if (dealId) {
+      const deal = await getDealById(req.tenantDb!, dealId, req.user!.role, req.user!.id);
+      if (!deal) throw new AppError(404, "Deal not found or access denied.");
+    }
+
+    // Reuse the presign logic to generate filenames, r2Key, folderPath
+    const result = await requestUploadUrl(
+      req.tenantDb!,
+      req.officeSlug!,
+      req.user!.id,
+      {
+        originalFilename,
+        mimeType,
+        fileSizeBytes: body.length,
+        category: category as FileCategory,
+        subcategory: subcategory || undefined,
+        dealId,
+        contactId,
+        description,
+        tags,
+      }
+    );
+
+    // Upload to R2 server-side (no CORS needed)
+    const { putObject, isR2Configured } = await import("../../lib/r2-client.js");
+    if (isR2Configured()) {
+      await putObject(result.r2Key, body, mimeType);
+    }
+
+    // Confirm the upload (creates the file record)
+    const file = await confirmUpload(req.tenantDb!, req.user!.id, {
+      uploadToken: result.uploadToken,
+    });
+
+    // Queue EXIF extraction job
+    const officeId = req.user!.activeOfficeId ?? req.user!.officeId;
+    const jobPayload = JSON.stringify({
+      eventName: "file.uploaded",
+      fileId: file.id,
+      r2Key: file.r2Key,
+      mimeType: file.mimeType,
+      dealId: file.dealId,
+      contactId: file.contactId,
+      category: file.category,
+      uploadedBy: req.user!.id,
+    });
+    await req.tenantDb!.execute(
+      sql`INSERT INTO public.job_queue (job_type, payload, office_id, status, run_after)
+          VALUES ('domain_event', ${jobPayload}::jsonb, ${officeId}::uuid, 'pending', NOW())`
+    );
+
+    await req.commitTransaction!();
+    res.status(201).json({ file });
   } catch (err) {
     next(err);
   }

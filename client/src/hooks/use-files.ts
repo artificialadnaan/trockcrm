@@ -274,10 +274,9 @@ export interface UploadFileInput {
 }
 
 /**
- * Full upload flow:
- * 1. Request presigned URL from server
- * 2. Upload file directly to R2 via presigned URL (XHR for progress)
- * 3. Confirm upload with server (creates file record)
+ * Upload a file via server-side proxy to R2 (avoids CORS issues with presigned URLs).
+ * Sends the file as raw body with metadata in headers.
+ * Uses XHR for upload progress tracking.
  */
 export async function uploadFile(input: UploadFileInput): Promise<FileRecord> {
   const {
@@ -286,45 +285,29 @@ export async function uploadFile(input: UploadFileInput): Promise<FileRecord> {
     subcategory,
     dealId,
     contactId,
-    procoreProjectId,
-    changeOrderId,
     description,
     tags,
     onProgress,
   } = input;
 
-  // Step 1: Request presigned URL (returns uploadToken for confirm step)
-  const presigned = await api<{
-    uploadUrl: string;
-    r2Key: string;
-    expiresIn: number;
-    systemFilename: string;
-    displayName: string;
-    folderPath: string;
-    uploadToken: string;
-  }>("/files/upload-url", {
-    method: "POST",
-    json: {
-      originalFilename: file.name,
-      mimeType: file.type,
-      fileSizeBytes: file.size,
-      category,
-      subcategory,
-      dealId,
-      contactId,
-      procoreProjectId,
-      changeOrderId,
-      description,
-      tags,
-    },
-  });
+  const baseUrl = (import.meta as any).env?.VITE_API_URL || "";
 
-  // Step 2: Upload file directly to R2 (or dev endpoint)
-  // Use XMLHttpRequest for progress tracking
-  await new Promise<void>((resolve, reject) => {
+  return new Promise<FileRecord>((resolve, reject) => {
     const xhr = new XMLHttpRequest();
-    xhr.open("PUT", presigned.uploadUrl);
-    xhr.setRequestHeader("Content-Type", file.type);
+    xhr.open("POST", `${baseUrl}/api/files/upload-direct`);
+
+    // Send metadata in headers
+    xhr.setRequestHeader("Content-Type", file.type || "application/octet-stream");
+    xhr.setRequestHeader("X-Original-Filename", file.name);
+    xhr.setRequestHeader("X-File-Category", category);
+    if (subcategory) xhr.setRequestHeader("X-File-Subcategory", subcategory);
+    if (dealId) xhr.setRequestHeader("X-Deal-Id", dealId);
+    if (contactId) xhr.setRequestHeader("X-Contact-Id", contactId);
+    if (description) xhr.setRequestHeader("X-File-Description", description);
+    if (tags && tags.length > 0) xhr.setRequestHeader("X-File-Tags", tags.join(","));
+
+    // Include auth cookie
+    xhr.withCredentials = true;
 
     xhr.upload.onprogress = (event) => {
       if (event.lengthComputable && onProgress) {
@@ -334,26 +317,25 @@ export async function uploadFile(input: UploadFileInput): Promise<FileRecord> {
 
     xhr.onload = () => {
       if (xhr.status >= 200 && xhr.status < 300) {
-        resolve();
+        try {
+          const data = JSON.parse(xhr.responseText);
+          resolve(data.file);
+        } catch {
+          reject(new Error("Failed to parse upload response"));
+        }
       } else {
-        reject(new Error(`Upload failed with status ${xhr.status}`));
+        try {
+          const data = JSON.parse(xhr.responseText);
+          reject(new Error(data.message || `Upload failed with status ${xhr.status}`));
+        } catch {
+          reject(new Error(`Upload failed with status ${xhr.status}`));
+        }
       }
     };
 
     xhr.onerror = () => reject(new Error("Upload failed: network error"));
     xhr.send(file);
   });
-
-  // Step 3: Confirm upload with server using the upload token
-  // Fix 2: Only send the uploadToken — server uses stored metadata from presign step
-  const { file: fileRecord } = await api<{ file: FileRecord }>("/files/confirm-upload", {
-    method: "POST",
-    json: {
-      uploadToken: presigned.uploadToken,
-    },
-  });
-
-  return fileRecord;
 }
 
 /**
