@@ -90,22 +90,15 @@ export interface TaskRuleDefinition {
 
 export type RuleEvaluationAction = "created" | "updated" | "skipped";
 
-<<<<<<< HEAD
 export interface RuleSkipReason {
   code: string;
   detail: string;
 }
 
-=======
->>>>>>> d198bb2 (feat: add smart task rule evaluator)
 export interface RuleEvaluationOutcome {
   ruleId: string;
   businessKey?: TaskBusinessKey;
   action: RuleEvaluationAction;
   taskId?: string;
-<<<<<<< HEAD
   reason?: RuleSkipReason;
-=======
-  reason?: string;
->>>>>>> d198bb2 (feat: add smart task rule evaluator)
 }
