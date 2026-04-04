@@ -151,6 +151,7 @@ Task status becomes:
 - `started_at` is set automatically when entering `in_progress` for the first time
 - when a task exits `waiting_on`, `waiting_on` must be cleared or replaced before commit
 - when a task exits `blocked`, `blocked_by` must be cleared or replaced before commit
+- prior `waiting_on` or `blocked_by` payloads must be preserved in audit or transition-history records before they are cleared
 
 Office contract:
 
@@ -413,7 +414,7 @@ Rule-id stability contract:
 - `rule id` is a migration-owned stable identifier, not a display label
 - once a rule id ships to production, it is immutable for dedupe, suppression, and dependency-clear matching purposes
 - if a rule must be renamed for product language reasons, keep the stable id and change only display text
-- if a true identifier change is unavoidable, it requires an explicit data migration that rewrites persisted `origin_rule`, `source_rule`, resolution-state business keys, and any dependency-clear configuration that references the old id
+- if a true identifier change is unavoidable, it requires an explicit data migration that rewrites persisted `origin_rule`, `source_rule`, resolution-state business keys, `task_migration_review.origin_rule`, and any dependency-clear configuration that references the old id
 
 #### Rule evaluation service
 
@@ -738,6 +739,7 @@ Required coverage areas:
 - backfill correctness for provenance and dedupe fields where derivable
 - duplicate-collision backfill remediation behavior before active unique-index enforcement
 - migration review table and admin remediation queue lifecycle behavior
+- unique-index enforcement blocked while any duplicate remains unresolved and active
 - task-related production path/deep-link behavior where changed
 - API contract verification against the generated task API spec so enums, fields, and filters cannot drift silently
 
@@ -811,12 +813,14 @@ This work is an in-place evolution of the current task module and requires an ex
 
 1. add new task enum values and new task columns, including nullable `office_id`, `origin_rule`, and `dedupe_key`
 2. add `task_resolution_state`
-3. deploy code that writes `office_id` for all new task writes and can read both pre-rule and rule-driven task rows
-4. backfill `office_id` for existing rows and validate tenant-office consistency
-5. enforce `office_id NOT NULL`
-6. add indexes for active task querying and partial unique dedupe enforcement after backfill remediation is complete
-7. migrate automation sources one at a time behind the evaluator
-8. remove legacy direct inserts after parity is verified for each source
+3. add `task_migration_review` and the admin remediation queue surface it depends on
+4. deploy code that writes `office_id` for all new task writes and can read both pre-rule and rule-driven task rows
+5. backfill `office_id` for existing rows and validate tenant-office consistency
+6. enforce `office_id NOT NULL`
+7. run duplicate-backfill remediation and clear any blocking `task_migration_review` rows
+8. add indexes for active task querying and partial unique dedupe enforcement after backfill remediation is complete
+9. migrate automation sources one at a time behind the evaluator
+10. remove legacy direct inserts after parity is verified for each source
 
 ### 15.2 Backfill Rules
 
@@ -842,13 +846,29 @@ Migration review artifact:
 
 - create a tenant-scoped `task_migration_review` table and an admin remediation queue backed by it
 - minimum row shape: `id`, `office_id`, `survivor_task_id`, `duplicate_task_id`, `origin_rule`, `dedupe_key`, `reason_code`, `review_status`, `resolution_action`, `created_at`, `resolved_at`, `resolved_by`
-- `review_status` values: `pending`, `resolved`
+- `review_status` values: `pending_active_resolution`, `resolved`
 - `resolution_action` values: `dismissed_duplicate`, `merged_into_survivor`, `manually_kept_terminal`
-- rows in `task_migration_review` represent non-survivor duplicates that have been removed from the active set but still require operator confirmation or audit visibility
+- rows in `task_migration_review` represent non-survivor duplicates that still need operator resolution before unique-index enforcement
+
+Remediation queue contract:
+
+- only admin or director users may resolve queue items
+- resolving an item must mutate the duplicate task row into a non-active terminal state or merge its relevant history/linkage into the survivor before terminalizing it
+- `merged_into_survivor` preserves linkable history by transferring safe references and recording the merge action in audit history
+- `resolved` is not advisory; it means the duplicate row is already in a non-active state and no longer blocks unique-index enforcement
+
+Duplicate remediation state machine:
+
+1. detect a survivor/non-survivor collision candidate
+2. if auto-safe, terminalize the duplicate row and record a resolved remediation row
+3. if not auto-safe, create a `task_migration_review` row with `review_status = pending_active_resolution` while the duplicate row remains unresolved
+4. admin queue action must choose one allowed `resolution_action`
+5. that action must mutate the duplicate row into a non-active state or merge-then-terminalize it
+6. only then may the remediation row move to `resolved`
 
 Enforcement gate:
 
-- the partial unique active index is not created until the migration review table is empty or every remaining row has been resolved into a non-active state
+- the partial unique active index is not created until there are no `pending_active_resolution` rows and every reviewed duplicate row is already non-active
 
 ### 15.3 Compatibility Window
 
