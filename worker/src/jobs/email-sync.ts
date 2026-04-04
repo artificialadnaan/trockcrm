@@ -500,6 +500,7 @@ export async function processInboundMessage(
         emailSubject: subject,
         activeDealCount: association.activeDealCount,
         activeDealNames: association.activeDealNames,
+        unreadInbound: association.dealId ? 30 : 20,
       }
     );
   }
@@ -601,13 +602,14 @@ async function evaluateInboundEmailTasks(
     emailSubject: string;
     activeDealCount: number;
     activeDealNames: string[];
+    unreadInbound: number;
   }
 ): Promise<void> {
-  const [{ evaluateTaskRules }, { TASK_RULES }, { createTenantTaskRulePersistence }] = await Promise.all([
+  const [{ evaluateTaskRules }, { TASK_RULES }, { createTenantTaskRulePersistence }] = (await Promise.all([
     import(SERVER_EVALUATOR_MODULE),
     import(SERVER_TASK_RULES_MODULE),
     import(SERVER_TASK_PERSISTENCE_MODULE),
-  ]);
+  ])) as any;
 
   const taskPersistence = createTenantTaskRulePersistence(client, schemaName);
   await evaluateTaskRules(context, taskPersistence, TASK_RULES);

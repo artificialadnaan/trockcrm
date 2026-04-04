@@ -1,3 +1,7 @@
+import { and, desc, eq, inArray } from "drizzle-orm";
+import { taskResolutionState, tasks } from "@trock-crm/shared/schema";
+import type { NodePgDatabase } from "drizzle-orm/node-postgres";
+import type * as schema from "@trock-crm/shared/schema";
 import type {
   TaskBusinessKey,
   TaskRecord,
@@ -9,6 +13,8 @@ import type {
 type Queryable = {
   query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<{ rows: T[] }>;
 };
+
+type TenantDb = NodePgDatabase<typeof schema>;
 
 const ACTIVE_TASK_STATUSES = ["pending", "scheduled", "in_progress", "waiting_on", "blocked"] as const;
 
@@ -79,6 +85,57 @@ function taskDraftColumns(draft: SystemTaskDraft) {
     dedupeKey: draft.dedupeKey,
     reasonCode: draft.reasonCode,
     entitySnapshot: draft.entitySnapshot ?? null,
+    dealId: draft.dealId ?? null,
+    contactId: draft.contactId ?? null,
+    emailId: draft.emailId ?? null,
+    dueDate: toNullableDate(draft.dueAt),
+    dueTime: null,
+    remindAt: null,
+  };
+}
+
+function mapDrizzleTaskRow(row: typeof tasks.$inferSelect): TaskRecord {
+  return {
+    id: row.id,
+    title: row.title,
+    description: row.description ?? null,
+    type: row.type,
+    assignedTo: row.assignedTo,
+    officeId: row.officeId ?? "",
+    originRule: row.originRule ?? "",
+    sourceRule: row.sourceRule ?? undefined,
+    sourceEvent: row.sourceEvent ?? "",
+    dedupeKey: row.dedupeKey ?? "",
+    reasonCode: row.reasonCode ?? "",
+    priority: row.priority,
+    priorityScore: 0,
+    status: row.status as TaskRecord["status"],
+    dueAt: row.dueDate ?? null,
+    entitySnapshot: (row.entitySnapshot as Record<string, unknown> | null) ?? null,
+    metadata: null,
+    dealId: row.dealId ?? null,
+    contactId: row.contactId ?? null,
+    emailId: row.emailId ?? null,
+  };
+}
+
+function taskDraftValues(draft: SystemTaskDraft) {
+  return {
+    title: draft.title,
+    description: draft.description ?? null,
+    type: draft.type as (typeof tasks.$inferInsert)["type"],
+    priority: draft.priority,
+    priorityScore: draft.priorityScore,
+    status: draft.status ?? "pending",
+    assignedTo: draft.assignedTo,
+    officeId: draft.officeId,
+    originRule: draft.originRule,
+    sourceRule: draft.sourceRule ?? null,
+    sourceEvent: draft.sourceEvent,
+    dedupeKey: draft.dedupeKey,
+    reasonCode: draft.reasonCode,
+    entitySnapshot: draft.entitySnapshot ?? null,
+    metadata: draft.metadata ?? {},
     dealId: draft.dealId ?? null,
     contactId: draft.contactId ?? null,
     emailId: draft.emailId ?? null,
@@ -165,7 +222,7 @@ export function createTenantTaskRulePersistence(
            (title, description, type, priority, status, assigned_to, office_id, origin_rule,
             source_rule, source_event, dedupe_key, reason_code, entity_snapshot, deal_id, contact_id,
             email_id, due_date, due_time, remind_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
          RETURNING
            id,
            title,
