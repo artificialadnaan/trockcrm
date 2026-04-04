@@ -242,7 +242,7 @@ Examples:
 
 #### `dedupe_key`
 
-Stable unique key used to suppress duplicate active tasks created for the same business reason.
+Stable per-rule key component used with `origin_rule` to suppress duplicate active tasks created for the same business reason.
 
 Examples:
 
@@ -351,6 +351,7 @@ Use:
 - `task_id` stores the most recent task row associated with this business key
 - the table is latest-state only, not historical
 - task history remains in the task rows themselves and related activity/audit records, not in `task_resolution_state`
+- when suppression expires and a fresh task is regenerated, `task_id` is updated to the newly created task row during the same resolution-row upsert
 
 Resolution state contract:
 
@@ -506,6 +507,13 @@ Dependency-resolution contract:
 - transitions out of `waiting_on` or `blocked` happen through explicit user action or explicit dependency-cleared event handlers
 - dependency-cleared handlers may move `waiting_on` or `blocked` tasks back to `pending` or `in_progress` only when the triggering event directly resolves the referenced dependency
 - generic evaluator refresh passes may not change `waiting_on` or `blocked` status on their own
+
+Dependency lookup contract:
+
+- dependency-cleared handlers match tasks by the structured reference fields in `waiting_on` or `blocked_by`
+- the minimum deterministic lookup tuple is `(ref_type, ref_id, status)` plus tenant office scope
+- implementations should add JSON-path-capable indexes or extracted generated columns for dependency lookup keys used by event handlers
+- if a dependency reference is too weak to support deterministic lookup, the rule must not rely on automatic dependency-cleared transitions for that task type
 
 ### 6.6 Event Inputs
 
@@ -674,8 +682,9 @@ This does not change user-authored CRM email sending through Microsoft Graph. It
 Implementation contract:
 
 - add a notification-email recipient override in the notification/email-delivery path
-- the override applies only to notification emails whose type is in the explicit allowlist: `stale_deal`, `inbound_email`, `approval_needed`, plus task-engine-specific `system` emails for overdue-task alerts introduced by this initiative
-- any newly added task-rule-driven system email must declare its notification type in this allowlist before it can use the override
+- the override applies only to emails emitted with an explicit task-engine source marker or task-engine template id from the task/notification delivery path
+- notification type alone is not sufficient to trigger the override
+- any newly added task-rule-driven system email must declare that source marker or template id before it can use the override
 - for this initiative, the override is mandatory and routes those scoped system-notification emails to `adnaan.iqbal@gmail.com` regardless of the task assignee or notification recipient
 - the override applies in one place, before email send, so templates and callers do not implement their own routing logic
 - the implementation should use the existing single-recipient override mechanism in the Resend send path, but only from the task/notification delivery path that knows the notification type and can scope the override correctly
@@ -709,6 +718,7 @@ Required coverage areas:
 - scoped email-override tests proving non-task critical emails are unaffected
 - backfill correctness for provenance and dedupe fields where derivable
 - task-related production path/deep-link behavior where changed
+- API contract verification against the generated task API spec so enums, fields, and filters cannot drift silently
 
 Testing layers:
 
@@ -779,11 +789,12 @@ This work is an in-place evolution of the current task module and requires an ex
 
 1. add new task enum values and new task columns, including nullable `office_id`, `origin_rule`, and `dedupe_key`
 2. add `task_resolution_state`
-3. add indexes for active task querying and partial unique dedupe enforcement
-4. backfill `office_id` for existing rows, validate tenant-office consistency, then enforce `office_id NOT NULL`
-5. deploy code that can read both pre-rule and rule-driven task rows
-6. migrate automation sources one at a time behind the evaluator
-7. remove legacy direct inserts after parity is verified for each source
+3. deploy code that writes `office_id` for all new task writes and can read both pre-rule and rule-driven task rows
+4. backfill `office_id` for existing rows and validate tenant-office consistency
+5. enforce `office_id NOT NULL`
+6. add indexes for active task querying and partial unique dedupe enforcement after backfill remediation is complete
+7. migrate automation sources one at a time behind the evaluator
+8. remove legacy direct inserts after parity is verified for each source
 
 ### 15.2 Backfill Rules
 
@@ -797,6 +808,7 @@ Backfill guarantees:
 
 - `office_id` is fully backfilled because tenant schema context provides the source office deterministically
 - `origin_rule` and `dedupe_key` are nullable for legacy rows when safe derivation is not possible
+- if multiple legacy active rows safely derive to the same `(origin_rule, dedupe_key)`, the migration keeps the most recently updated row as the active survivor and clears provenance fields on the others so they remain legacy rows outside the new unique-key regime
 
 ### 15.3 Compatibility Window
 
@@ -816,6 +828,7 @@ Required indexes include:
 - index on `scheduled_for` for activation scans
 - index on `origin_rule` and `reason_code` for diagnostics and reporting
 - unique index on `task_resolution_state(origin_rule, dedupe_key)`
+- dependency-lookup indexes for structured `waiting_on` and `blocked_by` references used by dependency-cleared handlers
 
 ### 15.5 Cutover Safety
 
