@@ -330,36 +330,47 @@ describe("Task Service", () => {
       expect(result.waitingOn).toEqual({ reason: "client response" });
     });
 
-    it("allows scheduled tasks to move into progress after scheduling", async () => {
-      const clock = new Date("2026-04-04T15:00:00.000Z");
-      vi.useFakeTimers();
-      vi.setSystemTime(clock);
+    it("allows scheduled tasks to return to pending", async () => {
+      const { db } = createTransitionDb(
+        makeTask({ status: "scheduled", scheduledFor: new Date("2026-04-05T12:00:00.000Z") })
+      );
 
-      try {
-        const { db } = createTransitionDb(makeTask());
+      const result = await transitionTaskStatus(
+        db as any,
+        "task-1",
+        { nextStatus: "pending" },
+        "director",
+        "user-1"
+      );
 
-        const scheduled = await transitionTaskStatus(
-          db as any,
-          "task-1",
-          { nextStatus: "scheduled", scheduledFor: new Date("2026-04-05T12:00:00.000Z") },
-          "director",
-          "user-1"
-        );
-        expect(scheduled.status).toBe("scheduled");
-        expect(scheduled.scheduledFor).toBeInstanceOf(Date);
+      expect(result.status).toBe("pending");
+    });
 
-        const inProgress = await transitionTaskStatus(
-          db as any,
-          "task-1",
-          { nextStatus: "in_progress" },
-          "director",
-          "user-1"
-        );
-        expect(inProgress.status).toBe("in_progress");
-        expect(inProgress.startedAt).toEqual(clock);
-      } finally {
-        vi.useRealTimers();
-      }
+    it("clears due scheduling fields when entering scheduled", async () => {
+      const { db } = createTransitionDb(
+        makeTask({
+          dueDate: "2026-04-06",
+          dueTime: "09:00:00",
+          remindAt: new Date("2026-04-06T08:00:00.000Z"),
+          waitingOn: { reason: "client" },
+          blockedBy: { kind: "deal", id: "deal-1" },
+        })
+      );
+
+      const result = await transitionTaskStatus(
+        db as any,
+        "task-1",
+        { nextStatus: "scheduled", scheduledFor: new Date("2026-04-07T12:00:00.000Z") },
+        "director",
+        "user-1"
+      );
+
+      expect(result.status).toBe("scheduled");
+      expect(result.dueDate).toBeNull();
+      expect(result.dueTime).toBeNull();
+      expect(result.remindAt).toBeNull();
+      expect(result.waitingOn).toBeNull();
+      expect(result.blockedBy).toBeNull();
     });
   });
 
@@ -395,10 +406,11 @@ describe("Task Service", () => {
       }
     });
 
-    it("should only show active statuses in overdue/today/upcoming", () => {
-      const activeStatuses = ["pending", "in_progress"];
+    it("should only show active non-scheduled statuses in overdue/today/upcoming", () => {
+      const activeStatuses = ["pending", "in_progress", "waiting_on", "blocked"];
       expect(activeStatuses).not.toContain("completed");
       expect(activeStatuses).not.toContain("dismissed");
+      expect(activeStatuses).not.toContain("scheduled");
     });
   });
 
@@ -461,7 +473,7 @@ describe("Task Service", () => {
       expect(counts.completed).toBe(2);
     });
 
-    it("should count dismissed tasks in the completed bucket", async () => {
+    it("should count only completed tasks in the completed bucket", async () => {
       const { db } = createTransitionDb(makeTask(), [{ overdue: "0", today: "0", upcoming: "0", completed: "4" }]);
       const counts = await getTaskCounts(db as any, "user-1");
       expect(counts.completed).toBe(4);
@@ -554,6 +566,29 @@ describe("Task Service", () => {
       expect(result.status).toBe("completed");
       expect(result.completedAt).toBeInstanceOf(Date);
       expect(result.isOverdue).toBe(false);
+      expect(result.waitingOn).toBeNull();
+      expect(result.blockedBy).toBeNull();
+    });
+
+    it("treats scheduled tasks as inactive even after scheduledFor passes", () => {
+      const now = new Date("2026-04-04T12:00:00.000Z");
+      const future = new Date("2026-04-04T14:00:00.000Z");
+      const past = new Date("2026-04-04T10:00:00.000Z");
+
+      expect(
+        isTaskIncludedInActiveBuckets(
+          makeTask({ status: "scheduled", scheduledFor: future }),
+          now
+        )
+      ).toBe(false);
+      expect(
+        isTaskIncludedInActiveBuckets(
+          makeTask({ status: "scheduled", scheduledFor: past }),
+          now
+        )
+      ).toBe(false);
+      expect(isTaskIncludedInActiveBuckets(makeTask({ status: "waiting_on" }), now)).toBe(true);
+      expect(isTaskIncludedInActiveBuckets(makeTask({ status: "blocked" }), now)).toBe(true);
     });
   });
 });

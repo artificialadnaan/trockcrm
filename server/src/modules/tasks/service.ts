@@ -67,7 +67,7 @@ const TERMINAL_STATUSES: TaskStatus[] = ["completed", "dismissed"];
 
 const ALLOWED_TRANSITIONS: Record<TaskStatus, TaskStatus[]> = {
   pending: ["scheduled", "in_progress", "waiting_on", "blocked", "completed", "dismissed"],
-  scheduled: ["pending", "in_progress", "waiting_on", "blocked", "completed", "dismissed"],
+  scheduled: ["pending", "dismissed"],
   in_progress: ["scheduled", "waiting_on", "blocked", "completed", "dismissed"],
   waiting_on: ["scheduled", "pending", "in_progress", "blocked", "completed", "dismissed"],
   blocked: ["scheduled", "pending", "in_progress", "waiting_on", "completed", "dismissed"],
@@ -80,13 +80,8 @@ function isTaskStatus(value: string): value is TaskStatus {
 }
 
 function buildOpenTaskStatusCondition(now: Date) {
-  return or(
-    inArray(tasks.status as any, ACTIVE_BUCKET_STATUSES as any),
-    and(
-      eq(tasks.status as any, "scheduled" as any),
-      or(isNull((tasks as any).scheduledFor), sql`${(tasks as any).scheduledFor} <= ${now}`)
-    )
-  );
+  void now;
+  return inArray(tasks.status as any, ACTIVE_BUCKET_STATUSES as any);
 }
 
 type TaskBucketCandidate = {
@@ -98,8 +93,9 @@ export function isTaskIncludedInActiveBuckets(
   task: TaskBucketCandidate,
   now = new Date()
 ) {
+  void now;
   if (task.status === "scheduled") {
-    return task.scheduledFor == null || task.scheduledFor <= now;
+    return false;
   }
 
   return ACTIVE_BUCKET_STATUSES.includes(task.status);
@@ -136,6 +132,9 @@ export async function transitionTaskStatus(
       throw new AppError(400, "scheduledFor is required when moving a task to scheduled");
     }
     updates.scheduledFor = input.scheduledFor instanceof Date ? input.scheduledFor : new Date(input.scheduledFor);
+    updates.dueDate = null;
+    updates.dueTime = null;
+    updates.remindAt = null;
     updates.waitingOn = null;
     updates.blockedBy = null;
   }
@@ -323,39 +322,19 @@ export async function getTaskCounts(
   const result = await tenantDb.execute(sql`
     SELECT
       COUNT(*) FILTER (
-        WHERE (
-          status IN ('pending', 'in_progress', 'waiting_on', 'blocked')
-          OR (
-            status = 'scheduled'
-            AND (scheduled_for IS NULL OR scheduled_for <= ${new Date()})
-          )
-        )
+        WHERE status IN ('pending', 'in_progress', 'waiting_on', 'blocked')
         AND due_date < ${today}
       )::int AS overdue,
       COUNT(*) FILTER (
-        WHERE (
-          status IN ('pending', 'in_progress', 'waiting_on', 'blocked')
-          OR (
-            status = 'scheduled'
-            AND (scheduled_for IS NULL OR scheduled_for <= ${new Date()})
-          )
-        )
+        WHERE status IN ('pending', 'in_progress', 'waiting_on', 'blocked')
         AND due_date = ${today}
       )::int AS today,
       COUNT(*) FILTER (
-        WHERE (
-          status IN ('pending', 'in_progress', 'waiting_on', 'blocked')
-          OR (
-            status = 'scheduled'
-            AND (scheduled_for IS NULL OR scheduled_for <= ${new Date()})
-          )
-        )
+        WHERE status IN ('pending', 'in_progress', 'waiting_on', 'blocked')
         AND (due_date > ${today} OR due_date IS NULL)
       )::int AS upcoming,
       COUNT(*) FILTER (
-        WHERE status IN ('completed', 'dismissed')
-          AND completed_at IS NOT NULL
-          AND completed_at >= (CURRENT_TIMESTAMP AT TIME ZONE 'America/Chicago')::date - INTERVAL '7 days'
+        WHERE status = 'completed'
       )::int AS completed
     FROM tasks
     WHERE assigned_to = ${userId}
@@ -482,7 +461,9 @@ export async function completeTask(
       status: "completed",
       completedAt: new Date(),
       isOverdue: false,
-    })
+      waitingOn: null,
+      blockedBy: null,
+    } as any)
     .where(and(eq(tasks.id, taskId), inArray(tasks.status as any, ["pending", "in_progress", "waiting_on", "blocked"] as any)))
     .returning();
 
@@ -511,7 +492,7 @@ export async function dismissTask(
 
   const result = await tenantDb
     .update(tasks)
-    .set({ status: "dismissed", isOverdue: false })
+    .set({ status: "dismissed", isOverdue: false, waitingOn: null, blockedBy: null } as any)
     .where(eq(tasks.id, taskId))
     .returning();
 
