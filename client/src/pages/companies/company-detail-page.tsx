@@ -240,6 +240,15 @@ export function CompanyDetailPage() {
               <Download className="h-4 w-4 mr-2" />
               Export Data
             </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              className="border-zinc-300 text-zinc-600 hover:bg-zinc-100"
+              onClick={() => setAddContactOpen(true)}
+            >
+              <UserPlus className="h-4 w-4 mr-2" />
+              Add Contact
+            </Button>
           </div>
         </div>
 
@@ -293,14 +302,22 @@ export function CompanyDetailPage() {
               )}
 
               {/* Location */}
-              {(company.city || company.state) && (
+              {(company.address || company.city || company.state || company.zip) && (
                 <div>
                   <p className="text-[11px] font-semibold uppercase tracking-wider text-zinc-400 mb-1">Location</p>
-                  <div className="flex items-center gap-1.5">
-                    <MapPin className="h-3.5 w-3.5 text-zinc-400" />
-                    <p className="text-sm font-medium text-foreground">
-                      {[company.city, company.state].filter(Boolean).join(", ")}
-                    </p>
+                  <div className="flex items-start gap-1.5">
+                    <MapPin className="h-3.5 w-3.5 text-zinc-400 mt-0.5 shrink-0" />
+                    <div className="text-sm font-medium text-foreground">
+                      {company.address && (
+                        <p>{company.address}</p>
+                      )}
+                      <p>
+                        {[
+                          [company.city, company.state].filter(Boolean).join(", "),
+                          company.zip,
+                        ].filter(Boolean).join(" ")}
+                      </p>
+                    </div>
                   </div>
                 </div>
               )}

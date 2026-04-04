@@ -5,7 +5,10 @@ import {
   Check,
   Clock,
   ChevronDown,
+  Mail,
+  Pencil,
   User,
+  Users,
   X,
 } from "lucide-react";
 import { useTasks, useTaskCounts, completeTask, dismissTask, snoozeTask } from "@/hooks/use-tasks";
@@ -120,6 +123,14 @@ function AssigneeAvatar({ name }: { name: string | null }) {
   );
 }
 
+const typeIcons: Record<string, React.ReactNode> = {
+  follow_up: <Clock className="h-3 w-3" />,
+  stale_deal: <AlertTriangle className="h-3 w-3" />,
+  inbound_email: <Mail className="h-3 w-3" />,
+  touchpoint: <Users className="h-3 w-3" />,
+  manual: <Pencil className="h-3 w-3" />,
+};
+
 // ---------------------------------------------------------------------------
 // Task Row
 // ---------------------------------------------------------------------------
@@ -221,8 +232,9 @@ function IndustrialTaskRow({
                 CONTACT
               </span>
             )}
-            <span className="text-[10px] font-mono text-gray-400 uppercase tracking-wide">
-              {task.type.replace("_", " ")}
+            <span className="text-[10px] font-mono text-gray-400 uppercase tracking-wide flex items-center gap-1">
+              {typeIcons[task.type]}
+              {task.type.replace(/_/g, " ")}
             </span>
           </div>
         </div>
@@ -487,14 +499,62 @@ export function TaskListPage() {
 
           {/* Task Rows */}
           <div className="space-y-1">
-            {sortedTasks.length === 0 ? (
-              <div className="text-center py-12 text-gray-400">
-                <p className="text-sm font-medium">No tasks match this filter</p>
-              </div>
+            {activeFilter === "all" ? (
+              <>
+                {overdueTasks.length === 0 && todayTasks.length === 0 && upcomingTasks.length === 0 ? (
+                  <div className="text-center py-12 text-gray-400">
+                    <p className="text-sm font-medium">No tasks match this filter</p>
+                  </div>
+                ) : (
+                  <>
+                    {overdueTasks.length > 0 && (
+                      <>
+                        <div className="px-6 py-2 bg-red-50/50 text-[10px] font-black uppercase tracking-[0.15em] text-gray-500 flex items-center gap-2">
+                          <div className="w-2 h-2 rounded-full bg-red-500" />
+                          Overdue ({overdueTasks.length})
+                        </div>
+                        {overdueTasks.map((task) => (
+                          <IndustrialTaskRow key={task.id} task={task} onUpdate={refetchAll} />
+                        ))}
+                      </>
+                    )}
+                    {todayTasks.length > 0 && (
+                      <>
+                        <div className="px-6 py-2 bg-amber-50/50 text-[10px] font-black uppercase tracking-[0.15em] text-gray-500 flex items-center gap-2">
+                          <div className="w-2 h-2 rounded-full bg-amber-400" />
+                          Today ({todayTasks.length})
+                        </div>
+                        {todayTasks.map((task) => (
+                          <IndustrialTaskRow key={task.id} task={task} onUpdate={refetchAll} />
+                        ))}
+                      </>
+                    )}
+                    {upcomingTasks.length > 0 && (
+                      <>
+                        <div className="px-6 py-2 bg-gray-50/80 text-[10px] font-black uppercase tracking-[0.15em] text-gray-500 flex items-center gap-2">
+                          <div className="w-2 h-2 rounded-full bg-gray-400" />
+                          Upcoming ({upcomingTasks.length})
+                        </div>
+                        {upcomingTasks.map((task) => (
+                          <IndustrialTaskRow key={task.id} task={task} onUpdate={refetchAll} />
+                        ))}
+                      </>
+                    )}
+                  </>
+                )}
+              </>
             ) : (
-              sortedTasks.map((task) => (
-                <IndustrialTaskRow key={task.id} task={task} onUpdate={refetchAll} />
-              ))
+              <>
+                {sortedTasks.length === 0 ? (
+                  <div className="text-center py-12 text-gray-400">
+                    <p className="text-sm font-medium">No tasks match this filter</p>
+                  </div>
+                ) : (
+                  sortedTasks.map((task) => (
+                    <IndustrialTaskRow key={task.id} task={task} onUpdate={refetchAll} />
+                  ))
+                )}
+              </>
             )}
           </div>
         </div>
