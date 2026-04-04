@@ -54,6 +54,7 @@ Extend tasks so the system can explain why a task exists, when it should surface
 
 New task fields:
 
+- `origin_rule`
 - `source_rule`
 - `source_event`
 - `dedupe_key`
@@ -64,7 +65,11 @@ New task fields:
 - `blocked_by`
 - `started_at`
 
-These fields apply to both current task API responses and internal rule evaluation.
+Additional close-loop persistence:
+
+- `task_resolution_state` table
+
+These fields apply to both current task API responses and internal rule evaluation. `task_resolution_state` is the durable close-loop store for dedupe suppression and rule outcome memory.
 
 ### Phase C: Centralized Rule-Driven Generation
 
@@ -170,6 +175,10 @@ Allowed transitions:
 - `blocked` -> `completed`
 - `blocked` -> `dismissed`
 
+Automatic transitions:
+
+- `scheduled` -> `pending` when `scheduled_for <= now` in office-local time and the activation worker promotes it
+
 Disallowed behavior:
 
 - editing completed or dismissed tasks through the standard task edit flow
@@ -190,9 +199,13 @@ The current task identity and linkage model stays intact:
 
 ### 5.2 New Fields
 
+#### `origin_rule`
+
+String identifier for the rule that originally created the task. Null for manual tasks. This never changes after insert and is the primary provenance field for audit/debugging.
+
 #### `source_rule`
 
-String identifier for the rule that created or most recently refreshed the task. Null for manual tasks.
+String identifier for the rule that most recently refreshed or materially updated the task. Null for manual tasks.
 
 Examples:
 
@@ -235,6 +248,14 @@ Examples:
 
 JSON snapshot of the key data the rule used when generating the task. This supports explainability without requiring later joins to unchanged records.
 
+This is not unconstrained JSON. It follows a versioned envelope:
+
+- `schema_version`
+- `entity_type`
+- `entity_id`
+- `summary`
+- `signals`
+
 Example contents:
 
 - deal number and stage
@@ -244,31 +265,67 @@ Example contents:
 
 #### `scheduled_for`
 
-Timestamp or date-time indicating when a scheduled task becomes active.
+Timezone-aware timestamp indicating when a scheduled task becomes active. All persistence uses UTC. Activation comparisons use the office-local timezone when deciding whether the task should surface as active work.
 
 #### `waiting_on`
 
-Free-text or structured reference describing what the task is waiting on.
+Structured JSON reference describing what the task is waiting on.
+
+Shape:
+
+- `kind`
+- `label`
+- `ref_type`
+- `ref_id`
 
 Examples:
 
-- `Customer reply`
-- `Proposal revision from estimating`
-- `email:{messageId}`
+- `{ kind: "person_reply", label: "Customer reply", ref_type: "email", ref_id: "{messageId}" }`
+- `{ kind: "internal_handoff", label: "Proposal revision from estimating", ref_type: "team", ref_id: "estimating" }`
 
 #### `blocked_by`
 
-Free-text or structured reference describing the blocker.
+Structured JSON reference describing the blocker.
+
+Shape:
+
+- `kind`
+- `label`
+- `ref_type`
+- `ref_id`
 
 Examples:
 
-- `Missing deal stage approval`
-- `procore_project_not_created`
-- `contact_missing_email`
+- `{ kind: "approval", label: "Missing deal stage approval", ref_type: "deal_stage", ref_id: "{dealId}" }`
+- `{ kind: "integration", label: "Procore project not created", ref_type: "deal", ref_id: "{dealId}" }`
 
 #### `started_at`
 
 Timestamp set when the task first enters `in_progress`.
+
+#### `task_resolution_state`
+
+New tenant-scoped table for durable rule outcome memory and duplicate suppression.
+
+Columns:
+
+- `id`
+- `task_id`
+- `origin_rule`
+- `dedupe_key`
+- `resolution_status`
+- `resolution_reason`
+- `resolved_at`
+- `suppressed_until`
+- `entity_snapshot`
+- `created_at`
+- `updated_at`
+
+Use:
+
+- persist provenance-aware completion outcomes
+- suppress regenerated suggestions for the same business reason
+- preserve close-loop state even after the original task becomes terminal
 
 ---
 
@@ -321,7 +378,43 @@ Responsible for:
 - dedupe against active tasks
 - idempotent retries
 
-### 6.3 Event Inputs
+### 6.3 Scheduled Activation Contract
+
+Scheduled activation is worker-driven, not lazy on read.
+
+- A dedicated activation pass runs every 5 minutes in the worker.
+- It promotes tasks from `scheduled` to `pending` when `scheduled_for <= now` in the office-local timezone.
+- Pre-activation scheduled tasks do not appear in active sections, do not count toward overdue/today/upcoming totals, and are not included in actionable task queues.
+- Once promoted, normal sectioning and overdue evaluation apply.
+- If a scheduled task is already terminal when the activation pass sees it, it is skipped.
+
+This keeps read paths simple and avoids hidden state mutation during list/count API calls.
+
+### 6.4 Dedupe and Idempotency Contract
+
+`dedupe_key` is the canonical persistence-level idempotency key for system-generated tasks.
+
+Rules:
+
+- manual tasks do not use `dedupe_key`
+- system-generated tasks must set `dedupe_key`
+- active-task uniqueness is enforced at the database layer
+
+Database contract:
+
+- add a partial unique index on active system tasks scoped to `dedupe_key`
+- active means status in `scheduled`, `pending`, `in_progress`, `waiting_on`, `blocked`
+- terminal tasks (`completed`, `dismissed`) do not participate in the active unique index
+
+Conflict policy:
+
+- on unique conflict, the evaluator refreshes the existing active task instead of creating a second task
+- refresh updates `source_rule`, `source_event`, `reason_code`, `entity_snapshot`, priority, scheduling metadata, and assignment where allowed by policy
+- refresh never reopens terminal tasks
+
+This is the required protection against concurrent cron and event evaluation.
+
+### 6.5 Event Inputs
 
 Initial triggers:
 
@@ -332,7 +425,7 @@ Initial triggers:
 - `cron.daily_task_generation`
 - `cron.cold_lead_warming`
 
-### 6.4 Migration Strategy
+### 6.6 Migration Strategy
 
 Migrate existing hardcoded automations one source at a time behind the evaluator. Do not rewrite all jobs at once.
 
@@ -344,6 +437,13 @@ Order:
 4. stale deals
 5. inbound email tasks
 6. cold lead warming
+
+Compatibility rule during migration:
+
+- legacy worker/job code may continue detecting candidates
+- only the rule evaluator may materialize or refresh the task row once a source is migrated
+- source-specific direct inserts are removed immediately after that source is migrated
+- each migrated source gets parity tests before removing legacy direct-write behavior
 
 Each migration keeps current behavior unless the spec explicitly changes it.
 
@@ -364,6 +464,13 @@ Rules:
 - reps can only assign tasks to themselves in manual flows
 - directors/admins can filter and assign across available users for the active office
 - office fallback must be explicit and testable, not “first row returned” behavior hidden inside a worker
+
+Office fallback source of truth:
+
+- add or use an office-level configured fallback assignee in office settings
+- fallback must reference an active user with office access
+- if the configured fallback is inactive or missing, the evaluator returns a structured skip reason and does not silently reassign to a random user
+- per-rule overrides may replace the office fallback only when explicitly configured
 
 If assignment cannot be resolved, the evaluator returns a structured skip reason rather than silently creating a broken task.
 
@@ -408,6 +515,15 @@ The tasks API is extended to:
 
 The API spec must be updated to match implementation and stop advertising stale task enums or types.
 
+Section/count behavior:
+
+- `scheduled` tasks are excluded from active counts and from overdue/today/upcoming sections until activation
+- `pending`, `in_progress`, `waiting_on`, and `blocked` are active tasks
+- `waiting_on` and `blocked` remain in the same date bucket as other active tasks, with explicit state badges and explanation payloads
+- overdue status applies to active tasks with due dates in the past, including `waiting_on` and `blocked`
+- completed counts include only `completed`
+- dismissed tasks remain visible in task detail/history responses but never count toward completed totals in this initiative
+
 ### 9.2 UI
 
 Task UI changes:
@@ -416,6 +532,7 @@ Task UI changes:
 - expose lifecycle transitions beyond complete/dismiss/snooze
 - show why a task is waiting or blocked
 - show scheduled state distinctly from active work
+- show scheduled tasks in a dedicated non-actionable scheduled view or filter, separate from active sections
 - allow director/admin assignee filtering on the tasks page
 - keep completed/dismissed tasks non-editable from the normal row interaction
 
@@ -455,6 +572,13 @@ This applies to:
 - any new task-rule-driven system emails added by this implementation
 
 This does not change user-authored CRM email sending through Microsoft Graph. It only affects system-generated email delivery.
+
+Implementation contract:
+
+- add a notification-email recipient override in the notification/email-delivery path
+- when the override is enabled for this environment, all system-notification emails from this initiative are sent to `adnaan.iqbal@gmail.com` regardless of the task assignee or notification recipient
+- the override applies in one place, before email send, so templates and callers do not implement their own routing logic
+- CRM user-authored outbound email via Microsoft Graph bypasses this override entirely
 
 ---
 
@@ -534,3 +658,50 @@ This design intentionally does not include:
 - broad notification-system redesign outside task-related behavior
 
 The immediate objective is a smart, deterministic task engine that is reliable enough to support the operational workflow already defined in T Rock’s dashboards and CRM process.
+
+---
+
+## 15. Rollout and Migration Contract
+
+This work is an in-place evolution of the current task module and requires an explicit rollout order.
+
+### 15.1 Schema Migration Order
+
+1. add new task enum values and columns
+2. add `origin_rule` and `dedupe_key`
+3. add `task_resolution_state`
+4. add indexes for active task querying and partial unique dedupe enforcement
+5. deploy code that can read both pre-rule and rule-driven task rows
+6. migrate automation sources one at a time behind the evaluator
+7. remove legacy direct inserts after parity is verified for each source
+
+### 15.2 Backfill Rules
+
+- existing manual tasks get null provenance fields
+- existing system-generated tasks get best-effort `origin_rule`, `source_rule`, `reason_code`, and `dedupe_key` backfills only where they can be derived safely
+- tasks without safe derivation remain null-provenance legacy rows and continue to function
+- existing `pending` tasks are not auto-converted to `scheduled`, `waiting_on`, or `blocked` during migration
+
+### 15.3 Compatibility Window
+
+During migration:
+
+- list/count APIs must support both legacy and rule-driven tasks
+- worker jobs that have not yet migrated may still detect candidate work
+- migrated sources must write only through the evaluator
+- direct SQL inserts into `tasks` for migrated sources are considered a bug
+
+### 15.4 Index Requirements
+
+Required indexes include:
+
+- assignee/status/date index for active list queries
+- partial unique index on active `dedupe_key`
+- index on `scheduled_for` for activation scans
+- index on `origin_rule` and `reason_code` for diagnostics and reporting
+
+### 15.5 Cutover Safety
+
+- each migrated source ships with parity tests and idempotency tests
+- production rollout should enable one migrated source at a time when possible
+- if a migrated rule path misbehaves, the source can be disabled without rolling back the entire task subsystem
