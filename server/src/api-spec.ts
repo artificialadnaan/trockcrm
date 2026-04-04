@@ -206,6 +206,7 @@ export const apiSpec = {
           priority: { type: "string", enum: ["low", "normal", "high", "urgent"], default: "normal" },
           status: { type: "string", enum: ["pending", "scheduled", "in_progress", "waiting_on", "blocked", "completed", "dismissed"], default: "pending" },
           assignedTo: { type: "string", format: "uuid" },
+          assignedToName: { type: "string", nullable: true, description: "Display name of the assigned user, when available." },
           createdBy: { type: "string", format: "uuid", nullable: true },
           dealId: { type: "string", format: "uuid", nullable: true },
           contactId: { type: "string", format: "uuid", nullable: true },
@@ -2004,6 +2005,40 @@ export const apiSpec = {
     // =========================================================================
     // TASKS
     // =========================================================================
+    "/api/tasks/assignees": {
+      get: {
+        tags: ["Tasks"],
+        summary: "List task assignees",
+        description: "Reps only see themselves. Directors/admins see active users in the current office.",
+        responses: {
+          200: {
+            description: "Assignable users.",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    users: {
+                      type: "array",
+                      items: {
+                        type: "object",
+                        properties: {
+                          id: { type: "string", format: "uuid" },
+                          displayName: { type: "string" },
+                        },
+                        required: ["id", "displayName"],
+                      },
+                    },
+                  },
+                  required: ["users"],
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+
     "/api/tasks": {
       get: {
         tags: ["Tasks"],
@@ -2168,14 +2203,42 @@ export const apiSpec = {
           content: {
             "application/json": {
               schema: {
-                type: "object",
-                properties: {
-                  nextStatus: { type: "string", enum: ["pending", "scheduled", "in_progress", "waiting_on", "blocked", "completed", "dismissed"] },
-                  scheduledFor: { type: "string", format: "date-time" },
-                  waitingOn: { type: "object", additionalProperties: true },
-                  blockedBy: { type: "object", additionalProperties: true },
-                },
-                required: ["nextStatus"],
+                oneOf: [
+                  {
+                    type: "object",
+                    properties: {
+                      nextStatus: { type: "string", enum: ["scheduled"] },
+                      scheduledFor: { type: "string", format: "date-time" },
+                    },
+                    required: ["nextStatus", "scheduledFor"],
+                  },
+                  {
+                    type: "object",
+                    properties: {
+                      nextStatus: { type: "string", enum: ["waiting_on"] },
+                      waitingOn: { type: "object", additionalProperties: true },
+                    },
+                    required: ["nextStatus", "waitingOn"],
+                  },
+                  {
+                    type: "object",
+                    properties: {
+                      nextStatus: { type: "string", enum: ["blocked"] },
+                      blockedBy: { type: "object", additionalProperties: true },
+                    },
+                    required: ["nextStatus", "blockedBy"],
+                  },
+                  {
+                    type: "object",
+                    properties: {
+                      nextStatus: { type: "string", enum: ["pending", "in_progress", "completed", "dismissed"] },
+                      scheduledFor: { type: "string", format: "date-time", nullable: true },
+                      waitingOn: { type: "object", nullable: true, additionalProperties: true },
+                      blockedBy: { type: "object", nullable: true, additionalProperties: true },
+                    },
+                    required: ["nextStatus"],
+                  },
+                ],
               },
             },
           },
