@@ -18,7 +18,7 @@ vi.mock("../../../server/src/modules/tasks/rules/evaluator.js", () => ({
 }));
 
 vi.mock("../../../server/src/modules/tasks/rules/config.js", () => ({
-  TASK_RULES: [{ id: "bid_deadline_countdown" }],
+  TASK_RULES: [{ id: "bid_deadline_14_day" }],
 }));
 
 vi.mock("../../../server/src/modules/tasks/rules/persistence.js", () => ({
@@ -37,7 +37,7 @@ describe("bid deadline worker", () => {
   it("delegates countdown task creation to the rule evaluator without issuing raw task inserts", async () => {
     const taskPersistence = { marker: "task-persistence" };
     createTenantTaskRulePersistenceMock.mockReturnValue(taskPersistence);
-    evaluateTaskRulesMock.mockResolvedValue([{ ruleId: "bid_deadline_countdown", action: "created" }]);
+    evaluateTaskRulesMock.mockResolvedValue([{ ruleId: "bid_deadline_14_day", action: "created" }]);
 
     queryMock.mockImplementation(async (sql: string, params?: unknown[]) => {
       if (sql.includes("FROM public.offices")) {
