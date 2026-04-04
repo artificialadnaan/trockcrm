@@ -113,7 +113,7 @@ Initial close-loop behaviors:
 
 - update related contact/deal recency signals
 - record task provenance-aware completion outcomes
-- prevent duplicate open suggestions for the same `dedupe_key`
+- prevent duplicate open suggestions for the same `(origin_rule, dedupe_key)` business key
 
 ---
 
@@ -346,10 +346,16 @@ Use:
 - suppress regenerated suggestions for the same business reason
 - preserve close-loop state even after the original task becomes terminal
 
+`task_id` semantics:
+
+- `task_id` stores the most recent task row associated with this business key
+- the table is latest-state only, not historical
+- task history remains in the task rows themselves and related activity/audit records, not in `task_resolution_state`
+
 Resolution state contract:
 
 - authoritative business key is `origin_rule` plus `dedupe_key`
-- allowed `resolution_status` values are `completed`, `dismissed`, `suppressed`, `expired`
+- allowed persisted `resolution_status` values are `completed`, `dismissed`, `suppressed`
 - `completed` means the business reason was satisfied and should suppress regeneration for the configured suppression window
 - `dismissed` means the user intentionally closed the task without satisfying the business reason and does not suppress regeneration unless the rule explicitly marks the dismissal reason as suppressible
 - `suppressed` means regeneration is intentionally blocked until `suppressed_until`
@@ -433,7 +439,9 @@ This keeps read paths simple and avoids hidden state mutation during list/count 
 
 ### 6.4 Dedupe and Idempotency Contract
 
-`dedupe_key` is the canonical persistence-level idempotency key for system-generated tasks.
+`dedupe_key` is the per-rule idempotency component for system-generated tasks.
+
+The canonical business key for rule-generated tasks is always `(origin_rule, dedupe_key)`.
 
 Rules:
 
@@ -492,6 +500,12 @@ Contract:
 - evaluator refreshes may not move tasks between active non-terminal statuses; non-terminal status changes happen only through explicit lifecycle transitions or the scheduled activation rule described above
 - system transitions into terminal states always win over refresh attempts
 - implementations may use explicit manual-lock columns or equivalent metadata, but the behavior contract above is mandatory
+
+Dependency-resolution contract:
+
+- transitions out of `waiting_on` or `blocked` happen through explicit user action or explicit dependency-cleared event handlers
+- dependency-cleared handlers may move `waiting_on` or `blocked` tasks back to `pending` or `in_progress` only when the triggering event directly resolves the referenced dependency
+- generic evaluator refresh passes may not change `waiting_on` or `blocked` status on their own
 
 ### 6.6 Event Inputs
 
@@ -660,7 +674,8 @@ This does not change user-authored CRM email sending through Microsoft Graph. It
 Implementation contract:
 
 - add a notification-email recipient override in the notification/email-delivery path
-- the override applies only to task-initiative notification emails: overdue task, stale deal, inbound email alert, approval-needed from this task/notification area, and any new task-rule-driven system emails introduced by this implementation
+- the override applies only to notification emails whose type is in the explicit allowlist: `stale_deal`, `inbound_email`, `approval_needed`, plus task-engine-specific `system` emails for overdue-task alerts introduced by this initiative
+- any newly added task-rule-driven system email must declare its notification type in this allowlist before it can use the override
 - for this initiative, the override is mandatory and routes those scoped system-notification emails to `adnaan.iqbal@gmail.com` regardless of the task assignee or notification recipient
 - the override applies in one place, before email send, so templates and callers do not implement their own routing logic
 - the implementation should use the existing single-recipient override mechanism in the Resend send path, but only from the task/notification delivery path that knows the notification type and can scope the override correctly
@@ -679,16 +694,19 @@ Required coverage areas:
 - assignment resolution order
 - priority scoring and mapping
 - dedupe key generation and idempotent task materialization
+- composite business-key behavior where the same `dedupe_key` under different `origin_rule`s does not collide
 - concurrent event and cron races against the active-task unique index
 - migration parity for existing automation paths
 - mixed legacy and rule-driven rows during the compatibility window
 - close-loop completion side effects
 - suppression-state creation, expiry, and regeneration checks
+- resolution upserts keyed by `(origin_rule, dedupe_key)`
 - office-local scheduled activation including DST boundary cases
 - task office persistence and office-derived activation behavior
 - assignee display-name correctness in API/UI
 - director/admin assignee filtering behavior
 - system email routing override to `adnaan.iqbal@gmail.com`
+- scoped email-override tests proving non-task critical emails are unaffected
 - backfill correctness for provenance and dedupe fields where derivable
 - task-related production path/deep-link behavior where changed
 
@@ -722,7 +740,7 @@ Control:
 Control:
 
 - move all automated creates through one materialization layer
-- make `dedupe_key` the canonical dedupe mechanism
+- make `(origin_rule, dedupe_key)` the canonical dedupe mechanism
 
 ### Risk: assignment fallback stays opaque
 
@@ -759,12 +777,13 @@ This work is an in-place evolution of the current task module and requires an ex
 
 ### 15.1 Schema Migration Order
 
-1. add new task enum values and new task columns, including `office_id`, `origin_rule`, and `dedupe_key`
+1. add new task enum values and new task columns, including nullable `office_id`, `origin_rule`, and `dedupe_key`
 2. add `task_resolution_state`
 3. add indexes for active task querying and partial unique dedupe enforcement
-4. deploy code that can read both pre-rule and rule-driven task rows
-5. migrate automation sources one at a time behind the evaluator
-6. remove legacy direct inserts after parity is verified for each source
+4. backfill `office_id` for existing rows, validate tenant-office consistency, then enforce `office_id NOT NULL`
+5. deploy code that can read both pre-rule and rule-driven task rows
+6. migrate automation sources one at a time behind the evaluator
+7. remove legacy direct inserts after parity is verified for each source
 
 ### 15.2 Backfill Rules
 
