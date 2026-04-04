@@ -90,10 +90,15 @@ export interface TaskRuleDefinition {
 
 export type RuleEvaluationAction = "created" | "updated" | "skipped";
 
+export interface RuleSkipReason {
+  code: string;
+  detail: string;
+}
+
 export interface RuleEvaluationOutcome {
   ruleId: string;
   businessKey?: TaskBusinessKey;
   action: RuleEvaluationAction;
   taskId?: string;
-  reason?: string;
+  reason?: RuleSkipReason;
 }

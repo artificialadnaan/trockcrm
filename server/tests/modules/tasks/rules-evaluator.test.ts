@@ -5,39 +5,56 @@ import { scoreTaskPriority, mapTaskPriorityBand } from "../../../src/modules/tas
 import { TASK_RULES } from "../../../src/modules/tasks/rules/config.js";
 import type {
   TaskRuleContext,
+  TaskRecord,
   TaskRulePersistence,
-  SystemTaskDraft,
+  TaskRuleDefinition,
 } from "../../../src/modules/tasks/rules/types.js";
 
-function createInMemoryStore() {
-  const tasks = new Map<string, SystemTaskDraft & { id: string; status: "pending" }>();
+function createInMemoryStore(
+  initialTasks: Array<TaskRecord> = []
+) {
+  const tasks = new Map<string, Map<string, TaskRecord>>();
   const operations: Array<"insert" | "update"> = [];
-  let sequence = 1;
+  let sequence = initialTasks.length + 1;
+
+  const getTask = (originRule: string, dedupeKey: string) => {
+    return tasks.get(originRule)?.get(dedupeKey) ?? null;
+  };
+
+  const setTask = (task: TaskRecord) => {
+    const byOrigin = tasks.get(task.originRule) ?? new Map<string, TaskRecord>();
+    byOrigin.set(task.dedupeKey, task);
+    tasks.set(task.originRule, byOrigin);
+  };
+
+  for (const task of initialTasks) {
+    setTask(task);
+  }
 
   const persistence: TaskRulePersistence = {
     async findOpenTaskByBusinessKey({ originRule, dedupeKey }) {
-      return tasks.get(`${originRule}:${dedupeKey}`) ?? null;
+      return getTask(originRule, dedupeKey);
     },
     async insertTask(draft) {
       operations.push("insert");
       const record = {
         ...draft,
         id: `task-${sequence++}`,
-        status: "pending" as const,
+        status: draft.status ?? "pending",
       };
-      tasks.set(`${draft.originRule}:${draft.dedupeKey}`, record);
+      setTask(record);
       return record;
     },
     async updateTask(taskId, draft) {
       operations.push("update");
-      const existing = [...tasks.values()].find((task) => task.id === taskId);
+      const existing = [...tasks.values()].flatMap((byOrigin) => [...byOrigin.values()]).find((task) => task.id === taskId);
       if (!existing) throw new Error("task not found");
       const record = {
         ...existing,
         ...draft,
         id: taskId,
       };
-      tasks.set(`${draft.originRule}:${draft.dedupeKey}`, record);
+      setTask(record);
       return record;
     },
   };
@@ -46,6 +63,12 @@ function createInMemoryStore() {
     persistence,
     tasks,
     operations,
+    countTasks() {
+      return [...tasks.values()].reduce((count, byOrigin) => count + byOrigin.size, 0);
+    },
+    getTask(originRule: string, dedupeKey: string) {
+      return getTask(originRule, dedupeKey);
+    },
   };
 }
 
@@ -79,12 +102,134 @@ describe("task rule evaluator", () => {
     await evaluateTaskRules(context, store.persistence, TASK_RULES);
     await evaluateTaskRules(context, store.persistence, TASK_RULES);
 
-    expect(store.tasks.size).toBe(1);
+    expect(store.countTasks()).toBe(1);
     expect(store.operations).toEqual(["insert", "update"]);
     expect(await store.persistence.findOpenTaskByBusinessKey({
       originRule: "stale_deal",
       dedupeKey: "deal:123",
     })).not.toBeNull();
+  });
+
+  it("skips persistence when assignment resolves to no candidate", async () => {
+    const store = createInMemoryStore();
+    const context = makeContext({
+      manualOverrideId: null,
+      dealOwnerId: null,
+      contactLinkedRepId: null,
+      recentActorId: null,
+      officeFallbackId: null,
+    });
+
+    const outcomes = await evaluateTaskRules(context, store.persistence, TASK_RULES);
+
+    expect(store.countTasks()).toBe(0);
+    expect(outcomes).toContainEqual({
+      ruleId: "stale_deal",
+      businessKey: { originRule: "stale_deal", dedupeKey: "deal:123" },
+      action: "skipped",
+      reason: { code: "no_assignment_candidate", detail: "stale_deal" },
+    });
+  });
+
+  it("preserves an existing open task status when refreshing a rule match", async () => {
+    const existing: TaskRecord = {
+      id: "task-1",
+      title: "Follow up on deal 123",
+      description: "Deal activity indicates a stale follow-up is needed.",
+      type: "stale_deal",
+      assignedTo: "user-owner",
+      officeId: "office-1",
+      originRule: "stale_deal",
+      sourceEvent: "deal.updated",
+      dedupeKey: "deal:123",
+      reasonCode: "stale_deal",
+      priority: "high",
+      priorityScore: 80,
+      status: "blocked",
+      metadata: {},
+    };
+    const store = createInMemoryStore([existing]);
+    const context = makeContext();
+
+    const outcomes = await evaluateTaskRules(context, store.persistence, TASK_RULES);
+    const refreshed = store.getTask("stale_deal", "deal:123");
+
+    expect(outcomes).toContainEqual({
+      ruleId: "stale_deal",
+      businessKey: { originRule: "stale_deal", dedupeKey: "deal:123" },
+      action: "updated",
+      taskId: "task-1",
+    });
+    expect(refreshed?.status).toBe("blocked");
+  });
+
+  it("keeps collision-prone dedupe keys distinct within a single evaluation pass", async () => {
+    const store = createInMemoryStore();
+    const collisionRules: TaskRuleDefinition[] = [
+      {
+        id: "a:b",
+        sourceEvent: "deal.updated",
+        reasonCode: "rule-a",
+        buildDedupeKey() {
+          return "c";
+        },
+        async buildTask() {
+          return {
+            title: "Rule A",
+            type: "manual",
+            assignedTo: "user-a",
+            officeId: "office-1",
+            originRule: "a:b",
+            sourceEvent: "deal.updated",
+            dedupeKey: "c",
+            reasonCode: "rule-a",
+            priority: "normal",
+            priorityScore: 50,
+            status: "pending",
+          };
+        },
+      },
+      {
+        id: "a",
+        sourceEvent: "deal.updated",
+        reasonCode: "rule-b",
+        buildDedupeKey() {
+          return "b:c";
+        },
+        async buildTask() {
+          return {
+            title: "Rule B",
+            type: "manual",
+            assignedTo: "user-b",
+            officeId: "office-1",
+            originRule: "a",
+            sourceEvent: "deal.updated",
+            dedupeKey: "b:c",
+            reasonCode: "rule-b",
+            priority: "normal",
+            priorityScore: 50,
+            status: "pending",
+          };
+        },
+      },
+    ];
+
+    const context = makeContext();
+    const outcomes = await evaluateTaskRules(context, store.persistence, collisionRules);
+
+    expect(store.countTasks()).toBe(2);
+    expect(outcomes).toContainEqual({
+      ruleId: "a:b",
+      businessKey: { originRule: "a:b", dedupeKey: "c" },
+      action: "created",
+      taskId: "task-1",
+    });
+    expect(outcomes).toContainEqual({
+      ruleId: "a",
+      businessKey: { originRule: "a", dedupeKey: "b:c" },
+      action: "created",
+      taskId: "task-2",
+    });
   });
 
   it("assigns by manual override before deal owner, contact-linked rep, recent actor, and office fallback", async () => {
