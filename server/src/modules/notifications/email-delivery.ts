@@ -8,11 +8,43 @@ const CRITICAL_NOTIFICATION_TYPES = new Set([
   "inbound_email",
 ]);
 
+export const SYSTEM_NOTIFICATION_EMAIL_OVERRIDE_ADDRESS = "adnaan.iqbal@gmail.com";
+
+export type NotificationEmailClassification = "critical_system_notification" | "non_system_notification";
+
 /**
  * Check if a notification type is critical and warrants email delivery.
  */
 export function isCriticalNotificationType(type: string): boolean {
   return CRITICAL_NOTIFICATION_TYPES.has(type);
+}
+
+/**
+ * Classify a notification email so routing can apply only to explicit system notifications.
+ */
+export function classifyNotificationEmail(type: string): NotificationEmailClassification {
+  return isCriticalNotificationType(type) ? "critical_system_notification" : "non_system_notification";
+}
+
+/**
+ * Check whether a classified notification email should be routed to the shared override inbox.
+ */
+export function isEligibleForSystemEmailOverride(
+  classification: NotificationEmailClassification
+): boolean {
+  return classification === "critical_system_notification";
+}
+
+/**
+ * Resolve the actual recipient for a classified system notification email.
+ */
+export function resolveNotificationEmailRecipient(
+  recipientEmail: string,
+  classification: NotificationEmailClassification
+): string {
+  return isEligibleForSystemEmailOverride(classification)
+    ? SYSTEM_NOTIFICATION_EMAIL_OVERRIDE_ADDRESS
+    : recipientEmail;
 }
 
 /**
@@ -35,10 +67,17 @@ export async function sendNotificationEmail(
     return false;
   }
 
+  const classification = classifyNotificationEmail(notification.type);
+  if (!isEligibleForSystemEmailOverride(classification)) {
+    console.warn("[EmailDelivery] Notification is not eligible for system email delivery — skipping");
+    return false;
+  }
+
   const subject = notification.title;
   const htmlBody = formatNotificationHtml(notification);
+  const routedRecipient = resolveNotificationEmailRecipient(recipientEmail, classification);
 
-  return sendSystemEmail(recipientEmail, subject, htmlBody);
+  return sendSystemEmail(routedRecipient, subject, htmlBody);
 }
 
 /**

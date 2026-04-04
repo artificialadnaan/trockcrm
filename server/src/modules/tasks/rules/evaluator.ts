@@ -17,18 +17,27 @@ function makeSkipReason(code: string, detail: string) {
   return { code, detail };
 }
 
+function addSuppressionWindow(resolvedAt: Date, suppressionWindowDays: number): Date {
+  return new Date(resolvedAt.getTime() + suppressionWindowDays * 24 * 60 * 60 * 1000);
+}
+
 function isResolutionStateActive(
   state: TaskResolutionStateRecord,
-  now: Date
+  now: Date,
+  suppressionWindowDays: number
 ): boolean {
-  const suppressedUntil = state.suppressedUntil ? new Date(state.suppressedUntil) : null;
+  const suppressedUntil = state.suppressedUntil
+    ? new Date(state.suppressedUntil)
+    : state.resolvedAt
+      ? addSuppressionWindow(new Date(state.resolvedAt), suppressionWindowDays)
+      : null;
 
   if (state.resolutionStatus === "completed") {
-    return suppressedUntil == null || suppressedUntil > now;
+    return suppressedUntil != null && suppressedUntil > now;
   }
 
   if (state.resolutionStatus === "suppressed") {
-    return suppressedUntil == null || suppressedUntil > now;
+    return suppressedUntil != null && suppressedUntil > now;
   }
 
   if (state.resolutionStatus === "dismissed") {
@@ -84,10 +93,8 @@ export async function evaluateTaskRules(
       seenKeys.set(compositeKey[0], new Set([compositeKey[1]]));
     }
 
-    const resolutionState = persistence.findResolutionStateByBusinessKey
-      ? await persistence.findResolutionStateByBusinessKey(businessKey)
-      : null;
-    if (resolutionState && isResolutionStateActive(resolutionState, context.now)) {
+    const resolutionState = await persistence.findResolutionStateByBusinessKey(businessKey);
+    if (resolutionState && isResolutionStateActive(resolutionState, context.now, rule.suppressionWindowDays)) {
       outcomes.push({
         ruleId: rule.id,
         businessKey,

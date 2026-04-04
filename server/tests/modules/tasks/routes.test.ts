@@ -343,6 +343,7 @@ describe("task routes", () => {
           originRule: "stale_deal",
           dedupeKey: "deal:1",
           entitySnapshot: { dealId: "deal-1", contactId: "contact-1" },
+          suppressionWindowDays: expect.any(Number),
         }),
       })
     );
@@ -354,6 +355,7 @@ describe("task routes", () => {
           originRule: "stale_deal",
           dedupeKey: "deal:1",
           entitySnapshot: { dealId: "deal-1", contactId: "contact-1" },
+          suppressionWindowDays: expect.any(Number),
         }),
       })
     );

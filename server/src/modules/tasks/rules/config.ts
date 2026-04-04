@@ -19,6 +19,7 @@ const staleDealRule: TaskRuleDefinition = {
   id: staleDealRuleId,
   sourceEvent: "deal.updated",
   reasonCode: "stale_deal",
+  suppressionWindowDays: 30,
   buildDedupeKey(context) {
     return context.dealId ? `deal:${context.dealId}` : null;
   },
@@ -55,6 +56,7 @@ const inboundEmailRule: TaskRuleDefinition = {
   id: inboundEmailRuleId,
   sourceEvent: "email.received",
   reasonCode: "inbound_email",
+  suppressionWindowDays: 30,
   buildDedupeKey(context) {
     return context.emailId ? `email:${context.emailId}` : null;
   },

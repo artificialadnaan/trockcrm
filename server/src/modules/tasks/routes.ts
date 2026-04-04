@@ -3,6 +3,7 @@ import { jobQueue } from "@trock-crm/shared/schema";
 import { TASK_PRIORITIES, TASK_TYPES } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 import { eventBus } from "../../events/bus.js";
+import { TASK_RULES } from "./rules/config.js";
 import { listUsers } from "../admin/users-service.js";
 import {
   getTasks,
@@ -217,6 +218,9 @@ router.post("/:id/transition", async (req, res, next) => {
 router.post("/:id/complete", async (req, res, next) => {
   try {
     const task = await completeTask(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    const completionRule = task.originRule
+      ? TASK_RULES.find((rule) => rule.id === task.originRule)
+      : null;
     const completionPayload = {
       taskId: task.id,
       dealId: task.dealId,
@@ -228,6 +232,7 @@ router.post("/:id/complete", async (req, res, next) => {
       dedupeKey: task.dedupeKey,
       reasonCode: task.reasonCode,
       entitySnapshot: task.entitySnapshot,
+      suppressionWindowDays: completionRule?.suppressionWindowDays ?? null,
     };
 
     // Outbox pattern: insert into job_queue BEFORE committing the transaction

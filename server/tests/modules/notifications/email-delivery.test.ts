@@ -1,41 +1,63 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const sendMock = vi.fn();
+const sendSystemEmailMock = vi.fn();
 
-vi.stubEnv("RESEND_API_KEY", "test-resend-key");
-
-vi.mock("resend", () => ({
-  Resend: vi.fn().mockImplementation(() => ({
-    emails: {
-      send: sendMock,
-    },
-  })),
+vi.mock("../../../src/lib/resend-client.js", () => ({
+  sendSystemEmail: sendSystemEmailMock,
 }));
 
 const {
-  sendSystemEmail,
-  resolveSystemEmailRecipient,
-  SYSTEM_EMAIL_OVERRIDE_ADDRESS,
-} = await import("../../../src/lib/resend-client.js");
+  classifyNotificationEmail,
+  isEligibleForSystemEmailOverride,
+  resolveNotificationEmailRecipient,
+  sendNotificationEmail,
+  SYSTEM_NOTIFICATION_EMAIL_OVERRIDE_ADDRESS,
+} = await import("../../../src/modules/notifications/email-delivery.js");
 
 describe("system email routing", () => {
   beforeEach(() => {
-    sendMock.mockReset();
+    sendSystemEmailMock.mockReset();
   });
 
-  it("routes all system email recipients to the override address", async () => {
-    sendMock.mockResolvedValue({ data: { id: "email-1" } });
+  it("routes critical notification emails to the shared override inbox", async () => {
+    sendSystemEmailMock.mockResolvedValue(true);
 
-    const result = await sendSystemEmail(["rep@example.com", "other@example.com"], "Subject", "<p>Body</p>");
+    const result = await sendNotificationEmail(
+      {
+        type: "stale_deal",
+        title: "Stale deal alert",
+        body: "Follow up now",
+        link: "/deals/1",
+      },
+      "rep@example.com"
+    );
 
     expect(result).toBe(true);
-    expect(resolveSystemEmailRecipient(["rep@example.com"])).toBe(SYSTEM_EMAIL_OVERRIDE_ADDRESS);
-    expect(sendMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        to: [SYSTEM_EMAIL_OVERRIDE_ADDRESS],
-        subject: "Subject",
-        html: "<p>Body</p>",
-      })
+    expect(classifyNotificationEmail("stale_deal")).toBe("critical_system_notification");
+    expect(isEligibleForSystemEmailOverride("critical_system_notification")).toBe(true);
+    expect(resolveNotificationEmailRecipient(
+      "rep@example.com",
+      "critical_system_notification"
+    )).toBe(SYSTEM_NOTIFICATION_EMAIL_OVERRIDE_ADDRESS);
+    expect(sendSystemEmailMock).toHaveBeenCalledWith(
+      SYSTEM_NOTIFICATION_EMAIL_OVERRIDE_ADDRESS,
+      "Stale deal alert",
+      expect.stringContaining("Stale deal alert")
     );
+  });
+
+  it("refuses to route non-critical notification emails", async () => {
+    const result = await sendNotificationEmail(
+      {
+        type: "system",
+        title: "Generic update",
+      },
+      "rep@example.com"
+    );
+
+    expect(result).toBe(false);
+    expect(classifyNotificationEmail("system")).toBe("non_system_notification");
+    expect(isEligibleForSystemEmailOverride("non_system_notification")).toBe(false);
+    expect(sendSystemEmailMock).not.toHaveBeenCalled();
   });
 });

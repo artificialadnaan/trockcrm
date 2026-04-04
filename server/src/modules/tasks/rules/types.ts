@@ -75,6 +75,7 @@ export interface TaskResolutionStateRecord {
   originRule: string;
   dedupeKey: string;
   resolutionStatus: TaskResolutionStatus;
+  resolvedAt?: Date | string | null;
   suppressedUntil?: Date | string | null;
 }
 
@@ -85,7 +86,7 @@ export interface TaskRecord extends SystemTaskDraft {
 
 export interface TaskRulePersistence {
   findOpenTaskByBusinessKey(key: TaskBusinessKey): Promise<TaskRecord | null>;
-  findResolutionStateByBusinessKey?(key: TaskBusinessKey): Promise<TaskResolutionStateRecord | null>;
+  findResolutionStateByBusinessKey(key: TaskBusinessKey): Promise<TaskResolutionStateRecord | null>;
   insertTask(draft: SystemTaskDraft): Promise<TaskRecord>;
   updateTask(taskId: string, draft: SystemTaskDraft): Promise<TaskRecord>;
 }
@@ -94,6 +95,7 @@ export interface TaskRuleDefinition {
   id: string;
   sourceEvent: string;
   reasonCode: string;
+  suppressionWindowDays: number;
   buildDedupeKey(context: TaskRuleContext): string | null;
   buildTask(context: TaskRuleContext): Promise<SystemTaskDraft | null> | SystemTaskDraft | null;
 }
