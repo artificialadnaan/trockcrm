@@ -1,5 +1,13 @@
+import { Table } from "drizzle-orm";
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { TASK_STATUSES } from "../../../../shared/src/types/enums.js";
+import {
+  TASK_STATUSES,
+} from "../../../../shared/src/types/enums.js";
+import {
+  tasks,
+  taskStatusEnum,
+  taskResolutionState,
+} from "../../../../shared/src/schema/index.js";
 
 vi.mock("../../../src/db.js", () => ({
   db: { select: vi.fn() },
@@ -68,16 +76,40 @@ describe("Task Service", () => {
       expect(types).toHaveLength(7);
     });
 
-    it("should define correct task statuses", () => {
-      expect(TASK_STATUSES).toEqual([
-        "pending",
-        "scheduled",
-        "in_progress",
-        "waiting_on",
-        "blocked",
-        "completed",
-        "dismissed",
-      ]);
+    it("should define the smart task lifecycle on the shared enum and task table", () => {
+      expect(taskStatusEnum.enumValues).toEqual(TASK_STATUSES);
+
+      const columns = tasks[Table.Symbol.Columns];
+      expect(columns.officeId).toBeDefined();
+      expect(columns.originRule).toBeDefined();
+      expect(columns.dedupeKey).toBeDefined();
+      expect(columns.reasonCode).toBeDefined();
+      expect(columns.scheduledFor).toBeDefined();
+    });
+  });
+
+  describe("Task Resolution State Contract", () => {
+    it("should expose the close-loop suppression fields keyed by origin rule and dedupe key", () => {
+      const columns = taskResolutionState[Table.Symbol.Columns];
+
+      expect(Object.keys(columns)).toEqual(
+        expect.arrayContaining([
+          "officeId",
+          "taskId",
+          "originRule",
+          "dedupeKey",
+          "resolutionStatus",
+          "resolutionReason",
+          "suppressedUntil",
+          "entitySnapshot",
+        ])
+      );
+      expect(columns.originRule).toBeDefined();
+      expect(columns.dedupeKey).toBeDefined();
+      expect(columns.resolutionStatus).toBeDefined();
+      expect(columns.resolutionReason).toBeDefined();
+      expect(columns.suppressedUntil).toBeDefined();
+      expect(columns.entitySnapshot).toBeDefined();
     });
   });
 

@@ -10,7 +10,10 @@ import {
   timestamp,
   jsonb,
   index,
+  uniqueIndex,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
+import { offices } from "../public/offices.js";
 import { TASK_TYPES, TASK_PRIORITIES, TASK_STATUSES } from "../../types/enums.js";
 
 export const taskTypeEnum = pgEnum("task_type", TASK_TYPES);
@@ -28,7 +31,7 @@ export const tasks = pgTable(
     status: taskStatusEnum("status").default("pending").notNull(),
     assignedTo: uuid("assigned_to").notNull(),
     createdBy: uuid("created_by"),
-    officeId: uuid("office_id"),
+    officeId: uuid("office_id").references(() => offices.id),
     originRule: varchar("origin_rule", { length: 120 }),
     sourceRule: varchar("source_rule", { length: 120 }),
     sourceEvent: varchar("source_event", { length: 120 }),
@@ -54,6 +57,11 @@ export const tasks = pgTable(
     index("tasks_assigned_status_idx").on(table.assignedTo, table.status, table.dueDate),
     index("tasks_priority_idx").on(table.assignedTo, table.status, table.priority),
     index("tasks_status_scheduled_for_idx").on(table.status, table.scheduledFor),
-    index("tasks_origin_rule_dedupe_key_idx").on(table.originRule, table.dedupeKey),
+    uniqueIndex("tasks_active_origin_rule_dedupe_key_uidx")
+      .on(table.originRule, table.dedupeKey)
+      .where(
+        sql`${table.originRule} IS NOT NULL AND ${table.dedupeKey} IS NOT NULL AND ${table.status} IN ('scheduled', 'pending', 'in_progress', 'waiting_on', 'blocked')`
+      ),
+    index("tasks_origin_rule_reason_code_idx").on(table.originRule, table.reasonCode),
   ]
 );

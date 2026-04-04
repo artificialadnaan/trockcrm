@@ -15,24 +15,32 @@ ALTER TABLE tasks
   ADD COLUMN IF NOT EXISTS blocked_by jsonb,
   ADD COLUMN IF NOT EXISTS started_at timestamptz;
 
-CREATE INDEX IF NOT EXISTS tasks_status_scheduled_for_idx
-  ON tasks (status, scheduled_for);
+ALTER TABLE tasks
+  ADD CONSTRAINT tasks_office_id_offices_id_fk FOREIGN KEY (office_id) REFERENCES offices(id);
 
-CREATE INDEX IF NOT EXISTS tasks_origin_rule_dedupe_key_idx
-  ON tasks (origin_rule, dedupe_key);
+CREATE UNIQUE INDEX IF NOT EXISTS tasks_active_origin_rule_dedupe_key_uidx
+  ON tasks (origin_rule, dedupe_key)
+  WHERE origin_rule IS NOT NULL
+    AND dedupe_key IS NOT NULL
+    AND status IN ('scheduled', 'pending', 'in_progress', 'waiting_on', 'blocked');
+
+CREATE INDEX IF NOT EXISTS tasks_origin_rule_reason_code_idx
+  ON tasks (origin_rule, reason_code);
 
 CREATE TABLE IF NOT EXISTS task_resolution_state (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  task_id UUID NOT NULL UNIQUE,
+  office_id UUID NOT NULL REFERENCES offices(id),
+  task_id UUID NOT NULL,
   origin_rule VARCHAR(120) NOT NULL,
   dedupe_key VARCHAR(255) NOT NULL,
-  resolution VARCHAR(50) NOT NULL,
-  reason_code VARCHAR(120),
-  details JSONB,
+  resolution_status VARCHAR(50) NOT NULL,
+  resolution_reason VARCHAR(120),
   resolved_at TIMESTAMPTZ,
+  suppressed_until TIMESTAMPTZ,
+  entity_snapshot JSONB,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS task_resolution_state_origin_rule_dedupe_key_idx
+CREATE UNIQUE INDEX IF NOT EXISTS task_resolution_state_origin_rule_dedupe_key_uidx
   ON task_resolution_state (origin_rule, dedupe_key);
