@@ -114,6 +114,88 @@ export async function getPhotoFeed(
 }
 
 /**
+ * Aggregate photo stats grouped by project (deal).
+ * Returns one row per deal that has at least one photo.
+ */
+export async function getProjectPhotoStats(
+  tenantDb: TenantDb
+): Promise<{
+  projects: Array<{
+    dealId: string;
+    dealName: string;
+    dealNumber: string;
+    propertyCity: string | null;
+    propertyState: string | null;
+    photoCount: number;
+    lastPhotoAt: string | null;
+    recentUploaders: string[];
+    recentPhotoIds: string[];
+  }>;
+}> {
+  // Aggregate counts, last photo timestamp, recent uploaders, and recent photo IDs per deal
+  const rows = await tenantDb
+    .select({
+      dealId: files.dealId,
+      dealName: deals.name,
+      dealNumber: deals.dealNumber,
+      propertyCity: deals.propertyCity,
+      propertyState: deals.propertyState,
+      photoCount: sql<number>`count(*)::int`,
+      lastPhotoAt: sql<string>`max(COALESCE(${files.takenAt}, ${files.createdAt}))::text`,
+      recentUploaders: sql<string>`
+        (SELECT array_to_json(array_agg(DISTINCT u.display_name))
+         FROM (
+           SELECT COALESCE(u2.display_name, 'Unknown') as display_name
+           FROM files f2
+           LEFT JOIN users u2 ON u2.id = f2.uploaded_by
+           WHERE f2.deal_id = ${files.dealId}
+             AND f2.category = 'photo'
+             AND f2.is_active = true
+           ORDER BY COALESCE(f2.taken_at, f2.created_at) DESC
+           LIMIT 10
+         ) u
+        )::text`,
+      recentPhotoIds: sql<string>`
+        (SELECT array_to_json(array_agg(f3.id))
+         FROM (
+           SELECT f3.id
+           FROM files f3
+           WHERE f3.deal_id = ${files.dealId}
+             AND f3.category = 'photo'
+             AND f3.is_active = true
+           ORDER BY COALESCE(f3.taken_at, f3.created_at) DESC
+           LIMIT 5
+         ) f3
+        )::text`,
+    })
+    .from(files)
+    .innerJoin(deals, eq(deals.id, files.dealId))
+    .where(
+      and(
+        eq(files.category, "photo"),
+        eq(files.isActive, true),
+        sql`${files.dealId} IS NOT NULL`
+      )
+    )
+    .groupBy(files.dealId, deals.name, deals.dealNumber, deals.propertyCity, deals.propertyState)
+    .orderBy(desc(sql`max(COALESCE(${files.takenAt}, ${files.createdAt}))`));
+
+  return {
+    projects: rows.map((r) => ({
+      dealId: r.dealId!,
+      dealName: r.dealName,
+      dealNumber: r.dealNumber,
+      propertyCity: r.propertyCity,
+      propertyState: r.propertyState,
+      photoCount: r.photoCount,
+      lastPhotoAt: r.lastPhotoAt,
+      recentUploaders: r.recentUploaders ? JSON.parse(r.recentUploaders) : [],
+      recentPhotoIds: r.recentPhotoIds ? JSON.parse(r.recentPhotoIds) : [],
+    })),
+  };
+}
+
+/**
  * Count photos created on or after `since`.
  * Same RBAC filter as getPhotoFeed — reps only see photos from their assigned deals.
  */
