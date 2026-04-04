@@ -748,6 +748,7 @@ Required coverage areas:
 - unique-index enforcement blocked while any duplicate remains unresolved and active
 - auto-remediation positive and negative criteria for duplicate terminalization
 - office-scoped remediation queue authorization and audit logging
+- remediation audit-event invariants: `schema_version`, UTC timestamps, normalized before/after snapshots, and required `machine_reason` for automatic resolutions
 - task-related production path/deep-link behavior where changed
 - API contract verification against the generated task API spec so enums, fields, and filters cannot drift silently
 
@@ -857,10 +858,15 @@ Auto-remediation criteria:
 - auto-dismiss is allowed only when the duplicate has no extra non-terminal workflow state beyond what already exists on the survivor
 - auto-dismiss is not allowed when office scope differs, when any user-owned or identity-bearing field differs, when dependency payloads differ, or when the duplicate contains distinct status context that would be lost by terminalizing it
 
+Migration-remediation strictness:
+
+- migration remediation is intentionally stricter than the normal runtime ownership model
+- even though `priority` and `scheduled_for` are rule-refreshable during normal operation, they are treated as collision-significant fields during remediation
+
 Migration review artifact:
 
 - create a tenant-scoped `task_migration_review` table and an admin remediation queue backed by it
-- minimum row shape: `id`, `office_id`, `survivor_task_id`, `duplicate_task_id`, `origin_rule`, `dedupe_key`, `reason_code`, `review_status`, `resolution_action`, `reviewer_note`, `created_at`, `resolved_at`, `resolved_by`
+- minimum row shape: `id`, `office_id`, `survivor_task_id`, `duplicate_task_id`, `origin_rule`, `dedupe_key`, `reason_code`, `machine_reason`, `review_status`, `resolution_action`, `reviewer_note`, `created_at`, `resolved_at`, `resolved_by`
 - `review_status` values: `pending_active_resolution`, `resolved`
 - `resolution_action` values: `dismissed_duplicate`, `merged_into_survivor`, `manually_kept_terminal`
 - `task_migration_review` is both the live remediation queue and the retained audit ledger for duplicate-remediation decisions
@@ -875,15 +881,18 @@ Remediation queue contract:
 - `manually_kept_terminal` means the operator chose to preserve the duplicate as a terminal historical row with status `dismissed` and a required reviewer note explaining why the survivor could not fully absorb it
 - `merged_into_survivor` is allowed only when duplicate and survivor share the same `office_id`
 - `merged_into_survivor` is allowed only when every differing field is in this preservable allowlist: `description`, `priority`, `scheduled_for`, `due_date`, `due_time`, `remind_at`, `waiting_on`, `blocked_by`
-- `merged_into_survivor` copies those differing values into the survivor remediation audit event, then terminalizes the duplicate as `dismissed`
+- `merged_into_survivor` is allowed only for these status pairs: `pending -> pending`, `scheduled -> scheduled`, `waiting_on -> waiting_on`, `blocked -> blocked`
+- `merged_into_survivor` updates the survivor row deterministically before dismissing the duplicate:
+  `priority` keeps the higher-urgency value, `scheduled_for` keeps the earlier non-null timestamp, `due_date`/`due_time`/`remind_at` keep the earlier non-null values, `description` appends a remediation note only when texts differ, and `waiting_on`/`blocked_by` may be copied only when both rows share the same status family and survivor lacks a value
 - `merged_into_survivor` does not move external linked records, notifications, or comments in the initial rollout
 
 Remediation audit event contract:
 
-- every remediation action writes a task-audit event with `schema_version`, `survivor_task_id`, `duplicate_task_id`, `resolution_action`, `preserved_field_names`, `preserved_field_snapshots`, `reviewer_note`, `actor`, and `timestamp`
+- every remediation action writes a task-audit event with `schema_version`, `survivor_task_id`, `duplicate_task_id`, `resolution_action`, `preserved_field_names`, `preserved_field_snapshots`, `machine_reason`, `reviewer_note`, `actor`, and `timestamp`
 - `preserved_field_snapshots` stores normalized before/after pairs keyed by field name
 - timestamps in remediation audit events are stored in UTC
-- automatic resolutions set `actor = system`, may leave `reviewer_note = null`, and must still write the same audit schema
+- `schema_version` starts at `1` and must be bumped whenever the remediation audit event shape changes
+- automatic resolutions set `actor = system`, require a non-null `machine_reason`, and may leave `reviewer_note = null`
 
 Duplicate remediation state machine:
 
