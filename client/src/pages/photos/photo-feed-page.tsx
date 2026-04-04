@@ -100,7 +100,17 @@ function truncate(str: string, maxLen: number): string {
 
 // ─── Thumbnail Cache ────────────────────────────────────────────────────────
 
+const THUMB_CACHE_MAX = 200;
 const thumbCache = new Map<string, string>();
+
+function setThumbCache(key: string, value: string) {
+  if (thumbCache.size >= THUMB_CACHE_MAX) {
+    // Delete oldest entry (first key in insertion order)
+    const firstKey = thumbCache.keys().next().value;
+    if (firstKey) thumbCache.delete(firstKey);
+  }
+  thumbCache.set(key, value);
+}
 
 function useThumbnailUrl(photo: FeedPhoto): string | null {
   const [url, setUrl] = useState<string | null>(() => {
@@ -115,7 +125,7 @@ function useThumbnailUrl(photo: FeedPhoto): string | null {
 
     api<{ url: string }>(`/files/${photo.id}/download`)
       .then((data) => {
-        thumbCache.set(photo.id, data.url);
+        setThumbCache(photo.id, data.url);
         if (!cancelled) setUrl(data.url);
       })
       .catch(() => {});
@@ -138,7 +148,7 @@ function usePhotoIdThumbnail(photoId: string | undefined): string | null {
 
     api<{ url: string }>(`/files/${photoId}/download`)
       .then((data) => {
-        thumbCache.set(photoId, data.url);
+        setThumbCache(photoId, data.url);
         if (!cancelled) setUrl(data.url);
       })
       .catch(() => {});
@@ -182,8 +192,6 @@ function ProjectRow({
   project: ProjectStat;
   onClick: () => void;
 }) {
-  const featureThumbUrl = usePhotoIdThumbnail(project.recentPhotoIds[0]);
-
   // Load thumbnails for the recent photos strip
   const thumb1 = usePhotoIdThumbnail(project.recentPhotoIds[0]);
   const thumb2 = usePhotoIdThumbnail(project.recentPhotoIds[1]);
@@ -207,9 +215,9 @@ function ProjectRow({
       <div className="flex items-center gap-3 min-w-0 flex-1">
         {/* Feature thumbnail */}
         <div className="h-16 w-16 rounded-lg overflow-hidden bg-gray-100 shrink-0">
-          {featureThumbUrl ? (
+          {thumb1 ? (
             <img
-              src={featureThumbUrl}
+              src={thumb1}
               alt={project.dealName}
               className="h-full w-full object-cover"
               loading="lazy"

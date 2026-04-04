@@ -49,6 +49,7 @@ export function PhotoCapturePage() {
   const [sessionCount, setSessionCount] = useState(0);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const blobUrlsRef = useRef<string[]>([]);
 
   // Auto-select nearest deal
   useEffect(() => {
@@ -57,10 +58,10 @@ export function PhotoCapturePage() {
     }
   }, [autoSelectedDeal, selectedDealId]);
 
-  // Clean up preview URLs on unmount
+  // Clean up all tracked blob URLs on unmount
   useEffect(() => {
     return () => {
-      queue.forEach((p) => URL.revokeObjectURL(p.previewUrl));
+      blobUrlsRef.current.forEach((u) => URL.revokeObjectURL(u));
     };
   }, []);
 
@@ -77,14 +78,18 @@ export function PhotoCapturePage() {
     const files = e.target.files;
     if (!files || files.length === 0) return;
 
-    const newPhotos: QueuedPhoto[] = Array.from(files).map((file) => ({
-      id: crypto.randomUUID(),
-      file,
-      previewUrl: URL.createObjectURL(file),
-      note: "",
-      status: "pending" as const,
-      progress: 0,
-    }));
+    const newPhotos: QueuedPhoto[] = Array.from(files).map((file) => {
+      const newUrl = URL.createObjectURL(file);
+      blobUrlsRef.current.push(newUrl);
+      return {
+        id: crypto.randomUUID(),
+        file,
+        previewUrl: newUrl,
+        note: "",
+        status: "pending" as const,
+        progress: 0,
+      };
+    });
 
     setQueue((prev) => [...prev, ...newPhotos]);
     setUploadComplete(false);

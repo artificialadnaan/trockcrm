@@ -86,7 +86,7 @@ router.post("/upload-url", async (req, res, next) => {
 // Accepts raw file body with metadata in headers. The server uploads to R2 directly.
 router.post("/upload-direct", express.raw({ type: "*/*", limit: "50mb" }), async (req, res, next) => {
   try {
-    const originalFilename = req.headers["x-original-filename"] as string;
+    const originalFilename = decodeURIComponent(req.headers["x-original-filename"] as string);
     const mimeType = req.headers["content-type"] as string || "application/octet-stream";
     const category = req.headers["x-file-category"] as string;
     const subcategory = req.headers["x-file-subcategory"] as string | undefined;

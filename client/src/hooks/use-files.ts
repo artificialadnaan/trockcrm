@@ -298,7 +298,7 @@ export async function uploadFile(input: UploadFileInput): Promise<FileRecord> {
 
     // Send metadata in headers
     xhr.setRequestHeader("Content-Type", file.type || "application/octet-stream");
-    xhr.setRequestHeader("X-Original-Filename", file.name);
+    xhr.setRequestHeader("X-Original-Filename", encodeURIComponent(file.name));
     xhr.setRequestHeader("X-File-Category", category);
     if (subcategory) xhr.setRequestHeader("X-File-Subcategory", subcategory);
     if (dealId) xhr.setRequestHeader("X-Deal-Id", dealId);

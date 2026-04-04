@@ -48,7 +48,11 @@ export function createApp() {
   // HMAC signature verification. The route uses express.raw() internally.
   app.use("/api/webhooks/procore", procoreWebhookRoutes);
 
-  app.use(express.json({ limit: "10mb" }));
+  app.use((req, res, next) => {
+    // Skip JSON parsing for direct file uploads (handled by express.raw on the route)
+    if (req.path === "/api/files/upload-direct") return next();
+    express.json({ limit: "10mb" })(req, res, next);
+  });
   app.use(cookieParser());
   app.use("/api", apiLimiter);
 

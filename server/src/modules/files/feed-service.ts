@@ -178,7 +178,8 @@ export async function getProjectPhotoStats(
       )
     )
     .groupBy(files.dealId, deals.name, deals.dealNumber, deals.propertyCity, deals.propertyState)
-    .orderBy(desc(sql`max(COALESCE(${files.takenAt}, ${files.createdAt}))`));
+    .orderBy(desc(sql`max(COALESCE(${files.takenAt}, ${files.createdAt}))`))
+    .limit(100);
 
   return {
     projects: rows.map((r) => ({
