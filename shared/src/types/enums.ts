@@ -67,7 +67,15 @@ export type TaskType = (typeof TASK_TYPES)[number];
 export const TASK_PRIORITIES = ["urgent", "high", "normal", "low"] as const;
 export type TaskPriority = (typeof TASK_PRIORITIES)[number];
 
-export const TASK_STATUSES = ["pending", "in_progress", "completed", "dismissed"] as const;
+export const TASK_STATUSES = [
+  "pending",
+  "scheduled",
+  "in_progress",
+  "waiting_on",
+  "blocked",
+  "completed",
+  "dismissed",
+] as const;
 export type TaskStatus = (typeof TASK_STATUSES)[number];
 
 export const NOTIFICATION_TYPES = [

@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { TASK_STATUSES } from "../../../../shared/src/types/enums.js";
 
 vi.mock("../../../src/db.js", () => ({
   db: { select: vi.fn() },
@@ -68,8 +69,15 @@ describe("Task Service", () => {
     });
 
     it("should define correct task statuses", () => {
-      const statuses = ["pending", "in_progress", "completed", "dismissed"];
-      expect(statuses).toHaveLength(4);
+      expect(TASK_STATUSES).toEqual([
+        "pending",
+        "scheduled",
+        "in_progress",
+        "waiting_on",
+        "blocked",
+        "completed",
+        "dismissed",
+      ]);
     });
   });
 
