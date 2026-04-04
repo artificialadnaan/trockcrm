@@ -5,6 +5,7 @@ import { scoreTaskPriority, mapTaskPriorityBand } from "../../../src/modules/tas
 import { TASK_RULES } from "../../../src/modules/tasks/rules/config.js";
 import type {
   TaskRuleContext,
+<<<<<<< HEAD
   TaskRecord,
   TaskRulePersistence,
   TaskRuleDefinition,
@@ -34,27 +35,55 @@ function createInMemoryStore(
   const persistence: TaskRulePersistence = {
     async findOpenTaskByBusinessKey({ originRule, dedupeKey }) {
       return getTask(originRule, dedupeKey);
+=======
+  TaskRulePersistence,
+  SystemTaskDraft,
+} from "../../../src/modules/tasks/rules/types.js";
+
+function createInMemoryStore() {
+  const tasks = new Map<string, SystemTaskDraft & { id: string; status: "pending" }>();
+  const operations: Array<"insert" | "update"> = [];
+  let sequence = 1;
+
+  const persistence: TaskRulePersistence = {
+    async findOpenTaskByBusinessKey({ originRule, dedupeKey }) {
+      return tasks.get(`${originRule}:${dedupeKey}`) ?? null;
+>>>>>>> d198bb2 (feat: add smart task rule evaluator)
     },
     async insertTask(draft) {
       operations.push("insert");
       const record = {
         ...draft,
         id: `task-${sequence++}`,
+<<<<<<< HEAD
         status: draft.status ?? "pending",
       };
       setTask(record);
+=======
+        status: "pending" as const,
+      };
+      tasks.set(`${draft.originRule}:${draft.dedupeKey}`, record);
+>>>>>>> d198bb2 (feat: add smart task rule evaluator)
       return record;
     },
     async updateTask(taskId, draft) {
       operations.push("update");
+<<<<<<< HEAD
       const existing = [...tasks.values()].flatMap((byOrigin) => [...byOrigin.values()]).find((task) => task.id === taskId);
+=======
+      const existing = [...tasks.values()].find((task) => task.id === taskId);
+>>>>>>> d198bb2 (feat: add smart task rule evaluator)
       if (!existing) throw new Error("task not found");
       const record = {
         ...existing,
         ...draft,
         id: taskId,
       };
+<<<<<<< HEAD
       setTask(record);
+=======
+      tasks.set(`${draft.originRule}:${draft.dedupeKey}`, record);
+>>>>>>> d198bb2 (feat: add smart task rule evaluator)
       return record;
     },
   };
@@ -63,12 +92,15 @@ function createInMemoryStore(
     persistence,
     tasks,
     operations,
+<<<<<<< HEAD
     countTasks() {
       return [...tasks.values()].reduce((count, byOrigin) => count + byOrigin.size, 0);
     },
     getTask(originRule: string, dedupeKey: string) {
       return getTask(originRule, dedupeKey);
     },
+=======
+>>>>>>> d198bb2 (feat: add smart task rule evaluator)
   };
 }
 
@@ -102,7 +134,11 @@ describe("task rule evaluator", () => {
     await evaluateTaskRules(context, store.persistence, TASK_RULES);
     await evaluateTaskRules(context, store.persistence, TASK_RULES);
 
+<<<<<<< HEAD
     expect(store.countTasks()).toBe(1);
+=======
+    expect(store.tasks.size).toBe(1);
+>>>>>>> d198bb2 (feat: add smart task rule evaluator)
     expect(store.operations).toEqual(["insert", "update"]);
     expect(await store.persistence.findOpenTaskByBusinessKey({
       originRule: "stale_deal",
@@ -110,6 +146,7 @@ describe("task rule evaluator", () => {
     })).not.toBeNull();
   });
 
+<<<<<<< HEAD
   it("skips persistence when assignment resolves to no candidate", async () => {
     const store = createInMemoryStore();
     const context = makeContext({
@@ -232,6 +269,8 @@ describe("task rule evaluator", () => {
     });
   });
 
+=======
+>>>>>>> d198bb2 (feat: add smart task rule evaluator)
   it("assigns by manual override before deal owner, contact-linked rep, recent actor, and office fallback", async () => {
     const result = await assignTaskFromContext({
       entityId: "deal:123",
