@@ -750,6 +750,7 @@ Required coverage areas:
 - office-scoped remediation queue authorization and audit logging
 - remediation audit-event invariants: `schema_version`, UTC timestamps, normalized before/after snapshots, and required `machine_reason` for automatic resolutions
 - schedule-payload remediation semantics: no mixed scalar minima across `scheduled_for`, `due_date`, `due_time`, and `remind_at`
+- machine-reason taxonomy and duplicate-remediation cancellation of queued reminders/task emails
 - task-related production path/deep-link behavior where changed
 - API contract verification against the generated task API spec so enums, fields, and filters cannot drift silently
 
@@ -856,8 +857,8 @@ Auto-remediation criteria:
 
 - auto-dismiss is allowed only when duplicate and survivor share the same `office_id`
 - auto-dismiss is allowed only when duplicate and survivor match on all identity-bearing and user-owned task fields: `title`, `description`, `type`, `assigned_to`, `deal_id`, `contact_id`, `email_id`, `priority`, `scheduled_for`, `due_date`, `due_time`, `remind_at`, plus matching `waiting_on`/`blocked_by` payloads when present
-- auto-dismiss is allowed only when the duplicate has no extra non-terminal workflow state beyond what already exists on the survivor
-- auto-dismiss is not allowed when office scope differs, when any user-owned or identity-bearing field differs, when dependency payloads differ, or when the duplicate contains distinct status context that would be lost by terminalizing it
+- auto-dismiss is allowed only when duplicate and survivor have exactly the same non-terminal status
+- auto-dismiss is not allowed when office scope differs, when any user-owned or identity-bearing field differs, when dependency payloads differ, or when task statuses differ
 
 Migration-remediation strictness:
 
@@ -884,13 +885,15 @@ Remediation queue contract:
 - `merged_into_survivor` is allowed only when every differing field is in this preservable allowlist: `description`, `priority`, `scheduled_for`, `due_date`, `due_time`, `remind_at`, `waiting_on`, `blocked_by`
 - `merged_into_survivor` is allowed only for these status pairs: `pending -> pending`, `scheduled -> scheduled`, `waiting_on -> waiting_on`, `blocked -> blocked`
 - `merged_into_survivor` updates the survivor row deterministically before dismissing the duplicate:
-  `priority` keeps the higher-urgency value; scheduling values are treated as a single logical payload, so `scheduled_for` or the `(due_date, due_time, remind_at)` tuple must be copied coherently from one source row and never synthesized from mixed scalar minima; `description` is never mutated by remediation; and `waiting_on`/`blocked_by` may be copied only when both rows share the same status family and survivor lacks a value
+  `priority` keeps the higher-urgency value; scheduling values are treated as a single logical payload and must be taken entirely from one source row, with the survivor row winning by default and the duplicate row winning only when the survivor has no schedule payload at all; `description` differences are preserved only in audit/history and never written back to the survivor row; and `waiting_on`/`blocked_by` may be copied only when both rows share the same status family and survivor lacks a value
 - `merged_into_survivor` does not move external linked records, notifications, or comments in the initial rollout
+- queued reminders and task-generated notification emails tied to the dismissed duplicate must be canceled or ignored by terminal-state checks before the remediation row can be marked resolved
 
 Remediation audit event contract:
 
 - every remediation action writes a task-audit event with `schema_version`, `survivor_task_id`, `duplicate_task_id`, `resolution_action`, `preserved_field_names`, `preserved_field_snapshots`, `machine_reason`, `reviewer_note`, `actor`, and `timestamp`
 - `preserved_field_snapshots` stores normalized before/after pairs keyed by field name
+- `machine_reason` is a stable code plus optional detail text; the code must come from a controlled taxonomy and the detail text is optional
 - timestamps in remediation audit events are stored in UTC
 - `schema_version` starts at `1` and must be bumped whenever the remediation audit event shape changes
 - automatic resolutions set `actor = system`, require a non-null `machine_reason`, and may leave `reviewer_note = null`
