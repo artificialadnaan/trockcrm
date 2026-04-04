@@ -49,6 +49,7 @@ export interface TaskLifecycleReference {
   label: string;
   ref_type: string;
   ref_id: string;
+  note?: string;
 }
 
 export const TASK_STATUS_LABELS: Record<TaskStatus, string> = {
@@ -100,7 +101,7 @@ function formatLifecycleDate(value: string | null) {
 
 function getLifecycleReferenceLabel(value: unknown) {
   const record = asRecord(value);
-  return asString(record?.label) ?? asString(record?.kind) ?? null;
+  return asString(record?.label) ?? asString(record?.note) ?? asString(record?.kind) ?? null;
 }
 
 function getLifecycleReferenceBase(task: Pick<Task, "id" | "dealId" | "contactId" | "emailId">) {
@@ -124,18 +125,21 @@ export function buildTaskLifecycleReference(
 ): TaskLifecycleReference {
   const record = asRecord(existing);
   const base = getLifecycleReferenceBase(task);
+  const resolvedLabel = label.trim() || asString(record?.label) || asString(record?.note) || asString(record?.kind) || kind;
   return {
     schema_version: 1,
     kind: asString(record?.kind) ?? kind,
-    label: label.trim() || asString(record?.label) || kind,
+    label: resolvedLabel,
     ref_type: asString(record?.ref_type) ?? base.ref_type,
     ref_id: asString(record?.ref_id) ?? base.ref_id,
+    note: resolvedLabel,
   };
 }
 
 export function getTaskLifecycleSummary(task: Pick<Task, "status" | "scheduledFor" | "waitingOn" | "blockedBy" | "startedAt">) {
   if (task.status === "scheduled") {
-    return formatLifecycleDate(task.scheduledFor) ? `Scheduled for ${formatLifecycleDate(task.scheduledFor)}` : "Scheduled";
+    const scheduledAt = formatLifecycleDate(task.scheduledFor);
+    return scheduledAt ? `Scheduled for ${scheduledAt}` : "Scheduled";
   }
 
   if (task.status === "waiting_on") {
@@ -154,6 +158,14 @@ export function getTaskLifecycleSummary(task: Pick<Task, "status" | "scheduledFo
   }
 
   return null;
+}
+
+export function getTaskTimelineLabel(task: Pick<Task, "status" | "scheduledFor" | "dueDate">) {
+  if (task.status === "scheduled") {
+    return task.scheduledFor ? `Scheduled: ${formatLifecycleDate(task.scheduledFor) ?? task.scheduledFor}` : "Scheduled";
+  }
+
+  return task.dueDate ? `Due: ${new Date(task.dueDate + "T00:00:00").toLocaleDateString()}` : "No date";
 }
 
 export interface TaskCounts {

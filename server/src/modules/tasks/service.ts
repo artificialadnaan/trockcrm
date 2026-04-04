@@ -258,6 +258,12 @@ export async function getTasks(
   const priorityRank = sql<number>`CASE ${tasks.priority}
     WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 WHEN 'low' THEN 3 ELSE 4
   END`;
+  const taskColumns = tasks as typeof tasks & {
+    scheduledFor: typeof tasks.dueDate;
+    waitingOn: typeof tasks.dueDate;
+    blockedBy: typeof tasks.dueDate;
+    startedAt: typeof tasks.createdAt;
+  };
 
   // Subquery to resolve assignee display name from public.users
   const assignedToName = sql<string | null>`(SELECT display_name FROM public.users WHERE id = ${tasks.assignedTo})`.as("assignedToName");
@@ -281,10 +287,10 @@ export async function getTasks(
         dueDate: tasks.dueDate,
         dueTime: tasks.dueTime,
         remindAt: tasks.remindAt,
-        scheduledFor: tasks.scheduledFor,
-        waitingOn: tasks.waitingOn,
-        blockedBy: tasks.blockedBy,
-        startedAt: tasks.startedAt,
+        scheduledFor: taskColumns.scheduledFor,
+        waitingOn: taskColumns.waitingOn,
+        blockedBy: taskColumns.blockedBy,
+        startedAt: taskColumns.startedAt,
         completedAt: tasks.completedAt,
         isOverdue: tasks.isOverdue,
         createdAt: tasks.createdAt,
@@ -298,7 +304,9 @@ export async function getTasks(
         // Completed section: order by completedAt DESC instead.
         ...(filters.section === "completed"
           ? [desc(tasks.completedAt)]
-          : [desc(tasks.isOverdue), asc(priorityRank), asc(tasks.dueDate)])
+          : filters.status === "scheduled"
+            ? [asc(taskColumns.scheduledFor), asc(priorityRank), asc(tasks.title)]
+            : [desc(tasks.isOverdue), asc(priorityRank), asc(tasks.dueDate)])
       )
       .limit(limit)
       .offset(offset),
@@ -318,10 +326,14 @@ export async function getTasks(
  */
 export async function getTaskCounts(
   tenantDb: TenantDb,
-  userId: string
+  userRole: string,
+  currentUserId: string,
+  targetUserId?: string | null
 ) {
   // Use office timezone (CT for T Rock) for date bucketing
   const today = new Date().toLocaleDateString("en-CA", { timeZone: "America/Chicago" }); // YYYY-MM-DD in CT
+  const effectiveUserId = userRole === "rep" ? currentUserId : (targetUserId ?? null);
+  const scopeClause = effectiveUserId ? sql`WHERE assigned_to = ${effectiveUserId}` : sql``;
 
   const result = await tenantDb.execute(sql`
     SELECT
@@ -341,7 +353,7 @@ export async function getTaskCounts(
         WHERE status = 'completed'
       )::int AS completed
     FROM tasks
-    WHERE assigned_to = ${userId}
+    ${scopeClause}
   `);
 
   const rows = (result as any).rows ?? result;

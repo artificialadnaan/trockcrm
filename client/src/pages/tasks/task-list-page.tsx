@@ -22,6 +22,7 @@ import {
   transitionTask,
   getTaskStatusLabel,
   getTaskLifecycleSummary,
+  getTaskTimelineLabel,
   canTransitionTask,
   isTerminalTaskStatus,
 } from "@/hooks/use-tasks";
@@ -153,6 +154,7 @@ function StatusPill({ status }: { status: string }) {
 function getLifecycleLabel(payload: Record<string, unknown> | null) {
   if (!payload) return "";
   if (typeof payload.label === "string" && payload.label.trim()) return payload.label.trim();
+  if (typeof payload.note === "string" && payload.note.trim()) return payload.note.trim();
   if (typeof payload.kind === "string" && payload.kind.trim()) return payload.kind.trim();
   return "";
 }
@@ -198,11 +200,13 @@ function IndustrialTaskRow({
   const overdueDays = task.dueDate && task.isOverdue ? daysOverdue(task.dueDate) : 0;
   const assigneeLabel = task.assignedToName ?? "Unassigned";
   const lifecycleSummary = getTaskLifecycleSummary(task);
+  const timelineLabel = getTaskTimelineLabel(task);
   const canResume = canTransitionTask(task.status, "pending");
   const canStart = canTransitionTask(task.status, "in_progress");
   const canSchedule = canTransitionTask(task.status, "scheduled");
   const canComplete = canTransitionTask(task.status, "completed");
   const canDismiss = canTransitionTask(task.status, "dismissed");
+  const showInlineActions = !isCompleted && task.status !== "scheduled";
 
   const handleComplete = async (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -335,6 +339,15 @@ function IndustrialTaskRow({
           <span className="text-xs font-bold text-green-600 uppercase tracking-wider">
             Completed
           </span>
+        ) : task.status === "scheduled" ? (
+          <div>
+            <p className="text-sm font-bold text-slate-900">
+              {timelineLabel}
+            </p>
+            <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mt-0.5">
+              Scheduled Work
+            </p>
+          </div>
         ) : task.dueDate ? (
           <div>
             <p className={`text-sm font-bold ${task.isOverdue ? "text-[#CC0000]" : "text-gray-900"}`}>
@@ -353,7 +366,7 @@ function IndustrialTaskRow({
 
       {/* Assigned To — col-span-2 */}
       <div className="col-span-2 flex items-center justify-end gap-2">
-        {!isCompleted && (
+        {showInlineActions && (
           <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity mr-1">
             {canResume && (
               <button
@@ -493,7 +506,7 @@ export function TaskListPage() {
     limit: 20,
     assignedTo: assigneeFilter,
   });
-  const { tasks: scheduledTasks, refetch: refetchScheduled } = useTasks({
+  const { tasks: scheduledTasks, pagination: scheduledPagination, refetch: refetchScheduled } = useTasks({
     status: "scheduled",
     limit: 100,
     assignedTo: assigneeFilter,
@@ -569,7 +582,7 @@ export function TaskListPage() {
 
   const totalActive = counts.overdue + counts.today + counts.upcoming;
   const hasActiveWorkTasks = overdueTasks.length > 0 || todayTasks.length > 0 || upcomingTasks.length > 0;
-  const hasAnyVisibleTasks = hasActiveWorkTasks || scheduledTasks.length > 0;
+  const hasAnyVisibleTasks = hasActiveWorkTasks || scheduledPagination.total > 0;
 
   // Top 3 overdue for alert panel
   const topOverdue = useMemo(
@@ -613,7 +626,7 @@ export function TaskListPage() {
                 Done
               </span>
               <span>
-                <span className="text-slate-700 font-bold text-sm">{scheduledTasks.length}</span>{" "}
+                <span className="text-slate-700 font-bold text-sm">{scheduledPagination.total}</span>{" "}
                 Scheduled
               </span>
             </div>
@@ -727,15 +740,20 @@ export function TaskListPage() {
                   </div>
                 ) : (
                   <>
-                    {scheduledTasks.length > 0 && (
+                    {scheduledPagination.total > 0 && (
                       <>
                         <div className="px-6 py-2 bg-slate-50/80 text-[10px] font-black uppercase tracking-[0.15em] text-gray-500 flex items-center gap-2">
                           <div className="w-2 h-2 rounded-full bg-slate-500" />
-                          Scheduled ({scheduledTasks.length})
+                          Scheduled ({scheduledPagination.total})
                         </div>
                         {scheduledTasks.map((task) => (
                           <IndustrialTaskRow key={task.id} task={task} onUpdate={refetchAll} />
                         ))}
+                        {scheduledPagination.total > scheduledTasks.length && (
+                          <div className="px-6 py-1 text-[10px] font-medium text-slate-500">
+                            Showing {scheduledTasks.length} of {scheduledPagination.total}
+                          </div>
+                        )}
                       </>
                     )}
                     {overdueTasks.length > 0 && (

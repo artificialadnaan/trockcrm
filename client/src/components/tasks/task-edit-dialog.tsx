@@ -51,6 +51,8 @@ function getLifecycleLabel(payload: Record<string, unknown> | null) {
   if (!payload) return "";
   const label = payload.label;
   if (typeof label === "string" && label.trim()) return label.trim();
+  const note = payload.note;
+  if (typeof note === "string" && note.trim()) return note.trim();
   const kind = payload.kind;
   if (typeof kind === "string" && kind.trim()) return kind.trim();
   return "";

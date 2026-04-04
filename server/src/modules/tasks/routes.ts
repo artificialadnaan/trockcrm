@@ -65,10 +65,7 @@ router.get("/", async (req, res, next) => {
 router.get("/counts", async (req, res, next) => {
   try {
     const userId = req.query.userId as string | undefined;
-    // Reps always get their own counts; directors can query other users
-    const targetUserId = req.user!.role === "rep" ? req.user!.id : (userId ?? req.user!.id);
-
-    const counts = await getTaskCounts(req.tenantDb!, targetUserId);
+    const counts = await getTaskCounts(req.tenantDb!, req.user!.role, req.user!.id, userId);
     await req.commitTransaction!();
     res.json({ counts });
   } catch (err) {

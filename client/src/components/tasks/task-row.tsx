@@ -10,6 +10,7 @@ import {
   transitionTask,
   getTaskStatusLabel,
   getTaskLifecycleSummary,
+  getTaskTimelineLabel,
   canTransitionTask,
   isTerminalTaskStatus,
 } from "@/hooks/use-tasks";
@@ -55,11 +56,13 @@ export function TaskRow({ task, onUpdate }: TaskRowProps) {
   const isTerminal = isTerminalTaskStatus(task.status);
   const assigneeLabel = task.assignedToName ?? "Unassigned";
   const lifecycleSummary = getTaskLifecycleSummary(task);
+  const timelineLabel = getTaskTimelineLabel(task);
   const canResume = canTransitionTask(task.status, "pending");
   const canStart = canTransitionTask(task.status, "in_progress");
   const canSchedule = canTransitionTask(task.status, "scheduled");
   const canComplete = canTransitionTask(task.status, "completed");
   const canDismiss = canTransitionTask(task.status, "dismissed");
+  const showInlineActions = !isTerminal && task.status !== "scheduled";
 
   const handleComplete = async (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -152,18 +155,16 @@ export function TaskRow({ task, onUpdate }: TaskRowProps) {
         {lifecycleSummary && (
           <p className="text-xs text-muted-foreground truncate">{lifecycleSummary}</p>
         )}
-        {task.dueDate && (
-          <p className={`text-xs ${task.isOverdue ? "text-red-600 font-medium" : "text-muted-foreground"}`}>
-            Due: {new Date(task.dueDate + "T00:00:00").toLocaleDateString()}
-          </p>
-        )}
+        <p className={`text-xs ${task.isOverdue ? "text-red-600 font-medium" : "text-muted-foreground"}`}>
+          {timelineLabel}
+        </p>
       </div>
 
       <Badge variant="outline" className={`text-xs shrink-0 ${priorityColors[task.priority] ?? ""}`}>
         {task.priority}
       </Badge>
 
-      {!isCompleted && (
+      {showInlineActions && (
         <div className="flex items-center gap-1 shrink-0">
           {canResume && (
             <Button
