@@ -105,6 +105,9 @@ describe("Task Service", () => {
 
       expect(TASK_RESOLUTION_STATUSES).toEqual(expectedResolutionStatuses);
       expect(taskResolutionStatusEnum.enumValues).toEqual(expectedResolutionStatuses);
+      expect(taskResolutionState[Table.Symbol.Columns].resolutionStatus.enumValues).toEqual(
+        expectedResolutionStatuses
+      );
       expect(Object.keys(columns)).toEqual(
         expect.arrayContaining([
           "officeId",

@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS task_resolution_state (
   task_id UUID NOT NULL,
   origin_rule VARCHAR(120) NOT NULL,
   dedupe_key VARCHAR(255) NOT NULL,
-  resolution_status VARCHAR(50) NOT NULL,
+  resolution_status task_resolution_status NOT NULL,
   resolution_reason VARCHAR(120),
   resolved_at TIMESTAMPTZ,
   suppressed_until TIMESTAMPTZ,
