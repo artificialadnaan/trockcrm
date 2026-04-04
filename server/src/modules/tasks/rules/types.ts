@@ -54,6 +54,7 @@ export interface SystemTaskDraft {
   assignedTo: string | null;
   officeId: string;
   originRule: string;
+  sourceRule?: string;
   sourceEvent: string;
   dedupeKey: string;
   reasonCode: string;
@@ -61,6 +62,7 @@ export interface SystemTaskDraft {
   priorityScore: number;
   status?: "pending" | "scheduled" | "in_progress" | "waiting_on" | "blocked";
   dueAt?: Date | string | null;
+  entitySnapshot?: Record<string, unknown> | null;
   metadata?: Record<string, unknown>;
 }
 

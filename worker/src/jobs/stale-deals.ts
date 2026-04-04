@@ -1,5 +1,9 @@
 import { pool } from "../db.js";
 
+const SERVER_EVALUATOR_MODULE = "../../../server/src/modules/tasks/rules/evaluator.js" as string;
+const SERVER_TASK_RULES_MODULE = "../../../server/src/modules/tasks/rules/config.js" as string;
+const SERVER_TASK_PERSISTENCE_MODULE = "../../../server/src/modules/tasks/rules/persistence.js" as string;
+
 /**
  * Scans all active deals across all offices for stale deals.
  *
@@ -15,7 +19,7 @@ import { pool } from "../db.js";
  *
  * Notification title includes the tier severity.
  * Dedup: skip if a stale_deal notification already exists for this deal today.
- * A stale_deal task is created for the rep if none is active.
+ * A stale_deal task is generated through the rule evaluator if none is active.
  *
  * This job runs daily at 6am via node-cron.
  */
@@ -105,6 +109,14 @@ export async function runStaleDealScan(): Promise<void> {
       console.log(`[Worker:stale-deals] Found ${staleDeals.rows.length} stale deals in office ${office.slug}`);
       totalStale += staleDeals.rows.length;
 
+      const [{ evaluateTaskRules }, { TASK_RULES }, { createTenantTaskRulePersistence }] = (await Promise.all([
+        import(SERVER_EVALUATOR_MODULE),
+        import(SERVER_TASK_RULES_MODULE),
+        import(SERVER_TASK_PERSISTENCE_MODULE),
+      ])) as any;
+
+      const taskPersistence = createTenantTaskRulePersistence(client, schemaName);
+
       for (const staleDeal of staleDeals.rows) {
         // Check if a stale_deal notification already exists for this deal today
         const existingNotification = await client.query(
@@ -166,29 +178,20 @@ export async function runStaleDealScan(): Promise<void> {
           }
         }
 
-        // Create a stale_deal task for the rep (if one doesn't exist for this deal already)
-        const existingTask = await client.query(
-          `SELECT id FROM ${schemaName}.tasks
-           WHERE type = 'stale_deal'
-             AND deal_id = $1
-             AND status IN ('pending', 'in_progress')
-           LIMIT 1`,
-          [staleDeal.deal_id]
+        await evaluateTaskRules(
+          {
+            now: new Date(),
+            officeId: office.id,
+            entityId: `deal:${staleDeal.deal_id}`,
+            sourceEvent: "deal.updated",
+            dealId: staleDeal.deal_id,
+            dealOwnerId: staleDeal.assigned_rep_id,
+            stage: staleDeal.stage_name,
+            staleAge: daysInStage,
+          },
+          taskPersistence,
+          TASK_RULES
         );
-
-        if (existingTask.rows.length === 0) {
-          await client.query(
-            `INSERT INTO ${schemaName}.tasks
-             (title, description, type, priority, status, assigned_to, deal_id, due_date)
-             VALUES ($1, $2, 'stale_deal', 'high', 'pending', $3, $4, CURRENT_DATE)`,
-            [
-              `Follow up on stale deal: ${staleDeal.deal_number}`,
-              body,
-              staleDeal.assigned_rep_id,
-              staleDeal.deal_id,
-            ]
-          );
-        }
       }
     }
 
