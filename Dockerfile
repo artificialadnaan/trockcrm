@@ -12,4 +12,4 @@ WORKDIR /app
 COPY --from=builder /app .
 ENV NODE_ENV=production
 EXPOSE 3001
-CMD ["node", "server/dist/index.js"]
+CMD ["sh", "-lc", "npm run db:migrate && node server/dist/index.js"]
