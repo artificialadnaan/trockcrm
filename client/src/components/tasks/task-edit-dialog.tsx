@@ -85,7 +85,7 @@ export function TaskEditDialog({ task, open, onOpenChange, onUpdated }: TaskEdit
       return [
         {
           id: task.assignedTo,
-          displayName: task.assignedToName ?? "Current assignee",
+          displayName: task.assignedToName ?? "Assigned teammate",
         },
         ...assignees,
       ];

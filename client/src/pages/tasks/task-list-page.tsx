@@ -39,6 +39,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 
 type FilterKey = "all" | "critical" | "pending" | "scheduled" | "overdue" | "completed";
 type SortKey = "dueDate" | "priority" | "title";
+const ALL_ASSIGNEES_VALUE = "__all__";
 
 const FILTERS: Array<{ key: FilterKey; label: string }> = [
   { key: "all", label: "All" },
@@ -466,6 +467,9 @@ export function TaskListPage() {
   const [selectedAssignee, setSelectedAssignee] = useState("");
   const [assignees, setAssignees] = useState<Assignee[]>([]);
   const assigneeFilter = selectedAssignee || undefined;
+  const selectedAssigneeLabel = selectedAssignee
+    ? assignees.find((assignee) => assignee.id === selectedAssignee)?.displayName ?? "Selected assignee"
+    : "All assignees";
   const { counts, refetch: refetchCounts } = useTaskCounts(assigneeFilter);
 
   useEffect(() => {
@@ -670,16 +674,16 @@ export function TaskListPage() {
                       Assignee
                     </span>
                     <Select
-                      value={selectedAssignee || "__all__"}
+                      value={selectedAssignee || ALL_ASSIGNEES_VALUE}
                       onValueChange={(value) =>
-                        setSelectedAssignee(!value || value === "__all__" ? "" : value)
+                        setSelectedAssignee(!value || value === ALL_ASSIGNEES_VALUE ? "" : value)
                       }
                     >
                       <SelectTrigger className="h-8 w-full sm:w-56">
-                        <SelectValue placeholder="All assignees" />
+                        <SelectValue>{selectedAssigneeLabel}</SelectValue>
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="__all__">All assignees</SelectItem>
+                        <SelectItem value={ALL_ASSIGNEES_VALUE}>All assignees</SelectItem>
                         {assignees.map((assignee) => (
                           <SelectItem key={assignee.id} value={assignee.id}>
                             {assignee.displayName}
