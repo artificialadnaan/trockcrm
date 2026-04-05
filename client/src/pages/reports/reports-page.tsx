@@ -47,6 +47,14 @@ import {
   FileText,
 } from "lucide-react";
 import {
+  buildPrintableReportHtml,
+  buildReportExportFilename,
+  downloadTextFile,
+  normalizeReportRows,
+  openPrintableReportWindow,
+  serializeRowsToCsv,
+} from "@/lib/report-export";
+import {
   BarChart,
   Bar,
   XAxis,
@@ -420,6 +428,7 @@ export function ReportsPage() {
   const [showBuilder, setShowBuilder] = useState(false);
   const [builderError, setBuilderError] = useState<string | null>(null);
   const [reportError, setReportError] = useState<string | null>(null);
+  const [exporting, setExporting] = useState<"pdf" | "csv" | null>(null);
 
   const [builderEntity, setBuilderEntity] = useState<ReportEntity>("deals");
   const [builderName, setBuilderName] = useState("");
@@ -626,6 +635,23 @@ export function ReportsPage() {
   const activeLockedOptions = activeReport?.isLocked
     ? LOCKED_REPORT_OPTIONS[(activeReport.config as any)?.reportType ?? ""]
     : undefined;
+  const exportRows = useMemo(() => normalizeReportRows(reportData), [reportData]);
+  const exportReportName = activeReport?.name ?? "Report Preview";
+  const exportMetadata = useMemo(() => {
+    const items: Array<{ label: string; value: string }> = [];
+    if (activeReport?.isLocked && activeLockedOptions?.supportsDateRange) {
+      const fromLabel = lockedFrom || "Start";
+      const toLabel = lockedTo || "Today";
+      items.push({ label: "Date range", value: `${fromLabel} - ${toLabel}` });
+    }
+    if (activeReport?.isLocked && activeLockedOptions?.supportsIncludeDd) {
+      items.push({ label: "Include DD", value: lockedIncludeDd ? "Yes" : "No" });
+    }
+    if (!activeReport && builderChartType) {
+      items.push({ label: "Chart type", value: builderChartType });
+    }
+    return items;
+  }, [activeLockedOptions?.supportsDateRange, activeLockedOptions?.supportsIncludeDd, activeReport, builderChartType, lockedFrom, lockedIncludeDd, lockedTo]);
 
   const staleDeals = dirData?.staleDeals ?? [];
   const currentDeals = projectTab === "current"
@@ -634,6 +660,60 @@ export function ReportsPage() {
 
   const now = new Date();
   const syncTime = `${now.toLocaleDateString("en-US", { month: "short", day: "numeric" })} at ${now.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })}`;
+
+  function requireExportableRows() {
+    if (reportLoading) {
+      throw new Error("Wait for the report to finish loading before exporting.");
+    }
+    if (exportRows.length === 0) {
+      throw new Error("Run a report first, then export the loaded results.");
+    }
+    return exportRows;
+  }
+
+  function handleExportCsv() {
+    setReportError(null);
+    setExporting("csv");
+    try {
+      const rows = requireExportableRows();
+      const csv = serializeRowsToCsv(rows);
+      downloadTextFile(
+        csv,
+        buildReportExportFilename(exportReportName, "csv"),
+        "text/csv;charset=utf-8;",
+      );
+    } catch (err) {
+      setReportError(err instanceof Error ? err.message : "Failed to export report");
+    } finally {
+      setExporting(null);
+    }
+  }
+
+  function handleExportPdf() {
+    setReportError(null);
+    setExporting("pdf");
+    try {
+      const rows = requireExportableRows();
+      const generatedAtLabel = new Date().toLocaleString("en-US", {
+        month: "short",
+        day: "numeric",
+        year: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+      });
+      const printableHtml = buildPrintableReportHtml({
+        reportName: exportReportName,
+        rows,
+        generatedAtLabel,
+        metadata: exportMetadata,
+      });
+      openPrintableReportWindow(printableHtml);
+    } catch (err) {
+      setReportError(err instanceof Error ? err.message : "Failed to export report");
+    } finally {
+      setExporting(null);
+    }
+  }
 
   return (
     <div className="min-h-screen bg-slate-50">
@@ -658,13 +738,11 @@ export function ReportsPage() {
             <Button
               variant="outline"
               className="border-slate-200 text-slate-600 hover:bg-slate-100"
-              onClick={() => {
-                resetBuilder();
-                setShowBuilder(true);
-              }}
+              onClick={handleExportPdf}
+              disabled={reportLoading || exportRows.length === 0 || exporting === "pdf"}
             >
               <Download className="h-4 w-4 mr-2" />
-              Export PDF
+              {exporting === "pdf" ? "Preparing PDF..." : "Export PDF"}
             </Button>
             <button
               className="flex items-center gap-2 px-4 py-2 rounded-lg text-white text-sm font-semibold"
@@ -971,18 +1049,40 @@ export function ReportsPage() {
                   </Badge>
                 )}
               </div>
-              <Button
-                variant="ghost"
-                size="icon"
-                className="h-8 w-8"
-                onClick={() => {
-                  setShowReportDrawer(false);
-                  setActiveReport(null);
-                  setReportData(null);
-                }}
-              >
-                <X className="h-4 w-4" />
-              </Button>
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="border-slate-200 text-slate-600"
+                  onClick={handleExportCsv}
+                  disabled={reportLoading || exportRows.length === 0 || exporting === "csv"}
+                >
+                  <Download className="h-4 w-4 mr-1" />
+                  {exporting === "csv" ? "Preparing CSV..." : "Export CSV"}
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="border-slate-200 text-slate-600"
+                  onClick={handleExportPdf}
+                  disabled={reportLoading || exportRows.length === 0 || exporting === "pdf"}
+                >
+                  <Download className="h-4 w-4 mr-1" />
+                  {exporting === "pdf" ? "Preparing PDF..." : "Export PDF"}
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-8 w-8"
+                  onClick={() => {
+                    setShowReportDrawer(false);
+                    setActiveReport(null);
+                    setReportData(null);
+                  }}
+                >
+                  <X className="h-4 w-4" />
+                </Button>
+              </div>
             </div>
 
             {activeReport?.isLocked && activeLockedOptions && (
