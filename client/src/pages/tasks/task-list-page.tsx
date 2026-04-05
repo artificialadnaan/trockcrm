@@ -638,86 +638,87 @@ export function TaskListPage() {
       {/* ── 12-Column Grid ── */}
       <div className="grid grid-cols-12 gap-6">
         {/* ── Left Column: Filters + Table (8 cols) ── */}
-        <div className="col-span-12 lg:col-span-8 space-y-4">
+        <div className="col-span-12 xl:col-span-8 space-y-4 min-w-0">
           {/* Filter Bar */}
-          <div className="flex items-center justify-between bg-gray-100 rounded-lg p-1.5">
-          <div className="flex items-center gap-1">
-            {FILTERS.map((f) => (
-              <button
-                key={f.key}
-                onClick={() => setActiveFilter(f.key)}
+          <div className="rounded-lg bg-gray-100 p-1.5">
+            <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+              <div className="flex flex-wrap items-center gap-1 min-w-0">
+                {FILTERS.map((f) => (
+                  <button
+                    key={f.key}
+                    onClick={() => setActiveFilter(f.key)}
                   className={`px-3.5 py-1.5 text-xs font-semibold rounded-md transition-all ${
                     activeFilter === f.key
                       ? "bg-white text-gray-900 shadow-sm"
                       : "text-gray-500 hover:text-gray-700 hover:bg-gray-50"
                   }`}
-                >
-                  {f.label}
-                  {f.key === "overdue" && counts.overdue > 0 && (
-                    <span className="ml-1.5 bg-[#CC0000] text-white text-[9px] font-bold px-1.5 py-0.5 rounded-full">
-                      {counts.overdue}
-                    </span>
-                  )}
-                </button>
-              ))}
-            </div>
-
-            <div className="flex items-center gap-2">
-              {canAssign && (
-                <div className="flex items-center gap-2">
-                  <span className="text-[10px] font-bold uppercase tracking-[0.15em] text-gray-400">
-                    Assignee
-                  </span>
-                  <Select
-                    value={selectedAssignee || "__all__"}
-                    onValueChange={(value) =>
-                      setSelectedAssignee(!value || value === "__all__" ? "" : value)
-                    }
                   >
-                    <SelectTrigger className="h-8 w-56">
-                      <SelectValue placeholder="All assignees" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="__all__">All assignees</SelectItem>
-                      {assignees.map((assignee) => (
-                        <SelectItem key={assignee.id} value={assignee.id}>
-                          {assignee.displayName}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-              )}
+                    {f.label}
+                    {f.key === "overdue" && counts.overdue > 0 && (
+                      <span className="ml-1.5 rounded-full bg-[#CC0000] px-1.5 py-0.5 text-[9px] font-bold text-white">
+                        {counts.overdue}
+                      </span>
+                    )}
+                  </button>
+                ))}
+              </div>
 
-              {/* Sort Dropdown */}
-              <div className="relative">
-                <button
-                  onClick={() => setSortOpen(!sortOpen)}
-                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-gray-500 hover:text-gray-700 rounded-md hover:bg-gray-50 transition-all"
-                >
-                  Sort By: {SORT_OPTIONS.find((s) => s.key === sortBy)?.label}
-                  <ChevronDown className="h-3 w-3" />
-                </button>
-                {sortOpen && (
-                  <div className="absolute right-0 top-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg z-20 py-1 min-w-[140px]">
-                    {SORT_OPTIONS.map((opt) => (
-                      <button
-                        key={opt.key}
-                        onClick={() => {
-                          setSortBy(opt.key);
-                          setSortOpen(false);
-                        }}
-                        className={`block w-full text-left px-3 py-1.5 text-xs font-medium transition-colors ${
-                          sortBy === opt.key
-                            ? "bg-gray-100 text-gray-900"
-                            : "text-gray-600 hover:bg-gray-50"
-                        }`}
-                      >
-                        {opt.label}
-                      </button>
-                    ))}
+              <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center sm:justify-end xl:justify-end">
+                {canAssign && (
+                  <div className="flex min-w-0 flex-col gap-1 sm:flex-row sm:items-center sm:gap-2">
+                    <span className="text-[10px] font-bold uppercase tracking-[0.15em] text-gray-400">
+                      Assignee
+                    </span>
+                    <Select
+                      value={selectedAssignee || "__all__"}
+                      onValueChange={(value) =>
+                        setSelectedAssignee(!value || value === "__all__" ? "" : value)
+                      }
+                    >
+                      <SelectTrigger className="h-8 w-full sm:w-56">
+                        <SelectValue placeholder="All assignees" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="__all__">All assignees</SelectItem>
+                        {assignees.map((assignee) => (
+                          <SelectItem key={assignee.id} value={assignee.id}>
+                            {assignee.displayName}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
                   </div>
                 )}
+
+                <div className="relative self-start sm:self-auto">
+                  <button
+                    onClick={() => setSortOpen(!sortOpen)}
+                    className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-semibold text-gray-500 transition-all hover:bg-gray-50 hover:text-gray-700"
+                  >
+                    Sort By: {SORT_OPTIONS.find((s) => s.key === sortBy)?.label}
+                    <ChevronDown className="h-3 w-3" />
+                  </button>
+                  {sortOpen && (
+                    <div className="absolute right-0 top-full z-20 mt-1 min-w-[140px] rounded-lg border border-gray-200 bg-white py-1 shadow-lg">
+                      {SORT_OPTIONS.map((opt) => (
+                        <button
+                          key={opt.key}
+                          onClick={() => {
+                            setSortBy(opt.key);
+                            setSortOpen(false);
+                          }}
+                          className={`block w-full px-3 py-1.5 text-left text-xs font-medium transition-colors ${
+                            sortBy === opt.key
+                              ? "bg-gray-100 text-gray-900"
+                              : "text-gray-600 hover:bg-gray-50"
+                          }`}
+                        >
+                          {opt.label}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
           </div>
@@ -809,7 +810,7 @@ export function TaskListPage() {
         </div>
 
         {/* ── Right Sidebar (4 cols) ── */}
-        <div className="col-span-12 lg:col-span-4 space-y-4">
+        <div className="col-span-12 xl:col-span-4 space-y-4">
           {/* Operational Alert Card */}
           {counts.overdue > 0 && (
             <div className="bg-[#CC0000] rounded-lg p-5 text-white">
