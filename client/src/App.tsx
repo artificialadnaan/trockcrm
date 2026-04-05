@@ -40,6 +40,7 @@ import { AdminGuidePage } from "@/pages/admin/help/admin-guide-page";
 import { CompanyCamPage } from "@/pages/admin/companycam-page";
 import { PhotoCapturePage } from "@/pages/photos/photo-capture-page";
 import { PhotoFeedPage } from "@/pages/photos/photo-feed-page";
+import { Toaster } from "@/components/ui/sonner";
 
 function HomePage() {
   const { user } = useAuth();
@@ -66,48 +67,51 @@ export function App() {
   return (
     <AuthProvider>
       <AuthGate>
-        <Routes>
-          <Route path="/photos/capture" element={<PhotoCapturePage />} />
-          <Route element={<AppShell />}>
-            <Route path="/" element={<HomePage />} />
-            <Route path="/deals" element={<DealListPage />} />
-            <Route path="/deals/new" element={<DealNewPage />} />
-            <Route path="/deals/:id" element={<DealDetailPage />} />
-            <Route path="/deals/:id/edit" element={<DealEditPage />} />
-            <Route path="/pipeline" element={<PipelinePage />} />
-            <Route path="/contacts" element={<ContactListPage />} />
-            <Route path="/contacts/new" element={<ContactNewPage />} />
-            <Route path="/contacts/:id" element={<ContactDetailPage />} />
-            <Route path="/contacts/:id/edit" element={<ContactEditPage />} />
-            <Route path="/companies" element={<CompanyListPage />} />
-            <Route path="/companies/new" element={<CompanyNewPage />} />
-            <Route path="/companies/:id" element={<CompanyDetailPage />} />
-            <Route path="/companies/:id/edit" element={<CompanyEditPage />} />
-            <Route path="/email" element={<EmailInboxPage />} />
-            <Route path="/tasks" element={<TaskListPage />} />
-            <Route path="/files" element={<FilesPage />} />
-            <Route path="/reports" element={<ReportsPage />} />
-            <Route path="/projects" element={<ProjectsPage />} />
-            <Route path="/director" element={<DirectorDashboardPage />} />
-            <Route path="/director/rep/:repId" element={<DirectorRepDetail />} />
-            <Route path="/search" element={<SearchPage />} />
-            <Route path="/admin/offices" element={<OfficesPage />} />
-            <Route path="/admin/users" element={<UsersPage />} />
-            <Route path="/admin/pipeline" element={<PipelineConfigPage />} />
-            <Route path="/admin/audit" element={<AuditLogPage />} />
-            <Route path="/admin/cross-office-reports" element={<CrossOfficeReportsPage />} />
-            <Route path="/admin/merge-queue" element={<MergeQueuePage />} />
-            <Route path="/admin/procore" element={<ProcoreSyncPage />} />
-            <Route path="/admin/companycam" element={<CompanyCamPage />} />
-            <Route path="/admin/migration" element={<MigrationDashboardPage />} />
-            <Route path="/admin/migration/deals" element={<MigrationDealsPage />} />
-            <Route path="/admin/migration/contacts" element={<MigrationContactsPage />} />
-            <Route path="/photos/feed" element={<PhotoFeedPage />} />
-            <Route path="/help/user-guide" element={<UserGuidePage />} />
-            <Route path="/help/admin-guide" element={<AdminGuidePage />} />
-          </Route>
-          <Route path="*" element={<Navigate to="/" replace />} />
-        </Routes>
+        <>
+          <Routes>
+            <Route path="/photos/capture" element={<PhotoCapturePage />} />
+            <Route element={<AppShell />}>
+              <Route path="/" element={<HomePage />} />
+              <Route path="/deals" element={<DealListPage />} />
+              <Route path="/deals/new" element={<DealNewPage />} />
+              <Route path="/deals/:id" element={<DealDetailPage />} />
+              <Route path="/deals/:id/edit" element={<DealEditPage />} />
+              <Route path="/pipeline" element={<PipelinePage />} />
+              <Route path="/contacts" element={<ContactListPage />} />
+              <Route path="/contacts/new" element={<ContactNewPage />} />
+              <Route path="/contacts/:id" element={<ContactDetailPage />} />
+              <Route path="/contacts/:id/edit" element={<ContactEditPage />} />
+              <Route path="/companies" element={<CompanyListPage />} />
+              <Route path="/companies/new" element={<CompanyNewPage />} />
+              <Route path="/companies/:id" element={<CompanyDetailPage />} />
+              <Route path="/companies/:id/edit" element={<CompanyEditPage />} />
+              <Route path="/email" element={<EmailInboxPage />} />
+              <Route path="/tasks" element={<TaskListPage />} />
+              <Route path="/files" element={<FilesPage />} />
+              <Route path="/reports" element={<ReportsPage />} />
+              <Route path="/projects" element={<ProjectsPage />} />
+              <Route path="/director" element={<DirectorDashboardPage />} />
+              <Route path="/director/rep/:repId" element={<DirectorRepDetail />} />
+              <Route path="/search" element={<SearchPage />} />
+              <Route path="/admin/offices" element={<OfficesPage />} />
+              <Route path="/admin/users" element={<UsersPage />} />
+              <Route path="/admin/pipeline" element={<PipelineConfigPage />} />
+              <Route path="/admin/audit" element={<AuditLogPage />} />
+              <Route path="/admin/cross-office-reports" element={<CrossOfficeReportsPage />} />
+              <Route path="/admin/merge-queue" element={<MergeQueuePage />} />
+              <Route path="/admin/procore" element={<ProcoreSyncPage />} />
+              <Route path="/admin/companycam" element={<CompanyCamPage />} />
+              <Route path="/admin/migration" element={<MigrationDashboardPage />} />
+              <Route path="/admin/migration/deals" element={<MigrationDealsPage />} />
+              <Route path="/admin/migration/contacts" element={<MigrationContactsPage />} />
+              <Route path="/photos/feed" element={<PhotoFeedPage />} />
+              <Route path="/help/user-guide" element={<UserGuidePage />} />
+              <Route path="/help/admin-guide" element={<AdminGuidePage />} />
+            </Route>
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+          <Toaster position="top-right" richColors />
+        </>
       </AuthGate>
     </AuthProvider>
   );

@@ -3,6 +3,76 @@ import { pipelineStageConfig } from "@trock-crm/shared/schema";
 import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 
+export const STAGE_GATE_ALLOWED_FIELDS = [
+  "primaryContactId",
+  "companyId",
+  "projectTypeId",
+  "regionId",
+  "expectedCloseDate",
+  "ddEstimate",
+  "bidEstimate",
+  "awardedAmount",
+  "propertyAddress",
+  "propertyCity",
+  "propertyState",
+  "propertyZip",
+  "winProbability",
+  "description",
+  "lostReasonId",
+  "lostNotes",
+  "lostCompetitor",
+] as const;
+
+export const STAGE_GATE_ALLOWED_DOCUMENTS = [
+  "photo",
+  "contract",
+  "rfp",
+  "estimate",
+  "change_order",
+  "proposal",
+  "permit",
+  "inspection",
+  "correspondence",
+  "insurance",
+  "warranty",
+  "closeout",
+  "other",
+] as const;
+
+export const STAGE_GATE_ALLOWED_APPROVALS = ["director", "admin"] as const;
+
+export function normalizeStageGateValues(
+  values: unknown,
+  allowedValues: readonly string[],
+  fieldName: "requiredFields" | "requiredDocuments" | "requiredApprovals"
+): string[] {
+  if (!Array.isArray(values)) {
+    throw new AppError(400, `${fieldName} must be an array`);
+  }
+
+  const allowed = new Set(allowedValues);
+  const normalized: string[] = [];
+
+  for (const entry of values) {
+    if (typeof entry !== "string") {
+      throw new AppError(400, `${fieldName} entries must be strings`);
+    }
+
+    const trimmed = entry.trim();
+    if (!trimmed) continue;
+
+    if (!allowed.has(trimmed)) {
+      throw new AppError(400, `Unknown ${fieldName} value: ${trimmed}`);
+    }
+
+    if (!normalized.includes(trimmed)) {
+      normalized.push(trimmed);
+    }
+  }
+
+  return normalized;
+}
+
 export async function listPipelineStages() {
   return db
     .select()
@@ -36,9 +106,27 @@ export async function updatePipelineStage(
   if (input.color !== undefined) updates.color = input.color;
   if (input.staleThresholdDays !== undefined) updates.staleThresholdDays = input.staleThresholdDays;
   if (input.procoreStageMapping !== undefined) updates.procoreStageMapping = input.procoreStageMapping;
-  if (input.requiredFields !== undefined) updates.requiredFields = input.requiredFields;
-  if (input.requiredDocuments !== undefined) updates.requiredDocuments = input.requiredDocuments;
-  if (input.requiredApprovals !== undefined) updates.requiredApprovals = input.requiredApprovals;
+  if (input.requiredFields !== undefined) {
+    updates.requiredFields = normalizeStageGateValues(
+      input.requiredFields,
+      STAGE_GATE_ALLOWED_FIELDS,
+      "requiredFields"
+    );
+  }
+  if (input.requiredDocuments !== undefined) {
+    updates.requiredDocuments = normalizeStageGateValues(
+      input.requiredDocuments,
+      STAGE_GATE_ALLOWED_DOCUMENTS,
+      "requiredDocuments"
+    );
+  }
+  if (input.requiredApprovals !== undefined) {
+    updates.requiredApprovals = normalizeStageGateValues(
+      input.requiredApprovals,
+      STAGE_GATE_ALLOWED_APPROVALS,
+      "requiredApprovals"
+    );
+  }
 
   if (Object.keys(updates).length === 0) {
     return existing[0];

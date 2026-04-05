@@ -35,7 +35,7 @@ const SECTIONS: AdminSection[] = [
       "Stale threshold: the number of days a deal can sit in a stage before triggering a stale alert. Set to blank/null to disable stale alerts for that stage.",
       "Procore mapping: the Procore project status string to set when a deal enters this stage. Leave blank for stages that should not sync to Procore (e.g. DD, Closed Lost).",
       "Color: used in UI badges. Use hex color codes. Recommended: blue for active stages, green for Closed Won, gray for Closed Lost.",
-      "Required fields, documents, and approvals are set per stage and enforce stage gate rules. Edit the JSON arrays directly in the database for now -- UI editor is Phase 2.",
+      "Required fields, documents, and approvals are set per stage and enforce stage gate rules. Use the inline stage-gate editor on the Pipeline Configuration page to manage these requirements.",
     ],
   },
   {

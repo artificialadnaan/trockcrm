@@ -34,11 +34,18 @@ export function useAdminPipeline() {
   const updateStage = async (id: string, input: Partial<PipelineStageAdmin>) => {
     setSaving(true);
     try {
-      await api(`/admin/pipeline/${id}`, {
+      const data = await api<{ stage: PipelineStageAdmin }>(`/admin/pipeline/${id}`, {
         method: "PATCH",
         json: input,
       });
-      await load();
+
+      setStages((current) => current.map((stage) => (stage.id === id ? data.stage : stage)));
+
+      void load().catch((err) => {
+        console.error("Failed to refresh pipeline stages after update:", err);
+      });
+
+      return data.stage;
     } finally {
       setSaving(false);
     }
