@@ -1,5 +1,19 @@
 import { pool } from "../db.js";
 
+const SERVER_EVALUATOR_MODULE = "../../../server/src/modules/tasks/rules/evaluator.js" as string;
+const SERVER_TASK_RULES_MODULE = "../../../server/src/modules/tasks/rules/config.js" as string;
+const SERVER_TASK_PERSISTENCE_MODULE = "../../../server/src/modules/tasks/rules/persistence.js" as string;
+
+async function loadTaskRuleDependencies() {
+  const [{ evaluateTaskRules }, { TASK_RULES }, { createTenantTaskRulePersistence }] = (await Promise.all([
+    import(SERVER_EVALUATOR_MODULE),
+    import(SERVER_TASK_RULES_MODULE),
+    import(SERVER_TASK_PERSISTENCE_MODULE),
+  ])) as any;
+
+  return { evaluateTaskRules, TASK_RULES, createTenantTaskRulePersistence };
+}
+
 /**
  * Generates a weekly digest task for each director/admin in every active office.
  *
@@ -88,25 +102,6 @@ export async function runWeeklyDigest(): Promise<void> {
              AND psc.is_terminal = false`
         );
         const totalValue = Number(valueRes.rows[0]?.total_value ?? 0);
-        const formattedValue = new Intl.NumberFormat("en-US", {
-          style: "currency",
-          currency: "USD",
-          maximumFractionDigits: 0,
-        }).format(totalValue);
-
-        // Build digest content
-        const title = `Weekly Digest: ${staleCount} stale, ${approachingCount} approaching deadline, ${newDealsCount} new — ${formattedValue} pipeline`;
-        const description = [
-          `Weekly Pipeline Digest for ${office.name}`,
-          ``,
-          `Stale Deals: ${staleCount} deals past their stage threshold`,
-          `Approaching Deadline: ${approachingCount} deals with expected close date in the next 7 days`,
-          `New This Week: ${newDealsCount} deals created in the past 7 days`,
-          `Total Active Pipeline Value: ${formattedValue}`,
-          ``,
-          `Generated: ${new Date().toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" })}`,
-        ].join("\n");
-
         // Find all directors/admins in this office
         const directors = await client.query(
           `SELECT id FROM public.users
@@ -120,32 +115,32 @@ export async function runWeeklyDigest(): Promise<void> {
           continue;
         }
 
-        const dueDate = new Date().toISOString().split("T")[0];
+        const { evaluateTaskRules, TASK_RULES, createTenantTaskRulePersistence } = await loadTaskRuleDependencies();
+        const taskPersistence = createTenantTaskRulePersistence(client, schemaName);
+        let createdCount = 0;
 
         for (const director of directors.rows) {
-          // Check if a digest task already exists for today (avoid duplicates)
-          const existingTask = await client.query(
-            `SELECT id FROM ${schemaName}.tasks
-             WHERE type = 'system'
-               AND title LIKE 'Weekly Digest:%'
-               AND assigned_to = $1
-               AND created_at >= CURRENT_DATE
-             LIMIT 1`,
-            [director.id]
+          const outcomes = await evaluateTaskRules(
+            {
+              now: new Date(),
+              officeId: office.id,
+              officeName: office.name,
+              entityId: `office:${office.id}`,
+              sourceEvent: "cron.weekly_digest",
+              taskAssigneeId: director.id,
+              staleCount,
+              approachingCount,
+              newDealsCount,
+              pipelineValue: totalValue,
+            },
+            taskPersistence,
+            TASK_RULES
           );
-
-          if (existingTask.rows.length > 0) continue;
-
-          await client.query(
-            `INSERT INTO ${schemaName}.tasks
-             (title, description, type, priority, status, assigned_to, due_date)
-             VALUES ($1, $2, 'system', 'normal', 'pending', $3, $4)`,
-            [title, description, director.id, dueDate]
-          );
+          createdCount += outcomes.filter((outcome: { action: string }) => outcome.action === "created").length;
         }
 
         await client.query("COMMIT");
-        console.log(`[Worker:weekly-digest] Digest created for office ${office.slug}: ${directors.rows.length} directors`);
+        console.log(`[Worker:weekly-digest] Digest created for office ${office.slug}: ${createdCount} task(s)`);
       } catch (err) {
         await client.query("ROLLBACK").catch(() => {});
         console.error(`[Worker:weekly-digest] Error for office ${office.slug}:`, err);

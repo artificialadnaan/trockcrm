@@ -418,6 +418,348 @@ const dailyCadenceOverdueFollowUpRule: TaskRuleDefinition = {
   },
 };
 
+function buildWonDealHandoffRule(
+  id: string,
+  titleBuilder: (context: TaskRuleContext) => string,
+  priorityScore: number,
+  dueOffsetDays: number,
+  dedupeSuffix: string
+): TaskRuleDefinition {
+  return {
+    id,
+    sourceEvent: "deal.won.handoff",
+    reasonCode: id,
+    suppressionWindowDays: 0,
+    buildDedupeKey(context) {
+      return context.dealId ? `deal:${context.dealId}:won_handoff:${dedupeSuffix}` : null;
+    },
+    async buildTask(context) {
+      if (!context.dealId || !context.dealName) return null;
+
+      const assignment = await assignTaskFromContext({
+        entityId: context.entityId,
+        manualOverrideId: context.taskAssigneeId ?? context.manualOverrideId,
+        dealOwnerId: context.dealOwnerId,
+        contactLinkedRepId: context.contactLinkedRepId,
+        recentActorId: context.recentActorId,
+        officeFallbackId: context.officeFallbackId,
+      });
+
+      if (!assignment.assignedTo) return null;
+
+      const priority = buildFixedPriority(priorityScore);
+      const dueAt = addCalendarDays(context.now, dueOffsetDays);
+      const title = titleBuilder(context);
+
+      return {
+        title,
+        type: "system",
+        assignedTo: assignment.assignedTo,
+        officeId: context.officeId,
+        originRule: id,
+        sourceRule: id,
+        sourceEvent: context.sourceEvent,
+        dedupeKey: `deal:${context.dealId}:won_handoff:${dedupeSuffix}`,
+        reasonCode: id,
+        priority: priority.band,
+        priorityScore: priority.score,
+        status: "pending",
+        dealId: context.dealId,
+        dueAt,
+        entitySnapshot: {
+          schemaVersion: 1,
+          entityType: "deal",
+          entityId: context.entityId,
+          officeId: context.officeId,
+          sourceEvent: context.sourceEvent,
+          dealId: context.dealId,
+          dealName: context.dealName,
+          primaryContactName: context.primaryContactName ?? null,
+          summary: title,
+        },
+        metadata: {
+          entityId: context.entityId,
+          dealId: context.dealId,
+          dealName: context.dealName,
+          primaryContactName: context.primaryContactName ?? null,
+          assignment: assignment.machineReason,
+        },
+      };
+    },
+  };
+}
+
+const dealWonKickoffRule = buildWonDealHandoffRule(
+  "deal_won_schedule_kickoff",
+  (context) => `Schedule kickoff meeting for ${context.dealName}`,
+  90,
+  0,
+  "schedule_kickoff"
+);
+
+const dealWonWelcomePacketRule = buildWonDealHandoffRule(
+  "deal_won_send_welcome_packet",
+  (context) => `Send welcome packet to ${context.primaryContactName ?? "primary contact"}`,
+  70,
+  1,
+  "send_welcome_packet"
+);
+
+const dealWonIntroduceTeamRule = buildWonDealHandoffRule(
+  "deal_won_introduce_project_team",
+  (context) => `Introduce project team for ${context.dealName}`,
+  50,
+  2,
+  "introduce_project_team"
+);
+
+const dealWonVerifyProcoreRule = buildWonDealHandoffRule(
+  "deal_won_verify_procore_project",
+  (context) => `Verify Procore project created for ${context.dealName}`,
+  50,
+  3,
+  "verify_procore_project"
+);
+
+const dealWonCrossSellRuleId = "deal_won_cross_sell_opportunity";
+const dealWonCrossSellRule: TaskRuleDefinition = {
+  id: dealWonCrossSellRuleId,
+  sourceEvent: "deal.won.cross_sell",
+  reasonCode: dealWonCrossSellRuleId,
+  suppressionWindowDays: 0,
+  buildDedupeKey(context) {
+    return context.dealId && context.projectTypeId
+      ? `deal:${context.dealId}:cross_sell:${context.projectTypeId}`
+      : null;
+  },
+  async buildTask(context) {
+    if (!context.dealId || !context.projectTypeId || !context.projectTypeName || !context.companyName) {
+      return null;
+    }
+
+    const assignment = await assignTaskFromContext({
+      entityId: context.entityId,
+      manualOverrideId: context.taskAssigneeId ?? context.manualOverrideId,
+      dealOwnerId: context.dealOwnerId,
+      contactLinkedRepId: context.contactLinkedRepId,
+      recentActorId: context.recentActorId,
+      officeFallbackId: context.officeFallbackId,
+    });
+
+    if (!assignment.assignedTo) return null;
+
+    const priority = buildFixedPriority(50);
+    const dueAt = addCalendarDays(context.now, 14);
+
+    return {
+      title: `Explore ${context.projectTypeName} opportunities with ${context.companyName}`,
+      description: `${context.companyName} just won deal "${context.dealName}" (${context.dealNumber}). Consider cross-selling ${context.projectTypeName} services.`,
+      type: "system",
+      assignedTo: assignment.assignedTo,
+      officeId: context.officeId,
+      originRule: dealWonCrossSellRuleId,
+      sourceRule: dealWonCrossSellRuleId,
+      sourceEvent: context.sourceEvent,
+      dedupeKey: `deal:${context.dealId}:cross_sell:${context.projectTypeId}`,
+      reasonCode: dealWonCrossSellRuleId,
+      priority: priority.band,
+      priorityScore: priority.score,
+      status: "pending",
+      dealId: context.dealId,
+      dueAt,
+      entitySnapshot: {
+        schemaVersion: 1,
+        entityType: "deal",
+        entityId: context.entityId,
+        officeId: context.officeId,
+        sourceEvent: context.sourceEvent,
+        dealId: context.dealId,
+        dealName: context.dealName ?? null,
+        dealNumber: context.dealNumber ?? null,
+        companyName: context.companyName,
+        projectTypeId: context.projectTypeId,
+        projectTypeName: context.projectTypeName,
+        summary: `Cross-sell ${context.projectTypeName} with ${context.companyName}`,
+      },
+      metadata: {
+        entityId: context.entityId,
+        dealId: context.dealId,
+        dealName: context.dealName ?? null,
+        dealNumber: context.dealNumber ?? null,
+        companyName: context.companyName,
+        projectTypeId: context.projectTypeId,
+        projectTypeName: context.projectTypeName,
+        assignment: assignment.machineReason,
+      },
+    };
+  },
+};
+
+const dealLostCompetitorIntelRuleId = "deal_lost_competitor_intel";
+const dealLostCompetitorIntelRule: TaskRuleDefinition = {
+  id: dealLostCompetitorIntelRuleId,
+  sourceEvent: "deal.lost.competitor_intel",
+  reasonCode: dealLostCompetitorIntelRuleId,
+  suppressionWindowDays: 0,
+  buildDedupeKey(context) {
+    return context.dealId && context.triggerDealId && context.lostCompetitor
+      ? `deal:${context.dealId}:lost_competitor:${context.triggerDealId}:${context.lostCompetitor}`
+      : null;
+  },
+  async buildTask(context) {
+    if (!context.dealId || !context.dealName || !context.triggerDealId || !context.triggerDealName || !context.lostCompetitor) {
+      return null;
+    }
+
+    const assignment = await assignTaskFromContext({
+      entityId: context.entityId,
+      manualOverrideId: context.taskAssigneeId ?? context.manualOverrideId,
+      dealOwnerId: context.dealOwnerId,
+      contactLinkedRepId: context.contactLinkedRepId,
+      recentActorId: context.recentActorId,
+      officeFallbackId: context.officeFallbackId,
+    });
+
+    if (!assignment.assignedTo) return null;
+
+    const priority = buildFixedPriority(80);
+    const contactName = context.contactName?.trim() || "contact";
+
+    return {
+      title: `Heads up: ${contactName} chose ${context.lostCompetitor} on ${context.triggerDealName}. Review strategy for ${context.dealName}`,
+      description: `${context.lostCompetitor} won ${context.triggerDealName}. Review the active deal strategy for ${context.dealName}.`,
+      type: "system",
+      assignedTo: assignment.assignedTo,
+      officeId: context.officeId,
+      originRule: dealLostCompetitorIntelRuleId,
+      sourceRule: dealLostCompetitorIntelRuleId,
+      sourceEvent: context.sourceEvent,
+      dedupeKey: `deal:${context.dealId}:lost_competitor:${context.triggerDealId}:${context.lostCompetitor}`,
+      reasonCode: dealLostCompetitorIntelRuleId,
+      priority: priority.band,
+      priorityScore: priority.score,
+      status: "pending",
+      dealId: context.dealId,
+      dueAt: context.now,
+      entitySnapshot: {
+        schemaVersion: 1,
+        entityType: "deal",
+        entityId: context.entityId,
+        officeId: context.officeId,
+        sourceEvent: context.sourceEvent,
+        dealId: context.dealId,
+        dealName: context.dealName,
+        triggerDealId: context.triggerDealId,
+        triggerDealName: context.triggerDealName,
+        triggerDealNumber: context.triggerDealNumber ?? null,
+        lostCompetitor: context.lostCompetitor,
+        contactName,
+        summary: `Review ${context.dealName} after ${context.lostCompetitor} won ${context.triggerDealName}`,
+      },
+      metadata: {
+        entityId: context.entityId,
+        dealId: context.dealId,
+        dealName: context.dealName,
+        triggerDealId: context.triggerDealId,
+        triggerDealName: context.triggerDealName,
+        triggerDealNumber: context.triggerDealNumber ?? null,
+        lostCompetitor: context.lostCompetitor,
+        contactName,
+        assignment: assignment.machineReason,
+      },
+    };
+  },
+};
+
+const weeklyPipelineDigestRuleId = "weekly_pipeline_digest";
+const weeklyPipelineDigestRule: TaskRuleDefinition = {
+  id: weeklyPipelineDigestRuleId,
+  sourceEvent: "cron.weekly_digest",
+  reasonCode: weeklyPipelineDigestRuleId,
+  suppressionWindowDays: 0,
+  buildDedupeKey(context) {
+    if (!context.taskAssigneeId) return null;
+    const digestDate = formatDate(context.now);
+    return `office:${context.officeId}:assignee:${context.taskAssigneeId}:weekly_digest:${digestDate}`;
+  },
+  async buildTask(context) {
+    if (!context.taskAssigneeId) return null;
+
+    const assignment = await assignTaskFromContext({
+      entityId: context.entityId,
+      manualOverrideId: context.taskAssigneeId,
+    });
+
+    if (!assignment.assignedTo) return null;
+
+    const staleCount = context.staleCount ?? 0;
+    const approachingCount = context.approachingCount ?? 0;
+    const newDealsCount = context.newDealsCount ?? 0;
+    const pipelineValue = context.pipelineValue ?? 0;
+    const formattedValue = new Intl.NumberFormat("en-US", {
+      style: "currency",
+      currency: "USD",
+      maximumFractionDigits: 0,
+    }).format(pipelineValue);
+    const generatedLabel = context.now.toLocaleDateString("en-US", {
+      weekday: "long",
+      year: "numeric",
+      month: "long",
+      day: "numeric",
+    });
+    const title = `Weekly Digest: ${staleCount} stale, ${approachingCount} approaching deadline, ${newDealsCount} new — ${formattedValue} pipeline`;
+
+    return {
+      title,
+      description: [
+        `Weekly Pipeline Digest for ${context.officeName ?? "office"}`,
+        ``,
+        `Stale Deals: ${staleCount} deals past their stage threshold`,
+        `Approaching Deadline: ${approachingCount} deals with expected close date in the next 7 days`,
+        `New This Week: ${newDealsCount} deals created in the past 7 days`,
+        `Total Active Pipeline Value: ${formattedValue}`,
+        ``,
+        `Generated: ${generatedLabel}`,
+      ].join("\n"),
+      type: "system",
+      assignedTo: assignment.assignedTo,
+      officeId: context.officeId,
+      originRule: weeklyPipelineDigestRuleId,
+      sourceRule: weeklyPipelineDigestRuleId,
+      sourceEvent: context.sourceEvent,
+      dedupeKey: `office:${context.officeId}:assignee:${context.taskAssigneeId}:weekly_digest:${formatDate(context.now)}`,
+      reasonCode: weeklyPipelineDigestRuleId,
+      priority: "normal",
+      priorityScore: 50,
+      status: "pending",
+      dueAt: context.now,
+      entitySnapshot: {
+        schemaVersion: 1,
+        entityType: "office",
+        entityId: context.entityId,
+        officeId: context.officeId,
+        officeName: context.officeName ?? null,
+        sourceEvent: context.sourceEvent,
+        staleCount,
+        approachingCount,
+        newDealsCount,
+        pipelineValue,
+        summary: title,
+      },
+      metadata: {
+        entityId: context.entityId,
+        officeId: context.officeId,
+        officeName: context.officeName ?? null,
+        staleCount,
+        approachingCount,
+        newDealsCount,
+        pipelineValue,
+        assignment: assignment.machineReason,
+      },
+    };
+  },
+};
+
 function buildBidDeadlineRule(daysUntil: number, titlePrefix: string, priorityScore: number): TaskRuleDefinition {
   const ruleId = `bid_deadline_${daysUntil}_day`;
   return {
@@ -733,4 +1075,11 @@ export const TASK_RULES: TaskRuleDefinition[] = [
   dailyCloseDateFollowUpRule,
   dailyFirstOutreachTouchpointRule,
   dailyCadenceOverdueFollowUpRule,
+  dealWonKickoffRule,
+  dealWonWelcomePacketRule,
+  dealWonIntroduceTeamRule,
+  dealWonVerifyProcoreRule,
+  dealWonCrossSellRule,
+  dealLostCompetitorIntelRule,
+  weeklyPipelineDigestRule,
 ];

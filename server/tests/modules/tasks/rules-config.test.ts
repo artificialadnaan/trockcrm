@@ -51,6 +51,60 @@ function makeDailyTaskContext(overrides: Record<string, unknown> = {}) {
   } as any;
 }
 
+function makeWonDealContext(overrides: Record<string, unknown> = {}) {
+  return {
+    now: new Date("2026-04-04T15:00:00.000Z"),
+    officeId: "office-1",
+    entityId: "deal:deal-1",
+    sourceEvent: "deal.won.handoff",
+    dealId: "deal-1",
+    dealName: "Alpha Roof",
+    dealNumber: "D-1001",
+    dealOwnerId: "user-1",
+    taskAssigneeId: "user-1",
+    primaryContactName: "Brett Smith",
+    companyName: "Acme Roofing",
+    projectTypeId: "pt-2",
+    projectTypeName: "Gutters",
+    ...overrides,
+  } as any;
+}
+
+function makeLostDealContext(overrides: Record<string, unknown> = {}) {
+  return {
+    now: new Date("2026-04-04T15:00:00.000Z"),
+    officeId: "office-1",
+    entityId: "deal:deal-2",
+    sourceEvent: "deal.lost.competitor_intel",
+    dealId: "deal-2",
+    dealName: "Beta Roof",
+    dealOwnerId: "user-2",
+    taskAssigneeId: "user-2",
+    contactName: "Brett Smith",
+    triggerDealId: "deal-1",
+    triggerDealName: "Lost Bid",
+    triggerDealNumber: "D-1001",
+    lostCompetitor: "Acme Exteriors",
+    ...overrides,
+  } as any;
+}
+
+function makeWeeklyDigestContext(overrides: Record<string, unknown> = {}) {
+  return {
+    now: new Date("2026-04-06T12:00:00.000Z"),
+    officeId: "office-1",
+    officeName: "Beta",
+    entityId: "office:office-1",
+    sourceEvent: "cron.weekly_digest",
+    taskAssigneeId: "director-1",
+    staleCount: 3,
+    approachingCount: 2,
+    newDealsCount: 4,
+    pipelineValue: 250000,
+    ...overrides,
+  } as any;
+}
+
 describe("task rule config", () => {
   it("defines one bid-deadline rule per countdown threshold", () => {
     const bidRules = TASK_RULES.filter((rule) => rule.sourceEvent === "cron.bid_deadline");
@@ -195,5 +249,89 @@ describe("task rule config", () => {
       dealId: "deal-1",
       contactId: "contact-1",
     });
+  });
+
+  it("defines the won-deal handoff sequence with stable dedupe keys", () => {
+    const handoffRules = TASK_RULES.filter((rule) => rule.sourceEvent === "deal.won.handoff");
+
+    expect(handoffRules.map((rule) => rule.id)).toEqual([
+      "deal_won_schedule_kickoff",
+      "deal_won_send_welcome_packet",
+      "deal_won_introduce_project_team",
+      "deal_won_verify_procore_project",
+    ]);
+    expect(handoffRules[0]?.buildDedupeKey(makeWonDealContext())).toBe("deal:deal-1:won_handoff:schedule_kickoff");
+    expect(handoffRules[1]?.buildDedupeKey(makeWonDealContext())).toBe("deal:deal-1:won_handoff:send_welcome_packet");
+    expect(handoffRules[2]?.buildDedupeKey(makeWonDealContext())).toBe("deal:deal-1:won_handoff:introduce_project_team");
+    expect(handoffRules[3]?.buildDedupeKey(makeWonDealContext())).toBe("deal:deal-1:won_handoff:verify_procore_project");
+  });
+
+  it("builds the won-deal cross-sell draft", async () => {
+    const crossSellRule = TASK_RULES.find((rule) => rule.id === "deal_won_cross_sell_opportunity");
+    expect(crossSellRule).toBeDefined();
+
+    const draft = await crossSellRule!.buildTask(makeWonDealContext({ sourceEvent: "deal.won.cross_sell" }));
+
+    expect(draft).toMatchObject({
+      title: "Explore Gutters opportunities with Acme Roofing",
+      type: "system",
+      assignedTo: "user-1",
+      officeId: "office-1",
+      originRule: "deal_won_cross_sell_opportunity",
+      sourceRule: "deal_won_cross_sell_opportunity",
+      sourceEvent: "deal.won.cross_sell",
+      dedupeKey: "deal:deal-1:cross_sell:pt-2",
+      reasonCode: "deal_won_cross_sell_opportunity",
+      priority: "normal",
+      status: "pending",
+      dealId: "deal-1",
+    });
+  });
+
+  it("builds the competitor-intelligence draft from deal.lost", async () => {
+    const competitorRule = TASK_RULES.find((rule) => rule.id === "deal_lost_competitor_intel");
+    expect(competitorRule).toBeDefined();
+
+    const draft = await competitorRule!.buildTask(makeLostDealContext());
+
+    expect(draft).toMatchObject({
+      title: "Heads up: Brett Smith chose Acme Exteriors on Lost Bid. Review strategy for Beta Roof",
+      type: "system",
+      assignedTo: "user-2",
+      officeId: "office-1",
+      originRule: "deal_lost_competitor_intel",
+      sourceRule: "deal_lost_competitor_intel",
+      sourceEvent: "deal.lost.competitor_intel",
+      dedupeKey: "deal:deal-2:lost_competitor:deal-1:Acme Exteriors",
+      reasonCode: "deal_lost_competitor_intel",
+      priority: "urgent",
+      status: "pending",
+      dealId: "deal-2",
+    });
+  });
+
+  it("builds the weekly digest draft for a director/admin assignee", async () => {
+    const digestRule = TASK_RULES.find((rule) => rule.id === "weekly_pipeline_digest");
+    expect(digestRule).toBeDefined();
+    expect(digestRule?.buildDedupeKey(makeWeeklyDigestContext())).toBe(
+      "office:office-1:assignee:director-1:weekly_digest:2026-04-06"
+    );
+
+    const draft = await digestRule!.buildTask(makeWeeklyDigestContext());
+
+    expect(draft).toMatchObject({
+      title: "Weekly Digest: 3 stale, 2 approaching deadline, 4 new — $250,000 pipeline",
+      type: "system",
+      assignedTo: "director-1",
+      officeId: "office-1",
+      originRule: "weekly_pipeline_digest",
+      sourceRule: "weekly_pipeline_digest",
+      sourceEvent: "cron.weekly_digest",
+      dedupeKey: "office:office-1:assignee:director-1:weekly_digest:2026-04-06",
+      reasonCode: "weekly_pipeline_digest",
+      priority: "normal",
+      status: "pending",
+    });
+    expect(draft?.description).toContain("Weekly Pipeline Digest for Beta");
   });
 });

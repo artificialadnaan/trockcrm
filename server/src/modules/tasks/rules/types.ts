@@ -35,14 +35,19 @@ export interface AssignmentResult {
 export interface TaskRuleContext extends AssignmentContext {
   now: Date;
   officeId: string;
+  officeName?: string | null;
   sourceEvent: string;
   dealId?: string | null;
   dealName?: string | null;
   dealNumber?: string | null;
+  triggerDealId?: string | null;
+  triggerDealName?: string | null;
+  triggerDealNumber?: string | null;
   contactId?: string | null;
   emailId?: string | null;
   taskAssigneeId?: string | null;
   contactName?: string | null;
+  primaryContactName?: string | null;
   emailSubject?: string | null;
   activeDealCount?: number | null;
   activeDealNames?: string[] | null;
@@ -52,6 +57,14 @@ export interface TaskRuleContext extends AssignmentContext {
   dueAt?: Date | string | null;
   lastContactedAt?: Date | string | null;
   touchpointCadenceDays?: number | null;
+  companyName?: string | null;
+  projectTypeId?: string | null;
+  projectTypeName?: string | null;
+  lostCompetitor?: string | null;
+  staleCount?: number | null;
+  approachingCount?: number | null;
+  newDealsCount?: number | null;
+  pipelineValue?: number | null;
   dealValue?: number | null;
   priority?: PriorityScoreInput | null;
   unreadInbound?: number | null;

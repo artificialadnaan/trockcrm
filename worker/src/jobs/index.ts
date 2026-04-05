@@ -87,6 +87,10 @@ async function resolveOfficeSchema(
   };
 }
 
+function countTaskRuleCreations(outcomes: Array<{ action: string }>) {
+  return outcomes.filter((outcome) => outcome.action === "created").length;
+}
+
 export function registerAllJobs() {
   registerJobHandler("test_echo", handleTestEcho);
   registerJobHandler("domain_event", handleDomainEvent);
@@ -153,80 +157,47 @@ export function registerAllJobs() {
     // --- Task 17: Won deal handoff checklist ---
     try {
       const { pool: handoffPool } = await import("../db.js");
-
-      // Resolve office
-      let handoffOfficeId = officeId;
-      if (!handoffOfficeId && payload.assignedRepId) {
-        const userRes = await handoffPool.query(
-          "SELECT office_id FROM public.users WHERE id = $1",
-          [payload.assignedRepId]
-        );
-        handoffOfficeId = userRes.rows[0]?.office_id ?? null;
-      }
-      if (!handoffOfficeId) {
+      const resolved = await resolveOfficeSchema(handoffPool, officeId, payload.assignedRepId);
+      if (!resolved) {
         console.log("[Worker:handoff] Cannot resolve office — skipping handoff checklist");
       } else {
-        const handoffOfficeRes = await handoffPool.query(
-          "SELECT slug FROM public.offices WHERE id = $1 AND is_active = true",
-          [handoffOfficeId]
-        );
-        if (handoffOfficeRes.rows.length > 0) {
-          const handoffSlug = handoffOfficeRes.rows[0].slug;
-          const slugRegex = /^[a-z][a-z0-9_]*$/;
-          if (slugRegex.test(handoffSlug)) {
-            const handoffSchema = `office_${handoffSlug}`;
-            const dealName = payload.dealName ?? "deal";
-            const assignedTo = payload.assignedRepId ?? payload.assignedTo;
+        const { evaluateTaskRules, TASK_RULES, createTenantTaskRulePersistence } = await loadTaskRuleDependencies();
+        const taskPersistence = createTenantTaskRulePersistence(handoffPool, resolved.schemaName);
+        const assignedTo = payload.assignedRepId ?? payload.assignedTo;
 
-            if (assignedTo) {
-              // Look up primary contact name
-              let primaryContactName = "primary contact";
-              if (payload.primaryContactId) {
-                const contactResult = await handoffPool.query(
-                  `SELECT first_name, last_name FROM ${handoffSchema}.contacts WHERE id = $1`,
-                  [payload.primaryContactId]
-                );
-                if (contactResult.rows.length > 0) {
-                  const c = contactResult.rows[0];
-                  primaryContactName = `${c.first_name ?? ""} ${c.last_name ?? ""}`.trim() || "primary contact";
-                }
-              }
-
-              const today = new Date();
-              const handoffTasks = [
-                {
-                  title: `Schedule kickoff meeting for ${dealName}`,
-                  priority: "urgent",
-                  dueDate: today.toISOString().split("T")[0],
-                },
-                {
-                  title: `Send welcome packet to ${primaryContactName}`,
-                  priority: "high",
-                  dueDate: new Date(today.getTime() + 1 * 86400000).toISOString().split("T")[0],
-                },
-                {
-                  title: `Introduce project team for ${dealName}`,
-                  priority: "normal",
-                  dueDate: new Date(today.getTime() + 2 * 86400000).toISOString().split("T")[0],
-                },
-                {
-                  title: `Verify Procore project created for ${dealName}`,
-                  priority: "normal",
-                  dueDate: new Date(today.getTime() + 3 * 86400000).toISOString().split("T")[0],
-                },
-              ];
-
-              for (const task of handoffTasks) {
-                await handoffPool.query(
-                  `INSERT INTO ${handoffSchema}.tasks
-                   (title, type, priority, status, assigned_to, deal_id, due_date, created_by)
-                   VALUES ($1, 'system', $2, 'pending', $3, $4, $5, $3)`,
-                  [task.title, task.priority, assignedTo, payload.dealId, task.dueDate]
-                );
-              }
-
-              console.log(`[Worker] deal.won: created 4 handoff tasks for ${dealName}`);
+        if (assignedTo) {
+          let primaryContactName = "primary contact";
+          if (payload.primaryContactId) {
+            const contactResult = await handoffPool.query(
+              `SELECT first_name, last_name FROM ${resolved.schemaName}.contacts WHERE id = $1`,
+              [payload.primaryContactId]
+            );
+            if (contactResult.rows.length > 0) {
+              const c = contactResult.rows[0];
+              primaryContactName = `${c.first_name ?? ""} ${c.last_name ?? ""}`.trim() || "primary contact";
             }
+          }
+
+          const outcomes = await evaluateTaskRules(
+            {
+              now: new Date(),
+              officeId: resolved.officeId,
+              entityId: `deal:${payload.dealId}`,
+              sourceEvent: "deal.won.handoff",
+              dealId: payload.dealId,
+              dealName: payload.dealName ?? "deal",
+              dealNumber: payload.dealNumber ?? null,
+              dealOwnerId: payload.assignedRepId ?? null,
+              taskAssigneeId: assignedTo,
+              primaryContactName,
+            },
+            taskPersistence,
+            TASK_RULES
+          );
+
+          const createdCount = countTaskRuleCreations(outcomes);
+          if (createdCount > 0) {
+            console.log(`[Worker] deal.won: created ${createdCount} handoff tasks for ${payload.dealName ?? "deal"}`);
           }
         }
       }
@@ -238,41 +209,21 @@ export function registerAllJobs() {
     // --- Cross-sell alert ---
     try {
       const { pool: workerPool } = await import("../db.js");
-
-      // Resolve office from assignedRepId if officeId is null
-      let resolvedOfficeId = officeId;
-      if (!resolvedOfficeId && payload.assignedRepId) {
-        const userRes = await workerPool.query(
-          "SELECT office_id FROM public.users WHERE id = $1",
-          [payload.assignedRepId]
-        );
-        resolvedOfficeId = userRes.rows[0]?.office_id ?? null;
-      }
-      if (!resolvedOfficeId) {
+      const resolved = await resolveOfficeSchema(workerPool, officeId, payload.assignedRepId);
+      if (!resolved) {
         console.log("[Worker:cross-sell] Cannot resolve office — skipping cross-sell check");
         return;
       }
-
-      // Get office slug
-      const officeRes = await workerPool.query(
-        "SELECT slug FROM public.offices WHERE id = $1 AND is_active = true",
-        [resolvedOfficeId]
-      );
-      if (officeRes.rows.length === 0) return;
-
-      const slug = officeRes.rows[0].slug;
-      const slugRegex = /^[a-z][a-z0-9_]*$/;
-      if (!slugRegex.test(slug)) return;
-
-      const schemaName = `office_${slug}`;
+      const { evaluateTaskRules, TASK_RULES, createTenantTaskRulePersistence } = await loadTaskRuleDependencies();
+      const taskPersistence = createTenantTaskRulePersistence(workerPool, resolved.schemaName);
 
       // Get the won deal's project_type_id and primary contact's company_name
       const dealRes = await workerPool.query(
         `SELECT d.project_type_id, d.primary_contact_id, c.company_name
-         FROM ${schemaName}.deals d
-         LEFT JOIN ${schemaName}.contact_deal_associations cda
+         FROM ${resolved.schemaName}.deals d
+         LEFT JOIN ${resolved.schemaName}.contact_deal_associations cda
            ON cda.deal_id = d.id AND cda.is_primary = true
-         LEFT JOIN ${schemaName}.contacts c
+         LEFT JOIN ${resolved.schemaName}.contacts c
            ON c.id = cda.contact_id
          WHERE d.id = $1`,
         [payload.dealId]
@@ -298,9 +249,9 @@ export function registerAllJobs() {
       // Check which project types the company already has deals in
       const existingTypesRes = await workerPool.query(
         `SELECT DISTINCT d.project_type_id
-         FROM ${schemaName}.deals d
-         JOIN ${schemaName}.contact_deal_associations cda ON cda.deal_id = d.id
-         JOIN ${schemaName}.contacts c ON c.id = cda.contact_id
+         FROM ${resolved.schemaName}.deals d
+         JOIN ${resolved.schemaName}.contact_deal_associations cda ON cda.deal_id = d.id
+         JOIN ${resolved.schemaName}.contacts c ON c.id = cda.contact_id
          WHERE c.company_name = $1
            AND d.project_type_id IS NOT NULL
            AND d.is_active = true`,
@@ -321,38 +272,32 @@ export function registerAllJobs() {
         return;
       }
 
-      // Create a cross-sell task for each untapped type (limit to top 3 to avoid noise)
+      let createdCount = 0;
       const tasksToCreate = untappedTypes.slice(0, 3);
       for (const pt of tasksToCreate) {
-        // Check if a cross-sell task already exists for this company + project type
-        const existingTask = await workerPool.query(
-          `SELECT id FROM ${schemaName}.tasks
-           WHERE type = 'system'
-             AND title LIKE $1
-             AND status IN ('pending', 'in_progress')
-           LIMIT 1`,
-          [`%${pt.name}%${company_name}%`]
+        const outcomes = await evaluateTaskRules(
+          {
+            now: new Date(),
+            officeId: resolved.officeId,
+            entityId: `deal:${payload.dealId}`,
+            sourceEvent: "deal.won.cross_sell",
+            dealId: payload.dealId,
+            dealName: payload.dealName ?? "deal",
+            dealNumber: payload.dealNumber ?? null,
+            dealOwnerId: payload.assignedRepId ?? null,
+            taskAssigneeId: payload.assignedRepId ?? payload.assignedTo ?? null,
+            companyName: company_name,
+            projectTypeId: pt.id,
+            projectTypeName: pt.name,
+          },
+          taskPersistence,
+          TASK_RULES
         );
+        createdCount += countTaskRuleCreations(outcomes);
+      }
 
-        if (existingTask.rows.length > 0) continue;
-
-        const dueDate = new Date();
-        dueDate.setDate(dueDate.getDate() + 14);
-
-        await workerPool.query(
-          `INSERT INTO ${schemaName}.tasks
-           (title, description, type, priority, status, assigned_to, deal_id, due_date)
-           VALUES ($1, $2, 'system', 'normal', 'pending', $3, $4, $5)`,
-          [
-            `Explore ${pt.name} opportunities with ${company_name}`,
-            `${company_name} just won deal "${payload.dealName}" (${payload.dealNumber}). Consider cross-selling ${pt.name} services.`,
-            payload.assignedRepId,
-            payload.dealId,
-            dueDate.toISOString().split("T")[0],
-          ]
-        );
-
-        console.log(`[Worker:cross-sell] Created task: Explore ${pt.name} with ${company_name}`);
+      if (createdCount > 0) {
+        console.log(`[Worker:cross-sell] Created ${createdCount} cross-sell task(s) for ${company_name}`);
       }
     } catch (err) {
       console.error("[Worker:cross-sell] Error:", err);
@@ -480,6 +425,8 @@ export function registerAllJobs() {
 
       const competitor = payload.lostCompetitor;
       const lostDealName = payload.dealName ?? "a deal";
+      const { evaluateTaskRules, TASK_RULES, createTenantTaskRulePersistence } = await loadTaskRuleDependencies();
+      const taskPersistence = createTenantTaskRulePersistence(workerPool, schemaName);
 
       // Find the lost deal's contacts via contact_deal_associations
       const lostDealContacts = await workerPool.query(
@@ -493,9 +440,6 @@ export function registerAllJobs() {
       if (lostDealContacts.rows.length === 0) return;
 
       const contactIds = lostDealContacts.rows.map((r: any) => r.contact_id);
-      const companyNames = lostDealContacts.rows
-        .map((r: any) => r.company_name)
-        .filter((n: string | null) => n != null);
 
       // Find other active deals that share contacts with the lost deal
       // via contact_deal_associations JOIN
@@ -520,28 +464,26 @@ export function registerAllJobs() {
       let tasksCreated = 0;
       for (const deal of activeDeals.rows) {
         const contactName = `${deal.first_name ?? ""} ${deal.last_name ?? ""}`.trim() || "contact";
-        const title = `Heads up: ${contactName} chose ${competitor} on ${lostDealName}. Review strategy for ${deal.name}`;
-
-        // Dedup: check if this exact task already exists
-        const existingTask = await workerPool.query(
-          `SELECT id FROM ${schemaName}.tasks
-           WHERE deal_id = $1
-             AND type = 'system'
-             AND title = $2
-             AND status IN ('pending', 'in_progress')
-           LIMIT 1`,
-          [deal.id, title]
+        const outcomes = await evaluateTaskRules(
+          {
+            now: new Date(),
+            officeId: resolvedOfficeId,
+            entityId: `deal:${deal.id}`,
+            sourceEvent: "deal.lost.competitor_intel",
+            dealId: deal.id,
+            dealName: deal.name,
+            dealOwnerId: deal.assigned_rep_id,
+            taskAssigneeId: deal.assigned_rep_id,
+            contactName,
+            triggerDealId: payload.dealId,
+            triggerDealName: lostDealName,
+            triggerDealNumber: payload.dealNumber ?? null,
+            lostCompetitor: competitor,
+          },
+          taskPersistence,
+          TASK_RULES
         );
-
-        if (existingTask.rows.length > 0) continue;
-
-        await workerPool.query(
-          `INSERT INTO ${schemaName}.tasks
-           (title, type, priority, status, assigned_to, deal_id, due_date, created_by)
-           VALUES ($1, 'system', 'high', 'pending', $2, $3, CURRENT_DATE, $2)`,
-          [title, deal.assigned_rep_id, deal.id]
-        );
-        tasksCreated++;
+        tasksCreated += countTaskRuleCreations(outcomes);
       }
 
       if (tasksCreated > 0) {
