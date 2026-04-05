@@ -1,8 +1,16 @@
 import { Router } from "express";
+import crypto from "crypto";
+import jwt from "jsonwebtoken";
 import { getDevUsers, getUserByEmail, signJwt } from "./service.js";
 import { authMiddleware } from "../../middleware/auth.js";
 import { authLimiter } from "../../middleware/rate-limit.js";
 import { AppError } from "../../middleware/error-handler.js";
+import {
+  exchangeCodeForTokens,
+  getConsentUrl,
+  isGraphAuthConfigured,
+} from "../email/graph-auth.js";
+import { getGraphTokenStatus, revokeGraphTokens } from "../email/graph-token-service.js";
 
 const router = Router();
 
@@ -98,8 +106,6 @@ router.post("/logout", (_req, res) => {
 // GET /api/auth/graph/consent — redirect user to Microsoft consent screen
 router.get("/graph/consent", authMiddleware, (req, res, next) => {
   try {
-    const { isGraphAuthConfigured, getConsentUrl } = require("../email/graph-auth.js");
-
     if (!isGraphAuthConfigured()) {
       // Dev mode: no Azure credentials, return mock status
       res.json({ url: null, devMode: true, message: "Graph auth not configured — using dev mode" });
@@ -108,8 +114,6 @@ router.get("/graph/consent", authMiddleware, (req, res, next) => {
 
     const redirectUri = `${process.env.API_BASE_URL || "http://localhost:3001"}/api/auth/graph/callback`;
     // Sign the state parameter to prevent tampering (binds callback to this user, expires in 10 min)
-    const jwt = require("jsonwebtoken");
-    const crypto = require("crypto");
     const nonce = crypto.randomUUID();
 
     // Store nonce in HttpOnly cookie so it can be verified on callback (prevents replay)
@@ -135,8 +139,6 @@ router.get("/graph/consent", authMiddleware, (req, res, next) => {
 // GET /api/auth/graph/callback — handle Microsoft OAuth callback
 router.get("/graph/callback", async (req, res, next) => {
   try {
-    const { exchangeCodeForTokens, isGraphAuthConfigured } = require("../email/graph-auth.js");
-
     if (!isGraphAuthConfigured()) {
       res.redirect(`${process.env.FRONTEND_URL || "http://localhost:5173"}/email?error=not_configured`);
       return;
@@ -158,10 +160,9 @@ router.get("/graph/callback", async (req, res, next) => {
     }
 
     // Verify the signed state token and nonce cookie to prevent callback tampering + replay
-    const jwt = require("jsonwebtoken");
     let userId: string;
     try {
-      const payload = jwt.verify(stateToken, process.env.JWT_SECRET!);
+      const payload = jwt.verify(stateToken, process.env.JWT_SECRET!) as { userId: string; nonce: string };
       const cookieNonce = req.cookies?.graph_auth_nonce;
       if (!cookieNonce || payload.nonce !== cookieNonce) {
         console.error("[GraphAuth] Nonce mismatch — possible OAuth state replay");
@@ -191,7 +192,6 @@ router.get("/graph/callback", async (req, res, next) => {
 // GET /api/auth/graph/status — check if current user has connected Graph
 router.get("/graph/status", authMiddleware, async (req, res, next) => {
   try {
-    const { getGraphTokenStatus } = require("../email/graph-token-service.js");
     const status = await getGraphTokenStatus(req.user!.id);
     res.json(status);
   } catch (err) {
@@ -202,7 +202,6 @@ router.get("/graph/status", authMiddleware, async (req, res, next) => {
 // POST /api/auth/graph/disconnect — revoke Graph tokens
 router.post("/graph/disconnect", authMiddleware, async (req, res, next) => {
   try {
-    const { revokeGraphTokens } = require("../email/graph-token-service.js");
     await revokeGraphTokens(req.user!.id);
     res.json({ success: true });
   } catch (err) {

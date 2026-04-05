@@ -37,6 +37,10 @@ import { companycamRoutes } from "./modules/companycam/routes.js";
 export function createApp() {
   const app = express();
 
+  if (process.env.NODE_ENV === "production" || process.env.TRUST_PROXY === "true") {
+    app.set("trust proxy", 1);
+  }
+
   // Core middleware
   app.use(cors({
     origin: process.env.FRONTEND_URL || "http://localhost:5173",

@@ -241,6 +241,19 @@ async function getAccessibleOfficeSlugs(userId: string, userRole: string, primar
   return result.rows;
 }
 
+async function officeTableExists(
+  client: { query: (sql: string, params?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>> }> },
+  schemaName: string,
+  tableName: string
+): Promise<boolean> {
+  const result = await client.query(
+    "SELECT to_regclass($1) AS relation_name",
+    [`${schemaName}.${tableName}`]
+  );
+
+  return (result.rows[0]?.relation_name as string | null | undefined) != null;
+}
+
 // GET /api/admin/reports/cross-office-pipeline
 router.get(
   "/admin/reports/cross-office-pipeline",
@@ -264,6 +277,20 @@ router.get(
       for (const office of offices) {
         const schemaName = `office_${office.slug}`;
         try {
+          const hasDealsTable = await officeTableExists(client, schemaName, "deals");
+          if (!hasDealsTable) {
+            results.push({
+              officeId: office.id,
+              officeName: office.name,
+              officeSlug: office.slug,
+              totalDeals: 0,
+              activeDeals: 0,
+              totalPipelineValue: 0,
+              totalAwardedValue: 0,
+            });
+            continue;
+          }
+
           await client.query("SELECT set_config('search_path', $1, false)", [schemaName]);
           const row = await client.query<{
             total_deals: string;
@@ -338,6 +365,21 @@ router.get(
       for (const office of offices) {
         const schemaName = `office_${office.slug}`;
         try {
+          const hasActivitiesTable = await officeTableExists(client, schemaName, "activities");
+          if (!hasActivitiesTable) {
+            results.push({
+              officeId: office.id,
+              officeName: office.name,
+              officeSlug: office.slug,
+              totalActivities: 0,
+              activitiesLast30Days: 0,
+              callCount: 0,
+              emailCount: 0,
+              meetingCount: 0,
+            });
+            continue;
+          }
+
           await client.query("SELECT set_config('search_path', $1, false)", [schemaName]);
           const row = await client.query<{
             total_activities: string;
