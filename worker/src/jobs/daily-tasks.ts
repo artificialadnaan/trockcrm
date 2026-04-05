@@ -1,5 +1,9 @@
 import { pool } from "../db.js";
 
+const SERVER_EVALUATOR_MODULE = "../../../server/src/modules/tasks/rules/evaluator.js" as string;
+const SERVER_TASK_RULES_MODULE = "../../../server/src/modules/tasks/rules/config.js" as string;
+const SERVER_TASK_PERSISTENCE_MODULE = "../../../server/src/modules/tasks/rules/persistence.js" as string;
+
 /**
  * Daily task list generation job.
  *
@@ -13,15 +17,26 @@ import { pool } from "../db.js";
  * workers (stale-deals.ts and email-sync.ts). This job handles the remaining
  * automated task types.
  */
+async function loadTaskRuleDependencies() {
+  const [{ evaluateTaskRules }, { TASK_RULES }, { createTenantTaskRulePersistence }] = (await Promise.all([
+    import(SERVER_EVALUATOR_MODULE),
+    import(SERVER_TASK_RULES_MODULE),
+    import(SERVER_TASK_PERSISTENCE_MODULE),
+  ])) as any;
+
+  return { evaluateTaskRules, TASK_RULES, createTenantTaskRulePersistence };
+}
+
+function countGeneratedTasks(outcomes: Array<{ action: string }>) {
+  return outcomes.filter((outcome) => outcome.action === "created").length;
+}
+
 export async function runDailyTaskGeneration(): Promise<void> {
   console.log("[Worker:daily-tasks] Starting daily task generation...");
 
   const client = await pool.connect();
   try {
-    // Get all active offices
-    const offices = await client.query(
-      "SELECT id, slug FROM public.offices WHERE is_active = true"
-    );
+    const offices = await client.query("SELECT id, slug FROM public.offices WHERE is_active = true");
 
     let totalTasksCreated = 0;
     let totalOverdueMarked = 0;
@@ -31,25 +46,20 @@ export async function runDailyTaskGeneration(): Promise<void> {
         let officeTasksCreated = 0;
         let officeOverdueMarked = 0;
 
-        // Acquire advisory lock per office to prevent concurrent runs from racing
         await client.query("BEGIN");
-        await client.query(
-          `SELECT pg_advisory_xact_lock(hashtext('daily_task_generation_' || $1))`,
-          [office.id]
-        );
+        await client.query(`SELECT pg_advisory_xact_lock(hashtext('daily_task_generation_' || $1))`, [office.id]);
+
         const slugRegex = /^[a-z][a-z0-9_]*$/;
         if (!slugRegex.test(office.slug)) {
           console.error(`[Worker:daily-tasks] Invalid office slug: "${office.slug}" -- skipping`);
           await client.query("ROLLBACK");
           continue;
         }
-        const schemaName = `office_${office.slug}`;
 
-        // Step 1: Mark overdue tasks as is_overdue AND escalate to 'urgent' priority
-        // Per spec: the daily job should mark existing overdue tasks as urgent priority
-        // if they aren't already, so the task list surfaces them prominently.
-        // Stale-deal and email-sync workers already CREATE those tasks; this job
-        // just ensures they are flagged correctly.
+        const schemaName = `office_${office.slug}`;
+        const { evaluateTaskRules, TASK_RULES, createTenantTaskRulePersistence } = await loadTaskRuleDependencies();
+        const taskPersistence = createTenantTaskRulePersistence(client, schemaName);
+
         const overdueResult = await client.query(
           `UPDATE ${schemaName}.tasks
            SET is_overdue = true,
@@ -60,9 +70,6 @@ export async function runDailyTaskGeneration(): Promise<void> {
         );
         officeOverdueMarked += overdueResult.rowCount ?? 0;
 
-        // Create notifications for assignees of overdue tasks (dedup: one per task per day)
-        // Dedup: body contains [task:{uuid}] marker. This is a text-based dedup strategy.
-        // TODO: Add a dedup_key column to notifications for robust dedup.
         await client.query(
           `INSERT INTO ${schemaName}.notifications (type, title, body, user_id, is_read)
            SELECT 'system',
@@ -83,8 +90,6 @@ export async function runDailyTaskGeneration(): Promise<void> {
              )`
         );
 
-        // Step 2: Create follow-up tasks for deals with expected_close_date within 7 days
-        // Only for deals that don't already have an active follow_up task
         const upcomingDeals = await client.query(
           `SELECT d.id AS deal_id, d.name AS deal_name, d.deal_number,
                   d.assigned_rep_id, d.expected_close_date
@@ -101,23 +106,25 @@ export async function runDailyTaskGeneration(): Promise<void> {
         );
 
         for (const deal of upcomingDeals.rows) {
-          await client.query(
-            `INSERT INTO ${schemaName}.tasks
-             (title, description, type, priority, status, assigned_to, deal_id, due_date)
-             VALUES ($1, $2, 'follow_up', 'high', 'pending', $3, $4, $5)`,
-            [
-              `Follow up: ${deal.deal_number} closes ${deal.expected_close_date}`,
-              `${deal.deal_name} has an expected close date of ${deal.expected_close_date}. Ensure all pre-close tasks are complete.`,
-              deal.assigned_rep_id,
-              deal.deal_id,
-              deal.expected_close_date,
-            ]
+          const outcomes = await evaluateTaskRules(
+            {
+              now: new Date(),
+              officeId: office.id,
+              entityId: `deal:${deal.deal_id}`,
+              sourceEvent: "cron.daily_task_generation.close_date_follow_up",
+              dealId: deal.deal_id,
+              dealName: deal.deal_name,
+              dealNumber: deal.deal_number,
+              dealOwnerId: deal.assigned_rep_id,
+              taskAssigneeId: deal.assigned_rep_id,
+              dueAt: deal.expected_close_date,
+            },
+            taskPersistence,
+            TASK_RULES
           );
-          officeTasksCreated++;
+          officeTasksCreated += countGeneratedTasks(outcomes);
         }
 
-        // Step 3: Create touchpoint tasks for contacts needing first outreach
-        // Only contacts older than 3 days without outreach and no active touchpoint task
         const needsOutreach = await client.query(
           `SELECT c.id AS contact_id, c.first_name, c.last_name
            FROM ${schemaName}.contacts c
@@ -132,8 +139,6 @@ export async function runDailyTaskGeneration(): Promise<void> {
              )`
         );
 
-        // Assign touchpoint tasks to the rep who has the most deals with this contact,
-        // or fall back to the first active rep in the office
         for (const contact of needsOutreach.rows) {
           const repResult = await client.query(
             `SELECT cda.deal_id, d.assigned_rep_id
@@ -147,7 +152,6 @@ export async function runDailyTaskGeneration(): Promise<void> {
 
           let assignedTo: string | null = repResult.rows[0]?.assigned_rep_id ?? null;
 
-          // Fallback: first active rep in this office
           if (!assignedTo) {
             const fallbackRep = await client.query(
               `SELECT id FROM public.users
@@ -158,52 +162,50 @@ export async function runDailyTaskGeneration(): Promise<void> {
             assignedTo = fallbackRep.rows[0]?.id ?? null;
           }
 
-          if (!assignedTo) continue; // No rep available
+          if (!assignedTo) continue;
 
-          await client.query(
-            `INSERT INTO ${schemaName}.tasks
-             (title, type, priority, status, assigned_to, contact_id, due_date)
-             VALUES ($1, 'touchpoint', 'normal', 'pending', $2, $3, CURRENT_DATE)`,
-            [
-              `First outreach needed: ${contact.first_name} ${contact.last_name}`,
-              assignedTo,
-              contact.contact_id,
-            ]
+          const outcomes = await evaluateTaskRules(
+            {
+              now: new Date(),
+              officeId: office.id,
+              entityId: `contact:${contact.contact_id}`,
+              sourceEvent: "cron.daily_task_generation.first_outreach_touchpoint",
+              contactId: contact.contact_id,
+              contactName: `${contact.first_name} ${contact.last_name}`,
+              taskAssigneeId: assignedTo,
+              dueAt: new Date(),
+            },
+            taskPersistence,
+            TASK_RULES
           );
-          officeTasksCreated++;
+          const createdTouchpoint = outcomes.some((outcome: { action: string }) => outcome.action === "created");
+          officeTasksCreated += countGeneratedTasks(outcomes);
 
-          // Create a touchpoint_alert notification for the assigned rep.
-          // The body embeds the contact_id so the dedup LIKE check is reliable.
-          // Dedup: skip if a touchpoint_alert for this contact already exists today.
-          await client.query(
-            `INSERT INTO ${schemaName}.notifications
-             (type, title, body, user_id, is_read)
-             SELECT 'touchpoint_alert',
-                    'Contact Needs Outreach',
-                    $1,
-                    $2,
-                    false
-             WHERE NOT EXISTS (
-               SELECT 1 FROM ${schemaName}.notifications
-               WHERE type = 'touchpoint_alert'
-                 AND user_id = $2
-                 AND body LIKE $3
-                 AND created_at >= CURRENT_DATE
-             )`,
-            [
-              `New contact ${contact.first_name} ${contact.last_name} has not received first outreach. [contact:${contact.contact_id}]`,
-              assignedTo,
-              `%[contact:${contact.contact_id}]%`,
-            ]
-          );
+          if (createdTouchpoint) {
+            await client.query(
+              `INSERT INTO ${schemaName}.notifications
+               (type, title, body, user_id, is_read)
+               SELECT 'touchpoint_alert',
+                      'Contact Needs Outreach',
+                      $1,
+                      $2,
+                      false
+               WHERE NOT EXISTS (
+                 SELECT 1 FROM ${schemaName}.notifications
+                 WHERE type = 'touchpoint_alert'
+                   AND user_id = $2
+                   AND body LIKE $3
+                   AND created_at >= CURRENT_DATE
+               )`,
+              [
+                `New contact ${contact.first_name} ${contact.last_name} has not received first outreach. [contact:${contact.contact_id}]`,
+                assignedTo,
+                `%[contact:${contact.contact_id}]%`,
+              ]
+            );
+          }
         }
 
-        // Step 4: Create follow-up tasks for contacts behind their touchpoint cadence.
-        // Finds contacts on active deals where last_contacted_at is overdue per the
-        // stage's touchpoint_cadence_days. Skips contacts that already have a pending
-        // cadence follow_up task for the same deal.
-        // NOTE: public.pipeline_stage_config is fully qualified because search_path
-        // is set to the tenant schema inside the transaction.
         const overdueContacts = await client.query(
           `SELECT c.id AS contact_id, c.first_name, c.last_name, c.last_contacted_at,
                   d.id AS deal_id, d.deal_number, d.name AS deal_name,
@@ -228,24 +230,29 @@ export async function runDailyTaskGeneration(): Promise<void> {
         );
 
         for (const row of overdueContacts.rows) {
-          const lastContactText = row.last_contacted_at
-            ? new Date(row.last_contacted_at).toISOString().split("T")[0]
-            : "Never";
-          await client.query(
-            `INSERT INTO ${schemaName}.tasks
-             (type, title, description, priority, status, assigned_to, deal_id, due_date)
-             VALUES ('follow_up', $1, $2, 'normal', 'pending', $3, $4, CURRENT_DATE)`,
-            [
-              `Contact Follow-Up: ${row.first_name} ${row.last_name}`,
-              `Touchpoint cadence overdue for ${row.first_name} ${row.last_name} on deal ${row.deal_number}. Last contact: ${lastContactText}`,
-              row.assigned_rep_id,
-              row.deal_id,
-            ]
+          const outcomes = await evaluateTaskRules(
+            {
+              now: new Date(),
+              officeId: office.id,
+              entityId: `contact:${row.contact_id}`,
+              sourceEvent: "cron.daily_task_generation.cadence_overdue_follow_up",
+              contactId: row.contact_id,
+              contactName: `${row.first_name} ${row.last_name}`,
+              dealId: row.deal_id,
+              dealName: row.deal_name,
+              dealNumber: row.deal_number,
+              dealOwnerId: row.assigned_rep_id,
+              taskAssigneeId: row.assigned_rep_id,
+              lastContactedAt: row.last_contacted_at,
+              touchpointCadenceDays: row.touchpoint_cadence_days,
+              dueAt: new Date(),
+            },
+            taskPersistence,
+            TASK_RULES
           );
-          officeTasksCreated++;
+          officeTasksCreated += countGeneratedTasks(outcomes);
         }
 
-        // Release the advisory lock by committing the transaction for this office
         await client.query("COMMIT");
         totalOverdueMarked += officeOverdueMarked;
         totalTasksCreated += officeTasksCreated;
