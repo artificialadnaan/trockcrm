@@ -7,6 +7,8 @@ export { lostDealReasons } from "./public/lost-deal-reasons.js";
 export { projectTypeConfig } from "./public/project-type-config.js";
 export { regionConfig } from "./public/region-config.js";
 export { savedReports, reportVisibilityEnum, reportEntityEnum } from "./public/saved-reports.js";
+export { procoreSyncControls, procoreSyncModeEnum } from "./public/procore-sync-controls.js";
+export { procoreReconciliationState, procoreReconciliationStatusEnum } from "./public/procore-reconciliation-state.js";
 export { procoreSyncState, procoreEntityTypeEnum, syncDirectionEnum, syncStatusEnum } from "./public/procore-sync-state.js";
 export { procoreWebhookLog } from "./public/procore-webhook-log.js";
 export { userGraphTokens, graphTokenStatusEnum } from "./public/user-graph-tokens.js";

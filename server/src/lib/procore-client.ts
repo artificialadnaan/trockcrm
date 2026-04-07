@@ -98,6 +98,20 @@ async function getAccessToken(): Promise<string> {
 let mockIdCounter = 100000;
 
 function getMockResponse(method: string, path: string): any {
+  if (method === "GET" && path.includes("/projects?")) {
+    return [
+      {
+        id: 1,
+        name: "Mock Project",
+        display_name: "Mock Project",
+        project_number: "MOCK-1",
+        city: "Dallas",
+        state_code: "TX",
+        address: "100 Mock St",
+        updated_at: new Date().toISOString(),
+      },
+    ];
+  }
   if (method === "POST" && path.includes("/projects")) {
     return { id: ++mockIdCounter, name: "Mock Project", active: true };
   }
@@ -189,3 +203,46 @@ export const procoreClient = {
   /** Check if running in dev/mock mode */
   isDevMode,
 };
+
+export interface ProcoreCompanyProjectRow {
+  id: number;
+  name?: string | null;
+  display_name?: string | null;
+  project_number?: string | null;
+  city?: string | null;
+  state_code?: string | null;
+  address?: string | null;
+  updated_at?: string | null;
+}
+
+export async function listCompanyProjectsPage(
+  companyId: string,
+  page: number,
+  pageSize: number
+): Promise<
+  Array<{
+    id: number;
+    name: string | null;
+    displayName: string | null;
+    projectNumber: string | null;
+    city: string | null;
+    state: string | null;
+    address: string | null;
+    updatedAt: string | null;
+  }>
+> {
+  const rows = await procoreClient.get<ProcoreCompanyProjectRow[]>(
+    `/rest/v1.0/companies/${companyId}/projects?page=${page}&per_page=${pageSize}`
+  );
+
+  return rows.map((row) => ({
+    id: row.id,
+    name: row.name ?? null,
+    displayName: row.display_name ?? null,
+    projectNumber: row.project_number ?? null,
+    city: row.city ?? null,
+    state: row.state_code ?? null,
+    address: row.address ?? null,
+    updatedAt: row.updated_at ?? null,
+  }));
+}
