@@ -10,6 +10,31 @@ export const dealScopingIntakeStatusEnum = pgEnum(
   DEAL_SCOPING_INTAKE_STATUSES
 );
 
+export interface DealScopingIntakeMigrationGuardRow {
+  dealId?: string | null;
+  officeId?: string | null;
+  createdBy?: string | null;
+  lastEditedBy?: string | null;
+}
+
+export function assertDealScopingIntakeMigrationGuard(
+  schemaName: string,
+  rows: DealScopingIntakeMigrationGuardRow[]
+): void {
+  const invalidRequiredColumns = [
+    rows.some((row) => row.dealId == null) ? "deal_id" : null,
+    rows.some((row) => row.officeId == null) ? "office_id" : null,
+    rows.some((row) => row.createdBy == null) ? "created_by" : null,
+    rows.some((row) => row.lastEditedBy == null) ? "last_edited_by" : null,
+  ].filter((value): value is string => value !== null);
+
+  if (invalidRequiredColumns.length > 0) {
+    throw new Error(
+      `Migration 0016 cannot enforce deal_scoping_intake constraints for schema ${schemaName} because existing rows have NULL values in required columns: ${invalidRequiredColumns.join(", ")}. Backfill these columns before rerunning this migration.`
+    );
+  }
+}
+
 export const dealScopingIntake = pgTable("deal_scoping_intake", {
   id: uuid("id").primaryKey().defaultRandom(),
   dealId: uuid("deal_id").references(() => deals.id).unique().notNull(),

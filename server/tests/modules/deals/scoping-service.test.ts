@@ -4,7 +4,11 @@ import { fileURLToPath } from "node:url";
 import { getTableColumns } from "drizzle-orm";
 import { getTableConfig } from "drizzle-orm/pg-core";
 import { DEAL_SCOPING_INTAKE_STATUSES, WORKFLOW_ROUTES } from "@trock-crm/shared/types";
-import { dealScopingIntake, deals } from "@trock-crm/shared/schema";
+import {
+  assertDealScopingIntakeMigrationGuard,
+  dealScopingIntake,
+  deals,
+} from "@trock-crm/shared/schema";
 import { describe, expect, it } from "vitest";
 
 const migrationPath = resolve(
@@ -53,6 +57,30 @@ describe("Scoping Service Shared Contract", () => {
       "deal_scoping_intake_office_id_offices_id_fk",
       "deal_scoping_intake_project_type_id_project_type_config_id_fk",
     ]);
+  });
+
+  it("fails fast on partial rerun rows before later constraint enforcement", () => {
+    let reachedNotNullEnforcement = false;
+    let reachedForeignKeyEnforcement = false;
+
+    expect(() => {
+      assertDealScopingIntakeMigrationGuard("office_partial", [
+        {
+          dealId: null,
+          officeId: "office-1",
+          createdBy: null,
+          lastEditedBy: "user-2",
+        },
+      ]);
+
+      reachedNotNullEnforcement = true;
+      reachedForeignKeyEnforcement = true;
+    }).toThrowError(
+      "Migration 0016 cannot enforce deal_scoping_intake constraints for schema office_partial because existing rows have NULL values in required columns: deal_id, created_by. Backfill these columns before rerunning this migration."
+    );
+
+    expect(reachedNotNullEnforcement).toBe(false);
+    expect(reachedForeignKeyEnforcement).toBe(false);
   });
 
   it("keeps the migration rerunnable and constraint-complete for partial application", () => {
