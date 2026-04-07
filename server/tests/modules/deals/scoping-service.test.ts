@@ -4,8 +4,9 @@ import { fileURLToPath } from "node:url";
 import { getTableColumns } from "drizzle-orm";
 import { getTableConfig } from "drizzle-orm/pg-core";
 import { DEAL_SCOPING_INTAKE_STATUSES, WORKFLOW_ROUTES } from "@trock-crm/shared/types";
-import { dealScopingIntake, deals } from "@trock-crm/shared/schema";
+import { dealScopingIntake, deals, files, users } from "@trock-crm/shared/schema";
 import { describe, expect, it } from "vitest";
+import { evaluateDealScopingReadiness, upsertDealScopingIntake } from "../../../src/modules/deals/scoping-service.js";
 
 const migrationPath = resolve(
   dirname(fileURLToPath(import.meta.url)),
@@ -51,6 +52,153 @@ function runDealScopingIntakeMigrationGuardFromSql(
     .replace("%", invalidRequiredColumns.join(", "));
 
   throw new Error(errorMessage);
+}
+
+interface FakeDealRow {
+  id: string;
+  name: string;
+  workflowRoute: "estimating" | "service";
+  expectedCloseDate: string | null;
+  propertyAddress: string | null;
+  propertyCity: string | null;
+  propertyState: string | null;
+  propertyZip: string | null;
+  description: string | null;
+  projectTypeId: string | null;
+  assignedRepId: string;
+}
+
+interface FakeUserRow {
+  id: string;
+  officeId: string;
+}
+
+interface FakeFileRow {
+  id: string;
+  dealId: string | null;
+  intakeRequirementKey: string | null;
+  isActive: boolean;
+}
+
+interface FakeDealScopingIntakeRow {
+  id: string;
+  dealId: string;
+  officeId: string;
+  workflowRouteSnapshot: "estimating" | "service";
+  status: "draft" | "ready" | "activated";
+  projectTypeId: string | null;
+  sectionData: Record<string, unknown>;
+  completionState: Record<string, unknown>;
+  readinessErrors: Record<string, unknown>;
+  firstReadyAt: Date | null;
+  activatedAt: Date | null;
+  lastAutosavedAt: Date;
+  createdBy: string;
+  lastEditedBy: string;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+interface FakeTenantState {
+  deals: FakeDealRow[];
+  users: FakeUserRow[];
+  files: FakeFileRow[];
+  dealScopingIntake: FakeDealScopingIntakeRow[];
+}
+
+function createFakeTenantDb(initialState?: Partial<FakeTenantState>) {
+  const state: FakeTenantState = {
+    deals: [
+      {
+        id: "deal-1",
+        name: "Original Deal",
+        workflowRoute: "estimating",
+        expectedCloseDate: null,
+        propertyAddress: null,
+        propertyCity: null,
+        propertyState: null,
+        propertyZip: null,
+        description: null,
+        projectTypeId: null,
+        assignedRepId: "rep-1",
+      },
+    ],
+    users: [{ id: "user-1", officeId: "office-1" }],
+    files: [],
+    dealScopingIntake: [],
+    ...initialState,
+  };
+
+  function getRows(table: unknown) {
+    if (table === deals) return state.deals;
+    if (table === users) return state.users;
+    if (table === files) return state.files;
+    if (table === dealScopingIntake) return state.dealScopingIntake;
+    throw new Error("Unexpected table in fake tenant db");
+  }
+
+  return {
+    state,
+    select() {
+      return {
+        from(table: unknown) {
+          const rows = getRows(table);
+          return {
+            where() {
+              return {
+                limit(limit: number) {
+                  return Promise.resolve(rows.slice(0, limit));
+                },
+                then(onfulfilled: (value: unknown[]) => unknown) {
+                  return Promise.resolve(rows).then(onfulfilled);
+                },
+              };
+            },
+            limit(limit: number) {
+              return Promise.resolve(rows.slice(0, limit));
+            },
+            then(onfulfilled: (value: unknown[]) => unknown) {
+              return Promise.resolve(rows).then(onfulfilled);
+            },
+          };
+        },
+      };
+    },
+    insert(table: unknown) {
+      return {
+        values(value: Record<string, unknown>) {
+          const rows = getRows(table) as Array<Record<string, unknown>>;
+          const insertedRow = {
+            id: value.id ?? `${String((table as { _: { name: string } })._?.name ?? "row")}-${rows.length + 1}`,
+            ...value,
+          };
+          rows.push(insertedRow);
+          return {
+            returning() {
+              return Promise.resolve([insertedRow]);
+            },
+          };
+        },
+      };
+    },
+    update(table: unknown) {
+      return {
+        set(values: Record<string, unknown>) {
+          return {
+            where() {
+              const rows = getRows(table) as Array<Record<string, unknown>>;
+              rows.forEach((row) => Object.assign(row, values));
+              return {
+                returning() {
+                  return Promise.resolve(rows);
+                },
+              };
+            },
+          };
+        },
+      };
+    },
+  };
 }
 
 describe("Scoping Service Shared Contract", () => {
@@ -151,5 +299,104 @@ describe("Scoping Service Shared Contract", () => {
     expect(fkIndex).toBeGreaterThan(-1);
     expect(nullGuardIndex).toBeLessThan(notNullIndex);
     expect(nullGuardIndex).toBeLessThan(fkIndex);
+  });
+});
+
+describe("Scoping Service", () => {
+  it("writes deal-owned scoping fields back to canonical deal columns", async () => {
+    const tenantDb = createFakeTenantDb();
+
+    const result = await upsertDealScopingIntake(
+      tenantDb as never,
+      "deal-1",
+      {
+        workflowRoute: "estimating",
+        projectOverview: { propertyName: "Palm Villas", bidDueDate: "2026-04-30" },
+        propertyDetails: { propertyAddress: "123 Palm Way" },
+        scopeSummary: { summary: "Exterior refresh" },
+      },
+      "user-1"
+    );
+
+    expect(result.intake.status).toBe("draft");
+    expect(result.intake.sectionData).toMatchObject({
+      projectOverview: { propertyName: "Palm Villas", bidDueDate: "2026-04-30" },
+      propertyDetails: { propertyAddress: "123 Palm Way" },
+      scopeSummary: { summary: "Exterior refresh" },
+    });
+
+    const [updatedDeal] = tenantDb.state.deals;
+    expect(updatedDeal.name).toBe("Palm Villas");
+    expect(updatedDeal.propertyAddress).toBe("123 Palm Way");
+    expect(updatedDeal.description).toBe("Exterior refresh");
+    expect(updatedDeal.expectedCloseDate).toBeNull();
+  });
+
+  it("marks intake ready only when required sections and attachments are satisfied", async () => {
+    const tenantDb = createFakeTenantDb({
+      dealScopingIntake: [
+        {
+          id: "intake-1",
+          dealId: "deal-1",
+          officeId: "office-1",
+          workflowRouteSnapshot: "estimating",
+          status: "draft",
+          projectTypeId: null,
+          sectionData: {},
+          completionState: {},
+          readinessErrors: {},
+          firstReadyAt: null,
+          activatedAt: null,
+          lastAutosavedAt: new Date("2026-04-08T09:00:00.000Z"),
+          createdBy: "user-1",
+          lastEditedBy: "user-1",
+          createdAt: new Date("2026-04-08T09:00:00.000Z"),
+          updatedAt: new Date("2026-04-08T09:00:00.000Z"),
+        },
+      ],
+    });
+
+    const readiness = await evaluateDealScopingReadiness(tenantDb as never, "deal-1");
+
+    expect(readiness.status).toBe("draft");
+    expect(readiness.errors.sections.projectOverview).toContain("bidDueDate");
+    expect(readiness.errors.attachments.site_photos).toContain("site_photos");
+    expect(readiness.completionState.projectOverview.isComplete).toBe(false);
+
+    await upsertDealScopingIntake(
+      tenantDb as never,
+      "deal-1",
+      {
+        projectOverview: { propertyName: "Palm Villas", bidDueDate: "2026-04-30" },
+        propertyDetails: { propertyAddress: "123 Palm Way" },
+        scopeSummary: { summary: "Exterior refresh" },
+      },
+      "user-1"
+    );
+    tenantDb.state.files.push(
+      {
+        id: "file-1",
+        dealId: "deal-1",
+        intakeRequirementKey: "scope_docs",
+        isActive: true,
+      },
+      {
+        id: "file-2",
+        dealId: "deal-1",
+        intakeRequirementKey: "site_photos",
+        isActive: true,
+      }
+    );
+
+    const readyReadiness = await evaluateDealScopingReadiness(tenantDb as never, "deal-1");
+
+    expect(readyReadiness.status).toBe("ready");
+    expect(readyReadiness.errors.sections).toEqual({});
+    expect(readyReadiness.errors.attachments).toEqual({});
+    expect(readyReadiness.completionState.attachments.isComplete).toBe(true);
+
+    const [savedIntake] = tenantDb.state.dealScopingIntake;
+    expect(savedIntake.status).toBe("ready");
+    expect(savedIntake.firstReadyAt).toBeInstanceOf(Date);
   });
 });
