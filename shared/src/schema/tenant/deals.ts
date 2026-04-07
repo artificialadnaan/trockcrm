@@ -1,4 +1,5 @@
 import {
+  pgEnum,
   pgTable,
   uuid,
   varchar,
@@ -10,11 +11,13 @@ import {
   date,
   timestamp,
 } from "drizzle-orm/pg-core";
-import { workflowRouteEnum } from "./deal-scoping-intake.js";
+import { WORKFLOW_ROUTES } from "../../types/enums.js";
 
 // Note: These reference public schema tables by UUID. Drizzle cross-schema references
 // are defined here for TypeScript typing. The actual FK constraints are in the SQL migration
 // because Drizzle doesn't natively handle cross-schema references.
+
+export const workflowRouteEnum = pgEnum("workflow_route", WORKFLOW_ROUTES);
 
 export const deals = pgTable("deals", {
   id: uuid("id").primaryKey().defaultRandom(),
