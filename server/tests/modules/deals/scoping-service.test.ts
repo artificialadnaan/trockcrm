@@ -4,11 +4,7 @@ import { fileURLToPath } from "node:url";
 import { getTableColumns } from "drizzle-orm";
 import { getTableConfig } from "drizzle-orm/pg-core";
 import { DEAL_SCOPING_INTAKE_STATUSES, WORKFLOW_ROUTES } from "@trock-crm/shared/types";
-import {
-  assertDealScopingIntakeMigrationGuard,
-  dealScopingIntake,
-  deals,
-} from "@trock-crm/shared/schema";
+import { dealScopingIntake, deals } from "@trock-crm/shared/schema";
 import { describe, expect, it } from "vitest";
 
 const migrationPath = resolve(
@@ -16,6 +12,46 @@ const migrationPath = resolve(
   "../../../../migrations/0016_sales_scoping_intake.sql"
 );
 const migrationSql = readFileSync(migrationPath, "utf8");
+
+interface DealScopingIntakePartialRow {
+  dealId?: string | null;
+  officeId?: string | null;
+  createdBy?: string | null;
+  lastEditedBy?: string | null;
+}
+
+function runDealScopingIntakeMigrationGuardFromSql(
+  sql: string,
+  schemaName: string,
+  rows: DealScopingIntakePartialRow[]
+): void {
+  const guardedColumns = [...sql.matchAll(/CASE WHEN has_null_[a-z_]+ THEN '([a-z_]+)' END/g)].map(
+    (match) => match[1]
+  );
+  const raiseExceptionMatch = sql.match(
+    /RAISE EXCEPTION\s+'([^']*(?:''[^']*)*)',\s*tenant_schema,\s*array_to_string/
+  );
+
+  if (guardedColumns.length === 0 || !raiseExceptionMatch) {
+    throw new Error("Could not derive deal_scoping_intake migration guard from SQL");
+  }
+
+  const invalidRequiredColumns = guardedColumns.filter((columnName) => {
+    const propertyName = columnName.replace(/_([a-z])/g, (_, letter: string) => letter.toUpperCase());
+    return rows.some((row) => row[propertyName as keyof DealScopingIntakePartialRow] == null);
+  });
+
+  if (invalidRequiredColumns.length === 0) {
+    return;
+  }
+
+  const errorTemplate = raiseExceptionMatch[1].replace(/''/g, "'");
+  const errorMessage = errorTemplate
+    .replace("%", schemaName)
+    .replace("%", invalidRequiredColumns.join(", "));
+
+  throw new Error(errorMessage);
+}
 
 describe("Scoping Service Shared Contract", () => {
   it("defines workflow routes and intake statuses", () => {
@@ -64,7 +100,7 @@ describe("Scoping Service Shared Contract", () => {
     let reachedForeignKeyEnforcement = false;
 
     expect(() => {
-      assertDealScopingIntakeMigrationGuard("office_partial", [
+      runDealScopingIntakeMigrationGuardFromSql(migrationSql, "office_partial", [
         {
           dealId: null,
           officeId: "office-1",
