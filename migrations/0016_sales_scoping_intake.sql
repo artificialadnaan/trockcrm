@@ -4,6 +4,11 @@
 DO $$
 DECLARE
   tenant_schema TEXT;
+  has_null_deal_id BOOLEAN;
+  has_null_office_id BOOLEAN;
+  has_null_created_by BOOLEAN;
+  has_null_last_edited_by BOOLEAN;
+  invalid_required_columns TEXT[];
 BEGIN
   FOR tenant_schema IN
     SELECT schema_name FROM information_schema.schemata WHERE schema_name LIKE 'office_%'
@@ -124,6 +129,57 @@ BEGIN
               workflow_route_snapshot = COALESCE(workflow_route_snapshot, ''estimating'')',
       tenant_schema
     );
+
+    EXECUTE format(
+      'SELECT EXISTS (
+         SELECT 1
+         FROM %I.deal_scoping_intake
+         WHERE deal_id IS NULL
+       )',
+      tenant_schema
+    ) INTO has_null_deal_id;
+    EXECUTE format(
+      'SELECT EXISTS (
+         SELECT 1
+         FROM %I.deal_scoping_intake
+         WHERE office_id IS NULL
+       )',
+      tenant_schema
+    ) INTO has_null_office_id;
+    EXECUTE format(
+      'SELECT EXISTS (
+         SELECT 1
+         FROM %I.deal_scoping_intake
+         WHERE created_by IS NULL
+       )',
+      tenant_schema
+    ) INTO has_null_created_by;
+    EXECUTE format(
+      'SELECT EXISTS (
+         SELECT 1
+         FROM %I.deal_scoping_intake
+         WHERE last_edited_by IS NULL
+       )',
+      tenant_schema
+    ) INTO has_null_last_edited_by;
+
+    invalid_required_columns := array_remove(
+      ARRAY[
+        CASE WHEN has_null_deal_id THEN 'deal_id' END,
+        CASE WHEN has_null_office_id THEN 'office_id' END,
+        CASE WHEN has_null_created_by THEN 'created_by' END,
+        CASE WHEN has_null_last_edited_by THEN 'last_edited_by' END
+      ],
+      NULL
+    );
+
+    IF array_length(invalid_required_columns, 1) IS NOT NULL THEN
+      RAISE EXCEPTION
+        'Migration 0016 cannot enforce deal_scoping_intake constraints for schema % because existing rows have NULL values in required columns: %. Backfill these columns before rerunning this migration.',
+        tenant_schema,
+        array_to_string(invalid_required_columns, ', ');
+    END IF;
+
     EXECUTE format(
       'ALTER TABLE %I.deal_scoping_intake
          ALTER COLUMN deal_id SET NOT NULL,

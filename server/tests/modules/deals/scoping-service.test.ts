@@ -56,6 +56,10 @@ describe("Scoping Service Shared Contract", () => {
   });
 
   it("keeps the migration rerunnable and constraint-complete for partial application", () => {
+    const nullGuardIndex = migrationSql.indexOf("existing rows have NULL values in required columns");
+    const notNullIndex = migrationSql.indexOf("ALTER COLUMN deal_id SET NOT NULL");
+    const fkIndex = migrationSql.indexOf("ADD CONSTRAINT deal_scoping_intake_deal_id_deals_id_fk");
+
     expect(migrationSql).toContain("ALTER TABLE %I.deal_scoping_intake");
     expect(migrationSql).toContain("ADD COLUMN IF NOT EXISTS deal_id UUID");
     expect(migrationSql).toContain("ADD COLUMN IF NOT EXISTS office_id UUID");
@@ -69,5 +73,19 @@ describe("Scoping Service Shared Contract", () => {
     expect(migrationSql).toContain("ADD CONSTRAINT deal_scoping_intake_created_by_users_id_fk");
     expect(migrationSql).toContain("ADD CONSTRAINT deal_scoping_intake_last_edited_by_users_id_fk");
     expect(migrationSql).toContain("CREATE UNIQUE INDEX IF NOT EXISTS deal_scoping_intake_deal_id_uidx");
+    expect(migrationSql).toContain("WHERE deal_id IS NULL");
+    expect(migrationSql).toContain("WHERE office_id IS NULL");
+    expect(migrationSql).toContain("WHERE created_by IS NULL");
+    expect(migrationSql).toContain("WHERE last_edited_by IS NULL");
+    expect(migrationSql).toContain("RAISE EXCEPTION");
+    expect(migrationSql).toContain(
+      "Migration 0016 cannot enforce deal_scoping_intake constraints for schema % because existing rows have NULL values in required columns: %."
+    );
+    expect(migrationSql).toContain("Backfill these columns before rerunning this migration.");
+    expect(nullGuardIndex).toBeGreaterThan(-1);
+    expect(notNullIndex).toBeGreaterThan(-1);
+    expect(fkIndex).toBeGreaterThan(-1);
+    expect(nullGuardIndex).toBeLessThan(notNullIndex);
+    expect(nullGuardIndex).toBeLessThan(fkIndex);
   });
 });
