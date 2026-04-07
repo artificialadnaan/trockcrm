@@ -16,6 +16,7 @@ export { jobQueue, jobStatusEnum } from "./public/job-queue.js";
 
 // Tenant schema tables (used for Drizzle type resolution when querying via tenantDb)
 export { deals } from "./tenant/deals.js";
+export { dealScopingIntake, workflowRouteEnum, dealScopingIntakeStatusEnum } from "./tenant/deal-scoping-intake.js";
 export { dealStageHistory } from "./tenant/deal-stage-history.js";
 export { changeOrders, changeOrderStatusEnum } from "./tenant/change-orders.js";
 export { dealApprovals, approvalStatusEnum } from "./tenant/deal-approvals.js";
