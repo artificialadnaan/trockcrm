@@ -1,4 +1,8 @@
 import { CheckCircle2, XCircle, AlertTriangle, FileText, User } from "lucide-react";
+import {
+  formatScopingAttachmentLabel,
+  formatScopingFieldLabel,
+} from "@/lib/scoping-intake";
 
 interface StageGateChecklistProps {
   missingRequirements: {
@@ -8,7 +12,6 @@ interface StageGateChecklistProps {
   };
 }
 
-// Human-readable field name mapping
 const FIELD_LABELS: Record<string, string> = {
   ddEstimate: "DD Estimate",
   bidEstimate: "Bid Estimate",
@@ -31,6 +34,22 @@ const DOC_LABELS: Record<string, string> = {
   insurance: "Insurance Certificate",
   closeout: "Closeout Package",
 };
+
+function getFieldLabel(field: string) {
+  if (field.includes(".")) {
+    return formatScopingFieldLabel(field);
+  }
+
+  return FIELD_LABELS[field] ?? field;
+}
+
+function getDocumentLabel(doc: string) {
+  if (doc.includes("_")) {
+    return formatScopingAttachmentLabel(doc);
+  }
+
+  return DOC_LABELS[doc] ?? doc;
+}
 
 export function StageGateChecklist({ missingRequirements }: StageGateChecklistProps) {
   const { fields, documents, approvals } = missingRequirements;
@@ -60,7 +79,7 @@ export function StageGateChecklist({ missingRequirements }: StageGateChecklistPr
           {fields.map((field) => (
             <div key={field} className="flex items-center gap-2 text-sm text-red-600">
               <XCircle className="h-3.5 w-3.5" />
-              {FIELD_LABELS[field] ?? field}
+              {getFieldLabel(field)}
             </div>
           ))}
         </div>
@@ -74,7 +93,7 @@ export function StageGateChecklist({ missingRequirements }: StageGateChecklistPr
           {documents.map((doc) => (
             <div key={doc} className="flex items-center gap-2 text-sm text-red-600">
               <FileText className="h-3.5 w-3.5" />
-              {DOC_LABELS[doc] ?? doc}
+              {getDocumentLabel(doc)}
             </div>
           ))}
         </div>

@@ -8,6 +8,7 @@ import { dealScopingIntake, deals, files, users } from "@trock-crm/shared/schema
 import { describe, expect, it } from "vitest";
 import {
   evaluateDealScopingReadiness,
+  getOrCreateDealScopingIntake,
   linkDealFileToScopingRequirement,
   upsertDealScopingIntake,
 } from "../../../src/modules/deals/scoping-service.js";
@@ -307,6 +308,40 @@ describe("Scoping Service Shared Contract", () => {
 });
 
 describe("Scoping Service", () => {
+  it("seeds a new scoping intake from canonical deal data", async () => {
+    const tenantDb = createFakeTenantDb({
+      deals: [
+        {
+          id: "deal-1",
+          name: "Palm Villas",
+          workflowRoute: "estimating",
+          expectedCloseDate: null,
+          propertyAddress: "123 Palm Way",
+          propertyCity: "Miami",
+          propertyState: "FL",
+          propertyZip: "33101",
+          description: "Exterior refresh",
+          projectTypeId: "project-type-1",
+          assignedRepId: "rep-1",
+        },
+      ],
+    });
+
+    const result = await getOrCreateDealScopingIntake(tenantDb as never, "deal-1", "user-1");
+
+    expect(result.intake.projectTypeId).toBe("project-type-1");
+    expect(result.intake.sectionData).toMatchObject({
+      projectOverview: { propertyName: "Palm Villas" },
+      propertyDetails: {
+        propertyAddress: "123 Palm Way",
+        propertyCity: "Miami",
+        propertyState: "FL",
+        propertyZip: "33101",
+      },
+      scopeSummary: { summary: "Exterior refresh" },
+    });
+  });
+
   it("writes deal-owned scoping fields back to canonical deal columns", async () => {
     const tenantDb = createFakeTenantDb();
 

@@ -20,6 +20,7 @@ export type DealScopingPatch = {
 export interface DealScopingServiceResult {
   intake: DealScopingIntakeRow;
   readiness: DealScopingReadinessSnapshot;
+  previousStatus: DealScopingIntakeStatus | null;
 }
 
 export interface LinkScopingFileInput {
@@ -133,6 +134,43 @@ function buildDealWritebackPatch(
   return updates;
 }
 
+function buildSeedSectionDataFromDeal(deal: DealRow): DealScopingSectionData {
+  const sectionData: DealScopingSectionData = {};
+
+  if (deal.name) {
+    sectionData.projectOverview = {
+      propertyName: deal.name,
+    };
+  }
+
+  if (deal.propertyAddress || deal.propertyCity || deal.propertyState || deal.propertyZip) {
+    sectionData.propertyDetails = {
+      propertyAddress: deal.propertyAddress,
+      propertyCity: deal.propertyCity,
+      propertyState: deal.propertyState,
+      propertyZip: deal.propertyZip,
+    };
+  }
+
+  if (deal.description) {
+    sectionData.scopeSummary = {
+      summary: deal.description,
+    };
+  }
+
+  return sectionData;
+}
+
+function buildBaseSectionData(
+  existingIntake: DealScopingIntakeRow | null,
+  deal: DealRow
+): DealScopingSectionData {
+  return mergeSectionData(
+    buildSeedSectionDataFromDeal(deal),
+    toSectionData(existingIntake?.sectionData)
+  );
+}
+
 async function getDealOrThrow(tenantDb: TenantDb, dealId: string) {
   const [deal] = await tenantDb.select().from(deals).where(eq(deals.id, dealId)).limit(1);
 
@@ -177,10 +215,21 @@ export async function getOrCreateDealScopingIntake(
     return {
       intake: refreshedIntake,
       readiness,
+      previousStatus: existingIntake.status as DealScopingIntakeStatus,
     };
   }
 
-  return upsertDealScopingIntake(tenantDb, dealId, {}, userId);
+  const deal = await getDealOrThrow(tenantDb, dealId);
+
+  return upsertDealScopingIntake(
+    tenantDb,
+    dealId,
+    {
+      projectTypeId: deal.projectTypeId,
+      sectionData: buildSeedSectionDataFromDeal(deal),
+    },
+    userId
+  );
 }
 
 async function listAttachmentRequirementKeys(tenantDb: TenantDb, dealId: string): Promise<string[]> {
@@ -292,7 +341,7 @@ export async function evaluateDealScopingReadiness(
   const deal = await getDealOrThrow(tenantDb, dealId);
   const existingIntake = await getExistingIntake(tenantDb, dealId);
   const attachmentKeys = await listAttachmentRequirementKeys(tenantDb, dealId);
-  const sectionData = toSectionData(existingIntake?.sectionData);
+  const sectionData = buildBaseSectionData(existingIntake, deal);
   const projectTypeId = existingIntake?.projectTypeId ?? deal.projectTypeId ?? null;
   const readiness = evaluateScopingReadiness({
     currentStatus: (existingIntake?.status ?? "draft") as DealScopingIntakeStatus,
@@ -359,6 +408,7 @@ export async function activateDealScopingIntake(
   return {
     intake: savedIntake,
     readiness: { ...readiness, status: "activated" },
+    previousStatus: existingIntake.status as DealScopingIntakeStatus,
   };
 }
 
@@ -373,8 +423,9 @@ export async function upsertDealScopingIntake(
     getUserOrThrow(tenantDb, userId),
     getExistingIntake(tenantDb, dealId),
   ]);
+  const baseSectionData = buildBaseSectionData(existingIntake, deal);
   const nextSectionData = mergeSectionData(
-    toSectionData(existingIntake?.sectionData),
+    baseSectionData,
     extractSectionPatch(patch)
   );
   const dealUpdates = buildDealWritebackPatch(patch, nextSectionData);
@@ -440,5 +491,6 @@ export async function upsertDealScopingIntake(
   return {
     intake: savedIntake,
     readiness,
+    previousStatus: existingIntake?.status as DealScopingIntakeStatus | null ?? null,
   };
 }

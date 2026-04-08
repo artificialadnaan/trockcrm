@@ -70,6 +70,20 @@ function makeWonDealContext(overrides: Record<string, unknown> = {}) {
   } as any;
 }
 
+function makeScopingActivatedContext(overrides: Record<string, unknown> = {}) {
+  return {
+    now: new Date("2026-04-08T15:00:00.000Z"),
+    officeId: "office-1",
+    entityId: "deal:deal-1",
+    dealId: "deal-1",
+    dealName: "Alpha Roof",
+    dealNumber: "D-1001",
+    dealOwnerId: "user-1",
+    taskAssigneeId: "user-1",
+    ...overrides,
+  } as any;
+}
+
 function makeLostDealContext(overrides: Record<string, unknown> = {}) {
   return {
     now: new Date("2026-04-04T15:00:00.000Z"),
@@ -264,6 +278,54 @@ describe("task rule config", () => {
     expect(handoffRules[1]?.buildDedupeKey(makeWonDealContext())).toBe("deal:deal-1:won_handoff:send_welcome_packet");
     expect(handoffRules[2]?.buildDedupeKey(makeWonDealContext())).toBe("deal:deal-1:won_handoff:introduce_project_team");
     expect(handoffRules[3]?.buildDedupeKey(makeWonDealContext())).toBe("deal:deal-1:won_handoff:verify_procore_project");
+  });
+
+  it("defines scoping activation rules for estimating and service handoff", () => {
+    const scopingRules = TASK_RULES.filter((rule) =>
+      rule.sourceEvent.startsWith("scoping_intake.activated.")
+    );
+
+    expect(scopingRules.map((rule) => rule.id)).toEqual([
+      "scoping_estimating_review_handoff",
+      "scoping_service_review_handoff",
+    ]);
+
+    expect(
+      scopingRules[0]?.buildDedupeKey(
+        makeScopingActivatedContext({
+          sourceEvent: "scoping_intake.activated.estimating",
+        })
+      )
+    ).toBe("deal:deal-1:scoping_handoff:estimating_review");
+    expect(
+      scopingRules[1]?.buildDedupeKey(
+        makeScopingActivatedContext({
+          sourceEvent: "scoping_intake.activated.service",
+        })
+      )
+    ).toBe("deal:deal-1:scoping_handoff:service_review");
+  });
+
+  it("builds the scoping estimating handoff draft from the activation event", async () => {
+    const estimatingRule = TASK_RULES.find((rule) => rule.id === "scoping_estimating_review_handoff");
+    expect(estimatingRule).toBeDefined();
+
+    const draft = await estimatingRule!.buildTask(
+      makeScopingActivatedContext({
+        sourceEvent: "scoping_intake.activated.estimating",
+      })
+    );
+
+    expect(draft).toMatchObject({
+      title: "Review scoping intake for Alpha Roof",
+      description: "Scoping is complete. Start estimating handoff for Alpha Roof (D-1001).",
+      sourceEvent: "scoping_intake.activated.estimating",
+      dedupeKey: "deal:deal-1:scoping_handoff:estimating_review",
+      dealId: "deal-1",
+      assignedTo: "user-1",
+      priority: "high",
+      status: "pending",
+    });
   });
 
   it("builds the won-deal cross-sell draft", async () => {

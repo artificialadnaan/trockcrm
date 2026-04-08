@@ -26,6 +26,43 @@ import {
 
 const router = Router();
 
+async function queueDomainEvent(
+  tenantDb: any,
+  officeId: string,
+  eventName: string,
+  payload: Record<string, unknown>
+) {
+  await tenantDb.insert(jobQueue).values({
+    jobType: "domain_event",
+    payload: {
+      eventName,
+      ...payload,
+    },
+    officeId,
+    status: "pending",
+    runAfter: new Date(),
+  });
+}
+
+function emitLocalDealEvents(
+  events: Array<{ name: string; payload: any }>,
+  input: { officeId: string; userId: string }
+) {
+  for (const event of events) {
+    try {
+      eventBus.emitLocal({
+        name: event.name as any,
+        payload: event.payload,
+        officeId: input.officeId,
+        userId: input.userId,
+        timestamp: new Date(),
+      });
+    } catch (eventErr) {
+      console.error(`[Deals] Failed to emit local event ${event.name}:`, eventErr);
+    }
+  }
+}
+
 // GET /api/deals — list deals (paginated, filtered, sorted)
 router.get("/", async (req, res, next) => {
   try {
@@ -171,7 +208,34 @@ router.get("/:id/scoping-intake", async (req, res, next) => {
 router.patch("/:id/scoping-intake", async (req, res, next) => {
   try {
     const result = await upsertDealScopingIntake(req.tenantDb!, req.params.id, req.body, req.user!.id);
+    const officeId = req.user!.activeOfficeId ?? req.user!.officeId;
+    const eventsToEmit: Array<{ name: string; payload: Record<string, unknown> }> = [];
+
+    if (result.previousStatus !== result.readiness.status) {
+      const payload = {
+        dealId: req.params.id,
+        intakeId: result.intake.id,
+        workflowRoute: result.intake.workflowRouteSnapshot,
+        status: result.readiness.status,
+        editedBy: req.user!.id,
+      };
+
+      if (result.readiness.status === "ready") {
+        await queueDomainEvent(req.tenantDb! as any, officeId, "scoping_intake.ready", payload);
+        eventsToEmit.push({ name: "scoping_intake.ready", payload });
+      }
+
+      if (result.previousStatus === "activated" && result.readiness.status === "draft") {
+        await queueDomainEvent(req.tenantDb! as any, officeId, "scoping_intake.reopened", payload);
+        eventsToEmit.push({ name: "scoping_intake.reopened", payload });
+      }
+    }
+
     await req.commitTransaction!();
+    emitLocalDealEvents(eventsToEmit, {
+      officeId,
+      userId: req.user!.id,
+    });
     res.json(result);
   } catch (err) {
     next(err);
@@ -204,8 +268,26 @@ router.post("/:id/scoping-intake/attachments/link-existing", async (req, res, ne
       { fileId, intakeSection, intakeRequirementKey },
       req.user!.id
     );
+    const officeId = req.user!.activeOfficeId ?? req.user!.officeId;
+    const payload = {
+      dealId: req.params.id,
+      fileId: file.id,
+      intakeSection: file.intakeSection,
+      intakeRequirementKey: file.intakeRequirementKey,
+      linkedBy: req.user!.id,
+    };
+    await queueDomainEvent(
+      req.tenantDb! as any,
+      officeId,
+      "scoping_intake.attachment.added",
+      payload
+    );
 
     await req.commitTransaction!();
+    emitLocalDealEvents(
+      [{ name: "scoping_intake.attachment.added", payload }],
+      { officeId, userId: req.user!.id }
+    );
     res.json({ file });
   } catch (err) {
     next(err);
@@ -309,25 +391,10 @@ router.post("/:id/stage", async (req, res, next) => {
     });
 
     await req.commitTransaction!();
-
-    // Emit local events AFTER successful commit (for SSE push to connected clients).
-    // These are best-effort — the durable job_queue entries (inserted inside the
-    // transaction above) ensure the worker will process them regardless.
-    const eventsToEmit = (result as any)._eventsToEmit ?? [];
-    for (const event of eventsToEmit) {
-      try {
-        eventBus.emitLocal({
-          name: event.name,
-          payload: event.payload,
-          officeId: req.user!.activeOfficeId ?? req.user!.officeId,
-          userId: req.user!.id,
-          timestamp: new Date(),
-        });
-      } catch (eventErr) {
-        // Swallow — local emission is best-effort; durable jobs handle persistence
-        console.error(`[Deals] Failed to emit local event ${event.name}:`, eventErr);
-      }
-    }
+    emitLocalDealEvents((result as any)._eventsToEmit ?? [], {
+      officeId: req.user!.activeOfficeId ?? req.user!.officeId,
+      userId: req.user!.id,
+    });
 
     res.json({
       deal: result.deal,
@@ -372,6 +439,10 @@ router.post("/:id/service-handoff/activate", async (req, res, next) => {
     });
 
     await req.commitTransaction!();
+    emitLocalDealEvents((result as any)._eventsToEmit ?? [], {
+      officeId: req.user!.activeOfficeId ?? req.user!.officeId,
+      userId: req.user!.id,
+    });
     res.json(result);
   } catch (err) {
     next(err);

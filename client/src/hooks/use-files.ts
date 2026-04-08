@@ -19,6 +19,9 @@ export interface FileRecord {
   r2Key: string;
   r2Bucket: string;
   dealId: string | null;
+  intakeSection?: string | null;
+  intakeRequirementKey?: string | null;
+  intakeSource?: string | null;
   contactId: string | null;
   procoreProjectId: number | null;
   changeOrderId: string | null;

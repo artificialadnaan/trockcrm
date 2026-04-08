@@ -60,7 +60,11 @@ async function invokeRoute(
   const req = {
     params: options?.params ?? {},
     body: options?.body ?? {},
-    tenantDb: {},
+    tenantDb: {
+      insert: vi.fn(() => ({
+        values: vi.fn(async () => ({})),
+      })),
+    },
     officeSlug: "office-a",
     user: {
       id: "user-1",

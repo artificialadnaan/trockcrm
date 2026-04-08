@@ -9,7 +9,6 @@ import {
 } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
-import { eventBus } from "../../events/bus.js";
 import { DOMAIN_EVENTS } from "../../events/types.js";
 import { validateStageGate } from "./stage-gate.js";
 import type { UserRole } from "@trock-crm/shared/types";
@@ -39,6 +38,12 @@ export interface ServiceHandoffActivationInput {
   dealId: string;
   userId: string;
   userRole: UserRole;
+}
+
+export interface ServiceHandoffActivationResult {
+  activated: true;
+  eventsEmitted: string[];
+  _eventsToEmit: Array<{ name: string; payload: any }>;
 }
 
 /**
@@ -161,10 +166,6 @@ export async function changeDealStage(
     .returning();
   const updatedDeal = updatedDealResult[0];
 
-  if (targetStage.slug === "estimating") {
-    await activateDealScopingIntake(tenantDb, dealId);
-  }
-
   // Auto-dismiss pending/in-progress tasks when deal reaches a terminal stage
   if (targetStage.isTerminal) {
     await tenantDb
@@ -232,6 +233,31 @@ export async function changeDealStage(
     status: "pending",
   });
 
+  if (targetStage.slug === "estimating") {
+    const scopingActivation = await activateDealScopingIntake(tenantDb, dealId);
+    const scopingActivatedPayload = {
+      dealId,
+      dealName: updatedDeal.name,
+      dealNumber: updatedDeal.dealNumber,
+      workflowRoute: updatedDeal.workflowRoute,
+      activatedBy: userId,
+      scopingStatus: scopingActivation.readiness.status,
+    };
+    eventsToEmit.push({
+      name: "scoping_intake.activated",
+      payload: scopingActivatedPayload,
+    });
+    eventsEmitted.push("scoping_intake.activated");
+    await tenantDb.insert(jobQueue).values({
+      jobType: "domain_event",
+      payload: {
+        eventName: "scoping_intake.activated",
+        ...scopingActivatedPayload,
+      },
+      status: "pending",
+    });
+  }
+
   // Closed Won
   if (targetStage.slug === "closed_won") {
     const wonPayload = {
@@ -286,7 +312,7 @@ export async function changeDealStage(
 export async function activateServiceHandoff(
   tenantDb: TenantDb,
   input: ServiceHandoffActivationInput
-): Promise<{ activated: true }> {
+): Promise<ServiceHandoffActivationResult> {
   const [deal] = await tenantDb
     .select()
     .from(deals)
@@ -310,7 +336,33 @@ export async function activateServiceHandoff(
     throw new AppError(400, "Scoping intake is incomplete. Complete all required scoping items before activating service handoff.");
   }
 
-  await activateDealScopingIntake(tenantDb, input.dealId);
+  const scopingActivation = await activateDealScopingIntake(tenantDb, input.dealId);
+  const payload = {
+    dealId: deal.id,
+    dealName: deal.name,
+    dealNumber: deal.dealNumber,
+    workflowRoute: deal.workflowRoute,
+    activatedBy: input.userId,
+    scopingStatus: scopingActivation.readiness.status,
+  };
 
-  return { activated: true };
+  await tenantDb.insert(jobQueue).values({
+    jobType: "domain_event",
+      payload: {
+      eventName: "scoping_intake.activated",
+      ...payload,
+    },
+    status: "pending",
+  });
+
+  return {
+    activated: true,
+    eventsEmitted: ["scoping_intake.activated"],
+    _eventsToEmit: [
+      {
+        name: "scoping_intake.activated",
+        payload,
+      },
+    ],
+  };
 }
