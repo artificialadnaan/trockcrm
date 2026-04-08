@@ -332,6 +332,49 @@ describe("Scoping Service", () => {
     expect(updatedDeal.expectedCloseDate).toBeNull();
   });
 
+  it("writes canonical deal fields when autosave sections arrive through sectionData", async () => {
+    const tenantDb = createFakeTenantDb();
+
+    await upsertDealScopingIntake(
+      tenantDb as never,
+      "deal-1",
+      {
+        workflowRoute: "estimating",
+        sectionData: {
+          projectOverview: { propertyName: "Palm Villas Phase II", bidDueDate: "2026-05-15" },
+          propertyDetails: {
+            propertyAddress: "456 Palm Way",
+            propertyCity: "Miami",
+            propertyState: "FL",
+            propertyZip: "33101",
+          },
+          scopeSummary: { summary: "Interior refresh" },
+        },
+      },
+      "user-1"
+    );
+
+    const [updatedDeal] = tenantDb.state.deals;
+    const [savedIntake] = tenantDb.state.dealScopingIntake;
+
+    expect(updatedDeal.name).toBe("Palm Villas Phase II");
+    expect(updatedDeal.propertyAddress).toBe("456 Palm Way");
+    expect(updatedDeal.propertyCity).toBe("Miami");
+    expect(updatedDeal.propertyState).toBe("FL");
+    expect(updatedDeal.propertyZip).toBe("33101");
+    expect(updatedDeal.description).toBe("Interior refresh");
+    expect(savedIntake.sectionData).toMatchObject({
+      projectOverview: { propertyName: "Palm Villas Phase II", bidDueDate: "2026-05-15" },
+      propertyDetails: {
+        propertyAddress: "456 Palm Way",
+        propertyCity: "Miami",
+        propertyState: "FL",
+        propertyZip: "33101",
+      },
+      scopeSummary: { summary: "Interior refresh" },
+    });
+  });
+
   it("marks intake ready only when required sections and attachments are satisfied", async () => {
     const tenantDb = createFakeTenantDb({
       dealScopingIntake: [

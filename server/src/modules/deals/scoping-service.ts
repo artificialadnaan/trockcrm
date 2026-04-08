@@ -76,7 +76,10 @@ function normalizeText(value: unknown): string | null | undefined {
   return trimmed.length > 0 ? trimmed : null;
 }
 
-function buildDealWritebackPatch(patch: DealScopingPatch): Partial<DealRow> {
+function buildDealWritebackPatch(
+  patch: Pick<DealScopingPatch, "workflowRoute" | "projectTypeId">,
+  sectionData: DealScopingSectionData
+): Partial<DealRow> {
   const updates: Partial<DealRow> = {};
 
   if (patch.workflowRoute !== undefined) {
@@ -87,9 +90,9 @@ function buildDealWritebackPatch(patch: DealScopingPatch): Partial<DealRow> {
     updates.projectTypeId = patch.projectTypeId;
   }
 
-  const projectOverview = toSectionData(patch.projectOverview);
-  const propertyDetails = toSectionData(patch.propertyDetails);
-  const scopeSummary = toSectionData(patch.scopeSummary);
+  const projectOverview = toSectionData(sectionData.projectOverview);
+  const propertyDetails = toSectionData(sectionData.propertyDetails);
+  const scopeSummary = toSectionData(sectionData.scopeSummary);
 
   const propertyName = normalizeText(projectOverview.propertyName);
   if (typeof propertyName === "string") {
@@ -268,7 +271,7 @@ export async function upsertDealScopingIntake(
     toSectionData(existingIntake?.sectionData),
     extractSectionPatch(patch)
   );
-  const dealUpdates = buildDealWritebackPatch(patch);
+  const dealUpdates = buildDealWritebackPatch(patch, nextSectionData);
 
   if (Object.keys(dealUpdates).length > 0) {
     await tenantDb
