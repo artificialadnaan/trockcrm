@@ -6,7 +6,11 @@ import { getTableConfig } from "drizzle-orm/pg-core";
 import { DEAL_SCOPING_INTAKE_STATUSES, WORKFLOW_ROUTES } from "@trock-crm/shared/types";
 import { dealScopingIntake, deals, files, users } from "@trock-crm/shared/schema";
 import { describe, expect, it } from "vitest";
-import { evaluateDealScopingReadiness, upsertDealScopingIntake } from "../../../src/modules/deals/scoping-service.js";
+import {
+  evaluateDealScopingReadiness,
+  linkDealFileToScopingRequirement,
+  upsertDealScopingIntake,
+} from "../../../src/modules/deals/scoping-service.js";
 
 const migrationPath = resolve(
   dirname(fileURLToPath(import.meta.url)),
@@ -441,5 +445,35 @@ describe("Scoping Service", () => {
     const [savedIntake] = tenantDb.state.dealScopingIntake;
     expect(savedIntake.status).toBe("ready");
     expect(savedIntake.firstReadyAt).toBeInstanceOf(Date);
+  });
+
+  it("links an existing deal file into a scoping requirement without duplicating the file row", async () => {
+    const tenantDb = createFakeTenantDb({
+      files: [
+        {
+          id: "file-1",
+          dealId: "deal-1",
+          intakeRequirementKey: null,
+          isActive: true,
+        },
+      ],
+    });
+
+    const file = await linkDealFileToScopingRequirement(
+      tenantDb as never,
+      "deal-1",
+      {
+        fileId: "file-1",
+        intakeSection: "attachments",
+        intakeRequirementKey: "site_photos",
+      },
+      "user-1"
+    );
+
+    expect(file.id).toBe("file-1");
+    expect(file.intakeSection).toBe("attachments");
+    expect(file.intakeRequirementKey).toBe("site_photos");
+    expect(file.intakeSource).toBe("scoping_intake");
+    expect(tenantDb.state.files).toHaveLength(1);
   });
 });

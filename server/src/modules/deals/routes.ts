@@ -17,6 +17,12 @@ import {
 import { changeDealStage } from "./stage-change.js";
 import { preflightStageCheck } from "./stage-gate.js";
 import { getContactsForDeal } from "../contacts/association-service.js";
+import {
+  evaluateDealScopingReadiness,
+  getOrCreateDealScopingIntake,
+  linkDealFileToScopingRequirement,
+  upsertDealScopingIntake,
+} from "./scoping-service.js";
 
 const router = Router();
 
@@ -145,6 +151,62 @@ router.get("/:id/detail", async (req, res, next) => {
     if (!detail) throw new AppError(404, "Deal not found");
     await req.commitTransaction!();
     res.json({ deal: detail });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/deals/:id/scoping-intake — load or initialize scoping intake
+router.get("/:id/scoping-intake", async (req, res, next) => {
+  try {
+    const result = await getOrCreateDealScopingIntake(req.tenantDb!, req.params.id, req.user!.id);
+    await req.commitTransaction!();
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// PATCH /api/deals/:id/scoping-intake — autosave scoping intake
+router.patch("/:id/scoping-intake", async (req, res, next) => {
+  try {
+    const result = await upsertDealScopingIntake(req.tenantDb!, req.params.id, req.body, req.user!.id);
+    await req.commitTransaction!();
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/deals/:id/scoping-intake/readiness — evaluate current readiness
+router.get("/:id/scoping-intake/readiness", async (req, res, next) => {
+  try {
+    const readiness = await evaluateDealScopingReadiness(req.tenantDb!, req.params.id);
+    await req.commitTransaction!();
+    res.json({ readiness });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/deals/:id/scoping-intake/attachments/link-existing — reuse an existing deal file
+router.post("/:id/scoping-intake/attachments/link-existing", async (req, res, next) => {
+  try {
+    const { fileId, intakeSection, intakeRequirementKey } = req.body;
+
+    if (!fileId || !intakeSection || !intakeRequirementKey) {
+      throw new AppError(400, "fileId, intakeSection, and intakeRequirementKey are required");
+    }
+
+    const file = await linkDealFileToScopingRequirement(
+      req.tenantDb!,
+      req.params.id,
+      { fileId, intakeSection, intakeRequirementKey },
+      req.user!.id
+    );
+
+    await req.commitTransaction!();
+    res.json({ file });
   } catch (err) {
     next(err);
   }

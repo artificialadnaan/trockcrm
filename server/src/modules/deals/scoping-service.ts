@@ -22,6 +22,12 @@ export interface DealScopingServiceResult {
   readiness: DealScopingReadinessSnapshot;
 }
 
+export interface LinkScopingFileInput {
+  fileId: string;
+  intakeSection: string;
+  intakeRequirementKey: string;
+}
+
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -157,6 +163,26 @@ async function getExistingIntake(tenantDb: TenantDb, dealId: string) {
   return intake ?? null;
 }
 
+export async function getOrCreateDealScopingIntake(
+  tenantDb: TenantDb,
+  dealId: string,
+  userId: string
+): Promise<DealScopingServiceResult> {
+  const existingIntake = await getExistingIntake(tenantDb, dealId);
+
+  if (existingIntake) {
+    const readiness = await evaluateDealScopingReadiness(tenantDb, dealId);
+    const refreshedIntake = (await getExistingIntake(tenantDb, dealId)) ?? existingIntake;
+
+    return {
+      intake: refreshedIntake,
+      readiness,
+    };
+  }
+
+  return upsertDealScopingIntake(tenantDb, dealId, {}, userId);
+}
+
 async function listAttachmentRequirementKeys(tenantDb: TenantDb, dealId: string): Promise<string[]> {
   const rows = await tenantDb
     .select()
@@ -166,6 +192,47 @@ async function listAttachmentRequirementKeys(tenantDb: TenantDb, dealId: string)
   return rows
     .map((row) => row.intakeRequirementKey)
     .filter((requirementKey): requirementKey is string => typeof requirementKey === "string");
+}
+
+export async function linkDealFileToScopingRequirement(
+  tenantDb: TenantDb,
+  dealId: string,
+  input: LinkScopingFileInput,
+  userId: string
+) {
+  const deal = await getDealOrThrow(tenantDb, dealId);
+  await getUserOrThrow(tenantDb, userId);
+
+  const [file] = await tenantDb
+    .select()
+    .from(files)
+    .where(and(eq(files.id, input.fileId), eq(files.isActive, true)))
+    .limit(1);
+
+  if (!file) {
+    throw new AppError(404, "File not found");
+  }
+
+  if (file.dealId !== deal.id) {
+    throw new AppError(400, "File must belong to the same deal to be linked into scoping");
+  }
+
+  const [updatedFile] = await tenantDb
+    .update(files)
+    .set({
+      intakeSection: input.intakeSection,
+      intakeRequirementKey: input.intakeRequirementKey,
+      intakeSource: "scoping_intake",
+      updatedAt: new Date(),
+    })
+    .where(eq(files.id, input.fileId))
+    .returning();
+
+  if (!updatedFile) {
+    throw new AppError(500, "Failed to update file scoping metadata");
+  }
+
+  return updatedFile;
 }
 
 function createIntakePayload(input: {
