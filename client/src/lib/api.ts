@@ -1,4 +1,11 @@
-const API_BASE = "/api";
+export function resolveApiBase(env: { VITE_API_URL?: string | undefined } = {}): string {
+  const configuredUrl = env.VITE_API_URL?.trim();
+  if (!configuredUrl) return "/api";
+
+  return `${configuredUrl.replace(/\/+$/, "")}/api`;
+}
+
+const API_BASE = resolveApiBase((import.meta as any).env ?? {});
 
 interface ApiOptions extends RequestInit {
   json?: Record<string, any>;

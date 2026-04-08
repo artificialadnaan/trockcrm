@@ -11,6 +11,7 @@ import {
   isGraphAuthConfigured,
 } from "../email/graph-auth.js";
 import { getGraphTokenStatus, revokeGraphTokens } from "../email/graph-token-service.js";
+import { getTokenCookieOptions } from "./http-config.js";
 
 const router = Router();
 
@@ -19,6 +20,7 @@ const router = Router();
 const nodeEnv = process.env.NODE_ENV;
 const isLocalDevEnv = nodeEnv === "development" || nodeEnv === "test";
 const isDevMode = !process.env.AZURE_CLIENT_ID && (isLocalDevEnv || process.env.DEV_MODE === "true");
+const tokenCookieOptions = getTokenCookieOptions(process.env);
 
 // Dev-mode: list available users for picker
 router.get("/dev/users", authLimiter, async (_req, res, next) => {
@@ -64,12 +66,7 @@ router.post("/dev/login", authLimiter, async (req, res, next) => {
       role: user.role,
     });
 
-    res.cookie("token", token, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "strict",
-      maxAge: 24 * 60 * 60 * 1000, // 24 hours
-    });
+    res.cookie("token", token, tokenCookieOptions);
 
     res.json({
       user: {
@@ -97,7 +94,11 @@ router.get("/me", authMiddleware, (req, res) => {
 
 // Logout
 router.post("/logout", (_req, res) => {
-  res.clearCookie("token");
+  res.clearCookie("token", {
+    httpOnly: tokenCookieOptions.httpOnly,
+    secure: tokenCookieOptions.secure,
+    sameSite: tokenCookieOptions.sameSite,
+  });
   res.json({ success: true });
 });
 

@@ -33,6 +33,7 @@ import { searchRoutes } from "./modules/search/routes.js";
 import { companyRoutes } from "./modules/companies/routes.js";
 import { adminRoutes } from "./modules/admin/routes.js";
 import { companycamRoutes } from "./modules/companycam/routes.js";
+import { getAllowedCorsOrigins } from "./modules/auth/http-config.js";
 
 export function createApp() {
   const app = express();
@@ -43,7 +44,7 @@ export function createApp() {
 
   // Core middleware
   app.use(cors({
-    origin: process.env.FRONTEND_URL || "http://localhost:5173",
+    origin: getAllowedCorsOrigins(process.env),
     credentials: true,
   }));
 
