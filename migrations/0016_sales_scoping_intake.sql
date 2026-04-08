@@ -65,9 +65,17 @@ BEGIN
       tenant_schema
     );
     EXECUTE format(
+      'ALTER TABLE %I.deals DISABLE TRIGGER USER',
+      tenant_schema
+    );
+    EXECUTE format(
       'UPDATE %I.deals
           SET workflow_route = ''estimating''
         WHERE workflow_route IS NULL',
+      tenant_schema
+    );
+    EXECUTE format(
+      'ALTER TABLE %I.deals ENABLE TRIGGER USER',
       tenant_schema
     );
     EXECUTE format(

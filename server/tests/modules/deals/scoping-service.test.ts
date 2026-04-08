@@ -274,6 +274,9 @@ describe("Scoping Service Shared Contract", () => {
 
   it("keeps the migration rerunnable and constraint-complete for partial application", () => {
     const nullGuardIndex = migrationSql.indexOf("existing rows have NULL values in required columns");
+    const disableAuditTriggerIndex = migrationSql.indexOf("ALTER TABLE %I.deals DISABLE TRIGGER USER");
+    const workflowRouteBackfillIndex = migrationSql.indexOf("UPDATE %I.deals");
+    const enableAuditTriggerIndex = migrationSql.indexOf("ALTER TABLE %I.deals ENABLE TRIGGER USER");
     const notNullIndex = migrationSql.indexOf("ALTER COLUMN deal_id SET NOT NULL");
     const fkIndex = migrationSql.indexOf("ADD CONSTRAINT deal_scoping_intake_deal_id_deals_id_fk");
 
@@ -290,6 +293,8 @@ describe("Scoping Service Shared Contract", () => {
     expect(migrationSql).toContain("ADD CONSTRAINT deal_scoping_intake_created_by_users_id_fk");
     expect(migrationSql).toContain("ADD CONSTRAINT deal_scoping_intake_last_edited_by_users_id_fk");
     expect(migrationSql).toContain("CREATE UNIQUE INDEX IF NOT EXISTS deal_scoping_intake_deal_id_uidx");
+    expect(migrationSql).toContain("ALTER TABLE %I.deals DISABLE TRIGGER USER");
+    expect(migrationSql).toContain("ALTER TABLE %I.deals ENABLE TRIGGER USER");
     expect(migrationSql).toContain("WHERE deal_id IS NULL");
     expect(migrationSql).toContain("WHERE office_id IS NULL");
     expect(migrationSql).toContain("WHERE created_by IS NULL");
@@ -300,6 +305,11 @@ describe("Scoping Service Shared Contract", () => {
     );
     expect(migrationSql).toContain("Backfill these columns before rerunning this migration.");
     expect(nullGuardIndex).toBeGreaterThan(-1);
+    expect(disableAuditTriggerIndex).toBeGreaterThan(-1);
+    expect(workflowRouteBackfillIndex).toBeGreaterThan(-1);
+    expect(enableAuditTriggerIndex).toBeGreaterThan(-1);
+    expect(disableAuditTriggerIndex).toBeLessThan(workflowRouteBackfillIndex);
+    expect(workflowRouteBackfillIndex).toBeLessThan(enableAuditTriggerIndex);
     expect(notNullIndex).toBeGreaterThan(-1);
     expect(fkIndex).toBeGreaterThan(-1);
     expect(nullGuardIndex).toBeLessThan(notNullIndex);
