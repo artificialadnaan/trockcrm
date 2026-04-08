@@ -15,4 +15,11 @@ describe("resolveApiBase", () => {
     expect(resolveApiBase({ VITE_API_URL: "https://api-production-ad218.up.railway.app/" }))
       .toBe("https://api-production-ad218.up.railway.app/api");
   });
+
+  it("uses the Railway API fallback on the deployed frontend hosts", () => {
+    expect(resolveApiBase({}, { hostname: "frontend-production-bcab.up.railway.app" }))
+      .toBe("https://api-production-ad218.up.railway.app/api");
+    expect(resolveApiBase({}, { hostname: "crm.trockconstruction.com" }))
+      .toBe("https://api-production-ad218.up.railway.app/api");
+  });
 });

@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { api } from "@/lib/api";
+import { api, resolveApiBase } from "@/lib/api";
 import type { FileCategory } from "@/lib/file-utils";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -293,7 +293,11 @@ export async function uploadFile(input: UploadFileInput): Promise<FileRecord> {
     onProgress,
   } = input;
 
-  const baseUrl = (import.meta as any).env?.VITE_API_URL || "";
+  const apiBase = resolveApiBase(
+    (import.meta as any).env ?? {},
+    typeof window !== "undefined" ? window.location : undefined
+  );
+  const baseUrl = apiBase.replace(/\/api$/, "");
 
   return new Promise<FileRecord>((resolve, reject) => {
     const xhr = new XMLHttpRequest();

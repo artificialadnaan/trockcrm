@@ -1,11 +1,27 @@
-export function resolveApiBase(env: { VITE_API_URL?: string | undefined } = {}): string {
-  const configuredUrl = env.VITE_API_URL?.trim();
-  if (!configuredUrl) return "/api";
+const RAILWAY_API_FALLBACK = "https://api-production-ad218.up.railway.app";
+const FRONTEND_API_FALLBACK_HOSTS = new Set([
+  "frontend-production-bcab.up.railway.app",
+  "crm.trockconstruction.com",
+]);
 
-  return `${configuredUrl.replace(/\/+$/, "")}/api`;
+export function resolveApiBase(
+  env: { VITE_API_URL?: string | undefined } = {},
+  locationLike?: { hostname?: string | undefined }
+): string {
+  const configuredUrl = env.VITE_API_URL?.trim();
+  if (configuredUrl) {
+    return `${configuredUrl.replace(/\/+$/, "")}/api`;
+  }
+
+  const hostname = locationLike?.hostname?.trim().toLowerCase();
+  if (hostname && FRONTEND_API_FALLBACK_HOSTS.has(hostname)) {
+    return `${RAILWAY_API_FALLBACK}/api`;
+  }
+
+  return "/api";
 }
 
-const API_BASE = resolveApiBase((import.meta as any).env ?? {});
+const API_BASE = resolveApiBase((import.meta as any).env ?? {}, typeof window !== "undefined" ? window.location : undefined);
 
 interface ApiOptions extends RequestInit {
   json?: Record<string, any>;
