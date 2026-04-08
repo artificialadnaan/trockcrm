@@ -13,6 +13,7 @@ import { eventBus } from "../../events/bus.js";
 import { DOMAIN_EVENTS } from "../../events/types.js";
 import { validateStageGate } from "./stage-gate.js";
 import type { UserRole } from "@trock-crm/shared/types";
+import { activateDealScopingIntake, evaluateDealScopingReadiness } from "./scoping-service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -32,6 +33,12 @@ export interface StageChangeResult {
   stageHistory: typeof dealStageHistory.$inferSelect | null;
   eventsEmitted: string[];
   _eventsToEmit: Array<{ name: string; payload: any }>;
+}
+
+export interface ServiceHandoffActivationInput {
+  dealId: string;
+  userId: string;
+  userRole: UserRole;
 }
 
 /**
@@ -154,6 +161,10 @@ export async function changeDealStage(
     .returning();
   const updatedDeal = updatedDealResult[0];
 
+  if (targetStage.slug === "estimating") {
+    await activateDealScopingIntake(tenantDb, dealId);
+  }
+
   // Auto-dismiss pending/in-progress tasks when deal reaches a terminal stage
   if (targetStage.isTerminal) {
     await tenantDb
@@ -270,4 +281,36 @@ export async function changeDealStage(
     eventsEmitted,
     _eventsToEmit: eventsToEmit,
   };
+}
+
+export async function activateServiceHandoff(
+  tenantDb: TenantDb,
+  input: ServiceHandoffActivationInput
+): Promise<{ activated: true }> {
+  const [deal] = await tenantDb
+    .select()
+    .from(deals)
+    .where(eq(deals.id, input.dealId))
+    .limit(1);
+
+  if (!deal) {
+    throw new AppError(404, "Deal not found");
+  }
+
+  if (input.userRole === "rep" && deal.assignedRepId !== input.userId) {
+    throw new AppError(403, "You can only modify your own deals");
+  }
+
+  if (deal.workflowRoute !== "service") {
+    throw new AppError(400, "Deal is not service-routed");
+  }
+
+  const readiness = await evaluateDealScopingReadiness(tenantDb, input.dealId);
+  if (readiness.status === "draft") {
+    throw new AppError(400, "Scoping intake is incomplete. Complete all required scoping items before activating service handoff.");
+  }
+
+  await activateDealScopingIntake(tenantDb, input.dealId);
+
+  return { activated: true };
 }

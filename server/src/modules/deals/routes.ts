@@ -14,7 +14,7 @@ import {
   getDealsForPipeline,
   getDealSources,
 } from "./service.js";
-import { changeDealStage } from "./stage-change.js";
+import { activateServiceHandoff, changeDealStage } from "./stage-change.js";
 import { preflightStageCheck } from "./stage-gate.js";
 import { getContactsForDeal } from "../contacts/association-service.js";
 import {
@@ -354,6 +354,22 @@ router.post("/:id/stage/preflight", async (req, res, next) => {
       req.user!.role,
       req.user!.id
     );
+
+    await req.commitTransaction!();
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/deals/:id/service-handoff/activate — activate service workflow once scoping is ready
+router.post("/:id/service-handoff/activate", async (req, res, next) => {
+  try {
+    const result = await activateServiceHandoff(req.tenantDb!, {
+      dealId: req.params.id,
+      userId: req.user!.id,
+      userRole: req.user!.role,
+    });
 
     await req.commitTransaction!();
     res.json(result);

@@ -323,6 +323,45 @@ export async function evaluateDealScopingReadiness(
   return readiness;
 }
 
+export async function activateDealScopingIntake(
+  tenantDb: TenantDb,
+  dealId: string
+): Promise<DealScopingServiceResult> {
+  const deal = await getDealOrThrow(tenantDb, dealId);
+  const existingIntake = await getExistingIntake(tenantDb, dealId);
+
+  if (!existingIntake) {
+    throw new AppError(400, "Scoping intake is incomplete. Complete all required scoping items before activating workflow.");
+  }
+
+  const readiness = await evaluateDealScopingReadiness(tenantDb, dealId);
+  if (readiness.status === "draft") {
+    throw new AppError(400, "Scoping intake is incomplete. Complete all required scoping items before activating workflow.");
+  }
+
+  const now = new Date();
+  const [savedIntake] = await tenantDb
+    .update(dealScopingIntake)
+    .set({
+      workflowRouteSnapshot: deal.workflowRoute,
+      status: "activated",
+      activatedAt: existingIntake.activatedAt ?? now,
+      updatedAt: now,
+      lastAutosavedAt: existingIntake.lastAutosavedAt ?? now,
+    })
+    .where(eq(dealScopingIntake.id, existingIntake.id))
+    .returning();
+
+  if (!savedIntake) {
+    throw new AppError(500, "Failed to activate deal scoping intake");
+  }
+
+  return {
+    intake: savedIntake,
+    readiness: { ...readiness, status: "activated" },
+  };
+}
+
 export async function upsertDealScopingIntake(
   tenantDb: TenantDb,
   dealId: string,

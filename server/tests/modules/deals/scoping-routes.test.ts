@@ -13,6 +13,7 @@ vi.mock("../../../src/modules/deals/service.js", () => ({
 
 vi.mock("../../../src/modules/deals/stage-change.js", () => ({
   changeDealStage: vi.fn(),
+  activateServiceHandoff: vi.fn(),
 }));
 
 vi.mock("../../../src/modules/deals/stage-gate.js", () => ({
@@ -32,6 +33,7 @@ vi.mock("../../../src/modules/deals/scoping-service.js", () => ({
 
 const { dealRoutes } = await import("../../../src/modules/deals/routes.js");
 const scopingService = await import("../../../src/modules/deals/scoping-service.js");
+const stageChange = await import("../../../src/modules/deals/stage-change.js");
 
 function findRouteHandler(method: "get" | "patch" | "post", path: string) {
   const layer = (dealRoutes as any).stack.find(
@@ -164,5 +166,21 @@ describe("Deal Scoping Routes", () => {
     );
     expect(res.statusCode).toBe(200);
     expect(res.body.file.id).toBe("file-1");
+  });
+
+  it("activates service handoff through the deal route", async () => {
+    vi.mocked(stageChange.activateServiceHandoff).mockResolvedValueOnce({ activated: true } as never);
+
+    const { req, res } = await invokeRoute("post", "/:id/service-handoff/activate", {
+      params: { id: "deal-1" },
+    });
+
+    expect(stageChange.activateServiceHandoff).toHaveBeenCalledWith(req.tenantDb, {
+      dealId: "deal-1",
+      userId: "user-1",
+      userRole: "director",
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.body.activated).toBe(true);
   });
 });
