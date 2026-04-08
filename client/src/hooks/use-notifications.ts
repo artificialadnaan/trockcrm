@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { api } from "@/lib/api";
+import { api, resolveApiBase } from "@/lib/api";
 
 export interface Notification {
   id: string;
@@ -76,7 +76,12 @@ export function useNotificationStream() {
 
   // Connect to SSE stream
   useEffect(() => {
-    const es = new EventSource("/api/notifications/stream", { withCredentials: true });
+    const apiBase = resolveApiBase(
+      (import.meta as any).env ?? {},
+      typeof window !== "undefined" ? window.location : undefined
+    );
+    const eventSourceUrl = `${apiBase.replace(/\/api$/, "")}/api/notifications/stream`;
+    const es = new EventSource(eventSourceUrl, { withCredentials: true });
     eventSourceRef.current = es;
 
     es.addEventListener("notification", (event) => {
