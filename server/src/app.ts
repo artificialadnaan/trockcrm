@@ -1,4 +1,5 @@
 import express, { Router } from "express";
+import helmet from "helmet";
 import compression, { type CompressionFilter } from "compression";
 import cors from "cors";
 import cookieParser from "cookie-parser";
@@ -38,6 +39,8 @@ import { getAllowedCorsOrigins } from "./modules/auth/http-config.js";
 
 export function createApp() {
   const app = express();
+
+  app.use(helmet());
 
   if (process.env.NODE_ENV === "production" || process.env.TRUST_PROXY === "true") {
     app.set("trust proxy", 1);

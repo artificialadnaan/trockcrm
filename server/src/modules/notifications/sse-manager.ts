@@ -15,23 +15,47 @@ interface SseConnection {
 
 const connections = new Map<string, Set<SseConnection>>();
 
+const MAX_PER_USER = 5;
+const MAX_GLOBAL = 200;
+
+/**
+ * Check if the SSE connection can be admitted BEFORE sending headers.
+ * Call this in the route handler before writeHead(200).
+ */
+export function canAdmitSseConnection(): boolean {
+  return getConnectionCount() < MAX_GLOBAL;
+}
+
 /**
  * Register an SSE connection for a user.
  * Returns a cleanup function to call on disconnect.
+ * Enforces a per-user limit of MAX_PER_USER (closes oldest).
+ * Call canAdmitSseConnection() BEFORE sending headers to enforce global limit.
  */
 export function registerSseConnection(userId: string, officeId: string, res: Response): () => void {
+
   if (!connections.has(userId)) {
     connections.set(userId, new Set());
   }
 
+  // Enforce per-user limit — close the oldest connection when exceeded
+  const userConns = connections.get(userId)!;
+  if (userConns.size >= MAX_PER_USER) {
+    const oldest = userConns.values().next().value;
+    if (oldest) {
+      try { oldest.res.end(); } catch {}
+      userConns.delete(oldest);
+    }
+  }
+
   const conn: SseConnection = { res, userId, officeId };
-  connections.get(userId)!.add(conn);
+  userConns.add(conn);
 
   return () => {
-    const userConns = connections.get(userId);
-    if (userConns) {
-      userConns.delete(conn);
-      if (userConns.size === 0) {
+    const set = connections.get(userId);
+    if (set) {
+      set.delete(conn);
+      if (set.size === 0) {
         connections.delete(userId);
       }
     }

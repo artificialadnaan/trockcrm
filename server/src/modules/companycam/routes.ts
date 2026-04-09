@@ -55,9 +55,22 @@ function requireAdminOrDirector(role: string): void {
 async function acquireBackgroundDb(officeSlug: string) {
   const client = await pool.connect();
   const schemaName = `office_${officeSlug}`;
-  await client.query("SELECT set_config('search_path', $1, false)", [`${schemaName}, public`]);
+  // Use a transaction-local search_path (true = transaction-local, not session-local)
+  // so concurrent requests on other connections are not affected.
+  await client.query("BEGIN");
+  await client.query("SELECT set_config('search_path', $1, true)", [`${schemaName},public`]);
   const tenantDb = drizzle(client, { schema });
-  return { tenantDb, release: () => client.release() };
+  return {
+    tenantDb,
+    release: async (rollback = false) => {
+      if (rollback) {
+        await client.query("ROLLBACK").catch(() => {});
+      } else {
+        await client.query("COMMIT").catch(() => {});
+      }
+      client.release();
+    },
+  };
 }
 
 // GET /api/companycam/mappings — Get all CC projects with deal match status
@@ -140,6 +153,7 @@ router.post("/sync/:projectId", async (req, res, next) => {
 
     // Acquire a fresh DB connection for background work
     const { tenantDb: bgDb, release } = await acquireBackgroundDb(officeSlug);
+    let syncFailed = false;
     syncProjectPhotos(bgDb, projectId, userId, officeSlug, (progress) => {
       syncStatus.progress = progress;
     })
@@ -147,9 +161,10 @@ router.post("/sync/:projectId", async (req, res, next) => {
         syncStatus = { running: false, startedAt: syncStatus.startedAt, progress: "Complete", results: [result], error: null };
       })
       .catch((err) => {
+        syncFailed = true;
         syncStatus = { running: false, startedAt: syncStatus.startedAt, progress: "Failed", results: null, error: err instanceof Error ? err.message : String(err) };
       })
-      .finally(() => release());
+      .finally(() => release(syncFailed));
   } catch (err) {
     if (syncStatus.running && !syncStatus.results && !syncStatus.error) {
       syncStatus.running = false;
@@ -175,6 +190,7 @@ router.post("/sync-all", async (req, res, next) => {
     res.json({ message: "Sync started in background. Poll /sync-status for progress." });
 
     const { tenantDb: bgDb, release } = await acquireBackgroundDb(officeSlug);
+    let syncAllFailed = false;
     syncAllLinkedProjects(bgDb, userId, officeSlug, (progress) => {
       syncStatus.progress = progress;
     })
@@ -182,9 +198,10 @@ router.post("/sync-all", async (req, res, next) => {
         syncStatus = { running: false, startedAt: syncStatus.startedAt, progress: "Complete", results, error: null };
       })
       .catch((err) => {
+        syncAllFailed = true;
         syncStatus = { running: false, startedAt: syncStatus.startedAt, progress: "Failed", results: null, error: err instanceof Error ? err.message : String(err) };
       })
-      .finally(() => release());
+      .finally(() => release(syncAllFailed));
   } catch (err) {
     if (syncStatus.running && !syncStatus.results && !syncStatus.error) {
       syncStatus.running = false;

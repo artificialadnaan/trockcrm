@@ -16,11 +16,11 @@ describe("auth http config", () => {
     ]);
   });
 
-  it("uses cross-site cookie settings in production", () => {
+  it("uses secure lax cookie settings in production", () => {
     expect(getTokenCookieOptions({ NODE_ENV: "production" })).toMatchObject({
       httpOnly: true,
       secure: true,
-      sameSite: "none",
+      sameSite: "lax",
     });
   });
 

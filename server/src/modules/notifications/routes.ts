@@ -1,11 +1,17 @@
 import { Router } from "express";
 import { authMiddleware } from "../../middleware/auth.js";
-import { registerSseConnection } from "./sse-manager.js";
+import { registerSseConnection, canAdmitSseConnection } from "./sse-manager.js";
 
 const router = Router();
 
 // SSE notification stream
 router.get("/stream", authMiddleware, (req, res) => {
+  // Check global connection limit BEFORE sending headers
+  if (!canAdmitSseConnection()) {
+    res.status(503).json({ error: { message: "Too many SSE connections" } });
+    return;
+  }
+
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
     "Cache-Control": "no-cache",

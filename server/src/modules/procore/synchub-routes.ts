@@ -9,6 +9,18 @@ import { AppError } from "../../middleware/error-handler.js";
 
 const router = Router();
 
+/**
+ * Defense-in-depth validator for schema names used in dynamic SQL.
+ * This is a second guard after the office_slug regex check — it ensures
+ * any schema name interpolated into SQL is strictly in the expected format.
+ */
+function validateSchemaName(name: string): string {
+  if (!/^office_[a-z][a-z0-9_]*$/.test(name)) {
+    throw new AppError(400, "Invalid schema name");
+  }
+  return name;
+}
+
 // SyncHub shared-secret auth middleware
 function requireSyncHubSecret(
   req: Request,
@@ -83,7 +95,7 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
       throw new AppError(404, `Office not found: ${office_slug}`);
     }
     const officeId: string = officeResult.rows[0].id;
-    const schemaName = `office_${office_slug}`;
+    const schemaName = validateSchemaName(`office_${office_slug}`);
 
     // Resolve stage
     const stageResult = await client.query(

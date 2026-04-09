@@ -15,17 +15,30 @@ import { getTokenCookieOptions } from "./http-config.js";
 
 const router = Router();
 
-// Dev mode: enabled when Azure SSO is not configured, OR when DEV_MODE is explicitly set.
-// This allows testing on Railway before OAuth credentials are provided.
+// Never allow dev mode in production — AZURE_CLIENT_ID must be set.
+if (process.env.NODE_ENV === "production" && !process.env.AZURE_CLIENT_ID) {
+  console.error("[Auth] FATAL: AZURE_CLIENT_ID is required in production. Dev mode is not allowed.");
+}
+
+// Dev mode: enabled only when Azure SSO is not configured AND we are in a local dev environment.
+// DEV_MODE env var is intentionally NOT honoured — it was too easy to accidentally leave set on Railway.
 const nodeEnv = process.env.NODE_ENV;
 const isLocalDevEnv = nodeEnv === "development" || nodeEnv === "test";
-const isDevMode = !process.env.AZURE_CLIENT_ID && (isLocalDevEnv || process.env.DEV_MODE === "true");
+const isDevModeFlag = !process.env.AZURE_CLIENT_ID && isLocalDevEnv;
+
+// Additional safety: verify the request is from localhost before allowing dev login
+function isDevMode(req: import("express").Request): boolean {
+  if (!isDevModeFlag) return false;
+  const host = req.hostname || req.get("host") || "";
+  const isLocalhost = host === "localhost" || host === "127.0.0.1" || host === "::1" || host.startsWith("localhost:");
+  return isLocalhost;
+}
 const tokenCookieOptions = getTokenCookieOptions(process.env);
 
 // Dev-mode: list available users for picker
-router.get("/dev/users", authLimiter, async (_req, res, next) => {
+router.get("/dev/users", authLimiter, async (req, res, next) => {
   try {
-    if (!isDevMode) {
+    if (!isDevMode(req)) {
       throw new AppError(404, "Dev mode not available");
     }
     const devUsers = await getDevUsers();
@@ -38,7 +51,7 @@ router.get("/dev/users", authLimiter, async (_req, res, next) => {
 // Dev-mode: login as a specific user
 router.post("/dev/login", authLimiter, async (req, res, next) => {
   try {
-    if (!isDevMode) {
+    if (!isDevMode(req)) {
       throw new AppError(404, "Dev mode not available");
     }
     const { email } = req.body;

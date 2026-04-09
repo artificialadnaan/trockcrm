@@ -4,7 +4,7 @@ import * as schema from "@trock-crm/shared/schema";
 
 const pool = new pg.Pool({
   connectionString: process.env.DATABASE_URL,
-  max: parseInt(process.env.DB_POOL_MAX || "50", 10),
+  max: parseInt(process.env.DB_POOL_MAX || "20", 10),
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 5000,
 });

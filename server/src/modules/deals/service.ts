@@ -9,11 +9,11 @@ import {
   users,
   userOfficeAccess,
   tasks,
+  jobQueue,
 } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
-import { geocodeAddress } from "./geocode.js";
 
 // Type alias for the tenant-scoped Drizzle instance
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -328,18 +328,16 @@ export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
 
   const newDeal = result[0];
 
-  // Geocode property address in background (non-blocking)
-  if (input.propertyAddress && input.propertyCity && input.propertyState) {
-    geocodeAddress(input.propertyAddress, input.propertyCity, input.propertyState, input.propertyZip)
-      .then(async (coords) => {
-        if (coords) {
-          await tenantDb
-            .update(deals)
-            .set({ propertyLat: String(coords.lat), propertyLng: String(coords.lng) })
-            .where(eq(deals.id, newDeal.id));
-        }
-      })
-      .catch((err) => console.error("[Geocode] Background geocode failed:", err));
+  // Queue geocode as background job (the tenantDb connection will be released after commit)
+  const { propertyAddress, propertyCity, propertyState, propertyZip, officeId } = input;
+  if (propertyAddress) {
+    db.insert(jobQueue).values({
+      jobType: "geocode_deal",
+      payload: { dealId: newDeal.id, address: `${propertyAddress}, ${propertyCity || ""} ${propertyState || ""} ${propertyZip || ""}`.trim() },
+      officeId: officeId ?? null,
+      status: "pending",
+      runAfter: new Date(),
+    }).catch((err) => console.error("[Deals] Failed to queue geocode job:", err));
   }
 
   return newDeal;
@@ -460,17 +458,15 @@ export async function updateDeal(
     const state = input.propertyState ?? existing.propertyState;
     const zip = input.propertyZip ?? existing.propertyZip;
 
-    if (addr && city && state) {
-      geocodeAddress(addr, city, state, zip)
-        .then(async (coords) => {
-          if (coords) {
-            await tenantDb
-              .update(deals)
-              .set({ propertyLat: String(coords.lat), propertyLng: String(coords.lng) })
-              .where(eq(deals.id, dealId));
-          }
-        })
-        .catch((err) => console.error("[Geocode] Background geocode failed:", err));
+    if (addr) {
+      // Queue geocode as background job (the tenantDb connection will be released after commit)
+      db.insert(jobQueue).values({
+        jobType: "geocode_deal",
+        payload: { dealId, address: `${addr}, ${city || ""} ${state || ""} ${zip || ""}`.trim() },
+        officeId: officeId ?? null,
+        status: "pending",
+        runAfter: new Date(),
+      }).catch((err) => console.error("[Deals] Failed to queue geocode job:", err));
     }
   }
 
@@ -541,7 +537,8 @@ export async function getDealsForPipeline(
     .select()
     .from(deals)
     .where(and(...conditions))
-    .orderBy(desc(deals.updatedAt));
+    .orderBy(desc(deals.updatedAt))
+    .limit(500);
 
   // Group deals by stageId
   const dealsByStage = new Map<string, typeof allDeals>();

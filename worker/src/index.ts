@@ -1,6 +1,7 @@
 import dotenv from "dotenv";
 dotenv.config();
 
+import http from "http";
 import { startListener } from "./listener.js";
 import { pollJobs, recoverStaleJobs } from "./queue.js";
 import { registerAllJobs } from "./jobs/index.js";
@@ -140,6 +141,32 @@ async function main() {
 
   console.log("[Worker] Ready.");
 }
+
+// Health check server for Railway
+const healthServer = http.createServer((req, res) => {
+  if (req.url === "/health") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ status: "ok", timestamp: new Date().toISOString() }));
+  } else {
+    res.writeHead(404);
+    res.end();
+  }
+});
+
+const HEALTH_PORT = parseInt(process.env.WORKER_HEALTH_PORT || "3002", 10);
+healthServer.listen(HEALTH_PORT, () => {
+  console.log(`[Worker] Health check on port ${HEALTH_PORT}`);
+});
+
+// Graceful shutdown
+process.on("SIGTERM", () => {
+  console.log("[Worker] SIGTERM received, shutting down gracefully...");
+  cron.getTasks().forEach((task) => task.stop());
+  healthServer.close(() => {
+    console.log("[Worker] Health server closed.");
+    process.exit(0);
+  });
+});
 
 main().catch((err) => {
   console.error("[Worker] Fatal error:", err);

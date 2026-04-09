@@ -1,4 +1,4 @@
-import { Router, type Request, type Response } from "express";
+import { Router, type Request, type Response, type NextFunction } from "express";
 import { authMiddleware } from "../../middleware/auth.js";
 import { requireAdmin, requireDirector } from "../../middleware/rbac.js";
 import { tenantMiddleware } from "../../middleware/tenant.js";
@@ -21,22 +21,22 @@ router.use(authMiddleware);
 // Offices (admin only)
 // ---------------------------------------------------------------------------
 
-router.get("/admin/offices", requireAdmin, async (req: Request, res: Response) => {
+router.get("/admin/offices", requireAdmin, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const officeList = await listOffices();
     return res.json({ offices: officeList });
   } catch (err) {
-    return res.status(500).json({ error: String(err) });
+    return next(err);
   }
 });
 
-router.get("/admin/offices/:id", requireAdmin, async (req: Request, res: Response) => {
+router.get("/admin/offices/:id", requireAdmin, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const office = await getOfficeById(req.params.id as string);
     if (!office) return res.status(404).json({ error: "Office not found" });
     return res.json({ office });
   } catch (err) {
-    return res.status(500).json({ error: String(err) });
+    return next(err);
   }
 });
 
@@ -69,22 +69,22 @@ router.patch("/admin/offices/:id", requireAdmin, async (req: Request, res: Respo
 // Users (admin only)
 // ---------------------------------------------------------------------------
 
-router.get("/admin/users", requireAdmin, async (req: Request, res: Response) => {
+router.get("/admin/users", requireAdmin, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const userList = await getUsersWithStats();
     return res.json({ users: userList });
   } catch (err) {
-    return res.status(500).json({ error: String(err) });
+    return next(err);
   }
 });
 
-router.get("/admin/users/:id", requireAdmin, async (req: Request, res: Response) => {
+router.get("/admin/users/:id", requireAdmin, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const user = await getUserById(req.params.id as string);
     if (!user) return res.status(404).json({ error: "User not found" });
     return res.json({ user });
   } catch (err) {
-    return res.status(500).json({ error: String(err) });
+    return next(err);
   }
 });
 
@@ -97,7 +97,7 @@ router.patch("/admin/users/:id", requireAdmin, async (req: Request, res: Respons
   }
 });
 
-router.post("/admin/users/:id/office-access", requireAdmin, async (req: Request, res: Response) => {
+router.post("/admin/users/:id/office-access", requireAdmin, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { officeId, roleOverride } = req.body as {
       officeId: string;
@@ -107,19 +107,19 @@ router.post("/admin/users/:id/office-access", requireAdmin, async (req: Request,
     await grantOfficeAccess(req.params.id as string, officeId, roleOverride);
     return res.json({ success: true });
   } catch (err) {
-    return res.status(500).json({ error: String(err) });
+    return next(err);
   }
 });
 
 router.delete(
   "/admin/users/:id/office-access/:officeId",
   requireAdmin,
-  async (req: Request, res: Response) => {
+  async (req: Request, res: Response, next: NextFunction) => {
     try {
       await revokeOfficeAccess(req.params.id as string, req.params.officeId as string);
       return res.json({ success: true });
     } catch (err) {
-      return res.status(500).json({ error: String(err) });
+      return next(err);
     }
   }
 );
@@ -128,12 +128,12 @@ router.delete(
 // Pipeline config (admin only)
 // ---------------------------------------------------------------------------
 
-router.get("/admin/pipeline", requireAdmin, async (req: Request, res: Response) => {
+router.get("/admin/pipeline", requireAdmin, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const stages = await listPipelineStages();
     return res.json({ stages });
   } catch (err) {
-    return res.status(500).json({ error: String(err) });
+    return next(err);
   }
 });
 
@@ -146,14 +146,14 @@ router.patch("/admin/pipeline/:id", requireAdmin, async (req: Request, res: Resp
   }
 });
 
-router.post("/admin/pipeline/reorder", requireAdmin, async (req: Request, res: Response) => {
+router.post("/admin/pipeline/reorder", requireAdmin, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { orderedIds } = req.body as { orderedIds: string[] };
     if (!Array.isArray(orderedIds)) return res.status(400).json({ error: "orderedIds required" });
     await reorderPipelineStages(orderedIds);
     return res.json({ success: true });
   } catch (err) {
-    return res.status(500).json({ error: String(err) });
+    return next(err);
   }
 });
 
@@ -165,7 +165,7 @@ router.get(
   "/admin/audit",
   requireDirector,
   tenantMiddleware,
-  async (req: Request, res: Response) => {
+  async (req: Request, res: Response, next: NextFunction) => {
     try {
       const {
         tableName, recordId, changedBy, action, fromDate, toDate, page, limit,
@@ -185,7 +185,7 @@ router.get(
       await req.commitTransaction!();
       return res.json(result);
     } catch (err) {
-      return res.status(500).json({ error: String(err) });
+      return next(err);
     }
   }
 );
@@ -194,13 +194,13 @@ router.get(
   "/admin/audit/tables",
   requireDirector,
   tenantMiddleware,
-  async (req: Request, res: Response) => {
+  async (req: Request, res: Response, next: NextFunction) => {
     try {
       const tables = await getAuditLogTables(req.tenantDb!);
       await req.commitTransaction!();
       return res.json({ tables });
     } catch (err) {
-      return res.status(500).json({ error: String(err) });
+      return next(err);
     }
   }
 );
@@ -258,7 +258,7 @@ async function officeTableExists(
 router.get(
   "/admin/reports/cross-office-pipeline",
   requireDirector,
-  async (req: Request, res: Response) => {
+  async (req: Request, res: Response, next: NextFunction) => {
     const client = await pool.connect();
     try {
       const user = req.user!;
@@ -291,7 +291,10 @@ router.get(
             continue;
           }
 
-          await client.query("SELECT set_config('search_path', $1, false)", [schemaName]);
+          // Use a transaction-local search_path (true = transaction-local, not session-local)
+          // so concurrent requests on other connections are not affected.
+          await client.query("BEGIN");
+          await client.query("SELECT set_config('search_path', $1, true)", [`${schemaName},public`]);
           const row = await client.query<{
             total_deals: string;
             active_deals: string;
@@ -305,6 +308,7 @@ router.get(
                COALESCE(SUM(COALESCE(awarded_amount, 0)), 0) AS total_awarded_value
              FROM deals`
           );
+          await client.query("COMMIT");
           const r = row.rows[0];
           results.push({
             officeId: office.id,
@@ -316,6 +320,7 @@ router.get(
             totalAwardedValue: parseFloat(r.total_awarded_value),
           });
         } catch (officeErr) {
+          await client.query("ROLLBACK").catch(() => {});
           console.error(`[CrossOffice] Pipeline query failed for ${office.slug}:`, officeErr);
           results.push({
             officeId: office.id,
@@ -326,15 +331,12 @@ router.get(
             totalPipelineValue: 0,
             totalAwardedValue: 0,
           });
-        } finally {
-          // CRITICAL: Reset search_path to public after each office query
-          await client.query("SELECT set_config('search_path', 'public', false)");
         }
       }
 
       return res.json({ offices: results });
     } catch (err) {
-      return res.status(500).json({ error: String(err) });
+      return next(err);
     } finally {
       client.release();
     }
@@ -345,7 +347,7 @@ router.get(
 router.get(
   "/admin/reports/cross-office-activity",
   requireDirector,
-  async (req: Request, res: Response) => {
+  async (req: Request, res: Response, next: NextFunction) => {
     const client = await pool.connect();
     try {
       const user = req.user!;
@@ -380,7 +382,10 @@ router.get(
             continue;
           }
 
-          await client.query("SELECT set_config('search_path', $1, false)", [schemaName]);
+          // Use a transaction-local search_path (true = transaction-local, not session-local)
+          // so concurrent requests on other connections are not affected.
+          await client.query("BEGIN");
+          await client.query("SELECT set_config('search_path', $1, true)", [`${schemaName},public`]);
           const row = await client.query<{
             total_activities: string;
             activities_last_30: string;
@@ -396,6 +401,7 @@ router.get(
                COUNT(*) FILTER (WHERE type = 'meeting') AS meeting_count
              FROM activities`
           );
+          await client.query("COMMIT");
           const r = row.rows[0];
           results.push({
             officeId: office.id,
@@ -408,6 +414,7 @@ router.get(
             meetingCount: parseInt(r.meeting_count, 10),
           });
         } catch (officeErr) {
+          await client.query("ROLLBACK").catch(() => {});
           console.error(`[CrossOffice] Activity query failed for ${office.slug}:`, officeErr);
           results.push({
             officeId: office.id,
@@ -419,15 +426,12 @@ router.get(
             emailCount: 0,
             meetingCount: 0,
           });
-        } finally {
-          // CRITICAL: Reset search_path to public after each office query
-          await client.query("SELECT set_config('search_path', 'public', false)");
         }
       }
 
       return res.json({ offices: results });
     } catch (err) {
-      return res.status(500).json({ error: String(err) });
+      return next(err);
     } finally {
       client.release();
     }

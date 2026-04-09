@@ -5,6 +5,19 @@ const PG_NOTIFY_CHANNEL = "crm_events";
 let activeClient: pg.Client | null = null;
 let reconnecting = false;
 
+async function connectWithRetry(client: pg.Client, maxRetries = 3): Promise<void> {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      await client.connect();
+      return;
+    } catch (err) {
+      console.error(`[Listener] Connection attempt ${attempt}/${maxRetries} failed:`, err);
+      if (attempt === maxRetries) throw err;
+      await new Promise((r) => setTimeout(r, 2000 * attempt)); // 2s, 4s, 6s backoff
+    }
+  }
+}
+
 export async function startListener(onEvent: (event: any) => void): Promise<pg.Client> {
   // Close existing client if reconnecting — prevents duplicate listeners
   if (activeClient) {
@@ -16,7 +29,7 @@ export async function startListener(onEvent: (event: any) => void): Promise<pg.C
   const client = new pg.Client({ connectionString: process.env.DATABASE_URL });
   activeClient = client;
 
-  await client.connect();
+  await connectWithRetry(client);
   await client.query(`LISTEN ${PG_NOTIFY_CHANNEL}`);
 
   client.on("notification", (msg) => {

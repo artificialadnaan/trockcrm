@@ -91,6 +91,7 @@ export async function tenantMiddleware(req: Request, res: Response, next: NextFu
 
     // Begin transaction
     await client.query("BEGIN");
+    await client.query("SET LOCAL statement_timeout = '30s'");
 
     // Set search_path and audit user via parameterized set_config (Issue #10 fix)
     await client.query("SELECT set_config('search_path', $1, true)", [`${schemaName},public`]);

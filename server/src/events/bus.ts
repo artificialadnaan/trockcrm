@@ -6,6 +6,10 @@ class EventBus extends EventEmitter {
   constructor() {
     super();
     this.setMaxListeners(50);
+    // Catch errors thrown by async event handlers that EventEmitter surfaces via "error"
+    this.on("error", (err: Error) => {
+      console.error("[EventBus] Unhandled listener error:", err);
+    });
   }
 
   /**
@@ -13,7 +17,11 @@ class EventBus extends EventEmitter {
    * Use for: SSE notifications, activity logging, in-request side effects.
    */
   emitLocal(event: DomainEvent) {
-    this.emit(event.name, event);
+    try {
+      this.emit(event.name, event);
+    } catch (err) {
+      console.error("[EventBus] Synchronous listener error on event", event.name, ":", err);
+    }
   }
 
   /**

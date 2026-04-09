@@ -7,6 +7,18 @@ import { offices } from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+/**
+ * Defense-in-depth validator for schema names used in dynamic SQL.
+ * This is a second guard after the slug regex check — it ensures
+ * any schema name interpolated into SQL is strictly in the expected format.
+ */
+function validateSchemaName(name: string): string {
+  if (!/^office_[a-z][a-z0-9_]*$/.test(name)) {
+    throw new AppError(400, "Invalid schema name");
+  }
+  return name;
+}
 const MIGRATIONS_DIR = join(__dirname, "../../../../migrations");
 
 export async function getAllOffices() {
@@ -76,7 +88,7 @@ export async function createOffice(name: string, slug: string, address?: string,
  * The runner replaces the placeholder schema name with the actual office schema.
  */
 async function provisionOfficeSchema(client: import("pg").PoolClient, slug: string) {
-  const schemaName = `office_${slug}`;
+  const schemaName = validateSchemaName(`office_${slug}`);
 
   // Create the schema
   await client.query(`CREATE SCHEMA IF NOT EXISTS ${schemaName}`);
