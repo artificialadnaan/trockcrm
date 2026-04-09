@@ -12,6 +12,12 @@ export const DEAL_STAGES = [
 ] as const;
 export type DealStage = (typeof DEAL_STAGES)[number];
 
+export const WORKFLOW_ROUTES = ["estimating", "service"] as const;
+export type WorkflowRoute = (typeof WORKFLOW_ROUTES)[number];
+
+export const DEAL_SCOPING_INTAKE_STATUSES = ["draft", "ready", "activated"] as const;
+export type DealScopingIntakeStatus = (typeof DEAL_SCOPING_INTAKE_STATUSES)[number];
+
 export const CONTACT_CATEGORIES = [
   "client",
   "subcontractor",

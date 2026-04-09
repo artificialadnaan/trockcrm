@@ -11,6 +11,7 @@ import type * as schema from "@trock-crm/shared/schema";
 import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import type { UserRole } from "@trock-crm/shared/types";
+import { evaluateDealScopingReadiness } from "./scoping-service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -231,6 +232,23 @@ export async function validateStageGate(
     } else {
       requiresOverride = true;
       overrideType = overrideType ?? "missing_requirements";
+    }
+  }
+
+  if (targetStage.slug === "estimating") {
+    const scopingReadiness = await evaluateDealScopingReadiness(tenantDb, dealId);
+    const scopingMissingFields = Object.entries(scopingReadiness.errors.sections).flatMap(
+      ([sectionName, fieldNames]) => fieldNames.map((fieldName) => `${sectionName}.${fieldName}`)
+    );
+    const scopingMissingDocuments = Object.keys(scopingReadiness.errors.attachments);
+
+    if (scopingReadiness.status === "draft") {
+      allowed = false;
+      requiresOverride = false;
+      overrideType = null;
+      blockReason = "Scoping intake is incomplete. Complete all required scoping items before advancing.";
+      missingFields.push(...scopingMissingFields);
+      missingDocuments.push(...scopingMissingDocuments);
     }
   }
 

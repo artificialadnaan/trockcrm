@@ -525,6 +525,46 @@ export function registerAllJobs() {
     }
   });
 
+  domainEventHandlers.set("scoping_intake.activated", async (payload, officeId) => {
+    console.log(`[Worker] scoping_intake.activated: ${payload.dealId} (${payload.workflowRoute})`);
+
+    try {
+      const { pool: workerPool } = await import("../db.js");
+      const resolved = await resolveOfficeSchema(workerPool, officeId, payload.activatedBy);
+      if (!resolved) return;
+
+      const { evaluateTaskRules, TASK_RULES, createTenantTaskRulePersistence } = await loadTaskRuleDependencies();
+      const taskPersistence = createTenantTaskRulePersistence(workerPool, resolved.schemaName);
+      const sourceEvent =
+        payload.workflowRoute === "service"
+          ? "scoping_intake.activated.service"
+          : "scoping_intake.activated.estimating";
+
+      const outcomes = await evaluateTaskRules(
+        {
+          now: new Date(),
+          officeId: resolved.officeId,
+          entityId: `deal:${payload.dealId}`,
+          sourceEvent,
+          dealId: payload.dealId,
+          dealName: payload.dealName ?? "deal",
+          dealNumber: payload.dealNumber ?? null,
+          taskAssigneeId: payload.activatedBy ?? null,
+          dealOwnerId: payload.activatedBy ?? null,
+        },
+        taskPersistence,
+        TASK_RULES
+      );
+
+      const createdCount = countTaskRuleCreations(outcomes);
+      if (createdCount > 0) {
+        console.log(`[Worker] scoping_intake.activated: created ${createdCount} handoff tasks for ${payload.dealName ?? "deal"}`);
+      }
+    } catch (err) {
+      console.error("[Worker:scoping-handoff] Error:", err);
+    }
+  });
+
   domainEventHandlers.set("contact.created", async (payload, officeId) => {
     console.log(`[Worker] contact.created: ${payload.contactId}`);
 

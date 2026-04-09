@@ -14,7 +14,7 @@ import {
   getDealsForPipeline,
   getDealSources,
 } from "./service.js";
-import { changeDealStage } from "./stage-change.js";
+import { activateServiceHandoff, changeDealStage } from "./stage-change.js";
 import { preflightStageCheck } from "./stage-gate.js";
 import { getContactsForDeal } from "../contacts/association-service.js";
 import {
@@ -55,8 +55,51 @@ import {
   PUNCH_LIST_TYPES,
   WORKFLOW_TIMER_TYPES,
 } from "@trock-crm/shared/types";
+import {
+  evaluateDealScopingReadiness,
+  getOrCreateDealScopingIntake,
+  linkDealFileToScopingRequirement,
+  upsertDealScopingIntake,
+} from "./scoping-service.js";
 
 const router = Router();
+
+async function queueDomainEvent(
+  tenantDb: any,
+  officeId: string,
+  eventName: string,
+  payload: Record<string, unknown>
+) {
+  await tenantDb.insert(jobQueue).values({
+    jobType: "domain_event",
+    payload: {
+      eventName,
+      ...payload,
+    },
+    officeId,
+    status: "pending",
+    runAfter: new Date(),
+  });
+}
+
+function emitLocalDealEvents(
+  events: Array<{ name: string; payload: any }>,
+  input: { officeId: string; userId: string }
+) {
+  for (const event of events) {
+    try {
+      eventBus.emitLocal({
+        name: event.name as any,
+        payload: event.payload,
+        officeId: input.officeId,
+        userId: input.userId,
+        timestamp: new Date(),
+      });
+    } catch (eventErr) {
+      console.error(`[Deals] Failed to emit local event ${event.name}:`, eventErr);
+    }
+  }
+}
 
 // GET /api/deals — list deals (paginated, filtered, sorted)
 router.get("/", async (req, res, next) => {
@@ -188,6 +231,107 @@ router.get("/:id/detail", async (req, res, next) => {
   }
 });
 
+// GET /api/deals/:id/scoping-intake — load or initialize scoping intake
+router.get("/:id/scoping-intake", async (req, res, next) => {
+  try {
+    const result = await getOrCreateDealScopingIntake(req.tenantDb!, req.params.id, req.user!.id);
+    await req.commitTransaction!();
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// PATCH /api/deals/:id/scoping-intake — autosave scoping intake
+router.patch("/:id/scoping-intake", async (req, res, next) => {
+  try {
+    const result = await upsertDealScopingIntake(req.tenantDb!, req.params.id, req.body, req.user!.id);
+    const officeId = req.user!.activeOfficeId ?? req.user!.officeId;
+    const eventsToEmit: Array<{ name: string; payload: Record<string, unknown> }> = [];
+
+    if (result.previousStatus !== result.readiness.status) {
+      const payload = {
+        dealId: req.params.id,
+        intakeId: result.intake.id,
+        workflowRoute: result.intake.workflowRouteSnapshot,
+        status: result.readiness.status,
+        editedBy: req.user!.id,
+      };
+
+      if (result.readiness.status === "ready") {
+        await queueDomainEvent(req.tenantDb! as any, officeId, "scoping_intake.ready", payload);
+        eventsToEmit.push({ name: "scoping_intake.ready", payload });
+      }
+
+      if (result.previousStatus === "activated" && result.readiness.status === "draft") {
+        await queueDomainEvent(req.tenantDb! as any, officeId, "scoping_intake.reopened", payload);
+        eventsToEmit.push({ name: "scoping_intake.reopened", payload });
+      }
+    }
+
+    await req.commitTransaction!();
+    emitLocalDealEvents(eventsToEmit, {
+      officeId,
+      userId: req.user!.id,
+    });
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/deals/:id/scoping-intake/readiness — evaluate current readiness
+router.get("/:id/scoping-intake/readiness", async (req, res, next) => {
+  try {
+    const readiness = await evaluateDealScopingReadiness(req.tenantDb!, req.params.id);
+    await req.commitTransaction!();
+    res.json({ readiness });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/deals/:id/scoping-intake/attachments/link-existing — reuse an existing deal file
+router.post("/:id/scoping-intake/attachments/link-existing", async (req, res, next) => {
+  try {
+    const { fileId, intakeSection, intakeRequirementKey } = req.body;
+
+    if (!fileId || !intakeSection || !intakeRequirementKey) {
+      throw new AppError(400, "fileId, intakeSection, and intakeRequirementKey are required");
+    }
+
+    const file = await linkDealFileToScopingRequirement(
+      req.tenantDb!,
+      req.params.id,
+      { fileId, intakeSection, intakeRequirementKey },
+      req.user!.id
+    );
+    const officeId = req.user!.activeOfficeId ?? req.user!.officeId;
+    const payload = {
+      dealId: req.params.id,
+      fileId: file.id,
+      intakeSection: file.intakeSection,
+      intakeRequirementKey: file.intakeRequirementKey,
+      linkedBy: req.user!.id,
+    };
+    await queueDomainEvent(
+      req.tenantDb! as any,
+      officeId,
+      "scoping_intake.attachment.added",
+      payload
+    );
+
+    await req.commitTransaction!();
+    emitLocalDealEvents(
+      [{ name: "scoping_intake.attachment.added", payload }],
+      { officeId, userId: req.user!.id }
+    );
+    res.json({ file });
+  } catch (err) {
+    next(err);
+  }
+});
+
 function validateDealPayload(body: Record<string, unknown>): void {
   const MAX_MONEY = 999999999;
   for (const field of ["ddEstimate", "bidEstimate", "awardedAmount"] as const) {
@@ -285,25 +429,10 @@ router.post("/:id/stage", async (req, res, next) => {
     });
 
     await req.commitTransaction!();
-
-    // Emit local events AFTER successful commit (for SSE push to connected clients).
-    // These are best-effort — the durable job_queue entries (inserted inside the
-    // transaction above) ensure the worker will process them regardless.
-    const eventsToEmit = (result as any)._eventsToEmit ?? [];
-    for (const event of eventsToEmit) {
-      try {
-        eventBus.emitLocal({
-          name: event.name,
-          payload: event.payload,
-          officeId: req.user!.activeOfficeId ?? req.user!.officeId,
-          userId: req.user!.id,
-          timestamp: new Date(),
-        });
-      } catch (eventErr) {
-        // Swallow — local emission is best-effort; durable jobs handle persistence
-        console.error(`[Deals] Failed to emit local event ${event.name}:`, eventErr);
-      }
-    }
+    emitLocalDealEvents((result as any)._eventsToEmit ?? [], {
+      officeId: req.user!.activeOfficeId ?? req.user!.officeId,
+      userId: req.user!.id,
+    });
 
     res.json({
       deal: result.deal,
@@ -332,6 +461,26 @@ router.post("/:id/stage/preflight", async (req, res, next) => {
     );
 
     await req.commitTransaction!();
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/deals/:id/service-handoff/activate — activate service workflow once scoping is ready
+router.post("/:id/service-handoff/activate", async (req, res, next) => {
+  try {
+    const result = await activateServiceHandoff(req.tenantDb!, {
+      dealId: req.params.id,
+      userId: req.user!.id,
+      userRole: req.user!.role,
+    });
+
+    await req.commitTransaction!();
+    emitLocalDealEvents((result as any)._eventsToEmit ?? [], {
+      officeId: req.user!.activeOfficeId ?? req.user!.officeId,
+      userId: req.user!.id,
+    });
     res.json(result);
   } catch (err) {
     next(err);

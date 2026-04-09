@@ -54,6 +54,7 @@ import {
   openPrintableReportWindow,
   serializeRowsToCsv,
 } from "@/lib/report-export";
+import { getScheduleReportActionConfig } from "@/lib/report-actions";
 import {
   BarChart,
   Bar,
@@ -421,6 +422,7 @@ function getStageStatus(stageName: string) {
 
 export function ReportsPage() {
   // --- preserved report hooks ---
+  const scheduleReportAction = getScheduleReportActionConfig();
   const { reports, loading, refetch } = useSavedReports();
   const [activeReport, setActiveReport] = useState<SavedReport | null>(null);
   const [reportData, setReportData] = useState<any>(null);
@@ -1149,8 +1151,14 @@ export function ReportsPage() {
             <span>System Status — Last synced {syncTime}</span>
           </div>
           <div className="flex items-center gap-3">
-            <Button variant="outline" size="sm" className="border-slate-200 text-slate-600 text-xs">
-              Schedule Report
+            <Button
+              variant="outline"
+              size="sm"
+              className="border-slate-200 text-slate-600 text-xs"
+              disabled={scheduleReportAction.disabled}
+              title={scheduleReportAction.title}
+            >
+              {scheduleReportAction.label}
             </Button>
             <button
               className="flex items-center gap-2 px-4 py-2 rounded-lg text-white text-xs font-semibold"

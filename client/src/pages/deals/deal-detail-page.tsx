@@ -20,6 +20,7 @@ import { DealEmailTab } from "@/components/email/deal-email-tab";
 import { DealOverviewTab } from "@/components/deals/deal-overview-tab";
 import { DealHistoryTab } from "@/components/deals/deal-history-tab";
 import { DealTimelineTab } from "@/components/deals/deal-timeline-tab";
+import { DealScopingWorkspace } from "@/components/deals/deal-scoping-workspace";
 import { DealFileTab } from "@/components/files/deal-file-tab";
 import { DealTeamTab } from "./deal-team-tab";
 import { DealEstimatesTab } from "./deal-estimates-tab";
@@ -37,7 +38,7 @@ import { usePipelineStages } from "@/hooks/use-pipeline-config";
 import { useAuth } from "@/lib/auth";
 import { formatCurrency, bestEstimate } from "@/lib/deal-utils";
 
-type Tab = "overview" | "files" | "email" | "activity" | "timeline" | "history" | "team" | "estimates" | "punch_list" | "closeout";
+type Tab = "overview" | "scoping" | "files" | "email" | "activity" | "timeline" | "history" | "team" | "estimates" | "punch_list" | "closeout";
 
 export function DealDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -110,6 +111,7 @@ export function DealDetailPage() {
 
   const tabs: { key: Tab; label: string }[] = [
     { key: "overview", label: "Overview" },
+    { key: "scoping", label: "Scoping" },
     { key: "files", label: "Files" },
     { key: "email", label: "Email" },
     { key: "activity", label: "Activity" },
@@ -279,6 +281,7 @@ export function DealDetailPage() {
           <DealOverviewTab deal={deal} />
         </div>
       )}
+      {activeTab === "scoping" && <DealScopingWorkspace deal={deal} onDealUpdated={refetch} />}
       {activeTab === "files" && <DealFileTab dealId={deal.id} />}
       {activeTab === "email" && <DealEmailTab dealId={deal.id} />}
       {activeTab === "activity" && <DealActivityPanel dealId={deal.id} />}

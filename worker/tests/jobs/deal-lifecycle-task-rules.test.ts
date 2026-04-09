@@ -27,6 +27,8 @@ vi.mock("../../../server/src/modules/tasks/rules/config.js", () => ({
     { id: "deal_won_schedule_kickoff" },
     { id: "deal_won_cross_sell_opportunity" },
     { id: "deal_lost_competitor_intel" },
+    { id: "scoping_estimating_review_handoff" },
+    { id: "scoping_service_review_handoff" },
   ],
 }));
 
@@ -199,5 +201,49 @@ describe("deal lifecycle task migration", () => {
     expect(
       queryMock.mock.calls.some(([sql]) => typeof sql === "string" && sql.includes("INSERT INTO office_beta.tasks"))
     ).toBe(false);
+  });
+
+  it("routes scoping_intake.activated through the shared evaluator using the canonical workflow route", async () => {
+    const taskPersistence = { marker: "task-persistence" };
+    createTenantTaskRulePersistenceMock.mockReturnValue(taskPersistence);
+    evaluateTaskRulesMock.mockResolvedValue([{ action: "created" }]);
+
+    queryMock.mockImplementation(async (sql: string) => {
+      if (sql === "SELECT slug FROM public.offices WHERE id = $1 AND is_active = true") {
+        return { rows: [{ slug: "beta" }] };
+      }
+
+      throw new Error(`Unexpected SQL: ${sql}`);
+    });
+
+    const handler = handlers.get("domain_event");
+    expect(handler).toBeDefined();
+
+    await handler!(
+      {
+        eventName: "scoping_intake.activated",
+        dealId: "deal-1",
+        dealName: "Alpha Roof",
+        dealNumber: "D-1001",
+        workflowRoute: "service",
+        activatedBy: "user-1",
+      },
+      "office-1"
+    );
+
+    expect(createTenantTaskRulePersistenceMock).toHaveBeenCalledWith(expect.any(Object), "office_beta");
+    expect(evaluateTaskRulesMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sourceEvent: "scoping_intake.activated.service",
+        officeId: "office-1",
+        entityId: "deal:deal-1",
+        dealId: "deal-1",
+        dealName: "Alpha Roof",
+        dealNumber: "D-1001",
+        taskAssigneeId: "user-1",
+      }),
+      taskPersistence,
+      expect.any(Array)
+    );
   });
 });

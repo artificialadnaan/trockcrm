@@ -93,8 +93,15 @@ function evaluateStageGate(opts: {
   userId: string;
   existingFileCategories?: string[];
   existingApprovedRoles?: string[];
+  scopingGate?: {
+    applies: boolean;
+    allowed: boolean;
+    missingFields?: string[];
+    missingDocuments?: string[];
+    blockReason?: string;
+  };
 }) {
-  const { deal, currentStage, targetStage, userRole, userId, existingFileCategories = [], existingApprovedRoles = [] } = opts;
+  const { deal, currentStage, targetStage, userRole, userId, existingFileCategories = [], existingApprovedRoles = [], scopingGate } = opts;
 
   // Rep ownership check
   if (userRole === "rep" && deal.assignedRepId !== userId) {
@@ -193,6 +200,15 @@ function evaluateStageGate(opts: {
       requiresOverride = true;
       overrideType = overrideType ?? "missing_requirements";
     }
+  }
+
+  if (scopingGate?.applies && !scopingGate.allowed) {
+    allowed = false;
+    requiresOverride = false;
+    overrideType = null;
+    blockReason = scopingGate.blockReason ?? "Scoping intake is incomplete. Complete all required scoping items before advancing.";
+    missingFields.push(...(scopingGate.missingFields ?? []));
+    missingDocuments.push(...(scopingGate.missingDocuments ?? []));
   }
 
   return {
@@ -445,6 +461,30 @@ describe("Stage Gate Validation", () => {
 
       expect(result.allowed).toBe(true);
       expect(result).not.toHaveProperty("error");
+    });
+
+    it("should block director override when scoping gate is incomplete for estimating entry", () => {
+      const result = evaluateStageGate({
+        deal: makeDeal({ stageId: STAGES.dd.id }),
+        currentStage: STAGES.dd,
+        targetStage: STAGES.estimating,
+        userRole: "director",
+        userId: "dir-1",
+        scopingGate: {
+          applies: true,
+          allowed: false,
+          missingFields: ["projectOverview.bidDueDate"],
+          missingDocuments: ["site_photos"],
+          blockReason: "Scoping intake is incomplete. Complete all required scoping items before advancing.",
+        },
+      });
+
+      expect(result.allowed).toBe(false);
+      expect(result.requiresOverride).toBe(false);
+      expect(result.overrideType).toBeNull();
+      expect(result.blockReason).toContain("Scoping intake is incomplete");
+      expect(result.missingRequirements.fields).toContain("projectOverview.bidDueDate");
+      expect(result.missingRequirements.documents).toContain("site_photos");
     });
   });
 

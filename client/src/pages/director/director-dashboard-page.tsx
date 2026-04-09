@@ -19,13 +19,13 @@ import {
   ChevronRight,
   AlertTriangle,
   Bell,
-  Settings,
   User,
   MapPin,
   ArrowUpRight,
   ArrowDownRight,
   Minus,
 } from "lucide-react";
+import { DIRECTOR_DASHBOARD_ACTIONS } from "@/lib/director-dashboard-actions";
 
 const PRESETS: Array<{ value: DateRangePreset; label: string }> = [
   { value: "mtd", label: "MTD" },
@@ -170,12 +170,21 @@ export function DirectorDashboardPage() {
           </div>
 
           {/* Action buttons */}
-          <button className="w-8 h-8 rounded-full bg-white border border-gray-200 flex items-center justify-center text-gray-500 hover:text-gray-800 transition-colors shadow-sm">
-            <Bell className="h-4 w-4" />
-          </button>
-          <button className="w-8 h-8 rounded-full bg-white border border-gray-200 flex items-center justify-center text-gray-500 hover:text-gray-800 transition-colors shadow-sm">
-            <Settings className="h-4 w-4" />
-          </button>
+          {DIRECTOR_DASHBOARD_ACTIONS.map((action) => {
+            const Icon = action.key === "alerts" ? Bell : BarChart3;
+            return (
+              <button
+                key={action.key}
+                type="button"
+                aria-label={action.label}
+                title={action.title}
+                onClick={() => navigate(action.to)}
+                className="w-8 h-8 rounded-full bg-white border border-gray-200 flex items-center justify-center text-gray-500 hover:text-gray-800 transition-colors shadow-sm"
+              >
+                <Icon className="h-4 w-4" />
+              </button>
+            );
+          })}
           <div className="w-8 h-8 rounded-full bg-[#CC0000] flex items-center justify-center text-white text-xs font-bold shadow-sm">
             <User className="h-4 w-4" />
           </div>

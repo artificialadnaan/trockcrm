@@ -1,7 +1,7 @@
 {
-  "tool_name": "Read",
-  "tool_input_preview": "{\"file_path\":\"/Users/adnaaniqbal/Developer/trock-crm/client/src/lib/auth.ts\",\"limit\":30}",
-  "error": "File does not exist. Note: your current working directory is /Users/adnaaniqbal/Developer/trock-crm. Did you mean auth.tsx?",
-  "timestamp": "2026-04-03T16:15:41.441Z",
+  "tool_name": "Bash",
+  "tool_input_preview": "{\"command\":\"rm -f shared/tsconfig.tsbuildinfo && npm run build --workspace=shared 2>&1\",\"description\":\"Build shared package\"}",
+  "error": "Exit code 2\n\n> @trock-crm/shared@1.0.0 build\n> tsc\n\nsrc/schema/tenant/deals.ts(2,3): error TS2300: Duplicate identifier 'pgEnum'.\nsrc/schema/tenant/deals.ts(4,3): error TS2300: Duplicate identifier 'pgEnum'.\nnpm error Lifecycle script `build` failed with error:\nnpm error code 2\nnpm error path /Users/adnaaniqbal/Developer/trock-crm/shared\nnpm error workspace @trock-crm/shared@1.0.0\nnpm error location /Users/adnaaniqbal/Developer/trock-crm/shared\nnpm error command failed\nnpm error command sh -c ts...",
+  "timestamp": "2026-04-09T19:39:06.979Z",
   "retry_count": 1
 }

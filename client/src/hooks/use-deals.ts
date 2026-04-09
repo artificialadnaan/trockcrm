@@ -1,11 +1,59 @@
 import { useState, useEffect, useCallback } from "react";
 import { api } from "@/lib/api";
+import type { FileRecord } from "./use-files";
+
+export type WorkflowRoute = "estimating" | "service";
+export type DealScopingIntakeStatus = "draft" | "ready" | "activated";
+
+export interface DealScopingSectionData {
+  [sectionKey: string]: unknown;
+}
+
+export interface DealScopingCompletionStateEntry {
+  isComplete: boolean;
+  missingFields: string[];
+  missingAttachments: string[];
+}
+
+export interface DealScopingReadiness {
+  status: DealScopingIntakeStatus;
+  errors: {
+    sections: Record<string, string[]>;
+    attachments: Record<string, string[]>;
+  };
+  completionState: Record<string, DealScopingCompletionStateEntry>;
+  requiredSections: string[];
+  requiredAttachmentKeys: string[];
+}
+
+export interface DealScopingIntake {
+  id: string;
+  dealId: string;
+  officeId: string;
+  workflowRouteSnapshot: WorkflowRoute;
+  status: DealScopingIntakeStatus;
+  projectTypeId: string | null;
+  sectionData: DealScopingSectionData;
+  completionState: Record<string, DealScopingCompletionStateEntry>;
+  readinessErrors: {
+    sections: Record<string, string[]>;
+    attachments: Record<string, string[]>;
+  };
+  firstReadyAt: string | null;
+  activatedAt: string | null;
+  lastAutosavedAt: string;
+  createdBy: string;
+  lastEditedBy: string;
+  createdAt: string;
+  updatedAt: string;
+}
 
 export interface Deal {
   id: string;
   dealNumber: string;
   name: string;
   stageId: string;
+  workflowRoute: WorkflowRoute;
   assignedRepId: string;
   primaryContactId: string | null;
   ddEstimate: string | null;
@@ -235,4 +283,49 @@ export async function preflightStageCheck(dealId: string, targetStageId: string)
 
 export async function deleteDeal(dealId: string) {
   return api<{ success: boolean }>(`/deals/${dealId}`, { method: "DELETE" });
+}
+
+export async function getDealScopingIntake(dealId: string) {
+  return api<{ intake: DealScopingIntake; readiness: DealScopingReadiness }>(
+    `/deals/${dealId}/scoping-intake`
+  );
+}
+
+export async function patchDealScopingIntake(
+  dealId: string,
+  input: Partial<{
+    workflowRoute: WorkflowRoute;
+    projectTypeId: string | null;
+    sectionData: DealScopingSectionData;
+  }> &
+    Record<string, unknown>
+) {
+  return api<{ intake: DealScopingIntake; readiness: DealScopingReadiness }>(
+    `/deals/${dealId}/scoping-intake`,
+    { method: "PATCH", json: input }
+  );
+}
+
+export async function getDealScopingReadiness(dealId: string) {
+  return api<{ readiness: DealScopingReadiness }>(`/deals/${dealId}/scoping-intake/readiness`);
+}
+
+export async function linkExistingScopingAttachment(
+  dealId: string,
+  input: {
+    fileId: string;
+    intakeSection: string;
+    intakeRequirementKey: string;
+  }
+) {
+  return api<{ file: FileRecord }>(`/deals/${dealId}/scoping-intake/attachments/link-existing`, {
+    method: "POST",
+    json: input,
+  });
+}
+
+export async function activateServiceHandoff(dealId: string) {
+  return api<{ activated: true }>(`/deals/${dealId}/service-handoff/activate`, {
+    method: "POST",
+  });
 }

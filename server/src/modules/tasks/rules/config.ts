@@ -671,6 +671,104 @@ const dealLostCompetitorIntelRule: TaskRuleDefinition = {
   },
 };
 
+function buildScopingActivatedRule(input: {
+  id: string;
+  sourceEvent: "scoping_intake.activated.estimating" | "scoping_intake.activated.service";
+  dedupeSuffix: string;
+  title: (context: TaskRuleContext) => string;
+  description: (context: TaskRuleContext) => string;
+  priorityScore: number;
+  dueOffsetDays: number;
+}) {
+  return {
+    id: input.id,
+    sourceEvent: input.sourceEvent,
+    reasonCode: input.id,
+    suppressionWindowDays: 0,
+    buildDedupeKey(context: TaskRuleContext) {
+      return context.dealId ? `deal:${context.dealId}:scoping_handoff:${input.dedupeSuffix}` : null;
+    },
+    async buildTask(context: TaskRuleContext) {
+      if (!context.dealId || !context.dealName) {
+        return null;
+      }
+
+      const assignment = await assignTaskFromContext({
+        entityId: context.entityId,
+        manualOverrideId: context.taskAssigneeId ?? context.manualOverrideId,
+        dealOwnerId: context.dealOwnerId,
+        contactLinkedRepId: context.contactLinkedRepId,
+        recentActorId: context.recentActorId,
+        officeFallbackId: context.officeFallbackId,
+      });
+
+      if (!assignment.assignedTo) return null;
+
+      const priority = buildFixedPriority(input.priorityScore);
+      const dueAt = addBusinessDays(context.now, input.dueOffsetDays);
+      const title = input.title(context);
+
+      return {
+        title,
+        description: input.description(context),
+        type: "system",
+        assignedTo: assignment.assignedTo,
+        officeId: context.officeId,
+        originRule: input.id,
+        sourceRule: input.id,
+        sourceEvent: context.sourceEvent,
+        dedupeKey: `deal:${context.dealId}:scoping_handoff:${input.dedupeSuffix}`,
+        reasonCode: input.id,
+        priority: priority.band,
+        priorityScore: priority.score,
+        status: "pending",
+        dealId: context.dealId,
+        dueAt,
+        entitySnapshot: {
+          schemaVersion: 1,
+          entityType: "deal",
+          entityId: context.entityId,
+          officeId: context.officeId,
+          sourceEvent: context.sourceEvent,
+          dealId: context.dealId,
+          dealName: context.dealName,
+          dealNumber: context.dealNumber ?? null,
+          summary: title,
+        },
+        metadata: {
+          entityId: context.entityId,
+          dealId: context.dealId,
+          dealName: context.dealName,
+          dealNumber: context.dealNumber ?? null,
+          assignment: assignment.machineReason,
+        },
+      };
+    },
+  } satisfies TaskRuleDefinition;
+}
+
+const scopingEstimatingReviewRule = buildScopingActivatedRule({
+  id: "scoping_estimating_review_handoff",
+  sourceEvent: "scoping_intake.activated.estimating",
+  dedupeSuffix: "estimating_review",
+  title: (context) => `Review scoping intake for ${context.dealName}`,
+  description: (context) =>
+    `Scoping is complete. Start estimating handoff for ${context.dealName} (${context.dealNumber ?? "deal"}).`,
+  priorityScore: 70,
+  dueOffsetDays: 0,
+});
+
+const scopingServiceReviewRule = buildScopingActivatedRule({
+  id: "scoping_service_review_handoff",
+  sourceEvent: "scoping_intake.activated.service",
+  dedupeSuffix: "service_review",
+  title: (context) => `Review service handoff for ${context.dealName}`,
+  description: (context) =>
+    `Scoping is complete. Start service handoff for ${context.dealName} (${context.dealNumber ?? "deal"}).`,
+  priorityScore: 65,
+  dueOffsetDays: 0,
+});
+
 const weeklyPipelineDigestRuleId = "weekly_pipeline_digest";
 const weeklyPipelineDigestRule: TaskRuleDefinition = {
   id: weeklyPipelineDigestRuleId,
@@ -1081,5 +1179,7 @@ export const TASK_RULES: TaskRuleDefinition[] = [
   dealWonVerifyProcoreRule,
   dealWonCrossSellRule,
   dealLostCompetitorIntelRule,
+  scopingEstimatingReviewRule,
+  scopingServiceReviewRule,
   weeklyPipelineDigestRule,
 ];

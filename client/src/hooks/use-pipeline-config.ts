@@ -41,15 +41,87 @@ export interface Region {
   isActive: boolean;
 }
 
+type ApiFetcher = typeof api;
+
+function createCachedLoader<T>(load: (fetcher: ApiFetcher) => Promise<T>) {
+  let cachedValue: T | null = null;
+  let pending: Promise<T> | null = null;
+
+  const read = async (fetcher: ApiFetcher = api) => {
+    if (cachedValue != null) return cachedValue;
+    if (!pending) {
+      pending = load(fetcher)
+        .then((value) => {
+          cachedValue = value;
+          return value;
+        })
+        .finally(() => {
+          pending = null;
+        });
+    }
+    return pending;
+  };
+
+  const clear = () => {
+    cachedValue = null;
+    pending = null;
+  };
+
+  return { read, clear };
+}
+
+const stagesLoader = createCachedLoader(async (fetcher) => {
+  const data = await fetcher<{ stages: PipelineStage[] }>("/pipeline/stages");
+  return data.stages;
+});
+
+const lostReasonsLoader = createCachedLoader(async (fetcher) => {
+  const data = await fetcher<{ reasons: LostReason[] }>("/pipeline/lost-reasons");
+  return data.reasons;
+});
+
+const projectTypesLoader = createCachedLoader(async (fetcher) => {
+  const data = await fetcher<{ projectTypes: ProjectType[] }>("/pipeline/project-types");
+  return data.projectTypes;
+});
+
+const regionsLoader = createCachedLoader(async (fetcher) => {
+  const data = await fetcher<{ regions: Region[] }>("/pipeline/regions");
+  return data.regions;
+});
+
+export function clearPipelineConfigCache() {
+  stagesLoader.clear();
+  lostReasonsLoader.clear();
+  projectTypesLoader.clear();
+  regionsLoader.clear();
+}
+
+export function loadPipelineStages(fetcher?: ApiFetcher) {
+  return stagesLoader.read(fetcher);
+}
+
+export function loadLostReasons(fetcher?: ApiFetcher) {
+  return lostReasonsLoader.read(fetcher);
+}
+
+export function loadProjectTypes(fetcher?: ApiFetcher) {
+  return projectTypesLoader.read(fetcher);
+}
+
+export function loadRegions(fetcher?: ApiFetcher) {
+  return regionsLoader.read(fetcher);
+}
+
 export function usePipelineStages() {
   const [stages, setStages] = useState<PipelineStage[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     let cancelled = false;
-    api<{ stages: PipelineStage[] }>("/pipeline/stages")
+    loadPipelineStages()
       .then((data) => {
-        if (!cancelled) setStages(data.stages);
+        if (!cancelled) setStages(data);
       })
       .catch((err) => console.error("Failed to load stages:", err))
       .finally(() => { if (!cancelled) setLoading(false); });
@@ -65,8 +137,8 @@ export function useLostReasons() {
 
   useEffect(() => {
     let cancelled = false;
-    api<{ reasons: LostReason[] }>("/pipeline/lost-reasons")
-      .then((data) => { if (!cancelled) setReasons(data.reasons); })
+    loadLostReasons()
+      .then((data) => { if (!cancelled) setReasons(data); })
       .catch((err) => console.error("Failed to load lost reasons:", err))
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
@@ -81,8 +153,8 @@ export function useProjectTypes() {
 
   useEffect(() => {
     let cancelled = false;
-    api<{ projectTypes: ProjectType[] }>("/pipeline/project-types")
-      .then((data) => { if (!cancelled) setProjectTypes(data.projectTypes); })
+    loadProjectTypes()
+      .then((data) => { if (!cancelled) setProjectTypes(data); })
       .catch((err) => console.error("Failed to load project types:", err))
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
@@ -105,8 +177,8 @@ export function useRegions() {
 
   useEffect(() => {
     let cancelled = false;
-    api<{ regions: Region[] }>("/pipeline/regions")
-      .then((data) => { if (!cancelled) setRegions(data.regions); })
+    loadRegions()
+      .then((data) => { if (!cancelled) setRegions(data); })
       .catch((err) => console.error("Failed to load regions:", err))
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
