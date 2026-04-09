@@ -1,4 +1,5 @@
 import express, { Router } from "express";
+import compression, { type CompressionFilter } from "compression";
 import cors from "cors";
 import cookieParser from "cookie-parser";
 import { existsSync } from "fs";
@@ -33,6 +34,7 @@ import { searchRoutes } from "./modules/search/routes.js";
 import { companyRoutes } from "./modules/companies/routes.js";
 import { adminRoutes } from "./modules/admin/routes.js";
 import { companycamRoutes } from "./modules/companycam/routes.js";
+import { getAllowedCorsOrigins } from "./modules/auth/http-config.js";
 
 export function createApp() {
   const app = express();
@@ -41,9 +43,15 @@ export function createApp() {
     app.set("trust proxy", 1);
   }
 
-  // Core middleware
+  // Core middleware — skip compression for SSE streams (buffering breaks real-time delivery)
+  app.use(compression({
+    filter: (req, res) => {
+      if (req.path === "/api/notifications/stream") return false;
+      return (compression.filter as CompressionFilter)(req, res);
+    },
+  }));
   app.use(cors({
-    origin: process.env.FRONTEND_URL || "http://localhost:5173",
+    origin: getAllowedCorsOrigins(process.env),
     credentials: true,
   }));
 
@@ -58,7 +66,6 @@ export function createApp() {
     express.json({ limit: "10mb" })(req, res, next);
   });
   app.use(cookieParser());
-  app.use("/api", apiLimiter);
 
   // API Documentation
   app.use("/api/docs", swaggerUi.serve, swaggerUi.setup(apiSpec, {
@@ -92,6 +99,9 @@ export function createApp() {
   // Tenant-scoped routes — auth + tenant middleware applied
   // All feature routes (deals, contacts, tasks, etc.) go through this chain
   const tenantRouter = Router();
+
+  // Rate limit per authenticated user (mounted here so req.user is populated by authMiddleware)
+  tenantRouter.use(apiLimiter);
 
   // Feature routes
   tenantRouter.use("/deals", dealRoutes);

@@ -39,6 +39,12 @@ export interface Deal {
 }
 
 export interface DealDetail extends Deal {
+  proposalStatus: string | null;
+  proposalSentAt: string | null;
+  proposalAcceptedAt: string | null;
+  proposalRevisionCount: number | null;
+  proposalNotes: string | null;
+  estimatingSubstage: string | null;
   stageHistory: Array<{
     id: string;
     dealId: string;

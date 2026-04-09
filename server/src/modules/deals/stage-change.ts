@@ -13,6 +13,7 @@ import { eventBus } from "../../events/bus.js";
 import { DOMAIN_EVENTS } from "../../events/types.js";
 import { validateStageGate } from "./stage-gate.js";
 import type { UserRole } from "@trock-crm/shared/types";
+import { createStageTimers } from "./timer-service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -259,6 +260,14 @@ export async function changeDealStage(
       payload: { eventName: "deal.lost", ...lostPayload },
       status: "pending",
     });
+  }
+
+  // Auto-create stage-specific timers (best-effort, inside transaction)
+  try {
+    await createStageTimers(tenantDb, dealId, targetStage.slug, userId);
+  } catch (timerErr) {
+    // Non-blocking — log and continue. Stage change must not fail due to timer errors.
+    console.error("[StageChange] Failed to create stage timers:", timerErr);
   }
 
   // Return events for the route handler to emit locally AFTER commitTransaction().

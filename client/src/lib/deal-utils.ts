@@ -89,6 +89,18 @@ export function formatDate(date: string | Date | null): string {
 }
 
 /**
+ * Format a date as "Mon D, YYYY" (short display for proposals/closeout).
+ */
+export function formatShortDate(iso: string | null | undefined): string {
+  if (!iso) return "";
+  return new Date(iso).toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+}
+
+/**
  * Get win probability color for badges.
  */
 export function winProbabilityColor(probability: number | null): string {

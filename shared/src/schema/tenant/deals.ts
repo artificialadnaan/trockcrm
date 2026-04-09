@@ -1,5 +1,6 @@
 import {
   pgTable,
+  pgEnum,
   uuid,
   varchar,
   text,
@@ -10,6 +11,26 @@ import {
   date,
   timestamp,
 } from "drizzle-orm/pg-core";
+
+export const proposalStatusEnum = pgEnum("proposal_status", [
+  "not_started",
+  "drafting",
+  "sent",
+  "under_review",
+  "revision_requested",
+  "accepted",
+  "signed",
+  "rejected",
+]);
+
+export const estimatingSubstageEnum = pgEnum("estimating_substage", [
+  "scope_review",
+  "site_visit",
+  "missing_info",
+  "building_estimate",
+  "under_review",
+  "sent_to_client",
+]);
 
 // Note: These reference public schema tables by UUID. Drizzle cross-schema references
 // are defined here for TypeScript typing. The actual FK constraints are in the SQL migration
@@ -52,6 +73,12 @@ export const deals = pgTable("deals", {
   companycamProjectId: varchar("companycam_project_id", { length: 50 }),
   propertyLat: numeric("property_lat", { precision: 10, scale: 7 }),
   propertyLng: numeric("property_lng", { precision: 10, scale: 7 }),
+  estimatingSubstage: estimatingSubstageEnum("estimating_substage"),
+  proposalStatus: proposalStatusEnum("proposal_status").default("not_started"),
+  proposalSentAt: timestamp("proposal_sent_at", { withTimezone: true }),
+  proposalAcceptedAt: timestamp("proposal_accepted_at", { withTimezone: true }),
+  proposalRevisionCount: integer("proposal_revision_count").default(0),
+  proposalNotes: text("proposal_notes"),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 });

@@ -16,6 +16,7 @@
     "@aws-sdk/s3-request-presigner": "^3.1022.0",
     "@azure/msal-node": "^3.3.0",
     "@trock-crm/shared": "*",
+    "compression": "^1.8.1",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
@@ -28,6 +29,7 @@
     "swagger-ui-express": "^5.0.1"
   },
   "devDependencies": {
+    "@types/compression": "^1.8.1",
     "@types/cookie-parser": "^1.4.8",
     "@types/cors": "^2.8.17",
     "@types/express": "^5.0.0",

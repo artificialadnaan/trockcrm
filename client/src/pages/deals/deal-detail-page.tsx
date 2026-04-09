@@ -21,6 +21,13 @@ import { DealOverviewTab } from "@/components/deals/deal-overview-tab";
 import { DealHistoryTab } from "@/components/deals/deal-history-tab";
 import { DealTimelineTab } from "@/components/deals/deal-timeline-tab";
 import { DealFileTab } from "@/components/files/deal-file-tab";
+import { DealTeamTab } from "./deal-team-tab";
+import { DealEstimatesTab } from "./deal-estimates-tab";
+import { DealPunchListTab } from "./deal-punch-list-tab";
+import { DealCloseoutTab } from "./deal-closeout-tab";
+import { DealTimersBanner } from "./deal-timers-banner";
+import { DealProposalCard } from "./deal-proposal-card";
+import { DealEstimatingSubstage } from "./deal-estimating-substage";
 import { ActivityLogForm } from "@/components/activities/activity-log-form";
 import { StageChangeDialog } from "@/components/deals/stage-change-dialog";
 import { TaskCreateDialog } from "@/components/tasks/task-create-dialog";
@@ -30,7 +37,7 @@ import { usePipelineStages } from "@/hooks/use-pipeline-config";
 import { useAuth } from "@/lib/auth";
 import { formatCurrency, bestEstimate } from "@/lib/deal-utils";
 
-type Tab = "overview" | "files" | "email" | "activity" | "timeline" | "history";
+type Tab = "overview" | "files" | "email" | "activity" | "timeline" | "history" | "team" | "estimates" | "punch_list" | "closeout";
 
 export function DealDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -41,6 +48,7 @@ export function DealDetailPage() {
   const [activeTab, setActiveTab] = useState<Tab>("overview");
   const [stageChangeOpen, setStageChangeOpen] = useState(false);
   const [targetStageId, setTargetStageId] = useState<string | null>(null);
+  const [teamCount, setTeamCount] = useState<number | null>(null);
 
   if (loading) {
     return (
@@ -96,6 +104,10 @@ export function DealDetailPage() {
     }
   };
 
+  const currentStageSlug = currentStage?.slug ?? "";
+  const showPunchList = ["in_production", "close_out", "closed_won"].includes(currentStageSlug);
+  const showCloseout = ["close_out", "closed_won"].includes(currentStageSlug);
+
   const tabs: { key: Tab; label: string }[] = [
     { key: "overview", label: "Overview" },
     { key: "files", label: "Files" },
@@ -103,6 +115,10 @@ export function DealDetailPage() {
     { key: "activity", label: "Activity" },
     { key: "timeline", label: "Timeline" },
     { key: "history", label: "History" },
+    { key: "team", label: teamCount != null ? `Team (${teamCount})` : "Team" },
+    { key: "estimates", label: "Estimates" },
+    ...(showPunchList ? [{ key: "punch_list" as Tab, label: "Punch List" }] : []),
+    ...(showCloseout ? [{ key: "closeout" as Tab, label: "Close-Out" }] : []),
   ];
 
   return (
@@ -227,6 +243,14 @@ export function DealDetailPage() {
         </div>
       </div>
 
+      {/* Active Timers Banner */}
+      <DealTimersBanner dealId={deal.id} />
+
+      {/* Estimating Sub-Stage Indicator */}
+      {currentStageSlug === "estimating" && (
+        <DealEstimatingSubstage deal={deal} onUpdate={refetch} />
+      )}
+
       {/* Tabs */}
       <div className="border-b">
         <div className="flex gap-6">
@@ -247,7 +271,14 @@ export function DealDetailPage() {
       </div>
 
       {/* Tab Content */}
-      {activeTab === "overview" && <DealOverviewTab deal={deal} />}
+      {activeTab === "overview" && (
+        <div className="space-y-4">
+          {(currentStageSlug === "estimating" || currentStageSlug === "bid_sent") && (
+            <DealProposalCard deal={deal} onUpdate={refetch} />
+          )}
+          <DealOverviewTab deal={deal} />
+        </div>
+      )}
       {activeTab === "files" && <DealFileTab dealId={deal.id} />}
       {activeTab === "email" && <DealEmailTab dealId={deal.id} />}
       {activeTab === "activity" && <DealActivityPanel dealId={deal.id} />}
@@ -258,6 +289,12 @@ export function DealDetailPage() {
         />
       )}
       {activeTab === "history" && <DealHistoryTab deal={deal} />}
+      {activeTab === "team" && (
+        <DealTeamTab dealId={deal.id} onCountChange={setTeamCount} />
+      )}
+      {activeTab === "estimates" && <DealEstimatesTab dealId={deal.id} />}
+      {activeTab === "punch_list" && <DealPunchListTab dealId={deal.id} />}
+      {activeTab === "closeout" && <DealCloseoutTab dealId={deal.id} />}
 
       {/* Stage Change Dialog */}
       {stageChangeOpen && targetStageId && (

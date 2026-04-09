@@ -70,6 +70,9 @@ export interface UpdateDealInput {
   source?: string | null;
   winProbability?: number | null;
   expectedCloseDate?: string | null;
+  proposalStatus?: string | null;
+  proposalNotes?: string | null;
+  estimatingSubstage?: string | null;
 }
 
 /**
@@ -387,6 +390,53 @@ export async function updateDeal(
   if (input.source !== undefined) updates.source = input.source;
   if (input.winProbability !== undefined) updates.winProbability = input.winProbability;
   if (input.expectedCloseDate !== undefined) updates.expectedCloseDate = input.expectedCloseDate;
+  if (input.proposalNotes !== undefined) updates.proposalNotes = input.proposalNotes;
+
+  // Validate and set estimating substage
+  if (input.estimatingSubstage !== undefined) {
+    const VALID_SUBSTAGES = ["scope_review", "site_visit", "missing_info", "building_estimate", "under_review", "sent_to_client"];
+    if (input.estimatingSubstage !== null && !VALID_SUBSTAGES.includes(input.estimatingSubstage)) {
+      throw new AppError(400, `Invalid estimating substage: ${input.estimatingSubstage}`);
+    }
+    updates.estimatingSubstage = input.estimatingSubstage;
+  }
+
+  // Proposal status with validation, state machine enforcement, auto-timestamps, and revision counter
+  if (input.proposalStatus !== undefined) {
+    const VALID_STATUSES = ["not_started", "drafting", "sent", "under_review", "revision_requested", "accepted", "signed", "rejected"];
+    if (input.proposalStatus !== null && !VALID_STATUSES.includes(input.proposalStatus)) {
+      throw new AppError(400, `Invalid proposal status: ${input.proposalStatus}`);
+    }
+
+    // Enforce valid state transitions
+    const ALLOWED_TRANSITIONS: Record<string, string[]> = {
+      not_started: ["drafting"],
+      drafting: ["sent"],
+      sent: ["under_review", "rejected"],
+      under_review: ["revision_requested", "accepted", "rejected"],
+      revision_requested: ["sent"],
+      accepted: ["signed"],
+      signed: [],
+      rejected: [],
+    };
+
+    const currentStatus = existing.proposalStatus ?? "not_started";
+    if (input.proposalStatus !== null) {
+      const allowed = ALLOWED_TRANSITIONS[currentStatus] ?? [];
+      if (!allowed.includes(input.proposalStatus)) {
+        throw new AppError(400, `Cannot transition proposal from '${currentStatus}' to '${input.proposalStatus}'`);
+      }
+    }
+
+    updates.proposalStatus = input.proposalStatus;
+    if (input.proposalStatus === "sent") {
+      updates.proposalSentAt = new Date();
+    } else if (input.proposalStatus === "revision_requested") {
+      updates.proposalRevisionCount = sql`coalesce(proposal_revision_count, 0) + 1`;
+    } else if (input.proposalStatus === "accepted" || input.proposalStatus === "signed") {
+      updates.proposalAcceptedAt = new Date();
+    }
+  }
 
   if (Object.keys(updates).length === 0) {
     return existing;

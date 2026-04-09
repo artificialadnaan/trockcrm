@@ -108,6 +108,9 @@ export type SyncDirection = (typeof SYNC_DIRECTIONS)[number];
 export const SYNC_STATUSES = ["synced", "pending", "conflict", "error"] as const;
 export type SyncStatus = (typeof SYNC_STATUSES)[number];
 
+export const PROCORE_SYNC_MODES = ["active", "dry_run", "paused"] as const;
+export type ProcoreSyncMode = (typeof PROCORE_SYNC_MODES)[number];
+
 export const APPROVAL_STATUSES = ["pending", "approved", "rejected"] as const;
 export type ApprovalStatus = (typeof APPROVAL_STATUSES)[number];
 
@@ -152,3 +155,52 @@ export type EmailDirection = (typeof EMAIL_DIRECTIONS)[number];
 
 export const AUDIT_ACTIONS = ["insert", "update", "delete"] as const;
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];
+
+export const DEAL_TEAM_ROLES = [
+  "superintendent",
+  "estimator",
+  "project_manager",
+  "foreman",
+  "other",
+] as const;
+export type DealTeamRole = (typeof DEAL_TEAM_ROLES)[number];
+
+export const PUNCH_LIST_TYPES = ["internal", "external"] as const;
+export type PunchListType = (typeof PUNCH_LIST_TYPES)[number];
+
+export const PUNCH_LIST_STATUSES = ["open", "in_progress", "completed"] as const;
+export type PunchListStatus = (typeof PUNCH_LIST_STATUSES)[number];
+
+export const PROPOSAL_STATUSES = [
+  "not_started",
+  "drafting",
+  "sent",
+  "under_review",
+  "revision_requested",
+  "accepted",
+  "signed",
+  "rejected",
+] as const;
+export type ProposalStatus = (typeof PROPOSAL_STATUSES)[number];
+
+export const WORKFLOW_TIMER_TYPES = [
+  "proposal_response",
+  "estimate_review",
+  "companycam_service",
+  "final_billing",
+  "custom",
+] as const;
+export type WorkflowTimerType = (typeof WORKFLOW_TIMER_TYPES)[number];
+
+export const WORKFLOW_TIMER_STATUSES = ["active", "completed", "expired", "cancelled"] as const;
+export type WorkflowTimerStatus = (typeof WORKFLOW_TIMER_STATUSES)[number];
+
+export const ESTIMATING_SUBSTAGES = [
+  "scope_review",
+  "site_visit",
+  "missing_info",
+  "building_estimate",
+  "under_review",
+  "sent_to_client",
+] as const;
+export type EstimatingSubstage = (typeof ESTIMATING_SUBSTAGES)[number];

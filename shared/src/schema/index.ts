@@ -15,7 +15,7 @@ export { userGraphTokens, graphTokenStatusEnum } from "./public/user-graph-token
 export { jobQueue, jobStatusEnum } from "./public/job-queue.js";
 
 // Tenant schema tables (used for Drizzle type resolution when querying via tenantDb)
-export { deals } from "./tenant/deals.js";
+export { deals, proposalStatusEnum, estimatingSubstageEnum } from "./tenant/deals.js";
 export { dealStageHistory } from "./tenant/deal-stage-history.js";
 export { changeOrders, changeOrderStatusEnum } from "./tenant/change-orders.js";
 export { dealApprovals, approvalStatusEnum } from "./tenant/deal-approvals.js";
@@ -30,6 +30,12 @@ export { tasks, taskTypeEnum, taskPriorityEnum, taskStatusEnum } from "./tenant/
 export { taskResolutionState, taskResolutionStatusEnum } from "./tenant/task-resolution-state.js";
 export { notifications, notificationTypeEnum } from "./tenant/notifications.js";
 export { auditLog, auditActionEnum } from "./tenant/audit-log.js";
+export { dealTeamMembers, dealTeamRoleEnum } from "./tenant/deal-team-members.js";
+export { estimateSections } from "./tenant/estimate-sections.js";
+export { estimateLineItems } from "./tenant/estimate-line-items.js";
+export { punchListItems, punchListTypeEnum, punchListStatusEnum } from "./tenant/punch-list-items.js";
+export { workflowTimers, workflowTimerTypeEnum, workflowTimerStatusEnum } from "./tenant/workflow-timers.js";
+export { closeoutChecklistItems } from "./tenant/closeout-checklist-items.js";
 
 // Migration schema tables (staging area for HubSpot data migration)
 export { stagedDeals } from "./migration/staged-deals.js";

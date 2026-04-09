@@ -17,6 +17,44 @@ import {
 import { changeDealStage } from "./stage-change.js";
 import { preflightStageCheck } from "./stage-gate.js";
 import { getContactsForDeal } from "../contacts/association-service.js";
+import {
+  getTeamMembers,
+  addTeamMember,
+  updateTeamMember,
+  removeTeamMember,
+} from "./team-service.js";
+import {
+  getEstimate,
+  createSection,
+  updateSection,
+  deleteSection,
+  createLineItem,
+  updateLineItem,
+  deleteLineItem,
+} from "./estimate-service.js";
+import {
+  getPunchList,
+  createPunchListItem,
+  updatePunchListItem,
+  completePunchListItem,
+} from "./punch-list-service.js";
+import {
+  getTimers,
+  createTimer,
+  completeTimer,
+  cancelTimer,
+} from "./timer-service.js";
+import {
+  getCloseoutChecklist,
+  initializeCloseoutChecklist,
+  toggleChecklistItem,
+  updateChecklistItem,
+} from "./closeout-service.js";
+import {
+  DEAL_TEAM_ROLES,
+  PUNCH_LIST_TYPES,
+  WORKFLOW_TIMER_TYPES,
+} from "@trock-crm/shared/types";
 
 const router = Router();
 
@@ -490,6 +528,389 @@ router.delete("/:id", requireRole("admin", "director"), async (req, res, next) =
     await deleteDeal(req.tenantDb!, req.params.id as string, req.user!.role);
     await req.commitTransaction!();
     res.json({ success: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ── Deal Team Members ──────────────────────────────────────────────────────────
+
+// GET /api/deals/:id/team
+router.get("/:id/team", async (req, res, next) => {
+  try {
+    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+
+    const members = await getTeamMembers(req.tenantDb!, req.params.id);
+    await req.commitTransaction!();
+    res.json({ members });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/deals/:id/team
+router.post("/:id/team", async (req, res, next) => {
+  try {
+    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+
+    const { userId, role, notes } = req.body;
+    if (!userId || !role) throw new AppError(400, "userId and role are required");
+    if (!DEAL_TEAM_ROLES.includes(role)) throw new AppError(400, "Invalid role");
+
+    const member = await addTeamMember(req.tenantDb!, {
+      dealId: req.params.id,
+      userId,
+      role,
+      assignedBy: req.user!.id,
+      notes,
+    });
+    await req.commitTransaction!();
+    res.status(201).json({ member });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// PATCH /api/deals/:id/team/:memberId
+router.patch("/:id/team/:memberId", async (req, res, next) => {
+  try {
+    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+
+    const { role, notes } = req.body;
+    if (role !== undefined && !DEAL_TEAM_ROLES.includes(role)) throw new AppError(400, "Invalid role");
+    const member = await updateTeamMember(req.tenantDb!, req.params.memberId, req.params.id, { role, notes });
+    await req.commitTransaction!();
+    res.json({ member });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// DELETE /api/deals/:id/team/:memberId
+router.delete("/:id/team/:memberId", async (req, res, next) => {
+  try {
+    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+
+    await removeTeamMember(req.tenantDb!, req.params.memberId, req.params.id);
+    await req.commitTransaction!();
+    res.json({ success: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ── Estimates ──────────────────────────────────────────────────────────────────
+
+// GET /api/deals/:id/estimates
+router.get("/:id/estimates", async (req, res, next) => {
+  try {
+    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+
+    const estimate = await getEstimate(req.tenantDb!, req.params.id);
+    await req.commitTransaction!();
+    res.json(estimate);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/deals/:id/estimates/sections
+router.post("/:id/estimates/sections", async (req, res, next) => {
+  try {
+    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+
+    const { name, displayOrder } = req.body;
+    if (!name) throw new AppError(400, "name is required");
+
+    const section = await createSection(req.tenantDb!, req.params.id, name, displayOrder);
+    await req.commitTransaction!();
+    res.status(201).json({ section });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// PATCH /api/deals/:id/estimates/sections/:sectionId
+router.patch("/:id/estimates/sections/:sectionId", async (req, res, next) => {
+  try {
+    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+
+    const { name, displayOrder } = req.body;
+    const section = await updateSection(req.tenantDb!, req.params.sectionId, req.params.id, { name, displayOrder });
+    await req.commitTransaction!();
+    res.json({ section });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// DELETE /api/deals/:id/estimates/sections/:sectionId
+router.delete("/:id/estimates/sections/:sectionId", async (req, res, next) => {
+  try {
+    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+
+    await deleteSection(req.tenantDb!, req.params.sectionId, req.params.id);
+    await req.commitTransaction!();
+    res.json({ success: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/deals/:id/estimates/sections/:sectionId/items
+router.post("/:id/estimates/sections/:sectionId/items", async (req, res, next) => {
+  try {
+    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+
+    const { description, quantity, unit, unitPrice, notes, displayOrder } = req.body;
+    const item = await createLineItem(req.tenantDb!, req.params.id, req.params.sectionId, {
+      description,
+      quantity,
+      unit,
+      unitPrice,
+      notes,
+      displayOrder,
+    });
+    await req.commitTransaction!();
+    res.status(201).json({ item });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// PATCH /api/deals/:id/estimates/items/:itemId
+router.patch("/:id/estimates/items/:itemId", async (req, res, next) => {
+  try {
+    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+
+    const { description, quantity, unit, unitPrice, notes, displayOrder } = req.body;
+    const item = await updateLineItem(req.tenantDb!, req.params.itemId, req.params.id, {
+      description,
+      quantity,
+      unit,
+      unitPrice,
+      notes,
+      displayOrder,
+    });
+    await req.commitTransaction!();
+    res.json({ item });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// DELETE /api/deals/:id/estimates/items/:itemId
+router.delete("/:id/estimates/items/:itemId", async (req, res, next) => {
+  try {
+    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+
+    await deleteLineItem(req.tenantDb!, req.params.itemId, req.params.id);
+    await req.commitTransaction!();
+    res.json({ success: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ── Punch List ─────────────────────────────────────────────────────────────────
+
+// GET /api/deals/:id/punch-list
+router.get("/:id/punch-list", async (req, res, next) => {
+  try {
+    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+
+    const result = await getPunchList(req.tenantDb!, req.params.id);
+    await req.commitTransaction!();
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/deals/:id/punch-list
+router.post("/:id/punch-list", async (req, res, next) => {
+  try {
+    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+
+    const { type, title, description, assignedTo, location, priority } = req.body;
+    if (type !== undefined && !PUNCH_LIST_TYPES.includes(type)) throw new AppError(400, "Invalid punch list type");
+    const item = await createPunchListItem(req.tenantDb!, {
+      dealId: req.params.id,
+      type,
+      title,
+      description,
+      assignedTo,
+      location,
+      priority,
+      createdBy: req.user!.id,
+    });
+    await req.commitTransaction!();
+    res.status(201).json({ item });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// PATCH /api/deals/:id/punch-list/:itemId
+router.patch("/:id/punch-list/:itemId", async (req, res, next) => {
+  try {
+    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+
+    const { type, title, description, assignedTo, location, priority, status } = req.body;
+    if (type !== undefined && !PUNCH_LIST_TYPES.includes(type)) throw new AppError(400, "Invalid punch list type");
+    const item = await updatePunchListItem(req.tenantDb!, req.params.itemId, req.params.id, {
+      type,
+      title,
+      description,
+      assignedTo,
+      location,
+      priority,
+      status,
+    });
+    await req.commitTransaction!();
+    res.json({ item });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/deals/:id/punch-list/:itemId/complete
+router.post("/:id/punch-list/:itemId/complete", async (req, res, next) => {
+  try {
+    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+
+    const item = await completePunchListItem(req.tenantDb!, req.params.itemId, req.params.id, req.user!.id);
+    await req.commitTransaction!();
+    res.json({ item });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ── Workflow Timers ────────────────────────────────────────────────────────────
+
+// GET /api/deals/:id/timers
+router.get("/:id/timers", async (req, res, next) => {
+  try {
+    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+
+    const result = await getTimers(req.tenantDb!, req.params.id);
+    await req.commitTransaction!();
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/deals/:id/timers
+router.post("/:id/timers", async (req, res, next) => {
+  try {
+    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+
+    const { timerType, label, deadlineAt } = req.body;
+    if (!timerType || !deadlineAt) throw new AppError(400, "timerType and deadlineAt are required");
+    if (!WORKFLOW_TIMER_TYPES.includes(timerType)) throw new AppError(400, "Invalid timer type");
+
+    const timer = await createTimer(req.tenantDb!, {
+      dealId: req.params.id,
+      timerType,
+      label,
+      deadlineAt,
+      createdBy: req.user!.id,
+    });
+    await req.commitTransaction!();
+    res.status(201).json({ timer });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// PATCH /api/deals/:id/timers/:timerId — complete or cancel
+router.patch("/:id/timers/:timerId", async (req, res, next) => {
+  try {
+    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+
+    const { action } = req.body;
+    if (!action || !["complete", "cancel"].includes(action)) {
+      throw new AppError(400, "action must be 'complete' or 'cancel'");
+    }
+
+    const timer =
+      action === "complete"
+        ? await completeTimer(req.tenantDb!, req.params.timerId, req.params.id)
+        : await cancelTimer(req.tenantDb!, req.params.timerId, req.params.id);
+
+    await req.commitTransaction!();
+    res.json({ timer });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ── Close-Out Checklist ────────────────────────────────────────────────────────
+
+// GET /api/deals/:id/closeout
+router.get("/:id/closeout", async (req, res, next) => {
+  try {
+    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+
+    const result = await getCloseoutChecklist(req.tenantDb!, req.params.id);
+    await req.commitTransaction!();
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/deals/:id/closeout/initialize
+router.post("/:id/closeout/initialize", async (req, res, next) => {
+  try {
+    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+    await initializeCloseoutChecklist(req.tenantDb!, req.params.id);
+    const checklist = await getCloseoutChecklist(req.tenantDb!, req.params.id);
+    await req.commitTransaction!();
+    res.json(checklist);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// PATCH /api/deals/:id/closeout/:itemId — update checklist item (toggle or set notes)
+router.patch("/:id/closeout/:itemId", async (req, res, next) => {
+  try {
+    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+
+    const { isCompleted, notes } = req.body;
+    const item = await updateChecklistItem(
+      req.tenantDb!,
+      req.params.itemId,
+      req.params.id,
+      req.user!.id,
+      { isCompleted, notes }
+    );
+    await req.commitTransaction!();
+    res.json({ item });
   } catch (err) {
     next(err);
   }

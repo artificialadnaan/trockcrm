@@ -18,38 +18,75 @@ declare global {
   }
 }
 
+// ── In-memory cache for office slugs and validated schemas ──────────────
+// Eliminates 2 DB queries per request for data that rarely changes.
+const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+interface CacheEntry<T> { value: T; expiresAt: number; }
+const officeSlugCache = new Map<string, CacheEntry<string>>();
+const schemaExistsCache = new Map<string, CacheEntry<boolean>>();
+
+function getCached<T>(cache: Map<string, CacheEntry<T>>, key: string): T | undefined {
+  const entry = cache.get(key);
+  if (!entry) return undefined;
+  if (Date.now() > entry.expiresAt) { cache.delete(key); return undefined; }
+  return entry.value;
+}
+
+function setCache<T>(cache: Map<string, CacheEntry<T>>, key: string, value: T): void {
+  cache.set(key, { value, expiresAt: Date.now() + CACHE_TTL_MS });
+}
+
+/** Call when an office is created/updated/deactivated to bust the cache. */
+export function invalidateOfficeCache(officeId?: string): void {
+  if (officeId) {
+    officeSlugCache.delete(officeId);
+  } else {
+    officeSlugCache.clear();
+    schemaExistsCache.clear();
+  }
+}
+// ────────────────────────────────────────────────────────────────────────
+
 export async function tenantMiddleware(req: Request, res: Response, next: NextFunction) {
   if (!req.user) {
     return next(new AppError(401, "Authentication required for tenant resolution"));
   }
 
+  // Resolve office slug (cached)
+  const activeOfficeId = req.user.activeOfficeId;
+  let officeSlug = getCached(officeSlugCache, activeOfficeId);
+
   const client = await pool.connect();
   let committed = false;
 
   try {
-    // Look up office slug
-    const officeResult = await client.query(
-      "SELECT slug FROM public.offices WHERE id = $1 AND is_active = true",
-      [req.user.activeOfficeId]
-    );
-
-    if (officeResult.rows.length === 0) {
-      client.release();
-      return next(new AppError(404, "Office not found or inactive"));
+    if (!officeSlug) {
+      const officeResult = await client.query(
+        "SELECT slug FROM public.offices WHERE id = $1 AND is_active = true",
+        [activeOfficeId]
+      );
+      if (officeResult.rows.length === 0) {
+        client.release();
+        return next(new AppError(404, "Office not found or inactive"));
+      }
+      officeSlug = officeResult.rows[0].slug;
+      setCache(officeSlugCache, activeOfficeId, officeSlug);
     }
 
-    const officeSlug = officeResult.rows[0].slug;
     const schemaName = `office_${officeSlug}`;
 
-    // Validate schema exists
-    const schemaCheck = await client.query(
-      "SELECT schema_name FROM information_schema.schemata WHERE schema_name = $1",
-      [schemaName]
-    );
-
-    if (schemaCheck.rows.length === 0) {
-      client.release();
-      return next(new AppError(500, `Office schema ${schemaName} does not exist`));
+    // Validate schema exists (cached)
+    if (!getCached(schemaExistsCache, schemaName)) {
+      const schemaCheck = await client.query(
+        "SELECT schema_name FROM information_schema.schemata WHERE schema_name = $1",
+        [schemaName]
+      );
+      if (schemaCheck.rows.length === 0) {
+        client.release();
+        return next(new AppError(500, `Office schema ${schemaName} does not exist`));
+      }
+      setCache(schemaExistsCache, schemaName, true);
     }
 
     // Begin transaction

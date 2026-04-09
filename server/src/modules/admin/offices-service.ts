@@ -3,6 +3,7 @@ import { offices } from "@trock-crm/shared/schema";
 import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { createOffice as provisionOffice } from "../office/service.js";
+import { invalidateOfficeCache } from "../../middleware/tenant.js";
 
 export async function listOffices() {
   return db
@@ -64,6 +65,9 @@ export async function updateOffice(
     .set(updates)
     .where(eq(offices.id, id))
     .returning();
+
+  // Bust tenant middleware cache so deactivated offices take effect immediately
+  invalidateOfficeCache(id);
 
   return updated;
 }

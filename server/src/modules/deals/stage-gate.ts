@@ -5,6 +5,7 @@ import {
   deals,
   dealApprovals,
   files,
+  closeoutChecklistItems,
 } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { db } from "../../db.js";
@@ -189,7 +190,38 @@ export async function validateStageGate(
     }
   }
 
-  // Rule 2: Missing requirements -- blocked for reps, director can override
+  // Rule 2: Close-out checklist must be complete before moving to closed_won
+  if (targetStage.slug === "closed_won" && currentStage.slug === "close_out") {
+    const checklistItems = await tenantDb
+      .select()
+      .from(closeoutChecklistItems)
+      .where(eq(closeoutChecklistItems.dealId, dealId));
+
+    if (checklistItems.length === 0) {
+      // Checklist was never initialized — block until user visits Close-Out tab
+      if (!isDirectorOrAdmin) {
+        allowed = false;
+        blockReason = "Close-out checklist has not been initialized. Visit the Close-Out tab to begin.";
+      } else {
+        requiresOverride = true;
+        overrideType = overrideType ?? "missing_requirements";
+      }
+    } else {
+      const incomplete = checklistItems.filter((item) => !item.isCompleted);
+      if (incomplete.length > 0) {
+        const labels = incomplete.map((i) => i.label).join(", ");
+        if (!isDirectorOrAdmin) {
+          allowed = false;
+          blockReason = `Close-out checklist incomplete: ${labels}`;
+        } else {
+          requiresOverride = true;
+          overrideType = overrideType ?? "missing_requirements";
+        }
+      }
+    }
+  }
+
+  // Rule 3: Missing requirements -- blocked for reps, director can override
   if (hasMissingRequirements) {
     if (!isDirectorOrAdmin) {
       allowed = false;
