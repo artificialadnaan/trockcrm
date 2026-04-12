@@ -114,7 +114,10 @@ export async function listProjectValidationForOffice(
         .then((rows) =>
           rows.map((row) => ({
             ...row,
-            updatedAt: row.updatedAt?.toISOString?.() ?? (row.updatedAt as string | null),
+            updatedAt:
+              row.updatedAt instanceof Date
+                ? row.updatedAt.toISOString()
+                : row.updatedAt ?? null,
           }))
         ),
   });

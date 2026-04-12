@@ -18,6 +18,9 @@ vi.mock("../../../src/modules/procore/project-validation-service.js", async () =
 });
 
 const { procoreRoutes } = await import("../../../src/modules/procore/routes.js");
+const { listProjectValidationForOffice } = await vi.importActual<
+  typeof import("../../../src/modules/procore/project-validation-service.js")
+>("../../../src/modules/procore/project-validation-service.js");
 
 function makeProject(overrides: Partial<{
   id: number;
@@ -423,6 +426,49 @@ describe("project validation service", () => {
     expect(listProjectsPage).toHaveBeenCalledTimes(2);
     expect(result.projects.map((row) => row.project.id)).toEqual([1, 2]);
     expect(result.meta.truncated).toBe(true);
+  });
+
+  it("normalizes office deal updatedAt values to ISO strings", async () => {
+    const rows = [
+      {
+        id: "deal-date",
+        dealNumber: "TR-001",
+        name: "Alpha Tower",
+        city: "Dallas",
+        state: "TX",
+        address: "100 Main St",
+        procoreProjectId: null,
+        updatedAt: new Date("2026-04-12T10:00:00.000Z"),
+      },
+      {
+        id: "deal-null",
+        dealNumber: "TR-002",
+        name: "Beta Tower",
+        city: "Austin",
+        state: "TX",
+        address: "200 Main St",
+        procoreProjectId: null,
+        updatedAt: null,
+      },
+    ];
+
+    const tenantDb = {
+      select: vi.fn().mockReturnValue({
+        from: vi.fn().mockReturnValue({
+          where: vi.fn().mockResolvedValue(rows),
+        }),
+      }),
+    } as any;
+
+    const result = await listProjectValidationForOffice(tenantDb, {
+      companyId: "598134325683880",
+      pageSize: 100,
+      maxProjects: 100,
+      listProjectsPage: vi.fn().mockResolvedValueOnce([]),
+    });
+
+    expect(result.summary.totalDeals).toBe(2);
+    expect(tenantDb.select).toHaveBeenCalledOnce();
   });
 });
 
