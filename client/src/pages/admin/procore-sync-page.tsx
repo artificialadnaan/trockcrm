@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
+import { useSearchParams } from "react-router-dom";
 import { RefreshCw, AlertTriangle, CheckCircle2, XCircle, Zap, Clock, Activity } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -14,7 +15,9 @@ import {
 import { api } from "@/lib/api";
 import {
   buildValidationSummary,
+  canLoadProcoreValidation,
   formatValidationMatchReason,
+  getProcoreRedirectBanner,
   getProcoreConnectionBanner,
   type ProcoreAuthStatus,
 } from "@/lib/procore-validation-view-model";
@@ -186,6 +189,7 @@ function formatDealLabel(deal: ProjectValidationDeal | null) {
 }
 
 export function ProcoreSyncPage() {
+  const [searchParams] = useSearchParams();
   const [data, setData] = useState<SyncStatusResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [resolving, setResolving] = useState<string | null>(null);
@@ -247,7 +251,7 @@ export function ProcoreSyncPage() {
   }, [loadSyncStatus, loadProcoreStatus]);
 
   useEffect(() => {
-    if (procoreStatus?.connected) {
+    if (canLoadProcoreValidation(procoreStatus)) {
       loadValidation();
     } else if (procoreStatus) {
       setValidationData(null);
@@ -320,6 +324,10 @@ export function ProcoreSyncPage() {
     healthColor === "green" ? "Healthy" : healthColor === "amber" ? "Warning" : "Degraded";
   const validationSummary = buildValidationSummary(validationData?.projects ?? []);
   const connectionBanner = getProcoreConnectionBanner(procoreStatus);
+  const redirectBanner = getProcoreRedirectBanner({
+    procore: searchParams.get("procore"),
+    reason: searchParams.get("reason"),
+  });
 
   return (
     <div className="space-y-6">
@@ -347,6 +355,21 @@ export function ProcoreSyncPage() {
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
+          {redirectBanner ? (
+            <div
+              className={`rounded-md border p-3 text-sm ${
+                redirectBanner.tone === "success"
+                  ? "border-green-200 bg-green-50 text-green-800"
+                  : "border-red-200 bg-red-50 text-red-700"
+              }`}
+            >
+              <div className="space-y-1">
+                <p className="font-medium">{redirectBanner.title}</p>
+                <p>{redirectBanner.description}</p>
+              </div>
+            </div>
+          ) : null}
+
           <div className="flex flex-col gap-2 text-sm text-muted-foreground md:flex-row md:items-center md:justify-between">
             <div className="space-y-2">
               <p>
@@ -371,11 +394,11 @@ export function ProcoreSyncPage() {
               <Button variant="outline" size="sm" onClick={disconnectProcore}>
                 Disconnect Procore
               </Button>
-            ) : (
+            ) : connectionBanner?.actionLabel ? (
               <Button size="sm" onClick={connectProcore}>
                 {connectionBanner?.actionLabel ?? "Connect Procore"}
               </Button>
-            )}
+            ) : null}
           </div>
 
           {connectionBanner ? (

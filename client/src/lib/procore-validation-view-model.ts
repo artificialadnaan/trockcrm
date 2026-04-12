@@ -28,7 +28,13 @@ type ProcoreConnectionBanner = {
   tone: "warning" | "destructive";
   title: string;
   description: string;
-  actionLabel: string;
+  actionLabel?: string;
+};
+
+export type ProcoreRedirectBanner = {
+  tone: "success" | "destructive";
+  title: string;
+  description: string;
 };
 
 export function buildValidationSummary(rows: ValidationSummaryInput[]) {
@@ -67,6 +73,26 @@ export function formatValidationMatchReason(reason: ValidationMatchReason) {
   }
 }
 
+export function canLoadProcoreValidation(status: ProcoreAuthStatus | null) {
+  if (!status) {
+    return false;
+  }
+
+  if (status.connected) {
+    return true;
+  }
+
+  if (status.status === "reauth_needed") {
+    return false;
+  }
+
+  if (status.authMode === "oauth") {
+    return false;
+  }
+
+  return status.authMode === "client_credentials" || status.authMode === "dev";
+}
+
 export function getProcoreConnectionBanner(
   status: ProcoreAuthStatus | null
 ): ProcoreConnectionBanner | null {
@@ -88,9 +114,18 @@ export function getProcoreConnectionBanner(
   if (status.authMode === "dev") {
     return {
       tone: "warning",
-      title: "Procore OAuth unavailable",
+      title: "Using development fallback access",
       description:
-        "Procore OAuth is not configured in this environment, so project validation cannot run.",
+        "Procore OAuth is not configured in this environment. Read-only validation can still run using development fallback access.",
+    };
+  }
+
+  if (status.authMode === "client_credentials") {
+    return {
+      tone: "warning",
+      title: "Using fallback Procore access",
+      description:
+        "Read-only validation is using the configured client credentials fallback. Connect Procore to switch to shared OAuth access.",
       actionLabel: "Connect Procore",
     };
   }
@@ -102,4 +137,38 @@ export function getProcoreConnectionBanner(
       "Project validation only runs against an authenticated Procore session. Connect Procore to load live projects.",
     actionLabel: "Connect Procore",
   };
+}
+
+function formatProcoreCallbackReason(reason: string | null | undefined) {
+  if (!reason) {
+    return "unknown error";
+  }
+
+  return reason.replace(/_/g, " ");
+}
+
+export function getProcoreRedirectBanner({
+  procore,
+  reason,
+}: {
+  procore?: string | null;
+  reason?: string | null;
+}): ProcoreRedirectBanner | null {
+  if (procore === "connected") {
+    return {
+      tone: "success",
+      title: "Procore connected",
+      description: "Procore OAuth connected successfully.",
+    };
+  }
+
+  if (procore === "error") {
+    return {
+      tone: "destructive",
+      title: "Procore connection failed",
+      description: `Failed to connect Procore: ${formatProcoreCallbackReason(reason)}.`,
+    };
+  }
+
+  return null;
 }
