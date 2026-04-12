@@ -1,5 +1,6 @@
 CREATE TABLE IF NOT EXISTS public.procore_oauth_tokens (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  singleton_key integer NOT NULL DEFAULT 1 UNIQUE,
   access_token text NOT NULL,
   refresh_token text NOT NULL,
   token_expires_at timestamptz NOT NULL,

@@ -1,7 +1,8 @@
-import { pgTable, uuid, text, timestamp } from "drizzle-orm/pg-core";
+import { integer, pgTable, uuid, text, timestamp } from "drizzle-orm/pg-core";
 
 export const procoreOauthTokens = pgTable("procore_oauth_tokens", {
   id: uuid("id").primaryKey().defaultRandom(),
+  singletonKey: integer("singleton_key").notNull().default(1).unique(),
   accessToken: text("access_token").notNull(),
   refreshToken: text("refresh_token").notNull(),
   tokenExpiresAt: timestamp("token_expires_at", { withTimezone: true }).notNull(),

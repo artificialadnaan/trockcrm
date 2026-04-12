@@ -1,7 +1,7 @@
 import { eq } from "drizzle-orm";
 import { db } from "../../db.js";
 import { decrypt, encrypt } from "../../lib/encryption.js";
-import { procoreOauthTokens } from "../../../../shared/src/schema/public/procore-oauth-tokens.js";
+import { procoreOauthTokens } from "@trock-crm/shared/schema";
 
 export interface ProcoreOauthTokenData {
   accessToken: string;
@@ -21,31 +21,8 @@ export async function upsertProcoreOauthTokens(
   const encryptedAccessToken = encrypt(tokens.accessToken);
   const encryptedRefreshToken = encrypt(tokens.refreshToken);
 
-  const existingRows = await dbClient
-    .select({ id: procoreOauthTokens.id })
-    .from(procoreOauthTokens)
-    .limit(1);
-
-  const row = existingRows[0];
-  if (row) {
-    await dbClient
-      .update(procoreOauthTokens)
-      .set({
-        accessToken: encryptedAccessToken,
-        refreshToken: encryptedRefreshToken,
-        tokenExpiresAt: tokens.expiresAt,
-        scopes: tokens.scopes,
-        connectedAccountEmail: tokens.accountEmail ?? null,
-        connectedAccountName: tokens.accountName ?? null,
-        status: "active",
-        lastError: null,
-        updatedAt: new Date(),
-      })
-      .where(eq(procoreOauthTokens.id, row.id));
-    return;
-  }
-
   await dbClient.insert(procoreOauthTokens).values({
+    singletonKey: 1,
     accessToken: encryptedAccessToken,
     refreshToken: encryptedRefreshToken,
     tokenExpiresAt: tokens.expiresAt,
@@ -54,6 +31,20 @@ export async function upsertProcoreOauthTokens(
     connectedAccountName: tokens.accountName ?? null,
     status: "active",
     lastError: null,
+  }).onConflictDoUpdate({
+    target: procoreOauthTokens.singletonKey,
+    set: {
+      singletonKey: 1,
+      accessToken: encryptedAccessToken,
+      refreshToken: encryptedRefreshToken,
+      tokenExpiresAt: tokens.expiresAt,
+      scopes: tokens.scopes,
+      connectedAccountEmail: tokens.accountEmail ?? null,
+      connectedAccountName: tokens.accountName ?? null,
+      status: "active",
+      lastError: null,
+      updatedAt: new Date(),
+    },
   });
 }
 
@@ -73,7 +64,11 @@ export async function getStoredProcoreOauthTokens(
     }
   | null
 > {
-  const rows = await dbClient.select().from(procoreOauthTokens).limit(1);
+  const rows = await dbClient
+    .select()
+    .from(procoreOauthTokens)
+    .where(eq(procoreOauthTokens.singletonKey, 1))
+    .limit(1);
   const row = rows[0];
   if (!row) return null;
 
@@ -91,20 +86,15 @@ export async function getStoredProcoreOauthTokens(
 }
 
 export async function markProcoreOauthReauthNeeded(
-  dbClient: ProcoreOauthDb | undefined,
+  dbClient: ProcoreOauthDb = db,
   errorMessage: string
 ): Promise<void> {
-  const client = dbClient ?? db;
-  const rows = await client.select({ id: procoreOauthTokens.id }).from(procoreOauthTokens).limit(1);
-  const row = rows[0];
-  if (!row) return;
-
-  await client
+  await dbClient
     .update(procoreOauthTokens)
     .set({
       status: "reauth_needed",
       lastError: errorMessage,
       updatedAt: new Date(),
     })
-    .where(eq(procoreOauthTokens.id, row.id));
+    .where(eq(procoreOauthTokens.singletonKey, 1));
 }
