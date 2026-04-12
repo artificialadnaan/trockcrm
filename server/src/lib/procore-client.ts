@@ -246,3 +246,31 @@ export async function listCompanyProjectsPage(
     updatedAt: row.updated_at ?? null,
   }));
 }
+
+export interface ProcoreProjectCandidateRow {
+  id: number;
+  name: string;
+  projectNumber: string | null;
+  city: string | null;
+  state: string | null;
+  address: string | null;
+  updatedAt: string | null;
+}
+
+export async function listCompanyProjectCandidatesPage(
+  companyId: string,
+  page: number,
+  pageSize: number
+): Promise<ProcoreProjectCandidateRow[]> {
+  const rows = await listCompanyProjectsPage(companyId, page, pageSize);
+
+  return rows.map((row) => ({
+    id: row.id,
+    name: row.displayName || row.name || `Project ${row.id}`,
+    projectNumber: row.projectNumber,
+    city: row.city,
+    state: row.state,
+    address: row.address,
+    updatedAt: row.updatedAt,
+  }));
+}
