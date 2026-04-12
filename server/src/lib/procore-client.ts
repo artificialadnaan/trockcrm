@@ -1,11 +1,17 @@
 // server/src/lib/procore-client.ts
 // Procore API client with OAuth client credentials, retry, and circuit breaker.
 
+import {
+  getStoredProcoreOauthTokens,
+  refreshStoredProcoreOauthTokens,
+} from "../modules/procore/oauth-token-service.js";
+
 const PROCORE_BASE_URL = "https://api.procore.com";
 const MAX_RETRIES = 3;
 const BACKOFF_MS = [1000, 3000, 9000];
 const CIRCUIT_BREAKER_THRESHOLD = 5;
 const CIRCUIT_BREAKER_RESET_MS = 60_000;
+const OAUTH_REFRESH_BUFFER_MS = 60_000;
 
 type CircuitState = "closed" | "open" | "half_open";
 
@@ -50,7 +56,7 @@ function recordFailure(): void {
   }
 }
 
-let cachedToken: { value: string; expiresAt: number } | null = null;
+let cachedClientCredentialsToken: { value: string; expiresAt: number } | null = null;
 
 /**
  * Dev mode: when PROCORE_CLIENT_ID is not set, all API calls return mock data.
@@ -59,19 +65,22 @@ function isDevMode(): boolean {
   return !process.env.PROCORE_CLIENT_ID || !process.env.PROCORE_CLIENT_SECRET;
 }
 
-async function getAccessToken(): Promise<string> {
+async function getAccessToken(fetchImpl: typeof fetch = fetch): Promise<string> {
   if (isDevMode()) {
     return "dev-mock-token";
   }
 
-  if (cachedToken && cachedToken.expiresAt - Date.now() > 60_000) {
-    return cachedToken.value;
+  if (
+    cachedClientCredentialsToken &&
+    cachedClientCredentialsToken.expiresAt - Date.now() > OAUTH_REFRESH_BUFFER_MS
+  ) {
+    return cachedClientCredentialsToken.value;
   }
 
   const clientId = process.env.PROCORE_CLIENT_ID!;
   const clientSecret = process.env.PROCORE_CLIENT_SECRET!;
 
-  const res = await fetch(`${PROCORE_BASE_URL}/oauth/token`, {
+  const res = await fetchImpl(`${PROCORE_BASE_URL}/oauth/token`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -87,12 +96,67 @@ async function getAccessToken(): Promise<string> {
   }
 
   const data = await res.json();
-  cachedToken = {
+  cachedClientCredentialsToken = {
     value: data.access_token,
     // data.expires_in is in seconds; subtract 60s buffer
-    expiresAt: Date.now() + (data.expires_in - 60) * 1000,
+    expiresAt: Date.now() + (data.expires_in * 1000) - OAUTH_REFRESH_BUFFER_MS,
   };
-  return cachedToken.value;
+  return cachedClientCredentialsToken.value;
+}
+
+type StoredProcoreOauthTokens = Awaited<ReturnType<typeof getStoredProcoreOauthTokens>>;
+
+interface ProcoreReadAuthOptions {
+  fetchImpl?: typeof fetch;
+  getStoredTokens?: () => Promise<StoredProcoreOauthTokens>;
+  refreshStoredTokens?: (refreshToken: string, options?: {
+    fetchImpl?: typeof fetch;
+    now?: () => Date;
+  }) => Promise<string>;
+  now?: () => Date;
+  companyId?: string;
+}
+
+async function resolveProcoreReadAuth(options: ProcoreReadAuthOptions = {}) {
+  const getStoredTokens = options.getStoredTokens ?? getStoredProcoreOauthTokens;
+  const refreshStoredTokens = options.refreshStoredTokens ?? refreshStoredProcoreOauthTokens;
+  const now = options.now ?? (() => new Date());
+  const stored = await getStoredTokens();
+
+  if (stored) {
+    if (stored.status !== "active") {
+      throw new Error("PROCORE_OAUTH_REQUIRED");
+    }
+
+    const expiresInMs = stored.expiresAt.getTime() - now().getTime();
+    const accessToken =
+      expiresInMs <= OAUTH_REFRESH_BUFFER_MS
+        ? await refreshStoredTokens(stored.refreshToken, {
+            fetchImpl: options.fetchImpl,
+            now,
+          })
+        : stored.accessToken;
+
+    return {
+      mode: "oauth" as const,
+      accessToken,
+      companyHeader: process.env.PROCORE_COMPANY_ID ?? options.companyId ?? "",
+    };
+  }
+
+  if (isDevMode()) {
+    return {
+      mode: "dev" as const,
+      accessToken: "dev-mock-token",
+      companyHeader: null,
+    };
+  }
+
+  return {
+    mode: "client_credentials" as const,
+    accessToken: await getAccessToken(options.fetchImpl),
+    companyHeader: process.env.PROCORE_COMPANY_ID ?? options.companyId ?? "",
+  };
 }
 
 let mockIdCounter = 100000;
@@ -130,26 +194,44 @@ function getMockResponse(method: string, path: string): any {
 async function procoreFetch<T = any>(
   method: "GET" | "POST" | "PATCH" | "DELETE",
   path: string,
-  body?: unknown
+  body?: unknown,
+  options: ProcoreReadAuthOptions = {}
 ): Promise<T> {
-  if (isDevMode()) {
+  const fetchImpl = options.fetchImpl ?? fetch;
+  checkCircuit();
+
+  const auth =
+    method === "GET"
+      ? await resolveProcoreReadAuth(options)
+      : isDevMode()
+        ? {
+            mode: "dev" as const,
+            accessToken: "dev-mock-token",
+            companyHeader: null,
+          }
+        : {
+            mode: "client_credentials" as const,
+            accessToken: await getAccessToken(fetchImpl),
+            companyHeader: null,
+          };
+
+  if (auth.mode === "dev") {
     console.log(`[Procore:dev] Mock ${method} ${path}`);
     return getMockResponse(method, path) as T;
   }
-
-  checkCircuit();
-
-  const token = await getAccessToken();
   const url = `${PROCORE_BASE_URL}${path}`;
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
-      const res = await fetch(url, {
+      const res = await fetchImpl(url, {
         method,
         headers: {
-          Authorization: `Bearer ${token}`,
+          Authorization: `Bearer ${auth.accessToken}`,
           "Content-Type": "application/json",
           Accept: "application/json",
+          ...(method === "GET" && auth.mode === "oauth" && auth.companyHeader
+            ? { "Procore-Company-Id": auth.companyHeader }
+            : {}),
         },
         body: body != null ? JSON.stringify(body) : undefined,
       });
@@ -194,7 +276,8 @@ async function procoreFetch<T = any>(
 }
 
 export const procoreClient = {
-  get: <T = any>(path: string) => procoreFetch<T>("GET", path),
+  get: <T = any>(path: string, options?: ProcoreReadAuthOptions) =>
+    procoreFetch<T>("GET", path, undefined, options),
   post: <T = any>(path: string, body: unknown) => procoreFetch<T>("POST", path, body),
   patch: <T = any>(path: string, body: unknown) => procoreFetch<T>("PATCH", path, body),
   delete: <T = any>(path: string) => procoreFetch<T>("DELETE", path),
@@ -218,7 +301,8 @@ export interface ProcoreCompanyProjectRow {
 export async function listCompanyProjectsPage(
   companyId: string,
   page: number,
-  pageSize: number
+  pageSize: number,
+  options: ProcoreReadAuthOptions = {}
 ): Promise<
   Array<{
     id: number;
@@ -232,7 +316,11 @@ export async function listCompanyProjectsPage(
   }>
 > {
   const rows = await procoreClient.get<ProcoreCompanyProjectRow[]>(
-    `/rest/v1.0/companies/${companyId}/projects?page=${page}&per_page=${pageSize}`
+    `/rest/v1.0/companies/${companyId}/projects?page=${page}&per_page=${pageSize}`,
+    {
+      ...options,
+      companyId,
+    }
   );
 
   return rows.map((row) => ({
@@ -260,9 +348,10 @@ export interface ProcoreProjectCandidateRow {
 export async function listCompanyProjectCandidatesPage(
   companyId: string,
   page: number,
-  pageSize: number
+  pageSize: number,
+  options: ProcoreReadAuthOptions = {}
 ): Promise<ProcoreProjectCandidateRow[]> {
-  const rows = await listCompanyProjectsPage(companyId, page, pageSize);
+  const rows = await listCompanyProjectsPage(companyId, page, pageSize, options);
 
   return rows.map((row) => ({
     id: row.id,

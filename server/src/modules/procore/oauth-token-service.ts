@@ -14,6 +14,12 @@ export interface ProcoreOauthTokenData {
 
 type ProcoreOauthDb = Pick<typeof db, "select" | "insert" | "update" | "delete">;
 
+interface RefreshStoredProcoreOauthTokensOptions {
+  dbClient?: ProcoreOauthDb;
+  fetchImpl?: typeof fetch;
+  now?: () => Date;
+}
+
 export async function upsertProcoreOauthTokens(
   tokens: ProcoreOauthTokenData,
   dbClient: ProcoreOauthDb = db
@@ -105,4 +111,51 @@ export async function clearStoredProcoreOauthTokens(
   await dbClient
     .delete(procoreOauthTokens)
     .where(eq(procoreOauthTokens.singletonKey, 1));
+}
+
+export async function refreshStoredProcoreOauthTokens(
+  refreshToken: string,
+  options: RefreshStoredProcoreOauthTokensOptions = {}
+): Promise<string> {
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const dbClient = options.dbClient ?? db;
+  const now = options.now ?? (() => new Date());
+
+  const response = await fetchImpl("https://login.procore.com/oauth/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      grant_type: "refresh_token",
+      client_id: process.env.PROCORE_CLIENT_ID,
+      client_secret: process.env.PROCORE_CLIENT_SECRET,
+      refresh_token: refreshToken,
+    }),
+  });
+
+  if (!response.ok) {
+    const errorText = (await response.text().catch(() => "")) || "refresh failed";
+    await markProcoreOauthReauthNeeded(dbClient, errorText);
+    throw new Error("PROCORE_OAUTH_REFRESH_FAILED");
+  }
+
+  const data = await response.json() as {
+    access_token: string;
+    refresh_token?: string;
+    expires_in: number;
+    scope?: string;
+  };
+
+  await upsertProcoreOauthTokens(
+    {
+      accessToken: data.access_token,
+      refreshToken: data.refresh_token ?? refreshToken,
+      expiresAt: new Date(now().getTime() + data.expires_in * 1000),
+      scopes: data.scope?.split(" ") ?? [],
+      accountEmail: null,
+      accountName: null,
+    },
+    dbClient
+  );
+
+  return data.access_token;
 }

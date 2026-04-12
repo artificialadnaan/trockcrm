@@ -24,6 +24,7 @@ const {
   upsertProcoreOauthTokens,
   getStoredProcoreOauthTokens,
   markProcoreOauthReauthNeeded,
+  refreshStoredProcoreOauthTokens,
 } = await import("../../../src/modules/procore/oauth-token-service.js");
 const { encrypt } = await import("../../../src/lib/encryption.js");
 
@@ -204,6 +205,85 @@ describe("procore oauth token service", () => {
     expect(insertValues).toHaveBeenCalledWith(
       expect.objectContaining({
         singletonKey: 1,
+      })
+    );
+  });
+
+  it("refreshes stored oauth tokens and persists the refreshed token set", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          access_token: "refreshed-access",
+          refresh_token: "refreshed-refresh",
+          expires_in: 3600,
+          scope: "read write",
+        }),
+        { status: 200 }
+      )
+    );
+    const onConflictDoUpdate = vi.fn().mockResolvedValue(undefined);
+    const insertValues = vi.fn().mockReturnValue({
+      onConflictDoUpdate,
+    });
+    const injectedDb = {
+      insert: vi.fn().mockReturnValue({
+        values: insertValues,
+      }),
+    } as any;
+
+    await expect(
+      refreshStoredProcoreOauthTokens("refresh-token", {
+        fetchImpl: fetchMock,
+        dbClient: injectedDb,
+        now: () => new Date("2026-04-13T12:00:00.000Z"),
+      })
+    ).resolves.toBe("refreshed-access");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://login.procore.com/oauth/token",
+      expect.objectContaining({
+        method: "POST",
+      })
+    );
+    expect(injectedDb.insert).toHaveBeenCalledOnce();
+    expect(insertValues).toHaveBeenCalledWith(
+      expect.objectContaining({
+        accessToken: "enc:refreshed-access",
+        refreshToken: "enc:refreshed-refresh",
+        tokenExpiresAt: new Date("2026-04-13T13:00:00.000Z"),
+        scopes: ["read", "write"],
+        status: "active",
+        lastError: null,
+      })
+    );
+  });
+
+  it("marks stored oauth tokens as reauth_needed when refresh fails", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response("refresh failed", { status: 401 })
+    );
+    const set = vi.fn().mockReturnValue({
+      where: vi.fn().mockResolvedValue(undefined),
+    });
+    const injectedDb = {
+      update: vi.fn().mockReturnValue({
+        set,
+      }),
+    } as any;
+
+    await expect(
+      refreshStoredProcoreOauthTokens("refresh-token", {
+        fetchImpl: fetchMock,
+        dbClient: injectedDb,
+      })
+    ).rejects.toThrow("PROCORE_OAUTH_REFRESH_FAILED");
+
+    expect(injectedDb.update).toHaveBeenCalledOnce();
+    expect(set).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: "reauth_needed",
+        lastError: "refresh failed",
+        updatedAt: expect.any(Date),
       })
     );
   });

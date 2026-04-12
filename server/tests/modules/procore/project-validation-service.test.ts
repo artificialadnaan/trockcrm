@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { listCompanyProjectsPage } from "../../../src/lib/procore-client.js";
 import { AppError } from "../../../src/middleware/error-handler.js";
 import { listProjectValidation } from "../../../src/modules/procore/project-validation-service.js";
 
@@ -490,5 +491,83 @@ describe("project validation route", () => {
       message: "Requires one of: admin",
     });
     expect(projectValidationServiceMocks.listProjectValidationForOffice).not.toHaveBeenCalled();
+  });
+});
+
+describe("procore client read auth", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.env.PROCORE_CLIENT_ID = "client-id";
+    process.env.PROCORE_CLIENT_SECRET = "client-secret";
+    process.env.PROCORE_COMPANY_ID = "598134325683880";
+  });
+
+  it("prefers stored oauth tokens over client credentials for read requests", async () => {
+    const getStoredTokens = vi.fn().mockResolvedValue({
+      accessToken: "oauth-token",
+      refreshToken: "refresh-token",
+      expiresAt: new Date(Date.now() + 120_000),
+      scopes: ["read"],
+      accountEmail: "admin@trock.dev",
+      accountName: "Admin User",
+      status: "active",
+      lastError: null,
+    });
+    const fetchMock = vi.fn().mockResolvedValue(new Response("[]", { status: 200 }));
+
+    await listCompanyProjectsPage("598134325683880", 1, 5, {
+      fetchImpl: fetchMock,
+      getStoredTokens,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]?.[1]?.headers?.Authorization).toBe("Bearer oauth-token");
+    expect(fetchMock.mock.calls[0]?.[1]?.headers?.["Procore-Company-Id"]).toBe("598134325683880");
+  });
+
+  it("refreshes an expired stored oauth token before issuing the read request", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            access_token: "refreshed-access",
+            refresh_token: "refreshed-refresh",
+            expires_in: 3600,
+          }),
+          { status: 200 }
+        )
+      )
+      .mockResolvedValueOnce(new Response("[]", { status: 200 }));
+    const refreshStoredTokens = vi.fn(async (_refreshToken: string, options?: {
+      fetchImpl?: typeof fetch;
+    }) => {
+      const response = await options?.fetchImpl?.("https://login.procore.com/oauth/token", {
+        method: "POST",
+      });
+      const data = await response?.json();
+      return data.access_token as string;
+    });
+
+    await listCompanyProjectsPage("598134325683880", 1, 5, {
+      fetchImpl: fetchMock,
+      getStoredTokens: vi.fn().mockResolvedValue({
+        accessToken: "expired-access",
+        refreshToken: "refresh-token",
+        expiresAt: new Date(Date.now() - 1000),
+        scopes: ["read"],
+        accountEmail: "admin@trock.dev",
+        accountName: "Admin User",
+        status: "active",
+        lastError: null,
+      }),
+      refreshStoredTokens,
+    });
+
+    expect(refreshStoredTokens).toHaveBeenCalledOnce();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("https://login.procore.com/oauth/token");
+    expect(fetchMock.mock.calls[1]?.[1]?.headers?.Authorization).toBe("Bearer refreshed-access");
+    expect(fetchMock.mock.calls[1]?.[1]?.headers?.["Procore-Company-Id"]).toBe("598134325683880");
   });
 });
