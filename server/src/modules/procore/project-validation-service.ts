@@ -42,9 +42,14 @@ export async function listProjectValidation(args: {
   let page = 1;
   let truncated = false;
 
-  while (projects.length < args.maxProjects) {
+  while (true) {
     const rows = await listPage(args.companyId, page, args.pageSize);
     if (rows.length === 0) break;
+
+    if (projects.length >= args.maxProjects) {
+      truncated = true;
+      break;
+    }
 
     for (const row of rows) {
       if (projects.length >= args.maxProjects) {
