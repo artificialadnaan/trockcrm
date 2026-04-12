@@ -15,8 +15,8 @@ export interface ProcoreOauthTokenData {
 type ProcoreOauthDb = Pick<typeof db, "select" | "insert" | "update">;
 
 export async function upsertProcoreOauthTokens(
-  dbClient: ProcoreOauthDb,
-  tokens: ProcoreOauthTokenData
+  tokens: ProcoreOauthTokenData,
+  dbClient: ProcoreOauthDb = db
 ): Promise<void> {
   const encryptedAccessToken = encrypt(tokens.accessToken);
   const encryptedRefreshToken = encrypt(tokens.refreshToken);
@@ -58,7 +58,7 @@ export async function upsertProcoreOauthTokens(
 }
 
 export async function getStoredProcoreOauthTokens(
-  dbClient: ProcoreOauthDb
+  dbClient: ProcoreOauthDb = db
 ): Promise<
   | {
       id: string;
@@ -91,14 +91,15 @@ export async function getStoredProcoreOauthTokens(
 }
 
 export async function markProcoreOauthReauthNeeded(
-  dbClient: ProcoreOauthDb,
+  dbClient: ProcoreOauthDb | undefined,
   errorMessage: string
 ): Promise<void> {
-  const rows = await dbClient.select({ id: procoreOauthTokens.id }).from(procoreOauthTokens).limit(1);
+  const client = dbClient ?? db;
+  const rows = await client.select({ id: procoreOauthTokens.id }).from(procoreOauthTokens).limit(1);
   const row = rows[0];
   if (!row) return;
 
-  await dbClient
+  await client
     .update(procoreOauthTokens)
     .set({
       status: "reauth_needed",
