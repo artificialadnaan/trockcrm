@@ -1,5 +1,23 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { AppError } from "../../../src/middleware/error-handler.js";
 import { listProjectValidation } from "../../../src/modules/procore/project-validation-service.js";
+
+const projectValidationServiceMocks = vi.hoisted(() => ({
+  listProjectValidationForOffice: vi.fn(),
+}));
+
+vi.mock("../../../src/modules/procore/project-validation-service.js", async () => {
+  const actual = await vi.importActual<
+    typeof import("../../../src/modules/procore/project-validation-service.js")
+  >("../../../src/modules/procore/project-validation-service.js");
+
+  return {
+    ...actual,
+    listProjectValidationForOffice: projectValidationServiceMocks.listProjectValidationForOffice,
+  };
+});
+
+const { procoreRoutes } = await import("../../../src/modules/procore/routes.js");
 
 function makeProject(overrides: Partial<{
   id: number;
@@ -45,7 +63,100 @@ function makeDeal(overrides: Partial<{
   };
 }
 
+type TestUser = {
+  id: string;
+  role: "admin" | "director" | "rep";
+  displayName: string;
+  email: string;
+  officeId: string;
+  activeOfficeId: string;
+};
+
+function makeResponse() {
+  return {
+    statusCode: 200,
+    body: undefined as any,
+    status(code: number) {
+      this.statusCode = code;
+      return this;
+    },
+    json(payload: any) {
+      this.body = payload;
+      return this;
+    },
+  };
+}
+
+function findRouteStack(method: "get", routePath: string) {
+  const layer = (procoreRoutes as any).stack.find(
+    (entry: any) => entry.route?.path === routePath && entry.route?.methods?.[method]
+  );
+
+  if (!layer) {
+    throw new Error(`Route not found: ${method.toUpperCase()} ${routePath}`);
+  }
+
+  return layer.route.stack as Array<{
+    handle: (req: any, res: any, next: (err?: unknown) => void) => unknown;
+  }>;
+}
+
+async function invokeRoute({
+  method,
+  routePath,
+  url,
+  user,
+}: {
+  method: "get";
+  routePath: string;
+  url: string;
+  user: TestUser;
+}) {
+  const stack = findRouteStack(method, routePath);
+  const req = {
+    method: method.toUpperCase(),
+    url,
+    originalUrl: `/api/procore${url}`,
+    baseUrl: "/api/procore",
+    path: url,
+    params: {},
+    query: {},
+    body: {},
+    user,
+    tenantDb: {},
+    commitTransaction: vi.fn().mockResolvedValue(undefined),
+    headers: {},
+  } as any;
+  const res = makeResponse();
+
+  let index = 0;
+  const next = async (err?: unknown): Promise<void> => {
+    if (err) throw err;
+    const layer = stack[index++];
+    if (!layer) return;
+    await Promise.resolve(layer.handle(req, res, next));
+  };
+
+  await next();
+  return { req, res };
+}
+
+function makeUser(role: TestUser["role"]): TestUser {
+  return {
+    id: `${role}-1`,
+    role,
+    displayName: `${role} user`,
+    email: `${role}@example.com`,
+    officeId: "office-1",
+    activeOfficeId: "office-1",
+  };
+}
+
 describe("project validation service", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
   it("returns a linked exact match when deal.procoreProjectId matches project.id", async () => {
     const result = await listProjectValidation({
       companyId: "598134325683880",
@@ -312,5 +423,26 @@ describe("project validation service", () => {
     expect(listProjectsPage).toHaveBeenCalledTimes(2);
     expect(result.projects.map((row) => row.project.id)).toEqual([1, 2]);
     expect(result.meta.truncated).toBe(true);
+  });
+});
+
+describe("project validation route", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("requires admin role for project validation", async () => {
+    const request = invokeRoute({
+      method: "get",
+      routePath: "/project-validation",
+      url: "/project-validation",
+      user: makeUser("rep"),
+    });
+
+    await expect(request).rejects.toMatchObject<AppError>({
+      statusCode: 403,
+      message: "Requires one of: admin",
+    });
+    expect(projectValidationServiceMocks.listProjectValidationForOffice).not.toHaveBeenCalled();
   });
 });

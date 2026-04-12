@@ -1,9 +1,15 @@
+import { eq } from "drizzle-orm";
+import type { NodePgDatabase } from "drizzle-orm/node-postgres";
+import { deals } from "@trock-crm/shared/schema";
+import type * as schema from "@trock-crm/shared/schema";
 import { listCompanyProjectCandidatesPage } from "../../lib/procore-client.js";
 import { normalizeProcoreReconciliationRow } from "./reconciliation-service.js";
 import type {
   CrmDealCandidate,
   ProcoreProjectCandidate,
 } from "./reconciliation-service.js";
+
+type TenantDb = NodePgDatabase<typeof schema>;
 
 type ValidationStatus = "matched" | "ambiguous" | "unmatched";
 type ValidationMatchReason =
@@ -79,6 +85,39 @@ export async function listProjectValidation(args: {
       truncated,
     },
   };
+}
+
+export async function listProjectValidationForOffice(
+  tenantDb: TenantDb,
+  args: {
+    companyId: string;
+    pageSize: number;
+    maxProjects: number;
+  }
+) {
+  return listProjectValidation({
+    ...args,
+    listActiveDeals: async () =>
+      tenantDb
+        .select({
+          id: deals.id,
+          dealNumber: deals.dealNumber,
+          name: deals.name,
+          city: deals.propertyCity,
+          state: deals.propertyState,
+          address: deals.propertyAddress,
+          procoreProjectId: deals.procoreProjectId,
+          updatedAt: deals.updatedAt,
+        })
+        .from(deals)
+        .where(eq(deals.isActive, true))
+        .then((rows) =>
+          rows.map((row) => ({
+            ...row,
+            updatedAt: row.updatedAt?.toISOString?.() ?? (row.updatedAt as string | null),
+          }))
+        ),
+  });
 }
 
 function buildValidationRow(

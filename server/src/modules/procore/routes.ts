@@ -8,6 +8,7 @@ import { requireRole } from "../../middleware/rbac.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { db } from "../../db.js";
 import { procoreClient } from "../../lib/procore-client.js";
+import { listProjectValidationForOffice } from "./project-validation-service.js";
 
 const router = Router();
 
@@ -157,6 +158,29 @@ router.post(
 
       await req.commitTransaction!();
       res.json({ success: true, record: result[0] });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// GET /api/procore/project-validation — admin read-only project validation
+router.get(
+  "/project-validation",
+  requireRole("admin"),
+  async (req, res, next) => {
+    try {
+      const companyId = process.env.PROCORE_COMPANY_ID;
+      if (!companyId) throw new AppError(500, "PROCORE_COMPANY_ID not configured");
+
+      const result = await listProjectValidationForOffice(req.tenantDb!, {
+        companyId,
+        pageSize: 100,
+        maxProjects: 500,
+      });
+
+      await req.commitTransaction!();
+      res.json(result);
     } catch (err) {
       next(err);
     }
