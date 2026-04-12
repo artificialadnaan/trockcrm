@@ -570,4 +570,33 @@ describe("procore client read auth", () => {
     expect(fetchMock.mock.calls[1]?.[1]?.headers?.Authorization).toBe("Bearer refreshed-access");
     expect(fetchMock.mock.calls[1]?.[1]?.headers?.["Procore-Company-Id"]).toBe("598134325683880");
   });
+
+  it.each([401, 403])(
+    "marks stored oauth tokens as reauth_needed and throws PROCORE_OAUTH_REQUIRED when an oauth-backed GET returns %s",
+    async (statusCode) => {
+      const markOauthReauthNeeded = vi.fn().mockResolvedValue(undefined);
+      const fetchMock = vi.fn().mockResolvedValue(
+        new Response("auth failed", { status: statusCode })
+      );
+
+      const request = listCompanyProjectsPage("598134325683880", 1, 5, {
+        fetchImpl: fetchMock,
+        getStoredTokens: vi.fn().mockResolvedValue({
+          accessToken: "oauth-token",
+          refreshToken: "refresh-token",
+          expiresAt: new Date(Date.now() + 120_000),
+          scopes: ["read"],
+          accountEmail: "admin@trock.dev",
+          accountName: "Admin User",
+          status: "active",
+          lastError: null,
+        }),
+        markOauthReauthNeeded,
+      });
+
+      await expect(request).rejects.toThrow("PROCORE_OAUTH_REQUIRED");
+      expect(markOauthReauthNeeded).toHaveBeenCalledOnce();
+      expect(markOauthReauthNeeded).toHaveBeenCalledWith(`oauth read failed: ${statusCode}`);
+    }
+  );
 });

@@ -3,6 +3,7 @@
 
 import {
   getStoredProcoreOauthTokens,
+  markProcoreOauthReauthNeeded,
   refreshStoredProcoreOauthTokens,
 } from "../modules/procore/oauth-token-service.js";
 
@@ -113,8 +114,13 @@ interface ProcoreReadAuthOptions {
     fetchImpl?: typeof fetch;
     now?: () => Date;
   }) => Promise<string>;
+  markOauthReauthNeeded?: (errorMessage: string) => Promise<void>;
   now?: () => Date;
   companyId?: string;
+}
+
+function isProcoreOauthRequiredError(error: unknown): boolean {
+  return error instanceof Error && error.message === "PROCORE_OAUTH_REQUIRED";
 }
 
 async function resolveProcoreReadAuth(options: ProcoreReadAuthOptions = {}) {
@@ -198,6 +204,8 @@ async function procoreFetch<T = any>(
   options: ProcoreReadAuthOptions = {}
 ): Promise<T> {
   const fetchImpl = options.fetchImpl ?? fetch;
+  const markOauthReauthNeeded =
+    options.markOauthReauthNeeded ?? ((errorMessage: string) => markProcoreOauthReauthNeeded(undefined, errorMessage));
   checkCircuit();
 
   const auth =
@@ -248,6 +256,11 @@ async function procoreFetch<T = any>(
         throw new Error(`[Procore] Rate limited (429) after ${MAX_RETRIES} retries`);
       }
 
+      if (method === "GET" && auth.mode === "oauth" && (res.status === 401 || res.status === 403)) {
+        await markOauthReauthNeeded(`oauth read failed: ${res.status}`);
+        throw new Error("PROCORE_OAUTH_REQUIRED");
+      }
+
       if (!res.ok) {
         const errBody = await res.text().catch(() => "");
         throw new Error(`[Procore] ${method} ${path} failed: ${res.status} ${errBody}`);
@@ -257,6 +270,9 @@ async function procoreFetch<T = any>(
       recordSuccess();
       return data;
     } catch (err) {
+      if (isProcoreOauthRequiredError(err)) {
+        throw err;
+      }
       if (attempt < MAX_RETRIES) {
         const delay = BACKOFF_MS[attempt] ?? 9000;
         console.warn(

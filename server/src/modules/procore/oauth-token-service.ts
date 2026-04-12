@@ -120,6 +120,7 @@ export async function refreshStoredProcoreOauthTokens(
   const fetchImpl = options.fetchImpl ?? fetch;
   const dbClient = options.dbClient ?? db;
   const now = options.now ?? (() => new Date());
+  const existingTokens = await getStoredProcoreOauthTokens(dbClient);
 
   const response = await fetchImpl("https://login.procore.com/oauth/token", {
     method: "POST",
@@ -151,8 +152,8 @@ export async function refreshStoredProcoreOauthTokens(
       refreshToken: data.refresh_token ?? refreshToken,
       expiresAt: new Date(now().getTime() + data.expires_in * 1000),
       scopes: data.scope?.split(" ") ?? [],
-      accountEmail: null,
-      accountName: null,
+      accountEmail: existingTokens?.accountEmail ?? null,
+      accountName: existingTokens?.accountName ?? null,
     },
     dbClient
   );

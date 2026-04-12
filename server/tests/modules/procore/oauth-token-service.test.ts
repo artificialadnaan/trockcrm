@@ -226,6 +226,26 @@ describe("procore oauth token service", () => {
       onConflictDoUpdate,
     });
     const injectedDb = {
+      select: vi.fn().mockReturnValue({
+        from: vi.fn().mockReturnValue({
+          where: vi.fn().mockReturnValue({
+            limit: vi.fn().mockResolvedValue([
+              {
+                id: "token-row",
+                singletonKey: 1,
+                accessToken: "enc:old-access",
+                refreshToken: "enc:old-refresh",
+                tokenExpiresAt: new Date("2026-04-13T11:00:00.000Z"),
+                scopes: ["read"],
+                connectedAccountEmail: "admin@trock.dev",
+                connectedAccountName: "Admin User",
+                status: "active",
+                lastError: null,
+              },
+            ]),
+          }),
+        }),
+      }),
       insert: vi.fn().mockReturnValue({
         values: insertValues,
       }),
@@ -252,6 +272,8 @@ describe("procore oauth token service", () => {
         refreshToken: "enc:refreshed-refresh",
         tokenExpiresAt: new Date("2026-04-13T13:00:00.000Z"),
         scopes: ["read", "write"],
+        connectedAccountEmail: "admin@trock.dev",
+        connectedAccountName: "Admin User",
         status: "active",
         lastError: null,
       })
@@ -266,6 +288,13 @@ describe("procore oauth token service", () => {
       where: vi.fn().mockResolvedValue(undefined),
     });
     const injectedDb = {
+      select: vi.fn().mockReturnValue({
+        from: vi.fn().mockReturnValue({
+          where: vi.fn().mockReturnValue({
+            limit: vi.fn().mockResolvedValue([]),
+          }),
+        }),
+      }),
       update: vi.fn().mockReturnValue({
         set,
       }),
