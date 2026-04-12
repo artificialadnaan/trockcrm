@@ -15,6 +15,8 @@ import { api } from "@/lib/api";
 import {
   buildValidationSummary,
   formatValidationMatchReason,
+  getProcoreConnectionBanner,
+  type ProcoreAuthStatus,
 } from "@/lib/procore-validation-view-model";
 
 interface SyncSummary {
@@ -187,6 +189,7 @@ export function ProcoreSyncPage() {
   const [data, setData] = useState<SyncStatusResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [resolving, setResolving] = useState<string | null>(null);
+  const [procoreStatus, setProcoreStatus] = useState<ProcoreAuthStatus | null>(null);
   const [validationData, setValidationData] = useState<ProjectValidationResponse | null>(null);
   const [validationLoading, setValidationLoading] = useState(true);
   const [validationError, setValidationError] = useState<string | null>(null);
@@ -219,13 +222,73 @@ export function ProcoreSyncPage() {
     }
   }, []);
 
+  const loadProcoreStatus = useCallback(async () => {
+    setValidationLoading(true);
+    try {
+      const result = await api<ProcoreAuthStatus>("/auth/procore/status");
+      setProcoreStatus(result);
+    } catch (err) {
+      console.error("Failed to load Procore auth status:", err);
+      setProcoreStatus(null);
+      setValidationError(
+        err instanceof Error ? err.message : "Failed to load Procore auth status"
+      );
+      setValidationLoading(false);
+    }
+  }, []);
+
   const load = useCallback(async () => {
-    await Promise.all([loadSyncStatus(), loadValidation()]);
-  }, [loadSyncStatus, loadValidation]);
+    await Promise.all([loadSyncStatus(), loadProcoreStatus()]);
+  }, [loadSyncStatus, loadProcoreStatus]);
 
   useEffect(() => {
-    load();
-  }, [load]);
+    loadSyncStatus();
+    loadProcoreStatus();
+  }, [loadSyncStatus, loadProcoreStatus]);
+
+  useEffect(() => {
+    if (procoreStatus?.connected) {
+      loadValidation();
+    } else if (procoreStatus) {
+      setValidationData(null);
+      setValidationError(null);
+      setValidationLoading(false);
+    }
+  }, [procoreStatus, loadValidation]);
+
+  const connectProcore = async () => {
+    try {
+      const result = await api<{ url: string | null; message?: string | null }>("/auth/procore/url");
+      if (!result.url) {
+        setValidationError(result.message ?? "Procore auth is not available in this environment");
+        setValidationLoading(false);
+        return;
+      }
+
+      window.location.href = result.url;
+    } catch (err) {
+      console.error("Failed to start Procore auth:", err);
+      setValidationError(
+        err instanceof Error ? err.message : "Failed to start Procore auth"
+      );
+      setValidationLoading(false);
+    }
+  };
+
+  const disconnectProcore = async () => {
+    try {
+      await api("/auth/procore/disconnect", { method: "POST" });
+      await loadProcoreStatus();
+      setValidationData(null);
+      setValidationError(null);
+    } catch (err) {
+      console.error("Failed to disconnect Procore:", err);
+      setValidationError(
+        err instanceof Error ? err.message : "Failed to disconnect Procore"
+      );
+      setValidationLoading(false);
+    }
+  };
 
   const resolveConflict = async (id: string, resolution: "accept_crm" | "accept_procore") => {
     setResolving(id);
@@ -256,6 +319,7 @@ export function ProcoreSyncPage() {
   const healthLabel =
     healthColor === "green" ? "Healthy" : healthColor === "amber" ? "Warning" : "Degraded";
   const validationSummary = buildValidationSummary(validationData?.projects ?? []);
+  const connectionBanner = getProcoreConnectionBanner(procoreStatus);
 
   return (
     <div className="space-y-6">
@@ -284,14 +348,53 @@ export function ProcoreSyncPage() {
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="flex flex-col gap-2 text-sm text-muted-foreground md:flex-row md:items-center md:justify-between">
-            <p>
-              This compares live Procore projects to CRM deals without writing to Procore or
-              mutating CRM sync state.
-            </p>
-            {validationData?.meta.readOnly ? (
-              <Badge className="w-fit bg-blue-100 text-blue-800">Read-only mode</Badge>
-            ) : null}
+            <div className="space-y-2">
+              <p>
+                This compares live Procore projects to CRM deals without writing to Procore or
+                mutating CRM sync state.
+              </p>
+              <div className="flex flex-wrap items-center gap-2">
+                {validationData?.meta.readOnly ? (
+                  <Badge className="w-fit bg-blue-100 text-blue-800">Read-only mode</Badge>
+                ) : null}
+                {procoreStatus?.connected ? (
+                  <Badge className="w-fit bg-green-100 text-green-800">Procore connected</Badge>
+                ) : null}
+              </div>
+              {procoreStatus?.connected && (procoreStatus.accountName || procoreStatus.accountEmail) ? (
+                <p className="text-xs text-muted-foreground">
+                  Connected as {procoreStatus.accountName ?? procoreStatus.accountEmail}
+                </p>
+              ) : null}
+            </div>
+            {procoreStatus?.connected ? (
+              <Button variant="outline" size="sm" onClick={disconnectProcore}>
+                Disconnect Procore
+              </Button>
+            ) : (
+              <Button size="sm" onClick={connectProcore}>
+                {connectionBanner?.actionLabel ?? "Connect Procore"}
+              </Button>
+            )}
           </div>
+
+          {connectionBanner ? (
+            <div
+              className={`rounded-md border p-3 text-sm ${
+                connectionBanner.tone === "destructive"
+                  ? "border-red-200 bg-red-50 text-red-700"
+                  : "border-amber-200 bg-amber-50 text-amber-800"
+              }`}
+            >
+              <div className="flex items-start gap-2">
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                <div className="space-y-1">
+                  <p className="font-medium">{connectionBanner.title}</p>
+                  <p>{connectionBanner.description}</p>
+                </div>
+              </div>
+            </div>
+          ) : null}
 
           {validationLoading ? (
             <div className="text-sm text-muted-foreground">Loading project validation...</div>

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildValidationSummary,
   formatValidationMatchReason,
+  getProcoreConnectionBanner,
 } from "./procore-validation-view-model";
 
 describe("procore validation view model", () => {
@@ -27,5 +28,22 @@ describe("procore validation view model", () => {
       "Ambiguous project number match"
     );
     expect(formatValidationMatchReason("none")).toBe("No CRM match");
+  });
+
+  it("returns a connect banner when procore oauth is disconnected", () => {
+    expect(
+      getProcoreConnectionBanner({ connected: false, authMode: "client_credentials" })
+    ).toMatchObject({ tone: "warning" });
+  });
+
+  it("returns an auth-error banner when procore oauth needs reauthorization", () => {
+    expect(
+      getProcoreConnectionBanner({
+        connected: false,
+        authMode: "oauth",
+        status: "reauth_needed",
+        errorMessage: "refresh failed",
+      })
+    ).toMatchObject({ tone: "destructive" });
   });
 });
