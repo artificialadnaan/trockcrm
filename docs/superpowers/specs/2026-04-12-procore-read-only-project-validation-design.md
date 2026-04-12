@@ -56,6 +56,11 @@ Response shape:
 - `summary`: counts for matched, unmatched, ambiguous
 - `meta`: company id, fetched count, fetched at timestamp, read-only mode flag
 
+Fetch behavior:
+- page through Procore projects using the existing paginated helper
+- cap the first validation pass at a deterministic maximum project count so the admin page cannot accidentally fan out into an unbounded fetch
+- include a `truncated` flag in `meta` if the response is capped
+
 ### 2. Comparison Logic
 
 Reuse the normalization and scoring patterns already present in `reconciliation-service.ts`, but keep the first pass non-persistent.
@@ -66,7 +71,10 @@ Matching priority:
 3. Strong normalized name + location match
 4. Otherwise mark as unmatched
 
-If multiple CRM deals score similarly for one Procore project, mark the row as `ambiguous` instead of guessing.
+Ambiguity rule:
+- if two or more CRM deals tie on the highest eligible match tier, mark the row as `ambiguous`
+- do not fall back from an exact `procore_project_id` match to a weaker candidate
+- do not guess between multiple equally strong name/location candidates
 
 Comparison statuses:
 - `matched`
@@ -99,7 +107,7 @@ The page should show:
 
 Do not show actions that imply mutation during this phase.
 
-The existing conflict resolution controls should either remain hidden in read-only validation mode or be visually separated as not part of this first pass.
+The existing conflict resolution controls should remain hidden in read-only validation mode so the first pass cannot accidentally expose write-capable actions.
 
 ## Write-Safety Guardrails
 
@@ -124,6 +132,7 @@ Return explicit admin-visible states for:
 - missing `PROCORE_CLIENT_SECRET`
 - missing `PROCORE_COMPANY_ID`
 - Procore auth failure
+- Procore credential/app-mode mismatch (for example, credentials exist but the upstream app configuration does not permit the requested project read)
 - Procore rate limiting
 - Procore circuit breaker open
 - unexpected upstream response shape
@@ -138,9 +147,10 @@ Server tests:
 - project validation route returns normalized read-only rows
 - exact linked matches are labeled `matched`
 - multiple strong candidates are labeled `ambiguous`
-- no candidate is labeled `unmatched`
+- unmatched candidates are labeled `unmatched`
 - route remains admin-only
 - route does not invoke write-capable Procore client methods
+- capped fetches set `meta.truncated=true`
 
 Frontend tests:
 - summary renders correctly
@@ -151,6 +161,7 @@ Manual verification:
 - use the admin Procore page
 - confirm live projects are visible
 - confirm no Procore write endpoints are called during the validation fetch
+- confirm the UI does not render conflict-resolution or link-mutating controls in read-only mode
 
 ## Success Criteria
 
