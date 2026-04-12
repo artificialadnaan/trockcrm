@@ -1,7 +1,7 @@
 import { Router } from "express";
 import crypto from "crypto";
 import jwt from "jsonwebtoken";
-import { getDevUsers, getUserByEmail, signJwt } from "./service.js";
+import { getDevUsers, getUserByEmail, getUserById, signJwt } from "./service.js";
 import { authMiddleware } from "../../middleware/auth.js";
 import { authLimiter } from "../../middleware/rate-limit.js";
 import { AppError } from "../../middleware/error-handler.js";
@@ -318,6 +318,12 @@ router.get("/procore/callback", async (req, res) => {
       throw new AppError(403, "Invalid Procore OAuth state");
     }
   } catch {
+    res.redirect(getProcoreAuthErrorRedirect("invalid_state"));
+    return;
+  }
+
+  const stateUser = await getUserById(payload.sub);
+  if (!stateUser || !stateUser.isActive || stateUser.role !== "admin") {
     res.redirect(getProcoreAuthErrorRedirect("invalid_state"));
     return;
   }

@@ -10,6 +10,10 @@ const oauthTokenServiceMocks = vi.hoisted(() => ({
   clearStoredProcoreOauthTokens: vi.fn(),
 }));
 
+const authServiceMocks = vi.hoisted(() => ({
+  getUserById: vi.fn(),
+}));
+
 const authTestUsers = {
   admin: {
     id: "admin-1",
@@ -63,6 +67,17 @@ vi.mock("../../../src/modules/procore/oauth-token-service.js", async () => {
     upsertProcoreOauthTokens: oauthTokenServiceMocks.upsertProcoreOauthTokens,
     getStoredProcoreOauthTokens: oauthTokenServiceMocks.getStoredProcoreOauthTokens,
     clearStoredProcoreOauthTokens: oauthTokenServiceMocks.clearStoredProcoreOauthTokens,
+  };
+});
+
+vi.mock("../../../src/modules/auth/service.js", async () => {
+  const actual = await vi.importActual<
+    typeof import("../../../src/modules/auth/service.js")
+  >("../../../src/modules/auth/service.js");
+
+  return {
+    ...actual,
+    getUserById: authServiceMocks.getUserById,
   };
 });
 
@@ -127,6 +142,15 @@ describe("procore oauth auth routes", () => {
     process.env.PROCORE_CLIENT_SECRET = "procore-client-secret";
     process.env.API_BASE_URL = "http://localhost:3001";
     process.env.FRONTEND_URL = "http://localhost:5173";
+
+    authServiceMocks.getUserById.mockResolvedValue({
+      id: authTestUsers.admin.id,
+      email: authTestUsers.admin.email,
+      displayName: authTestUsers.admin.displayName,
+      role: "admin",
+      officeId: authTestUsers.admin.officeId,
+      isActive: true,
+    });
   });
 
   afterEach(() => {
@@ -270,6 +294,69 @@ describe("procore oauth auth routes", () => {
 
     expect(res.status).toBe(302);
     expect(res.headers.location).toContain("/admin/procore?procore=error&reason=token_exchange_failed");
+  });
+
+  it("redirects to oauth_not_configured when callback oauth env vars are missing", async () => {
+    delete process.env.PROCORE_CLIENT_ID;
+    delete process.env.PROCORE_CLIENT_SECRET;
+    const app = createTestApp();
+    const signedState = createSignedState();
+
+    const res = await request(app)
+      .get("/api/auth/procore/callback")
+      .query({ code: "abc123", state: signedState });
+
+    expect(res.status).toBe(302);
+    expect(res.headers.location).toContain("/admin/procore?procore=error&reason=oauth_not_configured");
+  });
+
+  it("redirects to token_storage_failed when stored token persistence fails", async () => {
+    oauthTokenServiceMocks.upsertProcoreOauthTokens.mockRejectedValue(new Error("write failed"));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        mockFetchResponse({
+          ok: true,
+          status: 200,
+          json: {
+            access_token: "oauth-access",
+            refresh_token: "oauth-refresh",
+            expires_in: 3600,
+            scope: "read projects",
+          },
+        })
+      )
+    );
+
+    const app = createTestApp();
+    const signedState = createSignedState();
+
+    const res = await request(app)
+      .get("/api/auth/procore/callback")
+      .query({ code: "abc123", state: signedState });
+
+    expect(res.status).toBe(302);
+    expect(res.headers.location).toContain("/admin/procore?procore=error&reason=token_storage_failed");
+  });
+
+  it("redirects to invalid_state when the signed callback user is no longer an active admin", async () => {
+    authServiceMocks.getUserById.mockResolvedValue({
+      id: authTestUsers.admin.id,
+      email: authTestUsers.admin.email,
+      displayName: authTestUsers.admin.displayName,
+      role: "rep",
+      officeId: authTestUsers.admin.officeId,
+      isActive: false,
+    });
+    const app = createTestApp();
+    const signedState = createSignedState();
+
+    const res = await request(app)
+      .get("/api/auth/procore/callback")
+      .query({ code: "abc123", state: signedState });
+
+    expect(res.status).toBe(302);
+    expect(res.headers.location).toContain("/admin/procore?procore=error&reason=invalid_state");
   });
 
   it("deletes the stored Procore OAuth token on disconnect", async () => {
