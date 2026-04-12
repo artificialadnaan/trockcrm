@@ -33,6 +33,7 @@ describe("project validation service", () => {
     });
 
     expect(result.projects[0].status).toBe("matched");
+    expect(result.projects[0].matchReason).toBe("procore_project_id");
     expect(result.projects[0].deal?.id).toBe("deal-1");
   });
 
@@ -116,5 +117,6 @@ describe("project validation service", () => {
     });
 
     expect(result.meta.truncated).toBe(true);
+    expect(result.projects).toHaveLength(1);
   });
 });
