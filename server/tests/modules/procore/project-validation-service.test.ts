@@ -518,6 +518,24 @@ describe("project validation route", () => {
       message: "Procore authentication required",
     });
   });
+
+  it("returns an explicit auth error when oauth refresh fails", async () => {
+    projectValidationServiceMocks.listProjectValidationForOffice.mockRejectedValueOnce(
+      new Error("PROCORE_OAUTH_REFRESH_FAILED")
+    );
+
+    const request = invokeRoute({
+      method: "get",
+      routePath: "/project-validation",
+      url: "/project-validation",
+      user: makeUser("admin"),
+    });
+
+    await expect(request).rejects.toMatchObject<AppError>({
+      statusCode: 503,
+      message: "Procore authentication required",
+    });
+  });
 });
 
 describe("procore client read auth", () => {
