@@ -12,6 +12,10 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { api } from "@/lib/api";
+import {
+  buildValidationSummary,
+  formatValidationMatchReason,
+} from "@/lib/procore-validation-view-model";
 
 interface SyncSummary {
   synced: number;
@@ -59,6 +63,54 @@ interface SyncStatusResponse {
   circuit_breaker: CircuitBreaker;
 }
 
+interface ProjectValidationProject {
+  id: number;
+  name: string | null;
+  projectNumber: string | null;
+  city: string | null;
+  state: string | null;
+  address: string | null;
+  updatedAt: string | null;
+}
+
+interface ProjectValidationDeal {
+  id: string;
+  dealNumber: string | null;
+  name: string | null;
+  city: string | null;
+  state: string | null;
+  address: string | null;
+  procoreProjectId: number | null;
+  updatedAt: string | null;
+}
+
+interface ProjectValidationRow {
+  project: ProjectValidationProject;
+  deal: ProjectValidationDeal | null;
+  status: "matched" | "ambiguous" | "unmatched";
+  matchReason:
+    | "procore_project_id"
+    | "duplicate_procore_project_id"
+    | "project_number"
+    | "duplicate_project_number"
+    | "name_location"
+    | "name_location_tie"
+    | "none";
+}
+
+interface ProjectValidationMeta {
+  companyId: string;
+  fetchedCount: number;
+  fetchedAt: string;
+  readOnly: boolean;
+  truncated: boolean;
+}
+
+interface ProjectValidationResponse {
+  projects: ProjectValidationRow[];
+  meta: ProjectValidationMeta;
+}
+
 // How stale (ms) before health turns amber/red
 const AMBER_THRESHOLD_MS = 60 * 60 * 1000;  // 1 hour
 const RED_THRESHOLD_MS   = 24 * 60 * 60 * 1000; // 24 hours
@@ -102,12 +154,44 @@ function StatusBadge({ status }: { status: string }) {
   );
 }
 
+function ValidationStatusBadge({
+  status,
+}: {
+  status: ProjectValidationRow["status"];
+}) {
+  const map: Record<ProjectValidationRow["status"], string> = {
+    matched: "bg-green-100 text-green-800",
+    ambiguous: "bg-amber-100 text-amber-800",
+    unmatched: "bg-slate-100 text-slate-700",
+  };
+
+  return <Badge className={`text-xs capitalize ${map[status]}`}>{status}</Badge>;
+}
+
+function formatProjectLocation(project: ProjectValidationProject) {
+  const cityState = [project.city, project.state].filter(Boolean).join(", ");
+  return project.address ?? cityState ?? "No location";
+}
+
+function formatDealLabel(deal: ProjectValidationDeal | null) {
+  if (!deal) {
+    return "No CRM deal";
+  }
+
+  const name = deal.name ?? "Untitled CRM deal";
+  const number = deal.dealNumber ? ` (${deal.dealNumber})` : "";
+  return `${name}${number}`;
+}
+
 export function ProcoreSyncPage() {
   const [data, setData] = useState<SyncStatusResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [resolving, setResolving] = useState<string | null>(null);
+  const [validationData, setValidationData] = useState<ProjectValidationResponse | null>(null);
+  const [validationLoading, setValidationLoading] = useState(true);
+  const [validationError, setValidationError] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
+  const loadSyncStatus = useCallback(async () => {
     setLoading(true);
     try {
       const result = await api<SyncStatusResponse>("/procore/sync-status");
@@ -118,6 +202,26 @@ export function ProcoreSyncPage() {
       setLoading(false);
     }
   }, []);
+
+  const loadValidation = useCallback(async () => {
+    setValidationLoading(true);
+    try {
+      setValidationError(null);
+      const result = await api<ProjectValidationResponse>("/procore/project-validation");
+      setValidationData(result);
+    } catch (err) {
+      console.error("Failed to load project validation:", err);
+      setValidationError(
+        err instanceof Error ? err.message : "Failed to load Procore project validation"
+      );
+    } finally {
+      setValidationLoading(false);
+    }
+  }, []);
+
+  const load = useCallback(async () => {
+    await Promise.all([loadSyncStatus(), loadValidation()]);
+  }, [loadSyncStatus, loadValidation]);
 
   useEffect(() => {
     load();
@@ -151,6 +255,7 @@ export function ProcoreSyncPage() {
 
   const healthLabel =
     healthColor === "green" ? "Healthy" : healthColor === "amber" ? "Warning" : "Degraded";
+  const validationSummary = buildValidationSummary(validationData?.projects ?? []);
 
   return (
     <div className="space-y-6">
@@ -169,6 +274,140 @@ export function ProcoreSyncPage() {
           Refresh
         </Button>
       </div>
+
+      <Card>
+        <CardHeader className="pb-2">
+          <CardTitle className="text-sm flex items-center gap-2">
+            <CheckCircle2 className="h-4 w-4 text-muted-foreground" />
+            Read-Only Project Validation
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex flex-col gap-2 text-sm text-muted-foreground md:flex-row md:items-center md:justify-between">
+            <p>
+              This compares live Procore projects to CRM deals without writing to Procore or
+              mutating CRM sync state.
+            </p>
+            {validationData?.meta.readOnly ? (
+              <Badge className="w-fit bg-blue-100 text-blue-800">Read-only mode</Badge>
+            ) : null}
+          </div>
+
+          {validationLoading ? (
+            <div className="text-sm text-muted-foreground">Loading project validation...</div>
+          ) : validationError ? (
+            <div className="text-sm text-red-600">{validationError}</div>
+          ) : validationData ? (
+            <>
+              <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+                <Card>
+                  <CardHeader className="pb-2">
+                    <CardTitle className="text-xs text-muted-foreground uppercase">
+                      Projects
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="text-2xl font-bold text-slate-900">{validationSummary.total}</div>
+                  </CardContent>
+                </Card>
+                <Card>
+                  <CardHeader className="pb-2">
+                    <CardTitle className="text-xs text-muted-foreground uppercase">
+                      Matched
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="text-2xl font-bold text-green-600">
+                      {validationSummary.matched}
+                    </div>
+                  </CardContent>
+                </Card>
+                <Card>
+                  <CardHeader className="pb-2">
+                    <CardTitle className="text-xs text-muted-foreground uppercase">
+                      Ambiguous
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="text-2xl font-bold text-amber-600">
+                      {validationSummary.ambiguous}
+                    </div>
+                  </CardContent>
+                </Card>
+                <Card>
+                  <CardHeader className="pb-2">
+                    <CardTitle className="text-xs text-muted-foreground uppercase">
+                      Unmatched
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="text-2xl font-bold text-slate-600">
+                      {validationSummary.unmatched}
+                    </div>
+                  </CardContent>
+                </Card>
+              </div>
+
+              <div className="flex flex-col gap-1 text-xs text-muted-foreground md:flex-row md:items-center md:justify-between">
+                <span>
+                  Fetched {validationData.meta.fetchedCount} project
+                  {validationData.meta.fetchedCount === 1 ? "" : "s"} from company{" "}
+                  {validationData.meta.companyId} at{" "}
+                  {new Date(validationData.meta.fetchedAt).toLocaleString()}.
+                </span>
+                {validationData.meta.truncated ? (
+                  <span className="text-amber-700">Results were truncated at the safety cap.</span>
+                ) : null}
+              </div>
+
+              {validationData.projects.length > 0 ? (
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Procore Project</TableHead>
+                      <TableHead>Status</TableHead>
+                      <TableHead>Match Reason</TableHead>
+                      <TableHead>CRM Deal</TableHead>
+                      <TableHead>Location</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {validationData.projects.map((row) => (
+                      <TableRow key={row.project.id}>
+                        <TableCell>
+                          <div className="flex flex-col">
+                            <span className="font-medium text-gray-900">
+                              {row.project.name ?? "Untitled Procore project"}
+                            </span>
+                            <span className="text-xs text-muted-foreground">
+                              {row.project.projectNumber ? `${row.project.projectNumber} · ` : ""}
+                              ID {row.project.id}
+                            </span>
+                          </div>
+                        </TableCell>
+                        <TableCell>
+                          <ValidationStatusBadge status={row.status} />
+                        </TableCell>
+                        <TableCell className="text-sm text-muted-foreground">
+                          {formatValidationMatchReason(row.matchReason)}
+                        </TableCell>
+                        <TableCell className="text-sm">{formatDealLabel(row.deal)}</TableCell>
+                        <TableCell className="text-sm text-muted-foreground">
+                          {formatProjectLocation(row.project)}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              ) : (
+                <div className="text-sm text-muted-foreground">
+                  No Procore projects were returned for validation.
+                </div>
+              )}
+            </>
+          ) : null}
+        </CardContent>
+      </Card>
 
       {data && (
         <>
