@@ -48,10 +48,9 @@ export function getTokenCookieOptions(env: EnvInput) {
   return {
     httpOnly: true,
     secure: isProduction,
-    // "lax" instead of "none": frontend and API share the same domain in production,
-    // so cross-site cookie sending is not required. "none" would also require Secure
-    // on every environment, and opens the door to CSRF on cross-origin requests.
-    sameSite: isProduction ? "lax" : "strict",
+    // Production runs the frontend and API on separate origins, so auth cookies must be
+    // sent on cross-site fetch requests from the frontend app to the API service.
+    sameSite: isProduction ? "none" : "strict",
     maxAge: 24 * 60 * 60 * 1000,
   } as const;
 }
