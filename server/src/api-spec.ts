@@ -750,7 +750,7 @@ export const apiSpec = {
       get: {
         tags: ["Auth"],
         summary: "Get Procore OAuth authorize URL",
-        description: "Returns the URL to redirect an admin user to Procore for OAuth authorization.",
+        description: "Returns the URL to redirect an admin user to Procore for OAuth authorization. If Procore OAuth is not configured, returns a null URL with authMode=dev.",
         responses: {
           200: {
             description: "Procore authorize URL.",
@@ -759,7 +759,9 @@ export const apiSpec = {
                 schema: {
                   type: "object",
                   properties: {
-                    url: { type: "string", format: "uri" },
+                    url: { type: "string", format: "uri", nullable: true },
+                    authMode: { type: "string", enum: ["oauth", "client_credentials", "dev"], nullable: true },
+                    message: { type: "string", nullable: true },
                   },
                   required: ["url"],
                 },
@@ -784,7 +786,7 @@ export const apiSpec = {
           { name: "error", in: "query", schema: { type: "string" } },
         ],
         responses: {
-          302: { description: "Redirect to /admin/procore with connected or error query params." },
+          302: { description: "Redirect to /admin/procore with connected or error query params such as invalid_state, oauth_not_configured, token_exchange_failed, or token_storage_failed." },
         },
       },
     },

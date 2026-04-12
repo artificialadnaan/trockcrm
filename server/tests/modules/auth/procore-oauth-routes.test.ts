@@ -99,6 +99,25 @@ function createSignedState(overrides: Partial<{
   );
 }
 
+function mockFetchResponse({
+  ok = true,
+  status = 200,
+  json,
+  text = "",
+}: {
+  ok?: boolean;
+  status?: number;
+  json?: unknown;
+  text?: string;
+}) {
+  return {
+    ok,
+    status,
+    json: vi.fn().mockResolvedValue(json),
+    text: vi.fn().mockResolvedValue(text),
+  };
+}
+
 describe("procore oauth auth routes", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -123,6 +142,23 @@ describe("procore oauth auth routes", () => {
 
     expect(res.status).toBe(200);
     expect(res.body.url).toContain("https://login.procore.com/oauth/authorize");
+  });
+
+  it("returns a null authorize URL when Procore OAuth env vars are missing", async () => {
+    delete process.env.PROCORE_CLIENT_ID;
+    delete process.env.PROCORE_CLIENT_SECRET;
+    const app = createTestApp();
+
+    const res = await request(app)
+      .get("/api/auth/procore/url")
+      .set("Cookie", adminCookie);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      url: null,
+      authMode: "dev",
+      message: "Procore auth not configured — using dev mode",
+    });
   });
 
   it("returns disconnected when no stored Procore OAuth token exists", async () => {
@@ -179,14 +215,15 @@ describe("procore oauth auth routes", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn().mockResolvedValue(
-        new Response(JSON.stringify({
-          access_token: "oauth-access",
-          refresh_token: "oauth-refresh",
-          expires_in: 3600,
-          scope: "read projects",
-        }), {
+        mockFetchResponse({
+          ok: true,
           status: 200,
-          headers: { "Content-Type": "application/json" },
+          json: {
+            access_token: "oauth-access",
+            refresh_token: "oauth-refresh",
+            expires_in: 3600,
+            scope: "read projects",
+          },
         })
       )
     );
@@ -210,6 +247,29 @@ describe("procore oauth auth routes", () => {
         accountName: null,
       })
     );
+  });
+
+  it("redirects to a non-state auth error when token exchange fails", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        mockFetchResponse({
+          ok: false,
+          status: 401,
+          text: "exchange failed",
+        })
+      )
+    );
+
+    const app = createTestApp();
+    const signedState = createSignedState();
+
+    const res = await request(app)
+      .get("/api/auth/procore/callback")
+      .query({ code: "abc123", state: signedState });
+
+    expect(res.status).toBe(302);
+    expect(res.headers.location).toContain("/admin/procore?procore=error&reason=token_exchange_failed");
   });
 
   it("deletes the stored Procore OAuth token on disconnect", async () => {

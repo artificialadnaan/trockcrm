@@ -241,9 +241,22 @@ export async function exchangeProcoreCodeForTokens(code: string, redirectUri: st
   }>;
 }
 
+function getProcoreAuthErrorRedirect(reason: string) {
+  return `${process.env.FRONTEND_URL || "http://localhost:5173"}/admin/procore?procore=error&reason=${encodeURIComponent(reason)}`;
+}
+
 // GET /api/auth/procore/url — get Procore OAuth authorize URL
 router.get("/procore/url", authMiddleware, requireAdmin, async (req, res, next) => {
   try {
+    if (!process.env.PROCORE_CLIENT_ID || !process.env.PROCORE_CLIENT_SECRET) {
+      res.json({
+        url: null,
+        authMode: "dev",
+        message: "Procore auth not configured — using dev mode",
+      });
+      return;
+    }
+
     const redirectUri = `${process.env.API_BASE_URL || "http://localhost:3001"}/api/auth/procore/callback`;
     const state = jwt.sign({
       sub: req.user!.id,
@@ -267,24 +280,35 @@ router.get("/procore/url", authMiddleware, requireAdmin, async (req, res, next) 
 
 // GET /api/auth/procore/callback — handle Procore OAuth callback
 router.get("/procore/callback", async (req, res) => {
+  const code = req.query.code as string | undefined;
+  const state = req.query.state as string | undefined;
+  const error = req.query.error as string | undefined;
+  const apiBaseUrl = process.env.API_BASE_URL || "http://localhost:3001";
+  const frontendUrl = process.env.FRONTEND_URL || "http://localhost:5173";
+
+  if (error) {
+    res.redirect(getProcoreAuthErrorRedirect(error));
+    return;
+  }
+
+  if (!code || !state) {
+    res.redirect(getProcoreAuthErrorRedirect("missing_code"));
+    return;
+  }
+
+  if (!process.env.JWT_SECRET || !process.env.PROCORE_CLIENT_ID || !process.env.PROCORE_CLIENT_SECRET) {
+    res.redirect(getProcoreAuthErrorRedirect("oauth_not_configured"));
+    return;
+  }
+
+  let payload: {
+    sub: string;
+    role: string;
+    purpose: string;
+  };
+
   try {
-    const code = req.query.code as string | undefined;
-    const state = req.query.state as string | undefined;
-    const error = req.query.error as string | undefined;
-    const apiBaseUrl = process.env.API_BASE_URL || "http://localhost:3001";
-    const frontendUrl = process.env.FRONTEND_URL || "http://localhost:5173";
-
-    if (error) {
-      res.redirect(`${frontendUrl}/admin/procore?procore=error&reason=${encodeURIComponent(error)}`);
-      return;
-    }
-
-    if (!code || !state) {
-      res.redirect(`${frontendUrl}/admin/procore?procore=error&reason=missing_code`);
-      return;
-    }
-
-    const payload = jwt.verify(state, process.env.JWT_SECRET!) as {
+    payload = jwt.verify(state, process.env.JWT_SECRET) as {
       sub: string;
       role: string;
       purpose: string;
@@ -293,12 +317,29 @@ router.get("/procore/callback", async (req, res) => {
     if (payload.purpose !== "procore_oauth" || payload.role !== "admin") {
       throw new AppError(403, "Invalid Procore OAuth state");
     }
+  } catch {
+    res.redirect(getProcoreAuthErrorRedirect("invalid_state"));
+    return;
+  }
 
-    const tokenResponse = await exchangeProcoreCodeForTokens(
+  let tokenResponse: {
+    access_token: string;
+    refresh_token: string;
+    expires_in: number;
+    scope?: string;
+  };
+
+  try {
+    tokenResponse = await exchangeProcoreCodeForTokens(
       code,
       `${apiBaseUrl}/api/auth/procore/callback`
     );
+  } catch {
+    res.redirect(getProcoreAuthErrorRedirect("token_exchange_failed"));
+    return;
+  }
 
+  try {
     await upsertProcoreOauthTokens({
       accessToken: tokenResponse.access_token,
       refreshToken: tokenResponse.refresh_token,
@@ -310,9 +351,7 @@ router.get("/procore/callback", async (req, res) => {
 
     res.redirect(`${frontendUrl}/admin/procore?procore=connected`);
   } catch {
-    res.redirect(
-      `${process.env.FRONTEND_URL || "http://localhost:5173"}/admin/procore?procore=error&reason=invalid_state`
-    );
+    res.redirect(getProcoreAuthErrorRedirect("token_storage_failed"));
   }
 });
 
