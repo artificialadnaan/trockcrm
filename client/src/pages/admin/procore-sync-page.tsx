@@ -16,7 +16,9 @@ import { api } from "@/lib/api";
 import {
   buildProcoreValidationSectionState,
   buildValidationSummary,
+  formatProjectValidationLocation,
   formatValidationMatchReason,
+  type ProjectValidationAddress,
   type ProcoreAuthStatus,
 } from "@/lib/procore-validation-view-model";
 
@@ -72,7 +74,7 @@ interface ProjectValidationProject {
   projectNumber: string | null;
   city: string | null;
   state: string | null;
-  address: string | null;
+  address: ProjectValidationAddress;
   updatedAt: string | null;
 }
 
@@ -172,8 +174,7 @@ function ValidationStatusBadge({
 }
 
 function formatProjectLocation(project: ProjectValidationProject) {
-  const cityState = [project.city, project.state].filter(Boolean).join(", ");
-  return project.address ?? cityState ?? "No location";
+  return formatProjectValidationLocation(project);
 }
 
 function formatDealLabel(deal: ProjectValidationDeal | null) {

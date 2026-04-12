@@ -43,6 +43,17 @@ export type ProcoreValidationSectionState = {
   redirectBanner: ProcoreRedirectBanner | null;
 };
 
+export type ProjectValidationAddress =
+  | string
+  | {
+      street?: string | null;
+      city?: string | null;
+      state_code?: string | null;
+      zip?: string | null;
+      country_code?: string | null;
+    }
+  | null;
+
 export function buildValidationSummary(rows: ValidationSummaryInput[]) {
   return rows.reduce(
     (summary, row) => {
@@ -57,6 +68,33 @@ export function buildValidationSummary(rows: ValidationSummaryInput[]) {
       total: 0,
     }
   );
+}
+
+export function formatProjectValidationLocation(project: {
+  city: string | null;
+  state: string | null;
+  address: ProjectValidationAddress;
+}) {
+  if (typeof project.address === "string" && project.address.trim()) {
+    return project.address;
+  }
+
+  if (project.address && typeof project.address === "object") {
+    const street = project.address.street?.trim();
+    const city = project.address.city?.trim();
+    const state = project.address.state_code?.trim();
+    const zip = project.address.zip?.trim();
+    const structured = [street, [city, state].filter(Boolean).join(", "), zip]
+      .filter(Boolean)
+      .join(" ");
+
+    if (structured) {
+      return structured;
+    }
+  }
+
+  const cityState = [project.city, project.state].filter(Boolean).join(", ");
+  return cityState || "No location";
 }
 
 export function formatValidationMatchReason(reason: ValidationMatchReason) {

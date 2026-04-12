@@ -3,6 +3,7 @@ import {
   buildProcoreValidationSectionState,
   buildValidationSummary,
   canLoadProcoreValidation,
+  formatProjectValidationLocation,
   formatValidationMatchReason,
   getProcoreRedirectBanner,
   getProcoreConnectionBanner,
@@ -152,5 +153,21 @@ describe("procore validation view model", () => {
         description: expect.stringContaining("token exchange failed"),
       },
     });
+  });
+
+  it("formats a structured Procore address object into readable location text", () => {
+    expect(
+      formatProjectValidationLocation({
+        city: null,
+        state: null,
+        address: {
+          street: "6212 Crow Lane",
+          city: "Austin",
+          state_code: "TX",
+          zip: "78745",
+          country_code: "US",
+        },
+      })
+    ).toBe("6212 Crow Lane Austin, TX 78745");
   });
 });
