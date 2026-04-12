@@ -138,7 +138,14 @@ async function invokeRoute({
     if (err) throw err;
     const layer = stack[index++];
     if (!layer) return;
-    await Promise.resolve(layer.handle(req, res, next));
+    let downstreamPromise: Promise<void> | undefined;
+    const layerNext = (nextErr?: unknown) => {
+      downstreamPromise = next(nextErr);
+      return downstreamPromise;
+    };
+
+    await Promise.resolve(layer.handle(req, res, layerNext));
+    await downstreamPromise;
   };
 
   await next();
@@ -476,6 +483,7 @@ describe("project validation service", () => {
 describe("project validation route", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    process.env.PROCORE_COMPANY_ID = "598134325683880";
   });
 
   it("requires admin role for project validation", async () => {
@@ -491,6 +499,24 @@ describe("project validation route", () => {
       message: "Requires one of: admin",
     });
     expect(projectValidationServiceMocks.listProjectValidationForOffice).not.toHaveBeenCalled();
+  });
+
+  it("returns an explicit auth error instead of an empty validation result", async () => {
+    projectValidationServiceMocks.listProjectValidationForOffice.mockRejectedValueOnce(
+      new Error("PROCORE_OAUTH_REQUIRED")
+    );
+
+    const request = invokeRoute({
+      method: "get",
+      routePath: "/project-validation",
+      url: "/project-validation",
+      user: makeUser("admin"),
+    });
+
+    await expect(request).rejects.toMatchObject<AppError>({
+      statusCode: 503,
+      message: "Procore authentication required",
+    });
   });
 });
 

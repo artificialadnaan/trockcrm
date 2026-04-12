@@ -119,8 +119,12 @@ interface ProcoreReadAuthOptions {
   companyId?: string;
 }
 
-function isProcoreOauthRequiredError(error: unknown): boolean {
+export function isProcoreOauthRequiredError(error: unknown): boolean {
   return error instanceof Error && error.message === "PROCORE_OAUTH_REQUIRED";
+}
+
+export function isProcoreOauthRefreshError(error: unknown): boolean {
+  return error instanceof Error && error.message === "PROCORE_OAUTH_REFRESH_FAILED";
 }
 
 async function resolveProcoreReadAuth(options: ProcoreReadAuthOptions = {}) {

@@ -7,7 +7,11 @@ import { procoreSyncState } from "@trock-crm/shared/schema";
 import { requireRole } from "../../middleware/rbac.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { db } from "../../db.js";
-import { procoreClient } from "../../lib/procore-client.js";
+import {
+  isProcoreOauthRefreshError,
+  isProcoreOauthRequiredError,
+  procoreClient,
+} from "../../lib/procore-client.js";
 import { listProjectValidationForOffice } from "./project-validation-service.js";
 
 const router = Router();
@@ -182,7 +186,11 @@ router.get(
       await req.commitTransaction!();
       res.json(result);
     } catch (err) {
-      next(err);
+      if (isProcoreOauthRequiredError(err) || isProcoreOauthRefreshError(err)) {
+        return next(new AppError(503, "Procore authentication required"));
+      }
+
+      return next(err);
     }
   }
 );
