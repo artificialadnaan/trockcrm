@@ -407,6 +407,39 @@ describe("procore reconciliation service", () => {
     expect(sql).toContain("coalesce(deal_id");
   });
 
+  it("coerces unexpected non-string Procore values without crashing normalization", async () => {
+    process.env.PROCORE_COMPANY_ID = "company-1";
+
+    const service = createProcoreReconciliationService(
+      {
+        listProjectsPage: vi.fn().mockResolvedValueOnce([
+          {
+            id: 1003,
+            name: "Typed Project",
+            projectNumber: "TR-typed",
+            city: 101 as unknown as string,
+            state: { code: "TX" } as unknown as string,
+            address: ["500", "Main"] as unknown as string,
+            updatedAt: "2026-04-05T12:00:00.000Z",
+          },
+        ]),
+        listActiveDeals: vi.fn().mockResolvedValue([]),
+        listIgnoredRows: vi.fn().mockResolvedValue([]),
+      },
+      { pageSize: 100 }
+    );
+
+    const result = await service.listProcoreReconciliation({
+      tenantDb: {} as never,
+      officeId: "office-1",
+    });
+
+    expect(result.projects[0]).toMatchObject({
+      procoreProjectId: 1003,
+      bucket: "procore_only",
+    });
+  });
+
   it("pages through all Procore company projects and builds summary buckets", async () => {
     process.env.PROCORE_COMPANY_ID = "company-1";
 

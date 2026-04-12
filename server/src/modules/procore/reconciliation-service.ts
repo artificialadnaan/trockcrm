@@ -499,15 +499,18 @@ export function normalizeProcoreReconciliationRow(input: {
   state: string | null;
   address: string | null;
 }) {
-  const normalizeText = (value: string | null) =>
-    (value ?? "")
+  const coerceText = (value: unknown) =>
+    typeof value === "string" ? value : value == null ? "" : String(value);
+
+  const normalizeText = (value: unknown) =>
+    coerceText(value)
       .toLowerCase()
       .replace(/[^a-z0-9\s]/g, " ")
       .replace(/\s+/g, " ")
       .trim();
 
-  const normalizeCode = (value: string | null) =>
-    (value ?? "")
+  const normalizeCode = (value: unknown) =>
+    coerceText(value)
       .toLowerCase()
       .replace(/[^a-z0-9]/g, "")
       .trim();
