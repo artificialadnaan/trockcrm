@@ -11,7 +11,7 @@ export const apiSpec = {
     { url: "https://api.trock-crm.railway.app", description: "Production (Railway)" },
   ],
   tags: [
-    { name: "Auth", description: "Authentication — dev login, SSO, MS Graph OAuth" },
+    { name: "Auth", description: "Authentication — dev login, SSO, MS Graph OAuth, Procore OAuth" },
     { name: "Deals", description: "Deal CRUD, stage changes, approvals, pipeline" },
     { name: "Contacts", description: "Contact CRUD, dedup, merge, deal associations" },
     { name: "Companies", description: "Company directory, contacts & deals by company" },
@@ -742,6 +742,99 @@ export const apiSpec = {
               },
             },
           },
+        },
+      },
+    },
+
+    "/api/auth/procore/url": {
+      get: {
+        tags: ["Auth"],
+        summary: "Get Procore OAuth authorize URL",
+        description: "Returns the URL to redirect an admin user to Procore for OAuth authorization.",
+        responses: {
+          200: {
+            description: "Procore authorize URL.",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    url: { type: "string", format: "uri" },
+                  },
+                  required: ["url"],
+                },
+              },
+            },
+          },
+          401: { description: "Not authenticated." },
+          403: { description: "Admin role required." },
+        },
+      },
+    },
+
+    "/api/auth/procore/callback": {
+      get: {
+        tags: ["Auth"],
+        summary: "Procore OAuth callback (redirects)",
+        description: "Handles the redirect from Procore after authorization, stores shared OAuth tokens, and redirects back to the admin Procore page.",
+        security: [],
+        parameters: [
+          { name: "code", in: "query", schema: { type: "string" } },
+          { name: "state", in: "query", schema: { type: "string" } },
+          { name: "error", in: "query", schema: { type: "string" } },
+        ],
+        responses: {
+          302: { description: "Redirect to /admin/procore with connected or error query params." },
+        },
+      },
+    },
+
+    "/api/auth/procore/status": {
+      get: {
+        tags: ["Auth"],
+        summary: "Check Procore OAuth connection status",
+        responses: {
+          200: {
+            description: "Shared Procore OAuth connection status.",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    connected: { type: "boolean" },
+                    expiresAt: { type: "string", format: "date-time", nullable: true },
+                    accountEmail: { type: "string", nullable: true },
+                    accountName: { type: "string", nullable: true },
+                    status: { type: "string", nullable: true },
+                    errorMessage: { type: "string", nullable: true },
+                    authMode: { type: "string", enum: ["oauth", "client_credentials", "dev"] },
+                  },
+                  required: ["connected", "expiresAt", "accountEmail", "accountName", "status", "errorMessage", "authMode"],
+                },
+              },
+            },
+          },
+          401: { description: "Not authenticated." },
+          403: { description: "Admin role required." },
+        },
+      },
+    },
+
+    "/api/auth/procore/disconnect": {
+      post: {
+        tags: ["Auth"],
+        summary: "Disconnect Procore OAuth / clear stored tokens",
+        responses: {
+          200: {
+            description: "Stored tokens cleared.",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/SuccessResponse" },
+              },
+            },
+          },
+          401: { description: "Not authenticated." },
+          403: { description: "Admin role required." },
         },
       },
     },

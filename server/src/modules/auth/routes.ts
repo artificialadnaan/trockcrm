@@ -5,6 +5,7 @@ import { getDevUsers, getUserByEmail, signJwt } from "./service.js";
 import { authMiddleware } from "../../middleware/auth.js";
 import { authLimiter } from "../../middleware/rate-limit.js";
 import { AppError } from "../../middleware/error-handler.js";
+import { requireAdmin } from "../../middleware/rbac.js";
 import {
   exchangeCodeForTokens,
   getConsentUrl,
@@ -12,6 +13,11 @@ import {
 } from "../email/graph-auth.js";
 import { getGraphTokenStatus, revokeGraphTokens } from "../email/graph-token-service.js";
 import { getTokenCookieOptions, isDevAuthEnabled } from "./http-config.js";
+import {
+  clearStoredProcoreOauthTokens,
+  getStoredProcoreOauthTokens,
+  upsertProcoreOauthTokens,
+} from "../procore/oauth-token-service.js";
 
 const router = Router();
 
@@ -203,6 +209,142 @@ router.get("/graph/status", authMiddleware, async (req, res, next) => {
 router.post("/graph/disconnect", authMiddleware, async (req, res, next) => {
   try {
     await revokeGraphTokens(req.user!.id);
+    res.json({ success: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+export async function exchangeProcoreCodeForTokens(code: string, redirectUri: string) {
+  const response = await fetch("https://login.procore.com/oauth/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      grant_type: "authorization_code",
+      client_id: process.env.PROCORE_CLIENT_ID,
+      client_secret: process.env.PROCORE_CLIENT_SECRET,
+      code,
+      redirect_uri: redirectUri,
+    }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`PROCORE_OAUTH_CODE_EXCHANGE_FAILED:${errorText}`);
+  }
+
+  return response.json() as Promise<{
+    access_token: string;
+    refresh_token: string;
+    expires_in: number;
+    scope?: string;
+  }>;
+}
+
+// GET /api/auth/procore/url — get Procore OAuth authorize URL
+router.get("/procore/url", authMiddleware, requireAdmin, async (req, res, next) => {
+  try {
+    const redirectUri = `${process.env.API_BASE_URL || "http://localhost:3001"}/api/auth/procore/callback`;
+    const state = jwt.sign({
+      sub: req.user!.id,
+      role: req.user!.role,
+      officeId: req.user!.activeOfficeId ?? req.user!.officeId,
+      purpose: "procore_oauth",
+    }, process.env.JWT_SECRET!, { expiresIn: "10m" });
+
+    const params = new URLSearchParams({
+      response_type: "code",
+      client_id: process.env.PROCORE_CLIENT_ID!,
+      redirect_uri: redirectUri,
+      state,
+    });
+
+    res.json({ url: `https://login.procore.com/oauth/authorize?${params.toString()}` });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/auth/procore/callback — handle Procore OAuth callback
+router.get("/procore/callback", async (req, res) => {
+  try {
+    const code = req.query.code as string | undefined;
+    const state = req.query.state as string | undefined;
+    const error = req.query.error as string | undefined;
+    const apiBaseUrl = process.env.API_BASE_URL || "http://localhost:3001";
+    const frontendUrl = process.env.FRONTEND_URL || "http://localhost:5173";
+
+    if (error) {
+      res.redirect(`${frontendUrl}/admin/procore?procore=error&reason=${encodeURIComponent(error)}`);
+      return;
+    }
+
+    if (!code || !state) {
+      res.redirect(`${frontendUrl}/admin/procore?procore=error&reason=missing_code`);
+      return;
+    }
+
+    const payload = jwt.verify(state, process.env.JWT_SECRET!) as {
+      sub: string;
+      role: string;
+      purpose: string;
+    };
+
+    if (payload.purpose !== "procore_oauth" || payload.role !== "admin") {
+      throw new AppError(403, "Invalid Procore OAuth state");
+    }
+
+    const tokenResponse = await exchangeProcoreCodeForTokens(
+      code,
+      `${apiBaseUrl}/api/auth/procore/callback`
+    );
+
+    await upsertProcoreOauthTokens({
+      accessToken: tokenResponse.access_token,
+      refreshToken: tokenResponse.refresh_token,
+      expiresAt: new Date(Date.now() + tokenResponse.expires_in * 1000),
+      scopes: tokenResponse.scope?.split(" ") ?? [],
+      accountEmail: null,
+      accountName: null,
+    });
+
+    res.redirect(`${frontendUrl}/admin/procore?procore=connected`);
+  } catch {
+    res.redirect(
+      `${process.env.FRONTEND_URL || "http://localhost:5173"}/admin/procore?procore=error&reason=invalid_state`
+    );
+  }
+});
+
+// GET /api/auth/procore/status — get current Procore OAuth connection status
+router.get("/procore/status", authMiddleware, requireAdmin, async (_req, res, next) => {
+  try {
+    const tokens = await getStoredProcoreOauthTokens();
+    const authMode =
+      tokens
+        ? "oauth"
+        : !process.env.PROCORE_CLIENT_ID || !process.env.PROCORE_CLIENT_SECRET
+          ? "dev"
+          : "client_credentials";
+
+    res.json({
+      connected: tokens?.status === "active",
+      expiresAt: tokens?.expiresAt?.toISOString() ?? null,
+      accountEmail: tokens?.accountEmail ?? null,
+      accountName: tokens?.accountName ?? null,
+      status: tokens?.status ?? null,
+      errorMessage: tokens?.lastError ?? null,
+      authMode,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/auth/procore/disconnect — clear stored Procore OAuth tokens
+router.post("/procore/disconnect", authMiddleware, requireAdmin, async (_req, res, next) => {
+  try {
+    await clearStoredProcoreOauthTokens();
     res.json({ success: true });
   } catch (err) {
     next(err);

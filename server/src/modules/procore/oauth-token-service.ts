@@ -12,7 +12,7 @@ export interface ProcoreOauthTokenData {
   accountName?: string | null;
 }
 
-type ProcoreOauthDb = Pick<typeof db, "select" | "insert" | "update">;
+type ProcoreOauthDb = Pick<typeof db, "select" | "insert" | "update" | "delete">;
 
 export async function upsertProcoreOauthTokens(
   tokens: ProcoreOauthTokenData,
@@ -96,5 +96,13 @@ export async function markProcoreOauthReauthNeeded(
       lastError: errorMessage,
       updatedAt: new Date(),
     })
+    .where(eq(procoreOauthTokens.singletonKey, 1));
+}
+
+export async function clearStoredProcoreOauthTokens(
+  dbClient: ProcoreOauthDb = db
+): Promise<void> {
+  await dbClient
+    .delete(procoreOauthTokens)
     .where(eq(procoreOauthTokens.singletonKey, 1));
 }
