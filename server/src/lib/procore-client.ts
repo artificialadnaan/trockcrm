@@ -311,11 +311,49 @@ export interface ProcoreCompanyProjectRow {
   id: number;
   name?: string | null;
   display_name?: string | null;
+  displayName?: string | null;
   project_number?: string | null;
+  projectNumber?: string | null;
   city?: string | null;
   state_code?: string | null;
-  address?: string | null;
+  stateCode?: string | null;
+  address?:
+    | string
+    | {
+        street?: string | null;
+        city?: string | null;
+        state_code?: string | null;
+        stateCode?: string | null;
+        zip?: string | null;
+        country_code?: string | null;
+      }
+    | null;
   updated_at?: string | null;
+  updatedAt?: string | null;
+}
+
+function extractProjectAddress(row: ProcoreCompanyProjectRow) {
+  if (typeof row.address === "string") {
+    return {
+      city: row.city ?? null,
+      state: row.state_code ?? row.stateCode ?? null,
+      address: row.address,
+    };
+  }
+
+  if (row.address && typeof row.address === "object") {
+    return {
+      city: row.city ?? row.address.city ?? null,
+      state: row.state_code ?? row.stateCode ?? row.address.state_code ?? row.address.stateCode ?? null,
+      address: row.address.street ?? null,
+    };
+  }
+
+  return {
+    city: row.city ?? null,
+    state: row.state_code ?? row.stateCode ?? null,
+    address: null,
+  };
 }
 
 export async function listCompanyProjectsPage(
@@ -344,14 +382,12 @@ export async function listCompanyProjectsPage(
   );
 
   return rows.map((row) => ({
+    ...extractProjectAddress(row),
     id: row.id,
     name: row.name ?? null,
-    displayName: row.display_name ?? null,
-    projectNumber: row.project_number ?? null,
-    city: row.city ?? null,
-    state: row.state_code ?? null,
-    address: row.address ?? null,
-    updatedAt: row.updated_at ?? null,
+    displayName: row.display_name ?? row.displayName ?? null,
+    projectNumber: row.project_number ?? row.projectNumber ?? null,
+    updatedAt: row.updated_at ?? row.updatedAt ?? null,
   }));
 }
 

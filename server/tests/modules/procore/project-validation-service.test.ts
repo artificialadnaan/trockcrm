@@ -643,4 +643,87 @@ describe("procore client read auth", () => {
       expect(markOauthReauthNeeded).toHaveBeenCalledWith(`oauth read failed: ${statusCode}`);
     }
   );
+
+  it("flattens structured Procore addresses into matcher-friendly city/state/address fields", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify([
+          {
+            id: 1,
+            name: "Structured Address Project",
+            display_name: "Structured Address Project",
+            project_number: "TR-900",
+            city: null,
+            state_code: null,
+            address: {
+              street: "6212 Crow Lane",
+              city: "Austin",
+              state_code: "TX",
+              zip: "78745",
+              country_code: "US",
+            },
+            updated_at: "2026-04-13T00:00:00.000Z",
+          },
+        ]),
+        { status: 200 }
+      )
+    );
+
+    const result = await listCompanyProjectsPage("598134325683880", 1, 5, {
+      fetchImpl: fetchMock,
+      getStoredTokens: vi.fn().mockResolvedValue({
+        accessToken: "oauth-token",
+        refreshToken: "refresh-token",
+        expiresAt: new Date(Date.now() + 120_000),
+        scopes: ["read"],
+        accountEmail: "admin@trock.dev",
+        accountName: "Admin User",
+        status: "active",
+        lastError: null,
+      }),
+    });
+
+    expect(result[0]).toMatchObject({
+      projectNumber: "TR-900",
+      city: "Austin",
+      state: "TX",
+      address: "6212 Crow Lane",
+    });
+  });
+
+  it("accepts camelCase project number fields when Procore omits snake_case project_number", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify([
+          {
+            id: 1,
+            name: "Camel Project Number",
+            display_name: "Camel Project Number",
+            projectNumber: "TR-901",
+            city: "Dallas",
+            state_code: "TX",
+            address: "100 Main St",
+            updated_at: "2026-04-13T00:00:00.000Z",
+          },
+        ]),
+        { status: 200 }
+      )
+    );
+
+    const result = await listCompanyProjectsPage("598134325683880", 1, 5, {
+      fetchImpl: fetchMock,
+      getStoredTokens: vi.fn().mockResolvedValue({
+        accessToken: "oauth-token",
+        refreshToken: "refresh-token",
+        expiresAt: new Date(Date.now() + 120_000),
+        scopes: ["read"],
+        accountEmail: "admin@trock.dev",
+        accountName: "Admin User",
+        status: "active",
+        lastError: null,
+      }),
+    });
+
+    expect(result[0]?.projectNumber).toBe("TR-901");
+  });
 });
