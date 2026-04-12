@@ -19,7 +19,7 @@
 - Modify: `shared/src/schema/index.ts`
   Responsibility: export the new Procore OAuth schema.
 - Create: `server/src/modules/procore/oauth-token-service.ts`
-  Responsibility: encrypt, store, load, refresh, and clear Procore OAuth tokens.
+  Responsibility: encrypt, store, load, exchange, refresh, and clear Procore OAuth tokens.
 - Modify: `server/src/lib/procore-client.ts`
   Responsibility: prefer OAuth-backed Procore reads, send `Procore-Company-Id`, refresh expired tokens, and expose explicit auth-mode / auth-failure behavior.
 - Modify: `server/src/modules/auth/routes.ts`
@@ -29,7 +29,7 @@
 - Modify: `client/src/pages/admin/procore-sync-page.tsx`
   Responsibility: show Procore OAuth connection state and gate validation UI accordingly.
 - Create: `server/tests/modules/procore/oauth-token-service.test.ts`
-  Responsibility: TDD coverage for token storage, refresh, and auth status behavior.
+  Responsibility: TDD coverage for token storage, refresh, auth status behavior, and reauth-needed transitions.
 - Create: `server/tests/modules/auth/procore-oauth-routes.test.ts`
   Responsibility: route-level coverage for Procore authorize, callback, status, and disconnect behavior.
 - Modify: `server/tests/modules/procore/project-validation-service.test.ts`
@@ -52,7 +52,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   upsertProcoreOauthTokens,
   getStoredProcoreOauthTokens,
-  clearStoredProcoreOauthTokens,
+  markProcoreOauthReauthNeeded,
 } from "../../../src/modules/procore/oauth-token-service.js";
 
 describe("procore oauth token service", () => {
@@ -87,6 +87,20 @@ describe("procore oauth token service", () => {
     } as any;
 
     await expect(getStoredProcoreOauthTokens(db)).resolves.toBeNull();
+  });
+
+  it("marks the stored token row as reauth_needed when refresh fails", async () => {
+    const db = {
+      update: vi.fn().mockReturnValue({
+        set: vi.fn().mockReturnValue({
+          where: vi.fn().mockResolvedValue(undefined),
+        }),
+      }),
+    } as any;
+
+    await markProcoreOauthReauthNeeded(db, "refresh failed");
+
+    expect(db.update).toHaveBeenCalledOnce();
   });
 });
 ```
@@ -155,6 +169,23 @@ export async function getStoredProcoreOauthTokens(db = poolDb) {
     lastError: row.lastError,
   };
 }
+
+export async function markProcoreOauthReauthNeeded(
+  db = poolDb,
+  errorMessage: string
+) {
+  const existing = await db.select({ id: procoreOauthTokens.id }).from(procoreOauthTokens).limit(1);
+  if (existing.length === 0) return;
+
+  await db
+    .update(procoreOauthTokens)
+    .set({
+      status: "reauth_needed",
+      lastError: errorMessage,
+      updatedAt: new Date(),
+    })
+    .where(eq(procoreOauthTokens.id, existing[0].id));
+}
 ```
 
 - [ ] **Step 6: Re-run the focused token service tests**
@@ -222,6 +253,24 @@ it("deletes the stored Procore OAuth token on disconnect", async () => {
   expect(res.status).toBe(200);
   expect(clearStoredProcoreOauthTokensMock).toHaveBeenCalledOnce();
 });
+
+it("redirects to an auth error when callback state is invalid", async () => {
+  const res = await request(app)
+    .get("/api/auth/procore/callback")
+    .query({ code: "abc123", state: "bad-state" });
+
+  expect(res.status).toBe(302);
+  expect(res.headers.location).toContain("procore=error");
+});
+
+it("redirects to an auth error when Procore returns an oauth error", async () => {
+  const res = await request(app)
+    .get("/api/auth/procore/callback")
+    .query({ error: "access_denied", state: signedState });
+
+  expect(res.status).toBe(302);
+  expect(res.headers.location).toContain("access_denied");
+});
 ```
 
 - [ ] **Step 2: Run those tests to verify they fail**
@@ -262,12 +311,44 @@ router.get("/procore/url", requireRole("admin"), async (req, res, next) => {
 - [ ] **Step 4: Add callback, status, and disconnect routes**
 
 ```ts
+export async function exchangeProcoreCodeForTokens(code: string, redirectUri: string) {
+  const response = await fetch("https://login.procore.com/oauth/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      grant_type: "authorization_code",
+      client_id: process.env.PROCORE_CLIENT_ID,
+      client_secret: process.env.PROCORE_CLIENT_SECRET,
+      code,
+      redirect_uri: redirectUri,
+    }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`PROCORE_OAUTH_CODE_EXCHANGE_FAILED:${errorText}`);
+  }
+
+  return response.json();
+}
+
 router.get("/procore/callback", async (req, res, next) => {
   try {
     const code = req.query.code as string;
     const state = req.query.state as string;
+    const error = req.query.error as string | undefined;
     const apiBaseUrl = process.env.API_BASE_URL || "http://localhost:3001";
     const frontendUrl = process.env.FRONTEND_URL || "http://localhost:5173";
+
+    if (error) {
+      res.redirect(`${frontendUrl}/admin/procore?procore=error&reason=${encodeURIComponent(error)}`);
+      return;
+    }
+
+    if (!code || !state) {
+      res.redirect(`${frontendUrl}/admin/procore?procore=error&reason=missing_code`);
+      return;
+    }
 
     const payload = jwt.verify(state, process.env.JWT_SECRET!) as {
       sub: string;
@@ -290,19 +371,28 @@ router.get("/procore/callback", async (req, res, next) => {
 
     res.redirect(`${frontendUrl}/admin/procore?procore=connected`);
   } catch (err) {
-    next(err);
+    res.redirect(`${process.env.FRONTEND_URL || "http://localhost:5173"}/admin/procore?procore=error&reason=invalid_state`);
   }
 });
 
 router.get("/procore/status", requireRole("admin"), async (req, res, next) => {
   try {
     const tokens = await getStoredProcoreOauthTokens();
+    const authMode =
+      tokens
+        ? "oauth"
+        : !process.env.PROCORE_CLIENT_ID || !process.env.PROCORE_CLIENT_SECRET
+        ? "dev"
+        : "client_credentials";
+
     res.json({
-      connected: Boolean(tokens),
+      connected: tokens?.status === "active",
       expiresAt: tokens?.expiresAt?.toISOString() ?? null,
       accountEmail: tokens?.accountEmail ?? null,
       accountName: tokens?.accountName ?? null,
-      authMode: tokens ? "oauth" : "client_credentials",
+      status: tokens?.status ?? null,
+      errorMessage: tokens?.lastError ?? null,
+      authMode,
     });
   } catch (err) {
     next(err);
@@ -363,6 +453,33 @@ it("prefers stored oauth tokens over client credentials for read requests", asyn
 
   expect(fetchMock.mock.calls[0]?.[1]?.headers?.["Procore-Company-Id"]).toBe("598134325683880");
 });
+
+it("refreshes an expired stored oauth token before issuing the read request", async () => {
+  const fetchMock = vi
+    .fn()
+    .mockResolvedValueOnce(new Response(JSON.stringify({
+      access_token: "refreshed-access",
+      refresh_token: "refreshed-refresh",
+      expires_in: 3600,
+    }), { status: 200 }))
+    .mockResolvedValueOnce(new Response("[]", { status: 200 }));
+
+  await listCompanyProjectsPage("598134325683880", 1, 5, {
+    fetchImpl: fetchMock,
+    getStoredTokens: vi.fn().mockResolvedValue({
+      accessToken: "expired-access",
+      refreshToken: "refresh-token",
+      expiresAt: new Date(Date.now() - 1000),
+      scopes: ["read"],
+      accountEmail: "admin@trock.dev",
+      accountName: "Admin User",
+      status: "active",
+      lastError: null,
+    }),
+  });
+
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+});
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -379,7 +496,7 @@ async function resolveProcoreAuth() {
   if (stored) {
     const accessToken =
       stored.expiresAt.getTime() - Date.now() <= 60_000
-        ? await refreshStoredProcoreOauthTokens()
+        ? await refreshStoredProcoreOauthTokens(stored.refreshToken)
         : stored.accessToken;
 
     return {
@@ -401,7 +518,42 @@ async function resolveProcoreAuth() {
 }
 ```
 
-- [ ] **Step 4: Send `Procore-Company-Id` for OAuth-backed GETs**
+- [ ] **Step 4: Define and test the refresh helper in the token service**
+
+```ts
+export async function refreshStoredProcoreOauthTokens(refreshToken: string) {
+  const response = await fetch("https://login.procore.com/oauth/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      grant_type: "refresh_token",
+      client_id: process.env.PROCORE_CLIENT_ID,
+      client_secret: process.env.PROCORE_CLIENT_SECRET,
+      refresh_token: refreshToken,
+    }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    await markProcoreOauthReauthNeeded(undefined, errorText || "refresh failed");
+    throw new Error("PROCORE_OAUTH_REFRESH_FAILED");
+  }
+
+  const data = await response.json();
+  await upsertProcoreOauthTokens({
+    accessToken: data.access_token,
+    refreshToken: data.refresh_token ?? refreshToken,
+    expiresAt: new Date(Date.now() + data.expires_in * 1000),
+    scopes: data.scope?.split(" ") ?? [],
+    accountEmail: null,
+    accountName: null,
+  });
+
+  return data.access_token as string;
+}
+```
+
+- [ ] **Step 5: Send `Procore-Company-Id` for OAuth-backed GETs**
 
 ```ts
 const auth = await resolveProcoreAuth();
@@ -417,13 +569,13 @@ const res = await fetch(url, {
 });
 ```
 
-- [ ] **Step 5: Re-run focused server tests**
+- [ ] **Step 6: Re-run focused server tests**
 
 Run: `npx vitest run server/tests/modules/procore/oauth-token-service.test.ts server/tests/modules/procore/project-validation-service.test.ts`
 
 Expected: PASS
 
-- [ ] **Step 6: Commit the Procore client auth switch**
+- [ ] **Step 7: Commit the Procore client auth switch**
 
 ```bash
 git add server/src/lib/procore-client.ts server/src/modules/procore/oauth-token-service.ts server/tests/modules/procore/oauth-token-service.test.ts server/tests/modules/procore/project-validation-service.test.ts
@@ -509,6 +661,17 @@ describe("procore validation view model", () => {
       getProcoreConnectionBanner({ connected: false, authMode: "client_credentials" })
     ).toMatchObject({ tone: "warning" });
   });
+
+  it("returns an auth-error banner when procore oauth needs reauthorization", () => {
+    expect(
+      getProcoreConnectionBanner({
+        connected: false,
+        authMode: "oauth",
+        status: "reauth_needed",
+        errorMessage: "refresh failed",
+      })
+    ).toMatchObject({ tone: "destructive" });
+  });
 });
 ```
 
@@ -532,6 +695,12 @@ const connectProcore = async () => {
   const result = await api<{ url: string }>("/auth/procore/url");
   window.location.href = result.url;
 };
+
+const disconnectProcore = async () => {
+  await api("/auth/procore/disconnect", { method: "POST" });
+  await loadProcoreStatus();
+  setValidationData(null);
+};
 ```
 
 - [ ] **Step 4: Gate validation loading on connection state**
@@ -552,7 +721,31 @@ useEffect(() => {
 }, [procoreStatus, loadValidation]);
 ```
 
-- [ ] **Step 5: Re-run the helper tests and client build**
+- [ ] **Step 5: Render and test the disconnect path**
+
+```tsx
+{procoreStatus?.connected ? (
+  <Button variant="outline" size="sm" onClick={disconnectProcore}>
+    Disconnect Procore
+  </Button>
+) : (
+  <Button size="sm" onClick={connectProcore}>
+    Connect Procore
+  </Button>
+)}
+```
+
+- [ ] **Step 6: Render and test the auth-error state**
+
+```tsx
+{procoreStatus?.status === "reauth_needed" ? (
+  <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+    Procore needs to be reconnected before project validation can run.
+  </div>
+) : null}
+```
+
+- [ ] **Step 7: Re-run the helper tests and client build**
 
 Run:
 - `npx vitest run client/src/lib/procore-validation-view-model.test.ts`
@@ -560,7 +753,7 @@ Run:
 
 Expected: PASS
 
-- [ ] **Step 6: Commit the admin UI auth state**
+- [ ] **Step 8: Commit the admin UI auth state**
 
 ```bash
 git add client/src/pages/admin/procore-sync-page.tsx client/src/lib/procore-validation-view-model.ts client/src/lib/procore-validation-view-model.test.ts
