@@ -26,6 +26,7 @@ export async function listProjectValidation(args: {
   companyId: string;
   pageSize: number;
   maxProjects: number;
+  now?: () => Date;
   listProjectsPage?: (
     companyId: string,
     page: number,
@@ -65,6 +66,7 @@ export async function listProjectValidation(args: {
 
   const deals = await args.listActiveDeals();
   const projectRows = projects.map((project) => buildValidationRow(project, deals));
+  const now = args.now?.() ?? new Date();
 
   return {
     projects: projectRows,
@@ -72,7 +74,7 @@ export async function listProjectValidation(args: {
     meta: {
       companyId: args.companyId,
       fetchedCount: projects.length,
-      fetchedAt: new Date().toISOString(),
+      fetchedAt: now.toISOString(),
       readOnly: true,
       truncated,
     },
@@ -83,6 +85,7 @@ function buildValidationRow(
   project: ProcoreProjectCandidate,
   deals: CrmDealCandidate[]
 ): ProjectValidationRow {
+  const fuzzyEligibleDeals = deals.filter((deal) => deal.procoreProjectId == null);
   const exactProjectIdMatches = deals.filter(
     (deal) => deal.procoreProjectId != null && deal.procoreProjectId === project.id
   );
@@ -93,12 +96,20 @@ function buildValidationRow(
     return toRow(project, null, "ambiguous", "duplicate_procore_project_id");
   }
 
-  const exactProjectNumberMatches = deals.filter(
-    (deal) =>
-      deal.dealNumber != null &&
-      project.projectNumber != null &&
-      deal.dealNumber.trim().toLowerCase() === project.projectNumber.trim().toLowerCase()
-  );
+  const normalizedProject = normalizeProcoreReconciliationRow(project);
+  const exactProjectNumberMatches = normalizedProject.normalizedProjectNumber
+    ? fuzzyEligibleDeals.filter((deal) => {
+        const normalizedDeal = normalizeProcoreReconciliationRow({
+          name: deal.name,
+          projectNumber: deal.dealNumber,
+          city: deal.city,
+          state: deal.state,
+          address: deal.address,
+        });
+
+        return normalizedDeal.normalizedProjectNumber === normalizedProject.normalizedProjectNumber;
+      })
+    : [];
   if (exactProjectNumberMatches.length === 1) {
     return toRow(project, exactProjectNumberMatches[0], "matched", "project_number");
   }
@@ -106,7 +117,7 @@ function buildValidationRow(
     return toRow(project, null, "ambiguous", "duplicate_project_number");
   }
 
-  const strongestLocationMatches = scoreNameAndLocation(project, deals);
+  const strongestLocationMatches = scoreNameAndLocation(project, fuzzyEligibleDeals);
   if (strongestLocationMatches.length === 1) {
     return toRow(project, strongestLocationMatches[0], "matched", "name_location");
   }

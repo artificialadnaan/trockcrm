@@ -61,28 +61,31 @@ describe("project validation service", () => {
   });
 
   it("reports the validation result as read-only metadata", async () => {
+    const now = new Date("2026-04-12T12:34:56.000Z");
     const result = await listProjectValidation({
       companyId: "598134325683880",
       pageSize: 100,
       maxProjects: 100,
       listProjectsPage: vi.fn().mockResolvedValueOnce([makeProject()]),
       listActiveDeals: vi.fn().mockResolvedValueOnce([]),
+      now: () => now,
     });
 
     expect(result.meta.readOnly).toBe(true);
+    expect(result.meta.fetchedAt).toBe(now.toISOString());
   });
 
-  it("matches by exact project number when no project-id link exists", async () => {
+  it("matches by normalized project number when no project-id link exists", async () => {
     const result = await listProjectValidation({
       companyId: "598134325683880",
       pageSize: 100,
       maxProjects: 100,
-      listProjectsPage: vi.fn().mockResolvedValueOnce([makeProject({ id: 42, projectNumber: " TR-001 " })]),
+      listProjectsPage: vi.fn().mockResolvedValueOnce([makeProject({ id: 42, projectNumber: "TR-001" })]),
       listActiveDeals: vi.fn().mockResolvedValueOnce([
         makeDeal({
           id: "deal-number",
           procoreProjectId: null,
-          dealNumber: "tr-001",
+          dealNumber: "TR001",
           name: "Other Name",
           city: "Houston",
           state: "TX",
@@ -94,6 +97,39 @@ describe("project validation service", () => {
     expect(result.projects[0].status).toBe("matched");
     expect(result.projects[0].matchReason).toBe("project_number");
     expect(result.projects[0].deal?.id).toBe("deal-number");
+  });
+
+  it("ignores deals linked to a different project for fuzzy name-location matching", async () => {
+    const result = await listProjectValidation({
+      companyId: "598134325683880",
+      pageSize: 100,
+      maxProjects: 100,
+      listProjectsPage: vi.fn().mockResolvedValueOnce([
+        makeProject({
+          id: 42,
+          projectNumber: null,
+          name: "Linked Elsewhere",
+          city: "Austin",
+          state: "TX",
+          address: "500 River Rd",
+        }),
+      ]),
+      listActiveDeals: vi.fn().mockResolvedValueOnce([
+        makeDeal({
+          id: "deal-foreign-link",
+          procoreProjectId: 999,
+          dealNumber: null,
+          name: "Linked Elsewhere",
+          city: "Austin",
+          state: "TX",
+          address: "500 River Rd",
+        }),
+      ]),
+    });
+
+    expect(result.projects[0].status).toBe("unmatched");
+    expect(result.projects[0].matchReason).toBe("none");
+    expect(result.projects[0].deal).toBeNull();
   });
 
   it("prefers procoreProjectId over project number and name-location tiers", async () => {
