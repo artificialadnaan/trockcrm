@@ -2,6 +2,8 @@ type EnvInput = {
   FRONTEND_URL?: string | undefined;
   RAILWAY_SERVICE_FRONTEND_URL?: string | undefined;
   NODE_ENV?: string | undefined;
+  AZURE_CLIENT_ID?: string | undefined;
+  DEV_MODE?: string | undefined;
 };
 
 function normalizeOrigin(value: string | undefined): string | null {
@@ -21,6 +23,23 @@ export function getAllowedCorsOrigins(env: EnvInput): string[] {
   ].filter((value, index, values): value is string => Boolean(value) && values.indexOf(value) === index);
 
   return origins;
+}
+
+export function isDevAuthEnabled(env: EnvInput, host: string | undefined): boolean {
+  const normalizedHost = host?.trim().toLowerCase() ?? "";
+  const isLocalDevEnv = env.NODE_ENV === "development" || env.NODE_ENV === "test";
+  const hasAzureSso = Boolean(env.AZURE_CLIENT_ID?.trim());
+  const explicitDevMode = env.DEV_MODE === "true";
+  const isLocalhost =
+    normalizedHost === "localhost" ||
+    normalizedHost === "127.0.0.1" ||
+    normalizedHost === "::1" ||
+    normalizedHost.startsWith("localhost:");
+
+  if (explicitDevMode) return true;
+  if (hasAzureSso) return false;
+
+  return isLocalDevEnv && isLocalhost;
 }
 
 export function getTokenCookieOptions(env: EnvInput) {

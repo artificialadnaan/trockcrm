@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { getAllowedCorsOrigins, getTokenCookieOptions } from "../../../src/modules/auth/http-config.js";
+import {
+  getAllowedCorsOrigins,
+  getTokenCookieOptions,
+  isDevAuthEnabled,
+} from "../../../src/modules/auth/http-config.js";
 
 describe("auth http config", () => {
   it("includes the configured custom frontend and Railway frontend service origins", () => {
@@ -30,5 +34,42 @@ describe("auth http config", () => {
       secure: false,
       sameSite: "strict",
     });
+  });
+
+  it("allows dev auth on localhost during local development when Azure SSO is not configured", () => {
+    expect(
+      isDevAuthEnabled(
+        {
+          NODE_ENV: "development",
+          AZURE_CLIENT_ID: "",
+        },
+        "localhost"
+      )
+    ).toBe(true);
+  });
+
+  it("allows dev auth remotely when explicit testing mode is enabled", () => {
+    expect(
+      isDevAuthEnabled(
+        {
+          NODE_ENV: "production",
+          AZURE_CLIENT_ID: "",
+          DEV_MODE: "true",
+        },
+        "crm.trockconstruction.com"
+      )
+    ).toBe(true);
+  });
+
+  it("disables dev auth in production when testing mode is not explicitly enabled", () => {
+    expect(
+      isDevAuthEnabled(
+        {
+          NODE_ENV: "production",
+          AZURE_CLIENT_ID: "",
+        },
+        "crm.trockconstruction.com"
+      )
+    ).toBe(false);
   });
 });
