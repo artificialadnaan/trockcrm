@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildProcoreValidationSectionState,
   buildValidationSummary,
   canLoadProcoreValidation,
   formatValidationMatchReason,
@@ -96,6 +97,60 @@ describe("procore validation view model", () => {
     ).toMatchObject({
       tone: "destructive",
       description: expect.stringContaining("token exchange failed"),
+    });
+  });
+
+  it("builds page state that still loads validation in disconnected client credentials mode", () => {
+    expect(
+      buildProcoreValidationSectionState({
+        status: {
+          connected: false,
+          authMode: "client_credentials",
+        },
+        searchParams: new URLSearchParams(),
+      })
+    ).toMatchObject({
+      shouldLoadValidation: true,
+      redirectBanner: null,
+      connectionBanner: {
+        title: "Using fallback Procore access",
+      },
+    });
+  });
+
+  it("builds page state with a success banner from procore callback params", () => {
+    expect(
+      buildProcoreValidationSectionState({
+        status: {
+          connected: false,
+          authMode: "client_credentials",
+        },
+        searchParams: new URLSearchParams("procore=connected"),
+      })
+    ).toMatchObject({
+      shouldLoadValidation: true,
+      redirectBanner: {
+        tone: "success",
+        title: "Procore connected",
+      },
+    });
+  });
+
+  it("builds page state with an error banner from procore callback params", () => {
+    expect(
+      buildProcoreValidationSectionState({
+        status: {
+          connected: false,
+          authMode: "dev",
+        },
+        searchParams: new URLSearchParams("procore=error&reason=token_exchange_failed"),
+      })
+    ).toMatchObject({
+      shouldLoadValidation: true,
+      redirectBanner: {
+        tone: "destructive",
+        description: expect.stringContaining("token exchange failed"),
+      },
     });
   });
 });

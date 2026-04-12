@@ -14,11 +14,9 @@ import {
 } from "@/components/ui/table";
 import { api } from "@/lib/api";
 import {
+  buildProcoreValidationSectionState,
   buildValidationSummary,
-  canLoadProcoreValidation,
   formatValidationMatchReason,
-  getProcoreRedirectBanner,
-  getProcoreConnectionBanner,
   type ProcoreAuthStatus,
 } from "@/lib/procore-validation-view-model";
 
@@ -245,20 +243,26 @@ export function ProcoreSyncPage() {
     await Promise.all([loadSyncStatus(), loadProcoreStatus()]);
   }, [loadSyncStatus, loadProcoreStatus]);
 
+  const validationSectionState = buildProcoreValidationSectionState({
+    status: procoreStatus,
+    searchParams,
+  });
+  const { shouldLoadValidation, connectionBanner, redirectBanner } = validationSectionState;
+
   useEffect(() => {
     loadSyncStatus();
     loadProcoreStatus();
   }, [loadSyncStatus, loadProcoreStatus]);
 
   useEffect(() => {
-    if (canLoadProcoreValidation(procoreStatus)) {
+    if (shouldLoadValidation) {
       loadValidation();
     } else if (procoreStatus) {
       setValidationData(null);
       setValidationError(null);
       setValidationLoading(false);
     }
-  }, [procoreStatus, loadValidation]);
+  }, [procoreStatus, shouldLoadValidation, loadValidation]);
 
   const connectProcore = async () => {
     try {
@@ -323,11 +327,6 @@ export function ProcoreSyncPage() {
   const healthLabel =
     healthColor === "green" ? "Healthy" : healthColor === "amber" ? "Warning" : "Degraded";
   const validationSummary = buildValidationSummary(validationData?.projects ?? []);
-  const connectionBanner = getProcoreConnectionBanner(procoreStatus);
-  const redirectBanner = getProcoreRedirectBanner({
-    procore: searchParams.get("procore"),
-    reason: searchParams.get("reason"),
-  });
 
   return (
     <div className="space-y-6">

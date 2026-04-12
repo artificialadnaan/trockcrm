@@ -37,6 +37,12 @@ export type ProcoreRedirectBanner = {
   description: string;
 };
 
+export type ProcoreValidationSectionState = {
+  shouldLoadValidation: boolean;
+  connectionBanner: ProcoreConnectionBanner | null;
+  redirectBanner: ProcoreRedirectBanner | null;
+};
+
 export function buildValidationSummary(rows: ValidationSummaryInput[]) {
   return rows.reduce(
     (summary, row) => {
@@ -171,4 +177,21 @@ export function getProcoreRedirectBanner({
   }
 
   return null;
+}
+
+export function buildProcoreValidationSectionState({
+  status,
+  searchParams,
+}: {
+  status: ProcoreAuthStatus | null;
+  searchParams: URLSearchParams;
+}): ProcoreValidationSectionState {
+  return {
+    shouldLoadValidation: canLoadProcoreValidation(status),
+    connectionBanner: getProcoreConnectionBanner(status),
+    redirectBanner: getProcoreRedirectBanner({
+      procore: searchParams.get("procore"),
+      reason: searchParams.get("reason"),
+    }),
+  };
 }
