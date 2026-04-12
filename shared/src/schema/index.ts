@@ -10,6 +10,7 @@ export { savedReports, reportVisibilityEnum, reportEntityEnum } from "./public/s
 export { procoreSyncControls, procoreSyncModeEnum } from "./public/procore-sync-controls.js";
 export { procoreReconciliationState, procoreReconciliationStatusEnum } from "./public/procore-reconciliation-state.js";
 export { procoreSyncState, procoreEntityTypeEnum, syncDirectionEnum, syncStatusEnum } from "./public/procore-sync-state.js";
+export { procoreOauthTokens } from "./public/procore-oauth-tokens.js";
 export { procoreWebhookLog } from "./public/procore-webhook-log.js";
 export { userGraphTokens, graphTokenStatusEnum } from "./public/user-graph-tokens.js";
 export { jobQueue, jobStatusEnum } from "./public/job-queue.js";
