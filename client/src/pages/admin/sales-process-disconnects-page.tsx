@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { AlertTriangle, ArrowUpRight, MailWarning, RefreshCcw, ShieldAlert, TimerReset, Workflow } from "lucide-react";
-import { toast } from "sonner";
 import {
   trackSalesProcessDisconnectInteraction,
   useSalesProcessDisconnectDashboard,
@@ -28,6 +27,7 @@ export function SalesProcessDisconnectsPage() {
   const { dashboard, loading, error, refetch } = useSalesProcessDisconnectDashboard(75);
   const [typeFilter, setTypeFilter] = useState<string>("all");
   const [clusterFilter, setClusterFilter] = useState<string>("all");
+  const [trendDimension, setTrendDimension] = useState<"reps" | "stages" | "companies">("reps");
   const didTrackView = useRef(false);
 
   useEffect(() => {
@@ -74,6 +74,21 @@ export function SalesProcessDisconnectsPage() {
       interactionType: "deal_click",
       targetValue: disconnectType,
       comment: dealId,
+    }).catch(() => {});
+  };
+
+  const handleTrendDimension = (next: "reps" | "stages" | "companies") => {
+    setTrendDimension(next);
+    void trackSalesProcessDisconnectInteraction({
+      interactionType: "trend_focus",
+      targetValue: next,
+    }).catch(() => {});
+  };
+
+  const handleOutcomeFocus = (next: string) => {
+    void trackSalesProcessDisconnectInteraction({
+      interactionType: "outcome_focus",
+      targetValue: next,
     }).catch(() => {});
   };
 
@@ -211,6 +226,117 @@ export function SalesProcessDisconnectsPage() {
           </div>
         </CardContent>
       </Card>
+
+      <div className="grid grid-cols-1 xl:grid-cols-[1.2fr_0.8fr] gap-4">
+        <Card>
+          <CardHeader>
+            <CardTitle>Trend Hotspots</CardTitle>
+            <CardDescription>
+              Where disconnect clusters are concentrating by owner, stage, and company
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="flex flex-wrap gap-2">
+              <Button variant={trendDimension === "reps" ? "default" : "outline"} size="sm" onClick={() => handleTrendDimension("reps")}>
+                Reps
+              </Button>
+              <Button variant={trendDimension === "stages" ? "default" : "outline"} size="sm" onClick={() => handleTrendDimension("stages")}>
+                Stages
+              </Button>
+              <Button variant={trendDimension === "companies" ? "default" : "outline"} size="sm" onClick={() => handleTrendDimension("companies")}>
+                Companies
+              </Button>
+            </div>
+
+            <div className="space-y-3">
+              {(dashboard?.trends?.[trendDimension] ?? []).map((trend) => (
+                <div key={`${trendDimension}:${trend.key}`} className="rounded-lg border border-border/80 bg-white px-4 py-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="space-y-1">
+                      <div className="font-semibold text-sm">{trend.label}</div>
+                      <div className="text-xs text-muted-foreground">
+                        {trend.dealCount} deals · {trend.disconnectCount} disconnects · {trend.criticalCount} critical
+                      </div>
+                    </div>
+                    {trend.recentInterventionCount > 0 && (
+                      <Badge variant="outline" className="bg-emerald-50 text-emerald-700 border-emerald-200">
+                        {trend.recentInterventionCount} recent intervention{trend.recentInterventionCount === 1 ? "" : "s"}
+                      </Badge>
+                    )}
+                  </div>
+                  <div className="flex flex-wrap gap-2 mt-3">
+                    {trend.clusterKeys.map((clusterKey) => (
+                      <Badge key={`${trend.key}:${clusterKey}`} variant="secondary">{clusterKey.split("_").join(" ")}</Badge>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Intervention Outcomes</CardTitle>
+            <CardDescription>
+              Whether recent triage activity is actually reducing currently open disconnects
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <button
+              type="button"
+              onClick={() => handleOutcomeFocus("intervention_deals_30d")}
+              className="w-full rounded-lg border border-border/80 bg-white px-4 py-3 text-left"
+            >
+              <div className="text-xs uppercase tracking-widest text-muted-foreground">Deals with interventions</div>
+              <div className="text-2xl font-black">{dashboard?.outcomes.interventionDeals30d ?? 0}</div>
+            </button>
+            <button
+              type="button"
+              onClick={() => handleOutcomeFocus("clearance_rate_30d")}
+              className="w-full rounded-lg border border-border/80 bg-white px-4 py-3 text-left"
+            >
+              <div className="text-xs uppercase tracking-widest text-muted-foreground">Clearance rate</div>
+              <div className="text-2xl font-black">
+                {dashboard?.outcomes.clearanceRate30d == null ? "N/A" : `${Math.round(dashboard.outcomes.clearanceRate30d * 100)}%`}
+              </div>
+              <div className="text-xs text-muted-foreground mt-1">
+                {dashboard?.outcomes.clearedAfterIntervention30d ?? 0} cleared / {dashboard?.outcomes.interventionDeals30d ?? 0} intervened
+              </div>
+            </button>
+            <button
+              type="button"
+              onClick={() => handleOutcomeFocus("still_open_after_intervention")}
+              className="w-full rounded-lg border border-border/80 bg-white px-4 py-3 text-left"
+            >
+              <div className="text-xs uppercase tracking-widest text-muted-foreground">Still open after intervention</div>
+              <div className="text-2xl font-black">{dashboard?.outcomes.stillOpenAfterIntervention30d ?? 0}</div>
+            </button>
+            <div className="grid grid-cols-2 gap-3 text-sm">
+              <div className="rounded-lg border border-border/80 bg-white px-4 py-3">
+                <div className="text-xs uppercase tracking-widest text-muted-foreground">Escalations still open</div>
+                <div className="text-xl font-black">{dashboard?.outcomes.unresolvedEscalationsOpen ?? 0}</div>
+              </div>
+              <div className="rounded-lg border border-border/80 bg-white px-4 py-3">
+                <div className="text-xs uppercase tracking-widest text-muted-foreground">Repeat issue deals</div>
+                <div className="text-xl font-black">{dashboard?.outcomes.repeatIssueDealsOpen ?? 0}</div>
+              </div>
+              <div className="rounded-lg border border-border/80 bg-white px-4 py-3">
+                <div className="text-xs uppercase tracking-widest text-muted-foreground">Repeat cluster deals</div>
+                <div className="text-xl font-black">{dashboard?.outcomes.repeatClusterDealsOpen ?? 0}</div>
+              </div>
+              <div className="rounded-lg border border-border/80 bg-white px-4 py-3">
+                <div className="text-xs uppercase tracking-widest text-muted-foreground">Coverage on open deals</div>
+                <div className="text-xl font-black">
+                  {dashboard?.outcomes.interventionCoverageRate == null
+                    ? "N/A"
+                    : `${Math.round(dashboard.outcomes.interventionCoverageRate * 100)}%`}
+                </div>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
 
       <Card>
         <CardHeader>

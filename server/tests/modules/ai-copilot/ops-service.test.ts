@@ -326,6 +326,24 @@ describe("AI ops service", () => {
               procore_last_synced_at: "2026-04-11T11:00:00.000Z",
               procore_sync_updated_at: "2026-04-14T08:00:00.000Z",
               procore_drift_reason: "Procore reported a newer update than the CRM stage map.",
+              company_id: "company-2",
+              company_name: "Beta Holdings",
+            },
+          ],
+        })
+        .mockResolvedValueOnce({
+          rows: [
+            {
+              deal_id: "deal-1",
+              intervention_count_30d: 2,
+              latest_intervention_at: "2026-04-14T15:00:00.000Z",
+              latest_action: "mark_reviewed",
+            },
+            {
+              deal_id: "deal-3",
+              intervention_count_30d: 1,
+              latest_intervention_at: "2026-04-13T13:00:00.000Z",
+              latest_action: "resolve",
             },
           ],
         }),
@@ -376,6 +394,7 @@ describe("AI ops service", () => {
       disconnectType: "procore_bid_board_drift",
       procoreSyncStatus: "conflict",
       procoreSyncDirection: "bidirectional",
+      companyName: "Beta Holdings",
     });
     expect(result.clusters).toEqual([
       expect.objectContaining({
@@ -390,5 +409,33 @@ describe("AI ops service", () => {
         dealCount: 1,
       }),
     ]);
+    expect(result.trends.reps).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        key: "Morgan Rep",
+        disconnectCount: 1,
+        recentInterventionCount: 1,
+      }),
+      expect.objectContaining({
+        key: "Jordan Rep",
+        disconnectCount: 1,
+      }),
+    ]));
+    expect(result.trends.companies).toEqual([
+      expect.objectContaining({
+        key: "company-2",
+        label: "Beta Holdings",
+        disconnectCount: 1,
+      }),
+    ]);
+    expect(result.outcomes).toEqual({
+      interventionDeals30d: 2,
+      clearedAfterIntervention30d: 1,
+      stillOpenAfterIntervention30d: 1,
+      unresolvedEscalationsOpen: 0,
+      repeatIssueDealsOpen: 0,
+      repeatClusterDealsOpen: 0,
+      interventionCoverageRate: 0.5,
+      clearanceRate30d: 0.5,
+    });
   });
 });

@@ -134,6 +134,8 @@ export interface SalesProcessDisconnectRow {
   id: string;
   dealNumber: string;
   dealName: string;
+  companyId: string | null;
+  companyName: string | null;
   stageName: string | null;
   estimatingSubstage: string | null;
   assignedRepName: string | null;
@@ -155,6 +157,27 @@ export interface SalesProcessDisconnectRow {
   procoreDriftReason: string | null;
 }
 
+export interface SalesProcessDisconnectTrendEntry {
+  key: string;
+  label: string;
+  disconnectCount: number;
+  dealCount: number;
+  criticalCount: number;
+  recentInterventionCount: number;
+  clusterKeys: string[];
+}
+
+export interface SalesProcessDisconnectOutcomes {
+  interventionDeals30d: number;
+  clearedAfterIntervention30d: number;
+  stillOpenAfterIntervention30d: number;
+  unresolvedEscalationsOpen: number;
+  repeatIssueDealsOpen: number;
+  repeatClusterDealsOpen: number;
+  interventionCoverageRate: number | null;
+  clearanceRate30d: number | null;
+}
+
 export interface SalesProcessDisconnectCluster {
   clusterKey: string;
   title: string;
@@ -174,6 +197,12 @@ export interface SalesProcessDisconnectDashboard {
   summary: SalesProcessDisconnectSummary;
   byType: SalesProcessDisconnectTypeSummary[];
   clusters: SalesProcessDisconnectCluster[];
+  trends: {
+    reps: SalesProcessDisconnectTrendEntry[];
+    stages: SalesProcessDisconnectTrendEntry[];
+    companies: SalesProcessDisconnectTrendEntry[];
+  };
+  outcomes: SalesProcessDisconnectOutcomes;
   rows: SalesProcessDisconnectRow[];
 }
 
@@ -312,7 +341,7 @@ export async function triageAiActionQueueEntry(
 }
 
 export async function trackSalesProcessDisconnectInteraction(input: {
-  interactionType: "dashboard_view" | "deal_click" | "type_filter" | "cluster_filter";
+  interactionType: "dashboard_view" | "deal_click" | "type_filter" | "cluster_filter" | "trend_focus" | "outcome_focus";
   targetValue: string;
   comment?: string | null;
 }) {

@@ -312,7 +312,7 @@ describe("ai copilot routes", () => {
     serviceMocks.getSalesProcessDisconnectDashboard.mockResolvedValue({
       summary: {
         activeDeals: 18,
-        totalDisconnects: 9,
+        totalDisconnects: 11,
         staleStageCount: 3,
         missingNextTaskCount: 2,
         inboundWithoutFollowupCount: 1,
@@ -326,6 +326,21 @@ describe("ai copilot routes", () => {
       clusters: [
         { clusterKey: "bid_board_sync_break", title: "Bid board / CRM stage drift", dealCount: 2 },
       ],
+      trends: {
+        reps: [{ key: "rep-1", label: "Morgan Rep", disconnectCount: 3 }],
+        stages: [{ key: "estimating", label: "Estimating", disconnectCount: 4 }],
+        companies: [{ key: "company-1", label: "Acme Group", disconnectCount: 2 }],
+      },
+      outcomes: {
+        interventionDeals30d: 5,
+        clearedAfterIntervention30d: 2,
+        stillOpenAfterIntervention30d: 3,
+        unresolvedEscalationsOpen: 1,
+        repeatIssueDealsOpen: 4,
+        repeatClusterDealsOpen: 2,
+        interventionCoverageRate: 0.5,
+        clearanceRate30d: 0.4,
+      },
       rows: [
         { id: "deal-1", dealNumber: "D-1001", dealName: "Alpha Plaza" },
       ],
@@ -336,9 +351,11 @@ describe("ai copilot routes", () => {
 
     expect(res.status).toBe(200);
     expect(serviceMocks.getSalesProcessDisconnectDashboard).toHaveBeenCalledWith(expect.anything(), { limit: 25 });
-    expect(res.body.summary.totalDisconnects).toBe(9);
+    expect(res.body.summary.totalDisconnects).toBe(11);
     expect(res.body.summary.procoreBidBoardDriftCount).toBe(2);
     expect(res.body.clusters[0].clusterKey).toBe("bid_board_sync_break");
+    expect(res.body.trends.reps[0].disconnectCount).toBe(3);
+    expect(res.body.outcomes.clearanceRate30d).toBe(0.4);
     expect(res.body.rows).toHaveLength(1);
   });
 });

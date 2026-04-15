@@ -8,6 +8,7 @@ import {
   aiFeedback,
   aiRiskFlags,
   aiTaskSuggestions,
+  companies,
   contacts,
   deals,
 } from "@trock-crm/shared/schema";
@@ -187,6 +188,8 @@ export interface SalesProcessDisconnectRow {
   id: string;
   dealNumber: string;
   dealName: string;
+  companyId: string | null;
+  companyName: string | null;
   stageName: string | null;
   estimatingSubstage: string | null;
   assignedRepName: string | null;
@@ -208,6 +211,27 @@ export interface SalesProcessDisconnectRow {
   procoreDriftReason: string | null;
 }
 
+export interface SalesProcessDisconnectTrendEntry {
+  key: string;
+  label: string;
+  disconnectCount: number;
+  dealCount: number;
+  criticalCount: number;
+  recentInterventionCount: number;
+  clusterKeys: string[];
+}
+
+export interface SalesProcessDisconnectOutcomes {
+  interventionDeals30d: number;
+  clearedAfterIntervention30d: number;
+  stillOpenAfterIntervention30d: number;
+  unresolvedEscalationsOpen: number;
+  repeatIssueDealsOpen: number;
+  repeatClusterDealsOpen: number;
+  interventionCoverageRate: number | null;
+  clearanceRate30d: number | null;
+}
+
 export interface SalesProcessDisconnectCluster {
   clusterKey: string;
   title: string;
@@ -227,6 +251,12 @@ export interface SalesProcessDisconnectDashboard {
   summary: SalesProcessDisconnectSummary;
   byType: SalesProcessDisconnectTypeSummary[];
   clusters: SalesProcessDisconnectCluster[];
+  trends: {
+    reps: SalesProcessDisconnectTrendEntry[];
+    stages: SalesProcessDisconnectTrendEntry[];
+    companies: SalesProcessDisconnectTrendEntry[];
+  };
+  outcomes: SalesProcessDisconnectOutcomes;
   rows: SalesProcessDisconnectRow[];
 }
 
@@ -293,6 +323,17 @@ function severityRank(value: string | null | undefined) {
   }
 }
 
+function getDisconnectClusterKey(disconnectType: string) {
+  if (disconnectType === "procore_bid_board_drift") return "bid_board_sync_break";
+  if (disconnectType === "revision_loop" || disconnectType === "estimating_gate_gap") {
+    return "estimating_handoff_break";
+  }
+  if (disconnectType === "missing_next_task" || disconnectType === "inbound_without_followup") {
+    return "follow_through_gap";
+  }
+  return "execution_stall";
+}
+
 function buildSalesProcessDisconnectClusters(rows: SalesProcessDisconnectRow[]): SalesProcessDisconnectCluster[] {
   const clusterMeta: Record<
     string,
@@ -350,19 +391,8 @@ function buildSalesProcessDisconnectClusters(rows: SalesProcessDisconnectRow[]):
     }
   >();
 
-  const toClusterKey = (row: SalesProcessDisconnectRow) => {
-    if (row.disconnectType === "procore_bid_board_drift") return "bid_board_sync_break";
-    if (row.disconnectType === "revision_loop" || row.disconnectType === "estimating_gate_gap") {
-      return "estimating_handoff_break";
-    }
-    if (row.disconnectType === "missing_next_task" || row.disconnectType === "inbound_without_followup") {
-      return "follow_through_gap";
-    }
-    return "execution_stall";
-  };
-
   for (const row of rows) {
-    const clusterKey = toClusterKey(row);
+    const clusterKey = getDisconnectClusterKey(row.disconnectType);
     const existing = grouped.get(clusterKey);
     const rank = severityRank(row.disconnectSeverity);
     if (!existing) {
@@ -418,6 +448,123 @@ function buildSalesProcessDisconnectClusters(rows: SalesProcessDisconnectRow[]):
       if (b.disconnectCount !== a.disconnectCount) return b.disconnectCount - a.disconnectCount;
       return a.title.localeCompare(b.title);
     });
+}
+
+function buildSalesProcessDisconnectTrends(
+  rows: SalesProcessDisconnectRow[],
+  interventionsByDeal: Map<string, { interventionCount30d: number }>
+) {
+  const buildDimension = (
+    getKey: (row: SalesProcessDisconnectRow) => string | null,
+    getLabel: (row: SalesProcessDisconnectRow) => string | null
+  ): SalesProcessDisconnectTrendEntry[] => {
+    const grouped = new Map<
+      string,
+      {
+        label: string;
+        disconnectCount: number;
+        dealIds: Set<string>;
+        criticalCount: number;
+        interventionDealIds: Set<string>;
+        clusterKeys: Set<string>;
+      }
+    >();
+
+    for (const row of rows) {
+      const key = getKey(row);
+      const label = getLabel(row);
+      if (!key || !label) continue;
+      const existing = grouped.get(key);
+      if (!existing) {
+        const intervention = interventionsByDeal.has(row.id);
+        grouped.set(key, {
+          label,
+          disconnectCount: 1,
+          dealIds: new Set([row.id]),
+          criticalCount: row.disconnectSeverity === "critical" ? 1 : 0,
+          interventionDealIds: intervention ? new Set([row.id]) : new Set(),
+          clusterKeys: new Set([getDisconnectClusterKey(row.disconnectType)]),
+        });
+        continue;
+      }
+
+      existing.disconnectCount += 1;
+      existing.dealIds.add(row.id);
+      if (row.disconnectSeverity === "critical") existing.criticalCount += 1;
+      if (interventionsByDeal.has(row.id)) existing.interventionDealIds.add(row.id);
+      existing.clusterKeys.add(getDisconnectClusterKey(row.disconnectType));
+    }
+
+    return Array.from(grouped.entries())
+      .map(([key, value]) => ({
+        key,
+        label: value.label,
+        disconnectCount: value.disconnectCount,
+        dealCount: value.dealIds.size,
+        criticalCount: value.criticalCount,
+        recentInterventionCount: value.interventionDealIds.size,
+        clusterKeys: Array.from(value.clusterKeys).sort(),
+      }))
+      .sort((a, b) => {
+        if (b.disconnectCount !== a.disconnectCount) return b.disconnectCount - a.disconnectCount;
+        if (b.criticalCount !== a.criticalCount) return b.criticalCount - a.criticalCount;
+        return a.label.localeCompare(b.label);
+      })
+      .slice(0, 5);
+  };
+
+  return {
+    reps: buildDimension(
+      (row) => row.assignedRepName,
+      (row) => row.assignedRepName
+    ),
+    stages: buildDimension(
+      (row) => row.stageName,
+      (row) => row.stageName
+    ),
+    companies: buildDimension(
+      (row) => row.companyId,
+      (row) => row.companyName
+    ),
+  };
+}
+
+function buildSalesProcessDisconnectOutcomes(
+  rows: SalesProcessDisconnectRow[],
+  interventionsByDeal: Map<string, { interventionCount30d: number; latestAction: string | null }>
+): SalesProcessDisconnectOutcomes {
+  const openDealIds = new Set(rows.map((row) => row.id));
+  const interventionDealIds = Array.from(interventionsByDeal.keys());
+  const clearedAfterIntervention = interventionDealIds.filter((dealId) => !openDealIds.has(dealId)).length;
+  const stillOpenAfterIntervention = interventionDealIds.filter((dealId) => openDealIds.has(dealId)).length;
+  const unresolvedEscalationsOpen = interventionDealIds.filter((dealId) => {
+    const intervention = interventionsByDeal.get(dealId);
+    return intervention?.latestAction === "escalate" && openDealIds.has(dealId);
+  }).length;
+
+  const disconnectCountsByDeal = new Map<string, number>();
+  const clusterCountsByDeal = new Map<string, Set<string>>();
+  for (const row of rows) {
+    disconnectCountsByDeal.set(row.id, (disconnectCountsByDeal.get(row.id) ?? 0) + 1);
+    const clusters = clusterCountsByDeal.get(row.id) ?? new Set<string>();
+    clusters.add(getDisconnectClusterKey(row.disconnectType));
+    clusterCountsByDeal.set(row.id, clusters);
+  }
+
+  const repeatIssueDealsOpen = Array.from(disconnectCountsByDeal.values()).filter((count) => count > 1).length;
+  const repeatClusterDealsOpen = Array.from(clusterCountsByDeal.values()).filter((clusters) => clusters.size > 1).length;
+
+  return {
+    interventionDeals30d: interventionDealIds.length,
+    clearedAfterIntervention30d: clearedAfterIntervention,
+    stillOpenAfterIntervention30d: stillOpenAfterIntervention,
+    unresolvedEscalationsOpen,
+    repeatIssueDealsOpen,
+    repeatClusterDealsOpen,
+    interventionCoverageRate: openDealIds.size === 0 ? null : Number((stillOpenAfterIntervention / openDealIds.size).toFixed(4)),
+    clearanceRate30d:
+      interventionDealIds.length === 0 ? null : Number((clearedAfterIntervention / interventionDealIds.length).toFixed(4)),
+  };
 }
 
 const DEFAULT_DEPS: GenerateDealCopilotPacketDeps = {
@@ -843,7 +990,7 @@ export async function getSalesProcessDisconnectDashboard(
 ): Promise<SalesProcessDisconnectDashboard> {
   const limit = Math.max(1, Math.min(input.limit ?? 50, 200));
 
-  const [summaryResult, byTypeResult, rowsResult] = await Promise.all([
+  const [summaryResult, byTypeResult, rowsResult, interventionsResult] = await Promise.all([
     tenantDb.execute(sql`
       WITH scoped_deals AS (
         SELECT
@@ -1038,6 +1185,8 @@ export async function getSalesProcessDisconnectDashboard(
           d.id,
           d.deal_number,
           d.name AS deal_name,
+          c.id AS company_id,
+          c.name AS company_name,
           psc.name AS stage_name,
           d.estimating_substage,
           u.display_name AS assigned_rep_name,
@@ -1096,6 +1245,7 @@ export async function getSalesProcessDisconnectDashboard(
           END AS procore_drift_reason
         FROM deals d
         JOIN pipeline_stage_config psc ON psc.id = d.stage_id
+        LEFT JOIN companies c ON c.id = d.company_id
         LEFT JOIN public.users u ON u.id = d.assigned_rep_id
         LEFT JOIN LATERAL (
           SELECT
@@ -1318,6 +1468,45 @@ export async function getSalesProcessDisconnectDashboard(
         deal_number ASC
       LIMIT ${limit}
     `),
+    tenantDb.execute(sql`
+      WITH triage_feedback AS (
+        SELECT
+          rf.deal_id AS deal_id,
+          f.feedback_value,
+          f.created_at
+        FROM ai_feedback f
+        JOIN ai_risk_flags rf
+          ON f.target_type = 'risk_flag'
+         AND f.target_id = rf.id
+        WHERE f.feedback_type = 'triage_action'
+          AND f.created_at >= NOW() - INTERVAL '30 days'
+          AND rf.deal_id IS NOT NULL
+
+        UNION ALL
+
+        SELECT
+          ts.scope_id AS deal_id,
+          f.feedback_value,
+          f.created_at
+        FROM ai_feedback f
+        JOIN ai_task_suggestions ts
+          ON f.target_type = 'task_suggestion'
+         AND f.target_id = ts.id
+        WHERE f.feedback_type = 'triage_action'
+          AND f.created_at >= NOW() - INTERVAL '30 days'
+          AND ts.scope_type = 'deal'
+          AND ts.scope_id IS NOT NULL
+      )
+      SELECT
+        deal_id,
+        COUNT(*)::int AS intervention_count_30d,
+        MAX(created_at) AS latest_intervention_at,
+        (
+          ARRAY_AGG(feedback_value ORDER BY created_at DESC)
+        )[1]::text AS latest_action
+      FROM triage_feedback
+      GROUP BY deal_id
+    `),
   ]);
 
   const summaryRow = getRows(summaryResult)[0] ?? {};
@@ -1342,6 +1531,8 @@ export async function getSalesProcessDisconnectDashboard(
     id: row.id,
     dealNumber: row.deal_number,
     dealName: row.deal_name,
+    companyId: row.company_id ?? null,
+    companyName: row.company_name ?? null,
     stageName: row.stage_name ?? null,
     estimatingSubstage: row.estimating_substage ?? null,
     assignedRepName: row.assigned_rep_name ?? null,
@@ -1363,6 +1554,22 @@ export async function getSalesProcessDisconnectDashboard(
     procoreDriftReason: row.procore_drift_reason ?? null,
   }));
 
+  const interventionsByDeal = new Map(
+    getRows(interventionsResult).map((row) => [
+      String(row.deal_id),
+      {
+        interventionCount30d: Number(row.intervention_count_30d ?? 0),
+        latestInterventionAt:
+          row.latest_intervention_at instanceof Date
+            ? row.latest_intervention_at.toISOString()
+            : row.latest_intervention_at
+              ? String(row.latest_intervention_at)
+              : null,
+        latestAction: row.latest_action ? String(row.latest_action) : null,
+      },
+    ])
+  );
+
   return {
     summary,
     byType: getRows(byTypeResult).map((row) => ({
@@ -1371,6 +1578,8 @@ export async function getSalesProcessDisconnectDashboard(
       count: Number(row.disconnect_count ?? 0),
     })),
     clusters: buildSalesProcessDisconnectClusters(rows),
+    trends: buildSalesProcessDisconnectTrends(rows, interventionsByDeal),
+    outcomes: buildSalesProcessDisconnectOutcomes(rows, interventionsByDeal),
     rows,
   };
 }
