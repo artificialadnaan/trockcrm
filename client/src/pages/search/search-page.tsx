@@ -86,13 +86,23 @@ export function SearchPage() {
   ];
   const intentLabel = aiResults?.intent ? aiResults.intent.replace(/_/g, " ") : null;
 
-  const trackInteraction = (interactionType: "recommended_action_click" | "top_entity_click" | "evidence_click", targetValue: string, deepLink: string) => {
+  const trackInteraction = (
+    interactionType: "recommended_action_click" | "recommended_action_executed" | "top_entity_click" | "evidence_click",
+    targetValue: string,
+    deepLink: string,
+    metadata?: {
+      executionMode?: "navigate" | "api_then_navigate";
+      apiEndpoint?: string;
+    }
+  ) => {
     if (!aiResults?.queryId) return;
     void trackAiSearchInteraction({
       queryId: aiResults.queryId,
       interactionType,
       targetValue,
       deepLink,
+      executionMode: metadata?.executionMode,
+      apiEndpoint: metadata?.apiEndpoint,
     }).catch(() => {});
   };
 
@@ -106,6 +116,10 @@ export function SearchPage() {
 
     try {
       await executeAiSearchWorkflowAction(action);
+      trackInteraction("recommended_action_executed", action.actionType, action.deepLink, {
+        executionMode: action.executionMode,
+        apiEndpoint: action.apiEndpoint,
+      });
       if (action.successMessage) {
         toast.success(action.successMessage);
       }

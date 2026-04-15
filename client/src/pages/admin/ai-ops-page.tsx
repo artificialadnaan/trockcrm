@@ -185,7 +185,8 @@ export function AiOpsPage() {
           </CardHeader>
           <CardContent className="space-y-2">
             <div className="text-3xl font-black">{metrics?.aiSearchInteractions30d ?? 0}</div>
-            <div className="text-sm text-muted-foreground">Tracked AI search clicks</div>
+            <div className="text-sm text-muted-foreground">Tracked AI search interactions</div>
+            <div className="text-sm">{metrics?.aiSearchWorkflowExecutions30d ?? 0} executed workflows</div>
           </CardContent>
         </Card>
 
@@ -196,7 +197,8 @@ export function AiOpsPage() {
           </CardHeader>
           <CardContent className="space-y-2">
             <div className="text-3xl font-black">{metrics?.aiSearchQueriesWithClick30d ?? 0}</div>
-            <div className="text-sm text-muted-foreground">Clicked AI search results</div>
+            <div className="text-sm text-muted-foreground">Queries with tracked AI search follow-through</div>
+            <div className="text-sm">{metrics?.aiSearchQueriesWithWorkflow30d ?? 0} queries with executed workflows</div>
           </CardContent>
         </Card>
       </div>

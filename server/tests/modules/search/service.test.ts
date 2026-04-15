@@ -20,10 +20,10 @@ describe("search service", () => {
       })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({
-        rows: [
-          {
-            id: "chunk-1",
+        .mockResolvedValueOnce({
+          rows: [
+            {
+              id: "chunk-1",
             source_type: "email_message",
             source_id: "email-1",
             deal_id: "deal-1",
@@ -37,6 +37,15 @@ describe("search service", () => {
     const select = vi.fn(() => ({
       from: vi.fn(() => ({
         where: vi.fn().mockResolvedValue([
+          {
+            feedbackValue: "recommended_action_executed",
+            comment: JSON.stringify({
+              targetValue: "refresh_deal_copilot",
+              deepLink: "/deals/deal-1?tab=overview&focus=copilot",
+              executionMode: "api_then_navigate",
+              apiEndpoint: "/ai/deals/deal-1/regenerate",
+            }),
+          },
           {
             feedbackValue: "recommended_action_click",
             comment: JSON.stringify({
@@ -67,10 +76,10 @@ describe("search service", () => {
       interactionScore: 1,
     });
     expect(result.recommendedActions[0]).toMatchObject({
-      actionType: "review_deal_emails",
-      deepLink: "/deals/deal-1?tab=email",
-      executionMode: "navigate",
-      interactionScore: 2,
+      actionType: "refresh_deal_copilot",
+      deepLink: "/deals/deal-1?tab=overview&focus=copilot",
+      executionMode: "api_then_navigate",
+      interactionScore: 8,
     });
     expect(result.evidence[0]).toMatchObject({
       deepLink: "/deals/deal-1",

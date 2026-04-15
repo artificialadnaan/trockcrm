@@ -63,6 +63,8 @@ export interface AiOpsMetrics {
   recurringSuggestionsOpen: number;
   aiSearchInteractions30d: number;
   aiSearchQueriesWithClick30d: number;
+  aiSearchWorkflowExecutions30d: number;
+  aiSearchQueriesWithWorkflow30d: number;
   positiveFeedback30d: number;
   negativeFeedback30d: number;
   documentsIndexed: number;
@@ -732,6 +734,19 @@ export async function getAiOpsMetrics(tenantDb: TenantDb): Promise<AiOpsMetrics>
               AND feedback_type = 'search_interaction'
               AND created_at >= NOW() - INTERVAL '30 days'
           )::int AS ai_search_queries_with_click_30d
+          ,
+          COUNT(*) FILTER (
+            WHERE target_type = 'search_query'
+              AND feedback_type = 'search_interaction'
+              AND feedback_value = 'recommended_action_executed'
+              AND created_at >= NOW() - INTERVAL '30 days'
+          )::int AS ai_search_workflow_executions_30d,
+          COUNT(DISTINCT target_id) FILTER (
+            WHERE target_type = 'search_query'
+              AND feedback_type = 'search_interaction'
+              AND feedback_value = 'recommended_action_executed'
+              AND created_at >= NOW() - INTERVAL '30 days'
+          )::int AS ai_search_queries_with_workflow_30d
         FROM ai_feedback
       ),
       risk_resolution_counts AS (
@@ -789,6 +804,8 @@ export async function getAiOpsMetrics(tenantDb: TenantDb): Promise<AiOpsMetrics>
         triage_counts.escalations_30d,
         search_interaction_counts.ai_search_interactions_30d,
         search_interaction_counts.ai_search_queries_with_click_30d,
+        search_interaction_counts.ai_search_workflow_executions_30d,
+        search_interaction_counts.ai_search_queries_with_workflow_30d,
         risk_resolution_counts.resolved_blind_spots_30d,
         risk_resolution_counts.recurring_blind_spots_open,
         recurring_suggestion_counts.recurring_suggestions_open,
@@ -822,6 +839,8 @@ export async function getAiOpsMetrics(tenantDb: TenantDb): Promise<AiOpsMetrics>
     escalations30d: Number(summaryRow.escalations_30d ?? 0),
     aiSearchInteractions30d: Number(summaryRow.ai_search_interactions_30d ?? 0),
     aiSearchQueriesWithClick30d: Number(summaryRow.ai_search_queries_with_click_30d ?? 0),
+    aiSearchWorkflowExecutions30d: Number(summaryRow.ai_search_workflow_executions_30d ?? 0),
+    aiSearchQueriesWithWorkflow30d: Number(summaryRow.ai_search_queries_with_workflow_30d ?? 0),
     resolvedBlindSpots30d: Number(summaryRow.resolved_blind_spots_30d ?? 0),
     recurringBlindSpotsOpen: Number(summaryRow.recurring_blind_spots_open ?? 0),
     recurringSuggestionsOpen: Number(summaryRow.recurring_suggestions_open ?? 0),

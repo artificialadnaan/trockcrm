@@ -650,11 +650,12 @@ async function getSearchInteractionScores(tenantDb: TenantDb): Promise<SearchInt
     if (!row.comment) continue;
     try {
       const parsed = JSON.parse(row.comment) as { targetValue?: string; deepLink?: string };
+      const weight = row.feedbackValue === "recommended_action_executed" ? 4 : 1;
       if (parsed.deepLink) {
-        deepLinkCounts.set(parsed.deepLink, (deepLinkCounts.get(parsed.deepLink) ?? 0) + 1);
+        deepLinkCounts.set(parsed.deepLink, (deepLinkCounts.get(parsed.deepLink) ?? 0) + weight);
       }
       if (parsed.targetValue) {
-        actionCounts.set(parsed.targetValue, (actionCounts.get(parsed.targetValue) ?? 0) + 1);
+        actionCounts.set(parsed.targetValue, (actionCounts.get(parsed.targetValue) ?? 0) + weight);
       }
     } catch {
       continue;

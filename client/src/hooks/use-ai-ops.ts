@@ -15,6 +15,8 @@ export interface AiOpsMetrics {
   recurringSuggestionsOpen: number;
   aiSearchInteractions30d: number;
   aiSearchQueriesWithClick30d: number;
+  aiSearchWorkflowExecutions30d: number;
+  aiSearchQueriesWithWorkflow30d: number;
   positiveFeedback30d: number;
   negativeFeedback30d: number;
   documentsIndexed: number;

@@ -144,4 +144,35 @@ describe("search routes", () => {
       }),
     });
   });
+
+  it("tracks executed AI search workflows separately from clicks", async () => {
+    aiCopilotMocks.recordAiFeedback.mockResolvedValueOnce({ id: "feedback-2" });
+
+    const app = createApp();
+    const res = await request(app)
+      .post("/api/search/ai/interaction")
+      .send({
+        queryId: "22222222-2222-2222-2222-222222222222",
+        interactionType: "recommended_action_executed",
+        targetValue: "refresh_deal_copilot",
+        deepLink: "/deals/deal-1?tab=overview&focus=copilot",
+        executionMode: "api_then_navigate",
+        apiEndpoint: "/ai/deals/deal-1/regenerate",
+      });
+
+    expect(res.status).toBe(201);
+    expect(aiCopilotMocks.recordAiFeedback).toHaveBeenCalledWith(expect.anything(), {
+      targetType: "search_query",
+      targetId: "22222222-2222-2222-2222-222222222222",
+      userId: "director-1",
+      feedbackType: "search_interaction",
+      feedbackValue: "recommended_action_executed",
+      comment: JSON.stringify({
+        targetValue: "refresh_deal_copilot",
+        deepLink: "/deals/deal-1?tab=overview&focus=copilot",
+        executionMode: "api_then_navigate",
+        apiEndpoint: "/ai/deals/deal-1/regenerate",
+      }),
+    });
+  });
 });

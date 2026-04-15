@@ -3,6 +3,12 @@ import { globalSearch, naturalLanguageSearch } from "./service.js";
 import { recordAiFeedback } from "../ai-copilot/service.js";
 
 const router = Router();
+const SEARCH_INTERACTION_TYPES = new Set([
+  "recommended_action_click",
+  "recommended_action_executed",
+  "top_entity_click",
+  "evidence_click",
+]);
 
 /**
  * GET /search?q=<query>&types=deals,contacts,files
@@ -83,9 +89,14 @@ router.post("/ai/interaction", async (req: Request, res: Response) => {
     const interactionType = typeof req.body?.interactionType === "string" ? req.body.interactionType : "";
     const targetValue = typeof req.body?.targetValue === "string" ? req.body.targetValue : "";
     const deepLink = typeof req.body?.deepLink === "string" ? req.body.deepLink : null;
+    const executionMode = typeof req.body?.executionMode === "string" ? req.body.executionMode : null;
+    const apiEndpoint = typeof req.body?.apiEndpoint === "string" ? req.body.apiEndpoint : null;
 
     if (!queryId || !interactionType || !targetValue || !req.user?.id) {
       return res.status(400).json({ error: "queryId, interactionType, and targetValue are required" });
+    }
+    if (!SEARCH_INTERACTION_TYPES.has(interactionType)) {
+      return res.status(400).json({ error: "Invalid AI search interaction type" });
     }
 
     const feedback = await recordAiFeedback(req.tenantDb!, {
@@ -97,6 +108,8 @@ router.post("/ai/interaction", async (req: Request, res: Response) => {
       comment: JSON.stringify({
         targetValue,
         deepLink,
+        ...(executionMode ? { executionMode } : {}),
+        ...(apiEndpoint ? { apiEndpoint } : {}),
       }),
     });
 
