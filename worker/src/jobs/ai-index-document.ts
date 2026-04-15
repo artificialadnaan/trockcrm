@@ -1,7 +1,24 @@
 import crypto from "crypto";
 import { pool } from "../db.js";
 
-const SERVER_AI_DOCUMENT_SERVICE_MODULE = "../../../server/src/modules/ai-copilot/document-service.js" as string;
+const SERVER_AI_DOCUMENT_SERVICE_MODULES = [
+  "../../../server/dist/modules/ai-copilot/document-service.js",
+  "../../../server/src/modules/ai-copilot/document-service.js",
+] as const;
+
+async function importFirstAvailable<T>(paths: readonly string[]): Promise<T> {
+  let lastError: unknown;
+
+  for (const path of paths) {
+    try {
+      return (await import(path)) as T;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error("Unable to import server AI document module");
+}
 
 export async function runAiIndexDocument(payload: {
   sourceType: string;
@@ -36,9 +53,19 @@ export async function runAiIndexDocument(payload: {
     }
 
     const schemaName = `office_${officeSlug}`;
-    const [{ htmlToPlainText, buildDocumentChunks }] = await Promise.all([
-      import(SERVER_AI_DOCUMENT_SERVICE_MODULE),
-    ]);
+    const { htmlToPlainText, buildDocumentChunks } = await importFirstAvailable<{
+      htmlToPlainText: (html: string) => string;
+      buildDocumentChunks: (input: {
+        documentId: string;
+        text: string;
+        metadata: Record<string, unknown>;
+      }) => Array<{
+        documentId: string;
+        chunkIndex: number;
+        text: string;
+        metadata: Record<string, unknown>;
+      }>;
+    }>(SERVER_AI_DOCUMENT_SERVICE_MODULES);
 
     const emailResult = await client.query(
       `SELECT id, deal_id, subject, body_html, body_preview, sent_at

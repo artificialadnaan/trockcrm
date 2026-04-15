@@ -2,7 +2,24 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import * as schema from "@trock-crm/shared/schema";
 import { pool } from "../db.js";
 
-const SERVER_AI_COPILOT_SERVICE_MODULE = "../../../server/src/modules/ai-copilot/service.js" as string;
+const SERVER_AI_COPILOT_SERVICE_MODULES = [
+  "../../../server/dist/modules/ai-copilot/service.js",
+  "../../../server/src/modules/ai-copilot/service.js",
+] as const;
+
+async function importFirstAvailable<T>(paths: readonly string[]): Promise<T> {
+  let lastError: unknown;
+
+  for (const path of paths) {
+    try {
+      return (await import(path)) as T;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error("Unable to import server AI copilot module");
+}
 
 export async function runAiGenerateDealCopilot(payload: {
   dealId: string;
@@ -31,7 +48,12 @@ export async function runAiGenerateDealCopilot(payload: {
 
     await client.query("SELECT set_config('search_path', $1, true)", [`office_${officeSlug},public`]);
     const tenantDb = drizzle(client, { schema });
-    const module = await import(SERVER_AI_COPILOT_SERVICE_MODULE);
+    const module = await importFirstAvailable<{
+      generateDealCopilotPacket: (
+        tenantDb: unknown,
+        input: { dealId: string; forceRegenerate?: boolean }
+      ) => Promise<unknown>;
+    }>(SERVER_AI_COPILOT_SERVICE_MODULES);
     const generateDealCopilotPacket = module.generateDealCopilotPacket as (
       tenantDb: unknown,
       input: { dealId: string; forceRegenerate?: boolean }
