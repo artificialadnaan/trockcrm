@@ -166,6 +166,48 @@ export interface AiActionQueueEntry {
   escalated: boolean;
 }
 
+export interface SalesProcessDisconnectSummary {
+  activeDeals: number;
+  totalDisconnects: number;
+  staleStageCount: number;
+  missingNextTaskCount: number;
+  inboundWithoutFollowupCount: number;
+  revisionLoopCount: number;
+  estimatingGateGapCount: number;
+}
+
+export interface SalesProcessDisconnectTypeSummary {
+  disconnectType: string;
+  label: string;
+  count: number;
+}
+
+export interface SalesProcessDisconnectRow {
+  id: string;
+  dealNumber: string;
+  dealName: string;
+  stageName: string | null;
+  estimatingSubstage: string | null;
+  assignedRepName: string | null;
+  disconnectType: string;
+  disconnectLabel: string;
+  disconnectSeverity: string;
+  disconnectSummary: string;
+  disconnectDetails: string | null;
+  ageDays: number | null;
+  openTaskCount: number;
+  inboundWithoutFollowupCount: number;
+  lastActivityAt: string | null;
+  latestCustomerEmailAt: string | null;
+  proposalStatus: string | null;
+}
+
+export interface SalesProcessDisconnectDashboard {
+  summary: SalesProcessDisconnectSummary;
+  byType: SalesProcessDisconnectTypeSummary[];
+  rows: SalesProcessDisconnectRow[];
+}
+
 interface GenerateDealCopilotPacketDeps {
   getDealCopilotContext: (tenantDb: TenantDb, dealId: string) => Promise<DealCopilotContext>;
   getDealBlindSpotSignals: (tenantDb: TenantDb, dealId: string, now?: Date) => Promise<DealBlindSpotSignal[]>;
@@ -629,6 +671,399 @@ export async function getAiActionQueue(
           : null,
     escalated: row.last_triage_action === "escalate",
   }));
+}
+
+export async function getSalesProcessDisconnectDashboard(
+  tenantDb: TenantDb,
+  input: { limit?: number } = {}
+): Promise<SalesProcessDisconnectDashboard> {
+  const limit = Math.max(1, Math.min(input.limit ?? 50, 200));
+
+  const [summaryResult, byTypeResult, rowsResult] = await Promise.all([
+    tenantDb.execute(sql`
+      WITH scoped_deals AS (
+        SELECT
+          d.id,
+          d.stage_entered_at,
+          d.proposal_status,
+          psc.stale_threshold_days,
+          COALESCE(jsonb_array_length(psc.required_documents), 0) AS required_document_count
+        FROM deals d
+        JOIN pipeline_stage_config psc ON psc.id = d.stage_id
+        WHERE d.is_active = TRUE
+      ),
+      deal_task_counts AS (
+        SELECT
+          t.deal_id,
+          COUNT(*) FILTER (WHERE t.status IN ('pending', 'in_progress', 'waiting_on', 'blocked'))::int AS open_task_count
+        FROM tasks t
+        WHERE t.deal_id IS NOT NULL
+        GROUP BY t.deal_id
+      ),
+      deal_inbound_counts AS (
+        SELECT
+          e.deal_id,
+          COUNT(*) FILTER (
+            WHERE e.direction = 'inbound'
+              AND NOT EXISTS (
+                SELECT 1
+                FROM activities a
+                WHERE a.deal_id = e.deal_id
+                  AND a.occurred_at >= e.sent_at
+                  AND a.type IN ('call', 'email', 'meeting', 'note')
+              )
+          )::int AS inbound_without_followup_count
+        FROM emails e
+        WHERE e.deal_id IS NOT NULL
+        GROUP BY e.deal_id
+      ),
+      deal_file_counts AS (
+        SELECT
+          f.deal_id,
+          COUNT(DISTINCT f.category)::int AS present_document_count
+        FROM files f
+        WHERE f.deal_id IS NOT NULL
+          AND f.is_active = TRUE
+        GROUP BY f.deal_id
+      )
+      SELECT
+        COUNT(*)::int AS active_deals,
+        COUNT(*) FILTER (
+          WHERE stale_threshold_days > 0
+            AND stage_entered_at IS NOT NULL
+            AND EXTRACT(EPOCH FROM (NOW() - stage_entered_at)) / 86400 > stale_threshold_days
+        )::int AS stale_stage_count,
+        COUNT(*) FILTER (WHERE COALESCE(open_task_count, 0) = 0)::int AS missing_next_task_count,
+        COUNT(*) FILTER (WHERE COALESCE(inbound_without_followup_count, 0) > 0)::int AS inbound_without_followup_count,
+        COUNT(*) FILTER (WHERE proposal_status = 'revision_requested')::int AS revision_loop_count,
+        COUNT(*) FILTER (
+          WHERE required_document_count > COALESCE(present_document_count, 0)
+        )::int AS estimating_gate_gap_count
+      FROM scoped_deals sd
+      LEFT JOIN deal_task_counts dtc ON dtc.deal_id = sd.id
+      LEFT JOIN deal_inbound_counts dic ON dic.deal_id = sd.id
+      LEFT JOIN deal_file_counts dfc ON dfc.deal_id = sd.id
+    `),
+    tenantDb.execute(sql`
+      WITH disconnect_rows AS (
+        SELECT
+          d.id AS deal_id,
+          'stale_stage'::text AS disconnect_type,
+          'Stalled in stage'::text AS disconnect_label
+        FROM deals d
+        JOIN pipeline_stage_config psc ON psc.id = d.stage_id
+        WHERE d.is_active = TRUE
+          AND psc.stale_threshold_days > 0
+          AND d.stage_entered_at IS NOT NULL
+          AND EXTRACT(EPOCH FROM (NOW() - d.stage_entered_at)) / 86400 > psc.stale_threshold_days
+
+        UNION ALL
+
+        SELECT
+          d.id AS deal_id,
+          'missing_next_task'::text AS disconnect_type,
+          'Missing next task'::text AS disconnect_label
+        FROM deals d
+        WHERE d.is_active = TRUE
+          AND NOT EXISTS (
+            SELECT 1
+            FROM tasks t
+            WHERE t.deal_id = d.id
+              AND t.status IN ('pending', 'in_progress', 'waiting_on', 'blocked')
+          )
+
+        UNION ALL
+
+        SELECT
+          d.id AS deal_id,
+          'inbound_without_followup'::text AS disconnect_type,
+          'Inbound with no follow-up'::text AS disconnect_label
+        FROM deals d
+        WHERE d.is_active = TRUE
+          AND EXISTS (
+            SELECT 1
+            FROM emails e
+            WHERE e.deal_id = d.id
+              AND e.direction = 'inbound'
+              AND NOT EXISTS (
+                SELECT 1
+                FROM activities a
+                WHERE a.deal_id = e.deal_id
+                  AND a.occurred_at >= e.sent_at
+                  AND a.type IN ('call', 'email', 'meeting', 'note')
+              )
+          )
+
+        UNION ALL
+
+        SELECT
+          d.id AS deal_id,
+          'revision_loop'::text AS disconnect_type,
+          'Revision loop'::text AS disconnect_label
+        FROM deals d
+        WHERE d.is_active = TRUE
+          AND d.proposal_status = 'revision_requested'
+
+        UNION ALL
+
+        SELECT
+          d.id AS deal_id,
+          'estimating_gate_gap'::text AS disconnect_type,
+          'Estimating gate gap'::text AS disconnect_label
+        FROM deals d
+        JOIN pipeline_stage_config psc ON psc.id = d.stage_id
+        WHERE d.is_active = TRUE
+          AND COALESCE(jsonb_array_length(psc.required_documents), 0) > (
+            SELECT COUNT(DISTINCT f.category)::int
+            FROM files f
+            WHERE f.deal_id = d.id
+              AND f.is_active = TRUE
+          )
+      )
+      SELECT
+        disconnect_type,
+        disconnect_label,
+        COUNT(*)::int AS disconnect_count
+      FROM disconnect_rows
+      GROUP BY disconnect_type, disconnect_label
+      ORDER BY disconnect_count DESC, disconnect_label ASC
+    `),
+    tenantDb.execute(sql`
+      WITH base AS (
+        SELECT
+          d.id,
+          d.deal_number,
+          d.name AS deal_name,
+          psc.name AS stage_name,
+          d.estimating_substage,
+          u.display_name AS assigned_rep_name,
+          d.stage_entered_at,
+          d.last_activity_at,
+          d.proposal_status,
+          COALESCE((
+            SELECT COUNT(*)::int
+            FROM tasks t
+            WHERE t.deal_id = d.id
+              AND t.status IN ('pending', 'in_progress', 'waiting_on', 'blocked')
+          ), 0) AS open_task_count,
+          COALESCE((
+            SELECT COUNT(*)::int
+            FROM emails e
+            WHERE e.deal_id = d.id
+              AND e.direction = 'inbound'
+              AND NOT EXISTS (
+                SELECT 1
+                FROM activities a
+                WHERE a.deal_id = e.deal_id
+                  AND a.occurred_at >= e.sent_at
+                  AND a.type IN ('call', 'email', 'meeting', 'note')
+              )
+          ), 0) AS inbound_without_followup_count,
+          (
+            SELECT MAX(e.sent_at)
+            FROM emails e
+            WHERE e.deal_id = d.id
+              AND e.direction = 'inbound'
+          ) AS latest_customer_email_at,
+          COALESCE(jsonb_array_length(psc.required_documents), 0) AS required_document_count,
+          COALESCE((
+            SELECT COUNT(DISTINCT f.category)::int
+            FROM files f
+            WHERE f.deal_id = d.id
+              AND f.is_active = TRUE
+          ), 0) AS present_document_count,
+          psc.stale_threshold_days
+        FROM deals d
+        JOIN pipeline_stage_config psc ON psc.id = d.stage_id
+        LEFT JOIN public.users u ON u.id = d.assigned_rep_id
+        WHERE d.is_active = TRUE
+      ),
+      disconnect_rows AS (
+        SELECT
+          id,
+          deal_number,
+          deal_name,
+          stage_name,
+          estimating_substage,
+          assigned_rep_name,
+          'stale_stage'::text AS disconnect_type,
+          'Stalled in stage'::text AS disconnect_label,
+          'high'::text AS disconnect_severity,
+          'Deal has exceeded its configured stale threshold.'::text AS disconnect_summary,
+          CONCAT(stage_name, ' has been inactive for ', FLOOR(EXTRACT(EPOCH FROM (NOW() - stage_entered_at)) / 86400), ' days.')::text AS disconnect_details,
+          FLOOR(EXTRACT(EPOCH FROM (NOW() - stage_entered_at)) / 86400)::int AS age_days,
+          open_task_count,
+          inbound_without_followup_count,
+          last_activity_at,
+          latest_customer_email_at,
+          proposal_status
+        FROM base
+        WHERE stale_threshold_days > 0
+          AND stage_entered_at IS NOT NULL
+          AND EXTRACT(EPOCH FROM (NOW() - stage_entered_at)) / 86400 > stale_threshold_days
+
+        UNION ALL
+
+        SELECT
+          id,
+          deal_number,
+          deal_name,
+          stage_name,
+          estimating_substage,
+          assigned_rep_name,
+          'missing_next_task'::text AS disconnect_type,
+          'Missing next task'::text AS disconnect_label,
+          'high'::text AS disconnect_severity,
+          'Deal has no open next-step task.'::text AS disconnect_summary,
+          'No pending or in-progress task exists to drive the next customer or internal step.'::text AS disconnect_details,
+          CASE
+            WHEN last_activity_at IS NULL THEN NULL
+            ELSE FLOOR(EXTRACT(EPOCH FROM (NOW() - last_activity_at)) / 86400)::int
+          END AS age_days,
+          open_task_count,
+          inbound_without_followup_count,
+          last_activity_at,
+          latest_customer_email_at,
+          proposal_status
+        FROM base
+        WHERE open_task_count = 0
+
+        UNION ALL
+
+        SELECT
+          id,
+          deal_number,
+          deal_name,
+          stage_name,
+          estimating_substage,
+          assigned_rep_name,
+          'inbound_without_followup'::text AS disconnect_type,
+          'Inbound with no follow-up'::text AS disconnect_label,
+          'critical'::text AS disconnect_severity,
+          'Customer emailed without a recorded follow-up.'::text AS disconnect_summary,
+          'Inbound customer communication exists with no later call, email, meeting, or note logged.'::text AS disconnect_details,
+          CASE
+            WHEN latest_customer_email_at IS NULL THEN NULL
+            ELSE FLOOR(EXTRACT(EPOCH FROM (NOW() - latest_customer_email_at)) / 86400)::int
+          END AS age_days,
+          open_task_count,
+          inbound_without_followup_count,
+          last_activity_at,
+          latest_customer_email_at,
+          proposal_status
+        FROM base
+        WHERE inbound_without_followup_count > 0
+
+        UNION ALL
+
+        SELECT
+          id,
+          deal_number,
+          deal_name,
+          stage_name,
+          estimating_substage,
+          assigned_rep_name,
+          'revision_loop'::text AS disconnect_type,
+          'Revision loop'::text AS disconnect_label,
+          'critical'::text AS disconnect_severity,
+          'Proposal revision requested with no clear closed-loop ownership.'::text AS disconnect_summary,
+          'The deal remains in revision_requested, which often signals a stalled handoff between sales and estimating.'::text AS disconnect_details,
+          CASE
+            WHEN latest_customer_email_at IS NULL THEN NULL
+            ELSE FLOOR(EXTRACT(EPOCH FROM (NOW() - latest_customer_email_at)) / 86400)::int
+          END AS age_days,
+          open_task_count,
+          inbound_without_followup_count,
+          last_activity_at,
+          latest_customer_email_at,
+          proposal_status
+        FROM base
+        WHERE proposal_status = 'revision_requested'
+
+        UNION ALL
+
+        SELECT
+          id,
+          deal_number,
+          deal_name,
+          stage_name,
+          estimating_substage,
+          assigned_rep_name,
+          'estimating_gate_gap'::text AS disconnect_type,
+          'Estimating gate gap'::text AS disconnect_label,
+          'critical'::text AS disconnect_severity,
+          'Required estimating artifacts are missing.'::text AS disconnect_summary,
+          'Stage requirements indicate missing supporting documents or files for the current phase.'::text AS disconnect_details,
+          CASE
+            WHEN stage_entered_at IS NULL THEN NULL
+            ELSE FLOOR(EXTRACT(EPOCH FROM (NOW() - stage_entered_at)) / 86400)::int
+          END AS age_days,
+          open_task_count,
+          inbound_without_followup_count,
+          last_activity_at,
+          latest_customer_email_at,
+          proposal_status
+        FROM base
+        WHERE required_document_count > present_document_count
+      )
+      SELECT *
+      FROM disconnect_rows
+      ORDER BY
+        CASE disconnect_severity
+          WHEN 'critical' THEN 0
+          WHEN 'high' THEN 1
+          WHEN 'medium' THEN 2
+          ELSE 3
+        END ASC,
+        COALESCE(age_days, 0) DESC,
+        deal_number ASC
+      LIMIT ${limit}
+    `),
+  ]);
+
+  const summaryRow = getRows(summaryResult)[0] ?? {};
+  const summary: SalesProcessDisconnectSummary = {
+    activeDeals: Number(summaryRow.active_deals ?? 0),
+    staleStageCount: Number(summaryRow.stale_stage_count ?? 0),
+    missingNextTaskCount: Number(summaryRow.missing_next_task_count ?? 0),
+    inboundWithoutFollowupCount: Number(summaryRow.inbound_without_followup_count ?? 0),
+    revisionLoopCount: Number(summaryRow.revision_loop_count ?? 0),
+    estimatingGateGapCount: Number(summaryRow.estimating_gate_gap_count ?? 0),
+    totalDisconnects:
+      Number(summaryRow.stale_stage_count ?? 0) +
+      Number(summaryRow.missing_next_task_count ?? 0) +
+      Number(summaryRow.inbound_without_followup_count ?? 0) +
+      Number(summaryRow.revision_loop_count ?? 0) +
+      Number(summaryRow.estimating_gate_gap_count ?? 0),
+  };
+
+  return {
+    summary,
+    byType: getRows(byTypeResult).map((row) => ({
+      disconnectType: row.disconnect_type,
+      label: row.disconnect_label,
+      count: Number(row.disconnect_count ?? 0),
+    })),
+    rows: getRows(rowsResult).map((row) => ({
+      id: row.id,
+      dealNumber: row.deal_number,
+      dealName: row.deal_name,
+      stageName: row.stage_name ?? null,
+      estimatingSubstage: row.estimating_substage ?? null,
+      assignedRepName: row.assigned_rep_name ?? null,
+      disconnectType: row.disconnect_type,
+      disconnectLabel: row.disconnect_label,
+      disconnectSeverity: row.disconnect_severity,
+      disconnectSummary: row.disconnect_summary,
+      disconnectDetails: row.disconnect_details ?? null,
+      ageDays: row.age_days == null ? null : Number(row.age_days),
+      openTaskCount: Number(row.open_task_count ?? 0),
+      inboundWithoutFollowupCount: Number(row.inbound_without_followup_count ?? 0),
+      lastActivityAt: row.last_activity_at ?? null,
+      latestCustomerEmailAt: row.latest_customer_email_at ?? null,
+      proposalStatus: row.proposal_status ?? null,
+    })),
+  };
 }
 
 export async function triageAiActionQueueEntry(

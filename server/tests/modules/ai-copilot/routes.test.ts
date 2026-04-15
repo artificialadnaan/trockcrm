@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const serviceMocks = vi.hoisted(() => ({
   getAiActionQueue: vi.fn(),
+  getSalesProcessDisconnectDashboard: vi.fn(),
   getCompanyCopilotView: vi.fn(),
   getDealCopilotView: vi.fn(),
   dismissTaskSuggestion: vi.fn(),
@@ -28,6 +29,7 @@ const companiesServiceMocks = vi.hoisted(() => ({
 
 vi.mock("../../../src/modules/ai-copilot/service.js", () => ({
   getAiActionQueue: serviceMocks.getAiActionQueue,
+  getSalesProcessDisconnectDashboard: serviceMocks.getSalesProcessDisconnectDashboard,
   getCompanyCopilotView: serviceMocks.getCompanyCopilotView,
   getDealCopilotView: serviceMocks.getDealCopilotView,
   dismissTaskSuggestion: serviceMocks.dismissTaskSuggestion,
@@ -304,5 +306,33 @@ describe("ai copilot routes", () => {
     expect(res.status).toBe(202);
     expect(res.body).toEqual({ queued: true, sourceType: "email_message", batchSize: 75 });
     expect(insertMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns sales process disconnects for director users", async () => {
+    serviceMocks.getSalesProcessDisconnectDashboard.mockResolvedValue({
+      summary: {
+        activeDeals: 18,
+        totalDisconnects: 9,
+        staleStageCount: 3,
+        missingNextTaskCount: 2,
+        inboundWithoutFollowupCount: 1,
+        revisionLoopCount: 2,
+        estimatingGateGapCount: 1,
+      },
+      byType: [
+        { disconnectType: "stale_stage", label: "Stalled in stage", count: 3 },
+      ],
+      rows: [
+        { id: "deal-1", dealNumber: "D-1001", dealName: "Alpha Plaza" },
+      ],
+    });
+
+    const app = createApp("director");
+    const res = await request(app).get("/api/ai/ops/process-disconnects?limit=25");
+
+    expect(res.status).toBe(200);
+    expect(serviceMocks.getSalesProcessDisconnectDashboard).toHaveBeenCalledWith(expect.anything(), { limit: 25 });
+    expect(res.body.summary.totalDisconnects).toBe(9);
+    expect(res.body.rows).toHaveLength(1);
   });
 });

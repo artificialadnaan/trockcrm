@@ -113,6 +113,48 @@ export interface AiReviewPacketDetail {
   }>;
 }
 
+export interface SalesProcessDisconnectSummary {
+  activeDeals: number;
+  totalDisconnects: number;
+  staleStageCount: number;
+  missingNextTaskCount: number;
+  inboundWithoutFollowupCount: number;
+  revisionLoopCount: number;
+  estimatingGateGapCount: number;
+}
+
+export interface SalesProcessDisconnectTypeSummary {
+  disconnectType: string;
+  label: string;
+  count: number;
+}
+
+export interface SalesProcessDisconnectRow {
+  id: string;
+  dealNumber: string;
+  dealName: string;
+  stageName: string | null;
+  estimatingSubstage: string | null;
+  assignedRepName: string | null;
+  disconnectType: string;
+  disconnectLabel: string;
+  disconnectSeverity: string;
+  disconnectSummary: string;
+  disconnectDetails: string | null;
+  ageDays: number | null;
+  openTaskCount: number;
+  inboundWithoutFollowupCount: number;
+  lastActivityAt: string | null;
+  latestCustomerEmailAt: string | null;
+  proposalStatus: string | null;
+}
+
+export interface SalesProcessDisconnectDashboard {
+  summary: SalesProcessDisconnectSummary;
+  byType: SalesProcessDisconnectTypeSummary[];
+  rows: SalesProcessDisconnectRow[];
+}
+
 export interface QueueAiBackfillResult {
   queued: boolean;
   sourceType: string | null;
@@ -193,6 +235,36 @@ export function useAiActionQueue(limit = 50) {
   };
 }
 
+export function useSalesProcessDisconnectDashboard(limit = 50) {
+  const [dashboard, setDashboard] = useState<SalesProcessDisconnectDashboard | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchData = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const response = await api<SalesProcessDisconnectDashboard>(`/ai/ops/process-disconnects?limit=${limit}`);
+      setDashboard(response);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to load sales process disconnects");
+    } finally {
+      setLoading(false);
+    }
+  }, [limit]);
+
+  useEffect(() => {
+    void fetchData();
+  }, [fetchData]);
+
+  return {
+    dashboard,
+    loading,
+    error,
+    refetch: fetchData,
+  };
+}
+
 export async function queueAiBackfill(sourceType?: string | null, batchSize = 100) {
   return api<QueueAiBackfillResult>("/ai/ops/backfill", {
     method: "POST",
@@ -213,6 +285,26 @@ export async function triageAiActionQueueEntry(
     json: {
       action: input.action,
       comment: input.comment ?? null,
+    },
+  });
+}
+
+export async function trackSalesProcessDisconnectInteraction(input: {
+  interactionType: "dashboard_view" | "deal_click" | "type_filter";
+  targetValue: string;
+  comment?: string | null;
+}) {
+  return api("/ai/feedback", {
+    method: "POST",
+    json: {
+      targetType: "sales_process_disconnect_dashboard",
+      targetId: "sales-process-disconnect-dashboard",
+      feedbackType: "ops_dashboard_interaction",
+      feedbackValue: input.interactionType,
+      comment: JSON.stringify({
+        targetValue: input.targetValue,
+        detail: input.comment ?? null,
+      }),
     },
   });
 }

@@ -11,6 +11,7 @@ import {
   getDealCopilotView,
   getDirectorBlindSpots,
   getAiOpsMetrics,
+  getSalesProcessDisconnectDashboard,
   getAiReviewPacketDetail,
   getAiReviewQueue,
   recordAiFeedback,
@@ -154,6 +155,17 @@ router.get("/ops/action-queue", requireRole("admin", "director"), async (req, re
     const queue = await getAiActionQueue(req.tenantDb!, { limit });
     await req.commitTransaction!();
     res.json({ queue });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/ops/process-disconnects", requireRole("admin", "director"), async (req, res, next) => {
+  try {
+    const limit = req.query.limit ? Number(req.query.limit) : undefined;
+    const dashboard = await getSalesProcessDisconnectDashboard(req.tenantDb!, { limit });
+    await req.commitTransaction!();
+    res.json(dashboard);
   } catch (err) {
     next(err);
   }

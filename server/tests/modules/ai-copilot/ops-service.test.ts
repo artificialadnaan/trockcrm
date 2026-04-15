@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-const { getAiActionQueue, getAiOpsMetrics, getAiReviewQueue, getAiReviewPacketDetail } = await import("../../../src/modules/ai-copilot/service.js");
+const { getAiActionQueue, getAiOpsMetrics, getAiReviewQueue, getAiReviewPacketDetail, getSalesProcessDisconnectDashboard } = await import("../../../src/modules/ai-copilot/service.js");
 
 describe("AI ops service", () => {
   it("returns aggregate AI ops metrics", async () => {
@@ -238,5 +238,96 @@ describe("AI ops service", () => {
         escalated: false,
       },
     ]);
+  });
+
+  it("returns a sales process disconnect dashboard", async () => {
+    const tenantDb = {
+      execute: vi
+        .fn()
+        .mockResolvedValueOnce({
+          rows: [
+            {
+              active_deals: 18,
+              total_disconnects: 9,
+              stale_stage_count: 3,
+              missing_next_task_count: 2,
+              inbound_without_followup_count: 1,
+              revision_loop_count: 2,
+              estimating_gate_gap_count: 1,
+            },
+          ],
+        })
+        .mockResolvedValueOnce({
+          rows: [
+            {
+              disconnect_type: "stale_stage",
+              disconnect_label: "Stalled in stage",
+              disconnect_count: 3,
+            },
+            {
+              disconnect_type: "revision_loop",
+              disconnect_label: "Revision loop",
+              disconnect_count: 2,
+            },
+          ],
+        })
+        .mockResolvedValueOnce({
+          rows: [
+            {
+              id: "deal-1",
+              deal_number: "D-1001",
+              deal_name: "Alpha Plaza",
+              stage_name: "Estimating",
+              estimating_substage: "under_review",
+              assigned_rep_name: "Morgan Rep",
+              disconnect_type: "stale_stage",
+              disconnect_label: "Stalled in stage",
+              disconnect_severity: "high",
+              disconnect_summary: "Estimating has exceeded its stale threshold.",
+              disconnect_details: "Deal has been in Estimating for 16 days with no closed-loop movement.",
+              age_days: 16,
+              open_task_count: 0,
+              inbound_without_followup_count: 1,
+              last_activity_at: "2026-04-10T10:00:00.000Z",
+              latest_customer_email_at: "2026-04-12T12:00:00.000Z",
+              proposal_status: "revision_requested",
+            },
+          ],
+        }),
+    };
+
+    const result = await getSalesProcessDisconnectDashboard(tenantDb as any, { limit: 25 });
+
+    expect(result.summary).toEqual({
+      activeDeals: 18,
+      totalDisconnects: 9,
+      staleStageCount: 3,
+      missingNextTaskCount: 2,
+      inboundWithoutFollowupCount: 1,
+      revisionLoopCount: 2,
+      estimatingGateGapCount: 1,
+    });
+    expect(result.byType).toEqual([
+      {
+        disconnectType: "stale_stage",
+        label: "Stalled in stage",
+        count: 3,
+      },
+      {
+        disconnectType: "revision_loop",
+        label: "Revision loop",
+        count: 2,
+      },
+    ]);
+    expect(result.rows[0]).toMatchObject({
+      id: "deal-1",
+      dealNumber: "D-1001",
+      dealName: "Alpha Plaza",
+      stageName: "Estimating",
+      disconnectType: "stale_stage",
+      disconnectSeverity: "high",
+      openTaskCount: 0,
+      inboundWithoutFollowupCount: 1,
+    });
   });
 });
