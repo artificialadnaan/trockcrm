@@ -17,6 +17,7 @@ import { TASK_RULES } from "../tasks/rules/config.js";
 import { createTenantTaskRulePersistence } from "../tasks/rules/persistence.js";
 import {
   resolveEmailAssignment,
+  buildPropertyCandidatesFromDeals,
   type EmailAssignmentDealCandidate,
   type EmailAssignmentEntityType,
   type EmailAssignmentResult,
@@ -128,9 +129,14 @@ async function getThreadAssignment(
 async function getEmailCandidateDeals(
   tenantDb: TenantDb,
   contactId: string | null | undefined
-): Promise<{ companyId: string | null; companyName: string | null; dealCandidates: EmailAssignmentDealCandidate[] }> {
+): Promise<{
+  companyId: string | null;
+  companyName: string | null;
+  dealCandidates: EmailAssignmentDealCandidate[];
+  propertyCandidates: ReturnType<typeof buildPropertyCandidatesFromDeals>;
+}> {
   if (!contactId) {
-    return { companyId: null, companyName: null, dealCandidates: [] };
+    return { companyId: null, companyName: null, dealCandidates: [], propertyCandidates: [] };
   }
 
   const [contactRow] = await tenantDb
@@ -186,7 +192,12 @@ async function getEmailCandidateDeals(
     []
   );
 
-  return { companyId, companyName, dealCandidates: candidateDeals };
+  return {
+    companyId,
+    companyName,
+    dealCandidates: candidateDeals,
+    propertyCandidates: buildPropertyCandidatesFromDeals(candidateDeals),
+  };
 }
 
 export async function getEmailAssignmentQueue(
@@ -250,7 +261,7 @@ export async function getEmailAssignmentQueue(
             .limit(1)
         : [null];
 
-      const { companyId, companyName, dealCandidates } = await getEmailCandidateDeals(
+      const { companyId, companyName, dealCandidates, propertyCandidates } = await getEmailCandidateDeals(
         tenantDb,
         emailRow.contactId
       );
@@ -261,6 +272,8 @@ export async function getEmailAssignmentQueue(
         priorThreadAssignment: await getThreadAssignment(tenantDb, emailRow.graphConversationId),
         contactCompanyId: contactRow?.companyId ?? companyId,
         dealCandidates,
+        leadCandidates: [],
+        propertyCandidates,
       });
 
       return {
@@ -772,7 +785,12 @@ export async function associateEmailToDeal(
 
   await tenantDb
     .update(tasks)
-    .set({ dealId })
+    .set({
+      dealId,
+      status: "completed",
+      completedAt: new Date(),
+      updatedAt: new Date(),
+    })
     .where(and(eq(tasks.emailId, emailId), eq(tasks.type, "inbound_email")));
 }
 

@@ -1,9 +1,13 @@
-export type EmailAssignmentEntityType = "deal" | "company";
+import crypto from "crypto";
+
+export type EmailAssignmentEntityType = "deal" | "lead" | "property" | "company";
 export type EmailAssignmentConfidence = "high" | "medium" | "low";
 export type EmailAssignmentMatch =
   | "explicit_deal_number"
   | "prior_thread_assignment"
   | "single_deal"
+  | "single_lead"
+  | "single_property"
   | "unique_property"
   | "company_only";
 
@@ -16,6 +20,29 @@ export interface EmailAssignmentDealCandidate {
   propertyCity?: string | null;
   propertyState?: string | null;
   propertyZip?: string | null;
+}
+
+export interface EmailAssignmentLeadCandidate {
+  id: string;
+  leadNumber: string;
+  name: string;
+  companyId?: string | null;
+  relatedDealId?: string | null;
+  propertyAddress?: string | null;
+  propertyCity?: string | null;
+  propertyState?: string | null;
+  propertyZip?: string | null;
+}
+
+export interface EmailAssignmentPropertyCandidate {
+  id: string;
+  companyId?: string | null;
+  name?: string | null;
+  propertyAddress?: string | null;
+  propertyCity?: string | null;
+  propertyState?: string | null;
+  propertyZip?: string | null;
+  relatedDealIds?: string[];
 }
 
 export interface EmailAssignmentThreadAssignment {
@@ -31,6 +58,8 @@ export interface EmailAssignmentContext {
   priorThreadAssignment?: EmailAssignmentThreadAssignment | null;
   contactCompanyId?: string | null;
   dealCandidates: EmailAssignmentDealCandidate[];
+  leadCandidates?: EmailAssignmentLeadCandidate[];
+  propertyCandidates?: EmailAssignmentPropertyCandidate[];
 }
 
 export interface EmailAssignmentResult {
@@ -45,6 +74,7 @@ export interface EmailAssignmentResult {
 }
 
 const DEAL_NUMBER_PATTERN = /\b[A-Z]{2,}-\d{4}-\d{4}\b/g;
+const UUID_BYTES = 16;
 
 function stripHtml(html: string): string {
   return html
@@ -89,6 +119,70 @@ function buildPropertySignature(candidate: EmailAssignmentDealCandidate): string
   return normalizeText(pieces.join(" "));
 }
 
+function buildLeadPropertySignature(candidate: {
+  propertyAddress?: string | null;
+  propertyCity?: string | null;
+  propertyState?: string | null;
+  propertyZip?: string | null;
+}): string | null {
+  const pieces = [candidate.propertyAddress, candidate.propertyCity, candidate.propertyState, candidate.propertyZip]
+    .map((piece) => piece?.trim())
+    .filter((piece): piece is string => Boolean(piece));
+
+  if (pieces.length === 0) return null;
+  return normalizeText(pieces.join(" "));
+}
+
+function toDeterministicUuid(seed: string): string {
+  const digest = crypto.createHash("sha1").update(seed).digest("hex").slice(0, 32);
+  const bytes = digest.match(/.{2}/g)?.map((byte) => Number.parseInt(byte, 16)) ?? [];
+  if (bytes.length !== UUID_BYTES) {
+    throw new Error("Failed to derive deterministic uuid");
+  }
+  bytes[6] = (bytes[6] & 0x0f) | 0x50;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = bytes.map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  return [
+    hex.slice(0, 8),
+    hex.slice(8, 12),
+    hex.slice(12, 16),
+    hex.slice(16, 20),
+    hex.slice(20, 32),
+  ].join("-");
+}
+
+export function buildPropertyCandidatesFromDeals(
+  dealCandidates: EmailAssignmentDealCandidate[]
+): EmailAssignmentPropertyCandidate[] {
+  const groups = new Map<string, EmailAssignmentPropertyCandidate>();
+
+  for (const deal of dealCandidates) {
+    const signature = buildPropertySignature(deal);
+    if (!signature) continue;
+
+    const existing = groups.get(signature);
+    if (existing) {
+      existing.relatedDealIds = [...(existing.relatedDealIds ?? []), deal.id];
+      continue;
+    }
+
+    groups.set(signature, {
+      id: toDeterministicUuid(`property:${signature}`),
+      name: [deal.propertyAddress, deal.propertyCity, deal.propertyState, deal.propertyZip]
+        .filter((piece): piece is string => Boolean(piece))
+        .join(", "),
+      companyId: deal.companyId ?? null,
+      propertyAddress: deal.propertyAddress ?? null,
+      propertyCity: deal.propertyCity ?? null,
+      propertyState: deal.propertyState ?? null,
+      propertyZip: deal.propertyZip ?? null,
+      relatedDealIds: [deal.id],
+    });
+  }
+
+  return [...groups.values()];
+}
+
 function uniqueById<T extends { id: string }>(values: T[]): T[] {
   const seen = new Set<string>();
   const output: T[] = [];
@@ -114,10 +208,10 @@ function findExplicitDealCandidate(
 
 function findPropertyCandidate(
   text: string,
-  dealCandidates: EmailAssignmentDealCandidate[]
-): EmailAssignmentDealCandidate | null {
-  const matches = dealCandidates.filter((candidate) => {
-    const signature = buildPropertySignature(candidate);
+  propertyCandidates: EmailAssignmentPropertyCandidate[]
+): EmailAssignmentPropertyCandidate | null {
+  const matches = propertyCandidates.filter((candidate) => {
+    const signature = buildLeadPropertySignature(candidate);
     return signature ? text.includes(signature) : false;
   });
   return matches.length === 1 ? matches[0] : null;
@@ -131,6 +225,10 @@ function buildAmbiguityReason(candidateCount: number, hasCompany: boolean): stri
 
 export function resolveEmailAssignment(context: EmailAssignmentContext): EmailAssignmentResult {
   const candidateDeals = uniqueById(context.dealCandidates ?? []);
+  const candidateLeads = uniqueById(context.leadCandidates ?? []);
+  const candidateProperties = uniqueById(
+    context.propertyCandidates ?? buildPropertyCandidatesFromDeals(candidateDeals)
+  );
   const rawText = buildEmailRawText(context);
   const searchText = normalizeText(rawText);
 
@@ -179,15 +277,43 @@ export function resolveEmailAssignment(context: EmailAssignmentContext): EmailAs
     };
   }
 
-  const propertyCandidate = findPropertyCandidate(searchText, candidateDeals);
+  if (candidateProperties.length === 1) {
+    const [propertyCandidate] = candidateProperties;
+    return {
+      assignedEntityType: "property",
+      assignedEntityId: propertyCandidate.id,
+      assignedDealId: propertyCandidate.relatedDealIds?.[0] ?? null,
+      confidence: "high",
+      ambiguityReason: null,
+      matchedBy: "single_property",
+      requiresClassificationTask: false,
+      candidateDealIds: candidateDeals.map((deal) => deal.id),
+    };
+  }
+
+  const propertyCandidate = findPropertyCandidate(searchText, candidateProperties);
   if (propertyCandidate) {
     return {
-      assignedEntityType: "deal",
+      assignedEntityType: "property",
       assignedEntityId: propertyCandidate.id,
-      assignedDealId: propertyCandidate.id,
+      assignedDealId: propertyCandidate.relatedDealIds?.[0] ?? null,
       confidence: "high",
       ambiguityReason: null,
       matchedBy: "unique_property",
+      requiresClassificationTask: false,
+      candidateDealIds: candidateDeals.map((deal) => deal.id),
+    };
+  }
+
+  if (candidateLeads.length === 1) {
+    const [lead] = candidateLeads;
+    return {
+      assignedEntityType: "lead",
+      assignedEntityId: lead.id,
+      assignedDealId: lead.relatedDealId ?? null,
+      confidence: "high",
+      ambiguityReason: null,
+      matchedBy: "single_lead",
       requiresClassificationTask: false,
       candidateDealIds: candidateDeals.map((deal) => deal.id),
     };

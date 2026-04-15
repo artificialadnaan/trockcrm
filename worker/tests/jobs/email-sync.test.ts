@@ -37,16 +37,49 @@ const processInboundMessage = (emailSyncModule as any).processInboundMessage as 
 ) => Promise<boolean>;
 
 function createQueryMock(options: {
-  activeDeals: Array<{ deal_id: string; deal_number: string; deal_name: string }>;
+  activeDeals: Array<{
+    id: string;
+    deal_number: string;
+    name: string;
+    company_id?: string | null;
+    property_address?: string | null;
+    property_city?: string | null;
+    property_state?: string | null;
+    property_zip?: string | null;
+  }>;
+  threadAssignment?: {
+    assigned_entity_type: "deal" | "company";
+    assigned_entity_id: string;
+    deal_id: string | null;
+  } | null;
 }) {
   return vi.fn(async (sql: string, params?: unknown[]) => {
     if (sql.includes("FROM office_beta.emails") && sql.includes("graph_message_id = $1")) {
       return { rows: [] };
     }
 
-    if (sql.includes("FROM office_beta.contacts")) {
+    if (
+      sql.includes("SELECT assigned_entity_type, assigned_entity_id, deal_id") &&
+      sql.includes("FROM office_beta.emails")
+    ) {
+      return { rows: options.threadAssignment ? [options.threadAssignment] : [] };
+    }
+
+    if (sql.includes("SELECT id") && sql.includes("FROM office_beta.tasks") && sql.includes("email_assignment_queue")) {
+      return { rows: [] };
+    }
+
+    if (sql.includes("SELECT id, first_name, last_name, company_id") && sql.includes("FROM office_beta.contacts")) {
       return {
-        rows: [{ id: "contact-1", first_name: "Brett", last_name: "Smith" }],
+        rows: [
+          { id: "contact-1", first_name: "Brett", last_name: "Smith", company_id: "company-1" },
+        ],
+      };
+    }
+
+    if (sql.includes("SELECT company_id, company_name") && sql.includes("FROM office_beta.contacts")) {
+      return {
+        rows: [{ company_id: "company-1", company_name: "Alpha Roofing" }],
       };
     }
 
@@ -58,12 +91,20 @@ function createQueryMock(options: {
       return { rows: options.activeDeals };
     }
 
+    if (sql.includes("FROM office_beta.deals") && sql.includes("company_id = $1") && !sql.includes("FROM office_beta.deals d")) {
+      return { rows: options.activeDeals };
+    }
+
     if (sql.startsWith("UPDATE office_beta.emails")) {
       return { rows: [] };
     }
 
     if (sql.startsWith("INSERT INTO office_beta.activities")) {
       return { rows: [] };
+    }
+
+    if (sql.startsWith("INSERT INTO office_beta.tasks")) {
+      return { rows: [{ id: "task-1" }] };
     }
 
     if (sql.startsWith("INSERT INTO public.job_queue")) {
@@ -83,7 +124,7 @@ describe("email sync inbound message routing", () => {
   it("routes a single-active-deal email to the reply-needed task rule", async () => {
     const queryMock = createQueryMock({
       activeDeals: [
-        { deal_id: "deal-1", deal_number: "D-1001", deal_name: "Project Alpha" },
+        { id: "deal-1", deal_number: "D-1001", name: "Project Alpha" },
       ],
     });
     const client = { query: queryMock };
@@ -135,14 +176,11 @@ describe("email sync inbound message routing", () => {
   it("routes a multi-active-deal email to the disambiguation task rule", async () => {
     const queryMock = createQueryMock({
       activeDeals: [
-        { deal_id: "deal-1", deal_number: "D-1001", deal_name: "Project Alpha" },
-        { deal_id: "deal-2", deal_number: "D-1002", deal_name: "Project Beta" },
+        { id: "deal-1", deal_number: "D-1001", name: "Project Alpha" },
+        { id: "deal-2", deal_number: "D-1002", name: "Project Beta" },
       ],
     });
     const client = { query: queryMock };
-    const taskPersistence = { marker: "task-persistence" };
-    createTenantTaskRulePersistenceMock.mockReturnValue(taskPersistence);
-    evaluateTaskRulesMock.mockResolvedValue([{ ruleId: "inbound_email_deal_disambiguation", action: "created" }]);
 
     const processed = await processInboundMessage(
       client,
@@ -164,23 +202,59 @@ describe("email sync inbound message routing", () => {
     );
 
     expect(processed).toBe(true);
+    expect(evaluateTaskRulesMock).not.toHaveBeenCalled();
+    expect(
+      queryMock.mock.calls.some(
+        ([sql]) => typeof sql === "string" && sql.includes("INSERT INTO office_beta.tasks")
+      )
+    ).toBe(true);
+  });
+
+  it("keeps the prior thread assignment when the conversation was already classified", async () => {
+    const queryMock = createQueryMock({
+      activeDeals: [
+        { id: "deal-2", deal_number: "D-1002", name: "Project Beta" },
+      ],
+      threadAssignment: {
+        assigned_entity_type: "deal",
+        assigned_entity_id: "deal-2",
+        deal_id: "deal-2",
+      },
+    });
+    const client = { query: queryMock };
+    const taskPersistence = { marker: "task-persistence" };
+    createTenantTaskRulePersistenceMock.mockReturnValue(taskPersistence);
+    evaluateTaskRulesMock.mockResolvedValue([{ ruleId: "inbound_email_reply_needed", action: "created" }]);
+
+    const processed = await processInboundMessage(
+      client,
+      "office_beta",
+      "user-1",
+      "office-1",
+      {
+        id: "graph-3",
+        from: { emailAddress: { address: "brett@example.com" } },
+        toRecipients: [],
+        ccRecipients: [],
+        subject: "Re: Project Beta",
+        bodyPreview: "Following up on the thread",
+        body: { content: "<p>Following up on the thread</p>" },
+        hasAttachments: false,
+        receivedDateTime: "2026-04-04T15:00:00.000Z",
+        conversationId: "conv-3",
+      }
+    );
+
+    expect(processed).toBe(true);
     expect(evaluateTaskRulesMock).toHaveBeenCalledWith(
       expect.objectContaining({
-        officeId: "office-1",
-        entityId: "email:email-1",
-        sourceEvent: "email.received",
-        dealId: null,
-        contactId: "contact-1",
+        dealId: "deal-2",
         emailId: "email-1",
-        taskAssigneeId: "user-1",
-        contactName: "Brett Smith",
-        emailSubject: "Need deal help",
-        activeDealCount: 2,
-        activeDealNames: ["D-1001 Project Alpha", "D-1002 Project Beta"],
+        activeDealCount: 1,
+        activeDealNames: ["D-1002 Project Beta"],
       }),
       taskPersistence,
       expect.any(Array)
     );
-    expect(queryMock.mock.calls.some(([sql]) => typeof sql === "string" && sql.includes("INSERT INTO office_beta.tasks"))).toBe(false);
   });
 });

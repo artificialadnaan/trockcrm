@@ -443,6 +443,8 @@ export async function processInboundMessage(
     priorThreadAssignment,
     contactCompanyId: contactContext.companyId,
     dealCandidates: contactContext.dealCandidates,
+    leadCandidates: [],
+    propertyCandidates: assignmentModule.buildPropertyCandidatesFromDeals(contactContext.dealCandidates),
   });
 
   // Insert email record
@@ -516,7 +518,7 @@ export async function processInboundMessage(
       ambiguityReason: assignment.ambiguityReason ?? "assignment_review",
       candidateDealNames: association.activeDealNames,
     });
-  } else if (association.activeDealCount === 1 && assignment.matchedBy === "single_deal") {
+  } else if (association.activeDealCount === 1) {
     await evaluateInboundEmailTasks(
       client,
       schemaName,
@@ -627,9 +629,18 @@ async function getContactAssignmentContextRaw(
       )
     : { rows: [] };
 
-  const dealCandidates = [...contactDealsResult.rows, ...companyDealsResult.rows].filter(
-    (deal, index, arr) => arr.findIndex((candidate) => candidate.id === deal.id) === index
-  );
+  const dealCandidates = [...contactDealsResult.rows, ...companyDealsResult.rows]
+    .map((deal: any) => ({
+      id: deal.id,
+      dealNumber: deal.deal_number,
+      name: deal.name,
+      companyId: deal.company_id ?? null,
+      propertyAddress: deal.property_address ?? null,
+      propertyCity: deal.property_city ?? null,
+      propertyState: deal.property_state ?? null,
+      propertyZip: deal.property_zip ?? null,
+    }))
+    .filter((deal, index, arr) => arr.findIndex((candidate) => candidate.id === deal.id) === index);
 
   return { companyId, companyName, dealCandidates };
 }

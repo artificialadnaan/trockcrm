@@ -46,7 +46,9 @@ function AssignmentQueueCard({
   item: EmailAssignmentQueueItem;
   onAssign: (emailId: string, dealId: string) => Promise<void>;
 }) {
-  const [selectedDealId, setSelectedDealId] = useState(item.candidateDeals[0]?.id ?? "");
+  const [selectedDealId, setSelectedDealId] = useState(
+    item.candidateDeals.length === 1 ? item.candidateDeals[0]?.id ?? "" : ""
+  );
   const [saving, setSaving] = useState(false);
 
   return (
@@ -78,11 +80,14 @@ function AssignmentQueueCard({
           {item.candidateDeals.length === 0 ? (
             <option value="">No candidate deals</option>
           ) : (
-            item.candidateDeals.map((deal) => (
-              <option key={deal.id} value={deal.id}>
-                {deal.dealNumber} · {deal.name}
-              </option>
-            ))
+            <>
+              <option value="">Select a deal...</option>
+              {item.candidateDeals.map((deal) => (
+                <option key={deal.id} value={deal.id}>
+                  {deal.dealNumber} · {deal.name}
+                </option>
+              ))}
+            </>
           )}
         </select>
         <button
