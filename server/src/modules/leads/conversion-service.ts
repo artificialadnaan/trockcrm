@@ -90,6 +90,13 @@ export function createLeadConversionService(
       throw new AppError(403, "You cannot reassign the successor deal");
     }
 
+    const convertedStage = await deps.getStageBySlug("converted", "lead");
+    if (!convertedStage) {
+      throw new AppError(500, "Missing converted lead stage configuration");
+    }
+
+    const transitionedToConvertedStage = convertedStage.id !== lead.stageId;
+
     const deal = await deps.createDeal(tenantDb, {
       name: input.name ?? lead.name,
       stageId: input.dealStageId,
@@ -103,6 +110,7 @@ export function createLeadConversionService(
       companyId: lead.companyId,
       propertyId: lead.propertyId,
       sourceLeadId: lead.id,
+      sourceLeadWriteMode: "lead_conversion",
       source: input.source ?? lead.source ?? undefined,
       description: input.description ?? lead.description ?? undefined,
       ddEstimate: input.ddEstimate,
@@ -114,9 +122,6 @@ export function createLeadConversionService(
     });
 
     const convertedAt = deps.now();
-    const convertedStage = await deps.getStageBySlug("converted", "lead");
-    const transitionedToConvertedStage =
-      convertedStage !== null && convertedStage.id !== lead.stageId;
 
     if (transitionedToConvertedStage) {
       await tenantDb.insert(leadStageHistory).values({

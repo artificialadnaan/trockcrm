@@ -44,9 +44,18 @@ const migrationPath = resolve(
   "../../../../migrations/0019_properties_and_leads.sql"
 );
 const migrationSql = readFileSync(migrationPath, "utf8");
+const pipelineFamilyMigrationPath = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../../migrations/0020_pipeline_workflow_families.sql"
+);
+const pipelineFamilyMigrationSql = readFileSync(pipelineFamilyMigrationPath, "utf8");
 
 function expectSqlToMatch(pattern: RegExp): void {
   expect(migrationSql).toMatch(pattern);
+}
+
+function expectPipelineFamilySqlToMatch(pattern: RegExp): void {
+  expect(pipelineFamilyMigrationSql).toMatch(pattern);
 }
 
 interface FakeCompanyRow {
@@ -428,7 +437,8 @@ function createFakeTenantDb(initialState?: Partial<FakeTenantState>) {
         return queryBuilder;
       },
       limit(limit: number) {
-        return Promise.resolve(materialize(rows.slice(0, limit)));
+        rows = rows.slice(0, limit);
+        return queryBuilder;
       },
       for() {
         return queryBuilder;
@@ -584,6 +594,12 @@ describe("Lead Conversion Shared Contract", () => {
     );
     expectSqlToMatch(
       /CREATE UNIQUE INDEX IF NOT EXISTS deals_source_lead_id_idx\s+ON %I\.deals \(source_lead_id\)\s+WHERE source_lead_id IS NOT NULL/s
+    );
+  });
+
+  it("seeds minimal lead-family stages for fresh environments", () => {
+    expectPipelineFamilySqlToMatch(
+      /INSERT INTO public\.pipeline_stage_config[\s\S]*\('Contacted',\s*'contacted',\s*1,\s*'lead',\s*true,\s*false,\s*'#2563EB'\)[\s\S]*\('Converted',\s*'converted',\s*99,\s*'lead',\s*false,\s*true,\s*'#16A34A'\)/s
     );
   });
 });
@@ -1002,9 +1018,95 @@ describe("Lead Conversion Service", () => {
     expect(createDealSpy).not.toHaveBeenCalled();
     expect(tenantDb.state.deals).toHaveLength(0);
   });
+
+  it("fails conversion when the converted lead stage is not configured", async () => {
+    pipelineMocks.getStageBySlug.mockResolvedValueOnce(null);
+
+    const tenantDb = createFakeTenantDb({
+      leads: [
+        {
+          id: "lead-1",
+          companyId: "company-1",
+          propertyId: "property-1",
+          primaryContactId: null,
+          name: "Palm Villas repaint",
+          stageId: "lead-stage-1",
+          assignedRepId: "rep-1",
+          status: "open",
+          source: "Referral",
+          description: null,
+          stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+          convertedAt: null,
+          isActive: true,
+          createdAt: new Date("2026-04-12T15:00:00.000Z"),
+          updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+        },
+      ],
+    });
+    const createDealSpy = vi.fn();
+    const service = createLeadConversionService({
+      createDeal: createDealSpy as never,
+    });
+
+    await expect(
+      service.convertLead(tenantDb as never, {
+        leadId: "lead-1",
+        dealStageId: "deal-stage-1",
+        userRole: "rep",
+        userId: "rep-1",
+      })
+    ).rejects.toMatchObject<AppError>({
+      statusCode: 500,
+      message: "Missing converted lead stage configuration",
+    });
+
+    expect(createDealSpy).not.toHaveBeenCalled();
+    expect(tenantDb.state.leads[0]?.status).toBe("open");
+    expect(tenantDb.state.leadStageHistory).toHaveLength(0);
+  });
 });
 
 describe("Deal Lineage Enforcement", () => {
+  it("rejects direct successor deal creation outside the dedicated lead conversion flow", async () => {
+    const tenantDb = createFakeTenantDb({
+      leads: [
+        {
+          id: "lead-1",
+          companyId: "company-1",
+          propertyId: "property-1",
+          primaryContactId: "contact-1",
+          name: "Palm Villas repaint",
+          stageId: "lead-stage-1",
+          assignedRepId: "rep-2",
+          status: "open",
+          source: "Referral",
+          description: null,
+          stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+          convertedAt: null,
+          isActive: true,
+          createdAt: new Date("2026-04-12T15:00:00.000Z"),
+          updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+        },
+      ],
+    });
+
+    await expect(
+      createDeal(tenantDb as never, {
+        name: "Bypass successor deal",
+        stageId: "deal-stage-1",
+        assignedRepId: "rep-1",
+        sourceLeadId: "lead-1",
+        workflowRoute: "estimating",
+      })
+    ).rejects.toMatchObject<AppError>({
+      statusCode: 400,
+      message: "Use the lead conversion endpoint to create deals from leads",
+    });
+
+    expect(tenantDb.state.leads[0]?.status).toBe("open");
+    expect(tenantDb.state.deals).toHaveLength(0);
+  });
+
   it("rejects creating a second deal for the same source lead with a controlled validation error", async () => {
     const tenantDb = createFakeTenantDb({
       leads: [
@@ -1050,10 +1152,52 @@ describe("Deal Lineage Enforcement", () => {
         assignedRepId: "rep-1",
         sourceLeadId: "lead-1",
         workflowRoute: "estimating",
+        sourceLeadWriteMode: "lead_conversion",
       })
     ).rejects.toMatchObject<AppError>({
       statusCode: 409,
       message: "A deal already exists for this source lead",
+    });
+  });
+
+  it("rejects deal creation when the primary contact belongs to a different company", async () => {
+    const tenantDb = createFakeTenantDb({
+      companies: [
+        {
+          id: "company-1",
+          name: "Palm Villas",
+          slug: "palm-villas",
+          category: "other",
+          isActive: true,
+        },
+        {
+          id: "company-2",
+          name: "Ocean View",
+          slug: "ocean-view",
+          category: "other",
+          isActive: true,
+        },
+      ],
+      contacts: [
+        { id: "contact-1", companyId: "company-1", isActive: true },
+        { id: "contact-2", companyId: "company-2", isActive: true },
+      ],
+    });
+
+    await expect(
+      createDeal(tenantDb as never, {
+        name: "Cross-company contact deal",
+        stageId: "deal-stage-1",
+        assignedRepId: "rep-1",
+        migrationMode: true,
+        companyId: "company-1",
+        propertyId: "property-1",
+        primaryContactId: "contact-2",
+        workflowRoute: "estimating",
+      })
+    ).rejects.toMatchObject<AppError>({
+      statusCode: 400,
+      message: "Primary contact does not belong to the company",
     });
   });
 
@@ -1182,6 +1326,59 @@ describe("Deal Lineage Enforcement", () => {
     ).rejects.toMatchObject<AppError>({
       statusCode: 409,
       message: "A deal already exists for this source lead",
+    });
+  });
+
+  it("rejects updating a deal to use a primary contact from a different company", async () => {
+    const tenantDb = createFakeTenantDb({
+      companies: [
+        {
+          id: "company-1",
+          name: "Palm Villas",
+          slug: "palm-villas",
+          category: "other",
+          isActive: true,
+        },
+        {
+          id: "company-2",
+          name: "Ocean View",
+          slug: "ocean-view",
+          category: "other",
+          isActive: true,
+        },
+      ],
+      contacts: [
+        { id: "contact-1", companyId: "company-1", isActive: true },
+        { id: "contact-2", companyId: "company-2", isActive: true },
+      ],
+      deals: [
+        {
+          id: "deal-1",
+          dealNumber: "TR-2026-0001",
+          name: "Palm Villas deal",
+          stageId: "deal-stage-1",
+          assignedRepId: "rep-1",
+          primaryContactId: "contact-1",
+          companyId: "company-1",
+          propertyId: "property-1",
+          sourceLeadId: null,
+          source: "Referral",
+          workflowRoute: "estimating",
+        },
+      ],
+    });
+
+    await expect(
+      updateDeal(
+        tenantDb as never,
+        "deal-1",
+        { primaryContactId: "contact-2", migrationMode: true },
+        "director",
+        "director-1"
+      )
+    ).rejects.toMatchObject<AppError>({
+      statusCode: 400,
+      message: "Primary contact does not belong to the company",
     });
   });
 });

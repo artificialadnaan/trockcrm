@@ -6,6 +6,7 @@ import {
   dealApprovals,
   changeOrders,
   pipelineStageConfig,
+  contacts,
   leads,
   users,
   userOfficeAccess,
@@ -43,6 +44,7 @@ export interface CreateDealInput {
   companyId?: string;
   propertyId?: string;
   sourceLeadId?: string;
+  sourceLeadWriteMode?: "direct" | "lead_conversion";
   workflowRoute?: WorkflowRoute;
   migrationMode?: boolean;
   primaryContactId?: string;
@@ -140,6 +142,34 @@ async function validateAssignee(tenantDb: TenantDb, assigneeId: string, officeId
 
 function workflowFamilyForRoute(workflowRoute: WorkflowRoute) {
   return workflowRoute === "service" ? "service_deal" : "standard_deal";
+}
+
+async function validateDealPrimaryContact(
+  tenantDb: TenantDb,
+  companyId: string | null,
+  primaryContactId?: string | null
+) {
+  if (!primaryContactId) {
+    return;
+  }
+
+  if (!companyId) {
+    throw new AppError(400, "Primary contact requires a company");
+  }
+
+  const [contact] = await tenantDb
+    .select()
+    .from(contacts)
+    .where(and(eq(contacts.id, primaryContactId), eq(contacts.isActive, true)))
+    .limit(1);
+
+  if (!contact) {
+    throw new AppError(400, "Primary contact not found");
+  }
+
+  if (contact.companyId !== companyId) {
+    throw new AppError(400, "Primary contact does not belong to the company");
+  }
 }
 
 async function assertSourceLeadLineageAvailable(
@@ -374,6 +404,14 @@ export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
     throw new AppError(400, "sourceLeadId is required unless migrationMode is true");
   }
 
+  if (
+    input.sourceLeadId &&
+    !input.migrationMode &&
+    input.sourceLeadWriteMode !== "lead_conversion"
+  ) {
+    throw new AppError(400, "Use the lead conversion endpoint to create deals from leads");
+  }
+
   const lineage = await resolveSourceLeadLineage(tenantDb, input);
 
   if (!input.migrationMode && (!lineage.companyId || !lineage.propertyId || !lineage.sourceLeadId)) {
@@ -385,6 +423,7 @@ export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
 
   // Validate the assigned rep exists, is active, and has office access
   await validateAssignee(tenantDb, input.assignedRepId, input.officeId);
+  await validateDealPrimaryContact(tenantDb, lineage.companyId, lineage.primaryContactId);
 
   const dealNumber = await generateDealNumber(tenantDb);
 
@@ -557,6 +596,18 @@ export async function updateDeal(
   } else {
     if (input.companyId !== undefined) updates.companyId = input.companyId;
     if (input.propertyId !== undefined) updates.propertyId = input.propertyId;
+  }
+
+  if (
+    input.primaryContactId !== undefined ||
+    input.companyId !== undefined ||
+    input.sourceLeadId !== undefined
+  ) {
+    await validateDealPrimaryContact(
+      tenantDb,
+      (updates.companyId ?? existing.companyId ?? null) as string | null,
+      (updates.primaryContactId ?? existing.primaryContactId ?? null) as string | null
+    );
   }
 
   // Validate and set estimating substage

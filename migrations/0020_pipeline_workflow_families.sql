@@ -23,3 +23,24 @@ WHERE workflow_family IS NULL;
 
 ALTER TABLE public.pipeline_stage_config
   ALTER COLUMN workflow_family SET NOT NULL;
+
+INSERT INTO public.pipeline_stage_config (
+  name,
+  slug,
+  display_order,
+  workflow_family,
+  is_active_pipeline,
+  is_terminal,
+  color
+)
+VALUES
+  ('Contacted', 'contacted', 1, 'lead', true, false, '#2563EB'),
+  ('Converted', 'converted', 99, 'lead', false, true, '#16A34A')
+ON CONFLICT (slug) DO UPDATE
+SET
+  name = EXCLUDED.name,
+  display_order = EXCLUDED.display_order,
+  workflow_family = EXCLUDED.workflow_family,
+  is_active_pipeline = EXCLUDED.is_active_pipeline,
+  is_terminal = EXCLUDED.is_terminal,
+  color = EXCLUDED.color;

@@ -353,7 +353,7 @@ function validateDealPayload(body: Record<string, unknown>): void {
 // POST /api/deals — create a new deal
 router.post("/", async (req, res, next) => {
   try {
-    const { name, stageId, assignedRepId, ...rest } = req.body;
+    const { name, stageId, assignedRepId, sourceLeadWriteMode: _sourceLeadWriteMode, ...rest } = req.body;
     if (!name || !stageId) {
       throw new AppError(400, "Name and stageId are required");
     }
