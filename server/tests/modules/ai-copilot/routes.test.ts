@@ -318,9 +318,13 @@ describe("ai copilot routes", () => {
         inboundWithoutFollowupCount: 1,
         revisionLoopCount: 2,
         estimatingGateGapCount: 1,
+        procoreBidBoardDriftCount: 2,
       },
       byType: [
         { disconnectType: "stale_stage", label: "Stalled in stage", count: 3 },
+      ],
+      clusters: [
+        { clusterKey: "bid_board_sync_break", title: "Bid board / CRM stage drift", dealCount: 2 },
       ],
       rows: [
         { id: "deal-1", dealNumber: "D-1001", dealName: "Alpha Plaza" },
@@ -333,6 +337,8 @@ describe("ai copilot routes", () => {
     expect(res.status).toBe(200);
     expect(serviceMocks.getSalesProcessDisconnectDashboard).toHaveBeenCalledWith(expect.anything(), { limit: 25 });
     expect(res.body.summary.totalDisconnects).toBe(9);
+    expect(res.body.summary.procoreBidBoardDriftCount).toBe(2);
+    expect(res.body.clusters[0].clusterKey).toBe("bid_board_sync_break");
     expect(res.body.rows).toHaveLength(1);
   });
 });

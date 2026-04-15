@@ -254,6 +254,7 @@ describe("AI ops service", () => {
               inbound_without_followup_count: 1,
               revision_loop_count: 2,
               estimating_gate_gap_count: 1,
+              procore_bid_board_drift_count: 2,
             },
           ],
         })
@@ -267,6 +268,11 @@ describe("AI ops service", () => {
             {
               disconnect_type: "revision_loop",
               disconnect_label: "Revision loop",
+              disconnect_count: 2,
+            },
+            {
+              disconnect_type: "procore_bid_board_drift",
+              disconnect_label: "Bid board sync drift",
               disconnect_count: 2,
             },
           ],
@@ -291,6 +297,35 @@ describe("AI ops service", () => {
               last_activity_at: "2026-04-10T10:00:00.000Z",
               latest_customer_email_at: "2026-04-12T12:00:00.000Z",
               proposal_status: "revision_requested",
+              procore_sync_status: "conflict",
+              procore_sync_direction: "bidirectional",
+              procore_last_synced_at: "2026-04-09T10:00:00.000Z",
+              procore_sync_updated_at: "2026-04-12T09:00:00.000Z",
+              procore_drift_reason: "Bid board stage changed without CRM reconciliation.",
+            },
+            {
+              id: "deal-2",
+              deal_number: "D-1002",
+              deal_name: "Beta Tower",
+              stage_name: "Bid Sent",
+              estimating_substage: "sent_to_client",
+              assigned_rep_name: "Jordan Rep",
+              disconnect_type: "procore_bid_board_drift",
+              disconnect_label: "Bid board sync drift",
+              disconnect_severity: "critical",
+              disconnect_summary: "Procore bid board and CRM stage state are out of sync.",
+              disconnect_details: "Bid board recorded a newer project/bid state than CRM currently reflects.",
+              age_days: 3,
+              open_task_count: 1,
+              inbound_without_followup_count: 0,
+              last_activity_at: "2026-04-13T11:00:00.000Z",
+              latest_customer_email_at: null,
+              proposal_status: "sent",
+              procore_sync_status: "conflict",
+              procore_sync_direction: "bidirectional",
+              procore_last_synced_at: "2026-04-11T11:00:00.000Z",
+              procore_sync_updated_at: "2026-04-14T08:00:00.000Z",
+              procore_drift_reason: "Procore reported a newer update than the CRM stage map.",
             },
           ],
         }),
@@ -300,12 +335,13 @@ describe("AI ops service", () => {
 
     expect(result.summary).toEqual({
       activeDeals: 18,
-      totalDisconnects: 9,
+      totalDisconnects: 11,
       staleStageCount: 3,
       missingNextTaskCount: 2,
       inboundWithoutFollowupCount: 1,
       revisionLoopCount: 2,
       estimatingGateGapCount: 1,
+      procoreBidBoardDriftCount: 2,
     });
     expect(result.byType).toEqual([
       {
@@ -318,6 +354,11 @@ describe("AI ops service", () => {
         label: "Revision loop",
         count: 2,
       },
+      {
+        disconnectType: "procore_bid_board_drift",
+        label: "Bid board sync drift",
+        count: 2,
+      },
     ]);
     expect(result.rows[0]).toMatchObject({
       id: "deal-1",
@@ -328,6 +369,26 @@ describe("AI ops service", () => {
       disconnectSeverity: "high",
       openTaskCount: 0,
       inboundWithoutFollowupCount: 1,
+      procoreSyncStatus: "conflict",
+      procoreDriftReason: "Bid board stage changed without CRM reconciliation.",
     });
+    expect(result.rows[1]).toMatchObject({
+      disconnectType: "procore_bid_board_drift",
+      procoreSyncStatus: "conflict",
+      procoreSyncDirection: "bidirectional",
+    });
+    expect(result.clusters).toEqual([
+      expect.objectContaining({
+        clusterKey: "bid_board_sync_break",
+        title: "Bid board / CRM stage drift",
+        dealCount: 1,
+        disconnectCount: 1,
+        includesProcoreBidBoard: true,
+      }),
+      expect.objectContaining({
+        clusterKey: "execution_stall",
+        dealCount: 1,
+      }),
+    ]);
   });
 });

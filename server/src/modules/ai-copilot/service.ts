@@ -174,6 +174,7 @@ export interface SalesProcessDisconnectSummary {
   inboundWithoutFollowupCount: number;
   revisionLoopCount: number;
   estimatingGateGapCount: number;
+  procoreBidBoardDriftCount: number;
 }
 
 export interface SalesProcessDisconnectTypeSummary {
@@ -200,11 +201,32 @@ export interface SalesProcessDisconnectRow {
   lastActivityAt: string | null;
   latestCustomerEmailAt: string | null;
   proposalStatus: string | null;
+  procoreSyncStatus: string | null;
+  procoreSyncDirection: string | null;
+  procoreLastSyncedAt: string | null;
+  procoreSyncUpdatedAt: string | null;
+  procoreDriftReason: string | null;
+}
+
+export interface SalesProcessDisconnectCluster {
+  clusterKey: string;
+  title: string;
+  summary: string;
+  likelyRootCause: string;
+  recommendedAction: string;
+  severity: string;
+  dealCount: number;
+  disconnectCount: number;
+  disconnectTypes: string[];
+  stages: string[];
+  reps: string[];
+  includesProcoreBidBoard: boolean;
 }
 
 export interface SalesProcessDisconnectDashboard {
   summary: SalesProcessDisconnectSummary;
   byType: SalesProcessDisconnectTypeSummary[];
+  clusters: SalesProcessDisconnectCluster[];
   rows: SalesProcessDisconnectRow[];
 }
 
@@ -254,6 +276,148 @@ function createSnapshotHash(input: {
     .createHash("sha256")
     .update(JSON.stringify(input))
     .digest("hex");
+}
+
+function severityRank(value: string | null | undefined) {
+  switch (value) {
+    case "critical":
+      return 4;
+    case "high":
+      return 3;
+    case "medium":
+      return 2;
+    case "low":
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+function buildSalesProcessDisconnectClusters(rows: SalesProcessDisconnectRow[]): SalesProcessDisconnectCluster[] {
+  const clusterMeta: Record<
+    string,
+    Pick<SalesProcessDisconnectCluster, "title" | "summary" | "likelyRootCause" | "recommendedAction">
+  > = {
+    bid_board_sync_break: {
+      title: "Bid board / CRM stage drift",
+      summary:
+        "Procore bid-board or project sync state shows newer or conflicting stage movement than the CRM currently reflects.",
+      likelyRootCause:
+        "Bid-board updates are landing, but the CRM stage map or manual reconciliation step is lagging behind.",
+      recommendedAction:
+        "Review Procore sync conflicts first, reconcile the stage owner, and confirm the CRM stage mirrors the latest bid-board outcome.",
+    },
+    estimating_handoff_break: {
+      title: "Estimating handoff break",
+      summary:
+        "Revision requests or missing required artifacts suggest sales and estimating are not closing the loop cleanly.",
+      likelyRootCause:
+        "Estimating requests are being handed off without the required files, ownership, or task coverage to move the deal forward.",
+      recommendedAction:
+        "Assign a clear estimator owner, attach the missing estimating artifacts, and create an explicit next-step task for the rep.",
+    },
+    follow_through_gap: {
+      title: "Customer follow-through gap",
+      summary:
+        "Customer communication arrived or the deal changed state, but no logged next step exists to continue the conversation.",
+      likelyRootCause:
+        "Inbound customer activity is not consistently turning into follow-up tasks or logged outreach from sales/admin staff.",
+      recommendedAction:
+        "Create the next customer-response task immediately and verify the rep or office owner is accountable for the follow-up window.",
+    },
+    execution_stall: {
+      title: "Execution stall",
+      summary:
+        "Deals are sitting in-stage beyond expected thresholds, which usually means work is happening off-system or not happening at all.",
+      likelyRootCause:
+        "The current stage has no active execution owner, or status changes are occurring without corresponding CRM activity updates.",
+      recommendedAction:
+        "Review stage owner coverage, confirm what work is actually pending, and either progress the deal or create the missing task trail.",
+    },
+  };
+
+  const grouped = new Map<
+    string,
+    {
+      rows: SalesProcessDisconnectRow[];
+      severity: string;
+      severityRank: number;
+      disconnectTypes: Set<string>;
+      stages: Set<string>;
+      reps: Set<string>;
+      dealIds: Set<string>;
+      includesProcoreBidBoard: boolean;
+    }
+  >();
+
+  const toClusterKey = (row: SalesProcessDisconnectRow) => {
+    if (row.disconnectType === "procore_bid_board_drift") return "bid_board_sync_break";
+    if (row.disconnectType === "revision_loop" || row.disconnectType === "estimating_gate_gap") {
+      return "estimating_handoff_break";
+    }
+    if (row.disconnectType === "missing_next_task" || row.disconnectType === "inbound_without_followup") {
+      return "follow_through_gap";
+    }
+    return "execution_stall";
+  };
+
+  for (const row of rows) {
+    const clusterKey = toClusterKey(row);
+    const existing = grouped.get(clusterKey);
+    const rank = severityRank(row.disconnectSeverity);
+    if (!existing) {
+      grouped.set(clusterKey, {
+        rows: [row],
+        severity: row.disconnectSeverity,
+        severityRank: rank,
+        disconnectTypes: new Set([row.disconnectType]),
+        stages: new Set(row.stageName ? [row.stageName] : []),
+        reps: new Set(row.assignedRepName ? [row.assignedRepName] : []),
+        dealIds: new Set([row.id]),
+        includesProcoreBidBoard: row.disconnectType === "procore_bid_board_drift",
+      });
+      continue;
+    }
+
+    existing.rows.push(row);
+    existing.disconnectTypes.add(row.disconnectType);
+    if (row.stageName) existing.stages.add(row.stageName);
+    if (row.assignedRepName) existing.reps.add(row.assignedRepName);
+    existing.dealIds.add(row.id);
+    if (row.disconnectType === "procore_bid_board_drift") {
+      existing.includesProcoreBidBoard = true;
+    }
+    if (rank > existing.severityRank) {
+      existing.severityRank = rank;
+      existing.severity = row.disconnectSeverity;
+    }
+  }
+
+  return Array.from(grouped.entries())
+    .map(([clusterKey, group]) => {
+      const meta = clusterMeta[clusterKey];
+      return {
+        clusterKey,
+        title: meta.title,
+        summary: meta.summary,
+        likelyRootCause: meta.likelyRootCause,
+        recommendedAction: meta.recommendedAction,
+        severity: group.severity,
+        dealCount: group.dealIds.size,
+        disconnectCount: group.rows.length,
+        disconnectTypes: Array.from(group.disconnectTypes).sort(),
+        stages: Array.from(group.stages).sort(),
+        reps: Array.from(group.reps).sort(),
+        includesProcoreBidBoard: group.includesProcoreBidBoard,
+      };
+    })
+    .sort((a, b) => {
+      const severityDelta = severityRank(b.severity) - severityRank(a.severity);
+      if (severityDelta !== 0) return severityDelta;
+      if (b.dealCount !== a.dealCount) return b.dealCount - a.dealCount;
+      if (b.disconnectCount !== a.disconnectCount) return b.disconnectCount - a.disconnectCount;
+      return a.title.localeCompare(b.title);
+    });
 }
 
 const DEFAULT_DEPS: GenerateDealCopilotPacketDeps = {
@@ -725,6 +889,21 @@ export async function getSalesProcessDisconnectDashboard(
         WHERE f.deal_id IS NOT NULL
           AND f.is_active = TRUE
         GROUP BY f.deal_id
+      ),
+      latest_procore_sync AS (
+        SELECT DISTINCT ON (pss.crm_entity_id)
+          pss.crm_entity_id AS deal_id,
+          pss.sync_status
+        FROM public.procore_sync_state pss
+        WHERE pss.crm_entity_type = 'deal'
+          AND pss.entity_type IN ('project', 'bid')
+        ORDER BY pss.crm_entity_id, pss.updated_at DESC
+      ),
+      deal_procore_drift AS (
+        SELECT
+          lps.deal_id,
+          CASE WHEN lps.sync_status != 'synced' THEN 1 ELSE 0 END::int AS procore_bid_board_drift_count
+        FROM latest_procore_sync lps
       )
       SELECT
         COUNT(*)::int AS active_deals,
@@ -738,14 +917,27 @@ export async function getSalesProcessDisconnectDashboard(
         COUNT(*) FILTER (WHERE proposal_status = 'revision_requested')::int AS revision_loop_count,
         COUNT(*) FILTER (
           WHERE required_document_count > COALESCE(present_document_count, 0)
-        )::int AS estimating_gate_gap_count
+        )::int AS estimating_gate_gap_count,
+        COUNT(*) FILTER (
+          WHERE COALESCE(procore_bid_board_drift_count, 0) > 0
+        )::int AS procore_bid_board_drift_count
       FROM scoped_deals sd
       LEFT JOIN deal_task_counts dtc ON dtc.deal_id = sd.id
       LEFT JOIN deal_inbound_counts dic ON dic.deal_id = sd.id
       LEFT JOIN deal_file_counts dfc ON dfc.deal_id = sd.id
+      LEFT JOIN deal_procore_drift dpd ON dpd.deal_id = sd.id
     `),
     tenantDb.execute(sql`
-      WITH disconnect_rows AS (
+      WITH latest_procore_sync AS (
+        SELECT DISTINCT ON (pss.crm_entity_id)
+          pss.crm_entity_id AS deal_id,
+          pss.sync_status
+        FROM public.procore_sync_state pss
+        WHERE pss.crm_entity_type = 'deal'
+          AND pss.entity_type IN ('project', 'bid')
+        ORDER BY pss.crm_entity_id, pss.updated_at DESC
+      ),
+      disconnect_rows AS (
         SELECT
           d.id AS deal_id,
           'stale_stage'::text AS disconnect_type,
@@ -819,6 +1011,18 @@ export async function getSalesProcessDisconnectDashboard(
             WHERE f.deal_id = d.id
               AND f.is_active = TRUE
           )
+
+        UNION ALL
+
+        SELECT
+          d.id AS deal_id,
+          'procore_bid_board_drift'::text AS disconnect_type,
+          'Bid board sync drift'::text AS disconnect_label
+        FROM deals d
+        JOIN latest_procore_sync lps ON lps.deal_id = d.id
+        WHERE d.is_active = TRUE
+          AND d.procore_project_id IS NOT NULL
+          AND lps.sync_status != 'synced'
       )
       SELECT
         disconnect_type,
@@ -840,6 +1044,8 @@ export async function getSalesProcessDisconnectDashboard(
           d.stage_entered_at,
           d.last_activity_at,
           d.proposal_status,
+          d.procore_project_id,
+          d.procore_last_synced_at,
           COALESCE((
             SELECT COUNT(*)::int
             FROM tasks t
@@ -872,10 +1078,42 @@ export async function getSalesProcessDisconnectDashboard(
             WHERE f.deal_id = d.id
               AND f.is_active = TRUE
           ), 0) AS present_document_count,
-          psc.stale_threshold_days
+          psc.stale_threshold_days,
+          pss.sync_status AS procore_sync_status,
+          pss.sync_direction AS procore_sync_direction,
+          pss.updated_at AS procore_sync_updated_at,
+          CASE
+            WHEN pss.sync_status = 'conflict' THEN COALESCE(pss.conflict_data ->> 'summary', pss.error_message, 'Procore sync conflict requires reconciliation.')
+            WHEN pss.sync_status = 'error' THEN COALESCE(pss.error_message, 'Procore sync error blocked CRM reconciliation.')
+            WHEN pss.sync_status = 'pending' THEN 'Bid board update is pending sync into CRM.'
+            WHEN pss.last_procore_updated_at IS NOT NULL
+              AND (
+                pss.last_crm_updated_at IS NULL
+                OR pss.last_procore_updated_at > pss.last_crm_updated_at
+              )
+              THEN 'Procore reported a newer update than the CRM stage map.'
+            ELSE NULL
+          END AS procore_drift_reason
         FROM deals d
         JOIN pipeline_stage_config psc ON psc.id = d.stage_id
         LEFT JOIN public.users u ON u.id = d.assigned_rep_id
+        LEFT JOIN LATERAL (
+          SELECT
+            sync_status,
+            sync_direction,
+            last_synced_at,
+            last_procore_updated_at,
+            last_crm_updated_at,
+            updated_at,
+            conflict_data,
+            error_message
+          FROM public.procore_sync_state
+          WHERE crm_entity_type = 'deal'
+            AND crm_entity_id = d.id
+            AND entity_type IN ('project', 'bid')
+          ORDER BY updated_at DESC
+          LIMIT 1
+        ) pss ON TRUE
         WHERE d.is_active = TRUE
       ),
       disconnect_rows AS (
@@ -896,7 +1134,12 @@ export async function getSalesProcessDisconnectDashboard(
           inbound_without_followup_count,
           last_activity_at,
           latest_customer_email_at,
-          proposal_status
+          proposal_status,
+          procore_sync_status,
+          procore_sync_direction,
+          procore_last_synced_at,
+          procore_sync_updated_at,
+          procore_drift_reason
         FROM base
         WHERE stale_threshold_days > 0
           AND stage_entered_at IS NOT NULL
@@ -924,7 +1167,12 @@ export async function getSalesProcessDisconnectDashboard(
           inbound_without_followup_count,
           last_activity_at,
           latest_customer_email_at,
-          proposal_status
+          proposal_status,
+          procore_sync_status,
+          procore_sync_direction,
+          procore_last_synced_at,
+          procore_sync_updated_at,
+          procore_drift_reason
         FROM base
         WHERE open_task_count = 0
 
@@ -950,7 +1198,12 @@ export async function getSalesProcessDisconnectDashboard(
           inbound_without_followup_count,
           last_activity_at,
           latest_customer_email_at,
-          proposal_status
+          proposal_status,
+          procore_sync_status,
+          procore_sync_direction,
+          procore_last_synced_at,
+          procore_sync_updated_at,
+          procore_drift_reason
         FROM base
         WHERE inbound_without_followup_count > 0
 
@@ -976,7 +1229,12 @@ export async function getSalesProcessDisconnectDashboard(
           inbound_without_followup_count,
           last_activity_at,
           latest_customer_email_at,
-          proposal_status
+          proposal_status,
+          procore_sync_status,
+          procore_sync_direction,
+          procore_last_synced_at,
+          procore_sync_updated_at,
+          procore_drift_reason
         FROM base
         WHERE proposal_status = 'revision_requested'
 
@@ -1002,9 +1260,50 @@ export async function getSalesProcessDisconnectDashboard(
           inbound_without_followup_count,
           last_activity_at,
           latest_customer_email_at,
-          proposal_status
+          proposal_status,
+          procore_sync_status,
+          procore_sync_direction,
+          procore_last_synced_at,
+          procore_sync_updated_at,
+          procore_drift_reason
         FROM base
         WHERE required_document_count > present_document_count
+
+        UNION ALL
+
+        SELECT
+          id,
+          deal_number,
+          deal_name,
+          stage_name,
+          estimating_substage,
+          assigned_rep_name,
+          'procore_bid_board_drift'::text AS disconnect_type,
+          'Bid board sync drift'::text AS disconnect_label,
+          'critical'::text AS disconnect_severity,
+          'Procore bid board and CRM stage state are out of sync.'::text AS disconnect_summary,
+          COALESCE(
+            procore_drift_reason,
+            'Bid board recorded a newer or conflicting update than the CRM currently reflects.'
+          )::text AS disconnect_details,
+          CASE
+            WHEN procore_sync_updated_at IS NULL THEN NULL
+            ELSE FLOOR(EXTRACT(EPOCH FROM (NOW() - procore_sync_updated_at)) / 86400)::int
+          END AS age_days,
+          open_task_count,
+          inbound_without_followup_count,
+          last_activity_at,
+          latest_customer_email_at,
+          proposal_status,
+          procore_sync_status,
+          procore_sync_direction,
+          procore_last_synced_at,
+          procore_sync_updated_at,
+          procore_drift_reason
+        FROM base
+        WHERE procore_project_id IS NOT NULL
+          AND procore_sync_status IS NOT NULL
+          AND procore_sync_status != 'synced'
       )
       SELECT *
       FROM disconnect_rows
@@ -1029,13 +1328,40 @@ export async function getSalesProcessDisconnectDashboard(
     inboundWithoutFollowupCount: Number(summaryRow.inbound_without_followup_count ?? 0),
     revisionLoopCount: Number(summaryRow.revision_loop_count ?? 0),
     estimatingGateGapCount: Number(summaryRow.estimating_gate_gap_count ?? 0),
+    procoreBidBoardDriftCount: Number(summaryRow.procore_bid_board_drift_count ?? 0),
     totalDisconnects:
       Number(summaryRow.stale_stage_count ?? 0) +
       Number(summaryRow.missing_next_task_count ?? 0) +
       Number(summaryRow.inbound_without_followup_count ?? 0) +
       Number(summaryRow.revision_loop_count ?? 0) +
-      Number(summaryRow.estimating_gate_gap_count ?? 0),
+      Number(summaryRow.estimating_gate_gap_count ?? 0) +
+      Number(summaryRow.procore_bid_board_drift_count ?? 0),
   };
+
+  const rows: SalesProcessDisconnectRow[] = getRows(rowsResult).map((row) => ({
+    id: row.id,
+    dealNumber: row.deal_number,
+    dealName: row.deal_name,
+    stageName: row.stage_name ?? null,
+    estimatingSubstage: row.estimating_substage ?? null,
+    assignedRepName: row.assigned_rep_name ?? null,
+    disconnectType: row.disconnect_type,
+    disconnectLabel: row.disconnect_label,
+    disconnectSeverity: row.disconnect_severity,
+    disconnectSummary: row.disconnect_summary,
+    disconnectDetails: row.disconnect_details ?? null,
+    ageDays: row.age_days == null ? null : Number(row.age_days),
+    openTaskCount: Number(row.open_task_count ?? 0),
+    inboundWithoutFollowupCount: Number(row.inbound_without_followup_count ?? 0),
+    lastActivityAt: row.last_activity_at ?? null,
+    latestCustomerEmailAt: row.latest_customer_email_at ?? null,
+    proposalStatus: row.proposal_status ?? null,
+    procoreSyncStatus: row.procore_sync_status ?? null,
+    procoreSyncDirection: row.procore_sync_direction ?? null,
+    procoreLastSyncedAt: row.procore_last_synced_at ?? null,
+    procoreSyncUpdatedAt: row.procore_sync_updated_at ?? null,
+    procoreDriftReason: row.procore_drift_reason ?? null,
+  }));
 
   return {
     summary,
@@ -1044,25 +1370,8 @@ export async function getSalesProcessDisconnectDashboard(
       label: row.disconnect_label,
       count: Number(row.disconnect_count ?? 0),
     })),
-    rows: getRows(rowsResult).map((row) => ({
-      id: row.id,
-      dealNumber: row.deal_number,
-      dealName: row.deal_name,
-      stageName: row.stage_name ?? null,
-      estimatingSubstage: row.estimating_substage ?? null,
-      assignedRepName: row.assigned_rep_name ?? null,
-      disconnectType: row.disconnect_type,
-      disconnectLabel: row.disconnect_label,
-      disconnectSeverity: row.disconnect_severity,
-      disconnectSummary: row.disconnect_summary,
-      disconnectDetails: row.disconnect_details ?? null,
-      ageDays: row.age_days == null ? null : Number(row.age_days),
-      openTaskCount: Number(row.open_task_count ?? 0),
-      inboundWithoutFollowupCount: Number(row.inbound_without_followup_count ?? 0),
-      lastActivityAt: row.last_activity_at ?? null,
-      latestCustomerEmailAt: row.latest_customer_email_at ?? null,
-      proposalStatus: row.proposal_status ?? null,
-    })),
+    clusters: buildSalesProcessDisconnectClusters(rows),
+    rows,
   };
 }
 

@@ -121,6 +121,7 @@ export interface SalesProcessDisconnectSummary {
   inboundWithoutFollowupCount: number;
   revisionLoopCount: number;
   estimatingGateGapCount: number;
+  procoreBidBoardDriftCount: number;
 }
 
 export interface SalesProcessDisconnectTypeSummary {
@@ -147,11 +148,32 @@ export interface SalesProcessDisconnectRow {
   lastActivityAt: string | null;
   latestCustomerEmailAt: string | null;
   proposalStatus: string | null;
+  procoreSyncStatus: string | null;
+  procoreSyncDirection: string | null;
+  procoreLastSyncedAt: string | null;
+  procoreSyncUpdatedAt: string | null;
+  procoreDriftReason: string | null;
+}
+
+export interface SalesProcessDisconnectCluster {
+  clusterKey: string;
+  title: string;
+  summary: string;
+  likelyRootCause: string;
+  recommendedAction: string;
+  severity: string;
+  dealCount: number;
+  disconnectCount: number;
+  disconnectTypes: string[];
+  stages: string[];
+  reps: string[];
+  includesProcoreBidBoard: boolean;
 }
 
 export interface SalesProcessDisconnectDashboard {
   summary: SalesProcessDisconnectSummary;
   byType: SalesProcessDisconnectTypeSummary[];
+  clusters: SalesProcessDisconnectCluster[];
   rows: SalesProcessDisconnectRow[];
 }
 
@@ -290,7 +312,7 @@ export async function triageAiActionQueueEntry(
 }
 
 export async function trackSalesProcessDisconnectInteraction(input: {
-  interactionType: "dashboard_view" | "deal_click" | "type_filter";
+  interactionType: "dashboard_view" | "deal_click" | "type_filter" | "cluster_filter";
   targetValue: string;
   comment?: string | null;
 }) {

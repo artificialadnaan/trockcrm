@@ -27,6 +27,7 @@ function formatDate(value: string | null) {
 export function SalesProcessDisconnectsPage() {
   const { dashboard, loading, error, refetch } = useSalesProcessDisconnectDashboard(75);
   const [typeFilter, setTypeFilter] = useState<string>("all");
+  const [clusterFilter, setClusterFilter] = useState<string>("all");
   const didTrackView = useRef(false);
 
   useEffect(() => {
@@ -41,14 +42,29 @@ export function SalesProcessDisconnectsPage() {
 
   const filteredRows = useMemo(() => {
     if (!dashboard) return [];
-    if (typeFilter === "all") return dashboard.rows;
-    return dashboard.rows.filter((row) => row.disconnectType === typeFilter);
-  }, [dashboard, typeFilter]);
+    return dashboard.rows.filter((row) => {
+      const clusterMatch =
+        clusterFilter === "all" ||
+        dashboard.clusters
+          .find((cluster) => cluster.clusterKey === clusterFilter)
+          ?.disconnectTypes.includes(row.disconnectType) === true;
+      const typeMatch = typeFilter === "all" || row.disconnectType === typeFilter;
+      return clusterMatch && typeMatch;
+    });
+  }, [clusterFilter, dashboard, typeFilter]);
 
   const handleFilter = (next: string) => {
     setTypeFilter(next);
     void trackSalesProcessDisconnectInteraction({
       interactionType: "type_filter",
+      targetValue: next,
+    }).catch(() => {});
+  };
+
+  const handleClusterFilter = (next: string) => {
+    setClusterFilter(next);
+    void trackSalesProcessDisconnectInteraction({
+      interactionType: "cluster_filter",
       targetValue: next,
     }).catch(() => {});
   };
@@ -114,9 +130,87 @@ export function SalesProcessDisconnectsPage() {
             <div>{dashboard?.summary.revisionLoopCount ?? 0} revision loops</div>
             <div>{dashboard?.summary.estimatingGateGapCount ?? 0} estimating gate gaps</div>
             <div>{dashboard?.summary.inboundWithoutFollowupCount ?? 0} inbound emails with no follow-up</div>
+            <div>{dashboard?.summary.procoreBidBoardDriftCount ?? 0} bid board sync drifts</div>
           </CardContent>
         </Card>
       </div>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Root Cause Clusters</CardTitle>
+          <CardDescription>
+            Grouped disconnect patterns across CRM execution and Procore bid-board sync drift
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="flex flex-wrap gap-2">
+            <Button
+              variant={clusterFilter === "all" ? "default" : "outline"}
+              size="sm"
+              onClick={() => handleClusterFilter("all")}
+            >
+              All clusters
+            </Button>
+            {(dashboard?.clusters ?? []).map((cluster) => (
+              <Button
+                key={cluster.clusterKey}
+                variant={clusterFilter === cluster.clusterKey ? "default" : "outline"}
+                size="sm"
+                onClick={() => handleClusterFilter(cluster.clusterKey)}
+              >
+                {cluster.title} ({cluster.dealCount})
+              </Button>
+            ))}
+          </div>
+
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+            {(dashboard?.clusters ?? []).map((cluster) => (
+              <Card
+                key={cluster.clusterKey}
+                className={clusterFilter === cluster.clusterKey ? "border-brand-red/40 shadow-sm" : "border-border/80"}
+              >
+                <CardContent className="p-5 space-y-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <Badge variant="outline" className={severityClasses[cluster.severity] ?? severityClasses.low}>
+                          {cluster.severity}
+                        </Badge>
+                        {cluster.includesProcoreBidBoard && (
+                          <Badge variant="outline" className="bg-blue-50 text-blue-700 border-blue-200">
+                            Includes bid board sync
+                          </Badge>
+                        )}
+                      </div>
+                      <div className="text-base font-semibold">{cluster.title}</div>
+                    </div>
+                    <div className="text-right text-xs text-muted-foreground">
+                      <div>{cluster.dealCount} deals</div>
+                      <div>{cluster.disconnectCount} disconnects</div>
+                    </div>
+                  </div>
+
+                  <div className="text-sm text-muted-foreground leading-6">{cluster.summary}</div>
+
+                  <div className="space-y-1 text-sm">
+                    <div><span className="font-semibold text-foreground">Likely root cause:</span> {cluster.likelyRootCause}</div>
+                    <div><span className="font-semibold text-foreground">Recommended action:</span> {cluster.recommendedAction}</div>
+                  </div>
+
+                  <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">
+                    {cluster.stages.map((stage) => (
+                      <Badge key={`${cluster.clusterKey}:stage:${stage}`} variant="secondary">{stage}</Badge>
+                    ))}
+                    {cluster.reps.map((rep) => (
+                      <Badge key={`${cluster.clusterKey}:rep:${rep}`} variant="outline">{rep}</Badge>
+                    ))}
+                  </div>
+                </CardContent>
+              </Card>
+            ))}
+          </div>
+        </CardContent>
+      </Card>
 
       <Card>
         <CardHeader>
@@ -189,13 +283,14 @@ export function SalesProcessDisconnectsPage() {
                     </div>
                   </div>
 
-                  <div className="grid gap-2 text-right text-sm text-muted-foreground">
+                    <div className="grid gap-2 text-right text-sm text-muted-foreground">
                     <div>Rep: {row.assignedRepName ?? "Unassigned"}</div>
                     <div>Open tasks: {row.openTaskCount}</div>
                     <div>Inbound no follow-up: {row.inboundWithoutFollowupCount}</div>
                     <div>Last activity: {formatDate(row.lastActivityAt)}</div>
                     <div>Latest customer email: {formatDate(row.latestCustomerEmailAt)}</div>
                     {row.proposalStatus && <div>Proposal: {row.proposalStatus}</div>}
+                    {row.procoreSyncStatus && <div>Procore sync: {row.procoreSyncStatus}</div>}
                   </div>
                 </div>
 
@@ -205,7 +300,9 @@ export function SalesProcessDisconnectsPage() {
                   {row.disconnectType !== "inbound_without_followup" && row.disconnectType !== "stale_stage" && (
                     <AlertTriangle className="h-3.5 w-3.5" />
                   )}
-                  Deterministic CRM disconnect detected. AI should explain and prioritize this, not invent it.
+                  {row.disconnectType === "procore_bid_board_drift"
+                    ? "Bid board drift detected from Procore sync state. AI should help explain the pattern, not decide whether drift exists."
+                    : "Deterministic CRM disconnect detected. AI should explain and prioritize this, not invent it."}
                 </div>
               </CardContent>
             </Card>
