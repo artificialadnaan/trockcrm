@@ -366,7 +366,7 @@ function buildScopingReadiness(input: {
     errors: {
       ...baseReadiness.errors,
       attachments: Object.fromEntries(
-        missingAttachments.map((requirement) => [requirement.key, [requirement.category]])
+        missingAttachments.map((requirement) => [requirement.key, [requirement.key]])
       ),
     },
     completionState: {

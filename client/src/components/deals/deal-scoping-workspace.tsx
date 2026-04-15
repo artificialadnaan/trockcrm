@@ -33,6 +33,7 @@ import {
   activateServiceHandoff,
   getDealScopingIntake,
   type DealDetail,
+  type DealScopingAttachmentRequirement,
   type DealScopingIntake,
   type DealScopingReadiness,
   linkExistingScopingAttachment,
@@ -50,17 +51,6 @@ import {
 } from "@/lib/scoping-intake";
 
 type SectionKey = "projectOverview" | "propertyDetails" | "scopeSummary" | "attachments";
-
-type WorkspaceAttachmentRequirement = {
-  key: string;
-  category: string;
-  label: string;
-  satisfied: boolean;
-};
-
-type WorkspaceReadiness = DealScopingReadiness & {
-  attachmentRequirements: WorkspaceAttachmentRequirement[];
-};
 
 const SECTION_ORDER: Array<{ key: SectionKey; label: string }> = [
   { key: "projectOverview", label: "Project Overview" },
@@ -156,13 +146,10 @@ function getDefaultAttachmentRequirementKeys(route: WorkflowRoute) {
 function normalizeWorkspaceReadiness(
   readiness: DealScopingReadiness,
   route: WorkflowRoute
-): WorkspaceReadiness {
-  const rawReadiness = readiness as DealScopingReadiness & {
-    attachmentRequirements?: WorkspaceAttachmentRequirement[];
-  };
+) {
   const requiredAttachmentKeys =
-    rawReadiness.requiredAttachmentKeys.length > 0
-      ? rawReadiness.requiredAttachmentKeys
+    readiness.requiredAttachmentKeys.length > 0
+      ? readiness.requiredAttachmentKeys
       : getDefaultAttachmentRequirementKeys(route);
   const attachmentRequirements = requiredAttachmentKeys
     .map((key) => {
@@ -172,7 +159,7 @@ function normalizeWorkspaceReadiness(
         return null;
       }
 
-      const existingRequirement = rawReadiness.attachmentRequirements?.find(
+      const existingRequirement = readiness.attachmentRequirements.find(
         (requirement) => requirement.key === key
       );
 
@@ -181,11 +168,11 @@ function normalizeWorkspaceReadiness(
           key,
           category: baseRequirement.category,
           label: baseRequirement.label,
-          satisfied: !(rawReadiness.errors.attachments[key]?.length ?? 0),
+          satisfied: !(readiness.errors.attachments[key]?.length ?? 0),
         }
       );
     })
-    .filter((requirement): requirement is WorkspaceAttachmentRequirement => Boolean(requirement));
+    .filter((requirement): requirement is DealScopingAttachmentRequirement => Boolean(requirement));
 
   return {
     ...readiness,
@@ -208,7 +195,7 @@ export function DealScopingWorkspace({
   });
 
   const [intake, setIntake] = useState<DealScopingIntake | null>(null);
-  const [readiness, setReadiness] = useState<WorkspaceReadiness | null>(null);
+  const [readiness, setReadiness] = useState<DealScopingReadiness | null>(null);
   const [sectionData, setSectionData] = useState<Record<string, unknown>>({});
   const [workflowRoute, setWorkflowRoute] = useState<WorkflowRoute>(deal.workflowRoute);
   const [projectTypeId, setProjectTypeId] = useState<string | null>(deal.projectTypeId);
@@ -312,7 +299,7 @@ export function DealScopingWorkspace({
             ) ?? null,
         };
       })
-      .filter((requirement): requirement is (typeof ATTACHMENT_REQUIREMENTS)[number] & { status: WorkspaceAttachmentRequirement | null } => Boolean(requirement));
+      .filter((requirement): requirement is (typeof ATTACHMENT_REQUIREMENTS)[number] & { status: DealScopingAttachmentRequirement | null } => Boolean(requirement));
   }, [attachmentRequirements, readiness?.requiredAttachmentKeys]);
   const linkedFilesByRequirement = useMemo(() => {
     const map = new Map<string, FileRecord[]>();
