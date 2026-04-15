@@ -424,6 +424,7 @@ const staleLeadRule: TaskRuleDefinition = {
   sourceEvent: "cron.daily_task_generation.stale_lead",
   reasonCode: staleLeadRuleId,
   suppressionWindowDays: 30,
+  preserveAssignedToOnRefresh: true,
   buildDedupeKey(context) {
     return context.leadId ? `lead:${context.leadId}` : null;
   },

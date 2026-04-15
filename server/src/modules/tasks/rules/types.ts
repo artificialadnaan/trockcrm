@@ -127,6 +127,7 @@ export interface TaskRuleDefinition {
   sourceEvent: string;
   reasonCode: string;
   suppressionWindowDays: number;
+  preserveAssignedToOnRefresh?: boolean;
   buildDedupeKey(context: TaskRuleContext): string | null;
   buildTask(context: TaskRuleContext): Promise<SystemTaskDraft | null> | SystemTaskDraft | null;
 }

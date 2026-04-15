@@ -455,7 +455,7 @@ export function DirectorDashboardPage() {
                     to="/reports"
                     className="flex items-center gap-1 text-[10px] font-semibold text-gray-400 hover:text-white transition-colors"
                   >
-                    Review {data.staleLeads.length} stale leads
+                    Review {data.staleLeads.length} current stale leads
                     <ChevronRight className="h-3 w-3" />
                   </Link>
                 )}

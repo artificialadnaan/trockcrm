@@ -32,6 +32,83 @@ function countGeneratedTasks(outcomes: Array<{ action: string }>) {
   return outcomes.filter((outcome) => outcome.action === "created").length;
 }
 
+type Queryable = {
+  query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<{ rows: T[]; rowCount?: number | null }>;
+};
+
+export async function dismissResolvedStaleLeadTasks(
+  client: Queryable,
+  schemaName: string,
+  officeId: string,
+  activeStaleLeadIds: string[],
+  resolvedAt: Date = new Date()
+): Promise<number> {
+  const activeDedupeKeys = activeStaleLeadIds.map((leadId) => `lead:${leadId}`);
+  const activeTaskStatusesSql = ["pending", "scheduled", "in_progress", "waiting_on", "blocked"]
+    .map((status) => `'${status}'`)
+    .join(", ");
+
+  const dismissalWhereClause = activeDedupeKeys.length > 0
+    ? `AND dedupe_key <> ALL($2::text[])`
+    : "";
+  const dismissalParams: unknown[] = activeDedupeKeys.length > 0
+    ? [resolvedAt, activeDedupeKeys]
+    : [resolvedAt];
+
+  const dismissedTasks = await client.query<{
+    id: string;
+    origin_rule: string;
+    dedupe_key: string;
+    reason_code: string | null;
+    entity_snapshot: Record<string, unknown> | null;
+  }>(
+    `UPDATE ${schemaName}.tasks
+     SET status = 'dismissed',
+         completed_at = $1,
+         is_overdue = false,
+         waiting_on = NULL,
+         blocked_by = NULL,
+         updated_at = NOW()
+     WHERE origin_rule = 'stale_lead'
+       AND status IN (${activeTaskStatusesSql})
+       ${dismissalWhereClause}
+     RETURNING id, origin_rule, dedupe_key, reason_code, entity_snapshot`,
+    dismissalParams
+  );
+
+  if ((dismissedTasks.rows?.length ?? 0) === 0) {
+    return dismissedTasks.rowCount ?? 0;
+  }
+
+  for (const task of dismissedTasks.rows) {
+    await client.query(
+      `INSERT INTO ${schemaName}.task_resolution_state
+         (office_id, task_id, origin_rule, dedupe_key, resolution_status, resolution_reason, resolved_at, suppressed_until, entity_snapshot)
+       VALUES ($1, $2, $3, $4, 'dismissed', $5, $6, NULL, $7)
+       ON CONFLICT (origin_rule, dedupe_key) DO UPDATE
+       SET office_id = EXCLUDED.office_id,
+           task_id = EXCLUDED.task_id,
+           resolution_status = EXCLUDED.resolution_status,
+           resolution_reason = EXCLUDED.resolution_reason,
+           resolved_at = EXCLUDED.resolved_at,
+           suppressed_until = EXCLUDED.suppressed_until,
+           entity_snapshot = EXCLUDED.entity_snapshot,
+           updated_at = NOW()`,
+      [
+        officeId,
+        task.id,
+        task.origin_rule,
+        task.dedupe_key,
+        "lead_no_longer_stale",
+        resolvedAt,
+        task.entity_snapshot ?? null,
+      ]
+    );
+  }
+
+  return dismissedTasks.rowCount ?? dismissedTasks.rows.length;
+}
+
 export async function runDailyTaskGeneration(): Promise<void> {
   console.log("[Worker:daily-tasks] Starting daily task generation...");
 
@@ -269,6 +346,13 @@ export async function runDailyTaskGeneration(): Promise<void> {
              AND psc.is_terminal = false
              AND psc.stale_threshold_days IS NOT NULL
              AND l.stage_entered_at < NOW() - (psc.stale_threshold_days || ' days')::interval`
+        );
+
+        await dismissResolvedStaleLeadTasks(
+          client,
+          schemaName,
+          office.id,
+          staleLeads.rows.map((lead) => lead.lead_id)
         );
 
         for (const lead of staleLeads.rows) {

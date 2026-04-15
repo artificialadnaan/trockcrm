@@ -127,7 +127,13 @@ export async function evaluateTaskRules(
 
     const existing = await persistence.findOpenTaskByBusinessKey(businessKey);
     const draftForPersistence = existing
-      ? { ...draft, status: existing.status }
+      ? {
+          ...draft,
+          status: existing.status,
+          assignedTo: rule.preserveAssignedToOnRefresh && existing.assignedTo
+            ? existing.assignedTo
+            : draft.assignedTo,
+        }
       : draft;
     const persisted: TaskRecord = existing
       ? await persistence.updateTask(existing.id, draftForPersistence)

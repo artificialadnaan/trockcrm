@@ -1,30 +1,28 @@
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { AlertTriangle } from "lucide-react";
-
-interface StaleLead {
-  leadId: string;
-  leadName: string;
-  companyName: string;
-  propertyName: string;
-  stageName: string;
-  repName: string;
-  daysInStage: number;
-}
+import {
+  getStaleLeadWatchlistMeta,
+  type StaleLeadViewRow,
+} from "@/lib/stale-lead-dashboard";
 
 interface StaleLeadListProps {
-  leads: StaleLead[];
+  leads: StaleLeadViewRow[];
+  dateRange?: { from?: string; to?: string };
 }
 
-export function StaleLeadList({ leads }: StaleLeadListProps) {
+export function StaleLeadList({ leads, dateRange }: StaleLeadListProps) {
+  const meta = getStaleLeadWatchlistMeta(dateRange);
+
   if (leads.length === 0) {
     return (
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <AlertTriangle className="h-4 w-4 text-amber-500" />
-            Stale Lead Watchlist
+            {meta.label}
           </CardTitle>
+          <p className="text-sm text-muted-foreground">{meta.detail}</p>
         </CardHeader>
         <CardContent>
           <p className="text-muted-foreground text-sm text-center py-4">
@@ -36,13 +34,14 @@ export function StaleLeadList({ leads }: StaleLeadListProps) {
   }
 
   return (
-    <Card>
+      <Card>
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
           <AlertTriangle className="h-4 w-4 text-amber-500" />
-          Stale Lead Watchlist
+          {meta.label}
           <Badge variant="secondary" className="ml-auto">{leads.length}</Badge>
         </CardTitle>
+        <p className="text-sm text-muted-foreground">{meta.detail}</p>
       </CardHeader>
       <CardContent>
         <div className="space-y-2">

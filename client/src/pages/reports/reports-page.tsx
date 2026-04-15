@@ -55,6 +55,7 @@ import {
   serializeRowsToCsv,
 } from "@/lib/report-export";
 import { getScheduleReportActionConfig } from "@/lib/report-actions";
+import { getStaleLeadWatchlistMeta } from "@/lib/stale-lead-dashboard";
 import {
   BarChart,
   Bar,
@@ -479,6 +480,7 @@ export function ReportsPage() {
 
   const staleLeadWatchlist = dirData?.staleLeads ?? repData?.staleLeads.leads ?? [];
   const staleLeadCount = dirData?.staleLeads.length ?? repData?.staleLeads.count ?? 0;
+  const staleLeadMeta = getStaleLeadWatchlistMeta(undefined);
 
   const avgLeadDaysInStage = useMemo(() => {
     if (dirData?.staleLeads.length) {
@@ -958,8 +960,8 @@ export function ReportsPage() {
         <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
           <div className="flex items-center justify-between px-6 py-5 border-b border-slate-100">
             <div>
-              <h2 className="text-lg font-bold text-slate-900">Stale Lead Watchlist</h2>
-              <p className="text-xs text-slate-400 mt-0.5">Lead-stage opportunities past threshold and queued for automated follow-up</p>
+              <h2 className="text-lg font-bold text-slate-900">{staleLeadMeta.label}</h2>
+              <p className="text-xs text-slate-400 mt-0.5">{staleLeadMeta.detail}</p>
             </div>
             <Badge variant="secondary" className="text-xs">
               {staleLeadCount} stale lead{staleLeadCount === 1 ? "" : "s"}

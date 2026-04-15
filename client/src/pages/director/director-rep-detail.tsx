@@ -144,7 +144,7 @@ export function DirectorRepDetail() {
       <StaleDealList deals={data.staleDeals} />
 
       {/* Stale Leads */}
-      <StaleLeadList leads={data.staleLeads} />
+      <StaleLeadList leads={data.staleLeads} dateRange={dateRange} />
     </div>
   );
 }
