@@ -1,8 +1,9 @@
 import { useEffect } from "react";
 import { useSearchParams, Link } from "react-router-dom";
-import { Search, Building2, User, FileText } from "lucide-react";
+import { Search, Building2, User, FileText, Sparkles } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
-import { useSearch, useRecentSearches, type SearchResult } from "@/hooks/use-search";
+import { useAiSearch, useSearch, useRecentSearches, type SearchResult } from "@/hooks/use-search";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 
 const ENTITY_ICONS = { deal: Building2, contact: User, file: FileText } as const;
@@ -40,11 +41,13 @@ export function SearchPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const initialQ = searchParams.get("q") ?? "";
   const { query, setQuery, results, loading } = useSearch();
+  const { setQuery: setAiQuery, results: aiResults, loading: aiLoading } = useAiSearch();
   const { addRecent } = useRecentSearches();
 
   useEffect(() => {
     if (initialQ) {
       setQuery(initialQ);
+      setAiQuery(initialQ);
       addRecent(initialQ);
     }
     // Only run on mount
@@ -53,6 +56,7 @@ export function SearchPage() {
 
   const handleQueryChange = (q: string) => {
     setQuery(q);
+    setAiQuery(q);
     setSearchParams(q.trim().length >= 2 ? { q: q.trim() } : {}, { replace: true });
   };
 
@@ -77,6 +81,45 @@ export function SearchPage() {
 
       {loading && (
         <div className="text-center text-gray-400 py-12">Searching...</div>
+      )}
+
+      {aiResults?.summary && query.length >= 2 && (
+        <Card className="border-border/80">
+          <CardHeader className="pb-3">
+            <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-2">
+              <Sparkles className="h-4 w-4" />
+              AI Search Summary
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <p className="text-sm leading-6">{aiResults.summary}</p>
+            {aiLoading && <p className="text-sm text-muted-foreground">Refreshing AI evidence...</p>}
+            {(aiResults.evidence ?? []).length > 0 && (
+              <div className="space-y-2">
+                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+                  Supporting Evidence
+                </p>
+                <div className="space-y-2">
+                  {aiResults.evidence.map((item) => (
+                    <Link
+                      key={item.id}
+                      to={item.deepLink}
+                      className="block rounded-lg border bg-white px-3 py-3 hover:bg-gray-50"
+                    >
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="min-w-0 space-y-1">
+                          <div className="text-sm font-medium text-foreground">{item.title}</div>
+                          <div className="text-sm text-muted-foreground line-clamp-2">{item.snippet}</div>
+                        </div>
+                        <Badge variant="outline">{item.sourceType}</Badge>
+                      </div>
+                    </Link>
+                  ))}
+                </div>
+              </div>
+            )}
+          </CardContent>
+        </Card>
       )}
 
       {!loading && results && results.total === 0 && query.length >= 2 && (

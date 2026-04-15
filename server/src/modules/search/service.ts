@@ -26,7 +26,25 @@ export interface SearchResponse {
   query: string;
 }
 
+export interface AiSearchEvidence {
+  id: string;
+  sourceType: string;
+  sourceId: string;
+  dealId: string | null;
+  title: string;
+  snippet: string;
+  deepLink: string;
+}
+
+export interface AiSearchResponse {
+  query: string;
+  summary: string;
+  structured: SearchResponse;
+  evidence: AiSearchEvidence[];
+}
+
 const MAX_RESULTS_PER_TYPE = 5;
+const MAX_AI_EVIDENCE = 5;
 
 /**
  * Search across deals, contacts, and files using PostgreSQL full-text search.
@@ -55,6 +73,24 @@ export async function globalSearch(
 
   // Default: single-office search (reps)
   return singleOfficeSearch(tenantDb, sanitized, types);
+}
+
+export async function naturalLanguageSearch(
+  tenantDb: TenantDb,
+  query: string,
+  types: Array<"deals" | "contacts" | "files"> = ["deals", "contacts", "files"],
+  userRole?: string,
+  userId?: string,
+): Promise<AiSearchResponse> {
+  const structured = await globalSearch(tenantDb, query, types, userRole, userId);
+  const evidence = await searchAiEvidence(tenantDb, structured.query);
+
+  return {
+    query: structured.query,
+    summary: buildAiSearchSummary(structured, evidence),
+    structured,
+    evidence,
+  };
 }
 
 async function singleOfficeSearch(
@@ -285,4 +321,105 @@ async function searchFiles(tenantDb: TenantDb, query: string): Promise<SearchRes
       rank: Number(r.rank ?? 0),
     };
   });
+}
+
+async function searchAiEvidence(tenantDb: TenantDb, query: string): Promise<AiSearchEvidence[]> {
+  const sanitized = query.trim().replace(/[^\w\s-]/g, "").trim();
+  if (sanitized.length < 2) return [];
+
+  const result = await tenantDb.execute(sql`
+    WITH ranked_chunks AS (
+      SELECT
+        c.id,
+        d.source_type,
+        d.source_id,
+        d.deal_id,
+        c.text,
+        c.metadata_json,
+        ts_rank_cd(
+          to_tsvector('english', c.text),
+          websearch_to_tsquery('english', ${sanitized})
+        ) AS rank
+      FROM ai_embedding_chunks c
+      JOIN ai_document_index d ON d.id = c.document_id
+      WHERE to_tsvector('english', c.text) @@ websearch_to_tsquery('english', ${sanitized})
+    )
+    SELECT
+      id,
+      source_type,
+      source_id,
+      deal_id,
+      text,
+      metadata_json,
+      rank
+    FROM ranked_chunks
+    ORDER BY rank DESC
+    LIMIT ${MAX_AI_EVIDENCE}
+  `);
+
+  const rows = (result as any).rows ?? result;
+  return rows.map((row: any): AiSearchEvidence => {
+    const snippet = String(row.text ?? "").replace(/\s+/g, " ").trim().slice(0, 220);
+    const sourceType = String(row.source_type ?? "unknown");
+    const sourceId = String(row.source_id ?? "");
+    const metadata = row.metadata_json ?? {};
+    const dealId = row.deal_id ? String(row.deal_id) : null;
+
+    let title = sourceType.replace(/_/g, " ");
+    let deepLink = "/search";
+
+    if (sourceType === "email_message") {
+      title = metadata.subject ?? "Email evidence";
+      if (dealId) deepLink = `/deals/${dealId}`;
+    } else if (sourceType === "activity_note") {
+      title = metadata.subject ?? metadata.activityType ?? "Activity note";
+      if (dealId) deepLink = `/deals/${dealId}`;
+    } else if (sourceType === "estimate_snapshot") {
+      title = "Estimate snapshot";
+      if (dealId) deepLink = `/deals/${dealId}`;
+    }
+
+    return {
+      id: String(row.id),
+      sourceType,
+      sourceId,
+      dealId,
+      title,
+      snippet: snippet.length === 220 ? `${snippet}...` : snippet,
+      deepLink,
+    };
+  });
+}
+
+function buildAiSearchSummary(structured: SearchResponse, evidence: AiSearchEvidence[]): string {
+  if (structured.total === 0 && evidence.length === 0) {
+    return `No CRM matches or indexed evidence were found for "${structured.query}".`;
+  }
+
+  const parts: string[] = [];
+  if (structured.total > 0) {
+    parts.push(
+      `Found ${structured.total} structured CRM match${structured.total === 1 ? "" : "es"} across ${[
+        structured.deals.length ? `${structured.deals.length} deal${structured.deals.length === 1 ? "" : "s"}` : null,
+        structured.contacts.length ? `${structured.contacts.length} contact${structured.contacts.length === 1 ? "" : "s"}` : null,
+        structured.files.length ? `${structured.files.length} file${structured.files.length === 1 ? "" : "s"}` : null,
+      ].filter(Boolean).join(", ")}.`
+    );
+  }
+
+  if (evidence.length > 0) {
+    parts.push(
+      `Top indexed evidence includes ${evidence
+        .slice(0, 2)
+        .map((item) => `"${item.title}"`)
+        .join(" and ")}.`
+    );
+  }
+
+  const topDeal = structured.deals[0];
+  if (topDeal) {
+    parts.push(`The strongest structured match is deal "${topDeal.primaryLabel}".`);
+  }
+
+  return parts.join(" ");
 }

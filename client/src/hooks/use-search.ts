@@ -19,6 +19,23 @@ export interface SearchResponse {
   query: string;
 }
 
+export interface AiSearchEvidence {
+  id: string;
+  sourceType: string;
+  sourceId: string;
+  dealId: string | null;
+  title: string;
+  snippet: string;
+  deepLink: string;
+}
+
+export interface AiSearchResponse {
+  query: string;
+  summary: string;
+  structured: SearchResponse;
+  evidence: AiSearchEvidence[];
+}
+
 const RECENT_SEARCHES_KEY = "trock_crm_recent_searches";
 const MAX_RECENT = 8;
 const DEBOUNCE_MS = 300;
@@ -70,6 +87,45 @@ export function useSearch() {
       setResults(data);
     } catch {
       setError("Search failed");
+      setResults(null);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => {
+      search(query);
+    }, DEBOUNCE_MS);
+
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+    };
+  }, [query, search]);
+
+  return { query, setQuery, results, loading, error };
+}
+
+export function useAiSearch() {
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<AiSearchResponse | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const search = useCallback(async (q: string) => {
+    if (q.trim().length < 2) {
+      setResults(null);
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await api<AiSearchResponse>(`/search/ai?q=${encodeURIComponent(q.trim())}`);
+      setResults(data);
+    } catch {
+      setError("AI search failed");
       setResults(null);
     } finally {
       setLoading(false);
