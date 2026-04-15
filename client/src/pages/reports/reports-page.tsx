@@ -55,7 +55,7 @@ import {
   serializeRowsToCsv,
 } from "@/lib/report-export";
 import { getScheduleReportActionConfig } from "@/lib/report-actions";
-import { getStaleLeadWatchlistMeta } from "@/lib/stale-lead-watchlist-meta";
+import { getStaleLeadWatchlistMeta } from "@/lib/stale-lead-dashboard";
 import {
   BarChart,
   Bar,
