@@ -90,14 +90,16 @@ export function useDealCopilot(dealId: string | undefined) {
   const [workingSuggestionId, setWorkingSuggestionId] = useState<string | null>(null);
   const [submittingFeedback, setSubmittingFeedback] = useState(false);
 
-  const fetchCopilot = useCallback(async () => {
+  const fetchCopilot = useCallback(async (options?: { silent?: boolean }) => {
     if (!dealId) {
       setLoading(false);
       setData(null);
       return;
     }
 
-    setLoading(true);
+    if (!options?.silent) {
+      setLoading(true);
+    }
     setError(null);
     try {
       const view = await api<DealCopilotView>(`/ai/deals/${dealId}/copilot`);
@@ -112,13 +114,25 @@ export function useDealCopilot(dealId: string | undefined) {
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to load deal copilot");
     } finally {
-      setLoading(false);
+      if (!options?.silent) {
+        setLoading(false);
+      }
     }
-  }, [dealId]);
+  }, [dealId, refreshQueuedAt]);
 
   useEffect(() => {
-    fetchCopilot();
+    void fetchCopilot();
   }, [fetchCopilot]);
+
+  useEffect(() => {
+    if (!refreshQueuedAt) return;
+
+    const intervalId = window.setInterval(() => {
+      void fetchCopilot({ silent: true });
+    }, 5000);
+
+    return () => window.clearInterval(intervalId);
+  }, [fetchCopilot, refreshQueuedAt]);
 
   const regenerate = useCallback(async () => {
     if (!dealId) return;
@@ -128,7 +142,7 @@ export function useDealCopilot(dealId: string | undefined) {
     try {
       await api(`/ai/deals/${dealId}/regenerate`, { method: "POST" });
       setRefreshQueuedAt(new Date().toISOString());
-      await fetchCopilot();
+      await fetchCopilot({ silent: true });
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to regenerate deal copilot");
       throw err;
