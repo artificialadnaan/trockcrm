@@ -38,6 +38,7 @@ export function DealCopilotPanel({ dealId }: DealCopilotPanelProps) {
     loading,
     error,
     regenerating,
+    refreshQueuedAt,
     submittingFeedback,
     workingSuggestionId,
     refetch,
@@ -56,11 +57,12 @@ export function DealCopilotPanel({ dealId }: DealCopilotPanelProps) {
   const confidenceLabel = formatConfidence(data?.packet?.confidence ?? null);
   const generatedAtLabel = formatGeneratedAt(data?.packet?.generatedAt ?? null);
   const nextStep = openSuggestions[0] ?? null;
+  const isRefreshPending = Boolean(refreshQueuedAt);
 
   const handleRegenerate = async () => {
     try {
       await regenerate();
-      toast.success("Deal copilot refreshed");
+      toast.success("Deal copilot refresh queued");
     } catch (err: unknown) {
       toast.error(err instanceof Error ? err.message : "Failed to regenerate deal copilot");
     }
@@ -155,16 +157,27 @@ export function DealCopilotPanel({ dealId }: DealCopilotPanelProps) {
               {generatedAtLabel && (
                 <span className="text-xs text-muted-foreground">Updated {generatedAtLabel}</span>
               )}
+              {isRefreshPending && (
+                <Badge variant="outline" className="bg-amber-50 text-amber-700 border-amber-200">
+                  Refresh queued
+                </Badge>
+              )}
             </div>
           </div>
           <Button size="sm" variant="outline" disabled={regenerating} onClick={() => void handleRegenerate()}>
             <RefreshCcw className="h-3.5 w-3.5 mr-2" />
-            {data?.packet ? "Refresh" : "Generate"}
+            {regenerating ? "Queueing..." : data?.packet ? "Refresh" : "Generate"}
           </Button>
         </div>
       </CardHeader>
 
       <CardContent className="space-y-5">
+        {isRefreshPending && (
+          <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-3 text-sm text-amber-800">
+            A fresh AI packet is being generated in the background. You are still viewing the most recent completed result.
+          </div>
+        )}
+
         {data?.packet?.summaryText ? (
           <div className="space-y-2">
             <p className="text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">

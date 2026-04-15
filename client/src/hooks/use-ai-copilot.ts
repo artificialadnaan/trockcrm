@@ -86,6 +86,7 @@ export function useDealCopilot(dealId: string | undefined) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [regenerating, setRegenerating] = useState(false);
+  const [refreshQueuedAt, setRefreshQueuedAt] = useState<string | null>(null);
   const [workingSuggestionId, setWorkingSuggestionId] = useState<string | null>(null);
   const [submittingFeedback, setSubmittingFeedback] = useState(false);
 
@@ -101,6 +102,13 @@ export function useDealCopilot(dealId: string | undefined) {
     try {
       const view = await api<DealCopilotView>(`/ai/deals/${dealId}/copilot`);
       setData(view);
+      if (refreshQueuedAt && view.packet?.generatedAt) {
+        const queuedAt = new Date(refreshQueuedAt).getTime();
+        const generatedAt = new Date(view.packet.generatedAt).getTime();
+        if (!Number.isNaN(queuedAt) && !Number.isNaN(generatedAt) && generatedAt >= queuedAt) {
+          setRefreshQueuedAt(null);
+        }
+      }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to load deal copilot");
     } finally {
@@ -119,6 +127,7 @@ export function useDealCopilot(dealId: string | undefined) {
     setError(null);
     try {
       await api(`/ai/deals/${dealId}/regenerate`, { method: "POST" });
+      setRefreshQueuedAt(new Date().toISOString());
       await fetchCopilot();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to regenerate deal copilot");
@@ -183,6 +192,7 @@ export function useDealCopilot(dealId: string | undefined) {
     loading,
     error,
     regenerating,
+    refreshQueuedAt,
     submittingFeedback,
     workingSuggestionId,
     refetch: fetchCopilot,
