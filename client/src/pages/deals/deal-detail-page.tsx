@@ -33,7 +33,9 @@ import { ActivityLogForm } from "@/components/activities/activity-log-form";
 import { StageChangeDialog } from "@/components/deals/stage-change-dialog";
 import { TaskCreateDialog } from "@/components/tasks/task-create-dialog";
 import { useActivities, createActivity } from "@/hooks/use-activities";
+import type { ActivitySourceEntityType } from "@/hooks/use-activities";
 import { useDealDetail, deleteDeal as apiDeleteDeal } from "@/hooks/use-deals";
+import type { DealDetail } from "@/hooks/use-deals";
 import { usePipelineStages } from "@/hooks/use-pipeline-config";
 import { useAuth } from "@/lib/auth";
 import { formatCurrency, bestEstimate } from "@/lib/deal-utils";
@@ -284,7 +286,7 @@ export function DealDetailPage() {
       {activeTab === "scoping" && <DealScopingWorkspace deal={deal} onDealUpdated={refetch} />}
       {activeTab === "files" && <DealFileTab dealId={deal.id} />}
       {activeTab === "email" && <DealEmailTab dealId={deal.id} />}
-      {activeTab === "activity" && <DealActivityPanel dealId={deal.id} />}
+      {activeTab === "activity" && <DealActivityPanel deal={deal} />}
       {activeTab === "timeline" && (
         <DealTimelineTab
           dealId={deal.id}
@@ -316,7 +318,8 @@ export function DealDetailPage() {
   );
 }
 
-function DealActivityPanel({ dealId }: { dealId: string }) {
+function DealActivityPanel({ deal }: { deal: DealDetail }) {
+  const dealId = deal.id;
   const { activities, loading, refetch } = useActivities({ dealId });
 
   const handleLogActivity = async (data: {
@@ -325,21 +328,42 @@ function DealActivityPanel({ dealId }: { dealId: string }) {
     body: string;
     outcome?: string;
     durationMinutes?: number;
+    responsibleUserId?: string;
+    sourceEntityType?: ActivitySourceEntityType;
+    sourceEntityId?: string;
   }) => {
+    const sourceEntityType = data.sourceEntityType === "lead" ? "lead" : "deal";
+    const sourceEntityId = data.sourceEntityId ?? dealId;
+
     await createActivity({
       type: data.type,
       subject: data.subject,
       body: data.body,
       outcome: data.outcome,
       durationMinutes: data.durationMinutes,
-      dealId,
+      responsibleUserId: data.responsibleUserId,
+      sourceEntityType,
+      sourceEntityId,
+      companyId: deal.companyId ?? undefined,
+      propertyId: deal.propertyId ?? undefined,
+      leadId: sourceEntityType === "lead" ? sourceEntityId : undefined,
+      dealId: sourceEntityType === "deal" ? dealId : undefined,
     });
     refetch();
   };
 
   return (
     <div className="space-y-4">
-      <ActivityLogForm onSubmit={handleLogActivity} />
+      <ActivityLogForm
+        onSubmit={handleLogActivity}
+        defaultResponsibleUserId={deal.assignedRepId}
+        targetOptions={[
+          { id: deal.id, label: "Deal timeline", type: "deal" },
+          ...(deal.sourceLeadId
+            ? [{ id: deal.sourceLeadId, label: "Lead history", type: "lead" as const }]
+            : []),
+        ]}
+      />
       {loading ? (
         <div className="h-32 bg-muted animate-pulse rounded" />
       ) : activities.length === 0 ? (

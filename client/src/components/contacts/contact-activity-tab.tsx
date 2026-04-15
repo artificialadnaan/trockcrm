@@ -42,6 +42,7 @@ export function ContactActivityTab({ contactId }: ContactActivityTabProps) {
     body: string;
     outcome?: string;
     durationMinutes?: number;
+    responsibleUserId?: string;
   }) => {
     await createContactActivity(contactId, {
       type: data.type,
@@ -49,6 +50,7 @@ export function ContactActivityTab({ contactId }: ContactActivityTabProps) {
       body: data.body,
       outcome: data.outcome,
       durationMinutes: data.durationMinutes,
+      responsibleUserId: data.responsibleUserId,
     });
     refetch();
   };

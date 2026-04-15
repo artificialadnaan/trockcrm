@@ -397,7 +397,16 @@ router.post("/:id/activities", async (req, res, next) => {
   try {
     const { createActivity } = await import("../activities/service.js");
     const contactId = req.params.id;
-    const { type, subject, body, outcome, durationMinutes, dealId, occurredAt } = req.body;
+    const {
+      type,
+      subject,
+      body,
+      outcome,
+      durationMinutes,
+      dealId,
+      occurredAt,
+      responsibleUserId: requestedResponsibleUserId,
+    } = req.body;
 
     if (!type) throw new AppError(400, "Activity type is required");
 
@@ -407,9 +416,15 @@ router.post("/:id/activities", async (req, res, next) => {
       if (!deal) throw new AppError(404, "Deal not found or access denied");
     }
 
+    const resolvedResponsibleUserId =
+      req.user!.role === "rep" ? req.user!.id : (requestedResponsibleUserId ?? req.user!.id);
+
     const activity = await createActivity(req.tenantDb!, {
       type,
-      userId: req.user!.id,
+      responsibleUserId: resolvedResponsibleUserId,
+      performedByUserId: req.user!.id,
+      sourceEntityType: "contact",
+      sourceEntityId: contactId,
       dealId: dealId ?? null,
       contactId,
       subject,
@@ -426,7 +441,12 @@ router.post("/:id/activities", async (req, res, next) => {
         eventName: DOMAIN_EVENTS.ACTIVITY_CREATED,
         activityId: activity.id,
         type: activity.type,
-        userId: req.user!.id,
+        userId: activity.responsibleUserId,
+        responsibleUserId: activity.responsibleUserId,
+        performedByUserId: activity.performedByUserId,
+        sourceEntityType: activity.sourceEntityType,
+        sourceEntityId: activity.sourceEntityId,
+        leadId: activity.leadId,
         dealId: activity.dealId,
         contactId: activity.contactId,
         subject: activity.subject,
@@ -445,6 +465,12 @@ router.post("/:id/activities", async (req, res, next) => {
         payload: {
           activityId: activity.id,
           type: activity.type,
+          userId: activity.responsibleUserId,
+          responsibleUserId: activity.responsibleUserId,
+          performedByUserId: activity.performedByUserId,
+          sourceEntityType: activity.sourceEntityType,
+          sourceEntityId: activity.sourceEntityId,
+          leadId: activity.leadId,
           dealId: activity.dealId,
           contactId: activity.contactId,
           subject: activity.subject,

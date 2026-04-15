@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Phone, FileText, Calendar, Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -11,8 +11,17 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { api } from "@/lib/api";
+import { useAuth } from "@/lib/auth";
+import type { ActivitySourceEntityType } from "@/hooks/use-activities";
 
 type LogType = "call" | "note" | "meeting";
+
+interface ActivityTargetOption {
+  id: string;
+  label: string;
+  type: ActivitySourceEntityType;
+}
 
 interface ActivityLogFormProps {
   onSubmit: (data: {
@@ -21,19 +30,102 @@ interface ActivityLogFormProps {
     body: string;
     outcome?: string;
     durationMinutes?: number;
+    responsibleUserId?: string;
+    sourceEntityType?: ActivitySourceEntityType;
+    sourceEntityId?: string;
   }) => Promise<void>;
+  targetOptions?: ActivityTargetOption[];
+  defaultResponsibleUserId?: string;
 }
 
-export function ActivityLogForm({ onSubmit }: ActivityLogFormProps) {
+interface Assignee {
+  id: string;
+  displayName: string;
+}
+
+function encodeTarget(option: ActivityTargetOption) {
+  return `${option.type}:${option.id}`;
+}
+
+function decodeTarget(value: string) {
+  const [type, ...idParts] = value.split(":");
+  if (!type || idParts.length === 0) return null;
+
+  return {
+    sourceEntityType: type as ActivitySourceEntityType,
+    sourceEntityId: idParts.join(":"),
+  };
+}
+
+export function ActivityLogForm({
+  onSubmit,
+  targetOptions = [],
+  defaultResponsibleUserId,
+}: ActivityLogFormProps) {
+  const { user } = useAuth();
   const [activeForm, setActiveForm] = useState<LogType | null>(null);
   const [body, setBody] = useState("");
   const [outcome, setOutcome] = useState<string>("");
   const [duration, setDuration] = useState<string>("");
+  const [target, setTarget] = useState<string>(targetOptions[0] ? encodeTarget(targetOptions[0]) : "");
+  const [assignees, setAssignees] = useState<Assignee[]>([]);
+  const [responsibleUserId, setResponsibleUserId] = useState<string>(
+    defaultResponsibleUserId ?? user?.id ?? ""
+  );
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  useEffect(() => {
+    if (targetOptions[0] && !target) {
+      setTarget(encodeTarget(targetOptions[0]));
+    }
+  }, [target, targetOptions]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    api<{ users: Assignee[] }>("/tasks/assignees")
+      .then((data) => {
+        if (cancelled) return;
+
+        setAssignees(data.users);
+        const preferredUserId = defaultResponsibleUserId ?? user?.id ?? data.users[0]?.id ?? "";
+        setResponsibleUserId((current) => {
+          if (current && data.users.some((assignee) => assignee.id === current)) {
+            return current;
+          }
+          return preferredUserId;
+        });
+      })
+      .catch(() => {
+        if (cancelled) return;
+
+        if (user) {
+          setAssignees([{ id: user.id, displayName: user.displayName }]);
+          setResponsibleUserId((current) => current || defaultResponsibleUserId || user.id);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [defaultResponsibleUserId, user]);
+
   const handleSubmit = async () => {
     if (!body.trim() || !activeForm) return;
+
+    const selectedTarget = decodeTarget(target);
+
+    if (targetOptions.length > 0 && !selectedTarget) {
+      setError("Select a target entity");
+      return;
+    }
+
+    if (assignees.length > 0 && !responsibleUserId) {
+      setError("Select a responsible owner");
+      return;
+    }
+
     setSubmitting(true);
     setError(null);
     try {
@@ -43,6 +135,9 @@ export function ActivityLogForm({ onSubmit }: ActivityLogFormProps) {
         body: body.trim(),
         outcome: outcome || undefined,
         durationMinutes: duration ? parseInt(duration, 10) : undefined,
+        responsibleUserId: responsibleUserId || undefined,
+        sourceEntityType: selectedTarget?.sourceEntityType,
+        sourceEntityId: selectedTarget?.sourceEntityId,
       });
       setBody("");
       setOutcome("");
@@ -87,6 +182,44 @@ export function ActivityLogForm({ onSubmit }: ActivityLogFormProps) {
         <Card>
           <CardContent className="pt-4 space-y-3">
             <p className="text-sm font-medium capitalize">{activeForm} details</p>
+            {(targetOptions.length > 1 || assignees.length > 1) && (
+              <div className="grid gap-3 md:grid-cols-2">
+                {targetOptions.length > 1 && (
+                  <div>
+                    <label className="text-xs text-muted-foreground mb-1 block">Target</label>
+                    <Select value={target} onValueChange={(value) => setTarget(value ?? "")}>
+                      <SelectTrigger>
+                        <SelectValue placeholder="Choose where to log this" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {targetOptions.map((option) => (
+                          <SelectItem key={encodeTarget(option)} value={encodeTarget(option)}>
+                            {option.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                )}
+                {assignees.length > 1 && (
+                  <div>
+                    <label className="text-xs text-muted-foreground mb-1 block">Responsible owner</label>
+                    <Select value={responsibleUserId} onValueChange={(value) => setResponsibleUserId(value ?? "")}>
+                      <SelectTrigger>
+                        <SelectValue placeholder="Choose owner" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {assignees.map((assignee) => (
+                          <SelectItem key={assignee.id} value={assignee.id}>
+                            {assignee.displayName}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                )}
+              </div>
+            )}
             <Textarea
               placeholder={`Describe this ${activeForm}...`}
               value={body}

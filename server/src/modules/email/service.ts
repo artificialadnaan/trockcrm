@@ -125,16 +125,24 @@ export async function sendEmail(
     .returning();
 
   // Create activity record for the unified feed
-  await tenantDb.insert(activities).values({
-    type: "email",
-    userId,
-    dealId: input.dealId ?? null,
-    contactId: input.contactId ?? null,
-    emailId: emailRecord.id,
-    subject: input.subject,
-    body: stripHtml(input.bodyHtml).substring(0, 1000),
-    occurredAt: new Date(),
-  });
+  const activitySourceEntityType = input.dealId ? "deal" : input.contactId ? "contact" : null;
+  const activitySourceEntityId = input.dealId ?? input.contactId ?? null;
+
+  if (activitySourceEntityType && activitySourceEntityId) {
+    await tenantDb.insert(activities).values({
+      type: "email",
+      responsibleUserId: userId,
+      performedByUserId: userId,
+      sourceEntityType: activitySourceEntityType,
+      sourceEntityId: activitySourceEntityId,
+      dealId: input.dealId ?? null,
+      contactId: input.contactId ?? null,
+      emailId: emailRecord.id,
+      subject: input.subject,
+      body: stripHtml(input.bodyHtml).substring(0, 1000),
+      occurredAt: new Date(),
+    });
+  }
 
   return emailRecord;
 }
@@ -168,16 +176,24 @@ async function createMockSentEmail(
     })
     .returning();
 
-  await tenantDb.insert(activities).values({
-    type: "email",
-    userId,
-    dealId: input.dealId ?? null,
-    contactId: input.contactId ?? null,
-    emailId: emailRecord.id,
-    subject: input.subject,
-    body: stripHtml(input.bodyHtml).substring(0, 1000),
-    occurredAt: new Date(),
-  });
+  const activitySourceEntityType = input.dealId ? "deal" : input.contactId ? "contact" : null;
+  const activitySourceEntityId = input.dealId ?? input.contactId ?? null;
+
+  if (activitySourceEntityType && activitySourceEntityId) {
+    await tenantDb.insert(activities).values({
+      type: "email",
+      responsibleUserId: userId,
+      performedByUserId: userId,
+      sourceEntityType: activitySourceEntityType,
+      sourceEntityId: activitySourceEntityId,
+      dealId: input.dealId ?? null,
+      contactId: input.contactId ?? null,
+      emailId: emailRecord.id,
+      subject: input.subject,
+      body: stripHtml(input.bodyHtml).substring(0, 1000),
+      occurredAt: new Date(),
+    });
+  }
 
   return emailRecord;
 }

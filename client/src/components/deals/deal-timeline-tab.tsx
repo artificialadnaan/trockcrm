@@ -26,6 +26,14 @@ const activityIcons: Record<string, typeof Phone> = {
   task_completed: CheckSquare,
 };
 
+const sourceEntityLabels: Record<string, string> = {
+  deal: "Deal",
+  lead: "Lead history",
+  company: "Company",
+  property: "Property",
+  contact: "Contact",
+};
+
 function formatTimestamp(date: string): string {
   return new Date(date).toLocaleString("en-US", {
     month: "short",
@@ -145,6 +153,11 @@ export function DealTimelineTab({ dealId, stageHistory }: DealTimelineTabProps) 
                   <span className="text-sm font-medium capitalize">
                     {activity.type.replace(/_/g, " ")}
                   </span>
+                  {activity.sourceEntityType && (
+                    <span className="rounded-md bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-700">
+                      {sourceEntityLabels[activity.sourceEntityType] ?? activity.sourceEntityType}
+                    </span>
+                  )}
                   {activity.outcome && (
                     <span className="text-xs text-muted-foreground capitalize">
                       {activity.outcome.replace(/_/g, " ")}
