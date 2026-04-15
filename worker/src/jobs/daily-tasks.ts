@@ -12,6 +12,7 @@ const SERVER_TASK_PERSISTENCE_MODULE = "../../../server/src/modules/tasks/rules/
  * 2. Create follow-up tasks for deals with upcoming expected_close_date (7 days out)
  * 3. Create touchpoint tasks for contacts with first_outreach_completed = false (older than 3 days)
  * 4. Create follow-up tasks for contacts overdue on their stage's touchpoint_cadence_days
+ * 5. Create follow-up tasks for leads stuck past their configured stage stale threshold
  *
  * Stale deal tasks and inbound email tasks are already created by their respective
  * workers (stale-deals.ts and email-sync.ts). This job handles the remaining
@@ -246,6 +247,42 @@ export async function runDailyTaskGeneration(): Promise<void> {
               lastContactedAt: row.last_contacted_at,
               touchpointCadenceDays: row.touchpoint_cadence_days,
               dueAt: new Date(),
+            },
+            taskPersistence,
+            TASK_RULES
+          );
+          officeTasksCreated += countGeneratedTasks(outcomes);
+        }
+
+        const staleLeads = await client.query(
+          `SELECT l.id AS lead_id,
+                  l.name AS lead_name,
+                  l.assigned_rep_id,
+                  psc.name AS stage_name,
+                  psc.stale_threshold_days,
+                  EXTRACT(DAY FROM NOW() - l.stage_entered_at)::int AS days_in_stage
+           FROM ${schemaName}.leads l
+           JOIN public.pipeline_stage_config psc ON psc.id = l.stage_id
+           WHERE l.is_active = true
+             AND l.status = 'open'
+             AND psc.workflow_family = 'lead'
+             AND psc.is_terminal = false
+             AND psc.stale_threshold_days IS NOT NULL
+             AND l.stage_entered_at < NOW() - (psc.stale_threshold_days || ' days')::interval`
+        );
+
+        for (const lead of staleLeads.rows) {
+          const outcomes = await evaluateTaskRules(
+            {
+              now: new Date(),
+              officeId: office.id,
+              entityId: `lead:${lead.lead_id}`,
+              sourceEvent: "cron.daily_task_generation.stale_lead",
+              leadId: lead.lead_id,
+              leadName: lead.lead_name,
+              stage: lead.stage_name,
+              staleAge: lead.days_in_stage,
+              taskAssigneeId: lead.assigned_rep_id,
             },
             taskPersistence,
             TASK_RULES

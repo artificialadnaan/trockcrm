@@ -19,6 +19,19 @@ export interface RepDashboardData {
     dealCount: number;
     totalValue: number;
   }>;
+  staleLeads: {
+    count: number;
+    averageDaysInStage: number | null;
+    leads: Array<{
+      leadId: string;
+      leadName: string;
+      companyName: string;
+      propertyName: string;
+      stageName: string;
+      repName: string;
+      daysInStage: number;
+    }>;
+  };
 }
 
 export function useRepDashboard() {

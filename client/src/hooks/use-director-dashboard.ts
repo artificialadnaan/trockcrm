@@ -9,6 +9,7 @@ export interface RepPerformanceCard {
   winRate: number;
   activityScore: number;
   staleDeals: number;
+  staleLeads: number;
 }
 
 export interface DirectorDashboardData {
@@ -43,6 +44,15 @@ export interface DirectorDashboardData {
     repName: string;
     daysInStage: number;
     dealValue: number;
+  }>;
+  staleLeads: Array<{
+    leadId: string;
+    leadName: string;
+    companyName: string;
+    propertyName: string;
+    stageName: string;
+    repName: string;
+    daysInStage: number;
   }>;
   ddVsPipeline: {
     ddValue: number;
@@ -89,6 +99,15 @@ export interface RepDetailData {
     repName: string;
     daysInStage: number;
     dealValue: number;
+  }>;
+  staleLeads: Array<{
+    leadId: string;
+    leadName: string;
+    companyName: string;
+    propertyName: string;
+    stageName: string;
+    repName: string;
+    daysInStage: number;
   }>;
 }
 

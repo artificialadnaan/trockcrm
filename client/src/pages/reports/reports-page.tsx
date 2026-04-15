@@ -477,11 +477,21 @@ export function ReportsPage() {
     return Math.round(total / dirData.repCards.length);
   }, [dirData]);
 
-  const avgDaysInStage = useMemo(() => {
-    if (!dirData?.staleDeals.length) return null;
-    const total = dirData.staleDeals.reduce((sum, d) => sum + d.daysInStage, 0);
-    return Math.round(total / dirData.staleDeals.length);
-  }, [dirData]);
+  const staleLeadWatchlist = dirData?.staleLeads ?? repData?.staleLeads.leads ?? [];
+  const staleLeadCount = dirData?.staleLeads.length ?? repData?.staleLeads.count ?? 0;
+
+  const avgLeadDaysInStage = useMemo(() => {
+    if (dirData?.staleLeads.length) {
+      const total = dirData.staleLeads.reduce((sum, lead) => sum + lead.daysInStage, 0);
+      return Math.round(total / dirData.staleLeads.length);
+    }
+    if (repData?.staleLeads.averageDaysInStage != null) {
+      return repData.staleLeads.averageDaysInStage;
+    }
+    if (!staleLeadWatchlist.length) return null;
+    const total = staleLeadWatchlist.reduce((sum, lead) => sum + lead.daysInStage, 0);
+    return Math.round(total / staleLeadWatchlist.length);
+  }, [dirData, repData, staleLeadWatchlist]);
 
   const pipelineByStage = dirData?.pipelineByStage ?? repData?.pipelineByStage ?? [];
 
@@ -784,8 +794,11 @@ export function ReportsPage() {
           />
           <KpiCard
             label="Lead Velocity"
-            value={avgDaysInStage != null ? `${avgDaysInStage}d` : "--"}
-            indicator={{ text: "-2.1d improvement", positive: true }}
+            value={avgLeadDaysInStage != null ? `${avgLeadDaysInStage}d` : "--"}
+            badge={{
+              text: staleLeadCount > 0 ? `${staleLeadCount} stale leads` : "No stale leads",
+              color: staleLeadCount > 0 ? "red" : "green",
+            }}
             icon={<Zap />}
             loading={kpiLoading}
           />
@@ -936,6 +949,70 @@ export function ReportsPage() {
                       </tr>
                     );
                   })
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+          <div className="flex items-center justify-between px-6 py-5 border-b border-slate-100">
+            <div>
+              <h2 className="text-lg font-bold text-slate-900">Stale Lead Watchlist</h2>
+              <p className="text-xs text-slate-400 mt-0.5">Lead-stage opportunities past threshold and queued for automated follow-up</p>
+            </div>
+            <Badge variant="secondary" className="text-xs">
+              {staleLeadCount} stale lead{staleLeadCount === 1 ? "" : "s"}
+            </Badge>
+          </div>
+
+          <div className="overflow-x-auto">
+            <table className="w-full">
+              <thead>
+                <tr className="border-b border-slate-100">
+                  <th className="text-left px-6 py-3 text-xs font-semibold uppercase tracking-wider text-slate-400">Lead</th>
+                  <th className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wider text-slate-400">Stage</th>
+                  <th className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wider text-slate-400">Owner</th>
+                  <th className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wider text-slate-400">Account</th>
+                  <th className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wider text-slate-400">Age</th>
+                </tr>
+              </thead>
+              <tbody>
+                {kpiLoading ? (
+                  Array.from({ length: 4 }).map((_, i) => (
+                    <tr key={i} className="border-b border-slate-50">
+                      <td className="px-6 py-4"><div className="h-4 bg-slate-100 animate-pulse rounded w-48" /></td>
+                      <td className="px-4 py-4"><div className="h-4 bg-slate-100 animate-pulse rounded w-24" /></td>
+                      <td className="px-4 py-4"><div className="h-4 bg-slate-100 animate-pulse rounded w-24" /></td>
+                      <td className="px-4 py-4"><div className="h-4 bg-slate-100 animate-pulse rounded w-32" /></td>
+                      <td className="px-4 py-4"><div className="h-4 bg-slate-100 animate-pulse rounded w-12" /></td>
+                    </tr>
+                  ))
+                ) : staleLeadWatchlist.length === 0 ? (
+                  <tr>
+                    <td colSpan={5} className="px-6 py-12 text-center text-sm text-slate-400">
+                      No stale leads are currently over threshold.
+                    </td>
+                  </tr>
+                ) : (
+                  staleLeadWatchlist.slice(0, 8).map((lead) => (
+                    <tr key={lead.leadId} className="border-b border-slate-50 hover:bg-slate-50 transition-colors">
+                      <td className="px-6 py-4">
+                        <p className="text-sm font-semibold text-slate-900 truncate max-w-xs">{lead.leadName}</p>
+                        <p className="text-xs text-slate-400 mt-0.5">{lead.propertyName}</p>
+                      </td>
+                      <td className="px-4 py-4">
+                        <span className="inline-flex items-center rounded-full bg-amber-50 px-2.5 py-1 text-xs font-semibold text-amber-700">
+                          {lead.stageName}
+                        </span>
+                      </td>
+                      <td className="px-4 py-4 text-sm text-slate-600">{lead.repName}</td>
+                      <td className="px-4 py-4 text-sm text-slate-600">{lead.companyName}</td>
+                      <td className="px-4 py-4">
+                        <span className="font-mono text-sm text-slate-700">{lead.daysInStage}d</span>
+                      </td>
+                    </tr>
+                  ))
                 )}
               </tbody>
             </table>

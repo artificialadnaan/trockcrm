@@ -418,6 +418,77 @@ const dailyCadenceOverdueFollowUpRule: TaskRuleDefinition = {
   },
 };
 
+const staleLeadRuleId = "stale_lead";
+const staleLeadRule: TaskRuleDefinition = {
+  id: staleLeadRuleId,
+  sourceEvent: "cron.daily_task_generation.stale_lead",
+  reasonCode: staleLeadRuleId,
+  suppressionWindowDays: 30,
+  buildDedupeKey(context) {
+    return context.leadId ? `lead:${context.leadId}` : null;
+  },
+  async buildTask(context) {
+    if (!context.leadId || !context.taskAssigneeId) return null;
+
+    const assignment = await assignTaskFromContext({
+      entityId: context.entityId,
+      manualOverrideId: context.taskAssigneeId,
+      recentActorId: context.recentActorId,
+      officeFallbackId: context.officeFallbackId,
+    });
+
+    if (!assignment.assignedTo) return null;
+
+    const leadName = context.leadName?.trim() || `Lead ${context.leadId}`;
+    const stageName = context.stage?.trim() || "current stage";
+    const staleAge = Math.max(context.staleAge ?? 0, 0);
+    const priority = scoreTaskPriority({
+      dueProximity: 20,
+      stageRisk: context.stage ? 15 : 0,
+      staleAge: Math.min(staleAge * 2, 45),
+      unreadInbound: 0,
+      dealValue: 0,
+    });
+
+    return {
+      title: `Re-engage stale lead ${leadName}`,
+      description: `Lead "${leadName}" has been in ${stageName} for ${staleAge} days without progression.`,
+      type: "follow_up",
+      assignedTo: assignment.assignedTo,
+      officeId: context.officeId,
+      originRule: staleLeadRuleId,
+      sourceRule: staleLeadRuleId,
+      sourceEvent: context.sourceEvent,
+      dedupeKey: `lead:${context.leadId}`,
+      reasonCode: staleLeadRuleId,
+      priority: priority.band,
+      priorityScore: priority.score,
+      status: "pending",
+      dueAt: startOfDay(context.now),
+      entitySnapshot: {
+        schemaVersion: 1,
+        entityType: "lead",
+        entityId: context.entityId,
+        officeId: context.officeId,
+        sourceEvent: context.sourceEvent,
+        leadId: context.leadId,
+        leadName,
+        stage: stageName,
+        staleAge,
+        summary: `Lead "${leadName}" is stale in ${stageName}`,
+      },
+      metadata: {
+        entityId: context.entityId,
+        leadId: context.leadId,
+        leadName,
+        stage: stageName,
+        staleAge,
+        assignment: assignment.machineReason,
+      },
+    };
+  },
+};
+
 function buildWonDealHandoffRule(
   id: string,
   titleBuilder: (context: TaskRuleContext) => string,
@@ -1159,6 +1230,7 @@ const inboundEmailDisambiguationRule: TaskRuleDefinition = {
 };
 
 export const TASK_RULES: TaskRuleDefinition[] = [
+  staleLeadRule,
   staleDealRule,
   inboundEmailReplyNeededRule,
   inboundEmailDisambiguationRule,

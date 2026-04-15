@@ -21,6 +21,60 @@ import {
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
+export interface StaleLeadDashboardRow {
+  leadId: string;
+  leadName: string;
+  companyName: string;
+  propertyName: string;
+  stageName: string;
+  repName: string;
+  daysInStage: number;
+}
+
+async function getStaleLeadWatchlist(
+  tenantDb: TenantDb,
+  options: { repId?: string } = {}
+): Promise<StaleLeadDashboardRow[]> {
+  const repFilter = options.repId
+    ? sql`AND l.assigned_rep_id = ${options.repId}`
+    : sql``;
+
+  const result = await tenantDb.execute(sql`
+    SELECT
+      l.id AS lead_id,
+      l.name AS lead_name,
+      c.name AS company_name,
+      p.name AS property_name,
+      psc.name AS stage_name,
+      u.display_name AS rep_name,
+      EXTRACT(DAY FROM NOW() - l.stage_entered_at)::int AS days_in_stage
+    FROM leads l
+    JOIN companies c ON c.id = l.company_id
+    JOIN properties p ON p.id = l.property_id
+    JOIN pipeline_stage_config psc ON psc.id = l.stage_id
+    JOIN users u ON u.id = l.assigned_rep_id
+    WHERE l.is_active = true
+      AND l.status = 'open'
+      AND psc.workflow_family = 'lead'
+      AND psc.is_terminal = false
+      AND psc.stale_threshold_days IS NOT NULL
+      AND l.stage_entered_at < NOW() - (psc.stale_threshold_days || ' days')::interval
+      ${repFilter}
+    ORDER BY days_in_stage DESC, l.updated_at ASC
+  `);
+
+  const rows = (result as any).rows ?? result;
+  return rows.map((row: any) => ({
+    leadId: row.lead_id,
+    leadName: row.lead_name,
+    companyName: row.company_name,
+    propertyName: row.property_name,
+    stageName: row.stage_name,
+    repName: row.rep_name,
+    daysInStage: Number(row.days_in_stage ?? 0),
+  }));
+}
+
 // ---------------------------------------------------------------------------
 // Per-Rep Dashboard
 // ---------------------------------------------------------------------------
@@ -37,6 +91,11 @@ export interface RepDashboardData {
     dealCount: number;
     totalValue: number;
   }>;
+  staleLeads: {
+    count: number;
+    averageDaysInStage: number | null;
+    leads: StaleLeadDashboardRow[];
+  };
 }
 
 /**
@@ -62,6 +121,7 @@ export async function getRepDashboard(
     activityResult,
     complianceResult,
     pipelineResult,
+    staleLeadResult,
   ] = await Promise.all([
     // 1. Active deals count + value for this rep
     tenantDb.execute(sql`
@@ -126,12 +186,17 @@ export async function getRepDashboard(
       GROUP BY d.stage_id, psc.name, psc.color, psc.display_order
       ORDER BY psc.display_order ASC
     `),
+
+    getStaleLeadWatchlist(tenantDb, { repId: userId }),
   ]);
 
   const adRows = (activeDealResult as any).rows ?? activeDealResult;
   const tcRows = (taskCountResult as any).rows ?? taskCountResult;
   const acRows = (activityResult as any).rows ?? activityResult;
   const plRows = (pipelineResult as any).rows ?? pipelineResult;
+  const staleLeadAverage = staleLeadResult.length > 0
+    ? Math.round(staleLeadResult.reduce((sum, lead) => sum + lead.daysInStage, 0) / staleLeadResult.length)
+    : null;
 
   return {
     activeDeals: {
@@ -157,6 +222,11 @@ export async function getRepDashboard(
       dealCount: Number(r.deal_count ?? 0),
       totalValue: Number(r.total_value ?? 0),
     })),
+    staleLeads: {
+      count: staleLeadResult.length,
+      averageDaysInStage: staleLeadAverage,
+      leads: staleLeadResult,
+    },
   };
 }
 
@@ -172,6 +242,7 @@ export interface RepPerformanceCard {
   winRate: number;
   activityScore: number; // total activities in period
   staleDeals: number;
+  staleLeads: number;
 }
 
 export interface DirectorDashboardData {
@@ -202,6 +273,7 @@ export interface DirectorDashboardData {
     daysInStage: number;
     dealValue: number;
   }>;
+  staleLeads: StaleLeadDashboardRow[];
   ddVsPipeline: {
     ddValue: number;
     ddCount: number;
@@ -230,6 +302,7 @@ export async function getDirectorDashboard(
     winRateTrendResult,
     activityResult,
     staleResult,
+    staleLeadResult,
     ddResult,
   ] = await Promise.all([
     // 1. Per-rep performance cards
@@ -247,7 +320,10 @@ export async function getDirectorDashboard(
     // 5. Stale deals watchlist
     getStaleDeals(tenantDb),
 
-    // 6. DD vs pipeline
+    // 6. Stale leads watchlist
+    getStaleLeadWatchlist(tenantDb),
+
+    // 7. DD vs pipeline
     getDdVsPipeline(tenantDb),
   ]);
 
@@ -279,6 +355,7 @@ export async function getDirectorDashboard(
       daysInStage: s.daysInStage,
       dealValue: s.dealValue,
     })),
+    staleLeads: staleLeadResult,
     ddVsPipeline: ddResult,
   };
 }
@@ -338,6 +415,20 @@ async function buildRepPerformanceCards(
         AND psc.stale_threshold_days IS NOT NULL
         AND EXTRACT(DAY FROM NOW() - d.stage_entered_at) > psc.stale_threshold_days
       GROUP BY d.assigned_rep_id
+    ),
+    rep_stale_leads AS (
+      SELECT
+        l.assigned_rep_id AS rep_id,
+        COUNT(*)::int AS stale_lead_count
+      FROM leads l
+      JOIN pipeline_stage_config psc ON psc.id = l.stage_id
+      WHERE l.is_active = true
+        AND l.status = 'open'
+        AND psc.workflow_family = 'lead'
+        AND psc.is_terminal = false
+        AND psc.stale_threshold_days IS NOT NULL
+        AND EXTRACT(DAY FROM NOW() - l.stage_entered_at) > psc.stale_threshold_days
+      GROUP BY l.assigned_rep_id
     )
     SELECT
       u.id AS rep_id,
@@ -347,12 +438,14 @@ async function buildRepPerformanceCards(
       COALESCE(rw.wins, 0)::int AS wins,
       COALESCE(rw.losses, 0)::int AS losses,
       COALESCE(ra.total, 0)::int AS activity_score,
-      COALESCE(rs.stale_count, 0)::int AS stale_deals
+      COALESCE(rs.stale_count, 0)::int AS stale_deals,
+      COALESCE(rsl.stale_lead_count, 0)::int AS stale_leads
     FROM users u
     LEFT JOIN rep_deals rd ON rd.rep_id = u.id
     LEFT JOIN rep_wins rw ON rw.rep_id = u.id
     LEFT JOIN rep_activities ra ON ra.rep_id = u.id
     LEFT JOIN rep_stale rs ON rs.rep_id = u.id
+    LEFT JOIN rep_stale_leads rsl ON rsl.rep_id = u.id
     WHERE u.is_active = true
       AND u.role = 'rep'
     ORDER BY pipeline_value DESC
@@ -371,6 +464,7 @@ async function buildRepPerformanceCards(
       winRate: total > 0 ? Math.round((wins / total) * 100) : 0,
       activityScore: Number(r.activity_score ?? 0),
       staleDeals: Number(r.stale_deals ?? 0),
+      staleLeads: Number(r.stale_leads ?? 0),
     };
   });
 }
@@ -392,11 +486,12 @@ export async function getRepDetail(
   const from = options.from ?? `${year}-01-01`;
   const to = options.to ?? `${year}-12-31`;
 
-  const [dashboard, winLoss, winTrend, staleDeals] = await Promise.all([
+  const [dashboard, winLoss, winTrend, staleDeals, staleLeads] = await Promise.all([
     getRepDashboard(tenantDb, repId),
     getWinLossRatioByRep(tenantDb, { from, to }),
     getWinRateTrend(tenantDb, { from, to, repId }),
     getStaleDeals(tenantDb, { repId }),
+    getStaleLeadWatchlist(tenantDb, { repId }),
   ]);
 
   const repWinLoss = winLoss.find((w) => w.repId === repId) ?? {
@@ -413,5 +508,6 @@ export async function getRepDetail(
     winLoss: repWinLoss,
     winRateTrend: winTrend,
     staleDeals,
+    staleLeads,
   };
 }
