@@ -428,6 +428,18 @@ router.post("/:id/stage", async (req, res, next) => {
       lostCompetitor,
     });
 
+    await req.tenantDb!.insert(jobQueue).values({
+      jobType: "ai_refresh_copilot",
+      payload: {
+        dealId: req.params.id,
+        reason: "deal_stage_changed",
+        targetStageId,
+      },
+      officeId: req.user!.activeOfficeId ?? req.user!.officeId,
+      status: "pending",
+      runAfter: new Date(),
+    });
+
     await req.commitTransaction!();
     emitLocalDealEvents((result as any)._eventsToEmit ?? [], {
       officeId: req.user!.activeOfficeId ?? req.user!.officeId,

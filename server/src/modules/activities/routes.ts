@@ -83,6 +83,20 @@ router.post("/", async (req, res, next) => {
       runAfter: new Date(),
     });
 
+    if (activity.dealId) {
+      await req.tenantDb!.insert(jobQueue).values({
+        jobType: "ai_refresh_copilot",
+        payload: {
+          dealId: activity.dealId,
+          reason: "activity_created",
+          activityId: activity.id,
+        },
+        officeId: req.user!.activeOfficeId ?? req.user!.officeId,
+        status: "pending",
+        runAfter: new Date(),
+      });
+    }
+
     await req.commitTransaction!();
 
     // Best-effort local emit for SSE push

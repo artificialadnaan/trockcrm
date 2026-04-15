@@ -35,6 +35,7 @@ import { searchRoutes } from "./modules/search/routes.js";
 import { companyRoutes } from "./modules/companies/routes.js";
 import { adminRoutes } from "./modules/admin/routes.js";
 import { companycamRoutes } from "./modules/companycam/routes.js";
+import { aiCopilotRoutes } from "./modules/ai-copilot/routes.js";
 import { getAllowedCorsOrigins } from "./modules/auth/http-config.js";
 
 export function createApp() {
@@ -121,6 +122,7 @@ export function createApp() {
   tenantRouter.use("/search", searchRoutes);
   tenantRouter.use("/companies", companyRoutes);
   tenantRouter.use("/companycam", companycamRoutes);
+  tenantRouter.use("/ai", aiCopilotRoutes);
 
   // Foundation test route — proves tenant middleware works end-to-end
   tenantRouter.get("/tenant-check", async (req, res) => {

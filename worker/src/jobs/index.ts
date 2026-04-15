@@ -11,6 +11,8 @@ import { runBidDeadlineCountdown } from "./bid-deadline.js";
 import { handleProcoreSyncJob, handleProcoreWebhookJob, runProcoreSync } from "./procore-sync.js";
 import { handleTaskCompletedEvent } from "./task-completed.js";
 import { runAiIndexDocument } from "./ai-index-document.js";
+import { runAiRefreshCopilot } from "./ai-refresh-copilot.js";
+import { runAiGenerateDealCopilot } from "./ai-generate-deal-copilot.js";
 
 const SERVER_EVALUATOR_MODULE = "../../../server/src/modules/tasks/rules/evaluator.js" as string;
 const SERVER_TASK_RULES_MODULE = "../../../server/src/modules/tasks/rules/config.js" as string;
@@ -113,6 +115,14 @@ export function registerAllJobs() {
 
   registerJobHandler("ai_index_document", async (payload) => {
     await runAiIndexDocument(payload);
+  });
+
+  registerJobHandler("ai_refresh_copilot", async (payload) => {
+    await runAiRefreshCopilot(payload);
+  });
+
+  registerJobHandler("ai_generate_deal_copilot", async (payload) => {
+    await runAiGenerateDealCopilot(payload);
   });
 
   // Daily task generation (triggered via job_queue or cron)

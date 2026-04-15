@@ -1,6 +1,14 @@
 import crypto from "crypto";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
+import { and, desc, eq } from "drizzle-orm";
 import type * as schema from "@trock-crm/shared/schema";
+import {
+  aiCopilotPackets,
+  aiFeedback,
+  aiRiskFlags,
+  aiTaskSuggestions,
+  deals,
+} from "@trock-crm/shared/schema";
 import { getDealCopilotContext } from "./context-service.js";
 import { getDealBlindSpotSignals } from "./signal-service.js";
 import { searchDealKnowledge } from "./retrieval-service.js";
@@ -143,4 +151,100 @@ export async function generateDealCopilotPacket(
     summary: generated.summary,
     generatedAt: persisted.generatedAt,
   };
+}
+
+export async function getDealCopilotView(tenantDb: TenantDb, dealId: string) {
+  const [packet] = await tenantDb
+    .select()
+    .from(aiCopilotPackets)
+    .where(and(eq(aiCopilotPackets.scopeType, "deal"), eq(aiCopilotPackets.scopeId, dealId)))
+    .orderBy(desc(aiCopilotPackets.createdAt))
+    .limit(1);
+
+  const suggestedTasks = await tenantDb
+    .select()
+    .from(aiTaskSuggestions)
+    .where(and(eq(aiTaskSuggestions.scopeType, "deal"), eq(aiTaskSuggestions.scopeId, dealId)))
+    .orderBy(desc(aiTaskSuggestions.createdAt));
+
+  const blindSpotFlags = await tenantDb
+    .select()
+    .from(aiRiskFlags)
+    .where(and(eq(aiRiskFlags.scopeType, "deal"), eq(aiRiskFlags.scopeId, dealId)))
+    .orderBy(desc(aiRiskFlags.createdAt));
+
+  return {
+    packet: packet ?? null,
+    suggestedTasks,
+    blindSpotFlags,
+  };
+}
+
+export async function regenerateDealCopilot(tenantDb: TenantDb, dealId: string) {
+  return generateDealCopilotPacket(tenantDb, { dealId, forceRegenerate: true });
+}
+
+export async function dismissTaskSuggestion(
+  tenantDb: TenantDb,
+  suggestionId: string,
+  _userId: string
+) {
+  const [updated] = await tenantDb
+    .update(aiTaskSuggestions)
+    .set({
+      status: "dismissed",
+      resolvedAt: new Date(),
+    })
+    .where(eq(aiTaskSuggestions.id, suggestionId))
+    .returning();
+
+  return updated ?? null;
+}
+
+export async function recordAiFeedback(
+  tenantDb: TenantDb,
+  input: {
+    targetType: string;
+    targetId: string;
+    userId: string;
+    feedbackType: string;
+    feedbackValue: string;
+    comment: string | null;
+  }
+) {
+  const [created] = await tenantDb
+    .insert(aiFeedback)
+    .values({
+      targetType: input.targetType,
+      targetId: input.targetId,
+      userId: input.userId,
+      feedbackType: input.feedbackType,
+      feedbackValue: input.feedbackValue,
+      comment: input.comment,
+    })
+    .returning();
+
+  return created;
+}
+
+export async function getDirectorBlindSpots(tenantDb: TenantDb) {
+  const rows = await tenantDb
+    .select({
+      id: aiRiskFlags.id,
+      dealId: aiRiskFlags.dealId,
+      title: aiRiskFlags.title,
+      severity: aiRiskFlags.severity,
+      status: aiRiskFlags.status,
+      details: aiRiskFlags.details,
+      createdAt: aiRiskFlags.createdAt,
+      dealName: deals.name,
+      dealNumber: deals.dealNumber,
+    })
+    .from(aiRiskFlags)
+    .leftJoin(deals, eq(aiRiskFlags.dealId, deals.id))
+    .where(eq(aiRiskFlags.status, "open"))
+    .orderBy(desc(aiRiskFlags.createdAt))
+    .limit(25);
+
+  return rows;
 }
