@@ -1,5 +1,6 @@
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { DealCopilotPanel } from "@/components/ai/deal-copilot-panel";
 import { DealEstimatesCard } from "./deal-estimates-card";
 import { DealStageBadge } from "./deal-stage-badge";
 import { formatDate, daysInStage, winProbabilityColor, formatCurrency } from "@/lib/deal-utils";
@@ -195,6 +196,8 @@ export function DealOverviewTab({ deal }: DealOverviewTabProps) {
 
       {/* Right Column: Estimates + Quick Info */}
       <div className="space-y-4">
+        <DealCopilotPanel dealId={deal.id} />
+
         <DealEstimatesCard deal={deal} />
 
         {/* Procore Link */}

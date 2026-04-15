@@ -1,0 +1,182 @@
+import { useCallback, useEffect, useState } from "react";
+import { api } from "@/lib/api";
+
+export interface AiCopilotPacket {
+  id: string;
+  scopeType: string;
+  scopeId: string;
+  dealId: string | null;
+  packetKind: string;
+  snapshotHash: string;
+  modelName: string | null;
+  status: string;
+  summaryText: string | null;
+  nextStepJson: Record<string, unknown> | null;
+  blindSpotsJson: Record<string, unknown> | null;
+  evidenceJson: Array<Record<string, unknown>> | null;
+  confidence: string | null;
+  generatedAt: string | null;
+  expiresAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AiTaskSuggestion {
+  id: string;
+  packetId: string;
+  scopeType: string;
+  scopeId: string;
+  title: string;
+  description: string | null;
+  suggestedOwnerId: string | null;
+  suggestedDueAt: string | null;
+  priority: string;
+  confidence: string | null;
+  evidenceJson: Array<Record<string, unknown>> | null;
+  status: string;
+  acceptedTaskId: string | null;
+  createdAt: string;
+  resolvedAt: string | null;
+}
+
+export interface AiRiskFlag {
+  id: string;
+  packetId: string | null;
+  scopeType: string;
+  scopeId: string;
+  dealId: string | null;
+  flagType: string;
+  severity: string;
+  status: string;
+  title: string;
+  details: string | null;
+  evidenceJson: Array<Record<string, unknown>> | null;
+  createdAt: string;
+  resolvedAt: string | null;
+}
+
+export interface DealCopilotView {
+  packet: AiCopilotPacket | null;
+  suggestedTasks: AiTaskSuggestion[];
+  blindSpotFlags: AiRiskFlag[];
+}
+
+interface FeedbackInput {
+  targetType: string;
+  targetId: string;
+  feedbackType: string;
+  feedbackValue: string;
+  comment?: string | null;
+}
+
+export function useDealCopilot(dealId: string | undefined) {
+  const [data, setData] = useState<DealCopilotView | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [regenerating, setRegenerating] = useState(false);
+  const [workingSuggestionId, setWorkingSuggestionId] = useState<string | null>(null);
+  const [submittingFeedback, setSubmittingFeedback] = useState(false);
+
+  const fetchCopilot = useCallback(async () => {
+    if (!dealId) {
+      setLoading(false);
+      setData(null);
+      return;
+    }
+
+    setLoading(true);
+    setError(null);
+    try {
+      const view = await api<DealCopilotView>(`/ai/deals/${dealId}/copilot`);
+      setData(view);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to load deal copilot");
+    } finally {
+      setLoading(false);
+    }
+  }, [dealId]);
+
+  useEffect(() => {
+    fetchCopilot();
+  }, [fetchCopilot]);
+
+  const regenerate = useCallback(async () => {
+    if (!dealId) return;
+
+    setRegenerating(true);
+    setError(null);
+    try {
+      await api(`/ai/deals/${dealId}/regenerate`, { method: "POST" });
+      await fetchCopilot();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to regenerate deal copilot");
+      throw err;
+    } finally {
+      setRegenerating(false);
+    }
+  }, [dealId, fetchCopilot]);
+
+  const acceptSuggestion = useCallback(async (suggestionId: string) => {
+    setWorkingSuggestionId(suggestionId);
+    setError(null);
+    try {
+      await api(`/ai/task-suggestions/${suggestionId}/accept`, { method: "POST" });
+      await fetchCopilot();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to accept task suggestion");
+      throw err;
+    } finally {
+      setWorkingSuggestionId(null);
+    }
+  }, [fetchCopilot]);
+
+  const dismissSuggestion = useCallback(async (suggestionId: string) => {
+    setWorkingSuggestionId(suggestionId);
+    setError(null);
+    try {
+      await api(`/ai/task-suggestions/${suggestionId}/dismiss`, { method: "POST" });
+      await fetchCopilot();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to dismiss task suggestion");
+      throw err;
+    } finally {
+      setWorkingSuggestionId(null);
+    }
+  }, [fetchCopilot]);
+
+  const submitFeedback = useCallback(async (input: FeedbackInput) => {
+    setSubmittingFeedback(true);
+    setError(null);
+    try {
+      await api("/ai/feedback", {
+        method: "POST",
+        json: {
+          targetType: input.targetType,
+          targetId: input.targetId,
+          feedbackType: input.feedbackType,
+          feedbackValue: input.feedbackValue,
+          comment: input.comment ?? null,
+        },
+      });
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to save AI feedback");
+      throw err;
+    } finally {
+      setSubmittingFeedback(false);
+    }
+  }, []);
+
+  return {
+    data,
+    loading,
+    error,
+    regenerating,
+    submittingFeedback,
+    workingSuggestionId,
+    refetch: fetchCopilot,
+    regenerate,
+    acceptSuggestion,
+    dismissSuggestion,
+    submitFeedback,
+  };
+}
