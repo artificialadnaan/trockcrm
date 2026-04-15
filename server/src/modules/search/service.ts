@@ -1,8 +1,8 @@
-import { sql, eq } from "drizzle-orm";
+import { sql, eq, and, gte } from "drizzle-orm";
 import crypto from "crypto";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
-import { userOfficeAccess, offices, users } from "@trock-crm/shared/schema";
+import { aiFeedback, userOfficeAccess, offices, users } from "@trock-crm/shared/schema";
 import { db, pool } from "../../db.js";
 import { drizzle } from "drizzle-orm/node-postgres";
 
@@ -37,6 +37,7 @@ export interface AiSearchEvidence {
   title: string;
   snippet: string;
   deepLink: string;
+  interactionScore?: number;
 }
 
 export interface AiSearchEntityAnchor {
@@ -44,6 +45,7 @@ export interface AiSearchEntityAnchor {
   id: string;
   label: string;
   deepLink: string;
+  interactionScore?: number;
 }
 
 export interface AiSearchRecommendedAction {
@@ -51,6 +53,7 @@ export interface AiSearchRecommendedAction {
   label: string;
   rationale: string;
   deepLink: string;
+  interactionScore?: number;
 }
 
 export interface AiSearchResponse {
@@ -104,17 +107,23 @@ export async function naturalLanguageSearch(
   userId?: string,
 ): Promise<AiSearchResponse> {
   const structured = await globalSearch(tenantDb, query, types, userRole, userId);
-  const evidence = await searchAiEvidence(tenantDb, structured.query);
+  const [evidence, interactionScores] = await Promise.all([
+    searchAiEvidence(tenantDb, structured.query),
+    getSearchInteractionScores(tenantDb),
+  ]);
+  const rankedEvidence = rankEvidenceByInteractions(evidence, interactionScores);
+  const rankedTopEntities = buildTopEntityAnchors(structured, interactionScores);
+  const rankedActions = buildRecommendedActions(structured, rankedEvidence, interactionScores);
 
   return {
     queryId: crypto.randomUUID(),
     query: structured.query,
     intent: classifySearchIntent(structured.query),
-    summary: buildAiSearchSummary(structured, evidence),
+    summary: buildAiSearchSummary(structured, rankedEvidence),
     structured,
-    topEntities: buildTopEntityAnchors(structured),
-    recommendedActions: buildRecommendedActions(structured, evidence),
-    evidence,
+    topEntities: rankedTopEntities,
+    recommendedActions: rankedActions,
+    evidence: rankedEvidence,
   };
 }
 
@@ -475,28 +484,38 @@ function classifySearchIntent(query: string): AiSearchResponse["intent"] {
   return "general_search";
 }
 
-function buildTopEntityAnchors(structured: SearchResponse): AiSearchEntityAnchor[] {
-  const anchors: AiSearchEntityAnchor[] = [];
-  for (const result of [...structured.deals, ...structured.contacts, ...structured.files]) {
-    anchors.push({
-      entityType: result.entityType,
-      id: result.id,
-      label: result.primaryLabel,
-      deepLink: result.deepLink,
-    });
-    if (anchors.length >= 3) break;
-  }
-  return anchors;
+function buildTopEntityAnchors(
+  structured: SearchResponse,
+  interactionScores: SearchInteractionScores
+): AiSearchEntityAnchor[] {
+  return [...structured.deals, ...structured.contacts, ...structured.files]
+    .map((result, index) => ({
+      anchor: {
+        entityType: result.entityType,
+        id: result.id,
+        label: result.primaryLabel,
+        deepLink: result.deepLink,
+        interactionScore: scoreDeepLink(result.deepLink, interactionScores),
+      } satisfies AiSearchEntityAnchor,
+      index,
+    }))
+    .sort((left, right) =>
+      ((right.anchor.interactionScore ?? 0) - (left.anchor.interactionScore ?? 0)) ||
+      (left.index - right.index)
+    )
+    .map(({ anchor }) => anchor)
+    .slice(0, 3);
 }
 
 function buildRecommendedActions(
   structured: SearchResponse,
-  evidence: AiSearchEvidence[]
+  evidence: AiSearchEvidence[],
+  interactionScores: SearchInteractionScores
 ): AiSearchRecommendedAction[] {
-  const actions: AiSearchRecommendedAction[] = [];
+  const actions: Array<{ action: AiSearchRecommendedAction; index: number }> = [];
   const push = (action: AiSearchRecommendedAction) => {
-    if (!actions.some((existing) => existing.deepLink === action.deepLink && existing.label === action.label)) {
-      actions.push(action);
+    if (!actions.some((existing) => existing.action.deepLink === action.deepLink && existing.action.label === action.label)) {
+      actions.push({ action, index: actions.length });
     }
   };
 
@@ -511,12 +530,14 @@ function buildRecommendedActions(
       label: "Open Best Deal Match",
       rationale: `Jump to ${topDeal.primaryLabel} to inspect the strongest structured deal result.`,
       deepLink: topDeal.deepLink,
+      interactionScore: scoreAction("open_best_match", topDeal.deepLink, interactionScores),
     });
     push({
       actionType: "review_deal_emails",
       label: "Review Deal Emails",
       rationale: `Open the email tab for ${topDeal.primaryLabel} to verify the communications behind this answer.`,
       deepLink: `${topDeal.deepLink}?tab=email`,
+      interactionScore: scoreAction("review_deal_emails", `${topDeal.deepLink}?tab=email`, interactionScores),
     });
   }
 
@@ -526,12 +547,14 @@ function buildRecommendedActions(
       label: "Open Deal Context",
       rationale: "The strongest AI evidence points to a specific deal context.",
       deepLink: `/deals/${topEvidenceDeal}`,
+      interactionScore: scoreAction("open_deal_context", `/deals/${topEvidenceDeal}`, interactionScores),
     });
     push({
       actionType: "review_deal_emails",
       label: "Review Deal Emails",
       rationale: "Open the deal email context tied to the strongest evidence.",
       deepLink: `/deals/${topEvidenceDeal}?tab=email`,
+      interactionScore: scoreAction("review_deal_emails", `/deals/${topEvidenceDeal}?tab=email`, interactionScores),
     });
   }
 
@@ -541,6 +564,7 @@ function buildRecommendedActions(
       label: "Open Best Contact Match",
       rationale: `Jump to ${topContact.primaryLabel} to review the strongest contact result.`,
       deepLink: topContact.deepLink,
+      interactionScore: scoreAction("open_contact", topContact.deepLink, interactionScores),
     });
   }
 
@@ -550,8 +574,83 @@ function buildRecommendedActions(
       label: "Open File Context",
       rationale: `Review the file location tied to ${topFile.primaryLabel}.`,
       deepLink: topFile.deepLink,
+      interactionScore: scoreAction("open_file_context", topFile.deepLink, interactionScores),
     });
   }
 
-  return actions.slice(0, 3);
+  return actions
+    .sort((left, right) =>
+      ((right.action.interactionScore ?? 0) - (left.action.interactionScore ?? 0)) ||
+      (left.index - right.index)
+    )
+    .map(({ action }) => action)
+    .slice(0, 3);
+}
+
+interface SearchInteractionScores {
+  deepLinkCounts: Map<string, number>;
+  actionCounts: Map<string, number>;
+}
+
+async function getSearchInteractionScores(tenantDb: TenantDb): Promise<SearchInteractionScores> {
+  const rows = (await tenantDb
+    .select({
+      feedbackValue: aiFeedback.feedbackValue,
+      comment: aiFeedback.comment,
+    })
+    .from(aiFeedback)
+    .where(
+      and(
+        eq(aiFeedback.targetType, "search_query"),
+        eq(aiFeedback.feedbackType, "search_interaction"),
+        gte(aiFeedback.createdAt, sql`NOW() - INTERVAL '90 days'`)
+      )
+    )) as Array<{ feedbackValue: string; comment: string | null }>;
+
+  const deepLinkCounts = new Map<string, number>();
+  const actionCounts = new Map<string, number>();
+
+  for (const row of rows) {
+    if (!row.comment) continue;
+    try {
+      const parsed = JSON.parse(row.comment) as { targetValue?: string; deepLink?: string };
+      if (parsed.deepLink) {
+        deepLinkCounts.set(parsed.deepLink, (deepLinkCounts.get(parsed.deepLink) ?? 0) + 1);
+      }
+      if (parsed.targetValue) {
+        actionCounts.set(parsed.targetValue, (actionCounts.get(parsed.targetValue) ?? 0) + 1);
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  return { deepLinkCounts, actionCounts };
+}
+
+function scoreDeepLink(deepLink: string, interactionScores: SearchInteractionScores) {
+  return interactionScores.deepLinkCounts.get(deepLink) ?? 0;
+}
+
+function scoreAction(actionType: string, deepLink: string, interactionScores: SearchInteractionScores) {
+  return (interactionScores.actionCounts.get(actionType) ?? 0) + (interactionScores.deepLinkCounts.get(deepLink) ?? 0);
+}
+
+function rankEvidenceByInteractions(
+  evidence: AiSearchEvidence[],
+  interactionScores: SearchInteractionScores
+): AiSearchEvidence[] {
+  return [...evidence]
+    .map((item, index) => ({
+      item: {
+        ...item,
+        interactionScore: scoreDeepLink(item.deepLink, interactionScores),
+      },
+      index,
+    }))
+    .sort((left, right) =>
+      ((right.item.interactionScore ?? 0) - (left.item.interactionScore ?? 0)) ||
+      (left.index - right.index)
+    )
+    .map(({ item }) => item);
 }

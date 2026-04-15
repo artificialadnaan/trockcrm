@@ -29,6 +29,7 @@ export interface AiSearchEvidence {
   title: string;
   snippet: string;
   deepLink: string;
+  interactionScore?: number;
 }
 
 export interface AiSearchEntityAnchor {
@@ -36,6 +37,7 @@ export interface AiSearchEntityAnchor {
   id: string;
   label: string;
   deepLink: string;
+  interactionScore?: number;
 }
 
 export interface AiSearchRecommendedAction {
@@ -43,6 +45,7 @@ export interface AiSearchRecommendedAction {
   label: string;
   rationale: string;
   deepLink: string;
+  interactionScore?: number;
 }
 
 export interface AiSearchResponse {

@@ -13,6 +13,15 @@ const ENTITY_COLORS = {
   file: "bg-red-100 text-red-800",
 } as const;
 
+function PopularityBadge({ score }: { score?: number }) {
+  if (!score || score < 1) return null;
+  return (
+    <Badge variant="outline" className="text-[10px] uppercase tracking-[0.16em]">
+      Frequently used
+    </Badge>
+  );
+}
+
 function ResultCard({ result }: { result: SearchResult }) {
   const Icon = ENTITY_ICONS[result.entityType];
   return (
@@ -122,7 +131,10 @@ export function SearchPage() {
                       onClick={() => trackInteraction("recommended_action_click", action.actionType, action.deepLink)}
                     >
                       <div className="space-y-1">
-                        <div className="text-sm font-medium text-foreground">{action.label}</div>
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="text-sm font-medium text-foreground">{action.label}</div>
+                          <PopularityBadge score={action.interactionScore} />
+                        </div>
                         <div className="text-xs text-muted-foreground leading-5">{action.rationale}</div>
                       </div>
                     </Link>
@@ -142,9 +154,12 @@ export function SearchPage() {
                       to={entity.deepLink}
                       onClick={() => trackInteraction("top_entity_click", `${entity.entityType}:${entity.id}`, entity.deepLink)}
                     >
-                      <Badge variant="secondary" className="hover:bg-secondary/80">
-                        {entity.entityType}: {entity.label}
-                      </Badge>
+                      <div className="flex items-center gap-2">
+                        <Badge variant="secondary" className="hover:bg-secondary/80">
+                          {entity.entityType}: {entity.label}
+                        </Badge>
+                        <PopularityBadge score={entity.interactionScore} />
+                      </div>
                     </Link>
                   ))}
                 </div>
@@ -165,7 +180,10 @@ export function SearchPage() {
                     >
                       <div className="flex items-center justify-between gap-3">
                         <div className="min-w-0 space-y-1">
-                          <div className="text-sm font-medium text-foreground">{item.title}</div>
+                          <div className="flex items-center gap-2">
+                            <div className="text-sm font-medium text-foreground">{item.title}</div>
+                            <PopularityBadge score={item.interactionScore} />
+                          </div>
                           <div className="text-sm text-muted-foreground line-clamp-2">{item.snippet}</div>
                           {item.entityLabel && (
                             <div className="text-xs text-muted-foreground">
