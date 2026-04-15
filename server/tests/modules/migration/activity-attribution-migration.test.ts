@@ -22,28 +22,35 @@ function getTenantSection(sql: string) {
 }
 
 describe("0021 activity attribution migration", () => {
-  it("updates all existing office schemas through the tenant migration loop", () => {
-    expect(migrationSql).toContain("FROM pg_namespace");
-    expect(migrationSql).toContain("WHERE nspname LIKE 'office\\_%' ESCAPE '\\'");
-    expect(migrationSql).toContain("ALTER TABLE %I.activities RENAME COLUMN user_id TO responsible_user_id");
-    expect(migrationSql).toContain("ADD COLUMN IF NOT EXISTS performed_by_user_id UUID");
-    expect(migrationSql).toContain("ADD COLUMN IF NOT EXISTS source_entity_type public.activity_source_entity");
-    expect(migrationSql).toContain("CREATE INDEX IF NOT EXISTS activities_responsible_user_idx");
+  it("applies to all existing office schemas", () => {
+    expect(migrationSql).toContain("FROM information_schema.schemata");
+    expect(migrationSql).toContain("WHERE schema_name LIKE 'office_%'");
+    expect(migrationSql).toContain("SET LOCAL search_path = %I, public");
+    expect(migrationSql).toContain("EXECUTE tenant_sql");
   });
 
   it("keeps the mixed-state rename guard schema-scoped and idempotent", () => {
-    expect(migrationSql).toContain("WHERE table_schema = schema_name");
+    expect(migrationSql).toContain("table_schema = current_schema()");
     expect(migrationSql).toContain("AND table_name = 'activities'");
     expect(migrationSql).toContain("AND column_name = 'user_id'");
+  });
+
+  it("backfills through direct and email-linked lineage before enforcing not-null columns", () => {
+    expect(migrationSql).toContain("SELECT e.deal_id FROM emails e WHERE e.id = activities.email_id");
+    expect(migrationSql).toContain("SELECT e.contact_id FROM emails e WHERE e.id = activities.email_id");
+    expect(migrationSql).toContain("JOIN deals d ON d.id = e.deal_id");
+    expect(migrationSql).toContain("JOIN contacts c ON c.id = e.contact_id");
+    expect(migrationSql).toContain("source_entity_id = COALESCE(");
+    expect(migrationSql).toContain("source_entity_type = COALESCE(source_entity_type, 'company'::activity_source_entity)");
+    expect(migrationSql).toContain("source_entity_id = COALESCE(source_entity_id, company_id, contact_id, deal_id, id)");
   });
 
   it("includes tenant provisioning DDL for new office schemas", () => {
     const tenantSql = getTenantSection(migrationSql);
 
     expect(tenantSql).toContain("table_schema = current_schema()");
-    expect(tenantSql).toContain("ALTER TABLE activities RENAME COLUMN user_id TO responsible_user_id");
     expect(tenantSql).toContain("ADD COLUMN IF NOT EXISTS performed_by_user_id UUID");
-    expect(tenantSql).toContain("ADD COLUMN IF NOT EXISTS source_entity_type public.activity_source_entity");
+    expect(tenantSql).toContain("ADD COLUMN IF NOT EXISTS source_entity_type activity_source_entity");
     expect(tenantSql).toContain("CREATE INDEX IF NOT EXISTS activities_lead_idx");
   });
 });

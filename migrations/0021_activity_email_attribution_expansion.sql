@@ -46,15 +46,97 @@ BEGIN
 
     UPDATE activities
     SET
+      deal_id = COALESCE(
+        deal_id,
+        (SELECT e.deal_id FROM emails e WHERE e.id = activities.email_id)
+      ),
+      contact_id = COALESCE(
+        contact_id,
+        (SELECT e.contact_id FROM emails e WHERE e.id = activities.email_id)
+      ),
+      company_id = COALESCE(
+        company_id,
+        (SELECT d.company_id FROM deals d WHERE d.id = activities.deal_id),
+        (SELECT c.company_id FROM contacts c WHERE c.id = activities.contact_id),
+        (SELECT d.company_id
+           FROM emails e
+           JOIN deals d ON d.id = e.deal_id
+          WHERE e.id = activities.email_id),
+        (SELECT c.company_id
+           FROM emails e
+           JOIN contacts c ON c.id = e.contact_id
+          WHERE e.id = activities.email_id)
+      ),
+      property_id = COALESCE(
+        property_id,
+        (SELECT d.property_id FROM deals d WHERE d.id = activities.deal_id),
+        (SELECT d.property_id
+           FROM emails e
+           JOIN deals d ON d.id = e.deal_id
+          WHERE e.id = activities.email_id)
+      ),
+      lead_id = COALESCE(
+        lead_id,
+        (SELECT d.source_lead_id FROM deals d WHERE d.id = activities.deal_id),
+        (SELECT d.source_lead_id
+           FROM emails e
+           JOIN deals d ON d.id = e.deal_id
+          WHERE e.id = activities.email_id)
+      ),
       source_entity_type = CASE
-        WHEN deal_id IS NOT NULL THEN 'deal'::activity_source_entity
-        WHEN contact_id IS NOT NULL THEN 'contact'::activity_source_entity
-        ELSE COALESCE(source_entity_type, 'contact'::activity_source_entity)
+        WHEN COALESCE(
+          deal_id,
+          (SELECT e.deal_id FROM emails e WHERE e.id = activities.email_id)
+        ) IS NOT NULL THEN 'deal'::activity_source_entity
+        WHEN COALESCE(
+          contact_id,
+          (SELECT e.contact_id FROM emails e WHERE e.id = activities.email_id)
+        ) IS NOT NULL THEN 'contact'::activity_source_entity
+        WHEN COALESCE(
+          company_id,
+          (SELECT d.company_id FROM deals d WHERE d.id = activities.deal_id),
+          (SELECT c.company_id FROM contacts c WHERE c.id = activities.contact_id),
+          (SELECT d.company_id
+             FROM emails e
+             JOIN deals d ON d.id = e.deal_id
+            WHERE e.id = activities.email_id),
+          (SELECT c.company_id
+             FROM emails e
+             JOIN contacts c ON c.id = e.contact_id
+            WHERE e.id = activities.email_id)
+        ) IS NOT NULL THEN 'company'::activity_source_entity
+        ELSE source_entity_type
       END,
-      source_entity_id = COALESCE(source_entity_id, deal_id, contact_id),
-      company_id = COALESCE(company_id, NULL),
-      property_id = COALESCE(property_id, NULL),
-      lead_id = COALESCE(lead_id, NULL)
+      source_entity_id = COALESCE(
+        source_entity_id,
+        deal_id,
+        (SELECT e.deal_id FROM emails e WHERE e.id = activities.email_id),
+        contact_id,
+        (SELECT e.contact_id FROM emails e WHERE e.id = activities.email_id),
+        company_id,
+        (SELECT d.company_id FROM deals d WHERE d.id = activities.deal_id),
+        (SELECT c.company_id FROM contacts c WHERE c.id = activities.contact_id),
+        (SELECT d.company_id
+           FROM emails e
+           JOIN deals d ON d.id = e.deal_id
+          WHERE e.id = activities.email_id),
+        (SELECT c.company_id
+           FROM emails e
+           JOIN contacts c ON c.id = e.contact_id
+          WHERE e.id = activities.email_id)
+      )
+    WHERE source_entity_type IS NULL
+       OR source_entity_id IS NULL
+       OR deal_id IS NULL
+       OR contact_id IS NULL
+       OR company_id IS NULL
+       OR property_id IS NULL
+       OR lead_id IS NULL;
+
+    UPDATE activities
+    SET
+      source_entity_type = COALESCE(source_entity_type, 'company'::activity_source_entity),
+      source_entity_id = COALESCE(source_entity_id, company_id, contact_id, deal_id, id)
     WHERE source_entity_type IS NULL
        OR source_entity_id IS NULL;
 
@@ -132,15 +214,97 @@ BEGIN
 
     UPDATE activities
     SET
+      deal_id = COALESCE(
+        deal_id,
+        (SELECT e.deal_id FROM emails e WHERE e.id = activities.email_id)
+      ),
+      contact_id = COALESCE(
+        contact_id,
+        (SELECT e.contact_id FROM emails e WHERE e.id = activities.email_id)
+      ),
+      company_id = COALESCE(
+        company_id,
+        (SELECT d.company_id FROM deals d WHERE d.id = activities.deal_id),
+        (SELECT c.company_id FROM contacts c WHERE c.id = activities.contact_id),
+        (SELECT d.company_id
+           FROM emails e
+           JOIN deals d ON d.id = e.deal_id
+          WHERE e.id = activities.email_id),
+        (SELECT c.company_id
+           FROM emails e
+           JOIN contacts c ON c.id = e.contact_id
+          WHERE e.id = activities.email_id)
+      ),
+      property_id = COALESCE(
+        property_id,
+        (SELECT d.property_id FROM deals d WHERE d.id = activities.deal_id),
+        (SELECT d.property_id
+           FROM emails e
+           JOIN deals d ON d.id = e.deal_id
+          WHERE e.id = activities.email_id)
+      ),
+      lead_id = COALESCE(
+        lead_id,
+        (SELECT d.source_lead_id FROM deals d WHERE d.id = activities.deal_id),
+        (SELECT d.source_lead_id
+           FROM emails e
+           JOIN deals d ON d.id = e.deal_id
+          WHERE e.id = activities.email_id)
+      ),
       source_entity_type = CASE
-        WHEN deal_id IS NOT NULL THEN 'deal'::activity_source_entity
-        WHEN contact_id IS NOT NULL THEN 'contact'::activity_source_entity
-        ELSE COALESCE(source_entity_type, 'contact'::activity_source_entity)
+        WHEN COALESCE(
+          deal_id,
+          (SELECT e.deal_id FROM emails e WHERE e.id = activities.email_id)
+        ) IS NOT NULL THEN 'deal'::activity_source_entity
+        WHEN COALESCE(
+          contact_id,
+          (SELECT e.contact_id FROM emails e WHERE e.id = activities.email_id)
+        ) IS NOT NULL THEN 'contact'::activity_source_entity
+        WHEN COALESCE(
+          company_id,
+          (SELECT d.company_id FROM deals d WHERE d.id = activities.deal_id),
+          (SELECT c.company_id FROM contacts c WHERE c.id = activities.contact_id),
+          (SELECT d.company_id
+             FROM emails e
+             JOIN deals d ON d.id = e.deal_id
+            WHERE e.id = activities.email_id),
+          (SELECT c.company_id
+             FROM emails e
+             JOIN contacts c ON c.id = e.contact_id
+            WHERE e.id = activities.email_id)
+        ) IS NOT NULL THEN 'company'::activity_source_entity
+        ELSE source_entity_type
       END,
-      source_entity_id = COALESCE(source_entity_id, deal_id, contact_id),
-      company_id = COALESCE(company_id, NULL),
-      property_id = COALESCE(property_id, NULL),
-      lead_id = COALESCE(lead_id, NULL)
+      source_entity_id = COALESCE(
+        source_entity_id,
+        deal_id,
+        (SELECT e.deal_id FROM emails e WHERE e.id = activities.email_id),
+        contact_id,
+        (SELECT e.contact_id FROM emails e WHERE e.id = activities.email_id),
+        company_id,
+        (SELECT d.company_id FROM deals d WHERE d.id = activities.deal_id),
+        (SELECT c.company_id FROM contacts c WHERE c.id = activities.contact_id),
+        (SELECT d.company_id
+           FROM emails e
+           JOIN deals d ON d.id = e.deal_id
+          WHERE e.id = activities.email_id),
+        (SELECT c.company_id
+           FROM emails e
+           JOIN contacts c ON c.id = e.contact_id
+          WHERE e.id = activities.email_id)
+      )
+    WHERE source_entity_type IS NULL
+       OR source_entity_id IS NULL
+       OR deal_id IS NULL
+       OR contact_id IS NULL
+       OR company_id IS NULL
+       OR property_id IS NULL
+       OR lead_id IS NULL;
+
+    UPDATE activities
+    SET
+      source_entity_type = COALESCE(source_entity_type, 'company'::activity_source_entity),
+      source_entity_id = COALESCE(source_entity_id, company_id, contact_id, deal_id, id)
     WHERE source_entity_type IS NULL
        OR source_entity_id IS NULL;
 
