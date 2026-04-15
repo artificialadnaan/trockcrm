@@ -38,6 +38,12 @@ export { estimateLineItems } from "./tenant/estimate-line-items.js";
 export { punchListItems, punchListTypeEnum, punchListStatusEnum } from "./tenant/punch-list-items.js";
 export { workflowTimers, workflowTimerTypeEnum, workflowTimerStatusEnum } from "./tenant/workflow-timers.js";
 export { closeoutChecklistItems } from "./tenant/closeout-checklist-items.js";
+export { aiDocumentIndex } from "./tenant/ai-document-index.js";
+export { aiEmbeddingChunks } from "./tenant/ai-embedding-chunks.js";
+export { aiCopilotPackets } from "./tenant/ai-copilot-packets.js";
+export { aiTaskSuggestions } from "./tenant/ai-task-suggestions.js";
+export { aiRiskFlags } from "./tenant/ai-risk-flags.js";
+export { aiFeedback } from "./tenant/ai-feedback.js";
 
 // Migration schema tables (staging area for HubSpot data migration)
 export { stagedDeals } from "./migration/staged-deals.js";
