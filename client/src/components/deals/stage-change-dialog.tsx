@@ -25,7 +25,6 @@ import {
 } from "@/hooks/use-deals";
 import { useLostReasons } from "@/hooks/use-pipeline-config";
 import { AlertTriangle, ArrowRight, ArrowLeft, Shield, Loader2 } from "lucide-react";
-import type { StageGateChecklistItemView } from "./stage-gate-checklist";
 
 interface StageChangeDialogProps {
   deal: { id: string; name: string; stageId: string };
@@ -34,12 +33,6 @@ interface StageChangeDialogProps {
   onOpenChange: (open: boolean) => void;
   onSuccess: () => void;
 }
-
-type StageGateEffectiveChecklist = {
-  fields: StageGateChecklistItemView[];
-  attachments: StageGateChecklistItemView[];
-  approvals: StageGateChecklistItemView[];
-};
 
 export function StageChangeDialog({
   deal,
@@ -118,7 +111,6 @@ export function StageChangeDialog({
   const isBlocked = preflight != null && !preflight.allowed;
   const isClosedLost = preflight?.targetStage.slug === "closed_lost";
   const isClosedWon = preflight?.targetStage.slug === "closed_won";
-  const effectiveChecklist = (preflight as { effectiveChecklist?: StageGateEffectiveChecklist } | null)?.effectiveChecklist;
 
   // When closing as lost, the modal is NOT dismissible via overlay click or escape.
   // The user MUST fill in all required fields and submit. For other stage changes,
@@ -178,10 +170,7 @@ export function StageChangeDialog({
             )}
 
             {/* Gate Checklist */}
-            <StageGateChecklist
-              missingRequirements={preflight.missingRequirements}
-              effectiveChecklist={effectiveChecklist}
-            />
+            <StageGateChecklist missingRequirements={preflight.missingRequirements} />
 
             {/* Override Reason (for directors) */}
             {preflight.requiresOverride && (

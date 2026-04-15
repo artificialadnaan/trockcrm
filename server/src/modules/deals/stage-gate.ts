@@ -46,6 +46,11 @@ export interface StageGateResult {
     fields: string[];
     documents: string[];
     approvals: string[];
+    effectiveChecklist?: {
+      fields: StageGateChecklistItem[];
+      attachments: StageGateChecklistItem[];
+      approvals: StageGateChecklistItem[];
+    };
   };
   effectiveChecklist: {
     fields: StageGateChecklistItem[];
@@ -196,7 +201,12 @@ export async function validateStageGate(
         isTerminal: currentStage.isTerminal,
         displayOrder: currentStage.displayOrder,
       },
-      missingRequirements: { fields: [], documents: [], approvals: [] },
+      missingRequirements: {
+        fields: [],
+        documents: [],
+        approvals: [],
+        effectiveChecklist: { fields: [], attachments: [], approvals: [] },
+      },
       effectiveChecklist: { fields: [], attachments: [], approvals: [] },
       requiresOverride: false,
       overrideType: null,
@@ -420,6 +430,7 @@ export async function validateStageGate(
       fields: uniqueStrings(missingFields),
       documents: uniqueStrings(missingDocuments),
       approvals: uniqueStrings(missingApprovals),
+      effectiveChecklist,
     },
     effectiveChecklist,
     requiresOverride,

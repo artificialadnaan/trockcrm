@@ -18,11 +18,11 @@ interface StageGateChecklistProps {
     fields: string[];
     documents: string[];
     approvals: string[];
-  };
-  effectiveChecklist?: {
-    fields: StageGateChecklistItemView[];
-    attachments: StageGateChecklistItemView[];
-    approvals: StageGateChecklistItemView[];
+    effectiveChecklist?: {
+      fields: StageGateChecklistItemView[];
+      attachments: StageGateChecklistItemView[];
+      approvals: StageGateChecklistItemView[];
+    };
   };
 }
 
@@ -110,9 +110,9 @@ function RequirementGroup({
 
 export function StageGateChecklist({
   missingRequirements,
-  effectiveChecklist,
 }: StageGateChecklistProps) {
   const { fields, documents, approvals } = missingRequirements;
+  const effectiveChecklist = missingRequirements.effectiveChecklist;
   const hasAny = fields.length > 0 || documents.length > 0 || approvals.length > 0;
   const hasChecklist =
     (effectiveChecklist?.fields.length ?? 0) > 0 ||

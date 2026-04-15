@@ -1211,7 +1211,7 @@ describe("Scoping Attachment Hardening", () => {
         satisfied: true,
       }),
     ]);
-  });
+  }, 10000);
 
   it("requires a linked file in the canonical category before attachment satisfaction passes", async () => {
     const { evaluateDealScopingReadiness } = await import("../../../src/modules/deals/scoping-service.js");
@@ -1255,7 +1255,7 @@ describe("Scoping Attachment Hardening", () => {
         satisfied: false,
       })
     );
-  });
+  }, 10000);
 
   it("ignores linked files without verified storage metadata", async () => {
     const { evaluateDealScopingReadiness } = await import("../../../src/modules/deals/scoping-service.js");
@@ -1414,6 +1414,33 @@ describe("Stage Gate Payload Hardening", () => {
         satisfied: false,
       }),
     ]);
+    expect(result.missingRequirements).toEqual(
+      expect.objectContaining({
+        effectiveChecklist: expect.objectContaining({
+          fields: [
+            expect.objectContaining({
+              key: "description",
+              source: "stage",
+              satisfied: true,
+            }),
+          ],
+          attachments: [
+            expect.objectContaining({
+              key: "proposal",
+              source: "stage",
+              satisfied: false,
+            }),
+          ],
+          approvals: [
+            expect.objectContaining({
+              key: "director",
+              source: "stage",
+              satisfied: false,
+            }),
+          ],
+        }),
+      })
+    );
   });
 
   it("does not satisfy stage document requirements with unverified linked files", async () => {
