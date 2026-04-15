@@ -7,15 +7,24 @@ const serviceMocks = vi.hoisted(() => ({
   naturalLanguageSearch: vi.fn(),
 }));
 
+const aiCopilotMocks = vi.hoisted(() => ({
+  recordAiFeedback: vi.fn(),
+}));
+
 vi.mock("../../../src/modules/search/service.js", () => ({
   globalSearch: serviceMocks.globalSearch,
   naturalLanguageSearch: serviceMocks.naturalLanguageSearch,
+}));
+
+vi.mock("../../../src/modules/ai-copilot/service.js", () => ({
+  recordAiFeedback: aiCopilotMocks.recordAiFeedback,
 }));
 
 const { searchRoutes } = await import("../../../src/modules/search/routes.js");
 
 function createApp() {
   const app = express();
+  app.use(express.json());
   app.use((req, _res, next) => {
     req.user = { id: "director-1", role: "director" };
     req.tenantDb = {};
@@ -107,5 +116,32 @@ describe("search routes", () => {
     expect(res.body.topEntities).toHaveLength(1);
     expect(res.body.recommendedActions).toHaveLength(1);
     expect(res.body.evidence).toHaveLength(1);
+  });
+
+  it("tracks AI search interactions", async () => {
+    aiCopilotMocks.recordAiFeedback.mockResolvedValueOnce({ id: "feedback-1" });
+
+    const app = createApp();
+    const res = await request(app)
+      .post("/api/search/ai/interaction")
+      .send({
+        queryId: "11111111-1111-1111-1111-111111111111",
+        interactionType: "recommended_action_click",
+        targetValue: "open_best_match",
+        deepLink: "/deals/deal-1",
+      });
+
+    expect(res.status).toBe(201);
+    expect(aiCopilotMocks.recordAiFeedback).toHaveBeenCalledWith(expect.anything(), {
+      targetType: "search_query",
+      targetId: "11111111-1111-1111-1111-111111111111",
+      userId: "director-1",
+      feedbackType: "search_interaction",
+      feedbackValue: "recommended_action_click",
+      comment: JSON.stringify({
+        targetValue: "open_best_match",
+        deepLink: "/deals/deal-1",
+      }),
+    });
   });
 });

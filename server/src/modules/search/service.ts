@@ -1,4 +1,5 @@
 import { sql, eq } from "drizzle-orm";
+import crypto from "crypto";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import { userOfficeAccess, offices, users } from "@trock-crm/shared/schema";
@@ -53,6 +54,7 @@ export interface AiSearchRecommendedAction {
 }
 
 export interface AiSearchResponse {
+  queryId: string;
   query: string;
   intent: "deal_lookup" | "contact_lookup" | "file_lookup" | "account_research" | "activity_lookup" | "general_search";
   summary: string;
@@ -105,6 +107,7 @@ export async function naturalLanguageSearch(
   const evidence = await searchAiEvidence(tenantDb, structured.query);
 
   return {
+    queryId: crypto.randomUUID(),
     query: structured.query,
     intent: classifySearchIntent(structured.query),
     summary: buildAiSearchSummary(structured, evidence),

@@ -46,6 +46,7 @@ export interface AiSearchRecommendedAction {
 }
 
 export interface AiSearchResponse {
+  queryId: string;
   query: string;
   intent: "deal_lookup" | "contact_lookup" | "file_lookup" | "account_research" | "activity_lookup" | "general_search";
   summary: string;
@@ -163,4 +164,16 @@ export function useAiSearch() {
   }, [query, search]);
 
   return { query, setQuery, results, loading, error };
+}
+
+export async function trackAiSearchInteraction(input: {
+  queryId: string;
+  interactionType: "recommended_action_click" | "top_entity_click" | "evidence_click";
+  targetValue: string;
+  deepLink: string;
+}) {
+  return api<{ interaction: { id: string } }>("/search/ai/interaction", {
+    method: "POST",
+    json: input,
+  });
 }

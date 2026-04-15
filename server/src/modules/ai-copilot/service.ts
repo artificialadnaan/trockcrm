@@ -61,6 +61,8 @@ export interface AiOpsMetrics {
   resolvedBlindSpots30d: number;
   recurringBlindSpotsOpen: number;
   recurringSuggestionsOpen: number;
+  aiSearchInteractions30d: number;
+  aiSearchQueriesWithClick30d: number;
   positiveFeedback30d: number;
   negativeFeedback30d: number;
   documentsIndexed: number;
@@ -718,6 +720,20 @@ export async function getAiOpsMetrics(tenantDb: TenantDb): Promise<AiOpsMetrics>
           COUNT(*) FILTER (WHERE feedback_type = 'triage_action' AND feedback_value = 'escalate' AND created_at >= NOW() - INTERVAL '30 days')::int AS escalations_30d
         FROM ai_feedback
       ),
+      search_interaction_counts AS (
+        SELECT
+          COUNT(*) FILTER (
+            WHERE target_type = 'search_query'
+              AND feedback_type = 'search_interaction'
+              AND created_at >= NOW() - INTERVAL '30 days'
+          )::int AS ai_search_interactions_30d,
+          COUNT(DISTINCT target_id) FILTER (
+            WHERE target_type = 'search_query'
+              AND feedback_type = 'search_interaction'
+              AND created_at >= NOW() - INTERVAL '30 days'
+          )::int AS ai_search_queries_with_click_30d
+        FROM ai_feedback
+      ),
       risk_resolution_counts AS (
         SELECT
           COUNT(*) FILTER (WHERE status = 'resolved' AND resolved_at >= NOW() - INTERVAL '30 days')::int AS resolved_blind_spots_30d,
@@ -771,6 +787,8 @@ export async function getAiOpsMetrics(tenantDb: TenantDb): Promise<AiOpsMetrics>
         suggestion_counts.suggestions_dismissed_30d,
         triage_counts.triage_actions_30d,
         triage_counts.escalations_30d,
+        search_interaction_counts.ai_search_interactions_30d,
+        search_interaction_counts.ai_search_queries_with_click_30d,
         risk_resolution_counts.resolved_blind_spots_30d,
         risk_resolution_counts.recurring_blind_spots_open,
         recurring_suggestion_counts.recurring_suggestions_open,
@@ -778,7 +796,7 @@ export async function getAiOpsMetrics(tenantDb: TenantDb): Promise<AiOpsMetrics>
         feedback_counts.negative_feedback_30d,
         document_counts.documents_indexed,
         document_counts.documents_pending
-      FROM packet_counts, risk_counts, suggestion_counts, triage_counts, risk_resolution_counts, recurring_suggestion_counts, feedback_counts, document_counts
+      FROM packet_counts, risk_counts, suggestion_counts, triage_counts, search_interaction_counts, risk_resolution_counts, recurring_suggestion_counts, feedback_counts, document_counts
     `),
     tenantDb.execute(sql`
       SELECT
@@ -802,6 +820,8 @@ export async function getAiOpsMetrics(tenantDb: TenantDb): Promise<AiOpsMetrics>
     suggestionsDismissed30d: Number(summaryRow.suggestions_dismissed_30d ?? 0),
     triageActions30d: Number(summaryRow.triage_actions_30d ?? 0),
     escalations30d: Number(summaryRow.escalations_30d ?? 0),
+    aiSearchInteractions30d: Number(summaryRow.ai_search_interactions_30d ?? 0),
+    aiSearchQueriesWithClick30d: Number(summaryRow.ai_search_queries_with_click_30d ?? 0),
     resolvedBlindSpots30d: Number(summaryRow.resolved_blind_spots_30d ?? 0),
     recurringBlindSpotsOpen: Number(summaryRow.recurring_blind_spots_open ?? 0),
     recurringSuggestionsOpen: Number(summaryRow.recurring_suggestions_open ?? 0),

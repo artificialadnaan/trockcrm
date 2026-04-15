@@ -2,7 +2,7 @@ import { useEffect } from "react";
 import { useSearchParams, Link } from "react-router-dom";
 import { Search, Building2, User, FileText, Sparkles } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
-import { useAiSearch, useSearch, useRecentSearches, type SearchResult } from "@/hooks/use-search";
+import { trackAiSearchInteraction, useAiSearch, useSearch, useRecentSearches, type SearchResult } from "@/hooks/use-search";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 
@@ -67,6 +67,16 @@ export function SearchPage() {
   ];
   const intentLabel = aiResults?.intent ? aiResults.intent.replace(/_/g, " ") : null;
 
+  const trackInteraction = (interactionType: "recommended_action_click" | "top_entity_click" | "evidence_click", targetValue: string, deepLink: string) => {
+    if (!aiResults?.queryId) return;
+    void trackAiSearchInteraction({
+      queryId: aiResults.queryId,
+      interactionType,
+      targetValue,
+      deepLink,
+    }).catch(() => {});
+  };
+
   return (
     <div className="p-6 max-w-3xl mx-auto space-y-6">
       <div className="flex items-center gap-3">
@@ -109,6 +119,7 @@ export function SearchPage() {
                       key={`${action.actionType}:${action.deepLink}`}
                       to={action.deepLink}
                       className="rounded-lg border bg-white px-3 py-3 hover:bg-gray-50"
+                      onClick={() => trackInteraction("recommended_action_click", action.actionType, action.deepLink)}
                     >
                       <div className="space-y-1">
                         <div className="text-sm font-medium text-foreground">{action.label}</div>
@@ -126,7 +137,11 @@ export function SearchPage() {
                 </p>
                 <div className="flex flex-wrap gap-2">
                   {aiResults.topEntities.map((entity) => (
-                    <Link key={`${entity.entityType}:${entity.id}`} to={entity.deepLink}>
+                    <Link
+                      key={`${entity.entityType}:${entity.id}`}
+                      to={entity.deepLink}
+                      onClick={() => trackInteraction("top_entity_click", `${entity.entityType}:${entity.id}`, entity.deepLink)}
+                    >
                       <Badge variant="secondary" className="hover:bg-secondary/80">
                         {entity.entityType}: {entity.label}
                       </Badge>
@@ -146,6 +161,7 @@ export function SearchPage() {
                       key={item.id}
                       to={item.deepLink}
                       className="block rounded-lg border bg-white px-3 py-3 hover:bg-gray-50"
+                      onClick={() => trackInteraction("evidence_click", `${item.sourceType}:${item.sourceId}`, item.deepLink)}
                     >
                       <div className="flex items-center justify-between gap-3">
                         <div className="min-w-0 space-y-1">

@@ -13,6 +13,8 @@ export interface AiOpsMetrics {
   resolvedBlindSpots30d: number;
   recurringBlindSpotsOpen: number;
   recurringSuggestionsOpen: number;
+  aiSearchInteractions30d: number;
+  aiSearchQueriesWithClick30d: number;
   positiveFeedback30d: number;
   negativeFeedback30d: number;
   documentsIndexed: number;
