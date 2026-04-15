@@ -58,6 +58,145 @@ function expectPipelineFamilySqlToMatch(pattern: RegExp): void {
   expect(pipelineFamilyMigrationSql).toMatch(pattern);
 }
 
+type RouteServiceMocks = {
+  createDeal: ReturnType<typeof vi.fn>;
+  updateDeal: ReturnType<typeof vi.fn>;
+};
+
+async function loadDealRoutesWithServiceMocks() {
+  vi.resetModules();
+
+  const routeServiceMocks: RouteServiceMocks = {
+    createDeal: vi.fn(),
+    updateDeal: vi.fn(),
+  };
+
+  vi.doMock("../../../src/modules/deals/service.js", async () => {
+    const actual = await vi.importActual<typeof import("../../../src/modules/deals/service.js")>(
+      "../../../src/modules/deals/service.js"
+    );
+
+    return {
+      ...actual,
+      getDealById: vi.fn(async () => ({ id: "deal-1", assignedRepId: "rep-1" })),
+      getDeals: vi.fn(),
+      getDealDetail: vi.fn(),
+      createDeal: routeServiceMocks.createDeal,
+      updateDeal: routeServiceMocks.updateDeal,
+      deleteDeal: vi.fn(),
+      getDealsForPipeline: vi.fn(),
+      getDealSources: vi.fn(),
+    };
+  });
+
+  vi.doMock("../../../src/modules/deals/stage-change.js", () => ({
+    changeDealStage: vi.fn(),
+    activateServiceHandoff: vi.fn(),
+  }));
+
+  vi.doMock("../../../src/modules/deals/stage-gate.js", () => ({
+    preflightStageCheck: vi.fn(),
+  }));
+
+  vi.doMock("../../../src/modules/contacts/association-service.js", () => ({
+    getContactsForDeal: vi.fn(),
+  }));
+
+  vi.doMock("../../../src/modules/deals/scoping-service.js", () => ({
+    evaluateDealScopingReadiness: vi.fn(),
+    getOrCreateDealScopingIntake: vi.fn(),
+    linkDealFileToScopingRequirement: vi.fn(),
+    upsertDealScopingIntake: vi.fn(),
+  }));
+
+  vi.doMock("../../../src/events/bus.js", () => ({
+    eventBus: {
+      emitLocal: vi.fn(),
+      on: vi.fn(),
+      emit: vi.fn(),
+      setMaxListeners: vi.fn(),
+    },
+  }));
+
+  const { dealRoutes } = await import("../../../src/modules/deals/routes.js");
+  return { dealRoutes, routeServiceMocks };
+}
+
+function findDealRouteHandler(
+  dealRoutes: unknown,
+  method: "post" | "patch",
+  path: string
+) {
+  const layer = (dealRoutes as any).stack.find(
+    (entry: any) => entry.route?.path === path && entry.route?.methods?.[method]
+  );
+
+  if (!layer) {
+    throw new Error(`Route ${method.toUpperCase()} ${path} not found`);
+  }
+
+  const routeLayer = layer.route.stack.find((entry: any) => entry.method === method);
+  if (!routeLayer) {
+    throw new Error(`Route handler ${method.toUpperCase()} ${path} not found`);
+  }
+
+  return routeLayer.handle as (req: any, res: any, next: (err?: unknown) => void) => unknown;
+}
+
+async function invokeDealRoute({
+  dealRoutes,
+  method,
+  path,
+  params = {},
+  body = {},
+  userRole = "director",
+}: {
+  dealRoutes: unknown;
+  method: "post" | "patch";
+  path: "/" | "/:id";
+  params?: Record<string, string>;
+  body?: Record<string, unknown>;
+  userRole?: "admin" | "director" | "rep";
+}) {
+  const handler = findDealRouteHandler(dealRoutes, method, path);
+  const req = {
+    params,
+    body,
+    tenantDb: {
+      insert: vi.fn(() => ({
+        values: vi.fn(async () => ({})),
+      })),
+    },
+    user: {
+      id: userRole === "rep" ? "rep-1" : "director-1",
+      role: userRole,
+      officeId: "office-1",
+      activeOfficeId: "office-1",
+    },
+    commitTransaction: vi.fn(async () => {}),
+  } as any;
+  const res = {
+    statusCode: 200,
+    body: undefined as any,
+    status(code: number) {
+      this.statusCode = code;
+      return this;
+    },
+    json(payload: any) {
+      this.body = payload;
+      return this;
+    },
+  } as any;
+  const next = vi.fn((err?: unknown) => {
+    if (err) {
+      throw err;
+    }
+  });
+
+  await handler(req, res, next);
+  return { req, res, next };
+}
+
 interface FakeCompanyRow {
   id: string;
   name: string;
@@ -1380,5 +1519,66 @@ describe("Deal Lineage Enforcement", () => {
       statusCode: 400,
       message: "Primary contact does not belong to the company",
     });
+  });
+});
+
+describe("Public Deal Route Guardrails", () => {
+  it("strips migrationMode from public deal-create requests", async () => {
+    const { dealRoutes, routeServiceMocks } = await loadDealRoutesWithServiceMocks();
+    routeServiceMocks.createDeal.mockResolvedValueOnce({ id: "deal-1" });
+
+    await invokeDealRoute({
+      dealRoutes,
+      method: "post",
+      path: "/",
+      body: {
+        name: "Route-created deal",
+        stageId: "deal-stage-1",
+        assignedRepId: "rep-2",
+        sourceLeadId: "lead-1",
+        migrationMode: true,
+      },
+      userRole: "director",
+    });
+
+    expect(routeServiceMocks.createDeal).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        name: "Route-created deal",
+        stageId: "deal-stage-1",
+        assignedRepId: "rep-2",
+        sourceLeadId: "lead-1",
+      })
+    );
+    expect(routeServiceMocks.createDeal.mock.calls[0]?.[1]).not.toHaveProperty("migrationMode");
+  });
+
+  it("strips migrationMode from public deal-update requests", async () => {
+    const { dealRoutes, routeServiceMocks } = await loadDealRoutesWithServiceMocks();
+    routeServiceMocks.updateDeal.mockResolvedValueOnce({ id: "deal-1" });
+
+    await invokeDealRoute({
+      dealRoutes,
+      method: "patch",
+      path: "/:id",
+      params: { id: "deal-1" },
+      body: {
+        sourceLeadId: "lead-1",
+        migrationMode: true,
+      },
+      userRole: "director",
+    });
+
+    expect(routeServiceMocks.updateDeal).toHaveBeenCalledWith(
+      expect.anything(),
+      "deal-1",
+      expect.objectContaining({
+        sourceLeadId: "lead-1",
+      }),
+      "director",
+      "director-1",
+      "office-1"
+    );
+    expect(routeServiceMocks.updateDeal.mock.calls[0]?.[2]).not.toHaveProperty("migrationMode");
   });
 });

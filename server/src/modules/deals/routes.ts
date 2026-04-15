@@ -353,15 +353,18 @@ function validateDealPayload(body: Record<string, unknown>): void {
 // POST /api/deals — create a new deal
 router.post("/", async (req, res, next) => {
   try {
-    const { name, stageId, assignedRepId, sourceLeadWriteMode: _sourceLeadWriteMode, ...rest } = req.body;
+    const {
+      name,
+      stageId,
+      assignedRepId,
+      sourceLeadWriteMode: _sourceLeadWriteMode,
+      migrationMode: _migrationMode,
+      ...rest
+    } = req.body;
     if (!name || !stageId) {
       throw new AppError(400, "Name and stageId are required");
     }
     validateDealPayload(req.body);
-
-    if (rest.migrationMode === true && req.user!.role === "rep") {
-      throw new AppError(403, "migrationMode is only available to directors and admins");
-    }
 
     // Rep ownership enforcement:
     // - Reps: force assignedRepId to their own ID (ignore request body value)
@@ -392,10 +395,7 @@ router.patch("/:id", async (req, res, next) => {
   try {
     const body = { ...req.body };
     validateDealPayload(body);
-
-    if (body.migrationMode === true && req.user!.role === "rep") {
-      throw new AppError(403, "migrationMode is only available to directors and admins");
-    }
+    delete body.migrationMode;
 
     // Reps cannot change assignedRepId (reassign deals)
     if (req.user!.role === "rep" && body.assignedRepId !== undefined) {
