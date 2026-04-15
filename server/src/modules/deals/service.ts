@@ -446,6 +446,13 @@ export async function updateDeal(
     throw new AppError(400, "companyId and propertyId cannot be cleared once set");
   }
 
+  if (!existing.sourceLeadId && input.migrationMode !== true) {
+    throw new AppError(
+      400,
+      "Legacy deals require migrationMode=true until source lead lineage is backfilled"
+    );
+  }
+
   if (
     existing.sourceLeadId &&
     input.sourceLeadId !== undefined &&

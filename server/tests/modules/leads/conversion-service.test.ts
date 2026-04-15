@@ -16,6 +16,7 @@ import { describe, expect, it, vi } from "vitest";
 import { AppError } from "../../../src/middleware/error-handler.js";
 import { createLeadConversionService } from "../../../src/modules/leads/conversion-service.js";
 import { createLeadService } from "../../../src/modules/leads/service.js";
+import { updateDeal } from "../../../src/modules/deals/service.js";
 
 vi.mock("@trock-crm/shared/schema", async () => import("../../../../shared/src/schema/index.js"));
 
@@ -518,5 +519,70 @@ describe("Lead Conversion Service", () => {
     expect(result.deal.propertyId).toBe("property-1");
     expect(result.deal.sourceLeadId).toBe("lead-1");
     expect(result.deal.source).toBe("Referral");
+  });
+});
+
+describe("Deal Lineage Enforcement", () => {
+  it("rejects updating a legacy deal without source lead lineage unless migrationMode is explicit", async () => {
+    const tenantDb = createFakeTenantDb({
+      deals: [
+        {
+          id: "deal-legacy-1",
+          dealNumber: "TR-2026-0099",
+          name: "Legacy Deal",
+          stageId: "deal-stage-1",
+          assignedRepId: "rep-1",
+          primaryContactId: null,
+          companyId: "company-1",
+          propertyId: "property-1",
+          sourceLeadId: null,
+          source: "HubSpot",
+          workflowRoute: "estimating",
+        },
+      ],
+    });
+
+    await expect(
+      updateDeal(
+        tenantDb as never,
+        "deal-legacy-1",
+        { name: "Legacy Deal Updated" },
+        "director",
+        "director-1"
+      )
+    ).rejects.toMatchObject<AppError>({
+      statusCode: 400,
+      message: "Legacy deals require migrationMode=true until source lead lineage is backfilled",
+    });
+  });
+
+  it("allows updating a legacy deal when migrationMode is explicit", async () => {
+    const tenantDb = createFakeTenantDb({
+      deals: [
+        {
+          id: "deal-legacy-1",
+          dealNumber: "TR-2026-0099",
+          name: "Legacy Deal",
+          stageId: "deal-stage-1",
+          assignedRepId: "rep-1",
+          primaryContactId: null,
+          companyId: "company-1",
+          propertyId: "property-1",
+          sourceLeadId: null,
+          source: "HubSpot",
+          workflowRoute: "estimating",
+        },
+      ],
+    });
+
+    const updated = await updateDeal(
+      tenantDb as never,
+      "deal-legacy-1",
+      { name: "Legacy Deal Updated", migrationMode: true },
+      "director",
+      "director-1"
+    );
+
+    expect(updated.name).toBe("Legacy Deal Updated");
   });
 });
