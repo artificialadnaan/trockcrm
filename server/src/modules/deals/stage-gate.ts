@@ -127,6 +127,10 @@ function uniqueStrings(values: string[]) {
   return [...new Set(values)];
 }
 
+function hasNonEmptyText(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
 /**
  * Validate whether a deal can move to the target stage.
  *
@@ -222,15 +226,18 @@ export async function validateStageGate(
       .select({
         category: files.category,
         intakeRequirementKey: files.intakeRequirementKey,
+        r2Key: files.r2Key,
+        r2Bucket: files.r2Bucket,
       })
       .from(files)
       .where(and(eq(files.dealId, dealId), eq(files.isActive, true)));
 
     for (const file of existingFiles) {
       if (
-        typeof file.category === "string" &&
-        typeof file.intakeRequirementKey === "string" &&
-        file.intakeRequirementKey.trim().length > 0
+        hasNonEmptyText(file.category) &&
+        hasNonEmptyText(file.intakeRequirementKey) &&
+        hasNonEmptyText(file.r2Key) &&
+        hasNonEmptyText(file.r2Bucket)
       ) {
         linkedVerifiedCategories.add(file.category);
       }

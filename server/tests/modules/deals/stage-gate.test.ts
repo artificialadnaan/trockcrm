@@ -116,6 +116,8 @@ type FakeFileRow = {
   id: string;
   dealId: string | null;
   category: string;
+  r2Key?: string | null;
+  r2Bucket?: string | null;
   intakeRequirementKey: string | null;
   intakeSection?: string | null;
   intakeSource?: string | null;
@@ -1188,6 +1190,8 @@ describe("Scoping Attachment Hardening", () => {
           id: "file-1",
           dealId: "deal-1",
           category: "photo",
+          r2Key: "office_a/deals/D-1/photos/file-1.jpg",
+          r2Bucket: "trock-crm-files",
           intakeRequirementKey: "site_photos",
           intakeSection: "attachments",
           intakeSource: "scoping_intake",
@@ -1217,6 +1221,8 @@ describe("Scoping Attachment Hardening", () => {
           id: "file-1",
           dealId: "deal-1",
           category: "photo",
+          r2Key: "office_a/deals/D-1/photos/file-1.jpg",
+          r2Bucket: "trock-crm-files",
           intakeRequirementKey: "scope_docs",
           intakeSection: "attachments",
           intakeSource: "scoping_intake",
@@ -1226,6 +1232,52 @@ describe("Scoping Attachment Hardening", () => {
           id: "file-2",
           dealId: "deal-1",
           category: "photo",
+          r2Key: "office_a/deals/D-1/photos/file-2.jpg",
+          r2Bucket: "trock-crm-files",
+          intakeRequirementKey: "site_photos",
+          intakeSection: "attachments",
+          intakeSource: "scoping_intake",
+          isActive: true,
+        },
+      ],
+    });
+
+    const readiness = await evaluateDealScopingReadiness(tenantDb as never, "deal-1");
+    const scopeDocsRequirement = readiness.attachmentRequirements.find(
+      (requirement) => requirement.key === "scope_docs"
+    );
+
+    expect(readiness.status).toBe("draft");
+    expect(scopeDocsRequirement).toEqual(
+      expect.objectContaining({
+        key: "scope_docs",
+        category: "other",
+        satisfied: false,
+      })
+    );
+  });
+
+  it("ignores linked files without verified storage metadata", async () => {
+    const { evaluateDealScopingReadiness } = await import("../../../src/modules/deals/scoping-service.js");
+    const tenantDb = createHardeningTenantDb({
+      files: [
+        {
+          id: "file-1",
+          dealId: "deal-1",
+          category: "other",
+          r2Key: null,
+          r2Bucket: null,
+          intakeRequirementKey: "scope_docs",
+          intakeSection: "attachments",
+          intakeSource: "scoping_intake",
+          isActive: true,
+        },
+        {
+          id: "file-2",
+          dealId: "deal-1",
+          category: "photo",
+          r2Key: "office_a/deals/D-1/photos/file-2.jpg",
+          r2Bucket: "trock-crm-files",
           intakeRequirementKey: "site_photos",
           intakeSection: "attachments",
           intakeSource: "scoping_intake",
@@ -1358,6 +1410,100 @@ describe("Stage Gate Payload Hardening", () => {
     expect(result.effectiveChecklist.approvals).toEqual([
       expect.objectContaining({
         key: "director",
+        source: "stage",
+        satisfied: false,
+      }),
+    ]);
+  });
+
+  it("does not satisfy stage document requirements with unverified linked files", async () => {
+    vi.doMock("../../../src/modules/deals/scoping-service.js", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("../../../src/modules/deals/scoping-service.js")>();
+      return {
+        ...actual,
+        evaluateDealScopingReadiness: vi.fn(async () => ({
+          status: "ready",
+          errors: { sections: {}, attachments: {} },
+          completionState: {},
+          requiredSections: ["projectOverview"],
+          requiredAttachmentKeys: ["scope_docs"],
+          attachmentRequirements: [
+            {
+              key: "scope_docs",
+              category: "other",
+              label: "Scope docs",
+              satisfied: true,
+            },
+          ],
+        })),
+      };
+    });
+
+    const { validateStageGate } = await import("../../../src/modules/deals/stage-gate.js");
+    const tenantDb = createHardeningTenantDb({
+      deals: [
+        {
+          id: "deal-1",
+          name: "Palm Villas",
+          stageId: STAGES.estimating.id,
+          workflowRoute: "estimating",
+          assignedRepId: "rep-1",
+          projectTypeId: "pt-1",
+          propertyAddress: "123 Palm Way",
+          propertyCity: "Miami",
+          propertyState: "FL",
+          propertyZip: "33101",
+          description: "Exterior refresh",
+        },
+      ],
+      files: [
+        {
+          id: "file-1",
+          dealId: "deal-1",
+          category: "proposal",
+          r2Key: null,
+          r2Bucket: null,
+          intakeRequirementKey: "proposal_packet",
+          isActive: true,
+        },
+      ],
+    });
+
+    mockedStageLookups.queue.push(
+      {
+        id: STAGES.estimating.id,
+        name: STAGES.estimating.name,
+        slug: STAGES.estimating.slug,
+        isTerminal: STAGES.estimating.isTerminal,
+        displayOrder: STAGES.estimating.displayOrder,
+        requiredFields: [],
+        requiredDocuments: [],
+        requiredApprovals: [],
+      },
+      {
+        id: STAGES.bid_sent.id,
+        name: STAGES.bid_sent.name,
+        slug: STAGES.bid_sent.slug,
+        isTerminal: STAGES.bid_sent.isTerminal,
+        displayOrder: STAGES.bid_sent.displayOrder,
+        requiredFields: ["description"],
+        requiredDocuments: ["proposal"],
+        requiredApprovals: [],
+      }
+    );
+
+    const result = await validateStageGate(
+      tenantDb as never,
+      "deal-1",
+      STAGES.bid_sent.id,
+      "rep",
+      "rep-1"
+    );
+
+    expect(result.missingRequirements.documents).toEqual(["proposal"]);
+    expect(result.effectiveChecklist.attachments).toEqual([
+      expect.objectContaining({
+        key: "proposal",
         source: "stage",
         satisfied: false,
       }),

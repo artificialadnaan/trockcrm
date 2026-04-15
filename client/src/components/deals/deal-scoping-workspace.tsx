@@ -33,7 +33,6 @@ import {
   activateServiceHandoff,
   getDealScopingIntake,
   type DealDetail,
-  type DealScopingAttachmentRequirement,
   type DealScopingIntake,
   type DealScopingReadiness,
   linkExistingScopingAttachment,
@@ -51,6 +50,13 @@ import {
 } from "@/lib/scoping-intake";
 
 type SectionKey = "projectOverview" | "propertyDetails" | "scopeSummary" | "attachments";
+
+type WorkspaceAttachmentRequirement = {
+  key: string;
+  category: string;
+  label: string;
+  satisfied: boolean;
+};
 
 const SECTION_ORDER: Array<{ key: SectionKey; label: string }> = [
   { key: "projectOverview", label: "Project Overview" },
@@ -235,6 +241,12 @@ export function DealScopingWorkspace({
   }, [deal, deal.id, onDealUpdated, projectTypeId, sectionData, workflowRoute]);
 
   const completionCounts = getScopingCompletionCounts(readiness?.completionState);
+  const attachmentRequirements =
+    (
+      readiness as (DealScopingReadiness & {
+        attachmentRequirements?: WorkspaceAttachmentRequirement[];
+      }) | null
+    )?.attachmentRequirements ?? [];
   const visibleAttachmentRequirements = useMemo(() => {
     const requirementKeys =
       readiness?.requiredAttachmentKeys ??
@@ -251,13 +263,13 @@ export function DealScopingWorkspace({
         return {
           ...baseRequirement,
           status:
-            readiness?.attachmentRequirements.find(
+            attachmentRequirements.find(
               (requirement) => requirement.key === key
             ) ?? null,
         };
       })
-      .filter((requirement): requirement is (typeof ATTACHMENT_REQUIREMENTS)[number] & { status: DealScopingAttachmentRequirement | null } => Boolean(requirement));
-  }, [readiness]);
+      .filter((requirement): requirement is (typeof ATTACHMENT_REQUIREMENTS)[number] & { status: WorkspaceAttachmentRequirement | null } => Boolean(requirement));
+  }, [attachmentRequirements, readiness?.requiredAttachmentKeys]);
   const linkedFilesByRequirement = useMemo(() => {
     const map = new Map<string, FileRecord[]>();
     for (const requirement of ATTACHMENT_REQUIREMENTS) {
@@ -420,7 +432,7 @@ export function DealScopingWorkspace({
                   </div>
                 ))
               )}
-              {readiness.attachmentRequirements
+              {attachmentRequirements
                 .filter((attachment) => !attachment.satisfied)
                 .map((attachment) => (
                   <div key={attachment.key} className="text-red-600">

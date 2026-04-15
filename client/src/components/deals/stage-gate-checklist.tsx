@@ -3,7 +3,15 @@ import {
   formatScopingAttachmentLabel,
   formatScopingFieldLabel,
 } from "@/lib/scoping-intake";
-import type { StageGateChecklistItem } from "@/hooks/use-deals";
+
+type ChecklistSource = "stage" | "scoping" | "combined";
+
+export interface StageGateChecklistItemView {
+  key: string;
+  label: string;
+  satisfied: boolean;
+  source: ChecklistSource;
+}
 
 interface StageGateChecklistProps {
   missingRequirements: {
@@ -12,9 +20,9 @@ interface StageGateChecklistProps {
     approvals: string[];
   };
   effectiveChecklist?: {
-    fields: StageGateChecklistItem[];
-    attachments: StageGateChecklistItem[];
-    approvals: StageGateChecklistItem[];
+    fields: StageGateChecklistItemView[];
+    attachments: StageGateChecklistItemView[];
+    approvals: StageGateChecklistItemView[];
   };
 }
 
@@ -69,7 +77,7 @@ function RequirementGroup({
   icon: Icon,
 }: {
   title: string;
-  items: StageGateChecklistItem[];
+  items: StageGateChecklistItemView[];
   icon: typeof FileText;
 }) {
   if (items.length === 0) {
@@ -152,52 +160,52 @@ export function StageGateChecklist({
 
       {hasAny && (
         <>
-      <div className="flex items-center gap-2 text-amber-600 text-sm font-medium">
-        <AlertTriangle className="h-4 w-4" />
-        Missing Requirements
-      </div>
+          <div className="flex items-center gap-2 text-amber-600 text-sm font-medium">
+            <AlertTriangle className="h-4 w-4" />
+            Missing Requirements
+          </div>
 
-      {fields.length > 0 && (
-        <div className="space-y-1">
-          <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
-            Required Fields
-          </p>
-          {fields.map((field) => (
-            <div key={field} className="flex items-center gap-2 text-sm text-red-600">
-              <XCircle className="h-3.5 w-3.5" />
-              {getFieldLabel(field)}
+          {fields.length > 0 && (
+            <div className="space-y-1">
+              <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                Required Fields
+              </p>
+              {fields.map((field) => (
+                <div key={field} className="flex items-center gap-2 text-sm text-red-600">
+                  <XCircle className="h-3.5 w-3.5" />
+                  {getFieldLabel(field)}
+                </div>
+              ))}
             </div>
-          ))}
-        </div>
-      )}
+          )}
 
-      {documents.length > 0 && (
-        <div className="space-y-1">
-          <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
-            Missing Attachment Categories
-          </p>
-          {documents.map((doc) => (
-            <div key={doc} className="flex items-center gap-2 text-sm text-red-600">
-              <FileText className="h-3.5 w-3.5" />
-              {getDocumentLabel(doc)}
+          {documents.length > 0 && (
+            <div className="space-y-1">
+              <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                Missing Attachment Categories
+              </p>
+              {documents.map((doc) => (
+                <div key={doc} className="flex items-center gap-2 text-sm text-red-600">
+                  <FileText className="h-3.5 w-3.5" />
+                  {getDocumentLabel(doc)}
+                </div>
+              ))}
             </div>
-          ))}
-        </div>
-      )}
+          )}
 
-      {approvals.length > 0 && (
-        <div className="space-y-1">
-          <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
-            Required Approvals
-          </p>
-          {approvals.map((role) => (
-            <div key={role} className="flex items-center gap-2 text-sm text-red-600">
-              <User className="h-3.5 w-3.5" />
-              {role.charAt(0).toUpperCase() + role.slice(1)} approval
+          {approvals.length > 0 && (
+            <div className="space-y-1">
+              <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                Required Approvals
+              </p>
+              {approvals.map((role) => (
+                <div key={role} className="flex items-center gap-2 text-sm text-red-600">
+                  <User className="h-3.5 w-3.5" />
+                  {role.charAt(0).toUpperCase() + role.slice(1)} approval
+                </div>
+              ))}
             </div>
-          ))}
-        </div>
-      )}
+          )}
         </>
       )}
     </div>
