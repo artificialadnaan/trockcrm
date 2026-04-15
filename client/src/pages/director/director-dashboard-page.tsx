@@ -140,7 +140,7 @@ export function DirectorDashboardPage() {
   const staleLeadAlert = buildStaleLeadAlertSummary(
     data.staleLeads[0],
     "Lead pipeline on track",
-    "No stale leads detected this period"
+    "No current stale leads detected today"
   );
 
   return (

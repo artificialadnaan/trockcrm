@@ -29,11 +29,11 @@ describe("stale lead dashboard helpers", () => {
       buildStaleLeadAlertSummary(
         null,
         "Lead pipeline on track",
-        "No stale leads detected this period"
+        "No current stale leads detected today"
       )
     ).toEqual({
       title: "Lead pipeline on track",
-      detail: "No stale leads detected this period",
+      detail: "No current stale leads detected today",
     });
   });
 
