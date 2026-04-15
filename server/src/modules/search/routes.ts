@@ -48,6 +48,7 @@ router.get("/ai", async (req: Request, res: Response) => {
         summary: "",
         structured: { deals: [], contacts: [], files: [], total: 0, query: q },
         topEntities: [],
+        recommendedActions: [],
         evidence: [],
       });
     }

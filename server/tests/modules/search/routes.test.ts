@@ -68,6 +68,14 @@ describe("search routes", () => {
           deepLink: "/deals/deal-1",
         },
       ],
+      recommendedActions: [
+        {
+          actionType: "open_best_match",
+          label: "Open Best Deal Match",
+          rationale: "Jump to the strongest deal result.",
+          deepLink: "/deals/deal-1",
+        },
+      ],
       evidence: [
         {
           id: "chunk-1",
@@ -97,6 +105,7 @@ describe("search routes", () => {
     expect(res.body.summary).toContain("indexed email evidence");
     expect(res.body.intent).toBe("deal_lookup");
     expect(res.body.topEntities).toHaveLength(1);
+    expect(res.body.recommendedActions).toHaveLength(1);
     expect(res.body.evidence).toHaveLength(1);
   });
 });

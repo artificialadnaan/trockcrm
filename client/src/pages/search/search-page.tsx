@@ -98,6 +98,27 @@ export function SearchPage() {
             )}
             <p className="text-sm leading-6">{aiResults.summary}</p>
             {aiLoading && <p className="text-sm text-muted-foreground">Refreshing AI evidence...</p>}
+            {(aiResults.recommendedActions ?? []).length > 0 && (
+              <div className="space-y-2">
+                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+                  Recommended Next Steps
+                </p>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  {aiResults.recommendedActions.map((action) => (
+                    <Link
+                      key={`${action.actionType}:${action.deepLink}`}
+                      to={action.deepLink}
+                      className="rounded-lg border bg-white px-3 py-3 hover:bg-gray-50"
+                    >
+                      <div className="space-y-1">
+                        <div className="text-sm font-medium text-foreground">{action.label}</div>
+                        <div className="text-xs text-muted-foreground leading-5">{action.rationale}</div>
+                      </div>
+                    </Link>
+                  ))}
+                </div>
+              </div>
+            )}
             {(aiResults.topEntities ?? []).length > 0 && (
               <div className="space-y-2">
                 <p className="text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">

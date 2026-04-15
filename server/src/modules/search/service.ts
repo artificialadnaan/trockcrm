@@ -45,12 +45,20 @@ export interface AiSearchEntityAnchor {
   deepLink: string;
 }
 
+export interface AiSearchRecommendedAction {
+  actionType: "open_best_match" | "review_deal_emails" | "open_contact" | "open_file_context" | "open_deal_context";
+  label: string;
+  rationale: string;
+  deepLink: string;
+}
+
 export interface AiSearchResponse {
   query: string;
   intent: "deal_lookup" | "contact_lookup" | "file_lookup" | "account_research" | "activity_lookup" | "general_search";
   summary: string;
   structured: SearchResponse;
   topEntities: AiSearchEntityAnchor[];
+  recommendedActions: AiSearchRecommendedAction[];
   evidence: AiSearchEvidence[];
 }
 
@@ -102,6 +110,7 @@ export async function naturalLanguageSearch(
     summary: buildAiSearchSummary(structured, evidence),
     structured,
     topEntities: buildTopEntityAnchors(structured),
+    recommendedActions: buildRecommendedActions(structured, evidence),
     evidence,
   };
 }
@@ -475,4 +484,71 @@ function buildTopEntityAnchors(structured: SearchResponse): AiSearchEntityAnchor
     if (anchors.length >= 3) break;
   }
   return anchors;
+}
+
+function buildRecommendedActions(
+  structured: SearchResponse,
+  evidence: AiSearchEvidence[]
+): AiSearchRecommendedAction[] {
+  const actions: AiSearchRecommendedAction[] = [];
+  const push = (action: AiSearchRecommendedAction) => {
+    if (!actions.some((existing) => existing.deepLink === action.deepLink && existing.label === action.label)) {
+      actions.push(action);
+    }
+  };
+
+  const topDeal = structured.deals[0];
+  const topContact = structured.contacts[0];
+  const topFile = structured.files[0];
+  const topEvidenceDeal = evidence.find((item) => item.dealId)?.dealId ?? null;
+
+  if (topDeal) {
+    push({
+      actionType: "open_best_match",
+      label: "Open Best Deal Match",
+      rationale: `Jump to ${topDeal.primaryLabel} to inspect the strongest structured deal result.`,
+      deepLink: topDeal.deepLink,
+    });
+    push({
+      actionType: "review_deal_emails",
+      label: "Review Deal Emails",
+      rationale: `Open the email tab for ${topDeal.primaryLabel} to verify the communications behind this answer.`,
+      deepLink: `${topDeal.deepLink}?tab=email`,
+    });
+  }
+
+  if (!topDeal && topEvidenceDeal) {
+    push({
+      actionType: "open_deal_context",
+      label: "Open Deal Context",
+      rationale: "The strongest AI evidence points to a specific deal context.",
+      deepLink: `/deals/${topEvidenceDeal}`,
+    });
+    push({
+      actionType: "review_deal_emails",
+      label: "Review Deal Emails",
+      rationale: "Open the deal email context tied to the strongest evidence.",
+      deepLink: `/deals/${topEvidenceDeal}?tab=email`,
+    });
+  }
+
+  if (topContact) {
+    push({
+      actionType: "open_contact",
+      label: "Open Best Contact Match",
+      rationale: `Jump to ${topContact.primaryLabel} to review the strongest contact result.`,
+      deepLink: topContact.deepLink,
+    });
+  }
+
+  if (topFile) {
+    push({
+      actionType: "open_file_context",
+      label: "Open File Context",
+      rationale: `Review the file location tied to ${topFile.primaryLabel}.`,
+      deepLink: topFile.deepLink,
+    });
+  }
+
+  return actions.slice(0, 3);
 }

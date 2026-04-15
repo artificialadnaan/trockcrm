@@ -38,12 +38,20 @@ export interface AiSearchEntityAnchor {
   deepLink: string;
 }
 
+export interface AiSearchRecommendedAction {
+  actionType: "open_best_match" | "review_deal_emails" | "open_contact" | "open_file_context" | "open_deal_context";
+  label: string;
+  rationale: string;
+  deepLink: string;
+}
+
 export interface AiSearchResponse {
   query: string;
   intent: "deal_lookup" | "contact_lookup" | "file_lookup" | "account_research" | "activity_lookup" | "general_search";
   summary: string;
   structured: SearchResponse;
   topEntities: AiSearchEntityAnchor[];
+  recommendedActions: AiSearchRecommendedAction[];
   evidence: AiSearchEvidence[];
 }
 
