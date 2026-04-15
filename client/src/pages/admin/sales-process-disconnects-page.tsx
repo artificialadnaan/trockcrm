@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { AlertTriangle, ArrowUpRight, MailWarning, RefreshCcw, ShieldAlert, TimerReset, Workflow } from "lucide-react";
 import {
+  queueAiDisconnectAdminTasks,
   queueAiDisconnectDigest,
   queueAiDisconnectEscalationScan,
   trackSalesProcessDisconnectInteraction,
@@ -32,6 +33,7 @@ export function SalesProcessDisconnectsPage() {
   const [trendDimension, setTrendDimension] = useState<"reps" | "stages" | "companies">("reps");
   const [digestQueued, setDigestQueued] = useState(false);
   const [escalationQueued, setEscalationQueued] = useState(false);
+  const [adminTasksQueued, setAdminTasksQueued] = useState(false);
   const didTrackView = useRef(false);
 
   useEffect(() => {
@@ -121,6 +123,15 @@ export function SalesProcessDisconnectsPage() {
     }).catch(() => {});
   };
 
+  const handleQueueAdminTasks = async () => {
+    await queueAiDisconnectAdminTasks("manual");
+    setAdminTasksQueued(true);
+    void trackSalesProcessDisconnectInteraction({
+      interactionType: "outcome_focus",
+      targetValue: "admin_task_queue",
+    }).catch(() => {});
+  };
+
   return (
     <div className="p-6 space-y-6 bg-gray-50 min-h-screen">
       <div className="flex items-start justify-between gap-4">
@@ -140,6 +151,9 @@ export function SalesProcessDisconnectsPage() {
         <Button variant="outline" onClick={() => void handleQueueEscalation()} disabled={loading}>
           Queue Escalation Scan
         </Button>
+        <Button variant="outline" onClick={() => void handleQueueAdminTasks()} disabled={loading}>
+          Queue Admin Tasks
+        </Button>
       </div>
 
       {digestQueued && (
@@ -150,6 +164,11 @@ export function SalesProcessDisconnectsPage() {
       {escalationQueued && (
         <div className="rounded-lg border border-orange-200 bg-orange-50 px-4 py-3 text-sm text-orange-800">
           Disconnect escalation scan queued for critical issue notifications.
+        </div>
+      )}
+      {adminTasksQueued && (
+        <div className="rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-800">
+          Deterministic admin tasks queued for high-confidence disconnects.
         </div>
       )}
 
@@ -195,6 +214,54 @@ export function SalesProcessDisconnectsPage() {
           </CardContent>
         </Card>
       </div>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Automation Status</CardTitle>
+          <CardDescription>
+            Live validation for digest, escalation, and deterministic admin-task automations
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="grid grid-cols-1 xl:grid-cols-[0.95fr_1.05fr] gap-4">
+          <div className="grid grid-cols-2 gap-3 text-sm">
+            <div className="rounded-lg border border-border/80 bg-white px-4 py-3">
+              <div className="text-xs uppercase tracking-widest text-muted-foreground">Digests sent 7d</div>
+              <div className="text-2xl font-black">{dashboard?.automation.digestNotifications7d ?? 0}</div>
+              <div className="text-xs text-muted-foreground mt-1">Last: {formatDate(dashboard?.automation.latestDigestAt ?? null)}</div>
+            </div>
+            <div className="rounded-lg border border-border/80 bg-white px-4 py-3">
+              <div className="text-xs uppercase tracking-widest text-muted-foreground">Escalations sent 7d</div>
+              <div className="text-2xl font-black">{dashboard?.automation.escalationNotifications7d ?? 0}</div>
+              <div className="text-xs text-muted-foreground mt-1">Last: {formatDate(dashboard?.automation.latestEscalationAt ?? null)}</div>
+            </div>
+            <div className="rounded-lg border border-border/80 bg-white px-4 py-3">
+              <div className="text-xs uppercase tracking-widest text-muted-foreground">Admin tasks created 7d</div>
+              <div className="text-2xl font-black">{dashboard?.automation.adminTasksCreated7d ?? 0}</div>
+              <div className="text-xs text-muted-foreground mt-1">Last: {formatDate(dashboard?.automation.latestAdminTaskCreatedAt ?? null)}</div>
+            </div>
+            <div className="rounded-lg border border-border/80 bg-white px-4 py-3">
+              <div className="text-xs uppercase tracking-widest text-muted-foreground">Open admin tasks</div>
+              <div className="text-2xl font-black">{dashboard?.automation.adminTasksOpen ?? 0}</div>
+              <div className="text-xs text-muted-foreground mt-1">Deterministic disconnect follow-through</div>
+            </div>
+          </div>
+
+          <div className="rounded-lg border border-blue-200 bg-blue-50 px-4 py-4 space-y-3">
+            <div>
+              <div className="text-xs uppercase tracking-widest text-blue-700">Scheduled cadence</div>
+              <div className="text-lg font-semibold text-blue-950 mt-1">Production worker automation windows</div>
+            </div>
+            <div className="grid gap-2 text-sm text-blue-900">
+              <div>Disconnect digest: weekdays at 7:15 AM CT</div>
+              <div>Escalation scan: weekdays at 7:45 AM CT</div>
+              <div>Admin task generation: weekdays at 7:30 AM CT</div>
+            </div>
+            <div className="text-xs text-blue-700">
+              These counts come from real notifications and task records, so this section acts as live validation after deploy.
+            </div>
+          </div>
+        </CardContent>
+      </Card>
 
       <Card>
         <CardHeader>

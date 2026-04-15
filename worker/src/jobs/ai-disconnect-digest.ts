@@ -166,6 +166,17 @@ export async function runAiDisconnectDigest(): Promise<void> {
         const body = `${Number(summary.critical_disconnects)} critical disconnects. Top cluster: ${topCluster?.title ?? "No dominant cluster"} (${Number(topCluster?.deal_count ?? 0)} deals). Bid board drifts: ${Number(summary.bid_board_sync_drifts ?? 0)}. Follow-through gaps: ${Number(summary.follow_through_gaps ?? 0)}.`;
 
         for (const recipient of recipients.rows) {
+          const existing = await client.query(
+            `SELECT id
+             FROM ${schemaName}.notifications
+             WHERE user_id = $1
+               AND title LIKE 'AI Disconnect Digest:%'
+               AND created_at >= date_trunc('day', NOW())
+             LIMIT 1`,
+            [recipient.id]
+          );
+          if (existing.rows.length > 0) continue;
+
           await client.query(
             `INSERT INTO ${schemaName}.notifications (user_id, type, title, body, link)
              VALUES ($1, $2, $3, $4, $5)

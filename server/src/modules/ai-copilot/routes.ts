@@ -302,4 +302,32 @@ router.post("/ops/disconnect-escalation-scan", requireRole("admin", "director"),
   }
 });
 
+router.post("/ops/disconnect-admin-tasks", requireRole("admin", "director"), async (req, res, next) => {
+  try {
+    const officeId = req.user!.activeOfficeId ?? req.user!.officeId;
+    if (!officeId) {
+      throw new AppError(400, "Active office is required to queue AI disconnect admin tasks");
+    }
+
+    const mode = typeof req.body?.mode === "string" ? req.body.mode : "manual";
+
+    await req.tenantDb!.insert(jobQueue).values({
+      jobType: "ai_disconnect_admin_tasks",
+      payload: {
+        officeId,
+        mode,
+        requestedBy: req.user!.id,
+      },
+      officeId,
+      status: "pending",
+      runAfter: new Date(),
+    });
+
+    await req.commitTransaction!();
+    res.status(202).json({ queued: true, mode });
+  } catch (err) {
+    next(err);
+  }
+});
+
 export const aiCopilotRoutes = router;

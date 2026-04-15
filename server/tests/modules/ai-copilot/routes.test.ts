@@ -330,6 +330,17 @@ describe("ai copilot routes", () => {
     expect(insertMock).toHaveBeenCalledTimes(1);
   });
 
+  it("queues deterministic admin tasks for director users", async () => {
+    const app = createApp("director");
+    const res = await request(app)
+      .post("/api/ai/ops/disconnect-admin-tasks")
+      .send({ mode: "manual" });
+
+    expect(res.status).toBe(202);
+    expect(res.body).toEqual({ queued: true, mode: "manual" });
+    expect(insertMock).toHaveBeenCalledTimes(1);
+  });
+
   it("returns sales process disconnects for director users", async () => {
     serviceMocks.getSalesProcessDisconnectDashboard.mockResolvedValue({
       summary: {
@@ -341,6 +352,15 @@ describe("ai copilot routes", () => {
         revisionLoopCount: 2,
         estimatingGateGapCount: 1,
         procoreBidBoardDriftCount: 2,
+      },
+      automation: {
+        digestNotifications7d: 3,
+        escalationNotifications7d: 2,
+        adminTasksCreated7d: 4,
+        adminTasksOpen: 2,
+        latestDigestAt: "2026-04-15T12:00:00.000Z",
+        latestEscalationAt: "2026-04-15T13:00:00.000Z",
+        latestAdminTaskCreatedAt: "2026-04-15T14:00:00.000Z",
       },
       byType: [
         { disconnectType: "stale_stage", label: "Stalled in stage", count: 3 },

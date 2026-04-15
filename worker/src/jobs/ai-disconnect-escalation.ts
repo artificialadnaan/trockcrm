@@ -110,6 +110,17 @@ export async function runAiDisconnectEscalationScan(): Promise<void> {
           .join("; ");
 
         for (const recipient of recipients.rows) {
+          const existing = await client.query(
+            `SELECT id
+             FROM ${schemaName}.notifications
+             WHERE user_id = $1
+               AND title LIKE 'AI Escalation:%'
+               AND created_at >= NOW() - INTERVAL '12 hours'
+             LIMIT 1`,
+            [recipient.id]
+          );
+          if (existing.rows.length > 0) continue;
+
           await client.query(
             `INSERT INTO ${schemaName}.notifications (user_id, type, title, body, link)
              VALUES ($1, $2, $3, $4, $5)

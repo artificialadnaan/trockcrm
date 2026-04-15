@@ -220,8 +220,19 @@ export interface SalesProcessDisconnectCluster {
   includesProcoreBidBoard: boolean;
 }
 
+export interface SalesProcessDisconnectAutomationStatus {
+  digestNotifications7d: number;
+  escalationNotifications7d: number;
+  adminTasksCreated7d: number;
+  adminTasksOpen: number;
+  latestDigestAt: string | null;
+  latestEscalationAt: string | null;
+  latestAdminTaskCreatedAt: string | null;
+}
+
 export interface SalesProcessDisconnectDashboard {
   summary: SalesProcessDisconnectSummary;
+  automation: SalesProcessDisconnectAutomationStatus;
   byType: SalesProcessDisconnectTypeSummary[];
   clusters: SalesProcessDisconnectCluster[];
   trends: {
@@ -369,6 +380,13 @@ export async function queueAiDisconnectDigest(mode = "manual") {
 
 export async function queueAiDisconnectEscalationScan(mode = "manual") {
   return api<QueueAiDisconnectDigestResult>("/ai/ops/disconnect-escalation-scan", {
+    method: "POST",
+    json: { mode },
+  });
+}
+
+export async function queueAiDisconnectAdminTasks(mode = "manual") {
+  return api<QueueAiDisconnectDigestResult>("/ai/ops/disconnect-admin-tasks", {
     method: "POST",
     json: { mode },
   });

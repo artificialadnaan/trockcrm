@@ -274,8 +274,19 @@ export interface SalesProcessDisconnectCluster {
   includesProcoreBidBoard: boolean;
 }
 
+export interface SalesProcessDisconnectAutomationStatus {
+  digestNotifications7d: number;
+  escalationNotifications7d: number;
+  adminTasksCreated7d: number;
+  adminTasksOpen: number;
+  latestDigestAt: string | null;
+  latestEscalationAt: string | null;
+  latestAdminTaskCreatedAt: string | null;
+}
+
 export interface SalesProcessDisconnectDashboard {
   summary: SalesProcessDisconnectSummary;
+  automation: SalesProcessDisconnectAutomationStatus;
   byType: SalesProcessDisconnectTypeSummary[];
   clusters: SalesProcessDisconnectCluster[];
   trends: {
@@ -1258,7 +1269,7 @@ export async function getSalesProcessDisconnectDashboard(
 ): Promise<SalesProcessDisconnectDashboard> {
   const limit = Math.max(1, Math.min(input.limit ?? 50, 200));
 
-  const [summaryResult, byTypeResult, rowsResult, interventionsResult, interventionEventsResult] = await Promise.all([
+  const [summaryResult, byTypeResult, rowsResult, interventionsResult, interventionEventsResult, automationResult] = await Promise.all([
     tenantDb.execute(sql`
       WITH scoped_deals AS (
         SELECT
@@ -1813,6 +1824,37 @@ export async function getSalesProcessDisconnectDashboard(
         comment_text
       FROM triage_feedback
     `),
+    tenantDb.execute(sql`
+      SELECT
+        COUNT(*) FILTER (
+          WHERE title LIKE 'AI Disconnect Digest:%'
+            AND created_at >= NOW() - INTERVAL '7 days'
+        )::int AS digest_notifications_7d,
+        COUNT(*) FILTER (
+          WHERE title LIKE 'AI Escalation:%'
+            AND created_at >= NOW() - INTERVAL '7 days'
+        )::int AS escalation_notifications_7d,
+        MAX(created_at) FILTER (WHERE title LIKE 'AI Disconnect Digest:%') AS latest_digest_at,
+        MAX(created_at) FILTER (WHERE title LIKE 'AI Escalation:%') AS latest_escalation_at,
+        (
+          SELECT COUNT(*)::int
+          FROM tasks t
+          WHERE t.origin_rule = 'ai_disconnect_admin_task'
+            AND t.created_at >= NOW() - INTERVAL '7 days'
+        ) AS admin_tasks_created_7d,
+        (
+          SELECT COUNT(*)::int
+          FROM tasks t
+          WHERE t.origin_rule = 'ai_disconnect_admin_task'
+            AND t.status IN ('pending', 'in_progress', 'waiting_on', 'blocked')
+        ) AS admin_tasks_open,
+        (
+          SELECT MAX(t.created_at)
+          FROM tasks t
+          WHERE t.origin_rule = 'ai_disconnect_admin_task'
+        ) AS latest_admin_task_created_at
+      FROM notifications
+    `),
   ]);
 
   const summaryRow = getRows(summaryResult)[0] ?? {};
@@ -1831,6 +1873,31 @@ export async function getSalesProcessDisconnectDashboard(
       Number(summaryRow.revision_loop_count ?? 0) +
       Number(summaryRow.estimating_gate_gap_count ?? 0) +
       Number(summaryRow.procore_bid_board_drift_count ?? 0),
+  };
+  const automationRow = getRows(automationResult)[0] ?? {};
+  const automation: SalesProcessDisconnectAutomationStatus = {
+    digestNotifications7d: Number(automationRow.digest_notifications_7d ?? 0),
+    escalationNotifications7d: Number(automationRow.escalation_notifications_7d ?? 0),
+    adminTasksCreated7d: Number(automationRow.admin_tasks_created_7d ?? 0),
+    adminTasksOpen: Number(automationRow.admin_tasks_open ?? 0),
+    latestDigestAt:
+      automationRow.latest_digest_at instanceof Date
+        ? automationRow.latest_digest_at.toISOString()
+        : automationRow.latest_digest_at
+          ? String(automationRow.latest_digest_at)
+          : null,
+    latestEscalationAt:
+      automationRow.latest_escalation_at instanceof Date
+        ? automationRow.latest_escalation_at.toISOString()
+        : automationRow.latest_escalation_at
+          ? String(automationRow.latest_escalation_at)
+          : null,
+    latestAdminTaskCreatedAt:
+      automationRow.latest_admin_task_created_at instanceof Date
+        ? automationRow.latest_admin_task_created_at.toISOString()
+        : automationRow.latest_admin_task_created_at
+          ? String(automationRow.latest_admin_task_created_at)
+          : null,
   };
 
   const rows: SalesProcessDisconnectRow[] = getRows(rowsResult).map((row) => ({
@@ -1905,6 +1972,7 @@ export async function getSalesProcessDisconnectDashboard(
 
   return {
     summary,
+    automation,
     byType: getRows(byTypeResult).map((row) => ({
       disconnectType: row.disconnect_type,
       label: row.disconnect_label,

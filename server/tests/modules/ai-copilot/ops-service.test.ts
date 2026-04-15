@@ -377,6 +377,19 @@ describe("AI ops service", () => {
               }),
             },
           ],
+        })
+        .mockResolvedValueOnce({
+          rows: [
+            {
+              digest_notifications_7d: 3,
+              escalation_notifications_7d: 2,
+              admin_tasks_created_7d: 4,
+              admin_tasks_open: 2,
+              latest_digest_at: "2026-04-15T12:00:00.000Z",
+              latest_escalation_at: "2026-04-15T13:00:00.000Z",
+              latest_admin_task_created_at: "2026-04-15T14:00:00.000Z",
+            },
+          ],
         }),
     };
 
@@ -391,6 +404,15 @@ describe("AI ops service", () => {
       revisionLoopCount: 2,
       estimatingGateGapCount: 1,
       procoreBidBoardDriftCount: 2,
+    });
+    expect(result.automation).toEqual({
+      digestNotifications7d: 3,
+      escalationNotifications7d: 2,
+      adminTasksCreated7d: 4,
+      adminTasksOpen: 2,
+      latestDigestAt: "2026-04-15T12:00:00.000Z",
+      latestEscalationAt: "2026-04-15T13:00:00.000Z",
+      latestAdminTaskCreatedAt: "2026-04-15T14:00:00.000Z",
     });
     expect(result.byType).toEqual([
       {
