@@ -232,6 +232,33 @@ export interface SalesProcessDisconnectOutcomes {
   clearanceRate30d: number | null;
 }
 
+export interface SalesProcessDisconnectActionSummary {
+  markReviewed30d: number;
+  resolve30d: number;
+  dismiss30d: number;
+  escalate30d: number;
+  bestOverallAction: "mark_reviewed" | "resolve" | "dismiss" | "escalate" | null;
+  bestOverallClearanceRate: number | null;
+}
+
+export interface SalesProcessDisconnectPlaybookAction {
+  action: "mark_reviewed" | "resolve" | "dismiss" | "escalate";
+  interventionDeals30d: number;
+  clearedDeals30d: number;
+  stillOpenDeals30d: number;
+  clearanceRate30d: number | null;
+}
+
+export interface SalesProcessDisconnectPlaybook {
+  clusterKey: string;
+  title: string;
+  bestAction: "mark_reviewed" | "resolve" | "dismiss" | "escalate" | null;
+  recommendedAction: "mark_reviewed" | "resolve" | "dismiss" | "escalate" | null;
+  interventionDeals30d: number;
+  stillOpenDeals30d: number;
+  actions: SalesProcessDisconnectPlaybookAction[];
+}
+
 export interface SalesProcessDisconnectCluster {
   clusterKey: string;
   title: string;
@@ -257,6 +284,8 @@ export interface SalesProcessDisconnectDashboard {
     companies: SalesProcessDisconnectTrendEntry[];
   };
   outcomes: SalesProcessDisconnectOutcomes;
+  actionSummary: SalesProcessDisconnectActionSummary;
+  playbooks: SalesProcessDisconnectPlaybook[];
   rows: SalesProcessDisconnectRow[];
 }
 
@@ -565,6 +594,245 @@ function buildSalesProcessDisconnectOutcomes(
     clearanceRate30d:
       interventionDealIds.length === 0 ? null : Number((clearedAfterIntervention / interventionDealIds.length).toFixed(4)),
   };
+}
+
+function parseTriageMetadata(commentText: string | null | undefined) {
+  if (!commentText) return null;
+  try {
+    const parsed = JSON.parse(commentText) as {
+      note?: unknown;
+      clusterKeys?: unknown;
+      disconnectTypes?: unknown;
+    };
+    const note = typeof parsed.note === "string" ? parsed.note : null;
+    const clusterKeys = Array.isArray(parsed.clusterKeys)
+      ? parsed.clusterKeys.filter((value): value is string => typeof value === "string")
+      : [];
+    const disconnectTypes = Array.isArray(parsed.disconnectTypes)
+      ? parsed.disconnectTypes.filter((value): value is string => typeof value === "string")
+      : [];
+    return {
+      note,
+      clusterKeys,
+      disconnectTypes,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function getCurrentDisconnectMetadataForDeal(tenantDb: TenantDb, dealId: string) {
+  const rows = getRows(await tenantDb.execute(sql`
+    WITH base AS (
+      SELECT
+        d.id,
+        d.procore_project_id,
+        d.stage_entered_at,
+        d.last_activity_at,
+        d.proposal_status,
+        psc.stale_threshold_days,
+        COALESCE(jsonb_array_length(psc.required_documents), 0) AS required_document_count,
+        COALESCE((
+          SELECT COUNT(DISTINCT f.category)::int
+          FROM files f
+          WHERE f.deal_id = d.id
+            AND f.is_active = TRUE
+        ), 0) AS present_document_count,
+        COALESCE((
+          SELECT COUNT(*)::int
+          FROM tasks t
+          WHERE t.deal_id = d.id
+            AND t.status IN ('pending', 'in_progress', 'waiting_on', 'blocked')
+        ), 0) AS open_task_count,
+        COALESCE((
+          SELECT COUNT(*)::int
+          FROM emails e
+          WHERE e.deal_id = d.id
+            AND e.direction = 'inbound'
+            AND NOT EXISTS (
+              SELECT 1
+              FROM activities a
+              WHERE a.deal_id = e.deal_id
+                AND a.occurred_at >= e.sent_at
+                AND a.type IN ('call', 'email', 'meeting', 'note')
+            )
+        ), 0) AS inbound_without_followup_count,
+        pss.sync_status AS procore_sync_status
+      FROM deals d
+      JOIN pipeline_stage_config psc ON psc.id = d.stage_id
+      LEFT JOIN LATERAL (
+        SELECT sync_status
+        FROM public.procore_sync_state
+        WHERE crm_entity_type = 'deal'
+          AND crm_entity_id = d.id
+          AND entity_type IN ('project', 'bid')
+        ORDER BY updated_at DESC
+        LIMIT 1
+      ) pss ON TRUE
+      WHERE d.id = ${dealId}
+        AND d.is_active = TRUE
+    ),
+    disconnect_rows AS (
+      SELECT 'stale_stage'::text AS disconnect_type
+      FROM base
+      WHERE stale_threshold_days > 0
+        AND stage_entered_at IS NOT NULL
+        AND EXTRACT(EPOCH FROM (NOW() - stage_entered_at)) / 86400 > stale_threshold_days
+
+      UNION ALL
+
+      SELECT 'missing_next_task'::text AS disconnect_type
+      FROM base
+      WHERE open_task_count = 0
+
+      UNION ALL
+
+      SELECT 'inbound_without_followup'::text AS disconnect_type
+      FROM base
+      WHERE inbound_without_followup_count > 0
+
+      UNION ALL
+
+      SELECT 'revision_loop'::text AS disconnect_type
+      FROM base
+      WHERE proposal_status = 'revision_requested'
+
+      UNION ALL
+
+      SELECT 'estimating_gate_gap'::text AS disconnect_type
+      FROM base
+      WHERE required_document_count > present_document_count
+
+      UNION ALL
+
+      SELECT 'procore_bid_board_drift'::text AS disconnect_type
+      FROM base
+      WHERE procore_project_id IS NOT NULL
+        AND procore_sync_status IS NOT NULL
+        AND procore_sync_status != 'synced'
+    )
+    SELECT disconnect_type
+    FROM disconnect_rows
+  `));
+
+  const disconnectTypes = rows.map((row) => String(row.disconnect_type));
+  const clusterKeys = Array.from(new Set(disconnectTypes.map((disconnectType) => getDisconnectClusterKey(disconnectType))));
+  return { disconnectTypes, clusterKeys };
+}
+
+function buildSalesProcessDisconnectActionSummary(
+  interventionEvents: Array<{ dealId: string; action: "mark_reviewed" | "resolve" | "dismiss" | "escalate" }>,
+  openDealIds: Set<string>
+): SalesProcessDisconnectActionSummary {
+  const actions: Array<"mark_reviewed" | "resolve" | "dismiss" | "escalate"> = [
+    "mark_reviewed",
+    "resolve",
+    "dismiss",
+    "escalate",
+  ];
+  const summary = {
+    markReviewed30d: 0,
+    resolve30d: 0,
+    dismiss30d: 0,
+    escalate30d: 0,
+    bestOverallAction: null,
+    bestOverallClearanceRate: null,
+  } as SalesProcessDisconnectActionSummary;
+
+  let bestAction: SalesProcessDisconnectActionSummary["bestOverallAction"] = null;
+  let bestRate: number | null = null;
+  let bestCount = -1;
+
+  for (const action of actions) {
+    const dealIds = new Set(interventionEvents.filter((event) => event.action === action).map((event) => event.dealId));
+    const total = dealIds.size;
+    const cleared = Array.from(dealIds).filter((dealId) => !openDealIds.has(dealId)).length;
+    const rate = total === 0 ? null : Number((cleared / total).toFixed(4));
+
+    if (action === "mark_reviewed") summary.markReviewed30d = total;
+    if (action === "resolve") summary.resolve30d = total;
+    if (action === "dismiss") summary.dismiss30d = total;
+    if (action === "escalate") summary.escalate30d = total;
+
+    if (
+      rate != null &&
+      (bestRate == null || rate > bestRate || (rate === bestRate && total > bestCount))
+    ) {
+      bestAction = action;
+      bestRate = rate;
+      bestCount = total;
+    }
+  }
+
+  summary.bestOverallAction = bestAction;
+  summary.bestOverallClearanceRate = bestRate;
+  return summary;
+}
+
+function buildSalesProcessDisconnectPlaybooks(
+  rows: SalesProcessDisconnectRow[],
+  clusters: SalesProcessDisconnectCluster[],
+  interventionEvents: Array<{
+    dealId: string;
+    action: "mark_reviewed" | "resolve" | "dismiss" | "escalate";
+    clusterKeys: string[];
+  }>
+): SalesProcessDisconnectPlaybook[] {
+  const openClusterDealIds = new Map<string, Set<string>>();
+  for (const row of rows) {
+    const clusterKey = getDisconnectClusterKey(row.disconnectType);
+    const existing = openClusterDealIds.get(clusterKey) ?? new Set<string>();
+    existing.add(row.id);
+    openClusterDealIds.set(clusterKey, existing);
+  }
+
+  return clusters.map((cluster) => {
+    const clusterEvents = interventionEvents.filter((event) => event.clusterKeys.includes(cluster.clusterKey));
+    const actions: Array<"mark_reviewed" | "resolve" | "dismiss" | "escalate"> = [
+      "mark_reviewed",
+      "resolve",
+      "dismiss",
+      "escalate",
+    ];
+    const openDealIds = openClusterDealIds.get(cluster.clusterKey) ?? new Set<string>();
+
+    const actionRows: SalesProcessDisconnectPlaybookAction[] = actions
+      .map((action) => {
+        const dealIds = new Set(clusterEvents.filter((event) => event.action === action).map((event) => event.dealId));
+        const interventionDeals30d = dealIds.size;
+        const stillOpenDeals30d = Array.from(dealIds).filter((dealId) => openDealIds.has(dealId)).length;
+        const clearedDeals30d = interventionDeals30d - stillOpenDeals30d;
+        return {
+          action,
+          interventionDeals30d,
+          clearedDeals30d,
+          stillOpenDeals30d,
+          clearanceRate30d:
+            interventionDeals30d === 0 ? null : Number((clearedDeals30d / interventionDeals30d).toFixed(4)),
+        };
+      })
+      .filter((row) => row.interventionDeals30d > 0)
+      .sort((a, b) => {
+        const rateA = a.clearanceRate30d ?? -1;
+        const rateB = b.clearanceRate30d ?? -1;
+        if (rateB !== rateA) return rateB - rateA;
+        if (a.stillOpenDeals30d !== b.stillOpenDeals30d) return a.stillOpenDeals30d - b.stillOpenDeals30d;
+        return b.interventionDeals30d - a.interventionDeals30d;
+      });
+
+    const bestAction = actionRows[0]?.action ?? null;
+    return {
+      clusterKey: cluster.clusterKey,
+      title: cluster.title,
+      bestAction,
+      recommendedAction: bestAction ?? null,
+      interventionDeals30d: new Set(clusterEvents.map((event) => event.dealId)).size,
+      stillOpenDeals30d: Array.from(new Set(clusterEvents.map((event) => event.dealId))).filter((dealId) =>
+        openDealIds.has(dealId)
+      ).length,
+      actions: actionRows,
+    };
+  });
 }
 
 const DEFAULT_DEPS: GenerateDealCopilotPacketDeps = {
@@ -990,7 +1258,7 @@ export async function getSalesProcessDisconnectDashboard(
 ): Promise<SalesProcessDisconnectDashboard> {
   const limit = Math.max(1, Math.min(input.limit ?? 50, 200));
 
-  const [summaryResult, byTypeResult, rowsResult, interventionsResult] = await Promise.all([
+  const [summaryResult, byTypeResult, rowsResult, interventionsResult, interventionEventsResult] = await Promise.all([
     tenantDb.execute(sql`
       WITH scoped_deals AS (
         SELECT
@@ -1507,6 +1775,44 @@ export async function getSalesProcessDisconnectDashboard(
       FROM triage_feedback
       GROUP BY deal_id
     `),
+    tenantDb.execute(sql`
+      WITH triage_feedback AS (
+        SELECT
+          rf.deal_id AS deal_id,
+          f.feedback_value AS action,
+          f.created_at,
+          f.comment_text
+        FROM ai_feedback f
+        JOIN ai_risk_flags rf
+          ON f.target_type = 'risk_flag'
+         AND f.target_id = rf.id
+        WHERE f.feedback_type = 'triage_action'
+          AND f.created_at >= NOW() - INTERVAL '30 days'
+          AND rf.deal_id IS NOT NULL
+
+        UNION ALL
+
+        SELECT
+          ts.scope_id AS deal_id,
+          f.feedback_value AS action,
+          f.created_at,
+          f.comment_text
+        FROM ai_feedback f
+        JOIN ai_task_suggestions ts
+          ON f.target_type = 'task_suggestion'
+         AND f.target_id = ts.id
+        WHERE f.feedback_type = 'triage_action'
+          AND f.created_at >= NOW() - INTERVAL '30 days'
+          AND ts.scope_type = 'deal'
+          AND ts.scope_id IS NOT NULL
+      )
+      SELECT
+        deal_id,
+        action,
+        created_at,
+        comment_text
+      FROM triage_feedback
+    `),
   ]);
 
   const summaryRow = getRows(summaryResult)[0] ?? {};
@@ -1569,6 +1875,33 @@ export async function getSalesProcessDisconnectDashboard(
       },
     ])
   );
+  const openDealIds = new Set(rows.map((row) => row.id));
+  const currentClusterKeysByDeal = new Map<string, string[]>();
+  for (const row of rows) {
+    const clusterKey = getDisconnectClusterKey(row.disconnectType);
+    const existing = currentClusterKeysByDeal.get(row.id) ?? [];
+    if (!existing.includes(clusterKey)) existing.push(clusterKey);
+    currentClusterKeysByDeal.set(row.id, existing);
+  }
+  const interventionEvents = getRows(interventionEventsResult).flatMap((row) => {
+    const action = row.action as "mark_reviewed" | "resolve" | "dismiss" | "escalate" | null;
+    if (!action || !["mark_reviewed", "resolve", "dismiss", "escalate"].includes(action)) {
+      return [];
+    }
+    const metadata = parseTriageMetadata(row.comment_text);
+    const clusterKeys =
+      metadata?.clusterKeys?.length
+        ? metadata.clusterKeys
+        : currentClusterKeysByDeal.get(String(row.deal_id)) ?? [];
+    return [
+      {
+        dealId: String(row.deal_id),
+        action,
+        clusterKeys,
+      },
+    ];
+  });
+  const clusters = buildSalesProcessDisconnectClusters(rows);
 
   return {
     summary,
@@ -1577,9 +1910,11 @@ export async function getSalesProcessDisconnectDashboard(
       label: row.disconnect_label,
       count: Number(row.disconnect_count ?? 0),
     })),
-    clusters: buildSalesProcessDisconnectClusters(rows),
+    clusters,
     trends: buildSalesProcessDisconnectTrends(rows, interventionsByDeal),
     outcomes: buildSalesProcessDisconnectOutcomes(rows, interventionsByDeal),
+    actionSummary: buildSalesProcessDisconnectActionSummary(interventionEvents, openDealIds),
+    playbooks: buildSalesProcessDisconnectPlaybooks(rows, clusters, interventionEvents),
     rows,
   };
 }
@@ -1595,6 +1930,15 @@ export async function triageAiActionQueueEntry(
   }
 ) {
   if (input.entryType === "blind_spot") {
+    const [riskFlag] = await tenantDb
+      .select({ dealId: aiRiskFlags.dealId })
+      .from(aiRiskFlags)
+      .where(eq(aiRiskFlags.id, input.id))
+      .limit(1);
+    const disconnectMetadata = riskFlag?.dealId
+      ? await getCurrentDisconnectMetadataForDeal(tenantDb, riskFlag.dealId)
+      : { disconnectTypes: [], clusterKeys: [] };
+
     if (input.action === "resolve" || input.action === "dismiss") {
       await tenantDb
         .update(aiRiskFlags)
@@ -1611,7 +1955,12 @@ export async function triageAiActionQueueEntry(
       userId: input.userId,
       feedbackType: "triage_action",
       feedbackValue: input.action,
-      comment: input.comment ?? null,
+      comment: JSON.stringify({
+        note: input.comment ?? null,
+        dealId: riskFlag?.dealId ?? null,
+        clusterKeys: disconnectMetadata.clusterKeys,
+        disconnectTypes: disconnectMetadata.disconnectTypes,
+      }),
     });
 
     return {
@@ -1633,13 +1982,28 @@ export async function triageAiActionQueueEntry(
       .where(eq(aiTaskSuggestions.id, input.id));
   }
 
+  const [suggestion] = await tenantDb
+    .select({ dealId: aiTaskSuggestions.scopeId, scopeType: aiTaskSuggestions.scopeType })
+    .from(aiTaskSuggestions)
+    .where(eq(aiTaskSuggestions.id, input.id))
+    .limit(1);
+  const disconnectMetadata =
+    suggestion?.scopeType === "deal" && suggestion.dealId
+      ? await getCurrentDisconnectMetadataForDeal(tenantDb, suggestion.dealId)
+      : { disconnectTypes: [], clusterKeys: [] };
+
   const feedback = await recordAiFeedback(tenantDb, {
     targetType: "task_suggestion",
     targetId: input.id,
     userId: input.userId,
     feedbackType: "triage_action",
     feedbackValue: input.action,
-    comment: input.comment ?? null,
+    comment: JSON.stringify({
+      note: input.comment ?? null,
+      dealId: suggestion?.scopeType === "deal" ? suggestion.dealId ?? null : null,
+      clusterKeys: disconnectMetadata.clusterKeys,
+      disconnectTypes: disconnectMetadata.disconnectTypes,
+    }),
   });
 
   return {

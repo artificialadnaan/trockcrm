@@ -92,6 +92,13 @@ export function SalesProcessDisconnectsPage() {
     }).catch(() => {});
   };
 
+  const handlePlaybookFocus = (next: string) => {
+    void trackSalesProcessDisconnectInteraction({
+      interactionType: "outcome_focus",
+      targetValue: `playbook:${next}`,
+    }).catch(() => {});
+  };
+
   return (
     <div className="p-6 space-y-6 bg-gray-50 min-h-screen">
       <div className="flex items-start justify-between gap-4">
@@ -334,6 +341,97 @@ export function SalesProcessDisconnectsPage() {
                 </div>
               </div>
             </div>
+          </CardContent>
+        </Card>
+      </div>
+
+      <div className="grid grid-cols-1 xl:grid-cols-[0.85fr_1.15fr] gap-4">
+        <Card>
+          <CardHeader>
+            <CardTitle>Action Scoreboard</CardTitle>
+            <CardDescription>
+              Which triage actions are currently correlating with clearance across admin intervention work
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3">
+              <div className="text-xs uppercase tracking-widest text-emerald-700">Best overall action</div>
+              <div className="text-2xl font-black text-emerald-900">
+                {dashboard?.actionSummary.bestOverallAction ? dashboard.actionSummary.bestOverallAction.split("_").join(" ") : "N/A"}
+              </div>
+              <div className="text-xs text-emerald-700 mt-1">
+                {dashboard?.actionSummary.bestOverallClearanceRate == null
+                  ? "No recent outcome data yet"
+                  : `${Math.round(dashboard.actionSummary.bestOverallClearanceRate * 100)}% clearance rate`}
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-3 text-sm">
+              <div className="rounded-lg border border-border/80 bg-white px-4 py-3">
+                <div className="text-xs uppercase tracking-widest text-muted-foreground">Mark reviewed</div>
+                <div className="text-xl font-black">{dashboard?.actionSummary.markReviewed30d ?? 0}</div>
+              </div>
+              <div className="rounded-lg border border-border/80 bg-white px-4 py-3">
+                <div className="text-xs uppercase tracking-widest text-muted-foreground">Resolve</div>
+                <div className="text-xl font-black">{dashboard?.actionSummary.resolve30d ?? 0}</div>
+              </div>
+              <div className="rounded-lg border border-border/80 bg-white px-4 py-3">
+                <div className="text-xs uppercase tracking-widest text-muted-foreground">Dismiss</div>
+                <div className="text-xl font-black">{dashboard?.actionSummary.dismiss30d ?? 0}</div>
+              </div>
+              <div className="rounded-lg border border-border/80 bg-white px-4 py-3">
+                <div className="text-xs uppercase tracking-widest text-muted-foreground">Escalate</div>
+                <div className="text-xl font-black">{dashboard?.actionSummary.escalate30d ?? 0}</div>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Intervention Playbooks</CardTitle>
+            <CardDescription>
+              Cluster-specific action guidance based on recent intervention outcomes and still-open disconnects
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {(dashboard?.playbooks ?? []).map((playbook) => (
+              <div key={playbook.clusterKey} className="rounded-lg border border-border/80 bg-white px-4 py-4 space-y-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="space-y-1">
+                    <div className="font-semibold">{playbook.title}</div>
+                    <div className="text-xs text-muted-foreground">
+                      {playbook.interventionDeals30d} intervened deals · {playbook.stillOpenDeals30d} still open
+                    </div>
+                  </div>
+                  <Button variant="outline" size="sm" onClick={() => handlePlaybookFocus(playbook.clusterKey)}>
+                    Focus
+                  </Button>
+                </div>
+
+                <div className="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm">
+                  <span className="font-semibold text-emerald-900">Recommended action:</span>{" "}
+                  <span className="text-emerald-800">
+                    {playbook.recommendedAction ? playbook.recommendedAction.split("_").join(" ") : "No recommendation yet"}
+                  </span>
+                </div>
+
+                <div className="space-y-2">
+                  {playbook.actions.map((action) => (
+                    <div key={`${playbook.clusterKey}:${action.action}`} className="flex items-center justify-between gap-4 rounded-md border border-border/70 px-3 py-2 text-sm">
+                      <div>
+                        <div className="font-medium">{action.action.split("_").join(" ")}</div>
+                        <div className="text-xs text-muted-foreground">
+                          {action.interventionDeals30d} interventions · {action.clearedDeals30d} cleared · {action.stillOpenDeals30d} still open
+                        </div>
+                      </div>
+                      <Badge variant="outline">
+                        {action.clearanceRate30d == null ? "N/A" : `${Math.round(action.clearanceRate30d * 100)}%`}
+                      </Badge>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
           </CardContent>
         </Card>
       </div>

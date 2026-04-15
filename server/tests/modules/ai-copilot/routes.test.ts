@@ -341,6 +341,17 @@ describe("ai copilot routes", () => {
         interventionCoverageRate: 0.5,
         clearanceRate30d: 0.4,
       },
+      actionSummary: {
+        markReviewed30d: 2,
+        resolve30d: 1,
+        dismiss30d: 0,
+        escalate30d: 2,
+        bestOverallAction: "resolve",
+        bestOverallClearanceRate: 1,
+      },
+      playbooks: [
+        { clusterKey: "bid_board_sync_break", bestAction: "escalate", recommendedAction: "escalate" },
+      ],
       rows: [
         { id: "deal-1", dealNumber: "D-1001", dealName: "Alpha Plaza" },
       ],
@@ -356,6 +367,8 @@ describe("ai copilot routes", () => {
     expect(res.body.clusters[0].clusterKey).toBe("bid_board_sync_break");
     expect(res.body.trends.reps[0].disconnectCount).toBe(3);
     expect(res.body.outcomes.clearanceRate30d).toBe(0.4);
+    expect(res.body.actionSummary.bestOverallAction).toBe("resolve");
+    expect(res.body.playbooks[0].recommendedAction).toBe("escalate");
     expect(res.body.rows).toHaveLength(1);
   });
 });

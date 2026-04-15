@@ -178,6 +178,33 @@ export interface SalesProcessDisconnectOutcomes {
   clearanceRate30d: number | null;
 }
 
+export interface SalesProcessDisconnectActionSummary {
+  markReviewed30d: number;
+  resolve30d: number;
+  dismiss30d: number;
+  escalate30d: number;
+  bestOverallAction: "mark_reviewed" | "resolve" | "dismiss" | "escalate" | null;
+  bestOverallClearanceRate: number | null;
+}
+
+export interface SalesProcessDisconnectPlaybookAction {
+  action: "mark_reviewed" | "resolve" | "dismiss" | "escalate";
+  interventionDeals30d: number;
+  clearedDeals30d: number;
+  stillOpenDeals30d: number;
+  clearanceRate30d: number | null;
+}
+
+export interface SalesProcessDisconnectPlaybook {
+  clusterKey: string;
+  title: string;
+  bestAction: "mark_reviewed" | "resolve" | "dismiss" | "escalate" | null;
+  recommendedAction: "mark_reviewed" | "resolve" | "dismiss" | "escalate" | null;
+  interventionDeals30d: number;
+  stillOpenDeals30d: number;
+  actions: SalesProcessDisconnectPlaybookAction[];
+}
+
 export interface SalesProcessDisconnectCluster {
   clusterKey: string;
   title: string;
@@ -203,6 +230,8 @@ export interface SalesProcessDisconnectDashboard {
     companies: SalesProcessDisconnectTrendEntry[];
   };
   outcomes: SalesProcessDisconnectOutcomes;
+  actionSummary: SalesProcessDisconnectActionSummary;
+  playbooks: SalesProcessDisconnectPlaybook[];
   rows: SalesProcessDisconnectRow[];
 }
 

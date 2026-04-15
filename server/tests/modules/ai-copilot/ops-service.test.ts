@@ -346,6 +346,37 @@ describe("AI ops service", () => {
               latest_action: "resolve",
             },
           ],
+        })
+        .mockResolvedValueOnce({
+          rows: [
+            {
+              deal_id: "deal-1",
+              action: "mark_reviewed",
+              created_at: "2026-04-14T15:00:00.000Z",
+              comment_text: JSON.stringify({
+                clusterKeys: ["execution_stall"],
+                disconnectTypes: ["stale_stage"],
+              }),
+            },
+            {
+              deal_id: "deal-2",
+              action: "escalate",
+              created_at: "2026-04-14T16:00:00.000Z",
+              comment_text: JSON.stringify({
+                clusterKeys: ["bid_board_sync_break"],
+                disconnectTypes: ["procore_bid_board_drift"],
+              }),
+            },
+            {
+              deal_id: "deal-3",
+              action: "resolve",
+              created_at: "2026-04-13T13:00:00.000Z",
+              comment_text: JSON.stringify({
+                clusterKeys: ["execution_stall"],
+                disconnectTypes: ["missing_next_task"],
+              }),
+            },
+          ],
         }),
     };
 
@@ -437,5 +468,25 @@ describe("AI ops service", () => {
       interventionCoverageRate: 0.5,
       clearanceRate30d: 0.5,
     });
+    expect(result.actionSummary).toEqual({
+      markReviewed30d: 1,
+      resolve30d: 1,
+      dismiss30d: 0,
+      escalate30d: 1,
+      bestOverallAction: "resolve",
+      bestOverallClearanceRate: 1,
+    });
+    expect(result.playbooks).toEqual([
+      expect.objectContaining({
+        clusterKey: "bid_board_sync_break",
+        bestAction: "escalate",
+        recommendedAction: "escalate",
+      }),
+      expect.objectContaining({
+        clusterKey: "execution_stall",
+        bestAction: "resolve",
+        recommendedAction: "resolve",
+      }),
+    ]);
   });
 });
