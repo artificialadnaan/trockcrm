@@ -55,7 +55,6 @@ import {
   serializeRowsToCsv,
 } from "@/lib/report-export";
 import { getScheduleReportActionConfig } from "@/lib/report-actions";
-import { getStaleLeadWatchlistMeta } from "@/lib/stale-lead-dashboard";
 import {
   BarChart,
   Bar,
@@ -480,7 +479,10 @@ export function ReportsPage() {
 
   const staleLeadWatchlist = dirData?.staleLeads ?? repData?.staleLeads.leads ?? [];
   const staleLeadCount = dirData?.staleLeads.length ?? repData?.staleLeads.count ?? 0;
-  const staleLeadMeta = getStaleLeadWatchlistMeta(undefined);
+  const staleLeadMeta = {
+    label: "Current-state lead watchlist",
+    detail: "Snapshot as of today. Not filtered by the selected reporting period.",
+  };
 
   const avgLeadDaysInStage = useMemo(() => {
     if (dirData?.staleLeads.length) {

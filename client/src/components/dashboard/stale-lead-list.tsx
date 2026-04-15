@@ -1,10 +1,7 @@
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { AlertTriangle } from "lucide-react";
-import {
-  getStaleLeadWatchlistMeta,
-  type StaleLeadViewRow,
-} from "@/lib/stale-lead-dashboard";
+import { type StaleLeadViewRow } from "@/lib/stale-lead-dashboard";
 
 interface StaleLeadListProps {
   leads: StaleLeadViewRow[];
@@ -12,7 +9,11 @@ interface StaleLeadListProps {
 }
 
 export function StaleLeadList({ leads, dateRange }: StaleLeadListProps) {
-  const meta = getStaleLeadWatchlistMeta(dateRange);
+  void dateRange;
+  const meta = {
+    label: "Current-state lead watchlist",
+    detail: "Snapshot as of today. Not filtered by the selected reporting period.",
+  };
 
   if (leads.length === 0) {
     return (

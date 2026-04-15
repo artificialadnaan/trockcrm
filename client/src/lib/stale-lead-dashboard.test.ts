@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   buildStaleLeadAlertSummary,
-  getStaleLeadWatchlistMeta,
 } from "./stale-lead-dashboard";
 
 describe("stale lead dashboard helpers", () => {
@@ -36,18 +35,6 @@ describe("stale lead dashboard helpers", () => {
     ).toEqual({
       title: "Lead pipeline on track",
       detail: "No current stale leads detected today",
-    });
-  });
-
-  it("labels stale lead watchlists as current-state data even when a date range is selected", () => {
-    expect(
-      getStaleLeadWatchlistMeta({
-        from: "2026-04-01",
-        to: "2026-04-30",
-      })
-    ).toEqual({
-      label: "Current-state lead watchlist",
-      detail: "Snapshot as of today. Not filtered by the selected reporting period.",
     });
   });
 });
