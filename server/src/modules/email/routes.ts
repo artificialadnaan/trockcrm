@@ -9,6 +9,7 @@ import {
   getEmailById,
   getEmailThread,
   getUserEmails,
+  getEmailAssignmentQueue,
   associateEmailToDeal,
 } from "./service.js";
 import { getDealById } from "../deals/service.js";
@@ -156,6 +157,28 @@ router.get("/thread/:conversationId", async (req, res, next) => {
     const thread = await getEmailThread(req.tenantDb!, req.params.conversationId, req.user!.id, req.user!.role);
     await req.commitTransaction!();
     res.json({ emails: thread });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/email/assignment-queue — unresolved assignment queue for inbox triage
+router.get("/assignment-queue", async (req, res, next) => {
+  try {
+    const filters = {
+      search: req.query.search as string | undefined,
+      page: req.query.page ? parseInt(req.query.page as string, 10) : undefined,
+      limit: req.query.limit ? parseInt(req.query.limit as string, 10) : undefined,
+    };
+
+    const result = await getEmailAssignmentQueue(
+      req.tenantDb!,
+      filters,
+      req.user!.id,
+      req.user!.role
+    );
+    await req.commitTransaction!();
+    res.json(result);
   } catch (err) {
     next(err);
   }

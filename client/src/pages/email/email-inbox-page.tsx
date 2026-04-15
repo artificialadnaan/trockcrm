@@ -12,6 +12,7 @@ import {
 } from "@/components/ui/select";
 import { GraphAuthBanner } from "@/components/email/graph-auth-banner";
 import { EmailList } from "@/components/email/email-list";
+import { EmailAssignmentQueue } from "@/components/email/email-assignment-queue";
 import { EmailComposeDialog } from "@/components/email/email-compose-dialog";
 import { useUserEmails } from "@/hooks/use-emails";
 
@@ -58,6 +59,8 @@ export function EmailInboxPage() {
       )}
 
       <GraphAuthBanner />
+
+      <EmailAssignmentQueue />
 
       {/* Filters */}
       <div className="flex items-center gap-3">

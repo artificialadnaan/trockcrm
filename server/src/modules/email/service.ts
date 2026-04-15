@@ -1,6 +1,13 @@
 import { eq, and, desc, sql, or } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
-import { emails, activities, contacts, deals, contactDealAssociations, tasks } from "@trock-crm/shared/schema";
+import {
+  emails,
+  activities,
+  contacts,
+  deals,
+  contactDealAssociations,
+  tasks,
+} from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
 import { graphRequest } from "../../lib/graph-client.js";
@@ -8,6 +15,13 @@ import { getValidAccessToken, isGraphAuthConfigured } from "./graph-auth.js";
 import { evaluateTaskRules } from "../tasks/rules/evaluator.js";
 import { TASK_RULES } from "../tasks/rules/config.js";
 import { createTenantTaskRulePersistence } from "../tasks/rules/persistence.js";
+import {
+  resolveEmailAssignment,
+  type EmailAssignmentDealCandidate,
+  type EmailAssignmentEntityType,
+  type EmailAssignmentResult,
+  type EmailAssignmentThreadAssignment,
+} from "./assignment-service.js";
 import crypto from "crypto";
 
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -31,6 +45,243 @@ export interface EmailFilters {
   search?: string;
   page?: number;
   limit?: number;
+}
+
+export interface EmailAssignmentQueueFilters {
+  search?: string;
+  page?: number;
+  limit?: number;
+}
+
+export interface EmailAssignmentQueueItem {
+  email: Awaited<ReturnType<typeof getEmailById>>;
+  contactName: string | null;
+  companyName: string | null;
+  candidateDeals: EmailAssignmentDealCandidate[];
+  suggestedAssignment: EmailAssignmentResult;
+}
+
+type EmailAssignmentUpdate = {
+  assignedEntityType: EmailAssignmentEntityType | null;
+  assignedEntityId: string | null;
+  assignmentConfidence: EmailAssignmentResult["confidence"];
+  assignmentAmbiguityReason: string | null;
+  dealId: string | null;
+};
+
+function assignmentUpdateForDeal(dealId: string): EmailAssignmentUpdate {
+  return {
+    assignedEntityType: "deal",
+    assignedEntityId: dealId,
+    assignmentConfidence: "high",
+    assignmentAmbiguityReason: null,
+    dealId,
+  };
+}
+
+async function getThreadAssignment(
+  tenantDb: TenantDb,
+  conversationId: string | null | undefined
+): Promise<EmailAssignmentThreadAssignment | null> {
+  if (!conversationId) return null;
+
+  const [row] = await tenantDb
+    .select({
+      assignedEntityType: emails.assignedEntityType,
+      assignedEntityId: emails.assignedEntityId,
+      dealId: emails.dealId,
+    })
+    .from(emails)
+    .where(
+      and(
+        eq(emails.graphConversationId, conversationId),
+        or(
+          sql`${emails.assignedEntityType} IS NOT NULL`,
+          sql`${emails.dealId} IS NOT NULL`
+        )
+      )
+    )
+    .orderBy(desc(emails.sentAt))
+    .limit(1);
+
+  if (!row) return null;
+
+  if (row.assignedEntityType && row.assignedEntityId) {
+    return {
+      assignedEntityType: row.assignedEntityType as EmailAssignmentThreadAssignment["assignedEntityType"],
+      assignedEntityId: row.assignedEntityId,
+      assignedDealId: row.dealId ?? (row.assignedEntityType === "deal" ? row.assignedEntityId : null),
+    };
+  }
+
+  if (row.dealId) {
+    return {
+      assignedEntityType: "deal",
+      assignedEntityId: row.dealId,
+      assignedDealId: row.dealId,
+    };
+  }
+
+  return null;
+}
+
+async function getEmailCandidateDeals(
+  tenantDb: TenantDb,
+  contactId: string | null | undefined
+): Promise<{ companyId: string | null; companyName: string | null; dealCandidates: EmailAssignmentDealCandidate[] }> {
+  if (!contactId) {
+    return { companyId: null, companyName: null, dealCandidates: [] };
+  }
+
+  const [contactRow] = await tenantDb
+    .select({
+      companyId: contacts.companyId,
+      companyName: contacts.companyName,
+    })
+    .from(contacts)
+    .where(eq(contacts.id, contactId))
+    .limit(1);
+
+  const companyId = contactRow?.companyId ?? null;
+  const companyName = contactRow?.companyName ?? null;
+
+  const contactDeals = await tenantDb
+    .select({
+      id: deals.id,
+      dealNumber: deals.dealNumber,
+      name: deals.name,
+      companyId: deals.companyId,
+      propertyAddress: deals.propertyAddress,
+      propertyCity: deals.propertyCity,
+      propertyState: deals.propertyState,
+      propertyZip: deals.propertyZip,
+    })
+    .from(deals)
+    .innerJoin(contactDealAssociations, eq(contactDealAssociations.dealId, deals.id))
+    .where(and(eq(contactDealAssociations.contactId, contactId), eq(deals.isActive, true)));
+
+  const companyDeals =
+    companyId == null
+      ? []
+      : await tenantDb
+          .select({
+            id: deals.id,
+            dealNumber: deals.dealNumber,
+            name: deals.name,
+            companyId: deals.companyId,
+            propertyAddress: deals.propertyAddress,
+            propertyCity: deals.propertyCity,
+            propertyState: deals.propertyState,
+            propertyZip: deals.propertyZip,
+          })
+          .from(deals)
+          .where(and(eq(deals.companyId, companyId), eq(deals.isActive, true)));
+
+  const candidateDeals = [...contactDeals, ...companyDeals].reduce<EmailAssignmentDealCandidate[]>(
+    (acc, deal) => {
+      if (acc.some((existing) => existing.id === deal.id)) return acc;
+      acc.push(deal);
+      return acc;
+    },
+    []
+  );
+
+  return { companyId, companyName, dealCandidates: candidateDeals };
+}
+
+export async function getEmailAssignmentQueue(
+  tenantDb: TenantDb,
+  filters: EmailAssignmentQueueFilters = {},
+  userId?: string,
+  userRole?: string
+) {
+  const page = filters.page ?? 1;
+  const limit = filters.limit ?? 25;
+  const offset = (page - 1) * limit;
+
+  const conditions: any[] = [
+    eq(emails.direction, "inbound"),
+    or(
+      sql`${emails.assignmentAmbiguityReason} IS NOT NULL`,
+      and(eq(emails.assignedEntityType, "company"), sql`${emails.dealId} IS NULL`)
+    ),
+  ];
+
+  if (userId && userRole === "rep") {
+    conditions.push(eq(emails.userId, userId));
+  }
+
+  if (filters.search && filters.search.trim().length >= 2) {
+    const term = `%${filters.search.trim()}%`;
+    conditions.push(
+      or(
+        sql`${emails.subject} ILIKE ${term}`,
+        sql`${emails.bodyPreview} ILIKE ${term}`,
+        sql`${emails.fromAddress} ILIKE ${term}`
+      )
+    );
+  }
+
+  const where = and(...conditions);
+
+  const [countResult, emailRows] = await Promise.all([
+    tenantDb.select({ count: sql<number>`count(*)` }).from(emails).where(where),
+    tenantDb
+      .select()
+      .from(emails)
+      .where(where)
+      .orderBy(desc(emails.sentAt))
+      .limit(limit)
+      .offset(offset),
+  ]);
+
+  const items = await Promise.all(
+    emailRows.map(async (emailRow) => {
+      const [contactRow] = emailRow.contactId
+        ? await tenantDb
+            .select({
+              firstName: contacts.firstName,
+              lastName: contacts.lastName,
+              companyId: contacts.companyId,
+              companyName: contacts.companyName,
+            })
+            .from(contacts)
+            .where(eq(contacts.id, emailRow.contactId))
+            .limit(1)
+        : [null];
+
+      const { companyId, companyName, dealCandidates } = await getEmailCandidateDeals(
+        tenantDb,
+        emailRow.contactId
+      );
+      const suggestedAssignment = resolveEmailAssignment({
+        subject: emailRow.subject,
+        bodyPreview: emailRow.bodyPreview,
+        bodyHtml: emailRow.bodyHtml,
+        priorThreadAssignment: await getThreadAssignment(tenantDb, emailRow.graphConversationId),
+        contactCompanyId: contactRow?.companyId ?? companyId,
+        dealCandidates,
+      });
+
+      return {
+        email: emailRow,
+        contactName: contactRow ? `${contactRow.firstName} ${contactRow.lastName}`.trim() : null,
+        companyName: contactRow?.companyName ?? companyName,
+        candidateDeals: dealCandidates,
+        suggestedAssignment,
+      } satisfies EmailAssignmentQueueItem;
+    })
+  );
+
+  return {
+    items,
+    pagination: {
+      page,
+      limit,
+      total: Number(countResult[0]?.count ?? 0),
+      totalPages: Math.ceil(Number(countResult[0]?.count ?? 0) / limit),
+    },
+  };
 }
 
 /**
@@ -87,6 +338,31 @@ export async function sendEmail(
   const graphMessageId = draft.id ?? `sent-${crypto.randomUUID()}`;
   const graphConversationId: string | null = draft.conversationId ?? null;
   const fromAddress: string = draft.from?.emailAddress?.address ?? "";
+  let outboundAssignment: EmailAssignmentUpdate = {
+    assignedEntityType: null,
+    assignedEntityId: null,
+    assignmentConfidence: "low",
+    assignmentAmbiguityReason: null,
+    dealId: null,
+  };
+  if (input.dealId) {
+    outboundAssignment = assignmentUpdateForDeal(input.dealId);
+  } else if (input.contactId) {
+    const [contactRow] = await tenantDb
+      .select({ companyId: contacts.companyId })
+      .from(contacts)
+      .where(eq(contacts.id, input.contactId))
+      .limit(1);
+    if (contactRow?.companyId) {
+      outboundAssignment = {
+        assignedEntityType: "company",
+        assignedEntityId: contactRow.companyId,
+        assignmentConfidence: "medium",
+        assignmentAmbiguityReason: null,
+        dealId: null,
+      };
+    }
+  }
 
   // Step 2: Send the draft
   const sendResult = await graphRequest({
@@ -118,7 +394,7 @@ export async function sendEmail(
       bodyHtml: input.bodyHtml,
       hasAttachments: false,
       contactId: input.contactId ?? null,
-      dealId: input.dealId ?? null,
+      ...outboundAssignment,
       userId,
       sentAt: new Date(),
     })
@@ -156,6 +432,31 @@ async function createMockSentEmail(
   input: SendEmailInput
 ): Promise<any> {
   const graphMessageId = `dev-sent-${crypto.randomUUID()}`;
+  let outboundAssignment: EmailAssignmentUpdate = {
+    assignedEntityType: null,
+    assignedEntityId: null,
+    assignmentConfidence: "low",
+    assignmentAmbiguityReason: null,
+    dealId: null,
+  };
+  if (input.dealId) {
+    outboundAssignment = assignmentUpdateForDeal(input.dealId);
+  } else if (input.contactId) {
+    const [contactRow] = await tenantDb
+      .select({ companyId: contacts.companyId })
+      .from(contacts)
+      .where(eq(contacts.id, input.contactId))
+      .limit(1);
+    if (contactRow?.companyId) {
+      outboundAssignment = {
+        assignedEntityType: "company",
+        assignedEntityId: contactRow.companyId,
+        assignmentConfidence: "medium",
+        assignmentAmbiguityReason: null,
+        dealId: null,
+      };
+    }
+  }
 
   const [emailRecord] = await tenantDb
     .insert(emails)
@@ -170,7 +471,7 @@ async function createMockSentEmail(
       bodyHtml: input.bodyHtml,
       hasAttachments: false,
       contactId: input.contactId ?? null,
-      dealId: input.dealId ?? null,
+      ...outboundAssignment,
       userId,
       sentAt: new Date(),
     })
@@ -476,7 +777,7 @@ export async function associateEmailToDeal(
 
   await tenantDb
     .update(emails)
-    .set({ dealId })
+    .set(assignmentUpdateForDeal(dealId))
     .where(eq(emails.id, emailId));
 
   // Cascade: update the associated activity and task records to keep deal_id consistent
