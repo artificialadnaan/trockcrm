@@ -70,6 +70,7 @@ describe("AI copilot service", () => {
         persistPacketBundle: vi.fn(async (payload) => {
           callOrder.push("persist");
           expect(payload.packet.scopeId).toBe("deal-1");
+          expect(payload.packet.expiresAt).toBe("2026-04-15T12:30:00.000Z");
           expect(payload.suggestedTasks).toHaveLength(1);
           expect(payload.blindSpotFlags).toHaveLength(1);
           return {
@@ -119,6 +120,53 @@ describe("AI copilot service", () => {
       snapshotHash: expect.any(String),
       summary: "Existing summary",
       generatedAt: "2026-04-15T12:00:00.000Z",
+    });
+  });
+
+  it("regenerates when the existing packet is expired", async () => {
+    const persistedAt = new Date("2026-04-15T12:45:00.000Z");
+
+    const result = await generateDealCopilotPacket(
+      {} as any,
+      { dealId: "deal-1", forceRegenerate: false },
+      {
+        getDealCopilotContext: vi.fn(async () => ({
+          deal: { id: "deal-1", name: "Alpha Plaza", stageName: "Estimating", proposalStatus: "drafting" },
+          recentActivities: [],
+          recentEmails: [],
+          taskSummary: { openTaskCount: 1, overdueTaskCount: 0 },
+        })),
+        getDealBlindSpotSignals: vi.fn(async () => []),
+        searchDealKnowledge: vi.fn(async () => []),
+        provider: {
+          generateCopilotPacket: vi.fn(async () => ({
+            summary: "Fresh summary",
+            recommendedNextStep: {
+              action: "Refresh packet",
+              ownerId: null,
+              dueLabel: null,
+              rationale: "Old packet expired.",
+            },
+            suggestedTasks: [],
+            blindSpotFlags: [],
+            confidence: 0.7,
+            evidence: [],
+          })),
+        },
+        getExistingFreshPacket: vi.fn(async () => null),
+        persistPacketBundle: vi.fn(async () => ({
+          packetId: "packet-fresh",
+          generatedAt: persistedAt.toISOString(),
+        })),
+        now: persistedAt,
+      }
+    );
+
+    expect(result).toEqual({
+      packetId: "packet-fresh",
+      snapshotHash: expect.any(String),
+      summary: "Fresh summary",
+      generatedAt: "2026-04-15T12:45:00.000Z",
     });
   });
 });

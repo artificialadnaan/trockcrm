@@ -20,6 +20,7 @@ import type { DealKnowledgeChunk } from "./retrieval-service.js";
 import type { DealCopilotPromptOutput } from "./prompt-contract.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
+const PACKET_TTL_MS = 30 * 60 * 1000;
 
 export interface GenerateDealCopilotPacketInput {
   dealId: string;
@@ -61,6 +62,7 @@ interface GenerateDealCopilotPacketDeps {
       confidence: number;
       evidence: Array<Record<string, unknown>>;
       generatedAt: string;
+      expiresAt: string;
     };
     suggestedTasks: DealCopilotPromptOutput["suggestedTasks"];
     blindSpotFlags: DealCopilotPromptOutput["blindSpotFlags"];
@@ -142,6 +144,7 @@ export async function generateDealCopilotPacket(
       confidence: generated.confidence,
       evidence: generated.evidence,
       generatedAt: deps.now.toISOString(),
+      expiresAt: new Date(deps.now.getTime() + PACKET_TTL_MS).toISOString(),
     },
     suggestedTasks: generated.suggestedTasks,
     blindSpotFlags: generated.blindSpotFlags,
@@ -272,6 +275,7 @@ async function persistPacketBundle(
       confidence: number;
       evidence: Array<Record<string, unknown>>;
       generatedAt: string;
+      expiresAt: string;
     };
     suggestedTasks: DealCopilotPromptOutput["suggestedTasks"];
     blindSpotFlags: DealCopilotPromptOutput["blindSpotFlags"];
@@ -299,6 +303,7 @@ async function persistPacketBundle(
       evidenceJson: payload.packet.evidence,
       confidence: String(payload.packet.confidence),
       generatedAt: new Date(payload.packet.generatedAt),
+      expiresAt: new Date(payload.packet.expiresAt),
       updatedAt: new Date(),
     })
     .returning();
@@ -361,6 +366,9 @@ async function getExistingFreshPacket(input: {
     .limit(1);
 
   if (!packet) return null;
+  if (packet.expiresAt && packet.expiresAt.getTime() <= input.now.getTime()) {
+    return null;
+  }
 
   return {
     packetId: packet.id,
