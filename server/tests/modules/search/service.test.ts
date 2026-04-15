@@ -69,11 +69,22 @@ describe("search service", () => {
     expect(result.recommendedActions[0]).toMatchObject({
       actionType: "review_deal_emails",
       deepLink: "/deals/deal-1?tab=email",
+      executionMode: "navigate",
       interactionScore: 2,
     });
     expect(result.evidence[0]).toMatchObject({
       deepLink: "/deals/deal-1",
       interactionScore: 1,
     });
+    expect(result.recommendedActions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          actionType: "refresh_deal_copilot",
+          executionMode: "api_then_navigate",
+          apiEndpoint: "/ai/deals/deal-1/regenerate",
+          deepLink: "/deals/deal-1?tab=overview&focus=copilot",
+        }),
+      ])
+    );
   });
 });

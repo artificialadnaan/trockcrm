@@ -16,6 +16,7 @@ import { useDealCopilot } from "@/hooks/use-ai-copilot";
 
 interface DealCopilotPanelProps {
   dealId: string;
+  panelId?: string;
 }
 
 function formatConfidence(value: string | null) {
@@ -32,7 +33,7 @@ function formatGeneratedAt(value: string | null) {
   return date.toLocaleString();
 }
 
-export function DealCopilotPanel({ dealId }: DealCopilotPanelProps) {
+export function DealCopilotPanel({ dealId, panelId }: DealCopilotPanelProps) {
   const {
     data,
     loading,
@@ -140,7 +141,7 @@ export function DealCopilotPanel({ dealId }: DealCopilotPanelProps) {
   }
 
   return (
-    <Card className="border-border/80">
+    <Card id={panelId} className="border-border/80">
       <CardHeader className="pb-3">
         <div className="flex items-start justify-between gap-3">
           <div className="space-y-2">

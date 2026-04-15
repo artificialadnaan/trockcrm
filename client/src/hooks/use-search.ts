@@ -41,10 +41,21 @@ export interface AiSearchEntityAnchor {
 }
 
 export interface AiSearchRecommendedAction {
-  actionType: "open_best_match" | "review_deal_emails" | "open_contact" | "open_file_context" | "open_deal_context";
+  actionType:
+    | "open_best_match"
+    | "review_deal_emails"
+    | "open_contact"
+    | "open_file_context"
+    | "open_deal_context"
+    | "open_deal_copilot"
+    | "refresh_deal_copilot";
   label: string;
   rationale: string;
   deepLink: string;
+  executionMode: "navigate" | "api_then_navigate";
+  apiEndpoint?: string;
+  apiMethod?: "POST";
+  successMessage?: string;
   interactionScore?: number;
 }
 
@@ -178,5 +189,15 @@ export async function trackAiSearchInteraction(input: {
   return api<{ interaction: { id: string } }>("/search/ai/interaction", {
     method: "POST",
     json: input,
+  });
+}
+
+export async function executeAiSearchWorkflowAction(action: AiSearchRecommendedAction) {
+  if (action.executionMode !== "api_then_navigate" || !action.apiEndpoint) {
+    return null;
+  }
+
+  return api(action.apiEndpoint, {
+    method: action.apiMethod ?? "POST",
   });
 }

@@ -1,8 +1,17 @@
 import { useEffect } from "react";
-import { useSearchParams, Link } from "react-router-dom";
+import { useSearchParams, Link, useNavigate } from "react-router-dom";
 import { Search, Building2, User, FileText, Sparkles } from "lucide-react";
+import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
-import { trackAiSearchInteraction, useAiSearch, useSearch, useRecentSearches, type SearchResult } from "@/hooks/use-search";
+import {
+  executeAiSearchWorkflowAction,
+  trackAiSearchInteraction,
+  useAiSearch,
+  useSearch,
+  useRecentSearches,
+  type AiSearchRecommendedAction,
+  type SearchResult,
+} from "@/hooks/use-search";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 
@@ -48,6 +57,7 @@ function ResultCard({ result }: { result: SearchResult }) {
 
 export function SearchPage() {
   const [searchParams, setSearchParams] = useSearchParams();
+  const navigate = useNavigate();
   const initialQ = searchParams.get("q") ?? "";
   const { query, setQuery, results, loading } = useSearch();
   const { setQuery: setAiQuery, results: aiResults, loading: aiLoading } = useAiSearch();
@@ -84,6 +94,25 @@ export function SearchPage() {
       targetValue,
       deepLink,
     }).catch(() => {});
+  };
+
+  const handleRecommendedAction = async (action: AiSearchRecommendedAction) => {
+    trackInteraction("recommended_action_click", action.actionType, action.deepLink);
+
+    if (action.executionMode === "navigate") {
+      navigate(action.deepLink);
+      return;
+    }
+
+    try {
+      await executeAiSearchWorkflowAction(action);
+      if (action.successMessage) {
+        toast.success(action.successMessage);
+      }
+      navigate(action.deepLink);
+    } catch (err: unknown) {
+      toast.error(err instanceof Error ? err.message : "Failed to run AI workflow action");
+    }
   };
 
   return (
@@ -124,11 +153,11 @@ export function SearchPage() {
                 </p>
                 <div className="grid gap-2 sm:grid-cols-2">
                   {aiResults.recommendedActions.map((action) => (
-                    <Link
+                    <button
                       key={`${action.actionType}:${action.deepLink}`}
-                      to={action.deepLink}
-                      className="rounded-lg border bg-white px-3 py-3 hover:bg-gray-50"
-                      onClick={() => trackInteraction("recommended_action_click", action.actionType, action.deepLink)}
+                      type="button"
+                      className="rounded-lg border bg-white px-3 py-3 hover:bg-gray-50 text-left"
+                      onClick={() => void handleRecommendedAction(action)}
                     >
                       <div className="space-y-1">
                         <div className="flex items-center justify-between gap-2">
@@ -137,7 +166,7 @@ export function SearchPage() {
                         </div>
                         <div className="text-xs text-muted-foreground leading-5">{action.rationale}</div>
                       </div>
-                    </Link>
+                    </button>
                   ))}
                 </div>
               </div>

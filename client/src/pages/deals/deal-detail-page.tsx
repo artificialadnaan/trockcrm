@@ -1,5 +1,5 @@
-import { useState, useCallback } from "react";
-import { useParams, useNavigate } from "react-router-dom";
+import { useState, useCallback, useEffect } from "react";
+import { useParams, useNavigate, useSearchParams } from "react-router-dom";
 import {
   ArrowLeft,
   Edit,
@@ -43,6 +43,7 @@ type Tab = "overview" | "scoping" | "files" | "email" | "activity" | "timeline" 
 export function DealDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { user } = useAuth();
   const { deal, loading, error, refetch } = useDealDetail(id);
   const { stages } = usePipelineStages();
@@ -122,6 +123,44 @@ export function DealDetailPage() {
     ...(showPunchList ? [{ key: "punch_list" as Tab, label: "Punch List" }] : []),
     ...(showCloseout ? [{ key: "closeout" as Tab, label: "Close-Out" }] : []),
   ];
+  const availableTabs = tabs.map((tab) => tab.key);
+  const requestedTab = searchParams.get("tab");
+  const requestedFocus = searchParams.get("focus");
+
+  useEffect(() => {
+    const nextTab =
+      requestedTab && availableTabs.includes(requestedTab as Tab)
+        ? (requestedTab as Tab)
+        : "overview";
+    setActiveTab((current) => (current === nextTab ? current : nextTab));
+  }, [availableTabs, requestedTab]);
+
+  useEffect(() => {
+    if (activeTab !== "overview" || requestedFocus !== "copilot") {
+      return;
+    }
+
+    const frame = window.requestAnimationFrame(() => {
+      document.getElementById("deal-ai-copilot")?.scrollIntoView({
+        behavior: "smooth",
+        block: "start",
+      });
+    });
+
+    return () => window.cancelAnimationFrame(frame);
+  }, [activeTab, requestedFocus]);
+
+  const handleTabSelect = (tab: Tab) => {
+    setActiveTab(tab);
+    const nextParams = new URLSearchParams(searchParams);
+    if (tab === "overview") {
+      nextParams.delete("tab");
+    } else {
+      nextParams.set("tab", tab);
+      nextParams.delete("focus");
+    }
+    setSearchParams(nextParams, { replace: true });
+  };
 
   return (
     <div className="space-y-4">
@@ -264,7 +303,7 @@ export function DealDetailPage() {
                   ? "border-brand-red text-foreground"
                   : "border-transparent text-muted-foreground hover:text-foreground"
               }`}
-              onClick={() => setActiveTab(tab.key)}
+              onClick={() => handleTabSelect(tab.key)}
             >
               {tab.label}
             </button>

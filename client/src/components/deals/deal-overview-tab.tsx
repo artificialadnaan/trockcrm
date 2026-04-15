@@ -196,7 +196,7 @@ export function DealOverviewTab({ deal }: DealOverviewTabProps) {
 
       {/* Right Column: Estimates + Quick Info */}
       <div className="space-y-4">
-        <DealCopilotPanel dealId={deal.id} />
+        <DealCopilotPanel dealId={deal.id} panelId="deal-ai-copilot" />
 
         <DealEstimatesCard deal={deal} />
 
