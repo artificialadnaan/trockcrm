@@ -37,7 +37,12 @@ const processInboundMessage = (emailSyncModule as any).processInboundMessage as 
 ) => Promise<boolean>;
 
 function createQueryMock(options: {
-  activeDeals: Array<{ deal_id: string; deal_number: string; deal_name: string }>;
+  activeDeals: Array<{
+    deal_id: string;
+    deal_number: string;
+    deal_name: string;
+    assigned_rep_id?: string | null;
+  }>;
 }) {
   return vi.fn(async (sql: string, params?: unknown[]) => {
     if (sql.includes("FROM office_beta.emails") && sql.includes("graph_message_id = $1")) {
@@ -83,7 +88,12 @@ describe("email sync inbound message routing", () => {
   it("routes a single-active-deal email to the reply-needed task rule", async () => {
     const queryMock = createQueryMock({
       activeDeals: [
-        { deal_id: "deal-1", deal_number: "D-1001", deal_name: "Project Alpha" },
+        {
+          deal_id: "deal-1",
+          deal_number: "D-1001",
+          deal_name: "Project Alpha",
+          assigned_rep_id: "rep-77",
+        },
       ],
     });
     const client = { query: queryMock };
@@ -138,7 +148,7 @@ describe("email sync inbound message routing", () => {
     expect(activityCall?.[0]).toContain("source_entity_type");
     expect(activityCall?.[0]).toContain("source_entity_id");
     expect(activityCall?.[1]).toEqual([
-      "user-1",
+      "rep-77",
       "deal",
       "deal-1",
       "deal-1",
@@ -154,8 +164,18 @@ describe("email sync inbound message routing", () => {
   it("routes a multi-active-deal email to the disambiguation task rule", async () => {
     const queryMock = createQueryMock({
       activeDeals: [
-        { deal_id: "deal-1", deal_number: "D-1001", deal_name: "Project Alpha" },
-        { deal_id: "deal-2", deal_number: "D-1002", deal_name: "Project Beta" },
+        {
+          deal_id: "deal-1",
+          deal_number: "D-1001",
+          deal_name: "Project Alpha",
+          assigned_rep_id: "rep-77",
+        },
+        {
+          deal_id: "deal-2",
+          deal_number: "D-1002",
+          deal_name: "Project Beta",
+          assigned_rep_id: "rep-88",
+        },
       ],
     });
     const client = { query: queryMock };

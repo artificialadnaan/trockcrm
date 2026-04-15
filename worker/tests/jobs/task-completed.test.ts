@@ -15,7 +15,7 @@ describe("task.completed worker handling", () => {
     queryMock.mockReset();
   });
 
-  it("writes close-loop state into the event office schema with the configured suppression window", async () => {
+  it("uses the affected deal owner as responsible activity owner and the actor as performed_by", async () => {
     vi.useFakeTimers();
     const now = new Date("2026-04-04T15:00:00.000Z");
     vi.setSystemTime(now);
@@ -23,6 +23,10 @@ describe("task.completed worker handling", () => {
     queryMock.mockImplementation(async (sql: string) => {
       if (sql.includes("FROM public.offices")) {
         return { rows: [{ slug: "beta" }] };
+      }
+
+      if (sql.includes("FROM office_beta.deals")) {
+        return { rows: [{ assigned_rep_id: "owner-7" }] };
       }
 
       return { rows: [] };
@@ -63,11 +67,13 @@ describe("task.completed worker handling", () => {
     expect(activityCall?.[0]).toContain("performed_by_user_id");
     expect(activityCall?.[0]).toContain("source_entity_type");
     expect(activityCall?.[0]).toContain("source_entity_id");
+    expect(activityCall?.[0]).toContain("lead_id");
     expect(activityCall?.[1]).toEqual([
-      "user-1",
+      "owner-7",
       "user-1",
       "deal",
       "deal-1",
+      null,
       "deal-1",
       "contact-1",
       "Completed: Follow up on stale deal",
@@ -87,5 +93,52 @@ describe("task.completed worker handling", () => {
     expect(params?.[5]).toEqual(now);
     expect(params?.[6]).toEqual(new Date("2026-05-04T15:00:00.000Z"));
     expect(params?.[7]).toEqual({ dealId: "deal-1", contactId: "contact-1" });
+  });
+
+  it("creates a lead-scoped activity row for stale-lead completions", async () => {
+    queryMock.mockImplementation(async (sql: string) => {
+      if (sql.includes("FROM public.offices")) {
+        return { rows: [{ slug: "beta" }] };
+      }
+
+      if (sql.includes("FROM office_beta.leads")) {
+        return { rows: [{ assigned_rep_id: "lead-owner-1" }] };
+      }
+
+      return { rows: [] };
+    });
+
+    await handleTaskCompletedEvent(
+      {
+        taskId: "task-2",
+        title: "Re-engage stale lead Acme HQ",
+        completedBy: "director-2",
+        type: "follow_up",
+        originRule: "stale_lead",
+        dedupeKey: "lead:lead-123:stage_entered:2026-03-29T12:00:00.000Z",
+        reasonCode: "stale_lead",
+        entitySnapshot: {
+          entityType: "lead",
+          leadId: "lead-123",
+        },
+        suppressionWindowDays: 30,
+      },
+      "office-2"
+    );
+
+    const activityCall = queryMock.mock.calls.find(
+      ([sql]) => typeof sql === "string" && sql.includes("INSERT INTO office_beta.activities")
+    );
+    expect(activityCall).toBeDefined();
+    expect(activityCall?.[1]).toEqual([
+      "lead-owner-1",
+      "director-2",
+      "lead",
+      "lead-123",
+      "lead-123",
+      null,
+      null,
+      "Completed: Re-engage stale lead Acme HQ",
+    ]);
   });
 });

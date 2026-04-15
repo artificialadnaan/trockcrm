@@ -470,13 +470,14 @@ export async function processInboundMessage(
   // (no separate UPDATE needed)
   const activitySourceEntityType = association.dealId ? "deal" : "contact";
   const activitySourceEntityId = association.dealId ?? contactMatch.id;
+  const responsibleUserId = association.responsibleUserId ?? userId;
   await client.query(
     `INSERT INTO ${schemaName}.activities
      (type, responsible_user_id, performed_by_user_id, source_entity_type, source_entity_id,
       deal_id, contact_id, email_id, subject, body, occurred_at)
      VALUES ('email', $1, NULL, $2, $3, $4, $5, $6, $7, $8, $9)`,
     [
-      userId,
+      responsibleUserId,
       activitySourceEntityType,
       activitySourceEntityId,
       association.dealId, // may be null if 0 or multiple deals
@@ -566,9 +567,14 @@ async function autoAssociateRaw(
   schemaName: string,
   emailId: string,
   contactId: string
-): Promise<{ dealId: string | null; activeDealCount: number; activeDealNames: string[] }> {
+): Promise<{
+  dealId: string | null;
+  activeDealCount: number;
+  activeDealNames: string[];
+  responsibleUserId: string | null;
+}> {
   const activeDeals = await client.query(
-    `SELECT d.id AS deal_id, d.deal_number, d.name AS deal_name
+    `SELECT d.id AS deal_id, d.deal_number, d.name AS deal_name, d.assigned_rep_id
      FROM ${schemaName}.deals d
      JOIN ${schemaName}.contact_deal_associations cda ON cda.deal_id = d.id
      WHERE cda.contact_id = $1 AND d.is_active = true`,
@@ -585,10 +591,20 @@ async function autoAssociateRaw(
     );
     // Activity record is now created AFTER auto-association with deal_id included,
     // so no separate UPDATE is needed here.
-    return { dealId, activeDealCount: activeDeals.rows.length, activeDealNames };
+    return {
+      dealId,
+      activeDealCount: activeDeals.rows.length,
+      activeDealNames,
+      responsibleUserId: activeDeals.rows[0].assigned_rep_id ?? null,
+    };
   }
   // 0 active deals: contact-only association, no deal
-  return { dealId: null, activeDealCount: activeDeals.rows.length, activeDealNames };
+  return {
+    dealId: null,
+    activeDealCount: activeDeals.rows.length,
+    activeDealNames,
+    responsibleUserId: null,
+  };
 }
 
 async function evaluateInboundEmailTasks(
