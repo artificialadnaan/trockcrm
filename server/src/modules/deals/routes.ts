@@ -59,6 +59,7 @@ import {
   evaluateDealScopingReadiness,
   getOrCreateDealScopingIntake,
   linkDealFileToScopingRequirement,
+  routeRevisionToEstimating,
   upsertDealScopingIntake,
 } from "./scoping-service.js";
 
@@ -402,7 +403,7 @@ router.patch("/:id", async (req, res, next) => {
       delete body.assignedRepId;
     }
 
-    const deal = await updateDeal(
+    let deal = await updateDeal(
       req.tenantDb!,
       req.params.id,
       body,
@@ -410,6 +411,16 @@ router.patch("/:id", async (req, res, next) => {
       req.user!.id,
       req.user!.activeOfficeId,
     );
+
+    if (body.proposalStatus === "revision_requested") {
+      const revisionRouting = await routeRevisionToEstimating(
+        req.tenantDb!,
+        req.params.id,
+        req.user!.id
+      );
+      deal = revisionRouting.deal;
+    }
+
     await req.commitTransaction!();
     res.json({ deal });
   } catch (err) {

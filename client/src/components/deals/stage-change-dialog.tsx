@@ -170,7 +170,10 @@ export function StageChangeDialog({
             )}
 
             {/* Gate Checklist */}
-            <StageGateChecklist missingRequirements={preflight.missingRequirements} />
+            <StageGateChecklist
+              missingRequirements={preflight.missingRequirements}
+              effectiveChecklist={preflight.effectiveChecklist}
+            />
 
             {/* Override Reason (for directors) */}
             {preflight.requiresOverride && (

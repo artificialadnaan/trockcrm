@@ -1,6 +1,6 @@
 import { and, eq } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
-import { dealScopingIntake, deals, files, users } from "@trock-crm/shared/schema";
+import { dealScopingIntake, dealTeamMembers, deals, files, tasks, users } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import type { DealScopingIntakeStatus, WorkflowRoute } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
@@ -27,6 +27,12 @@ export interface LinkScopingFileInput {
   fileId: string;
   intakeSection: string;
   intakeRequirementKey: string;
+}
+
+export interface DealRevisionRoutingResult {
+  routed: boolean;
+  deal: DealRow;
+  task: typeof tasks.$inferSelect | null;
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
@@ -232,15 +238,23 @@ export async function getOrCreateDealScopingIntake(
   );
 }
 
-async function listAttachmentRequirementKeys(tenantDb: TenantDb, dealId: string): Promise<string[]> {
+async function listLinkedScopingAttachments(
+  tenantDb: TenantDb,
+  dealId: string
+): Promise<Array<{ requirementKey: string | null; category: string | null }>> {
   const rows = await tenantDb
-    .select()
+    .select({
+      category: files.category,
+      intakeRequirementKey: files.intakeRequirementKey,
+    })
     .from(files)
     .where(and(eq(files.dealId, dealId), eq(files.isActive, true)));
 
-  return rows
-    .map((row) => row.intakeRequirementKey)
-    .filter((requirementKey): requirementKey is string => typeof requirementKey === "string");
+  return rows.map((row) => ({
+    requirementKey:
+      typeof row.intakeRequirementKey === "string" ? row.intakeRequirementKey : null,
+    category: typeof row.category === "string" ? row.category : null,
+  }));
 }
 
 export async function linkDealFileToScopingRequirement(
@@ -340,7 +354,7 @@ export async function evaluateDealScopingReadiness(
 ): Promise<DealScopingReadinessSnapshot> {
   const deal = await getDealOrThrow(tenantDb, dealId);
   const existingIntake = await getExistingIntake(tenantDb, dealId);
-  const attachmentKeys = await listAttachmentRequirementKeys(tenantDb, dealId);
+  const attachments = await listLinkedScopingAttachments(tenantDb, dealId);
   const sectionData = buildBaseSectionData(existingIntake, deal);
   const projectTypeId = existingIntake?.projectTypeId ?? deal.projectTypeId ?? null;
   const readiness = evaluateScopingReadiness({
@@ -348,7 +362,7 @@ export async function evaluateDealScopingReadiness(
     workflowRoute: deal.workflowRoute,
     projectTypeId,
     sectionData,
-    attachmentKeys,
+    attachments,
   });
 
   if (existingIntake) {
@@ -446,13 +460,13 @@ export async function upsertDealScopingIntake(
     patch.projectTypeId === undefined
       ? existingIntake?.projectTypeId ?? deal.projectTypeId ?? null
       : patch.projectTypeId;
-  const attachmentKeys = await listAttachmentRequirementKeys(tenantDb, dealId);
+  const attachments = await listLinkedScopingAttachments(tenantDb, dealId);
   const readiness = evaluateScopingReadiness({
     currentStatus: (existingIntake?.status ?? "draft") as DealScopingIntakeStatus,
     workflowRoute: nextRoute,
     projectTypeId,
     sectionData: nextSectionData,
-    attachmentKeys,
+    attachments,
   });
   const payload = createIntakePayload({
     existingIntake,
@@ -492,5 +506,105 @@ export async function upsertDealScopingIntake(
     intake: savedIntake,
     readiness,
     previousStatus: existingIntake?.status as DealScopingIntakeStatus | null ?? null,
+  };
+}
+
+async function resolveRevisionTaskAssignee(
+  tenantDb: TenantDb,
+  deal: DealRow
+): Promise<string> {
+  const [estimator] = await tenantDb
+    .select()
+    .from(dealTeamMembers)
+    .where(
+      and(
+        eq(dealTeamMembers.dealId, deal.id),
+        eq(dealTeamMembers.role, "estimator"),
+        eq(dealTeamMembers.isActive, true)
+      )
+    )
+    .limit(1);
+
+  return estimator?.userId ?? deal.assignedRepId;
+}
+
+export async function routeRevisionToEstimating(
+  tenantDb: TenantDb,
+  dealId: string,
+  userId: string
+): Promise<DealRevisionRoutingResult> {
+  const [deal, editor] = await Promise.all([
+    getDealOrThrow(tenantDb, dealId),
+    getUserOrThrow(tenantDb, userId),
+  ]);
+
+  if (
+    deal.workflowRoute !== "estimating" ||
+    deal.proposalStatus !== "revision_requested" ||
+    deal.estimatingSubstage !== "sent_to_client"
+  ) {
+    return {
+      routed: false,
+      deal,
+      task: null,
+    };
+  }
+
+  const [updatedDeal] = await tenantDb
+    .update(deals)
+    .set({
+      estimatingSubstage: "building_estimate",
+      updatedAt: new Date(),
+    })
+    .where(eq(deals.id, dealId))
+    .returning();
+
+  const routedDeal = (updatedDeal ?? {
+    ...deal,
+    estimatingSubstage: "building_estimate",
+  }) as DealRow;
+  const assignedTo = await resolveRevisionTaskAssignee(tenantDb, routedDeal);
+  const revisionCount =
+    typeof routedDeal.proposalRevisionCount === "number"
+      ? routedDeal.proposalRevisionCount
+      : 0;
+  const title = `Address estimate revision for ${routedDeal.name}`;
+
+  const [task] = await tenantDb
+    .insert(tasks)
+    .values({
+      title,
+      description:
+        "Client feedback sent this deal back into estimating. Review the requested changes and prepare a revised estimate.",
+      type: "system",
+      priority: "high",
+      status: "pending",
+      assignedTo,
+      createdBy: userId,
+      officeId: editor.officeId,
+      originRule: "deal_estimate_revision_requested",
+      sourceRule: "deal_estimate_revision_requested",
+      sourceEvent: "deal.estimate.revision_requested",
+      dedupeKey: `deal:${dealId}:estimate_revision:${revisionCount}`,
+      reasonCode: "deal_estimate_revision_requested",
+      dealId,
+      entitySnapshot: {
+        schemaVersion: 1,
+        entityType: "deal",
+        entityId: dealId,
+        officeId: editor.officeId,
+        sourceEvent: "deal.estimate.revision_requested",
+        dealId,
+        dealName: routedDeal.name,
+        dealNumber: routedDeal.dealNumber ?? null,
+        summary: title,
+      },
+    })
+    .returning();
+
+  return {
+    routed: true,
+    deal: routedDeal,
+    task: task ?? null,
   };
 }

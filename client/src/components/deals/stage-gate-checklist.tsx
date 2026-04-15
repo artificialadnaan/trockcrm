@@ -3,12 +3,18 @@ import {
   formatScopingAttachmentLabel,
   formatScopingFieldLabel,
 } from "@/lib/scoping-intake";
+import type { StageGateChecklistItem } from "@/hooks/use-deals";
 
 interface StageGateChecklistProps {
   missingRequirements: {
     fields: string[];
     documents: string[];
     approvals: string[];
+  };
+  effectiveChecklist?: {
+    fields: StageGateChecklistItem[];
+    attachments: StageGateChecklistItem[];
+    approvals: StageGateChecklistItem[];
   };
 }
 
@@ -33,6 +39,12 @@ const DOC_LABELS: Record<string, string> = {
   permit: "Permit",
   insurance: "Insurance Certificate",
   closeout: "Closeout Package",
+  change_order: "Change Order",
+  inspection: "Inspection",
+  correspondence: "Correspondence",
+  warranty: "Warranty",
+  photo: "Photo",
+  other: "Other",
 };
 
 function getFieldLabel(field: string) {
@@ -51,11 +63,55 @@ function getDocumentLabel(doc: string) {
   return DOC_LABELS[doc] ?? doc;
 }
 
-export function StageGateChecklist({ missingRequirements }: StageGateChecklistProps) {
+function RequirementGroup({
+  title,
+  items,
+  icon: Icon,
+}: {
+  title: string;
+  items: StageGateChecklistItem[];
+  icon: typeof FileText;
+}) {
+  if (items.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="space-y-1">
+      <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+        {title}
+      </p>
+      {items.map((item) => (
+        <div
+          key={`${title}-${item.key}`}
+          className={`flex items-center gap-2 text-sm ${
+            item.satisfied ? "text-green-600" : "text-red-600"
+          }`}
+        >
+          {item.satisfied ? (
+            <CheckCircle2 className="h-3.5 w-3.5" />
+          ) : (
+            <Icon className="h-3.5 w-3.5" />
+          )}
+          <span>{item.label}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+export function StageGateChecklist({
+  missingRequirements,
+  effectiveChecklist,
+}: StageGateChecklistProps) {
   const { fields, documents, approvals } = missingRequirements;
   const hasAny = fields.length > 0 || documents.length > 0 || approvals.length > 0;
+  const hasChecklist =
+    (effectiveChecklist?.fields.length ?? 0) > 0 ||
+    (effectiveChecklist?.attachments.length ?? 0) > 0 ||
+    (effectiveChecklist?.approvals.length ?? 0) > 0;
 
-  if (!hasAny) {
+  if (!hasAny && !hasChecklist) {
     return (
       <div className="flex items-center gap-2 text-green-600 text-sm">
         <CheckCircle2 className="h-4 w-4" />
@@ -66,6 +122,36 @@ export function StageGateChecklist({ missingRequirements }: StageGateChecklistPr
 
   return (
     <div className="space-y-3">
+      {hasChecklist && effectiveChecklist && (
+        <div className="space-y-3 rounded-lg border bg-muted/30 p-3">
+          <div className="text-sm font-medium">Effective Checklist</div>
+          <RequirementGroup
+            title="Fields"
+            items={effectiveChecklist.fields}
+            icon={XCircle}
+          />
+          <RequirementGroup
+            title="Attachment Categories"
+            items={effectiveChecklist.attachments}
+            icon={FileText}
+          />
+          <RequirementGroup
+            title="Approvals"
+            items={effectiveChecklist.approvals}
+            icon={User}
+          />
+        </div>
+      )}
+
+      {!hasAny && (
+        <div className="flex items-center gap-2 text-green-600 text-sm">
+          <CheckCircle2 className="h-4 w-4" />
+          All requirements met
+        </div>
+      )}
+
+      {hasAny && (
+        <>
       <div className="flex items-center gap-2 text-amber-600 text-sm font-medium">
         <AlertTriangle className="h-4 w-4" />
         Missing Requirements
@@ -88,7 +174,7 @@ export function StageGateChecklist({ missingRequirements }: StageGateChecklistPr
       {documents.length > 0 && (
         <div className="space-y-1">
           <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
-            Required Documents
+            Missing Attachment Categories
           </p>
           {documents.map((doc) => (
             <div key={doc} className="flex items-center gap-2 text-sm text-red-600">
@@ -111,6 +197,8 @@ export function StageGateChecklist({ missingRequirements }: StageGateChecklistPr
             </div>
           ))}
         </div>
+      )}
+        </>
       )}
     </div>
   );

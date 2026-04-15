@@ -13,7 +13,19 @@ export interface DealScopingRulesInput {
 export interface DealScopingRules {
   requiredSections: string[];
   requiredFieldsBySection: Record<string, string[]>;
+  requiredAttachments: DealScopingAttachmentDefinition[];
   requiredAttachmentKeys: string[];
+}
+
+export interface DealScopingAttachmentDefinition {
+  key: string;
+  category: string;
+  label: string;
+}
+
+export interface DealScopingAttachmentRequirementSnapshot
+  extends DealScopingAttachmentDefinition {
+  satisfied: boolean;
 }
 
 export interface DealScopingCompletionStateEntry {
@@ -33,6 +45,7 @@ export interface DealScopingReadinessSnapshot {
   completionState: Record<string, DealScopingCompletionStateEntry>;
   requiredSections: string[];
   requiredAttachmentKeys: string[];
+  attachmentRequirements: DealScopingAttachmentRequirementSnapshot[];
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
@@ -58,6 +71,27 @@ function isMissingRequiredValue(value: unknown): boolean {
 export function getRequiredScopingRules(input: DealScopingRulesInput): DealScopingRules {
   const projectOverviewFields =
     input.workflowRoute === "service" ? ["propertyName"] : ["propertyName", "bidDueDate"];
+  const requiredAttachments: DealScopingAttachmentDefinition[] =
+    input.workflowRoute === "service"
+      ? [
+          {
+            key: "site_photos",
+            category: "photo",
+            label: "Site photos",
+          },
+        ]
+      : [
+          {
+            key: "scope_docs",
+            category: "other",
+            label: "Scope docs",
+          },
+          {
+            key: "site_photos",
+            category: "photo",
+            label: "Site photos",
+          },
+        ];
 
   return {
     requiredSections: ["projectOverview", "propertyDetails", "scopeSummary", "attachments"],
@@ -66,7 +100,8 @@ export function getRequiredScopingRules(input: DealScopingRulesInput): DealScopi
       propertyDetails: ["propertyAddress"],
       scopeSummary: ["summary"],
     },
-    requiredAttachmentKeys: ["scope_docs", "site_photos"],
+    requiredAttachments,
+    requiredAttachmentKeys: requiredAttachments.map((attachment) => attachment.key),
   };
 }
 
@@ -75,14 +110,21 @@ export function evaluateScopingReadiness(input: {
   workflowRoute: WorkflowRoute;
   projectTypeId: string | null;
   sectionData: DealScopingSectionData;
-  attachmentKeys: Iterable<string>;
+  attachments: Iterable<{
+    requirementKey: string | null;
+    category: string | null;
+  }>;
 }): DealScopingReadinessSnapshot {
   const rules = getRequiredScopingRules({
     workflowRoute: input.workflowRoute,
     projectTypeId: input.projectTypeId,
     sectionData: input.sectionData,
   });
-  const attachmentKeySet = new Set(input.attachmentKeys);
+  const linkedAttachmentPairs = new Set(
+    Array.from(input.attachments, (attachment) =>
+      `${attachment.requirementKey ?? ""}:${attachment.category ?? ""}`
+    )
+  );
   const sectionErrors: Record<string, string[]> = {};
   const attachmentErrors: Record<string, string[]> = {};
   const completionState: Record<string, DealScopingCompletionStateEntry> = {};
@@ -109,12 +151,18 @@ export function evaluateScopingReadiness(input: {
     };
   }
 
-  const missingAttachmentKeys = rules.requiredAttachmentKeys.filter(
-    (requirementKey) => !attachmentKeySet.has(requirementKey)
-  );
+  const attachmentRequirements = rules.requiredAttachments.map((attachment) => ({
+    ...attachment,
+    satisfied: linkedAttachmentPairs.has(`${attachment.key}:${attachment.category}`),
+  }));
+  const missingAttachmentKeys = attachmentRequirements
+    .filter((attachment) => !attachment.satisfied)
+    .map((attachment) => attachment.key);
 
-  for (const attachmentKey of missingAttachmentKeys) {
-    attachmentErrors[attachmentKey] = [attachmentKey];
+  for (const attachment of attachmentRequirements) {
+    if (!attachment.satisfied) {
+      attachmentErrors[attachment.key] = [attachment.category];
+    }
   }
 
   completionState.attachments = {
@@ -139,5 +187,6 @@ export function evaluateScopingReadiness(input: {
     completionState,
     requiredSections: rules.requiredSections,
     requiredAttachmentKeys: rules.requiredAttachmentKeys,
+    attachmentRequirements,
   };
 }

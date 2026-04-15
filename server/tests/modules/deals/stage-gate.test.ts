@@ -1,5 +1,15 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { UserRole } from "@trock-crm/shared/types";
+import {
+  closeoutChecklistItems,
+  dealApprovals,
+  dealScopingIntake,
+  dealTeamMembers,
+  deals,
+  files,
+  tasks,
+  users,
+} from "@trock-crm/shared/schema";
 
 /**
  * Unit tests for stage gate validation logic.
@@ -78,6 +88,233 @@ function makeDeal(overrides: Partial<MockDeal> = {}): MockDeal {
     ...overrides,
   };
 }
+
+type FakeDealRow = {
+  id: string;
+  name: string;
+  stageId: string;
+  workflowRoute: "estimating" | "service";
+  assignedRepId: string;
+  projectTypeId: string | null;
+  propertyAddress: string | null;
+  propertyCity: string | null;
+  propertyState: string | null;
+  propertyZip: string | null;
+  description: string | null;
+  estimatingSubstage?: string | null;
+  proposalStatus?: string | null;
+  proposalRevisionCount?: number | null;
+  updatedAt?: Date;
+};
+
+type FakeUserRow = {
+  id: string;
+  officeId: string;
+};
+
+type FakeFileRow = {
+  id: string;
+  dealId: string | null;
+  category: string;
+  intakeRequirementKey: string | null;
+  intakeSection?: string | null;
+  intakeSource?: string | null;
+  isActive: boolean;
+};
+
+type FakeDealScopingIntakeRow = {
+  id: string;
+  dealId: string;
+  officeId: string;
+  workflowRouteSnapshot: "estimating" | "service";
+  status: "draft" | "ready" | "activated";
+  projectTypeId: string | null;
+  sectionData: Record<string, unknown>;
+  completionState: Record<string, unknown>;
+  readinessErrors: Record<string, unknown>;
+  firstReadyAt: Date | null;
+  activatedAt: Date | null;
+  lastAutosavedAt: Date;
+  createdBy: string;
+  lastEditedBy: string;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+type FakeTaskRow = Record<string, unknown>;
+type FakeDealTeamMemberRow = {
+  id: string;
+  dealId: string;
+  userId: string;
+  role: string;
+  isActive: boolean;
+};
+
+type FakeTenantState = {
+  deals: FakeDealRow[];
+  users: FakeUserRow[];
+  files: FakeFileRow[];
+  dealScopingIntake: FakeDealScopingIntakeRow[];
+  tasks: FakeTaskRow[];
+  dealTeamMembers: FakeDealTeamMemberRow[];
+  dealApprovals: Array<Record<string, unknown>>;
+  closeoutChecklistItems: Array<Record<string, unknown>>;
+};
+
+function createHardeningTenantDb(initialState?: Partial<FakeTenantState>) {
+  const now = new Date("2026-04-15T15:00:00.000Z");
+  const state: FakeTenantState = {
+    deals: [
+      {
+        id: "deal-1",
+        name: "Palm Villas",
+        stageId: STAGES.dd.id,
+        workflowRoute: "estimating",
+        assignedRepId: "rep-1",
+        projectTypeId: "pt-1",
+        propertyAddress: "123 Palm Way",
+        propertyCity: "Miami",
+        propertyState: "FL",
+        propertyZip: "33101",
+        description: "Exterior refresh",
+        estimatingSubstage: null,
+        proposalStatus: "not_started",
+        proposalRevisionCount: 0,
+        updatedAt: now,
+      },
+    ],
+    users: [
+      { id: "user-1", officeId: "office-1" },
+      { id: "rep-1", officeId: "office-1" },
+      { id: "est-1", officeId: "office-1" },
+    ],
+    files: [],
+    dealScopingIntake: [
+      {
+        id: "intake-1",
+        dealId: "deal-1",
+        officeId: "office-1",
+        workflowRouteSnapshot: "estimating",
+        status: "draft",
+        projectTypeId: "pt-1",
+        sectionData: {
+          projectOverview: { propertyName: "Palm Villas", bidDueDate: "2026-04-30" },
+          propertyDetails: { propertyAddress: "123 Palm Way" },
+          scopeSummary: { summary: "Exterior refresh" },
+        },
+        completionState: {},
+        readinessErrors: {},
+        firstReadyAt: null,
+        activatedAt: null,
+        lastAutosavedAt: now,
+        createdBy: "user-1",
+        lastEditedBy: "user-1",
+        createdAt: now,
+        updatedAt: now,
+      },
+    ],
+    tasks: [],
+    dealTeamMembers: [],
+    dealApprovals: [],
+    closeoutChecklistItems: [],
+    ...initialState,
+  };
+
+  function getRows(table: unknown) {
+    const tableName = String((table as Record<PropertyKey, unknown> | undefined)?.[Symbol.for("drizzle:Name")] ?? "");
+    if (tableName === "deals") return state.deals;
+    if (tableName === "users") return state.users;
+    if (tableName === "files") return state.files;
+    if (tableName === "deal_scoping_intake") return state.dealScopingIntake;
+    if (tableName === "tasks") return state.tasks;
+    if (tableName === "deal_team_members") return state.dealTeamMembers;
+    if (tableName === "deal_approvals") return state.dealApprovals;
+    if (tableName === "closeout_checklist_items") return state.closeoutChecklistItems;
+    throw new Error("Unexpected table in fake tenant db");
+  }
+
+  return {
+    state,
+    select() {
+      return {
+        from(table: unknown) {
+          const rows = getRows(table);
+          return {
+            where() {
+              return {
+                limit(limit: number) {
+                  return Promise.resolve(rows.slice(0, limit));
+                },
+                then(onfulfilled: (value: unknown[]) => unknown) {
+                  return Promise.resolve(rows).then(onfulfilled);
+                },
+              };
+            },
+            limit(limit: number) {
+              return Promise.resolve(rows.slice(0, limit));
+            },
+            then(onfulfilled: (value: unknown[]) => unknown) {
+              return Promise.resolve(rows).then(onfulfilled);
+            },
+          };
+        },
+      };
+    },
+    insert(table: unknown) {
+      return {
+        values(value: Record<string, unknown>) {
+          const rows = getRows(table) as Array<Record<string, unknown>>;
+          const insertedRow = {
+            id: value.id ?? `${String((table as { _: { name: string } })._?.name ?? "row")}-${rows.length + 1}`,
+            ...value,
+          };
+          rows.push(insertedRow);
+          return {
+            returning() {
+              return Promise.resolve([insertedRow]);
+            },
+          };
+        },
+      };
+    },
+    update(table: unknown) {
+      return {
+        set(values: Record<string, unknown>) {
+          return {
+            where() {
+              const rows = getRows(table) as Array<Record<string, unknown>>;
+              rows.forEach((row) => Object.assign(row, values));
+              return {
+                returning() {
+                  return Promise.resolve(rows);
+                },
+              };
+            },
+          };
+        },
+      };
+    },
+  };
+}
+
+const mockedStageLookups = vi.hoisted(() => ({
+  queue: [] as Array<Record<string, unknown>>,
+}));
+
+vi.mock("../../../src/db.js", () => ({
+  db: {
+    select: () => ({
+      from: () => ({
+        where: () => ({
+          limit: async () => {
+            const next = mockedStageLookups.queue.shift();
+            return next ? [next] : [];
+          },
+        }),
+      }),
+    }),
+  },
+}));
 
 // ── Core validation logic extracted for testing ─────────────────────────────
 
@@ -893,5 +1130,300 @@ describe("Stage Gate Validation", () => {
 
       expect(durationStr).toBeNull();
     });
+  });
+});
+
+describe("Scoping Attachment Hardening", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.resetModules();
+    vi.unmock("../../../src/modules/deals/scoping-service.js");
+    mockedStageLookups.queue.length = 0;
+  });
+
+  it("uses route-specific required attachment categories for service readiness", async () => {
+    const { evaluateDealScopingReadiness } = await import("../../../src/modules/deals/scoping-service.js");
+    const tenantDb = createHardeningTenantDb({
+      deals: [
+        {
+          id: "deal-1",
+          name: "Palm Villas",
+          stageId: STAGES.dd.id,
+          workflowRoute: "service",
+          assignedRepId: "rep-1",
+          projectTypeId: "pt-1",
+          propertyAddress: "123 Palm Way",
+          propertyCity: "Miami",
+          propertyState: "FL",
+          propertyZip: "33101",
+          description: "Exterior refresh",
+        },
+      ],
+      dealScopingIntake: [
+        {
+          id: "intake-1",
+          dealId: "deal-1",
+          officeId: "office-1",
+          workflowRouteSnapshot: "service",
+          status: "draft",
+          projectTypeId: "pt-1",
+          sectionData: {
+            projectOverview: { propertyName: "Palm Villas" },
+            propertyDetails: { propertyAddress: "123 Palm Way" },
+            scopeSummary: { summary: "Exterior refresh" },
+          },
+          completionState: {},
+          readinessErrors: {},
+          firstReadyAt: null,
+          activatedAt: null,
+          lastAutosavedAt: new Date("2026-04-15T15:00:00.000Z"),
+          createdBy: "user-1",
+          lastEditedBy: "user-1",
+          createdAt: new Date("2026-04-15T15:00:00.000Z"),
+          updatedAt: new Date("2026-04-15T15:00:00.000Z"),
+        },
+      ],
+      files: [
+        {
+          id: "file-1",
+          dealId: "deal-1",
+          category: "photo",
+          intakeRequirementKey: "site_photos",
+          intakeSection: "attachments",
+          intakeSource: "scoping_intake",
+          isActive: true,
+        },
+      ],
+    });
+
+    const readiness = await evaluateDealScopingReadiness(tenantDb as never, "deal-1");
+
+    expect(readiness.status).toBe("ready");
+    expect(readiness.requiredAttachmentKeys).toEqual(["site_photos"]);
+    expect(readiness.attachmentRequirements).toEqual([
+      expect.objectContaining({
+        key: "site_photos",
+        category: "photo",
+        satisfied: true,
+      }),
+    ]);
+  });
+
+  it("requires a linked file in the canonical category before attachment satisfaction passes", async () => {
+    const { evaluateDealScopingReadiness } = await import("../../../src/modules/deals/scoping-service.js");
+    const tenantDb = createHardeningTenantDb({
+      files: [
+        {
+          id: "file-1",
+          dealId: "deal-1",
+          category: "photo",
+          intakeRequirementKey: "scope_docs",
+          intakeSection: "attachments",
+          intakeSource: "scoping_intake",
+          isActive: true,
+        },
+        {
+          id: "file-2",
+          dealId: "deal-1",
+          category: "photo",
+          intakeRequirementKey: "site_photos",
+          intakeSection: "attachments",
+          intakeSource: "scoping_intake",
+          isActive: true,
+        },
+      ],
+    });
+
+    const readiness = await evaluateDealScopingReadiness(tenantDb as never, "deal-1");
+    const scopeDocsRequirement = readiness.attachmentRequirements.find(
+      (requirement) => requirement.key === "scope_docs"
+    );
+
+    expect(readiness.status).toBe("draft");
+    expect(scopeDocsRequirement).toEqual(
+      expect.objectContaining({
+        key: "scope_docs",
+        category: "other",
+        satisfied: false,
+      })
+    );
+  });
+});
+
+describe("Stage Gate Payload Hardening", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.resetModules();
+    vi.unmock("../../../src/modules/deals/scoping-service.js");
+    mockedStageLookups.queue.length = 0;
+  });
+
+  it("returns a structured effective checklist and only counts linked attachment categories", async () => {
+    vi.doMock("../../../src/modules/deals/scoping-service.js", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("../../../src/modules/deals/scoping-service.js")>();
+      return {
+        ...actual,
+        evaluateDealScopingReadiness: vi.fn(async () => ({
+          status: "ready",
+          errors: { sections: {}, attachments: {} },
+          completionState: {},
+          requiredSections: ["projectOverview"],
+          requiredAttachmentKeys: ["scope_docs"],
+          attachmentRequirements: [
+            {
+              key: "scope_docs",
+              category: "other",
+              label: "Scope docs",
+              satisfied: true,
+            },
+          ],
+        })),
+      };
+    });
+
+    const { validateStageGate } = await import("../../../src/modules/deals/stage-gate.js");
+    const tenantDb = createHardeningTenantDb({
+      deals: [
+        {
+          id: "deal-1",
+          name: "Palm Villas",
+          stageId: STAGES.estimating.id,
+          workflowRoute: "estimating",
+          assignedRepId: "rep-1",
+          projectTypeId: "pt-1",
+          propertyAddress: "123 Palm Way",
+          propertyCity: "Miami",
+          propertyState: "FL",
+          propertyZip: "33101",
+          description: "Exterior refresh",
+        },
+      ],
+      files: [
+        {
+          id: "file-1",
+          dealId: "deal-1",
+          category: "proposal",
+          intakeRequirementKey: null,
+          isActive: true,
+        },
+      ],
+    });
+
+    mockedStageLookups.queue.push(
+      {
+        id: STAGES.estimating.id,
+        name: STAGES.estimating.name,
+        slug: STAGES.estimating.slug,
+        isTerminal: STAGES.estimating.isTerminal,
+        displayOrder: STAGES.estimating.displayOrder,
+        requiredFields: [],
+        requiredDocuments: [],
+        requiredApprovals: [],
+      },
+      {
+        id: STAGES.bid_sent.id,
+        name: STAGES.bid_sent.name,
+        slug: STAGES.bid_sent.slug,
+        isTerminal: STAGES.bid_sent.isTerminal,
+        displayOrder: STAGES.bid_sent.displayOrder,
+        requiredFields: ["description"],
+        requiredDocuments: ["proposal"],
+        requiredApprovals: ["director"],
+      }
+    );
+
+    const result = await validateStageGate(
+      tenantDb as never,
+      "deal-1",
+      STAGES.bid_sent.id,
+      "rep",
+      "rep-1"
+    );
+
+    expect(result.missingRequirements.documents).toEqual(["proposal"]);
+    expect(result.effectiveChecklist.fields).toEqual([
+      expect.objectContaining({
+        key: "description",
+        source: "stage",
+        satisfied: true,
+      }),
+    ]);
+    expect(result.effectiveChecklist.attachments).toEqual([
+      expect.objectContaining({
+        key: "proposal",
+        source: "stage",
+        satisfied: false,
+      }),
+    ]);
+    expect(result.effectiveChecklist.approvals).toEqual([
+      expect.objectContaining({
+        key: "director",
+        source: "stage",
+        satisfied: false,
+      }),
+    ]);
+  });
+});
+
+describe("Revision Routing Hardening", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.resetModules();
+    vi.unmock("../../../src/modules/deals/scoping-service.js");
+    mockedStageLookups.queue.length = 0;
+  });
+
+  it("routes revision requests from sent_to_client back into estimating and creates a task trail", async () => {
+    const scopingService = await import("../../../src/modules/deals/scoping-service.js");
+    const routeRevisionToEstimating = (scopingService as any).routeRevisionToEstimating;
+    const tenantDb = createHardeningTenantDb({
+      deals: [
+        {
+          id: "deal-1",
+          name: "Palm Villas",
+          stageId: STAGES.estimating.id,
+          workflowRoute: "estimating",
+          assignedRepId: "rep-1",
+          projectTypeId: "pt-1",
+          propertyAddress: "123 Palm Way",
+          propertyCity: "Miami",
+          propertyState: "FL",
+          propertyZip: "33101",
+          description: "Exterior refresh",
+          estimatingSubstage: "sent_to_client",
+          proposalStatus: "revision_requested",
+          proposalRevisionCount: 2,
+        },
+      ],
+      dealTeamMembers: [
+        {
+          id: "member-1",
+          dealId: "deal-1",
+          userId: "est-1",
+          role: "estimator",
+          isActive: true,
+        },
+      ],
+    });
+
+    expect(typeof routeRevisionToEstimating).toBe("function");
+
+    const result = await routeRevisionToEstimating(tenantDb as never, "deal-1", "user-1");
+
+    expect(result).toEqual(
+      expect.objectContaining({
+        routed: true,
+      })
+    );
+    expect(tenantDb.state.deals[0]?.estimatingSubstage).toBe("building_estimate");
+    expect(tenantDb.state.tasks).toEqual([
+      expect.objectContaining({
+        dealId: "deal-1",
+        assignedTo: "est-1",
+        status: "pending",
+        originRule: "deal_estimate_revision_requested",
+        sourceEvent: "deal.estimate.revision_requested",
+      }),
+    ]);
   });
 });
