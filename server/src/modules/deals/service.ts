@@ -6,14 +6,17 @@ import {
   dealApprovals,
   changeOrders,
   pipelineStageConfig,
+  leads,
   users,
   userOfficeAccess,
   tasks,
   jobQueue,
 } from "@trock-crm/shared/schema";
+import type { WorkflowRoute } from "@trock-crm/shared/types";
 import type * as schema from "@trock-crm/shared/schema";
 import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
+import { getStageById } from "../pipeline/service.js";
 
 // Type alias for the tenant-scoped Drizzle instance
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -37,6 +40,11 @@ export interface CreateDealInput {
   stageId: string;
   assignedRepId: string;
   officeId?: string; // Active office — used to validate assignee has access
+  companyId?: string;
+  propertyId?: string;
+  sourceLeadId?: string;
+  workflowRoute?: WorkflowRoute;
+  migrationMode?: boolean;
   primaryContactId?: string;
   ddEstimate?: string;
   bidEstimate?: string;
@@ -57,6 +65,11 @@ export interface UpdateDealInput {
   name?: string;
   assignedRepId?: string;
   primaryContactId?: string | null;
+  sourceLeadId?: string | null;
+  companyId?: string | null;
+  propertyId?: string | null;
+  workflowRoute?: WorkflowRoute;
+  migrationMode?: boolean;
   ddEstimate?: string | null;
   bidEstimate?: string | null;
   awardedAmount?: string | null;
@@ -123,6 +136,48 @@ async function validateAssignee(tenantDb: TenantDb, assigneeId: string, officeId
       .where(and(eq(userOfficeAccess.userId, assigneeId), eq(userOfficeAccess.officeId, officeId))).limit(1);
     if (!access) throw new AppError(400, "Assigned user does not have access to this office");
   }
+}
+
+function workflowFamilyForRoute(workflowRoute: WorkflowRoute) {
+  return workflowRoute === "service" ? "service_deal" : "standard_deal";
+}
+
+async function resolveSourceLeadLineage(tenantDb: TenantDb, input: CreateDealInput) {
+  if (!input.sourceLeadId) {
+    return {
+      companyId: input.companyId ?? null,
+      propertyId: input.propertyId ?? null,
+      primaryContactId: input.primaryContactId ?? null,
+      sourceLeadId: null,
+      source: input.source ?? null,
+    };
+  }
+
+  const [sourceLead] = await tenantDb
+    .select()
+    .from(leads)
+    .where(eq(leads.id, input.sourceLeadId))
+    .limit(1);
+
+  if (!sourceLead) {
+    throw new AppError(400, "Source lead not found");
+  }
+
+  if (input.companyId && input.companyId !== sourceLead.companyId) {
+    throw new AppError(400, "companyId does not match the source lead");
+  }
+
+  if (input.propertyId && input.propertyId !== sourceLead.propertyId) {
+    throw new AppError(400, "propertyId does not match the source lead");
+  }
+
+  return {
+    companyId: sourceLead.companyId,
+    propertyId: sourceLead.propertyId,
+    primaryContactId: input.primaryContactId ?? sourceLead.primaryContactId ?? null,
+    sourceLeadId: sourceLead.id,
+    source: input.source ?? sourceLead.source ?? null,
+  };
 }
 
 /**
@@ -282,19 +337,28 @@ export async function getDealDetail(tenantDb: TenantDb, dealId: string, userRole
  * Create a new deal.
  */
 export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
-  // Validate stage exists
-  const stage = await db
-    .select()
-    .from(pipelineStageConfig)
-    .where(eq(pipelineStageConfig.id, input.stageId))
-    .limit(1);
-  if (stage.length === 0) {
-    throw new AppError(400, "Invalid stage ID");
+  const workflowRoute = input.workflowRoute ?? "estimating";
+  const stage = await getStageById(input.stageId, workflowFamilyForRoute(workflowRoute));
+  if (!stage) {
+    throw new AppError(400, "Invalid stage ID for workflow route");
   }
 
   // Terminal stages cannot be initial stage
-  if (stage[0].isTerminal) {
+  if (stage.isTerminal) {
     throw new AppError(400, "Cannot create a deal in a terminal stage");
+  }
+
+  if (!input.migrationMode && !input.sourceLeadId) {
+    throw new AppError(400, "sourceLeadId is required unless migrationMode is true");
+  }
+
+  const lineage = await resolveSourceLeadLineage(tenantDb, input);
+
+  if (!input.migrationMode && (!lineage.companyId || !lineage.propertyId || !lineage.sourceLeadId)) {
+    throw new AppError(
+      400,
+      "Deals require source lead lineage, company, and property unless migrationMode is true"
+    );
   }
 
   // Validate the assigned rep exists, is active, and has office access
@@ -309,7 +373,10 @@ export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
       name: input.name,
       stageId: input.stageId,
       assignedRepId: input.assignedRepId,
-      primaryContactId: input.primaryContactId ?? null,
+      primaryContactId: lineage.primaryContactId,
+      companyId: lineage.companyId,
+      propertyId: lineage.propertyId,
+      sourceLeadId: lineage.sourceLeadId,
       ddEstimate: input.ddEstimate ?? null,
       bidEstimate: input.bidEstimate ?? null,
       awardedAmount: input.awardedAmount ?? null,
@@ -320,9 +387,10 @@ export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
       propertyZip: input.propertyZip ?? null,
       projectTypeId: input.projectTypeId ?? null,
       regionId: input.regionId ?? null,
-      source: input.source ?? null,
+      source: lineage.source,
       winProbability: input.winProbability ?? null,
       expectedCloseDate: input.expectedCloseDate ?? null,
+      workflowRoute,
     })
     .returning();
 
@@ -370,6 +438,38 @@ export async function updateDeal(
     await validateAssignee(tenantDb, input.assignedRepId, officeId);
   }
 
+  if (input.sourceLeadId === null) {
+    throw new AppError(400, "sourceLeadId cannot be cleared once set");
+  }
+
+  if (input.companyId === null || input.propertyId === null) {
+    throw new AppError(400, "companyId and propertyId cannot be cleared once set");
+  }
+
+  if (
+    existing.sourceLeadId &&
+    input.sourceLeadId !== undefined &&
+    input.sourceLeadId !== existing.sourceLeadId
+  ) {
+    throw new AppError(400, "sourceLeadId is immutable once established");
+  }
+
+  if (
+    existing.companyId &&
+    input.companyId !== undefined &&
+    input.companyId !== existing.companyId
+  ) {
+    throw new AppError(400, "companyId is immutable once established");
+  }
+
+  if (
+    existing.propertyId &&
+    input.propertyId !== undefined &&
+    input.propertyId !== existing.propertyId
+  ) {
+    throw new AppError(400, "propertyId is immutable once established");
+  }
+
   // Build update object — only include fields that are provided
   const updates: Record<string, any> = {};
   if (input.name !== undefined) updates.name = input.name;
@@ -389,6 +489,44 @@ export async function updateDeal(
   if (input.winProbability !== undefined) updates.winProbability = input.winProbability;
   if (input.expectedCloseDate !== undefined) updates.expectedCloseDate = input.expectedCloseDate;
   if (input.proposalNotes !== undefined) updates.proposalNotes = input.proposalNotes;
+  if (input.workflowRoute !== undefined) {
+    const stage = await getStageById(existing.stageId, workflowFamilyForRoute(input.workflowRoute));
+    if (!stage) {
+      throw new AppError(400, "Current stage is not valid for the requested workflow route");
+    }
+    updates.workflowRoute = input.workflowRoute;
+  }
+
+  if (input.sourceLeadId !== undefined) {
+    const lineage = await resolveSourceLeadLineage(tenantDb, {
+      name: existing.name,
+      stageId: existing.stageId,
+      assignedRepId: existing.assignedRepId,
+      officeId,
+      sourceLeadId: input.sourceLeadId,
+      companyId: input.companyId ?? existing.companyId ?? undefined,
+      propertyId: input.propertyId ?? existing.propertyId ?? undefined,
+      primaryContactId:
+        input.primaryContactId === undefined
+          ? (existing.primaryContactId ?? undefined)
+          : (input.primaryContactId ?? undefined),
+      source: input.source === undefined ? (existing.source ?? undefined) : (input.source ?? undefined),
+      workflowRoute: input.workflowRoute ?? existing.workflowRoute,
+    });
+
+    updates.sourceLeadId = lineage.sourceLeadId;
+    if (!existing.companyId || input.companyId !== undefined) updates.companyId = lineage.companyId;
+    if (!existing.propertyId || input.propertyId !== undefined) updates.propertyId = lineage.propertyId;
+    if (input.primaryContactId === undefined && lineage.primaryContactId !== existing.primaryContactId) {
+      updates.primaryContactId = lineage.primaryContactId;
+    }
+    if (input.source === undefined && lineage.source !== existing.source) {
+      updates.source = lineage.source;
+    }
+  } else {
+    if (input.companyId !== undefined) updates.companyId = input.companyId;
+    if (input.propertyId !== undefined) updates.propertyId = input.propertyId;
+  }
 
   // Validate and set estimating substage
   if (input.estimatingSubstage !== undefined) {
@@ -521,6 +659,7 @@ export async function getDealsForPipeline(
   const stages = await db
     .select()
     .from(pipelineStageConfig)
+    .where(inArray(pipelineStageConfig.workflowFamily, ["standard_deal", "service_deal"]))
     .orderBy(asc(pipelineStageConfig.displayOrder));
 
   // Build deal conditions

@@ -18,6 +18,7 @@ import { tenantMiddleware } from "./middleware/tenant.js";
 import { dealRoutes } from "./modules/deals/routes.js";
 import { pipelineRoutes } from "./modules/pipeline/routes.js";
 import { contactRoutes } from "./modules/contacts/routes.js";
+import { leadRoutes } from "./modules/leads/routes.js";
 import { emailRoutes } from "./modules/email/routes.js";
 import { fileRoutes } from "./modules/files/routes.js";
 import { taskRoutes } from "./modules/tasks/routes.js";
@@ -110,6 +111,7 @@ export function createApp() {
   tenantRouter.use("/deals", dealRoutes);
   tenantRouter.use("/pipeline", pipelineRoutes);
   tenantRouter.use("/contacts", contactRoutes);
+  tenantRouter.use("/leads", leadRoutes);
   tenantRouter.use("/email", emailRoutes);
   tenantRouter.use("/files", fileRoutes);
   tenantRouter.use("/tasks", taskRoutes);

@@ -359,6 +359,10 @@ router.post("/", async (req, res, next) => {
     }
     validateDealPayload(req.body);
 
+    if (rest.migrationMode === true && req.user!.role === "rep") {
+      throw new AppError(403, "migrationMode is only available to directors and admins");
+    }
+
     // Rep ownership enforcement:
     // - Reps: force assignedRepId to their own ID (ignore request body value)
     // - Directors/admins: can assign to any user
@@ -388,6 +392,10 @@ router.patch("/:id", async (req, res, next) => {
   try {
     const body = { ...req.body };
     validateDealPayload(body);
+
+    if (body.migrationMode === true && req.user!.role === "rep") {
+      throw new AppError(403, "migrationMode is only available to directors and admins");
+    }
 
     // Reps cannot change assignedRepId (reassign deals)
     if (req.user!.role === "rep" && body.assignedRepId !== undefined) {
