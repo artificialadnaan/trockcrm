@@ -10,6 +10,7 @@ import { runColdLeadWarming } from "./cold-lead-warming.js";
 import { runBidDeadlineCountdown } from "./bid-deadline.js";
 import { handleProcoreSyncJob, handleProcoreWebhookJob, runProcoreSync } from "./procore-sync.js";
 import { handleTaskCompletedEvent } from "./task-completed.js";
+import { runAiIndexDocument } from "./ai-index-document.js";
 
 const SERVER_EVALUATOR_MODULE = "../../../server/src/modules/tasks/rules/evaluator.js" as string;
 const SERVER_TASK_RULES_MODULE = "../../../server/src/modules/tasks/rules/config.js" as string;
@@ -108,6 +109,10 @@ export function registerAllJobs() {
   // Email sync (triggered via job_queue or cron)
   registerJobHandler("email_sync", async () => {
     await runEmailSync();
+  });
+
+  registerJobHandler("ai_index_document", async (payload) => {
+    await runAiIndexDocument(payload);
   });
 
   // Daily task generation (triggered via job_queue or cron)

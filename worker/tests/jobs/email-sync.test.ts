@@ -129,6 +129,13 @@ describe("email sync inbound message routing", () => {
       taskPersistence,
       expect.any(Array)
     );
+    expect(queryMock).toHaveBeenCalledWith(
+      expect.stringContaining("INSERT INTO public.job_queue"),
+      expect.arrayContaining([
+        expect.stringContaining("\"sourceType\":\"email_message\""),
+        "office-1",
+      ])
+    );
     expect(queryMock.mock.calls.some(([sql]) => typeof sql === "string" && sql.includes("INSERT INTO office_beta.tasks"))).toBe(false);
   });
 
@@ -180,6 +187,13 @@ describe("email sync inbound message routing", () => {
       }),
       taskPersistence,
       expect.any(Array)
+    );
+    expect(queryMock).toHaveBeenCalledWith(
+      expect.stringContaining("INSERT INTO public.job_queue"),
+      expect.arrayContaining([
+        expect.stringContaining("\"sourceType\":\"email_message\""),
+        "office-1",
+      ])
     );
     expect(queryMock.mock.calls.some(([sql]) => typeof sql === "string" && sql.includes("INSERT INTO office_beta.tasks"))).toBe(false);
   });
