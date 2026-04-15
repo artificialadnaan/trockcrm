@@ -141,4 +141,37 @@ router.get("/ops/reviews/:packetId", requireRole("admin", "director"), async (re
   }
 });
 
+router.post("/ops/backfill", requireRole("admin", "director"), async (req, res, next) => {
+  try {
+    const officeId = req.user!.activeOfficeId ?? req.user!.officeId;
+    if (!officeId) {
+      throw new AppError(400, "Active office is required to queue AI backfill");
+    }
+
+    const sourceType = typeof req.body?.sourceType === "string" ? req.body.sourceType : null;
+    const batchSize =
+      typeof req.body?.batchSize === "number" && Number.isFinite(req.body.batchSize)
+        ? Math.max(1, Math.min(req.body.batchSize, 250))
+        : 100;
+
+    await req.tenantDb!.insert(jobQueue).values({
+      jobType: "ai_backfill_documents",
+      payload: {
+        officeId,
+        sourceType,
+        batchSize,
+        requestedBy: req.user!.id,
+      },
+      officeId,
+      status: "pending",
+      runAfter: new Date(),
+    });
+
+    await req.commitTransaction!();
+    res.status(202).json({ queued: true, sourceType, batchSize });
+  } catch (err) {
+    next(err);
+  }
+});
+
 export const aiCopilotRoutes = router;

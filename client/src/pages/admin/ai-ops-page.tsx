@@ -1,6 +1,8 @@
+import { useState } from "react";
 import { Link } from "react-router-dom";
 import { AlertTriangle, CheckCircle2, Clock3, DatabaseZap, RefreshCcw, Sparkles, ThumbsDown, ThumbsUp } from "lucide-react";
-import { useAiOps } from "@/hooks/use-ai-ops";
+import { toast } from "sonner";
+import { queueAiBackfill, useAiOps } from "@/hooks/use-ai-ops";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
@@ -26,6 +28,25 @@ function statusVariant(status: string): "secondary" | "outline" | "default" {
 
 export function AiOpsPage() {
   const { metrics, reviews, loading, error, refetch } = useAiOps(25);
+  const [backfillState, setBackfillState] = useState<string | null>(null);
+
+  async function handleBackfill(sourceType?: string) {
+    const backfillKey = sourceType ?? "all";
+    setBackfillState(backfillKey);
+    try {
+      const result = await queueAiBackfill(sourceType ?? null, 100);
+      toast.success(
+        result.sourceType
+          ? `Queued ${result.sourceType} AI backfill batch`
+          : "Queued historical AI backfill batch"
+      );
+      await refetch();
+    } catch (err: unknown) {
+      toast.error(err instanceof Error ? err.message : "Failed to queue AI backfill");
+    } finally {
+      setBackfillState(null);
+    }
+  }
 
   return (
     <div className="p-6 space-y-6 bg-gray-50 min-h-screen">
@@ -36,10 +57,20 @@ export function AiOpsPage() {
             Copilot health, evaluation, and review queue
           </p>
         </div>
-        <Button variant="outline" onClick={() => void refetch()} disabled={loading}>
-          <RefreshCcw className="h-4 w-4 mr-2" />
-          Refresh
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="secondary"
+            onClick={() => void handleBackfill()}
+            disabled={loading || backfillState !== null}
+          >
+            <DatabaseZap className="h-4 w-4 mr-2" />
+            Queue Backfill
+          </Button>
+          <Button variant="outline" onClick={() => void refetch()} disabled={loading}>
+            <RefreshCcw className="h-4 w-4 mr-2" />
+            Refresh
+          </Button>
+        </div>
       </div>
 
       {error && (
@@ -119,12 +150,13 @@ export function AiOpsPage() {
                 <TableHead>Source</TableHead>
                 <TableHead className="text-right">Indexed</TableHead>
                 <TableHead className="text-right">Pending</TableHead>
+                <TableHead className="text-right">Action</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {(metrics?.documentStatusBySource ?? []).length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={3} className="text-center text-muted-foreground py-6">No indexed sources yet.</TableCell>
+                  <TableCell colSpan={4} className="text-center text-muted-foreground py-6">No indexed sources yet.</TableCell>
                 </TableRow>
               ) : (
                 (metrics?.documentStatusBySource ?? []).map((row) => (
@@ -132,6 +164,16 @@ export function AiOpsPage() {
                     <TableCell className="font-medium">{row.sourceType}</TableCell>
                     <TableCell className="text-right">{row.indexed}</TableCell>
                     <TableCell className="text-right">{row.pending}</TableCell>
+                    <TableCell className="text-right">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => void handleBackfill(row.sourceType)}
+                        disabled={loading || backfillState !== null}
+                      >
+                        {backfillState === row.sourceType ? "Queueing..." : "Backfill"}
+                      </Button>
+                    </TableCell>
                   </TableRow>
                 ))
               )}

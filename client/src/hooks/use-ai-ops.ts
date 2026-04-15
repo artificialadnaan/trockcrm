@@ -83,6 +83,12 @@ export interface AiReviewPacketDetail {
   }>;
 }
 
+export interface QueueAiBackfillResult {
+  queued: boolean;
+  sourceType: string | null;
+  batchSize: number;
+}
+
 export function useAiOps(limit = 20) {
   const [metrics, setMetrics] = useState<AiOpsMetrics | null>(null);
   const [reviews, setReviews] = useState<AiReviewQueueEntry[]>([]);
@@ -117,6 +123,16 @@ export function useAiOps(limit = 20) {
     error,
     refetch: fetchData,
   };
+}
+
+export async function queueAiBackfill(sourceType?: string | null, batchSize = 100) {
+  return api<QueueAiBackfillResult>("/ai/ops/backfill", {
+    method: "POST",
+    json: {
+      sourceType: sourceType ?? null,
+      batchSize,
+    },
+  });
 }
 
 export function useAiReviewPacketDetail(packetId: string | undefined) {

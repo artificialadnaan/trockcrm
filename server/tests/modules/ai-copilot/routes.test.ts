@@ -218,4 +218,15 @@ describe("ai copilot routes", () => {
     expect(serviceMocks.getAiReviewQueue).toHaveBeenCalledWith(expect.anything(), { limit: 5 });
     expect(res.body.reviews).toHaveLength(1);
   });
+
+  it("queues an AI backfill job for director users", async () => {
+    const app = createApp("director");
+    const res = await request(app)
+      .post("/api/ai/ops/backfill")
+      .send({ sourceType: "email_message", batchSize: 75 });
+
+    expect(res.status).toBe(202);
+    expect(res.body).toEqual({ queued: true, sourceType: "email_message", batchSize: 75 });
+    expect(insertMock).toHaveBeenCalledTimes(1);
+  });
 });

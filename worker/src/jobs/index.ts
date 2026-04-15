@@ -11,6 +11,7 @@ import { runBidDeadlineCountdown } from "./bid-deadline.js";
 import { handleProcoreSyncJob, handleProcoreWebhookJob, runProcoreSync } from "./procore-sync.js";
 import { handleTaskCompletedEvent } from "./task-completed.js";
 import { runAiIndexDocument } from "./ai-index-document.js";
+import { runAiBackfillDocuments } from "./ai-backfill-documents.js";
 import { runAiRefreshCopilot } from "./ai-refresh-copilot.js";
 import { runAiGenerateDealCopilot } from "./ai-generate-deal-copilot.js";
 
@@ -115,6 +116,10 @@ export function registerAllJobs() {
 
   registerJobHandler("ai_index_document", async (payload, officeId) => {
     await runAiIndexDocument(payload, officeId);
+  });
+
+  registerJobHandler("ai_backfill_documents", async (payload, officeId) => {
+    await runAiBackfillDocuments(payload, officeId);
   });
 
   registerJobHandler("ai_refresh_copilot", async (payload, officeId) => {
