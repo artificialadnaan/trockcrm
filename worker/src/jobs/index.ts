@@ -113,16 +113,16 @@ export function registerAllJobs() {
     await runEmailSync();
   });
 
-  registerJobHandler("ai_index_document", async (payload) => {
-    await runAiIndexDocument(payload);
+  registerJobHandler("ai_index_document", async (payload, officeId) => {
+    await runAiIndexDocument(payload, officeId);
   });
 
-  registerJobHandler("ai_refresh_copilot", async (payload) => {
-    await runAiRefreshCopilot(payload);
+  registerJobHandler("ai_refresh_copilot", async (payload, officeId) => {
+    await runAiRefreshCopilot(payload, officeId);
   });
 
-  registerJobHandler("ai_generate_deal_copilot", async (payload) => {
-    await runAiGenerateDealCopilot(payload);
+  registerJobHandler("ai_generate_deal_copilot", async (payload, officeId) => {
+    await runAiGenerateDealCopilot(payload, officeId);
   });
 
   // Daily task generation (triggered via job_queue or cron)

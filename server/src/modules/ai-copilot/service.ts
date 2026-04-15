@@ -13,6 +13,7 @@ import { getDealCopilotContext } from "./context-service.js";
 import { getDealBlindSpotSignals } from "./signal-service.js";
 import { searchDealKnowledge } from "./retrieval-service.js";
 import type { AiCopilotProvider } from "./provider.js";
+import { getAiCopilotProvider } from "./provider.js";
 import type { DealBlindSpotSignal } from "./signal-service.js";
 import type { DealCopilotContext } from "./context-service.js";
 import type { DealKnowledgeChunk } from "./retrieval-service.js";
@@ -82,11 +83,7 @@ const DEFAULT_DEPS: GenerateDealCopilotPacketDeps = {
   getDealCopilotContext,
   getDealBlindSpotSignals,
   searchDealKnowledge,
-  provider: {
-    async generateCopilotPacket() {
-      throw new Error("AI copilot provider is not configured yet");
-    },
-  },
+  provider: getAiCopilotProvider(),
   persistPacketBundle: async (payload) => {
     throw new Error("Packet persistence is not configured yet");
   },
@@ -286,6 +283,15 @@ async function persistPacketBundle(
       snapshotHash: payload.packet.snapshotHash,
       status: "ready",
       summaryText: payload.packet.summary,
+      nextStepJson: payload.suggestedTasks[0]
+        ? {
+            title: payload.suggestedTasks[0].title,
+            description: payload.suggestedTasks[0].description,
+            suggestedOwnerId: payload.suggestedTasks[0].suggestedOwnerId,
+            priority: payload.suggestedTasks[0].priority,
+          }
+        : null,
+      blindSpotsJson: payload.blindSpotFlags,
       evidenceJson: payload.packet.evidence,
       confidence: String(payload.packet.confidence),
       generatedAt: new Date(payload.packet.generatedAt),
