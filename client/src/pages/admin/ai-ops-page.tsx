@@ -138,6 +138,45 @@ export function AiOpsPage() {
         </Card>
       </div>
 
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <Card>
+          <CardHeader>
+            <CardTitle>Triage Volume</CardTitle>
+            <CardDescription>Manager interventions over the last 30 days</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-2">
+            <div className="text-3xl font-black">{metrics?.triageActions30d ?? 0}</div>
+            <div className="text-sm text-muted-foreground">Triage actions logged</div>
+            <div className="text-sm">{metrics?.escalations30d ?? 0} escalations</div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Resolution Signal</CardTitle>
+            <CardDescription>Blind spots resolved within 30 days</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-2">
+            <div className="text-3xl font-black">{metrics?.resolvedBlindSpots30d ?? 0}</div>
+            <div className="text-sm text-muted-foreground">Resolved blind spots</div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Repeat Issues</CardTitle>
+            <CardDescription>Problems that keep coming back</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-2">
+            <div className="text-3xl font-black">{(metrics?.recurringBlindSpotsOpen ?? 0) + (metrics?.recurringSuggestionsOpen ?? 0)}</div>
+            <div className="flex items-center gap-4 text-sm">
+              <span>{metrics?.recurringBlindSpotsOpen ?? 0} blind spots</span>
+              <span>{metrics?.recurringSuggestionsOpen ?? 0} suggestions</span>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+
       <Card>
         <CardHeader>
           <CardTitle>Index Status By Source</CardTitle>

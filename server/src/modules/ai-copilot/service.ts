@@ -56,6 +56,11 @@ export interface AiOpsMetrics {
   openBlindSpots: number;
   suggestionsAccepted30d: number;
   suggestionsDismissed30d: number;
+  triageActions30d: number;
+  escalations30d: number;
+  resolvedBlindSpots30d: number;
+  recurringBlindSpotsOpen: number;
+  recurringSuggestionsOpen: number;
   positiveFeedback30d: number;
   negativeFeedback30d: number;
   documentsIndexed: number;
@@ -149,6 +154,10 @@ export interface AiActionQueueEntry {
   status: string;
   createdAt: string;
   suggestedDueAt: string | null;
+  repeatCount: number;
+  lastTriageAction: string | null;
+  lastTriagedAt: string | null;
+  escalated: boolean;
 }
 
 interface GenerateDealCopilotPacketDeps {
@@ -508,7 +517,31 @@ export async function getAiActionQueue(
         NULL::text AS priority,
         rf.status::text AS status,
         rf.created_at AS created_at,
-        NULL::timestamptz AS suggested_due_at
+        NULL::timestamptz AS suggested_due_at,
+        (
+          SELECT COUNT(*)
+          FROM ai_risk_flags rf_repeat
+          WHERE rf_repeat.deal_id = rf.deal_id
+            AND rf_repeat.flag_type = rf.flag_type
+        )::int AS repeat_count,
+        (
+          SELECT f.feedback_value
+          FROM ai_feedback f
+          WHERE f.target_type = 'risk_flag'
+            AND f.target_id = rf.id
+            AND f.feedback_type = 'triage_action'
+          ORDER BY f.created_at DESC
+          LIMIT 1
+        )::text AS last_triage_action,
+        (
+          SELECT f.created_at
+          FROM ai_feedback f
+          WHERE f.target_type = 'risk_flag'
+            AND f.target_id = rf.id
+            AND f.feedback_type = 'triage_action'
+          ORDER BY f.created_at DESC
+          LIMIT 1
+        ) AS last_triaged_at
       FROM ai_risk_flags rf
       LEFT JOIN deals d ON d.id = rf.deal_id
       WHERE rf.status = 'open'
@@ -527,7 +560,32 @@ export async function getAiActionQueue(
         ts.priority::text AS priority,
         ts.status::text AS status,
         ts.created_at AS created_at,
-        ts.suggested_due_at AS suggested_due_at
+        ts.suggested_due_at AS suggested_due_at,
+        (
+          SELECT COUNT(*)
+          FROM ai_task_suggestions ts_repeat
+          WHERE ts_repeat.scope_type = 'deal'
+            AND ts_repeat.scope_id = ts.scope_id
+            AND ts_repeat.title = ts.title
+        )::int AS repeat_count,
+        (
+          SELECT f.feedback_value
+          FROM ai_feedback f
+          WHERE f.target_type = 'task_suggestion'
+            AND f.target_id = ts.id
+            AND f.feedback_type = 'triage_action'
+          ORDER BY f.created_at DESC
+          LIMIT 1
+        )::text AS last_triage_action,
+        (
+          SELECT f.created_at
+          FROM ai_feedback f
+          WHERE f.target_type = 'task_suggestion'
+            AND f.target_id = ts.id
+            AND f.feedback_type = 'triage_action'
+          ORDER BY f.created_at DESC
+          LIMIT 1
+        ) AS last_triaged_at
       FROM ai_task_suggestions ts
       LEFT JOIN deals d ON d.id = ts.scope_id
       WHERE ts.scope_type = 'deal'
@@ -555,6 +613,15 @@ export async function getAiActionQueue(
         : row.suggested_due_at
           ? String(row.suggested_due_at)
           : null,
+    repeatCount: Number(row.repeat_count ?? 0),
+    lastTriageAction: row.last_triage_action ? String(row.last_triage_action) : null,
+    lastTriagedAt:
+      row.last_triaged_at instanceof Date
+        ? row.last_triaged_at.toISOString()
+        : row.last_triaged_at
+          ? String(row.last_triaged_at)
+          : null,
+    escalated: row.last_triage_action === "escalate",
   }));
 }
 
@@ -645,6 +712,44 @@ export async function getAiOpsMetrics(tenantDb: TenantDb): Promise<AiOpsMetrics>
           COUNT(*) FILTER (WHERE status = 'dismissed' AND resolved_at >= NOW() - INTERVAL '30 days')::int AS suggestions_dismissed_30d
         FROM ai_task_suggestions
       ),
+      triage_counts AS (
+        SELECT
+          COUNT(*) FILTER (WHERE feedback_type = 'triage_action' AND created_at >= NOW() - INTERVAL '30 days')::int AS triage_actions_30d,
+          COUNT(*) FILTER (WHERE feedback_type = 'triage_action' AND feedback_value = 'escalate' AND created_at >= NOW() - INTERVAL '30 days')::int AS escalations_30d
+        FROM ai_feedback
+      ),
+      risk_resolution_counts AS (
+        SELECT
+          COUNT(*) FILTER (WHERE status = 'resolved' AND resolved_at >= NOW() - INTERVAL '30 days')::int AS resolved_blind_spots_30d,
+          COUNT(*) FILTER (
+            WHERE status = 'open'
+              AND EXISTS (
+                SELECT 1
+                FROM ai_risk_flags rf_prev
+                WHERE rf_prev.deal_id = ai_risk_flags.deal_id
+                  AND rf_prev.flag_type = ai_risk_flags.flag_type
+                  AND rf_prev.id <> ai_risk_flags.id
+                  AND rf_prev.status = 'resolved'
+              )
+          )::int AS recurring_blind_spots_open
+        FROM ai_risk_flags
+      ),
+      recurring_suggestion_counts AS (
+        SELECT
+          COUNT(*) FILTER (
+            WHERE status = 'suggested'
+              AND EXISTS (
+                SELECT 1
+                FROM ai_task_suggestions ts_prev
+                WHERE ts_prev.scope_type = ai_task_suggestions.scope_type
+                  AND ts_prev.scope_id = ai_task_suggestions.scope_id
+                  AND ts_prev.title = ai_task_suggestions.title
+                  AND ts_prev.id <> ai_task_suggestions.id
+                  AND ts_prev.status IN ('dismissed', 'accepted')
+              )
+          )::int AS recurring_suggestions_open
+        FROM ai_task_suggestions
+      ),
       feedback_counts AS (
         SELECT
           COUNT(*) FILTER (WHERE feedback_value IN ('useful', 'thumbs_up') AND created_at >= NOW() - INTERVAL '30 days')::int AS positive_feedback_30d,
@@ -664,11 +769,16 @@ export async function getAiOpsMetrics(tenantDb: TenantDb): Promise<AiOpsMetrics>
         risk_counts.open_blind_spots,
         suggestion_counts.suggestions_accepted_30d,
         suggestion_counts.suggestions_dismissed_30d,
+        triage_counts.triage_actions_30d,
+        triage_counts.escalations_30d,
+        risk_resolution_counts.resolved_blind_spots_30d,
+        risk_resolution_counts.recurring_blind_spots_open,
+        recurring_suggestion_counts.recurring_suggestions_open,
         feedback_counts.positive_feedback_30d,
         feedback_counts.negative_feedback_30d,
         document_counts.documents_indexed,
         document_counts.documents_pending
-      FROM packet_counts, risk_counts, suggestion_counts, feedback_counts, document_counts
+      FROM packet_counts, risk_counts, suggestion_counts, triage_counts, risk_resolution_counts, recurring_suggestion_counts, feedback_counts, document_counts
     `),
     tenantDb.execute(sql`
       SELECT
@@ -690,6 +800,11 @@ export async function getAiOpsMetrics(tenantDb: TenantDb): Promise<AiOpsMetrics>
     openBlindSpots: Number(summaryRow.open_blind_spots ?? 0),
     suggestionsAccepted30d: Number(summaryRow.suggestions_accepted_30d ?? 0),
     suggestionsDismissed30d: Number(summaryRow.suggestions_dismissed_30d ?? 0),
+    triageActions30d: Number(summaryRow.triage_actions_30d ?? 0),
+    escalations30d: Number(summaryRow.escalations_30d ?? 0),
+    resolvedBlindSpots30d: Number(summaryRow.resolved_blind_spots_30d ?? 0),
+    recurringBlindSpotsOpen: Number(summaryRow.recurring_blind_spots_open ?? 0),
+    recurringSuggestionsOpen: Number(summaryRow.recurring_suggestions_open ?? 0),
     positiveFeedback30d: Number(summaryRow.positive_feedback_30d ?? 0),
     negativeFeedback30d: Number(summaryRow.negative_feedback_30d ?? 0),
     documentsIndexed: Number(summaryRow.documents_indexed ?? 0),

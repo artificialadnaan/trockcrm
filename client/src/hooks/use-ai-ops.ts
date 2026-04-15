@@ -8,6 +8,11 @@ export interface AiOpsMetrics {
   openBlindSpots: number;
   suggestionsAccepted30d: number;
   suggestionsDismissed30d: number;
+  triageActions30d: number;
+  escalations30d: number;
+  resolvedBlindSpots30d: number;
+  recurringBlindSpotsOpen: number;
+  recurringSuggestionsOpen: number;
   positiveFeedback30d: number;
   negativeFeedback30d: number;
   documentsIndexed: number;
@@ -50,6 +55,10 @@ export interface AiActionQueueEntry {
   status: string;
   createdAt: string;
   suggestedDueAt: string | null;
+  repeatCount: number;
+  lastTriageAction: string | null;
+  lastTriagedAt: string | null;
+  escalated: boolean;
 }
 
 export interface AiReviewPacketDetail {

@@ -31,11 +31,23 @@ const priorityClasses: Record<string, string> = {
 export function AiActionQueuePage() {
   const { queue, loading, error, refetch } = useAiActionQueue(100);
   const [workingId, setWorkingId] = useState<string | null>(null);
+  const [entryFilter, setEntryFilter] = useState<"all" | "blind_spot" | "task_suggestion">("all");
+  const [repeatOnly, setRepeatOnly] = useState(false);
+  const [escalatedOnly, setEscalatedOnly] = useState(false);
 
   const grouped = useMemo(() => ({
     blindSpots: queue.filter((item) => item.entryType === "blind_spot"),
     suggestedTasks: queue.filter((item) => item.entryType === "task_suggestion"),
   }), [queue]);
+
+  const filteredQueue = useMemo(() => {
+    return queue.filter((entry) => {
+      if (entryFilter !== "all" && entry.entryType !== entryFilter) return false;
+      if (repeatOnly && entry.repeatCount < 2) return false;
+      if (escalatedOnly && !entry.escalated) return false;
+      return true;
+    });
+  }, [entryFilter, escalatedOnly, queue, repeatOnly]);
 
   async function handleAction(
     entryType: "blind_spot" | "task_suggestion",
@@ -106,15 +118,33 @@ export function AiActionQueuePage() {
         </Card>
       </div>
 
-      {queue.length === 0 ? (
+      <div className="flex flex-wrap items-center gap-2">
+        <Button variant={entryFilter === "all" ? "default" : "outline"} size="sm" onClick={() => setEntryFilter("all")}>
+          All
+        </Button>
+        <Button variant={entryFilter === "blind_spot" ? "default" : "outline"} size="sm" onClick={() => setEntryFilter("blind_spot")}>
+          Blind Spots
+        </Button>
+        <Button variant={entryFilter === "task_suggestion" ? "default" : "outline"} size="sm" onClick={() => setEntryFilter("task_suggestion")}>
+          Suggested Tasks
+        </Button>
+        <Button variant={repeatOnly ? "default" : "outline"} size="sm" onClick={() => setRepeatOnly((value) => !value)}>
+          Repeat Issues Only
+        </Button>
+        <Button variant={escalatedOnly ? "default" : "outline"} size="sm" onClick={() => setEscalatedOnly((value) => !value)}>
+          Escalated Only
+        </Button>
+      </div>
+
+      {filteredQueue.length === 0 ? (
         <Card>
           <CardContent className="py-12 text-center text-muted-foreground">
-            No unresolved AI actions are waiting right now.
+            No AI actions match the current filters.
           </CardContent>
         </Card>
       ) : (
         <div className="space-y-4">
-          {queue.map((entry) => {
+          {filteredQueue.map((entry) => {
             const severityOrPriorityClass =
               entry.entryType === "blind_spot"
                 ? severityClasses[entry.severity ?? "low"] ?? severityClasses.low
@@ -133,9 +163,22 @@ export function AiActionQueuePage() {
                         <span className="text-xs text-muted-foreground">
                           Created {formatDate(entry.createdAt)}
                         </span>
+                        {entry.repeatCount > 1 && (
+                          <Badge variant="outline">Repeat x{entry.repeatCount}</Badge>
+                        )}
+                        {entry.escalated && (
+                          <Badge variant="outline" className="border-red-200 bg-red-50 text-red-700">
+                            Escalated
+                          </Badge>
+                        )}
                         {entry.suggestedDueAt && (
                           <span className="text-xs text-muted-foreground">
                             Due {formatDate(entry.suggestedDueAt)}
+                          </span>
+                        )}
+                        {entry.lastTriagedAt && (
+                          <span className="text-xs text-muted-foreground">
+                            Last triage {entry.lastTriageAction ?? "reviewed"} on {formatDate(entry.lastTriagedAt)}
                           </span>
                         )}
                       </div>
