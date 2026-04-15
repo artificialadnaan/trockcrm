@@ -87,12 +87,10 @@ const DEFAULT_DEPS: GenerateDealCopilotPacketDeps = {
       throw new Error("AI copilot provider is not configured yet");
     },
   },
-  async persistPacketBundle() {
+  persistPacketBundle: async (payload) => {
     throw new Error("Packet persistence is not configured yet");
   },
-  async getExistingFreshPacket() {
-    return null;
-  },
+  getExistingFreshPacket: async () => null,
   now: new Date(),
 };
 
@@ -107,11 +105,18 @@ export async function generateDealCopilotPacket(
   const snapshotHash = createSnapshotHash({ context, signals });
 
   if (!input.forceRegenerate) {
-    const existing = await deps.getExistingFreshPacket({
-      dealId: input.dealId,
-      snapshotHash,
-      now: deps.now,
-    });
+    const existing = overrides.getExistingFreshPacket
+      ? await deps.getExistingFreshPacket({
+          dealId: input.dealId,
+          snapshotHash,
+          now: deps.now,
+        })
+      : await getExistingFreshPacket({
+          tenantDb,
+          dealId: input.dealId,
+          snapshotHash,
+          now: deps.now,
+        });
     if (existing) {
       return existing;
     }
@@ -129,12 +134,12 @@ export async function generateDealCopilotPacket(
     evidence,
   });
 
-  const persisted = await deps.persistPacketBundle({
+  const persistencePayload = {
     packet: {
-      scopeType: "deal",
+      scopeType: "deal" as const,
       scopeId: input.dealId,
       dealId: input.dealId,
-      packetKind: "deal",
+      packetKind: "deal" as const,
       snapshotHash,
       summary: generated.summary,
       confidence: generated.confidence,
@@ -143,7 +148,11 @@ export async function generateDealCopilotPacket(
     },
     suggestedTasks: generated.suggestedTasks,
     blindSpotFlags: generated.blindSpotFlags,
-  });
+  };
+
+  const persisted = overrides.persistPacketBundle
+    ? await deps.persistPacketBundle(persistencePayload)
+    : await persistPacketBundle(tenantDb, persistencePayload);
 
   return {
     packetId: persisted.packetId,
@@ -247,4 +256,106 @@ export async function getDirectorBlindSpots(tenantDb: TenantDb) {
     .limit(25);
 
   return rows;
+}
+
+async function persistPacketBundle(
+  tenantDb: TenantDb,
+  payload: {
+    packet: {
+      scopeType: "deal";
+      scopeId: string;
+      dealId: string;
+      packetKind: "deal";
+      snapshotHash: string;
+      summary: string;
+      confidence: number;
+      evidence: Array<Record<string, unknown>>;
+      generatedAt: string;
+    };
+    suggestedTasks: DealCopilotPromptOutput["suggestedTasks"];
+    blindSpotFlags: DealCopilotPromptOutput["blindSpotFlags"];
+  }
+): Promise<PersistedPacketBundleResult> {
+  const [packet] = await tenantDb
+    .insert(aiCopilotPackets)
+    .values({
+      scopeType: payload.packet.scopeType,
+      scopeId: payload.packet.scopeId,
+      dealId: payload.packet.dealId,
+      packetKind: payload.packet.packetKind,
+      snapshotHash: payload.packet.snapshotHash,
+      status: "ready",
+      summaryText: payload.packet.summary,
+      evidenceJson: payload.packet.evidence,
+      confidence: String(payload.packet.confidence),
+      generatedAt: new Date(payload.packet.generatedAt),
+      updatedAt: new Date(),
+    })
+    .returning();
+
+  if (payload.suggestedTasks.length > 0) {
+    await tenantDb.insert(aiTaskSuggestions).values(
+      payload.suggestedTasks.map((task) => ({
+        packetId: packet.id,
+        scopeType: payload.packet.scopeType,
+        scopeId: payload.packet.scopeId,
+        title: task.title,
+        description: task.description,
+        suggestedOwnerId: task.suggestedOwnerId,
+        priority: task.priority,
+        confidence: String(task.confidence),
+        evidenceJson: task.evidence,
+      }))
+    );
+  }
+
+  if (payload.blindSpotFlags.length > 0) {
+    await tenantDb.insert(aiRiskFlags).values(
+      payload.blindSpotFlags.map((flag) => ({
+        packetId: packet.id,
+        scopeType: payload.packet.scopeType,
+        scopeId: payload.packet.scopeId,
+        dealId: payload.packet.dealId,
+        flagType: flag.flagType,
+        severity: flag.severity,
+        title: flag.title,
+        details: flag.details,
+        evidenceJson: flag.evidence,
+      }))
+    );
+  }
+
+  return {
+    packetId: packet.id,
+    generatedAt: packet.generatedAt?.toISOString() ?? payload.packet.generatedAt,
+  };
+}
+
+async function getExistingFreshPacket(input: {
+  tenantDb: TenantDb;
+  dealId: string;
+  snapshotHash: string;
+  now: Date;
+}): Promise<ExistingFreshPacket | null> {
+  const [packet] = await input.tenantDb
+    .select()
+    .from(aiCopilotPackets)
+    .where(
+      and(
+        eq(aiCopilotPackets.scopeType, "deal"),
+        eq(aiCopilotPackets.scopeId, input.dealId),
+        eq(aiCopilotPackets.snapshotHash, input.snapshotHash),
+      )
+    )
+    .orderBy(desc(aiCopilotPackets.createdAt))
+    .limit(1);
+
+  if (!packet) return null;
+
+  return {
+    packetId: packet.id,
+    snapshotHash: packet.snapshotHash,
+    summary: packet.summaryText ?? "",
+    generatedAt: packet.generatedAt?.toISOString() ?? packet.createdAt.toISOString(),
+  };
 }
