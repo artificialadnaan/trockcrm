@@ -4,21 +4,40 @@ import { fileURLToPath } from "node:url";
 import { getTableColumns } from "drizzle-orm";
 import { getTableConfig } from "drizzle-orm/pg-core";
 import {
-  LEAD_STATUSES,
   companies,
+  contacts,
   deals,
   leadStageHistory,
   leads,
   properties,
+  userOfficeAccess,
   users,
-} from "../../helpers/worktree-shared-contracts.js";
-import { describe, expect, it, vi } from "vitest";
+} from "../../../../shared/src/schema/index.js";
+import { LEAD_STATUSES } from "../../helpers/worktree-shared-contracts.js";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AppError } from "../../../src/middleware/error-handler.js";
 import { createLeadConversionService } from "../../../src/modules/leads/conversion-service.js";
+import { createDeal, updateDeal } from "../../../src/modules/deals/service.js";
 import { createLeadService } from "../../../src/modules/leads/service.js";
-import { updateDeal } from "../../../src/modules/deals/service.js";
+
+const pipelineMocks = vi.hoisted(() => ({
+  getStageById: vi.fn(),
+  getStageBySlug: vi.fn(),
+}));
+
+vi.mock("../../../src/modules/pipeline/service.js", () => ({
+  getStageById: pipelineMocks.getStageById,
+  getStageBySlug: pipelineMocks.getStageBySlug,
+}));
 
 vi.mock("@trock-crm/shared/schema", async () => import("../../../../shared/src/schema/index.js"));
+vi.mock("../../../src/db.js", () => ({
+  db: {
+    insert: vi.fn(() => ({
+      values: vi.fn().mockResolvedValue(undefined),
+    })),
+  },
+}));
 
 const migrationPath = resolve(
   dirname(fileURLToPath(import.meta.url)),
@@ -46,6 +65,12 @@ interface FakePropertyRow {
   city: string | null;
   state: string | null;
   zip: string | null;
+  isActive: boolean;
+}
+
+interface FakeContactRow {
+  id: string;
+  companyId: string;
   isActive: boolean;
 }
 
@@ -87,12 +112,31 @@ interface FakeDealRow {
   workflowRoute: "estimating" | "service";
 }
 
+interface FakeUserOfficeAccessRow {
+  userId: string;
+  officeId: string;
+}
+
+interface FakeLeadStageHistoryRow {
+  id: string;
+  leadId: string;
+  fromStageId: string | null;
+  toStageId: string;
+  changedBy: string;
+  isBackwardMove: boolean;
+  durationInPreviousStage: unknown;
+  createdAt: Date;
+}
+
 interface FakeTenantState {
   companies: FakeCompanyRow[];
   properties: FakePropertyRow[];
+  contacts: FakeContactRow[];
   users: FakeUserRow[];
+  userOfficeAccess: FakeUserOfficeAccessRow[];
   leads: FakeLeadRow[];
   deals: FakeDealRow[];
+  leadStageHistory: FakeLeadStageHistoryRow[];
 }
 
 function createFakeTenantDb(initialState?: Partial<FakeTenantState>) {
@@ -119,15 +163,34 @@ function createFakeTenantDb(initialState?: Partial<FakeTenantState>) {
         isActive: true,
       },
     ],
+    contacts: [
+      {
+        id: "contact-1",
+        companyId: "company-1",
+        isActive: true,
+      },
+    ],
     users: [
       {
         id: "rep-1",
         officeId: "office-1",
         isActive: true,
       },
+      {
+        id: "rep-2",
+        officeId: "office-1",
+        isActive: true,
+      },
+      {
+        id: "director-1",
+        officeId: "office-1",
+        isActive: true,
+      },
     ],
+    userOfficeAccess: [],
     leads: [],
     deals: [],
+    leadStageHistory: [],
     ...initialState,
   };
 
@@ -137,48 +200,152 @@ function createFakeTenantDb(initialState?: Partial<FakeTenantState>) {
 
     if (table === companies || tableName === "companies") return state.companies;
     if (table === properties || tableName === "properties") return state.properties;
+    if (table === contacts || tableName === "contacts") return state.contacts;
     if (table === users || tableName === "users") return state.users;
+    if (table === userOfficeAccess || tableName === "user_office_access") return state.userOfficeAccess;
     if (table === leads || tableName === "leads") return state.leads;
     if (table === deals || tableName === "deals") return state.deals;
+    if (table === leadStageHistory || tableName === "lead_stage_history") return state.leadStageHistory;
     if ("slug" in candidate && "category" in candidate && "website" in candidate) return state.companies;
     if ("lat" in candidate && "lng" in candidate && "companyId" in candidate) return state.properties;
+    if ("companyId" in candidate && "firstName" in candidate && "lastName" in candidate) return state.contacts;
     if ("email" in candidate && "role" in candidate && "officeId" in candidate) return state.users;
+    if ("userId" in candidate && "roleOverride" in candidate) return state.userOfficeAccess;
     if ("convertedAt" in candidate && "stageEnteredAt" in candidate && "assignedRepId" in candidate) return state.leads;
     if ("dealNumber" in candidate && "workflowRoute" in candidate && "sourceLeadId" in candidate) return state.deals;
+    if ("leadId" in candidate && "changedBy" in candidate && "toStageId" in candidate) return state.leadStageHistory;
     throw new Error("Unexpected table in fake tenant db");
+  }
+
+  function camelCase(name: string) {
+    return name.replace(/_([a-z])/g, (_match, char: string) => char.toUpperCase());
+  }
+
+  function getObjectPropertyByName(object: Record<string, unknown>, key: string) {
+    if (key in object) {
+      return object[key];
+    }
+
+    const camelKey = camelCase(key);
+    if (camelKey in object) {
+      return object[camelKey];
+    }
+
+    return undefined;
+  }
+
+  function isSqlChunk(value: unknown): value is { queryChunks: unknown[] } {
+    return Boolean(value) && typeof value === "object" && Array.isArray((value as { queryChunks?: unknown[] }).queryChunks);
+  }
+
+  function isParamChunk(value: unknown): value is { value: unknown } {
+    return Boolean(value) && typeof value === "object" && "encoder" in (value as Record<string, unknown>);
+  }
+
+  function isColumnChunk(value: unknown): value is { name: string } {
+    return Boolean(value) && typeof value === "object" && typeof (value as { name?: unknown }).name === "string";
+  }
+
+  function getStringChunkValue(value: unknown) {
+    if (!value || typeof value !== "object" || !("value" in (value as Record<string, unknown>))) {
+      return "";
+    }
+
+    const chunkValue = (value as { value: unknown }).value;
+    if (Array.isArray(chunkValue)) {
+      return chunkValue.join("");
+    }
+
+    return typeof chunkValue === "string" ? chunkValue : "";
+  }
+
+  function parsePredicate(condition: unknown): (row: Record<string, unknown>) => boolean {
+    if (!condition || !isSqlChunk(condition)) {
+      return () => true;
+    }
+
+    const nestedSqlChunks = condition.queryChunks.filter(isSqlChunk);
+    if (nestedSqlChunks.length > 0) {
+      const separators = condition.queryChunks
+        .map(getStringChunkValue)
+        .filter((value) => value.includes(" and ") || value.includes(" or "));
+
+      if (separators.some((value) => value.includes(" or "))) {
+        const predicates = nestedSqlChunks.map(parsePredicate);
+        return (row) => predicates.some((predicate) => predicate(row));
+      }
+
+      const predicates = nestedSqlChunks.map(parsePredicate);
+      return (row) => predicates.every((predicate) => predicate(row));
+    }
+
+    const joinedChunks = condition.queryChunks.map(getStringChunkValue).join("").toLowerCase();
+    const column = condition.queryChunks.find(isColumnChunk);
+    const param = condition.queryChunks.find(isParamChunk);
+
+    if (column && param && joinedChunks.includes(" ilike ")) {
+      const propertyName = camelCase(column.name);
+      const rawPattern = String(param.value ?? "").toLowerCase();
+      const startsWithWildcard = rawPattern.startsWith("%");
+      const endsWithWildcard = rawPattern.endsWith("%");
+      const pattern = rawPattern.replace(/^%|%$/g, "");
+
+      return (row) => {
+        const value = String(row[propertyName] ?? "").toLowerCase();
+
+        if (startsWithWildcard && endsWithWildcard) {
+          return value.includes(pattern);
+        }
+
+        if (startsWithWildcard) {
+          return value.endsWith(pattern);
+        }
+
+        if (endsWithWildcard) {
+          return value.startsWith(pattern);
+        }
+
+        return value === pattern;
+      };
+    }
+
+    if (column && param && joinedChunks.includes(" = ")) {
+      const propertyName = camelCase(column.name);
+      return (row) => row[propertyName] === param.value;
+    }
+
+    if (column && joinedChunks.includes(" is null")) {
+      const propertyName = camelCase(column.name);
+      return (row) => row[propertyName] == null;
+    }
+
+    if (column && joinedChunks.includes(" is not null")) {
+      const propertyName = camelCase(column.name);
+      return (row) => row[propertyName] != null;
+    }
+
+    return () => true;
+  }
+
+  function cloneRow<T>(row: T): T {
+    return { ...row };
+  }
+
+  function applyWhere<T extends Record<string, unknown>>(rows: T[], condition: unknown) {
+    const predicate = parsePredicate(condition);
+    return rows.filter((row) => predicate(row));
   }
 
   return {
     state,
-    select() {
+    execute() {
+      return Promise.resolve();
+    },
+    select(selectedFields?: Record<string, unknown>) {
       return {
         from(table: unknown) {
-          const rows = getRows(table);
-          return {
-            where() {
-              return {
-                limit(limit: number) {
-                  return Promise.resolve(rows.slice(0, limit));
-                },
-                for() {
-                  return {
-                    limit(limit: number) {
-                      return Promise.resolve(rows.slice(0, limit));
-                    },
-                  };
-                },
-                then(onfulfilled: (value: unknown[]) => unknown) {
-                  return Promise.resolve(rows).then(onfulfilled);
-                },
-              };
-            },
-            limit(limit: number) {
-              return Promise.resolve(rows.slice(0, limit));
-            },
-            then(onfulfilled: (value: unknown[]) => unknown) {
-              return Promise.resolve(rows).then(onfulfilled);
-            },
-          };
+          const rows = getRows(table) as Array<Record<string, unknown>>;
+          return createQueryBuilder(rows, selectedFields);
         },
       };
     },
@@ -195,6 +362,9 @@ function createFakeTenantDb(initialState?: Partial<FakeTenantState>) {
             returning() {
               return Promise.resolve([insertedRow]);
             },
+            then(onfulfilled: (value: unknown) => unknown) {
+              return Promise.resolve(insertedRow).then(onfulfilled);
+            },
           };
         },
       };
@@ -203,12 +373,17 @@ function createFakeTenantDb(initialState?: Partial<FakeTenantState>) {
       return {
         set(values: Record<string, unknown>) {
           return {
-            where() {
+            where(condition: unknown) {
               const rows = getRows(table) as Array<Record<string, unknown>>;
-              rows.forEach((row) => Object.assign(row, values));
+              const matchingRows = applyWhere(rows, condition);
+              matchingRows.forEach((row) => {
+                for (const [key, value] of Object.entries(values)) {
+                  row[key] = value;
+                }
+              });
               return {
                 returning() {
-                  return Promise.resolve(rows);
+                  return Promise.resolve(matchingRows);
                 },
               };
             },
@@ -217,6 +392,54 @@ function createFakeTenantDb(initialState?: Partial<FakeTenantState>) {
       };
     },
   };
+
+  function createQueryBuilder(
+    sourceRows: Array<Record<string, unknown>>,
+    fields?: Record<string, unknown>
+  ) {
+    let rows = [...sourceRows];
+
+    function materialize(selectedRows: Array<Record<string, unknown>>) {
+      if (!fields) {
+        return selectedRows.map(cloneRow);
+      }
+
+      return selectedRows.map((row) => {
+        const projectedRow: Record<string, unknown> = {};
+        for (const [key, field] of Object.entries(fields)) {
+          if (isColumnChunk(field)) {
+            projectedRow[key] = getObjectPropertyByName(row, field.name);
+          }
+        }
+        return projectedRow;
+      });
+    }
+
+    const queryBuilder = {
+      where(condition: unknown) {
+        rows = applyWhere(sourceRows, condition);
+        return queryBuilder;
+      },
+      orderBy() {
+        return queryBuilder;
+      },
+      offset(offset: number) {
+        rows = rows.slice(offset);
+        return queryBuilder;
+      },
+      limit(limit: number) {
+        return Promise.resolve(materialize(rows.slice(0, limit)));
+      },
+      for() {
+        return queryBuilder;
+      },
+      then(onfulfilled: (value: unknown[]) => unknown) {
+        return Promise.resolve(materialize(rows)).then(onfulfilled);
+      },
+    };
+
+    return queryBuilder;
+  }
 }
 
 const leadStage = {
@@ -228,6 +451,45 @@ const leadStage = {
   isActivePipeline: true,
   isTerminal: false,
 };
+
+const convertedLeadStage = {
+  id: "lead-stage-converted",
+  name: "Converted",
+  slug: "converted",
+  displayOrder: 99,
+  workflowFamily: "lead" as const,
+  isActivePipeline: true,
+  isTerminal: true,
+};
+
+const dealStage = {
+  id: "deal-stage-1",
+  name: "Qualified",
+  slug: "qualified",
+  displayOrder: 1,
+  workflowFamily: "standard_deal" as const,
+  isActivePipeline: true,
+  isTerminal: false,
+};
+
+beforeEach(() => {
+  pipelineMocks.getStageById.mockReset();
+  pipelineMocks.getStageBySlug.mockReset();
+  pipelineMocks.getStageById.mockImplementation(async (_id: string, workflowFamily?: string) => {
+    if (workflowFamily === "lead") {
+      return leadStage;
+    }
+
+    return dealStage;
+  });
+  pipelineMocks.getStageBySlug.mockImplementation(async (slug: string, workflowFamily?: string) => {
+    if (workflowFamily === "lead" && slug === "converted") {
+      return convertedLeadStage;
+    }
+
+    return null;
+  });
+});
 
 describe("Lead Conversion Shared Contract", () => {
   it("defines the lead lifecycle statuses used during conversion", () => {
@@ -351,6 +613,67 @@ describe("Lead Service", () => {
     expect(lead.isActive).toBe(true);
     expect(tenantDb.state.leads).toHaveLength(1);
   });
+
+  it("revalidates the primary contact hierarchy when primaryContactId changes", async () => {
+    const tenantDb = createFakeTenantDb({
+      companies: [
+        {
+          id: "company-1",
+          name: "Palm Villas",
+          slug: "palm-villas",
+          category: "other",
+          isActive: true,
+        },
+        {
+          id: "company-2",
+          name: "Ocean View",
+          slug: "ocean-view",
+          category: "other",
+          isActive: true,
+        },
+      ],
+      contacts: [
+        { id: "contact-1", companyId: "company-1", isActive: true },
+        { id: "contact-2", companyId: "company-2", isActive: true },
+      ],
+      leads: [
+        {
+          id: "lead-1",
+          companyId: "company-1",
+          propertyId: "property-1",
+          primaryContactId: "contact-1",
+          name: "Palm Villas repaint",
+          stageId: "lead-stage-1",
+          assignedRepId: "rep-1",
+          status: "open",
+          source: "Referral",
+          description: null,
+          stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+          convertedAt: null,
+          isActive: true,
+          createdAt: new Date("2026-04-12T15:00:00.000Z"),
+          updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+        },
+      ],
+    });
+    const service = createLeadService({
+      getStageById: async () => leadStage,
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+    });
+
+    await expect(
+      service.updateLead(
+        tenantDb as never,
+        "lead-1",
+        { primaryContactId: "contact-2" },
+        "director",
+        "director-1"
+      )
+    ).rejects.toMatchObject<AppError>({
+      statusCode: 400,
+      message: "Primary contact does not belong to the company",
+    });
+  });
 });
 
 describe("Lead Conversion Service", () => {
@@ -400,12 +723,24 @@ describe("Lead Conversion Service", () => {
     const result = await service.convertLead(tenantDb as never, {
       leadId: "lead-1",
       dealStageId: "deal-stage-1",
+      userRole: "rep",
+      userId: "rep-1",
     });
 
     expect(result.deal.id).toBe("deal-1");
     expect(result.deal.sourceLeadId).toBe("lead-1");
     expect(result.lead.status).toBe("converted");
     expect(result.lead.convertedAt).toEqual(new Date("2026-04-15T15:00:00.000Z"));
+    expect(result.lead.stageId).toBe("lead-stage-converted");
+    expect(result.lead.stageEnteredAt).toEqual(new Date("2026-04-15T15:00:00.000Z"));
+    expect(tenantDb.state.leadStageHistory).toEqual([
+      expect.objectContaining({
+        leadId: "lead-1",
+        fromStageId: "lead-stage-1",
+        toStageId: "lead-stage-converted",
+        changedBy: "rep-1",
+      }),
+    ]);
     expect(tenantDb.state.deals).toHaveLength(1);
   });
 
@@ -454,12 +789,16 @@ describe("Lead Conversion Service", () => {
     await service.convertLead(tenantDb as never, {
       leadId: "lead-1",
       dealStageId: "deal-stage-1",
+      userRole: "rep",
+      userId: "rep-1",
     });
 
     await expect(
       service.convertLead(tenantDb as never, {
         leadId: "lead-1",
         dealStageId: "deal-stage-1",
+        userRole: "rep",
+        userId: "rep-1",
       })
     ).rejects.toMatchObject<AppError>({
       statusCode: 409,
@@ -512,6 +851,8 @@ describe("Lead Conversion Service", () => {
     const result = await service.convertLead(tenantDb as never, {
       leadId: "lead-1",
       dealStageId: "deal-stage-1",
+      userRole: "rep",
+      userId: "rep-1",
     });
 
     expect(result.deal.assignedRepId).toBe("rep-1");
@@ -520,9 +861,202 @@ describe("Lead Conversion Service", () => {
     expect(result.deal.sourceLeadId).toBe("lead-1");
     expect(result.deal.source).toBe("Referral");
   });
+
+  it("rejects converting another rep's lead", async () => {
+    const tenantDb = createFakeTenantDb({
+      leads: [
+        {
+          id: "lead-1",
+          companyId: "company-1",
+          propertyId: "property-1",
+          primaryContactId: null,
+          name: "Palm Villas repaint",
+          stageId: "lead-stage-1",
+          assignedRepId: "rep-2",
+          status: "open",
+          source: "Referral",
+          description: null,
+          stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+          convertedAt: null,
+          isActive: true,
+          createdAt: new Date("2026-04-12T15:00:00.000Z"),
+          updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+        },
+      ],
+    });
+    const createDealSpy = vi.fn();
+    const service = createLeadConversionService({
+      createDeal: createDealSpy as never,
+    });
+
+    await expect(
+      service.convertLead(tenantDb as never, {
+        leadId: "lead-1",
+        dealStageId: "deal-stage-1",
+        userRole: "rep",
+        userId: "rep-1",
+      })
+    ).rejects.toMatchObject<AppError>({
+      statusCode: 403,
+      message: "You can only convert your own leads",
+    });
+
+    expect(createDealSpy).not.toHaveBeenCalled();
+    expect(tenantDb.state.deals).toHaveLength(0);
+  });
+
+  it("rejects rep-driven reassignment of the successor deal", async () => {
+    const tenantDb = createFakeTenantDb({
+      leads: [
+        {
+          id: "lead-1",
+          companyId: "company-1",
+          propertyId: "property-1",
+          primaryContactId: null,
+          name: "Palm Villas repaint",
+          stageId: "lead-stage-1",
+          assignedRepId: "rep-1",
+          status: "open",
+          source: "Referral",
+          description: null,
+          stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+          convertedAt: null,
+          isActive: true,
+          createdAt: new Date("2026-04-12T15:00:00.000Z"),
+          updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+        },
+      ],
+    });
+    const createDealSpy = vi.fn();
+    const service = createLeadConversionService({
+      createDeal: createDealSpy as never,
+    });
+
+    await expect(
+      service.convertLead(tenantDb as never, {
+        leadId: "lead-1",
+        dealStageId: "deal-stage-1",
+        assignedRepId: "rep-2",
+        userRole: "rep",
+        userId: "rep-1",
+      })
+    ).rejects.toMatchObject<AppError>({
+      statusCode: 403,
+      message: "You cannot reassign the successor deal",
+    });
+
+    expect(createDealSpy).not.toHaveBeenCalled();
+    expect(tenantDb.state.deals).toHaveLength(0);
+  });
+
+  it.each([
+    {
+      name: "disqualified leads",
+      lead: { status: "disqualified" as const, isActive: false },
+      message: "Disqualified leads cannot be converted",
+    },
+    {
+      name: "inactive leads",
+      lead: { status: "open" as const, isActive: false },
+      message: "Inactive leads cannot be converted",
+    },
+  ])("rejects conversion for $name", async ({ lead, message }) => {
+    const tenantDb = createFakeTenantDb({
+      leads: [
+        {
+          id: "lead-1",
+          companyId: "company-1",
+          propertyId: "property-1",
+          primaryContactId: null,
+          name: "Palm Villas repaint",
+          stageId: "lead-stage-1",
+          assignedRepId: "rep-1",
+          status: lead.status,
+          source: "Referral",
+          description: null,
+          stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+          convertedAt: null,
+          isActive: lead.isActive,
+          createdAt: new Date("2026-04-12T15:00:00.000Z"),
+          updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+        },
+      ],
+    });
+    const createDealSpy = vi.fn();
+    const service = createLeadConversionService({
+      createDeal: createDealSpy as never,
+    });
+
+    await expect(
+      service.convertLead(tenantDb as never, {
+        leadId: "lead-1",
+        dealStageId: "deal-stage-1",
+        userRole: "rep",
+        userId: "rep-1",
+      })
+    ).rejects.toMatchObject<AppError>({
+      statusCode: 400,
+      message,
+    });
+
+    expect(createDealSpy).not.toHaveBeenCalled();
+    expect(tenantDb.state.deals).toHaveLength(0);
+  });
 });
 
 describe("Deal Lineage Enforcement", () => {
+  it("rejects creating a second deal for the same source lead with a controlled validation error", async () => {
+    const tenantDb = createFakeTenantDb({
+      leads: [
+        {
+          id: "lead-1",
+          companyId: "company-1",
+          propertyId: "property-1",
+          primaryContactId: "contact-1",
+          name: "Palm Villas repaint",
+          stageId: "lead-stage-1",
+          assignedRepId: "rep-1",
+          status: "open",
+          source: "Referral",
+          description: null,
+          stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+          convertedAt: null,
+          isActive: true,
+          createdAt: new Date("2026-04-12T15:00:00.000Z"),
+          updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+        },
+      ],
+      deals: [
+        {
+          id: "deal-1",
+          dealNumber: "TR-2026-0001",
+          name: "Existing successor deal",
+          stageId: "deal-stage-1",
+          assignedRepId: "rep-1",
+          primaryContactId: "contact-1",
+          companyId: "company-1",
+          propertyId: "property-1",
+          sourceLeadId: "lead-1",
+          source: "Referral",
+          workflowRoute: "estimating",
+        },
+      ],
+    });
+
+    await expect(
+      createDeal(tenantDb as never, {
+        name: "Duplicate successor deal",
+        stageId: "deal-stage-1",
+        assignedRepId: "rep-1",
+        sourceLeadId: "lead-1",
+        workflowRoute: "estimating",
+      })
+    ).rejects.toMatchObject<AppError>({
+      statusCode: 409,
+      message: "A deal already exists for this source lead",
+    });
+  });
+
   it("rejects updating a legacy deal without source lead lineage unless migrationMode is explicit", async () => {
     const tenantDb = createFakeTenantDb({
       deals: [
@@ -584,5 +1118,70 @@ describe("Deal Lineage Enforcement", () => {
     );
 
     expect(updated.name).toBe("Legacy Deal Updated");
+  });
+
+  it("rejects attaching a source lead that is already linked to another deal", async () => {
+    const tenantDb = createFakeTenantDb({
+      leads: [
+        {
+          id: "lead-1",
+          companyId: "company-1",
+          propertyId: "property-1",
+          primaryContactId: "contact-1",
+          name: "Palm Villas repaint",
+          stageId: "lead-stage-1",
+          assignedRepId: "rep-1",
+          status: "open",
+          source: "Referral",
+          description: null,
+          stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+          convertedAt: null,
+          isActive: true,
+          createdAt: new Date("2026-04-12T15:00:00.000Z"),
+          updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+        },
+      ],
+      deals: [
+        {
+          id: "deal-1",
+          dealNumber: "TR-2026-0001",
+          name: "Existing successor deal",
+          stageId: "deal-stage-1",
+          assignedRepId: "rep-1",
+          primaryContactId: "contact-1",
+          companyId: "company-1",
+          propertyId: "property-1",
+          sourceLeadId: "lead-1",
+          source: "Referral",
+          workflowRoute: "estimating",
+        },
+        {
+          id: "deal-2",
+          dealNumber: "TR-2026-0002",
+          name: "Legacy deal awaiting lineage",
+          stageId: "deal-stage-1",
+          assignedRepId: "rep-1",
+          primaryContactId: null,
+          companyId: "company-1",
+          propertyId: "property-1",
+          sourceLeadId: null,
+          source: "Referral",
+          workflowRoute: "estimating",
+        },
+      ],
+    });
+
+    await expect(
+      updateDeal(
+        tenantDb as never,
+        "deal-2",
+        { sourceLeadId: "lead-1", migrationMode: true },
+        "director",
+        "director-1"
+      )
+    ).rejects.toMatchObject<AppError>({
+      statusCode: 409,
+      message: "A deal already exists for this source lead",
+    });
   });
 });

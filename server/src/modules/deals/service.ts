@@ -142,7 +142,27 @@ function workflowFamilyForRoute(workflowRoute: WorkflowRoute) {
   return workflowRoute === "service" ? "service_deal" : "standard_deal";
 }
 
-async function resolveSourceLeadLineage(tenantDb: TenantDb, input: CreateDealInput) {
+async function assertSourceLeadLineageAvailable(
+  tenantDb: TenantDb,
+  sourceLeadId: string,
+  existingDealId?: string
+) {
+  const [existingDeal] = await tenantDb
+    .select()
+    .from(deals)
+    .where(eq(deals.sourceLeadId, sourceLeadId))
+    .limit(1);
+
+  if (existingDeal && existingDeal.id !== existingDealId) {
+    throw new AppError(409, "A deal already exists for this source lead");
+  }
+}
+
+async function resolveSourceLeadLineage(
+  tenantDb: TenantDb,
+  input: CreateDealInput,
+  options?: { existingDealId?: string }
+) {
   if (!input.sourceLeadId) {
     return {
       companyId: input.companyId ?? null,
@@ -152,6 +172,8 @@ async function resolveSourceLeadLineage(tenantDb: TenantDb, input: CreateDealInp
       source: input.source ?? null,
     };
   }
+
+  await assertSourceLeadLineageAvailable(tenantDb, input.sourceLeadId, options?.existingDealId);
 
   const [sourceLead] = await tenantDb
     .select()
@@ -519,6 +541,8 @@ export async function updateDeal(
           : (input.primaryContactId ?? undefined),
       source: input.source === undefined ? (existing.source ?? undefined) : (input.source ?? undefined),
       workflowRoute: input.workflowRoute ?? existing.workflowRoute,
+    }, {
+      existingDealId: existing.id,
     });
 
     updates.sourceLeadId = lineage.sourceLeadId;

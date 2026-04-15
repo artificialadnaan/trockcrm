@@ -1,16 +1,19 @@
 import { eq } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
-import { deals, leads } from "@trock-crm/shared/schema";
+import { deals, leadStageHistory, leads } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import type { WorkflowRoute } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 import { createDeal } from "../deals/service.js";
+import { getStageBySlug } from "../pipeline/service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
 export interface ConvertLeadInput {
   leadId: string;
   dealStageId: string;
+  userId: string;
+  userRole: string;
   workflowRoute?: WorkflowRoute;
   assignedRepId?: string;
   primaryContactId?: string | null;
@@ -28,11 +31,13 @@ export interface ConvertLeadInput {
 
 interface LeadConversionDependencies {
   createDeal: typeof createDeal;
+  getStageBySlug: typeof getStageBySlug;
   now: () => Date;
 }
 
 const defaultDependencies: LeadConversionDependencies = {
   createDeal,
+  getStageBySlug,
   now: () => new Date(),
 };
 
@@ -54,8 +59,20 @@ export function createLeadConversionService(
       throw new AppError(404, "Lead not found");
     }
 
+    if (input.userRole === "rep" && lead.assignedRepId !== input.userId) {
+      throw new AppError(403, "You can only convert your own leads");
+    }
+
     if (lead.status === "converted") {
       throw new AppError(409, "Lead has already been converted");
+    }
+
+    if (lead.status === "disqualified") {
+      throw new AppError(400, "Disqualified leads cannot be converted");
+    }
+
+    if (!lead.isActive) {
+      throw new AppError(400, "Inactive leads cannot be converted");
     }
 
     const [existingDeal] = await tenantDb
@@ -68,11 +85,16 @@ export function createLeadConversionService(
       throw new AppError(409, "Lead has already been converted");
     }
 
+    const successorAssignedRepId = input.assignedRepId ?? lead.assignedRepId;
+    if (input.userRole === "rep" && successorAssignedRepId !== lead.assignedRepId) {
+      throw new AppError(403, "You cannot reassign the successor deal");
+    }
+
     const deal = await deps.createDeal(tenantDb, {
       name: input.name ?? lead.name,
       stageId: input.dealStageId,
       workflowRoute: input.workflowRoute ?? "estimating",
-      assignedRepId: input.assignedRepId ?? lead.assignedRepId,
+      assignedRepId: successorAssignedRepId,
       officeId: input.officeId,
       primaryContactId:
         input.primaryContactId === undefined
@@ -92,11 +114,28 @@ export function createLeadConversionService(
     });
 
     const convertedAt = deps.now();
+    const convertedStage = await deps.getStageBySlug("converted", "lead");
+    const transitionedToConvertedStage =
+      convertedStage !== null && convertedStage.id !== lead.stageId;
+
+    if (transitionedToConvertedStage) {
+      await tenantDb.insert(leadStageHistory).values({
+        leadId: lead.id,
+        fromStageId: lead.stageId,
+        toStageId: convertedStage.id,
+        changedBy: input.userId,
+        isBackwardMove: false,
+        durationInPreviousStage: null,
+        createdAt: convertedAt,
+      });
+    }
 
     const [updatedLead] = await tenantDb
       .update(leads)
       .set({
+        stageId: transitionedToConvertedStage ? convertedStage.id : lead.stageId,
         status: "converted",
+        stageEnteredAt: convertedAt,
         convertedAt,
         isActive: false,
         updatedAt: convertedAt,

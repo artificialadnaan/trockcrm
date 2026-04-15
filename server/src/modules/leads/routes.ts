@@ -101,14 +101,21 @@ router.patch("/:id", async (req, res, next) => {
 // POST /api/leads/:id/convert
 router.post("/:id/convert", async (req, res, next) => {
   try {
-    const { dealStageId, ...rest } = req.body;
+    const body = { ...req.body };
+    const { dealStageId, ...rest } = body;
     if (!dealStageId) {
       throw new AppError(400, "dealStageId is required");
+    }
+
+    if (req.user!.role === "rep" && body.assignedRepId !== undefined) {
+      delete rest.assignedRepId;
     }
 
     const result = await convertLead(req.tenantDb!, {
       leadId: req.params.id,
       dealStageId,
+      userId: req.user!.id,
+      userRole: req.user!.role,
       officeId: req.user!.activeOfficeId,
       ...rest,
     });

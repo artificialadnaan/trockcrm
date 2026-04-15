@@ -114,21 +114,29 @@ async function validateLeadHierarchy(
     throw new AppError(400, "Property does not belong to the company");
   }
 
-  if (!input.primaryContactId) {
+  await validatePrimaryContact(tenantDb, input.companyId, input.primaryContactId);
+}
+
+async function validatePrimaryContact(
+  tenantDb: TenantDb,
+  companyId: string,
+  primaryContactId?: string | null
+) {
+  if (!primaryContactId) {
     return;
   }
 
   const [contact] = await tenantDb
     .select()
     .from(contacts)
-    .where(and(eq(contacts.id, input.primaryContactId), eq(contacts.isActive, true)))
+    .where(and(eq(contacts.id, primaryContactId), eq(contacts.isActive, true)))
     .limit(1);
 
   if (!contact) {
     throw new AppError(400, "Primary contact not found");
   }
 
-  if (contact.companyId !== input.companyId) {
+  if (contact.companyId !== companyId) {
     throw new AppError(400, "Primary contact does not belong to the company");
   }
 }
@@ -261,6 +269,9 @@ export function createLeadService(
     }
 
     if (input.primaryContactId !== undefined) {
+      if (input.primaryContactId !== existing.primaryContactId) {
+        await validatePrimaryContact(tenantDb, existing.companyId, input.primaryContactId);
+      }
       updates.primaryContactId = input.primaryContactId;
     }
 
