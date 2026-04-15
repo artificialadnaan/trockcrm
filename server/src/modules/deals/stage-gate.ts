@@ -136,6 +136,22 @@ function hasNonEmptyText(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
 }
 
+function isVerifiedLinkedStageDocument(file: {
+  category: unknown;
+  intakeRequirementKey: unknown;
+  intakeSource: unknown;
+  r2Key: unknown;
+  r2Bucket: unknown;
+}) {
+  return (
+    hasNonEmptyText(file.category) &&
+    hasNonEmptyText(file.intakeRequirementKey) &&
+    file.intakeSource === "scoping_intake" &&
+    hasNonEmptyText(file.r2Key) &&
+    hasNonEmptyText(file.r2Bucket)
+  );
+}
+
 /**
  * Validate whether a deal can move to the target stage.
  *
@@ -236,6 +252,7 @@ export async function validateStageGate(
       .select({
         category: files.category,
         intakeRequirementKey: files.intakeRequirementKey,
+        intakeSource: files.intakeSource,
         r2Key: files.r2Key,
         r2Bucket: files.r2Bucket,
       })
@@ -243,12 +260,7 @@ export async function validateStageGate(
       .where(and(eq(files.dealId, dealId), eq(files.isActive, true)));
 
     for (const file of existingFiles) {
-      if (
-        hasNonEmptyText(file.category) &&
-        hasNonEmptyText(file.intakeRequirementKey) &&
-        hasNonEmptyText(file.r2Key) &&
-        hasNonEmptyText(file.r2Bucket)
-      ) {
+      if (isVerifiedLinkedStageDocument(file)) {
         linkedVerifiedCategories.add(file.category);
       }
     }

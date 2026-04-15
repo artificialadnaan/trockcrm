@@ -403,6 +403,16 @@ router.patch("/:id", async (req, res, next) => {
       delete body.assignedRepId;
     }
 
+    const priorDeal =
+      body.proposalStatus === "revision_requested"
+        ? await getDealById(
+            req.tenantDb!,
+            req.params.id,
+            req.user!.role,
+            req.user!.id
+          )
+        : null;
+
     let deal = await updateDeal(
       req.tenantDb!,
       req.params.id,
@@ -416,7 +426,11 @@ router.patch("/:id", async (req, res, next) => {
       const revisionRouting = await routeRevisionToEstimating(
         req.tenantDb!,
         req.params.id,
-        req.user!.id
+        req.user!.id,
+        {
+          proposalStatus: "revision_requested",
+          previousEstimatingSubstage: priorDeal?.estimatingSubstage ?? null,
+        }
       );
       deal = revisionRouting.deal;
     }

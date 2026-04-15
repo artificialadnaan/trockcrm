@@ -150,6 +150,7 @@ type FakeDealTeamMemberRow = {
   userId: string;
   role: string;
   isActive: boolean;
+  createdAt?: Date;
 };
 
 type FakeTenantState = {
@@ -1536,6 +1537,94 @@ describe("Stage Gate Payload Hardening", () => {
       }),
     ]);
   });
+
+  it("requires linked stage documents to include canonical intake source metadata", async () => {
+    vi.doMock("../../../src/modules/deals/scoping-service.js", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("../../../src/modules/deals/scoping-service.js")>();
+      return {
+        ...actual,
+        evaluateDealScopingReadiness: vi.fn(async () => ({
+          status: "ready",
+          errors: { sections: {}, attachments: {} },
+          completionState: {},
+          requiredSections: ["projectOverview"],
+          requiredAttachmentKeys: ["scope_docs"],
+          attachmentRequirements: [
+            {
+              key: "scope_docs",
+              category: "other",
+              label: "Scope docs",
+              satisfied: true,
+            },
+          ],
+        })),
+      };
+    });
+
+    const { validateStageGate } = await import("../../../src/modules/deals/stage-gate.js");
+    const tenantDb = createHardeningTenantDb({
+      deals: [
+        {
+          id: "deal-1",
+          name: "Palm Villas",
+          stageId: STAGES.estimating.id,
+          workflowRoute: "estimating",
+          assignedRepId: "rep-1",
+          projectTypeId: "pt-1",
+          propertyAddress: "123 Palm Way",
+          propertyCity: "Miami",
+          propertyState: "FL",
+          propertyZip: "33101",
+          description: "Exterior refresh",
+        },
+      ],
+      files: [
+        {
+          id: "file-1",
+          dealId: "deal-1",
+          category: "proposal",
+          r2Key: "office_a/deals/D-1/proposal/file-1.pdf",
+          r2Bucket: "trock-crm-files",
+          intakeRequirementKey: "proposal_packet",
+          intakeSource: null,
+          isActive: true,
+        },
+      ],
+    });
+
+    mockedStageLookups.queue.push(
+      {
+        id: STAGES.estimating.id,
+        name: STAGES.estimating.name,
+        slug: STAGES.estimating.slug,
+        isTerminal: STAGES.estimating.isTerminal,
+        displayOrder: STAGES.estimating.displayOrder,
+        requiredFields: [],
+        requiredDocuments: [],
+        requiredApprovals: [],
+      },
+      {
+        id: STAGES.bid_sent.id,
+        name: STAGES.bid_sent.name,
+        slug: STAGES.bid_sent.slug,
+        isTerminal: STAGES.bid_sent.isTerminal,
+        displayOrder: STAGES.bid_sent.displayOrder,
+        requiredFields: ["description"],
+        requiredDocuments: ["proposal"],
+        requiredApprovals: [],
+      }
+    );
+
+    const result = await validateStageGate(
+      tenantDb as never,
+      "deal-1",
+      STAGES.bid_sent.id,
+      "rep",
+      "rep-1"
+    );
+
+    expect(result.missingRequirements.documents).toEqual(["proposal"]);
+  });
 });
 
 describe("Revision Routing Hardening", () => {
@@ -1596,6 +1685,101 @@ describe("Revision Routing Hardening", () => {
         status: "pending",
         originRule: "deal_estimate_revision_requested",
         sourceEvent: "deal.estimate.revision_requested",
+      }),
+    ]);
+  });
+
+  it("reroutes deterministically even when the same request already overwrote the persisted substage", async () => {
+    const scopingService = await import("../../../src/modules/deals/scoping-service.js");
+    const routeRevisionToEstimating = (scopingService as any).routeRevisionToEstimating;
+    const tenantDb = createHardeningTenantDb({
+      deals: [
+        {
+          id: "deal-1",
+          name: "Palm Villas",
+          stageId: STAGES.estimating.id,
+          workflowRoute: "estimating",
+          assignedRepId: "rep-1",
+          projectTypeId: "pt-1",
+          propertyAddress: "123 Palm Way",
+          propertyCity: "Miami",
+          propertyState: "FL",
+          propertyZip: "33101",
+          description: "Exterior refresh",
+          estimatingSubstage: "building_estimate",
+          proposalStatus: "revision_requested",
+          proposalRevisionCount: 2,
+        },
+      ],
+    });
+
+    const result = await routeRevisionToEstimating(
+      tenantDb as never,
+      "deal-1",
+      "user-1",
+      {
+        proposalStatus: "revision_requested",
+        previousEstimatingSubstage: "sent_to_client",
+      }
+    );
+
+    expect(result.routed).toBe(true);
+    expect(tenantDb.state.deals[0]?.estimatingSubstage).toBe("building_estimate");
+    expect(tenantDb.state.tasks).toEqual([
+      expect.objectContaining({
+        dealId: "deal-1",
+        status: "pending",
+      }),
+    ]);
+  });
+
+  it("assigns revision tasks to the earliest active estimator deterministically", async () => {
+    const scopingService = await import("../../../src/modules/deals/scoping-service.js");
+    const routeRevisionToEstimating = (scopingService as any).routeRevisionToEstimating;
+    const tenantDb = createHardeningTenantDb({
+      deals: [
+        {
+          id: "deal-1",
+          name: "Palm Villas",
+          stageId: STAGES.estimating.id,
+          workflowRoute: "estimating",
+          assignedRepId: "rep-1",
+          projectTypeId: "pt-1",
+          propertyAddress: "123 Palm Way",
+          propertyCity: "Miami",
+          propertyState: "FL",
+          propertyZip: "33101",
+          description: "Exterior refresh",
+          estimatingSubstage: "sent_to_client",
+          proposalStatus: "revision_requested",
+          proposalRevisionCount: 2,
+        },
+      ],
+      dealTeamMembers: [
+        {
+          id: "member-2",
+          dealId: "deal-1",
+          userId: "est-2",
+          role: "estimator",
+          isActive: true,
+          createdAt: new Date("2026-04-15T16:00:00.000Z"),
+        },
+        {
+          id: "member-1",
+          dealId: "deal-1",
+          userId: "est-1",
+          role: "estimator",
+          isActive: true,
+          createdAt: new Date("2026-04-15T15:00:00.000Z"),
+        },
+      ],
+    });
+
+    await routeRevisionToEstimating(tenantDb as never, "deal-1", "user-1");
+
+    expect(tenantDb.state.tasks).toEqual([
+      expect.objectContaining({
+        assignedTo: "est-1",
       }),
     ]);
   });

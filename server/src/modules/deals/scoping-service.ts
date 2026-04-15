@@ -35,6 +35,11 @@ export interface DealRevisionRoutingResult {
   task: typeof tasks.$inferSelect | null;
 }
 
+export interface DealRevisionRoutingContext {
+  proposalStatus?: DealRow["proposalStatus"];
+  previousEstimatingSubstage?: DealRow["estimatingSubstage"];
+}
+
 export interface DealScopingAttachmentRequirement {
   key: string;
   category: string;
@@ -633,17 +638,34 @@ async function resolveRevisionTaskAssignee(
   tenantDb: TenantDb,
   deal: DealRow
 ): Promise<string> {
-  const [estimator] = await tenantDb
+  const teamMembers = await tenantDb
     .select()
     .from(dealTeamMembers)
-    .where(
-      and(
-        eq(dealTeamMembers.dealId, deal.id),
-        eq(dealTeamMembers.role, "estimator"),
-        eq(dealTeamMembers.isActive, true)
-      )
+    .where(eq(dealTeamMembers.dealId, deal.id));
+
+  const [estimator] = teamMembers
+    .filter(
+      (member) =>
+        member.dealId === deal.id &&
+        member.role === "estimator" &&
+        member.isActive
     )
-    .limit(1);
+    .sort((left, right) => {
+      const leftCreatedAt =
+        left.createdAt instanceof Date ? left.createdAt.getTime() : Number.MAX_SAFE_INTEGER;
+      const rightCreatedAt =
+        right.createdAt instanceof Date ? right.createdAt.getTime() : Number.MAX_SAFE_INTEGER;
+
+      if (leftCreatedAt !== rightCreatedAt) {
+        return leftCreatedAt - rightCreatedAt;
+      }
+
+      if (left.userId !== right.userId) {
+        return left.userId.localeCompare(right.userId);
+      }
+
+      return left.id.localeCompare(right.id);
+    });
 
   return estimator?.userId ?? deal.assignedRepId;
 }
@@ -651,17 +673,21 @@ async function resolveRevisionTaskAssignee(
 export async function routeRevisionToEstimating(
   tenantDb: TenantDb,
   dealId: string,
-  userId: string
+  userId: string,
+  context?: DealRevisionRoutingContext
 ): Promise<DealRevisionRoutingResult> {
   const [deal, editor] = await Promise.all([
     getDealOrThrow(tenantDb, dealId),
     getUserOrThrow(tenantDb, userId),
   ]);
+  const targetProposalStatus = context?.proposalStatus ?? deal.proposalStatus;
+  const routingSubstage =
+    context?.previousEstimatingSubstage ?? deal.estimatingSubstage;
 
   if (
     deal.workflowRoute !== "estimating" ||
-    deal.proposalStatus !== "revision_requested" ||
-    deal.estimatingSubstage !== "sent_to_client"
+    targetProposalStatus !== "revision_requested" ||
+    routingSubstage !== "sent_to_client"
   ) {
     return {
       routed: false,

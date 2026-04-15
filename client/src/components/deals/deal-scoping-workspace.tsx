@@ -58,6 +58,10 @@ type WorkspaceAttachmentRequirement = {
   satisfied: boolean;
 };
 
+type WorkspaceReadiness = DealScopingReadiness & {
+  attachmentRequirements: WorkspaceAttachmentRequirement[];
+};
+
 const SECTION_ORDER: Array<{ key: SectionKey; label: string }> = [
   { key: "projectOverview", label: "Project Overview" },
   { key: "propertyDetails", label: "Property Details" },
@@ -145,6 +149,51 @@ function getReadinessTone(status: DealScopingReadiness["status"]) {
   return "bg-amber-50 text-amber-700 border-amber-200";
 }
 
+function getDefaultAttachmentRequirementKeys(route: WorkflowRoute) {
+  return route === "service" ? ["site_photos"] : ["scope_docs", "site_photos"];
+}
+
+function normalizeWorkspaceReadiness(
+  readiness: DealScopingReadiness,
+  route: WorkflowRoute
+): WorkspaceReadiness {
+  const rawReadiness = readiness as DealScopingReadiness & {
+    attachmentRequirements?: WorkspaceAttachmentRequirement[];
+  };
+  const requiredAttachmentKeys =
+    rawReadiness.requiredAttachmentKeys.length > 0
+      ? rawReadiness.requiredAttachmentKeys
+      : getDefaultAttachmentRequirementKeys(route);
+  const attachmentRequirements = requiredAttachmentKeys
+    .map((key) => {
+      const baseRequirement =
+        ATTACHMENT_REQUIREMENT_BY_KEY[key as keyof typeof ATTACHMENT_REQUIREMENT_BY_KEY];
+      if (!baseRequirement) {
+        return null;
+      }
+
+      const existingRequirement = rawReadiness.attachmentRequirements?.find(
+        (requirement) => requirement.key === key
+      );
+
+      return (
+        existingRequirement ?? {
+          key,
+          category: baseRequirement.category,
+          label: baseRequirement.label,
+          satisfied: !(rawReadiness.errors.attachments[key]?.length ?? 0),
+        }
+      );
+    })
+    .filter((requirement): requirement is WorkspaceAttachmentRequirement => Boolean(requirement));
+
+  return {
+    ...readiness,
+    requiredAttachmentKeys,
+    attachmentRequirements,
+  };
+}
+
 export function DealScopingWorkspace({
   deal,
   onDealUpdated,
@@ -159,7 +208,7 @@ export function DealScopingWorkspace({
   });
 
   const [intake, setIntake] = useState<DealScopingIntake | null>(null);
-  const [readiness, setReadiness] = useState<DealScopingReadiness | null>(null);
+  const [readiness, setReadiness] = useState<WorkspaceReadiness | null>(null);
   const [sectionData, setSectionData] = useState<Record<string, unknown>>({});
   const [workflowRoute, setWorkflowRoute] = useState<WorkflowRoute>(deal.workflowRoute);
   const [projectTypeId, setProjectTypeId] = useState<string | null>(deal.projectTypeId);
@@ -178,7 +227,7 @@ export function DealScopingWorkspace({
       const result = await getDealScopingIntake(deal.id);
       const nextSectionData = buildWorkspaceSectionData(deal, result.intake);
       setIntake(result.intake);
-      setReadiness(result.readiness);
+      setReadiness(normalizeWorkspaceReadiness(result.readiness, deal.workflowRoute));
       setSectionData(nextSectionData);
       setWorkflowRoute(deal.workflowRoute);
       setProjectTypeId(result.intake.projectTypeId ?? deal.projectTypeId);
@@ -221,7 +270,7 @@ export function DealScopingWorkspace({
         });
         const nextSectionData = buildWorkspaceSectionData(deal, result.intake);
         setIntake(result.intake);
-        setReadiness(result.readiness);
+        setReadiness(normalizeWorkspaceReadiness(result.readiness, workflowRoute));
         setSectionData(nextSectionData);
         lastSavedFingerprintRef.current = JSON.stringify({
           workflowRoute,
@@ -241,12 +290,7 @@ export function DealScopingWorkspace({
   }, [deal, deal.id, onDealUpdated, projectTypeId, sectionData, workflowRoute]);
 
   const completionCounts = getScopingCompletionCounts(readiness?.completionState);
-  const attachmentRequirements =
-    (
-      readiness as (DealScopingReadiness & {
-        attachmentRequirements?: WorkspaceAttachmentRequirement[];
-      }) | null
-    )?.attachmentRequirements ?? [];
+  const attachmentRequirements = readiness?.attachmentRequirements ?? [];
   const visibleAttachmentRequirements = useMemo(() => {
     const requirementKeys =
       readiness?.requiredAttachmentKeys ??
@@ -585,7 +629,7 @@ export function DealScopingWorkspace({
             {visibleAttachmentRequirements.map((requirement) => {
               const RequirementIcon = requirement.icon;
               const linkedFiles = linkedFilesByRequirement.get(requirement.key) ?? [];
-              const isSatisfied = requirement.status?.satisfied ?? linkedFiles.length > 0;
+              const isSatisfied = requirement.status?.satisfied ?? false;
               const categoryLabel =
                 FILE_CATEGORY_LABELS[requirement.category] ?? requirement.category;
 
