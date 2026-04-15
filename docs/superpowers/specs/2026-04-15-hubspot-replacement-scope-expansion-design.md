@@ -65,8 +65,24 @@ Rules:
 - a property can have many leads over time
 - a lead is the canonical pre-RFP record
 - a deal is the canonical post-RFP record
+- a lead converts by creating one successor deal record; the lead is never mutated into a deal
+- each deal must store `source_lead_id` to preserve the conversion chain and reporting lineage
+- a lead may convert at most once; if a post-RFP effort is abandoned and restarted later, that creates a new lead and potentially a new successor deal
 - "project" is business-language aliasing for a deal, not a separate domain entity
 - contacts can attach at company, property, lead, and deal levels
+
+### Lead-to-deal conversion contract
+
+Conversion from lead to deal is a record-creation event, not an in-place type change.
+
+Requirements:
+
+- conversion occurs when the opportunity crosses the RFP boundary into post-RFP workflow
+- the lead remains as a historical pre-RFP record
+- the new deal inherits company, property, contact links, owner context, and source metadata from the lead at conversion time
+- the deal must retain a durable reference to the originating lead for reporting, audit, and timeline continuity
+- pre-RFP lead activities remain stored against the lead, but become visible from the successor deal through linked timeline rollups
+- ownership defaults to the converted lead owner unless reassigned during or immediately after conversion
 
 ### Why this hierarchy is required
 
@@ -132,6 +148,33 @@ The CRM must enforce that:
 - the required fields, attachments, and approvals are machine-validated
 - estimating-stage entry is blocked with structured missing-requirement feedback
 
+Canonical Phase 1 gate categories:
+
+- required core fields
+- required scoping sections
+- required attachments
+- required approvals
+
+Minimum launch gate contract:
+
+- required core fields: company, property, assigned rep, workflow pipeline, project type, expected value or explicit “value pending”, and source lead linkage
+- required scoping sections: project overview, property details, scope summary, relevant scope sections by route, site logistics, and observed site conditions
+- required attachments: the selected route must satisfy every attachment category marked as required in pipeline configuration; each required category passes only when at least one verified uploaded file is linked to the intake in that category
+- required approvals: route-specific approval roles defined in pipeline configuration
+
+Pipeline-specific override rules:
+
+- `standard` and `service` pipelines may have different required sections, attachment categories, and approval roles
+- route-specific overrides may only tighten the gate, not remove the global minimum launch contract
+- admin configuration must render the effective gate definition visible in-product so sales, estimating, and directors are reading the same checklist
+
+Attachment validation contract:
+
+- attachment categories come from the canonical CRM file taxonomy, not freeform labels
+- the gate evaluates category presence, not arbitrary file counts beyond the minimum of one verified file per required category
+- a file only counts after upload verification and successful link to the intake/deal record
+- replacing a file preserves category satisfaction as long as one verified file remains linked in the required category
+
 ### 4. Revision routing
 
 The CRM must support estimate revision flow as a first-class workflow path.
@@ -166,6 +209,16 @@ Each activity has:
 
 - one canonical stored source entity
 - optional linked entities for roll-up visibility
+- one mandatory `responsible_user_id` used for attribution and reporting
+- one optional `performed_by_user_id` when the actor differs from the responsible owner
+
+Rep attribution rules:
+
+- every activity must resolve to a responsible rep or owner at write time
+- manually created activities use the selected owner or, if omitted, the current record owner
+- synced emails attribute responsibility to the owning salesperson of the matched lead/deal or, for company-only fallback, the owning salesperson responsible for classification
+- meetings, approvals, and notes inherit the primary record owner unless an explicit responsible user is selected
+- system events and automations must still write a `responsible_user_id` based on the affected record owner so `activity by rep` reporting is complete
 
 Activities must be viewable by:
 
@@ -184,6 +237,7 @@ Requirements:
 - deal views surface relevant pre-RFP lead activity
 - company and property timelines roll up all related history across multiple leads and deals
 - rep activity reporting can distinguish lead-stage work from deal-stage work
+- lead conversion must not duplicate historical activities into the deal record; continuity is achieved through linked visibility, not copy-on-convert
 
 ### Call logging
 
@@ -215,9 +269,19 @@ The system should attempt assignment in this order:
 
 1. explicit project/deal number in subject, body, or normalized extracted metadata
 2. prior thread assignment
-3. exactly one active linked lead or deal for the participants
-4. exactly one active property-linked opportunity match
-5. fallback to company-only association
+3. exactly one active matched deal for the participants
+4. exactly one active matched lead for the participants, but only if no active deal match exists
+5. exactly one active lead or deal under a uniquely matched property for the participants
+6. fallback to company-only association
+
+Tie-breaking rules:
+
+- active deal matches outrank active lead matches because deal is the post-RFP canonical record
+- if more than one active deal matches, treat the message as ambiguous
+- if no deal matches and more than one active lead matches, treat the message as ambiguous
+- the property-linked tier only applies when the email can be linked to exactly one property and that property has exactly one active lead-or-deal candidate
+- if more than one active lead-or-deal candidate exists under that property, treat the message as ambiguous
+- ambiguity must not be resolved by “most recent” heuristics in Phase 1 unless the prior thread is already assigned
 
 ### Ambiguity handling
 
@@ -277,9 +341,23 @@ The system should not fabricate history or silently attach data to the wrong dea
 ### Required protections
 
 - migration confidence flags
-- exception buckets for ambiguous historical emails and activities
+- exception buckets for ambiguous historical companies, properties, contacts, leads, deals, emails, and activities
 - review workflow for unresolved imports
 - reporting distinction between migrated historical data and new in-CRM activity when needed
+
+Required migration exception buckets:
+
+- unknown company match
+- ambiguous property match
+- ambiguous contact match
+- lead-versus-deal association conflict
+- ambiguous deal association
+- ambiguous email/activity attribution
+- missing owner assignment
+
+Promotion rule:
+
+- records in exception buckets may be imported into staging and surfaced for review, but they must not be silently promoted into canonical linked CRM records until resolved or explicitly accepted with a documented fallback association
 
 ## Recommended Implementation Shape
 
