@@ -62,7 +62,7 @@ export async function runActivityDropDetection(): Promise<void> {
             FROM weeks w
             LEFT JOIN ${schemaName}.activities a
               ON date_trunc('week', a.occurred_at) = w.week_start
-              AND a.user_id = $1
+              AND a.responsible_user_id = $1
               AND a.type IN ('call', 'meeting', 'email')
             GROUP BY w.week_start
           )
@@ -86,7 +86,7 @@ export async function runActivityDropDetection(): Promise<void> {
         const recentResult = await client.query(
           `SELECT COUNT(*)::int AS recent_count
            FROM ${schemaName}.activities
-           WHERE user_id = $1
+           WHERE responsible_user_id = $1
              AND type IN ('call', 'meeting', 'email')
              AND occurred_at >= NOW() - INTERVAL '7 days'`,
           [rep.id]

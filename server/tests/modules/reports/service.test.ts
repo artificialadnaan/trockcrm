@@ -45,6 +45,27 @@ function createMockTenantDb(rows: any[] = []) {
   } as any;
 }
 
+function extractSqlText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (!value || typeof value !== "object") return "";
+
+  if (Array.isArray((value as { queryChunks?: unknown[] }).queryChunks)) {
+    return (value as { queryChunks: unknown[] }).queryChunks.map(extractSqlText).join("");
+  }
+
+  if ("value" in (value as Record<string, unknown>)) {
+    const chunkValue = (value as { value: unknown }).value;
+    if (Array.isArray(chunkValue)) return chunkValue.map(extractSqlText).join("");
+    if (typeof chunkValue === "string") return chunkValue;
+  }
+
+  if ("name" in (value as Record<string, unknown>) && typeof (value as { name?: unknown }).name === "string") {
+    return (value as { name: string }).name;
+  }
+
+  return "";
+}
+
 describe("Reports Service", () => {
   describe("getPipelineSummary", () => {
     it("should return empty array when no stages exist", async () => {
@@ -106,6 +127,18 @@ describe("Reports Service", () => {
       expect(result[0].emails).toBe(20);
       expect(result[0].total).toBe(45);
     });
+
+    it("queries by responsible activity owner after the attribution migration", async () => {
+      const { getActivitySummaryByRep } = await import("../../../src/modules/reports/service.js");
+      const tenantDb = createMockTenantDb([]);
+
+      await getActivitySummaryByRep(tenantDb);
+
+      const queryText = extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase();
+      expect(queryText).toContain("a.responsible_user_id as rep_id");
+      expect(queryText).toContain("join users u on u.id = a.responsible_user_id");
+      expect(queryText).not.toContain("a.user_id");
+    });
   });
 
   describe("getFollowUpCompliance", () => {
@@ -158,6 +191,48 @@ describe("Reports Service", () => {
       const year = new Date().getFullYear();
       // This is implicitly tested via all service functions that call defaultDateRange
       expect(year).toBeGreaterThan(2025);
+    });
+  });
+
+  describe("executeCustomReport", () => {
+    it("maps legacy activities.user_id configs to responsible_user_id", async () => {
+      const { executeCustomReport } = await import("../../../src/modules/reports/service.js");
+      const tenantDb = {
+        execute: vi.fn()
+          .mockResolvedValueOnce({ rows: [{ total: "1" }] })
+          .mockResolvedValueOnce({ rows: [{ responsible_user_id: "rep-1", type: "email" }] }),
+      } as any;
+
+      await executeCustomReport(tenantDb, {
+        entity: "activities",
+        columns: ["user_id", "type"],
+        filters: [{ field: "user_id", op: "eq", value: "rep-1" }],
+        sort: { field: "user_id", dir: "asc" },
+      });
+
+      const countQueryText = extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase();
+      const dataQueryText = extractSqlText(tenantDb.execute.mock.calls[1][0]).toLowerCase();
+
+      expect(countQueryText).toContain("responsible_user_id");
+      expect(dataQueryText).toContain("responsible_user_id");
+      expect(dataQueryText).not.toContain(" user_id ");
+    });
+  });
+
+  describe("getRepPerformanceComparison", () => {
+    it("uses responsible activity ownership in comparison activity rollups", async () => {
+      const { getRepPerformanceComparison } = await import("../../../src/modules/reports/service.js");
+      const tenantDb = {
+        execute: vi.fn()
+          .mockResolvedValueOnce({ rows: [] })
+          .mockResolvedValueOnce({ rows: [] }),
+      } as any;
+
+      await getRepPerformanceComparison(tenantDb, "month");
+
+      const activityQueryText = extractSqlText(tenantDb.execute.mock.calls[1][0]).toLowerCase();
+      expect(activityQueryText).toContain("a.responsible_user_id as rep_id");
+      expect(activityQueryText).not.toContain("a.user_id");
     });
   });
 

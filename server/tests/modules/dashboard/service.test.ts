@@ -1,13 +1,24 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
+function createChainableMock(resolveValue: any[] = []) {
+  const chain: any = {
+    select: vi.fn(),
+    from: vi.fn(),
+    where: vi.fn(),
+    orderBy: vi.fn(),
+    limit: vi.fn(),
+    then: vi.fn((resolve: any) => resolve(resolveValue)),
+  };
+  chain.select.mockReturnValue(chain);
+  chain.from.mockReturnValue(chain);
+  chain.where.mockReturnValue(chain);
+  chain.orderBy.mockReturnValue(chain);
+  chain.limit.mockReturnValue(chain);
+  return chain;
+}
+
 vi.mock("../../../src/db.js", () => ({
-  db: {
-    select: vi.fn().mockReturnThis(),
-    from: vi.fn().mockReturnThis(),
-    where: vi.fn().mockReturnThis(),
-    orderBy: vi.fn().mockReturnThis(),
-    limit: vi.fn().mockReturnValue([]),
-  },
+  db: createChainableMock([]),
 }));
 
 function createMockTenantDb(responses: any[][] = []) {
@@ -24,6 +35,27 @@ function createMockTenantDb(responses: any[][] = []) {
     orderBy: vi.fn().mockReturnThis(),
     limit: vi.fn().mockReturnValue([]),
   } as any;
+}
+
+function extractSqlText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (!value || typeof value !== "object") return "";
+
+  if (Array.isArray((value as { queryChunks?: unknown[] }).queryChunks)) {
+    return (value as { queryChunks: unknown[] }).queryChunks.map(extractSqlText).join("");
+  }
+
+  if ("value" in (value as Record<string, unknown>)) {
+    const chunkValue = (value as { value: unknown }).value;
+    if (Array.isArray(chunkValue)) return chunkValue.map(extractSqlText).join("");
+    if (typeof chunkValue === "string") return chunkValue;
+  }
+
+  if ("name" in (value as Record<string, unknown>) && typeof (value as { name?: unknown }).name === "string") {
+    return (value as { name: string }).name;
+  }
+
+  return "";
 }
 
 describe("Dashboard Service", () => {
@@ -71,6 +103,23 @@ describe("Dashboard Service", () => {
       expect(result.followUpCompliance.complianceRate).toBe(100);
       expect(result.pipelineByStage).toHaveLength(0);
     });
+
+    it("uses responsible activity ownership in the weekly activity query", async () => {
+      const { getRepDashboard } = await import("../../../src/modules/dashboard/service.js");
+      const tenantDb = createMockTenantDb([
+        [{ count: "0", total_value: "0" }],
+        [{ overdue: "0", today: "0" }],
+        [{ calls: "0", emails: "0", meetings: "0", notes: "0", total: "0" }],
+        [{ total: "0", on_time: "0" }],
+        [],
+      ]);
+
+      await getRepDashboard(tenantDb, "user-1");
+
+      const activityQueryText = extractSqlText(tenantDb.execute.mock.calls[2][0]).toLowerCase();
+      expect(activityQueryText).toContain("responsible_user_id");
+      expect(activityQueryText).not.toContain("where user_id =");
+    });
   });
 
   describe("getDirectorDashboard", () => {
@@ -79,6 +128,25 @@ describe("Dashboard Service", () => {
       // Full integration testing requires a database with seeded data.
       const { getDirectorDashboard } = await import("../../../src/modules/dashboard/service.js");
       expect(typeof getDirectorDashboard).toBe("function");
+    });
+
+    it("uses responsible activity ownership in director rep-card aggregations", async () => {
+      const { getDirectorDashboard } = await import("../../../src/modules/dashboard/service.js");
+      const tenantDb = createMockTenantDb([
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [{ dd_value: "0", dd_count: "0", pipeline_value: "0", pipeline_count: "0" }],
+      ]);
+
+      await getDirectorDashboard(tenantDb, { from: "2026-01-01", to: "2026-12-31" });
+
+      const repCardsQueryText = extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase();
+      expect(repCardsQueryText).toContain("a.responsible_user_id as rep_id");
+      expect(repCardsQueryText).not.toContain("a.user_id");
     });
   });
 

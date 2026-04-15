@@ -159,7 +159,7 @@ export async function getRepDashboard(
         COUNT(*) FILTER (WHERE type = 'note')::int AS notes,
         COUNT(*)::int AS total
       FROM activities
-      WHERE user_id = ${userId}
+      WHERE responsible_user_id = ${userId}
         AND occurred_at >= ${weekAgoStr}::timestamptz
     `),
 
@@ -397,12 +397,12 @@ async function buildRepPerformanceCards(
     ),
     rep_activities AS (
       SELECT
-        a.user_id AS rep_id,
+        a.responsible_user_id AS rep_id,
         COUNT(*)::int AS total
       FROM activities a
       WHERE a.occurred_at >= ${from}::timestamptz
         AND a.occurred_at <= (${to}::date + INTERVAL '1 day')::timestamptz
-      GROUP BY a.user_id
+      GROUP BY a.responsible_user_id
     ),
     rep_stale AS (
       SELECT

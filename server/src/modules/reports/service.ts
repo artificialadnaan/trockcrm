@@ -15,6 +15,16 @@ import { db } from "../../db.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
+const LEGACY_REPORT_FIELD_ALIASES: Record<string, Record<string, string>> = {
+  activities: {
+    user_id: "responsible_user_id",
+  },
+};
+
+function normalizeReportField(entity: ReportConfig["entity"], field: string): string {
+  return LEGACY_REPORT_FIELD_ALIASES[entity]?.[field] ?? field;
+}
+
 /** Default to Jan 1 of current year through today */
 function defaultDateRange(from?: string, to?: string): { from: string; to: string } {
   const year = new Date().getFullYear();
@@ -304,7 +314,7 @@ export async function getActivitySummaryByRep(
 
   const result = await tenantDb.execute(sql`
     SELECT
-      a.user_id AS rep_id,
+      a.responsible_user_id AS rep_id,
       u.display_name AS rep_name,
       COUNT(*) FILTER (WHERE a.type = 'call')::int AS calls,
       COUNT(*) FILTER (WHERE a.type = 'email')::int AS emails,
@@ -313,10 +323,10 @@ export async function getActivitySummaryByRep(
       COUNT(*) FILTER (WHERE a.type = 'task_completed')::int AS tasks_completed,
       COUNT(*)::int AS total
     FROM activities a
-    JOIN users u ON u.id = a.user_id
+    JOIN users u ON u.id = a.responsible_user_id
     WHERE a.occurred_at >= ${from}::timestamptz
       AND a.occurred_at <= (${to}::date + INTERVAL '1 day')::timestamptz
-    GROUP BY a.user_id, u.display_name
+    GROUP BY a.responsible_user_id, u.display_name
     ORDER BY total DESC
   `);
 
@@ -898,7 +908,7 @@ const ALLOWED_COLUMNS: Record<string, string[]> = {
     "is_active", "created_at", "updated_at",
   ],
   activities: [
-    "id", "type", "user_id", "deal_id", "contact_id",
+    "id", "type", "responsible_user_id", "deal_id", "contact_id",
     "subject", "outcome", "duration_minutes", "occurred_at", "created_at",
   ],
   tasks: [
@@ -923,8 +933,11 @@ export async function executeCustomReport(
   if (!allowed) throw new Error(`Invalid entity: ${entityTable}`);
 
   // Validate columns
-  const selectCols = config.columns.length > 0
-    ? config.columns.filter((c) => allowed.includes(c))
+  const normalizedColumns = config.columns.map((column) =>
+    normalizeReportField(config.entity, column)
+  );
+  const selectCols = normalizedColumns.length > 0
+    ? normalizedColumns.filter((c) => allowed.includes(c))
     : allowed.slice(0, 10); // default to first 10 columns
 
   if (selectCols.length === 0) throw new Error("No valid columns selected");
@@ -932,9 +945,10 @@ export async function executeCustomReport(
   // Build WHERE clause from filters using parameter binding for all values.
   const whereClauses: ReturnType<typeof sql>[] = [];
   for (const filter of config.filters) {
-    if (!allowed.includes(filter.field)) continue; // skip unknown fields
+    const normalizedField = normalizeReportField(config.entity, filter.field);
+    if (!allowed.includes(normalizedField)) continue; // skip unknown fields
 
-    const col = sql.identifier(filter.field);
+    const col = sql.identifier(normalizedField);
     switch (filter.op) {
       case "eq":
         if (filter.value !== undefined) {
@@ -993,9 +1007,12 @@ export async function executeCustomReport(
 
   // Sort
   let orderClause = sql``;
-  if (config.sort && allowed.includes(config.sort.field)) {
+  const normalizedSortField = config.sort
+    ? normalizeReportField(config.entity, config.sort.field)
+    : null;
+  if (config.sort && normalizedSortField && allowed.includes(normalizedSortField)) {
     const dir = config.sort.dir === "asc" ? sql`ASC` : sql`DESC`;
-    orderClause = sql`ORDER BY ${sql.identifier(config.sort.field)} ${dir}`;
+    orderClause = sql`ORDER BY ${sql.identifier(normalizedSortField)} ${dir}`;
   }
 
   const offset = (pagination.page - 1) * pagination.limit;
@@ -1206,7 +1223,7 @@ export async function getRepPerformanceComparison(
   // Query activities for both periods
   const activityResult = await tenantDb.execute(sql`
     SELECT
-      a.user_id AS rep_id,
+      a.responsible_user_id AS rep_id,
       COUNT(*) FILTER (
         WHERE a.occurred_at >= ${current.from}::timestamptz
           AND a.occurred_at <= (${current.to}::date + INTERVAL '1 day')::timestamptz
@@ -1218,7 +1235,7 @@ export async function getRepPerformanceComparison(
     FROM activities a
     WHERE a.occurred_at >= ${previous.from}::timestamptz
       AND a.occurred_at <= (${current.to}::date + INTERVAL '1 day')::timestamptz
-    GROUP BY a.user_id
+    GROUP BY a.responsible_user_id
   `);
 
   const dealRows = (dealResult as any).rows ?? dealResult;
