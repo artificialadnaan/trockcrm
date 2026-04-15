@@ -28,6 +28,7 @@ import { DealStageBadge } from "@/components/deals/deal-stage-badge";
 import { useCompanyDetail, useCompanyContacts, useCompanyDeals } from "@/hooks/use-companies";
 import { formatPhone } from "@/lib/contact-utils";
 import { ContactForm } from "@/components/contacts/contact-form";
+import { CompanyCopilotPanel } from "@/components/ai/company-copilot-panel";
 import { api } from "@/lib/api";
 
 // --- Constants ---
@@ -369,6 +370,10 @@ export function CompanyDetailPage() {
 
         {/* Right column: Tabbed content */}
         <div className="lg:col-span-8">
+          <div className="mb-4">
+            <CompanyCopilotPanel companyId={company.id} />
+          </div>
+
           {/* Tab bar */}
           <div className="border-b border-zinc-200 mb-4">
             <div className="flex gap-1">

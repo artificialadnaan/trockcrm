@@ -3,6 +3,7 @@ import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const serviceMocks = vi.hoisted(() => ({
+  getCompanyCopilotView: vi.fn(),
   getDealCopilotView: vi.fn(),
   dismissTaskSuggestion: vi.fn(),
   recordAiFeedback: vi.fn(),
@@ -19,7 +20,12 @@ const dealsServiceMocks = vi.hoisted(() => ({
   getDealById: vi.fn(),
 }));
 
+const companiesServiceMocks = vi.hoisted(() => ({
+  getCompanyById: vi.fn(),
+}));
+
 vi.mock("../../../src/modules/ai-copilot/service.js", () => ({
+  getCompanyCopilotView: serviceMocks.getCompanyCopilotView,
   getDealCopilotView: serviceMocks.getDealCopilotView,
   dismissTaskSuggestion: serviceMocks.dismissTaskSuggestion,
   recordAiFeedback: serviceMocks.recordAiFeedback,
@@ -34,6 +40,10 @@ vi.mock("../../../src/modules/ai-copilot/task-suggestion-service.js", () => ({
 
 vi.mock("../../../src/modules/deals/service.js", () => ({
   getDealById: dealsServiceMocks.getDealById,
+}));
+
+vi.mock("../../../src/modules/companies/service.js", () => ({
+  getCompanyById: companiesServiceMocks.getCompanyById,
 }));
 
 const { aiCopilotRoutes } = await import("../../../src/modules/ai-copilot/routes.js");
@@ -71,6 +81,10 @@ describe("ai copilot routes", () => {
       id: "deal-1",
       assignedRepId: "rep-1",
     });
+    companiesServiceMocks.getCompanyById.mockResolvedValue({
+      id: "company-1",
+      name: "Acme Property Group",
+    });
   });
 
   it("returns the deal copilot packet view", async () => {
@@ -86,6 +100,26 @@ describe("ai copilot routes", () => {
     expect(res.status).toBe(200);
     expect(serviceMocks.getDealCopilotView).toHaveBeenCalledWith(expect.anything(), "deal-1");
     expect(res.body.packet.summary).toBe("Deal needs follow-up.");
+  });
+
+  it("returns the company copilot aggregate view", async () => {
+    serviceMocks.getCompanyCopilotView.mockResolvedValue({
+      company: { id: "company-1", name: "Acme Property Group", contactCount: 3, dealCount: 2 },
+      summaryText: "Acme Property Group has 2 active deals.",
+      relatedDeals: [],
+      suggestedTasks: [],
+      blindSpotFlags: [],
+    });
+
+    const app = createApp("rep");
+    const res = await request(app).get("/api/ai/companies/company-1/copilot");
+
+    expect(res.status).toBe(200);
+    expect(serviceMocks.getCompanyCopilotView).toHaveBeenCalledWith(expect.anything(), {
+      id: "company-1",
+      name: "Acme Property Group",
+    });
+    expect(res.body.company.name).toBe("Acme Property Group");
   });
 
   it("queues a background deal copilot regeneration", async () => {

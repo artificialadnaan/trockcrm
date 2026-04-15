@@ -3,7 +3,9 @@ import { jobQueue } from "@trock-crm/shared/schema";
 import { requireRole } from "../../middleware/rbac.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { getDealById } from "../deals/service.js";
+import { getCompanyById } from "../companies/service.js";
 import {
+  getCompanyCopilotView,
   dismissTaskSuggestion,
   getDealCopilotView,
   getDirectorBlindSpots,
@@ -22,10 +24,27 @@ async function assertDealAccess(req: any, dealId: string) {
   return deal;
 }
 
+async function assertCompanyAccess(req: any, companyId: string) {
+  const company = await getCompanyById(req.tenantDb!, companyId);
+  if (!company) throw new AppError(404, "Company not found");
+  return company;
+}
+
 router.get("/deals/:id/copilot", async (req, res, next) => {
   try {
     await assertDealAccess(req, req.params.id);
     const view = await getDealCopilotView(req.tenantDb!, req.params.id);
+    await req.commitTransaction!();
+    res.json(view);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/companies/:id/copilot", async (req, res, next) => {
+  try {
+    const company = await assertCompanyAccess(req, req.params.id);
+    const view = await getCompanyCopilotView(req.tenantDb!, company);
     await req.commitTransaction!();
     res.json(view);
   } catch (err) {

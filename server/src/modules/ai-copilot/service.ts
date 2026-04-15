@@ -8,6 +8,7 @@ import {
   aiFeedback,
   aiRiskFlags,
   aiTaskSuggestions,
+  contacts,
   deals,
 } from "@trock-crm/shared/schema";
 import { getDealCopilotContext } from "./context-service.js";
@@ -112,6 +113,27 @@ export interface AiReviewPacketDetail {
   suggestedTasks: Array<typeof aiTaskSuggestions.$inferSelect>;
   blindSpotFlags: Array<typeof aiRiskFlags.$inferSelect>;
   feedback: Array<typeof aiFeedback.$inferSelect>;
+}
+
+export interface CompanyCopilotView {
+  company: {
+    id: string;
+    name: string;
+    contactCount: number;
+    dealCount: number;
+  };
+  summaryText: string;
+  relatedDeals: Array<{
+    id: string;
+    dealNumber: string;
+    name: string;
+    lastActivityAt: Date | null;
+    updatedAt: Date;
+    latestPacketSummary: string | null;
+    latestPacketConfidence: number | null;
+  }>;
+  suggestedTasks: Array<typeof aiTaskSuggestions.$inferSelect>;
+  blindSpotFlags: Array<typeof aiRiskFlags.$inferSelect>;
 }
 
 interface GenerateDealCopilotPacketDeps {
@@ -270,6 +292,113 @@ export async function getDealCopilotView(tenantDb: TenantDb, dealId: string) {
 
   return {
     packet: packet ?? null,
+    suggestedTasks,
+    blindSpotFlags,
+  };
+}
+
+export async function getCompanyCopilotView(
+  tenantDb: TenantDb,
+  company: { id: string; name: string }
+): Promise<CompanyCopilotView> {
+  const [contactCountResult, companyDeals] = await Promise.all([
+    tenantDb
+      .select({ count: sql<number>`count(*)::int` })
+      .from(contacts)
+      .where(and(eq(contacts.companyId, company.id), eq(contacts.isActive, true))),
+    tenantDb
+      .select({
+        id: deals.id,
+        dealNumber: deals.dealNumber,
+        name: deals.name,
+        lastActivityAt: deals.lastActivityAt,
+        updatedAt: deals.updatedAt,
+      })
+      .from(deals)
+      .where(and(eq(deals.companyId, company.id), eq(deals.isActive, true)))
+      .orderBy(desc(deals.updatedAt))
+      .limit(10),
+  ]);
+
+  const dealIds = companyDeals.map((deal) => deal.id);
+  const latestPacketRows = dealIds.length
+    ? getRows(await tenantDb.execute(sql`
+        SELECT DISTINCT ON (deal_id)
+          id,
+          deal_id,
+          summary_text,
+          confidence,
+          generated_at,
+          created_at
+        FROM ai_copilot_packets
+        WHERE scope_type = 'deal'
+          AND deal_id IN (${sql.join(dealIds.map((id) => sql`${id}`), sql`, `)})
+        ORDER BY deal_id, created_at DESC
+      `))
+    : [];
+  const latestPacketByDealId = new Map<string, { summaryText: string | null; confidence: number | null }>();
+  for (const row of latestPacketRows) {
+    latestPacketByDealId.set(String(row.deal_id), {
+      summaryText: (row.summary_text as string | null) ?? null,
+      confidence: row.confidence == null ? null : Number(row.confidence),
+    });
+  }
+
+  const [suggestedTasks, blindSpotFlags] = await Promise.all([
+    dealIds.length
+      ? tenantDb
+          .select()
+          .from(aiTaskSuggestions)
+          .where(
+            and(
+              eq(aiTaskSuggestions.scopeType, "deal"),
+              sql`${aiTaskSuggestions.scopeId} IN (${sql.join(dealIds.map((id) => sql`${id}`), sql`, `)})`,
+              eq(aiTaskSuggestions.status, "suggested")
+            )
+          )
+          .orderBy(desc(aiTaskSuggestions.createdAt))
+          .limit(8)
+      : Promise.resolve([]),
+    dealIds.length
+      ? tenantDb
+          .select()
+          .from(aiRiskFlags)
+          .where(
+            and(
+              sql`${aiRiskFlags.dealId} IN (${sql.join(dealIds.map((id) => sql`${id}`), sql`, `)})`,
+              eq(aiRiskFlags.status, "open")
+            )
+          )
+          .orderBy(desc(aiRiskFlags.createdAt))
+          .limit(8)
+      : Promise.resolve([]),
+  ]);
+
+  const relatedDeals = companyDeals.map((deal) => ({
+    ...deal,
+    latestPacketSummary: latestPacketByDealId.get(deal.id)?.summaryText ?? null,
+    latestPacketConfidence: latestPacketByDealId.get(deal.id)?.confidence ?? null,
+  }));
+
+  const summaryParts = [
+    `${company.name} has ${companyDeals.length} active deal${companyDeals.length === 1 ? "" : "s"} and ${Number(contactCountResult[0]?.count ?? 0)} active contact${Number(contactCountResult[0]?.count ?? 0) === 1 ? "" : "s"}.`,
+    suggestedTasks.length > 0
+      ? `${suggestedTasks.length} unresolved AI task suggestion${suggestedTasks.length === 1 ? "" : "s"} are open across the account.`
+      : "No unresolved AI task suggestions are open across the account.",
+    blindSpotFlags.length > 0
+      ? `Top blind spots: ${blindSpotFlags.slice(0, 2).map((flag) => flag.title).join("; ")}.`
+      : "No open blind spots are currently attached to this account's active deals.",
+  ];
+
+  return {
+    company: {
+      id: company.id,
+      name: company.name,
+      contactCount: Number(contactCountResult[0]?.count ?? 0),
+      dealCount: companyDeals.length,
+    },
+    summaryText: summaryParts.join(" "),
+    relatedDeals,
     suggestedTasks,
     blindSpotFlags,
   };

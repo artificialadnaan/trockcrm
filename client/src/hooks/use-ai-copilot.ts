@@ -73,6 +73,29 @@ export interface DirectorBlindSpot {
   dealNumber: string | null;
 }
 
+export interface CompanyCopilotDeal {
+  id: string;
+  dealNumber: string;
+  name: string;
+  lastActivityAt: string | null;
+  updatedAt: string;
+  latestPacketSummary: string | null;
+  latestPacketConfidence: number | null;
+}
+
+export interface CompanyCopilotView {
+  company: {
+    id: string;
+    name: string;
+    contactCount: number;
+    dealCount: number;
+  };
+  summaryText: string;
+  relatedDeals: CompanyCopilotDeal[];
+  suggestedTasks: AiTaskSuggestion[];
+  blindSpotFlags: AiRiskFlag[];
+}
+
 interface FeedbackInput {
   targetType: string;
   targetId: string;
@@ -244,5 +267,41 @@ export function useDirectorBlindSpots() {
     loading,
     error,
     refetch: fetchBlindSpots,
+  };
+}
+
+export function useCompanyCopilot(companyId: string | undefined) {
+  const [data, setData] = useState<CompanyCopilotView | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchCopilot = useCallback(async () => {
+    if (!companyId) {
+      setData(null);
+      setLoading(false);
+      return;
+    }
+
+    setLoading(true);
+    setError(null);
+    try {
+      const view = await api<CompanyCopilotView>(`/ai/companies/${companyId}/copilot`);
+      setData(view);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to load company copilot");
+    } finally {
+      setLoading(false);
+    }
+  }, [companyId]);
+
+  useEffect(() => {
+    void fetchCopilot();
+  }, [fetchCopilot]);
+
+  return {
+    data,
+    loading,
+    error,
+    refetch: fetchCopilot,
   };
 }
