@@ -5,10 +5,18 @@ import {
   stagedDeals,
   stagedContacts,
   stagedActivities,
+  stagedCompanies,
+  stagedProperties,
+  stagedLeads,
   importRuns,
 } from "@trock-crm/shared/schema";
 import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
+import {
+  assertNoUnresolvedMigrationBucket,
+  getMigrationExceptionGroups,
+} from "./exception-service.js";
+import { getValidationStats } from "./validator.js";
 
 // ---------------------------------------------------------------------------
 // Import runs
@@ -101,6 +109,9 @@ export async function approveStagedDeal(dealId: string, reviewedBy: string) {
   if (row.validationStatus === "promoted") {
     throw new AppError(400, "Deal already promoted");
   }
+  if (["invalid", "duplicate", "orphan"].includes(row.validationStatus)) {
+    throw new AppError(400, "Deal still has unresolved validation issues");
+  }
 
   await db
     .update(stagedDeals)
@@ -132,8 +143,200 @@ export async function batchApproveStagedDeals(
         inArray(stagedDeals.id, dealIds),
         inArray(stagedDeals.validationStatus, ["valid", "needs_review"] as any[])
       )
-    );
+  );
   return (result as any).rowCount ?? 0;
+}
+
+// ---------------------------------------------------------------------------
+// Staged companies — list and update
+// ---------------------------------------------------------------------------
+
+export async function listStagedCompanies(filter: StagedDealFilter = {}) {
+  const limit = Math.min(filter.limit ?? 50, 200);
+  const offset = ((filter.page ?? 1) - 1) * limit;
+
+  const where = filter.validationStatus
+    ? eq(stagedCompanies.validationStatus, filter.validationStatus as any)
+    : undefined;
+
+  const [rows, countResult] = await Promise.all([
+    db
+      .select()
+      .from(stagedCompanies)
+      .where(where)
+      .orderBy(desc(stagedCompanies.createdAt))
+      .limit(limit)
+      .offset(offset),
+    db
+      .select({ count: sql<number>`COUNT(*)::int` })
+      .from(stagedCompanies)
+      .where(where),
+  ]);
+
+  return { rows, total: countResult[0]?.count ?? 0 };
+}
+
+export async function approveStagedCompany(companyId: string, reviewedBy: string) {
+  const [row] = await db
+    .select({ validationStatus: stagedCompanies.validationStatus, exceptionBucket: stagedCompanies.exceptionBucket })
+    .from(stagedCompanies)
+    .where(eq(stagedCompanies.id, companyId))
+    .limit(1);
+
+  if (!row) throw new AppError(404, "Staged company not found");
+  assertNoUnresolvedMigrationBucket({
+    entityType: "company",
+    validationStatus: row.validationStatus,
+    exceptionBucket: row.exceptionBucket as any,
+  });
+
+  await db
+    .update(stagedCompanies)
+    .set({ validationStatus: "approved", reviewedBy })
+    .where(eq(stagedCompanies.id, companyId));
+}
+
+export async function rejectStagedCompany(
+  companyId: string,
+  reviewedBy: string,
+  reviewNotes?: string
+) {
+  await db
+    .update(stagedCompanies)
+    .set({
+      validationStatus: "rejected",
+      reviewedBy,
+      reviewNotes: reviewNotes ?? null,
+    })
+    .where(eq(stagedCompanies.id, companyId));
+}
+
+// ---------------------------------------------------------------------------
+// Staged properties — list and update
+// ---------------------------------------------------------------------------
+
+export async function listStagedProperties(filter: StagedDealFilter = {}) {
+  const limit = Math.min(filter.limit ?? 50, 200);
+  const offset = ((filter.page ?? 1) - 1) * limit;
+
+  const where = filter.validationStatus
+    ? eq(stagedProperties.validationStatus, filter.validationStatus as any)
+    : undefined;
+
+  const [rows, countResult] = await Promise.all([
+    db
+      .select()
+      .from(stagedProperties)
+      .where(where)
+      .orderBy(desc(stagedProperties.createdAt))
+      .limit(limit)
+      .offset(offset),
+    db
+      .select({ count: sql<number>`COUNT(*)::int` })
+      .from(stagedProperties)
+      .where(where),
+  ]);
+
+  return { rows, total: countResult[0]?.count ?? 0 };
+}
+
+export async function approveStagedProperty(propertyId: string, reviewedBy: string) {
+  const [row] = await db
+    .select({ validationStatus: stagedProperties.validationStatus, exceptionBucket: stagedProperties.exceptionBucket })
+    .from(stagedProperties)
+    .where(eq(stagedProperties.id, propertyId))
+    .limit(1);
+
+  if (!row) throw new AppError(404, "Staged property not found");
+  assertNoUnresolvedMigrationBucket({
+    entityType: "property",
+    validationStatus: row.validationStatus,
+    exceptionBucket: row.exceptionBucket as any,
+  });
+
+  await db
+    .update(stagedProperties)
+    .set({ validationStatus: "approved", reviewedBy })
+    .where(eq(stagedProperties.id, propertyId));
+}
+
+export async function rejectStagedProperty(
+  propertyId: string,
+  reviewedBy: string,
+  reviewNotes?: string
+) {
+  await db
+    .update(stagedProperties)
+    .set({
+      validationStatus: "rejected",
+      reviewedBy,
+      reviewNotes: reviewNotes ?? null,
+    })
+    .where(eq(stagedProperties.id, propertyId));
+}
+
+// ---------------------------------------------------------------------------
+// Staged leads — list and update
+// ---------------------------------------------------------------------------
+
+export async function listStagedLeads(filter: StagedDealFilter = {}) {
+  const limit = Math.min(filter.limit ?? 50, 200);
+  const offset = ((filter.page ?? 1) - 1) * limit;
+
+  const where = filter.validationStatus
+    ? eq(stagedLeads.validationStatus, filter.validationStatus as any)
+    : undefined;
+
+  const [rows, countResult] = await Promise.all([
+    db
+      .select()
+      .from(stagedLeads)
+      .where(where)
+      .orderBy(desc(stagedLeads.createdAt))
+      .limit(limit)
+      .offset(offset),
+    db
+      .select({ count: sql<number>`COUNT(*)::int` })
+      .from(stagedLeads)
+      .where(where),
+  ]);
+
+  return { rows, total: countResult[0]?.count ?? 0 };
+}
+
+export async function approveStagedLead(leadId: string, reviewedBy: string) {
+  const [row] = await db
+    .select({ validationStatus: stagedLeads.validationStatus, exceptionBucket: stagedLeads.exceptionBucket })
+    .from(stagedLeads)
+    .where(eq(stagedLeads.id, leadId))
+    .limit(1);
+
+  if (!row) throw new AppError(404, "Staged lead not found");
+  assertNoUnresolvedMigrationBucket({
+    entityType: "lead",
+    validationStatus: row.validationStatus,
+    exceptionBucket: row.exceptionBucket as any,
+  });
+
+  await db
+    .update(stagedLeads)
+    .set({ validationStatus: "approved", reviewedBy })
+    .where(eq(stagedLeads.id, leadId));
+}
+
+export async function rejectStagedLead(
+  leadId: string,
+  reviewedBy: string,
+  reviewNotes?: string
+) {
+  await db
+    .update(stagedLeads)
+    .set({
+      validationStatus: "rejected",
+      reviewedBy,
+      reviewNotes: reviewNotes ?? null,
+    })
+    .where(eq(stagedLeads.id, leadId));
 }
 
 // ---------------------------------------------------------------------------
@@ -168,6 +371,17 @@ export async function listStagedContacts(
 }
 
 export async function approveStagedContact(contactId: string, reviewedBy: string) {
+  const [row] = await db
+    .select({ validationStatus: stagedContacts.validationStatus })
+    .from(stagedContacts)
+    .where(eq(stagedContacts.id, contactId))
+    .limit(1);
+
+  if (!row) throw new AppError(404, "Staged contact not found");
+  if (["invalid", "duplicate", "orphan"].includes(row.validationStatus)) {
+    throw new AppError(400, "Contact still has unresolved validation issues");
+  }
+
   await db
     .update(stagedContacts)
     .set({ validationStatus: "approved", reviewedBy })
@@ -226,22 +440,8 @@ export async function batchApproveStagedContacts(
 // ---------------------------------------------------------------------------
 
 export async function getMigrationSummary() {
-  const [dealStats, contactStats, activityStats, recentRuns] = await Promise.all([
-    db.execute(sql`
-      SELECT validation_status, COUNT(*)::int AS count
-      FROM migration.staged_deals
-      GROUP BY validation_status
-    `),
-    db.execute(sql`
-      SELECT validation_status, COUNT(*)::int AS count
-      FROM migration.staged_contacts
-      GROUP BY validation_status
-    `),
-    db.execute(sql`
-      SELECT validation_status, COUNT(*)::int AS count
-      FROM migration.staged_activities
-      GROUP BY validation_status
-    `),
+  const [validationStats, recentRuns] = await Promise.all([
+    getValidationStats(),
     db
       .select()
       .from(importRuns)
@@ -249,17 +449,18 @@ export async function getMigrationSummary() {
       .limit(5),
   ]);
 
-  function toMap(rows: any): Record<string, number> {
-    const arr = (rows as any).rows ?? rows;
-    const m: Record<string, number> = {};
-    for (const r of arr) m[r.validation_status] = Number(r.count ?? 0);
-    return m;
-  }
-
   return {
-    deals: toMap(dealStats),
-    contacts: toMap(contactStats),
-    activities: toMap(activityStats),
+    deals: validationStats.deals,
+    contacts: validationStats.contacts,
+    activities: validationStats.activities,
+    companies: validationStats.companies,
+    properties: validationStats.properties,
+    leads: validationStats.leads,
     recentRuns,
   };
+}
+
+export async function getMigrationExceptions() {
+  const groups = await getMigrationExceptionGroups();
+  return { groups };
 }

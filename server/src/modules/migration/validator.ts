@@ -2,6 +2,9 @@
 
 import { eq, sql } from "drizzle-orm";
 import {
+  stagedCompanies,
+  stagedProperties,
+  stagedLeads,
   stagedDeals,
   stagedContacts,
   stagedActivities,
@@ -9,6 +12,15 @@ import {
   users,
 } from "@trock-crm/shared/schema";
 import { db } from "../../db.js";
+import {
+  classifyActivityException,
+  classifyCompanyException,
+  classifyContactException,
+  classifyLeadException,
+  classifyOwnerAssignmentException,
+  classifyPropertyException,
+  type MigrationExceptionBucket,
+} from "./exception-service.js";
 
 interface ValidationError {
   field: string;
@@ -20,6 +32,19 @@ interface ValidationWarning {
   warning: string;
 }
 
+type ValidationExceptionCounts = Record<MigrationExceptionBucket, number>;
+
+function createExceptionCounts(): ValidationExceptionCounts {
+  return {
+    unknown_company: 0,
+    ambiguous_property: 0,
+    ambiguous_contact: 0,
+    lead_vs_deal_conflict: 0,
+    ambiguous_email_activity_attribution: 0,
+    missing_owner_assignment: 0,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Validate all staged deals
 // ---------------------------------------------------------------------------
@@ -28,6 +53,7 @@ export async function validateStagedDeals(): Promise<{
   valid: number;
   invalid: number;
   needsReview: number;
+  exceptions: ValidationExceptionCounts;
 }> {
   const allStages = await db
     .select({ id: pipelineStageConfig.id, slug: pipelineStageConfig.slug })
@@ -44,6 +70,7 @@ export async function validateStagedDeals(): Promise<{
 
   const BATCH = 100;
   let valid = 0, invalid = 0, needsReview = 0;
+  const exceptions = createExceptionCounts();
 
   // Fetch pending rows WITHOUT offset — each batch updates rows out of
   // 'pending' status, so the next fetch naturally gets the next batch.
@@ -75,11 +102,13 @@ export async function validateStagedDeals(): Promise<{
 
       if (!deal.mappedRepEmail) {
         warnings.push({ field: "rep", warning: "No rep email — deal will be unassigned" });
+        exceptions.missing_owner_assignment++;
       } else if (!repEmails.has(deal.mappedRepEmail.toLowerCase())) {
         errors.push({
           field: "rep",
           error: `Rep email "${deal.mappedRepEmail}" does not match any active CRM user`,
         });
+        exceptions.missing_owner_assignment++;
       }
 
       if (deal.mappedAmount == null || Number(deal.mappedAmount) === 0) {
@@ -109,7 +138,7 @@ export async function validateStagedDeals(): Promise<{
     }
   }
 
-  return { valid, invalid, needsReview };
+  return { valid, invalid, needsReview, exceptions };
 }
 
 // ---------------------------------------------------------------------------
@@ -121,9 +150,11 @@ export async function validateStagedContacts(): Promise<{
   invalid: number;
   needsReview: number;
   duplicates: number;
+  exceptions: ValidationExceptionCounts;
 }> {
   const BATCH = 100;
   let valid = 0, invalid = 0, needsReview = 0, duplicates = 0;
+  const exceptions = createExceptionCounts();
 
   // Build in-memory email map for staged duplicate detection
   const allStaged = await db
@@ -203,12 +234,17 @@ export async function validateStagedContacts(): Promise<{
       let validationStatus: "valid" | "invalid" | "needs_review" | "duplicate";
       if (duplicateOfStagedId) {
         validationStatus = "duplicate";
+        exceptions.ambiguous_contact++;
       } else if (errors.length > 0) {
         validationStatus = "invalid";
         invalid++;
+        if (!contact.mappedEmail && !contact.mappedPhone) {
+          exceptions.ambiguous_contact++;
+        }
       } else if (warnings.length > 0) {
         validationStatus = "needs_review";
         needsReview++;
+        exceptions.ambiguous_contact++;
       } else {
         validationStatus = "valid";
         valid++;
@@ -226,7 +262,7 @@ export async function validateStagedContacts(): Promise<{
     }
   }
 
-  return { valid, invalid, needsReview, duplicates };
+  return { valid, invalid, needsReview, duplicates, exceptions };
 }
 
 // ---------------------------------------------------------------------------
@@ -237,6 +273,7 @@ export async function validateStagedActivities(): Promise<{
   valid: number;
   invalid: number;
   orphans: number;
+  exceptions: ValidationExceptionCounts;
 }> {
   const stagedDealIds = new Set(
     (await db.select({ id: stagedDeals.hubspotDealId }).from(stagedDeals)).map((r) => r.id)
@@ -247,6 +284,7 @@ export async function validateStagedActivities(): Promise<{
 
   const BATCH = 100;
   let valid = 0, invalid = 0, orphans = 0;
+  const exceptions = createExceptionCounts();
 
   while (true) {
     const batch = await db
@@ -273,6 +311,7 @@ export async function validateStagedActivities(): Promise<{
       if (!dealExists && !contactExists) {
         validationStatus = "orphan";
         orphans++;
+        exceptions.ambiguous_email_activity_attribution++;
       } else if (errors.length > 0) {
         validationStatus = "invalid";
         invalid++;
@@ -288,7 +327,234 @@ export async function validateStagedActivities(): Promise<{
     }
   }
 
-  return { valid, invalid, orphans };
+  return { valid, invalid, orphans, exceptions };
+}
+
+// ---------------------------------------------------------------------------
+// Validate staged companies / properties / leads
+// ---------------------------------------------------------------------------
+
+export async function validateStagedCompanies(): Promise<{
+  valid: number;
+  invalid: number;
+  needsReview: number;
+  exceptions: ValidationExceptionCounts;
+}> {
+  const BATCH = 100;
+  let valid = 0;
+  let invalid = 0;
+  let needsReview = 0;
+  const exceptions = createExceptionCounts();
+
+  while (true) {
+    const batch = await db
+      .select()
+      .from(stagedCompanies)
+      .where(eq(stagedCompanies.validationStatus, "pending"))
+      .limit(BATCH);
+
+    if (batch.length === 0) break;
+
+    for (const company of batch) {
+      const errors: ValidationError[] = [];
+      const warnings: ValidationWarning[] = [];
+
+      const classification = classifyCompanyException({
+        mappedName: company.mappedName,
+        mappedDomain: company.mappedDomain,
+      });
+
+      if (classification?.bucket === "unknown_company") {
+        warnings.push({ field: "company", warning: classification.reason });
+        company.exceptionBucket = classification.bucket;
+        company.exceptionReason = classification.reason;
+        exceptions.unknown_company++;
+      }
+
+      if (company.mappedOwnerEmail && company.mappedOwnerEmail.trim().length === 0) {
+        company.mappedOwnerEmail = null;
+      }
+
+      if (!company.mappedName && !company.mappedDomain) {
+        errors.push({ field: "company", error: "Company cannot be matched to a unique record" });
+      }
+
+      let validationStatus: "valid" | "invalid" | "needs_review";
+      if (errors.length > 0) {
+        validationStatus = "invalid";
+        invalid++;
+      } else if (warnings.length > 0) {
+        validationStatus = "needs_review";
+        needsReview++;
+      } else {
+        validationStatus = "valid";
+        valid++;
+      }
+
+      await db
+        .update(stagedCompanies)
+        .set({
+          validationStatus,
+          validationErrors: errors,
+          validationWarnings: warnings,
+          exceptionBucket: company.exceptionBucket ?? null,
+          exceptionReason: company.exceptionReason ?? null,
+        })
+        .where(eq(stagedCompanies.id, company.id));
+    }
+  }
+
+  return { valid, invalid, needsReview, exceptions };
+}
+
+export async function validateStagedProperties(): Promise<{
+  valid: number;
+  invalid: number;
+  needsReview: number;
+  exceptions: ValidationExceptionCounts;
+}> {
+  const BATCH = 100;
+  let valid = 0;
+  let invalid = 0;
+  let needsReview = 0;
+  const exceptions = createExceptionCounts();
+
+  while (true) {
+    const batch = await db
+      .select()
+      .from(stagedProperties)
+      .where(eq(stagedProperties.validationStatus, "pending"))
+      .limit(BATCH);
+
+    if (batch.length === 0) break;
+
+    for (const property of batch) {
+      const errors: ValidationError[] = [];
+      const warnings: ValidationWarning[] = [];
+      const classification = classifyPropertyException({
+        mappedName: property.mappedName,
+        mappedCompanyName: property.mappedCompanyName,
+        candidateCompanyCount: property.candidateCompanyCount,
+      });
+
+      if (classification?.bucket === "ambiguous_property") {
+        warnings.push({ field: "property", warning: classification.reason });
+        property.exceptionBucket = classification.bucket;
+        property.exceptionReason = classification.reason;
+        exceptions.ambiguous_property++;
+      }
+
+      if (!property.mappedName) {
+        errors.push({ field: "property", error: "Property name is blank" });
+      }
+
+      let validationStatus: "valid" | "invalid" | "needs_review";
+      if (errors.length > 0) {
+        validationStatus = "invalid";
+        invalid++;
+      } else if (warnings.length > 0) {
+        validationStatus = "needs_review";
+        needsReview++;
+      } else {
+        validationStatus = "valid";
+        valid++;
+      }
+
+      await db
+        .update(stagedProperties)
+        .set({
+          validationStatus,
+          validationErrors: errors,
+          validationWarnings: warnings,
+          exceptionBucket: property.exceptionBucket ?? null,
+          exceptionReason: property.exceptionReason ?? null,
+        })
+        .where(eq(stagedProperties.id, property.id));
+    }
+  }
+
+  return { valid, invalid, needsReview, exceptions };
+}
+
+export async function validateStagedLeads(): Promise<{
+  valid: number;
+  invalid: number;
+  needsReview: number;
+  exceptions: ValidationExceptionCounts;
+}> {
+  const BATCH = 100;
+  let valid = 0;
+  let invalid = 0;
+  let needsReview = 0;
+  const exceptions = createExceptionCounts();
+
+  while (true) {
+    const batch = await db
+      .select()
+      .from(stagedLeads)
+      .where(eq(stagedLeads.validationStatus, "pending"))
+      .limit(BATCH);
+
+    if (batch.length === 0) break;
+
+    for (const lead of batch) {
+      const errors: ValidationError[] = [];
+      const warnings: ValidationWarning[] = [];
+      const ownerClassification = classifyOwnerAssignmentException({
+        mappedOwnerEmail: lead.mappedOwnerEmail,
+      });
+      const leadClassification = classifyLeadException({
+        mappedName: lead.mappedName,
+        mappedOwnerEmail: lead.mappedOwnerEmail,
+        mappedCompanyName: lead.mappedCompanyName,
+        mappedPropertyName: lead.mappedPropertyName,
+        mappedDealName: lead.mappedDealName,
+        candidateDealCount: lead.candidateDealCount,
+        candidatePropertyCount: lead.candidatePropertyCount,
+      });
+
+      if (ownerClassification?.bucket === "missing_owner_assignment") {
+        warnings.push({ field: "owner", warning: ownerClassification.reason });
+        lead.exceptionBucket = ownerClassification.bucket;
+        lead.exceptionReason = ownerClassification.reason;
+        exceptions.missing_owner_assignment++;
+      } else if (leadClassification?.bucket === "lead_vs_deal_conflict") {
+        warnings.push({ field: "lead", warning: leadClassification.reason });
+        lead.exceptionBucket = leadClassification.bucket;
+        lead.exceptionReason = leadClassification.reason;
+        exceptions.lead_vs_deal_conflict++;
+      }
+
+      if (!lead.mappedName) {
+        errors.push({ field: "lead", error: "Lead name is blank" });
+      }
+
+      let validationStatus: "valid" | "invalid" | "needs_review";
+      if (errors.length > 0) {
+        validationStatus = "invalid";
+        invalid++;
+      } else if (warnings.length > 0) {
+        validationStatus = "needs_review";
+        needsReview++;
+      } else {
+        validationStatus = "valid";
+        valid++;
+      }
+
+      await db
+        .update(stagedLeads)
+        .set({
+          validationStatus,
+          validationErrors: errors,
+          validationWarnings: warnings,
+          exceptionBucket: lead.exceptionBucket ?? null,
+          exceptionReason: lead.exceptionReason ?? null,
+        })
+        .where(eq(stagedLeads.id, lead.id));
+    }
+  }
+
+  return { valid, invalid, needsReview, exceptions };
 }
 
 // ---------------------------------------------------------------------------
@@ -299,6 +565,9 @@ export async function getValidationStats(): Promise<{
   deals: Record<string, number>;
   contacts: Record<string, number>;
   activities: Record<string, number>;
+  companies: Record<string, number>;
+  properties: Record<string, number>;
+  leads: Record<string, number>;
 }> {
   const dealStats = await db.execute(sql`
     SELECT validation_status, COUNT(*)::int AS count
@@ -315,6 +584,21 @@ export async function getValidationStats(): Promise<{
     FROM migration.staged_activities
     GROUP BY validation_status
   `);
+  const companyStats = await db.execute(sql`
+    SELECT validation_status, COUNT(*)::int AS count
+    FROM migration.staged_companies
+    GROUP BY validation_status
+  `);
+  const propertyStats = await db.execute(sql`
+    SELECT validation_status, COUNT(*)::int AS count
+    FROM migration.staged_properties
+    GROUP BY validation_status
+  `);
+  const leadStats = await db.execute(sql`
+    SELECT validation_status, COUNT(*)::int AS count
+    FROM migration.staged_leads
+    GROUP BY validation_status
+  `);
 
   function toRecord(rows: any): Record<string, number> {
     const result: Record<string, number> = {};
@@ -329,5 +613,8 @@ export async function getValidationStats(): Promise<{
     deals: toRecord(dealStats),
     contacts: toRecord(contactStats),
     activities: toRecord(activityStats),
+    companies: toRecord(companyStats),
+    properties: toRecord(propertyStats),
+    leads: toRecord(leadStats),
   };
 }

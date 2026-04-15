@@ -46,4 +46,7 @@ export { closeoutChecklistItems } from "./tenant/closeout-checklist-items.js";
 export { stagedDeals } from "./migration/staged-deals.js";
 export { stagedContacts } from "./migration/staged-contacts.js";
 export { stagedActivities } from "./migration/staged-activities.js";
+export { stagedCompanies } from "./migration/staged-companies.js";
+export { stagedProperties } from "./migration/staged-properties.js";
+export { stagedLeads } from "./migration/staged-leads.js";
 export { importRuns } from "./migration/import-runs.js";
