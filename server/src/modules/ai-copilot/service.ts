@@ -167,17 +167,21 @@ export async function getDealCopilotView(tenantDb: TenantDb, dealId: string) {
     .orderBy(desc(aiCopilotPackets.createdAt))
     .limit(1);
 
-  const suggestedTasks = await tenantDb
-    .select()
-    .from(aiTaskSuggestions)
-    .where(and(eq(aiTaskSuggestions.scopeType, "deal"), eq(aiTaskSuggestions.scopeId, dealId)))
-    .orderBy(desc(aiTaskSuggestions.createdAt));
+  const suggestedTasks = packet
+    ? await tenantDb
+        .select()
+        .from(aiTaskSuggestions)
+        .where(eq(aiTaskSuggestions.packetId, packet.id))
+        .orderBy(desc(aiTaskSuggestions.createdAt))
+    : [];
 
-  const blindSpotFlags = await tenantDb
-    .select()
-    .from(aiRiskFlags)
-    .where(and(eq(aiRiskFlags.scopeType, "deal"), eq(aiRiskFlags.scopeId, dealId)))
-    .orderBy(desc(aiRiskFlags.createdAt));
+  const blindSpotFlags = packet
+    ? await tenantDb
+        .select()
+        .from(aiRiskFlags)
+        .where(eq(aiRiskFlags.packetId, packet.id))
+        .orderBy(desc(aiRiskFlags.createdAt))
+    : [];
 
   return {
     packet: packet ?? null,
