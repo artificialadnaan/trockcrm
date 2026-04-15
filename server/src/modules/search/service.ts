@@ -31,15 +31,26 @@ export interface AiSearchEvidence {
   sourceType: string;
   sourceId: string;
   dealId: string | null;
+  entityType: "deal" | "contact" | "file" | "crm_text";
+  entityLabel: string | null;
   title: string;
   snippet: string;
   deepLink: string;
 }
 
+export interface AiSearchEntityAnchor {
+  entityType: "deal" | "contact" | "file";
+  id: string;
+  label: string;
+  deepLink: string;
+}
+
 export interface AiSearchResponse {
   query: string;
+  intent: "deal_lookup" | "contact_lookup" | "file_lookup" | "account_research" | "activity_lookup" | "general_search";
   summary: string;
   structured: SearchResponse;
+  topEntities: AiSearchEntityAnchor[];
   evidence: AiSearchEvidence[];
 }
 
@@ -87,8 +98,10 @@ export async function naturalLanguageSearch(
 
   return {
     query: structured.query,
+    intent: classifySearchIntent(structured.query),
     summary: buildAiSearchSummary(structured, evidence),
     structured,
+    topEntities: buildTopEntityAnchors(structured),
     evidence,
   };
 }
@@ -384,6 +397,8 @@ async function searchAiEvidence(tenantDb: TenantDb, query: string): Promise<AiSe
       sourceType,
       sourceId,
       dealId,
+      entityType: dealId ? "deal" : "crm_text",
+      entityLabel: dealId ? title : null,
       title,
       snippet: snippet.length === 220 ? `${snippet}...` : snippet,
       deepLink,
@@ -392,11 +407,16 @@ async function searchAiEvidence(tenantDb: TenantDb, query: string): Promise<AiSe
 }
 
 function buildAiSearchSummary(structured: SearchResponse, evidence: AiSearchEvidence[]): string {
+  const intent = classifySearchIntent(structured.query);
   if (structured.total === 0 && evidence.length === 0) {
     return `No CRM matches or indexed evidence were found for "${structured.query}".`;
   }
 
   const parts: string[] = [];
+  if (intent !== "general_search") {
+    parts.push(`Search intent looks like ${intent.replace(/_/g, " ")}.`);
+  }
+
   if (structured.total > 0) {
     parts.push(
       `Found ${structured.total} structured CRM match${structured.total === 1 ? "" : "es"} across ${[
@@ -419,7 +439,40 @@ function buildAiSearchSummary(structured: SearchResponse, evidence: AiSearchEvid
   const topDeal = structured.deals[0];
   if (topDeal) {
     parts.push(`The strongest structured match is deal "${topDeal.primaryLabel}".`);
+  } else if (structured.contacts[0]) {
+    parts.push(`The strongest structured match is contact "${structured.contacts[0].primaryLabel}".`);
+  } else if (structured.files[0]) {
+    parts.push(`The strongest structured match is file "${structured.files[0].primaryLabel}".`);
   }
 
   return parts.join(" ");
+}
+
+function classifySearchIntent(query: string): AiSearchResponse["intent"] {
+  const normalized = query.toLowerCase().trim();
+  if (!normalized) return "general_search";
+  if (/^d[-\s]?\d+/i.test(normalized) || normalized.includes("deal")) return "deal_lookup";
+  if (normalized.includes("contact") || normalized.includes("email") || normalized.includes("@")) return "contact_lookup";
+  if (normalized.includes("file") || normalized.includes("pdf") || normalized.includes("document") || normalized.includes("attachment")) {
+    return "file_lookup";
+  }
+  if (normalized.includes("company") || normalized.includes("account") || normalized.includes("customer")) return "account_research";
+  if (normalized.includes("call") || normalized.includes("activity") || normalized.includes("note") || normalized.includes("meeting")) {
+    return "activity_lookup";
+  }
+  return "general_search";
+}
+
+function buildTopEntityAnchors(structured: SearchResponse): AiSearchEntityAnchor[] {
+  const anchors: AiSearchEntityAnchor[] = [];
+  for (const result of [...structured.deals, ...structured.contacts, ...structured.files]) {
+    anchors.push({
+      entityType: result.entityType,
+      id: result.id,
+      label: result.primaryLabel,
+      deepLink: result.deepLink,
+    });
+    if (anchors.length >= 3) break;
+  }
+  return anchors;
 }

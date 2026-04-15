@@ -51,6 +51,7 @@ describe("search routes", () => {
   it("returns AI search results", async () => {
     serviceMocks.naturalLanguageSearch.mockResolvedValue({
       query: "revision scope",
+      intent: "deal_lookup",
       summary: "Found a matching deal and indexed email evidence.",
       structured: {
         deals: [],
@@ -59,12 +60,22 @@ describe("search routes", () => {
         total: 0,
         query: "revision scope",
       },
+      topEntities: [
+        {
+          entityType: "deal",
+          id: "deal-1",
+          label: "Alpha Plaza",
+          deepLink: "/deals/deal-1",
+        },
+      ],
       evidence: [
         {
           id: "chunk-1",
           sourceType: "email_message",
           sourceId: "email-1",
           dealId: "deal-1",
+          entityType: "deal",
+          entityLabel: "Alpha Plaza",
           title: "Revision follow-up",
           snippet: "Customer asked for a revision.",
           deepLink: "/deals/deal-1",
@@ -84,6 +95,8 @@ describe("search routes", () => {
       "director-1"
     );
     expect(res.body.summary).toContain("indexed email evidence");
+    expect(res.body.intent).toBe("deal_lookup");
+    expect(res.body.topEntities).toHaveLength(1);
     expect(res.body.evidence).toHaveLength(1);
   });
 });

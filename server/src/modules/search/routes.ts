@@ -44,8 +44,10 @@ router.get("/ai", async (req: Request, res: Response) => {
     if (q.length < 2) {
       return res.status(200).json({
         query: q,
+        intent: "general_search",
         summary: "",
         structured: { deals: [], contacts: [], files: [], total: 0, query: q },
+        topEntities: [],
         evidence: [],
       });
     }

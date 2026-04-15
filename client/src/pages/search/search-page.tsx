@@ -65,6 +65,7 @@ export function SearchPage() {
     { key: "contacts", label: "Contacts" },
     { key: "files", label: "Files" },
   ];
+  const intentLabel = aiResults?.intent ? aiResults.intent.replace(/_/g, " ") : null;
 
   return (
     <div className="p-6 max-w-3xl mx-auto space-y-6">
@@ -92,8 +93,27 @@ export function SearchPage() {
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
+            {intentLabel && intentLabel !== "general search" && (
+              <Badge variant="outline">{intentLabel}</Badge>
+            )}
             <p className="text-sm leading-6">{aiResults.summary}</p>
             {aiLoading && <p className="text-sm text-muted-foreground">Refreshing AI evidence...</p>}
+            {(aiResults.topEntities ?? []).length > 0 && (
+              <div className="space-y-2">
+                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+                  Top Entity Matches
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  {aiResults.topEntities.map((entity) => (
+                    <Link key={`${entity.entityType}:${entity.id}`} to={entity.deepLink}>
+                      <Badge variant="secondary" className="hover:bg-secondary/80">
+                        {entity.entityType}: {entity.label}
+                      </Badge>
+                    </Link>
+                  ))}
+                </div>
+              </div>
+            )}
             {(aiResults.evidence ?? []).length > 0 && (
               <div className="space-y-2">
                 <p className="text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">
@@ -110,6 +130,11 @@ export function SearchPage() {
                         <div className="min-w-0 space-y-1">
                           <div className="text-sm font-medium text-foreground">{item.title}</div>
                           <div className="text-sm text-muted-foreground line-clamp-2">{item.snippet}</div>
+                          {item.entityLabel && (
+                            <div className="text-xs text-muted-foreground">
+                              Linked {item.entityType}: {item.entityLabel}
+                            </div>
+                          )}
                         </div>
                         <Badge variant="outline">{item.sourceType}</Badge>
                       </div>

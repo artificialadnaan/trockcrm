@@ -24,15 +24,26 @@ export interface AiSearchEvidence {
   sourceType: string;
   sourceId: string;
   dealId: string | null;
+  entityType: "deal" | "contact" | "file" | "crm_text";
+  entityLabel: string | null;
   title: string;
   snippet: string;
   deepLink: string;
 }
 
+export interface AiSearchEntityAnchor {
+  entityType: "deal" | "contact" | "file";
+  id: string;
+  label: string;
+  deepLink: string;
+}
+
 export interface AiSearchResponse {
   query: string;
+  intent: "deal_lookup" | "contact_lookup" | "file_lookup" | "account_research" | "activity_lookup" | "general_search";
   summary: string;
   structured: SearchResponse;
+  topEntities: AiSearchEntityAnchor[];
   evidence: AiSearchEvidence[];
 }
 
