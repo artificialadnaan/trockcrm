@@ -2,6 +2,7 @@ import { pool } from "../db.js";
 import crypto from "crypto";
 
 const GRAPH_BASE_URL = "https://graph.microsoft.com/v1.0";
+const SERVER_EMAIL_ASSIGNMENT_MODULE = "../../../server/src/modules/email/assignment-service.js" as string;
 const SERVER_EVALUATOR_MODULE = "../../../server/src/modules/tasks/rules/evaluator.js" as string;
 const SERVER_TASK_RULES_MODULE = "../../../server/src/modules/tasks/rules/config.js" as string;
 const SERVER_TASK_PERSISTENCE_MODULE = "../../../server/src/modules/tasks/rules/persistence.js" as string;
@@ -429,13 +430,29 @@ export async function processInboundMessage(
   const sentAt = msg.receivedDateTime
     ? new Date(msg.receivedDateTime)
     : new Date();
+  const [contactContext, priorThreadAssignment, assignmentModule] = await Promise.all([
+    getContactAssignmentContextRaw(client, schemaName, contactMatch.id),
+    getLatestThreadAssignmentRaw(client, schemaName, conversationId),
+    import(SERVER_EMAIL_ASSIGNMENT_MODULE),
+  ]);
+
+  const assignment = assignmentModule.resolveEmailAssignment({
+    subject,
+    bodyPreview,
+    bodyHtml,
+    priorThreadAssignment,
+    contactCompanyId: contactContext.companyId,
+    dealCandidates: contactContext.dealCandidates,
+  });
 
   // Insert email record
   const insertResult = await client.query(
     `INSERT INTO ${schemaName}.emails
      (graph_message_id, graph_conversation_id, direction, from_address, to_addresses, cc_addresses,
-      subject, body_preview, body_html, has_attachments, contact_id, user_id, sent_at)
-     VALUES ($1, $2, 'inbound', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+      subject, body_preview, body_html, has_attachments, contact_id, deal_id,
+      assigned_entity_type, assigned_entity_id, assignment_confidence, assignment_ambiguity_reason,
+      user_id, sent_at)
+     VALUES ($1, $2, 'inbound', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
      ON CONFLICT (graph_message_id) DO NOTHING
      RETURNING id`,
     [
@@ -449,6 +466,11 @@ export async function processInboundMessage(
       bodyHtml,
       hasAttachments,
       contactMatch.id,
+      assignment.assignedDealId ?? null,
+      assignment.assignedEntityType ?? null,
+      assignment.assignedEntityId ?? null,
+      assignment.confidence,
+      assignment.ambiguityReason ?? null,
       userId,
       sentAt,
     ]
@@ -459,12 +481,11 @@ export async function processInboundMessage(
   const emailId = insertResult.rows[0].id;
 
   // Auto-associate to deal (determine dealId BEFORE creating activity/task)
-  const association = await autoAssociateRaw(
-    client,
-    schemaName,
-    emailId,
-    contactMatch.id
-  );
+  const association = {
+    dealId: assignment.assignedDealId ?? null,
+    activeDealCount: contactContext.dealCandidates.length,
+    activeDealNames: contactContext.dealCandidates.map((d) => `${d.dealNumber} ${d.name}`.trim()),
+  };
 
   // Create activity record AFTER deal association so deal_id is included in the INSERT
   // (no separate UPDATE needed)
@@ -483,7 +504,19 @@ export async function processInboundMessage(
     ]
   );
 
-  if (association.activeDealCount > 0) {
+  if (assignment.requiresClassificationTask) {
+    await createClassificationTaskRaw(client, schemaName, {
+      officeId,
+      emailId,
+      userId,
+      contactId: contactMatch.id,
+      subject,
+      contactName: `${contactMatch.first_name} ${contactMatch.last_name}`.trim(),
+      companyName: contactContext.companyName,
+      ambiguityReason: assignment.ambiguityReason ?? "assignment_review",
+      candidateDealNames: association.activeDealNames,
+    });
+  } else if (association.activeDealCount === 1 && assignment.matchedBy === "single_deal") {
     await evaluateInboundEmailTasks(
       client,
       schemaName,
@@ -533,13 +566,13 @@ async function findContactByEmailRaw(
   client: any,
   schemaName: string,
   emailAddresses: string[]
-): Promise<{ id: string; first_name: string; last_name: string } | null> {
+): Promise<{ id: string; first_name: string; last_name: string; company_id: string | null } | null> {
   if (emailAddresses.length === 0) return null;
 
   // Build parameterized IN clause
   const placeholders = emailAddresses.map((_, i) => `$${i + 1}`).join(", ");
   const result = await client.query(
-    `SELECT id, first_name, last_name FROM ${schemaName}.contacts
+    `SELECT id, first_name, last_name, company_id FROM ${schemaName}.contacts
      WHERE LOWER(email) IN (${placeholders}) AND is_active = true
      LIMIT 1`,
     emailAddresses.map((e) => e.toLowerCase())
@@ -548,42 +581,152 @@ async function findContactByEmailRaw(
   return result.rows[0] ?? null;
 }
 
-/**
- * Auto-associate an email to a deal using raw SQL (worker context).
- *
- * Rules:
- * - 1 active deal for contact -> auto-associate
- * - Multiple active deals -> leave null + create disambiguation task
- * - 0 active deals -> contact only
- */
-async function autoAssociateRaw(
+async function getContactAssignmentContextRaw(
   client: any,
   schemaName: string,
-  emailId: string,
   contactId: string
-): Promise<{ dealId: string | null; activeDealCount: number; activeDealNames: string[] }> {
-  const activeDeals = await client.query(
-    `SELECT d.id AS deal_id, d.deal_number, d.name AS deal_name
-     FROM ${schemaName}.deals d
-     JOIN ${schemaName}.contact_deal_associations cda ON cda.deal_id = d.id
-     WHERE cda.contact_id = $1 AND d.is_active = true`,
+): Promise<{
+  companyId: string | null;
+  companyName: string | null;
+  dealCandidates: Array<{
+    id: string;
+    dealNumber: string;
+    name: string;
+    companyId: string | null;
+    propertyAddress: string | null;
+    propertyCity: string | null;
+    propertyState: string | null;
+    propertyZip: string | null;
+  }>;
+}> {
+  const [contactRow] = await client.query(
+    `SELECT company_id, company_name
+       FROM ${schemaName}.contacts
+      WHERE id = $1
+      LIMIT 1`,
+    [contactId]
+  ).then((result: any) => result.rows ?? []);
+
+  const companyId = contactRow?.company_id ?? null;
+  const companyName = contactRow?.company_name ?? null;
+
+  const contactDealsResult = await client.query(
+    `SELECT d.id, d.deal_number, d.name, d.company_id, d.property_address, d.property_city, d.property_state, d.property_zip
+       FROM ${schemaName}.deals d
+       JOIN ${schemaName}.contact_deal_associations cda ON cda.deal_id = d.id
+      WHERE cda.contact_id = $1 AND d.is_active = true`,
     [contactId]
   );
-  const activeDealNames = activeDeals.rows.map((d: any) => `${d.deal_number} ${d.deal_name}`);
 
-  if (activeDeals.rows.length === 1) {
-    // Auto-associate to the single active deal
-    const dealId = activeDeals.rows[0].deal_id;
-    await client.query(
-      `UPDATE ${schemaName}.emails SET deal_id = $1 WHERE id = $2`,
-      [dealId, emailId]
-    );
-    // Activity record is now created AFTER auto-association with deal_id included,
-    // so no separate UPDATE is needed here.
-    return { dealId, activeDealCount: activeDeals.rows.length, activeDealNames };
+  const companyDealsResult = companyId
+    ? await client.query(
+        `SELECT id, deal_number, name, company_id, property_address, property_city, property_state, property_zip
+           FROM ${schemaName}.deals
+          WHERE company_id = $1 AND is_active = true`,
+        [companyId]
+      )
+    : { rows: [] };
+
+  const dealCandidates = [...contactDealsResult.rows, ...companyDealsResult.rows].filter(
+    (deal, index, arr) => arr.findIndex((candidate) => candidate.id === deal.id) === index
+  );
+
+  return { companyId, companyName, dealCandidates };
+}
+
+async function getLatestThreadAssignmentRaw(
+  client: any,
+  schemaName: string,
+  conversationId: string | null
+): Promise<{ assignedEntityType: "deal" | "company"; assignedEntityId: string; assignedDealId?: string | null } | null> {
+  if (!conversationId) return null;
+
+  const result = await client.query(
+    `SELECT assigned_entity_type, assigned_entity_id, deal_id
+       FROM ${schemaName}.emails
+      WHERE graph_conversation_id = $1
+        AND (assigned_entity_type IS NOT NULL OR deal_id IS NOT NULL)
+      ORDER BY sent_at DESC
+      LIMIT 1`,
+    [conversationId]
+  );
+
+  const row = result.rows[0];
+  if (!row) return null;
+  if (row.assigned_entity_type && row.assigned_entity_id) {
+    return {
+      assignedEntityType: row.assigned_entity_type,
+      assignedEntityId: row.assigned_entity_id,
+      assignedDealId: row.deal_id ?? (row.assigned_entity_type === "deal" ? row.assigned_entity_id : null),
+    };
   }
-  // 0 active deals: contact-only association, no deal
-  return { dealId: null, activeDealCount: activeDeals.rows.length, activeDealNames };
+  if (row.deal_id) {
+    return {
+      assignedEntityType: "deal",
+      assignedEntityId: row.deal_id,
+      assignedDealId: row.deal_id,
+    };
+  }
+  return null;
+}
+
+async function createClassificationTaskRaw(
+  client: any,
+  schemaName: string,
+  input: {
+    officeId: string;
+    emailId: string;
+    userId: string;
+    contactId: string;
+    subject: string;
+    contactName: string;
+    companyName: string | null;
+    ambiguityReason: string;
+    candidateDealNames: string[];
+  }
+): Promise<void> {
+  const dedupeKey = `email:${input.emailId}:assignment_review`;
+  const existing = await client.query(
+    `SELECT id
+       FROM ${schemaName}.tasks
+      WHERE origin_rule = 'email_assignment_queue'
+        AND dedupe_key = $1
+        AND status IN ('pending', 'scheduled', 'in_progress', 'waiting_on', 'blocked')
+      LIMIT 1`,
+    [dedupeKey]
+  );
+  if (existing.rows.length > 0) return;
+
+  const title = `Classify email: ${input.subject}`;
+  const dealNames = input.candidateDealNames.length > 0 ? input.candidateDealNames.join(", ") : "No clear deal candidate";
+  await client.query(
+    `INSERT INTO ${schemaName}.tasks
+       (title, description, type, priority, status, assigned_to, created_by, office_id, origin_rule, source_rule, source_event, dedupe_key, reason_code, entity_snapshot, deal_id, contact_id, email_id, due_date, due_time, remind_at)
+     VALUES ($1, $2, 'inbound_email', 'normal', 'pending', $3, $4, $5, 'email_assignment_queue', 'email_assignment_queue', 'email.received', $6, $7, $8, NULL, $9, $10, NULL, NULL, NULL)`,
+    [
+      title,
+      `Review email assignment for ${input.contactName}${input.companyName ? ` at ${input.companyName}` : ""}. Candidate deals: ${dealNames}.`,
+      input.userId,
+      input.userId,
+      input.officeId,
+      dedupeKey,
+      input.ambiguityReason,
+      JSON.stringify({
+        schemaVersion: 1,
+        entityType: "email",
+        entityId: `email:${input.emailId}`,
+        officeId: input.officeId,
+        contactId: input.contactId,
+        emailId: input.emailId,
+        contactName: input.contactName,
+        companyName: input.companyName,
+        ambiguityReason: input.ambiguityReason,
+        candidateDealNames: input.candidateDealNames,
+      }),
+      input.contactId,
+      input.emailId,
+    ]
+  );
 }
 
 async function evaluateInboundEmailTasks(
