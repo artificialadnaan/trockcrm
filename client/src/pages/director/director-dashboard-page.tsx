@@ -26,6 +26,7 @@ import {
   Minus,
 } from "lucide-react";
 import { DIRECTOR_DASHBOARD_ACTIONS } from "@/lib/director-dashboard-actions";
+import { buildStaleLeadAlertSummary } from "@/lib/stale-lead-dashboard";
 
 const PRESETS: Array<{ value: DateRangePreset; label: string }> = [
   { value: "mtd", label: "MTD" },
@@ -136,7 +137,11 @@ export function DirectorDashboardPage() {
   if (!data) return null;
 
   const firstStaleAlert = data.staleDeals[0] ?? null;
-  const secondStaleAlert = data.staleDeals[1] ?? null;
+  const staleLeadAlert = buildStaleLeadAlertSummary(
+    data.staleLeads[0],
+    "Lead pipeline on track",
+    "No stale leads detected this period"
+  );
 
   return (
     <div className="p-6 space-y-6 bg-gray-50 min-h-screen">
@@ -412,37 +417,49 @@ export function DirectorDashboardPage() {
 
               {/* Alert 2 — blue: velocity / performance insight */}
               <div className="border-l-4 border-blue-400 pl-3 py-1">
-                {secondStaleAlert ? (
+                {data.staleLeads[0] ? (
                   <>
                     <p className="text-xs font-semibold text-white leading-snug">
-                      {secondStaleAlert.dealName}
+                      {staleLeadAlert.title}
                     </p>
                     <p className="text-[10px] text-gray-400 mt-0.5">
-                      {secondStaleAlert.daysInStage}d stale &mdash; {secondStaleAlert.repName} &mdash;{" "}
-                      {secondStaleAlert.stageName}
+                      {staleLeadAlert.detail}
                     </p>
                   </>
                 ) : (
                   <>
                     <p className="text-xs font-semibold text-white leading-snug">
-                      Velocity insight
+                      {staleLeadAlert.title}
                     </p>
                     <p className="text-[10px] text-gray-400 mt-0.5">
-                      {data.ddVsPipeline.totalCount} active deals in pipeline
+                      {staleLeadAlert.detail}
                     </p>
                   </>
                 )}
               </div>
             </div>
 
-            {data.staleDeals.length > 0 && (
-              <Link
-                to="/deals?filter=stale"
-                className="mt-4 flex items-center gap-1 text-[10px] font-semibold text-gray-400 hover:text-white transition-colors"
-              >
-                View all {data.staleDeals.length} stale deals
-                <ChevronRight className="h-3 w-3" />
-              </Link>
+            {(data.staleDeals.length > 0 || data.staleLeads.length > 0) && (
+              <div className="mt-4 space-y-1">
+                {data.staleDeals.length > 0 && (
+                  <Link
+                    to="/deals?filter=stale"
+                    className="flex items-center gap-1 text-[10px] font-semibold text-gray-400 hover:text-white transition-colors"
+                  >
+                    View all {data.staleDeals.length} stale deals
+                    <ChevronRight className="h-3 w-3" />
+                  </Link>
+                )}
+                {data.staleLeads.length > 0 && (
+                  <Link
+                    to="/reports"
+                    className="flex items-center gap-1 text-[10px] font-semibold text-gray-400 hover:text-white transition-colors"
+                  >
+                    Review {data.staleLeads.length} stale leads
+                    <ChevronRight className="h-3 w-3" />
+                  </Link>
+                )}
+              </div>
             )}
           </div>
 
