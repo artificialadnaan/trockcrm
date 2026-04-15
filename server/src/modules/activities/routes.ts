@@ -85,6 +85,18 @@ router.post("/", async (req, res, next) => {
 
     if (activity.dealId) {
       await req.tenantDb!.insert(jobQueue).values({
+        jobType: "ai_index_document",
+        payload: {
+          sourceType: "activity_note",
+          sourceId: activity.id,
+          dealId: activity.dealId,
+        },
+        officeId: req.user!.activeOfficeId ?? req.user!.officeId,
+        status: "pending",
+        runAfter: new Date(),
+      });
+
+      await req.tenantDb!.insert(jobQueue).values({
         jobType: "ai_refresh_copilot",
         payload: {
           dealId: activity.dealId,

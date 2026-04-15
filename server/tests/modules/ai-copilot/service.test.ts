@@ -88,6 +88,58 @@ describe("AI copilot service", () => {
     expect(result.summary).toBe("Deal needs a revision follow-up.");
   });
 
+  it("passes a text retrieval query built from context and signals into knowledge search", async () => {
+    const searchDealKnowledge = vi.fn(async () => []);
+
+    await generateDealCopilotPacket(
+      {} as any,
+      { dealId: "deal-1", forceRegenerate: true },
+      {
+        getDealCopilotContext: vi.fn(async () => ({
+          deal: {
+            id: "deal-1",
+            name: "Alpha Plaza",
+            stageName: "Estimating",
+            proposalStatus: "revision_requested",
+            assignedRepId: "user-1",
+          },
+          recentActivities: [{ subject: "Estimator follow-up", body: "Need updated site photos." }],
+          recentEmails: [{ subject: "Pricing revision", bodyPreview: "Please revise the allowance." }],
+          taskSummary: { openTaskCount: 0, overdueTaskCount: 0 },
+        })),
+        getDealBlindSpotSignals: vi.fn(async () => [
+          { signalType: "missing_next_task", severity: "warning", summary: "Deal has no active follow-up task", evidence: [], isBlocking: false },
+        ]),
+        searchDealKnowledge,
+        provider: {
+          generateCopilotPacket: vi.fn(async () => ({
+            summary: "Summary",
+            recommendedNextStep: { action: "Action", ownerId: null, dueLabel: null, rationale: "Why" },
+            suggestedTasks: [],
+            blindSpotFlags: [],
+            confidence: 0.5,
+            evidence: [],
+          })),
+        },
+        persistPacketBundle: vi.fn(async () => ({
+          packetId: "packet-1",
+          generatedAt: "2026-04-15T12:00:00.000Z",
+        })),
+        getExistingFreshPacket: vi.fn(async () => null),
+        now: new Date("2026-04-15T12:00:00.000Z"),
+      }
+    );
+
+    expect(searchDealKnowledge).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        dealId: "deal-1",
+        queryText: expect.stringContaining("Alpha Plaza"),
+      })
+    );
+    expect(searchDealKnowledge.mock.calls[0]?.[1]?.queryText).toContain("missing next task");
+  });
+
   it("reuses a fresh packet when the snapshot hash is unchanged", async () => {
     const result = await generateDealCopilotPacket(
       {} as any,

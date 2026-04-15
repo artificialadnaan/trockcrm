@@ -35,6 +35,8 @@ import { UsersPage } from "@/pages/admin/users-page";
 import { PipelineConfigPage } from "@/pages/admin/pipeline-config-page";
 import { AuditLogPage } from "@/pages/admin/audit-log-page";
 import { CrossOfficeReportsPage } from "@/pages/admin/cross-office-reports-page";
+import { AiOpsPage } from "@/pages/admin/ai-ops-page";
+import { AiPacketReviewPage } from "@/pages/admin/ai-packet-review-page";
 import { UserGuidePage } from "@/pages/admin/help/user-guide-page";
 import { AdminGuidePage } from "@/pages/admin/help/admin-guide-page";
 import { CompanyCamPage } from "@/pages/admin/companycam-page";
@@ -100,6 +102,8 @@ export function App() {
               <Route path="/admin/cross-office-reports" element={<CrossOfficeReportsPage />} />
               <Route path="/admin/merge-queue" element={<MergeQueuePage />} />
               <Route path="/admin/procore" element={<ProcoreSyncPage />} />
+              <Route path="/admin/ai-ops" element={<AiOpsPage />} />
+              <Route path="/admin/ai-ops/reviews/:packetId" element={<AiPacketReviewPage />} />
               <Route path="/admin/companycam" element={<CompanyCamPage />} />
               <Route path="/admin/migration" element={<MigrationDashboardPage />} />
               <Route path="/admin/migration/deals" element={<MigrationDealsPage />} />

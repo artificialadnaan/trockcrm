@@ -4,10 +4,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const serviceMocks = vi.hoisted(() => ({
   getDealCopilotView: vi.fn(),
-  regenerateDealCopilot: vi.fn(),
   dismissTaskSuggestion: vi.fn(),
   recordAiFeedback: vi.fn(),
   getDirectorBlindSpots: vi.fn(),
+  getAiOpsMetrics: vi.fn(),
+  getAiReviewQueue: vi.fn(),
 }));
 
 const taskSuggestionMocks = vi.hoisted(() => ({
@@ -20,10 +21,11 @@ const dealsServiceMocks = vi.hoisted(() => ({
 
 vi.mock("../../../src/modules/ai-copilot/service.js", () => ({
   getDealCopilotView: serviceMocks.getDealCopilotView,
-  regenerateDealCopilot: serviceMocks.regenerateDealCopilot,
   dismissTaskSuggestion: serviceMocks.dismissTaskSuggestion,
   recordAiFeedback: serviceMocks.recordAiFeedback,
   getDirectorBlindSpots: serviceMocks.getDirectorBlindSpots,
+  getAiOpsMetrics: serviceMocks.getAiOpsMetrics,
+  getAiReviewQueue: serviceMocks.getAiReviewQueue,
 }));
 
 vi.mock("../../../src/modules/ai-copilot/task-suggestion-service.js", () => ({
@@ -36,6 +38,7 @@ vi.mock("../../../src/modules/deals/service.js", () => ({
 
 const { aiCopilotRoutes } = await import("../../../src/modules/ai-copilot/routes.js");
 const { errorHandler } = await import("../../../src/middleware/error-handler.js");
+let insertMock: ReturnType<typeof vi.fn>;
 
 function createApp(role: "admin" | "director" | "rep" = "rep") {
   const app = express();
@@ -49,7 +52,7 @@ function createApp(role: "admin" | "director" | "rep" = "rep") {
       officeId: "office-1",
       activeOfficeId: "office-1",
     };
-    req.tenantDb = {} as any;
+    req.tenantDb = { insert: insertMock } as any;
     req.commitTransaction = vi.fn().mockResolvedValue(undefined);
     next();
   });
@@ -61,6 +64,9 @@ function createApp(role: "admin" | "director" | "rep" = "rep") {
 describe("ai copilot routes", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    insertMock = vi.fn(() => ({
+      values: vi.fn().mockResolvedValue(undefined),
+    }));
     dealsServiceMocks.getDealById.mockResolvedValue({
       id: "deal-1",
       assignedRepId: "rep-1",
@@ -82,18 +88,13 @@ describe("ai copilot routes", () => {
     expect(res.body.packet.summary).toBe("Deal needs follow-up.");
   });
 
-  it("triggers a deal copilot regeneration", async () => {
-    serviceMocks.regenerateDealCopilot.mockResolvedValue({
-      packetId: "packet-2",
-      summary: "Fresh summary",
-    });
-
+  it("queues a background deal copilot regeneration", async () => {
     const app = createApp("rep");
     const res = await request(app).post("/api/ai/deals/deal-1/regenerate");
 
     expect(res.status).toBe(202);
-    expect(serviceMocks.regenerateDealCopilot).toHaveBeenCalledWith(expect.anything(), "deal-1");
-    expect(res.body.packetId).toBe("packet-2");
+    expect(res.body).toEqual({ queued: true });
+    expect(insertMock).toHaveBeenCalledTimes(1);
   });
 
   it("accepts a suggested task and creates a real task", async () => {
@@ -180,5 +181,41 @@ describe("ai copilot routes", () => {
     expect(res.status).toBe(200);
     expect(serviceMocks.getDirectorBlindSpots).toHaveBeenCalledWith(expect.anything());
     expect(res.body.blindSpots).toHaveLength(1);
+  });
+
+  it("returns AI ops metrics for director users", async () => {
+    serviceMocks.getAiOpsMetrics.mockResolvedValue({
+      packetsGenerated24h: 10,
+      packetsPending: 1,
+      avgConfidence7d: 0.81,
+      openBlindSpots: 4,
+      suggestionsAccepted30d: 6,
+      suggestionsDismissed30d: 2,
+      positiveFeedback30d: 3,
+      negativeFeedback30d: 1,
+      documentsIndexed: 20,
+      documentsPending: 5,
+      documentStatusBySource: [],
+    });
+
+    const app = createApp("director");
+    const res = await request(app).get("/api/ai/ops/metrics");
+
+    expect(res.status).toBe(200);
+    expect(serviceMocks.getAiOpsMetrics).toHaveBeenCalledWith(expect.anything());
+    expect(res.body.metrics.packetsGenerated24h).toBe(10);
+  });
+
+  it("returns AI review queue for director users", async () => {
+    serviceMocks.getAiReviewQueue.mockResolvedValue([
+      { packetId: "packet-1", dealName: "Alpha Plaza" },
+    ]);
+
+    const app = createApp("director");
+    const res = await request(app).get("/api/ai/ops/reviews?limit=5");
+
+    expect(res.status).toBe(200);
+    expect(serviceMocks.getAiReviewQueue).toHaveBeenCalledWith(expect.anything(), { limit: 5 });
+    expect(res.body.reviews).toHaveLength(1);
   });
 });

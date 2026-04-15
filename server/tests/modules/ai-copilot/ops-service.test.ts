@@ -1,0 +1,136 @@
+import { describe, expect, it, vi } from "vitest";
+
+const { getAiOpsMetrics, getAiReviewQueue, getAiReviewPacketDetail } = await import("../../../src/modules/ai-copilot/service.js");
+
+describe("AI ops service", () => {
+  it("returns aggregate AI ops metrics", async () => {
+    const tenantDb = {
+      execute: vi
+        .fn()
+        .mockResolvedValueOnce({
+          rows: [
+            {
+              packets_generated_24h: 12,
+              packets_pending: 3,
+              avg_confidence_7d: "0.8125",
+              open_blind_spots: 5,
+              suggestions_accepted_30d: 9,
+              suggestions_dismissed_30d: 4,
+              positive_feedback_30d: 7,
+              negative_feedback_30d: 2,
+              documents_indexed: 44,
+              documents_pending: 6,
+            },
+          ],
+        })
+        .mockResolvedValueOnce({
+          rows: [
+            { source_type: "email_message", indexed: 20, pending: 2 },
+            { source_type: "activity_note", indexed: 14, pending: 3 },
+          ],
+        }),
+    };
+
+    const result = await getAiOpsMetrics(tenantDb as any);
+
+    expect(result).toEqual({
+      packetsGenerated24h: 12,
+      packetsPending: 3,
+      avgConfidence7d: 0.8125,
+      openBlindSpots: 5,
+      suggestionsAccepted30d: 9,
+      suggestionsDismissed30d: 4,
+      positiveFeedback30d: 7,
+      negativeFeedback30d: 2,
+      documentsIndexed: 44,
+      documentsPending: 6,
+      documentStatusBySource: [
+        { sourceType: "email_message", indexed: 20, pending: 2 },
+        { sourceType: "activity_note", indexed: 14, pending: 3 },
+      ],
+    });
+  });
+
+  it("returns a packet review queue with counts", async () => {
+    const tenantDb = {
+      execute: vi.fn().mockResolvedValue({
+        rows: [
+          {
+            packet_id: "packet-1",
+            deal_id: "deal-1",
+            deal_name: "Alpha Plaza",
+            deal_number: "D-1001",
+            status: "completed",
+            summary_text: "Deal needs follow-up.",
+            confidence: "0.9000",
+            generated_at: "2026-04-15T12:00:00.000Z",
+            created_at: "2026-04-15T11:59:00.000Z",
+            suggested_count: 3,
+            accepted_count: 1,
+            dismissed_count: 1,
+            open_blind_spot_count: 2,
+            positive_feedback_count: 2,
+            negative_feedback_count: 0,
+          },
+        ],
+      }),
+    };
+
+    const result = await getAiReviewQueue(tenantDb as any, { limit: 10 });
+
+    expect(result).toEqual([
+      {
+        packetId: "packet-1",
+        dealId: "deal-1",
+        dealName: "Alpha Plaza",
+        dealNumber: "D-1001",
+        status: "completed",
+        summaryText: "Deal needs follow-up.",
+        confidence: 0.9,
+        generatedAt: "2026-04-15T12:00:00.000Z",
+        createdAt: "2026-04-15T11:59:00.000Z",
+        suggestedCount: 3,
+        acceptedCount: 1,
+        dismissedCount: 1,
+        openBlindSpotCount: 2,
+        positiveFeedbackCount: 2,
+        negativeFeedbackCount: 0,
+      },
+    ]);
+  });
+
+  it("returns a packet review detail bundle", async () => {
+    const tenantDb = {
+      execute: vi.fn().mockResolvedValue({
+        rows: [
+          {
+            id: "packet-1",
+            deal_id: "deal-1",
+            status: "completed",
+            summary_text: "Deal needs follow-up.",
+            deal_name: "Alpha Plaza",
+            deal_number: "D-1001",
+          },
+        ],
+      }),
+      select: vi.fn(() => ({
+        from: vi.fn(() => ({
+          where: vi.fn(() => ({
+            orderBy: vi.fn().mockResolvedValue([]),
+          })),
+        })),
+      })),
+    };
+
+    const result = await getAiReviewPacketDetail(tenantDb as any, "packet-1");
+
+    expect(result.packet).toMatchObject({
+      id: "packet-1",
+      dealName: "Alpha Plaza",
+      dealNumber: "D-1001",
+    });
+    expect(result.suggestedTasks).toEqual([]);
+    expect(result.blindSpotFlags).toEqual([]);
+    expect(result.feedback).toEqual([]);
+  });
+});

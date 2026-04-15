@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 const {
   htmlToPlainText,
   buildDocumentChunks,
+  buildDealRetrievalQuery,
 } = await import("../../../src/modules/ai-copilot/document-service.js");
 const { searchDealKnowledge } = await import("../../../src/modules/ai-copilot/retrieval-service.js");
 
@@ -38,6 +39,34 @@ describe("AI copilot retrieval service", () => {
         companyId: "company-1",
       }),
     });
+  });
+
+  it("builds a retrieval query from deal context, signals, and recent activity", () => {
+    const query = buildDealRetrievalQuery({
+      context: {
+        deal: {
+          name: "Alpha Plaza",
+          stageName: "Estimating",
+          proposalStatus: "revision_requested",
+        },
+        recentActivities: [
+          { subject: "Estimator follow-up", body: "Waiting on site photos from customer." },
+        ],
+        recentEmails: [
+          { subject: "Re: pricing revision", bodyPreview: "Can you update the allowance and send it today?" },
+        ],
+      },
+      signals: [
+        { signalType: "missing_next_task", summary: "Deal has no active follow-up task" },
+      ],
+    });
+
+    expect(query).toContain("Alpha Plaza");
+    expect(query).toContain("Estimating");
+    expect(query).toContain("revision requested");
+    expect(query).toContain("missing next task");
+    expect(query).toContain("pricing revision");
+    expect(query).toContain("Waiting on site photos");
   });
 
   it("retrieves only the top-scoring chunks for a deal scope", async () => {
@@ -104,6 +133,37 @@ describe("AI copilot retrieval service", () => {
       id: "chunk-9",
       distance: 1,
     });
+    expect(tenantDb.execute).toHaveBeenCalledTimes(2);
+  });
+
+  it("uses lexical retrieval before recency fallback when query text is available", async () => {
+    const tenantDb = {
+      execute: vi
+        .fn()
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({
+          rows: [
+            {
+              id: "chunk-lex",
+              document_id: "doc-lex",
+              chunk_index: 0,
+              text: "Customer asked for updated pricing and revised allowance.",
+              metadata_json: { sourceType: "email_message", sourceId: "email-44" },
+              distance: 0.22,
+            },
+          ],
+        }),
+    };
+
+    const results = await searchDealKnowledge(tenantDb as any, {
+      dealId: "deal-1",
+      embedding: Array.from({ length: 1536 }, () => 0),
+      queryText: "updated pricing revised allowance",
+      limit: 1,
+    });
+
+    expect(results).toHaveLength(1);
+    expect(results[0].id).toBe("chunk-lex");
     expect(tenantDb.execute).toHaveBeenCalledTimes(2);
   });
 });

@@ -34,7 +34,7 @@ export async function runAiIndexDocument(payload: {
     throw new Error("ai_index_document requires officeId");
   }
 
-  if (payload.sourceType !== "email_message") {
+  if (!["email_message", "activity_note", "estimate_snapshot"].includes(payload.sourceType)) {
     console.log(`[Worker:ai-index-document] Skipping unsupported sourceType=${payload.sourceType}`);
     return;
   }
@@ -67,20 +67,102 @@ export async function runAiIndexDocument(payload: {
       }>;
     }>(SERVER_AI_DOCUMENT_SERVICE_MODULES);
 
-    const emailResult = await client.query(
-      `SELECT id, deal_id, subject, body_html, body_preview, sent_at
-       FROM ${schemaName}.emails
-       WHERE id = $1
-       LIMIT 1`,
-      [payload.sourceId]
-    );
-    const email = emailResult.rows[0];
-    if (!email) {
-      throw new Error(`Email ${payload.sourceId} not found in ${schemaName}`);
+    let dealId: string | null = null;
+    let normalizedText = "";
+    let metadata: Record<string, unknown> = {
+      sourceType: payload.sourceType,
+      sourceId: payload.sourceId,
+    };
+
+    if (payload.sourceType === "email_message") {
+      const emailResult = await client.query(
+        `SELECT id, deal_id, subject, body_html, body_preview, sent_at
+         FROM ${schemaName}.emails
+         WHERE id = $1
+         LIMIT 1`,
+        [payload.sourceId]
+      );
+      const email = emailResult.rows[0];
+      if (!email) {
+        throw new Error(`Email ${payload.sourceId} not found in ${schemaName}`);
+      }
+
+      const plainText = htmlToPlainText(email.body_html ?? email.body_preview ?? "");
+      normalizedText = [email.subject, plainText].filter(Boolean).join("\n\n").trim();
+      dealId = email.deal_id;
+      metadata = {
+        ...metadata,
+        dealId,
+        subject: email.subject ?? null,
+        sentAt: email.sent_at,
+      };
+    } else if (payload.sourceType === "activity_note") {
+      const activityResult = await client.query(
+        `SELECT id, deal_id, type, subject, body, occurred_at
+         FROM ${schemaName}.activities
+         WHERE id = $1
+         LIMIT 1`,
+        [payload.sourceId]
+      );
+      const activity = activityResult.rows[0];
+      if (!activity) {
+        throw new Error(`Activity ${payload.sourceId} not found in ${schemaName}`);
+      }
+
+      normalizedText = [activity.type, activity.subject, activity.body].filter(Boolean).join("\n\n").trim();
+      dealId = activity.deal_id;
+      metadata = {
+        ...metadata,
+        dealId,
+        activityType: activity.type,
+        subject: activity.subject ?? null,
+        occurredAt: activity.occurred_at,
+      };
+    } else {
+      const estimateResult = await client.query(
+        `SELECT
+           s.id AS section_id,
+           s.name AS section_name,
+           i.id AS item_id,
+           i.description,
+           i.quantity,
+           i.unit,
+           i.total_price,
+           i.notes
+         FROM ${schemaName}.estimate_sections s
+         LEFT JOIN ${schemaName}.estimate_line_items i ON i.section_id = s.id
+         WHERE s.deal_id = $1
+         ORDER BY s.display_order ASC, i.display_order ASC`,
+        [payload.sourceId]
+      );
+
+      dealId = payload.sourceId;
+      const sections = new Map<string, { name: string; lines: string[] }>();
+      for (const row of estimateResult.rows) {
+        if (!sections.has(row.section_id)) {
+          sections.set(row.section_id, { name: row.section_name, lines: [] });
+        }
+        if (row.item_id) {
+          sections.get(row.section_id)!.lines.push(
+            [row.description, row.quantity ? `qty ${row.quantity}` : null, row.unit, row.total_price ? `total ${row.total_price}` : null, row.notes]
+              .filter(Boolean)
+              .join(" | ")
+          );
+        }
+      }
+
+      normalizedText = Array.from(sections.values())
+        .map((section) => [section.name, ...section.lines].join("\n"))
+        .join("\n\n")
+        .trim();
+      metadata = {
+        ...metadata,
+        dealId,
+        sectionCount: sections.size,
+        lineItemCount: estimateResult.rows.filter((row) => row.item_id).length,
+      };
     }
 
-    const plainText = htmlToPlainText(email.body_html ?? email.body_preview ?? "");
-    const normalizedText = [email.subject, plainText].filter(Boolean).join("\n\n").trim();
     const contentHash = crypto.createHash("sha256").update(normalizedText).digest("hex");
 
     const existingResult = await client.query(
@@ -118,15 +200,9 @@ export async function runAiIndexDocument(payload: {
          WHERE id = $1`,
         [
           documentId,
-          email.deal_id,
+          dealId,
           contentHash,
-          JSON.stringify({
-            sourceType: payload.sourceType,
-            sourceId: payload.sourceId,
-            dealId: email.deal_id,
-            subject: email.subject ?? null,
-            sentAt: email.sent_at,
-          }),
+          JSON.stringify(metadata),
         ]
       );
     } else {
@@ -138,15 +214,9 @@ export async function runAiIndexDocument(payload: {
         [
           payload.sourceType,
           payload.sourceId,
-          email.deal_id,
+          dealId,
           contentHash,
-          JSON.stringify({
-            sourceType: payload.sourceType,
-            sourceId: payload.sourceId,
-            dealId: email.deal_id,
-            subject: email.subject ?? null,
-            sentAt: email.sent_at,
-          }),
+          JSON.stringify(metadata),
         ]
       );
       documentId = insertResult.rows[0]?.id as string | undefined;
@@ -159,13 +229,7 @@ export async function runAiIndexDocument(payload: {
     const chunks = buildDocumentChunks({
       documentId,
       text: normalizedText,
-      metadata: {
-        sourceType: payload.sourceType,
-        sourceId: payload.sourceId,
-        dealId: email.deal_id,
-        subject: email.subject ?? null,
-        sentAt: email.sent_at,
-      },
+      metadata,
     });
 
     for (const chunk of chunks) {
