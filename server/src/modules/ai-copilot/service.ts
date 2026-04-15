@@ -281,6 +281,36 @@ async function persistPacketBundle(
     blindSpotFlags: DealCopilotPromptOutput["blindSpotFlags"];
   }
 ): Promise<PersistedPacketBundleResult> {
+  const supersededAt = new Date(payload.packet.generatedAt);
+
+  await tenantDb
+    .update(aiTaskSuggestions)
+    .set({
+      status: "dismissed",
+      resolvedAt: supersededAt,
+    })
+    .where(
+      and(
+        eq(aiTaskSuggestions.scopeType, payload.packet.scopeType),
+        eq(aiTaskSuggestions.scopeId, payload.packet.scopeId),
+        eq(aiTaskSuggestions.status, "suggested"),
+      )
+    );
+
+  await tenantDb
+    .update(aiRiskFlags)
+    .set({
+      status: "resolved",
+      resolvedAt: supersededAt,
+    })
+    .where(
+      and(
+        eq(aiRiskFlags.scopeType, payload.packet.scopeType),
+        eq(aiRiskFlags.scopeId, payload.packet.scopeId),
+        eq(aiRiskFlags.status, "open"),
+      )
+    );
+
   const [packet] = await tenantDb
     .insert(aiCopilotPackets)
     .values({
