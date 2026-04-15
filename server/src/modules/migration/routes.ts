@@ -5,9 +5,19 @@ import { authMiddleware } from "../../middleware/auth.js";
 import { requireAdmin } from "../../middleware/rbac.js";
 import {
   getMigrationSummary,
+  getMigrationExceptions,
   getImportRuns,
   createImportRun,
   completeImportRun,
+  listStagedCompanies,
+  approveStagedCompany,
+  rejectStagedCompany,
+  listStagedProperties,
+  approveStagedProperty,
+  rejectStagedProperty,
+  listStagedLeads,
+  approveStagedLead,
+  rejectStagedLead,
   listStagedDeals,
   approveStagedDeal,
   rejectStagedDeal,
@@ -22,6 +32,9 @@ import {
   validateStagedDeals,
   validateStagedContacts,
   validateStagedActivities,
+  validateStagedCompanies,
+  validateStagedProperties,
+  validateStagedLeads,
 } from "./validator.js";
 
 const router = Router();
@@ -38,6 +51,21 @@ router.get("/migration/summary", async (req: Request, res: Response) => {
     return res.json(summary);
   } catch (err) {
     console.error("[migration] summary error:", err);
+    return res.status(500).json({ error: { message: String(err) } });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Exception review
+// GET /api/migration/exceptions
+// ---------------------------------------------------------------------------
+
+router.get("/migration/exceptions", async (req: Request, res: Response) => {
+  try {
+    const exceptions = await getMigrationExceptions();
+    return res.json(exceptions);
+  } catch (err) {
+    console.error("[migration] exceptions error:", err);
     return res.status(500).json({ error: { message: String(err) } });
   }
 });
@@ -64,22 +92,149 @@ router.get("/migration/runs", async (req: Request, res: Response) => {
 router.post("/migration/validate", async (req: Request, res: Response) => {
   const runRow = await createImportRun("validate", req.user!.id);
   try {
-    const [dealResults, contactResults, activityResults] = await Promise.all([
+    const [
+      dealResults,
+      contactResults,
+      activityResults,
+      companyResults,
+      propertyResults,
+      leadResults,
+    ] = await Promise.all([
       validateStagedDeals(),
       validateStagedContacts(),
       validateStagedActivities(),
+      validateStagedCompanies(),
+      validateStagedProperties(),
+      validateStagedLeads(),
     ]);
 
     const stats = {
       deals: dealResults,
       contacts: contactResults,
       activities: activityResults,
-    };
+      companies: companyResults,
+      properties: propertyResults,
+      leads: leadResults,
+    } as const;
 
     await completeImportRun(runRow.id, stats);
     return res.json({ runId: runRow.id, stats });
   } catch (err) {
     await completeImportRun(runRow.id, {}, String(err));
+    return res.status(500).json({ error: { message: String(err) } });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Staged companies
+// GET /api/migration/companies?validationStatus=invalid&page=1&limit=50
+// ---------------------------------------------------------------------------
+
+router.get("/migration/companies", async (req: Request, res: Response) => {
+  try {
+    const { validationStatus, page, limit } = req.query as Record<string, string>;
+    const result = await listStagedCompanies({
+      validationStatus: validationStatus || undefined,
+      page: page ? parseInt(page, 10) : 1,
+      limit: limit ? parseInt(limit, 10) : 50,
+    });
+    return res.json(result);
+  } catch (err) {
+    return res.status(500).json({ error: { message: String(err) } });
+  }
+});
+
+router.post("/migration/companies/:id/approve", async (req: Request, res: Response) => {
+  try {
+    await approveStagedCompany(req.params.id as string, req.user!.id);
+    return res.json({ success: true });
+  } catch (err: any) {
+    return res.status(err.statusCode ?? 500).json({ error: { message: err.message } });
+  }
+});
+
+router.post("/migration/companies/:id/reject", async (req: Request, res: Response) => {
+  try {
+    const { notes } = req.body as { notes?: string };
+    await rejectStagedCompany(req.params.id as string, req.user!.id, notes);
+    return res.json({ success: true });
+  } catch (err) {
+    return res.status(500).json({ error: { message: String(err) } });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Staged properties
+// GET /api/migration/properties?validationStatus=invalid&page=1&limit=50
+// ---------------------------------------------------------------------------
+
+router.get("/migration/properties", async (req: Request, res: Response) => {
+  try {
+    const { validationStatus, page, limit } = req.query as Record<string, string>;
+    const result = await listStagedProperties({
+      validationStatus: validationStatus || undefined,
+      page: page ? parseInt(page, 10) : 1,
+      limit: limit ? parseInt(limit, 10) : 50,
+    });
+    return res.json(result);
+  } catch (err) {
+    return res.status(500).json({ error: { message: String(err) } });
+  }
+});
+
+router.post("/migration/properties/:id/approve", async (req: Request, res: Response) => {
+  try {
+    await approveStagedProperty(req.params.id as string, req.user!.id);
+    return res.json({ success: true });
+  } catch (err: any) {
+    return res.status(err.statusCode ?? 500).json({ error: { message: err.message } });
+  }
+});
+
+router.post("/migration/properties/:id/reject", async (req: Request, res: Response) => {
+  try {
+    const { notes } = req.body as { notes?: string };
+    await rejectStagedProperty(req.params.id as string, req.user!.id, notes);
+    return res.json({ success: true });
+  } catch (err) {
+    return res.status(500).json({ error: { message: String(err) } });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Staged leads
+// GET /api/migration/leads?validationStatus=invalid&page=1&limit=50
+// ---------------------------------------------------------------------------
+
+router.get("/migration/leads", async (req: Request, res: Response) => {
+  try {
+    const { validationStatus, page, limit } = req.query as Record<string, string>;
+    const result = await listStagedLeads({
+      validationStatus: validationStatus || undefined,
+      page: page ? parseInt(page, 10) : 1,
+      limit: limit ? parseInt(limit, 10) : 50,
+    });
+    return res.json(result);
+  } catch (err) {
+    return res.status(500).json({ error: { message: String(err) } });
+  }
+});
+
+router.post("/migration/leads/:id/approve", async (req: Request, res: Response) => {
+  try {
+    await approveStagedLead(req.params.id as string, req.user!.id);
+    return res.json({ success: true });
+  } catch (err: any) {
+    return res.status(err.statusCode ?? 500).json({ error: { message: err.message } });
+  }
+});
+
+router.post("/migration/leads/:id/reject", async (req: Request, res: Response) => {
+  try {
+    const { notes } = req.body as { notes?: string };
+    await rejectStagedLead(req.params.id as string, req.user!.id, notes);
+    return res.json({ success: true });
+  } catch (err) {
     return res.status(500).json({ error: { message: String(err) } });
   }
 });

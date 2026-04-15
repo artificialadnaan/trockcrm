@@ -5,7 +5,39 @@ export interface MigrationSummary {
   deals: Record<string, number>;
   contacts: Record<string, number>;
   activities: Record<string, number>;
+  companies: Record<string, number>;
+  properties: Record<string, number>;
+  leads: Record<string, number>;
   recentRuns: ImportRun[];
+}
+
+export interface MigrationExceptionItem {
+  id: string;
+  entityType: "company" | "property" | "lead" | "deal" | "contact" | "activity";
+  bucket:
+    | "unknown_company"
+    | "ambiguous_property"
+    | "ambiguous_contact"
+    | "lead_vs_deal_conflict"
+    | "ambiguous_email_activity_attribution"
+    | "missing_owner_assignment";
+  title: string;
+  detail: string;
+  validationStatus: string;
+  reviewNotes: string | null;
+  reviewable: boolean;
+  reviewHint: string;
+}
+
+export interface MigrationExceptionGroup {
+  bucket: MigrationExceptionItem["bucket"];
+  label: string;
+  count: number;
+  items: MigrationExceptionItem[];
+}
+
+export interface MigrationExceptionsResponse {
+  groups: MigrationExceptionGroup[];
 }
 
 export interface ImportRun {
@@ -76,6 +108,29 @@ export function useMigrationSummary() {
   useEffect(() => { load(); }, [load]);
 
   return { summary, loading, error, refetch: load, runValidation };
+}
+
+export function useMigrationExceptions() {
+  const [exceptions, setExceptions] = useState<MigrationExceptionGroup[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await api<MigrationExceptionsResponse>("/migration/exceptions");
+      setExceptions(data.groups ?? []);
+    } catch (err) {
+      setError("Failed to load migration exceptions");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  return { exceptions, loading, error, refetch: load };
 }
 
 export function useStagedDeals(validationStatus?: string) {

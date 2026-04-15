@@ -1,9 +1,9 @@
-import { CheckCircle2, AlertTriangle, XCircle, Clock, RefreshCw, Play } from "lucide-react";
+import { CheckCircle2, XCircle, Clock, RefreshCw, Play } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Link } from "react-router-dom";
-import { useMigrationSummary } from "@/hooks/use-migration";
+import { useMigrationSummary, useMigrationExceptions } from "@/hooks/use-migration";
 import { useState } from "react";
 
 const STATUS_COLORS: Record<string, string> = {
@@ -68,14 +68,70 @@ function StatCard({
   );
 }
 
+function ExceptionBucketCard({
+  label,
+  count,
+  items,
+}: {
+  label: string;
+  count: number;
+  items: Array<{
+    id: string;
+    entityType: string;
+    title: string;
+    detail: string;
+    reviewHint: string;
+    reviewable: boolean;
+  }>;
+}) {
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <CardTitle className="text-sm font-medium text-gray-500 uppercase tracking-wide">
+              {label}
+            </CardTitle>
+            <div className="text-2xl font-semibold text-gray-900 mt-1">{count}</div>
+          </div>
+          <Badge className="bg-amber-100 text-amber-800">Review</Badge>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {items.map((item) => (
+          <div key={item.id} className="rounded-md border bg-white p-3">
+            <div className="flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <div className="text-sm font-medium text-gray-900 truncate">{item.title}</div>
+                <div className="text-xs text-gray-500 uppercase tracking-wide">{item.entityType}</div>
+              </div>
+              <Badge className="bg-gray-100 text-gray-700">{item.reviewable ? "Inline" : "Read-only"}</Badge>
+            </div>
+            <p className="mt-2 text-sm text-gray-600">{item.detail}</p>
+            <p className="mt-1 text-xs text-amber-700">{item.reviewHint}</p>
+          </div>
+        ))}
+      </CardContent>
+    </Card>
+  );
+}
+
 export function MigrationDashboardPage() {
   const { summary, loading, error, refetch, runValidation } = useMigrationSummary();
+  const {
+    exceptions,
+    loading: exceptionsLoading,
+    error: exceptionsError,
+    refetch: refetchExceptions,
+  } = useMigrationExceptions();
   const [validating, setValidating] = useState(false);
+  const exceptionTotal = exceptions.reduce((sum, group) => sum + group.count, 0);
 
   const handleValidate = async () => {
     setValidating(true);
     try {
       await runValidation();
+      await Promise.all([refetch(), refetchExceptions()]);
     } finally {
       setValidating(false);
     }
@@ -114,12 +170,47 @@ export function MigrationDashboardPage() {
       )}
 
       {summary && (
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-3 xl:grid-cols-6 gap-4">
           <StatCard label="Deals" stats={summary.deals} href="/admin/migration/deals" />
           <StatCard label="Contacts" stats={summary.contacts} href="/admin/migration/contacts" />
           <StatCard label="Activities" stats={summary.activities} />
+          <StatCard label="Companies" stats={summary.companies} />
+          <StatCard label="Properties" stats={summary.properties} />
+          <StatCard label="Leads" stats={summary.leads} />
         </div>
       )}
+
+      <div className="space-y-3">
+        <div className="flex items-center justify-between">
+          <h2 className="text-sm font-medium text-gray-700 uppercase tracking-wide">
+            Migration Exceptions
+          </h2>
+          <div className="text-xs text-gray-500">
+            {exceptionTotal.toLocaleString()} unresolved mappings
+          </div>
+          <Button variant="outline" size="sm" onClick={refetchExceptions} disabled={exceptionsLoading}>
+            <RefreshCw className={`h-4 w-4 mr-1 ${exceptionsLoading ? "animate-spin" : ""}`} />
+            Refresh Exceptions
+          </Button>
+        </div>
+
+        {exceptionsError && (
+          <div className="rounded-md bg-red-50 border border-red-200 p-4 text-red-800 text-sm">
+            {exceptionsError}
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          {exceptions.map((group) => (
+            <ExceptionBucketCard
+              key={group.bucket}
+              label={group.label}
+              count={group.count}
+              items={group.items}
+            />
+          ))}
+        </div>
+      </div>
 
       {/* Recent runs */}
       {summary?.recentRuns && summary.recentRuns.length > 0 && (
