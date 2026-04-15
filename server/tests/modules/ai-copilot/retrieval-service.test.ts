@@ -73,4 +73,37 @@ describe("AI copilot retrieval service", () => {
     expect(results.map((row) => row.id)).toEqual(["chunk-1", "chunk-2"]);
     expect(tenantDb.execute).toHaveBeenCalledTimes(1);
   });
+
+  it("falls back to recent indexed chunks when embeddings are unavailable", async () => {
+    const tenantDb = {
+      execute: vi
+        .fn()
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({
+          rows: [
+            {
+              id: "chunk-9",
+              document_id: "doc-9",
+              chunk_index: 0,
+              text: "Recent inbound email mentioned revised scope.",
+              metadata_json: { sourceType: "email_message", sentAt: "2026-04-15T12:00:00.000Z" },
+              distance: null,
+            },
+          ],
+        }),
+    };
+
+    const results = await searchDealKnowledge(tenantDb as any, {
+      dealId: "deal-1",
+      embedding: Array.from({ length: 1536 }, () => 0),
+      limit: 1,
+    });
+
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({
+      id: "chunk-9",
+      distance: 1,
+    });
+    expect(tenantDb.execute).toHaveBeenCalledTimes(2);
+  });
 });

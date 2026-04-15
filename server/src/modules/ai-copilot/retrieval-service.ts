@@ -29,33 +29,66 @@ export interface DealKnowledgeChunk {
   distance: number;
 }
 
+function mapRowsToChunks(rows: QueryResultRow[]): DealKnowledgeChunk[] {
+  return rows.map((row) => ({
+    id: row.id,
+    documentId: row.document_id,
+    chunkIndex: Number(row.chunk_index ?? 0),
+    text: row.text,
+    metadata: row.metadata_json ?? {},
+    distance: row.distance == null ? 1 : Number(row.distance ?? 1),
+  }));
+}
+
 export async function searchDealKnowledge(
   tenantDb: TenantDb,
   input: DealKnowledgeSearchInput
 ): Promise<DealKnowledgeChunk[]> {
   const limit = input.limit ?? 5;
   const embeddingLiteral = `[${input.embedding.join(",")}]`;
-  const result = await tenantDb.execute(sql.raw(`
+  const result = await tenantDb.execute(sql`
     SELECT
       c.id,
       c.document_id,
       c.chunk_index,
       c.text,
       c.metadata_json,
-      (c.embedding <=> '${embeddingLiteral}'::vector) AS distance
+      (c.embedding <=> ${embeddingLiteral}::vector) AS distance
     FROM ai_embedding_chunks c
     JOIN ai_document_index d ON d.id = c.document_id
-    WHERE d.deal_id = '${input.dealId}'
-    ORDER BY c.embedding <=> '${embeddingLiteral}'::vector
+    WHERE d.deal_id = ${input.dealId}
+      AND c.embedding IS NOT NULL
+    ORDER BY c.embedding <=> ${embeddingLiteral}::vector
     LIMIT ${limit}
-  `));
+  `);
+  const rows = getRows(result);
 
-  return getRows(result).map((row) => ({
-    id: row.id,
-    documentId: row.document_id,
-    chunkIndex: Number(row.chunk_index ?? 0),
-    text: row.text,
-    metadata: row.metadata_json ?? {},
-    distance: Number(row.distance ?? 0),
-  }));
+  if (rows.length > 0) {
+    return mapRowsToChunks(rows);
+  }
+
+  const fallbackResult = await tenantDb.execute(sql`
+    SELECT
+      c.id,
+      c.document_id,
+      c.chunk_index,
+      c.text,
+      c.metadata_json,
+      NULL::float8 AS distance
+    FROM ai_embedding_chunks c
+    JOIN ai_document_index d ON d.id = c.document_id
+    WHERE d.deal_id = ${input.dealId}
+    ORDER BY
+      COALESCE(
+        NULLIF(c.metadata_json->>'sentAt', '')::timestamptz,
+        d.indexed_at,
+        d.updated_at,
+        d.created_at,
+        c.created_at
+      ) DESC,
+      c.chunk_index ASC
+    LIMIT ${limit}
+  `);
+
+  return mapRowsToChunks(getRows(fallbackResult));
 }
