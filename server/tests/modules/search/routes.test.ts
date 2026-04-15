@@ -175,4 +175,47 @@ describe("search routes", () => {
       }),
     });
   });
+
+  it("tracks AI search impressions with query context", async () => {
+    aiCopilotMocks.recordAiFeedback.mockResolvedValueOnce({ id: "feedback-3" });
+
+    const app = createApp();
+    const res = await request(app)
+      .post("/api/search/ai/interaction")
+      .send({
+        queryId: "33333333-3333-3333-3333-333333333333",
+        interactionType: "search_impression",
+        targetValue: "deal_lookup",
+        deepLink: "/search?q=alpha%20revision",
+        queryContext: {
+          query: "alpha revision",
+          intent: "deal_lookup",
+          structuredTotal: 2,
+          topEntityTypes: ["deal"],
+          recommendedActionTypes: ["refresh_deal_copilot", "review_deal_emails"],
+          hasEvidence: true,
+        },
+      });
+
+    expect(res.status).toBe(201);
+    expect(aiCopilotMocks.recordAiFeedback).toHaveBeenCalledWith(expect.anything(), {
+      targetType: "search_query",
+      targetId: "33333333-3333-3333-3333-333333333333",
+      userId: "director-1",
+      feedbackType: "search_interaction",
+      feedbackValue: "search_impression",
+      comment: JSON.stringify({
+        targetValue: "deal_lookup",
+        deepLink: "/search?q=alpha%20revision",
+        queryContext: {
+          query: "alpha revision",
+          intent: "deal_lookup",
+          structuredTotal: 2,
+          topEntityTypes: ["deal"],
+          recommendedActionTypes: ["refresh_deal_copilot", "review_deal_emails"],
+          hasEvidence: true,
+        },
+      }),
+    });
+  });
 });

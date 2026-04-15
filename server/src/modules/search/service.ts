@@ -118,18 +118,19 @@ export async function naturalLanguageSearch(
   userId?: string,
 ): Promise<AiSearchResponse> {
   const structured = await globalSearch(tenantDb, query, types, userRole, userId);
+  const intent = classifySearchIntent(structured.query);
   const [evidence, interactionScores] = await Promise.all([
     searchAiEvidence(tenantDb, structured.query),
     getSearchInteractionScores(tenantDb),
   ]);
   const rankedEvidence = rankEvidenceByInteractions(evidence, interactionScores);
   const rankedTopEntities = buildTopEntityAnchors(structured, interactionScores);
-  const rankedActions = buildRecommendedActions(structured, rankedEvidence, interactionScores);
+  const rankedActions = buildRecommendedActions(structured, rankedEvidence, interactionScores, intent);
 
   return {
     queryId: crypto.randomUUID(),
     query: structured.query,
-    intent: classifySearchIntent(structured.query),
+    intent,
     summary: buildAiSearchSummary(structured, rankedEvidence),
     structured,
     topEntities: rankedTopEntities,
@@ -521,7 +522,8 @@ function buildTopEntityAnchors(
 function buildRecommendedActions(
   structured: SearchResponse,
   evidence: AiSearchEvidence[],
-  interactionScores: SearchInteractionScores
+  interactionScores: SearchInteractionScores,
+  currentIntent: AiSearchResponse["intent"]
 ): AiSearchRecommendedAction[] {
   const actions: Array<{ action: AiSearchRecommendedAction; index: number }> = [];
   const push = (action: AiSearchRecommendedAction) => {
@@ -542,7 +544,7 @@ function buildRecommendedActions(
       rationale: `Jump straight into ${topDeal.primaryLabel} and review the AI copilot context.`,
       deepLink: `${topDeal.deepLink}?tab=overview&focus=copilot`,
       executionMode: "navigate",
-      interactionScore: scoreAction("open_deal_copilot", `${topDeal.deepLink}?tab=overview&focus=copilot`, interactionScores),
+      interactionScore: scoreAction("open_deal_copilot", `${topDeal.deepLink}?tab=overview&focus=copilot`, interactionScores, currentIntent),
     });
     push({
       actionType: "review_deal_emails",
@@ -550,7 +552,7 @@ function buildRecommendedActions(
       rationale: `Open the email tab for ${topDeal.primaryLabel} to verify the communications behind this answer.`,
       deepLink: `${topDeal.deepLink}?tab=email`,
       executionMode: "navigate",
-      interactionScore: scoreAction("review_deal_emails", `${topDeal.deepLink}?tab=email`, interactionScores),
+      interactionScore: scoreAction("review_deal_emails", `${topDeal.deepLink}?tab=email`, interactionScores, currentIntent),
     });
     push({
       actionType: "refresh_deal_copilot",
@@ -561,7 +563,7 @@ function buildRecommendedActions(
       apiEndpoint: `/ai/deals/${topDeal.id}/regenerate`,
       apiMethod: "POST",
       successMessage: "Deal copilot refresh queued",
-      interactionScore: scoreAction("refresh_deal_copilot", `${topDeal.deepLink}?tab=overview&focus=copilot`, interactionScores),
+      interactionScore: scoreAction("refresh_deal_copilot", `${topDeal.deepLink}?tab=overview&focus=copilot`, interactionScores, currentIntent),
     });
     push({
       actionType: "open_best_match",
@@ -569,7 +571,7 @@ function buildRecommendedActions(
       rationale: `Jump to ${topDeal.primaryLabel} to inspect the strongest structured deal result.`,
       deepLink: `${topDeal.deepLink}?tab=overview`,
       executionMode: "navigate",
-      interactionScore: scoreAction("open_best_match", `${topDeal.deepLink}?tab=overview`, interactionScores),
+      interactionScore: scoreAction("open_best_match", `${topDeal.deepLink}?tab=overview`, interactionScores, currentIntent),
     });
   }
 
@@ -580,7 +582,7 @@ function buildRecommendedActions(
       rationale: "The strongest AI evidence points to a specific deal context.",
       deepLink: `/deals/${topEvidenceDeal}?tab=overview`,
       executionMode: "navigate",
-      interactionScore: scoreAction("open_deal_context", `/deals/${topEvidenceDeal}?tab=overview`, interactionScores),
+      interactionScore: scoreAction("open_deal_context", `/deals/${topEvidenceDeal}?tab=overview`, interactionScores, currentIntent),
     });
     push({
       actionType: "review_deal_emails",
@@ -588,7 +590,7 @@ function buildRecommendedActions(
       rationale: "Open the deal email context tied to the strongest evidence.",
       deepLink: `/deals/${topEvidenceDeal}?tab=email`,
       executionMode: "navigate",
-      interactionScore: scoreAction("review_deal_emails", `/deals/${topEvidenceDeal}?tab=email`, interactionScores),
+      interactionScore: scoreAction("review_deal_emails", `/deals/${topEvidenceDeal}?tab=email`, interactionScores, currentIntent),
     });
   }
 
@@ -599,7 +601,7 @@ function buildRecommendedActions(
       rationale: `Jump to ${topContact.primaryLabel} to review the strongest contact result.`,
       deepLink: topContact.deepLink,
       executionMode: "navigate",
-      interactionScore: scoreAction("open_contact", topContact.deepLink, interactionScores),
+      interactionScore: scoreAction("open_contact", topContact.deepLink, interactionScores, currentIntent),
     });
   }
 
@@ -610,7 +612,7 @@ function buildRecommendedActions(
       rationale: `Review the file location tied to ${topFile.primaryLabel}.`,
       deepLink: topFile.deepLink,
       executionMode: "navigate",
-      interactionScore: scoreAction("open_file_context", topFile.deepLink, interactionScores),
+      interactionScore: scoreAction("open_file_context", topFile.deepLink, interactionScores, currentIntent),
     });
   }
 
@@ -626,11 +628,13 @@ function buildRecommendedActions(
 interface SearchInteractionScores {
   deepLinkCounts: Map<string, number>;
   actionCounts: Map<string, number>;
+  intentActionCounts: Map<string, Map<string, number>>;
 }
 
 async function getSearchInteractionScores(tenantDb: TenantDb): Promise<SearchInteractionScores> {
   const rows = (await tenantDb
     .select({
+      targetId: aiFeedback.targetId,
       feedbackValue: aiFeedback.feedbackValue,
       comment: aiFeedback.comment,
     })
@@ -641,36 +645,62 @@ async function getSearchInteractionScores(tenantDb: TenantDb): Promise<SearchInt
         eq(aiFeedback.feedbackType, "search_interaction"),
         gte(aiFeedback.createdAt, sql`NOW() - INTERVAL '90 days'`)
       )
-    )) as Array<{ feedbackValue: string; comment: string | null }>;
+    )) as Array<{ targetId: string; feedbackValue: string; comment: string | null }>;
 
   const deepLinkCounts = new Map<string, number>();
   const actionCounts = new Map<string, number>();
+  const queryIntentById = new Map<string, string>();
+  const intentActionCounts = new Map<string, Map<string, number>>();
 
   for (const row of rows) {
     if (!row.comment) continue;
     try {
-      const parsed = JSON.parse(row.comment) as { targetValue?: string; deepLink?: string };
+      const parsed = JSON.parse(row.comment) as {
+        targetValue?: string;
+        deepLink?: string;
+        queryContext?: { intent?: string };
+      };
+      if (row.feedbackValue === "search_impression" && parsed.queryContext?.intent) {
+        queryIntentById.set(row.targetId, parsed.queryContext.intent);
+        continue;
+      }
       const weight = row.feedbackValue === "recommended_action_executed" ? 4 : 1;
       if (parsed.deepLink) {
         deepLinkCounts.set(parsed.deepLink, (deepLinkCounts.get(parsed.deepLink) ?? 0) + weight);
       }
       if (parsed.targetValue) {
         actionCounts.set(parsed.targetValue, (actionCounts.get(parsed.targetValue) ?? 0) + weight);
+        const intent = queryIntentById.get(row.targetId);
+        if (intent) {
+          const byIntent = intentActionCounts.get(intent) ?? new Map<string, number>();
+          const intentWeight = row.feedbackValue === "recommended_action_executed" ? 2 : 1;
+          byIntent.set(parsed.targetValue, (byIntent.get(parsed.targetValue) ?? 0) + intentWeight);
+          intentActionCounts.set(intent, byIntent);
+        }
       }
     } catch {
       continue;
     }
   }
 
-  return { deepLinkCounts, actionCounts };
+  return { deepLinkCounts, actionCounts, intentActionCounts };
 }
 
 function scoreDeepLink(deepLink: string, interactionScores: SearchInteractionScores) {
   return interactionScores.deepLinkCounts.get(deepLink) ?? 0;
 }
 
-function scoreAction(actionType: string, deepLink: string, interactionScores: SearchInteractionScores) {
-  return (interactionScores.actionCounts.get(actionType) ?? 0) + (interactionScores.deepLinkCounts.get(deepLink) ?? 0);
+function scoreAction(
+  actionType: string,
+  deepLink: string,
+  interactionScores: SearchInteractionScores,
+  currentIntent: AiSearchResponse["intent"]
+) {
+  return (
+    (interactionScores.actionCounts.get(actionType) ?? 0) +
+    (interactionScores.deepLinkCounts.get(deepLink) ?? 0) +
+    (interactionScores.intentActionCounts.get(currentIntent)?.get(actionType) ?? 0)
+  );
 }
 
 function rankEvidenceByInteractions(

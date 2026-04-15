@@ -38,6 +38,23 @@ describe("search service", () => {
       from: vi.fn(() => ({
         where: vi.fn().mockResolvedValue([
           {
+            targetId: "query-1",
+            feedbackValue: "search_impression",
+            comment: JSON.stringify({
+              targetValue: "deal_lookup",
+              deepLink: "/search?q=alpha%20revision",
+              queryContext: {
+                query: "alpha revision",
+                intent: "deal_lookup",
+                structuredTotal: 1,
+                topEntityTypes: ["deal"],
+                recommendedActionTypes: ["refresh_deal_copilot"],
+                hasEvidence: true,
+              },
+            }),
+          },
+          {
+            targetId: "query-1",
             feedbackValue: "recommended_action_executed",
             comment: JSON.stringify({
               targetValue: "refresh_deal_copilot",
@@ -47,6 +64,7 @@ describe("search service", () => {
             }),
           },
           {
+            targetId: "query-2",
             feedbackValue: "recommended_action_click",
             comment: JSON.stringify({
               targetValue: "review_deal_emails",
@@ -54,6 +72,7 @@ describe("search service", () => {
             }),
           },
           {
+            targetId: "query-3",
             feedbackValue: "top_entity_click",
             comment: JSON.stringify({
               targetValue: "deal:deal-1",
@@ -69,7 +88,7 @@ describe("search service", () => {
       select,
     };
 
-    const result = await naturalLanguageSearch(tenantDb as any, "alpha revision");
+    const result = await naturalLanguageSearch(tenantDb as any, "deal alpha revision");
 
     expect(result.topEntities[0]).toMatchObject({
       deepLink: "/deals/deal-1",
@@ -79,7 +98,7 @@ describe("search service", () => {
       actionType: "refresh_deal_copilot",
       deepLink: "/deals/deal-1?tab=overview&focus=copilot",
       executionMode: "api_then_navigate",
-      interactionScore: 8,
+      interactionScore: 10,
     });
     expect(result.evidence[0]).toMatchObject({
       deepLink: "/deals/deal-1",

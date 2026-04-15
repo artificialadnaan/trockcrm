@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { useSearchParams, Link, useNavigate } from "react-router-dom";
 import { Search, Building2, User, FileText, Sparkles } from "lucide-react";
 import { toast } from "sonner";
@@ -62,6 +62,7 @@ export function SearchPage() {
   const { query, setQuery, results, loading } = useSearch();
   const { setQuery: setAiQuery, results: aiResults, loading: aiLoading } = useAiSearch();
   const { addRecent } = useRecentSearches();
+  const trackedQueryIdsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     if (initialQ) {
@@ -78,6 +79,29 @@ export function SearchPage() {
     setAiQuery(q);
     setSearchParams(q.trim().length >= 2 ? { q: q.trim() } : {}, { replace: true });
   };
+
+  useEffect(() => {
+    if (!aiResults?.queryId || aiResults.queryId === "00000000-0000-0000-0000-000000000000") return;
+    if (trackedQueryIdsRef.current.has(aiResults.queryId)) return;
+
+    trackedQueryIdsRef.current.add(aiResults.queryId);
+    void trackAiSearchInteraction({
+      queryId: aiResults.queryId,
+      interactionType: "search_impression",
+      targetValue: aiResults.intent,
+      deepLink: `/search?q=${encodeURIComponent(aiResults.query)}`,
+      queryContext: {
+        query: aiResults.query,
+        intent: aiResults.intent,
+        structuredTotal: aiResults.structured.total,
+        topEntityTypes: aiResults.topEntities.map((item) => item.entityType),
+        recommendedActionTypes: aiResults.recommendedActions.map((item) => item.actionType),
+        hasEvidence: aiResults.evidence.length > 0,
+      },
+    }).catch(() => {
+      trackedQueryIdsRef.current.delete(aiResults.queryId);
+    });
+  }, [aiResults]);
 
   const sections: Array<{ key: "deals" | "contacts" | "files"; label: string }> = [
     { key: "deals", label: "Deals" },

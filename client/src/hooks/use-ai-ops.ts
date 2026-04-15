@@ -17,6 +17,8 @@ export interface AiOpsMetrics {
   aiSearchQueriesWithClick30d: number;
   aiSearchWorkflowExecutions30d: number;
   aiSearchQueriesWithWorkflow30d: number;
+  aiSearchQueriesServed30d: number;
+  aiSearchWorkflowConversionRate30d: number | null;
   positiveFeedback30d: number;
   negativeFeedback30d: number;
   documentsIndexed: number;

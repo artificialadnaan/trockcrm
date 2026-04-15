@@ -187,6 +187,7 @@ export function AiOpsPage() {
             <div className="text-3xl font-black">{metrics?.aiSearchInteractions30d ?? 0}</div>
             <div className="text-sm text-muted-foreground">Tracked AI search interactions</div>
             <div className="text-sm">{metrics?.aiSearchWorkflowExecutions30d ?? 0} executed workflows</div>
+            <div className="text-sm">{metrics?.aiSearchQueriesServed30d ?? 0} queries served</div>
           </CardContent>
         </Card>
 
@@ -199,6 +200,7 @@ export function AiOpsPage() {
             <div className="text-3xl font-black">{metrics?.aiSearchQueriesWithClick30d ?? 0}</div>
             <div className="text-sm text-muted-foreground">Queries with tracked AI search follow-through</div>
             <div className="text-sm">{metrics?.aiSearchQueriesWithWorkflow30d ?? 0} queries with executed workflows</div>
+            <div className="text-sm">{formatPercent(metrics?.aiSearchWorkflowConversionRate30d ?? null)} workflow conversion</div>
           </CardContent>
         </Card>
       </div>

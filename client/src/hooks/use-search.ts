@@ -182,11 +182,19 @@ export function useAiSearch() {
 
 export async function trackAiSearchInteraction(input: {
   queryId: string;
-  interactionType: "recommended_action_click" | "recommended_action_executed" | "top_entity_click" | "evidence_click";
+  interactionType: "search_impression" | "recommended_action_click" | "recommended_action_executed" | "top_entity_click" | "evidence_click";
   targetValue: string;
   deepLink: string;
   executionMode?: "navigate" | "api_then_navigate";
   apiEndpoint?: string;
+  queryContext?: {
+    query: string;
+    intent: AiSearchResponse["intent"];
+    structuredTotal: number;
+    topEntityTypes: string[];
+    recommendedActionTypes: string[];
+    hasEvidence: boolean;
+  };
 }) {
   return api<{ interaction: { id: string } }>("/search/ai/interaction", {
     method: "POST",

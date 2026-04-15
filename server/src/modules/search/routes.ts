@@ -4,6 +4,7 @@ import { recordAiFeedback } from "../ai-copilot/service.js";
 
 const router = Router();
 const SEARCH_INTERACTION_TYPES = new Set([
+  "search_impression",
   "recommended_action_click",
   "recommended_action_executed",
   "top_entity_click",
@@ -91,6 +92,7 @@ router.post("/ai/interaction", async (req: Request, res: Response) => {
     const deepLink = typeof req.body?.deepLink === "string" ? req.body.deepLink : null;
     const executionMode = typeof req.body?.executionMode === "string" ? req.body.executionMode : null;
     const apiEndpoint = typeof req.body?.apiEndpoint === "string" ? req.body.apiEndpoint : null;
+    const queryContext = req.body?.queryContext && typeof req.body.queryContext === "object" ? req.body.queryContext : null;
 
     if (!queryId || !interactionType || !targetValue || !req.user?.id) {
       return res.status(400).json({ error: "queryId, interactionType, and targetValue are required" });
@@ -110,6 +112,7 @@ router.post("/ai/interaction", async (req: Request, res: Response) => {
         deepLink,
         ...(executionMode ? { executionMode } : {}),
         ...(apiEndpoint ? { apiEndpoint } : {}),
+        ...(queryContext ? { queryContext } : {}),
       }),
     });
 
