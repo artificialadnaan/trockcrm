@@ -23,6 +23,7 @@ import {
   Camera,
   Image,
   Sparkles,
+  ShieldAlert,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
@@ -52,6 +53,7 @@ const adminItems = [
   { to: "/admin/users", icon: Users, label: "Users", roles: ["admin"] },
   { to: "/admin/pipeline", icon: Settings, label: "Pipeline Config", roles: ["admin"] },
   { to: "/admin/procore", icon: Zap, label: "Procore Sync", roles: ["admin"] },
+  { to: "/admin/ai-actions", icon: ShieldAlert, label: "AI Actions", roles: ["admin", "director"] },
   { to: "/admin/ai-ops", icon: Sparkles, label: "AI Ops", roles: ["admin", "director"] },
   { to: "/admin/audit", icon: ClipboardList, label: "Audit Log", roles: ["admin", "director"] },
   { to: "/admin/cross-office-reports", icon: Globe, label: "Cross-Office Reports", roles: ["admin", "director"] },

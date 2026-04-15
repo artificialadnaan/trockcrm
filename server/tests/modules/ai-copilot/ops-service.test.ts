@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-const { getAiOpsMetrics, getAiReviewQueue, getAiReviewPacketDetail } = await import("../../../src/modules/ai-copilot/service.js");
+const { getAiActionQueue, getAiOpsMetrics, getAiReviewQueue, getAiReviewPacketDetail } = await import("../../../src/modules/ai-copilot/service.js");
 
 describe("AI ops service", () => {
   it("returns aggregate AI ops metrics", async () => {
@@ -132,5 +132,75 @@ describe("AI ops service", () => {
     expect(result.suggestedTasks).toEqual([]);
     expect(result.blindSpotFlags).toEqual([]);
     expect(result.feedback).toEqual([]);
+  });
+
+  it("returns a triage-ready AI action queue", async () => {
+    const tenantDb = {
+      execute: vi.fn().mockResolvedValue({
+        rows: [
+          {
+            entry_type: "blind_spot",
+            id: "risk-1",
+            deal_id: "deal-1",
+            deal_name: "Alpha Plaza",
+            deal_number: "D-1001",
+            title: "No follow-up task",
+            details: "Deal has no next step.",
+            severity: "high",
+            priority: null,
+            status: "open",
+            created_at: "2026-04-15T12:00:00.000Z",
+            suggested_due_at: null,
+          },
+          {
+            entry_type: "task_suggestion",
+            id: "suggestion-1",
+            deal_id: "deal-2",
+            deal_name: "Beta Tower",
+            deal_number: "D-1002",
+            title: "Call customer",
+            details: "Confirm revision scope.",
+            severity: null,
+            priority: "high",
+            status: "suggested",
+            created_at: "2026-04-15T11:00:00.000Z",
+            suggested_due_at: "2026-04-16T09:00:00.000Z",
+          },
+        ],
+      }),
+    };
+
+    const result = await getAiActionQueue(tenantDb as any, { limit: 10 });
+
+    expect(result).toEqual([
+      {
+        entryType: "blind_spot",
+        id: "risk-1",
+        dealId: "deal-1",
+        dealName: "Alpha Plaza",
+        dealNumber: "D-1001",
+        title: "No follow-up task",
+        details: "Deal has no next step.",
+        severity: "high",
+        priority: null,
+        status: "open",
+        createdAt: "2026-04-15T12:00:00.000Z",
+        suggestedDueAt: null,
+      },
+      {
+        entryType: "task_suggestion",
+        id: "suggestion-1",
+        dealId: "deal-2",
+        dealName: "Beta Tower",
+        dealNumber: "D-1002",
+        title: "Call customer",
+        details: "Confirm revision scope.",
+        severity: null,
+        priority: "high",
+        status: "suggested",
+        createdAt: "2026-04-15T11:00:00.000Z",
+        suggestedDueAt: "2026-04-16T09:00:00.000Z",
+      },
+    ]);
   });
 });

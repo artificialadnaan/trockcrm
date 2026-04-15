@@ -37,6 +37,21 @@ export interface AiReviewQueueEntry {
   negativeFeedbackCount: number;
 }
 
+export interface AiActionQueueEntry {
+  entryType: "blind_spot" | "task_suggestion";
+  id: string;
+  dealId: string | null;
+  dealName: string | null;
+  dealNumber: string | null;
+  title: string;
+  details: string | null;
+  severity: string | null;
+  priority: string | null;
+  status: string;
+  createdAt: string;
+  suggestedDueAt: string | null;
+}
+
 export interface AiReviewPacketDetail {
   packet: {
     id: string;
@@ -89,6 +104,14 @@ export interface QueueAiBackfillResult {
   batchSize: number;
 }
 
+export interface TriageAiActionResult {
+  entryType: "blind_spot" | "task_suggestion";
+  id: string;
+  action: "mark_reviewed" | "resolve" | "dismiss" | "escalate";
+  feedbackId: string;
+  targetStatus: string;
+}
+
 export function useAiOps(limit = 20) {
   const [metrics, setMetrics] = useState<AiOpsMetrics | null>(null);
   const [reviews, setReviews] = useState<AiReviewQueueEntry[]>([]);
@@ -125,12 +148,56 @@ export function useAiOps(limit = 20) {
   };
 }
 
+export function useAiActionQueue(limit = 50) {
+  const [queue, setQueue] = useState<AiActionQueueEntry[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchData = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const response = await api<{ queue: AiActionQueueEntry[] }>(`/ai/ops/action-queue?limit=${limit}`);
+      setQueue(response.queue);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to load AI action queue");
+    } finally {
+      setLoading(false);
+    }
+  }, [limit]);
+
+  useEffect(() => {
+    void fetchData();
+  }, [fetchData]);
+
+  return {
+    queue,
+    loading,
+    error,
+    refetch: fetchData,
+  };
+}
+
 export async function queueAiBackfill(sourceType?: string | null, batchSize = 100) {
   return api<QueueAiBackfillResult>("/ai/ops/backfill", {
     method: "POST",
     json: {
       sourceType: sourceType ?? null,
       batchSize,
+    },
+  });
+}
+
+export async function triageAiActionQueueEntry(
+  entryType: "blind_spot" | "task_suggestion",
+  id: string,
+  input: { action: "mark_reviewed" | "resolve" | "dismiss" | "escalate"; comment?: string | null }
+) {
+  return api<TriageAiActionResult>(`/ai/ops/action-queue/${entryType}/${id}`, {
+    method: "POST",
+    json: {
+      action: input.action,
+      comment: input.comment ?? null,
     },
   });
 }

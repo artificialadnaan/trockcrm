@@ -35,6 +35,7 @@ import { UsersPage } from "@/pages/admin/users-page";
 import { PipelineConfigPage } from "@/pages/admin/pipeline-config-page";
 import { AuditLogPage } from "@/pages/admin/audit-log-page";
 import { CrossOfficeReportsPage } from "@/pages/admin/cross-office-reports-page";
+import { AiActionQueuePage } from "@/pages/admin/ai-action-queue-page";
 import { AiOpsPage } from "@/pages/admin/ai-ops-page";
 import { AiPacketReviewPage } from "@/pages/admin/ai-packet-review-page";
 import { UserGuidePage } from "@/pages/admin/help/user-guide-page";
@@ -100,6 +101,7 @@ export function App() {
               <Route path="/admin/pipeline" element={<PipelineConfigPage />} />
               <Route path="/admin/audit" element={<AuditLogPage />} />
               <Route path="/admin/cross-office-reports" element={<CrossOfficeReportsPage />} />
+              <Route path="/admin/ai-actions" element={<AiActionQueuePage />} />
               <Route path="/admin/merge-queue" element={<MergeQueuePage />} />
               <Route path="/admin/procore" element={<ProcoreSyncPage />} />
               <Route path="/admin/ai-ops" element={<AiOpsPage />} />

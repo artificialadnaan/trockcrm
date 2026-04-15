@@ -5,7 +5,7 @@ describe("DIRECTOR_DASHBOARD_ACTIONS", () => {
   it("defines destinations for every dashboard header action", () => {
     expect(DIRECTOR_DASHBOARD_ACTIONS).toHaveLength(2);
     expect(DIRECTOR_DASHBOARD_ACTIONS.map((action) => action.to)).toEqual([
-      "/tasks",
+      "/admin/ai-actions",
       "/reports",
     ]);
   });

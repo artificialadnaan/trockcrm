@@ -5,6 +5,7 @@ import { AppError } from "../../middleware/error-handler.js";
 import { getDealById } from "../deals/service.js";
 import { getCompanyById } from "../companies/service.js";
 import {
+  getAiActionQueue,
   getCompanyCopilotView,
   dismissTaskSuggestion,
   getDealCopilotView,
@@ -13,6 +14,7 @@ import {
   getAiReviewPacketDetail,
   getAiReviewQueue,
   recordAiFeedback,
+  triageAiActionQueueEntry,
 } from "./service.js";
 import { acceptTaskSuggestion } from "./task-suggestion-service.js";
 
@@ -146,6 +148,17 @@ router.get("/ops/reviews", requireRole("admin", "director"), async (req, res, ne
   }
 });
 
+router.get("/ops/action-queue", requireRole("admin", "director"), async (req, res, next) => {
+  try {
+    const limit = req.query.limit ? Number(req.query.limit) : undefined;
+    const queue = await getAiActionQueue(req.tenantDb!, { limit });
+    await req.commitTransaction!();
+    res.json({ queue });
+  } catch (err) {
+    next(err);
+  }
+});
+
 router.get("/ops/reviews/:packetId", requireRole("admin", "director"), async (req, res, next) => {
   try {
     const packetId = Array.isArray(req.params.packetId) ? req.params.packetId[0] : req.params.packetId;
@@ -155,6 +168,34 @@ router.get("/ops/reviews/:packetId", requireRole("admin", "director"), async (re
       throw new AppError(404, "AI packet not found");
     }
     res.json(detail);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/ops/action-queue/:entryType/:id", requireRole("admin", "director"), async (req, res, next) => {
+  try {
+    const entryType = Array.isArray(req.params.entryType) ? req.params.entryType[0] : req.params.entryType;
+    const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    if (entryType !== "blind_spot" && entryType !== "task_suggestion") {
+      throw new AppError(400, "entryType must be blind_spot or task_suggestion");
+    }
+
+    const action = typeof req.body?.action === "string" ? req.body.action : "";
+    if (!["mark_reviewed", "resolve", "dismiss", "escalate"].includes(action)) {
+      throw new AppError(400, "Invalid triage action");
+    }
+
+    const result = await triageAiActionQueueEntry(req.tenantDb!, {
+      entryType,
+      id,
+      action: action as "mark_reviewed" | "resolve" | "dismiss" | "escalate",
+      userId: req.user!.id,
+      comment: typeof req.body?.comment === "string" ? req.body.comment : null,
+    });
+
+    await req.commitTransaction!();
+    res.json(result);
   } catch (err) {
     next(err);
   }

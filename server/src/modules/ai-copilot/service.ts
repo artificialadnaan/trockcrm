@@ -136,6 +136,21 @@ export interface CompanyCopilotView {
   blindSpotFlags: Array<typeof aiRiskFlags.$inferSelect>;
 }
 
+export interface AiActionQueueEntry {
+  entryType: "blind_spot" | "task_suggestion";
+  id: string;
+  dealId: string | null;
+  dealName: string | null;
+  dealNumber: string | null;
+  title: string;
+  details: string | null;
+  severity: string | null;
+  priority: string | null;
+  status: string;
+  createdAt: string;
+  suggestedDueAt: string | null;
+}
+
 interface GenerateDealCopilotPacketDeps {
   getDealCopilotContext: (tenantDb: TenantDb, dealId: string) => Promise<DealCopilotContext>;
   getDealBlindSpotSignals: (tenantDb: TenantDb, dealId: string, now?: Date) => Promise<DealBlindSpotSignal[]>;
@@ -471,6 +486,143 @@ export async function getDirectorBlindSpots(tenantDb: TenantDb) {
     .limit(25);
 
   return rows;
+}
+
+export async function getAiActionQueue(
+  tenantDb: TenantDb,
+  options: { limit?: number } = {}
+): Promise<AiActionQueueEntry[]> {
+  const limit = Math.max(1, Math.min(options.limit ?? 50, 200));
+  const rows = getRows(await tenantDb.execute(sql`
+    SELECT *
+    FROM (
+      SELECT
+        'blind_spot'::text AS entry_type,
+        rf.id::text AS id,
+        rf.deal_id::text AS deal_id,
+        d.name::text AS deal_name,
+        d.deal_number::text AS deal_number,
+        rf.title::text AS title,
+        rf.details::text AS details,
+        rf.severity::text AS severity,
+        NULL::text AS priority,
+        rf.status::text AS status,
+        rf.created_at AS created_at,
+        NULL::timestamptz AS suggested_due_at
+      FROM ai_risk_flags rf
+      LEFT JOIN deals d ON d.id = rf.deal_id
+      WHERE rf.status = 'open'
+
+      UNION ALL
+
+      SELECT
+        'task_suggestion'::text AS entry_type,
+        ts.id::text AS id,
+        ts.scope_id::text AS deal_id,
+        d.name::text AS deal_name,
+        d.deal_number::text AS deal_number,
+        ts.title::text AS title,
+        ts.description::text AS details,
+        NULL::text AS severity,
+        ts.priority::text AS priority,
+        ts.status::text AS status,
+        ts.created_at AS created_at,
+        ts.suggested_due_at AS suggested_due_at
+      FROM ai_task_suggestions ts
+      LEFT JOIN deals d ON d.id = ts.scope_id
+      WHERE ts.scope_type = 'deal'
+        AND ts.status = 'suggested'
+    ) queue
+    ORDER BY created_at DESC
+    LIMIT ${limit}
+  `));
+
+  return rows.map((row) => ({
+    entryType: row.entry_type === "blind_spot" ? "blind_spot" : "task_suggestion",
+    id: String(row.id),
+    dealId: row.deal_id ? String(row.deal_id) : null,
+    dealName: row.deal_name ? String(row.deal_name) : null,
+    dealNumber: row.deal_number ? String(row.deal_number) : null,
+    title: String(row.title),
+    details: row.details ? String(row.details) : null,
+    severity: row.severity ? String(row.severity) : null,
+    priority: row.priority ? String(row.priority) : null,
+    status: String(row.status),
+    createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at),
+    suggestedDueAt:
+      row.suggested_due_at instanceof Date
+        ? row.suggested_due_at.toISOString()
+        : row.suggested_due_at
+          ? String(row.suggested_due_at)
+          : null,
+  }));
+}
+
+export async function triageAiActionQueueEntry(
+  tenantDb: TenantDb,
+  input: {
+    entryType: "blind_spot" | "task_suggestion";
+    id: string;
+    action: "mark_reviewed" | "resolve" | "dismiss" | "escalate";
+    userId: string;
+    comment?: string | null;
+  }
+) {
+  if (input.entryType === "blind_spot") {
+    if (input.action === "resolve" || input.action === "dismiss") {
+      await tenantDb
+        .update(aiRiskFlags)
+        .set({
+          status: "resolved",
+          resolvedAt: new Date(),
+        })
+        .where(eq(aiRiskFlags.id, input.id));
+    }
+
+    const feedback = await recordAiFeedback(tenantDb, {
+      targetType: "risk_flag",
+      targetId: input.id,
+      userId: input.userId,
+      feedbackType: "triage_action",
+      feedbackValue: input.action,
+      comment: input.comment ?? null,
+    });
+
+    return {
+      entryType: input.entryType,
+      id: input.id,
+      action: input.action,
+      feedbackId: feedback.id,
+      targetStatus: input.action === "resolve" || input.action === "dismiss" ? "resolved" : "open",
+    };
+  }
+
+  if (input.action === "dismiss" || input.action === "resolve") {
+    await tenantDb
+      .update(aiTaskSuggestions)
+      .set({
+        status: "dismissed",
+        resolvedAt: new Date(),
+      })
+      .where(eq(aiTaskSuggestions.id, input.id));
+  }
+
+  const feedback = await recordAiFeedback(tenantDb, {
+    targetType: "task_suggestion",
+    targetId: input.id,
+    userId: input.userId,
+    feedbackType: "triage_action",
+    feedbackValue: input.action,
+    comment: input.comment ?? null,
+  });
+
+  return {
+    entryType: input.entryType,
+    id: input.id,
+    action: input.action,
+    feedbackId: feedback.id,
+    targetStatus: input.action === "dismiss" || input.action === "resolve" ? "dismissed" : "suggested",
+  };
 }
 
 export async function getAiOpsMetrics(tenantDb: TenantDb): Promise<AiOpsMetrics> {

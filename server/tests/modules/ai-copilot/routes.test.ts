@@ -3,6 +3,7 @@ import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const serviceMocks = vi.hoisted(() => ({
+  getAiActionQueue: vi.fn(),
   getCompanyCopilotView: vi.fn(),
   getDealCopilotView: vi.fn(),
   dismissTaskSuggestion: vi.fn(),
@@ -10,6 +11,7 @@ const serviceMocks = vi.hoisted(() => ({
   getDirectorBlindSpots: vi.fn(),
   getAiOpsMetrics: vi.fn(),
   getAiReviewQueue: vi.fn(),
+  triageAiActionQueueEntry: vi.fn(),
 }));
 
 const taskSuggestionMocks = vi.hoisted(() => ({
@@ -25,6 +27,7 @@ const companiesServiceMocks = vi.hoisted(() => ({
 }));
 
 vi.mock("../../../src/modules/ai-copilot/service.js", () => ({
+  getAiActionQueue: serviceMocks.getAiActionQueue,
   getCompanyCopilotView: serviceMocks.getCompanyCopilotView,
   getDealCopilotView: serviceMocks.getDealCopilotView,
   dismissTaskSuggestion: serviceMocks.dismissTaskSuggestion,
@@ -32,6 +35,7 @@ vi.mock("../../../src/modules/ai-copilot/service.js", () => ({
   getDirectorBlindSpots: serviceMocks.getDirectorBlindSpots,
   getAiOpsMetrics: serviceMocks.getAiOpsMetrics,
   getAiReviewQueue: serviceMocks.getAiReviewQueue,
+  triageAiActionQueueEntry: serviceMocks.triageAiActionQueueEntry,
 }));
 
 vi.mock("../../../src/modules/ai-copilot/task-suggestion-service.js", () => ({
@@ -251,6 +255,44 @@ describe("ai copilot routes", () => {
     expect(res.status).toBe(200);
     expect(serviceMocks.getAiReviewQueue).toHaveBeenCalledWith(expect.anything(), { limit: 5 });
     expect(res.body.reviews).toHaveLength(1);
+  });
+
+  it("returns AI action queue for director users", async () => {
+    serviceMocks.getAiActionQueue.mockResolvedValue([
+      { entryType: "blind_spot", id: "risk-1", title: "No follow-up task" },
+    ]);
+
+    const app = createApp("director");
+    const res = await request(app).get("/api/ai/ops/action-queue?limit=5");
+
+    expect(res.status).toBe(200);
+    expect(serviceMocks.getAiActionQueue).toHaveBeenCalledWith(expect.anything(), { limit: 5 });
+    expect(res.body.queue).toHaveLength(1);
+  });
+
+  it("applies a triage action to an AI action queue entry", async () => {
+    serviceMocks.triageAiActionQueueEntry.mockResolvedValue({
+      entryType: "blind_spot",
+      id: "risk-1",
+      action: "resolve",
+      feedbackId: "feedback-1",
+      targetStatus: "resolved",
+    });
+
+    const app = createApp("director");
+    const res = await request(app)
+      .post("/api/ai/ops/action-queue/blind_spot/risk-1")
+      .send({ action: "resolve", comment: "Manager handled this directly." });
+
+    expect(res.status).toBe(200);
+    expect(serviceMocks.triageAiActionQueueEntry).toHaveBeenCalledWith(expect.anything(), {
+      entryType: "blind_spot",
+      id: "risk-1",
+      action: "resolve",
+      userId: "director-1",
+      comment: "Manager handled this directly.",
+    });
+    expect(res.body.targetStatus).toBe("resolved");
   });
 
   it("queues an AI backfill job for director users", async () => {
