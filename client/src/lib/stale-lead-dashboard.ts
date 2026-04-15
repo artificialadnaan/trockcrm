@@ -13,16 +13,6 @@ export interface StaleLeadAlertSummary {
   detail: string;
 }
 
-export function getStaleLeadWatchlistMeta(_range?: {
-  from?: string;
-  to?: string;
-}) {
-  return {
-    label: "Current-state lead watchlist",
-    detail: "Snapshot as of today. Not filtered by the selected reporting period.",
-  };
-}
-
 export function buildStaleLeadAlertSummary(
   lead: StaleLeadViewRow | null | undefined,
   fallbackTitle: string,

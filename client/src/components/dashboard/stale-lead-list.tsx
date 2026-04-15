@@ -1,10 +1,8 @@
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { AlertTriangle } from "lucide-react";
-import {
-  getStaleLeadWatchlistMeta,
-  type StaleLeadViewRow,
-} from "@/lib/stale-lead-dashboard";
+import { type StaleLeadViewRow } from "@/lib/stale-lead-dashboard";
+import { getStaleLeadWatchlistMeta } from "@/lib/stale-lead-watchlist-meta";
 
 interface StaleLeadListProps {
   leads: StaleLeadViewRow[];

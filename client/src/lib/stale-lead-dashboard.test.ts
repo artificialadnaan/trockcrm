@@ -1,8 +1,6 @@
 import { describe, expect, it } from "vitest";
-import {
-  buildStaleLeadAlertSummary,
-  getStaleLeadWatchlistMeta,
-} from "./stale-lead-dashboard";
+import { buildStaleLeadAlertSummary } from "./stale-lead-dashboard";
+import { getStaleLeadWatchlistMeta } from "./stale-lead-watchlist-meta";
 
 describe("stale lead dashboard helpers", () => {
   it("builds a leadership alert summary from a stale lead row", () => {
