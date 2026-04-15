@@ -6,6 +6,7 @@ import {
   type DateRangePreset,
 } from "@/hooks/use-director-dashboard";
 import { useRepPerformance } from "@/hooks/use-rep-performance";
+import { DirectorBlindSpotList } from "@/components/ai/director-blind-spot-list";
 import { PipelineBarChart } from "@/components/charts/pipeline-bar-chart";
 import { WinRateTrendChart } from "@/components/charts/win-rate-trend-chart";
 import { ActivityBarChart } from "@/components/charts/activity-bar-chart";
@@ -445,6 +446,8 @@ export function DirectorDashboardPage() {
               </Link>
             )}
           </div>
+
+          <DirectorBlindSpotList />
 
           {/* Regional Focus Card */}
           <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5">

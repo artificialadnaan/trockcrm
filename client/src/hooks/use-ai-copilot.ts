@@ -61,6 +61,18 @@ export interface DealCopilotView {
   blindSpotFlags: AiRiskFlag[];
 }
 
+export interface DirectorBlindSpot {
+  id: string;
+  dealId: string | null;
+  title: string;
+  severity: string;
+  status: string;
+  details: string | null;
+  createdAt: string;
+  dealName: string | null;
+  dealNumber: string | null;
+}
+
 interface FeedbackInput {
   targetType: string;
   targetId: string;
@@ -178,5 +190,35 @@ export function useDealCopilot(dealId: string | undefined) {
     acceptSuggestion,
     dismissSuggestion,
     submitFeedback,
+  };
+}
+
+export function useDirectorBlindSpots() {
+  const [blindSpots, setBlindSpots] = useState<DirectorBlindSpot[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchBlindSpots = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await api<{ blindSpots: DirectorBlindSpot[] }>("/ai/blind-spots");
+      setBlindSpots(data.blindSpots);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to load blind spots");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchBlindSpots();
+  }, [fetchBlindSpots]);
+
+  return {
+    blindSpots,
+    loading,
+    error,
+    refetch: fetchBlindSpots,
   };
 }
