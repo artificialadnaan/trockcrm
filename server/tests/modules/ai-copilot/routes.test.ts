@@ -308,6 +308,28 @@ describe("ai copilot routes", () => {
     expect(insertMock).toHaveBeenCalledTimes(1);
   });
 
+  it("queues an AI disconnect digest job for director users", async () => {
+    const app = createApp("director");
+    const res = await request(app)
+      .post("/api/ai/ops/disconnect-digest")
+      .send({ mode: "manual" });
+
+    expect(res.status).toBe(202);
+    expect(res.body).toEqual({ queued: true, mode: "manual" });
+    expect(insertMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("queues an AI disconnect escalation scan for director users", async () => {
+    const app = createApp("director");
+    const res = await request(app)
+      .post("/api/ai/ops/disconnect-escalation-scan")
+      .send({ mode: "manual" });
+
+    expect(res.status).toBe(202);
+    expect(res.body).toEqual({ queued: true, mode: "manual" });
+    expect(insertMock).toHaveBeenCalledTimes(1);
+  });
+
   it("returns sales process disconnects for director users", async () => {
     serviceMocks.getSalesProcessDisconnectDashboard.mockResolvedValue({
       summary: {

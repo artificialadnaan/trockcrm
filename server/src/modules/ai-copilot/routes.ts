@@ -246,4 +246,60 @@ router.post("/ops/backfill", requireRole("admin", "director"), async (req, res, 
   }
 });
 
+router.post("/ops/disconnect-digest", requireRole("admin", "director"), async (req, res, next) => {
+  try {
+    const officeId = req.user!.activeOfficeId ?? req.user!.officeId;
+    if (!officeId) {
+      throw new AppError(400, "Active office is required to queue AI disconnect digest");
+    }
+
+    const mode = typeof req.body?.mode === "string" ? req.body.mode : "manual";
+
+    await req.tenantDb!.insert(jobQueue).values({
+      jobType: "ai_disconnect_digest",
+      payload: {
+        officeId,
+        mode,
+        requestedBy: req.user!.id,
+      },
+      officeId,
+      status: "pending",
+      runAfter: new Date(),
+    });
+
+    await req.commitTransaction!();
+    res.status(202).json({ queued: true, mode });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/ops/disconnect-escalation-scan", requireRole("admin", "director"), async (req, res, next) => {
+  try {
+    const officeId = req.user!.activeOfficeId ?? req.user!.officeId;
+    if (!officeId) {
+      throw new AppError(400, "Active office is required to queue AI disconnect escalation scan");
+    }
+
+    const mode = typeof req.body?.mode === "string" ? req.body.mode : "manual";
+
+    await req.tenantDb!.insert(jobQueue).values({
+      jobType: "ai_disconnect_escalation_scan",
+      payload: {
+        officeId,
+        mode,
+        requestedBy: req.user!.id,
+      },
+      officeId,
+      status: "pending",
+      runAfter: new Date(),
+    });
+
+    await req.commitTransaction!();
+    res.status(202).json({ queued: true, mode });
+  } catch (err) {
+    next(err);
+  }
+});
+
 export const aiCopilotRoutes = router;

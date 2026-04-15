@@ -241,6 +241,11 @@ export interface QueueAiBackfillResult {
   batchSize: number;
 }
 
+export interface QueueAiDisconnectDigestResult {
+  queued: boolean;
+  mode: string;
+}
+
 export interface TriageAiActionResult {
   entryType: "blind_spot" | "task_suggestion";
   id: string;
@@ -352,6 +357,20 @@ export async function queueAiBackfill(sourceType?: string | null, batchSize = 10
       sourceType: sourceType ?? null,
       batchSize,
     },
+  });
+}
+
+export async function queueAiDisconnectDigest(mode = "manual") {
+  return api<QueueAiDisconnectDigestResult>("/ai/ops/disconnect-digest", {
+    method: "POST",
+    json: { mode },
+  });
+}
+
+export async function queueAiDisconnectEscalationScan(mode = "manual") {
+  return api<QueueAiDisconnectDigestResult>("/ai/ops/disconnect-escalation-scan", {
+    method: "POST",
+    json: { mode },
   });
 }
 

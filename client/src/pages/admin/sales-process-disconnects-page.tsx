@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { AlertTriangle, ArrowUpRight, MailWarning, RefreshCcw, ShieldAlert, TimerReset, Workflow } from "lucide-react";
 import {
+  queueAiDisconnectDigest,
+  queueAiDisconnectEscalationScan,
   trackSalesProcessDisconnectInteraction,
   useSalesProcessDisconnectDashboard,
 } from "@/hooks/use-ai-ops";
@@ -28,6 +30,8 @@ export function SalesProcessDisconnectsPage() {
   const [typeFilter, setTypeFilter] = useState<string>("all");
   const [clusterFilter, setClusterFilter] = useState<string>("all");
   const [trendDimension, setTrendDimension] = useState<"reps" | "stages" | "companies">("reps");
+  const [digestQueued, setDigestQueued] = useState(false);
+  const [escalationQueued, setEscalationQueued] = useState(false);
   const didTrackView = useRef(false);
 
   useEffect(() => {
@@ -99,6 +103,24 @@ export function SalesProcessDisconnectsPage() {
     }).catch(() => {});
   };
 
+  const handleQueueDigest = async () => {
+    await queueAiDisconnectDigest("manual");
+    setDigestQueued(true);
+    void trackSalesProcessDisconnectInteraction({
+      interactionType: "outcome_focus",
+      targetValue: "digest_queue",
+    }).catch(() => {});
+  };
+
+  const handleQueueEscalation = async () => {
+    await queueAiDisconnectEscalationScan("manual");
+    setEscalationQueued(true);
+    void trackSalesProcessDisconnectInteraction({
+      interactionType: "outcome_focus",
+      targetValue: "escalation_scan_queue",
+    }).catch(() => {});
+  };
+
   return (
     <div className="p-6 space-y-6 bg-gray-50 min-h-screen">
       <div className="flex items-start justify-between gap-4">
@@ -112,7 +134,24 @@ export function SalesProcessDisconnectsPage() {
           <RefreshCcw className="h-4 w-4 mr-2" />
           Refresh
         </Button>
+        <Button variant="default" onClick={() => void handleQueueDigest()} disabled={loading}>
+          Queue Digest
+        </Button>
+        <Button variant="outline" onClick={() => void handleQueueEscalation()} disabled={loading}>
+          Queue Escalation Scan
+        </Button>
       </div>
+
+      {digestQueued && (
+        <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
+          Disconnect digest queued for admin/director notifications.
+        </div>
+      )}
+      {escalationQueued && (
+        <div className="rounded-lg border border-orange-200 bg-orange-50 px-4 py-3 text-sm text-orange-800">
+          Disconnect escalation scan queued for critical issue notifications.
+        </div>
+      )}
 
       {error && (
         <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
