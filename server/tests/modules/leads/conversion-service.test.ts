@@ -3,13 +3,13 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getTableColumns } from "drizzle-orm";
 import { getTableConfig } from "drizzle-orm/pg-core";
-import { LEAD_STATUSES } from "../../../../shared/src/types/enums.js";
 import {
+  LEAD_STATUSES,
   deals,
   leadStageHistory,
   leads,
   properties,
-} from "../../../../shared/src/schema/index.js";
+} from "../../helpers/worktree-shared-contracts.js";
 import { describe, expect, it } from "vitest";
 
 const migrationPath = resolve(
@@ -17,6 +17,10 @@ const migrationPath = resolve(
   "../../../../migrations/0019_properties_and_leads.sql"
 );
 const migrationSql = readFileSync(migrationPath, "utf8");
+
+function expectSqlToMatch(pattern: RegExp): void {
+  expect(migrationSql).toMatch(pattern);
+}
 
 describe("Lead Conversion Shared Contract", () => {
   it("defines the lead lifecycle statuses used during conversion", () => {
@@ -94,11 +98,23 @@ describe("Lead Conversion Shared Contract", () => {
   });
 
   it("creates the properties, leads, and lineage migration contract", () => {
-    expect(migrationSql).toContain("CREATE TABLE IF NOT EXISTS %I.properties");
-    expect(migrationSql).toContain("CREATE TABLE IF NOT EXISTS %I.leads");
-    expect(migrationSql).toContain("CREATE TABLE IF NOT EXISTS %I.lead_stage_history");
-    expect(migrationSql).toContain("ADD COLUMN IF NOT EXISTS property_id UUID");
-    expect(migrationSql).toContain("ADD COLUMN IF NOT EXISTS source_lead_id UUID");
-    expect(migrationSql).toContain("CREATE UNIQUE INDEX IF NOT EXISTS deals_source_lead_id_idx");
+    expectSqlToMatch(
+      /CREATE TABLE IF NOT EXISTS %I\.properties\s*\(\s*id UUID PRIMARY KEY DEFAULT gen_random_uuid\(\),\s*company_id UUID NOT NULL REFERENCES %I\.companies\(id\),\s*name VARCHAR\(500\) NOT NULL,/s
+    );
+    expectSqlToMatch(
+      /CREATE TABLE IF NOT EXISTS %I\.leads\s*\(\s*id UUID PRIMARY KEY DEFAULT gen_random_uuid\(\),\s*company_id UUID NOT NULL REFERENCES %I\.companies\(id\),\s*property_id UUID NOT NULL REFERENCES %I\.properties\(id\),\s*primary_contact_id UUID REFERENCES %I\.contacts\(id\),[\s\S]*assigned_rep_id UUID NOT NULL REFERENCES public\.users\(id\),\s*status lead_status NOT NULL DEFAULT ''open''/s
+    );
+    expectSqlToMatch(
+      /CREATE TABLE IF NOT EXISTS %I\.lead_stage_history\s*\(\s*id UUID PRIMARY KEY DEFAULT gen_random_uuid\(\),\s*lead_id UUID NOT NULL REFERENCES %I\.leads\(id\),[\s\S]*changed_by UUID NOT NULL REFERENCES public\.users\(id\),[\s\S]*duration_in_previous_stage INTERVAL/s
+    );
+    expectSqlToMatch(
+      /ALTER TABLE %I\.deals\s+ADD COLUMN IF NOT EXISTS property_id UUID REFERENCES %I\.properties\(id\)/s
+    );
+    expectSqlToMatch(
+      /ALTER TABLE %I\.deals\s+ADD COLUMN IF NOT EXISTS source_lead_id UUID REFERENCES %I\.leads\(id\)/s
+    );
+    expectSqlToMatch(
+      /CREATE UNIQUE INDEX IF NOT EXISTS deals_source_lead_id_idx\s+ON %I\.deals \(source_lead_id\)\s+WHERE source_lead_id IS NOT NULL/s
+    );
   });
 });
