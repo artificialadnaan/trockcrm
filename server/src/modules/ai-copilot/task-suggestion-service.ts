@@ -26,24 +26,36 @@ export async function acceptTaskSuggestion(
     throw new AppError(400, `Task suggestion is already ${suggestion.status}`);
   }
 
+  const reservedAt = new Date();
+  const [reserved] = await tenantDb
+    .update(aiTaskSuggestions)
+    .set({
+      status: "accepted",
+      resolvedAt: reservedAt,
+    })
+    .where(and(eq(aiTaskSuggestions.id, suggestionId), eq(aiTaskSuggestions.status, "suggested")))
+    .returning();
+
+  if (!reserved) {
+    throw new AppError(409, "Task suggestion is already being processed");
+  }
+
   const task = await createTask(tenantDb, {
-    title: suggestion.title,
-    description: suggestion.description ?? undefined,
+    title: reserved.title,
+    description: reserved.description ?? undefined,
     type: "follow_up",
-    priority: suggestion.priority,
-    assignedTo: suggestion.suggestedOwnerId ?? userId,
+    priority: reserved.priority,
+    assignedTo: reserved.suggestedOwnerId ?? userId,
     createdBy: userId,
-    dealId: suggestion.scopeType === "deal" ? suggestion.scopeId : undefined,
+    dealId: reserved.scopeType === "deal" ? reserved.scopeId : undefined,
   });
 
   const [updated] = await tenantDb
     .update(aiTaskSuggestions)
     .set({
-      status: "accepted",
       acceptedTaskId: task.id,
-      resolvedAt: new Date(),
     })
-    .where(and(eq(aiTaskSuggestions.id, suggestionId), eq(aiTaskSuggestions.status, "suggested")))
+    .where(eq(aiTaskSuggestions.id, suggestionId))
     .returning();
 
   return {
