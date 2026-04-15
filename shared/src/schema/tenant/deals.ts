@@ -12,6 +12,10 @@ import {
   timestamp,
 } from "drizzle-orm/pg-core";
 import { WORKFLOW_ROUTES } from "../../types/enums.js";
+import { companies } from "./companies.js";
+import { contacts } from "./contacts.js";
+import { leads } from "./leads.js";
+import { properties } from "./properties.js";
 
 export const proposalStatusEnum = pgEnum("proposal_status", [
   "not_started",
@@ -45,8 +49,10 @@ export const deals = pgTable("deals", {
   name: varchar("name", { length: 500 }).notNull(),
   stageId: uuid("stage_id").notNull(),
   assignedRepId: uuid("assigned_rep_id").notNull(),
-  primaryContactId: uuid("primary_contact_id"),
-  companyId: uuid("company_id"),
+  primaryContactId: uuid("primary_contact_id").references(() => contacts.id),
+  companyId: uuid("company_id").references(() => companies.id),
+  propertyId: uuid("property_id").references(() => properties.id),
+  sourceLeadId: uuid("source_lead_id").references(() => leads.id).unique(),
   ddEstimate: numeric("dd_estimate", { precision: 14, scale: 2 }),
   bidEstimate: numeric("bid_estimate", { precision: 14, scale: 2 }),
   awardedAmount: numeric("awarded_amount", { precision: 14, scale: 2 }),

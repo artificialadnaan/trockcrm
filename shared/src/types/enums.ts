@@ -31,6 +31,9 @@ export const CONTACT_CATEGORIES = [
 ] as const;
 export type ContactCategory = (typeof CONTACT_CATEGORIES)[number];
 
+export const LEAD_STATUSES = ["open", "converted", "disqualified"] as const;
+export type LeadStatus = (typeof LEAD_STATUSES)[number];
+
 export const ACTIVITY_TYPES = ["call", "note", "meeting", "email", "task_completed"] as const;
 export type ActivityType = (typeof ACTIVITY_TYPES)[number];
 
