@@ -55,6 +55,24 @@ describe("task.completed worker handling", () => {
     );
     expect(queryMock.mock.calls.some(([sql]) => typeof sql === "string" && sql.includes("public.users"))).toBe(false);
 
+    const activityCall = queryMock.mock.calls.find(
+      ([sql]) => typeof sql === "string" && sql.includes("INSERT INTO office_beta.activities")
+    );
+    expect(activityCall).toBeDefined();
+    expect(activityCall?.[0]).toContain("responsible_user_id");
+    expect(activityCall?.[0]).toContain("performed_by_user_id");
+    expect(activityCall?.[0]).toContain("source_entity_type");
+    expect(activityCall?.[0]).toContain("source_entity_id");
+    expect(activityCall?.[1]).toEqual([
+      "user-1",
+      "user-1",
+      "deal",
+      "deal-1",
+      "deal-1",
+      "contact-1",
+      "Completed: Follow up on stale deal",
+    ]);
+
     const resolutionCall = queryMock.mock.calls.find(
       ([sql]) => typeof sql === "string" && sql.includes("INSERT INTO office_beta.task_resolution_state")
     );

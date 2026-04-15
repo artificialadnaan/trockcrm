@@ -3,6 +3,7 @@ import { pool } from "../db.js";
 const SERVER_EVALUATOR_MODULE = "../../../server/src/modules/tasks/rules/evaluator.js" as string;
 const SERVER_TASK_RULES_MODULE = "../../../server/src/modules/tasks/rules/config.js" as string;
 const SERVER_TASK_PERSISTENCE_MODULE = "../../../server/src/modules/tasks/rules/persistence.js" as string;
+const SERVER_STALE_LEAD_KEY_MODULE = "../../../server/src/modules/tasks/rules/stale-lead-key.js" as string;
 
 /**
  * Daily task list generation job.
@@ -40,19 +41,18 @@ export async function dismissResolvedStaleLeadTasks(
   client: Queryable,
   schemaName: string,
   officeId: string,
-  activeStaleLeadIds: string[],
+  activeStaleLeadDedupeKeys: string[],
   resolvedAt: Date = new Date()
 ): Promise<number> {
-  const activeDedupeKeys = activeStaleLeadIds.map((leadId) => `lead:${leadId}`);
   const activeTaskStatusesSql = ["pending", "scheduled", "in_progress", "waiting_on", "blocked"]
     .map((status) => `'${status}'`)
     .join(", ");
 
-  const dismissalWhereClause = activeDedupeKeys.length > 0
+  const dismissalWhereClause = activeStaleLeadDedupeKeys.length > 0
     ? `AND dedupe_key <> ALL($2::text[])`
     : "";
-  const dismissalParams: unknown[] = activeDedupeKeys.length > 0
-    ? [resolvedAt, activeDedupeKeys]
+  const dismissalParams: unknown[] = activeStaleLeadDedupeKeys.length > 0
+    ? [resolvedAt, activeStaleLeadDedupeKeys]
     : [resolvedAt];
 
   const dismissedTasks = await client.query<{
@@ -335,6 +335,7 @@ export async function runDailyTaskGeneration(): Promise<void> {
           `SELECT l.id AS lead_id,
                   l.name AS lead_name,
                   l.assigned_rep_id,
+                  l.stage_entered_at,
                   psc.name AS stage_name,
                   psc.stale_threshold_days,
                   EXTRACT(DAY FROM NOW() - l.stage_entered_at)::int AS days_in_stage
@@ -347,12 +348,15 @@ export async function runDailyTaskGeneration(): Promise<void> {
              AND psc.stale_threshold_days IS NOT NULL
              AND l.stage_entered_at < NOW() - (psc.stale_threshold_days || ' days')::interval`
         );
+        const { buildStaleLeadDedupeKey } = (await import(SERVER_STALE_LEAD_KEY_MODULE)) as any;
 
         await dismissResolvedStaleLeadTasks(
           client,
           schemaName,
           office.id,
-          staleLeads.rows.map((lead) => lead.lead_id)
+          staleLeads.rows
+            .map((lead) => buildStaleLeadDedupeKey(lead.lead_id, lead.stage_entered_at))
+            .filter((dedupeKey): dedupeKey is string => typeof dedupeKey === "string" && dedupeKey.length > 0)
         );
 
         for (const lead of staleLeads.rows) {
@@ -364,6 +368,7 @@ export async function runDailyTaskGeneration(): Promise<void> {
               sourceEvent: "cron.daily_task_generation.stale_lead",
               leadId: lead.lead_id,
               leadName: lead.lead_name,
+              stageEnteredAt: lead.stage_entered_at,
               stage: lead.stage_name,
               staleAge: lead.days_in_stage,
               taskAssigneeId: lead.assigned_rep_id,

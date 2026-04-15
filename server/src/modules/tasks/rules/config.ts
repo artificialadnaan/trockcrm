@@ -1,6 +1,10 @@
 import { assignTaskFromContext } from "./assignment.js";
 import { scoreTaskPriority } from "./priority.js";
 import type { TaskRuleDefinition, TaskRuleContext } from "./types.js";
+import {
+  buildStaleLeadDedupeKey,
+  normalizeStaleLeadEpisodeTimestamp,
+} from "./stale-lead-key.js";
 
 function buildPriority(context: TaskRuleContext) {
   return scoreTaskPriority(
@@ -426,7 +430,7 @@ const staleLeadRule: TaskRuleDefinition = {
   suppressionWindowDays: 30,
   preserveAssignedToOnRefresh: true,
   buildDedupeKey(context) {
-    return context.leadId ? `lead:${context.leadId}` : null;
+    return buildStaleLeadDedupeKey(context.leadId, context.stageEnteredAt);
   },
   async buildTask(context) {
     if (!context.leadId || !context.taskAssigneeId) return null;
@@ -443,6 +447,8 @@ const staleLeadRule: TaskRuleDefinition = {
     const leadName = context.leadName?.trim() || `Lead ${context.leadId}`;
     const stageName = context.stage?.trim() || "current stage";
     const staleAge = Math.max(context.staleAge ?? 0, 0);
+    const dedupeKey = buildStaleLeadDedupeKey(context.leadId, context.stageEnteredAt);
+    if (!dedupeKey) return null;
     const priority = scoreTaskPriority({
       dueProximity: 20,
       stageRisk: context.stage ? 15 : 0,
@@ -460,7 +466,7 @@ const staleLeadRule: TaskRuleDefinition = {
       originRule: staleLeadRuleId,
       sourceRule: staleLeadRuleId,
       sourceEvent: context.sourceEvent,
-      dedupeKey: `lead:${context.leadId}`,
+      dedupeKey,
       reasonCode: staleLeadRuleId,
       priority: priority.band,
       priorityScore: priority.score,
@@ -474,6 +480,7 @@ const staleLeadRule: TaskRuleDefinition = {
         sourceEvent: context.sourceEvent,
         leadId: context.leadId,
         leadName,
+        stageEnteredAt: normalizeStaleLeadEpisodeTimestamp(context.stageEnteredAt),
         stage: stageName,
         staleAge,
         summary: `Lead "${leadName}" is stale in ${stageName}`,

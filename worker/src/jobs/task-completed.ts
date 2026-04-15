@@ -16,18 +16,26 @@ export async function handleTaskCompletedEvent(payload: any, officeId: string | 
   if (!slugRegex.test(slug)) return;
 
   const schemaName = `office_${slug}`;
+  const activitySourceEntityType = payload.dealId ? "deal" : payload.contactId ? "contact" : null;
+  const activitySourceEntityId = payload.dealId ?? payload.contactId ?? null;
 
-  await workerPool.query(
-    `INSERT INTO ${schemaName}.activities
-       (type, user_id, deal_id, contact_id, subject, occurred_at)
-       VALUES ('task_completed', $1, $2, $3, $4, NOW())`,
-    [
-      payload.completedBy,
-      payload.dealId ?? null,
-      payload.contactId ?? null,
-      `Completed: ${payload.title}`,
-    ]
-  );
+  if (activitySourceEntityType && activitySourceEntityId) {
+    await workerPool.query(
+      `INSERT INTO ${schemaName}.activities
+         (type, responsible_user_id, performed_by_user_id, source_entity_type, source_entity_id,
+          deal_id, contact_id, subject, occurred_at)
+         VALUES ('task_completed', $1, $2, $3, $4, $5, $6, $7, NOW())`,
+      [
+        payload.completedBy,
+        payload.completedBy,
+        activitySourceEntityType,
+        activitySourceEntityId,
+        payload.dealId ?? null,
+        payload.contactId ?? null,
+        `Completed: ${payload.title}`,
+      ]
+    );
+  }
 
   if (payload.dealId) {
     await workerPool.query(

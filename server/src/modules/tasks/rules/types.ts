@@ -39,6 +39,7 @@ export interface TaskRuleContext extends AssignmentContext {
   sourceEvent: string;
   leadId?: string | null;
   leadName?: string | null;
+  stageEnteredAt?: Date | string | null;
   dealId?: string | null;
   dealName?: string | null;
   dealNumber?: string | null;

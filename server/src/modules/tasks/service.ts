@@ -1,8 +1,9 @@
 import { eq, and, desc, asc, sql, or, isNull, inArray } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
-import { tasks } from "@trock-crm/shared/schema";
+import { taskResolutionState, tasks } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
+import { TASK_RULES } from "./rules/config.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -77,6 +78,48 @@ const ALLOWED_TRANSITIONS: Record<TaskStatus, TaskStatus[]> = {
 
 function isTaskStatus(value: string): value is TaskStatus {
   return (TASK_STATUS_VALUES as readonly string[]).includes(value);
+}
+
+function addSuppressionWindow(resolvedAt: Date, suppressionWindowDays: number) {
+  return new Date(resolvedAt.getTime() + suppressionWindowDays * 24 * 60 * 60 * 1000);
+}
+
+async function writeDismissalResolutionState(
+  tenantDb: TenantDb,
+  task: Record<string, any>,
+  resolvedAt: Date
+) {
+  if (!task.originRule || !task.dedupeKey || !task.officeId) return;
+
+  const rule = TASK_RULES.find((candidate) => candidate.id === task.originRule);
+  if (!rule) return;
+
+  await tenantDb
+    .insert(taskResolutionState)
+    .values({
+      officeId: task.officeId,
+      taskId: task.id,
+      originRule: task.originRule,
+      dedupeKey: task.dedupeKey,
+      resolutionStatus: "dismissed",
+      resolutionReason: task.reasonCode ?? task.originRule,
+      resolvedAt,
+      suppressedUntil: addSuppressionWindow(resolvedAt, rule.suppressionWindowDays),
+      entitySnapshot: task.entitySnapshot ?? null,
+    })
+    .onConflictDoUpdate({
+      target: [taskResolutionState.originRule, taskResolutionState.dedupeKey],
+      set: {
+        officeId: task.officeId,
+        taskId: task.id,
+        resolutionStatus: "dismissed",
+        resolutionReason: task.reasonCode ?? task.originRule,
+        resolvedAt,
+        suppressedUntil: addSuppressionWindow(resolvedAt, rule.suppressionWindowDays),
+        entitySnapshot: task.entitySnapshot ?? null,
+        updatedAt: new Date(),
+      },
+    });
 }
 
 function buildOpenTaskStatusCondition(now: Date) {
@@ -180,13 +223,23 @@ export async function transitionTaskStatus(
     updates.blockedBy = null;
   }
 
+  const resolvedAt = input.nextStatus === "dismissed" ? new Date() : null;
+  if (resolvedAt) {
+    updates.completedAt = resolvedAt;
+  }
+
   const result = await tenantDb
     .update(tasks)
     .set(updates)
     .where(eq(tasks.id, taskId))
     .returning();
 
-  return result[0];
+  const updatedTask = result[0];
+  if (resolvedAt) {
+    await writeDismissalResolutionState(tenantDb, updatedTask, resolvedAt);
+  }
+
+  return updatedTask;
 }
 
 /**
@@ -506,11 +559,21 @@ export async function dismissTask(
     throw new AppError(400, `Task is already ${existing.status}`);
   }
 
+  const resolvedAt = new Date();
+
   const result = await tenantDb
     .update(tasks)
-    .set({ status: "dismissed", isOverdue: false, waitingOn: null, blockedBy: null } as any)
+    .set({
+      status: "dismissed",
+      completedAt: resolvedAt,
+      isOverdue: false,
+      waitingOn: null,
+      blockedBy: null,
+    } as any)
     .where(eq(tasks.id, taskId))
     .returning();
+
+  await writeDismissalResolutionState(tenantDb, result[0], resolvedAt);
 
   return result[0];
 }

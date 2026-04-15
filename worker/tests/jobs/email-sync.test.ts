@@ -129,6 +129,25 @@ describe("email sync inbound message routing", () => {
       taskPersistence,
       expect.any(Array)
     );
+    const activityCall = queryMock.mock.calls.find(
+      ([sql]) => typeof sql === "string" && sql.includes("INSERT INTO office_beta.activities")
+    );
+    expect(activityCall).toBeDefined();
+    expect(activityCall?.[0]).toContain("responsible_user_id");
+    expect(activityCall?.[0]).toContain("performed_by_user_id");
+    expect(activityCall?.[0]).toContain("source_entity_type");
+    expect(activityCall?.[0]).toContain("source_entity_id");
+    expect(activityCall?.[1]).toEqual([
+      "user-1",
+      "deal",
+      "deal-1",
+      "deal-1",
+      "contact-1",
+      "email-1",
+      "Project Alpha follow-up",
+      "Please reply",
+      new Date("2026-04-04T15:00:00.000Z"),
+    ]);
     expect(queryMock.mock.calls.some(([sql]) => typeof sql === "string" && sql.includes("INSERT INTO office_beta.tasks"))).toBe(false);
   });
 
@@ -181,6 +200,21 @@ describe("email sync inbound message routing", () => {
       taskPersistence,
       expect.any(Array)
     );
+    const activityCall = queryMock.mock.calls.find(
+      ([sql]) => typeof sql === "string" && sql.includes("INSERT INTO office_beta.activities")
+    );
+    expect(activityCall).toBeDefined();
+    expect(activityCall?.[1]).toEqual([
+      "user-1",
+      "contact",
+      "contact-1",
+      null,
+      "contact-1",
+      "email-1",
+      "Need deal help",
+      "Please route this",
+      new Date("2026-04-04T15:00:00.000Z"),
+    ]);
     expect(queryMock.mock.calls.some(([sql]) => typeof sql === "string" && sql.includes("INSERT INTO office_beta.tasks"))).toBe(false);
   });
 });

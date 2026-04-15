@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { evaluateTaskRules } from "../../../src/modules/tasks/rules/evaluator.js";
 import { TASK_RULES } from "../../../src/modules/tasks/rules/config.js";
+import { buildStaleLeadDedupeKey } from "../../../src/modules/tasks/rules/stale-lead-key.js";
 import { dismissResolvedStaleLeadTasks } from "../../../../worker/src/jobs/daily-tasks.js";
 import type {
   TaskRecord,
@@ -113,6 +114,7 @@ function makeContext(overrides: Partial<TaskRuleContext> = {}): TaskRuleContext 
     officeFallbackId: null,
     staleAge: 17,
     stage: "Qualified",
+    stageEnteredAt: "2026-03-29T12:00:00.000Z",
     contactName: "Acme HQ",
     ...overrides,
   };
@@ -121,6 +123,7 @@ function makeContext(overrides: Partial<TaskRuleContext> = {}): TaskRuleContext 
 describe("stale lead task rule", () => {
   it("builds a stale lead follow-up task through the shared evaluator", async () => {
     const store = createInMemoryStore();
+    const dedupeKey = buildStaleLeadDedupeKey("lead-123", "2026-03-29T12:00:00.000Z");
 
     const outcomes = await evaluateTaskRules(
       makeContext({
@@ -134,19 +137,19 @@ describe("stale lead task rule", () => {
     expect(outcomes).toContainEqual(
       expect.objectContaining({
         ruleId: "stale_lead",
-        businessKey: { originRule: "stale_lead", dedupeKey: "lead:lead-123" },
+        businessKey: { originRule: "stale_lead", dedupeKey },
         action: "created",
       })
     );
 
-    expect(store.getTask("stale_lead", "lead:lead-123")).toMatchObject({
+    expect(store.getTask("stale_lead", dedupeKey!)).toMatchObject({
       title: "Re-engage stale lead Acme HQ lobby remodel",
       description: 'Lead "Acme HQ lobby remodel" has been in Qualified for 17 days without progression.',
       type: "follow_up",
       assignedTo: "rep-9",
       originRule: "stale_lead",
       sourceEvent: "cron.daily_task_generation.stale_lead",
-      dedupeKey: "lead:lead-123",
+      dedupeKey,
       reasonCode: "stale_lead",
       status: "pending",
     });
@@ -154,6 +157,7 @@ describe("stale lead task rule", () => {
 
   it("suppresses duplicate stale lead generation by updating the same business key", async () => {
     const store = createInMemoryStore();
+    const dedupeKey = buildStaleLeadDedupeKey("lead-123", "2026-03-29T12:00:00.000Z");
     const context = makeContext({
       leadId: "lead-123",
       leadName: "Acme HQ lobby remodel",
@@ -164,10 +168,11 @@ describe("stale lead task rule", () => {
 
     expect(store.countTasks()).toBe(1);
     expect(store.operations).toEqual(["insert", "update"]);
-    expect(store.getTask("stale_lead", "lead:lead-123")).not.toBeNull();
+    expect(store.getTask("stale_lead", dedupeKey!)).not.toBeNull();
   });
 
   it("preserves manual reassignment when refreshing an existing stale lead task", async () => {
+    const dedupeKey = buildStaleLeadDedupeKey("lead-123", "2026-03-29T12:00:00.000Z");
     const store = createInMemoryStore([
       {
         id: "task-1",
@@ -178,7 +183,7 @@ describe("stale lead task rule", () => {
         officeId: "office-1",
         originRule: "stale_lead",
         sourceEvent: "cron.daily_task_generation.stale_lead",
-        dedupeKey: "lead:lead-123",
+        dedupeKey: dedupeKey!,
         reasonCode: "stale_lead",
         priority: "normal",
         priorityScore: 69,
@@ -197,7 +202,76 @@ describe("stale lead task rule", () => {
       TASK_RULES
     );
 
-    expect(store.getTask("stale_lead", "lead:lead-123")?.assignedTo).toBe("director-override");
+    expect(store.getTask("stale_lead", dedupeKey!)?.assignedTo).toBe("director-override");
+  });
+
+  it("suppresses a manually dismissed stale lead task while the same stale episode remains active", async () => {
+    const dedupeKey = buildStaleLeadDedupeKey("lead-123", "2026-03-29T12:00:00.000Z");
+    const store = createInMemoryStore(
+      [],
+      [
+        {
+          originRule: "stale_lead",
+          dedupeKey: dedupeKey!,
+          resolutionStatus: "dismissed",
+          resolvedAt: "2026-04-15T13:00:00.000Z",
+          suppressedUntil: "2026-05-15T13:00:00.000Z",
+        },
+      ]
+    );
+
+    const outcomes = await evaluateTaskRules(
+      makeContext({
+        leadId: "lead-123",
+        leadName: "Acme HQ lobby remodel",
+      }),
+      store.persistence,
+      TASK_RULES
+    );
+
+    expect(outcomes).toContainEqual(
+      expect.objectContaining({
+        businessKey: { originRule: "stale_lead", dedupeKey },
+        action: "skipped",
+      })
+    );
+    expect(store.countTasks()).toBe(0);
+  });
+
+  it("allows a new stale episode after stage re-entry to create a new task key", async () => {
+    const firstEpisodeKey = buildStaleLeadDedupeKey("lead-123", "2026-03-29T12:00:00.000Z");
+    const secondEpisodeKey = buildStaleLeadDedupeKey("lead-123", "2026-04-20T09:30:00.000Z");
+    const store = createInMemoryStore(
+      [],
+      [
+        {
+          originRule: "stale_lead",
+          dedupeKey: firstEpisodeKey!,
+          resolutionStatus: "dismissed",
+          resolvedAt: "2026-04-15T13:00:00.000Z",
+          suppressedUntil: "2026-05-15T13:00:00.000Z",
+        },
+      ]
+    );
+
+    const outcomes = await evaluateTaskRules(
+      makeContext({
+        now: new Date("2026-04-25T13:00:00.000Z"),
+        leadId: "lead-123",
+        leadName: "Acme HQ lobby remodel",
+        stageEnteredAt: "2026-04-20T09:30:00.000Z",
+      }),
+      store.persistence,
+      TASK_RULES
+    );
+
+    expect(outcomes).toContainEqual(
+      expect.objectContaining({
+        businessKey: { originRule: "stale_lead", dedupeKey: secondEpisodeKey },
+        action: "created",
+      })
+    );
+    expect(store.getTask("stale_lead", secondEpisodeKey!)).not.toBeNull();
   });
 
   it("dismisses stale lead tasks that are no longer stale", async () => {
@@ -212,14 +286,14 @@ describe("stale lead task rule", () => {
               {
                 id: "task-1",
                 origin_rule: "stale_lead",
-                dedupe_key: "lead:lead-2",
+                dedupe_key: "lead:lead-2:stage_entered:2026-03-10T00:00:00.000Z",
                 reason_code: "stale_lead",
                 entity_snapshot: { leadId: "lead-2" },
               },
               {
                 id: "task-2",
                 origin_rule: "stale_lead",
-                dedupe_key: "lead:lead-3",
+                dedupe_key: "lead:lead-3:stage_entered:2026-03-12T00:00:00.000Z",
                 reason_code: "stale_lead",
                 entity_snapshot: { leadId: "lead-3" },
               },
@@ -234,7 +308,7 @@ describe("stale lead task rule", () => {
       client as any,
       "office_beta",
       "office-1",
-      ["lead-1"]
+      [buildStaleLeadDedupeKey("lead-1", "2026-04-01T00:00:00.000Z")!]
     );
 
     expect(dismissed).toBe(2);
