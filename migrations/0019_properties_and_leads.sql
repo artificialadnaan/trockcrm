@@ -15,6 +15,24 @@ BEGIN
     SELECT nspname
     FROM pg_namespace
     WHERE nspname LIKE 'office\_%' ESCAPE '\'
+      AND EXISTS (
+        SELECT 1
+        FROM information_schema.tables
+        WHERE table_schema = nspname
+          AND table_name = 'companies'
+      )
+      AND EXISTS (
+        SELECT 1
+        FROM information_schema.tables
+        WHERE table_schema = nspname
+          AND table_name = 'contacts'
+      )
+      AND EXISTS (
+        SELECT 1
+        FROM information_schema.tables
+        WHERE table_schema = nspname
+          AND table_name = 'deals'
+      )
   LOOP
     EXECUTE format(
       'CREATE TABLE IF NOT EXISTS %I.properties (
