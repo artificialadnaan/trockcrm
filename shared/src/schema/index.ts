@@ -47,6 +47,8 @@ export { aiCopilotPackets } from "./tenant/ai-copilot-packets.js";
 export { aiTaskSuggestions } from "./tenant/ai-task-suggestions.js";
 export { aiRiskFlags } from "./tenant/ai-risk-flags.js";
 export { aiFeedback } from "./tenant/ai-feedback.js";
+export { aiDisconnectCases } from "./tenant/ai-disconnect-cases.js";
+export { aiDisconnectCaseHistory } from "./tenant/ai-disconnect-case-history.js";
 
 // Migration schema tables (staging area for HubSpot data migration)
 export { stagedDeals } from "./migration/staged-deals.js";
