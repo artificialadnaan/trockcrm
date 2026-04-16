@@ -81,6 +81,7 @@ export function useNotificationStream() {
       typeof window !== "undefined" ? window.location : undefined
     );
     const eventSourceUrl = `${apiBase.replace(/\/api$/, "")}/api/notifications/stream`;
+    let isClosing = false;
     const es = new EventSource(eventSourceUrl, { withCredentials: true });
     eventSourceRef.current = es;
 
@@ -99,11 +100,17 @@ export function useNotificationStream() {
     });
 
     es.onerror = () => {
+      // Ignore the expected browser-side disconnect during cleanup/navigation.
+      if (isClosing || es.readyState === EventSource.CLOSED) {
+        return;
+      }
+
       // EventSource auto-reconnects -- just log
       console.warn("[SSE] Connection error -- will auto-reconnect");
     };
 
     return () => {
+      isClosing = true;
       es.close();
       eventSourceRef.current = null;
     };
