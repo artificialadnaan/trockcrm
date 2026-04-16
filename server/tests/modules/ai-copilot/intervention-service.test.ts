@@ -364,6 +364,33 @@ describe("AI intervention service", () => {
     });
   });
 
+  it("preserves lifecycle timestamps for already-open repeat cases during refresh", async () => {
+    disconnectRowsMock.mockResolvedValue([makeDisconnectRow()]);
+
+    const lifecycleStart = new Date("2026-04-10T12:00:00.000Z");
+    const reopenedAt = new Date("2026-04-10T12:00:00.000Z");
+    const refreshedAt = new Date("2026-04-18T12:00:00.000Z");
+    const tenantDb = createTenantDb({
+      cases: [
+        makeCase({
+          reopenCount: 2,
+          currentLifecycleStartedAt: lifecycleStart,
+          lastReopenedAt: reopenedAt,
+        }),
+      ],
+    });
+
+    await materializeDisconnectCases(tenantDb as any, { officeId: "office-1", now: refreshedAt });
+
+    expect(tenantDb.state.cases[0]).toMatchObject({
+      status: "open",
+      reopenCount: 2,
+      currentLifecycleStartedAt: lifecycleStart,
+      lastReopenedAt: reopenedAt,
+      lastDetectedAt: refreshedAt,
+    });
+  });
+
   it("excludes snoozed cases from the default queue until snoozed_until", async () => {
     const tenantDb = createTenantDb({
       cases: [
