@@ -38,7 +38,9 @@ import {
 } from "./validator.js";
 
 const router = Router();
-router.use(authMiddleware, requireAdmin);
+// Restrict admin gating to actual migration endpoints so unrelated /api/* routes
+// mounted after this router are not intercepted for non-admin users.
+router.use("/migration", authMiddleware, requireAdmin);
 
 // ---------------------------------------------------------------------------
 // Dashboard
