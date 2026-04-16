@@ -1,17 +1,9 @@
-import { Table } from "drizzle-orm";
+import { getTableName, Table } from "drizzle-orm";
 import { describe, expect, it, vi } from "vitest";
 import * as schema from "../../../../shared/src/schema/index.js";
+import { loadDisconnectCaseSchemaTables } from "../../../src/modules/ai-copilot/intervention-service";
 
-async function loadDisconnectCaseTables(tenantDb: {
-  select: () => {
-    from: (table: unknown) => Promise<unknown>;
-  };
-}) {
-  const cases = await tenantDb.select().from(schema.aiDisconnectCases as any);
-  const history = await tenantDb.select().from(schema.aiDisconnectCaseHistory as any);
-
-  return { cases, history };
-}
+vi.mock("@trock-crm/shared/schema", async () => import("../../../../shared/src/schema/index.js"));
 
 describe("AI intervention service schema foundation", () => {
   it("exports the disconnect case tables with the columns the workspace needs", () => {
@@ -77,12 +69,16 @@ describe("AI intervention service schema foundation", () => {
       select: vi.fn(() => selectChain),
     };
 
-    const result = await loadDisconnectCaseTables(tenantDb as any);
+    const result = await loadDisconnectCaseSchemaTables(tenantDb as any);
 
     expect(tenantDb.select).toHaveBeenCalledTimes(2);
-    expect(selectChain.from).toHaveBeenNthCalledWith(1, schema.aiDisconnectCases);
-    expect(selectChain.from).toHaveBeenNthCalledWith(2, schema.aiDisconnectCaseHistory);
-    expect(result.cases).toBe(schema.aiDisconnectCases);
-    expect(result.history).toBe(schema.aiDisconnectCaseHistory);
+    expect(getTableName(selectChain.from.mock.calls[0]?.[0] as any)).toBe(
+      getTableName(schema.aiDisconnectCases)
+    );
+    expect(getTableName(selectChain.from.mock.calls[1]?.[0] as any)).toBe(
+      getTableName(schema.aiDisconnectCaseHistory)
+    );
+    expect(getTableName(result.cases as any)).toBe(getTableName(schema.aiDisconnectCases));
+    expect(getTableName(result.history as any)).toBe(getTableName(schema.aiDisconnectCaseHistory));
   });
 });
