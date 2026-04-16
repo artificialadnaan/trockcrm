@@ -371,6 +371,11 @@ export async function listInterventionCases(
     };
   }
 
+  await materializeDisconnectCases(tenantDb, {
+    officeId: input.officeId,
+    now,
+  });
+
   let cases = await getCasesByOffice(tenantDb, input.officeId);
   cases = cases.filter((row) => {
     if (input.status) return row.status === input.status;
