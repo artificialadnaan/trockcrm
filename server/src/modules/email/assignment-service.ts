@@ -270,7 +270,8 @@ export function resolveEmailAssignment(context: EmailAssignmentContext): EmailAs
   );
   const rawText = buildEmailRawText(context);
   const searchText = normalizeText(rawText);
-  const hasCompany = Boolean(context.contactCompanyId);
+  const companyId = context.contactCompanyId ?? null;
+  const hasCompany = Boolean(companyId);
 
   const explicitCandidate = findExplicitDealCandidate(rawText, candidateDeals);
   if (explicitCandidate) {
@@ -322,8 +323,8 @@ export function resolveEmailAssignment(context: EmailAssignmentContext): EmailAs
     const relatedDealCount = propertyCandidate.relatedDealIds?.length ?? 0;
     if (relatedDealCount > 1) {
       return {
-        assignedEntityType: hasCompany ? "company" : null,
-        assignedEntityId: hasCompany ? context.contactCompanyId ?? null : null,
+        assignedEntityType: companyId ? "company" : null,
+        assignedEntityId: companyId,
         assignedDealId: null,
         confidence: "low",
         ambiguityReason: "ambiguous_property_match",
@@ -373,8 +374,8 @@ export function resolveEmailAssignment(context: EmailAssignmentContext): EmailAs
   }
 
   return {
-    assignedEntityType: hasCompany ? "company" : null,
-    assignedEntityId: hasCompany ? context.contactCompanyId ?? null : null,
+    assignedEntityType: companyId ? "company" : null,
+    assignedEntityId: companyId,
     assignedDealId: null,
     confidence: "low",
     ambiguityReason: buildAmbiguityReason(candidateDeals.length, hasCompany),

@@ -42,6 +42,8 @@ function createQueryMock(options: {
     deal_number: string;
     name: string;
     company_id?: string | null;
+    stage_slug?: string | null;
+    stage_display_order?: number | null;
     property_address?: string | null;
     property_city?: string | null;
     property_state?: string | null;
@@ -54,6 +56,10 @@ function createQueryMock(options: {
   } | null;
 }) {
   return vi.fn(async (sql: string, params?: unknown[]) => {
+    if (sql.includes("FROM public.pipeline_stage_config") && sql.includes("slug = 'estimating'")) {
+      return { rows: [{ display_order: 2 }] };
+    }
+
     if (sql.includes("FROM office_beta.emails") && sql.includes("graph_message_id = $1")) {
       return { rows: [] };
     }
@@ -124,7 +130,7 @@ describe("email sync inbound message routing", () => {
   it("routes a single-active-deal email to the reply-needed task rule", async () => {
     const queryMock = createQueryMock({
       activeDeals: [
-        { id: "deal-1", deal_number: "D-1001", name: "Project Alpha" },
+        { id: "deal-1", deal_number: "D-1001", name: "Project Alpha", stage_slug: "estimating", stage_display_order: 2 },
       ],
     });
     const client = { query: queryMock };
@@ -176,8 +182,8 @@ describe("email sync inbound message routing", () => {
   it("routes a multi-active-deal email to the disambiguation task rule", async () => {
     const queryMock = createQueryMock({
       activeDeals: [
-        { id: "deal-1", deal_number: "D-1001", name: "Project Alpha" },
-        { id: "deal-2", deal_number: "D-1002", name: "Project Beta" },
+        { id: "deal-1", deal_number: "D-1001", name: "Project Alpha", stage_slug: "estimating", stage_display_order: 2 },
+        { id: "deal-2", deal_number: "D-1002", name: "Project Beta", stage_slug: "estimating", stage_display_order: 2 },
       ],
     });
     const client = { query: queryMock };
@@ -213,7 +219,7 @@ describe("email sync inbound message routing", () => {
   it("keeps the prior thread assignment when the conversation was already classified", async () => {
     const queryMock = createQueryMock({
       activeDeals: [
-        { id: "deal-2", deal_number: "D-1002", name: "Project Beta" },
+        { id: "deal-2", deal_number: "D-1002", name: "Project Beta", stage_slug: "estimating", stage_display_order: 2 },
       ],
       threadAssignment: {
         assigned_entity_type: "deal",

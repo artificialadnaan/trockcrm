@@ -179,6 +179,46 @@ describe("resolveEmailAssignment", () => {
     });
   });
 
+  it("keeps a property match company-only when the property spans multiple active opportunities", () => {
+    const result = resolveEmailAssignment({
+      subject: "Re: 123 Main St",
+      bodyPreview: "Following up on the property",
+      contactCompanyId: "company-1",
+      dealCandidates: [
+        dealCandidate(),
+        dealCandidate({
+          id: "deal-2",
+          dealNumber: "TR-2026-0002",
+          name: "Beta Roof",
+          propertyAddress: "123 Main St",
+          propertyCity: "Dallas",
+          propertyState: "TX",
+          propertyZip: "75201",
+        }),
+      ],
+      propertyCandidates: [
+        {
+          id: "property-1",
+          propertyAddress: "123 Main St",
+          propertyCity: "Dallas",
+          propertyState: "TX",
+          propertyZip: "75201",
+          relatedDealIds: ["deal-1", "deal-2"],
+        },
+      ],
+    });
+
+    expect(result).toMatchObject({
+      assignedEntityType: "company",
+      assignedEntityId: "company-1",
+      assignedDealId: null,
+      confidence: "low",
+      ambiguityReason: "ambiguous_property_match",
+      matchedBy: "company_only",
+      requiresClassificationTask: true,
+    });
+  });
+
   it("falls back to company-only assignment and requests classification when matches are ambiguous", () => {
     const result = resolveEmailAssignment({
       subject: "General project question",

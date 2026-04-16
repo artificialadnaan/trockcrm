@@ -10,7 +10,7 @@ import {
   getEmailThread,
   getUserEmails,
   getEmailAssignmentQueue,
-  associateEmailToDeal,
+  associateEmailToEntity,
 } from "./service.js";
 import { getDealById } from "../deals/service.js";
 
@@ -205,11 +205,18 @@ router.get("/:id", async (req, res, next) => {
 });
 
 // POST /api/email/:id/associate — manually associate email to a deal
-// RBAC: verify user owns the email (if rep) and has access to the target deal
+// RBAC: verify user owns the email (if rep) and has access to the target deal when needed
 router.post("/:id/associate", async (req, res, next) => {
   try {
-    const { dealId } = req.body;
-    if (!dealId) throw new AppError(400, "dealId is required");
+    const assignedEntityType =
+      (req.body.assignedEntityType as "deal" | "lead" | "property" | "company" | undefined) ??
+      (req.body.dealId ? "deal" : undefined);
+    const assignedEntityId = (req.body.assignedEntityId as string | undefined) ?? (req.body.dealId as string | undefined);
+    const assignedDealId = (req.body.assignedDealId as string | null | undefined) ?? (req.body.dealId as string | undefined) ?? null;
+
+    if (!assignedEntityType || !assignedEntityId) {
+      throw new AppError(400, "assignedEntityType and assignedEntityId are required");
+    }
 
     // Verify the email exists and the user has permission to modify it
     const email = await getEmailById(req.tenantDb!, req.params.id);
@@ -219,11 +226,23 @@ router.post("/:id/associate", async (req, res, next) => {
       throw new AppError(403, "You can only modify your own emails");
     }
 
-    // Verify the user has access to the target deal (existing RBAC)
-    const deal = await getDealById(req.tenantDb!, dealId, req.user!.role, req.user!.id);
-    if (!deal) throw new AppError(404, "Deal not found");
+    if (assignedEntityType === "deal") {
+      const deal = await getDealById(req.tenantDb!, assignedEntityId, req.user!.role, req.user!.id);
+      if (!deal) throw new AppError(404, "Deal not found");
+    }
 
-    await associateEmailToDeal(req.tenantDb!, req.params.id, dealId);
+    await associateEmailToEntity(
+      req.tenantDb!,
+      req.params.id,
+      {
+        assignedEntityType,
+        assignedEntityId,
+        assignedDealId,
+      },
+      req.user!.role,
+      req.user!.id,
+      req.user!.activeOfficeId ?? req.user!.officeId
+    );
     await req.commitTransaction!();
     res.json({ success: true });
   } catch (err) {

@@ -443,7 +443,7 @@ export async function processInboundMessage(
     priorThreadAssignment,
     contactCompanyId: contactContext.companyId,
     dealCandidates: contactContext.dealCandidates,
-    leadCandidates: [],
+    leadCandidates: contactContext.leadCandidates,
     propertyCandidates: assignmentModule.buildPropertyCandidatesFromDeals(contactContext.dealCandidates),
   });
 
@@ -590,17 +590,41 @@ async function getContactAssignmentContextRaw(
 ): Promise<{
   companyId: string | null;
   companyName: string | null;
+  estimatingStageDisplayOrder: number | null;
   dealCandidates: Array<{
     id: string;
     dealNumber: string;
     name: string;
     companyId: string | null;
+    stageSlug: string | null;
+    stageDisplayOrder: number | null;
+    propertyAddress: string | null;
+    propertyCity: string | null;
+    propertyState: string | null;
+    propertyZip: string | null;
+  }>;
+  leadCandidates: Array<{
+    id: string;
+    leadNumber: string;
+    name: string;
+    companyId: string | null;
+    relatedDealId: string | null;
+    stageSlug: string | null;
+    stageDisplayOrder: number | null;
     propertyAddress: string | null;
     propertyCity: string | null;
     propertyState: string | null;
     propertyZip: string | null;
   }>;
 }> {
+  const estimatingStageResult = await client.query(
+    `SELECT display_order
+       FROM public.pipeline_stage_config
+      WHERE slug = 'estimating'
+      LIMIT 1`
+  );
+  const estimatingStageDisplayOrder = estimatingStageResult.rows[0]?.display_order ?? 2;
+
   const [contactRow] = await client.query(
     `SELECT company_id, company_name
        FROM ${schemaName}.contacts
@@ -613,18 +637,24 @@ async function getContactAssignmentContextRaw(
   const companyName = contactRow?.company_name ?? null;
 
   const contactDealsResult = await client.query(
-    `SELECT d.id, d.deal_number, d.name, d.company_id, d.property_address, d.property_city, d.property_state, d.property_zip
+    `SELECT d.id, d.deal_number, d.name, d.company_id,
+            ps.slug AS stage_slug, ps.display_order AS stage_display_order,
+            d.property_address, d.property_city, d.property_state, d.property_zip
        FROM ${schemaName}.deals d
        JOIN ${schemaName}.contact_deal_associations cda ON cda.deal_id = d.id
+       JOIN public.pipeline_stage_config ps ON ps.id = d.stage_id
       WHERE cda.contact_id = $1 AND d.is_active = true`,
     [contactId]
   );
 
   const companyDealsResult = companyId
     ? await client.query(
-        `SELECT id, deal_number, name, company_id, property_address, property_city, property_state, property_zip
-           FROM ${schemaName}.deals
-          WHERE company_id = $1 AND is_active = true`,
+        `SELECT d.id, d.deal_number, d.name, d.company_id,
+                ps.slug AS stage_slug, ps.display_order AS stage_display_order,
+                d.property_address, d.property_city, d.property_state, d.property_zip
+           FROM ${schemaName}.deals d
+           JOIN public.pipeline_stage_config ps ON ps.id = d.stage_id
+          WHERE d.company_id = $1 AND d.is_active = true`,
         [companyId]
       )
     : { rows: [] };
@@ -635,6 +665,8 @@ async function getContactAssignmentContextRaw(
       dealNumber: deal.deal_number,
       name: deal.name,
       companyId: deal.company_id ?? null,
+      stageSlug: deal.stage_slug ?? null,
+      stageDisplayOrder: deal.stage_display_order ?? null,
       propertyAddress: deal.property_address ?? null,
       propertyCity: deal.property_city ?? null,
       propertyState: deal.property_state ?? null,
@@ -642,14 +674,30 @@ async function getContactAssignmentContextRaw(
     }))
     .filter((deal, index, arr) => arr.findIndex((candidate) => candidate.id === deal.id) === index);
 
-  return { companyId, companyName, dealCandidates };
+  const leadCandidates = dealCandidates
+    .filter((deal) => deal.stageDisplayOrder != null && deal.stageDisplayOrder < estimatingStageDisplayOrder)
+    .map((deal) => ({
+      id: deal.id,
+      leadNumber: deal.dealNumber,
+      name: deal.name,
+      companyId: deal.companyId,
+      relatedDealId: deal.id,
+      stageSlug: deal.stageSlug,
+      stageDisplayOrder: deal.stageDisplayOrder,
+      propertyAddress: deal.propertyAddress,
+      propertyCity: deal.propertyCity,
+      propertyState: deal.propertyState,
+      propertyZip: deal.propertyZip,
+    }));
+
+  return { companyId, companyName, estimatingStageDisplayOrder, dealCandidates, leadCandidates };
 }
 
 async function getLatestThreadAssignmentRaw(
   client: any,
   schemaName: string,
   conversationId: string | null
-): Promise<{ assignedEntityType: "deal" | "company"; assignedEntityId: string; assignedDealId?: string | null } | null> {
+): Promise<{ assignedEntityType: "deal" | "lead" | "property" | "company"; assignedEntityId: string; assignedDealId?: string | null } | null> {
   if (!conversationId) return null;
 
   const result = await client.query(

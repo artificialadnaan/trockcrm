@@ -10,7 +10,7 @@ vi.mock("../../../src/modules/tasks/rules/persistence.js", () => ({
   createTenantTaskRulePersistence: createTenantTaskRulePersistenceMock,
 }));
 
-const { autoAssociateEmailToDeal, associateEmailToDeal } = await import("../../../src/modules/email/service.js");
+const { autoAssociateEmailToDeal, associateEmailToEntity } = await import("../../../src/modules/email/service.js");
 
 function createSelectChain(result: any[]) {
   const chain: any = {
@@ -106,6 +106,7 @@ describe("email service inbound association", () => {
 
   it("completes inbound email tasks when an email is manually associated to a deal", async () => {
     const updatePayloads: Array<{ table: string; payload: any }> = [];
+    const insertPayloads: Array<any> = [];
     const tenantDb = {
       select: vi.fn(() => {
         const chain: any = {
@@ -117,8 +118,24 @@ describe("email service inbound association", () => {
             const callIndex = (tenantDb.select as any).mock.calls.length;
             if (callIndex === 1) {
               resolve([{ id: "email-1", userId: "user-1" }]);
-            } else {
+            } else if (callIndex === 2) {
               resolve([{ id: "deal-1" }]);
+            } else {
+              resolve([
+                {
+                  id: "task-1",
+                  title: "Reply to contact: email",
+                  status: "pending",
+                  assignedTo: "user-1",
+                  type: "inbound_email",
+                  originRule: "inbound_email_reply_needed",
+                  dedupeKey: "email:email-1:reply_needed",
+                  reasonCode: "reply_needed",
+                  dealId: null,
+                  contactId: "contact-1",
+                  entitySnapshot: { emailId: "email-1" },
+                },
+              ]);
             }
           },
         };
@@ -128,15 +145,49 @@ describe("email service inbound association", () => {
         set: vi.fn((payload: any) => {
           updatePayloads.push({ table: table?.name ?? "unknown", payload });
           return {
-            where: vi.fn(async () => []),
+            where: vi.fn(() => ({
+              returning: vi.fn(async () => [
+                {
+                  id: "task-1",
+                  title: "Reply to contact: email",
+                  status: payload.status ?? "completed",
+                  assignedTo: "user-1",
+                  type: "inbound_email",
+                  originRule: "inbound_email_reply_needed",
+                  dedupeKey: "email:email-1:reply_needed",
+                  reasonCode: "reply_needed",
+                  dealId: payload.dealId ?? null,
+                  contactId: "contact-1",
+                  entitySnapshot: { emailId: "email-1" },
+                },
+              ]),
+            })),
           };
+        }),
+      })),
+      insert: vi.fn(() => ({
+        values: vi.fn(async (payload: any) => {
+          insertPayloads.push(payload);
+          return [];
         }),
       })),
     };
 
-    await associateEmailToDeal(tenantDb as any, "email-1", "deal-1");
+    await associateEmailToEntity(
+      tenantDb as any,
+      "email-1",
+      {
+        assignedEntityType: "deal",
+        assignedEntityId: "deal-1",
+        assignedDealId: "deal-1",
+      },
+      "director",
+      "director-1",
+      "office-1"
+    );
 
     expect(updatePayloads.some((entry) => entry.payload.status === "completed")).toBe(true);
     expect(updatePayloads.some((entry) => entry.payload.completedAt)).toBe(true);
+    expect(insertPayloads.some((entry) => entry.jobType === "domain_event" && entry.payload?.eventName === "task.completed")).toBe(true);
   });
 });
