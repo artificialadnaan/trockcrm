@@ -13,7 +13,17 @@ export type InterventionResolutionReason =
 export interface InterventionMutationResult {
   updatedCount: number;
   skippedCount: number;
-  errors: Array<{ caseId: string; message: string }>;
+  errors: InterventionMutationError[];
+}
+
+export interface InterventionMutationError {
+  caseId: string;
+  message: string;
+}
+
+export interface InterventionMutationSummary {
+  tone: "success" | "warning" | "error";
+  message: string;
 }
 
 export interface InterventionQueueItem {
@@ -142,6 +152,58 @@ export function buildInterventionWorkspacePath(input: {
 
   const query = params.toString();
   return query ? `/admin/interventions?${query}` : "/admin/interventions";
+}
+
+function pluralize(count: number, singular: string, plural = `${singular}s`) {
+  return `${count} ${count === 1 ? singular : plural}`;
+}
+
+function formatInterventionMutationErrors(errors: InterventionMutationError[]) {
+  return errors.map((error) => `${error.caseId}: ${error.message}`).join("; ");
+}
+
+function pluralizeLabel(count: number, singularLabel: string) {
+  return count === 1 ? singularLabel : `${singularLabel}s`;
+}
+
+function formatCountedLabel(count: number, singularLabel: string) {
+  return pluralize(count, singularLabel, pluralizeLabel(count, singularLabel));
+}
+
+export function hasInterventionMutationErrors(result: InterventionMutationResult) {
+  return result.errors.length > 0;
+}
+
+export function summarizeInterventionMutationResult(
+  result: InterventionMutationResult,
+  options?: { successLabel?: string; skippedLabel?: string; failureLabel?: string }
+): InterventionMutationSummary {
+  const successLabel = options?.successLabel ?? "intervention case";
+  const skippedLabel = options?.skippedLabel ?? "case";
+  const failureLabel = options?.failureLabel ?? "intervention case";
+  const hasErrors = hasInterventionMutationErrors(result);
+
+  if (result.updatedCount === 0) {
+    const parts: string[] = [];
+    const failureCountLabel = pluralizeLabel(Math.max(result.updatedCount + result.skippedCount, 2), failureLabel);
+    parts.push(`No ${failureCountLabel} were updated.`);
+    if (result.skippedCount > 0) parts.push(`${formatCountedLabel(result.skippedCount, skippedLabel)} skipped.`);
+    if (hasErrors) parts.push(`Errors: ${formatInterventionMutationErrors(result.errors)}`);
+
+    return {
+      tone: "error",
+      message: parts.join(" "),
+    };
+  }
+
+  const parts: string[] = [`Updated ${formatCountedLabel(result.updatedCount, successLabel)}`];
+  if (result.skippedCount > 0) parts.push(`${formatCountedLabel(result.skippedCount, skippedLabel)} skipped.`);
+  if (hasErrors) parts.push(`Errors: ${formatInterventionMutationErrors(result.errors)}`);
+
+  return {
+    tone: result.skippedCount > 0 || hasErrors ? "warning" : "success",
+    message: parts.join(". "),
+  };
 }
 
 export function toLocalDateTimeInput(value: string | null) {

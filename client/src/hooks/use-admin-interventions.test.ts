@@ -8,10 +8,12 @@ import {
   batchResolveInterventions,
   batchSnoozeInterventions,
   escalateIntervention,
+  hasInterventionMutationErrors,
   resolveIntervention,
   snoozeIntervention,
   localDateTimeInputToIso,
   type InterventionMutationResult,
+  summarizeInterventionMutationResult,
   toLocalDateTimeInput,
 } from "./use-admin-interventions";
 
@@ -68,6 +70,62 @@ describe("datetime helpers", () => {
 
   it("converts a datetime-local string into an ISO timestamp", () => {
     expect(localDateTimeInputToIso("2026-04-16T10:45")).toMatch(/^2026-04-16T\d{2}:45:00.000Z$/);
+  });
+});
+
+describe("intervention mutation summaries", () => {
+  it("summarizes a clean success result", () => {
+    expect(
+      summarizeInterventionMutationResult({
+        updatedCount: 4,
+        skippedCount: 0,
+        errors: [],
+      })
+    ).toEqual({
+      tone: "success",
+      message: "Updated 4 intervention cases",
+    });
+  });
+
+  it("summarizes a mixed partial result with skipped rows", () => {
+    expect(
+      summarizeInterventionMutationResult({
+        updatedCount: 2,
+        skippedCount: 1,
+        errors: [],
+      })
+    ).toEqual({
+      tone: "warning",
+      message: "Updated 2 intervention cases. 1 case skipped.",
+    });
+  });
+
+  it("summarizes a full failure result with error messages", () => {
+    expect(
+      summarizeInterventionMutationResult({
+        updatedCount: 0,
+        skippedCount: 2,
+        errors: [
+          { caseId: "case-1", message: "Case not found" },
+          { caseId: "case-2", message: "Case locked by another operator" },
+        ],
+      })
+    ).toEqual({
+      tone: "error",
+      message:
+        "No intervention cases were updated. 2 cases skipped. Errors: case-1: Case not found; case-2: Case locked by another operator",
+    });
+  });
+
+  it("detects whether a mutation result contains errors", () => {
+    expect(hasInterventionMutationErrors({ updatedCount: 1, skippedCount: 0, errors: [] })).toBe(false);
+    expect(
+      hasInterventionMutationErrors({
+        updatedCount: 0,
+        skippedCount: 0,
+        errors: [{ caseId: "case-1", message: "Case not found" }],
+      })
+    ).toBe(true);
   });
 });
 

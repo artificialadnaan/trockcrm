@@ -4,12 +4,14 @@ import { RefreshCcw } from "lucide-react";
 import { toast } from "sonner";
 import { buttonVariants } from "@/components/ui/button";
 import {
+  type InterventionMutationResult,
   type InterventionWorkspaceView,
   type InterventionResolutionReason,
   batchAssignInterventions,
   batchEscalateInterventions,
   batchResolveInterventions,
   batchSnoozeInterventions,
+  summarizeInterventionMutationResult,
   useAdminInterventions,
 } from "@/hooks/use-admin-interventions";
 import { InterventionBatchToolbar } from "@/components/ai/intervention-batch-toolbar";
@@ -29,6 +31,7 @@ export function AdminInterventionWorkspacePage() {
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [activeCaseId, setActiveCaseId] = useState<string | null>(null);
   const [batchWorking, setBatchWorking] = useState(false);
+  const [detailRefreshToken, setDetailRefreshToken] = useState(0);
   const [page, setPage] = useState(1);
   const pageSize = 50;
   const { data, loading, error, refetch } = useAdminInterventions({
@@ -100,21 +103,25 @@ export function AdminInterventionWorkspacePage() {
     setSelectedIds(checked ? items.map((item) => item.id) : []);
   }
 
-  async function runBatchAction(work: () => Promise<unknown>) {
+  async function runBatchAction(work: () => Promise<InterventionMutationResult>): Promise<InterventionMutationResult | null> {
     if (selectedIds.length === 0) {
       toast.error("Select at least one intervention case");
-      return;
+      return null;
     }
 
     setBatchWorking(true);
     try {
-      await work();
-      toast.success("Intervention queue updated");
-      clearSelection();
-      await refetch();
+      const result = await work();
+      const summary = summarizeInterventionMutationResult(result);
+      toast[summary.tone](summary.message);
+      if (result.updatedCount > 0) clearSelection();
+      return result;
     } catch (err: unknown) {
       toast.error(err instanceof Error ? err.message : "Failed to update intervention queue");
+      return null;
     } finally {
+      setDetailRefreshToken((current) => current + 1);
+      await refetch();
       setBatchWorking(false);
     }
   }
@@ -296,6 +303,7 @@ export function AdminInterventionWorkspacePage() {
       </div>
 
       <InterventionDetailPanel
+        key={`${activeCaseId ?? "none"}:${detailRefreshToken}`}
         caseId={activeCaseId}
         open={activeCaseId !== null}
         onOpenChange={(open) => {
