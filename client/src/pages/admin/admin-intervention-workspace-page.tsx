@@ -25,6 +25,13 @@ export function AdminInterventionWorkspacePage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const initialView = (searchParams.get("view") as InterventionWorkspaceView | null) ?? "open";
   const initialClusterKey = searchParams.get("clusterKey") ?? "all";
+  const caseIdFilter = searchParams.get("caseId");
+  const severityFilter = searchParams.get("severity");
+  const disconnectTypeFilter = searchParams.get("disconnectType");
+  const assigneeIdFilter = searchParams.get("assigneeId");
+  const repIdFilter = searchParams.get("repId");
+  const companyIdFilter = searchParams.get("companyId");
+  const stageKeyFilter = searchParams.get("stageKey");
   const [status, setStatus] = useState<"all" | "open" | "snoozed" | "resolved">("open");
   const [workspaceView, setWorkspaceView] = useState<InterventionWorkspaceView>(initialView);
   const [clusterKey, setClusterKey] = useState<string>(initialClusterKey);
@@ -40,6 +47,13 @@ export function AdminInterventionWorkspacePage() {
     status,
     view: workspaceView,
     clusterKey: clusterKey === "all" ? null : clusterKey,
+    caseId: caseIdFilter,
+    severity: severityFilter,
+    disconnectType: disconnectTypeFilter,
+    assigneeId: assigneeIdFilter,
+    repId: repIdFilter,
+    companyId: companyIdFilter,
+    stageKey: stageKeyFilter,
   });
 
   function applyWorkspaceView(nextView: InterventionWorkspaceView) {
@@ -73,8 +87,31 @@ export function AdminInterventionWorkspacePage() {
     const next = new URLSearchParams();
     if (workspaceView !== "open") next.set("view", workspaceView);
     if (clusterKey !== "all") next.set("clusterKey", clusterKey);
+    if (caseIdFilter) next.set("caseId", caseIdFilter);
+    if (severityFilter) next.set("severity", severityFilter);
+    if (disconnectTypeFilter) next.set("disconnectType", disconnectTypeFilter);
+    if (assigneeIdFilter) next.set("assigneeId", assigneeIdFilter);
+    if (repIdFilter) next.set("repId", repIdFilter);
+    if (companyIdFilter) next.set("companyId", companyIdFilter);
+    if (stageKeyFilter) next.set("stageKey", stageKeyFilter);
     setSearchParams(next, { replace: true });
-  }, [clusterKey, setSearchParams, workspaceView]);
+  }, [
+    assigneeIdFilter,
+    caseIdFilter,
+    clusterKey,
+    companyIdFilter,
+    disconnectTypeFilter,
+    repIdFilter,
+    setSearchParams,
+    severityFilter,
+    stageKeyFilter,
+    workspaceView,
+  ]);
+
+  useEffect(() => {
+    if (!caseIdFilter) return;
+    setActiveCaseId((current) => (current === caseIdFilter ? current : caseIdFilter));
+  }, [caseIdFilter]);
 
   useEffect(() => {
     const nextView = (searchParams.get("view") as InterventionWorkspaceView | null) ?? "open";

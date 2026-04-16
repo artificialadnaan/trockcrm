@@ -493,6 +493,11 @@ describe("AI intervention service", () => {
           status: "snoozed",
           snoozedUntil: new Date("2026-04-15T00:00:00.000Z"),
           companyId: "company-1",
+          metadataJson: {
+            ...makeCase().metadataJson,
+            assignedRepId: "rep-1",
+            stageKey: "estimating",
+          },
         }),
         makeCase({
           id: "case-other-company",
@@ -502,6 +507,11 @@ describe("AI intervention service", () => {
           businessKey: "office-1:missing_next_task:deal:deal-2",
           scopeId: "deal-2",
           dealId: "deal-2",
+          metadataJson: {
+            ...makeCase().metadataJson,
+            assignedRepId: "rep-2",
+            stageKey: "proposal",
+          },
         }),
       ],
       deals: [
@@ -521,6 +531,8 @@ describe("AI intervention service", () => {
       now: new Date("2026-04-16T15:00:00.000Z"),
       filters: {
         companyId: "company-1",
+        repId: "rep-1",
+        stageKey: "estimating",
         caseId: "case-does-not-filter-the-queue",
       },
     });

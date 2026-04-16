@@ -192,8 +192,10 @@ export interface SalesProcessDisconnectRow {
   dealName: string;
   companyId: string | null;
   companyName: string | null;
+  stageKey?: string | null;
   stageName: string | null;
   estimatingSubstage: string | null;
+  assignedRepId?: string | null;
   assignedRepName: string | null;
   disconnectType: string;
   disconnectLabel: string;
@@ -978,8 +980,10 @@ export async function listCurrentSalesProcessDisconnectRows(
         d.name AS deal_name,
         c.id AS company_id,
         c.name AS company_name,
+        psc.slug AS stage_key,
         psc.name AS stage_name,
         d.estimating_substage,
+        d.assigned_rep_id,
         u.display_name AS assigned_rep_name,
         d.stage_entered_at,
         d.last_activity_at,
@@ -1256,8 +1260,10 @@ export async function listCurrentSalesProcessDisconnectRows(
     dealName: row.deal_name,
     companyId: row.company_id ?? null,
     companyName: row.company_name ?? null,
+    stageKey: row.stage_key ?? null,
     stageName: row.stage_name ?? null,
     estimatingSubstage: row.estimating_substage ?? null,
+    assignedRepId: row.assigned_rep_id ?? null,
     assignedRepName: row.assigned_rep_name ?? null,
     disconnectType: row.disconnect_type,
     disconnectLabel: row.disconnect_label,
