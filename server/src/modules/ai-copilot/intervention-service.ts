@@ -640,6 +640,10 @@ interface MutationResult {
   errors: Array<{ caseId: string; message: string }>;
 }
 
+function isTerminalTaskStatus(status: string | null | undefined) {
+  return status === "completed" || status === "dismissed";
+}
+
 function createFeedbackComment(input: {
   comment: string | null;
   metadataJson?: Record<string, unknown> | null;
@@ -742,9 +746,16 @@ async function syncGeneratedTaskAssignment(
 
   if (isInMemoryTenantDb(tenantDb)) {
     const task = tenantDb.state.tasks.find((item) => item.id === disconnectCase.generatedTaskId);
-    if (task) task.assignedTo = assignedTo;
+    if (task && !isTerminalTaskStatus(task.status)) task.assignedTo = assignedTo;
     return;
   }
+
+  const [task] = await tenantDb
+    .select({ status: tasks.status })
+    .from(tasks)
+    .where(eq(tasks.id, disconnectCase.generatedTaskId))
+    .limit(1);
+  if (!task || isTerminalTaskStatus(task.status)) return;
 
   await updateTask(
     tenantDb,
@@ -765,9 +776,16 @@ async function syncGeneratedTaskSnooze(
 
   if (isInMemoryTenantDb(tenantDb)) {
     const task = tenantDb.state.tasks.find((item) => item.id === disconnectCase.generatedTaskId);
-    if (task) task.dueDate = snoozedUntil.toISOString().slice(0, 10);
+    if (task && !isTerminalTaskStatus(task.status)) task.dueDate = snoozedUntil.toISOString().slice(0, 10);
     return;
   }
+
+  const [task] = await tenantDb
+    .select({ status: tasks.status })
+    .from(tasks)
+    .where(eq(tasks.id, disconnectCase.generatedTaskId))
+    .limit(1);
+  if (!task || isTerminalTaskStatus(task.status)) return;
 
   await snoozeTask(
     tenantDb,

@@ -556,6 +556,52 @@ describe("AI intervention service", () => {
     });
   });
 
+  it("assigns intervention cases without editing generated tasks that are already completed", async () => {
+    const tenantDb = createTenantDb({
+      cases: [
+        makeCase({
+          generatedTaskId: "task-1",
+          assignedTo: null,
+        }),
+      ],
+      tasks: [
+        makeTask({
+          id: "task-1",
+          assignedTo: "manager-1",
+          status: "completed",
+        }),
+      ],
+    });
+
+    const result = await assignInterventionCases(tenantDb as any, {
+      officeId: "office-1",
+      actorUserId: "director-1",
+      actorRole: "director",
+      caseIds: ["case-1"],
+      assignedTo: "manager-2",
+      notes: "Reassign case only",
+    });
+
+    expect(result).toEqual({
+      updatedCount: 1,
+      skippedCount: 0,
+      errors: [],
+    });
+    expect(tenantDb.state.cases[0]).toMatchObject({
+      assignedTo: "manager-2",
+      status: "open",
+    });
+    expect(tenantDb.state.tasks[0]).toMatchObject({
+      assignedTo: "manager-1",
+      status: "completed",
+    });
+    expect(tenantDb.state.history[0]).toMatchObject({
+      actionType: "assign",
+      fromAssignee: null,
+      toAssignee: "manager-2",
+    });
+  });
+
   it("filters intervention queue by workspace view and cluster key before pagination", async () => {
     const tenantDb = createTenantDb({
       cases: [
@@ -646,6 +692,46 @@ describe("AI intervention service", () => {
       feedbackType: "intervention_action",
       feedbackValue: "snooze",
     });
+  });
+
+  it("snoozes intervention cases without editing generated tasks that are already completed", async () => {
+    const tenantDb = createTenantDb({
+      cases: [
+        makeCase({
+          generatedTaskId: "task-1",
+        }),
+      ],
+      tasks: [
+        makeTask({
+          id: "task-1",
+          assignedTo: "manager-1",
+          status: "completed",
+        }),
+      ],
+    });
+
+    const result = await snoozeInterventionCases(tenantDb as any, {
+      officeId: "office-1",
+      actorUserId: "director-1",
+      actorRole: "director",
+      caseIds: ["case-1"],
+      snoozedUntil: "2026-04-20T00:00:00.000Z",
+      notes: "Snooze case only",
+    });
+
+    expect(result).toEqual({
+      updatedCount: 1,
+      skippedCount: 0,
+      errors: [],
+    });
+    expect(tenantDb.state.cases[0]).toMatchObject({
+      status: "snoozed",
+      snoozedUntil: new Date("2026-04-20T00:00:00.000Z"),
+    });
+    expect(tenantDb.state.tasks[0]).toMatchObject({
+      status: "completed",
+    });
+    expect(tenantDb.state.tasks[0]?.dueDate ?? null).toBeNull();
   });
 
   it("resolves intervention cases, maps generated task outcomes, and writes history plus feedback", async () => {
