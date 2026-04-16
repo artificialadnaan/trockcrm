@@ -4,6 +4,7 @@ COPY . .
 ENV NODE_ENV=development
 RUN npm ci
 RUN npm run build --workspace=shared
+RUN npm run build --workspace=server
 RUN npm run build --workspace=worker
 
 FROM node:20-alpine
