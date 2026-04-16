@@ -12,6 +12,7 @@ export interface PropertyDeal {
   dealNumber: string;
   name: string;
   stageId: string;
+  isActive: boolean;
   companyId: string | null;
   propertyAddress: string | null;
   propertyCity: string | null;
@@ -122,7 +123,6 @@ export function buildPropertySurfaces(
 
 export function useProperties(options: { search?: string; limit?: number; page?: number } = {}) {
   const { deals, loading: dealsLoading, error: dealsError } = useDeals({
-    isActive: true,
     limit: options.limit ?? 2000,
     page: 1,
     sortBy: "updated_at",

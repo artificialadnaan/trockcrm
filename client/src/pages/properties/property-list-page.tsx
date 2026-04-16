@@ -35,7 +35,7 @@ export function PropertyListPage() {
           </div>
           <h1 className="text-3xl font-black tracking-tight text-foreground">Properties</h1>
           <p className="text-sm text-muted-foreground">
-            {totals.properties} property{totals.properties !== 1 ? "s" : ""} across {totals.deals} deals
+            {totals.properties} {totals.properties === 1 ? "property" : "properties"} across {totals.deals} deals
           </p>
         </div>
       </div>

@@ -3,6 +3,7 @@ import { useNavigate, useParams, Link } from "react-router-dom";
 import { ArrowLeft, Building2, MapPin, Users, Handshake, Clock3 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
 import { DealStageBadge } from "@/components/deals/deal-stage-badge";
 import { LeadStageBadge } from "@/components/leads/lead-stage-badge";
 import { useDeals } from "@/hooks/use-deals";
@@ -28,7 +29,6 @@ export function PropertyDetailPage() {
   const { deals, loading: dealsLoading } = useDeals({
     limit: 2000,
     page: 1,
-    isActive: true,
     sortBy: "updated_at",
     sortDir: "desc",
   });
@@ -52,7 +52,7 @@ export function PropertyDetailPage() {
   }, [deals, property]);
 
   const leadDeals = relatedDeals.filter((deal) => deal.stageId === ddStageId);
-  const activeDeals = relatedDeals.filter((deal) => deal.stageId !== ddStageId);
+  const convertedDeals = relatedDeals.filter((deal) => deal.stageId !== ddStageId);
 
   if (loading || dealsLoading) {
     return (
@@ -132,7 +132,7 @@ export function PropertyDetailPage() {
         <Card>
           <CardContent className="pt-4">
             <p className="text-xs uppercase tracking-wide text-muted-foreground">Converted</p>
-            <p className="mt-2 text-2xl font-black">{activeDeals.length}</p>
+            <p className="mt-2 text-2xl font-black">{convertedDeals.length}</p>
           </CardContent>
         </Card>
         <Card>
@@ -158,7 +158,7 @@ export function PropertyDetailPage() {
               <div className="flex items-center justify-between gap-3">
                 <div>
                   <p className="text-sm font-medium">Related Leads</p>
-                  <p className="text-sm text-muted-foreground">Pre-RFP opportunities at this property.</p>
+                  <p className="text-sm text-muted-foreground">Historical pre-RFP opportunities at this property.</p>
                 </div>
                 <span className="text-xs text-muted-foreground">{leadDeals.length} items</span>
               </div>
@@ -178,7 +178,14 @@ export function PropertyDetailPage() {
                         <p className="truncate text-sm font-medium">{deal.name}</p>
                         <p className="font-mono text-xs text-muted-foreground">{deal.dealNumber}</p>
                       </div>
-                      <LeadStageBadge stageId={deal.stageId} />
+                      <div className="flex items-center gap-2">
+                        {!deal.isActive && (
+                          <Badge variant="outline" className="bg-muted text-xs text-muted-foreground">
+                            Inactive
+                          </Badge>
+                        )}
+                        <LeadStageBadge stageId={deal.stageId} />
+                      </div>
                     </Link>
                   ))
                 )}
@@ -191,7 +198,7 @@ export function PropertyDetailPage() {
               <div className="flex items-center justify-between gap-3">
                 <div>
                   <p className="text-sm font-medium">Related Deals</p>
-                  <p className="text-sm text-muted-foreground">All active opportunities tied to this property.</p>
+                  <p className="text-sm text-muted-foreground">All historical opportunities tied to this property.</p>
                 </div>
                 <span className="text-xs text-muted-foreground">{relatedDeals.length} items</span>
               </div>
@@ -211,7 +218,14 @@ export function PropertyDetailPage() {
                         <p className="truncate text-sm font-medium">{deal.name}</p>
                         <p className="font-mono text-xs text-muted-foreground">{deal.dealNumber}</p>
                       </div>
-                      <DealStageBadge stageId={deal.stageId} />
+                      <div className="flex items-center gap-2">
+                        {!deal.isActive && (
+                          <Badge variant="outline" className="bg-muted text-xs text-muted-foreground">
+                            Inactive
+                          </Badge>
+                        )}
+                        <DealStageBadge stageId={deal.stageId} />
+                      </div>
                     </Link>
                   ))
                 )}
@@ -223,18 +237,18 @@ export function PropertyDetailPage() {
         <div className="space-y-4">
           <Card>
             <CardContent className="pt-4">
-              <p className="text-sm font-medium">Activity Rollup</p>
+              <p className="text-sm font-medium">Historical Rollup</p>
               <p className="text-sm text-muted-foreground">
-                This property aggregates activity across every deal tied to the address.
+                This property aggregates historical activity across every deal tied to the address.
               </p>
               <div className="mt-4 grid grid-cols-2 gap-3 text-sm">
                 <div className="rounded-lg border bg-muted/30 p-3">
-                  <p className="text-muted-foreground">Lead Activity</p>
+                  <p className="text-muted-foreground">Lead Records</p>
                   <p className="text-xl font-black">{property.leadCount}</p>
                 </div>
                 <div className="rounded-lg border bg-muted/30 p-3">
-                  <p className="text-muted-foreground">Total Deals</p>
-                  <p className="text-xl font-black">{property.dealCount}</p>
+                  <p className="text-muted-foreground">Converted Deals</p>
+                  <p className="text-xl font-black">{convertedDeals.length}</p>
                 </div>
               </div>
             </CardContent>
