@@ -6,6 +6,7 @@ import {
   getWeightedPipelineForecast,
   getWinLossRatioByRep,
   getWinRateTrend,
+  getUnifiedWorkflowOverview,
   getActivitySummaryByRep,
   getStaleDeals,
   getLostDealsByReason,
@@ -109,6 +110,18 @@ router.get("/activity-summary", requireDirector, async (req, res, next) => {
       from: req.query.from as string | undefined,
       to: req.query.to as string | undefined,
     });
+    await req.commitTransaction!();
+    res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/reports/workflow-overview
+router.get("/workflow-overview", async (req, res, next) => {
+  try {
+    const repId = req.user!.role === "rep" ? req.user!.id : undefined;
+    const data = await getUnifiedWorkflowOverview(req.tenantDb!, { repId });
     await req.commitTransaction!();
     res.json({ data });
   } catch (err) {

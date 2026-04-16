@@ -1,6 +1,8 @@
 import { eq, and, sql, gte, lte, inArray, isNull, not, asc, desc } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
+  companies,
+  dealScopingIntake,
   deals,
   dealStageHistory,
   activities,
@@ -11,19 +13,10 @@ import {
   projectTypeConfig,
 } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
+import type { DealScopingIntakeStatus, WorkflowRoute } from "@trock-crm/shared/types";
 import { db } from "../../db.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
-
-const LEGACY_REPORT_FIELD_ALIASES: Record<string, Record<string, string>> = {
-  activities: {
-    user_id: "responsible_user_id",
-  },
-};
-
-function normalizeReportField(entity: ReportConfig["entity"], field: string): string {
-  return LEGACY_REPORT_FIELD_ALIASES[entity]?.[field] ?? field;
-}
 
 /** Default to Jan 1 of current year through today */
 function defaultDateRange(from?: string, to?: string): { from: string; to: string } {
@@ -34,6 +27,8 @@ function defaultDateRange(from?: string, to?: string): { from: string; to: strin
     to: to ?? today,
   };
 }
+
+const LEAD_STALE_THRESHOLD_DAYS = 14;
 
 // ---------------------------------------------------------------------------
 // 1. Pipeline Summary by Stage
@@ -314,7 +309,7 @@ export async function getActivitySummaryByRep(
 
   const result = await tenantDb.execute(sql`
     SELECT
-      a.responsible_user_id AS rep_id,
+      a.user_id AS rep_id,
       u.display_name AS rep_name,
       COUNT(*) FILTER (WHERE a.type = 'call')::int AS calls,
       COUNT(*) FILTER (WHERE a.type = 'email')::int AS emails,
@@ -323,10 +318,10 @@ export async function getActivitySummaryByRep(
       COUNT(*) FILTER (WHERE a.type = 'task_completed')::int AS tasks_completed,
       COUNT(*)::int AS total
     FROM activities a
-    JOIN users u ON u.id = a.responsible_user_id
+    JOIN users u ON u.id = a.user_id
     WHERE a.occurred_at >= ${from}::timestamptz
       AND a.occurred_at <= (${to}::date + INTERVAL '1 day')::timestamptz
-    GROUP BY a.responsible_user_id, u.display_name
+    GROUP BY a.user_id, u.display_name
     ORDER BY total DESC
   `);
 
@@ -876,6 +871,306 @@ export async function getPipelineByRep(
 }
 
 // ---------------------------------------------------------------------------
+// 14. Unified Workflow Overview
+// ---------------------------------------------------------------------------
+
+export interface UnifiedLeadPipelineSummaryRow {
+  workflowRoute: WorkflowRoute;
+  validationStatus: DealScopingIntakeStatus | string;
+  intakeCount: number;
+}
+
+export interface UnifiedRouteRollupRow {
+  workflowRoute: WorkflowRoute;
+  dealCount: number;
+  totalValue: number;
+  staleDealCount: number;
+}
+
+export interface UnifiedCompanyRollupRow {
+  companyId: string | null;
+  companyName: string;
+  leadCount: number;
+  propertyCount: number;
+  dealCount: number;
+  activeDealCount: number;
+  standardDealCount: number;
+  serviceDealCount: number;
+  totalValue: number;
+}
+
+export interface UnifiedRepActivitySplitRow {
+  repId: string;
+  repName: string;
+  leadStageCalls: number;
+  leadStageEmails: number;
+  leadStageMeetings: number;
+  leadStageNotes: number;
+  dealStageCalls: number;
+  dealStageEmails: number;
+  dealStageMeetings: number;
+  dealStageNotes: number;
+  totalLeadStageActivities: number;
+  totalDealStageActivities: number;
+}
+
+export interface UnifiedStaleLeadRow {
+  leadId: string;
+  leadName: string;
+  companyName: string;
+  workflowRoute: WorkflowRoute;
+  validationStatus: DealScopingIntakeStatus | string;
+  ageInDays: number;
+  staleThresholdDays: number;
+}
+
+export interface UnifiedStaleDealRow {
+  dealId: string;
+  dealNumber: string;
+  dealName: string;
+  stageName: string;
+  workflowRoute: WorkflowRoute;
+  repName: string;
+  daysInStage: number;
+  staleThresholdDays: number;
+  dealValue: number;
+}
+
+export interface UnifiedWorkflowOverview {
+  leadPipelineSummary: UnifiedLeadPipelineSummaryRow[];
+  standardVsServiceRollups: UnifiedRouteRollupRow[];
+  companyRollups: UnifiedCompanyRollupRow[];
+  repActivitySplit: UnifiedRepActivitySplitRow[];
+  staleLeads: UnifiedStaleLeadRow[];
+  staleDeals: UnifiedStaleDealRow[];
+}
+
+export async function getUnifiedWorkflowOverview(
+  tenantDb: TenantDb,
+  options: { repId?: string } = {}
+): Promise<UnifiedWorkflowOverview> {
+  const leadRepFilter = options.repId
+    ? sql`AND (dsi.created_by = ${options.repId} OR dsi.last_edited_by = ${options.repId})`
+    : sql``;
+  const dealRepFilter = options.repId
+    ? sql`AND d.assigned_rep_id = ${options.repId}`
+    : sql``;
+  const activityRepFilter = options.repId
+    ? sql`AND a.user_id = ${options.repId}`
+    : sql``;
+
+  const [
+    leadPipelineResult,
+    routeRollupResult,
+    companyRollupResult,
+    repActivityResult,
+    staleLeadResult,
+    staleDealResult,
+  ] = await Promise.all([
+    tenantDb.execute(sql`
+      SELECT
+        dsi.workflow_route_snapshot AS workflow_route,
+        dsi.status AS validation_status,
+        COUNT(*)::int AS intake_count
+      FROM deal_scoping_intake dsi
+      WHERE dsi.workflow_route_snapshot IN ('estimating', 'service')
+        ${leadRepFilter}
+      GROUP BY dsi.workflow_route_snapshot, dsi.status
+      ORDER BY dsi.workflow_route_snapshot ASC, dsi.status ASC
+    `),
+    tenantDb.execute(sql`
+      SELECT
+        d.workflow_route,
+        COUNT(*) FILTER (WHERE d.is_active = true AND NOT psc.is_terminal)::int AS deal_count,
+        COALESCE(SUM(
+          COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)
+        ) FILTER (WHERE d.is_active = true AND NOT psc.is_terminal), 0)::numeric AS total_value,
+        COUNT(*) FILTER (
+          WHERE d.is_active = true
+            AND NOT psc.is_terminal
+            AND psc.stale_threshold_days IS NOT NULL
+            AND EXTRACT(DAY FROM NOW() - d.stage_entered_at) > psc.stale_threshold_days
+        )::int AS stale_deal_count
+      FROM deals d
+      JOIN pipeline_stage_config psc ON psc.id = d.stage_id
+      WHERE d.workflow_route IN ('estimating', 'service')
+        ${dealRepFilter}
+      GROUP BY d.workflow_route
+      ORDER BY d.workflow_route ASC
+    `),
+    tenantDb.execute(sql`
+      SELECT
+        d.company_id,
+        COALESCE(c.name, 'Unassigned') AS company_name,
+        COUNT(DISTINCT dsi.id)::int AS lead_count,
+        COUNT(DISTINCT CASE
+          WHEN COALESCE(d.property_address, d.property_city, d.property_state, d.property_zip) IS NOT NULL
+          THEN
+            COALESCE(LOWER(NULLIF(TRIM(c.name), '')), '') || '|' ||
+            COALESCE(LOWER(NULLIF(TRIM(d.property_address), '')), '') || '|' ||
+            COALESCE(LOWER(NULLIF(TRIM(d.property_city), '')), '') || '|' ||
+            COALESCE(LOWER(NULLIF(TRIM(d.property_state), '')), '') || '|' ||
+            COALESCE(LOWER(NULLIF(TRIM(d.property_zip), '')), '')
+        END)::int AS property_count,
+        COUNT(*)::int AS deal_count,
+        COUNT(*) FILTER (WHERE d.is_active = true AND NOT psc.is_terminal)::int AS active_deal_count,
+        COUNT(*) FILTER (WHERE d.workflow_route = 'estimating' AND NOT psc.is_terminal)::int AS standard_deal_count,
+        COUNT(*) FILTER (WHERE d.workflow_route = 'service' AND NOT psc.is_terminal)::int AS service_deal_count,
+        COALESCE(SUM(
+          COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)
+        ), 0)::numeric AS total_value
+      FROM deals d
+      LEFT JOIN companies c ON c.id = d.company_id
+      LEFT JOIN deal_scoping_intake dsi ON dsi.deal_id = d.id
+      JOIN pipeline_stage_config psc ON psc.id = d.stage_id
+      WHERE TRUE
+        ${dealRepFilter}
+      GROUP BY d.company_id, c.name
+      ORDER BY total_value DESC, company_name ASC
+    `),
+    tenantDb.execute(sql`
+      WITH activity_stage AS (
+        SELECT
+          a.user_id AS rep_id,
+          u.display_name AS rep_name,
+          CASE
+            WHEN dsi.id IS NULL THEN 'deal'
+            WHEN dsi.activated_at IS NOT NULL AND a.occurred_at >= dsi.activated_at THEN 'deal'
+            ELSE 'lead'
+          END AS stage_group,
+          a.type
+        FROM activities a
+        JOIN users u ON u.id = a.user_id
+        JOIN deals d ON d.id = a.deal_id
+        LEFT JOIN deal_scoping_intake dsi ON dsi.deal_id = d.id
+        WHERE a.occurred_at <= (NOW() + INTERVAL '1 day')
+          ${activityRepFilter}
+      )
+      SELECT
+        rep_id,
+        rep_name,
+        COUNT(*) FILTER (WHERE stage_group = 'lead' AND type = 'call')::int AS lead_stage_calls,
+        COUNT(*) FILTER (WHERE stage_group = 'lead' AND type = 'email')::int AS lead_stage_emails,
+        COUNT(*) FILTER (WHERE stage_group = 'lead' AND type = 'meeting')::int AS lead_stage_meetings,
+        COUNT(*) FILTER (WHERE stage_group = 'lead' AND type = 'note')::int AS lead_stage_notes,
+        COUNT(*) FILTER (WHERE stage_group = 'deal' AND type = 'call')::int AS deal_stage_calls,
+        COUNT(*) FILTER (WHERE stage_group = 'deal' AND type = 'email')::int AS deal_stage_emails,
+        COUNT(*) FILTER (WHERE stage_group = 'deal' AND type = 'meeting')::int AS deal_stage_meetings,
+        COUNT(*) FILTER (WHERE stage_group = 'deal' AND type = 'note')::int AS deal_stage_notes,
+        COUNT(*) FILTER (WHERE stage_group = 'lead')::int AS total_lead_stage_activities,
+        COUNT(*) FILTER (WHERE stage_group = 'deal')::int AS total_deal_stage_activities
+      FROM activity_stage
+      GROUP BY rep_id, rep_name
+      ORDER BY total_deal_stage_activities DESC, total_lead_stage_activities DESC, rep_name ASC
+    `),
+    tenantDb.execute(sql`
+      SELECT
+        dsi.id AS lead_id,
+        d.name AS lead_name,
+        COALESCE(c.name, 'Unassigned') AS company_name,
+        dsi.workflow_route_snapshot AS workflow_route,
+        dsi.status AS validation_status,
+        EXTRACT(DAY FROM NOW() - COALESCE(dsi.first_ready_at, dsi.last_autosaved_at, dsi.created_at))::int AS age_in_days,
+        ${LEAD_STALE_THRESHOLD_DAYS}::int AS stale_threshold_days
+      FROM deal_scoping_intake dsi
+      JOIN deals d ON d.id = dsi.deal_id
+      LEFT JOIN companies c ON c.id = d.company_id
+      WHERE dsi.status IN ('draft', 'ready')
+        AND EXTRACT(DAY FROM NOW() - COALESCE(dsi.first_ready_at, dsi.last_autosaved_at, dsi.created_at)) > ${LEAD_STALE_THRESHOLD_DAYS}
+        ${leadRepFilter}
+      ORDER BY age_in_days DESC, lead_name ASC
+    `),
+    tenantDb.execute(sql`
+      SELECT
+        d.id AS deal_id,
+        d.deal_number,
+        d.name AS deal_name,
+        psc.name AS stage_name,
+        d.workflow_route,
+        u.display_name AS rep_name,
+        EXTRACT(DAY FROM NOW() - d.stage_entered_at)::int AS days_in_stage,
+        psc.stale_threshold_days,
+        COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)::numeric AS deal_value
+      FROM deals d
+      JOIN pipeline_stage_config psc ON psc.id = d.stage_id
+      JOIN users u ON u.id = d.assigned_rep_id
+      WHERE d.is_active = true
+        AND psc.is_terminal = false
+        AND psc.stale_threshold_days IS NOT NULL
+        AND EXTRACT(DAY FROM NOW() - d.stage_entered_at) > psc.stale_threshold_days
+        ${dealRepFilter}
+      ORDER BY days_in_stage DESC, deal_name ASC
+    `),
+  ]);
+
+  const leadRows = (leadPipelineResult as any).rows ?? leadPipelineResult;
+  const routeRows = (routeRollupResult as any).rows ?? routeRollupResult;
+  const companyRows = (companyRollupResult as any).rows ?? companyRollupResult;
+  const activityRows = (repActivityResult as any).rows ?? repActivityResult;
+  const staleLeadRows = (staleLeadResult as any).rows ?? staleLeadResult;
+  const staleDealRows = (staleDealResult as any).rows ?? staleDealResult;
+
+  return {
+    leadPipelineSummary: leadRows.map((row: any) => ({
+      workflowRoute: row.workflow_route,
+      validationStatus: row.validation_status,
+      intakeCount: Number(row.intake_count ?? 0),
+    })),
+    standardVsServiceRollups: routeRows.map((row: any) => ({
+      workflowRoute: row.workflow_route,
+      dealCount: Number(row.deal_count ?? 0),
+      totalValue: Number(row.total_value ?? 0),
+      staleDealCount: Number(row.stale_deal_count ?? 0),
+    })),
+    companyRollups: companyRows.map((row: any) => ({
+      companyId: row.company_id ?? null,
+      companyName: row.company_name,
+      leadCount: Number(row.lead_count ?? 0),
+      propertyCount: Number(row.property_count ?? 0),
+      dealCount: Number(row.deal_count ?? 0),
+      activeDealCount: Number(row.active_deal_count ?? 0),
+      standardDealCount: Number(row.standard_deal_count ?? 0),
+      serviceDealCount: Number(row.service_deal_count ?? 0),
+      totalValue: Number(row.total_value ?? 0),
+    })),
+    repActivitySplit: activityRows.map((row: any) => ({
+      repId: row.rep_id,
+      repName: row.rep_name,
+      leadStageCalls: Number(row.lead_stage_calls ?? 0),
+      leadStageEmails: Number(row.lead_stage_emails ?? 0),
+      leadStageMeetings: Number(row.lead_stage_meetings ?? 0),
+      leadStageNotes: Number(row.lead_stage_notes ?? 0),
+      dealStageCalls: Number(row.deal_stage_calls ?? 0),
+      dealStageEmails: Number(row.deal_stage_emails ?? 0),
+      dealStageMeetings: Number(row.deal_stage_meetings ?? 0),
+      dealStageNotes: Number(row.deal_stage_notes ?? 0),
+      totalLeadStageActivities: Number(row.total_lead_stage_activities ?? 0),
+      totalDealStageActivities: Number(row.total_deal_stage_activities ?? 0),
+    })),
+    staleLeads: staleLeadRows.map((row: any) => ({
+      leadId: row.lead_id,
+      leadName: row.lead_name,
+      companyName: row.company_name,
+      workflowRoute: row.workflow_route,
+      validationStatus: row.validation_status,
+      ageInDays: Number(row.age_in_days ?? 0),
+      staleThresholdDays: Number(row.stale_threshold_days ?? LEAD_STALE_THRESHOLD_DAYS),
+    })),
+    staleDeals: staleDealRows.map((row: any) => ({
+      dealId: row.deal_id,
+      dealNumber: row.deal_number,
+      dealName: row.deal_name,
+      stageName: row.stage_name,
+      workflowRoute: row.workflow_route,
+      repName: row.rep_name,
+      daysInStage: Number(row.days_in_stage ?? 0),
+      staleThresholdDays: Number(row.stale_threshold_days ?? 0),
+      dealValue: Number(row.deal_value ?? 0),
+    })),
+  };
+}
+
+// ---------------------------------------------------------------------------
 // 14. Custom Report Query Executor
 // ---------------------------------------------------------------------------
 
@@ -908,7 +1203,7 @@ const ALLOWED_COLUMNS: Record<string, string[]> = {
     "is_active", "created_at", "updated_at",
   ],
   activities: [
-    "id", "type", "responsible_user_id", "deal_id", "contact_id",
+    "id", "type", "user_id", "deal_id", "contact_id",
     "subject", "outcome", "duration_minutes", "occurred_at", "created_at",
   ],
   tasks: [
@@ -933,11 +1228,8 @@ export async function executeCustomReport(
   if (!allowed) throw new Error(`Invalid entity: ${entityTable}`);
 
   // Validate columns
-  const normalizedColumns = config.columns.map((column) =>
-    normalizeReportField(config.entity, column)
-  );
-  const selectCols = normalizedColumns.length > 0
-    ? normalizedColumns.filter((c) => allowed.includes(c))
+  const selectCols = config.columns.length > 0
+    ? config.columns.filter((c) => allowed.includes(c))
     : allowed.slice(0, 10); // default to first 10 columns
 
   if (selectCols.length === 0) throw new Error("No valid columns selected");
@@ -945,10 +1237,9 @@ export async function executeCustomReport(
   // Build WHERE clause from filters using parameter binding for all values.
   const whereClauses: ReturnType<typeof sql>[] = [];
   for (const filter of config.filters) {
-    const normalizedField = normalizeReportField(config.entity, filter.field);
-    if (!allowed.includes(normalizedField)) continue; // skip unknown fields
+    if (!allowed.includes(filter.field)) continue; // skip unknown fields
 
-    const col = sql.identifier(normalizedField);
+    const col = sql.identifier(filter.field);
     switch (filter.op) {
       case "eq":
         if (filter.value !== undefined) {
@@ -1007,12 +1298,9 @@ export async function executeCustomReport(
 
   // Sort
   let orderClause = sql``;
-  const normalizedSortField = config.sort
-    ? normalizeReportField(config.entity, config.sort.field)
-    : null;
-  if (config.sort && normalizedSortField && allowed.includes(normalizedSortField)) {
+  if (config.sort && allowed.includes(config.sort.field)) {
     const dir = config.sort.dir === "asc" ? sql`ASC` : sql`DESC`;
-    orderClause = sql`ORDER BY ${sql.identifier(normalizedSortField)} ${dir}`;
+    orderClause = sql`ORDER BY ${sql.identifier(config.sort.field)} ${dir}`;
   }
 
   const offset = (pagination.page - 1) * pagination.limit;
@@ -1223,7 +1511,7 @@ export async function getRepPerformanceComparison(
   // Query activities for both periods
   const activityResult = await tenantDb.execute(sql`
     SELECT
-      a.responsible_user_id AS rep_id,
+      a.user_id AS rep_id,
       COUNT(*) FILTER (
         WHERE a.occurred_at >= ${current.from}::timestamptz
           AND a.occurred_at <= (${current.to}::date + INTERVAL '1 day')::timestamptz
@@ -1235,7 +1523,7 @@ export async function getRepPerformanceComparison(
     FROM activities a
     WHERE a.occurred_at >= ${previous.from}::timestamptz
       AND a.occurred_at <= (${current.to}::date + INTERVAL '1 day')::timestamptz
-    GROUP BY a.responsible_user_id
+    GROUP BY a.user_id
   `);
 
   const dealRows = (dealResult as any).rows ?? dealResult;

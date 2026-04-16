@@ -174,24 +174,30 @@ export async function deleteSavedReport(reportId: string, userId: string) {
 }
 
 /**
- * Seed the 9 locked company reports if they don't already exist.
+ * Seed the locked company reports if they don't already exist.
  * Called once during server startup or via admin endpoint.
  */
 export async function seedLockedReports(officeId: string) {
-  // Check if locked reports already exist for this office
   const existing = await db
-    .select({ id: savedReports.id })
+    .select({ name: savedReports.name })
     .from(savedReports)
-    .where(and(eq(savedReports.isLocked, true), eq(savedReports.officeId, officeId)))
-    .limit(1);
+    .where(and(eq(savedReports.isLocked, true), eq(savedReports.officeId, officeId)));
 
-  if (existing.length > 0) return; // already seeded
+  const existingNames = new Set(existing.map((report: { name: string }) => report.name));
 
   const lockedReports: Array<{
     name: string;
     entity: string;
     config: object;
   }> = [
+    {
+      name: "Unified Workflow Overview",
+      entity: "deals",
+      config: {
+        reportType: "workflow_overview",
+        chart_type: "table",
+      },
+    },
     {
       name: "Pipeline Summary (Excluding DD)",
       entity: "deals",
@@ -284,8 +290,11 @@ export async function seedLockedReports(officeId: string) {
     },
   ];
 
+  const missingReports = lockedReports.filter((report) => !existingNames.has(report.name));
+  if (missingReports.length === 0) return;
+
   await db.insert(savedReports).values(
-    lockedReports.map((r) => ({
+    missingReports.map((r) => ({
       name: r.name,
       entity: r.entity as any,
       config: r.config,

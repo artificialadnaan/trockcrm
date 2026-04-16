@@ -30,6 +30,77 @@ export interface ReportConfig {
   includeDd?: boolean;
 }
 
+export interface UnifiedLeadPipelineSummaryRow {
+  workflowRoute: "estimating" | "service";
+  validationStatus: string;
+  intakeCount: number;
+}
+
+export interface UnifiedRouteRollupRow {
+  workflowRoute: "estimating" | "service";
+  dealCount: number;
+  totalValue: number;
+  staleDealCount: number;
+}
+
+export interface UnifiedCompanyRollupRow {
+  companyId: string | null;
+  companyName: string;
+  leadCount: number;
+  propertyCount: number;
+  dealCount: number;
+  activeDealCount: number;
+  standardDealCount: number;
+  serviceDealCount: number;
+  totalValue: number;
+}
+
+export interface UnifiedRepActivitySplitRow {
+  repId: string;
+  repName: string;
+  leadStageCalls: number;
+  leadStageEmails: number;
+  leadStageMeetings: number;
+  leadStageNotes: number;
+  dealStageCalls: number;
+  dealStageEmails: number;
+  dealStageMeetings: number;
+  dealStageNotes: number;
+  totalLeadStageActivities: number;
+  totalDealStageActivities: number;
+}
+
+export interface UnifiedStaleLeadRow {
+  leadId: string;
+  leadName: string;
+  companyName: string;
+  workflowRoute: "estimating" | "service";
+  validationStatus: string;
+  ageInDays: number;
+  staleThresholdDays: number;
+}
+
+export interface UnifiedStaleDealRow {
+  dealId: string;
+  dealNumber: string;
+  dealName: string;
+  stageName: string;
+  workflowRoute: "estimating" | "service";
+  repName: string;
+  daysInStage: number;
+  staleThresholdDays: number;
+  dealValue: number;
+}
+
+export interface UnifiedWorkflowOverview {
+  leadPipelineSummary: UnifiedLeadPipelineSummaryRow[];
+  standardVsServiceRollups: UnifiedRouteRollupRow[];
+  companyRollups: UnifiedCompanyRollupRow[];
+  repActivitySplit: UnifiedRepActivitySplitRow[];
+  staleLeads: UnifiedStaleLeadRow[];
+  staleDeals: UnifiedStaleDealRow[];
+}
+
 export function useSavedReports() {
   const [reports, setReports] = useState<SavedReport[]>([]);
   const [loading, setLoading] = useState(true);
@@ -94,6 +165,7 @@ export async function executeLockedReport(
 
   const endpointMap: Record<string, string> = {
     pipeline_summary: "/reports/pipeline-summary",
+    workflow_overview: "/reports/workflow-overview",
     weighted_forecast: "/reports/weighted-forecast",
     win_loss_ratio: "/reports/win-loss",
     activity_summary: "/reports/activity-summary",
@@ -109,6 +181,40 @@ export async function executeLockedReport(
   if (!endpoint) throw new Error(`Unknown report type: ${reportType}`);
 
   return api<{ data: any }>(`${endpoint}${qs ? `?${qs}` : ""}`);
+}
+
+export async function executeWorkflowOverview(options: { from?: string; to?: string } = {}) {
+  const params = new URLSearchParams();
+  if (options.from) params.set("from", options.from);
+  if (options.to) params.set("to", options.to);
+  const qs = params.toString();
+
+  return api<{ data: UnifiedWorkflowOverview }>(`/reports/workflow-overview${qs ? `?${qs}` : ""}`);
+}
+
+export function useUnifiedWorkflowOverview(options: { from?: string; to?: string } = {}) {
+  const [data, setData] = useState<UnifiedWorkflowOverview | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchOverview = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await executeWorkflowOverview(options);
+      setData(result.data);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to load workflow overview");
+    } finally {
+      setLoading(false);
+    }
+  }, [options.from, options.to]);
+
+  useEffect(() => {
+    fetchOverview();
+  }, [fetchOverview]);
+
+  return { data, loading, error, refetch: fetchOverview };
 }
 
 /** Execute a custom report config */
