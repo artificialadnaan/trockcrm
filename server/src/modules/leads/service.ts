@@ -1,8 +1,9 @@
-import { and, asc, desc, eq, ilike, or } from "drizzle-orm";
+import { and, asc, desc, eq, ilike, inArray, or } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
   companies,
   contacts,
+  deals,
   leads,
   properties,
   userOfficeAccess,
@@ -21,7 +22,7 @@ export interface LeadFilters {
   propertyId?: string;
   assignedRepId?: string;
   status?: "open" | "converted" | "disqualified";
-  isActive?: boolean;
+  isActive?: boolean | "all";
 }
 
 export interface CreateLeadInput {
@@ -59,6 +60,65 @@ const defaultDependencies: LeadServiceDependencies = {
   getStageById,
   now: () => new Date(),
 };
+
+async function decorateLeads(
+  tenantDb: TenantDb,
+  rows: Array<typeof leads.$inferSelect>
+) {
+  if (rows.length === 0) {
+    return [];
+  }
+
+  const companyIds = [...new Set(rows.map((lead) => lead.companyId).filter(Boolean))];
+  const propertyIds = [...new Set(rows.map((lead) => lead.propertyId).filter(Boolean))];
+  const leadIds = rows.map((lead) => lead.id);
+
+  const [companyRows, propertyRows, convertedDealRows] = await Promise.all([
+    companyIds.length === 0
+      ? []
+      : tenantDb
+          .select({ id: companies.id, name: companies.name })
+          .from(companies)
+          .where(inArray(companies.id, companyIds)),
+    propertyIds.length === 0
+      ? []
+      : tenantDb
+          .select({
+            id: properties.id,
+            name: properties.name,
+            address: properties.address,
+            city: properties.city,
+            state: properties.state,
+            zip: properties.zip,
+          })
+          .from(properties)
+          .where(inArray(properties.id, propertyIds)),
+    tenantDb
+      .select({
+        sourceLeadId: deals.sourceLeadId,
+        id: deals.id,
+        dealNumber: deals.dealNumber,
+      })
+      .from(deals)
+      .where(inArray(deals.sourceLeadId, leadIds)),
+  ]);
+
+  const companyMap = new Map(companyRows.map((company) => [company.id, company.name]));
+  const propertyMap = new Map(propertyRows.map((property) => [property.id, property]));
+  const convertedDealMap = new Map(
+    convertedDealRows
+      .filter((deal) => deal.sourceLeadId)
+      .map((deal) => [deal.sourceLeadId as string, { id: deal.id, dealNumber: deal.dealNumber }])
+  );
+
+  return rows.map((lead) => ({
+    ...lead,
+    companyName: companyMap.get(lead.companyId) ?? null,
+    property: propertyMap.get(lead.propertyId) ?? null,
+    convertedDealId: convertedDealMap.get(lead.id)?.id ?? null,
+    convertedDealNumber: convertedDealMap.get(lead.id)?.dealNumber ?? null,
+  }));
+}
 
 async function validateAssignee(tenantDb: TenantDb, assigneeId: string, officeId?: string): Promise<void> {
   const [user] = await tenantDb
@@ -159,7 +219,7 @@ export function createLeadService(
       throw new AppError(403, "You can only view your own leads");
     }
 
-    return lead;
+    return (await decorateLeads(tenantDb, [lead]))[0] ?? null;
   }
 
   async function listLeads(
@@ -170,7 +230,9 @@ export function createLeadService(
   ) {
     const conditions: any[] = [];
 
-    conditions.push(eq(leads.isActive, filters.isActive ?? true));
+    if (filters.isActive !== "all") {
+      conditions.push(eq(leads.isActive, filters.isActive ?? true));
+    }
 
     if (userRole === "rep") {
       conditions.push(eq(leads.assignedRepId, userId));
@@ -193,11 +255,13 @@ export function createLeadService(
       );
     }
 
-    return tenantDb
+    const rows = await tenantDb
       .select()
       .from(leads)
       .where(and(...conditions))
       .orderBy(desc(leads.updatedAt), asc(leads.name));
+
+    return decorateLeads(tenantDb, rows);
   }
 
   async function createLead(tenantDb: TenantDb, input: CreateLeadInput) {

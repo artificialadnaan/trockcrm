@@ -9,7 +9,6 @@ import { DealStageBadge } from "./deal-stage-badge";
 import { formatDate, daysInStage, winProbabilityColor, formatCurrency } from "@/lib/deal-utils";
 import { useProjectTypes, useRegions } from "@/hooks/use-pipeline-config";
 import type { DealDetail } from "@/hooks/use-deals";
-import { buildPropertyId } from "@/lib/property-key";
 import {
   MapPin,
   Calendar,
@@ -29,16 +28,6 @@ export function DealOverviewTab({ deal }: DealOverviewTabProps) {
 
   const projectType = projectTypes.find((t) => t.id === deal.projectTypeId);
   const region = regions.find((r) => r.id === deal.regionId);
-  const propertyId =
-    deal.companyId && (deal.propertyAddress || deal.propertyCity || deal.propertyState || deal.propertyZip)
-      ? buildPropertyId({
-          companyId: deal.companyId,
-          address: deal.propertyAddress,
-          city: deal.propertyCity,
-          state: deal.propertyState,
-          zip: deal.propertyZip,
-        })
-      : null;
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
@@ -85,8 +74,8 @@ export function DealOverviewTab({ deal }: DealOverviewTabProps) {
               </CardTitle>
             </CardHeader>
             <CardContent className="text-sm space-y-1">
-              {propertyId ? (
-                <Link to={`/properties/${propertyId}`} className="space-y-1 text-primary hover:underline">
+              {deal.propertyId ? (
+                <Link to={`/properties/${deal.propertyId}`} className="space-y-1 text-primary hover:underline">
                   {deal.propertyAddress && <p>{deal.propertyAddress}</p>}
                   {deal.propertyCity && (
                     <p>
@@ -116,7 +105,12 @@ export function DealOverviewTab({ deal }: DealOverviewTabProps) {
             <p className="text-muted-foreground">
               This record has a dedicated pre-RFP lead view with inherited activity history.
             </p>
-            <Button variant="outline" size="sm" onClick={() => navigate(`/leads/${deal.id}`)}>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={!deal.sourceLeadId}
+              onClick={() => deal.sourceLeadId && navigate(`/leads/${deal.sourceLeadId}`)}
+            >
               Open Lead Detail
             </Button>
           </CardContent>

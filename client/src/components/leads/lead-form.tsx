@@ -3,15 +3,17 @@ import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { LeadStageBadge } from "./lead-stage-badge";
-import { buildPropertyId } from "@/lib/property-key";
 
 export interface LeadFormLead {
   id: string;
   name: string;
-  dealNumber: string;
+  convertedDealId: string | null;
+  convertedDealNumber: string | null;
   companyId: string | null;
   companyName: string | null;
   stageId: string;
+  propertyId: string | null;
+  propertyName: string | null;
   propertyAddress: string | null;
   propertyCity: string | null;
   propertyState: string | null;
@@ -28,19 +30,9 @@ interface LeadFormProps {
 
 export function LeadForm({ lead, converted = false }: LeadFormProps) {
   const navigate = useNavigate();
-  const propertyId =
-    lead.companyId && (lead.propertyAddress || lead.propertyCity || lead.propertyState || lead.propertyZip)
-      ? buildPropertyId({
-          companyId: lead.companyId,
-          address: lead.propertyAddress,
-          city: lead.propertyCity,
-          state: lead.propertyState,
-          zip: lead.propertyZip,
-        })
-      : null;
   const propertyLabel = [lead.propertyAddress, [lead.propertyCity, lead.propertyState].filter(Boolean).join(", "), lead.propertyZip]
     .filter(Boolean)
-    .join(" ");
+    .join(" ") || lead.propertyName || "--";
 
   return (
     <Card>
@@ -57,8 +49,8 @@ export function LeadForm({ lead, converted = false }: LeadFormProps) {
             <p className="font-medium">{lead.name}</p>
           </div>
           <div>
-            <p className="text-muted-foreground">Lead Number</p>
-            <p className="font-mono font-medium">{lead.dealNumber}</p>
+            <p className="text-muted-foreground">Lead Record</p>
+            <p className="font-mono font-medium">{lead.convertedDealNumber ?? lead.id.slice(0, 8)}</p>
           </div>
           <div>
             <p className="text-muted-foreground">Company</p>
@@ -72,8 +64,8 @@ export function LeadForm({ lead, converted = false }: LeadFormProps) {
 
         <div className="rounded-lg border bg-muted/30 p-3 text-sm">
           <p className="text-muted-foreground">Property</p>
-          {propertyId ? (
-            <Link to={`/properties/${propertyId}`} className="font-medium text-primary hover:underline">
+          {lead.propertyId ? (
+            <Link to={`/properties/${lead.propertyId}`} className="font-medium text-primary hover:underline">
               {propertyLabel || "--"}
             </Link>
           ) : (
@@ -86,7 +78,10 @@ export function LeadForm({ lead, converted = false }: LeadFormProps) {
         )}
 
         <div className="flex flex-wrap gap-2">
-          <Button onClick={() => navigate(`/deals/${lead.id}`)}>
+          <Button
+            disabled={converted && !lead.convertedDealId}
+            onClick={() => navigate(converted ? `/deals/${lead.convertedDealId}` : "/deals/new")}
+          >
             {converted ? "Open Deal" : "Convert to Deal"}
           </Button>
           {lead.companyId && (
@@ -97,7 +92,7 @@ export function LeadForm({ lead, converted = false }: LeadFormProps) {
         </div>
 
         <p className="text-xs text-muted-foreground">
-          This lead surface is derived from the pre-RFP deal record and preserves its activity history.
+          This lead surface is backed by the pre-RFP lead record and preserves its activity history through conversion.
         </p>
       </CardContent>
     </Card>

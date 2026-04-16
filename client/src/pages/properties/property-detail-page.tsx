@@ -6,55 +6,17 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { DealStageBadge } from "@/components/deals/deal-stage-badge";
 import { LeadStageBadge } from "@/components/leads/lead-stage-badge";
-import { useDeals } from "@/hooks/use-deals";
-import { useProperties } from "@/hooks/use-properties";
-import { usePipelineStages } from "@/hooks/use-pipeline-config";
-import { useCompanies } from "@/hooks/use-companies";
-
-function formatPropertyLine(
-  address: string | null,
-  city: string | null,
-  state: string | null,
-  zip: string | null
-) {
-  return [address, [city, state].filter(Boolean).join(", "), zip]
-    .filter(Boolean)
-    .join(" ");
-}
+import { formatPropertyLabel, usePropertyDetail } from "@/hooks/use-properties";
 
 export function PropertyDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const { properties, loading, error } = useProperties();
-  const { deals, loading: dealsLoading } = useDeals({
-    limit: 2000,
-    page: 1,
-    sortBy: "updated_at",
-    sortDir: "desc",
-  });
-  const { stages } = usePipelineStages();
-  const { companies } = useCompanies({ limit: 2000, page: 1 });
+  const { property, leads, deals, loading, error } = usePropertyDetail(id);
+  const relatedLeads = leads;
+  const relatedDeals = deals;
+  const leadDeals = useMemo(() => relatedLeads, [relatedLeads]);
 
-  const ddStageId = stages.find((stage) => stage.slug === "dd")?.id ?? "";
-  const companyMap = useMemo(
-    () => new Map(companies.map((company) => [company.id, company.name])),
-    [companies]
-  );
-
-  const property = useMemo(
-    () => properties.find((item) => item.id === id) ?? null,
-    [id, properties]
-  );
-
-  const relatedDeals = useMemo(() => {
-    if (!property) return [];
-    return deals.filter((deal) => property.dealIds.includes(deal.id));
-  }, [deals, property]);
-
-  const leadDeals = relatedDeals.filter((deal) => deal.stageId === ddStageId);
-  const convertedDeals = relatedDeals.filter((deal) => deal.stageId !== ddStageId);
-
-  if (loading || dealsLoading) {
+  if (loading) {
     return (
       <div className="space-y-4">
         <div className="h-8 w-48 rounded bg-muted animate-pulse" />
@@ -75,8 +37,8 @@ export function PropertyDetailPage() {
     );
   }
 
-  const companyName = property.companyName ?? (property.companyId ? companyMap.get(property.companyId) ?? null : null);
-  const propertyLine = formatPropertyLine(property.address, property.city, property.state, property.zip);
+  const companyName = property.companyName ?? null;
+  const propertyLine = formatPropertyLabel(property);
 
   return (
     <div className="space-y-6">
@@ -97,7 +59,7 @@ export function PropertyDetailPage() {
             Property Detail
           </span>
         </div>
-        <h1 className="text-4xl font-black tracking-tight text-foreground">{property.label}</h1>
+        <h1 className="text-4xl font-black tracking-tight text-foreground">{propertyLine}</h1>
         <div className="flex flex-wrap items-center gap-4 text-sm text-muted-foreground">
           <span className="flex items-center gap-1">
             <Users className="h-4 w-4" />
@@ -132,7 +94,7 @@ export function PropertyDetailPage() {
         <Card>
           <CardContent className="pt-4">
             <p className="text-xs uppercase tracking-wide text-muted-foreground">Converted</p>
-            <p className="mt-2 text-2xl font-black">{convertedDeals.length}</p>
+            <p className="mt-2 text-2xl font-black">{property.convertedDealCount}</p>
           </CardContent>
         </Card>
         <Card>
@@ -160,7 +122,7 @@ export function PropertyDetailPage() {
                   <p className="text-sm font-medium">Related Leads</p>
                   <p className="text-sm text-muted-foreground">Historical pre-RFP opportunities at this property.</p>
                 </div>
-                <span className="text-xs text-muted-foreground">{leadDeals.length} items</span>
+                    <span className="text-xs text-muted-foreground">{leadDeals.length} items</span>
               </div>
               <div className="mt-4 space-y-2">
                 {leadDeals.length === 0 ? (
@@ -168,23 +130,23 @@ export function PropertyDetailPage() {
                     No leads at this property yet.
                   </div>
                 ) : (
-                  leadDeals.map((deal) => (
+                  leadDeals.map((lead) => (
                     <Link
-                      key={deal.id}
-                      to={`/leads/${deal.id}`}
+                      key={lead.id}
+                      to={`/leads/${lead.id}`}
                       className="flex items-center justify-between gap-3 rounded-lg border px-3 py-2 transition-colors hover:bg-muted/40"
                     >
                       <div className="min-w-0">
-                        <p className="truncate text-sm font-medium">{deal.name}</p>
-                        <p className="font-mono text-xs text-muted-foreground">{deal.dealNumber}</p>
+                        <p className="truncate text-sm font-medium">{lead.name}</p>
+                        <p className="font-mono text-xs text-muted-foreground">{lead.convertedAt ? "Converted" : "Open lead"}</p>
                       </div>
                       <div className="flex items-center gap-2">
-                        {!deal.isActive && (
+                        {!lead.isActive && (
                           <Badge variant="outline" className="bg-muted text-xs text-muted-foreground">
                             Inactive
                           </Badge>
                         )}
-                        <LeadStageBadge stageId={deal.stageId} />
+                        <LeadStageBadge stageId={lead.stageId} converted={lead.status === "converted"} />
                       </div>
                     </Link>
                   ))
@@ -248,7 +210,7 @@ export function PropertyDetailPage() {
                 </div>
                 <div className="rounded-lg border bg-muted/30 p-3">
                   <p className="text-muted-foreground">Converted Deals</p>
-                  <p className="text-xl font-black">{convertedDeals.length}</p>
+                  <p className="text-xl font-black">{property.convertedDealCount}</p>
                 </div>
               </div>
             </CardContent>

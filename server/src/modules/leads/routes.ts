@@ -22,7 +22,12 @@ router.get("/", async (req, res, next) => {
         propertyId: req.query.propertyId as string | undefined,
         assignedRepId: req.query.assignedRepId as string | undefined,
         status: req.query.status as "open" | "converted" | "disqualified" | undefined,
-        isActive: req.query.isActive === "false" ? false : true,
+        isActive:
+          req.query.isActive === "all"
+            ? "all"
+            : req.query.isActive === "false"
+              ? false
+              : true,
       },
       req.user!.role,
       req.user!.id

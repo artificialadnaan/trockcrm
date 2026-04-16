@@ -432,12 +432,15 @@ function DealLeadTab({
     <div className="grid gap-4 lg:grid-cols-[0.95fr_1.05fr]">
       <LeadForm
         lead={{
-          id: deal.id,
+          id: deal.sourceLeadId ?? deal.id,
           name: deal.name,
-          dealNumber: deal.dealNumber,
+          convertedDealId: isConverted ? deal.id : null,
+          convertedDealNumber: isConverted ? deal.dealNumber : null,
           companyId: deal.companyId,
           companyName,
           stageId: deal.stageId,
+          propertyId: deal.propertyId,
+          propertyName: null,
           propertyAddress: deal.propertyAddress,
           propertyCity: deal.propertyCity,
           propertyState: deal.propertyState,
@@ -450,7 +453,8 @@ function DealLeadTab({
       />
 
       <LeadTimelineTab
-        dealId={deal.id}
+        leadId={deal.sourceLeadId ?? deal.id}
+        convertedDealId={isConverted ? deal.id : null}
         convertedAt={isConverted ? deal.stageEnteredAt : null}
       />
     </div>

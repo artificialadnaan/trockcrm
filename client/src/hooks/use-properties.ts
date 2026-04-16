@@ -1,178 +1,170 @@
-import { useMemo } from "react";
-import { useCompanies, type Company } from "@/hooks/use-companies";
-import { useDeals, type Deal } from "@/hooks/use-deals";
-import {
-  buildPropertyId,
-  formatPropertyLabel,
-} from "@/lib/property-key";
-import { usePipelineStages } from "@/hooks/use-pipeline-config";
+import { useState, useEffect, useCallback } from "react";
+import { api } from "@/lib/api";
+
+export interface PropertySurface {
+  id: string;
+  companyId: string;
+  companyName: string | null;
+  name: string;
+  address: string | null;
+  city: string | null;
+  state: string | null;
+  zip: string | null;
+  notes: string | null;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+  leadCount: number;
+  dealCount: number;
+  convertedDealCount: number;
+  lastActivityAt: string | null;
+}
+
+export interface PropertyListFilters {
+  search?: string;
+  companyId?: string;
+  page?: number;
+  limit?: number;
+  isActive?: boolean;
+}
+
+export interface PropertyLead {
+  id: string;
+  companyId: string;
+  propertyId: string;
+  primaryContactId: string | null;
+  name: string;
+  stageId: string;
+  assignedRepId: string;
+  status: "open" | "converted" | "disqualified";
+  source: string | null;
+  description: string | null;
+  lastActivityAt: string | null;
+  stageEnteredAt: string;
+  convertedAt: string | null;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
 
 export interface PropertyDeal {
   id: string;
   dealNumber: string;
   name: string;
   stageId: string;
-  isActive: boolean;
+  workflowRoute: "estimating" | "service";
+  assignedRepId: string;
   companyId: string | null;
+  propertyId: string | null;
+  sourceLeadId: string | null;
+  primaryContactId: string | null;
+  ddEstimate: string | null;
+  bidEstimate: string | null;
+  awardedAmount: string | null;
+  changeOrderTotal: string | null;
+  description: string | null;
   propertyAddress: string | null;
   propertyCity: string | null;
   propertyState: string | null;
   propertyZip: string | null;
+  projectTypeId: string | null;
+  regionId: string | null;
+  source: string | null;
+  winProbability: number | null;
+  procoreProjectId: number | null;
+  procoreBidId: number | null;
+  procoreLastSyncedAt: string | null;
+  lostReasonId: string | null;
+  lostNotes: string | null;
+  lostCompetitor: string | null;
+  lostAt: string | null;
+  expectedCloseDate: string | null;
+  actualCloseDate: string | null;
   lastActivityAt: string | null;
   stageEnteredAt: string;
+  isActive: boolean;
+  hubspotDealId: string | null;
   createdAt: string;
   updatedAt: string;
 }
 
-export interface PropertySurface {
-  id: string;
-  companyId: string | null;
-  companyName: string | null;
-  address: string | null;
-  city: string | null;
-  state: string | null;
-  zip: string | null;
-  label: string;
-  dealCount: number;
-  leadCount: number;
-  lastActivityAt: string | null;
-  leadDealId: string | null;
-  dealIds: string[];
-  leadIds: string[];
-}
-
-export interface PropertyDetailSurface extends PropertySurface {
+export interface PropertyDetailResponse {
+  property: PropertySurface;
+  leads: PropertyLead[];
   deals: PropertyDeal[];
 }
 
-function buildCompanyMap(companies: Company[]) {
-  return new Map(companies.map((company) => [company.id, company]));
+export function formatPropertyLabel(property: Pick<PropertySurface, "name" | "address" | "city" | "state" | "zip">) {
+  const line = [property.address, [property.city, property.state].filter(Boolean).join(", "), property.zip]
+    .filter(Boolean)
+    .join(" ");
+
+  return line || property.name || "Unassigned Property";
 }
 
-function isLeadDeal(stageId: string, ddStageId: string | null) {
-  return ddStageId != null && stageId === ddStageId;
-}
+export function useProperties(filters: PropertyListFilters = {}) {
+  const [properties, setProperties] = useState<PropertySurface[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-export function buildPropertySurfaces(
-  deals: Deal[],
-  companies: Company[],
-  ddStageId: string | null
-): PropertySurface[] {
-  const companyMap = buildCompanyMap(companies);
-  const properties = new Map<string, PropertySurface>();
+  const fetchProperties = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const params = new URLSearchParams();
+      if (filters.search) params.set("search", filters.search);
+      if (filters.companyId) params.set("companyId", filters.companyId);
+      if (filters.page) params.set("page", String(filters.page));
+      if (filters.limit) params.set("limit", String(filters.limit));
+      if (filters.isActive === false) params.set("isActive", "false");
 
-  for (const deal of deals) {
-    const id = buildPropertyId({
-      companyId: deal.companyId ?? null,
-      address: deal.propertyAddress,
-      city: deal.propertyCity,
-      state: deal.propertyState,
-      zip: deal.propertyZip,
-    });
-    const companyName = deal.companyId ? companyMap.get(deal.companyId)?.name ?? null : null;
-    const existing = properties.get(id);
-    const dealIsLead = isLeadDeal(deal.stageId, ddStageId);
-    const label = formatPropertyLabel({
-      address: deal.propertyAddress,
-      city: deal.propertyCity,
-      state: deal.propertyState,
-      zip: deal.propertyZip,
-    });
-
-    if (existing) {
-      existing.dealIds.push(deal.id);
-      if (dealIsLead) {
-        existing.leadIds.push(deal.id);
-      }
-      existing.dealCount += 1;
-      if (dealIsLead) existing.leadCount += 1;
-      if (!existing.companyName && companyName) existing.companyName = companyName;
-      if (
-        deal.lastActivityAt &&
-        (!existing.lastActivityAt || new Date(deal.lastActivityAt).getTime() > new Date(existing.lastActivityAt).getTime())
-      ) {
-        existing.lastActivityAt = deal.lastActivityAt;
-      }
-      continue;
+      const qs = params.toString();
+      const data = await api<{ properties: PropertySurface[] }>(`/properties${qs ? `?${qs}` : ""}`);
+      setProperties(data.properties);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to load properties");
+    } finally {
+      setLoading(false);
     }
+  }, [filters.companyId, filters.isActive, filters.limit, filters.page, filters.search]);
 
-    properties.set(id, {
-      id,
-      companyId: deal.companyId ?? null,
-      companyName,
-      address: deal.propertyAddress ?? null,
-      city: deal.propertyCity ?? null,
-      state: deal.propertyState ?? null,
-      zip: deal.propertyZip ?? null,
-      label,
-      dealCount: 1,
-      leadCount: dealIsLead ? 1 : 0,
-      lastActivityAt: deal.lastActivityAt ?? null,
-      leadDealId: dealIsLead ? deal.id : null,
-      dealIds: [deal.id],
-      leadIds: dealIsLead ? [deal.id] : [],
-    });
-  }
+  useEffect(() => {
+    fetchProperties();
+  }, [fetchProperties]);
 
-  return [...properties.values()].sort((a, b) => {
-    const left = `${a.companyName ?? ""} ${a.label}`.toLowerCase();
-    const right = `${b.companyName ?? ""} ${b.label}`.toLowerCase();
-    return left.localeCompare(right);
-  });
-}
-
-export function useProperties(options: { search?: string; limit?: number; page?: number } = {}) {
-  const { deals, loading: dealsLoading, error: dealsError } = useDeals({
-    limit: options.limit ?? 2000,
-    page: 1,
-    sortBy: "updated_at",
-    sortDir: "desc",
-  });
-  const { companies, loading: companiesLoading, error: companiesError } = useCompanies({
-    limit: options.limit ?? 2000,
-    page: 1,
-  });
-  const { stages } = usePipelineStages();
-
-  const ddStageId = stages.find((stage) => stage.slug === "dd")?.id ?? null;
-
-  const properties = useMemo(() => {
-    const grouped = buildPropertySurfaces(deals, companies, ddStageId);
-    const search = options.search?.trim().toLowerCase();
-    const filtered = search
-      ? grouped.filter((property) => {
-          const haystack = [
-            property.companyName,
-            property.label,
-            property.address,
-            property.city,
-            property.state,
-            property.zip,
-          ]
-            .filter(Boolean)
-            .join(" ")
-            .toLowerCase();
-          return haystack.includes(search);
-        })
-      : grouped;
-
-    return filtered;
-  }, [deals, companies, ddStageId, options.search]);
-
-  return {
-    properties,
-    loading: dealsLoading || companiesLoading,
-    error: dealsError ?? companiesError,
-  };
+  return { properties, loading, error, refetch: fetchProperties };
 }
 
 export function usePropertyDetail(propertyId: string | undefined) {
-  const { properties, loading, error } = useProperties();
+  const [property, setProperty] = useState<PropertyDetailResponse["property"] | null>(null);
+  const [leads, setLeads] = useState<PropertyLead[]>([]);
+  const [deals, setDeals] = useState<PropertyDeal[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-  const property = useMemo(() => properties.find((item) => item.id === propertyId) ?? null, [properties, propertyId]);
-  const relatedDeals = property
-    ? property.dealIds
-    : [];
+  const fetchProperty = useCallback(async () => {
+    if (!propertyId) {
+      setLoading(false);
+      return;
+    }
 
-  return { property, relatedDeals, loading, error };
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await api<PropertyDetailResponse>(`/properties/${propertyId}`);
+      setProperty(data.property);
+      setLeads(data.leads);
+      setDeals(data.deals);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to load property");
+    } finally {
+      setLoading(false);
+    }
+  }, [propertyId]);
+
+  useEffect(() => {
+    fetchProperty();
+  }, [fetchProperty]);
+
+  return { property, leads, deals, loading, error, refetch: fetchProperty };
 }

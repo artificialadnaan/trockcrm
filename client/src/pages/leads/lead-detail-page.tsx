@@ -6,34 +6,21 @@ import { Card, CardContent } from "@/components/ui/card";
 import { LeadForm } from "@/components/leads/lead-form";
 import { LeadStageBadge } from "@/components/leads/lead-stage-badge";
 import { LeadTimelineTab } from "@/components/leads/lead-timeline-tab";
-import { useDealDetail } from "@/hooks/use-deals";
-import { useCompanyDetail } from "@/hooks/use-companies";
+import { formatLeadPropertyLine, useLeadDetail } from "@/hooks/use-leads";
 import { usePipelineStages } from "@/hooks/use-pipeline-config";
-
-function formatPropertyLine(
-  address: string | null,
-  city: string | null,
-  state: string | null,
-  zip: string | null
-) {
-  return [address, [city, state].filter(Boolean).join(", "), zip]
-    .filter(Boolean)
-    .join(" ");
-}
 
 export function LeadDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const { deal, loading, error } = useDealDetail(id);
-  const { company } = useCompanyDetail(deal?.companyId ?? undefined);
+  const { lead, loading, error } = useLeadDetail(id);
   const { stages } = usePipelineStages();
 
   const currentStage = useMemo(
-    () => stages.find((stage) => stage.id === deal?.stageId) ?? null,
-    [deal?.stageId, stages]
+    () => stages.find((stage) => stage.id === lead?.stageId) ?? null,
+    [lead?.stageId, stages]
   );
   const isLeadStage = currentStage?.slug === "dd";
-  const convertedAt = isLeadStage ? null : deal?.stageEnteredAt ?? null;
+  const convertedAt = lead?.convertedAt ?? null;
 
   if (loading) {
     return (
@@ -45,7 +32,7 @@ export function LeadDetailPage() {
     );
   }
 
-  if (error || !deal) {
+  if (error || !lead) {
     return (
       <div className="py-12 text-center">
         <p className="text-red-600">{error ?? "Lead not found"}</p>
@@ -56,13 +43,8 @@ export function LeadDetailPage() {
     );
   }
 
-  const leadCompanyName = company?.name ?? null;
-  const propertyLine = formatPropertyLine(
-    deal.propertyAddress,
-    deal.propertyCity,
-    deal.propertyState,
-    deal.propertyZip
-  );
+  const leadCompanyName = lead.companyName ?? null;
+  const propertyLine = formatLeadPropertyLine(lead);
 
   return (
     <div className="space-y-6">
@@ -81,11 +63,11 @@ export function LeadDetailPage() {
           <div className="space-y-3">
             <div className="flex flex-wrap items-center gap-2">
               <span className="text-xs font-mono uppercase tracking-[0.18em] text-muted-foreground">
-                {deal.dealNumber}
+                {lead.convertedDealNumber ?? lead.id.slice(0, 8)}
               </span>
-              <LeadStageBadge stageId={deal.stageId} converted={!isLeadStage} />
+              <LeadStageBadge stageId={lead.stageId} converted={!isLeadStage} />
             </div>
-            <h1 className="text-4xl font-black tracking-tight text-foreground">{deal.name}</h1>
+            <h1 className="text-4xl font-black tracking-tight text-foreground">{lead.name}</h1>
             <div className="flex flex-wrap items-center gap-4 text-sm text-muted-foreground">
               <span className="flex items-center gap-1">
                 <Building2 className="h-4 w-4" />
@@ -117,7 +99,7 @@ export function LeadDetailPage() {
               <CardContent className="pt-4">
                 <p className="text-xs uppercase tracking-wide text-muted-foreground">Updated</p>
                 <p className="mt-2 text-sm font-semibold">
-                  {new Date(deal.updatedAt).toLocaleDateString("en-US", {
+                  {new Date(lead.updatedAt).toLocaleDateString("en-US", {
                     month: "short",
                     day: "numeric",
                     year: "numeric",
@@ -127,25 +109,28 @@ export function LeadDetailPage() {
             </Card>
           </div>
 
-          <LeadTimelineTab dealId={deal.id} convertedAt={convertedAt} />
+          <LeadTimelineTab leadId={lead.id} convertedDealId={lead.convertedDealId} convertedAt={convertedAt} />
         </div>
 
         <div className="space-y-4">
           <LeadForm
           lead={{
-            id: deal.id,
-            name: deal.name,
-            dealNumber: deal.dealNumber,
-            companyId: deal.companyId ?? null,
+            id: lead.id,
+            name: lead.name,
+            convertedDealId: lead.convertedDealId,
+            convertedDealNumber: lead.convertedDealNumber,
+            companyId: lead.companyId ?? null,
             companyName: leadCompanyName,
-            stageId: deal.stageId,
-            propertyAddress: deal.propertyAddress,
-              propertyCity: deal.propertyCity,
-              propertyState: deal.propertyState,
-              propertyZip: deal.propertyZip,
-              source: deal.source,
-              description: deal.description,
-              stageEnteredAt: deal.stageEnteredAt,
+            stageId: lead.stageId,
+            propertyId: lead.propertyId,
+            propertyName: lead.property?.name ?? null,
+            propertyAddress: lead.property?.address ?? null,
+              propertyCity: lead.property?.city ?? null,
+              propertyState: lead.property?.state ?? null,
+              propertyZip: lead.property?.zip ?? null,
+              source: lead.source,
+              description: lead.description,
+              stageEnteredAt: lead.stageEnteredAt,
             }}
             converted={!isLeadStage}
           />
@@ -163,11 +148,11 @@ export function LeadDetailPage() {
               </p>
               <div className="flex items-center gap-2 text-sm text-muted-foreground">
                 <User className="h-4 w-4" />
-                <span>{deal.primaryContactId ? "Primary contact linked" : "No primary contact yet"}</span>
+                <span>{lead.primaryContactId ? "Primary contact linked" : "No primary contact yet"}</span>
               </div>
               <div className="flex items-center gap-2 text-sm text-muted-foreground">
                 <Phone className="h-4 w-4" />
-                <span>{deal.lastActivityAt ? "Activity recorded" : "No activity yet"}</span>
+                <span>{lead.lastActivityAt ? "Activity recorded" : "No activity yet"}</span>
               </div>
             </CardContent>
           </Card>

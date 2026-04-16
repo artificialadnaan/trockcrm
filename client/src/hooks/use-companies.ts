@@ -156,6 +156,8 @@ export interface CompanyDeal {
   stageId: string;
   isActive: boolean;
   companyId: string | null;
+  propertyId: string | null;
+  sourceLeadId: string | null;
   propertyAddress: string | null;
   propertyCity: string | null;
   propertyState: string | null;

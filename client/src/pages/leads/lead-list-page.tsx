@@ -5,62 +5,35 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card } from "@/components/ui/card";
 import { LeadStageBadge } from "@/components/leads/lead-stage-badge";
-import { useDeals } from "@/hooks/use-deals";
-import { useCompanies } from "@/hooks/use-companies";
-import { usePipelineStages } from "@/hooks/use-pipeline-config";
-
-function formatPropertyLine(
-  address: string | null,
-  city: string | null,
-  state: string | null,
-  zip: string | null
-) {
-  return [address, [city, state].filter(Boolean).join(", "), zip]
-    .filter(Boolean)
-    .join(" ");
-}
+import { formatLeadPropertyLine, useLeads } from "@/hooks/use-leads";
 
 export function LeadListPage() {
   const navigate = useNavigate();
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
-  const { stages } = usePipelineStages();
-  const { companies } = useCompanies({ limit: 2000, page: 1 });
-  const ddStageId = stages.find((stage) => stage.slug === "dd")?.id ?? "";
-
-  const { deals, loading, error } = useDeals({
-    stageIds: ddStageId ? [ddStageId] : undefined,
-    limit: 1000,
-    page: 1,
-    sortBy: "updated_at",
-    sortDir: "desc",
-  });
-
-  const companyMap = useMemo(
-    () => new Map(companies.map((company) => [company.id, company.name])),
-    [companies]
-  );
+  const { leads, loading, error } = useLeads();
 
   const filtered = useMemo(() => {
     const query = search.trim().toLowerCase();
-    if (!query) return deals;
-    return deals.filter((deal) => {
-      const companyName = deal.companyId ? companyMap.get(deal.companyId) ?? "" : "";
+    if (!query) return leads;
+    return leads.filter((lead) => {
       const haystack = [
-        deal.dealNumber,
-        deal.name,
-        companyName,
-        deal.propertyAddress,
-        deal.propertyCity,
-        deal.propertyState,
-        deal.propertyZip,
+        lead.name,
+        lead.companyName,
+        lead.source,
+        lead.property?.name,
+        lead.property?.address,
+        lead.property?.city,
+        lead.property?.state,
+        lead.property?.zip,
+        lead.convertedDealNumber,
       ]
         .filter(Boolean)
         .join(" ")
         .toLowerCase();
       return haystack.includes(query);
     });
-  }, [companyMap, deals, search]);
+  }, [leads, search]);
 
   const pageSize = 25;
   const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
@@ -120,13 +93,8 @@ export function LeadListPage() {
       ) : (
         <div className="space-y-2">
           {pageItems.map((lead) => {
-            const companyName = lead.companyId ? companyMap.get(lead.companyId) ?? "Unassigned" : "Unassigned";
-            const propertyLine = formatPropertyLine(
-              lead.propertyAddress,
-              lead.propertyCity,
-              lead.propertyState,
-              lead.propertyZip
-            );
+            const companyName = lead.companyName ?? "Unassigned";
+            const propertyLine = formatLeadPropertyLine(lead);
 
             return (
               <Card
@@ -137,9 +105,11 @@ export function LeadListPage() {
                 <div className="flex items-start justify-between gap-4">
                   <div className="min-w-0 flex-1 space-y-2">
                     <div className="flex flex-wrap items-center gap-2">
-                      <span className="font-mono text-xs text-muted-foreground">
-                        {lead.dealNumber}
-                      </span>
+                      {lead.convertedDealNumber && (
+                        <span className="font-mono text-xs text-muted-foreground">
+                          {lead.convertedDealNumber}
+                        </span>
+                      )}
                       <LeadStageBadge stageId={lead.stageId} />
                     </div>
                     <h3 className="truncate text-lg font-semibold">{lead.name}</h3>

@@ -4,7 +4,7 @@ import { Building2, ChevronLeft, ChevronRight, MapPin, Search } from "lucide-rea
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { useProperties } from "@/hooks/use-properties";
+import { formatPropertyLabel, useProperties } from "@/hooks/use-properties";
 
 export function PropertyListPage() {
   const navigate = useNavigate();
@@ -78,7 +78,7 @@ export function PropertyListPage() {
               <div className="flex items-start justify-between gap-4">
                 <div className="min-w-0 flex-1 space-y-1">
                   <div className="flex flex-wrap items-center gap-2">
-                    <span className="text-sm font-semibold">{property.label}</span>
+                    <span className="text-sm font-semibold">{formatPropertyLabel(property)}</span>
                   </div>
                   <div className="flex flex-wrap items-center gap-4 text-sm text-muted-foreground">
                     <span>{property.companyName ?? "Unassigned company"}</span>

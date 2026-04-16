@@ -3,7 +3,8 @@ import { Calendar, Clock3, FileText, Mail, Phone, MessageSquare } from "lucide-r
 import { useActivities } from "@/hooks/use-activities";
 
 interface LeadTimelineTabProps {
-  dealId: string;
+  leadId: string;
+  convertedDealId?: string | null;
   convertedAt?: string | null;
 }
 
@@ -88,8 +89,10 @@ function ActivityList({
   );
 }
 
-export function LeadTimelineTab({ dealId, convertedAt }: LeadTimelineTabProps) {
-  const { activities, loading, error } = useActivities({ dealId, limit: 100 });
+export function LeadTimelineTab({ leadId, convertedDealId, convertedAt }: LeadTimelineTabProps) {
+  const { activities, loading, error } = useActivities(
+    convertedDealId ? { dealId: convertedDealId, limit: 100 } : { leadId, limit: 100 }
+  );
 
   const split = useMemo(() => {
     if (!convertedAt) {

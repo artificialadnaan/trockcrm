@@ -4,77 +4,14 @@ import { MemoryRouter } from "react-router-dom";
 import { PropertyListPage } from "./property-list-page";
 
 const mocks = vi.hoisted(() => ({
-  useDealsMock: vi.fn(),
-  useCompaniesMock: vi.fn(),
-  usePipelineStagesMock: vi.fn(),
+  usePropertiesMock: vi.fn(),
 }));
 
-const deals = [
-  {
-    id: "deal-1",
-    dealNumber: "T-1001",
-    name: "Alpha Roofing Lead",
-    stageId: "stage-lead",
-    isActive: true,
-    companyId: "company-1",
-    propertyAddress: "123 Main St",
-    propertyCity: "Dallas",
-    propertyState: "TX",
-    propertyZip: "75201",
-    lastActivityAt: "2026-04-11T09:00:00.000Z",
-    stageEnteredAt: "2026-04-10T10:00:00.000Z",
-    createdAt: "2026-04-10T10:00:00.000Z",
-    updatedAt: "2026-04-11T10:00:00.000Z",
-  },
-  {
-    id: "deal-2",
-    dealNumber: "T-1002",
-    name: "Alpha Roofing History",
-    stageId: "stage-estimating",
-    isActive: false,
-    companyId: "company-1",
-    propertyAddress: "123 Main St",
-    propertyCity: "Dallas",
-    propertyState: "TX",
-    propertyZip: "75201",
-    lastActivityAt: "2026-04-09T09:00:00.000Z",
-    stageEnteredAt: "2026-04-09T09:00:00.000Z",
-    createdAt: "2026-04-09T09:00:00.000Z",
-    updatedAt: "2026-04-09T09:00:00.000Z",
-  },
-  {
-    id: "deal-3",
-    dealNumber: "T-2001",
-    name: "Beta Roofing History",
-    stageId: "stage-estimating",
-    isActive: false,
-    companyId: "company-2",
-    propertyAddress: "123 Main St",
-    propertyCity: "Dallas",
-    propertyState: "TX",
-    propertyZip: "75201",
-    lastActivityAt: "2026-04-08T09:00:00.000Z",
-    stageEnteredAt: "2026-04-08T09:00:00.000Z",
-    createdAt: "2026-04-08T09:00:00.000Z",
-    updatedAt: "2026-04-08T09:00:00.000Z",
-  },
-];
-
-const companies = [
-  { id: "company-1", name: "Alpha Roofing" },
-  { id: "company-2", name: "Beta Roofing" },
-];
-
-vi.mock("@/hooks/use-deals", () => ({
-  useDeals: mocks.useDealsMock,
-}));
-
-vi.mock("@/hooks/use-companies", () => ({
-  useCompanies: mocks.useCompaniesMock,
-}));
-
-vi.mock("@/hooks/use-pipeline-config", () => ({
-  usePipelineStages: mocks.usePipelineStagesMock,
+vi.mock("@/hooks/use-properties", () => ({
+  useProperties: mocks.usePropertiesMock,
+  formatPropertyLabel: vi.fn((property: { address?: string | null; city?: string | null; state?: string | null; zip?: string | null; name?: string }) =>
+    [property.address, [property.city, property.state].filter(Boolean).join(", "), property.zip].filter(Boolean).join(" ") || property.name || "Unassigned Property"
+  ),
 }));
 
 function normalize(html: string) {
@@ -91,31 +28,40 @@ function renderPage() {
 
 describe("PropertyListPage", () => {
   beforeEach(() => {
-    mocks.useDealsMock.mockReturnValue({ deals, loading: false, error: null });
-    mocks.useCompaniesMock.mockReturnValue({ companies, loading: false, error: null });
-    mocks.usePipelineStagesMock.mockReturnValue({ stages: [{ id: "stage-lead", slug: "dd" }] });
-    mocks.useDealsMock.mockClear();
-    mocks.useCompaniesMock.mockClear();
-    mocks.usePipelineStagesMock.mockClear();
+    mocks.usePropertiesMock.mockReset();
+    mocks.usePropertiesMock.mockReturnValue({
+      properties: [
+        {
+          id: "property-1",
+          companyId: "company-1",
+          companyName: "Alpha Roofing",
+          name: "Dallas HQ",
+          address: "123 Main St",
+          city: "Dallas",
+          state: "TX",
+          zip: "75201",
+          notes: null,
+          isActive: true,
+          createdAt: "2026-04-10T10:00:00.000Z",
+          updatedAt: "2026-04-11T10:00:00.000Z",
+          leadCount: 2,
+          dealCount: 3,
+          convertedDealCount: 1,
+          lastActivityAt: "2026-04-11T09:00:00.000Z",
+        },
+      ],
+      loading: false,
+      error: null,
+    });
   });
 
-  it("includes inactive historical deals and keeps same-address properties split by company", () => {
+  it("renders first-class properties instead of grouped deals", () => {
     const html = normalize(renderPage());
 
-    expect(mocks.useDealsMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        limit: 2000,
-        page: 1,
-        sortBy: "updated_at",
-        sortDir: "desc",
-      })
-    );
-    expect(mocks.useDealsMock.mock.calls[0][0]).not.toHaveProperty("isActive", true);
-    expect(html).toContain("2 properties across 3 deals");
+    expect(mocks.usePropertiesMock).toHaveBeenCalledWith({ search: "" });
+    expect(html).toContain("1 property across 3 deals");
     expect(html).toContain("Alpha Roofing");
-    expect(html).toContain("Beta Roofing");
     expect(html).toContain("123 Main St");
-    expect(html).toContain("2 deals");
-    expect(html).toContain("1 deals");
+    expect(html).toContain("2 leads");
   });
 });

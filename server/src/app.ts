@@ -34,6 +34,7 @@ import { registerProcoreEventHandlers } from "./modules/procore/event-handlers.j
 import { migrationRouter } from "./modules/migration/routes.js";
 import { searchRoutes } from "./modules/search/routes.js";
 import { companyRoutes } from "./modules/companies/routes.js";
+import { propertyRoutes } from "./modules/properties/routes.js";
 import { adminRoutes } from "./modules/admin/routes.js";
 import { companycamRoutes } from "./modules/companycam/routes.js";
 import { aiCopilotRoutes } from "./modules/ai-copilot/routes.js";
@@ -123,6 +124,7 @@ export function createApp() {
   tenantRouter.use("/procore", procoreRoutes);
   tenantRouter.use("/search", searchRoutes);
   tenantRouter.use("/companies", companyRoutes);
+  tenantRouter.use("/properties", propertyRoutes);
   tenantRouter.use("/companycam", companycamRoutes);
   tenantRouter.use("/ai", aiCopilotRoutes);
 

@@ -2,84 +2,17 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { PropertyDetailPage } from "./property-detail-page";
-import { buildPropertyId } from "@/lib/property-key";
 
 const mocks = vi.hoisted(() => ({
-  useDealsMock: vi.fn(),
-  useCompaniesMock: vi.fn(),
+  usePropertyDetailMock: vi.fn(),
   usePipelineStagesMock: vi.fn(),
 }));
 
-const deals = [
-  {
-    id: "deal-1",
-    dealNumber: "T-1001",
-    name: "Alpha Roofing Lead",
-    stageId: "stage-lead",
-    isActive: true,
-    companyId: "company-1",
-    propertyAddress: "123 Main St",
-    propertyCity: "Dallas",
-    propertyState: "TX",
-    propertyZip: "75201",
-    lastActivityAt: "2026-04-11T09:00:00.000Z",
-    stageEnteredAt: "2026-04-10T10:00:00.000Z",
-    createdAt: "2026-04-10T10:00:00.000Z",
-    updatedAt: "2026-04-11T10:00:00.000Z",
-  },
-  {
-    id: "deal-2",
-    dealNumber: "T-1002",
-    name: "Alpha Roofing History",
-    stageId: "stage-estimating",
-    isActive: false,
-    companyId: "company-1",
-    propertyAddress: "123 Main St",
-    propertyCity: "Dallas",
-    propertyState: "TX",
-    propertyZip: "75201",
-    lastActivityAt: "2026-04-09T09:00:00.000Z",
-    stageEnteredAt: "2026-04-09T09:00:00.000Z",
-    createdAt: "2026-04-09T09:00:00.000Z",
-    updatedAt: "2026-04-09T09:00:00.000Z",
-  },
-  {
-    id: "deal-3",
-    dealNumber: "T-2001",
-    name: "Beta Roofing History",
-    stageId: "stage-estimating",
-    isActive: false,
-    companyId: "company-2",
-    propertyAddress: "123 Main St",
-    propertyCity: "Dallas",
-    propertyState: "TX",
-    propertyZip: "75201",
-    lastActivityAt: "2026-04-08T09:00:00.000Z",
-    stageEnteredAt: "2026-04-08T09:00:00.000Z",
-    createdAt: "2026-04-08T09:00:00.000Z",
-    updatedAt: "2026-04-08T09:00:00.000Z",
-  },
-];
-
-const companies = [
-  { id: "company-1", name: "Alpha Roofing" },
-  { id: "company-2", name: "Beta Roofing" },
-];
-
-const propertyId = buildPropertyId({
-  companyId: "company-1",
-  address: "123 Main St",
-  city: "Dallas",
-  state: "TX",
-  zip: "75201",
-});
-
-vi.mock("@/hooks/use-deals", () => ({
-  useDeals: mocks.useDealsMock,
-}));
-
-vi.mock("@/hooks/use-companies", () => ({
-  useCompanies: mocks.useCompaniesMock,
+vi.mock("@/hooks/use-properties", () => ({
+  usePropertyDetail: mocks.usePropertyDetailMock,
+  formatPropertyLabel: vi.fn((property: { address?: string | null; city?: string | null; state?: string | null; zip?: string | null; name?: string }) =>
+    [property.address, [property.city, property.state].filter(Boolean).join(", "), property.zip].filter(Boolean).join(" ") || property.name || "Unassigned Property"
+  ),
 }));
 
 vi.mock("@/hooks/use-pipeline-config", () => ({
@@ -92,7 +25,7 @@ function normalize(html: string) {
 
 function renderPage() {
   return renderToStaticMarkup(
-    <MemoryRouter initialEntries={[`/properties/${propertyId}`]}>
+    <MemoryRouter initialEntries={["/properties/property-1"]}>
       <Routes>
         <Route path="/properties/:id" element={<PropertyDetailPage />} />
       </Routes>
@@ -102,24 +35,123 @@ function renderPage() {
 
 describe("PropertyDetailPage", () => {
   beforeEach(() => {
-    mocks.useDealsMock.mockReturnValue({ deals, loading: false, error: null });
-    mocks.useCompaniesMock.mockReturnValue({ companies, loading: false, error: null });
+    mocks.usePipelineStagesMock.mockReset();
+    mocks.usePropertyDetailMock.mockReset();
     mocks.usePipelineStagesMock.mockReturnValue({ stages: [{ id: "stage-lead", slug: "dd" }] });
-    mocks.useDealsMock.mockClear();
-    mocks.useCompaniesMock.mockClear();
-    mocks.usePipelineStagesMock.mockClear();
+    mocks.usePropertyDetailMock.mockReturnValue({
+      property: {
+        id: "property-1",
+        companyId: "company-1",
+        companyName: "Alpha Roofing",
+        name: "Dallas HQ",
+        address: "123 Main St",
+        city: "Dallas",
+        state: "TX",
+        zip: "75201",
+        notes: null,
+        isActive: true,
+        createdAt: "2026-04-10T10:00:00.000Z",
+        updatedAt: "2026-04-11T10:00:00.000Z",
+        leadCount: 2,
+        dealCount: 3,
+        convertedDealCount: 2,
+        lastActivityAt: "2026-04-11T09:00:00.000Z",
+      },
+      leads: [
+        {
+          id: "lead-1",
+          companyId: "company-1",
+          propertyId: "property-1",
+          primaryContactId: null,
+          name: "Alpha Roofing Lead",
+          stageId: "stage-lead",
+          assignedRepId: "rep-1",
+          status: "open",
+          source: null,
+          description: null,
+          lastActivityAt: "2026-04-11T09:00:00.000Z",
+          stageEnteredAt: "2026-04-10T10:00:00.000Z",
+          convertedAt: null,
+          isActive: true,
+          createdAt: "2026-04-10T10:00:00.000Z",
+          updatedAt: "2026-04-11T10:00:00.000Z",
+        },
+        {
+          id: "lead-2",
+          companyId: "company-1",
+          propertyId: "property-1",
+          primaryContactId: null,
+          name: "Alpha Roofing Historical Lead",
+          stageId: "stage-estimating",
+          assignedRepId: "rep-1",
+          status: "converted",
+          source: null,
+          description: null,
+          lastActivityAt: "2026-04-09T09:00:00.000Z",
+          stageEnteredAt: "2026-04-09T09:00:00.000Z",
+          convertedAt: "2026-04-10T09:00:00.000Z",
+          isActive: false,
+          createdAt: "2026-04-09T09:00:00.000Z",
+          updatedAt: "2026-04-10T09:00:00.000Z",
+        },
+      ],
+      deals: [
+        {
+          id: "deal-1",
+          dealNumber: "TR-0001",
+          name: "Alpha Roofing History",
+          stageId: "stage-estimating",
+          workflowRoute: "estimating",
+          assignedRepId: "rep-1",
+          companyId: "company-1",
+          propertyId: "property-1",
+          sourceLeadId: "lead-2",
+          primaryContactId: null,
+          ddEstimate: null,
+          bidEstimate: null,
+          awardedAmount: null,
+          changeOrderTotal: null,
+          description: null,
+          propertyAddress: "123 Main St",
+          propertyCity: "Dallas",
+          propertyState: "TX",
+          propertyZip: "75201",
+          projectTypeId: null,
+          regionId: null,
+          source: null,
+          winProbability: null,
+          procoreProjectId: null,
+          procoreBidId: null,
+          procoreLastSyncedAt: null,
+          lostReasonId: null,
+          lostNotes: null,
+          lostCompetitor: null,
+          lostAt: null,
+          expectedCloseDate: null,
+          actualCloseDate: null,
+          lastActivityAt: "2026-04-10T10:00:00.000Z",
+          stageEnteredAt: "2026-04-10T10:00:00.000Z",
+          isActive: false,
+          hubspotDealId: null,
+          createdAt: "2026-04-10T10:00:00.000Z",
+          updatedAt: "2026-04-11T10:00:00.000Z",
+        },
+      ],
+      loading: false,
+      error: null,
+    });
   });
 
-  it("uses full historical deals and a historical converted metric", () => {
+  it("renders first-class property history and converted counts", () => {
     const html = normalize(renderPage());
 
-    expect(mocks.useDealsMock.mock.calls.every(([args]) => args?.isActive !== true)).toBe(true);
+    expect(mocks.usePropertyDetailMock).toHaveBeenCalledWith("property-1");
     expect(html).toContain("Alpha Roofing");
     expect(html).toContain("123 Main St");
-    expect(html).toContain("Historical Rollup");
-    expect(html).toContain("Converted Deals");
-    expect(html).toContain("Inactive");
+    expect(html).toContain("Converted");
+    expect(html).toContain("2");
     expect(html).toContain("All historical opportunities tied to this property.");
-    expect(html).toContain("2 items");
+    expect(html).toContain("Alpha Roofing Lead");
+    expect(html).toContain("Alpha Roofing History");
   });
 });

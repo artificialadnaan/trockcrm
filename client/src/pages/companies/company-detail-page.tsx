@@ -28,12 +28,13 @@ import {
 import { DealStageBadge } from "@/components/deals/deal-stage-badge";
 import { LeadStageBadge } from "@/components/leads/lead-stage-badge";
 import { useCompanyDetail, useCompanyContacts, useCompanyDeals } from "@/hooks/use-companies";
+import { useLeads } from "@/hooks/use-leads";
 import { usePipelineStages } from "@/hooks/use-pipeline-config";
 import { formatPhone } from "@/lib/contact-utils";
 import { ContactForm } from "@/components/contacts/contact-form";
 import { CompanyCopilotPanel } from "@/components/ai/company-copilot-panel";
 import { api } from "@/lib/api";
-import { buildPropertyId, formatPropertyLabel } from "@/lib/property-key";
+import { formatPropertyLabel, useProperties } from "@/hooks/use-properties";
 import type { Activity } from "@/hooks/use-activities";
 
 // --- Constants ---
@@ -724,6 +725,8 @@ function CompanyEmailsTab() {
 
 function CompanyPortfolioTab({ companyId, companyName }: { companyId: string; companyName: string }) {
   const { deals } = useCompanyDeals(companyId);
+  const { leads } = useLeads({ companyId, isActive: "all" });
+  const { properties } = useProperties({ companyId, limit: 500 });
   const { stages } = usePipelineStages();
   const ddStageId = stages.find((stage) => stage.slug === "dd")?.id ?? "";
   const [activities, setActivities] = useState<Activity[]>([]);
@@ -754,58 +757,7 @@ function CompanyPortfolioTab({ companyId, companyName }: { companyId: string; co
     };
   }, [deals]);
 
-  const properties = useMemo(() => {
-    const groups = new Map<string, {
-      id: string;
-      label: string;
-      companyName: string;
-      companyId: string | null;
-      dealIds: string[];
-      leadIds: string[];
-      lastActivityAt: string | null;
-    }>();
-
-    for (const deal of deals) {
-      const id = buildPropertyId({
-        companyId: deal.companyId ?? companyId,
-        address: deal.propertyAddress,
-        city: deal.propertyCity,
-        state: deal.propertyState,
-        zip: deal.propertyZip,
-      });
-      const existing = groups.get(id);
-      const label = formatPropertyLabel({
-        address: deal.propertyAddress,
-        city: deal.propertyCity,
-        state: deal.propertyState,
-        zip: deal.propertyZip,
-      });
-      const isLead = deal.stageId === ddStageId;
-
-      if (existing) {
-        existing.dealIds.push(deal.id);
-        if (isLead) existing.leadIds.push(deal.id);
-        if (deal.lastActivityAt && (!existing.lastActivityAt || new Date(deal.lastActivityAt).getTime() > new Date(existing.lastActivityAt).getTime())) {
-          existing.lastActivityAt = deal.lastActivityAt;
-        }
-        continue;
-      }
-
-      groups.set(id, {
-        id,
-        label,
-        companyName,
-        companyId: deal.companyId ?? companyId,
-        dealIds: [deal.id],
-        leadIds: isLead ? [deal.id] : [],
-        lastActivityAt: deal.lastActivityAt ?? null,
-      });
-    }
-
-    return [...groups.values()];
-  }, [companyId, deals, ddStageId]);
-
-  const leadDeals = deals.filter((deal) => deal.stageId === ddStageId);
+  const leadDeals = leads;
 
   const activitySummary = useMemo(() => {
     const counts = { total: activities.length, call: 0, email: 0, meeting: 0, note: 0 };
@@ -842,7 +794,7 @@ function CompanyPortfolioTab({ companyId, companyName }: { companyId: string; co
         <div className="space-y-4">
           <div>
             <p className="text-sm font-semibold">Related Properties</p>
-            <p className="text-sm text-muted-foreground">Unique property groupings across the company&apos;s deal portfolio.</p>
+                <p className="text-sm text-muted-foreground">First-class property records attached to this company.</p>
           </div>
           <div className="space-y-2">
             {properties.length === 0 ? (
@@ -854,10 +806,10 @@ function CompanyPortfolioTab({ companyId, companyName }: { companyId: string; co
                 <Link key={property.id} to={`/properties/${property.id}`} className="block rounded-lg border bg-white p-3 transition-colors hover:bg-zinc-50">
                   <div className="flex items-start justify-between gap-3">
                     <div>
-                      <p className="text-sm font-medium">{property.label}</p>
-                      <p className="text-xs text-muted-foreground">{property.companyName}</p>
+                      <p className="text-sm font-medium">{formatPropertyLabel(property)}</p>
+                      <p className="text-xs text-muted-foreground">{property.companyName ?? companyName}</p>
                     </div>
-                    <p className="text-xs text-muted-foreground">{property.dealIds.length} deals</p>
+                    <p className="text-xs text-muted-foreground">{property.dealCount} deals</p>
                   </div>
                 </Link>
               ))
@@ -926,7 +878,11 @@ function CompanyPortfolioTab({ companyId, companyName }: { companyId: string; co
             </div>
           ) : (
             deals.map((deal) => (
-              <Link key={deal.id} to={deal.stageId === ddStageId ? `/leads/${deal.id}` : `/deals/${deal.id}`} className="block rounded-lg border bg-white p-3 transition-colors hover:bg-zinc-50">
+              <Link
+                key={deal.id}
+                to={deal.stageId === ddStageId ? `/leads/${deal.sourceLeadId ?? deal.id}` : `/deals/${deal.id}`}
+                className="block rounded-lg border bg-white p-3 transition-colors hover:bg-zinc-50"
+              >
                 <div className="flex items-start justify-between gap-3">
                   <div>
                     <p className="text-sm font-medium">{deal.name}</p>

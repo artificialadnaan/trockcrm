@@ -8,43 +8,54 @@ const stages = [
   { id: "stage-estimating", name: "Estimating", slug: "estimating" },
 ];
 
-let deal: {
+let lead: {
   id: string;
-  dealNumber: string;
   name: string;
   stageId: string;
   companyId: string;
+  propertyId: string;
   primaryContactId: string | null;
-  propertyAddress: string | null;
-  propertyCity: string | null;
-  propertyState: string | null;
-  propertyZip: string | null;
+  companyName: string | null;
+  property: {
+    id: string;
+    name: string;
+    address: string | null;
+    city: string | null;
+    state: string | null;
+    zip: string | null;
+  } | null;
   source: string | null;
   description: string | null;
   stageEnteredAt: string;
+  convertedAt: string | null;
+  convertedDealId: string | null;
+  convertedDealNumber: string | null;
   updatedAt: string;
   lastActivityAt: string | null;
 } = {
-  id: "deal-1",
-  dealNumber: "T-1001",
+  id: "lead-1",
   name: "Alpha Roofing Follow-Up",
   stageId: "stage-lead",
   companyId: "company-1",
+  propertyId: "property-1",
   primaryContactId: "contact-1",
-  propertyAddress: "123 Main St",
-  propertyCity: "Dallas",
-  propertyState: "TX",
-  propertyZip: "75201",
+  companyName: "Alpha Roofing",
+  property: {
+    id: "property-1",
+    name: "Dallas HQ",
+    address: "123 Main St",
+    city: "Dallas",
+    state: "TX",
+    zip: "75201",
+  },
   source: "trade show",
   description: "Initial pre-RFP lead.",
   stageEnteredAt: "2026-04-10T10:00:00.000Z",
+  convertedAt: null,
+  convertedDealId: null,
+  convertedDealNumber: null,
   updatedAt: "2026-04-11T10:00:00.000Z",
   lastActivityAt: "2026-04-11T10:00:00.000Z",
-};
-
-let company = {
-  id: "company-1",
-  name: "Alpha Roofing",
 };
 
 let activities: Array<{
@@ -70,22 +81,18 @@ let activities: Array<{
   },
 ];
 
-vi.mock("@/hooks/use-deals", () => ({
-  useDealDetail: vi.fn(() => ({
-    deal,
+vi.mock("@/hooks/use-leads", () => ({
+  useLeadDetail: vi.fn(() => ({
+    lead,
     loading: false,
     error: null,
     refetch: vi.fn(),
   })),
-}));
-
-vi.mock("@/hooks/use-companies", () => ({
-  useCompanyDetail: vi.fn(() => ({
-    company,
-    loading: false,
-    error: null,
-    refetch: vi.fn(),
-  })),
+  formatLeadPropertyLine: vi.fn((currentLead: typeof lead) =>
+    [currentLead.property?.address, [currentLead.property?.city, currentLead.property?.state].filter(Boolean).join(", "), currentLead.property?.zip]
+      .filter(Boolean)
+      .join(" ")
+  ),
 }));
 
 vi.mock("@/hooks/use-pipeline-config", () => ({
@@ -105,7 +112,7 @@ vi.mock("@/hooks/use-activities", () => ({
 
 function renderLeadDetail() {
   return renderToStaticMarkup(
-    <MemoryRouter initialEntries={["/leads/deal-1"]}>
+    <MemoryRouter initialEntries={["/leads/lead-1"]}>
       <Routes>
         <Route path="/leads/:id" element={<LeadDetailPage />} />
       </Routes>
@@ -115,7 +122,7 @@ function renderLeadDetail() {
 
 describe("LeadDetailPage", () => {
   it("renders the lead detail surface with the lead CTA", () => {
-    deal = { ...deal, stageId: "stage-lead" };
+    lead = { ...lead, stageId: "stage-lead", convertedAt: null, convertedDealId: null, convertedDealNumber: null };
     activities = [];
 
     const html = renderLeadDetail();
@@ -128,7 +135,7 @@ describe("LeadDetailPage", () => {
   });
 
   it("switches the CTA to open the deal once the lead is converted", () => {
-    deal = { ...deal, stageId: "stage-estimating" };
+    lead = { ...lead, stageId: "stage-estimating", convertedAt: "2026-04-11T09:00:00.000Z", convertedDealId: "deal-1", convertedDealNumber: "TR-1001" };
     activities = [];
 
     const html = renderLeadDetail();
@@ -138,7 +145,7 @@ describe("LeadDetailPage", () => {
   });
 
   it("splits lead and post-conversion activity into separate timeline sections", () => {
-    deal = { ...deal, stageId: "stage-estimating" };
+    lead = { ...lead, stageId: "stage-estimating", convertedAt: "2026-04-11T09:00:00.000Z", convertedDealId: "deal-1", convertedDealNumber: "TR-1001" };
     activities = [
       {
         id: "activity-1",
