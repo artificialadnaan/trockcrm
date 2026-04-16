@@ -12,12 +12,13 @@ router.get("/stream", authMiddleware, (req, res) => {
     return;
   }
 
-  res.writeHead(200, {
-    "Content-Type": "text/event-stream",
-    "Cache-Control": "no-cache",
-    "Connection": "keep-alive",
-    "X-Accel-Buffering": "no", // Disable nginx buffering on Railway
-  });
+  // Preserve headers already set by global middleware such as CORS.
+  res.status(200);
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no"); // Disable nginx buffering on Railway
+  res.flushHeaders();
 
   // Send initial connection event
   res.write(`event: connected\ndata: ${JSON.stringify({ userId: req.user!.id })}\n\n`);
