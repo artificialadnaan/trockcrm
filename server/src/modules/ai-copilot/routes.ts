@@ -5,6 +5,14 @@ import { AppError } from "../../middleware/error-handler.js";
 import { getDealById } from "../deals/service.js";
 import { getCompanyById } from "../companies/service.js";
 import {
+  assignInterventionCases,
+  escalateInterventionCases,
+  getInterventionCaseDetail,
+  listInterventionCases,
+  resolveInterventionCases,
+  snoozeInterventionCases,
+} from "./intervention-service.js";
+import {
   getAiActionQueue,
   getCompanyCopilotView,
   dismissTaskSuggestion,
@@ -33,6 +41,21 @@ async function assertCompanyAccess(req: any, companyId: string) {
   const company = await getCompanyById(req.tenantDb!, companyId);
   if (!company) throw new AppError(404, "Company not found");
   return company;
+}
+
+function getActiveOfficeId(req: any) {
+  const officeId = req.user!.activeOfficeId ?? req.user!.officeId;
+  if (!officeId) {
+    throw new AppError(400, "Active office is required");
+  }
+  return officeId;
+}
+
+function requireCaseIds(value: unknown) {
+  if (!Array.isArray(value) || value.length === 0 || value.some((item) => typeof item !== "string")) {
+    throw new AppError(400, "caseIds must be a non-empty array of case ids");
+  }
+  return value;
 }
 
 router.get("/deals/:id/copilot", async (req, res, next) => {
@@ -169,6 +192,209 @@ router.get("/ops/action-queue", requireRole("admin", "director"), async (req, re
     const queue = await getAiActionQueue(req.tenantDb!, { limit });
     await req.commitTransaction!();
     res.json({ queue });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/ops/interventions", requireRole("admin", "director"), async (req, res, next) => {
+  try {
+    const page = typeof req.query.page === "string" ? Number(req.query.page) : undefined;
+    const pageSize = typeof req.query.limit === "string" ? Number(req.query.limit) : undefined;
+    const status =
+      typeof req.query.status === "string" &&
+      (req.query.status === "open" || req.query.status === "snoozed" || req.query.status === "resolved")
+        ? req.query.status
+        : undefined;
+
+    const result = await listInterventionCases(req.tenantDb!, {
+      officeId: getActiveOfficeId(req),
+      page,
+      pageSize,
+      status,
+    });
+
+    await req.commitTransaction!();
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/ops/interventions/:id", requireRole("admin", "director"), async (req, res, next) => {
+  try {
+    const caseId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const detail = await getInterventionCaseDetail(req.tenantDb!, {
+      officeId: getActiveOfficeId(req),
+      caseId,
+    });
+
+    await req.commitTransaction!();
+    res.json(detail);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/ops/interventions/batch-assign", requireRole("admin", "director"), async (req, res, next) => {
+  try {
+    const assignedTo = typeof req.body?.assignedTo === "string" ? req.body.assignedTo : null;
+    if (!assignedTo) throw new AppError(400, "assignedTo is required");
+
+    const result = await assignInterventionCases(req.tenantDb!, {
+      officeId: getActiveOfficeId(req),
+      actorUserId: req.user!.id,
+      actorRole: req.user!.role,
+      caseIds: requireCaseIds(req.body?.caseIds),
+      assignedTo,
+      notes: typeof req.body?.notes === "string" ? req.body.notes : null,
+    });
+
+    await req.commitTransaction!();
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/ops/interventions/batch-snooze", requireRole("admin", "director"), async (req, res, next) => {
+  try {
+    const snoozedUntil = typeof req.body?.snoozedUntil === "string" ? req.body.snoozedUntil : null;
+    if (!snoozedUntil) throw new AppError(400, "snoozedUntil is required");
+
+    const result = await snoozeInterventionCases(req.tenantDb!, {
+      officeId: getActiveOfficeId(req),
+      actorUserId: req.user!.id,
+      actorRole: req.user!.role,
+      caseIds: requireCaseIds(req.body?.caseIds),
+      snoozedUntil,
+      notes: typeof req.body?.notes === "string" ? req.body.notes : null,
+    });
+
+    await req.commitTransaction!();
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/ops/interventions/batch-resolve", requireRole("admin", "director"), async (req, res, next) => {
+  try {
+    const resolutionReason = typeof req.body?.resolutionReason === "string" ? req.body.resolutionReason : null;
+    if (!resolutionReason) throw new AppError(400, "resolutionReason is required");
+
+    const result = await resolveInterventionCases(req.tenantDb!, {
+      officeId: getActiveOfficeId(req),
+      actorUserId: req.user!.id,
+      actorRole: req.user!.role,
+      caseIds: requireCaseIds(req.body?.caseIds),
+      resolutionReason: resolutionReason as Parameters<typeof resolveInterventionCases>[1]["resolutionReason"],
+      notes: typeof req.body?.notes === "string" ? req.body.notes : null,
+    });
+
+    await req.commitTransaction!();
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/ops/interventions/batch-escalate", requireRole("admin", "director"), async (req, res, next) => {
+  try {
+    const result = await escalateInterventionCases(req.tenantDb!, {
+      officeId: getActiveOfficeId(req),
+      actorUserId: req.user!.id,
+      actorRole: req.user!.role,
+      caseIds: requireCaseIds(req.body?.caseIds),
+      notes: typeof req.body?.notes === "string" ? req.body.notes : null,
+    });
+
+    await req.commitTransaction!();
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/ops/interventions/:id/assign", requireRole("admin", "director"), async (req, res, next) => {
+  try {
+    const caseId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const assignedTo = typeof req.body?.assignedTo === "string" ? req.body.assignedTo : null;
+    if (!assignedTo) throw new AppError(400, "assignedTo is required");
+
+    const result = await assignInterventionCases(req.tenantDb!, {
+      officeId: getActiveOfficeId(req),
+      actorUserId: req.user!.id,
+      actorRole: req.user!.role,
+      caseIds: [caseId],
+      assignedTo,
+      notes: typeof req.body?.notes === "string" ? req.body.notes : null,
+    });
+
+    await req.commitTransaction!();
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/ops/interventions/:id/snooze", requireRole("admin", "director"), async (req, res, next) => {
+  try {
+    const caseId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const snoozedUntil = typeof req.body?.snoozedUntil === "string" ? req.body.snoozedUntil : null;
+    if (!snoozedUntil) throw new AppError(400, "snoozedUntil is required");
+
+    const result = await snoozeInterventionCases(req.tenantDb!, {
+      officeId: getActiveOfficeId(req),
+      actorUserId: req.user!.id,
+      actorRole: req.user!.role,
+      caseIds: [caseId],
+      snoozedUntil,
+      notes: typeof req.body?.notes === "string" ? req.body.notes : null,
+    });
+
+    await req.commitTransaction!();
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/ops/interventions/:id/resolve", requireRole("admin", "director"), async (req, res, next) => {
+  try {
+    const caseId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const resolutionReason = typeof req.body?.resolutionReason === "string" ? req.body.resolutionReason : null;
+    if (!resolutionReason) throw new AppError(400, "resolutionReason is required");
+
+    const result = await resolveInterventionCases(req.tenantDb!, {
+      officeId: getActiveOfficeId(req),
+      actorUserId: req.user!.id,
+      actorRole: req.user!.role,
+      caseIds: [caseId],
+      resolutionReason: resolutionReason as Parameters<typeof resolveInterventionCases>[1]["resolutionReason"],
+      notes: typeof req.body?.notes === "string" ? req.body.notes : null,
+    });
+
+    await req.commitTransaction!();
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/ops/interventions/:id/escalate", requireRole("admin", "director"), async (req, res, next) => {
+  try {
+    const caseId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const result = await escalateInterventionCases(req.tenantDb!, {
+      officeId: getActiveOfficeId(req),
+      actorUserId: req.user!.id,
+      actorRole: req.user!.role,
+      caseIds: [caseId],
+      notes: typeof req.body?.notes === "string" ? req.body.notes : null,
+    });
+
+    await req.commitTransaction!();
+    res.json(result);
   } catch (err) {
     next(err);
   }

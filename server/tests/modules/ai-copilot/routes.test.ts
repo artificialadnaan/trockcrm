@@ -8,11 +8,21 @@ const serviceMocks = vi.hoisted(() => ({
   getCompanyCopilotView: vi.fn(),
   getDealCopilotView: vi.fn(),
   dismissTaskSuggestion: vi.fn(),
+  getAiReviewPacketDetail: vi.fn(),
   recordAiFeedback: vi.fn(),
   getDirectorBlindSpots: vi.fn(),
   getAiOpsMetrics: vi.fn(),
   getAiReviewQueue: vi.fn(),
   triageAiActionQueueEntry: vi.fn(),
+}));
+
+const interventionServiceMocks = vi.hoisted(() => ({
+  listInterventionCases: vi.fn(),
+  getInterventionCaseDetail: vi.fn(),
+  assignInterventionCases: vi.fn(),
+  snoozeInterventionCases: vi.fn(),
+  resolveInterventionCases: vi.fn(),
+  escalateInterventionCases: vi.fn(),
 }));
 
 const taskSuggestionMocks = vi.hoisted(() => ({
@@ -33,11 +43,21 @@ vi.mock("../../../src/modules/ai-copilot/service.js", () => ({
   getCompanyCopilotView: serviceMocks.getCompanyCopilotView,
   getDealCopilotView: serviceMocks.getDealCopilotView,
   dismissTaskSuggestion: serviceMocks.dismissTaskSuggestion,
+  getAiReviewPacketDetail: serviceMocks.getAiReviewPacketDetail,
   recordAiFeedback: serviceMocks.recordAiFeedback,
   getDirectorBlindSpots: serviceMocks.getDirectorBlindSpots,
   getAiOpsMetrics: serviceMocks.getAiOpsMetrics,
   getAiReviewQueue: serviceMocks.getAiReviewQueue,
   triageAiActionQueueEntry: serviceMocks.triageAiActionQueueEntry,
+}));
+
+vi.mock("../../../src/modules/ai-copilot/intervention-service.js", () => ({
+  listInterventionCases: interventionServiceMocks.listInterventionCases,
+  getInterventionCaseDetail: interventionServiceMocks.getInterventionCaseDetail,
+  assignInterventionCases: interventionServiceMocks.assignInterventionCases,
+  snoozeInterventionCases: interventionServiceMocks.snoozeInterventionCases,
+  resolveInterventionCases: interventionServiceMocks.resolveInterventionCases,
+  escalateInterventionCases: interventionServiceMocks.escalateInterventionCases,
 }));
 
 vi.mock("../../../src/modules/ai-copilot/task-suggestion-service.js", () => ({
@@ -302,6 +322,249 @@ describe("ai copilot routes", () => {
     expect(res.body.queue).toHaveLength(1);
   });
 
+  it("returns intervention cases for director users", async () => {
+    interventionServiceMocks.listInterventionCases.mockResolvedValue({
+      items: [
+        {
+          id: "case-1",
+          businessKey: "office-1:missing_next_task:deal:deal-1",
+          disconnectType: "missing_next_task",
+          clusterKey: "follow_through_gap",
+          severity: "high",
+          status: "open",
+          escalated: false,
+          ageDays: 5,
+          assignedTo: null,
+          generatedTask: null,
+          deal: { id: "deal-1", dealNumber: "D-1001", name: "Alpha Plaza" },
+          company: { id: "company-1", name: "Acme Property Group" },
+          evidenceSummary: "Deal has no open next-step task.",
+          lastIntervention: null,
+        },
+      ],
+      totalCount: 1,
+      page: 2,
+      pageSize: 10,
+    });
+
+    const app = createApp("director");
+    const res = await request(app).get("/api/ai/ops/interventions?page=2&limit=10&status=open");
+
+    expect(res.status).toBe(200);
+    expect(interventionServiceMocks.listInterventionCases).toHaveBeenCalledWith(expect.anything(), {
+      officeId: "office-1",
+      page: 2,
+      pageSize: 10,
+      status: "open",
+    });
+    expect(res.body.items).toHaveLength(1);
+    expect(res.body.page).toBe(2);
+  });
+
+  it("returns intervention case detail for director users", async () => {
+    interventionServiceMocks.getInterventionCaseDetail.mockResolvedValue({
+      case: {
+        id: "case-1",
+        businessKey: "office-1:missing_next_task:deal:deal-1",
+        disconnectType: "missing_next_task",
+        clusterKey: "follow_through_gap",
+        severity: "high",
+        status: "open",
+        assignedTo: "manager-1",
+        generatedTaskId: "task-1",
+        escalated: false,
+        snoozedUntil: null,
+        reopenCount: 0,
+        lastDetectedAt: "2026-04-16T15:00:00.000Z",
+        lastIntervenedAt: null,
+        resolvedAt: null,
+        resolutionReason: null,
+        metadataJson: null,
+      },
+      generatedTask: {
+        id: "task-1",
+        title: "Resolve Missing next task for D-1001",
+        status: "pending",
+        assignedTo: "manager-1",
+      },
+      crm: {
+        deal: { id: "deal-1", dealNumber: "D-1001", name: "Alpha Plaza" },
+        company: { id: "company-1", name: "Acme Property Group" },
+      },
+      history: [],
+    });
+
+    const app = createApp("director");
+    const res = await request(app).get("/api/ai/ops/interventions/case-1");
+
+    expect(res.status).toBe(200);
+    expect(interventionServiceMocks.getInterventionCaseDetail).toHaveBeenCalledWith(expect.anything(), {
+      officeId: "office-1",
+      caseId: "case-1",
+    });
+    expect(res.body.case.id).toBe("case-1");
+  });
+
+  it("applies batch intervention mutations for director users", async () => {
+    interventionServiceMocks.assignInterventionCases.mockResolvedValue({
+      updatedCount: 2,
+      skippedCount: 0,
+      errors: [],
+    });
+    interventionServiceMocks.snoozeInterventionCases.mockResolvedValue({
+      updatedCount: 2,
+      skippedCount: 0,
+      errors: [],
+    });
+    interventionServiceMocks.resolveInterventionCases.mockResolvedValue({
+      updatedCount: 2,
+      skippedCount: 0,
+      errors: [],
+    });
+    interventionServiceMocks.escalateInterventionCases.mockResolvedValue({
+      updatedCount: 2,
+      skippedCount: 0,
+      errors: [],
+    });
+
+    const app = createApp("director");
+
+    const assignRes = await request(app)
+      .post("/api/ai/ops/interventions/batch-assign")
+      .send({ caseIds: ["case-1", "case-2"], assignedTo: "manager-2", notes: "Rebalance queue" });
+    expect(assignRes.status).toBe(200);
+    expect(interventionServiceMocks.assignInterventionCases).toHaveBeenCalledWith(expect.anything(), {
+      officeId: "office-1",
+      actorUserId: "director-1",
+      actorRole: "director",
+      caseIds: ["case-1", "case-2"],
+      assignedTo: "manager-2",
+      notes: "Rebalance queue",
+    });
+
+    const snoozeRes = await request(app)
+      .post("/api/ai/ops/interventions/batch-snooze")
+      .send({
+        caseIds: ["case-1", "case-2"],
+        snoozedUntil: "2026-04-20T00:00:00.000Z",
+        notes: "Waiting on customer reply",
+      });
+    expect(snoozeRes.status).toBe(200);
+    expect(interventionServiceMocks.snoozeInterventionCases).toHaveBeenCalledWith(expect.anything(), {
+      officeId: "office-1",
+      actorUserId: "director-1",
+      actorRole: "director",
+      caseIds: ["case-1", "case-2"],
+      snoozedUntil: "2026-04-20T00:00:00.000Z",
+      notes: "Waiting on customer reply",
+    });
+
+    const resolveRes = await request(app)
+      .post("/api/ai/ops/interventions/batch-resolve")
+      .send({
+        caseIds: ["case-1", "case-2"],
+        resolutionReason: "owner_aligned",
+        notes: "Owner already aligned on next step",
+      });
+    expect(resolveRes.status).toBe(200);
+    expect(interventionServiceMocks.resolveInterventionCases).toHaveBeenCalledWith(expect.anything(), {
+      officeId: "office-1",
+      actorUserId: "director-1",
+      actorRole: "director",
+      caseIds: ["case-1", "case-2"],
+      resolutionReason: "owner_aligned",
+      notes: "Owner already aligned on next step",
+    });
+
+    const escalateRes = await request(app)
+      .post("/api/ai/ops/interventions/batch-escalate")
+      .send({ caseIds: ["case-1", "case-2"], notes: "Needs leadership review" });
+    expect(escalateRes.status).toBe(200);
+    expect(interventionServiceMocks.escalateInterventionCases).toHaveBeenCalledWith(expect.anything(), {
+      officeId: "office-1",
+      actorUserId: "director-1",
+      actorRole: "director",
+      caseIds: ["case-1", "case-2"],
+      notes: "Needs leadership review",
+    });
+  });
+
+  it("applies single-case intervention mutations for director users", async () => {
+    interventionServiceMocks.assignInterventionCases.mockResolvedValue({
+      updatedCount: 1,
+      skippedCount: 0,
+      errors: [],
+    });
+    interventionServiceMocks.snoozeInterventionCases.mockResolvedValue({
+      updatedCount: 1,
+      skippedCount: 0,
+      errors: [],
+    });
+    interventionServiceMocks.resolveInterventionCases.mockResolvedValue({
+      updatedCount: 1,
+      skippedCount: 0,
+      errors: [],
+    });
+    interventionServiceMocks.escalateInterventionCases.mockResolvedValue({
+      updatedCount: 1,
+      skippedCount: 0,
+      errors: [],
+    });
+
+    const app = createApp("director");
+
+    const assignRes = await request(app)
+      .post("/api/ai/ops/interventions/case-1/assign")
+      .send({ assignedTo: "manager-2", notes: "Direct owner change" });
+    expect(assignRes.status).toBe(200);
+    expect(interventionServiceMocks.assignInterventionCases).toHaveBeenCalledWith(expect.anything(), {
+      officeId: "office-1",
+      actorUserId: "director-1",
+      actorRole: "director",
+      caseIds: ["case-1"],
+      assignedTo: "manager-2",
+      notes: "Direct owner change",
+    });
+
+    const snoozeRes = await request(app)
+      .post("/api/ai/ops/interventions/case-1/snooze")
+      .send({ snoozedUntil: "2026-04-20T00:00:00.000Z", notes: "Waiting for reply" });
+    expect(snoozeRes.status).toBe(200);
+    expect(interventionServiceMocks.snoozeInterventionCases).toHaveBeenCalledWith(expect.anything(), {
+      officeId: "office-1",
+      actorUserId: "director-1",
+      actorRole: "director",
+      caseIds: ["case-1"],
+      snoozedUntil: "2026-04-20T00:00:00.000Z",
+      notes: "Waiting for reply",
+    });
+
+    const resolveRes = await request(app)
+      .post("/api/ai/ops/interventions/case-1/resolve")
+      .send({ resolutionReason: "task_completed", notes: "Task is complete" });
+    expect(resolveRes.status).toBe(200);
+    expect(interventionServiceMocks.resolveInterventionCases).toHaveBeenCalledWith(expect.anything(), {
+      officeId: "office-1",
+      actorUserId: "director-1",
+      actorRole: "director",
+      caseIds: ["case-1"],
+      resolutionReason: "task_completed",
+      notes: "Task is complete",
+    });
+
+    const escalateRes = await request(app)
+      .post("/api/ai/ops/interventions/case-1/escalate")
+      .send({ notes: "Director visibility needed" });
+    expect(escalateRes.status).toBe(200);
+    expect(interventionServiceMocks.escalateInterventionCases).toHaveBeenCalledWith(expect.anything(), {
+      officeId: "office-1",
+      actorUserId: "director-1",
+      actorRole: "director",
+      caseIds: ["case-1"],
+      notes: "Director visibility needed",
+    });
+  });
+
   it("applies a triage action to an AI action queue entry", async () => {
     serviceMocks.triageAiActionQueueEntry.mockResolvedValue({
       entryType: "blind_spot",
@@ -451,4 +714,5 @@ describe("ai copilot routes", () => {
     expect(res.body.playbooks[0].recommendedAction).toBe("escalate");
     expect(res.body.rows).toHaveLength(1);
   });
+
 });

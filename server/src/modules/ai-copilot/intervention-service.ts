@@ -2,6 +2,7 @@ import { and, desc, eq, inArray } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import {
+  aiFeedback,
   aiDisconnectCaseHistory,
   aiDisconnectCases,
   companies,
@@ -18,6 +19,12 @@ import type {
   InterventionQueueItem,
   InterventionQueueResult,
 } from "./intervention-types.js";
+import {
+  completeTask,
+  dismissTask,
+  snoozeTask,
+  updateTask,
+} from "../tasks/service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -27,6 +34,7 @@ type DisconnectCaseHistoryRow = typeof aiDisconnectCaseHistory.$inferSelect;
 type TaskRow = typeof tasks.$inferSelect;
 type DealRow = typeof deals.$inferSelect;
 type CompanyRow = typeof companies.$inferSelect;
+type AiFeedbackRow = typeof aiFeedback.$inferSelect;
 
 type InMemoryTenantDb = {
   state: {
@@ -35,6 +43,7 @@ type InMemoryTenantDb = {
     deals: Array<Pick<DealRow, "id" | "dealNumber" | "name" | "companyId">>;
     companies: Array<Pick<CompanyRow, "id" | "name">>;
     history: DisconnectCaseHistoryRow[];
+    feedback?: AiFeedbackRow[];
   };
 };
 
@@ -565,5 +574,418 @@ export async function getInterventionCaseDetail(
       notes: entry.notes,
       metadataJson: (entry.metadataJson as Record<string, unknown> | null) ?? null,
     })),
+  };
+}
+
+type MutationAction = "assign" | "snooze" | "resolve" | "escalate";
+
+interface MutationRecordInput {
+  actionType: MutationAction;
+  actedBy: string;
+  comment: string | null;
+  fromStatus?: string | null;
+  toStatus?: string | null;
+  fromAssignee?: string | null;
+  toAssignee?: string | null;
+  fromSnoozedUntil?: Date | null;
+  toSnoozedUntil?: Date | null;
+  metadataJson?: Record<string, unknown> | null;
+}
+
+interface MutationResult {
+  updatedCount: number;
+  skippedCount: number;
+  errors: Array<{ caseId: string; message: string }>;
+}
+
+function createFeedbackComment(input: {
+  comment: string | null;
+  metadataJson?: Record<string, unknown> | null;
+}) {
+  if (!input.metadataJson || Object.keys(input.metadataJson).length === 0) {
+    return input.comment;
+  }
+
+  return JSON.stringify({
+    note: input.comment,
+    ...input.metadataJson,
+  });
+}
+
+async function writeMutationArtifacts(
+  tenantDb: TenantDb | InMemoryTenantDb,
+  disconnectCase: DisconnectCaseRow,
+  input: MutationRecordInput
+) {
+  const actedAt = new Date();
+  const historyRecord = {
+    id: isInMemoryTenantDb(tenantDb)
+      ? `history-${(tenantDb.state.history?.length ?? 0) + 1}`
+      : undefined,
+    disconnectCaseId: disconnectCase.id,
+    actionType: input.actionType,
+    actedBy: input.actedBy,
+    actedAt,
+    fromStatus: input.fromStatus ?? null,
+    toStatus: input.toStatus ?? null,
+    fromAssignee: input.fromAssignee ?? null,
+    toAssignee: input.toAssignee ?? null,
+    fromSnoozedUntil: input.fromSnoozedUntil ?? null,
+    toSnoozedUntil: input.toSnoozedUntil ?? null,
+    notes: input.comment,
+    metadataJson: input.metadataJson ?? null,
+  } satisfies typeof aiDisconnectCaseHistory.$inferInsert;
+
+  const feedbackPayload = {
+    targetType: "disconnect_case",
+    targetId: disconnectCase.id,
+    userId: input.actedBy,
+    feedbackType: "intervention_action",
+    feedbackValue: input.actionType,
+    comment: createFeedbackComment({
+      comment: input.comment,
+      metadataJson: input.metadataJson,
+    }),
+  } satisfies typeof aiFeedback.$inferInsert;
+
+  if (isInMemoryTenantDb(tenantDb)) {
+    tenantDb.state.history.push(historyRecord as DisconnectCaseHistoryRow);
+    const feedbackRecord = {
+      id: `feedback-${(tenantDb.state.feedback?.length ?? 0) + 1}`,
+      createdAt: actedAt,
+      ...feedbackPayload,
+    } as AiFeedbackRow;
+    tenantDb.state.feedback ??= [];
+    tenantDb.state.feedback.push(feedbackRecord);
+    return { historyId: historyRecord.id!, feedbackId: feedbackRecord.id };
+  }
+
+  const [createdHistory] = await tenantDb
+    .insert(aiDisconnectCaseHistory)
+    .values(historyRecord)
+    .returning();
+  const [createdFeedback] = await tenantDb
+    .insert(aiFeedback)
+    .values(feedbackPayload)
+    .returning();
+
+  return { historyId: createdHistory.id, feedbackId: createdFeedback.id };
+}
+
+async function loadCasesForMutation(
+  tenantDb: TenantDb | InMemoryTenantDb,
+  officeId: string,
+  caseIds: string[]
+) {
+  if (isInMemoryTenantDb(tenantDb)) {
+    return tenantDb.state.cases.filter(
+      (item) => item.officeId === officeId && caseIds.includes(item.id)
+    );
+  }
+
+  if (caseIds.length === 0) return [];
+  return tenantDb
+    .select()
+    .from(aiDisconnectCases)
+    .where(and(eq(aiDisconnectCases.officeId, officeId), inArray(aiDisconnectCases.id, caseIds)));
+}
+
+async function syncGeneratedTaskAssignment(
+  tenantDb: TenantDb | InMemoryTenantDb,
+  disconnectCase: DisconnectCaseRow,
+  assignedTo: string,
+  actor: { role: string; userId: string }
+) {
+  if (!disconnectCase.generatedTaskId) return;
+
+  if (isInMemoryTenantDb(tenantDb)) {
+    const task = tenantDb.state.tasks.find((item) => item.id === disconnectCase.generatedTaskId);
+    if (task) task.assignedTo = assignedTo;
+    return;
+  }
+
+  await updateTask(
+    tenantDb,
+    disconnectCase.generatedTaskId,
+    { assignedTo },
+    actor.role,
+    actor.userId
+  );
+}
+
+async function syncGeneratedTaskSnooze(
+  tenantDb: TenantDb | InMemoryTenantDb,
+  disconnectCase: DisconnectCaseRow,
+  snoozedUntil: Date,
+  actor: { role: string; userId: string }
+) {
+  if (!disconnectCase.generatedTaskId) return;
+
+  if (isInMemoryTenantDb(tenantDb)) {
+    const task = tenantDb.state.tasks.find((item) => item.id === disconnectCase.generatedTaskId);
+    if (task) task.dueDate = snoozedUntil.toISOString().slice(0, 10);
+    return;
+  }
+
+  await snoozeTask(
+    tenantDb,
+    disconnectCase.generatedTaskId,
+    snoozedUntil.toISOString().slice(0, 10),
+    actor.role,
+    actor.userId
+  );
+}
+
+const resolutionToTaskOutcome = {
+  task_completed: "completed",
+  follow_up_completed: "completed",
+  owner_aligned: "dismissed",
+  false_positive: "dismissed",
+  duplicate_case: "dismissed",
+  issue_no_longer_relevant: "dismissed",
+} as const;
+
+async function syncGeneratedTaskResolution(
+  tenantDb: TenantDb | InMemoryTenantDb,
+  disconnectCase: DisconnectCaseRow,
+  resolutionReason: keyof typeof resolutionToTaskOutcome,
+  actor: { role: string; userId: string }
+) {
+  if (!disconnectCase.generatedTaskId) return;
+
+  const nextTaskStatus = resolutionToTaskOutcome[resolutionReason];
+  if (isInMemoryTenantDb(tenantDb)) {
+    const task = tenantDb.state.tasks.find((item) => item.id === disconnectCase.generatedTaskId);
+    if (task) task.status = nextTaskStatus;
+    return;
+  }
+
+  if (nextTaskStatus === "completed") {
+    await completeTask(tenantDb, disconnectCase.generatedTaskId, actor.role, actor.userId);
+    return;
+  }
+
+  await dismissTask(tenantDb, disconnectCase.generatedTaskId, actor.role, actor.userId);
+}
+
+export async function assignInterventionCases(
+  tenantDb: TenantDb | InMemoryTenantDb,
+  input: {
+    officeId: string;
+    caseIds: string[];
+    assignedTo: string;
+    actorUserId: string;
+    actorRole: string;
+    notes?: string | null;
+  }
+): Promise<MutationResult> {
+  const rows = await loadCasesForMutation(tenantDb, input.officeId, input.caseIds);
+  const errors: Array<{ caseId: string; message: string }> = [];
+
+  for (const row of rows) {
+    const fromAssignee = row.assignedTo ?? null;
+    const actedAt = new Date();
+    if (isInMemoryTenantDb(tenantDb)) {
+      row.assignedTo = input.assignedTo;
+      row.lastIntervenedAt = actedAt;
+    } else {
+      await tenantDb
+        .update(aiDisconnectCases)
+        .set({
+          assignedTo: input.assignedTo,
+          lastIntervenedAt: actedAt,
+          updatedAt: actedAt,
+        })
+        .where(eq(aiDisconnectCases.id, row.id));
+    }
+    await syncGeneratedTaskAssignment(tenantDb, row, input.assignedTo, {
+      role: input.actorRole,
+      userId: input.actorUserId,
+    });
+    await writeMutationArtifacts(tenantDb, row, {
+      actionType: "assign",
+      actedBy: input.actorUserId,
+      comment: input.notes ?? null,
+      fromStatus: row.status,
+      toStatus: row.status,
+      fromAssignee,
+      toAssignee: input.assignedTo,
+    });
+  }
+
+  return {
+    updatedCount: rows.length,
+    skippedCount: input.caseIds.length - rows.length,
+    errors,
+  };
+}
+
+export async function snoozeInterventionCases(
+  tenantDb: TenantDb | InMemoryTenantDb,
+  input: {
+    officeId: string;
+    caseIds: string[];
+    snoozedUntil: Date | string;
+    actorUserId: string;
+    actorRole: string;
+    notes?: string | null;
+  }
+): Promise<MutationResult> {
+  const snoozedUntil = input.snoozedUntil instanceof Date
+    ? input.snoozedUntil
+    : new Date(input.snoozedUntil);
+  const rows = await loadCasesForMutation(tenantDb, input.officeId, input.caseIds);
+  const errors: Array<{ caseId: string; message: string }> = [];
+
+  for (const row of rows) {
+    const fromStatus = row.status;
+    const fromSnoozedUntil = row.snoozedUntil ?? null;
+    const actedAt = new Date();
+    if (isInMemoryTenantDb(tenantDb)) {
+      row.status = "snoozed";
+      row.snoozedUntil = snoozedUntil;
+      row.lastIntervenedAt = actedAt;
+    } else {
+      await tenantDb
+        .update(aiDisconnectCases)
+        .set({
+          status: "snoozed",
+          snoozedUntil,
+          lastIntervenedAt: actedAt,
+          updatedAt: actedAt,
+        })
+        .where(eq(aiDisconnectCases.id, row.id));
+    }
+    await syncGeneratedTaskSnooze(tenantDb, row, snoozedUntil, {
+      role: input.actorRole,
+      userId: input.actorUserId,
+    });
+    await writeMutationArtifacts(tenantDb, row, {
+      actionType: "snooze",
+      actedBy: input.actorUserId,
+      comment: input.notes ?? null,
+      fromStatus,
+      toStatus: "snoozed",
+      fromAssignee: row.assignedTo ?? null,
+      toAssignee: row.assignedTo ?? null,
+      fromSnoozedUntil,
+      toSnoozedUntil: snoozedUntil,
+    });
+  }
+
+  return {
+    updatedCount: rows.length,
+    skippedCount: input.caseIds.length - rows.length,
+    errors,
+  };
+}
+
+export async function resolveInterventionCases(
+  tenantDb: TenantDb | InMemoryTenantDb,
+  input: {
+    officeId: string;
+    caseIds: string[];
+    resolutionReason: keyof typeof resolutionToTaskOutcome;
+    actorUserId: string;
+    actorRole: string;
+    notes?: string | null;
+  }
+): Promise<MutationResult> {
+  const rows = await loadCasesForMutation(tenantDb, input.officeId, input.caseIds);
+  const errors: Array<{ caseId: string; message: string }> = [];
+  const taskOutcome = resolutionToTaskOutcome[input.resolutionReason];
+
+  for (const row of rows) {
+    const fromStatus = row.status;
+    const actedAt = new Date();
+    if (isInMemoryTenantDb(tenantDb)) {
+      row.status = "resolved";
+      row.resolutionReason = input.resolutionReason;
+      row.resolvedAt = actedAt;
+      row.snoozedUntil = null;
+      row.lastIntervenedAt = actedAt;
+    } else {
+      await tenantDb
+        .update(aiDisconnectCases)
+        .set({
+          status: "resolved",
+          resolutionReason: input.resolutionReason,
+          resolvedAt: actedAt,
+          snoozedUntil: null,
+          lastIntervenedAt: actedAt,
+          updatedAt: actedAt,
+        })
+        .where(eq(aiDisconnectCases.id, row.id));
+    }
+    await syncGeneratedTaskResolution(tenantDb, row, input.resolutionReason, {
+      role: input.actorRole,
+      userId: input.actorUserId,
+    });
+    await writeMutationArtifacts(tenantDb, row, {
+      actionType: "resolve",
+      actedBy: input.actorUserId,
+      comment: input.notes ?? null,
+      fromStatus,
+      toStatus: "resolved",
+      fromAssignee: row.assignedTo ?? null,
+      toAssignee: row.assignedTo ?? null,
+      metadataJson: {
+        resolutionReason: input.resolutionReason,
+        taskOutcome,
+      },
+    });
+  }
+
+  return {
+    updatedCount: rows.length,
+    skippedCount: input.caseIds.length - rows.length,
+    errors,
+  };
+}
+
+export async function escalateInterventionCases(
+  tenantDb: TenantDb | InMemoryTenantDb,
+  input: {
+    officeId: string;
+    caseIds: string[];
+    actorUserId: string;
+    actorRole: string;
+    notes?: string | null;
+  }
+): Promise<MutationResult> {
+  const rows = await loadCasesForMutation(tenantDb, input.officeId, input.caseIds);
+  const errors: Array<{ caseId: string; message: string }> = [];
+
+  for (const row of rows) {
+    const actedAt = new Date();
+    if (isInMemoryTenantDb(tenantDb)) {
+      row.escalated = true;
+      row.lastIntervenedAt = actedAt;
+    } else {
+      await tenantDb
+        .update(aiDisconnectCases)
+        .set({
+          escalated: true,
+          lastIntervenedAt: actedAt,
+          updatedAt: actedAt,
+        })
+        .where(eq(aiDisconnectCases.id, row.id));
+    }
+    await writeMutationArtifacts(tenantDb, row, {
+      actionType: "escalate",
+      actedBy: input.actorUserId,
+      comment: input.notes ?? null,
+      fromStatus: row.status,
+      toStatus: row.status,
+      fromAssignee: row.assignedTo ?? null,
+      toAssignee: row.assignedTo ?? null,
+      metadataJson: { escalated: true },
+    });
+  }
+
+  return {
+    updatedCount: rows.length,
+    skippedCount: input.caseIds.length - rows.length,
+    errors,
   };
 }

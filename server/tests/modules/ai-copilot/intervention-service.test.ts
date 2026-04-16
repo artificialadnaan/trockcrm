@@ -19,6 +19,10 @@ const {
   materializeDisconnectCases,
   listInterventionCases,
   getInterventionCaseDetail,
+  assignInterventionCases,
+  snoozeInterventionCases,
+  resolveInterventionCases,
+  escalateInterventionCases,
 } = await import("../../../src/modules/ai-copilot/intervention-service");
 
 type DisconnectCaseRecord = {
@@ -85,6 +89,17 @@ type HistoryRecord = {
   toSnoozedUntil: Date | null;
   notes: string | null;
   metadataJson: Record<string, unknown> | null;
+};
+
+type FeedbackRecord = {
+  id: string;
+  targetType: string;
+  targetId: string;
+  userId: string;
+  feedbackType: string;
+  feedbackValue: string;
+  comment: string | null;
+  createdAt: Date;
 };
 
 function makeDisconnectRow(overrides: Partial<SalesProcessDisconnectRow> = {}): SalesProcessDisconnectRow {
@@ -200,6 +215,7 @@ function createTenantDb(state?: {
   deals?: DealRecord[];
   companies?: CompanyRecord[];
   history?: HistoryRecord[];
+  feedback?: FeedbackRecord[];
 }) {
   const internal = {
     cases: state?.cases ? state.cases.map((row) => ({ ...row })) : [],
@@ -207,6 +223,7 @@ function createTenantDb(state?: {
     deals: state?.deals ? state.deals.map((row) => ({ ...row })) : [],
     companies: state?.companies ? state.companies.map((row) => ({ ...row })) : [],
     history: state?.history ? state.history.map((row) => ({ ...row })) : [],
+    feedback: state?.feedback ? state.feedback.map((row) => ({ ...row })) : [],
   };
 
   return {
@@ -479,5 +496,249 @@ describe("AI intervention service", () => {
       },
     });
     expect(detail.history.map((entry) => entry.id)).toEqual(["history-1", "history-2"]);
+  });
+
+  it("assigns intervention cases and syncs generated task assignees", async () => {
+    const tenantDb = createTenantDb({
+      cases: [
+        makeCase({
+          generatedTaskId: "task-1",
+          assignedTo: "manager-1",
+        }),
+      ],
+      tasks: [
+        makeTask({
+          id: "task-1",
+          assignedTo: "manager-1",
+          status: "pending",
+        }),
+      ],
+    });
+
+    const result = await assignInterventionCases(tenantDb as any, {
+      officeId: "office-1",
+      actorUserId: "director-1",
+      actorRole: "director",
+      caseIds: ["case-1"],
+      assignedTo: "manager-2",
+      notes: "Reassign to closer owner",
+    });
+
+    expect(result).toEqual({
+      updatedCount: 1,
+      skippedCount: 0,
+      errors: [],
+    });
+    expect(tenantDb.state.cases[0]).toMatchObject({
+      assignedTo: "manager-2",
+      status: "open",
+    });
+    expect(tenantDb.state.tasks[0]).toMatchObject({
+      assignedTo: "manager-2",
+      status: "pending",
+    });
+    expect(tenantDb.state.history).toHaveLength(1);
+    expect(tenantDb.state.history[0]).toMatchObject({
+      disconnectCaseId: "case-1",
+      actionType: "assign",
+      actedBy: "director-1",
+      fromAssignee: "manager-1",
+      toAssignee: "manager-2",
+      notes: "Reassign to closer owner",
+    });
+    expect(tenantDb.state.feedback).toHaveLength(1);
+    expect(tenantDb.state.feedback[0]).toMatchObject({
+      targetType: "disconnect_case",
+      targetId: "case-1",
+      userId: "director-1",
+      feedbackType: "intervention_action",
+      feedbackValue: "assign",
+    });
+  });
+
+  it("snoozes intervention cases, syncs generated tasks, and writes history plus feedback", async () => {
+    const tenantDb = createTenantDb({
+      cases: [
+        makeCase({
+          generatedTaskId: "task-1",
+          assignedTo: "manager-1",
+        }),
+      ],
+      tasks: [
+        makeTask({
+          id: "task-1",
+          assignedTo: "manager-1",
+          status: "in_progress",
+        }),
+      ],
+    });
+
+    const result = await snoozeInterventionCases(tenantDb as any, {
+      officeId: "office-1",
+      actorUserId: "director-1",
+      actorRole: "director",
+      caseIds: ["case-1"],
+      snoozedUntil: "2026-04-20T00:00:00.000Z",
+      notes: "Waiting on customer reply",
+    });
+
+    expect(result).toEqual({
+      updatedCount: 1,
+      skippedCount: 0,
+      errors: [],
+    });
+    expect(tenantDb.state.cases[0]).toMatchObject({
+      status: "snoozed",
+      snoozedUntil: new Date("2026-04-20T00:00:00.000Z"),
+    });
+    expect(tenantDb.state.tasks[0]).toMatchObject({
+      status: "in_progress",
+      dueDate: "2026-04-20",
+    });
+    expect(tenantDb.state.history[0]).toMatchObject({
+      actionType: "snooze",
+      fromStatus: "open",
+      toStatus: "snoozed",
+      toSnoozedUntil: new Date("2026-04-20T00:00:00.000Z"),
+    });
+    expect(tenantDb.state.feedback[0]).toMatchObject({
+      feedbackType: "intervention_action",
+      feedbackValue: "snooze",
+    });
+  });
+
+  it("resolves intervention cases, maps generated task outcomes, and writes history plus feedback", async () => {
+    const tenantDb = createTenantDb({
+      cases: [
+        makeCase({
+          generatedTaskId: "task-1",
+          assignedTo: "manager-1",
+        }),
+        makeCase({
+          id: "case-2",
+          generatedTaskId: "task-2",
+          businessKey: "office-1:stale_stage:deal:deal-2",
+          scopeId: "deal-2",
+          dealId: "deal-2",
+          companyId: null,
+          disconnectType: "stale_stage",
+          clusterKey: "execution_stall",
+          metadataJson: { evidenceSummary: "Deal has exceeded stale threshold." },
+        }),
+      ],
+      tasks: [
+        makeTask({ id: "task-1", status: "pending" }),
+        makeTask({
+          id: "task-2",
+          dealId: "deal-2",
+          dedupeKey: "office-1:stale_stage:deal:deal-2",
+          status: "pending",
+        }),
+      ],
+    });
+
+    const completedResult = await resolveInterventionCases(tenantDb as any, {
+      officeId: "office-1",
+      actorUserId: "director-1",
+      actorRole: "director",
+      caseIds: ["case-1"],
+      resolutionReason: "task_completed",
+      notes: "The task was completed directly",
+    });
+
+    expect(completedResult).toEqual({
+      updatedCount: 1,
+      skippedCount: 0,
+      errors: [],
+    });
+    expect(tenantDb.state.cases[0]).toMatchObject({
+      status: "resolved",
+      resolutionReason: "task_completed",
+    });
+    expect(tenantDb.state.tasks[0]).toMatchObject({
+      status: "completed",
+    });
+
+    const dismissedResult = await resolveInterventionCases(tenantDb as any, {
+      officeId: "office-1",
+      actorUserId: "director-1",
+      actorRole: "director",
+      caseIds: ["case-2"],
+      resolutionReason: "owner_aligned",
+      notes: "No further admin task is needed",
+    });
+
+    expect(dismissedResult).toEqual({
+      updatedCount: 1,
+      skippedCount: 0,
+      errors: [],
+    });
+    expect(tenantDb.state.cases[1]).toMatchObject({
+      status: "resolved",
+      resolutionReason: "owner_aligned",
+    });
+    expect(tenantDb.state.tasks[1]).toMatchObject({
+      status: "dismissed",
+    });
+    expect(tenantDb.state.history).toHaveLength(2);
+    expect(tenantDb.state.history[0]).toMatchObject({
+      disconnectCaseId: "case-1",
+      actionType: "resolve",
+      fromStatus: "open",
+      toStatus: "resolved",
+      notes: "The task was completed directly",
+      metadataJson: { resolutionReason: "task_completed", taskOutcome: "completed" },
+    });
+    expect(tenantDb.state.history[1]).toMatchObject({
+      disconnectCaseId: "case-2",
+      actionType: "resolve",
+      metadataJson: { resolutionReason: "owner_aligned", taskOutcome: "dismissed" },
+    });
+    expect(tenantDb.state.feedback).toHaveLength(2);
+    expect(tenantDb.state.feedback[0]).toMatchObject({
+      feedbackValue: "resolve",
+    });
+    expect(tenantDb.state.feedback[1]).toMatchObject({
+      feedbackValue: "resolve",
+    });
+  });
+
+  it("escalates intervention cases and writes history plus feedback", async () => {
+    const tenantDb = createTenantDb({
+      cases: [
+        makeCase({
+          generatedTaskId: "task-1",
+          escalated: false,
+        }),
+      ],
+      tasks: [makeTask({ id: "task-1", status: "pending" })],
+    });
+
+    const result = await escalateInterventionCases(tenantDb as any, {
+      officeId: "office-1",
+      actorUserId: "director-1",
+      actorRole: "director",
+      caseIds: ["case-1"],
+      notes: "Escalate for leadership attention",
+    });
+
+    expect(result).toEqual({
+      updatedCount: 1,
+      skippedCount: 0,
+      errors: [],
+    });
+    expect(tenantDb.state.cases[0]).toMatchObject({
+      escalated: true,
+      status: "open",
+    });
+    expect(tenantDb.state.history[0]).toMatchObject({
+      actionType: "escalate",
+      notes: "Escalate for leadership attention",
+      metadataJson: { escalated: true },
+    });
+    expect(tenantDb.state.feedback[0]).toMatchObject({
+      feedbackType: "intervention_action",
+      feedbackValue: "escalate",
+    });
   });
 });
