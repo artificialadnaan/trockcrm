@@ -10,6 +10,7 @@ import {
 } from "@/hooks/use-ai-ops";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { buttonVariants } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 
 const severityClasses: Record<string, string> = {
@@ -145,6 +146,9 @@ export function SalesProcessDisconnectsPage() {
           <RefreshCcw className="h-4 w-4 mr-2" />
           Refresh
         </Button>
+        <Link to="/admin/interventions" className={buttonVariants({ variant: "outline" })}>
+          Open Intervention Workspace
+        </Link>
         <Button variant="default" onClick={() => void handleQueueDigest()} disabled={loading}>
           Queue Digest
         </Button>
