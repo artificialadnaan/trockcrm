@@ -155,6 +155,15 @@ export interface CompanyDeal {
   name: string;
   stageId: string;
   isActive: boolean;
+  companyId: string | null;
+  propertyAddress: string | null;
+  propertyCity: string | null;
+  propertyState: string | null;
+  propertyZip: string | null;
+  stageEnteredAt: string;
+  lastActivityAt: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export function useCompanyDeals(companyId: string | undefined) {

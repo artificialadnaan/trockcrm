@@ -16,6 +16,10 @@ import { CompanyListPage } from "@/pages/companies/company-list-page";
 import { CompanyDetailPage } from "@/pages/companies/company-detail-page";
 import { CompanyNewPage } from "@/pages/companies/company-new-page";
 import { CompanyEditPage } from "@/pages/companies/company-edit-page";
+import { LeadListPage } from "@/pages/leads/lead-list-page";
+import { LeadDetailPage } from "@/pages/leads/lead-detail-page";
+import { PropertyListPage } from "@/pages/properties/property-list-page";
+import { PropertyDetailPage } from "@/pages/properties/property-detail-page";
 import { MergeQueuePage } from "@/pages/admin/merge-queue-page";
 import { EmailInboxPage } from "@/pages/email/email-inbox-page";
 import { TaskListPage } from "@/pages/tasks/task-list-page";
@@ -29,6 +33,7 @@ import { ProcoreSyncPage } from "@/pages/admin/procore-sync-page";
 import { MigrationDashboardPage } from "@/pages/admin/migration/migration-dashboard-page";
 import { MigrationDealsPage } from "@/pages/admin/migration/migration-deals-page";
 import { MigrationContactsPage } from "@/pages/admin/migration/migration-contacts-page";
+import { MigrationReviewPage } from "@/pages/admin/migration/migration-review-page";
 import { SearchPage } from "@/pages/search/search-page";
 import { OfficesPage } from "@/pages/admin/offices-page";
 import { UsersPage } from "@/pages/admin/users-page";
@@ -76,6 +81,10 @@ export function App() {
               <Route path="/deals/new" element={<DealNewPage />} />
               <Route path="/deals/:id" element={<DealDetailPage />} />
               <Route path="/deals/:id/edit" element={<DealEditPage />} />
+              <Route path="/leads" element={<LeadListPage />} />
+              <Route path="/leads/:id" element={<LeadDetailPage />} />
+              <Route path="/properties" element={<PropertyListPage />} />
+              <Route path="/properties/:id" element={<PropertyDetailPage />} />
               <Route path="/pipeline" element={<PipelinePage />} />
               <Route path="/contacts" element={<ContactListPage />} />
               <Route path="/contacts/new" element={<ContactNewPage />} />
@@ -102,6 +111,7 @@ export function App() {
               <Route path="/admin/procore" element={<ProcoreSyncPage />} />
               <Route path="/admin/companycam" element={<CompanyCamPage />} />
               <Route path="/admin/migration" element={<MigrationDashboardPage />} />
+              <Route path="/admin/migration/review" element={<MigrationReviewPage />} />
               <Route path="/admin/migration/deals" element={<MigrationDealsPage />} />
               <Route path="/admin/migration/contacts" element={<MigrationContactsPage />} />
               <Route path="/photos/feed" element={<PhotoFeedPage />} />

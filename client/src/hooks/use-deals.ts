@@ -15,13 +15,6 @@ export interface DealScopingCompletionStateEntry {
   missingAttachments: string[];
 }
 
-export interface DealScopingAttachmentRequirement {
-  key: string;
-  category: string;
-  label: string;
-  satisfied: boolean;
-}
-
 export interface DealScopingReadiness {
   status: DealScopingIntakeStatus;
   errors: {
@@ -31,7 +24,6 @@ export interface DealScopingReadiness {
   completionState: Record<string, DealScopingCompletionStateEntry>;
   requiredSections: string[];
   requiredAttachmentKeys: string[];
-  attachmentRequirements: DealScopingAttachmentRequirement[];
 }
 
 export interface DealScopingIntake {
@@ -63,10 +55,8 @@ export interface Deal {
   stageId: string;
   workflowRoute: WorkflowRoute;
   assignedRepId: string;
-  primaryContactId: string | null;
   companyId: string | null;
-  propertyId: string | null;
-  sourceLeadId: string | null;
+  primaryContactId: string | null;
   ddEstimate: string | null;
   bidEstimate: string | null;
   awardedAmount: string | null;

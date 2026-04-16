@@ -1,10 +1,14 @@
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Link } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import { DealEstimatesCard } from "./deal-estimates-card";
 import { DealStageBadge } from "./deal-stage-badge";
 import { formatDate, daysInStage, winProbabilityColor, formatCurrency } from "@/lib/deal-utils";
 import { useProjectTypes, useRegions } from "@/hooks/use-pipeline-config";
 import type { DealDetail } from "@/hooks/use-deals";
+import { buildPropertyId } from "@/lib/property-key";
 import {
   MapPin,
   Calendar,
@@ -18,11 +22,22 @@ interface DealOverviewTabProps {
 }
 
 export function DealOverviewTab({ deal }: DealOverviewTabProps) {
+  const navigate = useNavigate();
   const { projectTypes } = useProjectTypes();
   const { regions } = useRegions();
 
   const projectType = projectTypes.find((t) => t.id === deal.projectTypeId);
   const region = regions.find((r) => r.id === deal.regionId);
+  const propertyId =
+    deal.companyId && (deal.propertyAddress || deal.propertyCity || deal.propertyState || deal.propertyZip)
+      ? buildPropertyId({
+          companyId: deal.companyId,
+          address: deal.propertyAddress,
+          city: deal.propertyCity,
+          state: deal.propertyState,
+          zip: deal.propertyZip,
+        })
+      : null;
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
@@ -69,15 +84,42 @@ export function DealOverviewTab({ deal }: DealOverviewTabProps) {
               </CardTitle>
             </CardHeader>
             <CardContent className="text-sm space-y-1">
-              {deal.propertyAddress && <p>{deal.propertyAddress}</p>}
-              {deal.propertyCity && (
-                <p>
-                  {deal.propertyCity}, {deal.propertyState} {deal.propertyZip}
-                </p>
+              {propertyId ? (
+                <Link to={`/properties/${propertyId}`} className="space-y-1 text-primary hover:underline">
+                  {deal.propertyAddress && <p>{deal.propertyAddress}</p>}
+                  {deal.propertyCity && (
+                    <p>
+                      {deal.propertyCity}, {deal.propertyState} {deal.propertyZip}
+                    </p>
+                  )}
+                </Link>
+              ) : (
+                <>
+                  {deal.propertyAddress && <p>{deal.propertyAddress}</p>}
+                  {deal.propertyCity && (
+                    <p>
+                      {deal.propertyCity}, {deal.propertyState} {deal.propertyZip}
+                    </p>
+                  )}
+                </>
               )}
             </CardContent>
           </Card>
         )}
+
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-sm font-medium text-muted-foreground">Lead Surface</CardTitle>
+          </CardHeader>
+          <CardContent className="text-sm space-y-2">
+            <p className="text-muted-foreground">
+              This record has a dedicated pre-RFP lead view with inherited activity history.
+            </p>
+            <Button variant="outline" size="sm" onClick={() => navigate(`/leads/${deal.id}`)}>
+              Open Lead Detail
+            </Button>
+          </CardContent>
+        </Card>
 
         {/* Metadata */}
         <Card>
