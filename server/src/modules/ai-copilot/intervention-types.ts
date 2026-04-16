@@ -28,7 +28,19 @@ export type InterventionQueueView =
   | "unassigned"
   | "aging"
   | "repeat"
-  | "generated-task-pending";
+  | "generated-task-pending"
+  | "overdue"
+  | "snooze-breached";
+
+export interface InterventionQueueFilters {
+  caseId?: string | null;
+  severity?: string | null;
+  disconnectType?: string | null;
+  assigneeId?: string | null;
+  repId?: string | null;
+  companyId?: string | null;
+  stageKey?: string | null;
+}
 
 export interface InterventionQueueResult {
   items: InterventionQueueItem[];

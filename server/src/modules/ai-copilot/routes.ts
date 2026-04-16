@@ -12,7 +12,7 @@ import {
   resolveInterventionCases,
   snoozeInterventionCases,
 } from "./intervention-service.js";
-import type { InterventionQueueView } from "./intervention-types.js";
+import type { InterventionQueueFilters, InterventionQueueView } from "./intervention-types.js";
 import {
   getAiActionQueue,
   getCompanyCopilotView,
@@ -47,6 +47,8 @@ const INTERVENTION_QUEUE_VIEWS = new Set<InterventionQueueView>([
   "aging",
   "repeat",
   "generated-task-pending",
+  "overdue",
+  "snooze-breached",
 ]);
 
 async function assertDealAccess(req: any, dealId: string) {
@@ -232,6 +234,21 @@ router.get("/ops/interventions", requireRole("admin", "director"), async (req, r
       typeof req.query.clusterKey === "string" && req.query.clusterKey.length > 0
         ? req.query.clusterKey
         : undefined;
+    const filters: InterventionQueueFilters = {
+      caseId: typeof req.query.caseId === "string" && req.query.caseId.length > 0 ? req.query.caseId : undefined,
+      severity: typeof req.query.severity === "string" && req.query.severity.length > 0 ? req.query.severity : undefined,
+      disconnectType:
+        typeof req.query.disconnectType === "string" && req.query.disconnectType.length > 0
+          ? req.query.disconnectType
+          : undefined,
+      assigneeId:
+        typeof req.query.assigneeId === "string" && req.query.assigneeId.length > 0 ? req.query.assigneeId : undefined,
+      repId: typeof req.query.repId === "string" && req.query.repId.length > 0 ? req.query.repId : undefined,
+      companyId:
+        typeof req.query.companyId === "string" && req.query.companyId.length > 0 ? req.query.companyId : undefined,
+      stageKey:
+        typeof req.query.stageKey === "string" && req.query.stageKey.length > 0 ? req.query.stageKey : undefined,
+    };
 
     const result = await listInterventionCases(req.tenantDb!, {
       officeId: getActiveOfficeId(req),
@@ -240,6 +257,7 @@ router.get("/ops/interventions", requireRole("admin", "director"), async (req, r
       status,
       view,
       clusterKey,
+      filters,
     });
 
     await req.commitTransaction!();

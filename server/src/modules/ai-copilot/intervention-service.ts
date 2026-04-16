@@ -17,6 +17,7 @@ import {
 } from "./service.js";
 import type {
   InterventionCaseDetail,
+  InterventionQueueFilters,
   InterventionQueueItem,
   InterventionQueueResult,
   InterventionQueueView,
@@ -70,6 +71,21 @@ function severityRank(value: string) {
       return 1;
     default:
       return 0;
+  }
+}
+
+function interventionSlaThresholdDays(value: string) {
+  switch (value) {
+    case "critical":
+      return 0;
+    case "high":
+      return 2;
+    case "medium":
+      return 5;
+    case "low":
+      return 10;
+    default:
+      return Number.POSITIVE_INFINITY;
   }
 }
 
@@ -140,6 +156,48 @@ function sortQueueItems(a: InterventionQueueItem, b: InterventionQueueItem) {
   if (severityDelta !== 0) return severityDelta;
   if (b.ageDays !== a.ageDays) return b.ageDays - a.ageDays;
   return a.businessKey.localeCompare(b.businessKey);
+}
+
+function readMetadataString(metadata: Record<string, unknown> | null | undefined, key: string) {
+  if (!metadata || typeof metadata !== "object") return null;
+  const value = metadata[key];
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function matchesQueueStatus(
+  row: DisconnectCaseRow,
+  input: { status?: "open" | "snoozed" | "resolved"; view?: InterventionQueueView; now: Date }
+) {
+  if (input.view === "overdue") {
+    if (row.status !== "open") return false;
+    return input.status ? row.status === input.status : true;
+  }
+
+  if (input.view === "snooze-breached") {
+    if (row.status !== "snoozed") return false;
+    if (!row.snoozedUntil || row.snoozedUntil > input.now) return false;
+    return input.status ? row.status === input.status : true;
+  }
+
+  if (input.status) return row.status === input.status;
+  if (row.status === "resolved") return false;
+  if (row.status === "snoozed" && (!row.snoozedUntil || row.snoozedUntil > input.now)) return false;
+  return true;
+}
+
+function matchesQueueFilters(row: DisconnectCaseRow, filters: InterventionQueueFilters | undefined) {
+  if (!filters) return true;
+  if (filters.severity && row.severity !== filters.severity) return false;
+  if (filters.disconnectType && row.disconnectType !== filters.disconnectType) return false;
+  if (filters.assigneeId && row.assignedTo !== filters.assigneeId) return false;
+  if (filters.companyId && row.companyId !== filters.companyId) return false;
+  if (filters.repId && readMetadataString(row.metadataJson as Record<string, unknown> | null, "assignedRepId") !== filters.repId) {
+    return false;
+  }
+  if (filters.stageKey && readMetadataString(row.metadataJson as Record<string, unknown> | null, "stageKey") !== filters.stageKey) {
+    return false;
+  }
+  return true;
 }
 
 function projectQueueItem(input: {
@@ -331,6 +389,7 @@ export async function listInterventionCases(
     status?: "open" | "snoozed" | "resolved";
     view?: InterventionQueueView;
     clusterKey?: string;
+    filters?: InterventionQueueFilters;
     page?: number;
     pageSize?: number;
     now?: Date;
@@ -342,12 +401,9 @@ export async function listInterventionCases(
 
   if (isInMemoryTenantDb(tenantDb)) {
     let cases = tenantDb.state.cases.filter((row) => row.officeId === input.officeId);
-    cases = cases.filter((row) => {
-      if (input.status) return row.status === input.status;
-      if (row.status === "resolved") return false;
-      if (row.status === "snoozed" && (!row.snoozedUntil || row.snoozedUntil > now)) return false;
-      return true;
-    });
+    cases = cases
+      .filter((row) => matchesQueueStatus(row, { status: input.status, view: input.view, now }))
+      .filter((row) => matchesQueueFilters(row, input.filters));
 
     const latestHistoryByCase = new Map<string, DisconnectCaseHistoryRow>();
     for (const row of tenantDb.state.history.sort((a, b) => b.actedAt.getTime() - a.actedAt.getTime())) {
@@ -383,12 +439,9 @@ export async function listInterventionCases(
   });
 
   let cases = await getCasesByOffice(tenantDb, input.officeId);
-  cases = cases.filter((row) => {
-    if (input.status) return row.status === input.status;
-    if (row.status === "resolved") return false;
-    if (row.status === "snoozed" && (!row.snoozedUntil || row.snoozedUntil > now)) return false;
-    return true;
-  });
+  cases = cases
+    .filter((row) => matchesQueueStatus(row, { status: input.status, view: input.view, now }))
+    .filter((row) => matchesQueueFilters(row, input.filters));
 
   const taskIds = cases.map((row) => row.generatedTaskId).filter((value): value is string => Boolean(value));
   const dealIds = cases.map((row) => row.dealId).filter((value): value is string => Boolean(value));
@@ -442,6 +495,10 @@ function matchesInterventionView(item: InterventionQueueItem, view: Intervention
   switch (view) {
     case "all":
       return true;
+    case "overdue":
+      return item.status === "open" && item.ageDays > interventionSlaThresholdDays(item.severity);
+    case "snooze-breached":
+      return item.status === "snoozed";
     case "escalated":
       return item.escalated;
     case "unassigned":

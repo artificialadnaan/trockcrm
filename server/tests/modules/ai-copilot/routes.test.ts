@@ -359,9 +359,51 @@ describe("ai copilot routes", () => {
       status: "open",
       view: "aging",
       clusterKey: "follow_through_gap",
+      filters: {
+        caseId: undefined,
+        severity: undefined,
+        disconnectType: undefined,
+        assigneeId: undefined,
+        repId: undefined,
+        companyId: undefined,
+        stageKey: undefined,
+      },
     });
     expect(res.body.items).toHaveLength(1);
     expect(res.body.page).toBe(2);
+  });
+
+  it("passes overdue and source filters through the intervention queue route", async () => {
+    interventionServiceMocks.listInterventionCases.mockResolvedValue({
+      items: [],
+      totalCount: 0,
+      page: 1,
+      pageSize: 50,
+    });
+
+    const app = createApp("director");
+    const res = await request(app).get(
+      "/api/ai/ops/interventions?view=snooze-breached&companyId=company-1&caseId=case-1"
+    );
+
+    expect(res.status).toBe(200);
+    expect(interventionServiceMocks.listInterventionCases).toHaveBeenCalledWith(expect.anything(), {
+      officeId: "office-1",
+      page: undefined,
+      pageSize: undefined,
+      status: undefined,
+      view: "snooze-breached",
+      clusterKey: undefined,
+      filters: {
+        caseId: "case-1",
+        severity: undefined,
+        disconnectType: undefined,
+        assigneeId: undefined,
+        repId: undefined,
+        companyId: "company-1",
+        stageKey: undefined,
+      },
+    });
   });
 
   it("returns intervention case detail for director users", async () => {

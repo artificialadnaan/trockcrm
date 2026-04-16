@@ -443,6 +443,91 @@ describe("AI intervention service", () => {
     expect(afterWindow.items.map((item) => item.id)).toEqual(["case-2", "case-1"]);
   });
 
+  it("lists overdue cases when view=overdue", async () => {
+    const tenantDb = createTenantDb({
+      cases: [
+        makeCase({
+          id: "case-overdue",
+          severity: "high",
+          metadataJson: {
+            evidenceSummary: "Deal has no open next-step task.",
+            ageDays: 3,
+          },
+        }),
+        makeCase({
+          id: "case-not-overdue",
+          severity: "high",
+          metadataJson: {
+            evidenceSummary: "Deal has no open next-step task.",
+            ageDays: 1,
+          },
+        }),
+        makeCase({
+          id: "case-resolved",
+          severity: "critical",
+          status: "resolved",
+          resolvedAt: new Date("2026-04-16T10:00:00.000Z"),
+          metadataJson: {
+            evidenceSummary: "Resolved case should not count as overdue.",
+            ageDays: 5,
+          },
+        }),
+      ],
+    });
+
+    const result = await listInterventionCases(tenantDb as any, {
+      officeId: "office-1",
+      view: "overdue",
+      status: undefined,
+      now: new Date("2026-04-16T15:00:00.000Z"),
+    });
+
+    expect(result.items.map((item) => item.id)).toEqual(["case-overdue"]);
+  });
+
+  it("lists snooze-breached cases with source filters while preserving caseId as a deep-link selector", async () => {
+    const tenantDb = createTenantDb({
+      cases: [
+        makeCase({
+          id: "case-breached",
+          status: "snoozed",
+          snoozedUntil: new Date("2026-04-15T00:00:00.000Z"),
+          companyId: "company-1",
+        }),
+        makeCase({
+          id: "case-other-company",
+          status: "snoozed",
+          snoozedUntil: new Date("2026-04-15T00:00:00.000Z"),
+          companyId: "company-2",
+          businessKey: "office-1:missing_next_task:deal:deal-2",
+          scopeId: "deal-2",
+          dealId: "deal-2",
+        }),
+      ],
+      deals: [
+        { id: "deal-1", dealNumber: "D-1001", name: "Alpha Plaza", companyId: "company-1" },
+        { id: "deal-2", dealNumber: "D-1002", name: "Beta Tower", companyId: "company-2" },
+      ],
+      companies: [
+        { id: "company-1", name: "Acme Property Group" },
+        { id: "company-2", name: "Beta Holdings" },
+      ],
+    });
+
+    const result = await listInterventionCases(tenantDb as any, {
+      officeId: "office-1",
+      view: "snooze-breached",
+      status: undefined,
+      now: new Date("2026-04-16T15:00:00.000Z"),
+      filters: {
+        companyId: "company-1",
+        caseId: "case-does-not-filter-the-queue",
+      },
+    });
+
+    expect(result.items.map((item) => item.id)).toEqual(["case-breached"]);
+  });
+
   it("projects generated task state into queue rows", async () => {
     const tenantDb = createTenantDb({
       cases: [
