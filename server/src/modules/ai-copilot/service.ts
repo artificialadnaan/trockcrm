@@ -699,6 +699,7 @@ async function getCurrentDisconnectMetadataForDeal(tenantDb: TenantDb, dealId: s
       ) pss ON TRUE
       WHERE d.id = ${dealId}
         AND d.is_active = TRUE
+        AND psc.is_terminal = FALSE
     ),
     disconnect_rows AS (
       SELECT 'stale_stage'::text AS disconnect_type
@@ -1035,6 +1036,7 @@ export async function listCurrentSalesProcessDisconnectRows(
         LIMIT 1
       ) lps ON TRUE
       WHERE d.is_active = TRUE
+        AND psc.is_terminal = FALSE
     ),
     disconnect_rows AS (
       SELECT
@@ -1699,6 +1701,7 @@ export async function getSalesProcessDisconnectDashboard(
         FROM deals d
         JOIN pipeline_stage_config psc ON psc.id = d.stage_id
         WHERE d.is_active = TRUE
+          AND psc.is_terminal = FALSE
       ),
       deal_task_counts AS (
         SELECT
@@ -1962,6 +1965,7 @@ export async function getSalesProcessDisconnectDashboard(
           LIMIT 1
         ) pss ON TRUE
         WHERE d.is_active = TRUE
+          AND psc.is_terminal = FALSE
       ),
       disconnect_rows AS (
         SELECT

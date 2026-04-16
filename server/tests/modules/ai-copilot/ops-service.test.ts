@@ -2,6 +2,27 @@ import { describe, expect, it, vi } from "vitest";
 
 const { getAiActionQueue, getAiOpsMetrics, getAiReviewQueue, getAiReviewPacketDetail, getSalesProcessDisconnectDashboard } = await import("../../../src/modules/ai-copilot/service.js");
 
+function extractSqlText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (!value || typeof value !== "object") return "";
+
+  if (Array.isArray((value as { queryChunks?: unknown[] }).queryChunks)) {
+    return (value as { queryChunks: unknown[] }).queryChunks.map(extractSqlText).join("");
+  }
+
+  if ("value" in (value as Record<string, unknown>)) {
+    const chunkValue = (value as { value: unknown }).value;
+    if (Array.isArray(chunkValue)) return chunkValue.map(extractSqlText).join("");
+    if (typeof chunkValue === "string") return chunkValue;
+  }
+
+  if ("name" in (value as Record<string, unknown>) && typeof (value as { name?: unknown }).name === "string") {
+    return (value as { name: string }).name;
+  }
+
+  return "";
+}
+
 describe("AI ops service", () => {
   it("returns aggregate AI ops metrics", async () => {
     const tenantDb = {
@@ -449,6 +470,8 @@ describe("AI ops service", () => {
       procoreSyncDirection: "bidirectional",
       companyName: "Beta Holdings",
     });
+    const executedSql = tenantDb.execute.mock.calls.map(([query]: [unknown]) => extractSqlText(query)).join("\n");
+    expect(executedSql).toContain("psc.is_terminal = FALSE");
     expect(result.clusters).toEqual([
       expect.objectContaining({
         clusterKey: "bid_board_sync_break",
