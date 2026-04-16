@@ -17,6 +17,7 @@ import {
 } from "../shared/src/schema/migration/index.js";
 import { users } from "../shared/src/schema/public/users.js";
 import {
+  fetchAllCompanies,
   fetchAllDeals,
   fetchAllContacts,
   fetchAllActivities,
@@ -24,6 +25,7 @@ import {
 } from "../server/src/modules/migration/hubspot-client.js";
 import {
   buildOwnerEmailMap,
+  mapCompany,
   mapDeal,
   mapContact,
   mapActivity,
@@ -143,7 +145,7 @@ async function main() {
     }
     console.log(`\n[migration:extract] ${contactCount} contacts staged`);
 
-    // 3. Derive staged companies, properties, and leads from HubSpot contact + deal data.
+    // 3. Stage HubSpot companies directly, then augment with contact-derived fallbacks.
     const companyRows = new Map<
       string,
       {
@@ -156,16 +158,43 @@ async function main() {
         mappedLeadHint: string | null;
       }
     >();
+
+    console.log("[migration:extract] Fetching companies from HubSpot...");
+    const hsCompanies = await fetchAllCompanies();
+    console.log(`[migration:extract] ${hsCompanies.length} companies fetched`);
+    const mappedCompanies = hsCompanies.map((company) => mapCompany(company, ownerEmailMap));
+
+    for (const company of mappedCompanies) {
+      const companyKey =
+        normalizeTextKey(company.mappedName) ||
+        normalizeTextKey(company.mappedDomain) ||
+        `hubspot-company:${company.hubspotCompanyId}`;
+      if (companyRows.has(companyKey)) continue;
+      companyRows.set(companyKey, {
+        hubspotCompanyId: company.hubspotCompanyId,
+        rawData: {
+          source: "hubspot-company",
+          company: company.rawData,
+          contactIds: [],
+        },
+        mappedName: company.mappedName,
+        mappedDomain: company.mappedDomain,
+        mappedPhone: company.mappedPhone,
+        mappedOwnerEmail: company.mappedOwnerEmail,
+        mappedLeadHint: company.mappedLeadHint,
+      });
+    }
+
+    // Contact-derived company fallbacks for contacts whose company does not exist in HubSpot companies.
     for (const contact of mappedContacts) {
       if (!contact.mappedCompany) continue;
       const companyKey = normalizeTextKey(contact.mappedCompany);
       if (!companyKey) continue;
-      const companyId =
-        `derived-company:${companyKey.replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 80) || contact.hubspotContactId}`;
       const existing = companyRows.get(companyKey);
       if (!existing) {
         companyRows.set(companyKey, {
-          hubspotCompanyId: companyId,
+          hubspotCompanyId:
+            `derived-company:${companyKey.replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 80) || contact.hubspotContactId}`,
           rawData: {
             source: "derived-from-contacts",
             contactIds: [contact.hubspotContactId],
@@ -181,6 +210,7 @@ async function main() {
         (existing.rawData as any).contactIds.push(contact.hubspotContactId);
         existing.mappedDomain = existing.mappedDomain ?? deriveEmailDomain(contact.mappedEmail);
         existing.mappedPhone = existing.mappedPhone ?? contact.mappedPhone;
+        existing.mappedLeadHint = existing.mappedLeadHint ?? contact.mappedEmail;
       }
     }
 

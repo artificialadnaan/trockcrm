@@ -69,6 +69,22 @@ export interface HubSpotContact {
   };
 }
 
+export interface HubSpotCompany {
+  id: string;
+  properties: {
+    name?: string;
+    domain?: string;
+    phone?: string;
+    hubspot_owner_id?: string;
+    address?: string;
+    city?: string;
+    state?: string;
+    zip?: string;
+    hs_lastmodifieddate?: string;
+    createdate?: string;
+  };
+}
+
 export interface HubSpotActivity {
   id: string;
   properties: {
@@ -164,6 +180,35 @@ export async function fetchAllContacts(): Promise<HubSpotContact[]> {
       });
       if (after) params.set("after", after);
       return `/crm/v3/objects/contacts?${params}`;
+    },
+    (body) => body.results ?? [],
+    (body) => body.paging?.next?.after
+  );
+}
+
+const COMPANY_PROPERTIES = [
+  "name",
+  "domain",
+  "phone",
+  "hubspot_owner_id",
+  "address",
+  "city",
+  "state",
+  "zip",
+  "hs_lastmodifieddate",
+  "createdate",
+].join(",");
+
+/** Fetch all HubSpot companies. */
+export async function fetchAllCompanies(): Promise<HubSpotCompany[]> {
+  return fetchAllPages<HubSpotCompany>(
+    (after) => {
+      const params = new URLSearchParams({
+        properties: COMPANY_PROPERTIES,
+        limit: String(PAGE_SIZE),
+      });
+      if (after) params.set("after", after);
+      return `/crm/v3/objects/companies?${params}`;
     },
     (body) => body.results ?? [],
     (body) => body.paging?.next?.after

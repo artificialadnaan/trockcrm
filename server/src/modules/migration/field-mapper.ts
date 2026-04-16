@@ -1,6 +1,12 @@
 // server/src/modules/migration/field-mapper.ts
 
-import type { HubSpotDeal, HubSpotContact, HubSpotActivity, HubSpotOwner } from "./hubspot-client.js";
+import type {
+  HubSpotDeal,
+  HubSpotContact,
+  HubSpotActivity,
+  HubSpotOwner,
+  HubSpotCompany,
+} from "./hubspot-client.js";
 
 // ---------------------------------------------------------------------------
 // Owner ID -> email resolution map
@@ -117,6 +123,16 @@ export interface MappedContact {
   mappedCategory: string;
 }
 
+export interface MappedCompany {
+  hubspotCompanyId: string;
+  rawData: Record<string, unknown>;
+  mappedName: string | null;
+  mappedDomain: string | null;
+  mappedPhone: string | null;
+  mappedOwnerEmail: string | null;
+  mappedLeadHint: string | null;
+}
+
 export function mapContact(contact: HubSpotContact): MappedContact {
   const p = contact.properties;
   return {
@@ -128,6 +144,26 @@ export function mapContact(contact: HubSpotContact): MappedContact {
     mappedPhone: p.phone?.replace(/[^\d\-()+\s]/g, "").trim() || null,
     mappedCompany: p.company?.trim() || null,
     mappedCategory: inferContactCategory(contact),
+  };
+}
+
+export function mapCompany(
+  company: HubSpotCompany,
+  ownerEmailMap: Map<string, string>
+): MappedCompany {
+  const p = company.properties;
+  const mappedOwnerEmail = p.hubspot_owner_id
+    ? (ownerEmailMap.get(p.hubspot_owner_id) ?? null)
+    : null;
+
+  return {
+    hubspotCompanyId: company.id,
+    rawData: company as unknown as Record<string, unknown>,
+    mappedName: p.name?.trim() || null,
+    mappedDomain: p.domain?.toLowerCase().trim() || null,
+    mappedPhone: p.phone?.replace(/[^\d\-()+\s]/g, "").trim() || null,
+    mappedOwnerEmail,
+    mappedLeadHint: null,
   };
 }
 

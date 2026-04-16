@@ -559,10 +559,17 @@ export async function validateStagedLeads(): Promise<{
     for (const lead of batch) {
       const errors: ValidationError[] = [];
       const warnings: ValidationWarning[] = [];
+      const ambiguousDealClassification =
+        lead.candidateDealCount > 1
+          ? {
+              bucket: "ambiguous_deal_association" as const,
+              reason: "Lead matches more than one possible deal.",
+            }
+          : null;
       const ownerClassification = classifyOwnerAssignmentException({
         mappedOwnerEmail: lead.mappedOwnerEmail,
       });
-      const leadClassification = classifyLeadException({
+      const leadClassification = ambiguousDealClassification ?? classifyLeadException({
         mappedName: lead.mappedName,
         mappedOwnerEmail: lead.mappedOwnerEmail,
         mappedCompanyName: lead.mappedCompanyName,
@@ -577,6 +584,13 @@ export async function validateStagedLeads(): Promise<{
         lead.exceptionBucket = ownerClassification.bucket;
         lead.exceptionReason = ownerClassification.reason;
         exceptions.missing_owner_assignment++;
+      }
+
+      if (leadClassification?.bucket === "ambiguous_deal_association") {
+        warnings.push({ field: "lead", warning: leadClassification.reason });
+        lead.exceptionBucket = leadClassification.bucket;
+        lead.exceptionReason = leadClassification.reason;
+        exceptions.ambiguous_deal_association++;
       } else if (leadClassification?.bucket === "lead_vs_deal_conflict") {
         warnings.push({ field: "lead", warning: leadClassification.reason });
         lead.exceptionBucket = leadClassification.bucket;

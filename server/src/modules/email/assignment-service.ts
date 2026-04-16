@@ -16,6 +16,8 @@ export interface EmailAssignmentDealCandidate {
   dealNumber: string;
   name: string;
   companyId?: string | null;
+  stageSlug?: string | null;
+  stageDisplayOrder?: number | null;
   propertyAddress?: string | null;
   propertyCity?: string | null;
   propertyState?: string | null;
@@ -28,6 +30,8 @@ export interface EmailAssignmentLeadCandidate {
   name: string;
   companyId?: string | null;
   relatedDealId?: string | null;
+  stageSlug?: string | null;
+  stageDisplayOrder?: number | null;
   propertyAddress?: string | null;
   propertyCity?: string | null;
   propertyState?: string | null;
@@ -183,6 +187,37 @@ export function buildPropertyCandidatesFromDeals(
   return [...groups.values()];
 }
 
+export function buildLeadCandidatesFromDeals(
+  dealCandidates: EmailAssignmentDealCandidate[],
+  estimatingStageDisplayOrder: number | null
+): EmailAssignmentLeadCandidate[] {
+  if (estimatingStageDisplayOrder == null) return [];
+
+  const leads = new Map<string, EmailAssignmentLeadCandidate>();
+
+  for (const deal of dealCandidates) {
+    if (deal.stageDisplayOrder == null || deal.stageDisplayOrder >= estimatingStageDisplayOrder) continue;
+
+    if (leads.has(deal.id)) continue;
+
+    leads.set(deal.id, {
+      id: deal.id,
+      leadNumber: deal.dealNumber,
+      name: deal.name,
+      companyId: deal.companyId ?? null,
+      relatedDealId: deal.id,
+      stageSlug: deal.stageSlug ?? null,
+      stageDisplayOrder: deal.stageDisplayOrder ?? null,
+      propertyAddress: deal.propertyAddress ?? null,
+      propertyCity: deal.propertyCity ?? null,
+      propertyState: deal.propertyState ?? null,
+      propertyZip: deal.propertyZip ?? null,
+    });
+  }
+
+  return [...leads.values()];
+}
+
 function uniqueById<T extends { id: string }>(values: T[]): T[] {
   const seen = new Set<string>();
   const output: T[] = [];
@@ -214,7 +249,11 @@ function findPropertyCandidate(
     const signature = buildLeadPropertySignature(candidate);
     return signature ? text.includes(signature) : false;
   });
-  return matches.length === 1 ? matches[0] : null;
+  if (matches.length !== 1) return null;
+
+  const [match] = matches;
+  const relatedDealCount = match.relatedDealIds?.length ?? 0;
+  return relatedDealCount <= 1 ? match : null;
 }
 
 function buildAmbiguityReason(candidateCount: number, hasCompany: boolean): string {
@@ -231,6 +270,7 @@ export function resolveEmailAssignment(context: EmailAssignmentContext): EmailAs
   );
   const rawText = buildEmailRawText(context);
   const searchText = normalizeText(rawText);
+  const hasCompany = Boolean(context.contactCompanyId);
 
   const explicitCandidate = findExplicitDealCandidate(rawText, candidateDeals);
   if (explicitCandidate) {
@@ -279,6 +319,19 @@ export function resolveEmailAssignment(context: EmailAssignmentContext): EmailAs
 
   if (candidateProperties.length === 1) {
     const [propertyCandidate] = candidateProperties;
+    const relatedDealCount = propertyCandidate.relatedDealIds?.length ?? 0;
+    if (relatedDealCount > 1) {
+      return {
+        assignedEntityType: hasCompany ? "company" : null,
+        assignedEntityId: hasCompany ? context.contactCompanyId ?? null : null,
+        assignedDealId: null,
+        confidence: "low",
+        ambiguityReason: "ambiguous_property_match",
+        matchedBy: "company_only",
+        requiresClassificationTask: true,
+        candidateDealIds: candidateDeals.map((deal) => deal.id),
+      };
+    }
     return {
       assignedEntityType: "property",
       assignedEntityId: propertyCandidate.id,
@@ -319,7 +372,6 @@ export function resolveEmailAssignment(context: EmailAssignmentContext): EmailAs
     };
   }
 
-  const hasCompany = Boolean(context.contactCompanyId);
   return {
     assignedEntityType: hasCompany ? "company" : null,
     assignedEntityId: hasCompany ? context.contactCompanyId ?? null : null,

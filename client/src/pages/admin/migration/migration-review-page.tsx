@@ -36,13 +36,29 @@ function QueueBadge({ value }: { value: string | null }) {
   return <Badge className={`text-xs ${STATUS_BADGE[value] ?? "bg-gray-100"}`}>{value.replace(/_/g, " ")}</Badge>;
 }
 
-function EntityReason({ item }: { item: { exceptionBucket: string | null; exceptionReason: string | null; validationWarnings: Array<{ warning: string }> } }) {
+function EntityReason({
+  item,
+}: {
+  item: {
+    exceptionBucket: string | null;
+    exceptionReason: string | null;
+    validationWarnings: Array<{ warning: string }>;
+    validationErrors: Array<{ error: string }>;
+  };
+}) {
   return (
     <div className="space-y-1">
       <QueueBadge value={item.exceptionBucket} />
       {item.exceptionReason && <div className="text-xs text-gray-600">{item.exceptionReason}</div>}
+      {item.validationErrors.map((error, index) => (
+        <div key={index} className="text-xs text-red-700">
+          {error.error}
+        </div>
+      ))}
       {item.validationWarnings.map((warning, index) => (
-        <div key={index} className="text-xs text-amber-700">{warning.warning}</div>
+        <div key={index} className="text-xs text-amber-700">
+          {warning.warning}
+        </div>
       ))}
     </div>
   );
@@ -51,15 +67,19 @@ function EntityReason({ item }: { item: { exceptionBucket: string | null; except
 export function MigrationReviewPage() {
   const [tab, setTab] = useState<ReviewTab>("companies");
 
-  const companies = useStagedCompanies("needs_review");
-  const properties = useStagedProperties("needs_review");
-  const leads = useStagedLeads("needs_review");
+  const companies = useStagedCompanies("unresolved");
+  const properties = useStagedProperties("unresolved");
+  const leads = useStagedLeads("unresolved");
 
   const current = useMemo(() => {
     if (tab === "properties") return properties;
     if (tab === "leads") return leads;
     return companies;
   }, [tab, companies, properties, leads]);
+
+  const totalPages = Math.max(1, Math.ceil(current.total / 50));
+  const start = current.total === 0 ? 0 : (current.page - 1) * 50 + 1;
+  const end = Math.min(current.page * 50, current.total);
 
   const handleReject = async (id: string) => {
     const notes = window.prompt("Reject notes (optional)");
@@ -116,7 +136,7 @@ export function MigrationReviewPage() {
               ) : current.rows.length === 0 ? (
                 <TableRow>
                   <TableCell colSpan={5} className="py-8 text-center text-gray-400">
-                    No staged {tab} need review.
+                    No unresolved staged {tab} rows.
                   </TableCell>
                 </TableRow>
               ) : (
@@ -205,14 +225,36 @@ export function MigrationReviewPage() {
         </CardContent>
       </Card>
 
-      <div className="flex items-center justify-between text-sm text-gray-500">
+      <div className="flex items-center justify-between gap-3 text-sm text-gray-500">
         <span>
           {current.total.toLocaleString()} staged {tab}
+          {current.total > 0 ? ` • showing ${start.toLocaleString()}-${end.toLocaleString()}` : ""}
         </span>
-        <Button variant="outline" size="sm" onClick={current.refetch} disabled={current.loading}>
-          <ArrowRightLeft className="h-4 w-4 mr-1" />
-          Refresh
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => current.setPage(Math.max(1, current.page - 1))}
+            disabled={current.loading || current.page <= 1}
+          >
+            Prev
+          </Button>
+          <span className="text-xs text-gray-500">
+            Page {current.page} of {totalPages}
+          </span>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => current.setPage(Math.min(totalPages, current.page + 1))}
+            disabled={current.loading || current.page >= totalPages}
+          >
+            Next
+          </Button>
+          <Button variant="outline" size="sm" onClick={current.refetch} disabled={current.loading}>
+            <ArrowRightLeft className="h-4 w-4 mr-1" />
+            Refresh
+          </Button>
+        </div>
       </div>
     </div>
   );

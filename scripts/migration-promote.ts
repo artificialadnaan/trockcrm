@@ -19,7 +19,7 @@ import { pipelineStageConfig } from "../shared/src/schema/public/pipeline-stage-
 import { users } from "../shared/src/schema/public/users.js";
 
 const OFFICE_SLUG = process.env.OFFICE_SLUG;
-if (!OFFICE_SLUG) {
+if (!OFFICE_SLUG && process.argv[1]?.includes("migration-promote.ts")) {
   console.error("OFFICE_SLUG env var required (e.g. OFFICE_SLUG=dallas)");
   process.exit(1);
 }
@@ -59,6 +59,39 @@ function buildPropertyKey(input: {
   return [input.address, input.city, input.state, input.zip]
     .map((part) => normalizeTextKey(part))
     .join("|");
+}
+
+export function resolvePropertyPromotionTargets(
+  approvedProperties: Array<{
+    id: string;
+    mappedAddress: string | null;
+    mappedCity: string | null;
+    mappedState: string | null;
+    mappedZip: string | null;
+    promotedAt: Date | null;
+  }>,
+  propertyPromotionMap: Map<string, string>
+): Array<{ propertyId: string; promotedDealId: string }> {
+  const targets: Array<{ propertyId: string; promotedDealId: string }> = [];
+
+  for (const property of approvedProperties) {
+    if (property.promotedAt) continue;
+    const propertyKey = buildPropertyKey({
+      address: property.mappedAddress,
+      city: property.mappedCity,
+      state: property.mappedState,
+      zip: property.mappedZip,
+    });
+    const promotedDealId = propertyPromotionMap.get(propertyKey);
+    if (!promotedDealId) {
+      throw new Error(
+        `Approved property ${property.id} has no promoted deal mapping for key "${propertyKey || "(empty)"}"`
+      );
+    }
+    targets.push({ propertyId: property.id, promotedDealId });
+  }
+
+  return targets;
 }
 
 async function main() {
@@ -419,20 +452,15 @@ async function main() {
     // -----------------------------------------------------------------------
 
     let promotedPropertyCount = 0;
-    for (const property of approvedProperties) {
-      if (property.promotedAt) continue;
-      const propertyKey = buildPropertyKey({
-        address: property.mappedAddress,
-        city: property.mappedCity,
-        state: property.mappedState,
-        zip: property.mappedZip,
-      });
-      const promotedDealId = propertyPromotionMap.get(propertyKey);
-      if (!promotedDealId) continue;
+    const propertyPromotionTargets = resolvePropertyPromotionTargets(
+      approvedProperties,
+      propertyPromotionMap
+    );
+    for (const target of propertyPromotionTargets) {
       await txDb
         .update(stagedProperties)
-        .set({ promotedAt: new Date(), promotedPropertyId: promotedDealId })
-        .where(eq(stagedProperties.id, property.id));
+        .set({ promotedAt: new Date(), promotedPropertyId: target.promotedDealId })
+        .where(eq(stagedProperties.id, target.propertyId));
       promotedPropertyCount++;
     }
 
@@ -543,4 +571,6 @@ async function main() {
   }
 }
 
-main();
+if (process.argv[1]?.includes("migration-promote.ts") && !process.env.VITEST) {
+  main();
+}

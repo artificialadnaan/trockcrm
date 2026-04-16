@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { stagedContacts, contacts } from "@trock-crm/shared/schema";
+import { validateStagedContacts } from "../../../src/modules/migration/validator.js";
 
 // Mock the DB module
 const updateCalls: Array<Record<string, unknown>> = [];
@@ -221,4 +222,3 @@ describe("validateStagedContacts duplicate detection", () => {
     });
   });
 });
-import { validateStagedContacts } from "../../../src/modules/migration/validator.js";
