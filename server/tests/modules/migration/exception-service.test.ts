@@ -62,6 +62,19 @@ describe("migration exception classifiers", () => {
       candidateDealCount: 2,
       candidatePropertyCount: 1,
     });
+    expect(result?.bucket).toBe("ambiguous_deal_association");
+  });
+
+  it("flags lead-versus-deal conflict when the mapped company or property is not usable", () => {
+    const result = classifyLeadException({
+      mappedName: "New Lead",
+      mappedOwnerEmail: "rep@trock.com",
+      mappedCompanyName: "",
+      mappedPropertyName: "Site A",
+      mappedDealName: "Future Deal",
+      candidateDealCount: 0,
+      candidatePropertyCount: 0,
+    });
     expect(result?.bucket).toBe("lead_vs_deal_conflict");
   });
 

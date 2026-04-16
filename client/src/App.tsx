@@ -29,6 +29,7 @@ import { ProcoreSyncPage } from "@/pages/admin/procore-sync-page";
 import { MigrationDashboardPage } from "@/pages/admin/migration/migration-dashboard-page";
 import { MigrationDealsPage } from "@/pages/admin/migration/migration-deals-page";
 import { MigrationContactsPage } from "@/pages/admin/migration/migration-contacts-page";
+import { MigrationReviewPage } from "@/pages/admin/migration/migration-review-page";
 import { SearchPage } from "@/pages/search/search-page";
 import { OfficesPage } from "@/pages/admin/offices-page";
 import { UsersPage } from "@/pages/admin/users-page";
@@ -102,6 +103,7 @@ export function App() {
               <Route path="/admin/procore" element={<ProcoreSyncPage />} />
               <Route path="/admin/companycam" element={<CompanyCamPage />} />
               <Route path="/admin/migration" element={<MigrationDashboardPage />} />
+              <Route path="/admin/migration/review" element={<MigrationReviewPage />} />
               <Route path="/admin/migration/deals" element={<MigrationDealsPage />} />
               <Route path="/admin/migration/contacts" element={<MigrationContactsPage />} />
               <Route path="/photos/feed" element={<PhotoFeedPage />} />

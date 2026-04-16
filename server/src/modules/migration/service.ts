@@ -372,13 +372,21 @@ export async function listStagedContacts(
 
 export async function approveStagedContact(contactId: string, reviewedBy: string) {
   const [row] = await db
-    .select({ validationStatus: stagedContacts.validationStatus })
+    .select({
+      validationStatus: stagedContacts.validationStatus,
+      duplicateOfStagedId: stagedContacts.duplicateOfStagedId,
+      duplicateOfLiveId: stagedContacts.duplicateOfLiveId,
+    })
     .from(stagedContacts)
     .where(eq(stagedContacts.id, contactId))
     .limit(1);
 
   if (!row) throw new AppError(404, "Staged contact not found");
-  if (["invalid", "duplicate", "orphan"].includes(row.validationStatus)) {
+  if (
+    ["invalid", "duplicate", "orphan"].includes(row.validationStatus) ||
+    row.duplicateOfStagedId ||
+    row.duplicateOfLiveId
+  ) {
     throw new AppError(400, "Contact still has unresolved validation issues");
   }
 

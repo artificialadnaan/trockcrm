@@ -14,6 +14,7 @@ export type MigrationExceptionBucket =
   | "unknown_company"
   | "ambiguous_property"
   | "ambiguous_contact"
+  | "ambiguous_deal_association"
   | "lead_vs_deal_conflict"
   | "ambiguous_email_activity_attribution"
   | "missing_owner_assignment";
@@ -54,6 +55,7 @@ const BUCKET_LABELS: Record<MigrationExceptionBucket, string> = {
   unknown_company: "Unknown company",
   ambiguous_property: "Ambiguous property",
   ambiguous_contact: "Ambiguous contact",
+  ambiguous_deal_association: "Ambiguous deal association",
   lead_vs_deal_conflict: "Lead vs deal conflict",
   ambiguous_email_activity_attribution: "Ambiguous email/activity attribution",
   missing_owner_assignment: "Missing owner assignment",
@@ -159,10 +161,17 @@ export function classifyLeadException(input: {
     };
   }
 
-  if ((input.candidateDealCount ?? 0) > 1 || (input.candidatePropertyCount ?? 0) > 1) {
+  if ((input.candidateDealCount ?? 0) > 1) {
+    return {
+      bucket: "ambiguous_deal_association",
+      reason: "Lead matches more than one possible deal.",
+    };
+  }
+
+  if ((input.candidatePropertyCount ?? 0) > 1) {
     return {
       bucket: "lead_vs_deal_conflict",
-      reason: "Lead points at conflicting deal/property matches.",
+      reason: "Lead points at conflicting property matches.",
     };
   }
 
@@ -334,6 +343,7 @@ async function loadLeadExceptions(): Promise<MigrationExceptionItem[]> {
         entityType: "lead",
         classification:
           row.exceptionBucket === "lead_vs_deal_conflict" ||
+          row.exceptionBucket === "ambiguous_deal_association" ||
           row.exceptionBucket === "missing_owner_assignment"
             ? {
                 bucket: row.exceptionBucket as MigrationExceptionBucket,
@@ -474,6 +484,7 @@ export async function getMigrationExceptionCounts(): Promise<Record<MigrationExc
     unknown_company: 0,
     ambiguous_property: 0,
     ambiguous_contact: 0,
+    ambiguous_deal_association: 0,
     lead_vs_deal_conflict: 0,
     ambiguous_email_activity_attribution: 0,
     missing_owner_assignment: 0,

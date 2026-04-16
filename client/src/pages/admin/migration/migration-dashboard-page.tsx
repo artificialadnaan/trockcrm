@@ -174,9 +174,9 @@ export function MigrationDashboardPage() {
           <StatCard label="Deals" stats={summary.deals} href="/admin/migration/deals" />
           <StatCard label="Contacts" stats={summary.contacts} href="/admin/migration/contacts" />
           <StatCard label="Activities" stats={summary.activities} />
-          <StatCard label="Companies" stats={summary.companies} />
-          <StatCard label="Properties" stats={summary.properties} />
-          <StatCard label="Leads" stats={summary.leads} />
+          <StatCard label="Companies" stats={summary.companies} href="/admin/migration/review" />
+          <StatCard label="Properties" stats={summary.properties} href="/admin/migration/review" />
+          <StatCard label="Leads" stats={summary.leads} href="/admin/migration/review" />
         </div>
       )}
 
@@ -188,10 +188,17 @@ export function MigrationDashboardPage() {
           <div className="text-xs text-gray-500">
             {exceptionTotal.toLocaleString()} unresolved mappings
           </div>
-          <Button variant="outline" size="sm" onClick={refetchExceptions} disabled={exceptionsLoading}>
-            <RefreshCw className={`h-4 w-4 mr-1 ${exceptionsLoading ? "animate-spin" : ""}`} />
-            Refresh Exceptions
-          </Button>
+          <div className="flex items-center gap-2">
+            <Link to="/admin/migration/review">
+              <Button variant="outline" size="sm">
+                Review queues
+              </Button>
+            </Link>
+            <Button variant="outline" size="sm" onClick={refetchExceptions} disabled={exceptionsLoading}>
+              <RefreshCw className={`h-4 w-4 mr-1 ${exceptionsLoading ? "animate-spin" : ""}`} />
+              Refresh Exceptions
+            </Button>
+          </div>
         </div>
 
         {exceptionsError && (

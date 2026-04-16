@@ -9,8 +9,12 @@ import {
   stagedDeals,
   stagedContacts,
   stagedActivities,
+  stagedCompanies,
+  stagedProperties,
+  stagedLeads,
   importRuns,
 } from "../shared/src/schema/migration/index.js";
+import { companies } from "../shared/src/schema/index.js";
 import { pipelineStageConfig } from "../shared/src/schema/public/pipeline-stage-config.js";
 import { users } from "../shared/src/schema/public/users.js";
 
@@ -31,6 +35,30 @@ async function getRunByUserId(): Promise<string> {
     .limit(1);
   if (!rows[0]) throw new Error("No admin user found");
   return rows[0].id;
+}
+
+function normalizeTextKey(input: string | null | undefined): string {
+  return input?.trim().toLowerCase() ?? "";
+}
+
+function slugifyCompanyName(input: string): string {
+  return input
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 70);
+}
+
+function buildPropertyKey(input: {
+  address?: string | null;
+  city?: string | null;
+  state?: string | null;
+  zip?: string | null;
+}): string {
+  return [input.address, input.city, input.state, input.zip]
+    .map((part) => normalizeTextKey(part))
+    .join("|");
 }
 
 async function main() {
@@ -76,7 +104,73 @@ async function main() {
     const repByEmail = new Map(repUsers.map((u) => [u.email.toLowerCase(), u.id]));
 
     // -----------------------------------------------------------------------
-    // 2. Promote contacts first (deals reference contacts)
+    // 2. Promote companies first so contacts and deals can reference them.
+    // -----------------------------------------------------------------------
+
+    const approvedCompanies = await txDb
+      .select()
+      .from(stagedCompanies)
+      .where(eq(stagedCompanies.validationStatus, "approved"));
+
+    console.log(`[migration:promote] Promoting ${approvedCompanies.length} companies...`);
+
+    const companyIdByName = new Map<string, string>();
+    let promotedCompanyCount = 0;
+
+    for (const company of approvedCompanies) {
+      if (company.promotedCompanyId) {
+        companyIdByName.set(normalizeTextKey(company.mappedName), company.promotedCompanyId);
+        continue;
+      }
+
+      if (!company.mappedName?.trim()) continue;
+      const slugBase = slugifyCompanyName(company.mappedName) || "company";
+      const slug = `${slugBase}-${company.hubspotCompanyId.slice(-8)}`.slice(0, 100);
+      const insertResult = await client.query(
+        `INSERT INTO companies (
+          name, slug, category, address, city, state, zip, phone, website, notes, is_active, created_at, updated_at
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,true,NOW(),NOW())
+        ON CONFLICT (slug) DO UPDATE SET
+          name = EXCLUDED.name,
+          category = EXCLUDED.category,
+          address = EXCLUDED.address,
+          city = EXCLUDED.city,
+          state = EXCLUDED.state,
+          zip = EXCLUDED.zip,
+          phone = EXCLUDED.phone,
+          website = EXCLUDED.website,
+          notes = EXCLUDED.notes,
+          updated_at = NOW()
+        RETURNING id`,
+        [
+          company.mappedName,
+          slug,
+          "other",
+          null,
+          null,
+          null,
+          null,
+          company.mappedPhone ?? null,
+          company.mappedDomain ?? null,
+          company.mappedLeadHint ?? null,
+        ]
+      );
+
+      const newCompanyId = insertResult.rows[0]?.id;
+      if (newCompanyId) {
+        companyIdByName.set(normalizeTextKey(company.mappedName), newCompanyId);
+        promotedCompanyCount++;
+        await txDb
+          .update(stagedCompanies)
+          .set({ promotedAt: new Date(), promotedCompanyId: newCompanyId })
+          .where(eq(stagedCompanies.id, company.id));
+      }
+    }
+
+    console.log(`[migration:promote] ${promotedCompanyCount} companies promoted`);
+
+    // -----------------------------------------------------------------------
+    // 3. Promote contacts next (they may attach to promoted companies).
     // -----------------------------------------------------------------------
 
     const approvedContacts = await txDb
@@ -87,21 +181,25 @@ async function main() {
     console.log(`[migration:promote] Promoting ${approvedContacts.length} contacts...`);
 
     const contactIdMap = new Map<string, string>(); // hubspot_contact_id -> new CRM contact_id
+    const contactCompanyByHubspotId = new Map<string, string | null>();
 
     for (const c of approvedContacts) {
-      // Check if already promoted (idempotency)
       if (c.promotedContactId) {
         contactIdMap.set(c.hubspotContactId, c.promotedContactId);
+        contactCompanyByHubspotId.set(c.hubspotContactId, c.mappedCompany ?? null);
         continue;
       }
 
+      const companyId = c.mappedCompany ? companyIdByName.get(normalizeTextKey(c.mappedCompany)) ?? null : null;
       const insertResult = await client.query(
         `INSERT INTO contacts (
-          first_name, last_name, email, phone, company_name,
+          first_name, last_name, email, phone, company_name, company_id,
           category, hubspot_contact_id, is_active, created_at, updated_at
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,true,NOW(),NOW())
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,true,NOW(),NOW())
         ON CONFLICT (email) WHERE email IS NOT NULL DO UPDATE SET
           hubspot_contact_id = EXCLUDED.hubspot_contact_id,
+          company_id = COALESCE(EXCLUDED.company_id, contacts.company_id),
+          company_name = COALESCE(EXCLUDED.company_name, contacts.company_name),
           updated_at = NOW()
         RETURNING id`,
         [
@@ -110,6 +208,7 @@ async function main() {
           c.mappedEmail ?? null,
           c.mappedPhone ?? null,
           c.mappedCompany ?? null,
+          companyId ?? null,
           c.mappedCategory ?? "other",
           c.hubspotContactId,
         ]
@@ -118,6 +217,7 @@ async function main() {
       const newContactId = insertResult.rows[0]?.id;
       if (newContactId) {
         contactIdMap.set(c.hubspotContactId, newContactId);
+        contactCompanyByHubspotId.set(c.hubspotContactId, c.mappedCompany ?? null);
         await txDb
           .update(stagedContacts)
           .set({ promotedAt: new Date(), promotedContactId: newContactId })
@@ -128,7 +228,104 @@ async function main() {
     console.log(`[migration:promote] ${contactIdMap.size} contacts promoted`);
 
     // -----------------------------------------------------------------------
-    // 3. Promote deals
+    // 4. Promote staged leads into actual deal rows in the lead stage.
+    // -----------------------------------------------------------------------
+
+    const approvedLeads = await txDb
+      .select()
+      .from(stagedLeads)
+      .where(eq(stagedLeads.validationStatus, "approved"));
+
+    console.log(`[migration:promote] Promoting ${approvedLeads.length} leads...`);
+
+    const approvedProperties = await txDb
+      .select()
+      .from(stagedProperties)
+      .where(eq(stagedProperties.validationStatus, "approved"));
+
+    const dealIdMap = new Map<string, string>(); // hubspot deal id -> new CRM deal id
+    const propertyPromotionMap = new Map<string, string>(); // property key -> deal id
+    let promotedLeadCount = 0;
+    let promotedDealCount = 0;
+
+    const countResult = await client.query(
+      `SELECT COALESCE(MAX(REGEXP_REPLACE(deal_number, '[^0-9]', '', 'g')::int), 0) AS max_num FROM deals`
+    );
+    let dealCounter = Number(countResult.rows[0]?.max_num ?? 0);
+    const year = new Date().getFullYear();
+    const ddStageId = stageBySlug.get("dd");
+    if (!ddStageId) {
+      throw new Error("Missing dd stage configuration");
+    }
+
+    for (const lead of approvedLeads) {
+      if (lead.promotedLeadId) {
+        dealIdMap.set(lead.hubspotLeadId, lead.promotedLeadId);
+        continue;
+      }
+
+      const repId = lead.mappedOwnerEmail ? repByEmail.get(lead.mappedOwnerEmail.toLowerCase()) : null;
+      if (!repId) {
+        console.warn(
+          `[migration:promote] Skipping lead ${lead.hubspotLeadId} — missing rep (rep: ${lead.mappedOwnerEmail})`
+        );
+        continue;
+      }
+
+      dealCounter++;
+      const dealNumber = `TR-${year}-${String(dealCounter).padStart(4, "0")}`;
+      const raw = lead.rawData as any;
+      const properties = raw?.properties ?? {};
+      const propertyKey = buildPropertyKey({
+        address: properties.address ?? null,
+        city: properties.city ?? null,
+        state: properties.state ?? null,
+        zip: properties.zip ?? null,
+      });
+      const companyId = lead.mappedCompanyName ? companyIdByName.get(normalizeTextKey(lead.mappedCompanyName)) ?? null : null;
+
+      const insertResult = await client.query(
+        `INSERT INTO deals (
+          deal_number, name, stage_id, assigned_rep_id, company_id,
+          dd_estimate, awarded_amount, expected_close_date, source,
+          hubspot_deal_id, property_address, property_city, property_state, property_zip,
+          is_active, stage_entered_at, created_at, updated_at
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,true,NOW(),NOW(),NOW())
+        ON CONFLICT (hubspot_deal_id) WHERE hubspot_deal_id IS NOT NULL DO UPDATE SET
+          updated_at = NOW()
+        RETURNING id`,
+        [
+          dealNumber,
+          lead.mappedName ?? "Unnamed Lead",
+          ddStageId,
+          repId,
+          companyId,
+          lead.mappedAmount ?? null,
+          null,
+          lead.mappedCloseDate ?? null,
+          lead.mappedSourceStage ?? "HubSpot",
+          lead.hubspotLeadId,
+          properties.address ?? null,
+          properties.city ?? null,
+          properties.state ?? null,
+          properties.zip ?? null,
+        ]
+      );
+
+      const newDealId = insertResult.rows[0]?.id;
+      if (newDealId) {
+        dealIdMap.set(lead.hubspotLeadId, newDealId);
+        propertyPromotionMap.set(propertyKey, newDealId);
+        promotedLeadCount++;
+        await txDb
+          .update(stagedLeads)
+          .set({ promotedAt: new Date(), promotedLeadId: newDealId })
+          .where(eq(stagedLeads.id, lead.id));
+      }
+    }
+
+    // -----------------------------------------------------------------------
+    // 5. Promote post-RFP deals.
     // -----------------------------------------------------------------------
 
     const approvedDeals = await txDb
@@ -138,16 +335,6 @@ async function main() {
 
     console.log(`[migration:promote] Promoting ${approvedDeals.length} deals...`);
 
-    const dealIdMap = new Map<string, string>(); // hubspot_deal_id -> new CRM deal_id
-
-    // Generate deal numbers sequentially
-    const countResult = await client.query(
-      `SELECT COALESCE(MAX(REGEXP_REPLACE(deal_number, '[^0-9]', '', 'g')::int), 0) AS max_num FROM deals`
-    );
-    let dealCounter = Number(countResult.rows[0]?.max_num ?? 0);
-
-    const year = new Date().getFullYear();
-
     for (const d of approvedDeals) {
       if (d.promotedDealId) {
         dealIdMap.set(d.hubspotDealId, d.promotedDealId);
@@ -156,6 +343,19 @@ async function main() {
 
       const stageId = d.mappedStage ? stageBySlug.get(d.mappedStage) : null;
       const repId = d.mappedRepEmail ? repByEmail.get(d.mappedRepEmail.toLowerCase()) : null;
+      const raw = d.rawData as any;
+      const properties = raw?.properties ?? {};
+      const contactAssociations: string[] = (raw?.associations?.contacts?.results ?? []).map(
+        (c: any) => c.id
+      );
+      const primaryContactCompany =
+        contactAssociations
+          .map((hsContactId) => contactCompanyByHubspotId.get(hsContactId))
+          .find((company) => Boolean(company?.trim())) ?? null;
+      const companyId = primaryContactCompany
+        ? companyIdByName.get(normalizeTextKey(primaryContactCompany))
+          ?? null
+        : null;
 
       if (!stageId || !repId) {
         console.warn(
@@ -166,13 +366,13 @@ async function main() {
 
       dealCounter++;
       const dealNumber = `TR-${year}-${String(dealCounter).padStart(4, "0")}`;
-
       const insertResult = await client.query(
         `INSERT INTO deals (
-          deal_number, name, stage_id, assigned_rep_id,
+          deal_number, name, stage_id, assigned_rep_id, company_id,
           bid_estimate, awarded_amount, expected_close_date, source,
-          hubspot_deal_id, is_active, stage_entered_at, created_at, updated_at
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,true,NOW(),NOW(),NOW())
+          hubspot_deal_id, property_address, property_city, property_state, property_zip,
+          is_active, stage_entered_at, created_at, updated_at
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,true,NOW(),NOW(),NOW())
         ON CONFLICT (hubspot_deal_id) WHERE hubspot_deal_id IS NOT NULL DO UPDATE SET
           updated_at = NOW()
         RETURNING id`,
@@ -181,17 +381,30 @@ async function main() {
           d.mappedName ?? "Unnamed Deal",
           stageId,
           repId,
+          companyId,
           d.mappedAmount ?? null,
           null,
           d.mappedCloseDate ?? null,
           d.mappedSource ?? "HubSpot",
           d.hubspotDealId,
+          properties.address ?? null,
+          properties.city ?? null,
+          properties.state ?? null,
+          properties.zip ?? null,
         ]
       );
 
       const newDealId = insertResult.rows[0]?.id;
       if (newDealId) {
         dealIdMap.set(d.hubspotDealId, newDealId);
+        const propertyKey = buildPropertyKey({
+          address: properties.address ?? null,
+          city: properties.city ?? null,
+          state: properties.state ?? null,
+          zip: properties.zip ?? null,
+        });
+        propertyPromotionMap.set(propertyKey, newDealId);
+        promotedDealCount++;
         await txDb
           .update(stagedDeals)
           .set({ promotedAt: new Date(), promotedDealId: newDealId })
@@ -199,14 +412,38 @@ async function main() {
       }
     }
 
-    console.log(`[migration:promote] ${dealIdMap.size} deals promoted`);
+    console.log(`[migration:promote] ${promotedLeadCount + promotedDealCount} deals promoted`);
 
     // -----------------------------------------------------------------------
-    // 4. Create contact_deal_associations
+    // 6. Link approved properties to the promoted deal snapshots.
     // -----------------------------------------------------------------------
 
-    for (const d of approvedDeals) {
-      const promotedDealId = d.promotedDealId ?? dealIdMap.get(d.hubspotDealId);
+    let promotedPropertyCount = 0;
+    for (const property of approvedProperties) {
+      if (property.promotedAt) continue;
+      const propertyKey = buildPropertyKey({
+        address: property.mappedAddress,
+        city: property.mappedCity,
+        state: property.mappedState,
+        zip: property.mappedZip,
+      });
+      const promotedDealId = propertyPromotionMap.get(propertyKey);
+      if (!promotedDealId) continue;
+      await txDb
+        .update(stagedProperties)
+        .set({ promotedAt: new Date(), promotedPropertyId: promotedDealId })
+        .where(eq(stagedProperties.id, property.id));
+      promotedPropertyCount++;
+    }
+
+    // -----------------------------------------------------------------------
+    // 7. Create contact_deal_associations
+    // -----------------------------------------------------------------------
+
+    for (const d of [...approvedLeads, ...approvedDeals]) {
+      const sourceHubspotId = (d as any).hubspotLeadId ?? (d as any).hubspotDealId;
+      const promotedDealId =
+        (d as any).promotedLeadId ?? (d as any).promotedDealId ?? dealIdMap.get(sourceHubspotId);
       if (!promotedDealId) continue;
 
       const raw = d.rawData as any;
@@ -228,7 +465,7 @@ async function main() {
     }
 
     // -----------------------------------------------------------------------
-    // 5. Promote activities
+    // 8. Promote activities
     // -----------------------------------------------------------------------
 
     const approvedActivities = await txDb
@@ -278,7 +515,10 @@ async function main() {
 
     const stats = {
       contacts: contactIdMap.size,
-      deals: dealIdMap.size,
+      companies: promotedCompanyCount,
+      leads: promotedLeadCount,
+      properties: promotedPropertyCount,
+      deals: promotedLeadCount + promotedDealCount,
       activities: activityCount,
     };
 
