@@ -1,18 +1,108 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { stagedContacts, contacts } from "@trock-crm/shared/schema";
+import { validateStagedContacts } from "../../../src/modules/migration/validator.js";
 
 // Mock the DB module
-vi.mock("../../../src/db.js", () => ({
-  db: {
-    select: vi.fn().mockReturnThis(),
-    from: vi.fn().mockReturnThis(),
-    where: vi.fn().mockReturnThis(),
-    limit: vi.fn().mockReturnThis(),
-    offset: vi.fn().mockReturnThis(),
-    update: vi.fn().mockReturnThis(),
-    set: vi.fn().mockReturnThis(),
+const updateCalls: Array<Record<string, unknown>> = [];
+let stagedBatchQueryCount = 0;
+
+vi.mock("../../../src/db.js", () => {
+  const db = {
+    select: vi.fn((columns?: Record<string, unknown>) => {
+      const state: { table: unknown; limit?: number } = { table: null };
+      return {
+        from(table: unknown) {
+          state.table = table;
+          return this;
+        },
+        where() {
+          return this;
+        },
+        limit(limit: number) {
+          state.limit = limit;
+          return this;
+        },
+        offset() {
+          return this;
+        },
+        then(resolve: (value: unknown) => void) {
+          if (state.table === stagedContacts && columns && "mappedEmail" in columns) {
+            resolve([
+              {
+                id: "staged-1",
+                mappedEmail: "duplicate@client.com",
+                mappedFirstName: "Alex",
+                mappedLastName: "Stone",
+              },
+            ]);
+            return;
+          }
+
+          if (state.table === stagedContacts) {
+            stagedBatchQueryCount++;
+            resolve(
+              stagedBatchQueryCount === 1
+                ? [
+                    {
+                      id: "staged-1",
+                      hubspotContactId: "hs-contact-1",
+                      mappedFirstName: "Alex",
+                      mappedLastName: "Stone",
+                      mappedEmail: "duplicate@client.com",
+                      mappedPhone: null,
+                      mappedCompany: "Acme",
+                      mappedCategory: "other",
+                      duplicateOfStagedId: null,
+                      duplicateOfLiveId: null,
+                      duplicateConfidence: null,
+                      validationStatus: "pending",
+                      validationErrors: [],
+                      validationWarnings: [],
+                      reviewNotes: null,
+                      promotedAt: null,
+                    },
+                  ]
+                : []
+            );
+            return;
+          }
+
+          if (state.table === contacts) {
+            resolve([
+              {
+                id: "live-contact-1",
+                email: "duplicate@client.com",
+                phone: null,
+                normalizedPhone: null,
+                firstName: "Alex",
+                lastName: "Stone",
+                companyName: "Acme",
+              },
+            ]);
+            return;
+          }
+
+          resolve([]);
+        },
+      };
+    }),
+    update: vi.fn(() => {
+      let payload: Record<string, unknown> | null = null;
+      return {
+        set(next: Record<string, unknown>) {
+          payload = next;
+          return this;
+        },
+        where() {
+          if (payload) updateCalls.push(payload);
+          return this;
+        },
+      };
+    }),
     execute: vi.fn(),
-  },
-}));
+  };
+  return { db };
+});
 
 describe("validateStagedDeals", () => {
   it("flags deal with no name as invalid", () => {
@@ -116,5 +206,19 @@ describe("validateStagedContacts duplicate detection", () => {
     const isDuplicate = firstId != null && firstId !== contactId;
 
     expect(isDuplicate).toBe(false);
+  });
+
+  it("marks a staged contact as a duplicate of an existing live contact", async () => {
+    updateCalls.length = 0;
+    stagedBatchQueryCount = 0;
+
+    await validateStagedContacts();
+
+    expect(updateCalls).toHaveLength(1);
+    expect(updateCalls[0]).toMatchObject({
+      duplicateOfLiveId: "live-contact-1",
+      duplicateConfidence: "100",
+      validationStatus: "duplicate",
+    });
   });
 });

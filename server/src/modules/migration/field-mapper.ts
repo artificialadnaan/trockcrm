@@ -1,6 +1,12 @@
 // server/src/modules/migration/field-mapper.ts
 
-import type { HubSpotDeal, HubSpotContact, HubSpotActivity, HubSpotOwner } from "./hubspot-client.js";
+import type {
+  HubSpotDeal,
+  HubSpotContact,
+  HubSpotActivity,
+  HubSpotOwner,
+  HubSpotCompany,
+} from "./hubspot-client.js";
 
 // ---------------------------------------------------------------------------
 // Owner ID -> email resolution map
@@ -117,6 +123,16 @@ export interface MappedContact {
   mappedCategory: string;
 }
 
+export interface MappedCompany {
+  hubspotCompanyId: string;
+  rawData: Record<string, unknown>;
+  mappedName: string | null;
+  mappedDomain: string | null;
+  mappedPhone: string | null;
+  mappedOwnerEmail: string | null;
+  mappedLeadHint: string | null;
+}
+
 export function mapContact(contact: HubSpotContact): MappedContact {
   const p = contact.properties;
   return {
@@ -131,6 +147,26 @@ export function mapContact(contact: HubSpotContact): MappedContact {
   };
 }
 
+export function mapCompany(
+  company: HubSpotCompany,
+  ownerEmailMap: Map<string, string>
+): MappedCompany {
+  const p = company.properties;
+  const mappedOwnerEmail = p.hubspot_owner_id
+    ? (ownerEmailMap.get(p.hubspot_owner_id) ?? null)
+    : null;
+
+  return {
+    hubspotCompanyId: company.id,
+    rawData: company as unknown as Record<string, unknown>,
+    mappedName: p.name?.trim() || null,
+    mappedDomain: p.domain?.toLowerCase().trim() || null,
+    mappedPhone: p.phone?.replace(/[^\d\-()+\s]/g, "").trim() || null,
+    mappedOwnerEmail,
+    mappedLeadHint: null,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Activity mapper
 // ---------------------------------------------------------------------------
@@ -138,7 +174,9 @@ export function mapContact(contact: HubSpotContact): MappedContact {
 export interface MappedActivity {
   hubspotActivityId: string;
   hubspotDealId: string | null;
+  hubspotDealIds: string[];
   hubspotContactId: string | null;
+  hubspotContactIds: string[];
   rawData: Record<string, unknown>;
   mappedType: "call" | "note" | "meeting" | "email" | "task_completed" | null;
   mappedSubject: string | null;
@@ -162,10 +200,14 @@ export function mapActivity(activity: HubSpotActivity): MappedActivity {
   const p = activity.properties;
   const engType = (activity as any).__type ?? "";
 
-  const hubspotDealId =
-    activity.associations?.deals?.results?.[0]?.id ?? null;
-  const hubspotContactId =
-    activity.associations?.contacts?.results?.[0]?.id ?? null;
+  const hubspotDealIds = Array.from(
+    new Set((activity.associations?.deals?.results ?? []).map((assoc) => assoc.id).filter(Boolean))
+  );
+  const hubspotContactIds = Array.from(
+    new Set((activity.associations?.contacts?.results ?? []).map((assoc) => assoc.id).filter(Boolean))
+  );
+  const hubspotDealId = hubspotDealIds[0] ?? null;
+  const hubspotContactId = hubspotContactIds[0] ?? null;
 
   let subject: string | null = null;
   if (engType === "calls") subject = p.hs_call_title ?? "Call";
@@ -188,7 +230,9 @@ export function mapActivity(activity: HubSpotActivity): MappedActivity {
   return {
     hubspotActivityId: activity.id,
     hubspotDealId,
+    hubspotDealIds,
     hubspotContactId,
+    hubspotContactIds,
     rawData: activity as unknown as Record<string, unknown>,
     mappedType: mapActivityType(engType),
     mappedSubject: subject,

@@ -2,6 +2,7 @@
 
 import { eq, sql } from "drizzle-orm";
 import {
+  contacts,
   stagedCompanies,
   stagedProperties,
   stagedLeads,
@@ -21,6 +22,7 @@ import {
   classifyPropertyException,
   type MigrationExceptionBucket,
 } from "./exception-service.js";
+import { getStagedActivityAssociationIds } from "./activity-associations.js";
 
 interface ValidationError {
   field: string;
@@ -39,10 +41,52 @@ function createExceptionCounts(): ValidationExceptionCounts {
     unknown_company: 0,
     ambiguous_property: 0,
     ambiguous_contact: 0,
+    ambiguous_deal_association: 0,
     lead_vs_deal_conflict: 0,
     ambiguous_email_activity_attribution: 0,
     missing_owner_assignment: 0,
   };
+}
+
+function normalizePhoneDigits(input: string | null | undefined): string | null {
+  const digits = input?.replace(/[^\d]/g, "").trim();
+  return digits && digits.length > 0 ? digits : null;
+}
+
+async function findLiveContactDuplicate(contact: {
+  mappedEmail: string | null;
+  mappedPhone: string | null;
+  mappedFirstName: string | null;
+  mappedLastName: string | null;
+  mappedCompany: string | null;
+}): Promise<{ id: string; confidence: number } | null> {
+  if (contact.mappedEmail?.trim()) {
+    const email = contact.mappedEmail.toLowerCase().trim();
+    const [match] = await db
+      .select({ id: contacts.id })
+      .from(contacts)
+      .where(sql`LOWER(${contacts.email}) = ${email}`)
+      .limit(1);
+
+    if (match) {
+      return { id: match.id, confidence: 100 };
+    }
+  }
+
+  const normalizedPhone = normalizePhoneDigits(contact.mappedPhone);
+  if (normalizedPhone) {
+    const [match] = await db
+      .select({ id: contacts.id })
+      .from(contacts)
+      .where(sql`${contacts.normalizedPhone} = ${normalizedPhone}`)
+      .limit(1);
+
+    if (match) {
+      return { id: match.id, confidence: 90 };
+    }
+  }
+
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -209,6 +253,8 @@ export async function validateStagedContacts(): Promise<{
       }
 
       let duplicateOfStagedId: string | null = null;
+      let duplicateOfLiveId: string | null = null;
+      let duplicateConfidence: number | null = null;
       if (contact.mappedEmail) {
         const email = contact.mappedEmail.toLowerCase().trim();
         const firstId = stagedEmailMap.get(email);
@@ -219,6 +265,14 @@ export async function validateStagedContacts(): Promise<{
       }
 
       if (!duplicateOfStagedId) {
+        const liveDuplicate = await findLiveContactDuplicate(contact);
+        if (liveDuplicate) {
+          duplicateOfLiveId = liveDuplicate.id;
+          duplicateConfidence = liveDuplicate.confidence;
+        }
+      }
+
+      if (!duplicateOfStagedId && !duplicateOfLiveId) {
         const name = `${contact.mappedFirstName ?? ""} ${contact.mappedLastName ?? ""}`.toLowerCase().trim();
         if (name.length > 2) {
           const firstId = stagedNameMap.get(name);
@@ -232,7 +286,7 @@ export async function validateStagedContacts(): Promise<{
       }
 
       let validationStatus: "valid" | "invalid" | "needs_review" | "duplicate";
-      if (duplicateOfStagedId) {
+      if (duplicateOfStagedId || duplicateOfLiveId) {
         validationStatus = "duplicate";
         exceptions.ambiguous_contact++;
       } else if (errors.length > 0) {
@@ -257,6 +311,8 @@ export async function validateStagedContacts(): Promise<{
           validationErrors: errors,
           validationWarnings: warnings,
           duplicateOfStagedId: duplicateOfStagedId ?? null,
+          duplicateOfLiveId: duplicateOfLiveId ?? null,
+          duplicateConfidence: duplicateConfidence != null ? String(duplicateConfidence) : null,
         })
         .where(eq(stagedContacts.id, contact.id));
     }
@@ -278,6 +334,9 @@ export async function validateStagedActivities(): Promise<{
   const stagedDealIds = new Set(
     (await db.select({ id: stagedDeals.hubspotDealId }).from(stagedDeals)).map((r) => r.id)
   );
+  const stagedLeadIds = new Set(
+    (await db.select({ id: stagedLeads.hubspotLeadId }).from(stagedLeads)).map((r) => r.id)
+  );
   const stagedContactIds = new Set(
     (await db.select({ id: stagedContacts.hubspotContactId }).from(stagedContacts)).map((r) => r.id)
   );
@@ -297,18 +356,39 @@ export async function validateStagedActivities(): Promise<{
 
     for (const activity of batch) {
       const errors: ValidationError[] = [];
+      const activityAssociations = getStagedActivityAssociationIds({
+        rawData: activity.rawData as Record<string, unknown> | null | undefined,
+        hubspotDealId: activity.hubspotDealId ?? null,
+        hubspotDealIds: (activity as any).hubspotDealIds,
+        hubspotContactId: activity.hubspotContactId ?? null,
+        hubspotContactIds: (activity as any).hubspotContactIds,
+      });
+      const associationCount = activityAssociations.candidateCount;
 
       if (!activity.mappedType) {
         errors.push({ field: "type", error: "Activity type could not be mapped" });
       }
 
-      const dealExists = activity.hubspotDealId ? stagedDealIds.has(activity.hubspotDealId) : false;
-      const contactExists = activity.hubspotContactId
-        ? stagedContactIds.has(activity.hubspotContactId)
+      const dealExists = activityAssociations.hubspotDealId
+        ? stagedDealIds.has(activityAssociations.hubspotDealId)
+        : false;
+      const leadExists = activityAssociations.hubspotDealId
+        ? stagedLeadIds.has(activityAssociations.hubspotDealId)
+        : false;
+      const contactExists = activityAssociations.hubspotContactId
+        ? stagedContactIds.has(activityAssociations.hubspotContactId)
         : false;
 
       let validationStatus: "valid" | "invalid" | "orphan";
-      if (!dealExists && !contactExists) {
+      if (associationCount > 1) {
+        validationStatus = "invalid";
+        invalid++;
+        errors.push({
+          field: "associations",
+          error: "Activity matches more than one deal/contact target",
+        });
+        exceptions.ambiguous_email_activity_attribution++;
+      } else if (!dealExists && !leadExists && !contactExists) {
         validationStatus = "orphan";
         orphans++;
         exceptions.ambiguous_email_activity_attribution++;
@@ -500,10 +580,17 @@ export async function validateStagedLeads(): Promise<{
     for (const lead of batch) {
       const errors: ValidationError[] = [];
       const warnings: ValidationWarning[] = [];
+      const ambiguousDealClassification =
+        lead.candidateDealCount > 1
+          ? {
+              bucket: "ambiguous_deal_association" as const,
+              reason: "Lead matches more than one possible deal.",
+            }
+          : null;
       const ownerClassification = classifyOwnerAssignmentException({
         mappedOwnerEmail: lead.mappedOwnerEmail,
       });
-      const leadClassification = classifyLeadException({
+      const leadClassification = ambiguousDealClassification ?? classifyLeadException({
         mappedName: lead.mappedName,
         mappedOwnerEmail: lead.mappedOwnerEmail,
         mappedCompanyName: lead.mappedCompanyName,
@@ -518,6 +605,13 @@ export async function validateStagedLeads(): Promise<{
         lead.exceptionBucket = ownerClassification.bucket;
         lead.exceptionReason = ownerClassification.reason;
         exceptions.missing_owner_assignment++;
+      }
+
+      if (leadClassification?.bucket === "ambiguous_deal_association") {
+        warnings.push({ field: "lead", warning: leadClassification.reason });
+        lead.exceptionBucket = leadClassification.bucket;
+        lead.exceptionReason = leadClassification.reason;
+        exceptions.ambiguous_deal_association++;
       } else if (leadClassification?.bucket === "lead_vs_deal_conflict") {
         warnings.push({ field: "lead", warning: leadClassification.reason });
         lead.exceptionBucket = leadClassification.bucket;

@@ -73,6 +73,17 @@ export interface StagedDealFilter {
   limit?: number;
 }
 
+function buildQueueValidationWhere<T extends { validationStatus: unknown }>(
+  column: T,
+  validationStatus?: string
+) {
+  if (!validationStatus) return undefined;
+  if (validationStatus === "unresolved") {
+    return inArray((column as any).validationStatus, ["needs_review", "invalid"] as any[]);
+  }
+  return eq((column as any).validationStatus, validationStatus as any);
+}
+
 export async function listStagedDeals(filter: StagedDealFilter = {}) {
   const limit = Math.min(filter.limit ?? 50, 200);
   const offset = ((filter.page ?? 1) - 1) * limit;
@@ -155,9 +166,7 @@ export async function listStagedCompanies(filter: StagedDealFilter = {}) {
   const limit = Math.min(filter.limit ?? 50, 200);
   const offset = ((filter.page ?? 1) - 1) * limit;
 
-  const where = filter.validationStatus
-    ? eq(stagedCompanies.validationStatus, filter.validationStatus as any)
-    : undefined;
+  const where = buildQueueValidationWhere(stagedCompanies, filter.validationStatus);
 
   const [rows, countResult] = await Promise.all([
     db
@@ -219,9 +228,7 @@ export async function listStagedProperties(filter: StagedDealFilter = {}) {
   const limit = Math.min(filter.limit ?? 50, 200);
   const offset = ((filter.page ?? 1) - 1) * limit;
 
-  const where = filter.validationStatus
-    ? eq(stagedProperties.validationStatus, filter.validationStatus as any)
-    : undefined;
+  const where = buildQueueValidationWhere(stagedProperties, filter.validationStatus);
 
   const [rows, countResult] = await Promise.all([
     db
@@ -283,9 +290,7 @@ export async function listStagedLeads(filter: StagedDealFilter = {}) {
   const limit = Math.min(filter.limit ?? 50, 200);
   const offset = ((filter.page ?? 1) - 1) * limit;
 
-  const where = filter.validationStatus
-    ? eq(stagedLeads.validationStatus, filter.validationStatus as any)
-    : undefined;
+  const where = buildQueueValidationWhere(stagedLeads, filter.validationStatus);
 
   const [rows, countResult] = await Promise.all([
     db
@@ -372,13 +377,21 @@ export async function listStagedContacts(
 
 export async function approveStagedContact(contactId: string, reviewedBy: string) {
   const [row] = await db
-    .select({ validationStatus: stagedContacts.validationStatus })
+    .select({
+      validationStatus: stagedContacts.validationStatus,
+      duplicateOfStagedId: stagedContacts.duplicateOfStagedId,
+      duplicateOfLiveId: stagedContacts.duplicateOfLiveId,
+    })
     .from(stagedContacts)
     .where(eq(stagedContacts.id, contactId))
     .limit(1);
 
   if (!row) throw new AppError(404, "Staged contact not found");
-  if (["invalid", "duplicate", "orphan"].includes(row.validationStatus)) {
+  if (
+    ["invalid", "duplicate", "orphan"].includes(row.validationStatus) ||
+    row.duplicateOfStagedId ||
+    row.duplicateOfLiveId
+  ) {
     throw new AppError(400, "Contact still has unresolved validation issues");
   }
 
