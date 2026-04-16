@@ -355,6 +355,17 @@ export async function validateStagedActivities(): Promise<{
 
     for (const activity of batch) {
       const errors: ValidationError[] = [];
+      const dealAssociationCount = Array.isArray((activity as any).hubspotDealIds)
+        ? (activity as any).hubspotDealIds.filter(Boolean).length
+        : activity.hubspotDealId
+          ? 1
+          : 0;
+      const contactAssociationCount = Array.isArray((activity as any).hubspotContactIds)
+        ? (activity as any).hubspotContactIds.filter(Boolean).length
+        : activity.hubspotContactId
+          ? 1
+          : 0;
+      const associationCount = dealAssociationCount + contactAssociationCount;
 
       if (!activity.mappedType) {
         errors.push({ field: "type", error: "Activity type could not be mapped" });
@@ -367,7 +378,15 @@ export async function validateStagedActivities(): Promise<{
         : false;
 
       let validationStatus: "valid" | "invalid" | "orphan";
-      if (!dealExists && !leadExists && !contactExists) {
+      if (associationCount > 1) {
+        validationStatus = "invalid";
+        invalid++;
+        errors.push({
+          field: "associations",
+          error: "Activity matches more than one deal/contact target",
+        });
+        exceptions.ambiguous_email_activity_attribution++;
+      } else if (!dealExists && !leadExists && !contactExists) {
         validationStatus = "orphan";
         orphans++;
         exceptions.ambiguous_email_activity_attribution++;

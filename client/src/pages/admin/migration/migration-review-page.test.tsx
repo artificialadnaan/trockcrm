@@ -42,6 +42,7 @@ vi.mock("../../../hooks/use-migration", () => ({
 }));
 
 import { MigrationReviewPage } from "./migration-review-page";
+import { MigrationReviewActionErrorBanner } from "./migration-review-page";
 
 describe("MigrationReviewPage", () => {
   it("surfaces invalid rows and paging controls for unresolved migration queues", () => {
@@ -50,5 +51,14 @@ describe("MigrationReviewPage", () => {
     expect(html).toContain("invalid");
     expect(html).toContain("Page 1 of 2");
     expect(html).toContain("Next");
+  });
+
+  it("renders a visible approval failure banner", () => {
+    const html = renderToStaticMarkup(
+      <MigrationReviewActionErrorBanner message="Failed to approve migration row" />
+    );
+
+    expect(html).toContain("role=\"alert\"");
+    expect(html).toContain("Failed to approve migration row");
   });
 });

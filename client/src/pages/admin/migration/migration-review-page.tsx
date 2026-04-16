@@ -64,8 +64,23 @@ function EntityReason({
   );
 }
 
+export function MigrationReviewActionErrorBanner({ message }: { message: string | null }) {
+  if (!message) return null;
+
+  return (
+    <div
+      role="alert"
+      aria-live="assertive"
+      className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800"
+    >
+      {message}
+    </div>
+  );
+}
+
 export function MigrationReviewPage() {
   const [tab, setTab] = useState<ReviewTab>("companies");
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const companies = useStagedCompanies("unresolved");
   const properties = useStagedProperties("unresolved");
@@ -83,7 +98,21 @@ export function MigrationReviewPage() {
 
   const handleReject = async (id: string) => {
     const notes = window.prompt("Reject notes (optional)");
-    await current.reject(id, notes ?? undefined);
+    setActionError(null);
+    try {
+      await current.reject(id, notes ?? undefined);
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : "Failed to reject migration row");
+    }
+  };
+
+  const handleApprove = async (id: string) => {
+    setActionError(null);
+    try {
+      await current.approve(id);
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : "Failed to approve migration row");
+    }
   };
 
   return (
@@ -108,6 +137,8 @@ export function MigrationReviewPage() {
           ))}
         </div>
       </div>
+
+      <MigrationReviewActionErrorBanner message={actionError} />
 
       <Card>
         <CardHeader className="pb-3">
@@ -201,7 +232,7 @@ export function MigrationReviewPage() {
                           size="sm"
                           variant="ghost"
                           className="h-7 px-2 text-green-700 hover:bg-green-50"
-                          onClick={() => current.approve(row.id)}
+                          onClick={() => void handleApprove(row.id)}
                         >
                           <CheckCircle2 className="h-3.5 w-3.5 mr-1" />
                           Approve
@@ -210,7 +241,7 @@ export function MigrationReviewPage() {
                           size="sm"
                           variant="ghost"
                           className="h-7 px-2 text-red-700 hover:bg-red-50"
-                          onClick={() => handleReject(row.id)}
+                          onClick={() => void handleReject(row.id)}
                         >
                           <XCircle className="h-3.5 w-3.5 mr-1" />
                           Reject

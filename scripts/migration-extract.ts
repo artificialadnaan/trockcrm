@@ -30,6 +30,7 @@ import {
   mapContact,
   mapActivity,
 } from "../server/src/modules/migration/field-mapper.js";
+import { buildPropertyKey } from "../server/src/modules/migration/property-key.js";
 
 // ---------------------------------------------------------------------------
 // Database connection
@@ -63,17 +64,6 @@ function normalizeTextKey(input: string | null | undefined): string {
 function deriveEmailDomain(email: string | null | undefined): string | null {
   if (!email?.includes("@")) return null;
   return email.split("@").pop()?.toLowerCase().trim() ?? null;
-}
-
-function buildPropertyKey(input: {
-  address?: string | null;
-  city?: string | null;
-  state?: string | null;
-  zip?: string | null;
-}): string {
-  return [input.address, input.city, input.state, input.zip]
-    .map((part) => normalizeTextKey(part))
-    .join("|");
 }
 
 // ---------------------------------------------------------------------------
@@ -263,6 +253,8 @@ async function main() {
           .map((assoc) => contactByHubspotId.get(assoc.id)?.mappedEmail)
           .find((email) => Boolean(email?.trim())) ?? null;
       const propertyKey = buildPropertyKey({
+        companyName: primaryCompanyName,
+        companyDomain: null,
         address: sourceDeal.properties.address ?? null,
         city: sourceDeal.properties.city ?? null,
         state: sourceDeal.properties.state ?? null,
@@ -310,7 +302,14 @@ async function main() {
 
       const isLeadStage = mappedDeal.mappedStage === "dd";
       if (isLeadStage) {
-        const leadKey = `${normalizeTextKey(primaryCompanyName)}::${propertyKey}`;
+        const leadKey = buildPropertyKey({
+          companyName: primaryCompanyName,
+          companyDomain: null,
+          address: sourceDeal.properties.address ?? null,
+          city: sourceDeal.properties.city ?? null,
+          state: sourceDeal.properties.state ?? null,
+          zip: sourceDeal.properties.zip ?? null,
+        });
         leadCounts.set(leadKey, (leadCounts.get(leadKey) ?? 0) + 1);
         leadDrafts.push({
           leadKey,
@@ -480,7 +479,9 @@ async function main() {
           mapped.map((a) => ({
             hubspotActivityId: a.hubspotActivityId,
             hubspotDealId: a.hubspotDealId,
+            hubspotDealIds: a.hubspotDealIds,
             hubspotContactId: a.hubspotContactId,
+            hubspotContactIds: a.hubspotContactIds,
             rawData: a.rawData,
             mappedType: a.mappedType,
             mappedSubject: a.mappedSubject,

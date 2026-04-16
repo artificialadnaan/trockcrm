@@ -17,6 +17,7 @@ import {
 import { companies } from "../shared/src/schema/index.js";
 import { pipelineStageConfig } from "../shared/src/schema/public/pipeline-stage-config.js";
 import { users } from "../shared/src/schema/public/users.js";
+import { buildPropertyKey } from "../server/src/modules/migration/property-key.js";
 
 const OFFICE_SLUG = process.env.OFFICE_SLUG;
 if (!OFFICE_SLUG && process.argv[1]?.includes("migration-promote.ts")) {
@@ -50,17 +51,6 @@ function slugifyCompanyName(input: string): string {
     .slice(0, 70);
 }
 
-function buildPropertyKey(input: {
-  address?: string | null;
-  city?: string | null;
-  state?: string | null;
-  zip?: string | null;
-}): string {
-  return [input.address, input.city, input.state, input.zip]
-    .map((part) => normalizeTextKey(part))
-    .join("|");
-}
-
 export function resolvePropertyPromotionTargets(
   approvedProperties: Array<{
     id: string;
@@ -77,6 +67,8 @@ export function resolvePropertyPromotionTargets(
   for (const property of approvedProperties) {
     if (property.promotedAt) continue;
     const propertyKey = buildPropertyKey({
+      companyName: property.mappedCompanyName,
+      companyDomain: null,
       address: property.mappedAddress,
       city: property.mappedCity,
       state: property.mappedState,
@@ -310,6 +302,8 @@ async function main() {
       const raw = lead.rawData as any;
       const properties = raw?.properties ?? {};
       const propertyKey = buildPropertyKey({
+        companyName: lead.mappedCompanyName,
+        companyDomain: null,
         address: properties.address ?? null,
         city: properties.city ?? null,
         state: properties.state ?? null,
@@ -431,6 +425,8 @@ async function main() {
       if (newDealId) {
         dealIdMap.set(d.hubspotDealId, newDealId);
         const propertyKey = buildPropertyKey({
+          companyName: primaryContactCompany,
+          companyDomain: null,
           address: properties.address ?? null,
           city: properties.city ?? null,
           state: properties.state ?? null,

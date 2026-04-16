@@ -188,16 +188,23 @@ export function classifyLeadException(input: {
 export function classifyActivityException(input: {
   hubspotDealId: string | null;
   hubspotContactId: string | null;
+  hubspotDealIds?: string[] | null;
+  hubspotContactIds?: string[] | null;
   candidateCount: number;
 }): MigrationExceptionClassification | null {
-  if ((input.candidateCount ?? 0) > 1) {
+  const dealCount = input.hubspotDealIds?.filter(Boolean).length ?? (input.hubspotDealId ? 1 : 0);
+  const contactCount =
+    input.hubspotContactIds?.filter(Boolean).length ?? (input.hubspotContactId ? 1 : 0);
+  const candidateCount = Math.max(input.candidateCount ?? 0, dealCount + contactCount);
+
+  if (candidateCount > 1) {
     return {
       bucket: "ambiguous_email_activity_attribution",
       reason: "Activity matches more than one possible deal/contact target.",
     };
   }
 
-  if (!input.hubspotDealId && !input.hubspotContactId) {
+  if (candidateCount === 0) {
     return {
       bucket: "ambiguous_email_activity_attribution",
       reason: "Activity cannot be assigned to a unique deal or contact.",
@@ -444,23 +451,38 @@ async function loadActivityExceptions(): Promise<MigrationExceptionItem[]> {
 
   return rows
     .map((row) =>
-      itemForBucket({
-        id: row.id,
-        entityType: "activity",
-        classification: classifyActivityException({
-          hubspotDealId: row.hubspotDealId ?? null,
-          hubspotContactId: row.hubspotContactId ?? null,
-          candidateCount: row.hubspotDealId && row.hubspotContactId ? 0 : 1,
-        }),
-        title: row.mappedSubject ?? `Activity ${row.hubspotActivityId}`,
-        detailFallback:
-          (row.validationErrors as Array<{ error: string }> | undefined)?.[0]?.error ??
-          "Activity requires review.",
-        validationStatus: row.validationStatus,
-        reviewNotes: null,
-        reviewable: false,
-        reviewHint: "Review on the staged activities list.",
-      })
+      {
+        const hubspotDealIds = Array.isArray((row as any).hubspotDealIds)
+          ? ((row as any).hubspotDealIds as string[])
+          : row.hubspotDealId
+            ? [row.hubspotDealId]
+            : [];
+        const hubspotContactIds = Array.isArray((row as any).hubspotContactIds)
+          ? ((row as any).hubspotContactIds as string[])
+          : row.hubspotContactId
+            ? [row.hubspotContactId]
+            : [];
+
+        return itemForBucket({
+          id: row.id,
+          entityType: "activity",
+          classification: classifyActivityException({
+            hubspotDealId: row.hubspotDealId ?? null,
+            hubspotContactId: row.hubspotContactId ?? null,
+            hubspotDealIds,
+            hubspotContactIds,
+            candidateCount: hubspotDealIds.length + hubspotContactIds.length,
+          }),
+          title: row.mappedSubject ?? `Activity ${row.hubspotActivityId}`,
+          detailFallback:
+            (row.validationErrors as Array<{ error: string }> | undefined)?.[0]?.error ??
+            "Activity requires review.",
+          validationStatus: row.validationStatus,
+          reviewNotes: null,
+          reviewable: false,
+          reviewHint: "Review on the staged activities list.",
+        });
+      }
     )
     .filter((item): item is MigrationExceptionItem => item != null);
 }

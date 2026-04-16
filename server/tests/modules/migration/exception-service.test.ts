@@ -82,6 +82,8 @@ describe("migration exception classifiers", () => {
     const result = classifyActivityException({
       hubspotDealId: null,
       hubspotContactId: null,
+      hubspotDealIds: ["deal-1", "deal-2"],
+      hubspotContactIds: ["contact-1"],
       candidateCount: 2,
     });
     expect(result?.bucket).toBe("ambiguous_email_activity_attribution");

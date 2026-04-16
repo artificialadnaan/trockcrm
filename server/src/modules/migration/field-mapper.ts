@@ -174,7 +174,9 @@ export function mapCompany(
 export interface MappedActivity {
   hubspotActivityId: string;
   hubspotDealId: string | null;
+  hubspotDealIds: string[];
   hubspotContactId: string | null;
+  hubspotContactIds: string[];
   rawData: Record<string, unknown>;
   mappedType: "call" | "note" | "meeting" | "email" | "task_completed" | null;
   mappedSubject: string | null;
@@ -198,10 +200,14 @@ export function mapActivity(activity: HubSpotActivity): MappedActivity {
   const p = activity.properties;
   const engType = (activity as any).__type ?? "";
 
-  const hubspotDealId =
-    activity.associations?.deals?.results?.[0]?.id ?? null;
-  const hubspotContactId =
-    activity.associations?.contacts?.results?.[0]?.id ?? null;
+  const hubspotDealIds = Array.from(
+    new Set((activity.associations?.deals?.results ?? []).map((assoc) => assoc.id).filter(Boolean))
+  );
+  const hubspotContactIds = Array.from(
+    new Set((activity.associations?.contacts?.results ?? []).map((assoc) => assoc.id).filter(Boolean))
+  );
+  const hubspotDealId = hubspotDealIds[0] ?? null;
+  const hubspotContactId = hubspotContactIds[0] ?? null;
 
   let subject: string | null = null;
   if (engType === "calls") subject = p.hs_call_title ?? "Call";
@@ -224,7 +230,9 @@ export function mapActivity(activity: HubSpotActivity): MappedActivity {
   return {
     hubspotActivityId: activity.id,
     hubspotDealId,
+    hubspotDealIds,
     hubspotContactId,
+    hubspotContactIds,
     rawData: activity as unknown as Record<string, unknown>,
     mappedType: mapActivityType(engType),
     mappedSubject: subject,
