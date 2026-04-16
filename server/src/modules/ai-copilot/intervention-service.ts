@@ -89,9 +89,27 @@ function interventionSlaThresholdDays(value: string) {
   }
 }
 
-function calculateLifecycleAgeDays(startedAt: Date | null | undefined, now: Date) {
+function startOfDay(date: Date) {
+  const result = new Date(date);
+  result.setHours(0, 0, 0, 0);
+  return result;
+}
+
+function calculateBusinessDaysElapsed(startedAt: Date | null | undefined, now: Date) {
   if (!startedAt) return 0;
-  return Math.max(0, Math.floor((now.getTime() - startedAt.getTime()) / 86400000));
+  const current = startOfDay(startedAt);
+  const end = startOfDay(now);
+  let elapsed = 0;
+
+  while (current < end) {
+    current.setDate(current.getDate() + 1);
+    const dayOfWeek = current.getDay();
+    if (dayOfWeek !== 0 && dayOfWeek !== 6) {
+      elapsed++;
+    }
+  }
+
+  return elapsed;
 }
 
 function buildBusinessKey(officeId: string, row: SalesProcessDisconnectRow) {
@@ -228,7 +246,7 @@ function projectQueueItem(input: {
     status: input.row.status as "open" | "snoozed" | "resolved",
     escalated: input.row.escalated,
     reopenCount: input.row.reopenCount,
-    ageDays: calculateLifecycleAgeDays(input.row.currentLifecycleStartedAt, input.now),
+    ageDays: calculateBusinessDaysElapsed(input.row.currentLifecycleStartedAt, input.now),
     assignedTo: input.row.assignedTo,
     generatedTask: input.task
       ? {

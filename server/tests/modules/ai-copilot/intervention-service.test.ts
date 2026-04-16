@@ -488,6 +488,27 @@ describe("AI intervention service", () => {
     expect(result.items[0]?.ageDays).toBe(3);
   });
 
+  it("uses business-day aging for overdue queue classification", async () => {
+    const tenantDb = createTenantDb({
+      cases: [
+        makeCase({
+          id: "case-friday",
+          severity: "high",
+          currentLifecycleStartedAt: new Date("2026-04-17T15:00:00.000Z"),
+        }),
+      ],
+    });
+
+    const result = await listInterventionCases(tenantDb as any, {
+      officeId: "office-1",
+      view: "overdue",
+      status: undefined,
+      now: new Date("2026-04-20T15:00:00.000Z"),
+    });
+
+    expect(result.totalCount).toBe(0);
+  });
+
   it("lists snooze-breached cases with source filters while preserving caseId as a deep-link selector", async () => {
     const tenantDb = createTenantDb({
       cases: [
