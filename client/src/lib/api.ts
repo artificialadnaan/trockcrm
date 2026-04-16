@@ -12,11 +12,6 @@ export function resolveApiBase(
   env: { VITE_API_URL?: string | undefined } = {},
   locationLike?: { hostname?: string | undefined }
 ): string {
-  const configuredUrl = env.VITE_API_URL?.trim();
-  if (configuredUrl) {
-    return `${configuredUrl.replace(/\/+$/, "")}/api`;
-  }
-
   const hostname = locationLike?.hostname?.trim().toLowerCase();
   if (hostname && AI_COPILOT_FRONTEND_FALLBACK_HOSTS.has(hostname)) {
     return `${AI_COPILOT_API_FALLBACK}/api`;
@@ -24,6 +19,11 @@ export function resolveApiBase(
 
   if (hostname && FRONTEND_API_FALLBACK_HOSTS.has(hostname)) {
     return `${RAILWAY_API_FALLBACK}/api`;
+  }
+
+  const configuredUrl = env.VITE_API_URL?.trim();
+  if (configuredUrl) {
+    return `${configuredUrl.replace(/\/+$/, "")}/api`;
   }
 
   return "/api";
