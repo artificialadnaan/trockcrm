@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import {
   ArrowLeft,
@@ -16,6 +16,7 @@ import {
   Building2,
   Plus,
 } from "lucide-react";
+import { Link } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -25,10 +26,14 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { DealStageBadge } from "@/components/deals/deal-stage-badge";
+import { LeadStageBadge } from "@/components/leads/lead-stage-badge";
 import { useCompanyDetail, useCompanyContacts, useCompanyDeals } from "@/hooks/use-companies";
+import { usePipelineStages } from "@/hooks/use-pipeline-config";
 import { formatPhone } from "@/lib/contact-utils";
 import { ContactForm } from "@/components/contacts/contact-form";
 import { api } from "@/lib/api";
+import { buildPropertyId, formatPropertyLabel } from "@/lib/property-key";
+import type { Activity } from "@/hooks/use-activities";
 
 // --- Constants ---
 
@@ -121,7 +126,7 @@ function exportCompanyCSV(
 
 // --- Types ---
 
-type Tab = "contacts" | "deals" | "files" | "emails";
+type Tab = "contacts" | "portfolio" | "deals" | "files" | "emails";
 
 // --- Main Component ---
 
@@ -169,6 +174,7 @@ export function CompanyDetailPage() {
 
   const tabs: { key: Tab; label: string; icon: React.ReactNode }[] = [
     { key: "contacts", label: "Contacts", icon: <Users className="h-4 w-4" /> },
+    { key: "portfolio", label: "Portfolio", icon: <Building2 className="h-4 w-4" /> },
     { key: "deals", label: "Deals", icon: <Handshake className="h-4 w-4" /> },
     { key: "files", label: "Files", icon: <FileText className="h-4 w-4" /> },
     { key: "emails", label: "Emails", icon: <Mail className="h-4 w-4" /> },
@@ -397,6 +403,7 @@ export function CompanyDetailPage() {
               onAddContact={() => setAddContactOpen(true)}
             />
           )}
+          {activeTab === "portfolio" && <CompanyPortfolioTab companyId={company.id} companyName={company.name} />}
           {activeTab === "deals" && <CompanyDealsTab companyId={company.id} />}
           {activeTab === "files" && <CompanyFilesTab companyId={company.id} />}
           {activeTab === "emails" && <CompanyEmailsTab />}
@@ -706,6 +713,231 @@ function CompanyEmailsTab() {
       <p className="text-xs text-zinc-400">
         Emails associated with this company's contacts and deals will appear here.
       </p>
+    </div>
+  );
+}
+
+function CompanyPortfolioTab({ companyId, companyName }: { companyId: string; companyName: string }) {
+  const { deals } = useCompanyDeals(companyId);
+  const { stages } = usePipelineStages();
+  const ddStageId = stages.find((stage) => stage.slug === "dd")?.id ?? "";
+  const [activities, setActivities] = useState<Activity[]>([]);
+  const [activitiesLoading, setActivitiesLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    setActivitiesLoading(true);
+
+    Promise.all(
+      deals.map((deal) =>
+        api<{ activities: Activity[] }>(`/activities?dealId=${deal.id}&limit=50`)
+          .then((data) => data.activities.map((activity) => ({ ...activity, dealId: deal.id })))
+          .catch(() => [] as Activity[])
+      )
+    )
+      .then((results) => {
+        if (!cancelled) {
+          setActivities(results.flat().sort((a, b) => new Date(b.occurredAt).getTime() - new Date(a.occurredAt).getTime()));
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setActivitiesLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [deals]);
+
+  const properties = useMemo(() => {
+    const groups = new Map<string, {
+      id: string;
+      label: string;
+      companyName: string;
+      companyId: string | null;
+      dealIds: string[];
+      leadIds: string[];
+      lastActivityAt: string | null;
+    }>();
+
+    for (const deal of deals) {
+      const id = buildPropertyId({
+        companyId: deal.companyId ?? companyId,
+        address: deal.propertyAddress,
+        city: deal.propertyCity,
+        state: deal.propertyState,
+        zip: deal.propertyZip,
+      });
+      const existing = groups.get(id);
+      const label = formatPropertyLabel({
+        address: deal.propertyAddress,
+        city: deal.propertyCity,
+        state: deal.propertyState,
+        zip: deal.propertyZip,
+      });
+      const isLead = deal.stageId === ddStageId;
+
+      if (existing) {
+        existing.dealIds.push(deal.id);
+        if (isLead) existing.leadIds.push(deal.id);
+        if (deal.lastActivityAt && (!existing.lastActivityAt || new Date(deal.lastActivityAt).getTime() > new Date(existing.lastActivityAt).getTime())) {
+          existing.lastActivityAt = deal.lastActivityAt;
+        }
+        continue;
+      }
+
+      groups.set(id, {
+        id,
+        label,
+        companyName,
+        companyId: deal.companyId ?? companyId,
+        dealIds: [deal.id],
+        leadIds: isLead ? [deal.id] : [],
+        lastActivityAt: deal.lastActivityAt ?? null,
+      });
+    }
+
+    return [...groups.values()];
+  }, [companyId, deals, ddStageId]);
+
+  const leadDeals = deals.filter((deal) => deal.stageId === ddStageId);
+
+  const activitySummary = useMemo(() => {
+    const counts = { total: activities.length, call: 0, email: 0, meeting: 0, note: 0 };
+    for (const activity of activities) {
+      if (activity.type in counts) {
+        counts[activity.type as keyof typeof counts] += 1;
+      }
+    }
+    return counts;
+  }, [activities]);
+
+  return (
+    <div className="space-y-5">
+          <div className="grid gap-4 sm:grid-cols-4">
+            <div className="rounded-xl border bg-white p-4">
+          <p className="text-xs uppercase tracking-wider text-muted-foreground">Properties</p>
+          <p className="mt-2 text-2xl font-black">{properties.length}</p>
+        </div>
+        <div className="rounded-xl border bg-white p-4">
+          <p className="text-xs uppercase tracking-wider text-muted-foreground">Leads</p>
+          <p className="mt-2 text-2xl font-black">{leadDeals.length}</p>
+        </div>
+        <div className="rounded-xl border bg-white p-4">
+          <p className="text-xs uppercase tracking-wider text-muted-foreground">Deals</p>
+          <p className="mt-2 text-2xl font-black">{deals.length}</p>
+        </div>
+        <div className="rounded-xl border bg-white p-4">
+          <p className="text-xs uppercase tracking-wider text-muted-foreground">Activities</p>
+          <p className="mt-2 text-2xl font-black">{activitySummary.total}</p>
+        </div>
+      </div>
+
+      <div className="grid gap-5 lg:grid-cols-[1fr_1fr]">
+        <div className="space-y-4">
+          <div>
+            <p className="text-sm font-semibold">Related Properties</p>
+            <p className="text-sm text-muted-foreground">Unique property groupings across the company&apos;s deal portfolio.</p>
+          </div>
+          <div className="space-y-2">
+            {properties.length === 0 ? (
+              <div className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
+                No related properties found.
+              </div>
+            ) : (
+              properties.map((property) => (
+                <Link key={property.id} to={`/properties/${property.id}`} className="block rounded-lg border bg-white p-3 transition-colors hover:bg-zinc-50">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-medium">{property.label}</p>
+                      <p className="text-xs text-muted-foreground">{property.companyName}</p>
+                    </div>
+                    <p className="text-xs text-muted-foreground">{property.dealIds.length} deals</p>
+                  </div>
+                </Link>
+              ))
+            )}
+          </div>
+        </div>
+
+        <div className="space-y-4">
+          <div>
+            <p className="text-sm font-semibold">Activity Rollup</p>
+            <p className="text-sm text-muted-foreground">Deal-linked activity summarized across the company portfolio.</p>
+          </div>
+          <div className="grid grid-cols-2 gap-3 text-sm">
+            <div className="rounded-lg border bg-white p-3">
+              <p className="text-muted-foreground">Calls</p>
+              <p className="text-xl font-black">{activitySummary.call}</p>
+            </div>
+            <div className="rounded-lg border bg-white p-3">
+              <p className="text-muted-foreground">Emails</p>
+              <p className="text-xl font-black">{activitySummary.email}</p>
+            </div>
+            <div className="rounded-lg border bg-white p-3">
+              <p className="text-muted-foreground">Meetings</p>
+              <p className="text-xl font-black">{activitySummary.meeting}</p>
+            </div>
+            <div className="rounded-lg border bg-white p-3">
+              <p className="text-muted-foreground">Notes</p>
+              <p className="text-xl font-black">{activitySummary.note}</p>
+            </div>
+          </div>
+
+          <div className="space-y-2">
+            {activitiesLoading ? (
+              <div className="space-y-2">
+                {Array.from({ length: 3 }).map((_, index) => (
+                  <div key={index} className="h-16 rounded-lg bg-muted animate-pulse" />
+                ))}
+              </div>
+            ) : activities.length === 0 ? (
+              <div className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
+                No activity recorded yet.
+              </div>
+            ) : (
+              activities.slice(0, 5).map((activity) => (
+                <div key={activity.id} className="rounded-lg border bg-white p-3">
+                  <p className="text-sm font-medium capitalize">{activity.type.replace(/_/g, " ")}</p>
+                  <p className="text-xs text-muted-foreground">
+                    {activity.subject ?? activity.body ?? "Activity"} · {new Date(activity.occurredAt).toLocaleDateString()}
+                  </p>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="space-y-3">
+        <div>
+          <p className="text-sm font-semibold">Related Deals</p>
+          <p className="text-sm text-muted-foreground">Leads and downstream deals tied to this company.</p>
+        </div>
+        <div className="space-y-2">
+          {deals.length === 0 ? (
+            <div className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
+              No related deals found.
+            </div>
+          ) : (
+            deals.map((deal) => (
+              <Link key={deal.id} to={deal.stageId === ddStageId ? `/leads/${deal.id}` : `/deals/${deal.id}`} className="block rounded-lg border bg-white p-3 transition-colors hover:bg-zinc-50">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-medium">{deal.name}</p>
+                    <p className="text-xs text-muted-foreground font-mono">{deal.dealNumber}</p>
+                  </div>
+                  {deal.stageId === ddStageId ? (
+                    <LeadStageBadge stageId={deal.stageId} />
+                  ) : (
+                    <DealStageBadge stageId={deal.stageId} />
+                  )}
+                </div>
+              </Link>
+            ))
+          )}
+        </div>
+      </div>
     </div>
   );
 }

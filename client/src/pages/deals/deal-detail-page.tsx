@@ -29,22 +29,26 @@ import { DealCloseoutTab } from "./deal-closeout-tab";
 import { DealTimersBanner } from "./deal-timers-banner";
 import { DealProposalCard } from "./deal-proposal-card";
 import { DealEstimatingSubstage } from "./deal-estimating-substage";
+import { LeadForm } from "@/components/leads/lead-form";
+import { LeadTimelineTab } from "@/components/leads/lead-timeline-tab";
 import { ActivityLogForm } from "@/components/activities/activity-log-form";
 import { StageChangeDialog } from "@/components/deals/stage-change-dialog";
 import { TaskCreateDialog } from "@/components/tasks/task-create-dialog";
 import { useActivities, createActivity } from "@/hooks/use-activities";
-import { useDealDetail, deleteDeal as apiDeleteDeal } from "@/hooks/use-deals";
+import { useDealDetail, deleteDeal as apiDeleteDeal, type DealDetail } from "@/hooks/use-deals";
+import { useCompanyDetail } from "@/hooks/use-companies";
 import { usePipelineStages } from "@/hooks/use-pipeline-config";
 import { useAuth } from "@/lib/auth";
 import { formatCurrency, bestEstimate } from "@/lib/deal-utils";
 
-type Tab = "overview" | "scoping" | "files" | "email" | "activity" | "timeline" | "history" | "team" | "estimates" | "punch_list" | "closeout";
+type Tab = "overview" | "lead" | "scoping" | "files" | "email" | "activity" | "timeline" | "history" | "team" | "estimates" | "punch_list" | "closeout";
 
 export function DealDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const { user } = useAuth();
   const { deal, loading, error, refetch } = useDealDetail(id);
+  const { company } = useCompanyDetail(deal?.companyId ?? undefined);
   const { stages } = usePipelineStages();
   const [activeTab, setActiveTab] = useState<Tab>("overview");
   const [stageChangeOpen, setStageChangeOpen] = useState(false);
@@ -111,6 +115,7 @@ export function DealDetailPage() {
 
   const tabs: { key: Tab; label: string }[] = [
     { key: "overview", label: "Overview" },
+    { key: "lead", label: "Lead" },
     { key: "scoping", label: "Scoping" },
     { key: "files", label: "Files" },
     { key: "email", label: "Email" },
@@ -281,6 +286,13 @@ export function DealDetailPage() {
           <DealOverviewTab deal={deal} />
         </div>
       )}
+      {activeTab === "lead" && (
+        <DealLeadTab
+          deal={deal}
+          companyName={company?.name ?? null}
+          isConverted={currentStageSlug !== "dd"}
+        />
+      )}
       {activeTab === "scoping" && <DealScopingWorkspace deal={deal} onDealUpdated={refetch} />}
       {activeTab === "files" && <DealFileTab dealId={deal.id} />}
       {activeTab === "email" && <DealEmailTab dealId={deal.id} />}
@@ -363,6 +375,44 @@ function DealActivityPanel({ dealId }: { dealId: string }) {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+function DealLeadTab({
+  deal,
+  companyName,
+  isConverted,
+}: {
+  deal: DealDetail;
+  companyName: string | null;
+  isConverted: boolean;
+}) {
+  return (
+    <div className="grid gap-4 lg:grid-cols-[0.95fr_1.05fr]">
+      <LeadForm
+        lead={{
+          id: deal.id,
+          name: deal.name,
+          dealNumber: deal.dealNumber,
+          companyId: deal.companyId,
+          companyName,
+          stageId: deal.stageId,
+          propertyAddress: deal.propertyAddress,
+          propertyCity: deal.propertyCity,
+          propertyState: deal.propertyState,
+          propertyZip: deal.propertyZip,
+          source: deal.source,
+          description: deal.description,
+          stageEnteredAt: deal.stageEnteredAt,
+        }}
+        converted={isConverted}
+      />
+
+      <LeadTimelineTab
+        dealId={deal.id}
+        convertedAt={isConverted ? deal.stageEnteredAt : null}
+      />
     </div>
   );
 }

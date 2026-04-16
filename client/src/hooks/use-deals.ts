@@ -55,6 +55,7 @@ export interface Deal {
   stageId: string;
   workflowRoute: WorkflowRoute;
   assignedRepId: string;
+  companyId: string | null;
   primaryContactId: string | null;
   ddEstimate: string | null;
   bidEstimate: string | null;

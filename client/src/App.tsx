@@ -16,6 +16,10 @@ import { CompanyListPage } from "@/pages/companies/company-list-page";
 import { CompanyDetailPage } from "@/pages/companies/company-detail-page";
 import { CompanyNewPage } from "@/pages/companies/company-new-page";
 import { CompanyEditPage } from "@/pages/companies/company-edit-page";
+import { LeadListPage } from "@/pages/leads/lead-list-page";
+import { LeadDetailPage } from "@/pages/leads/lead-detail-page";
+import { PropertyListPage } from "@/pages/properties/property-list-page";
+import { PropertyDetailPage } from "@/pages/properties/property-detail-page";
 import { MergeQueuePage } from "@/pages/admin/merge-queue-page";
 import { EmailInboxPage } from "@/pages/email/email-inbox-page";
 import { TaskListPage } from "@/pages/tasks/task-list-page";
@@ -77,6 +81,10 @@ export function App() {
               <Route path="/deals/new" element={<DealNewPage />} />
               <Route path="/deals/:id" element={<DealDetailPage />} />
               <Route path="/deals/:id/edit" element={<DealEditPage />} />
+              <Route path="/leads" element={<LeadListPage />} />
+              <Route path="/leads/:id" element={<LeadDetailPage />} />
+              <Route path="/properties" element={<PropertyListPage />} />
+              <Route path="/properties/:id" element={<PropertyDetailPage />} />
               <Route path="/pipeline" element={<PipelinePage />} />
               <Route path="/contacts" element={<ContactListPage />} />
               <Route path="/contacts/new" element={<ContactNewPage />} />
