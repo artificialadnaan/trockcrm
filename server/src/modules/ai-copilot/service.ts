@@ -186,6 +186,8 @@ export interface SalesProcessDisconnectTypeSummary {
 
 export interface SalesProcessDisconnectRow {
   id: string;
+  scopeType?: string;
+  scopeId?: string;
   dealNumber: string;
   dealName: string;
   companyId: string | null;
@@ -257,6 +259,12 @@ export interface SalesProcessDisconnectPlaybook {
   interventionDeals30d: number;
   stillOpenDeals30d: number;
   actions: SalesProcessDisconnectPlaybookAction[];
+}
+
+export interface DisconnectCaseIdentity {
+  scopeType: "deal";
+  scopeId: string;
+  clusterKey: string;
 }
 
 export interface SalesProcessDisconnectCluster {
@@ -925,6 +933,25 @@ function buildSalesProcessDisconnectNarrative(input: {
   };
 }
 
+export function getDisconnectCaseIdentity(
+  row: Pick<SalesProcessDisconnectRow, "id" | "disconnectType">
+): DisconnectCaseIdentity {
+  const clusterKey =
+    row.disconnectType === "procore_bid_board_drift"
+      ? "bid_board_sync_break"
+      : row.disconnectType === "revision_loop" || row.disconnectType === "estimating_gate_gap"
+        ? "estimating_handoff_break"
+        : row.disconnectType === "missing_next_task" || row.disconnectType === "inbound_without_followup"
+          ? "follow_through_gap"
+          : "execution_stall";
+
+  return {
+    scopeType: "deal",
+    scopeId: row.id,
+    clusterKey,
+  };
+}
+
 const DEFAULT_DEPS: GenerateDealCopilotPacketDeps = {
   getDealCopilotContext,
   getDealBlindSpotSignals,
@@ -936,6 +963,318 @@ const DEFAULT_DEPS: GenerateDealCopilotPacketDeps = {
   getExistingFreshPacket: async () => null,
   now: new Date(),
 };
+
+export async function listCurrentSalesProcessDisconnectRows(
+  tenantDb: TenantDb,
+  input: { limit?: number } = {}
+): Promise<SalesProcessDisconnectRow[]> {
+  const limit = Math.max(1, Math.min(input.limit ?? 200, 500));
+  const rowsResult = await tenantDb.execute(sql`
+    WITH base AS (
+      SELECT
+        d.id,
+        d.deal_number,
+        d.name AS deal_name,
+        c.id AS company_id,
+        c.name AS company_name,
+        psc.name AS stage_name,
+        d.estimating_substage,
+        u.display_name AS assigned_rep_name,
+        d.stage_entered_at,
+        d.last_activity_at,
+        d.proposal_status,
+        d.procore_project_id,
+        d.procore_last_synced_at,
+        COALESCE((
+          SELECT COUNT(*)::int
+          FROM tasks t
+          WHERE t.deal_id = d.id
+            AND t.status IN ('pending', 'in_progress', 'waiting_on', 'blocked')
+        ), 0) AS open_task_count,
+        COALESCE((
+          SELECT COUNT(*)::int
+          FROM emails e
+          WHERE e.deal_id = d.id
+            AND e.direction = 'inbound'
+            AND NOT EXISTS (
+              SELECT 1
+              FROM activities a
+              WHERE a.deal_id = e.deal_id
+                AND a.occurred_at >= e.sent_at
+                AND a.type IN ('call', 'email', 'meeting', 'note')
+            )
+        ), 0) AS inbound_without_followup_count,
+        (
+          SELECT MAX(e.sent_at)
+          FROM emails e
+          WHERE e.deal_id = d.id
+            AND e.direction = 'inbound'
+        ) AS latest_customer_email_at,
+        lps.sync_status AS procore_sync_status,
+        lps.sync_direction AS procore_sync_direction,
+        lps.updated_at AS procore_sync_updated_at,
+        CASE
+          WHEN lps.sync_status IS NULL THEN NULL
+          WHEN lps.sync_status = 'synced' THEN NULL
+          ELSE CONCAT('Latest Procore sync status is ', lps.sync_status, '.')
+        END AS procore_drift_reason
+      FROM deals d
+      LEFT JOIN companies c ON c.id = d.company_id
+      LEFT JOIN pipeline_stage_config psc ON psc.id = d.stage_id
+      LEFT JOIN public.users u ON u.id = d.assigned_rep_id
+      LEFT JOIN LATERAL (
+        SELECT
+          pss.sync_status,
+          pss.sync_direction,
+          pss.updated_at
+        FROM public.procore_sync_state pss
+        WHERE pss.crm_entity_type = 'deal'
+          AND pss.crm_entity_id = d.id
+          AND pss.entity_type IN ('project', 'bid')
+        ORDER BY pss.updated_at DESC
+        LIMIT 1
+      ) lps ON TRUE
+      WHERE d.is_active = TRUE
+    ),
+    disconnect_rows AS (
+      SELECT
+        id,
+        deal_number,
+        deal_name,
+        company_id,
+        company_name,
+        stage_name,
+        estimating_substage,
+        assigned_rep_name,
+        'stale_stage'::text AS disconnect_type,
+        'Stalled in stage'::text AS disconnect_label,
+        'high'::text AS disconnect_severity,
+        'Deal has exceeded its configured stale threshold.'::text AS disconnect_summary,
+        CONCAT(stage_name, ' has been inactive for ', FLOOR(EXTRACT(EPOCH FROM (NOW() - stage_entered_at)) / 86400), ' days.')::text AS disconnect_details,
+        FLOOR(EXTRACT(EPOCH FROM (NOW() - stage_entered_at)) / 86400)::int AS age_days,
+        open_task_count,
+        inbound_without_followup_count,
+        last_activity_at,
+        latest_customer_email_at,
+        proposal_status,
+        procore_sync_status,
+        procore_sync_direction,
+        procore_last_synced_at,
+        procore_sync_updated_at,
+        procore_drift_reason
+      FROM base
+      WHERE stage_entered_at IS NOT NULL
+        AND EXISTS (
+          SELECT 1
+          FROM pipeline_stage_config psc
+          WHERE psc.name = base.stage_name
+            AND psc.stale_threshold_days > 0
+            AND EXTRACT(EPOCH FROM (NOW() - stage_entered_at)) / 86400 > psc.stale_threshold_days
+        )
+
+      UNION ALL
+
+      SELECT
+        id,
+        deal_number,
+        deal_name,
+        company_id,
+        company_name,
+        stage_name,
+        estimating_substage,
+        assigned_rep_name,
+        'missing_next_task'::text AS disconnect_type,
+        'Missing next task'::text AS disconnect_label,
+        'high'::text AS disconnect_severity,
+        'Deal has no open next-step task.'::text AS disconnect_summary,
+        'No pending or in-progress task exists to drive the next customer or internal step.'::text AS disconnect_details,
+        FLOOR(EXTRACT(EPOCH FROM (NOW() - COALESCE(last_activity_at, NOW() - INTERVAL '1 day'))) / 86400)::int AS age_days,
+        open_task_count,
+        inbound_without_followup_count,
+        last_activity_at,
+        latest_customer_email_at,
+        proposal_status,
+        procore_sync_status,
+        procore_sync_direction,
+        procore_last_synced_at,
+        procore_sync_updated_at,
+        procore_drift_reason
+      FROM base
+      WHERE open_task_count = 0
+
+      UNION ALL
+
+      SELECT
+        id,
+        deal_number,
+        deal_name,
+        company_id,
+        company_name,
+        stage_name,
+        estimating_substage,
+        assigned_rep_name,
+        'inbound_without_followup'::text AS disconnect_type,
+        'Inbound with no follow-up'::text AS disconnect_label,
+        'critical'::text AS disconnect_severity,
+        'Customer emailed without a recorded follow-up.'::text AS disconnect_summary,
+        'Inbound customer communication exists with no later call, email, meeting, or note logged.'::text AS disconnect_details,
+        FLOOR(EXTRACT(EPOCH FROM (NOW() - latest_customer_email_at)) / 86400)::int AS age_days,
+        open_task_count,
+        inbound_without_followup_count,
+        last_activity_at,
+        latest_customer_email_at,
+        proposal_status,
+        procore_sync_status,
+        procore_sync_direction,
+        procore_last_synced_at,
+        procore_sync_updated_at,
+        procore_drift_reason
+      FROM base
+      WHERE inbound_without_followup_count > 0
+
+      UNION ALL
+
+      SELECT
+        id,
+        deal_number,
+        deal_name,
+        company_id,
+        company_name,
+        stage_name,
+        estimating_substage,
+        assigned_rep_name,
+        'revision_loop'::text AS disconnect_type,
+        'Revision loop'::text AS disconnect_label,
+        'critical'::text AS disconnect_severity,
+        'Proposal revision requested with no clear closed-loop ownership.'::text AS disconnect_summary,
+        'The deal remains in revision_requested, which often signals a stalled handoff between sales and estimating.'::text AS disconnect_details,
+        FLOOR(EXTRACT(EPOCH FROM (NOW() - COALESCE(last_activity_at, NOW() - INTERVAL '1 day'))) / 86400)::int AS age_days,
+        open_task_count,
+        inbound_without_followup_count,
+        last_activity_at,
+        latest_customer_email_at,
+        proposal_status,
+        procore_sync_status,
+        procore_sync_direction,
+        procore_last_synced_at,
+        procore_sync_updated_at,
+        procore_drift_reason
+      FROM base
+      WHERE proposal_status = 'revision_requested'
+
+      UNION ALL
+
+      SELECT
+        b.id,
+        b.deal_number,
+        b.deal_name,
+        b.company_id,
+        b.company_name,
+        b.stage_name,
+        b.estimating_substage,
+        b.assigned_rep_name,
+        'estimating_gate_gap'::text AS disconnect_type,
+        'Estimating gate gap'::text AS disconnect_label,
+        'critical'::text AS disconnect_severity,
+        'Required estimating artifacts are missing.'::text AS disconnect_summary,
+        'Stage requirements indicate missing supporting documents or files for the current phase.'::text AS disconnect_details,
+        FLOOR(EXTRACT(EPOCH FROM (NOW() - COALESCE(b.last_activity_at, NOW() - INTERVAL '1 day'))) / 86400)::int AS age_days,
+        b.open_task_count,
+        b.inbound_without_followup_count,
+        b.last_activity_at,
+        b.latest_customer_email_at,
+        b.proposal_status,
+        b.procore_sync_status,
+        b.procore_sync_direction,
+        b.procore_last_synced_at,
+        b.procore_sync_updated_at,
+        b.procore_drift_reason
+      FROM base b
+      JOIN pipeline_stage_config psc ON psc.name = b.stage_name
+      WHERE COALESCE(jsonb_array_length(psc.required_documents), 0) > (
+        SELECT COUNT(DISTINCT f.category)::int
+        FROM files f
+        WHERE f.deal_id = b.id
+          AND f.is_active = TRUE
+      )
+
+      UNION ALL
+
+      SELECT
+        id,
+        deal_number,
+        deal_name,
+        company_id,
+        company_name,
+        stage_name,
+        estimating_substage,
+        assigned_rep_name,
+        'procore_bid_board_drift'::text AS disconnect_type,
+        'Bid board sync drift'::text AS disconnect_label,
+        'critical'::text AS disconnect_severity,
+        'Procore bid board and CRM stage state are out of sync.'::text AS disconnect_summary,
+        COALESCE(procore_drift_reason, 'The latest Procore sync record is not marked synced.')::text AS disconnect_details,
+        FLOOR(EXTRACT(EPOCH FROM (NOW() - COALESCE(procore_sync_updated_at, NOW() - INTERVAL '1 day'))) / 86400)::int AS age_days,
+        open_task_count,
+        inbound_without_followup_count,
+        last_activity_at,
+        latest_customer_email_at,
+        proposal_status,
+        procore_sync_status,
+        procore_sync_direction,
+        procore_last_synced_at,
+        procore_sync_updated_at,
+        procore_drift_reason
+      FROM base
+      WHERE procore_project_id IS NOT NULL
+        AND procore_sync_status IS NOT NULL
+        AND procore_sync_status != 'synced'
+    )
+    SELECT *
+    FROM disconnect_rows
+    ORDER BY
+      CASE disconnect_severity
+        WHEN 'critical' THEN 0
+        WHEN 'high' THEN 1
+        WHEN 'medium' THEN 2
+        ELSE 3
+      END,
+      age_days DESC NULLS LAST,
+      deal_number ASC
+    LIMIT ${limit}
+  `);
+
+  return getRows(rowsResult).map((row) => ({
+    id: row.id,
+    ...getDisconnectCaseIdentity({
+      id: row.id,
+      disconnectType: row.disconnect_type,
+    }),
+    dealNumber: row.deal_number,
+    dealName: row.deal_name,
+    companyId: row.company_id ?? null,
+    companyName: row.company_name ?? null,
+    stageName: row.stage_name ?? null,
+    estimatingSubstage: row.estimating_substage ?? null,
+    assignedRepName: row.assigned_rep_name ?? null,
+    disconnectType: row.disconnect_type,
+    disconnectLabel: row.disconnect_label,
+    disconnectSeverity: row.disconnect_severity,
+    disconnectSummary: row.disconnect_summary,
+    disconnectDetails: row.disconnect_details ?? null,
+    ageDays: row.age_days == null ? null : Number(row.age_days),
+    openTaskCount: Number(row.open_task_count ?? 0),
+    inboundWithoutFollowupCount: Number(row.inbound_without_followup_count ?? 0),
+    lastActivityAt: row.last_activity_at ?? null,
+    latestCustomerEmailAt: row.latest_customer_email_at ?? null,
+    proposalStatus: row.proposal_status ?? null,
+    procoreSyncStatus: row.procore_sync_status ?? null,
+    procoreSyncDirection: row.procore_sync_direction ?? null,
+    procoreLastSyncedAt: row.procore_last_synced_at ?? null,
+    procoreSyncUpdatedAt: row.procore_sync_updated_at ?? null,
+    procoreDriftReason: row.procore_drift_reason ?? null,
+  }));
+}
 
 export async function generateDealCopilotPacket(
   tenantDb: TenantDb,
