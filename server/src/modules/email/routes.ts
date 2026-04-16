@@ -10,7 +10,7 @@ import {
   getEmailThread,
   getUserEmails,
   getEmailAssignmentQueue,
-  associateEmailToDeal,
+  associateEmailToEntity,
 } from "./service.js";
 import { getDealById } from "../deals/service.js";
 
@@ -205,11 +205,25 @@ router.get("/:id", async (req, res, next) => {
 });
 
 // POST /api/email/:id/associate — manually associate email to a deal
-// RBAC: verify user owns the email (if rep) and has access to the target deal
+// RBAC: verify user owns the email (if rep) and has access to the target deal when needed
 router.post("/:id/associate", async (req, res, next) => {
   try {
-    const { dealId } = req.body;
-    if (!dealId) throw new AppError(400, "dealId is required");
+    const requestedEntityType = req.body.assignedEntityType as string | undefined;
+    if (requestedEntityType && requestedEntityType !== "deal") {
+      throw new AppError(400, "Only deal assignments are supported by this endpoint");
+    }
+
+    // Keep the public contract deal-only until non-deal assignment targets can be stored consistently.
+    const assignedEntityType = "deal" as const;
+    const assignedEntityId = (req.body.assignedEntityId as string | undefined) ?? (req.body.dealId as string | undefined);
+    const assignedDealId = (req.body.assignedDealId as string | null | undefined) ?? (req.body.dealId as string | undefined) ?? assignedEntityId ?? null;
+
+    if (!assignedEntityId) {
+      throw new AppError(400, "assignedEntityId is required");
+    }
+    if (assignedDealId != null && assignedDealId !== assignedEntityId) {
+      throw new AppError(400, "assignedDealId must match assignedEntityId for deal assignments");
+    }
 
     // Verify the email exists and the user has permission to modify it
     const email = await getEmailById(req.tenantDb!, req.params.id);
@@ -219,11 +233,23 @@ router.post("/:id/associate", async (req, res, next) => {
       throw new AppError(403, "You can only modify your own emails");
     }
 
-    // Verify the user has access to the target deal (existing RBAC)
-    const deal = await getDealById(req.tenantDb!, dealId, req.user!.role, req.user!.id);
-    if (!deal) throw new AppError(404, "Deal not found");
+    if (assignedEntityType === "deal") {
+      const deal = await getDealById(req.tenantDb!, assignedEntityId, req.user!.role, req.user!.id);
+      if (!deal) throw new AppError(404, "Deal not found");
+    }
 
-    await associateEmailToDeal(req.tenantDb!, req.params.id, dealId);
+    await associateEmailToEntity(
+      req.tenantDb!,
+      req.params.id,
+      {
+        assignedEntityType,
+        assignedEntityId,
+        assignedDealId,
+      },
+      req.user!.role,
+      req.user!.id,
+      req.user!.activeOfficeId ?? req.user!.officeId
+    );
     await req.commitTransaction!();
     res.json({ success: true });
   } catch (err) {

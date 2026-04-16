@@ -6,6 +6,19 @@ export interface EmailAssignmentQueueDealCandidate {
   name: string;
 }
 
+export interface EmailAssignmentQueueLeadCandidate {
+  id: string;
+  leadNumber: string;
+  name: string;
+  relatedDealId: string | null;
+}
+
+export interface EmailAssignmentQueuePropertyCandidate {
+  id: string;
+  name: string;
+  relatedDealIds: string[];
+}
+
 export interface EmailAssignmentQueueItem {
   email: {
     id: string;
@@ -14,9 +27,12 @@ export interface EmailAssignmentQueueItem {
     fromAddress: string;
     sentAt: string;
   };
+  companyId: string | null;
   contactName: string | null;
   companyName: string | null;
   candidateDeals: EmailAssignmentQueueDealCandidate[];
+  candidateLeads: EmailAssignmentQueueLeadCandidate[];
+  candidateProperties: EmailAssignmentQueuePropertyCandidate[];
   suggestedAssignment: {
     assignedEntityType: string | null;
     assignedEntityId: string | null;
@@ -29,9 +45,15 @@ export interface EmailAssignmentQueueItem {
   };
 }
 
+export interface EmailAssignmentTarget {
+  assignedEntityType: "deal";
+  assignedEntityId: string;
+  assignedDealId: string;
+}
+
 interface EmailAssignmentQueueViewProps {
   items: EmailAssignmentQueueItem[];
-  onAssign: (emailId: string, dealId: string) => Promise<void>;
+  onAssign: (emailId: string, target: EmailAssignmentTarget) => Promise<void>;
 }
 
 function formatDateTime(value: string) {
@@ -39,15 +61,50 @@ function formatDateTime(value: string) {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
 }
 
+function encodeTarget(target: EmailAssignmentTarget) {
+  return JSON.stringify(target);
+}
+
+function decodeTarget(value: string): EmailAssignmentTarget | null {
+  if (!value) return null;
+  try {
+    return JSON.parse(value) as EmailAssignmentTarget;
+  } catch {
+    return null;
+  }
+}
+
+function buildAssignmentOptions(item: EmailAssignmentQueueItem): Array<{ label: string; value: EmailAssignmentTarget }> {
+  const options: Array<{ label: string; value: EmailAssignmentTarget }> = [];
+
+  for (const deal of item.candidateDeals) {
+    options.push({
+      label: `Deal · ${deal.dealNumber} · ${deal.name}`,
+      value: {
+        assignedEntityType: "deal",
+        assignedEntityId: deal.id,
+        assignedDealId: deal.id,
+      },
+    });
+  }
+
+  return options;
+}
+
 function AssignmentQueueCard({
   item,
   onAssign,
 }: {
   item: EmailAssignmentQueueItem;
-  onAssign: (emailId: string, dealId: string) => Promise<void>;
+  onAssign: (emailId: string, target: EmailAssignmentTarget) => Promise<void>;
 }) {
-  const [selectedDealId, setSelectedDealId] = useState(item.candidateDeals[0]?.id ?? "");
+  const assignmentOptions = buildAssignmentOptions(item);
+  const [selectedTarget, setSelectedTarget] = useState(
+    assignmentOptions.length === 1 ? encodeTarget(assignmentOptions[0]!.value) : ""
+  );
   const [saving, setSaving] = useState(false);
+
+  const parsedTarget = decodeTarget(selectedTarget);
 
   return (
     <div className="rounded-lg border bg-background p-4 shadow-sm">
@@ -71,37 +128,46 @@ function AssignmentQueueCard({
 
       <div className="mt-3 flex flex-wrap items-center gap-2">
         <select
-          className="min-w-[240px] rounded-md border bg-background px-3 py-2 text-sm"
-          value={selectedDealId}
-          onChange={(event) => setSelectedDealId(event.target.value)}
+          className="min-w-[300px] rounded-md border bg-background px-3 py-2 text-sm"
+          value={selectedTarget}
+          onChange={(event) => setSelectedTarget(event.target.value)}
         >
-          {item.candidateDeals.length === 0 ? (
-            <option value="">No candidate deals</option>
+          {assignmentOptions.length === 0 ? (
+            <option value="">No safe assignment targets</option>
           ) : (
-            item.candidateDeals.map((deal) => (
-              <option key={deal.id} value={deal.id}>
-                {deal.dealNumber} · {deal.name}
-              </option>
-            ))
+            <>
+              <option value="">Select a target...</option>
+              {assignmentOptions.map((option) => (
+                <option key={encodeTarget(option.value)} value={encodeTarget(option.value)}>
+                  {option.label}
+                </option>
+              ))}
+            </>
           )}
         </select>
         <button
           type="button"
           className="rounded-md border px-3 py-2 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50"
-          disabled={!selectedDealId || saving}
+          disabled={!parsedTarget || saving}
           onClick={async () => {
-            if (!selectedDealId) return;
+            if (!parsedTarget) return;
             setSaving(true);
             try {
-              await onAssign(item.email.id, selectedDealId);
+              await onAssign(item.email.id, parsedTarget);
             } finally {
               setSaving(false);
             }
           }}
         >
-          {saving ? "Assigning..." : "Assign"}
+          {saving ? "Assigning..." : "Resolve"}
         </button>
       </div>
+
+      {assignmentOptions.length === 0 && (
+        <p className="mt-2 text-xs text-muted-foreground">
+          This email can be reviewed, but it does not have a safe deal target yet.
+        </p>
+      )}
 
       <div className="mt-3 flex flex-wrap gap-2 text-xs">
         <span className="rounded-full border px-2 py-1">Matched by {item.suggestedAssignment.matchedBy}</span>

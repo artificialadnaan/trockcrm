@@ -443,6 +443,8 @@ export async function processInboundMessage(
     priorThreadAssignment,
     contactCompanyId: contactContext.companyId,
     dealCandidates: contactContext.dealCandidates,
+    leadCandidates: contactContext.leadCandidates,
+    propertyCandidates: assignmentModule.buildPropertyCandidatesFromDeals(contactContext.dealCandidates),
   });
 
   // Insert email record
@@ -491,7 +493,7 @@ export async function processInboundMessage(
   // (no separate UPDATE needed)
   const activitySourceEntityType = association.dealId ? "deal" : "contact";
   const activitySourceEntityId = association.dealId ?? contactMatch.id;
-  const responsibleUserId = association.responsibleUserId ?? userId;
+  const responsibleUserId = userId;
   await client.query(
     `INSERT INTO ${schemaName}.activities
      (type, responsible_user_id, performed_by_user_id, source_entity_type, source_entity_id,
@@ -522,7 +524,7 @@ export async function processInboundMessage(
       ambiguityReason: assignment.ambiguityReason ?? "assignment_review",
       candidateDealNames: association.activeDealNames,
     });
-  } else if (association.activeDealCount === 1 && assignment.matchedBy === "single_deal") {
+  } else if (association.dealId) {
     await evaluateInboundEmailTasks(
       client,
       schemaName,
@@ -539,7 +541,7 @@ export async function processInboundMessage(
         emailSubject: subject,
         activeDealCount: association.activeDealCount,
         activeDealNames: association.activeDealNames,
-        unreadInbound: association.dealId ? 30 : 20,
+        unreadInbound: 30,
       }
     );
   }
@@ -658,7 +660,7 @@ async function getContactAssignmentContextRaw(
                 d.property_address, d.property_city, d.property_state, d.property_zip
            FROM ${schemaName}.deals d
            JOIN public.pipeline_stage_config ps ON ps.id = d.stage_id
-          WHERE company_id = $1 AND is_active = true`,
+          WHERE d.company_id = $1 AND d.is_active = true`,
         [companyId]
       )
     : { rows: [] };

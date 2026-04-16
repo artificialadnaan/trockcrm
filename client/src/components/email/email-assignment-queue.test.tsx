@@ -15,11 +15,18 @@ describe("EmailAssignmentQueueView", () => {
               fromAddress: "customer@example.com",
               sentAt: "2026-04-15T14:00:00.000Z",
             },
+            companyId: "company-1",
             contactName: "Casey Customer",
             companyName: "Alpha Roofing",
             candidateDeals: [
               { id: "deal-1", dealNumber: "TR-2026-0001", name: "Alpha Roof" },
               { id: "deal-2", dealNumber: "TR-2026-0002", name: "Beta Roof" },
+            ],
+            candidateLeads: [
+              { id: "lead-1", leadNumber: "TR-2026-L001", name: "Alpha Lead", relatedDealId: "deal-1" },
+            ],
+            candidateProperties: [
+              { id: "property-1", name: "123 Main St", relatedDealIds: ["deal-1"] },
             ],
             suggestedAssignment: {
               assignedEntityType: "company",
@@ -40,8 +47,11 @@ describe("EmailAssignmentQueueView", () => {
     expect(html).toContain("Casey Customer");
     expect(html).toContain("Question about TR-2026-0002");
     expect(html).toContain("TR-2026-0002");
-    expect(html).toContain("Assign");
+    expect(html).toContain("Resolve");
     expect(html).toContain("multiple_deal_candidates");
+    expect(html).not.toContain("Lead · TR-2026-L001");
+    expect(html).not.toContain("Property · 123 Main St");
+    expect(html).not.toContain("Company only");
   });
 
   it("renders an empty-state message when there are no items", () => {

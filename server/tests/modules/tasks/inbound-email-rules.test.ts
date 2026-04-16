@@ -59,6 +59,37 @@ describe("inbound email task rules", () => {
     });
   });
 
+  it("builds a reply-needed draft when a multi-deal contact is explicitly resolved to a deal", async () => {
+    const replyRule = TASK_RULES.find((rule) => rule.id === "inbound_email_reply_needed");
+    expect(replyRule).toBeDefined();
+
+    const draft = await replyRule!.buildTask(
+      makeEmailContext({
+        dealId: "deal-2",
+        activeDealCount: 2,
+        activeDealNames: ["D-1001 Project Alpha", "D-1002 Project Beta"],
+      })
+    );
+
+    expect(draft).toMatchObject({
+      title: "Reply to Brett Smith: Project Alpha follow-up",
+      type: "inbound_email",
+      assignedTo: "user-1",
+      officeId: "office-1",
+      originRule: "inbound_email_reply_needed",
+      sourceRule: "inbound_email_reply_needed",
+      sourceEvent: "email.received",
+      dedupeKey: "email:email-1:reply_needed",
+      reasonCode: "reply_needed",
+      priority: "high",
+      priorityScore: 80,
+      status: "pending",
+      dealId: "deal-2",
+      contactId: "contact-1",
+      emailId: "email-1",
+    });
+  });
+
   it("builds a disambiguation draft when a contact has multiple active deals", async () => {
     const disambiguationRule = TASK_RULES.find((rule) => rule.id === "inbound_email_deal_disambiguation");
     expect(disambiguationRule).toBeDefined();
