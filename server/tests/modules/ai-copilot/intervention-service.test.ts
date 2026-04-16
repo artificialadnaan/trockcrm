@@ -44,6 +44,8 @@ type DisconnectCaseRecord = {
   reopenCount: number;
   firstDetectedAt: Date;
   lastDetectedAt: Date;
+  currentLifecycleStartedAt: Date;
+  lastReopenedAt: Date | null;
   lastIntervenedAt: Date | null;
   resolvedAt: Date | null;
   resolutionReason: string | null;
@@ -155,6 +157,8 @@ function makeCase(
     reopenCount: 0,
     firstDetectedAt: now,
     lastDetectedAt: now,
+    currentLifecycleStartedAt: now,
+    lastReopenedAt: null,
     lastIntervenedAt: null,
     resolvedAt: null,
     resolutionReason: null,
@@ -331,6 +335,32 @@ describe("AI intervention service", () => {
       reopenCount: 1,
       resolvedAt: null,
       resolutionReason: null,
+    });
+  });
+
+  it("resets lifecycle timestamps when a resolved case reopens", async () => {
+    disconnectRowsMock.mockResolvedValue([makeDisconnectRow()]);
+
+    const now = new Date("2026-04-16T12:00:00.000Z");
+    const reopenedAt = new Date("2026-04-18T12:00:00.000Z");
+    const tenantDb = createTenantDb({
+      cases: [
+        makeCase({
+          status: "resolved",
+          currentLifecycleStartedAt: now,
+          lastReopenedAt: null,
+          resolvedAt: now,
+        }),
+      ],
+    });
+
+    await materializeDisconnectCases(tenantDb as any, { officeId: "office-1", now: reopenedAt });
+
+    expect(tenantDb.state.cases[0]).toMatchObject({
+      status: "open",
+      currentLifecycleStartedAt: reopenedAt,
+      lastReopenedAt: reopenedAt,
+      reopenCount: 1,
     });
   });
 

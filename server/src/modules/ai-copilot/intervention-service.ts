@@ -119,6 +119,8 @@ function buildCaseInsert(
     reopenCount: 0,
     firstDetectedAt: now,
     lastDetectedAt: now,
+    currentLifecycleStartedAt: now,
+    lastReopenedAt: null,
     metadataJson: buildCaseMetadata(row),
   };
 }
@@ -254,6 +256,8 @@ export async function materializeDisconnectCases(
       if (shouldReopenCase(existing, now)) {
         existing.status = "open";
         existing.reopenCount += 1;
+        existing.currentLifecycleStartedAt = now;
+        existing.lastReopenedAt = now;
         existing.snoozedUntil = null;
         existing.resolvedAt = null;
         existing.resolutionReason = null;
@@ -311,6 +315,8 @@ export async function materializeDisconnectCases(
         resolvedAt: reopen ? null : existing.resolvedAt,
         resolutionReason: reopen ? null : existing.resolutionReason,
         reopenCount: reopen ? existing.reopenCount + 1 : existing.reopenCount,
+        currentLifecycleStartedAt: reopen ? now : existing.currentLifecycleStartedAt,
+        lastReopenedAt: reopen ? now : existing.lastReopenedAt,
       })
       .where(eq(aiDisconnectCases.id, existing.id));
   }
