@@ -60,6 +60,11 @@ BEGIN
         office_schema
       );
 
+      EXECUTE format(
+        'ALTER TABLE %I.deals DISABLE TRIGGER USER',
+        office_schema
+      );
+
       EXECUTE format($sql$
         WITH staged_contact_links AS (
           SELECT DISTINCT
@@ -284,6 +289,11 @@ BEGIN
           USING created_lead_id, deal_row.deal_id;
         END LOOP;
       END IF;
+
+      EXECUTE format(
+        'ALTER TABLE %I.deals ENABLE TRIGGER USER',
+        office_schema
+      );
     END IF;
   END LOOP;
 END $$;
