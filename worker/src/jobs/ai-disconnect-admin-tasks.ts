@@ -29,6 +29,7 @@ export async function runAiDisconnectAdminTaskGeneration(): Promise<void> {
 
       try {
         await client.query("BEGIN");
+        await client.query(`SET LOCAL search_path TO ${schemaName}, public`);
 
         const assignees = await client.query(
           "SELECT id FROM public.users WHERE office_id = $1 AND role IN ('director', 'admin') AND is_active = true ORDER BY role DESC, created_at ASC LIMIT 1",

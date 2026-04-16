@@ -28,6 +28,7 @@ describe("ai disconnect admin task worker", () => {
       }
       if (sql.includes("SELECT pg_try_advisory_lock")) return { rows: [{ acquired: true }] };
       if (sql === "BEGIN" || sql === "COMMIT") return { rows: [] };
+      if (sql === "SET LOCAL search_path TO office_beta, public") return { rows: [] };
       if (sql.includes("FROM public.users") && sql.includes("role IN ('director', 'admin')")) {
         return { rows: [{ id: "director-1" }] };
       }
@@ -119,6 +120,7 @@ describe("ai disconnect admin task worker", () => {
       }
       if (sql.includes("SELECT pg_try_advisory_lock")) return { rows: [{ acquired: true }] };
       if (sql === "BEGIN" || sql === "COMMIT") return { rows: [] };
+      if (sql === "SET LOCAL search_path TO office_beta, public") return { rows: [] };
       if (sql.includes("FROM public.users") && sql.includes("role IN ('director', 'admin')")) {
         return { rows: [{ id: "director-1" }] };
       }
