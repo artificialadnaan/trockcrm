@@ -1,7 +1,8 @@
-import { sql, eq } from "drizzle-orm";
+import { sql, eq, and, gte } from "drizzle-orm";
+import crypto from "crypto";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
-import { userOfficeAccess, offices, users } from "@trock-crm/shared/schema";
+import { aiFeedback, userOfficeAccess, offices, users } from "@trock-crm/shared/schema";
 import { db, pool } from "../../db.js";
 import { drizzle } from "drizzle-orm/node-postgres";
 
@@ -26,7 +27,59 @@ export interface SearchResponse {
   query: string;
 }
 
+export interface AiSearchEvidence {
+  id: string;
+  sourceType: string;
+  sourceId: string;
+  dealId: string | null;
+  entityType: "deal" | "contact" | "file" | "crm_text";
+  entityLabel: string | null;
+  title: string;
+  snippet: string;
+  deepLink: string;
+  interactionScore?: number;
+}
+
+export interface AiSearchEntityAnchor {
+  entityType: "deal" | "contact" | "file";
+  id: string;
+  label: string;
+  deepLink: string;
+  interactionScore?: number;
+}
+
+export interface AiSearchRecommendedAction {
+  actionType:
+    | "open_best_match"
+    | "review_deal_emails"
+    | "open_contact"
+    | "open_file_context"
+    | "open_deal_context"
+    | "open_deal_copilot"
+    | "refresh_deal_copilot";
+  label: string;
+  rationale: string;
+  deepLink: string;
+  executionMode: "navigate" | "api_then_navigate";
+  apiEndpoint?: string;
+  apiMethod?: "POST";
+  successMessage?: string;
+  interactionScore?: number;
+}
+
+export interface AiSearchResponse {
+  queryId: string;
+  query: string;
+  intent: "deal_lookup" | "contact_lookup" | "file_lookup" | "account_research" | "activity_lookup" | "general_search";
+  summary: string;
+  structured: SearchResponse;
+  topEntities: AiSearchEntityAnchor[];
+  recommendedActions: AiSearchRecommendedAction[];
+  evidence: AiSearchEvidence[];
+}
+
 const MAX_RESULTS_PER_TYPE = 5;
+const MAX_AI_EVIDENCE = 5;
 
 /**
  * Search across deals, contacts, and files using PostgreSQL full-text search.
@@ -55,6 +108,35 @@ export async function globalSearch(
 
   // Default: single-office search (reps)
   return singleOfficeSearch(tenantDb, sanitized, types);
+}
+
+export async function naturalLanguageSearch(
+  tenantDb: TenantDb,
+  query: string,
+  types: Array<"deals" | "contacts" | "files"> = ["deals", "contacts", "files"],
+  userRole?: string,
+  userId?: string,
+): Promise<AiSearchResponse> {
+  const structured = await globalSearch(tenantDb, query, types, userRole, userId);
+  const intent = classifySearchIntent(structured.query);
+  const [evidence, interactionScores] = await Promise.all([
+    searchAiEvidence(tenantDb, structured.query),
+    getSearchInteractionScores(tenantDb),
+  ]);
+  const rankedEvidence = rankEvidenceByInteractions(evidence, interactionScores);
+  const rankedTopEntities = buildTopEntityAnchors(structured, interactionScores);
+  const rankedActions = buildRecommendedActions(structured, rankedEvidence, interactionScores, intent);
+
+  return {
+    queryId: crypto.randomUUID(),
+    query: structured.query,
+    intent,
+    summary: buildAiSearchSummary(structured, rankedEvidence),
+    structured,
+    topEntities: rankedTopEntities,
+    recommendedActions: rankedActions,
+    evidence: rankedEvidence,
+  };
 }
 
 async function singleOfficeSearch(
@@ -285,4 +367,357 @@ async function searchFiles(tenantDb: TenantDb, query: string): Promise<SearchRes
       rank: Number(r.rank ?? 0),
     };
   });
+}
+
+async function searchAiEvidence(tenantDb: TenantDb, query: string): Promise<AiSearchEvidence[]> {
+  const sanitized = query.trim().replace(/[^\w\s-]/g, "").trim();
+  if (sanitized.length < 2) return [];
+
+  const result = await tenantDb.execute(sql`
+    WITH ranked_chunks AS (
+      SELECT
+        c.id,
+        d.source_type,
+        d.source_id,
+        d.deal_id,
+        c.text,
+        c.metadata_json,
+        ts_rank_cd(
+          to_tsvector('english', c.text),
+          websearch_to_tsquery('english', ${sanitized})
+        ) AS rank
+      FROM ai_embedding_chunks c
+      JOIN ai_document_index d ON d.id = c.document_id
+      WHERE to_tsvector('english', c.text) @@ websearch_to_tsquery('english', ${sanitized})
+    )
+    SELECT
+      id,
+      source_type,
+      source_id,
+      deal_id,
+      text,
+      metadata_json,
+      rank
+    FROM ranked_chunks
+    ORDER BY rank DESC
+    LIMIT ${MAX_AI_EVIDENCE}
+  `);
+
+  const rows = (result as any).rows ?? result;
+  return rows.map((row: any): AiSearchEvidence => {
+    const snippet = String(row.text ?? "").replace(/\s+/g, " ").trim().slice(0, 220);
+    const sourceType = String(row.source_type ?? "unknown");
+    const sourceId = String(row.source_id ?? "");
+    const metadata = row.metadata_json ?? {};
+    const dealId = row.deal_id ? String(row.deal_id) : null;
+
+    let title = sourceType.replace(/_/g, " ");
+    let deepLink = "/search";
+
+    if (sourceType === "email_message") {
+      title = metadata.subject ?? "Email evidence";
+      if (dealId) deepLink = `/deals/${dealId}`;
+    } else if (sourceType === "activity_note") {
+      title = metadata.subject ?? metadata.activityType ?? "Activity note";
+      if (dealId) deepLink = `/deals/${dealId}`;
+    } else if (sourceType === "estimate_snapshot") {
+      title = "Estimate snapshot";
+      if (dealId) deepLink = `/deals/${dealId}`;
+    }
+
+    return {
+      id: String(row.id),
+      sourceType,
+      sourceId,
+      dealId,
+      entityType: dealId ? "deal" : "crm_text",
+      entityLabel: dealId ? title : null,
+      title,
+      snippet: snippet.length === 220 ? `${snippet}...` : snippet,
+      deepLink,
+    };
+  });
+}
+
+function buildAiSearchSummary(structured: SearchResponse, evidence: AiSearchEvidence[]): string {
+  const intent = classifySearchIntent(structured.query);
+  if (structured.total === 0 && evidence.length === 0) {
+    return `No CRM matches or indexed evidence were found for "${structured.query}".`;
+  }
+
+  const parts: string[] = [];
+  if (intent !== "general_search") {
+    parts.push(`Search intent looks like ${intent.replace(/_/g, " ")}.`);
+  }
+
+  if (structured.total > 0) {
+    parts.push(
+      `Found ${structured.total} structured CRM match${structured.total === 1 ? "" : "es"} across ${[
+        structured.deals.length ? `${structured.deals.length} deal${structured.deals.length === 1 ? "" : "s"}` : null,
+        structured.contacts.length ? `${structured.contacts.length} contact${structured.contacts.length === 1 ? "" : "s"}` : null,
+        structured.files.length ? `${structured.files.length} file${structured.files.length === 1 ? "" : "s"}` : null,
+      ].filter(Boolean).join(", ")}.`
+    );
+  }
+
+  if (evidence.length > 0) {
+    parts.push(
+      `Top indexed evidence includes ${evidence
+        .slice(0, 2)
+        .map((item) => `"${item.title}"`)
+        .join(" and ")}.`
+    );
+  }
+
+  const topDeal = structured.deals[0];
+  if (topDeal) {
+    parts.push(`The strongest structured match is deal "${topDeal.primaryLabel}".`);
+  } else if (structured.contacts[0]) {
+    parts.push(`The strongest structured match is contact "${structured.contacts[0].primaryLabel}".`);
+  } else if (structured.files[0]) {
+    parts.push(`The strongest structured match is file "${structured.files[0].primaryLabel}".`);
+  }
+
+  return parts.join(" ");
+}
+
+function classifySearchIntent(query: string): AiSearchResponse["intent"] {
+  const normalized = query.toLowerCase().trim();
+  if (!normalized) return "general_search";
+  if (/^d[-\s]?\d+/i.test(normalized) || normalized.includes("deal")) return "deal_lookup";
+  if (normalized.includes("contact") || normalized.includes("email") || normalized.includes("@")) return "contact_lookup";
+  if (normalized.includes("file") || normalized.includes("pdf") || normalized.includes("document") || normalized.includes("attachment")) {
+    return "file_lookup";
+  }
+  if (normalized.includes("company") || normalized.includes("account") || normalized.includes("customer")) return "account_research";
+  if (normalized.includes("call") || normalized.includes("activity") || normalized.includes("note") || normalized.includes("meeting")) {
+    return "activity_lookup";
+  }
+  return "general_search";
+}
+
+function buildTopEntityAnchors(
+  structured: SearchResponse,
+  interactionScores: SearchInteractionScores
+): AiSearchEntityAnchor[] {
+  return [...structured.deals, ...structured.contacts, ...structured.files]
+    .map((result, index) => ({
+      anchor: {
+        entityType: result.entityType,
+        id: result.id,
+        label: result.primaryLabel,
+        deepLink: result.deepLink,
+        interactionScore: scoreDeepLink(result.deepLink, interactionScores),
+      } satisfies AiSearchEntityAnchor,
+      index,
+    }))
+    .sort((left, right) =>
+      ((right.anchor.interactionScore ?? 0) - (left.anchor.interactionScore ?? 0)) ||
+      (left.index - right.index)
+    )
+    .map(({ anchor }) => anchor)
+    .slice(0, 3);
+}
+
+function buildRecommendedActions(
+  structured: SearchResponse,
+  evidence: AiSearchEvidence[],
+  interactionScores: SearchInteractionScores,
+  currentIntent: AiSearchResponse["intent"]
+): AiSearchRecommendedAction[] {
+  const actions: Array<{ action: AiSearchRecommendedAction; index: number }> = [];
+  const push = (action: AiSearchRecommendedAction) => {
+    if (!actions.some((existing) => existing.action.deepLink === action.deepLink && existing.action.label === action.label)) {
+      actions.push({ action, index: actions.length });
+    }
+  };
+
+  const topDeal = structured.deals[0];
+  const topContact = structured.contacts[0];
+  const topFile = structured.files[0];
+  const topEvidenceDeal = evidence.find((item) => item.dealId)?.dealId ?? null;
+
+  if (topDeal) {
+    push({
+      actionType: "open_deal_copilot",
+      label: "Open Deal Copilot",
+      rationale: `Jump straight into ${topDeal.primaryLabel} and review the AI copilot context.`,
+      deepLink: `${topDeal.deepLink}?tab=overview&focus=copilot`,
+      executionMode: "navigate",
+      interactionScore: scoreAction("open_deal_copilot", `${topDeal.deepLink}?tab=overview&focus=copilot`, interactionScores, currentIntent),
+    });
+    push({
+      actionType: "review_deal_emails",
+      label: "Review Deal Emails",
+      rationale: `Open the email tab for ${topDeal.primaryLabel} to verify the communications behind this answer.`,
+      deepLink: `${topDeal.deepLink}?tab=email`,
+      executionMode: "navigate",
+      interactionScore: scoreAction("review_deal_emails", `${topDeal.deepLink}?tab=email`, interactionScores, currentIntent),
+    });
+    push({
+      actionType: "refresh_deal_copilot",
+      label: "Refresh Deal Copilot",
+      rationale: `Queue a fresh AI read on ${topDeal.primaryLabel} before you act on this search result.`,
+      deepLink: `${topDeal.deepLink}?tab=overview&focus=copilot`,
+      executionMode: "api_then_navigate",
+      apiEndpoint: `/ai/deals/${topDeal.id}/regenerate`,
+      apiMethod: "POST",
+      successMessage: "Deal copilot refresh queued",
+      interactionScore: scoreAction("refresh_deal_copilot", `${topDeal.deepLink}?tab=overview&focus=copilot`, interactionScores, currentIntent),
+    });
+    push({
+      actionType: "open_best_match",
+      label: "Open Best Deal Match",
+      rationale: `Jump to ${topDeal.primaryLabel} to inspect the strongest structured deal result.`,
+      deepLink: `${topDeal.deepLink}?tab=overview`,
+      executionMode: "navigate",
+      interactionScore: scoreAction("open_best_match", `${topDeal.deepLink}?tab=overview`, interactionScores, currentIntent),
+    });
+  }
+
+  if (!topDeal && topEvidenceDeal) {
+    push({
+      actionType: "open_deal_context",
+      label: "Open Deal Context",
+      rationale: "The strongest AI evidence points to a specific deal context.",
+      deepLink: `/deals/${topEvidenceDeal}?tab=overview`,
+      executionMode: "navigate",
+      interactionScore: scoreAction("open_deal_context", `/deals/${topEvidenceDeal}?tab=overview`, interactionScores, currentIntent),
+    });
+    push({
+      actionType: "review_deal_emails",
+      label: "Review Deal Emails",
+      rationale: "Open the deal email context tied to the strongest evidence.",
+      deepLink: `/deals/${topEvidenceDeal}?tab=email`,
+      executionMode: "navigate",
+      interactionScore: scoreAction("review_deal_emails", `/deals/${topEvidenceDeal}?tab=email`, interactionScores, currentIntent),
+    });
+  }
+
+  if (topContact) {
+    push({
+      actionType: "open_contact",
+      label: "Open Best Contact Match",
+      rationale: `Jump to ${topContact.primaryLabel} to review the strongest contact result.`,
+      deepLink: topContact.deepLink,
+      executionMode: "navigate",
+      interactionScore: scoreAction("open_contact", topContact.deepLink, interactionScores, currentIntent),
+    });
+  }
+
+  if (topFile) {
+    push({
+      actionType: "open_file_context",
+      label: "Open File Context",
+      rationale: `Review the file location tied to ${topFile.primaryLabel}.`,
+      deepLink: topFile.deepLink,
+      executionMode: "navigate",
+      interactionScore: scoreAction("open_file_context", topFile.deepLink, interactionScores, currentIntent),
+    });
+  }
+
+  return actions
+    .sort((left, right) =>
+      ((right.action.interactionScore ?? 0) - (left.action.interactionScore ?? 0)) ||
+      (left.index - right.index)
+    )
+    .map(({ action }) => action)
+    .slice(0, 3);
+}
+
+interface SearchInteractionScores {
+  deepLinkCounts: Map<string, number>;
+  actionCounts: Map<string, number>;
+  intentActionCounts: Map<string, Map<string, number>>;
+}
+
+async function getSearchInteractionScores(tenantDb: TenantDb): Promise<SearchInteractionScores> {
+  const rows = (await tenantDb
+    .select({
+      targetId: aiFeedback.targetId,
+      feedbackValue: aiFeedback.feedbackValue,
+      comment: aiFeedback.comment,
+    })
+    .from(aiFeedback)
+    .where(
+      and(
+        eq(aiFeedback.targetType, "search_query"),
+        eq(aiFeedback.feedbackType, "search_interaction"),
+        gte(aiFeedback.createdAt, sql`NOW() - INTERVAL '90 days'`)
+      )
+    )) as Array<{ targetId: string; feedbackValue: string; comment: string | null }>;
+
+  const deepLinkCounts = new Map<string, number>();
+  const actionCounts = new Map<string, number>();
+  const queryIntentById = new Map<string, string>();
+  const intentActionCounts = new Map<string, Map<string, number>>();
+
+  for (const row of rows) {
+    if (!row.comment) continue;
+    try {
+      const parsed = JSON.parse(row.comment) as {
+        targetValue?: string;
+        deepLink?: string;
+        queryContext?: { intent?: string };
+      };
+      if (row.feedbackValue === "search_impression" && parsed.queryContext?.intent) {
+        queryIntentById.set(row.targetId, parsed.queryContext.intent);
+        continue;
+      }
+      const weight = row.feedbackValue === "recommended_action_executed" ? 4 : 1;
+      if (parsed.deepLink) {
+        deepLinkCounts.set(parsed.deepLink, (deepLinkCounts.get(parsed.deepLink) ?? 0) + weight);
+      }
+      if (parsed.targetValue) {
+        actionCounts.set(parsed.targetValue, (actionCounts.get(parsed.targetValue) ?? 0) + weight);
+        const intent = queryIntentById.get(row.targetId);
+        if (intent) {
+          const byIntent = intentActionCounts.get(intent) ?? new Map<string, number>();
+          const intentWeight = row.feedbackValue === "recommended_action_executed" ? 2 : 1;
+          byIntent.set(parsed.targetValue, (byIntent.get(parsed.targetValue) ?? 0) + intentWeight);
+          intentActionCounts.set(intent, byIntent);
+        }
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  return { deepLinkCounts, actionCounts, intentActionCounts };
+}
+
+function scoreDeepLink(deepLink: string, interactionScores: SearchInteractionScores) {
+  return interactionScores.deepLinkCounts.get(deepLink) ?? 0;
+}
+
+function scoreAction(
+  actionType: string,
+  deepLink: string,
+  interactionScores: SearchInteractionScores,
+  currentIntent: AiSearchResponse["intent"]
+) {
+  return (
+    (interactionScores.actionCounts.get(actionType) ?? 0) +
+    (interactionScores.deepLinkCounts.get(deepLink) ?? 0) +
+    (interactionScores.intentActionCounts.get(currentIntent)?.get(actionType) ?? 0)
+  );
+}
+
+function rankEvidenceByInteractions(
+  evidence: AiSearchEvidence[],
+  interactionScores: SearchInteractionScores
+): AiSearchEvidence[] {
+  return [...evidence]
+    .map((item, index) => ({
+      item: {
+        ...item,
+        interactionScore: scoreDeepLink(item.deepLink, interactionScores),
+      },
+      index,
+    }))
+    .sort((left, right) =>
+      ((right.item.interactionScore ?? 0) - (left.item.interactionScore ?? 0)) ||
+      (left.index - right.index)
+    )
+    .map(({ item }) => item);
 }

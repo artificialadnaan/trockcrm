@@ -8,9 +8,9 @@ export interface DirectorDashboardAction {
 export const DIRECTOR_DASHBOARD_ACTIONS: DirectorDashboardAction[] = [
   {
     key: "alerts",
-    label: "Open tasks",
-    title: "Open task queue",
-    to: "/tasks",
+    label: "Open AI actions",
+    title: "Open AI action queue",
+    to: "/admin/ai-actions",
   },
   {
     key: "reports",

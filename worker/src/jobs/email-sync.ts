@@ -564,6 +564,18 @@ export async function processInboundMessage(
     ]
   );
 
+  await client.query(
+    `INSERT INTO public.job_queue (job_type, payload, office_id, status, run_after)
+     VALUES ('ai_index_document', $1, $2, 'pending', NOW())`,
+    [
+      JSON.stringify({
+        sourceType: "email_message",
+        sourceId: emailId,
+      }),
+      officeId,
+    ]
+  );
+
   return true;
 }
 

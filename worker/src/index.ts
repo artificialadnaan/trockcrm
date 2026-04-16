@@ -15,6 +15,9 @@ import { runWeeklyDigest } from "./jobs/weekly-digest.js";
 import { runColdLeadWarming } from "./jobs/cold-lead-warming.js";
 import { runBidDeadlineCountdown } from "./jobs/bid-deadline.js";
 import { runProcoreSync } from "./jobs/procore-sync.js";
+import { runAiDisconnectDigest } from "./jobs/ai-disconnect-digest.js";
+import { runAiDisconnectEscalationScan } from "./jobs/ai-disconnect-escalation.js";
+import { runAiDisconnectAdminTaskGeneration } from "./jobs/ai-disconnect-admin-tasks.js";
 
 const POLL_INTERVAL_MS = 2000; // Poll job queue every 2 seconds
 
@@ -138,6 +141,39 @@ async function main() {
     }
   });
   console.log("[Worker] Cron scheduled: Procore sync poll every 15 minutes");
+
+  // Disconnect digest: weekdays at 7:15 AM CT
+  cron.schedule("15 7 * * 1-5", async () => {
+    console.log("[Worker:cron] Running disconnect digest...");
+    try {
+      await runAiDisconnectDigest();
+    } catch (err) {
+      console.error("[Worker:cron] Disconnect digest failed:", err);
+    }
+  }, { timezone: "America/Chicago" });
+  console.log("[Worker] Cron scheduled: disconnect digest at 7:15 AM CT weekdays");
+
+  // Disconnect admin tasks: weekdays at 7:30 AM CT
+  cron.schedule("30 7 * * 1-5", async () => {
+    console.log("[Worker:cron] Running disconnect admin task generation...");
+    try {
+      await runAiDisconnectAdminTaskGeneration();
+    } catch (err) {
+      console.error("[Worker:cron] Disconnect admin task generation failed:", err);
+    }
+  }, { timezone: "America/Chicago" });
+  console.log("[Worker] Cron scheduled: disconnect admin task generation at 7:30 AM CT weekdays");
+
+  // Disconnect escalation scan: weekdays at 7:45 AM CT
+  cron.schedule("45 7 * * 1-5", async () => {
+    console.log("[Worker:cron] Running disconnect escalation scan...");
+    try {
+      await runAiDisconnectEscalationScan();
+    } catch (err) {
+      console.error("[Worker:cron] Disconnect escalation scan failed:", err);
+    }
+  }, { timezone: "America/Chicago" });
+  console.log("[Worker] Cron scheduled: disconnect escalation scan at 7:45 AM CT weekdays");
 
   console.log("[Worker] Ready.");
 }

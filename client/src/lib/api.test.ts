@@ -22,4 +22,9 @@ describe("resolveApiBase", () => {
     expect(resolveApiBase({}, { hostname: "crm.trockconstruction.com" }))
       .toBe("https://api-production-ad218.up.railway.app/api");
   });
+
+  it("uses the ai-copilot API fallback on the ai-copilot frontend host", () => {
+    expect(resolveApiBase({}, { hostname: "frontend-ai-copilot.up.railway.app" }))
+      .toBe("https://api-ai-copilot.up.railway.app/api");
+  });
 });
