@@ -411,11 +411,13 @@ export async function trackSalesProcessDisconnectInteraction(input: {
   targetValue: string;
   comment?: string | null;
 }) {
+  const salesProcessDisconnectDashboardTargetId = "42e5f8ee-a758-4cf5-9f3f-c8ec4fef3d86";
+
   return api("/ai/feedback", {
     method: "POST",
     json: {
       targetType: "sales_process_disconnect_dashboard",
-      targetId: "sales-process-disconnect-dashboard",
+      targetId: salesProcessDisconnectDashboardTargetId,
       feedbackType: "ops_dashboard_interaction",
       feedbackValue: input.interactionType,
       comment: JSON.stringify({

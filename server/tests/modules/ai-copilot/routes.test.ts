@@ -187,7 +187,7 @@ describe("ai copilot routes", () => {
       .post("/api/ai/feedback")
       .send({
         targetType: "packet",
-        targetId: "packet-1",
+        targetId: "11111111-1111-4111-8111-111111111111",
         feedbackType: "packet_quality",
         feedbackValue: "useful",
       });
@@ -195,12 +195,27 @@ describe("ai copilot routes", () => {
     expect(res.status).toBe(201);
     expect(serviceMocks.recordAiFeedback).toHaveBeenCalledWith(expect.anything(), {
       targetType: "packet",
-      targetId: "packet-1",
+      targetId: "11111111-1111-4111-8111-111111111111",
       userId: "rep-1",
       feedbackType: "packet_quality",
       feedbackValue: "useful",
       comment: null,
     });
+  });
+
+  it("rejects invalid feedback target ids", async () => {
+    const app = createApp("rep");
+    const res = await request(app)
+      .post("/api/ai/feedback")
+      .send({
+        targetType: "packet",
+        targetId: "sales-process-disconnect-dashboard",
+        feedbackType: "packet_quality",
+        feedbackValue: "useful",
+      });
+
+    expect(res.status).toBe(400);
+    expect(serviceMocks.recordAiFeedback).not.toHaveBeenCalled();
   });
 
   it("restricts blind-spot summary to director/admin roles", async () => {
