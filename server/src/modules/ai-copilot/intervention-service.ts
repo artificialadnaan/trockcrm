@@ -640,6 +640,41 @@ interface MutationResult {
   errors: Array<{ caseId: string; message: string }>;
 }
 
+function buildMutationError(caseId: string, message: string) {
+  return { caseId, message };
+}
+
+function canAssignCase(row: DisconnectCaseRow) {
+  if (row.status === "resolved") return "Cannot assign a resolved case";
+  return null;
+}
+
+function canSnoozeCase(row: DisconnectCaseRow) {
+  if (row.status === "resolved") return "Cannot snooze a resolved case";
+  return null;
+}
+
+function canResolveCase(row: DisconnectCaseRow) {
+  if (row.status === "resolved") return "Case is already resolved";
+  return null;
+}
+
+function canEscalateCase(row: DisconnectCaseRow) {
+  if (row.escalated) return "Case is already escalated";
+  return null;
+}
+
+function dedupeCaseIds(caseIds: string[]) {
+  const seen = new Set<string>();
+  const uniqueCaseIds: string[] = [];
+  for (const caseId of caseIds) {
+    if (seen.has(caseId)) continue;
+    seen.add(caseId);
+    uniqueCaseIds.push(caseId);
+  }
+  return uniqueCaseIds;
+}
+
 function isTerminalTaskStatus(status: string | null | undefined) {
   return status === "completed" || status === "dismissed";
 }
@@ -839,10 +874,28 @@ export async function assignInterventionCases(
     notes?: string | null;
   }
 ): Promise<MutationResult> {
-  const rows = await loadCasesForMutation(tenantDb, input.officeId, input.caseIds);
+  const caseIds = dedupeCaseIds(input.caseIds);
+  const rows = await loadCasesForMutation(tenantDb, input.officeId, caseIds);
+  const rowsById = new Map(rows.map((row) => [row.id, row]));
   const errors: Array<{ caseId: string; message: string }> = [];
+  let updatedCount = 0;
+  let skippedCount = 0;
 
-  for (const row of rows) {
+  for (const caseId of caseIds) {
+    const row = rowsById.get(caseId);
+    if (!row) {
+      skippedCount += 1;
+      errors.push(buildMutationError(caseId, "Intervention case not found"));
+      continue;
+    }
+
+    const validationError = canAssignCase(row);
+    if (validationError) {
+      skippedCount += 1;
+      errors.push(buildMutationError(caseId, validationError));
+      continue;
+    }
+
     const fromAssignee = row.assignedTo ?? null;
     const actedAt = new Date();
     if (isInMemoryTenantDb(tenantDb)) {
@@ -871,11 +924,12 @@ export async function assignInterventionCases(
       fromAssignee,
       toAssignee: input.assignedTo,
     });
+    updatedCount += 1;
   }
 
   return {
-    updatedCount: rows.length,
-    skippedCount: input.caseIds.length - rows.length,
+    updatedCount,
+    skippedCount,
     errors,
   };
 }
@@ -891,13 +945,31 @@ export async function snoozeInterventionCases(
     notes?: string | null;
   }
 ): Promise<MutationResult> {
+  const caseIds = dedupeCaseIds(input.caseIds);
   const snoozedUntil = input.snoozedUntil instanceof Date
     ? input.snoozedUntil
     : new Date(input.snoozedUntil);
-  const rows = await loadCasesForMutation(tenantDb, input.officeId, input.caseIds);
+  const rows = await loadCasesForMutation(tenantDb, input.officeId, caseIds);
+  const rowsById = new Map(rows.map((row) => [row.id, row]));
   const errors: Array<{ caseId: string; message: string }> = [];
+  let updatedCount = 0;
+  let skippedCount = 0;
 
-  for (const row of rows) {
+  for (const caseId of caseIds) {
+    const row = rowsById.get(caseId);
+    if (!row) {
+      skippedCount += 1;
+      errors.push(buildMutationError(caseId, "Intervention case not found"));
+      continue;
+    }
+
+    const validationError = canSnoozeCase(row);
+    if (validationError) {
+      skippedCount += 1;
+      errors.push(buildMutationError(caseId, validationError));
+      continue;
+    }
+
     const fromStatus = row.status;
     const fromSnoozedUntil = row.snoozedUntil ?? null;
     const actedAt = new Date();
@@ -931,11 +1003,12 @@ export async function snoozeInterventionCases(
       fromSnoozedUntil,
       toSnoozedUntil: snoozedUntil,
     });
+    updatedCount += 1;
   }
 
   return {
-    updatedCount: rows.length,
-    skippedCount: input.caseIds.length - rows.length,
+    updatedCount,
+    skippedCount,
     errors,
   };
 }
@@ -951,11 +1024,29 @@ export async function resolveInterventionCases(
     notes?: string | null;
   }
 ): Promise<MutationResult> {
-  const rows = await loadCasesForMutation(tenantDb, input.officeId, input.caseIds);
+  const caseIds = dedupeCaseIds(input.caseIds);
+  const rows = await loadCasesForMutation(tenantDb, input.officeId, caseIds);
+  const rowsById = new Map(rows.map((row) => [row.id, row]));
   const errors: Array<{ caseId: string; message: string }> = [];
   const taskOutcome = resolutionToTaskOutcome[input.resolutionReason];
+  let updatedCount = 0;
+  let skippedCount = 0;
 
-  for (const row of rows) {
+  for (const caseId of caseIds) {
+    const row = rowsById.get(caseId);
+    if (!row) {
+      skippedCount += 1;
+      errors.push(buildMutationError(caseId, "Intervention case not found"));
+      continue;
+    }
+
+    const validationError = canResolveCase(row);
+    if (validationError) {
+      skippedCount += 1;
+      errors.push(buildMutationError(caseId, validationError));
+      continue;
+    }
+
     const fromStatus = row.status;
     const actedAt = new Date();
     if (isInMemoryTenantDb(tenantDb)) {
@@ -994,11 +1085,12 @@ export async function resolveInterventionCases(
         taskOutcome,
       },
     });
+    updatedCount += 1;
   }
 
   return {
-    updatedCount: rows.length,
-    skippedCount: input.caseIds.length - rows.length,
+    updatedCount,
+    skippedCount,
     errors,
   };
 }
@@ -1013,10 +1105,28 @@ export async function escalateInterventionCases(
     notes?: string | null;
   }
 ): Promise<MutationResult> {
-  const rows = await loadCasesForMutation(tenantDb, input.officeId, input.caseIds);
+  const caseIds = dedupeCaseIds(input.caseIds);
+  const rows = await loadCasesForMutation(tenantDb, input.officeId, caseIds);
   const errors: Array<{ caseId: string; message: string }> = [];
+  const rowsById = new Map(rows.map((row) => [row.id, row]));
+  let updatedCount = 0;
+  let skippedCount = 0;
 
-  for (const row of rows) {
+  for (const caseId of caseIds) {
+    const row = rowsById.get(caseId);
+    if (!row) {
+      skippedCount += 1;
+      errors.push(buildMutationError(caseId, "Intervention case not found"));
+      continue;
+    }
+
+    const validationError = canEscalateCase(row);
+    if (validationError) {
+      skippedCount += 1;
+      errors.push(buildMutationError(caseId, validationError));
+      continue;
+    }
+
     const actedAt = new Date();
     if (isInMemoryTenantDb(tenantDb)) {
       row.escalated = true;
@@ -1041,11 +1151,12 @@ export async function escalateInterventionCases(
       toAssignee: row.assignedTo ?? null,
       metadataJson: { escalated: true },
     });
+    updatedCount += 1;
   }
 
   return {
-    updatedCount: rows.length,
-    skippedCount: input.caseIds.length - rows.length,
+    updatedCount,
+    skippedCount,
     errors,
   };
 }

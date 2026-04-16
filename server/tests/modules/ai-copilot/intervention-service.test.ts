@@ -602,6 +602,87 @@ describe("AI intervention service", () => {
     });
   });
 
+  it("skips assigning a resolved case without mutating it", async () => {
+    const tenantDb = createTenantDb({
+      cases: [
+        makeCase({
+          status: "resolved",
+          assignedTo: "manager-1",
+          resolutionReason: "owner_aligned",
+          resolvedAt: new Date("2026-04-15T10:00:00.000Z"),
+          lastIntervenedAt: new Date("2026-04-15T10:00:00.000Z"),
+        }),
+      ],
+    });
+
+    const result = await assignInterventionCases(tenantDb as any, {
+      officeId: "office-1",
+      actorUserId: "director-1",
+      actorRole: "director",
+      caseIds: ["case-1"],
+      assignedTo: "manager-2",
+      notes: "Attempted reassignment",
+    });
+
+    expect(result).toEqual({
+      updatedCount: 0,
+      skippedCount: 1,
+      errors: [
+        {
+          caseId: "case-1",
+          message: "Cannot assign a resolved case",
+        },
+      ],
+    });
+    expect(tenantDb.state.cases[0]).toMatchObject({
+      status: "resolved",
+      assignedTo: "manager-1",
+      resolutionReason: "owner_aligned",
+    });
+    expect(tenantDb.state.history).toHaveLength(0);
+  });
+
+  it("deduplicates repeated case ids before assigning", async () => {
+    const tenantDb = createTenantDb({
+      cases: [
+        makeCase({
+          assignedTo: null,
+          generatedTaskId: "task-1",
+        }),
+      ],
+      tasks: [
+        makeTask({
+          id: "task-1",
+          assignedTo: "manager-1",
+          status: "pending",
+        }),
+      ],
+    });
+
+    const result = await assignInterventionCases(tenantDb as any, {
+      officeId: "office-1",
+      actorUserId: "director-1",
+      actorRole: "director",
+      caseIds: ["case-1", "case-1"],
+      assignedTo: "manager-2",
+      notes: "Repeated request",
+    });
+
+    expect(result).toEqual({
+      updatedCount: 1,
+      skippedCount: 0,
+      errors: [],
+    });
+    expect(tenantDb.state.cases[0]).toMatchObject({
+      assignedTo: "manager-2",
+    });
+    expect(tenantDb.state.tasks[0]).toMatchObject({
+      assignedTo: "manager-2",
+    });
+    expect(tenantDb.state.history).toHaveLength(1);
+    expect(tenantDb.state.feedback).toHaveLength(1);
+  });
+
   it("filters intervention queue by workspace view and cluster key before pagination", async () => {
     const tenantDb = createTenantDb({
       cases: [
@@ -734,6 +815,43 @@ describe("AI intervention service", () => {
     expect(tenantDb.state.tasks[0]?.dueDate ?? null).toBeNull();
   });
 
+  it("skips snoozing a resolved case without mutating it", async () => {
+    const tenantDb = createTenantDb({
+      cases: [
+        makeCase({
+          status: "resolved",
+          resolvedAt: new Date("2026-04-15T10:00:00.000Z"),
+          lastIntervenedAt: new Date("2026-04-15T10:00:00.000Z"),
+        }),
+      ],
+    });
+
+    const result = await snoozeInterventionCases(tenantDb as any, {
+      officeId: "office-1",
+      actorUserId: "director-1",
+      actorRole: "director",
+      caseIds: ["case-1"],
+      snoozedUntil: "2026-04-20T00:00:00.000Z",
+      notes: "Attempted snooze",
+    });
+
+    expect(result).toEqual({
+      updatedCount: 0,
+      skippedCount: 1,
+      errors: [
+        {
+          caseId: "case-1",
+          message: "Cannot snooze a resolved case",
+        },
+      ],
+    });
+    expect(tenantDb.state.cases[0]).toMatchObject({
+      status: "resolved",
+      snoozedUntil: null,
+    });
+    expect(tenantDb.state.history).toHaveLength(0);
+  });
+
   it("resolves intervention cases, maps generated task outcomes, and writes history plus feedback", async () => {
     const tenantDb = createTenantDb({
       cases: [
@@ -830,6 +948,44 @@ describe("AI intervention service", () => {
     });
   });
 
+  it("skips resolving an already resolved case without mutating it", async () => {
+    const tenantDb = createTenantDb({
+      cases: [
+        makeCase({
+          status: "resolved",
+          resolutionReason: "owner_aligned",
+          resolvedAt: new Date("2026-04-15T10:00:00.000Z"),
+          lastIntervenedAt: new Date("2026-04-15T10:00:00.000Z"),
+        }),
+      ],
+    });
+
+    const result = await resolveInterventionCases(tenantDb as any, {
+      officeId: "office-1",
+      actorUserId: "director-1",
+      actorRole: "director",
+      caseIds: ["case-1"],
+      resolutionReason: "task_completed",
+      notes: "Attempted resolve",
+    });
+
+    expect(result).toEqual({
+      updatedCount: 0,
+      skippedCount: 1,
+      errors: [
+        {
+          caseId: "case-1",
+          message: "Case is already resolved",
+        },
+      ],
+    });
+    expect(tenantDb.state.cases[0]).toMatchObject({
+      status: "resolved",
+      resolutionReason: "owner_aligned",
+    });
+    expect(tenantDb.state.history).toHaveLength(0);
+  });
+
   it("escalates intervention cases and writes history plus feedback", async () => {
     const tenantDb = createTenantDb({
       cases: [
@@ -867,5 +1023,91 @@ describe("AI intervention service", () => {
       feedbackType: "intervention_action",
       feedbackValue: "escalate",
     });
+  });
+
+  it("skips escalating an already escalated case without mutating it", async () => {
+    const tenantDb = createTenantDb({
+      cases: [
+        makeCase({
+          escalated: true,
+          lastIntervenedAt: new Date("2026-04-15T10:00:00.000Z"),
+        }),
+      ],
+    });
+
+    const result = await escalateInterventionCases(tenantDb as any, {
+      officeId: "office-1",
+      actorUserId: "director-1",
+      actorRole: "director",
+      caseIds: ["case-1"],
+      notes: "Attempted escalation",
+    });
+
+    expect(result).toEqual({
+      updatedCount: 0,
+      skippedCount: 1,
+      errors: [
+        {
+          caseId: "case-1",
+          message: "Case is already escalated",
+        },
+      ],
+    });
+    expect(tenantDb.state.cases[0]).toMatchObject({
+      escalated: true,
+    });
+    expect(tenantDb.state.history).toHaveLength(0);
+  });
+
+  it("returns mixed mutation counts when valid and invalid cases are batched together", async () => {
+    const tenantDb = createTenantDb({
+      cases: [
+        makeCase({
+          id: "case-1",
+          assignedTo: null,
+        }),
+        makeCase({
+          id: "case-2",
+          status: "resolved",
+          assignedTo: "manager-1",
+          resolutionReason: "owner_aligned",
+          resolvedAt: new Date("2026-04-15T10:00:00.000Z"),
+          lastIntervenedAt: new Date("2026-04-15T10:00:00.000Z"),
+        }),
+      ],
+    });
+
+    const result = await assignInterventionCases(tenantDb as any, {
+      officeId: "office-1",
+      actorUserId: "director-1",
+      actorRole: "director",
+      caseIds: ["case-1", "case-2", "case-3"],
+      assignedTo: "manager-2",
+      notes: "Batch reassignment",
+    });
+
+    expect(result).toEqual({
+      updatedCount: 1,
+      skippedCount: 2,
+      errors: [
+        {
+          caseId: "case-2",
+          message: "Cannot assign a resolved case",
+        },
+        {
+          caseId: "case-3",
+          message: "Intervention case not found",
+        },
+      ],
+    });
+    expect(tenantDb.state.cases[0]).toMatchObject({
+      assignedTo: "manager-2",
+      status: "open",
+    });
+    expect(tenantDb.state.cases[1]).toMatchObject({
+      status: "resolved",
+      assignedTo: "manager-1",
+    });
+    expect(tenantDb.state.history).toHaveLength(1);
   });
 });

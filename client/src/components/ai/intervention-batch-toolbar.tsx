@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import type { InterventionResolutionReason } from "@/hooks/use-admin-interventions";
+import type { InterventionMutationResult, InterventionResolutionReason } from "@/hooks/use-admin-interventions";
 import { INTERVENTION_RESOLUTION_OPTIONS } from "@/hooks/use-admin-interventions";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -10,10 +10,12 @@ import { Textarea } from "@/components/ui/textarea";
 interface InterventionBatchToolbarProps {
   selectedCount: number;
   working: boolean;
-  onAssign: (input: { assignedTo: string; notes: string | null }) => Promise<void>;
-  onSnooze: (input: { snoozedUntil: string; notes: string | null }) => Promise<void>;
-  onResolve: (input: { resolutionReason: InterventionResolutionReason; notes: string | null }) => Promise<void>;
-  onEscalate: (input: { notes: string | null }) => Promise<void>;
+  onAssign: (input: { assignedTo: string; notes: string | null }) => Promise<InterventionMutationResult | null>;
+  onSnooze: (input: { snoozedUntil: string; notes: string | null }) => Promise<InterventionMutationResult | null>;
+  onResolve: (
+    input: { resolutionReason: InterventionResolutionReason; notes: string | null }
+  ) => Promise<InterventionMutationResult | null>;
+  onEscalate: (input: { notes: string | null }) => Promise<InterventionMutationResult | null>;
 }
 
 export function InterventionBatchToolbar({
@@ -30,6 +32,13 @@ export function InterventionBatchToolbar({
   const [notes, setNotes] = useState("");
 
   const disabled = useMemo(() => selectedCount === 0 || working, [selectedCount, working]);
+
+  function clearFormState() {
+    setAssignedTo("");
+    setSnoozedUntil("");
+    setResolutionReason("task_completed");
+    setNotes("");
+  }
 
   return (
     <div className="rounded-xl border border-border/80 bg-white p-4 space-y-4">
@@ -54,7 +63,10 @@ export function InterventionBatchToolbar({
           <Button
             variant="outline"
             disabled={disabled || assignedTo.trim().length === 0}
-            onClick={() => void onAssign({ assignedTo: assignedTo.trim(), notes: notes.trim() || null })}
+            onClick={async () => {
+              const result = await onAssign({ assignedTo: assignedTo.trim(), notes: notes.trim() || null });
+              if ((result?.updatedCount ?? 0) > 0) clearFormState();
+            }}
           >
             Assign selected
           </Button>
@@ -71,7 +83,10 @@ export function InterventionBatchToolbar({
           <Button
             variant="outline"
             disabled={disabled || snoozedUntil.trim().length === 0}
-            onClick={() => void onSnooze({ snoozedUntil, notes: notes.trim() || null })}
+            onClick={async () => {
+              const result = await onSnooze({ snoozedUntil, notes: notes.trim() || null });
+              if ((result?.updatedCount ?? 0) > 0) clearFormState();
+            }}
           >
             Snooze selected
           </Button>
@@ -94,14 +109,20 @@ export function InterventionBatchToolbar({
           <div className="flex flex-wrap gap-2">
             <Button
               disabled={disabled}
-              onClick={() => void onResolve({ resolutionReason, notes: notes.trim() || null })}
+              onClick={async () => {
+                const result = await onResolve({ resolutionReason, notes: notes.trim() || null });
+                if ((result?.updatedCount ?? 0) > 0) clearFormState();
+              }}
             >
               Resolve selected
             </Button>
             <Button
               variant="outline"
               disabled={disabled}
-              onClick={() => void onEscalate({ notes: notes.trim() || null })}
+              onClick={async () => {
+                const result = await onEscalate({ notes: notes.trim() || null });
+                if ((result?.updatedCount ?? 0) > 0) clearFormState();
+              }}
             >
               Escalate selected
             </Button>
