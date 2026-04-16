@@ -27,6 +27,10 @@ describe("resolveEmailAssignment", () => {
           id: "deal-2",
           dealNumber: "TR-2026-0002",
           name: "Beta Roof",
+          propertyAddress: "500 Elm St",
+          propertyCity: "Houston",
+          propertyState: "TX",
+          propertyZip: "77002",
         }),
       ],
     });
@@ -91,7 +95,74 @@ describe("resolveEmailAssignment", () => {
     });
   });
 
-  it("resolves a unique property match to the matching deal", () => {
+  it("resolves a unique lead match before falling back to company-only", () => {
+    const result = resolveEmailAssignment({
+      subject: "Lead follow-up",
+      bodyPreview: "Checking in on the lead status",
+      contactCompanyId: "company-1",
+      dealCandidates: [],
+      leadCandidates: [
+        {
+          id: "lead-1",
+          leadNumber: "TR-2026-L001",
+          name: "Alpha Lead",
+          relatedDealId: "deal-1",
+        },
+      ],
+    });
+
+    expect(result).toMatchObject({
+      assignedEntityType: "deal",
+      assignedEntityId: "deal-1",
+      assignedDealId: "deal-1",
+      confidence: "high",
+      ambiguityReason: null,
+      matchedBy: "single_lead",
+      requiresClassificationTask: false,
+    });
+  });
+
+  it("resolves a unique property match when exactly one active opportunity exists under it", () => {
+    const result = resolveEmailAssignment({
+      subject: "Re: 123 Main St Dallas TX 75201",
+      bodyPreview: "Following up on 123 Main St, Dallas, TX 75201",
+      contactCompanyId: "company-1",
+      dealCandidates: [
+        dealCandidate(),
+        dealCandidate({
+          id: "deal-2",
+          dealNumber: "TR-2026-0002",
+          name: "Beta Roof",
+          propertyAddress: "555 Oak Ave",
+          propertyCity: "Austin",
+          propertyState: "TX",
+          propertyZip: "73301",
+        }),
+      ],
+      propertyCandidates: [
+        {
+          id: "property-1",
+          propertyAddress: "123 Main St",
+          propertyCity: "Dallas",
+          propertyState: "TX",
+          propertyZip: "75201",
+          relatedDealIds: ["deal-1"],
+        },
+      ],
+    });
+
+    expect(result).toMatchObject({
+      assignedEntityType: "deal",
+      assignedEntityId: "deal-1",
+      assignedDealId: "deal-1",
+      confidence: "high",
+      ambiguityReason: null,
+      matchedBy: "single_property",
+      requiresClassificationTask: false,
+    });
+  });
+
+  it("resolves a property match even when other active opportunities exist under different properties", () => {
     const result = resolveEmailAssignment({
       subject: "Re: 123 Main St Dallas TX 75201",
       bodyPreview: "Checking the roof at 123 Main St, Dallas, TX 75201",
@@ -116,8 +187,48 @@ describe("resolveEmailAssignment", () => {
       assignedDealId: "deal-1",
       confidence: "high",
       ambiguityReason: null,
-      matchedBy: "unique_property",
+      matchedBy: "single_property",
       requiresClassificationTask: false,
+    });
+  });
+
+  it("keeps a property match company-only when the property spans multiple active opportunities", () => {
+    const result = resolveEmailAssignment({
+      subject: "Re: 123 Main St Dallas TX 75201",
+      bodyPreview: "Following up on 123 Main St, Dallas, TX 75201",
+      contactCompanyId: "company-1",
+      dealCandidates: [
+        dealCandidate(),
+        dealCandidate({
+          id: "deal-2",
+          dealNumber: "TR-2026-0002",
+          name: "Beta Roof",
+          propertyAddress: "123 Main St",
+          propertyCity: "Dallas",
+          propertyState: "TX",
+          propertyZip: "75201",
+        }),
+      ],
+      propertyCandidates: [
+        {
+          id: "property-1",
+          propertyAddress: "123 Main St",
+          propertyCity: "Dallas",
+          propertyState: "TX",
+          propertyZip: "75201",
+          relatedDealIds: ["deal-1", "deal-2"],
+        },
+      ],
+    });
+
+    expect(result).toMatchObject({
+      assignedEntityType: "company",
+      assignedEntityId: "company-1",
+      assignedDealId: null,
+      confidence: "low",
+      ambiguityReason: "ambiguous_property_match",
+      matchedBy: "company_only",
+      requiresClassificationTask: true,
     });
   });
 
@@ -126,6 +237,7 @@ describe("resolveEmailAssignment", () => {
       subject: "General project question",
       bodyPreview: "Need help figuring out which project this belongs to",
       contactCompanyId: "company-1",
+      propertyCandidates: [],
       dealCandidates: [
         dealCandidate(),
         dealCandidate({
