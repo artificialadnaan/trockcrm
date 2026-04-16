@@ -116,11 +116,19 @@ async function getThreadAssignment(
 
   if (!row) return null;
 
-  if (row.assignedEntityType && row.assignedEntityId) {
+  if (row.assignedEntityType === "deal" && row.assignedEntityId) {
     return {
-      assignedEntityType: row.assignedEntityType as EmailAssignmentThreadAssignment["assignedEntityType"],
+      assignedEntityType: "deal",
       assignedEntityId: row.assignedEntityId,
-      assignedDealId: row.dealId ?? (row.assignedEntityType === "deal" ? row.assignedEntityId : null),
+      assignedDealId: row.dealId ?? row.assignedEntityId,
+    };
+  }
+
+  if (row.assignedEntityType === "company" && row.assignedEntityId) {
+    return {
+      assignedEntityType: "company",
+      assignedEntityId: row.assignedEntityId,
+      assignedDealId: null,
     };
   }
 
@@ -844,7 +852,7 @@ async function completeInboundEmailTasks(
 export async function associateEmailToEntity(
   tenantDb: TenantDb,
   emailId: string,
-  input: { assignedEntityType: EmailAssignmentEntityType; assignedEntityId: string; assignedDealId?: string | null },
+  input: { assignedEntityType: "deal"; assignedEntityId: string; assignedDealId?: string | null },
   userRole: string,
   userId: string,
   officeId: string

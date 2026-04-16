@@ -216,6 +216,54 @@ describe("email sync inbound message routing", () => {
     ).toBe(true);
   });
 
+  it("routes an explicitly matched multi-deal email to the reply-needed task rule", async () => {
+    const queryMock = createQueryMock({
+      activeDeals: [
+        { id: "deal-1", deal_number: "TR-2026-0001", name: "Project Alpha", stage_slug: "estimating", stage_display_order: 2 },
+        { id: "deal-2", deal_number: "TR-2026-0002", name: "Project Beta", stage_slug: "estimating", stage_display_order: 2 },
+      ],
+    });
+    const client = { query: queryMock };
+    const taskPersistence = { marker: "task-persistence" };
+    createTenantTaskRulePersistenceMock.mockReturnValue(taskPersistence);
+    evaluateTaskRulesMock.mockResolvedValue([{ ruleId: "inbound_email_reply_needed", action: "created" }]);
+
+    const processed = await processInboundMessage(
+      client,
+      "office_beta",
+      "user-1",
+      "office-1",
+      {
+        id: "graph-5",
+        from: { emailAddress: { address: "brett@example.com" } },
+        toRecipients: [],
+        ccRecipients: [],
+        subject: "TR-2026-0002 follow-up",
+        bodyPreview: "Please reply on the exact deal",
+        body: { content: "<p>Please reply on the exact deal</p>" },
+        hasAttachments: false,
+        receivedDateTime: "2026-04-04T15:00:00.000Z",
+        conversationId: "conv-5",
+      }
+    );
+
+    expect(processed).toBe(true);
+    expect(evaluateTaskRulesMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        dealId: "deal-2",
+        activeDealCount: 2,
+        activeDealNames: ["TR-2026-0001 Project Alpha", "TR-2026-0002 Project Beta"],
+      }),
+      taskPersistence,
+      expect.any(Array)
+    );
+    expect(
+      queryMock.mock.calls.some(
+        ([sql]) => typeof sql === "string" && sql.includes("INSERT INTO office_beta.tasks")
+      )
+    ).toBe(false);
+  });
+
   it("routes a prior thread assignment to the reply-needed task rule even when multiple active deals exist", async () => {
     const queryMock = createQueryMock({
       activeDeals: [

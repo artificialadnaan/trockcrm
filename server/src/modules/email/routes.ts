@@ -208,17 +208,18 @@ router.get("/:id", async (req, res, next) => {
 // RBAC: verify user owns the email (if rep) and has access to the target deal when needed
 router.post("/:id/associate", async (req, res, next) => {
   try {
-    const assignedEntityType =
-      (req.body.assignedEntityType as "deal" | "lead" | "property" | "company" | undefined) ??
-      (req.body.dealId ? "deal" : undefined);
+    const requestedEntityType = req.body.assignedEntityType as string | undefined;
+    if (requestedEntityType && requestedEntityType !== "deal") {
+      throw new AppError(400, "Only deal assignments are supported by this endpoint");
+    }
+
+    // Keep the public contract deal-only until non-deal assignment targets can be stored consistently.
+    const assignedEntityType = "deal" as const;
     const assignedEntityId = (req.body.assignedEntityId as string | undefined) ?? (req.body.dealId as string | undefined);
     const assignedDealId = (req.body.assignedDealId as string | null | undefined) ?? (req.body.dealId as string | undefined) ?? assignedEntityId ?? null;
 
-    if (!assignedEntityType || !assignedEntityId) {
-      throw new AppError(400, "assignedEntityType and assignedEntityId are required");
-    }
-    if (assignedEntityType !== "deal") {
-      throw new AppError(400, "Only deal assignments are supported by this endpoint");
+    if (!assignedEntityId) {
+      throw new AppError(400, "assignedEntityId is required");
     }
     if (assignedDealId != null && assignedDealId !== assignedEntityId) {
       throw new AppError(400, "assignedDealId must match assignedEntityId for deal assignments");

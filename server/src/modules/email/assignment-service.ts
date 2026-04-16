@@ -1,14 +1,11 @@
 import crypto from "crypto";
 
-export type EmailAssignmentEntityType = "deal" | "lead" | "property" | "company";
+export type EmailAssignmentEntityType = "deal" | "company";
 export type EmailAssignmentConfidence = "high" | "medium" | "low";
 export type EmailAssignmentMatch =
   | "explicit_deal_number"
   | "prior_thread_assignment"
   | "single_deal"
-  | "single_lead"
-  | "single_property"
-  | "unique_property"
   | "company_only";
 
 export interface EmailAssignmentDealCandidate {
@@ -256,6 +253,23 @@ function findPropertyCandidate(
   return relatedDealCount <= 1 ? match : null;
 }
 
+function buildCompanyFallbackResult(
+  companyId: string | null,
+  ambiguityReason: string,
+  candidateDealIds: string[]
+): EmailAssignmentResult {
+  return {
+    assignedEntityType: companyId ? "company" : null,
+    assignedEntityId: companyId,
+    assignedDealId: null,
+    confidence: "low",
+    ambiguityReason,
+    matchedBy: "company_only",
+    requiresClassificationTask: true,
+    candidateDealIds,
+  };
+}
+
 function buildAmbiguityReason(candidateCount: number, hasCompany: boolean): string {
   if (candidateCount > 1) return "multiple_deal_candidates";
   if (!hasCompany) return "no_company_context";
@@ -288,18 +302,40 @@ export function resolveEmailAssignment(context: EmailAssignmentContext): EmailAs
   }
 
   if (context.priorThreadAssignment) {
+    if (context.priorThreadAssignment.assignedEntityType === "deal" && context.priorThreadAssignment.assignedDealId) {
+      return {
+        assignedEntityType: "deal",
+        assignedEntityId: context.priorThreadAssignment.assignedDealId,
+        assignedDealId: context.priorThreadAssignment.assignedDealId,
+        confidence: "high",
+        ambiguityReason: null,
+        matchedBy: "prior_thread_assignment",
+        requiresClassificationTask: false,
+        candidateDealIds: candidateDeals.map((deal) => deal.id),
+      };
+    }
+
+    if (context.priorThreadAssignment.assignedEntityType === "company") {
+      return {
+        assignedEntityType: "company",
+        assignedEntityId: context.priorThreadAssignment.assignedEntityId,
+        assignedDealId: null,
+        confidence: "high",
+        ambiguityReason: null,
+        matchedBy: "prior_thread_assignment",
+        requiresClassificationTask: false,
+        candidateDealIds: candidateDeals.map((deal) => deal.id),
+      };
+    }
+
     return {
-      assignedEntityType: context.priorThreadAssignment.assignedEntityType,
-      assignedEntityId: context.priorThreadAssignment.assignedEntityId,
-      assignedDealId: context.priorThreadAssignment.assignedDealId ?? (
-        context.priorThreadAssignment.assignedEntityType === "deal"
-          ? context.priorThreadAssignment.assignedEntityId
-          : null
-      ),
-      confidence: "high",
-      ambiguityReason: null,
-      matchedBy: "prior_thread_assignment",
-      requiresClassificationTask: false,
+      assignedEntityType: companyId ? "company" : null,
+      assignedEntityId: companyId,
+      assignedDealId: null,
+      confidence: "low",
+      ambiguityReason: "unsupported_prior_thread_assignment",
+      matchedBy: "company_only",
+      requiresClassificationTask: true,
       candidateDealIds: candidateDeals.map((deal) => deal.id),
     };
   }
@@ -318,59 +354,9 @@ export function resolveEmailAssignment(context: EmailAssignmentContext): EmailAs
     };
   }
 
+  // Property matches remain advisory until the reporting/timeline model can store them end to end.
   if (candidateProperties.length === 1) {
-    const [propertyCandidate] = candidateProperties;
-    const relatedDealCount = propertyCandidate.relatedDealIds?.length ?? 0;
-    if (relatedDealCount > 1) {
-      return {
-        assignedEntityType: companyId ? "company" : null,
-        assignedEntityId: companyId,
-        assignedDealId: null,
-        confidence: "low",
-        ambiguityReason: "ambiguous_property_match",
-        matchedBy: "company_only",
-        requiresClassificationTask: true,
-        candidateDealIds: candidateDeals.map((deal) => deal.id),
-      };
-    }
-    return {
-      assignedEntityType: "property",
-      assignedEntityId: propertyCandidate.id,
-      assignedDealId: propertyCandidate.relatedDealIds?.[0] ?? null,
-      confidence: "high",
-      ambiguityReason: null,
-      matchedBy: "single_property",
-      requiresClassificationTask: false,
-      candidateDealIds: candidateDeals.map((deal) => deal.id),
-    };
-  }
-
-  const propertyCandidate = findPropertyCandidate(searchText, candidateProperties);
-  if (propertyCandidate) {
-    return {
-      assignedEntityType: "property",
-      assignedEntityId: propertyCandidate.id,
-      assignedDealId: propertyCandidate.relatedDealIds?.[0] ?? null,
-      confidence: "high",
-      ambiguityReason: null,
-      matchedBy: "unique_property",
-      requiresClassificationTask: false,
-      candidateDealIds: candidateDeals.map((deal) => deal.id),
-    };
-  }
-
-  if (candidateLeads.length === 1) {
-    const [lead] = candidateLeads;
-    return {
-      assignedEntityType: "lead",
-      assignedEntityId: lead.id,
-      assignedDealId: lead.relatedDealId ?? null,
-      confidence: "high",
-      ambiguityReason: null,
-      matchedBy: "single_lead",
-      requiresClassificationTask: false,
-      candidateDealIds: candidateDeals.map((deal) => deal.id),
-    };
+    return buildCompanyFallbackResult(companyId, "ambiguous_property_match", candidateDeals.map((deal) => deal.id));
   }
 
   return {

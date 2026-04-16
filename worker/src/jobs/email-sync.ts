@@ -518,7 +518,7 @@ export async function processInboundMessage(
       ambiguityReason: assignment.ambiguityReason ?? "assignment_review",
       candidateDealNames: association.activeDealNames,
     });
-  } else if (assignment.assignedEntityType === "deal" && assignment.assignedDealId) {
+  } else if (association.dealId) {
     await evaluateInboundEmailTasks(
       client,
       schemaName,
@@ -697,7 +697,7 @@ async function getLatestThreadAssignmentRaw(
   client: any,
   schemaName: string,
   conversationId: string | null
-): Promise<{ assignedEntityType: "deal" | "lead" | "property" | "company"; assignedEntityId: string; assignedDealId?: string | null } | null> {
+): Promise<{ assignedEntityType: "deal" | "company"; assignedEntityId: string; assignedDealId?: string | null } | null> {
   if (!conversationId) return null;
 
   const result = await client.query(
@@ -712,11 +712,18 @@ async function getLatestThreadAssignmentRaw(
 
   const row = result.rows[0];
   if (!row) return null;
-  if (row.assigned_entity_type && row.assigned_entity_id) {
+  if (row.assigned_entity_type === "deal" && row.assigned_entity_id) {
     return {
-      assignedEntityType: row.assigned_entity_type,
+      assignedEntityType: "deal",
       assignedEntityId: row.assigned_entity_id,
-      assignedDealId: row.deal_id ?? (row.assigned_entity_type === "deal" ? row.assigned_entity_id : null),
+      assignedDealId: row.deal_id ?? row.assigned_entity_id,
+    };
+  }
+  if (row.assigned_entity_type === "company" && row.assigned_entity_id) {
+    return {
+      assignedEntityType: "company",
+      assignedEntityId: row.assigned_entity_id,
+      assignedDealId: null,
     };
   }
   if (row.deal_id) {

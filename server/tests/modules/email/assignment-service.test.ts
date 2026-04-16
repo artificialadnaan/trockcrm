@@ -95,7 +95,7 @@ describe("resolveEmailAssignment", () => {
     });
   });
 
-  it("resolves a single lead candidate when no deal candidates are available", () => {
+  it("falls back to company-only when only lead metadata is available", () => {
     const result = resolveEmailAssignment({
       subject: "Lead follow-up",
       bodyPreview: "Checking in on the lead status",
@@ -112,17 +112,17 @@ describe("resolveEmailAssignment", () => {
     });
 
     expect(result).toMatchObject({
-      assignedEntityType: "lead",
-      assignedEntityId: "lead-1",
+      assignedEntityType: "company",
+      assignedEntityId: "company-1",
       assignedDealId: null,
-      confidence: "high",
-      ambiguityReason: null,
-      matchedBy: "single_lead",
-      requiresClassificationTask: false,
+      confidence: "low",
+      ambiguityReason: "company_only_fallback",
+      matchedBy: "company_only",
+      requiresClassificationTask: true,
     });
   });
 
-  it("resolves a single property candidate when it is the only property context", () => {
+  it("falls back to company-only when only property metadata is available", () => {
     const result = resolveEmailAssignment({
       subject: "Re: 123 Main St",
       bodyPreview: "Following up on the property only",
@@ -140,17 +140,17 @@ describe("resolveEmailAssignment", () => {
     });
 
     expect(result).toMatchObject({
-      assignedEntityType: "property",
-      assignedEntityId: "property-1",
+      assignedEntityType: "company",
+      assignedEntityId: "company-1",
       assignedDealId: null,
-      confidence: "high",
-      ambiguityReason: null,
-      matchedBy: "single_property",
-      requiresClassificationTask: false,
+      confidence: "low",
+      ambiguityReason: "ambiguous_property_match",
+      matchedBy: "company_only",
+      requiresClassificationTask: true,
     });
   });
 
-  it("resolves a unique property match to the matching deal", () => {
+  it("falls back to company-only when a property match would span multiple opportunities", () => {
     const result = resolveEmailAssignment({
       subject: "Re: 123 Main St Dallas TX 75201",
       bodyPreview: "Checking the roof at 123 Main St, Dallas, TX 75201",
@@ -170,12 +170,13 @@ describe("resolveEmailAssignment", () => {
     });
 
     expect(result).toMatchObject({
-      assignedEntityType: "property",
-      assignedDealId: "deal-1",
-      confidence: "high",
-      ambiguityReason: null,
-      matchedBy: "unique_property",
-      requiresClassificationTask: false,
+      assignedEntityType: "company",
+      assignedEntityId: "company-1",
+      assignedDealId: null,
+      confidence: "low",
+      ambiguityReason: "multiple_deal_candidates",
+      matchedBy: "company_only",
+      requiresClassificationTask: true,
     });
   });
 
