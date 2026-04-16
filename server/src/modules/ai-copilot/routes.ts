@@ -8,6 +8,7 @@ import {
   assignInterventionCases,
   escalateInterventionCases,
   getInterventionCaseDetail,
+  getInterventionAnalyticsDashboard,
   listInterventionCases,
   resolveInterventionCases,
   snoozeInterventionCases,
@@ -190,6 +191,18 @@ router.get("/ops/metrics", requireRole("admin", "director"), async (req, res, ne
     const metrics = await getAiOpsMetrics(req.tenantDb!);
     await req.commitTransaction!();
     res.json({ metrics });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/ops/intervention-analytics", requireRole("admin", "director"), async (req, res, next) => {
+  try {
+    const dashboard = await getInterventionAnalyticsDashboard(req.tenantDb!, {
+      officeId: getActiveOfficeId(req),
+    });
+    await req.commitTransaction!();
+    res.json(dashboard);
   } catch (err) {
     next(err);
   }

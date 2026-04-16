@@ -19,6 +19,7 @@ const serviceMocks = vi.hoisted(() => ({
 
 const interventionServiceMocks = vi.hoisted(() => ({
   listInterventionCases: vi.fn(),
+  getInterventionAnalyticsDashboard: vi.fn(),
   getInterventionCaseDetail: vi.fn(),
   assignInterventionCases: vi.fn(),
   snoozeInterventionCases: vi.fn(),
@@ -54,6 +55,7 @@ vi.mock("../../../src/modules/ai-copilot/service.js", () => ({
 
 vi.mock("../../../src/modules/ai-copilot/intervention-service.js", () => ({
   listInterventionCases: interventionServiceMocks.listInterventionCases,
+  getInterventionAnalyticsDashboard: interventionServiceMocks.getInterventionAnalyticsDashboard,
   getInterventionCaseDetail: interventionServiceMocks.getInterventionCaseDetail,
   assignInterventionCases: interventionServiceMocks.assignInterventionCases,
   snoozeInterventionCases: interventionServiceMocks.snoozeInterventionCases,
@@ -295,6 +297,24 @@ describe("ai copilot routes", () => {
     expect(res.status).toBe(200);
     expect(serviceMocks.getAiOpsMetrics).toHaveBeenCalledWith(expect.anything());
     expect(res.body.metrics.packetsGenerated24h).toBe(10);
+  });
+
+  it("returns intervention analytics for admins", async () => {
+    interventionServiceMocks.getInterventionAnalyticsDashboard.mockResolvedValue({
+      summary: { openCases: 1 },
+      outcomes: { actionVolume30d: { assign: 0, snooze: 0, resolve: 0, escalate: 0 } },
+      hotspots: { assignees: [], disconnectTypes: [], reps: [], companies: [], stages: [] },
+      breachQueue: { items: [], totalCount: 0, pageSize: 25 },
+      slaRules: { criticalDays: 0, highDays: 2, mediumDays: 5, lowDays: 10, timingBasis: "business_days" },
+    });
+
+    const app = createApp("admin");
+    const response = await request(app)
+      .get("/api/ai/ops/intervention-analytics");
+
+    expect(response.status).toBe(200);
+    expect(response.body.summary).toBeDefined();
+    expect(response.body.breachQueue.items).toBeInstanceOf(Array);
   });
 
   it("returns AI review queue for director users", async () => {
