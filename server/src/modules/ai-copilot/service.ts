@@ -1792,7 +1792,7 @@ export async function getSalesProcessDisconnectDashboard(
           rf.deal_id AS deal_id,
           f.feedback_value AS action,
           f.created_at,
-          f.comment_text
+          f.comment AS comment_text
         FROM ai_feedback f
         JOIN ai_risk_flags rf
           ON f.target_type = 'risk_flag'
@@ -1807,7 +1807,7 @@ export async function getSalesProcessDisconnectDashboard(
           ts.scope_id AS deal_id,
           f.feedback_value AS action,
           f.created_at,
-          f.comment_text
+          f.comment AS comment_text
         FROM ai_feedback f
         JOIN ai_task_suggestions ts
           ON f.target_type = 'task_suggestion'
