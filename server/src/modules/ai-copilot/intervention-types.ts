@@ -21,6 +21,15 @@ export interface InterventionQueueItem {
   lastIntervention: { actionType: string; actedAt: string } | null;
 }
 
+export type InterventionQueueView =
+  | "open"
+  | "all"
+  | "escalated"
+  | "unassigned"
+  | "aging"
+  | "repeat"
+  | "generated-task-pending";
+
 export interface InterventionQueueResult {
   items: InterventionQueueItem[];
   totalCount: number;

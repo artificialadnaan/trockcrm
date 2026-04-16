@@ -19,6 +19,7 @@ import type {
   InterventionCaseDetail,
   InterventionQueueItem,
   InterventionQueueResult,
+  InterventionQueueView,
 } from "./intervention-types.js";
 import {
   completeTask,
@@ -319,7 +320,15 @@ export async function materializeDisconnectCases(
 
 export async function listInterventionCases(
   tenantDb: TenantDb | InMemoryTenantDb,
-  input: { officeId: string; status?: "open" | "snoozed" | "resolved"; page?: number; pageSize?: number; now?: Date }
+  input: {
+    officeId: string;
+    status?: "open" | "snoozed" | "resolved";
+    view?: InterventionQueueView;
+    clusterKey?: string;
+    page?: number;
+    pageSize?: number;
+    now?: Date;
+  }
 ): Promise<InterventionQueueResult> {
   const now = input.now ?? new Date();
   const page = Math.max(1, input.page ?? 1);
@@ -349,6 +358,8 @@ export async function listInterventionCases(
           history: latestHistoryByCase.get(row.id) ?? null,
         })
       )
+      .filter((item) => matchesInterventionView(item, input.view))
+      .filter((item) => !input.clusterKey || item.clusterKey === input.clusterKey)
       .sort(sortQueueItems);
 
     const paged = items.slice((page - 1) * pageSize, page * pageSize);
@@ -402,6 +413,8 @@ export async function listInterventionCases(
         history: latestHistoryByCase.get(row.id) ?? null,
       })
     )
+    .filter((item) => matchesInterventionView(item, input.view))
+    .filter((item) => !input.clusterKey || item.clusterKey === input.clusterKey)
     .sort(sortQueueItems);
 
   return {
@@ -410,6 +423,28 @@ export async function listInterventionCases(
     page,
     pageSize,
   };
+}
+
+function matchesInterventionView(item: InterventionQueueItem, view: InterventionQueueView | undefined) {
+  if (!view) return true;
+
+  switch (view) {
+    case "all":
+      return true;
+    case "escalated":
+      return item.escalated;
+    case "unassigned":
+      return !item.assignedTo;
+    case "aging":
+      return item.ageDays >= 7;
+    case "repeat":
+      return item.reopenCount > 0;
+    case "generated-task-pending":
+      return item.generatedTask !== null && item.generatedTask.status !== "completed" && item.generatedTask.status !== "dismissed";
+    case "open":
+    default:
+      return item.status === "open";
+  }
 }
 
 export async function getInterventionCaseDetail(

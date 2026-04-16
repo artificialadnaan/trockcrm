@@ -17,6 +17,18 @@ describe("buildAdminInterventionQuery", () => {
     );
   });
 
+  it("includes workspace view and cluster filters when present", () => {
+    expect(
+      buildAdminInterventionQuery({
+        page: 1,
+        pageSize: 50,
+        status: "open",
+        view: "aging",
+        clusterKey: "follow_through_gap",
+      })
+    ).toBe("?page=1&limit=50&status=open&view=aging&clusterKey=follow_through_gap");
+  });
+
   it("returns an empty string when no params are provided", () => {
     expect(buildAdminInterventionQuery({})).toBe("");
   });

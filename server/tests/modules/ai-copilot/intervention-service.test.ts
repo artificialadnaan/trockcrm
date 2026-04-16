@@ -556,6 +556,47 @@ describe("AI intervention service", () => {
     });
   });
 
+  it("filters intervention queue by workspace view and cluster key before pagination", async () => {
+    const tenantDb = createTenantDb({
+      cases: [
+        makeCase({
+          id: "case-1",
+          clusterKey: "follow_through_gap",
+          metadataJson: { evidenceSummary: "Aging queue case", ageDays: 9 },
+        }),
+        makeCase({
+          id: "case-2",
+          businessKey: "office-1:stale_stage:deal:deal-2",
+          scopeId: "deal-2",
+          dealId: "deal-2",
+          disconnectType: "stale_stage",
+          clusterKey: "execution_stall",
+          metadataJson: { evidenceSummary: "Wrong cluster", ageDays: 12 },
+        }),
+        makeCase({
+          id: "case-3",
+          businessKey: "office-1:missing_next_task:deal:deal-3",
+          scopeId: "deal-3",
+          dealId: "deal-3",
+          clusterKey: "follow_through_gap",
+          metadataJson: { evidenceSummary: "Too new", ageDays: 2 },
+        }),
+      ],
+    });
+
+    const result = await listInterventionCases(tenantDb as any, {
+      officeId: "office-1",
+      view: "aging",
+      clusterKey: "follow_through_gap",
+      page: 1,
+      pageSize: 50,
+    });
+
+    expect(result.totalCount).toBe(1);
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]?.id).toBe("case-1");
+  });
+
   it("snoozes intervention cases, syncs generated tasks, and writes history plus feedback", async () => {
     const tenantDb = createTenantDb({
       cases: [

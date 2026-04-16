@@ -31,7 +31,13 @@ export function AdminInterventionWorkspacePage() {
   const [batchWorking, setBatchWorking] = useState(false);
   const [page, setPage] = useState(1);
   const pageSize = 50;
-  const { data, loading, error, refetch } = useAdminInterventions({ page, pageSize, status });
+  const { data, loading, error, refetch } = useAdminInterventions({
+    page,
+    pageSize,
+    status,
+    view: workspaceView,
+    clusterKey: clusterKey === "all" ? null : clusterKey,
+  });
 
   function applyWorkspaceView(nextView: InterventionWorkspaceView) {
     setWorkspaceView(nextView);
@@ -44,41 +50,17 @@ export function AdminInterventionWorkspacePage() {
     }
   }
 
-  const rawItems = data?.items ?? [];
+  const items = data?.items ?? [];
   const clusterOptions = useMemo(() => {
-    return Array.from(new Set(rawItems.map((item) => item.clusterKey).filter((value): value is string => Boolean(value)))).sort();
-  }, [rawItems]);
-
-  const items = useMemo(() => {
-    return rawItems.filter((item) => {
-      if (clusterKey !== "all" && item.clusterKey !== clusterKey) return false;
-
-      switch (workspaceView) {
-        case "all":
-          return true;
-        case "escalated":
-          return item.escalated;
-        case "unassigned":
-          return !item.assignedTo;
-        case "aging":
-          return item.ageDays >= 7;
-        case "repeat":
-          return item.reopenCount > 0;
-        case "generated-task-pending":
-          return item.generatedTask !== null && item.generatedTask.status !== "completed" && item.generatedTask.status !== "dismissed";
-        case "open":
-        default:
-          return item.status === "open";
-      }
-    });
-  }, [clusterKey, rawItems, workspaceView]);
+    return Array.from(new Set(items.map((item) => item.clusterKey).filter((value): value is string => Boolean(value)))).sort();
+  }, [items]);
   const selectedCount = selectedIds.length;
 
   const selectionSet = useMemo(() => new Set(selectedIds), [selectedIds]);
 
   useEffect(() => {
     clearSelection();
-  }, [clusterKey, status, workspaceView]);
+  }, [clusterKey, page, status, workspaceView]);
 
   useEffect(() => {
     setPage(1);
@@ -163,7 +145,17 @@ export function AdminInterventionWorkspacePage() {
         </div>
       )}
 
-      <InterventionSummaryStrip items={items} totalCount={data?.totalCount ?? 0} />
+      <InterventionSummaryStrip
+        items={items}
+        totalCount={data?.totalCount ?? 0}
+        totalLabel={
+          workspaceView === "all"
+            ? "All Cases"
+            : workspaceView === "open"
+              ? "Open Cases"
+              : `${workspaceView.split("-").join(" ").replace(/\b\w/g, (char) => char.toUpperCase())} Cases`
+        }
+      />
 
       <div className="flex flex-wrap items-center gap-2">
         <Button variant={status === "open" ? "default" : "outline"} size="sm" onClick={() => setStatus("open")}>

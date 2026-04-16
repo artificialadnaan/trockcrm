@@ -349,7 +349,7 @@ describe("ai copilot routes", () => {
     });
 
     const app = createApp("director");
-    const res = await request(app).get("/api/ai/ops/interventions?page=2&limit=10&status=open");
+    const res = await request(app).get("/api/ai/ops/interventions?page=2&limit=10&status=open&view=aging&clusterKey=follow_through_gap");
 
     expect(res.status).toBe(200);
     expect(interventionServiceMocks.listInterventionCases).toHaveBeenCalledWith(expect.anything(), {
@@ -357,6 +357,8 @@ describe("ai copilot routes", () => {
       page: 2,
       pageSize: 10,
       status: "open",
+      view: "aging",
+      clusterKey: "follow_through_gap",
     });
     expect(res.body.items).toHaveLength(1);
     expect(res.body.page).toBe(2);

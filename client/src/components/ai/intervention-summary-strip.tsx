@@ -5,11 +5,12 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 export function InterventionSummaryStrip({
   items,
   totalCount,
+  totalLabel,
 }: {
   items: InterventionQueueItem[];
   totalCount: number;
+  totalLabel: string;
 }) {
-  const openCount = items.filter((item) => item.status === "open").length;
   const snoozedCount = items.filter((item) => item.status === "snoozed").length;
   const escalatedCount = items.filter((item) => item.escalated).length;
   const unassignedCount = items.filter((item) => !item.assignedTo).length;
@@ -20,7 +21,7 @@ export function InterventionSummaryStrip({
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-sm">
             <AlertTriangle className="h-4 w-4" />
-            Open Cases
+            {totalLabel}
           </CardTitle>
         </CardHeader>
         <CardContent>

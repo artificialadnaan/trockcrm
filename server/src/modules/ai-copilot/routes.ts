@@ -12,6 +12,7 @@ import {
   resolveInterventionCases,
   snoozeInterventionCases,
 } from "./intervention-service.js";
+import type { InterventionQueueView } from "./intervention-types.js";
 import {
   getAiActionQueue,
   getCompanyCopilotView,
@@ -37,6 +38,15 @@ const RESOLUTION_REASONS = new Set([
   "false_positive",
   "duplicate_case",
   "issue_no_longer_relevant",
+]);
+const INTERVENTION_QUEUE_VIEWS = new Set<InterventionQueueView>([
+  "open",
+  "all",
+  "escalated",
+  "unassigned",
+  "aging",
+  "repeat",
+  "generated-task-pending",
 ]);
 
 async function assertDealAccess(req: any, dealId: string) {
@@ -214,12 +224,22 @@ router.get("/ops/interventions", requireRole("admin", "director"), async (req, r
       (req.query.status === "open" || req.query.status === "snoozed" || req.query.status === "resolved")
         ? req.query.status
         : undefined;
+    const view =
+      typeof req.query.view === "string" && INTERVENTION_QUEUE_VIEWS.has(req.query.view as InterventionQueueView)
+        ? (req.query.view as InterventionQueueView)
+        : undefined;
+    const clusterKey =
+      typeof req.query.clusterKey === "string" && req.query.clusterKey.length > 0
+        ? req.query.clusterKey
+        : undefined;
 
     const result = await listInterventionCases(req.tenantDb!, {
       officeId: getActiveOfficeId(req),
       page,
       pageSize,
       status,
+      view,
+      clusterKey,
     });
 
     await req.commitTransaction!();

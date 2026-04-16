@@ -106,12 +106,16 @@ export function buildAdminInterventionQuery(input: {
   page?: number;
   pageSize?: number;
   status?: InterventionStatusFilter;
+  view?: InterventionWorkspaceView;
+  clusterKey?: string | null;
 }) {
   const params = new URLSearchParams();
 
   if (input.page && input.page > 0) params.set("page", String(input.page));
   if (input.pageSize && input.pageSize > 0) params.set("limit", String(input.pageSize));
   if (input.status && input.status !== "all") params.set("status", input.status);
+  if (input.view && input.view !== "open") params.set("view", input.view);
+  if (input.clusterKey) params.set("clusterKey", input.clusterKey);
 
   const query = params.toString();
   return query ? `?${query}` : "";
@@ -162,8 +166,10 @@ export function useAdminInterventions(input: {
   page?: number;
   pageSize?: number;
   status?: InterventionStatusFilter;
+  view?: InterventionWorkspaceView;
+  clusterKey?: string | null;
 } = {}) {
-  const { page = 1, pageSize = 50, status = "all" } = input;
+  const { page = 1, pageSize = 50, status = "all", view = "open", clusterKey = null } = input;
   const [data, setData] = useState<InterventionQueueResult | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -174,7 +180,7 @@ export function useAdminInterventions(input: {
     setLoading(true);
     setError(null);
     try {
-      const query = buildAdminInterventionQuery({ page, pageSize, status });
+      const query = buildAdminInterventionQuery({ page, pageSize, status, view, clusterKey });
       const response = await api<InterventionQueueResult>(`/ai/ops/interventions${query}`);
       if (requestVersion !== requestVersionRef.current) return;
       setData(response);
@@ -184,7 +190,7 @@ export function useAdminInterventions(input: {
     } finally {
       if (requestVersion === requestVersionRef.current) setLoading(false);
     }
-  }, [page, pageSize, status]);
+  }, [clusterKey, page, pageSize, status, view]);
 
   useEffect(() => {
     void fetchData();
