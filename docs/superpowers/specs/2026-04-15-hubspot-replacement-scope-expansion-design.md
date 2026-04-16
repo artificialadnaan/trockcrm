@@ -408,3 +408,15 @@ That approach:
 - fixes the actual data and attribution problems raised in the meeting
 - keeps launch-critical scope aligned to HubSpot replacement
 - preserves a clean extension point for later workflow generalization
+
+## Implementation Notes
+
+The Phase 1 implementation that landed on this branch follows the design above, with a few explicit product decisions worth documenting:
+
+- lead and property detail pages are first-class URLs, but the current property surface is synthesized from deal-linked property data rather than a standalone property aggregate
+- property rollups are currently client-assisted over a bounded deal fetch, so historical counts are only as complete as the underlying deal history window
+- the property `Converted` metric is a stage-derived proxy for historical lead-to-deal conversion, not an audit-grade lineage metric
+- unified workflow reporting uses `deal_scoping_intake.activated_at` to split lead-stage and deal-stage rep activity
+- the email assignment queue is deal-only for manual association; lead and property categorization are resolved automatically and ambiguous emails fall back to company-level association plus a classification task
+- migration review now includes unresolved company, property, and lead rows with paging and visible approval failure feedback
+- lead conversion preserves timeline continuity by linking the successor deal back to the originating lead instead of duplicating historical activities

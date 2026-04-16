@@ -27,11 +27,30 @@ const SECTIONS: Section[] = [
     ],
   },
   {
+    id: "leads",
+    title: "Leads",
+    content: [
+      "Lead pages (/leads/:id) show pre-RFP work before it becomes a deal. Use them to review scoping context, contact links, and the lead timeline.",
+      "When a lead converts, the successor deal keeps the history linked back to the lead so you do not lose the earlier activity trail.",
+      "If the lead is still active, the page makes that clear so you know whether the work belongs in pre-RFP or deal-stage follow-up.",
+    ],
+  },
+  {
+    id: "properties",
+    title: "Properties",
+    content: [
+      "Property pages (/properties/:id) roll up every historical lead and deal tied to the same property.",
+      "Use the property page when a company has multiple locations or multiple opportunities at the same address and you need the full history in one place.",
+      "The Converted metric on the property page is a history proxy for lead-to-deal conversion, not just the currently active open work.",
+    ],
+  },
+  {
     id: "deals",
     title: "Deal Detail",
     content: [
       "Click any deal to open the detail view. Tabs: Overview, Files, Email, Timeline, History.",
       "The Overview tab shows estimates (DD / Bid / Awarded), contact list, property info, and the stage advancement panel.",
+      "Deal detail timelines include the linked pre-RFP lead history so conversion history stays visible after the handoff.",
       "To log a call, note, or meeting: use the activity buttons in the Overview tab. All activities appear in the Timeline tab.",
       "Files uploaded to a deal are automatically named using the deal number, category, and date (e.g. TR-2026-0142_Photo_2026-04-15_001.jpg).",
     ],
@@ -50,7 +69,8 @@ const SECTIONS: Section[] = [
     title: "Email",
     content: [
       "Your CRM inbox (/email) shows emails from contacts in the CRM -- not your full Outlook inbox. Only emails from known contacts are synced.",
-      "Inbound emails are automatically associated to the contact's most recent active deal. If a contact has multiple active deals, you'll get a task asking you to assign the email manually.",
+      "Inbound emails are automatically associated using deal number, thread history, deal, lead, and property context in that order. If the system still cannot choose safely, the email is attached to the company and a task is created for deal assignment.",
+      "The manual assignment queue is deal-only. Use it to resolve the email to the correct deal when the system cannot do it automatically.",
       "To send an email from the CRM, open a deal or contact and click \"Compose\". Emails sent from the CRM are logged in your activity feed.",
     ],
   },
@@ -70,6 +90,24 @@ const SECTIONS: Section[] = [
       "Press Cmd+K (Mac) or Ctrl+K (Windows) to open global search from any page.",
       "Search across deals, contacts, and files simultaneously. Results are ranked by relevance.",
       "Recent searches are saved locally and appear when you open the search palette with an empty query.",
+    ],
+  },
+  {
+    id: "reports",
+    title: "Reports",
+    content: [
+      "Use Reports > Unified Workflow Intelligence to see the combined lead pipeline, standard pipeline, service pipeline, company rollups, stale leads, and stale deals.",
+      "The workflow overview is meant to keep sales and estimating aligned on the same operational numbers.",
+      "If you are checking whether a rep is active, use the rep activity split in the workflow overview rather than counting notes by hand.",
+    ],
+  },
+  {
+    id: "migration",
+    title: "Migration Review",
+    content: [
+      "If you are helping clean up an import, unresolved records are reviewed under Admin > Migration Review.",
+      "The queue can include companies, properties, and leads that need manual review before promotion.",
+      "Rows can fail approval with a visible banner message, so if something does not promote, review the bucket and the reason before trying again.",
     ],
   },
 ];

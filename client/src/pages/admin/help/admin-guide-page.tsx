@@ -39,6 +39,35 @@ const SECTIONS: AdminSection[] = [
     ],
   },
   {
+    id: "records",
+    title: "Lead and Property Records",
+    content: [
+      "Lead detail pages (/leads/:id) show the pre-RFP record, its timeline, and the conversion handoff into the successor deal.",
+      "Property detail pages (/properties/:id) roll up all historical leads and deals tied to the same property and show the related company context.",
+      "The property Converted metric is a history proxy: it reflects lead-to-deal conversions, not just currently active work.",
+      "If a property or lead needs support review, use the detail page to confirm the source company, address, and related opportunities before escalating.",
+    ],
+  },
+  {
+    id: "reporting",
+    title: "Unified Workflow Reporting",
+    content: [
+      "Go to Reports > Unified Workflow Intelligence to review the consolidated lead pipeline, standard pipeline, and service pipeline view.",
+      "The workflow overview includes company rollups, rep activity split, stale leads, and stale deals so sales and estimating are reading the same numbers.",
+      "The lead-stage versus deal-stage split is based on lead intake activation time, not a hard-coded calendar cutoff.",
+      "Saved report presets are additive: existing offices receive missing locked workflow presets without losing their current report setup.",
+    ],
+  },
+  {
+    id: "migration",
+    title: "Migration Review",
+    content: [
+      "Go to Admin > Migration Review to resolve unresolved companies, properties, and leads before promotion.",
+      "The review queue is paged and surfaces the exception bucket and reason for each staged row.",
+      "If an approval fails, the page shows a visible error banner so the operator can correct the row instead of guessing.",
+    ],
+  },
+  {
     id: "procore",
     title: "Procore Sync",
     content: [
