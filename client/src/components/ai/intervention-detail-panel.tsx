@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { toast } from "sonner";
-import type { InterventionResolutionReason } from "@/hooks/use-admin-interventions";
+import type { InterventionMutationResult, InterventionResolutionReason } from "@/hooks/use-admin-interventions";
 import {
   INTERVENTION_RESOLUTION_OPTIONS,
   assignIntervention,
@@ -9,6 +9,7 @@ import {
   localDateTimeInputToIso,
   resolveIntervention,
   snoozeIntervention,
+  summarizeInterventionMutationResult,
   toLocalDateTimeInput,
   useAdminInterventionDetail,
 } from "@/hooks/use-admin-interventions";
@@ -33,6 +34,22 @@ function formatDate(value: string | null) {
   return date.toLocaleString();
 }
 
+function normalizeInterventionSummaryMessage(message: string) {
+  return message.replace(/\.\.\s+/g, ". ");
+}
+
+export function getInterventionDetailMutationOutcome(result: InterventionMutationResult) {
+  const summary = summarizeInterventionMutationResult(result);
+  return {
+    summary: {
+      ...summary,
+      message: normalizeInterventionSummaryMessage(summary.message),
+    },
+    shouldRefreshDetail: result.updatedCount > 0,
+    shouldClearNotes: result.updatedCount > 0,
+  };
+}
+
 export function InterventionDetailPanel(props: {
   caseId: string | null;
   open: boolean;
@@ -49,19 +66,29 @@ export function InterventionDetailPanel(props: {
   useEffect(() => {
     setAssignedTo(detail?.case.assignedTo ?? "");
     setSnoozedUntil(toLocalDateTimeInput(detail?.case.snoozedUntil ?? null));
-    setResolutionReason("task_completed");
-    setNotes("");
   }, [detail?.case.assignedTo, detail?.case.id, detail?.case.snoozedUntil]);
 
-  async function runAction(action: string, work: () => Promise<unknown>) {
+  useEffect(() => {
+    setResolutionReason("task_completed");
+    setNotes("");
+  }, [detail?.case.id]);
+
+  async function runAction(action: string, work: () => Promise<InterventionMutationResult>) {
     setWorkingAction(action);
     try {
-      await work();
-      toast.success("Intervention case updated");
-      await Promise.all([refetch(), props.onUpdated()]);
+      const result = await work();
+      const outcome = getInterventionDetailMutationOutcome(result);
+      toast[outcome.summary.tone](outcome.summary.message);
+      if (outcome.shouldRefreshDetail) {
+        await refetch();
+        if (outcome.shouldClearNotes) {
+          setNotes("");
+        }
+      }
     } catch (err: unknown) {
       toast.error(err instanceof Error ? err.message : "Failed to update intervention case");
     } finally {
+      await props.onUpdated();
       setWorkingAction(null);
     }
   }
