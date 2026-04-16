@@ -812,10 +812,6 @@ export async function getInterventionAnalyticsDashboard(
 ): Promise<InterventionAnalyticsDashboard> {
   const now = input.now ?? new Date();
 
-  if (!isInMemoryTenantDb(tenantDb)) {
-    await materializeDisconnectCases(tenantDb, { officeId: input.officeId, now });
-  }
-
   const { cases, deals: dealRows, companies: companyRows, history } = await loadInterventionAnalyticsData(
     tenantDb,
     input.officeId
