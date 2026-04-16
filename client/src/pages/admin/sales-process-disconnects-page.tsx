@@ -377,7 +377,7 @@ export function SalesProcessDisconnectsPage() {
 
                   <div className="flex items-center justify-end">
                     <Link
-                      to={buildInterventionWorkspacePath({ view: "aging", clusterKey: cluster.clusterKey })}
+                      to={buildInterventionWorkspacePath({ view: "open", clusterKey: cluster.clusterKey })}
                       className={buttonVariants({ variant: "outline", size: "sm" })}
                     >
                       Open in workspace
