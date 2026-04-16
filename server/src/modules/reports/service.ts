@@ -309,7 +309,7 @@ export async function getActivitySummaryByRep(
 
   const result = await tenantDb.execute(sql`
     SELECT
-      a.user_id AS rep_id,
+      a.responsible_user_id AS rep_id,
       u.display_name AS rep_name,
       COUNT(*) FILTER (WHERE a.type = 'call')::int AS calls,
       COUNT(*) FILTER (WHERE a.type = 'email')::int AS emails,
@@ -318,10 +318,10 @@ export async function getActivitySummaryByRep(
       COUNT(*) FILTER (WHERE a.type = 'task_completed')::int AS tasks_completed,
       COUNT(*)::int AS total
     FROM activities a
-    JOIN users u ON u.id = a.user_id
+    JOIN users u ON u.id = a.responsible_user_id
     WHERE a.occurred_at >= ${from}::timestamptz
       AND a.occurred_at <= (${to}::date + INTERVAL '1 day')::timestamptz
-    GROUP BY a.user_id, u.display_name
+    GROUP BY a.responsible_user_id, u.display_name
     ORDER BY total DESC
   `);
 
@@ -956,7 +956,7 @@ export async function getUnifiedWorkflowOverview(
     ? sql`AND d.assigned_rep_id = ${options.repId}`
     : sql``;
   const activityRepFilter = options.repId
-    ? sql`AND a.user_id = ${options.repId}`
+    ? sql`AND a.responsible_user_id = ${options.repId}`
     : sql``;
 
   const [
@@ -1031,7 +1031,7 @@ export async function getUnifiedWorkflowOverview(
     tenantDb.execute(sql`
       WITH activity_stage AS (
         SELECT
-          a.user_id AS rep_id,
+          a.responsible_user_id AS rep_id,
           u.display_name AS rep_name,
           CASE
             WHEN dsi.id IS NULL THEN 'deal'
@@ -1040,7 +1040,7 @@ export async function getUnifiedWorkflowOverview(
           END AS stage_group,
           a.type
         FROM activities a
-        JOIN users u ON u.id = a.user_id
+        JOIN users u ON u.id = a.responsible_user_id
         JOIN deals d ON d.id = a.deal_id
         LEFT JOIN deal_scoping_intake dsi ON dsi.deal_id = d.id
         WHERE a.occurred_at <= (NOW() + INTERVAL '1 day')
@@ -1203,7 +1203,7 @@ const ALLOWED_COLUMNS: Record<string, string[]> = {
     "is_active", "created_at", "updated_at",
   ],
   activities: [
-    "id", "type", "user_id", "deal_id", "contact_id",
+    "id", "type", "responsible_user_id", "performed_by_user_id", "deal_id", "contact_id",
     "subject", "outcome", "duration_minutes", "occurred_at", "created_at",
   ],
   tasks: [
@@ -1212,6 +1212,13 @@ const ALLOWED_COLUMNS: Record<string, string[]> = {
     "is_overdue", "created_at", "updated_at",
   ],
 };
+
+function normalizeReportField(entityTable: string, field: string): string {
+  if (entityTable === "activities" && field === "user_id") {
+    return "responsible_user_id";
+  }
+  return field;
+}
 
 /**
  * Execute a custom report query based on a saved report config.
@@ -1229,7 +1236,9 @@ export async function executeCustomReport(
 
   // Validate columns
   const selectCols = config.columns.length > 0
-    ? config.columns.filter((c) => allowed.includes(c))
+    ? config.columns
+        .map((c) => normalizeReportField(entityTable, c))
+        .filter((c) => allowed.includes(c))
     : allowed.slice(0, 10); // default to first 10 columns
 
   if (selectCols.length === 0) throw new Error("No valid columns selected");
@@ -1237,9 +1246,10 @@ export async function executeCustomReport(
   // Build WHERE clause from filters using parameter binding for all values.
   const whereClauses: ReturnType<typeof sql>[] = [];
   for (const filter of config.filters) {
-    if (!allowed.includes(filter.field)) continue; // skip unknown fields
+    const field = normalizeReportField(entityTable, filter.field);
+    if (!allowed.includes(field)) continue; // skip unknown fields
 
-    const col = sql.identifier(filter.field);
+    const col = sql.identifier(field);
     switch (filter.op) {
       case "eq":
         if (filter.value !== undefined) {
@@ -1298,9 +1308,12 @@ export async function executeCustomReport(
 
   // Sort
   let orderClause = sql``;
-  if (config.sort && allowed.includes(config.sort.field)) {
+  if (config.sort) {
+    const sortField = normalizeReportField(entityTable, config.sort.field);
+    if (allowed.includes(sortField)) {
     const dir = config.sort.dir === "asc" ? sql`ASC` : sql`DESC`;
-    orderClause = sql`ORDER BY ${sql.identifier(config.sort.field)} ${dir}`;
+      orderClause = sql`ORDER BY ${sql.identifier(sortField)} ${dir}`;
+    }
   }
 
   const offset = (pagination.page - 1) * pagination.limit;
@@ -1511,7 +1524,7 @@ export async function getRepPerformanceComparison(
   // Query activities for both periods
   const activityResult = await tenantDb.execute(sql`
     SELECT
-      a.user_id AS rep_id,
+      a.responsible_user_id AS rep_id,
       COUNT(*) FILTER (
         WHERE a.occurred_at >= ${current.from}::timestamptz
           AND a.occurred_at <= (${current.to}::date + INTERVAL '1 day')::timestamptz
@@ -1523,7 +1536,7 @@ export async function getRepPerformanceComparison(
     FROM activities a
     WHERE a.occurred_at >= ${previous.from}::timestamptz
       AND a.occurred_at <= (${current.to}::date + INTERVAL '1 day')::timestamptz
-    GROUP BY a.user_id
+    GROUP BY a.responsible_user_id
   `);
 
   const dealRows = (dealResult as any).rows ?? dealResult;
