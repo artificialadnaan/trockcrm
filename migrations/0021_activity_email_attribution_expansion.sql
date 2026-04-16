@@ -13,6 +13,36 @@ BEGIN
     FROM information_schema.tables
     WHERE table_schema = current_schema()
       AND table_name = 'activities'
+  ) AND EXISTS (
+    SELECT 1
+    FROM information_schema.tables
+    WHERE table_schema = current_schema()
+      AND table_name = 'companies'
+  ) AND EXISTS (
+    SELECT 1
+    FROM information_schema.tables
+    WHERE table_schema = current_schema()
+      AND table_name = 'properties'
+  ) AND EXISTS (
+    SELECT 1
+    FROM information_schema.tables
+    WHERE table_schema = current_schema()
+      AND table_name = 'leads'
+  ) AND EXISTS (
+    SELECT 1
+    FROM information_schema.tables
+    WHERE table_schema = current_schema()
+      AND table_name = 'deals'
+  ) AND EXISTS (
+    SELECT 1
+    FROM information_schema.tables
+    WHERE table_schema = current_schema()
+      AND table_name = 'contacts'
+  ) AND EXISTS (
+    SELECT 1
+    FROM information_schema.tables
+    WHERE table_schema = current_schema()
+      AND table_name = 'emails'
   ) THEN
     BEGIN
       CREATE TYPE activity_source_entity AS ENUM (
@@ -166,6 +196,48 @@ BEGIN
     SELECT schema_name
     FROM information_schema.schemata
     WHERE schema_name LIKE 'office_%'
+      AND EXISTS (
+        SELECT 1
+        FROM information_schema.tables
+        WHERE table_schema = schema_name
+          AND table_name = 'activities'
+      )
+      AND EXISTS (
+        SELECT 1
+        FROM information_schema.tables
+        WHERE table_schema = schema_name
+          AND table_name = 'companies'
+      )
+      AND EXISTS (
+        SELECT 1
+        FROM information_schema.tables
+        WHERE table_schema = schema_name
+          AND table_name = 'properties'
+      )
+      AND EXISTS (
+        SELECT 1
+        FROM information_schema.tables
+        WHERE table_schema = schema_name
+          AND table_name = 'leads'
+      )
+      AND EXISTS (
+        SELECT 1
+        FROM information_schema.tables
+        WHERE table_schema = schema_name
+          AND table_name = 'deals'
+      )
+      AND EXISTS (
+        SELECT 1
+        FROM information_schema.tables
+        WHERE table_schema = schema_name
+          AND table_name = 'contacts'
+      )
+      AND EXISTS (
+        SELECT 1
+        FROM information_schema.tables
+        WHERE table_schema = schema_name
+          AND table_name = 'emails'
+      )
   LOOP
     EXECUTE format('SET LOCAL search_path = %I, public', tenant_schema);
     EXECUTE tenant_sql;
@@ -181,6 +253,36 @@ BEGIN
     FROM information_schema.tables
     WHERE table_schema = current_schema()
       AND table_name = 'activities'
+  ) AND EXISTS (
+    SELECT 1
+    FROM information_schema.tables
+    WHERE table_schema = current_schema()
+      AND table_name = 'companies'
+  ) AND EXISTS (
+    SELECT 1
+    FROM information_schema.tables
+    WHERE table_schema = current_schema()
+      AND table_name = 'properties'
+  ) AND EXISTS (
+    SELECT 1
+    FROM information_schema.tables
+    WHERE table_schema = current_schema()
+      AND table_name = 'leads'
+  ) AND EXISTS (
+    SELECT 1
+    FROM information_schema.tables
+    WHERE table_schema = current_schema()
+      AND table_name = 'deals'
+  ) AND EXISTS (
+    SELECT 1
+    FROM information_schema.tables
+    WHERE table_schema = current_schema()
+      AND table_name = 'contacts'
+  ) AND EXISTS (
+    SELECT 1
+    FROM information_schema.tables
+    WHERE table_schema = current_schema()
+      AND table_name = 'emails'
   ) THEN
     BEGIN
       CREATE TYPE activity_source_entity AS ENUM (
