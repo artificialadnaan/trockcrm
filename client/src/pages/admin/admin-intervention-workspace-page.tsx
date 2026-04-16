@@ -32,7 +32,14 @@ export function AdminInterventionWorkspacePage() {
   const repIdFilter = searchParams.get("repId");
   const companyIdFilter = searchParams.get("companyId");
   const stageKeyFilter = searchParams.get("stageKey");
-  const [status, setStatus] = useState<"all" | "open" | "snoozed" | "resolved">("open");
+  const deriveStatusForView = (view: InterventionWorkspaceView): "all" | "open" | "snoozed" | "resolved" => {
+    if (view === "all") return "all";
+    if (view === "snooze-breached") return "snoozed";
+    return "open";
+  };
+  const [status, setStatus] = useState<"all" | "open" | "snoozed" | "resolved">(
+    deriveStatusForView(initialView)
+  );
   const [workspaceView, setWorkspaceView] = useState<InterventionWorkspaceView>(initialView);
   const [clusterKey, setClusterKey] = useState<string>(initialClusterKey);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
@@ -58,13 +65,7 @@ export function AdminInterventionWorkspacePage() {
 
   function applyWorkspaceView(nextView: InterventionWorkspaceView) {
     setWorkspaceView(nextView);
-    if (nextView === "all") {
-      setStatus("all");
-      return;
-    }
-    if (nextView === "open") {
-      setStatus("open");
-    }
+    setStatus(deriveStatusForView(nextView));
   }
 
   const items = data?.items ?? [];
@@ -118,11 +119,8 @@ export function AdminInterventionWorkspacePage() {
     const nextClusterKey = searchParams.get("clusterKey") ?? "all";
     setWorkspaceView((current) => (current === nextView ? current : nextView));
     setClusterKey((current) => (current === nextClusterKey ? current : nextClusterKey));
-    if (nextView === "all") {
-      setStatus((current) => (current === "all" ? current : "all"));
-    } else if (nextView === "open") {
-      setStatus((current) => (current === "open" ? current : "open"));
-    }
+    const derivedStatus = deriveStatusForView(nextView);
+    setStatus((current) => (current === derivedStatus ? current : derivedStatus));
   }, [searchParams]);
 
   function clearSelection() {

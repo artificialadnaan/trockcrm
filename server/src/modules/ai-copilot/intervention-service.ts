@@ -89,6 +89,11 @@ function interventionSlaThresholdDays(value: string) {
   }
 }
 
+function calculateLifecycleAgeDays(startedAt: Date | null | undefined, now: Date) {
+  if (!startedAt) return 0;
+  return Math.max(0, Math.floor((now.getTime() - startedAt.getTime()) / 86400000));
+}
+
 function buildBusinessKey(officeId: string, row: SalesProcessDisconnectRow) {
   const identity = getDisconnectCaseIdentity(row);
   return `${officeId}:${row.disconnectType}:${identity.scopeType}:${identity.scopeId}`;
@@ -208,10 +213,8 @@ function projectQueueItem(input: {
   deal: Pick<DealRow, "id" | "dealNumber" | "name" | "companyId"> | null;
   company: Pick<CompanyRow, "id" | "name"> | null;
   history: DisconnectCaseHistoryRow | null;
+  now: Date;
 }): InterventionQueueItem {
-  const ageDaysRaw = input.row.metadataJson && typeof input.row.metadataJson === "object"
-    ? (input.row.metadataJson as Record<string, unknown>).ageDays
-    : null;
   const evidenceSummaryRaw = input.row.metadataJson && typeof input.row.metadataJson === "object"
     ? (input.row.metadataJson as Record<string, unknown>).evidenceSummary
     : null;
@@ -225,7 +228,7 @@ function projectQueueItem(input: {
     status: input.row.status as "open" | "snoozed" | "resolved",
     escalated: input.row.escalated,
     reopenCount: input.row.reopenCount,
-    ageDays: typeof ageDaysRaw === "number" ? ageDaysRaw : 0,
+    ageDays: calculateLifecycleAgeDays(input.row.currentLifecycleStartedAt, input.now),
     assignedTo: input.row.assignedTo,
     generatedTask: input.task
       ? {
@@ -420,6 +423,7 @@ export async function listInterventionCases(
           deal: tenantDb.state.deals.find((deal) => deal.id === row.dealId) ?? null,
           company: tenantDb.state.companies.find((company) => company.id === row.companyId) ?? null,
           history: latestHistoryByCase.get(row.id) ?? null,
+          now,
         })
       )
       .filter((item) => matchesInterventionView(item, input.view))
@@ -477,6 +481,7 @@ export async function listInterventionCases(
         deal: row.dealId ? dealMap.get(row.dealId) ?? null : null,
         company: row.companyId ? companyMap.get(row.companyId) ?? null : null,
         history: latestHistoryByCase.get(row.id) ?? null,
+        now,
       })
     )
     .filter((item) => matchesInterventionView(item, input.view))

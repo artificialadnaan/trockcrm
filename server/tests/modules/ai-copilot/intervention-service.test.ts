@@ -449,17 +449,19 @@ describe("AI intervention service", () => {
         makeCase({
           id: "case-overdue",
           severity: "high",
+          currentLifecycleStartedAt: new Date("2026-04-13T15:00:00.000Z"),
           metadataJson: {
             evidenceSummary: "Deal has no open next-step task.",
-            ageDays: 3,
+            ageDays: 1,
           },
         }),
         makeCase({
           id: "case-not-overdue",
           severity: "high",
+          currentLifecycleStartedAt: new Date("2026-04-15T15:00:00.000Z"),
           metadataJson: {
             evidenceSummary: "Deal has no open next-step task.",
-            ageDays: 1,
+            ageDays: 9,
           },
         }),
         makeCase({
@@ -483,6 +485,7 @@ describe("AI intervention service", () => {
     });
 
     expect(result.items.map((item) => item.id)).toEqual(["case-overdue"]);
+    expect(result.items[0]?.ageDays).toBe(3);
   });
 
   it("lists snooze-breached cases with source filters while preserving caseId as a deep-link selector", async () => {
@@ -843,6 +846,7 @@ describe("AI intervention service", () => {
         makeCase({
           id: "case-1",
           clusterKey: "follow_through_gap",
+          currentLifecycleStartedAt: new Date("2026-04-07T15:00:00.000Z"),
           metadataJson: { evidenceSummary: "Aging queue case", ageDays: 9 },
         }),
         makeCase({
@@ -860,6 +864,7 @@ describe("AI intervention service", () => {
           scopeId: "deal-3",
           dealId: "deal-3",
           clusterKey: "follow_through_gap",
+          currentLifecycleStartedAt: new Date("2026-04-14T15:00:00.000Z"),
           metadataJson: { evidenceSummary: "Too new", ageDays: 2 },
         }),
       ],
@@ -871,6 +876,7 @@ describe("AI intervention service", () => {
       clusterKey: "follow_through_gap",
       page: 1,
       pageSize: 50,
+      now: new Date("2026-04-16T15:00:00.000Z"),
     });
 
     expect(result.totalCount).toBe(1);
