@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { authMiddleware } from "../../middleware/auth.js";
-import { registerSseConnection, canAdmitSseConnection } from "./sse-manager.js";
+import { registerSseConnection, canAdmitSseConnection, writeSse } from "./sse-manager.js";
 
 const router = Router();
 
@@ -21,7 +21,7 @@ router.get("/stream", authMiddleware, (req, res) => {
   res.flushHeaders();
 
   // Send initial connection event
-  res.write(`event: connected\ndata: ${JSON.stringify({ userId: req.user!.id })}\n\n`);
+  writeSse(res, `event: connected\ndata: ${JSON.stringify({ userId: req.user!.id })}\n\n`);
 
   // Register this connection for real-time push
   const cleanup = registerSseConnection(
@@ -32,7 +32,7 @@ router.get("/stream", authMiddleware, (req, res) => {
 
   // Keepalive ping every 30 seconds
   const keepalive = setInterval(() => {
-    res.write(`: keepalive\n\n`);
+    writeSse(res, `: keepalive\n\n`);
   }, 30000);
 
   // Cleanup on disconnect

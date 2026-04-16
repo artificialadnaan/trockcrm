@@ -18,6 +18,14 @@ const connections = new Map<string, Set<SseConnection>>();
 const MAX_PER_USER = 5;
 const MAX_GLOBAL = 200;
 
+type FlushableResponse = Response & { flush?: () => void };
+
+export function writeSse(res: Response, payload: string): void {
+  const flushable = res as FlushableResponse;
+  flushable.write(payload);
+  flushable.flush?.();
+}
+
 /**
  * Check if the SSE connection can be admitted BEFORE sending headers.
  * Call this in the route handler before writeHead(200).
@@ -73,7 +81,7 @@ export function pushToUser(userId: string, event: string, data: unknown): void {
 
   for (const conn of userConns) {
     try {
-      conn.res.write(payload);
+      writeSse(conn.res, payload);
     } catch (err) {
       // Connection is dead -- cleanup will happen via req.on("close")
       console.error(`[SSE] Failed to push to user ${userId}:`, err);
