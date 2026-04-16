@@ -149,8 +149,29 @@ describe("mapActivity", () => {
     expect(result.mappedSubject).toBe("Follow-up call");
     expect(result.mappedBody).toBe("Discussed pricing options");
     expect(result.hubspotDealId).toBe("deal-hs-1");
+    expect(result.hubspotDealIds).toEqual(["deal-hs-1"]);
     expect(result.hubspotContactId).toBe("contact-hs-1");
+    expect(result.hubspotContactIds).toEqual(["contact-hs-1"]);
     expect(result.mappedOccurredAt).toContain("2026-04-15");
+  });
+
+  it("preserves multiple associated deal and contact ids", () => {
+    const activity: HubSpotActivity = {
+      id: "hs-act-2",
+      properties: { hs_email_subject: "Multi-target email" },
+      associations: {
+        deals: { results: [{ id: "deal-hs-1" }, { id: "deal-hs-2" }] },
+        contacts: { results: [{ id: "contact-hs-1" }, { id: "contact-hs-2" }] },
+      },
+    };
+    (activity as any).__type = "emails";
+
+    const result = mapActivity(activity);
+
+    expect(result.hubspotDealId).toBe("deal-hs-1");
+    expect(result.hubspotDealIds).toEqual(["deal-hs-1", "deal-hs-2"]);
+    expect(result.hubspotContactId).toBe("contact-hs-1");
+    expect(result.hubspotContactIds).toEqual(["contact-hs-1", "contact-hs-2"]);
   });
 
   it("maps note activity", () => {

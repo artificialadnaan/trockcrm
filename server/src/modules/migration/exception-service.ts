@@ -9,11 +9,13 @@ import {
 } from "@trock-crm/shared/schema";
 import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
+import { getStagedActivityAssociationIds } from "./activity-associations.js";
 
 export type MigrationExceptionBucket =
   | "unknown_company"
   | "ambiguous_property"
   | "ambiguous_contact"
+  | "ambiguous_deal_association"
   | "lead_vs_deal_conflict"
   | "ambiguous_email_activity_attribution"
   | "missing_owner_assignment";
@@ -54,6 +56,7 @@ const BUCKET_LABELS: Record<MigrationExceptionBucket, string> = {
   unknown_company: "Unknown company",
   ambiguous_property: "Ambiguous property",
   ambiguous_contact: "Ambiguous contact",
+  ambiguous_deal_association: "Ambiguous deal association",
   lead_vs_deal_conflict: "Lead vs deal conflict",
   ambiguous_email_activity_attribution: "Ambiguous email/activity attribution",
   missing_owner_assignment: "Missing owner assignment",
@@ -159,10 +162,17 @@ export function classifyLeadException(input: {
     };
   }
 
-  if ((input.candidateDealCount ?? 0) > 1 || (input.candidatePropertyCount ?? 0) > 1) {
+  if ((input.candidateDealCount ?? 0) > 1) {
+    return {
+      bucket: "ambiguous_deal_association",
+      reason: "Lead matches more than one possible deal.",
+    };
+  }
+
+  if ((input.candidatePropertyCount ?? 0) > 1) {
     return {
       bucket: "lead_vs_deal_conflict",
-      reason: "Lead points at conflicting deal/property matches.",
+      reason: "Lead points at conflicting property matches.",
     };
   }
 
@@ -179,16 +189,23 @@ export function classifyLeadException(input: {
 export function classifyActivityException(input: {
   hubspotDealId: string | null;
   hubspotContactId: string | null;
+  hubspotDealIds?: string[] | null;
+  hubspotContactIds?: string[] | null;
   candidateCount: number;
 }): MigrationExceptionClassification | null {
-  if ((input.candidateCount ?? 0) > 1) {
+  const dealCount = input.hubspotDealIds?.filter(Boolean).length ?? (input.hubspotDealId ? 1 : 0);
+  const contactCount =
+    input.hubspotContactIds?.filter(Boolean).length ?? (input.hubspotContactId ? 1 : 0);
+  const candidateCount = Math.max(input.candidateCount ?? 0, dealCount + contactCount);
+
+  if (candidateCount > 1) {
     return {
       bucket: "ambiguous_email_activity_attribution",
       reason: "Activity matches more than one possible deal/contact target.",
     };
   }
 
-  if (!input.hubspotDealId && !input.hubspotContactId) {
+  if (candidateCount === 0) {
     return {
       bucket: "ambiguous_email_activity_attribution",
       reason: "Activity cannot be assigned to a unique deal or contact.",
@@ -334,6 +351,7 @@ async function loadLeadExceptions(): Promise<MigrationExceptionItem[]> {
         entityType: "lead",
         classification:
           row.exceptionBucket === "lead_vs_deal_conflict" ||
+          row.exceptionBucket === "ambiguous_deal_association" ||
           row.exceptionBucket === "missing_owner_assignment"
             ? {
                 bucket: row.exceptionBucket as MigrationExceptionBucket,
@@ -434,23 +452,35 @@ async function loadActivityExceptions(): Promise<MigrationExceptionItem[]> {
 
   return rows
     .map((row) =>
-      itemForBucket({
-        id: row.id,
-        entityType: "activity",
-        classification: classifyActivityException({
+      {
+        const associationIds = getStagedActivityAssociationIds({
+          rawData: row.rawData as Record<string, unknown> | null | undefined,
           hubspotDealId: row.hubspotDealId ?? null,
+          hubspotDealIds: (row as any).hubspotDealIds,
           hubspotContactId: row.hubspotContactId ?? null,
-          candidateCount: row.hubspotDealId && row.hubspotContactId ? 0 : 1,
-        }),
-        title: row.mappedSubject ?? `Activity ${row.hubspotActivityId}`,
-        detailFallback:
-          (row.validationErrors as Array<{ error: string }> | undefined)?.[0]?.error ??
-          "Activity requires review.",
-        validationStatus: row.validationStatus,
-        reviewNotes: null,
-        reviewable: false,
-        reviewHint: "Review on the staged activities list.",
-      })
+          hubspotContactIds: (row as any).hubspotContactIds,
+        });
+
+        return itemForBucket({
+          id: row.id,
+          entityType: "activity",
+          classification: classifyActivityException({
+            hubspotDealId: associationIds.hubspotDealId,
+            hubspotContactId: associationIds.hubspotContactId,
+            hubspotDealIds: associationIds.hubspotDealIds,
+            hubspotContactIds: associationIds.hubspotContactIds,
+            candidateCount: associationIds.candidateCount,
+          }),
+          title: row.mappedSubject ?? `Activity ${row.hubspotActivityId}`,
+          detailFallback:
+            (row.validationErrors as Array<{ error: string }> | undefined)?.[0]?.error ??
+            "Activity requires review.",
+          validationStatus: row.validationStatus,
+          reviewNotes: null,
+          reviewable: false,
+          reviewHint: "Review on the staged activities list.",
+        });
+      }
     )
     .filter((item): item is MigrationExceptionItem => item != null);
 }
@@ -474,6 +504,7 @@ export async function getMigrationExceptionCounts(): Promise<Record<MigrationExc
     unknown_company: 0,
     ambiguous_property: 0,
     ambiguous_contact: 0,
+    ambiguous_deal_association: 0,
     lead_vs_deal_conflict: 0,
     ambiguous_email_activity_attribution: 0,
     missing_owner_assignment: 0,
