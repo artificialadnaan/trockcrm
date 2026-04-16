@@ -104,8 +104,17 @@ router.post("/feedback", async (req, res, next) => {
     if (!targetType || !targetId || !feedbackType || !feedbackValue) {
       throw new AppError(400, "targetType, targetId, feedbackType, and feedbackValue are required");
     }
+    if (String(targetType).length > 32) {
+      throw new AppError(400, "targetType must be 32 characters or fewer");
+    }
     if (!UUID_PATTERN.test(String(targetId))) {
       throw new AppError(400, "targetId must be a valid UUID");
+    }
+    if (String(feedbackType).length > 32) {
+      throw new AppError(400, "feedbackType must be 32 characters or fewer");
+    }
+    if (String(feedbackValue).length > 32) {
+      throw new AppError(400, "feedbackValue must be 32 characters or fewer");
     }
 
     const feedback = await recordAiFeedback(req.tenantDb!, {

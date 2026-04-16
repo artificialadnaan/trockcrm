@@ -218,6 +218,21 @@ describe("ai copilot routes", () => {
     expect(serviceMocks.recordAiFeedback).not.toHaveBeenCalled();
   });
 
+  it("rejects feedback fields that exceed schema length limits", async () => {
+    const app = createApp("rep");
+    const res = await request(app)
+      .post("/api/ai/feedback")
+      .send({
+        targetType: "sales_process_disconnect_dashboard",
+        targetId: "11111111-1111-4111-8111-111111111111",
+        feedbackType: "ops_dashboard_interaction",
+        feedbackValue: "dashboard_view",
+      });
+
+    expect(res.status).toBe(400);
+    expect(serviceMocks.recordAiFeedback).not.toHaveBeenCalled();
+  });
+
   it("restricts blind-spot summary to director/admin roles", async () => {
     const app = createApp("rep");
     const res = await request(app).get("/api/ai/blind-spots");

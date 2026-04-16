@@ -416,7 +416,7 @@ export async function trackSalesProcessDisconnectInteraction(input: {
   return api("/ai/feedback", {
     method: "POST",
     json: {
-      targetType: "sales_process_disconnect_dashboard",
+      targetType: "ops_dashboard",
       targetId: salesProcessDisconnectDashboardTargetId,
       feedbackType: "ops_dashboard_interaction",
       feedbackValue: input.interactionType,
