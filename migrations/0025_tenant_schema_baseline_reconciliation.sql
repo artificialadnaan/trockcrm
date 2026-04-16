@@ -18,9 +18,9 @@ DECLARE
   schema_name text;
 BEGIN
   FOR schema_name IN
-    SELECT schema_name
-    FROM information_schema.schemata
-    WHERE schema_name LIKE 'office_%'
+    SELECT schemata.schema_name
+    FROM information_schema.schemata AS schemata
+    WHERE schemata.schema_name LIKE 'office_%'
   LOOP
     IF EXISTS (
       SELECT 1

@@ -15,7 +15,8 @@ describe("0025 tenant schema baseline reconciliation migration", () => {
   it("repairs office schemas that missed core crm baseline tables and columns", () => {
     const migrationSql = readFileSync(migrationPath, "utf8");
 
-    expect(migrationSql).toContain("WHERE schema_name LIKE 'office_%'");
+    expect(migrationSql).toContain("SELECT schemata.schema_name");
+    expect(migrationSql).toContain("WHERE schemata.schema_name LIKE 'office_%'");
     expect(migrationSql).toContain("CREATE TABLE IF NOT EXISTS %I.companies");
     expect(migrationSql).toContain("ALTER TABLE %I.contacts ADD COLUMN IF NOT EXISTS company_id UUID");
     expect(migrationSql).toContain("ALTER TABLE %I.deals ADD COLUMN IF NOT EXISTS company_id UUID");
