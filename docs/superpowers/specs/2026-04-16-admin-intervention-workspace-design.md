@@ -18,6 +18,38 @@ The workspace should help admins and directors:
 
 This phase builds on the current disconnect dashboard, action queue, and deterministic admin task generation. It does not replace them. It makes them operational.
 
+## Canonical Surface Boundary
+
+This design introduces one canonical writable surface:
+
+- `/admin/interventions`
+
+The existing surfaces keep distinct roles:
+
+- `/admin/sales-process-disconnects`
+  - diagnostic and reporting surface
+  - read-first
+  - optimized for totals, clusters, trends, narratives, and automation status
+- `/admin/interventions`
+  - operational action surface
+  - optimized for ownership, queue management, batch actioning, and intervention history
+- `/admin/ai-actions`
+  - broader AI/admin queue for non-disconnect AI items
+  - not the primary operating surface for disconnect-case work
+
+Navigation rule:
+
+- users discover problems on `/admin/sales-process-disconnects`
+- users act on those problems in `/admin/interventions`
+- the disconnect dashboard should link into the intervention workspace using prefiltered views, not duplicate its controls
+
+Boundary rule for existing dashboard controls:
+
+- the existing dashboard may retain `Refresh`, `Queue Digest`, `Queue Escalation Scan`, and `Queue Admin Tasks`
+- those controls remain office-level automation triggers, not case-level intervention controls
+- individual and batch mutation of disconnect cases belongs only in `/admin/interventions`
+- the disconnect dashboard should not gain assign, snooze, resolve, or escalate controls for specific cases
+
 ## Why This Is Next
 
 The current AI/admin stack already provides:
@@ -232,7 +264,27 @@ It may or may not have:
 - intervention notes
 - prior resolution history
 
-This is not a replacement for `ai_risk_flags` or `ai_task_suggestions`. It is a working-layer projection on top of the existing AI outputs.
+This is not a replacement for `ai_risk_flags` or `ai_task_suggestions`, but it is the canonical workspace state for admin intervention lifecycle.
+
+Authority rule:
+
+- `ai_disconnect_cases` is the source of truth for workspace status, assignee, escalation state, snooze state, and resolution state
+- generated `tasks` remain the execution artifact for admin follow-through
+- `ai_risk_flags` and disconnect dashboard logic remain the detection layer
+- task rows may be created, assigned, snoozed, or resolved in response to case actions, but they do not own the workspace lifecycle
+
+This keeps ownership unambiguous:
+
+- detection comes from existing AI/disconnect logic
+- intervention state lives in `ai_disconnect_cases`
+- work execution can still be represented in canonical `tasks`
+
+Materialization rule:
+
+- every active disconnect that qualifies for the dashboard/action system should have exactly one `ai_disconnect_cases` row for its business key
+- case rows are created or upserted by the same deterministic refresh path that computes disconnect dashboard rows
+- recommended entry points are the existing disconnect refresh jobs and manual refresh path, not ad hoc page loads
+- the workspace never creates duplicate cases from UI reads
 
 ## Recommended Architecture
 
@@ -250,6 +302,7 @@ The existing AI/admin system remains the source for:
 
 Add a new server-side aggregation layer that assembles each disconnect case from:
 
+- canonical `ai_disconnect_cases` state
 - current disconnect dashboard row
 - linked generated admin task, if present
 - related AI risk flag, if present
@@ -262,12 +315,18 @@ This projection should return one normalized queue item shape.
 
 Direct mutations from the workspace should map to existing systems:
 
-- assignment updates generated task assignee when a task exists
-- snooze updates generated task schedule or case state
-- resolve records intervention outcome and can close the generated task if appropriate
-- escalate records escalation state and keeps the case visible in escalation filters
+- assignment updates `ai_disconnect_cases.assigned_to` and syncs generated task assignee when a task exists
+- snooze updates `ai_disconnect_cases.status = 'snoozed'` and `snoozed_until`, and may also snooze the generated task when one exists
+- resolve records case outcome and can close the generated task if appropriate
+- escalate updates case escalation state and keeps the case visible in escalation filters
 
 Where no generated task exists yet, the workspace may create or queue the intervention action directly using existing deterministic task-generation semantics.
+
+Task sync rule:
+
+- workspace actions should never create a second parallel task for the same case business key
+- if a generated admin task already exists, workspace actions mutate that task
+- if no generated task exists and the chosen action requires one, the workspace creates or queues exactly one deterministic admin task tied to the case business key
 
 ### 4. Outcome layer
 
@@ -278,11 +337,16 @@ Every mutation should write structured feedback that can later answer:
 - whether the case reopened
 - whether the cluster repeated
 
+Write contract:
+
+- every workspace mutation must write one `ai_disconnect_case_history` row
+- every workspace mutation must also write one standardized `ai_feedback` event
+
+This preserves compatibility with the current AI ops metrics and action-history consumers while introducing a purpose-built intervention history table.
+
 ## UI Shape
 
-V1 should be a new admin/director page:
-
-- `/admin/interventions`
+V1 should be a new admin/director page at `/admin/interventions`.
 
 ### Layout
 
@@ -351,6 +415,12 @@ Assign the case owner and, if a generated task exists, sync the task assignee.
 
 Temporarily suppress visibility until a future date without marking the case solved.
 
+Required behavior:
+
+- snooze must set `snoozed_until`
+- snoozed cases are excluded from the default open queue until that timestamp passes
+- snoozed cases remain visible in a dedicated snoozed view
+
 ### Resolve
 
 Mark the intervention complete with a required structured resolution reason.
@@ -364,9 +434,45 @@ Suggested reasons:
 - duplicate case
 - issue no longer relevant
 
+Task outcome mapping:
+
+- `task completed`
+  - generated task transitions to `completed`
+  - corresponding `task_resolution_state` should be written so the task engine understands the issue was resolved through execution
+- `owner aligned`
+  - generated task is dismissed if no further task execution is needed
+  - `task_resolution_state` should be written with a suppressing resolution marker
+- `follow-up completed`
+  - generated task transitions to `completed`
+  - `task_resolution_state` should be written
+- `false positive`
+  - generated task is dismissed
+  - `task_resolution_state` should be written with a suppression-oriented resolution marker
+- `duplicate case`
+  - generated task is dismissed unless a surviving linked case owns the task
+  - `task_resolution_state` should be written
+- `issue no longer relevant`
+  - generated task is dismissed
+  - `task_resolution_state` should be written
+
+If no generated task exists, resolve updates only the disconnect case and case history, but still writes the standardized `ai_feedback` event.
+
 ### Escalate
 
 Mark the case escalated and push it into escalation-oriented views and metrics.
+
+### Reopen
+
+Reopen is not a direct user action in v1. It is a deterministic system transition.
+
+Rule:
+
+- if a resolved or snoozed disconnect case is re-detected for the same business key after its resolution or snooze window, the same case record is reopened rather than creating a new case
+- reopening increments a counter and appends a history row
+
+Business key recommendation:
+
+- `office_id + disconnect_type + scope_type + scope_id`
 
 ## Data Model Additions
 
@@ -388,17 +494,28 @@ Suggested fields:
 - `company_id`
 - `disconnect_type`
 - `cluster_key`
+- `business_key`
 - `severity`
 - `status` such as `open`, `snoozed`, `resolved`
 - `assigned_to`
 - `generated_task_id`
 - `escalated`
+- `snoozed_until`
+- `reopen_count`
 - `first_detected_at`
 - `last_detected_at`
 - `last_intervened_at`
 - `resolved_at`
 - `resolution_reason`
 - `metadata_json`
+
+Recommended index/uniqueness rule:
+
+- unique index on `office_id + business_key`
+
+Business key should be derived from:
+
+- `office_id + disconnect_type + scope_type + scope_id`
 
 ### `ai_disconnect_case_history`
 
@@ -417,10 +534,12 @@ Suggested fields:
 - `to_status`
 - `from_assignee`
 - `to_assignee`
+- `from_snoozed_until`
+- `to_snoozed_until`
 - `notes`
 - `metadata_json`
 
-These tables should not replace existing `ai_feedback`. They should provide a purpose-built operational history layer, while `ai_feedback` remains a broad event ledger.
+These tables should not replace existing `ai_feedback`. They provide the canonical intervention-state layer and append-only intervention history, while `ai_feedback` remains the broad event ledger used by existing AI ops metrics and telemetry.
 
 ## API Surface
 
@@ -436,6 +555,76 @@ Recommended additive routes:
 - `POST /api/ai/ops/interventions/:id/snooze`
 - `POST /api/ai/ops/interventions/:id/resolve`
 - `POST /api/ai/ops/interventions/:id/escalate`
+
+### List endpoint contract
+
+`GET /api/ai/ops/interventions` should support:
+
+- pagination:
+  - `page`
+  - `limit`
+- sorting:
+  - `sortBy` with values such as `age`, `severity`, `cluster`, `owner`, `company`, `lastIntervenedAt`
+  - `sortOrder` with values `asc` or `desc`
+- filters:
+  - `status`
+  - `severity`
+  - `clusterKey`
+  - `disconnectType`
+  - `assignedTo`
+  - `stageId`
+  - `companyId`
+  - `escalated`
+  - `hasGeneratedTask`
+  - `repeatOnly`
+  - `agingOnly`
+  - `view`
+
+Standard `view` values should include:
+
+- `open`
+- `escalated`
+- `unassigned`
+- `aging`
+- `repeat`
+- `generated-task-pending`
+
+Response shape should include:
+
+- `items`
+- `pagination`
+- `availableFilters`
+- `summary`
+
+Each queue item should include:
+
+- case identity and business key
+- scope and linked CRM entities
+- severity and age
+- cluster metadata
+- generated task state
+- assignee
+- escalated state
+- snoozed state
+- top evidence summary
+- last intervention snapshot
+
+### Batch mutation contract
+
+Batch action routes should accept:
+
+- `caseIds: string[]`
+- action-specific payload such as:
+  - `assignedTo`
+  - `snoozedUntil`
+  - `resolutionReason`
+  - `notes`
+
+Batch mutation responses should include:
+
+- `updatedCount`
+- `skippedCount`
+- `errors`
 
 ## Relationship to Existing AI Features
 
