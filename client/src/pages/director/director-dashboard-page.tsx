@@ -9,7 +9,7 @@ import { useRepPerformance } from "@/hooks/use-rep-performance";
 import { DirectorBlindSpotList } from "@/components/ai/director-blind-spot-list";
 import { PipelineBarChart } from "@/components/charts/pipeline-bar-chart";
 import { WinRateTrendChart } from "@/components/charts/win-rate-trend-chart";
-import { ActivityBarChart } from "@/components/charts/activity-bar-chart";
+import { ActivityByRepCard } from "@/components/dashboard/activity-by-rep-card";
 import { formatCurrency } from "@/components/charts/chart-colors";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
@@ -648,20 +648,12 @@ export function DirectorDashboardPage() {
       </div>
 
       {/* ── Activity by Rep ─────────────────────────────────────────────── */}
-      <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-        <div className="px-5 py-4 border-b border-gray-100">
-          <h3 className="text-sm font-bold text-gray-900 uppercase tracking-wide">
-            Activity by Rep
-          </h3>
-        </div>
-        <div className="p-4">
-          {data.activityByRep.length > 0 ? (
-            <ActivityBarChart data={data.activityByRep} />
-          ) : (
-            <p className="text-gray-400 text-sm text-center py-8">No activity data.</p>
-          )}
-        </div>
-      </div>
+      <ActivityByRepCard
+        activityByRep={data.activityByRep}
+        repCards={data.repCards}
+        formatCurrency={formatCurrency}
+        onSelectRep={(repId) => navigate(`/director/rep/${repId}?focus=activity`)}
+      />
     </div>
   );
 }

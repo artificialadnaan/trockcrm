@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { useParams, Link } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { useParams, Link, useSearchParams } from "react-router-dom";
 import {
   useRepDetail,
   presetToDateRange,
@@ -25,9 +25,25 @@ import {
 
 export function DirectorRepDetail() {
   const { repId } = useParams<{ repId: string }>();
+  const [searchParams] = useSearchParams();
   const [preset, setPreset] = useState<DateRangePreset>("ytd");
   const dateRange = presetToDateRange(preset);
   const { data, loading, error } = useRepDetail(repId, dateRange);
+
+  useEffect(() => {
+    if (searchParams.get("focus") !== "activity") {
+      return;
+    }
+
+    const frame = window.requestAnimationFrame(() => {
+      document.getElementById("rep-activity-summary")?.scrollIntoView({
+        behavior: "smooth",
+        block: "start",
+      });
+    });
+
+    return () => window.cancelAnimationFrame(frame);
+  }, [searchParams]);
 
   if (loading) {
     return (
@@ -62,6 +78,28 @@ export function DirectorRepDetail() {
   if (!data) return null;
 
   const taskTotal = data.tasksToday.overdue + data.tasksToday.today;
+  const activityBreakdown = [
+    {
+      label: "Calls",
+      value: data.activityThisWeek.calls,
+      tone: "bg-rose-50 text-rose-700 border-rose-100",
+    },
+    {
+      label: "Emails",
+      value: data.activityThisWeek.emails,
+      tone: "bg-sky-50 text-sky-700 border-sky-100",
+    },
+    {
+      label: "Meetings",
+      value: data.activityThisWeek.meetings,
+      tone: "bg-indigo-50 text-indigo-700 border-indigo-100",
+    },
+    {
+      label: "Notes",
+      value: data.activityThisWeek.notes,
+      tone: "bg-emerald-50 text-emerald-700 border-emerald-100",
+    },
+  ];
 
   return (
     <div className="space-y-6">
@@ -110,6 +148,49 @@ export function DirectorRepDetail() {
           icon={<Target className="h-5 w-5" />}
         />
       </div>
+
+      <Card id="rep-activity-summary" className="scroll-mt-24">
+        <CardHeader>
+          <CardTitle>Activity Summary</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1.2fr,2fr]">
+            <div className="rounded-2xl border border-gray-200 bg-gray-50 p-5">
+              <p className="text-[11px] font-semibold uppercase tracking-widest text-gray-400">
+                Current activity signal
+              </p>
+              <p className="mt-3 text-4xl font-black text-gray-900">
+                {data.activityThisWeek.total}
+              </p>
+              <p className="mt-2 text-sm text-gray-500">
+                Logged this week across calls, emails, meetings, and notes.
+              </p>
+              <div className="mt-4 grid grid-cols-2 gap-3 text-sm">
+                <div className="rounded-xl border border-gray-200 bg-white px-3 py-2">
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400">Tasks today</p>
+                  <p className="mt-1 text-lg font-bold text-gray-900">{taskTotal}</p>
+                </div>
+                <div className="rounded-xl border border-gray-200 bg-white px-3 py-2">
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400">Follow-up compliance</p>
+                  <p className="mt-1 text-lg font-bold text-gray-900">{data.followUpCompliance.complianceRate}%</p>
+                </div>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+              {activityBreakdown.map((item) => (
+                <div key={item.label} className={`rounded-2xl border px-4 py-4 ${item.tone}`}>
+                  <p className="text-[10px] font-bold uppercase tracking-widest opacity-70">{item.label}</p>
+                  <p className="mt-3 text-3xl font-black">{item.value}</p>
+                  <p className="mt-1 text-xs opacity-80">
+                    {item.value === 1 ? `${item.label.slice(0, -1)} logged` : `${item.label} logged`}
+                  </p>
+                </div>
+              ))}
+            </div>
+          </div>
+        </CardContent>
+      </Card>
 
       {/* Charts */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
