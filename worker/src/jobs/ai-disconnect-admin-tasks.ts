@@ -143,11 +143,22 @@ export async function runAiDisconnectAdminTaskGeneration(): Promise<void> {
           const title = `Resolve ${row.disconnect_label} for ${row.deal_number}`;
           const description = `${row.deal_name} has an open ${row.disconnect_label.toLowerCase()} for ${row.age_days} day(s).`;
           const dedupeKey = `${row.disconnect_type}:${row.deal_id}`;
+          const existingTask = await client.query(
+            `SELECT id
+             FROM ${schemaName}.tasks
+             WHERE origin_rule = $1
+               AND dedupe_key = $2
+               AND status IN ('scheduled', 'pending', 'in_progress', 'waiting_on', 'blocked')
+             LIMIT 1`,
+            ["ai_disconnect_admin_task", dedupeKey]
+          );
+          if (existingTask.rows.length > 0) {
+            continue;
+          }
           await client.query(
             `INSERT INTO ${schemaName}.tasks
                (title, description, type, priority, status, assigned_to, office_id, origin_rule, source_event, dedupe_key, reason_code, entity_snapshot, deal_id)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13)
-             ON CONFLICT ON CONSTRAINT tasks_active_origin_rule_dedupe_key_uidx DO NOTHING
              RETURNING id`,
             [
               title,

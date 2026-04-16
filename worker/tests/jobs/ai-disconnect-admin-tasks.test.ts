@@ -69,6 +69,9 @@ describe("ai disconnect admin task worker", () => {
           ],
         };
       }
+      if (sql.startsWith("SELECT id\n             FROM office_beta.tasks")) {
+        return { rows: [] };
+      }
       if (sql.startsWith("INSERT INTO office_beta.tasks")) {
         return { rows: [{ id: "task-1" }] };
       }
@@ -104,6 +107,49 @@ describe("ai disconnect admin task worker", () => {
         "missing_next_task",
       ])
     );
+  });
+
+  it("skips inserting duplicate active tasks for the same business key", async () => {
+    queryMock.mockImplementation(async (sql: string, params?: unknown[]) => {
+      if (sql.includes("FROM public.offices WHERE is_active = true")) {
+        return { rows: [{ id: "office-1", slug: "beta", name: "Beta" }] };
+      }
+      if (sql.includes("FROM information_schema.schemata")) {
+        return { rows: [{ schema_name: "office_beta" }] };
+      }
+      if (sql.includes("SELECT pg_try_advisory_lock")) return { rows: [{ acquired: true }] };
+      if (sql === "BEGIN" || sql === "COMMIT") return { rows: [] };
+      if (sql.includes("FROM public.users") && sql.includes("role IN ('director', 'admin')")) {
+        return { rows: [{ id: "director-1" }] };
+      }
+      if (sql.includes("'procore_bid_board_drift'::text")) {
+        return {
+          rows: [
+            {
+              deal_id: "deal-1",
+              deal_number: "D-1001",
+              deal_name: "Alpha Plaza",
+              disconnect_type: "procore_bid_board_drift",
+              disconnect_label: "Bid board sync drift",
+              age_days: 5,
+            },
+          ],
+        };
+      }
+      if (sql.startsWith("SELECT id\n             FROM office_beta.tasks")) {
+        return { rows: [{ id: "existing-task" }] };
+      }
+      if (sql.startsWith("INSERT INTO office_beta.tasks")) {
+        return { rows: [{ id: "task-1" }] };
+      }
+      if (sql.includes("SELECT pg_advisory_unlock")) return { rows: [] };
+      throw new Error(`Unexpected SQL: ${sql} :: ${JSON.stringify(params)}`);
+    });
+
+    await runAiDisconnectAdminTaskGeneration();
+
+    const inserts = queryMock.mock.calls.filter(([sql]) => typeof sql === "string" && sql.startsWith("INSERT INTO office_beta.tasks"));
+    expect(inserts).toHaveLength(0);
   });
 
   it("skips offices whose tenant schema does not exist", async () => {
