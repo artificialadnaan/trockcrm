@@ -51,28 +51,7 @@ export function DealDetailPage() {
   const [stageChangeOpen, setStageChangeOpen] = useState(false);
   const [targetStageId, setTargetStageId] = useState<string | null>(null);
   const [teamCount, setTeamCount] = useState<number | null>(null);
-
-  if (loading) {
-    return (
-      <div className="space-y-4">
-        <div className="h-8 w-48 bg-muted animate-pulse rounded" />
-        <div className="h-64 bg-muted animate-pulse rounded-lg" />
-      </div>
-    );
-  }
-
-  if (error || !deal) {
-    return (
-      <div className="text-center py-12">
-        <p className="text-red-600">{error ?? "Deal not found"}</p>
-        <Button variant="outline" className="mt-4" onClick={() => navigate("/deals")}>
-          Back to Deals
-        </Button>
-      </div>
-    );
-  }
-
-  const currentStage = stages.find((s) => s.id === deal.stageId);
+  const currentStage = stages.find((s) => s.id === deal?.stageId);
   const isDirectorOrAdmin = user?.role === "director" || user?.role === "admin";
 
   // Build stage advancement options
@@ -95,6 +74,9 @@ export function DealDetailPage() {
   };
 
   const handleDelete = async () => {
+    if (!deal) {
+      return;
+    }
     if (!window.confirm("Are you sure you want to delete this deal? This action can be undone by an admin.")) {
       return;
     }
@@ -149,6 +131,26 @@ export function DealDetailPage() {
 
     return () => window.cancelAnimationFrame(frame);
   }, [activeTab, requestedFocus]);
+
+  if (loading) {
+    return (
+      <div className="space-y-4">
+        <div className="h-8 w-48 bg-muted animate-pulse rounded" />
+        <div className="h-64 bg-muted animate-pulse rounded-lg" />
+      </div>
+    );
+  }
+
+  if (error || !deal) {
+    return (
+      <div className="text-center py-12">
+        <p className="text-red-600">{error ?? "Deal not found"}</p>
+        <Button variant="outline" className="mt-4" onClick={() => navigate("/deals")}>
+          Back to Deals
+        </Button>
+      </div>
+    );
+  }
 
   const handleTabSelect = (tab: Tab) => {
     setActiveTab(tab);
