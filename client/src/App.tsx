@@ -43,6 +43,7 @@ import { CrossOfficeReportsPage } from "@/pages/admin/cross-office-reports-page"
 import { AiActionQueuePage } from "@/pages/admin/ai-action-queue-page";
 import { AiOpsPage } from "@/pages/admin/ai-ops-page";
 import { AiPacketReviewPage } from "@/pages/admin/ai-packet-review-page";
+import { AdminInterventionWorkspacePage } from "@/pages/admin/admin-intervention-workspace-page";
 import { SalesProcessDisconnectsPage } from "@/pages/admin/sales-process-disconnects-page";
 import { UserGuidePage } from "@/pages/admin/help/user-guide-page";
 import { AdminGuidePage } from "@/pages/admin/help/admin-guide-page";
@@ -112,6 +113,7 @@ export function App() {
               <Route path="/admin/audit" element={<AuditLogPage />} />
               <Route path="/admin/cross-office-reports" element={<CrossOfficeReportsPage />} />
               <Route path="/admin/ai-actions" element={<AiActionQueuePage />} />
+              <Route path="/admin/interventions" element={<AdminInterventionWorkspacePage />} />
               <Route path="/admin/sales-process-disconnects" element={<SalesProcessDisconnectsPage />} />
               <Route path="/admin/merge-queue" element={<MergeQueuePage />} />
               <Route path="/admin/procore" element={<ProcoreSyncPage />} />

@@ -1,0 +1,45 @@
+import {
+  pgTable,
+  uuid,
+  varchar,
+  boolean,
+  integer,
+  timestamp,
+  jsonb,
+  index,
+  uniqueIndex,
+} from "drizzle-orm/pg-core";
+
+export const aiDisconnectCases = pgTable(
+  "ai_disconnect_cases",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    officeId: uuid("office_id").notNull(),
+    scopeType: varchar("scope_type", { length: 40 }).notNull(),
+    scopeId: uuid("scope_id").notNull(),
+    dealId: uuid("deal_id"),
+    companyId: uuid("company_id"),
+    disconnectType: varchar("disconnect_type", { length: 80 }).notNull(),
+    clusterKey: varchar("cluster_key", { length: 80 }),
+    businessKey: varchar("business_key", { length: 255 }).notNull(),
+    severity: varchar("severity", { length: 20 }).notNull(),
+    status: varchar("status", { length: 20 }).notNull().default("open"),
+    assignedTo: uuid("assigned_to"),
+    generatedTaskId: uuid("generated_task_id"),
+    escalated: boolean("escalated").notNull().default(false),
+    snoozedUntil: timestamp("snoozed_until", { withTimezone: true }),
+    reopenCount: integer("reopen_count").notNull().default(0),
+    firstDetectedAt: timestamp("first_detected_at", { withTimezone: true }).notNull(),
+    lastDetectedAt: timestamp("last_detected_at", { withTimezone: true }).notNull(),
+    lastIntervenedAt: timestamp("last_intervened_at", { withTimezone: true }),
+    resolvedAt: timestamp("resolved_at", { withTimezone: true }),
+    resolutionReason: varchar("resolution_reason", { length: 80 }),
+    metadataJson: jsonb("metadata_json"),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex("ai_disconnect_cases_office_business_key_uidx").on(table.officeId, table.businessKey),
+    index("ai_disconnect_cases_status_idx").on(table.status, table.escalated, table.assignedTo),
+  ]
+);

@@ -8,8 +8,10 @@ import {
   trackSalesProcessDisconnectInteraction,
   useSalesProcessDisconnectDashboard,
 } from "@/hooks/use-ai-ops";
+import { buildInterventionWorkspacePath } from "@/hooks/use-admin-interventions";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { buttonVariants } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 
 const severityClasses: Record<string, string> = {
@@ -145,6 +147,9 @@ export function SalesProcessDisconnectsPage() {
           <RefreshCcw className="h-4 w-4 mr-2" />
           Refresh
         </Button>
+        <Link to="/admin/interventions" className={buttonVariants({ variant: "outline" })}>
+          Open Intervention Workspace
+        </Link>
         <Button variant="default" onClick={() => void handleQueueDigest()} disabled={loading}>
           Queue Digest
         </Button>
@@ -370,6 +375,15 @@ export function SalesProcessDisconnectsPage() {
                     <div><span className="font-semibold text-foreground">Recommended action:</span> {cluster.recommendedAction}</div>
                   </div>
 
+                  <div className="flex items-center justify-end">
+                    <Link
+                      to={buildInterventionWorkspacePath({ view: "aging", clusterKey: cluster.clusterKey })}
+                      className={buttonVariants({ variant: "outline", size: "sm" })}
+                    >
+                      Open in workspace
+                    </Link>
+                  </div>
+
                   <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">
                     {cluster.stages.map((stage) => (
                       <Badge key={`${cluster.clusterKey}:stage:${stage}`} variant="secondary">{stage}</Badge>
@@ -427,6 +441,16 @@ export function SalesProcessDisconnectsPage() {
                       <Badge key={`${trend.key}:${clusterKey}`} variant="secondary">{clusterKey.split("_").join(" ")}</Badge>
                     ))}
                   </div>
+                  {trend.clusterKeys[0] && (
+                    <div className="mt-3">
+                      <Link
+                        to={buildInterventionWorkspacePath({ view: "aging", clusterKey: trend.clusterKeys[0] })}
+                        className={buttonVariants({ variant: "outline", size: "sm" })}
+                      >
+                        Open hotspot in workspace
+                      </Link>
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
@@ -559,6 +583,15 @@ export function SalesProcessDisconnectsPage() {
                   </Button>
                 </div>
 
+                <div className="flex justify-end">
+                  <Link
+                    to={buildInterventionWorkspacePath({ view: "open", clusterKey: playbook.clusterKey })}
+                    className={buttonVariants({ variant: "outline", size: "sm" })}
+                  >
+                    Open cases
+                  </Link>
+                </div>
+
                 <div className="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm">
                   <span className="font-semibold text-emerald-900">Recommended action:</span>{" "}
                   <span className="text-emerald-800">
@@ -655,6 +688,18 @@ export function SalesProcessDisconnectsPage() {
                       {row.disconnectDetails && (
                         <div className="text-sm text-muted-foreground leading-6">{row.disconnectDetails}</div>
                       )}
+                      <div className="pt-1">
+                        <Link
+                          to={buildInterventionWorkspacePath({
+                            view: row.ageDays != null && row.ageDays >= 7 ? "aging" : "open",
+                            clusterKey:
+                              dashboard?.clusters.find((cluster) => cluster.disconnectTypes.includes(row.disconnectType))?.clusterKey ?? null,
+                          })}
+                          className={buttonVariants({ variant: "outline", size: "sm" })}
+                        >
+                          Open case queue
+                        </Link>
+                      </div>
                     </div>
                   </div>
 

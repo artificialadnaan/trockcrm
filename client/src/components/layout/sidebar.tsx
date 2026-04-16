@@ -25,6 +25,7 @@ import {
   Sparkles,
   ShieldAlert,
   Radar,
+  ClipboardCheck,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
@@ -57,6 +58,7 @@ const adminItems = [
   { to: "/admin/pipeline", icon: Settings, label: "Pipeline Config", roles: ["admin"] },
   { to: "/admin/procore", icon: Zap, label: "Procore Sync", roles: ["admin"] },
   { to: "/admin/sales-process-disconnects", icon: Radar, label: "Process Disconnects", roles: ["admin", "director"] },
+  { to: "/admin/interventions", icon: ClipboardCheck, label: "Interventions", roles: ["admin", "director"] },
   { to: "/admin/ai-actions", icon: ShieldAlert, label: "AI Actions", roles: ["admin", "director"] },
   { to: "/admin/ai-ops", icon: Sparkles, label: "AI Ops", roles: ["admin", "director"] },
   { to: "/admin/audit", icon: ClipboardList, label: "Audit Log", roles: ["admin", "director"] },
