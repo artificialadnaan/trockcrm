@@ -3,6 +3,7 @@ import { stagedActivities, stagedDeals, stagedLeads, stagedContacts } from "@tro
 
 const updateCalls: Array<Record<string, unknown>> = [];
 let activityFetchCount = 0;
+let activityScenario: "multi-linked" | "raw-associations" = "multi-linked";
 
 vi.mock("../../../src/db.js", () => {
   const db = {
@@ -37,8 +38,13 @@ vi.mock("../../../src/db.js", () => {
 
           if (state.table === stagedActivities) {
             activityFetchCount++;
+            if (activityFetchCount > 1) {
+              resolve([]);
+              return;
+            }
+
             resolve(
-              activityFetchCount === 1
+              activityScenario === "multi-linked"
                 ? [
                     {
                       id: "activity-1",
@@ -47,12 +53,36 @@ vi.mock("../../../src/db.js", () => {
                       hubspotDealIds: ["deal-hs-1", "deal-hs-2"],
                       hubspotContactId: "contact-hs-1",
                       hubspotContactIds: ["contact-hs-1"],
+                      rawData: {
+                        associations: {
+                          deals: { results: [{ id: "deal-hs-1" }, { id: "deal-hs-2" }] },
+                          contacts: { results: [{ id: "contact-hs-1" }] },
+                        },
+                      },
                       mappedType: "email",
                       validationStatus: "pending",
                       validationErrors: [],
                     },
                   ]
-                : []
+                : [
+                    {
+                      id: "activity-2",
+                      hubspotActivityId: "hs-act-2",
+                      hubspotDealId: "deal-hs-1",
+                      hubspotDealIds: [],
+                      hubspotContactId: "contact-hs-1",
+                      hubspotContactIds: [],
+                      rawData: {
+                        associations: {
+                          deals: { results: [{ id: "deal-hs-1" }, { id: "deal-hs-2" }] },
+                          contacts: { results: [{ id: "contact-hs-1" }] },
+                        },
+                      },
+                      mappedType: "email",
+                      validationStatus: "pending",
+                      validationErrors: [],
+                    },
+                  ]
             );
             return;
           }
@@ -84,6 +114,28 @@ describe("validateStagedActivities", () => {
   it("marks multi-linked activities as invalid so exception handling can review them", async () => {
     updateCalls.length = 0;
     activityFetchCount = 0;
+    activityScenario = "multi-linked";
+
+    const result = await validateStagedActivities();
+
+    expect(result.invalid).toBe(1);
+    expect(result.exceptions.ambiguous_email_activity_attribution).toBe(1);
+    expect(updateCalls).toHaveLength(1);
+    expect(updateCalls[0]).toMatchObject({
+      validationStatus: "invalid",
+      validationErrors: [
+        {
+          field: "associations",
+          error: "Activity matches more than one deal/contact target",
+        },
+      ],
+    });
+  });
+
+  it("preserves raw HubSpot associations even when staged ids only include the primary link", async () => {
+    updateCalls.length = 0;
+    activityFetchCount = 0;
+    activityScenario = "raw-associations";
 
     const result = await validateStagedActivities();
 

@@ -54,6 +54,8 @@ function slugifyCompanyName(input: string): string {
 export function resolvePropertyPromotionTargets(
   approvedProperties: Array<{
     id: string;
+    mappedCompanyName: string | null;
+    mappedCompanyDomain: string | null;
     mappedAddress: string | null;
     mappedCity: string | null;
     mappedState: string | null;
@@ -68,7 +70,7 @@ export function resolvePropertyPromotionTargets(
     if (property.promotedAt) continue;
     const propertyKey = buildPropertyKey({
       companyName: property.mappedCompanyName,
-      companyDomain: null,
+      companyDomain: property.mappedCompanyDomain,
       address: property.mappedAddress,
       city: property.mappedCity,
       state: property.mappedState,

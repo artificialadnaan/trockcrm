@@ -22,6 +22,7 @@ import {
   classifyPropertyException,
   type MigrationExceptionBucket,
 } from "./exception-service.js";
+import { getStagedActivityAssociationIds } from "./activity-associations.js";
 
 interface ValidationError {
   field: string;
@@ -355,26 +356,27 @@ export async function validateStagedActivities(): Promise<{
 
     for (const activity of batch) {
       const errors: ValidationError[] = [];
-      const dealAssociationCount = Array.isArray((activity as any).hubspotDealIds)
-        ? (activity as any).hubspotDealIds.filter(Boolean).length
-        : activity.hubspotDealId
-          ? 1
-          : 0;
-      const contactAssociationCount = Array.isArray((activity as any).hubspotContactIds)
-        ? (activity as any).hubspotContactIds.filter(Boolean).length
-        : activity.hubspotContactId
-          ? 1
-          : 0;
-      const associationCount = dealAssociationCount + contactAssociationCount;
+      const activityAssociations = getStagedActivityAssociationIds({
+        rawData: activity.rawData as Record<string, unknown> | null | undefined,
+        hubspotDealId: activity.hubspotDealId ?? null,
+        hubspotDealIds: (activity as any).hubspotDealIds,
+        hubspotContactId: activity.hubspotContactId ?? null,
+        hubspotContactIds: (activity as any).hubspotContactIds,
+      });
+      const associationCount = activityAssociations.candidateCount;
 
       if (!activity.mappedType) {
         errors.push({ field: "type", error: "Activity type could not be mapped" });
       }
 
-      const dealExists = activity.hubspotDealId ? stagedDealIds.has(activity.hubspotDealId) : false;
-      const leadExists = activity.hubspotDealId ? stagedLeadIds.has(activity.hubspotDealId) : false;
-      const contactExists = activity.hubspotContactId
-        ? stagedContactIds.has(activity.hubspotContactId)
+      const dealExists = activityAssociations.hubspotDealId
+        ? stagedDealIds.has(activityAssociations.hubspotDealId)
+        : false;
+      const leadExists = activityAssociations.hubspotDealId
+        ? stagedLeadIds.has(activityAssociations.hubspotDealId)
+        : false;
+      const contactExists = activityAssociations.hubspotContactId
+        ? stagedContactIds.has(activityAssociations.hubspotContactId)
         : false;
 
       let validationStatus: "valid" | "invalid" | "orphan";

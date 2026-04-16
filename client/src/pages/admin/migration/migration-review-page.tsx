@@ -78,6 +78,17 @@ export function MigrationReviewActionErrorBanner({ message }: { message: string 
   );
 }
 
+export function formatMigrationReviewActionError(
+  action: "approve" | "reject",
+  error: unknown
+): string {
+  if (error instanceof Error && error.message.trim().length > 0) {
+    return error.message;
+  }
+
+  return `Failed to ${action} migration row`;
+}
+
 export function MigrationReviewPage() {
   const [tab, setTab] = useState<ReviewTab>("companies");
   const [actionError, setActionError] = useState<string | null>(null);
@@ -102,7 +113,7 @@ export function MigrationReviewPage() {
     try {
       await current.reject(id, notes ?? undefined);
     } catch (err) {
-      setActionError(err instanceof Error ? err.message : "Failed to reject migration row");
+      setActionError(formatMigrationReviewActionError("reject", err));
     }
   };
 
@@ -111,7 +122,7 @@ export function MigrationReviewPage() {
     try {
       await current.approve(id);
     } catch (err) {
-      setActionError(err instanceof Error ? err.message : "Failed to approve migration row");
+      setActionError(formatMigrationReviewActionError("approve", err));
     }
   };
 

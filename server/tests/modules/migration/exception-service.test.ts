@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { stagedActivities } from "@trock-crm/shared/schema";
 
 const dbMock = vi.hoisted(() => ({
   select: vi.fn(),
@@ -10,6 +11,7 @@ const dbMock = vi.hoisted(() => ({
   set: vi.fn(),
   execute: vi.fn(),
 }));
+let stagedActivityRows: Array<Record<string, unknown>> = [];
 
 vi.mock("../../../src/db.js", () => ({
   db: dbMock,
@@ -23,6 +25,7 @@ import {
   classifyLeadException,
   classifyOwnerAssignmentException,
   classifyPropertyException,
+  getMigrationExceptionGroups,
 } from "../../../src/modules/migration/exception-service.js";
 import { getMigrationSummary } from "../../../src/modules/migration/service.js";
 
@@ -125,6 +128,7 @@ describe("migration promotion guards", () => {
 describe("migration summary", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    stagedActivityRows = [];
   });
 
   it("returns company, property, and lead validation counts alongside the legacy summary cards", async () => {
@@ -163,5 +167,62 @@ describe("migration summary", () => {
     expect(summary.contacts).toEqual({ valid: 6 });
     expect(summary.activities).toEqual({ invalid: 5 });
     expect(summary.recentRuns).toHaveLength(1);
+  });
+});
+
+describe("activity exception review", () => {
+  beforeEach(() => {
+    stagedActivityRows = [];
+    vi.clearAllMocks();
+  });
+
+  it("reads raw HubSpot associations when building the activity exception queue", async () => {
+    stagedActivityRows = [
+      {
+        id: "activity-1",
+        hubspotActivityId: "hs-act-1",
+        hubspotDealId: "deal-1",
+        hubspotDealIds: [],
+        hubspotContactId: "contact-1",
+        hubspotContactIds: [],
+        rawData: {
+          associations: {
+            deals: { results: [{ id: "deal-1" }, { id: "deal-2" }] },
+            contacts: { results: [{ id: "contact-1" }] },
+          },
+        },
+        validationStatus: "invalid",
+        validationErrors: [],
+        validationWarnings: [],
+        reviewNotes: null,
+      },
+    ];
+
+    dbMock.select.mockImplementation(() => ({
+      from(table: unknown) {
+        return {
+          where() {
+            return this;
+          },
+          then(resolve: (value: unknown) => void) {
+            if (table === stagedActivities) {
+              resolve(stagedActivityRows);
+              return;
+            }
+
+            resolve([]);
+          },
+        };
+      },
+    }));
+
+    const groups = await getMigrationExceptionGroups();
+    const activityGroup = groups.find((group) => group.bucket === "ambiguous_email_activity_attribution");
+
+    expect(activityGroup?.count).toBe(1);
+    expect(activityGroup?.items[0]).toMatchObject({
+      entityType: "activity",
+      title: "Activity hs-act-1",
+    });
   });
 });

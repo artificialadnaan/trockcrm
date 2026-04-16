@@ -9,6 +9,7 @@ import {
 } from "@trock-crm/shared/schema";
 import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
+import { getStagedActivityAssociationIds } from "./activity-associations.js";
 
 export type MigrationExceptionBucket =
   | "unknown_company"
@@ -452,26 +453,23 @@ async function loadActivityExceptions(): Promise<MigrationExceptionItem[]> {
   return rows
     .map((row) =>
       {
-        const hubspotDealIds = Array.isArray((row as any).hubspotDealIds)
-          ? ((row as any).hubspotDealIds as string[])
-          : row.hubspotDealId
-            ? [row.hubspotDealId]
-            : [];
-        const hubspotContactIds = Array.isArray((row as any).hubspotContactIds)
-          ? ((row as any).hubspotContactIds as string[])
-          : row.hubspotContactId
-            ? [row.hubspotContactId]
-            : [];
+        const associationIds = getStagedActivityAssociationIds({
+          rawData: row.rawData as Record<string, unknown> | null | undefined,
+          hubspotDealId: row.hubspotDealId ?? null,
+          hubspotDealIds: (row as any).hubspotDealIds,
+          hubspotContactId: row.hubspotContactId ?? null,
+          hubspotContactIds: (row as any).hubspotContactIds,
+        });
 
         return itemForBucket({
           id: row.id,
           entityType: "activity",
           classification: classifyActivityException({
-            hubspotDealId: row.hubspotDealId ?? null,
-            hubspotContactId: row.hubspotContactId ?? null,
-            hubspotDealIds,
-            hubspotContactIds,
-            candidateCount: hubspotDealIds.length + hubspotContactIds.length,
+            hubspotDealId: associationIds.hubspotDealId,
+            hubspotContactId: associationIds.hubspotContactId,
+            hubspotDealIds: associationIds.hubspotDealIds,
+            hubspotContactIds: associationIds.hubspotContactIds,
+            candidateCount: associationIds.candidateCount,
           }),
           title: row.mappedSubject ?? `Activity ${row.hubspotActivityId}`,
           detailFallback:

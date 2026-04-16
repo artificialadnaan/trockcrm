@@ -42,7 +42,10 @@ vi.mock("../../../hooks/use-migration", () => ({
 }));
 
 import { MigrationReviewPage } from "./migration-review-page";
-import { MigrationReviewActionErrorBanner } from "./migration-review-page";
+import {
+  MigrationReviewActionErrorBanner,
+  formatMigrationReviewActionError,
+} from "./migration-review-page";
 
 describe("MigrationReviewPage", () => {
   it("surfaces invalid rows and paging controls for unresolved migration queues", () => {
@@ -54,11 +57,21 @@ describe("MigrationReviewPage", () => {
   });
 
   it("renders a visible approval failure banner", () => {
+    const message = formatMigrationReviewActionError(
+      "approve",
+      new Error("Lead cannot be promoted while it still has an unresolved deal conflict exception.")
+    );
     const html = renderToStaticMarkup(
-      <MigrationReviewActionErrorBanner message="Failed to approve migration row" />
+      <MigrationReviewActionErrorBanner message={message} />
     );
 
     expect(html).toContain("role=\"alert\"");
-    expect(html).toContain("Failed to approve migration row");
+    expect(html).toContain("unresolved deal conflict exception");
+  });
+
+  it("falls back to a generic message when the server does not provide one", () => {
+    expect(formatMigrationReviewActionError("reject", "no message")).toBe(
+      "Failed to reject migration row"
+    );
   });
 });
