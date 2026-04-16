@@ -46,9 +46,9 @@ export interface EmailAssignmentQueueItem {
 }
 
 export interface EmailAssignmentTarget {
-  assignedEntityType: "deal" | "lead" | "property" | "company";
+  assignedEntityType: "deal";
   assignedEntityId: string;
-  assignedDealId: string | null;
+  assignedDealId: string;
 }
 
 interface EmailAssignmentQueueViewProps {
@@ -84,40 +84,6 @@ function buildAssignmentOptions(item: EmailAssignmentQueueItem): Array<{ label: 
         assignedEntityType: "deal",
         assignedEntityId: deal.id,
         assignedDealId: deal.id,
-      },
-    });
-  }
-
-  for (const lead of item.candidateLeads) {
-    options.push({
-      label: `Lead · ${lead.leadNumber} · ${lead.name}`,
-      value: {
-        assignedEntityType: "lead",
-        assignedEntityId: lead.id,
-        assignedDealId: lead.relatedDealId,
-      },
-    });
-  }
-
-  for (const property of item.candidateProperties) {
-    if (property.relatedDealIds.length > 1) continue;
-    options.push({
-      label: `Property · ${property.name}`,
-      value: {
-        assignedEntityType: "property",
-        assignedEntityId: property.id,
-        assignedDealId: property.relatedDealIds[0] ?? null,
-      },
-    });
-  }
-
-  if (item.companyId) {
-    options.push({
-      label: `Company only · ${item.companyName ?? "Company"}`,
-      value: {
-        assignedEntityType: "company",
-        assignedEntityId: item.companyId,
-        assignedDealId: null,
       },
     });
   }
@@ -196,6 +162,12 @@ function AssignmentQueueCard({
           {saving ? "Assigning..." : "Resolve"}
         </button>
       </div>
+
+      {assignmentOptions.length === 0 && (
+        <p className="mt-2 text-xs text-muted-foreground">
+          This email can be reviewed, but it does not have a safe deal target yet.
+        </p>
+      )}
 
       <div className="mt-3 flex flex-wrap gap-2 text-xs">
         <span className="rounded-full border px-2 py-1">Matched by {item.suggestedAssignment.matchedBy}</span>

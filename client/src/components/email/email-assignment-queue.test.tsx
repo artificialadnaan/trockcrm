@@ -49,8 +49,9 @@ describe("EmailAssignmentQueueView", () => {
     expect(html).toContain("TR-2026-0002");
     expect(html).toContain("Resolve");
     expect(html).toContain("multiple_deal_candidates");
-    expect(html).toContain("Lead · TR-2026-L001");
-    expect(html).toContain("Property · 123 Main St");
+    expect(html).not.toContain("Lead · TR-2026-L001");
+    expect(html).not.toContain("Property · 123 Main St");
+    expect(html).not.toContain("Company only");
   });
 
   it("renders an empty-state message when there are no items", () => {

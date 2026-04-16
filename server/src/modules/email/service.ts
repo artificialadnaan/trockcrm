@@ -852,23 +852,28 @@ export async function associateEmailToEntity(
   const email = await getEmailById(tenantDb, emailId);
   if (!email) throw new AppError(404, "Email not found");
 
-  const assignedDealId = input.assignedDealId ?? (input.assignedEntityType === "deal" ? input.assignedEntityId : null);
-
-  if (input.assignedEntityType === "deal") {
-    const deal = await tenantDb
-      .select({ id: deals.id })
-      .from(deals)
-      .where(eq(deals.id, input.assignedEntityId))
-      .limit(1);
-    if (deal.length === 0) throw new AppError(404, "Deal not found");
+  if (input.assignedEntityType !== "deal") {
+    throw new AppError(400, "Only deal assignments are supported by this endpoint");
   }
+
+  const assignedDealId = input.assignedDealId ?? input.assignedEntityId;
+  if (assignedDealId !== input.assignedEntityId) {
+    throw new AppError(400, "assignedDealId must match assignedEntityId for deal assignments");
+  }
+
+  const deal = await tenantDb
+    .select({ id: deals.id })
+    .from(deals)
+    .where(eq(deals.id, input.assignedEntityId))
+    .limit(1);
+  if (deal.length === 0) throw new AppError(404, "Deal not found");
 
   await tenantDb
     .update(emails)
     .set({
       assignedEntityType: input.assignedEntityType,
       assignedEntityId: input.assignedEntityId,
-      assignmentConfidence: input.assignedEntityType === "company" ? "low" : "high",
+      assignmentConfidence: "high",
       assignmentAmbiguityReason: null,
       dealId: assignedDealId,
     })

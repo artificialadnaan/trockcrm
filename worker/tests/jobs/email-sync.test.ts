@@ -182,8 +182,8 @@ describe("email sync inbound message routing", () => {
   it("routes a multi-active-deal email to the disambiguation task rule", async () => {
     const queryMock = createQueryMock({
       activeDeals: [
-        { id: "deal-1", deal_number: "D-1001", name: "Project Alpha", stage_slug: "estimating", stage_display_order: 2 },
-        { id: "deal-2", deal_number: "D-1002", name: "Project Beta", stage_slug: "estimating", stage_display_order: 2 },
+        { id: "deal-1", deal_number: "TR-2026-0001", name: "Project Alpha", stage_slug: "estimating", stage_display_order: 2 },
+        { id: "deal-2", deal_number: "TR-2026-0002", name: "Project Beta", stage_slug: "estimating", stage_display_order: 2 },
       ],
     });
     const client = { query: queryMock };
@@ -214,6 +214,59 @@ describe("email sync inbound message routing", () => {
         ([sql]) => typeof sql === "string" && sql.includes("INSERT INTO office_beta.tasks")
       )
     ).toBe(true);
+  });
+
+  it("routes a prior thread assignment to the reply-needed task rule even when multiple active deals exist", async () => {
+    const queryMock = createQueryMock({
+      activeDeals: [
+        { id: "deal-1", deal_number: "D-1001", name: "Project Alpha", stage_slug: "estimating", stage_display_order: 2 },
+        { id: "deal-2", deal_number: "D-1002", name: "Project Beta", stage_slug: "estimating", stage_display_order: 2 },
+      ],
+      threadAssignment: {
+        assigned_entity_type: "deal",
+        assigned_entity_id: "deal-1",
+        deal_id: "deal-1",
+      },
+    });
+    const client = { query: queryMock };
+    const taskPersistence = { marker: "task-persistence" };
+    createTenantTaskRulePersistenceMock.mockReturnValue(taskPersistence);
+    evaluateTaskRulesMock.mockResolvedValue([{ ruleId: "inbound_email_reply_needed", action: "created" }]);
+
+    const processed = await processInboundMessage(
+      client,
+      "office_beta",
+      "user-1",
+      "office-1",
+      {
+        id: "graph-4",
+        from: { emailAddress: { address: "brett@example.com" } },
+        toRecipients: [],
+        ccRecipients: [],
+        subject: "Re: Project Alpha",
+        bodyPreview: "Still following up",
+        body: { content: "<p>Still following up</p>" },
+        hasAttachments: false,
+        receivedDateTime: "2026-04-04T15:00:00.000Z",
+        conversationId: "conv-4",
+      }
+    );
+
+    expect(processed).toBe(true);
+    expect(evaluateTaskRulesMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        dealId: "deal-1",
+        activeDealCount: 2,
+        activeDealNames: ["D-1001 Project Alpha", "D-1002 Project Beta"],
+      }),
+      taskPersistence,
+      expect.any(Array)
+    );
+    expect(
+      queryMock.mock.calls.some(
+        ([sql]) => typeof sql === "string" && sql.includes("INSERT INTO office_beta.tasks")
+      )
+    ).toBe(false);
   });
 
   it("keeps the prior thread assignment when the conversation was already classified", async () => {

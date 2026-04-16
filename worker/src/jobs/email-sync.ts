@@ -518,7 +518,7 @@ export async function processInboundMessage(
       ambiguityReason: assignment.ambiguityReason ?? "assignment_review",
       candidateDealNames: association.activeDealNames,
     });
-  } else if (association.activeDealCount === 1) {
+  } else if (assignment.assignedEntityType === "deal" && assignment.assignedDealId) {
     await evaluateInboundEmailTasks(
       client,
       schemaName,
@@ -535,7 +535,7 @@ export async function processInboundMessage(
         emailSubject: subject,
         activeDealCount: association.activeDealCount,
         activeDealNames: association.activeDealNames,
-        unreadInbound: association.dealId ? 30 : 20,
+        unreadInbound: 30,
       }
     );
   }

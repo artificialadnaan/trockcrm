@@ -1041,10 +1041,10 @@ const inboundEmailReplyNeededRule: TaskRuleDefinition = {
   reasonCode: "reply_needed",
   suppressionWindowDays: 30,
   buildDedupeKey(context) {
-    return context.emailId && context.activeDealCount === 1 ? `email:${context.emailId}:reply_needed` : null;
+    return context.emailId && context.dealId ? `email:${context.emailId}:reply_needed` : null;
   },
   async buildTask(context) {
-    if (!context.emailId || context.activeDealCount !== 1 || !context.dealId) return null;
+    if (!context.emailId || !context.dealId) return null;
 
     const assignment = await assignTaskFromContext({
       ...context,
@@ -1103,12 +1103,12 @@ const inboundEmailDisambiguationRule: TaskRuleDefinition = {
   reasonCode: "deal_disambiguation",
   suppressionWindowDays: 30,
   buildDedupeKey(context) {
-    return context.emailId && (context.activeDealCount ?? 0) > 1
+    return context.emailId && (context.activeDealCount ?? 0) > 1 && !context.dealId
       ? `email:${context.emailId}:deal_disambiguation`
       : null;
   },
   async buildTask(context) {
-    if (!context.emailId || (context.activeDealCount ?? 0) <= 1) return null;
+    if (!context.emailId || (context.activeDealCount ?? 0) <= 1 || context.dealId) return null;
 
     const assignment = await assignTaskFromContext({
       ...context,

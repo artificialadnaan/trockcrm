@@ -212,10 +212,16 @@ router.post("/:id/associate", async (req, res, next) => {
       (req.body.assignedEntityType as "deal" | "lead" | "property" | "company" | undefined) ??
       (req.body.dealId ? "deal" : undefined);
     const assignedEntityId = (req.body.assignedEntityId as string | undefined) ?? (req.body.dealId as string | undefined);
-    const assignedDealId = (req.body.assignedDealId as string | null | undefined) ?? (req.body.dealId as string | undefined) ?? null;
+    const assignedDealId = (req.body.assignedDealId as string | null | undefined) ?? (req.body.dealId as string | undefined) ?? assignedEntityId ?? null;
 
     if (!assignedEntityType || !assignedEntityId) {
       throw new AppError(400, "assignedEntityType and assignedEntityId are required");
+    }
+    if (assignedEntityType !== "deal") {
+      throw new AppError(400, "Only deal assignments are supported by this endpoint");
+    }
+    if (assignedDealId != null && assignedDealId !== assignedEntityId) {
+      throw new AppError(400, "assignedDealId must match assignedEntityId for deal assignments");
     }
 
     // Verify the email exists and the user has permission to modify it

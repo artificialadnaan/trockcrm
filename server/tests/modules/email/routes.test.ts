@@ -194,4 +194,34 @@ describe("email routes", () => {
     expect(req.commitTransaction).toHaveBeenCalled();
     expect(res.body).toEqual({ success: true });
   });
+
+  it("rejects non-deal association targets before hitting the service", async () => {
+    emailServiceMocks.getEmailById.mockResolvedValue({ id: "email-1", userId: "director-1" });
+
+    await expect(
+      invokeRoute({
+        method: "post",
+        url: "/email-1/associate",
+        user: makeDirectorUser(),
+        body: { assignedEntityType: "lead", assignedEntityId: "lead-1" },
+      })
+    ).rejects.toThrow("Only deal assignments are supported by this endpoint");
+
+    expect(emailServiceMocks.associateEmailToEntity).not.toHaveBeenCalled();
+  });
+
+  it("rejects mismatched deal identifiers before hitting the service", async () => {
+    emailServiceMocks.getEmailById.mockResolvedValue({ id: "email-1", userId: "director-1" });
+
+    await expect(
+      invokeRoute({
+        method: "post",
+        url: "/email-1/associate",
+        user: makeDirectorUser(),
+        body: { assignedEntityType: "deal", assignedEntityId: "deal-1", assignedDealId: "deal-2" },
+      })
+    ).rejects.toThrow("assignedDealId must match assignedEntityId for deal assignments");
+
+    expect(emailServiceMocks.associateEmailToEntity).not.toHaveBeenCalled();
+  });
 });

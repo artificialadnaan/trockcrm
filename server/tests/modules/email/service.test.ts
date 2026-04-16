@@ -190,4 +190,50 @@ describe("email service inbound association", () => {
     expect(updatePayloads.some((entry) => entry.payload.completedAt)).toBe(true);
     expect(insertPayloads.some((entry) => entry.jobType === "domain_event" && entry.payload?.eventName === "task.completed")).toBe(true);
   });
+
+  it("rejects non-deal association targets", async () => {
+    const tenantDb = {
+      select: vi.fn(() => createSelectChain([{ id: "email-1", userId: "user-1" }])),
+      update: vi.fn(),
+      insert: vi.fn(),
+    };
+
+    await expect(
+      associateEmailToEntity(
+        tenantDb as any,
+        "email-1",
+        {
+          assignedEntityType: "lead" as any,
+          assignedEntityId: "lead-1",
+          assignedDealId: null,
+        },
+        "director",
+        "director-1",
+        "office-1"
+      )
+    ).rejects.toThrow("Only deal assignments are supported by this endpoint");
+  });
+
+  it("rejects mismatched deal identifiers", async () => {
+    const tenantDb = {
+      select: vi.fn(() => createSelectChain([{ id: "email-1", userId: "user-1" }])),
+      update: vi.fn(),
+      insert: vi.fn(),
+    };
+
+    await expect(
+      associateEmailToEntity(
+        tenantDb as any,
+        "email-1",
+        {
+          assignedEntityType: "deal",
+          assignedEntityId: "deal-1",
+          assignedDealId: "deal-2",
+        },
+        "director",
+        "director-1",
+        "office-1"
+      )
+    ).rejects.toThrow("assignedDealId must match assignedEntityId for deal assignments");
+  });
 });
