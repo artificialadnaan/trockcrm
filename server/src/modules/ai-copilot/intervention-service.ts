@@ -9,6 +9,7 @@ import {
   deals,
   tasks,
 } from "@trock-crm/shared/schema";
+import { AppError } from "../../middleware/error-handler.js";
 import {
   getDisconnectCaseIdentity,
   listCurrentSalesProcessDisconnectRows,
@@ -417,7 +418,7 @@ export async function getInterventionCaseDetail(
   if (isInMemoryTenantDb(tenantDb)) {
     const row = tenantDb.state.cases.find((item) => item.officeId === input.officeId && item.id === input.caseId);
     if (!row) {
-      throw new Error(`Intervention case ${input.caseId} not found`);
+      throw new AppError(404, "Intervention case not found");
     }
     const task = row.generatedTaskId
       ? tenantDb.state.tasks.find((item) => item.id === row.generatedTaskId) ?? null
@@ -495,7 +496,7 @@ export async function getInterventionCaseDetail(
     .where(and(eq(aiDisconnectCases.officeId, input.officeId), eq(aiDisconnectCases.id, input.caseId)))
     .limit(1);
   if (!row[0]) {
-    throw new Error(`Intervention case ${input.caseId} not found`);
+    throw new AppError(404, "Intervention case not found");
   }
   const taskRow = row[0].generatedTaskId
     ? (

@@ -30,6 +30,14 @@ import { acceptTaskSuggestion } from "./task-suggestion-service.js";
 const router = Router();
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const RESOLUTION_REASONS = new Set([
+  "task_completed",
+  "follow_up_completed",
+  "owner_aligned",
+  "false_positive",
+  "duplicate_case",
+  "issue_no_longer_relevant",
+]);
 
 async function assertDealAccess(req: any, dealId: string) {
   const deal = await getDealById(req.tenantDb!, dealId, req.user!.role, req.user!.id);
@@ -282,6 +290,9 @@ router.post("/ops/interventions/batch-resolve", requireRole("admin", "director")
   try {
     const resolutionReason = typeof req.body?.resolutionReason === "string" ? req.body.resolutionReason : null;
     if (!resolutionReason) throw new AppError(400, "resolutionReason is required");
+    if (!RESOLUTION_REASONS.has(resolutionReason)) {
+      throw new AppError(400, "Invalid resolutionReason");
+    }
 
     const result = await resolveInterventionCases(req.tenantDb!, {
       officeId: getActiveOfficeId(req),
@@ -365,6 +376,9 @@ router.post("/ops/interventions/:id/resolve", requireRole("admin", "director"), 
     const caseId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     const resolutionReason = typeof req.body?.resolutionReason === "string" ? req.body.resolutionReason : null;
     if (!resolutionReason) throw new AppError(400, "resolutionReason is required");
+    if (!RESOLUTION_REASONS.has(resolutionReason)) {
+      throw new AppError(400, "Invalid resolutionReason");
+    }
 
     const result = await resolveInterventionCases(req.tenantDb!, {
       officeId: getActiveOfficeId(req),

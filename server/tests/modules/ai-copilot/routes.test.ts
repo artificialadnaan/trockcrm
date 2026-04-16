@@ -1,6 +1,7 @@
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { AppError } from "../../../src/middleware/error-handler.js";
 
 const serviceMocks = vi.hoisted(() => ({
   getAiActionQueue: vi.fn(),
@@ -405,6 +406,17 @@ describe("ai copilot routes", () => {
     expect(res.body.case.id).toBe("case-1");
   });
 
+  it("returns 404 when intervention case detail is missing", async () => {
+    interventionServiceMocks.getInterventionCaseDetail.mockRejectedValue(
+      new AppError(404, "Intervention case not found")
+    );
+
+    const app = createApp("director");
+    const res = await request(app).get("/api/ai/ops/interventions/missing-case");
+
+    expect(res.status).toBe(404);
+  });
+
   it("applies batch intervention mutations for director users", async () => {
     interventionServiceMocks.assignInterventionCases.mockResolvedValue({
       updatedCount: 2,
@@ -475,6 +487,14 @@ describe("ai copilot routes", () => {
       resolutionReason: "owner_aligned",
       notes: "Owner already aligned on next step",
     });
+
+    const invalidResolveRes = await request(app)
+      .post("/api/ai/ops/interventions/batch-resolve")
+      .send({
+        caseIds: ["case-1", "case-2"],
+        resolutionReason: "bad_reason",
+      });
+    expect(invalidResolveRes.status).toBe(400);
 
     const escalateRes = await request(app)
       .post("/api/ai/ops/interventions/batch-escalate")
@@ -551,6 +571,11 @@ describe("ai copilot routes", () => {
       resolutionReason: "task_completed",
       notes: "Task is complete",
     });
+
+    const invalidResolveRes = await request(app)
+      .post("/api/ai/ops/interventions/case-1/resolve")
+      .send({ resolutionReason: "bad_reason" });
+    expect(invalidResolveRes.status).toBe(400);
 
     const escalateRes = await request(app)
       .post("/api/ai/ops/interventions/case-1/escalate")
