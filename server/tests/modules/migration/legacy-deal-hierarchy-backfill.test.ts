@@ -17,6 +17,12 @@ describe("0026 legacy deal hierarchy backfill migration", () => {
 
     expect(migrationSql).toContain("FROM %I.contact_deal_associations cda");
     expect(migrationSql).toContain("JOIN %I.contacts c ON c.id = cda.contact_id");
+    expect(migrationSql).toContain(
+      "(ARRAY_AGG(cda.contact_id ORDER BY cda.contact_id::text))[1] AS contact_id"
+    );
+    expect(migrationSql).toContain(
+      "(ARRAY_AGG(c.company_id ORDER BY c.company_id::text))[1] AS company_id"
+    );
     expect(migrationSql).toContain("UPDATE %I.deals d");
     expect(migrationSql).toContain("SET company_id = candidates.company_id");
     expect(migrationSql).toContain("SET primary_contact_id = candidates.contact_id");

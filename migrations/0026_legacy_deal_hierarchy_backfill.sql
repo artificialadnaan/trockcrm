@@ -78,7 +78,7 @@ BEGIN
         WITH candidates AS (
           SELECT
             cda.deal_id,
-            MIN(cda.contact_id) AS contact_id
+            (ARRAY_AGG(cda.contact_id ORDER BY cda.contact_id::text))[1] AS contact_id
           FROM %I.contact_deal_associations cda
           JOIN %I.contacts c ON c.id = cda.contact_id
           WHERE c.is_active = true
@@ -96,7 +96,7 @@ BEGIN
         WITH association_companies AS (
           SELECT
             cda.deal_id,
-            MIN(c.company_id) AS company_id
+            (ARRAY_AGG(c.company_id ORDER BY c.company_id::text))[1] AS company_id
           FROM %I.contact_deal_associations cda
           JOIN %I.contacts c ON c.id = cda.contact_id
           WHERE c.is_active = true
