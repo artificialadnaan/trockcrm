@@ -22,6 +22,7 @@ describe("0027 hubspot lineage repair migration", () => {
     expect(migrationSql).toContain("promoted_contact_id");
     expect(migrationSql).toContain("SET primary_contact_id = candidates.primary_contact_id");
     expect(migrationSql).toContain("SET company_id = candidates.company_id");
+    expect(migrationSql).not.toContain("ARRAY_AGG(DISTINCT");
   });
 
   it("recreates synthesized properties and converted leads after repairing company linkage", () => {

@@ -61,10 +61,10 @@ BEGIN
       );
 
       EXECUTE format($sql$
-        WITH staged_contact_candidates AS (
-          SELECT
+        WITH staged_contact_links AS (
+          SELECT DISTINCT
             d.id AS deal_id,
-            (ARRAY_AGG(DISTINCT sc.promoted_contact_id ORDER BY sc.promoted_contact_id::text))[1] AS primary_contact_id
+            sc.promoted_contact_id
           FROM %I.deals d
           JOIN migration.staged_deals sd
             ON sd.promoted_deal_id = d.id
@@ -79,8 +79,14 @@ BEGIN
           JOIN migration.staged_contacts sc
             ON sc.hubspot_contact_id = assoc.item ->> 'id'
           WHERE sc.promoted_contact_id IS NOT NULL
-          GROUP BY d.id
-          HAVING COUNT(DISTINCT sc.promoted_contact_id) = 1
+        ),
+        staged_contact_candidates AS (
+          SELECT
+            deal_id,
+            (ARRAY_AGG(promoted_contact_id ORDER BY promoted_contact_id::text))[1] AS primary_contact_id
+          FROM staged_contact_links
+          GROUP BY deal_id
+          HAVING COUNT(*) = 1
         )
         UPDATE %I.deals d
         SET primary_contact_id = candidates.primary_contact_id
@@ -90,10 +96,10 @@ BEGIN
       $sql$, office_schema, office_schema);
 
       EXECUTE format($sql$
-        WITH staged_company_candidates AS (
-          SELECT
+        WITH staged_company_links AS (
+          SELECT DISTINCT
             d.id AS deal_id,
-            (ARRAY_AGG(DISTINCT c.company_id ORDER BY c.company_id::text))[1] AS company_id
+            c.company_id
           FROM %I.deals d
           JOIN migration.staged_deals sd
             ON sd.promoted_deal_id = d.id
@@ -112,8 +118,14 @@ BEGIN
             ON c.id = sc.promoted_contact_id
            AND c.is_active = true
           WHERE c.company_id IS NOT NULL
-          GROUP BY d.id
-          HAVING COUNT(DISTINCT c.company_id) = 1
+        ),
+        staged_company_candidates AS (
+          SELECT
+            deal_id,
+            (ARRAY_AGG(company_id ORDER BY company_id::text))[1] AS company_id
+          FROM staged_company_links
+          GROUP BY deal_id
+          HAVING COUNT(*) = 1
         ),
         candidates AS (
           SELECT
