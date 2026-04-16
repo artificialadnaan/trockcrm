@@ -50,6 +50,22 @@ describe("ai disconnect admin task worker", () => {
               disconnect_label: "Estimating gate gap",
               age_days: 4,
             },
+            {
+              deal_id: "deal-3",
+              deal_number: "D-1003",
+              deal_name: "Gamma Point",
+              disconnect_type: "inbound_without_followup",
+              disconnect_label: "Inbound with no follow-up",
+              age_days: 3,
+            },
+            {
+              deal_id: "deal-4",
+              deal_number: "D-1004",
+              deal_name: "Delta Square",
+              disconnect_type: "missing_next_task",
+              disconnect_label: "Missing next task",
+              age_days: 3,
+            },
           ],
         };
       }
@@ -63,7 +79,7 @@ describe("ai disconnect admin task worker", () => {
     await runAiDisconnectAdminTaskGeneration();
 
     const inserts = queryMock.mock.calls.filter(([sql]) => typeof sql === "string" && sql.startsWith("INSERT INTO office_beta.tasks"));
-    expect(inserts).toHaveLength(2);
+    expect(inserts).toHaveLength(4);
     expect(inserts[0]?.[1]).toEqual(
       expect.arrayContaining([
         "Resolve Bid board sync drift for D-1001",
@@ -74,6 +90,18 @@ describe("ai disconnect admin task worker", () => {
         "office-1",
         "ai_disconnect_admin_task",
         "cron.ai_disconnect_admin_tasks",
+      ])
+    );
+    expect(inserts[2]?.[1]).toEqual(
+      expect.arrayContaining([
+        "Resolve Inbound with no follow-up for D-1003",
+        "inbound_without_followup",
+      ])
+    );
+    expect(inserts[3]?.[1]).toEqual(
+      expect.arrayContaining([
+        "Resolve Missing next task for D-1004",
+        "missing_next_task",
       ])
     );
   });

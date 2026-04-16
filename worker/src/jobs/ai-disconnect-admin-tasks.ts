@@ -86,6 +86,51 @@ export async function runAiDisconnectAdminTaskGeneration(): Promise<void> {
                     AND f.is_active = TRUE
                 )
                 AND FLOOR(EXTRACT(EPOCH FROM (NOW() - d.stage_entered_at)) / 86400) >= 3
+
+              UNION ALL
+
+              SELECT
+                d.id AS deal_id,
+                d.deal_number,
+                d.name AS deal_name,
+                'inbound_without_followup'::text AS disconnect_type,
+                'Inbound with no follow-up'::text AS disconnect_label,
+                FLOOR(EXTRACT(EPOCH FROM (NOW() - latest_inbound.latest_customer_email_at)) / 86400)::int AS age_days
+              FROM ${schemaName}.deals d
+              JOIN LATERAL (
+                SELECT MAX(e.sent_at) AS latest_customer_email_at
+                FROM ${schemaName}.emails e
+                WHERE e.deal_id = d.id
+                  AND e.direction = 'inbound'
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM ${schemaName}.activities a
+                    WHERE a.deal_id = e.deal_id
+                      AND a.occurred_at >= e.sent_at
+                      AND a.type IN ('call', 'email', 'meeting', 'note')
+                  )
+              ) latest_inbound ON latest_inbound.latest_customer_email_at IS NOT NULL
+              WHERE d.is_active = TRUE
+                AND FLOOR(EXTRACT(EPOCH FROM (NOW() - latest_inbound.latest_customer_email_at)) / 86400) >= 3
+
+              UNION ALL
+
+              SELECT
+                d.id AS deal_id,
+                d.deal_number,
+                d.name AS deal_name,
+                'missing_next_task'::text AS disconnect_type,
+                'Missing next task'::text AS disconnect_label,
+                FLOOR(EXTRACT(EPOCH FROM (NOW() - COALESCE(d.last_activity_at, d.stage_entered_at, d.updated_at))) / 86400)::int AS age_days
+              FROM ${schemaName}.deals d
+              WHERE d.is_active = TRUE
+                AND NOT EXISTS (
+                  SELECT 1
+                  FROM ${schemaName}.tasks t
+                  WHERE t.deal_id = d.id
+                    AND t.status IN ('pending', 'in_progress', 'waiting_on', 'blocked')
+                )
+                AND FLOOR(EXTRACT(EPOCH FROM (NOW() - COALESCE(d.last_activity_at, d.stage_entered_at, d.updated_at))) / 86400) >= 3
             )
             SELECT *
             FROM disconnect_rows

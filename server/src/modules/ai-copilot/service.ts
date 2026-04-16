@@ -284,9 +284,18 @@ export interface SalesProcessDisconnectAutomationStatus {
   latestAdminTaskCreatedAt: string | null;
 }
 
+export interface SalesProcessDisconnectNarrative {
+  headline: string;
+  summary: string;
+  whatChanged: string;
+  adminFocus: string;
+  recommendedActions: string[];
+}
+
 export interface SalesProcessDisconnectDashboard {
   summary: SalesProcessDisconnectSummary;
   automation: SalesProcessDisconnectAutomationStatus;
+  narrative: SalesProcessDisconnectNarrative;
   byType: SalesProcessDisconnectTypeSummary[];
   clusters: SalesProcessDisconnectCluster[];
   trends: {
@@ -844,6 +853,76 @@ function buildSalesProcessDisconnectPlaybooks(
       actions: actionRows,
     };
   });
+}
+
+function buildSalesProcessDisconnectNarrative(input: {
+  summary: SalesProcessDisconnectSummary;
+  clusters: SalesProcessDisconnectCluster[];
+  trends: SalesProcessDisconnectDashboard["trends"];
+  actionSummary: SalesProcessDisconnectActionSummary;
+}): SalesProcessDisconnectNarrative {
+  const leadCluster = input.clusters[0];
+  const leadRep = input.trends.reps[0];
+  const leadStage = input.trends.stages[0];
+  const leadCompany = input.trends.companies[0];
+
+  const criticalDisconnects =
+    input.summary.inboundWithoutFollowupCount +
+    input.summary.revisionLoopCount +
+    input.summary.estimatingGateGapCount +
+    input.summary.procoreBidBoardDriftCount;
+
+  const criticalThemes: string[] = [];
+  if (input.summary.procoreBidBoardDriftCount > 0) criticalThemes.push("bid board drift");
+  if (input.summary.revisionLoopCount > 0) criticalThemes.push("revision loops");
+  if (input.summary.estimatingGateGapCount > 0) criticalThemes.push("missing estimating artifacts");
+  if (input.summary.inboundWithoutFollowupCount > 0) criticalThemes.push("inbound follow-through gaps");
+
+  const headline = leadCluster
+    ? `${leadCluster.title} is the dominant disconnect this week.`
+    : "No dominant disconnect cluster is emerging this week.";
+
+  const summary = `${input.summary.totalDisconnects} disconnects are open across ${input.summary.activeDeals} active deals. ${
+    criticalDisconnects > 0
+      ? `Critical gaps are concentrated in ${criticalThemes.join(", ")}.`
+      : "No critical disconnect class is dominating the current queue."
+  }`;
+
+  const whatChanged = leadCompany && leadStage && leadRep
+    ? `${leadCompany.label} and the ${leadStage.label} stage are showing the heaviest concentration of current disconnects, with ${leadRep.label} carrying the most urgent open issue load.`
+    : "Current disconnect concentration is stable week over week, with no single rep, stage, or company clearly breaking away from the rest.";
+
+  let adminFocus = "Keep the action queue moving on repeated disconnect families before they reopen.";
+  if (input.summary.procoreBidBoardDriftCount > 0 && input.summary.estimatingGateGapCount > 0) {
+    adminFocus = "Prioritize bid board reconciliation and unresolved estimating handoffs before follow-through gaps spread into more active deals.";
+  } else if (input.summary.inboundWithoutFollowupCount > 0 || input.summary.missingNextTaskCount > 0) {
+    adminFocus = "Prioritize follow-through gaps and missing next steps so active deals do not drift into stale-stage risk.";
+  }
+
+  const recommendedActions: string[] = [];
+  if (leadCluster) {
+    recommendedActions.push(`Escalate ${leadCluster.title} cases first, because they are both critical and concentrated.`);
+  }
+  if (input.summary.missingNextTaskCount > 0 || input.summary.staleStageCount > 0) {
+    recommendedActions.push("Resolve execution stall issues next, especially where no next task exists on active estimating deals.");
+  }
+  if (leadCompany) {
+    recommendedActions.push(`Use the action queue to clear repeated disconnects on ${leadCompany.label} before they reopen.`);
+  }
+  if (recommendedActions.length === 0 && input.actionSummary.bestOverallAction) {
+    recommendedActions.push(`Lean on ${input.actionSummary.bestOverallAction.split("_").join(" ")} where recent intervention data is strongest.`);
+  }
+  while (recommendedActions.length < 3) {
+    recommendedActions.push("Use the action queue to clear the oldest unresolved disconnects first.");
+  }
+
+  return {
+    headline,
+    summary,
+    whatChanged,
+    adminFocus,
+    recommendedActions: recommendedActions.slice(0, 3),
+  };
 }
 
 const DEFAULT_DEPS: GenerateDealCopilotPacketDeps = {
@@ -1969,20 +2048,31 @@ export async function getSalesProcessDisconnectDashboard(
     ];
   });
   const clusters = buildSalesProcessDisconnectClusters(rows);
+  const trends = buildSalesProcessDisconnectTrends(rows, interventionsByDeal);
+  const outcomes = buildSalesProcessDisconnectOutcomes(rows, interventionsByDeal);
+  const actionSummary = buildSalesProcessDisconnectActionSummary(interventionEvents, openDealIds);
+  const playbooks = buildSalesProcessDisconnectPlaybooks(rows, clusters, interventionEvents);
+  const narrative = buildSalesProcessDisconnectNarrative({
+    summary,
+    clusters,
+    trends,
+    actionSummary,
+  });
 
   return {
     summary,
     automation,
+    narrative,
     byType: getRows(byTypeResult).map((row) => ({
       disconnectType: row.disconnect_type,
       label: row.disconnect_label,
       count: Number(row.disconnect_count ?? 0),
     })),
     clusters,
-    trends: buildSalesProcessDisconnectTrends(rows, interventionsByDeal),
-    outcomes: buildSalesProcessDisconnectOutcomes(rows, interventionsByDeal),
-    actionSummary: buildSalesProcessDisconnectActionSummary(interventionEvents, openDealIds),
-    playbooks: buildSalesProcessDisconnectPlaybooks(rows, clusters, interventionEvents),
+    trends,
+    outcomes,
+    actionSummary,
+    playbooks,
     rows,
   };
 }

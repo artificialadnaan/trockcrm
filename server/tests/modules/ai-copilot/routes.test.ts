@@ -392,6 +392,13 @@ describe("ai copilot routes", () => {
         latestEscalationAt: "2026-04-15T13:00:00.000Z",
         latestAdminTaskCreatedAt: "2026-04-15T14:00:00.000Z",
       },
+      narrative: {
+        headline: "Bid board / CRM stage drift is the dominant disconnect this week.",
+        summary: "11 disconnects are open across 18 active deals.",
+        whatChanged: "Acme Group is showing the heaviest concentration of current disconnects.",
+        adminFocus: "Prioritize bid board reconciliation before follow-through gaps spread.",
+        recommendedActions: ["Escalate bid board drift first."],
+      },
       byType: [
         { disconnectType: "stale_stage", label: "Stalled in stage", count: 3 },
       ],
@@ -437,6 +444,7 @@ describe("ai copilot routes", () => {
     expect(res.body.summary.totalDisconnects).toBe(11);
     expect(res.body.summary.procoreBidBoardDriftCount).toBe(2);
     expect(res.body.clusters[0].clusterKey).toBe("bid_board_sync_break");
+    expect(res.body.narrative.headline).toContain("dominant disconnect");
     expect(res.body.trends.reps[0].disconnectCount).toBe(3);
     expect(res.body.outcomes.clearanceRate30d).toBe(0.4);
     expect(res.body.actionSummary.bestOverallAction).toBe("resolve");

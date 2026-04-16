@@ -230,9 +230,18 @@ export interface SalesProcessDisconnectAutomationStatus {
   latestAdminTaskCreatedAt: string | null;
 }
 
+export interface SalesProcessDisconnectNarrative {
+  headline: string;
+  summary: string;
+  whatChanged: string;
+  adminFocus: string;
+  recommendedActions: string[];
+}
+
 export interface SalesProcessDisconnectDashboard {
   summary: SalesProcessDisconnectSummary;
   automation: SalesProcessDisconnectAutomationStatus;
+  narrative: SalesProcessDisconnectNarrative;
   byType: SalesProcessDisconnectTypeSummary[];
   clusters: SalesProcessDisconnectCluster[];
   trends: {

@@ -217,6 +217,51 @@ export function SalesProcessDisconnectsPage() {
 
       <Card>
         <CardHeader>
+          <CardTitle>Weekly Management Narrative</CardTitle>
+          <CardDescription>
+            Deterministic disconnect facts summarized into an admin-first explanation of what changed and where to intervene next
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="grid grid-cols-1 xl:grid-cols-[1.05fr_0.95fr] gap-4">
+          <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-4 space-y-3">
+            <div className="text-xs uppercase tracking-widest text-amber-700">Headline</div>
+            <div className="text-xl font-semibold text-amber-950">
+              {dashboard?.narrative.headline ?? "Loading narrative..."}
+            </div>
+            <div className="text-sm leading-6 text-amber-900">
+              {dashboard?.narrative.summary ?? "Summarizing current disconnect load..."}
+            </div>
+            <div className="rounded-md border border-amber-300/80 bg-white/70 px-3 py-3 text-sm text-amber-950">
+              <span className="font-semibold">What changed:</span>{" "}
+              {dashboard?.narrative.whatChanged ?? "Detecting current rep, stage, and company concentration..."}
+            </div>
+            <div className="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-3 text-sm text-emerald-900">
+              <span className="font-semibold">Admin focus:</span>{" "}
+              {dashboard?.narrative.adminFocus ?? "Calculating the next best office/admin intervention..."}
+            </div>
+          </div>
+
+          <div className="rounded-lg border border-border/80 bg-white px-4 py-4 space-y-3">
+            <div>
+              <div className="text-xs uppercase tracking-widest text-muted-foreground">Recommended interventions</div>
+              <div className="text-lg font-semibold mt-1">Use these priorities in the digest and action queue</div>
+            </div>
+            <div className="space-y-2">
+              {(dashboard?.narrative.recommendedActions ?? []).map((action) => (
+                <div key={action} className="rounded-md border border-border/70 px-3 py-3 text-sm leading-6">
+                  {action}
+                </div>
+              ))}
+            </div>
+            <div className="text-xs text-muted-foreground">
+              This narrative is computed from current disconnect clusters, trend hotspots, and recent intervention outcomes. It explains the queue; it does not replace the underlying deterministic signals.
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
           <CardTitle>Automation Status</CardTitle>
           <CardDescription>
             Live validation for digest, escalation, and deterministic admin-task automations

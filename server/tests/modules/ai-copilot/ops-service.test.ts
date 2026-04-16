@@ -510,5 +510,16 @@ describe("AI ops service", () => {
         recommendedAction: "resolve",
       }),
     ]);
+    expect(result.narrative).toEqual({
+      headline: "Bid board / CRM stage drift is the dominant disconnect this week.",
+      summary: "11 disconnects are open across 18 active deals. Critical gaps are concentrated in bid board drift, revision loops, missing estimating artifacts, inbound follow-through gaps.",
+      whatChanged: "Beta Holdings and the Bid Sent stage are showing the heaviest concentration of current disconnects, with Jordan Rep carrying the most urgent open issue load.",
+      adminFocus: "Prioritize bid board reconciliation and unresolved estimating handoffs before follow-through gaps spread into more active deals.",
+      recommendedActions: [
+        "Escalate Bid board / CRM stage drift cases first, because they are both critical and concentrated.",
+        "Resolve execution stall issues next, especially where no next task exists on active estimating deals.",
+        "Use the action queue to clear repeated disconnects on Beta Holdings before they reopen.",
+      ],
+    });
   });
 });

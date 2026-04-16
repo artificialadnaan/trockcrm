@@ -18,7 +18,7 @@ describe("ai disconnect digest worker", () => {
     queryMock.mockReset();
   });
 
-  it("creates admin notifications with disconnect summary and top cluster", async () => {
+  it("creates admin notifications with disconnect summary, weekly focus, and recommended action", async () => {
     queryMock.mockImplementation(async (sql: string, params?: unknown[]) => {
       if (sql.includes("FROM public.offices WHERE is_active = true")) {
         return { rows: [{ id: "office-1", slug: "beta", name: "Beta" }] };
@@ -60,6 +60,19 @@ describe("ai disconnect digest worker", () => {
         };
       }
 
+      if (sql.includes("AS hotspot_key")) {
+        return {
+          rows: [
+            {
+              hotspot_key: "Morgan Rep",
+              hotspot_label: "Morgan Rep",
+              disconnect_count: 3,
+              critical_count: 2,
+            },
+          ],
+        };
+      }
+
       if (sql.includes("FROM public.users") && sql.includes("role IN ('director', 'admin')")) {
         return { rows: [{ id: "director-1" }, { id: "admin-1" }] };
       }
@@ -87,7 +100,7 @@ describe("ai disconnect digest worker", () => {
       "director-1",
       "system",
       "AI Disconnect Digest: 7 open issues in Beta",
-      "3 critical disconnects. Top cluster: Bid board / CRM stage drift (2 deals). Bid board drifts: 2. Follow-through gaps: 1.",
+      "3 critical disconnects. Top cluster: Bid board / CRM stage drift (2 deals). Main hotspot: Morgan Rep (3 disconnects, 2 critical). Admin focus: prioritize bid board reconciliation before follow-through gaps spread. Recommended action: escalate bid board drift items first, then clear missing-next-step follow-through gaps. Bid board drifts: 2. Follow-through gaps: 1.",
       "/admin/sales-process-disconnects",
     ]);
   });
@@ -105,6 +118,9 @@ describe("ai disconnect digest worker", () => {
       }
       if (sql.includes("bid_board_sync_break")) {
         return { rows: [{ cluster_key: "bid_board_sync_break", title: "Bid board / CRM stage drift", deal_count: 2 }] };
+      }
+      if (sql.includes("AS hotspot_key")) {
+        return { rows: [{ hotspot_key: "Morgan Rep", hotspot_label: "Morgan Rep", disconnect_count: 3, critical_count: 2 }] };
       }
       if (sql.includes("FROM public.users") && sql.includes("role IN ('director', 'admin')")) {
         return { rows: [{ id: "director-1" }] };
