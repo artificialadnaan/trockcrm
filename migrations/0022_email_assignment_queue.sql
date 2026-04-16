@@ -8,6 +8,12 @@ BEGIN
     SELECT nspname
     FROM pg_namespace
     WHERE nspname LIKE 'office\_%' ESCAPE '\'
+      AND EXISTS (
+        SELECT 1
+        FROM information_schema.tables
+        WHERE table_schema = nspname
+          AND table_name = 'emails'
+      )
   LOOP
     EXECUTE format(
       'ALTER TABLE %I.emails
@@ -20,36 +26,53 @@ BEGIN
 
     EXECUTE format(
       'UPDATE %I.emails e
-         SET assigned_entity_type = CASE
-               WHEN e.deal_id IS NOT NULL THEN ''deal''
-               WHEN e.deal_id IS NULL AND c.company_id IS NOT NULL THEN ''company''
-               ELSE e.assigned_entity_type
-             END,
-             assigned_entity_id = CASE
-               WHEN e.deal_id IS NOT NULL THEN e.deal_id
-               WHEN e.deal_id IS NULL AND c.company_id IS NOT NULL THEN c.company_id
-               ELSE e.assigned_entity_id
-             END,
-             assignment_confidence = COALESCE(
-               e.assignment_confidence,
-               CASE
-                 WHEN e.deal_id IS NOT NULL THEN ''high''
-                 WHEN e.deal_id IS NULL AND c.company_id IS NOT NULL THEN ''low''
-                 ELSE NULL
-               END
-             ),
-             assignment_ambiguity_reason = COALESCE(
-               e.assignment_ambiguity_reason,
-               CASE
-                 WHEN e.deal_id IS NULL AND c.company_id IS NOT NULL THEN ''legacy_company_only''
-                 ELSE NULL
-               END
-             )
-       FROM %I.contacts c
-       WHERE c.id = e.contact_id',
-      schema_name,
+         SET assigned_entity_type = ''deal'',
+             assigned_entity_id = e.deal_id,
+             assignment_confidence = COALESCE(e.assignment_confidence, ''high'')
+       WHERE e.deal_id IS NOT NULL',
       schema_name
     );
+
+    IF EXISTS (
+      SELECT 1
+      FROM information_schema.columns
+      WHERE table_schema = schema_name
+        AND table_name = 'contacts'
+        AND column_name = 'company_id'
+    ) THEN
+      EXECUTE format(
+        'UPDATE %I.emails e
+           SET assigned_entity_type = CASE
+                 WHEN e.deal_id IS NOT NULL THEN ''deal''
+                 WHEN e.deal_id IS NULL AND c.company_id IS NOT NULL THEN ''company''
+                 ELSE e.assigned_entity_type
+               END,
+               assigned_entity_id = CASE
+                 WHEN e.deal_id IS NOT NULL THEN e.deal_id
+                 WHEN e.deal_id IS NULL AND c.company_id IS NOT NULL THEN c.company_id
+                 ELSE e.assigned_entity_id
+               END,
+               assignment_confidence = COALESCE(
+                 e.assignment_confidence,
+                 CASE
+                   WHEN e.deal_id IS NOT NULL THEN ''high''
+                   WHEN e.deal_id IS NULL AND c.company_id IS NOT NULL THEN ''low''
+                   ELSE NULL
+                 END
+               ),
+               assignment_ambiguity_reason = COALESCE(
+                 e.assignment_ambiguity_reason,
+                 CASE
+                   WHEN e.deal_id IS NULL AND c.company_id IS NOT NULL THEN ''legacy_company_only''
+                   ELSE NULL
+                 END
+               )
+         FROM %I.contacts c
+         WHERE c.id = e.contact_id',
+        schema_name,
+        schema_name
+      );
+    END IF;
 
     EXECUTE format(
       'CREATE INDEX IF NOT EXISTS emails_assignment_queue_idx
