@@ -174,7 +174,7 @@ export async function deleteSavedReport(reportId: string, userId: string) {
 }
 
 /**
- * Seed the 9 locked company reports if they don't already exist.
+ * Seed the locked company reports if they don't already exist.
  * Called once during server startup or via admin endpoint.
  */
 export async function seedLockedReports(officeId: string) {
@@ -192,6 +192,14 @@ export async function seedLockedReports(officeId: string) {
     entity: string;
     config: object;
   }> = [
+    {
+      name: "Unified Workflow Overview",
+      entity: "deals",
+      config: {
+        reportType: "workflow_overview",
+        chart_type: "table",
+      },
+    },
     {
       name: "Pipeline Summary (Excluding DD)",
       entity: "deals",

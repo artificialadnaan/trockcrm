@@ -5,11 +5,11 @@ import {
   executeCustomReport,
   createSavedReport,
   deleteSavedReport,
+  useUnifiedWorkflowOverview,
   type SavedReport,
   type ReportConfig,
+  type UnifiedWorkflowOverview,
 } from "@/hooks/use-reports";
-import { useRepDashboard } from "@/hooks/use-dashboard";
-import { useDirectorDashboard } from "@/hooks/use-director-dashboard";
 import { ReportChart } from "@/components/charts/report-chart";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -41,10 +41,12 @@ import {
   Calendar,
   DollarSign,
   Briefcase,
-  BarChart2,
-  Zap,
   RefreshCw,
   FileText,
+  Building2,
+  ClipboardList,
+  Clock3,
+  Activity,
 } from "lucide-react";
 import {
   buildPrintableReportHtml,
@@ -55,16 +57,6 @@ import {
   serializeRowsToCsv,
 } from "@/lib/report-export";
 import { getScheduleReportActionConfig } from "@/lib/report-actions";
-import {
-  BarChart,
-  Bar,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  ResponsiveContainer,
-  Legend,
-} from "recharts";
 
 // ---------------------------------------------------------------------------
 // Types & constants (unchanged from original)
@@ -159,6 +151,7 @@ const FILTER_OPERATORS: Array<{ value: ReportFilterOp; label: string; needsValue
 ];
 
 const LOCKED_REPORT_OPTIONS: Record<string, { supportsDateRange?: boolean; supportsIncludeDd?: boolean }> = {
+  workflow_overview: {},
   pipeline_summary: { supportsDateRange: true, supportsIncludeDd: true },
   weighted_forecast: { supportsDateRange: true },
   win_loss_ratio: { supportsDateRange: true },
@@ -262,158 +255,263 @@ function KpiCard({ label, value, indicator, badge, icon, loading }: KpiCardProps
 }
 
 // ---------------------------------------------------------------------------
-// SVG Donut Chart
+// Workflow Overview
 // ---------------------------------------------------------------------------
 
-const DONUT_COLORS = ["#CC0000", "#1E3A5F", "#475569", "#94A3B8", "#CBD5E1", "#E2E8F0"];
-
-interface DonutSegment {
-  name: string;
-  value: number;
-  count: number;
+function formatWorkflowRoute(route: "estimating" | "service") {
+  return route === "service" ? "Service" : "Standard";
 }
 
-function DonutChart({ segments }: { segments: DonutSegment[] }) {
-  const total = segments.reduce((sum, s) => sum + s.value, 0);
-  const totalCount = segments.reduce((sum, s) => sum + s.count, 0);
+function formatWorkflowStatus(status: string) {
+  return status
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+}
 
-  if (total === 0) {
-    return (
-      <div className="flex items-center justify-center h-48 text-slate-400 text-sm">
-        No pipeline data
-      </div>
-    );
-  }
+interface WorkflowTableColumn<T> {
+  key: string;
+  label: string;
+  align?: "left" | "right";
+  render: (row: T) => React.ReactNode;
+}
 
-  const cx = 90;
-  const cy = 90;
-  const r = 70;
-  const innerR = 45;
-
-  let cumulative = 0;
-  const paths: { path: string; color: string; pct: number; name: string }[] = [];
-
-  segments.forEach((seg, i) => {
-    const pct = seg.value / total;
-    const startAngle = cumulative * 2 * Math.PI - Math.PI / 2;
-    const endAngle = (cumulative + pct) * 2 * Math.PI - Math.PI / 2;
-    cumulative += pct;
-
-    const x1 = cx + r * Math.cos(startAngle);
-    const y1 = cy + r * Math.sin(startAngle);
-    const x2 = cx + r * Math.cos(endAngle);
-    const y2 = cy + r * Math.sin(endAngle);
-    const ix1 = cx + innerR * Math.cos(endAngle);
-    const iy1 = cy + innerR * Math.sin(endAngle);
-    const ix2 = cx + innerR * Math.cos(startAngle);
-    const iy2 = cy + innerR * Math.sin(startAngle);
-
-    const largeArc = pct > 0.5 ? 1 : 0;
-
-    const d = [
-      `M ${x1} ${y1}`,
-      `A ${r} ${r} 0 ${largeArc} 1 ${x2} ${y2}`,
-      `L ${ix1} ${iy1}`,
-      `A ${innerR} ${innerR} 0 ${largeArc} 0 ${ix2} ${iy2}`,
-      "Z",
-    ].join(" ");
-
-    paths.push({ path: d, color: DONUT_COLORS[i % DONUT_COLORS.length], pct, name: seg.name });
-  });
-
+function WorkflowTableSection<T extends object>({
+  title,
+  subtitle,
+  rows,
+  columns,
+  emptyMessage,
+}: {
+  title: string;
+  subtitle: string;
+  rows: T[];
+  columns: WorkflowTableColumn<T>[];
+  emptyMessage: string;
+}) {
   return (
-    <div className="flex flex-col items-center gap-4">
-      <div className="relative">
-        <svg width={180} height={180} viewBox="0 0 180 180">
-          {paths.map((p, i) => (
-            <path key={i} d={p.path} fill={p.color} />
-          ))}
-          {/* Center text */}
-          <text x={cx} y={cy - 8} textAnchor="middle" className="text-slate-900" style={{ fontSize: 22, fontWeight: 900, fill: "#0F172A" }}>
-            {totalCount}
-          </text>
-          <text x={cx} y={cy + 10} textAnchor="middle" style={{ fontSize: 10, fill: "#64748b" }}>
-            Total Value
-          </text>
-          <text x={cx} y={cy + 23} textAnchor="middle" style={{ fontSize: 9, fill: "#94a3b8" }}>
-            {formatCurrency(total)}
-          </text>
-        </svg>
+    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+      <div className="px-6 py-5 border-b border-slate-100">
+        <h2 className="text-lg font-bold text-slate-900">{title}</h2>
+        <p className="text-xs text-slate-400 mt-0.5">{subtitle}</p>
       </div>
-
-      {/* Legend */}
-      <div className="w-full space-y-1.5">
-        {segments.map((seg, i) => (
-          <div key={i} className="flex items-center justify-between text-xs">
-            <div className="flex items-center gap-2">
-              <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: DONUT_COLORS[i % DONUT_COLORS.length] }} />
-              <span className="text-slate-600 truncate max-w-[100px]">{seg.name}</span>
-            </div>
-            <span className="font-semibold text-slate-700 tabular-nums">
-              {total > 0 ? `${Math.round((seg.value / total) * 100)}%` : "0%"}
-            </span>
-          </div>
-        ))}
+      <div className="overflow-x-auto">
+        <table className="w-full">
+          <thead>
+            <tr className="border-b border-slate-100">
+              {columns.map((column) => (
+                <th
+                  key={column.key}
+                  className={`px-4 py-3 text-xs font-semibold uppercase tracking-wider text-slate-400 ${column.align === "right" ? "text-right" : "text-left"}`}
+                >
+                  {column.label}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length === 0 ? (
+              <tr>
+                <td colSpan={columns.length} className="px-6 py-10 text-center text-sm text-slate-400">
+                  {emptyMessage}
+                </td>
+              </tr>
+            ) : (
+              rows.map((row, index) => (
+                <tr key={index} className="border-b border-slate-50 last:border-b-0 hover:bg-slate-50 transition-colors">
+                  {columns.map((column) => (
+                    <td
+                      key={column.key}
+                      className={`px-4 py-4 text-sm text-slate-700 ${column.align === "right" ? "text-right tabular-nums" : ""}`}
+                    >
+                      {column.render(row)}
+                    </td>
+                  ))}
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
       </div>
     </div>
   );
 }
 
-// ---------------------------------------------------------------------------
-// Pipeline Bar Chart — side-by-side actual vs target
-// ---------------------------------------------------------------------------
-
-function PipelineOverviewChart({ data }: {
-  data: Array<{ stageName: string; totalValue: number; dealCount: number }>
+function WorkflowOverviewPanel({
+  data,
+  loading,
+}: {
+  data: UnifiedWorkflowOverview | null;
+  loading?: boolean;
 }) {
-  const chartData = data.map((d) => ({
-    name: d.stageName.length > 10 ? d.stageName.slice(0, 10) + "…" : d.stageName,
-    Actual: Math.round(d.totalValue / 1000),
-    Target: Math.round(d.totalValue * 1.15 / 1000), // 15% target uplift placeholder
-  }));
+  const leadPipelineCount = data?.leadPipelineSummary.reduce((sum, row) => sum + row.intakeCount, 0) ?? 0;
+  const standardRollup = data?.standardVsServiceRollups.find((row) => row.workflowRoute === "estimating");
+  const serviceRollup = data?.standardVsServiceRollups.find((row) => row.workflowRoute === "service");
+  const companyCount = data?.companyRollups.length ?? 0;
+  const staleLeadCount = data?.staleLeads.length ?? 0;
+  const staleDealCount = data?.staleDeals.length ?? 0;
 
   return (
-    <ResponsiveContainer width="100%" height={240}>
-      <BarChart data={chartData} margin={{ top: 5, right: 10, left: 0, bottom: 5 }} barGap={4}>
-        <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" vertical={false} />
-        <XAxis dataKey="name" tick={{ fontSize: 11, fill: "#94a3b8" }} axisLine={false} tickLine={false} />
-        <YAxis tick={{ fontSize: 11, fill: "#94a3b8" }} axisLine={false} tickLine={false} tickFormatter={(v) => `$${v}K`} />
-        <Tooltip
-          formatter={(v: number, name: string) => [`$${v}K`, name]}
-          contentStyle={{ fontSize: 12, borderRadius: 8, border: "1px solid #e2e8f0" }}
+    <div className="space-y-8">
+      <div className="flex items-start justify-between gap-6">
+        <div>
+          <p className="text-xs font-bold uppercase tracking-[0.2em] text-[#CC0000] mb-2">
+            Unified Workflow
+          </p>
+          <h1 className="text-6xl font-black tracking-tighter text-slate-900 leading-none mb-4">
+            Workflow Overview
+          </h1>
+          <p className="text-slate-500 text-sm max-w-2xl leading-relaxed">
+            Consolidated lead-stage, standard deal, and service deal reporting using the current hierarchy and workflow family boundaries.
+          </p>
+        </div>
+        <div className="flex items-center gap-3 pt-2 shrink-0">
+          <button
+            className="flex items-center gap-2 px-4 py-2 rounded-lg text-white text-sm font-semibold"
+            style={{ background: "linear-gradient(135deg, #CC0000, #991111)" }}
+          >
+            <Calendar className="h-4 w-4" />
+            Current View
+          </button>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
+        <KpiCard
+          label="Lead Pipeline Intakes"
+          value={String(leadPipelineCount)}
+          badge={{ text: "Pre-RFP", color: "gray" }}
+          icon={<ClipboardList />}
+          loading={loading}
         />
-        <Legend
-          iconType="circle"
-          iconSize={8}
-          wrapperStyle={{ fontSize: 12, paddingTop: 8 }}
+        <KpiCard
+          label="Standard Pipeline"
+          value={standardRollup ? String(standardRollup.dealCount) : "0"}
+          badge={{ text: standardRollup ? formatCurrency(standardRollup.totalValue) : "$0", color: "green" }}
+          icon={<Briefcase />}
+          loading={loading}
         />
-        <Bar dataKey="Actual" fill="#CC0000" radius={[4, 4, 0, 0]} />
-        <Bar dataKey="Target" fill="#CBD5E1" radius={[4, 4, 0, 0]} />
-      </BarChart>
-    </ResponsiveContainer>
+        <KpiCard
+          label="Service Pipeline"
+          value={serviceRollup ? String(serviceRollup.dealCount) : "0"}
+          badge={{ text: serviceRollup ? formatCurrency(serviceRollup.totalValue) : "$0", color: "green" }}
+          icon={<DollarSign />}
+          loading={loading}
+        />
+        <KpiCard
+          label="Companies"
+          value={String(companyCount)}
+          badge={{ text: "Multi-property rollups", color: "gray" }}
+          icon={<Building2 />}
+          loading={loading}
+        />
+        <KpiCard
+          label="Stale Leads"
+          value={String(staleLeadCount)}
+          badge={{ text: "Pre-RFP", color: staleLeadCount > 0 ? "red" : "green" }}
+          icon={<Clock3 />}
+          loading={loading}
+        />
+        <KpiCard
+          label="Stale Deals"
+          value={String(staleDealCount)}
+          badge={{ text: "Active pipeline", color: staleDealCount > 0 ? "red" : "green" }}
+          icon={<Activity />}
+          loading={loading}
+        />
+      </div>
+
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+        <WorkflowTableSection
+          title="Lead Pipeline Summary"
+          subtitle="Pre-RFP intake counts split by workflow family and validation state."
+          rows={data?.leadPipelineSummary ?? []}
+          emptyMessage="No lead pipeline data available."
+          columns={[
+            { key: "route", label: "Workflow", render: (row) => formatWorkflowRoute(row.workflowRoute) },
+            { key: "status", label: "Status", render: (row) => formatWorkflowStatus(row.validationStatus) },
+            { key: "count", label: "Intakes", align: "right", render: (row) => row.intakeCount.toLocaleString() },
+          ]}
+        />
+
+        <WorkflowTableSection
+          title="Standard vs Service Rollups"
+          subtitle="Current active pipeline by workflow route without collapsing the two families."
+          rows={data?.standardVsServiceRollups ?? []}
+          emptyMessage="No workflow rollups available."
+          columns={[
+            { key: "route", label: "Workflow", render: (row) => formatWorkflowRoute(row.workflowRoute) },
+            { key: "dealCount", label: "Active Deals", align: "right", render: (row) => row.dealCount.toLocaleString() },
+            { key: "value", label: "Total Value", align: "right", render: (row) => formatCurrency(row.totalValue) },
+            { key: "stale", label: "Stale", align: "right", render: (row) => row.staleDealCount.toLocaleString() },
+          ]}
+        />
+      </div>
+
+      <WorkflowTableSection
+        title="Company Rollups"
+        subtitle="Companies grouped across multiple properties, leads, and deals."
+        rows={data?.companyRollups ?? []}
+        emptyMessage="No company rollups available."
+        columns={[
+          { key: "company", label: "Company", render: (row) => row.companyName },
+          { key: "leads", label: "Leads", align: "right", render: (row) => row.leadCount.toLocaleString() },
+          { key: "properties", label: "Properties", align: "right", render: (row) => row.propertyCount.toLocaleString() },
+          { key: "deals", label: "Deals", align: "right", render: (row) => row.dealCount.toLocaleString() },
+          { key: "active", label: "Active", align: "right", render: (row) => row.activeDealCount.toLocaleString() },
+          { key: "standard", label: "Standard", align: "right", render: (row) => row.standardDealCount.toLocaleString() },
+          { key: "service", label: "Service", align: "right", render: (row) => row.serviceDealCount.toLocaleString() },
+          { key: "value", label: "Value", align: "right", render: (row) => formatCurrency(row.totalValue) },
+        ]}
+      />
+
+      <WorkflowTableSection
+        title="Rep Activity Split"
+        subtitle="Work captured before activation versus work done on activated deals."
+        rows={data?.repActivitySplit ?? []}
+        emptyMessage="No rep activity split available."
+        columns={[
+          { key: "rep", label: "Rep", render: (row) => row.repName },
+          { key: "leadCalls", label: "Lead Calls", align: "right", render: (row) => row.leadStageCalls.toLocaleString() },
+          { key: "leadEmails", label: "Lead Emails", align: "right", render: (row) => row.leadStageEmails.toLocaleString() },
+          { key: "dealCalls", label: "Deal Calls", align: "right", render: (row) => row.dealStageCalls.toLocaleString() },
+          { key: "dealEmails", label: "Deal Emails", align: "right", render: (row) => row.dealStageEmails.toLocaleString() },
+          { key: "leadTotal", label: "Lead Work", align: "right", render: (row) => row.totalLeadStageActivities.toLocaleString() },
+          { key: "dealTotal", label: "Deal Work", align: "right", render: (row) => row.totalDealStageActivities.toLocaleString() },
+        ]}
+      />
+
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+        <WorkflowTableSection
+          title="Stale Leads"
+          subtitle="Pre-RFP intakes that have sat in draft or ready too long."
+          rows={data?.staleLeads ?? []}
+          emptyMessage="No stale leads found."
+          columns={[
+            { key: "lead", label: "Lead", render: (row) => row.leadName },
+            { key: "company", label: "Company", render: (row) => row.companyName },
+            { key: "workflow", label: "Workflow", render: (row) => formatWorkflowRoute(row.workflowRoute) },
+            { key: "status", label: "Status", render: (row) => formatWorkflowStatus(row.validationStatus) },
+            { key: "age", label: "Age", align: "right", render: (row) => `${row.ageInDays}d` },
+          ]}
+        />
+
+        <WorkflowTableSection
+          title="Stale Deals"
+          subtitle="Active deals that have exceeded their stage threshold."
+          rows={data?.staleDeals ?? []}
+          emptyMessage="No stale deals found."
+          columns={[
+            { key: "deal", label: "Deal", render: (row) => row.dealName },
+            { key: "number", label: "Number", render: (row) => row.dealNumber },
+            { key: "workflow", label: "Workflow", render: (row) => formatWorkflowRoute(row.workflowRoute) },
+            { key: "rep", label: "Rep", render: (row) => row.repName },
+            { key: "age", label: "Age", align: "right", render: (row) => `${row.daysInStage}d` },
+            { key: "value", label: "Value", align: "right", render: (row) => formatCurrency(row.dealValue) },
+          ]}
+        />
+      </div>
+    </div>
   );
-}
-
-// ---------------------------------------------------------------------------
-// Project Performance Table
-// ---------------------------------------------------------------------------
-
-const STATUS_COLORS: Record<string, { dot: string; label: string; border: string }> = {
-  default: { dot: "bg-emerald-500", label: "Active", border: "border-emerald-500" },
-};
-
-function getStageStatus(stageName: string) {
-  const s = stageName.toLowerCase();
-  if (s.includes("won") || s.includes("award") || s.includes("closed")) {
-    return { dot: "bg-emerald-500", label: "Awarded", border: "border-emerald-500" };
-  }
-  if (s.includes("lost") || s.includes("dead")) {
-    return { dot: "bg-red-400", label: "Lost", border: "border-red-400" };
-  }
-  if (s.includes("bid") || s.includes("proposal")) {
-    return { dot: "bg-amber-500", label: "Bidding", border: "border-amber-500" };
-  }
-  return { dot: "bg-blue-500", label: "Active", border: "border-blue-500" };
 }
 
 // ---------------------------------------------------------------------------
@@ -445,12 +543,15 @@ export function ReportsPage() {
 
   const requestCounter = useRef(0);
 
-  // --- new dashboard data for KPIs ---
-  const { data: repData, loading: repLoading } = useRepDashboard();
-  const { data: dirData, loading: dirLoading } = useDirectorDashboard();
+  // --- unified workflow overview ---
+  const {
+    data: workflowOverview,
+    loading: workflowOverviewLoading,
+    error: workflowOverviewError,
+    refetch: refetchWorkflowOverview,
+  } = useUnifiedWorkflowOverview();
 
   // --- UI state ---
-  const [projectTab, setProjectTab] = useState<"current" | "historical">("current");
   const [showReportDrawer, setShowReportDrawer] = useState(false);
 
   const lockedReports = reports.filter((r) => r.isLocked);
@@ -462,36 +563,6 @@ export function ReportsPage() {
     () => buildConfig(builderEntity, builderColumns, builderFilters, builderSortField, builderSortDir, builderChartType),
     [builderEntity, builderColumns, builderFilters, builderSortField, builderSortDir, builderChartType]
   );
-
-  // --- KPI derivations ---
-  const totalPipelineValue = dirData?.ddVsPipeline.totalValue ?? repData?.activeDeals.totalValue ?? 0;
-  const activeDealCount = repData?.activeDeals.count ?? 0;
-  const highPriorityCount = dirData?.pipelineByStage.filter((s) => {
-    const n = s.stageName.toLowerCase();
-    return n.includes("bid") || n.includes("proposal");
-  }).reduce((sum, s) => sum + s.dealCount, 0) ?? 0;
-
-  const avgWinRate = useMemo(() => {
-    if (!dirData?.repCards.length) return null;
-    const total = dirData.repCards.reduce((sum, r) => sum + r.winRate, 0);
-    return Math.round(total / dirData.repCards.length);
-  }, [dirData]);
-
-  const avgDaysInStage = useMemo(() => {
-    if (!dirData?.staleDeals.length) return null;
-    const total = dirData.staleDeals.reduce((sum, d) => sum + d.daysInStage, 0);
-    return Math.round(total / dirData.staleDeals.length);
-  }, [dirData]);
-
-  const pipelineByStage = dirData?.pipelineByStage ?? repData?.pipelineByStage ?? [];
-
-  const donutSegments: DonutSegment[] = pipelineByStage.map((s) => ({
-    name: s.stageName,
-    value: s.totalValue,
-    count: s.dealCount,
-  }));
-
-  const kpiLoading = repLoading || dirLoading;
 
   // --- preserved report logic ---
   function resetBuilder(entity: ReportEntity = "deals") {
@@ -637,6 +708,8 @@ export function ReportsPage() {
   const activeLockedOptions = activeReport?.isLocked
     ? LOCKED_REPORT_OPTIONS[(activeReport.config as any)?.reportType ?? ""]
     : undefined;
+  const activeReportType = (activeReport?.config as any)?.reportType ?? "";
+  const isWorkflowOverviewReport = activeReportType === "workflow_overview";
   const exportRows = useMemo(() => normalizeReportRows(reportData), [reportData]);
   const exportReportName = activeReport?.name ?? "Report Preview";
   const exportMetadata = useMemo(() => {
@@ -655,17 +728,15 @@ export function ReportsPage() {
     return items;
   }, [activeLockedOptions?.supportsDateRange, activeLockedOptions?.supportsIncludeDd, activeReport, builderChartType, lockedFrom, lockedIncludeDd, lockedTo]);
 
-  const staleDeals = dirData?.staleDeals ?? [];
-  const currentDeals = projectTab === "current"
-    ? staleDeals.filter((d) => !d.stageName.toLowerCase().includes("lost") && !d.stageName.toLowerCase().includes("dead"))
-    : staleDeals.filter((d) => d.stageName.toLowerCase().includes("won") || d.stageName.toLowerCase().includes("lost") || d.stageName.toLowerCase().includes("award"));
-
   const now = new Date();
   const syncTime = `${now.toLocaleDateString("en-US", { month: "short", day: "numeric" })} at ${now.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })}`;
 
   function requireExportableRows() {
     if (reportLoading) {
       throw new Error("Wait for the report to finish loading before exporting.");
+    }
+    if (isWorkflowOverviewReport) {
+      throw new Error("Workflow overview reports are structured dashboards and do not export as rows.");
     }
     if (exportRows.length === 0) {
       throw new Error("Run a report first, then export the loaded results.");
@@ -720,226 +791,39 @@ export function ReportsPage() {
   return (
     <div className="min-h-screen bg-slate-50">
       <div className="max-w-[1400px] mx-auto px-6 py-8 space-y-8">
-
-        {/* ================================================================
-            HEADER
-        ================================================================ */}
         <div className="flex items-start justify-between gap-6">
           <div>
             <p className="text-xs font-bold uppercase tracking-[0.2em] text-[#CC0000] mb-2">
-              Quarterly Overview
+              Unified Workflow Intelligence
             </p>
             <h1 className="text-6xl font-black tracking-tighter text-slate-900 leading-none mb-4">
-              Financial Summary
+              Reports
             </h1>
             <p className="text-slate-500 text-sm max-w-md leading-relaxed">
-              Aggregate fiscal performance across all active deals, pipeline stages, and revenue projections for the current period.
+              Lead pipeline, standard deal, and service deal performance in one consolidated operating view.
             </p>
           </div>
           <div className="flex items-center gap-3 pt-2 shrink-0">
             <Button
               variant="outline"
               className="border-slate-200 text-slate-600 hover:bg-slate-100"
-              onClick={handleExportPdf}
-              disabled={reportLoading || exportRows.length === 0 || exporting === "pdf"}
+              onClick={() => refetchWorkflowOverview()}
+              disabled={workflowOverviewLoading}
             >
-              <Download className="h-4 w-4 mr-2" />
-              {exporting === "pdf" ? "Preparing PDF..." : "Export PDF"}
+              <RefreshCw className="h-4 w-4 mr-2" />
+              Refresh Overview
             </Button>
-            <button
-              className="flex items-center gap-2 px-4 py-2 rounded-lg text-white text-sm font-semibold"
-              style={{ background: "linear-gradient(135deg, #CC0000, #991111)" }}
-              onClick={() => setShowBuilder(true)}
-            >
-              <Calendar className="h-4 w-4" />
-              Filter Dates
-            </button>
           </div>
         </div>
 
-        {/* ================================================================
-            KPI BENTO GRID
-        ================================================================ */}
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-          <KpiCard
-            label="Total Revenue"
-            value={formatCurrency(totalPipelineValue)}
-            indicator={{ text: "+12.4% vs LY", positive: true }}
-            icon={<DollarSign />}
-            loading={kpiLoading}
-          />
-          <KpiCard
-            label="Active Bids"
-            value={String(activeDealCount)}
-            badge={{ text: `${highPriorityCount} High Priority`, color: "red" }}
-            icon={<Briefcase />}
-            loading={kpiLoading}
-          />
-          <KpiCard
-            label="Average Margin"
-            value={avgWinRate != null ? `${avgWinRate}%` : "--"}
-            badge={{ text: "Steady state", color: "gray" }}
-            icon={<BarChart2 />}
-            loading={kpiLoading}
-          />
-          <KpiCard
-            label="Lead Velocity"
-            value={avgDaysInStage != null ? `${avgDaysInStage}d` : "--"}
-            indicator={{ text: "-2.1d improvement", positive: true }}
-            icon={<Zap />}
-            loading={kpiLoading}
-          />
-        </div>
-
-        {/* ================================================================
-            CHARTS ROW
-        ================================================================ */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-          {/* Pipeline Bar Chart — 2/3 */}
-          <div className="lg:col-span-2 bg-white rounded-2xl border border-slate-200 shadow-sm p-6">
-            <div className="flex items-start justify-between mb-1">
-              <div>
-                <h2 className="text-lg font-bold text-slate-900">Revenue Pipeline</h2>
-                <p className="text-xs text-slate-400 mt-0.5">Monthly projection by stage — Actual vs Target ($K)</p>
-              </div>
-              <div className="flex items-center gap-3 text-xs text-slate-500">
-                <span className="flex items-center gap-1.5">
-                  <span className="w-2.5 h-2.5 rounded-full bg-[#CC0000]" /> Actual
-                </span>
-                <span className="flex items-center gap-1.5">
-                  <span className="w-2.5 h-2.5 rounded-full bg-slate-300" /> Target
-                </span>
-              </div>
-            </div>
-
-            <div className="mt-4">
-              {dirLoading || repLoading ? (
-                <div className="h-60 bg-slate-50 animate-pulse rounded-xl" />
-              ) : pipelineByStage.length > 0 ? (
-                <PipelineOverviewChart data={pipelineByStage} />
-              ) : (
-                <div className="h-60 flex items-center justify-center text-slate-400 text-sm">
-                  No pipeline data available
-                </div>
-              )}
-            </div>
+        {workflowOverviewError && (
+          <div className="rounded-2xl border border-red-200 bg-red-50 px-5 py-4 text-sm text-red-700">
+            {workflowOverviewError}
           </div>
+        )}
 
-          {/* Deal Velocity Donut — 1/3 */}
-          <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6">
-            <div className="mb-4">
-              <h2 className="text-lg font-bold text-slate-900">Deal Velocity</h2>
-              <p className="text-xs text-slate-400 mt-0.5">Distribution by pipeline stage</p>
-            </div>
-
-            {dirLoading || repLoading ? (
-              <div className="flex flex-col items-center gap-4">
-                <div className="w-[180px] h-[180px] rounded-full bg-slate-100 animate-pulse" />
-                <div className="w-full space-y-2">
-                  {[1, 2, 3].map((i) => <div key={i} className="h-4 bg-slate-100 animate-pulse rounded" />)}
-                </div>
-              </div>
-            ) : (
-              <DonutChart segments={donutSegments} />
-            )}
-          </div>
-        </div>
-
-        {/* ================================================================
-            PROJECT PERFORMANCE TABLE
-        ================================================================ */}
-        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
-          <div className="flex items-center justify-between px-6 py-5 border-b border-slate-100">
-            <div>
-              <h2 className="text-lg font-bold text-slate-900">Project Performance</h2>
-              <p className="text-xs text-slate-400 mt-0.5">Deal-level stage tracking and pipeline health indicators</p>
-            </div>
-            <div className="flex items-center gap-1 bg-slate-100 rounded-lg p-1">
-              <button
-                onClick={() => setProjectTab("current")}
-                className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-all ${
-                  projectTab === "current"
-                    ? "bg-white text-slate-900 shadow-sm"
-                    : "text-slate-500 hover:text-slate-700"
-                }`}
-              >
-                Current Projects
-              </button>
-              <button
-                onClick={() => setProjectTab("historical")}
-                className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-all ${
-                  projectTab === "historical"
-                    ? "bg-white text-slate-900 shadow-sm"
-                    : "text-slate-500 hover:text-slate-700"
-                }`}
-              >
-                Historical Archive
-              </button>
-            </div>
-          </div>
-
-          <div className="overflow-x-auto">
-            <table className="w-full">
-              <thead>
-                <tr className="border-b border-slate-100">
-                  <th className="text-left px-6 py-3 text-xs font-semibold uppercase tracking-wider text-slate-400">Entity / Project</th>
-                  <th className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wider text-slate-400">Status</th>
-                  <th className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wider text-slate-400">Lead Time</th>
-                  <th className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wider text-slate-400">Yield Performance</th>
-                </tr>
-              </thead>
-              <tbody>
-                {dirLoading ? (
-                  Array.from({ length: 5 }).map((_, i) => (
-                    <tr key={i} className="border-b border-slate-50">
-                      <td className="px-6 py-4"><div className="h-4 bg-slate-100 animate-pulse rounded w-48" /></td>
-                      <td className="px-4 py-4"><div className="h-4 bg-slate-100 animate-pulse rounded w-20" /></td>
-                      <td className="px-4 py-4"><div className="h-4 bg-slate-100 animate-pulse rounded w-16" /></td>
-                      <td className="px-4 py-4"><div className="h-4 bg-slate-100 animate-pulse rounded w-24" /></td>
-                    </tr>
-                  ))
-                ) : currentDeals.length === 0 ? (
-                  <tr>
-                    <td colSpan={4} className="px-6 py-12 text-center text-sm text-slate-400">
-                      No projects in this view
-                    </td>
-                  </tr>
-                ) : (
-                  currentDeals.map((deal) => {
-                    const status = getStageStatus(deal.stageName);
-                    const yieldPct = deal.dealValue > 0
-                      ? Math.round(((deal.dealValue - 50000) / 50000) * 100)
-                      : 0;
-                    return (
-                      <tr
-                        key={deal.dealId}
-                        className={`border-b border-slate-50 hover:bg-slate-50 transition-colors border-l-4 ${status.border}`}
-                      >
-                        <td className="px-6 py-4">
-                          <p className="text-sm font-semibold text-slate-900 truncate max-w-xs">{deal.dealName}</p>
-                          <p className="text-xs text-slate-400 font-mono mt-0.5">#{deal.dealNumber}</p>
-                        </td>
-                        <td className="px-4 py-4">
-                          <span className="flex items-center gap-2">
-                            <span className={`w-2 h-2 rounded-full ${status.dot}`} />
-                            <span className="text-xs font-medium text-slate-600">{status.label}</span>
-                          </span>
-                        </td>
-                        <td className="px-4 py-4">
-                          <span className="font-mono text-sm text-slate-700">{deal.daysInStage}d</span>
-                        </td>
-                        <td className="px-4 py-4">
-                          <span className={`text-sm font-semibold ${yieldPct >= 0 ? "text-emerald-600" : "text-red-500"}`}>
-                            {yieldPct >= 0 ? "+" : ""}{yieldPct}%
-                          </span>
-                        </td>
-                      </tr>
-                    );
-                  })
-                )}
-              </tbody>
-            </table>
-          </div>
+        <div className="rounded-3xl border border-slate-200 bg-white shadow-sm p-6">
+          <WorkflowOverviewPanel data={workflowOverview} loading={workflowOverviewLoading} />
         </div>
 
         {/* ================================================================
@@ -1057,7 +941,7 @@ export function ReportsPage() {
                   size="sm"
                   className="border-slate-200 text-slate-600"
                   onClick={handleExportCsv}
-                  disabled={reportLoading || exportRows.length === 0 || exporting === "csv"}
+                  disabled={reportLoading || exportRows.length === 0 || exporting === "csv" || isWorkflowOverviewReport}
                 >
                   <Download className="h-4 w-4 mr-1" />
                   {exporting === "csv" ? "Preparing CSV..." : "Export CSV"}
@@ -1067,7 +951,7 @@ export function ReportsPage() {
                   size="sm"
                   className="border-slate-200 text-slate-600"
                   onClick={handleExportPdf}
-                  disabled={reportLoading || exportRows.length === 0 || exporting === "pdf"}
+                  disabled={reportLoading || exportRows.length === 0 || exporting === "pdf" || isWorkflowOverviewReport}
                 >
                   <Download className="h-4 w-4 mr-1" />
                   {exporting === "pdf" ? "Preparing PDF..." : "Export PDF"}
@@ -1128,15 +1012,19 @@ export function ReportsPage() {
                 </div>
               )}
               {reportData && !reportLoading && (
-                <ReportChart
-                  data={reportData}
-                  chartType={
-                    activeReport
-                      ? ((activeReport.config as any)?.chart_type ?? "table")
-                      : builderChartType
-                  }
-                  reportType={activeReport ? (activeReport.config as any)?.reportType : undefined}
-                />
+                isWorkflowOverviewReport ? (
+                  <WorkflowOverviewPanel data={reportData as UnifiedWorkflowOverview} />
+                ) : (
+                  <ReportChart
+                    data={reportData}
+                    chartType={
+                      activeReport
+                        ? ((activeReport.config as any)?.chart_type ?? "table")
+                        : builderChartType
+                    }
+                    reportType={activeReport ? (activeReport.config as any)?.reportType : undefined}
+                  />
+                )
               )}
             </div>
           </div>
