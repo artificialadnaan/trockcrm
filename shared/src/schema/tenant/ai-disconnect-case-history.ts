@@ -26,6 +26,9 @@ export const aiDisconnectCaseHistory = pgTable(
     metadataJson: jsonb("metadata_json"),
   },
   (table) => [
-    index("ai_disconnect_case_history_case_idx").on(table.disconnectCaseId, table.actedAt),
+    index("ai_disconnect_case_history_case_idx").on(
+      table.disconnectCaseId,
+      table.actedAt.desc()
+    ),
   ]
 );
