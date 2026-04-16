@@ -1,5 +1,6 @@
 import { assignTaskFromContext } from "./assignment.js";
 import { scoreTaskPriority } from "./priority.js";
+import { buildStaleLeadDedupeKey } from "./stale-lead-key.js";
 import type { TaskRuleDefinition, TaskRuleContext } from "./types.js";
 
 function buildPriority(context: TaskRuleContext) {
@@ -412,6 +413,70 @@ const dailyCadenceOverdueFollowUpRule: TaskRuleDefinition = {
         dealNumber: context.dealNumber,
         lastContactedAt: lastContactText,
         touchpointCadenceDays: context.touchpointCadenceDays,
+        assignment: assignment.machineReason,
+      },
+    };
+  },
+};
+
+const staleLeadRuleId = "stale_lead";
+const staleLeadRule: TaskRuleDefinition = {
+  id: staleLeadRuleId,
+  sourceEvent: "cron.daily_task_generation.stale_lead",
+  reasonCode: staleLeadRuleId,
+  suppressionWindowDays: 30,
+  preserveAssignedToOnRefresh: true,
+  buildDedupeKey(context) {
+    return buildStaleLeadDedupeKey(context.leadId, context.stageEnteredAt);
+  },
+  async buildTask(context) {
+    if (!context.leadId || !context.leadName || !context.taskAssigneeId || !context.stage) return null;
+
+    const assignment = await assignTaskFromContext({
+      entityId: context.entityId,
+      manualOverrideId: context.taskAssigneeId,
+    });
+
+    if (!assignment.assignedTo) return null;
+
+    const staleAge = context.staleAge ?? 0;
+    const dedupeKey = buildStaleLeadDedupeKey(context.leadId, context.stageEnteredAt);
+    if (!dedupeKey) return null;
+
+    return {
+      title: `Re-engage stale lead ${context.leadName}`,
+      description: `Lead "${context.leadName}" has been in ${context.stage} for ${staleAge} days without progression.`,
+      type: "follow_up",
+      assignedTo: assignment.assignedTo,
+      officeId: context.officeId,
+      originRule: staleLeadRuleId,
+      sourceRule: staleLeadRuleId,
+      sourceEvent: context.sourceEvent,
+      dedupeKey,
+      reasonCode: staleLeadRuleId,
+      priority: "normal",
+      priorityScore: 69,
+      status: "pending",
+      dueAt: startOfDay(context.now),
+      entitySnapshot: {
+        schemaVersion: 1,
+        entityType: "lead",
+        entityId: context.entityId,
+        officeId: context.officeId,
+        sourceEvent: context.sourceEvent,
+        leadId: context.leadId,
+        leadName: context.leadName,
+        stage: context.stage,
+        staleAge,
+        stageEnteredAt: context.stageEnteredAt ?? null,
+        summary: `${context.leadName} is stale in ${context.stage}`,
+      },
+      metadata: {
+        entityId: context.entityId,
+        leadId: context.leadId,
+        leadName: context.leadName,
+        stage: context.stage,
+        staleAge,
         assignment: assignment.machineReason,
       },
     };
@@ -1160,6 +1225,7 @@ const inboundEmailDisambiguationRule: TaskRuleDefinition = {
 
 export const TASK_RULES: TaskRuleDefinition[] = [
   staleDealRule,
+  staleLeadRule,
   inboundEmailReplyNeededRule,
   inboundEmailDisambiguationRule,
   contactOnboardingIntroEmailRule,

@@ -156,19 +156,33 @@ describe("task rule config", () => {
     );
 
     expect(dailyRules.map((rule) => rule.id)).toEqual([
+      "stale_lead",
       "daily_close_date_follow_up",
       "daily_first_outreach_touchpoint",
       "daily_cadence_overdue_follow_up",
     ]);
     expect(dailyRules.map((rule) => rule.reasonCode)).toEqual([
+      "stale_lead",
       "daily_close_date_follow_up",
       "daily_first_outreach_touchpoint",
       "daily_cadence_overdue_follow_up",
     ]);
 
-    expect(dailyRules[0]?.buildDedupeKey(makeDailyTaskContext())).toBe("deal:deal-1:daily_close_date_follow_up");
     expect(
-      dailyRules[1]?.buildDedupeKey(
+      dailyRules[0]?.buildDedupeKey(
+        makeDailyTaskContext({
+          entityId: "lead:lead-1",
+          sourceEvent: "cron.daily_task_generation.stale_lead",
+          leadId: "lead-1",
+          leadName: "Acme HQ lobby remodel",
+          stage: "Qualified",
+          stageEnteredAt: new Date("2026-03-29T12:00:00.000Z"),
+        })
+      )
+    ).toBe("lead:lead-1:stage_entered:2026-03-29T12:00:00.000Z");
+    expect(dailyRules[1]?.buildDedupeKey(makeDailyTaskContext())).toBe("deal:deal-1:daily_close_date_follow_up");
+    expect(
+      dailyRules[2]?.buildDedupeKey(
         makeDailyTaskContext({
           sourceEvent: "cron.daily_task_generation.first_outreach_touchpoint",
           entityId: "contact:contact-1",
@@ -176,7 +190,7 @@ describe("task rule config", () => {
       )
     ).toBe("contact:contact-1:daily_first_outreach_touchpoint");
     expect(
-      dailyRules[2]?.buildDedupeKey(
+      dailyRules[3]?.buildDedupeKey(
         makeDailyTaskContext({
           sourceEvent: "cron.daily_task_generation.cadence_overdue_follow_up",
           entityId: "contact:contact-1",

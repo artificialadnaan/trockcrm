@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const queryMock = vi.fn();
 const evaluateTaskRulesMock = vi.fn();
 const createTenantTaskRulePersistenceMock = vi.fn();
+const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
 vi.mock("../../src/db.js", () => ({
   pool: {
@@ -36,6 +37,7 @@ describe("daily task generation worker", () => {
     queryMock.mockReset();
     evaluateTaskRulesMock.mockReset();
     createTenantTaskRulePersistenceMock.mockReset();
+    consoleErrorSpy.mockClear();
   });
 
   it("routes the remaining direct daily task creation paths through the shared evaluator", async () => {
@@ -110,6 +112,26 @@ describe("daily task generation worker", () => {
         };
       }
 
+      if (sql.includes("FROM office_beta.leads l") && sql.includes("psc.stale_threshold_days")) {
+        return {
+          rows: [
+            {
+              lead_id: "lead-1",
+              lead_name: "Duncanville Opportunity",
+              assigned_rep_id: "user-1",
+              stage_entered_at: "2026-03-15T00:00:00.000Z",
+              stage_name: "Qualified",
+              stale_threshold_days: 10,
+              days_in_stage: 20,
+            },
+          ],
+        };
+      }
+
+      if (sql.includes("FROM office_beta.tasks") && sql.includes("origin_rule = 'stale_lead'")) {
+        return { rows: [], rowCount: 0 };
+      }
+
       if (sql.startsWith("INSERT INTO office_beta.notifications")) {
         return { rows: [{ id: "notification-1" }] };
       }
@@ -171,9 +193,24 @@ describe("daily task generation worker", () => {
       taskPersistence,
       expect.any(Array)
     );
+    expect(evaluateTaskRulesMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sourceEvent: "cron.daily_task_generation.stale_lead",
+        officeId: "office-1",
+        entityId: "lead:lead-1",
+        leadId: "lead-1",
+        leadName: "Duncanville Opportunity",
+        stage: "Qualified",
+        staleAge: 20,
+        taskAssigneeId: "user-1",
+      }),
+      taskPersistence,
+      expect.any(Array)
+    );
     expect(
       queryMock.mock.calls.some(([sql]) => typeof sql === "string" && sql.includes("INSERT INTO office_beta.tasks"))
     ).toBe(false);
+    expect(consoleErrorSpy).not.toHaveBeenCalled();
 
     vi.useRealTimers();
   });
