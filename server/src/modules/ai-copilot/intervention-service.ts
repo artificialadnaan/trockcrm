@@ -161,6 +161,7 @@ function projectQueueItem(input: {
     severity: input.row.severity,
     status: input.row.status as "open" | "snoozed" | "resolved",
     escalated: input.row.escalated,
+    reopenCount: input.row.reopenCount,
     ageDays: typeof ageDaysRaw === "number" ? ageDaysRaw : 0,
     assignedTo: input.row.assignedTo,
     generatedTask: input.task

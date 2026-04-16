@@ -2,7 +2,13 @@ import { AlertTriangle, Clock3, ShieldAlert, UserRoundCheck } from "lucide-react
 import type { InterventionQueueItem } from "@/hooks/use-admin-interventions";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
-export function InterventionSummaryStrip({ items }: { items: InterventionQueueItem[] }) {
+export function InterventionSummaryStrip({
+  items,
+  totalCount,
+}: {
+  items: InterventionQueueItem[];
+  totalCount: number;
+}) {
   const openCount = items.filter((item) => item.status === "open").length;
   const snoozedCount = items.filter((item) => item.status === "snoozed").length;
   const escalatedCount = items.filter((item) => item.escalated).length;
@@ -18,8 +24,8 @@ export function InterventionSummaryStrip({ items }: { items: InterventionQueueIt
           </CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="text-3xl font-black">{openCount}</div>
-          <div className="text-sm text-muted-foreground">Ready for action now</div>
+          <div className="text-3xl font-black">{totalCount}</div>
+          <div className="text-sm text-muted-foreground">Cases in the current queue</div>
         </CardContent>
       </Card>
       <Card>
@@ -31,7 +37,7 @@ export function InterventionSummaryStrip({ items }: { items: InterventionQueueIt
         </CardHeader>
         <CardContent>
           <div className="text-3xl font-black">{snoozedCount}</div>
-          <div className="text-sm text-muted-foreground">Paused until a future date</div>
+          <div className="text-sm text-muted-foreground">Shown on this page</div>
         </CardContent>
       </Card>
       <Card>
@@ -43,7 +49,7 @@ export function InterventionSummaryStrip({ items }: { items: InterventionQueueIt
         </CardHeader>
         <CardContent>
           <div className="text-3xl font-black">{escalatedCount}</div>
-          <div className="text-sm text-muted-foreground">Manager attention required</div>
+          <div className="text-sm text-muted-foreground">Shown on this page</div>
         </CardContent>
       </Card>
       <Card>
@@ -55,7 +61,7 @@ export function InterventionSummaryStrip({ items }: { items: InterventionQueueIt
         </CardHeader>
         <CardContent>
           <div className="text-3xl font-black">{unassignedCount}</div>
-          <div className="text-sm text-muted-foreground">Cases without an owner</div>
+          <div className="text-sm text-muted-foreground">Shown on this page</div>
         </CardContent>
       </Card>
     </div>

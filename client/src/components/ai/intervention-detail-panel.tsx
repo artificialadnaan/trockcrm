@@ -6,8 +6,10 @@ import {
   INTERVENTION_RESOLUTION_OPTIONS,
   assignIntervention,
   escalateIntervention,
+  localDateTimeInputToIso,
   resolveIntervention,
   snoozeIntervention,
+  toLocalDateTimeInput,
   useAdminInterventionDetail,
 } from "@/hooks/use-admin-interventions";
 import { Badge } from "@/components/ui/badge";
@@ -46,7 +48,8 @@ export function InterventionDetailPanel(props: {
 
   useEffect(() => {
     setAssignedTo(detail?.case.assignedTo ?? "");
-    setSnoozedUntil(detail?.case.snoozedUntil ? detail.case.snoozedUntil.slice(0, 16) : "");
+    setSnoozedUntil(toLocalDateTimeInput(detail?.case.snoozedUntil ?? null));
+    setResolutionReason("task_completed");
     setNotes("");
   }, [detail?.case.assignedTo, detail?.case.id, detail?.case.snoozedUntil]);
 

@@ -6,6 +6,7 @@ export interface InterventionQueueItem {
   severity: string;
   status: "open" | "snoozed" | "resolved";
   escalated: boolean;
+  reopenCount: number;
   ageDays: number;
   assignedTo: string | null;
   generatedTask: {

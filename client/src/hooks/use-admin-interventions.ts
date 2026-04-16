@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../lib/api";
 
 export type InterventionStatusFilter = "all" | "open" | "snoozed" | "resolved";
@@ -23,6 +23,7 @@ export interface InterventionQueueItem {
   severity: string;
   status: "open" | "snoozed" | "resolved";
   escalated: boolean;
+  reopenCount: number;
   ageDays: number;
   assignedTo: string | null;
   generatedTask: {
@@ -116,6 +117,47 @@ export function buildAdminInterventionQuery(input: {
   return query ? `?${query}` : "";
 }
 
+export type InterventionWorkspaceView =
+  | "open"
+  | "all"
+  | "escalated"
+  | "unassigned"
+  | "aging"
+  | "repeat"
+  | "generated-task-pending";
+
+export function buildInterventionWorkspacePath(input: {
+  view?: InterventionWorkspaceView;
+  clusterKey?: string | null;
+}) {
+  const params = new URLSearchParams();
+
+  if (input.view && input.view !== "open") params.set("view", input.view);
+  if (input.clusterKey) params.set("clusterKey", input.clusterKey);
+
+  const query = params.toString();
+  return query ? `/admin/interventions?${query}` : "/admin/interventions";
+}
+
+export function toLocalDateTimeInput(value: string | null) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  const hours = String(date.getHours()).padStart(2, "0");
+  const minutes = String(date.getMinutes()).padStart(2, "0");
+  return `${year}-${month}-${day}T${hours}:${minutes}`;
+}
+
+export function localDateTimeInputToIso(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) throw new Error("Invalid date/time");
+  return date.toISOString();
+}
+
 export function useAdminInterventions(input: {
   page?: number;
   pageSize?: number;
@@ -125,18 +167,22 @@ export function useAdminInterventions(input: {
   const [data, setData] = useState<InterventionQueueResult | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const requestVersionRef = useRef(0);
 
   const fetchData = useCallback(async () => {
+    const requestVersion = ++requestVersionRef.current;
     setLoading(true);
     setError(null);
     try {
       const query = buildAdminInterventionQuery({ page, pageSize, status });
       const response = await api<InterventionQueueResult>(`/ai/ops/interventions${query}`);
+      if (requestVersion !== requestVersionRef.current) return;
       setData(response);
     } catch (err: unknown) {
+      if (requestVersion !== requestVersionRef.current) return;
       setError(err instanceof Error ? err.message : "Failed to load intervention queue");
     } finally {
-      setLoading(false);
+      if (requestVersion === requestVersionRef.current) setLoading(false);
     }
   }, [page, pageSize, status]);
 
@@ -156,24 +202,29 @@ export function useAdminInterventionDetail(caseId: string | null) {
   const [detail, setDetail] = useState<InterventionCaseDetail | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const requestVersionRef = useRef(0);
 
   const fetchData = useCallback(async () => {
     if (!caseId) {
+      requestVersionRef.current += 1;
       setDetail(null);
       setLoading(false);
       setError(null);
       return;
     }
 
+    const requestVersion = ++requestVersionRef.current;
     setLoading(true);
     setError(null);
     try {
       const response = await api<InterventionCaseDetail>(`/ai/ops/interventions/${caseId}`);
+      if (requestVersion !== requestVersionRef.current) return;
       setDetail(response);
     } catch (err: unknown) {
+      if (requestVersion !== requestVersionRef.current) return;
       setError(err instanceof Error ? err.message : "Failed to load intervention detail");
     } finally {
-      setLoading(false);
+      if (requestVersion === requestVersionRef.current) setLoading(false);
     }
   }, [caseId]);
 
@@ -213,7 +264,7 @@ export async function batchSnoozeInterventions(input: {
     method: "POST",
     json: {
       caseIds: input.caseIds,
-      snoozedUntil: input.snoozedUntil,
+      snoozedUntil: localDateTimeInputToIso(input.snoozedUntil),
       notes: input.notes ?? null,
     },
   });
@@ -261,7 +312,7 @@ export async function snoozeIntervention(caseId: string, input: { snoozedUntil: 
   return api<InterventionMutationResult>(`/ai/ops/interventions/${caseId}/snooze`, {
     method: "POST",
     json: {
-      snoozedUntil: input.snoozedUntil,
+      snoozedUntil: localDateTimeInputToIso(input.snoozedUntil),
       notes: input.notes ?? null,
     },
   });
