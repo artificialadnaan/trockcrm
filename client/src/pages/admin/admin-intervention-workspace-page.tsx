@@ -110,17 +110,21 @@ export function AdminInterventionWorkspacePage() {
     }
 
     setBatchWorking(true);
+    let updatedCount = 0;
     try {
       const result = await work();
+      updatedCount = result.updatedCount;
       const summary = summarizeInterventionMutationResult(result);
       toast[summary.tone](summary.message);
-      if (result.updatedCount > 0) clearSelection();
+      if (updatedCount > 0) clearSelection();
       return result;
     } catch (err: unknown) {
       toast.error(err instanceof Error ? err.message : "Failed to update intervention queue");
       return null;
     } finally {
-      setDetailRefreshToken((current) => current + 1);
+      if (updatedCount > 0) {
+        setDetailRefreshToken((current) => current + 1);
+      }
       await refetch();
       setBatchWorking(false);
     }
