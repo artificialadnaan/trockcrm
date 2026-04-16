@@ -8,6 +8,7 @@ import {
 import { DateRangeToggle } from "@/components/dashboard/date-range-toggle";
 import { StatCard } from "@/components/dashboard/stat-card";
 import { StaleDealList } from "@/components/dashboard/stale-deal-list";
+import { StaleLeadList } from "@/components/dashboard/stale-lead-list";
 import { PipelineBarChart } from "@/components/charts/pipeline-bar-chart";
 import { WinRateTrendChart } from "@/components/charts/win-rate-trend-chart";
 import { formatCurrency } from "@/components/charts/chart-colors";
@@ -141,6 +142,9 @@ export function DirectorRepDetail() {
 
       {/* Stale Deals */}
       <StaleDealList deals={data.staleDeals} />
+
+      {/* Stale Leads */}
+      <StaleLeadList leads={data.staleLeads} dateRange={dateRange} />
     </div>
   );
 }

@@ -3,6 +3,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Link } from "react-router-dom";
 import { useNavigate } from "react-router-dom";
+import { DealCopilotPanel } from "@/components/ai/deal-copilot-panel";
 import { DealEstimatesCard } from "./deal-estimates-card";
 import { DealStageBadge } from "./deal-stage-badge";
 import { formatDate, daysInStage, winProbabilityColor, formatCurrency } from "@/lib/deal-utils";
@@ -237,6 +238,8 @@ export function DealOverviewTab({ deal }: DealOverviewTabProps) {
 
       {/* Right Column: Estimates + Quick Info */}
       <div className="space-y-4">
+        <DealCopilotPanel dealId={deal.id} panelId="deal-ai-copilot" />
+
         <DealEstimatesCard deal={deal} />
 
         {/* Procore Link */}

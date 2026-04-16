@@ -10,6 +10,13 @@ import { runColdLeadWarming } from "./cold-lead-warming.js";
 import { runBidDeadlineCountdown } from "./bid-deadline.js";
 import { handleProcoreSyncJob, handleProcoreWebhookJob, runProcoreSync } from "./procore-sync.js";
 import { handleTaskCompletedEvent } from "./task-completed.js";
+import { runAiIndexDocument } from "./ai-index-document.js";
+import { runAiBackfillDocuments } from "./ai-backfill-documents.js";
+import { runAiRefreshCopilot } from "./ai-refresh-copilot.js";
+import { runAiGenerateDealCopilot } from "./ai-generate-deal-copilot.js";
+import { runAiDisconnectDigest } from "./ai-disconnect-digest.js";
+import { runAiDisconnectEscalationScan } from "./ai-disconnect-escalation.js";
+import { runAiDisconnectAdminTaskGeneration } from "./ai-disconnect-admin-tasks.js";
 
 const SERVER_EVALUATOR_MODULE = "../../../server/src/modules/tasks/rules/evaluator.js" as string;
 const SERVER_TASK_RULES_MODULE = "../../../server/src/modules/tasks/rules/config.js" as string;
@@ -108,6 +115,34 @@ export function registerAllJobs() {
   // Email sync (triggered via job_queue or cron)
   registerJobHandler("email_sync", async () => {
     await runEmailSync();
+  });
+
+  registerJobHandler("ai_index_document", async (payload, officeId) => {
+    await runAiIndexDocument(payload, officeId);
+  });
+
+  registerJobHandler("ai_backfill_documents", async (payload, officeId) => {
+    await runAiBackfillDocuments(payload, officeId);
+  });
+
+  registerJobHandler("ai_refresh_copilot", async (payload, officeId) => {
+    await runAiRefreshCopilot(payload, officeId);
+  });
+
+  registerJobHandler("ai_generate_deal_copilot", async (payload, officeId) => {
+    await runAiGenerateDealCopilot(payload, officeId);
+  });
+
+  registerJobHandler("ai_disconnect_digest", async () => {
+    await runAiDisconnectDigest();
+  });
+
+  registerJobHandler("ai_disconnect_escalation_scan", async () => {
+    await runAiDisconnectEscalationScan();
+  });
+
+  registerJobHandler("ai_disconnect_admin_tasks", async () => {
+    await runAiDisconnectAdminTaskGeneration();
   });
 
   // Daily task generation (triggered via job_queue or cron)

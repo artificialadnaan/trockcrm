@@ -19,6 +19,57 @@ export interface SearchResponse {
   query: string;
 }
 
+export interface AiSearchEvidence {
+  id: string;
+  sourceType: string;
+  sourceId: string;
+  dealId: string | null;
+  entityType: "deal" | "contact" | "file" | "crm_text";
+  entityLabel: string | null;
+  title: string;
+  snippet: string;
+  deepLink: string;
+  interactionScore?: number;
+}
+
+export interface AiSearchEntityAnchor {
+  entityType: "deal" | "contact" | "file";
+  id: string;
+  label: string;
+  deepLink: string;
+  interactionScore?: number;
+}
+
+export interface AiSearchRecommendedAction {
+  actionType:
+    | "open_best_match"
+    | "review_deal_emails"
+    | "open_contact"
+    | "open_file_context"
+    | "open_deal_context"
+    | "open_deal_copilot"
+    | "refresh_deal_copilot";
+  label: string;
+  rationale: string;
+  deepLink: string;
+  executionMode: "navigate" | "api_then_navigate";
+  apiEndpoint?: string;
+  apiMethod?: "POST";
+  successMessage?: string;
+  interactionScore?: number;
+}
+
+export interface AiSearchResponse {
+  queryId: string;
+  query: string;
+  intent: "deal_lookup" | "contact_lookup" | "file_lookup" | "account_research" | "activity_lookup" | "general_search";
+  summary: string;
+  structured: SearchResponse;
+  topEntities: AiSearchEntityAnchor[];
+  recommendedActions: AiSearchRecommendedAction[];
+  evidence: AiSearchEvidence[];
+}
+
 const RECENT_SEARCHES_KEY = "trock_crm_recent_searches";
 const MAX_RECENT = 8;
 const DEBOUNCE_MS = 300;
@@ -88,4 +139,75 @@ export function useSearch() {
   }, [query, search]);
 
   return { query, setQuery, results, loading, error };
+}
+
+export function useAiSearch() {
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<AiSearchResponse | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const search = useCallback(async (q: string) => {
+    if (q.trim().length < 2) {
+      setResults(null);
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await api<AiSearchResponse>(`/search/ai?q=${encodeURIComponent(q.trim())}`);
+      setResults(data);
+    } catch {
+      setError("AI search failed");
+      setResults(null);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => {
+      search(query);
+    }, DEBOUNCE_MS);
+
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+    };
+  }, [query, search]);
+
+  return { query, setQuery, results, loading, error };
+}
+
+export async function trackAiSearchInteraction(input: {
+  queryId: string;
+  interactionType: "search_impression" | "recommended_action_click" | "recommended_action_executed" | "top_entity_click" | "evidence_click";
+  targetValue: string;
+  deepLink: string;
+  executionMode?: "navigate" | "api_then_navigate";
+  apiEndpoint?: string;
+  queryContext?: {
+    query: string;
+    intent: AiSearchResponse["intent"];
+    structuredTotal: number;
+    topEntityTypes: string[];
+    recommendedActionTypes: string[];
+    hasEvidence: boolean;
+  };
+}) {
+  return api<{ interaction: { id: string } }>("/search/ai/interaction", {
+    method: "POST",
+    json: input,
+  });
+}
+
+export async function executeAiSearchWorkflowAction(action: AiSearchRecommendedAction) {
+  if (action.executionMode !== "api_then_navigate" || !action.apiEndpoint) {
+    return null;
+  }
+
+  return api(action.apiEndpoint, {
+    method: action.apiMethod ?? "POST",
+  });
 }

@@ -16,6 +16,7 @@ vi.mock("../../../src/db.js", () => ({
 const { AppError } = await import("../../../src/middleware/error-handler.ts");
 const {
   completeTask,
+  dismissTask,
   transitionTaskStatus,
   isTaskIncludedInActiveBuckets,
   getTaskCounts,
@@ -26,6 +27,7 @@ type TaskState = Record<string, any>;
 function createTransitionDb(initialTask: TaskState, rows: TaskState[] = []) {
   let currentTask = { ...initialTask };
   let lastUpdate: Record<string, any> | null = null;
+  const insertedRows: Array<Record<string, any>> = [];
 
   const selectChain: any = {
     from: vi.fn(),
@@ -51,14 +53,25 @@ function createTransitionDb(initialTask: TaskState, rows: TaskState[] = []) {
     }),
   };
 
+  const insertChain: any = {
+    values: vi.fn((values: Record<string, any>) => ({
+      onConflictDoUpdate: vi.fn(({ set }: { set: Record<string, any> }) => {
+        insertedRows.push({ ...values, ...set });
+        return Promise.resolve();
+      }),
+    })),
+  };
+
   return {
     db: {
       select: vi.fn(() => selectChain),
       update: vi.fn(() => updateChain),
+      insert: vi.fn(() => insertChain),
       execute: vi.fn(async () => ({ rows })),
     },
     getCurrentTask: () => currentTask,
     getLastUpdate: () => lastUpdate,
+    getInsertedRows: () => insertedRows,
   };
 }
 
@@ -372,6 +385,50 @@ describe("Task Service", () => {
       expect(result.waitingOn).toBeNull();
       expect(result.blockedBy).toBeNull();
     });
+
+    it("writes task resolution state when transitioning a rule-backed task to dismissed", async () => {
+      vi.useFakeTimers();
+      const now = new Date("2026-04-15T13:00:00.000Z");
+      vi.setSystemTime(now);
+
+      try {
+        const { db, getInsertedRows } = createTransitionDb(
+          makeTask({
+            officeId: "office-1",
+            originRule: "stale_lead",
+            dedupeKey: "lead:lead-123:stage_entered:2026-03-29T12:00:00.000Z",
+            reasonCode: "stale_lead",
+            entitySnapshot: { leadId: "lead-123" },
+          })
+        );
+
+        const result = await transitionTaskStatus(
+          db as any,
+          "task-1",
+          { nextStatus: "dismissed" },
+          "director",
+          "user-1"
+        );
+
+        expect(result.status).toBe("dismissed");
+        expect(result.completedAt).toEqual(now);
+        expect(getInsertedRows()).toContainEqual(
+          expect.objectContaining({
+            officeId: "office-1",
+            taskId: "task-1",
+            originRule: "stale_lead",
+            dedupeKey: "lead:lead-123:stage_entered:2026-03-29T12:00:00.000Z",
+            resolutionStatus: "dismissed",
+            resolutionReason: "stale_lead",
+            resolvedAt: now,
+            suppressedUntil: new Date("2026-05-15T13:00:00.000Z"),
+            entitySnapshot: { leadId: "lead-123" },
+          })
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 
   describe("Section Filtering Logic", () => {
@@ -589,6 +646,38 @@ describe("Task Service", () => {
       ).toBe(false);
       expect(isTaskIncludedInActiveBuckets(makeTask({ status: "waiting_on" }), now)).toBe(true);
       expect(isTaskIncludedInActiveBuckets(makeTask({ status: "blocked" }), now)).toBe(true);
+    });
+
+    it("writes dismissal suppression when dismissing a rule-backed task directly", async () => {
+      vi.useFakeTimers();
+      const now = new Date("2026-04-15T13:00:00.000Z");
+      vi.setSystemTime(now);
+
+      try {
+        const { db, getInsertedRows } = createTransitionDb(
+          makeTask({
+            officeId: "office-1",
+            originRule: "stale_lead",
+            dedupeKey: "lead:lead-123:stage_entered:2026-03-29T12:00:00.000Z",
+            reasonCode: "stale_lead",
+            entitySnapshot: { leadId: "lead-123" },
+          })
+        );
+
+        const result = await dismissTask(db as any, "task-1", "director", "user-1");
+
+        expect(result.status).toBe("dismissed");
+        expect(result.completedAt).toEqual(now);
+        expect(getInsertedRows()).toHaveLength(1);
+        expect(getInsertedRows()[0]).toEqual(
+          expect.objectContaining({
+            resolutionStatus: "dismissed",
+            suppressedUntil: new Date("2026-05-15T13:00:00.000Z"),
+          })
+        );
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 });

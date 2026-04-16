@@ -15,6 +15,9 @@ export type DealStage = (typeof DEAL_STAGES)[number];
 export const WORKFLOW_ROUTES = ["estimating", "service"] as const;
 export type WorkflowRoute = (typeof WORKFLOW_ROUTES)[number];
 
+export const WORKFLOW_FAMILIES = ["lead", "standard_deal", "service_deal"] as const;
+export type WorkflowFamily = (typeof WORKFLOW_FAMILIES)[number];
+
 export const DEAL_SCOPING_INTAKE_STATUSES = ["draft", "ready", "activated"] as const;
 export type DealScopingIntakeStatus = (typeof DEAL_SCOPING_INTAKE_STATUSES)[number];
 
@@ -30,6 +33,9 @@ export const CONTACT_CATEGORIES = [
   "other",
 ] as const;
 export type ContactCategory = (typeof CONTACT_CATEGORIES)[number];
+
+export const LEAD_STATUSES = ["open", "converted", "disqualified"] as const;
+export type LeadStatus = (typeof LEAD_STATUSES)[number];
 
 export const ACTIVITY_TYPES = ["call", "note", "meeting", "email", "task_completed"] as const;
 export type ActivityType = (typeof ACTIVITY_TYPES)[number];

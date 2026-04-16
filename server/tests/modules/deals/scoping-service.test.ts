@@ -81,7 +81,11 @@ interface FakeUserRow {
 interface FakeFileRow {
   id: string;
   dealId: string | null;
+  category?: string | null;
+  r2Key?: string | null;
+  r2Bucket?: string | null;
   intakeRequirementKey: string | null;
+  intakeSource?: string | null;
   isActive: boolean;
 }
 
@@ -469,13 +473,21 @@ describe("Scoping Service", () => {
       {
         id: "file-1",
         dealId: "deal-1",
+        category: "other",
+        r2Key: "office_a/deals/D-1/scope_docs/file-1.pdf",
+        r2Bucket: "trock-crm-files",
         intakeRequirementKey: "scope_docs",
+        intakeSource: "scoping_intake",
         isActive: true,
       },
       {
         id: "file-2",
         dealId: "deal-1",
+        category: "photo",
+        r2Key: "office_a/deals/D-1/site_photos/file-2.jpg",
+        r2Bucket: "trock-crm-files",
         intakeRequirementKey: "site_photos",
+        intakeSource: "scoping_intake",
         isActive: true,
       }
     );

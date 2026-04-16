@@ -134,6 +134,20 @@ router.post("/", async (req, res, next) => {
       });
     }
 
+    if (task.dealId) {
+      await req.tenantDb!.insert(jobQueue).values({
+        jobType: "ai_refresh_copilot",
+        payload: {
+          dealId: task.dealId,
+          reason: "task_created",
+          taskId: task.id,
+        },
+        officeId: req.user!.activeOfficeId ?? req.user!.officeId,
+        status: "pending",
+        runAfter: new Date(),
+      });
+    }
+
     await req.commitTransaction!();
 
     // Best-effort local emit for SSE push (already persisted via outbox above)
@@ -253,6 +267,20 @@ router.post("/:id/complete", async (req, res, next) => {
       status: "pending",
       runAfter: new Date(),
     });
+
+    if (task.dealId) {
+      await req.tenantDb!.insert(jobQueue).values({
+        jobType: "ai_refresh_copilot",
+        payload: {
+          dealId: task.dealId,
+          reason: "task_completed",
+          taskId: task.id,
+        },
+        officeId: req.user!.activeOfficeId ?? req.user!.officeId,
+        status: "pending",
+        runAfter: new Date(),
+      });
+    }
 
     await req.commitTransaction!();
 

@@ -455,9 +455,20 @@ export async function sendEmail(
     .returning();
 
   // Create activity record for the unified feed
+  const activitySourceEntityType =
+    input.dealId ? "deal" : outboundAssignment.assignedEntityType === "company" ? "company" : "contact";
+  const activitySourceEntityId =
+    input.dealId ?? outboundAssignment.assignedEntityId ?? input.contactId ?? null;
+  if (!activitySourceEntityId) {
+    throw new AppError(400, "Outbound email must be associated to a deal, company, or contact.");
+  }
   await tenantDb.insert(activities).values({
     type: "email",
-    userId,
+    responsibleUserId: userId,
+    performedByUserId: userId,
+    sourceEntityType: activitySourceEntityType,
+    sourceEntityId: activitySourceEntityId,
+    companyId: outboundAssignment.assignedEntityType === "company" ? outboundAssignment.assignedEntityId : null,
     dealId: input.dealId ?? null,
     contactId: input.contactId ?? null,
     emailId: emailRecord.id,
@@ -523,9 +534,20 @@ async function createMockSentEmail(
     })
     .returning();
 
+  const activitySourceEntityType =
+    input.dealId ? "deal" : outboundAssignment.assignedEntityType === "company" ? "company" : "contact";
+  const activitySourceEntityId =
+    input.dealId ?? outboundAssignment.assignedEntityId ?? input.contactId ?? null;
+  if (!activitySourceEntityId) {
+    throw new AppError(400, "Outbound email must be associated to a deal, company, or contact.");
+  }
   await tenantDb.insert(activities).values({
     type: "email",
-    userId,
+    responsibleUserId: userId,
+    performedByUserId: userId,
+    sourceEntityType: activitySourceEntityType,
+    sourceEntityId: activitySourceEntityId,
+    companyId: outboundAssignment.assignedEntityType === "company" ? outboundAssignment.assignedEntityId : null,
     dealId: input.dealId ?? null,
     contactId: input.contactId ?? null,
     emailId: emailRecord.id,

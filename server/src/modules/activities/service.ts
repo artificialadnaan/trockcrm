@@ -1,14 +1,21 @@
-import { eq, and, desc, sql } from "drizzle-orm";
+import { and, desc, eq, or, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { activities, deals } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
+type ActivitySourceEntityType = "company" | "property" | "lead" | "deal" | "contact";
 
 export interface CreateActivityInput {
   type: string;
-  userId: string;
+  responsibleUserId: string;
+  performedByUserId?: string;
+  sourceEntityType: ActivitySourceEntityType;
+  sourceEntityId: string;
+  companyId?: string;
+  propertyId?: string;
+  leadId?: string;
   dealId?: string;
   contactId?: string;
   emailId?: string;
@@ -20,12 +27,50 @@ export interface CreateActivityInput {
 }
 
 export interface ActivityFilters {
+  companyId?: string;
+  propertyId?: string;
+  leadId?: string;
   dealId?: string;
   contactId?: string;
+  responsibleUserId?: string;
   userId?: string;
+  sourceEntityType?: ActivitySourceEntityType;
+  sourceEntityId?: string;
   type?: string;
   page?: number;
   limit?: number;
+}
+
+const SOURCE_ENTITY_LINK_KEY: Record<ActivitySourceEntityType, keyof Pick<
+  CreateActivityInput,
+  "companyId" | "propertyId" | "leadId" | "dealId" | "contactId"
+>> = {
+  company: "companyId",
+  property: "propertyId",
+  lead: "leadId",
+  deal: "dealId",
+  contact: "contactId",
+};
+
+function normalizeLinkedEntities(input: CreateActivityInput) {
+  const linkedEntities = {
+    companyId: input.companyId ?? null,
+    propertyId: input.propertyId ?? null,
+    leadId: input.leadId ?? null,
+    dealId: input.dealId ?? null,
+    contactId: input.contactId ?? null,
+  };
+
+  const sourceLinkKey = SOURCE_ENTITY_LINK_KEY[input.sourceEntityType];
+  const existingSourceLink = linkedEntities[sourceLinkKey];
+
+  if (existingSourceLink && existingSourceLink !== input.sourceEntityId) {
+    throw new AppError(400, `${sourceLinkKey} must match sourceEntityId`);
+  }
+
+  linkedEntities[sourceLinkKey] = input.sourceEntityId;
+
+  return linkedEntities;
 }
 
 /**
@@ -40,10 +85,35 @@ export async function getActivities(
   const offset = (page - 1) * limit;
 
   const conditions: any[] = [];
+  const responsibleUserId = filters.responsibleUserId ?? filters.userId;
 
-  if (filters.dealId) conditions.push(eq(activities.dealId, filters.dealId));
+  let dealCondition = filters.dealId ? eq(activities.dealId, filters.dealId) : undefined;
+
+  if (filters.dealId) {
+    const [deal] = await tenantDb
+      .select({ sourceLeadId: deals.sourceLeadId })
+      .from(deals)
+      .where(eq(deals.id, filters.dealId))
+      .limit(1);
+
+    if (deal?.sourceLeadId) {
+      dealCondition = or(
+        eq(activities.dealId, filters.dealId),
+        eq(activities.leadId, deal.sourceLeadId)
+      );
+    }
+  }
+
+  if (filters.companyId) conditions.push(eq(activities.companyId, filters.companyId));
+  if (filters.propertyId) conditions.push(eq(activities.propertyId, filters.propertyId));
+  if (filters.leadId) conditions.push(eq(activities.leadId, filters.leadId));
+  if (dealCondition) conditions.push(dealCondition);
   if (filters.contactId) conditions.push(eq(activities.contactId, filters.contactId));
-  if (filters.userId) conditions.push(eq(activities.userId, filters.userId));
+  if (responsibleUserId) conditions.push(eq(activities.responsibleUserId, responsibleUserId));
+  if (filters.sourceEntityType) {
+    conditions.push(eq(activities.sourceEntityType, filters.sourceEntityType as any));
+  }
+  if (filters.sourceEntityId) conditions.push(eq(activities.sourceEntityId, filters.sourceEntityId));
   if (filters.type) conditions.push(eq(activities.type, filters.type as any));
 
   const where = conditions.length > 0 ? and(...conditions) : undefined;
@@ -54,7 +124,7 @@ export async function getActivities(
       .select()
       .from(activities)
       .where(where)
-      .orderBy(desc(activities.occurredAt))
+      .orderBy(desc(activities.occurredAt), desc(activities.createdAt))
       .limit(limit)
       .offset(offset),
   ]);
@@ -81,15 +151,25 @@ export async function createActivity(
   input: CreateActivityInput
 ) {
   if (!input.type) throw new AppError(400, "Activity type is required");
-  if (!input.userId) throw new AppError(400, "userId is required");
+  if (!input.responsibleUserId) throw new AppError(400, "responsibleUserId is required");
+  if (!input.sourceEntityType) throw new AppError(400, "sourceEntityType is required");
+  if (!input.sourceEntityId) throw new AppError(400, "sourceEntityId is required");
+
+  const linkedEntities = normalizeLinkedEntities(input);
 
   const result = await tenantDb
     .insert(activities)
     .values({
       type: input.type as any,
-      userId: input.userId,
-      dealId: input.dealId ?? null,
-      contactId: input.contactId ?? null,
+      responsibleUserId: input.responsibleUserId,
+      performedByUserId: input.performedByUserId ?? null,
+      sourceEntityType: input.sourceEntityType,
+      sourceEntityId: input.sourceEntityId,
+      companyId: linkedEntities.companyId,
+      propertyId: linkedEntities.propertyId,
+      leadId: linkedEntities.leadId,
+      dealId: linkedEntities.dealId,
+      contactId: linkedEntities.contactId,
       emailId: input.emailId ?? null,
       subject: input.subject ?? null,
       body: input.body ?? null,
@@ -102,11 +182,11 @@ export async function createActivity(
   const activity = result[0];
 
   // Update deal.lastActivityAt if deal is associated
-  if (input.dealId) {
+  if (linkedEntities.dealId) {
     await tenantDb
       .update(deals)
       .set({ lastActivityAt: new Date() })
-      .where(eq(deals.id, input.dealId));
+      .where(eq(deals.id, linkedEntities.dealId));
   }
 
   return activity;

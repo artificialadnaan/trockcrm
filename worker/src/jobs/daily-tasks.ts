@@ -3,6 +3,7 @@ import { pool } from "../db.js";
 const SERVER_EVALUATOR_MODULE = "../../../server/src/modules/tasks/rules/evaluator.js" as string;
 const SERVER_TASK_RULES_MODULE = "../../../server/src/modules/tasks/rules/config.js" as string;
 const SERVER_TASK_PERSISTENCE_MODULE = "../../../server/src/modules/tasks/rules/persistence.js" as string;
+const SERVER_STALE_LEAD_KEY_MODULE = "../../../server/src/modules/tasks/rules/stale-lead-key.js" as string;
 
 /**
  * Daily task list generation job.
@@ -12,6 +13,7 @@ const SERVER_TASK_PERSISTENCE_MODULE = "../../../server/src/modules/tasks/rules/
  * 2. Create follow-up tasks for deals with upcoming expected_close_date (7 days out)
  * 3. Create touchpoint tasks for contacts with first_outreach_completed = false (older than 3 days)
  * 4. Create follow-up tasks for contacts overdue on their stage's touchpoint_cadence_days
+ * 5. Create follow-up tasks for leads stuck past their configured stage stale threshold
  *
  * Stale deal tasks and inbound email tasks are already created by their respective
  * workers (stale-deals.ts and email-sync.ts). This job handles the remaining
@@ -29,6 +31,82 @@ async function loadTaskRuleDependencies() {
 
 function countGeneratedTasks(outcomes: Array<{ action: string }>) {
   return outcomes.filter((outcome) => outcome.action === "created").length;
+}
+
+type Queryable = {
+  query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<{ rows: T[]; rowCount?: number | null }>;
+};
+
+export async function dismissResolvedStaleLeadTasks(
+  client: Queryable,
+  schemaName: string,
+  officeId: string,
+  activeStaleLeadDedupeKeys: string[],
+  resolvedAt: Date = new Date()
+): Promise<number> {
+  const activeTaskStatusesSql = ["pending", "scheduled", "in_progress", "waiting_on", "blocked"]
+    .map((status) => `'${status}'`)
+    .join(", ");
+
+  const dismissalWhereClause = activeStaleLeadDedupeKeys.length > 0
+    ? `AND dedupe_key <> ALL($2::text[])`
+    : "";
+  const dismissalParams: unknown[] = activeStaleLeadDedupeKeys.length > 0
+    ? [resolvedAt, activeStaleLeadDedupeKeys]
+    : [resolvedAt];
+
+  const dismissedTasks = await client.query<{
+    id: string;
+    origin_rule: string;
+    dedupe_key: string;
+    reason_code: string | null;
+    entity_snapshot: Record<string, unknown> | null;
+  }>(
+    `UPDATE ${schemaName}.tasks
+     SET status = 'dismissed',
+         completed_at = $1,
+         is_overdue = false,
+         waiting_on = NULL,
+         blocked_by = NULL,
+         updated_at = NOW()
+     WHERE origin_rule = 'stale_lead'
+       AND status IN (${activeTaskStatusesSql})
+       ${dismissalWhereClause}
+     RETURNING id, origin_rule, dedupe_key, reason_code, entity_snapshot`,
+    dismissalParams
+  );
+
+  if ((dismissedTasks.rows?.length ?? 0) === 0) {
+    return dismissedTasks.rowCount ?? 0;
+  }
+
+  for (const task of dismissedTasks.rows) {
+    await client.query(
+      `INSERT INTO ${schemaName}.task_resolution_state
+         (office_id, task_id, origin_rule, dedupe_key, resolution_status, resolution_reason, resolved_at, suppressed_until, entity_snapshot)
+       VALUES ($1, $2, $3, $4, 'dismissed', $5, $6, NULL, $7)
+       ON CONFLICT (origin_rule, dedupe_key) DO UPDATE
+       SET office_id = EXCLUDED.office_id,
+           task_id = EXCLUDED.task_id,
+           resolution_status = EXCLUDED.resolution_status,
+           resolution_reason = EXCLUDED.resolution_reason,
+           resolved_at = EXCLUDED.resolved_at,
+           suppressed_until = EXCLUDED.suppressed_until,
+           entity_snapshot = EXCLUDED.entity_snapshot,
+           updated_at = NOW()`,
+      [
+        officeId,
+        task.id,
+        task.origin_rule,
+        task.dedupe_key,
+        "lead_no_longer_stale",
+        resolvedAt,
+        task.entity_snapshot ?? null,
+      ]
+    );
+  }
+
+  return dismissedTasks.rowCount ?? dismissedTasks.rows.length;
 }
 
 export async function runDailyTaskGeneration(): Promise<void> {
@@ -246,6 +324,54 @@ export async function runDailyTaskGeneration(): Promise<void> {
               lastContactedAt: row.last_contacted_at,
               touchpointCadenceDays: row.touchpoint_cadence_days,
               dueAt: new Date(),
+            },
+            taskPersistence,
+            TASK_RULES
+          );
+          officeTasksCreated += countGeneratedTasks(outcomes);
+        }
+
+        const staleLeads = await client.query(
+          `SELECT l.id AS lead_id,
+                  l.name AS lead_name,
+                  l.assigned_rep_id,
+                  l.stage_entered_at,
+                  psc.name AS stage_name,
+                  psc.stale_threshold_days,
+                  EXTRACT(DAY FROM NOW() - l.stage_entered_at)::int AS days_in_stage
+           FROM ${schemaName}.leads l
+           JOIN public.pipeline_stage_config psc ON psc.id = l.stage_id
+           WHERE l.is_active = true
+             AND l.status = 'open'
+             AND psc.workflow_family = 'lead'
+             AND psc.is_terminal = false
+             AND psc.stale_threshold_days IS NOT NULL
+             AND l.stage_entered_at < NOW() - (psc.stale_threshold_days || ' days')::interval`
+        );
+        const { buildStaleLeadDedupeKey } = (await import(SERVER_STALE_LEAD_KEY_MODULE)) as any;
+
+        await dismissResolvedStaleLeadTasks(
+          client,
+          schemaName,
+          office.id,
+          staleLeads.rows
+            .map((lead) => buildStaleLeadDedupeKey(lead.lead_id, lead.stage_entered_at))
+            .filter((dedupeKey): dedupeKey is string => typeof dedupeKey === "string" && dedupeKey.length > 0)
+        );
+
+        for (const lead of staleLeads.rows) {
+          const outcomes = await evaluateTaskRules(
+            {
+              now: new Date(),
+              officeId: office.id,
+              entityId: `lead:${lead.lead_id}`,
+              sourceEvent: "cron.daily_task_generation.stale_lead",
+              leadId: lead.lead_id,
+              leadName: lead.lead_name,
+              stageEnteredAt: lead.stage_entered_at,
+              stage: lead.stage_name,
+              staleAge: lead.days_in_stage,
+              taskAssigneeId: lead.assigned_rep_id,
             },
             taskPersistence,
             TASK_RULES

@@ -1,5 +1,5 @@
-import { useState, useCallback } from "react";
-import { useParams, useNavigate } from "react-router-dom";
+import { useState, useCallback, useEffect } from "react";
+import { useParams, useNavigate, useSearchParams } from "react-router-dom";
 import {
   ArrowLeft,
   Edit,
@@ -46,6 +46,7 @@ type Tab = "overview" | "lead" | "scoping" | "files" | "email" | "activity" | "t
 export function DealDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { user } = useAuth();
   const { deal, loading, error, refetch } = useDealDetail(id);
   const { company } = useCompanyDetail(deal?.companyId ?? undefined);
@@ -54,28 +55,7 @@ export function DealDetailPage() {
   const [stageChangeOpen, setStageChangeOpen] = useState(false);
   const [targetStageId, setTargetStageId] = useState<string | null>(null);
   const [teamCount, setTeamCount] = useState<number | null>(null);
-
-  if (loading) {
-    return (
-      <div className="space-y-4">
-        <div className="h-8 w-48 bg-muted animate-pulse rounded" />
-        <div className="h-64 bg-muted animate-pulse rounded-lg" />
-      </div>
-    );
-  }
-
-  if (error || !deal) {
-    return (
-      <div className="text-center py-12">
-        <p className="text-red-600">{error ?? "Deal not found"}</p>
-        <Button variant="outline" className="mt-4" onClick={() => navigate("/deals")}>
-          Back to Deals
-        </Button>
-      </div>
-    );
-  }
-
-  const currentStage = stages.find((s) => s.id === deal.stageId);
+  const currentStage = stages.find((s) => s.id === deal?.stageId);
   const isDirectorOrAdmin = user?.role === "director" || user?.role === "admin";
 
   // Build stage advancement options
@@ -98,6 +78,9 @@ export function DealDetailPage() {
   };
 
   const handleDelete = async () => {
+    if (!deal) {
+      return;
+    }
     if (!window.confirm("Are you sure you want to delete this deal? This action can be undone by an admin.")) {
       return;
     }
@@ -127,6 +110,63 @@ export function DealDetailPage() {
     ...(showPunchList ? [{ key: "punch_list" as Tab, label: "Punch List" }] : []),
     ...(showCloseout ? [{ key: "closeout" as Tab, label: "Close-Out" }] : []),
   ];
+  const availableTabs = tabs.map((tab) => tab.key);
+  const requestedTab = searchParams.get("tab");
+  const requestedFocus = searchParams.get("focus");
+
+  useEffect(() => {
+    const nextTab =
+      requestedTab && availableTabs.includes(requestedTab as Tab)
+        ? (requestedTab as Tab)
+        : "overview";
+    setActiveTab((current) => (current === nextTab ? current : nextTab));
+  }, [availableTabs, requestedTab]);
+
+  useEffect(() => {
+    if (activeTab !== "overview" || requestedFocus !== "copilot") {
+      return;
+    }
+
+    const frame = window.requestAnimationFrame(() => {
+      document.getElementById("deal-ai-copilot")?.scrollIntoView({
+        behavior: "smooth",
+        block: "start",
+      });
+    });
+
+    return () => window.cancelAnimationFrame(frame);
+  }, [activeTab, requestedFocus]);
+
+  if (loading) {
+    return (
+      <div className="space-y-4">
+        <div className="h-8 w-48 bg-muted animate-pulse rounded" />
+        <div className="h-64 bg-muted animate-pulse rounded-lg" />
+      </div>
+    );
+  }
+
+  if (error || !deal) {
+    return (
+      <div className="text-center py-12">
+        <p className="text-red-600">{error ?? "Deal not found"}</p>
+        <Button variant="outline" className="mt-4" onClick={() => navigate("/deals")}>
+          Back to Deals
+        </Button>
+      </div>
+    );
+  }
+  const handleTabSelect = (tab: Tab) => {
+    setActiveTab(tab);
+    const nextParams = new URLSearchParams(searchParams);
+    if (tab === "overview") {
+      nextParams.delete("tab");
+    } else {
+      nextParams.set("tab", tab);
+      nextParams.delete("focus");
+    }
+    setSearchParams(nextParams, { replace: true });
+  };
 
   return (
     <div className="space-y-4">
@@ -269,7 +309,7 @@ export function DealDetailPage() {
                   ? "border-brand-red text-foreground"
                   : "border-transparent text-muted-foreground hover:text-foreground"
               }`}
-              onClick={() => setActiveTab(tab.key)}
+              onClick={() => handleTabSelect(tab.key)}
             >
               {tab.label}
             </button>

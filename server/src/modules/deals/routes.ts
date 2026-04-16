@@ -59,6 +59,7 @@ import {
   evaluateDealScopingReadiness,
   getOrCreateDealScopingIntake,
   linkDealFileToScopingRequirement,
+  routeRevisionToEstimating,
   upsertDealScopingIntake,
 } from "./scoping-service.js";
 
@@ -80,6 +81,33 @@ async function queueDomainEvent(
     status: "pending",
     runAfter: new Date(),
   });
+}
+
+async function queueAiEstimateRefresh(tenantDb: any, officeId: string, dealId: string, reason: string) {
+  await tenantDb.insert(jobQueue).values([
+    {
+      jobType: "ai_index_document",
+      payload: {
+        sourceType: "estimate_snapshot",
+        sourceId: dealId,
+        dealId,
+        reason,
+      },
+      officeId,
+      status: "pending",
+      runAfter: new Date(),
+    },
+    {
+      jobType: "ai_refresh_copilot",
+      payload: {
+        dealId,
+        reason,
+      },
+      officeId,
+      status: "pending",
+      runAfter: new Date(),
+    },
+  ]);
 }
 
 function emitLocalDealEvents(
@@ -353,7 +381,14 @@ function validateDealPayload(body: Record<string, unknown>): void {
 // POST /api/deals — create a new deal
 router.post("/", async (req, res, next) => {
   try {
-    const { name, stageId, assignedRepId, ...rest } = req.body;
+    const {
+      name,
+      stageId,
+      assignedRepId,
+      sourceLeadWriteMode: _sourceLeadWriteMode,
+      migrationMode: _migrationMode,
+      ...rest
+    } = req.body;
     if (!name || !stageId) {
       throw new AppError(400, "Name and stageId are required");
     }
@@ -388,13 +423,24 @@ router.patch("/:id", async (req, res, next) => {
   try {
     const body = { ...req.body };
     validateDealPayload(body);
+    delete body.migrationMode;
 
     // Reps cannot change assignedRepId (reassign deals)
     if (req.user!.role === "rep" && body.assignedRepId !== undefined) {
       delete body.assignedRepId;
     }
 
-    const deal = await updateDeal(
+    const priorDeal =
+      body.proposalStatus === "revision_requested"
+        ? await getDealById(
+            req.tenantDb!,
+            req.params.id,
+            req.user!.role,
+            req.user!.id
+          )
+        : null;
+
+    let deal = await updateDeal(
       req.tenantDb!,
       req.params.id,
       body,
@@ -402,6 +448,20 @@ router.patch("/:id", async (req, res, next) => {
       req.user!.id,
       req.user!.activeOfficeId,
     );
+
+    if (body.proposalStatus === "revision_requested") {
+      const revisionRouting = await routeRevisionToEstimating(
+        req.tenantDb!,
+        req.params.id,
+        req.user!.id,
+        {
+          proposalStatus: "revision_requested",
+          previousEstimatingSubstage: priorDeal?.estimatingSubstage ?? null,
+        }
+      );
+      deal = revisionRouting.deal;
+    }
+
     await req.commitTransaction!();
     res.json({ deal });
   } catch (err) {
@@ -426,6 +486,18 @@ router.post("/:id/stage", async (req, res, next) => {
       lostReasonId,
       lostNotes,
       lostCompetitor,
+    });
+
+    await req.tenantDb!.insert(jobQueue).values({
+      jobType: "ai_refresh_copilot",
+      payload: {
+        dealId: req.params.id,
+        reason: "deal_stage_changed",
+        targetStageId,
+      },
+      officeId: req.user!.activeOfficeId ?? req.user!.officeId,
+      status: "pending",
+      runAfter: new Date(),
     });
 
     await req.commitTransaction!();
@@ -778,6 +850,12 @@ router.post("/:id/estimates/sections", async (req, res, next) => {
     if (!name) throw new AppError(400, "name is required");
 
     const section = await createSection(req.tenantDb!, req.params.id, name, displayOrder);
+    await queueAiEstimateRefresh(
+      req.tenantDb!,
+      req.user!.activeOfficeId ?? req.user!.officeId,
+      req.params.id,
+      "estimate_section_created"
+    );
     await req.commitTransaction!();
     res.status(201).json({ section });
   } catch (err) {
@@ -793,6 +871,12 @@ router.patch("/:id/estimates/sections/:sectionId", async (req, res, next) => {
 
     const { name, displayOrder } = req.body;
     const section = await updateSection(req.tenantDb!, req.params.sectionId, req.params.id, { name, displayOrder });
+    await queueAiEstimateRefresh(
+      req.tenantDb!,
+      req.user!.activeOfficeId ?? req.user!.officeId,
+      req.params.id,
+      "estimate_section_updated"
+    );
     await req.commitTransaction!();
     res.json({ section });
   } catch (err) {
@@ -807,6 +891,12 @@ router.delete("/:id/estimates/sections/:sectionId", async (req, res, next) => {
     if (!deal) throw new AppError(404, "Deal not found");
 
     await deleteSection(req.tenantDb!, req.params.sectionId, req.params.id);
+    await queueAiEstimateRefresh(
+      req.tenantDb!,
+      req.user!.activeOfficeId ?? req.user!.officeId,
+      req.params.id,
+      "estimate_section_deleted"
+    );
     await req.commitTransaction!();
     res.json({ success: true });
   } catch (err) {
@@ -829,6 +919,12 @@ router.post("/:id/estimates/sections/:sectionId/items", async (req, res, next) =
       notes,
       displayOrder,
     });
+    await queueAiEstimateRefresh(
+      req.tenantDb!,
+      req.user!.activeOfficeId ?? req.user!.officeId,
+      req.params.id,
+      "estimate_item_created"
+    );
     await req.commitTransaction!();
     res.status(201).json({ item });
   } catch (err) {
@@ -851,6 +947,12 @@ router.patch("/:id/estimates/items/:itemId", async (req, res, next) => {
       notes,
       displayOrder,
     });
+    await queueAiEstimateRefresh(
+      req.tenantDb!,
+      req.user!.activeOfficeId ?? req.user!.officeId,
+      req.params.id,
+      "estimate_item_updated"
+    );
     await req.commitTransaction!();
     res.json({ item });
   } catch (err) {
@@ -865,6 +967,12 @@ router.delete("/:id/estimates/items/:itemId", async (req, res, next) => {
     if (!deal) throw new AppError(404, "Deal not found");
 
     await deleteLineItem(req.tenantDb!, req.params.itemId, req.params.id);
+    await queueAiEstimateRefresh(
+      req.tenantDb!,
+      req.user!.activeOfficeId ?? req.user!.officeId,
+      req.params.id,
+      "estimate_item_deleted"
+    );
     await req.commitTransaction!();
     res.json({ success: true });
   } catch (err) {

@@ -491,12 +491,18 @@ export async function processInboundMessage(
 
   // Create activity record AFTER deal association so deal_id is included in the INSERT
   // (no separate UPDATE needed)
+  const activitySourceEntityType = association.dealId ? "deal" : "contact";
+  const activitySourceEntityId = association.dealId ?? contactMatch.id;
+  const responsibleUserId = userId;
   await client.query(
     `INSERT INTO ${schemaName}.activities
-     (type, user_id, deal_id, contact_id, email_id, subject, body, occurred_at)
-     VALUES ('email', $1, $2, $3, $4, $5, $6, $7)`,
+     (type, responsible_user_id, performed_by_user_id, source_entity_type, source_entity_id,
+      deal_id, contact_id, email_id, subject, body, occurred_at)
+     VALUES ('email', $1, NULL, $2, $3, $4, $5, $6, $7, $8, $9)`,
     [
-      userId,
+      responsibleUserId,
+      activitySourceEntityType,
+      activitySourceEntityId,
       association.dealId, // may be null if 0 or multiple deals
       contactMatch.id,
       emailId,
@@ -555,6 +561,18 @@ export async function processInboundMessage(
         userId,
       }),
       officeId, // pass actual office so notification handler resolves correct tenant
+    ]
+  );
+
+  await client.query(
+    `INSERT INTO public.job_queue (job_type, payload, office_id, status, run_after)
+     VALUES ('ai_index_document', $1, $2, 'pending', NOW())`,
+    [
+      JSON.stringify({
+        sourceType: "email_message",
+        sourceId: emailId,
+      }),
+      officeId,
     ]
   );
 

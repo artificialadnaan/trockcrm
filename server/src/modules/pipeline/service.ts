@@ -1,33 +1,56 @@
-import { eq, asc } from "drizzle-orm";
+import { and, asc, eq } from "drizzle-orm";
 import {
   pipelineStageConfig,
   lostDealReasons,
   projectTypeConfig,
   regionConfig,
 } from "@trock-crm/shared/schema";
+import type { WorkflowFamily } from "@trock-crm/shared/types";
 import { db } from "../../db.js";
 
-export async function getAllStages() {
+function buildStageWhere(
+  idOrSlug: { id?: string; slug?: string },
+  workflowFamily?: WorkflowFamily
+) {
+  const conditions = [];
+
+  if (idOrSlug.id) {
+    conditions.push(eq(pipelineStageConfig.id, idOrSlug.id));
+  }
+
+  if (idOrSlug.slug) {
+    conditions.push(eq(pipelineStageConfig.slug, idOrSlug.slug));
+  }
+
+  if (workflowFamily) {
+    conditions.push(eq(pipelineStageConfig.workflowFamily, workflowFamily));
+  }
+
+  return conditions.length > 0 ? and(...conditions) : undefined;
+}
+
+export async function getAllStages(workflowFamily?: WorkflowFamily) {
   return db
     .select()
     .from(pipelineStageConfig)
+    .where(buildStageWhere({}, workflowFamily))
     .orderBy(asc(pipelineStageConfig.displayOrder));
 }
 
-export async function getStageById(id: string) {
+export async function getStageById(id: string, workflowFamily?: WorkflowFamily) {
   const result = await db
     .select()
     .from(pipelineStageConfig)
-    .where(eq(pipelineStageConfig.id, id))
+    .where(buildStageWhere({ id }, workflowFamily))
     .limit(1);
   return result[0] ?? null;
 }
 
-export async function getStageBySlug(slug: string) {
+export async function getStageBySlug(slug: string, workflowFamily?: WorkflowFamily) {
   const result = await db
     .select()
     .from(pipelineStageConfig)
-    .where(eq(pipelineStageConfig.slug, slug))
+    .where(buildStageWhere({ slug }, workflowFamily))
     .limit(1);
   return result[0] ?? null;
 }

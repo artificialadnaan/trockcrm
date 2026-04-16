@@ -1,21 +1,29 @@
 const RAILWAY_API_FALLBACK = "https://api-production-ad218.up.railway.app";
+const AI_COPILOT_API_FALLBACK = "https://api-ai-copilot.up.railway.app";
 const FRONTEND_API_FALLBACK_HOSTS = new Set([
   "frontend-production-bcab.up.railway.app",
   "crm.trockconstruction.com",
+]);
+const AI_COPILOT_FRONTEND_FALLBACK_HOSTS = new Set([
+  "frontend-ai-copilot.up.railway.app",
 ]);
 
 export function resolveApiBase(
   env: { VITE_API_URL?: string | undefined } = {},
   locationLike?: { hostname?: string | undefined }
 ): string {
+  const hostname = locationLike?.hostname?.trim().toLowerCase();
+  if (hostname && AI_COPILOT_FRONTEND_FALLBACK_HOSTS.has(hostname)) {
+    return `${AI_COPILOT_API_FALLBACK}/api`;
+  }
+
+  if (hostname && FRONTEND_API_FALLBACK_HOSTS.has(hostname)) {
+    return `${RAILWAY_API_FALLBACK}/api`;
+  }
+
   const configuredUrl = env.VITE_API_URL?.trim();
   if (configuredUrl) {
     return `${configuredUrl.replace(/\/+$/, "")}/api`;
-  }
-
-  const hostname = locationLike?.hostname?.trim().toLowerCase();
-  if (hostname && FRONTEND_API_FALLBACK_HOSTS.has(hostname)) {
-    return `${RAILWAY_API_FALLBACK}/api`;
   }
 
   return "/api";

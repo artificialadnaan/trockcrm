@@ -51,11 +51,7 @@ export function EmailAssignmentQueue() {
   const handleAssign = async (emailId: string, target: EmailAssignmentTarget) => {
     await api<{ success: boolean }>(`/email/${emailId}/associate`, {
       method: "POST",
-      json: {
-        assignedEntityType: target.assignedEntityType,
-        assignedEntityId: target.assignedEntityId,
-        assignedDealId: target.assignedDealId,
-      },
+      json: target,
     });
     await fetchQueue();
   };
@@ -66,7 +62,7 @@ export function EmailAssignmentQueue() {
         <div>
           <h3 className="text-sm font-semibold">Assignment Queue</h3>
           <p className="text-xs text-muted-foreground">
-            Review unresolved emails and assign them to the correct record.
+            Review unresolved emails and assign them to the correct deal.
           </p>
         </div>
         <Button variant="outline" size="sm" onClick={() => void fetchQueue()} disabled={loading}>

@@ -15,6 +15,15 @@ import { evaluateDealScopingReadiness } from "./scoping-service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
+type StageGateChecklistSource = "stage" | "scoping" | "combined";
+
+export interface StageGateChecklistItem {
+  key: string;
+  label: string;
+  satisfied: boolean;
+  source: StageGateChecklistSource;
+}
+
 export interface StageGateResult {
   allowed: boolean;
   isBackwardMove: boolean;
@@ -37,10 +46,110 @@ export interface StageGateResult {
     fields: string[];
     documents: string[];
     approvals: string[];
+    effectiveChecklist?: {
+      fields: StageGateChecklistItem[];
+      attachments: StageGateChecklistItem[];
+      approvals: StageGateChecklistItem[];
+    };
+  };
+  effectiveChecklist: {
+    fields: StageGateChecklistItem[];
+    attachments: StageGateChecklistItem[];
+    approvals: StageGateChecklistItem[];
   };
   requiresOverride: boolean;
   overrideType: "backward_move" | "missing_requirements" | null;
   blockReason: string | null;
+}
+
+const FIELD_LABELS: Record<string, string> = {
+  ddEstimate: "DD Estimate",
+  bidEstimate: "Bid Estimate",
+  awardedAmount: "Awarded Amount",
+  expectedCloseDate: "Expected Close Date",
+  propertyAddress: "Property Address",
+  projectTypeId: "Project Type",
+  regionId: "Region",
+  primaryContactId: "Primary Contact",
+  companyId: "Company",
+  description: "Description",
+};
+
+const DOCUMENT_LABELS: Record<string, string> = {
+  photo: "Photo",
+  contract: "Contract",
+  rfp: "RFP",
+  estimate: "Estimate",
+  change_order: "Change Order",
+  proposal: "Proposal",
+  permit: "Permit",
+  inspection: "Inspection",
+  correspondence: "Correspondence",
+  insurance: "Insurance",
+  warranty: "Warranty",
+  closeout: "Closeout",
+  other: "Other",
+};
+
+function formatStartCase(value: string) {
+  return value
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function formatFieldLabel(field: string) {
+  if (field.includes(".")) {
+    const [sectionName, fieldName] = field.split(".");
+    return `${formatStartCase(sectionName ?? field)}: ${formatStartCase(fieldName ?? "")}`.trim();
+  }
+
+  return FIELD_LABELS[field] ?? formatStartCase(field);
+}
+
+function formatDocumentLabel(document: string) {
+  return DOCUMENT_LABELS[document] ?? formatStartCase(document);
+}
+
+function pushChecklistItem(
+  items: StageGateChecklistItem[],
+  nextItem: StageGateChecklistItem
+) {
+  const existingItem = items.find((item) => item.key === nextItem.key);
+  if (!existingItem) {
+    items.push(nextItem);
+    return;
+  }
+
+  existingItem.satisfied = existingItem.satisfied && nextItem.satisfied;
+  if (existingItem.source !== nextItem.source) {
+    existingItem.source = "combined";
+  }
+}
+
+function uniqueStrings(values: string[]) {
+  return [...new Set(values)];
+}
+
+function hasNonEmptyText(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function isVerifiedLinkedStageDocument(file: {
+  category: unknown;
+  intakeRequirementKey: unknown;
+  intakeSource: unknown;
+  r2Key: unknown;
+  r2Bucket: unknown;
+}) {
+  return (
+    hasNonEmptyText(file.category) &&
+    hasNonEmptyText(file.intakeRequirementKey) &&
+    file.intakeSource === "scoping_intake" &&
+    hasNonEmptyText(file.r2Key) &&
+    hasNonEmptyText(file.r2Bucket)
+  );
 }
 
 /**
@@ -108,7 +217,13 @@ export async function validateStageGate(
         isTerminal: currentStage.isTerminal,
         displayOrder: currentStage.displayOrder,
       },
-      missingRequirements: { fields: [], documents: [], approvals: [] },
+      missingRequirements: {
+        fields: [],
+        documents: [],
+        approvals: [],
+        effectiveChecklist: { fields: [], attachments: [], approvals: [] },
+      },
+      effectiveChecklist: { fields: [], attachments: [], approvals: [] },
       requiresOverride: false,
       overrideType: null,
       blockReason: null,
@@ -131,16 +246,27 @@ export async function validateStageGate(
   // Check required documents (file categories that must exist for this deal)
   const requiredDocuments = (targetStage.requiredDocuments as string[]) ?? [];
   const missingDocuments: string[] = [];
+  const linkedVerifiedCategories = new Set<string>();
   if (requiredDocuments.length > 0) {
-    // Query files for this deal by category
     const existingFiles = await tenantDb
-      .select({ category: files.category })
+      .select({
+        category: files.category,
+        intakeRequirementKey: files.intakeRequirementKey,
+        intakeSource: files.intakeSource,
+        r2Key: files.r2Key,
+        r2Bucket: files.r2Bucket,
+      })
       .from(files)
       .where(and(eq(files.dealId, dealId), eq(files.isActive, true)));
 
-    const existingCategories = new Set(existingFiles.map((f) => f.category));
+    for (const file of existingFiles) {
+      if (isVerifiedLinkedStageDocument(file)) {
+        linkedVerifiedCategories.add(file.category);
+      }
+    }
+
     for (const docType of requiredDocuments) {
-      if (!existingCategories.has(docType as any)) {
+      if (!linkedVerifiedCategories.has(docType)) {
         missingDocuments.push(docType);
       }
     }
@@ -168,6 +294,27 @@ export async function validateStageGate(
       }
     }
   }
+
+  const effectiveChecklist = {
+    fields: requiredFields.map((field) => ({
+      key: field,
+      label: formatFieldLabel(field),
+      satisfied: !missingFields.includes(field),
+      source: "stage" as const,
+    })),
+    attachments: requiredDocuments.map((document) => ({
+      key: document,
+      label: formatDocumentLabel(document),
+      satisfied: linkedVerifiedCategories.has(document),
+      source: "stage" as const,
+    })),
+    approvals: requiredApprovals.map((role) => ({
+      key: role,
+      label: `${formatStartCase(role)} Approval`,
+      satisfied: !missingApprovals.includes(role),
+      source: "stage" as const,
+    })),
+  };
 
   const hasMissingRequirements =
     missingFields.length > 0 || missingDocuments.length > 0 || missingApprovals.length > 0;
@@ -240,7 +387,28 @@ export async function validateStageGate(
     const scopingMissingFields = Object.entries(scopingReadiness.errors.sections).flatMap(
       ([sectionName, fieldNames]) => fieldNames.map((fieldName) => `${sectionName}.${fieldName}`)
     );
-    const scopingMissingDocuments = Object.keys(scopingReadiness.errors.attachments);
+    const scopingAttachmentRequirements = scopingReadiness.attachmentRequirements ?? [];
+    const scopingMissingDocuments = scopingAttachmentRequirements
+      .filter((attachment) => !attachment.satisfied)
+      .map((attachment) => attachment.category);
+
+    for (const field of scopingMissingFields) {
+      pushChecklistItem(effectiveChecklist.fields, {
+        key: field,
+        label: formatFieldLabel(field),
+        satisfied: false,
+        source: "scoping",
+      });
+    }
+
+    for (const attachment of scopingAttachmentRequirements) {
+      pushChecklistItem(effectiveChecklist.attachments, {
+        key: attachment.category,
+        label: attachment.label,
+        satisfied: attachment.satisfied,
+        source: "scoping",
+      });
+    }
 
     if (scopingReadiness.status === "draft") {
       allowed = false;
@@ -271,10 +439,12 @@ export async function validateStageGate(
       displayOrder: currentStage.displayOrder,
     },
     missingRequirements: {
-      fields: missingFields,
-      documents: missingDocuments,
-      approvals: missingApprovals,
+      fields: uniqueStrings(missingFields),
+      documents: uniqueStrings(missingDocuments),
+      approvals: uniqueStrings(missingApprovals),
+      effectiveChecklist,
     },
+    effectiveChecklist,
     requiresOverride,
     overrideType,
     blockReason,

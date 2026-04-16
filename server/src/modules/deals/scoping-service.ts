@@ -1,6 +1,6 @@
 import { and, eq } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
-import { dealScopingIntake, deals, files, users } from "@trock-crm/shared/schema";
+import { dealScopingIntake, dealTeamMembers, deals, files, tasks, users } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import type { DealScopingIntakeStatus, WorkflowRoute } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
@@ -19,7 +19,7 @@ export type DealScopingPatch = {
 
 export interface DealScopingServiceResult {
   intake: DealScopingIntakeRow;
-  readiness: DealScopingReadinessSnapshot;
+  readiness: DealScopingReadinessResult;
   previousStatus: DealScopingIntakeStatus | null;
 }
 
@@ -28,6 +28,36 @@ export interface LinkScopingFileInput {
   intakeSection: string;
   intakeRequirementKey: string;
 }
+
+export interface DealRevisionRoutingResult {
+  routed: boolean;
+  deal: DealRow;
+  task: typeof tasks.$inferSelect | null;
+}
+
+export interface DealRevisionRoutingContext {
+  proposalStatus?: DealRow["proposalStatus"];
+  previousEstimatingSubstage?: DealRow["estimatingSubstage"];
+}
+
+export interface DealScopingAttachmentRequirement {
+  key: string;
+  category: string;
+  label: string;
+  satisfied: boolean;
+}
+
+export interface DealScopingReadinessResult extends DealScopingReadinessSnapshot {
+  attachmentRequirements: DealScopingAttachmentRequirement[];
+}
+
+type LinkedScopingAttachmentRow = {
+  category: unknown;
+  intakeRequirementKey: unknown;
+  intakeSource: unknown;
+  r2Key: unknown;
+  r2Bucket: unknown;
+};
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -232,15 +262,124 @@ export async function getOrCreateDealScopingIntake(
   );
 }
 
-async function listAttachmentRequirementKeys(tenantDb: TenantDb, dealId: string): Promise<string[]> {
+async function listLinkedScopingAttachments(
+  tenantDb: TenantDb,
+  dealId: string
+): Promise<LinkedScopingAttachmentRow[]> {
   const rows = await tenantDb
-    .select()
+    .select({
+      category: files.category,
+      intakeRequirementKey: files.intakeRequirementKey,
+      intakeSource: files.intakeSource,
+      r2Key: files.r2Key,
+      r2Bucket: files.r2Bucket,
+    })
     .from(files)
     .where(and(eq(files.dealId, dealId), eq(files.isActive, true)));
 
-  return rows
-    .map((row) => row.intakeRequirementKey)
-    .filter((requirementKey): requirementKey is string => typeof requirementKey === "string");
+  return rows;
+}
+
+function hasNonEmptyText(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function getRequiredScopingAttachmentRequirements(
+  workflowRoute: WorkflowRoute
+): DealScopingAttachmentRequirement[] {
+  if (workflowRoute === "service") {
+    return [
+      {
+        key: "site_photos",
+        category: "photo",
+        label: "Site photos",
+        satisfied: false,
+      },
+    ];
+  }
+
+  return [
+    {
+      key: "scope_docs",
+      category: "other",
+      label: "Scope docs",
+      satisfied: false,
+    },
+    {
+      key: "site_photos",
+      category: "photo",
+      label: "Site photos",
+      satisfied: false,
+    },
+  ];
+}
+
+function isVerifiedLinkedScopingAttachment(file: LinkedScopingAttachmentRow) {
+  return (
+    hasNonEmptyText(file.category) &&
+    hasNonEmptyText(file.intakeRequirementKey) &&
+    file.intakeSource === "scoping_intake" &&
+    hasNonEmptyText(file.r2Key) &&
+    hasNonEmptyText(file.r2Bucket)
+  );
+}
+
+function buildScopingReadiness(input: {
+  currentStatus: DealScopingIntakeStatus;
+  workflowRoute: WorkflowRoute;
+  projectTypeId: string | null;
+  sectionData: DealScopingSectionData;
+  attachments: LinkedScopingAttachmentRow[];
+}): DealScopingReadinessResult {
+  const baseReadiness = evaluateScopingReadiness({
+    currentStatus: input.currentStatus,
+    workflowRoute: input.workflowRoute,
+    projectTypeId: input.projectTypeId,
+    sectionData: input.sectionData,
+    attachmentKeys: [],
+  });
+  const requiredAttachments = getRequiredScopingAttachmentRequirements(input.workflowRoute);
+  const verifiedLinkedAttachments = input.attachments.filter(isVerifiedLinkedScopingAttachment);
+  const attachmentRequirements = requiredAttachments.map((requirement) => ({
+    ...requirement,
+    satisfied: verifiedLinkedAttachments.some(
+      (attachment) =>
+        attachment.intakeRequirementKey === requirement.key &&
+        attachment.category === requirement.category
+    ),
+  }));
+  const missingAttachments = attachmentRequirements.filter(
+    (requirement) => !requirement.satisfied
+  );
+  const hasSectionErrors = Object.values(baseReadiness.errors.sections).some(
+    (fields) => fields.length > 0
+  );
+
+  return {
+    ...baseReadiness,
+    status:
+      input.currentStatus === "activated"
+        ? "activated"
+        : hasSectionErrors || missingAttachments.length > 0
+          ? "draft"
+          : "ready",
+    errors: {
+      ...baseReadiness.errors,
+      attachments: Object.fromEntries(
+        missingAttachments.map((requirement) => [requirement.key, [requirement.key]])
+      ),
+    },
+    completionState: {
+      ...baseReadiness.completionState,
+      attachments: {
+        isComplete: missingAttachments.length === 0,
+        missingFields: [],
+        missingAttachments: missingAttachments.map((requirement) => requirement.key),
+      },
+    },
+    requiredAttachmentKeys: attachmentRequirements.map((requirement) => requirement.key),
+    attachmentRequirements,
+  };
 }
 
 export async function linkDealFileToScopingRequirement(
@@ -292,7 +431,7 @@ function createIntakePayload(input: {
   route: WorkflowRoute;
   projectTypeId: string | null;
   sectionData: DealScopingSectionData;
-  readiness: DealScopingReadinessSnapshot;
+  readiness: DealScopingReadinessResult;
 }) {
   const now = new Date();
   const firstReadyAt =
@@ -337,18 +476,18 @@ async function persistReadinessIfNeeded(
 export async function evaluateDealScopingReadiness(
   tenantDb: TenantDb,
   dealId: string
-): Promise<DealScopingReadinessSnapshot> {
+): Promise<DealScopingReadinessResult> {
   const deal = await getDealOrThrow(tenantDb, dealId);
   const existingIntake = await getExistingIntake(tenantDb, dealId);
-  const attachmentKeys = await listAttachmentRequirementKeys(tenantDb, dealId);
+  const attachments = await listLinkedScopingAttachments(tenantDb, dealId);
   const sectionData = buildBaseSectionData(existingIntake, deal);
   const projectTypeId = existingIntake?.projectTypeId ?? deal.projectTypeId ?? null;
-  const readiness = evaluateScopingReadiness({
+  const readiness = buildScopingReadiness({
     currentStatus: (existingIntake?.status ?? "draft") as DealScopingIntakeStatus,
     workflowRoute: deal.workflowRoute,
     projectTypeId,
     sectionData,
-    attachmentKeys,
+    attachments,
   });
 
   if (existingIntake) {
@@ -446,13 +585,13 @@ export async function upsertDealScopingIntake(
     patch.projectTypeId === undefined
       ? existingIntake?.projectTypeId ?? deal.projectTypeId ?? null
       : patch.projectTypeId;
-  const attachmentKeys = await listAttachmentRequirementKeys(tenantDb, dealId);
-  const readiness = evaluateScopingReadiness({
+  const attachments = await listLinkedScopingAttachments(tenantDb, dealId);
+  const readiness = buildScopingReadiness({
     currentStatus: (existingIntake?.status ?? "draft") as DealScopingIntakeStatus,
     workflowRoute: nextRoute,
     projectTypeId,
     sectionData: nextSectionData,
-    attachmentKeys,
+    attachments,
   });
   const payload = createIntakePayload({
     existingIntake,
@@ -492,5 +631,126 @@ export async function upsertDealScopingIntake(
     intake: savedIntake,
     readiness,
     previousStatus: existingIntake?.status as DealScopingIntakeStatus | null ?? null,
+  };
+}
+
+async function resolveRevisionTaskAssignee(
+  tenantDb: TenantDb,
+  deal: DealRow
+): Promise<string> {
+  const teamMembers = await tenantDb
+    .select()
+    .from(dealTeamMembers)
+    .where(eq(dealTeamMembers.dealId, deal.id));
+
+  const [estimator] = teamMembers
+    .filter(
+      (member) =>
+        member.dealId === deal.id &&
+        member.role === "estimator" &&
+        member.isActive
+    )
+    .sort((left, right) => {
+      const leftCreatedAt =
+        left.createdAt instanceof Date ? left.createdAt.getTime() : Number.MAX_SAFE_INTEGER;
+      const rightCreatedAt =
+        right.createdAt instanceof Date ? right.createdAt.getTime() : Number.MAX_SAFE_INTEGER;
+
+      if (leftCreatedAt !== rightCreatedAt) {
+        return leftCreatedAt - rightCreatedAt;
+      }
+
+      if (left.userId !== right.userId) {
+        return left.userId.localeCompare(right.userId);
+      }
+
+      return left.id.localeCompare(right.id);
+    });
+
+  return estimator?.userId ?? deal.assignedRepId;
+}
+
+export async function routeRevisionToEstimating(
+  tenantDb: TenantDb,
+  dealId: string,
+  userId: string,
+  context?: DealRevisionRoutingContext
+): Promise<DealRevisionRoutingResult> {
+  const [deal, editor] = await Promise.all([
+    getDealOrThrow(tenantDb, dealId),
+    getUserOrThrow(tenantDb, userId),
+  ]);
+  const targetProposalStatus = context?.proposalStatus ?? deal.proposalStatus;
+  const routingSubstage =
+    context?.previousEstimatingSubstage ?? deal.estimatingSubstage;
+
+  if (
+    deal.workflowRoute !== "estimating" ||
+    targetProposalStatus !== "revision_requested" ||
+    routingSubstage !== "sent_to_client"
+  ) {
+    return {
+      routed: false,
+      deal,
+      task: null,
+    };
+  }
+
+  const [updatedDeal] = await tenantDb
+    .update(deals)
+    .set({
+      estimatingSubstage: "building_estimate",
+      updatedAt: new Date(),
+    })
+    .where(eq(deals.id, dealId))
+    .returning();
+
+  const routedDeal = (updatedDeal ?? {
+    ...deal,
+    estimatingSubstage: "building_estimate",
+  }) as DealRow;
+  const assignedTo = await resolveRevisionTaskAssignee(tenantDb, routedDeal);
+  const revisionCount =
+    typeof routedDeal.proposalRevisionCount === "number"
+      ? routedDeal.proposalRevisionCount
+      : 0;
+  const title = `Address estimate revision for ${routedDeal.name}`;
+
+  const [task] = await tenantDb
+    .insert(tasks)
+    .values({
+      title,
+      description:
+        "Client feedback sent this deal back into estimating. Review the requested changes and prepare a revised estimate.",
+      type: "system",
+      priority: "high",
+      status: "pending",
+      assignedTo,
+      createdBy: userId,
+      officeId: editor.officeId,
+      originRule: "deal_estimate_revision_requested",
+      sourceRule: "deal_estimate_revision_requested",
+      sourceEvent: "deal.estimate.revision_requested",
+      dedupeKey: `deal:${dealId}:estimate_revision:${revisionCount}`,
+      reasonCode: "deal_estimate_revision_requested",
+      dealId,
+      entitySnapshot: {
+        schemaVersion: 1,
+        entityType: "deal",
+        entityId: dealId,
+        officeId: editor.officeId,
+        sourceEvent: "deal.estimate.revision_requested",
+        dealId,
+        dealName: routedDeal.name,
+        dealNumber: routedDeal.dealNumber ?? null,
+        summary: title,
+      },
+    })
+    .returning();
+
+  return {
+    routed: true,
+    deal: routedDeal,
+    task: task ?? null,
   };
 }

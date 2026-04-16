@@ -1,10 +1,18 @@
 import { useState, useEffect, useCallback } from "react";
 import { api } from "@/lib/api";
 
+export type ActivitySourceEntityType = "company" | "property" | "lead" | "deal" | "contact";
+
 export interface Activity {
   id: string;
   type: string;
-  userId: string;
+  responsibleUserId: string;
+  performedByUserId: string | null;
+  sourceEntityType: ActivitySourceEntityType;
+  sourceEntityId: string;
+  companyId: string | null;
+  propertyId: string | null;
+  leadId: string | null;
   dealId: string | null;
   contactId: string | null;
   emailId: string | null;
@@ -17,8 +25,14 @@ export interface Activity {
 }
 
 export interface ActivityFilters {
+  companyId?: string;
+  propertyId?: string;
+  leadId?: string;
   dealId?: string;
   contactId?: string;
+  responsibleUserId?: string;
+  sourceEntityType?: ActivitySourceEntityType;
+  sourceEntityId?: string;
   type?: string;
   page?: number;
   limit?: number;
@@ -42,8 +56,14 @@ export function useActivities(filters: ActivityFilters = {}) {
     setError(null);
     try {
       const params = new URLSearchParams();
+      if (filters.companyId) params.set("companyId", filters.companyId);
+      if (filters.propertyId) params.set("propertyId", filters.propertyId);
+      if (filters.leadId) params.set("leadId", filters.leadId);
       if (filters.dealId) params.set("dealId", filters.dealId);
       if (filters.contactId) params.set("contactId", filters.contactId);
+      if (filters.responsibleUserId) params.set("responsibleUserId", filters.responsibleUserId);
+      if (filters.sourceEntityType) params.set("sourceEntityType", filters.sourceEntityType);
+      if (filters.sourceEntityId) params.set("sourceEntityId", filters.sourceEntityId);
       if (filters.type) params.set("type", filters.type);
       if (filters.page) params.set("page", String(filters.page));
       if (filters.limit) params.set("limit", String(filters.limit));
@@ -59,7 +79,19 @@ export function useActivities(filters: ActivityFilters = {}) {
     } finally {
       setLoading(false);
     }
-  }, [filters.dealId, filters.contactId, filters.type, filters.page, filters.limit]);
+  }, [
+    filters.companyId,
+    filters.propertyId,
+    filters.leadId,
+    filters.dealId,
+    filters.contactId,
+    filters.responsibleUserId,
+    filters.sourceEntityType,
+    filters.sourceEntityId,
+    filters.type,
+    filters.page,
+    filters.limit,
+  ]);
 
   useEffect(() => {
     fetchActivities();
@@ -74,6 +106,12 @@ export async function createActivity(input: {
   body?: string;
   outcome?: string;
   durationMinutes?: number;
+  responsibleUserId?: string;
+  sourceEntityType?: ActivitySourceEntityType;
+  sourceEntityId?: string;
+  companyId?: string;
+  propertyId?: string;
+  leadId?: string;
   dealId?: string;
   contactId?: string;
   occurredAt?: string;
@@ -89,6 +127,7 @@ export async function createContactActivity(
     body?: string;
     outcome?: string;
     durationMinutes?: number;
+    responsibleUserId?: string;
     dealId?: string;
   }
 ) {

@@ -1,10 +1,14 @@
-import { pgTable, uuid, varchar, integer, boolean, jsonb } from "drizzle-orm/pg-core";
+import { pgEnum, pgTable, uuid, varchar, integer, boolean, jsonb } from "drizzle-orm/pg-core";
+import { WORKFLOW_FAMILIES } from "../../types/enums.js";
+
+export const workflowFamilyEnum = pgEnum("workflow_family", WORKFLOW_FAMILIES);
 
 export const pipelineStageConfig = pgTable("pipeline_stage_config", {
   id: uuid("id").primaryKey().defaultRandom(),
   name: varchar("name", { length: 100 }).notNull(),
   slug: varchar("slug", { length: 100 }).unique().notNull(),
   displayOrder: integer("display_order").notNull(),
+  workflowFamily: workflowFamilyEnum("workflow_family").default("standard_deal").notNull(),
   isActivePipeline: boolean("is_active_pipeline").default(true).notNull(),
   isTerminal: boolean("is_terminal").default(false).notNull(),
   requiredFields: jsonb("required_fields").default([]).notNull(),

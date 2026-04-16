@@ -1,3 +1,81 @@
+type TaskCompletionActivityScope = {
+  sourceEntityType: "deal" | "contact" | "lead";
+  sourceEntityId: string;
+  leadId: string | null;
+  dealId: string | null;
+  contactId: string | null;
+};
+
+function getTaskCompletionActivityScope(payload: any): TaskCompletionActivityScope | null {
+  const entitySnapshot =
+    payload.entitySnapshot && typeof payload.entitySnapshot === "object"
+      ? payload.entitySnapshot
+      : null;
+  const leadId =
+    typeof payload.leadId === "string"
+      ? payload.leadId
+      : typeof entitySnapshot?.leadId === "string"
+        ? entitySnapshot.leadId
+        : null;
+
+  if (payload.dealId) {
+    return {
+      sourceEntityType: "deal",
+      sourceEntityId: payload.dealId,
+      leadId,
+      dealId: payload.dealId,
+      contactId: payload.contactId ?? null,
+    };
+  }
+
+  if (leadId) {
+    return {
+      sourceEntityType: "lead",
+      sourceEntityId: leadId,
+      leadId,
+      dealId: null,
+      contactId: payload.contactId ?? null,
+    };
+  }
+
+  if (payload.contactId) {
+    return {
+      sourceEntityType: "contact",
+      sourceEntityId: payload.contactId,
+      leadId: null,
+      dealId: null,
+      contactId: payload.contactId,
+    };
+  }
+
+  return null;
+}
+
+async function resolveResponsibleUserId(
+  workerPool: { query: (sql: string, params?: unknown[]) => Promise<{ rows: Array<Record<string, any>> }> },
+  schemaName: string,
+  activityScope: TaskCompletionActivityScope,
+  fallbackUserId: string
+) {
+  if (activityScope.sourceEntityType === "deal") {
+    const dealResult = await workerPool.query(
+      `SELECT assigned_rep_id FROM ${schemaName}.deals WHERE id = $1 LIMIT 1`,
+      [activityScope.sourceEntityId]
+    );
+    return dealResult.rows[0]?.assigned_rep_id ?? fallbackUserId;
+  }
+
+  if (activityScope.sourceEntityType === "lead") {
+    const leadResult = await workerPool.query(
+      `SELECT assigned_rep_id FROM ${schemaName}.leads WHERE id = $1 LIMIT 1`,
+      [activityScope.sourceEntityId]
+    );
+    return leadResult.rows[0]?.assigned_rep_id ?? fallbackUserId;
+  }
+
+  return fallbackUserId;
+}
+
 export async function handleTaskCompletedEvent(payload: any, officeId: string | null): Promise<void> {
   console.log(`[Worker] task.completed: ${payload.taskId} — ${payload.title}`);
 
@@ -16,18 +94,37 @@ export async function handleTaskCompletedEvent(payload: any, officeId: string | 
   if (!slugRegex.test(slug)) return;
 
   const schemaName = `office_${slug}`;
+  const activityScope = getTaskCompletionActivityScope(payload);
 
-  await workerPool.query(
-    `INSERT INTO ${schemaName}.activities
-       (type, user_id, deal_id, contact_id, subject, occurred_at)
-       VALUES ('task_completed', $1, $2, $3, $4, NOW())`,
-    [
-      payload.completedBy,
-      payload.dealId ?? null,
-      payload.contactId ?? null,
-      `Completed: ${payload.title}`,
-    ]
-  );
+  if (activityScope) {
+    const responsibleUserId = await resolveResponsibleUserId(
+      workerPool,
+      schemaName,
+      activityScope,
+      payload.completedBy
+    );
+    const performedByUserId =
+      payload.completedBy && payload.completedBy !== responsibleUserId
+        ? payload.completedBy
+        : null;
+
+    await workerPool.query(
+      `INSERT INTO ${schemaName}.activities
+         (type, responsible_user_id, performed_by_user_id, source_entity_type, source_entity_id,
+          lead_id, deal_id, contact_id, subject, occurred_at)
+         VALUES ('task_completed', $1, $2, $3, $4, $5, $6, $7, $8, NOW())`,
+      [
+        responsibleUserId,
+        performedByUserId,
+        activityScope.sourceEntityType,
+        activityScope.sourceEntityId,
+        activityScope.leadId,
+        activityScope.dealId,
+        activityScope.contactId,
+        `Completed: ${payload.title}`,
+      ]
+    );
+  }
 
   if (payload.dealId) {
     await workerPool.query(

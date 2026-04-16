@@ -22,8 +22,11 @@ export { dealStageHistory } from "./tenant/deal-stage-history.js";
 export { changeOrders, changeOrderStatusEnum } from "./tenant/change-orders.js";
 export { dealApprovals, approvalStatusEnum } from "./tenant/deal-approvals.js";
 export { companies } from "./tenant/companies.js";
+export { properties } from "./tenant/properties.js";
 export { contacts, contactCategoryEnum } from "./tenant/contacts.js";
 export { contactDealAssociations } from "./tenant/contact-deal-associations.js";
+export { leads, leadStatusEnum } from "./tenant/leads.js";
+export { leadStageHistory } from "./tenant/lead-stage-history.js";
 export { duplicateQueue, duplicateMatchTypeEnum, duplicateStatusEnum } from "./tenant/duplicate-queue.js";
 export { emails, emailDirectionEnum } from "./tenant/emails.js";
 export { activities, activityTypeEnum } from "./tenant/activities.js";
@@ -38,6 +41,12 @@ export { estimateLineItems } from "./tenant/estimate-line-items.js";
 export { punchListItems, punchListTypeEnum, punchListStatusEnum } from "./tenant/punch-list-items.js";
 export { workflowTimers, workflowTimerTypeEnum, workflowTimerStatusEnum } from "./tenant/workflow-timers.js";
 export { closeoutChecklistItems } from "./tenant/closeout-checklist-items.js";
+export { aiDocumentIndex } from "./tenant/ai-document-index.js";
+export { aiEmbeddingChunks } from "./tenant/ai-embedding-chunks.js";
+export { aiCopilotPackets } from "./tenant/ai-copilot-packets.js";
+export { aiTaskSuggestions } from "./tenant/ai-task-suggestions.js";
+export { aiRiskFlags } from "./tenant/ai-risk-flags.js";
+export { aiFeedback } from "./tenant/ai-feedback.js";
 
 // Migration schema tables (staging area for HubSpot data migration)
 export { stagedDeals } from "./migration/staged-deals.js";

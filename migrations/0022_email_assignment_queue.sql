@@ -66,19 +66,3 @@ BEGIN
     );
   END LOOP;
 END $$;
-
--- TENANT_SCHEMA_START
-ALTER TABLE office_dallas.emails
-  ADD COLUMN IF NOT EXISTS assigned_entity_type varchar(20),
-  ADD COLUMN IF NOT EXISTS assigned_entity_id uuid,
-  ADD COLUMN IF NOT EXISTS assignment_confidence varchar(20),
-  ADD COLUMN IF NOT EXISTS assignment_ambiguity_reason varchar(255);
-
-CREATE INDEX IF NOT EXISTS emails_assignment_queue_idx
-  ON office_dallas.emails (direction, synced_at DESC)
-  WHERE direction = 'inbound'
-    AND (assignment_ambiguity_reason IS NOT NULL OR assigned_entity_type = 'company');
-
-CREATE INDEX IF NOT EXISTS emails_assigned_entity_idx
-  ON office_dallas.emails (assigned_entity_type, assigned_entity_id);
--- TENANT_SCHEMA_END

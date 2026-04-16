@@ -37,6 +37,9 @@ export interface TaskRuleContext extends AssignmentContext {
   officeId: string;
   officeName?: string | null;
   sourceEvent: string;
+  leadId?: string | null;
+  leadName?: string | null;
+  stageEnteredAt?: Date | string | null;
   dealId?: string | null;
   dealName?: string | null;
   dealNumber?: string | null;
@@ -125,6 +128,7 @@ export interface TaskRuleDefinition {
   sourceEvent: string;
   reasonCode: string;
   suppressionWindowDays: number;
+  preserveAssignedToOnRefresh?: boolean;
   buildDedupeKey(context: TaskRuleContext): string | null;
   buildTask(context: TaskRuleContext): Promise<SystemTaskDraft | null> | SystemTaskDraft | null;
 }
