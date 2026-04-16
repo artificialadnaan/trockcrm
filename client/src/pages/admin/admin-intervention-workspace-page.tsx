@@ -122,7 +122,7 @@ export function AdminInterventionWorkspacePage() {
       toast.error(err instanceof Error ? err.message : "Failed to update intervention queue");
       return null;
     } finally {
-      if (updatedCount > 0) {
+      if (updatedCount > 0 && activeCaseId !== null && selectedIds.includes(activeCaseId)) {
         setDetailRefreshToken((current) => current + 1);
       }
       await refetch();

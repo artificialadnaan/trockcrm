@@ -186,23 +186,25 @@ export function summarizeInterventionMutationResult(
   if (result.updatedCount === 0) {
     const parts: string[] = [];
     const failureCountLabel = pluralizeLabel(Math.max(result.updatedCount + result.skippedCount, 2), failureLabel);
-    parts.push(`No ${failureCountLabel} were updated.`);
-    if (result.skippedCount > 0) parts.push(`${formatCountedLabel(result.skippedCount, skippedLabel)} skipped.`);
+    parts.push(`No ${failureCountLabel} were updated`);
+    if (result.skippedCount > 0) parts.push(`${formatCountedLabel(result.skippedCount, skippedLabel)} skipped`);
     if (hasErrors) parts.push(`Errors: ${formatInterventionMutationErrors(result.errors)}`);
+    const message = `${parts.join(". ")}${!hasErrors && result.skippedCount > 0 ? "." : ""}`;
 
     return {
       tone: "error",
-      message: parts.join(" "),
+      message,
     };
   }
 
   const parts: string[] = [`Updated ${formatCountedLabel(result.updatedCount, successLabel)}`];
-  if (result.skippedCount > 0) parts.push(`${formatCountedLabel(result.skippedCount, skippedLabel)} skipped.`);
+  if (result.skippedCount > 0) parts.push(`${formatCountedLabel(result.skippedCount, skippedLabel)} skipped`);
   if (hasErrors) parts.push(`Errors: ${formatInterventionMutationErrors(result.errors)}`);
+  const message = `${parts.join(". ")}${!hasErrors && result.skippedCount > 0 ? "." : ""}`;
 
   return {
     tone: result.skippedCount > 0 || hasErrors ? "warning" : "success",
-    message: parts.join(". "),
+    message,
   };
 }
 
