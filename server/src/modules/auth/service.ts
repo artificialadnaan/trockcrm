@@ -1,7 +1,7 @@
 import jwt from "jsonwebtoken";
 import { eq, and, like } from "drizzle-orm";
 import { db } from "../../db.js";
-import { users, userOfficeAccess } from "@trock-crm/shared/schema";
+import { offices, users, userOfficeAccess } from "@trock-crm/shared/schema";
 import type { JwtClaims } from "@trock-crm/shared/types";
 
 function getJwtSecret(): string {
@@ -63,6 +63,39 @@ export async function getDevUsers() {
     .from(users)
     .where(and(eq(users.isActive, true), like(users.email, "%@trock.dev")));
   return result;
+}
+
+export async function getOfficeBySlug(slug: string) {
+  const normalized = slug.trim().toLowerCase();
+  if (!normalized) return null;
+
+  const result = await db
+    .select()
+    .from(offices)
+    .where(eq(offices.slug, normalized))
+    .limit(1);
+
+  return result[0] ?? null;
+}
+
+export async function ensureDevUserPrimaryOffice(userId: string, preferredOfficeSlug = "dallas") {
+  const user = await getUserById(userId);
+  if (!user || !user.email.endsWith("@trock.dev")) {
+    return user;
+  }
+
+  const office = await getOfficeBySlug(preferredOfficeSlug);
+  if (!office || !office.isActive || user.officeId === office.id) {
+    return user;
+  }
+
+  const [updatedUser] = await db
+    .update(users)
+    .set({ officeId: office.id })
+    .where(eq(users.id, userId))
+    .returning();
+
+  return updatedUser ?? user;
 }
 
 export async function canAccessOffice(userId: string, officeId: string): Promise<boolean> {

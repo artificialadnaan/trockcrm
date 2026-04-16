@@ -1,7 +1,7 @@
 import { Router } from "express";
 import crypto from "crypto";
 import jwt from "jsonwebtoken";
-import { getDevUsers, getUserByEmail, getUserById, signJwt } from "./service.js";
+import { ensureDevUserPrimaryOffice, getDevUsers, getUserByEmail, getUserById, signJwt } from "./service.js";
 import { authMiddleware } from "../../middleware/auth.js";
 import { authLimiter } from "../../middleware/rate-limit.js";
 import { AppError } from "../../middleware/error-handler.js";
@@ -64,22 +64,28 @@ router.post("/dev/login", authLimiter, async (req, res, next) => {
       throw new AppError(403, "User is inactive");
     }
 
+    const demoDefaultOfficeSlug = process.env.DEMO_DEFAULT_OFFICE_SLUG?.trim().toLowerCase() || "dallas";
+    const resolvedUser = await ensureDevUserPrimaryOffice(user.id, demoDefaultOfficeSlug);
+    if (!resolvedUser) {
+      throw new AppError(404, "User not found");
+    }
+
     const token = signJwt({
-      userId: user.id,
-      email: user.email,
-      officeId: user.officeId,
-      role: user.role,
+      userId: resolvedUser.id,
+      email: resolvedUser.email,
+      officeId: resolvedUser.officeId,
+      role: resolvedUser.role,
     });
 
     res.cookie("token", token, tokenCookieOptions);
 
     res.json({
       user: {
-        id: user.id,
-        email: user.email,
-        displayName: user.displayName,
-        role: user.role,
-        officeId: user.officeId,
+        id: resolvedUser.id,
+        email: resolvedUser.email,
+        displayName: resolvedUser.displayName,
+        role: resolvedUser.role,
+        officeId: resolvedUser.officeId,
       },
     });
   } catch (err) {
