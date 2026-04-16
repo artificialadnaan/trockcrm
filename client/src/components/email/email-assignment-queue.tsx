@@ -1,10 +1,10 @@
 import { useEffect, useState } from "react";
 import { AlertCircle, RefreshCw } from "lucide-react";
 import { api } from "@/lib/api";
-import { associateEmailToDeal } from "@/hooks/use-emails";
 import { Button } from "@/components/ui/button";
 import {
   EmailAssignmentQueueView,
+  type EmailAssignmentTarget,
   type EmailAssignmentQueueItem,
 } from "./email-assignment-queue-view";
 
@@ -48,8 +48,11 @@ export function EmailAssignmentQueue() {
     void fetchQueue();
   }, [page]);
 
-  const handleAssign = async (emailId: string, dealId: string) => {
-    await associateEmailToDeal(emailId, dealId);
+  const handleAssign = async (emailId: string, target: EmailAssignmentTarget) => {
+    await api<{ success: boolean }>(`/email/${emailId}/associate`, {
+      method: "POST",
+      json: target,
+    });
     await fetchQueue();
   };
 

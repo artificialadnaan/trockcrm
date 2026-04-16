@@ -15,6 +15,13 @@ export interface DealScopingCompletionStateEntry {
   missingAttachments: string[];
 }
 
+export interface DealScopingAttachmentRequirement {
+  key: string;
+  category: string;
+  label: string;
+  satisfied: boolean;
+}
+
 export interface DealScopingReadiness {
   status: DealScopingIntakeStatus;
   errors: {
@@ -24,6 +31,7 @@ export interface DealScopingReadiness {
   completionState: Record<string, DealScopingCompletionStateEntry>;
   requiredSections: string[];
   requiredAttachmentKeys: string[];
+  attachmentRequirements: DealScopingAttachmentRequirement[];
 }
 
 export interface DealScopingIntake {

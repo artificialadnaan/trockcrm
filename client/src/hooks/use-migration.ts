@@ -18,6 +18,7 @@ export interface MigrationExceptionItem {
     | "unknown_company"
     | "ambiguous_property"
     | "ambiguous_contact"
+    | "ambiguous_deal_association"
     | "lead_vs_deal_conflict"
     | "ambiguous_email_activity_attribution"
     | "missing_owner_assignment";
@@ -79,6 +80,66 @@ export interface StagedContact {
   validationStatus: string;
   validationErrors: Array<{ field: string; error: string }>;
   validationWarnings: Array<{ field: string; warning: string }>;
+  promotedAt: string | null;
+}
+
+export interface StagedCompany {
+  id: string;
+  hubspotCompanyId: string;
+  mappedName: string | null;
+  mappedDomain: string | null;
+  mappedPhone: string | null;
+  mappedOwnerEmail: string | null;
+  mappedLeadHint: string | null;
+  validationStatus: string;
+  validationErrors: Array<{ field: string; error: string }>;
+  validationWarnings: Array<{ field: string; warning: string }>;
+  exceptionBucket: string | null;
+  exceptionReason: string | null;
+  reviewNotes: string | null;
+  promotedAt: string | null;
+}
+
+export interface StagedProperty {
+  id: string;
+  hubspotPropertyId: string;
+  mappedName: string | null;
+  mappedCompanyName: string | null;
+  mappedCompanyDomain: string | null;
+  mappedAddress: string | null;
+  mappedCity: string | null;
+  mappedState: string | null;
+  mappedZip: string | null;
+  mappedOwnerEmail: string | null;
+  candidateCompanyCount: number;
+  validationStatus: string;
+  validationErrors: Array<{ field: string; error: string }>;
+  validationWarnings: Array<{ field: string; warning: string }>;
+  exceptionBucket: string | null;
+  exceptionReason: string | null;
+  reviewNotes: string | null;
+  promotedAt: string | null;
+}
+
+export interface StagedLead {
+  id: string;
+  hubspotLeadId: string;
+  mappedName: string | null;
+  mappedCompanyName: string | null;
+  mappedPropertyName: string | null;
+  mappedDealName: string | null;
+  candidateDealCount: number;
+  candidatePropertyCount: number;
+  mappedOwnerEmail: string | null;
+  mappedSourceStage: string | null;
+  mappedAmount: string | number | null;
+  mappedCloseDate: string | null;
+  validationStatus: string;
+  validationErrors: Array<{ field: string; error: string }>;
+  validationWarnings: Array<{ field: string; warning: string }>;
+  exceptionBucket: string | null;
+  exceptionReason: string | null;
+  reviewNotes: string | null;
   promotedAt: string | null;
 }
 
@@ -241,4 +302,53 @@ export function useStagedContacts(validationStatus?: string) {
   useEffect(() => { load(); }, [load]);
 
   return { rows, total, page, setPage, loading, selected, setSelected, approve, reject, merge, batchApprove, refetch: load };
+}
+
+function useStagedQueue<T extends { id: string }>(
+  endpoint: string,
+  validationStatus?: string
+) {
+  const [rows, setRows] = useState<T[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
+  const [loading, setLoading] = useState(true);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const params = new URLSearchParams({ page: String(page), limit: "50" });
+      if (validationStatus) params.set("validationStatus", validationStatus);
+      const data = await api<{ rows: T[]; total: number }>(`${endpoint}?${params}`);
+      setRows(data.rows);
+      setTotal(data.total);
+    } finally {
+      setLoading(false);
+    }
+  }, [endpoint, page, validationStatus]);
+
+  const approve = async (id: string) => {
+    await api(`${endpoint}/${id}/approve`, { method: "POST" });
+    await load();
+  };
+
+  const reject = async (id: string, notes?: string) => {
+    await api(`${endpoint}/${id}/reject`, { method: "POST", json: { notes } });
+    await load();
+  };
+
+  useEffect(() => { load(); }, [load]);
+
+  return { rows, total, page, setPage, loading, approve, reject, refetch: load };
+}
+
+export function useStagedCompanies(validationStatus?: string) {
+  return useStagedQueue<StagedCompany>("/migration/companies", validationStatus);
+}
+
+export function useStagedProperties(validationStatus?: string) {
+  return useStagedQueue<StagedProperty>("/migration/properties", validationStatus);
+}
+
+export function useStagedLeads(validationStatus?: string) {
+  return useStagedQueue<StagedLead>("/migration/leads", validationStatus);
 }
