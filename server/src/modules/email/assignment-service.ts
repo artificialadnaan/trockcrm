@@ -6,6 +6,8 @@ export type EmailAssignmentMatch =
   | "explicit_deal_number"
   | "prior_thread_assignment"
   | "single_deal"
+  | "single_lead"
+  | "single_property"
   | "company_only";
 
 export interface EmailAssignmentDealCandidate {
@@ -247,10 +249,25 @@ function findPropertyCandidate(
     return signature ? text.includes(signature) : false;
   });
   if (matches.length !== 1) return null;
+  return matches[0] ?? null;
+}
 
-  const [match] = matches;
-  const relatedDealCount = match.relatedDealIds?.length ?? 0;
-  return relatedDealCount <= 1 ? match : null;
+function buildDealResolutionResult(
+  dealId: string,
+  matchedBy: EmailAssignmentMatch,
+  candidateDealIds: string[],
+  confidence: EmailAssignmentConfidence = "high"
+): EmailAssignmentResult {
+  return {
+    assignedEntityType: "deal",
+    assignedEntityId: dealId,
+    assignedDealId: dealId,
+    confidence,
+    ambiguityReason: null,
+    matchedBy,
+    requiresClassificationTask: false,
+    candidateDealIds,
+  };
 }
 
 function buildCompanyFallbackResult(
@@ -289,30 +306,20 @@ export function resolveEmailAssignment(context: EmailAssignmentContext): EmailAs
 
   const explicitCandidate = findExplicitDealCandidate(rawText, candidateDeals);
   if (explicitCandidate) {
-    return {
-      assignedEntityType: "deal",
-      assignedEntityId: explicitCandidate.id,
-      assignedDealId: explicitCandidate.id,
-      confidence: "high",
-      ambiguityReason: null,
-      matchedBy: "explicit_deal_number",
-      requiresClassificationTask: false,
-      candidateDealIds: candidateDeals.map((deal) => deal.id),
-    };
+    return buildDealResolutionResult(
+      explicitCandidate.id,
+      "explicit_deal_number",
+      candidateDeals.map((deal) => deal.id)
+    );
   }
 
   if (context.priorThreadAssignment) {
     if (context.priorThreadAssignment.assignedEntityType === "deal" && context.priorThreadAssignment.assignedDealId) {
-      return {
-        assignedEntityType: "deal",
-        assignedEntityId: context.priorThreadAssignment.assignedDealId,
-        assignedDealId: context.priorThreadAssignment.assignedDealId,
-        confidence: "high",
-        ambiguityReason: null,
-        matchedBy: "prior_thread_assignment",
-        requiresClassificationTask: false,
-        candidateDealIds: candidateDeals.map((deal) => deal.id),
-      };
+      return buildDealResolutionResult(
+        context.priorThreadAssignment.assignedDealId,
+        "prior_thread_assignment",
+        candidateDeals.map((deal) => deal.id)
+      );
     }
 
     if (context.priorThreadAssignment.assignedEntityType === "company") {
@@ -342,20 +349,25 @@ export function resolveEmailAssignment(context: EmailAssignmentContext): EmailAs
 
   if (candidateDeals.length === 1) {
     const [deal] = candidateDeals;
-    return {
-      assignedEntityType: "deal",
-      assignedEntityId: deal.id,
-      assignedDealId: deal.id,
-      confidence: "high",
-      ambiguityReason: null,
-      matchedBy: "single_deal",
-      requiresClassificationTask: false,
-      candidateDealIds: [deal.id],
-    };
+    return buildDealResolutionResult(deal.id, "single_deal", [deal.id]);
   }
 
-  // Property matches remain advisory until the reporting/timeline model can store them end to end.
-  if (candidateProperties.length === 1) {
+  if (candidateLeads.length === 1) {
+    const [lead] = candidateLeads;
+    const relatedDealId = lead.relatedDealId ?? lead.id;
+    return buildDealResolutionResult(relatedDealId, "single_lead", candidateDeals.map((deal) => deal.id));
+  }
+
+  const propertyMatch = findPropertyCandidate(searchText, candidateProperties);
+  if (propertyMatch) {
+    const relatedDealIds = uniqueById(
+      (propertyMatch.relatedDealIds ?? []).flatMap((dealId) => candidateDeals.filter((deal) => deal.id === dealId))
+    ).map((deal) => deal.id);
+
+    if (relatedDealIds.length === 1) {
+      return buildDealResolutionResult(relatedDealIds[0]!, "single_property", candidateDeals.map((deal) => deal.id));
+    }
+
     return buildCompanyFallbackResult(companyId, "ambiguous_property_match", candidateDeals.map((deal) => deal.id));
   }
 

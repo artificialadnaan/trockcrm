@@ -95,7 +95,7 @@ describe("resolveEmailAssignment", () => {
     });
   });
 
-  it("falls back to company-only when only lead metadata is available", () => {
+  it("resolves a unique lead match before falling back to company-only", () => {
     const result = resolveEmailAssignment({
       subject: "Lead follow-up",
       bodyPreview: "Checking in on the lead status",
@@ -106,28 +106,39 @@ describe("resolveEmailAssignment", () => {
           id: "lead-1",
           leadNumber: "TR-2026-L001",
           name: "Alpha Lead",
-          relatedDealId: null,
+          relatedDealId: "deal-1",
         },
       ],
     });
 
     expect(result).toMatchObject({
-      assignedEntityType: "company",
-      assignedEntityId: "company-1",
-      assignedDealId: null,
-      confidence: "low",
-      ambiguityReason: "company_only_fallback",
-      matchedBy: "company_only",
-      requiresClassificationTask: true,
+      assignedEntityType: "deal",
+      assignedEntityId: "deal-1",
+      assignedDealId: "deal-1",
+      confidence: "high",
+      ambiguityReason: null,
+      matchedBy: "single_lead",
+      requiresClassificationTask: false,
     });
   });
 
-  it("falls back to company-only when only property metadata is available", () => {
+  it("resolves a unique property match when exactly one active opportunity exists under it", () => {
     const result = resolveEmailAssignment({
-      subject: "Re: 123 Main St",
-      bodyPreview: "Following up on the property only",
+      subject: "Re: 123 Main St Dallas TX 75201",
+      bodyPreview: "Following up on 123 Main St, Dallas, TX 75201",
       contactCompanyId: "company-1",
-      dealCandidates: [],
+      dealCandidates: [
+        dealCandidate(),
+        dealCandidate({
+          id: "deal-2",
+          dealNumber: "TR-2026-0002",
+          name: "Beta Roof",
+          propertyAddress: "555 Oak Ave",
+          propertyCity: "Austin",
+          propertyState: "TX",
+          propertyZip: "73301",
+        }),
+      ],
       propertyCandidates: [
         {
           id: "property-1",
@@ -135,22 +146,23 @@ describe("resolveEmailAssignment", () => {
           propertyCity: "Dallas",
           propertyState: "TX",
           propertyZip: "75201",
+          relatedDealIds: ["deal-1"],
         },
       ],
     });
 
     expect(result).toMatchObject({
-      assignedEntityType: "company",
-      assignedEntityId: "company-1",
-      assignedDealId: null,
-      confidence: "low",
-      ambiguityReason: "ambiguous_property_match",
-      matchedBy: "company_only",
-      requiresClassificationTask: true,
+      assignedEntityType: "deal",
+      assignedEntityId: "deal-1",
+      assignedDealId: "deal-1",
+      confidence: "high",
+      ambiguityReason: null,
+      matchedBy: "single_property",
+      requiresClassificationTask: false,
     });
   });
 
-  it("falls back to company-only when a property match would span multiple opportunities", () => {
+  it("resolves a property match even when other active opportunities exist under different properties", () => {
     const result = resolveEmailAssignment({
       subject: "Re: 123 Main St Dallas TX 75201",
       bodyPreview: "Checking the roof at 123 Main St, Dallas, TX 75201",
@@ -170,20 +182,20 @@ describe("resolveEmailAssignment", () => {
     });
 
     expect(result).toMatchObject({
-      assignedEntityType: "company",
-      assignedEntityId: "company-1",
-      assignedDealId: null,
-      confidence: "low",
-      ambiguityReason: "multiple_deal_candidates",
-      matchedBy: "company_only",
-      requiresClassificationTask: true,
+      assignedEntityType: "deal",
+      assignedEntityId: "deal-1",
+      assignedDealId: "deal-1",
+      confidence: "high",
+      ambiguityReason: null,
+      matchedBy: "single_property",
+      requiresClassificationTask: false,
     });
   });
 
   it("keeps a property match company-only when the property spans multiple active opportunities", () => {
     const result = resolveEmailAssignment({
-      subject: "Re: 123 Main St",
-      bodyPreview: "Following up on the property",
+      subject: "Re: 123 Main St Dallas TX 75201",
+      bodyPreview: "Following up on 123 Main St, Dallas, TX 75201",
       contactCompanyId: "company-1",
       dealCandidates: [
         dealCandidate(),
