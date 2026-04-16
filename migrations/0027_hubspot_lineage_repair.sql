@@ -48,6 +48,16 @@ BEGIN
       FROM information_schema.tables
       WHERE table_schema = office_schema
         AND table_name = 'leads'
+    ) AND EXISTS (
+      SELECT 1
+      FROM information_schema.tables
+      WHERE table_schema = 'migration'
+        AND table_name = 'staged_deals'
+    ) AND EXISTS (
+      SELECT 1
+      FROM information_schema.tables
+      WHERE table_schema = 'migration'
+        AND table_name = 'staged_contacts'
     ) THEN
       EXECUTE format(
         'ALTER TABLE %I.properties ADD COLUMN IF NOT EXISTS legacy_property_key text',

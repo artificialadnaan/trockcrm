@@ -17,6 +17,9 @@ describe("0027 hubspot lineage repair migration", () => {
 
     expect(migrationSql).toContain("migration.staged_deals");
     expect(migrationSql).toContain("migration.staged_contacts");
+    expect(migrationSql).toContain("table_schema = 'migration'");
+    expect(migrationSql).toContain("table_name = 'staged_deals'");
+    expect(migrationSql).toContain("table_name = 'staged_contacts'");
     expect(migrationSql).toContain("jsonb_array_elements");
     expect(migrationSql).toContain("promoted_deal_id");
     expect(migrationSql).toContain("promoted_contact_id");
