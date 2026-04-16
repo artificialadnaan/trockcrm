@@ -12,6 +12,14 @@ export async function runAiDisconnectDigest(): Promise<void> {
       if (!slugRegex.test(office.slug)) continue;
 
       const schemaName = `office_${office.slug}`;
+      const schemaCheck = await client.query(
+        "SELECT schema_name FROM information_schema.schemata WHERE schema_name = $1",
+        [schemaName]
+      );
+      if (schemaCheck.rows.length === 0) {
+        console.warn(`[Worker:ai-disconnect-digest] Skipping office ${office.slug}: schema ${schemaName} does not exist`);
+        continue;
+      }
       let lockId = 0;
       for (const char of String(office.id)) {
         lockId = ((lockId * 31) + char.charCodeAt(0)) >>> 0;

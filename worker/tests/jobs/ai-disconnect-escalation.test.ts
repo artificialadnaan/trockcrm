@@ -23,6 +23,9 @@ describe("ai disconnect escalation worker", () => {
       if (sql.includes("FROM public.offices WHERE is_active = true")) {
         return { rows: [{ id: "office-1", slug: "beta", name: "Beta" }] };
       }
+      if (sql.includes("FROM information_schema.schemata")) {
+        return { rows: [{ schema_name: "office_beta" }] };
+      }
 
       if (sql.includes("SELECT pg_try_advisory_lock")) {
         return { rows: [{ acquired: true }] };
@@ -92,6 +95,7 @@ describe("ai disconnect escalation worker", () => {
       if (sql.includes("FROM public.offices WHERE is_active = true")) {
         return { rows: [{ id: "office-1", slug: "beta", name: "Beta" }] };
       }
+      if (sql.includes("FROM information_schema.schemata")) return { rows: [{ schema_name: "office_beta" }] };
       if (sql.includes("SELECT pg_try_advisory_lock")) return { rows: [{ acquired: true }] };
       if (sql === "BEGIN" || sql === "COMMIT") return { rows: [] };
       if (sql.includes("disconnect_type")) {
@@ -113,5 +117,23 @@ describe("ai disconnect escalation worker", () => {
     });
 
     await runAiDisconnectEscalationScan();
+  });
+
+  it("skips offices whose tenant schema does not exist", async () => {
+    queryMock.mockImplementation(async (sql: string) => {
+      if (sql.includes("FROM public.offices WHERE is_active = true")) {
+        return { rows: [{ id: "office-1", slug: "dfw", name: "DFW" }] };
+      }
+      if (sql.includes("FROM information_schema.schemata")) {
+        return { rows: [] };
+      }
+      throw new Error(`Unexpected SQL: ${sql}`);
+    });
+
+    await runAiDisconnectEscalationScan();
+
+    expect(
+      queryMock.mock.calls.some(([sql]) => typeof sql === "string" && sql === "BEGIN")
+    ).toBe(false);
   });
 });
