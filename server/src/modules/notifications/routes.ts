@@ -1,6 +1,11 @@
 import { Router } from "express";
 import { authMiddleware } from "../../middleware/auth.js";
-import { registerSseConnection, canAdmitSseConnection, writeSse } from "./sse-manager.js";
+import {
+  registerSseConnection,
+  canAdmitSseConnection,
+  writeSse,
+  buildSsePaddingComment,
+} from "./sse-manager.js";
 
 const router = Router();
 
@@ -19,6 +24,9 @@ router.get("/stream", authMiddleware, (req, res) => {
   res.setHeader("Connection", "keep-alive");
   res.setHeader("X-Accel-Buffering", "no"); // Disable nginx buffering on Railway
   res.flushHeaders();
+
+  // Warm proxy/CDN buffers so the first real SSE event reaches browsers immediately.
+  writeSse(res, buildSsePaddingComment());
 
   // Send initial connection event
   writeSse(res, `event: connected\ndata: ${JSON.stringify({ userId: req.user!.id })}\n\n`);

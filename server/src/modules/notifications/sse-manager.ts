@@ -17,8 +17,13 @@ const connections = new Map<string, Set<SseConnection>>();
 
 const MAX_PER_USER = 5;
 const MAX_GLOBAL = 200;
+const DEFAULT_SSE_PADDING_BYTES = 2048;
 
 type FlushableResponse = Response & { flush?: () => void };
+
+export function buildSsePaddingComment(byteCount: number = DEFAULT_SSE_PADDING_BYTES): string {
+  return `:${" ".repeat(byteCount)}\n\n`;
+}
 
 export function writeSse(res: Response, payload: string): void {
   const flushable = res as FlushableResponse;

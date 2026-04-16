@@ -1,6 +1,12 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import type { Response } from "express";
-import { canAdmitSseConnection, registerSseConnection, pushToUser, writeSse } from "../../../src/modules/notifications/sse-manager.js";
+import {
+  canAdmitSseConnection,
+  buildSsePaddingComment,
+  registerSseConnection,
+  pushToUser,
+  writeSse,
+} from "../../../src/modules/notifications/sse-manager.js";
 
 function makeResponse() {
   return {
@@ -23,6 +29,14 @@ describe("sse-manager", () => {
 
     expect(res.write).toHaveBeenCalledWith("event: connected\ndata: {}\n\n");
     expect(res.flush).toHaveBeenCalledTimes(1);
+  });
+
+  it("builds a proxy-warming padding comment for initial SSE delivery", () => {
+    const comment = buildSsePaddingComment();
+
+    expect(comment.startsWith(":")).toBe(true);
+    expect(comment.endsWith("\n\n")).toBe(true);
+    expect(comment.length).toBeGreaterThan(2048);
   });
 
   it("pushes notifications through registered connections and flushes them", () => {
