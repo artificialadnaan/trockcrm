@@ -13,6 +13,7 @@ export type InterventionResolutionReason =
 export interface InterventionMutationResult {
   updatedCount: number;
   skippedCount: number;
+  errors: Array<{ caseId: string; message: string }>;
 }
 
 export interface InterventionQueueItem {

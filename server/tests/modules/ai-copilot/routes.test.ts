@@ -421,24 +421,24 @@ describe("ai copilot routes", () => {
 
   it("applies batch intervention mutations for director users", async () => {
     interventionServiceMocks.assignInterventionCases.mockResolvedValue({
-      updatedCount: 2,
-      skippedCount: 0,
-      errors: [],
+      updatedCount: 1,
+      skippedCount: 1,
+      errors: [{ caseId: "case-2", message: "Cannot assign a resolved case" }],
     });
     interventionServiceMocks.snoozeInterventionCases.mockResolvedValue({
-      updatedCount: 2,
-      skippedCount: 0,
-      errors: [],
+      updatedCount: 1,
+      skippedCount: 1,
+      errors: [{ caseId: "case-2", message: "Cannot snooze a resolved case" }],
     });
     interventionServiceMocks.resolveInterventionCases.mockResolvedValue({
-      updatedCount: 2,
-      skippedCount: 0,
-      errors: [],
+      updatedCount: 1,
+      skippedCount: 1,
+      errors: [{ caseId: "case-2", message: "Case is already resolved" }],
     });
     interventionServiceMocks.escalateInterventionCases.mockResolvedValue({
-      updatedCount: 2,
-      skippedCount: 0,
-      errors: [],
+      updatedCount: 1,
+      skippedCount: 1,
+      errors: [{ caseId: "case-2", message: "Case is already escalated" }],
     });
 
     const app = createApp("director");
@@ -447,6 +447,11 @@ describe("ai copilot routes", () => {
       .post("/api/ai/ops/interventions/batch-assign")
       .send({ caseIds: ["case-1", "case-2"], assignedTo: "manager-2", notes: "Rebalance queue" });
     expect(assignRes.status).toBe(200);
+    expect(assignRes.body).toEqual({
+      updatedCount: 1,
+      skippedCount: 1,
+      errors: [{ caseId: "case-2", message: "Cannot assign a resolved case" }],
+    });
     expect(interventionServiceMocks.assignInterventionCases).toHaveBeenCalledWith(expect.anything(), {
       officeId: "office-1",
       actorUserId: "director-1",
@@ -464,6 +469,11 @@ describe("ai copilot routes", () => {
         notes: "Waiting on customer reply",
       });
     expect(snoozeRes.status).toBe(200);
+    expect(snoozeRes.body).toEqual({
+      updatedCount: 1,
+      skippedCount: 1,
+      errors: [{ caseId: "case-2", message: "Cannot snooze a resolved case" }],
+    });
     expect(interventionServiceMocks.snoozeInterventionCases).toHaveBeenCalledWith(expect.anything(), {
       officeId: "office-1",
       actorUserId: "director-1",
@@ -481,6 +491,11 @@ describe("ai copilot routes", () => {
         notes: "Owner already aligned on next step",
       });
     expect(resolveRes.status).toBe(200);
+    expect(resolveRes.body).toEqual({
+      updatedCount: 1,
+      skippedCount: 1,
+      errors: [{ caseId: "case-2", message: "Case is already resolved" }],
+    });
     expect(interventionServiceMocks.resolveInterventionCases).toHaveBeenCalledWith(expect.anything(), {
       officeId: "office-1",
       actorUserId: "director-1",
@@ -502,6 +517,11 @@ describe("ai copilot routes", () => {
       .post("/api/ai/ops/interventions/batch-escalate")
       .send({ caseIds: ["case-1", "case-2"], notes: "Needs leadership review" });
     expect(escalateRes.status).toBe(200);
+    expect(escalateRes.body).toEqual({
+      updatedCount: 1,
+      skippedCount: 1,
+      errors: [{ caseId: "case-2", message: "Case is already escalated" }],
+    });
     expect(interventionServiceMocks.escalateInterventionCases).toHaveBeenCalledWith(expect.anything(), {
       officeId: "office-1",
       actorUserId: "director-1",
@@ -513,24 +533,24 @@ describe("ai copilot routes", () => {
 
   it("applies single-case intervention mutations for director users", async () => {
     interventionServiceMocks.assignInterventionCases.mockResolvedValue({
-      updatedCount: 1,
-      skippedCount: 0,
-      errors: [],
+      updatedCount: 0,
+      skippedCount: 1,
+      errors: [{ caseId: "case-1", message: "Cannot assign a resolved case" }],
     });
     interventionServiceMocks.snoozeInterventionCases.mockResolvedValue({
-      updatedCount: 1,
-      skippedCount: 0,
-      errors: [],
+      updatedCount: 0,
+      skippedCount: 1,
+      errors: [{ caseId: "case-1", message: "Cannot snooze a resolved case" }],
     });
     interventionServiceMocks.resolveInterventionCases.mockResolvedValue({
-      updatedCount: 1,
-      skippedCount: 0,
-      errors: [],
+      updatedCount: 0,
+      skippedCount: 1,
+      errors: [{ caseId: "case-1", message: "Case is already resolved" }],
     });
     interventionServiceMocks.escalateInterventionCases.mockResolvedValue({
-      updatedCount: 1,
-      skippedCount: 0,
-      errors: [],
+      updatedCount: 0,
+      skippedCount: 1,
+      errors: [{ caseId: "case-1", message: "Case is already escalated" }],
     });
 
     const app = createApp("director");
@@ -539,6 +559,11 @@ describe("ai copilot routes", () => {
       .post("/api/ai/ops/interventions/case-1/assign")
       .send({ assignedTo: "manager-2", notes: "Direct owner change" });
     expect(assignRes.status).toBe(200);
+    expect(assignRes.body).toEqual({
+      updatedCount: 0,
+      skippedCount: 1,
+      errors: [{ caseId: "case-1", message: "Cannot assign a resolved case" }],
+    });
     expect(interventionServiceMocks.assignInterventionCases).toHaveBeenCalledWith(expect.anything(), {
       officeId: "office-1",
       actorUserId: "director-1",
@@ -552,6 +577,11 @@ describe("ai copilot routes", () => {
       .post("/api/ai/ops/interventions/case-1/snooze")
       .send({ snoozedUntil: "2026-04-20T00:00:00.000Z", notes: "Waiting for reply" });
     expect(snoozeRes.status).toBe(200);
+    expect(snoozeRes.body).toEqual({
+      updatedCount: 0,
+      skippedCount: 1,
+      errors: [{ caseId: "case-1", message: "Cannot snooze a resolved case" }],
+    });
     expect(interventionServiceMocks.snoozeInterventionCases).toHaveBeenCalledWith(expect.anything(), {
       officeId: "office-1",
       actorUserId: "director-1",
@@ -565,6 +595,11 @@ describe("ai copilot routes", () => {
       .post("/api/ai/ops/interventions/case-1/resolve")
       .send({ resolutionReason: "task_completed", notes: "Task is complete" });
     expect(resolveRes.status).toBe(200);
+    expect(resolveRes.body).toEqual({
+      updatedCount: 0,
+      skippedCount: 1,
+      errors: [{ caseId: "case-1", message: "Case is already resolved" }],
+    });
     expect(interventionServiceMocks.resolveInterventionCases).toHaveBeenCalledWith(expect.anything(), {
       officeId: "office-1",
       actorUserId: "director-1",
@@ -583,6 +618,11 @@ describe("ai copilot routes", () => {
       .post("/api/ai/ops/interventions/case-1/escalate")
       .send({ notes: "Director visibility needed" });
     expect(escalateRes.status).toBe(200);
+    expect(escalateRes.body).toEqual({
+      updatedCount: 0,
+      skippedCount: 1,
+      errors: [{ caseId: "case-1", message: "Case is already escalated" }],
+    });
     expect(interventionServiceMocks.escalateInterventionCases).toHaveBeenCalledWith(expect.anything(), {
       officeId: "office-1",
       actorUserId: "director-1",
