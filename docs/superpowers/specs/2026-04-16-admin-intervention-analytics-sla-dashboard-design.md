@@ -229,7 +229,7 @@ Top-row KPI cards:
 
 - Open Cases
 - Overdue Cases
-- Escalated Still Open
+- Escalated Cases
 - Snoozes Past Due
 - Repeat Cases Open
 
@@ -269,7 +269,7 @@ Each row should show:
 
 - open cases
 - overdue cases
-- reopened cases
+- repeat open cases
 - clearance rate if available
 
 Ranking rule:
@@ -300,6 +300,21 @@ Source-dimension mapping rule:
 - rep hotspots should deep-link via the linked deal rep filter
 - company hotspots should deep-link via the linked company filter
 - stage hotspots should deep-link via the linked deal stage filter
+
+Stable hotspot identity rule:
+
+- hotspot rows must carry both a display label and a stable filter identity
+- display labels must never be used as the queue filter
+- each row should include:
+  - `entityType`
+  - `filterValue`
+  - `label`
+- expected mappings:
+  - assignee row: `entityType = "assignee"`, `filterValue = <userId>`
+  - disconnect type row: `entityType = "disconnect_type"`, `filterValue = <disconnectType>`
+  - rep row: `entityType = "rep"`, `filterValue = <repUserId>`
+  - company row: `entityType = "company"`, `filterValue = <companyId>`
+  - stage row: `entityType = "stage"`, `filterValue = <stageKey>`
 
 Required queue-link contract for v1:
 
@@ -332,7 +347,7 @@ A read-first list of the highest-priority problem cases:
 - overdue indicator
 - escalated indicator
 - assigned owner
-- direct link to `/admin/interventions`
+- direct link to the specific case in `/admin/interventions`
 
 This is not a second writable queue. It is a high-signal subset for leadership.
 
@@ -356,6 +371,20 @@ Default breach-queue ordering:
 - then overdue age desc
 - then escalated cases before non-escalated cases when prior fields tie
 - then label asc for stability
+
+Linking rule for breach rows:
+
+- each breach row should expose:
+  - a primary `detailLink` that opens the exact case in `/admin/interventions`
+  - a secondary `queueLink` that opens the broader matching queue slice
+- the case-level link should use a deterministic case selector such as `caseId`
+- if a breach row matches multiple breach reasons, `queueLink` must choose one deterministic primary queue slice using this precedence:
+  - `overdue`
+  - `escalated_open`
+  - `snooze_breached`
+  - `repeat_open`
+- `queueLink` should use the highest-priority matching reason from that list
+- the full `breachReasons` array remains in the payload so the UI can still show all matched reasons even though the queue link picks one primary slice
 
 ### 5. SLA Rules Explanation
 
@@ -384,7 +413,7 @@ Metric definitions:
 - `openCases`: cases where status is `open`
 - `overdueCases`: open cases where age exceeds threshold
 - `snoozeOverdueCases`: snoozed cases where `snoozedUntil < now`
-- `escalatedOpenCases`: cases where `escalated = true` and status is not resolved
+- `escalatedCases`: cases where `escalated = true` and status is not resolved, including snoozed escalations
 - `repeatOpenCases`: open cases with `reopenCount > 0`
 - `clearanceRate30d`: distinct cases resolved in the last 30 days divided by distinct cases with at least one intervention action in the last 30 days
 - `reopenRate30d`: distinct cases that reopened in the last 30 days and had a prior resolution event divided by distinct cases resolved in the last 30 days
@@ -407,6 +436,12 @@ Reopen-rate cohort rule:
 - this is a trailing operational rate, not a strict matched-cohort survival analysis
 - the UI label should reflect that wording:
   - `Reopen Rate (resolved vs reopened in 30d)`
+- this slice must persist the timestamp of the most recent reopen event needed for that numerator
+- recommended storage contract:
+  - add `lastReopenedAt` to `ai_disconnect_cases`
+  - update it whenever a case transitions from `resolved` back into an active lifecycle
+  - backfill it from `ai_disconnect_case_history` where prior reopen transitions can be reconstructed
+- if historical backfill cannot recover every old reopen precisely, the spec should require best-effort backfill plus explicit forward correctness from the moment this slice ships
 
 Repeat-case rule:
 
@@ -419,8 +454,21 @@ Age-anchor rule:
 - for a case that has never reopened, that is its first active detection timestamp
 - for a reopened case, that is the timestamp of the latest reopen into the current active lifecycle, not the original historical creation time
 - this slice should persist that lifecycle-start timestamp in the intervention data model if it is not already available
+- recommended storage contract:
+  - add `currentLifecycleStartedAt` to `ai_disconnect_cases`
+  - set it when a case is first materialized
+  - reset it whenever the case reopens into a new active lifecycle
 - this slice should backfill that lifecycle-start timestamp for existing historical cases so current open-case age, overdue status, and age metrics are computed consistently
 - `ageDays`, overdue status, average open age, and average age to resolution must all use the same anchor
+
+Hotspot metric rule:
+
+- hotspot rows are dimension-scoped aggregations
+- `openCases`, `overdueCases`, and `repeatOpenCases` on a row must all be computed only from cases belonging to that row's dimension filter
+- `clearanceRate30d` on a row means:
+  - distinct cases in that row's dimension resolved in the last 30 days
+  - divided by distinct cases in that same row's dimension with at least one intervention action in the last 30 days
+- if a dimension cannot support a trustworthy row-scoped clearance denominator in v1, that row should return `clearanceRate30d = null` rather than borrowing an office-wide rate
 
 Formatting and empty-set rule:
 
@@ -451,7 +499,7 @@ interface InterventionAnalyticsDashboard {
   summary: {
     openCases: number;
     overdueCases: number;
-    escalatedOpenCases: number;
+    escalatedCases: number;
     snoozeOverdueCases: number;
     repeatOpenCases: number;
     openCasesBySeverity: Record<"critical" | "high" | "medium" | "low", number>;
@@ -493,6 +541,8 @@ interface InterventionAnalyticsDashboard {
 
 interface InterventionAnalyticsHotspotRow {
   key: string;
+  entityType: "assignee" | "disconnect_type" | "rep" | "company" | "stage";
+  filterValue: string | null;
   label: string;
   openCases: number;
   overdueCases: number;
@@ -513,6 +563,7 @@ interface InterventionAnalyticsBreachRow {
   assignedTo: string | null;
   escalated: boolean;
   breachReasons: Array<"overdue" | "escalated_open" | "snooze_breached" | "repeat_open">;
+  detailLink: string;
   queueLink: string;
 }
 ```
@@ -537,6 +588,19 @@ Required deep links into `/admin/interventions`:
 - snooze-breached queue
 - cluster-specific queue
 - hotspot-specific queue rows where supported by the query contract
+- exact case detail route using `caseId`
+
+Case-detail deep-link contract:
+
+- `/admin/interventions` must support a canonical query parameter:
+  - `caseId=<uuid>`
+- when `caseId` is present:
+  - the workspace must load the matching case detail explicitly
+  - the detail panel must open for that case even if the current queue page would not otherwise have that row visible
+  - the queue may still load its normal list, but the detail panel selection must be driven by `caseId`
+- `InterventionAnalyticsBreachRow.detailLink` must use that contract
+- recommended form:
+  - `/admin/interventions?caseId=<caseId>`
 
 Filter-combination rule:
 
