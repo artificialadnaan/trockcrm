@@ -27,6 +27,20 @@ function createMockTenantDb(rows: any[] = []) {
   } as any;
 }
 
+function flattenSqlQuery(query: any): string {
+  return (query?.queryChunks ?? [])
+    .map((chunk: any) => {
+      if (typeof chunk === "string") return chunk;
+      if (chunk?.value && Array.isArray(chunk.value)) {
+        return chunk.value
+          .map((part: any) => (typeof part === "string" ? part : String(part)))
+          .join("");
+      }
+      return String(chunk);
+    })
+    .join("");
+}
+
 describe("getUnifiedWorkflowOverview", () => {
   it("returns lead pipeline summary grouped by workflow family and status", async () => {
     const { getUnifiedWorkflowOverview } = await import("../../../src/modules/reports/service.js");
@@ -168,6 +182,27 @@ describe("getUnifiedWorkflowOverview", () => {
         totalDealStageActivities: 14,
       },
     ]);
+  });
+
+  it("attributes activity using activation timing instead of a hard-coded year window", async () => {
+    const { getUnifiedWorkflowOverview } = await import("../../../src/modules/reports/service.js");
+    const execute = vi.fn()
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] });
+    const tenantDb = { execute } as any;
+
+    await getUnifiedWorkflowOverview(tenantDb);
+
+    const activityQuery = execute.mock.calls[3]?.[0];
+    const sqlText = flattenSqlQuery(activityQuery);
+
+    expect(sqlText).toContain("dsi.activated_at");
+    expect(sqlText).toContain("a.occurred_at >= dsi.activated_at");
+    expect(sqlText).not.toContain(`${new Date().getFullYear()}-01-01`);
   });
 
   it("returns stale lead and stale deal outputs", async () => {

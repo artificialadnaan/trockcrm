@@ -958,7 +958,6 @@ export async function getUnifiedWorkflowOverview(
   const activityRepFilter = options.repId
     ? sql`AND a.user_id = ${options.repId}`
     : sql``;
-  const activityFrom = `${new Date().getFullYear()}-01-01`;
 
   const [
     leadPipelineResult,
@@ -1035,16 +1034,16 @@ export async function getUnifiedWorkflowOverview(
           a.user_id AS rep_id,
           u.display_name AS rep_name,
           CASE
-            WHEN dsi.status IN ('draft', 'ready') THEN 'lead'
-            ELSE 'deal'
+            WHEN dsi.id IS NULL THEN 'deal'
+            WHEN dsi.activated_at IS NOT NULL AND a.occurred_at >= dsi.activated_at THEN 'deal'
+            ELSE 'lead'
           END AS stage_group,
           a.type
         FROM activities a
         JOIN users u ON u.id = a.user_id
         JOIN deals d ON d.id = a.deal_id
         LEFT JOIN deal_scoping_intake dsi ON dsi.deal_id = d.id
-        WHERE a.occurred_at >= ${activityFrom}::timestamptz
-          AND a.occurred_at <= (NOW() + INTERVAL '1 day')
+        WHERE a.occurred_at <= (NOW() + INTERVAL '1 day')
           ${activityRepFilter}
       )
       SELECT
