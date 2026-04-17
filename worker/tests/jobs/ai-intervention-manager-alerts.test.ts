@@ -92,6 +92,10 @@ describe("ai intervention manager alerts worker", () => {
         return { rows: [] };
       }
 
+      if (sql.includes("SELECT set_config('search_path', $1, false)")) {
+        return { rows: [{ set_config: String(params?.[0] ?? "") }] };
+      }
+
       if (sql.includes("SELECT pg_advisory_unlock")) {
         return { rows: [] };
       }
@@ -126,6 +130,14 @@ describe("ai intervention manager alerts worker", () => {
     expect(sentRecipients).toEqual(["office-beta:director-1", "office-beta:admin-1"]);
     expect(skippedSchemas).toEqual(["office_dfw"]);
     expect(
+      queryMock.mock.calls.some(
+        ([sql, params]) =>
+          typeof sql === "string" &&
+          sql.includes("SELECT set_config('search_path', $1, false)") &&
+          params?.[0] === "office_beta,public"
+      )
+    ).toBe(true);
+    expect(
       logSpy.mock.calls.some(([message]) =>
         typeof message === "string" &&
         message.includes("Sent manager alerts for office beta: 1 delivered, 1 suppressed")
@@ -159,6 +171,10 @@ describe("ai intervention manager alerts worker", () => {
 
       if (sql.includes("FROM public.users") && sql.includes("role IN ('admin', 'director')")) {
         return { rows: [{ id: "director-1" }] };
+      }
+
+      if (sql.includes("SELECT set_config('search_path', $1, false)")) {
+        return { rows: [{ set_config: String(params?.[0] ?? "") }] };
       }
 
       if (sql.includes("SELECT pg_advisory_unlock")) {

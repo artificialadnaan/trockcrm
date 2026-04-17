@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import {
@@ -399,6 +399,34 @@ async function resolveOfficeTimezone(
   return getOfficeTimezone(rows[0] ?? null);
 }
 
+async function resolveOfficeSchemaName(
+  tenantDb: TenantDb | InMemoryTenantDb,
+  officeId: string
+) {
+  if (isInMemoryTenantDb(tenantDb)) {
+    return null;
+  }
+
+  const rows = await tenantDb.select({ slug: offices.slug }).from(offices).where(eq(offices.id, officeId)).limit(1);
+  const slug = rows[0]?.slug;
+  if (!slug) {
+    throw new Error(`Office ${officeId} is missing`);
+  }
+  return `office_${slug}`;
+}
+
+async function applyOfficeSearchPath(
+  tenantDb: TenantDb | InMemoryTenantDb,
+  officeId: string
+) {
+  if (isInMemoryTenantDb(tenantDb)) {
+    return;
+  }
+
+  const schemaName = await resolveOfficeSchemaName(tenantDb, officeId);
+  await tenantDb.execute(sql`SELECT set_config('search_path', ${`${schemaName},public`}, true)`);
+}
+
 async function persistSnapshot(
   tenantDb: TenantDb | InMemoryTenantDb,
   input: {
@@ -655,6 +683,7 @@ export async function sendManagerAlertSummary(
   }
 
   return tenantDb.transaction(async (tx) => {
+    await applyOfficeSearchPath(tx as TenantDb, input.officeId);
     const context = await loadManagerAlertContext(tx, { officeId: input.officeId, timezone: input.timezone, now });
     const snapshotJson = buildManagerAlertSnapshotFromCases({
       officeId: input.officeId,

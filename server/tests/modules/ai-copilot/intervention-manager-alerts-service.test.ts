@@ -85,6 +85,7 @@ type ManagerAlertNotificationRecord = {
 type ManagerAlertOfficeRecord = {
   id: string;
   timezone: string;
+  slug?: string;
 };
 
 type ManagerAlertUserRecord = {
@@ -325,6 +326,7 @@ function createTransactionalDbHarness(state?: {
         throw error;
       }
     }),
+    execute: vi.fn(async () => ({ rows: [] })),
   };
 
   return {
@@ -456,7 +458,7 @@ describe("manager alert service", () => {
           currentLifecycleStartedAt: new Date("2026-04-15T15:00:00.000Z"),
         }),
       ],
-      offices: [{ id: "office-1", timezone: "America/Chicago" }],
+      offices: [{ id: "office-1", slug: "one", timezone: "America/Chicago" }],
       users: [
         { id: "user-a", displayName: "Manager A" },
         { id: "user-b", displayName: "Manager B" },
@@ -503,7 +505,7 @@ describe("manager alert service", () => {
           currentLifecycleStartedAt: new Date("2026-04-10T15:00:00.000Z"),
         }),
       ],
-      offices: [{ id: "office-1", timezone: "America/Chicago" }],
+      offices: [{ id: "office-1", slug: "one", timezone: "America/Chicago" }],
       users: [{ id: "user-a", displayName: "Manager A" }],
     });
 
@@ -545,7 +547,7 @@ describe("manager alert service", () => {
           currentLifecycleStartedAt: new Date("2026-04-11T15:00:00.000Z"),
         }),
       ],
-      offices: [{ id: "office-1", timezone: "America/Chicago" }],
+      offices: [{ id: "office-1", slug: "one", timezone: "America/Chicago" }],
       users: [{ id: "user-a", displayName: "Manager A" }],
     });
 
@@ -601,7 +603,7 @@ describe("manager alert service", () => {
           currentLifecycleStartedAt: new Date("2026-04-09T15:00:00.000Z"),
         }),
       ],
-      offices: [{ id: "office-1", timezone: "America/Chicago" }],
+      offices: [{ id: "office-1", slug: "one", timezone: "America/Chicago" }],
       users: [{ id: "user-a", displayName: "Manager A" }],
     });
 
@@ -613,6 +615,7 @@ describe("manager alert service", () => {
     });
 
     expect(harness.db.transaction).toHaveBeenCalledTimes(1);
+    expect(harness.db.execute).toHaveBeenCalledTimes(1);
     expect(first.claimed).toBe(true);
     expect(first.snapshot.snapshotMode).toBe("sent");
     expect(harness.state.sendLedger).toHaveLength(1);
@@ -642,7 +645,7 @@ describe("manager alert service", () => {
             currentLifecycleStartedAt: new Date("2026-04-10T15:00:00.000Z"),
           }),
         ],
-        offices: [{ id: "office-1", timezone: "America/Chicago" }],
+        offices: [{ id: "office-1", slug: "one", timezone: "America/Chicago" }],
         users: [{ id: "user-a", displayName: "Manager A" }],
       },
       { failNotificationInsert: true }
@@ -672,7 +675,7 @@ describe("manager alert service", () => {
           currentLifecycleStartedAt: new Date("2026-04-10T15:00:00.000Z"),
         }),
       ],
-      offices: [{ id: "office-1", timezone: "America/Chicago" }],
+      offices: [{ id: "office-1", slug: "one", timezone: "America/Chicago" }],
       users: [{ id: "user-a", displayName: "Manager A" }],
     });
 
