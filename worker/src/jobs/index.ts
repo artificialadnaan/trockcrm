@@ -17,6 +17,7 @@ import { runAiGenerateDealCopilot } from "./ai-generate-deal-copilot.js";
 import { runAiDisconnectDigest } from "./ai-disconnect-digest.js";
 import { runAiDisconnectEscalationScan } from "./ai-disconnect-escalation.js";
 import { runAiDisconnectAdminTaskGeneration } from "./ai-disconnect-admin-tasks.js";
+import { runAiInterventionManagerAlerts } from "./ai-intervention-manager-alerts.js";
 
 const SERVER_EVALUATOR_MODULE = "../../../server/src/modules/tasks/rules/evaluator.js" as string;
 const SERVER_TASK_RULES_MODULE = "../../../server/src/modules/tasks/rules/config.js" as string;
@@ -143,6 +144,10 @@ export function registerAllJobs() {
 
   registerJobHandler("ai_disconnect_admin_tasks", async () => {
     await runAiDisconnectAdminTaskGeneration();
+  });
+
+  registerJobHandler("ai_intervention_manager_alerts", async (payload) => {
+    await runAiInterventionManagerAlerts(payload);
   });
 
   // Daily task generation (triggered via job_queue or cron)

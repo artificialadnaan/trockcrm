@@ -18,6 +18,7 @@ import { runProcoreSync } from "./jobs/procore-sync.js";
 import { runAiDisconnectDigest } from "./jobs/ai-disconnect-digest.js";
 import { runAiDisconnectEscalationScan } from "./jobs/ai-disconnect-escalation.js";
 import { runAiDisconnectAdminTaskGeneration } from "./jobs/ai-disconnect-admin-tasks.js";
+import { runAiInterventionManagerAlerts } from "./jobs/ai-intervention-manager-alerts.js";
 
 const POLL_INTERVAL_MS = 2000; // Poll job queue every 2 seconds
 
@@ -174,6 +175,17 @@ async function main() {
     }
   }, { timezone: "America/Chicago" });
   console.log("[Worker] Cron scheduled: disconnect escalation scan at 7:45 AM CT weekdays");
+
+  // Manager alerts: evaluate every 5 minutes and let office-local due gating decide when to send.
+  cron.schedule("*/5 * * * *", async () => {
+    console.log("[Worker:cron] Running intervention manager alerts...");
+    try {
+      await runAiInterventionManagerAlerts();
+    } catch (err) {
+      console.error("[Worker:cron] Intervention manager alerts failed:", err);
+    }
+  });
+  console.log("[Worker] Cron scheduled: intervention manager alerts every 5 minutes");
 
   console.log("[Worker] Ready.");
 }
