@@ -19,9 +19,11 @@ import { runAiDisconnectEscalationScan } from "./ai-disconnect-escalation.js";
 import { runAiDisconnectAdminTaskGeneration } from "./ai-disconnect-admin-tasks.js";
 import { runAiInterventionManagerAlerts } from "./ai-intervention-manager-alerts.js";
 
-const SERVER_EVALUATOR_MODULE = "../../../server/src/modules/tasks/rules/evaluator.js" as string;
-const SERVER_TASK_RULES_MODULE = "../../../server/src/modules/tasks/rules/config.js" as string;
-const SERVER_TASK_PERSISTENCE_MODULE = "../../../server/src/modules/tasks/rules/persistence.js" as string;
+const SERVER_MODULE_ROOT =
+  process.env.NODE_ENV === "production" ? "../../../server/dist/modules" : "../../../server/src/modules";
+const SERVER_EVALUATOR_MODULE = `${SERVER_MODULE_ROOT}/tasks/rules/evaluator.js` as string;
+const SERVER_TASK_RULES_MODULE = `${SERVER_MODULE_ROOT}/tasks/rules/config.js` as string;
+const SERVER_TASK_PERSISTENCE_MODULE = `${SERVER_MODULE_ROOT}/tasks/rules/persistence.js` as string;
 
 /**
  * Test handler that logs the payload. Used to validate the queue works end-to-end.
