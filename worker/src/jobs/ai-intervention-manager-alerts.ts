@@ -1,4 +1,6 @@
-import { pool, db } from "../db.js";
+import { pool } from "../db.js";
+import { drizzle } from "drizzle-orm/node-postgres";
+import * as schema from "@trock-crm/shared/schema";
 
 const SERVER_OFFICE_TIMEZONE_MODULES = [
   "../../../server/dist/lib/office-timezone.js",
@@ -139,7 +141,10 @@ export async function runAiInterventionManagerAlerts(input?: { now?: Date }): Pr
           continue;
         }
 
-        const preview = await runManagerAlertPreview(db, {
+        await client.query("SELECT set_config('search_path', $1, false)", [`${schemaName},public`]);
+        const officeDb = drizzle(client, { schema });
+
+        const preview = await runManagerAlertPreview(officeDb, {
           officeId: office.id,
           timezone,
           now,
@@ -154,7 +159,7 @@ export async function runAiInterventionManagerAlerts(input?: { now?: Date }): Pr
         let suppressedCount = 0;
         for (const recipient of recipients.rows) {
           try {
-            const result = await sendManagerAlertSummary(db, {
+            const result = await sendManagerAlertSummary(officeDb, {
               officeId: office.id,
               recipientUserId: recipient.id,
               timezone,
