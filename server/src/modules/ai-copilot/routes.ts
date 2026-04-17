@@ -9,13 +9,15 @@ import {
   escalateInterventionCases,
   getInterventionCaseDetail,
   getInterventionAnalyticsDashboard,
-  getLatestManagerAlertSnapshot,
   listInterventionCases,
   resolveInterventionCases,
-  runManagerAlertPreview,
-  sendManagerAlertSummary,
   snoozeInterventionCases,
 } from "./intervention-service.js";
+import {
+  getLatestManagerAlertSnapshot,
+  runManagerAlertPreview,
+  sendManagerAlertSummary,
+} from "./intervention-manager-alerts-service.js";
 import type { InterventionQueueFilters, InterventionQueueView } from "./intervention-types.js";
 import {
   getAiActionQueue,

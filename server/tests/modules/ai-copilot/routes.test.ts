@@ -59,14 +59,17 @@ vi.mock("../../../src/modules/ai-copilot/service.js", () => ({
 vi.mock("../../../src/modules/ai-copilot/intervention-service.js", () => ({
   listInterventionCases: interventionServiceMocks.listInterventionCases,
   getInterventionAnalyticsDashboard: interventionServiceMocks.getInterventionAnalyticsDashboard,
-  getLatestManagerAlertSnapshot: interventionServiceMocks.getLatestManagerAlertSnapshot,
-  runManagerAlertPreview: interventionServiceMocks.runManagerAlertPreview,
-  sendManagerAlertSummary: interventionServiceMocks.sendManagerAlertSummary,
   getInterventionCaseDetail: interventionServiceMocks.getInterventionCaseDetail,
   assignInterventionCases: interventionServiceMocks.assignInterventionCases,
   snoozeInterventionCases: interventionServiceMocks.snoozeInterventionCases,
   resolveInterventionCases: interventionServiceMocks.resolveInterventionCases,
   escalateInterventionCases: interventionServiceMocks.escalateInterventionCases,
+}));
+
+vi.mock("../../../src/modules/ai-copilot/intervention-manager-alerts-service.js", () => ({
+  getLatestManagerAlertSnapshot: interventionServiceMocks.getLatestManagerAlertSnapshot,
+  runManagerAlertPreview: interventionServiceMocks.runManagerAlertPreview,
+  sendManagerAlertSummary: interventionServiceMocks.sendManagerAlertSummary,
 }));
 
 vi.mock("../../../src/modules/ai-copilot/task-suggestion-service.js", () => ({

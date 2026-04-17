@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { ManagerAlertSnapshot } from "@/hooks/use-ai-ops";
 
 import {
   AdminInterventionAnalyticsPage,
@@ -81,7 +82,7 @@ const analyticsData = {
   },
 };
 
-const managerAlertSnapshot = {
+const managerAlertSnapshot: ManagerAlertSnapshot = {
   id: "snapshot-1",
   officeId: "office-1",
   snapshotKind: "manager_alert_summary",
