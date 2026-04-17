@@ -25,6 +25,7 @@ const interventionServiceMocks = vi.hoisted(() => ({
   sendManagerAlertSummary: vi.fn(),
   getInterventionCaseDetail: vi.fn(),
   assignInterventionCases: vi.fn(),
+  assertHomogeneousBatchConclusionCohort: vi.fn(),
   snoozeInterventionCases: vi.fn(),
   resolveInterventionCases: vi.fn(),
   escalateInterventionCases: vi.fn(),
@@ -61,6 +62,7 @@ vi.mock("../../../src/modules/ai-copilot/intervention-service.js", () => ({
   getInterventionAnalyticsDashboard: interventionServiceMocks.getInterventionAnalyticsDashboard,
   getInterventionCaseDetail: interventionServiceMocks.getInterventionCaseDetail,
   assignInterventionCases: interventionServiceMocks.assignInterventionCases,
+  assertHomogeneousBatchConclusionCohort: interventionServiceMocks.assertHomogeneousBatchConclusionCohort,
   snoozeInterventionCases: interventionServiceMocks.snoozeInterventionCases,
   resolveInterventionCases: interventionServiceMocks.resolveInterventionCases,
   escalateInterventionCases: interventionServiceMocks.escalateInterventionCases,
@@ -113,6 +115,7 @@ function createApp(role: "admin" | "director" | "rep" = "rep") {
 describe("ai copilot routes", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    delete process.env.ALLOW_LEGACY_OUTCOME_WRITES;
     insertMock = vi.fn(() => ({
       values: vi.fn().mockResolvedValue(undefined),
     }));
@@ -657,6 +660,64 @@ describe("ai copilot routes", () => {
 
     const app = createApp("director");
 
+    const conflictingResolveRes = await request(app)
+      .post("/api/ai/ops/interventions/case-1/resolve")
+      .send({
+        resolutionReason: "owner_aligned",
+        conclusion: {
+          kind: "resolve",
+          outcomeCategory: "task_completed",
+          reasonCode: "missing_task_created_and_completed",
+          effectiveness: "confirmed",
+        },
+      });
+    expect(conflictingResolveRes.status).toBe(400);
+
+    const conflictingSnoozeRes = await request(app)
+      .post("/api/ai/ops/interventions/case-1/snooze")
+      .send({
+        snoozedUntil: "2026-04-20T00:00:00.000Z",
+        notes: "legacy note",
+        conclusion: {
+          kind: "snooze",
+          snoozeReasonCode: "waiting_on_customer",
+          expectedOwnerType: "rep",
+          expectedNextStepCode: "rep_follow_up_expected",
+        },
+      });
+    expect(conflictingSnoozeRes.status).toBe(400);
+
+    const missingStructuredResolveRes = await request(app)
+      .post("/api/ai/ops/interventions/batch-resolve")
+      .send({ caseIds: ["case-1"], resolutionReason: "owner_aligned" });
+    expect(missingStructuredResolveRes.status).toBe(400);
+
+    const missingStructuredSnoozeRes = await request(app)
+      .post("/api/ai/ops/interventions/batch-snooze")
+      .send({ caseIds: ["case-1"], snoozedUntil: "2026-04-20T00:00:00.000Z" });
+    expect(missingStructuredSnoozeRes.status).toBe(400);
+
+    const missingStructuredEscalateRes = await request(app)
+      .post("/api/ai/ops/interventions/batch-escalate")
+      .send({ caseIds: ["case-1"] });
+    expect(missingStructuredEscalateRes.status).toBe(400);
+
+    interventionServiceMocks.assertHomogeneousBatchConclusionCohort.mockRejectedValueOnce(
+      new AppError(400, "Batch conclusion requires a homogeneous cohort")
+    );
+    const heterogeneousBatchRes = await request(app)
+      .post("/api/ai/ops/interventions/batch-resolve")
+      .send({
+        caseIds: ["case-1", "case-2"],
+        conclusion: {
+          kind: "resolve",
+          outcomeCategory: "task_completed",
+          reasonCode: "missing_task_created_and_completed",
+          effectiveness: "confirmed",
+        },
+      });
+    expect(heterogeneousBatchRes.status).toBe(400);
+
     const assignRes = await request(app)
       .post("/api/ai/ops/interventions/batch-assign")
       .send({ caseIds: ["case-1", "case-2"], assignedTo: "manager-2", notes: "Rebalance queue" });
@@ -680,7 +741,13 @@ describe("ai copilot routes", () => {
       .send({
         caseIds: ["case-1", "case-2"],
         snoozedUntil: "2026-04-20T00:00:00.000Z",
-        notes: "Waiting on customer reply",
+        conclusion: {
+          kind: "snooze",
+          snoozeReasonCode: "waiting_on_customer",
+          expectedOwnerType: "customer",
+          expectedNextStepCode: "customer_reply_expected",
+          notes: "Waiting on customer reply",
+        },
       });
     expect(snoozeRes.status).toBe(200);
     expect(snoozeRes.body).toEqual({
@@ -694,15 +761,28 @@ describe("ai copilot routes", () => {
       actorRole: "director",
       caseIds: ["case-1", "case-2"],
       snoozedUntil: "2026-04-20T00:00:00.000Z",
-      notes: "Waiting on customer reply",
+      conclusion: {
+        kind: "snooze",
+        snoozeReasonCode: "waiting_on_customer",
+        expectedOwnerType: "customer",
+        expectedNextStepCode: "customer_reply_expected",
+        notes: "Waiting on customer reply",
+      },
+      allowLegacyOutcomeWrites: false,
+      notes: null,
     });
 
     const resolveRes = await request(app)
       .post("/api/ai/ops/interventions/batch-resolve")
       .send({
         caseIds: ["case-1", "case-2"],
-        resolutionReason: "owner_aligned",
-        notes: "Owner already aligned on next step",
+        conclusion: {
+          kind: "resolve",
+          outcomeCategory: "owner_aligned",
+          reasonCode: "owner_assigned_and_confirmed",
+          effectiveness: "likely",
+          notes: "Owner already aligned on next step",
+        },
       });
     expect(resolveRes.status).toBe(200);
     expect(resolveRes.body).toEqual({
@@ -716,7 +796,15 @@ describe("ai copilot routes", () => {
       actorRole: "director",
       caseIds: ["case-1", "case-2"],
       resolutionReason: "owner_aligned",
-      notes: "Owner already aligned on next step",
+      conclusion: {
+        kind: "resolve",
+        outcomeCategory: "owner_aligned",
+        reasonCode: "owner_assigned_and_confirmed",
+        effectiveness: "likely",
+        notes: "Owner already aligned on next step",
+      },
+      allowLegacyOutcomeWrites: false,
+      notes: null,
     });
 
     const invalidResolveRes = await request(app)
@@ -724,12 +812,27 @@ describe("ai copilot routes", () => {
       .send({
         caseIds: ["case-1", "case-2"],
         resolutionReason: "bad_reason",
+        conclusion: {
+          kind: "resolve",
+          outcomeCategory: "task_completed",
+          reasonCode: "missing_task_created_and_completed",
+          effectiveness: "confirmed",
+        },
       });
     expect(invalidResolveRes.status).toBe(400);
 
     const escalateRes = await request(app)
       .post("/api/ai/ops/interventions/batch-escalate")
-      .send({ caseIds: ["case-1", "case-2"], notes: "Needs leadership review" });
+      .send({
+        caseIds: ["case-1", "case-2"],
+        conclusion: {
+          kind: "escalate",
+          escalationReasonCode: "manager_visibility_required",
+          escalationTargetType: "director",
+          urgency: "high",
+          notes: "Needs leadership review",
+        },
+      });
     expect(escalateRes.status).toBe(200);
     expect(escalateRes.body).toEqual({
       updatedCount: 1,
@@ -741,7 +844,15 @@ describe("ai copilot routes", () => {
       actorUserId: "director-1",
       actorRole: "director",
       caseIds: ["case-1", "case-2"],
-      notes: "Needs leadership review",
+      conclusion: {
+        kind: "escalate",
+        escalationReasonCode: "manager_visibility_required",
+        escalationTargetType: "director",
+        urgency: "high",
+        notes: "Needs leadership review",
+      },
+      allowLegacyOutcomeWrites: false,
+      notes: null,
     });
   });
 
@@ -789,7 +900,16 @@ describe("ai copilot routes", () => {
 
     const snoozeRes = await request(app)
       .post("/api/ai/ops/interventions/case-1/snooze")
-      .send({ snoozedUntil: "2026-04-20T00:00:00.000Z", notes: "Waiting for reply" });
+      .send({
+        snoozedUntil: "2026-04-20T00:00:00.000Z",
+        conclusion: {
+          kind: "snooze",
+          snoozeReasonCode: "waiting_on_customer",
+          expectedOwnerType: "customer",
+          expectedNextStepCode: "customer_reply_expected",
+          notes: "Waiting for reply",
+        },
+      });
     expect(snoozeRes.status).toBe(200);
     expect(snoozeRes.body).toEqual({
       updatedCount: 0,
@@ -802,12 +922,28 @@ describe("ai copilot routes", () => {
       actorRole: "director",
       caseIds: ["case-1"],
       snoozedUntil: "2026-04-20T00:00:00.000Z",
-      notes: "Waiting for reply",
+      conclusion: {
+        kind: "snooze",
+        snoozeReasonCode: "waiting_on_customer",
+        expectedOwnerType: "customer",
+        expectedNextStepCode: "customer_reply_expected",
+        notes: "Waiting for reply",
+      },
+      allowLegacyOutcomeWrites: false,
+      notes: null,
     });
 
     const resolveRes = await request(app)
       .post("/api/ai/ops/interventions/case-1/resolve")
-      .send({ resolutionReason: "task_completed", notes: "Task is complete" });
+      .send({
+        conclusion: {
+          kind: "resolve",
+          outcomeCategory: "task_completed",
+          reasonCode: "missing_task_created_and_completed",
+          effectiveness: "confirmed",
+          notes: "Task is complete",
+        },
+      });
     expect(resolveRes.status).toBe(200);
     expect(resolveRes.body).toEqual({
       updatedCount: 0,
@@ -820,17 +956,41 @@ describe("ai copilot routes", () => {
       actorRole: "director",
       caseIds: ["case-1"],
       resolutionReason: "task_completed",
-      notes: "Task is complete",
+      conclusion: {
+        kind: "resolve",
+        outcomeCategory: "task_completed",
+        reasonCode: "missing_task_created_and_completed",
+        effectiveness: "confirmed",
+        notes: "Task is complete",
+      },
+      allowLegacyOutcomeWrites: false,
+      notes: null,
     });
 
     const invalidResolveRes = await request(app)
       .post("/api/ai/ops/interventions/case-1/resolve")
-      .send({ resolutionReason: "bad_reason" });
+      .send({
+        resolutionReason: "bad_reason",
+        conclusion: {
+          kind: "resolve",
+          outcomeCategory: "task_completed",
+          reasonCode: "missing_task_created_and_completed",
+          effectiveness: "confirmed",
+        },
+      });
     expect(invalidResolveRes.status).toBe(400);
 
     const escalateRes = await request(app)
       .post("/api/ai/ops/interventions/case-1/escalate")
-      .send({ notes: "Director visibility needed" });
+      .send({
+        conclusion: {
+          kind: "escalate",
+          escalationReasonCode: "manager_visibility_required",
+          escalationTargetType: "director",
+          urgency: "high",
+          notes: "Director visibility needed",
+        },
+      });
     expect(escalateRes.status).toBe(200);
     expect(escalateRes.body).toEqual({
       updatedCount: 0,
@@ -842,7 +1002,15 @@ describe("ai copilot routes", () => {
       actorUserId: "director-1",
       actorRole: "director",
       caseIds: ["case-1"],
-      notes: "Director visibility needed",
+      conclusion: {
+        kind: "escalate",
+        escalationReasonCode: "manager_visibility_required",
+        escalationTargetType: "director",
+        urgency: "high",
+        notes: "Director visibility needed",
+      },
+      allowLegacyOutcomeWrites: false,
+      notes: null,
     });
   });
 

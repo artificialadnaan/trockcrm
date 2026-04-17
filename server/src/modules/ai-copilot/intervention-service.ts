@@ -1254,6 +1254,50 @@ interface MutationResult {
   errors: Array<{ caseId: string; message: string }>;
 }
 
+function getConclusionReasonFamilyForCase(
+  row: { disconnectType: string },
+  actionKind: "resolve" | "snooze" | "escalate"
+) {
+  switch (`${actionKind}:${row.disconnectType}`) {
+    case "resolve:missing_next_task":
+      return "resolve:task_execution";
+    case "resolve:inbound_without_followup":
+      return "resolve:follow_up_execution";
+    case "snooze:estimating_gate_gap":
+      return "snooze:estimating_wait";
+    case "escalate:revision_loop":
+      return "escalate:manager_intervention";
+    default:
+      return `${actionKind}:${row.disconnectType}`;
+  }
+}
+
+export async function assertHomogeneousBatchConclusionCohort(
+  tenantDb: TenantDb | InMemoryTenantDb,
+  officeId: string,
+  caseIds: string[],
+  actionKind: "resolve" | "snooze" | "escalate"
+) {
+  const rows = await loadCasesForMutation(tenantDb, officeId, caseIds);
+  if (rows.length === 0) {
+    throw new AppError(400, "At least one intervention case is required");
+  }
+
+  const firstRow = rows[0];
+  if (!firstRow) {
+    throw new AppError(400, "At least one intervention case is required");
+  }
+
+  if (!rows.every((row) => row.disconnectType === firstRow.disconnectType)) {
+    throw new AppError(400, "Batch conclusion requires a homogeneous cohort");
+  }
+
+  const expectedReasonFamily = getConclusionReasonFamilyForCase(firstRow, actionKind);
+  if (!rows.every((row) => getConclusionReasonFamilyForCase(row, actionKind) === expectedReasonFamily)) {
+    throw new AppError(400, "Batch conclusion requires a homogeneous cohort");
+  }
+}
+
 function buildMutationError(caseId: string, message: string) {
   return { caseId, message };
 }
@@ -1695,12 +1739,16 @@ export async function snoozeInterventionCases(
     caseIds: string[];
     snoozedUntil: Date | string;
     conclusion?: StructuredSnoozeConclusion | null;
+    allowLegacyOutcomeWrites?: boolean;
     actorUserId: string;
     actorRole: string;
     notes?: string | null;
   }
 ): Promise<MutationResult> {
   validateSnoozeConclusion(input.conclusion);
+  if (input.caseIds.length > 1 && input.conclusion) {
+    await assertHomogeneousBatchConclusionCohort(tenantDb, input.officeId, input.caseIds, "snooze");
+  }
   const caseIds = dedupeCaseIds(input.caseIds);
   const snoozedUntil = input.snoozedUntil instanceof Date
     ? input.snoozedUntil
@@ -1784,6 +1832,9 @@ export async function resolveInterventionCases(
   }
 ): Promise<MutationResult> {
   validateResolveConclusion(input.conclusion, input.resolutionReason, input.allowLegacyOutcomeWrites);
+  if (input.caseIds.length > 1 && input.conclusion) {
+    await assertHomogeneousBatchConclusionCohort(tenantDb, input.officeId, input.caseIds, "resolve");
+  }
   const caseIds = dedupeCaseIds(input.caseIds);
   const rows = await loadCasesForMutation(tenantDb, input.officeId, caseIds);
   const rowsById = new Map(rows.map((row) => [row.id, row]));
@@ -1863,12 +1914,16 @@ export async function escalateInterventionCases(
     officeId: string;
     caseIds: string[];
     conclusion?: StructuredEscalateConclusion | null;
+    allowLegacyOutcomeWrites?: boolean;
     actorUserId: string;
     actorRole: string;
     notes?: string | null;
   }
 ): Promise<MutationResult> {
   validateEscalateConclusion(input.conclusion);
+  if (input.caseIds.length > 1 && input.conclusion) {
+    await assertHomogeneousBatchConclusionCohort(tenantDb, input.officeId, input.caseIds, "escalate");
+  }
   const caseIds = dedupeCaseIds(input.caseIds);
   const rows = await loadCasesForMutation(tenantDb, input.officeId, caseIds);
   const errors: Array<{ caseId: string; message: string }> = [];
