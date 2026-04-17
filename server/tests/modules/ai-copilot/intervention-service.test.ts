@@ -44,6 +44,8 @@ type DisconnectCaseRecord = {
   reopenCount: number;
   firstDetectedAt: Date;
   lastDetectedAt: Date;
+  currentLifecycleStartedAt: Date;
+  lastReopenedAt: Date | null;
   lastIntervenedAt: Date | null;
   resolvedAt: Date | null;
   resolutionReason: string | null;
@@ -155,6 +157,8 @@ function makeCase(
     reopenCount: 0,
     firstDetectedAt: now,
     lastDetectedAt: now,
+    currentLifecycleStartedAt: now,
+    lastReopenedAt: null,
     lastIntervenedAt: null,
     resolvedAt: null,
     resolutionReason: null,
@@ -334,6 +338,59 @@ describe("AI intervention service", () => {
     });
   });
 
+  it("resets lifecycle timestamps when a resolved case reopens", async () => {
+    disconnectRowsMock.mockResolvedValue([makeDisconnectRow()]);
+
+    const now = new Date("2026-04-16T12:00:00.000Z");
+    const reopenedAt = new Date("2026-04-18T12:00:00.000Z");
+    const tenantDb = createTenantDb({
+      cases: [
+        makeCase({
+          status: "resolved",
+          currentLifecycleStartedAt: now,
+          lastReopenedAt: null,
+          resolvedAt: now,
+        }),
+      ],
+    });
+
+    await materializeDisconnectCases(tenantDb as any, { officeId: "office-1", now: reopenedAt });
+
+    expect(tenantDb.state.cases[0]).toMatchObject({
+      status: "open",
+      currentLifecycleStartedAt: reopenedAt,
+      lastReopenedAt: reopenedAt,
+      reopenCount: 1,
+    });
+  });
+
+  it("preserves lifecycle timestamps for already-open repeat cases during refresh", async () => {
+    disconnectRowsMock.mockResolvedValue([makeDisconnectRow()]);
+
+    const lifecycleStart = new Date("2026-04-10T12:00:00.000Z");
+    const reopenedAt = new Date("2026-04-10T12:00:00.000Z");
+    const refreshedAt = new Date("2026-04-18T12:00:00.000Z");
+    const tenantDb = createTenantDb({
+      cases: [
+        makeCase({
+          reopenCount: 2,
+          currentLifecycleStartedAt: lifecycleStart,
+          lastReopenedAt: reopenedAt,
+        }),
+      ],
+    });
+
+    await materializeDisconnectCases(tenantDb as any, { officeId: "office-1", now: refreshedAt });
+
+    expect(tenantDb.state.cases[0]).toMatchObject({
+      status: "open",
+      reopenCount: 2,
+      currentLifecycleStartedAt: lifecycleStart,
+      lastReopenedAt: reopenedAt,
+      lastDetectedAt: refreshedAt,
+    });
+  });
+
   it("excludes snoozed cases from the default queue until snoozed_until", async () => {
     const tenantDb = createTenantDb({
       cases: [
@@ -384,6 +441,127 @@ describe("AI intervention service", () => {
     });
 
     expect(afterWindow.items.map((item) => item.id)).toEqual(["case-2", "case-1"]);
+  });
+
+  it("lists overdue cases when view=overdue", async () => {
+    const tenantDb = createTenantDb({
+      cases: [
+        makeCase({
+          id: "case-overdue",
+          severity: "high",
+          currentLifecycleStartedAt: new Date("2026-04-13T15:00:00.000Z"),
+          metadataJson: {
+            evidenceSummary: "Deal has no open next-step task.",
+            ageDays: 1,
+          },
+        }),
+        makeCase({
+          id: "case-not-overdue",
+          severity: "high",
+          currentLifecycleStartedAt: new Date("2026-04-15T15:00:00.000Z"),
+          metadataJson: {
+            evidenceSummary: "Deal has no open next-step task.",
+            ageDays: 9,
+          },
+        }),
+        makeCase({
+          id: "case-resolved",
+          severity: "critical",
+          status: "resolved",
+          resolvedAt: new Date("2026-04-16T10:00:00.000Z"),
+          metadataJson: {
+            evidenceSummary: "Resolved case should not count as overdue.",
+            ageDays: 5,
+          },
+        }),
+      ],
+    });
+
+    const result = await listInterventionCases(tenantDb as any, {
+      officeId: "office-1",
+      view: "overdue",
+      status: undefined,
+      now: new Date("2026-04-16T15:00:00.000Z"),
+    });
+
+    expect(result.items.map((item) => item.id)).toEqual(["case-overdue"]);
+    expect(result.items[0]?.ageDays).toBe(3);
+  });
+
+  it("uses business-day aging for overdue queue classification", async () => {
+    const tenantDb = createTenantDb({
+      cases: [
+        makeCase({
+          id: "case-friday",
+          severity: "high",
+          currentLifecycleStartedAt: new Date("2026-04-17T15:00:00.000Z"),
+        }),
+      ],
+    });
+
+    const result = await listInterventionCases(tenantDb as any, {
+      officeId: "office-1",
+      view: "overdue",
+      status: undefined,
+      now: new Date("2026-04-20T15:00:00.000Z"),
+    });
+
+    expect(result.totalCount).toBe(0);
+  });
+
+  it("lists snooze-breached cases with source filters while preserving caseId as a deep-link selector", async () => {
+    const tenantDb = createTenantDb({
+      cases: [
+        makeCase({
+          id: "case-breached",
+          status: "snoozed",
+          snoozedUntil: new Date("2026-04-15T00:00:00.000Z"),
+          companyId: "company-1",
+          metadataJson: {
+            ...makeCase().metadataJson,
+            assignedRepId: "rep-1",
+            stageKey: "estimating",
+          },
+        }),
+        makeCase({
+          id: "case-other-company",
+          status: "snoozed",
+          snoozedUntil: new Date("2026-04-15T00:00:00.000Z"),
+          companyId: "company-2",
+          businessKey: "office-1:missing_next_task:deal:deal-2",
+          scopeId: "deal-2",
+          dealId: "deal-2",
+          metadataJson: {
+            ...makeCase().metadataJson,
+            assignedRepId: "rep-2",
+            stageKey: "proposal",
+          },
+        }),
+      ],
+      deals: [
+        { id: "deal-1", dealNumber: "D-1001", name: "Alpha Plaza", companyId: "company-1" },
+        { id: "deal-2", dealNumber: "D-1002", name: "Beta Tower", companyId: "company-2" },
+      ],
+      companies: [
+        { id: "company-1", name: "Acme Property Group" },
+        { id: "company-2", name: "Beta Holdings" },
+      ],
+    });
+
+    const result = await listInterventionCases(tenantDb as any, {
+      officeId: "office-1",
+      view: "snooze-breached",
+      status: undefined,
+      now: new Date("2026-04-16T15:00:00.000Z"),
+      filters: {
+        companyId: "company-1",
+        repId: "rep-1",
+        stageKey: "estimating",
+        caseId: "case-does-not-filter-the-queue",
+      },
+    });
+
+    expect(result.items.map((item) => item.id)).toEqual(["case-breached"]);
   });
 
   it("projects generated task state into queue rows", async () => {
@@ -689,6 +867,7 @@ describe("AI intervention service", () => {
         makeCase({
           id: "case-1",
           clusterKey: "follow_through_gap",
+          currentLifecycleStartedAt: new Date("2026-04-07T15:00:00.000Z"),
           metadataJson: { evidenceSummary: "Aging queue case", ageDays: 9 },
         }),
         makeCase({
@@ -706,6 +885,7 @@ describe("AI intervention service", () => {
           scopeId: "deal-3",
           dealId: "deal-3",
           clusterKey: "follow_through_gap",
+          currentLifecycleStartedAt: new Date("2026-04-14T15:00:00.000Z"),
           metadataJson: { evidenceSummary: "Too new", ageDays: 2 },
         }),
       ],
@@ -717,6 +897,7 @@ describe("AI intervention service", () => {
       clusterKey: "follow_through_gap",
       page: 1,
       pageSize: 50,
+      now: new Date("2026-04-16T15:00:00.000Z"),
     });
 
     expect(result.totalCount).toBe(1);

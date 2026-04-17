@@ -16,7 +16,11 @@ import {
   type SalesProcessDisconnectRow,
 } from "./service.js";
 import type {
+  InterventionAnalyticsBreachRow,
+  InterventionAnalyticsDashboard,
+  InterventionAnalyticsHotspotRow,
   InterventionCaseDetail,
+  InterventionQueueFilters,
   InterventionQueueItem,
   InterventionQueueResult,
   InterventionQueueView,
@@ -73,6 +77,44 @@ function severityRank(value: string) {
   }
 }
 
+function interventionSlaThresholdDays(value: string) {
+  switch (value) {
+    case "critical":
+      return 0;
+    case "high":
+      return 2;
+    case "medium":
+      return 5;
+    case "low":
+      return 10;
+    default:
+      return Number.POSITIVE_INFINITY;
+  }
+}
+
+function startOfDay(date: Date) {
+  const result = new Date(date);
+  result.setHours(0, 0, 0, 0);
+  return result;
+}
+
+function calculateBusinessDaysElapsed(startedAt: Date | null | undefined, now: Date) {
+  if (!startedAt) return 0;
+  const current = startOfDay(startedAt);
+  const end = startOfDay(now);
+  let elapsed = 0;
+
+  while (current < end) {
+    current.setDate(current.getDate() + 1);
+    const dayOfWeek = current.getDay();
+    if (dayOfWeek !== 0 && dayOfWeek !== 6) {
+      elapsed++;
+    }
+  }
+
+  return elapsed;
+}
+
 function buildBusinessKey(officeId: string, row: SalesProcessDisconnectRow) {
   const identity = getDisconnectCaseIdentity(row);
   return `${officeId}:${row.disconnectType}:${identity.scopeType}:${identity.scopeId}`;
@@ -87,7 +129,9 @@ function buildCaseMetadata(row: SalesProcessDisconnectRow) {
     dealNumber: row.dealNumber,
     dealName: row.dealName,
     companyName: row.companyName,
+    stageKey: row.stageKey ?? null,
     stageName: row.stageName,
+    assignedRepId: row.assignedRepId ?? null,
     assignedRepName: row.assignedRepName,
     ageDays: row.ageDays,
     latestCustomerEmailAt: row.latestCustomerEmailAt,
@@ -119,6 +163,8 @@ function buildCaseInsert(
     reopenCount: 0,
     firstDetectedAt: now,
     lastDetectedAt: now,
+    currentLifecycleStartedAt: now,
+    lastReopenedAt: null,
     metadataJson: buildCaseMetadata(row),
   };
 }
@@ -140,16 +186,56 @@ function sortQueueItems(a: InterventionQueueItem, b: InterventionQueueItem) {
   return a.businessKey.localeCompare(b.businessKey);
 }
 
+function readMetadataString(metadata: Record<string, unknown> | null | undefined, key: string) {
+  if (!metadata || typeof metadata !== "object") return null;
+  const value = metadata[key];
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function matchesQueueStatus(
+  row: DisconnectCaseRow,
+  input: { status?: "open" | "snoozed" | "resolved"; view?: InterventionQueueView; now: Date }
+) {
+  if (input.view === "overdue") {
+    if (row.status !== "open") return false;
+    return input.status ? row.status === input.status : true;
+  }
+
+  if (input.view === "snooze-breached") {
+    if (row.status !== "snoozed") return false;
+    if (!row.snoozedUntil || row.snoozedUntil > input.now) return false;
+    return input.status ? row.status === input.status : true;
+  }
+
+  if (input.status) return row.status === input.status;
+  if (row.status === "resolved") return false;
+  if (row.status === "snoozed" && (!row.snoozedUntil || row.snoozedUntil > input.now)) return false;
+  return true;
+}
+
+function matchesQueueFilters(row: DisconnectCaseRow, filters: InterventionQueueFilters | undefined) {
+  if (!filters) return true;
+  if (filters.severity && row.severity !== filters.severity) return false;
+  if (filters.disconnectType && row.disconnectType !== filters.disconnectType) return false;
+  if (filters.assigneeId && row.assignedTo !== filters.assigneeId) return false;
+  if (filters.companyId && row.companyId !== filters.companyId) return false;
+  if (filters.repId && readMetadataString(row.metadataJson as Record<string, unknown> | null, "assignedRepId") !== filters.repId) {
+    return false;
+  }
+  if (filters.stageKey && readMetadataString(row.metadataJson as Record<string, unknown> | null, "stageKey") !== filters.stageKey) {
+    return false;
+  }
+  return true;
+}
+
 function projectQueueItem(input: {
   row: DisconnectCaseRow;
   task: TaskRow | null;
   deal: Pick<DealRow, "id" | "dealNumber" | "name" | "companyId"> | null;
   company: Pick<CompanyRow, "id" | "name"> | null;
   history: DisconnectCaseHistoryRow | null;
+  now: Date;
 }): InterventionQueueItem {
-  const ageDaysRaw = input.row.metadataJson && typeof input.row.metadataJson === "object"
-    ? (input.row.metadataJson as Record<string, unknown>).ageDays
-    : null;
   const evidenceSummaryRaw = input.row.metadataJson && typeof input.row.metadataJson === "object"
     ? (input.row.metadataJson as Record<string, unknown>).evidenceSummary
     : null;
@@ -163,7 +249,7 @@ function projectQueueItem(input: {
     status: input.row.status as "open" | "snoozed" | "resolved",
     escalated: input.row.escalated,
     reopenCount: input.row.reopenCount,
-    ageDays: typeof ageDaysRaw === "number" ? ageDaysRaw : 0,
+    ageDays: calculateBusinessDaysElapsed(input.row.currentLifecycleStartedAt, input.now),
     assignedTo: input.row.assignedTo,
     generatedTask: input.task
       ? {
@@ -254,6 +340,8 @@ export async function materializeDisconnectCases(
       if (shouldReopenCase(existing, now)) {
         existing.status = "open";
         existing.reopenCount += 1;
+        existing.currentLifecycleStartedAt = now;
+        existing.lastReopenedAt = now;
         existing.snoozedUntil = null;
         existing.resolvedAt = null;
         existing.resolutionReason = null;
@@ -311,6 +399,8 @@ export async function materializeDisconnectCases(
         resolvedAt: reopen ? null : existing.resolvedAt,
         resolutionReason: reopen ? null : existing.resolutionReason,
         reopenCount: reopen ? existing.reopenCount + 1 : existing.reopenCount,
+        currentLifecycleStartedAt: reopen ? now : existing.currentLifecycleStartedAt,
+        lastReopenedAt: reopen ? now : existing.lastReopenedAt,
       })
       .where(eq(aiDisconnectCases.id, existing.id));
   }
@@ -325,6 +415,7 @@ export async function listInterventionCases(
     status?: "open" | "snoozed" | "resolved";
     view?: InterventionQueueView;
     clusterKey?: string;
+    filters?: InterventionQueueFilters;
     page?: number;
     pageSize?: number;
     now?: Date;
@@ -336,12 +427,9 @@ export async function listInterventionCases(
 
   if (isInMemoryTenantDb(tenantDb)) {
     let cases = tenantDb.state.cases.filter((row) => row.officeId === input.officeId);
-    cases = cases.filter((row) => {
-      if (input.status) return row.status === input.status;
-      if (row.status === "resolved") return false;
-      if (row.status === "snoozed" && (!row.snoozedUntil || row.snoozedUntil > now)) return false;
-      return true;
-    });
+    cases = cases
+      .filter((row) => matchesQueueStatus(row, { status: input.status, view: input.view, now }))
+      .filter((row) => matchesQueueFilters(row, input.filters));
 
     const latestHistoryByCase = new Map<string, DisconnectCaseHistoryRow>();
     for (const row of tenantDb.state.history.sort((a, b) => b.actedAt.getTime() - a.actedAt.getTime())) {
@@ -356,6 +444,7 @@ export async function listInterventionCases(
           deal: tenantDb.state.deals.find((deal) => deal.id === row.dealId) ?? null,
           company: tenantDb.state.companies.find((company) => company.id === row.companyId) ?? null,
           history: latestHistoryByCase.get(row.id) ?? null,
+          now,
         })
       )
       .filter((item) => matchesInterventionView(item, input.view))
@@ -377,12 +466,9 @@ export async function listInterventionCases(
   });
 
   let cases = await getCasesByOffice(tenantDb, input.officeId);
-  cases = cases.filter((row) => {
-    if (input.status) return row.status === input.status;
-    if (row.status === "resolved") return false;
-    if (row.status === "snoozed" && (!row.snoozedUntil || row.snoozedUntil > now)) return false;
-    return true;
-  });
+  cases = cases
+    .filter((row) => matchesQueueStatus(row, { status: input.status, view: input.view, now }))
+    .filter((row) => matchesQueueFilters(row, input.filters));
 
   const taskIds = cases.map((row) => row.generatedTaskId).filter((value): value is string => Boolean(value));
   const dealIds = cases.map((row) => row.dealId).filter((value): value is string => Boolean(value));
@@ -416,6 +502,7 @@ export async function listInterventionCases(
         deal: row.dealId ? dealMap.get(row.dealId) ?? null : null,
         company: row.companyId ? companyMap.get(row.companyId) ?? null : null,
         history: latestHistoryByCase.get(row.id) ?? null,
+        now,
       })
     )
     .filter((item) => matchesInterventionView(item, input.view))
@@ -436,6 +523,10 @@ function matchesInterventionView(item: InterventionQueueItem, view: Intervention
   switch (view) {
     case "all":
       return true;
+    case "overdue":
+      return item.status === "open" && item.ageDays > interventionSlaThresholdDays(item.severity);
+    case "snooze-breached":
+      return item.status === "snoozed";
     case "escalated":
       return item.escalated;
     case "unassigned":
@@ -450,6 +541,404 @@ function matchesInterventionView(item: InterventionQueueItem, view: Intervention
     default:
       return item.status === "open";
   }
+}
+
+function buildSeverityCounts() {
+  return {
+    critical: 0,
+    high: 0,
+    medium: 0,
+    low: 0,
+  } satisfies Record<"critical" | "high" | "medium" | "low", number>;
+}
+
+function incrementSeverityCount(
+  counts: Record<"critical" | "high" | "medium" | "low", number>,
+  severity: string
+) {
+  if (severity === "critical" || severity === "high" || severity === "medium" || severity === "low") {
+    counts[severity] += 1;
+  }
+}
+
+function average(values: number[]) {
+  if (values.length === 0) return null;
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function median(values: number[]) {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const middle = Math.floor(sorted.length / 2);
+  if (sorted.length % 2 === 0) {
+    return (sorted[middle - 1] + sorted[middle]) / 2;
+  }
+  return sorted[middle] ?? null;
+}
+
+function isOverdueDisconnectCase(row: DisconnectCaseRow, now: Date) {
+  return row.status === "open" && calculateBusinessDaysElapsed(row.currentLifecycleStartedAt, now) > interventionSlaThresholdDays(row.severity);
+}
+
+function isSnoozeBreachedCase(row: DisconnectCaseRow, now: Date) {
+  return row.status === "snoozed" && Boolean(row.snoozedUntil && row.snoozedUntil < now);
+}
+
+function isRepeatOpenCase(row: DisconnectCaseRow) {
+  return row.status === "open" && row.reopenCount > 0;
+}
+
+function isEscalatedOpenCase(row: DisconnectCaseRow) {
+  return row.escalated && row.status !== "resolved";
+}
+
+function formatQueueLink(input: {
+  view?: InterventionQueueView;
+  caseId?: string;
+  assigneeId?: string | null;
+  disconnectType?: string | null;
+  repId?: string | null;
+  companyId?: string | null;
+  stageKey?: string | null;
+}) {
+  const params = new URLSearchParams();
+  if (input.view && input.view !== "open") params.set("view", input.view);
+  if (input.assigneeId) params.set("assigneeId", input.assigneeId);
+  if (input.disconnectType) params.set("disconnectType", input.disconnectType);
+  if (input.repId) params.set("repId", input.repId);
+  if (input.companyId) params.set("companyId", input.companyId);
+  if (input.stageKey) params.set("stageKey", input.stageKey);
+  if (input.caseId) params.set("caseId", input.caseId);
+  const query = params.toString();
+  return query ? `/admin/interventions?${query}` : "/admin/interventions";
+}
+
+async function loadInterventionAnalyticsData(
+  tenantDb: TenantDb | InMemoryTenantDb,
+  officeId: string,
+  casesOverride?: DisconnectCaseRow[]
+) {
+  if (isInMemoryTenantDb(tenantDb)) {
+    const scopedCases = casesOverride ?? tenantDb.state.cases.filter((row) => row.officeId === officeId);
+    return {
+      cases: scopedCases,
+      deals: tenantDb.state.deals,
+      companies: tenantDb.state.companies,
+      history: tenantDb.state.history.filter((row) =>
+        scopedCases.some((item) => item.id === row.disconnectCaseId)
+      ),
+    };
+  }
+
+  const cases = casesOverride ?? (await getCasesByOffice(tenantDb, officeId));
+  const dealIds = cases.map((row) => row.dealId).filter((value): value is string => Boolean(value));
+  const companyIds = cases.map((row) => row.companyId).filter((value): value is string => Boolean(value));
+  const [dealRows, companyRows, historyRows] = await Promise.all([
+    dealIds.length ? tenantDb.select().from(deals).where(inArray(deals.id, dealIds)) : Promise.resolve([]),
+    companyIds.length ? tenantDb.select().from(companies).where(inArray(companies.id, companyIds)) : Promise.resolve([]),
+    cases.length
+      ? tenantDb.select().from(aiDisconnectCaseHistory).where(inArray(aiDisconnectCaseHistory.disconnectCaseId, cases.map((row) => row.id)))
+      : Promise.resolve([]),
+  ]);
+
+  return {
+    cases,
+    deals: dealRows,
+    companies: companyRows,
+    history: historyRows,
+  };
+}
+
+async function buildAnalyticsPreviewCases(
+  tenantDb: TenantDb,
+  input: { officeId: string; now: Date }
+) {
+  const [existingCases, currentRows] = await Promise.all([
+    getCasesByOffice(tenantDb, input.officeId),
+    // `tenantDb` is already scoped to the active office schema by tenant middleware.
+    listCurrentSalesProcessDisconnectRows(tenantDb, { limit: null }),
+  ]);
+  const existingByBusinessKey = new Map(existingCases.map((row) => [row.businessKey, row]));
+  const previewCases: DisconnectCaseRow[] = [...existingCases];
+
+  for (const row of currentRows) {
+    const businessKey = buildBusinessKey(input.officeId, row);
+    const existing = existingByBusinessKey.get(businessKey);
+    if (!existing) {
+      previewCases.push({
+        id: `preview:${businessKey}`,
+        ...buildCaseInsert(input.officeId, row, input.now),
+        createdAt: input.now,
+        updatedAt: input.now,
+      } as DisconnectCaseRow);
+      continue;
+    }
+
+    const reopen = shouldReopenCase(existing, input.now);
+    const previewRow: DisconnectCaseRow = {
+      ...existing,
+      severity: row.disconnectSeverity,
+      clusterKey: getDisconnectCaseIdentity(row).clusterKey,
+      companyId: row.companyId,
+      lastDetectedAt: input.now,
+      metadataJson: buildCaseMetadata(row),
+      updatedAt: input.now,
+      status: reopen ? "open" : existing.status,
+      snoozedUntil: reopen ? null : existing.snoozedUntil,
+      resolvedAt: reopen ? null : existing.resolvedAt,
+      resolutionReason: reopen ? null : existing.resolutionReason,
+      reopenCount: reopen ? existing.reopenCount + 1 : existing.reopenCount,
+      currentLifecycleStartedAt: reopen ? input.now : existing.currentLifecycleStartedAt,
+      lastReopenedAt: reopen ? input.now : existing.lastReopenedAt,
+    };
+
+    const previewIndex = previewCases.findIndex((item) => item.id === existing.id);
+    if (previewIndex >= 0) previewCases[previewIndex] = previewRow;
+  }
+
+  return previewCases;
+}
+
+function buildInterventionAnalyticsSummary(cases: DisconnectCaseRow[], now: Date) {
+  const openCases = cases.filter((row) => row.status === "open");
+  const overdueCases = openCases.filter((row) => isOverdueDisconnectCase(row, now));
+  const escalatedCases = cases.filter((row) => isEscalatedOpenCase(row));
+  const snoozeOverdueCases = cases.filter((row) => isSnoozeBreachedCase(row, now));
+  const repeatOpenCases = openCases.filter((row) => isRepeatOpenCase(row));
+
+  const openCasesBySeverity = buildSeverityCounts();
+  const overdueCasesBySeverity = buildSeverityCounts();
+  for (const row of openCases) incrementSeverityCount(openCasesBySeverity, row.severity);
+  for (const row of overdueCases) incrementSeverityCount(overdueCasesBySeverity, row.severity);
+
+  return {
+    openCases: openCases.length,
+    overdueCases: overdueCases.length,
+    escalatedCases: escalatedCases.length,
+    snoozeOverdueCases: snoozeOverdueCases.length,
+    repeatOpenCases: repeatOpenCases.length,
+    openCasesBySeverity,
+    overdueCasesBySeverity,
+  };
+}
+
+function buildInterventionAnalyticsOutcomes(
+  cases: DisconnectCaseRow[],
+  historyRows: DisconnectCaseHistoryRow[],
+  now: Date
+) {
+  const windowStart = new Date(now);
+  windowStart.setDate(windowStart.getDate() - 30);
+
+  const recentHistory = historyRows.filter((row) => row.actedAt >= windowStart);
+  const actionVolume30d = {
+    assign: recentHistory.filter((row) => row.actionType === "assign").length,
+    snooze: recentHistory.filter((row) => row.actionType === "snooze").length,
+    resolve: recentHistory.filter((row) => row.actionType === "resolve").length,
+    escalate: recentHistory.filter((row) => row.actionType === "escalate").length,
+  };
+  const recentResolutions = cases.filter((row) => Boolean(row.resolvedAt && row.resolvedAt >= windowStart));
+  const recentReopens = cases.filter(
+    (row) =>
+      Boolean(row.lastReopenedAt && row.lastReopenedAt >= windowStart) &&
+      historyRows.some(
+        (entry) =>
+          entry.disconnectCaseId === row.id &&
+          entry.actionType === "resolve" &&
+          entry.actedAt < (row.lastReopenedAt as Date)
+      )
+  );
+  const intervenedCaseIds = new Set(recentHistory.map((row) => row.disconnectCaseId));
+  const openAges = cases
+    .filter((row) => row.status === "open")
+    .map((row) => calculateBusinessDaysElapsed(row.currentLifecycleStartedAt, now));
+  const resolutionAges = recentResolutions.map((row) => calculateBusinessDaysElapsed(row.currentLifecycleStartedAt, row.resolvedAt ?? now));
+  const clearanceDenominator = intervenedCaseIds.size;
+  const reopenDenominator = recentResolutions.length;
+
+  return {
+    clearanceRate30d: clearanceDenominator === 0 ? null : recentResolutions.length / clearanceDenominator,
+    reopenRate30d: reopenDenominator === 0 ? null : recentReopens.length / reopenDenominator,
+    averageAgeOfOpenCases: average(openAges),
+    medianAgeOfOpenCases: median(openAges),
+    averageAgeToResolution: average(resolutionAges),
+    actionVolume30d,
+  };
+}
+
+function buildHotspotRows(
+  cases: DisconnectCaseRow[],
+  now: Date,
+  input: {
+    entityType: InterventionAnalyticsHotspotRow["entityType"];
+    keyFromCase: (row: DisconnectCaseRow) => string | null;
+    labelFromCase: (row: DisconnectCaseRow) => string;
+    queueLinkFromCase: (row: DisconnectCaseRow) => string | null;
+  }
+): InterventionAnalyticsHotspotRow[] {
+  const groups = new Map<string, { sample: DisconnectCaseRow; openCases: number; overdueCases: number; repeatOpenCases: number }>();
+
+  for (const row of cases) {
+    const key = input.keyFromCase(row);
+    if (!key) continue;
+    const existing = groups.get(key) ?? {
+      sample: row,
+      openCases: 0,
+      overdueCases: 0,
+      repeatOpenCases: 0,
+    };
+    if (row.status === "open") existing.openCases += 1;
+    if (isOverdueDisconnectCase(row, now)) existing.overdueCases += 1;
+    if (isRepeatOpenCase(row)) existing.repeatOpenCases += 1;
+    groups.set(key, existing);
+  }
+
+  return [...groups.entries()]
+    .map(([key, value]) => ({
+      key,
+      entityType: input.entityType,
+      filterValue: key,
+      label: input.labelFromCase(value.sample),
+      openCases: value.openCases,
+      overdueCases: value.overdueCases,
+      repeatOpenCases: value.repeatOpenCases,
+      clearanceRate30d: null,
+      queueLink: input.queueLinkFromCase(value.sample),
+    }))
+    .filter((row) => row.openCases > 0 || row.overdueCases > 0 || row.repeatOpenCases > 0)
+    .sort((a, b) => {
+      if (b.overdueCases !== a.overdueCases) return b.overdueCases - a.overdueCases;
+      if (b.openCases !== a.openCases) return b.openCases - a.openCases;
+      return a.label.localeCompare(b.label);
+    })
+    .slice(0, 10);
+}
+
+function buildInterventionAnalyticsBreachQueue(
+  cases: DisconnectCaseRow[],
+  dealsMap: Map<string, Pick<DealRow, "id" | "dealNumber" | "name" | "companyId">>,
+  companiesMap: Map<string, Pick<CompanyRow, "id" | "name">>,
+  now: Date
+) {
+  const items = cases
+    .map((row) => {
+      const breachReasons: InterventionAnalyticsBreachRow["breachReasons"] = [];
+      if (isOverdueDisconnectCase(row, now)) breachReasons.push("overdue");
+      if (isEscalatedOpenCase(row)) breachReasons.push("escalated_open");
+      if (isSnoozeBreachedCase(row, now)) breachReasons.push("snooze_breached");
+      if (isRepeatOpenCase(row)) breachReasons.push("repeat_open");
+      if (breachReasons.length === 0) return null;
+
+      const deal = row.dealId ? dealsMap.get(row.dealId) ?? null : null;
+      const company = row.companyId ? companiesMap.get(row.companyId) ?? null : null;
+      const primaryView: InterventionQueueView =
+        breachReasons[0] === "snooze_breached"
+          ? "snooze-breached"
+          : breachReasons[0] === "repeat_open"
+            ? "repeat"
+            : breachReasons[0] === "escalated_open"
+              ? "escalated"
+              : "overdue";
+
+      return {
+        caseId: row.id,
+        severity: row.severity,
+        disconnectType: row.disconnectType,
+        dealId: row.dealId,
+        dealLabel: deal ? `${deal.dealNumber} ${deal.name}` : readMetadataString(row.metadataJson as Record<string, unknown> | null, "dealName"),
+        companyId: row.companyId,
+        companyLabel: company?.name ?? readMetadataString(row.metadataJson as Record<string, unknown> | null, "companyName"),
+        ageDays: calculateBusinessDaysElapsed(row.currentLifecycleStartedAt, now),
+        assignedTo: row.assignedTo,
+        escalated: row.escalated,
+        breachReasons,
+        detailLink: formatQueueLink({ view: primaryView, caseId: row.id }),
+        queueLink: formatQueueLink({ view: primaryView, caseId: row.id }),
+      } satisfies InterventionAnalyticsBreachRow;
+    })
+    .filter((item): item is InterventionAnalyticsBreachRow => item !== null)
+    .sort((a, b) => {
+      const severityDelta = severityRank(b.severity) - severityRank(a.severity);
+      if (severityDelta !== 0) return severityDelta;
+      if (b.ageDays !== a.ageDays) return b.ageDays - a.ageDays;
+      if (a.escalated !== b.escalated) return a.escalated ? -1 : 1;
+      return (a.dealLabel ?? a.companyLabel ?? a.caseId).localeCompare(b.dealLabel ?? b.companyLabel ?? b.caseId);
+    });
+
+  return {
+    items: items.slice(0, 25),
+    totalCount: items.length,
+    pageSize: 25,
+  };
+}
+
+export async function getInterventionAnalyticsDashboard(
+  tenantDb: TenantDb | InMemoryTenantDb,
+  input: { officeId: string; now?: Date }
+): Promise<InterventionAnalyticsDashboard> {
+  const now = input.now ?? new Date();
+  const previewCases =
+    isInMemoryTenantDb(tenantDb) ? undefined : await buildAnalyticsPreviewCases(tenantDb, { officeId: input.officeId, now });
+
+  const { cases, deals: dealRows, companies: companyRows, history } = await loadInterventionAnalyticsData(
+    tenantDb,
+    input.officeId,
+    previewCases
+  );
+  const dealsMap = new Map(dealRows.map((row) => [row.id, row]));
+  const companiesMap = new Map(companyRows.map((row) => [row.id, row]));
+
+  return {
+    summary: buildInterventionAnalyticsSummary(cases, now),
+    outcomes: buildInterventionAnalyticsOutcomes(cases, history, now),
+    hotspots: {
+      assignees: buildHotspotRows(cases, now, {
+        entityType: "assignee",
+        keyFromCase: (row) => row.assignedTo,
+        labelFromCase: (row) => row.assignedTo ?? "Unassigned",
+        queueLinkFromCase: (row) => formatQueueLink({ view: "open", assigneeId: row.assignedTo ?? null }),
+      }),
+      disconnectTypes: buildHotspotRows(cases, now, {
+        entityType: "disconnect_type",
+        keyFromCase: (row) => row.disconnectType,
+        labelFromCase: (row) => row.disconnectType,
+        queueLinkFromCase: (row) => formatQueueLink({ view: "open", disconnectType: row.disconnectType }),
+      }),
+      reps: buildHotspotRows(cases, now, {
+        entityType: "rep",
+        keyFromCase: (row) => readMetadataString(row.metadataJson as Record<string, unknown> | null, "assignedRepId"),
+        labelFromCase: (row) =>
+          readMetadataString(row.metadataJson as Record<string, unknown> | null, "assignedRepName") ?? "Unknown rep",
+        queueLinkFromCase: (row) =>
+          formatQueueLink({ view: "open", repId: readMetadataString(row.metadataJson as Record<string, unknown> | null, "assignedRepId") }),
+      }),
+      companies: buildHotspotRows(cases, now, {
+        entityType: "company",
+        keyFromCase: (row) => row.companyId,
+        labelFromCase: (row) =>
+          companiesMap.get(row.companyId ?? "")?.name ??
+          readMetadataString(row.metadataJson as Record<string, unknown> | null, "companyName") ??
+          "Unknown company",
+        queueLinkFromCase: (row) => formatQueueLink({ view: "open", companyId: row.companyId }),
+      }),
+      stages: buildHotspotRows(cases, now, {
+        entityType: "stage",
+        keyFromCase: (row) => readMetadataString(row.metadataJson as Record<string, unknown> | null, "stageKey"),
+        labelFromCase: (row) =>
+          readMetadataString(row.metadataJson as Record<string, unknown> | null, "stageName") ?? "Unknown stage",
+        queueLinkFromCase: (row) =>
+          formatQueueLink({ view: "open", stageKey: readMetadataString(row.metadataJson as Record<string, unknown> | null, "stageKey") }),
+      }),
+    },
+    breachQueue: buildInterventionAnalyticsBreachQueue(cases, dealsMap, companiesMap, now),
+    slaRules: {
+      criticalDays: 0,
+      highDays: 2,
+      mediumDays: 5,
+      lowDays: 10,
+      timingBasis: "business_days",
+    },
+  };
 }
 
 export async function getInterventionCaseDetail(

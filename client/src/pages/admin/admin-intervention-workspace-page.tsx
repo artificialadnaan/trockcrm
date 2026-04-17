@@ -25,7 +25,21 @@ export function AdminInterventionWorkspacePage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const initialView = (searchParams.get("view") as InterventionWorkspaceView | null) ?? "open";
   const initialClusterKey = searchParams.get("clusterKey") ?? "all";
-  const [status, setStatus] = useState<"all" | "open" | "snoozed" | "resolved">("open");
+  const caseIdFilter = searchParams.get("caseId");
+  const severityFilter = searchParams.get("severity");
+  const disconnectTypeFilter = searchParams.get("disconnectType");
+  const assigneeIdFilter = searchParams.get("assigneeId");
+  const repIdFilter = searchParams.get("repId");
+  const companyIdFilter = searchParams.get("companyId");
+  const stageKeyFilter = searchParams.get("stageKey");
+  const deriveStatusForView = (view: InterventionWorkspaceView): "all" | "open" | "snoozed" | "resolved" => {
+    if (view === "all") return "all";
+    if (view === "snooze-breached") return "snoozed";
+    return "open";
+  };
+  const [status, setStatus] = useState<"all" | "open" | "snoozed" | "resolved">(
+    deriveStatusForView(initialView)
+  );
   const [workspaceView, setWorkspaceView] = useState<InterventionWorkspaceView>(initialView);
   const [clusterKey, setClusterKey] = useState<string>(initialClusterKey);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
@@ -40,17 +54,18 @@ export function AdminInterventionWorkspacePage() {
     status,
     view: workspaceView,
     clusterKey: clusterKey === "all" ? null : clusterKey,
+    caseId: caseIdFilter,
+    severity: severityFilter,
+    disconnectType: disconnectTypeFilter,
+    assigneeId: assigneeIdFilter,
+    repId: repIdFilter,
+    companyId: companyIdFilter,
+    stageKey: stageKeyFilter,
   });
 
   function applyWorkspaceView(nextView: InterventionWorkspaceView) {
     setWorkspaceView(nextView);
-    if (nextView === "all") {
-      setStatus("all");
-      return;
-    }
-    if (nextView === "open") {
-      setStatus("open");
-    }
+    setStatus(deriveStatusForView(nextView));
   }
 
   const items = data?.items ?? [];
@@ -73,19 +88,39 @@ export function AdminInterventionWorkspacePage() {
     const next = new URLSearchParams();
     if (workspaceView !== "open") next.set("view", workspaceView);
     if (clusterKey !== "all") next.set("clusterKey", clusterKey);
+    if (caseIdFilter) next.set("caseId", caseIdFilter);
+    if (severityFilter) next.set("severity", severityFilter);
+    if (disconnectTypeFilter) next.set("disconnectType", disconnectTypeFilter);
+    if (assigneeIdFilter) next.set("assigneeId", assigneeIdFilter);
+    if (repIdFilter) next.set("repId", repIdFilter);
+    if (companyIdFilter) next.set("companyId", companyIdFilter);
+    if (stageKeyFilter) next.set("stageKey", stageKeyFilter);
     setSearchParams(next, { replace: true });
-  }, [clusterKey, setSearchParams, workspaceView]);
+  }, [
+    assigneeIdFilter,
+    caseIdFilter,
+    clusterKey,
+    companyIdFilter,
+    disconnectTypeFilter,
+    repIdFilter,
+    setSearchParams,
+    severityFilter,
+    stageKeyFilter,
+    workspaceView,
+  ]);
+
+  useEffect(() => {
+    if (!caseIdFilter) return;
+    setActiveCaseId((current) => (current === caseIdFilter ? current : caseIdFilter));
+  }, [caseIdFilter]);
 
   useEffect(() => {
     const nextView = (searchParams.get("view") as InterventionWorkspaceView | null) ?? "open";
     const nextClusterKey = searchParams.get("clusterKey") ?? "all";
     setWorkspaceView((current) => (current === nextView ? current : nextView));
     setClusterKey((current) => (current === nextClusterKey ? current : nextClusterKey));
-    if (nextView === "all") {
-      setStatus((current) => (current === "all" ? current : "all"));
-    } else if (nextView === "open") {
-      setStatus((current) => (current === "open" ? current : "open"));
-    }
+    const derivedStatus = deriveStatusForView(nextView);
+    setStatus((current) => (current === derivedStatus ? current : derivedStatus));
   }, [searchParams]);
 
   function clearSelection() {
@@ -140,6 +175,9 @@ export function AdminInterventionWorkspacePage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          <Link to="/admin/intervention-analytics" className={buttonVariants({ variant: "outline" })}>
+            View Analytics
+          </Link>
           <Link to="/admin/sales-process-disconnects" className={buttonVariants({ variant: "outline" })}>
             View Disconnect Dashboard
           </Link>

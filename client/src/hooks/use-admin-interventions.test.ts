@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   assignIntervention,
   buildAdminInterventionQuery,
+  buildInterventionAnalyticsPath,
   buildInterventionWorkspacePath,
   batchAssignInterventions,
   batchEscalateInterventions,
@@ -46,6 +47,18 @@ describe("buildAdminInterventionQuery", () => {
     ).toBe("?page=1&limit=50&status=open&view=aging&clusterKey=follow_through_gap");
   });
 
+  it("includes caseId and source filters when present", () => {
+    expect(
+      buildAdminInterventionQuery({
+        page: 1,
+        pageSize: 50,
+        view: "overdue",
+        caseId: "case-1",
+        companyId: "company-1",
+      })
+    ).toBe("?page=1&limit=50&view=overdue&caseId=case-1&companyId=company-1");
+  });
+
   it("returns an empty string when no params are provided", () => {
     expect(buildAdminInterventionQuery({})).toBe("");
   });
@@ -60,6 +73,22 @@ describe("buildInterventionWorkspacePath", () => {
     expect(buildInterventionWorkspacePath({ view: "aging", clusterKey: "execution_stall" })).toBe(
       "/admin/interventions?view=aging&clusterKey=execution_stall"
     );
+  });
+
+  it("builds intervention workspace paths with caseId and source filters", () => {
+    expect(
+      buildInterventionWorkspacePath({
+        view: "snooze-breached",
+        companyId: "company-1",
+        caseId: "case-1",
+      })
+    ).toBe("/admin/interventions?view=snooze-breached&companyId=company-1&caseId=case-1");
+  });
+});
+
+describe("buildInterventionAnalyticsPath", () => {
+  it("returns the analytics workspace path", () => {
+    expect(buildInterventionAnalyticsPath()).toBe("/admin/intervention-analytics");
   });
 });
 

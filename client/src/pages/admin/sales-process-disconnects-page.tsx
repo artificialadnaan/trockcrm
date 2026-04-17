@@ -147,6 +147,9 @@ export function SalesProcessDisconnectsPage() {
           <RefreshCcw className="h-4 w-4 mr-2" />
           Refresh
         </Button>
+        <Link to="/admin/intervention-analytics" className={buttonVariants({ variant: "outline" })}>
+          View Intervention Analytics
+        </Link>
         <Link to="/admin/interventions" className={buttonVariants({ variant: "outline" })}>
           Open Intervention Workspace
         </Link>
