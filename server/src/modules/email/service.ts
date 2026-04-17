@@ -511,49 +511,47 @@ export async function bindThreadToDeal(
     actingUserId: string;
   }
 ): Promise<{ binding: ThreadBindingRecord; previousBindingId: string | null }> {
-  return tenantDb.transaction(async (tx) => {
-    const existing = await getActiveThreadBinding(tx, input.mailboxAccountId, input.providerConversationId);
+  const existing = await getActiveThreadBinding(tenantDb, input.mailboxAccountId, input.providerConversationId);
 
-    if (existing?.dealId === input.dealId) {
-      return { binding: existing, previousBindingId: null };
-    }
+  if (existing?.dealId === input.dealId) {
+    return { binding: existing, previousBindingId: null };
+  }
 
-    if (existing) {
-      await tx
-        .update(emailThreadBindings)
-        .set({
-          detachedAt: new Date(),
-          updatedBy: input.actingUserId,
-          updatedAt: new Date(),
-        })
-        .where(eq(emailThreadBindings.id, existing.id));
-    }
-
-    const [binding] = await tx
-      .insert(emailThreadBindings)
-      .values({
-        mailboxAccountId: input.mailboxAccountId,
-        provider: "microsoft_graph",
-        providerConversationId: input.providerConversationId,
-        dealId: input.dealId,
-        bindingSource: "manual",
-        confidence: "high",
-        assignmentReason: "manual_thread_assignment",
-        createdBy: input.actingUserId,
+  if (existing) {
+    await tenantDb
+      .update(emailThreadBindings)
+      .set({
+        detachedAt: new Date(),
         updatedBy: input.actingUserId,
+        updatedAt: new Date(),
       })
-      .returning();
+      .where(eq(emailThreadBindings.id, existing.id));
+  }
 
-    await backAssociateStoredMessagesForBinding(tx, {
+  const [binding] = await tenantDb
+    .insert(emailThreadBindings)
+    .values({
       mailboxAccountId: input.mailboxAccountId,
+      provider: "microsoft_graph",
       providerConversationId: input.providerConversationId,
-      bindingId: binding.id,
       dealId: input.dealId,
-      actingUserId: input.actingUserId,
-    });
+      bindingSource: "manual",
+      confidence: "high",
+      assignmentReason: "manual_thread_assignment",
+      createdBy: input.actingUserId,
+      updatedBy: input.actingUserId,
+    })
+    .returning();
 
-    return { binding, previousBindingId: existing?.id ?? null };
+  await backAssociateStoredMessagesForBinding(tenantDb, {
+    mailboxAccountId: input.mailboxAccountId,
+    providerConversationId: input.providerConversationId,
+    bindingId: binding.id,
+    dealId: input.dealId,
+    actingUserId: input.actingUserId,
   });
+
+  return { binding, previousBindingId: existing?.id ?? null };
 }
 
 export async function seedOutboundThreadBinding(
