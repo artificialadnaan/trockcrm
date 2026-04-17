@@ -346,6 +346,40 @@ export async function sendEmail(
   userId: string,
   input: SendEmailInput
 ): Promise<any> {
+  let outboundAssignment: EmailAssignmentUpdate = {
+    assignedEntityType: null,
+    assignedEntityId: null,
+    assignmentConfidence: "low",
+    assignmentAmbiguityReason: null,
+    dealId: null,
+  };
+  if (input.dealId) {
+    outboundAssignment = assignmentUpdateForDeal(input.dealId);
+  } else if (input.contactId) {
+    const [contactRow] = await tenantDb
+      .select({ companyId: contacts.companyId })
+      .from(contacts)
+      .where(eq(contacts.id, input.contactId))
+      .limit(1);
+    if (contactRow?.companyId) {
+      outboundAssignment = {
+        assignedEntityType: "company",
+        assignedEntityId: contactRow.companyId,
+        assignmentConfidence: "medium",
+        assignmentAmbiguityReason: null,
+        dealId: null,
+      };
+    }
+  }
+
+  const activitySourceEntityType =
+    input.dealId ? "deal" : outboundAssignment.assignedEntityType === "company" ? "company" : "contact";
+  const activitySourceEntityId =
+    input.dealId ?? outboundAssignment.assignedEntityId ?? input.contactId ?? null;
+  if (!activitySourceEntityId) {
+    throw new AppError(400, "Outbound email must be associated to a deal, company, or contact.");
+  }
+
   // Dev mode: store email locally without sending via Graph
   if (!isGraphAuthConfigured()) {
     return createMockSentEmail(tenantDb, userId, input);
@@ -392,31 +426,6 @@ export async function sendEmail(
   const graphMessageId = draft.id ?? `sent-${crypto.randomUUID()}`;
   const graphConversationId: string | null = draft.conversationId ?? null;
   const fromAddress: string = draft.from?.emailAddress?.address ?? "";
-  let outboundAssignment: EmailAssignmentUpdate = {
-    assignedEntityType: null,
-    assignedEntityId: null,
-    assignmentConfidence: "low",
-    assignmentAmbiguityReason: null,
-    dealId: null,
-  };
-  if (input.dealId) {
-    outboundAssignment = assignmentUpdateForDeal(input.dealId);
-  } else if (input.contactId) {
-    const [contactRow] = await tenantDb
-      .select({ companyId: contacts.companyId })
-      .from(contacts)
-      .where(eq(contacts.id, input.contactId))
-      .limit(1);
-    if (contactRow?.companyId) {
-      outboundAssignment = {
-        assignedEntityType: "company",
-        assignedEntityId: contactRow.companyId,
-        assignmentConfidence: "medium",
-        assignmentAmbiguityReason: null,
-        dealId: null,
-      };
-    }
-  }
 
   // Step 2: Send the draft
   const sendResult = await graphRequest({
@@ -455,13 +464,6 @@ export async function sendEmail(
     .returning();
 
   // Create activity record for the unified feed
-  const activitySourceEntityType =
-    input.dealId ? "deal" : outboundAssignment.assignedEntityType === "company" ? "company" : "contact";
-  const activitySourceEntityId =
-    input.dealId ?? outboundAssignment.assignedEntityId ?? input.contactId ?? null;
-  if (!activitySourceEntityId) {
-    throw new AppError(400, "Outbound email must be associated to a deal, company, or contact.");
-  }
   await tenantDb.insert(activities).values({
     type: "email",
     responsibleUserId: userId,

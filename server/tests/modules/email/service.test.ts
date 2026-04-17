@@ -1,6 +1,9 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 const evaluateTaskRulesMock = vi.fn();
 const createTenantTaskRulePersistenceMock = vi.fn();
+const graphRequestMock = vi.fn();
+const getValidAccessTokenMock = vi.fn();
+const isGraphAuthConfiguredMock = vi.fn();
 
 vi.mock("../../../src/modules/tasks/rules/evaluator.js", () => ({
   evaluateTaskRules: evaluateTaskRulesMock,
@@ -10,7 +13,16 @@ vi.mock("../../../src/modules/tasks/rules/persistence.js", () => ({
   createTenantTaskRulePersistence: createTenantTaskRulePersistenceMock,
 }));
 
-const { autoAssociateEmailToDeal, associateEmailToEntity } = await import("../../../src/modules/email/service.js");
+vi.mock("../../../src/lib/graph-client.js", () => ({
+  graphRequest: graphRequestMock,
+}));
+
+vi.mock("../../../src/modules/email/graph-auth.js", () => ({
+  getValidAccessToken: getValidAccessTokenMock,
+  isGraphAuthConfigured: isGraphAuthConfiguredMock,
+}));
+
+const { autoAssociateEmailToDeal, associateEmailToEntity, sendEmail } = await import("../../../src/modules/email/service.js");
 
 function createSelectChain(result: any[]) {
   const chain: any = {
@@ -56,6 +68,12 @@ describe("email service inbound association", () => {
   beforeEach(() => {
     evaluateTaskRulesMock.mockReset();
     createTenantTaskRulePersistenceMock.mockReset();
+    graphRequestMock.mockReset();
+    getValidAccessTokenMock.mockReset();
+    isGraphAuthConfiguredMock.mockReset();
+
+    isGraphAuthConfiguredMock.mockReturnValue(true);
+    getValidAccessTokenMock.mockResolvedValue("graph-access-token");
   });
 
   it("routes the multi-deal disambiguation task through the task evaluator", async () => {
@@ -235,5 +253,24 @@ describe("email service inbound association", () => {
         "office-1"
       )
     ).rejects.toThrow("assignedDealId must match assignedEntityId for deal assignments");
+  });
+
+  it("rejects outbound email without an association before sending through Microsoft", async () => {
+    const tenantDb = {
+      insert: vi.fn(),
+      select: vi.fn(),
+      update: vi.fn(),
+    };
+
+    await expect(
+      sendEmail(tenantDb as any, "user-1", {
+        to: ["client@example.com"],
+        subject: "Follow up",
+        bodyHtml: "<p>Hello</p>",
+      })
+    ).rejects.toThrow("Outbound email must be associated to a deal, company, or contact.");
+
+    expect(graphRequestMock).not.toHaveBeenCalled();
+    expect(tenantDb.insert).not.toHaveBeenCalled();
   });
 });
