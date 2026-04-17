@@ -309,10 +309,17 @@ DECLARE
   new_val TEXT;
 BEGIN
   IF TG_OP = 'INSERT' THEN
-    INSERT INTO audit_log (table_name, record_id, action, changed_by, full_row, created_at)
-    VALUES (TG_TABLE_NAME, NEW.id, 'insert',
-            NULLIF(current_setting('app.current_user_id', true), '')::UUID,
-            to_jsonb(NEW), NOW());
+    EXECUTE format(
+      'INSERT INTO %I.audit_log (table_name, record_id, action, changed_by, full_row, created_at)
+       VALUES ($1, $2, $3, $4, $5, NOW())',
+      TG_TABLE_SCHEMA
+    )
+    USING
+      TG_TABLE_NAME,
+      NEW.id,
+      'insert',
+      NULLIF(current_setting('app.current_user_id', true), '')::UUID,
+      to_jsonb(NEW);
     RETURN NEW;
   ELSIF TG_OP = 'UPDATE' THEN
     FOR col_name IN SELECT column_name FROM information_schema.columns
@@ -327,17 +334,31 @@ BEGIN
       END IF;
     END LOOP;
     IF changed_fields != '{}' THEN
-      INSERT INTO audit_log (table_name, record_id, action, changed_by, changes, created_at)
-      VALUES (TG_TABLE_NAME, NEW.id, 'update',
-              NULLIF(current_setting('app.current_user_id', true), '')::UUID,
-              changed_fields, NOW());
+      EXECUTE format(
+        'INSERT INTO %I.audit_log (table_name, record_id, action, changed_by, changes, created_at)
+         VALUES ($1, $2, $3, $4, $5, NOW())',
+        TG_TABLE_SCHEMA
+      )
+      USING
+        TG_TABLE_NAME,
+        NEW.id,
+        'update',
+        NULLIF(current_setting('app.current_user_id', true), '')::UUID,
+        changed_fields;
     END IF;
     RETURN NEW;
   ELSIF TG_OP = 'DELETE' THEN
-    INSERT INTO audit_log (table_name, record_id, action, changed_by, full_row, created_at)
-    VALUES (TG_TABLE_NAME, OLD.id, 'delete',
-            NULLIF(current_setting('app.current_user_id', true), '')::UUID,
-            to_jsonb(OLD), NOW());
+    EXECUTE format(
+      'INSERT INTO %I.audit_log (table_name, record_id, action, changed_by, full_row, created_at)
+       VALUES ($1, $2, $3, $4, $5, NOW())',
+      TG_TABLE_SCHEMA
+    )
+    USING
+      TG_TABLE_NAME,
+      OLD.id,
+      'delete',
+      NULLIF(current_setting('app.current_user_id', true), '')::UUID,
+      to_jsonb(OLD);
     RETURN OLD;
   END IF;
 END;
