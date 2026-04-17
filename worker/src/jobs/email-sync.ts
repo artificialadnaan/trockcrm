@@ -845,6 +845,8 @@ async function createClassificationTaskRaw(
     candidateDealNames: string[];
   }
 ): Promise<void> {
+  await setTenantAuditContext(client, schemaName, input.userId);
+
   const dedupeKey = `email:${input.emailId}:assignment_review`;
   const existing = await client.query(
     `SELECT id
@@ -908,6 +910,8 @@ async function evaluateInboundEmailTasks(
     unreadInbound: number;
   }
 ): Promise<void> {
+  await setTenantAuditContext(client, schemaName, context.taskAssigneeId);
+
   const [{ evaluateTaskRules }, { TASK_RULES }, { createTenantTaskRulePersistence }] = (await Promise.all([
     import(SERVER_EVALUATOR_MODULE),
     import(SERVER_TASK_RULES_MODULE),
@@ -916,4 +920,9 @@ async function evaluateInboundEmailTasks(
 
   const taskPersistence = createTenantTaskRulePersistence(client, schemaName);
   await evaluateTaskRules(context, taskPersistence, TASK_RULES);
+}
+
+async function setTenantAuditContext(client: any, schemaName: string, userId: string | null): Promise<void> {
+  await client.query("SELECT set_config('search_path', $1, false)", [`${schemaName},public`]);
+  await client.query("SELECT set_config('app.current_user_id', $1, false)", [userId ?? ""]);
 }

@@ -62,6 +62,14 @@ function createQueryMock(options: {
   companyName?: string | null;
 }) {
   return vi.fn(async (sql: string, params?: unknown[]) => {
+    if (sql.startsWith("SELECT set_config('search_path', $1, false)")) {
+      return { rows: [{ set_config: params?.[0] ?? null }] };
+    }
+
+    if (sql.startsWith("SELECT set_config('app.current_user_id', $1, false)")) {
+      return { rows: [{ set_config: params?.[0] ?? null }] };
+    }
+
     if (sql.includes("FROM public.pipeline_stage_config") && sql.includes("slug = 'estimating'")) {
       return { rows: [{ display_order: 2 }] };
     }
