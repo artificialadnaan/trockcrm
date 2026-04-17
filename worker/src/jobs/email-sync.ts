@@ -557,7 +557,7 @@ export async function processInboundMessage(
       ambiguityReason: assignment.ambiguityReason ?? "assignment_review",
       candidateDealNames: association.activeDealNames,
     });
-  } else if (association.dealId && contactMatch) {
+  } else if (association.dealId) {
     await evaluateInboundEmailTasks(
       client,
       schemaName,
@@ -567,10 +567,12 @@ export async function processInboundMessage(
         entityId: `email:${emailId}`,
         sourceEvent: "email.received",
         dealId: association.dealId,
-        contactId: contactMatch.id,
+        contactId: contactMatch?.id ?? null,
         emailId,
         taskAssigneeId: userId,
-        contactName: `${contactMatch.first_name} ${contactMatch.last_name}`.trim(),
+        contactName: contactMatch
+          ? `${contactMatch.first_name} ${contactMatch.last_name}`.trim()
+          : (fromAddress ?? "Unknown sender"),
         emailSubject: subject,
         activeDealCount: association.activeDealCount,
         activeDealNames: association.activeDealNames,
@@ -896,7 +898,7 @@ async function evaluateInboundEmailTasks(
     entityId: string;
     sourceEvent: "email.received";
     dealId: string | null;
-    contactId: string;
+    contactId: string | null;
     emailId: string;
     taskAssigneeId: string;
     contactName: string;

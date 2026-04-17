@@ -476,6 +476,62 @@ describe("email sync inbound message routing", () => {
     ).toBe(false);
   });
 
+  it("routes a bound thread to the reply-needed task rule even without a matched contact", async () => {
+    const queryMock = createQueryMock({
+      activeDeals: [
+        { id: "deal-1", deal_number: "D-1001", name: "Project Alpha", stage_slug: "estimating", stage_display_order: 2 },
+        { id: "deal-2", deal_number: "D-1002", name: "Project Beta", stage_slug: "estimating", stage_display_order: 2 },
+      ],
+      threadBinding: {
+        id: "binding-3",
+        deal_id: "deal-1",
+      },
+      contactMatch: null,
+    });
+    const client = { query: queryMock };
+    const taskPersistence = { marker: "task-persistence" };
+    createTenantTaskRulePersistenceMock.mockReturnValue(taskPersistence);
+    evaluateTaskRulesMock.mockResolvedValue([{ ruleId: "inbound_email_reply_needed", action: "created" }]);
+
+    const processed = await processInboundMessage(
+      client,
+      "office_beta",
+      "user-1",
+      "office-1",
+      {
+        id: "graph-8",
+        from: { emailAddress: { address: "unknown.sender@example.com" } },
+        toRecipients: [],
+        ccRecipients: [],
+        subject: "Re: Project Alpha",
+        bodyPreview: "Bound thread without contact match",
+        body: { content: "<p>Bound thread without contact match</p>" },
+        hasAttachments: false,
+        receivedDateTime: "2026-04-04T18:00:00.000Z",
+        conversationId: "conv-8",
+      }
+    );
+
+    expect(processed).toBe(true);
+    expect(evaluateTaskRulesMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        dealId: "deal-1",
+        contactId: null,
+        emailId: "email-1",
+        contactName: "unknown.sender@example.com",
+        activeDealCount: 0,
+        activeDealNames: [],
+      }),
+      taskPersistence,
+      expect.any(Array)
+    );
+    expect(
+      queryMock.mock.calls.some(
+        ([sql]) => typeof sql === "string" && sql.includes("INSERT INTO office_beta.tasks")
+      )
+    ).toBe(false);
+  });
+
   it("keeps the bound thread deal when the conversation was already classified", async () => {
     const queryMock = createQueryMock({
       activeDeals: [
