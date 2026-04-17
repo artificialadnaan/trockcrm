@@ -21,7 +21,7 @@ import {
 } from "./intervention-manager-alerts-service.js";
 import type { InterventionQueueFilters, InterventionQueueView } from "./intervention-types.js";
 import type { StructuredEscalateConclusion, StructuredResolveConclusion, StructuredSnoozeConclusion } from "./intervention-types.js";
-import { mapStructuredResolveReasonToLegacyResolutionReason } from "../../../../shared/src/lib/intervention-outcome-taxonomy.js";
+import { mapStructuredResolveReasonToLegacyResolutionReason } from "./intervention-outcome-taxonomy.js";
 import {
   getAiActionQueue,
   getCompanyCopilotView,

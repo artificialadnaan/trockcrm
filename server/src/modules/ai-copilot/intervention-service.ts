@@ -21,7 +21,7 @@ import {
   SNOOZE_REASON_TO_EXPECTED_OPTIONS,
   ESCALATION_TARGET_TYPES,
   mapStructuredResolveReasonToLegacyResolutionReason,
-} from "../../../../shared/src/lib/intervention-outcome-taxonomy.js";
+} from "./intervention-outcome-taxonomy.js";
 import type {
   InterventionAnalyticsBreachRow,
   InterventionAnalyticsDashboard,
