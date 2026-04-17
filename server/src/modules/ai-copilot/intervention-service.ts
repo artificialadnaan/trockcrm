@@ -894,13 +894,13 @@ export async function getInterventionAnalyticsDashboard(
         entityType: "assignee",
         keyFromCase: (row) => row.assignedTo,
         labelFromCase: (row) => row.assignedTo ?? "Unassigned",
-        queueLinkFromCase: (row) => formatQueueLink({ view: "overdue", assigneeId: row.assignedTo ?? null }),
+        queueLinkFromCase: (row) => formatQueueLink({ view: "open", assigneeId: row.assignedTo ?? null }),
       }),
       disconnectTypes: buildHotspotRows(cases, now, {
         entityType: "disconnect_type",
         keyFromCase: (row) => row.disconnectType,
         labelFromCase: (row) => row.disconnectType,
-        queueLinkFromCase: (row) => formatQueueLink({ view: "overdue", disconnectType: row.disconnectType }),
+        queueLinkFromCase: (row) => formatQueueLink({ view: "open", disconnectType: row.disconnectType }),
       }),
       reps: buildHotspotRows(cases, now, {
         entityType: "rep",
@@ -908,7 +908,7 @@ export async function getInterventionAnalyticsDashboard(
         labelFromCase: (row) =>
           readMetadataString(row.metadataJson as Record<string, unknown> | null, "assignedRepName") ?? "Unknown rep",
         queueLinkFromCase: (row) =>
-          formatQueueLink({ view: "overdue", repId: readMetadataString(row.metadataJson as Record<string, unknown> | null, "assignedRepId") }),
+          formatQueueLink({ view: "open", repId: readMetadataString(row.metadataJson as Record<string, unknown> | null, "assignedRepId") }),
       }),
       companies: buildHotspotRows(cases, now, {
         entityType: "company",
@@ -917,7 +917,7 @@ export async function getInterventionAnalyticsDashboard(
           companiesMap.get(row.companyId ?? "")?.name ??
           readMetadataString(row.metadataJson as Record<string, unknown> | null, "companyName") ??
           "Unknown company",
-        queueLinkFromCase: (row) => formatQueueLink({ view: "overdue", companyId: row.companyId }),
+        queueLinkFromCase: (row) => formatQueueLink({ view: "open", companyId: row.companyId }),
       }),
       stages: buildHotspotRows(cases, now, {
         entityType: "stage",
@@ -925,7 +925,7 @@ export async function getInterventionAnalyticsDashboard(
         labelFromCase: (row) =>
           readMetadataString(row.metadataJson as Record<string, unknown> | null, "stageName") ?? "Unknown stage",
         queueLinkFromCase: (row) =>
-          formatQueueLink({ view: "overdue", stageKey: readMetadataString(row.metadataJson as Record<string, unknown> | null, "stageKey") }),
+          formatQueueLink({ view: "open", stageKey: readMetadataString(row.metadataJson as Record<string, unknown> | null, "stageKey") }),
       }),
     },
     breachQueue: buildInterventionAnalyticsBreachQueue(cases, dealsMap, companiesMap, now),

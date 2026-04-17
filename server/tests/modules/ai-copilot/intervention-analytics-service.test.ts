@@ -246,6 +246,7 @@ describe("intervention analytics service", () => {
     expect(dashboard.outcomes.clearanceRate30d).toBe(0.25);
     expect(dashboard.outcomes.reopenRate30d).toBe(0);
     expect(dashboard.hotspots.assignees[0]?.entityType).toBe("assignee");
+    expect(dashboard.hotspots.assignees[0]?.queueLink).toContain("/admin/interventions?assigneeId=");
     expect(dashboard.breachQueue.items[0]?.detailLink).toContain("/admin/interventions?caseId=");
   });
 
