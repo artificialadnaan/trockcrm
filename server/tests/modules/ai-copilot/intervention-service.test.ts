@@ -77,6 +77,11 @@ type CompanyRecord = {
   name: string;
 };
 
+type UserRecord = {
+  id: string;
+  displayName: string;
+};
+
 type HistoryRecord = {
   id: string;
   disconnectCaseId: string;
@@ -218,6 +223,7 @@ function createTenantDb(state?: {
   tasks?: TaskRecord[];
   deals?: DealRecord[];
   companies?: CompanyRecord[];
+  users?: UserRecord[];
   history?: HistoryRecord[];
   feedback?: FeedbackRecord[];
 }) {
@@ -226,6 +232,7 @@ function createTenantDb(state?: {
     tasks: state?.tasks ? state.tasks.map((row) => ({ ...row })) : [],
     deals: state?.deals ? state.deals.map((row) => ({ ...row })) : [],
     companies: state?.companies ? state.companies.map((row) => ({ ...row })) : [],
+    users: state?.users ? state.users.map((row) => ({ ...row })) : [],
     history: state?.history ? state.history.map((row) => ({ ...row })) : [],
     feedback: state?.feedback ? state.feedback.map((row) => ({ ...row })) : [],
   };
@@ -581,6 +588,10 @@ describe("AI intervention service", () => {
       ],
       deals: [{ id: "deal-1", dealNumber: "D-1001", name: "Alpha Plaza", companyId: "company-1" }],
       companies: [{ id: "company-1", name: "Acme Property Group" }],
+      users: [
+        { id: "manager-1", displayName: "Manager One" },
+        { id: "admin-2", displayName: "Admin Two" },
+      ],
       history: [
         makeHistory({
           actionType: "assign",
@@ -598,10 +609,12 @@ describe("AI intervention service", () => {
       expect.objectContaining({
         id: "case-1",
         assignedTo: "manager-1",
+        assignedToName: "Manager One",
         generatedTask: {
           id: "task-1",
           status: "in_progress",
           assignedTo: "admin-2",
+          assignedToName: "Admin Two",
           title: "Resolve Missing next task for D-1001",
         },
         deal: {
@@ -633,6 +646,7 @@ describe("AI intervention service", () => {
       tasks: [makeTask()],
       deals: [{ id: "deal-1", dealNumber: "D-1001", name: "Alpha Plaza", companyId: "company-1" }],
       companies: [{ id: "company-1", name: "Acme Property Group" }],
+      users: [{ id: "manager-1", displayName: "Manager One" }, { id: "admin-1", displayName: "Admin User" }, { id: "user-1", displayName: "Task Owner" }],
       history: [
         makeHistory({
           id: "history-2",
@@ -656,10 +670,12 @@ describe("AI intervention service", () => {
       case: {
         id: "case-1",
         businessKey: "office-1:missing_next_task:deal:deal-1",
+        assignedToName: "Manager One",
       },
       generatedTask: {
         id: "task-1",
         status: "pending",
+        assignedToName: "Task Owner",
       },
       crm: {
         deal: {
@@ -674,6 +690,10 @@ describe("AI intervention service", () => {
       },
     });
     expect(detail.history.map((entry) => entry.id)).toEqual(["history-1", "history-2"]);
+    expect(detail.history[0]).toMatchObject({
+      actedByName: "Admin User",
+      toAssigneeName: null,
+    });
   });
 
   it("assigns intervention cases and syncs generated task assignees", async () => {

@@ -237,6 +237,7 @@ function projectQueueItem(input: {
   deal: Pick<DealRow, "id" | "dealNumber" | "name" | "companyId"> | null;
   company: Pick<CompanyRow, "id" | "name"> | null;
   history: DisconnectCaseHistoryRow | null;
+  usersMap: Map<string, string>;
   now: Date;
 }): InterventionQueueItem {
   const evidenceSummaryRaw = input.row.metadataJson && typeof input.row.metadataJson === "object"
@@ -254,11 +255,13 @@ function projectQueueItem(input: {
     reopenCount: input.row.reopenCount,
     ageDays: calculateBusinessDaysElapsed(input.row.currentLifecycleStartedAt, input.now),
     assignedTo: input.row.assignedTo,
+    assignedToName: input.usersMap.get(input.row.assignedTo ?? "") ?? null,
     generatedTask: input.task
       ? {
           id: input.task.id,
           status: input.task.status,
           assignedTo: input.task.assignedTo,
+          assignedToName: input.usersMap.get(input.task.assignedTo ?? "") ?? null,
           title: input.task.title,
         }
       : null,
@@ -438,6 +441,7 @@ export async function listInterventionCases(
     for (const row of tenantDb.state.history.sort((a, b) => b.actedAt.getTime() - a.actedAt.getTime())) {
       if (!latestHistoryByCase.has(row.disconnectCaseId)) latestHistoryByCase.set(row.disconnectCaseId, row);
     }
+    const usersMap = new Map((tenantDb.state.users ?? []).map((user) => [user.id, user.displayName]));
 
     const items = cases
       .map((row) =>
@@ -447,6 +451,7 @@ export async function listInterventionCases(
           deal: tenantDb.state.deals.find((deal) => deal.id === row.dealId) ?? null,
           company: tenantDb.state.companies.find((company) => company.id === row.companyId) ?? null,
           history: latestHistoryByCase.get(row.id) ?? null,
+          usersMap,
           now,
         })
       )
@@ -476,6 +481,7 @@ export async function listInterventionCases(
   const taskIds = cases.map((row) => row.generatedTaskId).filter((value): value is string => Boolean(value));
   const dealIds = cases.map((row) => row.dealId).filter((value): value is string => Boolean(value));
   const companyIds = cases.map((row) => row.companyId).filter((value): value is string => Boolean(value));
+  const assigneeIds = [...new Set(cases.map((row) => row.assignedTo).filter((value): value is string => Boolean(value)))];
   const [taskRows, dealRows, companyRows, historyRows] = await Promise.all([
     taskIds.length ? tenantDb.select().from(tasks).where(inArray(tasks.id, taskIds)) : Promise.resolve([]),
     dealIds.length ? tenantDb.select().from(deals).where(inArray(deals.id, dealIds)) : Promise.resolve([]),
@@ -488,10 +494,16 @@ export async function listInterventionCases(
           .orderBy(desc(aiDisconnectCaseHistory.actedAt))
       : Promise.resolve([]),
   ]);
+  const taskAssigneeIds = taskRows.map((row) => row.assignedTo).filter((value): value is string => Boolean(value));
+  const userIds = [...new Set([...assigneeIds, ...taskAssigneeIds])];
+  const userRows = userIds.length
+    ? await tenantDb.select({ id: users.id, displayName: users.displayName }).from(users).where(inArray(users.id, userIds))
+    : [];
 
   const taskMap = new Map(taskRows.map((row) => [row.id, row]));
   const dealMap = new Map(dealRows.map((row) => [row.id, row]));
   const companyMap = new Map(companyRows.map((row) => [row.id, row]));
+  const usersMap = new Map(userRows.map((row) => [row.id, row.displayName]));
   const latestHistoryByCase = new Map<string, DisconnectCaseHistoryRow>();
   for (const row of historyRows) {
     if (!latestHistoryByCase.has(row.disconnectCaseId)) latestHistoryByCase.set(row.disconnectCaseId, row);
@@ -505,6 +517,7 @@ export async function listInterventionCases(
         deal: row.dealId ? dealMap.get(row.dealId) ?? null : null,
         company: row.companyId ? companyMap.get(row.companyId) ?? null : null,
         history: latestHistoryByCase.get(row.id) ?? null,
+        usersMap,
         now,
       })
     )
@@ -969,6 +982,7 @@ export async function getInterventionCaseDetail(
     const history = tenantDb.state.history
       .filter((item) => item.disconnectCaseId === row.id)
       .sort((a, b) => b.actedAt.getTime() - a.actedAt.getTime());
+    const usersMap = new Map((tenantDb.state.users ?? []).map((user) => [user.id, user.displayName]));
 
     return {
       case: {
@@ -979,6 +993,7 @@ export async function getInterventionCaseDetail(
         severity: row.severity,
         status: row.status as "open" | "snoozed" | "resolved",
         assignedTo: row.assignedTo,
+        assignedToName: usersMap.get(row.assignedTo ?? "") ?? null,
         generatedTaskId: row.generatedTaskId,
         escalated: row.escalated,
         snoozedUntil: toIsoString(row.snoozedUntil),
@@ -995,6 +1010,7 @@ export async function getInterventionCaseDetail(
             title: task.title,
             status: task.status,
             assignedTo: task.assignedTo,
+            assignedToName: usersMap.get(task.assignedTo ?? "") ?? null,
           }
         : null,
       crm: {
@@ -1016,11 +1032,14 @@ export async function getInterventionCaseDetail(
         id: entry.id,
         actionType: entry.actionType,
         actedBy: entry.actedBy,
+        actedByName: usersMap.get(entry.actedBy) ?? null,
         actedAt: entry.actedAt.toISOString(),
         fromStatus: entry.fromStatus,
         toStatus: entry.toStatus,
         fromAssignee: entry.fromAssignee,
+        fromAssigneeName: usersMap.get(entry.fromAssignee ?? "") ?? null,
         toAssignee: entry.toAssignee,
+        toAssigneeName: usersMap.get(entry.toAssignee ?? "") ?? null,
         fromSnoozedUntil: toIsoString(entry.fromSnoozedUntil),
         toSnoozedUntil: toIsoString(entry.toSnoozedUntil),
         notes: entry.notes,
@@ -1057,6 +1076,19 @@ export async function getInterventionCaseDetail(
     .from(aiDisconnectCaseHistory)
     .where(eq(aiDisconnectCaseHistory.disconnectCaseId, row[0].id))
     .orderBy(desc(aiDisconnectCaseHistory.actedAt));
+  const userIds = [
+    ...new Set(
+      [
+        row[0].assignedTo,
+        taskRow?.assignedTo ?? null,
+        ...historyRows.flatMap((entry) => [entry.actedBy, entry.fromAssignee, entry.toAssignee]),
+      ].filter((value): value is string => Boolean(value))
+    ),
+  ];
+  const userRows = userIds.length
+    ? await tenantDb.select({ id: users.id, displayName: users.displayName }).from(users).where(inArray(users.id, userIds))
+    : [];
+  const usersMap = new Map(userRows.map((user) => [user.id, user.displayName]));
 
   return {
     case: {
@@ -1067,6 +1099,7 @@ export async function getInterventionCaseDetail(
       severity: row[0].severity,
       status: row[0].status as "open" | "snoozed" | "resolved",
       assignedTo: row[0].assignedTo,
+      assignedToName: usersMap.get(row[0].assignedTo ?? "") ?? null,
       generatedTaskId: row[0].generatedTaskId,
       escalated: row[0].escalated,
       snoozedUntil: toIsoString(row[0].snoozedUntil),
@@ -1083,6 +1116,7 @@ export async function getInterventionCaseDetail(
           title: taskRow.title,
           status: taskRow.status,
           assignedTo: taskRow.assignedTo,
+          assignedToName: usersMap.get(taskRow.assignedTo ?? "") ?? null,
         }
       : null,
     crm: {
@@ -1104,11 +1138,14 @@ export async function getInterventionCaseDetail(
       id: entry.id,
       actionType: entry.actionType,
       actedBy: entry.actedBy,
+      actedByName: usersMap.get(entry.actedBy) ?? null,
       actedAt: entry.actedAt.toISOString(),
       fromStatus: entry.fromStatus,
       toStatus: entry.toStatus,
       fromAssignee: entry.fromAssignee,
+      fromAssigneeName: usersMap.get(entry.fromAssignee ?? "") ?? null,
       toAssignee: entry.toAssignee,
+      toAssigneeName: usersMap.get(entry.toAssignee ?? "") ?? null,
       fromSnoozedUntil: toIsoString(entry.fromSnoozedUntil),
       toSnoozedUntil: toIsoString(entry.toSnoozedUntil),
       notes: entry.notes,

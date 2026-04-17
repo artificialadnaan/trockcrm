@@ -101,7 +101,7 @@ export function InterventionQueueTable(props: {
                   </div>
                 </TableCell>
                 <TableCell className="align-top">
-                  <div className="text-sm font-medium">{item.assignedTo ?? "Unassigned"}</div>
+                  <div className="text-sm font-medium">{item.assignedToName ?? item.assignedTo ?? "Unassigned"}</div>
                   {item.clusterKey && <div className="text-xs text-muted-foreground mt-1">{item.clusterKey}</div>}
                 </TableCell>
                 <TableCell className="align-top">
@@ -109,7 +109,9 @@ export function InterventionQueueTable(props: {
                     <div className="space-y-1">
                       <div className="text-sm font-medium">{item.generatedTask.title}</div>
                       <div className="text-xs text-muted-foreground">{item.generatedTask.status}</div>
-                      <div className="text-xs text-muted-foreground">{item.generatedTask.assignedTo ?? "No task assignee"}</div>
+                      <div className="text-xs text-muted-foreground">
+                        {item.generatedTask.assignedToName ?? item.generatedTask.assignedTo ?? "No task assignee"}
+                      </div>
                     </div>
                   ) : (
                     <div className="text-sm text-muted-foreground">No generated task</div>

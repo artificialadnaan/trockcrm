@@ -37,10 +37,12 @@ export interface InterventionQueueItem {
   reopenCount: number;
   ageDays: number;
   assignedTo: string | null;
+  assignedToName: string | null;
   generatedTask: {
     id: string;
     status: string;
     assignedTo: string | null;
+    assignedToName: string | null;
     title: string;
   } | null;
   deal: { id: string; dealNumber: string; name: string } | null;
@@ -75,6 +77,7 @@ export interface InterventionCaseDetail {
     severity: string;
     status: "open" | "snoozed" | "resolved";
     assignedTo: string | null;
+    assignedToName: string | null;
     generatedTaskId: string | null;
     escalated: boolean;
     snoozedUntil: string | null;
@@ -90,6 +93,7 @@ export interface InterventionCaseDetail {
     title: string;
     status: string;
     assignedTo: string | null;
+    assignedToName: string | null;
   } | null;
   crm: {
     deal: { id: string; dealNumber: string; name: string } | null;
@@ -99,11 +103,14 @@ export interface InterventionCaseDetail {
     id: string;
     actionType: string;
     actedBy: string;
+    actedByName: string | null;
     actedAt: string;
     fromStatus: string | null;
     toStatus: string | null;
     fromAssignee: string | null;
+    fromAssigneeName: string | null;
     toAssignee: string | null;
+    toAssigneeName: string | null;
     fromSnoozedUntil: string | null;
     toSnoozedUntil: string | null;
     notes: string | null;

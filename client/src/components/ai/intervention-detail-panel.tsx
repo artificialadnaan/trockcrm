@@ -139,7 +139,7 @@ export function InterventionDetailPanel(props: {
                 <div className="grid grid-cols-2 gap-3 text-sm">
                   <div>
                     <div className="text-xs uppercase tracking-widest text-muted-foreground">Assigned to</div>
-                    <div>{detail.case.assignedTo ?? "Unassigned"}</div>
+                    <div>{detail.case.assignedToName ?? detail.case.assignedTo ?? "Unassigned"}</div>
                   </div>
                   <div>
                     <div className="text-xs uppercase tracking-widest text-muted-foreground">Snoozed until</div>
@@ -162,7 +162,9 @@ export function InterventionDetailPanel(props: {
                   <div className="space-y-1 text-sm">
                     <div className="font-medium">{detail.generatedTask.title}</div>
                     <div className="text-muted-foreground">{detail.generatedTask.status}</div>
-                    <div className="text-muted-foreground">{detail.generatedTask.assignedTo ?? "No task assignee"}</div>
+                    <div className="text-muted-foreground">
+                      {detail.generatedTask.assignedToName ?? detail.generatedTask.assignedTo ?? "No task assignee"}
+                    </div>
                   </div>
                 ) : (
                   <div className="text-sm text-muted-foreground">No generated task is currently linked to this case.</div>
