@@ -1,14 +1,58 @@
 import { pool, db } from "../db.js";
-import {
-  getOfficeLocalTimeParts,
-  getOfficeTimezone,
-  isOfficeLocalSendDue,
-} from "../../../server/src/lib/office-timezone.js";
-import {
-  runManagerAlertPreview,
-  sendManagerAlertSummary,
-  type ManagerAlertSnapshotJson,
-} from "../../../server/src/modules/ai-copilot/intervention-manager-alerts-service.js";
+
+const SERVER_OFFICE_TIMEZONE_MODULES = [
+  "../../../server/dist/lib/office-timezone.js",
+  "../../../server/src/lib/office-timezone.js",
+] as const;
+
+const SERVER_MANAGER_ALERT_SERVICE_MODULES = [
+  "../../../server/dist/modules/ai-copilot/intervention-manager-alerts-service.js",
+  "../../../server/src/modules/ai-copilot/intervention-manager-alerts-service.js",
+] as const;
+
+async function importFirstAvailable<T>(paths: readonly string[]): Promise<T> {
+  let lastError: unknown;
+
+  for (const path of paths) {
+    try {
+      return (await import(path)) as T;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error("Unable to import server manager alert modules");
+}
+
+async function getOfficeTimeHelpers() {
+  return importFirstAvailable<{
+    getOfficeLocalTimeParts: (input: { timezone: string; nowUtc: Date }) => { weekday: string; isWeekend: boolean };
+    getOfficeTimezone: (input?: { timezone?: string | null } | null) => string;
+    isOfficeLocalSendDue: (input: { timezone: string; nowUtc: Date; targetHour: number }) => boolean;
+  }>(SERVER_OFFICE_TIMEZONE_MODULES);
+}
+
+async function getManagerAlertService() {
+  return importFirstAvailable<{
+    runManagerAlertPreview: (
+      tenantDb: unknown,
+      input: { officeId: string; timezone?: string | null; now?: Date }
+    ) => Promise<{ snapshotJson: ManagerAlertSnapshotJson }>;
+    sendManagerAlertSummary: (
+      tenantDb: unknown,
+      input: { officeId: string; recipientUserId: string; timezone?: string | null; now?: Date }
+    ) => Promise<{ claimed: boolean }>;
+  }>(SERVER_MANAGER_ALERT_SERVICE_MODULES);
+}
+
+type ManagerAlertSnapshotJson = {
+  families: {
+    overdueHighCritical: { count: number };
+    snoozeBreached: { count: number };
+    escalatedOpen: { count: number };
+    assigneeOverload: { count: number };
+  };
+};
 
 function computeAdvisoryLockId(value: string) {
   let lockId = 0;
@@ -30,6 +74,8 @@ function hasActiveAlertFamilies(snapshotJson: ManagerAlertSnapshotJson) {
 export async function runAiInterventionManagerAlerts(input?: { now?: Date }): Promise<void> {
   const now = input?.now ?? new Date();
   console.log("[Worker:ai-intervention-manager-alerts] Starting manager alert scheduling...");
+  const { getOfficeLocalTimeParts, getOfficeTimezone, isOfficeLocalSendDue } = await getOfficeTimeHelpers();
+  const { runManagerAlertPreview, sendManagerAlertSummary } = await getManagerAlertService();
 
   const client = await pool.connect();
   try {
