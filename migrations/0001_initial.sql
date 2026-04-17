@@ -310,8 +310,8 @@ DECLARE
 BEGIN
   IF TG_OP = 'INSERT' THEN
     EXECUTE format(
-      'INSERT INTO %I.audit_log (table_name, record_id, action, changed_by, full_row, created_at)
-       VALUES ($1, $2, $3, $4, $5, NOW())',
+      'INSERT INTO %1$I.audit_log (table_name, record_id, action, changed_by, full_row, created_at)
+       VALUES ($1, $2, $3::%1$I.audit_action, $4, $5, NOW())',
       TG_TABLE_SCHEMA
     )
     USING
@@ -335,8 +335,8 @@ BEGIN
     END LOOP;
     IF changed_fields != '{}' THEN
       EXECUTE format(
-        'INSERT INTO %I.audit_log (table_name, record_id, action, changed_by, changes, created_at)
-         VALUES ($1, $2, $3, $4, $5, NOW())',
+        'INSERT INTO %1$I.audit_log (table_name, record_id, action, changed_by, changes, created_at)
+         VALUES ($1, $2, $3::%1$I.audit_action, $4, $5, NOW())',
         TG_TABLE_SCHEMA
       )
       USING
@@ -349,8 +349,8 @@ BEGIN
     RETURN NEW;
   ELSIF TG_OP = 'DELETE' THEN
     EXECUTE format(
-      'INSERT INTO %I.audit_log (table_name, record_id, action, changed_by, full_row, created_at)
-       VALUES ($1, $2, $3, $4, $5, NOW())',
+      'INSERT INTO %1$I.audit_log (table_name, record_id, action, changed_by, full_row, created_at)
+       VALUES ($1, $2, $3::%1$I.audit_action, $4, $5, NOW())',
       TG_TABLE_SCHEMA
     )
     USING

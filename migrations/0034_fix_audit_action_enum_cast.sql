@@ -1,3 +1,7 @@
+-- Migration 0034: Fix schema-qualified audit trigger enum casts.
+-- The dynamic SQL introduced in 0033 must cast the action parameter inside the
+-- SQL string so Postgres resolves it as the tenant schema's audit_action enum.
+
 CREATE OR REPLACE FUNCTION audit_trigger_func()
 RETURNS TRIGGER AS $$
 DECLARE
@@ -20,14 +24,18 @@ BEGIN
       to_jsonb(NEW);
     RETURN NEW;
   ELSIF TG_OP = 'UPDATE' THEN
-    FOR col_name IN SELECT column_name FROM information_schema.columns
-      WHERE table_schema = TG_TABLE_SCHEMA AND table_name = TG_TABLE_NAME
+    FOR col_name IN
+      SELECT column_name
+      FROM information_schema.columns
+      WHERE table_schema = TG_TABLE_SCHEMA
+        AND table_name = TG_TABLE_NAME
     LOOP
       EXECUTE format('SELECT ($1).%I::TEXT, ($2).%I::TEXT', col_name, col_name)
         INTO old_val, new_val USING OLD, NEW;
       IF old_val IS DISTINCT FROM new_val THEN
         changed_fields := changed_fields || jsonb_build_object(
-          col_name, jsonb_build_object('old', old_val, 'new', new_val)
+          col_name,
+          jsonb_build_object('old', old_val, 'new', new_val)
         );
       END IF;
     END LOOP;
@@ -60,5 +68,7 @@ BEGIN
       to_jsonb(OLD);
     RETURN OLD;
   END IF;
+
+  RETURN NULL;
 END;
 $$ LANGUAGE plpgsql;

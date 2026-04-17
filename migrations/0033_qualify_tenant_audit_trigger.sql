@@ -13,14 +13,14 @@ DECLARE
 BEGIN
   IF TG_OP = 'INSERT' THEN
     EXECUTE format(
-      'INSERT INTO %I.audit_log (table_name, record_id, action, changed_by, full_row, created_at)
-       VALUES ($1, $2, $3, $4, $5, NOW())',
+      'INSERT INTO %1$I.audit_log (table_name, record_id, action, changed_by, full_row, created_at)
+       VALUES ($1, $2, $3::%1$I.audit_action, $4, $5, NOW())',
       TG_TABLE_SCHEMA
     )
     USING
       TG_TABLE_NAME,
       NEW.id,
-      'insert'::public.audit_action,
+      'insert',
       NULLIF(current_setting('app.current_user_id', true), '')::UUID,
       to_jsonb(NEW);
     RETURN NEW;
@@ -43,28 +43,28 @@ BEGIN
 
     IF changed_fields != '{}' THEN
       EXECUTE format(
-        'INSERT INTO %I.audit_log (table_name, record_id, action, changed_by, changes, created_at)
-         VALUES ($1, $2, $3, $4, $5, NOW())',
+        'INSERT INTO %1$I.audit_log (table_name, record_id, action, changed_by, changes, created_at)
+         VALUES ($1, $2, $3::%1$I.audit_action, $4, $5, NOW())',
         TG_TABLE_SCHEMA
       )
       USING
         TG_TABLE_NAME,
         NEW.id,
-        'update'::public.audit_action,
+        'update',
         NULLIF(current_setting('app.current_user_id', true), '')::UUID,
         changed_fields;
     END IF;
     RETURN NEW;
   ELSIF TG_OP = 'DELETE' THEN
     EXECUTE format(
-      'INSERT INTO %I.audit_log (table_name, record_id, action, changed_by, full_row, created_at)
-       VALUES ($1, $2, $3, $4, $5, NOW())',
+      'INSERT INTO %1$I.audit_log (table_name, record_id, action, changed_by, full_row, created_at)
+       VALUES ($1, $2, $3::%1$I.audit_action, $4, $5, NOW())',
       TG_TABLE_SCHEMA
     )
     USING
       TG_TABLE_NAME,
       OLD.id,
-      'delete'::public.audit_action,
+      'delete',
       NULLIF(current_setting('app.current_user_id', true), '')::UUID,
       to_jsonb(OLD);
     RETURN OLD;
