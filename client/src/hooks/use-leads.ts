@@ -112,3 +112,18 @@ export function useLeadDetail(leadId: string | undefined) {
 
   return { lead, loading, error, refetch: fetchLead };
 }
+
+export async function createLead(input: {
+  companyId: string;
+  propertyId: string;
+  stageId: string;
+  assignedRepId?: string;
+  name: string;
+  source?: string | null;
+  description?: string | null;
+}) {
+  return api<{ lead: LeadRecord }>("/leads", {
+    method: "POST",
+    json: input,
+  });
+}
