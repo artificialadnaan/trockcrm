@@ -175,6 +175,9 @@ export function AdminInterventionWorkspacePage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          <Link to="/admin/intervention-analytics" className={buttonVariants({ variant: "outline" })}>
+            View Analytics
+          </Link>
           <Link to="/admin/sales-process-disconnects" className={buttonVariants({ variant: "outline" })}>
             View Disconnect Dashboard
           </Link>
