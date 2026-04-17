@@ -19,7 +19,7 @@ export function LeadDetailPage() {
     () => stages.find((stage) => stage.id === lead?.stageId) ?? null,
     [lead?.stageId, stages]
   );
-  const isLeadStage = currentStage?.slug === "dd";
+  const isLeadStage = currentStage?.workflowFamily === "lead";
   const convertedAt = lead?.convertedAt ?? null;
 
   if (loading) {

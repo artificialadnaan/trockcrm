@@ -4,8 +4,8 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { LeadDetailPage } from "./lead-detail-page";
 
 const stages = [
-  { id: "stage-lead", name: "Lead", slug: "dd" },
-  { id: "stage-estimating", name: "Estimating", slug: "estimating" },
+  { id: "stage-lead", name: "Contacted", slug: "contacted", workflowFamily: "lead" },
+  { id: "stage-estimating", name: "Estimating", slug: "estimating", workflowFamily: "standard_deal" },
 ];
 
 let lead: {
@@ -131,7 +131,18 @@ describe("LeadDetailPage", () => {
     expect(html).toContain("Alpha Roofing");
     expect(html).toContain("123 Main St");
     expect(html).toContain("Convert to Deal");
-    expect(html).toContain("Lead");
+    expect(html).toContain("Contacted");
+  });
+
+  it("treats workflow-family lead stages as unconverted even when the slug is not dd", () => {
+    lead = { ...lead, stageId: "stage-lead", convertedAt: null, convertedDealId: null, convertedDealNumber: null };
+    activities = [];
+
+    const html = renderLeadDetail();
+
+    expect(html).toContain("Convert to Deal");
+    expect(html).toContain("This record is still in the lead stage.");
+    expect(html).not.toContain("This lead has already been converted");
   });
 
   it("switches the CTA to open the deal once the lead is converted", () => {
