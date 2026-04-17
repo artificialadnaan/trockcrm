@@ -195,6 +195,13 @@ function readMetadataString(metadata: Record<string, unknown> | null | undefined
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
+function readMetadataDate(metadata: Record<string, unknown> | null | undefined, key: string) {
+  const value = readMetadataString(metadata, key);
+  if (!value) return null;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
 function matchesQueueStatus(
   row: DisconnectCaseRow,
   input: { status?: "open" | "snoozed" | "resolved"; view?: InterventionQueueView; now: Date }
@@ -597,7 +604,7 @@ function isOverdueDisconnectCase(row: DisconnectCaseRow, now: Date) {
 }
 
 function isSnoozeBreachedCase(row: DisconnectCaseRow, now: Date) {
-  return row.status === "snoozed" && Boolean(row.snoozedUntil && row.snoozedUntil < now);
+  return row.status === "snoozed" && Boolean(row.snoozedUntil && row.snoozedUntil <= now);
 }
 
 function isRepeatOpenCase(row: DisconnectCaseRow) {
@@ -757,10 +764,16 @@ function buildInterventionAnalyticsOutcomes(
     resolve: recentHistory.filter((row) => row.actionType === "resolve").length,
     escalate: recentHistory.filter((row) => row.actionType === "escalate").length,
   };
-  const recentResolutions = cases.filter((row) => Boolean(row.resolvedAt && row.resolvedAt >= windowStart));
+  const recentResolutionCaseIds = new Set(
+    recentHistory
+      .filter((row) => row.actionType === "resolve")
+      .map((row) => row.disconnectCaseId)
+  );
+  const casesById = new Map(cases.map((row) => [row.id, row]));
   const recentReopens = cases.filter(
     (row) =>
       Boolean(row.lastReopenedAt && row.lastReopenedAt >= windowStart) &&
+      recentResolutionCaseIds.has(row.id) &&
       historyRows.some(
         (entry) =>
           entry.disconnectCaseId === row.id &&
@@ -772,12 +785,24 @@ function buildInterventionAnalyticsOutcomes(
   const openAges = cases
     .filter((row) => row.status === "open")
     .map((row) => calculateBusinessDaysElapsed(row.currentLifecycleStartedAt, now));
-  const resolutionAges = recentResolutions.map((row) => calculateBusinessDaysElapsed(row.currentLifecycleStartedAt, row.resolvedAt ?? now));
+  const resolutionAges = recentHistory
+    .filter((row) => row.actionType === "resolve")
+    .map((entry) => {
+      const lifecycleStartedAt =
+        readMetadataDate(entry.metadataJson as Record<string, unknown> | null | undefined, "lifecycleStartedAt") ??
+        (() => {
+          const currentRow = casesById.get(entry.disconnectCaseId);
+          if (!currentRow?.resolvedAt) return null;
+          return currentRow.resolvedAt.getTime() === entry.actedAt.getTime() ? currentRow.currentLifecycleStartedAt : null;
+        })();
+      return lifecycleStartedAt ? calculateBusinessDaysElapsed(lifecycleStartedAt, entry.actedAt) : null;
+    })
+    .filter((value): value is number => value !== null);
   const clearanceDenominator = intervenedCaseIds.size;
-  const reopenDenominator = recentResolutions.length;
+  const reopenDenominator = recentResolutionCaseIds.size;
 
   return {
-    clearanceRate30d: clearanceDenominator === 0 ? null : recentResolutions.length / clearanceDenominator,
+    clearanceRate30d: clearanceDenominator === 0 ? null : recentResolutionCaseIds.size / clearanceDenominator,
     reopenRate30d: reopenDenominator === 0 ? null : recentReopens.length / reopenDenominator,
     averageAgeOfOpenCases: average(openAges),
     medianAgeOfOpenCases: median(openAges),
@@ -1618,6 +1643,7 @@ export async function resolveInterventionCases(
       metadataJson: {
         resolutionReason: input.resolutionReason,
         taskOutcome,
+        lifecycleStartedAt: row.currentLifecycleStartedAt.toISOString(),
       },
     });
     updatedCount += 1;
