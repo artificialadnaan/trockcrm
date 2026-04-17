@@ -108,7 +108,7 @@ BEGIN
         SELECT
           ugt.id AS mailbox_account_id,
           e.graph_conversation_id,
-          min(e.deal_id) AS deal_id,
+          min(e.deal_id::text)::uuid AS deal_id,
           max(COALESCE(e.assignment_confidence, 'high')) AS assignment_confidence,
           count(DISTINCT e.deal_id) AS distinct_deal_count
         FROM %I.emails e
