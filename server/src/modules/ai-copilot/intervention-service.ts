@@ -615,20 +615,22 @@ function formatQueueLink(input: {
 
 async function loadInterventionAnalyticsData(
   tenantDb: TenantDb | InMemoryTenantDb,
-  officeId: string
+  officeId: string,
+  casesOverride?: DisconnectCaseRow[]
 ) {
   if (isInMemoryTenantDb(tenantDb)) {
+    const scopedCases = casesOverride ?? tenantDb.state.cases.filter((row) => row.officeId === officeId);
     return {
-      cases: tenantDb.state.cases.filter((row) => row.officeId === officeId),
+      cases: scopedCases,
       deals: tenantDb.state.deals,
       companies: tenantDb.state.companies,
       history: tenantDb.state.history.filter((row) =>
-        tenantDb.state.cases.some((item) => item.officeId === officeId && item.id === row.disconnectCaseId)
+        scopedCases.some((item) => item.id === row.disconnectCaseId)
       ),
     };
   }
 
-  const cases = await getCasesByOffice(tenantDb, officeId);
+  const cases = casesOverride ?? (await getCasesByOffice(tenantDb, officeId));
   const dealIds = cases.map((row) => row.dealId).filter((value): value is string => Boolean(value));
   const companyIds = cases.map((row) => row.companyId).filter((value): value is string => Boolean(value));
   const [dealRows, companyRows, historyRows] = await Promise.all([
@@ -645,6 +647,55 @@ async function loadInterventionAnalyticsData(
     companies: companyRows,
     history: historyRows,
   };
+}
+
+async function buildAnalyticsPreviewCases(
+  tenantDb: TenantDb,
+  input: { officeId: string; now: Date }
+) {
+  const [existingCases, currentRows] = await Promise.all([
+    getCasesByOffice(tenantDb, input.officeId),
+    listCurrentSalesProcessDisconnectRows(tenantDb, { limit: 500 }),
+  ]);
+  const existingByBusinessKey = new Map(existingCases.map((row) => [row.businessKey, row]));
+  const previewCases: DisconnectCaseRow[] = [...existingCases];
+
+  for (const row of currentRows) {
+    const businessKey = buildBusinessKey(input.officeId, row);
+    const existing = existingByBusinessKey.get(businessKey);
+    if (!existing) {
+      previewCases.push({
+        id: `preview:${businessKey}`,
+        ...buildCaseInsert(input.officeId, row, input.now),
+        createdAt: input.now,
+        updatedAt: input.now,
+      } as DisconnectCaseRow);
+      continue;
+    }
+
+    const reopen = shouldReopenCase(existing, input.now);
+    const previewRow: DisconnectCaseRow = {
+      ...existing,
+      severity: row.disconnectSeverity,
+      clusterKey: getDisconnectCaseIdentity(row).clusterKey,
+      companyId: row.companyId,
+      lastDetectedAt: input.now,
+      metadataJson: buildCaseMetadata(row),
+      updatedAt: input.now,
+      status: reopen ? "open" : existing.status,
+      snoozedUntil: reopen ? null : existing.snoozedUntil,
+      resolvedAt: reopen ? null : existing.resolvedAt,
+      resolutionReason: reopen ? null : existing.resolutionReason,
+      reopenCount: reopen ? existing.reopenCount + 1 : existing.reopenCount,
+      currentLifecycleStartedAt: reopen ? input.now : existing.currentLifecycleStartedAt,
+      lastReopenedAt: reopen ? input.now : existing.lastReopenedAt,
+    };
+
+    const previewIndex = previewCases.findIndex((item) => item.id === existing.id);
+    if (previewIndex >= 0) previewCases[previewIndex] = previewRow;
+  }
+
+  return previewCases;
 }
 
 function buildInterventionAnalyticsSummary(cases: DisconnectCaseRow[], now: Date) {
@@ -686,15 +737,27 @@ function buildInterventionAnalyticsOutcomes(
     escalate: recentHistory.filter((row) => row.actionType === "escalate").length,
   };
   const recentResolutions = cases.filter((row) => Boolean(row.resolvedAt && row.resolvedAt >= windowStart));
-  const recentReopens = cases.filter((row) => Boolean(row.lastReopenedAt && row.lastReopenedAt >= windowStart));
+  const recentReopens = cases.filter(
+    (row) =>
+      Boolean(row.lastReopenedAt && row.lastReopenedAt >= windowStart) &&
+      historyRows.some(
+        (entry) =>
+          entry.disconnectCaseId === row.id &&
+          entry.actionType === "resolve" &&
+          entry.actedAt < (row.lastReopenedAt as Date)
+      )
+  );
+  const intervenedCaseIds = new Set(recentHistory.map((row) => row.disconnectCaseId));
   const openAges = cases
     .filter((row) => row.status === "open")
     .map((row) => calculateBusinessDaysElapsed(row.currentLifecycleStartedAt, now));
   const resolutionAges = recentResolutions.map((row) => calculateBusinessDaysElapsed(row.currentLifecycleStartedAt, row.resolvedAt ?? now));
+  const clearanceDenominator = intervenedCaseIds.size;
+  const reopenDenominator = recentResolutions.length;
 
   return {
-    clearanceRate30d: recentResolutions.length / Math.max(recentResolutions.length + recentReopens.length, 1),
-    reopenRate30d: recentReopens.length / Math.max(recentResolutions.length + recentReopens.length, 1),
+    clearanceRate30d: clearanceDenominator === 0 ? null : recentResolutions.length / clearanceDenominator,
+    reopenRate30d: reopenDenominator === 0 ? null : recentReopens.length / reopenDenominator,
     averageAgeOfOpenCases: average(openAges),
     medianAgeOfOpenCases: median(openAges),
     averageAgeToResolution: average(resolutionAges),
@@ -796,7 +859,8 @@ function buildInterventionAnalyticsBreachQueue(
       const severityDelta = severityRank(b.severity) - severityRank(a.severity);
       if (severityDelta !== 0) return severityDelta;
       if (b.ageDays !== a.ageDays) return b.ageDays - a.ageDays;
-      return a.caseId.localeCompare(b.caseId);
+      if (a.escalated !== b.escalated) return a.escalated ? -1 : 1;
+      return (a.dealLabel ?? a.companyLabel ?? a.caseId).localeCompare(b.dealLabel ?? b.companyLabel ?? b.caseId);
     });
 
   return {
@@ -811,10 +875,13 @@ export async function getInterventionAnalyticsDashboard(
   input: { officeId: string; now?: Date }
 ): Promise<InterventionAnalyticsDashboard> {
   const now = input.now ?? new Date();
+  const previewCases =
+    isInMemoryTenantDb(tenantDb) ? undefined : await buildAnalyticsPreviewCases(tenantDb, { officeId: input.officeId, now });
 
   const { cases, deals: dealRows, companies: companyRows, history } = await loadInterventionAnalyticsData(
     tenantDb,
-    input.officeId
+    input.officeId,
+    previewCases
   );
   const dealsMap = new Map(dealRows.map((row) => [row.id, row]));
   const companiesMap = new Map(companyRows.map((row) => [row.id, row]));
