@@ -194,6 +194,10 @@ export function buildInterventionWorkspacePath(input: {
   return query ? `/admin/interventions?${query}` : "/admin/interventions";
 }
 
+export function buildInterventionAnalyticsPath() {
+  return "/admin/intervention-analytics";
+}
+
 function pluralize(count: number, singular: string, plural = `${singular}s`) {
   return `${count} ${count === 1 ? singular : plural}`;
 }

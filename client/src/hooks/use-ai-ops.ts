@@ -255,6 +255,73 @@ export interface SalesProcessDisconnectDashboard {
   rows: SalesProcessDisconnectRow[];
 }
 
+export interface InterventionAnalyticsHotspotRow {
+  key: string;
+  entityType: "assignee" | "disconnect_type" | "rep" | "company" | "stage";
+  filterValue: string | null;
+  label: string;
+  openCases: number;
+  overdueCases: number;
+  repeatOpenCases: number;
+  clearanceRate30d: number | null;
+  queueLink: string | null;
+}
+
+export interface InterventionAnalyticsBreachRow {
+  caseId: string;
+  severity: string;
+  disconnectType: string;
+  dealId: string | null;
+  dealLabel: string | null;
+  companyId: string | null;
+  companyLabel: string | null;
+  ageDays: number;
+  assignedTo: string | null;
+  escalated: boolean;
+  breachReasons: Array<"overdue" | "escalated_open" | "snooze_breached" | "repeat_open">;
+  detailLink: string;
+  queueLink: string;
+}
+
+export interface InterventionAnalyticsDashboard {
+  summary: {
+    openCases: number;
+    overdueCases: number;
+    escalatedCases: number;
+    snoozeOverdueCases: number;
+    repeatOpenCases: number;
+    openCasesBySeverity: Record<string, number>;
+    overdueCasesBySeverity: Record<string, number>;
+  };
+  outcomes: {
+    clearanceRate30d: number | null;
+    reopenRate30d: number | null;
+    averageAgeOfOpenCases: number | null;
+    medianAgeOfOpenCases: number | null;
+    averageAgeToResolution: number | null;
+    actionVolume30d: Record<string, number>;
+  };
+  hotspots: {
+    assignees: InterventionAnalyticsHotspotRow[];
+    disconnectTypes: InterventionAnalyticsHotspotRow[];
+    reps: InterventionAnalyticsHotspotRow[];
+    companies: InterventionAnalyticsHotspotRow[];
+    stages: InterventionAnalyticsHotspotRow[];
+  };
+  breachQueue: {
+    items: InterventionAnalyticsBreachRow[];
+    totalCount: number;
+    pageSize: number;
+  };
+  slaRules: {
+    criticalDays: number;
+    highDays: number;
+    mediumDays: number;
+    lowDays: number;
+    timingBasis: "business_days";
+  };
+}
+
 export interface QueueAiBackfillResult {
   queued: boolean;
   sourceType: string | null;
@@ -272,6 +339,43 @@ export interface TriageAiActionResult {
   action: "mark_reviewed" | "resolve" | "dismiss" | "escalate";
   feedbackId: string;
   targetStatus: string;
+}
+
+export function useAiOpsQuery<T>(path: string, errorMessage = "Failed to load AI ops data") {
+  const [data, setData] = useState<T | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchData = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const response = await api<T>(path);
+      setData(response);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : errorMessage);
+    } finally {
+      setLoading(false);
+    }
+  }, [errorMessage, path]);
+
+  useEffect(() => {
+    void fetchData();
+  }, [fetchData]);
+
+  return {
+    data,
+    loading,
+    error,
+    refetch: fetchData,
+  };
+}
+
+export function useInterventionAnalytics() {
+  return useAiOpsQuery<InterventionAnalyticsDashboard>(
+    "/ai/ops/intervention-analytics",
+    "Failed to load intervention analytics"
+  );
 }
 
 export function useAiOps(limit = 20) {

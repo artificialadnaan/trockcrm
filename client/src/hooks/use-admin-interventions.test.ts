@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   assignIntervention,
   buildAdminInterventionQuery,
+  buildInterventionAnalyticsPath,
   buildInterventionWorkspacePath,
   batchAssignInterventions,
   batchEscalateInterventions,
@@ -82,6 +83,12 @@ describe("buildInterventionWorkspacePath", () => {
         caseId: "case-1",
       })
     ).toBe("/admin/interventions?view=snooze-breached&companyId=company-1&caseId=case-1");
+  });
+});
+
+describe("buildInterventionAnalyticsPath", () => {
+  it("returns the analytics workspace path", () => {
+    expect(buildInterventionAnalyticsPath()).toBe("/admin/intervention-analytics");
   });
 });
 
