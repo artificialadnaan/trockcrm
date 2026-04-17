@@ -4,6 +4,7 @@ export const offices = pgTable("offices", {
   id: uuid("id").primaryKey().defaultRandom(),
   name: varchar("name", { length: 255 }).notNull(),
   slug: varchar("slug", { length: 100 }).unique().notNull(),
+  timezone: varchar("timezone", { length: 100 }).default("America/Chicago").notNull(),
   address: text("address"),
   phone: varchar("phone", { length: 20 }),
   isActive: boolean("is_active").default(true).notNull(),

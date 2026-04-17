@@ -4,6 +4,7 @@ import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { createOffice as provisionOffice } from "../office/service.js";
 import { invalidateOfficeCache } from "../../middleware/tenant.js";
+import { getOfficeTimezone } from "../../lib/office-timezone.js";
 
 export async function listOffices() {
   return db
@@ -26,6 +27,7 @@ export interface CreateOfficeInput {
   slug: string;
   address?: string;
   phone?: string;
+  timezone?: string | null;
 }
 
 /**
@@ -43,12 +45,28 @@ export async function createOffice(input: CreateOfficeInput) {
   }
 
   // provisionOffice does: slug validation, uniqueness check, INSERT + schema DDL in one transaction
-  return provisionOffice(input.name, input.slug, input.address, input.phone);
+  const office = await provisionOffice(
+    input.name,
+    input.slug,
+    input.address,
+    input.phone,
+    getOfficeTimezone({ timezone: input.timezone })
+  );
+
+  invalidateOfficeCache(office.id);
+  return office;
 }
 
 export async function updateOffice(
   id: string,
-  input: Partial<{ name: string; address: string; phone: string; isActive: boolean; settings: Record<string, unknown> }>
+  input: Partial<{
+    name: string;
+    address: string;
+    phone: string;
+    timezone: string | null;
+    isActive: boolean;
+    settings: Record<string, unknown>;
+  }>
 ) {
   const existing = await getOfficeById(id);
   if (!existing) throw new AppError(404, "Office not found");
@@ -57,6 +75,7 @@ export async function updateOffice(
   if (input.name !== undefined) updates.name = input.name;
   if (input.address !== undefined) updates.address = input.address;
   if (input.phone !== undefined) updates.phone = input.phone;
+  if (input.timezone !== undefined) updates.timezone = getOfficeTimezone({ timezone: input.timezone });
   if (input.isActive !== undefined) updates.isActive = input.isActive;
   if (input.settings !== undefined) updates.settings = input.settings;
 

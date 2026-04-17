@@ -18,6 +18,7 @@ vi.mock("../../../src/modules/ai-copilot/service.js", async () => {
 const {
   materializeDisconnectCases,
   listInterventionCases,
+  getInterventionAnalyticsDashboard,
   getInterventionCaseDetail,
   assignInterventionCases,
   snoozeInterventionCases,
@@ -1310,5 +1311,82 @@ describe("AI intervention service", () => {
       assignedTo: "manager-1",
     });
     expect(tenantDb.state.history).toHaveLength(1);
+  });
+
+  it("counts recent resolutions and reopens from history even after a case reopens", async () => {
+    const now = new Date("2026-04-16T15:00:00.000Z");
+    const resolvedAt = new Date("2026-04-10T12:00:00.000Z");
+    const reopenedAt = new Date("2026-04-12T12:00:00.000Z");
+    const tenantDb = createTenantDb({
+      cases: [
+        makeCase({
+          id: "case-1",
+          status: "open",
+          currentLifecycleStartedAt: reopenedAt,
+          lastReopenedAt: reopenedAt,
+          resolvedAt: null,
+          reopenCount: 1,
+        }),
+        makeCase({
+          id: "case-2",
+          businessKey: "office-1:estimating_gate_missing:deal:deal-2",
+          disconnectType: "estimating_gate_missing",
+          severity: "medium",
+          currentLifecycleStartedAt: new Date("2026-04-11T12:00:00.000Z"),
+        }),
+      ],
+      history: [
+        makeHistory({
+          id: "history-resolve-1",
+          disconnectCaseId: "case-1",
+          actionType: "resolve",
+          actedAt: resolvedAt,
+          fromStatus: "open",
+          toStatus: "resolved",
+          metadataJson: {
+            lifecycleStartedAt: "2026-04-01T12:00:00.000Z",
+          },
+        }),
+        makeHistory({
+          id: "history-assign-2",
+          disconnectCaseId: "case-2",
+          actionType: "assign",
+          actedAt: new Date("2026-04-13T12:00:00.000Z"),
+        }),
+      ],
+      deals: [{ id: "deal-1", dealNumber: "D-1001", name: "Alpha Plaza", companyId: "company-1" }],
+      companies: [{ id: "company-1", name: "Acme Property Group" }],
+      users: [{ id: "user-1", displayName: "Manager One" }],
+    });
+
+    const dashboard = await getInterventionAnalyticsDashboard(tenantDb as any, {
+      officeId: "office-1",
+      now,
+    });
+
+    expect(dashboard.outcomes.clearanceRate30d).toBe(0.5);
+    expect(dashboard.outcomes.reopenRate30d).toBe(1);
+    expect(dashboard.outcomes.averageAgeToResolution).toBe(7);
+  });
+
+  it("treats a snooze expiring exactly at now as breached in analytics", async () => {
+    const now = new Date("2026-04-16T15:00:00.000Z");
+    const tenantDb = createTenantDb({
+      cases: [
+        makeCase({
+          id: "case-1",
+          status: "snoozed",
+          snoozedUntil: now,
+          currentLifecycleStartedAt: new Date("2026-04-10T12:00:00.000Z"),
+        }),
+      ],
+    });
+
+    const dashboard = await getInterventionAnalyticsDashboard(tenantDb as any, {
+      officeId: "office-1",
+      now,
+    });
+
+    expect(dashboard.summary.snoozeOverdueCases).toBe(1);
   });
 });

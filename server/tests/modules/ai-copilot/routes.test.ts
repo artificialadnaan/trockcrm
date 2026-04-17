@@ -20,6 +20,9 @@ const serviceMocks = vi.hoisted(() => ({
 const interventionServiceMocks = vi.hoisted(() => ({
   listInterventionCases: vi.fn(),
   getInterventionAnalyticsDashboard: vi.fn(),
+  getLatestManagerAlertSnapshot: vi.fn(),
+  runManagerAlertPreview: vi.fn(),
+  sendManagerAlertSummary: vi.fn(),
   getInterventionCaseDetail: vi.fn(),
   assignInterventionCases: vi.fn(),
   snoozeInterventionCases: vi.fn(),
@@ -63,6 +66,12 @@ vi.mock("../../../src/modules/ai-copilot/intervention-service.js", () => ({
   escalateInterventionCases: interventionServiceMocks.escalateInterventionCases,
 }));
 
+vi.mock("../../../src/modules/ai-copilot/intervention-manager-alerts-service.js", () => ({
+  getLatestManagerAlertSnapshot: interventionServiceMocks.getLatestManagerAlertSnapshot,
+  runManagerAlertPreview: interventionServiceMocks.runManagerAlertPreview,
+  sendManagerAlertSummary: interventionServiceMocks.sendManagerAlertSummary,
+}));
+
 vi.mock("../../../src/modules/ai-copilot/task-suggestion-service.js", () => ({
   acceptTaskSuggestion: taskSuggestionMocks.acceptTaskSuggestion,
 }));
@@ -78,6 +87,7 @@ vi.mock("../../../src/modules/companies/service.js", () => ({
 const { aiCopilotRoutes } = await import("../../../src/modules/ai-copilot/routes.js");
 const { errorHandler } = await import("../../../src/middleware/error-handler.js");
 let insertMock: ReturnType<typeof vi.fn>;
+let selectMock: ReturnType<typeof vi.fn>;
 
 function createApp(role: "admin" | "director" | "rep" = "rep") {
   const app = express();
@@ -91,7 +101,7 @@ function createApp(role: "admin" | "director" | "rep" = "rep") {
       officeId: "office-1",
       activeOfficeId: "office-1",
     };
-    req.tenantDb = { insert: insertMock } as any;
+    req.tenantDb = { insert: insertMock, select: selectMock } as any;
     req.commitTransaction = vi.fn().mockResolvedValue(undefined);
     next();
   });
@@ -105,6 +115,9 @@ describe("ai copilot routes", () => {
     vi.clearAllMocks();
     insertMock = vi.fn(() => ({
       values: vi.fn().mockResolvedValue(undefined),
+    }));
+    selectMock = vi.fn(() => ({
+      from: vi.fn().mockResolvedValue([]),
     }));
     dealsServiceMocks.getDealById.mockResolvedValue({
       id: "deal-1",
@@ -315,6 +328,145 @@ describe("ai copilot routes", () => {
     expect(response.status).toBe(200);
     expect(response.body.summary).toBeDefined();
     expect(response.body.breachQueue.items).toBeInstanceOf(Array);
+  });
+
+  it("returns the latest persisted manager alert snapshot for the active office", async () => {
+    interventionServiceMocks.getLatestManagerAlertSnapshot.mockResolvedValue({
+      id: "snapshot-1",
+      officeId: "office-1",
+      snapshotKind: "manager_alert_summary",
+      snapshotMode: "sent",
+      snapshotJson: { version: 1, officeId: "office-1" },
+      scannedAt: new Date("2026-04-16T15:00:00.000Z"),
+      sentAt: new Date("2026-04-16T15:05:00.000Z"),
+      createdAt: new Date("2026-04-16T15:00:00.000Z"),
+      updatedAt: new Date("2026-04-16T15:05:00.000Z"),
+    });
+
+    const app = createApp("director");
+    const res = await request(app).get("/api/ai/ops/intervention-manager-alerts");
+
+    expect(res.status).toBe(200);
+    expect(interventionServiceMocks.getLatestManagerAlertSnapshot).toHaveBeenCalledWith(expect.anything(), {
+      officeId: "office-1",
+    });
+    expect(interventionServiceMocks.runManagerAlertPreview).not.toHaveBeenCalled();
+    expect(interventionServiceMocks.sendManagerAlertSummary).not.toHaveBeenCalled();
+    expect(res.body.snapshotMode).toBe("sent");
+    expect(res.body.snapshotKind).toBe("manager_alert_summary");
+  });
+
+  it("runs a preview-only manager alert scan for the active office", async () => {
+    interventionServiceMocks.runManagerAlertPreview.mockResolvedValue({
+      id: "snapshot-2",
+      officeId: "office-1",
+      snapshotKind: "manager_alert_summary",
+      snapshotMode: "preview",
+      snapshotJson: { version: 1, officeId: "office-1" },
+      scannedAt: new Date("2026-04-16T16:00:00.000Z"),
+      sentAt: null,
+      createdAt: new Date("2026-04-16T16:00:00.000Z"),
+      updatedAt: new Date("2026-04-16T16:00:00.000Z"),
+    });
+
+    const app = createApp("admin");
+    const res = await request(app)
+      .post("/api/ai/ops/intervention-manager-alerts/scan")
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(interventionServiceMocks.runManagerAlertPreview).toHaveBeenCalledWith(expect.anything(), {
+      officeId: "office-1",
+    });
+    expect(interventionServiceMocks.getLatestManagerAlertSnapshot).not.toHaveBeenCalled();
+    expect(interventionServiceMocks.sendManagerAlertSummary).not.toHaveBeenCalled();
+    expect(res.body.snapshotMode).toBe("preview");
+    expect(res.body.sentAt).toBeNull();
+  });
+
+  it("sends manager alerts manually for the current office context", async () => {
+    selectMock.mockReturnValue({
+      from: vi.fn().mockResolvedValue([
+        {
+          id: "admin-1",
+          officeId: "office-1",
+          role: "admin",
+          isActive: true,
+        },
+        {
+          id: "director-1",
+          officeId: "office-1",
+          role: "director",
+          isActive: true,
+        },
+        {
+          id: "rep-1",
+          officeId: "office-1",
+          role: "rep",
+          isActive: true,
+        },
+        {
+          id: "admin-other-office",
+          officeId: "office-2",
+          role: "admin",
+          isActive: true,
+        },
+        {
+          id: "inactive-director",
+          officeId: "office-1",
+          role: "director",
+          isActive: false,
+        },
+      ]),
+    });
+
+    interventionServiceMocks.sendManagerAlertSummary.mockResolvedValue({
+      claimed: true,
+      snapshot: {
+        id: "snapshot-3",
+        officeId: "office-1",
+        snapshotKind: "manager_alert_summary",
+        snapshotMode: "sent",
+        snapshotJson: { version: 1, officeId: "office-1" },
+        scannedAt: new Date("2026-04-16T17:00:00.000Z"),
+        sentAt: new Date("2026-04-16T17:01:00.000Z"),
+        createdAt: new Date("2026-04-16T17:00:00.000Z"),
+        updatedAt: new Date("2026-04-16T17:01:00.000Z"),
+      },
+      notification: {
+        id: "notification-1",
+        userId: "admin-1",
+        type: "manager_alert_summary",
+        title: "Manager alerts: 1 items need attention",
+        body: "High-priority intervention pressure needs attention today.",
+        link: "/admin/intervention-analytics",
+        isRead: false,
+        readAt: null,
+        createdAt: new Date("2026-04-16T17:01:00.000Z"),
+      },
+    });
+
+    const app = createApp("director");
+    const res = await request(app)
+      .post("/api/ai/ops/intervention-manager-alerts/send")
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(interventionServiceMocks.sendManagerAlertSummary).toHaveBeenCalledTimes(2);
+    expect(interventionServiceMocks.sendManagerAlertSummary).toHaveBeenNthCalledWith(1, expect.anything(), {
+      officeId: "office-1",
+      recipientUserId: "admin-1",
+    });
+    expect(interventionServiceMocks.sendManagerAlertSummary).toHaveBeenNthCalledWith(2, expect.anything(), {
+      officeId: "office-1",
+      recipientUserId: "director-1",
+    });
+    expect(interventionServiceMocks.getLatestManagerAlertSnapshot).not.toHaveBeenCalled();
+    expect(interventionServiceMocks.runManagerAlertPreview).not.toHaveBeenCalled();
+    expect(res.body.snapshot.snapshotMode).toBe("sent");
+    expect(res.body.snapshot.snapshotKind).toBe("manager_alert_summary");
+    expect(res.body.deliveries).toHaveLength(2);
+    expect(res.body.deliveries[0].notification.link).toBe("/admin/intervention-analytics");
   });
 
   it("returns AI review queue for director users", async () => {

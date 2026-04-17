@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { jobQueue } from "@trock-crm/shared/schema";
+import { jobQueue, users } from "@trock-crm/shared/schema";
 import { requireRole } from "../../middleware/rbac.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { getDealById } from "../deals/service.js";
@@ -13,6 +13,11 @@ import {
   resolveInterventionCases,
   snoozeInterventionCases,
 } from "./intervention-service.js";
+import {
+  getLatestManagerAlertSnapshot,
+  runManagerAlertPreview,
+  sendManagerAlertSummary,
+} from "./intervention-manager-alerts-service.js";
 import type { InterventionQueueFilters, InterventionQueueView } from "./intervention-types.js";
 import {
   getAiActionQueue,
@@ -203,6 +208,71 @@ router.get("/ops/intervention-analytics", requireRole("admin", "director"), asyn
     });
     await req.commitTransaction!();
     res.json(dashboard);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/ops/intervention-manager-alerts", requireRole("admin", "director"), async (req, res, next) => {
+  try {
+    const snapshot = await getLatestManagerAlertSnapshot(req.tenantDb!, {
+      officeId: getActiveOfficeId(req),
+    });
+    if (!snapshot) {
+      throw new AppError(404, "Manager alert snapshot not found");
+    }
+    await req.commitTransaction!();
+    res.json(snapshot);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/ops/intervention-manager-alerts/scan", requireRole("admin", "director"), async (req, res, next) => {
+  try {
+    const snapshot = await runManagerAlertPreview(req.tenantDb!, {
+      officeId: getActiveOfficeId(req),
+    });
+    await req.commitTransaction!();
+    res.json(snapshot);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/ops/intervention-manager-alerts/send", requireRole("admin", "director"), async (req, res, next) => {
+  try {
+    const officeId = getActiveOfficeId(req);
+    const recipients = (await req.tenantDb!.select().from(users)).filter(
+      (user) =>
+        user.officeId === officeId &&
+        user.isActive &&
+        (user.role === "admin" || user.role === "director")
+    );
+
+    let latestSnapshot = null;
+    const deliveries = [];
+    for (const recipient of recipients) {
+      const result = await sendManagerAlertSummary(req.tenantDb!, {
+        officeId,
+        recipientUserId: recipient.id,
+      });
+      latestSnapshot = result.snapshot;
+      deliveries.push({
+        recipientUserId: recipient.id,
+        claimed: result.claimed,
+        notification: result.notification,
+      });
+    }
+
+    await req.commitTransaction!();
+    if (!latestSnapshot) {
+      throw new AppError(404, "No active manager alert recipients found");
+    }
+    res.json({
+      snapshot: latestSnapshot,
+      deliveries,
+    });
   } catch (err) {
     next(err);
   }
