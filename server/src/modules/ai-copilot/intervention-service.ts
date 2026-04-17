@@ -16,6 +16,12 @@ import {
   listCurrentSalesProcessDisconnectRows,
   type SalesProcessDisconnectRow,
 } from "./service.js";
+import {
+  RESOLVE_OUTCOME_CATEGORY_TO_REASON_CODES,
+  SNOOZE_REASON_TO_EXPECTED_OPTIONS,
+  ESCALATION_TARGET_TYPES,
+  mapStructuredResolveReasonToLegacyResolutionReason,
+} from "../../../../shared/src/lib/intervention-outcome-taxonomy.js";
 import type {
   InterventionAnalyticsBreachRow,
   InterventionAnalyticsDashboard,
@@ -25,6 +31,10 @@ import type {
   InterventionQueueItem,
   InterventionQueueResult,
   InterventionQueueView,
+  StructuredEscalateConclusion,
+  StructuredInterventionConclusion,
+  StructuredResolveConclusion,
+  StructuredSnoozeConclusion,
 } from "./intervention-types.js";
 import {
   completeTask,
@@ -1400,6 +1410,57 @@ const resolutionToTaskOutcome = {
   issue_no_longer_relevant: "dismissed",
 } as const;
 
+function validateResolveConclusion(
+  conclusion: StructuredResolveConclusion | null | undefined,
+  resolutionReason: keyof typeof resolutionToTaskOutcome,
+  allowLegacyOutcomeWrites: boolean | undefined
+) {
+  if (!conclusion) {
+    if (allowLegacyOutcomeWrites !== false) return;
+    throw new AppError(400, "Structured resolve conclusion is required");
+  }
+
+  const validReasonCodes =
+    RESOLVE_OUTCOME_CATEGORY_TO_REASON_CODES[
+      conclusion.outcomeCategory as keyof typeof RESOLVE_OUTCOME_CATEGORY_TO_REASON_CODES
+    ];
+  if (!validReasonCodes || !validReasonCodes.includes(conclusion.reasonCode as never)) {
+    throw new AppError(400, "Invalid resolve conclusion");
+  }
+
+  const mappedReason = mapStructuredResolveReasonToLegacyResolutionReason(conclusion.reasonCode);
+  if (mappedReason !== resolutionReason) {
+    throw new AppError(400, "Resolve conclusion does not match resolutionReason");
+  }
+}
+
+function validateSnoozeConclusion(conclusion: StructuredSnoozeConclusion | null | undefined) {
+  if (!conclusion) return;
+
+  const validCombination =
+    SNOOZE_REASON_TO_EXPECTED_OPTIONS[
+      conclusion.snoozeReasonCode as keyof typeof SNOOZE_REASON_TO_EXPECTED_OPTIONS
+    ];
+  if (
+    !validCombination ||
+    !validCombination.ownerTypes.includes(conclusion.expectedOwnerType as never) ||
+    !validCombination.nextStepCodes.includes(conclusion.expectedNextStepCode as never)
+  ) {
+    throw new AppError(400, "Invalid snooze conclusion");
+  }
+}
+
+function validateEscalateConclusion(conclusion: StructuredEscalateConclusion | null | undefined) {
+  if (!conclusion) return;
+  if (!ESCALATION_TARGET_TYPES.includes(conclusion.escalationTargetType as never)) {
+    throw new AppError(400, "Invalid escalate conclusion");
+  }
+}
+
+function conclusionNotes(conclusion: StructuredInterventionConclusion | null | undefined) {
+  return conclusion?.notes ?? null;
+}
+
 async function syncGeneratedTaskResolution(
   tenantDb: TenantDb | InMemoryTenantDb,
   disconnectCase: DisconnectCaseRow,
@@ -1500,11 +1561,13 @@ export async function snoozeInterventionCases(
     officeId: string;
     caseIds: string[];
     snoozedUntil: Date | string;
+    conclusion?: StructuredSnoozeConclusion | null;
     actorUserId: string;
     actorRole: string;
     notes?: string | null;
   }
 ): Promise<MutationResult> {
+  validateSnoozeConclusion(input.conclusion);
   const caseIds = dedupeCaseIds(input.caseIds);
   const snoozedUntil = input.snoozedUntil instanceof Date
     ? input.snoozedUntil
@@ -1555,13 +1618,14 @@ export async function snoozeInterventionCases(
     await writeMutationArtifacts(tenantDb, row, {
       actionType: "snooze",
       actedBy: input.actorUserId,
-      comment: input.notes ?? null,
+      comment: input.notes ?? conclusionNotes(input.conclusion),
       fromStatus,
       toStatus: "snoozed",
       fromAssignee: row.assignedTo ?? null,
       toAssignee: row.assignedTo ?? null,
       fromSnoozedUntil,
       toSnoozedUntil: snoozedUntil,
+      metadataJson: input.conclusion ?? undefined,
     });
     updatedCount += 1;
   }
@@ -1579,11 +1643,14 @@ export async function resolveInterventionCases(
     officeId: string;
     caseIds: string[];
     resolutionReason: keyof typeof resolutionToTaskOutcome;
+    conclusion?: StructuredResolveConclusion | null;
+    allowLegacyOutcomeWrites?: boolean;
     actorUserId: string;
     actorRole: string;
     notes?: string | null;
   }
 ): Promise<MutationResult> {
+  validateResolveConclusion(input.conclusion, input.resolutionReason, input.allowLegacyOutcomeWrites);
   const caseIds = dedupeCaseIds(input.caseIds);
   const rows = await loadCasesForMutation(tenantDb, input.officeId, caseIds);
   const rowsById = new Map(rows.map((row) => [row.id, row]));
@@ -1635,7 +1702,7 @@ export async function resolveInterventionCases(
     await writeMutationArtifacts(tenantDb, row, {
       actionType: "resolve",
       actedBy: input.actorUserId,
-      comment: input.notes ?? null,
+      comment: input.notes ?? conclusionNotes(input.conclusion),
       fromStatus,
       toStatus: "resolved",
       fromAssignee: row.assignedTo ?? null,
@@ -1644,6 +1711,7 @@ export async function resolveInterventionCases(
         resolutionReason: input.resolutionReason,
         taskOutcome,
         lifecycleStartedAt: row.currentLifecycleStartedAt.toISOString(),
+        conclusion: input.conclusion ?? null,
       },
     });
     updatedCount += 1;
@@ -1661,11 +1729,13 @@ export async function escalateInterventionCases(
   input: {
     officeId: string;
     caseIds: string[];
+    conclusion?: StructuredEscalateConclusion | null;
     actorUserId: string;
     actorRole: string;
     notes?: string | null;
   }
 ): Promise<MutationResult> {
+  validateEscalateConclusion(input.conclusion);
   const caseIds = dedupeCaseIds(input.caseIds);
   const rows = await loadCasesForMutation(tenantDb, input.officeId, caseIds);
   const errors: Array<{ caseId: string; message: string }> = [];
@@ -1705,12 +1775,15 @@ export async function escalateInterventionCases(
     await writeMutationArtifacts(tenantDb, row, {
       actionType: "escalate",
       actedBy: input.actorUserId,
-      comment: input.notes ?? null,
+      comment: input.notes ?? conclusionNotes(input.conclusion),
       fromStatus: row.status,
       toStatus: row.status,
       fromAssignee: row.assignedTo ?? null,
       toAssignee: row.assignedTo ?? null,
-      metadataJson: { escalated: true },
+      metadataJson: {
+        escalated: true,
+        conclusion: input.conclusion ?? null,
+      },
     });
     updatedCount += 1;
   }

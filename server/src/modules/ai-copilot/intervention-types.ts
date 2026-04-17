@@ -101,6 +101,35 @@ export interface InterventionCaseDetail {
   }>;
 }
 
+export interface StructuredResolveConclusion {
+  kind: "resolve";
+  outcomeCategory: string;
+  reasonCode: string;
+  effectiveness: "confirmed" | "likely" | "unclear";
+  notes?: string | null;
+}
+
+export interface StructuredSnoozeConclusion {
+  kind: "snooze";
+  snoozeReasonCode: string;
+  expectedOwnerType: string;
+  expectedNextStepCode: string;
+  notes?: string | null;
+}
+
+export interface StructuredEscalateConclusion {
+  kind: "escalate";
+  escalationReasonCode: string;
+  escalationTargetType: string;
+  urgency: "high" | "normal";
+  notes?: string | null;
+}
+
+export type StructuredInterventionConclusion =
+  | StructuredResolveConclusion
+  | StructuredSnoozeConclusion
+  | StructuredEscalateConclusion;
+
 export interface InterventionAnalyticsHotspotRow {
   key: string;
   entityType: "assignee" | "disconnect_type" | "rep" | "company" | "stage";
