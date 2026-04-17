@@ -121,6 +121,7 @@ export function InterventionConclusionForm(props: {
   const activeForm =
     props.mode === "resolve" ? resolveForm : props.mode === "snooze" ? snoozeForm : escalateForm;
   const canSubmit = canSubmitInterventionConclusion(props.mode as never, activeForm as never);
+  const resetToken = String(props.resetKey ?? "default");
 
   return (
     <form
@@ -136,6 +137,7 @@ export function InterventionConclusionForm(props: {
           <div className="space-y-2">
             <Label htmlFor="resolve-outcome-category">Outcome category</Label>
             <Select
+              key={`resolve-outcome-category-${resetToken}`}
               value={resolveForm.outcomeCategory}
               onValueChange={(value) =>
                 setResolveForm((current) => ({ ...current, outcomeCategory: String(value), reasonCode: "" }))
@@ -156,6 +158,7 @@ export function InterventionConclusionForm(props: {
           <div className="space-y-2">
             <Label htmlFor="resolve-reason-code">Resolution reason</Label>
             <Select
+              key={`resolve-reason-code-${resetToken}`}
               value={resolveForm.reasonCode}
               onValueChange={(value) => setResolveForm((current) => ({ ...current, reasonCode: String(value) }))}
             >
@@ -174,6 +177,7 @@ export function InterventionConclusionForm(props: {
           <div className="space-y-2">
             <Label htmlFor="resolve-effectiveness">Effectiveness</Label>
             <Select
+              key={`resolve-effectiveness-${resetToken}`}
               value={resolveForm.effectiveness}
               onValueChange={(value) =>
                 setResolveForm((current) => ({
@@ -213,6 +217,7 @@ export function InterventionConclusionForm(props: {
           <div className="space-y-2">
             <Label htmlFor="snooze-reason-code">Snooze reason</Label>
             <Select
+              key={`snooze-reason-code-${resetToken}`}
               value={snoozeForm.snoozeReasonCode}
               onValueChange={(value) =>
                 setSnoozeForm((current) => ({
@@ -238,6 +243,7 @@ export function InterventionConclusionForm(props: {
           <div className="space-y-2">
             <Label htmlFor="snooze-owner-type">Expected owner</Label>
             <Select
+              key={`snooze-owner-type-${resetToken}`}
               value={snoozeForm.expectedOwnerType}
               onValueChange={(value) => setSnoozeForm((current) => ({ ...current, expectedOwnerType: String(value) }))}
             >
@@ -256,6 +262,7 @@ export function InterventionConclusionForm(props: {
           <div className="space-y-2">
             <Label htmlFor="snooze-next-step-code">Expected next step</Label>
             <Select
+              key={`snooze-next-step-code-${resetToken}`}
               value={snoozeForm.expectedNextStepCode}
               onValueChange={(value) => setSnoozeForm((current) => ({ ...current, expectedNextStepCode: String(value) }))}
             >
@@ -299,6 +306,7 @@ export function InterventionConclusionForm(props: {
           <div className="space-y-2">
             <Label htmlFor="escalate-reason-code">Escalation reason</Label>
             <Select
+              key={`escalate-reason-code-${resetToken}`}
               value={escalateForm.escalationReasonCode}
               onValueChange={(value) => setEscalateForm((current) => ({ ...current, escalationReasonCode: String(value) }))}
             >
@@ -317,6 +325,7 @@ export function InterventionConclusionForm(props: {
           <div className="space-y-2">
             <Label htmlFor="escalate-target-type">Escalation target</Label>
             <Select
+              key={`escalate-target-type-${resetToken}`}
               value={escalateForm.escalationTargetType}
               onValueChange={(value) => setEscalateForm((current) => ({ ...current, escalationTargetType: String(value) }))}
             >
@@ -335,6 +344,7 @@ export function InterventionConclusionForm(props: {
           <div className="space-y-2">
             <Label htmlFor="escalate-urgency">Urgency</Label>
             <Select
+              key={`escalate-urgency-${resetToken}`}
               value={escalateForm.urgency}
               onValueChange={(value) =>
                 setEscalateForm((current) => ({ ...current, urgency: value as EscalateConclusionPayload["urgency"] }))
