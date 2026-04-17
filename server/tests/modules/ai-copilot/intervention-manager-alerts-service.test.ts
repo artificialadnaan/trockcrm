@@ -636,6 +636,24 @@ describe("manager alert service", () => {
     expect(harness.state.snapshots).toHaveLength(1);
     expect(second.snapshot.snapshotMode).toBe("sent");
 
+    const preview = await runManagerAlertPreview(harness.db, {
+      officeId: "office-1",
+      timezone: "America/Chicago",
+      now,
+    });
+    expect(preview.snapshotMode).toBe("preview");
+
+    const third = await sendManagerAlertSummary(harness.db, {
+      officeId: "office-1",
+      recipientUserId: "user-a",
+      timezone: "America/Chicago",
+      now,
+    });
+
+    expect(third.claimed).toBe(false);
+    expect(third.snapshot.snapshotMode).toBe("sent");
+    expect(third.snapshot.sentAt).not.toBeNull();
+
     const rollbackHarness = createTransactionalDbHarness(
       {
         cases: [
