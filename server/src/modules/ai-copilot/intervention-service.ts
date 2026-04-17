@@ -67,6 +67,9 @@ type InMemoryTenantDb = {
   };
 };
 
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 export const INTERVENTION_SYSTEM_ACTOR_ID = "00000000-0000-0000-0000-0000000000a1";
 
 function isInMemoryTenantDb(value: unknown): value is InMemoryTenantDb {
@@ -719,6 +722,9 @@ async function loadInterventionAnalyticsData(
   }
 
   const cases = casesOverride ?? (await getCasesByOffice(tenantDb, officeId));
+  const persistedCaseIds = cases
+    .map((row) => row.id)
+    .filter((value): value is string => UUID_PATTERN.test(value));
   const dealIds = cases.map((row) => row.dealId).filter((value): value is string => Boolean(value));
   const companyIds = cases.map((row) => row.companyId).filter((value): value is string => Boolean(value));
   const assigneeIds = [...new Set(cases.map((row) => row.assignedTo).filter((value): value is string => Boolean(value)))];
@@ -726,8 +732,8 @@ async function loadInterventionAnalyticsData(
     dealIds.length ? tenantDb.select().from(deals).where(inArray(deals.id, dealIds)) : Promise.resolve([]),
     companyIds.length ? tenantDb.select().from(companies).where(inArray(companies.id, companyIds)) : Promise.resolve([]),
     assigneeIds.length ? tenantDb.select({ id: users.id, displayName: users.displayName }).from(users).where(inArray(users.id, assigneeIds)) : Promise.resolve([]),
-    cases.length
-      ? tenantDb.select().from(aiDisconnectCaseHistory).where(inArray(aiDisconnectCaseHistory.disconnectCaseId, cases.map((row) => row.id)))
+    persistedCaseIds.length
+      ? tenantDb.select().from(aiDisconnectCaseHistory).where(inArray(aiDisconnectCaseHistory.disconnectCaseId, persistedCaseIds))
       : Promise.resolve([]),
   ]);
 
