@@ -654,9 +654,13 @@ export async function sendManagerAlertSummary(
         now,
       });
       if (!claimed) {
-        const latest = await getLatestManagerAlertSnapshot(tenantDb, { officeId: input.officeId });
-        if (!latest) throw new Error("Manager alert snapshot is missing");
-        return { claimed: false, snapshot: latest, notification: null };
+        const snapshot = await persistSnapshot(tenantDb, {
+          officeId: input.officeId,
+          snapshotMode: "sent",
+          snapshotJson,
+          now,
+        });
+        return { claimed: false, snapshot, notification: null };
       }
 
       const snapshot = await persistSnapshot(tenantDb, {
@@ -700,9 +704,13 @@ export async function sendManagerAlertSummary(
       now,
     });
     if (!claimed) {
-      const latest = await getLatestManagerAlertSnapshot(tx, { officeId: input.officeId });
-      if (!latest) throw new Error("Manager alert snapshot is missing");
-      return { claimed: false, snapshot: latest, notification: null };
+      const snapshot = await persistSnapshot(tx, {
+        officeId: input.officeId,
+        snapshotMode: "sent",
+        snapshotJson,
+        now,
+      });
+      return { claimed: false, snapshot, notification: null };
     }
 
     const snapshot = await persistSnapshot(tx, {
