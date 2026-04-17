@@ -20,6 +20,37 @@ export interface Email {
   syncedAt: string;
 }
 
+export interface EmailThreadBinding {
+  id: string;
+  mailboxAccountId: string;
+  contactId: string | null;
+  contactName: string | null;
+  companyId: string | null;
+  companyName: string | null;
+  propertyId: string | null;
+  propertyName: string | null;
+  leadId: string | null;
+  leadName: string | null;
+  dealId: string | null;
+  dealName: string | null;
+  projectId: string | null;
+  projectName: string | null;
+  confidence: "high" | "medium" | "low";
+  assignmentReason: string | null;
+}
+
+export interface EmailThreadPreview {
+  affectedMessageCount?: number;
+  existingDealId?: string | null;
+  nextDealId?: string | null;
+}
+
+export interface EmailThread {
+  binding: EmailThreadBinding | null;
+  preview: EmailThreadPreview | null;
+  emails: Email[];
+}
+
 export interface EmailFilters {
   direction?: "inbound" | "outbound";
   search?: string;
@@ -166,7 +197,7 @@ export function useContactEmails(contactId: string | undefined, filters: EmailFi
 }
 
 export function useEmailThread(conversationId: string | undefined) {
-  const [emails, setEmails] = useState<Email[]>([]);
+  const [thread, setThread] = useState<EmailThread>({ binding: null, preview: null, emails: [] });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -178,10 +209,10 @@ export function useEmailThread(conversationId: string | undefined) {
     setLoading(true);
     setError(null);
     try {
-      const data = await api<{ emails: Email[] }>(
+      const data = await api<EmailThread>(
         `/email/thread/${encodeURIComponent(conversationId)}`
       );
-      setEmails(data.emails);
+      setThread(data);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to load thread");
     } finally {
@@ -193,7 +224,7 @@ export function useEmailThread(conversationId: string | undefined) {
     fetchThread();
   }, [fetchThread]);
 
-  return { emails, loading, error, refetch: fetchThread };
+  return { thread, loading, error, refetch: fetchThread, setThread };
 }
 
 // --- Mutation Functions ---
@@ -217,4 +248,33 @@ export async function associateEmailToDeal(emailId: string, dealId: string) {
     method: "POST",
     json: { dealId },
   });
+}
+
+export async function assignEmailThread(conversationId: string, dealId: string) {
+  return api<{ success: boolean; bindingId: string; thread: EmailThread }>(
+    `/email/thread/${encodeURIComponent(conversationId)}/assign`,
+    {
+      method: "POST",
+      json: { dealId },
+    }
+  );
+}
+
+export async function reassignEmailThread(conversationId: string, dealId: string) {
+  return api<{ success: boolean; bindingId: string; preview: EmailThreadPreview | null; thread: EmailThread }>(
+    `/email/thread/${encodeURIComponent(conversationId)}/reassign`,
+    {
+      method: "POST",
+      json: { dealId },
+    }
+  );
+}
+
+export async function detachEmailThread(conversationId: string) {
+  return api<{ success: boolean; thread: EmailThread }>(
+    `/email/thread/${encodeURIComponent(conversationId)}/detach`,
+    {
+      method: "POST",
+    }
+  );
 }

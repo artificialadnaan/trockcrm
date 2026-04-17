@@ -49,12 +49,17 @@ function createQueryMock(options: {
     property_state?: string | null;
     property_zip?: string | null;
   }>;
-  threadAssignment?: {
-    assigned_entity_type: "deal" | "company";
-    assigned_entity_id: string;
+  threadBinding?: {
+    id: string;
     deal_id: string | null;
   } | null;
-  contactMatch?: boolean;
+  contactMatch?: {
+    id: string;
+    first_name: string;
+    last_name: string;
+    company_id: string | null;
+  } | null;
+  companyName?: string | null;
 }) {
   return vi.fn(async (sql: string, params?: unknown[]) => {
     if (sql.includes("FROM public.pipeline_stage_config") && sql.includes("slug = 'estimating'")) {
@@ -65,11 +70,20 @@ function createQueryMock(options: {
       return { rows: [] };
     }
 
-    if (
-      sql.includes("SELECT assigned_entity_type, assigned_entity_id, deal_id") &&
-      sql.includes("FROM office_beta.emails")
-    ) {
-      return { rows: options.threadAssignment ? [options.threadAssignment] : [] };
+    if (sql.includes("SELECT id FROM public.user_graph_tokens")) {
+      return { rows: [{ id: "mailbox-1" }] };
+    }
+
+    if (sql.includes("FROM office_beta.email_thread_bindings") && sql.includes("provider_conversation_id = $2")) {
+      return { rows: options.threadBinding ? [options.threadBinding] : [] };
+    }
+
+    if (sql.includes("FROM office_beta.email_thread_bindings") && sql.includes("provider_conversation_id IS NULL")) {
+      return { rows: [] };
+    }
+
+    if (sql.startsWith("UPDATE office_beta.email_thread_bindings")) {
+      return { rows: options.threadBinding ? [options.threadBinding] : [] };
     }
 
     if (sql.includes("SELECT id") && sql.includes("FROM office_beta.tasks") && sql.includes("email_assignment_queue")) {
@@ -77,17 +91,14 @@ function createQueryMock(options: {
     }
 
     if (sql.includes("SELECT id, first_name, last_name, company_id") && sql.includes("FROM office_beta.contacts")) {
-      return {
-        rows:
-          options.contactMatch === false
-            ? []
-            : [{ id: "contact-1", first_name: "Brett", last_name: "Smith", company_id: "company-1" }],
-      };
+      return { rows: options.contactMatch ? [options.contactMatch] : [] };
     }
 
     if (sql.includes("SELECT company_id, company_name") && sql.includes("FROM office_beta.contacts")) {
       return {
-        rows: [{ company_id: "company-1", company_name: "Alpha Roofing" }],
+        rows: options.contactMatch
+          ? [{ company_id: options.contactMatch.company_id, company_name: options.companyName ?? "Alpha Roofing" }]
+          : [],
       };
     }
 
@@ -134,6 +145,7 @@ describe("email sync inbound message routing", () => {
       activeDeals: [
         { id: "deal-1", deal_number: "D-1001", name: "Project Alpha", stage_slug: "estimating", stage_display_order: 2 },
       ],
+      contactMatch: { id: "contact-1", first_name: "Brett", last_name: "Smith", company_id: "company-1" },
     });
     const client = { query: queryMock };
     const taskPersistence = { marker: "task-persistence" };
@@ -194,6 +206,7 @@ describe("email sync inbound message routing", () => {
         { id: "deal-1", deal_number: "TR-2026-0001", name: "Project Alpha", stage_slug: "estimating", stage_display_order: 2 },
         { id: "deal-2", deal_number: "TR-2026-0002", name: "Project Beta", stage_slug: "estimating", stage_display_order: 2 },
       ],
+      contactMatch: { id: "contact-1", first_name: "Brett", last_name: "Smith", company_id: "company-1" },
     });
     const client = { query: queryMock };
 
@@ -231,6 +244,7 @@ describe("email sync inbound message routing", () => {
         { id: "deal-1", deal_number: "TR-2026-0001", name: "Project Alpha", stage_slug: "estimating", stage_display_order: 2 },
         { id: "deal-2", deal_number: "TR-2026-0002", name: "Project Beta", stage_slug: "estimating", stage_display_order: 2 },
       ],
+      contactMatch: { id: "contact-1", first_name: "Brett", last_name: "Smith", company_id: "company-1" },
     });
     const client = { query: queryMock };
     const taskPersistence = { marker: "task-persistence" };
@@ -279,6 +293,7 @@ describe("email sync inbound message routing", () => {
         { id: "deal-1", deal_number: "D-1001", name: "Project Alpha", stage_slug: "lead", stage_display_order: 1 },
         { id: "deal-2", deal_number: "D-1002", name: "Project Beta", stage_slug: "estimating", stage_display_order: 2 },
       ],
+      contactMatch: { id: "contact-1", first_name: "Brett", last_name: "Smith", company_id: "company-1" },
     });
     const client = { query: queryMock };
     const taskPersistence = { marker: "task-persistence" };
@@ -356,6 +371,7 @@ describe("email sync inbound message routing", () => {
           property_zip: "73301",
         },
       ],
+      contactMatch: { id: "contact-1", first_name: "Brett", last_name: "Smith", company_id: "company-1" },
     });
     const client = { query: queryMock };
     const taskPersistence = { marker: "task-persistence" };
@@ -407,17 +423,17 @@ describe("email sync inbound message routing", () => {
     ).toBe(false);
   });
 
-  it("routes a prior thread assignment to the reply-needed task rule even when multiple active deals exist", async () => {
+  it("routes a bound thread to the reply-needed task rule even when multiple active deals exist", async () => {
     const queryMock = createQueryMock({
       activeDeals: [
         { id: "deal-1", deal_number: "D-1001", name: "Project Alpha", stage_slug: "estimating", stage_display_order: 2 },
         { id: "deal-2", deal_number: "D-1002", name: "Project Beta", stage_slug: "estimating", stage_display_order: 2 },
       ],
-      threadAssignment: {
-        assigned_entity_type: "deal",
-        assigned_entity_id: "deal-1",
+      threadBinding: {
+        id: "binding-1",
         deal_id: "deal-1",
       },
+      contactMatch: { id: "contact-1", first_name: "Brett", last_name: "Smith", company_id: "company-1" },
     });
     const client = { query: queryMock };
     const taskPersistence = { marker: "task-persistence" };
@@ -460,16 +476,16 @@ describe("email sync inbound message routing", () => {
     ).toBe(false);
   });
 
-  it("keeps the prior thread assignment when the conversation was already classified", async () => {
+  it("keeps the bound thread deal when the conversation was already classified", async () => {
     const queryMock = createQueryMock({
       activeDeals: [
         { id: "deal-2", deal_number: "D-1002", name: "Project Beta", stage_slug: "estimating", stage_display_order: 2 },
       ],
-      threadAssignment: {
-        assigned_entity_type: "deal",
-        assigned_entity_id: "deal-2",
+      threadBinding: {
+        id: "binding-2",
         deal_id: "deal-2",
       },
+      contactMatch: { id: "contact-1", first_name: "Brett", last_name: "Smith", company_id: "company-1" },
     });
     const client = { query: queryMock };
     const taskPersistence = { marker: "task-persistence" };
@@ -509,15 +525,10 @@ describe("email sync inbound message routing", () => {
     expect(queryMock.mock.calls.some(([sql]) => typeof sql === "string" && sql.includes("INSERT INTO office_beta.tasks"))).toBe(false);
   });
 
-  it("stores a reply when the sender is not a CRM contact but the thread is already linked to a deal", async () => {
+  it("stores unresolved inbound mail against the mailbox and creates a classification task when no contact matches", async () => {
     const queryMock = createQueryMock({
       activeDeals: [],
-      contactMatch: false,
-      threadAssignment: {
-        assigned_entity_type: "deal",
-        assigned_entity_id: "deal-2",
-        deal_id: "deal-2",
-      },
+      contactMatch: null,
     });
     const client = { query: queryMock };
 
@@ -528,12 +539,12 @@ describe("email sync inbound message routing", () => {
       "office-1",
       {
         id: "graph-8",
-        from: { emailAddress: { address: "adnaan.iqbal@gmail.com" } },
+        from: { emailAddress: { address: "unknown@example.com" } },
         toRecipients: [],
         ccRecipients: [],
-        subject: "Re: TR CRM E2E test",
-        bodyPreview: "Replying on the existing CRM thread",
-        body: { content: "<p>Replying on the existing CRM thread</p>" },
+        subject: "Unmatched inbound",
+        bodyPreview: "Please classify this thread",
+        body: { content: "<p>Please classify this thread</p>" },
         hasAttachments: false,
         receivedDateTime: "2026-04-04T18:00:00.000Z",
         conversationId: "conv-8",
@@ -546,23 +557,16 @@ describe("email sync inbound message routing", () => {
       queryMock.mock.calls.some(
         ([sql, params]) =>
           typeof sql === "string" &&
-          sql.includes("INSERT INTO office_beta.emails") &&
+          sql.includes("INSERT INTO office_beta.activities") &&
           Array.isArray(params) &&
-          params[9] === null &&
-          params[10] === "deal-2"
+          params[1] === "mailbox" &&
+          params[2] === "mailbox-1"
       )
     ).toBe(true);
     expect(
       queryMock.mock.calls.some(
-        ([sql, params]) =>
-          typeof sql === "string" &&
-          sql.includes("INSERT INTO office_beta.activities") &&
-          Array.isArray(params) &&
-          params[1] === "deal" &&
-          params[2] === "deal-2" &&
-          params[4] === null
+        ([sql]) => typeof sql === "string" && sql.includes("INSERT INTO office_beta.tasks")
       )
     ).toBe(true);
-    expect(queryMock.mock.calls.some(([sql]) => typeof sql === "string" && sql.includes("INSERT INTO office_beta.tasks"))).toBe(false);
   });
 });

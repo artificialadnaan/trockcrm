@@ -8,9 +8,14 @@ import {
   getEmails,
   getEmailById,
   getEmailThread,
+  getEmailThreadForMutation,
   getUserEmails,
   getEmailAssignmentQueue,
   associateEmailToEntity,
+  bindThreadToDeal,
+  detachThreadByConversation,
+  previewThreadReassignmentImpact,
+  assertCanMutateEmailThread,
 } from "./service.js";
 import { getDealById } from "../deals/service.js";
 
@@ -156,7 +161,79 @@ router.get("/thread/:conversationId", async (req, res, next) => {
   try {
     const thread = await getEmailThread(req.tenantDb!, req.params.conversationId, req.user!.id, req.user!.role);
     await req.commitTransaction!();
-    res.json({ emails: thread });
+    res.json(thread);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/thread/:conversationId/assign", async (req, res, next) => {
+  try {
+    const dealId = req.body.dealId as string | undefined;
+    if (!dealId) throw new AppError(400, "dealId is required");
+
+    const thread = await getEmailThreadForMutation(req.tenantDb!, req.params.conversationId);
+    await assertCanMutateEmailThread(req.tenantDb!, thread, req.user!);
+
+    const deal = await getDealById(req.tenantDb!, dealId, req.user!.role, req.user!.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+
+    const result = await bindThreadToDeal(req.tenantDb!, {
+      mailboxAccountId: thread.mailboxAccountId,
+      providerConversationId: req.params.conversationId,
+      dealId,
+      actingUserId: req.user!.id,
+    });
+
+    const refreshedThread = await getEmailThread(req.tenantDb!, req.params.conversationId, req.user!.id, req.user!.role);
+    await req.commitTransaction!();
+    res.json({ ...result, thread: refreshedThread });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/thread/:conversationId/reassign", async (req, res, next) => {
+  try {
+    const dealId = req.body.dealId as string | undefined;
+    if (!dealId) throw new AppError(400, "dealId is required");
+
+    const thread = await getEmailThreadForMutation(req.tenantDb!, req.params.conversationId);
+    await assertCanMutateEmailThread(req.tenantDb!, thread, req.user!);
+
+    const deal = await getDealById(req.tenantDb!, dealId, req.user!.role, req.user!.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+
+    const preview = await previewThreadReassignmentImpact(req.tenantDb!, {
+      mailboxAccountId: thread.mailboxAccountId,
+      providerConversationId: req.params.conversationId,
+      nextDealId: dealId,
+    });
+
+    const result = await bindThreadToDeal(req.tenantDb!, {
+      mailboxAccountId: thread.mailboxAccountId,
+      providerConversationId: req.params.conversationId,
+      dealId,
+      actingUserId: req.user!.id,
+    });
+
+    const refreshedThread = await getEmailThread(req.tenantDb!, req.params.conversationId, req.user!.id, req.user!.role);
+    await req.commitTransaction!();
+    res.json({ ...result, preview, thread: refreshedThread });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/thread/:conversationId/detach", async (req, res, next) => {
+  try {
+    const thread = await getEmailThreadForMutation(req.tenantDb!, req.params.conversationId);
+    await assertCanMutateEmailThread(req.tenantDb!, thread, req.user!);
+
+    await detachThreadByConversation(req.tenantDb!, thread.mailboxAccountId, req.params.conversationId, req.user!.id);
+    const refreshedThread = await getEmailThread(req.tenantDb!, req.params.conversationId, req.user!.id, req.user!.role);
+    await req.commitTransaction!();
+    res.json({ success: true, thread: refreshedThread });
   } catch (err) {
     next(err);
   }

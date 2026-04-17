@@ -4,11 +4,13 @@ import {
   pipelineStageConfig,
   jobQueue,
   emails,
+  emailThreadBindings,
   activities,
   contacts,
   deals,
   contactDealAssociations,
   tasks,
+  userGraphTokens,
 } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
@@ -71,6 +73,42 @@ export interface EmailAssignmentQueueItem {
   suggestedAssignment: EmailAssignmentResult;
 }
 
+type ThreadBindingRecord = typeof emailThreadBindings.$inferSelect;
+
+export interface EmailThreadResponse {
+  binding: {
+    id: string;
+    mailboxAccountId: string;
+    contactId: string | null;
+    contactName: string | null;
+    companyId: string | null;
+    companyName: string | null;
+    propertyId: string | null;
+    propertyName: string | null;
+    leadId: string | null;
+    leadName: string | null;
+    dealId: string | null;
+    dealName: string | null;
+    projectId: string | null;
+    projectName: string | null;
+    confidence: string;
+    assignmentReason: string | null;
+  } | null;
+  preview: {
+    affectedMessageCount: number;
+    affectedMessageIds: string[];
+    currentDealId: string | null;
+    nextDealId: string | null;
+  } | null;
+  emails: Array<typeof emails.$inferSelect>;
+}
+
+export interface EmailThreadMutationContext {
+  mailboxAccountId: string;
+  binding: ThreadBindingRecord | null;
+  emails: Array<typeof emails.$inferSelect>;
+}
+
 type EmailAssignmentUpdate = {
   assignedEntityType: EmailAssignmentEntityType | null;
   assignedEntityId: string | null;
@@ -89,11 +127,54 @@ function assignmentUpdateForDeal(dealId: string): EmailAssignmentUpdate {
   };
 }
 
+function normalizeEmailSubject(subject: string): string {
+  return subject
+    .replace(/^(re|fw|fwd):\s*/gi, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function buildParticipantFingerprint(to: string[], cc: string[]): string {
+  return [...to, ...cc]
+    .map((address) => address.trim().toLowerCase())
+    .filter(Boolean)
+    .sort()
+    .join("|");
+}
+
+export async function resolveMailboxAccountIdForCrmUser(
+  tenantDb: TenantDb,
+  crmUserId: string
+): Promise<string> {
+  const [tokenRow] = await tenantDb
+    .select({ id: userGraphTokens.id })
+    .from(userGraphTokens)
+    .where(and(eq(userGraphTokens.userId, crmUserId), eq(userGraphTokens.status, "active")))
+    .limit(1);
+
+  if (!tokenRow) {
+    throw new AppError(409, "Connect mailbox first");
+  }
+
+  return tokenRow.id;
+}
+
 async function getThreadAssignment(
   tenantDb: TenantDb,
+  mailboxAccountId: string,
   conversationId: string | null | undefined
 ): Promise<EmailAssignmentThreadAssignment | null> {
   if (!conversationId) return null;
+
+  const activeBinding = await getActiveThreadBinding(tenantDb, mailboxAccountId, conversationId);
+  if (activeBinding?.dealId) {
+    return {
+      assignedEntityType: "deal",
+      assignedEntityId: activeBinding.dealId,
+      assignedDealId: activeBinding.dealId,
+    };
+  }
 
   const [row] = await tenantDb
     .select({
@@ -238,6 +319,293 @@ async function getEmailCandidateDeals(
   };
 }
 
+export async function getActiveThreadBinding(
+  tenantDb: TenantDb,
+  mailboxAccountId: string,
+  providerConversationId: string
+): Promise<ThreadBindingRecord | null> {
+  const [binding] = await tenantDb
+    .select()
+    .from(emailThreadBindings)
+    .where(
+      and(
+        eq(emailThreadBindings.mailboxAccountId, mailboxAccountId),
+        eq(emailThreadBindings.provider, "microsoft_graph"),
+        eq(emailThreadBindings.providerConversationId, providerConversationId),
+        sql`${emailThreadBindings.detachedAt} IS NULL`
+      )
+    )
+    .limit(1);
+  return binding ?? null;
+}
+
+async function getProvisionalThreadBinding(
+  tenantDb: TenantDb,
+  mailboxAccountId: string,
+  normalizedSubject: string,
+  participantFingerprint: string
+): Promise<ThreadBindingRecord | null> {
+  const [binding] = await tenantDb
+    .select()
+    .from(emailThreadBindings)
+    .where(
+      and(
+        eq(emailThreadBindings.mailboxAccountId, mailboxAccountId),
+        eq(emailThreadBindings.provider, "microsoft_graph"),
+        eq(emailThreadBindings.normalizedSubject, normalizedSubject),
+        eq(emailThreadBindings.participantFingerprint, participantFingerprint),
+        sql`${emailThreadBindings.providerConversationId} IS NULL`,
+        sql`${emailThreadBindings.detachedAt} IS NULL`,
+        sql`${emailThreadBindings.provisionalUntil} IS NOT NULL AND ${emailThreadBindings.provisionalUntil} > now()`
+      )
+    )
+    .limit(1);
+  return binding ?? null;
+}
+
+async function resolveMailboxUserId(
+  tenantDb: TenantDb,
+  mailboxAccountId: string
+): Promise<string> {
+  const [tokenRow] = await tenantDb
+    .select({ userId: userGraphTokens.userId })
+    .from(userGraphTokens)
+    .where(eq(userGraphTokens.id, mailboxAccountId))
+    .limit(1);
+
+  if (!tokenRow) {
+    throw new AppError(404, "Mailbox not found");
+  }
+
+  return tokenRow.userId;
+}
+
+export async function getEmailThreadForMutation(
+  tenantDb: TenantDb,
+  providerConversationId: string
+): Promise<EmailThreadMutationContext> {
+  const threadEmails = await tenantDb
+    .select()
+    .from(emails)
+    .where(eq(emails.graphConversationId, providerConversationId))
+    .orderBy(sql`${emails.sentAt} ASC`);
+
+  if (threadEmails.length === 0) {
+    throw new AppError(404, "Email thread not found");
+  }
+
+  const mailboxAccountId = await resolveMailboxAccountIdForCrmUser(tenantDb, threadEmails[0].userId);
+  const binding = await getActiveThreadBinding(tenantDb, mailboxAccountId, providerConversationId);
+
+  return {
+    mailboxAccountId,
+    binding,
+    emails: threadEmails,
+  };
+}
+
+export async function assertCanMutateEmailThread(
+  tenantDb: TenantDb,
+  thread: EmailThreadMutationContext,
+  user: { id: string; role: string }
+) {
+  if (user.role === "admin" || user.role === "director") {
+    return;
+  }
+
+  const mailboxAccountId = await resolveMailboxAccountIdForCrmUser(tenantDb, user.id);
+  if (thread.mailboxAccountId !== mailboxAccountId) {
+    throw new AppError(403, "You can only modify your own email threads");
+  }
+}
+
+export async function previewThreadReassignmentImpact(
+  tenantDb: TenantDb,
+  input: {
+    mailboxAccountId: string;
+    providerConversationId: string;
+    nextDealId: string;
+  }
+) {
+  const mailboxUserId = await resolveMailboxUserId(tenantDb, input.mailboxAccountId);
+  const messageRows = await tenantDb
+    .select({ id: emails.id, dealId: emails.dealId })
+    .from(emails)
+    .where(
+      and(
+        eq(emails.userId, mailboxUserId),
+        eq(emails.graphConversationId, input.providerConversationId)
+      )
+    );
+
+  return {
+    affectedMessageCount: messageRows.length,
+    affectedMessageIds: messageRows.map((row) => row.id),
+    currentDealId: messageRows[0]?.dealId ?? null,
+    nextDealId: input.nextDealId,
+  };
+}
+
+export async function detachThreadByConversation(
+  tenantDb: TenantDb,
+  mailboxAccountId: string,
+  providerConversationId: string,
+  actingUserId: string
+) {
+  await tenantDb
+    .update(emailThreadBindings)
+    .set({
+      detachedAt: new Date(),
+      updatedBy: actingUserId,
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(emailThreadBindings.mailboxAccountId, mailboxAccountId),
+        eq(emailThreadBindings.provider, "microsoft_graph"),
+        eq(emailThreadBindings.providerConversationId, providerConversationId),
+        sql`${emailThreadBindings.detachedAt} IS NULL`
+      )
+    );
+}
+
+async function backAssociateStoredMessagesForBinding(
+  tenantDb: TenantDb,
+  input: {
+    mailboxAccountId: string;
+    providerConversationId: string;
+    bindingId: string;
+    dealId: string;
+    actingUserId: string;
+  }
+) {
+  const mailboxUserId = await resolveMailboxUserId(tenantDb, input.mailboxAccountId);
+  await tenantDb
+    .update(emails)
+    .set({
+      dealId: input.dealId,
+      assignedEntityType: "deal",
+      assignedEntityId: input.dealId,
+      assignmentConfidence: "high",
+      assignmentAmbiguityReason: null,
+      threadBindingId: input.bindingId,
+    })
+    .where(
+      and(
+        eq(emails.userId, mailboxUserId),
+        eq(emails.graphConversationId, input.providerConversationId),
+        or(
+          sql`${emails.threadBindingId} IS NULL`,
+          eq(emails.threadBindingId, input.bindingId)
+        )
+      )
+    );
+}
+
+export async function bindThreadToDeal(
+  tenantDb: TenantDb,
+  input: {
+    mailboxAccountId: string;
+    providerConversationId: string;
+    dealId: string;
+    actingUserId: string;
+  }
+): Promise<{ binding: ThreadBindingRecord; previousBindingId: string | null }> {
+  return tenantDb.transaction(async (tx) => {
+    const existing = await getActiveThreadBinding(tx, input.mailboxAccountId, input.providerConversationId);
+
+    if (existing?.dealId === input.dealId) {
+      return { binding: existing, previousBindingId: null };
+    }
+
+    if (existing) {
+      await tx
+        .update(emailThreadBindings)
+        .set({
+          detachedAt: new Date(),
+          updatedBy: input.actingUserId,
+          updatedAt: new Date(),
+        })
+        .where(eq(emailThreadBindings.id, existing.id));
+    }
+
+    const [binding] = await tx
+      .insert(emailThreadBindings)
+      .values({
+        mailboxAccountId: input.mailboxAccountId,
+        provider: "microsoft_graph",
+        providerConversationId: input.providerConversationId,
+        dealId: input.dealId,
+        bindingSource: "manual",
+        confidence: "high",
+        assignmentReason: "manual_thread_assignment",
+        createdBy: input.actingUserId,
+        updatedBy: input.actingUserId,
+      })
+      .returning();
+
+    await backAssociateStoredMessagesForBinding(tx, {
+      mailboxAccountId: input.mailboxAccountId,
+      providerConversationId: input.providerConversationId,
+      bindingId: binding.id,
+      dealId: input.dealId,
+      actingUserId: input.actingUserId,
+    });
+
+    return { binding, previousBindingId: existing?.id ?? null };
+  });
+}
+
+export async function seedOutboundThreadBinding(
+  tenantDb: TenantDb,
+  input: {
+    mailboxAccountId: string;
+    provider: "microsoft_graph";
+    providerConversationId?: string | null;
+    normalizedSubject: string;
+    participantFingerprint: string;
+    dealId: string;
+    actingUserId: string;
+  }
+): Promise<ThreadBindingRecord> {
+  if (input.providerConversationId) {
+    const result = await bindThreadToDeal(tenantDb, {
+      mailboxAccountId: input.mailboxAccountId,
+      providerConversationId: input.providerConversationId,
+      dealId: input.dealId,
+      actingUserId: input.actingUserId,
+    });
+    return result.binding;
+  }
+
+  const existing = await getProvisionalThreadBinding(
+    tenantDb,
+    input.mailboxAccountId,
+    input.normalizedSubject,
+    input.participantFingerprint
+  );
+  if (existing) return existing;
+
+  const [binding] = await tenantDb
+    .insert(emailThreadBindings)
+    .values({
+      mailboxAccountId: input.mailboxAccountId,
+      provider: input.provider,
+      normalizedSubject: input.normalizedSubject,
+      participantFingerprint: input.participantFingerprint,
+      dealId: input.dealId,
+      bindingSource: "outbound_seed",
+      confidence: "high",
+      assignmentReason: "outbound_thread_seed",
+      provisionalUntil: sql`now() + interval '24 hours'`,
+      createdBy: input.actingUserId,
+      updatedBy: input.actingUserId,
+    })
+    .returning();
+
+  return binding;
+}
+
 export async function getEmailAssignmentQueue(
   tenantDb: TenantDb,
   filters: EmailAssignmentQueueFilters = {},
@@ -303,11 +671,12 @@ export async function getEmailAssignmentQueue(
         tenantDb,
         emailRow.contactId
       );
+      const mailboxAccountId = await resolveMailboxAccountIdForCrmUser(tenantDb, emailRow.userId);
       const suggestedAssignment = resolveEmailAssignment({
         subject: emailRow.subject,
         bodyPreview: emailRow.bodyPreview,
         bodyHtml: emailRow.bodyHtml,
-        priorThreadAssignment: await getThreadAssignment(tenantDb, emailRow.graphConversationId),
+        priorThreadAssignment: await getThreadAssignment(tenantDb, mailboxAccountId, emailRow.graphConversationId),
         contactCompanyId: contactRow?.companyId ?? companyId,
         dealCandidates,
         leadCandidates,
@@ -463,6 +832,26 @@ export async function sendEmail(
     })
     .returning();
 
+  if (input.dealId) {
+    const mailboxAccountId = await resolveMailboxAccountIdForCrmUser(tenantDb, userId);
+    const binding = await seedOutboundThreadBinding(tenantDb, {
+      mailboxAccountId,
+      provider: "microsoft_graph",
+      providerConversationId: graphConversationId,
+      normalizedSubject: normalizeEmailSubject(input.subject),
+      participantFingerprint: buildParticipantFingerprint(input.to, input.cc ?? []),
+      dealId: input.dealId,
+      actingUserId: userId,
+    });
+
+    await tenantDb
+      .update(emails)
+      .set({ threadBindingId: binding.id })
+      .where(eq(emails.id, emailRecord.id));
+
+    emailRecord.threadBindingId = binding.id;
+  }
+
   // Create activity record for the unified feed
   await tenantDb.insert(activities).values({
     type: "email",
@@ -535,6 +924,26 @@ async function createMockSentEmail(
       sentAt: new Date(),
     })
     .returning();
+
+  if (input.dealId) {
+    const mailboxAccountId = await resolveMailboxAccountIdForCrmUser(tenantDb, userId);
+    const binding = await seedOutboundThreadBinding(tenantDb, {
+      mailboxAccountId,
+      provider: "microsoft_graph",
+      providerConversationId: null,
+      normalizedSubject: normalizeEmailSubject(input.subject),
+      participantFingerprint: buildParticipantFingerprint(input.to, input.cc ?? []),
+      dealId: input.dealId,
+      actingUserId: userId,
+    });
+
+    await tenantDb
+      .update(emails)
+      .set({ threadBindingId: binding.id })
+      .where(eq(emails.id, emailRecord.id));
+
+    emailRecord.threadBindingId = binding.id;
+  }
 
   const activitySourceEntityType =
     input.dealId ? "deal" : outboundAssignment.assignedEntityType === "company" ? "company" : "contact";
@@ -648,8 +1057,8 @@ export async function getEmailThread(
   conversationId: string,
   userId?: string,
   userRole?: string
-) {
-  if (!conversationId) return [];
+) : Promise<EmailThreadResponse> {
+  if (!conversationId) return { binding: null, preview: null, emails: [] };
 
   const conditions: any[] = [eq(emails.graphConversationId, conversationId)];
 
@@ -659,11 +1068,52 @@ export async function getEmailThread(
   }
 
   // Thread view: chronological order (oldest first) for natural reading context
-  return tenantDb
+  const thread = await tenantDb
     .select()
     .from(emails)
     .where(and(...conditions))
     .orderBy(sql`${emails.sentAt} ASC`);
+
+  if (thread.length === 0) {
+    return { binding: null, preview: null, emails: [] };
+  }
+
+  const mutationContext = await getEmailThreadForMutation(tenantDb, conversationId);
+
+  let bindingPayload: EmailThreadResponse["binding"] = null;
+  if (mutationContext.binding) {
+    const [dealRow] = mutationContext.binding.dealId
+      ? await tenantDb
+          .select({ id: deals.id, name: deals.name })
+          .from(deals)
+          .where(eq(deals.id, mutationContext.binding.dealId))
+          .limit(1)
+      : [null];
+    bindingPayload = {
+      id: mutationContext.binding.id,
+      mailboxAccountId: mutationContext.binding.mailboxAccountId,
+      contactId: thread[0]?.contactId ?? null,
+      contactName: null,
+      companyId: null,
+      companyName: null,
+      propertyId: null,
+      propertyName: null,
+      leadId: null,
+      leadName: null,
+      dealId: mutationContext.binding.dealId ?? null,
+      dealName: dealRow?.name ?? null,
+      projectId: mutationContext.binding.projectId ?? null,
+      projectName: null,
+      confidence: mutationContext.binding.confidence,
+      assignmentReason: mutationContext.binding.assignmentReason ?? null,
+    };
+  }
+
+  return {
+    binding: bindingPayload,
+    preview: null,
+    emails: thread,
+  };
 }
 
 /**

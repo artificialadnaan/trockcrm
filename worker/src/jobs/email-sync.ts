@@ -2,12 +2,10 @@ import { pool } from "../db.js";
 import crypto from "crypto";
 
 const GRAPH_BASE_URL = "https://graph.microsoft.com/v1.0";
-const SERVER_MODULE_ROOT =
-  process.env.NODE_ENV === "production" ? "../../../server/dist/modules" : "../../../server/src/modules";
-const SERVER_EMAIL_ASSIGNMENT_MODULE = `${SERVER_MODULE_ROOT}/email/assignment-service.js` as string;
-const SERVER_EVALUATOR_MODULE = `${SERVER_MODULE_ROOT}/tasks/rules/evaluator.js` as string;
-const SERVER_TASK_RULES_MODULE = `${SERVER_MODULE_ROOT}/tasks/rules/config.js` as string;
-const SERVER_TASK_PERSISTENCE_MODULE = `${SERVER_MODULE_ROOT}/tasks/rules/persistence.js` as string;
+const SERVER_EMAIL_ASSIGNMENT_MODULE = "../../../server/src/modules/email/assignment-service.js" as string;
+const SERVER_EVALUATOR_MODULE = "../../../server/src/modules/tasks/rules/evaluator.js" as string;
+const SERVER_TASK_RULES_MODULE = "../../../server/src/modules/tasks/rules/config.js" as string;
+const SERVER_TASK_PERSISTENCE_MODULE = "../../../server/src/modules/tasks/rules/persistence.js" as string;
 
 // ---------- Inline encryption (worker can't import from server package) ----------
 const ALGORITHM = "aes-256-gcm";
@@ -316,10 +314,6 @@ async function syncUserEmails(poolClient: any, tokenRow: any): Promise<void> {
   }
   const schemaName = `office_${officeSlug}`;
 
-  // Match the API tenant middleware so tenant-scoped triggers/audit writes resolve correctly.
-  await poolClient.query("SELECT set_config('search_path', $1, true)", [`${schemaName},public`]);
-  await poolClient.query("SELECT set_config('app.current_user_id', $1, true)", [user_id]);
-
   // Fetch messages page by page via delta
   let nextLink: string | null = deltaUrl;
   let newDeltaLink: string | null = null;
@@ -396,7 +390,6 @@ export async function processInboundMessage(
 ): Promise<boolean> {
   const graphMessageId = msg.id;
   if (!graphMessageId) return false;
-  const conversationId = msg.conversationId ?? null;
 
   // Dedup check: graph_message_id is UNIQUE
   const existing = await client.query(
@@ -414,21 +407,7 @@ export async function processInboundMessage(
   const ccAddresses: string[] = (msg.ccRecipients ?? [])
     .map((r: any) => r.emailAddress?.address?.toLowerCase())
     .filter(Boolean);
-
-  // Selective sync: for inbound emails, match ONLY the sender (from_address)
-  // against CRM contacts — not to/cc which are internal mailbox addresses.
-  const matchAddresses = fromAddress ? [fromAddress] : [];
-  const [contactMatch, priorThreadAssignment, assignmentModule] = await Promise.all([
-    findContactByEmailRaw(client, schemaName, matchAddresses),
-    getLatestThreadAssignmentRaw(client, schemaName, conversationId),
-    import(SERVER_EMAIL_ASSIGNMENT_MODULE),
-  ]);
-
-  if (!contactMatch && !priorThreadAssignment) {
-    // No matching contact and no prior thread classification — skip this email
-    return false;
-  }
-
+  const conversationId = msg.conversationId ?? null;
   const subject = msg.subject ?? "(No Subject)";
   const bodyPreview = (msg.bodyPreview ?? "").substring(0, 500);
   const bodyHtml = msg.body?.content ?? "";
@@ -436,6 +415,19 @@ export async function processInboundMessage(
   const sentAt = msg.receivedDateTime
     ? new Date(msg.receivedDateTime)
     : new Date();
+  const mailboxAccountId = await resolveMailboxAccountIdForSyncedUser(client, userId);
+  const normalizedSubject = normalizeEmailSubject(subject);
+  const participantFingerprint = buildParticipantFingerprint(toAddresses, ccAddresses);
+
+  // Selective sync: for inbound emails, match ONLY the sender (from_address)
+  // against CRM contacts — not to/cc which are internal mailbox addresses.
+  const matchAddresses = fromAddress ? [fromAddress] : [];
+  const [contactMatch, activeThreadBinding, provisionalThreadBinding, assignmentModule] = await Promise.all([
+    findContactByEmailRaw(client, schemaName, matchAddresses),
+    getActiveThreadBindingRaw(client, schemaName, mailboxAccountId, conversationId),
+    getProvisionalThreadBindingRaw(client, schemaName, mailboxAccountId, normalizedSubject, participantFingerprint),
+    import(SERVER_EMAIL_ASSIGNMENT_MODULE),
+  ]);
   const contactContext = contactMatch
     ? await getContactAssignmentContextRaw(client, schemaName, contactMatch.id)
     : {
@@ -445,26 +437,43 @@ export async function processInboundMessage(
         dealCandidates: [],
         leadCandidates: [],
       };
+  const authoritativeBinding = activeThreadBinding ?? provisionalThreadBinding;
 
-  const assignment = assignmentModule.resolveEmailAssignment({
-    subject,
-    bodyPreview,
-    bodyHtml,
-    priorThreadAssignment,
-    contactCompanyId: contactContext.companyId,
-    dealCandidates: contactContext.dealCandidates,
-    leadCandidates: contactContext.leadCandidates,
-    propertyCandidates: assignmentModule.buildPropertyCandidatesFromDeals(contactContext.dealCandidates),
-  });
+  const assignment = authoritativeBinding
+    ? {
+        assignedEntityType: "deal",
+        assignedEntityId: authoritativeBinding.deal_id,
+        assignedDealId: authoritativeBinding.deal_id,
+        confidence: "high",
+        ambiguityReason: null,
+        matchedBy: "prior_thread_assignment",
+        requiresClassificationTask: false,
+        candidateDealIds: authoritativeBinding.deal_id ? [authoritativeBinding.deal_id] : [],
+      }
+    : assignmentModule.resolveEmailAssignment({
+        subject,
+        bodyPreview,
+        bodyHtml,
+        priorThreadAssignment: null,
+        contactCompanyId: contactContext.companyId,
+        dealCandidates: contactContext.dealCandidates,
+        leadCandidates: contactContext.leadCandidates,
+        propertyCandidates: assignmentModule.buildPropertyCandidatesFromDeals(contactContext.dealCandidates),
+      });
 
-  // Insert email record
-  const insertResult = await client.query(
+  const promotedBinding =
+    provisionalThreadBinding && conversationId
+      ? await promoteProvisionalBindingRaw(client, schemaName, provisionalThreadBinding.id, conversationId)
+      : null;
+  const bindingId = promotedBinding?.id ?? activeThreadBinding?.id ?? provisionalThreadBinding?.id ?? null;
+
+  const [insertResult] = [await client.query(
     `INSERT INTO ${schemaName}.emails
      (graph_message_id, graph_conversation_id, direction, from_address, to_addresses, cc_addresses,
       subject, body_preview, body_html, has_attachments, contact_id, deal_id,
       assigned_entity_type, assigned_entity_id, assignment_confidence, assignment_ambiguity_reason,
-      user_id, sent_at)
-     VALUES ($1, $2, 'inbound', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+      thread_binding_id, user_id, sent_at)
+     VALUES ($1, $2, 'inbound', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
      ON CONFLICT (graph_message_id) DO NOTHING
      RETURNING id`,
     [
@@ -483,10 +492,11 @@ export async function processInboundMessage(
       assignment.assignedEntityId ?? null,
       assignment.confidence,
       assignment.ambiguityReason ?? null,
+      bindingId,
       userId,
       sentAt,
     ]
-  );
+  )];
 
   if (insertResult.rows.length === 0) return false; // Conflict — already existed
 
@@ -501,15 +511,19 @@ export async function processInboundMessage(
 
   // Create activity record AFTER deal association so deal_id is included in the INSERT
   // (no separate UPDATE needed)
-  const activitySourceEntityType = association.dealId
-    ? "deal"
-    : assignment.assignedEntityType === "company" && assignment.assignedEntityId
-      ? "company"
-      : "contact";
-  const activitySourceEntityId = association.dealId ?? assignment.assignedEntityId ?? contactMatch?.id ?? null;
-  if (!activitySourceEntityId) {
-    return false;
-  }
+  const activitySourceEntityType =
+    association.dealId
+      ? "deal"
+      : assignment.assignedEntityType === "company" && assignment.assignedEntityId
+        ? "company"
+        : contactMatch?.id
+          ? "contact"
+          : "mailbox";
+  const activitySourceEntityId =
+    association.dealId
+      ?? assignment.assignedEntityId
+      ?? contactMatch?.id
+      ?? mailboxAccountId;
   const responsibleUserId = userId;
   await client.query(
     `INSERT INTO ${schemaName}.activities
@@ -529,14 +543,14 @@ export async function processInboundMessage(
     ]
   );
 
-  if (assignment.requiresClassificationTask && contactMatch) {
+  if (assignment.requiresClassificationTask) {
     await createClassificationTaskRaw(client, schemaName, {
       officeId,
       emailId,
       userId,
-      contactId: contactMatch.id,
+      contactId: contactMatch?.id ?? null,
       subject,
-      contactName: `${contactMatch.first_name} ${contactMatch.last_name}`.trim(),
+      contactName: contactMatch ? `${contactMatch.first_name} ${contactMatch.last_name}`.trim() : fromAddress,
       companyName: contactContext.companyName,
       ambiguityReason: assignment.ambiguityReason ?? "assignment_review",
       candidateDealNames: association.activeDealNames,
@@ -572,7 +586,7 @@ export async function processInboundMessage(
         eventName: "email.received",
         emailId,
         contactId: contactMatch?.id ?? null,
-        contactName: contactMatch ? `${contactMatch.first_name} ${contactMatch.last_name}` : null,
+        contactName: contactMatch ? `${contactMatch.first_name} ${contactMatch.last_name}` : fromAddress,
         fromAddress,
         subject,
         userId,
@@ -728,47 +742,88 @@ async function getContactAssignmentContextRaw(
   return { companyId, companyName, estimatingStageDisplayOrder, dealCandidates, leadCandidates };
 }
 
-async function getLatestThreadAssignmentRaw(
+function normalizeEmailSubject(subject: string): string {
+  return subject.replace(/^(re|fw|fwd):\s*/gi, "").replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+function buildParticipantFingerprint(toAddresses: string[], ccAddresses: string[]): string {
+  return [...toAddresses, ...ccAddresses].map((value) => value.trim().toLowerCase()).filter(Boolean).sort().join("|");
+}
+
+async function resolveMailboxAccountIdForSyncedUser(
+  client: any,
+  syncedUserId: string
+): Promise<string> {
+  const result = await client.query(
+    `SELECT id FROM public.user_graph_tokens WHERE user_id = $1 AND status = 'active' LIMIT 1`,
+    [syncedUserId]
+  );
+  if (result.rows.length === 0) {
+    throw new Error(`No active mailbox connected for user ${syncedUserId}`);
+  }
+  return result.rows[0].id;
+}
+
+async function getActiveThreadBindingRaw(
   client: any,
   schemaName: string,
+  mailboxAccountId: string,
   conversationId: string | null
-): Promise<{ assignedEntityType: "deal" | "company"; assignedEntityId: string; assignedDealId?: string | null } | null> {
+): Promise<{ id: string; deal_id: string | null } | null> {
   if (!conversationId) return null;
-
   const result = await client.query(
-    `SELECT assigned_entity_type, assigned_entity_id, deal_id
-       FROM ${schemaName}.emails
-      WHERE graph_conversation_id = $1
-        AND (assigned_entity_type IS NOT NULL OR deal_id IS NOT NULL)
-      ORDER BY sent_at DESC
+    `SELECT id, deal_id
+       FROM ${schemaName}.email_thread_bindings
+      WHERE mailbox_account_id = $1
+        AND provider = 'microsoft_graph'
+        AND provider_conversation_id = $2
+        AND detached_at IS NULL
       LIMIT 1`,
-    [conversationId]
+    [mailboxAccountId, conversationId]
   );
+  return result.rows[0] ?? null;
+}
 
-  const row = result.rows[0];
-  if (!row) return null;
-  if (row.assigned_entity_type === "deal" && row.assigned_entity_id) {
-    return {
-      assignedEntityType: "deal",
-      assignedEntityId: row.assigned_entity_id,
-      assignedDealId: row.deal_id ?? row.assigned_entity_id,
-    };
-  }
-  if (row.assigned_entity_type === "company" && row.assigned_entity_id) {
-    return {
-      assignedEntityType: "company",
-      assignedEntityId: row.assigned_entity_id,
-      assignedDealId: null,
-    };
-  }
-  if (row.deal_id) {
-    return {
-      assignedEntityType: "deal",
-      assignedEntityId: row.deal_id,
-      assignedDealId: row.deal_id,
-    };
-  }
-  return null;
+async function getProvisionalThreadBindingRaw(
+  client: any,
+  schemaName: string,
+  mailboxAccountId: string,
+  normalizedSubject: string,
+  participantFingerprint: string
+): Promise<{ id: string; deal_id: string | null } | null> {
+  const result = await client.query(
+    `SELECT id, deal_id
+       FROM ${schemaName}.email_thread_bindings
+      WHERE mailbox_account_id = $1
+        AND provider = 'microsoft_graph'
+        AND provider_conversation_id IS NULL
+        AND normalized_subject = $2
+        AND participant_fingerprint = $3
+        AND detached_at IS NULL
+        AND provisional_until IS NOT NULL
+        AND provisional_until > NOW()
+      LIMIT 1`,
+    [mailboxAccountId, normalizedSubject, participantFingerprint]
+  );
+  return result.rows[0] ?? null;
+}
+
+async function promoteProvisionalBindingRaw(
+  client: any,
+  schemaName: string,
+  bindingId: string,
+  conversationId: string
+): Promise<{ id: string; deal_id: string | null } | null> {
+  const result = await client.query(
+    `UPDATE ${schemaName}.email_thread_bindings
+        SET provider_conversation_id = $2,
+            provisional_until = NULL,
+            updated_at = NOW()
+      WHERE id = $1
+      RETURNING id, deal_id`,
+    [bindingId, conversationId]
+  );
+  return result.rows[0] ?? null;
 }
 
 async function createClassificationTaskRaw(
@@ -778,7 +833,7 @@ async function createClassificationTaskRaw(
     officeId: string;
     emailId: string;
     userId: string;
-    contactId: string;
+    contactId: string | null;
     subject: string;
     contactName: string;
     companyName: string | null;

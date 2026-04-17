@@ -24,6 +24,7 @@ export const activitySourceEntityEnum = pgEnum("activity_source_entity", [
   "lead",
   "deal",
   "contact",
+  "mailbox",
 ]);
 
 export const activities = pgTable(
