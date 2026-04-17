@@ -134,7 +134,9 @@ router.get("/graph/consent", authMiddleware, (req, res, next) => {
     res.cookie("graph_auth_nonce", nonce, {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
-      sameSite: "lax",
+      // Consent starts from the frontend origin and sets this cookie on the API origin via fetch.
+      // In production that is a cross-site request, so the nonce cookie must allow cross-site storage.
+      sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
       maxAge: 600_000, // 10 minutes
     });
 
