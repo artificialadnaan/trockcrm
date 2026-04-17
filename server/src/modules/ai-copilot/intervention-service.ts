@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import {
@@ -65,6 +65,8 @@ type InMemoryTenantDb = {
     feedback?: AiFeedbackRow[];
   };
 };
+
+export const INTERVENTION_SYSTEM_ACTOR_ID = "00000000-0000-0000-0000-0000000000a1";
 
 function isInMemoryTenantDb(value: unknown): value is InMemoryTenantDb {
   return Boolean(value && typeof value === "object" && "state" in value);
@@ -187,6 +189,43 @@ function shouldReopenCase(existing: DisconnectCaseRow, now: Date) {
   if (existing.status !== "snoozed") return false;
   if (!existing.snoozedUntil) return true;
   return existing.snoozedUntil <= now;
+}
+
+function getSystemActorUserId() {
+  return INTERVENTION_SYSTEM_ACTOR_ID;
+}
+
+function buildReopenHistoryMetadata(input: {
+  priorConclusionActionId: string;
+  priorConclusionKind: "resolve" | "snooze" | "escalate";
+  reopenReason: string;
+  lifecycleStartedAt: string;
+}) {
+  return {
+    priorConclusionActionId: input.priorConclusionActionId,
+    priorConclusionKind: input.priorConclusionKind,
+    reopenReason: input.reopenReason,
+    lifecycleStartedAt: input.lifecycleStartedAt,
+  };
+}
+
+function readHistoryConclusionKind(
+  row: Pick<DisconnectCaseHistoryRow, "actionType" | "metadataJson">
+): "resolve" | "snooze" | "escalate" {
+  const metadata = row.metadataJson;
+  if (metadata && typeof metadata === "object") {
+    const conclusion = metadata.conclusion;
+    if (conclusion && typeof conclusion === "object" && "kind" in conclusion) {
+      const kind = conclusion.kind;
+      if (kind === "resolve" || kind === "snooze" || kind === "escalate") return kind;
+    }
+  }
+
+  if (row.actionType === "resolve" || row.actionType === "snooze" || row.actionType === "escalate") {
+    return row.actionType;
+  }
+
+  return "resolve";
 }
 
 function sortQueueItems(a: InterventionQueueItem, b: InterventionQueueItem) {
@@ -361,10 +400,12 @@ export async function materializeDisconnectCases(
       existing.metadataJson = buildCaseMetadata(row);
       existing.updatedAt = now;
       if (shouldReopenCase(existing, now)) {
+        const nextLifecycleStartedAt = now;
+        await writeReopenedHistoryEvent(tenantDb, existing, nextLifecycleStartedAt);
         existing.status = "open";
         existing.reopenCount += 1;
-        existing.currentLifecycleStartedAt = now;
-        existing.lastReopenedAt = now;
+        existing.currentLifecycleStartedAt = nextLifecycleStartedAt;
+        existing.lastReopenedAt = nextLifecycleStartedAt;
         existing.snoozedUntil = null;
         existing.resolvedAt = null;
         existing.resolutionReason = null;
@@ -413,6 +454,9 @@ export async function materializeDisconnectCases(
     }
 
     const reopen = shouldReopenCase(existing, now);
+    if (reopen) {
+      await writeReopenedHistoryEvent(tenantDb, existing, now);
+    }
     await tenantDb
       .update(aiDisconnectCases)
       .set({
@@ -1189,7 +1233,7 @@ export async function getInterventionCaseDetail(
   };
 }
 
-type MutationAction = "assign" | "snooze" | "resolve" | "escalate";
+type MutationAction = "assign" | "snooze" | "resolve" | "escalate" | "reopened";
 
 interface MutationRecordInput {
   actionType: MutationAction;
@@ -1321,6 +1365,95 @@ async function writeMutationArtifacts(
     .returning();
 
   return { historyId: createdHistory.id, feedbackId: createdFeedback.id };
+}
+
+async function getLatestConclusionHistoryEvent(
+  tenantDb: TenantDb | InMemoryTenantDb,
+  caseId: string
+): Promise<DisconnectCaseHistoryRow | null> {
+  if (isInMemoryTenantDb(tenantDb)) {
+    const row = [...tenantDb.state.history]
+      .filter(
+        (item) =>
+          item.disconnectCaseId === caseId &&
+          (item.actionType === "resolve" || item.actionType === "snooze" || item.actionType === "escalate")
+      )
+      .sort((left, right) => new Date(right.actedAt).getTime() - new Date(left.actedAt).getTime())[0];
+    return row ?? null;
+  }
+
+  const row = await tenantDb
+    .select()
+    .from(aiDisconnectCaseHistory)
+    .where(
+      and(
+        eq(aiDisconnectCaseHistory.disconnectCaseId, caseId),
+        inArray(aiDisconnectCaseHistory.actionType, ["resolve", "snooze", "escalate"])
+      )
+    )
+    .orderBy(desc(aiDisconnectCaseHistory.actedAt))
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
+
+  return row;
+}
+
+async function hasReopenHistoryForConclusionAction(
+  tenantDb: TenantDb | InMemoryTenantDb,
+  caseId: string,
+  priorConclusionActionId: string
+) {
+  if (isInMemoryTenantDb(tenantDb)) {
+    return (
+      tenantDb.state.history.find(
+        (item) =>
+          item.disconnectCaseId === caseId &&
+          item.actionType === "reopened" &&
+          item.metadataJson?.priorConclusionActionId === priorConclusionActionId
+      ) ?? null
+    );
+  }
+
+  return tenantDb
+    .select({ id: aiDisconnectCaseHistory.id })
+    .from(aiDisconnectCaseHistory)
+    .where(
+      and(
+        eq(aiDisconnectCaseHistory.disconnectCaseId, caseId),
+        eq(aiDisconnectCaseHistory.actionType, "reopened"),
+        sql`${aiDisconnectCaseHistory.metadataJson}->>'priorConclusionActionId' = ${priorConclusionActionId}`
+      )
+    )
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
+}
+
+async function writeReopenedHistoryEvent(
+  tenantDb: TenantDb | InMemoryTenantDb,
+  row: DisconnectCaseRow,
+  nextLifecycleStartedAt: Date
+) {
+  const latestConclusionEvent = await getLatestConclusionHistoryEvent(tenantDb, row.id);
+  if (!latestConclusionEvent) return;
+  const priorConclusionActionId = latestConclusionEvent.id;
+  const existingReopen = await hasReopenHistoryForConclusionAction(tenantDb, row.id, priorConclusionActionId);
+  if (existingReopen) return;
+
+  await writeMutationArtifacts(tenantDb, row, {
+    actionType: "reopened",
+    actedBy: getSystemActorUserId(),
+    comment: null,
+    fromStatus: row.status,
+    toStatus: "open",
+    fromAssignee: row.assignedTo ?? null,
+    toAssignee: row.assignedTo ?? null,
+    metadataJson: buildReopenHistoryMetadata({
+      priorConclusionActionId,
+      priorConclusionKind: readHistoryConclusionKind(latestConclusionEvent),
+      reopenReason: "signal_still_present",
+      lifecycleStartedAt: nextLifecycleStartedAt.toISOString(),
+    }),
+  });
 }
 
 async function loadCasesForMutation(
