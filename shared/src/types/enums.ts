@@ -103,6 +103,7 @@ export const NOTIFICATION_TYPES = [
   "task_assigned",
   "approval_needed",
   "activity_drop",
+  "manager_alert_summary",
   "deal_won",
   "deal_lost",
   "stage_change",
