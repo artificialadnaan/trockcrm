@@ -390,6 +390,7 @@ export async function processInboundMessage(
 ): Promise<boolean> {
   const graphMessageId = msg.id;
   if (!graphMessageId) return false;
+  const conversationId = msg.conversationId ?? null;
 
   // Dedup check: graph_message_id is UNIQUE
   const existing = await client.query(
@@ -411,18 +412,17 @@ export async function processInboundMessage(
   // Selective sync: for inbound emails, match ONLY the sender (from_address)
   // against CRM contacts — not to/cc which are internal mailbox addresses.
   const matchAddresses = fromAddress ? [fromAddress] : [];
-  const contactMatch = await findContactByEmailRaw(
-    client,
-    schemaName,
-    matchAddresses
-  );
+  const [contactMatch, priorThreadAssignment, assignmentModule] = await Promise.all([
+    findContactByEmailRaw(client, schemaName, matchAddresses),
+    getLatestThreadAssignmentRaw(client, schemaName, conversationId),
+    import(SERVER_EMAIL_ASSIGNMENT_MODULE),
+  ]);
 
-  if (!contactMatch) {
-    // No matching contact — skip this email (selective sync)
+  if (!contactMatch && !priorThreadAssignment) {
+    // No matching contact and no prior thread classification — skip this email
     return false;
   }
 
-  const conversationId = msg.conversationId ?? null;
   const subject = msg.subject ?? "(No Subject)";
   const bodyPreview = (msg.bodyPreview ?? "").substring(0, 500);
   const bodyHtml = msg.body?.content ?? "";
@@ -430,11 +430,15 @@ export async function processInboundMessage(
   const sentAt = msg.receivedDateTime
     ? new Date(msg.receivedDateTime)
     : new Date();
-  const [contactContext, priorThreadAssignment, assignmentModule] = await Promise.all([
-    getContactAssignmentContextRaw(client, schemaName, contactMatch.id),
-    getLatestThreadAssignmentRaw(client, schemaName, conversationId),
-    import(SERVER_EMAIL_ASSIGNMENT_MODULE),
-  ]);
+  const contactContext = contactMatch
+    ? await getContactAssignmentContextRaw(client, schemaName, contactMatch.id)
+    : {
+        companyId: null,
+        companyName: null,
+        estimatingStageDisplayOrder: null,
+        dealCandidates: [],
+        leadCandidates: [],
+      };
 
   const assignment = assignmentModule.resolveEmailAssignment({
     subject,
@@ -467,7 +471,7 @@ export async function processInboundMessage(
       bodyPreview,
       bodyHtml,
       hasAttachments,
-      contactMatch.id,
+      contactMatch?.id ?? null,
       assignment.assignedDealId ?? null,
       assignment.assignedEntityType ?? null,
       assignment.assignedEntityId ?? null,
@@ -491,8 +495,15 @@ export async function processInboundMessage(
 
   // Create activity record AFTER deal association so deal_id is included in the INSERT
   // (no separate UPDATE needed)
-  const activitySourceEntityType = association.dealId ? "deal" : "contact";
-  const activitySourceEntityId = association.dealId ?? contactMatch.id;
+  const activitySourceEntityType = association.dealId
+    ? "deal"
+    : assignment.assignedEntityType === "company" && assignment.assignedEntityId
+      ? "company"
+      : "contact";
+  const activitySourceEntityId = association.dealId ?? assignment.assignedEntityId ?? contactMatch?.id ?? null;
+  if (!activitySourceEntityId) {
+    return false;
+  }
   const responsibleUserId = userId;
   await client.query(
     `INSERT INTO ${schemaName}.activities
@@ -504,7 +515,7 @@ export async function processInboundMessage(
       activitySourceEntityType,
       activitySourceEntityId,
       association.dealId, // may be null if 0 or multiple deals
-      contactMatch.id,
+      contactMatch?.id ?? null,
       emailId,
       subject,
       bodyPreview.substring(0, 1000),
@@ -512,7 +523,7 @@ export async function processInboundMessage(
     ]
   );
 
-  if (assignment.requiresClassificationTask) {
+  if (assignment.requiresClassificationTask && contactMatch) {
     await createClassificationTaskRaw(client, schemaName, {
       officeId,
       emailId,
@@ -524,7 +535,7 @@ export async function processInboundMessage(
       ambiguityReason: assignment.ambiguityReason ?? "assignment_review",
       candidateDealNames: association.activeDealNames,
     });
-  } else if (association.dealId) {
+  } else if (association.dealId && contactMatch) {
     await evaluateInboundEmailTasks(
       client,
       schemaName,
@@ -554,8 +565,8 @@ export async function processInboundMessage(
       JSON.stringify({
         eventName: "email.received",
         emailId,
-        contactId: contactMatch.id,
-        contactName: `${contactMatch.first_name} ${contactMatch.last_name}`,
+        contactId: contactMatch?.id ?? null,
+        contactName: contactMatch ? `${contactMatch.first_name} ${contactMatch.last_name}` : null,
         fromAddress,
         subject,
         userId,

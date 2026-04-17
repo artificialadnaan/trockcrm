@@ -54,6 +54,7 @@ function createQueryMock(options: {
     assigned_entity_id: string;
     deal_id: string | null;
   } | null;
+  contactMatch?: boolean;
 }) {
   return vi.fn(async (sql: string, params?: unknown[]) => {
     if (sql.includes("FROM public.pipeline_stage_config") && sql.includes("slug = 'estimating'")) {
@@ -77,9 +78,10 @@ function createQueryMock(options: {
 
     if (sql.includes("SELECT id, first_name, last_name, company_id") && sql.includes("FROM office_beta.contacts")) {
       return {
-        rows: [
-          { id: "contact-1", first_name: "Brett", last_name: "Smith", company_id: "company-1" },
-        ],
+        rows:
+          options.contactMatch === false
+            ? []
+            : [{ id: "contact-1", first_name: "Brett", last_name: "Smith", company_id: "company-1" }],
       };
     }
 
@@ -504,6 +506,63 @@ describe("email sync inbound message routing", () => {
       taskPersistence,
       expect.any(Array)
     );
+    expect(queryMock.mock.calls.some(([sql]) => typeof sql === "string" && sql.includes("INSERT INTO office_beta.tasks"))).toBe(false);
+  });
+
+  it("stores a reply when the sender is not a CRM contact but the thread is already linked to a deal", async () => {
+    const queryMock = createQueryMock({
+      activeDeals: [],
+      contactMatch: false,
+      threadAssignment: {
+        assigned_entity_type: "deal",
+        assigned_entity_id: "deal-2",
+        deal_id: "deal-2",
+      },
+    });
+    const client = { query: queryMock };
+
+    const processed = await processInboundMessage(
+      client,
+      "office_beta",
+      "user-1",
+      "office-1",
+      {
+        id: "graph-8",
+        from: { emailAddress: { address: "adnaan.iqbal@gmail.com" } },
+        toRecipients: [],
+        ccRecipients: [],
+        subject: "Re: TR CRM E2E test",
+        bodyPreview: "Replying on the existing CRM thread",
+        body: { content: "<p>Replying on the existing CRM thread</p>" },
+        hasAttachments: false,
+        receivedDateTime: "2026-04-04T18:00:00.000Z",
+        conversationId: "conv-8",
+      }
+    );
+
+    expect(processed).toBe(true);
+    expect(evaluateTaskRulesMock).not.toHaveBeenCalled();
+    expect(
+      queryMock.mock.calls.some(
+        ([sql, params]) =>
+          typeof sql === "string" &&
+          sql.includes("INSERT INTO office_beta.emails") &&
+          Array.isArray(params) &&
+          params[9] === null &&
+          params[10] === "deal-2"
+      )
+    ).toBe(true);
+    expect(
+      queryMock.mock.calls.some(
+        ([sql, params]) =>
+          typeof sql === "string" &&
+          sql.includes("INSERT INTO office_beta.activities") &&
+          Array.isArray(params) &&
+          params[1] === "deal" &&
+          params[2] === "deal-2" &&
+          params[4] === null
+      )
+    ).toBe(true);
     expect(queryMock.mock.calls.some(([sql]) => typeof sql === "string" && sql.includes("INSERT INTO office_beta.tasks"))).toBe(false);
   });
 });
