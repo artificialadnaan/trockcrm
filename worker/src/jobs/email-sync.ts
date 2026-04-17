@@ -316,6 +316,10 @@ async function syncUserEmails(poolClient: any, tokenRow: any): Promise<void> {
   }
   const schemaName = `office_${officeSlug}`;
 
+  // Match the API tenant middleware so tenant-scoped triggers/audit writes resolve correctly.
+  await poolClient.query("SELECT set_config('search_path', $1, true)", [`${schemaName},public`]);
+  await poolClient.query("SELECT set_config('app.current_user_id', $1, true)", [user_id]);
+
   // Fetch messages page by page via delta
   let nextLink: string | null = deltaUrl;
   let newDeltaLink: string | null = null;
