@@ -969,9 +969,10 @@ const DEFAULT_DEPS: GenerateDealCopilotPacketDeps = {
 
 export async function listCurrentSalesProcessDisconnectRows(
   tenantDb: TenantDb,
-  input: { limit?: number } = {}
+  input: { limit?: number | null } = {}
 ): Promise<SalesProcessDisconnectRow[]> {
-  const limit = Math.max(1, Math.min(input.limit ?? 200, 500));
+  const limit = input.limit == null ? null : Math.max(1, Math.min(input.limit, 5000));
+  const limitClause = limit == null ? sql`` : sql`LIMIT ${limit}`;
   const rowsResult = await tenantDb.execute(sql`
     WITH base AS (
       SELECT
@@ -1247,7 +1248,7 @@ export async function listCurrentSalesProcessDisconnectRows(
       END,
       age_days DESC NULLS LAST,
       deal_number ASC
-    LIMIT ${limit}
+    ${limitClause}
   `);
 
   return getRows(rowsResult).map((row) => ({

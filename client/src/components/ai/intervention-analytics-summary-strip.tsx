@@ -36,43 +36,61 @@ function SummaryCardLink({
 export function InterventionAnalyticsSummaryStrip({ summary }: InterventionAnalyticsSummaryStripProps) {
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-4">
-      <SummaryCardLink to={buildInterventionWorkspacePath({ view: "open" })}>
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2"><Gauge className="h-4 w-4" /> Open Cases</CardTitle>
-            <CardDescription>Current intervention workload</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-3">
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2"><Gauge className="h-4 w-4" /> Open Cases</CardTitle>
+          <CardDescription>Current intervention workload</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <Link
+            to={buildInterventionWorkspacePath({ view: "open" })}
+            className="block transition-transform hover:-translate-y-0.5"
+          >
             <div className="text-4xl font-black">{summary.openCases}</div>
-            <div className="flex flex-wrap gap-2">
-              {severityOrder.map((severity) => (
-                <Badge key={severity} variant="outline" className={severityClasses[severity]}>
+          </Link>
+          <div className="flex flex-wrap gap-2">
+            {severityOrder.map((severity) => (
+              <Link
+                key={severity}
+                to={buildInterventionWorkspacePath({ view: "open", severity })}
+                className="transition-transform hover:-translate-y-0.5"
+              >
+                <Badge variant="outline" className={severityClasses[severity]}>
                   {severity}: {summary.openCasesBySeverity[severity] ?? 0}
                 </Badge>
-              ))}
-            </div>
-          </CardContent>
-        </Card>
-      </SummaryCardLink>
+              </Link>
+            ))}
+          </div>
+        </CardContent>
+      </Card>
 
-      <SummaryCardLink to={buildInterventionWorkspacePath({ view: "overdue" })}>
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2"><TimerReset className="h-4 w-4" /> Overdue</CardTitle>
-            <CardDescription>Cases beyond SLA thresholds</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-3">
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2"><TimerReset className="h-4 w-4" /> Overdue</CardTitle>
+          <CardDescription>Cases beyond SLA thresholds</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <Link
+            to={buildInterventionWorkspacePath({ view: "overdue" })}
+            className="block transition-transform hover:-translate-y-0.5"
+          >
             <div className="text-4xl font-black">{summary.overdueCases}</div>
-            <div className="flex flex-wrap gap-2">
-              {severityOrder.map((severity) => (
-                <Badge key={severity} variant="outline" className={severityClasses[severity]}>
+          </Link>
+          <div className="flex flex-wrap gap-2">
+            {severityOrder.map((severity) => (
+              <Link
+                key={severity}
+                to={buildInterventionWorkspacePath({ view: "overdue", severity })}
+                className="transition-transform hover:-translate-y-0.5"
+              >
+                <Badge variant="outline" className={severityClasses[severity]}>
                   {severity}: {summary.overdueCasesBySeverity[severity] ?? 0}
                 </Badge>
-              ))}
-            </div>
-          </CardContent>
-        </Card>
-      </SummaryCardLink>
+              </Link>
+            ))}
+          </div>
+        </CardContent>
+      </Card>
 
       <SummaryCardLink to={buildInterventionWorkspacePath({ view: "escalated" })}>
         <Card>

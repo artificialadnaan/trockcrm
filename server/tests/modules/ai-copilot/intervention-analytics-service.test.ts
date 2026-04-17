@@ -247,7 +247,11 @@ describe("intervention analytics service", () => {
     expect(dashboard.outcomes.reopenRate30d).toBe(0);
     expect(dashboard.hotspots.assignees[0]?.entityType).toBe("assignee");
     expect(dashboard.hotspots.assignees[0]?.queueLink).toContain("/admin/interventions?assigneeId=");
-    expect(dashboard.breachQueue.items[0]?.detailLink).toContain("/admin/interventions?caseId=");
+    expect(dashboard.breachQueue.items[0]?.detailLink).toContain("/admin/interventions");
+    expect(dashboard.breachQueue.items.find((item) => item.caseId === "case-snooze-breached")).toMatchObject({
+      detailLink: "/admin/interventions?view=snooze-breached&caseId=case-snooze-breached",
+      queueLink: "/admin/interventions?view=snooze-breached&caseId=case-snooze-breached",
+    });
   });
 
   it("orders equal-severity breach rows with escalated cases first and returns null percentages when no denominator exists", async () => {
@@ -288,5 +292,40 @@ describe("intervention analytics service", () => {
     ]);
     expect(dashboard.outcomes.clearanceRate30d).toBeNull();
     expect(dashboard.outcomes.reopenRate30d).toBeNull();
+  });
+
+  it("filters hotspot rows that do not have any active open, overdue, or repeat case load", async () => {
+    const now = new Date("2026-04-16T12:00:00.000Z");
+    const tenantDb = createTenantDb({
+      cases: [
+        makeCase({
+          id: "case-open",
+          assignedTo: "manager-1",
+        }),
+        makeCase({
+          id: "case-resolved-only",
+          businessKey: "office-1:stale_stage:deal:deal-2",
+          scopeId: "deal-2",
+          dealId: "deal-2",
+          disconnectType: "stale_stage",
+          assignedTo: "manager-2",
+          status: "resolved",
+          resolvedAt: new Date("2026-04-15T12:00:00.000Z"),
+        }),
+      ],
+      deals: [
+        { id: "deal-1", dealNumber: "D-1001", name: "Alpha Plaza", companyId: "company-1" },
+        { id: "deal-2", dealNumber: "D-1002", name: "Beta Tower", companyId: "company-1" },
+      ],
+      companies: [{ id: "company-1", name: "Acme Property Group" }],
+      history: [],
+    });
+
+    const dashboard = await getInterventionAnalyticsDashboard(tenantDb as any, {
+      officeId: "office-1",
+      now,
+    });
+
+    expect(dashboard.hotspots.assignees.map((row) => row.label)).toEqual(["manager-1"]);
   });
 });

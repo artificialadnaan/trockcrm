@@ -655,7 +655,8 @@ async function buildAnalyticsPreviewCases(
 ) {
   const [existingCases, currentRows] = await Promise.all([
     getCasesByOffice(tenantDb, input.officeId),
-    listCurrentSalesProcessDisconnectRows(tenantDb, { limit: 500 }),
+    // `tenantDb` is already scoped to the active office schema by tenant middleware.
+    listCurrentSalesProcessDisconnectRows(tenantDb, { limit: null }),
   ]);
   const existingByBusinessKey = new Map(existingCases.map((row) => [row.businessKey, row]));
   const previewCases: DisconnectCaseRow[] = [...existingCases];
@@ -804,6 +805,7 @@ function buildHotspotRows(
       clearanceRate30d: null,
       queueLink: input.queueLinkFromCase(value.sample),
     }))
+    .filter((row) => row.openCases > 0 || row.overdueCases > 0 || row.repeatOpenCases > 0)
     .sort((a, b) => {
       if (b.overdueCases !== a.overdueCases) return b.overdueCases - a.overdueCases;
       if (b.openCases !== a.openCases) return b.openCases - a.openCases;
@@ -850,7 +852,7 @@ function buildInterventionAnalyticsBreachQueue(
         assignedTo: row.assignedTo,
         escalated: row.escalated,
         breachReasons,
-        detailLink: formatQueueLink({ caseId: row.id }),
+        detailLink: formatQueueLink({ view: primaryView, caseId: row.id }),
         queueLink: formatQueueLink({ view: primaryView, caseId: row.id }),
       } satisfies InterventionAnalyticsBreachRow;
     })
