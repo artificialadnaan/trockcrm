@@ -126,6 +126,7 @@ function createTenantDb(state?: {
   cases?: DisconnectCaseRecord[];
   deals?: DealRecord[];
   companies?: CompanyRecord[];
+  users?: Array<{ id: string; displayName: string }>;
   history?: HistoryRecord[];
 }) {
   return {
@@ -134,6 +135,7 @@ function createTenantDb(state?: {
       tasks: [],
       deals: state?.deals ? state.deals.map((row) => ({ ...row })) : [],
       companies: state?.companies ? state.companies.map((row) => ({ ...row })) : [],
+      users: state?.users ? state.users.map((row) => ({ ...row })) : [],
       history: state?.history ? state.history.map((row) => ({ ...row })) : [],
       feedback: [],
     },
@@ -217,6 +219,10 @@ describe("intervention analytics service", () => {
         { id: "company-1", name: "Acme Property Group" },
         { id: "company-2", name: "Beta Holdings" },
       ],
+      users: [
+        { id: "manager-1", displayName: "Manager One" },
+        { id: "manager-2", displayName: "Manager Two" },
+      ],
       history: [
         makeHistory({ id: "history-assign", disconnectCaseId: "case-overdue-critical", actionType: "assign" }),
         makeHistory({ id: "history-snooze", disconnectCaseId: "case-snooze-breached", actionType: "snooze" }),
@@ -246,12 +252,14 @@ describe("intervention analytics service", () => {
     expect(dashboard.outcomes.clearanceRate30d).toBe(0.25);
     expect(dashboard.outcomes.reopenRate30d).toBe(0);
     expect(dashboard.hotspots.assignees[0]?.entityType).toBe("assignee");
+    expect(dashboard.hotspots.assignees[0]?.label).toBe("Manager One");
     expect(dashboard.hotspots.assignees[0]?.queueLink).toContain("/admin/interventions?assigneeId=");
     expect(dashboard.breachQueue.items[0]?.detailLink).toContain("/admin/interventions");
     expect(dashboard.breachQueue.items.find((item) => item.caseId === "case-snooze-breached")).toMatchObject({
       detailLink: "/admin/interventions?view=snooze-breached&caseId=case-snooze-breached",
       queueLink: "/admin/interventions?view=snooze-breached&caseId=case-snooze-breached",
     });
+    expect(dashboard.breachQueue.items[0]?.assignedTo).toBe("Manager One");
   });
 
   it("orders equal-severity breach rows with escalated cases first and returns null percentages when no denominator exists", async () => {

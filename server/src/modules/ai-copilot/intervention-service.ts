@@ -8,6 +8,7 @@ import {
   companies,
   deals,
   tasks,
+  users,
 } from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
 import {
@@ -40,6 +41,7 @@ type DisconnectCaseHistoryRow = typeof aiDisconnectCaseHistory.$inferSelect;
 type TaskRow = typeof tasks.$inferSelect;
 type DealRow = typeof deals.$inferSelect;
 type CompanyRow = typeof companies.$inferSelect;
+type UserRow = typeof users.$inferSelect;
 type AiFeedbackRow = typeof aiFeedback.$inferSelect;
 
 type InMemoryTenantDb = {
@@ -48,6 +50,7 @@ type InMemoryTenantDb = {
     tasks: TaskRow[];
     deals: Array<Pick<DealRow, "id" | "dealNumber" | "name" | "companyId">>;
     companies: Array<Pick<CompanyRow, "id" | "name">>;
+    users?: Array<Pick<UserRow, "id" | "displayName">>;
     history: DisconnectCaseHistoryRow[];
     feedback?: AiFeedbackRow[];
   };
@@ -624,6 +627,7 @@ async function loadInterventionAnalyticsData(
       cases: scopedCases,
       deals: tenantDb.state.deals,
       companies: tenantDb.state.companies,
+      users: tenantDb.state.users ?? [],
       history: tenantDb.state.history.filter((row) =>
         scopedCases.some((item) => item.id === row.disconnectCaseId)
       ),
@@ -633,9 +637,11 @@ async function loadInterventionAnalyticsData(
   const cases = casesOverride ?? (await getCasesByOffice(tenantDb, officeId));
   const dealIds = cases.map((row) => row.dealId).filter((value): value is string => Boolean(value));
   const companyIds = cases.map((row) => row.companyId).filter((value): value is string => Boolean(value));
-  const [dealRows, companyRows, historyRows] = await Promise.all([
+  const assigneeIds = [...new Set(cases.map((row) => row.assignedTo).filter((value): value is string => Boolean(value)))];
+  const [dealRows, companyRows, userRows, historyRows] = await Promise.all([
     dealIds.length ? tenantDb.select().from(deals).where(inArray(deals.id, dealIds)) : Promise.resolve([]),
     companyIds.length ? tenantDb.select().from(companies).where(inArray(companies.id, companyIds)) : Promise.resolve([]),
+    assigneeIds.length ? tenantDb.select({ id: users.id, displayName: users.displayName }).from(users).where(inArray(users.id, assigneeIds)) : Promise.resolve([]),
     cases.length
       ? tenantDb.select().from(aiDisconnectCaseHistory).where(inArray(aiDisconnectCaseHistory.disconnectCaseId, cases.map((row) => row.id)))
       : Promise.resolve([]),
@@ -645,6 +651,7 @@ async function loadInterventionAnalyticsData(
     cases,
     deals: dealRows,
     companies: companyRows,
+    users: userRows,
     history: historyRows,
   };
 }
@@ -818,6 +825,7 @@ function buildInterventionAnalyticsBreachQueue(
   cases: DisconnectCaseRow[],
   dealsMap: Map<string, Pick<DealRow, "id" | "dealNumber" | "name" | "companyId">>,
   companiesMap: Map<string, Pick<CompanyRow, "id" | "name">>,
+  usersMap: Map<string, string>,
   now: Date
 ) {
   const items = cases
@@ -849,7 +857,7 @@ function buildInterventionAnalyticsBreachQueue(
         companyId: row.companyId,
         companyLabel: company?.name ?? readMetadataString(row.metadataJson as Record<string, unknown> | null, "companyName"),
         ageDays: calculateBusinessDaysElapsed(row.currentLifecycleStartedAt, now),
-        assignedTo: row.assignedTo,
+        assignedTo: usersMap.get(row.assignedTo ?? "") ?? row.assignedTo,
         escalated: row.escalated,
         breachReasons,
         detailLink: formatQueueLink({ view: primaryView, caseId: row.id }),
@@ -880,13 +888,14 @@ export async function getInterventionAnalyticsDashboard(
   const previewCases =
     isInMemoryTenantDb(tenantDb) ? undefined : await buildAnalyticsPreviewCases(tenantDb, { officeId: input.officeId, now });
 
-  const { cases, deals: dealRows, companies: companyRows, history } = await loadInterventionAnalyticsData(
+  const { cases, deals: dealRows, companies: companyRows, users: userRows, history } = await loadInterventionAnalyticsData(
     tenantDb,
     input.officeId,
     previewCases
   );
   const dealsMap = new Map(dealRows.map((row) => [row.id, row]));
   const companiesMap = new Map(companyRows.map((row) => [row.id, row]));
+  const usersMap = new Map(userRows.map((row) => [row.id, row.displayName]));
 
   return {
     summary: buildInterventionAnalyticsSummary(cases, now),
@@ -895,7 +904,7 @@ export async function getInterventionAnalyticsDashboard(
       assignees: buildHotspotRows(cases, now, {
         entityType: "assignee",
         keyFromCase: (row) => row.assignedTo,
-        labelFromCase: (row) => row.assignedTo ?? "Unassigned",
+        labelFromCase: (row) => usersMap.get(row.assignedTo ?? "") ?? row.assignedTo ?? "Unassigned",
         queueLinkFromCase: (row) => formatQueueLink({ view: "open", assigneeId: row.assignedTo ?? null }),
       }),
       disconnectTypes: buildHotspotRows(cases, now, {
@@ -930,7 +939,7 @@ export async function getInterventionAnalyticsDashboard(
           formatQueueLink({ view: "open", stageKey: readMetadataString(row.metadataJson as Record<string, unknown> | null, "stageKey") }),
       }),
     },
-    breachQueue: buildInterventionAnalyticsBreachQueue(cases, dealsMap, companiesMap, now),
+    breachQueue: buildInterventionAnalyticsBreachQueue(cases, dealsMap, companiesMap, usersMap, now),
     slaRules: {
       criticalDays: 0,
       highDays: 2,
