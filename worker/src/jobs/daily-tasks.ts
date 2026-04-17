@@ -5,7 +5,7 @@ const SERVER_MODULE_ROOT =
 const SERVER_EVALUATOR_MODULE = `${SERVER_MODULE_ROOT}/tasks/rules/evaluator.js` as string;
 const SERVER_TASK_RULES_MODULE = `${SERVER_MODULE_ROOT}/tasks/rules/config.js` as string;
 const SERVER_TASK_PERSISTENCE_MODULE = `${SERVER_MODULE_ROOT}/tasks/rules/persistence.js` as string;
-const SERVER_STALE_LEAD_KEY_MODULE = "../../../server/src/modules/tasks/rules/stale-lead-key.js" as string;
+const SERVER_STALE_LEAD_KEY_MODULE = `${SERVER_MODULE_ROOT}/tasks/rules/stale-lead-key.js` as string;
 
 /**
  * Daily task list generation job.

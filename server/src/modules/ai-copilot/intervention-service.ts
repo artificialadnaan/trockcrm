@@ -1254,7 +1254,11 @@ export async function getInterventionCaseDetail(
         severity: row.severity,
         status: row.status as "open" | "snoozed" | "resolved",
         assignedTo: row.assignedTo,
-        assignedToName: resolveCaseAssigneeName(usersMap, row.assignedTo, row.metadataJson),
+        assignedToName: resolveCaseAssigneeName(
+          usersMap,
+          row.assignedTo,
+          row.metadataJson as Record<string, unknown> | null | undefined
+        ),
         generatedTaskId: row.generatedTaskId,
         escalated: row.escalated,
         snoozedUntil: toIsoString(row.snoozedUntil),
