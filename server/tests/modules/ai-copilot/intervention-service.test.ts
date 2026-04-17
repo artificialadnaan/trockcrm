@@ -16,6 +16,7 @@ vi.mock("../../../src/modules/ai-copilot/service.js", async () => {
 });
 
 const {
+  INTERVENTION_SYSTEM_ACTOR_ID,
   materializeDisconnectCases,
   listInterventionCases,
   getInterventionAnalyticsDashboard,
@@ -370,6 +371,88 @@ describe("AI intervention service", () => {
       lastReopenedAt: reopenedAt,
       reopenCount: 1,
     });
+  });
+
+  it("writes one reopened history event when a resolved case reopens", async () => {
+    disconnectRowsMock.mockResolvedValue([makeDisconnectRow()]);
+
+    const reopenedAt = new Date("2026-04-16T15:00:00.000Z");
+    const tenantDb = createTenantDb({
+      cases: [
+        makeCase({
+          status: "resolved",
+          resolvedAt: new Date("2026-04-15T10:00:00.000Z"),
+          resolutionReason: "owner_aligned",
+          reopenCount: 0,
+        }),
+      ],
+      history: [
+        makeHistory({
+          id: "history-resolve-1",
+          actionType: "resolve",
+          fromStatus: "open",
+          toStatus: "resolved",
+          metadataJson: {
+            conclusion: { kind: "resolve", outcomeCategory: "owner_aligned" },
+          },
+        }),
+      ],
+    });
+
+    await materializeDisconnectCases(tenantDb as any, {
+      officeId: "office-1",
+      now: reopenedAt,
+    });
+
+    expect(tenantDb.state.history.find((row) => row.actionType === "reopened")).toMatchObject({
+      actedBy: INTERVENTION_SYSTEM_ACTOR_ID,
+      fromStatus: "resolved",
+      toStatus: "open",
+      metadataJson: {
+        priorConclusionActionId: "history-resolve-1",
+        priorConclusionKind: "resolve",
+        reopenReason: "signal_still_present",
+        lifecycleStartedAt: reopenedAt.toISOString(),
+      },
+    });
+  });
+
+  it("does not duplicate reopened history events on repeated materialization retries", async () => {
+    disconnectRowsMock.mockResolvedValue([makeDisconnectRow()]);
+
+    const reopenedAt = new Date("2026-04-16T15:00:00.000Z");
+    const tenantDb = createTenantDb({
+      cases: [
+        makeCase({
+          status: "resolved",
+          resolvedAt: new Date("2026-04-15T10:00:00.000Z"),
+          resolutionReason: "owner_aligned",
+          reopenCount: 0,
+        }),
+      ],
+      history: [
+        makeHistory({
+          id: "history-resolve-1",
+          actionType: "resolve",
+          fromStatus: "open",
+          toStatus: "resolved",
+          metadataJson: {
+            conclusion: { kind: "resolve", outcomeCategory: "owner_aligned" },
+          },
+        }),
+      ],
+    });
+
+    await materializeDisconnectCases(tenantDb as any, {
+      officeId: "office-1",
+      now: reopenedAt,
+    });
+    await materializeDisconnectCases(tenantDb as any, {
+      officeId: "office-1",
+      now: reopenedAt,
+    });
+
+    expect(tenantDb.state.history.filter((row) => row.actionType === "reopened")).toHaveLength(1);
   });
 
   it("preserves lifecycle timestamps for already-open repeat cases during refresh", async () => {
@@ -1052,6 +1135,64 @@ describe("AI intervention service", () => {
       snoozedUntil: null,
     });
     expect(tenantDb.state.history).toHaveLength(0);
+  });
+
+  it("allows legacy-only resolve payloads while legacy outcome writes remain enabled", async () => {
+    const tenantDb = createTenantDb({
+      cases: [makeCase()],
+    });
+
+    const result = await resolveInterventionCases(tenantDb as any, {
+      officeId: "office-1",
+      actorUserId: "director-1",
+      actorRole: "director",
+      caseIds: ["case-1"],
+      resolutionReason: "task_completed",
+      conclusion: null,
+      allowLegacyOutcomeWrites: true,
+    });
+
+    expect(result.updatedCount).toBe(1);
+  });
+
+  it("rejects resolving without a structured conclusion payload once legacy outcome writes are disabled", async () => {
+    const tenantDb = createTenantDb({
+      cases: [makeCase()],
+    });
+
+    await expect(
+      resolveInterventionCases(tenantDb as any, {
+        officeId: "office-1",
+        actorUserId: "director-1",
+        actorRole: "director",
+        caseIds: ["case-1"],
+        resolutionReason: "task_completed",
+        conclusion: null,
+        allowLegacyOutcomeWrites: false,
+      })
+    ).rejects.toThrow("Structured resolve conclusion is required");
+  });
+
+  it("rejects invalid snooze reason and owner combinations", async () => {
+    const tenantDb = createTenantDb({
+      cases: [makeCase()],
+    });
+
+    await expect(
+      snoozeInterventionCases(tenantDb as any, {
+        officeId: "office-1",
+        actorUserId: "director-1",
+        actorRole: "director",
+        caseIds: ["case-1"],
+        snoozedUntil: "2026-04-20T00:00:00.000Z",
+        conclusion: {
+          kind: "snooze",
+          snoozeReasonCode: "waiting_on_customer",
+          expectedOwnerType: "rep",
+          expectedNextStepCode: "rep_follow_up_expected",
+        },
+      })
+    ).rejects.toThrow("Invalid snooze conclusion");
   });
 
   it("resolves intervention cases, maps generated task outcomes, and writes history plus feedback", async () => {

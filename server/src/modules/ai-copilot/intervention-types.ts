@@ -101,6 +101,35 @@ export interface InterventionCaseDetail {
   }>;
 }
 
+export interface StructuredResolveConclusion {
+  kind: "resolve";
+  outcomeCategory: string;
+  reasonCode: string;
+  effectiveness: "confirmed" | "likely" | "unclear";
+  notes?: string | null;
+}
+
+export interface StructuredSnoozeConclusion {
+  kind: "snooze";
+  snoozeReasonCode: string;
+  expectedOwnerType: string;
+  expectedNextStepCode: string;
+  notes?: string | null;
+}
+
+export interface StructuredEscalateConclusion {
+  kind: "escalate";
+  escalationReasonCode: string;
+  escalationTargetType: string;
+  urgency: "high" | "normal";
+  notes?: string | null;
+}
+
+export type StructuredInterventionConclusion =
+  | StructuredResolveConclusion
+  | StructuredSnoozeConclusion
+  | StructuredEscalateConclusion;
+
 export interface InterventionAnalyticsHotspotRow {
   key: string;
   entityType: "assignee" | "disconnect_type" | "rep" | "company" | "stage";
@@ -127,6 +156,34 @@ export interface InterventionAnalyticsBreachRow {
   breachReasons: Array<"overdue" | "escalated_open" | "snooze_breached" | "repeat_open">;
   detailLink: string;
   queueLink: string;
+}
+
+export interface InterventionOutcomeEffectiveness {
+  reopenRateByConclusionFamily: Record<"resolve" | "snooze" | "escalate", number | null>;
+  reopenRateByResolveCategory: Array<{ key: string; rate: number | null; count: number }>;
+  reopenRateBySnoozeReason: Array<{ key: string; rate: number | null; count: number }>;
+  reopenRateByEscalationReason: Array<{ key: string; rate: number | null; count: number }>;
+  conclusionMixByDisconnectType: Array<{
+    key: string;
+    resolveCount: number;
+    snoozeCount: number;
+    escalateCount: number;
+  }>;
+  conclusionMixByActingUser: Array<{
+    actorUserId: string;
+    actorName: string | null;
+    resolveCount: number;
+    snoozeCount: number;
+    escalateCount: number;
+  }>;
+  conclusionMixByAssigneeAtConclusion: Array<{
+    assigneeId: string | null;
+    assigneeName: string | null;
+    resolveCount: number;
+    snoozeCount: number;
+    escalateCount: number;
+  }>;
+  medianDaysToReopenByConclusionFamily: Array<{ key: string; medianDays: number | null }>;
 }
 
 export interface InterventionAnalyticsDashboard {
@@ -171,4 +228,5 @@ export interface InterventionAnalyticsDashboard {
     lowDays: number;
     timingBasis: "business_days";
   };
+  outcomeEffectiveness: InterventionOutcomeEffectiveness;
 }

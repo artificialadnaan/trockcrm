@@ -195,8 +195,14 @@ describe("intervention mutation helpers", () => {
       "/ai/ops/interventions/batch-snooze",
       {
         caseIds: ["case-1", "case-2"],
-        snoozedUntil: "2026-04-20T00:00:00.000Z",
-        notes: "Waiting on customer reply",
+        conclusion: {
+          kind: "snooze",
+          snoozeReasonCode: "waiting_on_customer",
+          expectedOwnerType: "customer",
+          expectedNextStepCode: "customer_reply_expected",
+          snoozedUntil: "2026-04-20T00:00:00.000Z",
+          notes: "Waiting on customer reply",
+        },
       },
     ],
     [
@@ -205,8 +211,13 @@ describe("intervention mutation helpers", () => {
       "/ai/ops/interventions/batch-resolve",
       {
         caseIds: ["case-1", "case-2"],
-        resolutionReason: "owner_aligned",
-        notes: "Owner already aligned on next step",
+        conclusion: {
+          kind: "resolve",
+          outcomeCategory: "owner_aligned",
+          reasonCode: "owner_assigned_and_confirmed",
+          effectiveness: "likely",
+          notes: "Owner already aligned on next step",
+        },
       },
     ],
     [
@@ -215,7 +226,13 @@ describe("intervention mutation helpers", () => {
       "/ai/ops/interventions/batch-escalate",
       {
         caseIds: ["case-1", "case-2"],
-        notes: "Needs leadership review",
+        conclusion: {
+          kind: "escalate",
+          escalationReasonCode: "manager_visibility_required",
+          escalationTargetType: "director",
+          urgency: "high",
+          notes: "Needs leadership review",
+        },
       },
     ],
   ])(
@@ -235,17 +252,36 @@ describe("intervention mutation helpers", () => {
           ? {
               caseIds: ["case-1", "case-2"],
               snoozedUntil: "2026-04-20T00:00:00.000Z",
-              notes: "Waiting on customer reply",
+              conclusion: {
+                kind: "snooze",
+                snoozeReasonCode: "waiting_on_customer",
+                expectedOwnerType: "customer",
+                expectedNextStepCode: "customer_reply_expected",
+                snoozedUntil: "2026-04-20T00:00:00.000Z",
+                notes: "Waiting on customer reply",
+              },
             }
           : path === "/ai/ops/interventions/batch-resolve"
             ? {
                 caseIds: ["case-1", "case-2"],
                 resolutionReason: "owner_aligned",
-                notes: "Owner already aligned on next step",
+                conclusion: {
+                  kind: "resolve",
+                  outcomeCategory: "owner_aligned",
+                  reasonCode: "owner_assigned_and_confirmed",
+                  effectiveness: "likely",
+                  notes: "Owner already aligned on next step",
+                },
               }
             : {
                 caseIds: ["case-1", "case-2"],
-                notes: "Needs leadership review",
+                conclusion: {
+                  kind: "escalate",
+                  escalationReasonCode: "manager_visibility_required",
+                  escalationTargetType: "director",
+                  urgency: "high",
+                  notes: "Needs leadership review",
+                },
               };
 
       expect(apiMock).toHaveBeenCalledWith(path, {
@@ -267,19 +303,44 @@ describe("intervention mutation helpers", () => {
       "snoozeIntervention",
       snoozeIntervention,
       "/ai/ops/interventions/case-1/snooze",
-      { snoozedUntil: "2026-04-20T00:00:00.000Z", notes: "Waiting for reply" },
+      {
+        conclusion: {
+          kind: "snooze",
+          snoozeReasonCode: "waiting_on_customer",
+          expectedOwnerType: "customer",
+          expectedNextStepCode: "customer_reply_expected",
+          snoozedUntil: "2026-04-20T00:00:00.000Z",
+          notes: "Waiting for reply",
+        },
+      },
     ],
     [
       "resolveIntervention",
       resolveIntervention,
       "/ai/ops/interventions/case-1/resolve",
-      { resolutionReason: "task_completed", notes: "Task is complete" },
+      {
+        conclusion: {
+          kind: "resolve",
+          outcomeCategory: "task_completed",
+          reasonCode: "missing_task_created_and_completed",
+          effectiveness: "confirmed",
+          notes: "Task is complete",
+        },
+      },
     ],
     [
       "escalateIntervention",
       escalateIntervention,
       "/ai/ops/interventions/case-1/escalate",
-      { notes: "Director visibility needed" },
+      {
+        conclusion: {
+          kind: "escalate",
+          escalationReasonCode: "manager_visibility_required",
+          escalationTargetType: "director",
+          urgency: "high",
+          notes: "Director visibility needed",
+        },
+      },
     ],
   ])(
     "preserves structured errors for %s responses",
@@ -300,7 +361,14 @@ describe("intervention mutation helpers", () => {
               method: "POST",
               json: {
                 snoozedUntil: "2026-04-20T00:00:00.000Z",
-                notes: "Waiting for reply",
+                conclusion: {
+                  kind: "snooze",
+                  snoozeReasonCode: "waiting_on_customer",
+                  expectedOwnerType: "customer",
+                  expectedNextStepCode: "customer_reply_expected",
+                  snoozedUntil: "2026-04-20T00:00:00.000Z",
+                  notes: "Waiting for reply",
+                },
               },
             }
           : path === "/ai/ops/interventions/case-1/assign"
@@ -316,13 +384,25 @@ describe("intervention mutation helpers", () => {
                   method: "POST",
                   json: {
                     resolutionReason: "task_completed",
-                    notes: "Task is complete",
+                    conclusion: {
+                      kind: "resolve",
+                      outcomeCategory: "task_completed",
+                      reasonCode: "missing_task_created_and_completed",
+                      effectiveness: "confirmed",
+                      notes: "Task is complete",
+                    },
                   },
                 }
               : {
                   method: "POST",
                   json: {
-                    notes: "Director visibility needed",
+                    conclusion: {
+                      kind: "escalate",
+                      escalationReasonCode: "manager_visibility_required",
+                      escalationTargetType: "director",
+                      urgency: "high",
+                      notes: "Director visibility needed",
+                    },
                   },
                 }
       );

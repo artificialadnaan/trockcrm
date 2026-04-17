@@ -80,6 +80,16 @@ const analyticsData = {
     lowDays: 10,
     timingBasis: "business_days",
   },
+  outcomeEffectiveness: {
+    reopenRateByConclusionFamily: { resolve: 0.5, snooze: 0.25, escalate: 0 },
+    reopenRateByResolveCategory: [{ key: "owner_aligned", rate: 0.5, count: 2 }],
+    reopenRateBySnoozeReason: [{ key: "waiting_on_customer", rate: 0.25, count: 4 }],
+    reopenRateByEscalationReason: [{ key: "manager_visibility_required", rate: 0, count: 1 }],
+    conclusionMixByDisconnectType: [{ key: "missing_next_task", resolveCount: 3, snoozeCount: 1, escalateCount: 1 }],
+    conclusionMixByActingUser: [{ actorUserId: "director-1", actorName: "Director One", resolveCount: 3, snoozeCount: 1, escalateCount: 1 }],
+    conclusionMixByAssigneeAtConclusion: [{ assigneeId: "manager-1", assigneeName: "Manager One", resolveCount: 2, snoozeCount: 1, escalateCount: 1 }],
+    medianDaysToReopenByConclusionFamily: [{ key: "resolve", medianDays: 3 }],
+  },
 };
 
 const managerAlertSnapshot: ManagerAlertSnapshot = {
@@ -169,6 +179,10 @@ vi.mock("@/components/ai/intervention-analytics-summary-strip", () => ({
   ),
 }));
 
+vi.mock("@/components/ai/intervention-effectiveness-summary", () => ({
+  InterventionEffectivenessSummary: () => <div>Resolution Effectiveness</div>,
+}));
+
 vi.mock("@/components/ui/button", () => ({
   Button: ({ children }: { children: ReactNode }) => <button>{children}</button>,
   buttonVariants: () => "",
@@ -223,6 +237,7 @@ describe("AdminInterventionAnalyticsPage", () => {
     expect(html).toContain("Send Alerts");
     expect(html).toContain("Office-local time");
     expect(html).toContain("Open Cases");
+    expect(html).toContain("Resolution Effectiveness");
     expect(html).toContain("Breach Queue");
     expect(html).toContain("Manager One");
   });

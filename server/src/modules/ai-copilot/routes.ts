@@ -6,6 +6,7 @@ import { getDealById } from "../deals/service.js";
 import { getCompanyById } from "../companies/service.js";
 import {
   assignInterventionCases,
+  assertHomogeneousBatchConclusionCohort,
   escalateInterventionCases,
   getInterventionCaseDetail,
   getInterventionAnalyticsDashboard,
@@ -19,6 +20,8 @@ import {
   sendManagerAlertSummary,
 } from "./intervention-manager-alerts-service.js";
 import type { InterventionQueueFilters, InterventionQueueView } from "./intervention-types.js";
+import type { StructuredEscalateConclusion, StructuredResolveConclusion, StructuredSnoozeConclusion } from "./intervention-types.js";
+import { mapStructuredResolveReasonToLegacyResolutionReason } from "../../../../shared/src/lib/intervention-outcome-taxonomy.js";
 import {
   getAiActionQueue,
   getCompanyCopilotView,
@@ -57,6 +60,10 @@ const INTERVENTION_QUEUE_VIEWS = new Set<InterventionQueueView>([
   "snooze-breached",
 ]);
 
+function allowLegacyOutcomeWrites() {
+  return process.env.ALLOW_LEGACY_OUTCOME_WRITES === "true";
+}
+
 async function assertDealAccess(req: any, dealId: string) {
   const deal = await getDealById(req.tenantDb!, dealId, req.user!.role, req.user!.id);
   if (!deal) throw new AppError(404, "Deal not found");
@@ -82,6 +89,49 @@ function requireCaseIds(value: unknown) {
     throw new AppError(400, "caseIds must be a non-empty array of case ids");
   }
   return value;
+}
+
+function readStructuredConclusion(
+  body: any,
+  kind: "resolve"
+): StructuredResolveConclusion | null;
+function readStructuredConclusion(
+  body: any,
+  kind: "snooze"
+): StructuredSnoozeConclusion | null;
+function readStructuredConclusion(
+  body: any,
+  kind: "escalate"
+): StructuredEscalateConclusion | null;
+function readStructuredConclusion(body: any, kind: "resolve" | "snooze" | "escalate") {
+  if (body?.conclusion?.kind === kind) return body.conclusion;
+  if (!allowLegacyOutcomeWrites()) {
+    throw new AppError(400, `Structured ${kind} conclusion is required`);
+  }
+  return null;
+}
+
+function assertNoLegacyResolveConflict(input: {
+  legacyResolutionReason?: string | null;
+  structuredResolveConclusion?: { reasonCode?: string } | null;
+}) {
+  if (!input.legacyResolutionReason || !input.structuredResolveConclusion?.reasonCode) return;
+  const mappedLegacy = mapStructuredResolveReasonToLegacyResolutionReason(
+    input.structuredResolveConclusion.reasonCode
+  );
+  if (mappedLegacy !== input.legacyResolutionReason) {
+    throw new AppError(400, "Legacy resolutionReason conflicts with structured conclusion");
+  }
+}
+
+function assertNoLegacyConclusionConflict(input: {
+  notes?: string | null;
+  conclusion: { notes?: string | null } | null;
+  kind: "snooze" | "escalate";
+}) {
+  if (input.notes && input.conclusion) {
+    throw new AppError(400, `Legacy notes conflict with structured ${input.kind} conclusion`);
+  }
 }
 
 router.get("/deals/:id/copilot", async (req, res, next) => {
@@ -390,13 +440,25 @@ router.post("/ops/interventions/batch-snooze", requireRole("admin", "director"),
   try {
     const snoozedUntil = typeof req.body?.snoozedUntil === "string" ? req.body.snoozedUntil : null;
     if (!snoozedUntil) throw new AppError(400, "snoozedUntil is required");
+    const conclusion = readStructuredConclusion(req.body, "snooze");
+    assertNoLegacyConclusionConflict({
+      notes: typeof req.body?.notes === "string" ? req.body.notes : null,
+      conclusion,
+      kind: "snooze",
+    });
+    const caseIds = requireCaseIds(req.body?.caseIds);
+    if (conclusion) {
+      await assertHomogeneousBatchConclusionCohort(req.tenantDb!, getActiveOfficeId(req), caseIds, "snooze");
+    }
 
     const result = await snoozeInterventionCases(req.tenantDb!, {
       officeId: getActiveOfficeId(req),
       actorUserId: req.user!.id,
       actorRole: req.user!.role,
-      caseIds: requireCaseIds(req.body?.caseIds),
+      caseIds,
       snoozedUntil,
+      conclusion,
+      allowLegacyOutcomeWrites: allowLegacyOutcomeWrites(),
       notes: typeof req.body?.notes === "string" ? req.body.notes : null,
     });
 
@@ -409,18 +471,32 @@ router.post("/ops/interventions/batch-snooze", requireRole("admin", "director"),
 
 router.post("/ops/interventions/batch-resolve", requireRole("admin", "director"), async (req, res, next) => {
   try {
-    const resolutionReason = typeof req.body?.resolutionReason === "string" ? req.body.resolutionReason : null;
+    const conclusion = readStructuredConclusion(req.body, "resolve");
+    const legacyResolutionReason = typeof req.body?.resolutionReason === "string" ? req.body.resolutionReason : null;
+    const resolutionReason =
+      legacyResolutionReason ??
+      (conclusion ? mapStructuredResolveReasonToLegacyResolutionReason(conclusion.reasonCode) : null);
     if (!resolutionReason) throw new AppError(400, "resolutionReason is required");
     if (!RESOLUTION_REASONS.has(resolutionReason)) {
       throw new AppError(400, "Invalid resolutionReason");
+    }
+    assertNoLegacyResolveConflict({
+      legacyResolutionReason,
+      structuredResolveConclusion: conclusion,
+    });
+    const caseIds = requireCaseIds(req.body?.caseIds);
+    if (conclusion) {
+      await assertHomogeneousBatchConclusionCohort(req.tenantDb!, getActiveOfficeId(req), caseIds, "resolve");
     }
 
     const result = await resolveInterventionCases(req.tenantDb!, {
       officeId: getActiveOfficeId(req),
       actorUserId: req.user!.id,
       actorRole: req.user!.role,
-      caseIds: requireCaseIds(req.body?.caseIds),
+      caseIds,
       resolutionReason: resolutionReason as Parameters<typeof resolveInterventionCases>[1]["resolutionReason"],
+      conclusion,
+      allowLegacyOutcomeWrites: allowLegacyOutcomeWrites(),
       notes: typeof req.body?.notes === "string" ? req.body.notes : null,
     });
 
@@ -433,11 +509,23 @@ router.post("/ops/interventions/batch-resolve", requireRole("admin", "director")
 
 router.post("/ops/interventions/batch-escalate", requireRole("admin", "director"), async (req, res, next) => {
   try {
+    const conclusion = readStructuredConclusion(req.body, "escalate");
+    assertNoLegacyConclusionConflict({
+      notes: typeof req.body?.notes === "string" ? req.body.notes : null,
+      conclusion,
+      kind: "escalate",
+    });
+    const caseIds = requireCaseIds(req.body?.caseIds);
+    if (conclusion) {
+      await assertHomogeneousBatchConclusionCohort(req.tenantDb!, getActiveOfficeId(req), caseIds, "escalate");
+    }
     const result = await escalateInterventionCases(req.tenantDb!, {
       officeId: getActiveOfficeId(req),
       actorUserId: req.user!.id,
       actorRole: req.user!.role,
-      caseIds: requireCaseIds(req.body?.caseIds),
+      caseIds,
+      conclusion,
+      allowLegacyOutcomeWrites: allowLegacyOutcomeWrites(),
       notes: typeof req.body?.notes === "string" ? req.body.notes : null,
     });
 
@@ -475,6 +563,12 @@ router.post("/ops/interventions/:id/snooze", requireRole("admin", "director"), a
     const caseId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     const snoozedUntil = typeof req.body?.snoozedUntil === "string" ? req.body.snoozedUntil : null;
     if (!snoozedUntil) throw new AppError(400, "snoozedUntil is required");
+    const conclusion = readStructuredConclusion(req.body, "snooze");
+    assertNoLegacyConclusionConflict({
+      notes: typeof req.body?.notes === "string" ? req.body.notes : null,
+      conclusion,
+      kind: "snooze",
+    });
 
     const result = await snoozeInterventionCases(req.tenantDb!, {
       officeId: getActiveOfficeId(req),
@@ -482,6 +576,8 @@ router.post("/ops/interventions/:id/snooze", requireRole("admin", "director"), a
       actorRole: req.user!.role,
       caseIds: [caseId],
       snoozedUntil,
+      conclusion,
+      allowLegacyOutcomeWrites: allowLegacyOutcomeWrites(),
       notes: typeof req.body?.notes === "string" ? req.body.notes : null,
     });
 
@@ -495,11 +591,19 @@ router.post("/ops/interventions/:id/snooze", requireRole("admin", "director"), a
 router.post("/ops/interventions/:id/resolve", requireRole("admin", "director"), async (req, res, next) => {
   try {
     const caseId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
-    const resolutionReason = typeof req.body?.resolutionReason === "string" ? req.body.resolutionReason : null;
+    const conclusion = readStructuredConclusion(req.body, "resolve");
+    const legacyResolutionReason = typeof req.body?.resolutionReason === "string" ? req.body.resolutionReason : null;
+    const resolutionReason =
+      legacyResolutionReason ??
+      (conclusion ? mapStructuredResolveReasonToLegacyResolutionReason(conclusion.reasonCode) : null);
     if (!resolutionReason) throw new AppError(400, "resolutionReason is required");
     if (!RESOLUTION_REASONS.has(resolutionReason)) {
       throw new AppError(400, "Invalid resolutionReason");
     }
+    assertNoLegacyResolveConflict({
+      legacyResolutionReason,
+      structuredResolveConclusion: conclusion,
+    });
 
     const result = await resolveInterventionCases(req.tenantDb!, {
       officeId: getActiveOfficeId(req),
@@ -507,6 +611,8 @@ router.post("/ops/interventions/:id/resolve", requireRole("admin", "director"), 
       actorRole: req.user!.role,
       caseIds: [caseId],
       resolutionReason: resolutionReason as Parameters<typeof resolveInterventionCases>[1]["resolutionReason"],
+      conclusion,
+      allowLegacyOutcomeWrites: allowLegacyOutcomeWrites(),
       notes: typeof req.body?.notes === "string" ? req.body.notes : null,
     });
 
@@ -520,11 +626,19 @@ router.post("/ops/interventions/:id/resolve", requireRole("admin", "director"), 
 router.post("/ops/interventions/:id/escalate", requireRole("admin", "director"), async (req, res, next) => {
   try {
     const caseId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const conclusion = readStructuredConclusion(req.body, "escalate");
+    assertNoLegacyConclusionConflict({
+      notes: typeof req.body?.notes === "string" ? req.body.notes : null,
+      conclusion,
+      kind: "escalate",
+    });
     const result = await escalateInterventionCases(req.tenantDb!, {
       officeId: getActiveOfficeId(req),
       actorUserId: req.user!.id,
       actorRole: req.user!.role,
       caseIds: [caseId],
+      conclusion,
+      allowLegacyOutcomeWrites: allowLegacyOutcomeWrites(),
       notes: typeof req.body?.notes === "string" ? req.body.notes : null,
     });
 

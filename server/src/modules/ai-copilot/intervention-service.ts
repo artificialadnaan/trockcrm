@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import {
@@ -16,15 +16,26 @@ import {
   listCurrentSalesProcessDisconnectRows,
   type SalesProcessDisconnectRow,
 } from "./service.js";
+import {
+  RESOLVE_OUTCOME_CATEGORY_TO_REASON_CODES,
+  SNOOZE_REASON_TO_EXPECTED_OPTIONS,
+  ESCALATION_TARGET_TYPES,
+  mapStructuredResolveReasonToLegacyResolutionReason,
+} from "../../../../shared/src/lib/intervention-outcome-taxonomy.js";
 import type {
   InterventionAnalyticsBreachRow,
   InterventionAnalyticsDashboard,
   InterventionAnalyticsHotspotRow,
   InterventionCaseDetail,
+  InterventionOutcomeEffectiveness,
   InterventionQueueFilters,
   InterventionQueueItem,
   InterventionQueueResult,
   InterventionQueueView,
+  StructuredEscalateConclusion,
+  StructuredInterventionConclusion,
+  StructuredResolveConclusion,
+  StructuredSnoozeConclusion,
 } from "./intervention-types.js";
 import {
   completeTask,
@@ -55,6 +66,8 @@ type InMemoryTenantDb = {
     feedback?: AiFeedbackRow[];
   };
 };
+
+export const INTERVENTION_SYSTEM_ACTOR_ID = "00000000-0000-0000-0000-0000000000a1";
 
 function isInMemoryTenantDb(value: unknown): value is InMemoryTenantDb {
   return Boolean(value && typeof value === "object" && "state" in value);
@@ -179,6 +192,37 @@ function shouldReopenCase(existing: DisconnectCaseRow, now: Date) {
   return existing.snoozedUntil <= now;
 }
 
+function getSystemActorUserId() {
+  return INTERVENTION_SYSTEM_ACTOR_ID;
+}
+
+function buildReopenHistoryMetadata(input: {
+  priorConclusionActionId: string;
+  priorConclusionKind: "resolve" | "snooze" | "escalate";
+  reopenReason: string;
+  lifecycleStartedAt: string;
+}) {
+  return {
+    priorConclusionActionId: input.priorConclusionActionId,
+    priorConclusionKind: input.priorConclusionKind,
+    reopenReason: input.reopenReason,
+    lifecycleStartedAt: input.lifecycleStartedAt,
+  };
+}
+
+function readHistoryConclusionKind(
+  row: Pick<DisconnectCaseHistoryRow, "actionType" | "metadataJson">
+): "resolve" | "snooze" | "escalate" {
+  const kind = readHistoryMetadata(row).conclusion?.kind;
+  if (kind === "resolve" || kind === "snooze" || kind === "escalate") return kind;
+
+  if (row.actionType === "resolve" || row.actionType === "snooze" || row.actionType === "escalate") {
+    return row.actionType;
+  }
+
+  return "resolve";
+}
+
 function sortQueueItems(a: InterventionQueueItem, b: InterventionQueueItem) {
   const expiredSnoozeA = a.status === "snoozed" ? 1 : 0;
   const expiredSnoozeB = b.status === "snoozed" ? 1 : 0;
@@ -200,6 +244,21 @@ function readMetadataDate(metadata: Record<string, unknown> | null | undefined, 
   if (!value) return null;
   const parsed = new Date(value);
   return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function readHistoryMetadata(row: Pick<DisconnectCaseHistoryRow, "metadataJson">) {
+  return (row.metadataJson ?? {}) as {
+    conclusion?: {
+      kind?: "resolve" | "snooze" | "escalate";
+      outcomeCategory?: string;
+      snoozeReasonCode?: string;
+      escalationReasonCode?: string;
+    } | null;
+    priorConclusionActionId?: string;
+    assigneeAtConclusion?: string | null;
+    disconnectTypeAtConclusion?: string;
+    lifecycleStartedAt?: string;
+  };
 }
 
 function matchesQueueStatus(
@@ -351,10 +410,12 @@ export async function materializeDisconnectCases(
       existing.metadataJson = buildCaseMetadata(row);
       existing.updatedAt = now;
       if (shouldReopenCase(existing, now)) {
+        const nextLifecycleStartedAt = now;
+        await writeReopenedHistoryEvent(tenantDb, existing, nextLifecycleStartedAt);
         existing.status = "open";
         existing.reopenCount += 1;
-        existing.currentLifecycleStartedAt = now;
-        existing.lastReopenedAt = now;
+        existing.currentLifecycleStartedAt = nextLifecycleStartedAt;
+        existing.lastReopenedAt = nextLifecycleStartedAt;
         existing.snoozedUntil = null;
         existing.resolvedAt = null;
         existing.resolutionReason = null;
@@ -403,6 +464,9 @@ export async function materializeDisconnectCases(
     }
 
     const reopen = shouldReopenCase(existing, now);
+    if (reopen) {
+      await writeReopenedHistoryEvent(tenantDb, existing, now);
+    }
     await tenantDb
       .update(aiDisconnectCases)
       .set({
@@ -811,6 +875,159 @@ function buildInterventionAnalyticsOutcomes(
   };
 }
 
+function buildGroupedRate(
+  rows: DisconnectCaseHistoryRow[],
+  keyFor: (row: DisconnectCaseHistoryRow) => string,
+  reopenedByActionId: Set<string>
+) {
+  const groups = new Map<string, DisconnectCaseHistoryRow[]>();
+  for (const row of rows) {
+    const key = keyFor(row);
+    if (!key) continue;
+    const group = groups.get(key) ?? [];
+    group.push(row);
+    groups.set(key, group);
+  }
+
+  return [...groups.entries()].reduce<Record<string, number | null>>((acc, [key, group]) => {
+    const reopened = group.filter((candidate) => reopenedByActionId.has(candidate.id));
+    acc[key] = group.length === 0 ? null : reopened.length / group.length;
+    return acc;
+  }, {});
+}
+
+function buildGroupedRateTable(
+  rows: DisconnectCaseHistoryRow[],
+  keyFor: (row: DisconnectCaseHistoryRow) => string,
+  reopenedByActionId: Set<string>
+) {
+  const rates = buildGroupedRate(rows, keyFor, reopenedByActionId);
+  return Object.entries(rates).map(([key, rate]) => ({
+    key,
+    rate,
+    count: rows.filter((row) => keyFor(row) === key).length,
+  }));
+}
+
+function buildConclusionMixByDisconnectType(rows: DisconnectCaseHistoryRow[]) {
+  const keys = [...new Set(rows.map((row) => readHistoryMetadata(row).disconnectTypeAtConclusion ?? "").filter(Boolean))];
+  return keys.map((key) => ({
+    key,
+    resolveCount: rows.filter((row) => readHistoryMetadata(row).disconnectTypeAtConclusion === key && readHistoryMetadata(row).conclusion?.kind === "resolve").length,
+    snoozeCount: rows.filter((row) => readHistoryMetadata(row).disconnectTypeAtConclusion === key && readHistoryMetadata(row).conclusion?.kind === "snooze").length,
+    escalateCount: rows.filter((row) => readHistoryMetadata(row).disconnectTypeAtConclusion === key && readHistoryMetadata(row).conclusion?.kind === "escalate").length,
+  }));
+}
+
+function buildConclusionMixByActingUser(
+  rows: DisconnectCaseHistoryRow[],
+  usersMap: Map<string, string>
+) {
+  const userIds = [...new Set(rows.map((row) => row.actedBy).filter(Boolean))];
+  return userIds.map((actorUserId) => ({
+    actorUserId,
+    actorName: usersMap.get(actorUserId) ?? null,
+    resolveCount: rows.filter((row) => row.actedBy === actorUserId && readHistoryMetadata(row).conclusion?.kind === "resolve").length,
+    snoozeCount: rows.filter((row) => row.actedBy === actorUserId && readHistoryMetadata(row).conclusion?.kind === "snooze").length,
+    escalateCount: rows.filter((row) => row.actedBy === actorUserId && readHistoryMetadata(row).conclusion?.kind === "escalate").length,
+  }));
+}
+
+function buildConclusionMixByAssigneeAtConclusion(
+  rows: DisconnectCaseHistoryRow[],
+  usersMap: Map<string, string>
+) {
+  const assigneeIds = [...new Set(rows.map((row) => readHistoryMetadata(row).assigneeAtConclusion ?? ""))];
+  return assigneeIds.map((assigneeId) => ({
+    assigneeId: assigneeId || null,
+    assigneeName: assigneeId ? usersMap.get(assigneeId) ?? null : null,
+    resolveCount: rows.filter((row) => (readHistoryMetadata(row).assigneeAtConclusion ?? "") === assigneeId && readHistoryMetadata(row).conclusion?.kind === "resolve").length,
+    snoozeCount: rows.filter((row) => (readHistoryMetadata(row).assigneeAtConclusion ?? "") === assigneeId && readHistoryMetadata(row).conclusion?.kind === "snooze").length,
+    escalateCount: rows.filter((row) => (readHistoryMetadata(row).assigneeAtConclusion ?? "") === assigneeId && readHistoryMetadata(row).conclusion?.kind === "escalate").length,
+  }));
+}
+
+function computeMedianDaysToLinkedReopen(
+  concludedRows: DisconnectCaseHistoryRow[],
+  history: DisconnectCaseHistoryRow[],
+  family: "resolve" | "snooze" | "escalate"
+) {
+  const reopenDurations = concludedRows
+    .filter((row) => readHistoryMetadata(row).conclusion?.kind === family)
+    .map((row) => {
+      const reopen = history.find(
+        (candidate) =>
+          candidate.actionType === "reopened" &&
+          readHistoryMetadata(candidate).priorConclusionActionId === row.id
+      );
+      if (!reopen) return null;
+      return Math.floor(
+        (new Date(String(reopen.actedAt)).getTime() - new Date(String(row.actedAt)).getTime()) /
+          (1000 * 60 * 60 * 24)
+      );
+    })
+    .filter((value): value is number => value !== null)
+    .sort((left, right) => left - right);
+  if (reopenDurations.length === 0) return null;
+  return reopenDurations[Math.floor(reopenDurations.length / 2)] ?? null;
+}
+
+function buildMedianDaysToReopenTable(
+  concludedRows: DisconnectCaseHistoryRow[],
+  history: DisconnectCaseHistoryRow[]
+) {
+  return (["resolve", "snooze", "escalate"] as const).map((key) => ({
+    key,
+    medianDays: computeMedianDaysToLinkedReopen(concludedRows, history, key),
+  }));
+}
+
+function buildInterventionOutcomeEffectiveness(
+  history: DisconnectCaseHistoryRow[],
+  usersMap: Map<string, string>
+): InterventionOutcomeEffectiveness {
+  const concludedRows = history.filter((row) => Boolean(readHistoryMetadata(row).conclusion?.kind));
+  const reopenedByActionId = new Set(
+    history
+      .filter((row) => row.actionType === "reopened")
+      .map((row) => String(readHistoryMetadata(row).priorConclusionActionId ?? ""))
+      .filter(Boolean)
+  );
+
+  const baseRates = buildGroupedRate(
+    concludedRows,
+    (row) => String(readHistoryMetadata(row).conclusion?.kind ?? ""),
+    reopenedByActionId
+  );
+
+  return {
+    reopenRateByConclusionFamily: {
+      resolve: baseRates.resolve ?? null,
+      snooze: baseRates.snooze ?? null,
+      escalate: baseRates.escalate ?? null,
+    },
+    reopenRateByResolveCategory: buildGroupedRateTable(
+      concludedRows.filter((row) => readHistoryMetadata(row).conclusion?.kind === "resolve"),
+      (row) => String(readHistoryMetadata(row).conclusion?.outcomeCategory ?? ""),
+      reopenedByActionId
+    ),
+    reopenRateBySnoozeReason: buildGroupedRateTable(
+      concludedRows.filter((row) => readHistoryMetadata(row).conclusion?.kind === "snooze"),
+      (row) => String(readHistoryMetadata(row).conclusion?.snoozeReasonCode ?? ""),
+      reopenedByActionId
+    ),
+    reopenRateByEscalationReason: buildGroupedRateTable(
+      concludedRows.filter((row) => readHistoryMetadata(row).conclusion?.kind === "escalate"),
+      (row) => String(readHistoryMetadata(row).conclusion?.escalationReasonCode ?? ""),
+      reopenedByActionId
+    ),
+    conclusionMixByDisconnectType: buildConclusionMixByDisconnectType(concludedRows),
+    conclusionMixByActingUser: buildConclusionMixByActingUser(concludedRows, usersMap),
+    conclusionMixByAssigneeAtConclusion: buildConclusionMixByAssigneeAtConclusion(concludedRows, usersMap),
+    medianDaysToReopenByConclusionFamily: buildMedianDaysToReopenTable(concludedRows, history),
+  };
+}
+
 function buildHotspotRows(
   cases: DisconnectCaseRow[],
   now: Date,
@@ -938,6 +1155,7 @@ export async function getInterventionAnalyticsDashboard(
   return {
     summary: buildInterventionAnalyticsSummary(cases, now),
     outcomes: buildInterventionAnalyticsOutcomes(cases, history, now),
+    outcomeEffectiveness: buildInterventionOutcomeEffectiveness(history, usersMap),
     hotspots: {
       assignees: buildHotspotRows(cases, now, {
         entityType: "assignee",
@@ -1179,7 +1397,7 @@ export async function getInterventionCaseDetail(
   };
 }
 
-type MutationAction = "assign" | "snooze" | "resolve" | "escalate";
+type MutationAction = "assign" | "snooze" | "resolve" | "escalate" | "reopened";
 
 interface MutationRecordInput {
   actionType: MutationAction;
@@ -1198,6 +1416,50 @@ interface MutationResult {
   updatedCount: number;
   skippedCount: number;
   errors: Array<{ caseId: string; message: string }>;
+}
+
+function getConclusionReasonFamilyForCase(
+  row: { disconnectType: string },
+  actionKind: "resolve" | "snooze" | "escalate"
+) {
+  switch (`${actionKind}:${row.disconnectType}`) {
+    case "resolve:missing_next_task":
+      return "resolve:task_execution";
+    case "resolve:inbound_without_followup":
+      return "resolve:follow_up_execution";
+    case "snooze:estimating_gate_gap":
+      return "snooze:estimating_wait";
+    case "escalate:revision_loop":
+      return "escalate:manager_intervention";
+    default:
+      return `${actionKind}:${row.disconnectType}`;
+  }
+}
+
+export async function assertHomogeneousBatchConclusionCohort(
+  tenantDb: TenantDb | InMemoryTenantDb,
+  officeId: string,
+  caseIds: string[],
+  actionKind: "resolve" | "snooze" | "escalate"
+) {
+  const rows = await loadCasesForMutation(tenantDb, officeId, caseIds);
+  if (rows.length === 0) {
+    throw new AppError(400, "At least one intervention case is required");
+  }
+
+  const firstRow = rows[0];
+  if (!firstRow) {
+    throw new AppError(400, "At least one intervention case is required");
+  }
+
+  if (!rows.every((row) => row.disconnectType === firstRow.disconnectType)) {
+    throw new AppError(400, "Batch conclusion requires a homogeneous cohort");
+  }
+
+  const expectedReasonFamily = getConclusionReasonFamilyForCase(firstRow, actionKind);
+  if (!rows.every((row) => getConclusionReasonFamilyForCase(row, actionKind) === expectedReasonFamily)) {
+    throw new AppError(400, "Batch conclusion requires a homogeneous cohort");
+  }
 }
 
 function buildMutationError(caseId: string, message: string) {
@@ -1313,6 +1575,95 @@ async function writeMutationArtifacts(
   return { historyId: createdHistory.id, feedbackId: createdFeedback.id };
 }
 
+async function getLatestConclusionHistoryEvent(
+  tenantDb: TenantDb | InMemoryTenantDb,
+  caseId: string
+): Promise<DisconnectCaseHistoryRow | null> {
+  if (isInMemoryTenantDb(tenantDb)) {
+    const row = [...tenantDb.state.history]
+      .filter(
+        (item) =>
+          item.disconnectCaseId === caseId &&
+          (item.actionType === "resolve" || item.actionType === "snooze" || item.actionType === "escalate")
+      )
+      .sort((left, right) => new Date(right.actedAt).getTime() - new Date(left.actedAt).getTime())[0];
+    return row ?? null;
+  }
+
+  const row = await tenantDb
+    .select()
+    .from(aiDisconnectCaseHistory)
+    .where(
+      and(
+        eq(aiDisconnectCaseHistory.disconnectCaseId, caseId),
+        inArray(aiDisconnectCaseHistory.actionType, ["resolve", "snooze", "escalate"])
+      )
+    )
+    .orderBy(desc(aiDisconnectCaseHistory.actedAt))
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
+
+  return row;
+}
+
+async function hasReopenHistoryForConclusionAction(
+  tenantDb: TenantDb | InMemoryTenantDb,
+  caseId: string,
+  priorConclusionActionId: string
+) {
+  if (isInMemoryTenantDb(tenantDb)) {
+    return (
+      tenantDb.state.history.find(
+        (item) =>
+          item.disconnectCaseId === caseId &&
+          item.actionType === "reopened" &&
+          readHistoryMetadata(item).priorConclusionActionId === priorConclusionActionId
+      ) ?? null
+    );
+  }
+
+  return tenantDb
+    .select({ id: aiDisconnectCaseHistory.id })
+    .from(aiDisconnectCaseHistory)
+    .where(
+      and(
+        eq(aiDisconnectCaseHistory.disconnectCaseId, caseId),
+        eq(aiDisconnectCaseHistory.actionType, "reopened"),
+        sql`${aiDisconnectCaseHistory.metadataJson}->>'priorConclusionActionId' = ${priorConclusionActionId}`
+      )
+    )
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
+}
+
+async function writeReopenedHistoryEvent(
+  tenantDb: TenantDb | InMemoryTenantDb,
+  row: DisconnectCaseRow,
+  nextLifecycleStartedAt: Date
+) {
+  const latestConclusionEvent = await getLatestConclusionHistoryEvent(tenantDb, row.id);
+  if (!latestConclusionEvent) return;
+  const priorConclusionActionId = latestConclusionEvent.id;
+  const existingReopen = await hasReopenHistoryForConclusionAction(tenantDb, row.id, priorConclusionActionId);
+  if (existingReopen) return;
+
+  await writeMutationArtifacts(tenantDb, row, {
+    actionType: "reopened",
+    actedBy: getSystemActorUserId(),
+    comment: null,
+    fromStatus: row.status,
+    toStatus: "open",
+    fromAssignee: row.assignedTo ?? null,
+    toAssignee: row.assignedTo ?? null,
+    metadataJson: buildReopenHistoryMetadata({
+      priorConclusionActionId,
+      priorConclusionKind: readHistoryConclusionKind(latestConclusionEvent),
+      reopenReason: "signal_still_present",
+      lifecycleStartedAt: nextLifecycleStartedAt.toISOString(),
+    }),
+  });
+}
+
 async function loadCasesForMutation(
   tenantDb: TenantDb | InMemoryTenantDb,
   officeId: string,
@@ -1399,6 +1750,57 @@ const resolutionToTaskOutcome = {
   duplicate_case: "dismissed",
   issue_no_longer_relevant: "dismissed",
 } as const;
+
+function validateResolveConclusion(
+  conclusion: StructuredResolveConclusion | null | undefined,
+  resolutionReason: keyof typeof resolutionToTaskOutcome,
+  allowLegacyOutcomeWrites: boolean | undefined
+) {
+  if (!conclusion) {
+    if (allowLegacyOutcomeWrites !== false) return;
+    throw new AppError(400, "Structured resolve conclusion is required");
+  }
+
+  const validReasonCodes =
+    RESOLVE_OUTCOME_CATEGORY_TO_REASON_CODES[
+      conclusion.outcomeCategory as keyof typeof RESOLVE_OUTCOME_CATEGORY_TO_REASON_CODES
+    ];
+  if (!validReasonCodes || !validReasonCodes.includes(conclusion.reasonCode as never)) {
+    throw new AppError(400, "Invalid resolve conclusion");
+  }
+
+  const mappedReason = mapStructuredResolveReasonToLegacyResolutionReason(conclusion.reasonCode);
+  if (mappedReason !== resolutionReason) {
+    throw new AppError(400, "Resolve conclusion does not match resolutionReason");
+  }
+}
+
+function validateSnoozeConclusion(conclusion: StructuredSnoozeConclusion | null | undefined) {
+  if (!conclusion) return;
+
+  const validCombination =
+    SNOOZE_REASON_TO_EXPECTED_OPTIONS[
+      conclusion.snoozeReasonCode as keyof typeof SNOOZE_REASON_TO_EXPECTED_OPTIONS
+    ];
+  if (
+    !validCombination ||
+    !validCombination.ownerTypes.includes(conclusion.expectedOwnerType as never) ||
+    !validCombination.nextStepCodes.includes(conclusion.expectedNextStepCode as never)
+  ) {
+    throw new AppError(400, "Invalid snooze conclusion");
+  }
+}
+
+function validateEscalateConclusion(conclusion: StructuredEscalateConclusion | null | undefined) {
+  if (!conclusion) return;
+  if (!ESCALATION_TARGET_TYPES.includes(conclusion.escalationTargetType as never)) {
+    throw new AppError(400, "Invalid escalate conclusion");
+  }
+}
+
+function conclusionNotes(conclusion: StructuredInterventionConclusion | null | undefined) {
+  return conclusion?.notes ?? null;
+}
 
 async function syncGeneratedTaskResolution(
   tenantDb: TenantDb | InMemoryTenantDb,
@@ -1500,11 +1902,17 @@ export async function snoozeInterventionCases(
     officeId: string;
     caseIds: string[];
     snoozedUntil: Date | string;
+    conclusion?: StructuredSnoozeConclusion | null;
+    allowLegacyOutcomeWrites?: boolean;
     actorUserId: string;
     actorRole: string;
     notes?: string | null;
   }
 ): Promise<MutationResult> {
+  validateSnoozeConclusion(input.conclusion);
+  if (input.caseIds.length > 1 && input.conclusion) {
+    await assertHomogeneousBatchConclusionCohort(tenantDb, input.officeId, input.caseIds, "snooze");
+  }
   const caseIds = dedupeCaseIds(input.caseIds);
   const snoozedUntil = input.snoozedUntil instanceof Date
     ? input.snoozedUntil
@@ -1555,13 +1963,21 @@ export async function snoozeInterventionCases(
     await writeMutationArtifacts(tenantDb, row, {
       actionType: "snooze",
       actedBy: input.actorUserId,
-      comment: input.notes ?? null,
+      comment: input.notes ?? conclusionNotes(input.conclusion),
       fromStatus,
       toStatus: "snoozed",
       fromAssignee: row.assignedTo ?? null,
       toAssignee: row.assignedTo ?? null,
       fromSnoozedUntil,
       toSnoozedUntil: snoozedUntil,
+      metadataJson: input.conclusion
+        ? {
+            lifecycleStartedAt: row.currentLifecycleStartedAt.toISOString(),
+            assigneeAtConclusion: row.assignedTo ?? null,
+            disconnectTypeAtConclusion: row.disconnectType,
+            conclusion: input.conclusion,
+          }
+        : undefined,
     });
     updatedCount += 1;
   }
@@ -1579,11 +1995,17 @@ export async function resolveInterventionCases(
     officeId: string;
     caseIds: string[];
     resolutionReason: keyof typeof resolutionToTaskOutcome;
+    conclusion?: StructuredResolveConclusion | null;
+    allowLegacyOutcomeWrites?: boolean;
     actorUserId: string;
     actorRole: string;
     notes?: string | null;
   }
 ): Promise<MutationResult> {
+  validateResolveConclusion(input.conclusion, input.resolutionReason, input.allowLegacyOutcomeWrites);
+  if (input.caseIds.length > 1 && input.conclusion) {
+    await assertHomogeneousBatchConclusionCohort(tenantDb, input.officeId, input.caseIds, "resolve");
+  }
   const caseIds = dedupeCaseIds(input.caseIds);
   const rows = await loadCasesForMutation(tenantDb, input.officeId, caseIds);
   const rowsById = new Map(rows.map((row) => [row.id, row]));
@@ -1635,7 +2057,7 @@ export async function resolveInterventionCases(
     await writeMutationArtifacts(tenantDb, row, {
       actionType: "resolve",
       actedBy: input.actorUserId,
-      comment: input.notes ?? null,
+      comment: input.notes ?? conclusionNotes(input.conclusion),
       fromStatus,
       toStatus: "resolved",
       fromAssignee: row.assignedTo ?? null,
@@ -1644,6 +2066,9 @@ export async function resolveInterventionCases(
         resolutionReason: input.resolutionReason,
         taskOutcome,
         lifecycleStartedAt: row.currentLifecycleStartedAt.toISOString(),
+        assigneeAtConclusion: row.assignedTo ?? null,
+        disconnectTypeAtConclusion: row.disconnectType,
+        conclusion: input.conclusion ?? null,
       },
     });
     updatedCount += 1;
@@ -1661,11 +2086,17 @@ export async function escalateInterventionCases(
   input: {
     officeId: string;
     caseIds: string[];
+    conclusion?: StructuredEscalateConclusion | null;
+    allowLegacyOutcomeWrites?: boolean;
     actorUserId: string;
     actorRole: string;
     notes?: string | null;
   }
 ): Promise<MutationResult> {
+  validateEscalateConclusion(input.conclusion);
+  if (input.caseIds.length > 1 && input.conclusion) {
+    await assertHomogeneousBatchConclusionCohort(tenantDb, input.officeId, input.caseIds, "escalate");
+  }
   const caseIds = dedupeCaseIds(input.caseIds);
   const rows = await loadCasesForMutation(tenantDb, input.officeId, caseIds);
   const errors: Array<{ caseId: string; message: string }> = [];
@@ -1705,12 +2136,18 @@ export async function escalateInterventionCases(
     await writeMutationArtifacts(tenantDb, row, {
       actionType: "escalate",
       actedBy: input.actorUserId,
-      comment: input.notes ?? null,
+      comment: input.notes ?? conclusionNotes(input.conclusion),
       fromStatus: row.status,
       toStatus: row.status,
       fromAssignee: row.assignedTo ?? null,
       toAssignee: row.assignedTo ?? null,
-      metadataJson: { escalated: true },
+      metadataJson: {
+        escalated: true,
+        lifecycleStartedAt: row.currentLifecycleStartedAt.toISOString(),
+        assigneeAtConclusion: row.assignedTo ?? null,
+        disconnectTypeAtConclusion: row.disconnectType,
+        conclusion: input.conclusion ?? null,
+      },
     });
     updatedCount += 1;
   }

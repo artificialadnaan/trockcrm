@@ -283,6 +283,29 @@ export interface InterventionAnalyticsBreachRow {
   queueLink: string;
 }
 
+export interface InterventionOutcomeEffectiveness {
+  reopenRateByConclusionFamily: Record<"resolve" | "snooze" | "escalate", number | null>;
+  reopenRateByResolveCategory: Array<{ key: string; rate: number | null; count: number }>;
+  reopenRateBySnoozeReason: Array<{ key: string; rate: number | null; count: number }>;
+  reopenRateByEscalationReason: Array<{ key: string; rate: number | null; count: number }>;
+  conclusionMixByDisconnectType: Array<{ key: string; resolveCount: number; snoozeCount: number; escalateCount: number }>;
+  conclusionMixByActingUser: Array<{
+    actorUserId: string;
+    actorName: string | null;
+    resolveCount: number;
+    snoozeCount: number;
+    escalateCount: number;
+  }>;
+  conclusionMixByAssigneeAtConclusion: Array<{
+    assigneeId: string | null;
+    assigneeName: string | null;
+    resolveCount: number;
+    snoozeCount: number;
+    escalateCount: number;
+  }>;
+  medianDaysToReopenByConclusionFamily: Array<{ key: string; medianDays: number | null }>;
+}
+
 export interface InterventionAnalyticsDashboard {
   summary: {
     openCases: number;
@@ -320,6 +343,7 @@ export interface InterventionAnalyticsDashboard {
     lowDays: number;
     timingBasis: "business_days";
   };
+  outcomeEffectiveness: InterventionOutcomeEffectiveness;
 }
 
 export interface ManagerAlertSnapshot {
