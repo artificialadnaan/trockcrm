@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
 
 export interface AiOpsMetrics {
@@ -322,6 +322,67 @@ export interface InterventionAnalyticsDashboard {
   };
 }
 
+export interface ManagerAlertSnapshot {
+  id: string;
+  officeId: string;
+  snapshotKind: "manager_alert_summary";
+  snapshotMode: "preview" | "sent";
+  snapshotJson: ManagerAlertSnapshotJson;
+  scannedAt: string;
+  sentAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ManagerAlertSnapshotJson {
+  version: 1;
+  officeId: string;
+  timezone: string;
+  officeLocalDate: string;
+  generatedAt: string;
+  link: string;
+  families: {
+    overdueHighCritical: {
+      count: number;
+      queueLink: string;
+      caseIds: string[];
+    };
+    snoozeBreached: {
+      count: number;
+      queueLink: string;
+      caseIds: string[];
+    };
+    escalatedOpen: {
+      count: number;
+      queueLink: string;
+      caseIds: string[];
+    };
+    assigneeOverload: {
+      count: number;
+      threshold: number;
+      queueLink: string | null;
+      items: Array<{
+        assigneeId: string;
+        assigneeLabel: string;
+        totalWeight: number;
+        caseCount: number;
+        queueLink: string;
+      }>;
+    };
+  };
+}
+
+export interface ManagerAlertSendResult {
+  snapshot: ManagerAlertSnapshot;
+  deliveries: Array<{
+    recipientUserId: string;
+    claimed: boolean;
+    notification: {
+      id: string;
+    } | null;
+  }>;
+}
+
 export interface QueueAiBackfillResult {
   queued: boolean;
   sourceType: string | null;
@@ -376,6 +437,63 @@ export function useInterventionAnalytics() {
     "/ai/ops/intervention-analytics",
     "Failed to load intervention analytics"
   );
+}
+
+function isMissingManagerAlertSnapshotError(error: unknown) {
+  return error instanceof Error && error.message === "Manager alert snapshot not found";
+}
+
+export function useManagerAlertSnapshot() {
+  const [data, setData] = useState<ManagerAlertSnapshot | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const requestVersionRef = useRef(0);
+
+  const fetchData = useCallback(async () => {
+    const requestVersion = ++requestVersionRef.current;
+    setLoading(true);
+    setError(null);
+    try {
+      const response = await api<ManagerAlertSnapshot>("/ai/ops/intervention-manager-alerts");
+      if (requestVersion !== requestVersionRef.current) return;
+      setData(response);
+    } catch (err: unknown) {
+      if (requestVersion !== requestVersionRef.current) return;
+      if (isMissingManagerAlertSnapshotError(err)) {
+        setData(null);
+        setError(null);
+      } else {
+        setError(err instanceof Error ? err.message : "Failed to load manager alert snapshot");
+      }
+    } finally {
+      if (requestVersion === requestVersionRef.current) setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void fetchData();
+  }, [fetchData]);
+
+  return {
+    data,
+    loading,
+    error,
+    refetch: fetchData,
+  };
+}
+
+export async function runManagerAlertScan() {
+  return api<ManagerAlertSnapshot>("/ai/ops/intervention-manager-alerts/scan", {
+    method: "POST",
+    json: {},
+  });
+}
+
+export async function sendManagerAlertSummary() {
+  return api<ManagerAlertSendResult>("/ai/ops/intervention-manager-alerts/send", {
+    method: "POST",
+    json: {},
+  });
 }
 
 export function useAiOps(limit = 20) {
