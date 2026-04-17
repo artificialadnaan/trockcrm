@@ -336,4 +336,71 @@ describe("intervention analytics service", () => {
 
     expect(dashboard.hotspots.assignees.map((row) => row.label)).toEqual(["manager-1"]);
   });
+
+  it("computes reopen rate by conclusion family from history events", async () => {
+    const tenantDb = createTenantDb({
+      cases: [
+        makeCase({ id: "case-1", assignedTo: "manager-1" }),
+        makeCase({
+          id: "case-2",
+          businessKey: "office-1:stale_stage:deal:deal-2",
+          scopeId: "deal-2",
+          dealId: "deal-2",
+          disconnectType: "stale_stage",
+          assignedTo: "manager-1",
+        }),
+      ],
+      users: [{ id: "manager-1", displayName: "Manager One" }],
+      history: [
+        makeHistory({
+          id: "resolve-1",
+          disconnectCaseId: "case-1",
+          actionType: "resolve",
+          actedBy: "director-1",
+          metadataJson: {
+            assigneeAtConclusion: "manager-1",
+            disconnectTypeAtConclusion: "missing_next_task",
+            conclusion: {
+              kind: "resolve",
+              outcomeCategory: "owner_aligned",
+            },
+          },
+        }),
+        makeHistory({
+          id: "resolve-2",
+          disconnectCaseId: "case-2",
+          actionType: "resolve",
+          actedBy: "director-1",
+          metadataJson: {
+            assigneeAtConclusion: "manager-1",
+            disconnectTypeAtConclusion: "stale_stage",
+            conclusion: {
+              kind: "resolve",
+              outcomeCategory: "owner_aligned",
+            },
+          },
+        }),
+        makeHistory({
+          id: "reopened-1",
+          disconnectCaseId: "case-1",
+          actionType: "reopened",
+          actedBy: "system",
+          metadataJson: {
+            priorConclusionActionId: "resolve-1",
+          },
+        }),
+      ],
+    });
+
+    const dashboard = await getInterventionAnalyticsDashboard(tenantDb as any, {
+      officeId: "office-1",
+    });
+
+    expect(dashboard.outcomeEffectiveness.reopenRateByConclusionFamily.resolve).toBe(0.5);
+    expect(dashboard.outcomeEffectiveness.conclusionMixByAssigneeAtConclusion[0]).toMatchObject({
+      assigneeId: "manager-1",
+      assigneeName: "Manager One",
+      resolveCount: 2,
+    });
+  });
 });

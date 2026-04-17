@@ -9,6 +9,7 @@ import {
   type ManagerAlertSnapshot,
 } from "@/hooks/use-ai-ops";
 import { InterventionAnalyticsBreachQueue } from "@/components/ai/intervention-analytics-breach-queue";
+import { InterventionEffectivenessSummary } from "@/components/ai/intervention-effectiveness-summary";
 import { InterventionAnalyticsHotspots } from "@/components/ai/intervention-analytics-hotspots";
 import { InterventionAnalyticsOutcomes } from "@/components/ai/intervention-analytics-outcomes";
 import { InterventionAnalyticsSlaRules } from "@/components/ai/intervention-analytics-sla-rules";
@@ -338,6 +339,7 @@ export function AdminInterventionAnalyticsPage() {
       ) : (
         <>
           <InterventionAnalyticsSummaryStrip summary={data.summary} />
+          <InterventionEffectivenessSummary {...data.outcomeEffectiveness} />
 
           <Card>
             <CardHeader>

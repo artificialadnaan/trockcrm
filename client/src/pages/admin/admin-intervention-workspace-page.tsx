@@ -2,11 +2,15 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { RefreshCcw } from "lucide-react";
 import { toast } from "sonner";
+import type {
+  EscalateConclusionPayload,
+  ResolveConclusionPayload,
+  SnoozeConclusionPayload,
+} from "@/lib/intervention-outcome-taxonomy";
 import { buttonVariants } from "@/components/ui/button";
 import {
   type InterventionMutationResult,
   type InterventionWorkspaceView,
-  type InterventionResolutionReason,
   batchAssignInterventions,
   batchEscalateInterventions,
   batchResolveInterventions,
@@ -289,17 +293,15 @@ export function AdminInterventionWorkspacePage() {
           runBatchAction(() =>
             batchSnoozeInterventions({
               caseIds: selectedIds,
-              snoozedUntil: input.snoozedUntil,
-              notes: input.notes,
+              conclusion: input.conclusion,
             })
           )
         }
-        onResolve={(input: { resolutionReason: InterventionResolutionReason; notes: string | null }) =>
+        onResolve={(input: { conclusion: ResolveConclusionPayload }) =>
           runBatchAction(() =>
             batchResolveInterventions({
               caseIds: selectedIds,
-              resolutionReason: input.resolutionReason,
-              notes: input.notes,
+              conclusion: input.conclusion,
             })
           )
         }
@@ -307,7 +309,7 @@ export function AdminInterventionWorkspacePage() {
           runBatchAction(() =>
             batchEscalateInterventions({
               caseIds: selectedIds,
-              notes: input.notes,
+              conclusion: input.conclusion,
             })
           )
         }

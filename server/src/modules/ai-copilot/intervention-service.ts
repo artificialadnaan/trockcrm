@@ -27,6 +27,7 @@ import type {
   InterventionAnalyticsDashboard,
   InterventionAnalyticsHotspotRow,
   InterventionCaseDetail,
+  InterventionOutcomeEffectiveness,
   InterventionQueueFilters,
   InterventionQueueItem,
   InterventionQueueResult,
@@ -212,14 +213,8 @@ function buildReopenHistoryMetadata(input: {
 function readHistoryConclusionKind(
   row: Pick<DisconnectCaseHistoryRow, "actionType" | "metadataJson">
 ): "resolve" | "snooze" | "escalate" {
-  const metadata = row.metadataJson;
-  if (metadata && typeof metadata === "object") {
-    const conclusion = metadata.conclusion;
-    if (conclusion && typeof conclusion === "object" && "kind" in conclusion) {
-      const kind = conclusion.kind;
-      if (kind === "resolve" || kind === "snooze" || kind === "escalate") return kind;
-    }
-  }
+  const kind = readHistoryMetadata(row).conclusion?.kind;
+  if (kind === "resolve" || kind === "snooze" || kind === "escalate") return kind;
 
   if (row.actionType === "resolve" || row.actionType === "snooze" || row.actionType === "escalate") {
     return row.actionType;
@@ -249,6 +244,21 @@ function readMetadataDate(metadata: Record<string, unknown> | null | undefined, 
   if (!value) return null;
   const parsed = new Date(value);
   return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function readHistoryMetadata(row: Pick<DisconnectCaseHistoryRow, "metadataJson">) {
+  return (row.metadataJson ?? {}) as {
+    conclusion?: {
+      kind?: "resolve" | "snooze" | "escalate";
+      outcomeCategory?: string;
+      snoozeReasonCode?: string;
+      escalationReasonCode?: string;
+    } | null;
+    priorConclusionActionId?: string;
+    assigneeAtConclusion?: string | null;
+    disconnectTypeAtConclusion?: string;
+    lifecycleStartedAt?: string;
+  };
 }
 
 function matchesQueueStatus(
@@ -865,6 +875,159 @@ function buildInterventionAnalyticsOutcomes(
   };
 }
 
+function buildGroupedRate(
+  rows: DisconnectCaseHistoryRow[],
+  keyFor: (row: DisconnectCaseHistoryRow) => string,
+  reopenedByActionId: Set<string>
+) {
+  const groups = new Map<string, DisconnectCaseHistoryRow[]>();
+  for (const row of rows) {
+    const key = keyFor(row);
+    if (!key) continue;
+    const group = groups.get(key) ?? [];
+    group.push(row);
+    groups.set(key, group);
+  }
+
+  return [...groups.entries()].reduce<Record<string, number | null>>((acc, [key, group]) => {
+    const reopened = group.filter((candidate) => reopenedByActionId.has(candidate.id));
+    acc[key] = group.length === 0 ? null : reopened.length / group.length;
+    return acc;
+  }, {});
+}
+
+function buildGroupedRateTable(
+  rows: DisconnectCaseHistoryRow[],
+  keyFor: (row: DisconnectCaseHistoryRow) => string,
+  reopenedByActionId: Set<string>
+) {
+  const rates = buildGroupedRate(rows, keyFor, reopenedByActionId);
+  return Object.entries(rates).map(([key, rate]) => ({
+    key,
+    rate,
+    count: rows.filter((row) => keyFor(row) === key).length,
+  }));
+}
+
+function buildConclusionMixByDisconnectType(rows: DisconnectCaseHistoryRow[]) {
+  const keys = [...new Set(rows.map((row) => readHistoryMetadata(row).disconnectTypeAtConclusion ?? "").filter(Boolean))];
+  return keys.map((key) => ({
+    key,
+    resolveCount: rows.filter((row) => readHistoryMetadata(row).disconnectTypeAtConclusion === key && readHistoryMetadata(row).conclusion?.kind === "resolve").length,
+    snoozeCount: rows.filter((row) => readHistoryMetadata(row).disconnectTypeAtConclusion === key && readHistoryMetadata(row).conclusion?.kind === "snooze").length,
+    escalateCount: rows.filter((row) => readHistoryMetadata(row).disconnectTypeAtConclusion === key && readHistoryMetadata(row).conclusion?.kind === "escalate").length,
+  }));
+}
+
+function buildConclusionMixByActingUser(
+  rows: DisconnectCaseHistoryRow[],
+  usersMap: Map<string, string>
+) {
+  const userIds = [...new Set(rows.map((row) => row.actedBy).filter(Boolean))];
+  return userIds.map((actorUserId) => ({
+    actorUserId,
+    actorName: usersMap.get(actorUserId) ?? null,
+    resolveCount: rows.filter((row) => row.actedBy === actorUserId && readHistoryMetadata(row).conclusion?.kind === "resolve").length,
+    snoozeCount: rows.filter((row) => row.actedBy === actorUserId && readHistoryMetadata(row).conclusion?.kind === "snooze").length,
+    escalateCount: rows.filter((row) => row.actedBy === actorUserId && readHistoryMetadata(row).conclusion?.kind === "escalate").length,
+  }));
+}
+
+function buildConclusionMixByAssigneeAtConclusion(
+  rows: DisconnectCaseHistoryRow[],
+  usersMap: Map<string, string>
+) {
+  const assigneeIds = [...new Set(rows.map((row) => readHistoryMetadata(row).assigneeAtConclusion ?? ""))];
+  return assigneeIds.map((assigneeId) => ({
+    assigneeId: assigneeId || null,
+    assigneeName: assigneeId ? usersMap.get(assigneeId) ?? null : null,
+    resolveCount: rows.filter((row) => (readHistoryMetadata(row).assigneeAtConclusion ?? "") === assigneeId && readHistoryMetadata(row).conclusion?.kind === "resolve").length,
+    snoozeCount: rows.filter((row) => (readHistoryMetadata(row).assigneeAtConclusion ?? "") === assigneeId && readHistoryMetadata(row).conclusion?.kind === "snooze").length,
+    escalateCount: rows.filter((row) => (readHistoryMetadata(row).assigneeAtConclusion ?? "") === assigneeId && readHistoryMetadata(row).conclusion?.kind === "escalate").length,
+  }));
+}
+
+function computeMedianDaysToLinkedReopen(
+  concludedRows: DisconnectCaseHistoryRow[],
+  history: DisconnectCaseHistoryRow[],
+  family: "resolve" | "snooze" | "escalate"
+) {
+  const reopenDurations = concludedRows
+    .filter((row) => readHistoryMetadata(row).conclusion?.kind === family)
+    .map((row) => {
+      const reopen = history.find(
+        (candidate) =>
+          candidate.actionType === "reopened" &&
+          readHistoryMetadata(candidate).priorConclusionActionId === row.id
+      );
+      if (!reopen) return null;
+      return Math.floor(
+        (new Date(String(reopen.actedAt)).getTime() - new Date(String(row.actedAt)).getTime()) /
+          (1000 * 60 * 60 * 24)
+      );
+    })
+    .filter((value): value is number => value !== null)
+    .sort((left, right) => left - right);
+  if (reopenDurations.length === 0) return null;
+  return reopenDurations[Math.floor(reopenDurations.length / 2)] ?? null;
+}
+
+function buildMedianDaysToReopenTable(
+  concludedRows: DisconnectCaseHistoryRow[],
+  history: DisconnectCaseHistoryRow[]
+) {
+  return (["resolve", "snooze", "escalate"] as const).map((key) => ({
+    key,
+    medianDays: computeMedianDaysToLinkedReopen(concludedRows, history, key),
+  }));
+}
+
+function buildInterventionOutcomeEffectiveness(
+  history: DisconnectCaseHistoryRow[],
+  usersMap: Map<string, string>
+): InterventionOutcomeEffectiveness {
+  const concludedRows = history.filter((row) => Boolean(readHistoryMetadata(row).conclusion?.kind));
+  const reopenedByActionId = new Set(
+    history
+      .filter((row) => row.actionType === "reopened")
+      .map((row) => String(readHistoryMetadata(row).priorConclusionActionId ?? ""))
+      .filter(Boolean)
+  );
+
+  const baseRates = buildGroupedRate(
+    concludedRows,
+    (row) => String(readHistoryMetadata(row).conclusion?.kind ?? ""),
+    reopenedByActionId
+  );
+
+  return {
+    reopenRateByConclusionFamily: {
+      resolve: baseRates.resolve ?? null,
+      snooze: baseRates.snooze ?? null,
+      escalate: baseRates.escalate ?? null,
+    },
+    reopenRateByResolveCategory: buildGroupedRateTable(
+      concludedRows.filter((row) => readHistoryMetadata(row).conclusion?.kind === "resolve"),
+      (row) => String(readHistoryMetadata(row).conclusion?.outcomeCategory ?? ""),
+      reopenedByActionId
+    ),
+    reopenRateBySnoozeReason: buildGroupedRateTable(
+      concludedRows.filter((row) => readHistoryMetadata(row).conclusion?.kind === "snooze"),
+      (row) => String(readHistoryMetadata(row).conclusion?.snoozeReasonCode ?? ""),
+      reopenedByActionId
+    ),
+    reopenRateByEscalationReason: buildGroupedRateTable(
+      concludedRows.filter((row) => readHistoryMetadata(row).conclusion?.kind === "escalate"),
+      (row) => String(readHistoryMetadata(row).conclusion?.escalationReasonCode ?? ""),
+      reopenedByActionId
+    ),
+    conclusionMixByDisconnectType: buildConclusionMixByDisconnectType(concludedRows),
+    conclusionMixByActingUser: buildConclusionMixByActingUser(concludedRows, usersMap),
+    conclusionMixByAssigneeAtConclusion: buildConclusionMixByAssigneeAtConclusion(concludedRows, usersMap),
+    medianDaysToReopenByConclusionFamily: buildMedianDaysToReopenTable(concludedRows, history),
+  };
+}
+
 function buildHotspotRows(
   cases: DisconnectCaseRow[],
   now: Date,
@@ -992,6 +1155,7 @@ export async function getInterventionAnalyticsDashboard(
   return {
     summary: buildInterventionAnalyticsSummary(cases, now),
     outcomes: buildInterventionAnalyticsOutcomes(cases, history, now),
+    outcomeEffectiveness: buildInterventionOutcomeEffectiveness(history, usersMap),
     hotspots: {
       assignees: buildHotspotRows(cases, now, {
         entityType: "assignee",
@@ -1453,7 +1617,7 @@ async function hasReopenHistoryForConclusionAction(
         (item) =>
           item.disconnectCaseId === caseId &&
           item.actionType === "reopened" &&
-          item.metadataJson?.priorConclusionActionId === priorConclusionActionId
+          readHistoryMetadata(item).priorConclusionActionId === priorConclusionActionId
       ) ?? null
     );
   }
@@ -1806,7 +1970,14 @@ export async function snoozeInterventionCases(
       toAssignee: row.assignedTo ?? null,
       fromSnoozedUntil,
       toSnoozedUntil: snoozedUntil,
-      metadataJson: input.conclusion ?? undefined,
+      metadataJson: input.conclusion
+        ? {
+            lifecycleStartedAt: row.currentLifecycleStartedAt.toISOString(),
+            assigneeAtConclusion: row.assignedTo ?? null,
+            disconnectTypeAtConclusion: row.disconnectType,
+            conclusion: input.conclusion,
+          }
+        : undefined,
     });
     updatedCount += 1;
   }
@@ -1895,6 +2066,8 @@ export async function resolveInterventionCases(
         resolutionReason: input.resolutionReason,
         taskOutcome,
         lifecycleStartedAt: row.currentLifecycleStartedAt.toISOString(),
+        assigneeAtConclusion: row.assignedTo ?? null,
+        disconnectTypeAtConclusion: row.disconnectType,
         conclusion: input.conclusion ?? null,
       },
     });
@@ -1970,6 +2143,9 @@ export async function escalateInterventionCases(
       toAssignee: row.assignedTo ?? null,
       metadataJson: {
         escalated: true,
+        lifecycleStartedAt: row.currentLifecycleStartedAt.toISOString(),
+        assigneeAtConclusion: row.assignedTo ?? null,
+        disconnectTypeAtConclusion: row.disconnectType,
         conclusion: input.conclusion ?? null,
       },
     });
