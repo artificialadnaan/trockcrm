@@ -780,6 +780,50 @@ describe("AI intervention service", () => {
     });
   });
 
+  it("falls back to metadata assignee labels in queue items when user lookup is unavailable", async () => {
+    const tenantDb = createTenantDb({
+      cases: [
+        makeCase({
+          assignedTo: "manager-1",
+          metadataJson: {
+            ...(makeCase().metadataJson ?? {}),
+            assignedRepName: "Manager One",
+          },
+        }),
+      ],
+      users: [],
+    });
+
+    const queue = await listInterventionCases(tenantDb as any, {
+      officeId: "office-1",
+      now: new Date("2026-04-16T15:00:00.000Z"),
+    });
+
+    expect(queue.items[0]?.assignedToName).toBe("Manager One");
+  });
+
+  it("falls back to metadata assignee labels in case detail when user lookup is unavailable", async () => {
+    const tenantDb = createTenantDb({
+      cases: [
+        makeCase({
+          assignedTo: "manager-1",
+          metadataJson: {
+            ...(makeCase().metadataJson ?? {}),
+            assignedRepName: "Manager One",
+          },
+        }),
+      ],
+      users: [],
+    });
+
+    const detail = await getInterventionCaseDetail(tenantDb as any, {
+      officeId: "office-1",
+      caseId: "case-1",
+    });
+
+    expect(detail.case.assignedToName).toBe("Manager One");
+  });
+
   it("assigns intervention cases and syncs generated task assignees", async () => {
     const tenantDb = createTenantDb({
       cases: [

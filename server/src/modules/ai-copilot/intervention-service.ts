@@ -249,6 +249,14 @@ function readMetadataDate(metadata: Record<string, unknown> | null | undefined, 
   return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
+function resolveCaseAssigneeName(
+  usersMap: Map<string, string>,
+  assignedTo: string | null | undefined,
+  metadataJson: Record<string, unknown> | null | undefined
+) {
+  return usersMap.get(assignedTo ?? "") ?? readMetadataString(metadataJson, "assignedRepName") ?? null;
+}
+
 function readHistoryMetadata(row: Pick<DisconnectCaseHistoryRow, "metadataJson">) {
   return (row.metadataJson ?? {}) as {
     conclusion?: {
@@ -324,7 +332,11 @@ function projectQueueItem(input: {
     reopenCount: input.row.reopenCount,
     ageDays: calculateBusinessDaysElapsed(input.row.currentLifecycleStartedAt, input.now),
     assignedTo: input.row.assignedTo,
-    assignedToName: input.usersMap.get(input.row.assignedTo ?? "") ?? null,
+    assignedToName: resolveCaseAssigneeName(
+      input.usersMap,
+      input.row.assignedTo,
+      input.row.metadataJson as Record<string, unknown> | null
+    ),
     generatedTask: input.task
       ? {
           id: input.task.id,
@@ -1242,7 +1254,7 @@ export async function getInterventionCaseDetail(
         severity: row.severity,
         status: row.status as "open" | "snoozed" | "resolved",
         assignedTo: row.assignedTo,
-        assignedToName: usersMap.get(row.assignedTo ?? "") ?? null,
+        assignedToName: resolveCaseAssigneeName(usersMap, row.assignedTo, row.metadataJson),
         generatedTaskId: row.generatedTaskId,
         escalated: row.escalated,
         snoozedUntil: toIsoString(row.snoozedUntil),
@@ -1348,7 +1360,11 @@ export async function getInterventionCaseDetail(
       severity: row[0].severity,
       status: row[0].status as "open" | "snoozed" | "resolved",
       assignedTo: row[0].assignedTo,
-      assignedToName: usersMap.get(row[0].assignedTo ?? "") ?? null,
+      assignedToName: resolveCaseAssigneeName(
+        usersMap,
+        row[0].assignedTo,
+        row[0].metadataJson as Record<string, unknown> | null
+      ),
       generatedTaskId: row[0].generatedTaskId,
       escalated: row[0].escalated,
       snoozedUntil: toIsoString(row[0].snoozedUntil),
