@@ -6,7 +6,7 @@ import {
   RESOLVE_OUTCOME_CATEGORY_TO_REASON_CODES,
   SNOOZE_REASON_TO_EXPECTED_OPTIONS,
   mapStructuredResolveReasonToLegacyResolutionReason,
-} from "../../../../shared/src/lib/intervention-outcome-taxonomy.js";
+} from "../../../src/modules/ai-copilot/intervention-outcome-taxonomy.js";
 
 describe("intervention outcome taxonomy", () => {
   it("keeps resolve reason codes one-to-one with outcome categories", () => {
