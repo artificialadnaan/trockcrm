@@ -19,6 +19,10 @@ export function LeadDetailPage() {
     () => stages.find((stage) => stage.id === lead?.stageId) ?? null,
     [lead?.stageId, stages]
   );
+  const defaultDealStageId = useMemo(
+    () => stages.find((stage) => stage.workflowFamily === "standard_deal" && stage.slug === "dd")?.id ?? null,
+    [stages]
+  );
   const isLeadStage = currentStage?.workflowFamily === "lead";
   const convertedAt = lead?.convertedAt ?? null;
 
@@ -133,6 +137,7 @@ export function LeadDetailPage() {
               stageEnteredAt: lead.stageEnteredAt,
             }}
             converted={!isLeadStage}
+            defaultDealStageId={defaultDealStageId}
           />
 
           <Card>

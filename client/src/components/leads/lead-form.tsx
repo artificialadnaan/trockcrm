@@ -1,8 +1,12 @@
 import { Link } from "react-router-dom";
+import { useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { Loader2 } from "lucide-react";
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { LeadStageBadge } from "./lead-stage-badge";
+import { convertLead } from "@/hooks/use-leads";
 
 export interface LeadFormLead {
   id: string;
@@ -26,13 +30,45 @@ export interface LeadFormLead {
 interface LeadFormProps {
   lead: LeadFormLead;
   converted?: boolean;
+  defaultDealStageId?: string | null;
 }
 
-export function LeadForm({ lead, converted = false }: LeadFormProps) {
+export function LeadForm({ lead, converted = false, defaultDealStageId = null }: LeadFormProps) {
   const navigate = useNavigate();
+  const [converting, setConverting] = useState(false);
   const propertyLabel = [lead.propertyAddress, [lead.propertyCity, lead.propertyState].filter(Boolean).join(", "), lead.propertyZip]
     .filter(Boolean)
     .join(" ") || lead.propertyName || "--";
+
+  const handlePrimaryAction = async () => {
+    if (converted) {
+      if (lead.convertedDealId) {
+        navigate(`/deals/${lead.convertedDealId}`);
+      }
+      return;
+    }
+
+    if (!defaultDealStageId) {
+      toast.error("Default deal stage is not configured");
+      return;
+    }
+
+    setConverting(true);
+    try {
+      const result = await convertLead(lead.id, {
+        dealStageId: defaultDealStageId,
+        name: lead.name,
+        source: lead.source,
+        description: lead.description,
+      });
+      toast.success("Lead converted to deal");
+      navigate(`/deals/${result.deal.id}`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to convert lead");
+    } finally {
+      setConverting(false);
+    }
+  };
 
   return (
     <Card>
@@ -79,9 +115,10 @@ export function LeadForm({ lead, converted = false }: LeadFormProps) {
 
         <div className="flex flex-wrap gap-2">
           <Button
-            disabled={converted && !lead.convertedDealId}
-            onClick={() => navigate(converted ? `/deals/${lead.convertedDealId}` : "/deals/new")}
+            disabled={converting || (converted && !lead.convertedDealId)}
+            onClick={handlePrimaryAction}
           >
+            {converting ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
             {converted ? "Open Deal" : "Convert to Deal"}
           </Button>
           {lead.companyId && (

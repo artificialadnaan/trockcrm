@@ -127,3 +127,27 @@ export async function createLead(input: {
     json: input,
   });
 }
+
+export async function convertLead(
+  leadId: string,
+  input: {
+    dealStageId: string;
+    workflowRoute?: "estimating" | "service";
+    assignedRepId?: string;
+    primaryContactId?: string | null;
+    name?: string;
+    source?: string | null;
+    description?: string | null;
+    ddEstimate?: string | null;
+    bidEstimate?: string | null;
+    awardedAmount?: string | null;
+    projectTypeId?: string | null;
+    regionId?: string | null;
+    expectedCloseDate?: string | null;
+  }
+) {
+  return api<{ lead: LeadRecord; deal: { id: string } }>(`/leads/${leadId}/convert`, {
+    method: "POST",
+    json: input,
+  });
+}
