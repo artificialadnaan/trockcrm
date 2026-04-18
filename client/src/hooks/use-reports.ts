@@ -123,6 +123,35 @@ export interface UnifiedWorkflowOverview {
   staleDeals: UnifiedStaleDealRow[];
 }
 
+export interface DataMiningSummary {
+  untouchedContact30Count: number;
+  untouchedContact60Count: number;
+  untouchedContact90Count: number;
+  dormantCompany90Count: number;
+}
+
+export interface DataMiningUntouchedContactRow {
+  contactId: string;
+  contactName: string;
+  companyName: string;
+  daysSinceTouch: number;
+  lastTouchedAt: string | null;
+}
+
+export interface DataMiningDormantCompanyRow {
+  companyId: string;
+  companyName: string;
+  daysSinceActivity: number;
+  lastActivityAt: string | null;
+  activeDealCount: number;
+}
+
+export interface DataMiningOverview {
+  summary: DataMiningSummary;
+  untouchedContacts: DataMiningUntouchedContactRow[];
+  dormantCompanies: DataMiningDormantCompanyRow[];
+}
+
 export function useSavedReports() {
   const [reports, setReports] = useState<SavedReport[]>([]);
   const [loading, setLoading] = useState(true);
@@ -259,6 +288,39 @@ export function useUnifiedWorkflowOverview(options: AnalyticsQueryOptions = {}) 
       setData(result.data);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to load workflow overview");
+    } finally {
+      setLoading(false);
+    }
+  }, [options.from, options.to, options.officeId, options.regionId, options.repId, options.source, options.includeDd]);
+
+  useEffect(() => {
+    fetchOverview();
+  }, [fetchOverview]);
+
+  return { data, loading, error, refetch: fetchOverview };
+}
+
+export async function executeDataMiningOverview(options: AnalyticsQueryOptions = {}) {
+  const params = new URLSearchParams();
+  appendAnalyticsQueryOptions(params, options);
+  const qs = params.toString();
+
+  return api<{ data: DataMiningOverview }>(`/reports/data-mining${qs ? `?${qs}` : ""}`);
+}
+
+export function useDataMiningOverview(options: AnalyticsQueryOptions = {}) {
+  const [data, setData] = useState<DataMiningOverview | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchOverview = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await executeDataMiningOverview(options);
+      setData(result.data);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to load data mining overview");
     } finally {
       setLoading(false);
     }

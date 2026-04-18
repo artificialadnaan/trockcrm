@@ -6,12 +6,14 @@ import {
   createSavedReport,
   deleteSavedReport,
   useUnifiedWorkflowOverview,
+  useDataMiningOverview,
   type SavedReport,
   type ReportConfig,
   type UnifiedWorkflowOverview,
 } from "@/hooks/use-reports";
 import { ReportChart } from "@/components/charts/report-chart";
 import { SourcePerformanceSection } from "@/components/reports/source-performance-section";
+import { DataMiningSection } from "@/components/reports/data-mining-section";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -553,6 +555,11 @@ export function ReportsPage() {
     error: workflowOverviewError,
     refetch: refetchWorkflowOverview,
   } = useUnifiedWorkflowOverview();
+  const {
+    data: dataMiningOverview,
+    loading: dataMiningLoading,
+    error: dataMiningError,
+  } = useDataMiningOverview();
 
   // --- UI state ---
   const [showReportDrawer, setShowReportDrawer] = useState(false);
@@ -830,6 +837,16 @@ export function ReportsPage() {
         </div>
 
         {user?.role === "director" && <SourcePerformanceSection />}
+
+        {canViewDataMining && (
+          <div className="rounded-3xl border border-slate-200 bg-white shadow-sm p-6">
+            <DataMiningSection
+              data={dataMiningOverview}
+              loading={dataMiningLoading}
+              error={dataMiningError}
+            />
+          </div>
+        )}
 
         {/* ================================================================
             SAVED REPORTS PANEL

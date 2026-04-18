@@ -6,6 +6,8 @@ import {
   deals,
   dealStageHistory,
   activities,
+  contacts,
+  contactDealAssociations,
   tasks,
   pipelineStageConfig,
   users,
@@ -654,7 +656,312 @@ export async function getLeadSourceROI(
 }
 
 // ---------------------------------------------------------------------------
-// 10. Follow-up Compliance Rate
+// 10. Data Mining
+// ---------------------------------------------------------------------------
+
+export interface DataMiningUntouchedContactRow {
+  contactId: string;
+  contactName: string;
+  companyName: string;
+  daysSinceTouch: number;
+  lastTouchedAt: string | null;
+}
+
+export interface DataMiningDormantCompanyRow {
+  companyId: string;
+  companyName: string;
+  daysSinceActivity: number;
+  lastActivityAt: string | null;
+  activeDealCount: number;
+}
+
+export interface DataMiningOverview {
+  summary: {
+    untouchedContact30Count: number;
+    untouchedContact60Count: number;
+    untouchedContact90Count: number;
+    dormantCompany90Count: number;
+  };
+  untouchedContacts: DataMiningUntouchedContactRow[];
+  dormantCompanies: DataMiningDormantCompanyRow[];
+}
+
+export async function getDataMiningOverview(
+  tenantDb: TenantDb,
+  options: AnalyticsFilterInput = {}
+): Promise<DataMiningOverview> {
+  const filters = normalizeAnalyticsFilters(options);
+  const contactOfficeFilter = filters.officeId
+    ? sql`AND EXISTS (
+        SELECT 1
+        FROM contact_deal_associations cda
+        JOIN deals d ON d.id = cda.deal_id
+        LEFT JOIN deal_scoping_intake dsi ON dsi.deal_id = d.id
+        WHERE cda.contact_id = c.id
+          AND dsi.office_id = ${filters.officeId}
+      )`
+    : sql``;
+  const contactRegionFilter = filters.regionId
+    ? sql`AND EXISTS (
+        SELECT 1
+        FROM contact_deal_associations cda
+        JOIN deals d ON d.id = cda.deal_id
+        WHERE cda.contact_id = c.id
+          AND d.region_id = ${filters.regionId}
+      )`
+    : sql``;
+  const contactRepFilter = filters.repId
+    ? sql`AND EXISTS (
+        SELECT 1
+        FROM contact_deal_associations cda
+        JOIN deals d ON d.id = cda.deal_id
+        WHERE cda.contact_id = c.id
+          AND d.assigned_rep_id = ${filters.repId}
+      )`
+    : sql``;
+  const contactSourceFilter = filters.source
+    ? sql`AND EXISTS (
+        SELECT 1
+        FROM contact_deal_associations cda
+        JOIN deals d ON d.id = cda.deal_id
+        WHERE cda.contact_id = c.id
+          AND COALESCE(NULLIF(TRIM(d.source), ''), 'Unknown') = ${filters.source}
+      )`
+    : sql``;
+  const companyOfficeFilter = filters.officeId
+    ? sql`AND EXISTS (
+        SELECT 1
+        FROM deal_scoping_intake dsi
+        JOIN deals d ON d.id = dsi.deal_id
+        WHERE d.company_id = c.id
+          AND dsi.office_id = ${filters.officeId}
+      )`
+    : sql``;
+  const companyRegionFilter = filters.regionId
+    ? sql`AND EXISTS (
+        SELECT 1
+        FROM deals d
+        WHERE d.company_id = c.id
+          AND d.region_id = ${filters.regionId}
+      )`
+    : sql``;
+  const companyRepFilter = filters.repId
+    ? sql`AND EXISTS (
+        SELECT 1
+        FROM deals d
+        WHERE d.company_id = c.id
+          AND d.assigned_rep_id = ${filters.repId}
+      )`
+    : sql``;
+  const companySourceFilter = filters.source
+    ? sql`AND EXISTS (
+        SELECT 1
+        FROM deals d
+        WHERE d.company_id = c.id
+          AND COALESCE(NULLIF(TRIM(d.source), ''), 'Unknown') = ${filters.source}
+      )`
+    : sql``;
+
+  const [untouchedContactSummaryResult, untouchedContactRowsResult, dormantCompanySummaryResult, dormantCompanyRowsResult] = await Promise.all([
+    tenantDb.execute(sql`
+      WITH contact_activity AS (
+        SELECT
+          a.contact_id,
+          MAX(a.occurred_at) AS last_activity_at
+        FROM activities a
+        WHERE a.contact_id IS NOT NULL
+        GROUP BY a.contact_id
+      ),
+      scoped_contacts AS (
+        SELECT
+          c.id AS contact_id,
+          TRIM(CONCAT_WS(' ', c.first_name, c.last_name)) AS contact_name,
+          COALESCE(NULLIF(TRIM(c.company_name), ''), COALESCE(comp.name, 'Unassigned')) AS company_name,
+          GREATEST(
+            COALESCE(c.last_contacted_at, c.created_at),
+            COALESCE(ca.last_activity_at, c.created_at)
+          ) AS last_touch_at
+        FROM contacts c
+        LEFT JOIN companies comp ON comp.id = c.company_id
+        LEFT JOIN contact_activity ca ON ca.contact_id = c.id
+        WHERE c.is_active = true
+          ${contactOfficeFilter}
+          ${contactRegionFilter}
+          ${contactRepFilter}
+          ${contactSourceFilter}
+      ),
+      ranked_contacts AS (
+        SELECT
+          contact_id,
+          contact_name,
+          company_name,
+          last_touch_at,
+          EXTRACT(DAY FROM (${filters.to}::date + INTERVAL '1 day')::timestamptz - last_touch_at)::int AS days_since_touch
+        FROM scoped_contacts
+      )
+      SELECT
+        COUNT(*) FILTER (WHERE days_since_touch >= 30)::int AS untouched_contact_30_count,
+        COUNT(*) FILTER (WHERE days_since_touch >= 60)::int AS untouched_contact_60_count,
+        COUNT(*) FILTER (WHERE days_since_touch >= 90)::int AS untouched_contact_90_count
+      FROM ranked_contacts
+    `),
+    tenantDb.execute(sql`
+      WITH contact_activity AS (
+        SELECT
+          a.contact_id,
+          MAX(a.occurred_at) AS last_activity_at
+        FROM activities a
+        WHERE a.contact_id IS NOT NULL
+        GROUP BY a.contact_id
+      ),
+      scoped_contacts AS (
+        SELECT
+          c.id AS contact_id,
+          TRIM(CONCAT_WS(' ', c.first_name, c.last_name)) AS contact_name,
+          COALESCE(NULLIF(TRIM(c.company_name), ''), COALESCE(comp.name, 'Unassigned')) AS company_name,
+          GREATEST(
+            COALESCE(c.last_contacted_at, c.created_at),
+            COALESCE(ca.last_activity_at, c.created_at)
+          ) AS last_touch_at
+        FROM contacts c
+        LEFT JOIN companies comp ON comp.id = c.company_id
+        LEFT JOIN contact_activity ca ON ca.contact_id = c.id
+        WHERE c.is_active = true
+          ${contactOfficeFilter}
+          ${contactRegionFilter}
+          ${contactRepFilter}
+          ${contactSourceFilter}
+      ),
+      ranked_contacts AS (
+        SELECT
+          contact_id,
+          contact_name,
+          company_name,
+          last_touch_at,
+          EXTRACT(DAY FROM (${filters.to}::date + INTERVAL '1 day')::timestamptz - last_touch_at)::int AS days_since_touch
+        FROM scoped_contacts
+      )
+      SELECT
+        contact_id,
+        contact_name,
+        company_name,
+        last_touch_at,
+        days_since_touch
+      FROM ranked_contacts
+      WHERE days_since_touch >= 30
+      ORDER BY days_since_touch DESC, contact_name ASC
+      LIMIT 25
+    `),
+    tenantDb.execute(sql`
+      WITH company_activity AS (
+        SELECT
+          c.id AS company_id,
+          COALESCE(NULLIF(TRIM(c.name), ''), 'Unassigned') AS company_name,
+          COALESCE(MAX(a.occurred_at), c.created_at) AS last_activity_at,
+          COALESCE(MAX(ct.last_contacted_at), c.created_at) AS last_contact_at,
+          COUNT(DISTINCT d.id) FILTER (WHERE d.is_active = true AND NOT psc.is_terminal)::int AS active_deal_count
+        FROM companies c
+        LEFT JOIN activities a ON a.company_id = c.id
+        LEFT JOIN contacts ct ON ct.company_id = c.id AND ct.is_active = true
+        LEFT JOIN deals d ON d.company_id = c.id
+        LEFT JOIN pipeline_stage_config psc ON psc.id = d.stage_id
+        WHERE c.is_active = true
+          ${companyOfficeFilter}
+          ${companyRegionFilter}
+          ${companyRepFilter}
+          ${companySourceFilter}
+        GROUP BY c.id, c.name, c.created_at
+      ),
+      ranked_companies AS (
+        SELECT
+          company_id,
+          company_name,
+          active_deal_count,
+          GREATEST(last_activity_at, last_contact_at) AS last_touch_at,
+          EXTRACT(DAY FROM (${filters.to}::date + INTERVAL '1 day')::timestamptz - GREATEST(last_activity_at, last_contact_at))::int AS days_since_activity
+        FROM company_activity
+      )
+      SELECT
+        COUNT(*) FILTER (WHERE active_deal_count = 0 AND days_since_activity >= 90)::int AS dormant_company_90_count
+      FROM ranked_companies
+    `),
+    tenantDb.execute(sql`
+      WITH company_activity AS (
+        SELECT
+          c.id AS company_id,
+          COALESCE(NULLIF(TRIM(c.name), ''), 'Unassigned') AS company_name,
+          COALESCE(MAX(a.occurred_at), c.created_at) AS last_activity_at,
+          COALESCE(MAX(ct.last_contacted_at), c.created_at) AS last_contact_at,
+          COUNT(DISTINCT d.id) FILTER (WHERE d.is_active = true AND NOT psc.is_terminal)::int AS active_deal_count
+        FROM companies c
+        LEFT JOIN activities a ON a.company_id = c.id
+        LEFT JOIN contacts ct ON ct.company_id = c.id AND ct.is_active = true
+        LEFT JOIN deals d ON d.company_id = c.id
+        LEFT JOIN pipeline_stage_config psc ON psc.id = d.stage_id
+        WHERE c.is_active = true
+          ${companyOfficeFilter}
+          ${companyRegionFilter}
+          ${companyRepFilter}
+          ${companySourceFilter}
+        GROUP BY c.id, c.name, c.created_at
+      ),
+      ranked_companies AS (
+        SELECT
+          company_id,
+          company_name,
+          active_deal_count,
+          GREATEST(last_activity_at, last_contact_at) AS last_touch_at,
+          EXTRACT(DAY FROM (${filters.to}::date + INTERVAL '1 day')::timestamptz - GREATEST(last_activity_at, last_contact_at))::int AS days_since_activity
+        FROM company_activity
+      )
+      SELECT
+        company_id,
+        company_name,
+        last_touch_at,
+        days_since_activity,
+        active_deal_count
+      FROM ranked_companies
+      WHERE active_deal_count = 0
+        AND days_since_activity >= 90
+      ORDER BY days_since_activity DESC, company_name ASC
+      LIMIT 25
+    `),
+  ]);
+
+  const untouchedSummaryRows = (untouchedContactSummaryResult as any).rows ?? untouchedContactSummaryResult;
+  const untouchedContactRows = (untouchedContactRowsResult as any).rows ?? untouchedContactRowsResult;
+  const dormantSummaryRows = (dormantCompanySummaryResult as any).rows ?? dormantCompanySummaryResult;
+  const dormantCompanyRows = (dormantCompanyRowsResult as any).rows ?? dormantCompanyRowsResult;
+
+  const untouchedSummary = untouchedSummaryRows[0] ?? {};
+  const dormantSummary = dormantSummaryRows[0] ?? {};
+
+  return {
+    summary: {
+      untouchedContact30Count: Number(untouchedSummary.untouched_contact_30_count ?? 0),
+      untouchedContact60Count: Number(untouchedSummary.untouched_contact_60_count ?? 0),
+      untouchedContact90Count: Number(untouchedSummary.untouched_contact_90_count ?? 0),
+      dormantCompany90Count: Number(dormantSummary.dormant_company_90_count ?? 0),
+    },
+    untouchedContacts: untouchedContactRows.map((row: any) => ({
+      contactId: row.contact_id,
+      contactName: row.contact_name,
+      companyName: row.company_name,
+      daysSinceTouch: Number(row.days_since_touch ?? 0),
+      lastTouchedAt: row.last_touch_at ?? null,
+    })),
+    dormantCompanies: dormantCompanyRows.map((row: any) => ({
+      companyId: row.company_id,
+      companyName: row.company_name,
+      daysSinceActivity: Number(row.days_since_activity ?? 0),
+      lastActivityAt: row.last_touch_at ?? null,
+      activeDealCount: Number(row.active_deal_count ?? 0),
+    })),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 11. Follow-up Compliance Rate
 // ---------------------------------------------------------------------------
 
 /**
@@ -696,7 +1003,7 @@ export async function getFollowUpCompliance(
 }
 
 // ---------------------------------------------------------------------------
-// 11. DD vs True Pipeline Value
+// 12. DD vs True Pipeline Value
 // ---------------------------------------------------------------------------
 
 export interface DdVsPipelineRow {
@@ -748,7 +1055,7 @@ export async function getDdVsPipeline(
 }
 
 // ---------------------------------------------------------------------------
-// 12. Closed-Won Summary Report
+// 13. Closed-Won Summary Report
 // ---------------------------------------------------------------------------
 
 export interface ClosedWonSummaryRepRow {
@@ -862,7 +1169,7 @@ export async function getClosedWonSummary(
 }
 
 // ---------------------------------------------------------------------------
-// 13. Pipeline by Rep
+// 14. Pipeline by Rep
 // ---------------------------------------------------------------------------
 
 export interface PipelineByRepStageRow {
@@ -931,7 +1238,7 @@ export async function getPipelineByRep(
 }
 
 // ---------------------------------------------------------------------------
-// 14. Unified Workflow Overview
+// 15. Unified Workflow Overview
 // ---------------------------------------------------------------------------
 
 export interface UnifiedLeadPipelineSummaryRow {
@@ -1298,7 +1605,7 @@ export async function getUnifiedWorkflowOverview(
 }
 
 // ---------------------------------------------------------------------------
-// 14. Custom Report Query Executor
+// 16. Custom Report Query Executor
 // ---------------------------------------------------------------------------
 
 export interface ReportConfig {

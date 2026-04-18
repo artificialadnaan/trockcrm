@@ -16,6 +16,7 @@ import {
   getDdVsPipeline,
   getClosedWonSummary,
   getPipelineByRep,
+  getDataMiningOverview,
   executeCustomReport,
   getRepPerformanceComparison,
   normalizeAnalyticsFilters,
@@ -200,6 +201,21 @@ router.get("/lead-source-roi", requireDirector, async (req, res, next) => {
     const data = await getLeadSourceROI(req.tenantDb!, {
       ...filters,
       officeId: filters.officeId ?? req.user!.activeOfficeId ?? req.user!.officeId,
+    });
+    await req.commitTransaction!();
+    res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/reports/data-mining?from=2026-01-01&to=2026-12-31
+router.get("/data-mining", requireDirector, async (req, res, next) => {
+  try {
+    const parsedFilters = parseAnalyticsFilters(req.query as Record<string, unknown>);
+    const data = await getDataMiningOverview(req.tenantDb!, {
+      ...parsedFilters,
+      officeId: parsedFilters.officeId ?? req.user!.activeOfficeId ?? req.user!.officeId,
     });
     await req.commitTransaction!();
     res.json({ data });

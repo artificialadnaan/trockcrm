@@ -22,8 +22,9 @@ vi.mock("../../../src/db.js", () => ({
 }));
 
 function createMockTenantDb(rows: any[] = []) {
+  const queue = Array.isArray(rows[0]) ? [...(rows as any[][])] : [rows];
   return {
-    execute: vi.fn().mockResolvedValue({ rows }),
+    execute: vi.fn().mockImplementation(async () => ({ rows: queue.shift() ?? [] })),
   } as any;
 }
 
@@ -179,5 +180,76 @@ describe("analytics cycle shared filters", () => {
       winRate: 50,
     });
     expect(result.some((row) => row.source === "Unknown")).toBe(true);
+  });
+
+  it("returns non-overlapping data mining buckets for untouched contacts and dormant companies", async () => {
+    const { getDataMiningOverview } = await import("../../../src/modules/reports/service.js");
+    const tenantDb = createMockTenantDb([
+      [
+        {
+          untouched_contact_30_count: "4",
+          untouched_contact_60_count: "2",
+          untouched_contact_90_count: "1",
+        },
+      ],
+      [
+        {
+          contact_id: "contact-1",
+          contact_name: "Jordan Client",
+          company_name: "Acme Roofing",
+          last_touch_at: "2026-02-01T00:00:00.000Z",
+          days_since_touch: "63",
+        },
+      ],
+      [
+        {
+          dormant_company_90_count: "3",
+        },
+      ],
+      [
+        {
+          company_id: "company-1",
+          company_name: "Acme Roofing",
+          last_touch_at: "2025-12-01T00:00:00.000Z",
+          days_since_activity: "137",
+          active_deal_count: "0",
+        },
+      ],
+    ]);
+
+    const result = await getDataMiningOverview(tenantDb, {
+      from: "2026-01-01",
+      to: "2026-12-31",
+      officeId: "office-1",
+      regionId: "region-1",
+      repId: "rep-1",
+      source: "Trade Show",
+    });
+
+    const firstQueryText = extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase();
+    expect(firstQueryText).toContain("from contacts c");
+    expect(firstQueryText).not.toContain("workflow_overview");
+    expect(firstQueryText).not.toContain("stale_deals");
+
+    expect(result.summary).toMatchObject({
+      untouchedContact30Count: 4,
+      untouchedContact60Count: 2,
+      untouchedContact90Count: 1,
+      dormantCompany90Count: 3,
+    });
+    expect(result.untouchedContacts).toHaveLength(1);
+    expect(result.untouchedContacts[0]).toMatchObject({
+      contactId: "contact-1",
+      contactName: "Jordan Client",
+      companyName: "Acme Roofing",
+      daysSinceTouch: 63,
+    });
+    expect(result.dormantCompanies).toHaveLength(1);
+    expect(result.dormantCompanies[0]).toMatchObject({
+      companyId: "company-1",
+      companyName: "Acme Roofing",
+      daysSinceActivity: 137,
+      activeDealCount: 0,
+    });
   });
 });
