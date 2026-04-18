@@ -130,6 +130,7 @@ git commit -m "feat: add deal forecast milestone storage"
 - [ ] **Step 1: Write failing lifecycle tests**
 
 ```ts
+import { describe, expect, it, vi } from "vitest";
 import { captureStageDrivenForecastMilestone, deriveForecastAmount } from "../../../src/modules/reports/forecast-milestones-service.js";
 
 it("captures the initial milestone on deal creation", async () => {
@@ -236,6 +237,7 @@ git commit -m "feat: capture forecast milestones during deal lifecycle"
 - [ ] **Step 1: Write failing report service tests**
 
 ```ts
+import { describe, expect, it, vi } from "vitest";
 import { getForecastVarianceOverview } from "../../../src/modules/reports/service.js";
 
 it("returns forecast variance summary, rep rollups, and deal detail rows", async () => {
@@ -271,6 +273,7 @@ it("scopes forecast variance to the current office and filters", async () => {
 - [ ] **Step 2: Write failing route tests**
 
 ```ts
+import { describe, expect, it, vi } from "vitest";
 import express from "express";
 import request from "supertest";
 const { reportRoutes } = await import("../../../src/modules/reports/routes.js");
@@ -374,8 +377,19 @@ git commit -m "feat: add forecast variance reporting"
 - [ ] **Step 1: Write failing client tests**
 
 ```tsx
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ForecastVarianceSection } from "./forecast-variance-section";
+
+const mockApi = vi.hoisted(() => vi.fn());
+
+vi.mock("@/lib/api", () => ({
+  api: mockApi,
+}));
+
+beforeEach(() => {
+  mockApi.mockReset();
+});
 
 it("renders forecast variance summary and deal detail rows", () => {
   const html = renderToStaticMarkup(
@@ -455,6 +469,7 @@ git commit -m "feat: add forecast variance analytics section"
 - [ ] **Step 1: Write a failing backfill test**
 
 ```ts
+import { describe, expect, it } from "vitest";
 import { buildForecastMilestoneBackfillRows } from "../../../src/modules/reports/forecast-milestones-service.js";
 
 it("backfills initial only when a create-time audit snapshot exists", async () => {
