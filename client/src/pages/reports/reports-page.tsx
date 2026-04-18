@@ -15,6 +15,7 @@ import {
 } from "@/hooks/use-reports";
 import { ReportChart } from "@/components/charts/report-chart";
 import { SourcePerformanceSection } from "@/components/reports/source-performance-section";
+import { ForecastVarianceSection } from "@/components/reports/forecast-variance-section";
 import { DataMiningSection } from "@/components/reports/data-mining-section";
 import { RegionalOwnershipSection } from "@/components/reports/regional-ownership-section";
 import { Button } from "@/components/ui/button";
@@ -854,6 +855,8 @@ export function ReportsPage() {
         <div className="rounded-3xl border border-slate-200 bg-white shadow-sm p-6">
           <WorkflowOverviewPanel data={workflowOverview} loading={workflowOverviewLoading} />
         </div>
+
+        {user?.role !== "rep" && <ForecastVarianceSection />}
 
         {user?.role === "director" && <SourcePerformanceSection />}
 

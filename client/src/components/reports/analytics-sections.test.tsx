@@ -34,10 +34,52 @@ vi.mock("@/hooks/use-reports", async (importOriginal) => {
       error: null,
       refetch: vi.fn(),
     })),
+    useForecastVarianceOverview: vi.fn(() => ({
+      data: {
+        summary: {
+          comparableDeals: 3,
+          avgInitialVariance: 15000,
+          avgQualifiedVariance: 10000,
+          avgEstimatingVariance: 4000,
+          avgCloseDriftDays: 12,
+        },
+        repRollups: [
+          {
+            repId: "rep-1",
+            repName: "Jordan",
+            comparableDeals: 2,
+            avgInitialVariance: 12000,
+            avgQualifiedVariance: 8000,
+            avgEstimatingVariance: 4000,
+            avgCloseDriftDays: 10,
+          },
+        ],
+        deals: [
+          {
+            dealId: "deal-1",
+            dealName: "North Plaza",
+            repName: "Jordan",
+            workflowRoute: "estimating",
+            initialForecast: 100000,
+            qualifiedForecast: 110000,
+            estimatingForecast: 120000,
+            awardedAmount: 125000,
+            initialVariance: 25000,
+            qualifiedVariance: 15000,
+            estimatingVariance: 5000,
+            closeDriftDays: 7,
+          },
+        ],
+      },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    })),
   };
 });
 
 import { DataMiningSection } from "./data-mining-section";
+import { ForecastVarianceSection } from "./forecast-variance-section";
 import { RegionalOwnershipSection } from "./regional-ownership-section";
 import { SourcePerformanceSection } from "./source-performance-section";
 import { canViewDataMiningSection } from "@/pages/reports/reports-page";
@@ -108,6 +150,37 @@ describe("analytics reporting sections", () => {
     );
   });
 
+  it("builds the forecast variance endpoint with the shared analytics filters", async () => {
+    mockApi.mockResolvedValue({
+      data: {
+        summary: {
+          comparableDeals: 1,
+          avgInitialVariance: 10000,
+          avgQualifiedVariance: 8000,
+          avgEstimatingVariance: 4000,
+          avgCloseDriftDays: 5,
+        },
+        repRollups: [],
+        deals: [],
+      },
+    });
+
+    const { executeForecastVarianceOverview } = await import("@/hooks/use-reports");
+    await executeForecastVarianceOverview({
+      from: "2026-01-01",
+      to: "2026-12-31",
+      officeId: "office-1",
+      regionId: "region-1",
+      repId: "rep-1",
+      source: "Trade Show",
+    });
+
+    expect(mockApi).toHaveBeenCalledTimes(1);
+    expect(mockApi).toHaveBeenCalledWith(
+      "/reports/forecast-variance?from=2026-01-01&to=2026-12-31&officeId=office-1&regionId=region-1&repId=rep-1&source=Trade+Show"
+    );
+  });
+
   it("only allows directors to view the data mining section", () => {
     expect(canViewDataMiningSection("director")).toBe(true);
     expect(canViewDataMiningSection("admin")).toBe(false);
@@ -174,6 +247,21 @@ describe("SourcePerformanceSection", () => {
     expect(html).toContain("Export CSV");
     expect(html).toContain("Export PDF");
     expect(html).toContain("Unknown");
+  });
+});
+
+describe("ForecastVarianceSection", () => {
+  it("renders the forecast variance lane with variance summaries and deal rows", () => {
+    const html = renderToStaticMarkup(
+      <ForecastVarianceSection />
+    );
+
+    expect(html).toContain("Forecast Variance");
+    expect(html).toContain("Avg Initial Variance");
+    expect(html).toContain("Office ID");
+    expect(html).toContain("Export CSV");
+    expect(html).toContain("North Plaza");
+    expect(html).toContain("Jordan");
   });
 });
 

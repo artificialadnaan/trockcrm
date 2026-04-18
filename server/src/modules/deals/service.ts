@@ -18,6 +18,7 @@ import type * as schema from "@trock-crm/shared/schema";
 import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { getStageById } from "../pipeline/service.js";
+import { captureInitialForecastMilestone } from "../reports/forecast-milestones-service.js";
 
 // Type alias for the tenant-scoped Drizzle instance
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -456,6 +457,21 @@ export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
     .returning();
 
   const newDeal = result[0];
+
+  await captureInitialForecastMilestone(tenantDb, {
+    deal: {
+      id: newDeal.id,
+      assignedRepId: newDeal.assignedRepId,
+      workflowRoute: newDeal.workflowRoute,
+      stageId: newDeal.stageId,
+      expectedCloseDate: newDeal.expectedCloseDate,
+      ddEstimate: newDeal.ddEstimate,
+      bidEstimate: newDeal.bidEstimate,
+      awardedAmount: newDeal.awardedAmount,
+      source: newDeal.source,
+    },
+    userId: input.assignedRepId,
+  });
 
   // Queue geocode as background job (the tenantDb connection will be released after commit)
   const { propertyAddress, propertyCity, propertyState, propertyZip, officeId } = input;

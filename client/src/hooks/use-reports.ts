@@ -180,6 +180,45 @@ export interface RegionalOwnershipOverview {
   ownershipGaps: RegionalOwnershipGap[];
 }
 
+export interface ForecastVarianceSummary {
+  comparableDeals: number;
+  avgInitialVariance: number;
+  avgQualifiedVariance: number;
+  avgEstimatingVariance: number;
+  avgCloseDriftDays: number;
+}
+
+export interface ForecastVarianceRepRollup {
+  repId: string;
+  repName: string;
+  comparableDeals: number;
+  avgInitialVariance: number;
+  avgQualifiedVariance: number;
+  avgEstimatingVariance: number;
+  avgCloseDriftDays: number;
+}
+
+export interface ForecastVarianceDealRow {
+  dealId: string;
+  dealName: string;
+  repName: string;
+  workflowRoute: "estimating" | "service";
+  initialForecast: number;
+  qualifiedForecast: number | null;
+  estimatingForecast: number | null;
+  awardedAmount: number;
+  initialVariance: number;
+  qualifiedVariance: number | null;
+  estimatingVariance: number | null;
+  closeDriftDays: number | null;
+}
+
+export interface ForecastVarianceOverview {
+  summary: ForecastVarianceSummary;
+  repRollups: ForecastVarianceRepRollup[];
+  deals: ForecastVarianceDealRow[];
+}
+
 export function useSavedReports() {
   const [reports, setReports] = useState<SavedReport[]>([]);
   const [loading, setLoading] = useState(true);
@@ -270,6 +309,13 @@ export async function executeLeadSourceROI(options: AnalyticsQueryOptions = {}) 
   return executeLockedReport("lead_source_roi", options);
 }
 
+export async function executeForecastVarianceOverview(options: AnalyticsQueryOptions = {}) {
+  const params = new URLSearchParams();
+  appendAnalyticsQueryOptions(params, options);
+  const qs = params.toString();
+  return api<{ data: ForecastVarianceOverview }>(`/reports/forecast-variance${qs ? `?${qs}` : ""}`);
+}
+
 export function useLeadSourceROI(options: AnalyticsQueryOptions = {}) {
   const [data, setData] = useState<LeadSourceRoiRow[] | null>(null);
   const [loading, setLoading] = useState(true);
@@ -293,6 +339,31 @@ export function useLeadSourceROI(options: AnalyticsQueryOptions = {}) {
   }, [fetchReport]);
 
   return { data, loading, error, refetch: fetchReport };
+}
+
+export function useForecastVarianceOverview(options: AnalyticsQueryOptions = {}) {
+  const [data, setData] = useState<ForecastVarianceOverview | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchOverview = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await executeForecastVarianceOverview(options);
+      setData(result.data as ForecastVarianceOverview);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to load forecast variance");
+    } finally {
+      setLoading(false);
+    }
+  }, [options.from, options.to, options.officeId, options.regionId, options.repId, options.source, options.includeDd]);
+
+  useEffect(() => {
+    fetchOverview();
+  }, [fetchOverview]);
+
+  return { data, loading, error, refetch: fetchOverview };
 }
 
 export async function executeWorkflowOverview(options: AnalyticsQueryOptions = {}) {

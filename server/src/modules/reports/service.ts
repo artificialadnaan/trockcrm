@@ -70,6 +70,257 @@ export function normalizeAnalyticsFilters(
 }
 
 // ---------------------------------------------------------------------------
+// Forecast Accuracy / Pipeline Variance
+// ---------------------------------------------------------------------------
+
+export interface ForecastVarianceSummary {
+  comparableDeals: number;
+  avgInitialVariance: number;
+  avgQualifiedVariance: number;
+  avgEstimatingVariance: number;
+  avgCloseDriftDays: number;
+}
+
+export interface ForecastVarianceRepRollup {
+  repId: string;
+  repName: string;
+  comparableDeals: number;
+  avgInitialVariance: number;
+  avgQualifiedVariance: number;
+  avgEstimatingVariance: number;
+  avgCloseDriftDays: number;
+}
+
+export interface ForecastVarianceDealRow {
+  dealId: string;
+  dealName: string;
+  repName: string;
+  workflowRoute: WorkflowRoute;
+  initialForecast: number;
+  qualifiedForecast: number | null;
+  estimatingForecast: number | null;
+  awardedAmount: number;
+  initialVariance: number;
+  qualifiedVariance: number | null;
+  estimatingVariance: number | null;
+  closeDriftDays: number | null;
+}
+
+export interface ForecastVarianceOverview {
+  summary: ForecastVarianceSummary;
+  repRollups: ForecastVarianceRepRollup[];
+  deals: ForecastVarianceDealRow[];
+}
+
+function buildForecastVarianceFilterSql(filters: NormalizedAnalyticsFilters) {
+  const clauses = [
+    sql`dsi.deal_id = d.id`,
+    sql`cw.captured_at >= ${filters.from}::timestamptz`,
+    sql`cw.captured_at < (${filters.to}::date + INTERVAL '1 day')::timestamptz`,
+  ];
+
+  if (filters.officeId) {
+    clauses.push(sql`dsi.office_id = ${filters.officeId}::uuid`);
+  }
+  if (filters.regionId) {
+    clauses.push(sql`d.region_id = ${filters.regionId}::uuid`);
+  }
+  if (filters.repId) {
+    clauses.push(sql`d.assigned_rep_id = ${filters.repId}::uuid`);
+  }
+  if (filters.source) {
+    clauses.push(sql`d.source = ${filters.source}`);
+  }
+
+  return sql.join(clauses, sql` AND `);
+}
+
+function mapForecastVarianceSummaryRow(row?: Record<string, any>): ForecastVarianceSummary {
+  return {
+    comparableDeals: Number(row?.comparable_deals ?? 0),
+    avgInitialVariance: Number(row?.avg_initial_variance ?? 0),
+    avgQualifiedVariance: Number(row?.avg_qualified_variance ?? 0),
+    avgEstimatingVariance: Number(row?.avg_estimating_variance ?? 0),
+    avgCloseDriftDays: Number(row?.avg_close_drift_days ?? 0),
+  };
+}
+
+export async function getForecastVarianceOverview(
+  tenantDb: TenantDb,
+  input: AnalyticsFilterInput = {}
+): Promise<ForecastVarianceOverview> {
+  const filters = normalizeAnalyticsFilters(input);
+  const whereSql = buildForecastVarianceFilterSql(filters);
+
+  const summaryResult = await tenantDb.execute(sql`
+    WITH forecast_base AS (
+      SELECT
+        d.id AS deal_id,
+        d.name AS deal_name,
+        cw.workflow_route,
+        cw.assigned_rep_id,
+        u.display_name AS rep_name,
+        cw.awarded_amount,
+        cw.captured_at::date AS actual_close_date,
+        cw.expected_close_date,
+        initial.forecast_amount AS initial_forecast,
+        qualified.forecast_amount AS qualified_forecast,
+        estimating.forecast_amount AS estimating_forecast,
+        cw.captured_at AS closed_won_captured_at
+      FROM deals d
+      JOIN deal_scoping_intake dsi ON dsi.deal_id = d.id
+      JOIN users u ON u.id = cw.assigned_rep_id
+      JOIN public.pipeline_stage_config current_stage ON current_stage.id = d.stage_id
+      JOIN deal_forecast_milestones cw
+        ON cw.deal_id = d.id
+       AND cw.milestone_key = 'closed_won'
+      LEFT JOIN deal_forecast_milestones initial
+        ON initial.deal_id = d.id
+       AND initial.milestone_key = 'initial'
+      LEFT JOIN deal_forecast_milestones qualified
+        ON qualified.deal_id = d.id
+       AND qualified.milestone_key = 'qualified'
+      LEFT JOIN deal_forecast_milestones estimating
+        ON estimating.deal_id = d.id
+       AND estimating.milestone_key = 'estimating'
+      WHERE current_stage.slug = 'closed_won'
+        AND ${whereSql}
+    )
+    SELECT
+      COUNT(*)::int AS comparable_deals,
+      COALESCE(AVG(ABS(awarded_amount - initial_forecast)), 0)::numeric AS avg_initial_variance,
+      COALESCE(AVG(ABS(awarded_amount - qualified_forecast)) FILTER (WHERE qualified_forecast IS NOT NULL), 0)::numeric AS avg_qualified_variance,
+      COALESCE(AVG(ABS(awarded_amount - estimating_forecast)) FILTER (WHERE estimating_forecast IS NOT NULL), 0)::numeric AS avg_estimating_variance,
+      COALESCE(AVG(ABS(actual_close_date - expected_close_date)) FILTER (WHERE actual_close_date IS NOT NULL AND expected_close_date IS NOT NULL), 0)::numeric AS avg_close_drift_days
+    FROM forecast_base
+  `);
+
+  const repRollupsResult = await tenantDb.execute(sql`
+    WITH forecast_base AS (
+      SELECT
+        d.id AS deal_id,
+        cw.assigned_rep_id,
+        u.display_name AS rep_name,
+        cw.awarded_amount,
+        cw.captured_at::date AS actual_close_date,
+        cw.expected_close_date,
+        initial.forecast_amount AS initial_forecast,
+        qualified.forecast_amount AS qualified_forecast,
+        estimating.forecast_amount AS estimating_forecast
+      FROM deals d
+      JOIN deal_scoping_intake dsi ON dsi.deal_id = d.id
+      JOIN users u ON u.id = cw.assigned_rep_id
+      JOIN public.pipeline_stage_config current_stage ON current_stage.id = d.stage_id
+      JOIN deal_forecast_milestones cw
+        ON cw.deal_id = d.id
+       AND cw.milestone_key = 'closed_won'
+      LEFT JOIN deal_forecast_milestones initial
+        ON initial.deal_id = d.id
+       AND initial.milestone_key = 'initial'
+      LEFT JOIN deal_forecast_milestones qualified
+        ON qualified.deal_id = d.id
+       AND qualified.milestone_key = 'qualified'
+      LEFT JOIN deal_forecast_milestones estimating
+        ON estimating.deal_id = d.id
+       AND estimating.milestone_key = 'estimating'
+      WHERE current_stage.slug = 'closed_won'
+        AND ${whereSql}
+    )
+    SELECT
+      assigned_rep_id AS rep_id,
+      rep_name,
+      COUNT(*)::int AS comparable_deals,
+      COALESCE(AVG(ABS(awarded_amount - initial_forecast)), 0)::numeric AS avg_initial_variance,
+      COALESCE(AVG(ABS(awarded_amount - qualified_forecast)) FILTER (WHERE qualified_forecast IS NOT NULL), 0)::numeric AS avg_qualified_variance,
+      COALESCE(AVG(ABS(awarded_amount - estimating_forecast)) FILTER (WHERE estimating_forecast IS NOT NULL), 0)::numeric AS avg_estimating_variance,
+      COALESCE(AVG(ABS(actual_close_date - expected_close_date)) FILTER (WHERE actual_close_date IS NOT NULL AND expected_close_date IS NOT NULL), 0)::numeric AS avg_close_drift_days
+    FROM forecast_base
+    GROUP BY assigned_rep_id, rep_name
+    ORDER BY comparable_deals DESC, rep_name ASC
+  `);
+
+  const dealRowsResult = await tenantDb.execute(sql`
+    WITH forecast_base AS (
+      SELECT
+        d.id AS deal_id,
+        d.name AS deal_name,
+        cw.workflow_route,
+        u.display_name AS rep_name,
+        cw.awarded_amount,
+        cw.captured_at::date AS actual_close_date,
+        cw.expected_close_date,
+        initial.forecast_amount AS initial_forecast,
+        qualified.forecast_amount AS qualified_forecast,
+        estimating.forecast_amount AS estimating_forecast
+      FROM deals d
+      JOIN deal_scoping_intake dsi ON dsi.deal_id = d.id
+      JOIN users u ON u.id = cw.assigned_rep_id
+      JOIN public.pipeline_stage_config current_stage ON current_stage.id = d.stage_id
+      JOIN deal_forecast_milestones cw
+        ON cw.deal_id = d.id
+       AND cw.milestone_key = 'closed_won'
+      LEFT JOIN deal_forecast_milestones initial
+        ON initial.deal_id = d.id
+       AND initial.milestone_key = 'initial'
+      LEFT JOIN deal_forecast_milestones qualified
+        ON qualified.deal_id = d.id
+       AND qualified.milestone_key = 'qualified'
+      LEFT JOIN deal_forecast_milestones estimating
+        ON estimating.deal_id = d.id
+       AND estimating.milestone_key = 'estimating'
+      WHERE current_stage.slug = 'closed_won'
+        AND ${whereSql}
+    )
+    SELECT
+      deal_id,
+      deal_name,
+      rep_name,
+      workflow_route,
+      initial_forecast,
+      qualified_forecast,
+      estimating_forecast,
+      awarded_amount,
+      ABS(awarded_amount - initial_forecast)::numeric AS initial_variance,
+      ABS(awarded_amount - qualified_forecast)::numeric AS qualified_variance,
+      ABS(awarded_amount - estimating_forecast)::numeric AS estimating_variance,
+      ABS(actual_close_date - expected_close_date)::int AS close_drift_days
+    FROM forecast_base
+    ORDER BY initial_variance DESC NULLS LAST, deal_name ASC
+  `);
+
+  const summaryRows = (summaryResult as any).rows ?? summaryResult;
+  const repRows = (repRollupsResult as any).rows ?? repRollupsResult;
+  const dealRows = (dealRowsResult as any).rows ?? dealRowsResult;
+
+  return {
+    summary: mapForecastVarianceSummaryRow(summaryRows[0]),
+    repRollups: repRows.map((row: any) => ({
+      repId: row.rep_id,
+      repName: row.rep_name,
+      comparableDeals: Number(row.comparable_deals ?? 0),
+      avgInitialVariance: Number(row.avg_initial_variance ?? 0),
+      avgQualifiedVariance: Number(row.avg_qualified_variance ?? 0),
+      avgEstimatingVariance: Number(row.avg_estimating_variance ?? 0),
+      avgCloseDriftDays: Number(row.avg_close_drift_days ?? 0),
+    })),
+    deals: dealRows.map((row: any) => ({
+      dealId: row.deal_id,
+      dealName: row.deal_name,
+      repName: row.rep_name,
+      workflowRoute: row.workflow_route,
+      initialForecast: Number(row.initial_forecast ?? 0),
+      qualifiedForecast: row.qualified_forecast === null ? null : Number(row.qualified_forecast),
+      estimatingForecast: row.estimating_forecast === null ? null : Number(row.estimating_forecast),
+      awardedAmount: Number(row.awarded_amount ?? 0),
+      initialVariance: Number(row.initial_variance ?? 0),
+      qualifiedVariance: row.qualified_variance === null ? null : Number(row.qualified_variance),
+      estimatingVariance: row.estimating_variance === null ? null : Number(row.estimating_variance),
+      closeDriftDays: row.close_drift_days === null ? null : Number(row.close_drift_days),
+    })),
+  };
+}
+
+// ---------------------------------------------------------------------------
 // 1. Pipeline Summary by Stage
 // ---------------------------------------------------------------------------
 

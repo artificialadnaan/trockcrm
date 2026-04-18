@@ -12,6 +12,7 @@ import {
   getLostDealsByReason,
   getRevenueByProjectType,
   getLeadSourceROI,
+  getForecastVarianceOverview,
   getFollowUpCompliance,
   getDdVsPipeline,
   getClosedWonSummary,
@@ -200,6 +201,21 @@ router.get("/lead-source-roi", requireDirector, async (req, res, next) => {
   try {
     const filters = parseAnalyticsFilters(req.query as Record<string, unknown>);
     const data = await getLeadSourceROI(req.tenantDb!, {
+      ...filters,
+      officeId: filters.officeId ?? req.user!.activeOfficeId ?? req.user!.officeId,
+    });
+    await req.commitTransaction!();
+    res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/reports/forecast-variance?from=2026-01-01&to=2026-12-31
+router.get("/forecast-variance", requireDirector, async (req, res, next) => {
+  try {
+    const filters = parseAnalyticsFilters(req.query as Record<string, unknown>);
+    const data = await getForecastVarianceOverview(req.tenantDb!, {
       ...filters,
       officeId: filters.officeId ?? req.user!.activeOfficeId ?? req.user!.officeId,
     });
