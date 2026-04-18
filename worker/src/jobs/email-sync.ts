@@ -520,30 +520,32 @@ export async function processInboundMessage(
         ? "company"
         : contactMatch?.id
           ? "contact"
-          : "mailbox";
+          : null;
   const activitySourceEntityId =
     association.dealId
       ?? assignment.assignedEntityId
       ?? contactMatch?.id
-      ?? mailboxAccountId;
+      ?? null;
   const responsibleUserId = userId;
-  await client.query(
-    `INSERT INTO ${schemaName}.activities
-     (type, responsible_user_id, performed_by_user_id, source_entity_type, source_entity_id,
-      deal_id, contact_id, email_id, subject, body, occurred_at)
-     VALUES ('email', $1, NULL, $2, $3, $4, $5, $6, $7, $8, $9)`,
-    [
-      responsibleUserId,
-      activitySourceEntityType,
-      activitySourceEntityId,
-      association.dealId, // may be null if 0 or multiple deals
-      contactMatch?.id ?? null,
-      emailId,
-      subject,
-      bodyPreview.substring(0, 1000),
-      sentAt,
-    ]
-  );
+  if (activitySourceEntityType && activitySourceEntityId) {
+    await client.query(
+      `INSERT INTO ${schemaName}.activities
+       (type, responsible_user_id, performed_by_user_id, source_entity_type, source_entity_id,
+        deal_id, contact_id, email_id, subject, body, occurred_at)
+       VALUES ('email', $1, NULL, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      [
+        responsibleUserId,
+        activitySourceEntityType,
+        activitySourceEntityId,
+        association.dealId, // may be null if 0 or multiple deals
+        contactMatch?.id ?? null,
+        emailId,
+        subject,
+        bodyPreview.substring(0, 1000),
+        sentAt,
+      ]
+    );
+  }
 
   if (assignment.requiresClassificationTask) {
     await createClassificationTaskRaw(client, schemaName, {

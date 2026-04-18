@@ -623,10 +623,9 @@ describe("email sync inbound message routing", () => {
           typeof sql === "string" &&
           sql.includes("INSERT INTO office_beta.activities") &&
           Array.isArray(params) &&
-          params[1] === "mailbox" &&
-          params[2] === "mailbox-1"
+          params[1] === "mailbox"
       )
-    ).toBe(true);
+    ).toBe(false);
     expect(
       queryMock.mock.calls.some(
         ([sql]) => typeof sql === "string" && sql.includes("INSERT INTO office_beta.tasks")
