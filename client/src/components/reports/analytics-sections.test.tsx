@@ -40,10 +40,13 @@ describe("SourcePerformanceSection", () => {
     const html = renderToStaticMarkup(<SourcePerformanceSection />);
 
     expect(html).toContain("Source Performance");
+    expect(html).toContain("Lead and Deal Volume by Source");
     expect(html).toContain("Trade Show");
     expect(html).toContain("Lead Count");
     expect(html).toContain("Deal Count");
     expect(html).toContain("Office ID");
+    expect(html).toContain("Export CSV");
+    expect(html).toContain("Export PDF");
     expect(html).toContain("Unknown");
   });
 });

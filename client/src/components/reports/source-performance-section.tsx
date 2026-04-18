@@ -1,8 +1,21 @@
 import { useMemo, useState, type ReactNode } from "react";
-import { RefreshCw, TrendingUp } from "lucide-react";
+import {
+  BarChart,
+  Bar,
+  CartesianGrid,
+  Cell,
+  Legend,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
+import { Download, RefreshCw, TrendingUp } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useLeadSourceROI } from "@/hooks/use-reports";
+import { buildPrintableReportHtml, buildReportExportFilename, downloadTextFile, openPrintableReportWindow, serializeRowsToCsv } from "@/lib/report-export";
+import { getChartColor } from "@/components/charts/chart-colors";
 
 function formatCurrency(value: number) {
   return new Intl.NumberFormat("en-US", {
@@ -23,6 +36,10 @@ function getDefaultDateRange() {
 
 function formatPercent(value: number) {
   return `${value}%`;
+}
+
+function renderChartValue(value: number) {
+  return value.toLocaleString();
 }
 
 export function SourcePerformanceSection() {
@@ -68,6 +85,34 @@ export function SourcePerformanceSection() {
   );
 
   const topRow = rows[0];
+  const chartData = rows.map((row) => ({
+    source: row.source,
+    leadCount: row.leadCount,
+    dealCount: row.dealCount,
+  }));
+  const exportRows = rows as unknown as Array<Record<string, unknown>>;
+
+  function handleExportCsv() {
+    const csv = serializeRowsToCsv(exportRows);
+    downloadTextFile(csv, buildReportExportFilename("Source Performance", "csv"), "text/csv;charset=utf-8;");
+  }
+
+  function handleExportPdf() {
+    const printableHtml = buildPrintableReportHtml({
+      reportName: "Source Performance",
+      rows: exportRows,
+      generatedAtLabel: new Date().toLocaleString("en-US"),
+      metadata: [
+        { label: "From", value: filters.from },
+        { label: "To", value: filters.to },
+        { label: "Office ID", value: filters.officeId || "All" },
+        { label: "Region ID", value: filters.regionId || "All" },
+        { label: "Rep ID", value: filters.repId || "All" },
+        { label: "Source", value: filters.source || "All" },
+      ],
+    });
+    openPrintableReportWindow(printableHtml);
+  }
 
   return (
     <section className="rounded-3xl border border-slate-200 bg-white shadow-sm overflow-hidden">
@@ -94,6 +139,28 @@ export function SourcePerformanceSection() {
             <RefreshCw className="h-4 w-4 mr-2" />
             Refresh
           </Button>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              className="border-slate-200 text-slate-600"
+              onClick={handleExportCsv}
+              disabled={loading || rows.length === 0}
+            >
+              <Download className="h-4 w-4 mr-2" />
+              Export CSV
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              className="border-slate-200 text-slate-600"
+              onClick={handleExportPdf}
+              disabled={loading || rows.length === 0}
+            >
+              <Download className="h-4 w-4 mr-2" />
+              Export PDF
+            </Button>
+          </div>
         </div>
       </div>
 
@@ -162,6 +229,50 @@ export function SourcePerformanceSection() {
               <MetricCard label="Deal Count" value={totals.deals.toLocaleString()} />
               <MetricCard label="Won Value" value={formatCurrency(totals.wonValue)} />
               <MetricCard label="Active Pipeline" value={formatCurrency(totals.pipelineValue)} />
+            </div>
+
+            <div className="rounded-2xl border border-slate-200 bg-white p-4">
+              <div className="mb-4">
+                <h3 className="text-sm font-bold text-slate-900">Lead and Deal Volume by Source</h3>
+                <p className="mt-1 text-xs text-slate-500">
+                  Comparison of lead count versus deal count for each source in the selected scope.
+                </p>
+              </div>
+              <div className="h-[320px] w-full">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={chartData} margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
+                    <XAxis
+                      dataKey="source"
+                      tick={{ fontSize: 12, fill: "#64748b" }}
+                      axisLine={{ stroke: "#e2e8f0" }}
+                    />
+                    <YAxis
+                      tick={{ fontSize: 12, fill: "#64748b" }}
+                      axisLine={{ stroke: "#e2e8f0" }}
+                      tickFormatter={renderChartValue}
+                    />
+                    <Tooltip
+                      formatter={(value: number, name: string) => [
+                        renderChartValue(value),
+                        name === "leadCount" ? "Lead Count" : "Deal Count",
+                      ]}
+                      contentStyle={{ fontSize: 12, borderRadius: 8 }}
+                    />
+                    <Legend wrapperStyle={{ fontSize: 12 }} />
+                    <Bar dataKey="leadCount" name="Lead Count" fill={getChartColor(0)} radius={[4, 4, 0, 0]}>
+                      {chartData.map((entry, index) => (
+                        <Cell key={entry.source} fill={getChartColor(index)} />
+                      ))}
+                    </Bar>
+                    <Bar dataKey="dealCount" name="Deal Count" fill={getChartColor(1)} radius={[4, 4, 0, 0]}>
+                      {chartData.map((entry, index) => (
+                        <Cell key={entry.source} fill={getChartColor(index + 1)} />
+                      ))}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
             </div>
 
             <div className="overflow-x-auto rounded-2xl border border-slate-200">
