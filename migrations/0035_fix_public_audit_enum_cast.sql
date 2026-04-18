@@ -1,6 +1,5 @@
--- Migration 0034: Fix schema-qualified audit trigger enum casts.
--- The dynamic SQL introduced in 0033 must cast the action parameter inside the
--- SQL string so Postgres resolves it as the tenant schema's audit_action enum.
+-- Migration 0035: Ensure schema-qualified tenant audit trigger casts to public.audit_action.
+-- Tenant schemas own the audit_log table, but the enum type itself lives in public.
 
 CREATE OR REPLACE FUNCTION audit_trigger_func()
 RETURNS TRIGGER AS $$

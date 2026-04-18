@@ -14,7 +14,7 @@ BEGIN
   IF TG_OP = 'INSERT' THEN
     EXECUTE format(
       'INSERT INTO %1$I.audit_log (table_name, record_id, action, changed_by, full_row, created_at)
-       VALUES ($1, $2, $3::%1$I.audit_action, $4, $5, NOW())',
+       VALUES ($1, $2, $3::public.audit_action, $4, $5, NOW())',
       TG_TABLE_SCHEMA
     )
     USING
@@ -44,7 +44,7 @@ BEGIN
     IF changed_fields != '{}' THEN
       EXECUTE format(
         'INSERT INTO %1$I.audit_log (table_name, record_id, action, changed_by, changes, created_at)
-         VALUES ($1, $2, $3::%1$I.audit_action, $4, $5, NOW())',
+         VALUES ($1, $2, $3::public.audit_action, $4, $5, NOW())',
         TG_TABLE_SCHEMA
       )
       USING
@@ -58,7 +58,7 @@ BEGIN
   ELSIF TG_OP = 'DELETE' THEN
     EXECUTE format(
       'INSERT INTO %1$I.audit_log (table_name, record_id, action, changed_by, full_row, created_at)
-       VALUES ($1, $2, $3::%1$I.audit_action, $4, $5, NOW())',
+       VALUES ($1, $2, $3::public.audit_action, $4, $5, NOW())',
       TG_TABLE_SCHEMA
     )
     USING
