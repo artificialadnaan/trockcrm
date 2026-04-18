@@ -711,43 +711,72 @@ export async function getDataMiningOverview(
         ${filters.source ? sql`AND COALESCE(NULLIF(TRIM(d.source), ''), 'Unknown') = ${filters.source}` : sql``}
     )
   `;
+  const officeContactContext = sql`
+    office_contact_context AS (
+      SELECT DISTINCT
+        c.id AS contact_id,
+        c.company_id,
+        TRIM(CONCAT_WS(' ', c.first_name, c.last_name)) AS contact_name,
+        COALESCE(NULLIF(TRIM(c.company_name), ''), COALESCE(comp.name, 'Unassigned')) AS company_name,
+        c.created_at
+      FROM contacts c
+      LEFT JOIN companies comp ON comp.id = c.company_id
+      WHERE c.is_active = true
+        AND EXISTS (
+          SELECT 1
+          FROM contact_deal_associations cda
+          JOIN office_deals od ON od.id = cda.deal_id
+          WHERE cda.contact_id = c.id
+        )
+    )
+  `;
+  const officeCompanyContext = sql`
+    office_company_context AS (
+      SELECT DISTINCT
+        c.id AS company_id,
+        COALESCE(NULLIF(TRIM(c.name), ''), 'Unassigned') AS company_name,
+        c.created_at
+      FROM companies c
+      WHERE c.is_active = true
+        AND EXISTS (
+          SELECT 1
+          FROM office_deals od
+          WHERE od.company_id = c.id
+        )
+    )
+  `;
+  const officeActivityScope = sql`
+    office_activity_scope AS (
+      SELECT
+        occ.contact_id,
+        occ.company_id,
+        a.occurred_at
+      FROM office_contact_context occ
+      JOIN activities a ON a.contact_id = occ.contact_id
+      UNION ALL
+      SELECT
+        occ.contact_id,
+        occ.company_id,
+        a.occurred_at
+      FROM office_contact_context occ
+      JOIN contact_deal_associations cda ON cda.contact_id = occ.contact_id
+      JOIN office_deals od ON od.id = cda.deal_id
+      JOIN activities a ON a.deal_id = od.id
+    )
+  `;
 
   const [untouchedContactSummaryResult, untouchedContactRowsResult, dormantCompanySummaryResult, dormantCompanyRowsResult] = await Promise.all([
     tenantDb.execute(sql`
       WITH
       ${officeDealContext},
-      office_contact_context AS (
-        SELECT DISTINCT
-          c.id AS contact_id,
-          c.company_id,
-          TRIM(CONCAT_WS(' ', c.first_name, c.last_name)) AS contact_name,
-          COALESCE(NULLIF(TRIM(c.company_name), ''), COALESCE(comp.name, 'Unassigned')) AS company_name,
-          c.created_at
-        FROM contacts c
-        LEFT JOIN companies comp ON comp.id = c.company_id
-        WHERE c.is_active = true
-          AND EXISTS (
-            SELECT 1
-            FROM contact_deal_associations cda
-            JOIN office_deals od ON od.id = cda.deal_id
-            WHERE cda.contact_id = c.id
-          )
-      ),
+      ${officeContactContext},
+      ${officeActivityScope},
       contact_activity AS (
         SELECT
-          occ.contact_id,
-          MAX(a.occurred_at) AS last_activity_at
-        FROM office_contact_context occ
-        LEFT JOIN activities a
-          ON a.contact_id = occ.contact_id
-          OR a.company_id = occ.company_id
-          OR EXISTS (
-            SELECT 1
-            FROM office_deals od
-            WHERE od.id = a.deal_id
-              AND od.company_id = occ.company_id
-          )
-        GROUP BY occ.contact_id
+          oas.contact_id,
+          MAX(oas.occurred_at) AS last_activity_at
+        FROM office_activity_scope oas
+        GROUP BY oas.contact_id
       ),
       ranked_contacts AS (
         SELECT
@@ -768,51 +797,15 @@ export async function getDataMiningOverview(
     tenantDb.execute(sql`
       WITH
       ${officeDealContext},
-      office_contact_context AS (
-        SELECT DISTINCT
-          c.id AS contact_id,
-          c.company_id
-        FROM contacts c
-        WHERE c.is_active = true
-          AND EXISTS (
-            SELECT 1
-            FROM contact_deal_associations cda
-            JOIN office_deals od ON od.id = cda.deal_id
-            WHERE cda.contact_id = c.id
-          )
-      ),
-      office_company_context AS (
-        SELECT DISTINCT
-          c.id AS company_id,
-          COALESCE(NULLIF(TRIM(c.name), ''), 'Unassigned') AS company_name,
-          c.created_at
-        FROM companies c
-        WHERE c.is_active = true
-          AND EXISTS (
-            SELECT 1
-            FROM office_deals od
-            WHERE od.company_id = c.id
-          )
-      ),
+      ${officeContactContext},
+      ${officeCompanyContext},
+      ${officeActivityScope},
       company_activity AS (
         SELECT
-          occ.company_id,
-          MAX(a.occurred_at) AS last_activity_at
-        FROM office_company_context occ
-        LEFT JOIN activities a
-          ON a.company_id = occ.company_id
-          OR a.contact_id IN (
-            SELECT occc.contact_id
-            FROM office_contact_context occc
-            WHERE occc.company_id = occ.company_id
-          )
-          OR EXISTS (
-            SELECT 1
-            FROM office_deals od
-            WHERE od.id = a.deal_id
-              AND od.company_id = occ.company_id
-          )
-        GROUP BY occ.company_id
+          oas.company_id,
+          MAX(oas.occurred_at) AS last_activity_at
+        FROM office_activity_scope oas
+        GROUP BY oas.company_id
       ),
       ranked_companies AS (
         SELECT
@@ -837,38 +830,14 @@ export async function getDataMiningOverview(
     tenantDb.execute(sql`
       WITH
       ${officeDealContext},
-      office_contact_context AS (
-        SELECT DISTINCT
-          c.id AS contact_id,
-          c.company_id,
-          TRIM(CONCAT_WS(' ', c.first_name, c.last_name)) AS contact_name,
-          COALESCE(NULLIF(TRIM(c.company_name), ''), COALESCE(comp.name, 'Unassigned')) AS company_name,
-          c.created_at
-        FROM contacts c
-        LEFT JOIN companies comp ON comp.id = c.company_id
-        WHERE c.is_active = true
-          AND EXISTS (
-            SELECT 1
-            FROM contact_deal_associations cda
-            JOIN office_deals od ON od.id = cda.deal_id
-            WHERE cda.contact_id = c.id
-          )
-      ),
+      ${officeContactContext},
+      ${officeActivityScope},
       contact_activity AS (
         SELECT
-          occ.contact_id,
-          MAX(a.occurred_at) AS last_activity_at
-        FROM office_contact_context occ
-        LEFT JOIN activities a
-          ON a.contact_id = occ.contact_id
-          OR a.company_id = occ.company_id
-          OR EXISTS (
-            SELECT 1
-            FROM office_deals od
-            WHERE od.id = a.deal_id
-              AND od.company_id = occ.company_id
-          )
-        GROUP BY occ.contact_id
+          oas.contact_id,
+          MAX(oas.occurred_at) AS last_activity_at
+        FROM office_activity_scope oas
+        GROUP BY oas.contact_id
       ),
       ranked_contacts AS (
         SELECT
@@ -894,51 +863,15 @@ export async function getDataMiningOverview(
     tenantDb.execute(sql`
       WITH
       ${officeDealContext},
-      office_contact_context AS (
-        SELECT DISTINCT
-          c.id AS contact_id,
-          c.company_id
-        FROM contacts c
-        WHERE c.is_active = true
-          AND EXISTS (
-            SELECT 1
-            FROM contact_deal_associations cda
-            JOIN office_deals od ON od.id = cda.deal_id
-            WHERE cda.contact_id = c.id
-          )
-      ),
-      office_company_context AS (
-        SELECT DISTINCT
-          c.id AS company_id,
-          COALESCE(NULLIF(TRIM(c.name), ''), 'Unassigned') AS company_name,
-          c.created_at
-        FROM companies c
-        WHERE c.is_active = true
-          AND EXISTS (
-            SELECT 1
-            FROM office_deals od
-            WHERE od.company_id = c.id
-          )
-      ),
+      ${officeContactContext},
+      ${officeCompanyContext},
+      ${officeActivityScope},
       company_activity AS (
         SELECT
-          occ.company_id,
-          MAX(a.occurred_at) AS last_activity_at
-        FROM office_company_context occ
-        LEFT JOIN activities a
-          ON a.company_id = occ.company_id
-          OR a.contact_id IN (
-            SELECT occc.contact_id
-            FROM office_contact_context occc
-            WHERE occc.company_id = occ.company_id
-          )
-          OR EXISTS (
-            SELECT 1
-            FROM office_deals od
-            WHERE od.id = a.deal_id
-              AND od.company_id = occ.company_id
-          )
-        GROUP BY occ.company_id
+          oas.company_id,
+          MAX(oas.occurred_at) AS last_activity_at
+        FROM office_activity_scope oas
+        GROUP BY oas.company_id
       ),
       ranked_companies AS (
         SELECT

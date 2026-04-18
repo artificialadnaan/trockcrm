@@ -256,4 +256,33 @@ describe("analytics cycle shared filters", () => {
       activeDealCount: 0,
     });
   });
+
+  it("ignores cross-office company activity when computing data mining clocks", async () => {
+    const { getDataMiningOverview } = await import("../../../src/modules/reports/service.js");
+    const tenantDb = createMockTenantDb([
+      [{ untouched_contact_30_count: "0", untouched_contact_60_count: "0", untouched_contact_90_count: "0" }],
+      [],
+      [{ dormant_company_90_count: "0" }],
+      [],
+    ]);
+
+    await getDataMiningOverview(tenantDb, {
+      from: "2026-01-01",
+      to: "2026-12-31",
+      officeId: "office-1",
+    });
+
+    const allQueryText = tenantDb.execute.mock.calls
+      .map((call) => extractSqlText(call[0]).toLowerCase())
+      .join("\n");
+
+    expect(allQueryText).toContain("office_deals as");
+    expect(allQueryText).toContain("office_contact_context");
+    expect(allQueryText).toContain("office_company_context");
+    expect(allQueryText).toContain("office_activity_scope");
+    expect(allQueryText).toContain("join activities a on a.contact_id = occ.contact_id");
+    expect(allQueryText).not.toContain("join activities a on a.company_id");
+    expect(allQueryText).not.toContain("a.contact_id in (");
+    expect(allQueryText).not.toContain("or a.company_id");
+  });
 });
