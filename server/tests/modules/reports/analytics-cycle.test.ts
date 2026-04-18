@@ -94,6 +94,7 @@ describe("analytics cycle shared filters", () => {
     const tenantDb = createMockTenantDb([
       {
         source: "Trade Show",
+        lead_count: "4",
         total_deals: "10",
         active_deals: "5",
         won_deals: "3",
@@ -118,8 +119,11 @@ describe("analytics cycle shared filters", () => {
     expect(queryText).toContain("d.region_id");
     expect(queryText).toContain("d.assigned_rep_id");
     expect(queryText).toContain("coalesce(nullif(trim(d.source), ''), 'unknown')");
+    expect(queryText).toContain("count(distinct dsi.id)::int as lead_count");
+    expect(queryText).toContain("count(distinct d.id)::int as deal_count");
     expect(result[0]).toMatchObject({
       source: "Trade Show",
+      leadCount: 4,
       totalDeals: 10,
       activeDeals: 5,
       wonDeals: 3,
@@ -127,5 +131,53 @@ describe("analytics cycle shared filters", () => {
       pipelineValue: 500000,
       wonValue: 300000,
     });
+  });
+
+  it("maps the canonical lead source ROI payload with source counts and unknown normalization", async () => {
+    const { getLeadSourceROI } = await import("../../../src/modules/reports/service.js");
+    const tenantDb = createMockTenantDb([
+      {
+        source: "Trade Show",
+        lead_count: "4",
+        deal_count: "3",
+        active_deals: "2",
+        won_deals: "1",
+        lost_deals: "1",
+        active_pipeline_value: "250000",
+        won_value: "100000",
+      },
+      {
+        source: "Unknown",
+        lead_count: "2",
+        deal_count: "1",
+        active_deals: "1",
+        won_deals: "0",
+        lost_deals: "0",
+        active_pipeline_value: "50000",
+        won_value: "0",
+      },
+    ]);
+
+    const result = await getLeadSourceROI(tenantDb, {
+      from: "2026-01-01",
+      to: "2026-12-31",
+      officeId: "office-1",
+      regionId: "region-1",
+      repId: "rep-1",
+      source: "Trade Show",
+    });
+
+    expect(result[0]).toMatchObject({
+      source: "Trade Show",
+      leadCount: 4,
+      dealCount: 3,
+      activeDeals: 2,
+      wonDeals: 1,
+      lostDeals: 1,
+      activePipelineValue: 250000,
+      wonValue: 100000,
+      winRate: 50,
+    });
+    expect(result.some((row) => row.source === "Unknown")).toBe(true);
   });
 });

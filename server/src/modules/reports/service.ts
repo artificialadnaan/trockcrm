@@ -573,10 +573,13 @@ export async function getRevenueByProjectType(
 
 export interface LeadSourceROIRow {
   source: string;
+  leadCount: number;
+  dealCount: number;
   totalDeals: number;
   activeDeals: number;
   wonDeals: number;
   lostDeals: number;
+  activePipelineValue: number;
   pipelineValue: number;
   wonValue: number;
   winRate: number;
@@ -606,13 +609,14 @@ export async function getLeadSourceROI(
   const result = await tenantDb.execute(sql`
     SELECT
       COALESCE(NULLIF(TRIM(d.source), ''), 'Unknown') AS source,
-      COUNT(*)::int AS total_deals,
-      COUNT(*) FILTER (WHERE d.is_active = true AND NOT psc.is_terminal)::int AS active_deals,
-      COUNT(*) FILTER (WHERE psc.slug = 'closed_won')::int AS won_deals,
-      COUNT(*) FILTER (WHERE psc.slug = 'closed_lost')::int AS lost_deals,
+      COUNT(DISTINCT dsi.id)::int AS lead_count,
+      COUNT(DISTINCT d.id)::int AS deal_count,
+      COUNT(DISTINCT d.id) FILTER (WHERE d.is_active = true AND NOT psc.is_terminal)::int AS active_deals,
+      COUNT(DISTINCT d.id) FILTER (WHERE psc.slug = 'closed_won')::int AS won_deals,
+      COUNT(DISTINCT d.id) FILTER (WHERE psc.slug = 'closed_lost')::int AS lost_deals,
       COALESCE(SUM(
         COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)
-      ) FILTER (WHERE d.is_active = true AND NOT psc.is_terminal), 0)::numeric AS pipeline_value,
+      ) FILTER (WHERE d.is_active = true AND NOT psc.is_terminal), 0)::numeric AS active_pipeline_value,
       COALESCE(SUM(
         COALESCE(d.awarded_amount, d.bid_estimate, 0)
       ) FILTER (WHERE psc.slug = 'closed_won'), 0)::numeric AS won_value
@@ -631,16 +635,22 @@ export async function getLeadSourceROI(
 
   const rows = (result as any).rows ?? result;
   return rows.map((r: any) => {
+    const leadCount = Number(r.lead_count ?? 0);
+    const dealCount = Number(r.deal_count ?? r.total_deals ?? 0);
     const won = Number(r.won_deals ?? 0);
     const lost = Number(r.lost_deals ?? 0);
     const closedTotal = won + lost;
+    const activePipelineValue = Number(r.active_pipeline_value ?? r.pipeline_value ?? 0);
     return {
       source: r.source,
-      totalDeals: Number(r.total_deals ?? 0),
+      leadCount,
+      dealCount,
+      totalDeals: dealCount,
       activeDeals: Number(r.active_deals ?? 0),
       wonDeals: won,
       lostDeals: lost,
-      pipelineValue: Number(r.pipeline_value ?? 0),
+      activePipelineValue,
+      pipelineValue: activePipelineValue,
       wonValue: Number(r.won_value ?? 0),
       winRate: closedTotal > 0 ? Math.round((won / closedTotal) * 100) : 0,
     };

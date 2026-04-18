@@ -102,6 +102,20 @@ export interface UnifiedStaleDealRow {
   dealValue: number;
 }
 
+export interface LeadSourceRoiRow {
+  source: string;
+  leadCount: number;
+  dealCount: number;
+  totalDeals: number;
+  activeDeals: number;
+  wonDeals: number;
+  lostDeals: number;
+  activePipelineValue: number;
+  pipelineValue: number;
+  wonValue: number;
+  winRate: number;
+}
+
 export interface UnifiedWorkflowOverview {
   leadPipelineSummary: UnifiedLeadPipelineSummaryRow[];
   standardVsServiceRollups: UnifiedRouteRollupRow[];
@@ -195,6 +209,35 @@ export async function executeLockedReport(reportType: string, options: Analytics
   if (!endpoint) throw new Error(`Unknown report type: ${reportType}`);
 
   return api<{ data: any }>(`${endpoint}${qs ? `?${qs}` : ""}`);
+}
+
+export async function executeLeadSourceROI(options: AnalyticsQueryOptions = {}) {
+  return executeLockedReport("lead_source_roi", options);
+}
+
+export function useLeadSourceROI(options: AnalyticsQueryOptions = {}) {
+  const [data, setData] = useState<LeadSourceRoiRow[] | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchReport = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await executeLeadSourceROI(options);
+      setData(result.data as LeadSourceRoiRow[]);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to load source performance");
+    } finally {
+      setLoading(false);
+    }
+  }, [options.from, options.to, options.officeId, options.regionId, options.repId, options.source, options.includeDd]);
+
+  useEffect(() => {
+    fetchReport();
+  }, [fetchReport]);
+
+  return { data, loading, error, refetch: fetchReport };
 }
 
 export async function executeWorkflowOverview(options: AnalyticsQueryOptions = {}) {

@@ -196,7 +196,11 @@ router.get("/revenue-by-type", requireDirector, async (req, res, next) => {
 // GET /api/reports/lead-source-roi?from=2026-01-01&to=2026-12-31
 router.get("/lead-source-roi", requireDirector, async (req, res, next) => {
   try {
-    const data = await getLeadSourceROI(req.tenantDb!, parseAnalyticsFilters(req.query as Record<string, unknown>));
+    const filters = parseAnalyticsFilters(req.query as Record<string, unknown>);
+    const data = await getLeadSourceROI(req.tenantDb!, {
+      ...filters,
+      officeId: filters.officeId ?? req.user!.activeOfficeId ?? req.user!.officeId,
+    });
     await req.commitTransaction!();
     res.json({ data });
   } catch (err) {

@@ -11,6 +11,7 @@ import {
   type UnifiedWorkflowOverview,
 } from "@/hooks/use-reports";
 import { ReportChart } from "@/components/charts/report-chart";
+import { SourcePerformanceSection } from "@/components/reports/source-performance-section";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -56,6 +57,7 @@ import {
   openPrintableReportWindow,
   serializeRowsToCsv,
 } from "@/lib/report-export";
+import { useAuth } from "@/lib/auth";
 import { getScheduleReportActionConfig } from "@/lib/report-actions";
 
 // ---------------------------------------------------------------------------
@@ -520,6 +522,7 @@ function WorkflowOverviewPanel({
 
 export function ReportsPage() {
   // --- preserved report hooks ---
+  const { user } = useAuth();
   const scheduleReportAction = getScheduleReportActionConfig();
   const { reports, loading, refetch } = useSavedReports();
   const [activeReport, setActiveReport] = useState<SavedReport | null>(null);
@@ -825,6 +828,8 @@ export function ReportsPage() {
         <div className="rounded-3xl border border-slate-200 bg-white shadow-sm p-6">
           <WorkflowOverviewPanel data={workflowOverview} loading={workflowOverviewLoading} />
         </div>
+
+        {user?.role === "director" && <SourcePerformanceSection />}
 
         {/* ================================================================
             SAVED REPORTS PANEL
