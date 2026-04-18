@@ -15,6 +15,7 @@ import {
   getFollowUpCompliance,
   getDdVsPipeline,
   getClosedWonSummary,
+  getRegionalOwnershipOverview,
   getPipelineByRep,
   getDataMiningOverview,
   executeCustomReport,
@@ -293,6 +294,27 @@ router.get("/rep-performance", requireDirector, async (req, res, next) => {
     );
     await req.commitTransaction!();
     res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/reports/regional-ownership?officeId=uuid&from=2026-01-01&to=2026-12-31
+router.get("/regional-ownership", requireDirector, async (req, res, next) => {
+  try {
+    const data = await getRegionalOwnershipOverview(req.tenantDb!, {
+      from: req.query.from as string | undefined,
+      to: req.query.to as string | undefined,
+      officeId:
+        (req.query.officeId as string | undefined) ??
+        req.user!.activeOfficeId ??
+        req.user!.officeId,
+      regionId: req.query.regionId as string | undefined,
+      repId: req.query.repId as string | undefined,
+      source: req.query.source as string | undefined,
+    });
+    await req.commitTransaction!();
+    res.json({ data });
   } catch (err) {
     next(err);
   }

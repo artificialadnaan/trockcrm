@@ -8,6 +8,7 @@ import {
   deleteSavedReport,
   useUnifiedWorkflowOverview,
   useDataMiningOverview,
+  useRegionalOwnershipOverview,
   type SavedReport,
   type ReportConfig,
   type UnifiedWorkflowOverview,
@@ -15,6 +16,7 @@ import {
 import { ReportChart } from "@/components/charts/report-chart";
 import { SourcePerformanceSection } from "@/components/reports/source-performance-section";
 import { DataMiningSection } from "@/components/reports/data-mining-section";
+import { RegionalOwnershipSection } from "@/components/reports/regional-ownership-section";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -566,6 +568,18 @@ export function ReportsPage() {
     loading: dataMiningLoading,
     error: dataMiningError,
   } = useDataMiningOverview({}, { enabled: canViewDataMining });
+  const canViewRegionalOwnership = user?.role !== "rep";
+  const regionalOfficeId = user?.activeOfficeId ?? user?.officeId;
+  const {
+    data: regionalOwnership,
+    loading: regionalOwnershipLoading,
+    error: regionalOwnershipError,
+  } = useRegionalOwnershipOverview(
+    {
+      officeId: regionalOfficeId,
+    },
+    canViewRegionalOwnership
+  );
 
   // --- UI state ---
   const [showReportDrawer, setShowReportDrawer] = useState(false);
@@ -843,7 +857,6 @@ export function ReportsPage() {
         </div>
 
         {user?.role === "director" && <SourcePerformanceSection />}
-        {user?.role === "director" && <SourcePerformanceSection />}
 
         {canViewDataMining && (
           <div className="rounded-3xl border border-slate-200 bg-white shadow-sm p-6">
@@ -851,6 +864,16 @@ export function ReportsPage() {
               data={dataMiningOverview}
               loading={dataMiningLoading}
               error={dataMiningError}
+            />
+          </div>
+        )}
+
+        {canViewRegionalOwnership && (
+          <div className="rounded-3xl border border-slate-200 bg-white shadow-sm p-6">
+            <RegionalOwnershipSection
+              data={regionalOwnership}
+              loading={regionalOwnershipLoading}
+              error={regionalOwnershipError}
             />
           </div>
         )}

@@ -152,6 +152,34 @@ export interface DataMiningOverview {
   dormantCompanies: DataMiningDormantCompanyRow[];
 }
 
+export interface RegionalOwnershipRegionRollup {
+  regionId: string | null;
+  regionName: string;
+  dealCount: number;
+  pipelineValue: number;
+  staleDealCount: number;
+}
+
+export interface RegionalOwnershipRepRollup {
+  repId: string;
+  repName: string;
+  dealCount: number;
+  pipelineValue: number;
+  activityCount: number;
+  staleDealCount: number;
+}
+
+export interface RegionalOwnershipGap {
+  gapType: "missing_assigned_rep" | "missing_region";
+  count: number;
+}
+
+export interface RegionalOwnershipOverview {
+  regionRollups: RegionalOwnershipRegionRollup[];
+  repRollups: RegionalOwnershipRepRollup[];
+  ownershipGaps: RegionalOwnershipGap[];
+}
+
 export function useSavedReports() {
   const [reports, setReports] = useState<SavedReport[]>([]);
   const [loading, setLoading] = useState(true);
@@ -336,6 +364,47 @@ export function useDataMiningOverview(
       setLoading(false);
     }
   }, [enabled, options.from, options.to, options.officeId, options.regionId, options.repId, options.source, options.includeDd]);
+
+  useEffect(() => {
+    fetchOverview();
+  }, [fetchOverview]);
+
+  return { data, loading, error, refetch: fetchOverview };
+}
+
+export async function executeRegionalOwnershipOverview(options: AnalyticsQueryOptions = {}) {
+  const params = new URLSearchParams();
+  appendAnalyticsQueryOptions(params, options);
+  const qs = params.toString();
+
+  return api<{ data: RegionalOwnershipOverview }>(`/reports/regional-ownership${qs ? `?${qs}` : ""}`);
+}
+
+export function useRegionalOwnershipOverview(options: AnalyticsQueryOptions = {}, enabled = true) {
+  const [data, setData] = useState<RegionalOwnershipOverview | null>(null);
+  const [loading, setLoading] = useState(enabled);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchOverview = useCallback(async () => {
+    if (!enabled) {
+      setData(null);
+      setLoading(false);
+      setError(null);
+      return;
+    }
+
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await executeRegionalOwnershipOverview(options);
+      setData(result.data);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to load regional ownership");
+      setData(null);
+    } finally {
+      setLoading(false);
+    }
+  }, [enabled, options.from, options.to, options.officeId, options.regionId, options.repId, options.source]);
 
   useEffect(() => {
     fetchOverview();

@@ -1,6 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
-import { beforeEach } from "vitest";
 
 vi.mock("@/hooks/use-reports", () => ({
   useLeadSourceROI: vi.fn(() => ({
@@ -35,6 +34,7 @@ vi.mock("@/hooks/use-reports", () => ({
 }));
 
 import { DataMiningSection } from "./data-mining-section";
+import { RegionalOwnershipSection } from "./regional-ownership-section";
 import { SourcePerformanceSection } from "./source-performance-section";
 import { canViewDataMiningSection } from "@/pages/reports/reports-page";
 
@@ -76,6 +76,31 @@ describe("analytics reporting sections", () => {
     expect(mockApi).toHaveBeenCalledTimes(1);
     expect(mockApi).toHaveBeenCalledWith(
       "/reports/data-mining?from=2026-01-01&to=2026-12-31&officeId=office-1&regionId=region-1&repId=rep-1&source=Trade+Show"
+    );
+  });
+
+  it("builds the regional ownership endpoint with the shared office filter", async () => {
+    mockApi.mockResolvedValue({
+      data: {
+        regionRollups: [],
+        repRollups: [],
+        ownershipGaps: [],
+      },
+    });
+
+    const { executeRegionalOwnershipOverview } = await import("@/hooks/use-reports");
+    await executeRegionalOwnershipOverview({
+      from: "2026-01-01",
+      to: "2026-12-31",
+      officeId: "office-1",
+      regionId: "region-1",
+      repId: "rep-1",
+      source: "Trade Show",
+    });
+
+    expect(mockApi).toHaveBeenCalledTimes(1);
+    expect(mockApi).toHaveBeenCalledWith(
+      "/reports/regional-ownership?from=2026-01-01&to=2026-12-31&officeId=office-1&regionId=region-1&repId=rep-1&source=Trade+Show"
     );
   });
 
@@ -126,7 +151,7 @@ describe("analytics reporting sections", () => {
     expect(html).toContain("Acme Roofing");
   });
 
-  it("renders an empty state when data has not loaded", () => {
+  it("renders an empty data mining state when data has not loaded", () => {
     const html = renderToStaticMarkup(<DataMiningSection loading={false} data={null} />);
     expect(html).toContain("No data-mining records found for the selected filters.");
   });
@@ -145,5 +170,54 @@ describe("SourcePerformanceSection", () => {
     expect(html).toContain("Export CSV");
     expect(html).toContain("Export PDF");
     expect(html).toContain("Unknown");
+  });
+});
+
+describe("RegionalOwnershipSection", () => {
+  it("renders regional ownership rollups and ownership gaps", () => {
+    const html = renderToStaticMarkup(
+      <RegionalOwnershipSection
+        data={{
+          regionRollups: [
+            {
+              regionId: "region-1",
+              regionName: "North Texas",
+              dealCount: 4,
+              pipelineValue: 240000,
+              staleDealCount: 1,
+            },
+          ],
+          repRollups: [
+            {
+              repId: "rep-1",
+              repName: "Jordan",
+              dealCount: 3,
+              pipelineValue: 180000,
+              activityCount: 12,
+              staleDealCount: 0,
+            },
+          ],
+          ownershipGaps: [
+            { gapType: "missing_assigned_rep", count: 2 },
+            { gapType: "missing_region", count: 1 },
+          ],
+        }}
+        loading={false}
+      />
+    );
+
+    expect(html).toContain("Regional and Rep Ownership");
+    expect(html).toContain("Regional Pipeline by Region");
+    expect(html).toContain("Export CSV");
+    expect(html).toContain("Export PDF");
+    expect(html).toContain("North Texas");
+    expect(html).toContain("Jordan");
+    expect(html).toContain("Missing Assigned Rep");
+    expect(html).toContain("Missing Region");
+  });
+
+  it("renders a loading state while the overview is fetching", () => {
+    const html = renderToStaticMarkup(<RegionalOwnershipSection data={null} loading />);
+    expect(html).toContain("Loading regional ownership");
   });
 });

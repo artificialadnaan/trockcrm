@@ -1,4 +1,21 @@
+import express from "express";
+import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const reportRouteMocks = vi.hoisted(() => ({
+  requireDirector: vi.fn((_req: any, _res: any, next: any) => next()),
+}));
+
+vi.mock("../../../src/middleware/rbac.js", () => ({
+  requireRole: vi.fn(() => (_req: any, _res: any, next: any) => next()),
+  requireDirector: reportRouteMocks.requireDirector,
+}));
+
+vi.mock("../../../src/db.js", () => ({
+  db: createChainableMock([]),
+}));
+
+const { reportRoutes } = await import("../../../src/modules/reports/routes.js");
 
 function createChainableMock(resolveValue: any[] = []) {
   const chain: any = {
@@ -16,10 +33,6 @@ function createChainableMock(resolveValue: any[] = []) {
   chain.limit.mockReturnValue(chain);
   return chain;
 }
-
-vi.mock("../../../src/db.js", () => ({
-  db: createChainableMock([]),
-}));
 
 function createMockTenantDb(rows: any[] = []) {
   const queue = Array.isArray(rows[0]) ? [...(rows as any[][])] : [rows];
@@ -308,5 +321,111 @@ describe("analytics cycle shared filters", () => {
       lastActivityAt: "2026-03-01T00:00:00.000Z",
       activeDealCount: 0,
     });
+  });
+
+  it("returns office-scoped regional and rep ownership rollups without replacing cross-office reporting", async () => {
+    const { getRegionalOwnershipOverview } = await import("../../../src/modules/reports/service.js");
+    const tenantDb = {
+      execute: vi.fn()
+        .mockResolvedValueOnce({
+          rows: [
+            {
+              region_id: "region-1",
+              region_name: "North Texas",
+              deal_count: "4",
+              pipeline_value: "240000",
+              stale_deal_count: "1",
+            },
+          ],
+        })
+        .mockResolvedValueOnce({
+          rows: [
+            {
+              rep_id: "rep-1",
+              rep_name: "Jordan",
+              deal_count: "3",
+              pipeline_value: "180000",
+              stale_deal_count: "0",
+            },
+          ],
+        })
+        .mockResolvedValueOnce({
+          rows: [
+            {
+              rep_id: "rep-1",
+              rep_name: "Jordan",
+              activity_count: "12",
+            },
+          ],
+        })
+        .mockResolvedValueOnce({
+          rows: [
+            { gap_type: "missing_assigned_rep", count: "2" },
+            { gap_type: "missing_region", count: "1" },
+          ],
+        }),
+    } as any;
+
+    const result = await getRegionalOwnershipOverview(tenantDb, {
+      officeId: "office-1",
+      from: "2026-01-01",
+      to: "2026-12-31",
+    });
+
+    const queryText = extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase();
+    expect(queryText).toContain("dsi.office_id =");
+    expect(queryText).toContain("d.created_at");
+    expect(result.regionRollups[0]).toMatchObject({
+      regionName: "North Texas",
+      dealCount: 4,
+      pipelineValue: 240000,
+    });
+    expect(result.repRollups[0]).toMatchObject({
+      repName: "Jordan",
+      dealCount: 3,
+      pipelineValue: 180000,
+      activityCount: 12,
+    });
+    expect(result.ownershipGaps).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ gapType: "missing_assigned_rep", count: 2 }),
+      ])
+    );
+  });
+
+  it("passes the current office into the regional ownership route", async () => {
+    const reportsService = await import("../../../src/modules/reports/service.js");
+    const ownershipSpy = vi.spyOn(reportsService, "getRegionalOwnershipOverview").mockResolvedValue({
+      regionRollups: [],
+      repRollups: [],
+      ownershipGaps: [],
+    });
+
+    const app = express();
+    app.use(express.json());
+    app.use((req: any, _res, next) => {
+      req.user = {
+        id: "director-1",
+        role: "director",
+        officeId: "office-1",
+        activeOfficeId: "office-2",
+      };
+      req.tenantDb = {};
+      req.commitTransaction = vi.fn().mockResolvedValue(undefined);
+      next();
+    });
+    app.use("/api/reports", reportRoutes);
+
+    const response = await request(app).get("/api/reports/regional-ownership?from=2026-01-01&to=2026-12-31");
+
+    expect(response.status).toBe(200);
+    expect(ownershipSpy).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        officeId: "office-2",
+        from: "2026-01-01",
+        to: "2026-12-31",
+      })
+    );
   });
 });

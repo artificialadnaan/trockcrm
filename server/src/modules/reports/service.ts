@@ -978,6 +978,198 @@ export async function getDataMiningOverview(
 }
 
 // ---------------------------------------------------------------------------
+// 11. Regional and Rep Ownership Overview
+// ---------------------------------------------------------------------------
+
+export interface RegionalOwnershipRegionRollup {
+  regionId: string | null;
+  regionName: string;
+  dealCount: number;
+  pipelineValue: number;
+  staleDealCount: number;
+}
+
+export interface RegionalOwnershipRepRollup {
+  repId: string;
+  repName: string;
+  dealCount: number;
+  pipelineValue: number;
+  activityCount: number;
+  staleDealCount: number;
+}
+
+export interface RegionalOwnershipGap {
+  gapType: "missing_assigned_rep" | "missing_region";
+  count: number;
+}
+
+export interface RegionalOwnershipOverview {
+  regionRollups: RegionalOwnershipRegionRollup[];
+  repRollups: RegionalOwnershipRepRollup[];
+  ownershipGaps: RegionalOwnershipGap[];
+}
+
+export async function getRegionalOwnershipOverview(
+  tenantDb: TenantDb,
+  options: AnalyticsFilterInput = {}
+): Promise<RegionalOwnershipOverview> {
+  const filters = normalizeAnalyticsFilters(options);
+  if (!filters.officeId) {
+    throw new Error("officeId is required for regional ownership reporting");
+  }
+
+  const officeFilter = sql`AND dsi.office_id = ${filters.officeId}`;
+  const regionFilter = filters.regionId
+    ? sql`AND d.region_id = ${filters.regionId}`
+    : sql``;
+  const repFilter = filters.repId
+    ? sql`AND d.assigned_rep_id = ${filters.repId}`
+    : sql``;
+  const sourceFilter = filters.source
+    ? sql`AND COALESCE(NULLIF(TRIM(d.source), ''), 'Unknown') = ${filters.source}`
+    : sql``;
+  const dateFilter = sql`
+    AND d.created_at >= ${filters.from}::timestamptz
+    AND d.created_at <= (${filters.to}::date + INTERVAL '1 day')::timestamptz
+  `;
+
+  const [regionResult, repDealResult, repActivityResult, gapResult] = await Promise.all([
+    tenantDb.execute(sql`
+      SELECT
+        d.region_id,
+        COALESCE(rc.name, 'Unassigned') AS region_name,
+        COUNT(*) FILTER (WHERE d.is_active = true AND NOT psc.is_terminal)::int AS deal_count,
+        COALESCE(SUM(
+          COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)
+        ) FILTER (WHERE d.is_active = true AND NOT psc.is_terminal), 0)::numeric AS pipeline_value,
+        COUNT(*) FILTER (
+          WHERE d.is_active = true
+            AND NOT psc.is_terminal
+            AND psc.stale_threshold_days IS NOT NULL
+            AND EXTRACT(DAY FROM NOW() - d.stage_entered_at) > psc.stale_threshold_days
+        )::int AS stale_deal_count
+      FROM deals d
+      LEFT JOIN deal_scoping_intake dsi ON dsi.deal_id = d.id
+      LEFT JOIN region_config rc ON rc.id = d.region_id
+      JOIN pipeline_stage_config psc ON psc.id = d.stage_id
+      WHERE TRUE
+        ${dateFilter}
+        ${officeFilter}
+        ${regionFilter}
+        ${repFilter}
+        ${sourceFilter}
+      GROUP BY d.region_id, rc.name
+      ORDER BY pipeline_value DESC, region_name ASC
+    `),
+    tenantDb.execute(sql`
+      SELECT
+        d.assigned_rep_id AS rep_id,
+        COALESCE(u.display_name, 'Unassigned') AS rep_name,
+        COUNT(*) FILTER (WHERE d.is_active = true AND NOT psc.is_terminal)::int AS deal_count,
+        COALESCE(SUM(
+          COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)
+        ) FILTER (WHERE d.is_active = true AND NOT psc.is_terminal), 0)::numeric AS pipeline_value,
+        COUNT(*) FILTER (
+          WHERE d.is_active = true
+            AND NOT psc.is_terminal
+            AND psc.stale_threshold_days IS NOT NULL
+            AND EXTRACT(DAY FROM NOW() - d.stage_entered_at) > psc.stale_threshold_days
+        )::int AS stale_deal_count
+      FROM deals d
+      LEFT JOIN deal_scoping_intake dsi ON dsi.deal_id = d.id
+      LEFT JOIN users u ON u.id = d.assigned_rep_id
+      LEFT JOIN pipeline_stage_config psc ON psc.id = d.stage_id
+      WHERE TRUE
+        ${dateFilter}
+        ${officeFilter}
+        ${regionFilter}
+        ${repFilter}
+        ${sourceFilter}
+      GROUP BY d.assigned_rep_id, u.display_name
+      ORDER BY pipeline_value DESC, rep_name ASC
+    `),
+    tenantDb.execute(sql`
+      SELECT
+        d.assigned_rep_id AS rep_id,
+        COALESCE(u.display_name, 'Unassigned') AS rep_name,
+        COUNT(*)::int AS activity_count
+      FROM activities a
+      JOIN deals d ON d.id = a.deal_id
+      LEFT JOIN deal_scoping_intake dsi ON dsi.deal_id = d.id
+      LEFT JOIN users u ON u.id = d.assigned_rep_id
+      WHERE TRUE
+        ${dateFilter}
+        ${officeFilter}
+        ${regionFilter}
+        ${repFilter}
+        ${sourceFilter}
+      GROUP BY d.assigned_rep_id, u.display_name
+      ORDER BY activity_count DESC, rep_name ASC
+    `),
+    tenantDb.execute(sql`
+      SELECT gap_type, COUNT(*)::int AS count
+      FROM (
+        SELECT 'missing_assigned_rep' AS gap_type
+        FROM deals d
+        LEFT JOIN deal_scoping_intake dsi ON dsi.deal_id = d.id
+        WHERE TRUE
+          ${dateFilter}
+          ${officeFilter}
+          ${sourceFilter}
+          AND d.assigned_rep_id IS NULL
+        UNION ALL
+        SELECT 'missing_region' AS gap_type
+        FROM deals d
+        LEFT JOIN deal_scoping_intake dsi ON dsi.deal_id = d.id
+        WHERE TRUE
+          ${dateFilter}
+          ${officeFilter}
+          ${repFilter}
+          ${sourceFilter}
+          AND d.region_id IS NULL
+      ) ownership_gaps
+      GROUP BY gap_type
+      ORDER BY gap_type ASC
+    `),
+  ]);
+
+  const regionRows = (regionResult as any).rows ?? regionResult;
+  const repDealRows = (repDealResult as any).rows ?? repDealResult;
+  const repActivityRows = (repActivityResult as any).rows ?? repActivityResult;
+  const gapRows = (gapResult as any).rows ?? gapResult;
+  const activityCountByRep = new Map<string, number>();
+  for (const row of repActivityRows as any[]) {
+    if (row.rep_id) {
+      activityCountByRep.set(row.rep_id, Number(row.activity_count ?? 0));
+    }
+  }
+
+  return {
+    regionRollups: regionRows.map((row: any) => ({
+      regionId: row.region_id ?? null,
+      regionName: row.region_name,
+      dealCount: Number(row.deal_count ?? 0),
+      pipelineValue: Number(row.pipeline_value ?? 0),
+      staleDealCount: Number(row.stale_deal_count ?? 0),
+    })),
+    repRollups: repDealRows
+      .filter((row: any) => row.rep_id)
+      .map((row: any) => ({
+        repId: row.rep_id,
+        repName: row.rep_name,
+        dealCount: Number(row.deal_count ?? 0),
+        pipelineValue: Number(row.pipeline_value ?? 0),
+        activityCount: activityCountByRep.get(row.rep_id) ?? 0,
+        staleDealCount: Number(row.stale_deal_count ?? 0),
+      })),
+    ownershipGaps: gapRows.map((row: any) => ({
+      gapType: row.gap_type,
+      count: Number(row.count ?? 0),
+    })),
+  };
+}
+
+// ---------------------------------------------------------------------------
 // 11. Follow-up Compliance Rate
 // ---------------------------------------------------------------------------
 
