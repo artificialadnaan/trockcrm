@@ -36,6 +36,7 @@ vi.mock("@/hooks/use-reports", () => ({
 
 import { DataMiningSection } from "./data-mining-section";
 import { SourcePerformanceSection } from "./source-performance-section";
+import { canViewDataMiningSection } from "@/pages/reports/reports-page";
 
 const mockApi = vi.hoisted(() => vi.fn());
 
@@ -76,6 +77,13 @@ describe("analytics reporting sections", () => {
     expect(mockApi).toHaveBeenCalledWith(
       "/reports/data-mining?from=2026-01-01&to=2026-12-31&officeId=office-1&regionId=region-1&repId=rep-1&source=Trade+Show"
     );
+  });
+
+  it("only allows directors to view the data mining section", () => {
+    expect(canViewDataMiningSection("director")).toBe(true);
+    expect(canViewDataMiningSection("admin")).toBe(false);
+    expect(canViewDataMiningSection("rep")).toBe(false);
+    expect(canViewDataMiningSection(undefined)).toBe(false);
   });
 
   it("renders the data mining section with untouched and dormant summaries", () => {

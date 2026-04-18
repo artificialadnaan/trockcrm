@@ -227,7 +227,11 @@ describe("analytics cycle shared filters", () => {
     });
 
     const firstQueryText = extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase();
+    const secondQueryText = extractSqlText(tenantDb.execute.mock.calls[1][0]).toLowerCase();
     expect(firstQueryText).toContain("from contacts c");
+    expect(firstQueryText).toContain("office_deals as");
+    expect(firstQueryText).toContain("office_contact_context");
+    expect(secondQueryText).toContain("office_company_context");
     expect(firstQueryText).not.toContain("workflow_overview");
     expect(firstQueryText).not.toContain("stale_deals");
 

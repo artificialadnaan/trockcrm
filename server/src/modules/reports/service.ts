@@ -691,113 +691,73 @@ export async function getDataMiningOverview(
   options: AnalyticsFilterInput = {}
 ): Promise<DataMiningOverview> {
   const filters = normalizeAnalyticsFilters(options);
-  const contactOfficeFilter = filters.officeId
-    ? sql`AND EXISTS (
-        SELECT 1
-        FROM contact_deal_associations cda
-        JOIN deals d ON d.id = cda.deal_id
-        LEFT JOIN deal_scoping_intake dsi ON dsi.deal_id = d.id
-        WHERE cda.contact_id = c.id
-          AND dsi.office_id = ${filters.officeId}
-      )`
-    : sql``;
-  const contactRegionFilter = filters.regionId
-    ? sql`AND EXISTS (
-        SELECT 1
-        FROM contact_deal_associations cda
-        JOIN deals d ON d.id = cda.deal_id
-        WHERE cda.contact_id = c.id
-          AND d.region_id = ${filters.regionId}
-      )`
-    : sql``;
-  const contactRepFilter = filters.repId
-    ? sql`AND EXISTS (
-        SELECT 1
-        FROM contact_deal_associations cda
-        JOIN deals d ON d.id = cda.deal_id
-        WHERE cda.contact_id = c.id
-          AND d.assigned_rep_id = ${filters.repId}
-      )`
-    : sql``;
-  const contactSourceFilter = filters.source
-    ? sql`AND EXISTS (
-        SELECT 1
-        FROM contact_deal_associations cda
-        JOIN deals d ON d.id = cda.deal_id
-        WHERE cda.contact_id = c.id
-          AND COALESCE(NULLIF(TRIM(d.source), ''), 'Unknown') = ${filters.source}
-      )`
-    : sql``;
-  const companyOfficeFilter = filters.officeId
-    ? sql`AND EXISTS (
-        SELECT 1
-        FROM deal_scoping_intake dsi
-        JOIN deals d ON d.id = dsi.deal_id
-        WHERE d.company_id = c.id
-          AND dsi.office_id = ${filters.officeId}
-      )`
-    : sql``;
-  const companyRegionFilter = filters.regionId
-    ? sql`AND EXISTS (
-        SELECT 1
-        FROM deals d
-        WHERE d.company_id = c.id
-          AND d.region_id = ${filters.regionId}
-      )`
-    : sql``;
-  const companyRepFilter = filters.repId
-    ? sql`AND EXISTS (
-        SELECT 1
-        FROM deals d
-        WHERE d.company_id = c.id
-          AND d.assigned_rep_id = ${filters.repId}
-      )`
-    : sql``;
-  const companySourceFilter = filters.source
-    ? sql`AND EXISTS (
-        SELECT 1
-        FROM deals d
-        WHERE d.company_id = c.id
-          AND COALESCE(NULLIF(TRIM(d.source), ''), 'Unknown') = ${filters.source}
-      )`
-    : sql``;
+  const officeDealContext = sql`
+    office_deals AS (
+      SELECT DISTINCT
+        d.id,
+        d.company_id,
+        d.region_id,
+        d.assigned_rep_id,
+        d.is_active,
+        psc.is_terminal,
+        COALESCE(NULLIF(TRIM(d.source), ''), 'Unknown') AS source
+      FROM deals d
+      LEFT JOIN deal_scoping_intake dsi ON dsi.deal_id = d.id
+      JOIN pipeline_stage_config psc ON psc.id = d.stage_id
+      WHERE TRUE
+        ${filters.officeId ? sql`AND dsi.office_id = ${filters.officeId}` : sql``}
+        ${filters.regionId ? sql`AND d.region_id = ${filters.regionId}` : sql``}
+        ${filters.repId ? sql`AND d.assigned_rep_id = ${filters.repId}` : sql``}
+        ${filters.source ? sql`AND COALESCE(NULLIF(TRIM(d.source), ''), 'Unknown') = ${filters.source}` : sql``}
+    )
+  `;
 
   const [untouchedContactSummaryResult, untouchedContactRowsResult, dormantCompanySummaryResult, dormantCompanyRowsResult] = await Promise.all([
     tenantDb.execute(sql`
-      WITH contact_activity AS (
-        SELECT
-          a.contact_id,
-          MAX(a.occurred_at) AS last_activity_at
-        FROM activities a
-        WHERE a.contact_id IS NOT NULL
-        GROUP BY a.contact_id
-      ),
-      scoped_contacts AS (
-        SELECT
+      WITH
+      ${officeDealContext},
+      office_contact_context AS (
+        SELECT DISTINCT
           c.id AS contact_id,
+          c.company_id,
           TRIM(CONCAT_WS(' ', c.first_name, c.last_name)) AS contact_name,
           COALESCE(NULLIF(TRIM(c.company_name), ''), COALESCE(comp.name, 'Unassigned')) AS company_name,
-          GREATEST(
-            COALESCE(c.last_contacted_at, c.created_at),
-            COALESCE(ca.last_activity_at, c.created_at)
-          ) AS last_touch_at
+          c.created_at
         FROM contacts c
         LEFT JOIN companies comp ON comp.id = c.company_id
-        LEFT JOIN contact_activity ca ON ca.contact_id = c.id
         WHERE c.is_active = true
-          ${contactOfficeFilter}
-          ${contactRegionFilter}
-          ${contactRepFilter}
-          ${contactSourceFilter}
+          AND EXISTS (
+            SELECT 1
+            FROM contact_deal_associations cda
+            JOIN office_deals od ON od.id = cda.deal_id
+            WHERE cda.contact_id = c.id
+          )
+      ),
+      contact_activity AS (
+        SELECT
+          occ.contact_id,
+          MAX(a.occurred_at) AS last_activity_at
+        FROM office_contact_context occ
+        LEFT JOIN activities a
+          ON a.contact_id = occ.contact_id
+          OR a.company_id = occ.company_id
+          OR EXISTS (
+            SELECT 1
+            FROM office_deals od
+            WHERE od.id = a.deal_id
+              AND od.company_id = occ.company_id
+          )
+        GROUP BY occ.contact_id
       ),
       ranked_contacts AS (
         SELECT
-          contact_id,
-          contact_name,
-          company_name,
-          last_touch_at,
-          EXTRACT(DAY FROM (${filters.to}::date + INTERVAL '1 day')::timestamptz - last_touch_at)::int AS days_since_touch
-        FROM scoped_contacts
+          occ.contact_id,
+          occ.contact_name,
+          occ.company_name,
+          GREATEST(COALESCE(ca.last_activity_at, occ.created_at), occ.created_at) AS last_touch_at,
+          EXTRACT(DAY FROM (${filters.to}::date + INTERVAL '1 day')::timestamptz - GREATEST(COALESCE(ca.last_activity_at, occ.created_at), occ.created_at))::int AS days_since_touch
+        FROM office_contact_context occ
+        LEFT JOIN contact_activity ca ON ca.contact_id = occ.contact_id
       )
       SELECT
         COUNT(*) FILTER (WHERE days_since_touch >= 30)::int AS untouched_contact_30_count,
@@ -806,40 +766,119 @@ export async function getDataMiningOverview(
       FROM ranked_contacts
     `),
     tenantDb.execute(sql`
-      WITH contact_activity AS (
-        SELECT
-          a.contact_id,
-          MAX(a.occurred_at) AS last_activity_at
-        FROM activities a
-        WHERE a.contact_id IS NOT NULL
-        GROUP BY a.contact_id
-      ),
-      scoped_contacts AS (
-        SELECT
+      WITH
+      ${officeDealContext},
+      office_contact_context AS (
+        SELECT DISTINCT
           c.id AS contact_id,
+          c.company_id
+        FROM contacts c
+        WHERE c.is_active = true
+          AND EXISTS (
+            SELECT 1
+            FROM contact_deal_associations cda
+            JOIN office_deals od ON od.id = cda.deal_id
+            WHERE cda.contact_id = c.id
+          )
+      ),
+      office_company_context AS (
+        SELECT DISTINCT
+          c.id AS company_id,
+          COALESCE(NULLIF(TRIM(c.name), ''), 'Unassigned') AS company_name,
+          c.created_at
+        FROM companies c
+        WHERE c.is_active = true
+          AND EXISTS (
+            SELECT 1
+            FROM office_deals od
+            WHERE od.company_id = c.id
+          )
+      ),
+      company_activity AS (
+        SELECT
+          occ.company_id,
+          MAX(a.occurred_at) AS last_activity_at
+        FROM office_company_context occ
+        LEFT JOIN activities a
+          ON a.company_id = occ.company_id
+          OR a.contact_id IN (
+            SELECT occc.contact_id
+            FROM office_contact_context occc
+            WHERE occc.company_id = occ.company_id
+          )
+          OR EXISTS (
+            SELECT 1
+            FROM office_deals od
+            WHERE od.id = a.deal_id
+              AND od.company_id = occ.company_id
+          )
+        GROUP BY occ.company_id
+      ),
+      ranked_companies AS (
+        SELECT
+          occ.company_id,
+          occ.company_name,
+          COALESCE(ca.last_activity_at, occ.created_at) AS last_touch_at,
+          EXTRACT(DAY FROM (${filters.to}::date + INTERVAL '1 day')::timestamptz - COALESCE(ca.last_activity_at, occ.created_at))::int AS days_since_activity,
+          (
+            SELECT COUNT(*)::int
+            FROM office_deals od
+            WHERE od.company_id = occ.company_id
+              AND od.is_active = true
+              AND od.is_terminal = false
+          ) AS active_deal_count
+        FROM office_company_context occ
+        LEFT JOIN company_activity ca ON ca.company_id = occ.company_id
+      )
+      SELECT
+        COUNT(*) FILTER (WHERE active_deal_count = 0 AND days_since_activity >= 90)::int AS dormant_company_90_count
+      FROM ranked_companies
+    `),
+    tenantDb.execute(sql`
+      WITH
+      ${officeDealContext},
+      office_contact_context AS (
+        SELECT DISTINCT
+          c.id AS contact_id,
+          c.company_id,
           TRIM(CONCAT_WS(' ', c.first_name, c.last_name)) AS contact_name,
           COALESCE(NULLIF(TRIM(c.company_name), ''), COALESCE(comp.name, 'Unassigned')) AS company_name,
-          GREATEST(
-            COALESCE(c.last_contacted_at, c.created_at),
-            COALESCE(ca.last_activity_at, c.created_at)
-          ) AS last_touch_at
+          c.created_at
         FROM contacts c
         LEFT JOIN companies comp ON comp.id = c.company_id
-        LEFT JOIN contact_activity ca ON ca.contact_id = c.id
         WHERE c.is_active = true
-          ${contactOfficeFilter}
-          ${contactRegionFilter}
-          ${contactRepFilter}
-          ${contactSourceFilter}
+          AND EXISTS (
+            SELECT 1
+            FROM contact_deal_associations cda
+            JOIN office_deals od ON od.id = cda.deal_id
+            WHERE cda.contact_id = c.id
+          )
+      ),
+      contact_activity AS (
+        SELECT
+          occ.contact_id,
+          MAX(a.occurred_at) AS last_activity_at
+        FROM office_contact_context occ
+        LEFT JOIN activities a
+          ON a.contact_id = occ.contact_id
+          OR a.company_id = occ.company_id
+          OR EXISTS (
+            SELECT 1
+            FROM office_deals od
+            WHERE od.id = a.deal_id
+              AND od.company_id = occ.company_id
+          )
+        GROUP BY occ.contact_id
       ),
       ranked_contacts AS (
         SELECT
-          contact_id,
-          contact_name,
-          company_name,
-          last_touch_at,
-          EXTRACT(DAY FROM (${filters.to}::date + INTERVAL '1 day')::timestamptz - last_touch_at)::int AS days_since_touch
-        FROM scoped_contacts
+          occ.contact_id,
+          occ.contact_name,
+          occ.company_name,
+          GREATEST(COALESCE(ca.last_activity_at, occ.created_at), occ.created_at) AS last_touch_at,
+          EXTRACT(DAY FROM (${filters.to}::date + INTERVAL '1 day')::timestamptz - GREATEST(COALESCE(ca.last_activity_at, occ.created_at), occ.created_at))::int AS days_since_touch
+        FROM office_contact_context occ
+        LEFT JOIN contact_activity ca ON ca.contact_id = occ.contact_id
       )
       SELECT
         contact_id,
@@ -853,66 +892,69 @@ export async function getDataMiningOverview(
       LIMIT 25
     `),
     tenantDb.execute(sql`
-      WITH company_activity AS (
-        SELECT
+      WITH
+      ${officeDealContext},
+      office_contact_context AS (
+        SELECT DISTINCT
+          c.id AS contact_id,
+          c.company_id
+        FROM contacts c
+        WHERE c.is_active = true
+          AND EXISTS (
+            SELECT 1
+            FROM contact_deal_associations cda
+            JOIN office_deals od ON od.id = cda.deal_id
+            WHERE cda.contact_id = c.id
+          )
+      ),
+      office_company_context AS (
+        SELECT DISTINCT
           c.id AS company_id,
           COALESCE(NULLIF(TRIM(c.name), ''), 'Unassigned') AS company_name,
-          COALESCE(MAX(a.occurred_at), c.created_at) AS last_activity_at,
-          COALESCE(MAX(ct.last_contacted_at), c.created_at) AS last_contact_at,
-          COUNT(DISTINCT d.id) FILTER (WHERE d.is_active = true AND NOT psc.is_terminal)::int AS active_deal_count
+          c.created_at
         FROM companies c
-        LEFT JOIN activities a ON a.company_id = c.id
-        LEFT JOIN contacts ct ON ct.company_id = c.id AND ct.is_active = true
-        LEFT JOIN deals d ON d.company_id = c.id
-        LEFT JOIN pipeline_stage_config psc ON psc.id = d.stage_id
         WHERE c.is_active = true
-          ${companyOfficeFilter}
-          ${companyRegionFilter}
-          ${companyRepFilter}
-          ${companySourceFilter}
-        GROUP BY c.id, c.name, c.created_at
+          AND EXISTS (
+            SELECT 1
+            FROM office_deals od
+            WHERE od.company_id = c.id
+          )
+      ),
+      company_activity AS (
+        SELECT
+          occ.company_id,
+          MAX(a.occurred_at) AS last_activity_at
+        FROM office_company_context occ
+        LEFT JOIN activities a
+          ON a.company_id = occ.company_id
+          OR a.contact_id IN (
+            SELECT occc.contact_id
+            FROM office_contact_context occc
+            WHERE occc.company_id = occ.company_id
+          )
+          OR EXISTS (
+            SELECT 1
+            FROM office_deals od
+            WHERE od.id = a.deal_id
+              AND od.company_id = occ.company_id
+          )
+        GROUP BY occ.company_id
       ),
       ranked_companies AS (
         SELECT
-          company_id,
-          company_name,
-          active_deal_count,
-          GREATEST(last_activity_at, last_contact_at) AS last_touch_at,
-          EXTRACT(DAY FROM (${filters.to}::date + INTERVAL '1 day')::timestamptz - GREATEST(last_activity_at, last_contact_at))::int AS days_since_activity
-        FROM company_activity
-      )
-      SELECT
-        COUNT(*) FILTER (WHERE active_deal_count = 0 AND days_since_activity >= 90)::int AS dormant_company_90_count
-      FROM ranked_companies
-    `),
-    tenantDb.execute(sql`
-      WITH company_activity AS (
-        SELECT
-          c.id AS company_id,
-          COALESCE(NULLIF(TRIM(c.name), ''), 'Unassigned') AS company_name,
-          COALESCE(MAX(a.occurred_at), c.created_at) AS last_activity_at,
-          COALESCE(MAX(ct.last_contacted_at), c.created_at) AS last_contact_at,
-          COUNT(DISTINCT d.id) FILTER (WHERE d.is_active = true AND NOT psc.is_terminal)::int AS active_deal_count
-        FROM companies c
-        LEFT JOIN activities a ON a.company_id = c.id
-        LEFT JOIN contacts ct ON ct.company_id = c.id AND ct.is_active = true
-        LEFT JOIN deals d ON d.company_id = c.id
-        LEFT JOIN pipeline_stage_config psc ON psc.id = d.stage_id
-        WHERE c.is_active = true
-          ${companyOfficeFilter}
-          ${companyRegionFilter}
-          ${companyRepFilter}
-          ${companySourceFilter}
-        GROUP BY c.id, c.name, c.created_at
-      ),
-      ranked_companies AS (
-        SELECT
-          company_id,
-          company_name,
-          active_deal_count,
-          GREATEST(last_activity_at, last_contact_at) AS last_touch_at,
-          EXTRACT(DAY FROM (${filters.to}::date + INTERVAL '1 day')::timestamptz - GREATEST(last_activity_at, last_contact_at))::int AS days_since_activity
-        FROM company_activity
+          occ.company_id,
+          occ.company_name,
+          COALESCE(ca.last_activity_at, occ.created_at) AS last_touch_at,
+          EXTRACT(DAY FROM (${filters.to}::date + INTERVAL '1 day')::timestamptz - COALESCE(ca.last_activity_at, occ.created_at))::int AS days_since_activity,
+          (
+            SELECT COUNT(*)::int
+            FROM office_deals od
+            WHERE od.company_id = occ.company_id
+              AND od.is_active = true
+              AND od.is_terminal = false
+          ) AS active_deal_count
+        FROM office_company_context occ
+        LEFT JOIN company_activity ca ON ca.company_id = occ.company_id
       )
       SELECT
         company_id,

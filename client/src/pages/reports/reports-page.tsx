@@ -1,4 +1,5 @@
 import { useMemo, useRef, useState } from "react";
+import { useAuth } from "@/lib/auth";
 import {
   useSavedReports,
   executeLockedReport,
@@ -204,6 +205,10 @@ function formatCurrency(n: number): string {
   if (n >= 1_000_000) return `$${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `$${(n / 1_000).toFixed(0)}K`;
   return `$${n.toLocaleString()}`;
+}
+
+export function canViewDataMiningSection(role?: string | null): boolean {
+  return role === "director";
 }
 
 // ---------------------------------------------------------------------------
@@ -555,11 +560,12 @@ export function ReportsPage() {
     error: workflowOverviewError,
     refetch: refetchWorkflowOverview,
   } = useUnifiedWorkflowOverview();
+  const canViewDataMining = canViewDataMiningSection(user?.role);
   const {
     data: dataMiningOverview,
     loading: dataMiningLoading,
     error: dataMiningError,
-  } = useDataMiningOverview();
+  } = useDataMiningOverview({}, { enabled: canViewDataMining });
 
   // --- UI state ---
   const [showReportDrawer, setShowReportDrawer] = useState(false);
@@ -836,6 +842,7 @@ export function ReportsPage() {
           <WorkflowOverviewPanel data={workflowOverview} loading={workflowOverviewLoading} />
         </div>
 
+        {user?.role === "director" && <SourcePerformanceSection />}
         {user?.role === "director" && <SourcePerformanceSection />}
 
         {canViewDataMining && (

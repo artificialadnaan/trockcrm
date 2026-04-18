@@ -308,12 +308,23 @@ export async function executeDataMiningOverview(options: AnalyticsQueryOptions =
   return api<{ data: DataMiningOverview }>(`/reports/data-mining${qs ? `?${qs}` : ""}`);
 }
 
-export function useDataMiningOverview(options: AnalyticsQueryOptions = {}) {
+export function useDataMiningOverview(
+  options: AnalyticsQueryOptions = {},
+  settings: { enabled?: boolean } = {}
+) {
   const [data, setData] = useState<DataMiningOverview | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const enabled = settings.enabled ?? true;
 
   const fetchOverview = useCallback(async () => {
+    if (!enabled) {
+      setData(null);
+      setLoading(false);
+      setError(null);
+      return;
+    }
+
     setLoading(true);
     setError(null);
     try {
@@ -324,7 +335,7 @@ export function useDataMiningOverview(options: AnalyticsQueryOptions = {}) {
     } finally {
       setLoading(false);
     }
-  }, [options.from, options.to, options.officeId, options.regionId, options.repId, options.source, options.includeDd]);
+  }, [enabled, options.from, options.to, options.officeId, options.regionId, options.repId, options.source, options.includeDd]);
 
   useEffect(() => {
     fetchOverview();
