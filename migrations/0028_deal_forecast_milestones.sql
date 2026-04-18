@@ -118,7 +118,7 @@ BEGIN
        JOIN %I.deals d ON d.id = dsh.deal_id
        JOIN public.pipeline_stage_config psc ON psc.id = dsh.to_stage_id
        WHERE psc.slug = ''dd''
-       GROUP BY dsh.deal_id, d.workflow_route, d.expected_close_date, d.dd_estimate, d.bid_estimate, d.awarded_amount, d.source
+       GROUP BY dsh.deal_id, d.assigned_rep_id, d.workflow_route, d.expected_close_date, d.dd_estimate, d.bid_estimate, d.awarded_amount, d.source
        ON CONFLICT (deal_id, milestone_key) DO NOTHING',
       schema_name,
       schema_name,
@@ -163,7 +163,7 @@ BEGIN
        JOIN %I.deals d ON d.id = dsh.deal_id
        JOIN public.pipeline_stage_config psc ON psc.id = dsh.to_stage_id
        WHERE psc.slug = ''estimating''
-       GROUP BY dsh.deal_id, d.workflow_route, d.expected_close_date, d.dd_estimate, d.bid_estimate, d.awarded_amount, d.source
+       GROUP BY dsh.deal_id, d.assigned_rep_id, d.workflow_route, d.expected_close_date, d.dd_estimate, d.bid_estimate, d.awarded_amount, d.source
        ON CONFLICT (deal_id, milestone_key) DO NOTHING',
       schema_name,
       schema_name,
