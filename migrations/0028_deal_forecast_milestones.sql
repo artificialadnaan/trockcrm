@@ -46,7 +46,7 @@ BEGIN
          captured_by UUID,
          assigned_rep_id UUID NOT NULL,
          stage_id UUID,
-         workflow_route %I.workflow_route NOT NULL,
+         workflow_route VARCHAR(32) NOT NULL,
          expected_close_date DATE,
          dd_estimate NUMERIC(14, 2),
          bid_estimate NUMERIC(14, 2),
@@ -196,7 +196,7 @@ BEGIN
          a.changed_by,
          d.assigned_rep_id,
          NULLIF(a.full_row->>''stage_id'', '''')::uuid,
-         COALESCE(NULLIF(a.full_row->>''workflow_route'', ''''), d.workflow_route::text)::%I.workflow_route,
+         COALESCE(NULLIF(a.full_row->>''workflow_route'', ''''), d.workflow_route::text),
          NULLIF(a.full_row->>''expected_close_date'', '''')::date,
          NULLIF(a.full_row->>''dd_estimate'', '''')::numeric,
          NULLIF(a.full_row->>''bid_estimate'', '''')::numeric,
@@ -215,7 +215,6 @@ BEGIN
          AND a.action = ''insert''
          AND a.full_row IS NOT NULL
        ON CONFLICT (deal_id, milestone_key) DO NOTHING',
-      schema_name,
       schema_name,
       schema_name,
       schema_name,

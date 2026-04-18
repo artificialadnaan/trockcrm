@@ -9,7 +9,7 @@ import {
   index,
   uniqueIndex,
 } from "drizzle-orm/pg-core";
-import { deals, workflowRouteEnum } from "./deals.js";
+import { deals } from "./deals.js";
 
 export const forecastMilestoneKeyEnum = pgEnum("forecast_milestone_key", [
   "initial",
@@ -33,7 +33,7 @@ export const dealForecastMilestones = pgTable(
     capturedBy: uuid("captured_by"),
     assignedRepId: uuid("assigned_rep_id").notNull(),
     stageId: uuid("stage_id"),
-    workflowRoute: workflowRouteEnum("workflow_route").notNull(),
+    workflowRoute: varchar("workflow_route", { length: 32 }).notNull(),
     expectedCloseDate: date("expected_close_date"),
     ddEstimate: numeric("dd_estimate", { precision: 14, scale: 2 }),
     bidEstimate: numeric("bid_estimate", { precision: 14, scale: 2 }),
