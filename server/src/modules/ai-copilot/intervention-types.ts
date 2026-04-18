@@ -159,6 +159,87 @@ export interface InterventionAnalyticsBreachRow {
 }
 
 export interface InterventionOutcomeEffectiveness {
+  summaryByConclusionFamily: Array<{
+    key: "resolve" | "snooze" | "escalate";
+    label: string;
+    volume: number;
+    reopenRate: number | null;
+    durableCloseRate: number | null;
+    medianDaysToReopen: number | null;
+    averageDaysToDurableClose: number | null;
+    queueLink: string;
+  }>;
+  resolveReasonPerformance: Array<{
+    key: string;
+    label: string;
+    volume: number;
+    reopenRate: number | null;
+    durableCloseRate: number | null;
+    medianDaysToReopen: number | null;
+    averageDaysToDurableClose: number | null;
+    queueLink: string;
+  }>;
+  snoozeReasonPerformance: Array<{
+    key: string;
+    label: string;
+    volume: number;
+    reopenRate: number | null;
+    durableCloseRate: number | null;
+    medianDaysToReopen: number | null;
+    averageDaysToDurableClose: number | null;
+    queueLink: string;
+  }>;
+  escalationReasonPerformance: Array<{
+    key: string;
+    label: string;
+    volume: number;
+    reopenRate: number | null;
+    durableCloseRate: number | null;
+    medianDaysToReopen: number | null;
+    averageDaysToDurableClose: number | null;
+    queueLink: string;
+  }>;
+  escalationTargetPerformance: Array<{
+    key: string;
+    label: string;
+    volume: number;
+    reopenRate: number | null;
+    durableCloseRate: number | null;
+    medianDaysToReopen: number | null;
+    averageDaysToDurableClose: number | null;
+    queueLink: string;
+  }>;
+  disconnectTypeInteractions: Array<{
+    disconnectType: string;
+    conclusionFamily: "resolve" | "snooze" | "escalate";
+    volume: number;
+    reopenRate: number | null;
+    durableCloseRate: number | null;
+    queueLink: string;
+  }>;
+  assigneeEffectiveness: Array<{
+    assigneeId: string | null;
+    assigneeName: string | null;
+    volume: number;
+    resolveCount: number;
+    snoozeCount: number;
+    escalateCount: number;
+    reopenRate: number | null;
+    durableCloseRate: number | null;
+    queueLink: string | null;
+  }>;
+  warnings: Array<{
+    kind:
+      | "snooze_reopen_risk"
+      | "escalation_reason_weak_close_through"
+      | "escalation_target_weak_close_through"
+      | "administrative_close_pattern";
+    key: string;
+    label: string;
+    volume: number;
+    rate: number | null;
+    queueLink: string;
+  }>;
   reopenRateByConclusionFamily: Record<"resolve" | "snooze" | "escalate", number | null>;
   reopenRateByResolveCategory: Array<{ key: string; rate: number | null; count: number }>;
   reopenRateBySnoozeReason: Array<{ key: string; rate: number | null; count: number }>;
