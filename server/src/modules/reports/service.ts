@@ -30,6 +30,43 @@ function defaultDateRange(from?: string, to?: string): { from: string; to: strin
 
 const LEAD_STALE_THRESHOLD_DAYS = 14;
 
+export interface AnalyticsFilterInput {
+  from?: string;
+  to?: string;
+  officeId?: string;
+  regionId?: string;
+  repId?: string;
+  source?: string;
+}
+
+export interface NormalizedAnalyticsFilters {
+  from: string;
+  to: string;
+  officeId?: string;
+  regionId?: string;
+  repId?: string;
+  source?: string;
+}
+
+function normalizeAnalyticsValue(value?: string): string | undefined {
+  const normalized = value?.trim();
+  return normalized ? normalized : undefined;
+}
+
+export function normalizeAnalyticsFilters(
+  input: AnalyticsFilterInput = {}
+): NormalizedAnalyticsFilters {
+  const { from, to } = defaultDateRange(input.from, input.to);
+  return {
+    from,
+    to,
+    officeId: normalizeAnalyticsValue(input.officeId),
+    regionId: normalizeAnalyticsValue(input.regionId),
+    repId: normalizeAnalyticsValue(input.repId),
+    source: normalizeAnalyticsValue(input.source),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // 1. Pipeline Summary by Stage
 // ---------------------------------------------------------------------------
@@ -550,13 +587,25 @@ export interface LeadSourceROIRow {
  */
 export async function getLeadSourceROI(
   tenantDb: TenantDb,
-  options: { from?: string; to?: string } = {}
+  options: AnalyticsFilterInput = {}
 ): Promise<LeadSourceROIRow[]> {
-  const { from, to } = defaultDateRange(options.from, options.to);
+  const filters = normalizeAnalyticsFilters(options);
+  const officeFilter = filters.officeId
+    ? sql`AND dsi.office_id = ${filters.officeId}`
+    : sql``;
+  const regionFilter = filters.regionId
+    ? sql`AND d.region_id = ${filters.regionId}`
+    : sql``;
+  const repFilter = filters.repId
+    ? sql`AND d.assigned_rep_id = ${filters.repId}`
+    : sql``;
+  const sourceFilter = filters.source
+    ? sql`AND COALESCE(NULLIF(TRIM(d.source), ''), 'Unknown') = ${filters.source}`
+    : sql``;
 
   const result = await tenantDb.execute(sql`
     SELECT
-      COALESCE(d.source, 'Unknown') AS source,
+      COALESCE(NULLIF(TRIM(d.source), ''), 'Unknown') AS source,
       COUNT(*)::int AS total_deals,
       COUNT(*) FILTER (WHERE d.is_active = true AND NOT psc.is_terminal)::int AS active_deals,
       COUNT(*) FILTER (WHERE psc.slug = 'closed_won')::int AS won_deals,
@@ -568,10 +617,15 @@ export async function getLeadSourceROI(
         COALESCE(d.awarded_amount, d.bid_estimate, 0)
       ) FILTER (WHERE psc.slug = 'closed_won'), 0)::numeric AS won_value
     FROM deals d
+    LEFT JOIN deal_scoping_intake dsi ON dsi.deal_id = d.id
     JOIN pipeline_stage_config psc ON psc.id = d.stage_id
-    WHERE d.created_at >= ${from}::timestamptz
-      AND d.created_at <= (${to}::date + INTERVAL '1 day')::timestamptz
-    GROUP BY COALESCE(d.source, 'Unknown')
+    WHERE d.created_at >= ${filters.from}::timestamptz
+      AND d.created_at <= (${filters.to}::date + INTERVAL '1 day')::timestamptz
+      ${officeFilter}
+      ${regionFilter}
+      ${repFilter}
+      ${sourceFilter}
+    GROUP BY COALESCE(NULLIF(TRIM(d.source), ''), 'Unknown')
     ORDER BY won_value DESC
   `);
 
@@ -947,16 +1001,62 @@ export interface UnifiedWorkflowOverview {
 
 export async function getUnifiedWorkflowOverview(
   tenantDb: TenantDb,
-  options: { repId?: string } = {}
+  options: AnalyticsFilterInput = {}
 ): Promise<UnifiedWorkflowOverview> {
-  const leadRepFilter = options.repId
-    ? sql`AND (dsi.created_by = ${options.repId} OR dsi.last_edited_by = ${options.repId})`
+  const filters = normalizeAnalyticsFilters(options);
+  const leadRepFilter = filters.repId
+    ? sql`AND (dsi.created_by = ${filters.repId} OR dsi.last_edited_by = ${filters.repId})`
     : sql``;
-  const dealRepFilter = options.repId
-    ? sql`AND d.assigned_rep_id = ${options.repId}`
+  const leadOfficeFilter = filters.officeId
+    ? sql`AND dsi.office_id = ${filters.officeId}`
     : sql``;
-  const activityRepFilter = options.repId
-    ? sql`AND a.responsible_user_id = ${options.repId}`
+  const leadRegionFilter = filters.regionId
+    ? sql`AND d.region_id = ${filters.regionId}`
+    : sql``;
+  const leadSourceFilter = filters.source
+    ? sql`AND COALESCE(NULLIF(TRIM(d.source), ''), 'Unknown') = ${filters.source}`
+    : sql``;
+  const dealRepFilter = filters.repId
+    ? sql`AND d.assigned_rep_id = ${filters.repId}`
+    : sql``;
+  const dealOfficeFilter = filters.officeId
+    ? sql`AND dsi.office_id = ${filters.officeId}`
+    : sql``;
+  const dealRegionFilter = filters.regionId
+    ? sql`AND d.region_id = ${filters.regionId}`
+    : sql``;
+  const dealSourceFilter = filters.source
+    ? sql`AND COALESCE(NULLIF(TRIM(d.source), ''), 'Unknown') = ${filters.source}`
+    : sql``;
+  const activityRepFilter = filters.repId
+    ? sql`AND a.responsible_user_id = ${filters.repId}`
+    : sql``;
+  const activityOfficeFilter = filters.officeId
+    ? sql`AND dsi.office_id = ${filters.officeId}`
+    : sql``;
+  const activityRegionFilter = filters.regionId
+    ? sql`AND d.region_id = ${filters.regionId}`
+    : sql``;
+  const activitySourceFilter = filters.source
+    ? sql`AND COALESCE(NULLIF(TRIM(d.source), ''), 'Unknown') = ${filters.source}`
+    : sql``;
+  const staleLeadOfficeFilter = filters.officeId
+    ? sql`AND dsi.office_id = ${filters.officeId}`
+    : sql``;
+  const staleLeadRegionFilter = filters.regionId
+    ? sql`AND d.region_id = ${filters.regionId}`
+    : sql``;
+  const staleLeadSourceFilter = filters.source
+    ? sql`AND COALESCE(NULLIF(TRIM(d.source), ''), 'Unknown') = ${filters.source}`
+    : sql``;
+  const staleDealOfficeFilter = filters.officeId
+    ? sql`AND dsi.office_id = ${filters.officeId}`
+    : sql``;
+  const staleDealRegionFilter = filters.regionId
+    ? sql`AND d.region_id = ${filters.regionId}`
+    : sql``;
+  const staleDealSourceFilter = filters.source
+    ? sql`AND COALESCE(NULLIF(TRIM(d.source), ''), 'Unknown') = ${filters.source}`
     : sql``;
 
   const [
@@ -973,8 +1073,12 @@ export async function getUnifiedWorkflowOverview(
         dsi.status AS validation_status,
         COUNT(*)::int AS intake_count
       FROM deal_scoping_intake dsi
+      JOIN deals d ON d.id = dsi.deal_id
       WHERE dsi.workflow_route_snapshot IN ('estimating', 'service')
         ${leadRepFilter}
+        ${leadOfficeFilter}
+        ${leadRegionFilter}
+        ${leadSourceFilter}
       GROUP BY dsi.workflow_route_snapshot, dsi.status
       ORDER BY dsi.workflow_route_snapshot ASC, dsi.status ASC
     `),
@@ -993,8 +1097,12 @@ export async function getUnifiedWorkflowOverview(
         )::int AS stale_deal_count
       FROM deals d
       JOIN pipeline_stage_config psc ON psc.id = d.stage_id
+      LEFT JOIN deal_scoping_intake dsi ON dsi.deal_id = d.id
       WHERE d.workflow_route IN ('estimating', 'service')
         ${dealRepFilter}
+        ${dealOfficeFilter}
+        ${dealRegionFilter}
+        ${dealSourceFilter}
       GROUP BY d.workflow_route
       ORDER BY d.workflow_route ASC
     `),
@@ -1011,7 +1119,7 @@ export async function getUnifiedWorkflowOverview(
             COALESCE(LOWER(NULLIF(TRIM(d.property_city), '')), '') || '|' ||
             COALESCE(LOWER(NULLIF(TRIM(d.property_state), '')), '') || '|' ||
             COALESCE(LOWER(NULLIF(TRIM(d.property_zip), '')), '')
-        END)::int AS property_count,
+          END)::int AS property_count,
         COUNT(*)::int AS deal_count,
         COUNT(*) FILTER (WHERE d.is_active = true AND NOT psc.is_terminal)::int AS active_deal_count,
         COUNT(*) FILTER (WHERE d.workflow_route = 'estimating' AND NOT psc.is_terminal)::int AS standard_deal_count,
@@ -1025,6 +1133,9 @@ export async function getUnifiedWorkflowOverview(
       JOIN pipeline_stage_config psc ON psc.id = d.stage_id
       WHERE TRUE
         ${dealRepFilter}
+        ${dealOfficeFilter}
+        ${dealRegionFilter}
+        ${dealSourceFilter}
       GROUP BY d.company_id, c.name
       ORDER BY total_value DESC, company_name ASC
     `),
@@ -1045,6 +1156,9 @@ export async function getUnifiedWorkflowOverview(
         LEFT JOIN deal_scoping_intake dsi ON dsi.deal_id = d.id
         WHERE a.occurred_at <= (NOW() + INTERVAL '1 day')
           ${activityRepFilter}
+          ${activityOfficeFilter}
+          ${activityRegionFilter}
+          ${activitySourceFilter}
       )
       SELECT
         rep_id,
@@ -1078,6 +1192,9 @@ export async function getUnifiedWorkflowOverview(
       WHERE dsi.status IN ('draft', 'ready')
         AND EXTRACT(DAY FROM NOW() - COALESCE(dsi.first_ready_at, dsi.last_autosaved_at, dsi.created_at)) > ${LEAD_STALE_THRESHOLD_DAYS}
         ${leadRepFilter}
+        ${staleLeadOfficeFilter}
+        ${staleLeadRegionFilter}
+        ${staleLeadSourceFilter}
       ORDER BY age_in_days DESC, lead_name ASC
     `),
     tenantDb.execute(sql`
@@ -1094,11 +1211,15 @@ export async function getUnifiedWorkflowOverview(
       FROM deals d
       JOIN pipeline_stage_config psc ON psc.id = d.stage_id
       JOIN users u ON u.id = d.assigned_rep_id
+      LEFT JOIN deal_scoping_intake dsi ON dsi.deal_id = d.id
       WHERE d.is_active = true
         AND psc.is_terminal = false
         AND psc.stale_threshold_days IS NOT NULL
         AND EXTRACT(DAY FROM NOW() - d.stage_entered_at) > psc.stale_threshold_days
         ${dealRepFilter}
+        ${staleDealOfficeFilter}
+        ${staleDealRegionFilter}
+        ${staleDealSourceFilter}
       ORDER BY days_in_stage DESC, deal_name ASC
     `),
   ]);

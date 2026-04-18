@@ -18,8 +18,9 @@ import {
   getPipelineByRep,
   executeCustomReport,
   getRepPerformanceComparison,
+  normalizeAnalyticsFilters,
 } from "./service.js";
-import type { ReportConfig } from "./service.js";
+import type { AnalyticsFilterInput, ReportConfig } from "./service.js";
 import {
   getSavedReports,
   getSavedReportById,
@@ -30,6 +31,21 @@ import {
 } from "./saved-reports-service.js";
 
 const router = Router();
+
+function readQueryString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+export function parseAnalyticsFilters(query: Record<string, unknown>): AnalyticsFilterInput {
+  return normalizeAnalyticsFilters({
+    from: readQueryString(query.from),
+    to: readQueryString(query.to),
+    officeId: readQueryString(query.officeId),
+    regionId: readQueryString(query.regionId),
+    repId: readQueryString(query.repId),
+    source: readQueryString(query.source),
+  });
+}
 
 // -------------------------------------------------------------------------
 // Locked report execution endpoints
@@ -120,8 +136,11 @@ router.get("/activity-summary", requireDirector, async (req, res, next) => {
 // GET /api/reports/workflow-overview
 router.get("/workflow-overview", async (req, res, next) => {
   try {
-    const repId = req.user!.role === "rep" ? req.user!.id : undefined;
-    const data = await getUnifiedWorkflowOverview(req.tenantDb!, { repId });
+    const parsedFilters = parseAnalyticsFilters(req.query as Record<string, unknown>);
+    const data = await getUnifiedWorkflowOverview(req.tenantDb!, {
+      ...parsedFilters,
+      repId: req.user!.role === "rep" ? req.user!.id : parsedFilters.repId,
+    });
     await req.commitTransaction!();
     res.json({ data });
   } catch (err) {
@@ -177,10 +196,7 @@ router.get("/revenue-by-type", requireDirector, async (req, res, next) => {
 // GET /api/reports/lead-source-roi?from=2026-01-01&to=2026-12-31
 router.get("/lead-source-roi", requireDirector, async (req, res, next) => {
   try {
-    const data = await getLeadSourceROI(req.tenantDb!, {
-      from: req.query.from as string | undefined,
-      to: req.query.to as string | undefined,
-    });
+    const data = await getLeadSourceROI(req.tenantDb!, parseAnalyticsFilters(req.query as Record<string, unknown>));
     await req.commitTransaction!();
     res.json({ data });
   } catch (err) {

@@ -30,6 +30,16 @@ export interface ReportConfig {
   includeDd?: boolean;
 }
 
+export interface AnalyticsQueryOptions {
+  from?: string;
+  to?: string;
+  officeId?: string;
+  regionId?: string;
+  repId?: string;
+  source?: string;
+  includeDd?: boolean;
+}
+
 export interface UnifiedLeadPipelineSummaryRow {
   workflowRoute: "estimating" | "service";
   validationStatus: string;
@@ -152,15 +162,19 @@ export async function deleteSavedReport(reportId: string) {
 }
 
 /** Execute a locked report by its reportType */
-export async function executeLockedReport(
-  reportType: string,
-  options: { from?: string; to?: string; repId?: string; includeDd?: boolean } = {}
-) {
-  const params = new URLSearchParams();
+function appendAnalyticsQueryOptions(params: URLSearchParams, options: AnalyticsQueryOptions) {
   if (options.from) params.set("from", options.from);
   if (options.to) params.set("to", options.to);
+  if (options.officeId) params.set("officeId", options.officeId);
+  if (options.regionId) params.set("regionId", options.regionId);
   if (options.repId) params.set("repId", options.repId);
+  if (options.source) params.set("source", options.source);
   if (options.includeDd) params.set("includeDd", "true");
+}
+
+export async function executeLockedReport(reportType: string, options: AnalyticsQueryOptions = {}) {
+  const params = new URLSearchParams();
+  appendAnalyticsQueryOptions(params, options);
   const qs = params.toString();
 
   const endpointMap: Record<string, string> = {
@@ -183,16 +197,15 @@ export async function executeLockedReport(
   return api<{ data: any }>(`${endpoint}${qs ? `?${qs}` : ""}`);
 }
 
-export async function executeWorkflowOverview(options: { from?: string; to?: string } = {}) {
+export async function executeWorkflowOverview(options: AnalyticsQueryOptions = {}) {
   const params = new URLSearchParams();
-  if (options.from) params.set("from", options.from);
-  if (options.to) params.set("to", options.to);
+  appendAnalyticsQueryOptions(params, options);
   const qs = params.toString();
 
   return api<{ data: UnifiedWorkflowOverview }>(`/reports/workflow-overview${qs ? `?${qs}` : ""}`);
 }
 
-export function useUnifiedWorkflowOverview(options: { from?: string; to?: string } = {}) {
+export function useUnifiedWorkflowOverview(options: AnalyticsQueryOptions = {}) {
   const [data, setData] = useState<UnifiedWorkflowOverview | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -208,7 +221,7 @@ export function useUnifiedWorkflowOverview(options: { from?: string; to?: string
     } finally {
       setLoading(false);
     }
-  }, [options.from, options.to]);
+  }, [options.from, options.to, options.officeId, options.regionId, options.repId, options.source, options.includeDd]);
 
   useEffect(() => {
     fetchOverview();
