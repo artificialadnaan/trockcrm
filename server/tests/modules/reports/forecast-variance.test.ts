@@ -141,6 +141,21 @@ describe("forecast variance reporting", () => {
     expect(queryText).toContain("d.assigned_rep_id");
     expect(queryText).toContain("d.source");
   });
+
+  it("joins closed-won milestones before joining reps", async () => {
+    const { getForecastVarianceOverview } = await import("../../../src/modules/reports/service.js");
+    const tenantDb = createMockTenantDb([[], [], []]);
+
+    await getForecastVarianceOverview(tenantDb, {});
+
+    const queryText = extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase();
+    const cwJoinIndex = queryText.indexOf("join deal_forecast_milestones cw");
+    const userJoinIndex = queryText.indexOf("join users u on u.id = cw.assigned_rep_id");
+
+    expect(cwJoinIndex).toBeGreaterThan(-1);
+    expect(userJoinIndex).toBeGreaterThan(-1);
+    expect(cwJoinIndex).toBeLessThan(userJoinIndex);
+  });
 });
 
 describe("forecast variance route", () => {

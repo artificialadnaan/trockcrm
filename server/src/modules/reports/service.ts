@@ -169,11 +169,11 @@ export async function getForecastVarianceOverview(
         cw.captured_at AS closed_won_captured_at
       FROM deals d
       JOIN deal_scoping_intake dsi ON dsi.deal_id = d.id
-      JOIN users u ON u.id = cw.assigned_rep_id
       JOIN public.pipeline_stage_config current_stage ON current_stage.id = d.stage_id
       JOIN deal_forecast_milestones cw
         ON cw.deal_id = d.id
        AND cw.milestone_key = 'closed_won'
+      JOIN users u ON u.id = cw.assigned_rep_id
       LEFT JOIN deal_forecast_milestones initial
         ON initial.deal_id = d.id
        AND initial.milestone_key = 'initial'
@@ -209,11 +209,11 @@ export async function getForecastVarianceOverview(
         estimating.forecast_amount AS estimating_forecast
       FROM deals d
       JOIN deal_scoping_intake dsi ON dsi.deal_id = d.id
-      JOIN users u ON u.id = cw.assigned_rep_id
       JOIN public.pipeline_stage_config current_stage ON current_stage.id = d.stage_id
       JOIN deal_forecast_milestones cw
         ON cw.deal_id = d.id
        AND cw.milestone_key = 'closed_won'
+      JOIN users u ON u.id = cw.assigned_rep_id
       LEFT JOIN deal_forecast_milestones initial
         ON initial.deal_id = d.id
        AND initial.milestone_key = 'initial'
@@ -254,11 +254,11 @@ export async function getForecastVarianceOverview(
         estimating.forecast_amount AS estimating_forecast
       FROM deals d
       JOIN deal_scoping_intake dsi ON dsi.deal_id = d.id
-      JOIN users u ON u.id = cw.assigned_rep_id
       JOIN public.pipeline_stage_config current_stage ON current_stage.id = d.stage_id
       JOIN deal_forecast_milestones cw
         ON cw.deal_id = d.id
        AND cw.milestone_key = 'closed_won'
+      JOIN users u ON u.id = cw.assigned_rep_id
       LEFT JOIN deal_forecast_milestones initial
         ON initial.deal_id = d.id
        AND initial.milestone_key = 'initial'
