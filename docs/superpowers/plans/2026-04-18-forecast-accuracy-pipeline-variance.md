@@ -22,18 +22,13 @@
 
 ```ts
 import { describe, expect, it } from "vitest";
+import { deriveForecastAmount } from "../../../src/modules/reports/forecast-milestones-service.js";
 
 describe("deal forecast milestones", () => {
-  it("captures one milestone row per deal and milestone key", async () => {
-    const inserted = [
-      { dealId: "deal-1", milestoneKey: "initial", forecastAmount: 120000 },
-      { dealId: "deal-1", milestoneKey: "initial", forecastAmount: 125000 },
-    ];
-
-    const uniqueMilestones = new Map(inserted.map((row) => [`${row.dealId}:${row.milestoneKey}`, row]));
-
-    expect(uniqueMilestones.size).toBe(1);
-    expect(uniqueMilestones.get("deal-1:initial")?.forecastAmount).toBe(125000);
+  it("derives forecast amount from awarded, bid, then dd values", () => {
+    expect(deriveForecastAmount({ awardedAmount: "150000", bidEstimate: "120000", ddEstimate: "90000" })).toBe(150000);
+    expect(deriveForecastAmount({ awardedAmount: null, bidEstimate: "120000", ddEstimate: "90000" })).toBe(120000);
+    expect(deriveForecastAmount({ awardedAmount: null, bidEstimate: null, ddEstimate: "90000" })).toBe(90000);
   });
 });
 ```
@@ -135,6 +130,8 @@ git commit -m "feat: add deal forecast milestone storage"
 - [ ] **Step 1: Write failing lifecycle tests**
 
 ```ts
+import { captureStageDrivenForecastMilestone, deriveForecastAmount } from "../../../src/modules/reports/forecast-milestones-service.js";
+
 it("captures the initial milestone on deal creation", async () => {
   const createdDeal = {
     id: "deal-1",
@@ -146,23 +143,19 @@ it("captures the initial milestone on deal creation", async () => {
     source: "Trade Show",
   };
 
-  const result = deriveForecastAmount(createdDeal);
-
-  expect(result).toBe(120000);
+  expect(deriveForecastAmount(createdDeal)).toBe(120000);
 });
 
 it("captures qualified, estimating, and closed_won milestones only once", async () => {
-  const transitions = [
-    { from: "lead", to: "dd", expectedMilestone: "qualified" },
-    { from: "dd", to: "estimating", expectedMilestone: "estimating" },
-    { from: "estimating", to: "closed_won", expectedMilestone: "closed_won" },
-  ];
+  const tenantDb = { execute: vi.fn().mockResolvedValue({ rows: [] }) } as any;
+  await captureStageDrivenForecastMilestone(tenantDb, {
+    deal: { id: "deal-1", workflowRoute: "estimating", ddEstimate: "100000", bidEstimate: "120000", awardedAmount: "130000", stageId: "stage-dd" },
+    currentStage: { slug: "lead" },
+    targetStage: { slug: "dd" },
+    userId: "user-1",
+  });
 
-  expect(transitions.map((row) => row.expectedMilestone)).toEqual([
-    "qualified",
-    "estimating",
-    "closed_won",
-  ]);
+  expect(tenantDb.execute).toHaveBeenCalledTimes(1);
 });
 ```
 
@@ -243,42 +236,71 @@ git commit -m "feat: capture forecast milestones during deal lifecycle"
 - [ ] **Step 1: Write failing report service tests**
 
 ```ts
-it("returns forecast variance summary, rep rollups, and deal detail rows", async () => {
-  const summary = {
-    comparableDeals: 3,
-    avgInitialVariance: 15000,
-    avgQualifiedVariance: 10000,
-    avgEstimatingVariance: 4000,
-  };
+import { getForecastVarianceOverview } from "../../../src/modules/reports/service.js";
 
-  expect(summary.comparableDeals).toBe(3);
-  expect(summary.avgInitialVariance).toBeGreaterThan(summary.avgEstimatingVariance);
+it("returns forecast variance summary, rep rollups, and deal detail rows", async () => {
+  const tenantDb = createMockTenantDb([
+    [{ comparable_deals: "3", avg_initial_variance: "15000", avg_qualified_variance: "10000", avg_estimating_variance: "4000", avg_close_drift_days: "12" }],
+    [{ rep_id: "rep-1", rep_name: "Jordan", comparable_deals: "2", avg_initial_variance: "12000", avg_qualified_variance: "8000", avg_estimating_variance: "4000", avg_close_drift_days: "10" }],
+    [{ deal_id: "deal-1", deal_name: "North Plaza", rep_name: "Jordan", workflow_route: "estimating", initial_forecast: "100000", qualified_forecast: "110000", estimating_forecast: "120000", awarded_amount: "125000", initial_variance: "25000", qualified_variance: "15000", estimating_variance: "5000", close_drift_days: "7" }],
+  ]);
+
+  const result = await getForecastVarianceOverview(tenantDb, { officeId: "office-1" });
+
+  expect(result.summary.comparableDeals).toBe(3);
+  expect(result.repRollups[0].repName).toBe("Jordan");
+  expect(result.deals[0].dealName).toBe("North Plaza");
 });
 
 it("scopes forecast variance to the current office and filters", async () => {
-  const filters = {
+  const tenantDb = createMockTenantDb([[], [], []]);
+  await getForecastVarianceOverview(tenantDb, {
     officeId: "office-1",
     regionId: "region-1",
     repId: "rep-1",
     source: "Trade Show",
-  };
+  });
 
-  expect(filters.officeId).toBe("office-1");
-  expect(filters.source).toBe("Trade Show");
+  const queryText = extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase();
+  expect(queryText).toContain("office_id");
+  expect(queryText).toContain("region_id");
+  expect(queryText).toContain("assigned_rep_id");
 });
 ```
 
 - [ ] **Step 2: Write failing route tests**
 
 ```ts
+import express from "express";
+import request from "supertest";
+const { reportRoutes } = await import("../../../src/modules/reports/routes.js");
+
 it("passes active office scope into the forecast variance route", async () => {
-  const user = { officeId: "office-1", activeOfficeId: "office-2" };
-  expect(user.activeOfficeId ?? user.officeId).toBe("office-2");
+  const app = express();
+  app.use((req: any, _res, next) => {
+    req.user = { role: "director", officeId: "office-1", activeOfficeId: "office-2" };
+    req.tenantDb = {};
+    req.commitTransaction = vi.fn().mockResolvedValue(undefined);
+    next();
+  });
+  app.use("/api/reports", reportRoutes);
+
+  const response = await request(app).get("/api/reports/forecast-variance?from=2026-01-01&to=2026-12-31");
+  expect(response.status).toBe(200);
 });
 
 it("blocks reps from forecast variance reporting", async () => {
-  const role = "rep";
-  expect(role === "rep").toBe(true);
+  const app = express();
+  app.use((req: any, _res, next) => {
+    req.user = { role: "rep", officeId: "office-1" };
+    req.tenantDb = {};
+    req.commitTransaction = vi.fn().mockResolvedValue(undefined);
+    next();
+  });
+  app.use("/api/reports", reportRoutes);
+
+  const response = await request(app).get("/api/reports/forecast-variance");
+  expect(response.status).toBe(403);
 });
 ```
 
@@ -352,16 +374,30 @@ git commit -m "feat: add forecast variance reporting"
 - [ ] **Step 1: Write failing client tests**
 
 ```tsx
+import { renderToStaticMarkup } from "react-dom/server";
+import { ForecastVarianceSection } from "./forecast-variance-section";
+
 it("renders forecast variance summary and deal detail rows", () => {
-  const summary = { comparableDeals: 4, avgInitialVariance: 12000 };
-  expect(summary.comparableDeals).toBe(4);
-  expect(summary.avgInitialVariance).toBeGreaterThan(0);
+  const html = renderToStaticMarkup(
+    <ForecastVarianceSection
+      loading={false}
+      data={{
+        summary: { comparableDeals: 4, avgInitialVariance: 12000, avgQualifiedVariance: 8000, avgEstimatingVariance: 3000, avgCloseDriftDays: 6 },
+        repRollups: [],
+        deals: [{ dealId: "deal-1", dealName: "North Plaza", repName: "Jordan", workflowRoute: "estimating", initialForecast: 100000, qualifiedForecast: 110000, estimatingForecast: 120000, awardedAmount: 125000, initialVariance: 25000, qualifiedVariance: 15000, estimatingVariance: 5000, closeDriftDays: 7 }],
+      }}
+    />
+  );
+
+  expect(html).toContain("Forecast Accuracy");
+  expect(html).toContain("North Plaza");
 });
 
 it("builds the forecast variance endpoint with shared analytics filters", async () => {
-  const endpoint = "/reports/forecast-variance?officeId=office-1&source=Trade+Show";
-  expect(endpoint).toContain("forecast-variance");
-  expect(endpoint).toContain("officeId=office-1");
+  const { executeForecastVarianceOverview } = await import("@/hooks/use-reports");
+  await executeForecastVarianceOverview({ officeId: "office-1", source: "Trade Show" });
+
+  expect(mockApi).toHaveBeenCalledWith("/reports/forecast-variance?officeId=office-1&source=Trade+Show");
 });
 ```
 
@@ -419,27 +455,32 @@ git commit -m "feat: add forecast variance analytics section"
 - [ ] **Step 1: Write a failing backfill test**
 
 ```ts
-it("backfills initial only when a create-time audit snapshot exists", async () => {
-  const auditInsertRow = {
-    full_row: {
-      dd_estimate: "90000",
-      bid_estimate: null,
-      awarded_amount: null,
-    },
-  };
+import { buildForecastMilestoneBackfillRows } from "../../../src/modules/reports/forecast-milestones-service.js";
 
-  expect(auditInsertRow.full_row.dd_estimate).toBe("90000");
+it("backfills initial only when a create-time audit snapshot exists", async () => {
+  const rows = buildForecastMilestoneBackfillRows({
+    auditInsertRow: {
+      full_row: { dd_estimate: "90000", bid_estimate: null, awarded_amount: null, workflow_route: "estimating", source: "Trade Show" },
+    },
+    closedWonDealRow: null,
+  });
+
+  expect(rows.map((row) => row.milestoneKey)).toEqual(["initial"]);
 });
 
 it("backfills closed_won from the current deal row as audit_backfill", async () => {
-  const closedWonBackfill = {
-    milestoneKey: "closed_won",
-    captureSource: "audit_backfill",
-    awardedAmount: "125000",
-  };
+  const rows = buildForecastMilestoneBackfillRows({
+    auditInsertRow: null,
+    closedWonDealRow: {
+      awardedAmount: "125000",
+      workflowRoute: "estimating",
+      actualCloseDate: "2026-04-01",
+      source: "Trade Show",
+    },
+  });
 
-  expect(closedWonBackfill.captureSource).toBe("audit_backfill");
-  expect(closedWonBackfill.awardedAmount).toBe("125000");
+  expect(rows[0].milestoneKey).toBe("closed_won");
+  expect(rows[0].captureSource).toBe("audit_backfill");
 });
 ```
 
