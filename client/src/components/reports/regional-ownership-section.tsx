@@ -1,4 +1,5 @@
 import { Badge } from "@/components/ui/badge";
+import { PipelineBarChart } from "@/components/charts/pipeline-bar-chart";
 import {
   Table,
   TableBody,
@@ -30,6 +31,13 @@ export function RegionalOwnershipSection({
   loading: boolean;
   error?: string | null;
 }) {
+  const regionChartData = data?.regionRollups.map((row) => ({
+    stageName: row.regionName,
+    stageColor: null,
+    dealCount: row.dealCount,
+    totalValue: row.pipelineValue,
+  })) ?? [];
+
   return (
     <section className="space-y-5">
       <div className="flex items-start justify-between gap-4">
@@ -82,6 +90,20 @@ export function RegionalOwnershipSection({
         </div>
       ) : (
         <div className="space-y-4">
+          <div className="rounded-3xl border border-slate-200 bg-white shadow-sm overflow-hidden">
+            <div className="px-6 py-5 border-b border-slate-100">
+              <h3 className="text-sm font-bold text-slate-900">Regional Pipeline by Region</h3>
+              <p className="text-xs text-slate-400 mt-0.5">Office-scoped pipeline value by region.</p>
+            </div>
+            <div className="p-4">
+              {regionChartData.length === 0 ? (
+                <div className="py-12 text-center text-sm text-slate-400">No region chart data available.</div>
+              ) : (
+                <PipelineBarChart data={regionChartData} />
+              )}
+            </div>
+          </div>
+
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
             <div className="rounded-3xl border border-slate-200 bg-white shadow-sm overflow-hidden">
               <div className="px-6 py-5 border-b border-slate-100">
