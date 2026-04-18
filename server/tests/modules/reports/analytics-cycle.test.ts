@@ -257,32 +257,56 @@ describe("analytics cycle shared filters", () => {
     });
   });
 
-  it("ignores cross-office company activity when computing data mining clocks", async () => {
+  it("counts office company activity even without a contact association", async () => {
     const { getDataMiningOverview } = await import("../../../src/modules/reports/service.js");
     const tenantDb = createMockTenantDb([
-      [{ untouched_contact_30_count: "0", untouched_contact_60_count: "0", untouched_contact_90_count: "0" }],
-      [],
-      [{ dormant_company_90_count: "0" }],
-      [],
+      [{ untouched_contact_30_count: "1", untouched_contact_60_count: "1", untouched_contact_90_count: "0" }],
+      [
+        {
+          contact_id: "contact-1",
+          contact_name: "Jordan Client",
+          company_name: "Acme Roofing",
+          last_touch_at: "2026-03-01T00:00:00.000Z",
+          days_since_touch: "48",
+        },
+      ],
+      [{ dormant_company_90_count: "1" }],
+      [
+        {
+          company_id: "company-1",
+          company_name: "Acme Roofing",
+          last_touch_at: "2026-03-01T00:00:00.000Z",
+          days_since_activity: "140",
+          active_deal_count: "0",
+        },
+      ],
     ]);
 
-    await getDataMiningOverview(tenantDb, {
+    const result = await getDataMiningOverview(tenantDb, {
       from: "2026-01-01",
       to: "2026-12-31",
       officeId: "office-1",
     });
 
-    const allQueryText = tenantDb.execute.mock.calls
-      .map((call) => extractSqlText(call[0]).toLowerCase())
-      .join("\n");
-
-    expect(allQueryText).toContain("office_deals as");
-    expect(allQueryText).toContain("office_contact_context");
-    expect(allQueryText).toContain("office_company_context");
-    expect(allQueryText).toContain("office_activity_scope");
-    expect(allQueryText).toContain("join activities a on a.contact_id = occ.contact_id");
-    expect(allQueryText).not.toContain("join activities a on a.company_id");
-    expect(allQueryText).not.toContain("a.contact_id in (");
-    expect(allQueryText).not.toContain("or a.company_id");
+    expect(result.summary).toMatchObject({
+      untouchedContact30Count: 1,
+      untouchedContact60Count: 1,
+      untouchedContact90Count: 0,
+      dormantCompany90Count: 1,
+    });
+    expect(result.untouchedContacts[0]).toMatchObject({
+      contactId: "contact-1",
+      contactName: "Jordan Client",
+      companyName: "Acme Roofing",
+      daysSinceTouch: 48,
+      lastTouchedAt: "2026-03-01T00:00:00.000Z",
+    });
+    expect(result.dormantCompanies[0]).toMatchObject({
+      companyId: "company-1",
+      companyName: "Acme Roofing",
+      daysSinceActivity: 140,
+      lastActivityAt: "2026-03-01T00:00:00.000Z",
+      activeDealCount: 0,
+    });
   });
 });

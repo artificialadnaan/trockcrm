@@ -745,22 +745,32 @@ export async function getDataMiningOverview(
         )
     )
   `;
-  const officeActivityScope = sql`
-    office_activity_scope AS (
+  const officeContactActivityScope = sql`
+    office_contact_activity_scope AS (
       SELECT
         occ.contact_id,
         occ.company_id,
         a.occurred_at
       FROM office_contact_context occ
       JOIN activities a ON a.contact_id = occ.contact_id
-      UNION ALL
+    )
+  `;
+  const officeOfficeActivityScope = sql`
+    office_office_activity_scope AS (
       SELECT
-        occ.contact_id,
         occ.company_id,
         a.occurred_at
-      FROM office_contact_context occ
-      JOIN contact_deal_associations cda ON cda.contact_id = occ.contact_id
-      JOIN office_deals od ON od.id = cda.deal_id
+      FROM office_company_context occ
+      JOIN activities a ON a.company_id = occ.company_id
+      ${filters.officeId ? sql`
+      JOIN users u ON u.id = a.responsible_user_id
+      WHERE u.office_id = ${filters.officeId}
+      ` : sql`WHERE 1 = 0`}
+      UNION ALL
+      SELECT
+        od.company_id,
+        a.occurred_at
+      FROM office_deals od
       JOIN activities a ON a.deal_id = od.id
     )
   `;
@@ -770,13 +780,21 @@ export async function getDataMiningOverview(
       WITH
       ${officeDealContext},
       ${officeContactContext},
-      ${officeActivityScope},
+      ${officeContactActivityScope},
+      ${officeOfficeActivityScope},
       contact_activity AS (
         SELECT
-          oas.contact_id,
-          MAX(oas.occurred_at) AS last_activity_at
-        FROM office_activity_scope oas
-        GROUP BY oas.contact_id
+          activity.contact_id,
+          MAX(activity.occurred_at) AS last_activity_at
+        FROM (
+          SELECT contact_id, occurred_at
+          FROM office_contact_activity_scope
+          UNION ALL
+          SELECT occ.contact_id, oas.occurred_at
+          FROM office_contact_context occ
+          JOIN office_office_activity_scope oas ON oas.company_id = occ.company_id
+        ) activity
+        GROUP BY activity.contact_id
       ),
       ranked_contacts AS (
         SELECT
@@ -799,13 +817,21 @@ export async function getDataMiningOverview(
       ${officeDealContext},
       ${officeContactContext},
       ${officeCompanyContext},
-      ${officeActivityScope},
+      ${officeContactActivityScope},
+      ${officeOfficeActivityScope},
       company_activity AS (
         SELECT
-          oas.company_id,
-          MAX(oas.occurred_at) AS last_activity_at
-        FROM office_activity_scope oas
-        GROUP BY oas.company_id
+          activity.company_id,
+          MAX(activity.occurred_at) AS last_activity_at
+        FROM (
+          SELECT company_id, occurred_at
+          FROM office_office_activity_scope
+          UNION ALL
+          SELECT occ.company_id, oas.occurred_at
+          FROM office_contact_activity_scope oas
+          JOIN office_contact_context occ ON occ.contact_id = oas.contact_id
+        ) activity
+        GROUP BY activity.company_id
       ),
       ranked_companies AS (
         SELECT
@@ -831,13 +857,21 @@ export async function getDataMiningOverview(
       WITH
       ${officeDealContext},
       ${officeContactContext},
-      ${officeActivityScope},
+      ${officeContactActivityScope},
+      ${officeOfficeActivityScope},
       contact_activity AS (
         SELECT
-          oas.contact_id,
-          MAX(oas.occurred_at) AS last_activity_at
-        FROM office_activity_scope oas
-        GROUP BY oas.contact_id
+          activity.contact_id,
+          MAX(activity.occurred_at) AS last_activity_at
+        FROM (
+          SELECT contact_id, occurred_at
+          FROM office_contact_activity_scope
+          UNION ALL
+          SELECT occ.contact_id, oas.occurred_at
+          FROM office_contact_context occ
+          JOIN office_office_activity_scope oas ON oas.company_id = occ.company_id
+        ) activity
+        GROUP BY activity.contact_id
       ),
       ranked_contacts AS (
         SELECT
@@ -865,13 +899,21 @@ export async function getDataMiningOverview(
       ${officeDealContext},
       ${officeContactContext},
       ${officeCompanyContext},
-      ${officeActivityScope},
+      ${officeContactActivityScope},
+      ${officeOfficeActivityScope},
       company_activity AS (
         SELECT
-          oas.company_id,
-          MAX(oas.occurred_at) AS last_activity_at
-        FROM office_activity_scope oas
-        GROUP BY oas.company_id
+          activity.company_id,
+          MAX(activity.occurred_at) AS last_activity_at
+        FROM (
+          SELECT company_id, occurred_at
+          FROM office_office_activity_scope
+          UNION ALL
+          SELECT occ.company_id, oas.occurred_at
+          FROM office_contact_activity_scope oas
+          JOIN office_contact_context occ ON occ.contact_id = oas.contact_id
+        ) activity
+        GROUP BY activity.company_id
       ),
       ranked_companies AS (
         SELECT
