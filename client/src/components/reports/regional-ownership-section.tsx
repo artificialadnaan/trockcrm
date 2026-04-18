@@ -1,3 +1,11 @@
+import {
+  buildPrintableReportHtml,
+  buildReportExportFilename,
+  downloadTextFile,
+  serializeRowsToCsv,
+  openPrintableReportWindow,
+} from "@/lib/report-export";
+import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { PipelineBarChart } from "@/components/charts/pipeline-bar-chart";
 import {
@@ -22,6 +30,41 @@ function getGapLabel(gapType: RegionalOwnershipOverview["ownershipGaps"][number]
   return gapType === "missing_assigned_rep" ? "Missing Assigned Rep" : "Missing Region";
 }
 
+function getExportRows(data: RegionalOwnershipOverview) {
+  return [
+    ...data.regionRollups.map((row) => ({
+      section: "Region",
+      name: row.regionName,
+      dealCount: row.dealCount,
+      activityCount: null,
+      pipelineValue: row.pipelineValue,
+      staleDealCount: row.staleDealCount,
+      gapType: null,
+      gapCount: null,
+    })),
+    ...data.repRollups.map((row) => ({
+      section: "Rep",
+      name: row.repName,
+      dealCount: row.dealCount,
+      activityCount: row.activityCount,
+      pipelineValue: row.pipelineValue,
+      staleDealCount: row.staleDealCount,
+      gapType: null,
+      gapCount: null,
+    })),
+    ...data.ownershipGaps.map((gap) => ({
+      section: "Ownership Gap",
+      name: getGapLabel(gap.gapType),
+      dealCount: null,
+      activityCount: null,
+      pipelineValue: null,
+      staleDealCount: null,
+      gapType: gap.gapType,
+      gapCount: gap.count,
+    })),
+  ];
+}
+
 export function RegionalOwnershipSection({
   data,
   loading,
@@ -38,6 +81,38 @@ export function RegionalOwnershipSection({
     totalValue: row.pipelineValue,
   })) ?? [];
 
+  function handleExportCsv() {
+    if (!data) return;
+    const rows = getExportRows(data);
+    downloadTextFile(
+      serializeRowsToCsv(rows),
+      buildReportExportFilename("regional-ownership", "csv"),
+      "text/csv;charset=utf-8;",
+    );
+  }
+
+  function handleExportPdf() {
+    if (!data) return;
+    const rows = getExportRows(data);
+    const generatedAtLabel = new Date().toLocaleString("en-US", {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    });
+    const printableHtml = buildPrintableReportHtml({
+      reportName: "Regional and Rep Ownership",
+      rows,
+      generatedAtLabel,
+      metadata: [
+        { label: "Scope", value: "Current office only" },
+        { label: "Export", value: "Regional pipeline, rep rollups, and ownership gaps" },
+      ],
+    });
+    openPrintableReportWindow(printableHtml);
+  }
+
   return (
     <section className="space-y-5">
       <div className="flex items-start justify-between gap-4">
@@ -52,22 +127,34 @@ export function RegionalOwnershipSection({
             Current-office ownership rollups by region and rep, with diagnostics for gaps that need review.
           </p>
         </div>
-        {data && (
-          <div className="grid grid-cols-3 gap-3 text-right">
-            <div className="rounded-2xl border border-slate-200 bg-white px-4 py-3 shadow-sm">
-              <p className="text-[11px] uppercase tracking-wider text-slate-400">Regions</p>
-              <p className="mt-1 text-xl font-black text-slate-900">{data.regionRollups.length}</p>
+        <div className="flex flex-col items-end gap-3">
+          {data && (
+            <div className="grid grid-cols-3 gap-3 text-right">
+              <div className="rounded-2xl border border-slate-200 bg-white px-4 py-3 shadow-sm">
+                <p className="text-[11px] uppercase tracking-wider text-slate-400">Regions</p>
+                <p className="mt-1 text-xl font-black text-slate-900">{data.regionRollups.length}</p>
+              </div>
+              <div className="rounded-2xl border border-slate-200 bg-white px-4 py-3 shadow-sm">
+                <p className="text-[11px] uppercase tracking-wider text-slate-400">Reps</p>
+                <p className="mt-1 text-xl font-black text-slate-900">{data.repRollups.length}</p>
+              </div>
+              <div className="rounded-2xl border border-slate-200 bg-white px-4 py-3 shadow-sm">
+                <p className="text-[11px] uppercase tracking-wider text-slate-400">Gaps</p>
+                <p className="mt-1 text-xl font-black text-slate-900">{data.ownershipGaps.reduce((sum, gap) => sum + gap.count, 0)}</p>
+              </div>
             </div>
-            <div className="rounded-2xl border border-slate-200 bg-white px-4 py-3 shadow-sm">
-              <p className="text-[11px] uppercase tracking-wider text-slate-400">Reps</p>
-              <p className="mt-1 text-xl font-black text-slate-900">{data.repRollups.length}</p>
+          )}
+          {data && (
+            <div className="flex items-center gap-2">
+              <Button variant="outline" size="sm" className="border-slate-200 text-slate-600" onClick={handleExportCsv}>
+                Export CSV
+              </Button>
+              <Button variant="outline" size="sm" className="border-slate-200 text-slate-600" onClick={handleExportPdf}>
+                Export PDF
+              </Button>
             </div>
-            <div className="rounded-2xl border border-slate-200 bg-white px-4 py-3 shadow-sm">
-              <p className="text-[11px] uppercase tracking-wider text-slate-400">Gaps</p>
-              <p className="mt-1 text-xl font-black text-slate-900">{data.ownershipGaps.reduce((sum, gap) => sum + gap.count, 0)}</p>
-            </div>
-          </div>
-        )}
+          )}
+        </div>
       </div>
 
       {loading ? (
