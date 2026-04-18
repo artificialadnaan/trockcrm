@@ -1,12 +1,117 @@
 DO $$
 DECLARE
   schema_name text;
+  deal_workflow_route_expr text;
+  deal_expected_close_date_expr text;
+  deal_dd_estimate_expr text;
+  deal_bid_estimate_expr text;
+  deal_awarded_amount_expr text;
+  deal_source_expr text;
+  deal_actual_close_date_expr text;
+  deal_group_by_expr text;
 BEGIN
   FOR schema_name IN
     SELECT nspname
     FROM pg_namespace
     WHERE nspname LIKE 'office\_%' ESCAPE '\'
   LOOP
+    deal_workflow_route_expr := CASE
+      WHEN EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = schema_name
+          AND table_name = 'deals'
+          AND column_name = 'workflow_route'
+      ) THEN 'd.workflow_route::text'
+      ELSE quote_literal('estimating')
+    END;
+
+    deal_expected_close_date_expr := CASE
+      WHEN EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = schema_name
+          AND table_name = 'deals'
+          AND column_name = 'expected_close_date'
+      ) THEN 'd.expected_close_date'
+      ELSE 'NULL::date'
+    END;
+
+    deal_dd_estimate_expr := CASE
+      WHEN EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = schema_name
+          AND table_name = 'deals'
+          AND column_name = 'dd_estimate'
+      ) THEN 'd.dd_estimate'
+      ELSE 'NULL::numeric'
+    END;
+
+    deal_bid_estimate_expr := CASE
+      WHEN EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = schema_name
+          AND table_name = 'deals'
+          AND column_name = 'bid_estimate'
+      ) THEN 'd.bid_estimate'
+      ELSE 'NULL::numeric'
+    END;
+
+    deal_awarded_amount_expr := CASE
+      WHEN EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = schema_name
+          AND table_name = 'deals'
+          AND column_name = 'awarded_amount'
+      ) THEN 'd.awarded_amount'
+      ELSE 'NULL::numeric'
+    END;
+
+    deal_source_expr := CASE
+      WHEN EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = schema_name
+          AND table_name = 'deals'
+          AND column_name = 'source'
+      ) THEN 'd.source'
+      ELSE 'NULL::varchar'
+    END;
+
+    deal_actual_close_date_expr := CASE
+      WHEN EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = schema_name
+          AND table_name = 'deals'
+          AND column_name = 'actual_close_date'
+      ) THEN 'd.actual_close_date::timestamptz'
+      ELSE 'NULL::timestamptz'
+    END;
+
+    deal_group_by_expr := 'dsh.deal_id, d.assigned_rep_id';
+    IF deal_workflow_route_expr = 'd.workflow_route::text' THEN
+      deal_group_by_expr := deal_group_by_expr || ', d.workflow_route';
+    END IF;
+    IF deal_expected_close_date_expr = 'd.expected_close_date' THEN
+      deal_group_by_expr := deal_group_by_expr || ', d.expected_close_date';
+    END IF;
+    IF deal_dd_estimate_expr = 'd.dd_estimate' THEN
+      deal_group_by_expr := deal_group_by_expr || ', d.dd_estimate';
+    END IF;
+    IF deal_bid_estimate_expr = 'd.bid_estimate' THEN
+      deal_group_by_expr := deal_group_by_expr || ', d.bid_estimate';
+    END IF;
+    IF deal_awarded_amount_expr = 'd.awarded_amount' THEN
+      deal_group_by_expr := deal_group_by_expr || ', d.awarded_amount';
+    END IF;
+    IF deal_source_expr = 'd.source' THEN
+      deal_group_by_expr := deal_group_by_expr || ', d.source';
+    END IF;
+
     EXECUTE format(
       'DO $inner$
        BEGIN
@@ -106,25 +211,35 @@ BEGIN
          NULL,
          d.assigned_rep_id,
          (ARRAY_AGG(dsh.to_stage_id ORDER BY dsh.created_at ASC))[1],
-         d.workflow_route,
-         d.expected_close_date,
-         d.dd_estimate,
-         d.bid_estimate,
-         d.awarded_amount,
-         COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0),
-         d.source,
+         %s,
+         %s,
+         %s,
+         %s,
+         %s,
+         COALESCE(%s, %s, %s, 0),
+         %s,
          ''audit_backfill''::%I.forecast_milestone_capture_source
        FROM %I.deal_stage_history dsh
        JOIN %I.deals d ON d.id = dsh.deal_id
        JOIN public.pipeline_stage_config psc ON psc.id = dsh.to_stage_id
        WHERE psc.slug = ''dd''
-       GROUP BY dsh.deal_id, d.assigned_rep_id, d.workflow_route, d.expected_close_date, d.dd_estimate, d.bid_estimate, d.awarded_amount, d.source
+       GROUP BY %s
        ON CONFLICT (deal_id, milestone_key) DO NOTHING',
       schema_name,
       schema_name,
       schema_name,
       schema_name,
-      schema_name
+      schema_name,
+      deal_workflow_route_expr,
+      deal_expected_close_date_expr,
+      deal_dd_estimate_expr,
+      deal_bid_estimate_expr,
+      deal_awarded_amount_expr,
+      deal_awarded_amount_expr,
+      deal_bid_estimate_expr,
+      deal_dd_estimate_expr,
+      deal_source_expr,
+      deal_group_by_expr
     );
 
     EXECUTE format(
@@ -151,25 +266,35 @@ BEGIN
          NULL,
          d.assigned_rep_id,
          (ARRAY_AGG(dsh.to_stage_id ORDER BY dsh.created_at ASC))[1],
-         d.workflow_route,
-         d.expected_close_date,
-         d.dd_estimate,
-         d.bid_estimate,
-         d.awarded_amount,
-         COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0),
-         d.source,
+         %s,
+         %s,
+         %s,
+         %s,
+         %s,
+         COALESCE(%s, %s, %s, 0),
+         %s,
          ''audit_backfill''::%I.forecast_milestone_capture_source
        FROM %I.deal_stage_history dsh
        JOIN %I.deals d ON d.id = dsh.deal_id
        JOIN public.pipeline_stage_config psc ON psc.id = dsh.to_stage_id
        WHERE psc.slug = ''estimating''
-       GROUP BY dsh.deal_id, d.assigned_rep_id, d.workflow_route, d.expected_close_date, d.dd_estimate, d.bid_estimate, d.awarded_amount, d.source
+       GROUP BY %s
        ON CONFLICT (deal_id, milestone_key) DO NOTHING',
       schema_name,
       schema_name,
       schema_name,
       schema_name,
-      schema_name
+      schema_name,
+      deal_workflow_route_expr,
+      deal_expected_close_date_expr,
+      deal_dd_estimate_expr,
+      deal_bid_estimate_expr,
+      deal_awarded_amount_expr,
+      deal_awarded_amount_expr,
+      deal_bid_estimate_expr,
+      deal_dd_estimate_expr,
+      deal_source_expr,
+      deal_group_by_expr
     );
 
     EXECUTE format(
@@ -196,7 +321,7 @@ BEGIN
          a.changed_by,
          d.assigned_rep_id,
          NULLIF(a.full_row->>''stage_id'', '''')::uuid,
-         COALESCE(NULLIF(a.full_row->>''workflow_route'', ''''), d.workflow_route::text),
+         COALESCE(NULLIF(a.full_row->>''workflow_route'', ''''), %s),
          NULLIF(a.full_row->>''expected_close_date'', '''')::date,
          NULLIF(a.full_row->>''dd_estimate'', '''')::numeric,
          NULLIF(a.full_row->>''bid_estimate'', '''')::numeric,
@@ -207,7 +332,7 @@ BEGIN
            NULLIF(a.full_row->>''dd_estimate'', '''')::numeric,
            0
          ),
-         COALESCE(NULLIF(a.full_row->>''source'', ''''), d.source),
+         COALESCE(NULLIF(a.full_row->>''source'', ''''), %s),
          ''audit_backfill''::%I.forecast_milestone_capture_source
        FROM %I.audit_log a
        JOIN %I.deals d ON d.id = a.record_id
@@ -218,6 +343,8 @@ BEGIN
       schema_name,
       schema_name,
       schema_name,
+      deal_workflow_route_expr,
+      deal_source_expr,
       schema_name,
       schema_name
     );
@@ -242,17 +369,17 @@ BEGIN
        SELECT
          d.id,
          ''closed_won''::%I.forecast_milestone_key,
-         COALESCE(d.actual_close_date::timestamptz, d.updated_at, NOW()),
+         COALESCE(%s, d.updated_at, NOW()),
          NULL,
          d.assigned_rep_id,
          d.stage_id,
-         d.workflow_route,
-         d.expected_close_date,
-         d.dd_estimate,
-         d.bid_estimate,
-         d.awarded_amount,
-         COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0),
-         d.source,
+         %s,
+         %s,
+         %s,
+         %s,
+         %s,
+         COALESCE(%s, %s, %s, 0),
+         %s,
          ''audit_backfill''::%I.forecast_milestone_capture_source
        FROM %I.deals d
        JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
@@ -261,6 +388,16 @@ BEGIN
       schema_name,
       schema_name,
       schema_name,
+      deal_actual_close_date_expr,
+      deal_workflow_route_expr,
+      deal_expected_close_date_expr,
+      deal_dd_estimate_expr,
+      deal_bid_estimate_expr,
+      deal_awarded_amount_expr,
+      deal_awarded_amount_expr,
+      deal_bid_estimate_expr,
+      deal_dd_estimate_expr,
+      deal_source_expr,
       schema_name
     );
   END LOOP;
