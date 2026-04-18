@@ -224,10 +224,7 @@ BEGIN
        JOIN public.pipeline_stage_config psc ON psc.id = dsh.to_stage_id
        WHERE psc.slug = ''dd''
        GROUP BY %s
-       ON CONFLICT (deal_id, milestone_key) DO NOTHING',
-      schema_name,
-      schema_name,
-      schema_name,
+      ON CONFLICT (deal_id, milestone_key) DO NOTHING',
       schema_name,
       schema_name,
       deal_workflow_route_expr,
@@ -239,6 +236,9 @@ BEGIN
       deal_bid_estimate_expr,
       deal_dd_estimate_expr,
       deal_source_expr,
+      schema_name,
+      schema_name,
+      schema_name,
       deal_group_by_expr
     );
 
@@ -279,10 +279,7 @@ BEGIN
        JOIN public.pipeline_stage_config psc ON psc.id = dsh.to_stage_id
        WHERE psc.slug = ''estimating''
        GROUP BY %s
-       ON CONFLICT (deal_id, milestone_key) DO NOTHING',
-      schema_name,
-      schema_name,
-      schema_name,
+      ON CONFLICT (deal_id, milestone_key) DO NOTHING',
       schema_name,
       schema_name,
       deal_workflow_route_expr,
@@ -294,6 +291,9 @@ BEGIN
       deal_bid_estimate_expr,
       deal_dd_estimate_expr,
       deal_source_expr,
+      schema_name,
+      schema_name,
+      schema_name,
       deal_group_by_expr
     );
 
@@ -339,12 +339,12 @@ BEGIN
        WHERE a.table_name = ''deals''
          AND a.action = ''insert''
          AND a.full_row IS NOT NULL
-       ON CONFLICT (deal_id, milestone_key) DO NOTHING',
-      schema_name,
+      ON CONFLICT (deal_id, milestone_key) DO NOTHING',
       schema_name,
       schema_name,
       deal_workflow_route_expr,
       deal_source_expr,
+      schema_name,
       schema_name,
       schema_name
     );
@@ -384,8 +384,7 @@ BEGIN
        FROM %I.deals d
        JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
        WHERE psc.slug = ''closed_won''
-       ON CONFLICT (deal_id, milestone_key) DO NOTHING',
-      schema_name,
+      ON CONFLICT (deal_id, milestone_key) DO NOTHING',
       schema_name,
       schema_name,
       deal_actual_close_date_expr,
@@ -398,6 +397,7 @@ BEGIN
       deal_bid_estimate_expr,
       deal_dd_estimate_expr,
       deal_source_expr,
+      schema_name,
       schema_name
     );
   END LOOP;
