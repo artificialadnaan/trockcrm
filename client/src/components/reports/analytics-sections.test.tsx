@@ -1,37 +1,41 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 
-vi.mock("@/hooks/use-reports", () => ({
-  useLeadSourceROI: vi.fn(() => ({
-    data: [
-      {
-        source: "Trade Show",
-        leadCount: 4,
-        dealCount: 3,
-        activeDeals: 2,
-        wonDeals: 1,
-        lostDeals: 1,
-        activePipelineValue: 250000,
-        wonValue: 100000,
-        winRate: 50,
-      },
-      {
-        source: "Unknown",
-        leadCount: 2,
-        dealCount: 1,
-        activeDeals: 1,
-        wonDeals: 0,
-        lostDeals: 0,
-        activePipelineValue: 50000,
-        wonValue: 0,
-        winRate: 0,
-      },
-    ],
-    loading: false,
-    error: null,
-    refetch: vi.fn(),
-  })),
-}));
+vi.mock("@/hooks/use-reports", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/hooks/use-reports")>();
+  return {
+    ...actual,
+    useLeadSourceROI: vi.fn(() => ({
+      data: [
+        {
+          source: "Trade Show",
+          leadCount: 4,
+          dealCount: 3,
+          activeDeals: 2,
+          wonDeals: 1,
+          lostDeals: 1,
+          activePipelineValue: 250000,
+          wonValue: 100000,
+          winRate: 50,
+        },
+        {
+          source: "Unknown",
+          leadCount: 2,
+          dealCount: 1,
+          activeDeals: 1,
+          wonDeals: 0,
+          lostDeals: 0,
+          activePipelineValue: 50000,
+          wonValue: 0,
+          winRate: 0,
+        },
+      ],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    })),
+  };
+});
 
 import { DataMiningSection } from "./data-mining-section";
 import { RegionalOwnershipSection } from "./regional-ownership-section";

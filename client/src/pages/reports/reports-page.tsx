@@ -62,7 +62,6 @@ import {
   openPrintableReportWindow,
   serializeRowsToCsv,
 } from "@/lib/report-export";
-import { useAuth } from "@/lib/auth";
 import { getScheduleReportActionConfig } from "@/lib/report-actions";
 
 // ---------------------------------------------------------------------------
