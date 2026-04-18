@@ -240,6 +240,27 @@ git commit -m "feat: capture forecast milestones during deal lifecycle"
 import { describe, expect, it, vi } from "vitest";
 import { getForecastVarianceOverview } from "../../../src/modules/reports/service.js";
 
+function createMockTenantDb(rows: any[] = []) {
+  const queue = Array.isArray(rows[0]) ? [...(rows as any[][])] : [rows];
+  return {
+    execute: vi.fn().mockImplementation(async () => ({ rows: queue.shift() ?? [] })),
+  } as any;
+}
+
+function extractSqlText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (!value || typeof value !== "object") return "";
+  if (Array.isArray((value as { queryChunks?: unknown[] }).queryChunks)) {
+    return (value as { queryChunks: unknown[] }).queryChunks.map(extractSqlText).join("");
+  }
+  if ("value" in (value as Record<string, unknown>)) {
+    const chunkValue = (value as { value: unknown }).value;
+    if (Array.isArray(chunkValue)) return chunkValue.map(extractSqlText).join("");
+    if (typeof chunkValue === "string") return chunkValue;
+  }
+  return "";
+}
+
 it("returns forecast variance summary, rep rollups, and deal detail rows", async () => {
   const tenantDb = createMockTenantDb([
     [{ comparable_deals: "3", avg_initial_variance: "15000", avg_qualified_variance: "10000", avg_estimating_variance: "4000", avg_close_drift_days: "12" }],
