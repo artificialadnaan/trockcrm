@@ -162,8 +162,8 @@ describe("Reports Service", () => {
       const { getLeadSourceROI } = await import("../../../src/modules/reports/service.js");
       const tenantDb = createMockTenantDb([
         {
-          source: "Referral", total_deals: "10", active_deals: "5",
-          won_deals: "3", lost_deals: "2", pipeline_value: "500000", won_value: "300000",
+          source: "Referral", deal_count: "10", active_deals: "5",
+          won_deals: "3", lost_deals: "2", active_pipeline_value: "500000", won_value: "300000",
         },
       ]);
       const result = await getLeadSourceROI(tenantDb);

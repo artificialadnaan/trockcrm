@@ -575,12 +575,10 @@ export interface LeadSourceROIRow {
   source: string;
   leadCount: number;
   dealCount: number;
-  totalDeals: number;
   activeDeals: number;
   wonDeals: number;
   lostDeals: number;
   activePipelineValue: number;
-  pipelineValue: number;
   wonValue: number;
   winRate: number;
 }
@@ -645,12 +643,10 @@ export async function getLeadSourceROI(
       source: r.source,
       leadCount,
       dealCount,
-      totalDeals: dealCount,
       activeDeals: Number(r.active_deals ?? 0),
       wonDeals: won,
       lostDeals: lost,
       activePipelineValue,
-      pipelineValue: activePipelineValue,
       wonValue: Number(r.won_value ?? 0),
       winRate: closedTotal > 0 ? Math.round((won / closedTotal) * 100) : 0,
     };

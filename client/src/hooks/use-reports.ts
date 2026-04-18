@@ -106,12 +106,10 @@ export interface LeadSourceRoiRow {
   source: string;
   leadCount: number;
   dealCount: number;
-  totalDeals: number;
   activeDeals: number;
   wonDeals: number;
   lostDeals: number;
   activePipelineValue: number;
-  pipelineValue: number;
   wonValue: number;
   winRate: number;
 }

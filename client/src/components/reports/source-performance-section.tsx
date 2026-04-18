@@ -13,8 +13,14 @@ import {
 import { Download, RefreshCw, TrendingUp } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { useLeadSourceROI } from "@/hooks/use-reports";
-import { buildPrintableReportHtml, buildReportExportFilename, downloadTextFile, openPrintableReportWindow, serializeRowsToCsv } from "@/lib/report-export";
+import { useLeadSourceROI, type LeadSourceRoiRow } from "@/hooks/use-reports";
+import {
+  buildPrintableReportHtml,
+  buildReportExportFilename,
+  downloadTextFile,
+  openPrintableReportWindow,
+  serializeRowsToCsv,
+} from "@/lib/report-export";
 import { getChartColor } from "@/components/charts/chart-colors";
 
 function formatCurrency(value: number) {
@@ -40,6 +46,20 @@ function formatPercent(value: number) {
 
 function renderChartValue(value: number) {
   return value.toLocaleString();
+}
+
+function buildSourcePerformanceExportRows(rows: LeadSourceRoiRow[]) {
+  return rows.map((row) => ({
+    Source: row.source,
+    "Lead Count": row.leadCount,
+    "Deal Count": row.dealCount,
+    "Active Deals": row.activeDeals,
+    "Won Deals": row.wonDeals,
+    "Lost Deals": row.lostDeals,
+    "Active Pipeline Value": row.activePipelineValue,
+    "Won Value": row.wonValue,
+    "Win Rate": row.winRate,
+  }));
 }
 
 export function SourcePerformanceSection() {
@@ -90,7 +110,7 @@ export function SourcePerformanceSection() {
     leadCount: row.leadCount,
     dealCount: row.dealCount,
   }));
-  const exportRows = rows as unknown as Array<Record<string, unknown>>;
+  const exportRows = buildSourcePerformanceExportRows(rows);
 
   function handleExportCsv() {
     const csv = serializeRowsToCsv(exportRows);

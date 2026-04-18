@@ -95,11 +95,11 @@ describe("analytics cycle shared filters", () => {
       {
         source: "Trade Show",
         lead_count: "4",
-        total_deals: "10",
+        deal_count: "10",
         active_deals: "5",
         won_deals: "3",
         lost_deals: "2",
-        pipeline_value: "500000",
+        active_pipeline_value: "500000",
         won_value: "300000",
       },
     ]);
@@ -124,11 +124,11 @@ describe("analytics cycle shared filters", () => {
     expect(result[0]).toMatchObject({
       source: "Trade Show",
       leadCount: 4,
-      totalDeals: 10,
+      dealCount: 10,
       activeDeals: 5,
       wonDeals: 3,
       lostDeals: 2,
-      pipelineValue: 500000,
+      activePipelineValue: 500000,
       wonValue: 300000,
     });
   });
