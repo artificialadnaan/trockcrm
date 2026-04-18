@@ -13,6 +13,7 @@ import {
   listPipelineStages, updatePipelineStage, reorderPipelineStages,
 } from "./pipeline-service.js";
 import { getAuditLog, getAuditLogTables } from "./audit-service.js";
+import { getAdminDataScrubOverview } from "./admin-reporting-service.js";
 
 const router = Router();
 router.use(authMiddleware);
@@ -160,6 +161,21 @@ router.post("/admin/pipeline/reorder", requireAdmin, async (req: Request, res: R
 // ---------------------------------------------------------------------------
 // Audit log (admin + director, requires tenant context)
 // ---------------------------------------------------------------------------
+
+router.get(
+  "/admin/data-scrub/overview",
+  requireDirector,
+  tenantMiddleware,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const overview = await getAdminDataScrubOverview(req.tenantDb!);
+      await req.commitTransaction!();
+      return res.json(overview);
+    } catch (err) {
+      return next(err);
+    }
+  }
+);
 
 router.get(
   "/admin/audit",

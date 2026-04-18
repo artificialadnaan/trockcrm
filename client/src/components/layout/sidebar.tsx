@@ -62,6 +62,7 @@ const adminItems = [
   { to: "/admin/intervention-analytics", icon: BarChart3, label: "Intervention Analytics", roles: ["admin", "director"] },
   { to: "/admin/ai-actions", icon: ShieldAlert, label: "AI Actions", roles: ["admin", "director"] },
   { to: "/admin/ai-ops", icon: Sparkles, label: "AI Ops", roles: ["admin", "director"] },
+  { to: "/admin/data-scrub", icon: ClipboardList, label: "Data Scrub", roles: ["admin", "director"] },
   { to: "/admin/audit", icon: ClipboardList, label: "Audit Log", roles: ["admin", "director"] },
   { to: "/admin/cross-office-reports", icon: Globe, label: "Cross-Office Reports", roles: ["admin", "director"] },
   { to: "/admin/migration", icon: ArrowRightLeft, label: "Migration", roles: ["admin"] },

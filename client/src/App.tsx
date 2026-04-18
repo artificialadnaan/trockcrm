@@ -47,6 +47,7 @@ import { AiPacketReviewPage } from "@/pages/admin/ai-packet-review-page";
 import { AdminInterventionWorkspacePage } from "@/pages/admin/admin-intervention-workspace-page";
 import { AdminInterventionAnalyticsPage } from "@/pages/admin/admin-intervention-analytics-page";
 import { SalesProcessDisconnectsPage } from "@/pages/admin/sales-process-disconnects-page";
+import { AdminDataScrubPage } from "@/pages/admin/admin-data-scrub-page";
 import { UserGuidePage } from "@/pages/admin/help/user-guide-page";
 import { AdminGuidePage } from "@/pages/admin/help/admin-guide-page";
 import { CompanyCamPage } from "@/pages/admin/companycam-page";
@@ -114,6 +115,7 @@ export function App() {
               <Route path="/admin/users" element={<UsersPage />} />
               <Route path="/admin/pipeline" element={<PipelineConfigPage />} />
               <Route path="/admin/audit" element={<AuditLogPage />} />
+              <Route path="/admin/data-scrub" element={<AdminDataScrubPage />} />
               <Route path="/admin/cross-office-reports" element={<CrossOfficeReportsPage />} />
               <Route path="/admin/ai-actions" element={<AiActionQueuePage />} />
               <Route path="/admin/interventions" element={<AdminInterventionWorkspacePage />} />
