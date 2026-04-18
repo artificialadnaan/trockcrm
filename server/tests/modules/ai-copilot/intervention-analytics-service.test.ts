@@ -403,4 +403,254 @@ describe("intervention analytics service", () => {
       resolveCount: 2,
     });
   });
+
+  it("builds history-backed effectiveness summary, reason rows, target rows, and warnings", async () => {
+    const tenantDb = createTenantDb({
+      cases: [
+        makeCase({
+          id: "case-1",
+          assignedTo: "manager-1",
+          currentLifecycleStartedAt: new Date("2026-04-10T12:00:00.000Z"),
+          status: "resolved",
+          resolvedAt: new Date("2026-04-12T12:00:00.000Z"),
+        }),
+        makeCase({
+          id: "case-2",
+          businessKey: "office-1:stale_stage:deal:deal-2",
+          scopeId: "deal-2",
+          dealId: "deal-2",
+          disconnectType: "stale_stage",
+          assignedTo: "manager-1",
+          currentLifecycleStartedAt: new Date("2026-04-08T12:00:00.000Z"),
+          lastReopenedAt: new Date("2026-04-14T12:00:00.000Z"),
+        }),
+        makeCase({
+          id: "case-3",
+          businessKey: "office-1:no_recent_contact:deal:deal-3",
+          scopeId: "deal-3",
+          dealId: "deal-3",
+          disconnectType: "no_recent_contact",
+          assignedTo: "manager-2",
+          currentLifecycleStartedAt: new Date("2026-04-07T12:00:00.000Z"),
+        }),
+        makeCase({
+          id: "case-4",
+          businessKey: "office-1:no_recent_contact:deal:deal-4",
+          scopeId: "deal-4",
+          dealId: "deal-4",
+          disconnectType: "no_recent_contact",
+          assignedTo: "manager-2",
+          currentLifecycleStartedAt: new Date("2026-04-06T12:00:00.000Z"),
+        }),
+        makeCase({
+          id: "case-5",
+          businessKey: "office-1:no_recent_contact:deal:deal-5",
+          scopeId: "deal-5",
+          dealId: "deal-5",
+          disconnectType: "no_recent_contact",
+          assignedTo: "manager-2",
+          currentLifecycleStartedAt: new Date("2026-04-05T12:00:00.000Z"),
+        }),
+      ],
+      users: [
+        { id: "manager-1", displayName: "Manager One" },
+        { id: "manager-2", displayName: "Manager Two" },
+      ],
+      history: [
+        makeHistory({
+          id: "resolve-1",
+          disconnectCaseId: "case-1",
+          actionType: "resolve",
+          actedAt: new Date("2026-04-12T12:00:00.000Z"),
+          actedBy: "director-1",
+          metadataJson: {
+            assigneeAtConclusion: "manager-1",
+            disconnectTypeAtConclusion: "missing_next_task",
+            lifecycleStartedAt: "2026-04-10T12:00:00.000Z",
+            conclusion: {
+              kind: "resolve",
+              outcomeCategory: "owner_aligned",
+              reasonCode: "owner_assigned_and_confirmed",
+              effectiveness: "confirmed",
+            },
+          },
+        }),
+        makeHistory({
+          id: "resolve-2",
+          disconnectCaseId: "case-2",
+          actionType: "resolve",
+          actedAt: new Date("2026-04-12T12:00:00.000Z"),
+          actedBy: "director-1",
+          metadataJson: {
+            assigneeAtConclusion: "manager-1",
+            disconnectTypeAtConclusion: "stale_stage",
+            lifecycleStartedAt: "2026-04-08T12:00:00.000Z",
+            conclusion: {
+              kind: "resolve",
+              outcomeCategory: "owner_aligned",
+              reasonCode: "owner_assigned_and_confirmed",
+              effectiveness: "unclear",
+            },
+          },
+        }),
+        makeHistory({
+          id: "snooze-1",
+          disconnectCaseId: "case-3",
+          actionType: "snooze",
+          actedAt: new Date("2026-04-10T12:00:00.000Z"),
+          actedBy: "director-1",
+          metadataJson: {
+            assigneeAtConclusion: "manager-2",
+            disconnectTypeAtConclusion: "no_recent_contact",
+            lifecycleStartedAt: "2026-04-07T12:00:00.000Z",
+            conclusion: {
+              kind: "snooze",
+              snoozeReasonCode: "waiting_on_customer",
+              expectedOwnerType: "customer",
+              expectedNextStepCode: "customer_reply_expected",
+              snoozedUntil: "2026-04-17T12:00:00.000Z",
+            },
+          },
+        }),
+        makeHistory({
+          id: "snooze-2",
+          disconnectCaseId: "case-4",
+          actionType: "snooze",
+          actedAt: new Date("2026-04-10T12:00:00.000Z"),
+          actedBy: "director-1",
+          metadataJson: {
+            assigneeAtConclusion: "manager-2",
+            disconnectTypeAtConclusion: "no_recent_contact",
+            lifecycleStartedAt: "2026-04-06T12:00:00.000Z",
+            conclusion: {
+              kind: "snooze",
+              snoozeReasonCode: "waiting_on_customer",
+              expectedOwnerType: "customer",
+              expectedNextStepCode: "customer_reply_expected",
+              snoozedUntil: "2026-04-17T12:00:00.000Z",
+            },
+          },
+        }),
+        makeHistory({
+          id: "escalate-1",
+          disconnectCaseId: "case-5",
+          actionType: "escalate",
+          actedAt: new Date("2026-04-09T12:00:00.000Z"),
+          actedBy: "director-1",
+          metadataJson: {
+            assigneeAtConclusion: "manager-2",
+            disconnectTypeAtConclusion: "no_recent_contact",
+            lifecycleStartedAt: "2026-04-05T12:00:00.000Z",
+            conclusion: {
+              kind: "escalate",
+              escalationReasonCode: "manager_visibility_required",
+              escalationTargetType: "director",
+              urgency: "high",
+            },
+          },
+        }),
+        makeHistory({
+          id: "reopened-1",
+          disconnectCaseId: "case-2",
+          actionType: "reopened",
+          actedAt: new Date("2026-04-14T12:00:00.000Z"),
+          actedBy: "system",
+          metadataJson: {
+            priorConclusionActionId: "resolve-2",
+          },
+        }),
+        makeHistory({
+          id: "reopened-2",
+          disconnectCaseId: "case-3",
+          actionType: "reopened",
+          actedAt: new Date("2026-04-13T12:00:00.000Z"),
+          actedBy: "system",
+          metadataJson: {
+            priorConclusionActionId: "snooze-1",
+          },
+        }),
+        makeHistory({
+          id: "reopened-3",
+          disconnectCaseId: "case-4",
+          actionType: "reopened",
+          actedAt: new Date("2026-04-13T12:00:00.000Z"),
+          actedBy: "system",
+          metadataJson: {
+            priorConclusionActionId: "snooze-2",
+          },
+        }),
+      ],
+    });
+
+    const dashboard = await getInterventionAnalyticsDashboard(tenantDb as any, {
+      officeId: "office-1",
+      now: new Date("2026-04-16T12:00:00.000Z"),
+    });
+
+    expect(dashboard.outcomeEffectiveness.summaryByConclusionFamily).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          key: "resolve",
+          volume: 2,
+          reopenRate: 0.5,
+          durableCloseRate: 0.5,
+        }),
+        expect.objectContaining({
+          key: "snooze",
+          volume: 2,
+          reopenRate: 1,
+          durableCloseRate: 0,
+        }),
+      ])
+    );
+    expect(dashboard.outcomeEffectiveness.resolveReasonPerformance).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          key: "owner_assigned_and_confirmed",
+          volume: 2,
+          reopenRate: 0.5,
+          durableCloseRate: 0.5,
+          queueLink: expect.any(String),
+        }),
+      ])
+    );
+    expect(dashboard.outcomeEffectiveness.escalationTargetPerformance).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          key: "director",
+          volume: 1,
+          durableCloseRate: 0,
+        }),
+      ])
+    );
+    expect(dashboard.outcomeEffectiveness.disconnectTypeInteractions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          disconnectType: "no_recent_contact",
+          conclusionFamily: "snooze",
+          volume: 2,
+          reopenRate: 1,
+        }),
+      ])
+    );
+    expect(dashboard.outcomeEffectiveness.assigneeEffectiveness).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          assigneeId: "manager-1",
+          assigneeName: "Manager One",
+          volume: 2,
+          resolveCount: 2,
+        }),
+      ])
+    );
+    expect(dashboard.outcomeEffectiveness.warnings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "snooze_reopen_risk",
+          key: "waiting_on_customer",
+          queueLink: expect.any(String),
+        }),
+      ])
+    );
+  });
 });

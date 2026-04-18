@@ -262,8 +262,11 @@ function readHistoryMetadata(row: Pick<DisconnectCaseHistoryRow, "metadataJson">
     conclusion?: {
       kind?: "resolve" | "snooze" | "escalate";
       outcomeCategory?: string;
+      reasonCode?: string;
+      effectiveness?: "confirmed" | "likely" | "unclear";
       snoozeReasonCode?: string;
       escalationReasonCode?: string;
+      escalationTargetType?: string;
     } | null;
     priorConclusionActionId?: string;
     assigneeAtConclusion?: string | null;
@@ -678,6 +681,10 @@ function median(values: number[]) {
   return sorted[middle] ?? null;
 }
 
+function formatAnalyticsLabel(value: string) {
+  return value.replace(/_/g, " ");
+}
+
 function isOverdueDisconnectCase(row: DisconnectCaseRow, now: Date) {
   return row.status === "open" && calculateBusinessDaysElapsed(row.currentLifecycleStartedAt, now) > interventionSlaThresholdDays(row.severity);
 }
@@ -927,6 +934,19 @@ function buildGroupedRateTable(
   }));
 }
 
+function buildGroupedCountTable(
+  rows: DisconnectCaseHistoryRow[],
+  keyFor: (row: DisconnectCaseHistoryRow) => string
+) {
+  const groups = new Map<string, number>();
+  for (const row of rows) {
+    const key = keyFor(row);
+    if (!key) continue;
+    groups.set(key, (groups.get(key) ?? 0) + 1);
+  }
+  return groups;
+}
+
 function buildConclusionMixByDisconnectType(rows: DisconnectCaseHistoryRow[]) {
   const keys = [...new Set(rows.map((row) => readHistoryMetadata(row).disconnectTypeAtConclusion ?? "").filter(Boolean))];
   return keys.map((key) => ({
@@ -1000,13 +1020,325 @@ function buildMedianDaysToReopenTable(
   }));
 }
 
+function findLinkedReopen(
+  history: DisconnectCaseHistoryRow[],
+  conclusionActionId: string
+) {
+  return history.find(
+    (candidate) =>
+      candidate.actionType === "reopened" &&
+      readHistoryMetadata(candidate).priorConclusionActionId === conclusionActionId
+  );
+}
+
+function isDurablyClosedConclusion(
+  row: DisconnectCaseHistoryRow,
+  history: DisconnectCaseHistoryRow[],
+  casesById: Map<string, DisconnectCaseRow>
+) {
+  if (findLinkedReopen(history, row.id)) return false;
+  const currentRow = casesById.get(row.disconnectCaseId);
+  if (!currentRow || currentRow.status !== "resolved" || !currentRow.resolvedAt) return false;
+  if (currentRow.lastReopenedAt && currentRow.lastReopenedAt > row.actedAt) return false;
+  return currentRow.resolvedAt >= row.actedAt;
+}
+
+function averageDaysToDurableClose(
+  rows: DisconnectCaseHistoryRow[],
+  history: DisconnectCaseHistoryRow[],
+  casesById: Map<string, DisconnectCaseRow>
+) {
+  const durations = rows
+    .filter((row) => isDurablyClosedConclusion(row, history, casesById))
+    .map((row) => {
+      const lifecycleStartedAt = readMetadataDate(row.metadataJson as Record<string, unknown> | null | undefined, "lifecycleStartedAt");
+      const currentRow = casesById.get(row.disconnectCaseId);
+      return lifecycleStartedAt && currentRow?.resolvedAt
+        ? calculateBusinessDaysElapsed(lifecycleStartedAt, currentRow.resolvedAt)
+        : null;
+    })
+    .filter((value): value is number => value !== null);
+
+  return average(durations);
+}
+
+function medianDaysToReopen(rows: DisconnectCaseHistoryRow[], history: DisconnectCaseHistoryRow[]) {
+  const durations = rows
+    .map((row) => {
+      const reopen = findLinkedReopen(history, row.id);
+      return reopen ? calculateBusinessDaysElapsed(row.actedAt, reopen.actedAt) : null;
+    })
+    .filter((value): value is number => value !== null);
+
+  return median(durations);
+}
+
+function buildConclusionFamilyQueueLink(family: "resolve" | "snooze" | "escalate", reopenedCount: number) {
+  if (family === "escalate") return formatQueueLink({ view: "escalated" });
+  if (family === "snooze") return formatQueueLink({ view: reopenedCount > 0 ? "repeat" : "snooze-breached" });
+  return formatQueueLink({ view: reopenedCount > 0 ? "repeat" : "open" });
+}
+
+function buildBestEffortReasonQueueLink(
+  family: "resolve" | "snooze" | "escalate",
+  rows: DisconnectCaseHistoryRow[],
+  history: DisconnectCaseHistoryRow[]
+) {
+  const sample = rows[0];
+  const disconnectType = sample ? readHistoryMetadata(sample).disconnectTypeAtConclusion ?? null : null;
+  const reopenedCount = rows.filter((row) => findLinkedReopen(history, row.id)).length;
+
+  if (family === "escalate") {
+    return formatQueueLink({ view: "escalated", disconnectType });
+  }
+  if (family === "snooze") {
+    return formatQueueLink({ view: reopenedCount > 0 ? "repeat" : "snooze-breached", disconnectType });
+  }
+  return formatQueueLink({ view: reopenedCount > 0 ? "repeat" : "open", disconnectType });
+}
+
+function buildSummaryByConclusionFamily(
+  concludedRows: DisconnectCaseHistoryRow[],
+  history: DisconnectCaseHistoryRow[],
+  reopenedByActionId: Set<string>,
+  casesById: Map<string, DisconnectCaseRow>
+) {
+  return (["resolve", "snooze", "escalate"] as const)
+    .map((key) => {
+      const rows = concludedRows.filter((row) => readHistoryMetadata(row).conclusion?.kind === key);
+      const durableCount = rows.filter((row) => isDurablyClosedConclusion(row, history, casesById)).length;
+      const reopenedCount = rows.filter((row) => reopenedByActionId.has(row.id)).length;
+      return {
+        key,
+        label: formatAnalyticsLabel(key),
+        volume: rows.length,
+        reopenRate: rows.length === 0 ? null : reopenedCount / rows.length,
+        durableCloseRate: rows.length === 0 ? null : durableCount / rows.length,
+        medianDaysToReopen: medianDaysToReopen(rows, history),
+        averageDaysToDurableClose: averageDaysToDurableClose(rows, history, casesById),
+        queueLink: buildConclusionFamilyQueueLink(key, reopenedCount),
+      };
+    })
+    .filter((row) => row.volume > 0);
+}
+
+function buildPerformanceRows(
+  rows: DisconnectCaseHistoryRow[],
+  history: DisconnectCaseHistoryRow[],
+  keyFor: (row: DisconnectCaseHistoryRow) => string,
+  family: "resolve" | "snooze" | "escalate",
+  casesById: Map<string, DisconnectCaseRow>
+) {
+  const groups = new Map<string, DisconnectCaseHistoryRow[]>();
+  for (const row of rows) {
+    const key = keyFor(row);
+    if (!key) continue;
+    const group = groups.get(key) ?? [];
+    group.push(row);
+    groups.set(key, group);
+  }
+
+  return [...groups.entries()]
+    .map(([key, group]) => {
+      const durableCount = group.filter((row) => isDurablyClosedConclusion(row, history, casesById)).length;
+      const reopenedCount = group.filter((row) => findLinkedReopen(history, row.id)).length;
+      return {
+        key,
+        label: formatAnalyticsLabel(key),
+        volume: group.length,
+        reopenRate: group.length === 0 ? null : reopenedCount / group.length,
+        durableCloseRate: group.length === 0 ? null : durableCount / group.length,
+        medianDaysToReopen: medianDaysToReopen(group, history),
+        averageDaysToDurableClose: averageDaysToDurableClose(group, history, casesById),
+        queueLink: buildBestEffortReasonQueueLink(family, group, history),
+      };
+    })
+    .sort((a, b) => {
+      if (b.volume !== a.volume) return b.volume - a.volume;
+      return a.label.localeCompare(b.label);
+    });
+}
+
+function buildDisconnectTypeInteractions(
+  concludedRows: DisconnectCaseHistoryRow[],
+  history: DisconnectCaseHistoryRow[],
+  casesById: Map<string, DisconnectCaseRow>
+) {
+  const groups = new Map<string, DisconnectCaseHistoryRow[]>();
+  for (const row of concludedRows) {
+    const family = readHistoryMetadata(row).conclusion?.kind;
+    const disconnectType = readHistoryMetadata(row).disconnectTypeAtConclusion;
+    if (!family || !disconnectType) continue;
+    const key = `${disconnectType}::${family}`;
+    const group = groups.get(key) ?? [];
+    group.push(row);
+    groups.set(key, group);
+  }
+
+  return [...groups.entries()]
+    .map(([key, group]) => {
+      const [disconnectType, conclusionFamily] = key.split("::") as [string, "resolve" | "snooze" | "escalate"];
+      const durableCount = group.filter((row) => isDurablyClosedConclusion(row, history, casesById)).length;
+      const reopenedCount = group.filter((row) => findLinkedReopen(history, row.id)).length;
+      return {
+        disconnectType,
+        conclusionFamily,
+        volume: group.length,
+        reopenRate: group.length === 0 ? null : reopenedCount / group.length,
+        durableCloseRate: group.length === 0 ? null : durableCount / group.length,
+        queueLink:
+          conclusionFamily === "escalate"
+            ? formatQueueLink({ view: "escalated", disconnectType })
+            : formatQueueLink({ view: reopenedCount > 0 ? "repeat" : "open", disconnectType }),
+      };
+    })
+    .sort((a, b) => {
+      if (b.volume !== a.volume) return b.volume - a.volume;
+      return a.disconnectType.localeCompare(b.disconnectType);
+    });
+}
+
+function buildAssigneeEffectiveness(
+  concludedRows: DisconnectCaseHistoryRow[],
+  history: DisconnectCaseHistoryRow[],
+  usersMap: Map<string, string>,
+  casesById: Map<string, DisconnectCaseRow>
+) {
+  const groups = new Map<string, DisconnectCaseHistoryRow[]>();
+  for (const row of concludedRows) {
+    const key = readHistoryMetadata(row).assigneeAtConclusion ?? "";
+    const group = groups.get(key) ?? [];
+    group.push(row);
+    groups.set(key, group);
+  }
+
+  return [...groups.entries()]
+    .map(([assigneeId, group]) => {
+      const durableCount = group.filter((row) => isDurablyClosedConclusion(row, history, casesById)).length;
+      const reopenedCount = group.filter((row) => findLinkedReopen(history, row.id)).length;
+      return {
+        assigneeId: assigneeId || null,
+        assigneeName: assigneeId ? usersMap.get(assigneeId) ?? null : null,
+        volume: group.length,
+        resolveCount: group.filter((row) => readHistoryMetadata(row).conclusion?.kind === "resolve").length,
+        snoozeCount: group.filter((row) => readHistoryMetadata(row).conclusion?.kind === "snooze").length,
+        escalateCount: group.filter((row) => readHistoryMetadata(row).conclusion?.kind === "escalate").length,
+        reopenRate: group.length === 0 ? null : reopenedCount / group.length,
+        durableCloseRate: group.length === 0 ? null : durableCount / group.length,
+        queueLink: assigneeId ? formatQueueLink({ view: "open", assigneeId }) : null,
+      };
+    })
+    .sort((a, b) => {
+      if (b.volume !== a.volume) return b.volume - a.volume;
+      return (a.assigneeName ?? a.assigneeId ?? "").localeCompare(b.assigneeName ?? b.assigneeId ?? "");
+    });
+}
+
+function buildOutcomeWarnings(
+  concludedRows: DisconnectCaseHistoryRow[],
+  history: DisconnectCaseHistoryRow[],
+  casesById: Map<string, DisconnectCaseRow>
+): InterventionOutcomeEffectiveness["warnings"] {
+  const warnings: InterventionOutcomeEffectiveness["warnings"] = [];
+  const snoozeRows = buildPerformanceRows(
+    concludedRows.filter((row) => readHistoryMetadata(row).conclusion?.kind === "snooze"),
+    history,
+    (row) => String(readHistoryMetadata(row).conclusion?.snoozeReasonCode ?? ""),
+    "snooze",
+    casesById
+  );
+  for (const row of snoozeRows) {
+    if (row.reopenRate !== null && row.reopenRate >= 0.35) {
+      warnings.push({
+        kind: "snooze_reopen_risk",
+        key: row.key,
+        label: row.label,
+        volume: row.volume,
+        rate: row.reopenRate,
+        queueLink: row.queueLink,
+      });
+    }
+  }
+
+  const escalationReasonRows = buildPerformanceRows(
+    concludedRows.filter((row) => readHistoryMetadata(row).conclusion?.kind === "escalate"),
+    history,
+    (row) => String(readHistoryMetadata(row).conclusion?.escalationReasonCode ?? ""),
+    "escalate",
+    casesById
+  );
+  for (const row of escalationReasonRows) {
+    if (row.durableCloseRate !== null && row.durableCloseRate <= 0.4) {
+      warnings.push({
+        kind: "escalation_reason_weak_close_through",
+        key: row.key,
+        label: row.label,
+        volume: row.volume,
+        rate: row.durableCloseRate,
+        queueLink: row.queueLink,
+      });
+    }
+  }
+
+  const escalationTargetRows = buildPerformanceRows(
+    concludedRows.filter((row) => readHistoryMetadata(row).conclusion?.kind === "escalate"),
+    history,
+    (row) => String(readHistoryMetadata(row).conclusion?.escalationTargetType ?? ""),
+    "escalate",
+    casesById
+  );
+  for (const row of escalationTargetRows) {
+    if (row.durableCloseRate !== null && row.durableCloseRate <= 0.4) {
+      warnings.push({
+        kind: "escalation_target_weak_close_through",
+        key: row.key,
+        label: row.label,
+        volume: row.volume,
+        rate: row.durableCloseRate,
+        queueLink: row.queueLink,
+      });
+    }
+  }
+
+  const administrativeGroups = buildGroupedCountTable(
+    concludedRows.filter(
+      (row) =>
+        readHistoryMetadata(row).conclusion?.kind === "resolve" &&
+        readHistoryMetadata(row).conclusion?.effectiveness === "unclear"
+    ),
+    (row) => String(readHistoryMetadata(row).disconnectTypeAtConclusion ?? "")
+  );
+
+  for (const [key, volume] of administrativeGroups.entries()) {
+    warnings.push({
+      kind: "administrative_close_pattern",
+      key,
+      label: formatAnalyticsLabel(key),
+      volume,
+      rate: null,
+      queueLink: formatQueueLink({ view: "open", disconnectType: key }),
+    });
+  }
+
+  return warnings.sort((a, b) => {
+    if (b.volume !== a.volume) return b.volume - a.volume;
+    return a.label.localeCompare(b.label);
+  });
+}
+
 function buildInterventionOutcomeEffectiveness(
   history: DisconnectCaseHistoryRow[],
-  usersMap: Map<string, string>
+  usersMap: Map<string, string>,
+  cases: DisconnectCaseRow[],
+  now: Date
 ): InterventionOutcomeEffectiveness {
-  const concludedRows = history.filter((row) => Boolean(readHistoryMetadata(row).conclusion?.kind));
+  const windowStart = new Date(now);
+  windowStart.setDate(windowStart.getDate() - 30);
+  const recentHistory = history.filter((row) => row.actedAt >= windowStart);
+  const concludedRows = recentHistory.filter((row) => Boolean(readHistoryMetadata(row).conclusion?.kind));
+  const casesById = new Map(cases.map((row) => [row.id, row]));
   const reopenedByActionId = new Set(
-    history
+    recentHistory
       .filter((row) => row.actionType === "reopened")
       .map((row) => String(readHistoryMetadata(row).priorConclusionActionId ?? ""))
       .filter(Boolean)
@@ -1019,6 +1351,38 @@ function buildInterventionOutcomeEffectiveness(
   );
 
   return {
+    summaryByConclusionFamily: buildSummaryByConclusionFamily(concludedRows, recentHistory, reopenedByActionId, casesById),
+    resolveReasonPerformance: buildPerformanceRows(
+      concludedRows.filter((row) => readHistoryMetadata(row).conclusion?.kind === "resolve"),
+      recentHistory,
+      (row) => String(readHistoryMetadata(row).conclusion?.reasonCode ?? ""),
+      "resolve",
+      casesById
+    ),
+    snoozeReasonPerformance: buildPerformanceRows(
+      concludedRows.filter((row) => readHistoryMetadata(row).conclusion?.kind === "snooze"),
+      recentHistory,
+      (row) => String(readHistoryMetadata(row).conclusion?.snoozeReasonCode ?? ""),
+      "snooze",
+      casesById
+    ),
+    escalationReasonPerformance: buildPerformanceRows(
+      concludedRows.filter((row) => readHistoryMetadata(row).conclusion?.kind === "escalate"),
+      recentHistory,
+      (row) => String(readHistoryMetadata(row).conclusion?.escalationReasonCode ?? ""),
+      "escalate",
+      casesById
+    ),
+    escalationTargetPerformance: buildPerformanceRows(
+      concludedRows.filter((row) => readHistoryMetadata(row).conclusion?.kind === "escalate"),
+      recentHistory,
+      (row) => String(readHistoryMetadata(row).conclusion?.escalationTargetType ?? ""),
+      "escalate",
+      casesById
+    ),
+    disconnectTypeInteractions: buildDisconnectTypeInteractions(concludedRows, recentHistory, casesById),
+    assigneeEffectiveness: buildAssigneeEffectiveness(concludedRows, recentHistory, usersMap, casesById),
+    warnings: buildOutcomeWarnings(concludedRows, recentHistory, casesById),
     reopenRateByConclusionFamily: {
       resolve: baseRates.resolve ?? null,
       snooze: baseRates.snooze ?? null,
@@ -1042,7 +1406,7 @@ function buildInterventionOutcomeEffectiveness(
     conclusionMixByDisconnectType: buildConclusionMixByDisconnectType(concludedRows),
     conclusionMixByActingUser: buildConclusionMixByActingUser(concludedRows, usersMap),
     conclusionMixByAssigneeAtConclusion: buildConclusionMixByAssigneeAtConclusion(concludedRows, usersMap),
-    medianDaysToReopenByConclusionFamily: buildMedianDaysToReopenTable(concludedRows, history),
+    medianDaysToReopenByConclusionFamily: buildMedianDaysToReopenTable(concludedRows, recentHistory),
   };
 }
 
@@ -1173,7 +1537,7 @@ export async function getInterventionAnalyticsDashboard(
   return {
     summary: buildInterventionAnalyticsSummary(cases, now),
     outcomes: buildInterventionAnalyticsOutcomes(cases, history, now),
-    outcomeEffectiveness: buildInterventionOutcomeEffectiveness(history, usersMap),
+    outcomeEffectiveness: buildInterventionOutcomeEffectiveness(history, usersMap, cases, now),
     hotspots: {
       assignees: buildHotspotRows(cases, now, {
         entityType: "assignee",
