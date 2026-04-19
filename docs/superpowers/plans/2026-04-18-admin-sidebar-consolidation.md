@@ -39,6 +39,7 @@ import {
   getVisibleAdminGroups,
   getVisibleDirectorItems,
   isAdminGroupActive,
+  getNextExpandedGroups,
 } from "./sidebar";
 
 vi.mock("@/lib/auth", () => ({
@@ -82,6 +83,21 @@ describe("Sidebar admin grouping", () => {
     expect(isAdminGroupActive(groups[0].items, "/admin/interventions")).toBe(true);
     expect(isAdminGroupActive(groups[1].items, "/admin/ai-ops")).toBe(true);
     expect(isAdminGroupActive(groups[2].items, "/admin/offices")).toBe(true);
+  });
+
+  it("toggles a non-active group but keeps an active group forced open", () => {
+    const groups = getVisibleAdminGroups("admin");
+    const aiGroup = groups.find((group) => group.id === "ai")!;
+    const operationsGroup = groups.find((group) => group.id === "operations")!;
+
+    const expanded = getNextExpandedGroups({}, groups, "/admin/interventions");
+    const toggledOpen = getNextExpandedGroups(expanded, groups, "/admin/interventions", aiGroup.id);
+    const toggledClosed = getNextExpandedGroups(toggledOpen, groups, "/admin/interventions", aiGroup.id);
+    const forcedOpen = getNextExpandedGroups(expanded, groups, "/admin/interventions", operationsGroup.id);
+
+    expect(toggledOpen.ai).toBe(true);
+    expect(toggledClosed.ai).toBe(false);
+    expect(forcedOpen.operations).toBe(true);
   });
 
   it("renders Merge Queue only in the Operations group markup", () => {
@@ -214,6 +230,32 @@ export function getVisibleAdminGroups(role: Role | undefined) {
 export function getVisibleDirectorItems(role: Role | undefined) {
   return filterByRole(directorItems, role);
 }
+
+export function getNextExpandedGroups(
+  current: Record<string, boolean>,
+  groups: Array<AdminGroup & { items: NavItem[] }>,
+  pathname: string,
+  toggledGroupId?: string,
+) {
+  const next = { ...current };
+
+  for (const group of groups) {
+    if (isAdminGroupActive(group.items, pathname)) {
+      next[group.id] = true;
+      continue;
+    }
+
+    if (!(group.id in next)) {
+      next[group.id] = group.defaultExpanded;
+    }
+
+    if (group.id === toggledGroupId) {
+      next[group.id] = !next[group.id];
+    }
+  }
+
+  return next;
+}
 ```
 
 Use `useLocation()` from `react-router-dom` so active-group logic is based on the current route.
@@ -257,18 +299,8 @@ const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({}
 
 useEffect(() => {
   setExpandedGroups((current) => {
-    let changed = false;
-    const next = { ...current };
-    for (const group of visibleAdminGroups) {
-      const desired = isAdminGroupActive(group.items, pathname)
-        ? true
-        : (group.id in next ? next[group.id] : group.defaultExpanded);
-      if (next[group.id] !== desired) {
-        next[group.id] = desired;
-        changed = true;
-      }
-    }
-    return changed ? next : current;
+    const next = getNextExpandedGroups(current, visibleAdminGroups, pathname);
+    return JSON.stringify(next) === JSON.stringify(current) ? current : next;
   });
 }, [pathname, visibleAdminGroups]);
 
@@ -285,11 +317,7 @@ Use a toggle handler like:
 
 ```tsx
 function toggleGroup(group: AdminGroup & { items: NavItem[] }) {
-  if (isAdminGroupActive(group.items, pathname)) return;
-  setExpandedGroups((current) => ({
-    ...current,
-    [group.id]: !isExpanded(group),
-  }));
+  setExpandedGroups((current) => getNextExpandedGroups(current, visibleAdminGroups, pathname, group.id));
 }
 ```
 
@@ -326,7 +354,7 @@ npx vitest run client/src/components/layout/sidebar.test.tsx --config client/vit
 
 Expected:
 
-- PASS for grouped rendering, role filtering, active-group forcing, and canonical route ownership
+- PASS for grouped rendering, role filtering, active-group forcing, toggle-state transitions, and canonical route ownership
 
 - [ ] **Step 5: Commit the sidebar behavior**
 
