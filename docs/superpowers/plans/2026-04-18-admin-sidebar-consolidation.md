@@ -67,6 +67,7 @@ describe("Sidebar admin grouping", () => {
   it("returns grouped admin navigation for admins and hides empty groups for directors", () => {
     const adminGroups = getVisibleAdminGroups("admin");
     const directorGroups = getVisibleAdminGroups("director");
+    const repGroups = getVisibleAdminGroups("rep");
 
     expect(adminGroups.map((group) => group.label)).toEqual(["Operations", "AI", "System"]);
     expect(directorGroups.map((group) => group.label)).toEqual(["Operations", "AI", "System"]);
@@ -75,6 +76,7 @@ describe("Sidebar admin grouping", () => {
       "Audit Log",
       "Cross-Office Reports",
     ]);
+    expect(repGroups).toEqual([]);
   });
 
   it("detects active groups from the current pathname", () => {
@@ -164,6 +166,9 @@ export type AdminGroup = {
 const directorItems: NavItem[] = [
   { to: "/director", icon: Shield, label: "Director", roles: ["admin", "director"] },
 ];
+
+// Keep Merge Queue out of directorItems. Its canonical sidebar location is
+// Admin > Operations.
 
 const adminGroups: AdminGroup[] = [
   {
