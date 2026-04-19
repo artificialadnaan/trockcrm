@@ -358,6 +358,16 @@ Client-visible freshness fields:
 - `latestCaseChangedAt`
 - `packetGeneratedAt`
 
+`latestCaseChangedAt` definition:
+
+- this is a derived server timestamp representing the latest change to any copilot input affecting the case
+- for v1 it is the max of:
+  - latest intervention case mutation timestamp
+  - latest reopen/materialization timestamp
+  - latest assignee change timestamp
+  - latest generated-task linkage/status change timestamp when a generated task is attached
+- the client treats it as an opaque freshness marker and does not recompute it
+
 Freshness / invalidation rules:
 
 - any successful intervention mutation on that case (`assign`, `snooze`, `resolve`, `escalate`) marks the current packet stale
@@ -406,6 +416,7 @@ The returned view should include:
 - `isStale`
 - `latestCaseChangedAt`
 - `packetGeneratedAt`
+- `viewerFeedbackValue`
 
 `recommendedAction` must be a normalized top-level object with at least:
 
@@ -437,6 +448,11 @@ Idempotency rule:
 - feedback remains append-only in storage, matching the existing feedback model
 - the UI only allows one latest visible opinion per user per packet at a time
 - if the same user changes opinion from `Useful` to `Not useful` or vice versa, the newer submission is treated as the active opinion for presentation/analytics in this slice
+
+Readback rule:
+
+- the copilot payload includes `viewerFeedbackValue`, derived from the latest feedback row for the current user on that packet
+- this allows the client to render the current user’s active visible opinion without querying a separate endpoint
 
 ## Permissions
 
