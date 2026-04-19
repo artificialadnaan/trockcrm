@@ -407,6 +407,13 @@ The returned view should include:
 - `latestCaseChangedAt`
 - `packetGeneratedAt`
 
+`recommendedAction` must be a normalized top-level object with at least:
+
+- `action`
+- `rationale`
+- `suggestedOwner`
+- `suggestedOwnerId`
+
 Do not expose accepted/dismissed task-suggestion mutations in v1. This slice is judgment support, not AI task creation.
 
 ## Feedback
