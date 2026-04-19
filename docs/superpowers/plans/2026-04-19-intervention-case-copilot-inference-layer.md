@@ -109,6 +109,13 @@ function createTenantDb(state: Record<string, unknown>) {
   return { state } as any;
 }
 
+Before implementing `buildInterventionCopilotView`, extend the in-memory tenant-db test path in `intervention-service.ts` so the in-memory state shape can read:
+
+- `state.packets`
+- `state.feedback`
+
+for intervention copilot packet lookup. If the service keeps a narrower in-memory shape instead, switch this test file to mock those DB reads directly instead of seeding unsupported `state` keys.
+
 describe("buildInterventionCopilotView", () => {
   it("returns a normalized intervention copilot view with packet, freshness, and similar cases", async () => {
     const tenantDb = createTenantDb({
@@ -507,7 +514,6 @@ expect(body).toMatchObject({
   isStale: expect.any(Boolean),
   latestCaseChangedAt: expect.anything(),
   packetGeneratedAt: expect.anything(),
-      viewerFeedbackValue: expect.toSatisfy((value) => value === null || typeof value === "string"),
 });
 ```
 
@@ -623,6 +629,8 @@ describe("InterventionCaseCopilotPanel", () => {
     const html = renderToStaticMarkup(
       <MemoryRouter>
         <InterventionCaseCopilotPanel
+          onRefresh={() => {}}
+          onFeedback={() => {}}
           data={{
             packet: { id: "packet-1", summaryText: "Likely owner mismatch.", confidence: 0.78, generatedAt: "2026-04-19T12:00:00.000Z" },
             recommendedAction: { action: "assign", rationale: "Task owner is missing.", suggestedOwner: "Admin User", suggestedOwnerId: "user-1" },
@@ -653,17 +661,19 @@ describe("InterventionCaseCopilotPanel", () => {
   it("renders loading, localized error, and stale/pending badges", () => {
     const loading = renderToStaticMarkup(
       <MemoryRouter>
-        <InterventionCaseCopilotPanel loading />
+        <InterventionCaseCopilotPanel loading onRefresh={() => {}} onFeedback={() => {}} />
       </MemoryRouter>,
     );
     const errored = renderToStaticMarkup(
       <MemoryRouter>
-        <InterventionCaseCopilotPanel error="Failed to load copilot" />
+        <InterventionCaseCopilotPanel error="Failed to load copilot" onRefresh={() => {}} onFeedback={() => {}} />
       </MemoryRouter>,
     );
     const stale = renderToStaticMarkup(
       <MemoryRouter>
         <InterventionCaseCopilotPanel
+          onRefresh={() => {}}
+          onFeedback={() => {}}
           data={{
             packet: { id: null, summaryText: null, confidence: null, generatedAt: null },
             recommendedAction: null,
@@ -759,6 +769,12 @@ Create `client/src/components/ai/intervention-detail-panel.test.tsx` to verify:
 - localized copilot errors do not suppress the rest of the detail content
 
 Keep this test server-rendered with `renderToStaticMarkup` like the panel tests. Do not require a DOM test environment for this slice.
+
+Make the test setup explicit:
+
+- mock the detail-data hook that currently feeds `InterventionDetailPanel`
+- mock `useInterventionCopilot(caseId)` once with loaded data and once with a localized error
+- assert that the existing direct-action sections still render in both cases while the copilot subsection changes independently
 
 - [ ] **Step 7: Run focused client tests**
 
