@@ -1,4 +1,5 @@
-import { NavLink } from "react-router-dom";
+import { useEffect, useMemo, useState } from "react";
+import { NavLink, useLocation } from "react-router-dom";
 import { useAuth } from "@/lib/auth";
 import {
   LayoutDashboard,
@@ -26,11 +27,29 @@ import {
   ShieldAlert,
   Radar,
   ClipboardCheck,
+  ChevronDown,
+  type LucideIcon,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 
-const navItems = [
+type Role = "admin" | "director" | "rep";
+
+export type NavItem = {
+  to: string;
+  icon: LucideIcon;
+  label: string;
+  roles: Role[];
+};
+
+export type AdminGroup = {
+  id: "operations" | "ai" | "system";
+  label: string;
+  defaultExpanded: boolean;
+  items: NavItem[];
+};
+
+const navItems: NavItem[] = [
   { to: "/", icon: LayoutDashboard, label: "Dashboard", roles: ["admin", "director", "rep"] },
   { to: "/deals", icon: Handshake, label: "Deals", roles: ["admin", "director", "rep"] },
   { to: "/leads", icon: ClipboardList, label: "Leads", roles: ["admin", "director", "rep"] },
@@ -47,37 +66,131 @@ const navItems = [
   { to: "/projects", icon: Building2, label: "Projects", roles: ["admin", "director", "rep"] },
 ];
 
-const directorItems = [
+const directorItems: NavItem[] = [
   { to: "/director", icon: Shield, label: "Director", roles: ["admin", "director"] },
-  { to: "/admin/merge-queue", icon: GitMerge, label: "Merge Queue", roles: ["admin", "director"] },
 ];
 
-const adminItems = [
-  { to: "/admin/offices", icon: Building2, label: "Offices", roles: ["admin"] },
-  { to: "/admin/users", icon: Users, label: "Users", roles: ["admin"] },
-  { to: "/admin/pipeline", icon: Settings, label: "Pipeline Config", roles: ["admin"] },
-  { to: "/admin/procore", icon: Zap, label: "Procore Sync", roles: ["admin"] },
-  { to: "/admin/sales-process-disconnects", icon: Radar, label: "Process Disconnects", roles: ["admin", "director"] },
-  { to: "/admin/interventions", icon: ClipboardCheck, label: "Interventions", roles: ["admin", "director"] },
-  { to: "/admin/intervention-analytics", icon: BarChart3, label: "Intervention Analytics", roles: ["admin", "director"] },
-  { to: "/admin/ai-actions", icon: ShieldAlert, label: "AI Actions", roles: ["admin", "director"] },
-  { to: "/admin/ai-ops", icon: Sparkles, label: "AI Ops", roles: ["admin", "director"] },
-  { to: "/admin/data-scrub", icon: ClipboardList, label: "Data Scrub", roles: ["admin", "director"] },
-  { to: "/admin/audit", icon: ClipboardList, label: "Audit Log", roles: ["admin", "director"] },
-  { to: "/admin/cross-office-reports", icon: Globe, label: "Cross-Office Reports", roles: ["admin", "director"] },
-  { to: "/admin/migration", icon: ArrowRightLeft, label: "Migration", roles: ["admin"] },
+const adminGroups: AdminGroup[] = [
+  {
+    id: "operations",
+    label: "Operations",
+    defaultExpanded: true,
+    items: [
+      { to: "/admin/sales-process-disconnects", icon: Radar, label: "Process Disconnects", roles: ["admin", "director"] },
+      { to: "/admin/interventions", icon: ClipboardCheck, label: "Interventions", roles: ["admin", "director"] },
+      { to: "/admin/intervention-analytics", icon: BarChart3, label: "Intervention Analytics", roles: ["admin", "director"] },
+      { to: "/admin/merge-queue", icon: GitMerge, label: "Merge Queue", roles: ["admin", "director"] },
+    ],
+  },
+  {
+    id: "ai",
+    label: "AI",
+    defaultExpanded: false,
+    items: [
+      { to: "/admin/ai-actions", icon: ShieldAlert, label: "AI Actions", roles: ["admin", "director"] },
+      { to: "/admin/ai-ops", icon: Sparkles, label: "AI Ops", roles: ["admin", "director"] },
+    ],
+  },
+  {
+    id: "system",
+    label: "System",
+    defaultExpanded: false,
+    items: [
+      { to: "/admin/offices", icon: Building2, label: "Offices", roles: ["admin"] },
+      { to: "/admin/users", icon: Users, label: "Users", roles: ["admin"] },
+      { to: "/admin/pipeline", icon: Settings, label: "Pipeline Config", roles: ["admin"] },
+      { to: "/admin/procore", icon: Zap, label: "Procore Sync", roles: ["admin"] },
+      { to: "/admin/data-scrub", icon: ClipboardList, label: "Data Scrub", roles: ["admin", "director"] },
+      { to: "/admin/audit", icon: ClipboardList, label: "Audit Log", roles: ["admin", "director"] },
+      { to: "/admin/cross-office-reports", icon: Globe, label: "Cross-Office Reports", roles: ["admin", "director"] },
+      { to: "/admin/migration", icon: ArrowRightLeft, label: "Migration", roles: ["admin"] },
+    ],
+  },
 ];
 
-const helpItems = [
+const helpItems: NavItem[] = [
   { to: "/help/user-guide", icon: BookOpen, label: "User Guide", roles: ["admin", "director", "rep"] },
   { to: "/help/admin-guide", icon: HelpCircle, label: "Admin Guide", roles: ["admin"] },
 ];
 
+function filterByRole(items: NavItem[], role: Role | undefined) {
+  if (!role) return [];
+  return items.filter((item) => item.roles.includes(role));
+}
+
+export function getVisibleDirectorItems(role: Role | undefined) {
+  return filterByRole(directorItems, role);
+}
+
+export function getVisibleAdminGroups(role: Role | undefined) {
+  return adminGroups
+    .map((group) => ({
+      ...group,
+      items: filterByRole(group.items, role),
+    }))
+    .filter((group) => group.items.length > 0);
+}
+
+export function isAdminGroupActive(items: NavItem[], pathname: string) {
+  return items.some((item) => pathname === item.to || pathname.startsWith(`${item.to}/`));
+}
+
+export function getNextExpandedGroups(
+  current: Record<string, boolean>,
+  groups: Array<AdminGroup & { items: NavItem[] }>,
+  pathname: string,
+  toggledGroupId?: string,
+) {
+  const next = { ...current };
+
+  for (const group of groups) {
+    if (isAdminGroupActive(group.items, pathname)) {
+      next[group.id] = true;
+      continue;
+    }
+
+    if (!(group.id in next)) {
+      next[group.id] = group.defaultExpanded;
+    }
+
+    if (group.id === toggledGroupId) {
+      next[group.id] = !next[group.id];
+    }
+  }
+
+  return next;
+}
+
 export function Sidebar() {
   const { user, logout } = useAuth();
+  const { pathname } = useLocation();
+  const role = user?.role;
+  const visibleNavItems = useMemo(() => filterByRole(navItems, role), [role]);
+  const visibleDirectorItems = useMemo(() => getVisibleDirectorItems(role), [role]);
+  const visibleAdminGroups = useMemo(() => getVisibleAdminGroups(role), [role]);
+  const visibleHelpItems = useMemo(() => filterByRole(helpItems, role), [role]);
+  const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
 
-  const filterByRole = (items: typeof navItems) =>
-    items.filter((item) => user && item.roles.includes(user.role));
+  useEffect(() => {
+    setExpandedGroups((current) => {
+      const next = getNextExpandedGroups(current, visibleAdminGroups, pathname);
+      return JSON.stringify(next) === JSON.stringify(current) ? current : next;
+    });
+  }, [pathname, visibleAdminGroups]);
+
+  const isExpanded = (group: AdminGroup & { items: NavItem[] }) =>
+    isAdminGroupActive(group.items, pathname) || expandedGroups[group.id] || false;
+
+  const toggleGroup = (group: AdminGroup & { items: NavItem[] }) => {
+    setExpandedGroups((current) => getNextExpandedGroups(current, visibleAdminGroups, pathname, group.id));
+  };
+
+  const navLinkClass = ({ isActive }: { isActive: boolean }) =>
+    `flex items-center gap-3 px-3 py-2 rounded-md text-sm transition-colors ${
+      isActive
+        ? "bg-sidebar-active border-l-2 border-brand-red text-white"
+        : "text-slate-400 hover:bg-sidebar-hover hover:text-white"
+    }`;
 
   return (
     <aside className="hidden md:flex flex-col w-60 bg-sidebar-bg text-white min-h-screen">
@@ -96,39 +209,27 @@ export function Sidebar() {
       </div>
 
       <nav className="flex-1 px-2 space-y-1">
-        {filterByRole(navItems).map((item) => (
+        {visibleNavItems.map((item) => (
           <NavLink
             key={item.to}
             to={item.to}
             end={item.to === "/"}
-            className={({ isActive }) =>
-              `flex items-center gap-3 px-3 py-2 rounded-md text-sm transition-colors ${
-                isActive
-                  ? "bg-sidebar-active border-l-2 border-brand-red text-white"
-                  : "text-slate-400 hover:bg-sidebar-hover hover:text-white"
-              }`
-            }
+            className={navLinkClass}
           >
             <item.icon className="h-4 w-4" />
             {item.label}
           </NavLink>
         ))}
 
-        {filterByRole(directorItems).length > 0 && (
+        {visibleDirectorItems.length > 0 && (
           <>
             <Separator className="my-3 bg-slate-700" />
             <p className="px-3 text-xs text-slate-500 uppercase tracking-wider">Director</p>
-            {filterByRole(directorItems).map((item) => (
+            {visibleDirectorItems.map((item) => (
               <NavLink
                 key={item.to}
                 to={item.to}
-                className={({ isActive }) =>
-                  `flex items-center gap-3 px-3 py-2 rounded-md text-sm transition-colors ${
-                    isActive
-                      ? "bg-sidebar-active border-l-2 border-brand-red text-white"
-                      : "text-slate-400 hover:bg-sidebar-hover hover:text-white"
-                  }`
-                }
+                className={navLinkClass}
               >
                 <item.icon className="h-4 w-4" />
                 {item.label}
@@ -137,44 +238,47 @@ export function Sidebar() {
           </>
         )}
 
-        {filterByRole(adminItems).length > 0 && (
+        {visibleAdminGroups.length > 0 && (
           <>
             <Separator className="my-3 bg-slate-700" />
             <p className="px-3 text-xs text-slate-500 uppercase tracking-wider">Admin</p>
-            {filterByRole(adminItems).map((item) => (
-              <NavLink
-                key={item.to}
-                to={item.to}
-                className={({ isActive }) =>
-                  `flex items-center gap-3 px-3 py-2 rounded-md text-sm transition-colors ${
-                    isActive
-                      ? "bg-sidebar-active border-l-2 border-brand-red text-white"
-                      : "text-slate-400 hover:bg-sidebar-hover hover:text-white"
-                  }`
-                }
-              >
-                <item.icon className="h-4 w-4" />
-                {item.label}
-              </NavLink>
+            {visibleAdminGroups.map((group) => (
+              <div key={group.id} className="space-y-1">
+                <button
+                  type="button"
+                  className="flex w-full items-center justify-between px-3 py-2 text-xs uppercase tracking-wider text-slate-400 hover:text-white"
+                  aria-expanded={isExpanded(group)}
+                  onClick={() => toggleGroup(group)}
+                >
+                  <span>{group.label}</span>
+                  <ChevronDown
+                    className={`h-4 w-4 transition-transform ${isExpanded(group) ? "rotate-0" : "-rotate-90"}`}
+                  />
+                </button>
+                {isExpanded(group) ? (
+                  <div className="space-y-1">
+                    {group.items.map((item) => (
+                      <NavLink key={item.to} to={item.to} className={navLinkClass}>
+                        <item.icon className="h-4 w-4" />
+                        {item.label}
+                      </NavLink>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
             ))}
           </>
         )}
 
-        {filterByRole(helpItems).length > 0 && (
+        {visibleHelpItems.length > 0 && (
           <>
             <Separator className="my-3 bg-slate-700" />
             <p className="px-3 text-xs text-slate-500 uppercase tracking-wider">Help</p>
-            {filterByRole(helpItems).map((item) => (
+            {visibleHelpItems.map((item) => (
               <NavLink
                 key={item.to}
                 to={item.to}
-                className={({ isActive }) =>
-                  `flex items-center gap-3 px-3 py-2 rounded-md text-sm transition-colors ${
-                    isActive
-                      ? "bg-sidebar-active border-l-2 border-brand-red text-white"
-                      : "text-slate-400 hover:bg-sidebar-hover hover:text-white"
-                  }`
-                }
+                className={navLinkClass}
               >
                 <item.icon className="h-4 w-4" />
                 {item.label}
