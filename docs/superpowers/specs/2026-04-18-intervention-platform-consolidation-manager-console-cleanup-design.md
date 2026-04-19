@@ -129,6 +129,20 @@ This becomes the canonical manager console and should be reorganized into one lo
 3. `Outcome Effectiveness`
 4. `Policy Recommendations`
 
+Required anchor ids for this cleanup:
+
+- `#queue-health`
+- `#manager-alerts`
+- `#outcome-effectiveness`
+- `#policy-recommendations`
+
+Required jump-row mapping:
+
+- `Queue Health` -> `#queue-health`
+- `Manager Alerts` -> `#manager-alerts`
+- `Outcome Effectiveness` -> `#outcome-effectiveness`
+- `Policy Recommendations` -> `#policy-recommendations`
+
 #### Queue Health
 
 Contains:
@@ -138,6 +152,11 @@ Contains:
 - queue outcomes summary
 - hotspots
 - breach queue
+- the current manager-readout framing, if retained at all, must be absorbed into the `Queue Health` section header/intro and must not survive as a separate fifth dashboard block
+
+Anchor owner:
+
+- `#queue-health`
 
 Purpose:
 
@@ -151,6 +170,10 @@ Contains:
 - latest scan/sent state
 - manual preview and send actions
 
+Anchor owner:
+
+- `#manager-alerts`
+
 Purpose:
 
 - answer “what management pressure is active and what was the latest alert state?”
@@ -163,6 +186,10 @@ Contains:
 - reason-performance tables
 - warnings tied to outcomes
 
+Anchor owner:
+
+- `#outcome-effectiveness`
+
 Purpose:
 
 - answer “what kinds of interventions are actually working?”
@@ -172,6 +199,10 @@ Purpose:
 Contains:
 
 - automation tuning recommendation section
+
+Anchor owner:
+
+- `#policy-recommendations`
 
 Purpose:
 
@@ -183,6 +214,49 @@ Purpose:
 - use section headers and descriptions to make the page readable as a console, not a list of cards
 - keep all current modules available, but regroup them into the four canonical sections
 - avoid repeating identical counts or explanations in multiple sections
+
+The jump-row must use the four exact anchors above. Tests for this slice should verify both:
+
+- the anchor ids exist in the DOM
+- the jump-row links target those exact fragment ids
+
+#### KPI Ownership Rules
+
+To make “fewer repeated summary surfaces” enforceable, the manager console becomes the canonical owner of intervention-management KPIs.
+
+`/admin/intervention-analytics` owns:
+
+- queue-health counts
+- SLA pressure counts
+- breach and hotspot summaries
+- manager-alert state
+- outcome-effectiveness summaries
+- policy-recommendation summaries
+
+`/admin/sales-process-disconnects` may still show source-side disconnect metrics, but it must not recreate intervention-management KPI strips or alternate manager-summary cards for the same concepts.
+
+Allowed on `sales-process-disconnects`:
+
+- raw disconnect totals
+- disconnect-type counts
+- cluster counts
+- trend slices
+- disconnect narrative
+- source-side automation status tied to disconnect generation
+
+Not allowed on `sales-process-disconnects` after this cleanup:
+
+- second copies of intervention queue-health summaries
+- second copies of manager-alert summaries
+- second copies of intervention outcome-effectiveness summaries
+- alternate framing that presents the page as the central intervention-management dashboard
+
+If a source-side module needs to reference an intervention-management KPI, it should do so by linking to the relevant anchored section in `/admin/intervention-analytics` instead of restating the full summary locally.
+
+The same anti-duplication rule applies inside `/admin/intervention-analytics` itself:
+
+- existing standalone summary/readout blocks that duplicate the new four-section framing must either be removed or absorbed into the owning section as supporting copy
+- specifically, the current `Manager Readout` block must not remain as an independent fifth console module after this cleanup
 
 ### `/admin/sales-process-disconnects`
 
@@ -229,6 +303,50 @@ Required cross-link behavior:
 Rule:
 
 - if a user is already on a page that is not the canonical owner of a metric or action, the UI should deep-link to the canonical owner instead of reproducing that feature in-place
+
+#### Drill-In Context Preservation
+
+Deep links must preserve supported context whenever the destination route already has a real query-param contract for that context.
+
+Required rule:
+
+- preserve supported filters, do not invent new client-only state
+
+For this cleanup, the supported carry-through contract is:
+
+- links into `/admin/interventions` preserve existing supported params such as:
+  - `view`
+  - `caseId`
+  - `severity`
+  - `disconnectType`
+  - `assigneeId`
+  - `repId`
+  - `companyId`
+  - `stageKey`
+- links into `/admin/intervention-analytics` may use anchors and any currently supported query params that already exist on that page, but must not introduce fake history-only drill-in params in this slice
+- links back to `/admin/sales-process-disconnects` should preserve its current source-side filters through URL search params introduced in this cleanup for existing local UI state only:
+  - `type`
+  - `cluster`
+  - `trend`
+
+This is explicitly allowed because it does not add new backend semantics; it only serializes already-existing local page state into the URL so drill-ins and back-links can preserve context.
+
+This cleanup therefore includes a frontend-only contract change on `/admin/sales-process-disconnects`:
+
+- promote the existing local filter state into URL-backed state
+- hydrate local UI controls from:
+  - `type`
+  - `cluster`
+  - `trend`
+- preserve those params on links returning to `/admin/sales-process-disconnects`
+
+This is required for consolidation and is considered in-scope because it preserves existing functionality while making cross-route drill-ins testable.
+
+If a source context cannot be expressed with a supported destination param, the link should:
+
+1. carry the closest supported filter subset
+2. land on the canonical anchored section
+3. avoid implying that unsupported hidden context was preserved
 
 ## Scope Boundaries
 
@@ -296,6 +414,18 @@ Consolidation must preserve the current page-level resilience model:
 
 The cleanup must not make one page more fragile by overly coupling previously independent sections.
 
+Concrete fallback requirements for this slice:
+
+- if broader analytics data fails on `/admin/intervention-analytics`, the page still renders:
+  - title/header
+  - manager alerts panel
+  - available navigation/jump affordances that do not depend on the failed payload
+  - a page-level analytics-unavailable message for the missing analytics sections
+- if the recommendation section fails, the page still renders the rest of the manager console and the recommendation section shows a local warning state instead of disappearing silently
+- if a source-side action or downstream drill-in target is temporarily unavailable on `/admin/sales-process-disconnects`, the page still renders the disconnect inventory and control surfaces with a local error or disabled state for the affected action
+
+The exact copy can follow existing page conventions, but the fallback shape must remain section-local wherever current behavior is section-local.
+
 ## Testing Strategy
 
 This slice is mainly UI composition and IA cleanup, so verification should focus on:
@@ -303,11 +433,16 @@ This slice is mainly UI composition and IA cleanup, so verification should focus
 ### Client Tests
 
 - analytics page renders the new canonical section layout
-- anchored jump navigation renders and points to the expected sections
+- anchored jump navigation renders and points to:
+  - `#queue-health`
+  - `#manager-alerts`
+  - `#outcome-effectiveness`
+  - `#policy-recommendations`
 - existing manager-alert content still renders
 - existing outcome-effectiveness content still renders
 - existing policy-recommendation content still renders
 - disconnects page still renders source-side controls and stronger drill-ins
+- disconnects page persists `type`, `cluster`, and `trend` through the URL and uses them when rendering local filter state
 - workspace still renders execution controls and links outward correctly
 
 ### Regression Checks
@@ -316,6 +451,8 @@ This slice is mainly UI composition and IA cleanup, so verification should focus
 - no recommendation-section regression
 - no route-link regressions between the three pages
 - no disappearance of existing actions from disconnects/workspace surfaces
+- no unsupported filter loss for the drill-ins this cleanup rewires
+- no accidental reintroduction of duplicated manager-summary KPI strips on `sales-process-disconnects`
 
 ### Verification Commands
 
