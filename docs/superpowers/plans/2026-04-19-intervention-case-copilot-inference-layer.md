@@ -36,8 +36,8 @@
   - Server-rendered component tests for loading/error/data states.
 - Modify: `client/src/components/ai/intervention-detail-panel.tsx`
   - Insert copilot panel in the existing sheet and keep current direct actions unchanged.
-- Modify: `client/src/pages/admin/admin-intervention-workspace-page.test.tsx`
-  - Verify the detail sheet still renders with copilot embedded and no route/nav changes.
+- Create: `client/src/components/ai/intervention-detail-panel.test.tsx`
+  - Verify the detail sheet still renders with copilot embedded and current direct actions still mount.
 
 ## Task 1: Add Failing Server Tests for Intervention Copilot View
 
@@ -52,12 +52,60 @@
 import { describe, expect, it } from "vitest";
 import {
   buildInterventionCopilotView,
-} from "../../../server/src/modules/ai-copilot/intervention-service";
-import {
-  createTenantDb,
-  makeCase,
-  makeHistory,
-} from "../helpers/intervention-test-helpers";
+} from "../../../src/modules/ai-copilot/intervention-service";
+import type { InterventionCaseDetail } from "../../../src/modules/ai-copilot/intervention-types";
+
+function makeCase(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "case-default",
+    officeId: "office-1",
+    businessKey: "office-1:missing_next_task:deal:deal-1",
+    scopeType: "deal",
+    scopeId: "deal-1",
+    dealId: "deal-1",
+    companyId: "company-1",
+    disconnectType: "missing_next_task",
+    clusterKey: "follow_through_gap",
+    severity: "high",
+    status: "open",
+    assignedTo: "user-1",
+    generatedTaskId: null,
+    escalated: false,
+    snoozedUntil: null,
+    reopenCount: 0,
+    firstDetectedAt: new Date("2026-04-18T12:00:00.000Z"),
+    lastDetectedAt: new Date("2026-04-19T12:00:00.000Z"),
+    currentLifecycleStartedAt: new Date("2026-04-18T12:00:00.000Z"),
+    lastReopenedAt: null,
+    resolvedAt: null,
+    resolutionReason: null,
+    metadataJson: { stageKey: "estimating" },
+    ...overrides,
+  };
+}
+
+function makeHistory(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "history-1",
+    caseId: "case-default",
+    actionType: "resolve",
+    actedBy: "user-1",
+    actedAt: new Date("2026-04-19T12:00:00.000Z"),
+    fromStatus: "open",
+    toStatus: "resolved",
+    fromAssignee: null,
+    toAssignee: "user-1",
+    fromSnoozedUntil: null,
+    toSnoozedUntil: null,
+    notes: null,
+    metadataJson: null,
+    ...overrides,
+  };
+}
+
+function createTenantDb(state: Record<string, unknown>) {
+  return { state } as any;
+}
 
 describe("buildInterventionCopilotView", () => {
   it("returns a normalized intervention copilot view with packet, freshness, and similar cases", async () => {
@@ -340,7 +388,7 @@ Use the same provider abstraction and heuristic fallback rather than creating a 
 Add a function like:
 
 ```ts
-export async function generateInterventionCopilotPacket(
+export async function regenerateInterventionCopilot(
   tenantDb: TenantDb,
   input: { caseId: string; officeId: string }
 ) {
@@ -427,7 +475,7 @@ expect(body).toMatchObject({
   isStale: expect.any(Boolean),
   latestCaseChangedAt: expect.anything(),
   packetGeneratedAt: expect.anything(),
-  viewerFeedbackValue: expect.anything(),
+      viewerFeedbackValue: expect.toSatisfy((value) => value === null || typeof value === "string"),
 });
 ```
 
@@ -541,6 +589,44 @@ describe("InterventionCaseCopilotPanel", () => {
     expect(html).toContain("assign");
     expect(html).toContain("Admin User");
   });
+
+  it("renders loading, localized error, and stale/pending badges", () => {
+    const loading = renderToStaticMarkup(
+      <MemoryRouter>
+        <InterventionCaseCopilotPanel loading />
+      </MemoryRouter>,
+    );
+    const errored = renderToStaticMarkup(
+      <MemoryRouter>
+        <InterventionCaseCopilotPanel error="Failed to load copilot" />
+      </MemoryRouter>,
+    );
+    const stale = renderToStaticMarkup(
+      <MemoryRouter>
+        <InterventionCaseCopilotPanel
+          data={{
+            packet: null,
+            recommendedAction: null,
+            currentAssignee: { id: null, name: null },
+            riskFlags: [],
+            rootCause: null,
+            blockerOwner: null,
+            reopenRisk: null,
+            similarCases: [],
+            isRefreshPending: true,
+            isStale: true,
+            latestCaseChangedAt: "2026-04-19T12:05:00.000Z",
+            packetGeneratedAt: "2026-04-19T12:00:00.000Z",
+            viewerFeedbackValue: null,
+          }}
+        />
+      </MemoryRouter>,
+    );
+
+    expect(loading).toContain("Case Copilot");
+    expect(errored).toContain("Failed to load copilot");
+    expect(stale).toContain("Refresh queued");
+  });
 });
 ```
 
@@ -579,22 +665,30 @@ Place the copilot block:
 
 The detail sheet must keep working if the copilot fails or loads slowly.
 
-- [ ] **Step 5: Run focused client tests**
+- [ ] **Step 5: Add a focused detail-panel mount test**
+
+Create `client/src/components/ai/intervention-detail-panel.test.tsx` to verify:
+
+- the detail sheet still renders current direct-action sections
+- the copilot section mounts in the sheet body
+- localized copilot errors do not suppress the rest of the detail content
+
+- [ ] **Step 6: Run focused client tests**
 
 Run:
 
 ```bash
-npx vitest run client/src/components/ai/intervention-case-copilot-panel.test.tsx client/src/pages/admin/admin-intervention-workspace-page.test.tsx --config client/vite.config.ts
+npx vitest run client/src/components/ai/intervention-case-copilot-panel.test.tsx client/src/components/ai/intervention-detail-panel.test.tsx --config client/vite.config.ts
 ```
 
 Expected:
 
 - PASS
 
-- [ ] **Step 6: Commit the client copilot UI**
+- [ ] **Step 7: Commit the client copilot UI**
 
 ```bash
-git add client/src/hooks/use-admin-interventions.ts client/src/components/ai/intervention-case-copilot-panel.tsx client/src/components/ai/intervention-case-copilot-panel.test.tsx client/src/components/ai/intervention-detail-panel.tsx client/src/pages/admin/admin-intervention-workspace-page.test.tsx
+git add client/src/hooks/use-admin-interventions.ts client/src/components/ai/intervention-case-copilot-panel.tsx client/src/components/ai/intervention-case-copilot-panel.test.tsx client/src/components/ai/intervention-detail-panel.tsx client/src/components/ai/intervention-detail-panel.test.tsx
 git commit -m "feat: add intervention case copilot panel"
 ```
 
@@ -609,7 +703,7 @@ Run:
 
 ```bash
 npx vitest run server/tests/modules/ai-copilot/intervention-case-copilot.test.ts server/tests/modules/ai-copilot/routes.test.ts
-npx vitest run client/src/components/ai/intervention-case-copilot-panel.test.tsx client/src/pages/admin/admin-intervention-workspace-page.test.tsx --config client/vite.config.ts
+npx vitest run client/src/components/ai/intervention-case-copilot-panel.test.tsx client/src/components/ai/intervention-detail-panel.test.tsx --config client/vite.config.ts
 npm run typecheck
 git diff --check
 ```
@@ -643,7 +737,7 @@ After each fix, rerun:
 
 ```bash
 npx vitest run server/tests/modules/ai-copilot/intervention-case-copilot.test.ts server/tests/modules/ai-copilot/routes.test.ts
-npx vitest run client/src/components/ai/intervention-case-copilot-panel.test.tsx client/src/pages/admin/admin-intervention-workspace-page.test.tsx --config client/vite.config.ts
+npx vitest run client/src/components/ai/intervention-case-copilot-panel.test.tsx client/src/components/ai/intervention-detail-panel.test.tsx --config client/vite.config.ts
 npm run typecheck
 git diff --check
 ```
