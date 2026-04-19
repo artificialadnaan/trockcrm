@@ -509,6 +509,13 @@ expect(body).toMatchObject({
 expect(body.viewerFeedbackValue === null || typeof body.viewerFeedbackValue === "string").toBe(true);
 ```
 
+Before adding the route cases, extend the existing `interventionServiceMocks` scaffold in `server/tests/modules/ai-copilot/routes.test.ts` to include:
+
+- `buildInterventionCopilotView`
+- `regenerateInterventionCopilot`
+
+and export those two mocks from the `vi.mock("../../../src/modules/ai-copilot/intervention-service.js", ...)` block so the new route tests can control the responses cleanly.
+
 - [ ] **Step 2: Implement the routes**
 
 Add routes in `routes.ts`:
@@ -566,10 +573,10 @@ git commit -m "feat: add intervention copilot routes"
 
 **Files:**
 - Modify: `client/src/hooks/use-admin-interventions.ts`
+- Modify: `client/src/hooks/use-admin-interventions.test.ts`
 - Create: `client/src/components/ai/intervention-case-copilot-panel.tsx`
 - Create: `client/src/components/ai/intervention-case-copilot-panel.test.tsx`
 - Modify: `client/src/components/ai/intervention-detail-panel.tsx`
-- Create: `client/src/hooks/use-admin-interventions.test.ts`
 
 - [ ] **Step 1: Write failing client tests for panel states**
 
@@ -663,16 +670,19 @@ describe("InterventionCaseCopilotPanel", () => {
 
 - [ ] **Step 2: Add focused hook tests for polling and action wiring**
 
-Create `client/src/hooks/use-admin-interventions.test.ts` alongside the existing hook tests and follow the current no-DOM pattern used in `use-ai-ops.test.ts`:
+Extend the existing `client/src/hooks/use-admin-interventions.test.ts` file and follow the current no-DOM pattern used in `use-ai-ops.test.ts`:
 
 - mock `react` state/effect primitives
 - mock `@/lib/api`
+- use `vi.useFakeTimers()` for the polling branch
 - verify the hook:
   - fetches `/ai/ops/interventions/:id/copilot`
   - polls every 5 seconds while `refreshQueuedAt` is newer than `packetGeneratedAt`
   - clears pending once a refreshed packet arrives
   - posts regenerate to `/ai/ops/interventions/:id/copilot/regenerate`
-  - posts feedback through the existing packet feedback route
+  - posts feedback through the existing packet feedback route using a fixed payload such as:
+    - `feedbackType: "intervention_case_copilot"`
+    - `feedbackValue: "useful"` or `"not_useful"`
 
 This keeps the hook behavior covered without requiring a `jsdom` client test environment.
 
