@@ -1,9 +1,12 @@
 import type { ReactNode } from "react";
-import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
+import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { AdminInterventionWorkspacePage } from "./admin-intervention-workspace-page";
+import {
+  AdminInterventionWorkspacePage,
+  buildWorkspaceSearchParams,
+} from "./admin-intervention-workspace-page";
 
 const mocks = vi.hoisted(() => ({
   useAdminInterventions: vi.fn(),
@@ -69,12 +72,28 @@ describe("AdminInterventionWorkspacePage", () => {
     );
 
     expect(html).toContain("Admin Intervention Workspace");
-    expect(html).toContain("View Analytics");
-    expect(html).toContain("View Disconnect Dashboard");
+    expect(html).toContain('href="/admin/intervention-analytics"');
     expect(html).toContain(
       'href="/admin/sales-process-disconnects?type=missing_next_task&amp;cluster=follow_through_gap&amp;trend=companies"'
     );
     expect(html).not.toContain("Manager Alerts");
     expect(html).not.toContain("Queue Health");
+  });
+
+  it("preserves passthrough disconnect context when rebuilding workspace search params", () => {
+    const next = buildWorkspaceSearchParams({
+      searchParams: new URLSearchParams("type=missing_next_task&cluster=follow_through_gap&trend=companies"),
+      workspaceView: "open",
+      clusterKey: "all",
+      caseIdFilter: null,
+      severityFilter: null,
+      disconnectTypeFilter: null,
+      assigneeIdFilter: null,
+      repIdFilter: null,
+      companyIdFilter: null,
+      stageKeyFilter: null,
+    });
+
+    expect(next.toString()).toBe("type=missing_next_task&cluster=follow_through_gap&trend=companies");
   });
 });

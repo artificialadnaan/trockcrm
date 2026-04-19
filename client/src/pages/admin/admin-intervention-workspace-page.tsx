@@ -25,6 +25,19 @@ import { InterventionSummaryStrip } from "@/components/ai/intervention-summary-s
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 
+type WorkspaceSearchParamsInput = {
+  searchParams: URLSearchParams;
+  workspaceView: InterventionWorkspaceView;
+  clusterKey: string;
+  caseIdFilter: string | null;
+  severityFilter: string | null;
+  disconnectTypeFilter: string | null;
+  assigneeIdFilter: string | null;
+  repIdFilter: string | null;
+  companyIdFilter: string | null;
+  stageKeyFilter: string | null;
+};
+
 function buildSalesProcessDisconnectsHref(searchParams: URLSearchParams) {
   const nextParams = new URLSearchParams();
   const type = searchParams.get("type");
@@ -37,6 +50,45 @@ function buildSalesProcessDisconnectsHref(searchParams: URLSearchParams) {
 
   const query = nextParams.toString();
   return query ? `/admin/sales-process-disconnects?${query}` : "/admin/sales-process-disconnects";
+}
+
+function preserveDisconnectContext(
+  nextParams: URLSearchParams,
+  searchParams: URLSearchParams
+) {
+  const type = searchParams.get("type");
+  const cluster = searchParams.get("cluster");
+  const trend = searchParams.get("trend");
+
+  if (type) nextParams.set("type", type);
+  if (cluster) nextParams.set("cluster", cluster);
+  if (trend) nextParams.set("trend", trend);
+}
+
+export function buildWorkspaceSearchParams({
+  searchParams,
+  workspaceView,
+  clusterKey,
+  caseIdFilter,
+  severityFilter,
+  disconnectTypeFilter,
+  assigneeIdFilter,
+  repIdFilter,
+  companyIdFilter,
+  stageKeyFilter,
+}: WorkspaceSearchParamsInput) {
+  const next = new URLSearchParams();
+  preserveDisconnectContext(next, searchParams);
+  if (workspaceView !== "open") next.set("view", workspaceView);
+  if (clusterKey !== "all") next.set("clusterKey", clusterKey);
+  if (caseIdFilter) next.set("caseId", caseIdFilter);
+  if (severityFilter) next.set("severity", severityFilter);
+  if (disconnectTypeFilter) next.set("disconnectType", disconnectTypeFilter);
+  if (assigneeIdFilter) next.set("assigneeId", assigneeIdFilter);
+  if (repIdFilter) next.set("repId", repIdFilter);
+  if (companyIdFilter) next.set("companyId", companyIdFilter);
+  if (stageKeyFilter) next.set("stageKey", stageKeyFilter);
+  return next;
 }
 
 export function AdminInterventionWorkspacePage() {
@@ -103,16 +155,18 @@ export function AdminInterventionWorkspacePage() {
   }, [clusterKey, status, workspaceView]);
 
   useEffect(() => {
-    const next = new URLSearchParams();
-    if (workspaceView !== "open") next.set("view", workspaceView);
-    if (clusterKey !== "all") next.set("clusterKey", clusterKey);
-    if (caseIdFilter) next.set("caseId", caseIdFilter);
-    if (severityFilter) next.set("severity", severityFilter);
-    if (disconnectTypeFilter) next.set("disconnectType", disconnectTypeFilter);
-    if (assigneeIdFilter) next.set("assigneeId", assigneeIdFilter);
-    if (repIdFilter) next.set("repId", repIdFilter);
-    if (companyIdFilter) next.set("companyId", companyIdFilter);
-    if (stageKeyFilter) next.set("stageKey", stageKeyFilter);
+    const next = buildWorkspaceSearchParams({
+      searchParams,
+      workspaceView,
+      clusterKey,
+      caseIdFilter,
+      severityFilter,
+      disconnectTypeFilter,
+      assigneeIdFilter,
+      repIdFilter,
+      companyIdFilter,
+      stageKeyFilter,
+    });
     setSearchParams(next, { replace: true });
   }, [
     assigneeIdFilter,
