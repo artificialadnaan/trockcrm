@@ -47,6 +47,14 @@ Out of scope:
 - changing page layouts
 - moving functionality between pages
 - introducing a brand-new top-level nav system
+- promoting nested/detail admin routes into new sidebar links
+
+Route-preservation rule:
+
+- every existing admin route must remain reachable after this slice
+- only current sidebar destinations are being regrouped
+- nested/detail routes that are not currently first-class sidebar links remain unchanged and do not need new sidebar entries
+- examples include routes such as `/admin/ai-ops/reviews/:packetId` and `/admin/companycam`
 
 ## Navigation Model
 
