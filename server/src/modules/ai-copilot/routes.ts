@@ -7,10 +7,12 @@ import { getCompanyById } from "../companies/service.js";
 import {
   assignInterventionCases,
   assertHomogeneousBatchConclusionCohort,
+  buildInterventionCopilotView,
   escalateInterventionCases,
   getInterventionCaseDetail,
   getInterventionAnalyticsDashboard,
   listInterventionCases,
+  regenerateInterventionCopilot,
   resolveInterventionCases,
   snoozeInterventionCases,
 } from "./intervention-service.js";
@@ -410,6 +412,38 @@ router.get("/ops/interventions/:id", requireRole("admin", "director"), async (re
 
     await req.commitTransaction!();
     res.json(detail);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/ops/interventions/:id/copilot", requireRole("admin", "director"), async (req, res, next) => {
+  try {
+    const caseId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const view = await buildInterventionCopilotView(req.tenantDb!, {
+      officeId: getActiveOfficeId(req),
+      caseId,
+      viewerUserId: req.user!.id,
+    });
+
+    await req.commitTransaction!();
+    res.json(view);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/ops/interventions/:id/copilot/regenerate", requireRole("admin", "director"), async (req, res, next) => {
+  try {
+    const caseId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const result = await regenerateInterventionCopilot(req.tenantDb!, {
+      officeId: getActiveOfficeId(req),
+      caseId,
+      requestedBy: req.user!.id,
+    });
+
+    await req.commitTransaction!();
+    res.status(result.queued ? 202 : 200).json(result);
   } catch (err) {
     next(err);
   }

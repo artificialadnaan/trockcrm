@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
@@ -17,6 +18,7 @@ import {
   listCurrentSalesProcessDisconnectRows,
   type SalesProcessDisconnectRow,
 } from "./service.js";
+import { getAiCopilotProvider } from "./provider.js";
 import {
   RESOLVE_OUTCOME_CATEGORY_TO_REASON_CODES,
   SNOOZE_REASON_TO_EXPECTED_OPTIONS,
@@ -1880,7 +1882,8 @@ function normalizeRiskFlags(
     now: Date;
   }
 ): InterventionCopilotRiskFlag[] {
-  const packetFlags = (toCopilotObjectArray(packet?.blindSpotsJson ?? null) ?? []).map((flag, index) => ({
+  const packetFlags: InterventionCopilotRiskFlag[] = (toCopilotObjectArray(packet?.blindSpotsJson ?? null) ?? []).map(
+    (flag, index) => ({
       flagType:
         typeof flag.flagType === "string"
           ? flag.flagType
@@ -1903,7 +1906,8 @@ function normalizeRiskFlags(
           : typeof flag.details === "string"
             ? flag.details
             : null,
-    }));
+    })
+  );
 
   const flags: InterventionCopilotRiskFlag[] = [];
   if (!input.currentAssigneeId) {
@@ -2014,7 +2018,9 @@ function buildRootCause(
           ? normalized.explanation
           : typeof normalized.rationale === "string"
             ? normalized.rationale
-            : null,
+            : typeof normalized.details === "string"
+              ? normalized.details
+              : null,
     };
   }
 
@@ -2079,7 +2085,9 @@ function buildReopenRisk(
           ? normalized.rationale
           : typeof normalized.explanation === "string"
             ? normalized.explanation
-            : null,
+            : typeof normalized.details === "string"
+              ? normalized.details
+              : null,
     };
   }
 
@@ -2437,6 +2445,170 @@ export async function getInterventionCopilotView(
 }
 
 export const buildInterventionCopilotView = getInterventionCopilotView;
+
+export async function regenerateInterventionCopilot(
+  tenantDb: TenantDb | InMemoryTenantDb,
+  input: {
+    officeId: string;
+    caseId: string;
+    requestedBy: string;
+    now?: Date;
+  }
+) {
+  const data = await loadInterventionAnalyticsData(tenantDb, input.officeId);
+  const caseRow = data.cases.find((row) => row.id === input.caseId && row.officeId === input.officeId);
+  if (!caseRow) {
+    throw new AppError(404, "Intervention case not found");
+  }
+
+  const now = input.now ?? new Date();
+  const task = caseRow.generatedTaskId
+    ? isInMemoryTenantDb(tenantDb)
+      ? tenantDb.state.tasks.find((row) => row.id === caseRow.generatedTaskId) ?? null
+      : (
+          await tenantDb
+            .select()
+            .from(tasks)
+            .where(eq(tasks.id, caseRow.generatedTaskId))
+            .limit(1)
+        )[0] ?? null
+    : null;
+  const { latestConclusionByCase } = buildLatestHistoryMap(data.history);
+  const similarCases = buildSimilarCases({
+    officeId: input.officeId,
+    caseRow,
+    cases: data.cases,
+    latestConclusionByCase,
+    historyRows: data.history,
+  });
+
+  const currentAssigneeName = data.users.find((user) => user.id === caseRow.assignedTo)?.displayName ?? null;
+  const generatedTaskOwnerName = data.users.find((user) => user.id === task?.assignedTo)?.displayName ?? null;
+  const ownerMismatch =
+    Boolean(task?.assignedTo) && task?.assignedTo !== (caseRow.assignedTo ?? null);
+  const rootCauseHints = [
+    readMetadataString(caseRow.metadataJson as Record<string, unknown> | null, "disconnectSummary"),
+    readMetadataString(caseRow.metadataJson as Record<string, unknown> | null, "disconnectDetails"),
+    ownerMismatch ? "The generated task owner does not match the current case owner." : null,
+  ].filter((value): value is string => Boolean(value));
+  const riskHints = [
+    caseRow.reopenCount > 1 ? "This case has reopened multiple times." : null,
+    caseRow.reopenCount === 1 ? "This case has reopened before." : null,
+    caseRow.status === "snoozed" ? "The case is snoozed and should be checked for breach risk." : null,
+    !caseRow.assignedTo ? "The case does not have a clear owner." : null,
+    caseRow.escalated ? "The case is already escalated." : null,
+  ].filter((value): value is string => Boolean(value));
+
+  const promptInput = {
+    context: {
+      caseId: caseRow.id,
+      disconnectType: caseRow.disconnectType,
+      severity: caseRow.severity,
+      status: caseRow.status,
+      currentAssigneeId: caseRow.assignedTo ?? null,
+      assignedToName: currentAssigneeName,
+      ownerTeamLabel:
+        readMetadataString(caseRow.metadataJson as Record<string, unknown> | null, "stageName") ??
+        readMetadataString(caseRow.metadataJson as Record<string, unknown> | null, "stageKey"),
+      generatedTaskOwnerId: task?.assignedTo ?? null,
+      generatedTaskOwnerName,
+      generatedTaskStatus: task?.status ?? null,
+      generatedTaskTitle: task?.title ?? null,
+      reopenCount: caseRow.reopenCount,
+      escalated: caseRow.escalated,
+      stageKey: readMetadataString(caseRow.metadataJson as Record<string, unknown> | null, "stageKey"),
+      stageName: readMetadataString(caseRow.metadataJson as Record<string, unknown> | null, "stageName"),
+    },
+    signals: {
+      rootCauseHints,
+      riskHints,
+      similarCaseSummaries: similarCases.slice(0, 3).map((item) => ({
+        label: item.businessKey,
+        outcome: `${item.conclusionKind}${item.reasonCode ? `:${item.reasonCode}` : ""}`,
+      })),
+    },
+    evidence: [
+      {
+        sourceType: "case",
+        textSnippet:
+          readMetadataString(caseRow.metadataJson as Record<string, unknown> | null, "evidenceSummary") ??
+          readMetadataString(caseRow.metadataJson as Record<string, unknown> | null, "disconnectSummary") ??
+          caseRow.businessKey,
+      },
+      {
+        sourceType: "task",
+        textSnippet: task ? `${task.title} (${task.status})` : "No generated task attached.",
+      },
+      ...similarCases.slice(0, 3).map((item) => ({
+        sourceType: "similar_case",
+        textSnippet: `${item.businessKey} -> ${item.conclusionKind}`,
+      })),
+    ],
+  };
+
+  const generated = await getAiCopilotProvider().generateInterventionCopilotPacket(promptInput);
+  const packetId = crypto.randomUUID();
+  const snapshotHash = crypto.createHash("sha256").update(JSON.stringify(promptInput)).digest("hex");
+
+  if (isInMemoryTenantDb(tenantDb)) {
+    tenantDb.state.packets = tenantDb.state.packets ?? [];
+    tenantDb.state.packets.push({
+      id: packetId,
+      scopeType: "intervention_case",
+      scopeId: caseRow.id,
+      dealId: caseRow.dealId,
+      packetKind: "intervention_case",
+      snapshotHash,
+      modelName: "heuristic",
+      status: "ready",
+      summaryText: generated.summary,
+      nextStepJson: {
+        ...generated.recommendedAction,
+        rootCause: generated.rootCause,
+        blockerOwner: generated.blockerOwner,
+        reopenRisk: generated.reopenRisk,
+      },
+      blindSpotsJson: generated.blindSpotFlags,
+      evidenceJson: generated.evidence,
+      confidence: String(generated.confidence),
+      generatedAt: now,
+      expiresAt: new Date(now.getTime() + 30 * 60 * 1000),
+      createdAt: now,
+      updatedAt: now,
+    } as AiCopilotPacketRow);
+  } else {
+    await tenantDb.insert(aiCopilotPackets).values({
+      id: packetId,
+      scopeType: "intervention_case",
+      scopeId: caseRow.id,
+      dealId: caseRow.dealId,
+      packetKind: "intervention_case",
+      snapshotHash,
+      modelName: "heuristic",
+      status: "ready",
+      summaryText: generated.summary,
+      nextStepJson: {
+        ...generated.recommendedAction,
+        rootCause: generated.rootCause,
+        blockerOwner: generated.blockerOwner,
+        reopenRisk: generated.reopenRisk,
+      },
+      blindSpotsJson: generated.blindSpotFlags,
+      evidenceJson: generated.evidence,
+      confidence: String(generated.confidence),
+      generatedAt: now,
+      expiresAt: new Date(now.getTime() + 30 * 60 * 1000),
+      updatedAt: now,
+    });
+  }
+
+  return {
+    queued: false,
+    packetId,
+    packetGeneratedAt: now.toISOString(),
+    requestedBy: input.requestedBy,
+  };
+}
 
 type MutationAction = "assign" | "snooze" | "resolve" | "escalate" | "reopened";
 

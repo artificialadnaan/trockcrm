@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 
-const { buildInterventionCopilotView } = await import("../../../src/modules/ai-copilot/intervention-service");
+const { buildInterventionCopilotView, regenerateInterventionCopilot } = await import(
+  "../../../src/modules/ai-copilot/intervention-service"
+);
 
 type DisconnectCaseRecord = {
   id: string;
@@ -316,6 +318,14 @@ describe("buildInterventionCopilotView", () => {
           officeId: "00000000-0000-0000-0000-000000000001",
         }),
         makeCase({
+          id: "00000000-0000-0000-0000-000000000104",
+          officeId: "00000000-0000-0000-0000-000000000001",
+          businessKey: "office-1:missing_next_task:deal:deal-4",
+          scopeId: "00000000-0000-0000-0000-000000000204",
+          dealId: "00000000-0000-0000-0000-000000000204",
+          status: "open",
+        }),
+        makeCase({
           id: "00000000-0000-0000-0000-000000000103",
           officeId: "00000000-0000-0000-0000-000000000002",
           businessKey: "office-2:missing_next_task:deal:deal-3",
@@ -346,6 +356,53 @@ describe("buildInterventionCopilotView", () => {
     });
     expect(view.evidence).toHaveLength(3);
     expect(view.similarCases).toEqual([]);
+  });
+
+  it("regenerates and persists an intervention packet with intervention_case scope", async () => {
+    const tenantDb = createTenantDb({
+      cases: [
+        makeCase({
+          id: "00000000-0000-0000-0000-000000000101",
+          officeId: "00000000-0000-0000-0000-000000000001",
+          generatedTaskId: "00000000-0000-0000-0000-000000000801",
+        }),
+      ],
+      history: [
+        makeHistory({
+          disconnectCaseId: "00000000-0000-0000-0000-000000000101",
+          actionType: "assign",
+        }),
+      ],
+      tasks: [
+        {
+          id: "00000000-0000-0000-0000-000000000801",
+          title: "Follow up with customer",
+          status: "pending",
+          assignedTo: "00000000-0000-0000-0000-000000000402",
+        },
+      ],
+      users: [
+        { id: "00000000-0000-0000-0000-000000000401", displayName: "Admin User" },
+        { id: "00000000-0000-0000-0000-000000000402", displayName: "Director User" },
+      ],
+    });
+
+    const result = await regenerateInterventionCopilot(tenantDb, {
+      officeId: "00000000-0000-0000-0000-000000000001",
+      caseId: "00000000-0000-0000-0000-000000000101",
+      requestedBy: "00000000-0000-0000-0000-000000000403",
+      now: new Date("2026-04-19T12:00:00.000Z"),
+    });
+
+    expect(result.queued).toBe(false);
+    expect(result.packetId).toBeDefined();
+    expect(tenantDb.state.packets).toHaveLength(1);
+    expect(tenantDb.state.packets?.[0]).toMatchObject({
+      scopeType: "intervention_case",
+      packetKind: "intervention_case",
+      status: "ready",
+    });
+    expect(tenantDb.state.packets?.[0]?.summaryText).toBeTruthy();
   });
 
   it("prefers a resolve recommendation for resolved cases even when a generated task is still linked", async () => {

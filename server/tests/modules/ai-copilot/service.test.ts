@@ -66,6 +66,21 @@ describe("AI copilot service", () => {
               evidence: [{ sourceType: "email_message", sourceId: "email-1" }],
             };
           }),
+          generateInterventionCopilotPacket: vi.fn(async () => ({
+            summary: "Intervention summary",
+            recommendedAction: {
+              action: "assign",
+              rationale: "Owner alignment is required.",
+              suggestedOwner: null,
+              suggestedOwnerId: null,
+            },
+            rootCause: null,
+            blockerOwner: null,
+            reopenRisk: null,
+            blindSpotFlags: [],
+            evidence: [],
+            confidence: 0.5,
+          })),
         },
         persistPacketBundle: vi.fn(async (payload) => {
           callOrder.push("persist");
@@ -120,6 +135,21 @@ describe("AI copilot service", () => {
             confidence: 0.5,
             evidence: [],
           })),
+          generateInterventionCopilotPacket: vi.fn(async () => ({
+            summary: "Intervention summary",
+            recommendedAction: {
+              action: "investigate",
+              rationale: "Review the case context.",
+              suggestedOwner: null,
+              suggestedOwnerId: null,
+            },
+            rootCause: null,
+            blockerOwner: null,
+            reopenRisk: null,
+            blindSpotFlags: [],
+            evidence: [],
+            confidence: 0.5,
+          })),
         },
         persistPacketBundle: vi.fn(async () => ({
           packetId: "packet-1",
@@ -155,6 +185,21 @@ describe("AI copilot service", () => {
         searchDealKnowledge: vi.fn(async () => []),
         provider: {
           generateCopilotPacket: vi.fn(),
+          generateInterventionCopilotPacket: vi.fn(async () => ({
+            summary: "Intervention summary",
+            recommendedAction: {
+              action: "investigate",
+              rationale: "Review the case context.",
+              suggestedOwner: null,
+              suggestedOwnerId: null,
+            },
+            rootCause: null,
+            blockerOwner: null,
+            reopenRisk: null,
+            blindSpotFlags: [],
+            evidence: [],
+            confidence: 0.5,
+          })),
         },
         getExistingFreshPacket: vi.fn(async ({ snapshotHash }) => ({
           packetId: "packet-existing",
@@ -203,6 +248,21 @@ describe("AI copilot service", () => {
             blindSpotFlags: [],
             confidence: 0.7,
             evidence: [],
+          })),
+          generateInterventionCopilotPacket: vi.fn(async () => ({
+            summary: "Intervention summary",
+            recommendedAction: {
+              action: "escalate",
+              rationale: "This case shows repeated reopen pressure.",
+              suggestedOwner: null,
+              suggestedOwnerId: null,
+            },
+            rootCause: null,
+            blockerOwner: null,
+            reopenRisk: null,
+            blindSpotFlags: [],
+            evidence: [],
+            confidence: 0.5,
           })),
         },
         getExistingFreshPacket: vi.fn(async () => null),
