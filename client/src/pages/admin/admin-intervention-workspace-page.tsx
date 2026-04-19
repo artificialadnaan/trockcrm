@@ -25,6 +25,20 @@ import { InterventionSummaryStrip } from "@/components/ai/intervention-summary-s
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 
+function buildSalesProcessDisconnectsHref(searchParams: URLSearchParams) {
+  const nextParams = new URLSearchParams();
+  const type = searchParams.get("type");
+  const cluster = searchParams.get("cluster");
+  const trend = searchParams.get("trend");
+
+  if (type) nextParams.set("type", type);
+  if (cluster) nextParams.set("cluster", cluster);
+  if (trend) nextParams.set("trend", trend);
+
+  const query = nextParams.toString();
+  return query ? `/admin/sales-process-disconnects?${query}` : "/admin/sales-process-disconnects";
+}
+
 export function AdminInterventionWorkspacePage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const initialView = (searchParams.get("view") as InterventionWorkspaceView | null) ?? "open";
@@ -175,14 +189,14 @@ export function AdminInterventionWorkspacePage() {
         <div>
           <h1 className="text-3xl font-black tracking-tighter uppercase text-gray-900">Admin Intervention Workspace</h1>
           <p className="text-[11px] uppercase tracking-widest text-gray-400 mt-1">
-            Manager-first queue for disconnect cases, execution artifacts, and direct office interventions
+            Execution surface for disconnect cases, follow-through artifacts, and direct office interventions
           </p>
         </div>
         <div className="flex items-center gap-2">
           <Link to="/admin/intervention-analytics" className={buttonVariants({ variant: "outline" })}>
             View Analytics
           </Link>
-          <Link to="/admin/sales-process-disconnects" className={buttonVariants({ variant: "outline" })}>
+          <Link to={buildSalesProcessDisconnectsHref(searchParams)} className={buttonVariants({ variant: "outline" })}>
             View Disconnect Dashboard
           </Link>
           <Button variant="outline" onClick={() => void refetch()} disabled={loading}>
