@@ -385,7 +385,11 @@ export interface InterventionCopilotPromptInput {
     disconnectType: string;
     severity: string;
     status: string;
+    currentAssigneeId: string | null;
     assignedToName: string | null;
+    ownerTeamLabel: string | null;
+    generatedTaskOwnerId: string | null;
+    generatedTaskOwnerName: string | null;
     generatedTaskStatus: string | null;
     reopenCount: number;
   };
@@ -712,12 +716,21 @@ Extend the existing `client/src/hooks/use-admin-interventions.test.ts` file and 
   - fetches `/ai/ops/interventions/:id/copilot`
   - polls every 5 seconds while `refreshQueuedAt` is newer than `packetGeneratedAt`
   - clears pending once a refreshed packet arrives
+  - stops polling after a bounded retry budget (for example 3 failed polls), surfaces a localized copilot refresh error, and leaves the manual refresh action available
   - posts regenerate to `/ai/ops/interventions/:id/copilot/regenerate`
   - posts feedback through the existing packet feedback route using a fixed payload such as:
     - `feedbackType: "intervention_case_copilot"`
     - `feedbackValue: "useful"` or `"not_useful"`
 
 This keeps the hook behavior covered without requiring a `jsdom` client test environment.
+
+Refresh semantics for v1:
+
+- a successful regenerate marks `refreshQueuedAt`
+- polling continues every 5 seconds until `packetGeneratedAt >= refreshQueuedAt`
+- three consecutive poll failures stop automatic polling for that queue cycle
+- the hook exposes a localized refresh error while preserving the last successful copilot data
+- the user can trigger `Refresh` again to start a new queue cycle
 
 - [ ] **Step 3: Add `useInterventionCopilot(caseId)`**
 
