@@ -101,6 +101,92 @@ export interface InterventionCaseDetail {
   }>;
 }
 
+export interface InterventionCopilotPacketView {
+  id: string | null;
+  scopeType: "intervention_case" | null;
+  scopeId: string | null;
+  packetKind: "intervention_case" | null;
+  status: string | null;
+  snapshotHash: string | null;
+  modelName: string | null;
+  summaryText: string | null;
+  nextStepJson: Record<string, unknown> | null;
+  blindSpotsJson: Array<Record<string, unknown>> | null;
+  evidenceJson: Array<Record<string, unknown>> | null;
+  confidence: number | null;
+  generatedAt: string | null;
+  expiresAt: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+}
+
+export interface InterventionCopilotOwnerContext {
+  id: string | null;
+  name: string | null;
+  type?: string | null;
+}
+
+export interface InterventionCopilotRecommendedAction {
+  action: "assign" | "resolve" | "snooze" | "escalate" | "investigate";
+  rationale: string | null;
+  suggestedOwnerId: string | null;
+  suggestedOwner: string | null;
+}
+
+export interface InterventionCopilotRootCause {
+  label: string | null;
+  explanation: string | null;
+}
+
+export interface InterventionCopilotReopenRisk {
+  level: "low" | "medium" | "high";
+  rationale: string | null;
+}
+
+export interface InterventionCopilotEvidenceItem {
+  sourceType: string;
+  textSnippet: string | null;
+  label: string | null;
+}
+
+export interface InterventionCopilotRiskFlag {
+  flagType: string;
+  title: string;
+  severity: "low" | "medium" | "high" | "critical";
+  details: string | null;
+}
+
+export interface InterventionCopilotSimilarCase {
+  caseId: string;
+  businessKey: string;
+  disconnectType: string;
+  clusterKey: string | null;
+  assigneeAtConclusion: string | null;
+  conclusionKind: "resolve" | "snooze" | "escalate";
+  reasonCode: string | null;
+  durableClose: boolean | null;
+  reopened: boolean;
+  daysToDurableClosure: number | null;
+  queueLink: string;
+}
+
+export interface InterventionCopilotView {
+  packet: InterventionCopilotPacketView;
+  evidence: InterventionCopilotEvidenceItem[];
+  riskFlags: InterventionCopilotRiskFlag[];
+  similarCases: InterventionCopilotSimilarCase[];
+  recommendedAction: InterventionCopilotRecommendedAction | null;
+  rootCause: InterventionCopilotRootCause | null;
+  blockerOwner: InterventionCopilotOwnerContext | null;
+  reopenRisk: InterventionCopilotReopenRisk | null;
+  currentAssignee: InterventionCopilotOwnerContext | null;
+  isRefreshPending: boolean;
+  isStale: boolean;
+  latestCaseChangedAt: string | null;
+  packetGeneratedAt: string | null;
+  viewerFeedbackValue: string | null;
+}
+
 export interface StructuredResolveConclusion {
   kind: "resolve";
   outcomeCategory: string;

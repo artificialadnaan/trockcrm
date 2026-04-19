@@ -3,6 +3,7 @@ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import {
   aiFeedback,
+  aiCopilotPackets,
   aiDisconnectCaseHistory,
   aiDisconnectCases,
   companies,
@@ -27,6 +28,15 @@ import type {
   InterventionAnalyticsDashboard,
   InterventionAnalyticsHotspotRow,
   InterventionCaseDetail,
+  InterventionCopilotEvidenceItem,
+  InterventionCopilotOwnerContext,
+  InterventionCopilotPacketView,
+  InterventionCopilotRecommendedAction,
+  InterventionCopilotRiskFlag,
+  InterventionCopilotRootCause,
+  InterventionCopilotReopenRisk,
+  InterventionCopilotSimilarCase,
+  InterventionCopilotView,
   InterventionOutcomeEffectiveness,
   InterventionQueueFilters,
   InterventionQueueItem,
@@ -49,6 +59,7 @@ type TenantDb = NodePgDatabase<typeof schema>;
 type DisconnectCaseRow = typeof aiDisconnectCases.$inferSelect;
 type DisconnectCaseInsert = typeof aiDisconnectCases.$inferInsert;
 type DisconnectCaseHistoryRow = typeof aiDisconnectCaseHistory.$inferSelect;
+type AiCopilotPacketRow = typeof aiCopilotPackets.$inferSelect;
 type TaskRow = typeof tasks.$inferSelect;
 type DealRow = typeof deals.$inferSelect;
 type CompanyRow = typeof companies.$inferSelect;
@@ -63,6 +74,7 @@ type InMemoryTenantDb = {
     companies: Array<Pick<CompanyRow, "id" | "name">>;
     users?: Array<Pick<UserRow, "id" | "displayName">>;
     history: DisconnectCaseHistoryRow[];
+    packets?: AiCopilotPacketRow[];
     feedback?: AiFeedbackRow[];
   };
 };
@@ -1786,6 +1798,645 @@ export async function getInterventionCaseDetail(
     })),
   };
 }
+
+const INTERVENTION_COPILOT_FEEDBACK_TYPE = "intervention_case_copilot";
+const INTERVENTION_COPILOT_ALLOWED_ACTIONS = new Set([
+  "assign",
+  "resolve",
+  "snooze",
+  "escalate",
+  "investigate",
+] as const);
+
+function isConclusionHistoryEntry(row: DisconnectCaseHistoryRow) {
+  return Boolean(readHistoryMetadata(row).conclusion?.kind || row.actionType === "resolve" || row.actionType === "snooze" || row.actionType === "escalate");
+}
+
+function toCopilotOwnerContext(
+  id: string | null,
+  name: string | null
+): InterventionCopilotOwnerContext {
+  return { id, name };
+}
+
+function toCopilotString(value: unknown) {
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (value instanceof Date) return value.toISOString();
+  if (value && typeof value === "object") {
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value);
+    }
+  }
+  return "";
+}
+
+function toCopilotObject(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function toCopilotObjectArray(value: unknown): Array<Record<string, unknown>> | null {
+  if (!Array.isArray(value)) return null;
+  return value.filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object" && !Array.isArray(item)));
+}
+
+function normalizePacketView(packet: AiCopilotPacketRow | null): InterventionCopilotPacketView {
+  return {
+    id: packet?.id ?? null,
+    scopeType: packet?.scopeType === "intervention_case" ? "intervention_case" : null,
+    scopeId: packet?.scopeId ?? null,
+    packetKind: packet?.packetKind === "intervention_case" ? "intervention_case" : null,
+    status: packet?.status ?? null,
+    snapshotHash: packet?.snapshotHash ?? null,
+    modelName: packet?.modelName ?? null,
+    summaryText: packet?.summaryText ?? null,
+    nextStepJson: toCopilotObject(packet?.nextStepJson ?? null),
+    blindSpotsJson: toCopilotObjectArray(packet?.blindSpotsJson ?? null),
+    evidenceJson: toCopilotObjectArray(packet?.evidenceJson ?? null),
+    confidence:
+      packet?.confidence == null
+        ? null
+        : Number.isFinite(Number(packet.confidence))
+          ? Number(packet.confidence)
+          : null,
+    generatedAt: toIsoString(packet?.generatedAt ?? null),
+    expiresAt: toIsoString(packet?.expiresAt ?? null),
+    createdAt: toIsoString(packet?.createdAt ?? null),
+    updatedAt: toIsoString(packet?.updatedAt ?? null),
+  };
+}
+
+function normalizeRiskFlags(
+  packet: AiCopilotPacketRow | null,
+  input: {
+    caseRow: DisconnectCaseRow;
+    currentAssigneeId: string | null;
+    task: TaskRow | null;
+    latestConclusion: DisconnectCaseHistoryRow | null;
+    now: Date;
+  }
+): InterventionCopilotRiskFlag[] {
+  const packetFlags = (toCopilotObjectArray(packet?.blindSpotsJson ?? null) ?? []).map((flag, index) => ({
+      flagType:
+        typeof flag.flagType === "string"
+          ? flag.flagType
+          : typeof flag.kind === "string"
+            ? flag.kind
+            : `flag-${index + 1}`,
+      title:
+        typeof flag.title === "string"
+          ? flag.title
+          : typeof flag.label === "string"
+            ? flag.label
+            : `Risk flag ${index + 1}`,
+      severity:
+        flag.severity === "critical" || flag.severity === "high" || flag.severity === "medium" || flag.severity === "low"
+          ? flag.severity
+          : "medium",
+      details:
+        typeof flag.rationale === "string"
+          ? flag.rationale
+          : typeof flag.details === "string"
+            ? flag.details
+            : null,
+    }));
+
+  const flags: InterventionCopilotRiskFlag[] = [];
+  if (!input.currentAssigneeId) {
+    flags.push({
+      flagType: "owner_gap",
+      title: "No current owner",
+      severity: "medium",
+      details: "The case is not assigned to a current owner.",
+    });
+  }
+  if (input.caseRow.reopenCount > 0) {
+    flags.push({
+      flagType: "reopen_risk",
+      title: "Reopen risk",
+      severity: input.caseRow.reopenCount > 1 ? "high" : "medium",
+      details: "The case has already reopened at least once.",
+    });
+  }
+  if (input.latestConclusion?.actionType === "snooze" && input.caseRow.snoozedUntil && input.caseRow.snoozedUntil <= input.now) {
+    flags.push({
+      flagType: "snooze_breach",
+      title: "Snooze breached",
+      severity: "high",
+      details: "The snooze window has expired.",
+    });
+  }
+  if (input.task && input.task.assignedTo !== (input.currentAssigneeId ?? null)) {
+    flags.push({
+      flagType: "owner_mismatch",
+      title: "Generated task needs owner alignment",
+      severity: "medium",
+      details:
+        input.currentAssigneeId
+          ? `The case assignee and generated task owner do not match.`
+          : `The generated task is currently assigned to ${input.task.assignedTo}.`,
+    });
+  }
+
+  const merged = [...packetFlags];
+  for (const derivedFlag of flags) {
+    if (!merged.some((flag) => flag.flagType === derivedFlag.flagType)) {
+      merged.push(derivedFlag);
+    }
+  }
+  return merged;
+}
+
+function buildCopilotEvidence(
+  packet: AiCopilotPacketRow | null,
+  input: { caseRow: DisconnectCaseRow; task: TaskRow | null; latestConclusion: DisconnectCaseHistoryRow | null }
+): InterventionCopilotEvidenceItem[] {
+  const packetEvidence = toCopilotObjectArray(packet?.evidenceJson ?? null);
+  if (packetEvidence && packetEvidence.length > 0) {
+    return packetEvidence.map((item, index) => ({
+      sourceType:
+        typeof item.sourceType === "string"
+          ? item.sourceType
+          : typeof item.source === "string"
+            ? item.source
+            : "unknown",
+      textSnippet:
+        typeof item.textSnippet === "string"
+          ? item.textSnippet
+          : typeof item.value === "string"
+            ? item.value
+            : typeof item.text === "string"
+              ? item.text
+              : toCopilotString(item.value ?? item.text ?? item.details ?? item.summary ?? item.label),
+      label: typeof item.label === "string" ? item.label : `Evidence ${index + 1}`,
+    }));
+  }
+
+  const evidence: InterventionCopilotEvidenceItem[] = [
+    {
+      sourceType: "case",
+      textSnippet:
+        readMetadataString(input.caseRow.metadataJson as Record<string, unknown> | null, "evidenceSummary") ??
+        readMetadataString(input.caseRow.metadataJson as Record<string, unknown> | null, "disconnectSummary") ??
+        "No case summary is available.",
+      label: "Case brief",
+    },
+    {
+      sourceType: "task",
+      textSnippet: input.task ? `${input.task.title} (${input.task.status})` : "No generated task is attached.",
+      label: "Current task",
+    },
+    {
+      sourceType: "history",
+      textSnippet: input.latestConclusion ? `${input.latestConclusion.actionType} at ${input.latestConclusion.actedAt.toISOString()}` : "No intervention history yet.",
+      label: "Latest intervention",
+    },
+  ];
+
+  return evidence;
+}
+
+function buildRootCause(
+  packet: AiCopilotPacketRow | null,
+  caseRow: DisconnectCaseRow
+): InterventionCopilotRootCause {
+  const packetRootCause = toCopilotObject(packet?.nextStepJson ?? null)?.rootCause;
+  if (packetRootCause && typeof packetRootCause === "object") {
+    const normalized = packetRootCause as Record<string, unknown>;
+    return {
+      label: typeof normalized.label === "string" ? normalized.label : null,
+      explanation:
+        typeof normalized.explanation === "string"
+          ? normalized.explanation
+          : typeof normalized.rationale === "string"
+            ? normalized.rationale
+            : null,
+    };
+  }
+
+  return {
+    label: readMetadataString(caseRow.metadataJson as Record<string, unknown> | null, "disconnectLabel") ?? caseRow.disconnectType,
+    explanation:
+      readMetadataString(caseRow.metadataJson as Record<string, unknown> | null, "disconnectDetails") ??
+      readMetadataString(caseRow.metadataJson as Record<string, unknown> | null, "disconnectSummary") ??
+      null,
+  };
+}
+
+function buildBlockerOwner(
+  packet: AiCopilotPacketRow | null,
+  input: { currentAssignee: InterventionCopilotOwnerContext | null; task: TaskRow | null }
+): InterventionCopilotOwnerContext {
+  const packetOwner = toCopilotObject(packet?.nextStepJson ?? null)?.blockerOwner;
+  if (packetOwner && typeof packetOwner === "object") {
+    const normalized = packetOwner as Record<string, unknown>;
+    return {
+      id: typeof normalized.id === "string" ? normalized.id : null,
+      name: typeof normalized.name === "string" ? normalized.name : typeof normalized.label === "string" ? normalized.label : null,
+    };
+  }
+
+  if (input.task?.assignedTo && input.task.assignedTo !== (input.currentAssignee?.id ?? null)) {
+    return {
+      id: input.task.assignedTo,
+      name: null,
+    };
+  }
+
+  if (input.currentAssignee) return input.currentAssignee;
+
+  if (input.task?.assignedTo) {
+    return {
+      id: input.task.assignedTo,
+      name: null,
+    };
+  }
+
+  return {
+    id: null,
+    name: null,
+  };
+}
+
+function buildReopenRisk(
+  packet: AiCopilotPacketRow | null,
+  input: { caseRow: DisconnectCaseRow; latestConclusion: DisconnectCaseHistoryRow | null; now: Date }
+): InterventionCopilotReopenRisk {
+  const packetRisk = toCopilotObject(packet?.nextStepJson ?? null)?.reopenRisk;
+  if (packetRisk && typeof packetRisk === "object") {
+    const normalized = packetRisk as Record<string, unknown>;
+    return {
+      level:
+        normalized.level === "high" || normalized.level === "medium" || normalized.level === "low"
+          ? normalized.level
+          : "medium",
+      rationale:
+        typeof normalized.rationale === "string"
+          ? normalized.rationale
+          : typeof normalized.explanation === "string"
+            ? normalized.explanation
+            : null,
+    };
+  }
+
+  const level: InterventionCopilotReopenRisk["level"] =
+    input.caseRow.reopenCount > 1 || input.caseRow.escalated
+      ? "high"
+      : input.caseRow.reopenCount === 1
+        ? "medium"
+        : input.latestConclusion?.actionType === "snooze" && input.caseRow.snoozedUntil && input.caseRow.snoozedUntil <= input.now
+          ? "high"
+          : "low";
+
+  return {
+    level,
+    rationale:
+      input.caseRow.reopenCount > 0
+        ? "The case has reopened before."
+        : "The current state does not yet show a strong reopen signal.",
+  };
+}
+
+function buildRecommendedAction(
+  packet: AiCopilotPacketRow | null,
+  input: {
+    caseRow: DisconnectCaseRow;
+    currentAssignee: InterventionCopilotOwnerContext | null;
+    task: TaskRow | null;
+    riskFlags: InterventionCopilotRiskFlag[];
+    rootCause: InterventionCopilotRootCause;
+    reopenRisk: InterventionCopilotReopenRisk;
+  }
+): InterventionCopilotRecommendedAction {
+  if (input.caseRow.status === "resolved") {
+    return {
+      action: "resolve",
+      rationale: "The case already appears resolved.",
+      suggestedOwnerId: input.currentAssignee?.id ?? null,
+      suggestedOwner: input.currentAssignee?.name ?? null,
+    };
+  }
+
+  const nextStep = toCopilotObject(packet?.nextStepJson ?? null);
+  if (nextStep && typeof nextStep.action === "string" && INTERVENTION_COPILOT_ALLOWED_ACTIONS.has(nextStep.action as never)) {
+    return {
+      action: nextStep.action as InterventionCopilotRecommendedAction["action"],
+      rationale:
+        typeof nextStep.rationale === "string"
+          ? nextStep.rationale
+          : typeof nextStep.summary === "string"
+            ? nextStep.summary
+            : null,
+      suggestedOwnerId:
+        typeof nextStep.suggestedOwnerId === "string"
+          ? nextStep.suggestedOwnerId
+          : typeof nextStep.ownerId === "string"
+            ? nextStep.ownerId
+            : null,
+      suggestedOwner:
+        typeof nextStep.suggestedOwner === "string"
+          ? nextStep.suggestedOwner
+          : typeof nextStep.ownerName === "string"
+            ? nextStep.ownerName
+            : null,
+    };
+  }
+
+  if (!input.currentAssignee && input.task) {
+    return {
+      action: "assign",
+      rationale: "Assign the generated task owner so the case has a clear next step.",
+      suggestedOwnerId: input.task.assignedTo,
+      suggestedOwner: null,
+    };
+  }
+
+  if (input.reopenRisk.level === "high" || input.riskFlags.some((flag) => flag.flagType === "reopen_risk")) {
+    return {
+      action: "escalate",
+      rationale: "The case shows repeat reopen risk and should be escalated.",
+      suggestedOwnerId: input.currentAssignee?.id ?? null,
+      suggestedOwner: input.currentAssignee?.name ?? null,
+    };
+  }
+
+  return {
+    action: "investigate",
+    rationale: input.rootCause.explanation ?? "Review the evidence before mutating the case.",
+    suggestedOwnerId: input.currentAssignee?.id ?? input.task?.assignedTo ?? null,
+    suggestedOwner: input.currentAssignee?.name ?? null,
+  };
+}
+
+function buildLatestHistoryMap(historyRows: DisconnectCaseHistoryRow[]) {
+  const latestHistoryByCase = new Map<string, DisconnectCaseHistoryRow>();
+  const latestConclusionByCase = new Map<string, DisconnectCaseHistoryRow>();
+  const sorted = [...historyRows].sort((left, right) => right.actedAt.getTime() - left.actedAt.getTime());
+  for (const row of sorted) {
+    if (!latestHistoryByCase.has(row.disconnectCaseId)) {
+      latestHistoryByCase.set(row.disconnectCaseId, row);
+    }
+    if (!latestConclusionByCase.has(row.disconnectCaseId) && isConclusionHistoryEntry(row)) {
+      latestConclusionByCase.set(row.disconnectCaseId, row);
+    }
+  }
+  return { latestHistoryByCase, latestConclusionByCase };
+}
+
+function computeLatestCaseChangedAt(input: {
+  caseRow: DisconnectCaseRow;
+  task: TaskRow | null;
+  historyRows: DisconnectCaseHistoryRow[];
+}) {
+  const candidateDates: Array<Date | null | undefined> = [
+    input.caseRow.updatedAt,
+    input.caseRow.lastIntervenedAt,
+    input.caseRow.lastReopenedAt,
+    ...input.historyRows.map((row) => row.actedAt),
+    input.task?.updatedAt ?? null,
+    input.task?.createdAt ?? null,
+  ];
+
+  let latest: Date | null = null;
+  for (const candidate of candidateDates) {
+    if (!candidate) continue;
+    if (!latest || candidate.getTime() > latest.getTime()) {
+      latest = candidate;
+    }
+  }
+  return latest;
+}
+
+function normalizeViewerFeedbackValue(
+  feedbackRows: AiFeedbackRow[],
+  packetId: string | null,
+  viewerUserId: string | null | undefined
+) {
+  if (!packetId || !viewerUserId) return null;
+  const latest = feedbackRows
+    .filter(
+      (row) =>
+        row.targetType === "packet" &&
+        row.targetId === packetId &&
+        row.userId === viewerUserId &&
+        row.feedbackType === INTERVENTION_COPILOT_FEEDBACK_TYPE
+    )
+    .sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime())[0];
+  if (!latest) return null;
+  return latest.feedbackValue === "useful" || latest.feedbackValue === "not_useful" ? latest.feedbackValue : null;
+}
+
+function buildSimilarCases(input: {
+  officeId: string;
+  caseRow: DisconnectCaseRow;
+  cases: DisconnectCaseRow[];
+  latestConclusionByCase: Map<string, DisconnectCaseHistoryRow>;
+  historyRows: DisconnectCaseHistoryRow[];
+}): InterventionCopilotView["similarCases"] {
+  const currentStageKey = readMetadataString(input.caseRow.metadataJson as Record<string, unknown> | null, "stageKey");
+  const currentClusterKey = input.caseRow.clusterKey;
+
+  return input.cases
+    .filter((candidate) => candidate.officeId === input.officeId)
+    .filter((candidate) => candidate.id !== input.caseRow.id)
+    .filter((candidate) => candidate.disconnectType === input.caseRow.disconnectType)
+    .map((candidate) => {
+      const conclusion = input.latestConclusionByCase.get(candidate.id) ?? null;
+      if (!conclusion || candidate.status === "open") return null;
+
+      const candidateStageKey = readMetadataString(candidate.metadataJson as Record<string, unknown> | null, "stageKey");
+      const reopened = input.historyRows.some(
+        (row) =>
+          row.disconnectCaseId === candidate.id &&
+          row.actionType === "reopened" &&
+          readHistoryMetadata(row).priorConclusionActionId === conclusion.id
+      );
+      const durableClose = readHistoryConclusionKind(conclusion) === "resolve" && !reopened;
+      const lifecycleStartedAt =
+        readMetadataDate(conclusion.metadataJson as Record<string, unknown> | null, "lifecycleStartedAt") ??
+        candidate.currentLifecycleStartedAt ??
+        null;
+      const daysToDurableClosure =
+        durableClose && lifecycleStartedAt && candidate.resolvedAt
+          ? calculateBusinessDaysElapsed(lifecycleStartedAt, candidate.resolvedAt)
+          : null;
+
+      return {
+        caseId: candidate.id,
+        businessKey: candidate.businessKey,
+        disconnectType: candidate.disconnectType,
+        clusterKey: candidate.clusterKey,
+        assigneeAtConclusion:
+          readHistoryMetadata(conclusion).assigneeAtConclusion ??
+          conclusion.toAssignee ??
+          null,
+        conclusionKind: readHistoryConclusionKind(conclusion),
+        reasonCode:
+          readHistoryMetadata(conclusion).conclusion?.reasonCode ??
+          readHistoryMetadata(conclusion).conclusion?.snoozeReasonCode ??
+          readHistoryMetadata(conclusion).conclusion?.escalationReasonCode ??
+          null,
+        durableClose,
+        reopened,
+        daysToDurableClosure,
+        queueLink: formatQueueLink({ caseId: candidate.id }),
+        _score: [
+          currentClusterKey && candidate.clusterKey === currentClusterKey ? 1 : 0,
+          currentStageKey && candidateStageKey === currentStageKey ? 1 : 0,
+          candidate.severity === input.caseRow.severity ? 1 : 0,
+          conclusion.actedAt.getTime(),
+        ] as const,
+      };
+    })
+    .filter((item): item is NonNullable<typeof item> => item !== null)
+    .sort((left, right) => {
+      if (right._score[0] !== left._score[0]) return right._score[0] - left._score[0];
+      if (right._score[1] !== left._score[1]) return right._score[1] - left._score[1];
+      if (right._score[2] !== left._score[2]) return right._score[2] - left._score[2];
+      if (right._score[3] !== left._score[3]) return right._score[3] - left._score[3];
+      return left.businessKey.localeCompare(right.businessKey);
+    })
+    .slice(0, 5)
+    .map(({ _score: _scoreIgnored, ...item }) => item);
+}
+
+function normalizePacketTime(
+  packet: AiCopilotPacketRow | null
+): string | null {
+  return toIsoString(packet?.generatedAt ?? packet?.createdAt ?? null);
+}
+
+export async function getInterventionCopilotView(
+  tenantDb: TenantDb | InMemoryTenantDb,
+  input: {
+    officeId: string;
+    caseId: string;
+    viewerUserId?: string | null;
+    now?: Date;
+  }
+): Promise<InterventionCopilotView> {
+  const data = await loadInterventionAnalyticsData(tenantDb, input.officeId);
+  const caseRow = data.cases.find((row) => row.id === input.caseId && row.officeId === input.officeId);
+  if (!caseRow) {
+    throw new AppError(404, "Intervention case not found");
+  }
+
+  const task = caseRow.generatedTaskId
+    ? isInMemoryTenantDb(tenantDb)
+      ? tenantDb.state.tasks.find((row) => row.id === caseRow.generatedTaskId) ?? null
+      : (
+          await tenantDb
+            .select()
+            .from(tasks)
+            .where(eq(tasks.id, caseRow.generatedTaskId))
+            .limit(1)
+        )[0] ?? null
+    : null;
+
+  const packet = isInMemoryTenantDb(tenantDb)
+    ? [...(tenantDb.state.packets ?? [])]
+        .filter(
+          (row) =>
+            row.scopeType === "intervention_case" &&
+            row.scopeId === caseRow.id &&
+            row.packetKind === "intervention_case" &&
+            row.status === "ready"
+        )
+        .sort(
+          (left, right) =>
+            (right.generatedAt?.getTime() ?? right.createdAt.getTime()) -
+            (left.generatedAt?.getTime() ?? left.createdAt.getTime())
+        )[0] ?? null
+    : (
+        await tenantDb
+          .select()
+          .from(aiCopilotPackets)
+          .where(
+            and(
+              eq(aiCopilotPackets.scopeType, "intervention_case"),
+              eq(aiCopilotPackets.scopeId, caseRow.id),
+              eq(aiCopilotPackets.packetKind, "intervention_case"),
+              eq(aiCopilotPackets.status, "ready")
+            )
+          )
+          .orderBy(desc(aiCopilotPackets.generatedAt), desc(aiCopilotPackets.createdAt))
+          .limit(1)
+      )[0] ?? null;
+
+  const feedbackRows = isInMemoryTenantDb(tenantDb)
+    ? tenantDb.state.feedback ?? []
+    : await tenantDb
+        .select()
+        .from(aiFeedback)
+        .where(and(eq(aiFeedback.targetType, "packet"), eq(aiFeedback.feedbackType, INTERVENTION_COPILOT_FEEDBACK_TYPE)))
+        .orderBy(desc(aiFeedback.createdAt));
+
+  const { latestConclusionByCase } = buildLatestHistoryMap(data.history);
+  const currentHistoryRows = data.history.filter((row) => row.disconnectCaseId === caseRow.id);
+  const latestCurrentConclusion = latestConclusionByCase.get(caseRow.id) ?? null;
+  const now = input.now ?? new Date();
+  const normalizedPacket = normalizePacketView(packet);
+  const packetGeneratedAt = packet?.generatedAt ?? packet?.createdAt ?? null;
+  const latestCaseChangedAt = computeLatestCaseChangedAt({
+    caseRow,
+    task,
+    historyRows: currentHistoryRows,
+  });
+  const currentAssignee = caseRow.assignedTo
+    ? toCopilotOwnerContext(caseRow.assignedTo, data.users.find((user) => user.id === caseRow.assignedTo)?.displayName ?? null)
+    : null;
+  const rootCause = buildRootCause(packet, caseRow);
+  const reopenRisk = buildReopenRisk(packet, { caseRow, latestConclusion: latestCurrentConclusion, now });
+  const riskFlags = normalizeRiskFlags(packet, {
+    caseRow,
+    currentAssigneeId: caseRow.assignedTo ?? null,
+    task,
+    latestConclusion: latestCurrentConclusion,
+    now,
+  });
+  const recommendedAction = buildRecommendedAction(packet, {
+    caseRow,
+    currentAssignee,
+    task,
+    riskFlags,
+    rootCause,
+    reopenRisk,
+  });
+  const blockerOwner = buildBlockerOwner(packet, { currentAssignee, task });
+
+  return {
+    packet: normalizedPacket,
+    evidence: buildCopilotEvidence(packet, {
+      caseRow,
+      task,
+      latestConclusion: latestCurrentConclusion,
+    }),
+    riskFlags,
+    similarCases: buildSimilarCases({
+      officeId: input.officeId,
+      caseRow,
+      cases: data.cases,
+      latestConclusionByCase,
+      historyRows: data.history,
+    }),
+    recommendedAction,
+    rootCause,
+    blockerOwner,
+    reopenRisk,
+    currentAssignee,
+    isRefreshPending: Boolean(packet && packet.status && packet.status !== "ready"),
+    isStale: Boolean(latestCaseChangedAt && packetGeneratedAt && latestCaseChangedAt.getTime() > packetGeneratedAt.getTime()),
+    latestCaseChangedAt: toIsoString(latestCaseChangedAt),
+    packetGeneratedAt: normalizePacketTime(packet),
+    viewerFeedbackValue: normalizeViewerFeedbackValue(feedbackRows, packet?.id ?? null, input.viewerUserId ?? null),
+  };
+}
+
+export const buildInterventionCopilotView = getInterventionCopilotView;
 
 type MutationAction = "assign" | "snooze" | "resolve" | "escalate" | "reopened";
 
