@@ -240,6 +240,14 @@ describe("AdminInterventionAnalyticsPage", () => {
     expect(html).toContain("Resolution Effectiveness");
     expect(html).toContain("Breach Queue");
     expect(html).toContain("Manager One");
+    expect(html).toContain('href="#queue-health"');
+    expect(html).toContain('href="#manager-alerts"');
+    expect(html).toContain('href="#outcome-effectiveness"');
+    expect(html).toContain('href="#policy-recommendations"');
+    expect(html).toContain('id="queue-health"');
+    expect(html).toContain('id="manager-alerts"');
+    expect(html).toContain('id="outcome-effectiveness"');
+    expect(html).toContain('id="policy-recommendations"');
   });
 
   it("keeps manager alerts visible when general analytics data is unavailable", () => {
