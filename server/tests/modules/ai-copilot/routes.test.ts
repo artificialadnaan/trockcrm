@@ -94,6 +94,7 @@ const { aiCopilotRoutes } = await import("../../../src/modules/ai-copilot/routes
 const { errorHandler } = await import("../../../src/middleware/error-handler.js");
 let insertMock: ReturnType<typeof vi.fn>;
 let selectMock: ReturnType<typeof vi.fn>;
+let executeMock: ReturnType<typeof vi.fn>;
 
 function createApp(role: "admin" | "director" | "rep" = "rep") {
   const app = express();
@@ -107,7 +108,7 @@ function createApp(role: "admin" | "director" | "rep" = "rep") {
       officeId: "office-1",
       activeOfficeId: "office-1",
     };
-    req.tenantDb = { insert: insertMock, select: selectMock } as any;
+    req.tenantDb = { insert: insertMock, select: selectMock, execute: executeMock } as any;
     req.commitTransaction = vi.fn().mockResolvedValue(undefined);
     next();
   });
@@ -126,6 +127,7 @@ describe("ai copilot routes", () => {
     selectMock = vi.fn(() => ({
       from: vi.fn().mockResolvedValue([]),
     }));
+    executeMock = vi.fn().mockResolvedValue(undefined);
     dealsServiceMocks.getDealById.mockResolvedValue({
       id: "deal-1",
       assignedRepId: "rep-1",
@@ -326,6 +328,15 @@ describe("ai copilot routes", () => {
       hotspots: { assignees: [], disconnectTypes: [], reps: [], companies: [], stages: [] },
       breachQueue: { items: [], totalCount: 0, pageSize: 25 },
       slaRules: { criticalDays: 0, highDays: 2, mediumDays: 5, lowDays: 10, timingBasis: "business_days" },
+      managerBrief: {
+        headline: "No strong manager brief is available yet.",
+        summaryWindowLabel: "Compared with the prior 7 days",
+        whatChanged: [],
+        focusNow: [],
+        emergingPatterns: [],
+        groundingNote: "Manager brief unavailable. Continue monitoring queue health and outcome trends.",
+        error: null,
+      },
     });
 
     const app = createApp("admin");
@@ -335,6 +346,8 @@ describe("ai copilot routes", () => {
     expect(response.status).toBe(200);
     expect(response.body.summary).toBeDefined();
     expect(response.body.breachQueue.items).toBeInstanceOf(Array);
+    expect(response.body.managerBrief).toBeDefined();
+    expect(executeMock).toHaveBeenCalledTimes(1);
   });
 
   it("returns the latest persisted manager alert snapshot for the active office", async () => {

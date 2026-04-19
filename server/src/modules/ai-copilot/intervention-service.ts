@@ -39,6 +39,7 @@ import type {
   InterventionCopilotReopenRisk,
   InterventionCopilotSimilarCase,
   InterventionCopilotView,
+  InterventionManagerBrief,
   InterventionOutcomeEffectiveness,
   InterventionQueueFilters,
   InterventionQueueItem,
@@ -1424,6 +1425,237 @@ function buildInterventionOutcomeEffectiveness(
   };
 }
 
+function isAllowedManagerBriefQueueLink(value: string) {
+  if (
+    value === "/admin/intervention-analytics#queue-health" ||
+    value === "/admin/intervention-analytics#manager-alerts" ||
+    value === "/admin/intervention-analytics#outcome-effectiveness" ||
+    value === "/admin/intervention-analytics#policy-recommendations"
+  ) {
+    return true;
+  }
+
+  if (!value.startsWith("/admin/interventions?")) return false;
+  const search = value.split("?")[1] ?? "";
+  const params = new URLSearchParams(search);
+  const view = params.get("view");
+  const caseId = params.get("caseId");
+
+  if (caseId) return false;
+  const keys = [...params.keys()];
+  const allowedKeys = new Set(["view", "assigneeId", "disconnectType", "stageKey", "companyId", "repId"]);
+  if (keys.some((key) => !allowedKeys.has(key))) return false;
+  if (![...params.values()].some(Boolean) && keys.length === 0) return false;
+
+  if (!view) return keys.length === 0;
+  if (!["overdue", "escalated", "snooze-breached", "repeat", "generated-task-pending", "all"].includes(view)) {
+    return false;
+  }
+
+  return true;
+}
+
+function sanitizeManagerBriefQueueLink(value: string | null | undefined) {
+  if (!value) return null;
+  return isAllowedManagerBriefQueueLink(value) ? value : null;
+}
+
+function countHistoryRowsInWindow(
+  history: DisconnectCaseHistoryRow[],
+  actionType: string,
+  range: { start: Date; end: Date }
+) {
+  return history.filter((row) => row.actionType === actionType && row.actedAt >= range.start && row.actedAt < range.end).length;
+}
+
+function buildManagerBrief(
+  history: DisconnectCaseHistoryRow[],
+  cases: DisconnectCaseRow[],
+  usersMap: Map<string, string>,
+  now: Date
+): InterventionManagerBrief {
+  const currentWindowEnd = new Date(now);
+  const currentWindowStart = new Date(now);
+  currentWindowStart.setDate(currentWindowStart.getDate() - 7);
+  const priorWindowStart = new Date(currentWindowStart);
+  priorWindowStart.setDate(priorWindowStart.getDate() - 7);
+  const currentWindow = { start: currentWindowStart, end: currentWindowEnd };
+  const priorWindow = { start: priorWindowStart, end: currentWindowStart };
+
+  const summary = buildInterventionAnalyticsSummary(cases, now);
+  const outcomeEffectiveness = buildInterventionOutcomeEffectiveness(history, usersMap, cases, now);
+  const hotspots = {
+    assignees: buildHotspotRows(cases, now, {
+      entityType: "assignee",
+      keyFromCase: (row) => row.assignedTo,
+      labelFromCase: (row) => usersMap.get(row.assignedTo ?? "") ?? row.assignedTo ?? "Unassigned",
+      queueLinkFromCase: (row) => formatQueueLink({ view: "all", assigneeId: row.assignedTo ?? null }),
+    }),
+    disconnectTypes: buildHotspotRows(cases, now, {
+      entityType: "disconnect_type",
+      keyFromCase: (row) => row.disconnectType,
+      labelFromCase: (row) => row.disconnectType,
+      queueLinkFromCase: (row) => formatQueueLink({ view: "all", disconnectType: row.disconnectType }),
+    }),
+  };
+
+  const currentEscalations = countHistoryRowsInWindow(history, "escalate", currentWindow);
+  const priorEscalations = countHistoryRowsInWindow(history, "escalate", priorWindow);
+  const currentReopens = countHistoryRowsInWindow(history, "reopened", currentWindow);
+  const priorReopens = countHistoryRowsInWindow(history, "reopened", priorWindow);
+  const currentResolves = countHistoryRowsInWindow(history, "resolve", currentWindow);
+  const priorResolves = countHistoryRowsInWindow(history, "resolve", priorWindow);
+
+  const headlineParts: string[] = [];
+  if (summary.overdueCases > 0) headlineParts.push(`${summary.overdueCases} overdue`);
+  if (summary.escalatedCases > 0) headlineParts.push(`${summary.escalatedCases} escalated-open`);
+  if (summary.snoozeOverdueCases > 0) headlineParts.push(`${summary.snoozeOverdueCases} snooze-breached`);
+  const headline =
+    headlineParts.length > 0
+      ? `Intervention pressure is concentrated in ${headlineParts.join(", ")} cases.`
+      : "No strong manager brief is available yet.";
+
+  const whatChanged: InterventionManagerBrief["whatChanged"] = [];
+  if (currentEscalations > priorEscalations) {
+    whatChanged.push({
+      key: "escalations_up",
+      tone: "worsened",
+      text: `Escalations rose to ${currentEscalations} in the last 7 days from ${priorEscalations} in the prior 7 days.`,
+      queueLink: sanitizeManagerBriefQueueLink("/admin/interventions?view=escalated"),
+    });
+  }
+  if (currentReopens > priorReopens) {
+    whatChanged.push({
+      key: "reopens_up",
+      tone: "worsened",
+      text: `Repeat-open pressure increased to ${currentReopens} reopened cases from ${priorReopens} in the prior week.`,
+      queueLink: sanitizeManagerBriefQueueLink("/admin/interventions?view=repeat"),
+    });
+  }
+  if (currentResolves > priorResolves) {
+    whatChanged.push({
+      key: "resolves_up",
+      tone: "improved",
+      text: `Durable closure activity improved with ${currentResolves} resolve actions versus ${priorResolves} in the prior week.`,
+      queueLink: sanitizeManagerBriefQueueLink("/admin/intervention-analytics#outcome-effectiveness"),
+    });
+  }
+  if (summary.snoozeOverdueCases > 0 && currentReopens <= priorReopens) {
+    whatChanged.push({
+      key: "snooze_watch",
+      tone: "watch",
+      text: `${summary.snoozeOverdueCases} snoozed cases are already past due and need active follow-through.`,
+      queueLink: sanitizeManagerBriefQueueLink("/admin/interventions?view=snooze-breached"),
+    });
+  }
+
+  const focusNow: InterventionManagerBrief["focusNow"] = [];
+  if (summary.overdueCases > 0) {
+    focusNow.push({
+      key: "focus_overdue",
+      priority: "high",
+      text: `Clear ${summary.overdueCases} overdue case${summary.overdueCases === 1 ? "" : "s"} before they roll into more escalations.`,
+      queueLink: sanitizeManagerBriefQueueLink("/admin/interventions?view=overdue"),
+    });
+  }
+  if (summary.escalatedCases > 0) {
+    focusNow.push({
+      key: "focus_escalated",
+      priority: "high",
+      text: `Review ${summary.escalatedCases} escalated-open case${summary.escalatedCases === 1 ? "" : "s"} for direct manager intervention.`,
+      queueLink: sanitizeManagerBriefQueueLink("/admin/interventions?view=escalated"),
+    });
+  }
+  const topAssignee = hotspots.assignees[0];
+  if (topAssignee?.queueLink && topAssignee.openCases > 0) {
+    focusNow.push({
+      key: "focus_assignee_load",
+      priority: topAssignee.overdueCases > 0 ? "high" : "medium",
+      text: `${topAssignee.label} is carrying ${topAssignee.openCases} open cases, including ${topAssignee.overdueCases} overdue.`,
+      queueLink: sanitizeManagerBriefQueueLink(topAssignee.queueLink),
+    });
+  }
+  const topDisconnectType = hotspots.disconnectTypes[0];
+  if (topDisconnectType?.queueLink && topDisconnectType.openCases > 0) {
+    focusNow.push({
+      key: "focus_disconnect_type",
+      priority: "medium",
+      text: `${topDisconnectType.label} is the heaviest open disconnect type at ${topDisconnectType.openCases} cases.`,
+      queueLink: sanitizeManagerBriefQueueLink(topDisconnectType.queueLink),
+    });
+  }
+
+  const emergingPatterns: InterventionManagerBrief["emergingPatterns"] = [];
+  const highestReopenFamily = Object.entries(outcomeEffectiveness.reopenRateByConclusionFamily)
+    .filter((entry): entry is ["resolve" | "snooze" | "escalate", number] => typeof entry[1] === "number")
+    .sort((a, b) => b[1] - a[1])[0];
+  if (highestReopenFamily && highestReopenFamily[1] >= 0.25) {
+    emergingPatterns.push({
+      key: `family_${highestReopenFamily[0]}`,
+      title: `${highestReopenFamily[0][0].toUpperCase()}${highestReopenFamily[0].slice(1)} outcomes are reopening`,
+      summary: `${Math.round(highestReopenFamily[1] * 100)}% of recent ${highestReopenFamily[0]} conclusions reopened inside the 30-day window.`,
+      confidence: highestReopenFamily[1] >= 0.4 ? "high" : "medium",
+      queueLink: sanitizeManagerBriefQueueLink("/admin/intervention-analytics#outcome-effectiveness"),
+    });
+  }
+  for (const warning of outcomeEffectiveness.warnings.slice(0, 2)) {
+    emergingPatterns.push({
+      key: `warning_${warning.kind}_${warning.key}`,
+      title: warning.label,
+      summary: `${warning.volume} recent conclusions are showing a ${Math.round((warning.rate ?? 0) * 100)}% weak-close/reopen signal.`,
+      confidence: (warning.rate ?? 0) >= 0.4 ? "high" : "medium",
+      queueLink: sanitizeManagerBriefQueueLink(warning.queueLink),
+    });
+  }
+  if (emergingPatterns.length === 0 && topDisconnectType?.openCases > 0) {
+    emergingPatterns.push({
+      key: "pattern_top_disconnect_type",
+      title: `${topDisconnectType.label} is dominating intervention load`,
+      summary: `${topDisconnectType.openCases} open cases are concentrated in the ${topDisconnectType.label} disconnect family.`,
+      confidence: topDisconnectType.overdueCases > 0 ? "high" : "medium",
+      queueLink: sanitizeManagerBriefQueueLink(topDisconnectType.queueLink),
+    });
+  }
+
+  return {
+    headline,
+    summaryWindowLabel: "Compared with the prior 7 days",
+    whatChanged: whatChanged.slice(0, 4),
+    focusNow: focusNow.slice(0, 4),
+    emergingPatterns: emergingPatterns.slice(0, 3),
+    groundingNote:
+      "Grounded in current intervention analytics, recent intervention history, queue pressure, and outcome-effectiveness trends.",
+    error: null,
+  };
+}
+
+export function buildManagerBriefSafely(
+  history: DisconnectCaseHistoryRow[],
+  cases: DisconnectCaseRow[],
+  usersMap: Map<string, string>,
+  now: Date,
+  builder: (
+    history: DisconnectCaseHistoryRow[],
+    cases: DisconnectCaseRow[],
+    usersMap: Map<string, string>,
+    now: Date
+  ) => InterventionManagerBrief = buildManagerBrief
+): InterventionManagerBrief {
+  try {
+    return builder(history, cases, usersMap, now);
+  } catch {
+    return {
+      headline: "No strong manager brief is available yet.",
+      summaryWindowLabel: "Compared with the prior 7 days",
+      whatChanged: [],
+      focusNow: [],
+      emergingPatterns: [],
+      groundingNote: "Manager brief unavailable. Continue monitoring queue health and outcome trends.",
+      error: "Failed to build manager brief",
+    };
+  }
+}
+
 function buildHotspotRows(
   cases: DisconnectCaseRow[],
   now: Date,
@@ -1551,6 +1783,7 @@ export async function getInterventionAnalyticsDashboard(
   return {
     summary: buildInterventionAnalyticsSummary(cases, now),
     outcomes: buildInterventionAnalyticsOutcomes(cases, history, now),
+    managerBrief: buildManagerBriefSafely(history, cases, usersMap, now),
     outcomeEffectiveness: buildInterventionOutcomeEffectiveness(history, usersMap, cases, now),
     hotspots: {
       assignees: buildHotspotRows(cases, now, {

@@ -1,4 +1,5 @@
 const consoleSections = [
+  { id: "manager-brief", label: "Manager brief" },
   { id: "queue-health", label: "Queue health" },
   { id: "manager-alerts", label: "Manager alerts" },
   { id: "outcome-effectiveness", label: "Outcome effectiveness" },

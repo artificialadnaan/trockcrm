@@ -72,7 +72,13 @@ for (const item of [
   ...dashboard.managerBrief.emergingPatterns,
 ]) {
   if (!item.queueLink) continue;
-  expect(item.queueLink.startsWith("/admin/interventions?")).toBe(true);
+  expect(
+    item.queueLink.startsWith("/admin/interventions?") ||
+      item.queueLink === "/admin/intervention-analytics#queue-health" ||
+      item.queueLink === "/admin/intervention-analytics#manager-alerts" ||
+      item.queueLink === "/admin/intervention-analytics#outcome-effectiveness" ||
+      item.queueLink === "/admin/intervention-analytics#policy-recommendations"
+  ).toBe(true);
 }
 ```
 
@@ -331,7 +337,21 @@ npx vitest run client/src/components/ai/intervention-manager-brief.test.tsx clie
 
 Expected: PASS.
 
-- [ ] **Step 2: Run workspace typecheck**
+- [ ] **Step 2: Add served-signal telemetry and verify it**
+
+Add a lightweight served signal in the analytics route or service path, such as:
+
+- a structured server log
+- an existing analytics/feedback metric increment
+- a narrow audit/telemetry event
+
+Requirements:
+
+- emitted only when `managerBrief` is actually served in the analytics payload
+- does not block response delivery if telemetry fails
+- has a focused regression test or service-level assertion proving the signal fires on success
+
+- [ ] **Step 3: Run workspace typecheck**
 
 Run:
 
@@ -341,7 +361,7 @@ npm run typecheck
 
 Expected: PASS.
 
-- [ ] **Step 3: Run diff hygiene**
+- [ ] **Step 4: Run diff hygiene**
 
 Run:
 
@@ -351,7 +371,7 @@ git diff --check
 
 Expected: PASS.
 
-- [ ] **Step 4: Commit the final implementation**
+- [ ] **Step 5: Commit the final implementation**
 
 ```bash
 git add server/src/modules/ai-copilot/intervention-types.ts \

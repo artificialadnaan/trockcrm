@@ -196,6 +196,50 @@ Any queue links emitted by the brief must:
 
 This slice does not add client-only filtering conventions.
 
+### Allowed v1 link targets
+
+In v1, `queueLink` may only be emitted when the brief item maps to one of these already-supported destinations:
+
+- `/admin/interventions?view=overdue`
+- `/admin/interventions?view=escalated`
+- `/admin/interventions?view=snooze-breached`
+- `/admin/interventions?view=repeat`
+- `/admin/interventions?view=generated-task-pending`
+- `/admin/interventions?view=all`
+- `/admin/interventions?view=all&assigneeId=...`
+- `/admin/interventions?view=all&disconnectType=...`
+- `/admin/interventions?view=all&stageKey=...`
+- `/admin/interventions?view=all&companyId=...`
+- `/admin/interventions?view=all&repId=...`
+
+The brief may also point back into an existing manager-console anchor when appropriate:
+
+- `/admin/intervention-analytics#queue-health`
+- `/admin/intervention-analytics#manager-alerts`
+- `/admin/intervention-analytics#outcome-effectiveness`
+- `/admin/intervention-analytics#policy-recommendations`
+
+No other destinations or query params are allowed in v1.
+
+### Disconnect-context passthrough
+
+When the analytics page already carries supported disconnect-context params, the brief may preserve only these existing passthrough values:
+
+- `type`
+- `cluster`
+- `trend`
+
+No other context params should be invented or forwarded by the brief layer.
+
+### Unsupported drill-ins
+
+If a `whatChanged`, `focusNow`, or `emergingPatterns` item does not map cleanly to the allowlisted route/filter contract above:
+
+- `queueLink` must be `null`
+- the UI must render the item as plain advisory text
+
+The brief must never synthesize fake filters or unsupported deep links just to make every item clickable.
+
 ## Suggested V1 Brief Themes
 
 Allowed v1 brief themes include:

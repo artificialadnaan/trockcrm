@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 import { cn } from "@/lib/utils";
 
 export interface InterventionManagerConsoleSectionProps {
-  id: "queue-health" | "manager-alerts" | "outcome-effectiveness" | "policy-recommendations";
+  id: "manager-brief" | "queue-health" | "manager-alerts" | "outcome-effectiveness" | "policy-recommendations";
   title: string;
   description: string;
   children: ReactNode;
