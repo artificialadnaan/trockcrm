@@ -164,15 +164,15 @@ describe("useInterventionCopilot", () => {
     apiMock.mockResolvedValueOnce({});
     apiMock.mockResolvedValueOnce({
       ...buildCopilotView(),
-      viewerFeedbackValue: "positive",
+      viewerFeedbackValue: "useful",
     });
 
     await result.submitFeedback({
-      targetType: "packet",
-      targetId: "packet-1",
-      feedbackType: "intervention_case_copilot",
-      feedbackValue: "positive",
-    });
+        targetType: "packet",
+        targetId: "packet-1",
+        feedbackType: "intervention_case_copilot",
+        feedbackValue: "useful",
+      });
 
     expect(apiMock).toHaveBeenCalledWith("/ai/feedback", {
       method: "POST",
@@ -180,7 +180,7 @@ describe("useInterventionCopilot", () => {
         targetType: "packet",
         targetId: "packet-1",
         feedbackType: "intervention_case_copilot",
-        feedbackValue: "positive",
+        feedbackValue: "useful",
         comment: null,
       },
     });

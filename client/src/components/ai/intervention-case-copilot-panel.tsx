@@ -46,7 +46,7 @@ export function InterventionCaseCopilotPanel(props: { caseId: string | null }) {
     }
   }
 
-  async function handleFeedback(feedbackValue: "positive" | "negative") {
+  async function handleFeedback(feedbackValue: "useful" | "not_useful") {
     if (!data?.packet?.id) return;
     try {
       await submitFeedback({
@@ -215,18 +215,18 @@ export function InterventionCaseCopilotPanel(props: { caseId: string | null }) {
       <div className="flex items-center gap-2">
         <Button
           size="sm"
-          variant={data?.viewerFeedbackValue === "positive" ? "default" : "outline"}
+          variant={data?.viewerFeedbackValue === "useful" ? "default" : "outline"}
           disabled={submittingFeedback || !data?.packet?.id}
-          onClick={() => void handleFeedback("positive")}
+          onClick={() => void handleFeedback("useful")}
         >
           <ThumbsUp className="h-3.5 w-3.5 mr-2" />
           Helpful
         </Button>
         <Button
           size="sm"
-          variant={data?.viewerFeedbackValue === "negative" ? "default" : "outline"}
+          variant={data?.viewerFeedbackValue === "not_useful" ? "default" : "outline"}
           disabled={submittingFeedback || !data?.packet?.id}
-          onClick={() => void handleFeedback("negative")}
+          onClick={() => void handleFeedback("not_useful")}
         >
           <ThumbsDown className="h-3.5 w-3.5 mr-2" />
           Not helpful

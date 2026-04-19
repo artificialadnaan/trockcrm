@@ -83,7 +83,7 @@ describe("InterventionCaseCopilotPanel", () => {
         isStale: false,
         latestCaseChangedAt: "2026-04-19T11:59:00.000Z",
         packetGeneratedAt: "2026-04-19T12:00:00.000Z",
-        viewerFeedbackValue: "positive",
+        viewerFeedbackValue: "useful",
       },
       loading: false,
       error: null,
