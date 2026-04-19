@@ -17,6 +17,7 @@ import type {
   SnoozeConclusionPayload,
 } from "@/lib/intervention-outcome-taxonomy";
 import { InterventionConclusionForm } from "@/components/ai/intervention-conclusion-form";
+import { InterventionCaseCopilotPanel } from "@/components/ai/intervention-case-copilot-panel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -162,6 +163,8 @@ export function InterventionDetailPanel(props: {
                   <div className="text-sm text-muted-foreground">No generated task is currently linked to this case.</div>
                 )}
               </div>
+
+              <InterventionCaseCopilotPanel caseId={detail.case.id} />
 
               <div className="rounded-lg border border-border/80 bg-white p-4 space-y-4">
                 <div className="text-sm font-semibold">Direct actions</div>
