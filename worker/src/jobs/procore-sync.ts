@@ -108,90 +108,102 @@ async function handleCreateProject(
   companyId: string,
   dealId: string
 ): Promise<void> {
-  // Take a per-deal advisory lock to prevent concurrent project creation
-  // for the same deal (e.g. duplicate job_queue entries or webhook replays).
-  await client.query("BEGIN");
-  await client.query(
-    `SELECT pg_advisory_xact_lock(hashtext('procore_project_' || $1))`,
-    [dealId]
-  );
-
-  const dealResult = await client.query(
-    `SELECT id, name, procore_project_id, property_address, property_city,
-            property_state, property_zip
-     FROM ${schemaName}.deals WHERE id = $1 LIMIT 1 FOR UPDATE`,
-    [dealId]
-  );
-  const deal = dealResult.rows[0];
-  if (!deal) {
-    console.warn(`[Procore:worker] handleCreateProject: deal ${dealId} not found`);
-    await client.query("COMMIT");
-    return;
-  }
-  // Re-check after acquiring lock — another worker may have created the project
-  if (deal.procore_project_id != null) {
-    console.log(
-      `[Procore:worker] Deal ${dealId} already has procore_project_id ${deal.procore_project_id} — skip`
+  let transactionOpen = false;
+  try {
+    // Take a per-deal advisory lock to prevent concurrent project creation
+    // for the same deal (e.g. duplicate job_queue entries or webhook replays).
+    await client.query("BEGIN");
+    transactionOpen = true;
+    await client.query(
+      `SELECT pg_advisory_xact_lock(hashtext('procore_project_' || $1))`,
+      [dealId]
     );
-    await client.query("COMMIT");
-    return;
-  }
 
-  let procoreProjectId: number;
-
-  if (isDevMode()) {
-    procoreProjectId = Math.floor(Math.random() * 900000) + 100000;
-    console.log(`[Procore:worker:dev] Mock created project ${procoreProjectId} for deal ${dealId}`);
-  } else {
-    const token = await getWorkerProcoreToken();
-    const res = await fetch(`${PROCORE_BASE_URL}/rest/v1.0/companies/${companyId}/projects`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        project: {
-          name: deal.name,
-          display_name: deal.name,
-          address: deal.property_address ?? undefined,
-          city: deal.property_city ?? undefined,
-          state_code: deal.property_state ?? undefined,
-          zip: deal.property_zip ?? undefined,
-          active: true,
-        },
-      }),
-    });
-
-    if (!res.ok) {
-      const errText = await res.text().catch(() => "");
-      throw new Error(`Procore project creation failed: ${res.status} ${errText}`);
+    const dealResult = await client.query(
+      `SELECT id, name, procore_project_id, property_address, property_city,
+              property_state, property_zip
+       FROM ${schemaName}.deals WHERE id = $1 LIMIT 1 FOR UPDATE`,
+      [dealId]
+    );
+    const deal = dealResult.rows[0];
+    if (!deal) {
+      console.warn(`[Procore:worker] handleCreateProject: deal ${dealId} not found`);
+      await client.query("COMMIT");
+      transactionOpen = false;
+      return;
+    }
+    // Re-check after acquiring lock — another worker may have created the project
+    if (deal.procore_project_id != null) {
+      console.log(
+        `[Procore:worker] Deal ${dealId} already has procore_project_id ${deal.procore_project_id} — skip`
+      );
+      await client.query("COMMIT");
+      transactionOpen = false;
+      return;
     }
 
-    const project = await res.json();
-    procoreProjectId = project.id;
-  }
+    let procoreProjectId: number;
 
-  await client.query(
-    `UPDATE ${schemaName}.deals
-     SET procore_project_id = $1, procore_last_synced_at = NOW(), updated_at = NOW()
-     WHERE id = $2`,
-    [procoreProjectId, dealId]
-  );
-  await client.query(
-    `INSERT INTO public.procore_sync_state
-       (id, entity_type, procore_id, crm_entity_type, crm_entity_id, office_id,
-        sync_direction, sync_status, last_synced_at, last_crm_updated_at, created_at, updated_at)
-     VALUES (gen_random_uuid(), 'project', $1, 'deal', $2, $3,
-             'crm_to_procore', 'synced', NOW(), NOW(), NOW(), NOW())
-     ON CONFLICT (entity_type, procore_id, office_id) DO UPDATE SET
-       sync_status = 'synced', last_synced_at = NOW(), error_message = NULL, updated_at = NOW()`,
-    [procoreProjectId, dealId, officeId]
-  );
-  await client.query("COMMIT");
-  console.log(
-    `[Procore:worker] Created project ${procoreProjectId} for deal ${dealId}`
-  );
+    if (isDevMode()) {
+      procoreProjectId = Math.floor(Math.random() * 900000) + 100000;
+      console.log(`[Procore:worker:dev] Mock created project ${procoreProjectId} for deal ${dealId}`);
+    } else {
+      const token = await getWorkerProcoreToken();
+      const res = await fetch(`${PROCORE_BASE_URL}/rest/v1.0/companies/${companyId}/projects`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          project: {
+            name: deal.name,
+            display_name: deal.name,
+            address: deal.property_address ?? undefined,
+            city: deal.property_city ?? undefined,
+            state_code: deal.property_state ?? undefined,
+            zip: deal.property_zip ?? undefined,
+            active: true,
+          },
+        }),
+      });
+
+      if (!res.ok) {
+        const errText = await res.text().catch(() => "");
+        throw new Error(`Procore project creation failed: ${res.status} ${errText}`);
+      }
+
+      const project = await res.json();
+      procoreProjectId = project.id;
+    }
+
+    await client.query(
+      `UPDATE ${schemaName}.deals
+       SET procore_project_id = $1, procore_last_synced_at = NOW(), updated_at = NOW()
+       WHERE id = $2`,
+      [procoreProjectId, dealId]
+    );
+    await client.query(
+      `INSERT INTO public.procore_sync_state
+         (id, entity_type, procore_id, crm_entity_type, crm_entity_id, office_id,
+          sync_direction, sync_status, last_synced_at, last_crm_updated_at, created_at, updated_at)
+       VALUES (gen_random_uuid(), 'project', $1, 'deal', $2, $3,
+               'crm_to_procore', 'synced', NOW(), NOW(), NOW(), NOW())
+       ON CONFLICT (entity_type, procore_id, office_id) DO UPDATE SET
+         sync_status = 'synced', last_synced_at = NOW(), error_message = NULL, updated_at = NOW()`,
+      [procoreProjectId, dealId, officeId]
+    );
+    await client.query("COMMIT");
+    transactionOpen = false;
+    console.log(
+      `[Procore:worker] Created project ${procoreProjectId} for deal ${dealId}`
+    );
+  } catch (error) {
+    if (transactionOpen) {
+      await client.query("ROLLBACK").catch(() => {});
+    }
+    throw error;
+  }
 }
 
 async function handleSyncStage(
@@ -307,6 +319,7 @@ export async function handleProcoreWebhookJob(jobPayload: any): Promise<void> {
     const slugRegex = /^[a-z][a-z0-9_]*$/;
     if (!slugRegex.test(officeSlug)) {
       console.error(`[Procore:worker] Invalid office slug: "${officeSlug}" — skipping`);
+      await markWebhookProcessed(client, webhookLogId, `Invalid office slug: ${officeSlug}`);
       return;
     }
     const schemaName = `office_${officeSlug}`;

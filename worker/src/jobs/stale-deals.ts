@@ -66,6 +66,7 @@ export async function runStaleDealScan(): Promise<void> {
   console.log("[Worker:stale-deals] Starting stale deal scan...");
 
   const client = await pool.connect();
+  let transactionOpen = false;
   try {
     // Get all active offices
     const offices = await client.query(
@@ -82,6 +83,14 @@ export async function runStaleDealScan(): Promise<void> {
         continue;
       }
       const schemaName = `office_${office.slug}`;
+      const lockKey = `stale_deals:${office.id}`;
+
+      await client.query("BEGIN");
+      transactionOpen = true;
+      await client.query(
+        `SELECT pg_advisory_xact_lock(hashtext($1))`,
+        [lockKey]
+      );
 
       // Find stale deals: join deals with pipeline config, check threshold.
       // Also fetch stale_escalation_tiers for tier logic.
@@ -105,6 +114,8 @@ export async function runStaleDealScan(): Promise<void> {
       );
 
       if (staleDeals.rows.length === 0) {
+        await client.query("COMMIT");
+        transactionOpen = false;
         continue;
       }
 
@@ -195,10 +206,16 @@ export async function runStaleDealScan(): Promise<void> {
           TASK_RULES
         );
       }
+
+      await client.query("COMMIT");
+      transactionOpen = false;
     }
 
     console.log(`[Worker:stale-deals] Scan complete. Total stale deals: ${totalStale}`);
   } catch (err) {
+    if (transactionOpen) {
+      await client.query("ROLLBACK").catch(() => {});
+    }
     console.error("[Worker:stale-deals] Scan failed:", err);
     throw err;
   } finally {

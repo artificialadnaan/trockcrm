@@ -114,13 +114,12 @@ export interface ForecastVarianceOverview {
 
 function buildForecastVarianceFilterSql(filters: NormalizedAnalyticsFilters) {
   const clauses = [
-    sql`dsi.deal_id = d.id`,
     sql`cw.captured_at >= ${filters.from}::timestamptz`,
     sql`cw.captured_at < (${filters.to}::date + INTERVAL '1 day')::timestamptz`,
   ];
 
   if (filters.officeId) {
-    clauses.push(sql`dsi.office_id = ${filters.officeId}::uuid`);
+    clauses.push(sql`u.office_id = ${filters.officeId}::uuid`);
   }
   if (filters.regionId) {
     clauses.push(sql`d.region_id = ${filters.regionId}::uuid`);
@@ -168,8 +167,7 @@ export async function getForecastVarianceOverview(
         estimating.forecast_amount AS estimating_forecast,
         cw.captured_at AS closed_won_captured_at
       FROM deals d
-      JOIN deal_scoping_intake dsi ON dsi.deal_id = d.id
-      JOIN public.pipeline_stage_config current_stage ON current_stage.id = d.stage_id
+      LEFT JOIN deal_scoping_intake dsi ON dsi.deal_id = d.id
       JOIN deal_forecast_milestones cw
         ON cw.deal_id = d.id
        AND cw.milestone_key = 'closed_won'
@@ -183,11 +181,10 @@ export async function getForecastVarianceOverview(
       LEFT JOIN deal_forecast_milestones estimating
         ON estimating.deal_id = d.id
        AND estimating.milestone_key = 'estimating'
-      WHERE current_stage.slug = 'closed_won'
-        AND ${whereSql}
+      WHERE ${whereSql}
     )
     SELECT
-      COUNT(*)::int AS comparable_deals,
+      COUNT(*) FILTER (WHERE initial_forecast IS NOT NULL)::int AS comparable_deals,
       COALESCE(AVG(ABS(awarded_amount - initial_forecast)), 0)::numeric AS avg_initial_variance,
       COALESCE(AVG(ABS(awarded_amount - qualified_forecast)) FILTER (WHERE qualified_forecast IS NOT NULL), 0)::numeric AS avg_qualified_variance,
       COALESCE(AVG(ABS(awarded_amount - estimating_forecast)) FILTER (WHERE estimating_forecast IS NOT NULL), 0)::numeric AS avg_estimating_variance,
@@ -208,8 +205,7 @@ export async function getForecastVarianceOverview(
         qualified.forecast_amount AS qualified_forecast,
         estimating.forecast_amount AS estimating_forecast
       FROM deals d
-      JOIN deal_scoping_intake dsi ON dsi.deal_id = d.id
-      JOIN public.pipeline_stage_config current_stage ON current_stage.id = d.stage_id
+      LEFT JOIN deal_scoping_intake dsi ON dsi.deal_id = d.id
       JOIN deal_forecast_milestones cw
         ON cw.deal_id = d.id
        AND cw.milestone_key = 'closed_won'
@@ -223,13 +219,12 @@ export async function getForecastVarianceOverview(
       LEFT JOIN deal_forecast_milestones estimating
         ON estimating.deal_id = d.id
        AND estimating.milestone_key = 'estimating'
-      WHERE current_stage.slug = 'closed_won'
-        AND ${whereSql}
+      WHERE ${whereSql}
     )
     SELECT
       assigned_rep_id AS rep_id,
       rep_name,
-      COUNT(*)::int AS comparable_deals,
+      COUNT(*) FILTER (WHERE initial_forecast IS NOT NULL)::int AS comparable_deals,
       COALESCE(AVG(ABS(awarded_amount - initial_forecast)), 0)::numeric AS avg_initial_variance,
       COALESCE(AVG(ABS(awarded_amount - qualified_forecast)) FILTER (WHERE qualified_forecast IS NOT NULL), 0)::numeric AS avg_qualified_variance,
       COALESCE(AVG(ABS(awarded_amount - estimating_forecast)) FILTER (WHERE estimating_forecast IS NOT NULL), 0)::numeric AS avg_estimating_variance,
@@ -253,8 +248,7 @@ export async function getForecastVarianceOverview(
         qualified.forecast_amount AS qualified_forecast,
         estimating.forecast_amount AS estimating_forecast
       FROM deals d
-      JOIN deal_scoping_intake dsi ON dsi.deal_id = d.id
-      JOIN public.pipeline_stage_config current_stage ON current_stage.id = d.stage_id
+      LEFT JOIN deal_scoping_intake dsi ON dsi.deal_id = d.id
       JOIN deal_forecast_milestones cw
         ON cw.deal_id = d.id
        AND cw.milestone_key = 'closed_won'
@@ -268,8 +262,7 @@ export async function getForecastVarianceOverview(
       LEFT JOIN deal_forecast_milestones estimating
         ON estimating.deal_id = d.id
        AND estimating.milestone_key = 'estimating'
-      WHERE current_stage.slug = 'closed_won'
-        AND ${whereSql}
+      WHERE ${whereSql}
     )
     SELECT
       deal_id,
@@ -285,6 +278,7 @@ export async function getForecastVarianceOverview(
       ABS(awarded_amount - estimating_forecast)::numeric AS estimating_variance,
       ABS(actual_close_date - expected_close_date)::int AS close_drift_days
     FROM forecast_base
+    WHERE initial_forecast IS NOT NULL
     ORDER BY initial_variance DESC NULLS LAST, deal_name ASC
   `);
 

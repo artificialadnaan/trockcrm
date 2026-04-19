@@ -38,19 +38,56 @@ function formatDays(value: number | null) {
 }
 
 function buildForecastExportRows(data: ForecastVarianceOverview) {
-  return data.deals.map((row) => ({
-    Deal: row.dealName,
-    Rep: row.repName,
-    Workflow: row.workflowRoute,
-    "Initial Forecast": row.initialForecast,
-    "Qualified Forecast": row.qualifiedForecast,
-    "Estimating Forecast": row.estimatingForecast,
-    "Awarded Amount": row.awardedAmount,
-    "Initial Variance": row.initialVariance,
-    "Qualified Variance": row.qualifiedVariance,
-    "Estimating Variance": row.estimatingVariance,
-    "Close Drift Days": row.closeDriftDays,
-  }));
+  return [
+    {
+      Section: "Summary",
+      Label: "Comparable Deals",
+      Value: data.summary.comparableDeals,
+    },
+    {
+      Section: "Summary",
+      Label: "Avg Initial Variance",
+      Value: data.summary.avgInitialVariance,
+    },
+    {
+      Section: "Summary",
+      Label: "Avg Qualified Variance",
+      Value: data.summary.avgQualifiedVariance,
+    },
+    {
+      Section: "Summary",
+      Label: "Avg Estimating Variance",
+      Value: data.summary.avgEstimatingVariance,
+    },
+    {
+      Section: "Summary",
+      Label: "Avg Close Drift Days",
+      Value: data.summary.avgCloseDriftDays,
+    },
+    ...data.repRollups.map((row) => ({
+      Section: "Rep Rollup",
+      Rep: row.repName,
+      "Comparable Deals": row.comparableDeals,
+      "Avg Initial Variance": row.avgInitialVariance,
+      "Avg Qualified Variance": row.avgQualifiedVariance,
+      "Avg Estimating Variance": row.avgEstimatingVariance,
+      "Avg Close Drift Days": row.avgCloseDriftDays,
+    })),
+    ...data.deals.map((row) => ({
+      Section: "Deal Detail",
+      Deal: row.dealName,
+      Rep: row.repName,
+      Workflow: row.workflowRoute,
+      "Initial Forecast": row.initialForecast,
+      "Qualified Forecast": row.qualifiedForecast,
+      "Estimating Forecast": row.estimatingForecast,
+      "Awarded Amount": row.awardedAmount,
+      "Initial Variance": row.initialVariance,
+      "Qualified Variance": row.qualifiedVariance,
+      "Estimating Variance": row.estimatingVariance,
+      "Close Drift Days": row.closeDriftDays,
+    })),
+  ];
 }
 
 function SummaryCard({

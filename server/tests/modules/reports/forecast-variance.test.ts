@@ -136,10 +136,25 @@ describe("forecast variance reporting", () => {
     });
 
     const queryText = extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase();
-    expect(queryText).toContain("dsi.office_id");
+    expect(queryText).toContain("u.office_id");
+    expect(queryText).toContain("left join deal_scoping_intake dsi");
     expect(queryText).toContain("d.region_id");
     expect(queryText).toContain("d.assigned_rep_id");
     expect(queryText).toContain("d.source");
+  });
+
+  it("counts only comparable rows and keeps legacy closed-won deals in scope", async () => {
+    const { getForecastVarianceOverview } = await import("../../../src/modules/reports/service.js");
+    const tenantDb = createMockTenantDb([[], [], []]);
+
+    await getForecastVarianceOverview(tenantDb, {});
+
+    const summaryQuery = extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase();
+    const dealRowsQuery = extractSqlText(tenantDb.execute.mock.calls[2][0]).toLowerCase();
+
+    expect(summaryQuery).toContain("count(*) filter (where initial_forecast is not null)");
+    expect(dealRowsQuery).toContain("left join deal_scoping_intake dsi");
+    expect(dealRowsQuery).toContain("where initial_forecast is not null");
   });
 
   it("joins closed-won milestones before joining reps", async () => {

@@ -68,4 +68,23 @@ describe("activity alerts worker", () => {
     expect(activityQueries[1]).not.toContain("WHERE user_id = $1");
     expect(releaseMock).toHaveBeenCalled();
   });
+
+  it("rolls back the office transaction when an office query fails", async () => {
+    queryMock.mockImplementation(async (sql: string) => {
+      if (sql.includes("FROM public.offices")) {
+        return { rows: [{ id: "office-1", slug: "beta" }] };
+      }
+
+      if (sql.includes("role = 'rep'")) {
+        throw new Error("boom");
+      }
+
+      return { rows: [] };
+    });
+
+    await expect(runActivityDropDetection()).rejects.toThrow("boom");
+
+    expect(queryMock).toHaveBeenCalledWith("ROLLBACK");
+    expect(releaseMock).toHaveBeenCalled();
+  });
 });

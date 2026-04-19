@@ -237,8 +237,8 @@ export function AdminDataScrubPage() {
                     </TableCell>
                   </TableRow>
                 ) : (
-                  (data?.scrubActivityByUser ?? []).map((row) => (
-                    <TableRow key={row.userId}>
+                  (data?.scrubActivityByUser ?? []).map((row, index) => (
+                    <TableRow key={row.userId ?? `anonymous-${row.userName}-${index}`}>
                       <TableCell>
                         <div className="space-y-1">
                           <div className="font-medium">{row.userName}</div>

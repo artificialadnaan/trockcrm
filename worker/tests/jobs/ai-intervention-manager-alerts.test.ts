@@ -19,7 +19,33 @@ vi.mock("../../../server/src/modules/ai-copilot/intervention-manager-alerts-serv
   sendManagerAlertSummary: sendManagerAlertSummaryMock,
 }));
 
+vi.mock("../../../server/dist/modules/ai-copilot/intervention-manager-alerts-service.js", () => ({
+  runManagerAlertPreview: runManagerAlertPreviewMock,
+  sendManagerAlertSummary: sendManagerAlertSummaryMock,
+}));
+
 const { runAiInterventionManagerAlerts } = await import("../../src/jobs/ai-intervention-manager-alerts.js");
+
+function sqlText(value: unknown) {
+  if (typeof value === "string") return value;
+  if (value && typeof value === "object") {
+    if ("text" in (value as Record<string, unknown>) && typeof (value as { text?: unknown }).text === "string") {
+      return (value as { text: string }).text;
+    }
+    if (
+      "queryChunks" in (value as Record<string, unknown>) &&
+      Array.isArray((value as { queryChunks?: unknown[] }).queryChunks)
+    ) {
+      return (value as { queryChunks: unknown[] }).queryChunks
+        .map((chunk) => sqlText(chunk))
+        .join("");
+    }
+    if ("sql" in (value as Record<string, unknown>) && typeof (value as { sql?: unknown }).sql === "string") {
+      return (value as { sql: string }).sql;
+    }
+  }
+  return String(value ?? "");
+}
 
 function makeAlertSnapshot(overrides?: Partial<Record<"overdueHighCritical" | "snoozeBreached" | "escalatedOpen" | "assigneeOverload", number>>) {
   return {
@@ -56,8 +82,9 @@ describe("ai intervention manager alerts worker", () => {
     const skippedSchemas: string[] = [];
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 
-    queryMock.mockImplementation(async (sql: string, params?: unknown[]) => {
-      if (sql.includes("FROM public.offices WHERE is_active = true")) {
+    queryMock.mockImplementation(async (sql: unknown, params?: unknown[]) => {
+      const text = sqlText(sql);
+      if (text.includes("FROM public.offices WHERE is_active = true")) {
         return {
           rows: [
             { id: "office-beta", slug: "beta", timezone: "America/Chicago" },
@@ -68,7 +95,7 @@ describe("ai intervention manager alerts worker", () => {
         };
       }
 
-      if (sql.includes("FROM information_schema.schemata")) {
+      if (text.includes("FROM information_schema.schemata")) {
         const schemaName = String(params?.[0] ?? "");
         if (schemaName === "office_dfw") {
           skippedSchemas.push(schemaName);
@@ -77,11 +104,11 @@ describe("ai intervention manager alerts worker", () => {
         return { rows: [{ schema_name: schemaName }] };
       }
 
-      if (sql.includes("SELECT pg_try_advisory_lock")) {
+      if (text.includes("SELECT pg_try_advisory_lock")) {
         return { rows: [{ acquired: true }] };
       }
 
-      if (sql.includes("FROM public.users") && sql.includes("role IN ('admin', 'director')")) {
+      if (text.includes("FROM public.users") && text.includes("role IN ('admin', 'director')")) {
         const officeId = String(params?.[0] ?? "");
         if (officeId === "office-beta") {
           return { rows: [{ id: "director-1" }, { id: "admin-1" }] };
@@ -92,15 +119,15 @@ describe("ai intervention manager alerts worker", () => {
         return { rows: [] };
       }
 
-      if (sql.includes("SELECT set_config('search_path', $1, false)")) {
+      if (text.includes("SELECT set_config('search_path', $1, false)")) {
         return { rows: [{ set_config: String(params?.[0] ?? "") }] };
       }
 
-      if (sql.includes("SELECT pg_advisory_unlock")) {
+      if (text.includes("SELECT pg_advisory_unlock")) {
         return { rows: [] };
       }
 
-      throw new Error(`Unexpected SQL: ${sql} :: ${JSON.stringify(params)}`);
+      throw new Error(`Unexpected SQL: ${text} :: ${JSON.stringify(params)}`);
     });
 
     runManagerAlertPreviewMock.mockImplementation(async (_db: unknown, input: { officeId: string }) => {
@@ -138,6 +165,14 @@ describe("ai intervention manager alerts worker", () => {
       )
     ).toBe(true);
     expect(
+      queryMock.mock.calls.some(
+        ([sql, params]) =>
+          typeof sql === "string" &&
+          sql.includes("SELECT set_config('search_path', $1, false)") &&
+          params?.[0] === "public"
+      )
+    ).toBe(true);
+    expect(
       logSpy.mock.calls.some(([message]) =>
         typeof message === "string" &&
         message.includes("Sent manager alerts for office beta: 1 delivered, 1 suppressed")
@@ -151,8 +186,9 @@ describe("ai intervention manager alerts worker", () => {
     const previewCalls: string[] = [];
     const sentRecipients: string[] = [];
 
-    queryMock.mockImplementation(async (sql: string, params?: unknown[]) => {
-      if (sql.includes("FROM public.offices WHERE is_active = true")) {
+    queryMock.mockImplementation(async (sql: unknown, params?: unknown[]) => {
+      const text = sqlText(sql);
+      if (text.includes("FROM public.offices WHERE is_active = true")) {
         return {
           rows: [
             { id: "office-west", slug: "west", timezone: "America/Los_Angeles" },
@@ -161,27 +197,27 @@ describe("ai intervention manager alerts worker", () => {
         };
       }
 
-      if (sql.includes("FROM information_schema.schemata")) {
+      if (text.includes("FROM information_schema.schemata")) {
         return { rows: [{ schema_name: String(params?.[0] ?? "") }] };
       }
 
-      if (sql.includes("SELECT pg_try_advisory_lock")) {
+      if (text.includes("SELECT pg_try_advisory_lock")) {
         return { rows: [{ acquired: true }] };
       }
 
-      if (sql.includes("FROM public.users") && sql.includes("role IN ('admin', 'director')")) {
+      if (text.includes("FROM public.users") && text.includes("role IN ('admin', 'director')")) {
         return { rows: [{ id: "director-1" }] };
       }
 
-      if (sql.includes("SELECT set_config('search_path', $1, false)")) {
+      if (text.includes("SELECT set_config('search_path', $1, false)")) {
         return { rows: [{ set_config: String(params?.[0] ?? "") }] };
       }
 
-      if (sql.includes("SELECT pg_advisory_unlock")) {
+      if (text.includes("SELECT pg_advisory_unlock")) {
         return { rows: [] };
       }
 
-      throw new Error(`Unexpected SQL: ${sql} :: ${JSON.stringify(params)}`);
+      throw new Error(`Unexpected SQL: ${text} :: ${JSON.stringify(params)}`);
     });
 
     runManagerAlertPreviewMock.mockImplementation(async (_db: unknown, input: { officeId: string }) => {
@@ -206,8 +242,9 @@ describe("ai intervention manager alerts worker", () => {
   });
 
   it("explicitly skips weekend local days even when the hour matches 8 AM", async () => {
-    queryMock.mockImplementation(async (sql: string, params?: unknown[]) => {
-      if (sql.includes("FROM public.offices WHERE is_active = true")) {
+    queryMock.mockImplementation(async (sql: unknown, params?: unknown[]) => {
+      const text = sqlText(sql);
+      if (text.includes("FROM public.offices WHERE is_active = true")) {
         return {
           rows: [
             { id: "office-beta", slug: "beta", timezone: "America/Chicago" },
@@ -215,7 +252,7 @@ describe("ai intervention manager alerts worker", () => {
         };
       }
 
-      throw new Error(`Unexpected SQL: ${sql} :: ${JSON.stringify(params)}`);
+      throw new Error(`Unexpected SQL: ${text} :: ${JSON.stringify(params)}`);
     });
 
     await runAiInterventionManagerAlerts({ now: new Date("2026-04-18T13:00:00.000Z") });

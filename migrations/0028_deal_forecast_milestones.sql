@@ -1,6 +1,7 @@
 DO $$
 DECLARE
   schema_name text;
+  audit_log_exists boolean;
   deal_workflow_route_expr text;
   deal_expected_close_date_expr text;
   deal_dd_estimate_expr text;
@@ -15,6 +16,17 @@ BEGIN
     FROM pg_namespace
     WHERE nspname LIKE 'office\_%' ESCAPE '\'
   LOOP
+    EXECUTE format(
+      'SELECT EXISTS (
+         SELECT 1
+         FROM information_schema.tables
+         WHERE table_schema = %L
+           AND table_name = %L
+       )',
+      schema_name,
+      'audit_log'
+    ) INTO audit_log_exists;
+
     deal_workflow_route_expr := CASE
       WHEN EXISTS (
         SELECT 1
@@ -297,108 +309,176 @@ BEGIN
       deal_group_by_expr
     );
 
-    EXECUTE format(
-      'INSERT INTO %I.deal_forecast_milestones (
-         deal_id,
-         milestone_key,
-         captured_at,
-         captured_by,
-         assigned_rep_id,
-         stage_id,
-         workflow_route,
-         expected_close_date,
-         dd_estimate,
-         bid_estimate,
-         awarded_amount,
-         forecast_amount,
-         source,
-         capture_source
-       )
-       SELECT
-         a.record_id,
-         ''initial''::%I.forecast_milestone_key,
-         a.created_at,
-         a.changed_by,
-         d.assigned_rep_id,
-         NULLIF(a.full_row->>''stage_id'', '''')::uuid,
-         COALESCE(NULLIF(a.full_row->>''workflow_route'', ''''), %s),
-         NULLIF(a.full_row->>''expected_close_date'', '''')::date,
-         NULLIF(a.full_row->>''dd_estimate'', '''')::numeric,
-         NULLIF(a.full_row->>''bid_estimate'', '''')::numeric,
-         NULLIF(a.full_row->>''awarded_amount'', '''')::numeric,
-         COALESCE(
-           NULLIF(a.full_row->>''awarded_amount'', '''')::numeric,
-           NULLIF(a.full_row->>''bid_estimate'', '''')::numeric,
+    IF audit_log_exists THEN
+      EXECUTE format(
+        'INSERT INTO %I.deal_forecast_milestones (
+           deal_id,
+           milestone_key,
+           captured_at,
+           captured_by,
+           assigned_rep_id,
+           stage_id,
+           workflow_route,
+           expected_close_date,
+           dd_estimate,
+           bid_estimate,
+           awarded_amount,
+           forecast_amount,
+           source,
+           capture_source
+         )
+         SELECT
+           a.record_id,
+           ''initial''::%I.forecast_milestone_key,
+           a.created_at,
+           a.changed_by,
+           COALESCE(NULLIF(a.full_row->>''assigned_rep_id'', '''')::uuid, d.assigned_rep_id),
+           NULLIF(a.full_row->>''stage_id'', '''')::uuid,
+           COALESCE(NULLIF(a.full_row->>''workflow_route'', ''''), %s),
+           NULLIF(a.full_row->>''expected_close_date'', '''')::date,
            NULLIF(a.full_row->>''dd_estimate'', '''')::numeric,
-           0
-         ),
-         COALESCE(NULLIF(a.full_row->>''source'', ''''), %s),
-         ''audit_backfill''::%I.forecast_milestone_capture_source
-       FROM %I.audit_log a
-       JOIN %I.deals d ON d.id = a.record_id
-       WHERE a.table_name = ''deals''
-         AND a.action = ''insert''
-         AND a.full_row IS NOT NULL
-      ON CONFLICT (deal_id, milestone_key) DO NOTHING',
-      schema_name,
-      schema_name,
-      deal_workflow_route_expr,
-      deal_source_expr,
-      schema_name,
-      schema_name,
-      schema_name
-    );
+           NULLIF(a.full_row->>''bid_estimate'', '''')::numeric,
+           NULLIF(a.full_row->>''awarded_amount'', '''')::numeric,
+           COALESCE(
+             NULLIF(a.full_row->>''awarded_amount'', '''')::numeric,
+             NULLIF(a.full_row->>''bid_estimate'', '''')::numeric,
+             NULLIF(a.full_row->>''dd_estimate'', '''')::numeric,
+             0
+           ),
+           COALESCE(NULLIF(a.full_row->>''source'', ''''), %s),
+           ''audit_backfill''::%I.forecast_milestone_capture_source
+         FROM %I.audit_log a
+         JOIN %I.deals d ON d.id = a.record_id
+         WHERE a.table_name = ''deals''
+           AND a.action = ''insert''
+           AND a.full_row IS NOT NULL
+        ON CONFLICT (deal_id, milestone_key) DO NOTHING',
+        schema_name,
+        schema_name,
+        deal_workflow_route_expr,
+        deal_source_expr,
+        schema_name,
+        schema_name,
+        schema_name
+      );
+    END IF;
 
-    EXECUTE format(
-      'INSERT INTO %I.deal_forecast_milestones (
-         deal_id,
-         milestone_key,
-         captured_at,
-         captured_by,
-         assigned_rep_id,
-         stage_id,
-         workflow_route,
-         expected_close_date,
-         dd_estimate,
-         bid_estimate,
-         awarded_amount,
-         forecast_amount,
-         source,
-         capture_source
-       )
-       SELECT
-         d.id,
-         ''closed_won''::%I.forecast_milestone_key,
-         COALESCE(%s, d.updated_at, NOW()),
-         NULL,
-         d.assigned_rep_id,
-         d.stage_id,
-         %s,
-         %s,
-         %s,
-         %s,
-         %s,
-         COALESCE(%s, %s, %s, 0),
-         %s,
-         ''audit_backfill''::%I.forecast_milestone_capture_source
-       FROM %I.deals d
-       JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
-       WHERE psc.slug = ''closed_won''
-      ON CONFLICT (deal_id, milestone_key) DO NOTHING',
-      schema_name,
-      schema_name,
-      deal_actual_close_date_expr,
-      deal_workflow_route_expr,
-      deal_expected_close_date_expr,
-      deal_dd_estimate_expr,
-      deal_bid_estimate_expr,
-      deal_awarded_amount_expr,
-      deal_awarded_amount_expr,
-      deal_bid_estimate_expr,
-      deal_dd_estimate_expr,
-      deal_source_expr,
-      schema_name,
-      schema_name
-    );
+    IF audit_log_exists THEN
+      EXECUTE format(
+        'INSERT INTO %I.deal_forecast_milestones (
+           deal_id,
+           milestone_key,
+           captured_at,
+           captured_by,
+           assigned_rep_id,
+           stage_id,
+           workflow_route,
+           expected_close_date,
+           dd_estimate,
+           bid_estimate,
+           awarded_amount,
+           forecast_amount,
+           source,
+           capture_source
+         )
+         SELECT
+           d.id,
+           ''closed_won''::%I.forecast_milestone_key,
+           COALESCE(%s, d.updated_at, NOW()),
+           NULL,
+           COALESCE(close_rep.assigned_rep_id, d.assigned_rep_id),
+           d.stage_id,
+           %s,
+           %s,
+           %s,
+           %s,
+           %s,
+           COALESCE(%s, %s, %s, 0),
+           %s,
+           ''audit_backfill''::%I.forecast_milestone_capture_source
+         FROM %I.deals d
+         LEFT JOIN LATERAL (
+           SELECT NULLIF(a.full_row->>''assigned_rep_id'', '''')::uuid AS assigned_rep_id
+           FROM %I.audit_log a
+           WHERE a.table_name = ''deals''
+             AND a.record_id = d.id
+             AND a.full_row IS NOT NULL
+             AND a.created_at <= COALESCE(%s, d.updated_at, NOW())
+           ORDER BY a.created_at DESC
+           LIMIT 1
+         ) close_rep ON TRUE
+         JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
+         WHERE psc.slug = ''closed_won''
+        ON CONFLICT (deal_id, milestone_key) DO NOTHING',
+        schema_name,
+        schema_name,
+        deal_actual_close_date_expr,
+        deal_workflow_route_expr,
+        deal_expected_close_date_expr,
+        deal_dd_estimate_expr,
+        deal_bid_estimate_expr,
+        deal_awarded_amount_expr,
+        deal_awarded_amount_expr,
+        deal_bid_estimate_expr,
+        deal_dd_estimate_expr,
+        deal_source_expr,
+        schema_name,
+        schema_name,
+        schema_name,
+        deal_actual_close_date_expr
+      );
+    ELSE
+      EXECUTE format(
+        'INSERT INTO %I.deal_forecast_milestones (
+           deal_id,
+           milestone_key,
+           captured_at,
+           captured_by,
+           assigned_rep_id,
+           stage_id,
+           workflow_route,
+           expected_close_date,
+           dd_estimate,
+           bid_estimate,
+           awarded_amount,
+           forecast_amount,
+           source,
+           capture_source
+         )
+         SELECT
+           d.id,
+           ''closed_won''::%I.forecast_milestone_key,
+           COALESCE(%s, d.updated_at, NOW()),
+           NULL,
+           d.assigned_rep_id,
+           d.stage_id,
+           %s,
+           %s,
+           %s,
+           %s,
+           %s,
+           COALESCE(%s, %s, %s, 0),
+           %s,
+           ''audit_backfill''::%I.forecast_milestone_capture_source
+         FROM %I.deals d
+         JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
+         WHERE psc.slug = ''closed_won''
+        ON CONFLICT (deal_id, milestone_key) DO NOTHING',
+        schema_name,
+        schema_name,
+        deal_actual_close_date_expr,
+        deal_workflow_route_expr,
+        deal_expected_close_date_expr,
+        deal_dd_estimate_expr,
+        deal_bid_estimate_expr,
+        deal_awarded_amount_expr,
+        deal_awarded_amount_expr,
+        deal_bid_estimate_expr,
+        deal_dd_estimate_expr,
+        deal_source_expr,
+        schema_name,
+        schema_name
+      );
+    END IF;
   END LOOP;
 END $$;

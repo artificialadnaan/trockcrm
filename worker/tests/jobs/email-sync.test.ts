@@ -206,6 +206,8 @@ describe("email sync inbound message routing", () => {
       ])
     );
     expect(queryMock.mock.calls.some(([sql]) => typeof sql === "string" && sql.includes("INSERT INTO office_beta.tasks"))).toBe(false);
+    expect(queryMock).toHaveBeenCalledWith("SELECT set_config('search_path', $1, false)", ["public"]);
+    expect(queryMock).toHaveBeenCalledWith("SELECT set_config('app.current_user_id', $1, false)", [""]);
   });
 
   it("routes a multi-active-deal email to the disambiguation task rule", async () => {
@@ -244,6 +246,8 @@ describe("email sync inbound message routing", () => {
         ([sql]) => typeof sql === "string" && sql.includes("INSERT INTO office_beta.tasks")
       )
     ).toBe(true);
+    expect(queryMock).toHaveBeenCalledWith("SELECT set_config('search_path', $1, false)", ["public"]);
+    expect(queryMock).toHaveBeenCalledWith("SELECT set_config('app.current_user_id', $1, false)", [""]);
   });
 
   it("routes an explicitly matched multi-deal email to the reply-needed task rule", async () => {

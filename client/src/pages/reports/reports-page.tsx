@@ -687,6 +687,7 @@ export function ReportsPage() {
     setReportError(null);
     setActiveReport(null);
     setReportData(null);
+    setShowReportDrawer(true);
 
     try {
       const result = await executeCustomReport(builderPreviewConfig);

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { EmailList } from "./email-list";
@@ -14,6 +14,10 @@ interface DealEmailTabProps {
 export function DealEmailTab({ dealId, primaryContactEmail }: DealEmailTabProps) {
   const [page, setPage] = useState(1);
   const [composeOpen, setComposeOpen] = useState(false);
+
+  useEffect(() => {
+    setPage(1);
+  }, [dealId]);
 
   const { emails, pagination, loading, error, refetch } = useDealEmails(dealId, {
     page,

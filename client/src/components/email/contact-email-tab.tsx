@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { EmailList } from "./email-list";
@@ -14,6 +14,10 @@ interface ContactEmailTabProps {
 export function ContactEmailTab({ contactId, contactEmail }: ContactEmailTabProps) {
   const [page, setPage] = useState(1);
   const [composeOpen, setComposeOpen] = useState(false);
+
+  useEffect(() => {
+    setPage(1);
+  }, [contactId]);
 
   const { emails, pagination, loading, error, refetch } = useContactEmails(contactId, {
     page,

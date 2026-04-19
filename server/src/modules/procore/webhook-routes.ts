@@ -87,31 +87,31 @@ router.post(
         return;
       }
 
-      // Write to log (durable record before processing)
-      const [logEntry] = await db
-        .insert(procoreWebhookLog)
-        .values({
-          eventType,
-          resourceId,
-          payload,
-          processed: false,
-        })
-        .returning();
+      const logEntry = await db.transaction(async (tx) => {
+        const [createdLogEntry] = await tx
+          .insert(procoreWebhookLog)
+          .values({
+            eventType,
+            resourceId,
+            payload,
+            processed: false,
+          })
+          .returning();
 
-      // Acknowledge immediately — process async via job_queue
+        await tx.execute(
+          sql`INSERT INTO public.job_queue (job_type, payload, office_id, status, run_after)
+              VALUES ('procore_webhook', ${JSON.stringify({
+                webhookLogId: createdLogEntry.id,
+                eventType,
+                resourceId,
+                payload,
+              })}::jsonb, NULL, 'pending', NOW())`
+        );
+
+        return createdLogEntry;
+      });
+
       res.json({ status: "accepted", logId: logEntry.id });
-
-      // Dispatch to job_queue for async processing
-      // Uses raw SQL because this is outside tenant context (public schema)
-      await db.execute(
-        sql`INSERT INTO public.job_queue (job_type, payload, office_id, status, run_after)
-            VALUES ('procore_webhook', ${JSON.stringify({
-              webhookLogId: logEntry.id,
-              eventType,
-              resourceId,
-              payload,
-            })}::jsonb, NULL, 'pending', NOW())`
-      );
     } catch (err) {
       next(err);
     }

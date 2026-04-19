@@ -73,6 +73,14 @@ function hasActiveAlertFamilies(snapshotJson: ManagerAlertSnapshotJson) {
   );
 }
 
+async function setTenantSearchPath(client: any, schemaName: string) {
+  await client.query("SELECT set_config('search_path', $1, false)", [`${schemaName},public`]);
+}
+
+async function resetTenantSearchPath(client: any) {
+  await client.query("SELECT set_config('search_path', $1, false)", ["public"]);
+}
+
 export async function runAiInterventionManagerAlerts(input?: { now?: Date }): Promise<void> {
   const now = input?.now ?? new Date();
   console.log("[Worker:ai-intervention-manager-alerts] Starting manager alert scheduling...");
@@ -141,46 +149,50 @@ export async function runAiInterventionManagerAlerts(input?: { now?: Date }): Pr
           continue;
         }
 
-        await client.query("SELECT set_config('search_path', $1, false)", [`${schemaName},public`]);
-        const officeDb = drizzle(client, { schema });
+        await setTenantSearchPath(client, schemaName);
+        try {
+          const officeDb = drizzle(client, { schema });
 
-        const preview = await runManagerAlertPreview(officeDb, {
-          officeId: office.id,
-          timezone,
-          now,
-        });
+          const preview = await runManagerAlertPreview(officeDb, {
+            officeId: office.id,
+            timezone,
+            now,
+          });
 
-        if (!hasActiveAlertFamilies(preview.snapshotJson)) {
-          console.log(`[Worker:ai-intervention-manager-alerts] Skipping office ${office.slug}: no active manager alerts`);
-          continue;
-        }
-
-        let deliveredCount = 0;
-        let suppressedCount = 0;
-        for (const recipient of recipients.rows) {
-          try {
-            const result = await sendManagerAlertSummary(officeDb, {
-              officeId: office.id,
-              recipientUserId: recipient.id,
-              timezone,
-              now,
-            });
-            if (result.claimed) {
-              deliveredCount += 1;
-            } else {
-              suppressedCount += 1;
-            }
-          } catch (error) {
-            console.error(
-              `[Worker:ai-intervention-manager-alerts] Failed to send manager alert to ${recipient.id} for office ${office.slug}:`,
-              error
-            );
+          if (!hasActiveAlertFamilies(preview.snapshotJson)) {
+            console.log(`[Worker:ai-intervention-manager-alerts] Skipping office ${office.slug}: no active manager alerts`);
+            continue;
           }
-        }
 
-        console.log(
-          `[Worker:ai-intervention-manager-alerts] Sent manager alerts for office ${office.slug}: ${deliveredCount} delivered, ${suppressedCount} suppressed`
-        );
+          let deliveredCount = 0;
+          let suppressedCount = 0;
+          for (const recipient of recipients.rows) {
+            try {
+              const result = await sendManagerAlertSummary(officeDb, {
+                officeId: office.id,
+                recipientUserId: recipient.id,
+                timezone,
+                now,
+              });
+              if (result.claimed) {
+                deliveredCount += 1;
+              } else {
+                suppressedCount += 1;
+              }
+            } catch (error) {
+              console.error(
+                `[Worker:ai-intervention-manager-alerts] Failed to send manager alert to ${recipient.id} for office ${office.slug}:`,
+                error
+              );
+            }
+          }
+
+          console.log(
+            `[Worker:ai-intervention-manager-alerts] Sent manager alerts for office ${office.slug}: ${deliveredCount} delivered, ${suppressedCount} suppressed`
+          );
+        } finally {
+          await resetTenantSearchPath(client);
+        }
       } catch (error) {
         console.error(`[Worker:ai-intervention-manager-alerts] Failed for office ${office.slug}:`, error);
       } finally {

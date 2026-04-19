@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import DOMPurify from "dompurify";
 import { ArrowLeft, ArrowDownLeft, ArrowUpRight, Link2, Loader2, RefreshCw, Unlink2 } from "lucide-react";
 import { toast } from "sonner";
@@ -56,6 +56,12 @@ function ThreadAssignmentDialog({
     search: search.trim().length >= 2 ? search.trim() : undefined,
     limit: 25,
   });
+
+  useEffect(() => {
+    if (!open) return;
+    setSearch("");
+    setSelectedDealId(currentDealId ?? "");
+  }, [currentDealId, open]);
 
   const selectedDeal = deals.find((deal) => deal.id === selectedDealId) ?? null;
 

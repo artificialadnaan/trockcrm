@@ -847,50 +847,51 @@ async function createClassificationTaskRaw(
     candidateDealNames: string[];
   }
 ): Promise<void> {
-  await setTenantAuditContext(client, schemaName, input.userId);
+  await withTenantAuditContext(client, schemaName, input.userId, async () => {
+    const dedupeKey = `email:${input.emailId}:assignment_review`;
+    const existing = await client.query(
+      `SELECT id
+         FROM ${schemaName}.tasks
+        WHERE origin_rule = 'email_assignment_queue'
+          AND dedupe_key = $1
+          AND status IN ('pending', 'scheduled', 'in_progress', 'waiting_on', 'blocked')
+        LIMIT 1`,
+      [dedupeKey]
+    );
+    if (existing.rows.length > 0) return;
 
-  const dedupeKey = `email:${input.emailId}:assignment_review`;
-  const existing = await client.query(
-    `SELECT id
-       FROM ${schemaName}.tasks
-      WHERE origin_rule = 'email_assignment_queue'
-        AND dedupe_key = $1
-        AND status IN ('pending', 'scheduled', 'in_progress', 'waiting_on', 'blocked')
-      LIMIT 1`,
-    [dedupeKey]
-  );
-  if (existing.rows.length > 0) return;
-
-  const title = `Classify email: ${input.subject}`;
-  const dealNames = input.candidateDealNames.length > 0 ? input.candidateDealNames.join(", ") : "No clear deal candidate";
-  await client.query(
-    `INSERT INTO ${schemaName}.tasks
-       (title, description, type, priority, status, assigned_to, created_by, office_id, origin_rule, source_rule, source_event, dedupe_key, reason_code, entity_snapshot, deal_id, contact_id, email_id, due_date, due_time, remind_at)
-     VALUES ($1, $2, 'inbound_email', 'normal', 'pending', $3, $4, $5, 'email_assignment_queue', 'email_assignment_queue', 'email.received', $6, $7, $8, NULL, $9, $10, NULL, NULL, NULL)`,
-    [
-      title,
-      `Review email assignment for ${input.contactName}${input.companyName ? ` at ${input.companyName}` : ""}. Candidate deals: ${dealNames}.`,
-      input.userId,
-      input.userId,
-      input.officeId,
-      dedupeKey,
-      input.ambiguityReason,
-      JSON.stringify({
-        schemaVersion: 1,
-        entityType: "email",
-        entityId: `email:${input.emailId}`,
-        officeId: input.officeId,
-        contactId: input.contactId,
-        emailId: input.emailId,
-        contactName: input.contactName,
-        companyName: input.companyName,
-        ambiguityReason: input.ambiguityReason,
-        candidateDealNames: input.candidateDealNames,
-      }),
-      input.contactId,
-      input.emailId,
-    ]
-  );
+    const title = `Classify email: ${input.subject}`;
+    const dealNames =
+      input.candidateDealNames.length > 0 ? input.candidateDealNames.join(", ") : "No clear deal candidate";
+    await client.query(
+      `INSERT INTO ${schemaName}.tasks
+         (title, description, type, priority, status, assigned_to, created_by, office_id, origin_rule, source_rule, source_event, dedupe_key, reason_code, entity_snapshot, deal_id, contact_id, email_id, due_date, due_time, remind_at)
+       VALUES ($1, $2, 'inbound_email', 'normal', 'pending', $3, $4, $5, 'email_assignment_queue', 'email_assignment_queue', 'email.received', $6, $7, $8, NULL, $9, $10, NULL, NULL, NULL)`,
+      [
+        title,
+        `Review email assignment for ${input.contactName}${input.companyName ? ` at ${input.companyName}` : ""}. Candidate deals: ${dealNames}.`,
+        input.userId,
+        input.userId,
+        input.officeId,
+        dedupeKey,
+        input.ambiguityReason,
+        JSON.stringify({
+          schemaVersion: 1,
+          entityType: "email",
+          entityId: `email:${input.emailId}`,
+          officeId: input.officeId,
+          contactId: input.contactId,
+          emailId: input.emailId,
+          contactName: input.contactName,
+          companyName: input.companyName,
+          ambiguityReason: input.ambiguityReason,
+          candidateDealNames: input.candidateDealNames,
+        }),
+        input.contactId,
+        input.emailId,
+      ]
+    );
+  });
 }
 
 async function evaluateInboundEmailTasks(
@@ -912,19 +913,38 @@ async function evaluateInboundEmailTasks(
     unreadInbound: number;
   }
 ): Promise<void> {
-  await setTenantAuditContext(client, schemaName, context.taskAssigneeId);
+  await withTenantAuditContext(client, schemaName, context.taskAssigneeId, async () => {
+    const [{ evaluateTaskRules }, { TASK_RULES }, { createTenantTaskRulePersistence }] = (await Promise.all([
+      import(SERVER_EVALUATOR_MODULE),
+      import(SERVER_TASK_RULES_MODULE),
+      import(SERVER_TASK_PERSISTENCE_MODULE),
+    ])) as any;
 
-  const [{ evaluateTaskRules }, { TASK_RULES }, { createTenantTaskRulePersistence }] = (await Promise.all([
-    import(SERVER_EVALUATOR_MODULE),
-    import(SERVER_TASK_RULES_MODULE),
-    import(SERVER_TASK_PERSISTENCE_MODULE),
-  ])) as any;
-
-  const taskPersistence = createTenantTaskRulePersistence(client, schemaName);
-  await evaluateTaskRules(context, taskPersistence, TASK_RULES);
+    const taskPersistence = createTenantTaskRulePersistence(client, schemaName);
+    await evaluateTaskRules(context, taskPersistence, TASK_RULES);
+  });
 }
 
 async function setTenantAuditContext(client: any, schemaName: string, userId: string | null): Promise<void> {
   await client.query("SELECT set_config('search_path', $1, false)", [`${schemaName},public`]);
   await client.query("SELECT set_config('app.current_user_id', $1, false)", [userId ?? ""]);
+}
+
+async function resetTenantAuditContext(client: any): Promise<void> {
+  await client.query("SELECT set_config('search_path', $1, false)", ["public"]);
+  await client.query("SELECT set_config('app.current_user_id', $1, false)", [""]);
+}
+
+async function withTenantAuditContext<T>(
+  client: any,
+  schemaName: string,
+  userId: string | null,
+  fn: () => Promise<T>
+): Promise<T> {
+  await setTenantAuditContext(client, schemaName, userId);
+  try {
+    return await fn();
+  } finally {
+    await resetTenantAuditContext(client);
+  }
 }
