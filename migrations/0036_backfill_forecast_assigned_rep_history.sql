@@ -255,6 +255,7 @@ BEGIN
       ON CONFLICT (deal_id, milestone_key) DO NOTHING',
       schema_name,
       schema_name,
+      schema_name,
       deal_actual_close_date_expr,
       deal_workflow_route_expr,
       deal_expected_close_date_expr,
