@@ -255,11 +255,11 @@ export interface InterventionCopilotSimilarCase {
 
 export interface InterventionCopilotView {
   packet: {
-    id: string;
+    id: string | null;
     summaryText: string | null;
     confidence: number | null;
     generatedAt: string | null;
-  } | null;
+  };
   recommendedAction: InterventionCopilotRecommendedAction | null;
   riskFlags: Array<{
     flagType: string;
@@ -271,6 +271,11 @@ export interface InterventionCopilotView {
   blockerOwner: { label: string; details: string | null } | null;
   reopenRisk: { level: "low" | "medium" | "high"; rationale: string | null } | null;
   currentAssignee: { id: string | null; name: string | null };
+  evidence: Array<{
+    sourceType: string;
+    textSnippet: string | null;
+    label: string | null;
+  }>;
   similarCases: InterventionCopilotSimilarCase[];
   isRefreshPending: boolean;
   isStale: boolean;
@@ -330,6 +335,8 @@ export async function buildInterventionCopilotView(
 For v1, normalize packet content defensively:
 
 - if packet JSON is missing structured owner/root-cause/risk fields, derive reasonable fallback values from blind spots and next step data
+- always return a structured `packet` object, even if no packet exists yet (`id`, `summaryText`, `confidence`, and `generatedAt` all `null`)
+- normalize a top-level `evidence` array from packet evidence JSON so the client does not have to parse raw packet internals
 - never throw because optional packet JSON fields are absent
 
 - [ ] **Step 4: Run the focused server tests**
@@ -481,7 +488,12 @@ Expected response shape to lock in:
 
 ```ts
 expect(body).toMatchObject({
-  packet: expect.anything(),
+  packet: {
+    id: expect.anything(),
+    summaryText: expect.anything(),
+    confidence: expect.anything(),
+    generatedAt: expect.anything(),
+  },
   recommendedAction: {
     action: expect.any(String),
     rationale: expect.any(String),
@@ -489,6 +501,7 @@ expect(body).toMatchObject({
     suggestedOwnerId: expect.anything(),
   },
   currentAssignee: expect.anything(),
+  evidence: expect.any(Array),
   similarCases: expect.any(Array),
   isRefreshPending: expect.any(Boolean),
   isStale: expect.any(Boolean),
@@ -502,9 +515,15 @@ Use a standard matcher in the route test and assert the nullable string separate
 
 ```ts
 expect(body).toMatchObject({
-  packet: expect.anything(),
+  packet: {
+    id: expect.anything(),
+    summaryText: expect.anything(),
+    confidence: expect.anything(),
+    generatedAt: expect.anything(),
+  },
   recommendedAction: expect.anything(),
   currentAssignee: expect.anything(),
+  evidence: expect.any(Array),
 });
 expect(body.viewerFeedbackValue === null || typeof body.viewerFeedbackValue === "string").toBe(true);
 ```
@@ -588,6 +607,7 @@ Create server-rendered tests that lock in:
   - brief
   - confidence
   - recommended action with suggested owner
+  - evidence list
   - similar cases
   - feedback buttons
 - stale badge / refresh-pending badge rendering
@@ -607,6 +627,7 @@ describe("InterventionCaseCopilotPanel", () => {
             packet: { id: "packet-1", summaryText: "Likely owner mismatch.", confidence: 0.78, generatedAt: "2026-04-19T12:00:00.000Z" },
             recommendedAction: { action: "assign", rationale: "Task owner is missing.", suggestedOwner: "Admin User", suggestedOwnerId: "user-1" },
             currentAssignee: { id: "user-2", name: "Director User" },
+            evidence: [{ sourceType: "case_history", textSnippet: "resolved once, reopened later", label: "Prior case history" }],
             riskFlags: [],
             rootCause: { label: "Owner mismatch", details: "The generated task has no durable owner." },
             blockerOwner: { label: "Admin follow-up", details: "Admin ownership is more durable in similar cases." },
@@ -626,6 +647,7 @@ describe("InterventionCaseCopilotPanel", () => {
     expect(html).toContain("Likely owner mismatch.");
     expect(html).toContain("assign");
     expect(html).toContain("Admin User");
+    expect(html).toContain("Prior case history");
   });
 
   it("renders loading, localized error, and stale/pending badges", () => {
@@ -643,9 +665,10 @@ describe("InterventionCaseCopilotPanel", () => {
       <MemoryRouter>
         <InterventionCaseCopilotPanel
           data={{
-            packet: null,
+            packet: { id: null, summaryText: null, confidence: null, generatedAt: null },
             recommendedAction: null,
             currentAssignee: { id: null, name: null },
+            evidence: [],
             riskFlags: [],
             rootCause: null,
             blockerOwner: null,
