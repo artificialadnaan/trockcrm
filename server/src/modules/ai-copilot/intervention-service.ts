@@ -2041,7 +2041,12 @@ function buildBlockerOwner(
   if (packetOwner && typeof packetOwner === "object") {
     const normalized = packetOwner as Record<string, unknown>;
     return {
-      id: typeof normalized.id === "string" ? normalized.id : null,
+      id:
+        typeof normalized.id === "string"
+          ? normalized.id
+          : typeof normalized.details === "string"
+            ? normalized.details
+            : null,
       name: typeof normalized.name === "string" ? normalized.name : typeof normalized.label === "string" ? normalized.label : null,
     };
   }

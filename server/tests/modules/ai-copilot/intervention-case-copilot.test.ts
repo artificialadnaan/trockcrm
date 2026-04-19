@@ -403,6 +403,17 @@ describe("buildInterventionCopilotView", () => {
       status: "ready",
     });
     expect(tenantDb.state.packets?.[0]?.summaryText).toBeTruthy();
+
+    const view = await buildInterventionCopilotView(tenantDb, {
+      caseId: "00000000-0000-0000-0000-000000000101",
+      officeId: "00000000-0000-0000-0000-000000000001",
+      viewerUserId: "00000000-0000-0000-0000-000000000403",
+    });
+
+    expect(view.blockerOwner).toEqual({
+      id: "00000000-0000-0000-0000-000000000402",
+      name: "Director User",
+    });
   });
 
   it("prefers a resolve recommendation for resolved cases even when a generated task is still linked", async () => {
