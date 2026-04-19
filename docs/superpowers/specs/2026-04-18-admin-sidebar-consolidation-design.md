@@ -157,6 +157,9 @@ Canonical ownership for shared routes in this slice:
 - the active route still uses the existing selected-nav styling
 - if the active route belongs to a collapsed group, that group must auto-expand on render
 - if the current route is inside `Operations`, `AI`, or `System`, the owning group must visibly indicate active context
+- route state takes precedence over manual collapse state:
+  - a group containing the current active route is forced open
+  - users may collapse that group only after navigating to a route outside it
 
 ### Persistence
 
