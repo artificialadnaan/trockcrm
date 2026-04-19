@@ -719,6 +719,8 @@ Extend the existing `client/src/hooks/use-admin-interventions.test.ts` file and 
   - stops polling after a bounded retry budget (for example 3 failed polls), surfaces a localized copilot refresh error, and leaves the manual refresh action available
   - posts regenerate to `/ai/ops/interventions/:id/copilot/regenerate`
   - posts feedback through the existing packet feedback route using a fixed payload such as:
+    - `targetType: "packet"`
+    - `targetId: packet.id`
     - `feedbackType: "intervention_case_copilot"`
     - `feedbackValue: "useful"` or `"not_useful"`
 
