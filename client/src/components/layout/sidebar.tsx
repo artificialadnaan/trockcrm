@@ -161,6 +161,13 @@ export function getNextExpandedGroups(
   return next;
 }
 
+function mapsEqual(left: Record<string, boolean>, right: Record<string, boolean>) {
+  const leftKeys = Object.keys(left);
+  const rightKeys = Object.keys(right);
+  if (leftKeys.length !== rightKeys.length) return false;
+  return leftKeys.every((key) => left[key] === right[key]);
+}
+
 export function Sidebar() {
   const { user, logout } = useAuth();
   const { pathname } = useLocation();
@@ -169,12 +176,14 @@ export function Sidebar() {
   const visibleDirectorItems = useMemo(() => getVisibleDirectorItems(role), [role]);
   const visibleAdminGroups = useMemo(() => getVisibleAdminGroups(role), [role]);
   const visibleHelpItems = useMemo(() => filterByRole(helpItems, role), [role]);
-  const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
+  const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>(() =>
+    getNextExpandedGroups({}, getVisibleAdminGroups(role), pathname),
+  );
 
   useEffect(() => {
     setExpandedGroups((current) => {
       const next = getNextExpandedGroups(current, visibleAdminGroups, pathname);
-      return JSON.stringify(next) === JSON.stringify(current) ? current : next;
+      return mapsEqual(next, current) ? current : next;
     });
   }, [pathname, visibleAdminGroups]);
 
