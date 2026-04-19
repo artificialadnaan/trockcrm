@@ -200,6 +200,17 @@ The intervention packet should persist:
   - concise evidence rows
 - `confidence`
 
+Required intervention-specific structured fields:
+
+- `rootCause`
+  - short root-cause hypothesis label + explanation
+- `blockerOwner`
+  - likely blocking owner or team context
+- `reopenRisk`
+  - normalized low/medium/high risk label + rationale
+
+These fields may live inside `blindSpotsJson` or `nextStepJson`, but the server response contract must normalize them into explicit top-level copilot view fields so the client does not depend on ad hoc packet JSON keys.
+
 ### Similar Cases
 
 Similar-case rows should be computed live from intervention history/current case data and returned in the copilot view payload.
@@ -214,15 +225,22 @@ Base similarity on:
 
 - same `disconnectType`
 - same `clusterKey` when present
-- same `severity` bucket when useful
-- optionally same `stageKey` from case metadata when available
+- same `severity` bucket as a tie-break signal
+- same `stageKey` from case metadata as a secondary tie-break signal when available
 
 Guardrails:
 
 - retrieval is scoped to the current tenant office only
 - the current case id must be excluded from the result set
-- only historical intervention cases from the same office are eligible
-- unresolved/open cases may be included only if they help explain a currently similar failure pattern; otherwise prefer concluded cases
+- only concluded historical intervention cases from the same office are eligible
+
+Deterministic ranking for v1:
+
+1. same `disconnectType` is required
+2. same `clusterKey` ranks above cases with only disconnect-type match
+3. same `severity` ranks above non-matching severity
+4. same `stageKey` ranks above non-matching stage when present
+5. more recent conclusions rank above older conclusions
 
 Each similar-case result should include:
 
@@ -308,10 +326,16 @@ If no similar cases exist:
 
 Add intervention-scoped endpoints under the existing AI routes:
 
-- `GET /api/ai/interventions/:id/copilot`
+- `GET /api/ai/ops/interventions/:id/copilot`
   - returns the current copilot view for one intervention case
-- `POST /api/ai/interventions/:id/copilot/regenerate`
+- `POST /api/ai/ops/interventions/:id/copilot/regenerate`
   - queues or regenerates a fresh packet for that intervention case
+
+Authorization:
+
+- these endpoints require the same intervention-workspace access level as the existing intervention detail route
+- only `admin` and `director` may access them
+- requests must be office/case scoped through the same active-office rules used by the intervention workspace
 
 V1 may generate synchronously or via the existing job queue, but the user-facing contract should match deal copilot behavior:
 
@@ -325,9 +349,20 @@ GET semantics:
 - if regeneration is pending, `GET` still returns the latest ready packet and marks the view as refresh-pending
 - if no packet exists yet, `GET` returns an empty packet state plus derived similar-case rows when possible
 
+Client-visible freshness fields:
+
+- `isRefreshPending`
+- `isStale`
+- `latestCaseChangedAt`
+- `packetGeneratedAt`
+
 Freshness / invalidation rules:
 
 - any successful intervention mutation on that case (`assign`, `snooze`, `resolve`, `escalate`) marks the current packet stale
+- any backend state change that materially changes copilot inputs also marks the packet stale
+  - reopen/materialization
+  - generated-task linkage/status changes
+  - assignee changes
 - stale packets may still render until regenerated, but the UI must show that they predate the latest case change
 - explicit regenerate clears the stale state once a newer packet is generated
 
@@ -355,6 +390,13 @@ The returned view should include:
 - `riskFlags`
 - `similarCases`
 - `recommendedAction`
+- `rootCause`
+- `blockerOwner`
+- `reopenRisk`
+- `isRefreshPending`
+- `isStale`
+- `latestCaseChangedAt`
+- `packetGeneratedAt`
 
 Do not expose accepted/dismissed task-suggestion mutations in v1. This slice is judgment support, not AI task creation.
 
