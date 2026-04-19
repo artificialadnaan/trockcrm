@@ -61,6 +61,12 @@ Keep the top-level sidebar structure:
 
 Only the `Admin` section changes in this slice.
 
+The `Director` section remains unchanged except for one ownership clarification:
+
+- `Merge Queue` moves into the `Admin > Operations` group as its canonical sidebar location
+- the separate `Director` section must no longer render a duplicate `Merge Queue` link
+- directors still retain access to `Merge Queue`; they just reach it through `Admin > Operations`
+
 ### Admin Groups
 
 Replace the flat `Admin` list with collapsible groups:
@@ -130,6 +136,11 @@ This slice must reinforce the page split already established:
 
 The sidebar should support that separation rather than flattening those routes into an undifferentiated admin list.
 
+Canonical ownership for shared routes in this slice:
+
+- `Merge Queue` is owned by `Admin > Operations`
+- shared admin/director routes should appear once in the sidebar, not duplicated across sections
+
 ## Interaction Rules
 
 ### Collapse Behavior
@@ -138,6 +149,8 @@ The sidebar should support that separation rather than flattening those routes i
 - clicking a group header expands/collapses only that group
 - multiple groups may be open at once
 - groups are not accordion-exclusive
+- groups with zero visible child routes for the current role must not render
+- groups with at least one visible child route must render with only the allowed child links
 
 ### Active-State Behavior
 
@@ -218,6 +231,8 @@ Must verify:
 
 - admin sidebar renders grouped `Admin` navigation
 - director sidebar renders only the allowed grouped entries
+- groups with no permitted routes are hidden
+- groups with partial route access render only the permitted child links
 - active route auto-expands the correct group
 - `Operations` is open by default
 - `AI` and `System` are collapsed by default unless active
