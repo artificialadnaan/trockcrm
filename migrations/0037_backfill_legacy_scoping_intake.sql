@@ -80,14 +80,14 @@ BEGIN
        LEFT JOIN %I.deal_scoping_intake dsi ON dsi.deal_id = d.id
        WHERE dsi.deal_id IS NULL
          AND u.office_id IS NOT NULL
-       ON CONFLICT (deal_id) DO NOTHING',
+      ON CONFLICT (deal_id) DO NOTHING',
       schema_name,
       deal_workflow_route_expr,
+      schema_name,
       deal_assigned_rep_id_expr,
       deal_assigned_rep_id_expr,
       schema_name,
       deal_assigned_rep_id_expr,
-      schema_name,
       schema_name
     );
   END LOOP;
