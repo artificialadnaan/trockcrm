@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
-import { BarChart3, ClipboardCheck, Clock3, Radar, RefreshCcw, Send, ShieldAlert, Users2 } from "lucide-react";
+import { Link, useSearchParams } from "react-router-dom";
+import { ClipboardCheck, Clock3, Radar, RefreshCcw, Send, ShieldAlert, Users2 } from "lucide-react";
 import {
   runManagerAlertScan,
   sendManagerAlertSummary,
@@ -14,6 +14,8 @@ import { InterventionAnalyticsHotspots } from "@/components/ai/intervention-anal
 import { InterventionAnalyticsOutcomes } from "@/components/ai/intervention-analytics-outcomes";
 import { InterventionAnalyticsSlaRules } from "@/components/ai/intervention-analytics-sla-rules";
 import { InterventionAnalyticsSummaryStrip } from "@/components/ai/intervention-analytics-summary-strip";
+import { InterventionManagerConsoleNav } from "@/components/ai/intervention-manager-console-nav";
+import { InterventionManagerConsoleSection } from "@/components/ai/intervention-manager-console-section";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 
@@ -66,7 +68,41 @@ export function shouldShowManagerAlertHookError(
   return Boolean(error && !snapshot);
 }
 
-function ManagerAlertsPanel() {
+function buildSalesProcessDisconnectsHref(searchParams: URLSearchParams) {
+  const nextSearchParams = new URLSearchParams();
+  for (const key of ["type", "cluster", "trend"] as const) {
+    const value = searchParams.get(key);
+    if (value) nextSearchParams.set(key, value);
+  }
+  const query = nextSearchParams.toString();
+  return query ? `/admin/sales-process-disconnects?${query}` : "/admin/sales-process-disconnects";
+}
+
+function buildInterventionWorkspaceHref(searchParams: URLSearchParams) {
+  const nextSearchParams = new URLSearchParams();
+  for (const key of ["type", "cluster", "trend"] as const) {
+    const value = searchParams.get(key);
+    if (value) nextSearchParams.set(key, value);
+  }
+  const query = nextSearchParams.toString();
+  return query ? `/admin/interventions?${query}` : "/admin/interventions";
+}
+
+function appendDisconnectContextToHref(path: string | null, searchParams: URLSearchParams) {
+  if (!path) return path;
+
+  const [pathname, query = ""] = path.split("?");
+  const nextSearchParams = new URLSearchParams(query);
+  for (const key of ["type", "cluster", "trend"] as const) {
+    const value = searchParams.get(key);
+    if (value) nextSearchParams.set(key, value);
+  }
+
+  const nextQuery = nextSearchParams.toString();
+  return nextQuery ? `${pathname}?${nextQuery}` : pathname;
+}
+
+function ManagerAlertsPanel({ searchParams }: { searchParams: URLSearchParams }) {
   const { data, loading, error } = useManagerAlertSnapshot();
   const [snapshot, setSnapshot] = useState<ManagerAlertSnapshot | null>(null);
   const [working, setWorking] = useState<"preview" | "send" | null>(null);
@@ -175,7 +211,10 @@ function ManagerAlertsPanel() {
             <div className="space-y-4">
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
                 <Link
-                  to={displaySnapshot.snapshotJson.families.overdueHighCritical.queueLink}
+                  to={appendDisconnectContextToHref(
+                    displaySnapshot.snapshotJson.families.overdueHighCritical.queueLink,
+                    searchParams
+                  ) ?? "/admin/interventions"}
                   className="block rounded-xl border border-border/80 bg-white px-4 py-4 shadow-sm transition-transform hover:-translate-y-0.5 hover:border-brand-red/30"
                 >
                   <div className="text-[11px] uppercase tracking-widest text-muted-foreground">Overdue high/critical</div>
@@ -187,7 +226,10 @@ function ManagerAlertsPanel() {
                   </div>
                 </Link>
                 <Link
-                  to={displaySnapshot.snapshotJson.families.snoozeBreached.queueLink}
+                  to={appendDisconnectContextToHref(
+                    displaySnapshot.snapshotJson.families.snoozeBreached.queueLink,
+                    searchParams
+                  ) ?? "/admin/interventions"}
                   className="block rounded-xl border border-border/80 bg-white px-4 py-4 shadow-sm transition-transform hover:-translate-y-0.5 hover:border-brand-red/30"
                 >
                   <div className="text-[11px] uppercase tracking-widest text-muted-foreground">Snooze breaches</div>
@@ -199,7 +241,10 @@ function ManagerAlertsPanel() {
                   </div>
                 </Link>
                 <Link
-                  to={displaySnapshot.snapshotJson.families.escalatedOpen.queueLink}
+                  to={appendDisconnectContextToHref(
+                    displaySnapshot.snapshotJson.families.escalatedOpen.queueLink,
+                    searchParams
+                  ) ?? "/admin/interventions"}
                   className="block rounded-xl border border-border/80 bg-white px-4 py-4 shadow-sm transition-transform hover:-translate-y-0.5 hover:border-brand-red/30"
                 >
                   <div className="text-[11px] uppercase tracking-widest text-muted-foreground">Escalated open</div>
@@ -262,7 +307,7 @@ function ManagerAlertsPanel() {
                       displaySnapshot.snapshotJson.families.assigneeOverload.items.map((item) => (
                         <Link
                           key={item.assigneeId}
-                          to={item.queueLink}
+                          to={appendDisconnectContextToHref(item.queueLink, searchParams) ?? "/admin/interventions"}
                           className="block rounded-lg border border-border/80 px-4 py-3 transition-colors hover:border-brand-red/40 hover:bg-muted/40"
                         >
                           <div className="flex items-start justify-between gap-3">
@@ -291,7 +336,10 @@ function ManagerAlertsPanel() {
 }
 
 export function AdminInterventionAnalyticsPage() {
+  const [searchParams] = useSearchParams();
   const { data, loading, error, refetch } = useInterventionAnalytics();
+  const salesProcessDisconnectsHref = buildSalesProcessDisconnectsHref(searchParams);
+  const interventionWorkspaceHref = buildInterventionWorkspaceHref(searchParams);
 
   return (
     <div className="p-6 space-y-6 bg-gray-50 min-h-screen">
@@ -303,11 +351,11 @@ export function AdminInterventionAnalyticsPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <Link to="/admin/sales-process-disconnects" className={buttonVariants({ variant: "outline" })}>
+          <Link to={salesProcessDisconnectsHref} className={buttonVariants({ variant: "outline" })}>
             <Radar className="mr-2 h-4 w-4" />
             Process Disconnects
           </Link>
-          <Link to="/admin/interventions" className={buttonVariants({ variant: "outline" })}>
+          <Link to={interventionWorkspaceHref} className={buttonVariants({ variant: "outline" })}>
             <ClipboardCheck className="mr-2 h-4 w-4" />
             Intervention Workspace
           </Link>
@@ -318,13 +366,23 @@ export function AdminInterventionAnalyticsPage() {
         </div>
       </div>
 
+      <div className="rounded-2xl border border-border/70 bg-white p-4 shadow-sm">
+        <InterventionManagerConsoleNav />
+      </div>
+
       {error && (
         <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
           {error}
         </div>
       )}
 
-      <ManagerAlertsPanel />
+      <InterventionManagerConsoleSection
+        id="manager-alerts"
+        title="Manager Alerts"
+        description="Live manager alert scans and send controls stay available even if the broader analytics load is unavailable."
+      >
+        <ManagerAlertsPanel searchParams={searchParams} />
+      </InterventionManagerConsoleSection>
 
       {!data && loading ? (
         <Card>
@@ -338,33 +396,38 @@ export function AdminInterventionAnalyticsPage() {
         </Card>
       ) : (
         <>
-          <InterventionAnalyticsSummaryStrip summary={data.summary} />
-          <InterventionEffectivenessSummary {...data.outcomeEffectiveness} />
+          <InterventionManagerConsoleSection
+            id="queue-health"
+            title="Queue Health"
+            description="Overdue cases, snooze breaches, repeat-open cases, and unresolved escalations roll into the same manager oversight surface. Use hotspot links to jump directly into filtered writable views in the intervention workspace."
+          >
+            <div className="space-y-4">
+              <InterventionAnalyticsSummaryStrip summary={data.summary} />
+              <InterventionAnalyticsOutcomes outcomes={data.outcomes} />
+              <InterventionAnalyticsSlaRules rules={data.slaRules} />
+              <InterventionAnalyticsHotspots hotspots={data.hotspots} />
+              <InterventionAnalyticsBreachQueue breachQueue={data.breachQueue} />
+            </div>
+          </InterventionManagerConsoleSection>
 
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2"><BarChart3 className="h-4 w-4" /> Manager Readout</CardTitle>
-              <CardDescription>
-                Use this page to understand whether the office is clearing intervention load or just moving it around.
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="grid grid-cols-1 xl:grid-cols-[1.2fr_0.8fr] gap-4">
-              <div className="rounded-lg border border-border/80 bg-white px-4 py-4 text-sm leading-6 text-muted-foreground">
-                Overdue cases, snooze breaches, repeat-open cases, and unresolved escalations all roll into the same
-                manager oversight surface. Use hotspot links to jump directly into filtered writable views in the
-                intervention workspace.
-              </div>
-              <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-4 text-sm leading-6 text-amber-950">
-                Focus the office first on <span className="font-semibold">overdue critical/high cases</span>, then on
-                <span className="font-semibold"> repeat-open clusters</span> and <span className="font-semibold">snoozes that slipped past due</span>.
-              </div>
-            </CardContent>
-          </Card>
+          <InterventionManagerConsoleSection
+            id="outcome-effectiveness"
+            title="Outcome Effectiveness"
+            description="Resolution patterns, reopen rates, and median time to reopen across conclusion families."
+          >
+            <InterventionEffectivenessSummary {...data.outcomeEffectiveness} />
+          </InterventionManagerConsoleSection>
 
-          <InterventionAnalyticsOutcomes outcomes={data.outcomes} />
-          <InterventionAnalyticsHotspots hotspots={data.hotspots} />
-          <InterventionAnalyticsBreachQueue breachQueue={data.breachQueue} />
-          <InterventionAnalyticsSlaRules rules={data.slaRules} />
+          <InterventionManagerConsoleSection
+            id="policy-recommendations"
+            title="Policy Recommendations"
+            description="Reserved for the merged policy recommendation module when that baseline lands."
+          >
+            <div className="rounded-lg border border-dashed border-border bg-muted/30 px-4 py-4 text-sm leading-6 text-muted-foreground">
+              Policy recommendations are reserved in this baseline. This section keeps the manager console layout
+              stable until the planned recommendation module ships.
+            </div>
+          </InterventionManagerConsoleSection>
         </>
       )}
     </div>

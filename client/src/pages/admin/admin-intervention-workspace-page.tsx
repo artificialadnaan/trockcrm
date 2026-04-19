@@ -25,6 +25,79 @@ import { InterventionSummaryStrip } from "@/components/ai/intervention-summary-s
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 
+type WorkspaceSearchParamsInput = {
+  searchParams: URLSearchParams;
+  workspaceView: InterventionWorkspaceView;
+  clusterKey: string;
+  caseIdFilter: string | null;
+  severityFilter: string | null;
+  disconnectTypeFilter: string | null;
+  assigneeIdFilter: string | null;
+  repIdFilter: string | null;
+  companyIdFilter: string | null;
+  stageKeyFilter: string | null;
+};
+
+function buildSalesProcessDisconnectsHref(searchParams: URLSearchParams) {
+  const nextParams = new URLSearchParams();
+  const type = searchParams.get("type");
+  const cluster = searchParams.get("cluster");
+  const trend = searchParams.get("trend");
+
+  if (type) nextParams.set("type", type);
+  if (cluster) nextParams.set("cluster", cluster);
+  if (trend) nextParams.set("trend", trend);
+
+  const query = nextParams.toString();
+  return query ? `/admin/sales-process-disconnects?${query}` : "/admin/sales-process-disconnects";
+}
+
+function buildInterventionAnalyticsHref(searchParams: URLSearchParams) {
+  const nextParams = new URLSearchParams();
+  preserveDisconnectContext(nextParams, searchParams);
+  const query = nextParams.toString();
+  return query ? `/admin/intervention-analytics?${query}` : "/admin/intervention-analytics";
+}
+
+function preserveDisconnectContext(
+  nextParams: URLSearchParams,
+  searchParams: URLSearchParams
+) {
+  const type = searchParams.get("type");
+  const cluster = searchParams.get("cluster");
+  const trend = searchParams.get("trend");
+
+  if (type) nextParams.set("type", type);
+  if (cluster) nextParams.set("cluster", cluster);
+  if (trend) nextParams.set("trend", trend);
+}
+
+export function buildWorkspaceSearchParams({
+  searchParams,
+  workspaceView,
+  clusterKey,
+  caseIdFilter,
+  severityFilter,
+  disconnectTypeFilter,
+  assigneeIdFilter,
+  repIdFilter,
+  companyIdFilter,
+  stageKeyFilter,
+}: WorkspaceSearchParamsInput) {
+  const next = new URLSearchParams();
+  preserveDisconnectContext(next, searchParams);
+  if (workspaceView !== "open") next.set("view", workspaceView);
+  if (clusterKey !== "all") next.set("clusterKey", clusterKey);
+  if (caseIdFilter) next.set("caseId", caseIdFilter);
+  if (severityFilter) next.set("severity", severityFilter);
+  if (disconnectTypeFilter) next.set("disconnectType", disconnectTypeFilter);
+  if (assigneeIdFilter) next.set("assigneeId", assigneeIdFilter);
+  if (repIdFilter) next.set("repId", repIdFilter);
+  if (companyIdFilter) next.set("companyId", companyIdFilter);
+  if (stageKeyFilter) next.set("stageKey", stageKeyFilter);
+  return next;
+}
+
 export function AdminInterventionWorkspacePage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const initialView = (searchParams.get("view") as InterventionWorkspaceView | null) ?? "open";
@@ -52,6 +125,7 @@ export function AdminInterventionWorkspacePage() {
   const [detailRefreshToken, setDetailRefreshToken] = useState(0);
   const [page, setPage] = useState(1);
   const pageSize = 50;
+  const interventionAnalyticsHref = buildInterventionAnalyticsHref(searchParams);
   const { data, loading, error, refetch } = useAdminInterventions({
     page,
     pageSize,
@@ -89,16 +163,18 @@ export function AdminInterventionWorkspacePage() {
   }, [clusterKey, status, workspaceView]);
 
   useEffect(() => {
-    const next = new URLSearchParams();
-    if (workspaceView !== "open") next.set("view", workspaceView);
-    if (clusterKey !== "all") next.set("clusterKey", clusterKey);
-    if (caseIdFilter) next.set("caseId", caseIdFilter);
-    if (severityFilter) next.set("severity", severityFilter);
-    if (disconnectTypeFilter) next.set("disconnectType", disconnectTypeFilter);
-    if (assigneeIdFilter) next.set("assigneeId", assigneeIdFilter);
-    if (repIdFilter) next.set("repId", repIdFilter);
-    if (companyIdFilter) next.set("companyId", companyIdFilter);
-    if (stageKeyFilter) next.set("stageKey", stageKeyFilter);
+    const next = buildWorkspaceSearchParams({
+      searchParams,
+      workspaceView,
+      clusterKey,
+      caseIdFilter,
+      severityFilter,
+      disconnectTypeFilter,
+      assigneeIdFilter,
+      repIdFilter,
+      companyIdFilter,
+      stageKeyFilter,
+    });
     setSearchParams(next, { replace: true });
   }, [
     assigneeIdFilter,
@@ -175,14 +251,14 @@ export function AdminInterventionWorkspacePage() {
         <div>
           <h1 className="text-3xl font-black tracking-tighter uppercase text-gray-900">Admin Intervention Workspace</h1>
           <p className="text-[11px] uppercase tracking-widest text-gray-400 mt-1">
-            Manager-first queue for disconnect cases, execution artifacts, and direct office interventions
+            Execution surface for disconnect cases, follow-through artifacts, and direct office interventions
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <Link to="/admin/intervention-analytics" className={buttonVariants({ variant: "outline" })}>
+          <Link to={interventionAnalyticsHref} className={buttonVariants({ variant: "outline" })}>
             View Analytics
           </Link>
-          <Link to="/admin/sales-process-disconnects" className={buttonVariants({ variant: "outline" })}>
+          <Link to={buildSalesProcessDisconnectsHref(searchParams)} className={buttonVariants({ variant: "outline" })}>
             View Disconnect Dashboard
           </Link>
           <Button variant="outline" onClick={() => void refetch()} disabled={loading}>

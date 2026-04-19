@@ -232,7 +232,11 @@ describe("AdminInterventionAnalyticsPage", () => {
     );
 
     expect(html).toContain("Intervention Analytics");
+    expect(html).toContain("Queue Health");
     expect(html).toContain("Manager Alerts");
+    expect(html).toContain("Outcome Effectiveness");
+    expect(html).toContain("Policy Recommendations");
+    expect(html).not.toContain("Manager Readout");
     expect(html).toContain("Run Manager Alert Scan");
     expect(html).toContain("Send Alerts");
     expect(html).toContain("Office-local time");
@@ -240,6 +244,31 @@ describe("AdminInterventionAnalyticsPage", () => {
     expect(html).toContain("Resolution Effectiveness");
     expect(html).toContain("Breach Queue");
     expect(html).toContain("Manager One");
+    expect(html).toContain('href="#queue-health"');
+    expect(html).toContain('href="#manager-alerts"');
+    expect(html).toContain('href="#outcome-effectiveness"');
+    expect(html).toContain('href="#policy-recommendations"');
+    expect(html).toContain('id="queue-health"');
+    expect(html).toContain('id="manager-alerts"');
+    expect(html).toContain('id="outcome-effectiveness"');
+    expect(html).toContain('id="policy-recommendations"');
+  });
+
+  it("preserves source filters on cross-links to the other manager surfaces", () => {
+    const html = renderToStaticMarkup(
+      <MemoryRouter
+        initialEntries={["/admin/intervention-analytics?type=overdue&cluster=manager&trend=critical"]}
+      >
+        <AdminInterventionAnalyticsPage />
+      </MemoryRouter>
+    );
+
+    expect(html).toContain('href="/admin/interventions?type=overdue&amp;cluster=manager&amp;trend=critical"');
+    expect(html).toContain('href="/admin/sales-process-disconnects?type=overdue&amp;cluster=manager&amp;trend=critical"');
+    expect(html).toContain('href="/admin/interventions?view=overdue&amp;type=overdue&amp;cluster=manager&amp;trend=critical"');
+    expect(html).toContain(
+      'href="/admin/interventions?view=all&amp;assigneeId=manager-1&amp;type=overdue&amp;cluster=manager&amp;trend=critical"'
+    );
   });
 
   it("keeps manager alerts visible when general analytics data is unavailable", () => {

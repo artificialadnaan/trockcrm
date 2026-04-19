@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { AlertTriangle, ArrowUpRight, MailWarning, RefreshCcw, ShieldAlert, TimerReset, Workflow } from "lucide-react";
 import {
   queueAiDisconnectAdminTasks,
@@ -8,7 +8,9 @@ import {
   trackSalesProcessDisconnectInteraction,
   useSalesProcessDisconnectDashboard,
 } from "@/hooks/use-ai-ops";
-import { buildInterventionWorkspacePath } from "@/hooks/use-admin-interventions";
+import {
+  buildInterventionWorkspacePath,
+} from "@/hooks/use-admin-interventions";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { buttonVariants } from "@/components/ui/button";
@@ -28,15 +30,66 @@ function formatDate(value: string | null) {
   return date.toLocaleString();
 }
 
+function buildPreservedRoute(path: string, searchParams: URLSearchParams) {
+  const preserved = new URLSearchParams();
+  const type = searchParams.get("type");
+  const cluster = searchParams.get("cluster");
+  const trend = searchParams.get("trend");
+
+  if (type) preserved.set("type", type);
+  if (cluster) preserved.set("cluster", cluster);
+  if (trend) preserved.set("trend", trend);
+
+  const query = preserved.toString();
+  return query ? `${path}?${query}` : path;
+}
+
+function buildPreservedWorkspacePath(
+  searchParams: URLSearchParams,
+  params: Parameters<typeof buildInterventionWorkspacePath>[0]
+) {
+  const workspacePath = buildInterventionWorkspacePath(params);
+  const [path, query = ""] = workspacePath.split("?");
+  const nextParams = new URLSearchParams(query);
+
+  for (const key of ["type", "cluster", "trend"] as const) {
+    const value = searchParams.get(key);
+    if (value) nextParams.set(key, value);
+  }
+
+  const nextQuery = nextParams.toString();
+  return nextQuery ? `${path}?${nextQuery}` : path;
+}
+
+function updatePreservedSearchParams(
+  current: URLSearchParams,
+  setSearchParams: ReturnType<typeof useSearchParams>[1],
+  key: "type" | "cluster" | "trend",
+  value: string,
+  defaultValue: string
+) {
+  const nextParams = new URLSearchParams(current);
+  if (value === defaultValue) {
+    nextParams.delete(key);
+  } else {
+    nextParams.set(key, value);
+  }
+  setSearchParams(nextParams, { replace: true });
+}
+
 export function SalesProcessDisconnectsPage() {
   const { dashboard, loading, error, refetch } = useSalesProcessDisconnectDashboard(75);
-  const [typeFilter, setTypeFilter] = useState<string>("all");
-  const [clusterFilter, setClusterFilter] = useState<string>("all");
-  const [trendDimension, setTrendDimension] = useState<"reps" | "stages" | "companies">("reps");
+  const [searchParams, setSearchParams] = useSearchParams();
   const [digestQueued, setDigestQueued] = useState(false);
   const [escalationQueued, setEscalationQueued] = useState(false);
   const [adminTasksQueued, setAdminTasksQueued] = useState(false);
   const didTrackView = useRef(false);
+  const typeFilter = searchParams.get("type") || "all";
+  const clusterFilter = searchParams.get("cluster") || "all";
+  const trendParam = searchParams.get("trend");
+  const trendDimension = trendParam === "stages" || trendParam === "companies" ? trendParam : "reps";
+  const analyticsHref = buildPreservedRoute("/admin/intervention-analytics", searchParams);
+  const workspaceHref = buildPreservedRoute("/admin/interventions", searchParams);
 
   useEffect(() => {
     if (!dashboard || didTrackView.current) return;
@@ -62,7 +115,7 @@ export function SalesProcessDisconnectsPage() {
   }, [clusterFilter, dashboard, typeFilter]);
 
   const handleFilter = (next: string) => {
-    setTypeFilter(next);
+    updatePreservedSearchParams(searchParams, setSearchParams, "type", next, "all");
     void trackSalesProcessDisconnectInteraction({
       interactionType: "type_filter",
       targetValue: next,
@@ -70,7 +123,7 @@ export function SalesProcessDisconnectsPage() {
   };
 
   const handleClusterFilter = (next: string) => {
-    setClusterFilter(next);
+    updatePreservedSearchParams(searchParams, setSearchParams, "cluster", next, "all");
     void trackSalesProcessDisconnectInteraction({
       interactionType: "cluster_filter",
       targetValue: next,
@@ -86,24 +139,10 @@ export function SalesProcessDisconnectsPage() {
   };
 
   const handleTrendDimension = (next: "reps" | "stages" | "companies") => {
-    setTrendDimension(next);
+    updatePreservedSearchParams(searchParams, setSearchParams, "trend", next, "reps");
     void trackSalesProcessDisconnectInteraction({
       interactionType: "trend_focus",
       targetValue: next,
-    }).catch(() => {});
-  };
-
-  const handleOutcomeFocus = (next: string) => {
-    void trackSalesProcessDisconnectInteraction({
-      interactionType: "outcome_focus",
-      targetValue: next,
-    }).catch(() => {});
-  };
-
-  const handlePlaybookFocus = (next: string) => {
-    void trackSalesProcessDisconnectInteraction({
-      interactionType: "outcome_focus",
-      targetValue: `playbook:${next}`,
     }).catch(() => {});
   };
 
@@ -140,28 +179,30 @@ export function SalesProcessDisconnectsPage() {
         <div>
           <h1 className="text-3xl font-black tracking-tighter uppercase text-gray-900">Sales Process Disconnects</h1>
           <p className="text-[11px] uppercase tracking-widest text-gray-400 mt-1">
-            Office and admin visibility into stalled follow-through, handoff gaps, and missing process steps
+            Source-side signal review for stalled follow-through, handoff gaps, and missing process steps
           </p>
         </div>
-        <Button variant="outline" onClick={() => void refetch()} disabled={loading}>
-          <RefreshCcw className="h-4 w-4 mr-2" />
-          Refresh
-        </Button>
-        <Link to="/admin/intervention-analytics" className={buttonVariants({ variant: "outline" })}>
-          View Intervention Analytics
-        </Link>
-        <Link to="/admin/interventions" className={buttonVariants({ variant: "outline" })}>
-          Open Intervention Workspace
-        </Link>
-        <Button variant="default" onClick={() => void handleQueueDigest()} disabled={loading}>
-          Queue Digest
-        </Button>
-        <Button variant="outline" onClick={() => void handleQueueEscalation()} disabled={loading}>
-          Queue Escalation Scan
-        </Button>
-        <Button variant="outline" onClick={() => void handleQueueAdminTasks()} disabled={loading}>
-          Queue Admin Tasks
-        </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          <Link to={analyticsHref} className={buttonVariants({ variant: "outline" })}>
+            View Intervention Analytics
+          </Link>
+          <Link to={workspaceHref} className={buttonVariants({ variant: "outline" })}>
+            Open Intervention Workspace
+          </Link>
+          <Button variant="outline" onClick={() => void refetch()} disabled={loading}>
+            <RefreshCcw className="h-4 w-4 mr-2" />
+            Refresh
+          </Button>
+          <Button variant="default" onClick={() => void handleQueueDigest()} disabled={loading}>
+            Queue Digest
+          </Button>
+          <Button variant="outline" onClick={() => void handleQueueEscalation()} disabled={loading}>
+            Queue Escalation Scan
+          </Button>
+          <Button variant="outline" onClick={() => void handleQueueAdminTasks()} disabled={loading}>
+            Queue Admin Tasks
+          </Button>
+        </div>
       </div>
 
       {digestQueued && (
@@ -227,7 +268,7 @@ export function SalesProcessDisconnectsPage() {
         <CardHeader>
           <CardTitle>Weekly Management Narrative</CardTitle>
           <CardDescription>
-            Deterministic disconnect facts summarized into an admin-first explanation of what changed and where to intervene next
+            Deterministic source signals summarized into a weekly review of what changed and where to look next
           </CardDescription>
         </CardHeader>
         <CardContent className="grid grid-cols-1 xl:grid-cols-[1.05fr_0.95fr] gap-4">
@@ -262,7 +303,8 @@ export function SalesProcessDisconnectsPage() {
               ))}
             </div>
             <div className="text-xs text-muted-foreground">
-              This narrative is computed from current disconnect clusters, trend hotspots, and recent intervention outcomes. It explains the queue; it does not replace the underlying deterministic signals.
+              This narrative is computed from current disconnect clusters, trend hotspots, and recent intervention outcomes.
+              It explains the source signals; it does not replace the underlying deterministic data.
             </div>
           </div>
         </CardContent>
@@ -310,7 +352,7 @@ export function SalesProcessDisconnectsPage() {
               <div>Admin task generation: weekdays at 7:30 AM CT</div>
             </div>
             <div className="text-xs text-blue-700">
-              These counts come from real notifications and task records, so this section acts as live validation after deploy.
+              These counts come from real notifications and task records, so this section acts as live source-side validation after deploy.
             </div>
           </div>
         </CardContent>
@@ -380,7 +422,7 @@ export function SalesProcessDisconnectsPage() {
 
                   <div className="flex items-center justify-end">
                     <Link
-                      to={buildInterventionWorkspacePath({ view: "open", clusterKey: cluster.clusterKey })}
+                      to={buildPreservedWorkspacePath(searchParams, { view: "open", clusterKey: cluster.clusterKey })}
                       className={buttonVariants({ variant: "outline", size: "sm" })}
                     >
                       Open in workspace
@@ -402,231 +444,70 @@ export function SalesProcessDisconnectsPage() {
         </CardContent>
       </Card>
 
-      <div className="grid grid-cols-1 xl:grid-cols-[1.2fr_0.8fr] gap-4">
-        <Card>
-          <CardHeader>
-            <CardTitle>Trend Hotspots</CardTitle>
-            <CardDescription>
-              Where disconnect clusters are concentrating by owner, stage, and company
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="flex flex-wrap gap-2">
-              <Button variant={trendDimension === "reps" ? "default" : "outline"} size="sm" onClick={() => handleTrendDimension("reps")}>
-                Reps
-              </Button>
-              <Button variant={trendDimension === "stages" ? "default" : "outline"} size="sm" onClick={() => handleTrendDimension("stages")}>
-                Stages
-              </Button>
-              <Button variant={trendDimension === "companies" ? "default" : "outline"} size="sm" onClick={() => handleTrendDimension("companies")}>
-                Companies
-              </Button>
-            </div>
+      <Card>
+        <CardHeader>
+          <CardTitle>Trend Hotspots</CardTitle>
+          <CardDescription>
+            Where disconnect clusters are concentrating by owner, stage, and company
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex flex-wrap gap-2">
+            <Button variant={trendDimension === "reps" ? "default" : "outline"} size="sm" onClick={() => handleTrendDimension("reps")}>
+              Reps
+            </Button>
+            <Button variant={trendDimension === "stages" ? "default" : "outline"} size="sm" onClick={() => handleTrendDimension("stages")}>
+              Stages
+            </Button>
+            <Button variant={trendDimension === "companies" ? "default" : "outline"} size="sm" onClick={() => handleTrendDimension("companies")}>
+              Companies
+            </Button>
+          </div>
 
-            <div className="space-y-3">
-              {(dashboard?.trends?.[trendDimension] ?? []).map((trend) => (
-                <div key={`${trendDimension}:${trend.key}`} className="rounded-lg border border-border/80 bg-white px-4 py-3">
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="space-y-1">
-                      <div className="font-semibold text-sm">{trend.label}</div>
-                      <div className="text-xs text-muted-foreground">
-                        {trend.dealCount} deals · {trend.disconnectCount} disconnects · {trend.criticalCount} critical
-                      </div>
-                    </div>
-                    {trend.recentInterventionCount > 0 && (
-                      <Badge variant="outline" className="bg-emerald-50 text-emerald-700 border-emerald-200">
-                        {trend.recentInterventionCount} recent intervention{trend.recentInterventionCount === 1 ? "" : "s"}
-                      </Badge>
-                    )}
-                  </div>
-                  <div className="flex flex-wrap gap-2 mt-3">
-                    {trend.clusterKeys.map((clusterKey) => (
-                      <Badge key={`${trend.key}:${clusterKey}`} variant="secondary">{clusterKey.split("_").join(" ")}</Badge>
-                    ))}
-                  </div>
-                  {trend.clusterKeys[0] && (
-                    <div className="mt-3">
-                      <Link
-                        to={buildInterventionWorkspacePath({ view: "aging", clusterKey: trend.clusterKeys[0] })}
-                        className={buttonVariants({ variant: "outline", size: "sm" })}
-                      >
-                        Open hotspot in workspace
-                      </Link>
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle>Intervention Outcomes</CardTitle>
-            <CardDescription>
-              Whether recent triage activity is actually reducing currently open disconnects
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            <button
-              type="button"
-              onClick={() => handleOutcomeFocus("intervention_deals_30d")}
-              className="w-full rounded-lg border border-border/80 bg-white px-4 py-3 text-left"
-            >
-              <div className="text-xs uppercase tracking-widest text-muted-foreground">Deals with interventions</div>
-              <div className="text-2xl font-black">{dashboard?.outcomes.interventionDeals30d ?? 0}</div>
-            </button>
-            <button
-              type="button"
-              onClick={() => handleOutcomeFocus("clearance_rate_30d")}
-              className="w-full rounded-lg border border-border/80 bg-white px-4 py-3 text-left"
-            >
-              <div className="text-xs uppercase tracking-widest text-muted-foreground">Clearance rate</div>
-              <div className="text-2xl font-black">
-                {dashboard?.outcomes.clearanceRate30d == null ? "N/A" : `${Math.round(dashboard.outcomes.clearanceRate30d * 100)}%`}
-              </div>
-              <div className="text-xs text-muted-foreground mt-1">
-                {dashboard?.outcomes.clearedAfterIntervention30d ?? 0} cleared / {dashboard?.outcomes.interventionDeals30d ?? 0} intervened
-              </div>
-            </button>
-            <button
-              type="button"
-              onClick={() => handleOutcomeFocus("still_open_after_intervention")}
-              className="w-full rounded-lg border border-border/80 bg-white px-4 py-3 text-left"
-            >
-              <div className="text-xs uppercase tracking-widest text-muted-foreground">Still open after intervention</div>
-              <div className="text-2xl font-black">{dashboard?.outcomes.stillOpenAfterIntervention30d ?? 0}</div>
-            </button>
-            <div className="grid grid-cols-2 gap-3 text-sm">
-              <div className="rounded-lg border border-border/80 bg-white px-4 py-3">
-                <div className="text-xs uppercase tracking-widest text-muted-foreground">Escalations still open</div>
-                <div className="text-xl font-black">{dashboard?.outcomes.unresolvedEscalationsOpen ?? 0}</div>
-              </div>
-              <div className="rounded-lg border border-border/80 bg-white px-4 py-3">
-                <div className="text-xs uppercase tracking-widest text-muted-foreground">Repeat issue deals</div>
-                <div className="text-xl font-black">{dashboard?.outcomes.repeatIssueDealsOpen ?? 0}</div>
-              </div>
-              <div className="rounded-lg border border-border/80 bg-white px-4 py-3">
-                <div className="text-xs uppercase tracking-widest text-muted-foreground">Repeat cluster deals</div>
-                <div className="text-xl font-black">{dashboard?.outcomes.repeatClusterDealsOpen ?? 0}</div>
-              </div>
-              <div className="rounded-lg border border-border/80 bg-white px-4 py-3">
-                <div className="text-xs uppercase tracking-widest text-muted-foreground">Coverage on open deals</div>
-                <div className="text-xl font-black">
-                  {dashboard?.outcomes.interventionCoverageRate == null
-                    ? "N/A"
-                    : `${Math.round(dashboard.outcomes.interventionCoverageRate * 100)}%`}
-                </div>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-      </div>
-
-      <div className="grid grid-cols-1 xl:grid-cols-[0.85fr_1.15fr] gap-4">
-        <Card>
-          <CardHeader>
-            <CardTitle>Action Scoreboard</CardTitle>
-            <CardDescription>
-              Which triage actions are currently correlating with clearance across admin intervention work
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3">
-              <div className="text-xs uppercase tracking-widest text-emerald-700">Best overall action</div>
-              <div className="text-2xl font-black text-emerald-900">
-                {dashboard?.actionSummary.bestOverallAction ? dashboard.actionSummary.bestOverallAction.split("_").join(" ") : "N/A"}
-              </div>
-              <div className="text-xs text-emerald-700 mt-1">
-                {dashboard?.actionSummary.bestOverallClearanceRate == null
-                  ? "No recent outcome data yet"
-                  : `${Math.round(dashboard.actionSummary.bestOverallClearanceRate * 100)}% clearance rate`}
-              </div>
-            </div>
-            <div className="grid grid-cols-2 gap-3 text-sm">
-              <div className="rounded-lg border border-border/80 bg-white px-4 py-3">
-                <div className="text-xs uppercase tracking-widest text-muted-foreground">Mark reviewed</div>
-                <div className="text-xl font-black">{dashboard?.actionSummary.markReviewed30d ?? 0}</div>
-              </div>
-              <div className="rounded-lg border border-border/80 bg-white px-4 py-3">
-                <div className="text-xs uppercase tracking-widest text-muted-foreground">Resolve</div>
-                <div className="text-xl font-black">{dashboard?.actionSummary.resolve30d ?? 0}</div>
-              </div>
-              <div className="rounded-lg border border-border/80 bg-white px-4 py-3">
-                <div className="text-xs uppercase tracking-widest text-muted-foreground">Dismiss</div>
-                <div className="text-xl font-black">{dashboard?.actionSummary.dismiss30d ?? 0}</div>
-              </div>
-              <div className="rounded-lg border border-border/80 bg-white px-4 py-3">
-                <div className="text-xs uppercase tracking-widest text-muted-foreground">Escalate</div>
-                <div className="text-xl font-black">{dashboard?.actionSummary.escalate30d ?? 0}</div>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle>Intervention Playbooks</CardTitle>
-            <CardDescription>
-              Cluster-specific action guidance based on recent intervention outcomes and still-open disconnects
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            {(dashboard?.playbooks ?? []).map((playbook) => (
-              <div key={playbook.clusterKey} className="rounded-lg border border-border/80 bg-white px-4 py-4 space-y-3">
+          <div className="space-y-3">
+            {(dashboard?.trends?.[trendDimension] ?? []).map((trend) => (
+              <div key={`${trendDimension}:${trend.key}`} className="rounded-lg border border-border/80 bg-white px-4 py-3">
                 <div className="flex items-start justify-between gap-3">
                   <div className="space-y-1">
-                    <div className="font-semibold">{playbook.title}</div>
+                    <div className="font-semibold text-sm">{trend.label}</div>
                     <div className="text-xs text-muted-foreground">
-                      {playbook.interventionDeals30d} intervened deals · {playbook.stillOpenDeals30d} still open
+                      {trend.dealCount} deals · {trend.disconnectCount} disconnects · {trend.criticalCount} critical
                     </div>
                   </div>
-                  <Button variant="outline" size="sm" onClick={() => handlePlaybookFocus(playbook.clusterKey)}>
-                    Focus
-                  </Button>
+                  {trend.recentInterventionCount > 0 && (
+                    <Badge variant="outline" className="bg-emerald-50 text-emerald-700 border-emerald-200">
+                      {trend.recentInterventionCount} recent intervention{trend.recentInterventionCount === 1 ? "" : "s"}
+                    </Badge>
+                  )}
                 </div>
-
-                <div className="flex justify-end">
-                  <Link
-                    to={buildInterventionWorkspacePath({ view: "open", clusterKey: playbook.clusterKey })}
-                    className={buttonVariants({ variant: "outline", size: "sm" })}
-                  >
-                    Open cases
-                  </Link>
-                </div>
-
-                <div className="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm">
-                  <span className="font-semibold text-emerald-900">Recommended action:</span>{" "}
-                  <span className="text-emerald-800">
-                    {playbook.recommendedAction ? playbook.recommendedAction.split("_").join(" ") : "No recommendation yet"}
-                  </span>
-                </div>
-
-                <div className="space-y-2">
-                  {playbook.actions.map((action) => (
-                    <div key={`${playbook.clusterKey}:${action.action}`} className="flex items-center justify-between gap-4 rounded-md border border-border/70 px-3 py-2 text-sm">
-                      <div>
-                        <div className="font-medium">{action.action.split("_").join(" ")}</div>
-                        <div className="text-xs text-muted-foreground">
-                          {action.interventionDeals30d} interventions · {action.clearedDeals30d} cleared · {action.stillOpenDeals30d} still open
-                        </div>
-                      </div>
-                      <Badge variant="outline">
-                        {action.clearanceRate30d == null ? "N/A" : `${Math.round(action.clearanceRate30d * 100)}%`}
-                      </Badge>
-                    </div>
+                <div className="flex flex-wrap gap-2 mt-3">
+                  {trend.clusterKeys.map((clusterKey) => (
+                    <Badge key={`${trend.key}:${clusterKey}`} variant="secondary">{clusterKey.split("_").join(" ")}</Badge>
                   ))}
                 </div>
+                {trend.clusterKeys[0] && (
+                  <div className="mt-3">
+                    <Link
+                      to={buildPreservedWorkspacePath(searchParams, {
+                        view: "aging",
+                        clusterKey: trend.clusterKeys[0],
+                      })}
+                      className={buttonVariants({ variant: "outline", size: "sm" })}
+                    >
+                      Open hotspot in workspace
+                    </Link>
+                  </div>
+                )}
               </div>
             ))}
-          </CardContent>
-        </Card>
-      </div>
+          </div>
+        </CardContent>
+      </Card>
 
       <Card>
         <CardHeader>
           <CardTitle>Disconnect Types</CardTitle>
-          <CardDescription>Filter the dashboard to the process break you want to inspect</CardDescription>
+          <CardDescription>Filter the source signals to the process break you want to inspect</CardDescription>
         </CardHeader>
         <CardContent className="flex flex-wrap gap-2">
           <Button variant={typeFilter === "all" ? "default" : "outline"} size="sm" onClick={() => handleFilter("all")}>
@@ -647,12 +528,12 @@ export function SalesProcessDisconnectsPage() {
 
       {loading ? (
         <Card>
-          <CardContent className="py-12 text-center text-muted-foreground">Loading disconnect dashboard...</CardContent>
+          <CardContent className="py-12 text-center text-muted-foreground">Loading source signals...</CardContent>
         </Card>
       ) : filteredRows.length === 0 ? (
         <Card>
           <CardContent className="py-12 text-center text-muted-foreground">
-            No disconnects match the current filter.
+            No disconnects match the current signal filters.
           </CardContent>
         </Card>
       ) : (
@@ -693,7 +574,7 @@ export function SalesProcessDisconnectsPage() {
                       )}
                       <div className="pt-1">
                         <Link
-                          to={buildInterventionWorkspacePath({
+                          to={buildPreservedWorkspacePath(searchParams, {
                             view: row.ageDays != null && row.ageDays >= 7 ? "aging" : "open",
                             clusterKey:
                               dashboard?.clusters.find((cluster) => cluster.disconnectTypes.includes(row.disconnectType))?.clusterKey ?? null,
