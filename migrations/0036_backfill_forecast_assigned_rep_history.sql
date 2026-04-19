@@ -336,14 +336,14 @@ BEGIN
        WHERE m.id = src.milestone_id',
       schema_name,
       schema_name,
-      schema_name,
-      schema_name,
       deal_workflow_route_expr,
       deal_expected_close_date_expr,
       deal_dd_estimate_expr,
       deal_bid_estimate_expr,
       deal_awarded_amount_expr,
       deal_source_expr,
+      schema_name,
+      schema_name,
       schema_name,
       deal_actual_close_date_expr
     );
