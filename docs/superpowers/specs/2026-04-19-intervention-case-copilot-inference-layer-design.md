@@ -217,6 +217,13 @@ Base similarity on:
 - same `severity` bucket when useful
 - optionally same `stageKey` from case metadata when available
 
+Guardrails:
+
+- retrieval is scoped to the current tenant office only
+- the current case id must be excluded from the result set
+- only historical intervention cases from the same office are eligible
+- unresolved/open cases may be included only if they help explain a currently similar failure pattern; otherwise prefer concluded cases
+
 Each similar-case result should include:
 
 - case id
@@ -312,6 +319,18 @@ V1 may generate synchronously or via the existing job queue, but the user-facing
 - regenerate is explicit
 - refresh state is visible
 
+GET semantics:
+
+- if a ready packet exists, `GET` returns that packet plus current derived similar-case rows
+- if regeneration is pending, `GET` still returns the latest ready packet and marks the view as refresh-pending
+- if no packet exists yet, `GET` returns an empty packet state plus derived similar-case rows when possible
+
+Freshness / invalidation rules:
+
+- any successful intervention mutation on that case (`assign`, `snooze`, `resolve`, `escalate`) marks the current packet stale
+- stale packets may still render until regenerated, but the UI must show that they predate the latest case change
+- explicit regenerate clears the stale state once a newer packet is generated
+
 ## Client Contract
 
 Add a new hook similar in spirit to `useDealCopilot`, but intervention-scoped:
@@ -349,6 +368,17 @@ Add packet-level feedback buttons inside the copilot panel:
 Feedback should write through the existing `ai_feedback` path with a new feedback type:
 
 - `intervention_case_copilot`
+
+Feedback target:
+
+- `targetType = "packet"`
+- `targetId = <ai_copilot_packets.id>`
+
+Idempotency rule:
+
+- feedback remains append-only in storage, matching the existing feedback model
+- the UI only allows one latest visible opinion per user per packet at a time
+- if the same user changes opinion from `Useful` to `Not useful` or vice versa, the newer submission is treated as the active opinion for presentation/analytics in this slice
 
 ## Permissions
 
