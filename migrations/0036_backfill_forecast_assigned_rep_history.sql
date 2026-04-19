@@ -269,7 +269,6 @@ BEGIN
       schema_name,
       schema_name,
       schema_name,
-      schema_name,
       deal_actual_close_date_expr
     );
 
