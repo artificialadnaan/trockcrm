@@ -254,7 +254,7 @@ describe("AdminInterventionAnalyticsPage", () => {
     expect(html).toContain('id="policy-recommendations"');
   });
 
-  it("preserves source filters only on the disconnects back-link", () => {
+  it("preserves source filters on cross-links to the other manager surfaces", () => {
     const html = renderToStaticMarkup(
       <MemoryRouter
         initialEntries={["/admin/intervention-analytics?type=overdue&cluster=manager&trend=critical"]}
@@ -263,8 +263,11 @@ describe("AdminInterventionAnalyticsPage", () => {
       </MemoryRouter>
     );
 
+    expect(html).toContain('href="/admin/interventions?type=overdue&amp;cluster=manager&amp;trend=critical"');
+    expect(html).toContain('href="/admin/sales-process-disconnects?type=overdue&amp;cluster=manager&amp;trend=critical"');
+    expect(html).toContain('href="/admin/interventions?view=overdue&amp;type=overdue&amp;cluster=manager&amp;trend=critical"');
     expect(html).toContain(
-      'href="/admin/sales-process-disconnects?type=overdue&amp;cluster=manager&amp;trend=critical"'
+      'href="/admin/interventions?view=all&amp;assigneeId=manager-1&amp;type=overdue&amp;cluster=manager&amp;trend=critical"'
     );
   });
 

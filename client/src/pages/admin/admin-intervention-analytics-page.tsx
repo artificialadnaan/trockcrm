@@ -78,7 +78,31 @@ function buildSalesProcessDisconnectsHref(searchParams: URLSearchParams) {
   return query ? `/admin/sales-process-disconnects?${query}` : "/admin/sales-process-disconnects";
 }
 
-function ManagerAlertsPanel() {
+function buildInterventionWorkspaceHref(searchParams: URLSearchParams) {
+  const nextSearchParams = new URLSearchParams();
+  for (const key of ["type", "cluster", "trend"] as const) {
+    const value = searchParams.get(key);
+    if (value) nextSearchParams.set(key, value);
+  }
+  const query = nextSearchParams.toString();
+  return query ? `/admin/interventions?${query}` : "/admin/interventions";
+}
+
+function appendDisconnectContextToHref(path: string | null, searchParams: URLSearchParams) {
+  if (!path) return path;
+
+  const [pathname, query = ""] = path.split("?");
+  const nextSearchParams = new URLSearchParams(query);
+  for (const key of ["type", "cluster", "trend"] as const) {
+    const value = searchParams.get(key);
+    if (value) nextSearchParams.set(key, value);
+  }
+
+  const nextQuery = nextSearchParams.toString();
+  return nextQuery ? `${pathname}?${nextQuery}` : pathname;
+}
+
+function ManagerAlertsPanel({ searchParams }: { searchParams: URLSearchParams }) {
   const { data, loading, error } = useManagerAlertSnapshot();
   const [snapshot, setSnapshot] = useState<ManagerAlertSnapshot | null>(null);
   const [working, setWorking] = useState<"preview" | "send" | null>(null);
@@ -187,7 +211,10 @@ function ManagerAlertsPanel() {
             <div className="space-y-4">
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
                 <Link
-                  to={displaySnapshot.snapshotJson.families.overdueHighCritical.queueLink}
+                  to={appendDisconnectContextToHref(
+                    displaySnapshot.snapshotJson.families.overdueHighCritical.queueLink,
+                    searchParams
+                  ) ?? "/admin/interventions"}
                   className="block rounded-xl border border-border/80 bg-white px-4 py-4 shadow-sm transition-transform hover:-translate-y-0.5 hover:border-brand-red/30"
                 >
                   <div className="text-[11px] uppercase tracking-widest text-muted-foreground">Overdue high/critical</div>
@@ -199,7 +226,10 @@ function ManagerAlertsPanel() {
                   </div>
                 </Link>
                 <Link
-                  to={displaySnapshot.snapshotJson.families.snoozeBreached.queueLink}
+                  to={appendDisconnectContextToHref(
+                    displaySnapshot.snapshotJson.families.snoozeBreached.queueLink,
+                    searchParams
+                  ) ?? "/admin/interventions"}
                   className="block rounded-xl border border-border/80 bg-white px-4 py-4 shadow-sm transition-transform hover:-translate-y-0.5 hover:border-brand-red/30"
                 >
                   <div className="text-[11px] uppercase tracking-widest text-muted-foreground">Snooze breaches</div>
@@ -211,7 +241,10 @@ function ManagerAlertsPanel() {
                   </div>
                 </Link>
                 <Link
-                  to={displaySnapshot.snapshotJson.families.escalatedOpen.queueLink}
+                  to={appendDisconnectContextToHref(
+                    displaySnapshot.snapshotJson.families.escalatedOpen.queueLink,
+                    searchParams
+                  ) ?? "/admin/interventions"}
                   className="block rounded-xl border border-border/80 bg-white px-4 py-4 shadow-sm transition-transform hover:-translate-y-0.5 hover:border-brand-red/30"
                 >
                   <div className="text-[11px] uppercase tracking-widest text-muted-foreground">Escalated open</div>
@@ -274,7 +307,7 @@ function ManagerAlertsPanel() {
                       displaySnapshot.snapshotJson.families.assigneeOverload.items.map((item) => (
                         <Link
                           key={item.assigneeId}
-                          to={item.queueLink}
+                          to={appendDisconnectContextToHref(item.queueLink, searchParams) ?? "/admin/interventions"}
                           className="block rounded-lg border border-border/80 px-4 py-3 transition-colors hover:border-brand-red/40 hover:bg-muted/40"
                         >
                           <div className="flex items-start justify-between gap-3">
@@ -306,6 +339,7 @@ export function AdminInterventionAnalyticsPage() {
   const [searchParams] = useSearchParams();
   const { data, loading, error, refetch } = useInterventionAnalytics();
   const salesProcessDisconnectsHref = buildSalesProcessDisconnectsHref(searchParams);
+  const interventionWorkspaceHref = buildInterventionWorkspaceHref(searchParams);
 
   return (
     <div className="p-6 space-y-6 bg-gray-50 min-h-screen">
@@ -321,7 +355,7 @@ export function AdminInterventionAnalyticsPage() {
             <Radar className="mr-2 h-4 w-4" />
             Process Disconnects
           </Link>
-          <Link to="/admin/interventions" className={buttonVariants({ variant: "outline" })}>
+          <Link to={interventionWorkspaceHref} className={buttonVariants({ variant: "outline" })}>
             <ClipboardCheck className="mr-2 h-4 w-4" />
             Intervention Workspace
           </Link>
@@ -347,7 +381,7 @@ export function AdminInterventionAnalyticsPage() {
         title="Manager Alerts"
         description="Live manager alert scans and send controls stay available even if the broader analytics load is unavailable."
       >
-        <ManagerAlertsPanel />
+        <ManagerAlertsPanel searchParams={searchParams} />
       </InterventionManagerConsoleSection>
 
       {!data && loading ? (

@@ -52,6 +52,13 @@ function buildSalesProcessDisconnectsHref(searchParams: URLSearchParams) {
   return query ? `/admin/sales-process-disconnects?${query}` : "/admin/sales-process-disconnects";
 }
 
+function buildInterventionAnalyticsHref(searchParams: URLSearchParams) {
+  const nextParams = new URLSearchParams();
+  preserveDisconnectContext(nextParams, searchParams);
+  const query = nextParams.toString();
+  return query ? `/admin/intervention-analytics?${query}` : "/admin/intervention-analytics";
+}
+
 function preserveDisconnectContext(
   nextParams: URLSearchParams,
   searchParams: URLSearchParams
@@ -118,6 +125,7 @@ export function AdminInterventionWorkspacePage() {
   const [detailRefreshToken, setDetailRefreshToken] = useState(0);
   const [page, setPage] = useState(1);
   const pageSize = 50;
+  const interventionAnalyticsHref = buildInterventionAnalyticsHref(searchParams);
   const { data, loading, error, refetch } = useAdminInterventions({
     page,
     pageSize,
@@ -247,7 +255,7 @@ export function AdminInterventionWorkspacePage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <Link to="/admin/intervention-analytics" className={buttonVariants({ variant: "outline" })}>
+          <Link to={interventionAnalyticsHref} className={buttonVariants({ variant: "outline" })}>
             View Analytics
           </Link>
           <Link to={buildSalesProcessDisconnectsHref(searchParams)} className={buttonVariants({ variant: "outline" })}>

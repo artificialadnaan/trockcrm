@@ -8,7 +8,9 @@ import {
   trackSalesProcessDisconnectInteraction,
   useSalesProcessDisconnectDashboard,
 } from "@/hooks/use-ai-ops";
-import { buildInterventionWorkspacePath } from "@/hooks/use-admin-interventions";
+import {
+  buildInterventionWorkspacePath,
+} from "@/hooks/use-admin-interventions";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { buttonVariants } from "@/components/ui/button";
@@ -40,6 +42,23 @@ function buildPreservedRoute(path: string, searchParams: URLSearchParams) {
 
   const query = preserved.toString();
   return query ? `${path}?${query}` : path;
+}
+
+function buildPreservedWorkspacePath(
+  searchParams: URLSearchParams,
+  params: Parameters<typeof buildInterventionWorkspacePath>[0]
+) {
+  const workspacePath = buildInterventionWorkspacePath(params);
+  const [path, query = ""] = workspacePath.split("?");
+  const nextParams = new URLSearchParams(query);
+
+  for (const key of ["type", "cluster", "trend"] as const) {
+    const value = searchParams.get(key);
+    if (value) nextParams.set(key, value);
+  }
+
+  const nextQuery = nextParams.toString();
+  return nextQuery ? `${path}?${nextQuery}` : path;
 }
 
 function updatePreservedSearchParams(
@@ -403,7 +422,7 @@ export function SalesProcessDisconnectsPage() {
 
                   <div className="flex items-center justify-end">
                     <Link
-                      to={buildInterventionWorkspacePath({ view: "open", clusterKey: cluster.clusterKey })}
+                      to={buildPreservedWorkspacePath(searchParams, { view: "open", clusterKey: cluster.clusterKey })}
                       className={buttonVariants({ variant: "outline", size: "sm" })}
                     >
                       Open in workspace
@@ -469,7 +488,10 @@ export function SalesProcessDisconnectsPage() {
                 {trend.clusterKeys[0] && (
                   <div className="mt-3">
                     <Link
-                      to={buildInterventionWorkspacePath({ view: "aging", clusterKey: trend.clusterKeys[0] })}
+                      to={buildPreservedWorkspacePath(searchParams, {
+                        view: "aging",
+                        clusterKey: trend.clusterKeys[0],
+                      })}
                       className={buttonVariants({ variant: "outline", size: "sm" })}
                     >
                       Open hotspot in workspace
@@ -552,7 +574,7 @@ export function SalesProcessDisconnectsPage() {
                       )}
                       <div className="pt-1">
                         <Link
-                          to={buildInterventionWorkspacePath({
+                          to={buildPreservedWorkspacePath(searchParams, {
                             view: row.ageDays != null && row.ageDays >= 7 ? "aging" : "open",
                             clusterKey:
                               dashboard?.clusters.find((cluster) => cluster.disconnectTypes.includes(row.disconnectType))?.clusterKey ?? null,

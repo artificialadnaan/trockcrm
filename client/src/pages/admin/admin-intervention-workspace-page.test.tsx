@@ -72,7 +72,9 @@ describe("AdminInterventionWorkspacePage", () => {
     );
 
     expect(html).toContain("Admin Intervention Workspace");
-    expect(html).toContain('href="/admin/intervention-analytics"');
+    expect(html).toContain(
+      'href="/admin/intervention-analytics?type=missing_next_task&amp;cluster=follow_through_gap&amp;trend=companies"'
+    );
     expect(html).toContain(
       'href="/admin/sales-process-disconnects?type=missing_next_task&amp;cluster=follow_through_gap&amp;trend=companies"'
     );

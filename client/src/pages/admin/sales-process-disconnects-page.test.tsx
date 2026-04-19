@@ -189,5 +189,11 @@ describe("SalesProcessDisconnectsPage", () => {
     expect(html).toContain(
       'href="/admin/interventions?type=missing_next_task&amp;cluster=follow_through_gap&amp;trend=companies"'
     );
+    expect(html).toContain(
+      'href="/admin/interventions?clusterKey=follow_through_gap&amp;type=missing_next_task&amp;cluster=follow_through_gap&amp;trend=companies"'
+    );
+    expect(html).toContain(
+      'href="/admin/interventions?view=aging&amp;clusterKey=follow_through_gap&amp;type=missing_next_task&amp;cluster=follow_through_gap&amp;trend=companies"'
+    );
   });
 });
