@@ -20,8 +20,10 @@
   - Add similar-case derivation helpers, freshness timestamps, and packet invalidation hooks for intervention mutations.
 - Modify: `server/src/modules/ai-copilot/service.ts`
   - Extend packet persistence / retrieval helpers if needed for intervention packet reuse.
+- Modify: `server/src/modules/ai-copilot/prompt-contract.ts`
+  - Add intervention-specific prompt input/output types alongside the existing deal contracts.
 - Modify: `server/src/modules/ai-copilot/provider.ts`
-  - Add intervention-specific prompt input/output types and heuristic provider path if needed.
+  - Widen the provider interface to support intervention-scoped generation and reuse the heuristic provider path.
 - Modify: `server/src/modules/ai-copilot/routes.ts`
   - Add `GET /ai/ops/interventions/:id/copilot` and `POST /ai/ops/interventions/:id/copilot/regenerate`.
 - Create: `server/tests/modules/ai-copilot/intervention-case-copilot.test.ts`
@@ -87,7 +89,7 @@ function makeCase(overrides: Record<string, unknown> = {}) {
 function makeHistory(overrides: Record<string, unknown> = {}) {
   return {
     id: "history-1",
-    caseId: "case-default",
+    disconnectCaseId: "case-default",
     actionType: "resolve",
     actedBy: "user-1",
     actedAt: new Date("2026-04-19T12:00:00.000Z"),
@@ -130,7 +132,7 @@ describe("buildInterventionCopilotView", () => {
       ],
       history: [
         makeHistory({
-          caseId: "case-prior",
+          disconnectCaseId: "case-prior",
           actionType: "resolve",
           metadataJson: {
             conclusion: { kind: "resolve", reasonCode: "follow_up_completed" },
@@ -184,7 +186,7 @@ describe("buildInterventionCopilotView", () => {
         makeCase({ id: "case-other-office", officeId: "office-2", disconnectType: "missing_next_task", status: "resolved" }),
       ],
       history: [
-        makeHistory({ caseId: "case-other-office", actionType: "resolve" }),
+        makeHistory({ disconnectCaseId: "case-other-office", actionType: "resolve" }),
       ],
     });
 
@@ -353,13 +355,14 @@ git commit -m "feat: add intervention case copilot view builder"
 
 **Files:**
 - Modify: `server/src/modules/ai-copilot/intervention-service.ts`
+- Modify: `server/src/modules/ai-copilot/prompt-contract.ts`
 - Modify: `server/src/modules/ai-copilot/provider.ts`
 - Modify: `server/src/modules/ai-copilot/service.ts`
 - Test: `server/tests/modules/ai-copilot/intervention-case-copilot.test.ts`
 
-- [ ] **Step 1: Add intervention-specific prompt input/output types**
+- [ ] **Step 1: Add intervention-specific prompt input/output types and provider contract**
 
-Extend provider support with intervention-scoped input:
+Extend `prompt-contract.ts` with intervention-scoped input/output contracts and widen `AiCopilotProvider` in `provider.ts` to expose an intervention generator:
 
 ```ts
 export interface InterventionCopilotPromptInput {
@@ -379,6 +382,22 @@ export interface InterventionCopilotPromptInput {
   };
   evidence: Array<Record<string, unknown>>;
 }
+
+export interface InterventionCopilotPromptOutput {
+  summary: string;
+  recommendedAction: {
+    action: "assign" | "resolve" | "snooze" | "escalate" | "investigate";
+    rationale: string;
+    suggestedOwner: string | null;
+    suggestedOwnerId: string | null;
+  };
+  rootCause: { label: string; details: string | null } | null;
+  blockerOwner: { label: string; details: string | null } | null;
+  reopenRisk: { level: "low" | "medium" | "high"; rationale: string | null } | null;
+  blindSpotFlags: Array<Record<string, unknown>>;
+  evidence: Array<Record<string, unknown>>;
+  confidence: number;
+}
 ```
 
 Use the same provider abstraction and heuristic fallback rather than creating a second AI stack.
@@ -390,7 +409,7 @@ Add a function like:
 ```ts
 export async function regenerateInterventionCopilot(
   tenantDb: TenantDb,
-  input: { caseId: string; officeId: string }
+  input: { caseId: string; officeId: string; requestedBy: string }
 ) {
   // load case + detail context
   // derive similar-case summaries
@@ -439,7 +458,7 @@ Expected:
 - [ ] **Step 6: Commit packet generation and invalidation**
 
 ```bash
-git add server/src/modules/ai-copilot/intervention-service.ts server/src/modules/ai-copilot/provider.ts server/src/modules/ai-copilot/service.ts server/tests/modules/ai-copilot/intervention-case-copilot.test.ts server/tests/modules/ai-copilot/routes.test.ts
+git add server/src/modules/ai-copilot/intervention-service.ts server/src/modules/ai-copilot/prompt-contract.ts server/src/modules/ai-copilot/provider.ts server/src/modules/ai-copilot/service.ts server/tests/modules/ai-copilot/intervention-case-copilot.test.ts server/tests/modules/ai-copilot/routes.test.ts
 git commit -m "feat: add intervention copilot packet generation"
 ```
 
@@ -477,6 +496,17 @@ expect(body).toMatchObject({
   packetGeneratedAt: expect.anything(),
       viewerFeedbackValue: expect.toSatisfy((value) => value === null || typeof value === "string"),
 });
+```
+
+Use a standard matcher in the route test and assert the nullable string separately after parsing the body:
+
+```ts
+expect(body).toMatchObject({
+  packet: expect.anything(),
+  recommendedAction: expect.anything(),
+  currentAssignee: expect.anything(),
+});
+expect(body.viewerFeedbackValue === null || typeof body.viewerFeedbackValue === "string").toBe(true);
 ```
 
 - [ ] **Step 2: Implement the routes**
@@ -539,6 +569,7 @@ git commit -m "feat: add intervention copilot routes"
 - Create: `client/src/components/ai/intervention-case-copilot-panel.tsx`
 - Create: `client/src/components/ai/intervention-case-copilot-panel.test.tsx`
 - Modify: `client/src/components/ai/intervention-detail-panel.tsx`
+- Create: `client/src/hooks/use-admin-interventions.test.ts`
 
 - [ ] **Step 1: Write failing client tests for panel states**
 
@@ -630,7 +661,22 @@ describe("InterventionCaseCopilotPanel", () => {
 });
 ```
 
-- [ ] **Step 2: Add `useInterventionCopilot(caseId)`**
+- [ ] **Step 2: Add focused hook tests for polling and action wiring**
+
+Create `client/src/hooks/use-admin-interventions.test.ts` alongside the existing hook tests and follow the current no-DOM pattern used in `use-ai-ops.test.ts`:
+
+- mock `react` state/effect primitives
+- mock `@/lib/api`
+- verify the hook:
+  - fetches `/ai/ops/interventions/:id/copilot`
+  - polls every 5 seconds while `refreshQueuedAt` is newer than `packetGeneratedAt`
+  - clears pending once a refreshed packet arrives
+  - posts regenerate to `/ai/ops/interventions/:id/copilot/regenerate`
+  - posts feedback through the existing packet feedback route
+
+This keeps the hook behavior covered without requiring a `jsdom` client test environment.
+
+- [ ] **Step 3: Add `useInterventionCopilot(caseId)`**
 
 In `use-admin-interventions.ts`, add:
 
@@ -641,7 +687,7 @@ In `use-admin-interventions.ts`, add:
 - 5-second polling while `refreshQueuedAt` is set
 - clear pending when `packetGeneratedAt >= refreshQueuedAt`
 
-- [ ] **Step 3: Build the embedded panel component**
+- [ ] **Step 4: Build the embedded panel component**
 
 `intervention-case-copilot-panel.tsx` should render:
 
@@ -656,7 +702,13 @@ In `use-admin-interventions.ts`, add:
 
 Keep it visually consistent with the existing detail sheet cards. No new tabs.
 
-- [ ] **Step 4: Insert the panel into `InterventionDetailPanel`**
+- [ ] **Step 5: Insert the panel into `InterventionDetailPanel`**
+
+Keep the ownership split explicit:
+
+- `useInterventionCopilot(caseId)` stays in `InterventionDetailPanel`
+- `InterventionCaseCopilotPanel` stays presentational and receives `data`, `loading`, `error`, `onRefresh`, and `onFeedback`
+- the detail sheet remains responsible for localized retry/feedback wiring
 
 Place the copilot block:
 
@@ -665,7 +717,7 @@ Place the copilot block:
 
 The detail sheet must keep working if the copilot fails or loads slowly.
 
-- [ ] **Step 5: Add a focused detail-panel mount test**
+- [ ] **Step 6: Add a focused detail-panel server-render test**
 
 Create `client/src/components/ai/intervention-detail-panel.test.tsx` to verify:
 
@@ -673,22 +725,24 @@ Create `client/src/components/ai/intervention-detail-panel.test.tsx` to verify:
 - the copilot section mounts in the sheet body
 - localized copilot errors do not suppress the rest of the detail content
 
-- [ ] **Step 6: Run focused client tests**
+Keep this test server-rendered with `renderToStaticMarkup` like the panel tests. Do not require a DOM test environment for this slice.
+
+- [ ] **Step 7: Run focused client tests**
 
 Run:
 
 ```bash
-npx vitest run client/src/components/ai/intervention-case-copilot-panel.test.tsx client/src/components/ai/intervention-detail-panel.test.tsx --config client/vite.config.ts
+npx vitest run client/src/hooks/use-admin-interventions.test.ts client/src/components/ai/intervention-case-copilot-panel.test.tsx client/src/components/ai/intervention-detail-panel.test.tsx --config client/vite.config.ts
 ```
 
 Expected:
 
 - PASS
 
-- [ ] **Step 7: Commit the client copilot UI**
+- [ ] **Step 8: Commit the client copilot UI**
 
 ```bash
-git add client/src/hooks/use-admin-interventions.ts client/src/components/ai/intervention-case-copilot-panel.tsx client/src/components/ai/intervention-case-copilot-panel.test.tsx client/src/components/ai/intervention-detail-panel.tsx client/src/components/ai/intervention-detail-panel.test.tsx
+git add client/src/hooks/use-admin-interventions.ts client/src/hooks/use-admin-interventions.test.ts client/src/components/ai/intervention-case-copilot-panel.tsx client/src/components/ai/intervention-case-copilot-panel.test.tsx client/src/components/ai/intervention-detail-panel.tsx client/src/components/ai/intervention-detail-panel.test.tsx
 git commit -m "feat: add intervention case copilot panel"
 ```
 
@@ -703,7 +757,7 @@ Run:
 
 ```bash
 npx vitest run server/tests/modules/ai-copilot/intervention-case-copilot.test.ts server/tests/modules/ai-copilot/routes.test.ts
-npx vitest run client/src/components/ai/intervention-case-copilot-panel.test.tsx client/src/components/ai/intervention-detail-panel.test.tsx --config client/vite.config.ts
+npx vitest run client/src/hooks/use-admin-interventions.test.ts client/src/components/ai/intervention-case-copilot-panel.test.tsx client/src/components/ai/intervention-detail-panel.test.tsx --config client/vite.config.ts
 npm run typecheck
 git diff --check
 ```
@@ -737,7 +791,7 @@ After each fix, rerun:
 
 ```bash
 npx vitest run server/tests/modules/ai-copilot/intervention-case-copilot.test.ts server/tests/modules/ai-copilot/routes.test.ts
-npx vitest run client/src/components/ai/intervention-case-copilot-panel.test.tsx client/src/components/ai/intervention-detail-panel.test.tsx --config client/vite.config.ts
+npx vitest run client/src/hooks/use-admin-interventions.test.ts client/src/components/ai/intervention-case-copilot-panel.test.tsx client/src/components/ai/intervention-detail-panel.test.tsx --config client/vite.config.ts
 npm run typecheck
 git diff --check
 ```
