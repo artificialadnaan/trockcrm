@@ -274,6 +274,8 @@ The copilot input should include:
 - current case status
 - severity
 - age
+- current assignee id/name
+- current owner/team context from the case and generated task, when present
 - escalated flag
 - snoozed-until / breach state
 - reopen count
@@ -384,6 +386,12 @@ The hook should expose:
 - `regenerate`
 - `submitFeedback`
 
+Queued refresh behavior:
+
+- if regenerate is queued rather than synchronous, the hook polls `GET /api/ai/ops/interventions/:id/copilot` every 5 seconds while `refreshQueuedAt` is set
+- polling stops once `packetGeneratedAt >= refreshQueuedAt`
+- polling also stops if the request errors, in which case the localized copilot error state is shown
+
 The returned view should include:
 
 - `packet`
@@ -393,6 +401,7 @@ The returned view should include:
 - `rootCause`
 - `blockerOwner`
 - `reopenRisk`
+- `currentAssignee`
 - `isRefreshPending`
 - `isStale`
 - `latestCaseChangedAt`
