@@ -24,6 +24,8 @@ const interventionServiceMocks = vi.hoisted(() => ({
   runManagerAlertPreview: vi.fn(),
   sendManagerAlertSummary: vi.fn(),
   getInterventionCaseDetail: vi.fn(),
+  buildInterventionCopilotView: vi.fn(),
+  regenerateInterventionCopilot: vi.fn(),
   assignInterventionCases: vi.fn(),
   assertHomogeneousBatchConclusionCohort: vi.fn(),
   snoozeInterventionCases: vi.fn(),
@@ -61,6 +63,8 @@ vi.mock("../../../src/modules/ai-copilot/intervention-service.js", () => ({
   listInterventionCases: interventionServiceMocks.listInterventionCases,
   getInterventionAnalyticsDashboard: interventionServiceMocks.getInterventionAnalyticsDashboard,
   getInterventionCaseDetail: interventionServiceMocks.getInterventionCaseDetail,
+  buildInterventionCopilotView: interventionServiceMocks.buildInterventionCopilotView,
+  regenerateInterventionCopilot: interventionServiceMocks.regenerateInterventionCopilot,
   assignInterventionCases: interventionServiceMocks.assignInterventionCases,
   assertHomogeneousBatchConclusionCohort: interventionServiceMocks.assertHomogeneousBatchConclusionCohort,
   snoozeInterventionCases: interventionServiceMocks.snoozeInterventionCases,
@@ -634,6 +638,156 @@ describe("ai copilot routes", () => {
     const res = await request(app).get("/api/ai/ops/interventions/missing-case");
 
     expect(res.status).toBe(404);
+  });
+
+  it("returns intervention copilot view for director users", async () => {
+    interventionServiceMocks.buildInterventionCopilotView.mockResolvedValue({
+      packet: {
+        id: "packet-1",
+        scopeType: "intervention_case",
+        scopeId: "case-1",
+        packetKind: "intervention_case",
+        status: "ready",
+        snapshotHash: "hash-1",
+        modelName: "heuristic",
+        summaryText: "Owner alignment is likely needed.",
+        nextStepJson: null,
+        blindSpotsJson: [],
+        evidenceJson: [],
+        confidence: 0.78,
+        generatedAt: "2026-04-19T12:00:00.000Z",
+        expiresAt: null,
+        createdAt: "2026-04-19T12:00:00.000Z",
+        updatedAt: "2026-04-19T12:00:00.000Z",
+      },
+      recommendedAction: {
+        action: "assign",
+        rationale: "Task owner and case owner do not match.",
+        suggestedOwner: "Admin User",
+        suggestedOwnerId: "manager-1",
+      },
+      currentAssignee: { id: "manager-2", name: "Director User" },
+      evidence: [],
+      riskFlags: [],
+      rootCause: null,
+      blockerOwner: null,
+      reopenRisk: null,
+      similarCases: [],
+      isRefreshPending: false,
+      isStale: false,
+      latestCaseChangedAt: "2026-04-19T12:00:00.000Z",
+      packetGeneratedAt: "2026-04-19T12:00:00.000Z",
+      viewerFeedbackValue: null,
+    });
+
+    const app = createApp("director");
+    const res = await request(app).get("/api/ai/ops/interventions/case-1/copilot");
+
+    expect(res.status).toBe(200);
+    expect(interventionServiceMocks.buildInterventionCopilotView).toHaveBeenCalledWith(expect.anything(), {
+      officeId: "office-1",
+      caseId: "case-1",
+      viewerUserId: "director-1",
+    });
+    expect(res.body).toMatchObject({
+      packet: {
+        id: "packet-1",
+      },
+      recommendedAction: {
+        action: "assign",
+      },
+      currentAssignee: { id: "manager-2" },
+      evidence: [],
+      similarCases: [],
+      isRefreshPending: false,
+      isStale: false,
+      latestCaseChangedAt: "2026-04-19T12:00:00.000Z",
+      packetGeneratedAt: "2026-04-19T12:00:00.000Z",
+    });
+    expect(res.body.viewerFeedbackValue === null || typeof res.body.viewerFeedbackValue === "string").toBe(true);
+  });
+
+  it("returns intervention copilot view for admin users", async () => {
+    interventionServiceMocks.buildInterventionCopilotView.mockResolvedValue({
+      packet: {
+        id: "packet-1",
+        scopeType: "intervention_case",
+        scopeId: "case-1",
+        packetKind: "intervention_case",
+        status: "ready",
+        snapshotHash: "hash-1",
+        modelName: "heuristic",
+        summaryText: "Owner alignment is likely needed.",
+        nextStepJson: null,
+        blindSpotsJson: [],
+        evidenceJson: [],
+        confidence: 0.78,
+        generatedAt: "2026-04-19T12:00:00.000Z",
+        expiresAt: null,
+        createdAt: "2026-04-19T12:00:00.000Z",
+        updatedAt: "2026-04-19T12:00:00.000Z",
+      },
+      recommendedAction: null,
+      currentAssignee: null,
+      evidence: [],
+      riskFlags: [],
+      rootCause: null,
+      blockerOwner: null,
+      reopenRisk: null,
+      similarCases: [],
+      isRefreshPending: false,
+      isStale: false,
+      latestCaseChangedAt: null,
+      packetGeneratedAt: null,
+      viewerFeedbackValue: null,
+    });
+
+    const app = createApp("admin");
+    const res = await request(app).get("/api/ai/ops/interventions/case-1/copilot");
+
+    expect(res.status).toBe(200);
+    expect(interventionServiceMocks.buildInterventionCopilotView).toHaveBeenCalledWith(expect.anything(), {
+      officeId: "office-1",
+      caseId: "case-1",
+      viewerUserId: "admin-1",
+    });
+  });
+
+  it("regenerates intervention copilot packets for director users", async () => {
+    interventionServiceMocks.regenerateInterventionCopilot.mockResolvedValue({
+      queued: false,
+      packetId: "packet-1",
+      packetGeneratedAt: "2026-04-19T12:00:00.000Z",
+      requestedBy: "director-1",
+    });
+
+    const app = createApp("director");
+    const res = await request(app).post("/api/ai/ops/interventions/case-1/copilot/regenerate").send({});
+
+    expect(res.status).toBe(200);
+    expect(interventionServiceMocks.regenerateInterventionCopilot).toHaveBeenCalledWith(expect.anything(), {
+      officeId: "office-1",
+      caseId: "case-1",
+      requestedBy: "director-1",
+    });
+    expect(res.body).toEqual({
+      queued: false,
+      packetId: "packet-1",
+      packetGeneratedAt: "2026-04-19T12:00:00.000Z",
+      requestedBy: "director-1",
+    });
+  });
+
+  it("rejects intervention copilot routes for unauthorized roles", async () => {
+    const app = createApp("rep");
+
+    const getRes = await request(app).get("/api/ai/ops/interventions/case-1/copilot");
+    const postRes = await request(app).post("/api/ai/ops/interventions/case-1/copilot/regenerate").send({});
+
+    expect(getRes.status).toBe(403);
+    expect(postRes.status).toBe(403);
+    expect(interventionServiceMocks.buildInterventionCopilotView).not.toHaveBeenCalled();
+    expect(interventionServiceMocks.regenerateInterventionCopilot).not.toHaveBeenCalled();
   });
 
   it("applies batch intervention mutations for director users", async () => {
