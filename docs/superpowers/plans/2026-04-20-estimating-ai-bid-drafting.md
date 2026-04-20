@@ -516,6 +516,7 @@ const [run] = await db.insert(costCatalogSyncRuns).values({
 
 ```ts
 await db.transaction(async (tx) => {
+  await markPriorCatalogSnapshotsSuperseded(tx, sourceId);
   const snapshotVersion = await createCatalogSnapshotVersion(tx, {
     sourceId,
     syncRunId: run.id,
@@ -597,7 +598,7 @@ export async function createEstimateSourceDocument({
   enqueueEstimateDocumentOcr,
   input,
 }: CreateEstimateSourceDocumentArgs) {
-  const existing = input.fileId
+  const existing = input.fileId && input.contentHash
     ? await tenantDb
         .select({
           id: estimateSourceDocuments.id,
@@ -612,7 +613,7 @@ export async function createEstimateSourceDocument({
             input.projectId
               ? eq(estimateSourceDocuments.projectId, input.projectId)
               : isNull(estimateSourceDocuments.projectId),
-            eq(estimateSourceDocuments.contentHash, input.contentHash ?? "")
+            eq(estimateSourceDocuments.contentHash, input.contentHash)
           )
         )
     : [];
@@ -950,11 +951,11 @@ export async function getHistoricalPricingSignals(db: TenantDb, dealId: string) 
 
 ```ts
 export async function listCatalogCandidatesForMatching(
-  db: TenantDb,
+  appDb: AppDb,
   sourceId: string,
   snapshotVersionId: string
 ) {
-  return db
+  return appDb
     .select({
       id: costCatalogItems.id,
       name: costCatalogItems.name,
@@ -1062,15 +1063,15 @@ export async function rankExtractionMatches({
 }
 ```
 
-- [ ] **Step 5: Orchestrate generation to write extraction matches and pricing recommendations with evidence**
+- [ ] **Step 7: Orchestrate generation to write extraction matches and pricing recommendations with evidence**
 
 ```ts
 const historicalSignals = await getHistoricalPricingSignals(tenantDb, deal.id);
-const catalogSnapshotVersionId = await resolveActiveCatalogSnapshotVersionId(tenantDb, catalogSourceId);
+const catalogSnapshotVersionId = await resolveActiveCatalogSnapshotVersionId(appDb, catalogSourceId);
 try {
   for (const extraction of pendingExtractions) {
     const catalogItems = await listCatalogCandidatesForMatching(
-      tenantDb,
+      appDb,
       catalogSourceId,
       catalogSnapshotVersionId
     );
@@ -1126,13 +1127,13 @@ try {
 }
 ```
 
-- [ ] **Step 7: Re-run the matching and pricing tests**
+- [ ] **Step 8: Re-run the matching and pricing tests**
 
 Run: `npx vitest run server/tests/modules/estimating/matching-service.test.ts server/tests/modules/estimating/pricing-service.test.ts`
 
 Expected: PASS
 
-- [ ] **Step 8: Commit the extraction, matching, and pricing task**
+- [ ] **Step 9: Commit the extraction, matching, and pricing task**
 
 ```bash
 git add server/src/modules/estimating/catalog-read-model-service.ts server/src/modules/estimating/historical-pricing-service.ts server/src/modules/estimating/extraction-service.ts server/src/modules/estimating/matching-service.ts server/src/modules/estimating/pricing-service.ts worker/src/jobs/estimate-generation.ts server/tests/modules/estimating/matching-service.test.ts server/tests/modules/estimating/pricing-service.test.ts
@@ -1288,7 +1289,7 @@ router.post("/:dealId/estimating/recommendations/:recommendationId/approve", asy
 ```ts
 export async function approveEstimateRecommendation(args: ApproveEstimateRecommendationArgs) {
   await assertRecommendationBelongsToDeal(args.tenantDb, args.dealId, args.recommendationId);
-  await markRecommendationApproved(args.tenantDb, args.recommendationId);
+  const recommendation = await markRecommendationApproved(args.tenantDb, args.recommendationId);
   await insertEstimateReviewEvent(args.tenantDb, {
     dealId: args.dealId,
     subjectType: "estimate_pricing_recommendation",
@@ -1297,6 +1298,7 @@ export async function approveEstimateRecommendation(args: ApproveEstimateRecomme
     userId: args.userId,
     reason: args.reason,
   });
+  return recommendation;
 }
 ```
 
@@ -1357,6 +1359,7 @@ git commit -m "feat: promote approved estimate recommendations into estimates"
 - Modify: `server/src/modules/deals/routes.ts`
 - Modify: `client/src/pages/deals/deal-estimates-tab.tsx`
 - Test: `server/tests/modules/estimating/copilot-service.test.ts`
+- Test: `server/tests/modules/estimating/workflow-state-routes.test.ts`
 - Test: `client/src/components/estimating/estimating-workflow-shell.test.tsx`
 
 - [ ] **Step 1: Write a failing UI workflow test**
@@ -1473,6 +1476,33 @@ router.post("/:dealId/estimating/extractions/:extractionId/approve", async (req,
     extractionId: req.params.extractionId,
     userId: req.user.id,
   });
+  await insertEstimateReviewEvent(req.tenantDb!, {
+    dealId: req.params.dealId,
+    subjectType: "estimate_extraction",
+    subjectId: req.params.extractionId,
+    eventType: "approved",
+    userId: req.user!.id,
+  });
+
+  res.status(200).json({ extraction });
+});
+
+router.post("/:dealId/estimating/extractions/:extractionId/reject", async (req, res) => {
+  const extraction = await rejectEstimateExtraction({
+    tenantDb: req.tenantDb,
+    dealId: req.params.dealId,
+    extractionId: req.params.extractionId,
+    userId: req.user.id,
+    reason: req.body.reason ?? null,
+  });
+  await insertEstimateReviewEvent(req.tenantDb!, {
+    dealId: req.params.dealId,
+    subjectType: "estimate_extraction",
+    subjectId: req.params.extractionId,
+    eventType: "rejected",
+    reason: req.body.reason ?? null,
+    userId: req.user!.id,
+  });
 
   res.status(200).json({ extraction });
 });
@@ -1496,6 +1526,33 @@ router.post("/:dealId/estimating/matches/:matchId/select", async (req, res) => {
     dealId: req.params.dealId,
     matchId: req.params.matchId,
     userId: req.user.id,
+  });
+  await insertEstimateReviewEvent(req.tenantDb!, {
+    dealId: req.params.dealId,
+    subjectType: "estimate_extraction_match",
+    subjectId: req.params.matchId,
+    eventType: "selected",
+    userId: req.user!.id,
+  });
+
+  res.status(200).json({ match });
+});
+
+router.post("/:dealId/estimating/matches/:matchId/reject", async (req, res) => {
+  const match = await rejectEstimateExtractionMatch({
+    tenantDb: req.tenantDb,
+    dealId: req.params.dealId,
+    matchId: req.params.matchId,
+    userId: req.user.id,
+    reason: req.body.reason ?? null,
+  });
+  await insertEstimateReviewEvent(req.tenantDb!, {
+    dealId: req.params.dealId,
+    subjectType: "estimate_extraction_match",
+    subjectId: req.params.matchId,
+    eventType: "rejected",
+    reason: req.body.reason ?? null,
+    userId: req.user!.id,
   });
 
   res.status(200).json({ match });
@@ -1625,7 +1682,16 @@ router.get("/:dealId/estimating/review-log", async (req, res) => {
 router.post("/:dealId/estimating/copilot", async (req, res) => {
   const deal = await getDealById(req.tenantDb!, req.params.dealId, req.user!.role, req.user!.id);
   if (!deal) throw new AppError(404, "Deal not found");
-  const answer = await answerEstimatingCopilotQuestion(req.body);
+  const context = await buildEstimatingCopilotContext({
+    tenantDb: req.tenantDb!,
+    appDb: req.appDb!,
+    dealId: req.params.dealId,
+    question: req.body.question,
+  });
+  const answer = await answerEstimatingCopilotQuestion({
+    question: req.body.question,
+    context,
+  });
   res.status(200).json({ answer });
 });
 ```
