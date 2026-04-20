@@ -14,6 +14,17 @@ export { procoreOauthTokens } from "./public/procore-oauth-tokens.js";
 export { procoreWebhookLog } from "./public/procore-webhook-log.js";
 export { userGraphTokens, graphTokenStatusEnum } from "./public/user-graph-tokens.js";
 export { jobQueue, jobStatusEnum } from "./public/job-queue.js";
+export {
+  costCatalogSources,
+  costCatalogSnapshotVersions,
+  costCatalogSyncRuns,
+} from "./public/cost-catalog-sources.js";
+export {
+  costCatalogCodes,
+  costCatalogItemCodes,
+  costCatalogItems,
+  costCatalogPrices,
+} from "./public/cost-catalog-items.js";
 
 // Tenant schema tables (used for Drizzle type resolution when querying via tenantDb)
 export { deals, workflowRouteEnum, proposalStatusEnum, estimatingSubstageEnum } from "./tenant/deals.js";
@@ -31,6 +42,14 @@ export { duplicateQueue, duplicateMatchTypeEnum, duplicateStatusEnum } from "./t
 export { emails, emailDirectionEnum } from "./tenant/emails.js";
 export { activities, activityTypeEnum } from "./tenant/activities.js";
 export { files, fileCategoryEnum } from "./tenant/files.js";
+export { estimateSourceDocuments, estimateDocumentPages } from "./tenant/estimate-source-documents.js";
+export {
+  estimateExtractions,
+  estimateExtractionMatches,
+  estimateGenerationRuns,
+  estimatePricingRecommendations,
+  estimateReviewEvents,
+} from "./tenant/estimate-extractions.js";
 export { tasks, taskTypeEnum, taskPriorityEnum, taskStatusEnum } from "./tenant/tasks.js";
 export { taskResolutionState, taskResolutionStatusEnum } from "./tenant/task-resolution-state.js";
 export { notifications, notificationTypeEnum } from "./tenant/notifications.js";
