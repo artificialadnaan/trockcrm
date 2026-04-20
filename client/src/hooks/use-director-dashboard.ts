@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { api } from "@/lib/api";
+import type { FunnelBucketSummary } from "./use-dashboard";
 
 export interface RepPerformanceCard {
   repId: string;
@@ -13,6 +14,8 @@ export interface RepPerformanceCard {
 }
 
 export interface DirectorDashboardData {
+  officeFunnelBuckets: FunnelBucketSummary[];
+  repFunnelRows: DirectorRepFunnelRow[];
   repCards: RepPerformanceCard[];
   pipelineByStage: Array<{
     stageId: string;
@@ -62,6 +65,16 @@ export interface DirectorDashboardData {
     totalValue: number;
     totalCount: number;
   };
+}
+
+export interface DirectorRepFunnelRow {
+  repId: string;
+  repName: string;
+  leads: number;
+  qualifiedLeads: number;
+  opportunities: number;
+  dueDiligence: number;
+  estimating: number;
 }
 
 export interface RepDetailData {
