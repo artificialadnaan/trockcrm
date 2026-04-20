@@ -1,8 +1,8 @@
-import type { ReactElement, ReactNode } from "react";
+import type { ReactNode } from "react";
 
 type PageHeaderActions = {
   primary?: ReactNode;
-  secondaryAction?: ReactElement;
+  secondaryAction?: ReactNode;
   overflow?: ReactNode;
 };
 
