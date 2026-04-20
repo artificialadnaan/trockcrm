@@ -6,6 +6,8 @@ import type {
   InterventionPolicyRecommendationDecisionStatus,
   InterventionPolicyRecommendationEvaluationSummary,
   InterventionPolicyRecommendationHistoryEntry,
+  InterventionPolicyRecommendationQualificationBlocker,
+  InterventionPolicyRecommendationQualificationTuningAction,
   InterventionPolicyRecommendationTuningGuidanceEntry,
   InterventionPolicyRecommendationReviewDecisionFilter,
   InterventionPolicyRecommendationReviewModel,
@@ -15,6 +17,7 @@ import type {
   InterventionPolicyRecommendationYieldNextAction,
 } from "./intervention-types.js";
 import { getInterventionPolicyRecommendationEvaluationSummary } from "./intervention-policy-application-service.js";
+import { getInterventionPolicyRecommendationSeedValidationStatus } from "./intervention-policy-recommendation-seed-service.js";
 import {
   POLICY_RECOMMENDATION_PRIMARY_CAP,
   POLICY_RECOMMENDATION_QUALIFICATION_FLOOR,
@@ -317,6 +320,145 @@ function buildYieldSummary(
   };
 }
 
+function mapSuppressionToDiagnosticBlocker(
+  decision: InterventionPolicyRecommendationDecisionStatus,
+  suppressionReason: string | null
+): InterventionPolicyRecommendationQualificationBlocker {
+  const reason = suppressionReason ?? decision;
+  if (reason === "suppressed_by_apply_ineligible") {
+    return "eligibility_limited";
+  }
+  if (reason === "suppressed_by_missing_target" || reason === "missing_policy_target") {
+    return "target_limited";
+  }
+  if (reason === "qualified_suppressed_by_cap") {
+    return "cap_limited";
+  }
+  if (reason === "suppressed_by_threshold" || reason === "threshold_not_met") {
+    return "threshold_limited";
+  }
+  if (reason === "suppressed_by_predicate" || reason === "predicate_not_met") {
+    return "history_limited";
+  }
+  return "healthy_low_volume";
+}
+
+function mapBlockerToRecommendedAction(
+  blocker: InterventionPolicyRecommendationQualificationBlocker
+): InterventionPolicyRecommendationQualificationTuningAction {
+  if (blocker === "history_limited") return "seed_non_prod_validation";
+  if (blocker === "threshold_limited") return "review_threshold_floor_in_code";
+  if (blocker === "cap_limited") return "review_ranking_cap_in_code";
+  if (blocker === "target_limited") return "review_target_coverage";
+  if (blocker === "eligibility_limited") return "review_apply_eligibility";
+  return "hold_current_thresholds";
+}
+
+function diagnosticBlockerSortValue(blocker: InterventionPolicyRecommendationQualificationBlocker) {
+  switch (blocker) {
+    case "target_limited":
+      return 0;
+    case "eligibility_limited":
+      return 1;
+    case "threshold_limited":
+      return 2;
+    case "cap_limited":
+      return 3;
+    case "history_limited":
+      return 4;
+    default:
+      return 4;
+  }
+}
+
+function buildQualificationDiagnostics(
+  summary: InterventionPolicyRecommendationEvaluationSummary,
+  windowDecisionRows: PolicyDecisionRow[]
+): InterventionPolicyRecommendationReviewModel["diagnostics"] {
+  const taxonomyDiagnostics = summary.byTaxonomy.map((row) => {
+    const suppressedCounts = {
+      predicateBlocked: row.counts.suppressedByPredicate,
+      thresholdBlocked: row.counts.suppressedByThreshold,
+      capBlocked: row.counts.qualifiedSuppressedByCap,
+      missingTarget: row.counts.suppressedByMissingTarget,
+      applyIneligible: row.counts.suppressedByApplyIneligible,
+    };
+
+    const blockerCounts: Array<{
+      blocker: InterventionPolicyRecommendationQualificationBlocker;
+      count: number;
+    }> = [
+      { blocker: "threshold_limited", count: suppressedCounts.thresholdBlocked },
+      { blocker: "history_limited", count: suppressedCounts.predicateBlocked },
+      { blocker: "cap_limited", count: suppressedCounts.capBlocked },
+      { blocker: "target_limited", count: suppressedCounts.missingTarget },
+      { blocker: "eligibility_limited", count: suppressedCounts.applyIneligible },
+    ];
+    const dominant = blockerCounts
+      .filter((entry) => entry.count > 0)
+      .sort((left, right) => right.count - left.count || diagnosticBlockerSortValue(left.blocker) - diagnosticBlockerSortValue(right.blocker))[0];
+    const dominantBlocker = dominant?.blocker ?? "healthy_low_volume";
+
+    const topSuppressedCandidates = windowDecisionRows
+      .filter((candidate) => candidate.taxonomy === row.taxonomy && candidate.decision !== "qualified_rendered")
+      .sort((left, right) => {
+        const blockerDiff =
+          diagnosticBlockerSortValue(mapSuppressionToDiagnosticBlocker(left.decision, left.suppression_reason)) -
+          diagnosticBlockerSortValue(mapSuppressionToDiagnosticBlocker(right.decision, right.suppression_reason));
+        if (blockerDiff !== 0) return blockerDiff;
+        if ((right.score ?? -Infinity) !== (left.score ?? -Infinity)) {
+          return (right.score ?? -Infinity) - (left.score ?? -Infinity);
+        }
+        const createdAtDiff =
+          new Date(toIso(right.created_at) ?? 0).getTime() - new Date(toIso(left.created_at) ?? 0).getTime();
+        if (createdAtDiff !== 0) return createdAtDiff;
+        return left.grouping_key.localeCompare(right.grouping_key);
+      })
+      .slice(0, 5)
+      .map((candidate) => ({
+        groupingKey: candidate.grouping_key,
+        decision: candidate.decision,
+        suppressionReason: candidate.suppression_reason,
+        score: candidate.score,
+        confidence: candidate.confidence,
+        createdAt: toIso(candidate.created_at),
+      }));
+
+    return {
+      scope: "historical_window" as const,
+      taxonomy: row.taxonomy,
+      renderedCount: row.counts.qualifiedRendered,
+      suppressedCounts,
+      dominantBlocker,
+      topSuppressedCandidates,
+      recommendedTuningAction: mapBlockerToRecommendedAction(dominantBlocker),
+    };
+  });
+
+  const systemBlockerCounts = new Map<InterventionPolicyRecommendationQualificationBlocker, number>();
+  for (const row of windowDecisionRows) {
+    if (row.decision === "qualified_rendered") continue;
+    const blocker = mapSuppressionToDiagnosticBlocker(row.decision, row.suppression_reason);
+    systemBlockerCounts.set(blocker, (systemBlockerCounts.get(blocker) ?? 0) + 1);
+  }
+
+  const dominantBlockers = [...systemBlockerCounts.entries()]
+    .sort((left, right) => right[1] - left[1] || diagnosticBlockerSortValue(left[0]) - diagnosticBlockerSortValue(right[0]))
+    .map(([blocker, count]) => ({ blocker, count }));
+
+  return {
+    window: summary.window,
+    generatedAt: summary.generatedAt,
+    systemDiagnostics: {
+      scope: "historical_window",
+      dominantBlockers,
+      recommendedNextAction: mapBlockerToRecommendedAction(dominantBlockers[0]?.blocker ?? "healthy_low_volume"),
+    },
+    taxonomyDiagnostics,
+    seededValidationStatus: getInterventionPolicyRecommendationSeedValidationStatus(),
+  };
+}
+
 function historySummaryForEvent(row: { eventType: string; title: string; rejectionReason: string | null }) {
   if (row.eventType === "rendered") return `Rendered recommendation "${row.title}".`;
   if (row.eventType === "applied") return `Applied recommendation "${row.title}".`;
@@ -514,6 +656,7 @@ export async function getInterventionPolicyRecommendationReview(
       emptyStateReason: null,
       latestDecisionRows: [],
       recentHistory,
+      diagnostics: buildQualificationDiagnostics(summary, windowDecisionRows),
       yield: buildYieldSummary(summary, windowDecisionRows),
       tuning: buildTuningGuidance(summary),
     };
@@ -539,6 +682,7 @@ export async function getInterventionPolicyRecommendationReview(
     emptyStateReason: buildEmptyStateReason(allSnapshotRows),
     latestDecisionRows: mapReviewRows(rawRows),
     recentHistory,
+    diagnostics: buildQualificationDiagnostics(summary, windowDecisionRows),
     yield: buildYieldSummary(summary, windowDecisionRows),
     tuning: buildTuningGuidance(summary),
   };

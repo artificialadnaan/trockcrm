@@ -26,6 +26,21 @@ function formatHistoryEventLabel(value: string) {
   return value.split("_").join(" ");
 }
 
+function formatDiagnosticActionLabel(value: string) {
+  return value.split("_").join(" ");
+}
+
+function formatDiagnosticBlockerLabel(value: string) {
+  return value.split("_").join(" ");
+}
+
+function formatOccurredAtLabel(value: string | null | undefined) {
+  if (!value) return "Unknown time";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Unknown time";
+  return date.toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
 function formatPolicyDiffValue(value: number | string | null | undefined, mode?: "percent") {
   if (value == null) return "Not set";
   if (mode === "percent") return `${value}%`;
@@ -461,6 +476,7 @@ export function InterventionPolicyRecommendationsSection({
           </div>
           <div className="rounded-lg border border-border/70 bg-white px-3 py-3">
             <div className="text-[11px] uppercase tracking-widest text-muted-foreground">Historical window summary</div>
+            <div className="mt-1 text-xs text-muted-foreground">Historical window summary for the selected review range.</div>
             <div className="mt-3 flex flex-wrap gap-2">
               {([
                 ["7d", "last_7_days"],
@@ -483,6 +499,7 @@ export function InterventionPolicyRecommendationsSection({
           </div>
           <div className="rounded-lg border border-border/70 bg-white px-3 py-3">
             <div className="text-[11px] uppercase tracking-widest text-muted-foreground">Latest decision diagnostics</div>
+            <div className="mt-1 text-xs text-muted-foreground">Latest snapshot truth for the active recommendation snapshot.</div>
             <div className="mt-3 flex flex-wrap gap-2">
               {(["all", "rendered", "suppressed"] as const).map((value) => (
                 <Button key={value} variant={reviewDecision === value ? "default" : "outline"} onClick={() => setReviewDecision(value)}>
@@ -532,7 +549,7 @@ export function InterventionPolicyRecommendationsSection({
                     <div className="mt-1 text-muted-foreground">
                       {entry.taxonomy}
                       {entry.actorName ? ` · ${entry.actorName}` : ""}
-                      {entry.occurredAt ? ` · ${formatFreshnessLabel(entry.occurredAt)}` : ""}
+                      {entry.occurredAt ? ` · ${formatOccurredAtLabel(entry.occurredAt)}` : ""}
                     </div>
                     <div className="mt-1 text-muted-foreground">{entry.summary}</div>
                   </div>
@@ -544,6 +561,7 @@ export function InterventionPolicyRecommendationsSection({
           </div>
           <div className="rounded-lg border border-border/70 bg-white px-3 py-3">
             <div className="text-[11px] uppercase tracking-widest text-muted-foreground">Yield and decision history</div>
+            <div className="mt-1 text-xs text-muted-foreground">Historical window summary derived from persisted review activity.</div>
             <div className="mt-3 grid gap-2 text-sm text-gray-900 md:grid-cols-1">
               <div>Window rendered: {review.data?.yield.renderedTotals.total ?? 0}</div>
             </div>
@@ -584,6 +602,7 @@ export function InterventionPolicyRecommendationsSection({
           </div>
           <div className="rounded-lg border border-border/70 bg-white px-3 py-3">
             <div className="text-[11px] uppercase tracking-widest text-muted-foreground">Threshold tuning guidance</div>
+            <div className="mt-1 text-xs text-muted-foreground">Historical window guidance only. Production thresholds stay read-only here.</div>
             <div className="mt-3 space-y-2">
               {review.data?.tuning.guidance.length ? (
                 review.data.tuning.guidance.map((entry) => (
@@ -595,6 +614,90 @@ export function InterventionPolicyRecommendationsSection({
                 ))
               ) : (
                 <div className="text-sm text-muted-foreground">No tuning guidance is available yet.</div>
+              )}
+            </div>
+          </div>
+          <div className="rounded-lg border border-border/70 bg-white px-3 py-3">
+            <div className="text-[11px] uppercase tracking-widest text-muted-foreground">Qualification diagnostics</div>
+            <div className="mt-1 text-xs text-muted-foreground">
+              Historical window diagnostics generated {formatFreshnessLabel(review.data?.diagnostics.generatedAt ?? null)}.
+            </div>
+            <div className="mt-3 text-sm text-gray-900">
+              Next safe action: {formatDiagnosticActionLabel(review.data?.diagnostics.systemDiagnostics.recommendedNextAction ?? "hold_current_thresholds")}
+            </div>
+            <div className="mt-3 space-y-2">
+              {review.data?.diagnostics.systemDiagnostics.dominantBlockers.length ? (
+                review.data.diagnostics.systemDiagnostics.dominantBlockers.map((entry) => (
+                  <div key={entry.blocker} className="rounded-md border border-border/60 px-3 py-2 text-sm text-muted-foreground">
+                    {formatDiagnosticBlockerLabel(entry.blocker)} · {entry.count}
+                  </div>
+                ))
+              ) : (
+                <div className="text-sm text-muted-foreground">No dominant qualification blockers are available yet.</div>
+              )}
+            </div>
+            <div className="mt-4 space-y-3">
+              {review.data?.diagnostics.taxonomyDiagnostics.length ? (
+                review.data.diagnostics.taxonomyDiagnostics.map((entry) => (
+                  <div key={entry.taxonomy} className="rounded-md border border-border/60 px-3 py-3 text-sm">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="font-medium text-gray-900">{entry.taxonomy}</div>
+                      <div className="text-xs uppercase tracking-widest text-muted-foreground">
+                        {formatDiagnosticBlockerLabel(entry.dominantBlocker)}
+                      </div>
+                    </div>
+                    <div className="mt-2 grid gap-2 text-muted-foreground md:grid-cols-2 xl:grid-cols-3">
+                      <div>Rendered {entry.renderedCount}</div>
+                      <div>Predicate {entry.suppressedCounts.predicateBlocked}</div>
+                      <div>Threshold {entry.suppressedCounts.thresholdBlocked}</div>
+                      <div>Cap {entry.suppressedCounts.capBlocked}</div>
+                      <div>Missing target {entry.suppressedCounts.missingTarget}</div>
+                      <div>Apply ineligible {entry.suppressedCounts.applyIneligible}</div>
+                    </div>
+                    <div className="mt-2 text-muted-foreground">
+                      Recommended tuning action: {formatDiagnosticActionLabel(entry.recommendedTuningAction)}
+                    </div>
+                    <div className="mt-3 space-y-2">
+                      {entry.topSuppressedCandidates.length ? (
+                        entry.topSuppressedCandidates.map((candidate) => (
+                          <div
+                            key={`${entry.taxonomy}:${candidate.groupingKey}:${candidate.createdAt ?? "unknown"}`}
+                            className="rounded-md border border-border/50 px-3 py-2 text-muted-foreground"
+                          >
+                            {candidate.groupingKey} · {candidate.suppressionReason ?? candidate.decision}
+                            {candidate.score == null ? "" : ` · score ${candidate.score}`}
+                          </div>
+                        ))
+                      ) : (
+                        <div className="text-muted-foreground">No suppressed candidates are active for this taxonomy in the selected window.</div>
+                      )}
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <div className="text-sm text-muted-foreground">No qualification diagnostics are available yet.</div>
+              )}
+            </div>
+          </div>
+          <div className="rounded-lg border border-border/70 bg-white px-3 py-3">
+            <div className="text-[11px] uppercase tracking-widest text-muted-foreground">Seeded validation guidance</div>
+            <div className="mt-1 text-xs text-muted-foreground">
+              Non-production validation only · {review.data?.diagnostics.seededValidationStatus.scriptPath ?? "Seed script unavailable"}
+            </div>
+            <div className="mt-3 space-y-2">
+              {review.data?.diagnostics.seededValidationStatus.taxonomies.length ? (
+                review.data.diagnostics.seededValidationStatus.taxonomies.map((entry) => (
+                  <div key={entry.taxonomy} className="rounded-md border border-border/60 px-3 py-2 text-sm">
+                    <div className="font-medium text-gray-900">{entry.taxonomy}</div>
+                    <div className="text-muted-foreground">
+                      {entry.seedPathAvailable
+                        ? `Seed key ${entry.seedKey} · ${entry.supportsApplyUndo ? "apply/undo verification available" : "review-only verification"}`
+                        : "No non-production seed recipe is configured yet."}
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <div className="text-sm text-muted-foreground">No seeded validation guidance is available yet.</div>
               )}
             </div>
           </div>

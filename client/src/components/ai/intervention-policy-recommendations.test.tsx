@@ -87,6 +87,59 @@ const recommendationReview = {
       occurredAt: "2026-04-16T13:12:00.000Z",
     },
   ],
+  diagnostics: {
+    window: "last_30_days",
+    generatedAt: "2026-04-16T13:15:00.000Z",
+    systemDiagnostics: {
+      scope: "historical_window",
+      dominantBlockers: [
+        {
+          blocker: "threshold_limited",
+          count: 5,
+        },
+      ],
+      recommendedNextAction: "review_threshold_floor_in_code",
+    },
+    taxonomyDiagnostics: [
+      {
+        scope: "historical_window",
+        taxonomy: "snooze_policy_adjustment",
+        renderedCount: 3,
+        suppressedCounts: {
+          predicateBlocked: 1,
+          thresholdBlocked: 5,
+          capBlocked: 0,
+          missingTarget: 0,
+          applyIneligible: 0,
+        },
+        dominantBlocker: "threshold_limited",
+        topSuppressedCandidates: [
+          {
+            groupingKey: "waiting_on_customer",
+            decision: "suppressed_by_threshold",
+            suppressionReason: "threshold_not_met",
+            score: 53,
+            confidence: "medium",
+            createdAt: "2026-04-16T13:08:00.000Z",
+          },
+        ],
+        recommendedTuningAction: "review_threshold_floor_in_code",
+      },
+    ],
+    seededValidationStatus: {
+      scope: "non_production_only",
+      validationMode: "manual_seed_script",
+      scriptPath: "scripts/seed-intervention-policy-recommendation-qualification.ts",
+      taxonomies: [
+        {
+          taxonomy: "snooze_policy_adjustment",
+          seedPathAvailable: true,
+          seedKey: "policy-recommendation-fixture",
+          supportsApplyUndo: true,
+        },
+      ],
+    },
+  },
   yield: {
     renderedTotals: {
       window: "last_30_days",
@@ -165,5 +218,10 @@ describe("InterventionPolicyRecommendationsSection", () => {
     expect(html).toContain("Rendered 3");
     expect(html).toContain("monitor_only");
     expect(html).toContain("Applied to waiting-on-customer snooze policy.");
+    expect(html).toContain("Qualification diagnostics");
+    expect(html).toContain("review threshold floor in code");
+    expect(html).toContain("Latest snapshot truth for the active recommendation snapshot.");
+    expect(html).toContain("Non-production validation only");
+    expect(html).toContain("scripts/seed-intervention-policy-recommendation-qualification.ts");
   });
 });

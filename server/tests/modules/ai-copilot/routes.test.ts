@@ -233,6 +233,22 @@ describe("ai copilot routes", () => {
       emptyStateReason: null,
       latestDecisionRows: [],
       recentHistory: [],
+      diagnostics: {
+        window: "last_30_days",
+        generatedAt: "2026-04-19T12:00:00.000Z",
+        systemDiagnostics: {
+          scope: "historical_window",
+          dominantBlockers: [{ blocker: "history_limited", count: 1 }],
+          recommendedNextAction: "seed_non_prod_validation",
+        },
+        taxonomyDiagnostics: [],
+        seededValidationStatus: {
+          scope: "non_production_only",
+          validationMode: "manual_seed_script",
+          scriptPath: "scripts/seed-intervention-policy-recommendation-qualification.ts",
+          taxonomies: [],
+        },
+      },
       yield: {
         renderedTotals: {
           window: "last_30_days",
@@ -619,6 +635,22 @@ describe("ai copilot routes", () => {
       emptyStateReason: null,
       latestDecisionRows: [],
       recentHistory: [],
+      diagnostics: {
+        window: "last_30_days",
+        generatedAt: "2026-04-19T12:00:00.000Z",
+        systemDiagnostics: {
+          scope: "historical_window",
+          dominantBlockers: [{ blocker: "history_limited", count: 1 }],
+          recommendedNextAction: "seed_non_prod_validation",
+        },
+        taxonomyDiagnostics: [],
+        seededValidationStatus: {
+          scope: "non_production_only",
+          validationMode: "manual_seed_script",
+          scriptPath: "scripts/seed-intervention-policy-recommendation-qualification.ts",
+          taxonomies: [],
+        },
+      },
       yield: {
         renderedTotals: {
           window: "last_30_days",
@@ -668,6 +700,19 @@ describe("ai copilot routes", () => {
       },
       latestDecisionRows: expect.any(Array),
       recentHistory: expect.any(Array),
+      diagnostics: {
+        window: "last_30_days",
+        generatedAt: expect.any(String),
+        systemDiagnostics: expect.objectContaining({
+          scope: "historical_window",
+          recommendedNextAction: "seed_non_prod_validation",
+        }),
+        taxonomyDiagnostics: expect.any(Array),
+        seededValidationStatus: expect.objectContaining({
+          scope: "non_production_only",
+          scriptPath: "scripts/seed-intervention-policy-recommendation-qualification.ts",
+        }),
+      },
       yield: {
         renderedTotals: {
           window: "last_30_days",
