@@ -82,6 +82,28 @@ export async function runEstimateGeneration(
       throw new Error("dealId is required for estimate generation");
     }
 
+    const pendingExtractionFilters = [
+      eq(estimateExtractions.dealId, payload.dealId),
+      eq(estimateExtractions.status, "pending"),
+    ];
+
+    if (payload.documentId && payload.parseRunId) {
+      pendingExtractionFilters.push(eq(estimateExtractions.documentId, payload.documentId));
+      pendingExtractionFilters.push(
+        sql`${estimateExtractions.metadataJson}->>'sourceParseRunId' = ${payload.parseRunId}`
+      );
+      pendingExtractionFilters.push(sql`
+        exists (
+          select 1
+          from estimate_source_documents as document
+          where document.id = ${payload.documentId}
+            and document.active_parse_run_id = ${payload.parseRunId}
+            and document.parse_status = 'completed'
+            and document.ocr_status = 'completed'
+        )
+      `);
+    }
+
     const historicalSignals = await getHistoricalPricingSignals(tenantDb as any, payload.dealId);
     const catalogSnapshotVersionId = source
       ? await resolveActiveCatalogSnapshotVersionId(appDb as any, source.id)
@@ -90,12 +112,7 @@ export async function runEstimateGeneration(
     const pendingExtractions = await tenantDb
       .select()
       .from(estimateExtractions)
-      .where(
-        and(
-          eq(estimateExtractions.dealId, payload.dealId),
-          eq(estimateExtractions.status, "pending")
-        )
-      );
+      .where(and(...pendingExtractionFilters));
 
     const catalogItems =
       source && catalogSnapshotVersionId
