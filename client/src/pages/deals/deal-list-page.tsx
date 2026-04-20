@@ -7,6 +7,7 @@ import {
   MapPin,
   Clock,
 } from "lucide-react";
+import { PageHeader } from "@/components/layout/page-header";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { DealStageBadge } from "@/components/deals/deal-stage-badge";
@@ -26,20 +27,19 @@ export function DealListPage() {
   const { deals, pagination, loading, error } = useDeals(filters);
 
   return (
-    <div className="space-y-4">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h2 className="text-2xl font-bold">Deals</h2>
-          <p className="text-sm text-muted-foreground">
-            {pagination.total} deal{pagination.total !== 1 ? "s" : ""}
-          </p>
-        </div>
-        <Button onClick={() => navigate("/deals/new")}>
-          <Plus className="h-4 w-4 mr-2" />
-          New Deal
-        </Button>
-      </div>
+    <div className="space-y-6">
+      <PageHeader
+        title="Deals"
+        meta={`${pagination.total} deal${pagination.total !== 1 ? "s" : ""}`}
+        actions={{
+          primary: (
+            <Button onClick={() => navigate("/deals/new")}>
+              <Plus className="mr-2 h-4 w-4" />
+              New Deal
+            </Button>
+          ),
+        }}
+      />
 
       {/* Filters */}
       <DealFilters
