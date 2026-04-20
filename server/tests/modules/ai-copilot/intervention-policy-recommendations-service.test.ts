@@ -402,6 +402,335 @@ describe("intervention policy recommendations service", () => {
     });
     expect(review.tuning).toEqual(reviewAll.tuning);
     expect(review.yield).toEqual(reviewAll.yield);
+    expect(review.thresholdCalibrationProposals).toMatchObject({
+      generatedAt: expect.any(String),
+      window: "last_30_days",
+      selectionSummary: expect.any(String),
+      proposals: expect.any(Array),
+    });
+  });
+
+  it("selects at most two threshold-limited taxonomies for threshold calibration proposals", async () => {
+    const tenantDb = createTenantDb({
+      users: [{ id: "admin-1", displayName: "Admin User" }],
+    });
+
+    tenantDb.state.policyRecommendationSnapshots.push({
+      id: "snapshot-1",
+      office_id: "office-1",
+      status: "active",
+      generated_at: new Date("2026-04-19T12:00:00.000Z"),
+      stale_at: new Date("2026-04-20T12:00:00.000Z"),
+      superseded_at: null,
+    });
+
+    tenantDb.state.policyRecommendationDecisions.push(
+      {
+        office_id: "office-1",
+        snapshot_id: "snapshot-1",
+        taxonomy: "snooze_policy_adjustment",
+        grouping_key: "waiting_on_customer",
+        decision: "suppressed_by_threshold",
+        suppression_reason: "threshold_not_met",
+        score: 54,
+        confidence: "medium",
+        used_fallback_copy: false,
+        used_fallback_structured_payload: false,
+        created_at: new Date("2026-04-19T11:00:00.000Z"),
+      },
+      {
+        office_id: "office-1",
+        snapshot_id: "snapshot-1",
+        taxonomy: "snooze_policy_adjustment",
+        grouping_key: "waiting_on_customer_repeat",
+        decision: "suppressed_by_threshold",
+        suppression_reason: "threshold_not_met",
+        score: 53,
+        confidence: "medium",
+        used_fallback_copy: false,
+        used_fallback_structured_payload: false,
+        created_at: new Date("2026-04-19T11:02:00.000Z"),
+      },
+      {
+        office_id: "office-1",
+        snapshot_id: "snapshot-1",
+        taxonomy: "snooze_policy_adjustment",
+        grouping_key: "waiting_on_customer_rendered",
+        decision: "qualified_rendered",
+        suppression_reason: null,
+        score: 72,
+        confidence: "high",
+        used_fallback_copy: false,
+        used_fallback_structured_payload: false,
+        created_at: new Date("2026-04-19T11:05:00.000Z"),
+      },
+      {
+        office_id: "office-1",
+        snapshot_id: "snapshot-1",
+        taxonomy: "escalation_policy_adjustment",
+        grouping_key: "manager_visibility_required",
+        decision: "suppressed_by_threshold",
+        suppression_reason: "threshold_not_met",
+        score: 52,
+        confidence: "medium",
+        used_fallback_copy: false,
+        used_fallback_structured_payload: false,
+        created_at: new Date("2026-04-19T11:10:00.000Z"),
+      },
+      {
+        office_id: "office-1",
+        snapshot_id: "snapshot-1",
+        taxonomy: "escalation_policy_adjustment",
+        grouping_key: "manager_visibility_required_repeat",
+        decision: "suppressed_by_threshold",
+        suppression_reason: "threshold_not_met",
+        score: 51,
+        confidence: "medium",
+        used_fallback_copy: false,
+        used_fallback_structured_payload: false,
+        created_at: new Date("2026-04-19T11:12:00.000Z"),
+      },
+      {
+        office_id: "office-1",
+        snapshot_id: "snapshot-1",
+        taxonomy: "escalation_policy_adjustment",
+        grouping_key: "manager_visibility_required_rendered",
+        decision: "qualified_rendered",
+        suppression_reason: null,
+        score: 73,
+        confidence: "high",
+        used_fallback_copy: false,
+        used_fallback_structured_payload: false,
+        created_at: new Date("2026-04-19T11:14:00.000Z"),
+      },
+      {
+        office_id: "office-1",
+        snapshot_id: "snapshot-1",
+        taxonomy: "disconnect_playbook_change",
+        grouping_key: "follow_through_gap",
+        decision: "suppressed_by_predicate",
+        suppression_reason: "predicate_not_met",
+        score: 48,
+        confidence: "low",
+        used_fallback_copy: false,
+        used_fallback_structured_payload: false,
+        created_at: new Date("2026-04-19T11:20:00.000Z"),
+      }
+    );
+
+    const review = await getInterventionPolicyRecommendationReview(tenantDb as any, {
+      officeId: "office-1",
+      viewerUserId: "admin-1",
+      window: "last_30_days",
+      now: new Date("2026-04-19T12:30:00.000Z"),
+    });
+
+    expect(review.thresholdCalibrationProposals.proposals).toHaveLength(2);
+    expect(review.thresholdCalibrationProposals.proposals.map((entry) => entry.taxonomy)).toEqual([
+      "escalation_policy_adjustment",
+      "snooze_policy_adjustment",
+    ]);
+    expect(review.thresholdCalibrationProposals.proposals[0]).toMatchObject({
+      currentThreshold: expect.any(String),
+      proposedThreshold: expect.any(String),
+      dominantBlocker: "threshold_limited",
+      blockerBreakdown: expect.arrayContaining([expect.objectContaining({ label: "threshold blocked", count: 2 })]),
+      guardrails: expect.any(Array),
+      verificationChecklist: expect.any(Array),
+    });
+    expect(review.thresholdCalibrationProposals.proposals.some((entry) => entry.taxonomy === "disconnect_playbook_change")).toBe(false);
+  });
+
+  it("emits a bounded no-proposal state when threshold calibration is not justified", async () => {
+    const tenantDb = createTenantDb({
+      users: [{ id: "admin-1", displayName: "Admin User" }],
+    });
+
+    tenantDb.state.policyRecommendationSnapshots.push({
+      id: "snapshot-2",
+      office_id: "office-1",
+      status: "active",
+      generated_at: new Date("2026-04-19T12:00:00.000Z"),
+      stale_at: new Date("2026-04-20T12:00:00.000Z"),
+      superseded_at: null,
+    });
+
+    tenantDb.state.policyRecommendationDecisions.push(
+      {
+        office_id: "office-1",
+        snapshot_id: "snapshot-2",
+        taxonomy: "snooze_policy_adjustment",
+        grouping_key: "waiting_on_customer",
+        decision: "suppressed_by_predicate",
+        suppression_reason: "predicate_not_met",
+        score: 40,
+        confidence: "low",
+        used_fallback_copy: false,
+        used_fallback_structured_payload: false,
+        created_at: new Date("2026-04-19T11:00:00.000Z"),
+      },
+      {
+        office_id: "office-1",
+        snapshot_id: "snapshot-2",
+        taxonomy: "snooze_policy_adjustment",
+        grouping_key: "waiting_on_customer_2",
+        decision: "suppressed_by_predicate",
+        suppression_reason: "predicate_not_met",
+        score: 39,
+        confidence: "low",
+        used_fallback_copy: false,
+        used_fallback_structured_payload: false,
+        created_at: new Date("2026-04-19T11:01:00.000Z"),
+      }
+    );
+
+    const review = await getInterventionPolicyRecommendationReview(tenantDb as any, {
+      officeId: "office-1",
+      viewerUserId: "admin-1",
+      window: "last_30_days",
+      now: new Date("2026-04-19T12:30:00.000Z"),
+    });
+
+    expect(review.thresholdCalibrationProposals.proposals).toEqual([]);
+    expect(review.thresholdCalibrationProposals.noProposalReason).toBe("predicate_failure_dominates");
+  });
+
+  it("reports low volume when threshold-limited taxonomies miss the calibration floor only because of candidate volume", async () => {
+    const tenantDb = createTenantDb({
+      users: [{ id: "admin-1", displayName: "Admin User" }],
+    });
+
+    tenantDb.state.policyRecommendationSnapshots.push({
+      id: "snapshot-3",
+      office_id: "office-1",
+      status: "active",
+      generated_at: new Date("2026-04-19T12:00:00.000Z"),
+      stale_at: new Date("2026-04-20T12:00:00.000Z"),
+      superseded_at: null,
+    });
+
+    tenantDb.state.policyRecommendationDecisions.push(
+      {
+        office_id: "office-1",
+        snapshot_id: "snapshot-3",
+        taxonomy: "snooze_policy_adjustment",
+        grouping_key: "waiting_on_customer",
+        decision: "suppressed_by_threshold",
+        suppression_reason: "threshold_not_met",
+        score: 54,
+        confidence: "medium",
+        used_fallback_copy: false,
+        used_fallback_structured_payload: false,
+        created_at: new Date("2026-04-19T11:00:00.000Z"),
+      },
+      {
+        office_id: "office-1",
+        snapshot_id: "snapshot-3",
+        taxonomy: "snooze_policy_adjustment",
+        grouping_key: "waiting_on_customer_rendered",
+        decision: "qualified_rendered",
+        suppression_reason: null,
+        score: 72,
+        confidence: "high",
+        used_fallback_copy: false,
+        used_fallback_structured_payload: false,
+        created_at: new Date("2026-04-19T11:05:00.000Z"),
+      }
+    );
+
+    const review = await getInterventionPolicyRecommendationReview(tenantDb as any, {
+      officeId: "office-1",
+      viewerUserId: "admin-1",
+      window: "last_30_days",
+      now: new Date("2026-04-19T12:30:00.000Z"),
+    });
+
+    expect(review.thresholdCalibrationProposals.proposals).toEqual([]);
+    expect(review.thresholdCalibrationProposals.noProposalReason).toBe("low_volume_dominates");
+  });
+
+  it("builds threshold calibration proposals from global multi-office decision history", async () => {
+    const tenantDb = createTenantDb({
+      users: [{ id: "admin-1", displayName: "Admin User" }],
+    });
+
+    tenantDb.state.policyRecommendationSnapshots.push({
+      id: "snapshot-office-1",
+      office_id: "office-1",
+      status: "active",
+      generated_at: new Date("2026-04-19T12:00:00.000Z"),
+      stale_at: new Date("2026-04-20T12:00:00.000Z"),
+      superseded_at: null,
+    });
+
+    tenantDb.state.policyRecommendationDecisions.push(
+      {
+        office_id: "office-1",
+        snapshot_id: "snapshot-office-1",
+        taxonomy: "snooze_policy_adjustment",
+        grouping_key: "waiting_on_customer",
+        decision: "suppressed_by_predicate",
+        suppression_reason: "predicate_not_met",
+        score: 41,
+        confidence: "low",
+        used_fallback_copy: false,
+        used_fallback_structured_payload: false,
+        created_at: new Date("2026-04-19T11:00:00.000Z"),
+      },
+      {
+        office_id: "office-2",
+        snapshot_id: "snapshot-office-2",
+        taxonomy: "assignee_load_balancing",
+        grouping_key: "manager-9",
+        decision: "suppressed_by_threshold",
+        suppression_reason: "threshold_not_met",
+        score: 58,
+        confidence: "medium",
+        used_fallback_copy: false,
+        used_fallback_structured_payload: false,
+        created_at: new Date("2026-04-19T11:10:00.000Z"),
+      },
+      {
+        office_id: "office-2",
+        snapshot_id: "snapshot-office-2",
+        taxonomy: "assignee_load_balancing",
+        grouping_key: "manager-9-repeat",
+        decision: "suppressed_by_threshold",
+        suppression_reason: "threshold_not_met",
+        score: 57,
+        confidence: "medium",
+        used_fallback_copy: false,
+        used_fallback_structured_payload: false,
+        created_at: new Date("2026-04-19T11:11:00.000Z"),
+      },
+      {
+        office_id: "office-2",
+        snapshot_id: "snapshot-office-2",
+        taxonomy: "assignee_load_balancing",
+        grouping_key: "manager-9-rendered",
+        decision: "qualified_rendered",
+        suppression_reason: null,
+        score: 77,
+        confidence: "high",
+        used_fallback_copy: false,
+        used_fallback_structured_payload: false,
+        created_at: new Date("2026-04-19T11:12:00.000Z"),
+      }
+    );
+
+    const review = await getInterventionPolicyRecommendationReview(tenantDb as any, {
+      officeId: "office-1",
+      viewerUserId: "admin-1",
+      window: "last_30_days",
+      now: new Date("2026-04-19T12:30:00.000Z"),
+    });
+
+    expect(review.summary.totals.suppressedByPredicate).toBe(1);
+    expect(review.thresholdCalibrationProposals.proposals).toHaveLength(1);
+    expect(review.thresholdCalibrationProposals.proposals[0]).toMatchObject({
+      taxonomy: "assignee_load_balancing",
+      dominantBlocker: "threshold_limited",
+    });
   });
 
   it("builds deterministic qualification diagnostics with stable blocker ordering and grouped suppressed candidates", async () => {

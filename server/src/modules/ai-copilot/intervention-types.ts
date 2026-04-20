@@ -669,6 +669,38 @@ export interface InterventionPolicyRecommendationTaxonomyDiagnosticEntry {
   recommendedTuningAction: InterventionPolicyRecommendationQualificationTuningAction;
 }
 
+export type InterventionPolicyRecommendationThresholdCalibrationNoProposalReason =
+  | "threshold_pressure_not_dominant"
+  | "low_volume_dominates"
+  | "predicate_failure_dominates"
+  | "target_coverage_dominates"
+  | "cap_pressure_dominates";
+
+export interface InterventionPolicyRecommendationThresholdCalibrationBlockerEntry {
+  label: string;
+  count: number;
+}
+
+export interface InterventionPolicyRecommendationThresholdCalibrationProposal {
+  taxonomy: InterventionPolicyRecommendationTaxonomy;
+  currentThreshold: string;
+  proposedThreshold: string;
+  dominantBlocker: InterventionPolicyRecommendationQualificationBlocker;
+  blockerBreakdown: InterventionPolicyRecommendationThresholdCalibrationBlockerEntry[];
+  rationale: string;
+  expectedYieldEffect: string;
+  guardrails: string[];
+  verificationChecklist: string[];
+}
+
+export interface InterventionPolicyRecommendationThresholdCalibrationProposalBlock {
+  generatedAt: string;
+  window: InterventionPolicyRecommendationReviewWindow;
+  selectionSummary: string;
+  noProposalReason: InterventionPolicyRecommendationThresholdCalibrationNoProposalReason | null;
+  proposals: InterventionPolicyRecommendationThresholdCalibrationProposal[];
+}
+
 export interface InterventionPolicyRecommendationSeedValidationTaxonomyStatus {
   taxonomy: InterventionPolicyRecommendationTaxonomy;
   seedPathAvailable: boolean;
@@ -728,6 +760,7 @@ export interface InterventionPolicyRecommendationReviewModel {
     };
     guidance: InterventionPolicyRecommendationTuningGuidanceEntry[];
   };
+  thresholdCalibrationProposals: InterventionPolicyRecommendationThresholdCalibrationProposalBlock;
 }
 
 export interface InterventionAnalyticsDashboard {

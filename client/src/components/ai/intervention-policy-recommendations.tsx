@@ -34,6 +34,23 @@ function formatDiagnosticBlockerLabel(value: string) {
   return value.split("_").join(" ");
 }
 
+function formatThresholdCalibrationNoProposalReason(value: string | null | undefined) {
+  if (!value) return "No threshold changes are currently recommended.";
+  if (value === "low_volume_dominates") {
+    return "No threshold changes are currently recommended because low volume dominates.";
+  }
+  if (value === "predicate_failure_dominates") {
+    return "No threshold changes are currently recommended because predicate failure dominates.";
+  }
+  if (value === "target_coverage_dominates") {
+    return "No threshold changes are currently recommended because target coverage dominates.";
+  }
+  if (value === "cap_pressure_dominates") {
+    return "No threshold changes are currently recommended because cap pressure should be reviewed first.";
+  }
+  return "No threshold changes are currently recommended because threshold pressure is not dominant.";
+}
+
 function formatOccurredAtLabel(value: string | null | undefined) {
   if (!value) return "Unknown time";
   const date = new Date(value);
@@ -676,6 +693,73 @@ export function InterventionPolicyRecommendationsSection({
                 ))
               ) : (
                 <div className="text-sm text-muted-foreground">No qualification diagnostics are available yet.</div>
+              )}
+            </div>
+          </div>
+          <div className="rounded-lg border border-border/70 bg-white px-3 py-3">
+            <div className="text-[11px] uppercase tracking-widest text-muted-foreground">Threshold calibration proposals</div>
+            <div className="mt-1 text-xs text-muted-foreground">
+              Read-only production-window guidance. Global threshold proposals are not live until a later code change lands.
+            </div>
+            <div className="mt-3 text-sm text-muted-foreground">
+              {review.data?.thresholdCalibrationProposals.selectionSummary ?? "No threshold changes are currently recommended."}
+            </div>
+            <div className="mt-3 space-y-3">
+              {review.data?.thresholdCalibrationProposals.proposals.length ? (
+                review.data.thresholdCalibrationProposals.proposals.map((proposal) => (
+                  <div key={proposal.taxonomy} className="rounded-md border border-border/60 px-3 py-3 text-sm">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="font-medium text-gray-900">{proposal.taxonomy}</div>
+                      <div className="text-xs uppercase tracking-widest text-muted-foreground">Global threshold proposal</div>
+                    </div>
+                    <div className="mt-3 grid gap-3 md:grid-cols-2">
+                      <div className="rounded-md border border-border/50 px-3 py-2">
+                        <div className="text-[10px] uppercase tracking-widest text-muted-foreground">Current threshold</div>
+                        <div className="mt-1 text-gray-900">{proposal.currentThreshold}</div>
+                      </div>
+                      <div className="rounded-md border border-border/50 px-3 py-2">
+                        <div className="text-[10px] uppercase tracking-widest text-muted-foreground">Proposed threshold</div>
+                        <div className="mt-1 text-gray-900">{proposal.proposedThreshold}</div>
+                      </div>
+                    </div>
+                    <div className="mt-3 text-muted-foreground">
+                      Dominant blocker: {formatDiagnosticBlockerLabel(proposal.dominantBlocker)}
+                    </div>
+                    <div className="mt-2 text-muted-foreground">{proposal.rationale}</div>
+                    <div className="mt-2 text-muted-foreground">{proposal.expectedYieldEffect}</div>
+                    <div className="mt-3">
+                      <div className="text-[10px] uppercase tracking-widest text-muted-foreground">Blocker mix</div>
+                      <div className="mt-2 space-y-1">
+                        {proposal.blockerBreakdown.map((entry) => (
+                          <div key={`${proposal.taxonomy}:${entry.label}`} className="text-muted-foreground">
+                            {entry.label} · {entry.count}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="mt-3">
+                      <div className="text-[10px] uppercase tracking-widest text-muted-foreground">Guardrails</div>
+                      <ul className="mt-2 list-disc space-y-1 pl-5 text-muted-foreground">
+                        {proposal.guardrails.map((entry) => (
+                          <li key={`${proposal.taxonomy}:guardrail:${entry}`}>{entry}</li>
+                        ))}
+                      </ul>
+                    </div>
+                    <div className="mt-3">
+                      <div className="text-[10px] uppercase tracking-widest text-muted-foreground">Verification checklist</div>
+                      <ul className="mt-2 list-disc space-y-1 pl-5 text-muted-foreground">
+                        {proposal.verificationChecklist.map((entry) => (
+                          <li key={`${proposal.taxonomy}:check:${entry}`}>{entry}</li>
+                        ))}
+                      </ul>
+                    </div>
+                    <div className="mt-3 text-xs text-muted-foreground">Not yet applied.</div>
+                  </div>
+                ))
+              ) : (
+                <div className="rounded-md border border-border/60 px-3 py-3 text-sm text-muted-foreground">
+                  {formatThresholdCalibrationNoProposalReason(review.data?.thresholdCalibrationProposals.noProposalReason)}
+                </div>
               )}
             </div>
           </div>
