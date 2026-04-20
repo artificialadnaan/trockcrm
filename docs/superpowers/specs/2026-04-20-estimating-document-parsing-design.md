@@ -223,6 +223,10 @@ Keep the current estimating document and extraction tables as the system of reco
 - `estimate_document_pages`
 - `estimate_extractions`
 
+Add one new parse-run table for rerun history and active-run control:
+
+- `estimate_document_parse_runs`
+
 ### Extend Metadata Instead of Forking Schema
 
 `estimate_source_documents` should store parse lifecycle metadata in addition to the current OCR status:
@@ -231,6 +235,20 @@ Keep the current estimating document and extraction tables as the system of reco
 - parse status that can distinguish `queued`, `processing`, `completed`, `partial`, `failed`
 - last parse provider/profile summary
 - parse error summary when the latest run fails
+
+`estimate_document_parse_runs` should store:
+
+- document id
+- parse status
+- provider identifier
+- parse profile
+- options snapshot json
+- stage summary json
+- error summary
+- started at and completed at timestamps
+- whether the run became the active parse for the document
+
+This makes rerun history explicit and gives the workbench and worker a stable way to reason about supersession without overloading document metadata alone.
 
 `estimate_document_pages.metadata_json` should store:
 
@@ -278,6 +296,7 @@ Rules:
 - prior rows remain in the database for auditability and are explicitly marked inactive through parse-run metadata
 - review history remains preserved through review events and parse-run metadata
 - failed reruns must not destroy the previously active successful parse output
+- workbench queries, matching, pricing, and generation only read rows associated with the document's active parse run unless a screen explicitly requests historical parse output
 
 This means supersession occurs only after the new parse has produced a valid replacement set. A failed rerun leaves the previous active parse visible in the workbench.
 
@@ -290,6 +309,7 @@ Rules:
 - scale detection is automatic
 - measurement candidates are automatic
 - both are advisory until estimator confirmation
+- estimator confirmation should be represented on the extraction row metadata so the existing extraction review flow can confirm or reject a measurement suggestion without introducing a separate confirmation subsystem in `V1`
 - confirmed measurement rows may continue into matching and pricing
 - unconfirmed measurement rows remain visible in the workbench but are excluded from promotion-ready pricing flows
 
@@ -372,6 +392,12 @@ The workbench document payload should expose:
 - count of confirmed vs unconfirmed measurement candidates
 
 The extraction rows payload should expose whether a row is measurement-derived and whether estimator confirmation is required or already complete.
+
+For `V1`, measurement confirmation should reuse the existing extraction mutation path:
+
+- approving a `measurement_candidate` row confirms it for downstream pricing use
+- rejecting it excludes it from downstream pricing use
+- editing it allows an estimator to correct the quantity, unit, or scale metadata before approval
 
 ## Testing Strategy
 
