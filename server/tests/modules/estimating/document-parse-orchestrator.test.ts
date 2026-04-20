@@ -59,7 +59,6 @@ function createTenantDbMock(options: {
   concurrentDocumentStateOnFailure?: Record<string, any>;
   concurrentDocumentStateOnActivation?: Record<string, any>;
   concurrentDocumentStateOnFailureWrite?: Record<string, any>;
-  concurrentDocumentStateOnArtifactActivation?: Record<string, any>;
 }) {
   const parseRuns = (options.existingParseRuns ?? []).map((row) => structuredClone(row));
   const updatedDocuments: Record<string, any>[] = [];
@@ -72,7 +71,6 @@ function createTenantDbMock(options: {
   };
   let activationRaceApplied = false;
   let failureWriteRaceApplied = false;
-  let artifactActivationRaceApplied = false;
 
   const tenantDb = {
     insert: vi.fn((table: unknown) => ({
@@ -269,6 +267,27 @@ function createTenantDbMock(options: {
             documentState.parseProfile = candidateRun.parseProfile ?? "balanced";
             documentState.parseErrorSummary = null;
             documentState.parsedAt = new Date("2026-04-20T12:30:00.000Z");
+
+            if (text.includes("update estimate_document_pages as page")) {
+              for (const page of pages) {
+                if (page.documentId === documentState.id) {
+                  page.metadataJson = {
+                    ...(page.metadataJson ?? {}),
+                    activeArtifact: page.metadataJson?.sourceParseRunId === candidateRun.id,
+                  };
+                }
+              }
+
+              for (const extraction of extractions) {
+                if (extraction.documentId === documentState.id) {
+                  extraction.metadataJson = {
+                    ...(extraction.metadataJson ?? {}),
+                    activeArtifact:
+                      extraction.metadataJson?.sourceParseRunId === candidateRun.id,
+                  };
+                }
+              }
+            }
           } else {
             documentState.parseStatus = "processing";
             documentState.ocrStatus = "processing";
@@ -280,47 +299,6 @@ function createTenantDbMock(options: {
           updatedDocuments.push({ ...documentState });
         }
 
-        return;
-      }
-
-      if (text.includes("with owning_document as")) {
-        const { documentId, parseRunId } = resolveDocumentAndRunParams(documentState.id, params);
-
-        if (
-          options.concurrentDocumentStateOnArtifactActivation &&
-          !artifactActivationRaceApplied
-        ) {
-          Object.assign(documentState, options.concurrentDocumentStateOnArtifactActivation);
-          artifactActivationRaceApplied = true;
-        }
-
-        const isCurrentCompletedOwner =
-          documentState.id === documentId &&
-          documentState.activeParseRunId === parseRunId &&
-          documentState.parseStatus === "completed" &&
-          documentState.ocrStatus === "completed";
-
-        if (!isCurrentCompletedOwner) {
-          return;
-        }
-
-        for (const page of pages) {
-          if (page.documentId === documentId) {
-            page.metadataJson = {
-              ...(page.metadataJson ?? {}),
-              activeArtifact: page.metadataJson?.sourceParseRunId === parseRunId,
-            };
-          }
-        }
-
-        for (const extraction of extractions) {
-          if (extraction.documentId === documentId) {
-            extraction.metadataJson = {
-              ...(extraction.metadataJson ?? {}),
-              activeArtifact: extraction.metadataJson?.sourceParseRunId === parseRunId,
-            };
-          }
-        }
         return;
       }
 
@@ -996,7 +974,7 @@ describe("runEstimateDocumentParse", () => {
     );
   });
 
-  it("does not flip artifact activeness if ownership changes before artifact sync runs", async () => {
+  it("activates document and artifact state in one completion statement", async () => {
     const documentSnapshot = {
       id: "doc-8",
       dealId: "deal-1",
@@ -1044,14 +1022,6 @@ describe("runEstimateDocumentParse", () => {
           },
         },
       ],
-      concurrentDocumentStateOnArtifactActivation: {
-        activeParseRunId: "parse-run-newer",
-        parseStatus: "processing",
-        ocrStatus: "processing",
-        parseProvider: "default",
-        parseProfile: "balanced",
-        parseErrorSummary: null,
-      },
     });
 
     const result = await runEstimateDocumentParse({
@@ -1072,9 +1042,9 @@ describe("runEstimateDocumentParse", () => {
     );
     expect(documentState).toEqual(
       expect.objectContaining({
-        activeParseRunId: "parse-run-newer",
-        parseStatus: "processing",
-        ocrStatus: "processing",
+        activeParseRunId: "parse-run-1",
+        parseStatus: "completed",
+        ocrStatus: "completed",
       })
     );
     expect(pages).toEqual(
@@ -1083,14 +1053,14 @@ describe("runEstimateDocumentParse", () => {
           id: "page-old-8",
           metadataJson: expect.objectContaining({
             sourceParseRunId: "parse-run-old",
-            activeArtifact: true,
+            activeArtifact: false,
           }),
         }),
         expect.objectContaining({
           documentId: "doc-8",
           metadataJson: expect.objectContaining({
             sourceParseRunId: "parse-run-1",
-            activeArtifact: false,
+            activeArtifact: true,
           }),
         }),
       ])
@@ -1101,16 +1071,28 @@ describe("runEstimateDocumentParse", () => {
           id: "extraction-old-8",
           metadataJson: expect.objectContaining({
             sourceParseRunId: "parse-run-old",
-            activeArtifact: true,
+            activeArtifact: false,
           }),
         }),
         expect.objectContaining({
           documentId: "doc-8",
           metadataJson: expect.objectContaining({
             sourceParseRunId: "parse-run-1",
-            activeArtifact: false,
+            activeArtifact: true,
           }),
         }),
+      ])
+    );
+    const executedSql = tenantDb.execute.mock.calls.map(([query]: [any]) => readSql(query).text);
+    const completionQueries = executedSql.filter((text: string) =>
+      text.includes("parse_status = 'completed'")
+    );
+    expect(completionQueries).toHaveLength(1);
+    expect(completionQueries[0]).toContain("update estimate_document_pages as page");
+    expect(completionQueries[0]).toContain("update estimate_extractions as extraction");
+    expect(executedSql).toEqual(
+      expect.not.arrayContaining([
+        expect.stringContaining("with owning_document as"),
       ])
     );
   });

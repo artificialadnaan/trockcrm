@@ -47,29 +47,20 @@ export async function runEstimateDocumentOcr(payload: { documentId: string; deal
     return;
   }
 
-  const [currentDocument] = await tenantDb
-    .select()
-    .from(estimateSourceDocuments)
-    .where(eq(estimateSourceDocuments.id, payload.documentId))
-    .limit(1);
-
-  if (
-    !currentDocument ||
-    currentDocument.activeParseRunId !== result.parseRun.id ||
-    currentDocument.parseStatus !== "completed" ||
-    currentDocument.ocrStatus !== "completed"
-  ) {
-    return;
-  }
-
   await tenantDb.execute(
-    sql`INSERT INTO public.job_queue (job_type, payload, office_id, status, run_after)
-        VALUES (
-          'estimate_generation',
-          ${JSON.stringify({ documentId: payload.documentId, dealId: document.dealId })}::jsonb,
-          ${officeId}::uuid,
-          'pending',
-          NOW()
-        )`
+    sql`
+      insert into public.job_queue (job_type, payload, office_id, status, run_after)
+      select
+        'estimate_generation',
+        jsonb_build_object('documentId', document.id, 'dealId', document.deal_id),
+        ${officeId}::uuid,
+        'pending',
+        now()
+      from estimate_source_documents as document
+      where document.id = ${payload.documentId}
+        and document.active_parse_run_id = ${result.parseRun.id}
+        and document.parse_status = 'completed'
+        and document.ocr_status = 'completed'
+    `
   );
 }

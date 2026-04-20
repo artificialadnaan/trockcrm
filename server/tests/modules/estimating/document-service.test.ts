@@ -5,41 +5,42 @@ import {
   reprocessEstimateSourceDocument,
 } from "../../../src/modules/estimating/document-service.js";
 
+function readSqlText(query: any) {
+  const chunks = query?.queryChunks ?? [];
+  return chunks
+    .map((chunk: any) => {
+      if (chunk && typeof chunk === "object" && "value" in chunk) {
+        return Array.isArray(chunk.value) ? chunk.value.join("") : "";
+      }
+      return "?";
+    })
+    .join("");
+}
+
 describe("runEstimateDocumentOcr", () => {
-  it("does not queue estimate generation when current document ownership has moved on", async () => {
+  it("uses a conditional insert-select to guard estimate generation enqueue", async () => {
     vi.resetModules();
 
     const poolQuery = vi.fn().mockResolvedValue({
       rows: [{ slug: "estimating" }],
     });
-    const limit = vi
-      .fn()
-      .mockResolvedValueOnce([
-        {
-          id: "doc-ocr-1",
-          dealId: "deal-1",
-          filename: "plans.pdf",
-          parseProvider: "default",
-          parseProfile: "balanced",
-          parseStatus: "processing",
-          ocrStatus: "processing",
-          activeParseRunId: null,
-        },
-      ])
-      .mockResolvedValueOnce([
-        {
-          id: "doc-ocr-1",
-          dealId: "deal-1",
-          filename: "plans.pdf",
-          parseProvider: "default",
-          parseProfile: "balanced",
-          parseStatus: "processing",
-          ocrStatus: "processing",
-          activeParseRunId: "parse-run-newer",
-        },
-      ]);
+    const limit = vi.fn().mockResolvedValue([
+      {
+        id: "doc-ocr-1",
+        dealId: "deal-1",
+        filename: "plans.pdf",
+        parseProvider: "default",
+        parseProfile: "balanced",
+        parseStatus: "processing",
+        ocrStatus: "processing",
+        activeParseRunId: null,
+      },
+    ]);
     const tenantDb = {
-      execute: vi.fn().mockResolvedValue(undefined),
+      execute: vi
+        .fn()
+        .mockResolvedValueOnce(undefined)
+        .mockResolvedValueOnce({ rowCount: 0 }),
       select: vi.fn(() => ({
         from: vi.fn(() => ({
           where: vi.fn(() => ({
@@ -79,8 +80,14 @@ describe("runEstimateDocumentOcr", () => {
     await runEstimateDocumentOcr({ documentId: "doc-ocr-1" }, "office-1");
 
     expect(runEstimateDocumentParse).toHaveBeenCalled();
-    expect(limit).toHaveBeenCalledTimes(2);
-    expect(tenantDb.execute).toHaveBeenCalledTimes(1);
+    expect(limit).toHaveBeenCalledTimes(1);
+    expect(tenantDb.execute).toHaveBeenCalledTimes(2);
+    const enqueueSql = readSqlText(tenantDb.execute.mock.calls[1]?.[0]);
+    expect(enqueueSql).toContain("insert into public.job_queue");
+    expect(enqueueSql).toContain("from estimate_source_documents as document");
+    expect(enqueueSql).toContain("document.active_parse_run_id = ?");
+    expect(enqueueSql).toContain("document.parse_status = 'completed'");
+    expect(enqueueSql).toContain("document.ocr_status = 'completed'");
   });
 });
 

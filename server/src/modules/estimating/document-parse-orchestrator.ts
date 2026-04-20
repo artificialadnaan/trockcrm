@@ -65,44 +65,6 @@ function buildDeterministicPageContent(input: {
   };
 }
 
-async function syncActiveArtifactsForCurrentRun(
-  tenantDb: TenantDb,
-  documentId: string,
-  parseRunId: string
-) {
-  await tenantDb.execute(sql`
-    with owning_document as (
-      select id
-      from estimate_source_documents
-      where id = ${documentId}
-        and active_parse_run_id = ${parseRunId}
-        and parse_status = 'completed'
-        and ocr_status = 'completed'
-    ),
-    updated_pages as (
-      update estimate_document_pages as page
-      set metadata_json =
-        coalesce(page.metadata_json, '{}'::jsonb)
-        || jsonb_build_object(
-          'activeArtifact',
-          page.metadata_json->>'sourceParseRunId' = ${parseRunId}
-        )
-      from owning_document
-      where page.document_id = owning_document.id
-      returning 1
-    )
-    update estimate_extractions as extraction
-    set metadata_json =
-      coalesce(extraction.metadata_json, '{}'::jsonb)
-      || jsonb_build_object(
-        'activeArtifact',
-        extraction.metadata_json->>'sourceParseRunId' = ${parseRunId}
-      )
-    from owning_document
-    where extraction.document_id = owning_document.id
-  `);
-}
-
 async function getCurrentDocumentState(tenantDb: TenantDb, documentId: string) {
   const [currentDocument] = await tenantDb
     .select()
@@ -193,17 +155,41 @@ async function activateCompletedParseRun(args: {
   options: { provider: string; profile: string };
 }) {
   await args.tenantDb.execute(sql`
-    update estimate_source_documents as document
-    set
-      parse_status = 'completed',
-      ocr_status = 'completed',
-      active_parse_run_id = ${args.parseRunId},
-      parse_provider = ${args.options.provider},
-      parse_profile = ${args.options.profile},
-      parse_error_summary = null,
-      parsed_at = now()
-    where document.id = ${args.documentId}
-      and document.active_parse_run_id = ${args.parseRunId}
+    with updated_document as (
+      update estimate_source_documents as document
+      set
+        parse_status = 'completed',
+        ocr_status = 'completed',
+        active_parse_run_id = ${args.parseRunId},
+        parse_provider = ${args.options.provider},
+        parse_profile = ${args.options.profile},
+        parse_error_summary = null,
+        parsed_at = now()
+      where document.id = ${args.documentId}
+        and document.active_parse_run_id = ${args.parseRunId}
+      returning document.id
+    ),
+    updated_pages as (
+      update estimate_document_pages as page
+      set metadata_json =
+        coalesce(page.metadata_json, '{}'::jsonb)
+        || jsonb_build_object(
+          'activeArtifact',
+          page.metadata_json->>'sourceParseRunId' = ${args.parseRunId}
+        )
+      from updated_document
+      where page.document_id = updated_document.id
+      returning 1
+    )
+    update estimate_extractions as extraction
+    set metadata_json =
+      coalesce(extraction.metadata_json, '{}'::jsonb)
+      || jsonb_build_object(
+        'activeArtifact',
+        extraction.metadata_json->>'sourceParseRunId' = ${args.parseRunId}
+      )
+    from updated_document
+    where extraction.document_id = updated_document.id
   `);
 
   return getCurrentDocumentState(args.tenantDb, args.documentId);
@@ -395,10 +381,6 @@ export async function runEstimateDocumentParse(args: {
         parseRunId: parseRun.id,
         options,
       });
-
-      if (documentUpdate?.activeParseRunId === parseRun.id && documentUpdate.parseStatus === "completed") {
-        await syncActiveArtifactsForCurrentRun(args.tenantDb, args.document.id, parseRun.id);
-      }
     }
 
     return {
