@@ -42,6 +42,24 @@ export async function runEstimateGeneration(
 
   try {
     if (lockedClient) {
+      await lockedClient.query(`SET search_path TO ${schemaName}, public`);
+    } else {
+      await tenantDb.execute(sql.raw(`SET search_path TO ${schemaName}, public`));
+    }
+
+    const [run] = await tenantDb
+      .insert(estimateGenerationRuns)
+      .values({
+        dealId: payload.dealId ?? "",
+        status: "running",
+        inputSnapshotJson: {
+          documentId: payload.documentId ?? null,
+        },
+      })
+      .returning();
+    generationRunId = run.id;
+
+    if (lockedClient) {
       await lockedClient.query("BEGIN");
       await lockedClient.query(`SET LOCAL search_path TO ${schemaName}, public`);
 
@@ -60,10 +78,16 @@ export async function runEstimateGeneration(
       if (!documentLock.rows[0]) {
         await lockedClient.query("ROLLBACK");
         transactionClosed = true;
+        await tenantDb
+          .update(estimateGenerationRuns)
+          .set({
+            status: "failed",
+            completedAt: new Date(),
+            errorSummary: "estimate generation skipped: parse run is no longer active",
+          })
+          .where(eq(estimateGenerationRuns.id, generationRunId));
         return;
       }
-    } else {
-      await tenantDb.execute(sql.raw(`SET search_path TO ${schemaName}, public`));
     }
 
     if (!payload.dealId) {
@@ -75,18 +99,6 @@ export async function runEstimateGeneration(
       .from(costCatalogSources)
       .where(eq(costCatalogSources.provider, "procore"))
       .limit(1);
-
-    const [run] = await tenantDb
-      .insert(estimateGenerationRuns)
-      .values({
-        dealId: payload.dealId ?? "",
-        status: "running",
-        inputSnapshotJson: {
-          documentId: payload.documentId ?? null,
-        },
-      })
-      .returning();
-    generationRunId = run.id;
 
     const pendingExtractionFilters = [
       eq(estimateExtractions.dealId, payload.dealId),
@@ -198,7 +210,7 @@ export async function runEstimateGeneration(
         evidenceJson: {
           comparableHistoricalPrices: recommendation.comparableHistoricalPrices,
         },
-        createdByRunId: run.id,
+        createdByRunId: generationRunId,
         status: "pending",
       });
 
@@ -215,7 +227,7 @@ export async function runEstimateGeneration(
         completedAt: new Date(),
         catalogSnapshotVersionId,
       })
-      .where(eq(estimateGenerationRuns.id, run.id));
+      .where(eq(estimateGenerationRuns.id, generationRunId));
 
     if (lockedClient) {
       await lockedClient.query("COMMIT");
