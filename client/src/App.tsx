@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import { AuthProvider, useAuth } from "@/lib/auth";
 import { AuthEntryScreen } from "@/components/auth/auth-entry-screen";
 import { ForcePasswordChangeScreen } from "@/components/auth/force-password-change-screen";
+import { RequireRole } from "@/components/auth/require-role";
 import { AppShell } from "@/components/layout/app-shell";
 import { DealListPage } from "@/pages/deals/deal-list-page";
 import { DealDetailPage } from "@/pages/deals/deal-detail-page";
@@ -110,31 +111,185 @@ export function App() {
               <Route path="/files" element={<FilesPage />} />
               <Route path="/reports" element={<ReportsPage />} />
               <Route path="/projects" element={<ProjectsPage />} />
-              <Route path="/director" element={<DirectorDashboardPage />} />
-              <Route path="/director/rep/:repId" element={<DirectorRepDetail />} />
+              <Route
+                path="/director"
+                element={(
+                  <RequireRole allowedRoles={["admin", "director"]}>
+                    <DirectorDashboardPage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/director/rep/:repId"
+                element={(
+                  <RequireRole allowedRoles={["admin", "director"]}>
+                    <DirectorRepDetail />
+                  </RequireRole>
+                )}
+              />
               <Route path="/search" element={<SearchPage />} />
-              <Route path="/admin/offices" element={<OfficesPage />} />
-              <Route path="/admin/users" element={<UsersPage />} />
-              <Route path="/admin/pipeline" element={<PipelineConfigPage />} />
-              <Route path="/admin/audit" element={<AuditLogPage />} />
-              <Route path="/admin/data-scrub" element={<AdminDataScrubPage />} />
-              <Route path="/admin/cross-office-reports" element={<CrossOfficeReportsPage />} />
-              <Route path="/admin/ai-actions" element={<AiActionQueuePage />} />
-              <Route path="/admin/interventions" element={<AdminInterventionWorkspacePage />} />
-              <Route path="/admin/intervention-analytics" element={<AdminInterventionAnalyticsPage />} />
-              <Route path="/admin/sales-process-disconnects" element={<SalesProcessDisconnectsPage />} />
-              <Route path="/admin/merge-queue" element={<MergeQueuePage />} />
-              <Route path="/admin/procore" element={<ProcoreSyncPage />} />
-              <Route path="/admin/ai-ops" element={<AiOpsPage />} />
-              <Route path="/admin/ai-ops/reviews/:packetId" element={<AiPacketReviewPage />} />
-              <Route path="/admin/companycam" element={<CompanyCamPage />} />
-              <Route path="/admin/migration" element={<MigrationDashboardPage />} />
-              <Route path="/admin/migration/review" element={<MigrationReviewPage />} />
-              <Route path="/admin/migration/deals" element={<MigrationDealsPage />} />
-              <Route path="/admin/migration/contacts" element={<MigrationContactsPage />} />
+              <Route
+                path="/admin/offices"
+                element={(
+                  <RequireRole allowedRoles={["admin"]}>
+                    <OfficesPage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/admin/users"
+                element={(
+                  <RequireRole allowedRoles={["admin"]}>
+                    <UsersPage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/admin/pipeline"
+                element={(
+                  <RequireRole allowedRoles={["admin"]}>
+                    <PipelineConfigPage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/admin/audit"
+                element={(
+                  <RequireRole allowedRoles={["admin", "director"]}>
+                    <AuditLogPage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/admin/data-scrub"
+                element={(
+                  <RequireRole allowedRoles={["admin", "director"]}>
+                    <AdminDataScrubPage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/admin/cross-office-reports"
+                element={(
+                  <RequireRole allowedRoles={["admin", "director"]}>
+                    <CrossOfficeReportsPage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/admin/ai-actions"
+                element={(
+                  <RequireRole allowedRoles={["admin", "director"]}>
+                    <AiActionQueuePage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/admin/interventions"
+                element={(
+                  <RequireRole allowedRoles={["admin", "director"]}>
+                    <AdminInterventionWorkspacePage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/admin/intervention-analytics"
+                element={(
+                  <RequireRole allowedRoles={["admin", "director"]}>
+                    <AdminInterventionAnalyticsPage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/admin/sales-process-disconnects"
+                element={(
+                  <RequireRole allowedRoles={["admin", "director"]}>
+                    <SalesProcessDisconnectsPage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/admin/merge-queue"
+                element={(
+                  <RequireRole allowedRoles={["admin", "director"]}>
+                    <MergeQueuePage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/admin/procore"
+                element={(
+                  <RequireRole allowedRoles={["admin"]}>
+                    <ProcoreSyncPage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/admin/ai-ops"
+                element={(
+                  <RequireRole allowedRoles={["admin", "director"]}>
+                    <AiOpsPage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/admin/ai-ops/reviews/:packetId"
+                element={(
+                  <RequireRole allowedRoles={["admin", "director"]}>
+                    <AiPacketReviewPage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/admin/companycam"
+                element={(
+                  <RequireRole allowedRoles={["admin"]}>
+                    <CompanyCamPage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/admin/migration"
+                element={(
+                  <RequireRole allowedRoles={["admin"]}>
+                    <MigrationDashboardPage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/admin/migration/review"
+                element={(
+                  <RequireRole allowedRoles={["admin"]}>
+                    <MigrationReviewPage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/admin/migration/deals"
+                element={(
+                  <RequireRole allowedRoles={["admin"]}>
+                    <MigrationDealsPage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/admin/migration/contacts"
+                element={(
+                  <RequireRole allowedRoles={["admin"]}>
+                    <MigrationContactsPage />
+                  </RequireRole>
+                )}
+              />
               <Route path="/photos/feed" element={<PhotoFeedPage />} />
               <Route path="/help/user-guide" element={<UserGuidePage />} />
-              <Route path="/help/admin-guide" element={<AdminGuidePage />} />
+              <Route
+                path="/help/admin-guide"
+                element={(
+                  <RequireRole allowedRoles={["admin"]}>
+                    <AdminGuidePage />
+                  </RequireRole>
+                )}
+              />
             </Route>
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
