@@ -301,7 +301,7 @@ describe("intervention policy recommendations service", () => {
 
     expect(review.snapshot?.id).toBe(generated.snapshotId);
     expect(review.summary.window).toBe("last_30_days");
-    expect(review.summary.filters.decision).toBe("suppressed");
+    expect(review.summary.filters.decision).toBeNull();
     expect(review.summary.totals.suppressedByPredicate).toBeGreaterThan(0);
     expect(review.emptyStateScope).toBe("latest_snapshot");
     expect(review.latestDecisionRows.length).toBeGreaterThan(0);
@@ -329,7 +329,7 @@ describe("intervention policy recommendations service", () => {
       expect.arrayContaining([
         expect.objectContaining({
           taxonomy: "assignee_load_balancing",
-          recommendedAction: "seed_more_history",
+          recommendedAction: "hold_thresholds",
         }),
       ])
     );
@@ -353,6 +353,11 @@ describe("intervention policy recommendations service", () => {
       ])
     );
     expect(review.yield.recommendedNextAction).toBe("review_threshold_floor");
+    expect(review.summary).toMatchObject({
+      ...reviewAll.summary,
+      generatedAt: expect.any(String),
+    });
+    expect(review.tuning).toEqual(reviewAll.tuning);
     expect(review.yield).toEqual(reviewAll.yield);
   });
 
