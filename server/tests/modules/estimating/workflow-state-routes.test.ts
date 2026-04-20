@@ -22,9 +22,17 @@ const estimatingServiceMocks = vi.hoisted(() => ({
 
 vi.mock("../../../src/modules/estimating/copilot-service.js", () => estimatingServiceMocks);
 
+const extractionReviewServiceMocks = vi.hoisted(() => ({
+  updateEstimateExtraction: vi.fn(),
+  approveEstimateExtraction: vi.fn(),
+  rejectEstimateExtraction: vi.fn(),
+}));
+
+vi.mock("../../../src/modules/estimating/extraction-review-service.js", () => extractionReviewServiceMocks);
+
 const { dealRoutes } = await import("../../../src/modules/deals/routes.js");
 
-function findRouteHandler(method: "get" | "post", path: string) {
+function findRouteHandler(method: "get" | "post" | "patch", path: string) {
   const layer = (dealRoutes as any).stack.find(
     (entry: any) => entry.route?.path === path && entry.route?.methods?.[method]
   );
@@ -35,7 +43,7 @@ function findRouteHandler(method: "get" | "post", path: string) {
 }
 
 async function invokeRoute(
-  method: "get" | "post",
+  method: "get" | "post" | "patch",
   path: string,
   options?: { params?: Record<string, string>; body?: any }
 ) {
@@ -185,5 +193,73 @@ describe("estimating workflow routes", () => {
         body: {},
       })
     ).rejects.toMatchObject({ statusCode: 400 });
+  });
+
+  it("updates an extraction row for the workbench", async () => {
+    extractionReviewServiceMocks.updateEstimateExtraction.mockResolvedValue({
+      extraction: { id: "ext-1", status: "pending", normalizedLabel: "Updated label" },
+      reviewEvent: { id: "evt-1", eventType: "edited" },
+    });
+
+    const { res } = await invokeRoute("patch", "/:id/estimating/extractions/:extractionId", {
+      params: { id: "deal-1", extractionId: "ext-1" },
+      body: { normalizedLabel: "Updated label" },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(extractionReviewServiceMocks.updateEstimateExtraction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        dealId: "deal-1",
+        extractionId: "ext-1",
+        userId: "user-1",
+        input: { normalizedLabel: "Updated label" },
+      })
+    );
+    expect(res.body.extraction.normalizedLabel).toBe("Updated label");
+  });
+
+  it("approves an extraction row for the workbench", async () => {
+    extractionReviewServiceMocks.approveEstimateExtraction.mockResolvedValue({
+      extraction: { id: "ext-2", status: "approved" },
+      reviewEvent: { id: "evt-2", eventType: "approved" },
+    });
+
+    const { res } = await invokeRoute("post", "/:id/estimating/extractions/:extractionId/approve", {
+      params: { id: "deal-1", extractionId: "ext-2" },
+      body: {},
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(extractionReviewServiceMocks.approveEstimateExtraction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        dealId: "deal-1",
+        extractionId: "ext-2",
+        userId: "user-1",
+      })
+    );
+    expect(res.body.extraction.status).toBe("approved");
+  });
+
+  it("rejects an extraction row for the workbench", async () => {
+    extractionReviewServiceMocks.rejectEstimateExtraction.mockResolvedValue({
+      extraction: { id: "ext-3", status: "rejected" },
+      reviewEvent: { id: "evt-3", eventType: "rejected" },
+    });
+
+    const { res } = await invokeRoute("post", "/:id/estimating/extractions/:extractionId/reject", {
+      params: { id: "deal-1", extractionId: "ext-3" },
+      body: { reason: "duplicate" },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(extractionReviewServiceMocks.rejectEstimateExtraction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        dealId: "deal-1",
+        extractionId: "ext-3",
+        userId: "user-1",
+        reason: "duplicate",
+      })
+    );
+    expect(res.body.extraction.status).toBe("rejected");
   });
 });

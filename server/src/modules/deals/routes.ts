@@ -79,6 +79,11 @@ import {
   getEstimatingWorkflowState,
   listEstimateReviewEvents,
 } from "../estimating/copilot-service.js";
+import {
+  approveEstimateExtraction,
+  rejectEstimateExtraction,
+  updateEstimateExtraction,
+} from "../estimating/extraction-review-service.js";
 
 const router = Router();
 
@@ -951,6 +956,65 @@ router.get("/:id/estimating", async (req, res, next) => {
     const workflow = await getEstimatingWorkflowState(req.tenantDb! as any, req.params.id);
     await req.commitTransaction!();
     res.status(200).json(workflow);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.patch("/:id/estimating/extractions/:extractionId", async (req, res, next) => {
+  try {
+    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+
+    const result = await updateEstimateExtraction({
+      tenantDb: req.tenantDb! as any,
+      dealId: req.params.id,
+      extractionId: req.params.extractionId,
+      userId: req.user!.id,
+      input: req.body,
+    });
+
+    await req.commitTransaction!();
+    res.status(200).json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/:id/estimating/extractions/:extractionId/approve", async (req, res, next) => {
+  try {
+    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+
+    const result = await approveEstimateExtraction({
+      tenantDb: req.tenantDb! as any,
+      dealId: req.params.id,
+      extractionId: req.params.extractionId,
+      userId: req.user!.id,
+    });
+
+    await req.commitTransaction!();
+    res.status(200).json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/:id/estimating/extractions/:extractionId/reject", async (req, res, next) => {
+  try {
+    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+
+    const result = await rejectEstimateExtraction({
+      tenantDb: req.tenantDb! as any,
+      dealId: req.params.id,
+      extractionId: req.params.extractionId,
+      userId: req.user!.id,
+      reason: req.body.reason ?? null,
+    });
+
+    await req.commitTransaction!();
+    res.status(200).json(result);
   } catch (err) {
     next(err);
   }
