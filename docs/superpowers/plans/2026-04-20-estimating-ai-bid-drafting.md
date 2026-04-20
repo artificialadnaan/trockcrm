@@ -221,6 +221,8 @@ CREATE TABLE IF NOT EXISTS public.cost_catalog_item_codes (
 CREATE TABLE IF NOT EXISTS public.cost_catalog_prices (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   catalog_item_id uuid NOT NULL REFERENCES public.cost_catalog_items(id) ON DELETE CASCADE,
+  source_id uuid NOT NULL REFERENCES public.cost_catalog_sources(id) ON DELETE CASCADE,
+  sync_run_id uuid REFERENCES public.cost_catalog_sync_runs(id) ON DELETE SET NULL,
   material_unit_cost numeric(14, 2),
   labor_unit_cost numeric(14, 2),
   equipment_unit_cost numeric(14, 2),
@@ -534,6 +536,10 @@ describe("createEstimateSourceDocument", () => {
 
     expect(result.filename).toBe("plans.pdf");
     expect(enqueue).toHaveBeenCalledOnce();
+  });
+
+  it("persists OCR pages and extraction rows after OCR completes", async () => {
+    expect(true).toBe(false);
   });
 });
 ```
@@ -1069,6 +1075,30 @@ import { describe, expect, it, vi } from "vitest";
 import { promoteApprovedRecommendationsToEstimate } from "../../../src/modules/estimating/draft-estimate-service.js";
 
 describe("promoteApprovedRecommendationsToEstimate", () => {
+  it("creates canonical estimate sections and line items from approved recommendations", async () => {
+    const tenantDb = {
+      insert: vi.fn().mockReturnValue({
+        values: vi.fn().mockReturnValue({
+          returning: vi.fn().mockResolvedValue([{ id: "section-1" }]),
+        }),
+      }),
+      select: vi.fn().mockReturnValue({
+        from: vi.fn().mockReturnValue({
+          where: vi.fn().mockResolvedValue([]),
+        }),
+      }),
+    } as any;
+
+    await promoteApprovedRecommendationsToEstimate({
+      tenantDb,
+      dealId: "deal-1",
+      generationRunId: "run-1",
+      approvedRecommendationIds: ["rec-1"],
+    });
+
+    expect(tenantDb.insert).toHaveBeenCalled();
+  });
+
   it("is idempotent for the same approved recommendation set", async () => {
     const tenantDb = {
       insert: vi.fn(),
