@@ -513,6 +513,8 @@ describe("intervention policy recommendations service", () => {
         count: 1,
       },
     ]);
+    expect(review.summary.totals.suppressedByThreshold).toBe(1);
+    expect(review.yield.recommendedNextAction).toBe("review_threshold_floor");
     expect(review.recentHistory).toEqual(
       expect.arrayContaining([
         expect.objectContaining({

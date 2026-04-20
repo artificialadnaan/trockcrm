@@ -493,11 +493,13 @@ export async function getInterventionPolicyRecommendationReview(
       officeId: input.officeId,
       window,
       decision: input.decision === "all" ? null : input.decision ?? null,
+      now: input.now,
     }),
     getInterventionPolicyRecommendationEvaluationSummary(tenantDb, {
       officeId: input.officeId,
       window,
       decision: null,
+      now: input.now,
     }),
   ]);
   const reviewNow = input.now ?? new Date();
