@@ -30,6 +30,7 @@ export function Topbar() {
       <div className="flex items-center gap-2">
         <button
           onClick={() => setSearchOpen(true)}
+          aria-label="Search"
           className="flex h-9 w-9 items-center justify-center rounded-md bg-slate-100 text-slate-500 md:w-auto md:min-w-[11rem] md:justify-start md:gap-2 md:px-3"
         >
           <Search className="h-4 w-4" />
