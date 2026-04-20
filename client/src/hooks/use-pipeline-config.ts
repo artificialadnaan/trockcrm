@@ -6,7 +6,6 @@ export interface PipelineStage {
   id: string;
   name: string;
   slug: string;
-  workflowFamily: "lead" | "standard_deal" | "service_deal";
   displayOrder: number;
   workflowFamily: WorkflowFamily;
   isActivePipeline: boolean;
