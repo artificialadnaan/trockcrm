@@ -136,39 +136,29 @@ export async function reprocessEstimateSourceDocument({
   enqueueEstimateDocumentOcr,
   input,
 }: ReprocessEstimateSourceDocumentArgs) {
-  const [existingDocument] = await tenantDb
-    .select()
-    .from(estimateSourceDocuments)
+  const [document] = await tenantDb
+    .update(estimateSourceDocuments)
+    .set({
+      ocrStatus: "queued",
+      parsedAt: null,
+    })
     .where(
       and(
         eq(estimateSourceDocuments.id, input.documentId),
         eq(estimateSourceDocuments.dealId, input.dealId)
       )
     )
-    .limit(1);
+    .returning();
 
-  if (!existingDocument) {
+  if (!document) {
     return null;
   }
 
-  return createEstimateSourceDocument({
-    tenantDb,
-    enqueueEstimateDocumentOcr,
-    input: {
-      dealId: existingDocument.dealId,
-      projectId: existingDocument.projectId,
-      fileId: existingDocument.fileId,
-      rootFileId: existingDocument.rootFileId ?? existingDocument.fileId,
-      filename: existingDocument.filename,
-      storageKey: existingDocument.storageKey,
-      mimeType: existingDocument.mimeType,
-      fileSize: existingDocument.fileSize,
-      versionLabel: existingDocument.versionLabel,
-      contentHash: existingDocument.contentHash,
-      documentType: existingDocument.documentType,
-      userId: input.userId,
-      officeId: input.officeId,
-      reprocessExisting: true,
-    },
+  await enqueueEstimateDocumentOcr({
+    documentId: document.id,
+    dealId: document.dealId,
+    officeId: input.officeId,
   });
+
+  return document;
 }

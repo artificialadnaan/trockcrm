@@ -45,6 +45,14 @@ const pricingReviewServiceMocks = vi.hoisted(() => ({
 
 vi.mock("../../../src/modules/estimating/pricing-review-service.js", () => pricingReviewServiceMocks);
 
+const documentServiceMocks = vi.hoisted(() => ({
+  createEstimateSourceDocument: vi.fn(),
+  enqueueEstimateDocumentOcrJob: vi.fn(),
+  reprocessEstimateSourceDocument: vi.fn(),
+}));
+
+vi.mock("../../../src/modules/estimating/document-service.js", () => documentServiceMocks);
+
 const { dealRoutes } = await import("../../../src/modules/deals/routes.js");
 
 function findRouteHandler(method: "get" | "post" | "patch", path: string) {
@@ -182,6 +190,27 @@ describe("estimating workflow routes", () => {
       canPromote: false,
       generationRunIds: [],
     });
+  });
+
+  it("returns 404 when a reprocess target document is missing", async () => {
+    documentServiceMocks.reprocessEstimateSourceDocument.mockResolvedValue(null);
+
+    await expect(
+      invokeRoute("post", "/:id/estimating/documents/:documentId/reprocess", {
+        params: { id: "deal-1", documentId: "missing-doc" },
+      })
+    ).rejects.toMatchObject({ statusCode: 404 });
+
+    expect(documentServiceMocks.reprocessEstimateSourceDocument).toHaveBeenCalledWith(
+      expect.objectContaining({
+        input: expect.objectContaining({
+          dealId: "deal-1",
+          documentId: "missing-doc",
+          userId: "user-1",
+          officeId: "office-1",
+        }),
+      })
+    );
   });
 
   it("returns copilot answers using server-built context", async () => {
