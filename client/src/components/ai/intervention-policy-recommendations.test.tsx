@@ -224,7 +224,22 @@ beforeEach(() => {
 });
 
 describe("InterventionPolicyRecommendationsSection", () => {
-  it("renders yield and history details when the review panel is opened by default", () => {
+  it("renders a compact review summary by default and a structured drawer when opened", () => {
+    const collapsedHtml = renderToStaticMarkup(
+      <InterventionPolicyRecommendationsSection
+        view={recommendationView}
+        onRefresh={() => {}}
+      />
+    );
+
+    expect(collapsedHtml).toContain("Review recommendation quality");
+    expect(collapsedHtml).toContain("Attention now:");
+    expect(collapsedHtml).not.toContain("Historical window summary");
+    expect(collapsedHtml).not.toContain("Qualification diagnostics");
+    expect(collapsedHtml).not.toContain("threshold limited");
+    expect(collapsedHtml).not.toContain("Window rendered:");
+    expect(collapsedHtml).not.toContain("Global threshold proposal");
+
     const html = renderToStaticMarkup(
       <InterventionPolicyRecommendationsSection
         view={recommendationView}
@@ -233,22 +248,51 @@ describe("InterventionPolicyRecommendationsSection", () => {
       />
     );
 
-    expect(html).toContain("Yield and decision history");
-    expect(html).toContain("Window rendered: 4");
-    expect(html).toContain("Next action: review threshold floor");
-    expect(html).toContain("threshold_not_met · 5");
-    expect(html).toContain("Rendered 3");
-    expect(html).toContain("monitor_only");
-    expect(html).toContain("Applied to waiting-on-customer snooze policy.");
-    expect(html).toContain("Qualification diagnostics");
-    expect(html).toContain("review threshold floor in code");
-    expect(html).toContain("Threshold calibration proposals");
-    expect(html).toContain("Current threshold");
-    expect(html).toContain("Proposed threshold");
-    expect(html).toContain("Read-only production-window guidance");
-    expect(html).toContain("minimum breached cases &gt;= 4");
-    expect(html).toContain("Latest snapshot truth for the active recommendation snapshot.");
-    expect(html).toContain("Non-production validation only");
-    expect(html).toContain("scripts/seed-intervention-policy-recommendation-qualification.ts");
+    expect(html).toContain("Overview");
+    expect(html).toContain("What needs attention now");
+    expect(html).toContain("Next safe action");
+    expect(html).toContain("Calibration status");
+    expect(html).toContain("History");
+    expect(html).toContain("Diagnostics");
+    expect(html).toContain("Calibration");
+    expect(html).toContain("Seeded validation");
+    expect(html).not.toContain("Window rendered:");
+    expect(html).not.toContain("Historical window summary");
+  });
+
+  it("keeps the last rendered review content visible during refetch and summarizes history-limited review state correctly", () => {
+    mocks.useInterventionPolicyRecommendationReview.mockReturnValueOnce({
+      data: {
+        ...recommendationReview,
+        diagnostics: {
+          ...recommendationReview.diagnostics,
+          systemDiagnostics: {
+            ...recommendationReview.diagnostics.systemDiagnostics,
+            recommendedNextAction: "seed_non_prod_validation",
+          },
+        },
+        thresholdCalibrationProposals: {
+          ...recommendationReview.thresholdCalibrationProposals,
+          selectionSummary: "No threshold changes are currently recommended.",
+          noProposalReason: "predicate_failure_dominates",
+          proposals: [],
+        },
+      },
+      loading: true,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const html = renderToStaticMarkup(
+      <InterventionPolicyRecommendationsSection
+        view={recommendationView}
+        onRefresh={() => {}}
+        defaultShowReview
+      />
+    );
+
+    expect(html).toContain("Attention now: recommendation history is too thin to justify live changes.");
+    expect(html).not.toContain("Loading recommendation history...");
+    expect(html).not.toContain("Loading recommendation diagnostics...");
   });
 });
