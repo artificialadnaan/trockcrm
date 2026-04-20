@@ -166,11 +166,37 @@ async function isFreshestEligibleParseRun(
     .orderBy(
       desc(estimateDocumentParseRuns.startedAt),
       desc(estimateDocumentParseRuns.createdAt)
-    )
-    .limit(10);
+    );
 
-  const newestEligibleRun = parseRuns.find((run) => run.status !== "failed");
+  const orderedParseRuns = [...parseRuns].sort((left, right) =>
+    compareParseRunPriority(right, left)
+  );
+
+  const newestEligibleRun = orderedParseRuns.find((run) => run.status !== "failed");
   return newestEligibleRun?.id === parseRunId;
+}
+
+async function activateCompletedParseRun(args: {
+  tenantDb: TenantDb;
+  documentId: string;
+  parseRunId: string;
+  options: { provider: string; profile: string };
+}) {
+  await args.tenantDb.execute(sql`
+    update estimate_source_documents as document
+    set
+      parse_status = 'completed',
+      ocr_status = 'completed',
+      active_parse_run_id = ${args.parseRunId},
+      parse_provider = ${args.options.provider},
+      parse_profile = ${args.options.profile},
+      parse_error_summary = null,
+      parsed_at = now()
+    where document.id = ${args.documentId}
+      and document.active_parse_run_id = ${args.parseRunId}
+  `);
+
+  return getCurrentDocumentState(args.tenantDb, args.documentId);
 }
 
 async function cleanupFailedParseArtifacts(
@@ -368,22 +394,16 @@ export async function runEstimateDocumentParse(args: {
 
     let documentUpdate = await getCurrentDocumentState(args.tenantDb, args.document.id);
     if (canActivate) {
-      const [activatedDocument] = await args.tenantDb
-        .update(estimateSourceDocuments)
-        .set({
-          parseStatus: "completed",
-          ocrStatus: "completed",
-          activeParseRunId: parseRun.id,
-          parseProvider: options.provider,
-          parseProfile: options.profile,
-          parseErrorSummary: null,
-          parsedAt: new Date(),
-        })
-        .where(eq(estimateSourceDocuments.id, args.document.id))
-        .returning();
+      documentUpdate = await activateCompletedParseRun({
+        tenantDb: args.tenantDb,
+        documentId: args.document.id,
+        parseRunId: parseRun.id,
+        options,
+      });
 
-      await markArtifactsInactive(args.tenantDb, args.document.id, parseRun.id);
-      documentUpdate = activatedDocument;
+      if (documentUpdate?.activeParseRunId === parseRun.id && documentUpdate.parseStatus === "completed") {
+        await markArtifactsInactive(args.tenantDb, args.document.id, parseRun.id);
+      }
     }
 
     return {
