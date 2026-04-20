@@ -45,19 +45,41 @@ function normalize(html: string) {
   return html.replace(/\s+/g, " ").trim();
 }
 
+function getClassList(html: string, pattern: RegExp) {
+  const match = html.match(pattern);
+
+  expect(match).not.toBeNull();
+  return match![1].split(/\s+/).filter(Boolean);
+}
+
 describe("AppShell layout", () => {
   it("wraps routed content in a shared page stack container", () => {
     const html = normalize(renderToStaticMarkup(<AppShell />));
-
-    expect(html).toContain(
-      '<main class="flex-1 overflow-auto bg-slate-50 p-4 pb-20 md:p-6 md:pb-6">',
+    const mainClasses = getClassList(html, /<main[^>]*class="([^"]+)"/);
+    const frameClasses = getClassList(
+      html,
+      /<section[^>]*data-slot="route-content-frame"[^>]*class="([^"]+)"/,
     );
+
     expect(html).toContain('data-slot="route-content-frame"');
-    expect(html).toContain('class="min-h-full space-y-6"');
     expect(html).toContain('<section');
     expect(html).toContain('data-slot="outlet"');
     expect(html).toContain('aria-label="Search"');
     expect(html).toContain('data-slot="notification-center"');
+    expect(mainClasses).toEqual(
+      expect.arrayContaining([
+        "flex-1",
+        "overflow-auto",
+        "bg-slate-50",
+        "p-4",
+        "pb-20",
+        "md:p-6",
+        "md:pb-6",
+      ]),
+    );
+    expect(frameClasses).toEqual(
+      expect.arrayContaining(["min-h-full", "space-y-6"]),
+    );
     expect(html.indexOf('data-slot="route-content-frame"')).toBeLessThan(
       html.indexOf('data-slot="outlet"'),
     );
