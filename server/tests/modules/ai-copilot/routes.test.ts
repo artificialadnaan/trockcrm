@@ -41,6 +41,14 @@ const policyApplicationServiceMocks = vi.hoisted(() => ({
   getInterventionPolicyRecommendationEvaluationSummary: vi.fn(),
 }));
 
+const policyReviewServiceMocks = vi.hoisted(() => ({
+  getInterventionPolicyRecommendationReview: vi.fn(),
+}));
+
+const policySeedServiceMocks = vi.hoisted(() => ({
+  seedInterventionPolicyRecommendationQualificationData: vi.fn(),
+}));
+
 const taskSuggestionMocks = vi.hoisted(() => ({
   acceptTaskSuggestion: vi.fn(),
 }));
@@ -96,6 +104,15 @@ vi.mock("../../../src/modules/ai-copilot/intervention-policy-application-service
     policyApplicationServiceMocks.getInterventionPolicyRecommendationEvaluationSummary,
 }));
 
+vi.mock("../../../src/modules/ai-copilot/intervention-policy-recommendation-review-service.js", () => ({
+  getInterventionPolicyRecommendationReview: policyReviewServiceMocks.getInterventionPolicyRecommendationReview,
+}));
+
+vi.mock("../../../src/modules/ai-copilot/intervention-policy-recommendation-seed-service.js", () => ({
+  seedInterventionPolicyRecommendationQualificationData:
+    policySeedServiceMocks.seedInterventionPolicyRecommendationQualificationData,
+}));
+
 vi.mock("../../../src/modules/ai-copilot/task-suggestion-service.js", () => ({
   acceptTaskSuggestion: taskSuggestionMocks.acceptTaskSuggestion,
 }));
@@ -139,6 +156,8 @@ describe("ai copilot routes", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     delete process.env.ALLOW_LEGACY_OUTCOME_WRITES;
+    delete process.env.NODE_ENV;
+    delete process.env.POLICY_RECOMMENDATION_FIXTURE_OFFICE_IDS;
     insertMock = vi.fn(() => ({
       values: vi.fn().mockResolvedValue(undefined),
     }));
@@ -182,6 +201,44 @@ describe("ai copilot routes", () => {
       beforeState: { maxSnoozeDays: 7 },
       proposedState: { maxSnoozeDays: 5 },
       appliedState: { maxSnoozeDays: 5 },
+    });
+    policyReviewServiceMocks.getInterventionPolicyRecommendationReview.mockResolvedValue({
+      snapshot: {
+        id: "22222222-2222-4222-8222-222222222222",
+        officeId: "office-1",
+        status: "active",
+        generatedAt: "2026-04-19T12:00:00.000Z",
+        staleAt: "2026-04-20T12:00:00.000Z",
+        supersededAt: null,
+      },
+      summary: {
+        window: "last_30_days",
+        generatedAt: "2026-04-19T12:00:00.000Z",
+        filters: { taxonomy: null, decision: null },
+        totals: {
+          qualifiedRendered: 1,
+          qualifiedSuppressedByCap: 0,
+          suppressedByThreshold: 0,
+          suppressedByPredicate: 1,
+          suppressedByMissingTarget: 0,
+          suppressedByApplyIneligible: 0,
+        },
+        byTaxonomy: [],
+        feedback: [],
+        apply: [],
+      },
+      emptyStateScope: "latest_snapshot",
+      emptyStateReason: null,
+      latestDecisionRows: [],
+    });
+    policySeedServiceMocks.seedInterventionPolicyRecommendationQualificationData.mockResolvedValue({
+      seeded: true,
+      seedKey: "policy-recommendation-fixture",
+      patternsCreated: [
+        "snooze_policy_adjustment",
+        "escalation_policy_adjustment",
+        "assignee_load_balancing",
+      ],
     });
   });
 
@@ -499,6 +556,107 @@ describe("ai copilot routes", () => {
       })
     );
     expect(response.body.window).toBe("last_30_days");
+  });
+
+  it("returns policy recommendation review data for admins", async () => {
+    policyReviewServiceMocks.getInterventionPolicyRecommendationReview.mockResolvedValueOnce({
+      snapshot: {
+        id: "22222222-2222-4222-8222-222222222222",
+        officeId: "office-1",
+        status: "active",
+        generatedAt: "2026-04-19T12:00:00.000Z",
+        staleAt: "2026-04-20T12:00:00.000Z",
+        supersededAt: null,
+      },
+      summary: {
+        window: "last_30_days",
+        generatedAt: "2026-04-19T12:00:00.000Z",
+        filters: { taxonomy: null, decision: "suppressed" },
+        totals: {
+          qualifiedRendered: 0,
+          qualifiedSuppressedByCap: 0,
+          suppressedByThreshold: 0,
+          suppressedByPredicate: 1,
+          suppressedByMissingTarget: 0,
+          suppressedByApplyIneligible: 0,
+        },
+        byTaxonomy: [],
+        feedback: [],
+        apply: [],
+      },
+      emptyStateScope: "latest_snapshot",
+      emptyStateReason: null,
+      latestDecisionRows: [],
+    });
+    const app = createApp("admin");
+    const response = await request(app).get(
+      "/api/ai/ops/intervention-policy-recommendations/review?window=last_7_days&decision=suppressed"
+    );
+
+    expect(response.status).toBe(200);
+    expect(policyReviewServiceMocks.getInterventionPolicyRecommendationReview).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        officeId: "office-1",
+        viewerUserId: "admin-1",
+        window: "last_7_days",
+        decision: "suppressed",
+      })
+    );
+    expect(response.body).toMatchObject({
+      snapshot: expect.any(Object),
+      summary: {
+        window: "last_30_days",
+        filters: {
+          decision: "suppressed",
+        },
+      },
+      latestDecisionRows: expect.any(Array),
+    });
+  });
+
+  it("seeds policy recommendation qualification data for admins outside production", async () => {
+    process.env.NODE_ENV = "development";
+    process.env.POLICY_RECOMMENDATION_FIXTURE_OFFICE_IDS = "office-1,office-2";
+    interventionServiceMocks.regenerateInterventionPolicyRecommendations.mockResolvedValue({
+      queued: true,
+      snapshotId: "33333333-3333-4333-8333-333333333333",
+      status: "pending",
+    });
+
+    const app = createApp("admin");
+    const response = await request(app)
+      .post("/api/ai/ops/intervention-policy-recommendations/dev/seed-qualification")
+      .send({
+        seedKey: "fixture-smoke",
+      });
+
+    expect(response.status).toBe(200);
+    expect(policySeedServiceMocks.seedInterventionPolicyRecommendationQualificationData).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        officeId: "office-1",
+        actorUserId: "admin-1",
+        environment: "development",
+        allowedOfficeIds: ["office-1", "office-2"],
+        seedKey: "fixture-smoke",
+      })
+    );
+    expect(interventionServiceMocks.regenerateInterventionPolicyRecommendations).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        officeId: "office-1",
+        requestedByUserId: "admin-1",
+      })
+    );
+    expect(response.body).toMatchObject({
+      seeded: true,
+      seedKey: "policy-recommendation-fixture",
+      generation: {
+        snapshotId: "33333333-3333-4333-8333-333333333333",
+        status: "pending",
+      },
+    });
   });
 
   it("applies a policy recommendation for admins", async () => {

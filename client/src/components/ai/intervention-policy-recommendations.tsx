@@ -4,7 +4,10 @@ import {
   regenerateInterventionPolicyRecommendations,
   submitInterventionPolicyRecommendationFeedback,
   type InterventionPolicyRecommendation,
+  type InterventionPolicyRecommendationReviewDecisionFilter,
+  type InterventionPolicyRecommendationReviewWindow,
   type InterventionPolicyRecommendationsView,
+  useInterventionPolicyRecommendationReview,
 } from "@/hooks/use-ai-ops";
 import { Button } from "@/components/ui/button";
 
@@ -247,6 +250,13 @@ export function InterventionPolicyRecommendationsSection({
 }) {
   const [regenerating, setRegenerating] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [showReview, setShowReview] = useState(false);
+  const [reviewWindow, setReviewWindow] = useState<InterventionPolicyRecommendationReviewWindow>("last_30_days");
+  const [reviewDecision, setReviewDecision] = useState<InterventionPolicyRecommendationReviewDecisionFilter>("all");
+  const review = useInterventionPolicyRecommendationReview({
+    window: reviewWindow,
+    decision: reviewDecision,
+  });
 
   async function handleRegenerate() {
     setRegenerating(true);
@@ -264,6 +274,75 @@ export function InterventionPolicyRecommendationsSection({
       setRegenerating(false);
     }
   }
+
+  const reviewControls = (
+    <div className="rounded-lg border border-border/70 bg-muted/20 px-4 py-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="text-sm font-semibold text-gray-900">Recommendation review</div>
+        <Button variant="outline" onClick={() => setShowReview((value) => !value)}>
+          Review recommendation quality
+        </Button>
+      </div>
+      {!showReview ? null : (
+        <div className="mt-4 space-y-4">
+          <div className="text-sm text-muted-foreground">
+            Latest snapshot: {formatFreshnessLabel(review.data?.snapshot?.generatedAt ?? null)}
+          </div>
+          <div className="rounded-lg border border-border/70 bg-white px-3 py-3">
+            <div className="text-[11px] uppercase tracking-widest text-muted-foreground">Historical window summary</div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {([
+                ["7d", "last_7_days"],
+                ["30d", "last_30_days"],
+                ["90d", "last_90_days"],
+              ] as const).map(([label, value]) => (
+                <Button key={value} variant={reviewWindow === value ? "default" : "outline"} onClick={() => setReviewWindow(value)}>
+                  {label}
+                </Button>
+              ))}
+            </div>
+            <div className="mt-4 grid gap-2 text-sm text-gray-900 md:grid-cols-2 xl:grid-cols-3">
+              <div>Rendered: {review.data?.summary.totals.qualifiedRendered ?? 0}</div>
+              <div>Suppressed by predicate: {review.data?.summary.totals.suppressedByPredicate ?? 0}</div>
+              <div>Suppressed by threshold: {review.data?.summary.totals.suppressedByThreshold ?? 0}</div>
+              <div>Suppressed by cap: {review.data?.summary.totals.qualifiedSuppressedByCap ?? 0}</div>
+              <div>Suppressed by missing target: {review.data?.summary.totals.suppressedByMissingTarget ?? 0}</div>
+              <div>Suppressed by apply ineligible: {review.data?.summary.totals.suppressedByApplyIneligible ?? 0}</div>
+            </div>
+          </div>
+          <div className="rounded-lg border border-border/70 bg-white px-3 py-3">
+            <div className="text-[11px] uppercase tracking-widest text-muted-foreground">Latest decision diagnostics</div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {(["all", "rendered", "suppressed"] as const).map((value) => (
+                <Button key={value} variant={reviewDecision === value ? "default" : "outline"} onClick={() => setReviewDecision(value)}>
+                  {value}
+                </Button>
+              ))}
+            </div>
+            <div className="mt-3 space-y-2">
+              {review.loading ? (
+                <div className="text-sm text-muted-foreground">Loading recommendation review...</div>
+              ) : review.error ? (
+                <div className="text-sm text-red-700">{review.error}</div>
+              ) : review.data?.latestDecisionRows.length ? (
+                review.data.latestDecisionRows.map((row) => (
+                  <div key={`${row.taxonomy}:${row.groupingKey}:${row.decision}`} className="rounded-md border border-border/60 px-3 py-2 text-sm">
+                    <div className="font-medium text-gray-900">{row.taxonomy}</div>
+                    <div className="text-muted-foreground">
+                      {row.groupingKey} · {row.decision}
+                      {row.score == null ? "" : ` · score ${row.score}`}
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <div className="text-sm text-muted-foreground">No diagnostics are available yet.</div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
 
   if (loading && !view) {
     return (
@@ -284,6 +363,7 @@ export function InterventionPolicyRecommendationsSection({
   if (!view || view.status === "missing_snapshot") {
     return (
       <div className="space-y-4">
+        {reviewControls}
         <div className="rounded-lg border border-dashed border-border bg-muted/30 px-4 py-4 text-sm leading-6 text-muted-foreground">
           No policy recommendation snapshot is available yet.
         </div>
@@ -297,12 +377,18 @@ export function InterventionPolicyRecommendationsSection({
   if (view.recommendations.length === 0) {
     return (
       <div className="space-y-4">
+        {reviewControls}
         <Button variant="outline" disabled={regenerating} onClick={() => void handleRegenerate()}>
           Refresh Recommendations
         </Button>
         <div className="rounded-lg border border-dashed border-border bg-muted/30 px-4 py-4 text-sm leading-6 text-muted-foreground">
           No policy changes are recommended right now.
         </div>
+        {review.data?.emptyStateReason ? (
+          <div className="rounded-lg border border-border/70 bg-white px-4 py-4 text-sm leading-6 text-muted-foreground">
+            {review.data.emptyStateReason}
+          </div>
+        ) : null}
       </div>
     );
   }
@@ -324,6 +410,7 @@ export function InterventionPolicyRecommendationsSection({
           Recommendations are available, but at least one card is using fallback copy from the latest generation run.
         </div>
       )}
+      {reviewControls}
       <Button variant="outline" disabled={regenerating} onClick={() => void handleRegenerate()}>
         Refresh Recommendations
       </Button>

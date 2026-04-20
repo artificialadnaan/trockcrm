@@ -29,6 +29,8 @@ import {
   applyInterventionPolicyRecommendation,
   getInterventionPolicyRecommendationEvaluationSummary,
 } from "./intervention-policy-application-service.js";
+import { getInterventionPolicyRecommendationReview } from "./intervention-policy-recommendation-review-service.js";
+import { seedInterventionPolicyRecommendationQualificationData } from "./intervention-policy-recommendation-seed-service.js";
 import type { InterventionQueueFilters, InterventionQueueView } from "./intervention-types.js";
 import type { StructuredEscalateConclusion, StructuredResolveConclusion, StructuredSnoozeConclusion } from "./intervention-types.js";
 import { mapStructuredResolveReasonToLegacyResolutionReason } from "./intervention-outcome-taxonomy.js";
@@ -122,6 +124,13 @@ function requireCaseIds(value: unknown) {
     throw new AppError(400, "caseIds must be a non-empty array of case ids");
   }
   return value;
+}
+
+function getPolicyRecommendationFixtureOfficeIds() {
+  return (process.env.POLICY_RECOMMENDATION_FIXTURE_OFFICE_IDS ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
 }
 
 function readStructuredConclusion(
@@ -434,6 +443,67 @@ router.get("/ops/intervention-policy-recommendations/evaluation", requireRole("a
     });
     await req.commitTransaction!();
     res.json(summary);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/ops/intervention-policy-recommendations/review", requireRole("admin", "director"), async (req, res, next) => {
+  try {
+    const window =
+      req.query.window === "last_7_days" || req.query.window === "last_90_days" || req.query.window === "last_30_days"
+        ? req.query.window
+        : "last_30_days";
+    const decision =
+      req.query.decision === "rendered" || req.query.decision === "suppressed" || req.query.decision === "all"
+        ? req.query.decision
+        : "all";
+    const review = await getInterventionPolicyRecommendationReview(req.tenantDb!, {
+      officeId: getActiveOfficeId(req),
+      viewerUserId: req.user!.id,
+      window,
+      decision,
+    });
+    await req.commitTransaction!();
+    res.json(review);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/ops/intervention-policy-recommendations/dev/seed-qualification", requireRole("admin"), async (req, res, next) => {
+  try {
+    if (process.env.NODE_ENV === "production") {
+      throw new AppError(404, "Not found");
+    }
+
+    const officeId = getActiveOfficeId(req);
+    const seedKey =
+      typeof req.body?.seedKey === "string" && req.body.seedKey.trim().length > 0
+        ? req.body.seedKey.trim()
+        : undefined;
+    const seeded = await seedInterventionPolicyRecommendationQualificationData(req.tenantDb!, {
+      officeId,
+      actorUserId: req.user!.id,
+      environment: process.env.NODE_ENV ?? "development",
+      allowedOfficeIds: getPolicyRecommendationFixtureOfficeIds(),
+      seedKey,
+    });
+    const generation = await regenerateInterventionPolicyRecommendations(req.tenantDb!, {
+      officeId,
+      requestedByUserId: req.user!.id,
+    });
+
+    await req.commitTransaction!();
+    res.json({
+      ...seeded,
+      generation: {
+        snapshotId: generation.snapshotId,
+        status: generation.status,
+        recommendationCount: generation.recommendations?.length ?? null,
+        taxonomies: generation.recommendations?.map((item) => item.taxonomy) ?? [],
+      },
+    });
   } catch (err) {
     next(err);
   }
