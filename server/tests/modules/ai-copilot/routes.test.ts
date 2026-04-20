@@ -36,6 +36,11 @@ const interventionServiceMocks = vi.hoisted(() => ({
   escalateInterventionCases: vi.fn(),
 }));
 
+const policyApplicationServiceMocks = vi.hoisted(() => ({
+  applyInterventionPolicyRecommendation: vi.fn(),
+  getInterventionPolicyRecommendationEvaluationSummary: vi.fn(),
+}));
+
 const taskSuggestionMocks = vi.hoisted(() => ({
   acceptTaskSuggestion: vi.fn(),
 }));
@@ -83,6 +88,12 @@ vi.mock("../../../src/modules/ai-copilot/intervention-manager-alerts-service.js"
   getLatestManagerAlertSnapshot: interventionServiceMocks.getLatestManagerAlertSnapshot,
   runManagerAlertPreview: interventionServiceMocks.runManagerAlertPreview,
   sendManagerAlertSummary: interventionServiceMocks.sendManagerAlertSummary,
+}));
+
+vi.mock("../../../src/modules/ai-copilot/intervention-policy-application-service.js", () => ({
+  applyInterventionPolicyRecommendation: policyApplicationServiceMocks.applyInterventionPolicyRecommendation,
+  getInterventionPolicyRecommendationEvaluationSummary:
+    policyApplicationServiceMocks.getInterventionPolicyRecommendationEvaluationSummary,
 }));
 
 vi.mock("../../../src/modules/ai-copilot/task-suggestion-service.js", () => ({
@@ -142,6 +153,35 @@ describe("ai copilot routes", () => {
     companiesServiceMocks.getCompanyById.mockResolvedValue({
       id: "company-1",
       name: "Acme Property Group",
+    });
+    policyApplicationServiceMocks.getInterventionPolicyRecommendationEvaluationSummary.mockResolvedValue({
+      window: "last_30_days",
+      generatedAt: "2026-04-19T12:00:00.000Z",
+      filters: { taxonomy: null, decision: null },
+      totals: {
+        qualifiedRendered: 1,
+        qualifiedSuppressedByCap: 0,
+        suppressedByThreshold: 0,
+        suppressedByPredicate: 1,
+        suppressedByMissingTarget: 0,
+        suppressedByApplyIneligible: 0,
+      },
+      byTaxonomy: [],
+      feedback: [],
+      apply: [],
+    });
+    policyApplicationServiceMocks.applyInterventionPolicyRecommendation.mockResolvedValue({
+      status: "applied",
+      applyEventId: "apply-1",
+      recommendationId: "11111111-1111-4111-8111-111111111111",
+      snapshotId: "22222222-2222-4222-8222-222222222222",
+      applyStatus: "applied",
+      appliedAt: "2026-04-19T12:05:00.000Z",
+      appliedBy: "Admin User",
+      reason: null,
+      beforeState: { maxSnoozeDays: 7 },
+      proposedState: { maxSnoozeDays: 5 },
+      appliedState: { maxSnoozeDays: 5 },
     });
   });
 
@@ -444,6 +484,43 @@ describe("ai copilot routes", () => {
 
     expect(response.status).toBe(400);
     expect(interventionServiceMocks.recordInterventionPolicyRecommendationFeedback).not.toHaveBeenCalled();
+  });
+
+  it("returns policy recommendation evaluation summary for admins", async () => {
+    const app = createApp("admin");
+    const response = await request(app).get("/api/ai/ops/intervention-policy-recommendations/evaluation?window=last_30_days");
+
+    expect(response.status).toBe(200);
+    expect(policyApplicationServiceMocks.getInterventionPolicyRecommendationEvaluationSummary).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        officeId: "office-1",
+        window: "last_30_days",
+      })
+    );
+    expect(response.body.window).toBe("last_30_days");
+  });
+
+  it("applies a policy recommendation for admins", async () => {
+    const app = createApp("admin");
+    const response = await request(app)
+      .post("/api/ai/ops/intervention-policy-recommendations/11111111-1111-4111-8111-111111111111/apply")
+      .send({
+        snapshotId: "22222222-2222-4222-8222-222222222222",
+        recommendationIdempotencyKey: "req-1",
+      });
+
+    expect(response.status).toBe(200);
+    expect(policyApplicationServiceMocks.applyInterventionPolicyRecommendation).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        officeId: "office-1",
+        recommendationId: "11111111-1111-4111-8111-111111111111",
+        snapshotId: "22222222-2222-4222-8222-222222222222",
+        recommendationIdempotencyKey: "req-1",
+      })
+    );
+    expect(response.body.status).toBe("applied");
   });
 
   it("returns the latest persisted manager alert snapshot for the active office", async () => {

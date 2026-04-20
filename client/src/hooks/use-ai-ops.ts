@@ -512,6 +512,20 @@ export interface ManagerAlertSendResult {
 }
 
 export type InterventionPolicyRecommendationFeedbackValue = "helpful" | "not_useful" | "wrong_direction";
+export type InterventionPolicyRecommendationDecisionStatus =
+  | "qualified_rendered"
+  | "qualified_suppressed_by_cap"
+  | "suppressed_by_threshold"
+  | "suppressed_by_predicate"
+  | "suppressed_by_missing_target"
+  | "suppressed_by_apply_ineligible";
+
+export type InterventionPolicyRecommendationApplyEventStatus =
+  | "applied"
+  | "applied_noop"
+  | "rejected_validation"
+  | "rejected_stale"
+  | "rejected_conflict";
 
 export interface InterventionPolicyRecommendationEvidenceItem {
   metricKey: string;
@@ -521,6 +535,63 @@ export interface InterventionPolicyRecommendationEvidenceItem {
   delta: number | string | null;
   window: "last_7_days_vs_prior_7_days" | "last_30_days" | "last_30_days_vs_prior_30_days";
   direction: "up" | "down" | "flat" | "not_applicable";
+}
+
+export type InterventionPolicyRecommendationProposedChange =
+  | {
+      kind: "snooze_policy_adjustment";
+      targetKey: string;
+      policyLabel: string;
+      currentValue: {
+        maxSnoozeDays: number;
+        breachReviewThresholdPercent: number | null;
+      };
+      proposedValue: {
+        maxSnoozeDays: number;
+        breachReviewThresholdPercent: number | null;
+      };
+    }
+  | {
+      kind: "escalation_policy_adjustment";
+      targetKey: string;
+      policyLabel: string;
+      currentValue: {
+        routingMode: string;
+        escalationThresholdPercent: number;
+      };
+      proposedValue: {
+        routingMode: string;
+        escalationThresholdPercent: number;
+      };
+    }
+  | {
+      kind: "assignee_load_balancing";
+      targetKey: string;
+      policyLabel: string;
+      currentValue: {
+        balancingMode: string;
+        overloadSharePercent: number;
+        minHighRiskCases: number;
+      };
+      proposedValue: {
+        balancingMode: string;
+        overloadSharePercent: number;
+        minHighRiskCases: number;
+      };
+    };
+
+export interface InterventionPolicyRecommendationReviewDetails {
+  decision: InterventionPolicyRecommendationDecisionStatus;
+  primaryTrigger: string;
+  thresholdSummary: string;
+  rankingSummary: string;
+  score: number;
+  impactScore: number;
+  volumeScore: number;
+  persistenceScore: number;
+  actionabilityScore: number;
+  usedFallbackCopy: boolean;
+  usedFallbackStructuredPayload: boolean;
 }
 
 export interface InterventionPolicyRecommendation {
@@ -545,6 +616,19 @@ export interface InterventionPolicyRecommendation {
   generatedAt: string;
   staleAt: string;
   renderStatus: "active" | "degraded";
+  proposedChange: InterventionPolicyRecommendationProposedChange | null;
+  reviewDetails: InterventionPolicyRecommendationReviewDetails;
+  applyEligibility: {
+    eligible: boolean;
+    reason: "eligible" | "read_only_taxonomy" | "low_confidence" | "missing_proposed_change";
+    message: string;
+  };
+  applyStatus: {
+    status: "not_applied" | InterventionPolicyRecommendationApplyEventStatus;
+    appliedAt: string | null;
+    appliedBy: string | null;
+    reason: string | null;
+  };
   feedbackSummary: {
     helpfulCount: number;
     notUsefulCount: number;
@@ -571,6 +655,39 @@ export type InterventionPolicyRecommendationsView =
       };
       recommendations: InterventionPolicyRecommendation[];
     };
+
+export interface InterventionPolicyRecommendationEvaluationSummary {
+  window: "last_7_days" | "last_30_days" | "last_90_days";
+  generatedAt: string;
+  filters: {
+    taxonomy: InterventionPolicyRecommendation["taxonomy"] | null;
+    decision: InterventionPolicyRecommendationDecisionStatus | null;
+  };
+  totals: {
+    qualifiedRendered: number;
+    qualifiedSuppressedByCap: number;
+    suppressedByThreshold: number;
+    suppressedByPredicate: number;
+    suppressedByMissingTarget: number;
+    suppressedByApplyIneligible: number;
+  };
+  byTaxonomy: Array<{
+    taxonomy: InterventionPolicyRecommendation["taxonomy"];
+    counts: InterventionPolicyRecommendationEvaluationSummary["totals"];
+  }>;
+  feedback: Array<{
+    taxonomy: InterventionPolicyRecommendation["taxonomy"];
+    helpfulCount: number;
+    notUsefulCount: number;
+    wrongDirectionCount: number;
+  }>;
+  apply: Array<{
+    taxonomy: InterventionPolicyRecommendation["taxonomy"];
+    appliedCount: number;
+    appliedNoopCount: number;
+    rejectedCount: number;
+  }>;
+}
 
 export interface QueueAiBackfillResult {
   queued: boolean;
@@ -745,6 +862,47 @@ export async function submitInterventionPolicyRecommendationFeedback(input: {
       comment: input.comment ?? null,
     },
   });
+}
+
+export async function applyInterventionPolicyRecommendation(input: {
+  recommendationId: string;
+  snapshotId: string;
+  recommendationIdempotencyKey: string;
+}) {
+  return api<{
+    status: InterventionPolicyRecommendationApplyEventStatus;
+    applyEventId: string;
+    recommendationId: string;
+    snapshotId: string;
+    applyStatus: InterventionPolicyRecommendationApplyEventStatus;
+    appliedAt: string | null;
+    appliedBy: string | null;
+    reason: string | null;
+    beforeState: Record<string, unknown>;
+    proposedState: Record<string, unknown>;
+    appliedState: Record<string, unknown>;
+  }>(`/ai/ops/intervention-policy-recommendations/${input.recommendationId}/apply`, {
+    method: "POST",
+    json: {
+      snapshotId: input.snapshotId,
+      recommendationIdempotencyKey: input.recommendationIdempotencyKey,
+    },
+  });
+}
+
+export async function getInterventionPolicyRecommendationEvaluationSummary(input?: {
+  window?: "last_7_days" | "last_30_days" | "last_90_days";
+  taxonomy?: InterventionPolicyRecommendation["taxonomy"] | null;
+  decision?: InterventionPolicyRecommendationDecisionStatus | null;
+}) {
+  const params = new URLSearchParams();
+  if (input?.window) params.set("window", input.window);
+  if (input?.taxonomy) params.set("taxonomy", input.taxonomy);
+  if (input?.decision) params.set("decision", input.decision);
+  const query = params.toString();
+  return api<InterventionPolicyRecommendationEvaluationSummary>(
+    `/ai/ops/intervention-policy-recommendations/evaluation${query ? `?${query}` : ""}`
+  );
 }
 
 export function useAiOps(limit = 20) {

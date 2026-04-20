@@ -25,6 +25,10 @@ import {
   runManagerAlertPreview,
   sendManagerAlertSummary,
 } from "./intervention-manager-alerts-service.js";
+import {
+  applyInterventionPolicyRecommendation,
+  getInterventionPolicyRecommendationEvaluationSummary,
+} from "./intervention-policy-application-service.js";
 import type { InterventionQueueFilters, InterventionQueueView } from "./intervention-types.js";
 import type { StructuredEscalateConclusion, StructuredResolveConclusion, StructuredSnoozeConclusion } from "./intervention-types.js";
 import { mapStructuredResolveReasonToLegacyResolutionReason } from "./intervention-outcome-taxonomy.js";
@@ -415,6 +419,54 @@ router.post(
     }
   }
 );
+
+router.get("/ops/intervention-policy-recommendations/evaluation", requireRole("admin", "director"), async (req, res, next) => {
+  try {
+    const window =
+      req.query.window === "last_7_days" || req.query.window === "last_90_days" || req.query.window === "last_30_days"
+        ? req.query.window
+        : "last_30_days";
+    const summary = await getInterventionPolicyRecommendationEvaluationSummary(req.tenantDb!, {
+      officeId: getActiveOfficeId(req),
+      window,
+      taxonomy: typeof req.query.taxonomy === "string" ? (req.query.taxonomy as any) : null,
+      decision: typeof req.query.decision === "string" ? req.query.decision : null,
+    });
+    await req.commitTransaction!();
+    res.json(summary);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/ops/intervention-policy-recommendations/:recommendationId/apply", requireRole("admin", "director"), async (req, res, next) => {
+  try {
+    const recommendationId = String(req.params.recommendationId ?? "");
+    if (!UUID_PATTERN.test(recommendationId)) {
+      throw new AppError(400, "recommendationId must be a valid UUID");
+    }
+    const snapshotId = typeof req.body?.snapshotId === "string" ? req.body.snapshotId : null;
+    const recommendationIdempotencyKey =
+      typeof req.body?.recommendationIdempotencyKey === "string" ? req.body.recommendationIdempotencyKey : null;
+    if (!snapshotId || !UUID_PATTERN.test(snapshotId)) {
+      throw new AppError(400, "snapshotId must be a valid UUID");
+    }
+    if (!recommendationIdempotencyKey) {
+      throw new AppError(400, "recommendationIdempotencyKey is required");
+    }
+    const result = await applyInterventionPolicyRecommendation(req.tenantDb!, {
+      officeId: getActiveOfficeId(req),
+      recommendationId,
+      snapshotId,
+      actorUserId: req.user!.id,
+      recommendationIdempotencyKey,
+    });
+    await req.commitTransaction!();
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
 
 router.get("/ops/reviews", requireRole("admin", "director"), async (req, res, next) => {
   try {

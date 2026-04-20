@@ -41,7 +41,12 @@ import type {
   InterventionCopilotSimilarCase,
   InterventionCopilotView,
   InterventionManagerBrief,
+  InterventionPolicyRecommendationApplyEventStatus,
+  InterventionPolicyRecommendationDecisionStatus,
+  InterventionPolicyRecommendationEvaluationSummary,
   InterventionPolicyRecommendation,
+  InterventionPolicyRecommendationProposedChange,
+  InterventionPolicyRecommendationReviewDetails,
   InterventionPolicyRecommendationConfidence,
   InterventionPolicyRecommendationFeedbackValue,
   InterventionPolicyRecommendationsView,
@@ -87,6 +92,11 @@ type InMemoryTenantDb = {
     policyRecommendationSnapshots?: Array<Record<string, any>>;
     policyRecommendationRows?: Array<Record<string, any>>;
     policyRecommendationFeedback?: Array<Record<string, any>>;
+    policyRecommendationDecisions?: Array<Record<string, any>>;
+    policyRecommendationApplyEvents?: Array<Record<string, any>>;
+    interventionSnoozePolicies?: Array<Record<string, any>>;
+    interventionEscalationPolicies?: Array<Record<string, any>>;
+    interventionAssigneeBalancingPolicies?: Array<Record<string, any>>;
   };
 };
 
@@ -1868,6 +1878,8 @@ type PolicyRecommendationRow = {
   counter_signal: string | null;
   render_status: "active" | "degraded";
   evidence_json: InterventionPolicyRecommendation["evidence"];
+  proposed_change_json: InterventionPolicyRecommendationProposedChange | null;
+  review_details_json: InterventionPolicyRecommendationReviewDetails;
   generated_at: Date | string;
   stale_at: Date | string;
 };
@@ -1877,6 +1889,69 @@ type PolicyFeedbackRow = {
   user_id: string;
   feedback_value: InterventionPolicyRecommendationFeedbackValue;
   comment: string | null;
+};
+
+type PolicyDecisionRow = {
+  id: string;
+  office_id: string;
+  snapshot_id: string;
+  recommendation_id: string | null;
+  taxonomy: InterventionPolicyRecommendation["taxonomy"];
+  grouping_key: string;
+  decision: InterventionPolicyRecommendationDecisionStatus;
+  suppression_reason: string | null;
+  score: number | null;
+  impact_score: number | null;
+  volume_score: number | null;
+  persistence_score: number | null;
+  actionability_score: number | null;
+  confidence: InterventionPolicyRecommendationConfidence | null;
+  qualified_at: Date | string | null;
+  rendered_at: Date | string | null;
+  used_fallback_copy: boolean;
+  used_fallback_structured_payload: boolean;
+  metrics_json: Record<string, unknown>;
+  created_at?: Date | string;
+};
+
+type PolicyApplyEventRow = {
+  id: string;
+  office_id: string;
+  recommendation_id: string;
+  snapshot_id: string;
+  taxonomy: InterventionPolicyRecommendation["taxonomy"];
+  actor_user_id: string;
+  actor_display_name?: string | null;
+  request_idempotency_key: string;
+  status: InterventionPolicyRecommendationApplyEventStatus;
+  target_type: string;
+  target_id: string;
+  before_state_json: Record<string, unknown>;
+  proposed_state_json: Record<string, unknown>;
+  applied_state_json: Record<string, unknown>;
+  rejection_reason: string | null;
+  created_at: Date | string;
+};
+
+type SnoozePolicyRow = {
+  office_id: string;
+  snooze_reason_key: string;
+  max_snooze_days: number;
+  breach_review_threshold_percent: number | null;
+};
+
+type EscalationPolicyRow = {
+  office_id: string;
+  disconnect_type_key: string;
+  routing_mode: string;
+  escalation_threshold_percent: number;
+};
+
+type AssigneeBalancingPolicyRow = {
+  office_id: string;
+  balancing_mode: string;
+  overload_share_percent: number;
+  min_high_risk_cases: number;
 };
 
 const PENDING_POLICY_SNAPSHOT_TIMEOUT_MS = 10 * 60 * 1000;
@@ -1908,9 +1983,77 @@ function scaleScore(value: number, min: number, max: number, weight: number) {
   return Math.round(((value - min) / (max - min)) * weight);
 }
 
+function defaultSnoozePolicy(reasonKey: string): SnoozePolicyRow {
+  return {
+    office_id: "",
+    snooze_reason_key: reasonKey,
+    max_snooze_days: 7,
+    breach_review_threshold_percent: 20,
+  };
+}
+
+function defaultEscalationPolicy(disconnectTypeKey: string): EscalationPolicyRow {
+  return {
+    office_id: "",
+    disconnect_type_key: disconnectTypeKey,
+    routing_mode: "manager_manual",
+    escalation_threshold_percent: 15,
+  };
+}
+
+function defaultAssigneeBalancingPolicy(): AssigneeBalancingPolicyRow {
+  return {
+    office_id: "",
+    balancing_mode: "weighted_share",
+    overload_share_percent: 35,
+    min_high_risk_cases: 5,
+  };
+}
+
+function buildReviewDetails(input: {
+  decision: InterventionPolicyRecommendationDecisionStatus;
+  primaryTrigger: string;
+  thresholdSummary: string;
+  rankingSummary: string;
+  score: number;
+  impactScore: number;
+  volumeScore: number;
+  persistenceScore: number;
+  actionabilityScore: number;
+  usedFallbackCopy?: boolean;
+  usedFallbackStructuredPayload?: boolean;
+}): InterventionPolicyRecommendationReviewDetails {
+  return {
+    decision: input.decision,
+    primaryTrigger: input.primaryTrigger,
+    thresholdSummary: input.thresholdSummary,
+    rankingSummary: input.rankingSummary,
+    score: input.score,
+    impactScore: input.impactScore,
+    volumeScore: input.volumeScore,
+    persistenceScore: input.persistenceScore,
+    actionabilityScore: input.actionabilityScore,
+    usedFallbackCopy: input.usedFallbackCopy ?? false,
+    usedFallbackStructuredPayload: input.usedFallbackStructuredPayload ?? false,
+  };
+}
+
 function buildPolicyRecommendationId(officeId: string, taxonomy: InterventionPolicyRecommendation["taxonomy"], primaryGroupingKey: string) {
   return deterministicUuid(`${officeId}:${taxonomy}:${primaryGroupingKey}`);
 }
+
+type PolicyRecommendationCandidate = Omit<
+  InterventionPolicyRecommendation,
+  "snapshotId" | "feedbackSummary" | "feedbackStateForViewer" | "applyStatus" | "applyEligibility"
+> & {
+  primaryGroupingKey: string;
+  score: number;
+  impactScore: number;
+  volumeScore: number;
+  persistenceScore: number;
+  actionabilityScore: number;
+  affectedVolume: number;
+};
 
 function buildPolicyRecommendationCandidates(input: {
   officeId: string;
@@ -1918,18 +2061,64 @@ function buildPolicyRecommendationCandidates(input: {
   history: DisconnectCaseHistoryRow[];
   usersMap: Map<string, string>;
   outcomeEffectiveness: InterventionOutcomeEffectiveness;
+  snoozePolicies: SnoozePolicyRow[];
+  escalationPolicies: EscalationPolicyRow[];
+  assigneeBalancingPolicy: AssigneeBalancingPolicyRow;
   now: Date;
 }) {
-  const candidates: Array<
-    Omit<InterventionPolicyRecommendation, "snapshotId" | "feedbackSummary" | "feedbackStateForViewer"> & {
-      primaryGroupingKey: string;
-      score: number;
-      impactScore: number;
-      persistenceScore: number;
-      affectedVolume: number;
-    }
-  > = [];
+  const candidates: PolicyRecommendationCandidate[] = [];
+  const decisions: PolicyDecisionRow[] = [];
   const staleAt = new Date(input.now.getTime() + 24 * 60 * 60 * 1000).toISOString();
+  const snoozePolicyByKey = new Map(input.snoozePolicies.map((row) => [row.snooze_reason_key, row]));
+  const escalationPolicyByKey = new Map(input.escalationPolicies.map((row) => [row.disconnect_type_key, row]));
+
+  function pushDecision(
+    taxonomy: InterventionPolicyRecommendation["taxonomy"],
+    groupingKey: string,
+    config: {
+      recommendationId?: string | null;
+      decision: InterventionPolicyRecommendationDecisionStatus;
+      suppressionReason?: string | null;
+      score?: number | null;
+      impactScore?: number | null;
+      volumeScore?: number | null;
+      persistenceScore?: number | null;
+      actionabilityScore?: number | null;
+      confidence?: InterventionPolicyRecommendationConfidence | null;
+      primaryTrigger: string;
+      thresholdSummary: string;
+      rankingSummary: string;
+      usedFallbackCopy?: boolean;
+      usedFallbackStructuredPayload?: boolean;
+    }
+  ) {
+    decisions.push({
+      id: crypto.randomUUID(),
+      office_id: input.officeId,
+      snapshot_id: "",
+      recommendation_id: config.recommendationId ?? null,
+      taxonomy,
+      grouping_key: groupingKey,
+      decision: config.decision,
+      suppression_reason: config.suppressionReason ?? null,
+      score: config.score ?? null,
+      impact_score: config.impactScore ?? null,
+      volume_score: config.volumeScore ?? null,
+      persistence_score: config.persistenceScore ?? null,
+      actionability_score: config.actionabilityScore ?? null,
+      confidence: config.confidence ?? null,
+      qualified_at: config.decision.startsWith("qualified") ? input.now.toISOString() : null,
+      rendered_at: config.decision === "qualified_rendered" ? input.now.toISOString() : null,
+      used_fallback_copy: config.usedFallbackCopy ?? false,
+      used_fallback_structured_payload: config.usedFallbackStructuredPayload ?? false,
+      metrics_json: {
+        primaryTrigger: config.primaryTrigger,
+        thresholdSummary: config.thresholdSummary,
+        rankingSummary: config.rankingSummary,
+      },
+      created_at: input.now.toISOString(),
+    });
+  }
 
   const highRiskCases = input.cases.filter(
     (row) =>
@@ -1946,15 +2135,30 @@ function buildPolicyRecommendationCandidates(input: {
     }
     for (const [assigneeId, rows] of assigneeGroups) {
       const share = rows.length / highRiskCases.length;
-      if (rows.length < 5 || share < 0.35) continue;
-      const score =
-        scaleScore(rows.length, 4, 12, 25) +
-        scaleScore(share, 0.35, 0.75, 40) +
-        scaleScore(rows.filter((row) => row.escalated).length, 0, rows.length, 20) +
-        15;
-      const impactScore = scaleScore(share, 0.35, 0.75, 40);
+      const volumeScore = scaleScore(rows.length, 4, 12, 25);
+      const impactScore = scaleScore(share, input.assigneeBalancingPolicy.overload_share_percent / 100, 0.75, 40);
       const persistenceScore = scaleScore(rows.filter((row) => row.escalated).length, 0, rows.length, 20);
+      const actionabilityScore = 15;
+      const score = volumeScore + impactScore + persistenceScore + actionabilityScore;
       const confidence = mapPolicyConfidence(score);
+      const thresholdSummary = `${rows.length} high-risk cases and ${(share * 100).toFixed(0)}% share against ${(input.assigneeBalancingPolicy.overload_share_percent).toFixed(0)}% threshold.`;
+      const rankingSummary = `Score ${score} = impact ${impactScore} + volume ${volumeScore} + persistence ${persistenceScore} + actionability ${actionabilityScore}.`;
+      if (rows.length < input.assigneeBalancingPolicy.min_high_risk_cases || share < input.assigneeBalancingPolicy.overload_share_percent / 100) {
+        pushDecision("assignee_load_balancing", assigneeId, {
+          decision: "suppressed_by_predicate",
+          suppressionReason: "threshold_not_met",
+          score,
+          impactScore,
+          volumeScore,
+          persistenceScore,
+          actionabilityScore,
+          confidence,
+          primaryTrigger: `High-risk concentration for ${assigneeId}`,
+          thresholdSummary,
+          rankingSummary,
+        });
+        continue;
+      }
       if (!confidence) continue;
       const assigneeName = input.usersMap.get(assigneeId) ?? "Assigned manager";
       candidates.push({
@@ -1969,6 +2173,32 @@ function buildPolicyRecommendationCandidates(input: {
         priority: score,
         suggestedAction: "Reassign part of the high-risk queue or adjust fallback routing for new intervention cases.",
         counterSignal: "Confirm this concentration is not driven by an intentional temporary ownership handoff.",
+        proposedChange: {
+          kind: "assignee_load_balancing",
+          targetKey: input.officeId,
+          policyLabel: "Office assignee balancing",
+          currentValue: {
+            balancingMode: input.assigneeBalancingPolicy.balancing_mode,
+            overloadSharePercent: input.assigneeBalancingPolicy.overload_share_percent,
+            minHighRiskCases: input.assigneeBalancingPolicy.min_high_risk_cases,
+          },
+          proposedValue: {
+            balancingMode: "weighted_share",
+            overloadSharePercent: Math.max(25, input.assigneeBalancingPolicy.overload_share_percent - 5),
+            minHighRiskCases: input.assigneeBalancingPolicy.min_high_risk_cases,
+          },
+        },
+        reviewDetails: buildReviewDetails({
+          decision: "qualified_rendered",
+          primaryTrigger: `${assigneeName} owns ${rows.length} high-risk open cases.`,
+          thresholdSummary,
+          rankingSummary,
+          score,
+          impactScore,
+          volumeScore,
+          persistenceScore,
+          actionabilityScore,
+        }),
         evidence: [
           {
             metricKey: "high_risk_assignee_share",
@@ -1986,7 +2216,9 @@ function buildPolicyRecommendationCandidates(input: {
         primaryGroupingKey: assigneeId,
         score,
         impactScore,
+        volumeScore,
         persistenceScore,
+        actionabilityScore,
         affectedVolume: rows.length,
       });
     }
@@ -2008,15 +2240,31 @@ function buildPolicyRecommendationCandidates(input: {
   for (const item of input.outcomeEffectiveness.snoozeReasonPerformance) {
     const breachCount = snoozeBreachCounts.get(item.key) ?? 0;
     const breachRate = item.volume > 0 ? breachCount / item.volume : 0;
-    if ((item.volume ?? 0) < 5 || breachRate < 0.2 || ((item.reopenRate ?? 0) < 0.25 && breachCount < 3)) continue;
-    const score =
-      scaleScore(item.volume, 4, 14, 25) +
-      scaleScore(item.reopenRate ?? 0, 0.25, 0.6, 40) +
-      scaleScore(breachRate, 0.2, 0.6, 20) +
-      15;
+    const currentPolicy = snoozePolicyByKey.get(item.key) ?? defaultSnoozePolicy(item.key);
+    const volumeScore = scaleScore(item.volume, 4, 14, 25);
     const impactScore = scaleScore(item.reopenRate ?? 0, 0.25, 0.6, 40);
     const persistenceScore = scaleScore(breachRate, 0.2, 0.6, 20);
+    const actionabilityScore = 15;
+    const score = volumeScore + impactScore + persistenceScore + actionabilityScore;
     const confidence = mapPolicyConfidence(score);
+    const thresholdSummary = `${item.volume} conclusions, ${(breachRate * 100).toFixed(0)}% breaches, ${(100 * (item.reopenRate ?? 0)).toFixed(0)}% reopen rate.`;
+    const rankingSummary = `Score ${score} = impact ${impactScore} + volume ${volumeScore} + persistence ${persistenceScore} + actionability ${actionabilityScore}.`;
+    if ((item.volume ?? 0) < 5 || breachRate < 0.2 || ((item.reopenRate ?? 0) < 0.25 && breachCount < 3)) {
+      pushDecision("snooze_policy_adjustment", item.key, {
+        decision: "suppressed_by_predicate",
+        suppressionReason: "threshold_not_met",
+        score,
+        impactScore,
+        volumeScore,
+        persistenceScore,
+        actionabilityScore,
+        confidence,
+        primaryTrigger: `${item.label} snoozes are being evaluated.`,
+        thresholdSummary,
+        rankingSummary,
+      });
+      continue;
+    }
     if (!confidence) continue;
     candidates.push({
       id: buildPolicyRecommendationId(input.officeId, "snooze_policy_adjustment", item.key),
@@ -2030,6 +2278,32 @@ function buildPolicyRecommendationCandidates(input: {
       priority: score,
       suggestedAction: `Review the default ${item.label.toLowerCase()} snooze window and require a stronger next-step plan.`,
       counterSignal: "Verify this is not driven by one-off customer-response delays before changing the default policy.",
+      proposedChange: {
+        kind: "snooze_policy_adjustment",
+        targetKey: item.key,
+        policyLabel: item.label,
+        currentValue: {
+          maxSnoozeDays: currentPolicy.max_snooze_days,
+          breachReviewThresholdPercent: currentPolicy.breach_review_threshold_percent,
+        },
+        proposedValue: {
+          maxSnoozeDays: Math.max(2, currentPolicy.max_snooze_days - 2),
+          breachReviewThresholdPercent: currentPolicy.breach_review_threshold_percent == null
+            ? 15
+            : Math.max(10, currentPolicy.breach_review_threshold_percent - 5),
+        },
+      },
+      reviewDetails: buildReviewDetails({
+        decision: "qualified_rendered",
+        primaryTrigger: `${item.label} snoozes are breaching and reopening above policy thresholds.`,
+        thresholdSummary,
+        rankingSummary,
+        score,
+        impactScore,
+        volumeScore,
+        persistenceScore,
+        actionabilityScore,
+      }),
       evidence: [
         {
           metricKey: `${item.key}_breach_rate`,
@@ -2047,7 +2321,9 @@ function buildPolicyRecommendationCandidates(input: {
       primaryGroupingKey: item.key,
       score,
       impactScore,
+      volumeScore,
       persistenceScore,
+      actionabilityScore,
       affectedVolume: item.volume,
     });
   }
@@ -2067,13 +2343,18 @@ function buildPolicyRecommendationCandidates(input: {
     const bestAlternative = items
       .filter((item) => item.conclusionFamily !== "escalate" && item.durableCloseRate != null)
       .sort((left, right) => (right.durableCloseRate ?? 0) - (left.durableCloseRate ?? 0))[0];
+    const currentEscalationPolicy = escalationPolicyByKey.get(disconnectType) ?? defaultEscalationPolicy(disconnectType);
     if (escalated && (escalated.volume ?? 0) >= 5 && bestAlternative && (bestAlternative.durableCloseRate ?? 0) - (escalated.durableCloseRate ?? 0) >= 0.15) {
       const gap = (bestAlternative.durableCloseRate ?? 0) - (escalated.durableCloseRate ?? 0);
-      const score = scaleScore(escalated.volume, 4, 14, 25) + scaleScore(gap, 0.15, 0.5, 40) + 20 + 15;
+      const volumeScore = scaleScore(escalated.volume, 4, 14, 25);
       const impactScore = scaleScore(gap, 0.15, 0.5, 40);
       const persistenceScore = 20;
+      const actionabilityScore = 15;
+      const score = volumeScore + impactScore + persistenceScore + actionabilityScore;
       const confidence = mapPolicyConfidence(score);
       if (confidence) {
+        const thresholdSummary = `${escalated.volume} escalations with ${(gap * 100).toFixed(0)} point durable-close gap versus ${bestAlternative.conclusionFamily}.`;
+        const rankingSummary = `Score ${score} = impact ${impactScore} + volume ${volumeScore} + persistence ${persistenceScore} + actionability ${actionabilityScore}.`;
         candidates.push({
           id: buildPolicyRecommendationId(input.officeId, "escalation_policy_adjustment", disconnectType),
           officeId: input.officeId,
@@ -2086,6 +2367,30 @@ function buildPolicyRecommendationCandidates(input: {
           priority: score,
           suggestedAction: `Review the escalation playbook for ${disconnectType.replace(/_/g, " ")} and tighten when managers escalate versus resolve or snooze.`,
           counterSignal: "Check whether recent escalations were intentionally reserved for the hardest edge cases.",
+          proposedChange: {
+            kind: "escalation_policy_adjustment",
+            targetKey: disconnectType,
+            policyLabel: disconnectType.replace(/_/g, " "),
+            currentValue: {
+              routingMode: currentEscalationPolicy.routing_mode,
+              escalationThresholdPercent: currentEscalationPolicy.escalation_threshold_percent,
+            },
+            proposedValue: {
+              routingMode: "resolve_first_then_escalate",
+              escalationThresholdPercent: Math.min(40, currentEscalationPolicy.escalation_threshold_percent + 5),
+            },
+          },
+          reviewDetails: buildReviewDetails({
+            decision: "qualified_rendered",
+            primaryTrigger: `${disconnectType.replace(/_/g, " ")} escalations underperform the best alternative path.`,
+            thresholdSummary,
+            rankingSummary,
+            score,
+            impactScore,
+            volumeScore,
+            persistenceScore,
+            actionabilityScore,
+          }),
           evidence: [
             {
               metricKey: `${disconnectType}_escalation_close_gap`,
@@ -2103,19 +2408,40 @@ function buildPolicyRecommendationCandidates(input: {
           primaryGroupingKey: disconnectType,
           score,
           impactScore,
+          volumeScore,
           persistenceScore,
+          actionabilityScore,
           affectedVolume: escalated.volume,
         });
       }
+    } else {
+      pushDecision("escalation_policy_adjustment", disconnectType, {
+        decision: "suppressed_by_predicate",
+        suppressionReason: "threshold_not_met",
+        score: null,
+        impactScore: null,
+        volumeScore: null,
+        persistenceScore: null,
+        actionabilityScore: null,
+        confidence: null,
+        primaryTrigger: `${disconnectType.replace(/_/g, " ")} escalation performance is being evaluated.`,
+        thresholdSummary: "Did not clear the minimum escalation-volume or durable-close gap threshold.",
+        rankingSummary: "No score because predicate qualification failed.",
+      });
     }
 
     const dominant = [...items].sort((left, right) => right.volume - left.volume)[0];
     if (dominant && items.reduce((sum, item) => sum + item.volume, 0) >= 10 && (dominant.reopenRate ?? 0) >= 0.25) {
-      const score = scaleScore(items.reduce((sum, item) => sum + item.volume, 0), 9, 20, 25) + scaleScore(dominant.reopenRate ?? 0, 0.25, 0.55, 40) + 20 + 15;
+      const totalVolume = items.reduce((sum, item) => sum + item.volume, 0);
+      const volumeScore = scaleScore(totalVolume, 9, 20, 25);
       const impactScore = scaleScore(dominant.reopenRate ?? 0, 0.25, 0.55, 40);
       const persistenceScore = 20;
+      const actionabilityScore = 15;
+      const score = volumeScore + impactScore + persistenceScore + actionabilityScore;
       const confidence = mapPolicyConfidence(score);
       if (confidence) {
+        const thresholdSummary = `${totalVolume} conclusions and ${(100 * (dominant.reopenRate ?? 0)).toFixed(0)}% dominant-family reopen rate.`;
+        const rankingSummary = `Score ${score} = impact ${impactScore} + volume ${volumeScore} + persistence ${persistenceScore} + actionability ${actionabilityScore}.`;
         candidates.push({
           id: buildPolicyRecommendationId(input.officeId, "disconnect_playbook_change", disconnectType),
           officeId: input.officeId,
@@ -2128,6 +2454,18 @@ function buildPolicyRecommendationCandidates(input: {
           priority: score,
           suggestedAction: `Update the default conclusion guidance for ${disconnectType.replace(/_/g, " ")} and coach managers toward the stronger path.`,
           counterSignal: "Validate that the recent reopen pattern is not a short-lived mix shift before revising the shared playbook.",
+          proposedChange: null,
+          reviewDetails: buildReviewDetails({
+            decision: "qualified_rendered",
+            primaryTrigger: `${disconnectType.replace(/_/g, " ")} is reopening too often through its dominant path.`,
+            thresholdSummary,
+            rankingSummary,
+            score,
+            impactScore,
+            volumeScore,
+            persistenceScore,
+            actionabilityScore,
+          }),
           evidence: [
             {
               metricKey: `${disconnectType}_dominant_reopen_rate`,
@@ -2145,10 +2483,20 @@ function buildPolicyRecommendationCandidates(input: {
           primaryGroupingKey: disconnectType,
           score,
           impactScore,
+          volumeScore,
           persistenceScore,
-          affectedVolume: items.reduce((sum, item) => sum + item.volume, 0),
+          actionabilityScore,
+          affectedVolume: totalVolume,
         });
       }
+    } else {
+      pushDecision("disconnect_playbook_change", disconnectType, {
+        decision: "suppressed_by_predicate",
+        suppressionReason: "threshold_not_met",
+        primaryTrigger: `${disconnectType.replace(/_/g, " ")} playbook drift is being evaluated.`,
+        thresholdSummary: "Did not clear the minimum volume or reopen-rate threshold.",
+        rankingSummary: "No score because predicate qualification failed.",
+      });
     }
   }
 
@@ -2168,6 +2516,18 @@ function buildPolicyRecommendationCandidates(input: {
         priority: score,
         suggestedAction: "Continue monitoring this pattern and re-evaluate after another full recommendation cycle.",
         counterSignal: "No prescriptive recommendation qualified above the action threshold yet.",
+        proposedChange: null,
+        reviewDetails: buildReviewDetails({
+          decision: "qualified_rendered",
+          primaryTrigger: `${warning.label} remains elevated without a stronger prescriptive pattern.`,
+          thresholdSummary: `${warning.volume} affected cases in the last 30 days.`,
+          rankingSummary: "Fixed monitor-only score 58 for notable but not prescriptive signals.",
+          score,
+          impactScore: 20,
+          volumeScore: 13,
+          persistenceScore: 10,
+          actionabilityScore: 15,
+        }),
         evidence: [
           {
             metricKey: `${warning.kind}:${warning.key}`,
@@ -2185,7 +2545,9 @@ function buildPolicyRecommendationCandidates(input: {
         primaryGroupingKey: `${warning.kind}:${warning.key}`,
         score,
         impactScore: 20,
+        volumeScore: 13,
         persistenceScore: 10,
+        actionabilityScore: 15,
         affectedVolume: warning.volume,
       });
     }
@@ -2208,21 +2570,50 @@ function buildPolicyRecommendationCandidates(input: {
     }
     return left.primaryGroupingKey.localeCompare(right.primaryGroupingKey);
   });
-  const primary = ranked.filter((candidate) => candidate.score >= 70).slice(0, 3);
-  const secondary = ranked
-    .filter((candidate) => candidate.score >= 55 && !primary.some((primaryCandidate) => primaryCandidate.id === candidate.id))
+  const qualifying = ranked.filter((candidate) => candidate.score >= 55);
+  const primary = qualifying.filter((candidate) => candidate.score >= 70).slice(0, 3);
+  const secondary = qualifying
+    .filter((candidate) => !primary.some((primaryCandidate) => primaryCandidate.id === candidate.id))
     .slice(0, 2);
-  return [...primary, ...secondary];
+  const rendered = [...primary, ...secondary];
+
+  for (const candidate of ranked) {
+    const decision =
+      candidate.score < 55
+        ? "suppressed_by_threshold"
+        : rendered.some((item) => item.id === candidate.id)
+          ? "qualified_rendered"
+          : "qualified_suppressed_by_cap";
+    pushDecision(candidate.taxonomy, candidate.primaryGroupingKey, {
+      recommendationId: candidate.id,
+      decision,
+      score: candidate.score,
+      impactScore: candidate.impactScore,
+      volumeScore: candidate.volumeScore,
+      persistenceScore: candidate.persistenceScore,
+      actionabilityScore: candidate.actionabilityScore,
+      confidence: candidate.confidence,
+      primaryTrigger: candidate.reviewDetails.primaryTrigger,
+      thresholdSummary: candidate.reviewDetails.thresholdSummary,
+      rankingSummary: candidate.reviewDetails.rankingSummary,
+    });
+  }
+
+  return {
+    recommendations: rendered,
+    decisions,
+  };
 }
 
 function finalizePolicyRecommendationCandidates(
-  candidates: ReturnType<typeof buildPolicyRecommendationCandidates>
+  input: ReturnType<typeof buildPolicyRecommendationCandidates>
 ): {
   snapshotStatus: "active" | "degraded";
-  recommendations: ReturnType<typeof buildPolicyRecommendationCandidates>;
+  recommendations: PolicyRecommendationCandidate[];
+  decisions: PolicyDecisionRow[];
 } {
   let degraded = false;
-  const finalized = candidates.map((candidate) => {
+  const finalized = input.recommendations.map((candidate) => {
     try {
       if (!candidate.title || !candidate.statement || !candidate.whyNow) {
         throw new Error("Incomplete recommendation copy");
@@ -2238,6 +2629,10 @@ function finalizePolicyRecommendationCandidates(
         expectedImpact: candidate.expectedImpact || "Keep managers aligned on a qualifying policy signal.",
         suggestedAction: candidate.suggestedAction || "Review the underlying analytics before making a policy change.",
         renderStatus: "degraded" as const,
+        reviewDetails: {
+          ...candidate.reviewDetails,
+          usedFallbackCopy: true,
+        },
       };
     }
   });
@@ -2245,6 +2640,16 @@ function finalizePolicyRecommendationCandidates(
   return {
     snapshotStatus: degraded ? "degraded" : "active",
     recommendations: finalized,
+    decisions: input.decisions.map((decision) => {
+      const finalizedRecommendation = finalized.find((candidate) => candidate.id === decision.recommendation_id);
+      return finalizedRecommendation
+        ? {
+            ...decision,
+            used_fallback_copy: finalizedRecommendation.reviewDetails.usedFallbackCopy,
+            used_fallback_structured_payload: finalizedRecommendation.reviewDetails.usedFallbackStructuredPayload,
+          }
+        : decision;
+    }),
   };
 }
 
@@ -2252,11 +2657,51 @@ function hydratePolicyRecommendationView(input: {
   snapshot: PolicySnapshotRow & { status: "active" | "degraded" };
   recommendationRows: PolicyRecommendationRow[];
   feedbackRows: PolicyFeedbackRow[];
+  applyEventRows: PolicyApplyEventRow[];
   viewerUserId: string;
 }): InterventionPolicyRecommendationsView {
   const recommendations = input.recommendationRows.map((row) => {
     const feedback = input.feedbackRows.filter((item) => item.recommendation_id === row.recommendation_id);
     const viewerFeedback = feedback.find((item) => item.user_id === input.viewerUserId);
+    const latestApplyEvent = input.applyEventRows.filter((item) => item.recommendation_id === row.recommendation_id).at(-1);
+    const proposedChange = row.proposed_change_json ?? null;
+    const reviewDetails =
+      row.review_details_json ??
+      buildReviewDetails({
+        decision: "qualified_rendered",
+        primaryTrigger: "This recommendation was generated before detailed review metadata was persisted.",
+        thresholdSummary: "No detailed threshold metadata is available for this snapshot.",
+        rankingSummary: "No detailed ranking metadata is available for this snapshot.",
+        score: row.priority,
+        impactScore: 0,
+        volumeScore: 0,
+        persistenceScore: 0,
+        actionabilityScore: 0,
+      });
+    const applyEligibility =
+      row.taxonomy === "disconnect_playbook_change" || row.taxonomy === "monitor_only"
+        ? {
+            eligible: false,
+            reason: "read_only_taxonomy" as const,
+            message: "This recommendation remains review-only in the current release.",
+          }
+        : row.confidence === "low"
+          ? {
+              eligible: false,
+              reason: "low_confidence" as const,
+              message: "Only medium and high confidence recommendations are apply-eligible.",
+            }
+          : !proposedChange
+            ? {
+                eligible: false,
+                reason: "missing_proposed_change" as const,
+                message: "A deterministic policy change payload is not available for this recommendation.",
+              }
+            : {
+                eligible: true,
+                reason: "eligible" as const,
+                message: "This recommendation is eligible for preview and apply.",
+              };
     return {
       id: row.recommendation_id,
       officeId: row.office_id,
@@ -2274,6 +2719,22 @@ function hydratePolicyRecommendationView(input: {
       generatedAt: toIso(row.generated_at) ?? new Date().toISOString(),
       staleAt: toIso(row.stale_at) ?? new Date().toISOString(),
       renderStatus: row.render_status,
+      proposedChange,
+      reviewDetails,
+      applyEligibility,
+      applyStatus: latestApplyEvent
+        ? {
+            status: latestApplyEvent.status,
+            appliedAt: toIso(latestApplyEvent.created_at),
+            appliedBy: latestApplyEvent.actor_display_name ?? latestApplyEvent.actor_user_id,
+            reason: latestApplyEvent.rejection_reason,
+          }
+        : {
+            status: "not_applied",
+            appliedAt: null,
+            appliedBy: null,
+            reason: null,
+          },
       feedbackSummary: {
         helpfulCount: feedback.filter((item) => item.feedback_value === "helpful").length,
         notUsefulCount: feedback.filter((item) => item.feedback_value === "not_useful").length,
@@ -2296,6 +2757,106 @@ function hydratePolicyRecommendationView(input: {
     },
     recommendations,
   };
+}
+
+async function fetchPolicyDecisionRows(
+  tenantDb: TenantDb | InMemoryTenantDb,
+  officeId: string,
+  snapshotId: string
+) {
+  if (isInMemoryTenantDb(tenantDb)) {
+    return ((tenantDb.state.policyRecommendationDecisions ?? []) as PolicyDecisionRow[]).filter(
+      (row) => row.office_id === officeId && row.snapshot_id === snapshotId
+    );
+  }
+
+  const result = await tenantDb.execute(sql`
+    SELECT *
+    FROM ai_policy_recommendation_decisions
+    WHERE office_id = ${officeId}
+      AND snapshot_id = ${snapshotId}
+    ORDER BY created_at ASC
+  `);
+  return ((result as any).rows ?? []) as PolicyDecisionRow[];
+}
+
+async function fetchPolicyApplyEventRows(
+  tenantDb: TenantDb | InMemoryTenantDb,
+  officeId: string,
+  recommendationIds: string[]
+) {
+  if (recommendationIds.length === 0) return [] as PolicyApplyEventRow[];
+  if (isInMemoryTenantDb(tenantDb)) {
+    return ((tenantDb.state.policyRecommendationApplyEvents ?? []) as PolicyApplyEventRow[]).filter((row) =>
+      recommendationIds.includes(row.recommendation_id)
+    );
+  }
+  const result = await tenantDb.execute(sql`
+    SELECT
+      a.id,
+      a.office_id,
+      a.recommendation_id,
+      a.snapshot_id,
+      a.taxonomy,
+      a.actor_user_id,
+      u.display_name AS actor_display_name,
+      a.request_idempotency_key,
+      a.status,
+      a.target_type,
+      a.target_id,
+      a.before_state_json,
+      a.proposed_state_json,
+      a.applied_state_json,
+      a.rejection_reason,
+      a.created_at
+    FROM ai_policy_recommendation_apply_events a
+    LEFT JOIN public.users u ON u.id = a.actor_user_id
+    WHERE a.office_id = ${officeId}
+      AND a.recommendation_id = ANY(${recommendationIds}::uuid[])
+    ORDER BY a.created_at ASC
+  `);
+  return ((result as any).rows ?? []) as PolicyApplyEventRow[];
+}
+
+async function fetchSnoozePolicyRows(tenantDb: TenantDb | InMemoryTenantDb, officeId: string) {
+  if (isInMemoryTenantDb(tenantDb)) {
+    return ((tenantDb.state.interventionSnoozePolicies ?? []) as SnoozePolicyRow[]).filter((row) => row.office_id === officeId);
+  }
+  const result = await tenantDb.execute(sql`
+    SELECT office_id, snooze_reason_key, max_snooze_days, breach_review_threshold_percent
+    FROM intervention_snooze_policies
+    WHERE office_id = ${officeId}
+  `);
+  return ((result as any).rows ?? []) as SnoozePolicyRow[];
+}
+
+async function fetchEscalationPolicyRows(tenantDb: TenantDb | InMemoryTenantDb, officeId: string) {
+  if (isInMemoryTenantDb(tenantDb)) {
+    return ((tenantDb.state.interventionEscalationPolicies ?? []) as EscalationPolicyRow[]).filter((row) => row.office_id === officeId);
+  }
+  const result = await tenantDb.execute(sql`
+    SELECT office_id, disconnect_type_key, routing_mode, escalation_threshold_percent
+    FROM intervention_escalation_policies
+    WHERE office_id = ${officeId}
+  `);
+  return ((result as any).rows ?? []) as EscalationPolicyRow[];
+}
+
+async function fetchAssigneeBalancingPolicyRow(tenantDb: TenantDb | InMemoryTenantDb, officeId: string) {
+  if (isInMemoryTenantDb(tenantDb)) {
+    return (
+      ((tenantDb.state.interventionAssigneeBalancingPolicies ?? []) as AssigneeBalancingPolicyRow[]).find(
+        (row) => row.office_id === officeId
+      ) ?? null
+    );
+  }
+  const result = await tenantDb.execute(sql`
+    SELECT office_id, balancing_mode, overload_share_percent, min_high_risk_cases
+    FROM intervention_assignee_balancing_policies
+    WHERE office_id = ${officeId}
+    LIMIT 1
+  `);
+  return (((result as any).rows ?? [])[0] ?? null) as AssigneeBalancingPolicyRow | null;
 }
 
 async function fetchLatestRenderablePolicySnapshot(tenantDb: TenantDb | InMemoryTenantDb, officeId: string) {
@@ -2365,6 +2926,8 @@ async function fetchPolicyRecommendationRows(
       counter_signal,
       render_status,
       evidence_json,
+      proposed_change_json,
+      review_details_json,
       generated_at,
       stale_at
     FROM ai_policy_recommendation_rows
@@ -2416,10 +2979,16 @@ export async function getInterventionPolicyRecommendationsView(
     input.officeId,
     rows.map((row) => row.recommendation_id)
   );
+  const applyEvents = await fetchPolicyApplyEventRows(
+    tenantDb,
+    input.officeId,
+    rows.map((row) => row.recommendation_id)
+  );
   return hydratePolicyRecommendationView({
     snapshot,
     recommendationRows: rows,
     feedbackRows: feedback,
+    applyEventRows: applyEvents,
     viewerUserId: input.viewerUserId,
   });
 }
@@ -2542,12 +3111,19 @@ export async function generateInterventionPolicyRecommendationsSnapshot(
     const { cases, users: userRows, history } = await loadInterventionAnalyticsData(tenantDb, input.officeId);
     const usersMap = new Map(userRows.map((row) => [row.id, row.displayName]));
     const outcomeEffectiveness = buildInterventionOutcomeEffectiveness(history, usersMap, cases, now);
+    const snoozePolicies = await fetchSnoozePolicyRows(tenantDb, input.officeId);
+    const escalationPolicies = await fetchEscalationPolicyRows(tenantDb, input.officeId);
+    const assigneeBalancingPolicy =
+      (await fetchAssigneeBalancingPolicyRow(tenantDb, input.officeId)) ?? defaultAssigneeBalancingPolicy();
     const candidates = buildPolicyRecommendationCandidates({
       officeId: input.officeId,
       cases,
       history,
       usersMap,
       outcomeEffectiveness,
+      snoozePolicies,
+      escalationPolicies,
+      assigneeBalancingPolicy,
       now,
     });
     const finalized = finalizePolicyRecommendationCandidates(candidates);
@@ -2575,6 +3151,13 @@ export async function generateInterventionPolicyRecommendationsSnapshot(
       pendingRow.status = snapshotStatus;
       pendingRow.supersedes_snapshot_id = prior?.id ?? null;
       pendingRow.stale_at = staleAt.toISOString();
+      const decisionRows = (tenantDb.state.policyRecommendationDecisions ??= []);
+      for (const decision of finalized.decisions) {
+        decisionRows.push({
+          ...decision,
+          snapshot_id: input.snapshotId,
+        });
+      }
       for (const candidate of finalized.recommendations) {
         rows.push({
           snapshot_id: input.snapshotId,
@@ -2592,6 +3175,8 @@ export async function generateInterventionPolicyRecommendationsSnapshot(
           counter_signal: candidate.counterSignal,
           render_status: candidate.renderStatus,
           evidence_json: candidate.evidence,
+          proposed_change_json: candidate.proposedChange,
+          review_details_json: candidate.reviewDetails,
           generated_at: candidate.generatedAt,
           stale_at: candidate.staleAt,
         });
@@ -2620,6 +3205,54 @@ export async function generateInterventionPolicyRecommendationsSnapshot(
           WHERE id = ${prior.id}
         `);
       }
+      for (const decision of finalized.decisions) {
+        await tenantDb.execute(sql`
+          INSERT INTO ai_policy_recommendation_decisions (
+            id,
+            office_id,
+            snapshot_id,
+            recommendation_id,
+            taxonomy,
+            grouping_key,
+            decision,
+            suppression_reason,
+            score,
+            impact_score,
+            volume_score,
+            persistence_score,
+            actionability_score,
+            confidence,
+            qualified_at,
+            rendered_at,
+            used_fallback_copy,
+            used_fallback_structured_payload,
+            metrics_json,
+            created_at
+          )
+          VALUES (
+            ${decision.id},
+            ${input.officeId},
+            ${input.snapshotId},
+            ${decision.recommendation_id},
+            ${decision.taxonomy},
+            ${decision.grouping_key},
+            ${decision.decision},
+            ${decision.suppression_reason},
+            ${decision.score},
+            ${decision.impact_score},
+            ${decision.volume_score},
+            ${decision.persistence_score},
+            ${decision.actionability_score},
+            ${decision.confidence},
+            ${decision.qualified_at ? new Date(toIso(decision.qualified_at) ?? now.toISOString()) : null},
+            ${decision.rendered_at ? new Date(toIso(decision.rendered_at) ?? now.toISOString()) : null},
+            ${decision.used_fallback_copy},
+            ${decision.used_fallback_structured_payload},
+            ${JSON.stringify(decision.metrics_json)}::jsonb,
+            ${now}
+          )
+        `);
+      }
       for (const candidate of finalized.recommendations) {
         await tenantDb.execute(sql`
           INSERT INTO ai_policy_recommendation_rows (
@@ -2638,6 +3271,8 @@ export async function generateInterventionPolicyRecommendationsSnapshot(
             counter_signal,
             render_status,
             evidence_json,
+            proposed_change_json,
+            review_details_json,
             generated_at,
             stale_at,
             created_at,
@@ -2659,6 +3294,8 @@ export async function generateInterventionPolicyRecommendationsSnapshot(
             ${candidate.counterSignal},
             ${candidate.renderStatus},
             ${JSON.stringify(candidate.evidence)}::jsonb,
+            ${JSON.stringify(candidate.proposedChange)}::jsonb,
+            ${JSON.stringify(candidate.reviewDetails)}::jsonb,
             ${now},
             ${staleAt},
             ${now},
@@ -2671,9 +3308,20 @@ export async function generateInterventionPolicyRecommendationsSnapshot(
     return {
       status: snapshotStatus,
       recommendations: finalized.recommendations.map(
-        ({ primaryGroupingKey: _primaryGroupingKey, score: _score, impactScore: _impactScore, persistenceScore: _persistenceScore, affectedVolume: _affectedVolume, ...candidate }) => ({
+        ({ primaryGroupingKey: _primaryGroupingKey, score: _score, impactScore: _impactScore, volumeScore: _volumeScore, persistenceScore: _persistenceScore, actionabilityScore: _actionabilityScore, affectedVolume: _affectedVolume, ...candidate }) => ({
         ...candidate,
         snapshotId: input.snapshotId,
+        applyEligibility: {
+          eligible: false,
+          reason: "missing_proposed_change",
+          message: "Eligibility is hydrated when recommendations are read.",
+        },
+        applyStatus: {
+          status: "not_applied",
+          appliedAt: null,
+          appliedBy: null,
+          reason: null,
+        },
         feedbackSummary: {
           helpfulCount: 0,
           notUsefulCount: 0,

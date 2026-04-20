@@ -5,6 +5,10 @@ const {
   recordInterventionPolicyRecommendationFeedback,
   regenerateInterventionPolicyRecommendations,
 } = await import("../../../src/modules/ai-copilot/intervention-service");
+const {
+  applyInterventionPolicyRecommendation,
+  getInterventionPolicyRecommendationEvaluationSummary,
+} = await import("../../../src/modules/ai-copilot/intervention-policy-application-service");
 
 type DisconnectCaseRecord = {
   id: string;
@@ -93,6 +97,11 @@ function createTenantDb(state?: {
       policyRecommendationSnapshots: [],
       policyRecommendationRows: [],
       policyRecommendationFeedback: [],
+      policyRecommendationDecisions: [],
+      policyRecommendationApplyEvents: [],
+      interventionSnoozePolicies: [],
+      interventionEscalationPolicies: [],
+      interventionAssigneeBalancingPolicies: [],
     },
   };
 }
@@ -130,6 +139,19 @@ describe("intervention policy recommendations service", () => {
       taxonomy: "assignee_load_balancing",
       confidence: "medium",
       renderStatus: "active",
+      applyStatus: {
+        status: "not_applied",
+      },
+    });
+    expect(firstResult.recommendations[0]?.proposedChange).toMatchObject({
+      kind: "assignee_load_balancing",
+      currentValue: {
+        overloadSharePercent: 35,
+      },
+    });
+    expect(firstResult.recommendations[0]?.reviewDetails).toMatchObject({
+      decision: "qualified_rendered",
+      score: 70,
     });
 
     const stableRecommendationId = firstResult.recommendations[0]?.id;
@@ -172,5 +194,46 @@ describe("intervention policy recommendations service", () => {
     });
 
     expect(secondResult.recommendations[0]?.id).toBe(stableRecommendationId);
+
+    const applyResult = await applyInterventionPolicyRecommendation(tenantDb as any, {
+      officeId: "office-1",
+      recommendationId: stableRecommendationId!,
+      snapshotId: secondResult.snapshotId,
+      actorUserId: "admin-1",
+      recommendationIdempotencyKey: "req-1",
+    });
+
+    expect(applyResult.status).toBe("applied");
+
+    const secondApplyResult = await applyInterventionPolicyRecommendation(tenantDb as any, {
+      officeId: "office-1",
+      recommendationId: stableRecommendationId!,
+      snapshotId: secondResult.snapshotId,
+      actorUserId: "admin-1",
+      recommendationIdempotencyKey: "req-2",
+    });
+
+    expect(secondApplyResult.status).toBe("applied_noop");
+
+    const refreshedView = await getInterventionPolicyRecommendationsView(tenantDb as any, {
+      officeId: "office-1",
+      viewerUserId: "admin-1",
+      now: new Date("2026-04-19T14:10:00.000Z"),
+    });
+
+    expect(refreshedView.status).toBe("active");
+    expect(refreshedView.recommendations[0]).toMatchObject({
+      applyStatus: {
+        status: "applied_noop",
+      },
+    });
+
+    const evaluation = await getInterventionPolicyRecommendationEvaluationSummary(tenantDb as any, {
+      officeId: "office-1",
+      window: "last_30_days",
+    });
+
+    expect(evaluation.totals.qualifiedRendered).toBeGreaterThanOrEqual(1);
+    expect(evaluation.apply[0]?.appliedCount ?? 0).toBeGreaterThanOrEqual(0);
   });
 });

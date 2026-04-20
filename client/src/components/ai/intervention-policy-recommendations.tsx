@@ -1,5 +1,6 @@
 import { useState } from "react";
 import {
+  applyInterventionPolicyRecommendation,
   regenerateInterventionPolicyRecommendations,
   submitInterventionPolicyRecommendationFeedback,
   type InterventionPolicyRecommendation,
@@ -24,6 +25,10 @@ function PolicyRecommendationCard({
   const [feedbackValue, setFeedbackValue] = useState(recommendation.feedbackStateForViewer);
   const [comment, setComment] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [showReviewDetails, setShowReviewDetails] = useState(false);
+  const [showApplyPreview, setShowApplyPreview] = useState(false);
+  const [applying, setApplying] = useState(false);
+  const [localApplyStatus, setLocalApplyStatus] = useState(recommendation.applyStatus);
   const [actionError, setActionError] = useState<string | null>(null);
 
   async function handleFeedback(nextValue: "helpful" | "not_useful" | "wrong_direction") {
@@ -43,6 +48,44 @@ function PolicyRecommendationCard({
       setSubmitting(false);
     }
   }
+
+  async function handleApply() {
+    if (!recommendation.proposedChange) return;
+    setApplying(true);
+    setActionError(null);
+    try {
+      const result = await applyInterventionPolicyRecommendation({
+        recommendationId: recommendation.id,
+        snapshotId: recommendation.snapshotId,
+        recommendationIdempotencyKey: `${recommendation.id}:${Date.now()}`,
+      });
+      setLocalApplyStatus({
+        status: result.status,
+        appliedAt: result.appliedAt,
+        appliedBy: result.appliedBy,
+        reason: result.reason,
+      });
+      setShowApplyPreview(false);
+      await onRefresh();
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "Failed to apply recommendation");
+    } finally {
+      setApplying(false);
+    }
+  }
+
+  function renderPolicyValue(value: Record<string, unknown>) {
+    return Object.entries(value)
+      .map(([key, current]) => `${key}: ${String(current)}`)
+      .join(" · ");
+  }
+
+  const applyStatus = localApplyStatus;
+  const canApply =
+    recommendation.applyEligibility.eligible &&
+    recommendation.proposedChange &&
+    applyStatus.status !== "applied" &&
+    applyStatus.status !== "applied_noop";
 
   return (
     <article className="rounded-xl border border-border/80 bg-white px-4 py-4 shadow-sm">
@@ -93,6 +136,59 @@ function PolicyRecommendationCard({
         </div>
       )}
 
+      <div className="mt-4 flex flex-wrap gap-2">
+        <Button variant="outline" onClick={() => setShowReviewDetails((value) => !value)}>
+          Why this qualified
+        </Button>
+        {canApply ? (
+          <Button onClick={() => setShowApplyPreview((value) => !value)} disabled={applying}>
+            Apply change
+          </Button>
+        ) : (
+          <div className="rounded-lg border border-border/70 bg-muted/20 px-3 py-2 text-sm text-muted-foreground">
+            Not yet apply-eligible
+          </div>
+        )}
+      </div>
+
+      {showReviewDetails && (
+        <div className="mt-4 rounded-lg border border-border/70 bg-muted/20 px-3 py-3 text-sm leading-6 text-gray-900">
+          <div className="font-medium text-gray-900">{recommendation.reviewDetails.primaryTrigger}</div>
+          <div className="mt-2 text-muted-foreground">{recommendation.reviewDetails.thresholdSummary}</div>
+          <div className="mt-2 text-muted-foreground">{recommendation.reviewDetails.rankingSummary}</div>
+          <div className="mt-2 text-muted-foreground">
+            Score {recommendation.reviewDetails.score} · Impact {recommendation.reviewDetails.impactScore} · Volume{" "}
+            {recommendation.reviewDetails.volumeScore} · Persistence {recommendation.reviewDetails.persistenceScore} ·
+            Actionability {recommendation.reviewDetails.actionabilityScore}
+          </div>
+        </div>
+      )}
+
+      {showApplyPreview && recommendation.proposedChange && (
+        <div className="mt-4 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-3 text-sm leading-6 text-emerald-950">
+          <div className="font-medium">Apply preview</div>
+          <div className="mt-2">Target policy surface: {recommendation.proposedChange.policyLabel}</div>
+          <div className="mt-2">Current value: {renderPolicyValue(recommendation.proposedChange.currentValue as Record<string, unknown>)}</div>
+          <div className="mt-2">
+            Proposed value: {renderPolicyValue(recommendation.proposedChange.proposedValue as Record<string, unknown>)}
+          </div>
+          <div className="mt-2 text-emerald-900/80">{recommendation.expectedImpact}</div>
+          <div className="mt-3">
+            <Button onClick={() => void handleApply()} disabled={applying}>
+              Confirm apply
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {applyStatus.status !== "not_applied" && (
+        <div className="mt-4 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-3 text-sm leading-6 text-emerald-900">
+          {applyStatus.status === "applied" || applyStatus.status === "applied_noop"
+            ? `Applied by ${applyStatus.appliedBy ?? "unknown"}${applyStatus.appliedAt ? ` at ${applyStatus.appliedAt}` : ""}.`
+            : applyStatus.reason ?? "Apply attempt was rejected."}
+        </div>
+      )}
+
       <div className="mt-4 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
         <span>{formatFreshnessLabel(recommendation.generatedAt)}</span>
         <span>
@@ -102,19 +198,19 @@ function PolicyRecommendationCard({
       </div>
 
       <div className="mt-4 flex flex-wrap gap-2">
-        <Button variant={feedbackValue === "helpful" ? "default" : "outline"} disabled={submitting} onClick={() => void handleFeedback("helpful")}>
+        <Button variant={feedbackValue === "helpful" ? "default" : "outline"} disabled={submitting || applying} onClick={() => void handleFeedback("helpful")}>
           Helpful
         </Button>
         <Button
           variant={feedbackValue === "not_useful" ? "default" : "outline"}
-          disabled={submitting}
+          disabled={submitting || applying}
           onClick={() => void handleFeedback("not_useful")}
         >
           Not Useful
         </Button>
         <Button
           variant={feedbackValue === "wrong_direction" ? "default" : "outline"}
-          disabled={submitting}
+          disabled={submitting || applying}
           onClick={() => void handleFeedback("wrong_direction")}
         >
           Wrong Direction

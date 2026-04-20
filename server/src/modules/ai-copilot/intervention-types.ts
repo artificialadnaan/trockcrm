@@ -389,6 +389,27 @@ export type InterventionPolicyRecommendationFeedbackValue =
   | "not_useful"
   | "wrong_direction";
 
+export type InterventionPolicyRecommendationDecisionStatus =
+  | "qualified_rendered"
+  | "qualified_suppressed_by_cap"
+  | "suppressed_by_threshold"
+  | "suppressed_by_predicate"
+  | "suppressed_by_missing_target"
+  | "suppressed_by_apply_ineligible";
+
+export type InterventionPolicyRecommendationApplyEventStatus =
+  | "applied"
+  | "applied_noop"
+  | "rejected_validation"
+  | "rejected_stale"
+  | "rejected_conflict";
+
+export type InterventionPolicyRecommendationApplyEligibilityReason =
+  | "eligible"
+  | "read_only_taxonomy"
+  | "low_confidence"
+  | "missing_proposed_change";
+
 export interface InterventionPolicyRecommendationEvidenceItem {
   metricKey: string;
   label: string;
@@ -397,6 +418,63 @@ export interface InterventionPolicyRecommendationEvidenceItem {
   delta: number | string | null;
   window: "last_7_days_vs_prior_7_days" | "last_30_days" | "last_30_days_vs_prior_30_days";
   direction: "up" | "down" | "flat" | "not_applicable";
+}
+
+export type InterventionPolicyRecommendationProposedChange =
+  | {
+      kind: "snooze_policy_adjustment";
+      targetKey: string;
+      policyLabel: string;
+      currentValue: {
+        maxSnoozeDays: number;
+        breachReviewThresholdPercent: number | null;
+      };
+      proposedValue: {
+        maxSnoozeDays: number;
+        breachReviewThresholdPercent: number | null;
+      };
+    }
+  | {
+      kind: "escalation_policy_adjustment";
+      targetKey: string;
+      policyLabel: string;
+      currentValue: {
+        routingMode: string;
+        escalationThresholdPercent: number;
+      };
+      proposedValue: {
+        routingMode: string;
+        escalationThresholdPercent: number;
+      };
+    }
+  | {
+      kind: "assignee_load_balancing";
+      targetKey: string;
+      policyLabel: string;
+      currentValue: {
+        balancingMode: string;
+        overloadSharePercent: number;
+        minHighRiskCases: number;
+      };
+      proposedValue: {
+        balancingMode: string;
+        overloadSharePercent: number;
+        minHighRiskCases: number;
+      };
+    };
+
+export interface InterventionPolicyRecommendationReviewDetails {
+  decision: InterventionPolicyRecommendationDecisionStatus;
+  primaryTrigger: string;
+  thresholdSummary: string;
+  rankingSummary: string;
+  score: number;
+  impactScore: number;
+  volumeScore: number;
+  persistenceScore: number;
+  actionabilityScore: number;
+  usedFallbackCopy: boolean;
+  usedFallbackStructuredPayload: boolean;
 }
 
 export interface InterventionPolicyRecommendation {
@@ -416,6 +494,19 @@ export interface InterventionPolicyRecommendation {
   generatedAt: string;
   staleAt: string;
   renderStatus: "active" | "degraded";
+  proposedChange: InterventionPolicyRecommendationProposedChange | null;
+  reviewDetails: InterventionPolicyRecommendationReviewDetails;
+  applyEligibility: {
+    eligible: boolean;
+    reason: InterventionPolicyRecommendationApplyEligibilityReason;
+    message: string;
+  };
+  applyStatus: {
+    status: "not_applied" | InterventionPolicyRecommendationApplyEventStatus;
+    appliedAt: string | null;
+    appliedBy: string | null;
+    reason: string | null;
+  };
   feedbackSummary: {
     helpfulCount: number;
     notUsefulCount: number;
@@ -444,6 +535,39 @@ export type InterventionPolicyRecommendationsView =
       snapshot: InterventionPolicyRecommendationSnapshotView;
       recommendations: InterventionPolicyRecommendation[];
     };
+
+export interface InterventionPolicyRecommendationEvaluationSummary {
+  window: "last_7_days" | "last_30_days" | "last_90_days";
+  generatedAt: string;
+  filters: {
+    taxonomy: InterventionPolicyRecommendationTaxonomy | null;
+    decision: InterventionPolicyRecommendationDecisionStatus | null;
+  };
+  totals: {
+    qualifiedRendered: number;
+    qualifiedSuppressedByCap: number;
+    suppressedByThreshold: number;
+    suppressedByPredicate: number;
+    suppressedByMissingTarget: number;
+    suppressedByApplyIneligible: number;
+  };
+  byTaxonomy: Array<{
+    taxonomy: InterventionPolicyRecommendationTaxonomy;
+    counts: InterventionPolicyRecommendationEvaluationSummary["totals"];
+  }>;
+  feedback: Array<{
+    taxonomy: InterventionPolicyRecommendationTaxonomy;
+    helpfulCount: number;
+    notUsefulCount: number;
+    wrongDirectionCount: number;
+  }>;
+  apply: Array<{
+    taxonomy: InterventionPolicyRecommendationTaxonomy;
+    appliedCount: number;
+    appliedNoopCount: number;
+    rejectedCount: number;
+  }>;
+}
 
 export interface InterventionAnalyticsDashboard {
   summary: {
