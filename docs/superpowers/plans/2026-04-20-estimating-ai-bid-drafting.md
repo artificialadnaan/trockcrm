@@ -451,6 +451,7 @@ export function normalizeCatalogItem(payload: any) {
 export async function runProcoreSync(deps: SyncDeps) {
   await syncCompanies(deps);
   await syncProjects(deps);
+  await syncCostCatalog({ trigger: "office_poll", officeId: deps.officeId });
 }
 ```
 
@@ -636,14 +637,22 @@ router.post("/deals/:dealId/estimating/documents", async (req, res) => {
   const deal = await getDealById(req.tenantDb!, req.params.dealId, req.user!.role, req.user!.id);
   if (!deal) throw new AppError(404, "Deal not found");
 
+  const uploadedFile = await createFileFromUploadRequest({
+    tenantDb: req.tenantDb!,
+    user: req.user!,
+    file: req.file,
+    entityType: "deal",
+    entityId: req.params.dealId,
+  });
+
   const document = await createEstimateSourceDocument({
     tenantDb: req.tenantDb,
     enqueueEstimateDocumentOcr,
     input: {
       dealId: req.params.dealId,
-      filename: req.body.filename,
-      storageKey: req.body.storageKey,
-      mimeType: req.body.mimeType,
+      filename: uploadedFile.originalName,
+      storageKey: uploadedFile.storageKey,
+      mimeType: uploadedFile.mimeType,
       userId: req.user.id,
     },
   });
@@ -690,6 +699,10 @@ describe("estimating security and recovery", () => {
   });
 
   it("keeps the previous catalog snapshot available when a sync run fails", async () => {
+    expect(true).toBe(false);
+  });
+
+  it("blocks pricing history and copilot answers from other office schemas", async () => {
     expect(true).toBe(false);
   });
 });
@@ -908,7 +921,16 @@ for (const extraction of pendingExtractions) {
   const catalogItems = await listCatalogCandidatesForMatching(tenantDb, catalogSourceId);
   const matches = await rankExtractionMatches({ extraction, catalogItems, historicalItems });
   const topMatch = matches[0];
-  if (!topMatch) continue;
+  if (!topMatch) {
+    await insertEstimateReviewEvent(tenantDb, {
+      dealId: extraction.dealId,
+      subjectType: "estimate_extraction",
+      subjectId: extraction.id,
+      eventType: "unmatched",
+      afterJson: { normalizedLabel: extraction.normalizedLabel },
+    });
+    continue;
+  }
 
   const recommendation = buildPricingRecommendation({
     quantity: Number(extraction.quantity ?? 1),
@@ -1262,6 +1284,14 @@ router.post("/deals/:dealId/estimating/extractions/:extractionId/approve", async
 
 router.patch("/deals/:dealId/estimating/extractions/:extractionId", async (req, res) => {
   const extraction = await updateEstimateExtraction(req.tenantDb!, req.params.dealId, req.params.extractionId, req.body);
+  await insertEstimateReviewEvent(req.tenantDb!, {
+    dealId: req.params.dealId,
+    subjectType: "estimate_extraction",
+    subjectId: req.params.extractionId,
+    eventType: "edited",
+    afterJson: req.body,
+    userId: req.user!.id,
+  });
   res.status(200).json({ extraction });
 });
 
@@ -1278,6 +1308,14 @@ router.post("/deals/:dealId/estimating/matches/:matchId/select", async (req, res
 
 router.patch("/deals/:dealId/estimating/matches/:matchId", async (req, res) => {
   const match = await remapEstimateExtractionMatch(req.tenantDb!, req.params.dealId, req.params.matchId, req.body);
+  await insertEstimateReviewEvent(req.tenantDb!, {
+    dealId: req.params.dealId,
+    subjectType: "estimate_extraction_match",
+    subjectId: req.params.matchId,
+    eventType: "remapped",
+    afterJson: req.body,
+    userId: req.user!.id,
+  });
   res.status(200).json({ match });
 });
 
@@ -1288,6 +1326,14 @@ router.patch("/deals/:dealId/estimating/recommendations/:recommendationId", asyn
     req.params.recommendationId,
     req.body
   );
+  await insertEstimateReviewEvent(req.tenantDb!, {
+    dealId: req.params.dealId,
+    subjectType: "estimate_pricing_recommendation",
+    subjectId: req.params.recommendationId,
+    eventType: "overridden",
+    afterJson: req.body,
+    userId: req.user!.id,
+  });
   res.status(200).json({ recommendation });
 });
 
