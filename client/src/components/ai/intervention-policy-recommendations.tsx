@@ -404,7 +404,7 @@ export function InterventionPolicyRecommendationsSection({
 }) {
   const [regenerating, setRegenerating] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
-  const [showReview, setShowReview] = useState(false);
+  const [showReview, setShowReview] = useState(true);
   const [reviewWindow, setReviewWindow] = useState<InterventionPolicyRecommendationReviewWindow>("last_30_days");
   const [reviewDecision, setReviewDecision] = useState<InterventionPolicyRecommendationReviewDecisionFilter>("all");
   const [reviewRefreshKey, setReviewRefreshKey] = useState(0);
@@ -538,6 +538,46 @@ export function InterventionPolicyRecommendationsSection({
               ) : (
                 <div className="text-sm text-muted-foreground">No recommendation history is available yet.</div>
               )}
+            </div>
+          </div>
+          <div className="rounded-lg border border-border/70 bg-white px-3 py-3">
+            <div className="text-[11px] uppercase tracking-widest text-muted-foreground">Yield and decision history</div>
+            <div className="mt-3 grid gap-2 text-sm text-gray-900 md:grid-cols-1">
+              <div>Window rendered: {review.data?.yield.renderedTotals.total ?? 0}</div>
+            </div>
+            <div className="mt-3 text-sm text-muted-foreground">
+              Next action: {(review.data?.yield.recommendedNextAction ?? "wait_for_more_history").split("_").join(" ")}
+            </div>
+            <div className="mt-4 grid gap-3 xl:grid-cols-2">
+              <div>
+                <div className="text-[11px] uppercase tracking-widest text-muted-foreground">Rendered by taxonomy</div>
+                <div className="mt-3 space-y-2">
+                  {review.data?.yield.renderedByTaxonomy.length ? (
+                    review.data.yield.renderedByTaxonomy.map((entry) => (
+                      <div key={entry.taxonomy} className="rounded-md border border-border/60 px-3 py-2 text-sm">
+                        <div className="font-medium text-gray-900">{entry.taxonomy}</div>
+                        <div className="text-muted-foreground">Rendered {entry.renderedCount}</div>
+                      </div>
+                    ))
+                  ) : (
+                    <div className="text-sm text-muted-foreground">No rendered recommendation history is available yet.</div>
+                  )}
+                </div>
+              </div>
+              <div>
+                <div className="text-[11px] uppercase tracking-widest text-muted-foreground">Dominant suppression reasons</div>
+                <div className="mt-3 space-y-2">
+                  {review.data?.yield.dominantSuppressionReasons.length ? (
+                    review.data.yield.dominantSuppressionReasons.map((entry) => (
+                      <div key={entry.reason} className="rounded-md border border-border/60 px-3 py-2 text-sm text-muted-foreground">
+                        {entry.reason} · {entry.count}
+                      </div>
+                    ))
+                  ) : (
+                    <div className="text-sm text-muted-foreground">No dominant suppression reasons are available yet.</div>
+                  )}
+                </div>
+              </div>
             </div>
           </div>
           <div className="rounded-lg border border-border/70 bg-white px-3 py-3">

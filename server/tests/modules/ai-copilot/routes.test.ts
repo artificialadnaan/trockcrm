@@ -232,6 +232,35 @@ describe("ai copilot routes", () => {
       emptyStateScope: "latest_snapshot",
       emptyStateReason: null,
       latestDecisionRows: [],
+      recentHistory: [],
+      yield: {
+        renderedTotals: {
+          window: "last_30_days",
+          total: 1,
+        },
+        renderedByTaxonomy: [
+          {
+            taxonomy: "assignee_load_balancing",
+            renderedCount: 1,
+          },
+        ],
+        dominantSuppressionReasons: [
+          {
+            reason: "predicate_not_met",
+            count: 1,
+          },
+        ],
+        recommendedNextAction: "seed_or_wait_for_more_history",
+      },
+      tuning: {
+        currentThresholds: {
+          qualificationFloor: 55,
+          strongRecommendationFloor: 70,
+          primaryCap: 3,
+          secondaryCap: 2,
+        },
+        guidance: [],
+      },
     });
     policySeedServiceMocks.seedInterventionPolicyRecommendationQualificationData.mockResolvedValue({
       seeded: true,
@@ -589,6 +618,30 @@ describe("ai copilot routes", () => {
       emptyStateScope: "latest_snapshot",
       emptyStateReason: null,
       latestDecisionRows: [],
+      recentHistory: [],
+      yield: {
+        renderedTotals: {
+          window: "last_30_days",
+          total: 0,
+        },
+        renderedByTaxonomy: [],
+        dominantSuppressionReasons: [
+          {
+            reason: "predicate_not_met",
+            count: 1,
+          },
+        ],
+        recommendedNextAction: "seed_or_wait_for_more_history",
+      },
+      tuning: {
+        currentThresholds: {
+          qualificationFloor: 55,
+          strongRecommendationFloor: 70,
+          primaryCap: 3,
+          secondaryCap: 2,
+        },
+        guidance: [],
+      },
     });
     const app = createApp("admin");
     const response = await request(app).get(
@@ -614,6 +667,16 @@ describe("ai copilot routes", () => {
         },
       },
       latestDecisionRows: expect.any(Array),
+      recentHistory: expect.any(Array),
+      yield: {
+        renderedTotals: {
+          window: "last_30_days",
+          total: 0,
+        },
+        renderedByTaxonomy: expect.any(Array),
+        dominantSuppressionReasons: expect.any(Array),
+        recommendedNextAction: "seed_or_wait_for_more_history",
+      },
     });
   });
 
