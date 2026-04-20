@@ -107,12 +107,12 @@ describe("estimating workflow routes", () => {
           rejected: 0,
         },
         pricing: {
-          total: 0,
+          total: 2,
           pending: 0,
-          approved: 0,
-          overridden: 0,
+          approved: 1,
+          overridden: 1,
           rejected: 0,
-          readyToPromote: false,
+          readyToPromote: 2,
         },
       },
       promotionReadiness: {
@@ -147,12 +147,12 @@ describe("estimating workflow routes", () => {
         rejected: 0,
       },
       pricing: {
-        total: 0,
+        total: 2,
         pending: 0,
-        approved: 0,
-        overridden: 0,
+        approved: 1,
+        overridden: 1,
         rejected: 0,
-        readyToPromote: false,
+        readyToPromote: 2,
       },
     });
     expect(res.body.promotionReadiness).toEqual({

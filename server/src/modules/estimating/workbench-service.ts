@@ -77,7 +77,7 @@ export async function buildEstimatingWorkbenchState(tenantDb: TenantDb, dealId: 
     rejected: matchRows.filter((row) => row.status === "rejected").length,
   };
 
-  const eligiblePricingRows = pricingRows.filter(
+  const promotablePricingRows = pricingRows.filter(
     (row) => row.status === "approved" || row.status === "overridden"
   );
 
@@ -87,16 +87,18 @@ export async function buildEstimatingWorkbenchState(tenantDb: TenantDb, dealId: 
     approved: pricingRows.filter((row) => row.status === "approved").length,
     overridden: pricingRows.filter((row) => row.status === "overridden").length,
     rejected: pricingRows.filter((row) => row.status === "rejected").length,
-    readyToPromote: eligiblePricingRows.length > 0,
+    readyToPromote: promotablePricingRows.length,
   };
 
   const generationRunIds = Array.from(
     new Set(
-      eligiblePricingRows
+      promotablePricingRows
         .map((row) => row.createdByRunId)
         .filter((runId): runId is string => typeof runId === "string" && runId.length > 0)
     )
   );
+
+  const canPromote = promotablePricingRows.length > 0 && generationRunIds.length > 0;
 
   return {
     documents,
@@ -111,7 +113,7 @@ export async function buildEstimatingWorkbenchState(tenantDb: TenantDb, dealId: 
       pricing: pricingSummary,
     },
     promotionReadiness: {
-      canPromote: pricingSummary.readyToPromote,
+      canPromote,
       generationRunIds,
     },
   };

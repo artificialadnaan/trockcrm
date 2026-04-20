@@ -90,7 +90,7 @@ describe("buildEstimatingWorkbenchState", () => {
         approved: 1,
         overridden: 2,
         rejected: 1,
-        readyToPromote: true,
+        readyToPromote: 3,
       },
     });
     expect(state.promotionReadiness).toEqual({
@@ -101,8 +101,17 @@ describe("buildEstimatingWorkbenchState", () => {
     expect(state.pricingRows).toHaveLength(5);
   });
 
-  it("keeps promotion disabled when no approved or overridden recommendations exist", async () => {
-    const tenantDb = makeTenantDb([[], [], [], [{ id: "rec-1", status: "pending" }], []]);
+  it("keeps promotion disabled when eligible rows have no generation run ids", async () => {
+    const tenantDb = makeTenantDb([
+      [],
+      [],
+      [],
+      [
+        { id: "rec-1", status: "approved", createdByRunId: null },
+        { id: "rec-2", status: "overridden", createdByRunId: "" },
+      ],
+      [],
+    ]);
 
     const state = await buildEstimatingWorkbenchState(tenantDb, "deal-1");
 
@@ -126,12 +135,12 @@ describe("buildEstimatingWorkbenchState", () => {
         rejected: 0,
       },
       pricing: {
-        total: 1,
-        pending: 1,
-        approved: 0,
-        overridden: 0,
+        total: 2,
+        pending: 0,
+        approved: 1,
+        overridden: 1,
         rejected: 0,
-        readyToPromote: false,
+        readyToPromote: 2,
       },
     });
     expect(state.promotionReadiness).toEqual({
