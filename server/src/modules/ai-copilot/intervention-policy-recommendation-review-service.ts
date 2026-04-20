@@ -3,6 +3,7 @@ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import type {
   InterventionPolicyRecommendationConfidence,
+  InterventionPolicyRecommendationThresholdCalibrationNoProposalReason,
   InterventionPolicyRecommendationDecisionStatus,
   InterventionPolicyRecommendationEvaluationSummary,
   InterventionPolicyRecommendationHistoryEntry,
@@ -79,6 +80,63 @@ type PolicyApplyEventRow = {
   created_at: Date | string;
   title?: string | null;
 };
+
+const THRESHOLD_CALIBRATION_METADATA: Record<
+  InterventionPolicyRecommendationTaxonomy,
+  {
+    currentThreshold: string;
+    proposedThreshold: string | null;
+    expectedYieldEffect: string;
+    guardrails: string[];
+  }
+> = {
+  snooze_policy_adjustment: {
+    currentThreshold: "minimum breached cases >= 4",
+    proposedThreshold: "minimum breached cases >= 3",
+    expectedYieldEffect: "May allow a small number of snooze-policy recommendations to render without broadening the taxonomy aggressively.",
+    guardrails: [
+      "Do not materially increase low-confidence snooze-policy output.",
+      "Do not let cap pressure replace threshold pressure as the dominant blocker after calibration.",
+    ],
+  },
+  escalation_policy_adjustment: {
+    currentThreshold: "minimum adverse escalations >= 5",
+    proposedThreshold: "minimum adverse escalations >= 4",
+    expectedYieldEffect: "May surface a narrow set of escalation-policy recommendations that are currently just below the floor.",
+    guardrails: [
+      "Do not convert low-volume escalation noise into live recommendations.",
+      "Do not increase monitor-only output as a side effect of the follow-up calibration.",
+    ],
+  },
+  assignee_load_balancing: {
+    currentThreshold: "minimum concentrated risky cases >= 6",
+    proposedThreshold: "minimum concentrated risky cases >= 5",
+    expectedYieldEffect: "May allow assignee-balancing proposals to appear earlier when overload signals are already concentrated.",
+    guardrails: [
+      "Do not surface balancing recommendations that are driven by one-off load spikes.",
+      "Do not reduce the floor if target coverage becomes the dominant blocker instead.",
+    ],
+  },
+  disconnect_playbook_change: {
+    currentThreshold: "minimum adverse disconnect cluster volume >= 5",
+    proposedThreshold: "minimum adverse disconnect cluster volume >= 4",
+    expectedYieldEffect: "May surface playbook changes for disconnect clusters that are currently suppressed by a narrow volume gap.",
+    guardrails: [
+      "Do not let predicate-limited clusters become threshold-driven proposals artificially.",
+      "Do not increase low-confidence playbook churn after the follow-up calibration.",
+    ],
+  },
+  monitor_only: {
+    currentThreshold: "minimum monitor signal count >= 6",
+    proposedThreshold: null,
+    expectedYieldEffect: "Monitor-only recommendations should stay advisory and not be threshold-calibrated in this slice.",
+    guardrails: [
+      "Do not calibrate monitor-only output through this proposal block.",
+    ],
+  },
+};
+
+const MINIMUM_CALIBRATION_VOLUME = 3;
 
 function isInMemoryTenantDb(value: unknown): value is InMemoryTenantDb {
   return Boolean(value && typeof value === "object" && "state" in value);
@@ -275,6 +333,27 @@ async function fetchWindowDecisionRows(
   return (((result as any).rows ?? []) as PolicyDecisionRow[]);
 }
 
+async function fetchGlobalWindowDecisionRows(
+  tenantDb: TenantDb | InMemoryTenantDb,
+  window: InterventionPolicyRecommendationReviewWindow,
+  now = new Date()
+) {
+  const cutoff = getReviewWindowCutoff(window, now);
+
+  if (isInMemoryTenantDb(tenantDb)) {
+    return ((tenantDb.state.policyRecommendationDecisions ?? []) as Array<Record<string, any>>).filter(
+      (row) => new Date(toIso(row.created_at) ?? 0).getTime() >= cutoff
+    ) as PolicyDecisionRow[];
+  }
+
+  const result = await tenantDb.execute(sql`
+    SELECT taxonomy, grouping_key, decision, suppression_reason, score, confidence, used_fallback_copy, used_fallback_structured_payload, created_at
+    FROM ai_policy_recommendation_decisions
+    WHERE created_at >= ${new Date(cutoff)}
+  `);
+  return (((result as any).rows ?? []) as PolicyDecisionRow[]);
+}
+
 function buildYieldSummary(
   summary: InterventionPolicyRecommendationEvaluationSummary,
   windowDecisionRows: PolicyDecisionRow[]
@@ -456,6 +535,139 @@ function buildQualificationDiagnostics(
     },
     taxonomyDiagnostics,
     seededValidationStatus: getInterventionPolicyRecommendationSeedValidationStatus(),
+  };
+}
+
+function buildThresholdCalibrationSelectionSummary(count: number) {
+  if (count === 0) return "No threshold-limited taxonomies qualify for calibration proposals right now.";
+  if (count === 1) return "1 taxonomy is currently the best candidate for a global threshold review.";
+  return `${count} taxonomies are currently the best candidates for a global threshold review.`;
+}
+
+function buildThresholdCalibrationNoProposalReason(
+  taxonomySummaries: Array<{
+    taxonomy: InterventionPolicyRecommendationTaxonomy;
+    renderedCount: number;
+    predicateBlocked: number;
+    thresholdBlocked: number;
+    capBlocked: number;
+    targetBlocked: number;
+  }>
+): InterventionPolicyRecommendationThresholdCalibrationNoProposalReason {
+  const lowVolumeThresholdCandidates = taxonomySummaries.filter((row) => {
+    const metadata = THRESHOLD_CALIBRATION_METADATA[row.taxonomy];
+    if (!metadata?.proposedThreshold) return false;
+    const candidateVolume = row.renderedCount + row.thresholdBlocked;
+    return (
+      row.thresholdBlocked > 0 &&
+      row.thresholdBlocked > row.predicateBlocked &&
+      row.thresholdBlocked > row.capBlocked &&
+      row.thresholdBlocked > row.targetBlocked &&
+      candidateVolume < MINIMUM_CALIBRATION_VOLUME
+    );
+  });
+  if (lowVolumeThresholdCandidates.length > 0) {
+    return "low_volume_dominates";
+  }
+
+  const totals = taxonomySummaries.reduce(
+    (acc, row) => {
+      acc.predicate += row.predicateBlocked;
+      acc.cap += row.capBlocked;
+      acc.target += row.targetBlocked;
+      acc.threshold += row.thresholdBlocked;
+      return acc;
+    },
+    { predicate: 0, cap: 0, target: 0, threshold: 0 }
+  );
+  const entries: Array<[InterventionPolicyRecommendationThresholdCalibrationNoProposalReason, number]> = [
+    ["predicate_failure_dominates", totals.predicate],
+    ["cap_pressure_dominates", totals.cap],
+    ["target_coverage_dominates", totals.target],
+    ["threshold_pressure_not_dominant", totals.threshold],
+  ];
+  const [dominantReason, dominantCount] = entries.sort((left, right) => right[1] - left[1])[0] ?? [
+    "low_volume_dominates",
+    0,
+  ];
+  if (dominantCount <= 0) return "low_volume_dominates";
+  return dominantReason;
+}
+
+function buildThresholdCalibrationProposals(
+  window: InterventionPolicyRecommendationReviewWindow,
+  generatedAt: string,
+  decisionRows: PolicyDecisionRow[]
+): InterventionPolicyRecommendationReviewModel["thresholdCalibrationProposals"] {
+  const taxonomies = Object.keys(THRESHOLD_CALIBRATION_METADATA) as InterventionPolicyRecommendationTaxonomy[];
+  const taxonomySummaries = taxonomies.map((taxonomy) => {
+    const rows = decisionRows.filter((row) => row.taxonomy === taxonomy);
+    return {
+      taxonomy,
+      renderedCount: rows.filter((row) => row.decision === "qualified_rendered").length,
+      predicateBlocked: rows.filter((row) => row.decision === "suppressed_by_predicate").length,
+      thresholdBlocked: rows.filter((row) => row.decision === "suppressed_by_threshold").length,
+      capBlocked: rows.filter((row) => row.decision === "qualified_suppressed_by_cap").length,
+      targetBlocked: rows.filter(
+        (row) => row.decision === "suppressed_by_missing_target" || row.decision === "suppressed_by_apply_ineligible"
+      ).length,
+    };
+  });
+
+  const proposals = taxonomySummaries
+    .map((row) => {
+      const metadata = THRESHOLD_CALIBRATION_METADATA[row.taxonomy];
+      if (!metadata?.proposedThreshold) return null;
+
+      const predicateBlocked = row.predicateBlocked;
+      const thresholdBlocked = row.thresholdBlocked;
+      const capBlocked = row.capBlocked;
+      const targetBlocked = row.targetBlocked;
+      const candidateVolume = row.renderedCount + thresholdBlocked;
+
+      if (thresholdBlocked <= 0) return null;
+      if (candidateVolume < MINIMUM_CALIBRATION_VOLUME) return null;
+      if (thresholdBlocked <= predicateBlocked) return null;
+      if (thresholdBlocked <= capBlocked) return null;
+      if (thresholdBlocked <= targetBlocked) return null;
+
+      const blockerBreakdown = [
+        { label: "threshold blocked", count: thresholdBlocked },
+        { label: "predicate blocked", count: predicateBlocked },
+        { label: "cap blocked", count: capBlocked },
+        { label: "target blocked", count: targetBlocked },
+        { label: "rendered", count: row.renderedCount },
+      ].filter((entry) => entry.count > 0);
+
+      return {
+        taxonomy: row.taxonomy,
+        currentThreshold: metadata.currentThreshold,
+        proposedThreshold: metadata.proposedThreshold,
+        dominantBlocker: "threshold_limited" as const,
+        blockerBreakdown,
+        rationale:
+          "Threshold failures dominate while predicate clearance and existing rendered volume suggest a bounded global floor reduction is the next defensible calibration move.",
+        expectedYieldEffect: metadata.expectedYieldEffect,
+        guardrails: metadata.guardrails,
+        verificationChecklist: [
+          "Record current rendered count for this taxonomy before any threshold change.",
+          "Re-check threshold-blocked count after the follow-up calibration deploy.",
+          "Confirm this taxonomy does not become the dominant low-confidence source.",
+        ],
+        rankingScore: thresholdBlocked * 100 + candidateVolume * 10 + row.renderedCount,
+      };
+    })
+    .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry))
+    .sort((left, right) => right.rankingScore - left.rankingScore || left.taxonomy.localeCompare(right.taxonomy))
+    .slice(0, 2)
+    .map(({ rankingScore: _rankingScore, ...entry }) => entry);
+
+  return {
+    generatedAt,
+    window,
+    selectionSummary: buildThresholdCalibrationSelectionSummary(proposals.length),
+    noProposalReason: proposals.length ? null : buildThresholdCalibrationNoProposalReason(taxonomySummaries),
+    proposals,
   };
 }
 
@@ -645,7 +857,10 @@ export async function getInterventionPolicyRecommendationReview(
     }),
   ]);
   const reviewNow = input.now ?? new Date();
-  const windowDecisionRows = await fetchWindowDecisionRows(tenantDb, input.officeId, window, reviewNow);
+  const [windowDecisionRows, globalWindowDecisionRows] = await Promise.all([
+    fetchWindowDecisionRows(tenantDb, input.officeId, window, reviewNow),
+    fetchGlobalWindowDecisionRows(tenantDb, window, reviewNow),
+  ]);
   const recentHistory = await fetchRecentHistory(tenantDb, input.officeId, window, reviewNow);
 
   if (!snapshot) {
@@ -659,6 +874,7 @@ export async function getInterventionPolicyRecommendationReview(
       diagnostics: buildQualificationDiagnostics(summary, windowDecisionRows),
       yield: buildYieldSummary(summary, windowDecisionRows),
       tuning: buildTuningGuidance(summary),
+      thresholdCalibrationProposals: buildThresholdCalibrationProposals(window, summary.generatedAt, globalWindowDecisionRows),
     };
   }
 
@@ -685,5 +901,6 @@ export async function getInterventionPolicyRecommendationReview(
     diagnostics: buildQualificationDiagnostics(summary, windowDecisionRows),
     yield: buildYieldSummary(summary, windowDecisionRows),
     tuning: buildTuningGuidance(summary),
+    thresholdCalibrationProposals: buildThresholdCalibrationProposals(window, summary.generatedAt, globalWindowDecisionRows),
   };
 }

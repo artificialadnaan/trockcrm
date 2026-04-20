@@ -182,6 +182,28 @@ const recommendationReview = {
       },
     ],
   },
+  thresholdCalibrationProposals: {
+    generatedAt: "2026-04-16T13:15:00.000Z",
+    window: "last_30_days",
+    selectionSummary: "2 taxonomies are currently the best candidates for a global threshold review.",
+    noProposalReason: null,
+    proposals: [
+      {
+        taxonomy: "snooze_policy_adjustment",
+        currentThreshold: "minimum breached cases >= 4",
+        proposedThreshold: "minimum breached cases >= 3",
+        dominantBlocker: "threshold_limited",
+        blockerBreakdown: [
+          { label: "threshold blocked", count: 5 },
+          { label: "predicate blocked", count: 1 },
+        ],
+        rationale: "Threshold failures dominate while predicate clearance remains healthy enough to justify a bounded adjustment.",
+        expectedYieldEffect: "May allow a small number of waiting-on-customer snooze recommendations to render.",
+        guardrails: ["Do not materially increase low-confidence output."],
+        verificationChecklist: ["Re-check threshold-blocked count after the follow-up calibration deploy."],
+      },
+    ],
+  },
 } as const;
 
 beforeEach(() => {
@@ -220,6 +242,11 @@ describe("InterventionPolicyRecommendationsSection", () => {
     expect(html).toContain("Applied to waiting-on-customer snooze policy.");
     expect(html).toContain("Qualification diagnostics");
     expect(html).toContain("review threshold floor in code");
+    expect(html).toContain("Threshold calibration proposals");
+    expect(html).toContain("Current threshold");
+    expect(html).toContain("Proposed threshold");
+    expect(html).toContain("Read-only production-window guidance");
+    expect(html).toContain("minimum breached cases &gt;= 4");
     expect(html).toContain("Latest snapshot truth for the active recommendation snapshot.");
     expect(html).toContain("Non-production validation only");
     expect(html).toContain("scripts/seed-intervention-policy-recommendation-qualification.ts");

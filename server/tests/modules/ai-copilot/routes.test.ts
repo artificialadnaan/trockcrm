@@ -277,6 +277,13 @@ describe("ai copilot routes", () => {
         },
         guidance: [],
       },
+      thresholdCalibrationProposals: {
+        generatedAt: "2026-04-19T12:00:00.000Z",
+        window: "last_30_days",
+        selectionSummary: "No threshold-limited taxonomies qualify for calibration proposals right now.",
+        noProposalReason: "predicate_failure_dominates",
+        proposals: [],
+      },
     });
     policySeedServiceMocks.seedInterventionPolicyRecommendationQualificationData.mockResolvedValue({
       seeded: true,
@@ -674,6 +681,13 @@ describe("ai copilot routes", () => {
         },
         guidance: [],
       },
+      thresholdCalibrationProposals: {
+        generatedAt: "2026-04-19T12:00:00.000Z",
+        window: "last_30_days",
+        selectionSummary: "No threshold-limited taxonomies qualify for calibration proposals right now.",
+        noProposalReason: "predicate_failure_dominates",
+        proposals: [],
+      },
     });
     const app = createApp("admin");
     const response = await request(app).get(
@@ -721,6 +735,13 @@ describe("ai copilot routes", () => {
         renderedByTaxonomy: expect.any(Array),
         dominantSuppressionReasons: expect.any(Array),
         recommendedNextAction: "seed_or_wait_for_more_history",
+      },
+      thresholdCalibrationProposals: {
+        generatedAt: expect.any(String),
+        window: "last_30_days",
+        selectionSummary: expect.any(String),
+        noProposalReason: "predicate_failure_dominates",
+        proposals: expect.any(Array),
       },
     });
   });
