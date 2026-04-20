@@ -124,6 +124,75 @@ This keeps the user in one place rather than forcing modal hopping or page chang
 
 The current read-only workflow routes are not sufficient for an interactive workbench. Add explicit mutation routes for estimator review actions.
 
+## Workflow State Model
+
+This workbench needs explicit status semantics so the UI, routes, and review log all agree on what each action means.
+
+### Document states
+
+Documents keep their existing OCR lifecycle:
+
+- `queued`
+- `processing`
+- `completed`
+- `failed`
+
+Reprocess moves a document back to `queued` and creates a review event or operational event entry tied to the document.
+
+### Extraction states
+
+Extraction rows should support:
+
+- `pending`
+- `approved`
+- `rejected`
+- `unmatched`
+- `processed`
+
+Meaning:
+
+- `pending` means awaiting estimator review or downstream generation
+- `approved` means the estimator accepted the extraction as valid
+- `rejected` means the estimator explicitly discarded it
+- `unmatched` means generation could not produce a usable catalog match
+- `processed` means the system used the extraction to create downstream records but it has not yet been estimator-approved
+
+Editing an extraction does not itself imply approval. Approval is a separate action.
+
+### Match states
+
+Match rows should support:
+
+- `suggested`
+- `selected`
+- `rejected`
+
+Meaning:
+
+- `suggested` means system-ranked but not estimator-confirmed
+- `selected` means estimator-confirmed active match
+- `rejected` means estimator discarded the match candidate
+
+If an estimator remaps to another candidate, the chosen row becomes `selected` and the previously active suggestion is no longer treated as current.
+
+### Pricing states
+
+Pricing recommendations should support:
+
+- `pending`
+- `approved`
+- `rejected`
+- `overridden`
+
+Meaning:
+
+- `pending` means ready for pricing review
+- `approved` means estimator accepted the recommendation as-is
+- `rejected` means estimator discarded the recommendation
+- `overridden` means estimator replaced the suggested value and supplied a reason
+
+Promotion readiness should treat both `approved` and `overridden` pricing rows as eligible.
+
 ### Required route groups
 
 - document actions
@@ -151,8 +220,20 @@ The workflow-state route should return data shaped for the workbench instead of 
 - review events
 - summary counts by section/status
 - promotion readiness indicators
+- selected/current item markers for matches and pricing when applicable
 
 The client should not have to reconstruct workflow status from unrelated arrays.
+
+### Mutation response contract
+
+Every mutation route should return enough data for the workbench to refresh deterministically. The minimum acceptable contract is:
+
+- updated subject row
+- any directly affected sibling rows when selection/current-state changes
+- updated summary counts
+- newly created review-event entry when one is written
+
+The client may still choose to refetch the full workflow payload after mutation, but the API contract should be explicit enough to support either targeted updates or full refresh.
 
 ### Review-event logging
 
@@ -179,6 +260,14 @@ The workbench’s job is:
 - send approved outputs into the estimate model
 
 This preserves a single source of truth for the final estimate.
+
+Promotion readiness is defined as:
+
+- at least one pricing row in `approved` or `overridden`
+- no required generation identifier missing for the selected batch
+- no row-level validation errors on the records being promoted
+
+The workbench may show unresolved rows elsewhere, but promotion must only operate on explicitly eligible pricing rows.
 
 ## Error Handling
 
