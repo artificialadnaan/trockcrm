@@ -201,17 +201,27 @@ export async function runEstimateDocumentParse(args: {
     })
     .returning();
 
-  await args.tenantDb
-    .update(estimateSourceDocuments)
-    .set({
-      parseStatus: "processing",
-      ocrStatus: "processing",
-      parseProvider: options.provider,
-      parseProfile: options.profile,
-      parseErrorSummary: null,
-    })
-    .where(eq(estimateSourceDocuments.id, args.document.id))
-    .returning();
+  const currentDocumentAtStart = await getCurrentDocumentState(args.tenantDb, args.document.id);
+  const hasDifferentInFlightRun =
+    currentDocumentAtStart?.activeParseRunId != null &&
+    currentDocumentAtStart.activeParseRunId !== parseRun.id &&
+    currentDocumentAtStart.parseStatus === "processing" &&
+    currentDocumentAtStart.ocrStatus === "processing";
+
+  if (!hasDifferentInFlightRun) {
+    await args.tenantDb
+      .update(estimateSourceDocuments)
+      .set({
+        parseStatus: "processing",
+        ocrStatus: "processing",
+        activeParseRunId: parseRun.id,
+        parseProvider: options.provider,
+        parseProfile: options.profile,
+        parseErrorSummary: null,
+      })
+      .where(eq(estimateSourceDocuments.id, args.document.id))
+      .returning();
+  }
 
   try {
     const normalizedPages = await normalizeEstimateDocumentPages({

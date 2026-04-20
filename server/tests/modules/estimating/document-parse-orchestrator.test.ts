@@ -349,6 +349,13 @@ describe("runEstimateDocumentParse", () => {
         status: "completed",
       })
     );
+    expect(updatedDocuments[0]).toEqual(
+      expect.objectContaining({
+        parseStatus: "processing",
+        ocrStatus: "processing",
+        activeParseRunId: "parse-run-1",
+      })
+    );
     expect(updatedDocuments.at(-1)).toEqual(expect.objectContaining({ activeParseRunId: "parse-run-1" }));
     expect(documentState.activeParseRunId).toBe("parse-run-1");
   });
