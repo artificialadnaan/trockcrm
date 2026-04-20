@@ -7,6 +7,7 @@ import {
   boolean,
   timestamp,
   index,
+  numeric,
 } from "drizzle-orm/pg-core";
 import { LEAD_STATUSES } from "../../types/enums.js";
 import { users } from "../public/users.js";
@@ -29,6 +30,14 @@ export const leads = pgTable(
     status: leadStatusEnum("status").default("open").notNull(),
     source: varchar("source", { length: 100 }),
     description: text("description"),
+    qualificationScope: varchar("qualification_scope", { length: 255 }),
+    qualificationBudgetAmount: numeric("qualification_budget_amount", { precision: 12, scale: 2 }),
+    qualificationCompanyFit: boolean("qualification_company_fit"),
+    qualificationCompletedAt: timestamp("qualification_completed_at", { withTimezone: true }),
+    directorReviewDecision: varchar("director_review_decision", { length: 20 }),
+    directorReviewedAt: timestamp("director_reviewed_at", { withTimezone: true }),
+    directorReviewedBy: uuid("director_reviewed_by").references(() => users.id),
+    directorReviewReason: text("director_review_reason"),
     lastActivityAt: timestamp("last_activity_at", { withTimezone: true }),
     stageEnteredAt: timestamp("stage_entered_at", { withTimezone: true }).defaultNow().notNull(),
     convertedAt: timestamp("converted_at", { withTimezone: true }),

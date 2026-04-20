@@ -676,9 +676,23 @@ describe("Lead Conversion Shared Contract", () => {
     expect(config.foreignKeys.map((fk) => fk.getName()).sort()).toEqual([
       "leads_assigned_rep_id_users_id_fk",
       "leads_company_id_companies_id_fk",
+      "leads_director_reviewed_by_users_id_fk",
       "leads_primary_contact_id_contacts_id_fk",
       "leads_property_id_properties_id_fk",
     ]);
+  });
+
+  it("stores qualification and director review metadata on leads", () => {
+    const columns = getTableColumns(leads);
+
+    expect(columns).toHaveProperty("qualificationCompletedAt");
+    expect(columns).toHaveProperty("qualificationBudgetAmount");
+    expect(columns).toHaveProperty("qualificationScope");
+    expect(columns).toHaveProperty("qualificationCompanyFit");
+    expect(columns).toHaveProperty("directorReviewDecision");
+    expect(columns).toHaveProperty("directorReviewedAt");
+    expect(columns).toHaveProperty("directorReviewedBy");
+    expect(columns).toHaveProperty("directorReviewReason");
   });
 
   it("stores lead stage lineage separately from deals", () => {
