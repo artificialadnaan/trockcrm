@@ -67,6 +67,7 @@ import { confirmUpload } from "../files/service.js";
 import {
   createEstimateSourceDocument,
   enqueueEstimateDocumentOcrJob,
+  reprocessEstimateSourceDocument,
 } from "../estimating/document-service.js";
 import {
   approveEstimateRecommendation,
@@ -901,6 +902,35 @@ router.post("/:id/estimating/documents", async (req, res, next) => {
 
     await req.commitTransaction!();
     res.status(201).json({ document, file: uploadedFile });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/:id/estimating/documents/:documentId/reprocess", async (req, res, next) => {
+  try {
+    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+
+    const officeId = req.user!.activeOfficeId ?? req.user!.officeId;
+    const document = await reprocessEstimateSourceDocument({
+      tenantDb: req.tenantDb!,
+      enqueueEstimateDocumentOcr: (payload) =>
+        enqueueEstimateDocumentOcrJob(req.tenantDb!, payload),
+      input: {
+        dealId: req.params.id,
+        documentId: req.params.documentId,
+        userId: req.user!.id,
+        officeId,
+      },
+    });
+
+    if (!document) {
+      throw new AppError(404, "Estimate document not found");
+    }
+
+    await req.commitTransaction!();
+    res.status(201).json({ document });
   } catch (err) {
     next(err);
   }

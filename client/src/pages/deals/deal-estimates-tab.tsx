@@ -4,7 +4,10 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { api } from "@/lib/api";
-import { EstimatingWorkflowShell } from "@/components/estimating/estimating-workflow-shell";
+import {
+  EstimatingWorkflowShell,
+  type EstimatingWorkflowState,
+} from "@/components/estimating/estimating-workflow-shell";
 
 interface EstimateItem {
   id: string;
@@ -35,14 +38,6 @@ interface DealEstimatesTabProps {
   dealId: string;
 }
 
-interface EstimatingWorkflowState {
-  documents: any[];
-  extractionRows: any[];
-  matchRows: any[];
-  pricingRows: any[];
-  reviewEvents: any[];
-}
-
 export function DealEstimatesTab({ dealId }: DealEstimatesTabProps) {
   const [sections, setSections] = useState<EstimateSection[]>([]);
   const [workflow, setWorkflow] = useState<EstimatingWorkflowState>({
@@ -51,6 +46,29 @@ export function DealEstimatesTab({ dealId }: DealEstimatesTabProps) {
     matchRows: [],
     pricingRows: [],
     reviewEvents: [],
+    summary: {
+      documents: { total: 0, queued: 0, failed: 0 },
+      extractions: {
+        total: 0,
+        pending: 0,
+        approved: 0,
+        rejected: 0,
+        unmatched: 0,
+      },
+      matches: { total: 0, suggested: 0, selected: 0, rejected: 0 },
+      pricing: {
+        total: 0,
+        pending: 0,
+        approved: 0,
+        overridden: 0,
+        rejected: 0,
+        readyToPromote: 0,
+      },
+    },
+    promotionReadiness: {
+      canPromote: false,
+      generationRunIds: [],
+    },
   });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -146,11 +164,8 @@ export function DealEstimatesTab({ dealId }: DealEstimatesTabProps) {
     <div className="space-y-4">
       <EstimatingWorkflowShell
         dealId={dealId}
-        documents={workflow.documents}
-        extractionRows={workflow.extractionRows}
-        matchRows={workflow.matchRows}
-        pricingRows={workflow.pricingRows}
-        reviewEvents={workflow.reviewEvents}
+        workflow={workflow}
+        onRefresh={fetchEstimates}
         copilotEnabled
       />
       {sections.length === 0 && !addingSection ? (

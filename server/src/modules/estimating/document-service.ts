@@ -30,6 +30,21 @@ export interface CreateEstimateSourceDocumentArgs {
   };
 }
 
+export interface ReprocessEstimateSourceDocumentArgs {
+  tenantDb: TenantDb;
+  enqueueEstimateDocumentOcr: (payload: {
+    documentId: string;
+    dealId: string;
+    officeId: string | null;
+  }) => Promise<void>;
+  input: {
+    dealId: string;
+    documentId: string;
+    userId: string;
+    officeId: string | null;
+  };
+}
+
 export function classifyEstimateDocument(input: { filename: string; mimeType: string }) {
   if (/spec/i.test(input.filename)) return "spec";
   if (/plan|blueprint/i.test(input.filename)) return "plan";
@@ -114,4 +129,46 @@ export async function createEstimateSourceDocument({
   });
 
   return document;
+}
+
+export async function reprocessEstimateSourceDocument({
+  tenantDb,
+  enqueueEstimateDocumentOcr,
+  input,
+}: ReprocessEstimateSourceDocumentArgs) {
+  const [existingDocument] = await tenantDb
+    .select()
+    .from(estimateSourceDocuments)
+    .where(
+      and(
+        eq(estimateSourceDocuments.id, input.documentId),
+        eq(estimateSourceDocuments.dealId, input.dealId)
+      )
+    )
+    .limit(1);
+
+  if (!existingDocument) {
+    return null;
+  }
+
+  return createEstimateSourceDocument({
+    tenantDb,
+    enqueueEstimateDocumentOcr,
+    input: {
+      dealId: existingDocument.dealId,
+      projectId: existingDocument.projectId,
+      fileId: existingDocument.fileId,
+      rootFileId: existingDocument.rootFileId ?? existingDocument.fileId,
+      filename: existingDocument.filename,
+      storageKey: existingDocument.storageKey,
+      mimeType: existingDocument.mimeType,
+      fileSize: existingDocument.fileSize,
+      versionLabel: existingDocument.versionLabel,
+      contentHash: existingDocument.contentHash,
+      documentType: existingDocument.documentType,
+      userId: input.userId,
+      officeId: input.officeId,
+      reprocessExisting: true,
+    },
+  });
 }
