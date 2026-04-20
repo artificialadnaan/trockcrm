@@ -486,6 +486,7 @@ git commit -m "feat: sync procore cost catalog into local tables"
 - Create: `server/src/modules/estimating/document-service.ts`
 - Create: `server/src/modules/estimating/routes.ts`
 - Create: `worker/src/jobs/estimate-document-ocr.ts`
+- Modify: `worker/src/jobs/index.ts`
 - Modify: `client/src/pages/deals/deal-estimates-tab.tsx`
 - Create: `client/src/components/estimating/estimate-documents-panel.tsx`
 - Test: `server/tests/modules/estimating/document-service.test.ts`
@@ -530,6 +531,15 @@ export async function createEstimateSourceDocument({
   enqueueEstimateDocumentOcr,
   input,
 }: CreateEstimateSourceDocumentArgs) {
+  const existing = input.contentHash
+    ? await tenantDb
+        .select({ id: estimateSourceDocuments.id, contentHash: estimateSourceDocuments.contentHash })
+        .from(estimateSourceDocuments)
+        .where(eq(estimateSourceDocuments.contentHash, input.contentHash))
+        .limit(1)
+    : [];
+
+  const versionLabel = existing.length > 0 ? `v${existing.length + 1}` : "v1";
   const [document] = await tenantDb
     .insert(estimateSourceDocuments)
     .values({
@@ -541,6 +551,7 @@ export async function createEstimateSourceDocument({
       mimeType: input.mimeType,
       fileSize: input.fileSize ?? null,
       contentHash: input.contentHash ?? null,
+      versionLabel,
       ocrStatus: "queued",
       uploadedByUserId: input.userId,
     })
@@ -551,7 +562,50 @@ export async function createEstimateSourceDocument({
 }
 ```
 
-- [ ] **Step 4: Add routes and a document upload panel in the estimate tab**
+- [ ] **Step 4: Persist page-level OCR artifacts and reprocessing metadata in the worker job**
+
+```ts
+export async function runEstimateDocumentOcr(payload: { documentId: string }, officeId: string | null) {
+  const pages = await extractPdfPages(payload.documentId);
+
+  for (const page of pages) {
+    await tenantDb.insert(estimateDocumentPages).values({
+      documentId: payload.documentId,
+      pageNumber: page.pageNumber,
+      sheetLabel: page.sheetLabel ?? null,
+      sheetType: page.sheetType ?? null,
+      ocrText: page.text,
+      pageImageKey: page.imageKey ?? null,
+      metadataJson: {
+        extractionProvider: page.provider,
+        reprocessedAt: new Date().toISOString(),
+      },
+    });
+  }
+
+  await tenantDb
+    .update(estimateSourceDocuments)
+    .set({ ocrStatus: "completed", parsedAt: new Date() })
+    .where(eq(estimateSourceDocuments.id, payload.documentId));
+}
+```
+
+- [ ] **Step 5: Register the new OCR and generation jobs in the worker job registry**
+
+```ts
+import { runEstimateDocumentOcr } from "./estimate-document-ocr.js";
+import { runEstimateGeneration } from "./estimate-generation.js";
+
+registerJobHandler("estimate_document_ocr", async (payload, officeId) => {
+  await runEstimateDocumentOcr(payload, officeId);
+});
+
+registerJobHandler("estimate_generation", async (payload, officeId) => {
+  await runEstimateGeneration(payload, officeId);
+});
+```
+
+- [ ] **Step 6: Add routes and a document upload panel in the estimate tab**
 
 ```ts
 router.post("/deals/:dealId/estimating/documents", async (req, res) => {
@@ -571,7 +625,7 @@ router.post("/deals/:dealId/estimating/documents", async (req, res) => {
 });
 ```
 
-- [ ] **Step 5: Re-run the focused service tests and a client typecheck**
+- [ ] **Step 7: Re-run the focused service tests and a client typecheck**
 
 Run: `npx vitest run server/tests/modules/estimating/document-service.test.ts`
 Expected: PASS
@@ -579,10 +633,10 @@ Expected: PASS
 Run: `npm run typecheck`
 Expected: PASS
 
-- [ ] **Step 6: Commit the upload and OCR queueing task**
+- [ ] **Step 8: Commit the upload and OCR queueing task**
 
 ```bash
-git add server/src/modules/estimating/document-service.ts server/src/modules/estimating/routes.ts worker/src/jobs/estimate-document-ocr.ts client/src/pages/deals/deal-estimates-tab.tsx client/src/components/estimating/estimate-documents-panel.tsx server/tests/modules/estimating/document-service.test.ts
+git add server/src/modules/estimating/document-service.ts server/src/modules/estimating/routes.ts worker/src/jobs/estimate-document-ocr.ts worker/src/jobs/index.ts client/src/pages/deals/deal-estimates-tab.tsx client/src/components/estimating/estimate-documents-panel.tsx server/tests/modules/estimating/document-service.test.ts
 git commit -m "feat: add estimating document upload and ocr queueing"
 ```
 
@@ -697,6 +751,10 @@ export async function rankExtractionMatches({
       return {
         catalogItemId: item.id,
         historicalLineItemIds: similarHistory.map((row) => row.id),
+        historicalUnitPrices: similarHistory
+          .map((row) => Number(row.unitPrice))
+          .filter((value) => Number.isFinite(value)),
+        catalogBaselinePrice: item.catalogBaselinePrice ?? null,
         matchScore:
           (item.name.toLowerCase() === normalizedLabel ? 50 : 0) +
           (item.unit && extraction.unit && item.unit === extraction.unit ? 15 : 0) +
@@ -1009,7 +1067,58 @@ export function EstimatingWorkflowShell(props: EstimatingWorkflowShellProps) {
 }
 ```
 
-- [ ] **Step 5: Implement the copilot backend and review-log route coverage**
+- [ ] **Step 5: Add concrete review-state mutations for extraction, match, and pricing rows**
+
+```ts
+router.post("/deals/:dealId/estimating/extractions/:extractionId/approve", async (req, res) => {
+  const extraction = await approveEstimateExtraction({
+    tenantDb: req.tenantDb,
+    dealId: req.params.dealId,
+    extractionId: req.params.extractionId,
+    userId: req.user.id,
+  });
+
+  res.status(200).json({ extraction });
+});
+
+router.post("/deals/:dealId/estimating/matches/:matchId/select", async (req, res) => {
+  const match = await selectEstimateExtractionMatch({
+    tenantDb: req.tenantDb,
+    dealId: req.params.dealId,
+    matchId: req.params.matchId,
+    userId: req.user.id,
+  });
+
+  res.status(200).json({ match });
+});
+
+router.post("/deals/:dealId/estimating/recommendations/:recommendationId/approve", async (req, res) => {
+  const recommendation = await approveEstimateRecommendation({
+    tenantDb: req.tenantDb,
+    dealId: req.params.dealId,
+    recommendationId: req.params.recommendationId,
+    userId: req.user.id,
+  });
+
+  res.status(200).json({ recommendation });
+});
+```
+
+```tsx
+<EstimateExtractionReviewTable
+  rows={props.extractionRows}
+  onApprove={(extractionId) => approveExtraction(extractionId)}
+  onEdit={(extractionId, patch) => updateExtraction(extractionId, patch)}
+/>
+
+<EstimatePricingReviewTable
+  rows={props.pricingRows}
+  onApprove={(recommendationId) => approveRecommendation(recommendationId)}
+  onOverride={(recommendationId, patch) => overrideRecommendation(recommendationId, patch)}
+/>
+```
+
+- [ ] **Step 6: Implement the copilot backend and review-log route coverage**
 
 ```ts
 export async function answerEstimatingCopilotQuestion(input: AnswerEstimatingCopilotQuestionArgs) {
@@ -1058,7 +1167,7 @@ router.post("/deals/:dealId/estimating/copilot", async (req, res) => {
 });
 ```
 
-- [ ] **Step 6: Integrate the workflow shell into the existing estimate tab**
+- [ ] **Step 7: Integrate the workflow shell into the existing estimate tab**
 
 ```tsx
 return (
@@ -1076,7 +1185,7 @@ return (
 );
 ```
 
-- [ ] **Step 7: Re-run the UI test, copilot test, and workspace typecheck**
+- [ ] **Step 8: Re-run the UI test, copilot test, and workspace typecheck**
 
 Run: `npx vitest run client/src/components/estimating/estimating-workflow-shell.test.tsx`
 Expected: PASS
@@ -1087,7 +1196,7 @@ Expected: PASS
 Run: `npm run typecheck`
 Expected: PASS
 
-- [ ] **Step 8: Commit the workflow UI task**
+- [ ] **Step 9: Commit the workflow UI task**
 
 ```bash
 git add client/src/components/estimating/estimating-workflow-shell.tsx client/src/components/estimating/estimate-overview-panel.tsx client/src/components/estimating/estimate-extraction-review-table.tsx client/src/components/estimating/estimate-pricing-review-table.tsx client/src/components/estimating/estimate-review-log-panel.tsx client/src/components/estimating/estimate-copilot-panel.tsx client/src/pages/deals/deal-estimates-tab.tsx server/src/modules/estimating/copilot-service.ts server/src/modules/estimating/routes.ts server/tests/modules/estimating/copilot-service.test.ts client/src/components/estimating/estimating-workflow-shell.test.tsx
