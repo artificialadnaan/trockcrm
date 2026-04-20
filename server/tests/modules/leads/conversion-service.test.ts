@@ -49,6 +49,11 @@ const pipelineFamilyMigrationPath = resolve(
   "../../../../migrations/0020_pipeline_workflow_families.sql"
 );
 const pipelineFamilyMigrationSql = readFileSync(pipelineFamilyMigrationPath, "utf8");
+const salesFunnelAlignmentMigrationPath = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../../migrations/0028_sales_funnel_model_alignment.sql"
+);
+const salesFunnelAlignmentMigrationSql = readFileSync(salesFunnelAlignmentMigrationPath, "utf8");
 
 function expectSqlToMatch(pattern: RegExp): void {
   expect(migrationSql).toMatch(pattern);
@@ -56,6 +61,10 @@ function expectSqlToMatch(pattern: RegExp): void {
 
 function expectPipelineFamilySqlToMatch(pattern: RegExp): void {
   expect(pipelineFamilyMigrationSql).toMatch(pattern);
+}
+
+function expectSalesFunnelAlignmentSqlToMatch(pattern: RegExp): void {
+  expect(salesFunnelAlignmentMigrationSql).toMatch(pattern);
 }
 
 type RouteServiceMocks = {
@@ -693,6 +702,13 @@ describe("Lead Conversion Shared Contract", () => {
     expect(columns).toHaveProperty("directorReviewedAt");
     expect(columns).toHaveProperty("directorReviewedBy");
     expect(columns).toHaveProperty("directorReviewReason");
+  });
+
+  it("adds qualification and director review columns to each tenant lead table", () => {
+    expectSalesFunnelAlignmentSqlToMatch(/table_name = 'leads'/);
+    expectSalesFunnelAlignmentSqlToMatch(/ALTER TABLE %I\.leads[\s\S]*qualification_scope varchar\(255\)/);
+    expectSalesFunnelAlignmentSqlToMatch(/director_reviewed_by uuid REFERENCES public\.users\(id\)/);
+    expectSalesFunnelAlignmentSqlToMatch(/director_review_reason text/);
   });
 
   it("stores lead stage lineage separately from deals", () => {
