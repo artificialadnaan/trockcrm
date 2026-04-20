@@ -4,9 +4,11 @@ type HygieneRecord = {
   entityType: "lead" | "deal";
   id: string;
   name: string;
-  assignedRepId: string;
-  assignedRepName: string;
+  assignedRepId: string | null;
+  assignedRepName: string | null;
   stageId: string;
+  decisionMakerName: string | null;
+  budgetStatus: string | null;
   forecastWindow: string | null;
   forecastCategory: string | null;
   forecastConfidencePercent: number | null;
@@ -14,6 +16,8 @@ type HygieneRecord = {
   nextMilestoneAt: string | Date | null;
   lastActivityAt: string | Date | null;
   updatedAt: string | Date;
+  ownershipSyncStatus: string | null;
+  unassignedReasonCode: string | null;
 };
 
 function daysSince(value: string | Date | null, now: Date) {
@@ -34,11 +38,16 @@ export function evaluateSalesHygieneRecords(
     .map((record) => {
       const issueTypes: string[] = [];
 
+      if (!record.assignedRepId) issueTypes.push("unassigned_owner");
+      if (!record.decisionMakerName?.trim()) issueTypes.push("missing_decision_maker");
+      if (!record.budgetStatus?.trim()) issueTypes.push("missing_budget_status");
       if (!record.forecastWindow) issueTypes.push("missing_forecast_window");
       if (!record.forecastCategory) issueTypes.push("missing_forecast_category");
       if (record.forecastConfidencePercent == null) issueTypes.push("missing_forecast_confidence");
       if (!record.nextStep?.trim()) issueTypes.push("missing_next_step");
       if (!record.nextMilestoneAt) issueTypes.push("missing_next_milestone");
+      if (record.unassignedReasonCode === "owner_mapping_failure") issueTypes.push("owner_mapping_failure");
+      if (record.unassignedReasonCode === "inactive_owner_mapping") issueTypes.push("inactive_owner_mapping");
       if (daysSince(record.updatedAt, now) > staleStageDays) issueTypes.push("stale_stage");
       if (daysSince(record.lastActivityAt, now) > staleActivityDays) issueTypes.push("no_recent_activity");
 
@@ -58,6 +67,10 @@ export function evaluateSalesHygieneRecords(
           : null,
         lastActivityAt: record.lastActivityAt ? new Date(record.lastActivityAt).toISOString() : null,
         updatedAt: new Date(record.updatedAt).toISOString(),
+        decisionMakerName: record.decisionMakerName,
+        budgetStatus: record.budgetStatus,
+        ownershipSyncStatus: record.ownershipSyncStatus,
+        unassignedReasonCode: record.unassignedReasonCode,
       } satisfies SalesHygieneIssueRow;
     })
     .filter((row): row is SalesHygieneIssueRow => row !== null)

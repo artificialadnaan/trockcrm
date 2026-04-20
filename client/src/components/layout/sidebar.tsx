@@ -103,7 +103,7 @@ const adminGroups: AdminGroup[] = [
       { to: "/admin/data-scrub", icon: ClipboardList, label: "Data Scrub", roles: ["admin", "director"] },
       { to: "/admin/audit", icon: ClipboardList, label: "Audit Log", roles: ["admin", "director"] },
       { to: "/admin/cross-office-reports", icon: Globe, label: "Cross-Office Reports", roles: ["admin", "director"] },
-      { to: "/admin/migration", icon: ArrowRightLeft, label: "Migration", roles: ["admin"] },
+      { to: "/admin/migration", icon: ArrowRightLeft, label: "Migration", roles: ["admin", "director"] },
     ],
   },
 ];

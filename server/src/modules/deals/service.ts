@@ -206,9 +206,17 @@ async function assertSourceLeadLineageAvailable(
   }
 }
 
-async function resolveSourceLeadLineage(
+async function resolveSourceLeadLineage<
+  T extends {
+    sourceLeadId?: string | null;
+    companyId?: string | null;
+    propertyId?: string | null;
+    primaryContactId?: string | null;
+    source?: string | null;
+  },
+>(
   tenantDb: TenantDb,
-  input: CreateDealInput,
+  input: T,
   options?: { existingDealId?: string }
 ) {
   if (!input.sourceLeadId) {

@@ -17,8 +17,8 @@ export interface SalesReviewForecastRow {
   propertyId: string | null;
   propertyName: string | null;
   stageId: string;
-  assignedRepId: string;
-  assignedRepName: string;
+  assignedRepId: string | null;
+  assignedRepName: string | null;
   forecastWindow: "30_days" | "60_days" | "90_days" | "beyond_90" | "uncommitted";
   forecastCategory: "commit" | "best_case" | "pipeline" | null;
   forecastConfidencePercent: number | null;
@@ -60,14 +60,18 @@ export interface SalesHygieneIssueRow {
   entityType: "lead" | "deal";
   id: string;
   name: string;
-  assignedRepId: string;
-  assignedRepName: string;
+  assignedRepId: string | null;
+  assignedRepName: string | null;
   issueTypes: string[];
   stageId: string;
   nextStep: string | null;
   nextMilestoneAt: string | null;
   lastActivityAt: string | null;
   updatedAt: string;
+  decisionMakerName: string | null;
+  budgetStatus: string | null;
+  ownershipSyncStatus: string | null;
+  unassignedReasonCode: string | null;
 }
 
 export interface SalesReviewOverview {
@@ -75,8 +79,8 @@ export interface SalesReviewOverview {
     entityType: "lead" | "deal";
     id: string;
     name: string;
-    assignedRepId: string;
-    assignedRepName: string;
+    assignedRepId: string | null;
+    assignedRepName: string | null;
     companyName: string | null;
     propertyName: string | null;
     createdAt: string;

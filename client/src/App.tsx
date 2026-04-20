@@ -255,7 +255,7 @@ export function App() {
               <Route
                 path="/admin/migration"
                 element={(
-                  <RequireRole allowedRoles={["admin"]}>
+                  <RequireRole allowedRoles={["admin", "director"]}>
                     <MigrationDashboardPage />
                   </RequireRole>
                 )}

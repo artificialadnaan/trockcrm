@@ -6,6 +6,7 @@ import { StatCard } from "@/components/dashboard/stat-card";
 import { PipelineBarChart } from "@/components/charts/pipeline-bar-chart";
 import { formatCurrency } from "@/components/charts/chart-colors";
 import { useTasks } from "@/hooks/use-tasks";
+import { useSalesReview } from "@/hooks/use-sales-review";
 import { TaskSection } from "@/components/tasks/task-section";
 import {
   Briefcase,
@@ -19,6 +20,7 @@ export function RepDashboardPage() {
   const { user } = useAuth();
   const navigate = useNavigate();
   const { data, loading, error } = useRepDashboard();
+  const { data: salesReview } = useSalesReview();
   const { tasks: overdueTasks, refetch: refetchOverdue } = useTasks({ section: "overdue" });
   const { tasks: todayTasks, refetch: refetchToday } = useTasks({ section: "today" });
   const firstName = user?.displayName?.split(" ")[0] ?? "there";
@@ -66,6 +68,9 @@ export function RepDashboardPage() {
   if (!data) return null;
 
   const taskTotal = data.tasksToday.overdue + data.tasksToday.today;
+  const cleanupCount = salesReview?.hygiene.length ?? 0;
+  const ownershipCount =
+    salesReview?.hygiene.filter((row) => row.issueTypes.includes("unassigned_owner")).length ?? 0;
 
   return (
     <div className="space-y-6">
@@ -150,6 +155,29 @@ export function RepDashboardPage() {
           }
         />
       </div>
+
+      <Card
+        className="cursor-pointer border-amber-200 bg-amber-50/50 hover:shadow-md transition-shadow"
+        onClick={() => navigate("/pipeline/hygiene")}
+      >
+        <CardHeader className="pb-2">
+          <CardTitle className="text-base">My Cleanup</CardTitle>
+        </CardHeader>
+        <CardContent className="flex items-center justify-between gap-4">
+          <div>
+            <p className="text-3xl font-semibold text-amber-900">{cleanupCount}</p>
+            <p className="mt-1 text-sm text-amber-800">
+              {ownershipCount > 0
+                ? `${ownershipCount} records still need owner resolution`
+                : "Complete missing fields and stale follow-up items in your pipeline"}
+            </p>
+          </div>
+          <div className="text-right text-sm text-amber-900">
+            <p className="font-medium">Open queue</p>
+            <p className="text-amber-700">Fix forecast, next steps, and ownership gaps</p>
+          </div>
+        </CardContent>
+      </Card>
 
       {/* Pipeline Chart */}
       <Card

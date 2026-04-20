@@ -30,7 +30,7 @@ interface ForecastMilestoneInsert extends ForecastSnapshot {
 interface StageDrivenCaptureInput {
   deal: {
     id: string;
-    assignedRepId: string;
+    assignedRepId: string | null;
     workflowRoute: string | null;
     ddEstimate: string | null;
     bidEstimate: string | null;
@@ -219,7 +219,7 @@ export async function captureInitialForecastMilestone(
   input: {
     deal: {
       id: string;
-      assignedRepId: string;
+      assignedRepId: string | null;
       workflowRoute: string | null;
       stageId: string | null;
       expectedCloseDate: string | null;
