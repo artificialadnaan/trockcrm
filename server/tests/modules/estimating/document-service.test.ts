@@ -110,6 +110,11 @@ describe("reprocessEstimateSourceDocument", () => {
     expect(tenantDb.update).toHaveBeenCalled();
     expect(updateSet).toHaveBeenCalledWith(
       expect.objectContaining({
+        parseStatus: "queued",
+        activeParseRunId: null,
+        parseProfile: null,
+        parseProvider: null,
+        parseErrorSummary: null,
         ocrStatus: "queued",
         parsedAt: null,
       })

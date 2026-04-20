@@ -149,6 +149,11 @@ export async function reprocessEstimateSourceDocument({
   const [document] = await tenantDb
     .update(estimateSourceDocuments)
     .set({
+      parseStatus: "queued",
+      activeParseRunId: null,
+      parseProfile: null,
+      parseProvider: null,
+      parseErrorSummary: null,
       ocrStatus: "queued",
       parsedAt: null,
     })
