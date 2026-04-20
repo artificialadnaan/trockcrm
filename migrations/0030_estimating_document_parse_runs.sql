@@ -126,3 +126,39 @@ BEGIN
     );
   END LOOP;
 END $$;
+
+-- TENANT_SCHEMA_START
+-- Fresh office schemas need this replayed so the estimating parse lifecycle is provisioned automatically.
+
+CREATE TABLE IF NOT EXISTS estimate_document_parse_runs (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  document_id UUID NOT NULL REFERENCES estimate_source_documents(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'queued',
+  parse_profile TEXT,
+  parse_provider TEXT,
+  error_summary TEXT,
+  started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  completed_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS estimate_document_parse_runs_document_idx
+  ON estimate_document_parse_runs (document_id, started_at);
+
+ALTER TABLE estimate_source_documents
+  ADD COLUMN IF NOT EXISTS parse_status TEXT NOT NULL DEFAULT 'queued',
+  ADD COLUMN IF NOT EXISTS active_parse_run_id UUID REFERENCES estimate_document_parse_runs(id) ON DELETE SET NULL,
+  ADD COLUMN IF NOT EXISTS parse_profile TEXT,
+  ADD COLUMN IF NOT EXISTS parse_provider TEXT,
+  ADD COLUMN IF NOT EXISTS parse_error_summary TEXT;
+
+DROP TRIGGER IF EXISTS estimate_source_documents_validate_active_parse_run ON estimate_source_documents;
+CREATE TRIGGER estimate_source_documents_validate_active_parse_run
+  BEFORE INSERT OR UPDATE OF active_parse_run_id ON estimate_source_documents
+  FOR EACH ROW EXECUTE FUNCTION public.ensure_estimate_source_document_active_parse_run_matches();
+
+DROP TRIGGER IF EXISTS estimate_document_parse_runs_document_immutable ON estimate_document_parse_runs;
+CREATE TRIGGER estimate_document_parse_runs_document_immutable
+  BEFORE UPDATE OF document_id ON estimate_document_parse_runs
+  FOR EACH ROW EXECUTE FUNCTION public.ensure_estimate_document_parse_run_document_immutable();
+-- TENANT_SCHEMA_END
