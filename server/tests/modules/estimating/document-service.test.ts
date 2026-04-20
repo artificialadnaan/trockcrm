@@ -88,6 +88,7 @@ describe("runEstimateDocumentOcr", () => {
     expect(enqueueSql).toContain("document.active_parse_run_id = ?");
     expect(enqueueSql).toContain("document.parse_status = 'completed'");
     expect(enqueueSql).toContain("document.ocr_status = 'completed'");
+    expect(enqueueSql).toContain("'parseRunId'");
   });
 });
 

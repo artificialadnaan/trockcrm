@@ -8,6 +8,7 @@ import {
   estimateGenerationRuns,
   estimatePricingRecommendations,
   estimateReviewEvents,
+  estimateSourceDocuments,
 } from "@trock-crm/shared/schema";
 import { pool } from "../db.js";
 import { listCatalogCandidatesForMatching, resolveActiveCatalogSnapshotVersionId } from "../../../server/src/modules/estimating/catalog-read-model-service.js";
@@ -28,12 +29,36 @@ async function resolveSchemaName(officeId: string | null) {
   return `office_${slug}`;
 }
 
-export async function runEstimateGeneration(payload: { documentId?: string; dealId?: string }, officeId: string | null) {
+export async function runEstimateGeneration(
+  payload: { documentId?: string; dealId?: string; parseRunId?: string },
+  officeId: string | null
+) {
   const schemaName = await resolveSchemaName(officeId);
   const appDb = drizzle(pool, { schema, casing: "snake_case" as any });
   const tenantDb = drizzle(pool, { schema, casing: "snake_case" as any });
 
   await tenantDb.execute(sql.raw(`SET search_path TO ${schemaName}, public`));
+
+  if (payload.documentId && payload.parseRunId) {
+    const [currentDocument] = await tenantDb
+      .select({
+        activeParseRunId: estimateSourceDocuments.activeParseRunId,
+        parseStatus: estimateSourceDocuments.parseStatus,
+        ocrStatus: estimateSourceDocuments.ocrStatus,
+      })
+      .from(estimateSourceDocuments)
+      .where(eq(estimateSourceDocuments.id, payload.documentId))
+      .limit(1);
+
+    if (
+      !currentDocument ||
+      currentDocument.activeParseRunId !== payload.parseRunId ||
+      currentDocument.parseStatus !== "completed" ||
+      currentDocument.ocrStatus !== "completed"
+    ) {
+      return;
+    }
+  }
 
   const [source] = await appDb
     .select({ id: costCatalogSources.id })

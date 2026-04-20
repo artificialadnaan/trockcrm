@@ -59,6 +59,7 @@ function createTenantDbMock(options: {
   concurrentDocumentStateOnFailure?: Record<string, any>;
   concurrentDocumentStateOnActivation?: Record<string, any>;
   concurrentDocumentStateOnFailureWrite?: Record<string, any>;
+  concurrentParseRunsOnActivation?: Record<string, any>[];
 }) {
   const parseRuns = (options.existingParseRuns ?? []).map((row) => structuredClone(row));
   const updatedDocuments: Record<string, any>[] = [];
@@ -215,13 +216,21 @@ function createTenantDbMock(options: {
             ? parseRuns.find((run) => run.id === documentState.activeParseRunId)
             : null;
 
-        if (
-          text.includes("parse_status = 'completed'") &&
-          options.concurrentDocumentStateOnActivation &&
-          !activationRaceApplied
-        ) {
-          Object.assign(documentState, options.concurrentDocumentStateOnActivation);
-          activationRaceApplied = true;
+        if (text.includes("parse_status = 'completed'") && !activationRaceApplied) {
+          if (options.concurrentDocumentStateOnActivation) {
+            Object.assign(documentState, options.concurrentDocumentStateOnActivation);
+          }
+          if (options.concurrentParseRunsOnActivation?.length) {
+            parseRuns.push(
+              ...options.concurrentParseRunsOnActivation.map((run) => structuredClone(run))
+            );
+          }
+          if (
+            options.concurrentDocumentStateOnActivation ||
+            options.concurrentParseRunsOnActivation?.length
+          ) {
+            activationRaceApplied = true;
+          }
         }
 
         if (text.includes("parse_status = 'completed'") && options.failOnDocumentComplete) {
@@ -248,7 +257,15 @@ function createTenantDbMock(options: {
           (text.includes("parse_status = 'failed'")
             ? documentState.activeParseRunId === candidateRun.id
             : text.includes("parse_status = 'completed'")
-            ? documentState.activeParseRunId === candidateRun.id
+            ? (() => {
+                const newestEligibleRun = [...parseRuns]
+                  .filter((run) => run.status !== "failed")
+                  .sort((left, right) => compareParseRunPriority(right, left))[0];
+                return (
+                  documentState.activeParseRunId === candidateRun.id &&
+                  newestEligibleRun?.id === candidateRun.id
+                );
+              })()
             : !currentOwner || compareParseRunPriority(candidateRun, currentOwner) >= 0);
 
         if (shouldClaim) {
@@ -970,6 +987,80 @@ describe("runEstimateDocumentParse", () => {
       expect.objectContaining({
         id: "parse-run-1",
         status: "completed",
+      })
+    );
+  });
+
+  it("does not activate when a newer eligible parse run appears at activation time", async () => {
+    const documentSnapshot = {
+      id: "doc-3b",
+      dealId: "deal-1",
+      projectId: "project-1",
+      filename: "A3b-plan.pdf",
+      documentType: "plan",
+      mimeType: "application/pdf",
+      storageKey: "stale/storage-key-a3b.pdf",
+      contentHash: "r2/estimate-documents/doc-3b.pdf",
+      activeParseRunId: null,
+    };
+    const { tenantDb, documentState, updatedDocuments } = createTenantDbMock({
+      documentSnapshot,
+      currentDocument: {
+        activeParseRunId: "parse-run-1",
+        parseStatus: "processing",
+        ocrStatus: "processing",
+        parseProvider: "default",
+        parseProfile: "balanced",
+      },
+      concurrentParseRunsOnActivation: [
+        {
+          id: "parse-run-newer",
+          documentId: "doc-3b",
+          status: "processing",
+          parseProfile: "balanced",
+          parseProvider: "default",
+          errorSummary: null,
+          startedAt: new Date("2026-04-20T12:05:00.000Z"),
+          completedAt: null,
+          createdAt: new Date("2026-04-20T12:05:00.000Z"),
+        },
+      ],
+    });
+
+    const result = await runEstimateDocumentParse({
+      tenantDb,
+      document: documentSnapshot,
+      options: {
+        provider: "default",
+        profile: "balanced",
+      },
+    });
+
+    expect(result.documentUpdate).toEqual(
+      expect.objectContaining({
+        activeParseRunId: "parse-run-1",
+        parseStatus: "processing",
+        ocrStatus: "processing",
+      })
+    );
+    expect(updatedDocuments).toEqual(
+      expect.not.arrayContaining([
+        expect.objectContaining({
+          parseStatus: "completed",
+          activeParseRunId: "parse-run-1",
+        }),
+      ])
+    );
+    const completionQueries = tenantDb.execute.mock.calls
+      .map(([query]: [any]) => readSql(query).text)
+      .filter((text: string) => text.includes("parse_status = 'completed'"));
+    expect(completionQueries).toHaveLength(1);
+    expect(completionQueries[0]).toContain("estimate_document_parse_runs as newer_run");
+    expect(documentState).toEqual(
+      expect.objectContaining({
+        activeParseRunId: "parse-run-1",
+        parseStatus: "processing",
+        ocrStatus: "processing",
       })
     );
   });

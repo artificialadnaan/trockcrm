@@ -52,7 +52,14 @@ export async function runEstimateDocumentOcr(payload: { documentId: string; deal
       insert into public.job_queue (job_type, payload, office_id, status, run_after)
       select
         'estimate_generation',
-        jsonb_build_object('documentId', document.id, 'dealId', document.deal_id),
+        jsonb_build_object(
+          'documentId',
+          document.id,
+          'dealId',
+          document.deal_id,
+          'parseRunId',
+          ${result.parseRun.id}
+        ),
         ${officeId}::uuid,
         'pending',
         now()

@@ -1,4 +1,4 @@
-import { desc, eq, sql } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import {
@@ -36,12 +36,6 @@ export interface EstimateDocumentParseResult {
   extractionCount: number;
 }
 
-interface ParseRunOrderingRecord {
-  id: string;
-  startedAt: Date | string | null;
-  createdAt: Date | string | null;
-}
-
 function resolveParseOptions(options?: EstimateDocumentParseOptions) {
   return {
     provider: options?.provider ?? "default",
@@ -75,25 +69,14 @@ async function getCurrentDocumentState(tenantDb: TenantDb, documentId: string) {
   return currentDocument ?? null;
 }
 
-function compareParseRunPriority(
-  candidate: ParseRunOrderingRecord,
-  current: ParseRunOrderingRecord
-) {
-  const startedDiff =
-    new Date(candidate.startedAt ?? 0).getTime() - new Date(current.startedAt ?? 0).getTime();
-  if (startedDiff !== 0) return startedDiff;
-
-  const createdDiff =
-    new Date(candidate.createdAt ?? 0).getTime() - new Date(current.createdAt ?? 0).getTime();
-  if (createdDiff !== 0) return createdDiff;
-
-  return candidate.id.localeCompare(current.id);
-}
-
 async function claimDocumentProcessingRun(args: {
   tenantDb: TenantDb;
   documentId: string;
-  parseRun: ParseRunOrderingRecord;
+  parseRun: {
+    id: string;
+    startedAt: Date | string | null;
+    createdAt: Date | string | null;
+  };
   options: { provider: string; profile: string };
 }) {
   await args.tenantDb.execute(sql`
@@ -126,28 +109,6 @@ async function claimDocumentProcessingRun(args: {
   `);
 }
 
-async function isFreshestEligibleParseRun(
-  tenantDb: TenantDb,
-  documentId: string,
-  parseRunId: string
-) {
-  const parseRuns = await tenantDb
-    .select()
-    .from(estimateDocumentParseRuns)
-    .where(eq(estimateDocumentParseRuns.documentId, documentId))
-    .orderBy(
-      desc(estimateDocumentParseRuns.startedAt),
-      desc(estimateDocumentParseRuns.createdAt)
-    );
-
-  const orderedParseRuns = [...parseRuns].sort((left, right) =>
-    compareParseRunPriority(right, left)
-  );
-
-  const newestEligibleRun = orderedParseRuns.find((run) => run.status !== "failed");
-  return newestEligibleRun?.id === parseRunId;
-}
-
 async function activateCompletedParseRun(args: {
   tenantDb: TenantDb;
   documentId: string;
@@ -155,7 +116,13 @@ async function activateCompletedParseRun(args: {
   options: { provider: string; profile: string };
 }) {
   await args.tenantDb.execute(sql`
-    with updated_document as (
+    with candidate_run as (
+      select id, document_id, started_at, created_at
+      from estimate_document_parse_runs
+      where id = ${args.parseRunId}
+        and document_id = ${args.documentId}
+    ),
+    updated_document as (
       update estimate_source_documents as document
       set
         parse_status = 'completed',
@@ -165,8 +132,27 @@ async function activateCompletedParseRun(args: {
         parse_profile = ${args.options.profile},
         parse_error_summary = null,
         parsed_at = now()
-      where document.id = ${args.documentId}
-        and document.active_parse_run_id = ${args.parseRunId}
+      from candidate_run
+      where document.id = candidate_run.document_id
+        and document.active_parse_run_id = candidate_run.id
+        and not exists (
+          select 1
+          from estimate_document_parse_runs as newer_run
+          where newer_run.document_id = candidate_run.document_id
+            and newer_run.status != 'failed'
+            and (
+              newer_run.started_at > candidate_run.started_at
+              or (
+                newer_run.started_at = candidate_run.started_at
+                and newer_run.created_at > candidate_run.created_at
+              )
+              or (
+                newer_run.started_at = candidate_run.started_at
+                and newer_run.created_at = candidate_run.created_at
+                and newer_run.id > candidate_run.id
+              )
+            )
+        )
       returning document.id
     ),
     updated_pages as (
@@ -367,21 +353,13 @@ export async function runEstimateDocumentParse(args: {
       .where(eq(estimateDocumentParseRuns.id, parseRun.id))
       .returning();
 
-    const canActivate = await isFreshestEligibleParseRun(
-      args.tenantDb,
-      args.document.id,
-      parseRun.id
-    );
-
     let documentUpdate = await getCurrentDocumentState(args.tenantDb, args.document.id);
-    if (canActivate) {
-      documentUpdate = await activateCompletedParseRun({
-        tenantDb: args.tenantDb,
-        documentId: args.document.id,
-        parseRunId: parseRun.id,
-        options,
-      });
-    }
+    documentUpdate = await activateCompletedParseRun({
+      tenantDb: args.tenantDb,
+      documentId: args.document.id,
+      parseRunId: parseRun.id,
+      options,
+    });
 
     return {
       parseRun: completedParseRun,
