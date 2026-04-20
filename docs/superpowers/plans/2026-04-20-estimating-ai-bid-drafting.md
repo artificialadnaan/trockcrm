@@ -49,7 +49,7 @@
 - Modify: `server/src/modules/deals/routes.ts`
   Responsibility: API routes for document upload, extraction review, matching review, pricing review, review logging, copilot answers, overview status, and draft promotion.
 - Modify: `server/src/app.ts` or the module registration entrypoint currently used by the API
-  Responsibility: mount any new admin-level Procore catalog endpoint if it is split from tenant deal routes.
+  Responsibility: confirm the existing admin router mount is already active and only touch `server/src/app.ts` if the admin route is not already registered there.
 - Create: `worker/src/jobs/estimate-document-ocr.ts`
   Responsibility: OCR and page extraction job for estimating documents.
 - Create: `worker/src/jobs/estimate-generation.ts`
@@ -76,6 +76,8 @@
   Responsibility: validate Procore payload normalization and upserts.
 - Create: `server/tests/modules/estimating/document-service.test.ts`
   Responsibility: validate document creation and OCR job enqueue behavior.
+- Create: `server/tests/modules/estimating/estimating-security.test.ts`
+  Responsibility: validate deal access checks, tenant isolation, failed OCR status handling, and catalog-sync failure recovery behavior.
 - Create: `server/tests/modules/estimating/matching-service.test.ts`
   Responsibility: validate catalog and historical estimate ranking.
 - Create: `server/tests/modules/estimating/pricing-service.test.ts`
@@ -398,7 +400,7 @@ describe("normalizeCatalogItem", () => {
 
     expect(result.item.externalId).toBe("item-1");
     expect(result.item.unit).toBe("ft");
-    expect(result.price.laborUnitCost).toBe("45");
+    expect(result.price.blendedUnitCost).toBe("45");
     expect(result.code.code).toBe("07-100");
   });
 });
@@ -458,6 +460,8 @@ adminRouter.post("/procore/catalog-sync", async (req, res) => {
   res.status(202).json({ syncRun });
 });
 ```
+
+`adminRouter` here means the existing admin router defined in `server/src/modules/admin/routes.ts`, not a new ad hoc router.
 
 ```ts
 export async function runScheduledCatalogSync() {
@@ -675,7 +679,7 @@ git commit -m "feat: add estimating document upload and ocr queueing"
 
 ```ts
 describe("buildPricingRecommendation", () => {
-  it("starts from the catalog baseline, adds historical context, and applies market adjustments", () => {
+  it("applies a geography and project-type market adjustment from the market-rate service", () => {
     const result = buildPricingRecommendation({
       quantity: 3,
       catalogBaselinePrice: 100,
@@ -683,7 +687,8 @@ describe("buildPricingRecommendation", () => {
       vendorQuotePrice: 130,
       awardedOutcomeAdjustmentPercent: -2,
       internalAdjustmentPercent: 5,
-      marketAdjustmentPercent: 10,
+      regionId: "dfw",
+      projectTypeId: "roofing",
     });
 
     expect(result.priceBasis).toBe("catalog_baseline_with_adjustments");
@@ -881,7 +886,21 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
 
     expect(tenantDb.insert).toHaveBeenCalled();
   });
-});
+  });
+```
+
+```ts
+export function getRegionalMarketAdjustmentPercent(input: {
+  regionId: string | null;
+  projectTypeId: string | null;
+}) {
+  const table = {
+    "dfw:roofing": 10,
+    "dfw:waterproofing": 8,
+  } as const;
+
+  return table[`${input.regionId ?? "unknown"}:${input.projectTypeId ?? "unknown"}`] ?? 0;
+}
 ```
 
 - [ ] **Step 2: Run the promotion test**
@@ -1282,6 +1301,7 @@ git commit -m "feat: add estimating workflow review ui and copilot"
 - [ ] Confirm every task points to exact files and includes runnable test commands before and after implementation.
 - [ ] Confirm the plan reuses the existing estimate model instead of inventing a parallel final-estimate schema.
 - [ ] Confirm the plan keeps Procore sync one-way and does not promise push-back in Phase 1.
+- [ ] Confirm the plan includes security and failure-mode tests for upload permissions, tenant scoping, failed OCR status, and catalog-sync recovery.
 
 ## Execution Handoff
 
