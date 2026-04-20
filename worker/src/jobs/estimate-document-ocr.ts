@@ -23,6 +23,16 @@ async function resolveSchemaName(officeId: string | null) {
   return `office_${slug}`;
 }
 
+export async function markEstimateDocumentOcrFailed(
+  tenantDb: ReturnType<typeof drizzle>,
+  documentId: string
+) {
+  await tenantDb
+    .update(estimateSourceDocuments)
+    .set({ ocrStatus: "failed" })
+    .where(eq(estimateSourceDocuments.id, documentId));
+}
+
 export async function runEstimateDocumentOcr(payload: { documentId: string; dealId?: string }, officeId: string | null) {
   const schemaName = await resolveSchemaName(officeId);
   const tenantDb = drizzle(pool, { schema, casing: "snake_case" as any });
@@ -110,10 +120,7 @@ export async function runEstimateDocumentOcr(payload: { documentId: string; deal
     );
   } catch (error) {
     await tenantDb.execute(sql.raw(`SET search_path TO ${schemaName}, public`));
-    await tenantDb
-      .update(estimateSourceDocuments)
-      .set({ ocrStatus: "failed" })
-      .where(eq(estimateSourceDocuments.id, payload.documentId));
+    await markEstimateDocumentOcrFailed(tenantDb, payload.documentId);
     throw error;
   }
 }
