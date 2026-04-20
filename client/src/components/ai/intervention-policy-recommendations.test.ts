@@ -1,5 +1,8 @@
-import { describe, expect, it } from "vitest";
-import { buildPolicyDiffRows } from "./intervention-policy-recommendations";
+import { describe, expect, it, vi } from "vitest";
+import {
+  buildPolicyDiffRows,
+  regeneratePolicyRecommendationState,
+} from "./intervention-policy-recommendations";
 
 describe("buildPolicyDiffRows", () => {
   it("returns only changed snooze policy fields with readable labels", () => {
@@ -55,5 +58,29 @@ describe("buildPolicyDiffRows", () => {
         after: "30%",
       },
     ]);
+  });
+});
+
+describe("regeneratePolicyRecommendationState", () => {
+  it("refreshes both recommendations and review state after regeneration and each polling interval", async () => {
+    const regenerate = vi.fn().mockResolvedValue(undefined);
+    const refreshView = vi.fn().mockResolvedValue(undefined);
+    const refreshReview = vi.fn().mockResolvedValue(undefined);
+    const wait = vi.fn().mockResolvedValue(undefined);
+
+    await regeneratePolicyRecommendationState({
+      regenerate,
+      refreshView,
+      refreshReview,
+      delaysMs: [10, 20],
+      wait,
+    });
+
+    expect(regenerate).toHaveBeenCalledTimes(1);
+    expect(wait).toHaveBeenCalledTimes(2);
+    expect(wait).toHaveBeenNthCalledWith(1, 10);
+    expect(wait).toHaveBeenNthCalledWith(2, 20);
+    expect(refreshView).toHaveBeenCalledTimes(3);
+    expect(refreshReview).toHaveBeenCalledTimes(3);
   });
 });
