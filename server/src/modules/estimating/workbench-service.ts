@@ -56,7 +56,47 @@ export async function buildEstimatingWorkbenchState(tenantDb: TenantDb, dealId: 
       .orderBy(desc(estimateReviewEvents.createdAt)),
   ]);
 
-  const approvedRecommendationCount = pricingRows.filter((row) => row.status === "approved").length;
+  const documentsSummary = {
+    total: documents.length,
+    queued: documents.filter((row) => row.ocrStatus === "queued").length,
+    failed: documents.filter((row) => row.ocrStatus === "failed").length,
+  };
+
+  const extractionsSummary = {
+    total: extractionRows.length,
+    pending: extractionRows.filter((row) => row.status === "pending").length,
+    approved: extractionRows.filter((row) => row.status === "approved").length,
+    rejected: extractionRows.filter((row) => row.status === "rejected").length,
+    unmatched: extractionRows.filter((row) => row.status === "unmatched").length,
+  };
+
+  const matchesSummary = {
+    total: matchRows.length,
+    suggested: matchRows.filter((row) => row.status === "suggested").length,
+    selected: matchRows.filter((row) => row.status === "selected").length,
+    rejected: matchRows.filter((row) => row.status === "rejected").length,
+  };
+
+  const eligiblePricingRows = pricingRows.filter(
+    (row) => row.status === "approved" || row.status === "overridden"
+  );
+
+  const pricingSummary = {
+    total: pricingRows.length,
+    pending: pricingRows.filter((row) => row.status === "pending").length,
+    approved: pricingRows.filter((row) => row.status === "approved").length,
+    overridden: pricingRows.filter((row) => row.status === "overridden").length,
+    rejected: pricingRows.filter((row) => row.status === "rejected").length,
+    readyToPromote: eligiblePricingRows.length > 0,
+  };
+
+  const generationRunIds = Array.from(
+    new Set(
+      eligiblePricingRows
+        .map((row) => row.createdByRunId)
+        .filter((runId): runId is string => typeof runId === "string" && runId.length > 0)
+    )
+  );
 
   return {
     documents,
@@ -65,13 +105,14 @@ export async function buildEstimatingWorkbenchState(tenantDb: TenantDb, dealId: 
     pricingRows,
     reviewEvents,
     summary: {
-      documentCount: documents.length,
-      extractionCount: extractionRows.length,
-      matchCount: matchRows.length,
-      recommendationCount: pricingRows.length,
-      approvedRecommendationCount,
-      reviewEventCount: reviewEvents.length,
+      documents: documentsSummary,
+      extractions: extractionsSummary,
+      matches: matchesSummary,
+      pricing: pricingSummary,
     },
-    promotionReady: approvedRecommendationCount > 0,
+    promotionReadiness: {
+      canPromote: pricingSummary.readyToPromote,
+      generationRunIds,
+    },
   };
 }

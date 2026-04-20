@@ -88,14 +88,37 @@ describe("estimating workflow routes", () => {
       pricingRows: [],
       reviewEvents: [],
       summary: {
-        documentCount: 0,
-        extractionCount: 0,
-        matchCount: 0,
-        recommendationCount: 0,
-        approvedRecommendationCount: 0,
-        reviewEventCount: 0,
+        documents: {
+          total: 0,
+          queued: 0,
+          failed: 0,
+        },
+        extractions: {
+          total: 0,
+          pending: 0,
+          approved: 0,
+          rejected: 0,
+          unmatched: 0,
+        },
+        matches: {
+          total: 0,
+          suggested: 0,
+          selected: 0,
+          rejected: 0,
+        },
+        pricing: {
+          total: 0,
+          pending: 0,
+          approved: 0,
+          overridden: 0,
+          rejected: 0,
+          readyToPromote: false,
+        },
       },
-      promotionReady: false,
+      promotionReadiness: {
+        canPromote: false,
+        generationRunIds: [],
+      },
     });
 
     const { res } = await invokeRoute("get", "/:id/estimating", {
@@ -105,14 +128,37 @@ describe("estimating workflow routes", () => {
     expect(res.statusCode).toBe(200);
     expect(estimatingServiceMocks.getEstimatingWorkflowState).toHaveBeenCalled();
     expect(res.body.summary).toEqual({
-      documentCount: 0,
-      extractionCount: 0,
-      matchCount: 0,
-      recommendationCount: 0,
-      approvedRecommendationCount: 0,
-      reviewEventCount: 0,
+      documents: {
+        total: 0,
+        queued: 0,
+        failed: 0,
+      },
+      extractions: {
+        total: 0,
+        pending: 0,
+        approved: 0,
+        rejected: 0,
+        unmatched: 0,
+      },
+      matches: {
+        total: 0,
+        suggested: 0,
+        selected: 0,
+        rejected: 0,
+      },
+      pricing: {
+        total: 0,
+        pending: 0,
+        approved: 0,
+        overridden: 0,
+        rejected: 0,
+        readyToPromote: false,
+      },
     });
-    expect(res.body.promotionReady).toBe(false);
+    expect(res.body.promotionReadiness).toEqual({
+      canPromote: false,
+      generationRunIds: [],
+    });
   });
 
   it("returns copilot answers using server-built context", async () => {

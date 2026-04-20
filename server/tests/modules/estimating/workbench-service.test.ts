@@ -35,15 +35,30 @@ function makeTenantDb(results: any[]) {
 }
 
 describe("buildEstimatingWorkbenchState", () => {
-  it("builds summary counts and marks promotion ready when recommendations are approved", async () => {
+  it("builds nested summary counts and promotion readiness from eligible pricing rows", async () => {
     const tenantDb = makeTenantDb([
-      [{ id: "doc-1" }, { id: "doc-2" }],
-      [{ id: "ext-1" }, { id: "ext-2" }, { id: "ext-3" }],
-      [{ id: "match-1" }, { id: "match-2" }, { id: "match-3" }, { id: "match-4" }],
       [
-        { id: "rec-1", status: "pending" },
-        { id: "rec-2", status: "approved" },
-        { id: "rec-3", status: "approved" },
+        { id: "doc-1", ocrStatus: "queued" },
+        { id: "doc-2", ocrStatus: "failed" },
+        { id: "doc-3", ocrStatus: "queued" },
+      ],
+      [
+        { id: "ext-1", status: "pending" },
+        { id: "ext-2", status: "approved" },
+        { id: "ext-3", status: "rejected" },
+        { id: "ext-4", status: "unmatched" },
+      ],
+      [
+        { id: "match-1", status: "suggested" },
+        { id: "match-2", status: "selected" },
+        { id: "match-3", status: "rejected" },
+      ],
+      [
+        { id: "rec-1", status: "pending", createdByRunId: "run-pending" },
+        { id: "rec-2", status: "approved", createdByRunId: "run-approved-1" },
+        { id: "rec-3", status: "overridden", createdByRunId: "run-approved-1" },
+        { id: "rec-4", status: "overridden", createdByRunId: "run-approved-2" },
+        { id: "rec-5", status: "rejected", createdByRunId: "run-rejected" },
       ],
       [{ id: "event-1" }],
     ]);
@@ -51,31 +66,77 @@ describe("buildEstimatingWorkbenchState", () => {
     const state = await buildEstimatingWorkbenchState(tenantDb, "deal-1");
 
     expect(state.summary).toEqual({
-      documentCount: 2,
-      extractionCount: 3,
-      matchCount: 4,
-      recommendationCount: 3,
-      approvedRecommendationCount: 2,
-      reviewEventCount: 1,
+      documents: {
+        total: 3,
+        queued: 2,
+        failed: 1,
+      },
+      extractions: {
+        total: 4,
+        pending: 1,
+        approved: 1,
+        rejected: 1,
+        unmatched: 1,
+      },
+      matches: {
+        total: 3,
+        suggested: 1,
+        selected: 1,
+        rejected: 1,
+      },
+      pricing: {
+        total: 5,
+        pending: 1,
+        approved: 1,
+        overridden: 2,
+        rejected: 1,
+        readyToPromote: true,
+      },
     });
-    expect(state.promotionReady).toBe(true);
-    expect(state.documents).toHaveLength(2);
-    expect(state.pricingRows).toHaveLength(3);
+    expect(state.promotionReadiness).toEqual({
+      canPromote: true,
+      generationRunIds: ["run-approved-1", "run-approved-2"],
+    });
+    expect(state.documents).toHaveLength(3);
+    expect(state.pricingRows).toHaveLength(5);
   });
 
-  it("keeps promotion disabled when no approved recommendations exist", async () => {
+  it("keeps promotion disabled when no approved or overridden recommendations exist", async () => {
     const tenantDb = makeTenantDb([[], [], [], [{ id: "rec-1", status: "pending" }], []]);
 
     const state = await buildEstimatingWorkbenchState(tenantDb, "deal-1");
 
     expect(state.summary).toEqual({
-      documentCount: 0,
-      extractionCount: 0,
-      matchCount: 0,
-      recommendationCount: 1,
-      approvedRecommendationCount: 0,
-      reviewEventCount: 0,
+      documents: {
+        total: 0,
+        queued: 0,
+        failed: 0,
+      },
+      extractions: {
+        total: 0,
+        pending: 0,
+        approved: 0,
+        rejected: 0,
+        unmatched: 0,
+      },
+      matches: {
+        total: 0,
+        suggested: 0,
+        selected: 0,
+        rejected: 0,
+      },
+      pricing: {
+        total: 1,
+        pending: 1,
+        approved: 0,
+        overridden: 0,
+        rejected: 0,
+        readyToPromote: false,
+      },
     });
-    expect(state.promotionReady).toBe(false);
+    expect(state.promotionReadiness).toEqual({
+      canPromote: false,
+      generationRunIds: [],
+    });
   });
 });
