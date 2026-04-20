@@ -554,19 +554,32 @@ export async function createEstimateSourceDocument({
 }: CreateEstimateSourceDocumentArgs) {
   const existing = input.contentHash
     ? await tenantDb
-        .select({ id: estimateSourceDocuments.id, contentHash: estimateSourceDocuments.contentHash })
+        .select({
+          id: estimateSourceDocuments.id,
+          contentHash: estimateSourceDocuments.contentHash,
+          versionLabel: estimateSourceDocuments.versionLabel,
+        })
         .from(estimateSourceDocuments)
         .where(eq(estimateSourceDocuments.contentHash, input.contentHash))
-        .limit(1)
     : [];
 
-  const versionLabel = existing.length > 0 ? `v${existing.length + 1}` : "v1";
+  const exactDuplicate = existing.find((row) => row.contentHash === input.contentHash);
+  if (exactDuplicate && input.reprocessExisting !== true) {
+    return exactDuplicate;
+  }
+
+  const versionLabel = `v${existing.length + 1 || 1}`;
   const [document] = await tenantDb
     .insert(estimateSourceDocuments)
     .values({
       dealId: input.dealId,
       projectId: input.projectId ?? null,
-      documentType: input.documentType ?? "plan",
+      documentType:
+        input.documentType ??
+        classifyEstimateDocument({
+          filename: input.filename,
+          mimeType: input.mimeType,
+        }),
       filename: input.filename,
       storageKey: input.storageKey,
       mimeType: input.mimeType,
@@ -584,6 +597,14 @@ export async function createEstimateSourceDocument({
     officeId: input.officeId,
   });
   return document;
+}
+```
+
+```ts
+export function classifyEstimateDocument(input: { filename: string; mimeType: string }) {
+  if (/spec/i.test(input.filename)) return "spec";
+  if (/plan|blueprint/i.test(input.filename)) return "plan";
+  return "supporting_package";
 }
 ```
 
@@ -617,6 +638,11 @@ export async function runEstimateDocumentOcr(payload: { documentId: string }, of
     .update(estimateSourceDocuments)
     .set({ ocrStatus: "completed", parsedAt: new Date() })
     .where(eq(estimateSourceDocuments.id, payload.documentId));
+
+  await enqueueEstimateGeneration({
+    documentId: payload.documentId,
+    officeId,
+  });
 }
 ```
 
