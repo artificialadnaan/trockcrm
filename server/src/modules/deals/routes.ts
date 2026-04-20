@@ -62,6 +62,11 @@ import {
   routeRevisionToEstimating,
   upsertDealScopingIntake,
 } from "./scoping-service.js";
+import { confirmUpload } from "../files/service.js";
+import {
+  createEstimateSourceDocument,
+  enqueueEstimateDocumentOcrJob,
+} from "../estimating/document-service.js";
 
 const router = Router();
 
@@ -835,6 +840,41 @@ router.get("/:id/estimates", async (req, res, next) => {
     const estimate = await getEstimate(req.tenantDb!, req.params.id);
     await req.commitTransaction!();
     res.json(estimate);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/deals/:id/estimating/documents
+router.post("/:id/estimating/documents", async (req, res, next) => {
+  try {
+    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+
+    const uploadedFile = await confirmUpload(req.tenantDb!, req.user!.id, {
+      uploadToken: req.body.uploadToken,
+    });
+
+    const officeId = req.user!.activeOfficeId ?? req.user!.officeId;
+    const document = await createEstimateSourceDocument({
+      tenantDb: req.tenantDb!,
+      enqueueEstimateDocumentOcr: (payload) =>
+        enqueueEstimateDocumentOcrJob(req.tenantDb!, payload),
+      input: {
+        dealId: req.params.id,
+        fileId: uploadedFile.id,
+        rootFileId: uploadedFile.parentFileId ?? uploadedFile.id,
+        filename: uploadedFile.originalFilename,
+        mimeType: uploadedFile.mimeType,
+        fileSize: uploadedFile.fileSizeBytes,
+        contentHash: uploadedFile.r2Key,
+        userId: req.user!.id,
+        officeId,
+      },
+    });
+
+    await req.commitTransaction!();
+    res.status(201).json({ document, file: uploadedFile });
   } catch (err) {
     next(err);
   }
