@@ -269,8 +269,10 @@ BEGIN
          root_file_id uuid,
          document_type text NOT NULL,
          filename text NOT NULL,
+         storage_key text,
          mime_type text NOT NULL,
          file_size integer,
+         version_label text,
          uploaded_by_user_id uuid,
          content_hash text,
          ocr_status text NOT NULL DEFAULT ''queued'',
@@ -290,15 +292,33 @@ BEGIN
     );
     EXECUTE format(
       'CREATE TABLE IF NOT EXISTS %I.estimate_extraction_matches (
-         ...,
+         id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+         extraction_id uuid NOT NULL REFERENCES %I.estimate_extractions(id) ON DELETE CASCADE,
+         catalog_item_id uuid REFERENCES public.cost_catalog_items(id) ON DELETE SET NULL,
+         catalog_code_id uuid REFERENCES public.cost_catalog_codes(id) ON DELETE SET NULL,
+         historical_line_item_id uuid REFERENCES %I.estimate_line_items(id) ON DELETE SET NULL,
+         match_type text NOT NULL,
+         match_score numeric(5,2) NOT NULL DEFAULT 0,
+         status text NOT NULL DEFAULT ''suggested'',
          reason_json jsonb NOT NULL DEFAULT ''{}''::jsonb,
          evidence_json jsonb NOT NULL DEFAULT ''{}''::jsonb
        )',
+      schema_name,
+      schema_name,
       schema_name
     );
     EXECUTE format(
       'CREATE TABLE IF NOT EXISTS %I.estimate_generation_runs (
-         ...,
+         id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+         deal_id uuid NOT NULL,
+         project_id uuid,
+         status text NOT NULL DEFAULT ''pending'',
+         triggered_by_user_id uuid,
+         input_snapshot_json jsonb NOT NULL DEFAULT ''{}''::jsonb,
+         output_summary_json jsonb NOT NULL DEFAULT ''{}''::jsonb,
+         error_summary text,
+         started_at timestamptz NOT NULL DEFAULT now(),
+         completed_at timestamptz,
          catalog_sync_run_id uuid REFERENCES public.cost_catalog_sync_runs(id) ON DELETE SET NULL,
          catalog_snapshot_version_id uuid REFERENCES public.cost_catalog_snapshot_versions(id) ON DELETE SET NULL
        )',
@@ -306,7 +326,19 @@ BEGIN
     );
     EXECUTE format(
       'CREATE TABLE IF NOT EXISTS %I.estimate_pricing_recommendations (
-         ...,
+         id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+         deal_id uuid NOT NULL,
+         project_id uuid,
+         extraction_match_id uuid NOT NULL REFERENCES %I.estimate_extraction_matches(id) ON DELETE CASCADE,
+         recommended_quantity numeric(14,3),
+         recommended_unit text,
+         recommended_unit_price numeric(14,2),
+         recommended_total_price numeric(14,2),
+         price_basis text NOT NULL,
+         catalog_baseline_price numeric(14,2),
+         historical_median_price numeric(14,2),
+         market_adjustment_percent numeric(8,3) NOT NULL DEFAULT 0,
+         confidence numeric(5,2) NOT NULL DEFAULT 0,
          assumptions_json jsonb NOT NULL DEFAULT ''{}''::jsonb,
          evidence_json jsonb NOT NULL DEFAULT ''{}''::jsonb,
          created_by_run_id uuid REFERENCES %I.estimate_generation_runs(id) ON DELETE SET NULL
@@ -315,7 +347,19 @@ BEGIN
       schema_name
     );
     EXECUTE format(
-      'CREATE TABLE IF NOT EXISTS %I.estimate_review_events (...)',
+      'CREATE TABLE IF NOT EXISTS %I.estimate_review_events (
+         id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+         deal_id uuid NOT NULL,
+         project_id uuid,
+         subject_type text NOT NULL,
+         subject_id uuid NOT NULL,
+         event_type text NOT NULL,
+         before_json jsonb NOT NULL DEFAULT ''{}''::jsonb,
+         after_json jsonb NOT NULL DEFAULT ''{}''::jsonb,
+         reason text,
+         user_id uuid,
+         created_at timestamptz NOT NULL DEFAULT now()
+       )',
       schema_name
     );
   END LOOP;
@@ -568,8 +612,10 @@ export async function createEstimateSourceDocument({
           mimeType: input.mimeType,
         }),
       filename: input.filename,
+      storageKey: input.storageKey ?? null,
       mimeType: input.mimeType,
       fileSize: input.fileSize ?? null,
+      versionLabel: input.versionLabel ?? null,
       contentHash: input.contentHash ?? null,
       ocrStatus: "queued",
       uploadedByUserId: input.userId,
