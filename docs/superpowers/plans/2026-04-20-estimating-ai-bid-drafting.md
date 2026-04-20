@@ -40,10 +40,12 @@
   Responsibility: generate pricing recommendations from catalog, history, and market adjustments.
 - Create: `server/src/modules/estimating/draft-estimate-service.ts`
   Responsibility: promote approved pricing recommendations into estimate sections and estimate line items.
+- Create: `server/src/modules/estimating/copilot-service.ts`
+  Responsibility: answer estimator advisory questions from extraction, catalog, history, and pricing evidence.
 - Modify: `server/src/modules/deals/estimate-service.ts`
   Responsibility: support generation-aware estimate imports without breaking existing manual editing.
 - Create: `server/src/modules/estimating/routes.ts`
-  Responsibility: API routes for document upload, extraction review, matching review, pricing review, and draft promotion.
+  Responsibility: API routes for document upload, extraction review, matching review, pricing review, review logging, copilot answers, overview status, and draft promotion.
 - Modify: `server/src/app.ts` or the module registration entrypoint currently used by the API
   Responsibility: mount the new estimating routes.
 - Create: `worker/src/jobs/estimate-document-ocr.ts`
@@ -62,6 +64,10 @@
   Responsibility: review/edit pricing recommendations before promotion.
 - Create: `client/src/components/estimating/estimate-copilot-panel.tsx`
   Responsibility: estimator advisory prompts and answers.
+- Create: `client/src/components/estimating/estimate-overview-panel.tsx`
+  Responsibility: summarize pipeline status, catalog snapshot, and reviewer attention areas.
+- Create: `client/src/components/estimating/estimate-review-log-panel.tsx`
+  Responsibility: show accepted, edited, rejected, and overridden system recommendations.
 - Create: `server/tests/modules/procore/catalog-sync-service.test.ts`
   Responsibility: validate Procore payload normalization and upserts.
 - Create: `server/tests/modules/estimating/document-service.test.ts`
@@ -72,6 +78,8 @@
   Responsibility: validate pricing recommendation calculations.
 - Create: `server/tests/modules/estimating/draft-estimate-service.test.ts`
   Responsibility: validate promotion into estimate sections and line items.
+- Create: `server/tests/modules/estimating/copilot-service.test.ts`
+  Responsibility: validate estimator copilot answer shaping from historical and pricing evidence.
 - Create: `client/src/components/estimating/estimating-workflow-shell.test.tsx`
   Responsibility: validate major workflow states and actions.
 
@@ -84,34 +92,52 @@
 - Create: `shared/src/schema/tenant/estimate-source-documents.ts`
 - Create: `shared/src/schema/tenant/estimate-extractions.ts`
 - Modify: `shared/src/schema/index.ts`
-- Test: `server/tests/modules/estimating/pricing-service.test.ts`
+- Test: `shared/src/schema/index.ts` export load via `server/tests/modules/estimating/schema-exports.test.ts`
 
-- [ ] **Step 1: Write a failing schema-adjacent pricing test**
+- [ ] **Step 1: Write a failing schema export test**
 
 ```ts
 import { describe, expect, it } from "vitest";
-import { buildPricingRecommendation } from "../../../src/modules/estimating/pricing-service.js";
+import {
+  costCatalogSources,
+  costCatalogSyncRuns,
+  costCatalogCodes,
+  costCatalogItems,
+  costCatalogItemCodes,
+  costCatalogPrices,
+  estimateSourceDocuments,
+  estimateDocumentPages,
+  estimateExtractions,
+  estimateExtractionMatches,
+  estimatePricingRecommendations,
+  estimateGenerationRuns,
+  estimateReviewEvents,
+} from "@trock-crm/shared/schema";
 
-describe("buildPricingRecommendation", () => {
-  it("prefers historical pricing over catalog baseline when strong comps exist", () => {
-    const result = buildPricingRecommendation({
-      quantity: 10,
-      catalogBaselinePrice: 100,
-      historicalPrices: [112, 118, 120],
-      marketAdjustmentPercent: 0,
-    });
-
-    expect(result.recommendedUnitPrice).toBe(118);
-    expect(result.priceBasis).toBe("historical_median");
+describe("estimating schema exports", () => {
+  it("exports the full catalog and generation schema set", () => {
+    expect(costCatalogSources).toBeDefined();
+    expect(costCatalogSyncRuns).toBeDefined();
+    expect(costCatalogCodes).toBeDefined();
+    expect(costCatalogItems).toBeDefined();
+    expect(costCatalogItemCodes).toBeDefined();
+    expect(costCatalogPrices).toBeDefined();
+    expect(estimateSourceDocuments).toBeDefined();
+    expect(estimateDocumentPages).toBeDefined();
+    expect(estimateExtractions).toBeDefined();
+    expect(estimateExtractionMatches).toBeDefined();
+    expect(estimatePricingRecommendations).toBeDefined();
+    expect(estimateGenerationRuns).toBeDefined();
+    expect(estimateReviewEvents).toBeDefined();
   });
 });
 ```
 
-- [ ] **Step 2: Run the focused test to verify the missing implementation fails**
+- [ ] **Step 2: Run the focused schema-export test to verify the missing tables fail**
 
-Run: `npx vitest run server/tests/modules/estimating/pricing-service.test.ts`
+Run: `npx vitest run server/tests/modules/estimating/schema-exports.test.ts`
 
-Expected: FAIL because `pricing-service.ts` and the new schema exports do not exist yet.
+Expected: FAIL because the new schema files and exports do not exist yet.
 
 - [ ] **Step 3: Add the migration for catalog and estimate-generation tables**
 
@@ -128,6 +154,150 @@ CREATE TABLE IF NOT EXISTS public.cost_catalog_sources (
   metadata_json jsonb NOT NULL DEFAULT '{}'::jsonb
 );
 
+CREATE TABLE IF NOT EXISTS public.cost_catalog_sync_runs (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  source_id uuid NOT NULL REFERENCES public.cost_catalog_sources(id) ON DELETE CASCADE,
+  started_at timestamptz NOT NULL DEFAULT now(),
+  completed_at timestamptz,
+  status text NOT NULL DEFAULT 'pending',
+  items_seen integer NOT NULL DEFAULT 0,
+  items_upserted integer NOT NULL DEFAULT 0,
+  items_deactivated integer NOT NULL DEFAULT 0,
+  error_summary text,
+  metadata_json jsonb NOT NULL DEFAULT '{}'::jsonb
+);
+
+CREATE TABLE IF NOT EXISTS public.cost_catalog_codes (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  source_id uuid NOT NULL REFERENCES public.cost_catalog_sources(id) ON DELETE CASCADE,
+  external_id text NOT NULL,
+  code text NOT NULL,
+  name text NOT NULL,
+  parent_code_id uuid REFERENCES public.cost_catalog_codes(id) ON DELETE SET NULL,
+  division text,
+  phase_name text,
+  phase_code text,
+  is_active boolean NOT NULL DEFAULT true,
+  metadata_json jsonb NOT NULL DEFAULT '{}'::jsonb,
+  UNIQUE (source_id, external_id)
+);
+
+CREATE TABLE IF NOT EXISTS public.cost_catalog_items (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  source_id uuid NOT NULL REFERENCES public.cost_catalog_sources(id) ON DELETE CASCADE,
+  external_id text NOT NULL,
+  item_type text NOT NULL,
+  name text NOT NULL,
+  description text,
+  unit text,
+  catalog_name text,
+  catalog_number text,
+  manufacturer text,
+  supplier text,
+  taxable boolean NOT NULL DEFAULT false,
+  is_active boolean NOT NULL DEFAULT true,
+  metadata_json jsonb NOT NULL DEFAULT '{}'::jsonb,
+  UNIQUE (source_id, external_id)
+);
+
+CREATE TABLE IF NOT EXISTS public.cost_catalog_item_codes (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  catalog_item_id uuid NOT NULL REFERENCES public.cost_catalog_items(id) ON DELETE CASCADE,
+  catalog_code_id uuid NOT NULL REFERENCES public.cost_catalog_codes(id) ON DELETE CASCADE,
+  is_primary boolean NOT NULL DEFAULT false,
+  UNIQUE (catalog_item_id, catalog_code_id)
+);
+
+CREATE TABLE IF NOT EXISTS public.cost_catalog_prices (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  catalog_item_id uuid NOT NULL REFERENCES public.cost_catalog_items(id) ON DELETE CASCADE,
+  material_unit_cost numeric(14, 2),
+  labor_unit_cost numeric(14, 2),
+  equipment_unit_cost numeric(14, 2),
+  subcontract_unit_cost numeric(14, 2),
+  blended_unit_cost numeric(14, 2),
+  effective_at timestamptz,
+  expires_at timestamptz,
+  metadata_json jsonb NOT NULL DEFAULT '{}'::jsonb
+);
+
+CREATE TABLE IF NOT EXISTS tenant.estimate_source_documents (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  deal_id uuid NOT NULL,
+  project_id uuid,
+  document_type text NOT NULL,
+  filename text NOT NULL,
+  storage_key text NOT NULL,
+  mime_type text NOT NULL,
+  file_size integer,
+  version_label text,
+  uploaded_by_user_id uuid,
+  content_hash text,
+  ocr_status text NOT NULL DEFAULT 'queued',
+  parsed_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS tenant.estimate_document_pages (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  document_id uuid NOT NULL REFERENCES tenant.estimate_source_documents(id) ON DELETE CASCADE,
+  page_number integer NOT NULL,
+  sheet_label text,
+  sheet_type text,
+  ocr_text text,
+  page_image_key text,
+  metadata_json jsonb NOT NULL DEFAULT '{}'::jsonb
+);
+
+CREATE TABLE IF NOT EXISTS tenant.estimate_extractions (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  deal_id uuid NOT NULL,
+  project_id uuid,
+  document_id uuid NOT NULL REFERENCES tenant.estimate_source_documents(id) ON DELETE CASCADE,
+  page_id uuid REFERENCES tenant.estimate_document_pages(id) ON DELETE SET NULL,
+  extraction_type text NOT NULL,
+  raw_label text NOT NULL,
+  normalized_label text NOT NULL,
+  quantity numeric(14, 3),
+  unit text,
+  division_hint text,
+  confidence numeric(5, 2) NOT NULL DEFAULT 0,
+  evidence_text text,
+  evidence_bbox_json jsonb NOT NULL DEFAULT '{}'::jsonb,
+  status text NOT NULL DEFAULT 'pending',
+  metadata_json jsonb NOT NULL DEFAULT '{}'::jsonb
+);
+
+CREATE TABLE IF NOT EXISTS tenant.estimate_extraction_matches (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  extraction_id uuid NOT NULL REFERENCES tenant.estimate_extractions(id) ON DELETE CASCADE,
+  catalog_item_id uuid REFERENCES public.cost_catalog_items(id) ON DELETE SET NULL,
+  catalog_code_id uuid REFERENCES public.cost_catalog_codes(id) ON DELETE SET NULL,
+  historical_line_item_id uuid REFERENCES tenant.estimate_line_items(id) ON DELETE SET NULL,
+  match_type text NOT NULL,
+  match_score numeric(5, 2) NOT NULL DEFAULT 0,
+  status text NOT NULL DEFAULT 'suggested',
+  reason_json jsonb NOT NULL DEFAULT '{}'::jsonb
+);
+
+CREATE TABLE IF NOT EXISTS tenant.estimate_pricing_recommendations (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  deal_id uuid NOT NULL,
+  project_id uuid,
+  extraction_match_id uuid NOT NULL REFERENCES tenant.estimate_extraction_matches(id) ON DELETE CASCADE,
+  recommended_quantity numeric(14, 3),
+  recommended_unit text,
+  recommended_unit_price numeric(14, 2),
+  recommended_total_price numeric(14, 2),
+  price_basis text NOT NULL,
+  catalog_baseline_price numeric(14, 2),
+  historical_median_price numeric(14, 2),
+  market_adjustment_percent numeric(8, 3) NOT NULL DEFAULT 0,
+  confidence numeric(5, 2) NOT NULL DEFAULT 0,
+  assumptions_json jsonb NOT NULL DEFAULT '{}'::jsonb,
+  created_by_run_id uuid REFERENCES tenant.estimate_generation_runs(id) ON DELETE SET NULL
+);
+
 CREATE TABLE IF NOT EXISTS tenant.estimate_generation_runs (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   deal_id uuid NOT NULL,
@@ -139,34 +309,52 @@ CREATE TABLE IF NOT EXISTS tenant.estimate_generation_runs (
   started_at timestamptz NOT NULL DEFAULT now(),
   completed_at timestamptz
 );
+
+CREATE TABLE IF NOT EXISTS tenant.estimate_review_events (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  deal_id uuid NOT NULL,
+  project_id uuid,
+  subject_type text NOT NULL,
+  subject_id uuid NOT NULL,
+  event_type text NOT NULL,
+  before_json jsonb NOT NULL DEFAULT '{}'::jsonb,
+  after_json jsonb NOT NULL DEFAULT '{}'::jsonb,
+  reason text,
+  user_id uuid,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
 ```
 
 - [ ] **Step 4: Add the Drizzle schema files and exports**
 
 ```ts
-export const estimateGenerationRuns = tenantTable("estimate_generation_runs", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  dealId: uuid("deal_id").notNull(),
-  projectId: uuid("project_id"),
-  status: text("status").notNull().default("pending"),
-  inputSnapshotJson: jsonb("input_snapshot_json").notNull().default(sql`'{}'::jsonb`),
-  outputSummaryJson: jsonb("output_summary_json").notNull().default(sql`'{}'::jsonb`),
-  errorSummary: text("error_summary"),
-  startedAt: timestamp("started_at", { withTimezone: true }).defaultNow().notNull(),
-  completedAt: timestamp("completed_at", { withTimezone: true }),
-});
+export { costCatalogSources, costCatalogSyncRuns } from "./public/cost-catalog-sources.js";
+export {
+  costCatalogCodes,
+  costCatalogItems,
+  costCatalogItemCodes,
+  costCatalogPrices,
+} from "./public/cost-catalog-items.js";
+export { estimateSourceDocuments, estimateDocumentPages } from "./tenant/estimate-source-documents.js";
+export {
+  estimateExtractions,
+  estimateExtractionMatches,
+  estimatePricingRecommendations,
+  estimateGenerationRuns,
+  estimateReviewEvents,
+} from "./tenant/estimate-extractions.js";
 ```
 
-- [ ] **Step 5: Re-run the focused pricing test to confirm the module is now loadable**
+- [ ] **Step 5: Re-run the focused schema export test**
 
-Run: `npx vitest run server/tests/modules/estimating/pricing-service.test.ts`
+Run: `npx vitest run server/tests/modules/estimating/schema-exports.test.ts`
 
-Expected: FAIL on pricing logic assertions instead of import or schema-export errors.
+Expected: PASS
 
 - [ ] **Step 6: Commit the storage layer**
 
 ```bash
-git add migrations/0020_cost_catalog_and_estimate_generation.sql shared/src/schema/public/cost-catalog-sources.ts shared/src/schema/public/cost-catalog-items.ts shared/src/schema/tenant/estimate-source-documents.ts shared/src/schema/tenant/estimate-extractions.ts shared/src/schema/index.ts server/tests/modules/estimating/pricing-service.test.ts
+git add migrations/0020_cost_catalog_and_estimate_generation.sql shared/src/schema/public/cost-catalog-sources.ts shared/src/schema/public/cost-catalog-items.ts shared/src/schema/tenant/estimate-source-documents.ts shared/src/schema/tenant/estimate-extractions.ts shared/src/schema/index.ts server/tests/modules/estimating/schema-exports.test.ts
 git commit -m "feat: add catalog and estimate generation storage"
 ```
 
@@ -382,34 +570,42 @@ git commit -m "feat: add estimating document upload and ocr queueing"
 - [ ] **Step 1: Write failing matching and pricing tests**
 
 ```ts
-describe("rankExtractionMatches", () => {
-  it("ranks exact catalog-unit matches above fuzzy label-only matches", async () => {
-    const results = await rankExtractionMatches({
-      extraction: { normalizedLabel: "parapet wall flashing", unit: "ft" } as any,
-      catalogItems: [
-        { id: "a", name: "Parapet Wall Flashing", unit: "ft" },
-        { id: "b", name: "Flashing", unit: "ea" },
-      ] as any,
-      historicalItems: [],
+describe("buildPricingRecommendation", () => {
+  it("starts from the catalog baseline, adds historical context, and applies market adjustments", () => {
+    const result = buildPricingRecommendation({
+      quantity: 3,
+      catalogBaselinePrice: 100,
+      historicalPrices: [110, 115, 120],
+      vendorQuotePrice: 130,
+      internalAdjustmentPercent: 5,
+      marketAdjustmentPercent: 10,
     });
 
-    expect(results[0]?.catalogItemId).toBe("a");
+    expect(result.priceBasis).toBe("catalog_baseline_with_adjustments");
+    expect(result.comparableHistoricalPrices).toEqual([110, 115, 120]);
+    expect(result.marketAdjustmentPercent).toBe(10);
+    expect(result.assumptions.catalogBaselineUsed).toBe(true);
+    expect(result.confidence).toBeGreaterThan(0);
   });
 });
 ```
 
 ```ts
-describe("buildPricingRecommendation", () => {
-  it("applies market adjustments after selecting the base recommendation", () => {
-    const result = buildPricingRecommendation({
-      quantity: 3,
-      catalogBaselinePrice: 100,
-      historicalPrices: [110, 115, 120],
-      marketAdjustmentPercent: 10,
+describe("rankExtractionMatches", () => {
+  it("uses catalog fit and similar historical line items when ranking matches", async () => {
+    const results = await rankExtractionMatches({
+      extraction: { normalizedLabel: "parapet wall flashing", unit: "ft", divisionHint: "07" } as any,
+      catalogItems: [
+        { id: "a", name: "Parapet Wall Flashing", unit: "ft", primaryCode: "07-100" },
+        { id: "b", name: "Flashing", unit: "ea", primaryCode: "08-200" },
+      ] as any,
+      historicalItems: [
+        { id: "hist-1", description: "Parapet Wall Flashing", unit: "ft", costCode: "07-100" },
+      ] as any,
     });
 
-    expect(result.recommendedUnitPrice).toBe(127.6);
-    expect(result.marketAdjustmentPercent).toBe(10);
+    expect(results[0]?.catalogItemId).toBe("a");
+    expect(results[0]?.historicalLineItemIds).toContain("hist-1");
   });
 });
 ```
@@ -423,6 +619,36 @@ Expected: FAIL because the matching and pricing services do not exist yet.
 - [ ] **Step 3: Implement the extraction normalization and matching logic**
 
 ```ts
+export function buildPricingRecommendation(input: BuildPricingRecommendationInput) {
+  const historicalMedian =
+    input.historicalPrices.length > 0
+      ? [...input.historicalPrices].sort((a, b) => a - b)[Math.floor(input.historicalPrices.length / 2)]
+      : null;
+  const base = input.catalogBaselinePrice ?? historicalMedian ?? input.vendorQuotePrice ?? 0;
+  const afterInternal = base * (1 + input.internalAdjustmentPercent / 100);
+  const adjusted = Number((afterInternal * (1 + input.marketAdjustmentPercent / 100)).toFixed(2));
+
+  return {
+    priceBasis: "catalog_baseline_with_adjustments",
+    recommendedUnitPrice: adjusted,
+    recommendedTotalPrice: Number((adjusted * input.quantity).toFixed(2)),
+    comparableHistoricalPrices: input.historicalPrices,
+    historicalMedianPrice: historicalMedian,
+    catalogBaselinePrice: input.catalogBaselinePrice ?? null,
+    marketAdjustmentPercent: input.marketAdjustmentPercent,
+    assumptions: {
+      catalogBaselineUsed: input.catalogBaselinePrice != null,
+      vendorQuotePrice: input.vendorQuotePrice ?? null,
+      internalAdjustmentPercent: input.internalAdjustmentPercent,
+    },
+    confidence: historicalMedian != null ? 0.84 : 0.58,
+  };
+}
+```
+
+- [ ] **Step 4: Implement matching to include historical evidence and store reviewable reasons**
+
+```ts
 export async function rankExtractionMatches({
   extraction,
   catalogItems,
@@ -430,46 +656,67 @@ export async function rankExtractionMatches({
 }: RankExtractionMatchesArgs) {
   const normalizedLabel = extraction.normalizedLabel.toLowerCase();
 
-  return [...catalogItems]
-    .map((item) => ({
-      catalogItemId: item.id,
-      matchScore:
-        (item.name.toLowerCase() === normalizedLabel ? 70 : 0) +
-        (item.unit && extraction.unit && item.unit === extraction.unit ? 20 : 0) +
-        (item.name.toLowerCase().includes(normalizedLabel) ? 10 : 0),
-    }))
+  return catalogItems
+    .map((item) => {
+      const similarHistory = historicalItems.filter((historicalItem) => {
+        return (
+          historicalItem.description.toLowerCase().includes(normalizedLabel) ||
+          historicalItem.costCode === item.primaryCode
+        );
+      });
+
+      return {
+        catalogItemId: item.id,
+        historicalLineItemIds: similarHistory.map((row) => row.id),
+        matchScore:
+          (item.name.toLowerCase() === normalizedLabel ? 50 : 0) +
+          (item.unit && extraction.unit && item.unit === extraction.unit ? 15 : 0) +
+          (item.primaryCode?.startsWith(extraction.divisionHint ?? "") ? 15 : 0) +
+          Math.min(similarHistory.length * 10, 20),
+        reasons: {
+          exactNameMatch: item.name.toLowerCase() === normalizedLabel,
+          unitMatched: item.unit === extraction.unit,
+          historicalCount: similarHistory.length,
+        },
+      };
+    })
     .sort((a, b) => b.matchScore - a.matchScore);
 }
 ```
 
-- [ ] **Step 4: Implement pricing recommendations and orchestrate them in the generation job**
+- [ ] **Step 5: Orchestrate generation to write extraction matches and pricing recommendations with evidence**
 
 ```ts
-export function buildPricingRecommendation(input: BuildPricingRecommendationInput) {
-  const historicalMedian = input.historicalPrices.length
-    ? [...input.historicalPrices].sort((a, b) => a - b)[Math.floor(input.historicalPrices.length / 2)]
-    : null;
+for (const extraction of pendingExtractions) {
+  const matches = await rankExtractionMatches({ extraction, catalogItems, historicalItems });
+  const topMatch = matches[0];
+  if (!topMatch) continue;
 
-  const base = historicalMedian ?? input.catalogBaselinePrice ?? 0;
-  const adjusted = Number((base * (1 + input.marketAdjustmentPercent / 100)).toFixed(2));
+  const recommendation = buildPricingRecommendation({
+    quantity: Number(extraction.quantity ?? 1),
+    catalogBaselinePrice: topMatch.catalogBaselinePrice ?? null,
+    historicalPrices: topMatch.historicalUnitPrices ?? [],
+    vendorQuotePrice: null,
+    internalAdjustmentPercent: 0,
+    marketAdjustmentPercent: marketAdjustmentPercent,
+  });
 
-  return {
-    priceBasis: historicalMedian != null ? "historical_median" : "catalog_baseline",
-    recommendedUnitPrice: adjusted,
-    recommendedTotalPrice: Number((adjusted * input.quantity).toFixed(2)),
-    historicalMedianPrice: historicalMedian,
-    marketAdjustmentPercent: input.marketAdjustmentPercent,
-  };
+  await saveExtractionMatchAndRecommendation({
+    extraction,
+    topMatch,
+    recommendation,
+    runId,
+  });
 }
 ```
 
-- [ ] **Step 5: Re-run the matching and pricing tests**
+- [ ] **Step 6: Re-run the matching and pricing tests**
 
 Run: `npx vitest run server/tests/modules/estimating/matching-service.test.ts server/tests/modules/estimating/pricing-service.test.ts`
 
 Expected: PASS
 
-- [ ] **Step 6: Commit the extraction, matching, and pricing task**
+- [ ] **Step 7: Commit the extraction, matching, and pricing task**
 
 ```bash
 git add server/src/modules/estimating/extraction-service.ts server/src/modules/estimating/matching-service.ts server/src/modules/estimating/pricing-service.ts worker/src/jobs/estimate-generation.ts server/tests/modules/estimating/matching-service.test.ts server/tests/modules/estimating/pricing-service.test.ts
@@ -586,10 +833,15 @@ git commit -m "feat: promote approved estimate recommendations into estimates"
 
 **Files:**
 - Create: `client/src/components/estimating/estimating-workflow-shell.tsx`
+- Create: `client/src/components/estimating/estimate-overview-panel.tsx`
 - Create: `client/src/components/estimating/estimate-extraction-review-table.tsx`
 - Create: `client/src/components/estimating/estimate-pricing-review-table.tsx`
+- Create: `client/src/components/estimating/estimate-review-log-panel.tsx`
 - Create: `client/src/components/estimating/estimate-copilot-panel.tsx`
+- Create: `server/src/modules/estimating/copilot-service.ts`
+- Modify: `server/src/modules/estimating/routes.ts`
 - Modify: `client/src/pages/deals/deal-estimates-tab.tsx`
+- Test: `server/tests/modules/estimating/copilot-service.test.ts`
 - Test: `client/src/components/estimating/estimating-workflow-shell.test.tsx`
 
 - [ ] **Step 1: Write a failing UI workflow test**
@@ -605,47 +857,105 @@ it("shows the document upload and pricing review states", () => {
       documents={[]}
       extractionRows={[]}
       pricingRows={[]}
+      reviewEvents={[]}
       copilotEnabled
     />
   );
 
+  expect(screen.getByText("Overview")).toBeInTheDocument();
   expect(screen.getByText("Documents")).toBeInTheDocument();
   expect(screen.getByText("Draft Pricing")).toBeInTheDocument();
+  expect(screen.getByText("Review Log")).toBeInTheDocument();
 });
 ```
 
-- [ ] **Step 2: Run the UI test**
+- [ ] **Step 2: Add a failing copilot service test**
+
+```ts
+import { describe, expect, it } from "vitest";
+import { answerEstimatingCopilotQuestion } from "../../../src/modules/estimating/copilot-service.js";
+
+describe("answerEstimatingCopilotQuestion", () => {
+  it("returns a priced answer with evidence references", async () => {
+    const result = await answerEstimatingCopilotQuestion({
+      question: "What should this line item price be?",
+      context: {
+        historicalComparables: [{ id: "hist-1", unitPrice: 118, description: "Parapet Wall Flashing" }],
+        pricingRecommendation: { recommendedUnitPrice: 121.54, priceBasis: "catalog_baseline_with_adjustments" },
+      } as any,
+    });
+
+    expect(result.answer).toContain("121.54");
+    expect(result.evidence.length).toBeGreaterThan(0);
+  });
+});
+```
+
+- [ ] **Step 3: Run the UI and copilot tests**
 
 Run: `npx vitest run client/src/components/estimating/estimating-workflow-shell.test.tsx`
+Run: `npx vitest run server/tests/modules/estimating/copilot-service.test.ts`
 
-Expected: FAIL because the workflow shell does not exist yet.
+Expected: FAIL because the workflow shell and copilot service do not exist yet.
 
-- [ ] **Step 3: Implement the workflow shell and review tables**
+- [ ] **Step 4: Implement the workflow shell, overview panel, and review log**
 
 ```tsx
 export function EstimatingWorkflowShell(props: EstimatingWorkflowShellProps) {
   return (
     <div className="space-y-6">
       <nav className="flex flex-wrap gap-2 text-sm">
-        {["Documents", "Extraction", "Catalog Match", "Draft Pricing", "Estimate", "Copilot"].map(
-          (step) => (
-            <div key={step} className="rounded-full border px-3 py-1">
-              {step}
-            </div>
-          )
-        )}
+        {["Overview", "Documents", "Extraction", "Catalog Match", "Draft Pricing", "Estimate", "Copilot", "Review Log"].map((step) => (
+          <div key={step} className="rounded-full border px-3 py-1">
+            {step}
+          </div>
+        ))}
       </nav>
 
+      <EstimateOverviewPanel dealId={props.dealId} />
       <EstimateDocumentsPanel dealId={props.dealId} documents={props.documents} />
       <EstimateExtractionReviewTable rows={props.extractionRows} />
       <EstimatePricingReviewTable rows={props.pricingRows} />
       {props.copilotEnabled ? <EstimateCopilotPanel dealId={props.dealId} /> : null}
+      <EstimateReviewLogPanel events={props.reviewEvents} />
     </div>
   );
 }
 ```
 
-- [ ] **Step 4: Integrate the workflow shell into the existing estimate tab**
+- [ ] **Step 5: Implement the copilot backend and review-log route coverage**
+
+```ts
+export async function answerEstimatingCopilotQuestion(input: AnswerEstimatingCopilotQuestionArgs) {
+  return {
+    answer: `Recommended unit price: ${input.context.pricingRecommendation.recommendedUnitPrice}`,
+    evidence: [
+      {
+        type: "pricing_recommendation",
+        id: input.context.pricingRecommendation.id ?? "generated",
+      },
+      ...input.context.historicalComparables.map((row: any) => ({
+        type: "historical_line_item",
+        id: row.id,
+      })),
+    ],
+  };
+}
+```
+
+```ts
+router.get("/deals/:dealId/estimating/review-log", async (req, res) => {
+  const events = await listEstimateReviewEvents(req.tenantDb, req.params.dealId);
+  res.status(200).json({ events });
+});
+
+router.post("/deals/:dealId/estimating/copilot", async (req, res) => {
+  const answer = await answerEstimatingCopilotQuestion(req.body);
+  res.status(200).json({ answer });
+});
+```
+
+- [ ] **Step 6: Integrate the workflow shell into the existing estimate tab**
 
 ```tsx
 return (
@@ -655,6 +965,7 @@ return (
       documents={documents}
       extractionRows={extractionRows}
       pricingRows={pricingRows}
+      reviewEvents={reviewEvents}
       copilotEnabled
     />
     <ExistingEstimateEditor sections={sections} onRefresh={fetchEstimates} />
@@ -662,18 +973,21 @@ return (
 );
 ```
 
-- [ ] **Step 5: Re-run the UI test and the workspace typecheck**
+- [ ] **Step 7: Re-run the UI test, copilot test, and workspace typecheck**
 
 Run: `npx vitest run client/src/components/estimating/estimating-workflow-shell.test.tsx`
+Expected: PASS
+
+Run: `npx vitest run server/tests/modules/estimating/copilot-service.test.ts`
 Expected: PASS
 
 Run: `npm run typecheck`
 Expected: PASS
 
-- [ ] **Step 6: Commit the workflow UI task**
+- [ ] **Step 8: Commit the workflow UI task**
 
 ```bash
-git add client/src/components/estimating/estimating-workflow-shell.tsx client/src/components/estimating/estimate-extraction-review-table.tsx client/src/components/estimating/estimate-pricing-review-table.tsx client/src/components/estimating/estimate-copilot-panel.tsx client/src/pages/deals/deal-estimates-tab.tsx client/src/components/estimating/estimating-workflow-shell.test.tsx
+git add client/src/components/estimating/estimating-workflow-shell.tsx client/src/components/estimating/estimate-overview-panel.tsx client/src/components/estimating/estimate-extraction-review-table.tsx client/src/components/estimating/estimate-pricing-review-table.tsx client/src/components/estimating/estimate-review-log-panel.tsx client/src/components/estimating/estimate-copilot-panel.tsx client/src/pages/deals/deal-estimates-tab.tsx server/src/modules/estimating/copilot-service.ts server/src/modules/estimating/routes.ts server/tests/modules/estimating/copilot-service.test.ts client/src/components/estimating/estimating-workflow-shell.test.tsx
 git commit -m "feat: add estimating workflow review ui and copilot"
 ```
 
