@@ -451,14 +451,13 @@ export function normalizeCatalogItem(payload: any) {
 export async function runProcoreSync(deps: SyncDeps) {
   await syncCompanies(deps);
   await syncProjects(deps);
-  await syncCostCatalog({ trigger: "office_poll", officeId: deps.officeId });
 }
 ```
 
 - [ ] **Step 5: Add explicit on-demand and scheduled catalog refresh entrypoints plus snapshot linkage**
 
 ```ts
-adminRouter.post("/procore/catalog-sync", async (req, res) => {
+adminRouter.post("/admin/procore/catalog-sync", requireAdmin, async (req, res) => {
   const syncRun = await startCatalogSync({ triggeredByUserId: req.user.id });
   res.status(202).json({ syncRun });
 });
@@ -637,12 +636,12 @@ router.post("/deals/:dealId/estimating/documents", async (req, res) => {
   const deal = await getDealById(req.tenantDb!, req.params.dealId, req.user!.role, req.user!.id);
   if (!deal) throw new AppError(404, "Deal not found");
 
-  const uploadedFile = await createFileFromUploadRequest({
+  const uploadedFile = await finalizeUploadedFileForDeal({
     tenantDb: req.tenantDb!,
-    user: req.user!,
-    file: req.file,
-    entityType: "deal",
-    entityId: req.params.dealId,
+    officeSlug: req.officeSlug!,
+    userId: req.user!.id,
+    uploadToken: req.body.uploadToken,
+    dealId: req.params.dealId,
   });
 
   const document = await createEstimateSourceDocument({
@@ -1267,6 +1266,8 @@ export function EstimatingWorkflowShell(props: EstimatingWorkflowShellProps) {
 
 ```ts
 router.get("/deals/:dealId/estimating", async (req, res) => {
+  const deal = await getDealById(req.tenantDb!, req.params.dealId, req.user!.role, req.user!.id);
+  if (!deal) throw new AppError(404, "Deal not found");
   const workflow = await getEstimatingWorkflowState(req.tenantDb!, req.params.dealId);
   res.status(200).json(workflow);
 });
@@ -1412,11 +1413,15 @@ export async function answerEstimatingCopilotQuestion(input: AnswerEstimatingCop
 
 ```ts
 router.get("/deals/:dealId/estimating/review-log", async (req, res) => {
+  const deal = await getDealById(req.tenantDb!, req.params.dealId, req.user!.role, req.user!.id);
+  if (!deal) throw new AppError(404, "Deal not found");
   const events = await listEstimateReviewEvents(req.tenantDb, req.params.dealId);
   res.status(200).json({ events });
 });
 
 router.post("/deals/:dealId/estimating/copilot", async (req, res) => {
+  const deal = await getDealById(req.tenantDb!, req.params.dealId, req.user!.role, req.user!.id);
+  if (!deal) throw new AppError(404, "Deal not found");
   const answer = await answerEstimatingCopilotQuestion(req.body);
   res.status(200).json({ answer });
 });
