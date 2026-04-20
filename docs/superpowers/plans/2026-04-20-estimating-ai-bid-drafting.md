@@ -60,6 +60,8 @@
   Responsibility: upload and list source documents.
 - Create: `client/src/components/estimating/estimate-extraction-review-table.tsx`
   Responsibility: review/edit extraction rows and match status.
+- Create: `client/src/components/estimating/estimate-catalog-match-table.tsx`
+  Responsibility: review and remap catalog item matches before pricing.
 - Create: `client/src/components/estimating/estimate-pricing-review-table.tsx`
   Responsibility: review/edit pricing recommendations before promotion.
 - Create: `client/src/components/estimating/estimate-copilot-panel.tsx`
@@ -308,6 +310,7 @@ CREATE TABLE IF NOT EXISTS estimate_generation_runs (
   deal_id uuid NOT NULL,
   project_id uuid,
   status text NOT NULL DEFAULT 'pending',
+  triggered_by_user_id uuid,
   input_snapshot_json jsonb NOT NULL DEFAULT '{}'::jsonb,
   output_summary_json jsonb NOT NULL DEFAULT '{}'::jsonb,
   error_summary text,
@@ -837,9 +840,8 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
     await promoteApprovedRecommendationsToEstimate({
       tenantDb,
       dealId: "deal-1",
-      recommendations: [
-        { sectionName: "Roofing", description: "Parapet Wall Flashing", quantity: "10", unit: "ft", unitPrice: "118" },
-      ] as any,
+      generationRunId: "run-1",
+      approvedRecommendationIds: ["rec-1"],
     });
 
     expect(tenantDb.insert).toHaveBeenCalled();
@@ -853,36 +855,34 @@ Run: `npx vitest run server/tests/modules/estimating/draft-estimate-service.test
 
 Expected: FAIL because the draft estimate service does not exist yet.
 
-- [ ] **Step 3: Implement promotion into estimate sections and line items**
+- [ ] **Step 3: Implement promotion through the existing estimate service path**
 
 ```ts
 export async function promoteApprovedRecommendationsToEstimate({
   tenantDb,
   dealId,
-  recommendations,
+  generationRunId,
+  approvedRecommendationIds,
 }: PromoteApprovedRecommendationsArgs) {
-  const sectionIds = new Map<string, string>();
+  const recommendations = await loadApprovedRecommendationsForRun(
+    tenantDb,
+    dealId,
+    generationRunId,
+    approvedRecommendationIds
+  );
 
-  for (const recommendation of recommendations) {
-    let sectionId = sectionIds.get(recommendation.sectionName);
-    if (!sectionId) {
-      const [section] = await tenantDb
-        .insert(estimateSections)
-        .values({ dealId, name: recommendation.sectionName })
-        .returning();
-      sectionId = section.id;
-      sectionIds.set(recommendation.sectionName, sectionId);
+  for (const sectionGroup of groupRecommendationsIntoSections(recommendations)) {
+    const section = await createSection(tenantDb, dealId, sectionGroup.sectionName);
+
+    for (const line of sectionGroup.lines) {
+      await createLineItem(tenantDb, dealId, section.id, {
+        description: line.description,
+        quantity: line.quantity,
+        unit: line.unit,
+        unitPrice: line.unitPrice,
+        notes: line.notes ?? null,
+      });
     }
-
-    await tenantDb.insert(estimateLineItems).values({
-      sectionId,
-      description: recommendation.description,
-      quantity: recommendation.quantity,
-      unit: recommendation.unit,
-      unitPrice: recommendation.unitPrice,
-      totalPrice: String(Number(recommendation.quantity) * Number(recommendation.unitPrice)),
-      notes: recommendation.notes ?? null,
-    });
   }
 }
 ```
@@ -964,6 +964,7 @@ git commit -m "feat: promote approved estimate recommendations into estimates"
 - Create: `client/src/components/estimating/estimating-workflow-shell.tsx`
 - Create: `client/src/components/estimating/estimate-overview-panel.tsx`
 - Create: `client/src/components/estimating/estimate-extraction-review-table.tsx`
+- Create: `client/src/components/estimating/estimate-catalog-match-table.tsx`
 - Create: `client/src/components/estimating/estimate-pricing-review-table.tsx`
 - Create: `client/src/components/estimating/estimate-review-log-panel.tsx`
 - Create: `client/src/components/estimating/estimate-copilot-panel.tsx`
@@ -985,6 +986,7 @@ it("shows the document upload and pricing review states", () => {
       dealId="deal-1"
       documents={[]}
       extractionRows={[]}
+      matchRows={[]}
       pricingRows={[]}
       reviewEvents={[]}
       copilotEnabled
@@ -1059,7 +1061,14 @@ export function EstimatingWorkflowShell(props: EstimatingWorkflowShellProps) {
       <EstimateOverviewPanel dealId={props.dealId} />
       <EstimateDocumentsPanel dealId={props.dealId} documents={props.documents} />
       <EstimateExtractionReviewTable rows={props.extractionRows} />
+      <EstimateCatalogMatchTable rows={props.matchRows} />
       <EstimatePricingReviewTable rows={props.pricingRows} />
+      <div className="rounded-2xl border border-border/60 p-4">
+        <h3 className="text-sm font-semibold">Estimate</h3>
+        <p className="text-sm text-muted-foreground">
+          Approved recommendations promote into the existing estimate editor below.
+        </p>
+      </div>
       {props.copilotEnabled ? <EstimateCopilotPanel dealId={props.dealId} /> : null}
       <EstimateReviewLogPanel events={props.reviewEvents} />
     </div>
@@ -1102,6 +1111,18 @@ router.post("/deals/:dealId/estimating/recommendations/:recommendationId/approve
 
   res.status(200).json({ recommendation });
 });
+
+router.post("/deals/:dealId/estimating/recommendations/:recommendationId/reject", async (req, res) => {
+  const recommendation = await rejectEstimateRecommendation({
+    tenantDb: req.tenantDb,
+    dealId: req.params.dealId,
+    recommendationId: req.params.recommendationId,
+    userId: req.user.id,
+    reason: req.body.reason,
+  });
+
+  res.status(200).json({ recommendation });
+});
 ```
 
 ```tsx
@@ -1109,12 +1130,21 @@ router.post("/deals/:dealId/estimating/recommendations/:recommendationId/approve
   rows={props.extractionRows}
   onApprove={(extractionId) => approveExtraction(extractionId)}
   onEdit={(extractionId, patch) => updateExtraction(extractionId, patch)}
+  onReject={(extractionId, reason) => rejectExtraction(extractionId, reason)}
+/>
+
+<EstimateCatalogMatchTable
+  rows={props.matchRows}
+  onSelect={(matchId) => selectMatch(matchId)}
+  onRemap={(matchId, catalogItemId) => remapMatch(matchId, catalogItemId)}
+  onReject={(matchId, reason) => rejectMatch(matchId, reason)}
 />
 
 <EstimatePricingReviewTable
   rows={props.pricingRows}
   onApprove={(recommendationId) => approveRecommendation(recommendationId)}
   onOverride={(recommendationId, patch) => overrideRecommendation(recommendationId, patch)}
+  onReject={(recommendationId, reason) => rejectRecommendation(recommendationId, reason)}
 />
 ```
 
@@ -1176,6 +1206,7 @@ return (
       dealId={dealId}
       documents={documents}
       extractionRows={extractionRows}
+      matchRows={matchRows}
       pricingRows={pricingRows}
       reviewEvents={reviewEvents}
       copilotEnabled
@@ -1199,7 +1230,7 @@ Expected: PASS
 - [ ] **Step 9: Commit the workflow UI task**
 
 ```bash
-git add client/src/components/estimating/estimating-workflow-shell.tsx client/src/components/estimating/estimate-overview-panel.tsx client/src/components/estimating/estimate-extraction-review-table.tsx client/src/components/estimating/estimate-pricing-review-table.tsx client/src/components/estimating/estimate-review-log-panel.tsx client/src/components/estimating/estimate-copilot-panel.tsx client/src/pages/deals/deal-estimates-tab.tsx server/src/modules/estimating/copilot-service.ts server/src/modules/estimating/routes.ts server/tests/modules/estimating/copilot-service.test.ts client/src/components/estimating/estimating-workflow-shell.test.tsx
+git add client/src/components/estimating/estimating-workflow-shell.tsx client/src/components/estimating/estimate-overview-panel.tsx client/src/components/estimating/estimate-extraction-review-table.tsx client/src/components/estimating/estimate-catalog-match-table.tsx client/src/components/estimating/estimate-pricing-review-table.tsx client/src/components/estimating/estimate-review-log-panel.tsx client/src/components/estimating/estimate-copilot-panel.tsx client/src/pages/deals/deal-estimates-tab.tsx server/src/modules/estimating/copilot-service.ts server/src/modules/estimating/routes.ts server/tests/modules/estimating/copilot-service.test.ts client/src/components/estimating/estimating-workflow-shell.test.tsx
 git commit -m "feat: add estimating workflow review ui and copilot"
 ```
 
