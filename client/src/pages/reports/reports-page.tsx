@@ -57,7 +57,6 @@ import {
   Activity,
   ArrowUpRight,
   ShieldCheck,
-  Rows3,
 } from "lucide-react";
 import {
   buildPrintableReportHtml,
@@ -289,12 +288,6 @@ const operationalViews = [
     description: "Run the weekly 30/60/90 forecast, cadence, hygiene, and support review from CRM data.",
     to: "/sales-review",
     icon: ShieldCheck,
-  },
-  {
-    title: "Pipeline Hygiene",
-    description: "Open the cleanup queue for stale or incomplete lead and deal records that need attention.",
-    to: "/pipeline/hygiene",
-    icon: Rows3,
   },
 ] as const;
 
@@ -905,7 +898,7 @@ export function ReportsPage() {
             <h2 className="text-sm font-bold text-slate-900">Operational Views</h2>
             <p className="text-xs text-slate-400">Focused workspaces for weekly pipeline review and cleanup.</p>
           </div>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-0 divide-y md:divide-y-0 md:divide-x divide-slate-100">
+          <div className="grid grid-cols-1 gap-0 divide-y divide-slate-100">
             {operationalViews.map((view) => (
               <Link
                 key={view.to}
