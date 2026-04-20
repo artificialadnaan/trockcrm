@@ -248,116 +248,78 @@ CREATE TABLE IF NOT EXISTS public.cost_catalog_prices (
 );
 
 -- TENANT_SCHEMA_START
--- Create these tables inside each office schema following the existing
--- Use the dynamic `FOR schema_name IN SELECT ... WHERE schema_name LIKE 'office_%'`
--- pattern from `0025_tenant_schema_baseline_reconciliation.sql`, and execute the
--- DDL with `EXECUTE format(...)` for each office schema.
+-- Create these tables inside each office schema using the same
+-- `FOR schema_name ... EXECUTE format(...)` pattern as
+-- `0025_tenant_schema_baseline_reconciliation.sql`. Example:
+DO $$
+DECLARE
+  schema_name text;
+BEGIN
+  FOR schema_name IN
+    SELECT schemata.schema_name
+    FROM information_schema.schemata AS schemata
+    WHERE schemata.schema_name LIKE 'office_%'
+  LOOP
+    EXECUTE format(
+      'CREATE TABLE IF NOT EXISTS %I.estimate_source_documents (
+         id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+         deal_id uuid NOT NULL,
+         project_id uuid,
+         file_id uuid NOT NULL,
+         root_file_id uuid,
+         document_type text NOT NULL,
+         filename text NOT NULL,
+         mime_type text NOT NULL,
+         file_size integer,
+         uploaded_by_user_id uuid,
+         content_hash text,
+         ocr_status text NOT NULL DEFAULT ''queued'',
+         parsed_at timestamptz,
+         created_at timestamptz NOT NULL DEFAULT now()
+       )',
+      schema_name
+    );
 
-CREATE TABLE IF NOT EXISTS estimate_source_documents (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  deal_id uuid NOT NULL,
-  project_id uuid,
-  file_id uuid NOT NULL,
-  root_file_id uuid,
-  document_type text NOT NULL,
-  filename text NOT NULL,
-  mime_type text NOT NULL,
-  file_size integer,
-  uploaded_by_user_id uuid,
-  content_hash text,
-  ocr_status text NOT NULL DEFAULT 'queued',
-  parsed_at timestamptz,
-  created_at timestamptz NOT NULL DEFAULT now()
-);
-
-CREATE TABLE IF NOT EXISTS estimate_document_pages (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  document_id uuid NOT NULL REFERENCES estimate_source_documents(id) ON DELETE CASCADE,
-  page_number integer NOT NULL,
-  sheet_label text,
-  sheet_type text,
-  ocr_text text,
-  page_image_key text,
-  metadata_json jsonb NOT NULL DEFAULT '{}'::jsonb
-);
-
-CREATE TABLE IF NOT EXISTS estimate_extractions (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  deal_id uuid NOT NULL,
-  project_id uuid,
-  document_id uuid NOT NULL REFERENCES estimate_source_documents(id) ON DELETE CASCADE,
-  page_id uuid REFERENCES estimate_document_pages(id) ON DELETE SET NULL,
-  extraction_type text NOT NULL,
-  raw_label text NOT NULL,
-  normalized_label text NOT NULL,
-  quantity numeric(14, 3),
-  unit text,
-  division_hint text,
-  confidence numeric(5, 2) NOT NULL DEFAULT 0,
-  evidence_text text,
-  evidence_bbox_json jsonb NOT NULL DEFAULT '{}'::jsonb,
-  status text NOT NULL DEFAULT 'pending',
-  metadata_json jsonb NOT NULL DEFAULT '{}'::jsonb
-);
-
-CREATE TABLE IF NOT EXISTS estimate_extraction_matches (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  extraction_id uuid NOT NULL REFERENCES estimate_extractions(id) ON DELETE CASCADE,
-  catalog_item_id uuid REFERENCES public.cost_catalog_items(id) ON DELETE SET NULL,
-  catalog_code_id uuid REFERENCES public.cost_catalog_codes(id) ON DELETE SET NULL,
-  historical_line_item_id uuid REFERENCES estimate_line_items(id) ON DELETE SET NULL,
-  match_type text NOT NULL,
-  match_score numeric(5, 2) NOT NULL DEFAULT 0,
-  status text NOT NULL DEFAULT 'suggested',
-  reason_json jsonb NOT NULL DEFAULT '{}'::jsonb
-);
-
-CREATE TABLE IF NOT EXISTS estimate_generation_runs (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  deal_id uuid NOT NULL,
-  project_id uuid,
-  status text NOT NULL DEFAULT 'pending',
-  triggered_by_user_id uuid,
-  input_snapshot_json jsonb NOT NULL DEFAULT '{}'::jsonb,
-  output_summary_json jsonb NOT NULL DEFAULT '{}'::jsonb,
-  error_summary text,
-  started_at timestamptz NOT NULL DEFAULT now(),
-  completed_at timestamptz,
-  catalog_sync_run_id uuid REFERENCES public.cost_catalog_sync_runs(id) ON DELETE SET NULL,
-  catalog_snapshot_version_id uuid REFERENCES public.cost_catalog_snapshot_versions(id) ON DELETE SET NULL
-);
-
-CREATE TABLE IF NOT EXISTS estimate_pricing_recommendations (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  deal_id uuid NOT NULL,
-  project_id uuid,
-  extraction_match_id uuid NOT NULL REFERENCES estimate_extraction_matches(id) ON DELETE CASCADE,
-  recommended_quantity numeric(14, 3),
-  recommended_unit text,
-  recommended_unit_price numeric(14, 2),
-  recommended_total_price numeric(14, 2),
-  price_basis text NOT NULL,
-  catalog_baseline_price numeric(14, 2),
-  historical_median_price numeric(14, 2),
-  market_adjustment_percent numeric(8, 3) NOT NULL DEFAULT 0,
-  confidence numeric(5, 2) NOT NULL DEFAULT 0,
-  assumptions_json jsonb NOT NULL DEFAULT '{}'::jsonb,
-  created_by_run_id uuid REFERENCES estimate_generation_runs(id) ON DELETE SET NULL
-);
-
-CREATE TABLE IF NOT EXISTS estimate_review_events (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  deal_id uuid NOT NULL,
-  project_id uuid,
-  subject_type text NOT NULL,
-  subject_id uuid NOT NULL,
-  event_type text NOT NULL,
-  before_json jsonb NOT NULL DEFAULT '{}'::jsonb,
-  after_json jsonb NOT NULL DEFAULT '{}'::jsonb,
-  reason text,
-  user_id uuid,
-  created_at timestamptz NOT NULL DEFAULT now()
-);
+    EXECUTE format(
+      'CREATE TABLE IF NOT EXISTS %I.estimate_document_pages (...)',
+      schema_name
+    );
+    EXECUTE format(
+      'CREATE TABLE IF NOT EXISTS %I.estimate_extractions (...)',
+      schema_name
+    );
+    EXECUTE format(
+      'CREATE TABLE IF NOT EXISTS %I.estimate_extraction_matches (
+         ...,
+         reason_json jsonb NOT NULL DEFAULT ''{}''::jsonb,
+         evidence_json jsonb NOT NULL DEFAULT ''{}''::jsonb
+       )',
+      schema_name
+    );
+    EXECUTE format(
+      'CREATE TABLE IF NOT EXISTS %I.estimate_generation_runs (
+         ...,
+         catalog_sync_run_id uuid REFERENCES public.cost_catalog_sync_runs(id) ON DELETE SET NULL,
+         catalog_snapshot_version_id uuid REFERENCES public.cost_catalog_snapshot_versions(id) ON DELETE SET NULL
+       )',
+      schema_name
+    );
+    EXECUTE format(
+      'CREATE TABLE IF NOT EXISTS %I.estimate_pricing_recommendations (
+         ...,
+         assumptions_json jsonb NOT NULL DEFAULT ''{}''::jsonb,
+         evidence_json jsonb NOT NULL DEFAULT ''{}''::jsonb,
+         created_by_run_id uuid REFERENCES %I.estimate_generation_runs(id) ON DELETE SET NULL
+       )',
+      schema_name,
+      schema_name
+    );
+    EXECUTE format(
+      'CREATE TABLE IF NOT EXISTS %I.estimate_review_events (...)',
+      schema_name
+    );
+  END LOOP;
+END $$;
 -- TENANT_SCHEMA_END
 ```
 
