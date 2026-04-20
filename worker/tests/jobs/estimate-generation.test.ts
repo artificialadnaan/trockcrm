@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const drizzleMock = vi.fn();
 const poolQueryMock = vi.fn();
+const poolConnectMock = vi.fn();
 const getHistoricalPricingSignalsMock = vi.fn();
 const listCatalogCandidatesForMatchingMock = vi.fn();
 const resolveActiveCatalogSnapshotVersionIdMock = vi.fn();
@@ -15,6 +16,7 @@ vi.mock("drizzle-orm/node-postgres", () => ({
 vi.mock("../../src/db.js", () => ({
   pool: {
     query: poolQueryMock,
+    connect: poolConnectMock,
   },
 }));
 
@@ -59,29 +61,25 @@ describe("estimate generation job", () => {
     });
   });
 
-  it("returns early when the queued parse run no longer owns the document", async () => {
+  it("returns early when the queued parse run cannot be locked as the active document owner", async () => {
     const appDb = {
       select: vi.fn(),
     } as any;
+    const lockedClient = {
+      query: vi
+        .fn()
+        .mockResolvedValue({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] }),
+      release: vi.fn(),
+    } as any;
     const tenantDb = {
-      execute: vi.fn().mockResolvedValue(undefined),
-      select: vi.fn(() => ({
-        from: vi.fn(() => ({
-          where: vi.fn(() => ({
-            limit: vi.fn().mockResolvedValue([
-              {
-                activeParseRunId: "parse-run-newer",
-                parseStatus: "completed",
-                ocrStatus: "completed",
-              },
-            ]),
-          })),
-        })),
-      })),
       insert: vi.fn(),
       update: vi.fn(),
     } as any;
 
+    poolConnectMock.mockResolvedValue(lockedClient);
     drizzleMock.mockReturnValueOnce(appDb).mockReturnValueOnce(tenantDb);
 
     const { runEstimateGeneration } = await import("../../src/jobs/estimate-generation.js");
@@ -95,7 +93,11 @@ describe("estimate generation job", () => {
       "office-1"
     );
 
-    expect(tenantDb.execute).toHaveBeenCalledTimes(1);
+    expect(lockedClient.query).toHaveBeenCalledWith("BEGIN");
+    expect(String(lockedClient.query.mock.calls[1]?.[0])).toContain("SET LOCAL search_path TO office_estimating, public");
+    expect(String(lockedClient.query.mock.calls[2]?.[0])).toContain("FOR UPDATE");
+    expect(lockedClient.query).toHaveBeenLastCalledWith("ROLLBACK");
+    expect(lockedClient.release).toHaveBeenCalledTimes(1);
     expect(appDb.select).not.toHaveBeenCalled();
     expect(tenantDb.insert).not.toHaveBeenCalled();
     expect(getHistoricalPricingSignalsMock).not.toHaveBeenCalled();
@@ -106,13 +108,6 @@ describe("estimate generation job", () => {
 
   it("filters pending extractions to the still-active parse run before processing", async () => {
     const sourceLimit = vi.fn().mockResolvedValue([]);
-    const documentLimit = vi.fn().mockResolvedValue([
-      {
-        activeParseRunId: "parse-run-1",
-        parseStatus: "completed",
-        ocrStatus: "completed",
-      },
-    ]);
     const extractionWhere = vi.fn().mockResolvedValue([]);
     const appDb = {
       select: vi.fn(() => ({
@@ -123,22 +118,22 @@ describe("estimate generation job", () => {
         })),
       })),
     } as any;
+    const lockedClient = {
+      query: vi
+        .fn()
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [{ id: "doc-1" }] })
+        .mockResolvedValueOnce({ rows: [] }),
+      release: vi.fn(),
+    } as any;
     let tenantSelectCallCount = 0;
     const tenantDb = {
-      execute: vi.fn().mockResolvedValue(undefined),
       select: vi.fn((fields?: any) => ({
         from: vi.fn(() => {
           tenantSelectCallCount += 1;
 
           if (tenantSelectCallCount === 1) {
-            return {
-              where: vi.fn(() => ({
-                limit: documentLimit,
-              })),
-            };
-          }
-
-          if (tenantSelectCallCount === 2) {
             return {
               where: extractionWhere,
             };
@@ -168,6 +163,7 @@ describe("estimate generation job", () => {
       vendorQuotes: [],
       currentDeal: null,
     });
+    poolConnectMock.mockResolvedValue(lockedClient);
     drizzleMock.mockReturnValueOnce(appDb).mockReturnValueOnce(tenantDb);
 
     const { runEstimateGeneration } = await import("../../src/jobs/estimate-generation.js");
@@ -182,11 +178,20 @@ describe("estimate generation job", () => {
     );
 
     const extractionFilterSql = readSqlText(extractionWhere.mock.calls[0]?.[0]);
+    expect(String(lockedClient.query.mock.calls[2]?.[0])).toContain("FOR UPDATE");
+    expect(lockedClient.query).toHaveBeenLastCalledWith("COMMIT");
+    expect(lockedClient.release).toHaveBeenCalledTimes(1);
     expect(extractionFilterSql).toContain("sourceParseRunId");
     expect(extractionFilterSql).toContain("estimate_source_documents as document");
     expect(extractionFilterSql).toContain("active_parse_run_id");
     expect(extractionFilterSql).toContain("document.parse_status = 'completed'");
     expect(extractionFilterSql).toContain("document.ocr_status = 'completed'");
+    expect(lockedClient.query.mock.invocationCallOrder[2]).toBeLessThan(
+      extractionWhere.mock.invocationCallOrder[0]
+    );
+    expect(extractionWhere.mock.invocationCallOrder[0]).toBeLessThan(
+      lockedClient.query.mock.invocationCallOrder[3]
+    );
     expect(rankExtractionMatchesMock).not.toHaveBeenCalled();
     expect(buildPricingRecommendationMock).not.toHaveBeenCalled();
     expect(tenantDb.insert).toHaveBeenCalledTimes(1);

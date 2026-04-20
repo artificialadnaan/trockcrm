@@ -8,7 +8,6 @@ import {
   estimateGenerationRuns,
   estimatePricingRecommendations,
   estimateReviewEvents,
-  estimateSourceDocuments,
 } from "@trock-crm/shared/schema";
 import { pool } from "../db.js";
 import { listCatalogCandidatesForMatching, resolveActiveCatalogSnapshotVersionId } from "../../../server/src/modules/estimating/catalog-read-model-service.js";
@@ -35,52 +34,59 @@ export async function runEstimateGeneration(
 ) {
   const schemaName = await resolveSchemaName(officeId);
   const appDb = drizzle(pool, { schema, casing: "snake_case" as any });
-  const tenantDb = drizzle(pool, { schema, casing: "snake_case" as any });
-
-  await tenantDb.execute(sql.raw(`SET search_path TO ${schemaName}, public`));
-
-  if (payload.documentId && payload.parseRunId) {
-    const [currentDocument] = await tenantDb
-      .select({
-        activeParseRunId: estimateSourceDocuments.activeParseRunId,
-        parseStatus: estimateSourceDocuments.parseStatus,
-        ocrStatus: estimateSourceDocuments.ocrStatus,
-      })
-      .from(estimateSourceDocuments)
-      .where(eq(estimateSourceDocuments.id, payload.documentId))
-      .limit(1);
-
-    if (
-      !currentDocument ||
-      currentDocument.activeParseRunId !== payload.parseRunId ||
-      currentDocument.parseStatus !== "completed" ||
-      currentDocument.ocrStatus !== "completed"
-    ) {
-      return;
-    }
-  }
-
-  const [source] = await appDb
-    .select({ id: costCatalogSources.id })
-    .from(costCatalogSources)
-    .where(eq(costCatalogSources.provider, "procore"))
-    .limit(1);
-
-  const [run] = await tenantDb
-    .insert(estimateGenerationRuns)
-    .values({
-      dealId: payload.dealId ?? "",
-      status: "running",
-      inputSnapshotJson: {
-        documentId: payload.documentId ?? null,
-      },
-    })
-    .returning();
+  const lockedClient =
+    payload.documentId && payload.parseRunId ? await pool.connect() : null;
+  const tenantDb = drizzle(lockedClient ?? pool, { schema, casing: "snake_case" as any });
+  let transactionClosed = false;
+  let generationRunId: string | null = null;
 
   try {
+    if (lockedClient) {
+      await lockedClient.query("BEGIN");
+      await lockedClient.query(`SET LOCAL search_path TO ${schemaName}, public`);
+
+      const documentLock = await lockedClient.query(
+        `SELECT id
+         FROM ${schemaName}.estimate_source_documents
+         WHERE id = $1
+           AND active_parse_run_id = $2
+           AND parse_status = 'completed'
+           AND ocr_status = 'completed'
+         LIMIT 1
+         FOR UPDATE`,
+        [payload.documentId, payload.parseRunId]
+      );
+
+      if (!documentLock.rows[0]) {
+        await lockedClient.query("ROLLBACK");
+        transactionClosed = true;
+        return;
+      }
+    } else {
+      await tenantDb.execute(sql.raw(`SET search_path TO ${schemaName}, public`));
+    }
+
     if (!payload.dealId) {
       throw new Error("dealId is required for estimate generation");
     }
+
+    const [source] = await appDb
+      .select({ id: costCatalogSources.id })
+      .from(costCatalogSources)
+      .where(eq(costCatalogSources.provider, "procore"))
+      .limit(1);
+
+    const [run] = await tenantDb
+      .insert(estimateGenerationRuns)
+      .values({
+        dealId: payload.dealId ?? "",
+        status: "running",
+        inputSnapshotJson: {
+          documentId: payload.documentId ?? null,
+        },
+      })
+      .returning();
+    generationRunId = run.id;
 
     const pendingExtractionFilters = [
       eq(estimateExtractions.dealId, payload.dealId),
@@ -210,15 +216,31 @@ export async function runEstimateGeneration(
         catalogSnapshotVersionId,
       })
       .where(eq(estimateGenerationRuns.id, run.id));
+
+    if (lockedClient) {
+      await lockedClient.query("COMMIT");
+      transactionClosed = true;
+    }
   } catch (error) {
-    await tenantDb
-      .update(estimateGenerationRuns)
-      .set({
-        status: "failed",
-        completedAt: new Date(),
-        errorSummary: error instanceof Error ? error.message : "estimate generation failed",
-      })
-      .where(eq(estimateGenerationRuns.id, run.id));
+    if (lockedClient && !transactionClosed) {
+      await lockedClient.query("ROLLBACK").catch(() => {});
+      transactionClosed = true;
+      if (generationRunId) {
+        await lockedClient.query(`SET search_path TO ${schemaName}, public`);
+      }
+    }
+    if (generationRunId) {
+      await tenantDb
+        .update(estimateGenerationRuns)
+        .set({
+          status: "failed",
+          completedAt: new Date(),
+          errorSummary: error instanceof Error ? error.message : "estimate generation failed",
+        })
+        .where(eq(estimateGenerationRuns.id, generationRunId));
+    }
     throw error;
+  } finally {
+    lockedClient?.release();
   }
 }
