@@ -36,6 +36,8 @@
   Responsibility: create uploaded estimating documents and queue OCR/indexing.
 - Create: `server/src/modules/estimating/extraction-service.ts`
   Responsibility: normalize OCR output into extraction records.
+- Create: `server/src/modules/estimating/historical-pricing-service.ts`
+  Responsibility: derive historical estimate comps, awarded-job adjustments, vendor quote inputs, and win/loss patterns from existing deal and estimate data.
 - Create: `server/src/modules/estimating/matching-service.ts`
   Responsibility: rank catalog and historical estimate matches for extraction rows.
 - Create: `server/src/modules/estimating/pricing-service.ts`
@@ -576,7 +578,11 @@ export async function createEstimateSourceDocument({
     })
     .returning();
 
-  await enqueueEstimateDocumentOcr({ documentId: document.id, dealId: document.dealId });
+  await enqueueEstimateDocumentOcr({
+    documentId: document.id,
+    dealId: document.dealId,
+    officeId: input.officeId,
+  });
   return document;
 }
 ```
@@ -614,7 +620,38 @@ export async function runEstimateDocumentOcr(payload: { documentId: string }, of
 }
 ```
 
-- [ ] **Step 5: Register the new OCR and generation jobs in the worker job registry**
+- [ ] **Step 5: Normalize OCR page text into structured extraction rows**
+
+```ts
+const extractionRows = await extractEstimateScopeRows({
+  documentId: payload.documentId,
+  pages,
+});
+
+for (const row of extractionRows) {
+  await tenantDb.insert(estimateExtractions).values({
+    dealId: row.dealId,
+    projectId: row.projectId ?? null,
+    documentId: payload.documentId,
+    pageId: row.pageId ?? null,
+    extractionType: row.extractionType,
+    rawLabel: row.rawLabel,
+    normalizedLabel: row.normalizedLabel,
+    quantity: row.quantity ?? null,
+    unit: row.unit ?? null,
+    divisionHint: row.divisionHint ?? null,
+    confidence: row.confidence,
+    evidenceText: row.evidenceText ?? null,
+    evidenceBboxJson: row.evidenceBboxJson ?? {},
+    metadataJson: {
+      extractionProvider: row.provider,
+      extractionMethod: row.method,
+    },
+  });
+}
+```
+
+- [ ] **Step 6: Register the new OCR and generation jobs in the worker job registry**
 
 ```ts
 import { runEstimateDocumentOcr } from "./estimate-document-ocr.js";
@@ -629,7 +666,7 @@ registerJobHandler("estimate_generation", async (payload, officeId) => {
 });
 ```
 
-- [ ] **Step 6: Add routes and a document upload panel in the estimate tab**
+- [ ] **Step 7: Add routes and a document upload panel in the estimate tab**
 
 ```ts
 router.post("/deals/:dealId/estimating/documents", async (req, res) => {
@@ -653,6 +690,7 @@ router.post("/deals/:dealId/estimating/documents", async (req, res) => {
       storageKey: uploadedFile.storageKey,
       mimeType: uploadedFile.mimeType,
       userId: req.user.id,
+      officeId: req.user.activeOfficeId ?? req.user.officeId,
     },
   });
 
@@ -660,7 +698,7 @@ router.post("/deals/:dealId/estimating/documents", async (req, res) => {
 });
 ```
 
-- [ ] **Step 7: Re-run the focused service tests and a client typecheck**
+- [ ] **Step 8: Re-run the focused service tests and a client typecheck**
 
 Run: `npx vitest run server/tests/modules/estimating/document-service.test.ts`
 Expected: PASS
@@ -668,10 +706,10 @@ Expected: PASS
 Run: `npm run typecheck`
 Expected: PASS
 
-- [ ] **Step 8: Commit the upload and OCR queueing task**
+- [ ] **Step 9: Commit the upload and OCR queueing task**
 
 ```bash
-git add server/src/modules/estimating/document-service.ts server/src/modules/deals/routes.ts worker/src/jobs/estimate-document-ocr.ts worker/src/jobs/index.ts client/src/pages/deals/deal-estimates-tab.tsx client/src/components/estimating/estimate-documents-panel.tsx server/tests/modules/estimating/document-service.test.ts
+git add server/src/modules/estimating/document-service.ts server/src/modules/estimating/extraction-service.ts server/src/modules/deals/routes.ts worker/src/jobs/estimate-document-ocr.ts worker/src/jobs/index.ts client/src/pages/deals/deal-estimates-tab.tsx client/src/components/estimating/estimate-documents-panel.tsx server/tests/modules/estimating/document-service.test.ts
 git commit -m "feat: add estimating document upload and ocr queueing"
 ```
 
@@ -749,6 +787,7 @@ git commit -m "test: add estimating security and failure-mode coverage"
 
 **Files:**
 - Create: `server/src/modules/estimating/extraction-service.ts`
+- Create: `server/src/modules/estimating/historical-pricing-service.ts`
 - Create: `server/src/modules/estimating/matching-service.ts`
 - Create: `server/src/modules/estimating/pricing-service.ts`
 - Create: `server/src/modules/estimating/catalog-read-model-service.ts`
@@ -807,7 +846,25 @@ Run: `npx vitest run server/tests/modules/estimating/matching-service.test.ts se
 
 Expected: FAIL because the matching and pricing services do not exist yet.
 
-- [ ] **Step 3: Implement the catalog read model used by matching and pricing**
+- [ ] **Step 3: Implement the historical pricing retrieval service**
+
+```ts
+export async function getHistoricalPricingSignals(db: TenantDb, dealId: string) {
+  const historicalItems = await loadSimilarHistoricalEstimateLineItems(db, dealId);
+  const awardedOutcomes = await loadAwardedDealOutcomes(db, dealId);
+  const vendorQuotes = await loadHistoricalVendorQuoteSignals(db, dealId);
+  const wonBidPatterns = await loadWonBidPatterns(db, dealId);
+
+  return {
+    historicalItems,
+    awardedOutcomes,
+    vendorQuotes,
+    wonBidPatterns,
+  };
+}
+```
+
+- [ ] **Step 4: Implement the catalog read model used by matching and pricing**
 
 ```ts
 export async function listCatalogCandidatesForMatching(db: TenantDb, sourceId: string) {
@@ -827,7 +884,7 @@ export async function listCatalogCandidatesForMatching(db: TenantDb, sourceId: s
 }
 ```
 
-- [ ] **Step 4: Implement the extraction normalization and matching logic**
+- [ ] **Step 5: Implement the extraction normalization and matching logic**
 
 ```ts
 export function buildPricingRecommendation(input: BuildPricingRecommendationInput) {
@@ -867,7 +924,7 @@ export function buildPricingRecommendation(input: BuildPricingRecommendationInpu
 }
 ```
 
-- [ ] **Step 5: Implement matching to include historical evidence and store reviewable reasons**
+- [ ] **Step 6: Implement matching to include historical evidence and store reviewable reasons**
 
 ```ts
 export async function rankExtractionMatches({
@@ -916,9 +973,15 @@ export async function rankExtractionMatches({
 - [ ] **Step 5: Orchestrate generation to write extraction matches and pricing recommendations with evidence**
 
 ```ts
+const historicalSignals = await getHistoricalPricingSignals(tenantDb, deal.id);
+
 for (const extraction of pendingExtractions) {
   const catalogItems = await listCatalogCandidatesForMatching(tenantDb, catalogSourceId);
-  const matches = await rankExtractionMatches({ extraction, catalogItems, historicalItems });
+  const matches = await rankExtractionMatches({
+    extraction,
+    catalogItems,
+    historicalItems: historicalSignals.historicalItems,
+  });
   const topMatch = matches[0];
   if (!topMatch) {
     await insertEstimateReviewEvent(tenantDb, {
@@ -935,8 +998,9 @@ for (const extraction of pendingExtractions) {
     quantity: Number(extraction.quantity ?? 1),
     catalogBaselinePrice: topMatch.catalogBaselinePrice ?? null,
     historicalPrices: topMatch.historicalUnitPrices ?? [],
-    vendorQuotePrice: topMatch.vendorQuotePrice ?? null,
-    awardedOutcomeAdjustmentPercent: topMatch.awardedOutcomeAdjustmentPercent ?? 0,
+    vendorQuotePrice: topMatch.vendorQuotePrice ?? historicalSignals.vendorQuotes[0]?.unitPrice ?? null,
+    awardedOutcomeAdjustmentPercent:
+      topMatch.awardedOutcomeAdjustmentPercent ?? deriveAwardedOutcomeAdjustment(historicalSignals.awardedOutcomes),
     internalAdjustmentPercent: topMatch.internalAdjustmentPercent ?? 0,
     regionId: deal.regionId,
     projectTypeId: deal.projectTypeId,
@@ -951,16 +1015,16 @@ for (const extraction of pendingExtractions) {
 }
 ```
 
-- [ ] **Step 6: Re-run the matching and pricing tests**
+- [ ] **Step 7: Re-run the matching and pricing tests**
 
 Run: `npx vitest run server/tests/modules/estimating/matching-service.test.ts server/tests/modules/estimating/pricing-service.test.ts`
 
 Expected: PASS
 
-- [ ] **Step 7: Commit the extraction, matching, and pricing task**
+- [ ] **Step 8: Commit the extraction, matching, and pricing task**
 
 ```bash
-git add server/src/modules/estimating/catalog-read-model-service.ts server/src/modules/estimating/extraction-service.ts server/src/modules/estimating/matching-service.ts server/src/modules/estimating/pricing-service.ts worker/src/jobs/estimate-generation.ts server/tests/modules/estimating/matching-service.test.ts server/tests/modules/estimating/pricing-service.test.ts
+git add server/src/modules/estimating/catalog-read-model-service.ts server/src/modules/estimating/historical-pricing-service.ts server/src/modules/estimating/extraction-service.ts server/src/modules/estimating/matching-service.ts server/src/modules/estimating/pricing-service.ts worker/src/jobs/estimate-generation.ts server/tests/modules/estimating/matching-service.test.ts server/tests/modules/estimating/pricing-service.test.ts
 git commit -m "feat: add estimate extraction matching and pricing services"
 ```
 
