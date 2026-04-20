@@ -375,6 +375,76 @@ export interface InterventionManagerBrief {
   error: string | null;
 }
 
+export type InterventionPolicyRecommendationTaxonomy =
+  | "snooze_policy_adjustment"
+  | "escalation_policy_adjustment"
+  | "assignee_load_balancing"
+  | "disconnect_playbook_change"
+  | "monitor_only";
+
+export type InterventionPolicyRecommendationConfidence = "high" | "medium" | "low";
+
+export type InterventionPolicyRecommendationFeedbackValue =
+  | "helpful"
+  | "not_useful"
+  | "wrong_direction";
+
+export interface InterventionPolicyRecommendationEvidenceItem {
+  metricKey: string;
+  label: string;
+  currentValue: number | string | null;
+  baselineValue: number | string | null;
+  delta: number | string | null;
+  window: "last_7_days_vs_prior_7_days" | "last_30_days" | "last_30_days_vs_prior_30_days";
+  direction: "up" | "down" | "flat" | "not_applicable";
+}
+
+export interface InterventionPolicyRecommendation {
+  id: string;
+  officeId: string;
+  snapshotId: string;
+  taxonomy: InterventionPolicyRecommendationTaxonomy;
+  title: string;
+  statement: string;
+  whyNow: string;
+  expectedImpact: string;
+  confidence: InterventionPolicyRecommendationConfidence;
+  priority: number;
+  suggestedAction: string;
+  counterSignal: string | null;
+  evidence: InterventionPolicyRecommendationEvidenceItem[];
+  generatedAt: string;
+  staleAt: string;
+  renderStatus: "active" | "degraded";
+  feedbackSummary: {
+    helpfulCount: number;
+    notUsefulCount: number;
+    wrongDirectionCount: number;
+    commentCount: number;
+  };
+  feedbackStateForViewer: InterventionPolicyRecommendationFeedbackValue | null;
+}
+
+export interface InterventionPolicyRecommendationSnapshotView {
+  id: string;
+  officeId: string;
+  status: "active" | "degraded";
+  generatedAt: string;
+  staleAt: string;
+  supersededAt: string | null;
+}
+
+export type InterventionPolicyRecommendationsView =
+  | {
+      status: "missing_snapshot";
+      canRegenerate: true;
+    }
+  | {
+      status: "active" | "degraded";
+      snapshot: InterventionPolicyRecommendationSnapshotView;
+      recommendations: InterventionPolicyRecommendation[];
+    };
+
 export interface InterventionAnalyticsDashboard {
   summary: {
     openCases: number;

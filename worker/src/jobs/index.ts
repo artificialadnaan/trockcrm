@@ -14,6 +14,7 @@ import { runAiIndexDocument } from "./ai-index-document.js";
 import { runAiBackfillDocuments } from "./ai-backfill-documents.js";
 import { runAiRefreshCopilot } from "./ai-refresh-copilot.js";
 import { runAiGenerateDealCopilot } from "./ai-generate-deal-copilot.js";
+import { runAiGenerateInterventionPolicyRecommendations } from "./ai-generate-intervention-policy-recommendations.js";
 import { runAiDisconnectDigest } from "./ai-disconnect-digest.js";
 import { runAiDisconnectEscalationScan } from "./ai-disconnect-escalation.js";
 import { runAiDisconnectAdminTaskGeneration } from "./ai-disconnect-admin-tasks.js";
@@ -134,6 +135,10 @@ export function registerAllJobs() {
 
   registerJobHandler("ai_generate_deal_copilot", async (payload, officeId) => {
     await runAiGenerateDealCopilot(payload, officeId);
+  });
+
+  registerJobHandler("ai_generate_intervention_policy_recommendations", async (payload) => {
+    await runAiGenerateInterventionPolicyRecommendations(payload);
   });
 
   registerJobHandler("ai_disconnect_digest", async () => {

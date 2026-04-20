@@ -20,6 +20,9 @@ const serviceMocks = vi.hoisted(() => ({
 const interventionServiceMocks = vi.hoisted(() => ({
   listInterventionCases: vi.fn(),
   getInterventionAnalyticsDashboard: vi.fn(),
+  getInterventionPolicyRecommendationsView: vi.fn(),
+  regenerateInterventionPolicyRecommendations: vi.fn(),
+  recordInterventionPolicyRecommendationFeedback: vi.fn(),
   getLatestManagerAlertSnapshot: vi.fn(),
   runManagerAlertPreview: vi.fn(),
   sendManagerAlertSummary: vi.fn(),
@@ -62,6 +65,10 @@ vi.mock("../../../src/modules/ai-copilot/service.js", () => ({
 vi.mock("../../../src/modules/ai-copilot/intervention-service.js", () => ({
   listInterventionCases: interventionServiceMocks.listInterventionCases,
   getInterventionAnalyticsDashboard: interventionServiceMocks.getInterventionAnalyticsDashboard,
+  getInterventionPolicyRecommendationsView: interventionServiceMocks.getInterventionPolicyRecommendationsView,
+  regenerateInterventionPolicyRecommendations: interventionServiceMocks.regenerateInterventionPolicyRecommendations,
+  recordInterventionPolicyRecommendationFeedback:
+    interventionServiceMocks.recordInterventionPolicyRecommendationFeedback,
   getInterventionCaseDetail: interventionServiceMocks.getInterventionCaseDetail,
   buildInterventionCopilotView: interventionServiceMocks.buildInterventionCopilotView,
   regenerateInterventionCopilot: interventionServiceMocks.regenerateInterventionCopilot,
@@ -348,6 +355,95 @@ describe("ai copilot routes", () => {
     expect(response.body.breachQueue.items).toBeInstanceOf(Array);
     expect(response.body.managerBrief).toBeDefined();
     expect(executeMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns a missing-snapshot policy recommendation response for admins", async () => {
+    interventionServiceMocks.getInterventionPolicyRecommendationsView.mockResolvedValue({
+      status: "missing_snapshot",
+      canRegenerate: true,
+    });
+
+    const app = createApp("admin");
+    const response = await request(app).get("/api/ai/ops/intervention-policy-recommendations");
+
+    expect(response.status).toBe(200);
+    expect(interventionServiceMocks.getInterventionPolicyRecommendationsView).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        officeId: "office-1",
+        viewerUserId: "admin-1",
+      })
+    );
+    expect(response.body).toEqual({
+      status: "missing_snapshot",
+      canRegenerate: true,
+    });
+  });
+
+  it("queues policy recommendation regeneration for admins", async () => {
+    interventionServiceMocks.regenerateInterventionPolicyRecommendations.mockResolvedValue({
+      queued: true,
+      snapshotId: "snapshot-1",
+      status: "active",
+    });
+
+    const app = createApp("admin");
+    const response = await request(app).post("/api/ai/ops/intervention-policy-recommendations/regenerate");
+
+    expect(response.status).toBe(202);
+    expect(interventionServiceMocks.regenerateInterventionPolicyRecommendations).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        officeId: "office-1",
+        requestedByUserId: "admin-1",
+      })
+    );
+    expect(response.body).toEqual({
+      queued: true,
+      snapshotId: "snapshot-1",
+      status: "active",
+    });
+  });
+
+  it("records policy recommendation feedback for admins", async () => {
+    interventionServiceMocks.recordInterventionPolicyRecommendationFeedback.mockResolvedValue({
+      recommendationId: "11111111-1111-4111-8111-111111111111",
+      feedbackValue: "helpful",
+      comment: "Useful signal",
+    });
+
+    const app = createApp("admin");
+    const response = await request(app)
+      .post("/api/ai/ops/intervention-policy-recommendations/11111111-1111-4111-8111-111111111111/feedback")
+      .send({
+        feedbackValue: "helpful",
+        comment: "Useful signal",
+      });
+
+    expect(response.status).toBe(200);
+    expect(interventionServiceMocks.recordInterventionPolicyRecommendationFeedback).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        officeId: "office-1",
+        recommendationId: "11111111-1111-4111-8111-111111111111",
+        userId: "admin-1",
+        feedbackValue: "helpful",
+        comment: "Useful signal",
+      })
+    );
+    expect(response.body.feedbackValue).toBe("helpful");
+  });
+
+  it("rejects invalid policy recommendation feedback values", async () => {
+    const app = createApp("admin");
+    const response = await request(app)
+      .post("/api/ai/ops/intervention-policy-recommendations/11111111-1111-4111-8111-111111111111/feedback")
+      .send({
+        feedbackValue: "love_it",
+      });
+
+    expect(response.status).toBe(400);
+    expect(interventionServiceMocks.recordInterventionPolicyRecommendationFeedback).not.toHaveBeenCalled();
   });
 
   it("returns the latest persisted manager alert snapshot for the active office", async () => {

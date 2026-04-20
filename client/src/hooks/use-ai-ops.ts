@@ -511,6 +511,67 @@ export interface ManagerAlertSendResult {
   }>;
 }
 
+export type InterventionPolicyRecommendationFeedbackValue = "helpful" | "not_useful" | "wrong_direction";
+
+export interface InterventionPolicyRecommendationEvidenceItem {
+  metricKey: string;
+  label: string;
+  currentValue: number | string | null;
+  baselineValue: number | string | null;
+  delta: number | string | null;
+  window: "last_7_days_vs_prior_7_days" | "last_30_days" | "last_30_days_vs_prior_30_days";
+  direction: "up" | "down" | "flat" | "not_applicable";
+}
+
+export interface InterventionPolicyRecommendation {
+  id: string;
+  officeId: string;
+  snapshotId: string;
+  taxonomy:
+    | "snooze_policy_adjustment"
+    | "escalation_policy_adjustment"
+    | "assignee_load_balancing"
+    | "disconnect_playbook_change"
+    | "monitor_only";
+  title: string;
+  statement: string;
+  whyNow: string;
+  expectedImpact: string;
+  confidence: "high" | "medium" | "low";
+  priority: number;
+  suggestedAction: string;
+  counterSignal: string | null;
+  evidence: InterventionPolicyRecommendationEvidenceItem[];
+  generatedAt: string;
+  staleAt: string;
+  renderStatus: "active" | "degraded";
+  feedbackSummary: {
+    helpfulCount: number;
+    notUsefulCount: number;
+    wrongDirectionCount: number;
+    commentCount: number;
+  };
+  feedbackStateForViewer: InterventionPolicyRecommendationFeedbackValue | null;
+}
+
+export type InterventionPolicyRecommendationsView =
+  | {
+      status: "missing_snapshot";
+      canRegenerate: true;
+    }
+  | {
+      status: "active" | "degraded";
+      snapshot: {
+        id: string;
+        officeId: string;
+        status: "active" | "degraded";
+        generatedAt: string;
+        staleAt: string;
+        supersededAt: string | null;
+      };
+      recommendations: InterventionPolicyRecommendation[];
+    };
+
 export interface QueueAiBackfillResult {
   queued: boolean;
   sourceType: string | null;
@@ -567,6 +628,40 @@ export function useInterventionAnalytics() {
   );
 }
 
+export function useInterventionPolicyRecommendations() {
+  const [data, setData] = useState<InterventionPolicyRecommendationsView | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const requestVersionRef = useRef(0);
+
+  const fetchData = useCallback(async () => {
+    const requestVersion = ++requestVersionRef.current;
+    setLoading(true);
+    setError(null);
+    try {
+      const response = await api<InterventionPolicyRecommendationsView>("/ai/ops/intervention-policy-recommendations");
+      if (requestVersion !== requestVersionRef.current) return;
+      setData(response);
+    } catch (err: unknown) {
+      if (requestVersion !== requestVersionRef.current) return;
+      setError(err instanceof Error ? err.message : "Failed to load policy recommendations");
+    } finally {
+      if (requestVersion === requestVersionRef.current) setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void fetchData();
+  }, [fetchData]);
+
+  return {
+    data,
+    loading,
+    error,
+    refetch: fetchData,
+  };
+}
+
 function isMissingManagerAlertSnapshotError(error: unknown) {
   return error instanceof Error && error.message === "Manager alert snapshot not found";
 }
@@ -621,6 +716,34 @@ export async function sendManagerAlertSummary() {
   return api<ManagerAlertSendResult>("/ai/ops/intervention-manager-alerts/send", {
     method: "POST",
     json: {},
+  });
+}
+
+export async function regenerateInterventionPolicyRecommendations() {
+  return api<{ queued: true; snapshotId: string; status: string }>(
+    "/ai/ops/intervention-policy-recommendations/regenerate",
+    {
+      method: "POST",
+      json: {},
+    }
+  );
+}
+
+export async function submitInterventionPolicyRecommendationFeedback(input: {
+  recommendationId: string;
+  feedbackValue: InterventionPolicyRecommendationFeedbackValue;
+  comment?: string | null;
+}) {
+  return api<{
+    recommendationId: string;
+    feedbackValue: InterventionPolicyRecommendationFeedbackValue;
+    comment: string | null;
+  }>(`/ai/ops/intervention-policy-recommendations/${input.recommendationId}/feedback`, {
+    method: "POST",
+    json: {
+      feedbackValue: input.feedbackValue,
+      comment: input.comment ?? null,
+    },
   });
 }
 

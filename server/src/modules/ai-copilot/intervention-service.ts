@@ -9,6 +9,7 @@ import {
   aiDisconnectCases,
   companies,
   deals,
+  jobQueue,
   tasks,
   users,
 } from "@trock-crm/shared/schema";
@@ -40,6 +41,10 @@ import type {
   InterventionCopilotSimilarCase,
   InterventionCopilotView,
   InterventionManagerBrief,
+  InterventionPolicyRecommendation,
+  InterventionPolicyRecommendationConfidence,
+  InterventionPolicyRecommendationFeedbackValue,
+  InterventionPolicyRecommendationsView,
   InterventionOutcomeEffectiveness,
   InterventionQueueFilters,
   InterventionQueueItem,
@@ -79,6 +84,9 @@ type InMemoryTenantDb = {
     history: DisconnectCaseHistoryRow[];
     packets?: AiCopilotPacketRow[];
     feedback?: AiFeedbackRow[];
+    policyRecommendationSnapshots?: Array<Record<string, any>>;
+    policyRecommendationRows?: Array<Record<string, any>>;
+    policyRecommendationFeedback?: Array<Record<string, any>>;
   };
 };
 
@@ -1832,6 +1840,931 @@ export async function getInterventionAnalyticsDashboard(
       lowDays: 10,
       timingBasis: "business_days",
     },
+  };
+}
+
+type PolicySnapshotRow = {
+  id: string;
+  office_id: string;
+  status: "pending" | "active" | "degraded" | "superseded";
+  generated_at: Date | string;
+  stale_at: Date | string;
+  superseded_at: Date | string | null;
+};
+
+type PolicyRecommendationRow = {
+  snapshot_id: string;
+  office_id: string;
+  recommendation_id: string;
+  taxonomy: InterventionPolicyRecommendation["taxonomy"];
+  primary_grouping_key: string;
+  title: string;
+  statement: string;
+  why_now: string;
+  expected_impact: string;
+  confidence: InterventionPolicyRecommendationConfidence;
+  priority: number;
+  suggested_action: string;
+  counter_signal: string | null;
+  render_status: "active" | "degraded";
+  evidence_json: InterventionPolicyRecommendation["evidence"];
+  generated_at: Date | string;
+  stale_at: Date | string;
+};
+
+type PolicyFeedbackRow = {
+  recommendation_id: string;
+  user_id: string;
+  feedback_value: InterventionPolicyRecommendationFeedbackValue;
+  comment: string | null;
+};
+
+const PENDING_POLICY_SNAPSHOT_TIMEOUT_MS = 10 * 60 * 1000;
+
+function deterministicUuid(seed: string) {
+  const digest = crypto.createHash("sha1").update(seed).digest("hex").slice(0, 32);
+  return `${digest.slice(0, 8)}-${digest.slice(8, 12)}-4${digest.slice(13, 16)}-8${digest.slice(17, 20)}-${digest.slice(20)}`;
+}
+
+function toIso(value: Date | string | null | undefined) {
+  if (!value) return null;
+  return value instanceof Date ? value.toISOString() : String(value);
+}
+
+function asNumber(value: unknown) {
+  return typeof value === "number" ? value : value == null ? null : Number(value);
+}
+
+function mapPolicyConfidence(score: number): InterventionPolicyRecommendationConfidence | null {
+  if (score >= 75) return "high";
+  if (score >= 60) return "medium";
+  if (score >= 55) return "low";
+  return null;
+}
+
+function scaleScore(value: number, min: number, max: number, weight: number) {
+  if (value <= min) return 0;
+  if (value >= max) return weight;
+  return Math.round(((value - min) / (max - min)) * weight);
+}
+
+function buildPolicyRecommendationId(officeId: string, taxonomy: InterventionPolicyRecommendation["taxonomy"], primaryGroupingKey: string) {
+  return deterministicUuid(`${officeId}:${taxonomy}:${primaryGroupingKey}`);
+}
+
+function buildPolicyRecommendationCandidates(input: {
+  officeId: string;
+  cases: DisconnectCaseRow[];
+  history: DisconnectCaseHistoryRow[];
+  usersMap: Map<string, string>;
+  outcomeEffectiveness: InterventionOutcomeEffectiveness;
+  now: Date;
+}) {
+  const candidates: Array<
+    Omit<InterventionPolicyRecommendation, "snapshotId" | "feedbackSummary" | "feedbackStateForViewer"> & {
+      primaryGroupingKey: string;
+      score: number;
+      impactScore: number;
+      persistenceScore: number;
+      affectedVolume: number;
+    }
+  > = [];
+  const staleAt = new Date(input.now.getTime() + 24 * 60 * 60 * 1000).toISOString();
+
+  const highRiskCases = input.cases.filter(
+    (row) =>
+      row.status === "open" &&
+      (row.severity === "critical" || row.severity === "high" || row.escalated || row.reopenCount > 0)
+  );
+  if (highRiskCases.length > 0) {
+    const assigneeGroups = new Map<string, DisconnectCaseRow[]>();
+    for (const row of highRiskCases) {
+      if (!row.assignedTo) continue;
+      const bucket = assigneeGroups.get(row.assignedTo) ?? [];
+      bucket.push(row);
+      assigneeGroups.set(row.assignedTo, bucket);
+    }
+    for (const [assigneeId, rows] of assigneeGroups) {
+      const share = rows.length / highRiskCases.length;
+      if (rows.length < 5 || share < 0.35) continue;
+      const score =
+        scaleScore(rows.length, 4, 12, 25) +
+        scaleScore(share, 0.35, 0.75, 40) +
+        scaleScore(rows.filter((row) => row.escalated).length, 0, rows.length, 20) +
+        15;
+      const impactScore = scaleScore(share, 0.35, 0.75, 40);
+      const persistenceScore = scaleScore(rows.filter((row) => row.escalated).length, 0, rows.length, 20);
+      const confidence = mapPolicyConfidence(score);
+      if (!confidence) continue;
+      const assigneeName = input.usersMap.get(assigneeId) ?? "Assigned manager";
+      candidates.push({
+        id: buildPolicyRecommendationId(input.officeId, "assignee_load_balancing", assigneeId),
+        officeId: input.officeId,
+        taxonomy: "assignee_load_balancing",
+        title: `Rebalance ${assigneeName} load`,
+        statement: `${assigneeName} is carrying a disproportionate share of high-risk open intervention cases.`,
+        whyNow: `${rows.length} of ${highRiskCases.length} high-risk open cases are concentrated with this assignee.`,
+        expectedImpact: "Reduce escalation pileups and improve response time on overdue intervention work.",
+        confidence,
+        priority: score,
+        suggestedAction: "Reassign part of the high-risk queue or adjust fallback routing for new intervention cases.",
+        counterSignal: "Confirm this concentration is not driven by an intentional temporary ownership handoff.",
+        evidence: [
+          {
+            metricKey: "high_risk_assignee_share",
+            label: "High-risk assignee share",
+            currentValue: Number(share.toFixed(2)),
+            baselineValue: 0.35,
+            delta: Number((share - 0.35).toFixed(2)),
+            window: "last_30_days",
+            direction: "up",
+          },
+        ],
+        generatedAt: input.now.toISOString(),
+        staleAt,
+        renderStatus: "active",
+        primaryGroupingKey: assigneeId,
+        score,
+        impactScore,
+        persistenceScore,
+        affectedVolume: rows.length,
+      });
+    }
+  }
+
+  const latestHistoryByCase = new Map<string, DisconnectCaseHistoryRow>();
+  for (const row of [...input.history].sort((left, right) => right.actedAt.getTime() - left.actedAt.getTime())) {
+    if (!latestHistoryByCase.has(row.disconnectCaseId)) latestHistoryByCase.set(row.disconnectCaseId, row);
+  }
+  const snoozeBreachCounts = new Map<string, number>();
+  for (const row of input.cases) {
+    if (row.status !== "snoozed" || !row.snoozedUntil || row.snoozedUntil > input.now) continue;
+    const historyRow = latestHistoryByCase.get(row.id);
+    const reasonCode = readHistoryMetadata(historyRow ?? { metadataJson: null }).conclusion?.snoozeReasonCode;
+    if (!reasonCode) continue;
+    snoozeBreachCounts.set(reasonCode, (snoozeBreachCounts.get(reasonCode) ?? 0) + 1);
+  }
+
+  for (const item of input.outcomeEffectiveness.snoozeReasonPerformance) {
+    const breachCount = snoozeBreachCounts.get(item.key) ?? 0;
+    const breachRate = item.volume > 0 ? breachCount / item.volume : 0;
+    if ((item.volume ?? 0) < 5 || breachRate < 0.2 || ((item.reopenRate ?? 0) < 0.25 && breachCount < 3)) continue;
+    const score =
+      scaleScore(item.volume, 4, 14, 25) +
+      scaleScore(item.reopenRate ?? 0, 0.25, 0.6, 40) +
+      scaleScore(breachRate, 0.2, 0.6, 20) +
+      15;
+    const impactScore = scaleScore(item.reopenRate ?? 0, 0.25, 0.6, 40);
+    const persistenceScore = scaleScore(breachRate, 0.2, 0.6, 20);
+    const confidence = mapPolicyConfidence(score);
+    if (!confidence) continue;
+    candidates.push({
+      id: buildPolicyRecommendationId(input.officeId, "snooze_policy_adjustment", item.key),
+      officeId: input.officeId,
+      taxonomy: "snooze_policy_adjustment",
+      title: `Tighten ${item.label} snoozes`,
+      statement: `Shorten or gate long ${item.label.toLowerCase()} snoozes for manager-owned intervention work.`,
+      whyNow: `${item.label} snoozes are reopening too often after conclusion and are underperforming the expected close-through baseline.`,
+      expectedImpact: "Reduce repeat-open volume and shorten breach recovery time.",
+      confidence,
+      priority: score,
+      suggestedAction: `Review the default ${item.label.toLowerCase()} snooze window and require a stronger next-step plan.`,
+      counterSignal: "Verify this is not driven by one-off customer-response delays before changing the default policy.",
+      evidence: [
+        {
+          metricKey: `${item.key}_breach_rate`,
+          label: `${item.label} breach rate`,
+          currentValue: Number(breachRate.toFixed(2)),
+          baselineValue: 0.2,
+          delta: Number((breachRate - 0.2).toFixed(2)),
+          window: "last_30_days",
+          direction: "up",
+        },
+      ],
+      generatedAt: input.now.toISOString(),
+      staleAt,
+      renderStatus: "active",
+      primaryGroupingKey: item.key,
+      score,
+      impactScore,
+      persistenceScore,
+      affectedVolume: item.volume,
+    });
+  }
+
+  const byDisconnectType = new Map<
+    string,
+    Array<InterventionOutcomeEffectiveness["disconnectTypeInteractions"][number]>
+  >();
+  for (const item of input.outcomeEffectiveness.disconnectTypeInteractions) {
+    const bucket = byDisconnectType.get(item.disconnectType) ?? [];
+    bucket.push(item);
+    byDisconnectType.set(item.disconnectType, bucket);
+  }
+
+  for (const [disconnectType, items] of byDisconnectType) {
+    const escalated = items.find((item) => item.conclusionFamily === "escalate");
+    const bestAlternative = items
+      .filter((item) => item.conclusionFamily !== "escalate" && item.durableCloseRate != null)
+      .sort((left, right) => (right.durableCloseRate ?? 0) - (left.durableCloseRate ?? 0))[0];
+    if (escalated && (escalated.volume ?? 0) >= 5 && bestAlternative && (bestAlternative.durableCloseRate ?? 0) - (escalated.durableCloseRate ?? 0) >= 0.15) {
+      const gap = (bestAlternative.durableCloseRate ?? 0) - (escalated.durableCloseRate ?? 0);
+      const score = scaleScore(escalated.volume, 4, 14, 25) + scaleScore(gap, 0.15, 0.5, 40) + 20 + 15;
+      const impactScore = scaleScore(gap, 0.15, 0.5, 40);
+      const persistenceScore = 20;
+      const confidence = mapPolicyConfidence(score);
+      if (confidence) {
+        candidates.push({
+          id: buildPolicyRecommendationId(input.officeId, "escalation_policy_adjustment", disconnectType),
+          officeId: input.officeId,
+          taxonomy: "escalation_policy_adjustment",
+          title: `Reroute escalation handling for ${disconnectType.replace(/_/g, " ")}`,
+          statement: `Escalation is underperforming the best alternative conclusion path for this disconnect type.`,
+          whyNow: `${disconnectType.replace(/_/g, " ")} escalations are closing less durably than ${bestAlternative.conclusionFamily} over the current window.`,
+          expectedImpact: "Improve durable-close rate on recurring intervention patterns before they become repeat-open work.",
+          confidence,
+          priority: score,
+          suggestedAction: `Review the escalation playbook for ${disconnectType.replace(/_/g, " ")} and tighten when managers escalate versus resolve or snooze.`,
+          counterSignal: "Check whether recent escalations were intentionally reserved for the hardest edge cases.",
+          evidence: [
+            {
+              metricKey: `${disconnectType}_escalation_close_gap`,
+              label: `${disconnectType.replace(/_/g, " ")} durable-close gap`,
+              currentValue: escalated.durableCloseRate,
+              baselineValue: bestAlternative.durableCloseRate,
+              delta: Number(gap.toFixed(2)),
+              window: "last_30_days",
+              direction: "down",
+            },
+          ],
+          generatedAt: input.now.toISOString(),
+          staleAt,
+          renderStatus: "active",
+          primaryGroupingKey: disconnectType,
+          score,
+          impactScore,
+          persistenceScore,
+          affectedVolume: escalated.volume,
+        });
+      }
+    }
+
+    const dominant = [...items].sort((left, right) => right.volume - left.volume)[0];
+    if (dominant && items.reduce((sum, item) => sum + item.volume, 0) >= 10 && (dominant.reopenRate ?? 0) >= 0.25) {
+      const score = scaleScore(items.reduce((sum, item) => sum + item.volume, 0), 9, 20, 25) + scaleScore(dominant.reopenRate ?? 0, 0.25, 0.55, 40) + 20 + 15;
+      const impactScore = scaleScore(dominant.reopenRate ?? 0, 0.25, 0.55, 40);
+      const persistenceScore = 20;
+      const confidence = mapPolicyConfidence(score);
+      if (confidence) {
+        candidates.push({
+          id: buildPolicyRecommendationId(input.officeId, "disconnect_playbook_change", disconnectType),
+          officeId: input.officeId,
+          taxonomy: "disconnect_playbook_change",
+          title: `Change the ${disconnectType.replace(/_/g, " ")} playbook`,
+          statement: `${dominant.conclusionFamily} is the dominant intervention path here, but it is reopening too often.`,
+          whyNow: `${disconnectType.replace(/_/g, " ")} has enough volume to justify a targeted playbook change.`,
+          expectedImpact: "Improve first-pass handling on a recurring disconnect type and reduce repeat intervention churn.",
+          confidence,
+          priority: score,
+          suggestedAction: `Update the default conclusion guidance for ${disconnectType.replace(/_/g, " ")} and coach managers toward the stronger path.`,
+          counterSignal: "Validate that the recent reopen pattern is not a short-lived mix shift before revising the shared playbook.",
+          evidence: [
+            {
+              metricKey: `${disconnectType}_dominant_reopen_rate`,
+              label: `${disconnectType.replace(/_/g, " ")} dominant-family reopen rate`,
+              currentValue: dominant.reopenRate,
+              baselineValue: 0.25,
+              delta: dominant.reopenRate == null ? null : Number((dominant.reopenRate - 0.25).toFixed(2)),
+              window: "last_30_days",
+              direction: "up",
+            },
+          ],
+          generatedAt: input.now.toISOString(),
+          staleAt,
+          renderStatus: "active",
+          primaryGroupingKey: disconnectType,
+          score,
+          impactScore,
+          persistenceScore,
+          affectedVolume: items.reduce((sum, item) => sum + item.volume, 0),
+        });
+      }
+    }
+  }
+
+  if (candidates.length === 0) {
+    const warning = input.outcomeEffectiveness.warnings.find((item) => item.volume >= 5);
+    if (warning) {
+      const score = 58;
+      candidates.push({
+        id: buildPolicyRecommendationId(input.officeId, "monitor_only", `${warning.kind}:${warning.key}`),
+        officeId: input.officeId,
+        taxonomy: "monitor_only",
+        title: `Monitor ${warning.label.toLowerCase()}`,
+        statement: `This pattern is notable enough to track, but not yet strong enough for a policy change.`,
+        whyNow: `${warning.label} is elevated in the current intervention window.`,
+        expectedImpact: "Keeps managers aligned on a risk pattern before it hardens into a recurring policy problem.",
+        confidence: "low",
+        priority: score,
+        suggestedAction: "Continue monitoring this pattern and re-evaluate after another full recommendation cycle.",
+        counterSignal: "No prescriptive recommendation qualified above the action threshold yet.",
+        evidence: [
+          {
+            metricKey: `${warning.kind}:${warning.key}`,
+            label: warning.label,
+            currentValue: warning.rate,
+            baselineValue: null,
+            delta: null,
+            window: "last_30_days",
+            direction: "not_applicable",
+          },
+        ],
+        generatedAt: input.now.toISOString(),
+        staleAt,
+        renderStatus: "active",
+        primaryGroupingKey: `${warning.kind}:${warning.key}`,
+        score,
+        impactScore: 20,
+        persistenceScore: 10,
+        affectedVolume: warning.volume,
+      });
+    }
+  }
+
+  const taxonomyOrder = [
+    "snooze_policy_adjustment",
+    "escalation_policy_adjustment",
+    "assignee_load_balancing",
+    "disconnect_playbook_change",
+    "monitor_only",
+  ] satisfies InterventionPolicyRecommendation["taxonomy"][];
+  const ranked = [...candidates].sort((left, right) => {
+    if (right.score !== left.score) return right.score - left.score;
+    if (right.impactScore !== left.impactScore) return right.impactScore - left.impactScore;
+    if (right.persistenceScore !== left.persistenceScore) return right.persistenceScore - left.persistenceScore;
+    if (right.affectedVolume !== left.affectedVolume) return right.affectedVolume - left.affectedVolume;
+    if (left.taxonomy !== right.taxonomy) {
+      return taxonomyOrder.indexOf(left.taxonomy) - taxonomyOrder.indexOf(right.taxonomy);
+    }
+    return left.primaryGroupingKey.localeCompare(right.primaryGroupingKey);
+  });
+  const primary = ranked.filter((candidate) => candidate.score >= 70).slice(0, 3);
+  const secondary = ranked
+    .filter((candidate) => candidate.score >= 55 && !primary.some((primaryCandidate) => primaryCandidate.id === candidate.id))
+    .slice(0, 2);
+  return [...primary, ...secondary];
+}
+
+function finalizePolicyRecommendationCandidates(
+  candidates: ReturnType<typeof buildPolicyRecommendationCandidates>
+): {
+  snapshotStatus: "active" | "degraded";
+  recommendations: ReturnType<typeof buildPolicyRecommendationCandidates>;
+} {
+  let degraded = false;
+  const finalized = candidates.map((candidate) => {
+    try {
+      if (!candidate.title || !candidate.statement || !candidate.whyNow) {
+        throw new Error("Incomplete recommendation copy");
+      }
+      return candidate;
+    } catch {
+      degraded = true;
+      return {
+        ...candidate,
+        title: candidate.title || "Monitor intervention policy drift",
+        statement: candidate.statement || "A policy pattern qualified but required fallback copy.",
+        whyNow: candidate.whyNow || "A qualifying intervention signal needs manual review.",
+        expectedImpact: candidate.expectedImpact || "Keep managers aligned on a qualifying policy signal.",
+        suggestedAction: candidate.suggestedAction || "Review the underlying analytics before making a policy change.",
+        renderStatus: "degraded" as const,
+      };
+    }
+  });
+
+  return {
+    snapshotStatus: degraded ? "degraded" : "active",
+    recommendations: finalized,
+  };
+}
+
+function hydratePolicyRecommendationView(input: {
+  snapshot: PolicySnapshotRow & { status: "active" | "degraded" };
+  recommendationRows: PolicyRecommendationRow[];
+  feedbackRows: PolicyFeedbackRow[];
+  viewerUserId: string;
+}): InterventionPolicyRecommendationsView {
+  const recommendations = input.recommendationRows.map((row) => {
+    const feedback = input.feedbackRows.filter((item) => item.recommendation_id === row.recommendation_id);
+    const viewerFeedback = feedback.find((item) => item.user_id === input.viewerUserId);
+    return {
+      id: row.recommendation_id,
+      officeId: row.office_id,
+      snapshotId: row.snapshot_id,
+      taxonomy: row.taxonomy,
+      title: row.title,
+      statement: row.statement,
+      whyNow: row.why_now,
+      expectedImpact: row.expected_impact,
+      confidence: row.confidence,
+      priority: row.priority,
+      suggestedAction: row.suggested_action,
+      counterSignal: row.counter_signal,
+      evidence: Array.isArray(row.evidence_json) ? row.evidence_json : [],
+      generatedAt: toIso(row.generated_at) ?? new Date().toISOString(),
+      staleAt: toIso(row.stale_at) ?? new Date().toISOString(),
+      renderStatus: row.render_status,
+      feedbackSummary: {
+        helpfulCount: feedback.filter((item) => item.feedback_value === "helpful").length,
+        notUsefulCount: feedback.filter((item) => item.feedback_value === "not_useful").length,
+        wrongDirectionCount: feedback.filter((item) => item.feedback_value === "wrong_direction").length,
+        commentCount: feedback.filter((item) => Boolean(item.comment)).length,
+      },
+      feedbackStateForViewer: viewerFeedback?.feedback_value ?? null,
+    } satisfies InterventionPolicyRecommendation;
+  });
+
+  return {
+    status: input.snapshot.status,
+    snapshot: {
+      id: input.snapshot.id,
+      officeId: input.snapshot.office_id,
+      status: input.snapshot.status,
+      generatedAt: toIso(input.snapshot.generated_at) ?? new Date().toISOString(),
+      staleAt: toIso(input.snapshot.stale_at) ?? new Date().toISOString(),
+      supersededAt: toIso(input.snapshot.superseded_at),
+    },
+    recommendations,
+  };
+}
+
+async function fetchLatestRenderablePolicySnapshot(tenantDb: TenantDb | InMemoryTenantDb, officeId: string) {
+  if (isInMemoryTenantDb(tenantDb)) {
+    const rows = (tenantDb.state.policyRecommendationSnapshots ?? []) as PolicySnapshotRow[];
+    return rows
+      .filter((row) => row.office_id === officeId && (row.status === "active" || row.status === "degraded"))
+      .sort((left, right) => new Date(toIso(right.generated_at) ?? 0).getTime() - new Date(toIso(left.generated_at) ?? 0).getTime())[0] as
+      | (PolicySnapshotRow & { status: "active" | "degraded" })
+      | undefined
+      | null;
+  }
+
+  const result = await tenantDb.execute(sql`
+    SELECT id, office_id, status, generated_at, stale_at, superseded_at
+    FROM ai_policy_recommendation_snapshots
+    WHERE office_id = ${officeId}
+      AND status IN ('active', 'degraded')
+    ORDER BY generated_at DESC
+    LIMIT 1
+  `);
+  return ((result as any).rows?.[0] ?? null) as (PolicySnapshotRow & { status: "active" | "degraded" }) | null;
+}
+
+async function fetchPendingPolicySnapshot(tenantDb: TenantDb | InMemoryTenantDb, officeId: string) {
+  if (isInMemoryTenantDb(tenantDb)) {
+    const rows = (tenantDb.state.policyRecommendationSnapshots ?? []) as Array<PolicySnapshotRow & { status: string }>;
+    return rows.find((row) => row.office_id === officeId && row.status === "pending") ?? null;
+  }
+
+  const result = await tenantDb.execute(sql`
+    SELECT id, office_id, status, generated_at, stale_at, superseded_at
+    FROM ai_policy_recommendation_snapshots
+    WHERE office_id = ${officeId}
+      AND status = 'pending'
+    ORDER BY generated_at DESC
+    LIMIT 1
+  `);
+  return ((result as any).rows?.[0] ?? null) as (PolicySnapshotRow & { status: string }) | null;
+}
+
+async function fetchPolicyRecommendationRows(
+  tenantDb: TenantDb | InMemoryTenantDb,
+  officeId: string,
+  snapshotId: string
+) {
+  if (isInMemoryTenantDb(tenantDb)) {
+    return ((tenantDb.state.policyRecommendationRows ?? []) as PolicyRecommendationRow[])
+      .filter((row) => row.office_id === officeId && row.snapshot_id === snapshotId)
+      .sort((left, right) => right.priority - left.priority);
+  }
+
+  const result = await tenantDb.execute(sql`
+    SELECT
+      snapshot_id,
+      office_id,
+      recommendation_id,
+      taxonomy,
+      primary_grouping_key,
+      title,
+      statement,
+      why_now,
+      expected_impact,
+      confidence,
+      priority,
+      suggested_action,
+      counter_signal,
+      render_status,
+      evidence_json,
+      generated_at,
+      stale_at
+    FROM ai_policy_recommendation_rows
+    WHERE office_id = ${officeId}
+      AND snapshot_id = ${snapshotId}
+    ORDER BY priority DESC, recommendation_id ASC
+  `);
+  return (((result as any).rows ?? []) as PolicyRecommendationRow[]).map((row) => ({
+    ...row,
+    evidence_json: Array.isArray((row as any).evidence_json) ? (row as any).evidence_json : [],
+  }));
+}
+
+async function fetchPolicyFeedbackRows(
+  tenantDb: TenantDb | InMemoryTenantDb,
+  officeId: string,
+  recommendationIds: string[]
+) {
+  if (recommendationIds.length === 0) return [] as PolicyFeedbackRow[];
+  if (isInMemoryTenantDb(tenantDb)) {
+    return ((tenantDb.state.policyRecommendationFeedback ?? []) as PolicyFeedbackRow[]).filter((row) =>
+      recommendationIds.includes(row.recommendation_id)
+    );
+  }
+  const result = await tenantDb.execute(sql`
+    SELECT recommendation_id, user_id, feedback_value, comment
+    FROM ai_policy_recommendation_feedback
+    WHERE office_id = ${officeId}
+      AND recommendation_id = ANY(${recommendationIds}::uuid[])
+  `);
+  return ((result as any).rows ?? []) as PolicyFeedbackRow[];
+}
+
+export async function getInterventionPolicyRecommendationsView(
+  tenantDb: TenantDb | InMemoryTenantDb,
+  input: { officeId: string; viewerUserId: string; now?: Date }
+): Promise<InterventionPolicyRecommendationsView> {
+  const snapshot = await fetchLatestRenderablePolicySnapshot(tenantDb, input.officeId);
+  if (!snapshot) {
+    return {
+      status: "missing_snapshot",
+      canRegenerate: true,
+    };
+  }
+
+  const rows = await fetchPolicyRecommendationRows(tenantDb, input.officeId, snapshot.id);
+  const feedback = await fetchPolicyFeedbackRows(
+    tenantDb,
+    input.officeId,
+    rows.map((row) => row.recommendation_id)
+  );
+  return hydratePolicyRecommendationView({
+    snapshot,
+    recommendationRows: rows,
+    feedbackRows: feedback,
+    viewerUserId: input.viewerUserId,
+  });
+}
+
+export async function regenerateInterventionPolicyRecommendations(
+  tenantDb: TenantDb | InMemoryTenantDb,
+  input: { officeId: string; requestedByUserId: string; now?: Date }
+) {
+  const now = input.now ?? new Date();
+  const pendingSnapshot = await fetchPendingPolicySnapshot(tenantDb, input.officeId);
+  if (pendingSnapshot) {
+    const pendingAge = now.getTime() - new Date(toIso(pendingSnapshot.generated_at) ?? now.toISOString()).getTime();
+    if (pendingAge < PENDING_POLICY_SNAPSHOT_TIMEOUT_MS) {
+      return {
+        queued: true as const,
+        snapshotId: pendingSnapshot.id,
+        status: "pending",
+      };
+    }
+
+    if (isInMemoryTenantDb(tenantDb)) {
+      const snapshots = (tenantDb.state.policyRecommendationSnapshots ??= []);
+      const row = snapshots.find((item) => item.id === pendingSnapshot.id);
+      if (row) row.status = "failed";
+    } else {
+      await tenantDb.execute(sql`
+        UPDATE ai_policy_recommendation_snapshots
+        SET status = 'failed', updated_at = ${now}
+        WHERE id = ${pendingSnapshot.id}
+      `);
+    }
+  }
+
+  const snapshotId = crypto.randomUUID();
+  const staleAt = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+  if (isInMemoryTenantDb(tenantDb)) {
+    const snapshots = (tenantDb.state.policyRecommendationSnapshots ??= []);
+    snapshots.push({
+      id: snapshotId,
+      office_id: input.officeId,
+      status: "pending",
+      requested_by_user_id: input.requestedByUserId,
+      supersedes_snapshot_id: null,
+      generated_at: now.toISOString(),
+      stale_at: staleAt.toISOString(),
+      superseded_at: null,
+    });
+  } else {
+    try {
+      await tenantDb.execute(sql`
+        INSERT INTO ai_policy_recommendation_snapshots (
+          id, office_id, status, requested_by_user_id, supersedes_snapshot_id, generated_at, stale_at, created_at, updated_at
+        )
+        VALUES (
+          ${snapshotId},
+          ${input.officeId},
+          'pending',
+          ${input.requestedByUserId},
+          ${null},
+          ${now},
+          ${staleAt},
+          ${now},
+          ${now}
+        )
+      `);
+    } catch {
+      const racingPending = await fetchPendingPolicySnapshot(tenantDb, input.officeId);
+      if (racingPending) {
+        return {
+          queued: true as const,
+          snapshotId: racingPending.id,
+          status: "pending",
+        };
+      }
+      throw new AppError(500, "Failed to queue intervention policy recommendations");
+    }
+  }
+
+  if (isInMemoryTenantDb(tenantDb)) {
+    const result = await generateInterventionPolicyRecommendationsSnapshot(tenantDb, {
+      officeId: input.officeId,
+      snapshotId,
+      now,
+    });
+    return {
+      queued: true as const,
+      snapshotId,
+      status: result.status,
+      recommendations: result.recommendations,
+    };
+  }
+
+  await tenantDb.insert(jobQueue).values({
+    jobType: "ai_generate_intervention_policy_recommendations",
+    payload: {
+      officeId: input.officeId,
+      snapshotId,
+      requestedByUserId: input.requestedByUserId,
+    },
+    officeId: input.officeId,
+    status: "pending",
+    runAfter: now,
+  });
+
+  return {
+    queued: true as const,
+    snapshotId,
+    status: "pending",
+  };
+}
+
+export async function generateInterventionPolicyRecommendationsSnapshot(
+  tenantDb: TenantDb | InMemoryTenantDb,
+  input: { officeId: string; snapshotId: string; now?: Date }
+) {
+  const now = input.now ?? new Date();
+  const staleAt = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+
+  try {
+    const { cases, users: userRows, history } = await loadInterventionAnalyticsData(tenantDb, input.officeId);
+    const usersMap = new Map(userRows.map((row) => [row.id, row.displayName]));
+    const outcomeEffectiveness = buildInterventionOutcomeEffectiveness(history, usersMap, cases, now);
+    const candidates = buildPolicyRecommendationCandidates({
+      officeId: input.officeId,
+      cases,
+      history,
+      usersMap,
+      outcomeEffectiveness,
+      now,
+    });
+    const finalized = finalizePolicyRecommendationCandidates(candidates);
+
+    const snapshotStatus = finalized.snapshotStatus;
+
+    if (isInMemoryTenantDb(tenantDb)) {
+      const snapshots = (tenantDb.state.policyRecommendationSnapshots ??= []);
+      const rows = (tenantDb.state.policyRecommendationRows ??= []);
+      const pendingRow = snapshots.find((item) => item.id === input.snapshotId);
+      if (!pendingRow || pendingRow.status !== "pending") {
+        return {
+          status: "failed" as const,
+          recommendations: [] as InterventionPolicyRecommendation[],
+        };
+      }
+      const prior = await fetchLatestRenderablePolicySnapshot(tenantDb, input.officeId);
+      if (prior) {
+        const priorRow = snapshots.find((item) => item.id === prior.id);
+        if (priorRow) {
+          priorRow.status = "superseded";
+          priorRow.superseded_at = now.toISOString();
+        }
+      }
+      pendingRow.status = snapshotStatus;
+      pendingRow.supersedes_snapshot_id = prior?.id ?? null;
+      pendingRow.stale_at = staleAt.toISOString();
+      for (const candidate of finalized.recommendations) {
+        rows.push({
+          snapshot_id: input.snapshotId,
+          office_id: input.officeId,
+          recommendation_id: candidate.id,
+          taxonomy: candidate.taxonomy,
+          primary_grouping_key: candidate.primaryGroupingKey,
+          title: candidate.title,
+          statement: candidate.statement,
+          why_now: candidate.whyNow,
+          expected_impact: candidate.expectedImpact,
+          confidence: candidate.confidence,
+          priority: candidate.priority,
+          suggested_action: candidate.suggestedAction,
+          counter_signal: candidate.counterSignal,
+          render_status: candidate.renderStatus,
+          evidence_json: candidate.evidence,
+          generated_at: candidate.generatedAt,
+          stale_at: candidate.staleAt,
+        });
+      }
+    } else {
+      const prior = await fetchLatestRenderablePolicySnapshot(tenantDb, input.officeId);
+      const promoteResult = await tenantDb.execute(sql`
+        UPDATE ai_policy_recommendation_snapshots
+        SET status = ${snapshotStatus},
+            supersedes_snapshot_id = ${prior?.id ?? null},
+            stale_at = ${staleAt},
+            updated_at = ${now}
+        WHERE id = ${input.snapshotId}
+          AND status = 'pending'
+      `);
+      if (((promoteResult as any).rowCount ?? 0) === 0) {
+        return {
+          status: "failed" as const,
+          recommendations: [] as InterventionPolicyRecommendation[],
+        };
+      }
+      if (prior) {
+        await tenantDb.execute(sql`
+          UPDATE ai_policy_recommendation_snapshots
+          SET status = 'superseded', superseded_at = ${now}, updated_at = ${now}
+          WHERE id = ${prior.id}
+        `);
+      }
+      for (const candidate of finalized.recommendations) {
+        await tenantDb.execute(sql`
+          INSERT INTO ai_policy_recommendation_rows (
+            snapshot_id,
+            office_id,
+            recommendation_id,
+            taxonomy,
+            primary_grouping_key,
+            title,
+            statement,
+            why_now,
+            expected_impact,
+            confidence,
+            priority,
+            suggested_action,
+            counter_signal,
+            render_status,
+            evidence_json,
+            generated_at,
+            stale_at,
+            created_at,
+            updated_at
+          )
+          VALUES (
+            ${input.snapshotId},
+            ${input.officeId},
+            ${candidate.id},
+            ${candidate.taxonomy},
+            ${candidate.primaryGroupingKey},
+            ${candidate.title},
+            ${candidate.statement},
+            ${candidate.whyNow},
+            ${candidate.expectedImpact},
+            ${candidate.confidence},
+            ${candidate.priority},
+            ${candidate.suggestedAction},
+            ${candidate.counterSignal},
+            ${candidate.renderStatus},
+            ${JSON.stringify(candidate.evidence)}::jsonb,
+            ${now},
+            ${staleAt},
+            ${now},
+            ${now}
+          )
+        `);
+      }
+    }
+
+    return {
+      status: snapshotStatus,
+      recommendations: finalized.recommendations.map(
+        ({ primaryGroupingKey: _primaryGroupingKey, score: _score, impactScore: _impactScore, persistenceScore: _persistenceScore, affectedVolume: _affectedVolume, ...candidate }) => ({
+        ...candidate,
+        snapshotId: input.snapshotId,
+        feedbackSummary: {
+          helpfulCount: 0,
+          notUsefulCount: 0,
+          wrongDirectionCount: 0,
+          commentCount: 0,
+        },
+        feedbackStateForViewer: null,
+      })
+      ),
+    };
+  } catch (error) {
+    if (isInMemoryTenantDb(tenantDb)) {
+      const snapshots = (tenantDb.state.policyRecommendationSnapshots ??= []);
+      const row = snapshots.find((item) => item.id === input.snapshotId);
+      if (row) row.status = "failed";
+    } else {
+      await tenantDb.execute(sql`
+        UPDATE ai_policy_recommendation_snapshots
+        SET status = 'failed', updated_at = ${now}
+        WHERE id = ${input.snapshotId}
+      `);
+    }
+    throw error;
+  }
+}
+
+export async function recordInterventionPolicyRecommendationFeedback(
+  tenantDb: TenantDb | InMemoryTenantDb,
+  input: {
+    officeId: string;
+    recommendationId: string;
+    userId: string;
+    feedbackValue: InterventionPolicyRecommendationFeedbackValue;
+    comment: string | null;
+  }
+) {
+  if (isInMemoryTenantDb(tenantDb)) {
+    const rows = (tenantDb.state.policyRecommendationFeedback ??= []);
+    const existing = rows.find(
+      (row) =>
+        row.recommendation_id === input.recommendationId &&
+        row.user_id === input.userId &&
+        (row.office_id ?? input.officeId) === input.officeId
+    );
+    if (existing) {
+      existing.feedback_value = input.feedbackValue;
+      existing.comment = input.comment ?? null;
+    } else {
+      rows.push({
+        id: crypto.randomUUID(),
+        office_id: input.officeId,
+        recommendation_id: input.recommendationId,
+        user_id: input.userId,
+        feedback_value: input.feedbackValue,
+        comment: input.comment ?? null,
+      });
+    }
+  } else {
+    await tenantDb.execute(sql`
+      INSERT INTO ai_policy_recommendation_feedback (
+        id,
+        office_id,
+        recommendation_id,
+        user_id,
+        feedback_value,
+        comment,
+        created_at,
+        updated_at
+      )
+      VALUES (
+        ${crypto.randomUUID()},
+        ${input.officeId},
+        ${input.recommendationId},
+        ${input.userId},
+        ${input.feedbackValue},
+        ${input.comment ?? null},
+        ${new Date()},
+        ${new Date()}
+      )
+      ON CONFLICT (office_id, recommendation_id, user_id)
+      DO UPDATE SET
+        feedback_value = EXCLUDED.feedback_value,
+        comment = EXCLUDED.comment,
+        updated_at = EXCLUDED.updated_at
+    `);
+  }
+
+  return {
+    recommendationId: input.recommendationId,
+    feedbackValue: input.feedbackValue,
+    comment: input.comment ?? null,
   };
 }
 
