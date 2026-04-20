@@ -46,14 +46,6 @@ function summarizeUnknown(value: unknown) {
   }
 }
 
-function createRefresh() {
-  return async () => {
-    if (typeof window !== "undefined" && typeof window.location?.reload === "function") {
-      window.location.reload();
-    }
-  };
-}
-
 async function runEstimateMatchReviewAction({
   action,
   dealId,
@@ -71,7 +63,13 @@ async function runEstimateMatchReviewAction({
   await refresh();
 }
 
-export function EstimateCatalogMatchTable({ rows }: { rows: EstimateMatchRow[] }) {
+export function EstimateCatalogMatchTable({
+  rows,
+  onRefresh,
+}: {
+  rows: EstimateMatchRow[];
+  onRefresh: () => Promise<void>;
+}) {
   const { dealId } = useParams<{ dealId: string }>();
   const [selectedRowId, setSelectedRowId] = useState<string | null>(rows[0]?.id ?? null);
   const [pendingAction, setPendingAction] = useState<string | null>(null);
@@ -91,7 +89,7 @@ export function EstimateCatalogMatchTable({ rows }: { rows: EstimateMatchRow[] }
         action,
         dealId,
         matchId: row.id,
-        refresh: createRefresh(),
+        refresh: onRefresh,
       });
       toast.success(action === "select" ? "Match selected" : "Match rejected");
     } catch (err: unknown) {

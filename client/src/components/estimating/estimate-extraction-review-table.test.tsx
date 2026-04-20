@@ -14,13 +14,13 @@ vi.mock("@/lib/api", () => ({
   api: mocks.apiMock,
 }));
 
-function renderTable(rows: any[]) {
+function renderTable(rows: any[], onRefresh = vi.fn().mockResolvedValue(undefined)) {
   return renderToStaticMarkup(
     <MemoryRouter initialEntries={["/deals/deal-1/estimates"]}>
       <Routes>
         <Route
           path="/deals/:dealId/estimates"
-          element={<EstimateExtractionReviewTable rows={rows} />}
+          element={<EstimateExtractionReviewTable rows={rows} onRefresh={onRefresh} />}
         />
       </Routes>
     </MemoryRouter>

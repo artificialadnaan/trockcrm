@@ -134,11 +134,23 @@ export function EstimatingWorkflowShell({
           />
         );
       case "extraction":
-        return <EstimateExtractionReviewTable rows={workflow.extractionRows} />;
+        return (
+          <EstimateExtractionReviewTable
+            rows={workflow.extractionRows}
+            onRefresh={onRefresh}
+          />
+        );
       case "match":
-        return <EstimateCatalogMatchTable rows={workflow.matchRows} />;
+        return (
+          <EstimateCatalogMatchTable rows={workflow.matchRows} onRefresh={onRefresh} />
+        );
       case "pricing":
-        return <EstimatePricingReviewTable rows={workflow.pricingRows} />;
+        return (
+          <EstimatePricingReviewTable
+            rows={workflow.pricingRows}
+            onRefresh={onRefresh}
+          />
+        );
       case "estimate":
         return <EstimateOverviewPanel dealId={dealId} />;
       case "copilot":

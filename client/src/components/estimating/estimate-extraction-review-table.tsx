@@ -48,14 +48,6 @@ function formatConfidence(value: string | number | null | undefined) {
   return `${Math.round(numeric <= 1 ? numeric * 100 : numeric)}%`;
 }
 
-function createRefresh() {
-  return async () => {
-    if (typeof window !== "undefined" && typeof window.location?.reload === "function") {
-      window.location.reload();
-    }
-  };
-}
-
 export async function runEstimateExtractionReviewAction({
   action,
   dealId,
@@ -73,7 +65,13 @@ export async function runEstimateExtractionReviewAction({
   await refresh();
 }
 
-export function EstimateExtractionReviewTable({ rows }: { rows: ExtractionReviewRow[] }) {
+export function EstimateExtractionReviewTable({
+  rows,
+  onRefresh,
+}: {
+  rows: ExtractionReviewRow[];
+  onRefresh: () => Promise<void>;
+}) {
   const { dealId } = useParams<{ dealId: string }>();
   const [selectedRowId, setSelectedRowId] = useState<string | null>(rows[0]?.id ?? null);
   const [pendingAction, setPendingAction] = useState<string | null>(null);
@@ -93,7 +91,7 @@ export function EstimateExtractionReviewTable({ rows }: { rows: ExtractionReview
         action,
         dealId,
         extractionId: row.id,
-        refresh: createRefresh(),
+        refresh: onRefresh,
       });
       toast.success(
         action === "approve" ? "Extraction approved" : "Extraction rejected"

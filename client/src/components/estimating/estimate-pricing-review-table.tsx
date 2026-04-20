@@ -57,14 +57,6 @@ function summarizeUnknown(value: unknown) {
   }
 }
 
-function createRefresh() {
-  return async () => {
-    if (typeof window !== "undefined" && typeof window.location?.reload === "function") {
-      window.location.reload();
-    }
-  };
-}
-
 export async function runEstimatePricingReviewAction({
   action,
   dealId,
@@ -83,7 +75,13 @@ export async function runEstimatePricingReviewAction({
   await refresh();
 }
 
-export function EstimatePricingReviewTable({ rows }: { rows: PricingReviewRow[] }) {
+export function EstimatePricingReviewTable({
+  rows,
+  onRefresh,
+}: {
+  rows: PricingReviewRow[];
+  onRefresh: () => Promise<void>;
+}) {
   const { dealId } = useParams<{ dealId: string }>();
   const [selectedRowId, setSelectedRowId] = useState<string | null>(rows[0]?.id ?? null);
   const [pendingAction, setPendingAction] = useState<string | null>(null);
@@ -103,7 +101,7 @@ export function EstimatePricingReviewTable({ rows }: { rows: PricingReviewRow[] 
         action,
         dealId,
         recommendationId: row.id,
-        refresh: createRefresh(),
+        refresh: onRefresh,
       });
       toast.success(
         action === "approve"

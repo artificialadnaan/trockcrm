@@ -1,6 +1,48 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi, afterEach } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { EstimatingWorkflowShell } from "./estimating-workflow-shell";
+
+const mocks = vi.hoisted(() => ({
+  activePanel: null as string | null,
+}));
+
+vi.mock("react", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("react")>();
+
+  return {
+    ...actual,
+    useState: <T,>(initialState: T) => {
+      if (mocks.activePanel !== null && initialState === "documents") {
+        return [mocks.activePanel as T, vi.fn()] as const;
+      }
+
+      return actual.useState(initialState);
+    },
+  };
+});
+
+vi.mock("./estimate-extraction-review-table", () => ({
+  EstimateExtractionReviewTable: ({ onRefresh }: { onRefresh?: unknown }) => (
+    <div>Extraction refresh {typeof onRefresh}</div>
+  ),
+}));
+
+vi.mock("./estimate-catalog-match-table", () => ({
+  EstimateCatalogMatchTable: ({ onRefresh }: { onRefresh?: unknown }) => (
+    <div>Match refresh {typeof onRefresh}</div>
+  ),
+}));
+
+vi.mock("./estimate-pricing-review-table", () => ({
+  EstimatePricingReviewTable: ({ onRefresh }: { onRefresh?: unknown }) => (
+    <div>Pricing refresh {typeof onRefresh}</div>
+  ),
+}));
+
+afterEach(() => {
+  mocks.activePanel = null;
+  vi.restoreAllMocks();
+});
 
 describe("EstimatingWorkflowShell", () => {
   it("renders the split-pane workbench structure and summary strip content", () => {
@@ -86,5 +128,107 @@ describe("EstimatingWorkflowShell", () => {
     expect(html).toContain("Queued for OCR");
     expect(html).toContain("Documents");
     expect(html).toContain("addendum-a.pdf");
+  });
+
+  it("threads the scoped refresh callback into the extraction panel", () => {
+    mocks.activePanel = "extraction";
+
+    const html = renderToStaticMarkup(
+      <EstimatingWorkflowShell
+        dealId="deal-1"
+        workflow={{
+          documents: [],
+          extractionRows: [{ id: "ext-1", status: "pending" }],
+          matchRows: [],
+          pricingRows: [],
+          reviewEvents: [],
+          summary: {
+            documents: { total: 0, queued: 0, failed: 0 },
+            extractions: { total: 1, pending: 1, approved: 0, rejected: 0, unmatched: 0 },
+            matches: { total: 0, suggested: 0, selected: 0, rejected: 0 },
+            pricing: {
+              total: 0,
+              pending: 0,
+              approved: 0,
+              overridden: 0,
+              rejected: 0,
+              readyToPromote: 0,
+            },
+          },
+          promotionReadiness: { canPromote: false, generationRunIds: [] },
+        }}
+        onRefresh={async () => {}}
+      />
+    );
+
+    expect(html).toContain("Extraction refresh function");
+  });
+
+  it("threads the scoped refresh callback into the match panel", () => {
+    mocks.activePanel = "match";
+
+    const html = renderToStaticMarkup(
+      <EstimatingWorkflowShell
+        dealId="deal-1"
+        workflow={{
+          documents: [],
+          extractionRows: [],
+          matchRows: [{ id: "match-1", status: "suggested" }],
+          pricingRows: [],
+          reviewEvents: [],
+          summary: {
+            documents: { total: 0, queued: 0, failed: 0 },
+            extractions: { total: 0, pending: 0, approved: 0, rejected: 0, unmatched: 0 },
+            matches: { total: 1, suggested: 1, selected: 0, rejected: 0 },
+            pricing: {
+              total: 0,
+              pending: 0,
+              approved: 0,
+              overridden: 0,
+              rejected: 0,
+              readyToPromote: 0,
+            },
+          },
+          promotionReadiness: { canPromote: false, generationRunIds: [] },
+        }}
+        onRefresh={async () => {}}
+      />
+    );
+
+    expect(html).toContain("Match refresh function");
+  });
+
+  it("threads the scoped refresh callback into the pricing panel", () => {
+    mocks.activePanel = "pricing";
+
+    const html = renderToStaticMarkup(
+      <EstimatingWorkflowShell
+        dealId="deal-1"
+        workflow={{
+          documents: [],
+          extractionRows: [],
+          matchRows: [],
+          pricingRows: [{ id: "price-1", status: "pending" }],
+          reviewEvents: [],
+          summary: {
+            documents: { total: 0, queued: 0, failed: 0 },
+            extractions: { total: 0, pending: 0, approved: 0, rejected: 0, unmatched: 0 },
+            matches: { total: 0, suggested: 0, selected: 0, rejected: 0 },
+            pricing: {
+              total: 1,
+              pending: 1,
+              approved: 0,
+              overridden: 0,
+              rejected: 0,
+              readyToPromote: 0,
+            },
+          },
+          promotionReadiness: { canPromote: false, generationRunIds: [] },
+        }}
+        onRefresh={async () => {}}
+      />
+    );
+
+    expect(html).toContain("Pricing refresh function");
   });
 });
