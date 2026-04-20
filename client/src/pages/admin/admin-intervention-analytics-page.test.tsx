@@ -605,6 +605,36 @@ describe("AdminInterventionAnalyticsPage", () => {
     expect(html).toContain("Generate Recommendations");
   });
 
+  it("renders an undo affordance for an applied recommendation", () => {
+    mocks.useInterventionPolicyRecommendations.mockReturnValue({
+      data: {
+        ...policyRecommendationView,
+        recommendations: [
+          {
+            ...policyRecommendationView.recommendations[0],
+            applyStatus: {
+              status: "applied",
+              appliedAt: "2026-04-16T13:12:00.000Z",
+              appliedBy: "Admin User",
+              reason: null,
+            },
+          },
+        ],
+      },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <AdminInterventionAnalyticsPage />
+      </MemoryRouter>
+    );
+
+    expect(html).toContain("Undo change");
+  });
+
   it("renders an explained empty recommendation state when nothing qualifies", () => {
     mocks.useInterventionPolicyRecommendations.mockReturnValueOnce({
       data: {
@@ -635,5 +665,37 @@ describe("AdminInterventionAnalyticsPage", () => {
 
     expect(html).toContain("No policy changes are recommended right now.");
     expect(html).toContain("qualification predicates were not met");
+  });
+
+  it("renders the read-only taxonomy message for review-only recommendations", () => {
+    mocks.useInterventionPolicyRecommendations.mockReturnValue({
+      data: {
+        ...policyRecommendationView,
+        recommendations: [
+          {
+            ...policyRecommendationView.recommendations[0],
+            taxonomy: "disconnect_playbook_change",
+            title: "Change the missing next task playbook",
+            proposedChange: null,
+            applyEligibility: {
+              eligible: false,
+              reason: "read_only_taxonomy",
+              message: "This recommendation remains review-only in the current release.",
+            },
+          },
+        ],
+      },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <AdminInterventionAnalyticsPage />
+      </MemoryRouter>
+    );
+
+    expect(html).toContain("This recommendation remains review-only in the current release.");
   });
 });

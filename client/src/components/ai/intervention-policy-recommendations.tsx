@@ -2,6 +2,7 @@ import { useState } from "react";
 import {
   applyInterventionPolicyRecommendation,
   regenerateInterventionPolicyRecommendations,
+  revertInterventionPolicyRecommendation,
   submitInterventionPolicyRecommendationFeedback,
   type InterventionPolicyRecommendation,
   type InterventionPolicyRecommendationReviewDecisionFilter,
@@ -20,6 +21,8 @@ function formatFreshnessLabel(value: string | null | undefined) {
 
 function formatHistoryEventLabel(value: string) {
   if (value === "applied_noop") return "Applied no-op";
+  if (value === "revert_noop") return "Undo no-op";
+  if (value === "revert_rejected_conflict") return "Undo rejected";
   return value.split("_").join(" ");
 }
 
@@ -141,6 +144,32 @@ function PolicyRecommendationCard({
     }
   }
 
+  async function handleRevert() {
+    setApplying(true);
+    setActionError(null);
+    try {
+      const result = await revertInterventionPolicyRecommendation({
+        recommendationId: recommendation.id,
+        snapshotId: recommendation.snapshotId,
+        recommendationIdempotencyKey: `${recommendation.id}:revert:${Date.now()}`,
+      });
+      setLocalApplyStatus({
+        status:
+          result.status === "reverted" || result.status === "revert_noop"
+            ? "not_applied"
+            : result.status,
+        appliedAt: result.appliedAt,
+        appliedBy: result.appliedBy,
+        reason: result.reason,
+      });
+      await onRefresh();
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "Failed to undo recommendation");
+    } finally {
+      setApplying(false);
+    }
+  }
+
   function renderPolicyValue(value: Record<string, unknown>) {
     return Object.entries(value)
       .map(([key, current]) => `${key}: ${String(current)}`)
@@ -154,6 +183,9 @@ function PolicyRecommendationCard({
     recommendation.proposedChange &&
     applyStatus.status !== "applied" &&
     applyStatus.status !== "applied_noop";
+  const canRevert =
+    recommendation.applyEligibility.eligible &&
+    (applyStatus.status === "applied" || applyStatus.status === "applied_noop");
 
   return (
     <article className="rounded-xl border border-border/80 bg-white px-4 py-4 shadow-sm">
@@ -212,9 +244,13 @@ function PolicyRecommendationCard({
           <Button onClick={() => setShowApplyPreview((value) => !value)} disabled={applying}>
             Apply change
           </Button>
+        ) : canRevert ? (
+          <Button variant="outline" onClick={() => void handleRevert()} disabled={applying}>
+            Undo change
+          </Button>
         ) : (
           <div className="rounded-lg border border-border/70 bg-muted/20 px-3 py-2 text-sm text-muted-foreground">
-            Not yet apply-eligible
+            {recommendation.applyEligibility.message}
           </div>
         )}
       </div>

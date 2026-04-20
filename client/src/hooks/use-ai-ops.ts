@@ -525,7 +525,10 @@ export type InterventionPolicyRecommendationApplyEventStatus =
   | "applied_noop"
   | "rejected_validation"
   | "rejected_stale"
-  | "rejected_conflict";
+  | "rejected_conflict"
+  | "reverted"
+  | "revert_noop"
+  | "revert_rejected_conflict";
 
 export interface InterventionPolicyRecommendationEvidenceItem {
   metricKey: string;
@@ -963,6 +966,32 @@ export async function applyInterventionPolicyRecommendation(input: {
     proposedState: Record<string, unknown>;
     appliedState: Record<string, unknown>;
   }>(`/ai/ops/intervention-policy-recommendations/${input.recommendationId}/apply`, {
+    method: "POST",
+    json: {
+      snapshotId: input.snapshotId,
+      recommendationIdempotencyKey: input.recommendationIdempotencyKey,
+    },
+  });
+}
+
+export async function revertInterventionPolicyRecommendation(input: {
+  recommendationId: string;
+  snapshotId: string;
+  recommendationIdempotencyKey: string;
+}) {
+  return api<{
+    status: InterventionPolicyRecommendationApplyEventStatus;
+    applyEventId: string;
+    recommendationId: string;
+    snapshotId: string;
+    applyStatus: InterventionPolicyRecommendationApplyEventStatus;
+    appliedAt: string | null;
+    appliedBy: string | null;
+    reason: string | null;
+    beforeState: Record<string, unknown>;
+    proposedState: Record<string, unknown>;
+    appliedState: Record<string, unknown>;
+  }>(`/ai/ops/intervention-policy-recommendations/${input.recommendationId}/revert`, {
     method: "POST",
     json: {
       snapshotId: input.snapshotId,

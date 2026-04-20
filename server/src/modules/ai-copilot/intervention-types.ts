@@ -402,7 +402,10 @@ export type InterventionPolicyRecommendationApplyEventStatus =
   | "applied_noop"
   | "rejected_validation"
   | "rejected_stale"
-  | "rejected_conflict";
+  | "rejected_conflict"
+  | "reverted"
+  | "revert_noop"
+  | "revert_rejected_conflict";
 
 export type InterventionPolicyRecommendationApplyEligibilityReason =
   | "eligible"

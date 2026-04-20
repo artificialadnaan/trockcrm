@@ -352,6 +352,199 @@ async function upsertPolicyState(
   return proposed.proposedValue;
 }
 
+function getComparablePolicyState(
+  proposed: NonNullable<InterventionPolicyRecommendation["proposedChange"]>,
+  state: Record<string, any> | null | undefined
+) {
+  if (proposed.kind === "snooze_policy_adjustment") {
+    return {
+      maxSnoozeDays: state?.max_snooze_days ?? state?.maxSnoozeDays ?? proposed.currentValue.maxSnoozeDays,
+      breachReviewThresholdPercent:
+        state?.breach_review_threshold_percent ??
+        state?.breachReviewThresholdPercent ??
+        proposed.currentValue.breachReviewThresholdPercent,
+    };
+  }
+  if (proposed.kind === "escalation_policy_adjustment") {
+    return {
+      routingMode: state?.routing_mode ?? state?.routingMode ?? proposed.currentValue.routingMode,
+      escalationThresholdPercent:
+        state?.escalation_threshold_percent ??
+        state?.escalationThresholdPercent ??
+        proposed.currentValue.escalationThresholdPercent,
+    };
+  }
+  return {
+    balancingMode: state?.balancing_mode ?? state?.balancingMode ?? proposed.currentValue.balancingMode,
+    overloadSharePercent:
+      state?.overload_share_percent ?? state?.overloadSharePercent ?? proposed.currentValue.overloadSharePercent,
+    minHighRiskCases:
+      state?.min_high_risk_cases ?? state?.minHighRiskCases ?? proposed.currentValue.minHighRiskCases,
+  };
+}
+
+async function applyPolicyStateValue(
+  tenantDb: TenantDb | InMemoryTenantDb,
+  officeId: string,
+  proposed: NonNullable<InterventionPolicyRecommendation["proposedChange"]>,
+  nextValue: Record<string, any>
+) {
+  if (proposed.kind === "snooze_policy_adjustment") {
+    if (isInMemoryTenantDb(tenantDb)) {
+      const rows = (tenantDb.state.interventionSnoozePolicies ??= []);
+      const existing = rows.find(
+        (row) => row.office_id === officeId && row.snooze_reason_key === proposed.targetKey
+      );
+      const next = {
+        office_id: officeId,
+        snooze_reason_key: proposed.targetKey,
+        max_snooze_days: nextValue.maxSnoozeDays,
+        breach_review_threshold_percent: nextValue.breachReviewThresholdPercent,
+      };
+      if (existing) Object.assign(existing, next);
+      else rows.push(next);
+      return next;
+    }
+    await tenantDb.execute(sql`
+      INSERT INTO intervention_snooze_policies (
+        id, office_id, snooze_reason_key, max_snooze_days, breach_review_threshold_percent, created_at, updated_at
+      )
+      VALUES (
+        ${crypto.randomUUID()},
+        ${officeId},
+        ${proposed.targetKey},
+        ${nextValue.maxSnoozeDays},
+        ${nextValue.breachReviewThresholdPercent},
+        ${new Date()},
+        ${new Date()}
+      )
+      ON CONFLICT (office_id, snooze_reason_key)
+      DO UPDATE SET
+        max_snooze_days = EXCLUDED.max_snooze_days,
+        breach_review_threshold_percent = EXCLUDED.breach_review_threshold_percent,
+        updated_at = EXCLUDED.updated_at
+    `);
+    return nextValue;
+  }
+
+  if (proposed.kind === "escalation_policy_adjustment") {
+    if (isInMemoryTenantDb(tenantDb)) {
+      const rows = (tenantDb.state.interventionEscalationPolicies ??= []);
+      const existing = rows.find(
+        (row) => row.office_id === officeId && row.disconnect_type_key === proposed.targetKey
+      );
+      const next = {
+        office_id: officeId,
+        disconnect_type_key: proposed.targetKey,
+        routing_mode: nextValue.routingMode,
+        escalation_threshold_percent: nextValue.escalationThresholdPercent,
+      };
+      if (existing) Object.assign(existing, next);
+      else rows.push(next);
+      return next;
+    }
+    await tenantDb.execute(sql`
+      INSERT INTO intervention_escalation_policies (
+        id, office_id, disconnect_type_key, routing_mode, escalation_threshold_percent, created_at, updated_at
+      )
+      VALUES (
+        ${crypto.randomUUID()},
+        ${officeId},
+        ${proposed.targetKey},
+        ${nextValue.routingMode},
+        ${nextValue.escalationThresholdPercent},
+        ${new Date()},
+        ${new Date()}
+      )
+      ON CONFLICT (office_id, disconnect_type_key)
+      DO UPDATE SET
+        routing_mode = EXCLUDED.routing_mode,
+        escalation_threshold_percent = EXCLUDED.escalation_threshold_percent,
+        updated_at = EXCLUDED.updated_at
+    `);
+    return nextValue;
+  }
+
+  if (isInMemoryTenantDb(tenantDb)) {
+    const rows = (tenantDb.state.interventionAssigneeBalancingPolicies ??= []);
+    const existing = rows.find((row) => row.office_id === officeId);
+    const next = {
+      office_id: officeId,
+      balancing_mode: nextValue.balancingMode,
+      overload_share_percent: nextValue.overloadSharePercent,
+      min_high_risk_cases: nextValue.minHighRiskCases,
+    };
+    if (existing) Object.assign(existing, next);
+    else rows.push(next);
+    return next;
+  }
+  await tenantDb.execute(sql`
+    INSERT INTO intervention_assignee_balancing_policies (
+      id, office_id, balancing_mode, overload_share_percent, min_high_risk_cases, created_at, updated_at
+    )
+    VALUES (
+      ${crypto.randomUUID()},
+      ${officeId},
+      ${nextValue.balancingMode},
+      ${nextValue.overloadSharePercent},
+      ${nextValue.minHighRiskCases},
+      ${new Date()},
+      ${new Date()}
+    )
+    ON CONFLICT (office_id)
+    DO UPDATE SET
+      balancing_mode = EXCLUDED.balancing_mode,
+      overload_share_percent = EXCLUDED.overload_share_percent,
+      min_high_risk_cases = EXCLUDED.min_high_risk_cases,
+      updated_at = EXCLUDED.updated_at
+  `);
+  return nextValue;
+}
+
+async function fetchLatestApplyEvent(
+  tenantDb: TenantDb | InMemoryTenantDb,
+  officeId: string,
+  recommendationId: string
+) {
+  if (isInMemoryTenantDb(tenantDb)) {
+    return (((tenantDb.state.policyRecommendationApplyEvents ?? []) as Array<Record<string, any>>)
+      .filter((row) => row.office_id === officeId && row.recommendation_id === recommendationId)
+      .sort((left, right) => new Date(toIso(right.created_at) ?? 0).getTime() - new Date(toIso(left.created_at) ?? 0).getTime())[0] ??
+      null) as Record<string, any> | null;
+  }
+
+  const result = await tenantDb.execute(sql`
+    SELECT *
+    FROM ai_policy_recommendation_apply_events
+    WHERE office_id = ${officeId}
+      AND recommendation_id = ${recommendationId}
+    ORDER BY created_at DESC
+    LIMIT 1
+  `);
+  return (((result as any).rows ?? [])[0] ?? null) as Record<string, any> | null;
+}
+
+async function fetchApplyEvents(
+  tenantDb: TenantDb | InMemoryTenantDb,
+  officeId: string,
+  recommendationId: string
+) {
+  if (isInMemoryTenantDb(tenantDb)) {
+    return (((tenantDb.state.policyRecommendationApplyEvents ?? []) as Array<Record<string, any>>)
+      .filter((row) => row.office_id === officeId && row.recommendation_id === recommendationId)
+      .sort((left, right) => new Date(toIso(right.created_at) ?? 0).getTime() - new Date(toIso(left.created_at) ?? 0).getTime())) as Array<Record<string, any>>;
+  }
+
+  const result = await tenantDb.execute(sql`
+    SELECT *
+    FROM ai_policy_recommendation_apply_events
+    WHERE office_id = ${officeId}
+      AND recommendation_id = ${recommendationId}
+    ORDER BY created_at DESC
+  `);
+  return (((result as any).rows ?? []) as Array<Record<string, any>>);
+}
+
 async function insertApplyEvent(tenantDb: TenantDb | InMemoryTenantDb, row: Record<string, any>) {
   if (isInMemoryTenantDb(tenantDb)) {
     const rows = (tenantDb.state.policyRecommendationApplyEvents ??= []);
@@ -504,24 +697,7 @@ export async function applyInterventionPolicyRecommendation(
 
   const beforeState = await readCurrentPolicyState(tenantDb, input.officeId, recommendation);
   const appliedState = await upsertPolicyState(tenantDb, input.officeId, recommendation);
-  const currentComparable = proposed.kind === "snooze_policy_adjustment"
-    ? {
-        maxSnoozeDays: beforeState?.max_snooze_days ?? proposed.currentValue.maxSnoozeDays,
-        breachReviewThresholdPercent:
-          beforeState?.breach_review_threshold_percent ?? proposed.currentValue.breachReviewThresholdPercent,
-      }
-    : proposed.kind === "escalation_policy_adjustment"
-      ? {
-          routingMode: beforeState?.routing_mode ?? proposed.currentValue.routingMode,
-          escalationThresholdPercent:
-            beforeState?.escalation_threshold_percent ?? proposed.currentValue.escalationThresholdPercent,
-        }
-      : {
-          balancingMode: beforeState?.balancing_mode ?? proposed.currentValue.balancingMode,
-          overloadSharePercent:
-            beforeState?.overload_share_percent ?? proposed.currentValue.overloadSharePercent,
-          minHighRiskCases: beforeState?.min_high_risk_cases ?? proposed.currentValue.minHighRiskCases,
-        };
+  const currentComparable = getComparablePolicyState(proposed, beforeState);
   const noop = JSON.stringify(proposed.proposedValue) === JSON.stringify(
     currentComparable
   );
@@ -556,6 +732,214 @@ export async function applyInterventionPolicyRecommendation(
     beforeState: beforeState ?? {},
     proposedState: coerceJson(persisted.proposed_state_json),
     appliedState: appliedState,
+  };
+}
+
+export async function revertInterventionPolicyRecommendation(
+  tenantDb: TenantDb | InMemoryTenantDb,
+  input: {
+    officeId: string;
+    recommendationId: string;
+    snapshotId: string;
+    actorUserId: string;
+    recommendationIdempotencyKey: string;
+  }
+) {
+  const existingEvent = await fetchApplyEventByIdempotencyKey(
+    tenantDb,
+    input.officeId,
+    input.recommendationId,
+    input.recommendationIdempotencyKey
+  );
+  if (existingEvent) {
+    return {
+      status: existingEvent.status as InterventionPolicyRecommendationApplyEventStatus,
+      applyEventId: existingEvent.id,
+      recommendationId: input.recommendationId,
+      snapshotId: input.snapshotId,
+      applyStatus: existingEvent.status,
+      appliedAt: toIso(existingEvent.created_at),
+      appliedBy: await fetchActorName(tenantDb, existingEvent.actor_user_id),
+      reason: existingEvent.rejection_reason ?? null,
+      beforeState: coerceJson(existingEvent.before_state_json),
+      proposedState: coerceJson(existingEvent.proposed_state_json),
+      appliedState: coerceJson(existingEvent.applied_state_json),
+    };
+  }
+
+  const recommendation = await fetchRecommendationRow(
+    tenantDb,
+    input.officeId,
+    input.recommendationId,
+    input.snapshotId
+  );
+  if (!recommendation) {
+    throw new AppError(404, "Policy recommendation not found");
+  }
+
+  const proposed = recommendation.proposed_change_json as InterventionPolicyRecommendation["proposedChange"];
+  if (!proposed) {
+    throw new AppError(400, "Recommendation has no deterministic policy change payload");
+  }
+
+  const latestApplyEvent = await fetchLatestApplyEvent(tenantDb, input.officeId, input.recommendationId);
+  const rejection = (status: "revert_noop" | "revert_rejected_conflict", reason: string) => ({
+    id: crypto.randomUUID(),
+    office_id: input.officeId,
+    recommendation_id: input.recommendationId,
+    snapshot_id: input.snapshotId,
+    taxonomy: recommendation.taxonomy,
+    actor_user_id: input.actorUserId,
+    request_idempotency_key: input.recommendationIdempotencyKey,
+    status,
+    target_type: proposed.kind,
+    target_id: proposed.targetKey,
+    before_state_json: latestApplyEvent?.applied_state_json ?? {},
+    proposed_state_json: latestApplyEvent?.before_state_json ?? {},
+    applied_state_json: latestApplyEvent?.before_state_json ?? {},
+    rejection_reason: reason,
+    created_at: new Date().toISOString(),
+  });
+
+  if (!latestApplyEvent) {
+    const persisted = await insertApplyEvent(
+      tenantDb,
+      rejection("revert_noop", "No applied policy change is available to undo.")
+    );
+    return {
+      status: persisted.status,
+      applyEventId: persisted.id,
+      recommendationId: input.recommendationId,
+      snapshotId: input.snapshotId,
+      applyStatus: persisted.status,
+      appliedAt: toIso(persisted.created_at),
+      appliedBy: await fetchActorName(tenantDb, persisted.actor_user_id),
+      reason: persisted.rejection_reason,
+      beforeState: coerceJson(persisted.before_state_json),
+      proposedState: coerceJson(persisted.proposed_state_json),
+      appliedState: coerceJson(persisted.applied_state_json),
+    };
+  }
+
+  if (["reverted", "revert_noop", "revert_rejected_conflict"].includes(String(latestApplyEvent.status))) {
+    const persisted = await insertApplyEvent(
+      tenantDb,
+      rejection("revert_noop", "The latest policy change has already been undone.")
+    );
+    return {
+      status: persisted.status,
+      applyEventId: persisted.id,
+      recommendationId: input.recommendationId,
+      snapshotId: input.snapshotId,
+      applyStatus: persisted.status,
+      appliedAt: toIso(persisted.created_at),
+      appliedBy: await fetchActorName(tenantDb, persisted.actor_user_id),
+      reason: persisted.rejection_reason,
+      beforeState: coerceJson(persisted.before_state_json),
+      proposedState: coerceJson(persisted.proposed_state_json),
+      appliedState: coerceJson(persisted.applied_state_json),
+    };
+  }
+
+  if (!["applied", "applied_noop"].includes(String(latestApplyEvent.status))) {
+    const persisted = await insertApplyEvent(
+      tenantDb,
+      rejection("revert_rejected_conflict", "Only the latest applied recommendation state can be undone.")
+    );
+    return {
+      status: persisted.status,
+      applyEventId: persisted.id,
+      recommendationId: input.recommendationId,
+      snapshotId: input.snapshotId,
+      applyStatus: persisted.status,
+      appliedAt: toIso(persisted.created_at),
+      appliedBy: await fetchActorName(tenantDb, persisted.actor_user_id),
+      reason: persisted.rejection_reason,
+      beforeState: coerceJson(persisted.before_state_json),
+      proposedState: coerceJson(persisted.proposed_state_json),
+      appliedState: coerceJson(persisted.applied_state_json),
+    };
+  }
+
+  const reversibleApplyEvent =
+    (await fetchApplyEvents(tenantDb, input.officeId, input.recommendationId)).find(
+      (row) =>
+        ["applied", "applied_noop"].includes(String(row.status)) &&
+        JSON.stringify(coerceJson(row.before_state_json)) !== JSON.stringify(coerceJson(row.applied_state_json))
+    ) ?? latestApplyEvent;
+
+  const currentState = await readCurrentPolicyState(tenantDb, input.officeId, recommendation);
+  const currentComparable = getComparablePolicyState(proposed, currentState);
+  const appliedComparable = getComparablePolicyState(
+    proposed,
+    coerceJson(reversibleApplyEvent.applied_state_json)
+  );
+
+  if (JSON.stringify(currentComparable) !== JSON.stringify(appliedComparable)) {
+    const persisted = await insertApplyEvent(
+      tenantDb,
+      rejection("revert_rejected_conflict", "The current policy no longer matches the last applied state.")
+    );
+    return {
+      status: persisted.status,
+      applyEventId: persisted.id,
+      recommendationId: input.recommendationId,
+      snapshotId: input.snapshotId,
+      applyStatus: persisted.status,
+      appliedAt: toIso(persisted.created_at),
+      appliedBy: await fetchActorName(tenantDb, persisted.actor_user_id),
+      reason: persisted.rejection_reason,
+      beforeState: coerceJson(persisted.before_state_json),
+      proposedState: coerceJson(persisted.proposed_state_json),
+      appliedState: coerceJson(persisted.applied_state_json),
+    };
+  }
+
+  const revertTargetState = getComparablePolicyState(
+    proposed,
+    coerceJson(reversibleApplyEvent.before_state_json)
+  );
+  const revertedState = await applyPolicyStateValue(
+    tenantDb,
+    input.officeId,
+    proposed,
+    revertTargetState
+  );
+
+  const noop =
+    JSON.stringify(getComparablePolicyState(proposed, revertedState)) ===
+    JSON.stringify(appliedComparable);
+
+  const event = {
+    id: crypto.randomUUID(),
+    office_id: input.officeId,
+    recommendation_id: input.recommendationId,
+    snapshot_id: input.snapshotId,
+    taxonomy: recommendation.taxonomy,
+    actor_user_id: input.actorUserId,
+    request_idempotency_key: input.recommendationIdempotencyKey,
+    status: (noop ? "revert_noop" : "reverted") as InterventionPolicyRecommendationApplyEventStatus,
+    target_type: proposed.kind,
+    target_id: proposed.targetKey,
+    before_state_json: reversibleApplyEvent.applied_state_json ?? {},
+    proposed_state_json: revertTargetState,
+    applied_state_json: revertedState,
+    rejection_reason: noop ? "The revert did not change the current policy state." : null,
+    created_at: new Date().toISOString(),
+  };
+  const persisted = await insertApplyEvent(tenantDb, event);
+  return {
+    status: persisted.status,
+    applyEventId: persisted.id,
+    recommendationId: input.recommendationId,
+    snapshotId: input.snapshotId,
+    applyStatus: persisted.status,
+    appliedAt: toIso(persisted.created_at),
+    appliedBy: await fetchActorName(tenantDb, persisted.actor_user_id),
+    reason: persisted.rejection_reason,
+    beforeState: coerceJson(persisted.before_state_json),
+    proposedState: coerceJson(persisted.proposed_state_json),
+    appliedState: coerceJson(persisted.applied_state_json),
   };
 }
 

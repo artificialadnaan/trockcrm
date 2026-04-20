@@ -38,6 +38,7 @@ const interventionServiceMocks = vi.hoisted(() => ({
 
 const policyApplicationServiceMocks = vi.hoisted(() => ({
   applyInterventionPolicyRecommendation: vi.fn(),
+  revertInterventionPolicyRecommendation: vi.fn(),
   getInterventionPolicyRecommendationEvaluationSummary: vi.fn(),
 }));
 
@@ -100,6 +101,7 @@ vi.mock("../../../src/modules/ai-copilot/intervention-manager-alerts-service.js"
 
 vi.mock("../../../src/modules/ai-copilot/intervention-policy-application-service.js", () => ({
   applyInterventionPolicyRecommendation: policyApplicationServiceMocks.applyInterventionPolicyRecommendation,
+  revertInterventionPolicyRecommendation: policyApplicationServiceMocks.revertInterventionPolicyRecommendation,
   getInterventionPolicyRecommendationEvaluationSummary:
     policyApplicationServiceMocks.getInterventionPolicyRecommendationEvaluationSummary,
 }));
@@ -679,6 +681,42 @@ describe("ai copilot routes", () => {
       })
     );
     expect(response.body.status).toBe("applied");
+  });
+
+  it("reverts a policy recommendation for admins", async () => {
+    policyApplicationServiceMocks.revertInterventionPolicyRecommendation.mockResolvedValue({
+      status: "reverted",
+      applyEventId: "apply-2",
+      recommendationId: "11111111-1111-4111-8111-111111111111",
+      snapshotId: "22222222-2222-4222-8222-222222222222",
+      applyStatus: "reverted",
+      appliedAt: "2026-04-19T14:15:00.000Z",
+      appliedBy: "Admin User",
+      reason: null,
+      beforeState: { overloadSharePercent: 30 },
+      proposedState: { overloadSharePercent: 35 },
+      appliedState: { overloadSharePercent: 35 },
+    });
+
+    const app = createApp("admin");
+    const response = await request(app)
+      .post("/api/ai/ops/intervention-policy-recommendations/11111111-1111-4111-8111-111111111111/revert")
+      .send({
+        snapshotId: "22222222-2222-4222-8222-222222222222",
+        recommendationIdempotencyKey: "req-revert-1",
+      });
+
+    expect(response.status).toBe(200);
+    expect(policyApplicationServiceMocks.revertInterventionPolicyRecommendation).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        officeId: "office-1",
+        recommendationId: "11111111-1111-4111-8111-111111111111",
+        snapshotId: "22222222-2222-4222-8222-222222222222",
+        recommendationIdempotencyKey: "req-revert-1",
+      })
+    );
+    expect(response.body.status).toBe("reverted");
   });
 
   it("returns the latest persisted manager alert snapshot for the active office", async () => {

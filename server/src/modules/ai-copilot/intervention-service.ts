@@ -2730,12 +2730,19 @@ function hydratePolicyRecommendationView(input: {
       reviewDetails,
       applyEligibility,
       applyStatus: latestApplyEvent
-        ? {
-            status: latestApplyEvent.status,
-            appliedAt: toIso(latestApplyEvent.created_at),
-            appliedBy: latestApplyEvent.actor_display_name ?? latestApplyEvent.actor_user_id,
-            reason: latestApplyEvent.rejection_reason,
-          }
+        ? ["reverted", "revert_noop"].includes(String(latestApplyEvent.status))
+          ? {
+              status: "not_applied",
+              appliedAt: null,
+              appliedBy: null,
+              reason: null,
+            }
+          : {
+              status: latestApplyEvent.status,
+              appliedAt: toIso(latestApplyEvent.created_at),
+              appliedBy: latestApplyEvent.actor_display_name ?? latestApplyEvent.actor_user_id,
+              reason: latestApplyEvent.rejection_reason,
+            }
         : {
             status: "not_applied",
             appliedAt: null,
