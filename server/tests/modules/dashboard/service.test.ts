@@ -162,11 +162,14 @@ describe("Dashboard Service", () => {
     it("returns canonical funnel buckets for the rep dashboard", async () => {
       const { getRepDashboard } = await import("../../../src/modules/dashboard/service.js");
       const tenantDb = createMockTenantDb([
+        [{ count: "4" }],
         [{ count: "2", total_value: "250000" }],
         [{ overdue: "1", today: "2" }],
         [{ calls: "1", emails: "2", meetings: "0", notes: "1", total: "4" }],
         [{ total: "5", on_time: "4" }],
         [{ stage_id: "deal-stage-1", stage_name: "DD", stage_color: "#2563EB", display_order: 1, deal_count: "1", total_value: "100000" }],
+        [],
+        [],
         [],
         [
           { slug: "contacted", count: "4" },

@@ -731,6 +731,7 @@ describe("Lead Conversion Shared Contract", () => {
       "leads_assigned_rep_id_users_id_fk",
       "leads_company_id_companies_id_fk",
       "leads_director_reviewed_by_users_id_fk",
+      "leads_forecast_updated_by_users_id_fk",
       "leads_primary_contact_id_contacts_id_fk",
       "leads_property_id_properties_id_fk",
     ]);

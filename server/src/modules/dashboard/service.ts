@@ -101,6 +101,14 @@ function dealValueSql() {
   return sql`COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)`;
 }
 
+function toIsoOrNow(value: unknown): string {
+  if (!value) {
+    return new Date(0).toISOString();
+  }
+  const date = new Date(String(value));
+  return Number.isNaN(date.getTime()) ? new Date(0).toISOString() : date.toISOString();
+}
+
 function buildFunnelBuckets(leadRows: any[], dealRows: any[]): FunnelBucketSummary[] {
   const leadCounts = new Map<string, number>(
     leadRows.map((row) => [String(row.slug), Number(row.count ?? 0)])
@@ -530,7 +538,7 @@ export async function getRepDashboard(
       propertyName: row.property_name ?? null,
       stageName: row.stage_name,
       daysInStage: Number(row.days_in_stage ?? 0),
-      updatedAt: new Date(row.updated_at).toISOString(),
+      updatedAt: toIsoOrNow(row.updated_at),
     })),
     dealSnapshot: dsRows.map((row: any) => ({
       dealId: row.deal_id,
@@ -539,7 +547,7 @@ export async function getRepDashboard(
       propertyName: row.property_name ?? null,
       stageName: row.stage_name,
       totalValue: Number(row.total_value ?? 0),
-      updatedAt: new Date(row.updated_at).toISOString(),
+      updatedAt: toIsoOrNow(row.updated_at),
     })),
   };
 }
