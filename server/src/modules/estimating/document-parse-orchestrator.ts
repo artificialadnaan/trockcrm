@@ -153,6 +153,10 @@ async function markParseFailed(args: {
     .where(eq(estimateDocumentParseRuns.id, args.parseRunId))
     .returning();
 
+  if (currentDocument?.activeParseRunId && currentDocument.activeParseRunId !== args.parseRunId) {
+    return { parseRun, documentUpdate: currentDocument };
+  }
+
   const [documentUpdate] = await args.tenantDb
     .update(estimateSourceDocuments)
     .set({

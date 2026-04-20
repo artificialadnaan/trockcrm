@@ -393,7 +393,7 @@ describe("runEstimateDocumentParse", () => {
     );
   });
 
-  it("cleans up failed-run artifacts and preserves the current active parse on late failure", async () => {
+  it("cleans up failed-run artifacts and preserves the current document state when the failure is stale", async () => {
     const documentSnapshot = {
       id: "doc-2",
       dealId: "deal-1",
@@ -410,6 +410,11 @@ describe("runEstimateDocumentParse", () => {
         documentSnapshot,
         currentDocument: {
           activeParseRunId: "parse-run-current",
+          parseStatus: "processing",
+          ocrStatus: "processing",
+          parseProvider: "newer-provider",
+          parseProfile: "balanced",
+          parseErrorSummary: null,
         },
         existingPages: [
           {
@@ -477,11 +482,20 @@ describe("runEstimateDocumentParse", () => {
         errorSummary: "simulated completion failure",
       })
     );
-    expect(updatedDocuments.at(-1)).toEqual(
+    expect(updatedDocuments).toEqual(
+      expect.not.arrayContaining([
+        expect.objectContaining({
+          parseStatus: "failed",
+          parseErrorSummary: "simulated completion failure",
+        }),
+      ])
+    );
+    expect(documentState).toEqual(
       expect.objectContaining({
-        parseStatus: "failed",
-        ocrStatus: "failed",
+        parseStatus: "processing",
+        ocrStatus: "processing",
         activeParseRunId: "parse-run-newer",
+        parseErrorSummary: null,
       })
     );
     expect(documentState.activeParseRunId).toBe("parse-run-newer");
