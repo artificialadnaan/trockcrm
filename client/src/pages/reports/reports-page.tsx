@@ -1,4 +1,5 @@
 import { useMemo, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 import { useAuth } from "@/lib/auth";
 import {
   useSavedReports,
@@ -54,6 +55,9 @@ import {
   ClipboardList,
   Clock3,
   Activity,
+  ArrowUpRight,
+  ShieldCheck,
+  Rows3,
 } from "lucide-react";
 import {
   buildPrintableReportHtml,
@@ -278,6 +282,21 @@ function formatWorkflowStatus(status: string) {
     .replace(/_/g, " ")
     .replace(/\b\w/g, (char) => char.toUpperCase());
 }
+
+const operationalViews = [
+  {
+    title: "Sales Review",
+    description: "Run the weekly 30/60/90 forecast, cadence, hygiene, and support review from CRM data.",
+    to: "/sales-review",
+    icon: ShieldCheck,
+  },
+  {
+    title: "Pipeline Hygiene",
+    description: "Open the cleanup queue for stale or incomplete lead and deal records that need attention.",
+    to: "/pipeline/hygiene",
+    icon: Rows3,
+  },
+] as const;
 
 interface WorkflowTableColumn<T> {
   key: string;
@@ -880,6 +899,33 @@ export function ReportsPage() {
             />
           </div>
         )}
+
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+          <div className="px-6 py-5 border-b border-slate-100">
+            <h2 className="text-sm font-bold text-slate-900">Operational Views</h2>
+            <p className="text-xs text-slate-400">Focused workspaces for weekly pipeline review and cleanup.</p>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-0 divide-y md:divide-y-0 md:divide-x divide-slate-100">
+            {operationalViews.map((view) => (
+              <Link
+                key={view.to}
+                to={view.to}
+                className="group px-6 py-5 hover:bg-slate-50 transition-colors"
+              >
+                <div className="flex items-start justify-between gap-4">
+                  <div className="space-y-2">
+                    <div className="flex items-center gap-2">
+                      <view.icon className="h-4 w-4 text-slate-400 group-hover:text-[#CC0000]" />
+                      <h3 className="text-sm font-semibold text-slate-900">{view.title}</h3>
+                    </div>
+                    <p className="text-sm leading-relaxed text-slate-500 max-w-md">{view.description}</p>
+                  </div>
+                  <ArrowUpRight className="h-4 w-4 text-slate-300 group-hover:text-[#CC0000]" />
+                </div>
+              </Link>
+            ))}
+          </div>
+        </div>
 
         {/* ================================================================
             SAVED REPORTS PANEL
