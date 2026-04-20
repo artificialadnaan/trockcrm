@@ -28,8 +28,6 @@
   Responsibility: add catalog-sync orchestration using existing Procore integration patterns.
 - Create: `server/src/modules/procore/catalog-sync-service.ts`
   Responsibility: normalize Procore catalog payloads into local catalog tables.
-- Modify: `worker/src/jobs/procore-sync.ts`
-  Responsibility: invoke the catalog sync path during Procore sync runs.
 - Modify: `worker/src/index.ts`
   Responsibility: add a dedicated cron entry for public catalog refresh instead of coupling it to every office-scoped Procore poll.
 - Create: `server/src/modules/estimating/document-service.ts`
@@ -62,6 +60,8 @@
   Responsibility: host the new estimating workflow inside the existing estimate tab.
 - Create: `client/src/components/estimating/estimating-workflow-shell.tsx`
   Responsibility: orchestrate workflow sections and status.
+- Create: `server/tests/modules/estimating/workflow-state-routes.test.ts`
+  Responsibility: validate workflow-state, review-log, and copilot route payloads that power the estimating UI shell.
 - Create: `client/src/components/estimating/estimate-documents-panel.tsx`
   Responsibility: upload and list source documents.
 - Create: `client/src/components/estimating/estimate-extraction-review-table.tsx`
@@ -384,7 +384,6 @@ git commit -m "feat: add catalog and estimate generation storage"
 **Files:**
 - Create: `server/src/modules/procore/catalog-sync-service.ts`
 - Modify: `server/src/modules/procore/sync-service.ts`
-- Modify: `worker/src/jobs/procore-sync.ts`
 - Test: `server/tests/modules/procore/catalog-sync-service.test.ts`
 
 - [ ] **Step 1: Write failing normalization tests**
@@ -499,7 +498,7 @@ Expected: PASS for the new catalog test, existing Procore tests remain green.
 - [ ] **Step 7: Commit the catalog sync task**
 
 ```bash
-git add server/src/modules/procore/catalog-sync-service.ts server/src/modules/procore/sync-service.ts server/src/modules/admin/routes.ts server/src/app.ts worker/src/index.ts worker/src/jobs/procore-sync.ts server/tests/modules/procore/catalog-sync-service.test.ts
+git add server/src/modules/procore/catalog-sync-service.ts server/src/modules/procore/sync-service.ts server/src/modules/admin/routes.ts server/src/app.ts worker/src/index.ts server/tests/modules/procore/catalog-sync-service.test.ts
 git commit -m "feat: sync procore cost catalog into local tables"
 ```
 
@@ -701,7 +700,7 @@ registerJobHandler("estimate_generation", async (payload, officeId) => {
 - [ ] **Step 7: Add routes and a document upload panel in the estimate tab**
 
 ```ts
-router.post("/deals/:dealId/estimating/documents", async (req, res) => {
+router.post("/:dealId/estimating/documents", async (req, res) => {
   const deal = await getDealById(req.tenantDb!, req.params.dealId, req.user!.role, req.user!.id);
   if (!deal) throw new AppError(404, "Deal not found");
 
@@ -1190,7 +1189,7 @@ export async function promoteApprovedRecommendationsToEstimate({
 - [ ] **Step 4: Add approval in Task 5 only, and reserve Task 6 for edit/remap/load endpoints**
 
 ```ts
-router.post("/deals/:dealId/estimating/recommendations/:recommendationId/approve", async (req, res) => {
+router.post("/:dealId/estimating/recommendations/:recommendationId/approve", async (req, res) => {
   const deal = await getDealById(req.tenantDb!, req.params.dealId, req.user!.role, req.user!.id);
   if (!deal) throw new AppError(404, "Deal not found");
 
@@ -1224,7 +1223,7 @@ export async function approveEstimateRecommendation(args: ApproveEstimateRecomme
 - [ ] **Step 5: Add the gated promotion route**
 
 ```ts
-router.post("/deals/:dealId/estimating/promote", async (req, res) => {
+router.post("/:dealId/estimating/promote", async (req, res) => {
   const deal = await getDealById(req.tenantDb!, req.params.dealId, req.user!.role, req.user!.id);
   if (!deal) throw new AppError(404, "Deal not found");
 
@@ -1369,12 +1368,7 @@ export function EstimatingWorkflowShell(props: EstimatingWorkflowShellProps) {
       <EstimateExtractionReviewTable rows={props.extractionRows} />
       <EstimateCatalogMatchTable rows={props.matchRows} />
       <EstimatePricingReviewTable rows={props.pricingRows} />
-      <div className="rounded-2xl border border-border/60 p-4">
-        <h3 className="text-sm font-semibold">Estimate</h3>
-        <p className="text-sm text-muted-foreground">
-          Approved recommendations promote into the existing estimate editor below.
-        </p>
-      </div>
+      <ExistingEstimateEditor sections={props.sections} onRefresh={props.onRefreshEstimate} />
       {props.copilotEnabled ? <EstimateCopilotPanel dealId={props.dealId} /> : null}
       <EstimateReviewLogPanel events={props.reviewEvents} />
     </div>
@@ -1382,17 +1376,17 @@ export function EstimatingWorkflowShell(props: EstimatingWorkflowShellProps) {
 }
 ```
 
-- [ ] **Step 5: Add concrete review-state mutations for extraction, match, and pricing rows**
+- [ ] **Step 5: Add workflow-state routes plus concrete review-state mutations**
 
 ```ts
-router.get("/deals/:dealId/estimating", async (req, res) => {
+router.get("/:dealId/estimating", async (req, res) => {
   const deal = await getDealById(req.tenantDb!, req.params.dealId, req.user!.role, req.user!.id);
   if (!deal) throw new AppError(404, "Deal not found");
   const workflow = await getEstimatingWorkflowState(req.tenantDb!, req.params.dealId);
   res.status(200).json(workflow);
 });
 
-router.post("/deals/:dealId/estimating/extractions/:extractionId/approve", async (req, res) => {
+router.post("/:dealId/estimating/extractions/:extractionId/approve", async (req, res) => {
   const extraction = await approveEstimateExtraction({
     tenantDb: req.tenantDb,
     dealId: req.params.dealId,
@@ -1403,7 +1397,7 @@ router.post("/deals/:dealId/estimating/extractions/:extractionId/approve", async
   res.status(200).json({ extraction });
 });
 
-router.patch("/deals/:dealId/estimating/extractions/:extractionId", async (req, res) => {
+router.patch("/:dealId/estimating/extractions/:extractionId", async (req, res) => {
   const extraction = await updateEstimateExtraction(req.tenantDb!, req.params.dealId, req.params.extractionId, req.body);
   await insertEstimateReviewEvent(req.tenantDb!, {
     dealId: req.params.dealId,
@@ -1416,7 +1410,7 @@ router.patch("/deals/:dealId/estimating/extractions/:extractionId", async (req, 
   res.status(200).json({ extraction });
 });
 
-router.post("/deals/:dealId/estimating/matches/:matchId/select", async (req, res) => {
+router.post("/:dealId/estimating/matches/:matchId/select", async (req, res) => {
   const match = await selectEstimateExtractionMatch({
     tenantDb: req.tenantDb,
     dealId: req.params.dealId,
@@ -1427,7 +1421,7 @@ router.post("/deals/:dealId/estimating/matches/:matchId/select", async (req, res
   res.status(200).json({ match });
 });
 
-router.patch("/deals/:dealId/estimating/matches/:matchId", async (req, res) => {
+router.patch("/:dealId/estimating/matches/:matchId", async (req, res) => {
   const match = await remapEstimateExtractionMatch(req.tenantDb!, req.params.dealId, req.params.matchId, req.body);
   await insertEstimateReviewEvent(req.tenantDb!, {
     dealId: req.params.dealId,
@@ -1440,7 +1434,7 @@ router.patch("/deals/:dealId/estimating/matches/:matchId", async (req, res) => {
   res.status(200).json({ match });
 });
 
-router.patch("/deals/:dealId/estimating/recommendations/:recommendationId", async (req, res) => {
+router.patch("/:dealId/estimating/recommendations/:recommendationId", async (req, res) => {
   const recommendation = await overrideEstimateRecommendation(
     req.tenantDb!,
     req.params.dealId,
@@ -1458,7 +1452,7 @@ router.patch("/deals/:dealId/estimating/recommendations/:recommendationId", asyn
   res.status(200).json({ recommendation });
 });
 
-router.post("/deals/:dealId/estimating/recommendations/:recommendationId/reject", async (req, res) => {
+router.post("/:dealId/estimating/recommendations/:recommendationId/reject", async (req, res) => {
   const recommendation = await rejectEstimateRecommendation({
     tenantDb: req.tenantDb,
     dealId: req.params.dealId,
@@ -1532,14 +1526,14 @@ export async function answerEstimatingCopilotQuestion(input: AnswerEstimatingCop
 ```
 
 ```ts
-router.get("/deals/:dealId/estimating/review-log", async (req, res) => {
+router.get("/:dealId/estimating/review-log", async (req, res) => {
   const deal = await getDealById(req.tenantDb!, req.params.dealId, req.user!.role, req.user!.id);
   if (!deal) throw new AppError(404, "Deal not found");
   const events = await listEstimateReviewEvents(req.tenantDb, req.params.dealId);
   res.status(200).json({ events });
 });
 
-router.post("/deals/:dealId/estimating/copilot", async (req, res) => {
+router.post("/:dealId/estimating/copilot", async (req, res) => {
   const deal = await getDealById(req.tenantDb!, req.params.dealId, req.user!.role, req.user!.id);
   if (!deal) throw new AppError(404, "Deal not found");
   const answer = await answerEstimatingCopilotQuestion(req.body);
