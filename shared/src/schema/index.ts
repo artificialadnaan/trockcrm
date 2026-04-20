@@ -62,6 +62,11 @@ export { aiManagerAlertSendLedger } from "./tenant/ai-manager-alert-send-ledger.
 export { aiPolicyRecommendationSnapshots } from "./tenant/ai-policy-recommendation-snapshots.js";
 export { aiPolicyRecommendationRows } from "./tenant/ai-policy-recommendation-rows.js";
 export { aiPolicyRecommendationFeedback } from "./tenant/ai-policy-recommendation-feedback.js";
+export { aiPolicyRecommendationDecisions } from "./tenant/ai-policy-recommendation-decisions.js";
+export { aiPolicyRecommendationApplyEvents } from "./tenant/ai-policy-recommendation-apply-events.js";
+export { interventionSnoozePolicies } from "./tenant/intervention-snooze-policies.js";
+export { interventionEscalationPolicies } from "./tenant/intervention-escalation-policies.js";
+export { interventionAssigneeBalancingPolicies } from "./tenant/intervention-assignee-balancing-policies.js";
 
 // Migration schema tables (staging area for HubSpot data migration)
 export { stagedDeals } from "./migration/staged-deals.js";

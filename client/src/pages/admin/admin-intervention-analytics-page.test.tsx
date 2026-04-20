@@ -16,6 +16,7 @@ const mocks = vi.hoisted(() => ({
   useInterventionPolicyRecommendations: vi.fn(),
   regenerateInterventionPolicyRecommendations: vi.fn(),
   submitInterventionPolicyRecommendationFeedback: vi.fn(),
+  applyInterventionPolicyRecommendation: vi.fn(),
 }));
 
 const analyticsData = {
@@ -202,6 +203,43 @@ const policyRecommendationView = {
       suggestedAction: "Review the default waiting-on-customer snooze window and require a stronger next-step plan.",
       counterSignal: "Volume is concentrated in one disconnect type, so confirm the issue is not isolated to a single playbook.",
       renderStatus: "active",
+      proposedChange: {
+        kind: "snooze_policy_adjustment",
+        targetKey: "waiting_on_customer",
+        policyLabel: "Waiting on customer",
+        currentValue: {
+          maxSnoozeDays: 7,
+          breachReviewThresholdPercent: 20,
+        },
+        proposedValue: {
+          maxSnoozeDays: 5,
+          breachReviewThresholdPercent: 15,
+        },
+      },
+      reviewDetails: {
+        decision: "qualified_rendered",
+        primaryTrigger: "Waiting on customer snoozes are breaching and reopening above policy thresholds.",
+        thresholdSummary: "6 conclusions, 40% breaches, 35% reopen rate.",
+        rankingSummary: "Score 88 = impact 34 + volume 19 + persistence 20 + actionability 15.",
+        score: 88,
+        impactScore: 34,
+        volumeScore: 19,
+        persistenceScore: 20,
+        actionabilityScore: 15,
+        usedFallbackCopy: false,
+        usedFallbackStructuredPayload: false,
+      },
+      applyEligibility: {
+        eligible: true,
+        reason: "eligible",
+        message: "This recommendation is eligible for preview and apply.",
+      },
+      applyStatus: {
+        status: "not_applied",
+        appliedAt: null,
+        appliedBy: null,
+        reason: null,
+      },
       feedbackSummary: {
         helpfulCount: 2,
         notUsefulCount: 0,
@@ -255,6 +293,19 @@ beforeEach(() => {
     feedbackValue: "helpful",
     comment: null,
   });
+  mocks.applyInterventionPolicyRecommendation.mockResolvedValue({
+    status: "applied",
+    applyEventId: "apply-1",
+    recommendationId: "11111111-1111-4111-8111-111111111111",
+    snapshotId: "policy-snapshot-1",
+    applyStatus: "applied",
+    appliedAt: "2026-04-16T13:12:00.000Z",
+    appliedBy: "Admin User",
+    reason: null,
+    beforeState: { maxSnoozeDays: 7, breachReviewThresholdPercent: 20 },
+    proposedState: { maxSnoozeDays: 5, breachReviewThresholdPercent: 15 },
+    appliedState: { maxSnoozeDays: 5, breachReviewThresholdPercent: 15 },
+  });
 });
 
 vi.mock("@/components/ai/intervention-analytics-breach-queue", () => ({
@@ -302,6 +353,7 @@ vi.mock("@/hooks/use-ai-ops", () => ({
   useInterventionPolicyRecommendations: mocks.useInterventionPolicyRecommendations,
   regenerateInterventionPolicyRecommendations: mocks.regenerateInterventionPolicyRecommendations,
   submitInterventionPolicyRecommendationFeedback: mocks.submitInterventionPolicyRecommendationFeedback,
+  applyInterventionPolicyRecommendation: mocks.applyInterventionPolicyRecommendation,
 }));
 
 describe("AdminInterventionAnalyticsPage", () => {
@@ -344,6 +396,8 @@ describe("AdminInterventionAnalyticsPage", () => {
     expect(html).toContain("snooze_policy_adjustment");
     expect(html).toContain("Reduce repeat-open volume and shorten breach recovery time.");
     expect(html).toContain("Waiting-on-customer breach rate");
+    expect(html).toContain("Why this qualified");
+    expect(html).toContain("Apply change");
     expect(html).not.toContain("Manager Readout");
     expect(html).toContain("Run Manager Alert Scan");
     expect(html).toContain("Send Alerts");
