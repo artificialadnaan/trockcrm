@@ -57,6 +57,9 @@ export { aiDisconnectCases } from "./tenant/ai-disconnect-cases.js";
 export { aiDisconnectCaseHistory } from "./tenant/ai-disconnect-case-history.js";
 export { aiManagerAlertSnapshots, aiManagerAlertSnapshotModeEnum } from "./tenant/ai-manager-alert-snapshots.js";
 export { aiManagerAlertSendLedger } from "./tenant/ai-manager-alert-send-ledger.js";
+export { aiPolicyRecommendationSnapshots } from "./tenant/ai-policy-recommendation-snapshots.js";
+export { aiPolicyRecommendationRows } from "./tenant/ai-policy-recommendation-rows.js";
+export { aiPolicyRecommendationFeedback } from "./tenant/ai-policy-recommendation-feedback.js";
 
 // Migration schema tables (staging area for HubSpot data migration)
 export { stagedDeals } from "./migration/staged-deals.js";

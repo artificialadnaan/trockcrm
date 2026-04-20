@@ -12,7 +12,10 @@ import {
   escalateInterventionCases,
   getInterventionCaseDetail,
   getInterventionAnalyticsDashboard,
+  getInterventionPolicyRecommendationsView,
   listInterventionCases,
+  recordInterventionPolicyRecommendationFeedback,
+  regenerateInterventionPolicyRecommendations,
   regenerateInterventionCopilot,
   resolveInterventionCases,
   snoozeInterventionCases,
@@ -354,6 +357,64 @@ router.post("/ops/intervention-manager-alerts/send", requireRole("admin", "direc
     next(err);
   }
 });
+
+router.get("/ops/intervention-policy-recommendations", requireRole("admin", "director"), async (req, res, next) => {
+  try {
+    const view = await getInterventionPolicyRecommendationsView(req.tenantDb!, {
+      officeId: getActiveOfficeId(req),
+      viewerUserId: req.user!.id,
+    });
+    await req.commitTransaction!();
+    res.json(view);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/ops/intervention-policy-recommendations/regenerate", requireRole("admin", "director"), async (req, res, next) => {
+  try {
+    const result = await regenerateInterventionPolicyRecommendations(req.tenantDb!, {
+      officeId: getActiveOfficeId(req),
+      requestedByUserId: req.user!.id,
+    });
+    await req.commitTransaction!();
+    res.status(202).json({
+      queued: result.queued,
+      snapshotId: result.snapshotId,
+      status: result.status,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post(
+  "/ops/intervention-policy-recommendations/:recommendationId/feedback",
+  requireRole("admin", "director"),
+  async (req, res, next) => {
+    try {
+      const recommendationId = String(req.params.recommendationId ?? "");
+      if (!UUID_PATTERN.test(recommendationId)) {
+        throw new AppError(400, "recommendationId must be a valid UUID");
+      }
+      const feedbackValue = String(req.body?.feedbackValue ?? "");
+      if (!["helpful", "not_useful", "wrong_direction"].includes(feedbackValue)) {
+        throw new AppError(400, "feedbackValue must be helpful, not_useful, or wrong_direction");
+      }
+      const feedback = await recordInterventionPolicyRecommendationFeedback(req.tenantDb!, {
+        officeId: getActiveOfficeId(req),
+        recommendationId,
+        userId: req.user!.id,
+        feedbackValue: feedbackValue as "helpful" | "not_useful" | "wrong_direction",
+        comment: typeof req.body?.comment === "string" ? req.body.comment : null,
+      });
+      await req.commitTransaction!();
+      res.json(feedback);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
 
 router.get("/ops/reviews", requireRole("admin", "director"), async (req, res, next) => {
   try {

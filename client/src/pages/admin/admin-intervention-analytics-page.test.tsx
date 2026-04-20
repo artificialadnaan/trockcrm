@@ -13,6 +13,9 @@ import {
 const mocks = vi.hoisted(() => ({
   useInterventionAnalytics: vi.fn(),
   useManagerAlertSnapshot: vi.fn(),
+  useInterventionPolicyRecommendations: vi.fn(),
+  regenerateInterventionPolicyRecommendations: vi.fn(),
+  submitInterventionPolicyRecommendationFeedback: vi.fn(),
 }));
 
 const analyticsData = {
@@ -174,6 +177,55 @@ const managerAlertSnapshot: ManagerAlertSnapshot = {
   updatedAt: "2026-04-16T13:00:00.000Z",
 };
 
+const policyRecommendationView = {
+  status: "active",
+  snapshot: {
+    id: "policy-snapshot-1",
+    officeId: "office-1",
+    status: "active",
+    generatedAt: "2026-04-16T13:10:00.000Z",
+    staleAt: "2026-04-17T13:10:00.000Z",
+    supersededAt: null,
+  },
+  recommendations: [
+    {
+      id: "11111111-1111-4111-8111-111111111111",
+      officeId: "office-1",
+      snapshotId: "policy-snapshot-1",
+      taxonomy: "snooze_policy_adjustment",
+      title: "Tighten waiting-on-customer snoozes",
+      statement: "Shorten or gate long waiting-on-customer snoozes for overdue manager-owned cases.",
+      whyNow: "Recent waiting-on-customer snoozes are breaching and reopening above the policy threshold.",
+      expectedImpact: "Reduce repeat-open volume and shorten breach recovery time.",
+      confidence: "high",
+      priority: 88,
+      suggestedAction: "Review the default waiting-on-customer snooze window and require a stronger next-step plan.",
+      counterSignal: "Volume is concentrated in one disconnect type, so confirm the issue is not isolated to a single playbook.",
+      renderStatus: "active",
+      feedbackSummary: {
+        helpfulCount: 2,
+        notUsefulCount: 0,
+        wrongDirectionCount: 0,
+        commentCount: 1,
+      },
+      feedbackStateForViewer: null,
+      evidence: [
+        {
+          metricKey: "waiting_on_customer_breach_rate",
+          label: "Waiting-on-customer breach rate",
+          currentValue: 0.4,
+          baselineValue: 0.15,
+          delta: 0.25,
+          window: "last_30_days",
+          direction: "up",
+        },
+      ],
+      generatedAt: "2026-04-16T13:10:00.000Z",
+      staleAt: "2026-04-17T13:10:00.000Z",
+    },
+  ],
+} as const;
+
 beforeEach(() => {
   mocks.useInterventionAnalytics.mockReturnValue({
     data: analyticsData,
@@ -186,6 +238,22 @@ beforeEach(() => {
     loading: false,
     error: null,
     refetch: vi.fn(),
+  });
+  mocks.useInterventionPolicyRecommendations.mockReturnValue({
+    data: policyRecommendationView,
+    loading: false,
+    error: null,
+    refetch: vi.fn(),
+  });
+  mocks.regenerateInterventionPolicyRecommendations.mockResolvedValue({
+    queued: true,
+    snapshotId: "policy-snapshot-1",
+    status: "active",
+  });
+  mocks.submitInterventionPolicyRecommendationFeedback.mockResolvedValue({
+    recommendationId: "11111111-1111-4111-8111-111111111111",
+    feedbackValue: "helpful",
+    comment: null,
   });
 });
 
@@ -231,6 +299,9 @@ vi.mock("@/components/ui/card", () => ({
 vi.mock("@/hooks/use-ai-ops", () => ({
   useInterventionAnalytics: mocks.useInterventionAnalytics,
   useManagerAlertSnapshot: mocks.useManagerAlertSnapshot,
+  useInterventionPolicyRecommendations: mocks.useInterventionPolicyRecommendations,
+  regenerateInterventionPolicyRecommendations: mocks.regenerateInterventionPolicyRecommendations,
+  submitInterventionPolicyRecommendationFeedback: mocks.submitInterventionPolicyRecommendationFeedback,
 }));
 
 describe("AdminInterventionAnalyticsPage", () => {
@@ -269,6 +340,10 @@ describe("AdminInterventionAnalyticsPage", () => {
     expect(html).toContain("Manager Alerts");
     expect(html).toContain("Outcome Effectiveness");
     expect(html).toContain("Policy Recommendations");
+    expect(html).toContain("Tighten waiting-on-customer snoozes");
+    expect(html).toContain("snooze_policy_adjustment");
+    expect(html).toContain("Reduce repeat-open volume and shorten breach recovery time.");
+    expect(html).toContain("Waiting-on-customer breach rate");
     expect(html).not.toContain("Manager Readout");
     expect(html).toContain("Run Manager Alert Scan");
     expect(html).toContain("Send Alerts");
@@ -292,6 +367,7 @@ describe("AdminInterventionAnalyticsPage", () => {
     expect(html).toContain('id="policy-recommendations"');
     expect(html.indexOf("Manager Brief")).toBeLessThan(html.indexOf("Queue Health"));
     expect(html.indexOf("Manager Brief")).toBeLessThan(html.indexOf("Manager Alerts"));
+    expect(html).not.toContain("Policy recommendations are reserved in this baseline.");
   });
 
   it("preserves source filters on cross-links to the other manager surfaces", () => {
@@ -332,5 +408,26 @@ describe("AdminInterventionAnalyticsPage", () => {
     expect(html).toContain("Manager Alerts");
     expect(html).toContain("Intervention analytics are unavailable right now.");
     expect(html).toContain("Run Manager Alert Scan");
+  });
+
+  it("renders a missing-snapshot recommendation state with regenerate affordance", () => {
+    mocks.useInterventionPolicyRecommendations.mockReturnValueOnce({
+      data: {
+        status: "missing_snapshot",
+        canRegenerate: true,
+      },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <AdminInterventionAnalyticsPage />
+      </MemoryRouter>
+    );
+
+    expect(html).toContain("No policy recommendation snapshot is available yet.");
+    expect(html).toContain("Generate Recommendations");
   });
 });

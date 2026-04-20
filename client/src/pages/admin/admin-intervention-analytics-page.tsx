@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { ClipboardCheck, Clock3, Radar, RefreshCcw, Send, ShieldAlert, Users2 } from "lucide-react";
 import {
+  useInterventionPolicyRecommendations,
   runManagerAlertScan,
   sendManagerAlertSummary,
   useInterventionAnalytics,
@@ -17,6 +18,7 @@ import { InterventionAnalyticsSummaryStrip } from "@/components/ai/intervention-
 import { InterventionManagerBrief } from "@/components/ai/intervention-manager-brief";
 import { InterventionManagerConsoleNav } from "@/components/ai/intervention-manager-console-nav";
 import { InterventionManagerConsoleSection } from "@/components/ai/intervention-manager-console-section";
+import { InterventionPolicyRecommendationsSection } from "@/components/ai/intervention-policy-recommendations";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 
@@ -339,6 +341,12 @@ function ManagerAlertsPanel({ searchParams }: { searchParams: URLSearchParams })
 export function AdminInterventionAnalyticsPage() {
   const [searchParams] = useSearchParams();
   const { data, loading, error, refetch } = useInterventionAnalytics();
+  const {
+    data: policyRecommendations,
+    loading: policyRecommendationsLoading,
+    error: policyRecommendationsError,
+    refetch: refetchPolicyRecommendations,
+  } = useInterventionPolicyRecommendations();
   const salesProcessDisconnectsHref = buildSalesProcessDisconnectsHref(searchParams);
   const interventionWorkspaceHref = buildInterventionWorkspaceHref(searchParams);
 
@@ -430,12 +438,14 @@ export function AdminInterventionAnalyticsPage() {
           <InterventionManagerConsoleSection
             id="policy-recommendations"
             title="Policy Recommendations"
-            description="Reserved for the merged policy recommendation module when that baseline lands."
+            description="Ranked manager-facing policy changes grounded in intervention outcomes, queue pressure, and ownership concentration."
           >
-            <div className="rounded-lg border border-dashed border-border bg-muted/30 px-4 py-4 text-sm leading-6 text-muted-foreground">
-              Policy recommendations are reserved in this baseline. This section keeps the manager console layout
-              stable until the planned recommendation module ships.
-            </div>
+            <InterventionPolicyRecommendationsSection
+              view={policyRecommendations}
+              loading={policyRecommendationsLoading}
+              error={policyRecommendationsError}
+              onRefresh={refetchPolicyRecommendations}
+            />
           </InterventionManagerConsoleSection>
         </>
       )}
