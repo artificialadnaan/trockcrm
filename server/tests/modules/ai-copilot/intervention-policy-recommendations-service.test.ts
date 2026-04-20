@@ -352,7 +352,7 @@ describe("intervention policy recommendations service", () => {
         }),
       ])
     );
-    expect(review.yield.recommendedNextAction).toBe("hold_thresholds");
+    expect(review.yield.recommendedNextAction).toBe("review_threshold_floor");
     expect(review.yield).toEqual(reviewAll.yield);
   });
 

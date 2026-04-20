@@ -396,15 +396,17 @@ export function InterventionPolicyRecommendationsSection({
   onRefresh,
   loading,
   error,
+  defaultShowReview = false,
 }: {
   view: InterventionPolicyRecommendationsView | null;
   onRefresh: () => Promise<void> | void;
   loading?: boolean;
   error?: string | null;
+  defaultShowReview?: boolean;
 }) {
   const [regenerating, setRegenerating] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
-  const [showReview, setShowReview] = useState(false);
+  const [showReview, setShowReview] = useState(defaultShowReview);
   const [reviewWindow, setReviewWindow] = useState<InterventionPolicyRecommendationReviewWindow>("last_30_days");
   const [reviewDecision, setReviewDecision] = useState<InterventionPolicyRecommendationReviewDecisionFilter>("all");
   const [reviewRefreshKey, setReviewRefreshKey] = useState(0);

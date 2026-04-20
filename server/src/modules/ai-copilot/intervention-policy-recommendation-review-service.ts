@@ -292,14 +292,16 @@ function buildYieldSummary(
     .slice(0, 3)
     .map(([reason, count]) => ({ reason, count }));
 
+  const dominantSuppressionReason = dominantSuppressionReasons[0]?.reason ?? null;
   const recommendedNextAction: InterventionPolicyRecommendationYieldNextAction =
-    summary.totals.qualifiedRendered === 0 && summary.totals.suppressedByPredicate > 0
+    dominantSuppressionReason === "predicate_not_met" || dominantSuppressionReason === "suppressed_by_predicate"
       ? "seed_or_wait_for_more_history"
-      : summary.totals.qualifiedRendered === 0 && summary.totals.suppressedByThreshold > 0
+      : dominantSuppressionReason === "threshold_not_met" || dominantSuppressionReason === "suppressed_by_threshold"
         ? "review_threshold_floor"
-        : summary.totals.qualifiedSuppressedByCap > 0
+        : dominantSuppressionReason === "qualified_suppressed_by_cap"
           ? "review_ranking_cap"
-          : summary.totals.suppressedByMissingTarget > 0 || summary.totals.suppressedByApplyIneligible > 0
+          : dominantSuppressionReason === "suppressed_by_missing_target" ||
+              dominantSuppressionReason === "suppressed_by_apply_ineligible"
             ? "review_target_coverage"
             : "hold_thresholds";
 

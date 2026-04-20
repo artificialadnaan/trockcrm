@@ -381,7 +381,7 @@ const policyRecommendationReview = {
         count: 2,
       },
     ],
-    recommendedNextAction: "seed_or_wait_for_more_history",
+    recommendedNextAction: "review_threshold_floor",
   },
   tuning: {
     currentThresholds: {
