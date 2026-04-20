@@ -488,7 +488,7 @@ export async function getInterventionPolicyRecommendationReview(
 ): Promise<InterventionPolicyRecommendationReviewModel> {
   const window = input.window ?? "last_30_days";
   const snapshot = await fetchLatestRenderablePolicySnapshot(tenantDb, input.officeId);
-  const [summary, yieldSummarySource] = await Promise.all([
+  const [, summary] = await Promise.all([
     getInterventionPolicyRecommendationEvaluationSummary(tenantDb, {
       officeId: input.officeId,
       window,
@@ -514,7 +514,7 @@ export async function getInterventionPolicyRecommendationReview(
       emptyStateReason: null,
       latestDecisionRows: [],
       recentHistory,
-      yield: buildYieldSummary(yieldSummarySource, windowDecisionRows),
+      yield: buildYieldSummary(summary, windowDecisionRows),
       tuning: buildTuningGuidance(summary),
     };
   }
@@ -539,7 +539,7 @@ export async function getInterventionPolicyRecommendationReview(
     emptyStateReason: buildEmptyStateReason(allSnapshotRows),
     latestDecisionRows: mapReviewRows(rawRows),
     recentHistory,
-    yield: buildYieldSummary(yieldSummarySource, windowDecisionRows),
+    yield: buildYieldSummary(summary, windowDecisionRows),
     tuning: buildTuningGuidance(summary),
   };
 }
