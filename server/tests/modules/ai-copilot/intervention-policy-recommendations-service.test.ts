@@ -283,6 +283,14 @@ describe("intervention policy recommendations service", () => {
       now: new Date("2026-04-19T12:00:00.000Z"),
     });
 
+    const reviewAll = await getInterventionPolicyRecommendationReview(tenantDb as any, {
+      officeId: "office-1",
+      viewerUserId: "admin-1",
+      window: "last_30_days",
+      decision: "all",
+      now: new Date("2026-04-19T12:30:00.000Z"),
+    });
+
     const review = await getInterventionPolicyRecommendationReview(tenantDb as any, {
       officeId: "office-1",
       viewerUserId: "admin-1",
@@ -344,7 +352,8 @@ describe("intervention policy recommendations service", () => {
         }),
       ])
     );
-    expect(review.yield.recommendedNextAction).toBe("seed_or_wait_for_more_history");
+    expect(review.yield.recommendedNextAction).toBe("hold_thresholds");
+    expect(review.yield).toEqual(reviewAll.yield);
   });
 
   it("keeps read-only taxonomies review-only in the hydrated recommendations view", async () => {

@@ -484,11 +484,18 @@ export async function getInterventionPolicyRecommendationReview(
 ): Promise<InterventionPolicyRecommendationReviewModel> {
   const window = input.window ?? "last_30_days";
   const snapshot = await fetchLatestRenderablePolicySnapshot(tenantDb, input.officeId);
-  const summary: InterventionPolicyRecommendationEvaluationSummary = await getInterventionPolicyRecommendationEvaluationSummary(tenantDb, {
-    officeId: input.officeId,
-    window,
-    decision: input.decision === "all" ? null : input.decision ?? null,
-  });
+  const [summary, yieldSummarySource] = await Promise.all([
+    getInterventionPolicyRecommendationEvaluationSummary(tenantDb, {
+      officeId: input.officeId,
+      window,
+      decision: input.decision === "all" ? null : input.decision ?? null,
+    }),
+    getInterventionPolicyRecommendationEvaluationSummary(tenantDb, {
+      officeId: input.officeId,
+      window,
+      decision: null,
+    }),
+  ]);
   const windowDecisionRows = await fetchWindowDecisionRows(tenantDb, input.officeId, window);
   const recentHistory = await fetchRecentHistory(tenantDb, input.officeId, window);
 
@@ -500,7 +507,7 @@ export async function getInterventionPolicyRecommendationReview(
       emptyStateReason: null,
       latestDecisionRows: [],
       recentHistory,
-      yield: buildYieldSummary(summary, windowDecisionRows),
+      yield: buildYieldSummary(yieldSummarySource, windowDecisionRows),
       tuning: buildTuningGuidance(summary),
     };
   }
@@ -525,7 +532,7 @@ export async function getInterventionPolicyRecommendationReview(
     emptyStateReason: buildEmptyStateReason(allSnapshotRows),
     latestDecisionRows: mapReviewRows(rawRows),
     recentHistory,
-    yield: buildYieldSummary(summary, windowDecisionRows),
+    yield: buildYieldSummary(yieldSummarySource, windowDecisionRows),
     tuning: buildTuningGuidance(summary),
   };
 }

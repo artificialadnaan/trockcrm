@@ -404,7 +404,7 @@ export function InterventionPolicyRecommendationsSection({
 }) {
   const [regenerating, setRegenerating] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
-  const [showReview, setShowReview] = useState(true);
+  const [showReview, setShowReview] = useState(false);
   const [reviewWindow, setReviewWindow] = useState<InterventionPolicyRecommendationReviewWindow>("last_30_days");
   const [reviewDecision, setReviewDecision] = useState<InterventionPolicyRecommendationReviewDecisionFilter>("all");
   const [reviewRefreshKey, setReviewRefreshKey] = useState(0);
