@@ -356,6 +356,33 @@ const policyRecommendationReview = {
       occurredAt: "2026-04-16T13:12:00.000Z",
     },
   ],
+  yield: {
+    renderedTotals: {
+      window: "last_30_days",
+      total: 4,
+    },
+    renderedByTaxonomy: [
+      {
+        taxonomy: "snooze_policy_adjustment",
+        renderedCount: 3,
+      },
+      {
+        taxonomy: "monitor_only",
+        renderedCount: 1,
+      },
+    ],
+    dominantSuppressionReasons: [
+      {
+        reason: "threshold_not_met",
+        count: 5,
+      },
+      {
+        reason: "apply_ineligible",
+        count: 2,
+      },
+    ],
+    recommendedNextAction: "review_threshold_floor",
+  },
   tuning: {
     currentThresholds: {
       qualificationFloor: 55,
@@ -518,6 +545,7 @@ describe("AdminInterventionAnalyticsPage", () => {
     expect(html).toContain("Review recommendation quality");
     expect(html).toContain("Recent history: 2 events");
     expect(html).toContain("Qualification floor 55");
+    expect(html).not.toContain("Yield and decision history");
     expect(html).not.toContain("Manager Readout");
     expect(html).toContain("Run Manager Alert Scan");
     expect(html).toContain("Send Alerts");

@@ -597,6 +597,13 @@ export interface InterventionPolicyRecommendationHistoryEntry {
   occurredAt: string;
 }
 
+export type InterventionPolicyRecommendationYieldNextAction =
+  | "hold_thresholds"
+  | "review_threshold_floor"
+  | "review_ranking_cap"
+  | "review_target_coverage"
+  | "seed_or_wait_for_more_history";
+
 export type InterventionPolicyRecommendationTuningAction =
   | "hold_thresholds"
   | "lower_qualification_floor"
@@ -628,6 +635,21 @@ export interface InterventionPolicyRecommendationReviewModel {
   emptyStateReason: string | null;
   latestDecisionRows: InterventionPolicyRecommendationReviewRow[];
   recentHistory: InterventionPolicyRecommendationHistoryEntry[];
+  yield: {
+    renderedTotals: {
+      window: InterventionPolicyRecommendationReviewWindow;
+      total: number;
+    };
+    renderedByTaxonomy: Array<{
+      taxonomy: InterventionPolicyRecommendationTaxonomy;
+      renderedCount: number;
+    }>;
+    dominantSuppressionReasons: Array<{
+      reason: string;
+      count: number;
+    }>;
+    recommendedNextAction: InterventionPolicyRecommendationYieldNextAction;
+  };
   tuning: {
     currentThresholds: {
       qualificationFloor: number;

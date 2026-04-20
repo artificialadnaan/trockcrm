@@ -12,6 +12,7 @@ import type {
   InterventionPolicyRecommendationReviewRow,
   InterventionPolicyRecommendationReviewWindow,
   InterventionPolicyRecommendationTaxonomy,
+  InterventionPolicyRecommendationYieldNextAction,
 } from "./intervention-types.js";
 import { getInterventionPolicyRecommendationEvaluationSummary } from "./intervention-policy-application-service.js";
 import {
@@ -64,6 +65,7 @@ type PolicyRecommendationRow = {
 };
 
 type PolicyApplyEventRow = {
+  office_id?: string;
   recommendation_id: string;
   snapshot_id: string;
   taxonomy: InterventionPolicyRecommendationTaxonomy;
@@ -237,14 +239,82 @@ function buildTuningGuidance(
   };
 }
 
-function getReviewWindowCutoff(window: InterventionPolicyRecommendationReviewWindow) {
+function getReviewWindowCutoff(window: InterventionPolicyRecommendationReviewWindow, now = new Date()) {
   const windowMs =
     window === "last_7_days"
       ? 7 * 24 * 60 * 60 * 1000
       : window === "last_90_days"
         ? 90 * 24 * 60 * 60 * 1000
         : 30 * 24 * 60 * 60 * 1000;
-  return Date.now() - windowMs;
+  return now.getTime() - windowMs;
+}
+
+async function fetchWindowDecisionRows(
+  tenantDb: TenantDb | InMemoryTenantDb,
+  officeId: string,
+  window: InterventionPolicyRecommendationReviewWindow,
+  now = new Date()
+) {
+  const cutoff = getReviewWindowCutoff(window, now);
+
+  if (isInMemoryTenantDb(tenantDb)) {
+    return ((tenantDb.state.policyRecommendationDecisions ?? []) as Array<Record<string, any>>)
+      .filter((row) => row.office_id === officeId)
+      .filter((row) => new Date(toIso(row.created_at) ?? 0).getTime() >= cutoff) as PolicyDecisionRow[];
+  }
+
+  const result = await tenantDb.execute(sql`
+    SELECT taxonomy, grouping_key, decision, suppression_reason, score, confidence, used_fallback_copy, used_fallback_structured_payload, created_at
+    FROM ai_policy_recommendation_decisions
+    WHERE office_id = ${officeId}
+      AND created_at >= ${new Date(cutoff)}
+  `);
+  return (((result as any).rows ?? []) as PolicyDecisionRow[]);
+}
+
+function buildYieldSummary(
+  summary: InterventionPolicyRecommendationEvaluationSummary,
+  windowDecisionRows: PolicyDecisionRow[]
+): InterventionPolicyRecommendationReviewModel["yield"] {
+  const renderedByTaxonomy = summary.byTaxonomy.map((row) => ({
+    taxonomy: row.taxonomy,
+    renderedCount: row.counts.qualifiedRendered,
+  }));
+
+  const suppressionReasonCounts = new Map<string, number>();
+  for (const row of windowDecisionRows) {
+    if (row.decision === "qualified_rendered") continue;
+    const reason = row.suppression_reason ?? row.decision;
+    suppressionReasonCounts.set(reason, (suppressionReasonCounts.get(reason) ?? 0) + 1);
+  }
+
+  const dominantSuppressionReasons = [...suppressionReasonCounts.entries()]
+    .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+    .slice(0, 3)
+    .map(([reason, count]) => ({ reason, count }));
+
+  const dominantSuppressionReason = dominantSuppressionReasons[0]?.reason ?? null;
+  const recommendedNextAction: InterventionPolicyRecommendationYieldNextAction =
+    dominantSuppressionReason === "predicate_not_met" || dominantSuppressionReason === "suppressed_by_predicate"
+      ? "seed_or_wait_for_more_history"
+      : dominantSuppressionReason === "threshold_not_met" || dominantSuppressionReason === "suppressed_by_threshold"
+        ? "review_threshold_floor"
+        : dominantSuppressionReason === "qualified_suppressed_by_cap"
+          ? "review_ranking_cap"
+          : dominantSuppressionReason === "suppressed_by_missing_target" ||
+              dominantSuppressionReason === "suppressed_by_apply_ineligible"
+            ? "review_target_coverage"
+            : "hold_thresholds";
+
+  return {
+    renderedTotals: {
+      window: summary.window,
+      total: summary.totals.qualifiedRendered,
+    },
+    renderedByTaxonomy,
+    dominantSuppressionReasons,
+    recommendedNextAction,
+  };
 }
 
 function historySummaryForEvent(row: { eventType: string; title: string; rejectionReason: string | null }) {
@@ -252,6 +322,11 @@ function historySummaryForEvent(row: { eventType: string; title: string; rejecti
   if (row.eventType === "applied") return `Applied recommendation "${row.title}".`;
   if (row.eventType === "applied_noop") {
     return `Applied recommendation "${row.title}" as a no-op because the target policy already matched.`;
+  }
+  if (row.eventType === "reverted") return `Undid recommendation "${row.title}".`;
+  if (row.eventType === "revert_noop") return `Undo for recommendation "${row.title}" was a no-op.`;
+  if (row.eventType === "revert_rejected_conflict") {
+    return row.rejectionReason ?? `Undo for recommendation "${row.title}" was rejected because the policy changed.`;
   }
   if (row.eventType === "rejected_validation") {
     return row.rejectionReason ?? `Rejected recommendation "${row.title}" during validation.`;
@@ -288,9 +363,10 @@ async function fetchActorDisplayName(
 async function fetchRecentHistory(
   tenantDb: TenantDb | InMemoryTenantDb,
   officeId: string,
-  window: InterventionPolicyRecommendationReviewWindow
+  window: InterventionPolicyRecommendationReviewWindow,
+  now = new Date()
 ): Promise<InterventionPolicyRecommendationHistoryEntry[]> {
-  const cutoff = getReviewWindowCutoff(window);
+  const cutoff = getReviewWindowCutoff(window, now);
 
   const renderedRows = isInMemoryTenantDb(tenantDb)
     ? (((tenantDb.state.policyRecommendationRows ?? []) as PolicyRecommendationRow[]).filter(
@@ -331,7 +407,7 @@ async function fetchRecentHistory(
       ) as any).rows ?? []) as PolicyApplyEventRow[]);
 
   const titleByRecommendation = new Map(
-    renderedRows.map((row) => [row.recommendation_id, row.title] as const)
+    renderedRows.map((row) => [`${row.recommendation_id}:${row.snapshot_id}`, row.title] as const)
   );
 
   const renderedEntries = renderedRows
@@ -359,7 +435,10 @@ async function fetchRecentHistory(
       .map(async (row): Promise<InterventionPolicyRecommendationHistoryEntry> => {
         const actorName =
           row.actor_display_name ?? (await fetchActorDisplayName(tenantDb, row.actor_user_id));
-        const title = row.title ?? titleByRecommendation.get(row.recommendation_id) ?? row.recommendation_id;
+        const title =
+          row.title ??
+          titleByRecommendation.get(`${row.recommendation_id}:${row.snapshot_id}`) ??
+          row.recommendation_id;
         return {
           recommendationId: row.recommendation_id,
           snapshotId: row.snapshot_id,
@@ -377,9 +456,24 @@ async function fetchRecentHistory(
       })
   );
 
-  return [...applyEntries, ...renderedEntries]
+  const newestLifecycleByRecommendation = new Map<string, number>();
+  for (const entry of applyEntries) {
+    const key = `${entry.recommendationId}:${entry.snapshotId}`;
+    const occurredAtMs = new Date(entry.occurredAt).getTime();
+    newestLifecycleByRecommendation.set(
+      key,
+      Math.max(newestLifecycleByRecommendation.get(key) ?? -Infinity, occurredAtMs)
+    );
+  }
+
+  return [...applyEntries, ...renderedEntries.filter((entry) => {
+    const key = `${entry.recommendationId}:${entry.snapshotId}`;
+    const newestLifecycleMs = newestLifecycleByRecommendation.get(key);
+    if (newestLifecycleMs == null) return true;
+    return new Date(entry.occurredAt).getTime() > newestLifecycleMs;
+  })]
     .sort((left, right) => new Date(right.occurredAt).getTime() - new Date(left.occurredAt).getTime())
-    .slice(0, 12);
+    .slice(0, 20);
 }
 
 export async function getInterventionPolicyRecommendationReview(
@@ -394,12 +488,23 @@ export async function getInterventionPolicyRecommendationReview(
 ): Promise<InterventionPolicyRecommendationReviewModel> {
   const window = input.window ?? "last_30_days";
   const snapshot = await fetchLatestRenderablePolicySnapshot(tenantDb, input.officeId);
-  const summary: InterventionPolicyRecommendationEvaluationSummary = await getInterventionPolicyRecommendationEvaluationSummary(tenantDb, {
-    officeId: input.officeId,
-    window,
-    decision: input.decision === "all" ? null : input.decision ?? null,
-  });
-  const recentHistory = await fetchRecentHistory(tenantDb, input.officeId, window);
+  const [summary, yieldSummarySource] = await Promise.all([
+    getInterventionPolicyRecommendationEvaluationSummary(tenantDb, {
+      officeId: input.officeId,
+      window,
+      decision: input.decision === "all" ? null : input.decision ?? null,
+      now: input.now,
+    }),
+    getInterventionPolicyRecommendationEvaluationSummary(tenantDb, {
+      officeId: input.officeId,
+      window,
+      decision: null,
+      now: input.now,
+    }),
+  ]);
+  const reviewNow = input.now ?? new Date();
+  const windowDecisionRows = await fetchWindowDecisionRows(tenantDb, input.officeId, window, reviewNow);
+  const recentHistory = await fetchRecentHistory(tenantDb, input.officeId, window, reviewNow);
 
   if (!snapshot) {
     return {
@@ -409,11 +514,16 @@ export async function getInterventionPolicyRecommendationReview(
       emptyStateReason: null,
       latestDecisionRows: [],
       recentHistory,
+      yield: buildYieldSummary(yieldSummarySource, windowDecisionRows),
       tuning: buildTuningGuidance(summary),
     };
   }
 
-  const rawRows = await fetchSnapshotDecisionRows(tenantDb, input.officeId, snapshot.id, input.decision ?? "all");
+  const allSnapshotRows = await fetchSnapshotDecisionRows(tenantDb, input.officeId, snapshot.id, "all");
+  const rawRows =
+    input.decision && input.decision !== "all"
+      ? await fetchSnapshotDecisionRows(tenantDb, input.officeId, snapshot.id, input.decision)
+      : allSnapshotRows;
 
   return {
     snapshot: {
@@ -426,9 +536,10 @@ export async function getInterventionPolicyRecommendationReview(
     },
     summary,
     emptyStateScope: "latest_snapshot",
-    emptyStateReason: buildEmptyStateReason(rawRows),
+    emptyStateReason: buildEmptyStateReason(allSnapshotRows),
     latestDecisionRows: mapReviewRows(rawRows),
     recentHistory,
+    yield: buildYieldSummary(yieldSummarySource, windowDecisionRows),
     tuning: buildTuningGuidance(summary),
   };
 }

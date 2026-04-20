@@ -950,12 +950,13 @@ export async function getInterventionPolicyRecommendationEvaluationSummary(
     window?: "last_7_days" | "last_30_days" | "last_90_days";
     taxonomy?: InterventionPolicyRecommendationTaxonomy | null;
     decision?: string | null;
+    now?: Date;
   }
 ): Promise<InterventionPolicyRecommendationEvaluationSummary> {
   const window = input.window ?? "last_30_days";
   const windowMs =
     window === "last_7_days" ? 7 * 24 * 60 * 60 * 1000 : window === "last_90_days" ? 90 * 24 * 60 * 60 * 1000 : 30 * 24 * 60 * 60 * 1000;
-  const cutoff = Date.now() - windowMs;
+  const cutoff = (input.now ?? new Date()).getTime() - windowMs;
   const rows = isInMemoryTenantDb(tenantDb)
     ? (((tenantDb.state.policyRecommendationDecisions ?? []) as Array<Record<string, any>>).filter(
         (row) => row.office_id === input.officeId
