@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import {
   applyInterventionPolicyRecommendation,
   regenerateInterventionPolicyRecommendations,
@@ -11,6 +11,16 @@ import {
   useInterventionPolicyRecommendationReview,
 } from "@/hooks/use-ai-ops";
 import { Button } from "@/components/ui/button";
+
+type ReviewSectionKey = "overview" | "history" | "diagnostics" | "calibration" | "seededValidation";
+
+const defaultReviewSections: Record<ReviewSectionKey, boolean> = {
+  overview: true,
+  history: false,
+  diagnostics: false,
+  calibration: false,
+  seededValidation: false,
+};
 
 function formatFreshnessLabel(value: string | null | undefined) {
   if (!value) return "Unknown freshness";
@@ -49,6 +59,71 @@ function formatThresholdCalibrationNoProposalReason(value: string | null | undef
     return "No threshold changes are currently recommended because cap pressure should be reviewed first.";
   }
   return "No threshold changes are currently recommended because threshold pressure is not dominant.";
+}
+
+function formatDecisionFilterLabel(value: InterventionPolicyRecommendationReviewDecisionFilter) {
+  if (value === "rendered") return "Rendered only";
+  if (value === "suppressed") return "Suppressed only";
+  return "All decisions";
+}
+
+function humanizeAction(value: string | null | undefined) {
+  if (!value) return "hold current thresholds";
+  return value.split("_").join(" ");
+}
+
+function humanizeReviewWindow(value: InterventionPolicyRecommendationReviewWindow | string) {
+  return value.split("_").join(" ");
+}
+
+function getAttentionSummary(review: ReturnType<typeof useInterventionPolicyRecommendationReview>["data"]) {
+  if (!review) return "Attention now: recommendation review data is unavailable.";
+  const proposalCount = review.thresholdCalibrationProposals?.proposals.length ?? 0;
+  if (proposalCount > 0) {
+    return `Attention now: threshold review is recommended for ${proposalCount} ${proposalCount === 1 ? "taxonomy" : "taxonomies"}.`;
+  }
+  const nextAction = review.diagnostics?.systemDiagnostics.recommendedNextAction;
+  if (nextAction === "seed_non_prod_validation") {
+    return "Attention now: recommendation history is too thin to justify live changes.";
+  }
+  if (nextAction === "review_threshold_floor_in_code") {
+    return "Attention now: threshold pressure is limiting live recommendations.";
+  }
+  if (nextAction === "review_ranking_cap_in_code") {
+    return "Attention now: ranking cap pressure is crowding out recommendations.";
+  }
+  if (nextAction === "review_target_coverage" || nextAction === "review_apply_eligibility") {
+    return "Attention now: target coverage is limiting live recommendations.";
+  }
+  return "Attention now: no immediate review action.";
+}
+
+function getCalibrationStatus(review: ReturnType<typeof useInterventionPolicyRecommendationReview>["data"]) {
+  if (!review) return "Calibration status: review data is unavailable.";
+  const proposalCount = review.thresholdCalibrationProposals?.proposals.length ?? 0;
+  if (proposalCount > 0) {
+    return `Calibration status: threshold review is recommended for ${proposalCount} ${proposalCount === 1 ? "taxonomy" : "taxonomies"}.`;
+  }
+  return `Calibration status: ${formatThresholdCalibrationNoProposalReason(
+    review.thresholdCalibrationProposals?.noProposalReason
+  )}`;
+}
+
+function buildOverviewItems(review: ReturnType<typeof useInterventionPolicyRecommendationReview>["data"]) {
+  if (!review) {
+    return {
+      attention: "What needs attention now: review data is unavailable.",
+      nextAction: "Next safe action: wait for recommendation review data.",
+      calibration: "Calibration status: review data is unavailable.",
+      context: "Latest snapshot: unknown freshness.",
+    };
+  }
+  return {
+    attention: `What needs attention now: ${getAttentionSummary(review).replace(/^Attention now:\s*/i, "")}`,
+    nextAction: `Next safe action: ${humanizeAction(review.diagnostics?.systemDiagnostics.recommendedNextAction)}.`,
+    calibration: getCalibrationStatus(review),
+    context: `Latest snapshot: ${formatFreshnessLabel(review.snapshot?.generatedAt ?? null)} · Review window: ${humanizeReviewWindow(review.summary?.window ?? "last_30_days")}.`,
+  };
 }
 
 function formatOccurredAtLabel(value: string | null | undefined) {
@@ -442,6 +517,10 @@ export function InterventionPolicyRecommendationsSection({
   const [reviewWindow, setReviewWindow] = useState<InterventionPolicyRecommendationReviewWindow>("last_30_days");
   const [reviewDecision, setReviewDecision] = useState<InterventionPolicyRecommendationReviewDecisionFilter>("all");
   const [reviewRefreshKey, setReviewRefreshKey] = useState(0);
+  const [openSections, setOpenSections] = useState<Record<ReviewSectionKey, boolean>>({
+    ...defaultReviewSections,
+    overview: defaultShowReview,
+  });
   const review = useInterventionPolicyRecommendationReview({
     window: reviewWindow,
     decision: reviewDecision,
@@ -468,91 +547,116 @@ export function InterventionPolicyRecommendationsSection({
     }
   }
 
+  function handleReviewToggle() {
+    setShowReview((value) => {
+      const next = !value;
+      if (next) {
+        setOpenSections(defaultReviewSections);
+      }
+      return next;
+    });
+  }
+
+  function toggleSection(section: ReviewSectionKey) {
+    setOpenSections((current) => ({
+      ...current,
+      [section]: !current[section],
+    }));
+  }
+
+  const overview = buildOverviewItems(review.data);
+
+  function renderSection(
+    key: ReviewSectionKey,
+    title: string,
+    content: ReactNode
+  ) {
+    const isOpen = openSections[key];
+    return (
+      <div className="rounded-lg border border-border/70 bg-white">
+        <button
+          type="button"
+          className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left"
+          onClick={() => toggleSection(key)}
+        >
+          <div className="text-sm font-semibold text-gray-900">{title}</div>
+          <div className="text-[11px] uppercase tracking-widest text-muted-foreground">{isOpen ? "open" : "closed"}</div>
+        </button>
+        {!isOpen ? null : <div className="border-t border-border/70 px-4 py-4">{content}</div>}
+      </div>
+    );
+  }
+
   const reviewControls = (
     <div className="rounded-lg border border-border/70 bg-muted/20 px-4 py-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
           <div className="text-sm font-semibold text-gray-900">Recommendation review</div>
-          <div className="mt-1 text-xs text-muted-foreground">
-            Recent history: {review.data?.recentHistory.length ?? 0} events
-          </div>
-          <div className="mt-1 text-xs text-muted-foreground">
-            Qualification floor {review.data?.tuning.currentThresholds.qualificationFloor ?? 55} · strong{" "}
-            {review.data?.tuning.currentThresholds.strongRecommendationFloor ?? 70} · cap{" "}
-            {review.data?.tuning.currentThresholds.primaryCap ?? 3} + {review.data?.tuning.currentThresholds.secondaryCap ?? 2}
-          </div>
+          <div className="mt-1 text-xs text-muted-foreground">{getAttentionSummary(review.data)}</div>
         </div>
-        <Button variant="outline" onClick={() => setShowReview((value) => !value)}>
+        <Button variant="outline" onClick={handleReviewToggle}>
           Review recommendation quality
         </Button>
       </div>
       {!showReview ? null : (
-        <div className="mt-4 space-y-4">
-          <div className="text-sm text-muted-foreground">
-            Latest snapshot: {formatFreshnessLabel(review.data?.snapshot?.generatedAt ?? null)}
-          </div>
-          <div className="rounded-lg border border-border/70 bg-white px-3 py-3">
-            <div className="text-[11px] uppercase tracking-widest text-muted-foreground">Historical window summary</div>
-            <div className="mt-1 text-xs text-muted-foreground">Historical window summary for the selected review range.</div>
-            <div className="mt-3 flex flex-wrap gap-2">
-              {([
-                ["7d", "last_7_days"],
-                ["30d", "last_30_days"],
-                ["90d", "last_90_days"],
-              ] as const).map(([label, value]) => (
-                <Button key={value} variant={reviewWindow === value ? "default" : "outline"} onClick={() => setReviewWindow(value)}>
-                  {label}
-                </Button>
-              ))}
+        <div className="mt-4 rounded-xl border border-border/70 bg-white px-4 py-4 shadow-sm">
+          {regenerating ? <div className="mb-4 text-sm text-muted-foreground">Refreshing recommendation review...</div> : null}
+          <div className="space-y-4">
+          {renderSection(
+            "overview",
+            "Overview",
+            <div className="space-y-4 text-sm leading-6 text-muted-foreground">
+              <div className="space-y-3">
+                <div>
+                  <div className="text-[11px] uppercase tracking-widest text-muted-foreground">What needs attention now</div>
+                  <div className="mt-1 text-sm leading-6 text-gray-900">{overview.attention.replace(/^What needs attention now:\s*/i, "")}</div>
+                </div>
+                <div>
+                  <div className="text-[11px] uppercase tracking-widest text-muted-foreground">Next safe action</div>
+                  <div className="mt-1 text-sm leading-6 text-gray-900">{overview.nextAction.replace(/^Next safe action:\s*/i, "")}</div>
+                </div>
+                <div>
+                  <div className="text-[11px] uppercase tracking-widest text-muted-foreground">Calibration status</div>
+                  <div className="mt-1 text-sm leading-6 text-gray-900">{overview.calibration.replace(/^Calibration status:\s*/i, "")}</div>
+                </div>
+                <div className="text-sm text-muted-foreground">{overview.context}</div>
+              </div>
+              <div className="rounded-lg border border-border/70 bg-muted/20 px-3 py-3">
+                <div className="text-[11px] uppercase tracking-widest text-muted-foreground">Review scope</div>
+                <div className="mt-2 text-sm text-gray-900">
+                  Showing {formatDecisionFilterLabel(reviewDecision).toLowerCase()} across {humanizeReviewWindow(reviewWindow)}.
+                </div>
+              </div>
+              <div className="flex flex-wrap gap-2 pt-1">
+                {([
+                  ["7d", "last_7_days"],
+                  ["30d", "last_30_days"],
+                  ["90d", "last_90_days"],
+                ] as const).map(([label, value]) => (
+                  <Button key={value} variant={reviewWindow === value ? "default" : "outline"} onClick={() => setReviewWindow(value)}>
+                    {label}
+                  </Button>
+                ))}
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {(["all", "rendered", "suppressed"] as const).map((value) => (
+                  <Button key={value} variant={reviewDecision === value ? "default" : "outline"} onClick={() => setReviewDecision(value)}>
+                    {formatDecisionFilterLabel(value)}
+                  </Button>
+                ))}
+              </div>
             </div>
-            <div className="mt-4 grid gap-2 text-sm text-gray-900 md:grid-cols-2 xl:grid-cols-3">
-              <div>Rendered: {review.data?.summary.totals.qualifiedRendered ?? 0}</div>
-              <div>Suppressed by predicate: {review.data?.summary.totals.suppressedByPredicate ?? 0}</div>
-              <div>Suppressed by threshold: {review.data?.summary.totals.suppressedByThreshold ?? 0}</div>
-              <div>Suppressed by cap: {review.data?.summary.totals.qualifiedSuppressedByCap ?? 0}</div>
-              <div>Suppressed by missing target: {review.data?.summary.totals.suppressedByMissingTarget ?? 0}</div>
-              <div>Suppressed by apply ineligible: {review.data?.summary.totals.suppressedByApplyIneligible ?? 0}</div>
-            </div>
-          </div>
-          <div className="rounded-lg border border-border/70 bg-white px-3 py-3">
-            <div className="text-[11px] uppercase tracking-widest text-muted-foreground">Latest decision diagnostics</div>
-            <div className="mt-1 text-xs text-muted-foreground">Latest snapshot truth for the active recommendation snapshot.</div>
-            <div className="mt-3 flex flex-wrap gap-2">
-              {(["all", "rendered", "suppressed"] as const).map((value) => (
-                <Button key={value} variant={reviewDecision === value ? "default" : "outline"} onClick={() => setReviewDecision(value)}>
-                  {value}
-                </Button>
-              ))}
-            </div>
-            <div className="mt-3 space-y-2">
-              {review.loading ? (
-                <div className="text-sm text-muted-foreground">Loading recommendation review...</div>
-              ) : review.error ? (
-                <div className="text-sm text-red-700">{review.error}</div>
-              ) : review.data?.latestDecisionRows.length ? (
-                review.data.latestDecisionRows.map((row) => (
-                  <div key={`${row.taxonomy}:${row.groupingKey}:${row.decision}`} className="rounded-md border border-border/60 px-3 py-2 text-sm">
-                    <div className="font-medium text-gray-900">{row.taxonomy}</div>
-                    <div className="text-muted-foreground">
-                      {row.groupingKey} · {row.decision}
-                      {row.score == null ? "" : ` · score ${row.score}`}
-                    </div>
-                  </div>
-                ))
-              ) : (
-                <div className="text-sm text-muted-foreground">No diagnostics are available yet.</div>
-              )}
-            </div>
-          </div>
-          <div className="rounded-lg border border-border/70 bg-white px-3 py-3">
-            <div className="text-[11px] uppercase tracking-widest text-muted-foreground">Recent recommendation history</div>
-            <div className="mt-3 space-y-2">
-              {review.loading ? (
-                <div className="text-sm text-muted-foreground">Loading recommendation history...</div>
-              ) : review.error ? (
-                <div className="text-sm text-red-700">{review.error}</div>
-              ) : review.data?.recentHistory.length ? (
-                review.data.recentHistory.map((entry) => (
+          )}
+          {renderSection(
+            "history",
+            "History",
+            !review.data && review.loading ? (
+              <div className="text-sm text-muted-foreground">Loading recommendation history...</div>
+            ) : review.error ? (
+              <div className="text-sm text-red-700">{review.error}</div>
+            ) : review.data?.recentHistory.length ? (
+              <div className="space-y-2">
+                {review.data.recentHistory.map((entry) => (
                   <div
                     key={`${entry.recommendationId}:${entry.eventType}:${entry.occurredAt}`}
                     className="rounded-md border border-border/60 px-3 py-2 text-sm"
@@ -570,207 +674,120 @@ export function InterventionPolicyRecommendationsSection({
                     </div>
                     <div className="mt-1 text-muted-foreground">{entry.summary}</div>
                   </div>
-                ))
-              ) : (
-                <div className="text-sm text-muted-foreground">No recommendation history is available yet.</div>
-              )}
-            </div>
-          </div>
-          <div className="rounded-lg border border-border/70 bg-white px-3 py-3">
-            <div className="text-[11px] uppercase tracking-widest text-muted-foreground">Yield and decision history</div>
-            <div className="mt-1 text-xs text-muted-foreground">Historical window summary derived from persisted review activity.</div>
-            <div className="mt-3 grid gap-2 text-sm text-gray-900 md:grid-cols-1">
-              <div>Window rendered: {review.data?.yield.renderedTotals.total ?? 0}</div>
-            </div>
-            <div className="mt-3 text-sm text-muted-foreground">
-              Next action: {(review.data?.yield.recommendedNextAction ?? "wait_for_more_history").split("_").join(" ")}
-            </div>
-            <div className="mt-4 grid gap-3 xl:grid-cols-2">
-              <div>
-                <div className="text-[11px] uppercase tracking-widest text-muted-foreground">Rendered by taxonomy</div>
+                ))}
+              </div>
+            ) : (
+              <div className="text-sm text-muted-foreground">No recommendation decision history is available right now.</div>
+            )
+          )}
+          {renderSection(
+            "diagnostics",
+            "Diagnostics",
+              <div className="space-y-4">
+              <div className="rounded-md border border-border/60 px-3 py-3">
+                <div className="text-xs text-muted-foreground">Latest snapshot truth for the active recommendation snapshot.</div>
                 <div className="mt-3 space-y-2">
-                  {review.data?.yield.renderedByTaxonomy.length ? (
-                    review.data.yield.renderedByTaxonomy.map((entry) => (
-                      <div key={entry.taxonomy} className="rounded-md border border-border/60 px-3 py-2 text-sm">
-                        <div className="font-medium text-gray-900">{entry.taxonomy}</div>
-                        <div className="text-muted-foreground">Rendered {entry.renderedCount}</div>
+                  {!review.data && review.loading ? (
+                    <div className="text-sm text-muted-foreground">Loading recommendation diagnostics...</div>
+                  ) : review.error ? (
+                    <div className="text-sm text-red-700">{review.error}</div>
+                  ) : review.data?.latestDecisionRows.length ? (
+                    review.data.latestDecisionRows.map((row) => (
+                      <div key={`${row.taxonomy}:${row.groupingKey}:${row.decision}`} className="rounded-md border border-border/60 px-3 py-2 text-sm">
+                        <div className="font-medium text-gray-900">{row.taxonomy}</div>
+                        <div className="text-muted-foreground">
+                          {row.groupingKey} · {row.decision}
+                          {row.score == null ? "" : ` · score ${row.score}`}
+                        </div>
                       </div>
                     ))
                   ) : (
-                    <div className="text-sm text-muted-foreground">No rendered recommendation history is available yet.</div>
+                    <div className="text-sm text-muted-foreground">No diagnostics are available yet.</div>
                   )}
                 </div>
               </div>
-              <div>
-                <div className="text-[11px] uppercase tracking-widest text-muted-foreground">Dominant suppression reasons</div>
+              <div className="rounded-md border border-border/60 px-3 py-3">
+                <div className="text-xs text-muted-foreground">
+                  Historical diagnostics generated {formatFreshnessLabel(review.data?.diagnostics.generatedAt ?? null)}.
+                </div>
+                <div className="mt-2 text-sm text-gray-900">
+                  Next safe action: {formatDiagnosticActionLabel(review.data?.diagnostics.systemDiagnostics.recommendedNextAction ?? "hold_current_thresholds")}
+                </div>
                 <div className="mt-3 space-y-2">
-                  {review.data?.yield.dominantSuppressionReasons.length ? (
-                    review.data.yield.dominantSuppressionReasons.map((entry) => (
-                      <div key={entry.reason} className="rounded-md border border-border/60 px-3 py-2 text-sm text-muted-foreground">
-                        {entry.reason} · {entry.count}
+                  {review.data?.diagnostics.systemDiagnostics.dominantBlockers.length ? (
+                    review.data.diagnostics.systemDiagnostics.dominantBlockers.map((entry) => (
+                      <div key={entry.blocker} className="rounded-md border border-border/60 px-3 py-2 text-sm text-muted-foreground">
+                        {formatDiagnosticBlockerLabel(entry.blocker)} · {entry.count}
                       </div>
                     ))
                   ) : (
-                    <div className="text-sm text-muted-foreground">No dominant suppression reasons are available yet.</div>
+                    <div className="text-sm text-muted-foreground">No qualification diagnostics are available right now.</div>
                   )}
                 </div>
               </div>
             </div>
-          </div>
-          <div className="rounded-lg border border-border/70 bg-white px-3 py-3">
-            <div className="text-[11px] uppercase tracking-widest text-muted-foreground">Threshold tuning guidance</div>
-            <div className="mt-1 text-xs text-muted-foreground">Historical window guidance only. Production thresholds stay read-only here.</div>
-            <div className="mt-3 space-y-2">
+          )}
+          {renderSection(
+            "calibration",
+            "Calibration",
+            <div className="space-y-4">
+              <div className="rounded-md border border-border/60 px-3 py-3">
+                <div className="text-xs text-muted-foreground">
+                  Read-only production guidance. Threshold proposals stay informational until a later code change lands.
+                </div>
+                <div className="mt-2 text-sm text-gray-900">
+                  {review.data?.thresholdCalibrationProposals.selectionSummary ?? "No threshold changes are currently recommended."}
+                </div>
+              </div>
               {review.data?.tuning.guidance.length ? (
-                review.data.tuning.guidance.map((entry) => (
-                  <div key={entry.taxonomy} className="rounded-md border border-border/60 px-3 py-2 text-sm">
-                    <div className="font-medium text-gray-900">{entry.taxonomy}</div>
-                    <div className="text-muted-foreground">{entry.recommendedAction.split("_").join(" ")}</div>
-                    <div className="mt-1 text-muted-foreground">{entry.summary}</div>
-                  </div>
-                ))
-              ) : (
-                <div className="text-sm text-muted-foreground">No tuning guidance is available yet.</div>
-              )}
-            </div>
-          </div>
-          <div className="rounded-lg border border-border/70 bg-white px-3 py-3">
-            <div className="text-[11px] uppercase tracking-widest text-muted-foreground">Qualification diagnostics</div>
-            <div className="mt-1 text-xs text-muted-foreground">
-              Historical window diagnostics generated {formatFreshnessLabel(review.data?.diagnostics.generatedAt ?? null)}.
-            </div>
-            <div className="mt-3 text-sm text-gray-900">
-              Next safe action: {formatDiagnosticActionLabel(review.data?.diagnostics.systemDiagnostics.recommendedNextAction ?? "hold_current_thresholds")}
-            </div>
-            <div className="mt-3 space-y-2">
-              {review.data?.diagnostics.systemDiagnostics.dominantBlockers.length ? (
-                review.data.diagnostics.systemDiagnostics.dominantBlockers.map((entry) => (
-                  <div key={entry.blocker} className="rounded-md border border-border/60 px-3 py-2 text-sm text-muted-foreground">
-                    {formatDiagnosticBlockerLabel(entry.blocker)} · {entry.count}
-                  </div>
-                ))
-              ) : (
-                <div className="text-sm text-muted-foreground">No dominant qualification blockers are available yet.</div>
-              )}
-            </div>
-            <div className="mt-4 space-y-3">
-              {review.data?.diagnostics.taxonomyDiagnostics.length ? (
-                review.data.diagnostics.taxonomyDiagnostics.map((entry) => (
-                  <div key={entry.taxonomy} className="rounded-md border border-border/60 px-3 py-3 text-sm">
-                    <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="space-y-2">
+                  {review.data.tuning.guidance.map((entry) => (
+                    <div key={entry.taxonomy} className="rounded-md border border-border/60 px-3 py-2 text-sm">
                       <div className="font-medium text-gray-900">{entry.taxonomy}</div>
-                      <div className="text-xs uppercase tracking-widest text-muted-foreground">
-                        {formatDiagnosticBlockerLabel(entry.dominantBlocker)}
-                      </div>
+                      <div className="text-muted-foreground">{humanizeAction(entry.recommendedAction)}</div>
+                      <div className="mt-1 text-muted-foreground">{entry.summary}</div>
                     </div>
-                    <div className="mt-2 grid gap-2 text-muted-foreground md:grid-cols-2 xl:grid-cols-3">
-                      <div>Rendered {entry.renderedCount}</div>
-                      <div>Predicate {entry.suppressedCounts.predicateBlocked}</div>
-                      <div>Threshold {entry.suppressedCounts.thresholdBlocked}</div>
-                      <div>Cap {entry.suppressedCounts.capBlocked}</div>
-                      <div>Missing target {entry.suppressedCounts.missingTarget}</div>
-                      <div>Apply ineligible {entry.suppressedCounts.applyIneligible}</div>
-                    </div>
-                    <div className="mt-2 text-muted-foreground">
-                      Recommended tuning action: {formatDiagnosticActionLabel(entry.recommendedTuningAction)}
-                    </div>
-                    <div className="mt-3 space-y-2">
-                      {entry.topSuppressedCandidates.length ? (
-                        entry.topSuppressedCandidates.map((candidate) => (
-                          <div
-                            key={`${entry.taxonomy}:${candidate.groupingKey}:${candidate.createdAt ?? "unknown"}`}
-                            className="rounded-md border border-border/50 px-3 py-2 text-muted-foreground"
-                          >
-                            {candidate.groupingKey} · {candidate.suppressionReason ?? candidate.decision}
-                            {candidate.score == null ? "" : ` · score ${candidate.score}`}
-                          </div>
-                        ))
-                      ) : (
-                        <div className="text-muted-foreground">No suppressed candidates are active for this taxonomy in the selected window.</div>
-                      )}
-                    </div>
-                  </div>
-                ))
-              ) : (
-                <div className="text-sm text-muted-foreground">No qualification diagnostics are available yet.</div>
-              )}
-            </div>
-          </div>
-          <div className="rounded-lg border border-border/70 bg-white px-3 py-3">
-            <div className="text-[11px] uppercase tracking-widest text-muted-foreground">Threshold calibration proposals</div>
-            <div className="mt-1 text-xs text-muted-foreground">
-              Read-only production-window guidance. Global threshold proposals are not live until a later code change lands.
-            </div>
-            <div className="mt-3 text-sm text-muted-foreground">
-              {review.data?.thresholdCalibrationProposals.selectionSummary ?? "No threshold changes are currently recommended."}
-            </div>
-            <div className="mt-3 space-y-3">
-              {review.data?.thresholdCalibrationProposals.proposals.length ? (
-                review.data.thresholdCalibrationProposals.proposals.map((proposal) => (
-                  <div key={proposal.taxonomy} className="rounded-md border border-border/60 px-3 py-3 text-sm">
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <div className="font-medium text-gray-900">{proposal.taxonomy}</div>
-                      <div className="text-xs uppercase tracking-widest text-muted-foreground">Global threshold proposal</div>
-                    </div>
-                    <div className="mt-3 grid gap-3 md:grid-cols-2">
-                      <div className="rounded-md border border-border/50 px-3 py-2">
-                        <div className="text-[10px] uppercase tracking-widest text-muted-foreground">Current threshold</div>
-                        <div className="mt-1 text-gray-900">{proposal.currentThreshold}</div>
-                      </div>
-                      <div className="rounded-md border border-border/50 px-3 py-2">
-                        <div className="text-[10px] uppercase tracking-widest text-muted-foreground">Proposed threshold</div>
-                        <div className="mt-1 text-gray-900">{proposal.proposedThreshold}</div>
-                      </div>
-                    </div>
-                    <div className="mt-3 text-muted-foreground">
-                      Dominant blocker: {formatDiagnosticBlockerLabel(proposal.dominantBlocker)}
-                    </div>
-                    <div className="mt-2 text-muted-foreground">{proposal.rationale}</div>
-                    <div className="mt-2 text-muted-foreground">{proposal.expectedYieldEffect}</div>
-                    <div className="mt-3">
-                      <div className="text-[10px] uppercase tracking-widest text-muted-foreground">Blocker mix</div>
-                      <div className="mt-2 space-y-1">
-                        {proposal.blockerBreakdown.map((entry) => (
-                          <div key={`${proposal.taxonomy}:${entry.label}`} className="text-muted-foreground">
-                            {entry.label} · {entry.count}
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                    <div className="mt-3">
-                      <div className="text-[10px] uppercase tracking-widest text-muted-foreground">Guardrails</div>
-                      <ul className="mt-2 list-disc space-y-1 pl-5 text-muted-foreground">
-                        {proposal.guardrails.map((entry) => (
-                          <li key={`${proposal.taxonomy}:guardrail:${entry}`}>{entry}</li>
-                        ))}
-                      </ul>
-                    </div>
-                    <div className="mt-3">
-                      <div className="text-[10px] uppercase tracking-widest text-muted-foreground">Verification checklist</div>
-                      <ul className="mt-2 list-disc space-y-1 pl-5 text-muted-foreground">
-                        {proposal.verificationChecklist.map((entry) => (
-                          <li key={`${proposal.taxonomy}:check:${entry}`}>{entry}</li>
-                        ))}
-                      </ul>
-                    </div>
-                    <div className="mt-3 text-xs text-muted-foreground">Not yet applied.</div>
-                  </div>
-                ))
-              ) : (
-                <div className="rounded-md border border-border/60 px-3 py-3 text-sm text-muted-foreground">
-                  {formatThresholdCalibrationNoProposalReason(review.data?.thresholdCalibrationProposals.noProposalReason)}
+                  ))}
                 </div>
+              ) : (
+                <div className="text-sm text-muted-foreground">No calibration changes are currently recommended.</div>
               )}
+              <div className="space-y-3">
+                {review.data?.thresholdCalibrationProposals.proposals.length ? (
+                  review.data.thresholdCalibrationProposals.proposals.map((proposal) => (
+                    <div key={proposal.taxonomy} className="rounded-md border border-border/60 px-3 py-3 text-sm">
+                      <div className="font-medium text-gray-900">{proposal.taxonomy}</div>
+                      <div className="mt-2 text-muted-foreground">{proposal.rationale}</div>
+                      <div className="mt-2 text-muted-foreground">{proposal.expectedYieldEffect}</div>
+                      <div className="mt-3 grid gap-3 md:grid-cols-2">
+                        <div className="rounded-md border border-border/50 px-3 py-2">
+                          <div className="text-[10px] uppercase tracking-widest text-muted-foreground">Current threshold</div>
+                          <div className="mt-1 text-gray-900">{proposal.currentThreshold}</div>
+                        </div>
+                        <div className="rounded-md border border-border/50 px-3 py-2">
+                          <div className="text-[10px] uppercase tracking-widest text-muted-foreground">Proposed threshold</div>
+                          <div className="mt-1 text-gray-900">{proposal.proposedThreshold}</div>
+                        </div>
+                      </div>
+                    </div>
+                  ))
+                ) : (
+                  <div className="text-sm text-muted-foreground">
+                    {formatThresholdCalibrationNoProposalReason(review.data?.thresholdCalibrationProposals.noProposalReason)}
+                  </div>
+                )}
+              </div>
             </div>
-          </div>
-          <div className="rounded-lg border border-border/70 bg-white px-3 py-3">
-            <div className="text-[11px] uppercase tracking-widest text-muted-foreground">Seeded validation guidance</div>
-            <div className="mt-1 text-xs text-muted-foreground">
-              Non-production validation only · {review.data?.diagnostics.seededValidationStatus.scriptPath ?? "Seed script unavailable"}
-            </div>
-            <div className="mt-3 space-y-2">
-              {review.data?.diagnostics.seededValidationStatus.taxonomies.length ? (
-                review.data.diagnostics.seededValidationStatus.taxonomies.map((entry) => (
+          )}
+          {renderSection(
+            "seededValidation",
+            "Seeded validation",
+            review.data?.diagnostics.seededValidationStatus.taxonomies.length ? (
+              <div className="space-y-2">
+                <div className="text-xs text-muted-foreground">
+                  Non-production validation only · {review.data?.diagnostics.seededValidationStatus.scriptPath ?? "Seed script unavailable"}
+                </div>
+                {review.data.diagnostics.seededValidationStatus.taxonomies.map((entry) => (
                   <div key={entry.taxonomy} className="rounded-md border border-border/60 px-3 py-2 text-sm">
                     <div className="font-medium text-gray-900">{entry.taxonomy}</div>
                     <div className="text-muted-foreground">
@@ -779,11 +796,12 @@ export function InterventionPolicyRecommendationsSection({
                         : "No non-production seed recipe is configured yet."}
                     </div>
                   </div>
-                ))
-              ) : (
-                <div className="text-sm text-muted-foreground">No seeded validation guidance is available yet.</div>
-              )}
-            </div>
+                ))}
+              </div>
+            ) : (
+              <div className="text-sm text-muted-foreground">No seeded validation guidance is available right now.</div>
+            )
+          )}
           </div>
         </div>
       )}

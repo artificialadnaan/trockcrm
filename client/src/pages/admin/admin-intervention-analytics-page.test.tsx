@@ -543,9 +543,12 @@ describe("AdminInterventionAnalyticsPage", () => {
     expect(html).toContain("Apply change");
     expect(html).toContain("2 policy values would change.");
     expect(html).toContain("Review recommendation quality");
-    expect(html).toContain("Recent history: 2 events");
-    expect(html).toContain("Qualification floor 55");
+    expect(html).toContain("Attention now:");
     expect(html).not.toContain("Yield and decision history");
+    expect(html).not.toContain("Historical window summary");
+    expect(html).not.toContain("Qualification diagnostics");
+    expect(html).not.toContain("Window rendered:");
+    expect(html).not.toContain("Global threshold proposal");
     expect(html).not.toContain("Manager Readout");
     expect(html).toContain("Run Manager Alert Scan");
     expect(html).toContain("Send Alerts");
