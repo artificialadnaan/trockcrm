@@ -40,6 +40,8 @@
   Responsibility: rank catalog and historical estimate matches for extraction rows.
 - Create: `server/src/modules/estimating/pricing-service.ts`
   Responsibility: generate pricing recommendations from catalog, history, and market adjustments.
+- Create: `server/src/modules/estimating/catalog-read-model-service.ts`
+  Responsibility: build a joined catalog view that exposes primary code and baseline price from normalized item/code/price tables.
 - Create: `server/src/modules/estimating/draft-estimate-service.ts`
   Responsibility: promote approved pricing recommendations into estimate sections and estimate line items.
 - Create: `server/src/modules/estimating/copilot-service.ts`
@@ -665,12 +667,79 @@ git add server/src/modules/estimating/document-service.ts server/src/modules/dea
 git commit -m "feat: add estimating document upload and ocr queueing"
 ```
 
+## Task 3B: Add Security and Failure-Mode Coverage
+
+**Files:**
+- Create: `server/tests/modules/estimating/estimating-security.test.ts`
+- Modify: `server/src/modules/deals/routes.ts`
+- Modify: `server/src/modules/estimating/document-service.ts`
+- Modify: `server/src/modules/procore/catalog-sync-service.ts`
+
+- [ ] **Step 1: Write failing security and recovery tests**
+
+```ts
+import { describe, expect, it } from "vitest";
+
+describe("estimating security and recovery", () => {
+  it("rejects document upload when the user cannot access the deal", async () => {
+    expect(true).toBe(false);
+  });
+
+  it("marks OCR status failed when OCR processing throws", async () => {
+    expect(true).toBe(false);
+  });
+
+  it("keeps the previous catalog snapshot available when a sync run fails", async () => {
+    expect(true).toBe(false);
+  });
+});
+```
+
+- [ ] **Step 2: Run the security test**
+
+Run: `npx vitest run server/tests/modules/estimating/estimating-security.test.ts`
+
+Expected: FAIL because the security and recovery behavior is not implemented yet.
+
+- [ ] **Step 3: Implement permission, tenant-scope, OCR failure, and sync-recovery hooks**
+
+```ts
+try {
+  await runEstimateDocumentOcr(payload, officeId);
+} catch (error) {
+  await tenantDb
+    .update(estimateSourceDocuments)
+    .set({ ocrStatus: "failed" })
+    .where(eq(estimateSourceDocuments.id, payload.documentId));
+  throw error;
+}
+```
+
+```ts
+if (!deal) throw new AppError(404, "Deal not found");
+if (deal.officeId !== req.user!.activeOfficeId) throw new AppError(403, "Forbidden");
+```
+
+- [ ] **Step 4: Re-run the security test**
+
+Run: `npx vitest run server/tests/modules/estimating/estimating-security.test.ts`
+
+Expected: PASS
+
+- [ ] **Step 5: Commit the security and recovery task**
+
+```bash
+git add server/tests/modules/estimating/estimating-security.test.ts server/src/modules/deals/routes.ts server/src/modules/estimating/document-service.ts server/src/modules/procore/catalog-sync-service.ts
+git commit -m "test: add estimating security and failure-mode coverage"
+```
+
 ## Task 4: Build Extraction, Matching, and Pricing Services
 
 **Files:**
 - Create: `server/src/modules/estimating/extraction-service.ts`
 - Create: `server/src/modules/estimating/matching-service.ts`
 - Create: `server/src/modules/estimating/pricing-service.ts`
+- Create: `server/src/modules/estimating/catalog-read-model-service.ts`
 - Create: `worker/src/jobs/estimate-generation.ts`
 - Test: `server/tests/modules/estimating/matching-service.test.ts`
 - Test: `server/tests/modules/estimating/pricing-service.test.ts`
@@ -706,8 +775,8 @@ describe("rankExtractionMatches", () => {
     const results = await rankExtractionMatches({
       extraction: { normalizedLabel: "parapet wall flashing", unit: "ft", divisionHint: "07" } as any,
       catalogItems: [
-        { id: "a", name: "Parapet Wall Flashing", unit: "ft", primaryCode: "07-100" },
-        { id: "b", name: "Flashing", unit: "ea", primaryCode: "08-200" },
+        { id: "a", name: "Parapet Wall Flashing", unit: "ft", primaryCode: "07-100", catalogBaselinePrice: "100.00" },
+        { id: "b", name: "Flashing", unit: "ea", primaryCode: "08-200", catalogBaselinePrice: "20.00" },
       ] as any,
       historicalItems: [
         { id: "hist-1", description: "Parapet Wall Flashing", unit: "ft", costCode: "07-100" },
@@ -726,7 +795,27 @@ Run: `npx vitest run server/tests/modules/estimating/matching-service.test.ts se
 
 Expected: FAIL because the matching and pricing services do not exist yet.
 
-- [ ] **Step 3: Implement the extraction normalization and matching logic**
+- [ ] **Step 3: Implement the catalog read model used by matching and pricing**
+
+```ts
+export async function listCatalogCandidatesForMatching(db: TenantDb, sourceId: string) {
+  return db
+    .select({
+      id: costCatalogItems.id,
+      name: costCatalogItems.name,
+      unit: costCatalogItems.unit,
+      primaryCode: costCatalogCodes.code,
+      catalogBaselinePrice: costCatalogPrices.blendedUnitCost,
+    })
+    .from(costCatalogItems)
+    .leftJoin(costCatalogItemCodes, eq(costCatalogItemCodes.catalogItemId, costCatalogItems.id))
+    .leftJoin(costCatalogCodes, eq(costCatalogCodes.id, costCatalogItemCodes.catalogCodeId))
+    .leftJoin(costCatalogPrices, eq(costCatalogPrices.catalogItemId, costCatalogItems.id))
+    .where(and(eq(costCatalogItems.sourceId, sourceId), eq(costCatalogItemCodes.isPrimary, true)));
+}
+```
+
+- [ ] **Step 4: Implement the extraction normalization and matching logic**
 
 ```ts
 export function buildPricingRecommendation(input: BuildPricingRecommendationInput) {
@@ -766,7 +855,7 @@ export function buildPricingRecommendation(input: BuildPricingRecommendationInpu
 }
 ```
 
-- [ ] **Step 4: Implement matching to include historical evidence and store reviewable reasons**
+- [ ] **Step 5: Implement matching to include historical evidence and store reviewable reasons**
 
 ```ts
 export async function rankExtractionMatches({
@@ -816,6 +905,7 @@ export async function rankExtractionMatches({
 
 ```ts
 for (const extraction of pendingExtractions) {
+  const catalogItems = await listCatalogCandidatesForMatching(tenantDb, catalogSourceId);
   const matches = await rankExtractionMatches({ extraction, catalogItems, historicalItems });
   const topMatch = matches[0];
   if (!topMatch) continue;
@@ -849,7 +939,7 @@ Expected: PASS
 - [ ] **Step 7: Commit the extraction, matching, and pricing task**
 
 ```bash
-git add server/src/modules/estimating/extraction-service.ts server/src/modules/estimating/matching-service.ts server/src/modules/estimating/pricing-service.ts worker/src/jobs/estimate-generation.ts server/tests/modules/estimating/matching-service.test.ts server/tests/modules/estimating/pricing-service.test.ts
+git add server/src/modules/estimating/catalog-read-model-service.ts server/src/modules/estimating/extraction-service.ts server/src/modules/estimating/matching-service.ts server/src/modules/estimating/pricing-service.ts worker/src/jobs/estimate-generation.ts server/tests/modules/estimating/matching-service.test.ts server/tests/modules/estimating/pricing-service.test.ts
 git commit -m "feat: add estimate extraction matching and pricing services"
 ```
 
@@ -868,11 +958,12 @@ import { describe, expect, it, vi } from "vitest";
 import { promoteApprovedRecommendationsToEstimate } from "../../../src/modules/estimating/draft-estimate-service.js";
 
 describe("promoteApprovedRecommendationsToEstimate", () => {
-  it("creates estimate sections and line items from approved recommendations", async () => {
+  it("is idempotent for the same approved recommendation set", async () => {
     const tenantDb = {
-      insert: vi.fn().mockReturnValue({
-        values: vi.fn().mockReturnValue({
-          returning: vi.fn().mockResolvedValue([{ id: "section-1" }]),
+      insert: vi.fn(),
+      select: vi.fn().mockReturnValue({
+        from: vi.fn().mockReturnValue({
+          where: vi.fn().mockResolvedValue([{ subjectId: "rec-1" }]),
         }),
       }),
     } as any;
@@ -884,9 +975,9 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
       approvedRecommendationIds: ["rec-1"],
     });
 
-    expect(tenantDb.insert).toHaveBeenCalled();
+    expect(tenantDb.insert).not.toHaveBeenCalled();
   });
-  });
+});
 ```
 
 ```ts
@@ -918,30 +1009,44 @@ export async function promoteApprovedRecommendationsToEstimate({
   generationRunId,
   approvedRecommendationIds,
 }: PromoteApprovedRecommendationsArgs) {
+  const alreadyPromoted = await listPreviouslyPromotedRecommendationIds(
+    tenantDb,
+    dealId,
+    approvedRecommendationIds
+  );
+
   const recommendations = await loadApprovedRecommendationsForRun(
     tenantDb,
     dealId,
     generationRunId,
-    approvedRecommendationIds
+    approvedRecommendationIds.filter((id) => !alreadyPromoted.includes(id))
   );
 
   for (const sectionGroup of groupRecommendationsIntoSections(recommendations)) {
     const section = await createSection(tenantDb, dealId, sectionGroup.sectionName);
 
     for (const line of sectionGroup.lines) {
-      await createLineItem(tenantDb, dealId, section.id, {
+      const lineItem = await createLineItem(tenantDb, dealId, section.id, {
         description: line.description,
         quantity: line.quantity,
         unit: line.unit,
         unitPrice: line.unitPrice,
         notes: line.notes ?? null,
       });
+
+      await insertEstimateReviewEvent(tenantDb, {
+        dealId,
+        subjectType: "estimate_pricing_recommendation",
+        subjectId: line.recommendationId,
+        eventType: "promoted",
+        afterJson: { estimateLineItemId: lineItem.id },
+      });
     }
   }
 }
 ```
 
-- [ ] **Step 4: Add the promotion route**
+- [ ] **Step 4: Add approval in Task 5 only, and reserve Task 6 for edit/remap/load endpoints**
 
 ```ts
 router.post("/deals/:dealId/estimating/recommendations/:recommendationId/approve", async (req, res) => {
@@ -1139,6 +1244,11 @@ export function EstimatingWorkflowShell(props: EstimatingWorkflowShellProps) {
 - [ ] **Step 5: Add concrete review-state mutations for extraction, match, and pricing rows**
 
 ```ts
+router.get("/deals/:dealId/estimating", async (req, res) => {
+  const workflow = await getEstimatingWorkflowState(req.tenantDb!, req.params.dealId);
+  res.status(200).json(workflow);
+});
+
 router.post("/deals/:dealId/estimating/extractions/:extractionId/approve", async (req, res) => {
   const extraction = await approveEstimateExtraction({
     tenantDb: req.tenantDb,
@@ -1147,6 +1257,11 @@ router.post("/deals/:dealId/estimating/extractions/:extractionId/approve", async
     userId: req.user.id,
   });
 
+  res.status(200).json({ extraction });
+});
+
+router.patch("/deals/:dealId/estimating/extractions/:extractionId", async (req, res) => {
+  const extraction = await updateEstimateExtraction(req.tenantDb!, req.params.dealId, req.params.extractionId, req.body);
   res.status(200).json({ extraction });
 });
 
@@ -1161,14 +1276,18 @@ router.post("/deals/:dealId/estimating/matches/:matchId/select", async (req, res
   res.status(200).json({ match });
 });
 
-router.post("/deals/:dealId/estimating/recommendations/:recommendationId/approve", async (req, res) => {
-  const recommendation = await approveEstimateRecommendation({
-    tenantDb: req.tenantDb,
-    dealId: req.params.dealId,
-    recommendationId: req.params.recommendationId,
-    userId: req.user.id,
-  });
+router.patch("/deals/:dealId/estimating/matches/:matchId", async (req, res) => {
+  const match = await remapEstimateExtractionMatch(req.tenantDb!, req.params.dealId, req.params.matchId, req.body);
+  res.status(200).json({ match });
+});
 
+router.patch("/deals/:dealId/estimating/recommendations/:recommendationId", async (req, res) => {
+  const recommendation = await overrideEstimateRecommendation(
+    req.tenantDb!,
+    req.params.dealId,
+    req.params.recommendationId,
+    req.body
+  );
   res.status(200).json({ recommendation });
 });
 
