@@ -419,3 +419,25 @@ export async function listCompanyProjectCandidatesPage(
     updatedAt: row.updatedAt,
   }));
 }
+
+export interface ProcoreUser {
+  id: number;
+  name?: string;
+  first_name?: string;
+  last_name?: string;
+  email_address?: string;
+}
+
+export function listProcoreUsers(companyId?: string) {
+  const targetCompanyId =
+    companyId ?? process.env.PROCORE_COMPANY_ID ?? "";
+
+  if (!targetCompanyId) {
+    throw new Error("PROCORE_COMPANY_ID is required to list Procore users");
+  }
+
+  return procoreClient.get<ProcoreUser[]>(
+    `/rest/v1.0/companies/${targetCompanyId}/users`,
+    { companyId: targetCompanyId }
+  );
+}

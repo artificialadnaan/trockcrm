@@ -1,5 +1,10 @@
 import type { Request, Response, NextFunction } from "express";
-import { verifyJwt, getUserById, getOfficeAccess } from "../modules/auth/service.js";
+import {
+  verifyJwt,
+  getUserById,
+  getOfficeAccess,
+} from "../modules/auth/service.js";
+import { getUserLocalAuthGate } from "../modules/auth/local-auth-service.js";
 import { AppError } from "./error-handler.js";
 import type { AuthenticatedUser } from "@trock-crm/shared/types";
 
@@ -30,6 +35,8 @@ export async function authMiddleware(req: Request, _res: Response, next: NextFun
       throw new AppError(401, "User not found or inactive");
     }
 
+    const localAuthGate = await getUserLocalAuthGate(user.id);
+
     // Determine active office (header override or default)
     const requestedOfficeId = req.headers["x-office-id"] as string | undefined;
     let activeOfficeId = user.officeId;
@@ -53,7 +60,19 @@ export async function authMiddleware(req: Request, _res: Response, next: NextFun
       role: effectiveRole,
       officeId: user.officeId,
       activeOfficeId,
+      mustChangePassword: localAuthGate.mustChangePassword,
     };
+
+    if (
+      localAuthGate.mustChangePassword &&
+      ![
+        "/api/auth/me",
+        "/api/auth/logout",
+        "/api/auth/local/change-password",
+      ].includes(req.originalUrl)
+    ) {
+      throw new AppError(403, "Password change required");
+    }
 
     next();
   } catch (err) {

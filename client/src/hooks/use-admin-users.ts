@@ -10,6 +10,21 @@ export interface AdminUser {
   officeName: string | null;
   isActive: boolean;
   extraOfficeCount: number;
+  sourceSystems: Array<"hubspot" | "procore">;
+  localAuthStatus:
+    | "not_invited"
+    | "invite_sent"
+    | "password_change_required"
+    | "active"
+    | "disabled";
+}
+
+export interface ImportedUsersSummary {
+  scannedCount: number;
+  createdCount: number;
+  matchedExistingCount: number;
+  skippedCount: number;
+  warnings: string[];
 }
 
 export function useAdminUsers() {
@@ -53,6 +68,31 @@ export function useAdminUsers() {
     await load();
   };
 
+  const importExternalUsers = async () => {
+    const summary = await api<ImportedUsersSummary>("/admin/users/import-external", {
+      method: "POST",
+    });
+    await load();
+    return summary;
+  };
+
+  const sendInvite = async (userId: string) => {
+    await api(`/admin/users/${userId}/send-invite`, {
+      method: "POST",
+    });
+    await load();
+  };
+
   useEffect(() => { load(); }, []);
-  return { users, loading, error, refetch: load, updateUser, grantAccess, revokeAccess };
+  return {
+    users,
+    loading,
+    error,
+    refetch: load,
+    updateUser,
+    grantAccess,
+    revokeAccess,
+    importExternalUsers,
+    sendInvite,
+  };
 }

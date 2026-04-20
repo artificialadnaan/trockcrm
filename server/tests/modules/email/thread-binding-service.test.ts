@@ -3,7 +3,7 @@ import {
   activitySourceEntityEnum,
   emailThreadBindings,
   emails,
-} from "@trock-crm/shared/schema";
+} from "../../../../shared/src/schema/index.js";
 
 describe("email thread binding schema", () => {
   it("exports the thread binding table and emails.threadBindingId", () => {

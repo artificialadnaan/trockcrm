@@ -13,6 +13,8 @@ export { procoreSyncState, procoreEntityTypeEnum, syncDirectionEnum, syncStatusE
 export { procoreOauthTokens } from "./public/procore-oauth-tokens.js";
 export { procoreWebhookLog } from "./public/procore-webhook-log.js";
 export { userGraphTokens, graphTokenStatusEnum } from "./public/user-graph-tokens.js";
+export { userExternalIdentities, externalUserSourceEnum } from "./public/user-external-identities.js";
+export { userLocalAuth } from "./public/user-local-auth.js";
 export { jobQueue, jobStatusEnum } from "./public/job-queue.js";
 
 // Tenant schema tables (used for Drizzle type resolution when querying via tenantDb)

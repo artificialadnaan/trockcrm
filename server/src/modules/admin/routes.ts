@@ -9,6 +9,8 @@ import {
 import {
   getUsersWithStats, getUserById, updateUser, grantOfficeAccess, revokeOfficeAccess,
 } from "./users-service.js";
+import { importExternalUsers } from "./user-import-service.js";
+import { sendUserInvite } from "../auth/local-auth-service.js";
 import {
   listPipelineStages, updatePipelineStage, reorderPipelineStages,
 } from "./pipeline-service.js";
@@ -79,6 +81,15 @@ router.get("/admin/users", requireAdmin, async (req: Request, res: Response, nex
   }
 });
 
+router.post("/admin/users/import-external", requireAdmin, async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    const summary = await importExternalUsers();
+    return res.json(summary);
+  } catch (err) {
+    return next(err);
+  }
+});
+
 router.get("/admin/users/:id", requireAdmin, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const user = await getUserById(req.params.id as string);
@@ -95,6 +106,18 @@ router.patch("/admin/users/:id", requireAdmin, async (req: Request, res: Respons
     return res.json({ user });
   } catch (err: any) {
     return res.status(err.statusCode ?? 500).json({ error: err.message ?? String(err) });
+  }
+});
+
+router.post("/admin/users/:id/send-invite", requireAdmin, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    await sendUserInvite({
+      userId: req.params.id as string,
+      sentByUserId: req.user!.id,
+    });
+    return res.json({ success: true });
+  } catch (err) {
+    return next(err);
   }
 });
 

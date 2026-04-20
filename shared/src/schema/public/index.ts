@@ -11,4 +11,6 @@ export { procoreReconciliationState, procoreReconciliationStatusEnum } from "./p
 export { procoreSyncState, procoreEntityTypeEnum, syncDirectionEnum, syncStatusEnum } from "./procore-sync-state.js";
 export { procoreWebhookLog } from "./procore-webhook-log.js";
 export { userGraphTokens, graphTokenStatusEnum } from "./user-graph-tokens.js";
+export { userExternalIdentities, externalUserSourceEnum } from "./user-external-identities.js";
+export { userLocalAuth } from "./user-local-auth.js";
 export { jobQueue, jobStatusEnum } from "./job-queue.js";

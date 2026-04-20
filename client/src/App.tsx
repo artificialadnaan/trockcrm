@@ -1,7 +1,8 @@
 import { Routes, Route, Navigate } from "react-router-dom";
 import type { ReactNode } from "react";
 import { AuthProvider, useAuth } from "@/lib/auth";
-import { DevUserPicker } from "@/components/auth/dev-user-picker";
+import { AuthEntryScreen } from "@/components/auth/auth-entry-screen";
+import { ForcePasswordChangeScreen } from "@/components/auth/force-password-change-screen";
 import { AppShell } from "@/components/layout/app-shell";
 import { DealListPage } from "@/pages/deals/deal-list-page";
 import { DealDetailPage } from "@/pages/deals/deal-detail-page";
@@ -72,7 +73,8 @@ function AuthGate({ children }: { children: ReactNode }) {
     );
   }
 
-  if (!user) return <DevUserPicker />;
+  if (!user) return <AuthEntryScreen />;
+  if (user.mustChangePassword) return <ForcePasswordChangeScreen />;
   return <>{children}</>;
 }
 

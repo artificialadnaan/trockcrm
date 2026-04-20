@@ -1,7 +1,17 @@
 import { eq, asc, and, sql } from "drizzle-orm";
-import { users, userOfficeAccess, offices } from "@trock-crm/shared/schema";
+import {
+  users,
+  userOfficeAccess,
+  offices,
+  userExternalIdentities,
+  userLocalAuth,
+} from "@trock-crm/shared/schema";
 import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
+import {
+  getLocalAuthStatus,
+  type LocalAuthStatus,
+} from "../auth/local-auth-service.js";
 
 export async function listUsers(officeId?: string) {
   const rows = await db
@@ -122,6 +132,50 @@ export async function getUsersWithStats() {
   `);
 
   const rows = (result as any).rows ?? result;
+  const userIds = rows.map((row: any) => row.id);
+
+  const [identityRows, localAuthRows] = userIds.length
+    ? await Promise.all([
+        db
+          .select({
+            userId: userExternalIdentities.userId,
+            sourceSystem: userExternalIdentities.sourceSystem,
+          })
+          .from(userExternalIdentities),
+        db
+          .select({
+            userId: userLocalAuth.userId,
+            isEnabled: userLocalAuth.isEnabled,
+            mustChangePassword: userLocalAuth.mustChangePassword,
+            inviteSentAt: userLocalAuth.inviteSentAt,
+            lastLoginAt: userLocalAuth.lastLoginAt,
+          })
+          .from(userLocalAuth),
+      ])
+    : [[], []];
+
+  const sourceSystemsByUserId = new Map<string, string[]>();
+  for (const row of identityRows) {
+    const existing = sourceSystemsByUserId.get(row.userId) ?? [];
+    if (!existing.includes(row.sourceSystem)) {
+      existing.push(row.sourceSystem);
+      sourceSystemsByUserId.set(row.userId, existing);
+    }
+  }
+
+  const localAuthByUserId = new Map<
+    string,
+    {
+      isEnabled: boolean;
+      mustChangePassword: boolean;
+      inviteSentAt: Date | null;
+      lastLoginAt: Date | null;
+    }
+  >();
+  for (const row of localAuthRows) {
+    localAuthByUserId.set(row.userId, row);
+  }
+
   return rows.map((r: any) => ({
     id: r.id,
     email: r.email,
@@ -131,5 +185,7 @@ export async function getUsersWithStats() {
     officeName: r.office_name,
     isActive: r.is_active,
     extraOfficeCount: Number(r.extra_office_count ?? 0),
+    sourceSystems: sourceSystemsByUserId.get(r.id) ?? [],
+    localAuthStatus: getLocalAuthStatus(localAuthByUserId.get(r.id) ?? null),
   }));
 }

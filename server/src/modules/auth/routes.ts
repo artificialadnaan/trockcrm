@@ -18,6 +18,10 @@ import {
   getStoredProcoreOauthTokens,
   upsertProcoreOauthTokens,
 } from "../procore/oauth-token-service.js";
+import {
+  changeLocalPassword,
+  loginWithLocalPassword,
+} from "./local-auth-service.js";
 
 const router = Router();
 
@@ -88,8 +92,36 @@ router.post("/dev/login", authLimiter, async (req, res, next) => {
         displayName: resolvedUser.displayName,
         role: resolvedUser.role,
         officeId: resolvedUser.officeId,
+        activeOfficeId: resolvedUser.officeId,
+        mustChangePassword: false,
       },
     });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/local/login", authLimiter, async (req, res, next) => {
+  try {
+    const email = typeof req.body?.email === "string" ? req.body.email : "";
+    const password =
+      typeof req.body?.password === "string" ? req.body.password : "";
+
+    if (!email || !password) {
+      throw new AppError(400, "Email and password are required");
+    }
+
+    const { user } = await loginWithLocalPassword({ email, password });
+
+    const token = signJwt({
+      userId: user.id,
+      email: user.email,
+      officeId: user.officeId,
+      role: user.role,
+    });
+
+    res.cookie("token", token, tokenCookieOptions);
+    res.json({ user });
   } catch (err) {
     next(err);
   }
@@ -103,6 +135,36 @@ router.post("/dev/login", authLimiter, async (req, res, next) => {
 // Get current user
 router.get("/me", authMiddleware, (req, res) => {
   res.json({ user: req.user });
+});
+
+router.post("/local/change-password", authMiddleware, async (req, res, next) => {
+  try {
+    const currentPassword =
+      typeof req.body?.currentPassword === "string"
+        ? req.body.currentPassword
+        : "";
+    const newPassword =
+      typeof req.body?.newPassword === "string" ? req.body.newPassword : "";
+
+    if (!currentPassword || !newPassword) {
+      throw new AppError(400, "Current password and new password are required");
+    }
+
+    await changeLocalPassword({
+      userId: req.user!.id,
+      currentPassword,
+      newPassword,
+    });
+
+    res.json({
+      user: {
+        ...req.user!,
+        mustChangePassword: false,
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
 });
 
 // Logout

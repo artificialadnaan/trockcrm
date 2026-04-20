@@ -5,6 +5,7 @@ import { db } from "../../db.js";
 import { pool } from "../../db.js";
 import { offices, users, userOfficeAccess } from "@trock-crm/shared/schema";
 import type { JwtClaims } from "@trock-crm/shared/types";
+import { getUserLocalAuthGate } from "./local-auth-service.js";
 
 function getJwtSecret(): string {
   const secret = process.env.JWT_SECRET;
@@ -42,6 +43,23 @@ export async function getUserByEmail(email: string) {
     .where(eq(users.email, email))
     .limit(1);
   return result[0] ?? null;
+}
+
+export async function buildAuthenticatedUser(userId: string) {
+  const user = await getUserById(userId);
+  if (!user || !user.isActive) return null;
+
+  const localAuthGate = await getUserLocalAuthGate(user.id);
+
+  return {
+    id: user.id,
+    email: user.email,
+    displayName: user.displayName,
+    role: user.role,
+    officeId: user.officeId,
+    activeOfficeId: user.officeId,
+    mustChangePassword: localAuthGate.mustChangePassword,
+  };
 }
 
 export async function getUserByAzureId(azureAdId: string) {

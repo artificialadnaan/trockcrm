@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { RefreshCw, Shield } from "lucide-react";
+import { RefreshCw, Shield, MailPlus, Download } from "lucide-react";
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -11,8 +12,30 @@ import {
 import { useAdminUsers } from "@/hooks/use-admin-users";
 
 export function UsersPage() {
-  const { users, loading, error, refetch, updateUser } = useAdminUsers();
+  const {
+    users,
+    loading,
+    error,
+    refetch,
+    updateUser,
+    importExternalUsers,
+    sendInvite,
+  } = useAdminUsers();
   const [updatingId, setUpdatingId] = useState<string | null>(null);
+  const [importing, setImporting] = useState(false);
+
+  const sourceLabel: Record<"hubspot" | "procore", string> = {
+    hubspot: "HubSpot",
+    procore: "Procore",
+  };
+
+  const localAuthLabel = {
+    not_invited: "Not invited",
+    invite_sent: "Invite sent",
+    password_change_required: "Password change required",
+    active: "Active local auth",
+    disabled: "Disabled",
+  } as const;
 
   const handleRoleChange = async (userId: string, role: "admin" | "director" | "rep") => {
     setUpdatingId(userId);
@@ -35,6 +58,32 @@ export function UsersPage() {
   const activeUsers = users.filter((u) => u.isActive);
   const inactiveUsers = users.filter((u) => !u.isActive);
 
+  const handleImport = async () => {
+    setImporting(true);
+    try {
+      const summary = await importExternalUsers();
+      toast.success(
+        `Imported users: ${summary.createdCount} created, ${summary.matchedExistingCount} matched existing`
+      );
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Import failed");
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  const handleSendInvite = async (userId: string) => {
+    setUpdatingId(userId);
+    try {
+      await sendInvite(userId);
+      toast.success("Invite sent");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to send invite");
+    } finally {
+      setUpdatingId(null);
+    }
+  };
+
   return (
     <div className="p-6 space-y-6 max-w-5xl mx-auto">
       <div className="flex items-center justify-between">
@@ -44,10 +93,16 @@ export function UsersPage() {
             {activeUsers.length} active · {inactiveUsers.length} inactive
           </p>
         </div>
-        <Button variant="outline" size="sm" onClick={refetch} disabled={loading}>
-          <RefreshCw className={`h-4 w-4 mr-1 ${loading ? "animate-spin" : ""}`} />
-          Refresh
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button variant="outline" size="sm" onClick={handleImport} disabled={importing || loading}>
+            <Download className={`mr-1 h-4 w-4 ${importing ? "animate-pulse" : ""}`} />
+            {importing ? "Importing..." : "Import Procore + HubSpot"}
+          </Button>
+          <Button variant="outline" size="sm" onClick={refetch} disabled={loading}>
+            <RefreshCw className={`h-4 w-4 mr-1 ${loading ? "animate-spin" : ""}`} />
+            Refresh
+          </Button>
+        </div>
       </div>
 
       {error && (
@@ -63,8 +118,10 @@ export function UsersPage() {
               <TableHead>User</TableHead>
               <TableHead>Primary Office</TableHead>
               <TableHead>Role</TableHead>
+              <TableHead>Sources</TableHead>
               <TableHead>Extra Offices</TableHead>
               <TableHead>Status</TableHead>
+              <TableHead>Login</TableHead>
               <TableHead>Actions</TableHead>
             </TableRow>
           </TableHeader>
@@ -102,6 +159,17 @@ export function UsersPage() {
                   </Select>
                 </TableCell>
                 <TableCell>
+                  <div className="flex flex-wrap gap-1">
+                    {user.sourceSystems.length > 0 ? user.sourceSystems.map((source) => (
+                      <Badge key={source} variant="outline" className="text-xs">
+                        {sourceLabel[source]}
+                      </Badge>
+                    )) : (
+                      <span className="text-xs text-gray-400">{"\u2014"}</span>
+                    )}
+                  </div>
+                </TableCell>
+                <TableCell>
                   {user.extraOfficeCount > 0 ? (
                     <Badge className="bg-blue-100 text-blue-800 text-xs">
                       +{user.extraOfficeCount} offices
@@ -122,21 +190,38 @@ export function UsersPage() {
                   </Badge>
                 </TableCell>
                 <TableCell>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="text-xs h-7"
-                    onClick={() => handleToggleActive(user.id, user.isActive)}
-                    disabled={updatingId === user.id}
-                  >
-                    {user.isActive ? "Deactivate" : "Activate"}
-                  </Button>
+                  <Badge variant="outline" className="text-xs">
+                    {localAuthLabel[user.localAuthStatus]}
+                  </Badge>
+                </TableCell>
+                <TableCell>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="text-xs h-7"
+                      onClick={() => handleToggleActive(user.id, user.isActive)}
+                      disabled={updatingId === user.id}
+                    >
+                      {user.isActive ? "Deactivate" : "Activate"}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="text-xs h-7"
+                      onClick={() => handleSendInvite(user.id)}
+                      disabled={updatingId === user.id || !user.isActive}
+                    >
+                      <MailPlus className="mr-1 h-3.5 w-3.5" />
+                      {user.localAuthStatus === "not_invited" ? "Send invite" : "Resend invite"}
+                    </Button>
+                  </div>
                 </TableCell>
               </TableRow>
             ))}
             {users.length === 0 && !loading && (
               <TableRow>
-                <TableCell colSpan={6} className="text-center text-gray-400 py-8">
+                <TableCell colSpan={8} className="text-center text-gray-400 py-8">
                   No users found
                 </TableCell>
               </TableRow>
@@ -150,9 +235,9 @@ export function UsersPage() {
           <Shield className="h-4 w-4" />
           User provisioning
         </div>
-        New users are auto-created on first Microsoft Entra SSO login. The admin assigns their
-        role and office here after first login. In dev mode, use the user picker to test
-        different roles.
+        Use the import action to seed the union of Procore users and HubSpot owners into Dallas.
+        Send invites only when you are ready to hand out temporary local-password access. Existing
+        role and office assignments are preserved for CRM users that already exist.
       </div>
     </div>
   );

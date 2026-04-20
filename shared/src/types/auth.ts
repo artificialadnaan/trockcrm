@@ -14,4 +14,5 @@ export interface AuthenticatedUser {
   role: UserRole;
   officeId: string;
   activeOfficeId: string; // May differ from officeId if user switched offices
+  mustChangePassword?: boolean;
 }
