@@ -32,8 +32,11 @@ describe("match-review-service", () => {
       evidenceJson: { source: "catalog" },
     };
     const selectLimit = vi.fn().mockResolvedValue([existing]);
-    const suggestedReturning = vi.fn().mockResolvedValue([]);
+    const siblingResetWhere = vi.fn();
     const selectedReturning = vi.fn().mockResolvedValue([updated]);
+    const selectedWhere = vi.fn(() => ({
+      returning: selectedReturning,
+    }));
     const insertReturning = vi.fn().mockResolvedValue([{ id: "evt-1", eventType: "selected" }]);
     const tenantDb = {
       select: vi.fn(() => ({
@@ -48,7 +51,7 @@ describe("match-review-service", () => {
       update: vi.fn(() => ({
         set: vi.fn(() => ({
           where: vi.fn(() => ({
-            returning: suggestedReturning,
+            returning: vi.fn().mockResolvedValue([]),
           })),
         })),
       })),
@@ -62,16 +65,12 @@ describe("match-review-service", () => {
     tenantDb.update
       .mockReturnValueOnce({
         set: vi.fn(() => ({
-          where: vi.fn(() => ({
-            returning: suggestedReturning,
-          })),
+          where: siblingResetWhere,
         })),
       })
       .mockReturnValueOnce({
         set: vi.fn(() => ({
-          where: vi.fn(() => ({
-            returning: selectedReturning,
-          })),
+          where: selectedWhere,
         })),
       });
 
@@ -87,6 +86,15 @@ describe("match-review-service", () => {
     expect(tenantDb.select).toHaveBeenCalledOnce();
     expect(tenantDb.update).toHaveBeenCalledTimes(2);
     expect(insertReturning).toHaveBeenCalledOnce();
+
+    const siblingResetCondition = siblingResetWhere.mock.calls[0]?.[0];
+    const siblingResetConditionJson = JSON.stringify(
+      siblingResetCondition,
+      (key, value) => (key === "table" ? undefined : value)
+    );
+    expect(siblingResetConditionJson).toContain("suggested");
+    expect(siblingResetConditionJson).toContain("selected");
+    expect(siblingResetConditionJson).not.toContain("rejected");
   });
 
   it("rejects a match with an optional reason", async () => {

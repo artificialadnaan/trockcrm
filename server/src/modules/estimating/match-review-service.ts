@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import {
@@ -77,7 +77,12 @@ export async function selectEstimateExtractionMatch(args: {
   await args.tenantDb
     .update(estimateExtractionMatches)
     .set({ status: "suggested" })
-    .where(eq(estimateExtractionMatches.extractionId, existing.extractionId));
+    .where(
+      and(
+        eq(estimateExtractionMatches.extractionId, existing.extractionId),
+        inArray(estimateExtractionMatches.status, ["suggested", "selected"])
+      )
+    );
 
   const [updated] = await args.tenantDb
     .update(estimateExtractionMatches)
