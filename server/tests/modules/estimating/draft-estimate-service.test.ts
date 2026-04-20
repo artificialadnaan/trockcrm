@@ -1,0 +1,94 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const estimateServiceMocks = vi.hoisted(() => ({
+  createSection: vi.fn(),
+  createLineItem: vi.fn(),
+}));
+
+vi.mock("../../../src/modules/deals/estimate-service.js", () => ({
+  createSection: estimateServiceMocks.createSection,
+  createLineItem: estimateServiceMocks.createLineItem,
+}));
+
+const { promoteApprovedRecommendationsToEstimate } = await import("../../../src/modules/estimating/draft-estimate-service.js");
+
+describe("promoteApprovedRecommendationsToEstimate", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("creates canonical estimate sections and line items from approved recommendations", async () => {
+    estimateServiceMocks.createSection.mockResolvedValue({ id: "section-1" });
+    estimateServiceMocks.createLineItem.mockResolvedValue({ id: "line-1" });
+
+    const tenantDb = {
+      select: vi.fn(() => ({
+        from: vi.fn(() => ({
+          innerJoin: vi.fn(() => ({
+            innerJoin: vi.fn(() => ({
+              where: vi.fn().mockResolvedValue([
+                {
+                  recommendationId: "rec-1",
+                  description: "Parapet Wall Flashing",
+                  quantity: "3",
+                  unit: "ft",
+                  unitPrice: "121.54",
+                  notes: null,
+                  sectionName: "Generated Estimate",
+                },
+              ]),
+            })),
+          })),
+          where: vi.fn().mockResolvedValue([]),
+        })),
+      })),
+      insert: vi.fn(() => ({
+        values: vi.fn().mockResolvedValue(undefined),
+      })),
+    } as any;
+
+    await promoteApprovedRecommendationsToEstimate({
+      tenantDb,
+      dealId: "deal-1",
+      generationRunId: "run-1",
+      approvedRecommendationIds: ["rec-1"],
+    });
+
+    expect(estimateServiceMocks.createSection).toHaveBeenCalled();
+    expect(estimateServiceMocks.createLineItem).toHaveBeenCalled();
+  });
+
+  it("is idempotent for the same approved recommendation set", async () => {
+    const tenantDb = {
+      select: vi
+        .fn()
+        .mockReturnValueOnce({
+          from: vi.fn(() => ({
+            where: vi.fn().mockResolvedValue([{ subjectId: "rec-1" }]),
+          })),
+        })
+        .mockReturnValueOnce({
+          from: vi.fn(() => ({
+            innerJoin: vi.fn(() => ({
+              innerJoin: vi.fn(() => ({
+                where: vi.fn().mockResolvedValue([]),
+              })),
+            })),
+          })),
+        }),
+      insert: vi.fn(() => ({
+        values: vi.fn().mockResolvedValue(undefined),
+      })),
+    } as any;
+
+    await promoteApprovedRecommendationsToEstimate({
+      tenantDb,
+      dealId: "deal-1",
+      generationRunId: "run-1",
+      approvedRecommendationIds: ["rec-1"],
+    });
+
+    expect(estimateServiceMocks.createSection).not.toHaveBeenCalled();
+    expect(estimateServiceMocks.createLineItem).not.toHaveBeenCalled();
+  });
+});

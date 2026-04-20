@@ -67,6 +67,11 @@ import {
   createEstimateSourceDocument,
   enqueueEstimateDocumentOcrJob,
 } from "../estimating/document-service.js";
+import {
+  approveEstimateRecommendation,
+  listApprovedRecommendationIdsForRun,
+  promoteApprovedRecommendationsToEstimate,
+} from "../estimating/draft-estimate-service.js";
 
 const router = Router();
 
@@ -875,6 +880,55 @@ router.post("/:id/estimating/documents", async (req, res, next) => {
 
     await req.commitTransaction!();
     res.status(201).json({ document, file: uploadedFile });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/:id/estimating/recommendations/:recommendationId/approve", async (req, res, next) => {
+  try {
+    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+
+    const recommendation = await approveEstimateRecommendation({
+      tenantDb: req.tenantDb! as any,
+      dealId: req.params.id,
+      recommendationId: req.params.recommendationId,
+      userId: req.user!.id,
+      reason: req.body.reason ?? null,
+    });
+
+    await req.commitTransaction!();
+    res.status(200).json({ recommendation });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/:id/estimating/promote", async (req, res, next) => {
+  try {
+    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+
+    const approvedRecommendationIds = await listApprovedRecommendationIdsForRun(
+      req.tenantDb! as any,
+      req.params.id,
+      req.body.generationRunId
+    );
+
+    if (approvedRecommendationIds.length === 0) {
+      throw new AppError(400, "At least one approved recommendation is required before promotion");
+    }
+
+    await promoteApprovedRecommendationsToEstimate({
+      tenantDb: req.tenantDb! as any,
+      dealId: req.params.id,
+      generationRunId: req.body.generationRunId,
+      approvedRecommendationIds,
+    });
+
+    await req.commitTransaction!();
+    res.status(200).json({ ok: true });
   } catch (err) {
     next(err);
   }
