@@ -81,6 +81,11 @@ export async function createEstimateSourceDocument({
           contentHash: estimateSourceDocuments.contentHash,
           dealId: estimateSourceDocuments.dealId,
           filename: estimateSourceDocuments.filename,
+          parseStatus: estimateSourceDocuments.parseStatus,
+          activeParseRunId: estimateSourceDocuments.activeParseRunId,
+          parseProfile: estimateSourceDocuments.parseProfile,
+          parseProvider: estimateSourceDocuments.parseProvider,
+          parseErrorSummary: estimateSourceDocuments.parseErrorSummary,
         })
         .from(estimateSourceDocuments)
         .where(
@@ -117,6 +122,11 @@ export async function createEstimateSourceDocument({
       fileSize: input.fileSize ?? null,
       versionLabel: input.versionLabel ?? null,
       contentHash: input.contentHash ?? null,
+      parseStatus: "queued",
+      activeParseRunId: null,
+      parseProfile: null,
+      parseProvider: null,
+      parseErrorSummary: null,
       ocrStatus: "queued",
       uploadedByUserId: input.userId,
     })

@@ -19,6 +19,13 @@ export const estimateSourceDocuments = pgTable(
     versionLabel: varchar("version_label", { length: 100 }),
     uploadedByUserId: uuid("uploaded_by_user_id"),
     contentHash: text("content_hash"),
+    parseStatus: text("parse_status").default("queued").notNull(),
+    activeParseRunId: uuid("active_parse_run_id").references(() => estimateDocumentParseRuns.id, {
+      onDelete: "set null",
+    }),
+    parseProfile: text("parse_profile"),
+    parseProvider: text("parse_provider"),
+    parseErrorSummary: text("parse_error_summary"),
     ocrStatus: text("ocr_status").default("queued").notNull(),
     parsedAt: timestamp("parsed_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
@@ -26,6 +33,26 @@ export const estimateSourceDocuments = pgTable(
   (table) => [
     index("estimate_source_documents_deal_idx").on(table.dealId, table.createdAt),
     index("estimate_source_documents_file_idx").on(table.fileId),
+  ]
+);
+
+export const estimateDocumentParseRuns = pgTable(
+  "estimate_document_parse_runs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    documentId: uuid("document_id")
+      .references(() => estimateSourceDocuments.id, { onDelete: "cascade" })
+      .notNull(),
+    status: text("status").default("queued").notNull(),
+    parseProfile: text("parse_profile"),
+    parseProvider: text("parse_provider"),
+    errorSummary: text("error_summary"),
+    startedAt: timestamp("started_at", { withTimezone: true }).defaultNow().notNull(),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    index("estimate_document_parse_runs_document_idx").on(table.documentId, table.startedAt),
   ]
 );
 

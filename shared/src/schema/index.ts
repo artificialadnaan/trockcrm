@@ -42,7 +42,11 @@ export { duplicateQueue, duplicateMatchTypeEnum, duplicateStatusEnum } from "./t
 export { emails, emailDirectionEnum } from "./tenant/emails.js";
 export { activities, activityTypeEnum } from "./tenant/activities.js";
 export { files, fileCategoryEnum } from "./tenant/files.js";
-export { estimateSourceDocuments, estimateDocumentPages } from "./tenant/estimate-source-documents.js";
+export {
+  estimateSourceDocuments,
+  estimateDocumentParseRuns,
+  estimateDocumentPages,
+} from "./tenant/estimate-source-documents.js";
 export {
   estimateExtractions,
   estimateExtractionMatches,

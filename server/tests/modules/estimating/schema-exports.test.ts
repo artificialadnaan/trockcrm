@@ -7,6 +7,7 @@ import {
   costCatalogSnapshotVersions,
   costCatalogSources,
   costCatalogSyncRuns,
+  estimateDocumentParseRuns,
   estimateDocumentPages,
   estimateExtractions,
   estimateExtractionMatches,
@@ -26,6 +27,7 @@ describe("estimating schema exports", () => {
     expect(costCatalogItemCodes).toBeDefined();
     expect(costCatalogPrices).toBeDefined();
     expect(estimateSourceDocuments).toBeDefined();
+    expect(estimateDocumentParseRuns).toBeDefined();
     expect(estimateDocumentPages).toBeDefined();
     expect(estimateExtractions).toBeDefined();
     expect(estimateExtractionMatches).toBeDefined();

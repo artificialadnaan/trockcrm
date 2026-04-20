@@ -12,13 +12,21 @@ describe("createEstimateSourceDocument", () => {
       id: "doc-1",
       dealId: "deal-1",
       filename: "plans.pdf",
+      parseStatus: "queued",
+      activeParseRunId: null,
+      parseProfile: null,
+      parseProvider: null,
+      parseErrorSummary: null,
     };
+
+    const returning = vi.fn().mockResolvedValue([returningDocument]);
+    const values = vi.fn(() => ({
+      returning,
+    }));
 
     const tenantDb = {
       insert: vi.fn(() => ({
-        values: vi.fn(() => ({
-          returning: vi.fn().mockResolvedValue([returningDocument]),
-        })),
+        values,
       })),
     } as any;
 
@@ -35,7 +43,15 @@ describe("createEstimateSourceDocument", () => {
       },
     });
 
+    expect(values).toHaveBeenCalledWith(
+      expect.objectContaining({
+        parseStatus: "queued",
+        activeParseRunId: null,
+      })
+    );
     expect(result.filename).toBe("plans.pdf");
+    expect(result.parseStatus).toBe("queued");
+    expect(result.activeParseRunId).toBeNull();
     expect(enqueueEstimateDocumentOcr).toHaveBeenCalledWith({
       documentId: "doc-1",
       dealId: "deal-1",
@@ -57,6 +73,11 @@ describe("reprocessEstimateSourceDocument", () => {
       id: "doc-1",
       dealId: "deal-1",
       filename: "plans.pdf",
+      parseStatus: "queued",
+      activeParseRunId: null,
+      parseProfile: null,
+      parseProvider: null,
+      parseErrorSummary: null,
       ocrStatus: "queued",
       parsedAt: null,
     };
