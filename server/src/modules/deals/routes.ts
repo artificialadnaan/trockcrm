@@ -84,6 +84,15 @@ import {
   rejectEstimateExtraction,
   updateEstimateExtraction,
 } from "../estimating/extraction-review-service.js";
+import {
+  approveEstimatePricingRecommendation,
+  rejectEstimatePricingRecommendation,
+  overrideEstimatePricingRecommendation,
+} from "../estimating/pricing-review-service.js";
+import {
+  rejectEstimateExtractionMatch,
+  selectEstimateExtractionMatch,
+} from "../estimating/match-review-service.js";
 
 const router = Router();
 
@@ -897,21 +906,20 @@ router.post("/:id/estimating/documents", async (req, res, next) => {
   }
 });
 
-router.post("/:id/estimating/recommendations/:recommendationId/approve", async (req, res, next) => {
+router.post("/:id/estimating/pricing-recommendations/:recommendationId/approve", async (req, res, next) => {
   try {
     const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
     if (!deal) throw new AppError(404, "Deal not found");
 
-    const recommendation = await approveEstimateRecommendation({
+    const result = await approveEstimatePricingRecommendation({
       tenantDb: req.tenantDb! as any,
       dealId: req.params.id,
       recommendationId: req.params.recommendationId,
       userId: req.user!.id,
-      reason: req.body.reason ?? null,
     });
 
     await req.commitTransaction!();
-    res.status(200).json({ recommendation });
+    res.status(200).json(result);
   } catch (err) {
     next(err);
   }
@@ -1011,6 +1019,104 @@ router.post("/:id/estimating/extractions/:extractionId/reject", async (req, res,
       extractionId: req.params.extractionId,
       userId: req.user!.id,
       reason: req.body.reason ?? null,
+    });
+
+    await req.commitTransaction!();
+    res.status(200).json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/:id/estimating/matches/:matchId/select", async (req, res, next) => {
+  try {
+    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+
+    const result = await selectEstimateExtractionMatch({
+      tenantDb: req.tenantDb! as any,
+      dealId: req.params.id,
+      matchId: req.params.matchId,
+      userId: req.user!.id,
+    });
+
+    await req.commitTransaction!();
+    res.status(200).json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/:id/estimating/matches/:matchId/reject", async (req, res, next) => {
+  try {
+    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+
+    const result = await rejectEstimateExtractionMatch({
+      tenantDb: req.tenantDb! as any,
+      dealId: req.params.id,
+      matchId: req.params.matchId,
+      userId: req.user!.id,
+      reason: req.body.reason ?? null,
+    });
+
+    await req.commitTransaction!();
+    res.status(200).json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/:id/estimating/recommendations/:recommendationId/approve", async (req, res, next) => {
+  try {
+    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+
+    const result = await approveEstimatePricingRecommendation({
+      tenantDb: req.tenantDb! as any,
+      dealId: req.params.id,
+      recommendationId: req.params.recommendationId,
+      userId: req.user!.id,
+    });
+
+    await req.commitTransaction!();
+    res.status(200).json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/:id/estimating/pricing-recommendations/:recommendationId/reject", async (req, res, next) => {
+  try {
+    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+
+    const result = await rejectEstimatePricingRecommendation({
+      tenantDb: req.tenantDb! as any,
+      dealId: req.params.id,
+      recommendationId: req.params.recommendationId,
+      userId: req.user!.id,
+      reason: req.body.reason ?? null,
+    });
+
+    await req.commitTransaction!();
+    res.status(200).json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.patch("/:id/estimating/pricing-recommendations/:recommendationId/override", async (req, res, next) => {
+  try {
+    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+
+    const result = await overrideEstimatePricingRecommendation({
+      tenantDb: req.tenantDb! as any,
+      dealId: req.params.id,
+      recommendationId: req.params.recommendationId,
+      userId: req.user!.id,
+      input: req.body,
     });
 
     await req.commitTransaction!();

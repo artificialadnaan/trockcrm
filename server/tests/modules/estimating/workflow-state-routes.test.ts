@@ -30,6 +30,21 @@ const extractionReviewServiceMocks = vi.hoisted(() => ({
 
 vi.mock("../../../src/modules/estimating/extraction-review-service.js", () => extractionReviewServiceMocks);
 
+const matchReviewServiceMocks = vi.hoisted(() => ({
+  selectEstimateExtractionMatch: vi.fn(),
+  rejectEstimateExtractionMatch: vi.fn(),
+}));
+
+vi.mock("../../../src/modules/estimating/match-review-service.js", () => matchReviewServiceMocks);
+
+const pricingReviewServiceMocks = vi.hoisted(() => ({
+  approveEstimatePricingRecommendation: vi.fn(),
+  rejectEstimatePricingRecommendation: vi.fn(),
+  overrideEstimatePricingRecommendation: vi.fn(),
+}));
+
+vi.mock("../../../src/modules/estimating/pricing-review-service.js", () => pricingReviewServiceMocks);
+
 const { dealRoutes } = await import("../../../src/modules/deals/routes.js");
 
 function findRouteHandler(method: "get" | "post" | "patch", path: string) {
@@ -261,5 +276,126 @@ describe("estimating workflow routes", () => {
       })
     );
     expect(res.body.extraction.status).toBe("rejected");
+  });
+
+  it("selects a catalog match for the workbench", async () => {
+    matchReviewServiceMocks.selectEstimateExtractionMatch.mockResolvedValue({
+      match: { id: "match-1", status: "selected" },
+      reviewEvent: { id: "evt-4", eventType: "selected" },
+    });
+
+    const { res } = await invokeRoute("post", "/:id/estimating/matches/:matchId/select", {
+      params: { id: "deal-1", matchId: "match-1" },
+      body: {},
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(matchReviewServiceMocks.selectEstimateExtractionMatch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        dealId: "deal-1",
+        matchId: "match-1",
+        userId: "user-1",
+      })
+    );
+    expect(res.body.match.status).toBe("selected");
+  });
+
+  it("rejects a catalog match for the workbench", async () => {
+    matchReviewServiceMocks.rejectEstimateExtractionMatch.mockResolvedValue({
+      match: { id: "match-2", status: "rejected" },
+      reviewEvent: { id: "evt-5", eventType: "rejected" },
+    });
+
+    const { res } = await invokeRoute("post", "/:id/estimating/matches/:matchId/reject", {
+      params: { id: "deal-1", matchId: "match-2" },
+      body: { reason: "wrong code" },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(matchReviewServiceMocks.rejectEstimateExtractionMatch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        dealId: "deal-1",
+        matchId: "match-2",
+        userId: "user-1",
+        reason: "wrong code",
+      })
+    );
+    expect(res.body.match.status).toBe("rejected");
+  });
+
+  it("approves a pricing recommendation for the workbench", async () => {
+    pricingReviewServiceMocks.approveEstimatePricingRecommendation.mockResolvedValue({
+      recommendation: { id: "rec-1", status: "approved" },
+      reviewEvent: { id: "evt-6", eventType: "approved" },
+    });
+
+    const { res } = await invokeRoute("post", "/:id/estimating/pricing-recommendations/:recommendationId/approve", {
+      params: { id: "deal-1", recommendationId: "rec-1" },
+      body: {},
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(pricingReviewServiceMocks.approveEstimatePricingRecommendation).toHaveBeenCalledWith(
+      expect.objectContaining({
+        dealId: "deal-1",
+        recommendationId: "rec-1",
+        userId: "user-1",
+      })
+    );
+    expect(res.body.recommendation.status).toBe("approved");
+  });
+
+  it("rejects a pricing recommendation for the workbench", async () => {
+    pricingReviewServiceMocks.rejectEstimatePricingRecommendation.mockResolvedValue({
+      recommendation: { id: "rec-2", status: "rejected" },
+      reviewEvent: { id: "evt-7", eventType: "rejected" },
+    });
+
+    const { res } = await invokeRoute("post", "/:id/estimating/pricing-recommendations/:recommendationId/reject", {
+      params: { id: "deal-1", recommendationId: "rec-2" },
+      body: { reason: "not competitive" },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(pricingReviewServiceMocks.rejectEstimatePricingRecommendation).toHaveBeenCalledWith(
+      expect.objectContaining({
+        dealId: "deal-1",
+        recommendationId: "rec-2",
+        userId: "user-1",
+        reason: "not competitive",
+      })
+    );
+    expect(res.body.recommendation.status).toBe("rejected");
+  });
+
+  it("overrides a pricing recommendation for the workbench", async () => {
+    pricingReviewServiceMocks.overrideEstimatePricingRecommendation.mockResolvedValue({
+      recommendation: { id: "rec-3", status: "overridden" },
+      reviewEvent: { id: "evt-8", eventType: "overridden" },
+    });
+
+    const { res } = await invokeRoute("patch", "/:id/estimating/pricing-recommendations/:recommendationId/override", {
+      params: { id: "deal-1", recommendationId: "rec-3" },
+      body: {
+        recommendedUnitPrice: "95.00",
+        recommendedTotalPrice: "285.00",
+        reason: "field conditions changed",
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(pricingReviewServiceMocks.overrideEstimatePricingRecommendation).toHaveBeenCalledWith(
+      expect.objectContaining({
+        dealId: "deal-1",
+        recommendationId: "rec-3",
+        userId: "user-1",
+        input: {
+          recommendedUnitPrice: "95.00",
+          recommendedTotalPrice: "285.00",
+          reason: "field conditions changed",
+        },
+      })
+    );
+    expect(res.body.recommendation.status).toBe("overridden");
   });
 });
