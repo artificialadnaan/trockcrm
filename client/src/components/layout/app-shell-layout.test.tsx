@@ -10,11 +10,35 @@ const dashboardState = vi.hoisted(() => ({
   loading: false,
   error: null as string | null,
   data: {
+    activeLeads: { count: 4 },
+    staleLeads: { count: 1 },
     activeDeals: { count: 3, totalValue: 123456 },
     tasksToday: { overdue: 1, today: 2 },
     activityThisWeek: { total: 7, calls: 2, emails: 3, meetings: 1, notes: 1 },
     followUpCompliance: { complianceRate: 85, onTime: 6, total: 7 },
     pipelineByStage: [{ stageId: "discovery", totalValue: 1000 }],
+    leadSnapshot: [
+      {
+        leadId: "lead-1",
+        leadName: "Lead One",
+        companyName: "Birchstone",
+        propertyName: "North Tower",
+        stageName: "Discovery",
+        daysInStage: 5,
+        updatedAt: "2026-04-20T00:00:00.000Z",
+      },
+    ],
+    dealSnapshot: [
+      {
+        dealId: "deal-1",
+        dealName: "Deal One",
+        companyName: "Birchstone",
+        propertyName: "North Tower",
+        stageName: "Estimating",
+        totalValue: 250000,
+        updatedAt: "2026-04-20T00:00:00.000Z",
+      },
+    ],
   },
 }));
 
@@ -36,6 +60,14 @@ vi.mock("@/hooks/use-dashboard", () => ({
     data: dashboardState.data,
     loading: dashboardState.loading,
     error: dashboardState.error,
+  }),
+}));
+
+vi.mock("@/hooks/use-sales-review", () => ({
+  useSalesReview: () => ({
+    data: {
+      hygiene: [{ issueTypes: ["unassigned_owner"] }],
+    },
   }),
 }));
 
@@ -87,6 +119,20 @@ vi.mock("@/components/ui/card", () => ({
     className?: string;
   }) => <header className={className}>{children}</header>,
   CardTitle: ({ children }: { children?: ReactNode }) => <h2>{children}</h2>,
+}));
+
+vi.mock("@/components/ui/badge", () => ({
+  Badge: ({ children }: { children?: ReactNode }) => <span>{children}</span>,
+}));
+
+vi.mock("@/components/ui/button", () => ({
+  Button: ({
+    children,
+    onClick,
+  }: {
+    children?: ReactNode;
+    onClick?: () => void;
+  }) => <button onClick={onClick}>{children}</button>,
 }));
 
 vi.mock("@/components/dashboard/stat-card", () => ({
@@ -186,9 +232,11 @@ describe("AppShell layout", () => {
       "title={`Welcome back, ${firstName}`}",
     );
     expect(repDashboardSource).toContain(
-      "description={`Here is your sales activity overview for ${currentYear}.`}",
+      "description={`Here is your live sales cockpit for ${currentYear}.`}",
     );
-    expect(repDashboardSource).not.toContain("<h2");
+    expect(repDashboardSource).toContain("Today At A Glance");
+    expect(repDashboardSource).toContain("Leads Snapshot");
+    expect(repDashboardSource).toContain("Deals Snapshot");
 
     dashboardState.loading = true;
     dashboardState.error = null;
@@ -210,10 +258,15 @@ describe("AppShell layout", () => {
     let successMarkup = normalize(renderToStaticMarkup(<RepDashboardPage />));
     expect(successMarkup).toContain('data-slot="page-header"');
     expect(successMarkup).toContain("Welcome back, Test");
-    expect(successMarkup).toContain("Here is your sales activity overview for");
+    expect(successMarkup).toContain("Here is your live sales cockpit for");
     expect(successMarkup).toContain("Today&#x27;s Tasks");
     expect(successMarkup).toContain("My Pipeline");
-    expect(successMarkup).toContain("Activity This Week");
+    expect(successMarkup).toContain("Active Leads");
+    expect(successMarkup).toContain("Active Deals");
+    expect(successMarkup).toContain("My Cleanup");
+    expect(successMarkup).toContain("Today At A Glance");
+    expect(successMarkup).toContain("Leads Snapshot");
+    expect(successMarkup).toContain("Deals Snapshot");
 
     expect(dealsPageSource).toContain(
       'import { PageHeader } from "@/components/layout/page-header";',

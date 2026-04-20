@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import { api } from "@/lib/api";
 
 export interface RepDashboardData {
+  activeLeads: { count: number };
   activeDeals: { count: number; totalValue: number };
   tasksToday: { overdue: number; today: number };
   activityThisWeek: {
@@ -32,6 +33,24 @@ export interface RepDashboardData {
       daysInStage: number;
     }>;
   };
+  leadSnapshot: Array<{
+    leadId: string;
+    leadName: string;
+    companyName: string | null;
+    propertyName: string | null;
+    stageName: string;
+    daysInStage: number;
+    updatedAt: string;
+  }>;
+  dealSnapshot: Array<{
+    dealId: string;
+    dealName: string;
+    companyName: string | null;
+    propertyName: string | null;
+    stageName: string;
+    totalValue: number;
+    updatedAt: string;
+  }>;
 }
 
 export function useRepDashboard() {

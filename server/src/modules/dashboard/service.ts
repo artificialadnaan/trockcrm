@@ -2,10 +2,13 @@ import { eq, and, sql, gte, lte, inArray } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
   deals,
+  leads,
   activities,
   tasks,
   users,
   pipelineStageConfig,
+  companies,
+  properties,
 } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { db } from "../../db.js";
@@ -80,6 +83,7 @@ async function getStaleLeadWatchlist(
 // ---------------------------------------------------------------------------
 
 export interface RepDashboardData {
+  activeLeads: { count: number };
   activeDeals: { count: number; totalValue: number };
   tasksToday: { overdue: number; today: number };
   activityThisWeek: { calls: number; emails: number; meetings: number; notes: number; total: number };
@@ -96,6 +100,24 @@ export interface RepDashboardData {
     averageDaysInStage: number | null;
     leads: StaleLeadDashboardRow[];
   };
+  leadSnapshot: Array<{
+    leadId: string;
+    leadName: string;
+    companyName: string | null;
+    propertyName: string | null;
+    stageName: string;
+    daysInStage: number;
+    updatedAt: string;
+  }>;
+  dealSnapshot: Array<{
+    dealId: string;
+    dealName: string;
+    companyName: string | null;
+    propertyName: string | null;
+    stageName: string;
+    totalValue: number;
+    updatedAt: string;
+  }>;
 }
 
 /**
@@ -116,13 +138,26 @@ export async function getRepDashboard(
   const yearEnd = `${year}-12-31`;
 
   const [
+    activeLeadResult,
     activeDealResult,
     taskCountResult,
     activityResult,
     complianceResult,
     pipelineResult,
     staleLeadResult,
+    leadSnapshotResult,
+    dealSnapshotResult,
   ] = await Promise.all([
+    tenantDb.execute(sql`
+      SELECT COUNT(*)::int AS count
+      FROM leads l
+      JOIN pipeline_stage_config psc ON psc.id = l.stage_id
+      WHERE l.is_active = true
+        AND l.status = 'open'
+        AND l.assigned_rep_id = ${userId}
+        AND NOT psc.is_terminal
+    `),
+
     // 1. Active deals count + value for this rep
     tenantDb.execute(sql`
       SELECT
@@ -188,17 +223,64 @@ export async function getRepDashboard(
     `),
 
     getStaleLeadWatchlist(tenantDb, { repId: userId }),
+
+    tenantDb.execute(sql`
+      SELECT
+        l.id AS lead_id,
+        l.name AS lead_name,
+        c.name AS company_name,
+        p.name AS property_name,
+        psc.name AS stage_name,
+        EXTRACT(DAY FROM NOW() - l.stage_entered_at)::int AS days_in_stage,
+        l.updated_at
+      FROM leads l
+      LEFT JOIN companies c ON c.id = l.company_id
+      LEFT JOIN properties p ON p.id = l.property_id
+      JOIN pipeline_stage_config psc ON psc.id = l.stage_id
+      WHERE l.is_active = true
+        AND l.status = 'open'
+        AND l.assigned_rep_id = ${userId}
+        AND NOT psc.is_terminal
+      ORDER BY l.updated_at DESC
+      LIMIT 5
+    `),
+
+    tenantDb.execute(sql`
+      SELECT
+        d.id AS deal_id,
+        d.name AS deal_name,
+        c.name AS company_name,
+        p.name AS property_name,
+        psc.name AS stage_name,
+        COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)::numeric AS total_value,
+        d.updated_at
+      FROM deals d
+      LEFT JOIN companies c ON c.id = d.company_id
+      LEFT JOIN properties p ON p.id = d.property_id
+      JOIN pipeline_stage_config psc ON psc.id = d.stage_id
+      WHERE d.is_active = true
+        AND d.assigned_rep_id = ${userId}
+        AND NOT psc.is_terminal
+      ORDER BY d.updated_at DESC
+      LIMIT 5
+    `),
   ]);
 
+  const alRows = (activeLeadResult as any).rows ?? activeLeadResult;
   const adRows = (activeDealResult as any).rows ?? activeDealResult;
   const tcRows = (taskCountResult as any).rows ?? taskCountResult;
   const acRows = (activityResult as any).rows ?? activityResult;
   const plRows = (pipelineResult as any).rows ?? pipelineResult;
+  const lsRows = (leadSnapshotResult as any).rows ?? leadSnapshotResult;
+  const dsRows = (dealSnapshotResult as any).rows ?? dealSnapshotResult;
   const staleLeadAverage = staleLeadResult.length > 0
     ? Math.round(staleLeadResult.reduce((sum, lead) => sum + lead.daysInStage, 0) / staleLeadResult.length)
     : null;
 
   return {
+    activeLeads: {
+      count: Number(alRows[0]?.count ?? 0),
+    },
     activeDeals: {
       count: Number(adRows[0]?.count ?? 0),
       totalValue: Number(adRows[0]?.total_value ?? 0),
@@ -227,6 +309,24 @@ export async function getRepDashboard(
       averageDaysInStage: staleLeadAverage,
       leads: staleLeadResult,
     },
+    leadSnapshot: lsRows.map((row: any) => ({
+      leadId: row.lead_id,
+      leadName: row.lead_name,
+      companyName: row.company_name ?? null,
+      propertyName: row.property_name ?? null,
+      stageName: row.stage_name,
+      daysInStage: Number(row.days_in_stage ?? 0),
+      updatedAt: new Date(row.updated_at).toISOString(),
+    })),
+    dealSnapshot: dsRows.map((row: any) => ({
+      dealId: row.deal_id,
+      dealName: row.deal_name,
+      companyName: row.company_name ?? null,
+      propertyName: row.property_name ?? null,
+      stageName: row.stage_name,
+      totalValue: Number(row.total_value ?? 0),
+      updatedAt: new Date(row.updated_at).toISOString(),
+    })),
   };
 }
 

@@ -63,6 +63,7 @@ describe("Dashboard Service", () => {
     it("should return all dashboard sections", async () => {
       const { getRepDashboard } = await import("../../../src/modules/dashboard/service.js");
       const tenantDb = createMockTenantDb([
+        [{ count: "4" }],
         // active deals
         [{ count: "5", total_value: "500000" }],
         // task counts
@@ -75,48 +76,85 @@ describe("Dashboard Service", () => {
         [
           { stage_id: "s1", stage_name: "Estimating", stage_color: "#3B82F6", display_order: 2, deal_count: "3", total_value: "300000" },
         ],
+        [],
+        [
+          {
+            lead_id: "lead-1",
+            lead_name: "Lead One",
+            company_name: "Birchstone",
+            property_name: "North Tower",
+            stage_name: "Discovery",
+            days_in_stage: "5",
+            updated_at: "2026-04-20T00:00:00.000Z",
+          },
+        ],
+        [
+          {
+            deal_id: "deal-1",
+            deal_name: "Deal One",
+            company_name: "Birchstone",
+            property_name: "North Tower",
+            stage_name: "Estimating",
+            total_value: "250000",
+            updated_at: "2026-04-20T00:00:00.000Z",
+          },
+        ],
       ]);
 
       const result = await getRepDashboard(tenantDb, "user-1");
+      expect(result.activeLeads.count).toBe(4);
       expect(result.activeDeals.count).toBe(5);
       expect(result.tasksToday.overdue).toBe(2);
       expect(result.activityThisWeek.total).toBe(20);
       expect(result.followUpCompliance.complianceRate).toBe(90);
       expect(result.pipelineByStage).toHaveLength(1);
+      expect(result.leadSnapshot).toHaveLength(1);
+      expect(result.dealSnapshot).toHaveLength(1);
     });
 
     it("should handle empty data gracefully", async () => {
       const { getRepDashboard } = await import("../../../src/modules/dashboard/service.js");
       const tenantDb = createMockTenantDb([
+        [{ count: "0" }],
         [{ count: "0", total_value: "0" }],
         [{ overdue: "0", today: "0" }],
         [{ calls: "0", emails: "0", meetings: "0", notes: "0", total: "0" }],
         [{ total: "0", on_time: "0" }],
         [],
+        [],
+        [],
+        [],
       ]);
 
       const result = await getRepDashboard(tenantDb, "user-1");
+      expect(result.activeLeads.count).toBe(0);
       expect(result.activeDeals.count).toBe(0);
       expect(result.activeDeals.totalValue).toBe(0);
       expect(result.tasksToday.overdue).toBe(0);
       expect(result.activityThisWeek.total).toBe(0);
       expect(result.followUpCompliance.complianceRate).toBe(100);
       expect(result.pipelineByStage).toHaveLength(0);
+      expect(result.leadSnapshot).toHaveLength(0);
+      expect(result.dealSnapshot).toHaveLength(0);
     });
 
     it("uses responsible activity ownership in the weekly activity query", async () => {
       const { getRepDashboard } = await import("../../../src/modules/dashboard/service.js");
       const tenantDb = createMockTenantDb([
+        [{ count: "0" }],
         [{ count: "0", total_value: "0" }],
         [{ overdue: "0", today: "0" }],
         [{ calls: "0", emails: "0", meetings: "0", notes: "0", total: "0" }],
         [{ total: "0", on_time: "0" }],
         [],
+        [],
+        [],
+        [],
       ]);
 
       await getRepDashboard(tenantDb, "user-1");
 
-      const activityQueryText = extractSqlText(tenantDb.execute.mock.calls[2][0]).toLowerCase();
+      const activityQueryText = extractSqlText(tenantDb.execute.mock.calls[3][0]).toLowerCase();
       expect(activityQueryText).toContain("responsible_user_id");
       expect(activityQueryText).not.toContain("where user_id =");
     });
@@ -161,29 +199,39 @@ describe("Dashboard Service", () => {
     it("should include all required sections", async () => {
       const { getRepDashboard } = await import("../../../src/modules/dashboard/service.js");
       const tenantDb = createMockTenantDb([
+        [{ count: "1" }],
         [{ count: "1", total_value: "100000" }],
         [{ overdue: "0", today: "1" }],
         [{ calls: "2", emails: "3", meetings: "1", notes: "0", total: "6" }],
         [{ total: "5", on_time: "4" }],
         [{ stage_id: "s1", stage_name: "Bid Sent", stage_color: "#EAB308", display_order: 3, deal_count: "1", total_value: "100000" }],
+        [],
+        [],
+        [],
       ]);
 
       const result = await getRepDashboard(tenantDb, "user-2");
 
       // Verify shape
       expect(result).toHaveProperty("activeDeals");
+      expect(result).toHaveProperty("activeLeads");
       expect(result).toHaveProperty("tasksToday");
       expect(result).toHaveProperty("activityThisWeek");
       expect(result).toHaveProperty("followUpCompliance");
       expect(result).toHaveProperty("pipelineByStage");
+      expect(result).toHaveProperty("leadSnapshot");
+      expect(result).toHaveProperty("dealSnapshot");
 
       // Verify types
+      expect(typeof result.activeLeads.count).toBe("number");
       expect(typeof result.activeDeals.count).toBe("number");
       expect(typeof result.activeDeals.totalValue).toBe("number");
       expect(typeof result.tasksToday.overdue).toBe("number");
       expect(typeof result.activityThisWeek.calls).toBe("number");
       expect(typeof result.followUpCompliance.complianceRate).toBe("number");
       expect(Array.isArray(result.pipelineByStage)).toBe(true);
+      expect(Array.isArray(result.leadSnapshot)).toBe(true);
+      expect(Array.isArray(result.dealSnapshot)).toBe(true);
     });
   });
 });
