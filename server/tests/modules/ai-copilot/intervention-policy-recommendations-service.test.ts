@@ -333,6 +333,49 @@ describe("intervention policy recommendations service", () => {
         }),
       ])
     );
+    expect(review.diagnostics).toMatchObject({
+      window: "last_30_days",
+      generatedAt: expect.any(String),
+      systemDiagnostics: {
+        scope: "historical_window",
+        recommendedNextAction: "review_threshold_floor_in_code",
+      },
+      seededValidationStatus: {
+        scope: "non_production_only",
+        validationMode: "manual_seed_script",
+        scriptPath: "scripts/seed-intervention-policy-recommendation-qualification.ts",
+      },
+    });
+    expect(review.diagnostics.systemDiagnostics.dominantBlockers).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          blocker: expect.any(String),
+          count: expect.any(Number),
+        }),
+      ])
+    );
+    expect(review.diagnostics.taxonomyDiagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          scope: "historical_window",
+          taxonomy: "assignee_load_balancing",
+          renderedCount: expect.any(Number),
+          suppressedCounts: expect.any(Object),
+          dominantBlocker: expect.any(String),
+          topSuppressedCandidates: expect.any(Array),
+          recommendedTuningAction: expect.any(String),
+        }),
+      ])
+    );
+    expect(review.diagnostics.seededValidationStatus.taxonomies).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          taxonomy: "snooze_policy_adjustment",
+          seedPathAvailable: true,
+          supportsApplyUndo: true,
+        }),
+      ])
+    );
     expect(review.yield.renderedTotals).toMatchObject({
       window: "last_30_days",
     });
@@ -359,6 +402,132 @@ describe("intervention policy recommendations service", () => {
     });
     expect(review.tuning).toEqual(reviewAll.tuning);
     expect(review.yield).toEqual(reviewAll.yield);
+  });
+
+  it("builds deterministic qualification diagnostics with stable blocker ordering and grouped suppressed candidates", async () => {
+    const tenantDb = createTenantDb({
+      users: [{ id: "admin-1", displayName: "Admin User" }],
+    });
+
+    tenantDb.state.policyRecommendationDecisions.push(
+      {
+        office_id: "office-1",
+        taxonomy: "snooze_policy_adjustment",
+        grouping_key: "waiting_on_customer",
+        decision: "suppressed_by_threshold",
+        suppression_reason: "threshold_not_met",
+        score: 53,
+        confidence: "medium",
+        used_fallback_copy: false,
+        used_fallback_structured_payload: false,
+        created_at: new Date("2026-04-19T12:03:00.000Z"),
+      },
+      {
+        office_id: "office-1",
+        taxonomy: "snooze_policy_adjustment",
+        grouping_key: "waiting_on_customer",
+        decision: "suppressed_by_threshold",
+        suppression_reason: "threshold_not_met",
+        score: 51,
+        confidence: "medium",
+        used_fallback_copy: false,
+        used_fallback_structured_payload: false,
+        created_at: new Date("2026-04-19T12:02:00.000Z"),
+      },
+      {
+        office_id: "office-1",
+        taxonomy: "snooze_policy_adjustment",
+        grouping_key: "waiting_on_docs",
+        decision: "suppressed_by_predicate",
+        suppression_reason: "predicate_not_met",
+        score: null,
+        confidence: null,
+        used_fallback_copy: false,
+        used_fallback_structured_payload: false,
+        created_at: new Date("2026-04-19T12:01:00.000Z"),
+      },
+      {
+        office_id: "office-1",
+        taxonomy: "assignee_load_balancing",
+        grouping_key: "manager-1",
+        decision: "qualified_suppressed_by_cap",
+        suppression_reason: null,
+        score: 80,
+        confidence: "high",
+        used_fallback_copy: false,
+        used_fallback_structured_payload: false,
+        created_at: new Date("2026-04-19T12:04:00.000Z"),
+      },
+      {
+        office_id: "office-1",
+        taxonomy: "disconnect_playbook_change",
+        grouping_key: "missing_next_task",
+        decision: "suppressed_by_missing_target",
+        suppression_reason: "missing_policy_target",
+        score: 74,
+        confidence: "medium",
+        used_fallback_copy: false,
+        used_fallback_structured_payload: false,
+        created_at: new Date("2026-04-19T12:05:00.000Z"),
+      }
+    );
+
+    const review = await getInterventionPolicyRecommendationReview(tenantDb as any, {
+      officeId: "office-1",
+      viewerUserId: "admin-1",
+      window: "last_30_days",
+      decision: "all",
+      now: new Date("2026-04-19T13:00:00.000Z"),
+    });
+
+    expect(review.diagnostics.window).toBe("last_30_days");
+    expect(review.diagnostics.systemDiagnostics.dominantBlockers[0]).toEqual({
+      blocker: "threshold_limited",
+      count: 2,
+    });
+    expect(review.diagnostics.systemDiagnostics.recommendedNextAction).toBe("review_threshold_floor_in_code");
+    expect(review.diagnostics.taxonomyDiagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          taxonomy: "snooze_policy_adjustment",
+          dominantBlocker: "threshold_limited",
+          recommendedTuningAction: "review_threshold_floor_in_code",
+          suppressedCounts: {
+            predicateBlocked: 1,
+            thresholdBlocked: 2,
+            capBlocked: 0,
+            missingTarget: 0,
+            applyIneligible: 0,
+          },
+          topSuppressedCandidates: [
+            expect.objectContaining({
+              groupingKey: "waiting_on_customer",
+              suppressionReason: "threshold_not_met",
+              score: 53,
+            }),
+            expect.objectContaining({
+              groupingKey: "waiting_on_customer",
+              suppressionReason: "threshold_not_met",
+              score: 51,
+            }),
+            expect.objectContaining({
+              groupingKey: "waiting_on_docs",
+              suppressionReason: "predicate_not_met",
+              score: null,
+            }),
+          ],
+        }),
+      ])
+    );
+    expect(review.diagnostics.taxonomyDiagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          taxonomy: "disconnect_playbook_change",
+          dominantBlocker: "target_limited",
+          recommendedTuningAction: "review_target_coverage",
+        }),
+      ])
+    );
   });
 
   it("keeps read-only taxonomies review-only in the hydrated recommendations view", async () => {
@@ -572,6 +741,122 @@ describe("intervention policy recommendations service", () => {
         "assignee_load_balancing",
       ])
     );
+  });
+
+  it("verifies seeded non-production scenarios across render, review, apply, and undo paths by taxonomy", async () => {
+    const now = new Date("2026-04-19T15:00:00.000Z");
+    const scenarios = [
+      {
+        seedKey: "policy-recommendation-fixture",
+        expectedTaxonomies: [
+          "snooze_policy_adjustment",
+          "escalation_policy_adjustment",
+          "assignee_load_balancing",
+        ] as const,
+        expectApplyUndo: true,
+      },
+      {
+        seedKey: "policy-recommendation-playbook-fixture",
+        expectedTaxonomies: ["disconnect_playbook_change"] as const,
+        expectApplyUndo: false,
+      },
+      {
+        seedKey: "policy-recommendation-monitor-fixture",
+        expectedTaxonomies: ["monitor_only"] as const,
+        expectApplyUndo: false,
+      },
+    ];
+
+    for (const scenario of scenarios) {
+      const tenantDb = createTenantDb({
+        users: [
+          { id: "admin-1", displayName: "Admin User" },
+          { id: "manager-1", displayName: "Manager One" },
+          { id: "manager-2", displayName: "Manager Two" },
+        ],
+      });
+
+      await seedInterventionPolicyRecommendationQualificationData(tenantDb as any, {
+        officeId: "office-1",
+        actorUserId: "manager-1",
+        environment: "development",
+        allowedOfficeIds: ["office-1"],
+        seedKey: scenario.seedKey,
+      });
+
+      const generated = await regenerateInterventionPolicyRecommendations(tenantDb as any, {
+        officeId: "office-1",
+        requestedByUserId: "admin-1",
+        now,
+      });
+      const view = await getInterventionPolicyRecommendationsView(tenantDb as any, {
+        officeId: "office-1",
+        viewerUserId: "admin-1",
+        now,
+      });
+      const review = await getInterventionPolicyRecommendationReview(tenantDb as any, {
+        officeId: "office-1",
+        viewerUserId: "admin-1",
+        window: "last_30_days",
+        decision: "all",
+        now,
+      });
+
+      expect(generated.status).toBe("active");
+      expect(view.status).toBe("active");
+      expect(view.recommendations.map((row) => row.taxonomy)).toEqual(
+        expect.arrayContaining(scenario.expectedTaxonomies)
+      );
+      expect(review.latestDecisionRows.map((row) => row.taxonomy)).toEqual(
+        expect.arrayContaining(scenario.expectedTaxonomies)
+      );
+      expect(review.diagnostics.taxonomyDiagnostics).toEqual(
+        expect.arrayContaining(
+          scenario.expectedTaxonomies.map((taxonomy) =>
+            expect.objectContaining({
+              taxonomy,
+            })
+          )
+        )
+      );
+
+      if (scenario.expectApplyUndo) {
+        const eligibleRecommendations = view.recommendations.filter(
+          (row) =>
+            scenario.expectedTaxonomies.includes(row.taxonomy as (typeof scenario.expectedTaxonomies)[number]) &&
+            row.applyEligibility.eligible
+        );
+
+        expect(eligibleRecommendations.length).toBeGreaterThan(0);
+
+        for (const recommendation of eligibleRecommendations) {
+          const applied = await applyInterventionPolicyRecommendation(tenantDb as any, {
+            officeId: "office-1",
+            recommendationId: recommendation.id,
+            snapshotId: generated.snapshotId,
+            actorUserId: "admin-1",
+            recommendationIdempotencyKey: `${scenario.seedKey}:${recommendation.taxonomy}:apply`,
+          });
+          expect(["applied", "applied_noop"]).toContain(applied.status);
+
+          const reverted = await revertInterventionPolicyRecommendation(tenantDb as any, {
+            officeId: "office-1",
+            recommendationId: recommendation.id,
+            snapshotId: generated.snapshotId,
+            actorUserId: "admin-1",
+            recommendationIdempotencyKey: `${scenario.seedKey}:${recommendation.taxonomy}:revert`,
+          });
+          expect(["reverted", "revert_noop"]).toContain(reverted.status);
+        }
+      } else {
+        const readOnlyRecommendations = view.recommendations.filter((row) =>
+          scenario.expectedTaxonomies.includes(row.taxonomy as (typeof scenario.expectedTaxonomies)[number])
+        );
+        for (const recommendation of readOnlyRecommendations) {
+          expect(recommendation.applyEligibility.eligible).toBe(false);
+        }
+      }
+    }
   });
 
   it("rejects qualification seeding in production", async () => {

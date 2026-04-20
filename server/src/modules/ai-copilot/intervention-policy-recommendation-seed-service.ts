@@ -4,6 +4,7 @@ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import { aiDisconnectCaseHistory, aiDisconnectCases } from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
+import type { InterventionPolicyRecommendationTaxonomy } from "./intervention-types.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -227,6 +228,145 @@ function buildFixtureCohort(input: { officeId: string; seedKey: string; actorUse
   };
 }
 
+function buildPlaybookFixtureCohort(input: { officeId: string; seedKey: string; actorUserId: string }) {
+  const cases: Array<Record<string, any>> = [];
+  const history: Array<Record<string, any>> = [];
+
+  for (let index = 1; index <= 10; index++) {
+    const reopened = index <= 4;
+    const resolvedAt = `2026-04-${10 + index}T12:00:00.000Z`;
+    const fixtureCase = buildFixtureCase(input.seedKey, input.officeId, `playbook-${index}`, {
+      status: reopened ? "open" : "resolved",
+      assignedTo: input.actorUserId,
+      currentLifecycleStartedAt: reopened ? new Date(`2026-04-${15 + index}T12:00:00.000Z`) : new Date("2026-04-10T12:00:00.000Z"),
+      lastReopenedAt: reopened ? new Date(`2026-04-${15 + index}T12:00:00.000Z`) : null,
+      reopenCount: reopened ? 1 : 0,
+      lastIntervenedAt: new Date(resolvedAt),
+      resolvedAt: reopened ? null : new Date(resolvedAt),
+      resolutionReason: "customer_replied_and_owner_followed_up",
+    });
+    cases.push(fixtureCase);
+    const resolveHistory = buildFixtureHistory(input.seedKey, fixtureCase.id, "resolve", resolvedAt, {
+      conclusion: {
+        kind: "resolve",
+        outcomeCategory: "customer_response_recovered",
+        reasonCode: "customer_replied_and_owner_followed_up",
+        effectiveness: "confirmed",
+      },
+      disconnectTypeAtConclusion: "missing_next_task",
+      assigneeAtConclusion: input.actorUserId,
+      lifecycleStartedAt: "2026-04-10T12:00:00.000Z",
+    });
+    history.push(resolveHistory);
+    if (reopened) {
+      history.push(
+        buildFixtureHistory(
+          input.seedKey,
+          fixtureCase.id,
+          "reopened",
+          `2026-04-${15 + index}T12:00:00.000Z`,
+          {
+            priorConclusionActionId: resolveHistory.id,
+          },
+          {
+            toStatus: "open",
+            actedBy: input.actorUserId,
+          }
+        )
+      );
+    }
+  }
+
+  return {
+    cases,
+    history,
+    patternsCreated: ["disconnect_playbook_change"] as const,
+  };
+}
+
+function buildMonitorFixtureCohort(input: { officeId: string; seedKey: string; actorUserId: string }) {
+  const cases: Array<Record<string, any>> = [];
+  const history: Array<Record<string, any>> = [];
+
+  for (let index = 1; index <= 5; index++) {
+    const resolvedAt = `2026-04-${10 + index}T12:00:00.000Z`;
+    const fixtureCase = buildFixtureCase(input.seedKey, input.officeId, `monitor-${index}`, {
+      status: "resolved",
+      assignedTo: input.actorUserId,
+      lastIntervenedAt: new Date(resolvedAt),
+      resolvedAt: new Date(resolvedAt),
+      resolutionReason: "administrative_cleanup",
+    });
+    cases.push(fixtureCase);
+    history.push(
+      buildFixtureHistory(input.seedKey, fixtureCase.id, "resolve", resolvedAt, {
+        conclusion: {
+          kind: "resolve",
+          outcomeCategory: "administrative_cleanup",
+          reasonCode: "administrative_cleanup",
+          effectiveness: "unclear",
+        },
+        disconnectTypeAtConclusion: "missing_next_task",
+        assigneeAtConclusion: input.actorUserId,
+        lifecycleStartedAt: "2026-04-10T12:00:00.000Z",
+      })
+    );
+  }
+
+  return {
+    cases,
+    history,
+    patternsCreated: ["monitor_only"] as const,
+  };
+}
+
+const POLICY_RECOMMENDATION_SEED_RECIPES: Array<{
+  taxonomy: InterventionPolicyRecommendationTaxonomy;
+  seedKey: string | null;
+  seedPathAvailable: boolean;
+  supportsApplyUndo: boolean;
+}> = [
+  {
+    taxonomy: "snooze_policy_adjustment",
+    seedKey: "policy-recommendation-fixture",
+    seedPathAvailable: true,
+    supportsApplyUndo: true,
+  },
+  {
+    taxonomy: "escalation_policy_adjustment",
+    seedKey: "policy-recommendation-fixture",
+    seedPathAvailable: true,
+    supportsApplyUndo: true,
+  },
+  {
+    taxonomy: "assignee_load_balancing",
+    seedKey: "policy-recommendation-fixture",
+    seedPathAvailable: true,
+    supportsApplyUndo: true,
+  },
+  {
+    taxonomy: "disconnect_playbook_change",
+    seedKey: "policy-recommendation-playbook-fixture",
+    seedPathAvailable: true,
+    supportsApplyUndo: false,
+  },
+  {
+    taxonomy: "monitor_only",
+    seedKey: "policy-recommendation-monitor-fixture",
+    seedPathAvailable: true,
+    supportsApplyUndo: false,
+  },
+];
+
+export function getInterventionPolicyRecommendationSeedValidationStatus() {
+  return {
+    scope: "non_production_only" as const,
+    validationMode: "manual_seed_script" as const,
+    scriptPath: "scripts/seed-intervention-policy-recommendation-qualification.ts",
+    taxonomies: POLICY_RECOMMENDATION_SEED_RECIPES.map((recipe) => ({ ...recipe })),
+  };
+}
+
 async function deleteExistingFixtureCohort(
   tenantDb: TenantDb | InMemoryTenantDb,
   officeId: string,
@@ -308,11 +448,24 @@ export async function seedInterventionPolicyRecommendationQualificationData(
   }
 
   const seedKey = input.seedKey ?? "policy-recommendation-fixture";
-  const fixture = buildFixtureCohort({
-    officeId: input.officeId,
-    seedKey,
-    actorUserId: input.actorUserId,
-  });
+  const fixture =
+    seedKey === "policy-recommendation-playbook-fixture"
+      ? buildPlaybookFixtureCohort({
+          officeId: input.officeId,
+          seedKey,
+          actorUserId: input.actorUserId,
+        })
+      : seedKey === "policy-recommendation-monitor-fixture"
+        ? buildMonitorFixtureCohort({
+            officeId: input.officeId,
+            seedKey,
+            actorUserId: input.actorUserId,
+          })
+        : buildFixtureCohort({
+            officeId: input.officeId,
+            seedKey,
+            actorUserId: input.actorUserId,
+          });
   await replaceFixtureCohort(tenantDb, {
     officeId: input.officeId,
     seedKey,

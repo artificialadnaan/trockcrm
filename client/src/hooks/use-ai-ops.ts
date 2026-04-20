@@ -719,6 +719,22 @@ export type InterventionPolicyRecommendationYieldNextAction =
   | "review_target_coverage"
   | "seed_or_wait_for_more_history";
 
+export type InterventionPolicyRecommendationQualificationBlocker =
+  | "history_limited"
+  | "threshold_limited"
+  | "cap_limited"
+  | "target_limited"
+  | "eligibility_limited"
+  | "healthy_low_volume";
+
+export type InterventionPolicyRecommendationQualificationTuningAction =
+  | "seed_non_prod_validation"
+  | "review_threshold_floor_in_code"
+  | "review_ranking_cap_in_code"
+  | "review_target_coverage"
+  | "review_apply_eligibility"
+  | "hold_current_thresholds";
+
 export type InterventionPolicyRecommendationTuningAction =
   | "hold_thresholds"
   | "lower_qualification_floor"
@@ -743,6 +759,45 @@ export interface InterventionPolicyRecommendationReviewRow {
   createdAt: string | null;
 }
 
+export interface InterventionPolicyRecommendationTopSuppressedCandidate {
+  groupingKey: string;
+  decision: InterventionPolicyRecommendationDecisionStatus;
+  suppressionReason: string | null;
+  score: number | null;
+  confidence: InterventionPolicyRecommendation["confidence"] | null;
+  createdAt: string | null;
+}
+
+export interface InterventionPolicyRecommendationTaxonomyDiagnosticEntry {
+  scope: "historical_window";
+  taxonomy: InterventionPolicyRecommendation["taxonomy"];
+  renderedCount: number;
+  suppressedCounts: {
+    predicateBlocked: number;
+    thresholdBlocked: number;
+    capBlocked: number;
+    missingTarget: number;
+    applyIneligible: number;
+  };
+  dominantBlocker: InterventionPolicyRecommendationQualificationBlocker;
+  topSuppressedCandidates: InterventionPolicyRecommendationTopSuppressedCandidate[];
+  recommendedTuningAction: InterventionPolicyRecommendationQualificationTuningAction;
+}
+
+export interface InterventionPolicyRecommendationSeedValidationTaxonomyStatus {
+  taxonomy: InterventionPolicyRecommendation["taxonomy"];
+  seedPathAvailable: boolean;
+  seedKey: string | null;
+  supportsApplyUndo: boolean;
+}
+
+export interface InterventionPolicyRecommendationSeedValidationStatus {
+  scope: "non_production_only";
+  validationMode: "manual_seed_script";
+  scriptPath: string;
+  taxonomies: InterventionPolicyRecommendationSeedValidationTaxonomyStatus[];
+}
+
 export interface InterventionPolicyRecommendationReviewModel {
   snapshot: {
     id: string;
@@ -757,6 +812,20 @@ export interface InterventionPolicyRecommendationReviewModel {
   emptyStateReason: string | null;
   latestDecisionRows: InterventionPolicyRecommendationReviewRow[];
   recentHistory: InterventionPolicyRecommendationHistoryEntry[];
+  diagnostics: {
+    window: InterventionPolicyRecommendationReviewWindow;
+    generatedAt: string;
+    systemDiagnostics: {
+      scope: "historical_window";
+      dominantBlockers: Array<{
+        blocker: InterventionPolicyRecommendationQualificationBlocker;
+        count: number;
+      }>;
+      recommendedNextAction: InterventionPolicyRecommendationQualificationTuningAction;
+    };
+    taxonomyDiagnostics: InterventionPolicyRecommendationTaxonomyDiagnosticEntry[];
+    seededValidationStatus: InterventionPolicyRecommendationSeedValidationStatus;
+  };
   yield: {
     renderedTotals: {
       window: InterventionPolicyRecommendationReviewWindow;
