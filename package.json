@@ -14,6 +14,7 @@
     "start:client": "npx serve client/dist -s -l 3000",
     "typecheck": "npm run build --workspace=shared && npm run typecheck --workspaces",
     "test": "npm run test --workspace=server",
+    "seed:policy-recommendation-qualification": "node --import tsx scripts/seed-intervention-policy-recommendation-qualification.ts",
     "db:generate": "drizzle-kit generate --config=shared/drizzle.config.ts",
     "db:migrate": "tsx server/src/migrations/runner.ts",
     "db:studio": "drizzle-kit studio --config=shared/drizzle.config.ts"

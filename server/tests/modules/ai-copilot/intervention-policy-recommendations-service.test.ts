@@ -9,6 +9,12 @@ const {
   applyInterventionPolicyRecommendation,
   getInterventionPolicyRecommendationEvaluationSummary,
 } = await import("../../../src/modules/ai-copilot/intervention-policy-application-service");
+const {
+  getInterventionPolicyRecommendationReview,
+} = await import("../../../src/modules/ai-copilot/intervention-policy-recommendation-review-service");
+const {
+  seedInterventionPolicyRecommendationQualificationData,
+} = await import("../../../src/modules/ai-copilot/intervention-policy-recommendation-seed-service");
 
 type DisconnectCaseRecord = {
   id: string;
@@ -235,5 +241,108 @@ describe("intervention policy recommendations service", () => {
 
     expect(evaluation.totals.qualifiedRendered).toBeGreaterThanOrEqual(1);
     expect(evaluation.apply[0]?.appliedCount ?? 0).toBeGreaterThanOrEqual(0);
+  });
+
+  it("builds a review model with latest-snapshot reasoning and bounded diagnostics rows", async () => {
+    const tenantDb = createTenantDb({
+      cases: [
+        makeCase(1),
+        makeCase(2),
+        makeCase(3),
+        makeCase(4),
+        makeCase(5),
+        makeCase(6, {
+          assignedTo: "manager-2",
+          businessKey: "office-1:missing_next_task:deal:deal-6",
+        }),
+      ],
+      users: [
+        { id: "manager-1", displayName: "Manager One" },
+        { id: "manager-2", displayName: "Manager Two" },
+      ],
+    });
+
+    const generated = await regenerateInterventionPolicyRecommendations(tenantDb as any, {
+      officeId: "office-1",
+      requestedByUserId: "admin-1",
+      now: new Date("2026-04-19T12:00:00.000Z"),
+    });
+
+    const review = await getInterventionPolicyRecommendationReview(tenantDb as any, {
+      officeId: "office-1",
+      viewerUserId: "admin-1",
+      window: "last_30_days",
+      decision: "suppressed",
+      now: new Date("2026-04-19T12:30:00.000Z"),
+    });
+
+    expect(review.snapshot?.id).toBe(generated.snapshotId);
+    expect(review.summary.window).toBe("last_30_days");
+    expect(review.summary.filters.decision).toBe("suppressed");
+    expect(review.emptyStateScope).toBe("latest_snapshot");
+    expect(review.latestDecisionRows.length).toBeGreaterThan(0);
+    expect(review.latestDecisionRows.length).toBeLessThanOrEqual(10);
+    expect(review.latestDecisionRows[0]).toMatchObject({
+      taxonomy: expect.any(String),
+      decision: expect.not.stringMatching(/^qualified_rendered$/),
+    });
+  });
+
+  it("seeds deterministic qualification data for non-production offices and surfaces qualifying recommendations", async () => {
+    const tenantDb = createTenantDb({
+      users: [
+        { id: "manager-1", displayName: "Manager One" },
+        { id: "manager-2", displayName: "Manager Two" },
+      ],
+    });
+
+    const seeded = await seedInterventionPolicyRecommendationQualificationData(tenantDb as any, {
+      officeId: "office-1",
+      actorUserId: "manager-1",
+      environment: "development",
+      allowedOfficeIds: ["office-1"],
+    });
+
+    expect(seeded).toMatchObject({
+      seeded: true,
+      seedKey: "policy-recommendation-fixture",
+      patternsCreated: expect.arrayContaining([
+        "snooze_policy_adjustment",
+        "escalation_policy_adjustment",
+        "assignee_load_balancing",
+      ]),
+    });
+    expect(tenantDb.state.cases.length).toBeGreaterThanOrEqual(20);
+    expect(tenantDb.state.history.length).toBeGreaterThanOrEqual(18);
+
+    const generated = await regenerateInterventionPolicyRecommendations(tenantDb as any, {
+      officeId: "office-1",
+      requestedByUserId: "admin-1",
+      now: new Date("2026-04-19T15:00:00.000Z"),
+    });
+
+    expect(generated.status).toBe("active");
+    expect(generated.recommendations.length).toBeGreaterThan(0);
+    expect(generated.recommendations.map((row) => row.taxonomy)).toEqual(
+      expect.arrayContaining([
+        "snooze_policy_adjustment",
+        "escalation_policy_adjustment",
+        "assignee_load_balancing",
+      ])
+    );
+  });
+
+  it("rejects qualification seeding in production", async () => {
+    const tenantDb = createTenantDb();
+
+    await expect(
+      seedInterventionPolicyRecommendationQualificationData(tenantDb as any, {
+        officeId: "office-1",
+        actorUserId: "manager-1",
+        environment: "production",
+      })
+    ).rejects.toMatchObject({
+      statusCode: 403,
+    });
   });
 });

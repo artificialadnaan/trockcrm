@@ -569,6 +569,36 @@ export interface InterventionPolicyRecommendationEvaluationSummary {
   }>;
 }
 
+export type InterventionPolicyRecommendationReviewWindow =
+  InterventionPolicyRecommendationEvaluationSummary["window"];
+
+export type InterventionPolicyRecommendationReviewDecisionFilter =
+  | "all"
+  | "rendered"
+  | "suppressed";
+
+export type InterventionPolicyRecommendationReviewScope = "latest_snapshot";
+
+export interface InterventionPolicyRecommendationReviewRow {
+  taxonomy: InterventionPolicyRecommendationTaxonomy;
+  groupingKey: string;
+  decision: InterventionPolicyRecommendationDecisionStatus;
+  suppressionReason: string | null;
+  score: number | null;
+  confidence: InterventionPolicyRecommendationConfidence | null;
+  usedFallbackCopy: boolean;
+  usedFallbackStructuredPayload: boolean;
+  createdAt: string | null;
+}
+
+export interface InterventionPolicyRecommendationReviewModel {
+  snapshot: InterventionPolicyRecommendationSnapshotView | null;
+  summary: InterventionPolicyRecommendationEvaluationSummary;
+  emptyStateScope: InterventionPolicyRecommendationReviewScope;
+  emptyStateReason: string | null;
+  latestDecisionRows: InterventionPolicyRecommendationReviewRow[];
+}
+
 export interface InterventionAnalyticsDashboard {
   summary: {
     openCases: number;

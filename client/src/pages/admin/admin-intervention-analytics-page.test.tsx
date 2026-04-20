@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
   useInterventionAnalytics: vi.fn(),
   useManagerAlertSnapshot: vi.fn(),
   useInterventionPolicyRecommendations: vi.fn(),
+  useInterventionPolicyRecommendationReview: vi.fn(),
   regenerateInterventionPolicyRecommendations: vi.fn(),
   submitInterventionPolicyRecommendationFeedback: vi.fn(),
   applyInterventionPolicyRecommendation: vi.fn(),
@@ -264,6 +265,77 @@ const policyRecommendationView = {
   ],
 } as const;
 
+const policyRecommendationReview = {
+  snapshot: {
+    id: "policy-snapshot-1",
+    officeId: "office-1",
+    status: "active",
+    generatedAt: "2026-04-16T13:10:00.000Z",
+    staleAt: "2026-04-17T13:10:00.000Z",
+    supersededAt: null,
+  },
+  summary: {
+    window: "last_30_days",
+    generatedAt: "2026-04-16T13:15:00.000Z",
+    filters: {
+      taxonomy: null,
+      decision: null,
+    },
+    totals: {
+      qualifiedRendered: 1,
+      qualifiedSuppressedByCap: 1,
+      suppressedByThreshold: 0,
+      suppressedByPredicate: 2,
+      suppressedByMissingTarget: 0,
+      suppressedByApplyIneligible: 0,
+    },
+    byTaxonomy: [
+      {
+        taxonomy: "snooze_policy_adjustment",
+        counts: {
+          qualifiedRendered: 1,
+          qualifiedSuppressedByCap: 0,
+          suppressedByThreshold: 0,
+          suppressedByPredicate: 1,
+          suppressedByMissingTarget: 0,
+          suppressedByApplyIneligible: 0,
+        },
+      },
+    ],
+    feedback: [
+      {
+        taxonomy: "snooze_policy_adjustment",
+        helpfulCount: 2,
+        notUsefulCount: 0,
+        wrongDirectionCount: 0,
+      },
+    ],
+    apply: [
+      {
+        taxonomy: "snooze_policy_adjustment",
+        appliedCount: 0,
+        appliedNoopCount: 0,
+        rejectedCount: 0,
+      },
+    ],
+  },
+  emptyStateScope: "latest_snapshot",
+  emptyStateReason: null,
+  latestDecisionRows: [
+    {
+      taxonomy: "snooze_policy_adjustment",
+      groupingKey: "waiting_on_customer",
+      decision: "qualified_rendered",
+      suppressionReason: null,
+      score: 88,
+      confidence: "high",
+      usedFallbackCopy: false,
+      usedFallbackStructuredPayload: false,
+      createdAt: "2026-04-16T13:10:00.000Z",
+    },
+  ],
+} as const;
+
 beforeEach(() => {
   mocks.useInterventionAnalytics.mockReturnValue({
     data: analyticsData,
@@ -279,6 +351,12 @@ beforeEach(() => {
   });
   mocks.useInterventionPolicyRecommendations.mockReturnValue({
     data: policyRecommendationView,
+    loading: false,
+    error: null,
+    refetch: vi.fn(),
+  });
+  mocks.useInterventionPolicyRecommendationReview.mockReturnValue({
+    data: policyRecommendationReview,
     loading: false,
     error: null,
     refetch: vi.fn(),
@@ -351,6 +429,7 @@ vi.mock("@/hooks/use-ai-ops", () => ({
   useInterventionAnalytics: mocks.useInterventionAnalytics,
   useManagerAlertSnapshot: mocks.useManagerAlertSnapshot,
   useInterventionPolicyRecommendations: mocks.useInterventionPolicyRecommendations,
+  useInterventionPolicyRecommendationReview: mocks.useInterventionPolicyRecommendationReview,
   regenerateInterventionPolicyRecommendations: mocks.regenerateInterventionPolicyRecommendations,
   submitInterventionPolicyRecommendationFeedback: mocks.submitInterventionPolicyRecommendationFeedback,
   applyInterventionPolicyRecommendation: mocks.applyInterventionPolicyRecommendation,
@@ -398,6 +477,7 @@ describe("AdminInterventionAnalyticsPage", () => {
     expect(html).toContain("Waiting-on-customer breach rate");
     expect(html).toContain("Why this qualified");
     expect(html).toContain("Apply change");
+    expect(html).toContain("Review recommendation quality");
     expect(html).not.toContain("Manager Readout");
     expect(html).toContain("Run Manager Alert Scan");
     expect(html).toContain("Send Alerts");
@@ -483,5 +563,37 @@ describe("AdminInterventionAnalyticsPage", () => {
 
     expect(html).toContain("No policy recommendation snapshot is available yet.");
     expect(html).toContain("Generate Recommendations");
+  });
+
+  it("renders an explained empty recommendation state when nothing qualifies", () => {
+    mocks.useInterventionPolicyRecommendations.mockReturnValueOnce({
+      data: {
+        status: "active",
+        snapshot: policyRecommendationView.snapshot,
+        recommendations: [],
+      },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+    mocks.useInterventionPolicyRecommendationReview.mockReturnValueOnce({
+      data: {
+        ...policyRecommendationReview,
+        emptyStateReason:
+          "In the latest snapshot, candidates were mostly suppressed because the qualification predicates were not met.",
+      },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <AdminInterventionAnalyticsPage />
+      </MemoryRouter>
+    );
+
+    expect(html).toContain("No policy changes are recommended right now.");
+    expect(html).toContain("qualification predicates were not met");
   });
 });

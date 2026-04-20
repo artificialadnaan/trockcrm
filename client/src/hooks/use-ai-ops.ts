@@ -689,6 +689,38 @@ export interface InterventionPolicyRecommendationEvaluationSummary {
   }>;
 }
 
+export type InterventionPolicyRecommendationReviewWindow =
+  InterventionPolicyRecommendationEvaluationSummary["window"];
+
+export type InterventionPolicyRecommendationReviewDecisionFilter = "all" | "rendered" | "suppressed";
+
+export interface InterventionPolicyRecommendationReviewRow {
+  taxonomy: InterventionPolicyRecommendation["taxonomy"];
+  groupingKey: string;
+  decision: InterventionPolicyRecommendationDecisionStatus;
+  suppressionReason: string | null;
+  score: number | null;
+  confidence: InterventionPolicyRecommendation["confidence"] | null;
+  usedFallbackCopy: boolean;
+  usedFallbackStructuredPayload: boolean;
+  createdAt: string | null;
+}
+
+export interface InterventionPolicyRecommendationReviewModel {
+  snapshot: {
+    id: string;
+    officeId: string;
+    status: "active" | "degraded";
+    generatedAt: string;
+    staleAt: string;
+    supersededAt: string | null;
+  } | null;
+  summary: InterventionPolicyRecommendationEvaluationSummary;
+  emptyStateScope: "latest_snapshot";
+  emptyStateReason: string | null;
+  latestDecisionRows: InterventionPolicyRecommendationReviewRow[];
+}
+
 export interface QueueAiBackfillResult {
   queued: boolean;
   sourceType: string | null;
@@ -777,6 +809,18 @@ export function useInterventionPolicyRecommendations() {
     error,
     refetch: fetchData,
   };
+}
+
+export function useInterventionPolicyRecommendationReview(input?: {
+  window?: InterventionPolicyRecommendationReviewWindow;
+  decision?: InterventionPolicyRecommendationReviewDecisionFilter;
+}) {
+  const window = input?.window ?? "last_30_days";
+  const decision = input?.decision ?? "all";
+  return useAiOpsQuery<InterventionPolicyRecommendationReviewModel>(
+    `/ai/ops/intervention-policy-recommendations/review?window=${window}&decision=${decision}`,
+    "Failed to load recommendation review"
+  );
 }
 
 function isMissingManagerAlertSnapshotError(error: unknown) {
@@ -902,6 +946,19 @@ export async function getInterventionPolicyRecommendationEvaluationSummary(input
   const query = params.toString();
   return api<InterventionPolicyRecommendationEvaluationSummary>(
     `/ai/ops/intervention-policy-recommendations/evaluation${query ? `?${query}` : ""}`
+  );
+}
+
+export async function getInterventionPolicyRecommendationReview(input?: {
+  window?: InterventionPolicyRecommendationReviewWindow;
+  decision?: InterventionPolicyRecommendationReviewDecisionFilter;
+}) {
+  const params = new URLSearchParams();
+  if (input?.window) params.set("window", input.window);
+  if (input?.decision) params.set("decision", input.decision);
+  const query = params.toString();
+  return api<InterventionPolicyRecommendationReviewModel>(
+    `/ai/ops/intervention-policy-recommendations/review${query ? `?${query}` : ""}`
   );
 }
 
