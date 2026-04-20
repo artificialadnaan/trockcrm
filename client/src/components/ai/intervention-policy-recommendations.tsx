@@ -24,9 +24,11 @@ function PolicyRecommendationCard({
   const [feedbackValue, setFeedbackValue] = useState(recommendation.feedbackStateForViewer);
   const [comment, setComment] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   async function handleFeedback(nextValue: "helpful" | "not_useful" | "wrong_direction") {
     setSubmitting(true);
+    setActionError(null);
     try {
       await submitInterventionPolicyRecommendationFeedback({
         recommendationId: recommendation.id,
@@ -35,6 +37,8 @@ function PolicyRecommendationCard({
       });
       setFeedbackValue(nextValue);
       await onRefresh();
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "Failed to save recommendation feedback");
     } finally {
       setSubmitting(false);
     }
@@ -116,6 +120,11 @@ function PolicyRecommendationCard({
           Wrong Direction
         </Button>
       </div>
+      {actionError && (
+        <div className="mt-4 rounded-lg border border-red-200 bg-red-50 px-3 py-3 text-sm leading-6 text-red-700">
+          {actionError}
+        </div>
+      )}
       <label className="mt-4 block text-sm text-muted-foreground">
         <span className="sr-only">Optional comment</span>
         <input
@@ -141,16 +150,20 @@ export function InterventionPolicyRecommendationsSection({
   error?: string | null;
 }) {
   const [regenerating, setRegenerating] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   async function handleRegenerate() {
     setRegenerating(true);
+    setActionError(null);
     try {
       await regenerateInterventionPolicyRecommendations();
       await onRefresh();
-      for (const delayMs of [800, 1200, 1600]) {
+      for (const delayMs of [800, 1200, 1600, 2200, 3000, 4000, 5000]) {
         await new Promise((resolve) => window.setTimeout(resolve, delayMs));
         await onRefresh();
       }
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "Failed to refresh recommendations");
     } finally {
       setRegenerating(false);
     }
@@ -203,6 +216,11 @@ export function InterventionPolicyRecommendationsSection({
       {error && (
         <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-4 text-sm leading-6 text-amber-900">
           {error}
+        </div>
+      )}
+      {actionError && (
+        <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-4 text-sm leading-6 text-red-700">
+          {actionError}
         </div>
       )}
       {view.status === "degraded" && (
