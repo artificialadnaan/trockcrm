@@ -13,6 +13,7 @@ import {
   listPipelineStages, updatePipelineStage, reorderPipelineStages,
 } from "./pipeline-service.js";
 import { getAuditLog, getAuditLogTables } from "./audit-service.js";
+import { startCatalogSync } from "../procore/sync-service.js";
 
 const router = Router();
 router.use(authMiddleware);
@@ -152,6 +153,17 @@ router.post("/admin/pipeline/reorder", requireAdmin, async (req: Request, res: R
     if (!Array.isArray(orderedIds)) return res.status(400).json({ error: "orderedIds required" });
     await reorderPipelineStages(orderedIds);
     return res.json({ success: true });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+router.post("/admin/procore/catalog-sync", requireAdmin, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const syncRun = await startCatalogSync({
+      triggeredByUserId: req.user?.id ?? null,
+    });
+    return res.status(202).json({ syncRun });
   } catch (err) {
     return next(err);
   }

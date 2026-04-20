@@ -14,7 +14,7 @@ import { runActivityDropDetection } from "./jobs/activity-alerts.js";
 import { runWeeklyDigest } from "./jobs/weekly-digest.js";
 import { runColdLeadWarming } from "./jobs/cold-lead-warming.js";
 import { runBidDeadlineCountdown } from "./jobs/bid-deadline.js";
-import { runProcoreSync } from "./jobs/procore-sync.js";
+import { runProcoreSync, runScheduledCatalogSync } from "./jobs/procore-sync.js";
 import { runAiDisconnectDigest } from "./jobs/ai-disconnect-digest.js";
 import { runAiDisconnectEscalationScan } from "./jobs/ai-disconnect-escalation.js";
 import { runAiDisconnectAdminTaskGeneration } from "./jobs/ai-disconnect-admin-tasks.js";
@@ -141,6 +141,17 @@ async function main() {
     }
   });
   console.log("[Worker] Cron scheduled: Procore sync poll every 15 minutes");
+
+  // Public Procore cost catalog refresh: every 6 hours at minute 7
+  cron.schedule("7 */6 * * *", async () => {
+    console.log("[Worker:cron] Running public Procore catalog refresh...");
+    try {
+      await runScheduledCatalogSync();
+    } catch (err) {
+      console.error("[Worker:cron] Public Procore catalog refresh failed:", err);
+    }
+  });
+  console.log("[Worker] Cron scheduled: public Procore catalog refresh every 6 hours");
 
   // Disconnect digest: weekdays at 7:15 AM CT
   cron.schedule("15 7 * * 1-5", async () => {

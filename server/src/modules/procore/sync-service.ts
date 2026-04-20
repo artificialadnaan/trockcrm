@@ -11,6 +11,7 @@ import {
 import type * as schema from "@trock-crm/shared/schema";
 import { db } from "../../db.js";
 import { procoreClient } from "../../lib/procore-client.js";
+import { startCatalogSync as startProcoreCatalogSync, syncCostCatalog } from "./catalog-sync-service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -261,4 +262,12 @@ export async function upsertSyncState(args: SyncStateUpsert): Promise<void> {
         updatedAt: new Date(),
       },
     });
+}
+
+export async function startCatalogSync(args: { triggeredByUserId?: string | null } = {}) {
+  return startProcoreCatalogSync(args);
+}
+
+export async function runScheduledCatalogSync() {
+  return syncCostCatalog({ trigger: "scheduled" });
 }

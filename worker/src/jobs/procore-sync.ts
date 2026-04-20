@@ -820,3 +820,21 @@ export async function runProcoreSync(): Promise<void> {
 
   console.log("[Worker:procore-sync] Poll complete");
 }
+
+export async function runScheduledCatalogSync(): Promise<void> {
+  console.log("[Worker:catalog-sync] Starting scheduled Procore catalog refresh...");
+
+  if (!process.env.PROCORE_COMPANY_ID && !isDevMode()) {
+    console.error("[Worker:catalog-sync] PROCORE_COMPANY_ID not set — skipping");
+    return;
+  }
+
+  if (isDevMode()) {
+    console.log("[Worker:catalog-sync] Dev mode — skipping actual Procore catalog refresh");
+    return;
+  }
+
+  console.warn(
+    "[Worker:catalog-sync] Scheduled catalog refresh is reserved for the shared public catalog flow and is not yet wired into worker-side persistence."
+  );
+}
