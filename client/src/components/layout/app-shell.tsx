@@ -10,10 +10,10 @@ export function AppShell() {
       <div className="flex min-w-0 flex-1 flex-col">
         <Topbar />
         <main className="flex-1 overflow-auto bg-slate-50 p-4 pb-20 md:p-6 md:pb-6">
-          {/* Shared stack keeps migrated routes on the inherited page rhythm during the shell rollout. */}
-          <div className="space-y-6">
+          {/* Named route-content frame keeps migrated routes on the inherited page rhythm while preserving full-height semantics during the shell rollout. */}
+          <section data-slot="route-content-frame" className="min-h-full space-y-6">
             <Outlet />
-          </div>
+          </section>
         </main>
       </div>
       <MobileNav />
