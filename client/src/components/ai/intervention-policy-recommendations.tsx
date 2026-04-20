@@ -85,6 +85,30 @@ export function buildPolicyDiffRows(
   return rows.filter((row) => row.before !== row.after);
 }
 
+export async function regeneratePolicyRecommendationState({
+  regenerate,
+  refreshView,
+  refreshReview,
+  delaysMs = [800, 1200, 1600, 2200, 3000, 4000, 5000],
+  wait = (delayMs: number) => new Promise((resolve) => window.setTimeout(resolve, delayMs)),
+}: {
+  regenerate: () => Promise<unknown>;
+  refreshView: () => Promise<void>;
+  refreshReview: () => Promise<void>;
+  delaysMs?: number[];
+  wait?: (delayMs: number) => Promise<unknown>;
+}) {
+  await regenerate();
+  await refreshView();
+  await refreshReview();
+
+  for (const delayMs of delaysMs) {
+    await wait(delayMs);
+    await refreshView();
+    await refreshReview();
+  }
+}
+
 function PolicyRecommendationCard({
   recommendation,
   onRefresh,
@@ -392,12 +416,13 @@ export function InterventionPolicyRecommendationsSection({
     setRegenerating(true);
     setActionError(null);
     try {
-      await regenerateInterventionPolicyRecommendations();
-      await onRefresh();
-      for (const delayMs of [800, 1200, 1600, 2200, 3000, 4000, 5000]) {
-        await new Promise((resolve) => window.setTimeout(resolve, delayMs));
-        await onRefresh();
-      }
+      await regeneratePolicyRecommendationState({
+        regenerate: regenerateInterventionPolicyRecommendations,
+        refreshView: async () => {
+          await onRefresh();
+        },
+        refreshReview: review.refetch,
+      });
     } catch (error) {
       setActionError(error instanceof Error ? error.message : "Failed to refresh recommendations");
     } finally {
