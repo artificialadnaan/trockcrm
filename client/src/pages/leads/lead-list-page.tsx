@@ -1,22 +1,41 @@
 import { useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { ArrowRight, Building2, MapPin, Plus, Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card } from "@/components/ui/card";
 import { LeadStageBadge } from "@/components/leads/lead-stage-badge";
 import { formatLeadPropertyLine, useLeads } from "@/hooks/use-leads";
+import { usePipelineStages } from "@/hooks/use-pipeline-config";
 
 export function LeadListPage() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
   const { leads, loading, error } = useLeads();
+  const { stages } = usePipelineStages();
+
+  const stageSlugById = useMemo(
+    () => new Map(stages.map((stage) => [stage.id, stage.slug])),
+    [stages]
+  );
+  const bucket = searchParams.get("bucket");
 
   const filtered = useMemo(() => {
     const query = search.trim().toLowerCase();
-    if (!query) return leads;
-    return leads.filter((lead) => {
+    const bucketFiltered = leads.filter((lead) => {
+      const stageSlug = stageSlugById.get(lead.stageId);
+      if (bucket === "lead") return stageSlug === "contacted";
+      if (bucket === "qualified_lead") return stageSlug === "qualified_lead";
+      if (bucket === "opportunity") {
+        return stageSlug === "director_go_no_go" || stageSlug === "ready_for_opportunity";
+      }
+      return true;
+    });
+
+    if (!query) return bucketFiltered;
+    return bucketFiltered.filter((lead) => {
       const haystack = [
         lead.name,
         lead.companyName,
@@ -33,7 +52,7 @@ export function LeadListPage() {
         .toLowerCase();
       return haystack.includes(query);
     });
-  }, [leads, search]);
+  }, [bucket, leads, search, stageSlugById]);
 
   const pageSize = 25;
   const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));

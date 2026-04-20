@@ -10,6 +10,8 @@ import { DirectorBlindSpotList } from "@/components/ai/director-blind-spot-list"
 import { PipelineBarChart } from "@/components/charts/pipeline-bar-chart";
 import { WinRateTrendChart } from "@/components/charts/win-rate-trend-chart";
 import { ActivityByRepCard } from "@/components/dashboard/activity-by-rep-card";
+import { FunnelBucketRow } from "@/components/dashboard/funnel-bucket-row";
+import { DirectorFunnelTable } from "@/components/dashboard/director-funnel-table";
 import { formatCurrency } from "@/components/charts/chart-colors";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
@@ -195,6 +197,24 @@ export function DirectorDashboardPage() {
             <User className="h-4 w-4" />
           </div>
         </div>
+      </div>
+
+      <FunnelBucketRow buckets={data.officeFunnelBuckets} />
+
+      <div className="space-y-3">
+        <div className="flex items-center justify-between">
+          <h2 className="text-sm font-bold uppercase tracking-wide text-gray-900">
+            Funnel Distribution By Rep
+          </h2>
+          <Link
+            to="/reports"
+            className="text-xs font-semibold text-[#CC0000] hover:text-red-700 flex items-center gap-1 transition-colors"
+          >
+            Full Report
+            <ChevronRight className="h-3 w-3" />
+          </Link>
+        </div>
+        <DirectorFunnelTable rows={data.repFunnelRows} />
       </div>
 
       {/* ── Metric Cards (Bento 3-col) ──────────────────────────────────── */}

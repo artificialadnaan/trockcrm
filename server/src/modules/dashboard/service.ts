@@ -21,6 +21,25 @@ import {
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
+export interface FunnelBucketSummary {
+  key: "lead" | "qualified_lead" | "opportunity" | "due_diligence" | "estimating";
+  label: string;
+  count: number;
+  totalValue: number | null;
+  route: "/leads" | "/deals";
+  bucket: "lead" | "qualified_lead" | "opportunity" | "due_diligence" | "estimating";
+}
+
+export interface DirectorRepFunnelRow {
+  repId: string;
+  repName: string;
+  leads: number;
+  qualifiedLeads: number;
+  opportunities: number;
+  dueDiligence: number;
+  estimating: number;
+}
+
 export interface StaleLeadDashboardRow {
   leadId: string;
   leadName: string;
@@ -75,11 +94,203 @@ async function getStaleLeadWatchlist(
   }));
 }
 
+function dealValueSql() {
+  return sql`COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)`;
+}
+
+function buildFunnelBuckets(leadRows: any[], dealRows: any[]): FunnelBucketSummary[] {
+  const leadCounts = new Map<string, number>(
+    leadRows.map((row) => [String(row.slug), Number(row.count ?? 0)])
+  );
+  const dealCounts = new Map<string, number>(
+    dealRows.map((row) => [String(row.slug), Number(row.count ?? 0)])
+  );
+  const dealValues = new Map<string, number>(
+    dealRows.map((row) => [String(row.slug), Number(row.total_value ?? 0)])
+  );
+
+  return [
+    {
+      key: "lead",
+      label: "Leads",
+      count: leadCounts.get("contacted") ?? 0,
+      totalValue: null,
+      route: "/leads",
+      bucket: "lead",
+    },
+    {
+      key: "qualified_lead",
+      label: "Qualified Leads",
+      count: leadCounts.get("qualified_lead") ?? 0,
+      totalValue: null,
+      route: "/leads",
+      bucket: "qualified_lead",
+    },
+    {
+      key: "opportunity",
+      label: "Opportunities",
+      count: (leadCounts.get("director_go_no_go") ?? 0) + (leadCounts.get("ready_for_opportunity") ?? 0),
+      totalValue: null,
+      route: "/leads",
+      bucket: "opportunity",
+    },
+    {
+      key: "due_diligence",
+      label: "Due Diligence",
+      count: dealCounts.get("dd") ?? 0,
+      totalValue: dealValues.get("dd") ?? 0,
+      route: "/deals",
+      bucket: "due_diligence",
+    },
+    {
+      key: "estimating",
+      label: "Estimating",
+      count: (dealCounts.get("estimating") ?? 0) + (dealCounts.get("bid_sent") ?? 0),
+      totalValue: (dealValues.get("estimating") ?? 0) + (dealValues.get("bid_sent") ?? 0),
+      route: "/deals",
+      bucket: "estimating",
+    },
+  ];
+}
+
+async function getRepFunnelBuckets(tenantDb: TenantDb, repId: string): Promise<FunnelBucketSummary[]> {
+  const [leadResult, dealResult] = await Promise.all([
+    tenantDb.execute(sql`
+      SELECT
+        psc.slug,
+        COUNT(*)::int AS count
+      FROM leads l
+      JOIN pipeline_stage_config psc ON psc.id = l.stage_id
+      WHERE l.status = 'open'
+        AND l.is_active = true
+        AND psc.workflow_family = 'lead'
+        AND l.assigned_rep_id = ${repId}
+      GROUP BY psc.slug
+    `),
+    tenantDb.execute(sql`
+      SELECT
+        psc.slug,
+        COUNT(*)::int AS count,
+        COALESCE(SUM(${dealValueSql()}), 0)::numeric AS total_value
+      FROM deals d
+      JOIN pipeline_stage_config psc ON psc.id = d.stage_id
+      WHERE d.is_active = true
+        AND d.assigned_rep_id = ${repId}
+        AND psc.slug IN ('dd', 'estimating', 'bid_sent')
+      GROUP BY psc.slug
+    `),
+  ]);
+
+  const leadRows = (leadResult as any).rows ?? leadResult;
+  const dealRows = (dealResult as any).rows ?? dealResult;
+  return buildFunnelBuckets(leadRows, dealRows);
+}
+
+async function getDirectorFunnelSummary(
+  tenantDb: TenantDb
+): Promise<{ officeFunnelBuckets: FunnelBucketSummary[]; repFunnelRows: DirectorRepFunnelRow[] }> {
+  const [leadResult, dealResult, repRowsResult] = await Promise.all([
+    tenantDb.execute(sql`
+      SELECT
+        psc.slug,
+        COUNT(*)::int AS count
+      FROM leads l
+      JOIN pipeline_stage_config psc ON psc.id = l.stage_id
+      WHERE l.status = 'open'
+        AND l.is_active = true
+        AND psc.workflow_family = 'lead'
+      GROUP BY psc.slug
+    `),
+    tenantDb.execute(sql`
+      SELECT
+        psc.slug,
+        COUNT(*)::int AS count,
+        COALESCE(SUM(${dealValueSql()}), 0)::numeric AS total_value
+      FROM deals d
+      JOIN pipeline_stage_config psc ON psc.id = d.stage_id
+      WHERE d.is_active = true
+        AND psc.slug IN ('dd', 'estimating', 'bid_sent')
+      GROUP BY psc.slug
+    `),
+    tenantDb.execute(sql`
+      WITH lead_counts AS (
+        SELECT
+          l.assigned_rep_id AS rep_id,
+          COUNT(*) FILTER (WHERE psc.slug = 'contacted')::int AS leads,
+          COUNT(*) FILTER (WHERE psc.slug = 'qualified_lead')::int AS qualified_leads,
+          COUNT(*) FILTER (WHERE psc.slug IN ('director_go_no_go', 'ready_for_opportunity'))::int AS opportunities
+        FROM leads l
+        JOIN pipeline_stage_config psc ON psc.id = l.stage_id
+        WHERE l.status = 'open'
+          AND l.is_active = true
+          AND psc.workflow_family = 'lead'
+        GROUP BY l.assigned_rep_id
+      ),
+      deal_counts AS (
+        SELECT
+          d.assigned_rep_id AS rep_id,
+          COUNT(*) FILTER (WHERE psc.slug = 'dd')::int AS due_diligence,
+          COUNT(*) FILTER (WHERE psc.slug IN ('estimating', 'bid_sent'))::int AS estimating
+        FROM deals d
+        JOIN pipeline_stage_config psc ON psc.id = d.stage_id
+        WHERE d.is_active = true
+          AND psc.slug IN ('dd', 'estimating', 'bid_sent')
+        GROUP BY d.assigned_rep_id
+      )
+      SELECT
+        u.id AS rep_id,
+        u.display_name AS rep_name,
+        COALESCE(lc.leads, 0)::int AS leads,
+        COALESCE(lc.qualified_leads, 0)::int AS qualified_leads,
+        COALESCE(lc.opportunities, 0)::int AS opportunities,
+        COALESCE(dc.due_diligence, 0)::int AS due_diligence,
+        COALESCE(dc.estimating, 0)::int AS estimating
+      FROM users u
+      LEFT JOIN lead_counts lc ON lc.rep_id = u.id
+      LEFT JOIN deal_counts dc ON dc.rep_id = u.id
+      WHERE u.is_active = true
+        AND u.role = 'rep'
+      ORDER BY
+        (
+          COALESCE(lc.leads, 0) +
+          COALESCE(lc.qualified_leads, 0) +
+          COALESCE(lc.opportunities, 0) +
+          COALESCE(dc.due_diligence, 0) +
+          COALESCE(dc.estimating, 0)
+        ) DESC,
+        u.display_name ASC
+    `),
+  ]);
+
+  const leadRows = (leadResult as any).rows ?? leadResult;
+  const dealRows = (dealResult as any).rows ?? dealResult;
+  const repRows = ((repRowsResult as any).rows ?? repRowsResult).map((row: any) => ({
+    repId: row.rep_id,
+    repName: row.rep_name,
+    leads: Number(row.leads ?? 0),
+    qualifiedLeads: Number(row.qualified_leads ?? 0),
+    opportunities: Number(row.opportunities ?? 0),
+    dueDiligence: Number(row.due_diligence ?? 0),
+    estimating: Number(row.estimating ?? 0),
+  })).sort((a: DirectorRepFunnelRow, b: DirectorRepFunnelRow) => {
+    const totalA = a.leads + a.qualifiedLeads + a.opportunities + a.dueDiligence + a.estimating;
+    const totalB = b.leads + b.qualifiedLeads + b.opportunities + b.dueDiligence + b.estimating;
+    if (totalB !== totalA) return totalB - totalA;
+    return a.repName.localeCompare(b.repName);
+  });
+
+  return {
+    officeFunnelBuckets: buildFunnelBuckets(leadRows, dealRows),
+    repFunnelRows: repRows,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Per-Rep Dashboard
 // ---------------------------------------------------------------------------
 
 export interface RepDashboardData {
+  funnelBuckets: FunnelBucketSummary[];
   activeDeals: { count: number; totalValue: number };
   tasksToday: { overdue: number; today: number };
   activityThisWeek: { calls: number; emails: number; meetings: number; notes: number; total: number };
@@ -122,6 +333,7 @@ export async function getRepDashboard(
     complianceResult,
     pipelineResult,
     staleLeadResult,
+    funnelBuckets,
   ] = await Promise.all([
     // 1. Active deals count + value for this rep
     tenantDb.execute(sql`
@@ -188,6 +400,7 @@ export async function getRepDashboard(
     `),
 
     getStaleLeadWatchlist(tenantDb, { repId: userId }),
+    getRepFunnelBuckets(tenantDb, userId),
   ]);
 
   const adRows = (activeDealResult as any).rows ?? activeDealResult;
@@ -199,6 +412,7 @@ export async function getRepDashboard(
     : null;
 
   return {
+    funnelBuckets,
     activeDeals: {
       count: Number(adRows[0]?.count ?? 0),
       totalValue: Number(adRows[0]?.total_value ?? 0),
@@ -246,6 +460,8 @@ export interface RepPerformanceCard {
 }
 
 export interface DirectorDashboardData {
+  officeFunnelBuckets: FunnelBucketSummary[];
+  repFunnelRows: DirectorRepFunnelRow[];
   repCards: RepPerformanceCard[];
   pipelineByStage: Array<{
     stageId: string;
@@ -304,6 +520,7 @@ export async function getDirectorDashboard(
     staleResult,
     staleLeadResult,
     ddResult,
+    funnelSummary,
   ] = await Promise.all([
     // 1. Per-rep performance cards
     buildRepPerformanceCards(tenantDb, { from, to }),
@@ -325,9 +542,12 @@ export async function getDirectorDashboard(
 
     // 7. DD vs pipeline
     getDdVsPipeline(tenantDb),
+    getDirectorFunnelSummary(tenantDb),
   ]);
 
   return {
+    officeFunnelBuckets: funnelSummary.officeFunnelBuckets,
+    repFunnelRows: funnelSummary.repFunnelRows,
     repCards: repCardsResult,
     pipelineByStage: pipelineResult.map((s) => ({
       stageId: s.stageId,

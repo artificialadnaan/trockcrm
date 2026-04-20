@@ -6,6 +6,7 @@ import { PipelineBarChart } from "@/components/charts/pipeline-bar-chart";
 import { formatCurrency } from "@/components/charts/chart-colors";
 import { useTasks } from "@/hooks/use-tasks";
 import { TaskSection } from "@/components/tasks/task-section";
+import { FunnelBucketRow } from "@/components/dashboard/funnel-bucket-row";
 import {
   Briefcase,
   CheckSquare,
@@ -68,6 +69,8 @@ export function RepDashboardPage() {
           Here is your sales activity overview for {new Date().getFullYear()}.
         </p>
       </div>
+
+      <FunnelBucketRow buckets={data.funnelBuckets} />
 
       {/* Today's Tasks */}
       <Card>

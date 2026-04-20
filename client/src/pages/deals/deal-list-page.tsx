@@ -1,4 +1,5 @@
-import { useNavigate } from "react-router-dom";
+import { useMemo } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   Plus,
   ChevronLeft,
@@ -13,6 +14,7 @@ import { DealStageBadge } from "@/components/deals/deal-stage-badge";
 import { DealFilters } from "@/components/deals/deal-filters";
 import { useDeals } from "@/hooks/use-deals";
 import { useDealFilters } from "@/hooks/use-deal-filters";
+import { usePipelineStages } from "@/hooks/use-pipeline-config";
 import {
   formatCurrency,
   bestEstimate,
@@ -22,8 +24,32 @@ import {
 
 export function DealListPage() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const { filters, setFilters, resetFilters } = useDealFilters();
-  const { deals, pagination, loading, error } = useDeals(filters);
+  const { stages } = usePipelineStages();
+  const bucket = searchParams.get("bucket");
+
+  const bucketStageIds = useMemo(() => {
+    if (bucket === "due_diligence") {
+      return stages.filter((stage) => stage.slug === "dd").map((stage) => stage.id);
+    }
+    if (bucket === "estimating") {
+      return stages
+        .filter((stage) => stage.slug === "estimating" || stage.slug === "bid_sent")
+        .map((stage) => stage.id);
+    }
+    return undefined;
+  }, [bucket, stages]);
+
+  const effectiveFilters = useMemo(
+    () => ({
+      ...filters,
+      ...(bucketStageIds ? { stageIds: bucketStageIds } : {}),
+    }),
+    [bucketStageIds, filters]
+  );
+
+  const { deals, pagination, loading, error } = useDeals(effectiveFilters);
 
   return (
     <div className="space-y-4">
