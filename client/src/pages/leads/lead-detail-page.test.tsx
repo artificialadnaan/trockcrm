@@ -101,6 +101,25 @@ vi.mock("@/hooks/use-pipeline-config", () => ({
   })),
 }));
 
+vi.mock("@/lib/auth", () => ({
+  useAuth: vi.fn(() => ({
+    user: {
+      id: "director-1",
+      displayName: "Dana Director",
+      role: "director",
+      officeId: "office-1",
+    },
+  })),
+}));
+
+vi.mock("@/hooks/use-task-assignees", () => ({
+  useTaskAssignees: vi.fn(() => ({
+    assignees: [{ id: "rep-1", displayName: "Rep One" }],
+    loading: false,
+    error: null,
+  })),
+}));
+
 vi.mock("@/hooks/use-activities", () => ({
   useActivities: vi.fn(() => ({
     activities,
@@ -132,6 +151,7 @@ describe("LeadDetailPage", () => {
     expect(html).toContain("123 Main St");
     expect(html).toContain("Convert to Deal");
     expect(html).toContain("Contacted");
+    expect(html).toContain("Assigned Rep");
   });
 
   it("treats workflow-family lead stages as unconverted even when the slug is not dd", () => {

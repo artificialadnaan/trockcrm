@@ -1,8 +1,9 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { ArrowLeft, Building2, MapPin, Clock3, User, Phone } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { RecordAssignmentCard } from "@/components/assignment/record-assignment-card";
 import { LeadForm } from "@/components/leads/lead-form";
 import { LeadStageBadge } from "@/components/leads/lead-stage-badge";
 import { LeadTimelineTab } from "@/components/leads/lead-timeline-tab";
@@ -10,12 +11,17 @@ import { ForecastEditor } from "@/components/shared/forecast-editor";
 import { NextStepEditor } from "@/components/shared/next-step-editor";
 import { formatLeadPropertyLine, updateLead, useLeadDetail } from "@/hooks/use-leads";
 import { usePipelineStages } from "@/hooks/use-pipeline-config";
+import { useAuth } from "@/lib/auth";
+import { useTaskAssignees } from "@/hooks/use-task-assignees";
 
 export function LeadDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const { user } = useAuth();
   const { lead, loading, error, refetch } = useLeadDetail(id);
   const { stages } = usePipelineStages();
+  const { assignees: availableReps } = useTaskAssignees();
+  const [savingAssignment, setSavingAssignment] = useState(false);
 
   const currentStage = useMemo(
     () => stages.find((stage) => stage.id === lead?.stageId) ?? null,
@@ -51,6 +57,21 @@ export function LeadDetailPage() {
 
   const leadCompanyName = lead.companyName ?? null;
   const propertyLine = formatLeadPropertyLine(lead);
+  const isDirectorOrAdmin = user?.role === "director" || user?.role === "admin";
+  const assignedRepName =
+    availableReps.find((assignee) => assignee.id === lead.assignedRepId)?.displayName ??
+    lead.assignedRepId;
+
+  const handleAssignmentSave = async (assignedRepId: string) => {
+    if (assignedRepId === lead.assignedRepId) return;
+    setSavingAssignment(true);
+    try {
+      await updateLead(lead.id, { assignedRepId });
+      await refetch();
+    } finally {
+      setSavingAssignment(false);
+    }
+  };
 
   return (
     <div className="space-y-6">
@@ -150,6 +171,16 @@ export function LeadDetailPage() {
         </div>
 
         <div className="space-y-4">
+          <RecordAssignmentCard
+            label="Assigned Rep"
+            assignedRepId={lead.assignedRepId}
+            assignedRepName={assignedRepName}
+            reps={availableReps}
+            canEdit={isDirectorOrAdmin}
+            saving={savingAssignment}
+            onSave={handleAssignmentSave}
+          />
+
           <LeadForm
           lead={{
             id: lead.id,

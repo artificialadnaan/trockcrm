@@ -19,6 +19,7 @@ import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { getStageById } from "../pipeline/service.js";
 import { captureInitialForecastMilestone } from "../reports/forecast-milestones-service.js";
+import { createAssignmentTaskIfNeeded } from "../assignment-tasks/service.js";
 
 // Type alias for the tenant-scoped Drizzle instance
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -581,6 +582,8 @@ export async function updateDeal(
 
   // Build update object — only include fields that are provided
   const updates: Record<string, any> = {};
+  const nextAssignedRepId =
+    input.assignedRepId !== undefined ? input.assignedRepId : existing.assignedRepId;
   if (input.name !== undefined) updates.name = input.name;
   if (input.assignedRepId !== undefined) updates.assignedRepId = input.assignedRepId;
   if (input.primaryContactId !== undefined) updates.primaryContactId = input.primaryContactId;
@@ -742,6 +745,21 @@ export async function updateDeal(
     .set(updates)
     .where(eq(deals.id, dealId))
     .returning();
+
+  if (
+    input.assignedRepId !== undefined &&
+    input.assignedRepId !== existing.assignedRepId
+  ) {
+    await createAssignmentTaskIfNeeded(tenantDb, {
+      entityType: "deal",
+      entityId: result[0].id,
+      entityName: result[0].name,
+      previousAssignedRepId: existing.assignedRepId,
+      nextAssignedRepId,
+      actorUserId: userId,
+      officeId: officeId ?? null,
+    });
+  }
 
   // Re-geocode if address changed
   const addressChanged =

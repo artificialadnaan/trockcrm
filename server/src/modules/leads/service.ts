@@ -13,6 +13,7 @@ import type * as schema from "@trock-crm/shared/schema";
 import type { WorkflowFamily } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 import { getStageById } from "../pipeline/service.js";
+import { createAssignmentTaskIfNeeded } from "../assignment-tasks/service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -334,6 +335,8 @@ export function createLeadService(
     }
 
     const updates: Record<string, unknown> = {};
+    const nextAssignedRepId =
+      input.assignedRepId !== undefined ? input.assignedRepId : existing.assignedRepId;
 
     if (input.stageId !== undefined) {
       const stage = await deps.getStageById(input.stageId, "lead");
@@ -416,6 +419,21 @@ export function createLeadService(
       .set(updates)
       .where(eq(leads.id, leadId))
       .returning();
+
+    if (
+      input.assignedRepId !== undefined &&
+      input.assignedRepId !== existing.assignedRepId
+    ) {
+      await createAssignmentTaskIfNeeded(tenantDb, {
+        entityType: "lead",
+        entityId: lead.id,
+        entityName: lead.name,
+        previousAssignedRepId: existing.assignedRepId,
+        nextAssignedRepId,
+        actorUserId: userId,
+        officeId: input.officeId ?? null,
+      });
+    }
 
     return lead;
   }

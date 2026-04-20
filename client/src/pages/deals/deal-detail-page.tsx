@@ -9,6 +9,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { RecordAssignmentCard } from "@/components/assignment/record-assignment-card";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -41,6 +42,7 @@ import { useDealDetail, deleteDeal as apiDeleteDeal, updateDeal, type DealDetail
 import { useCompanyDetail } from "@/hooks/use-companies";
 import { usePipelineStages } from "@/hooks/use-pipeline-config";
 import { useAuth } from "@/lib/auth";
+import { useTaskAssignees } from "@/hooks/use-task-assignees";
 import { formatCurrency, bestEstimate } from "@/lib/deal-utils";
 
 type Tab = "overview" | "lead" | "scoping" | "files" | "email" | "activity" | "timeline" | "history" | "team" | "estimates" | "punch_list" | "closeout";
@@ -53,10 +55,12 @@ export function DealDetailPage() {
   const { deal, loading, error, refetch } = useDealDetail(id);
   const { company } = useCompanyDetail(deal?.companyId ?? undefined);
   const { stages } = usePipelineStages();
+  const { assignees: availableReps } = useTaskAssignees();
   const [activeTab, setActiveTab] = useState<Tab>("overview");
   const [stageChangeOpen, setStageChangeOpen] = useState(false);
   const [targetStageId, setTargetStageId] = useState<string | null>(null);
   const [teamCount, setTeamCount] = useState<number | null>(null);
+  const [savingAssignment, setSavingAssignment] = useState(false);
   const currentStage = stages.find((s) => s.id === deal?.stageId);
   const isDirectorOrAdmin = user?.role === "director" || user?.role === "admin";
 
@@ -158,6 +162,9 @@ export function DealDetailPage() {
       </div>
     );
   }
+  const assignedRepName =
+    availableReps.find((assignee) => assignee.id === deal.assignedRepId)?.displayName ??
+    deal.assignedRepId;
   const handleTabSelect = (tab: Tab) => {
     setActiveTab(tab);
     const nextParams = new URLSearchParams(searchParams);
@@ -168,6 +175,17 @@ export function DealDetailPage() {
       nextParams.delete("focus");
     }
     setSearchParams(nextParams, { replace: true });
+  };
+
+  const handleAssignmentSave = async (assignedRepId: string) => {
+    if (assignedRepId === deal.assignedRepId) return;
+    setSavingAssignment(true);
+    try {
+      await updateDeal(deal.id, { assignedRepId });
+      await refetch();
+    } finally {
+      setSavingAssignment(false);
+    }
   };
 
   return (
@@ -322,6 +340,15 @@ export function DealDetailPage() {
       {/* Tab Content */}
       {activeTab === "overview" && (
         <div className="space-y-4">
+          <RecordAssignmentCard
+            label="Assigned Rep"
+            assignedRepId={deal.assignedRepId}
+            assignedRepName={assignedRepName}
+            reps={availableReps}
+            canEdit={isDirectorOrAdmin}
+            saving={savingAssignment}
+            onSave={handleAssignmentSave}
+          />
           {(currentStageSlug === "estimating" || currentStageSlug === "bid_sent") && (
             <DealProposalCard deal={deal} onUpdate={refetch} />
           )}
