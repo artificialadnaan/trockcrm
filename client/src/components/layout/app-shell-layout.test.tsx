@@ -242,7 +242,7 @@ describe("AppShell layout", () => {
     expect(contactsPageSource).not.toContain('className="space-y-4"');
   });
 
-  it("migrates the admin users page to PageHeader and the narrower content wrapper", () => {
+  it("migrates the admin users page to PageHeader and the shared management wrapper", () => {
     expect(usersPageSource).toContain(
       'import { PageHeader } from "@/components/layout/page-header";',
     );
@@ -253,6 +253,8 @@ describe("AppShell layout", () => {
     expect(usersPageSource).not.toContain(
       'className="p-6 space-y-6 max-w-5xl mx-auto"',
     );
-    expect(usersPageSource).toContain('className="mx-auto max-w-5xl space-y-6"');
+    expect(usersPageSource).toContain('className="mx-auto max-w-6xl space-y-6"');
+    expect(usersPageSource).toContain('placeholder="Search by name or email"');
+    expect(usersPageSource).toContain("Make director");
   });
 });

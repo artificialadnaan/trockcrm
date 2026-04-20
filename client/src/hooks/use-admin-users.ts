@@ -53,6 +53,21 @@ export function useAdminUsers() {
     await load();
   };
 
+  const updateUsersBulk = async (ids: string[], input: Partial<AdminUser>) => {
+    const results = await Promise.allSettled(
+      ids.map((id) => api(`/admin/users/${id}`, {
+        method: "PATCH",
+        json: input,
+      }))
+    );
+    await load();
+
+    const failedCount = results.filter((result) => result.status === "rejected").length;
+    if (failedCount > 0) {
+      throw new Error(`Updated ${ids.length - failedCount} users, but ${failedCount} failed`);
+    }
+  };
+
   const grantAccess = async (userId: string, officeId: string, roleOverride?: string) => {
     await api(`/admin/users/${userId}/office-access`, {
       method: "POST",
@@ -90,6 +105,7 @@ export function useAdminUsers() {
     error,
     refetch: load,
     updateUser,
+    updateUsersBulk,
     grantAccess,
     revokeAccess,
     importExternalUsers,
