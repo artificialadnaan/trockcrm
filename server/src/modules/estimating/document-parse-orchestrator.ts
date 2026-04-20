@@ -36,6 +36,12 @@ export interface EstimateDocumentParseResult {
   extractionCount: number;
 }
 
+interface ParseRunOrderingRecord {
+  id: string;
+  startedAt: Date | string | null;
+  createdAt: Date | string | null;
+}
+
 function resolveParseOptions(options?: EstimateDocumentParseOptions) {
   return {
     provider: options?.provider ?? "default",
@@ -95,6 +101,57 @@ async function getCurrentDocumentState(tenantDb: TenantDb, documentId: string) {
     .limit(1);
 
   return currentDocument ?? null;
+}
+
+function compareParseRunPriority(
+  candidate: ParseRunOrderingRecord,
+  current: ParseRunOrderingRecord
+) {
+  const startedDiff =
+    new Date(candidate.startedAt ?? 0).getTime() - new Date(current.startedAt ?? 0).getTime();
+  if (startedDiff !== 0) return startedDiff;
+
+  const createdDiff =
+    new Date(candidate.createdAt ?? 0).getTime() - new Date(current.createdAt ?? 0).getTime();
+  if (createdDiff !== 0) return createdDiff;
+
+  return candidate.id.localeCompare(current.id);
+}
+
+async function claimDocumentProcessingRun(args: {
+  tenantDb: TenantDb;
+  documentId: string;
+  parseRun: ParseRunOrderingRecord;
+  options: { provider: string; profile: string };
+}) {
+  await args.tenantDb.execute(sql`
+    update estimate_source_documents as document
+    set
+      parse_status = 'processing',
+      ocr_status = 'processing',
+      active_parse_run_id = ${args.parseRun.id},
+      parse_provider = ${args.options.provider},
+      parse_profile = ${args.options.profile},
+      parse_error_summary = null
+    where document.id = ${args.documentId}
+      and not exists (
+        select 1
+        from estimate_document_parse_runs as owning_run
+        where owning_run.id = document.active_parse_run_id
+          and (
+            owning_run.started_at > ${args.parseRun.startedAt}
+            or (
+              owning_run.started_at = ${args.parseRun.startedAt}
+              and owning_run.created_at > ${args.parseRun.createdAt}
+            )
+            or (
+              owning_run.started_at = ${args.parseRun.startedAt}
+              and owning_run.created_at = ${args.parseRun.createdAt}
+              and owning_run.id > ${args.parseRun.id}
+            )
+          )
+      )
+  `);
 }
 
 async function isFreshestEligibleParseRun(
@@ -201,27 +258,12 @@ export async function runEstimateDocumentParse(args: {
     })
     .returning();
 
-  const currentDocumentAtStart = await getCurrentDocumentState(args.tenantDb, args.document.id);
-  const hasDifferentInFlightRun =
-    currentDocumentAtStart?.activeParseRunId != null &&
-    currentDocumentAtStart.activeParseRunId !== parseRun.id &&
-    currentDocumentAtStart.parseStatus === "processing" &&
-    currentDocumentAtStart.ocrStatus === "processing";
-
-  if (!hasDifferentInFlightRun) {
-    await args.tenantDb
-      .update(estimateSourceDocuments)
-      .set({
-        parseStatus: "processing",
-        ocrStatus: "processing",
-        activeParseRunId: parseRun.id,
-        parseProvider: options.provider,
-        parseProfile: options.profile,
-        parseErrorSummary: null,
-      })
-      .where(eq(estimateSourceDocuments.id, args.document.id))
-      .returning();
-  }
+  await claimDocumentProcessingRun({
+    tenantDb: args.tenantDb,
+    documentId: args.document.id,
+    parseRun,
+    options,
+  });
 
   try {
     const normalizedPages = await normalizeEstimateDocumentPages({

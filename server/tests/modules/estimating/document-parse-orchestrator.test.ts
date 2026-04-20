@@ -33,6 +33,21 @@ function resolveDocumentAndRunParams(documentId: string, params: any[]) {
   };
 }
 
+function compareParseRunPriority(
+  candidate: { id: string; startedAt: Date | string | null; createdAt: Date | string | null },
+  current: { id: string; startedAt: Date | string | null; createdAt: Date | string | null }
+) {
+  const startedDiff =
+    new Date(candidate.startedAt ?? 0).getTime() - new Date(current.startedAt ?? 0).getTime();
+  if (startedDiff !== 0) return startedDiff;
+
+  const createdDiff =
+    new Date(candidate.createdAt ?? 0).getTime() - new Date(current.createdAt ?? 0).getTime();
+  if (createdDiff !== 0) return createdDiff;
+
+  return candidate.id.localeCompare(current.id);
+}
+
 function createTenantDbMock(options: {
   documentSnapshot: Record<string, any>;
   currentDocument?: Record<string, any>;
@@ -174,6 +189,33 @@ function createTenantDbMock(options: {
     })),
     execute: vi.fn().mockImplementation(async (query: any) => {
       const { text, params } = readSql(query);
+
+      if (text.includes("update estimate_source_documents as document")) {
+        const parseRunId = params.find((value) =>
+          typeof value === "string" && parseRuns.some((run) => run.id === value)
+        ) as string | undefined;
+        const candidateRun = parseRuns.find((run) => run.id === parseRunId);
+        const currentOwner =
+          documentState.activeParseRunId != null
+            ? parseRuns.find((run) => run.id === documentState.activeParseRunId)
+            : null;
+
+        const shouldClaim =
+          candidateRun &&
+          (!currentOwner || compareParseRunPriority(candidateRun, currentOwner) >= 0);
+
+        if (shouldClaim) {
+          documentState.parseStatus = "processing";
+          documentState.ocrStatus = "processing";
+          documentState.activeParseRunId = candidateRun.id;
+          documentState.parseProvider = candidateRun.parseProvider ?? "default";
+          documentState.parseProfile = candidateRun.parseProfile ?? "balanced";
+          documentState.parseErrorSummary = null;
+          updatedDocuments.push({ ...documentState });
+        }
+
+        return;
+      }
 
       if (text.includes("delete from estimate_extractions")) {
         const [documentId, parseRunId] = params;
@@ -711,6 +753,7 @@ describe("runEstimateDocumentParse", () => {
         ocrStatus: "processing",
       })
     );
+    expect(updatedDocuments).toHaveLength(0);
     expect(parseRuns).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
