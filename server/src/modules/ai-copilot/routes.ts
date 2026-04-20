@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { sql } from "drizzle-orm";
 import { jobQueue, users } from "@trock-crm/shared/schema";
 import { requireRole } from "../../middleware/rbac.js";
 import { AppError } from "../../middleware/error-handler.js";
@@ -84,6 +85,29 @@ function getActiveOfficeId(req: any) {
     throw new AppError(400, "Active office is required");
   }
   return officeId;
+}
+
+async function recordManagerBriefServed(req: any) {
+  const execute = req?.tenantDb?.execute;
+  if (typeof execute !== "function") return;
+
+  try {
+    await execute(
+      sql`
+        INSERT INTO audit_log (table_name, record_id, action, changed_by, changes, full_row)
+        VALUES (
+          'intervention_manager_brief',
+          ${getActiveOfficeId(req)},
+          'update',
+          ${req.user?.id ?? null},
+          ${JSON.stringify({ event: "served", route: "/api/ai/ops/intervention-analytics" })}::jsonb,
+          ${JSON.stringify({ servedAt: new Date().toISOString() })}::jsonb
+        )
+      `
+    );
+  } catch {
+    // Brief telemetry must not take down analytics delivery.
+  }
 }
 
 function requireCaseIds(value: unknown) {
@@ -258,6 +282,7 @@ router.get("/ops/intervention-analytics", requireRole("admin", "director"), asyn
     const dashboard = await getInterventionAnalyticsDashboard(req.tenantDb!, {
       officeId: getActiveOfficeId(req),
     });
+    await recordManagerBriefServed(req);
     await req.commitTransaction!();
     res.json(dashboard);
   } catch (err) {

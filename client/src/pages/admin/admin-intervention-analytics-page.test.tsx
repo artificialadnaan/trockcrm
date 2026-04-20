@@ -80,6 +80,38 @@ const analyticsData = {
     lowDays: 10,
     timingBasis: "business_days",
   },
+  managerBrief: {
+    headline: "Intervention pressure is concentrated in 2 overdue, 1 escalated-open cases.",
+    summaryWindowLabel: "Compared with the prior 7 days",
+    whatChanged: [
+      {
+        key: "escalations_up",
+        tone: "worsened",
+        text: "Escalations rose to 2 in the last 7 days from 1 in the prior 7 days.",
+        queueLink: "/admin/interventions?view=escalated",
+      },
+    ],
+    focusNow: [
+      {
+        key: "focus_overdue",
+        priority: "high",
+        text: "Clear 2 overdue cases before they roll into more escalations.",
+        queueLink: "/admin/interventions?view=overdue",
+      },
+    ],
+    emergingPatterns: [
+      {
+        key: "pattern_1",
+        title: "Resolve outcomes are reopening",
+        summary: "50% of recent resolve conclusions reopened inside the 30-day window.",
+        confidence: "high",
+        queueLink: "/admin/intervention-analytics#outcome-effectiveness",
+      },
+    ],
+    groundingNote:
+      "Grounded in current intervention analytics, recent intervention history, queue pressure, and outcome-effectiveness trends.",
+    error: null,
+  },
   outcomeEffectiveness: {
     reopenRateByConclusionFamily: { resolve: 0.5, snooze: 0.25, escalate: 0 },
     reopenRateByResolveCategory: [{ key: "owner_aligned", rate: 0.5, count: 2 }],
@@ -232,6 +264,7 @@ describe("AdminInterventionAnalyticsPage", () => {
     );
 
     expect(html).toContain("Intervention Analytics");
+    expect(html).toContain("Manager Brief");
     expect(html).toContain("Queue Health");
     expect(html).toContain("Manager Alerts");
     expect(html).toContain("Outcome Effectiveness");
@@ -244,14 +277,21 @@ describe("AdminInterventionAnalyticsPage", () => {
     expect(html).toContain("Resolution Effectiveness");
     expect(html).toContain("Breach Queue");
     expect(html).toContain("Manager One");
+    expect(html).toContain("Escalations rose to 2 in the last 7 days from 1 in the prior 7 days.");
+    expect(html).toContain("Clear 2 overdue cases before they roll into more escalations.");
+    expect(html).toContain("Resolve outcomes are reopening");
     expect(html).toContain('href="#queue-health"');
+    expect(html).toContain('href="#manager-brief"');
     expect(html).toContain('href="#manager-alerts"');
     expect(html).toContain('href="#outcome-effectiveness"');
     expect(html).toContain('href="#policy-recommendations"');
+    expect(html).toContain('id="manager-brief"');
     expect(html).toContain('id="queue-health"');
     expect(html).toContain('id="manager-alerts"');
     expect(html).toContain('id="outcome-effectiveness"');
     expect(html).toContain('id="policy-recommendations"');
+    expect(html.indexOf("Manager Brief")).toBeLessThan(html.indexOf("Queue Health"));
+    expect(html.indexOf("Manager Brief")).toBeLessThan(html.indexOf("Manager Alerts"));
   });
 
   it("preserves source filters on cross-links to the other manager surfaces", () => {
@@ -266,6 +306,10 @@ describe("AdminInterventionAnalyticsPage", () => {
     expect(html).toContain('href="/admin/interventions?type=overdue&amp;cluster=manager&amp;trend=critical"');
     expect(html).toContain('href="/admin/sales-process-disconnects?type=overdue&amp;cluster=manager&amp;trend=critical"');
     expect(html).toContain('href="/admin/interventions?view=overdue&amp;type=overdue&amp;cluster=manager&amp;trend=critical"');
+    expect(html).toContain('href="/admin/interventions?view=escalated&amp;type=overdue&amp;cluster=manager&amp;trend=critical"');
+    expect(html).toContain(
+      'href="/admin/intervention-analytics?type=overdue&amp;cluster=manager&amp;trend=critical#outcome-effectiveness"'
+    );
     expect(html).toContain(
       'href="/admin/interventions?view=all&amp;assigneeId=manager-1&amp;type=overdue&amp;cluster=manager&amp;trend=critical"'
     );

@@ -353,6 +353,28 @@ export interface InterventionOutcomeEffectiveness {
   medianDaysToReopenByConclusionFamily: Array<{ key: string; medianDays: number | null }>;
 }
 
+export interface InterventionManagerBriefItem {
+  key: string;
+  text: string;
+  queueLink: string | null;
+}
+
+export interface InterventionManagerBrief {
+  headline: string;
+  summaryWindowLabel: string;
+  whatChanged: Array<InterventionManagerBriefItem & { tone: "improved" | "worsened" | "watch" }>;
+  focusNow: Array<InterventionManagerBriefItem & { priority: "high" | "medium" }>;
+  emergingPatterns: Array<{
+    key: string;
+    title: string;
+    summary: string;
+    confidence: "high" | "medium";
+    queueLink: string | null;
+  }>;
+  groundingNote: string;
+  error: string | null;
+}
+
 export interface InterventionAnalyticsDashboard {
   summary: {
     openCases: number;
@@ -395,5 +417,6 @@ export interface InterventionAnalyticsDashboard {
     lowDays: number;
     timingBasis: "business_days";
   };
+  managerBrief: InterventionManagerBrief;
   outcomeEffectiveness: InterventionOutcomeEffectiveness;
 }

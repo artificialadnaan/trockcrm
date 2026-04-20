@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-const { getInterventionAnalyticsDashboard } = await import("../../../src/modules/ai-copilot/intervention-service");
+const { buildManagerBriefSafely, getInterventionAnalyticsDashboard } = await import("../../../src/modules/ai-copilot/intervention-service");
 
 type DisconnectCaseRecord = {
   id: string;
@@ -228,6 +228,12 @@ describe("intervention analytics service", () => {
         makeHistory({ id: "history-snooze", disconnectCaseId: "case-snooze-breached", actionType: "snooze" }),
         makeHistory({ id: "history-resolve", disconnectCaseId: "case-resolved", actionType: "resolve" }),
         makeHistory({ id: "history-escalate", disconnectCaseId: "case-overdue-high", actionType: "escalate" }),
+        makeHistory({
+          id: "history-reopened",
+          disconnectCaseId: "case-snooze-breached",
+          actionType: "reopened",
+          metadataJson: { priorConclusionActionId: "history-snooze" },
+        }),
       ],
     });
 
@@ -260,6 +266,37 @@ describe("intervention analytics service", () => {
       queueLink: "/admin/interventions?view=snooze-breached&caseId=case-snooze-breached",
     });
     expect(dashboard.breachQueue.items[0]?.assignedTo).toBe("Manager One");
+    expect(dashboard.managerBrief.headline).toContain("Intervention pressure");
+    expect(dashboard.managerBrief.summaryWindowLabel).toContain("prior 7 days");
+    expect(dashboard.managerBrief.whatChanged.length).toBeGreaterThan(0);
+    expect(dashboard.managerBrief.focusNow.length).toBeGreaterThan(0);
+    expect(dashboard.managerBrief.emergingPatterns.length).toBeGreaterThan(0);
+    for (const item of [
+      ...dashboard.managerBrief.whatChanged,
+      ...dashboard.managerBrief.focusNow,
+      ...dashboard.managerBrief.emergingPatterns,
+    ]) {
+      if (!item.queueLink) continue;
+      expect(
+        item.queueLink.startsWith("/admin/interventions?") ||
+          item.queueLink === "/admin/intervention-analytics#queue-health" ||
+          item.queueLink === "/admin/intervention-analytics#manager-alerts" ||
+          item.queueLink === "/admin/intervention-analytics#outcome-effectiveness" ||
+          item.queueLink === "/admin/intervention-analytics#policy-recommendations"
+      ).toBe(true);
+    }
+  });
+
+  it("falls back locally when manager brief generation fails", () => {
+    const fallback = buildManagerBriefSafely([], [], new Map(), new Date("2026-04-16T12:00:00.000Z"), () => {
+      throw new Error("boom");
+    });
+
+    expect(fallback.headline).toBe("No strong manager brief is available yet.");
+    expect(fallback.error).toBe("Failed to build manager brief");
+    expect(fallback.whatChanged).toEqual([]);
+    expect(fallback.focusNow).toEqual([]);
+    expect(fallback.emergingPatterns).toEqual([]);
   });
 
   it("orders equal-severity breach rows with escalated cases first and returns null percentages when no denominator exists", async () => {

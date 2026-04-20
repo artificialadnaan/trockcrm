@@ -14,6 +14,7 @@ import { InterventionAnalyticsHotspots } from "@/components/ai/intervention-anal
 import { InterventionAnalyticsOutcomes } from "@/components/ai/intervention-analytics-outcomes";
 import { InterventionAnalyticsSlaRules } from "@/components/ai/intervention-analytics-sla-rules";
 import { InterventionAnalyticsSummaryStrip } from "@/components/ai/intervention-analytics-summary-strip";
+import { InterventionManagerBrief } from "@/components/ai/intervention-manager-brief";
 import { InterventionManagerConsoleNav } from "@/components/ai/intervention-manager-console-nav";
 import { InterventionManagerConsoleSection } from "@/components/ai/intervention-manager-console-section";
 import { Button, buttonVariants } from "@/components/ui/button";
@@ -376,14 +377,6 @@ export function AdminInterventionAnalyticsPage() {
         </div>
       )}
 
-      <InterventionManagerConsoleSection
-        id="manager-alerts"
-        title="Manager Alerts"
-        description="Live manager alert scans and send controls stay available even if the broader analytics load is unavailable."
-      >
-        <ManagerAlertsPanel searchParams={searchParams} />
-      </InterventionManagerConsoleSection>
-
       {!data && loading ? (
         <Card>
           <CardContent className="py-12 text-center text-muted-foreground">Loading intervention analytics...</CardContent>
@@ -397,6 +390,14 @@ export function AdminInterventionAnalyticsPage() {
       ) : (
         <>
           <InterventionManagerConsoleSection
+            id="manager-brief"
+            title="Manager Brief"
+            description="A compact operating summary grounded in the current intervention queue, recent history, and outcome trends."
+          >
+            <InterventionManagerBrief brief={data.managerBrief} searchParams={searchParams} />
+          </InterventionManagerConsoleSection>
+
+          <InterventionManagerConsoleSection
             id="queue-health"
             title="Queue Health"
             description="Overdue cases, snooze breaches, repeat-open cases, and unresolved escalations roll into the same manager oversight surface. Use hotspot links to jump directly into filtered writable views in the intervention workspace."
@@ -408,6 +409,14 @@ export function AdminInterventionAnalyticsPage() {
               <InterventionAnalyticsHotspots hotspots={data.hotspots} />
               <InterventionAnalyticsBreachQueue breachQueue={data.breachQueue} />
             </div>
+          </InterventionManagerConsoleSection>
+
+          <InterventionManagerConsoleSection
+            id="manager-alerts"
+            title="Manager Alerts"
+            description="Live manager alert scans and send controls stay available even if the broader analytics load is unavailable."
+          >
+            <ManagerAlertsPanel searchParams={searchParams} />
           </InterventionManagerConsoleSection>
 
           <InterventionManagerConsoleSection
@@ -429,6 +438,16 @@ export function AdminInterventionAnalyticsPage() {
             </div>
           </InterventionManagerConsoleSection>
         </>
+      )}
+
+      {data ? null : (
+        <InterventionManagerConsoleSection
+          id="manager-alerts"
+          title="Manager Alerts"
+          description="Live manager alert scans and send controls stay available even if the broader analytics load is unavailable."
+        >
+          <ManagerAlertsPanel searchParams={searchParams} />
+        </InterventionManagerConsoleSection>
       )}
     </div>
   );
