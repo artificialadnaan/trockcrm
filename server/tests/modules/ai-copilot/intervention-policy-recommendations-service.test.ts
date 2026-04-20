@@ -296,6 +296,20 @@ describe("intervention policy recommendations service", () => {
         }),
       ])
     );
+    expect(review.tuning.currentThresholds).toMatchObject({
+      qualificationFloor: 55,
+      strongRecommendationFloor: 70,
+      primaryCap: 3,
+      secondaryCap: 2,
+    });
+    expect(review.tuning.guidance).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          taxonomy: "assignee_load_balancing",
+          recommendedAction: "seed_more_history",
+        }),
+      ])
+    );
   });
 
   it("seeds deterministic qualification data for non-production offices and surfaces qualifying recommendations", async () => {

@@ -356,6 +356,21 @@ const policyRecommendationReview = {
       occurredAt: "2026-04-16T13:12:00.000Z",
     },
   ],
+  tuning: {
+    currentThresholds: {
+      qualificationFloor: 55,
+      strongRecommendationFloor: 70,
+      primaryCap: 3,
+      secondaryCap: 2,
+    },
+    guidance: [
+      {
+        taxonomy: "snooze_policy_adjustment",
+        recommendedAction: "review_ranking_cap",
+        summary: "This taxonomy is qualifying but being crowded out by ranking cap pressure.",
+      },
+    ],
+  },
 } as const;
 
 beforeEach(() => {
@@ -502,6 +517,7 @@ describe("AdminInterventionAnalyticsPage", () => {
     expect(html).toContain("2 policy values would change.");
     expect(html).toContain("Review recommendation quality");
     expect(html).toContain("Recent history: 2 events");
+    expect(html).toContain("Qualification floor 55");
     expect(html).not.toContain("Manager Readout");
     expect(html).toContain("Run Manager Alert Scan");
     expect(html).toContain("Send Alerts");

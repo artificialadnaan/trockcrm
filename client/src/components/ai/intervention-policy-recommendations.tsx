@@ -377,6 +377,11 @@ export function InterventionPolicyRecommendationsSection({
           <div className="mt-1 text-xs text-muted-foreground">
             Recent history: {review.data?.recentHistory.length ?? 0} events
           </div>
+          <div className="mt-1 text-xs text-muted-foreground">
+            Qualification floor {review.data?.tuning.currentThresholds.qualificationFloor ?? 55} · strong{" "}
+            {review.data?.tuning.currentThresholds.strongRecommendationFloor ?? 70} · cap{" "}
+            {review.data?.tuning.currentThresholds.primaryCap ?? 3} + {review.data?.tuning.currentThresholds.secondaryCap ?? 2}
+          </div>
         </div>
         <Button variant="outline" onClick={() => setShowReview((value) => !value)}>
           Review recommendation quality
@@ -467,6 +472,22 @@ export function InterventionPolicyRecommendationsSection({
                 ))
               ) : (
                 <div className="text-sm text-muted-foreground">No recommendation history is available yet.</div>
+              )}
+            </div>
+          </div>
+          <div className="rounded-lg border border-border/70 bg-white px-3 py-3">
+            <div className="text-[11px] uppercase tracking-widest text-muted-foreground">Threshold tuning guidance</div>
+            <div className="mt-3 space-y-2">
+              {review.data?.tuning.guidance.length ? (
+                review.data.tuning.guidance.map((entry) => (
+                  <div key={entry.taxonomy} className="rounded-md border border-border/60 px-3 py-2 text-sm">
+                    <div className="font-medium text-gray-900">{entry.taxonomy}</div>
+                    <div className="text-muted-foreground">{entry.recommendedAction.split("_").join(" ")}</div>
+                    <div className="mt-1 text-muted-foreground">{entry.summary}</div>
+                  </div>
+                ))
+              ) : (
+                <div className="text-sm text-muted-foreground">No tuning guidance is available yet.</div>
               )}
             </div>
           </div>

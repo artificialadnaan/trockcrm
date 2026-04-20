@@ -1933,6 +1933,11 @@ type PolicyApplyEventRow = {
   created_at: Date | string;
 };
 
+export const POLICY_RECOMMENDATION_QUALIFICATION_FLOOR = 55;
+export const POLICY_RECOMMENDATION_STRONG_FLOOR = 70;
+export const POLICY_RECOMMENDATION_PRIMARY_CAP = 3;
+export const POLICY_RECOMMENDATION_SECONDARY_CAP = 2;
+
 type SnoozePolicyRow = {
   office_id: string;
   snooze_reason_key: string;
@@ -2570,16 +2575,18 @@ function buildPolicyRecommendationCandidates(input: {
     }
     return left.primaryGroupingKey.localeCompare(right.primaryGroupingKey);
   });
-  const qualifying = ranked.filter((candidate) => candidate.score >= 55);
-  const primary = qualifying.filter((candidate) => candidate.score >= 70).slice(0, 3);
+  const qualifying = ranked.filter((candidate) => candidate.score >= POLICY_RECOMMENDATION_QUALIFICATION_FLOOR);
+  const primary = qualifying
+    .filter((candidate) => candidate.score >= POLICY_RECOMMENDATION_STRONG_FLOOR)
+    .slice(0, POLICY_RECOMMENDATION_PRIMARY_CAP);
   const secondary = qualifying
     .filter((candidate) => !primary.some((primaryCandidate) => primaryCandidate.id === candidate.id))
-    .slice(0, 2);
+    .slice(0, POLICY_RECOMMENDATION_SECONDARY_CAP);
   const rendered = [...primary, ...secondary];
 
   for (const candidate of ranked) {
     const decision =
-      candidate.score < 55
+      candidate.score < POLICY_RECOMMENDATION_QUALIFICATION_FLOOR
         ? "suppressed_by_threshold"
         : rendered.some((item) => item.id === candidate.id)
           ? "qualified_rendered"

@@ -709,6 +709,18 @@ export interface InterventionPolicyRecommendationHistoryEntry {
   occurredAt: string;
 }
 
+export type InterventionPolicyRecommendationTuningAction =
+  | "hold_thresholds"
+  | "lower_qualification_floor"
+  | "review_ranking_cap"
+  | "seed_more_history";
+
+export interface InterventionPolicyRecommendationTuningGuidanceEntry {
+  taxonomy: InterventionPolicyRecommendation["taxonomy"];
+  recommendedAction: InterventionPolicyRecommendationTuningAction;
+  summary: string;
+}
+
 export interface InterventionPolicyRecommendationReviewRow {
   taxonomy: InterventionPolicyRecommendation["taxonomy"];
   groupingKey: string;
@@ -735,6 +747,15 @@ export interface InterventionPolicyRecommendationReviewModel {
   emptyStateReason: string | null;
   latestDecisionRows: InterventionPolicyRecommendationReviewRow[];
   recentHistory: InterventionPolicyRecommendationHistoryEntry[];
+  tuning: {
+    currentThresholds: {
+      qualificationFloor: number;
+      strongRecommendationFloor: number;
+      primaryCap: number;
+      secondaryCap: number;
+    };
+    guidance: InterventionPolicyRecommendationTuningGuidanceEntry[];
+  };
 }
 
 export interface QueueAiBackfillResult {

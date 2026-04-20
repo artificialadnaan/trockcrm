@@ -6,6 +6,7 @@ import type {
   InterventionPolicyRecommendationDecisionStatus,
   InterventionPolicyRecommendationEvaluationSummary,
   InterventionPolicyRecommendationHistoryEntry,
+  InterventionPolicyRecommendationTuningGuidanceEntry,
   InterventionPolicyRecommendationReviewDecisionFilter,
   InterventionPolicyRecommendationReviewModel,
   InterventionPolicyRecommendationReviewRow,
@@ -13,6 +14,12 @@ import type {
   InterventionPolicyRecommendationTaxonomy,
 } from "./intervention-types.js";
 import { getInterventionPolicyRecommendationEvaluationSummary } from "./intervention-policy-application-service.js";
+import {
+  POLICY_RECOMMENDATION_PRIMARY_CAP,
+  POLICY_RECOMMENDATION_QUALIFICATION_FLOOR,
+  POLICY_RECOMMENDATION_SECONDARY_CAP,
+  POLICY_RECOMMENDATION_STRONG_FLOOR,
+} from "./intervention-service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -187,6 +194,49 @@ function mapReviewRows(rows: PolicyDecisionRow[]): InterventionPolicyRecommendat
   }));
 }
 
+function buildTuningGuidance(
+  summary: InterventionPolicyRecommendationEvaluationSummary
+): InterventionPolicyRecommendationReviewModel["tuning"] {
+  const guidance: InterventionPolicyRecommendationTuningGuidanceEntry[] = summary.byTaxonomy.map((row) => {
+    if (row.counts.qualifiedRendered === 0 && row.counts.suppressedByThreshold > 0) {
+      return {
+        taxonomy: row.taxonomy,
+        recommendedAction: "lower_qualification_floor",
+        summary: "This taxonomy is clearing predicates but failing the qualification floor too often.",
+      };
+    }
+    if (row.counts.qualifiedRendered === 0 && row.counts.suppressedByPredicate > 0) {
+      return {
+        taxonomy: row.taxonomy,
+        recommendedAction: "seed_more_history",
+        summary: "This taxonomy is mostly blocked by predicates, which usually means the office needs more qualifying history.",
+      };
+    }
+    if (row.counts.qualifiedSuppressedByCap > 0) {
+      return {
+        taxonomy: row.taxonomy,
+        recommendedAction: "review_ranking_cap",
+        summary: "This taxonomy is qualifying but being crowded out by the render cap.",
+      };
+    }
+    return {
+      taxonomy: row.taxonomy,
+      recommendedAction: "hold_thresholds",
+      summary: "This taxonomy is behaving within the current qualification floor and cap settings.",
+    };
+  });
+
+  return {
+    currentThresholds: {
+      qualificationFloor: POLICY_RECOMMENDATION_QUALIFICATION_FLOOR,
+      strongRecommendationFloor: POLICY_RECOMMENDATION_STRONG_FLOOR,
+      primaryCap: POLICY_RECOMMENDATION_PRIMARY_CAP,
+      secondaryCap: POLICY_RECOMMENDATION_SECONDARY_CAP,
+    },
+    guidance,
+  };
+}
+
 function getReviewWindowCutoff(window: InterventionPolicyRecommendationReviewWindow) {
   const windowMs =
     window === "last_7_days"
@@ -359,6 +409,7 @@ export async function getInterventionPolicyRecommendationReview(
       emptyStateReason: null,
       latestDecisionRows: [],
       recentHistory,
+      tuning: buildTuningGuidance(summary),
     };
   }
 
@@ -378,5 +429,6 @@ export async function getInterventionPolicyRecommendationReview(
     emptyStateReason: buildEmptyStateReason(rawRows),
     latestDecisionRows: mapReviewRows(rawRows),
     recentHistory,
+    tuning: buildTuningGuidance(summary),
   };
 }
