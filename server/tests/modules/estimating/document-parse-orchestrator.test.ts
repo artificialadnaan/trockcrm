@@ -7,22 +7,59 @@ import {
 } from "@trock-crm/shared/schema";
 import { runEstimateDocumentParse } from "../../../src/modules/estimating/document-parse-orchestrator.js";
 
-function createTenantDbMock(document: Record<string, any>) {
-  const insertedPages: Record<string, any>[] = [];
-  const insertedExtractions: Record<string, any>[] = [];
+function readSql(query: any) {
+  const chunks = query?.queryChunks ?? [];
+  const params: any[] = [];
+  const text = chunks
+    .map((chunk: any) => {
+      if (chunk && typeof chunk === "object" && "value" in chunk) {
+        return Array.isArray(chunk.value) ? chunk.value.join("") : "";
+      }
+      params.push(chunk);
+      return "?";
+    })
+    .join("");
+
+  return { text, params };
+}
+
+function resolveDocumentAndRunParams(documentId: string, params: any[]) {
+  const resolvedDocumentId = params.find((value) => value === documentId) ?? params[0];
+  const resolvedParseRunId = params.find((value) => value !== resolvedDocumentId) ?? params[1];
+
+  return {
+    documentId: resolvedDocumentId,
+    parseRunId: resolvedParseRunId,
+  };
+}
+
+function createTenantDbMock(options: {
+  documentSnapshot: Record<string, any>;
+  currentDocument?: Record<string, any>;
+  existingPages?: Record<string, any>[];
+  existingExtractions?: Record<string, any>[];
+  failOnDocumentComplete?: boolean;
+  concurrentActiveParseRunIdOnFailure?: string | null;
+}) {
   const insertedParseRuns: Record<string, any>[] = [];
   const updatedDocuments: Record<string, any>[] = [];
   const updatedParseRuns: Record<string, any>[] = [];
+  const pages = (options.existingPages ?? []).map((row) => structuredClone(row));
+  const extractions = (options.existingExtractions ?? []).map((row) => structuredClone(row));
+  const documentState = {
+    ...structuredClone(options.documentSnapshot),
+    ...(options.currentDocument ? structuredClone(options.currentDocument) : {}),
+  };
 
   const tenantDb = {
     insert: vi.fn((table: unknown) => ({
       values: vi.fn((value: Record<string, any> | Record<string, any>[]) => {
         if (table === estimateExtractions) {
           const rows = (Array.isArray(value) ? value : [value]).map((row, index) => ({
-            id: `extraction-${index + 1}`,
+            id: `extraction-${extractions.length + index + 1}`,
             ...row,
           }));
-          insertedExtractions.push(...rows);
+          extractions.push(...rows);
           return Promise.resolve(rows);
         }
 
@@ -31,7 +68,7 @@ function createTenantDbMock(document: Record<string, any>) {
             if (table === estimateDocumentParseRuns) {
               const parseRun = {
                 id: "parse-run-1",
-                documentId: document.id,
+                documentId: options.documentSnapshot.id,
                 status: "processing",
                 parseProfile: "balanced",
                 parseProvider: "default",
@@ -47,10 +84,10 @@ function createTenantDbMock(document: Record<string, any>) {
 
             if (table === estimateDocumentPages) {
               const rows = (Array.isArray(value) ? value : [value]).map((row, index) => ({
-                id: `page-${index + 1}`,
+                id: `page-${pages.length + index + 1}`,
                 ...row,
               }));
-              insertedPages.push(...rows);
+              pages.push(...rows);
               return rows;
             }
 
@@ -73,9 +110,16 @@ function createTenantDbMock(document: Record<string, any>) {
             }
 
             if (table === estimateSourceDocuments) {
+              if (value.parseStatus === "completed" && options.failOnDocumentComplete) {
+                if (options.concurrentActiveParseRunIdOnFailure !== undefined) {
+                  documentState.activeParseRunId = options.concurrentActiveParseRunIdOnFailure;
+                }
+                throw new Error("simulated completion failure");
+              }
+
+              Object.assign(documentState, value);
               const updatedDocument = {
-                ...document,
-                ...value,
+                ...documentState,
               };
               updatedDocuments.push(updatedDocument);
               return [updatedDocument];
@@ -86,21 +130,87 @@ function createTenantDbMock(document: Record<string, any>) {
         })),
       })),
     })),
-    execute: vi.fn().mockResolvedValue(undefined),
+    select: vi.fn(() => ({
+      from: vi.fn((table: unknown) => ({
+        where: vi.fn(() => ({
+          limit: vi.fn().mockImplementation(async () => {
+            if (table === estimateSourceDocuments) {
+              return [{ ...documentState }];
+            }
+            return [];
+          }),
+        })),
+      })),
+    })),
+    execute: vi.fn().mockImplementation(async (query: any) => {
+      const { text, params } = readSql(query);
+
+      if (text.includes("delete from estimate_extractions")) {
+        const [documentId, parseRunId] = params;
+        for (let index = extractions.length - 1; index >= 0; index -= 1) {
+          if (
+            extractions[index]?.documentId === documentId &&
+            extractions[index]?.metadataJson?.sourceParseRunId === parseRunId
+          ) {
+            extractions.splice(index, 1);
+          }
+        }
+        return;
+      }
+
+      if (text.includes("delete from estimate_document_pages")) {
+        const [documentId, parseRunId] = params;
+        for (let index = pages.length - 1; index >= 0; index -= 1) {
+          if (
+            pages[index]?.documentId === documentId &&
+            pages[index]?.metadataJson?.sourceParseRunId === parseRunId
+          ) {
+            pages.splice(index, 1);
+          }
+        }
+        return;
+      }
+
+      if (text.includes("update estimate_document_pages")) {
+        const { documentId, parseRunId } = resolveDocumentAndRunParams(documentState.id, params);
+        for (const page of pages) {
+          if (page.documentId === documentId) {
+            page.metadataJson = {
+              ...(page.metadataJson ?? {}),
+              activeArtifact: page.metadataJson?.sourceParseRunId === parseRunId,
+            };
+          }
+        }
+        return;
+      }
+
+      if (text.includes("update estimate_extractions")) {
+        const { documentId, parseRunId } = resolveDocumentAndRunParams(documentState.id, params);
+        for (const extraction of extractions) {
+          if (extraction.documentId === documentId) {
+            extraction.metadataJson = {
+              ...(extraction.metadataJson ?? {}),
+              activeArtifact: extraction.metadataJson?.sourceParseRunId === parseRunId,
+            };
+          }
+        }
+      }
+    }),
   } as any;
 
   return {
     tenantDb,
-    insertedPages,
-    insertedExtractions,
+    pages,
+    extractions,
+    documentState,
     updatedDocuments,
     updatedParseRuns,
   };
 }
 
 describe("runEstimateDocumentParse", () => {
-  it("creates a parse run, persists active outputs, and marks the document completed", async () => {
-    const document = {
+  it("creates a parse run, supersedes old active artifacts, and marks the new run active", async () => {
+    const documentSnapshot = {
       id: "doc-1",
       dealId: "deal-1",
       projectId: "project-1",
@@ -109,13 +219,42 @@ describe("runEstimateDocumentParse", () => {
       mimeType: "application/pdf",
       storageKey: "stale/storage-key.pdf",
       contentHash: "r2/estimate-documents/doc-1.pdf",
+      activeParseRunId: "parse-run-old",
     };
-    const { tenantDb, insertedPages, insertedExtractions, updatedDocuments, updatedParseRuns } =
-      createTenantDbMock(document);
+    const { tenantDb, pages, extractions, documentState, updatedDocuments, updatedParseRuns } =
+      createTenantDbMock({
+        documentSnapshot,
+        existingPages: [
+          {
+            id: "page-old-1",
+            documentId: "doc-1",
+            pageNumber: 1,
+            pageImageKey: "r2/estimate-documents/old.pdf",
+            metadataJson: {
+              sourceParseRunId: "parse-run-old",
+              sourceKind: "pdf_page",
+              activeArtifact: true,
+            },
+          },
+        ],
+        existingExtractions: [
+          {
+            id: "extraction-old-1",
+            documentId: "doc-1",
+            rawLabel: "existing line",
+            normalizedLabel: "existing line",
+            metadataJson: {
+              sourceParseRunId: "parse-run-old",
+              activeArtifact: true,
+              extractionProvider: "default",
+            },
+          },
+        ],
+      });
 
     const result = await runEstimateDocumentParse({
       tenantDb,
-      document,
+      document: documentSnapshot,
       options: {
         provider: "default",
         profile: "balanced",
@@ -132,46 +271,59 @@ describe("runEstimateDocumentParse", () => {
         parseProfile: "balanced",
       })
     );
-    expect(insertedPages).toEqual([
-      expect.objectContaining({
-        documentId: "doc-1",
-        pageNumber: 1,
-        pageImageKey: "r2/estimate-documents/doc-1.pdf",
-        metadataJson: expect.objectContaining({
-          sourceParseRunId: "parse-run-1",
-          sourceKind: "pdf_page",
-          activeArtifact: false,
+    expect(pages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "page-old-1",
+          metadataJson: expect.objectContaining({
+            sourceParseRunId: "parse-run-old",
+            activeArtifact: false,
+          }),
         }),
-      }),
-    ]);
-    expect(insertedExtractions).not.toHaveLength(0);
-    expect(insertedExtractions[0]).toEqual(
+        expect.objectContaining({
+          documentId: "doc-1",
+          pageNumber: 1,
+          pageImageKey: "r2/estimate-documents/doc-1.pdf",
+          metadataJson: expect.objectContaining({
+            sourceParseRunId: "parse-run-1",
+            sourceKind: "pdf_page",
+            activeArtifact: true,
+          }),
+        }),
+      ])
+    );
+    expect(extractions).toHaveLength(3);
+    expect(extractions.at(-1)).toEqual(
       expect.objectContaining({
         documentId: "doc-1",
         metadataJson: expect.objectContaining({
           sourceParseRunId: "parse-run-1",
-          activeArtifact: false,
+          activeArtifact: true,
           extractionProvider: "default",
         }),
       })
     );
-    expect(tenantDb.execute).toHaveBeenCalledTimes(4);
+    expect(extractions[0]).toEqual(
+      expect.objectContaining({
+        id: "extraction-old-1",
+        metadataJson: expect.objectContaining({
+          sourceParseRunId: "parse-run-old",
+          activeArtifact: false,
+        }),
+      })
+    );
     expect(updatedParseRuns.at(-1)).toEqual(
       expect.objectContaining({
         id: "parse-run-1",
         status: "completed",
       })
     );
-    expect(updatedDocuments.at(-1)).toEqual(
-      expect.objectContaining({
-        activeParseRunId: "parse-run-1",
-        parseStatus: "completed",
-      })
-    );
+    expect(updatedDocuments.at(-1)).toEqual(expect.objectContaining({ activeParseRunId: "parse-run-1" }));
+    expect(documentState.activeParseRunId).toBe("parse-run-1");
   });
 
   it("marks the parse and document failed when an unsupported mime type reaches the orchestrator", async () => {
-    const document = {
+    const documentSnapshot = {
       id: "doc-unsupported",
       dealId: "deal-1",
       projectId: null,
@@ -181,13 +333,14 @@ describe("runEstimateDocumentParse", () => {
       storageKey: "files/notes.txt",
       contentHash: "r2/estimate-documents/notes.txt",
     };
-    const { tenantDb, insertedPages, insertedExtractions, updatedDocuments, updatedParseRuns } =
-      createTenantDbMock(document);
+    const { tenantDb, pages, extractions, updatedDocuments, updatedParseRuns } = createTenantDbMock({
+      documentSnapshot,
+    });
 
     await expect(
       runEstimateDocumentParse({
         tenantDb,
-        document,
+        document: documentSnapshot,
         options: {
           provider: "default",
           profile: "balanced",
@@ -195,8 +348,8 @@ describe("runEstimateDocumentParse", () => {
       })
     ).rejects.toThrow("Unsupported estimate document type: text/plain");
 
-    expect(insertedPages).toHaveLength(0);
-    expect(insertedExtractions).toHaveLength(0);
+    expect(pages).toHaveLength(0);
+    expect(extractions).toHaveLength(0);
     expect(updatedParseRuns.at(-1)).toEqual(
       expect.objectContaining({
         id: "parse-run-1",
@@ -211,5 +364,99 @@ describe("runEstimateDocumentParse", () => {
         parseErrorSummary: "Unsupported estimate document type: text/plain",
       })
     );
+  });
+
+  it("cleans up failed-run artifacts and preserves the current active parse on late failure", async () => {
+    const documentSnapshot = {
+      id: "doc-2",
+      dealId: "deal-1",
+      projectId: "project-1",
+      filename: "A2-plan.pdf",
+      documentType: "plan",
+      mimeType: "application/pdf",
+      storageKey: "stale/storage-key-a2.pdf",
+      contentHash: "r2/estimate-documents/doc-2.pdf",
+      activeParseRunId: "parse-run-stale",
+    };
+    const { tenantDb, pages, extractions, documentState, updatedDocuments, updatedParseRuns } =
+      createTenantDbMock({
+        documentSnapshot,
+        currentDocument: {
+          activeParseRunId: "parse-run-current",
+        },
+        existingPages: [
+          {
+            id: "page-current-1",
+            documentId: "doc-2",
+            pageNumber: 1,
+            pageImageKey: "r2/estimate-documents/current.pdf",
+            metadataJson: {
+              sourceParseRunId: "parse-run-current",
+              sourceKind: "pdf_page",
+              activeArtifact: true,
+            },
+          },
+        ],
+        existingExtractions: [
+          {
+            id: "extraction-current-1",
+            documentId: "doc-2",
+            rawLabel: "current line",
+            normalizedLabel: "current line",
+            metadataJson: {
+              sourceParseRunId: "parse-run-current",
+              activeArtifact: true,
+              extractionProvider: "default",
+            },
+          },
+        ],
+        failOnDocumentComplete: true,
+        concurrentActiveParseRunIdOnFailure: "parse-run-newer",
+      });
+
+    await expect(
+      runEstimateDocumentParse({
+        tenantDb,
+        document: documentSnapshot,
+        options: {
+          provider: "default",
+          profile: "balanced",
+        },
+      })
+    ).rejects.toThrow("simulated completion failure");
+
+    expect(pages).toEqual([
+      expect.objectContaining({
+        id: "page-current-1",
+        metadataJson: expect.objectContaining({
+          sourceParseRunId: "parse-run-current",
+          activeArtifact: true,
+        }),
+      }),
+    ]);
+    expect(extractions).toEqual([
+      expect.objectContaining({
+        id: "extraction-current-1",
+        metadataJson: expect.objectContaining({
+          sourceParseRunId: "parse-run-current",
+          activeArtifact: true,
+        }),
+      }),
+    ]);
+    expect(updatedParseRuns.at(-1)).toEqual(
+      expect.objectContaining({
+        id: "parse-run-1",
+        status: "failed",
+        errorSummary: "simulated completion failure",
+      })
+    );
+    expect(updatedDocuments.at(-1)).toEqual(
+      expect.objectContaining({
+        parseStatus: "failed",
+        ocrStatus: "failed",
+        activeParseRunId: "parse-run-newer",
+      })
+    );
+    expect(documentState.activeParseRunId).toBe("parse-run-newer");
   });
 });

@@ -66,36 +66,40 @@ async function markArtifactsInactive(
 ) {
   await tenantDb.execute(sql`
     update estimate_document_pages
-    set metadata_json = coalesce(metadata_json, '{}'::jsonb) || '{"activeArtifact": false}'::jsonb
+    set metadata_json =
+      coalesce(metadata_json, '{}'::jsonb)
+      || jsonb_build_object(
+        'activeArtifact',
+        metadata_json->>'sourceParseRunId' = ${parseRunId}
+      )
     where document_id = ${documentId}
-      and coalesce(metadata_json->>'activeArtifact', 'false') = 'true'
-      and coalesce(metadata_json->>'sourceParseRunId', '') <> ${parseRunId}
   `);
 
   await tenantDb.execute(sql`
     update estimate_extractions
-    set metadata_json = coalesce(metadata_json, '{}'::jsonb) || '{"activeArtifact": false}'::jsonb
+    set metadata_json =
+      coalesce(metadata_json, '{}'::jsonb)
+      || jsonb_build_object(
+        'activeArtifact',
+        metadata_json->>'sourceParseRunId' = ${parseRunId}
+      )
     where document_id = ${documentId}
-      and coalesce(metadata_json->>'activeArtifact', 'false') = 'true'
-      and coalesce(metadata_json->>'sourceParseRunId', '') <> ${parseRunId}
   `);
 }
 
-async function markArtifactsActive(
+async function cleanupFailedParseArtifacts(
   tenantDb: TenantDb,
   documentId: string,
   parseRunId: string
 ) {
   await tenantDb.execute(sql`
-    update estimate_document_pages
-    set metadata_json = coalesce(metadata_json, '{}'::jsonb) || '{"activeArtifact": true}'::jsonb
+    delete from estimate_extractions
     where document_id = ${documentId}
       and metadata_json->>'sourceParseRunId' = ${parseRunId}
   `);
 
   await tenantDb.execute(sql`
-    update estimate_extractions
-    set metadata_json = coalesce(metadata_json, '{}'::jsonb) || '{"activeArtifact": true}'::jsonb
+    delete from estimate_document_pages
     where document_id = ${documentId}
       and metadata_json->>'sourceParseRunId' = ${parseRunId}
   `);
@@ -108,6 +112,12 @@ async function markParseFailed(args: {
   options: { provider: string; profile: string };
   errorSummary: string;
 }) {
+  const [currentDocument] = await args.tenantDb
+    .select()
+    .from(estimateSourceDocuments)
+    .where(eq(estimateSourceDocuments.id, args.document.id))
+    .limit(1);
+
   const [parseRun] = await args.tenantDb
     .update(estimateDocumentParseRuns)
     .set({
@@ -126,7 +136,10 @@ async function markParseFailed(args: {
       parseProvider: args.options.provider,
       parseProfile: args.options.profile,
       parseErrorSummary: args.errorSummary,
-      activeParseRunId: args.document.activeParseRunId ?? null,
+      activeParseRunId:
+        currentDocument?.activeParseRunId === args.parseRunId
+          ? null
+          : currentDocument?.activeParseRunId ?? null,
     })
     .where(eq(estimateSourceDocuments.id, args.document.id))
     .returning();
@@ -248,9 +261,6 @@ export async function runEstimateDocumentParse(args: {
       }))
     );
 
-    await markArtifactsInactive(args.tenantDb, args.document.id, parseRun.id);
-    await markArtifactsActive(args.tenantDb, args.document.id, parseRun.id);
-
     const [completedParseRun] = await args.tenantDb
       .update(estimateDocumentParseRuns)
       .set({
@@ -275,6 +285,8 @@ export async function runEstimateDocumentParse(args: {
       .where(eq(estimateSourceDocuments.id, args.document.id))
       .returning();
 
+    await markArtifactsInactive(args.tenantDb, args.document.id, parseRun.id);
+
     return {
       parseRun: completedParseRun,
       documentUpdate,
@@ -285,6 +297,7 @@ export async function runEstimateDocumentParse(args: {
     const errorSummary =
       error instanceof Error ? error.message : "estimate document parse failed";
 
+    await cleanupFailedParseArtifacts(args.tenantDb, args.document.id, parseRun.id);
     await markParseFailed({
       tenantDb: args.tenantDb,
       document: args.document,
