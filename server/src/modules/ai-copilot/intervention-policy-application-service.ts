@@ -40,6 +40,13 @@ function coerceJson(value: unknown) {
   return {};
 }
 
+function matchesEvaluationDecisionFilter(rowDecision: string, filter: string | null | undefined) {
+  if (!filter) return true;
+  if (filter === "rendered") return rowDecision === "qualified_rendered";
+  if (filter === "suppressed") return rowDecision !== "qualified_rendered";
+  return rowDecision === filter;
+}
+
 async function fetchLatestRenderableSnapshotId(tenantDb: TenantDb | InMemoryTenantDb, officeId: string) {
   if (isInMemoryTenantDb(tenantDb)) {
     const row = ((tenantDb.state.policyRecommendationSnapshots ?? []) as Array<Record<string, any>>)
@@ -581,7 +588,7 @@ export async function getInterventionPolicyRecommendationEvaluationSummary(
     const createdAt = new Date(toIso(row.created_at) ?? 0).getTime();
     if (Number.isFinite(createdAt) && createdAt < cutoff) return false;
     if (input.taxonomy && row.taxonomy !== input.taxonomy) return false;
-    if (input.decision && row.decision !== input.decision) return false;
+    if (!matchesEvaluationDecisionFilter(String(row.decision), input.decision)) return false;
     return true;
   });
 
