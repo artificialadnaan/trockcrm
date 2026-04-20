@@ -12,8 +12,8 @@
 
 ## File Structure
 
-- Create: `migrations/0020_cost_catalog_and_estimate_generation.sql`
-  Responsibility: add local Procore-backed catalog tables in `public` and tenant-scoped estimate generation tables using the repo's `office_<slug>` tenant-schema migration pattern.
+- Create: `migrations/0026_cost_catalog_and_estimate_generation.sql`
+  Responsibility: add local Procore-backed catalog tables in `public` and tenant-scoped estimate generation tables using the repo's `office_%` reconciliation migration pattern so the change lands after the existing `0025` baseline repair.
 - Create: `shared/src/schema/public/cost-catalog-sources.ts`
   Responsibility: schema for catalog source metadata and sync runs.
 - Create: `shared/src/schema/public/cost-catalog-items.ts`
@@ -44,10 +44,10 @@
   Responsibility: answer estimator advisory questions from extraction, catalog, history, and pricing evidence.
 - Modify: `server/src/modules/deals/estimate-service.ts`
   Responsibility: support generation-aware estimate imports without breaking existing manual editing.
-- Create: `server/src/modules/estimating/routes.ts`
+- Modify: `server/src/modules/deals/routes.ts`
   Responsibility: API routes for document upload, extraction review, matching review, pricing review, review logging, copilot answers, overview status, and draft promotion.
 - Modify: `server/src/app.ts` or the module registration entrypoint currently used by the API
-  Responsibility: mount the new estimating routes.
+  Responsibility: mount any new admin-level Procore catalog endpoint if it is split from tenant deal routes.
 - Create: `worker/src/jobs/estimate-document-ocr.ts`
   Responsibility: OCR and page extraction job for estimating documents.
 - Create: `worker/src/jobs/estimate-generation.ts`
@@ -88,7 +88,7 @@
 ## Task 1: Add Catalog and Estimate-Generation Storage
 
 **Files:**
-- Create: `migrations/0020_cost_catalog_and_estimate_generation.sql`
+- Create: `migrations/0026_cost_catalog_and_estimate_generation.sql`
 - Create: `shared/src/schema/public/cost-catalog-sources.ts`
 - Create: `shared/src/schema/public/cost-catalog-items.ts`
 - Create: `shared/src/schema/tenant/estimate-source-documents.ts`
@@ -225,8 +225,9 @@ CREATE TABLE IF NOT EXISTS public.cost_catalog_prices (
 
 -- TENANT_SCHEMA_START
 -- Create these tables inside each office schema following the existing
--- office_dallas placeholder pattern from the baseline migration.
-SET search_path = 'office_dallas', 'public';
+-- Use the dynamic `FOR schema_name IN SELECT ... WHERE schema_name LIKE 'office_%'`
+-- pattern from `0025_tenant_schema_baseline_reconciliation.sql`, and execute the
+-- DDL with `EXECUTE format(...)` for each office schema.
 
 CREATE TABLE IF NOT EXISTS estimate_source_documents (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -364,7 +365,7 @@ Expected: PASS
 - [ ] **Step 6: Commit the storage layer**
 
 ```bash
-git add migrations/0020_cost_catalog_and_estimate_generation.sql shared/src/schema/public/cost-catalog-sources.ts shared/src/schema/public/cost-catalog-items.ts shared/src/schema/tenant/estimate-source-documents.ts shared/src/schema/tenant/estimate-extractions.ts shared/src/schema/index.ts server/tests/modules/estimating/schema-exports.test.ts
+git add migrations/0026_cost_catalog_and_estimate_generation.sql shared/src/schema/public/cost-catalog-sources.ts shared/src/schema/public/cost-catalog-items.ts shared/src/schema/tenant/estimate-source-documents.ts shared/src/schema/tenant/estimate-extractions.ts shared/src/schema/index.ts server/tests/modules/estimating/schema-exports.test.ts
 git commit -m "feat: add catalog and estimate generation storage"
 ```
 
@@ -451,7 +452,7 @@ export async function runProcoreSync(deps: SyncDeps) {
 - [ ] **Step 5: Add explicit on-demand and scheduled catalog refresh entrypoints plus snapshot linkage**
 
 ```ts
-router.post("/admin/procore/catalog-sync", async (req, res) => {
+adminRouter.post("/procore/catalog-sync", async (req, res) => {
   const syncRun = await startCatalogSync({ triggeredByUserId: req.user.id });
   res.status(202).json({ syncRun });
 });
@@ -479,7 +480,7 @@ Expected: PASS for the new catalog test, existing Procore tests remain green.
 - [ ] **Step 7: Commit the catalog sync task**
 
 ```bash
-git add server/src/modules/procore/catalog-sync-service.ts server/src/modules/procore/sync-service.ts server/src/modules/procore/routes.ts worker/src/jobs/procore-sync.ts server/tests/modules/procore/catalog-sync-service.test.ts
+git add server/src/modules/procore/catalog-sync-service.ts server/src/modules/procore/sync-service.ts server/src/modules/admin/routes.ts server/src/app.ts worker/src/jobs/procore-sync.ts server/tests/modules/procore/catalog-sync-service.test.ts
 git commit -m "feat: sync procore cost catalog into local tables"
 ```
 
@@ -612,6 +613,9 @@ registerJobHandler("estimate_generation", async (payload, officeId) => {
 
 ```ts
 router.post("/deals/:dealId/estimating/documents", async (req, res) => {
+  const deal = await getDealById(req.tenantDb!, req.params.dealId, req.user!.role, req.user!.id);
+  if (!deal) throw new AppError(404, "Deal not found");
+
   const document = await createEstimateSourceDocument({
     tenantDb: req.tenantDb,
     enqueueEstimateDocumentOcr,
@@ -663,6 +667,7 @@ describe("buildPricingRecommendation", () => {
       catalogBaselinePrice: 100,
       historicalPrices: [110, 115, 120],
       vendorQuotePrice: 130,
+      awardedOutcomeAdjustmentPercent: -2,
       internalAdjustmentPercent: 5,
       marketAdjustmentPercent: 10,
     });
@@ -710,8 +715,13 @@ export function buildPricingRecommendation(input: BuildPricingRecommendationInpu
     input.historicalPrices.length > 0
       ? [...input.historicalPrices].sort((a, b) => a - b)[Math.floor(input.historicalPrices.length / 2)]
       : null;
-  const base = input.catalogBaselinePrice ?? historicalMedian ?? input.vendorQuotePrice ?? 0;
-  const afterInternal = base * (1 + input.internalAdjustmentPercent / 100);
+  const quoteAdjustedBase =
+    input.vendorQuotePrice != null
+      ? (input.catalogBaselinePrice ?? input.vendorQuotePrice) * 0.5 + input.vendorQuotePrice * 0.5
+      : input.catalogBaselinePrice ?? historicalMedian ?? 0;
+  const awardedAdjustedBase =
+    quoteAdjustedBase * (1 + (input.awardedOutcomeAdjustmentPercent ?? 0) / 100);
+  const afterInternal = awardedAdjustedBase * (1 + input.internalAdjustmentPercent / 100);
   const adjusted = Number((afterInternal * (1 + input.marketAdjustmentPercent / 100)).toFixed(2));
 
   return {
@@ -725,6 +735,7 @@ export function buildPricingRecommendation(input: BuildPricingRecommendationInpu
     assumptions: {
       catalogBaselineUsed: input.catalogBaselinePrice != null,
       vendorQuotePrice: input.vendorQuotePrice ?? null,
+      awardedOutcomeAdjustmentPercent: input.awardedOutcomeAdjustmentPercent ?? 0,
       internalAdjustmentPercent: input.internalAdjustmentPercent,
     },
     confidence: historicalMedian != null ? 0.84 : 0.58,
@@ -758,6 +769,10 @@ export async function rankExtractionMatches({
           .map((row) => Number(row.unitPrice))
           .filter((value) => Number.isFinite(value)),
         catalogBaselinePrice: item.catalogBaselinePrice ?? null,
+        vendorQuotePrice: similarHistory.find((row) => row.vendorQuotePrice != null)?.vendorQuotePrice ?? null,
+        awardedOutcomeAdjustmentPercent:
+          similarHistory.length > 0 ? deriveAwardedOutcomeAdjustment(similarHistory) : 0,
+        internalAdjustmentPercent: deriveInternalAdjustmentPercent(item, extraction),
         matchScore:
           (item.name.toLowerCase() === normalizedLabel ? 50 : 0) +
           (item.unit && extraction.unit && item.unit === extraction.unit ? 15 : 0) +
@@ -786,8 +801,9 @@ for (const extraction of pendingExtractions) {
     quantity: Number(extraction.quantity ?? 1),
     catalogBaselinePrice: topMatch.catalogBaselinePrice ?? null,
     historicalPrices: topMatch.historicalUnitPrices ?? [],
-    vendorQuotePrice: null,
-    internalAdjustmentPercent: 0,
+    vendorQuotePrice: topMatch.vendorQuotePrice ?? null,
+    awardedOutcomeAdjustmentPercent: topMatch.awardedOutcomeAdjustmentPercent ?? 0,
+    internalAdjustmentPercent: topMatch.internalAdjustmentPercent ?? 0,
     marketAdjustmentPercent: marketAdjustmentPercent,
   });
 
@@ -891,6 +907,9 @@ export async function promoteApprovedRecommendationsToEstimate({
 
 ```ts
 router.post("/deals/:dealId/estimating/recommendations/:recommendationId/approve", async (req, res) => {
+  const deal = await getDealById(req.tenantDb!, req.params.dealId, req.user!.role, req.user!.id);
+  if (!deal) throw new AppError(404, "Deal not found");
+
   const recommendation = await approveEstimateRecommendation({
     tenantDb: req.tenantDb,
     dealId: req.params.dealId,
@@ -922,6 +941,9 @@ export async function approveEstimateRecommendation(args: ApproveEstimateRecomme
 
 ```ts
 router.post("/deals/:dealId/estimating/promote", async (req, res) => {
+  const deal = await getDealById(req.tenantDb!, req.params.dealId, req.user!.role, req.user!.id);
+  if (!deal) throw new AppError(404, "Deal not found");
+
   const approvedRecommendationIds = await listApprovedRecommendationIdsForRun(
     req.tenantDb,
     req.params.dealId,
