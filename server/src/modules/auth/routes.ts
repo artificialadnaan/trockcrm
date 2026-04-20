@@ -81,6 +81,7 @@ router.post("/dev/login", authLimiter, async (req, res, next) => {
       email: resolvedUser.email,
       officeId: resolvedUser.officeId,
       role: resolvedUser.role,
+      authMethod: "dev",
     });
 
     res.cookie("token", token, tokenCookieOptions);
@@ -118,6 +119,7 @@ router.post("/local/login", authLimiter, async (req, res, next) => {
       email: user.email,
       officeId: user.officeId,
       role: user.role,
+      authMethod: "local",
     });
 
     res.cookie("token", token, tokenCookieOptions);

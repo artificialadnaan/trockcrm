@@ -1,7 +1,7 @@
 import crypto from "crypto";
 import { promisify } from "util";
 import { and, eq } from "drizzle-orm";
-import { userLocalAuth, users } from "@trock-crm/shared/schema";
+import { userLocalAuth, userLocalAuthEvents, users } from "@trock-crm/shared/schema";
 import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { sendSystemEmail } from "../../lib/resend-client.js";
@@ -9,6 +9,9 @@ import { sendSystemEmail } from "../../lib/resend-client.js";
 const scryptAsync = promisify(crypto.scrypt);
 const PASSWORD_MIN_LENGTH = 12;
 const TEMP_PASSWORD_LENGTH = 18;
+const INVITE_TTL_HOURS = 72;
+const MAX_FAILED_LOGIN_ATTEMPTS = 5;
+const LOCKOUT_WINDOW_MINUTES = 15;
 
 export type LocalAuthStatus =
   | "not_invited"
@@ -21,6 +24,18 @@ function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();
 }
 
+function now(): Date {
+  return new Date();
+}
+
+function computeInviteExpiry(baseDate: Date): Date {
+  return new Date(baseDate.getTime() + INVITE_TTL_HOURS * 60 * 60 * 1000);
+}
+
+function computeLockoutUntil(baseDate: Date): Date {
+  return new Date(baseDate.getTime() + LOCKOUT_WINDOW_MINUTES * 60 * 1000);
+}
+
 function validatePasswordPolicy(password: string) {
   if (password.length < PASSWORD_MIN_LENGTH) {
     throw new AppError(
@@ -29,6 +44,14 @@ function validatePasswordPolicy(password: string) {
     );
   }
 }
+
+type InviteEmailContent = {
+  subject: string;
+  html: string;
+  text: string;
+  loginUrl: string;
+  recipientEmail: string;
+};
 
 function buildUserPayload(user: {
   id: string;
@@ -47,14 +70,77 @@ function buildUserPayload(user: {
   };
 }
 
+function buildInviteEmailContent(input: {
+  displayName: string;
+  recipientEmail: string;
+  loginUrl: string;
+  temporaryPassword: string | null;
+}): InviteEmailContent {
+  const passwordLine = input.temporaryPassword
+    ? `<p><strong>Temporary password:</strong> ${input.temporaryPassword}</p>`
+    : `<p><strong>Temporary password:</strong> Generated when the invite is sent.</p>`;
+
+  const passwordText = input.temporaryPassword
+    ? `Temporary password: ${input.temporaryPassword}`
+    : "Temporary password: Generated when the invite is sent.";
+
+  return {
+    recipientEmail: input.recipientEmail,
+    loginUrl: input.loginUrl,
+    subject: "Your T Rock CRM login",
+    html: `
+      <p>Hi ${input.displayName},</p>
+      <p>Your temporary T Rock CRM login is ready.</p>
+      <p><strong>Email:</strong> ${input.recipientEmail}</p>
+      ${passwordLine}
+      <p>Log in at <a href="${input.loginUrl}">${input.loginUrl}</a>. You will be prompted to change your password immediately.</p>
+    `,
+    text: [
+      `Hi ${input.displayName},`,
+      "",
+      "Your temporary T Rock CRM login is ready.",
+      `Email: ${input.recipientEmail}`,
+      passwordText,
+      `Log in at ${input.loginUrl}. You will be prompted to change your password immediately.`,
+    ].join("\n"),
+  };
+}
+
+async function recordLocalAuthEvent(input: {
+  userId: string;
+  eventType:
+    | "invite_previewed"
+    | "invite_sent"
+    | "invite_resent"
+    | "invite_revoked"
+    | "login_succeeded"
+    | "login_failed"
+    | "login_locked"
+    | "password_changed";
+  actorUserId?: string | null;
+  metadata?: Record<string, unknown> | null;
+}) {
+  await db.insert(userLocalAuthEvents).values({
+    userId: input.userId,
+    eventType: input.eventType,
+    actorUserId: input.actorUserId ?? null,
+    metadata: input.metadata ?? null,
+  });
+}
+
 export function getLocalAuthStatus(input: {
   isEnabled: boolean;
   mustChangePassword: boolean;
   inviteSentAt: Date | null;
   lastLoginAt: Date | null;
+  inviteExpiresAt?: Date | null;
+  revokedAt?: Date | null;
+  lockedUntil?: Date | null;
 } | null): LocalAuthStatus {
   if (!input) return "not_invited";
   if (!input.isEnabled) return "disabled";
+  if (input.revokedAt) return "disabled";
+  if (input.lockedUntil && input.lockedUntil.getTime() > Date.now()) return "disabled";
   if (input.mustChangePassword && !input.lastLoginAt && input.inviteSentAt) {
     return "invite_sent";
   }
@@ -95,11 +181,18 @@ export function generateTemporaryPassword(): string {
 
 export async function getUserLocalAuthGate(userId: string): Promise<{
   mustChangePassword: boolean;
+  isEnabled: boolean;
+  inviteExpiresAt: Date | null;
+  lockedUntil: Date | null;
+  revokedAt: Date | null;
 }> {
   const [row] = await db
     .select({
       mustChangePassword: userLocalAuth.mustChangePassword,
       isEnabled: userLocalAuth.isEnabled,
+      inviteExpiresAt: userLocalAuth.inviteExpiresAt,
+      lockedUntil: userLocalAuth.lockedUntil,
+      revokedAt: userLocalAuth.revokedAt,
     })
     .from(userLocalAuth)
     .where(eq(userLocalAuth.userId, userId))
@@ -107,7 +200,46 @@ export async function getUserLocalAuthGate(userId: string): Promise<{
 
   return {
     mustChangePassword: Boolean(row?.isEnabled && row?.mustChangePassword),
+    isEnabled: Boolean(row?.isEnabled),
+    inviteExpiresAt: row?.inviteExpiresAt ?? null,
+    lockedUntil: row?.lockedUntil ?? null,
+    revokedAt: row?.revokedAt ?? null,
   };
+}
+
+export async function previewUserInvite(input: {
+  userId: string;
+  actorUserId: string;
+  loginUrl?: string;
+}) {
+  const [user] = await db
+    .select({
+      id: users.id,
+      email: users.email,
+      displayName: users.displayName,
+      isActive: users.isActive,
+    })
+    .from(users)
+    .where(eq(users.id, input.userId))
+    .limit(1);
+
+  if (!user) throw new AppError(404, "User not found");
+  if (!user.isActive) throw new AppError(400, "Cannot preview an invite for an inactive user");
+  const loginUrl = input.loginUrl ?? process.env.FRONTEND_URL ?? "http://localhost:5173";
+  const preview = buildInviteEmailContent({
+    displayName: user.displayName,
+    recipientEmail: user.email,
+    loginUrl,
+    temporaryPassword: null,
+  });
+
+  await recordLocalAuthEvent({
+    userId: user.id,
+    actorUserId: input.actorUserId,
+    eventType: "invite_previewed",
+  });
+
+  return preview;
 }
 
 export async function sendUserInvite(input: {
@@ -129,9 +261,11 @@ export async function sendUserInvite(input: {
   if (!user) throw new AppError(404, "User not found");
   if (!user.isActive) throw new AppError(400, "Cannot invite an inactive user");
 
+  const existingGate = await getUserLocalAuthGate(user.id);
   const temporaryPassword = generateTemporaryPassword();
   const passwordHash = await hashPassword(temporaryPassword);
-  const now = new Date();
+  const currentTime = now();
+  const inviteExpiresAt = computeInviteExpiry(currentTime);
 
   await db
     .insert(userLocalAuth)
@@ -140,11 +274,17 @@ export async function sendUserInvite(input: {
       passwordHash,
       mustChangePassword: true,
       isEnabled: true,
-      inviteSentAt: now,
+      inviteSentAt: currentTime,
       inviteSentByUserId: input.sentByUserId,
+      inviteExpiresAt,
       lastLoginAt: null,
+      failedLoginAttempts: 0,
+      lastFailedLoginAt: null,
+      lockedUntil: null,
       passwordChangedAt: null,
-      updatedAt: now,
+      revokedAt: null,
+      revokedByUserId: null,
+      updatedAt: currentTime,
     })
     .onConflictDoUpdate({
       target: userLocalAuth.userId,
@@ -152,30 +292,99 @@ export async function sendUserInvite(input: {
         passwordHash,
         mustChangePassword: true,
         isEnabled: true,
-        inviteSentAt: now,
+        inviteSentAt: currentTime,
         inviteSentByUserId: input.sentByUserId,
+        inviteExpiresAt,
         lastLoginAt: null,
+        failedLoginAttempts: 0,
+        lastFailedLoginAt: null,
+        lockedUntil: null,
         passwordChangedAt: null,
-        updatedAt: now,
+        revokedAt: null,
+        revokedByUserId: null,
+        updatedAt: currentTime,
       },
     });
 
   const loginUrl = input.loginUrl ?? process.env.FRONTEND_URL ?? "http://localhost:5173";
+  const emailContent = buildInviteEmailContent({
+    displayName: user.displayName,
+    recipientEmail: user.email,
+    loginUrl,
+    temporaryPassword,
+  });
   const emailSent = await sendSystemEmail(
     user.email,
-    "Your T Rock CRM login",
-    `
-      <p>Hi ${user.displayName},</p>
-      <p>Your temporary T Rock CRM login is ready.</p>
-      <p><strong>Email:</strong> ${user.email}</p>
-      <p><strong>Temporary password:</strong> ${temporaryPassword}</p>
-      <p>Log in at <a href="${loginUrl}">${loginUrl}</a>. You will be prompted to change your password immediately.</p>
-    `
+    emailContent.subject,
+    emailContent.html,
   );
 
   if (!emailSent) {
     throw new AppError(500, "Failed to send invite email");
   }
+
+  await recordLocalAuthEvent({
+    userId: user.id,
+    actorUserId: input.sentByUserId,
+    eventType: existingGate.isEnabled ? "invite_resent" : "invite_sent",
+    metadata: { inviteExpiresAt: inviteExpiresAt.toISOString() },
+  });
+
+  return {
+    success: true,
+    inviteExpiresAt,
+  };
+}
+
+export async function revokeUserInvite(input: {
+  userId: string;
+  actorUserId: string;
+}) {
+  const [existing] = await db
+    .select({ userId: userLocalAuth.userId })
+    .from(userLocalAuth)
+    .where(eq(userLocalAuth.userId, input.userId))
+    .limit(1);
+
+  if (!existing) {
+    throw new AppError(404, "Local login is not enabled for this user");
+  }
+
+  const currentTime = now();
+
+  await db
+    .update(userLocalAuth)
+    .set({
+      isEnabled: false,
+      mustChangePassword: false,
+      inviteExpiresAt: null,
+      failedLoginAttempts: 0,
+      lastFailedLoginAt: null,
+      lockedUntil: null,
+      revokedAt: currentTime,
+      revokedByUserId: input.actorUserId,
+      updatedAt: currentTime,
+    })
+    .where(eq(userLocalAuth.userId, input.userId));
+
+  await recordLocalAuthEvent({
+    userId: input.userId,
+    actorUserId: input.actorUserId,
+    eventType: "invite_revoked",
+  });
+}
+
+export async function listLocalAuthEvents(userId: string) {
+  return db
+    .select({
+      id: userLocalAuthEvents.id,
+      eventType: userLocalAuthEvents.eventType,
+      actorUserId: userLocalAuthEvents.actorUserId,
+      metadata: userLocalAuthEvents.metadata,
+      createdAt: userLocalAuthEvents.createdAt,
+    })
+    .from(userLocalAuthEvents)
+    .where(eq(userLocalAuthEvents.userId, userId));
 }
 
 export async function loginWithLocalPassword(input: {
@@ -194,6 +403,9 @@ export async function loginWithLocalPassword(input: {
       passwordHash: userLocalAuth.passwordHash,
       mustChangePassword: userLocalAuth.mustChangePassword,
       isEnabled: userLocalAuth.isEnabled,
+      inviteExpiresAt: userLocalAuth.inviteExpiresAt,
+      failedLoginAttempts: userLocalAuth.failedLoginAttempts,
+      lockedUntil: userLocalAuth.lockedUntil,
     })
     .from(users)
     .innerJoin(userLocalAuth, eq(userLocalAuth.userId, users.id))
@@ -204,18 +416,68 @@ export async function loginWithLocalPassword(input: {
     throw new AppError(401, "Invalid email or password");
   }
 
+  const currentTime = now();
+  if (row.lockedUntil && row.lockedUntil.getTime() > currentTime.getTime()) {
+    throw new AppError(423, "Local login is temporarily locked");
+  }
+
   const passwordMatches = await verifyPassword(input.password, row.passwordHash);
   if (!passwordMatches) {
+    const failedLoginAttempts = (row.failedLoginAttempts ?? 0) + 1;
+    const lockedUntil = failedLoginAttempts >= MAX_FAILED_LOGIN_ATTEMPTS
+      ? computeLockoutUntil(currentTime)
+      : null;
+
+    await db
+      .update(userLocalAuth)
+      .set({
+        failedLoginAttempts,
+        lastFailedLoginAt: currentTime,
+        lockedUntil,
+        updatedAt: currentTime,
+      })
+      .where(eq(userLocalAuth.userId, row.id));
+
+    await recordLocalAuthEvent({
+      userId: row.id,
+      eventType: "login_failed",
+      metadata: { failedLoginAttempts },
+    });
+
+    if (lockedUntil) {
+      await recordLocalAuthEvent({
+        userId: row.id,
+        eventType: "login_locked",
+        metadata: { lockedUntil: lockedUntil.toISOString() },
+      });
+      throw new AppError(423, "Local login is temporarily locked");
+    }
     throw new AppError(401, "Invalid email or password");
+  }
+
+  if (
+    row.mustChangePassword
+    && row.inviteExpiresAt
+    && row.inviteExpiresAt.getTime() <= currentTime.getTime()
+  ) {
+    throw new AppError(403, "Temporary invite has expired");
   }
 
   await db
     .update(userLocalAuth)
     .set({
-      lastLoginAt: new Date(),
-      updatedAt: new Date(),
+      lastLoginAt: currentTime,
+      failedLoginAttempts: 0,
+      lastFailedLoginAt: null,
+      lockedUntil: null,
+      updatedAt: currentTime,
     })
     .where(eq(userLocalAuth.userId, row.id));
+
+  await recordLocalAuthEvent({
+    userId: row.id,
+    eventType: "login_succeeded",
+  });
 
   return {
     user: {
@@ -254,15 +516,24 @@ export async function changeLocalPassword(input: {
   }
 
   const nextHash = await hashPassword(input.newPassword);
-  const now = new Date();
+  const currentTime = now();
 
   await db
     .update(userLocalAuth)
     .set({
       passwordHash: nextHash,
       mustChangePassword: false,
-      passwordChangedAt: now,
-      updatedAt: now,
+      inviteExpiresAt: null,
+      failedLoginAttempts: 0,
+      lastFailedLoginAt: null,
+      lockedUntil: null,
+      passwordChangedAt: currentTime,
+      updatedAt: currentTime,
     })
     .where(eq(userLocalAuth.userId, input.userId));
+
+  await recordLocalAuthEvent({
+    userId: input.userId,
+    eventType: "password_changed",
+  });
 }

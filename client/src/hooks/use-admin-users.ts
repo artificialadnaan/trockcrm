@@ -17,6 +17,35 @@ export interface AdminUser {
     | "password_change_required"
     | "active"
     | "disabled";
+  inviteSentAt: string | null;
+  inviteExpiresAt: string | null;
+  lastLoginAt: string | null;
+  failedLoginAttempts: number;
+  lockedUntil: string | null;
+  passwordChangedAt: string | null;
+  revokedAt: string | null;
+  latestLocalAuthEvent: {
+    eventType: string;
+    actorUserId: string | null;
+    createdAt: string;
+  } | null;
+}
+
+export interface LocalAuthEvent {
+  id: string;
+  eventType: string;
+  actorUserId: string | null;
+  actorDisplayName: string | null;
+  metadata: Record<string, unknown> | null;
+  createdAt: string;
+}
+
+export interface InvitePreview {
+  recipientEmail: string;
+  loginUrl: string;
+  subject: string;
+  html: string;
+  text: string;
 }
 
 export interface ImportedUsersSummary {
@@ -98,6 +127,25 @@ export function useAdminUsers() {
     await load();
   };
 
+  const previewInvite = async (userId: string) => {
+    const response = await api<{ preview: InvitePreview }>(`/admin/users/${userId}/preview-invite`, {
+      method: "POST",
+    });
+    return response.preview;
+  };
+
+  const revokeInvite = async (userId: string) => {
+    await api(`/admin/users/${userId}/revoke-invite`, {
+      method: "POST",
+    });
+    await load();
+  };
+
+  const getLocalAuthEvents = async (userId: string) => {
+    const response = await api<{ events: LocalAuthEvent[] }>(`/admin/users/${userId}/local-auth-events`);
+    return response.events;
+  };
+
   useEffect(() => { load(); }, []);
   return {
     users,
@@ -110,5 +158,8 @@ export function useAdminUsers() {
     revokeAccess,
     importExternalUsers,
     sendInvite,
+    previewInvite,
+    revokeInvite,
+    getLocalAuthEvents,
   };
 }

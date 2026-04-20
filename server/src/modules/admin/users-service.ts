@@ -5,6 +5,7 @@ import {
   offices,
   userExternalIdentities,
   userLocalAuth,
+  userLocalAuthEvents,
 } from "@trock-crm/shared/schema";
 import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
@@ -134,7 +135,7 @@ export async function getUsersWithStats() {
   const rows = (result as any).rows ?? result;
   const userIds = rows.map((row: any) => row.id);
 
-  const [identityRows, localAuthRows] = userIds.length
+  const [identityRows, localAuthRows, eventRows] = userIds.length
     ? await Promise.all([
         db
           .select({
@@ -148,11 +149,24 @@ export async function getUsersWithStats() {
             isEnabled: userLocalAuth.isEnabled,
             mustChangePassword: userLocalAuth.mustChangePassword,
             inviteSentAt: userLocalAuth.inviteSentAt,
+            inviteExpiresAt: userLocalAuth.inviteExpiresAt,
             lastLoginAt: userLocalAuth.lastLoginAt,
+            failedLoginAttempts: userLocalAuth.failedLoginAttempts,
+            lockedUntil: userLocalAuth.lockedUntil,
+            passwordChangedAt: userLocalAuth.passwordChangedAt,
+            revokedAt: userLocalAuth.revokedAt,
           })
           .from(userLocalAuth),
+        db
+          .select({
+            userId: userLocalAuthEvents.userId,
+            eventType: userLocalAuthEvents.eventType,
+            actorUserId: userLocalAuthEvents.actorUserId,
+            createdAt: userLocalAuthEvents.createdAt,
+          })
+          .from(userLocalAuthEvents),
       ])
-    : [[], []];
+    : [[], [], []];
 
   const sourceSystemsByUserId = new Map<string, string[]>();
   for (const row of identityRows) {
@@ -169,11 +183,31 @@ export async function getUsersWithStats() {
       isEnabled: boolean;
       mustChangePassword: boolean;
       inviteSentAt: Date | null;
+      inviteExpiresAt: Date | null;
       lastLoginAt: Date | null;
+      failedLoginAttempts: number;
+      lockedUntil: Date | null;
+      passwordChangedAt: Date | null;
+      revokedAt: Date | null;
     }
   >();
   for (const row of localAuthRows) {
     localAuthByUserId.set(row.userId, row);
+  }
+
+  const latestEventByUserId = new Map<
+    string,
+    {
+      eventType: string;
+      actorUserId: string | null;
+      createdAt: Date;
+    }
+  >();
+  for (const row of eventRows) {
+    const current = latestEventByUserId.get(row.userId);
+    if (!current || current.createdAt.getTime() < row.createdAt.getTime()) {
+      latestEventByUserId.set(row.userId, row);
+    }
   }
 
   return rows.map((r: any) => ({
@@ -187,5 +221,40 @@ export async function getUsersWithStats() {
     extraOfficeCount: Number(r.extra_office_count ?? 0),
     sourceSystems: sourceSystemsByUserId.get(r.id) ?? [],
     localAuthStatus: getLocalAuthStatus(localAuthByUserId.get(r.id) ?? null),
+    inviteSentAt: localAuthByUserId.get(r.id)?.inviteSentAt ?? null,
+    inviteExpiresAt: localAuthByUserId.get(r.id)?.inviteExpiresAt ?? null,
+    lastLoginAt: localAuthByUserId.get(r.id)?.lastLoginAt ?? null,
+    failedLoginAttempts: localAuthByUserId.get(r.id)?.failedLoginAttempts ?? 0,
+    lockedUntil: localAuthByUserId.get(r.id)?.lockedUntil ?? null,
+    passwordChangedAt: localAuthByUserId.get(r.id)?.passwordChangedAt ?? null,
+    revokedAt: localAuthByUserId.get(r.id)?.revokedAt ?? null,
+    latestLocalAuthEvent: latestEventByUserId.get(r.id) ?? null,
+  }));
+}
+
+export async function getUserLocalAuthEvents(userId: string) {
+  const result = await db.execute(sql`
+    SELECT
+      e.id,
+      e.event_type,
+      e.actor_user_id,
+      e.metadata,
+      e.created_at,
+      actor.display_name AS actor_display_name
+    FROM user_local_auth_events e
+    LEFT JOIN users actor ON actor.id = e.actor_user_id
+    WHERE e.user_id = ${userId}
+    ORDER BY e.created_at DESC
+    LIMIT 20
+  `);
+
+  const rows = (result as any).rows ?? result;
+  return rows.map((row: any) => ({
+    id: row.id,
+    eventType: row.event_type,
+    actorUserId: row.actor_user_id,
+    actorDisplayName: row.actor_display_name,
+    metadata: row.metadata ?? null,
+    createdAt: row.created_at,
   }));
 }

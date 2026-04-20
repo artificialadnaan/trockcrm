@@ -7,10 +7,10 @@ import {
   listOffices, getOfficeById, createOffice, updateOffice,
 } from "./offices-service.js";
 import {
-  getUsersWithStats, getUserById, updateUser, grantOfficeAccess, revokeOfficeAccess,
+  getUsersWithStats, getUserById, getUserLocalAuthEvents, updateUser, grantOfficeAccess, revokeOfficeAccess,
 } from "./users-service.js";
 import { importExternalUsers } from "./user-import-service.js";
-import { sendUserInvite } from "../auth/local-auth-service.js";
+import { previewUserInvite, revokeUserInvite, sendUserInvite } from "../auth/local-auth-service.js";
 import {
   listPipelineStages, updatePipelineStage, reorderPipelineStages,
 } from "./pipeline-service.js";
@@ -111,11 +111,44 @@ router.patch("/admin/users/:id", requireAdmin, async (req: Request, res: Respons
 
 router.post("/admin/users/:id/send-invite", requireAdmin, async (req: Request, res: Response, next: NextFunction) => {
   try {
-    await sendUserInvite({
+    const result = await sendUserInvite({
       userId: req.params.id as string,
       sentByUserId: req.user!.id,
     });
+    return res.json(result);
+  } catch (err) {
+    return next(err);
+  }
+});
+
+router.post("/admin/users/:id/preview-invite", requireAdmin, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const preview = await previewUserInvite({
+      userId: req.params.id as string,
+      actorUserId: req.user!.id,
+    });
+    return res.json({ preview });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+router.post("/admin/users/:id/revoke-invite", requireAdmin, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    await revokeUserInvite({
+      userId: req.params.id as string,
+      actorUserId: req.user!.id,
+    });
     return res.json({ success: true });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+router.get("/admin/users/:id/local-auth-events", requireAdmin, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const events = await getUserLocalAuthEvents(req.params.id as string);
+    return res.json({ events });
   } catch (err) {
     return next(err);
   }

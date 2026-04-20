@@ -36,6 +36,18 @@ export async function authMiddleware(req: Request, _res: Response, next: NextFun
     }
 
     const localAuthGate = await getUserLocalAuthGate(user.id);
+    const authMethod = claims.authMethod;
+
+    if (!authMethod) {
+      throw new AppError(401, "Session expired, please sign in again");
+    }
+
+    if (
+      authMethod === "local"
+      && (!localAuthGate.isEnabled || localAuthGate.revokedAt)
+    ) {
+      throw new AppError(401, "Local login is no longer enabled for this user");
+    }
 
     // Determine active office (header override or default)
     const requestedOfficeId = req.headers["x-office-id"] as string | undefined;
@@ -61,6 +73,7 @@ export async function authMiddleware(req: Request, _res: Response, next: NextFun
       officeId: user.officeId,
       activeOfficeId,
       mustChangePassword: localAuthGate.mustChangePassword,
+      authMethod,
     };
 
     if (

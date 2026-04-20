@@ -1,6 +1,9 @@
 import { useEffect, useState } from "react";
 import {
+  Ban,
   Download,
+  Eye,
+  History,
   MailPlus,
   RefreshCw,
   Search,
@@ -32,6 +35,16 @@ import {
   type UserRoleFilter,
   type UserSourceFilter,
 } from "./users-page.helpers";
+import { UserInvitePreviewDialog } from "./user-invite-preview-dialog";
+import { UserLocalAuthEventsDialog } from "./user-local-auth-events-dialog";
+
+function formatDate(value: string | null) {
+  if (!value) return null;
+  return new Intl.DateTimeFormat("en-US", {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(new Date(value));
+}
 
 export function UsersPage() {
   const {
@@ -43,6 +56,9 @@ export function UsersPage() {
     updateUsersBulk,
     importExternalUsers,
     sendInvite,
+    previewInvite,
+    revokeInvite,
+    getLocalAuthEvents,
   } = useAdminUsers();
   const [updatingId, setUpdatingId] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
@@ -53,6 +69,14 @@ export function UsersPage() {
   const [activityFilter, setActivityFilter] = useState<UserActivityFilter>("all");
   const [sourceFilter, setSourceFilter] = useState<UserSourceFilter>("all");
   const [authFilter, setAuthFilter] = useState<UserAuthFilter>("all");
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewUserEmail, setPreviewUserEmail] = useState<string | null>(null);
+  const [invitePreview, setInvitePreview] = useState<Awaited<ReturnType<typeof previewInvite>> | null>(null);
+  const [eventsOpen, setEventsOpen] = useState(false);
+  const [eventsLoading, setEventsLoading] = useState(false);
+  const [eventsUserEmail, setEventsUserEmail] = useState<string | null>(null);
+  const [localAuthEvents, setLocalAuthEvents] = useState<Awaited<ReturnType<typeof getLocalAuthEvents>>>([]);
 
   const sourceLabel: Record<"hubspot" | "procore", string> = {
     hubspot: "HubSpot",
@@ -132,6 +156,52 @@ export function UsersPage() {
       toast.error(err instanceof Error ? err.message : "Failed to send invite");
     } finally {
       setUpdatingId(null);
+    }
+  };
+
+  const handlePreviewInvite = async (userId: string, email: string) => {
+    setPreviewOpen(true);
+    setPreviewLoading(true);
+    setPreviewUserEmail(email);
+    setInvitePreview(null);
+    try {
+      const preview = await previewInvite(userId);
+      setInvitePreview(preview);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to load invite preview");
+      setPreviewOpen(false);
+      setPreviewUserEmail(null);
+    } finally {
+      setPreviewLoading(false);
+    }
+  };
+
+  const handleRevokeInvite = async (userId: string) => {
+    setUpdatingId(userId);
+    try {
+      await revokeInvite(userId);
+      toast.success("Invite access revoked");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to revoke invite access");
+    } finally {
+      setUpdatingId(null);
+    }
+  };
+
+  const handleViewLocalAuthEvents = async (userId: string, email: string) => {
+    setEventsOpen(true);
+    setEventsLoading(true);
+    setEventsUserEmail(email);
+    setLocalAuthEvents([]);
+    try {
+      const events = await getLocalAuthEvents(userId);
+      setLocalAuthEvents(events);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to load auth history");
+      setEventsOpen(false);
+      setEventsUserEmail(null);
+    } finally {
+      setEventsLoading(false);
     }
   };
 
@@ -487,12 +557,29 @@ export function UsersPage() {
                   </Badge>
                 </TableCell>
                 <TableCell>
-                  <Badge variant="outline" className="text-xs">
-                    {localAuthLabel[user.localAuthStatus]}
-                  </Badge>
+                  <div className="space-y-2">
+                    <Badge variant="outline" className="text-xs">
+                      {localAuthLabel[user.localAuthStatus]}
+                    </Badge>
+                    <div className="space-y-1 text-xs text-slate-500">
+                      {user.inviteSentAt ? <div>Sent {formatDate(user.inviteSentAt)}</div> : null}
+                      {user.inviteExpiresAt ? <div>Expires {formatDate(user.inviteExpiresAt)}</div> : null}
+                      {user.lastLoginAt ? <div>Last login {formatDate(user.lastLoginAt)}</div> : null}
+                      {user.passwordChangedAt ? <div>Password changed {formatDate(user.passwordChangedAt)}</div> : null}
+                      {user.failedLoginAttempts > 0 ? <div>{user.failedLoginAttempts} failed attempts</div> : null}
+                      {user.lockedUntil ? <div className="text-amber-700">Locked until {formatDate(user.lockedUntil)}</div> : null}
+                      {user.revokedAt ? <div className="text-rose-700">Revoked {formatDate(user.revokedAt)}</div> : null}
+                      {user.latestLocalAuthEvent ? (
+                        <div>
+                          Last event: {user.latestLocalAuthEvent.eventType.replace(/_/g, " ")} on{" "}
+                          {formatDate(user.latestLocalAuthEvent.createdAt)}
+                        </div>
+                      ) : null}
+                    </div>
+                  </div>
                 </TableCell>
                 <TableCell>
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
                     <Button
                       variant="ghost"
                       size="sm"
@@ -503,6 +590,16 @@ export function UsersPage() {
                       {user.isActive ? "Deactivate" : "Activate"}
                     </Button>
                     <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 text-xs"
+                      onClick={() => handlePreviewInvite(user.id, user.email)}
+                      disabled={updatingId === user.id || bulkUpdating || previewLoading}
+                    >
+                      <Eye className="mr-1 h-3.5 w-3.5" />
+                      Preview
+                    </Button>
+                    <Button
                       variant="outline"
                       size="sm"
                       className="h-7 text-xs"
@@ -511,6 +608,31 @@ export function UsersPage() {
                     >
                       <MailPlus className="mr-1 h-3.5 w-3.5" />
                       {user.localAuthStatus === "not_invited" ? "Send invite" : "Resend invite"}
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 text-xs"
+                      onClick={() => handleViewLocalAuthEvents(user.id, user.email)}
+                      disabled={updatingId === user.id || bulkUpdating || eventsLoading}
+                    >
+                      <History className="mr-1 h-3.5 w-3.5" />
+                      History
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 text-xs text-rose-700 hover:text-rose-800"
+                      onClick={() => handleRevokeInvite(user.id)}
+                      disabled={
+                        updatingId === user.id
+                        || bulkUpdating
+                        || user.localAuthStatus === "not_invited"
+                        || user.localAuthStatus === "disabled"
+                      }
+                    >
+                      <Ban className="mr-1 h-3.5 w-3.5" />
+                      Revoke
                     </Button>
                   </div>
                 </TableCell>
@@ -537,6 +659,33 @@ export function UsersPage() {
         Send invites only when you are ready to hand out temporary local-password access. Existing
         role and office assignments are preserved for CRM users that already exist.
       </div>
+
+      <UserInvitePreviewDialog
+        open={previewOpen}
+        onOpenChange={(open) => {
+          setPreviewOpen(open);
+          if (!open) {
+            setPreviewUserEmail(null);
+            setInvitePreview(null);
+          }
+        }}
+        preview={invitePreview}
+        loading={previewLoading}
+      />
+
+      <UserLocalAuthEventsDialog
+        open={eventsOpen}
+        onOpenChange={(open) => {
+          setEventsOpen(open);
+          if (!open) {
+            setEventsUserEmail(null);
+            setLocalAuthEvents([]);
+          }
+        }}
+        userEmail={eventsUserEmail}
+        events={localAuthEvents}
+        loading={eventsLoading}
+      />
     </div>
   );
 }

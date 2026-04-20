@@ -256,5 +256,10 @@ describe("AppShell layout", () => {
     expect(usersPageSource).toContain('className="mx-auto max-w-6xl space-y-6"');
     expect(usersPageSource).toContain('placeholder="Search by name or email"');
     expect(usersPageSource).toContain("Make director");
+    expect(usersPageSource).toContain("Preview");
+    expect(usersPageSource).toContain("History");
+    expect(usersPageSource).toContain("Revoke");
+    expect(usersPageSource).toContain("<UserInvitePreviewDialog");
+    expect(usersPageSource).toContain("<UserLocalAuthEventsDialog");
   });
 });
