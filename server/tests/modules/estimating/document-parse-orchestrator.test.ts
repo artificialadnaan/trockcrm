@@ -41,6 +41,7 @@ function createTenantDbMock(options: {
   existingExtractions?: Record<string, any>[];
   failOnDocumentComplete?: boolean;
   concurrentActiveParseRunIdOnFailure?: string | null;
+  concurrentDocumentStateOnFailure?: Record<string, any>;
 }) {
   const parseRuns = (options.existingParseRuns ?? []).map((row) => structuredClone(row));
   const updatedDocuments: Record<string, any>[] = [];
@@ -119,6 +120,9 @@ function createTenantDbMock(options: {
 
             if (table === estimateSourceDocuments) {
               if (value.parseStatus === "completed" && options.failOnDocumentComplete) {
+                if (options.concurrentDocumentStateOnFailure) {
+                  Object.assign(documentState, options.concurrentDocumentStateOnFailure);
+                }
                 if (options.concurrentActiveParseRunIdOnFailure !== undefined) {
                   documentState.activeParseRunId = options.concurrentActiveParseRunIdOnFailure;
                 }
@@ -499,6 +503,122 @@ describe("runEstimateDocumentParse", () => {
       })
     );
     expect(documentState.activeParseRunId).toBe("parse-run-newer");
+  });
+
+  it("does not clobber a newer queued requeue state when a stale run fails with no active parse run", async () => {
+    const documentSnapshot = {
+      id: "doc-4",
+      dealId: "deal-1",
+      projectId: "project-1",
+      filename: "A4-plan.pdf",
+      documentType: "plan",
+      mimeType: "application/pdf",
+      storageKey: "stale/storage-key-a4.pdf",
+      contentHash: "r2/estimate-documents/doc-4.pdf",
+      activeParseRunId: "parse-run-old-active",
+    };
+    const { tenantDb, pages, extractions, documentState, updatedDocuments, updatedParseRuns } =
+      createTenantDbMock({
+        documentSnapshot,
+        currentDocument: {
+          activeParseRunId: "parse-run-old-active",
+          parseStatus: "processing",
+          ocrStatus: "processing",
+          parseProvider: "default",
+          parseProfile: "balanced",
+          parseErrorSummary: null,
+        },
+        existingPages: [
+          {
+            id: "page-queued-1",
+            documentId: "doc-4",
+            pageNumber: 1,
+            pageImageKey: "r2/estimate-documents/last-good.pdf",
+            metadataJson: {
+              sourceParseRunId: "parse-run-old-active",
+              sourceKind: "pdf_page",
+              activeArtifact: true,
+            },
+          },
+        ],
+        existingExtractions: [
+          {
+            id: "extraction-queued-1",
+            documentId: "doc-4",
+            rawLabel: "last good line",
+            normalizedLabel: "last good line",
+            metadataJson: {
+              sourceParseRunId: "parse-run-old-active",
+              activeArtifact: true,
+              extractionProvider: "default",
+            },
+          },
+        ],
+        failOnDocumentComplete: true,
+        concurrentDocumentStateOnFailure: {
+          activeParseRunId: null,
+          parseStatus: "queued",
+          ocrStatus: "queued",
+          parseProvider: null,
+          parseProfile: null,
+          parseErrorSummary: null,
+          parsedAt: null,
+        },
+      });
+
+    await expect(
+      runEstimateDocumentParse({
+        tenantDb,
+        document: documentSnapshot,
+        options: {
+          provider: "default",
+          profile: "balanced",
+        },
+      })
+    ).rejects.toThrow("simulated completion failure");
+
+    expect(updatedParseRuns.at(-1)).toEqual(
+      expect.objectContaining({
+        id: "parse-run-1",
+        status: "failed",
+        errorSummary: "simulated completion failure",
+      })
+    );
+    expect(updatedDocuments).toEqual(
+      expect.not.arrayContaining([
+        expect.objectContaining({
+          parseStatus: "failed",
+          ocrStatus: "failed",
+          parseErrorSummary: "simulated completion failure",
+        }),
+      ])
+    );
+    expect(documentState).toEqual(
+      expect.objectContaining({
+        activeParseRunId: null,
+        parseStatus: "queued",
+        ocrStatus: "queued",
+        parseErrorSummary: null,
+      })
+    );
+    expect(pages).toEqual([
+      expect.objectContaining({
+        id: "page-queued-1",
+        metadataJson: expect.objectContaining({
+          sourceParseRunId: "parse-run-old-active",
+          activeArtifact: true,
+        }),
+      }),
+    ]);
+    expect(extractions).toEqual([
+      expect.objectContaining({
+        id: "extraction-queued-1",
+        metadataJson: expect.objectContaining({
+          sourceParseRunId: "parse-run-old-active",
+          activeArtifact: true,
+        }),
+      }),
+    ]);
   });
 
   it("does not let an older run steal activation from a newer run that is already current", async () => {

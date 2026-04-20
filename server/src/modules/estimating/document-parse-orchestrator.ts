@@ -153,7 +153,15 @@ async function markParseFailed(args: {
     .where(eq(estimateDocumentParseRuns.id, args.parseRunId))
     .returning();
 
-  if (currentDocument?.activeParseRunId && currentDocument.activeParseRunId !== args.parseRunId) {
+  const hasSupersededActiveRun =
+    currentDocument?.activeParseRunId != null &&
+    currentDocument.activeParseRunId !== args.parseRunId;
+  const isQueuedRequeueState =
+    currentDocument?.activeParseRunId == null &&
+    currentDocument?.parseStatus === "queued" &&
+    currentDocument?.ocrStatus === "queued";
+
+  if (hasSupersededActiveRun || isQueuedRequeueState) {
     return { parseRun, documentUpdate: currentDocument };
   }
 
