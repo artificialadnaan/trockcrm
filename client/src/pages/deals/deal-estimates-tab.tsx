@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { api } from "@/lib/api";
+import { EstimatingWorkflowShell } from "@/components/estimating/estimating-workflow-shell";
 
 interface EstimateItem {
   id: string;
@@ -126,6 +127,15 @@ export function DealEstimatesTab({ dealId }: DealEstimatesTabProps) {
 
   return (
     <div className="space-y-4">
+      <EstimatingWorkflowShell
+        dealId={dealId}
+        documents={[]}
+        extractionRows={[]}
+        matchRows={[]}
+        pricingRows={[]}
+        reviewEvents={[]}
+        copilotEnabled
+      />
       {sections.length === 0 && !addingSection ? (
         <div className="text-center py-12 border rounded-lg bg-muted/20">
           <Calculator className="h-8 w-8 text-muted-foreground mx-auto mb-3" />

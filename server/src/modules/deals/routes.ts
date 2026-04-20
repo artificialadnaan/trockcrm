@@ -4,6 +4,7 @@ import { dealApprovals, deals, jobQueue } from "@trock-crm/shared/schema";
 import { requireRole } from "../../middleware/rbac.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { eventBus } from "../../events/bus.js";
+import { db } from "../../db.js";
 import {
   getDeals,
   getDealById,
@@ -72,6 +73,12 @@ import {
   listApprovedRecommendationIdsForRun,
   promoteApprovedRecommendationsToEstimate,
 } from "../estimating/draft-estimate-service.js";
+import {
+  answerEstimatingCopilotQuestion,
+  buildEstimatingCopilotContext,
+  getEstimatingWorkflowState,
+  listEstimateReviewEvents,
+} from "../estimating/copilot-service.js";
 
 const router = Router();
 
@@ -929,6 +936,51 @@ router.post("/:id/estimating/promote", async (req, res, next) => {
 
     await req.commitTransaction!();
     res.status(200).json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/:id/estimating", async (req, res, next) => {
+  try {
+    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+    const workflow = await getEstimatingWorkflowState(req.tenantDb! as any, req.params.id);
+    await req.commitTransaction!();
+    res.status(200).json(workflow);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/:id/estimating/review-log", async (req, res, next) => {
+  try {
+    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+    const events = await listEstimateReviewEvents(req.tenantDb! as any, req.params.id);
+    await req.commitTransaction!();
+    res.status(200).json({ events });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/:id/estimating/copilot", async (req, res, next) => {
+  try {
+    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+    const context = await buildEstimatingCopilotContext({
+      tenantDb: req.tenantDb! as any,
+      appDb: db as any,
+      dealId: req.params.id,
+      question: req.body.question,
+    });
+    const answer = await answerEstimatingCopilotQuestion({
+      question: req.body.question,
+      context,
+    });
+    await req.commitTransaction!();
+    res.status(200).json({ answer });
   } catch (err) {
     next(err);
   }
