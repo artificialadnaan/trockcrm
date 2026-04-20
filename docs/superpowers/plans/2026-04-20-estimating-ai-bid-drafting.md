@@ -12,8 +12,8 @@
 
 ## File Structure
 
-- Create: `migrations/0026_cost_catalog_and_estimate_generation.sql`
-  Responsibility: add local Procore-backed catalog tables in `public` and tenant-scoped estimate generation tables using the repo's `office_%` reconciliation migration pattern so the change lands after the existing `0025` baseline repair.
+- Create: `migrations/0028_cost_catalog_and_estimate_generation.sql`
+  Responsibility: add local Procore-backed catalog tables in `public` and tenant-scoped estimate generation tables using the repo's `office_%` reconciliation migration pattern with a new, non-colliding migration number after the existing `0027` files.
 - Create: `shared/src/schema/public/cost-catalog-sources.ts`
   Responsibility: schema for catalog source metadata and sync runs.
 - Create: `shared/src/schema/public/cost-catalog-items.ts`
@@ -30,6 +30,8 @@
   Responsibility: normalize Procore catalog payloads into local catalog tables.
 - Modify: `worker/src/jobs/procore-sync.ts`
   Responsibility: invoke the catalog sync path during Procore sync runs.
+- Modify: `worker/src/index.ts`
+  Responsibility: add a dedicated cron entry for public catalog refresh instead of coupling it to every office-scoped Procore poll.
 - Create: `server/src/modules/estimating/document-service.ts`
   Responsibility: create uploaded estimating documents and queue OCR/indexing.
 - Create: `server/src/modules/estimating/extraction-service.ts`
@@ -88,7 +90,7 @@
 ## Task 1: Add Catalog and Estimate-Generation Storage
 
 **Files:**
-- Create: `migrations/0026_cost_catalog_and_estimate_generation.sql`
+- Create: `migrations/0028_cost_catalog_and_estimate_generation.sql`
 - Create: `shared/src/schema/public/cost-catalog-sources.ts`
 - Create: `shared/src/schema/public/cost-catalog-items.ts`
 - Create: `shared/src/schema/tenant/estimate-source-documents.ts`
@@ -365,7 +367,7 @@ Expected: PASS
 - [ ] **Step 6: Commit the storage layer**
 
 ```bash
-git add migrations/0026_cost_catalog_and_estimate_generation.sql shared/src/schema/public/cost-catalog-sources.ts shared/src/schema/public/cost-catalog-items.ts shared/src/schema/tenant/estimate-source-documents.ts shared/src/schema/tenant/estimate-extractions.ts shared/src/schema/index.ts server/tests/modules/estimating/schema-exports.test.ts
+git add migrations/0028_cost_catalog_and_estimate_generation.sql shared/src/schema/public/cost-catalog-sources.ts shared/src/schema/public/cost-catalog-items.ts shared/src/schema/tenant/estimate-source-documents.ts shared/src/schema/tenant/estimate-extractions.ts shared/src/schema/index.ts server/tests/modules/estimating/schema-exports.test.ts
 git commit -m "feat: add catalog and estimate generation storage"
 ```
 
@@ -445,7 +447,6 @@ export function normalizeCatalogItem(payload: any) {
 export async function runProcoreSync(deps: SyncDeps) {
   await syncCompanies(deps);
   await syncProjects(deps);
-  await syncCostCatalog(deps);
 }
 ```
 
@@ -465,6 +466,14 @@ export async function runScheduledCatalogSync() {
 ```
 
 ```ts
+// worker/src/index.ts
+cron.schedule("7 */6 * * *", async () => {
+  console.log("[Worker:cron] Running public Procore catalog refresh...");
+  await runScheduledCatalogSync();
+});
+```
+
+```ts
 const [run] = await db.insert(costCatalogSyncRuns).values({
   sourceId,
   status: "running",
@@ -480,7 +489,7 @@ Expected: PASS for the new catalog test, existing Procore tests remain green.
 - [ ] **Step 7: Commit the catalog sync task**
 
 ```bash
-git add server/src/modules/procore/catalog-sync-service.ts server/src/modules/procore/sync-service.ts server/src/modules/admin/routes.ts server/src/app.ts worker/src/jobs/procore-sync.ts server/tests/modules/procore/catalog-sync-service.test.ts
+git add server/src/modules/procore/catalog-sync-service.ts server/src/modules/procore/sync-service.ts server/src/modules/admin/routes.ts server/src/app.ts worker/src/index.ts worker/src/jobs/procore-sync.ts server/tests/modules/procore/catalog-sync-service.test.ts
 git commit -m "feat: sync procore cost catalog into local tables"
 ```
 
@@ -488,7 +497,7 @@ git commit -m "feat: sync procore cost catalog into local tables"
 
 **Files:**
 - Create: `server/src/modules/estimating/document-service.ts`
-- Create: `server/src/modules/estimating/routes.ts`
+- Modify: `server/src/modules/deals/routes.ts`
 - Create: `worker/src/jobs/estimate-document-ocr.ts`
 - Modify: `worker/src/jobs/index.ts`
 - Modify: `client/src/pages/deals/deal-estimates-tab.tsx`
@@ -648,7 +657,7 @@ Expected: PASS
 - [ ] **Step 8: Commit the upload and OCR queueing task**
 
 ```bash
-git add server/src/modules/estimating/document-service.ts server/src/modules/estimating/routes.ts worker/src/jobs/estimate-document-ocr.ts worker/src/jobs/index.ts client/src/pages/deals/deal-estimates-tab.tsx client/src/components/estimating/estimate-documents-panel.tsx server/tests/modules/estimating/document-service.test.ts
+git add server/src/modules/estimating/document-service.ts server/src/modules/deals/routes.ts worker/src/jobs/estimate-document-ocr.ts worker/src/jobs/index.ts client/src/pages/deals/deal-estimates-tab.tsx client/src/components/estimating/estimate-documents-panel.tsx server/tests/modules/estimating/document-service.test.ts
 git commit -m "feat: add estimating document upload and ocr queueing"
 ```
 
@@ -844,7 +853,7 @@ git commit -m "feat: add estimate extraction matching and pricing services"
 **Files:**
 - Create: `server/src/modules/estimating/draft-estimate-service.ts`
 - Modify: `server/src/modules/deals/estimate-service.ts`
-- Modify: `server/src/modules/estimating/routes.ts`
+- Modify: `server/src/modules/deals/routes.ts`
 - Test: `server/tests/modules/estimating/draft-estimate-service.test.ts`
 
 - [ ] **Step 1: Write a failing promotion test**
@@ -986,7 +995,7 @@ Expected: PASS
 - [ ] **Step 7: Commit the draft estimate promotion task**
 
 ```bash
-git add server/src/modules/estimating/draft-estimate-service.ts server/src/modules/deals/estimate-service.ts server/src/modules/estimating/routes.ts server/tests/modules/estimating/draft-estimate-service.test.ts
+git add server/src/modules/estimating/draft-estimate-service.ts server/src/modules/deals/estimate-service.ts server/src/modules/deals/routes.ts server/tests/modules/estimating/draft-estimate-service.test.ts
 git commit -m "feat: promote approved estimate recommendations into estimates"
 ```
 
@@ -1001,7 +1010,7 @@ git commit -m "feat: promote approved estimate recommendations into estimates"
 - Create: `client/src/components/estimating/estimate-review-log-panel.tsx`
 - Create: `client/src/components/estimating/estimate-copilot-panel.tsx`
 - Create: `server/src/modules/estimating/copilot-service.ts`
-- Modify: `server/src/modules/estimating/routes.ts`
+- Modify: `server/src/modules/deals/routes.ts`
 - Modify: `client/src/pages/deals/deal-estimates-tab.tsx`
 - Test: `server/tests/modules/estimating/copilot-service.test.ts`
 - Test: `client/src/components/estimating/estimating-workflow-shell.test.tsx`
@@ -1262,7 +1271,7 @@ Expected: PASS
 - [ ] **Step 9: Commit the workflow UI task**
 
 ```bash
-git add client/src/components/estimating/estimating-workflow-shell.tsx client/src/components/estimating/estimate-overview-panel.tsx client/src/components/estimating/estimate-extraction-review-table.tsx client/src/components/estimating/estimate-catalog-match-table.tsx client/src/components/estimating/estimate-pricing-review-table.tsx client/src/components/estimating/estimate-review-log-panel.tsx client/src/components/estimating/estimate-copilot-panel.tsx client/src/pages/deals/deal-estimates-tab.tsx server/src/modules/estimating/copilot-service.ts server/src/modules/estimating/routes.ts server/tests/modules/estimating/copilot-service.test.ts client/src/components/estimating/estimating-workflow-shell.test.tsx
+git add client/src/components/estimating/estimating-workflow-shell.tsx client/src/components/estimating/estimate-overview-panel.tsx client/src/components/estimating/estimate-extraction-review-table.tsx client/src/components/estimating/estimate-catalog-match-table.tsx client/src/components/estimating/estimate-pricing-review-table.tsx client/src/components/estimating/estimate-review-log-panel.tsx client/src/components/estimating/estimate-copilot-panel.tsx client/src/pages/deals/deal-estimates-tab.tsx server/src/modules/estimating/copilot-service.ts server/src/modules/deals/routes.ts server/tests/modules/estimating/copilot-service.test.ts client/src/components/estimating/estimating-workflow-shell.test.tsx
 git commit -m "feat: add estimating workflow review ui and copilot"
 ```
 
