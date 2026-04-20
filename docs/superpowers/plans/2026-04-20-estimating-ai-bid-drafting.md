@@ -288,6 +288,20 @@ CREATE TABLE IF NOT EXISTS estimate_extraction_matches (
   reason_json jsonb NOT NULL DEFAULT '{}'::jsonb
 );
 
+CREATE TABLE IF NOT EXISTS estimate_generation_runs (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  deal_id uuid NOT NULL,
+  project_id uuid,
+  status text NOT NULL DEFAULT 'pending',
+  triggered_by_user_id uuid,
+  input_snapshot_json jsonb NOT NULL DEFAULT '{}'::jsonb,
+  output_summary_json jsonb NOT NULL DEFAULT '{}'::jsonb,
+  error_summary text,
+  started_at timestamptz NOT NULL DEFAULT now(),
+  completed_at timestamptz,
+  catalog_sync_run_id uuid REFERENCES public.cost_catalog_sync_runs(id) ON DELETE SET NULL
+);
+
 CREATE TABLE IF NOT EXISTS estimate_pricing_recommendations (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   deal_id uuid NOT NULL,
@@ -304,20 +318,6 @@ CREATE TABLE IF NOT EXISTS estimate_pricing_recommendations (
   confidence numeric(5, 2) NOT NULL DEFAULT 0,
   assumptions_json jsonb NOT NULL DEFAULT '{}'::jsonb,
   created_by_run_id uuid REFERENCES estimate_generation_runs(id) ON DELETE SET NULL
-);
-
-CREATE TABLE IF NOT EXISTS estimate_generation_runs (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  deal_id uuid NOT NULL,
-  project_id uuid,
-  status text NOT NULL DEFAULT 'pending',
-  triggered_by_user_id uuid,
-  input_snapshot_json jsonb NOT NULL DEFAULT '{}'::jsonb,
-  output_summary_json jsonb NOT NULL DEFAULT '{}'::jsonb,
-  error_summary text,
-  started_at timestamptz NOT NULL DEFAULT now(),
-  completed_at timestamptz,
-  catalog_sync_run_id uuid REFERENCES public.cost_catalog_sync_runs(id) ON DELETE SET NULL
 );
 
 CREATE TABLE IF NOT EXISTS estimate_review_events (
@@ -570,6 +570,11 @@ export async function createEstimateSourceDocument({
 
 ```ts
 export async function runEstimateDocumentOcr(payload: { documentId: string }, officeId: string | null) {
+  const { pool } = await import("../db.js");
+  const resolved = await resolveOfficeSchema(pool, officeId, null);
+  if (!resolved) throw new Error("Unable to resolve office schema for estimating OCR");
+
+  const tenantDb = createTenantDrizzle(pool, resolved.schemaName);
   const pages = await extractPdfPages(payload.documentId);
 
   for (const page of pages) {
@@ -722,7 +727,11 @@ export function buildPricingRecommendation(input: BuildPricingRecommendationInpu
   const awardedAdjustedBase =
     quoteAdjustedBase * (1 + (input.awardedOutcomeAdjustmentPercent ?? 0) / 100);
   const afterInternal = awardedAdjustedBase * (1 + input.internalAdjustmentPercent / 100);
-  const adjusted = Number((afterInternal * (1 + input.marketAdjustmentPercent / 100)).toFixed(2));
+  const regionalAdjustmentPercent = getRegionalMarketAdjustmentPercent({
+    projectTypeId: input.projectTypeId,
+    regionId: input.regionId,
+  });
+  const adjusted = Number((afterInternal * (1 + regionalAdjustmentPercent / 100)).toFixed(2));
 
   return {
     priceBasis: "catalog_baseline_with_adjustments",
@@ -731,7 +740,7 @@ export function buildPricingRecommendation(input: BuildPricingRecommendationInpu
     comparableHistoricalPrices: input.historicalPrices,
     historicalMedianPrice: historicalMedian,
     catalogBaselinePrice: input.catalogBaselinePrice ?? null,
-    marketAdjustmentPercent: input.marketAdjustmentPercent,
+    marketAdjustmentPercent: regionalAdjustmentPercent,
     assumptions: {
       catalogBaselineUsed: input.catalogBaselinePrice != null,
       vendorQuotePrice: input.vendorQuotePrice ?? null,
@@ -804,7 +813,8 @@ for (const extraction of pendingExtractions) {
     vendorQuotePrice: topMatch.vendorQuotePrice ?? null,
     awardedOutcomeAdjustmentPercent: topMatch.awardedOutcomeAdjustmentPercent ?? 0,
     internalAdjustmentPercent: topMatch.internalAdjustmentPercent ?? 0,
-    marketAdjustmentPercent: marketAdjustmentPercent,
+    regionId: deal.regionId,
+    projectTypeId: deal.projectTypeId,
   });
 
   await saveExtractionMatchAndRecommendation({
