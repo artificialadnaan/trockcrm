@@ -1,4 +1,4 @@
-import { CheckCircle2, XCircle, Clock, RefreshCw, Play } from "lucide-react";
+import { CheckCircle2, XCircle, Clock, RefreshCw, Play, ArrowUpRight, Rows3 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -179,6 +179,31 @@ export function MigrationDashboardPage() {
           <StatCard label="Leads" stats={summary.leads} />
         </div>
       )}
+
+      <Card>
+        <CardHeader className="pb-2">
+          <CardTitle className="text-sm font-medium text-gray-500 uppercase tracking-wide">
+            Data Hygiene
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <Link
+            to="/pipeline/hygiene"
+            className="group flex items-start justify-between gap-4 rounded-lg border border-slate-200 bg-white p-4 transition-colors hover:bg-slate-50"
+          >
+            <div className="space-y-2">
+              <div className="flex items-center gap-2">
+                <Rows3 className="h-4 w-4 text-slate-400 group-hover:text-blue-600" />
+                <h3 className="text-sm font-semibold text-gray-900">Pipeline Hygiene</h3>
+              </div>
+              <p className="text-sm leading-relaxed text-gray-600">
+                Review stale or incomplete lead and deal records that need cleanup outside the live sidebar navigation.
+              </p>
+            </div>
+            <ArrowUpRight className="h-4 w-4 text-slate-300 group-hover:text-blue-600" />
+          </Link>
+        </CardContent>
+      </Card>
 
       <div className="space-y-3">
         <div className="flex items-center justify-between">
