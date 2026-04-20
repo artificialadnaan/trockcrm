@@ -916,6 +916,9 @@ router.post("/:id/estimating/promote", async (req, res, next) => {
   try {
     const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
     if (!deal) throw new AppError(404, "Deal not found");
+    if (!req.body.generationRunId) {
+      throw new AppError(400, "generationRunId is required");
+    }
 
     const approvedRecommendationIds = await listApprovedRecommendationIdsForRun(
       req.tenantDb! as any,

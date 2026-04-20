@@ -94,6 +94,10 @@ export async function runEstimateGeneration(payload: { documentId?: string; deal
           eventType: "unmatched",
           afterJson: { normalizedLabel: extraction.normalizedLabel },
         });
+        await tenantDb
+          .update(estimateExtractions)
+          .set({ status: "unmatched" })
+          .where(eq(estimateExtractions.id, extraction.id));
         continue;
       }
 

@@ -1,5 +1,8 @@
-import { describe, expect, it } from "vitest";
-import { answerEstimatingCopilotQuestion } from "../../../src/modules/estimating/copilot-service.js";
+import { describe, expect, it, vi } from "vitest";
+import {
+  answerEstimatingCopilotQuestion,
+  getEstimatingWorkflowState,
+} from "../../../src/modules/estimating/copilot-service.js";
 
 describe("answerEstimatingCopilotQuestion", () => {
   it("returns a priced answer with evidence references", async () => {
@@ -28,5 +31,57 @@ describe("answerEstimatingCopilotQuestion", () => {
 
     expect(result.answer.toLowerCase()).toContain("roofing");
     expect(result.evidence.some((row: any) => row.type === "won_bid_pattern")).toBe(true);
+  });
+
+  it("scopes catalog matches to the current deal", async () => {
+    const matchesWhere = vi.fn().mockReturnValue({
+      orderBy: vi.fn().mockResolvedValue([]),
+    });
+    const matchesInnerJoin = vi.fn(() => ({
+      where: matchesWhere,
+    }));
+    const tenantDb = {
+      select: vi
+        .fn()
+        .mockReturnValueOnce({
+          from: vi.fn(() => ({
+            where: vi.fn(() => ({
+              orderBy: vi.fn().mockResolvedValue([]),
+            })),
+          })),
+        })
+        .mockReturnValueOnce({
+          from: vi.fn(() => ({
+            where: vi.fn(() => ({
+              orderBy: vi.fn().mockResolvedValue([]),
+            })),
+          })),
+        })
+        .mockReturnValueOnce({
+          from: vi.fn(() => ({
+            innerJoin: matchesInnerJoin,
+          })),
+        })
+        .mockReturnValueOnce({
+          from: vi.fn(() => ({
+            where: vi.fn(() => ({
+              orderBy: vi.fn().mockResolvedValue([]),
+            })),
+          })),
+        })
+        .mockReturnValueOnce({
+          from: vi.fn(() => ({
+            where: vi.fn(() => ({
+              orderBy: vi.fn().mockResolvedValue([]),
+            })),
+          })),
+        }),
+    } as any;
+
+    const workflow = await getEstimatingWorkflowState(tenantDb, "deal-1");
+
+    expect(workflow.matchRows).toEqual([]);
+    expect(matchesInnerJoin).toHaveBeenCalled();
+    expect(matchesWhere).toHaveBeenCalled();
   });
 });

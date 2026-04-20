@@ -3,6 +3,7 @@
 // Also exports runProcoreSync() for 15-minute periodic poll.
 
 import { pool } from "../db.js";
+import { runScheduledCatalogSync as runServerScheduledCatalogSync } from "../../../server/src/modules/procore/sync-service.js";
 
 const PROCORE_BASE_URL = "https://api.procore.com";
 
@@ -834,7 +835,6 @@ export async function runScheduledCatalogSync(): Promise<void> {
     return;
   }
 
-  console.warn(
-    "[Worker:catalog-sync] Scheduled catalog refresh is reserved for the shared public catalog flow and is not yet wired into worker-side persistence."
-  );
+  await runServerScheduledCatalogSync();
+  console.log("[Worker:catalog-sync] Scheduled Procore catalog refresh completed");
 }

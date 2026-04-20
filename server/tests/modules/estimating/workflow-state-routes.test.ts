@@ -113,4 +113,13 @@ describe("estimating workflow routes", () => {
     expect(estimatingServiceMocks.buildEstimatingCopilotContext).toHaveBeenCalled();
     expect(estimatingServiceMocks.answerEstimatingCopilotQuestion).toHaveBeenCalled();
   });
+
+  it("requires generationRunId before promotion", async () => {
+    await expect(
+      invokeRoute("post", "/:id/estimating/promote", {
+        params: { id: "deal-1" },
+        body: {},
+      })
+    ).rejects.toMatchObject({ statusCode: 400 });
+  });
 });

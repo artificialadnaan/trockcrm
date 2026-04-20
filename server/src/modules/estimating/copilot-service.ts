@@ -25,7 +25,27 @@ export async function getEstimatingWorkflowState(tenantDb: TenantDb, dealId: str
       .from(estimateExtractions)
       .where(eq(estimateExtractions.dealId, dealId))
       .orderBy(desc(estimateExtractions.createdAt)),
-    tenantDb.select().from(estimateExtractionMatches).orderBy(desc(estimateExtractionMatches.createdAt)),
+    tenantDb
+      .select({
+        id: estimateExtractionMatches.id,
+        extractionId: estimateExtractionMatches.extractionId,
+        catalogItemId: estimateExtractionMatches.catalogItemId,
+        catalogCodeId: estimateExtractionMatches.catalogCodeId,
+        historicalLineItemId: estimateExtractionMatches.historicalLineItemId,
+        matchType: estimateExtractionMatches.matchType,
+        matchScore: estimateExtractionMatches.matchScore,
+        status: estimateExtractionMatches.status,
+        reasonJson: estimateExtractionMatches.reasonJson,
+        evidenceJson: estimateExtractionMatches.evidenceJson,
+        createdAt: estimateExtractionMatches.createdAt,
+      })
+      .from(estimateExtractionMatches)
+      .innerJoin(
+        estimateExtractions,
+        eq(estimateExtractionMatches.extractionId, estimateExtractions.id)
+      )
+      .where(eq(estimateExtractions.dealId, dealId))
+      .orderBy(desc(estimateExtractionMatches.createdAt)),
     tenantDb
       .select()
       .from(estimatePricingRecommendations)

@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, isNull, or } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import {
@@ -47,7 +47,7 @@ export async function listCatalogCandidatesForMatching(
       and(
         eq(costCatalogItems.sourceId, sourceId),
         eq(costCatalogItems.snapshotVersionId, snapshotVersionId),
-        eq(costCatalogItemCodes.isPrimary, true)
+        or(isNull(costCatalogItemCodes.id), eq(costCatalogItemCodes.isPrimary, true))
       )
     );
 }

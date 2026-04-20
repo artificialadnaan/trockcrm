@@ -35,8 +35,23 @@ interface DealEstimatesTabProps {
   dealId: string;
 }
 
+interface EstimatingWorkflowState {
+  documents: any[];
+  extractionRows: any[];
+  matchRows: any[];
+  pricingRows: any[];
+  reviewEvents: any[];
+}
+
 export function DealEstimatesTab({ dealId }: DealEstimatesTabProps) {
   const [sections, setSections] = useState<EstimateSection[]>([]);
+  const [workflow, setWorkflow] = useState<EstimatingWorkflowState>({
+    documents: [],
+    extractionRows: [],
+    matchRows: [],
+    pricingRows: [],
+    reviewEvents: [],
+  });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
@@ -46,10 +61,12 @@ export function DealEstimatesTab({ dealId }: DealEstimatesTabProps) {
   const fetchEstimates = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await api<{ sections: EstimateSection[] }>(
-        `/deals/${dealId}/estimates`
-      );
-      setSections(data.sections);
+      const [estimateData, workflowData] = await Promise.all([
+        api<{ sections: EstimateSection[] }>(`/deals/${dealId}/estimates`),
+        api<EstimatingWorkflowState>(`/deals/${dealId}/estimating`),
+      ]);
+      setSections(estimateData.sections);
+      setWorkflow(workflowData);
       setError(null);
     } catch (err: unknown) {
       toast.error(err instanceof Error ? err.message : "Failed to load estimates");
@@ -129,11 +146,11 @@ export function DealEstimatesTab({ dealId }: DealEstimatesTabProps) {
     <div className="space-y-4">
       <EstimatingWorkflowShell
         dealId={dealId}
-        documents={[]}
-        extractionRows={[]}
-        matchRows={[]}
-        pricingRows={[]}
-        reviewEvents={[]}
+        documents={workflow.documents}
+        extractionRows={workflow.extractionRows}
+        matchRows={workflow.matchRows}
+        pricingRows={workflow.pricingRows}
+        reviewEvents={workflow.reviewEvents}
         copilotEnabled
       />
       {sections.length === 0 && !addingSection ? (

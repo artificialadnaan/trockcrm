@@ -1,4 +1,4 @@
-import { desc, eq } from "drizzle-orm";
+import { desc, eq, ne } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import { deals, estimateLineItems, estimateSections } from "@trock-crm/shared/schema";
@@ -27,6 +27,7 @@ export async function getHistoricalPricingSignals(tenantDb: TenantDb, dealId: st
     })
     .from(estimateLineItems)
     .innerJoin(estimateSections, eq(estimateLineItems.sectionId, estimateSections.id))
+    .where(ne(estimateSections.dealId, dealId))
     .orderBy(desc(estimateLineItems.updatedAt))
     .limit(200);
 

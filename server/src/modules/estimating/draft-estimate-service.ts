@@ -6,8 +6,10 @@ import {
   estimateExtractionMatches,
   estimatePricingRecommendations,
   estimateReviewEvents,
+  estimateSections,
 } from "@trock-crm/shared/schema";
 import { createLineItem, createSection } from "../deals/estimate-service.js";
+import { AppError } from "../../middleware/error-handler.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -96,6 +98,27 @@ function groupRecommendationsIntoSections(
   }));
 }
 
+async function getOrCreateEstimateSection(
+  tenantDb: TenantDb,
+  dealId: string,
+  sectionName: string
+) {
+  const [existingSection] = await tenantDb
+    .select()
+    .from(estimateSections)
+    .where(
+      and(
+        eq(estimateSections.dealId, dealId),
+        eq(estimateSections.name, sectionName)
+      )
+    )
+    .limit(1);
+
+  if (existingSection) return existingSection;
+
+  return createSection(tenantDb as any, dealId, sectionName);
+}
+
 export async function promoteApprovedRecommendationsToEstimate({
   tenantDb,
   dealId,
@@ -121,7 +144,11 @@ export async function promoteApprovedRecommendationsToEstimate({
   );
 
   for (const sectionGroup of groupRecommendationsIntoSections(recommendations)) {
-    const section = await createSection(tenantDb as any, dealId, sectionGroup.sectionName);
+    const section = await getOrCreateEstimateSection(
+      tenantDb,
+      dealId,
+      sectionGroup.sectionName
+    );
 
     for (const line of sectionGroup.lines) {
       const lineItem = await createLineItem(tenantDb as any, dealId, section.id, {
@@ -163,6 +190,10 @@ export async function approveEstimateRecommendation(args: {
       )
     )
     .returning();
+
+  if (!recommendation) {
+    throw new AppError(404, "Estimate recommendation not found");
+  }
 
   await args.tenantDb.insert(estimateReviewEvents).values({
     dealId: args.dealId,
