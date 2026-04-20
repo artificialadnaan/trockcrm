@@ -87,6 +87,15 @@ describe("estimating workflow routes", () => {
       matchRows: [],
       pricingRows: [],
       reviewEvents: [],
+      summary: {
+        documentCount: 0,
+        extractionCount: 0,
+        matchCount: 0,
+        recommendationCount: 0,
+        approvedRecommendationCount: 0,
+        reviewEventCount: 0,
+      },
+      promotionReady: false,
     });
 
     const { res } = await invokeRoute("get", "/:id/estimating", {
@@ -95,6 +104,15 @@ describe("estimating workflow routes", () => {
 
     expect(res.statusCode).toBe(200);
     expect(estimatingServiceMocks.getEstimatingWorkflowState).toHaveBeenCalled();
+    expect(res.body.summary).toEqual({
+      documentCount: 0,
+      extractionCount: 0,
+      matchCount: 0,
+      recommendationCount: 0,
+      approvedRecommendationCount: 0,
+      reviewEventCount: 0,
+    });
+    expect(res.body.promotionReady).toBe(false);
   });
 
   it("returns copilot answers using server-built context", async () => {
