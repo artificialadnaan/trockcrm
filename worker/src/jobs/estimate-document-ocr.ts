@@ -43,7 +43,22 @@ export async function runEstimateDocumentOcr(payload: { documentId: string; deal
     },
   });
 
-  if (result.extractionCount === 0 || result.documentUpdate?.activeParseRunId !== result.parseRun.id) {
+  if (result.extractionCount === 0) {
+    return;
+  }
+
+  const [currentDocument] = await tenantDb
+    .select()
+    .from(estimateSourceDocuments)
+    .where(eq(estimateSourceDocuments.id, payload.documentId))
+    .limit(1);
+
+  if (
+    !currentDocument ||
+    currentDocument.activeParseRunId !== result.parseRun.id ||
+    currentDocument.parseStatus !== "completed" ||
+    currentDocument.ocrStatus !== "completed"
+  ) {
     return;
   }
 

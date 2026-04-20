@@ -5,6 +5,85 @@ import {
   reprocessEstimateSourceDocument,
 } from "../../../src/modules/estimating/document-service.js";
 
+describe("runEstimateDocumentOcr", () => {
+  it("does not queue estimate generation when current document ownership has moved on", async () => {
+    vi.resetModules();
+
+    const poolQuery = vi.fn().mockResolvedValue({
+      rows: [{ slug: "estimating" }],
+    });
+    const limit = vi
+      .fn()
+      .mockResolvedValueOnce([
+        {
+          id: "doc-ocr-1",
+          dealId: "deal-1",
+          filename: "plans.pdf",
+          parseProvider: "default",
+          parseProfile: "balanced",
+          parseStatus: "processing",
+          ocrStatus: "processing",
+          activeParseRunId: null,
+        },
+      ])
+      .mockResolvedValueOnce([
+        {
+          id: "doc-ocr-1",
+          dealId: "deal-1",
+          filename: "plans.pdf",
+          parseProvider: "default",
+          parseProfile: "balanced",
+          parseStatus: "processing",
+          ocrStatus: "processing",
+          activeParseRunId: "parse-run-newer",
+        },
+      ]);
+    const tenantDb = {
+      execute: vi.fn().mockResolvedValue(undefined),
+      select: vi.fn(() => ({
+        from: vi.fn(() => ({
+          where: vi.fn(() => ({
+            limit,
+          })),
+        })),
+      })),
+    } as any;
+    const drizzle = vi.fn().mockReturnValue(tenantDb);
+    const runEstimateDocumentParse = vi.fn().mockResolvedValue({
+      parseRun: {
+        id: "parse-run-1",
+      },
+      documentUpdate: {
+        activeParseRunId: "parse-run-1",
+        parseStatus: "completed",
+        ocrStatus: "completed",
+      },
+      pageCount: 1,
+      extractionCount: 2,
+    });
+
+    vi.doMock("drizzle-orm/node-postgres", () => ({
+      drizzle,
+    }));
+    vi.doMock("../../../../worker/src/db.js", () => ({
+      pool: {
+        query: poolQuery,
+      },
+    }));
+    vi.doMock("../../../../server/src/modules/estimating/document-parse-orchestrator.js", () => ({
+      runEstimateDocumentParse,
+    }));
+
+    const { runEstimateDocumentOcr } = await import("../../../../worker/src/jobs/estimate-document-ocr.js");
+
+    await runEstimateDocumentOcr({ documentId: "doc-ocr-1" }, "office-1");
+
+    expect(runEstimateDocumentParse).toHaveBeenCalled();
+    expect(limit).toHaveBeenCalledTimes(2);
+    expect(tenantDb.execute).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("createEstimateSourceDocument", () => {
   it("creates an uploaded estimating document and queues OCR", async () => {
     const enqueueEstimateDocumentOcr = vi.fn().mockResolvedValue(undefined);

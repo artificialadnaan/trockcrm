@@ -58,6 +58,8 @@ function createTenantDbMock(options: {
   concurrentActiveParseRunIdOnFailure?: string | null;
   concurrentDocumentStateOnFailure?: Record<string, any>;
   concurrentDocumentStateOnActivation?: Record<string, any>;
+  concurrentDocumentStateOnFailureWrite?: Record<string, any>;
+  concurrentDocumentStateOnArtifactActivation?: Record<string, any>;
 }) {
   const parseRuns = (options.existingParseRuns ?? []).map((row) => structuredClone(row));
   const updatedDocuments: Record<string, any>[] = [];
@@ -69,6 +71,8 @@ function createTenantDbMock(options: {
     ...(options.currentDocument ? structuredClone(options.currentDocument) : {}),
   };
   let activationRaceApplied = false;
+  let failureWriteRaceApplied = false;
+  let artifactActivationRaceApplied = false;
 
   const tenantDb = {
     insert: vi.fn((table: unknown) => ({
@@ -232,14 +236,32 @@ function createTenantDbMock(options: {
           throw new Error("simulated completion failure");
         }
 
+        if (
+          text.includes("parse_status = 'failed'") &&
+          options.concurrentDocumentStateOnFailureWrite &&
+          !failureWriteRaceApplied
+        ) {
+          Object.assign(documentState, options.concurrentDocumentStateOnFailureWrite);
+          failureWriteRaceApplied = true;
+        }
+
         const shouldClaim =
           candidateRun &&
-          (text.includes("parse_status = 'completed'")
+          (text.includes("parse_status = 'failed'")
+            ? documentState.activeParseRunId === candidateRun.id
+            : text.includes("parse_status = 'completed'")
             ? documentState.activeParseRunId === candidateRun.id
             : !currentOwner || compareParseRunPriority(candidateRun, currentOwner) >= 0);
 
         if (shouldClaim) {
-          if (text.includes("parse_status = 'completed'")) {
+          if (text.includes("parse_status = 'failed'")) {
+            documentState.parseStatus = "failed";
+            documentState.ocrStatus = "failed";
+            documentState.activeParseRunId = null;
+            documentState.parseProvider = candidateRun.parseProvider ?? "default";
+            documentState.parseProfile = candidateRun.parseProfile ?? "balanced";
+            documentState.parseErrorSummary = params.at(-3) ?? "failed";
+          } else if (text.includes("parse_status = 'completed'")) {
             documentState.parseStatus = "completed";
             documentState.ocrStatus = "completed";
             documentState.activeParseRunId = candidateRun.id;
@@ -258,6 +280,47 @@ function createTenantDbMock(options: {
           updatedDocuments.push({ ...documentState });
         }
 
+        return;
+      }
+
+      if (text.includes("with owning_document as")) {
+        const { documentId, parseRunId } = resolveDocumentAndRunParams(documentState.id, params);
+
+        if (
+          options.concurrentDocumentStateOnArtifactActivation &&
+          !artifactActivationRaceApplied
+        ) {
+          Object.assign(documentState, options.concurrentDocumentStateOnArtifactActivation);
+          artifactActivationRaceApplied = true;
+        }
+
+        const isCurrentCompletedOwner =
+          documentState.id === documentId &&
+          documentState.activeParseRunId === parseRunId &&
+          documentState.parseStatus === "completed" &&
+          documentState.ocrStatus === "completed";
+
+        if (!isCurrentCompletedOwner) {
+          return;
+        }
+
+        for (const page of pages) {
+          if (page.documentId === documentId) {
+            page.metadataJson = {
+              ...(page.metadataJson ?? {}),
+              activeArtifact: page.metadataJson?.sourceParseRunId === parseRunId,
+            };
+          }
+        }
+
+        for (const extraction of extractions) {
+          if (extraction.documentId === documentId) {
+            extraction.metadataJson = {
+              ...(extraction.metadataJson ?? {}),
+              activeArtifact: extraction.metadataJson?.sourceParseRunId === parseRunId,
+            };
+          }
+        }
         return;
       }
 
@@ -714,6 +777,77 @@ describe("runEstimateDocumentParse", () => {
     ]);
   });
 
+  it("does not overwrite a newer owner when failure state loses the compare-and-swap race", async () => {
+    const documentSnapshot = {
+      id: "doc-7",
+      dealId: "deal-1",
+      projectId: "project-1",
+      filename: "A7-plan.pdf",
+      documentType: "plan",
+      mimeType: "application/pdf",
+      storageKey: "stale/storage-key-a7.pdf",
+      contentHash: "r2/estimate-documents/doc-7.pdf",
+      activeParseRunId: "parse-run-old-active",
+    };
+    const { tenantDb, documentState, updatedDocuments, updatedParseRuns } = createTenantDbMock({
+      documentSnapshot,
+      currentDocument: {
+        activeParseRunId: "parse-run-1",
+        parseStatus: "processing",
+        ocrStatus: "processing",
+        parseProvider: "default",
+        parseProfile: "balanced",
+        parseErrorSummary: null,
+      },
+      failOnDocumentComplete: true,
+      concurrentDocumentStateOnFailureWrite: {
+        activeParseRunId: "parse-run-newer",
+        parseStatus: "processing",
+        ocrStatus: "processing",
+        parseProvider: "default",
+        parseProfile: "balanced",
+        parseErrorSummary: null,
+      },
+    });
+
+    await expect(
+      runEstimateDocumentParse({
+        tenantDb,
+        document: documentSnapshot,
+        options: {
+          provider: "default",
+          profile: "balanced",
+        },
+      })
+    ).rejects.toThrow("simulated completion failure");
+
+    expect(updatedParseRuns.at(-1)).toEqual(
+      expect.objectContaining({
+        id: "parse-run-1",
+        status: "failed",
+        errorSummary: "simulated completion failure",
+      })
+    );
+    expect(updatedDocuments).toEqual(
+      expect.not.arrayContaining([
+        expect.objectContaining({
+          parseStatus: "failed",
+          ocrStatus: "failed",
+          activeParseRunId: null,
+          parseErrorSummary: "simulated completion failure",
+        }),
+      ])
+    );
+    expect(documentState).toEqual(
+      expect.objectContaining({
+        activeParseRunId: "parse-run-newer",
+        parseStatus: "processing",
+        ocrStatus: "processing",
+        parseErrorSummary: null,
+      })
+    );
+  });
+
   it("does not let an older run steal activation from a newer run that is already current", async () => {
     const documentSnapshot = {
       id: "doc-3",
@@ -859,6 +993,125 @@ describe("runEstimateDocumentParse", () => {
         id: "parse-run-1",
         status: "completed",
       })
+    );
+  });
+
+  it("does not flip artifact activeness if ownership changes before artifact sync runs", async () => {
+    const documentSnapshot = {
+      id: "doc-8",
+      dealId: "deal-1",
+      projectId: "project-1",
+      filename: "A8-plan.pdf",
+      documentType: "plan",
+      mimeType: "application/pdf",
+      storageKey: "stale/storage-key-a8.pdf",
+      contentHash: "r2/estimate-documents/doc-8.pdf",
+      activeParseRunId: null,
+    };
+    const { tenantDb, pages, extractions, documentState } = createTenantDbMock({
+      documentSnapshot,
+      currentDocument: {
+        activeParseRunId: "parse-run-1",
+        parseStatus: "processing",
+        ocrStatus: "processing",
+        parseProvider: "default",
+        parseProfile: "balanced",
+        parseErrorSummary: null,
+      },
+      existingPages: [
+        {
+          id: "page-old-8",
+          documentId: "doc-8",
+          pageNumber: 1,
+          pageImageKey: "r2/estimate-documents/last-good.pdf",
+          metadataJson: {
+            sourceParseRunId: "parse-run-old",
+            sourceKind: "pdf_page",
+            activeArtifact: true,
+          },
+        },
+      ],
+      existingExtractions: [
+        {
+          id: "extraction-old-8",
+          documentId: "doc-8",
+          rawLabel: "last good line",
+          normalizedLabel: "last good line",
+          metadataJson: {
+            sourceParseRunId: "parse-run-old",
+            activeArtifact: true,
+            extractionProvider: "default",
+          },
+        },
+      ],
+      concurrentDocumentStateOnArtifactActivation: {
+        activeParseRunId: "parse-run-newer",
+        parseStatus: "processing",
+        ocrStatus: "processing",
+        parseProvider: "default",
+        parseProfile: "balanced",
+        parseErrorSummary: null,
+      },
+    });
+
+    const result = await runEstimateDocumentParse({
+      tenantDb,
+      document: documentSnapshot,
+      options: {
+        provider: "default",
+        profile: "balanced",
+      },
+    });
+
+    expect(result.documentUpdate).toEqual(
+      expect.objectContaining({
+        activeParseRunId: "parse-run-1",
+        parseStatus: "completed",
+        ocrStatus: "completed",
+      })
+    );
+    expect(documentState).toEqual(
+      expect.objectContaining({
+        activeParseRunId: "parse-run-newer",
+        parseStatus: "processing",
+        ocrStatus: "processing",
+      })
+    );
+    expect(pages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "page-old-8",
+          metadataJson: expect.objectContaining({
+            sourceParseRunId: "parse-run-old",
+            activeArtifact: true,
+          }),
+        }),
+        expect.objectContaining({
+          documentId: "doc-8",
+          metadataJson: expect.objectContaining({
+            sourceParseRunId: "parse-run-1",
+            activeArtifact: false,
+          }),
+        }),
+      ])
+    );
+    expect(extractions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "extraction-old-8",
+          metadataJson: expect.objectContaining({
+            sourceParseRunId: "parse-run-old",
+            activeArtifact: true,
+          }),
+        }),
+        expect.objectContaining({
+          documentId: "doc-8",
+          metadataJson: expect.objectContaining({
+            sourceParseRunId: "parse-run-1",
+            activeArtifact: false,
+          }),
+        }),
+      ])
     );
   });
 

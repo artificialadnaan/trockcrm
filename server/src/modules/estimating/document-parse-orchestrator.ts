@@ -65,31 +65,41 @@ function buildDeterministicPageContent(input: {
   };
 }
 
-async function markArtifactsInactive(
+async function syncActiveArtifactsForCurrentRun(
   tenantDb: TenantDb,
   documentId: string,
   parseRunId: string
 ) {
   await tenantDb.execute(sql`
-    update estimate_document_pages
+    with owning_document as (
+      select id
+      from estimate_source_documents
+      where id = ${documentId}
+        and active_parse_run_id = ${parseRunId}
+        and parse_status = 'completed'
+        and ocr_status = 'completed'
+    ),
+    updated_pages as (
+      update estimate_document_pages as page
+      set metadata_json =
+        coalesce(page.metadata_json, '{}'::jsonb)
+        || jsonb_build_object(
+          'activeArtifact',
+          page.metadata_json->>'sourceParseRunId' = ${parseRunId}
+        )
+      from owning_document
+      where page.document_id = owning_document.id
+      returning 1
+    )
+    update estimate_extractions as extraction
     set metadata_json =
-      coalesce(metadata_json, '{}'::jsonb)
+      coalesce(extraction.metadata_json, '{}'::jsonb)
       || jsonb_build_object(
         'activeArtifact',
-        metadata_json->>'sourceParseRunId' = ${parseRunId}
+        extraction.metadata_json->>'sourceParseRunId' = ${parseRunId}
       )
-    where document_id = ${documentId}
-  `);
-
-  await tenantDb.execute(sql`
-    update estimate_extractions
-    set metadata_json =
-      coalesce(metadata_json, '{}'::jsonb)
-      || jsonb_build_object(
-        'activeArtifact',
-        metadata_json->>'sourceParseRunId' = ${parseRunId}
-      )
-    where document_id = ${documentId}
+    from owning_document
+    where extraction.document_id = owning_document.id
   `);
 }
 
@@ -224,8 +234,6 @@ async function markParseFailed(args: {
   options: { provider: string; profile: string };
   errorSummary: string;
 }) {
-  const currentDocument = await getCurrentDocumentState(args.tenantDb, args.document.id);
-
   const [parseRun] = await args.tenantDb
     .update(estimateDocumentParseRuns)
     .set({
@@ -236,33 +244,20 @@ async function markParseFailed(args: {
     .where(eq(estimateDocumentParseRuns.id, args.parseRunId))
     .returning();
 
-  const hasSupersededActiveRun =
-    currentDocument?.activeParseRunId != null &&
-    currentDocument.activeParseRunId !== args.parseRunId;
-  const isQueuedRequeueState =
-    currentDocument?.activeParseRunId == null &&
-    currentDocument?.parseStatus === "queued" &&
-    currentDocument?.ocrStatus === "queued";
+  await args.tenantDb.execute(sql`
+    update estimate_source_documents as document
+    set
+      parse_status = 'failed',
+      ocr_status = 'failed',
+      parse_provider = ${args.options.provider},
+      parse_profile = ${args.options.profile},
+      parse_error_summary = ${args.errorSummary},
+      active_parse_run_id = null
+    where document.id = ${args.document.id}
+      and document.active_parse_run_id = ${args.parseRunId}
+  `);
 
-  if (hasSupersededActiveRun || isQueuedRequeueState) {
-    return { parseRun, documentUpdate: currentDocument };
-  }
-
-  const [documentUpdate] = await args.tenantDb
-    .update(estimateSourceDocuments)
-    .set({
-      parseStatus: "failed",
-      ocrStatus: "failed",
-      parseProvider: args.options.provider,
-      parseProfile: args.options.profile,
-      parseErrorSummary: args.errorSummary,
-      activeParseRunId:
-        currentDocument?.activeParseRunId === args.parseRunId
-          ? null
-          : currentDocument?.activeParseRunId ?? null,
-    })
-    .where(eq(estimateSourceDocuments.id, args.document.id))
-    .returning();
+  const documentUpdate = await getCurrentDocumentState(args.tenantDb, args.document.id);
 
   return { parseRun, documentUpdate };
 }
@@ -402,7 +397,7 @@ export async function runEstimateDocumentParse(args: {
       });
 
       if (documentUpdate?.activeParseRunId === parseRun.id && documentUpdate.parseStatus === "completed") {
-        await markArtifactsInactive(args.tenantDb, args.document.id, parseRun.id);
+        await syncActiveArtifactsForCurrentRun(args.tenantDb, args.document.id, parseRun.id);
       }
     }
 
