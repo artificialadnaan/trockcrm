@@ -23,6 +23,65 @@ function formatHistoryEventLabel(value: string) {
   return value.split("_").join(" ");
 }
 
+function formatPolicyDiffValue(value: number | string | null | undefined, mode?: "percent") {
+  if (value == null) return "Not set";
+  if (mode === "percent") return `${value}%`;
+  return String(value);
+}
+
+export function buildPolicyDiffRows(
+  proposedChange: InterventionPolicyRecommendation["proposedChange"]
+) {
+  if (!proposedChange) return [] as Array<{ label: string; before: string; after: string }>;
+
+  const rows =
+    proposedChange.kind === "snooze_policy_adjustment"
+      ? [
+          {
+            label: "Max snooze days",
+            before: formatPolicyDiffValue(proposedChange.currentValue.maxSnoozeDays),
+            after: formatPolicyDiffValue(proposedChange.proposedValue.maxSnoozeDays),
+          },
+          {
+            label: "Breach review threshold",
+            before: formatPolicyDiffValue(proposedChange.currentValue.breachReviewThresholdPercent, "percent"),
+            after: formatPolicyDiffValue(proposedChange.proposedValue.breachReviewThresholdPercent, "percent"),
+          },
+        ]
+      : proposedChange.kind === "escalation_policy_adjustment"
+        ? [
+            {
+              label: "Routing mode",
+              before: formatPolicyDiffValue(proposedChange.currentValue.routingMode),
+              after: formatPolicyDiffValue(proposedChange.proposedValue.routingMode),
+            },
+            {
+              label: "Escalation threshold",
+              before: formatPolicyDiffValue(proposedChange.currentValue.escalationThresholdPercent, "percent"),
+              after: formatPolicyDiffValue(proposedChange.proposedValue.escalationThresholdPercent, "percent"),
+            },
+          ]
+        : [
+            {
+              label: "Balancing mode",
+              before: formatPolicyDiffValue(proposedChange.currentValue.balancingMode),
+              after: formatPolicyDiffValue(proposedChange.proposedValue.balancingMode),
+            },
+            {
+              label: "Overload share threshold",
+              before: formatPolicyDiffValue(proposedChange.currentValue.overloadSharePercent, "percent"),
+              after: formatPolicyDiffValue(proposedChange.proposedValue.overloadSharePercent, "percent"),
+            },
+            {
+              label: "Minimum high-risk cases",
+              before: formatPolicyDiffValue(proposedChange.currentValue.minHighRiskCases),
+              after: formatPolicyDiffValue(proposedChange.proposedValue.minHighRiskCases),
+            },
+          ];
+
+  return rows.filter((row) => row.before !== row.after);
+}
+
 function PolicyRecommendationCard({
   recommendation,
   onRefresh,
@@ -89,6 +148,7 @@ function PolicyRecommendationCard({
   }
 
   const applyStatus = localApplyStatus;
+  const diffRows = buildPolicyDiffRows(recommendation.proposedChange);
   const canApply =
     recommendation.applyEligibility.eligible &&
     recommendation.proposedChange &&
@@ -158,6 +218,11 @@ function PolicyRecommendationCard({
           </div>
         )}
       </div>
+      {diffRows.length ? (
+        <div className="mt-3 text-sm text-muted-foreground">
+          {diffRows.length} policy value{diffRows.length === 1 ? "" : "s"} would change.
+        </div>
+      ) : null}
 
       {showReviewDetails && (
         <div className="mt-4 rounded-lg border border-border/70 bg-muted/20 px-3 py-3 text-sm leading-6 text-gray-900">
@@ -176,8 +241,32 @@ function PolicyRecommendationCard({
         <div className="mt-4 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-3 text-sm leading-6 text-emerald-950">
           <div className="font-medium">Apply preview</div>
           <div className="mt-2">Target policy surface: {recommendation.proposedChange.policyLabel}</div>
-          <div className="mt-2">Current value: {renderPolicyValue(recommendation.proposedChange.currentValue as Record<string, unknown>)}</div>
-          <div className="mt-2">
+          <div className="mt-3 rounded-lg border border-emerald-200/80 bg-white/70 px-3 py-3">
+            <div className="text-[11px] uppercase tracking-widest text-emerald-900/70">Before / after policy diff</div>
+            {diffRows.length ? (
+              <div className="mt-3 space-y-2">
+                {diffRows.map((row) => (
+                  <div key={row.label} className="grid gap-2 rounded-md border border-emerald-200/70 px-3 py-2 md:grid-cols-[1.2fr_1fr_1fr]">
+                    <div className="font-medium">{row.label}</div>
+                    <div>
+                      <div className="text-[10px] uppercase tracking-widest text-emerald-900/60">Before</div>
+                      <div>{row.before}</div>
+                    </div>
+                    <div>
+                      <div className="text-[10px] uppercase tracking-widest text-emerald-900/60">After</div>
+                      <div>{row.after}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="mt-2 text-emerald-900/80">No policy value change is required.</div>
+            )}
+          </div>
+          <div className="mt-2 text-emerald-900/80">
+            Current value: {renderPolicyValue(recommendation.proposedChange.currentValue as Record<string, unknown>)}
+          </div>
+          <div className="mt-2 text-emerald-900/80">
             Proposed value: {renderPolicyValue(recommendation.proposedChange.proposedValue as Record<string, unknown>)}
           </div>
           <div className="mt-2 text-emerald-900/80">{recommendation.expectedImpact}</div>

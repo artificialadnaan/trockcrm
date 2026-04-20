@@ -499,6 +499,7 @@ describe("AdminInterventionAnalyticsPage", () => {
     expect(html).toContain("Waiting-on-customer breach rate");
     expect(html).toContain("Why this qualified");
     expect(html).toContain("Apply change");
+    expect(html).toContain("2 policy values would change.");
     expect(html).toContain("Review recommendation quality");
     expect(html).toContain("Recent history: 2 events");
     expect(html).not.toContain("Manager Readout");
