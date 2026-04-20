@@ -15,7 +15,7 @@
 - Create: `migrations/0028_cost_catalog_and_estimate_generation.sql`
   Responsibility: add local Procore-backed catalog tables in `public` and tenant-scoped estimate generation tables using the repo's `office_%` reconciliation migration pattern with a new, non-colliding migration number after the existing `0027` files.
 - Create: `shared/src/schema/public/cost-catalog-sources.ts`
-  Responsibility: schema for catalog source metadata and sync runs.
+  Responsibility: schema for catalog source metadata, sync runs, and snapshot versions.
 - Create: `shared/src/schema/public/cost-catalog-items.ts`
   Responsibility: schema for catalog items, codes, item-code mappings, and prices.
 - Create: `shared/src/schema/tenant/estimate-source-documents.ts`
@@ -111,6 +111,7 @@ import { describe, expect, it } from "vitest";
 import {
   costCatalogSources,
   costCatalogSyncRuns,
+  costCatalogSnapshotVersions,
   costCatalogCodes,
   costCatalogItems,
   costCatalogItemCodes,
@@ -128,6 +129,7 @@ describe("estimating schema exports", () => {
   it("exports the full catalog and generation schema set", () => {
     expect(costCatalogSources).toBeDefined();
     expect(costCatalogSyncRuns).toBeDefined();
+    expect(costCatalogSnapshotVersions).toBeDefined();
     expect(costCatalogCodes).toBeDefined();
     expect(costCatalogItems).toBeDefined();
     expect(costCatalogItemCodes).toBeDefined();
@@ -321,7 +323,8 @@ CREATE TABLE IF NOT EXISTS estimate_generation_runs (
   error_summary text,
   started_at timestamptz NOT NULL DEFAULT now(),
   completed_at timestamptz,
-  catalog_sync_run_id uuid REFERENCES public.cost_catalog_sync_runs(id) ON DELETE SET NULL
+  catalog_sync_run_id uuid REFERENCES public.cost_catalog_sync_runs(id) ON DELETE SET NULL,
+  catalog_snapshot_version_id uuid REFERENCES public.cost_catalog_snapshot_versions(id) ON DELETE SET NULL
 );
 
 CREATE TABLE IF NOT EXISTS estimate_pricing_recommendations (
@@ -361,7 +364,11 @@ CREATE TABLE IF NOT EXISTS estimate_review_events (
 - [ ] **Step 4: Add the Drizzle schema files and exports**
 
 ```ts
-export { costCatalogSources, costCatalogSyncRuns } from "./public/cost-catalog-sources.js";
+export {
+  costCatalogSources,
+  costCatalogSyncRuns,
+  costCatalogSnapshotVersions,
+} from "./public/cost-catalog-sources.js";
 export {
   costCatalogCodes,
   costCatalogItems,
@@ -911,7 +918,11 @@ export async function getHistoricalPricingSignals(db: TenantDb, dealId: string) 
 - [ ] **Step 4: Implement the catalog read model used by matching and pricing**
 
 ```ts
-export async function listCatalogCandidatesForMatching(db: TenantDb, sourceId: string) {
+export async function listCatalogCandidatesForMatching(
+  db: TenantDb,
+  sourceId: string,
+  snapshotVersionId: string
+) {
   return db
     .select({
       id: costCatalogItems.id,
@@ -924,7 +935,13 @@ export async function listCatalogCandidatesForMatching(db: TenantDb, sourceId: s
     .leftJoin(costCatalogItemCodes, eq(costCatalogItemCodes.catalogItemId, costCatalogItems.id))
     .leftJoin(costCatalogCodes, eq(costCatalogCodes.id, costCatalogItemCodes.catalogCodeId))
     .leftJoin(costCatalogPrices, eq(costCatalogPrices.catalogItemId, costCatalogItems.id))
-    .where(and(eq(costCatalogItems.sourceId, sourceId), eq(costCatalogItemCodes.isPrimary, true)));
+    .where(
+      and(
+        eq(costCatalogItems.sourceId, sourceId),
+        eq(costCatalogItems.snapshotVersionId, snapshotVersionId),
+        eq(costCatalogItemCodes.isPrimary, true)
+      )
+    );
 }
 ```
 
@@ -1018,9 +1035,14 @@ export async function rankExtractionMatches({
 
 ```ts
 const historicalSignals = await getHistoricalPricingSignals(tenantDb, deal.id);
+const catalogSnapshotVersionId = await resolveActiveCatalogSnapshotVersionId(tenantDb, catalogSourceId);
 
 for (const extraction of pendingExtractions) {
-  const catalogItems = await listCatalogCandidatesForMatching(tenantDb, catalogSourceId);
+  const catalogItems = await listCatalogCandidatesForMatching(
+    tenantDb,
+    catalogSourceId,
+    catalogSnapshotVersionId
+  );
   const matches = await rankExtractionMatches({
     extraction,
     catalogItems,
@@ -1055,6 +1077,7 @@ for (const extraction of pendingExtractions) {
     topMatch,
     recommendation,
     runId,
+    catalogSnapshotVersionId,
   });
 }
 ```
