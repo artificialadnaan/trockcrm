@@ -36,12 +36,13 @@ function resolveDocumentAndRunParams(documentId: string, params: any[]) {
 function createTenantDbMock(options: {
   documentSnapshot: Record<string, any>;
   currentDocument?: Record<string, any>;
+  existingParseRuns?: Record<string, any>[];
   existingPages?: Record<string, any>[];
   existingExtractions?: Record<string, any>[];
   failOnDocumentComplete?: boolean;
   concurrentActiveParseRunIdOnFailure?: string | null;
 }) {
-  const insertedParseRuns: Record<string, any>[] = [];
+  const parseRuns = (options.existingParseRuns ?? []).map((row) => structuredClone(row));
   const updatedDocuments: Record<string, any>[] = [];
   const updatedParseRuns: Record<string, any>[] = [];
   const pages = (options.existingPages ?? []).map((row) => structuredClone(row));
@@ -78,7 +79,7 @@ function createTenantDbMock(options: {
                 createdAt: new Date("2026-04-20T12:00:00.000Z"),
                 ...value,
               };
-              insertedParseRuns.push(parseRun);
+              parseRuns.push(parseRun);
               return [parseRun];
             }
 
@@ -101,10 +102,17 @@ function createTenantDbMock(options: {
         where: vi.fn(() => ({
           returning: vi.fn().mockImplementation(async () => {
             if (table === estimateDocumentParseRuns) {
+              const previous =
+                parseRuns.find((run) => run.id === "parse-run-1") ??
+                parseRuns.find((run) => run.documentId === options.documentSnapshot.id);
               const parseRun = {
-                ...insertedParseRuns[0],
+                ...previous,
                 ...value,
               };
+              const index = parseRuns.findIndex((run) => run.id === parseRun.id);
+              if (index >= 0) {
+                parseRuns[index] = parseRun;
+              }
               updatedParseRuns.push(parseRun);
               return [parseRun];
             }
@@ -133,9 +141,27 @@ function createTenantDbMock(options: {
     select: vi.fn(() => ({
       from: vi.fn((table: unknown) => ({
         where: vi.fn(() => ({
+          orderBy: vi.fn(() => ({
+            limit: vi.fn().mockImplementation(async () => {
+              if (table === estimateDocumentParseRuns) {
+                return [...parseRuns]
+                  .sort((left, right) => {
+                    const startedDiff =
+                      new Date(right.startedAt ?? 0).getTime() - new Date(left.startedAt ?? 0).getTime();
+                    if (startedDiff !== 0) return startedDiff;
+                    return new Date(right.createdAt ?? 0).getTime() - new Date(left.createdAt ?? 0).getTime();
+                  })
+                  .map((row) => ({ ...row }));
+              }
+              return [];
+            }),
+          })),
           limit: vi.fn().mockImplementation(async () => {
             if (table === estimateSourceDocuments) {
               return [{ ...documentState }];
+            }
+            if (table === estimateDocumentParseRuns) {
+              return [...parseRuns].map((row) => ({ ...row }));
             }
             return [];
           }),
@@ -203,6 +229,7 @@ function createTenantDbMock(options: {
     pages,
     extractions,
     documentState,
+    parseRuns,
     updatedDocuments,
     updatedParseRuns,
   };
@@ -458,5 +485,152 @@ describe("runEstimateDocumentParse", () => {
       })
     );
     expect(documentState.activeParseRunId).toBe("parse-run-newer");
+  });
+
+  it("does not let an older run steal activation from a newer run that is already current", async () => {
+    const documentSnapshot = {
+      id: "doc-3",
+      dealId: "deal-1",
+      projectId: "project-1",
+      filename: "A3-plan.pdf",
+      documentType: "plan",
+      mimeType: "application/pdf",
+      storageKey: "stale/storage-key-a3.pdf",
+      contentHash: "r2/estimate-documents/doc-3.pdf",
+      activeParseRunId: "parse-run-old-active",
+    };
+    const { tenantDb, pages, extractions, documentState, parseRuns, updatedDocuments, updatedParseRuns } =
+      createTenantDbMock({
+        documentSnapshot,
+        currentDocument: {
+          activeParseRunId: "parse-run-newer",
+          parseStatus: "processing",
+          ocrStatus: "processing",
+        },
+        existingParseRuns: [
+          {
+            id: "parse-run-newer",
+            documentId: "doc-3",
+            status: "processing",
+            parseProfile: "balanced",
+            parseProvider: "default",
+            errorSummary: null,
+            startedAt: new Date("2026-04-20T12:05:00.000Z"),
+            completedAt: null,
+            createdAt: new Date("2026-04-20T12:05:00.000Z"),
+          },
+        ],
+        existingPages: [
+          {
+            id: "page-newer-1",
+            documentId: "doc-3",
+            pageNumber: 1,
+            pageImageKey: "r2/estimate-documents/newer.pdf",
+            metadataJson: {
+              sourceParseRunId: "parse-run-newer",
+              sourceKind: "pdf_page",
+              activeArtifact: true,
+            },
+          },
+        ],
+        existingExtractions: [
+          {
+            id: "extraction-newer-1",
+            documentId: "doc-3",
+            rawLabel: "newer line",
+            normalizedLabel: "newer line",
+            metadataJson: {
+              sourceParseRunId: "parse-run-newer",
+              activeArtifact: true,
+              extractionProvider: "default",
+            },
+          },
+        ],
+      });
+
+    const result = await runEstimateDocumentParse({
+      tenantDb,
+      document: documentSnapshot,
+      options: {
+        provider: "default",
+        profile: "balanced",
+      },
+    });
+
+    expect(result.parseRun).toEqual(
+      expect.objectContaining({
+        id: "parse-run-1",
+        status: "completed",
+      })
+    );
+    expect(result.documentUpdate).toEqual(
+      expect.objectContaining({
+        activeParseRunId: "parse-run-newer",
+        parseStatus: "processing",
+        ocrStatus: "processing",
+      })
+    );
+    expect(parseRuns).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "parse-run-1",
+          status: "completed",
+        }),
+        expect.objectContaining({
+          id: "parse-run-newer",
+          status: "processing",
+        }),
+      ])
+    );
+    expect(updatedDocuments).toEqual(
+      expect.not.arrayContaining([
+        expect.objectContaining({
+          activeParseRunId: "parse-run-1",
+        }),
+      ])
+    );
+    expect(documentState.activeParseRunId).toBe("parse-run-newer");
+    expect(pages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "page-newer-1",
+          metadataJson: expect.objectContaining({
+            sourceParseRunId: "parse-run-newer",
+            activeArtifact: true,
+          }),
+        }),
+        expect.objectContaining({
+          documentId: "doc-3",
+          metadataJson: expect.objectContaining({
+            sourceParseRunId: "parse-run-1",
+            activeArtifact: false,
+          }),
+        }),
+      ])
+    );
+    expect(extractions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "extraction-newer-1",
+          metadataJson: expect.objectContaining({
+            sourceParseRunId: "parse-run-newer",
+            activeArtifact: true,
+          }),
+        }),
+        expect.objectContaining({
+          documentId: "doc-3",
+          metadataJson: expect.objectContaining({
+            sourceParseRunId: "parse-run-1",
+            activeArtifact: false,
+          }),
+        }),
+      ])
+    );
+    expect(updatedParseRuns.at(-1)).toEqual(
+      expect.objectContaining({
+        id: "parse-run-1",
+        status: "completed",
+      })
+    );
   });
 });

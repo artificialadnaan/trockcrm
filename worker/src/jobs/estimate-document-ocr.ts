@@ -43,7 +43,7 @@ export async function runEstimateDocumentOcr(payload: { documentId: string; deal
     },
   });
 
-  if (result.extractionCount === 0) {
+  if (result.extractionCount === 0 || result.documentUpdate?.activeParseRunId !== result.parseRun.id) {
     return;
   }
 

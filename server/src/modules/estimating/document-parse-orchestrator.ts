@@ -1,4 +1,4 @@
-import { eq, sql } from "drizzle-orm";
+import { desc, eq, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import {
@@ -87,6 +87,35 @@ async function markArtifactsInactive(
   `);
 }
 
+async function getCurrentDocumentState(tenantDb: TenantDb, documentId: string) {
+  const [currentDocument] = await tenantDb
+    .select()
+    .from(estimateSourceDocuments)
+    .where(eq(estimateSourceDocuments.id, documentId))
+    .limit(1);
+
+  return currentDocument ?? null;
+}
+
+async function isFreshestEligibleParseRun(
+  tenantDb: TenantDb,
+  documentId: string,
+  parseRunId: string
+) {
+  const parseRuns = await tenantDb
+    .select()
+    .from(estimateDocumentParseRuns)
+    .where(eq(estimateDocumentParseRuns.documentId, documentId))
+    .orderBy(
+      desc(estimateDocumentParseRuns.startedAt),
+      desc(estimateDocumentParseRuns.createdAt)
+    )
+    .limit(10);
+
+  const newestEligibleRun = parseRuns.find((run) => run.status !== "failed");
+  return newestEligibleRun?.id === parseRunId;
+}
+
 async function cleanupFailedParseArtifacts(
   tenantDb: TenantDb,
   documentId: string,
@@ -112,11 +141,7 @@ async function markParseFailed(args: {
   options: { provider: string; profile: string };
   errorSummary: string;
 }) {
-  const [currentDocument] = await args.tenantDb
-    .select()
-    .from(estimateSourceDocuments)
-    .where(eq(estimateSourceDocuments.id, args.document.id))
-    .limit(1);
+  const currentDocument = await getCurrentDocumentState(args.tenantDb, args.document.id);
 
   const [parseRun] = await args.tenantDb
     .update(estimateDocumentParseRuns)
@@ -271,21 +296,31 @@ export async function runEstimateDocumentParse(args: {
       .where(eq(estimateDocumentParseRuns.id, parseRun.id))
       .returning();
 
-    const [documentUpdate] = await args.tenantDb
-      .update(estimateSourceDocuments)
-      .set({
-        parseStatus: "completed",
-        ocrStatus: "completed",
-        activeParseRunId: parseRun.id,
-        parseProvider: options.provider,
-        parseProfile: options.profile,
-        parseErrorSummary: null,
-        parsedAt: new Date(),
-      })
-      .where(eq(estimateSourceDocuments.id, args.document.id))
-      .returning();
+    const canActivate = await isFreshestEligibleParseRun(
+      args.tenantDb,
+      args.document.id,
+      parseRun.id
+    );
 
-    await markArtifactsInactive(args.tenantDb, args.document.id, parseRun.id);
+    let documentUpdate = await getCurrentDocumentState(args.tenantDb, args.document.id);
+    if (canActivate) {
+      const [activatedDocument] = await args.tenantDb
+        .update(estimateSourceDocuments)
+        .set({
+          parseStatus: "completed",
+          ocrStatus: "completed",
+          activeParseRunId: parseRun.id,
+          parseProvider: options.provider,
+          parseProfile: options.profile,
+          parseErrorSummary: null,
+          parsedAt: new Date(),
+        })
+        .where(eq(estimateSourceDocuments.id, args.document.id))
+        .returning();
+
+      await markArtifactsInactive(args.tenantDb, args.document.id, parseRun.id);
+      documentUpdate = activatedDocument;
+    }
 
     return {
       parseRun: completedParseRun,
