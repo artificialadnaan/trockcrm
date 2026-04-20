@@ -694,6 +694,21 @@ export type InterventionPolicyRecommendationReviewWindow =
 
 export type InterventionPolicyRecommendationReviewDecisionFilter = "all" | "rendered" | "suppressed";
 
+export type InterventionPolicyRecommendationHistoryEventType =
+  | "rendered"
+  | InterventionPolicyRecommendationApplyEventStatus;
+
+export interface InterventionPolicyRecommendationHistoryEntry {
+  recommendationId: string;
+  snapshotId: string;
+  taxonomy: InterventionPolicyRecommendation["taxonomy"];
+  title: string;
+  eventType: InterventionPolicyRecommendationHistoryEventType;
+  actorName: string | null;
+  summary: string;
+  occurredAt: string;
+}
+
 export interface InterventionPolicyRecommendationReviewRow {
   taxonomy: InterventionPolicyRecommendation["taxonomy"];
   groupingKey: string;
@@ -719,6 +734,7 @@ export interface InterventionPolicyRecommendationReviewModel {
   emptyStateScope: "latest_snapshot";
   emptyStateReason: string | null;
   latestDecisionRows: InterventionPolicyRecommendationReviewRow[];
+  recentHistory: InterventionPolicyRecommendationHistoryEntry[];
 }
 
 export interface QueueAiBackfillResult {

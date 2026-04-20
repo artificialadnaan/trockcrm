@@ -287,6 +287,15 @@ describe("intervention policy recommendations service", () => {
       taxonomy: expect.any(String),
       decision: expect.not.stringMatching(/^qualified_rendered$/),
     });
+    expect(review.recentHistory).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          eventType: "rendered",
+          taxonomy: "assignee_load_balancing",
+          actorName: null,
+        }),
+      ])
+    );
   });
 
   it("seeds deterministic qualification data for non-production offices and surfaces qualifying recommendations", async () => {

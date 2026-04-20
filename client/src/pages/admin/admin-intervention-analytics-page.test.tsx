@@ -334,6 +334,28 @@ const policyRecommendationReview = {
       createdAt: "2026-04-16T13:10:00.000Z",
     },
   ],
+  recentHistory: [
+    {
+      recommendationId: "11111111-1111-4111-8111-111111111111",
+      snapshotId: "policy-snapshot-1",
+      taxonomy: "snooze_policy_adjustment",
+      title: "Tighten waiting-on-customer snoozes",
+      eventType: "rendered",
+      actorName: null,
+      summary: "Rendered in the latest active snapshot.",
+      occurredAt: "2026-04-16T13:10:00.000Z",
+    },
+    {
+      recommendationId: "11111111-1111-4111-8111-111111111111",
+      snapshotId: "policy-snapshot-1",
+      taxonomy: "snooze_policy_adjustment",
+      title: "Tighten waiting-on-customer snoozes",
+      eventType: "applied",
+      actorName: "Admin User",
+      summary: "Applied to waiting-on-customer snooze policy.",
+      occurredAt: "2026-04-16T13:12:00.000Z",
+    },
+  ],
 } as const;
 
 beforeEach(() => {
@@ -478,6 +500,7 @@ describe("AdminInterventionAnalyticsPage", () => {
     expect(html).toContain("Why this qualified");
     expect(html).toContain("Apply change");
     expect(html).toContain("Review recommendation quality");
+    expect(html).toContain("Recent history: 2 events");
     expect(html).not.toContain("Manager Readout");
     expect(html).toContain("Run Manager Alert Scan");
     expect(html).toContain("Send Alerts");

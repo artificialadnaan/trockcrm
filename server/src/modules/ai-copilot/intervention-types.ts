@@ -579,6 +579,21 @@ export type InterventionPolicyRecommendationReviewDecisionFilter =
 
 export type InterventionPolicyRecommendationReviewScope = "latest_snapshot";
 
+export type InterventionPolicyRecommendationHistoryEventType =
+  | "rendered"
+  | InterventionPolicyRecommendationApplyEventStatus;
+
+export interface InterventionPolicyRecommendationHistoryEntry {
+  recommendationId: string;
+  snapshotId: string;
+  taxonomy: InterventionPolicyRecommendationTaxonomy;
+  title: string;
+  eventType: InterventionPolicyRecommendationHistoryEventType;
+  actorName: string | null;
+  summary: string;
+  occurredAt: string;
+}
+
 export interface InterventionPolicyRecommendationReviewRow {
   taxonomy: InterventionPolicyRecommendationTaxonomy;
   groupingKey: string;
@@ -597,6 +612,7 @@ export interface InterventionPolicyRecommendationReviewModel {
   emptyStateScope: InterventionPolicyRecommendationReviewScope;
   emptyStateReason: string | null;
   latestDecisionRows: InterventionPolicyRecommendationReviewRow[];
+  recentHistory: InterventionPolicyRecommendationHistoryEntry[];
 }
 
 export interface InterventionAnalyticsDashboard {

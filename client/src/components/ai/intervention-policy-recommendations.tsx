@@ -18,6 +18,11 @@ function formatFreshnessLabel(value: string | null | undefined) {
   return `Generated ${date.toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}`;
 }
 
+function formatHistoryEventLabel(value: string) {
+  if (value === "applied_noop") return "Applied no-op";
+  return value.split("_").join(" ");
+}
+
 function PolicyRecommendationCard({
   recommendation,
   onRefresh,
@@ -278,7 +283,12 @@ export function InterventionPolicyRecommendationsSection({
   const reviewControls = (
     <div className="rounded-lg border border-border/70 bg-muted/20 px-4 py-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="text-sm font-semibold text-gray-900">Recommendation review</div>
+        <div>
+          <div className="text-sm font-semibold text-gray-900">Recommendation review</div>
+          <div className="mt-1 text-xs text-muted-foreground">
+            Recent history: {review.data?.recentHistory.length ?? 0} events
+          </div>
+        </div>
         <Button variant="outline" onClick={() => setShowReview((value) => !value)}>
           Review recommendation quality
         </Button>
@@ -336,6 +346,38 @@ export function InterventionPolicyRecommendationsSection({
                 ))
               ) : (
                 <div className="text-sm text-muted-foreground">No diagnostics are available yet.</div>
+              )}
+            </div>
+          </div>
+          <div className="rounded-lg border border-border/70 bg-white px-3 py-3">
+            <div className="text-[11px] uppercase tracking-widest text-muted-foreground">Recent recommendation history</div>
+            <div className="mt-3 space-y-2">
+              {review.loading ? (
+                <div className="text-sm text-muted-foreground">Loading recommendation history...</div>
+              ) : review.error ? (
+                <div className="text-sm text-red-700">{review.error}</div>
+              ) : review.data?.recentHistory.length ? (
+                review.data.recentHistory.map((entry) => (
+                  <div
+                    key={`${entry.recommendationId}:${entry.eventType}:${entry.occurredAt}`}
+                    className="rounded-md border border-border/60 px-3 py-2 text-sm"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="font-medium text-gray-900">{entry.title}</div>
+                      <div className="text-xs uppercase tracking-widest text-muted-foreground">
+                        {formatHistoryEventLabel(entry.eventType)}
+                      </div>
+                    </div>
+                    <div className="mt-1 text-muted-foreground">
+                      {entry.taxonomy}
+                      {entry.actorName ? ` · ${entry.actorName}` : ""}
+                      {entry.occurredAt ? ` · ${formatFreshnessLabel(entry.occurredAt)}` : ""}
+                    </div>
+                    <div className="mt-1 text-muted-foreground">{entry.summary}</div>
+                  </div>
+                ))
+              ) : (
+                <div className="text-sm text-muted-foreground">No recommendation history is available yet.</div>
               )}
             </div>
           </div>
