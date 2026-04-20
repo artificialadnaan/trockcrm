@@ -4,6 +4,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import dealsPageSource from "../../pages/deals/deal-list-page.tsx?raw";
 import contactsPageSource from "../../pages/contacts/contact-list-page.tsx?raw";
 import repDashboardSource from "../../pages/dashboard/rep-dashboard-page.tsx?raw";
+import usersPageSource from "../../pages/admin/users-page.tsx?raw";
 
 const dashboardState = vi.hoisted(() => ({
   loading: false,
@@ -239,5 +240,19 @@ describe("AppShell layout", () => {
       'className="flex items-center justify-between"',
     );
     expect(contactsPageSource).not.toContain('className="space-y-4"');
+  });
+
+  it("migrates the admin users page to PageHeader and the narrower content wrapper", () => {
+    expect(usersPageSource).toContain(
+      'import { PageHeader } from "@/components/layout/page-header";',
+    );
+    expect(usersPageSource).toContain("<PageHeader");
+    expect(usersPageSource).not.toContain(
+      '<h1 className="text-2xl font-semibold text-gray-900">Users</h1>',
+    );
+    expect(usersPageSource).not.toContain(
+      'className="p-6 space-y-6 max-w-5xl mx-auto"',
+    );
+    expect(usersPageSource).toContain('className="mx-auto max-w-5xl space-y-6"');
   });
 });

@@ -2,6 +2,7 @@ import { useState } from "react";
 import { RefreshCw, Shield } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { PageHeader } from "@/components/layout/page-header";
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
@@ -36,19 +37,19 @@ export function UsersPage() {
   const inactiveUsers = users.filter((u) => !u.isActive);
 
   return (
-    <div className="p-6 space-y-6 max-w-5xl mx-auto">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-semibold text-gray-900">Users</h1>
-          <p className="text-sm text-gray-500 mt-1">
-            {activeUsers.length} active · {inactiveUsers.length} inactive
-          </p>
-        </div>
-        <Button variant="outline" size="sm" onClick={refetch} disabled={loading}>
-          <RefreshCw className={`h-4 w-4 mr-1 ${loading ? "animate-spin" : ""}`} />
-          Refresh
-        </Button>
-      </div>
+    <div className="mx-auto max-w-5xl space-y-6">
+      <PageHeader
+        title="Users"
+        meta={`${activeUsers.length} active · ${inactiveUsers.length} inactive`}
+        actions={{
+          secondaryAction: (
+            <Button variant="outline" size="sm" onClick={refetch} disabled={loading}>
+              <RefreshCw className={`mr-1 h-4 w-4 ${loading ? "animate-spin" : ""}`} />
+              Refresh
+            </Button>
+          ),
+        }}
+      />
 
       {error && (
         <div className="rounded-md bg-red-50 border border-red-200 p-4 text-red-800 text-sm">
