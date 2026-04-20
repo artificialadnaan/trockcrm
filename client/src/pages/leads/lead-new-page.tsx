@@ -13,17 +13,17 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { useCompanies } from "@/hooks/use-companies";
-import { useProperties } from "@/hooks/use-properties";
 import { createLead } from "@/hooks/use-leads";
 import { usePipelineStages } from "@/hooks/use-pipeline-config";
 import { useAdminUsers } from "@/hooks/use-admin-users";
 import { useAuth } from "@/lib/auth";
+import { CompanySelector } from "@/components/companies/company-selector";
+import { PropertySelector } from "@/components/properties/property-selector";
+import { getLeadCreationStages, getSelectedOptionLabel } from "./lead-new-page.helpers";
 
 export function LeadNewPage() {
   const navigate = useNavigate();
   const { user } = useAuth();
-  const { companies, loading: companiesLoading } = useCompanies({ limit: 500 });
   const { users, loading: usersLoading } = useAdminUsers();
   const { stages, loading: stagesLoading } = usePipelineStages();
 
@@ -39,20 +39,17 @@ export function LeadNewPage() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const { properties, loading: propertiesLoading } = useProperties({
-    companyId: formData.companyId || undefined,
-    limit: 500,
-  });
-
   const leadStages = useMemo(() => {
-    const explicitLeadStages = stages.filter((stage) => stage.slug === "dd" && !stage.isTerminal);
-    if (explicitLeadStages.length > 0) return explicitLeadStages;
-    return stages.filter((stage) => !stage.isTerminal).slice(0, 1);
+    return getLeadCreationStages(stages);
   }, [stages]);
 
   const availableReps = useMemo(
     () => users.filter((candidate) => candidate.role === "rep" && candidate.isActive),
     [users]
+  );
+  const repOptions = useMemo(
+    () => availableReps.map((rep) => ({ id: rep.id, name: rep.displayName })),
+    [availableReps]
   );
 
   useEffect(() => {
@@ -70,8 +67,6 @@ export function LeadNewPage() {
       return next;
     });
   };
-
-  const normalizeSelectValue = (value: string | null) => (value && value !== "none" ? value : "");
 
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -107,7 +102,9 @@ export function LeadNewPage() {
     }
   };
 
-  const loading = companiesLoading || usersLoading || stagesLoading;
+  const loading = usersLoading || stagesLoading;
+  const selectedStageLabel = getSelectedOptionLabel(leadStages, formData.stageId, "Select lead stage");
+  const selectedRepLabel = getSelectedOptionLabel(repOptions, formData.assignedRepId, "Select rep");
 
   return (
     <div className="max-w-3xl space-y-4">
@@ -146,47 +143,28 @@ export function LeadNewPage() {
 
             <div className="space-y-2">
               <Label>Company *</Label>
-              <Select value={formData.companyId || "none"} onValueChange={(value) => handleChange("companyId", normalizeSelectValue(value))}>
-                <SelectTrigger>
-                  <SelectValue placeholder={loading ? "Loading companies..." : "Select company"} />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="none">Select company</SelectItem>
-                  {companies.map((company) => (
-                    <SelectItem key={company.id} value={company.id}>
-                      {company.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <CompanySelector
+                value={formData.companyId || null}
+                onChange={(companyId) => handleChange("companyId", companyId)}
+                required
+              />
             </div>
 
             <div className="space-y-2">
               <Label>Property *</Label>
-              <Select
-                value={formData.propertyId || "none"}
-                onValueChange={(value) => handleChange("propertyId", normalizeSelectValue(value))}
-                disabled={!formData.companyId || propertiesLoading}
-              >
-                <SelectTrigger>
-                  <SelectValue placeholder={!formData.companyId ? "Select company first" : "Select property"} />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="none">Select property</SelectItem>
-                  {properties.map((property) => (
-                    <SelectItem key={property.id} value={property.id}>
-                      {property.address || property.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <PropertySelector
+                companyId={formData.companyId || null}
+                value={formData.propertyId || null}
+                onChange={(propertyId) => handleChange("propertyId", propertyId)}
+                required
+              />
             </div>
 
             <div className="space-y-2">
               <Label>Lead Stage *</Label>
-              <Select value={formData.stageId || "none"} onValueChange={(value) => handleChange("stageId", normalizeSelectValue(value))}>
+              <Select value={formData.stageId || "none"} onValueChange={(value) => handleChange("stageId", value && value !== "none" ? value : "")}>
                 <SelectTrigger>
-                  <SelectValue placeholder="Select lead stage" />
+                  <SelectValue placeholder="Select lead stage">{selectedStageLabel}</SelectValue>
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="none">Select lead stage</SelectItem>
@@ -203,11 +181,11 @@ export function LeadNewPage() {
               <Label>Assigned Sales Rep *</Label>
               <Select
                 value={formData.assignedRepId || "none"}
-                onValueChange={(value) => handleChange("assignedRepId", normalizeSelectValue(value))}
+                onValueChange={(value) => handleChange("assignedRepId", value && value !== "none" ? value : "")}
                 disabled={user?.role === "rep"}
               >
                 <SelectTrigger>
-                  <SelectValue placeholder="Select rep" />
+                  <SelectValue placeholder="Select rep">{selectedRepLabel}</SelectValue>
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="none">Select rep</SelectItem>

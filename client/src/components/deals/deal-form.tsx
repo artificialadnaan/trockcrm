@@ -16,6 +16,9 @@ import { createDeal, updateDeal } from "@/hooks/use-deals";
 import type { Deal } from "@/hooks/use-deals";
 import { Loader2 } from "lucide-react";
 import { getDefaultDealStageId, getNewDealStages } from "./deal-form.helpers";
+import { CompanySelector } from "@/components/companies/company-selector";
+import { PropertySelector } from "@/components/properties/property-selector";
+import { getSelectedOptionLabel } from "@/pages/leads/lead-new-page.helpers";
 
 interface DealFormProps {
   deal?: Deal; // If provided, we're editing; otherwise creating
@@ -34,6 +37,8 @@ export function DealForm({ deal, onSuccess }: DealFormProps) {
   const [formData, setFormData] = useState({
     name: deal?.name ?? "",
     stageId: deal?.stageId ?? "",
+    companyId: deal?.companyId ?? "",
+    propertyId: deal?.propertyId ?? "",
     description: deal?.description ?? "",
     ddEstimate: deal?.ddEstimate ?? "",
     bidEstimate: deal?.bidEstimate ?? "",
@@ -62,7 +67,13 @@ export function DealForm({ deal, onSuccess }: DealFormProps) {
   }, [activeStages.length, formData.stageId, isEdit, stages]);
 
   const handleChange = (field: string, value: string) => {
-    setFormData((prev) => ({ ...prev, [field]: value }));
+    setFormData((prev) => {
+      const next = { ...prev, [field]: value };
+      if (field === "companyId") {
+        next.propertyId = "";
+      }
+      return next;
+    });
     if (fieldErrors[field]) {
       setFieldErrors((prev) => { const next = { ...prev }; delete next[field]; return next; });
     }
@@ -121,6 +132,10 @@ export function DealForm({ deal, onSuccess }: DealFormProps) {
       setError("Deal name is required");
       return;
     }
+    if (!formData.companyId || !formData.propertyId) {
+      setError("Company and property are required");
+      return;
+    }
     if (!formData.stageId && !isEdit) {
       setError("Stage is required");
       return;
@@ -134,6 +149,8 @@ export function DealForm({ deal, onSuccess }: DealFormProps) {
     try {
       const payload: Record<string, unknown> = {
         name: formData.name.trim(),
+        companyId: formData.companyId,
+        propertyId: formData.propertyId,
         description: formData.description.trim() || null,
         ddEstimate: formData.ddEstimate || null,
         bidEstimate: formData.bidEstimate || null,
@@ -199,6 +216,28 @@ export function DealForm({ deal, onSuccess }: DealFormProps) {
           </div>
 
           {!isEdit && (
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <div className="space-y-2">
+                <Label>Company <span className="text-red-500">*</span></Label>
+                <CompanySelector
+                  value={formData.companyId || null}
+                  onChange={(companyId) => handleChange("companyId", companyId)}
+                  required
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>Property <span className="text-red-500">*</span></Label>
+                <PropertySelector
+                  companyId={formData.companyId || null}
+                  value={formData.propertyId || null}
+                  onChange={(propertyId) => handleChange("propertyId", propertyId)}
+                  required
+                />
+              </div>
+            </div>
+          )}
+
+          {!isEdit && (
             <div className="space-y-2">
               <Label htmlFor="stage">
                 Initial Stage <span className="text-red-500">*</span>
@@ -209,7 +248,7 @@ export function DealForm({ deal, onSuccess }: DealFormProps) {
               >
                 <SelectTrigger>
                   <SelectValue placeholder="Select stage">
-                    {activeStages.find((s) => s.id === formData.stageId)?.name ?? "Select stage"}
+                    {getSelectedOptionLabel(activeStages, formData.stageId, "Select stage")}
                   </SelectValue>
                 </SelectTrigger>
                 <SelectContent>
@@ -269,7 +308,9 @@ export function DealForm({ deal, onSuccess }: DealFormProps) {
                 onValueChange={(val) => handleChange("projectTypeId", val ?? "")}
               >
                 <SelectTrigger>
-                  <SelectValue placeholder="Select type" />
+                  <SelectValue placeholder="Select type">
+                    {getSelectedOptionLabel(projectTypeHierarchy.flatMap((parent) => [parent, ...parent.children]), formData.projectTypeId, "Select type")}
+                  </SelectValue>
                 </SelectTrigger>
                 <SelectContent>
                   {projectTypeHierarchy.flatMap((parent) => [
@@ -292,7 +333,9 @@ export function DealForm({ deal, onSuccess }: DealFormProps) {
                 onValueChange={(val) => handleChange("regionId", val ?? "")}
               >
                 <SelectTrigger>
-                  <SelectValue placeholder="Select region" />
+                  <SelectValue placeholder="Select region">
+                    {getSelectedOptionLabel(regions, formData.regionId, "Select region")}
+                  </SelectValue>
                 </SelectTrigger>
                 <SelectContent>
                   {regions.map((r) => (

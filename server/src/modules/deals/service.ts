@@ -8,6 +8,8 @@ import {
   pipelineStageConfig,
   contacts,
   leads,
+  companies,
+  properties,
   users,
   userOfficeAccess,
   tasks,
@@ -20,6 +22,7 @@ import { AppError } from "../../middleware/error-handler.js";
 import { getStageById } from "../pipeline/service.js";
 import { captureInitialForecastMilestone } from "../reports/forecast-milestones-service.js";
 import { createAssignmentTaskIfNeeded } from "../assignment-tasks/service.js";
+import { canCreateDealWithoutSourceLead } from "./direct-create-rules.js";
 
 // Type alias for the tenant-scoped Drizzle instance
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -189,6 +192,45 @@ async function validateDealPrimaryContact(
   if (contact.companyId !== companyId) {
     throw new AppError(400, "Primary contact does not belong to the company");
   }
+}
+
+async function validateDealHierarchy(
+  tenantDb: TenantDb,
+  input: {
+    companyId?: string | null;
+    propertyId?: string | null;
+    primaryContactId?: string | null;
+  }
+) {
+  if (!input.companyId || !input.propertyId) {
+    throw new AppError(400, "Company and property are required");
+  }
+
+  const [company] = await tenantDb
+    .select({ id: companies.id })
+    .from(companies)
+    .where(and(eq(companies.id, input.companyId), eq(companies.isActive, true)))
+    .limit(1);
+
+  if (!company) {
+    throw new AppError(400, "Company not found");
+  }
+
+  const [property] = await tenantDb
+    .select()
+    .from(properties)
+    .where(and(eq(properties.id, input.propertyId), eq(properties.isActive, true)))
+    .limit(1);
+
+  if (!property) {
+    throw new AppError(400, "Property not found");
+  }
+
+  if (property.companyId !== input.companyId) {
+    throw new AppError(400, "Property does not belong to the company");
+  }
+
+  await validateDealPrimaryContact(tenantDb, input.companyId, input.primaryContactId);
 }
 
 async function assertSourceLeadLineageAvailable(
@@ -427,7 +469,7 @@ export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
     throw new AppError(400, "Cannot create a deal in a terminal stage");
   }
 
-  if (!input.migrationMode && !input.sourceLeadId) {
+  if (!canCreateDealWithoutSourceLead(input)) {
     throw new AppError(400, "sourceLeadId is required unless migrationMode is true");
   }
 
@@ -441,7 +483,16 @@ export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
 
   const lineage = await resolveSourceLeadLineage(tenantDb, input);
 
-  if (!input.migrationMode && (!lineage.companyId || !lineage.propertyId || !lineage.sourceLeadId)) {
+  const isDirectCreate = !input.sourceLeadId && !input.migrationMode;
+  if (isDirectCreate) {
+    await validateDealHierarchy(tenantDb, {
+      companyId: lineage.companyId,
+      propertyId: lineage.propertyId,
+      primaryContactId: lineage.primaryContactId,
+    });
+  }
+
+  if (!input.migrationMode && !isDirectCreate && (!lineage.companyId || !lineage.propertyId || !lineage.sourceLeadId)) {
     throw new AppError(
       400,
       "Deals require source lead lineage, company, and property unless migrationMode is true"
@@ -450,7 +501,9 @@ export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
 
   // Validate the assigned rep exists, is active, and has office access
   await validateAssignee(tenantDb, input.assignedRepId, input.officeId);
-  await validateDealPrimaryContact(tenantDb, lineage.companyId, lineage.primaryContactId);
+  if (!isDirectCreate) {
+    await validateDealPrimaryContact(tenantDb, lineage.companyId, lineage.primaryContactId);
+  }
 
   const dealNumber = await generateDealNumber(tenantDb);
 

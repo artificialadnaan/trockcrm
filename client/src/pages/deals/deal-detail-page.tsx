@@ -44,8 +44,9 @@ import { usePipelineStages } from "@/hooks/use-pipeline-config";
 import { useAuth } from "@/lib/auth";
 import { useTaskAssignees } from "@/hooks/use-task-assignees";
 import { formatCurrency, bestEstimate } from "@/lib/deal-utils";
+import { useTasks, getTaskStatusLabel } from "@/hooks/use-tasks";
 
-type Tab = "overview" | "lead" | "scoping" | "files" | "email" | "activity" | "timeline" | "history" | "team" | "estimates" | "punch_list" | "closeout";
+type Tab = "overview" | "lead" | "scoping" | "files" | "email" | "activity" | "timeline" | "history" | "team" | "tasks" | "estimates" | "punch_list" | "closeout";
 
 export function DealDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -56,6 +57,7 @@ export function DealDetailPage() {
   const { company } = useCompanyDetail(deal?.companyId ?? undefined);
   const { stages } = usePipelineStages();
   const { assignees: availableReps } = useTaskAssignees();
+  const { tasks: dealTasks, loading: tasksLoading } = useTasks({ dealId: id, limit: 100 });
   const [activeTab, setActiveTab] = useState<Tab>("overview");
   const [stageChangeOpen, setStageChangeOpen] = useState(false);
   const [targetStageId, setTargetStageId] = useState<string | null>(null);
@@ -112,6 +114,7 @@ export function DealDetailPage() {
     { key: "timeline", label: "Timeline" },
     { key: "history", label: "History" },
     { key: "team", label: teamCount != null ? `Team (${teamCount})` : "Team" },
+    { key: "tasks", label: `Tasks (${dealTasks.length})` },
     { key: "estimates", label: "Estimates" },
     ...(showPunchList ? [{ key: "punch_list" as Tab, label: "Punch List" }] : []),
     ...(showCloseout ? [{ key: "closeout" as Tab, label: "Close-Out" }] : []),
@@ -404,6 +407,40 @@ export function DealDetailPage() {
       {activeTab === "history" && <DealHistoryTab deal={deal} />}
       {activeTab === "team" && (
         <DealTeamTab dealId={deal.id} onCountChange={setTeamCount} />
+      )}
+      {activeTab === "tasks" && (
+        <div className="space-y-3 rounded-xl border bg-card p-4">
+          <div>
+            <h3 className="text-lg font-semibold">Project Tasks</h3>
+            <p className="text-sm text-muted-foreground">Tasks created from this project live here.</p>
+          </div>
+          {tasksLoading ? (
+            <p className="text-sm text-muted-foreground">Loading tasks...</p>
+          ) : dealTasks.length === 0 ? (
+            <div className="rounded-lg border border-dashed p-6 text-sm text-muted-foreground">
+              No tasks linked to this project yet.
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {dealTasks.map((task) => (
+                <div key={task.id} className="rounded-lg border p-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="font-medium">{task.title}</p>
+                      {task.description ? (
+                        <p className="mt-1 text-sm text-muted-foreground">{task.description}</p>
+                      ) : null}
+                    </div>
+                    <Badge variant="outline">{getTaskStatusLabel(task.status)}</Badge>
+                  </div>
+                  <div className="mt-2 text-xs text-muted-foreground">
+                    {task.assignedToName ? `Assigned to ${task.assignedToName}` : "Assigned"}{task.dueDate ? ` • Due ${new Date(`${task.dueDate}T00:00:00`).toLocaleDateString()}` : ""}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       )}
       {activeTab === "estimates" && <DealEstimatesTab dealId={deal.id} />}
       {activeTab === "punch_list" && <DealPunchListTab dealId={deal.id} />}

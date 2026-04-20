@@ -79,6 +79,15 @@ vi.mock("@/hooks/use-task-assignees", () => ({
   })),
 }));
 
+vi.mock("@/hooks/use-tasks", () => ({
+  useTasks: vi.fn(() => ({
+    tasks: [],
+    loading: false,
+    error: null,
+  })),
+  getTaskStatusLabel: vi.fn((status: string) => status),
+}));
+
 vi.mock("@/components/deals/deal-stage-badge", () => ({
   DealStageBadge: ({ stageId }: { stageId: string }) => <span>{stageId}</span>,
 }));
@@ -121,5 +130,6 @@ describe("DealDetailPage", () => {
 
     expect(html).toContain("Hill Place Interior Upgrade");
     expect(html).toContain("Assigned Rep");
+    expect(html).toContain("Tasks");
   });
 });
