@@ -865,6 +865,33 @@ export function ReportsPage() {
           </div>
         )}
 
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+          <div className="px-6 py-5 border-b border-slate-100">
+            <h2 className="text-sm font-bold text-slate-900">Operational Views</h2>
+            <p className="text-xs text-slate-400">Focused workspaces for weekly pipeline review and cleanup.</p>
+          </div>
+          <div className="grid grid-cols-1 gap-0 divide-y divide-slate-100">
+            {operationalViews.map((view) => (
+              <Link
+                key={view.to}
+                to={view.to}
+                className="group px-6 py-5 hover:bg-slate-50 transition-colors"
+              >
+                <div className="flex items-start justify-between gap-4">
+                  <div className="space-y-2">
+                    <div className="flex items-center gap-2">
+                      <view.icon className="h-4 w-4 text-slate-400 group-hover:text-[#CC0000]" />
+                      <h3 className="text-sm font-semibold text-slate-900">{view.title}</h3>
+                    </div>
+                    <p className="text-sm leading-relaxed text-slate-500 max-w-md">{view.description}</p>
+                  </div>
+                  <ArrowUpRight className="h-4 w-4 text-slate-300 group-hover:text-[#CC0000]" />
+                </div>
+              </Link>
+            ))}
+          </div>
+        </div>
+
         <div className="rounded-3xl border border-slate-200 bg-white shadow-sm p-6">
           <WorkflowOverviewPanel data={workflowOverview} loading={workflowOverviewLoading} />
         </div>
@@ -892,33 +919,6 @@ export function ReportsPage() {
             />
           </div>
         )}
-
-        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
-          <div className="px-6 py-5 border-b border-slate-100">
-            <h2 className="text-sm font-bold text-slate-900">Operational Views</h2>
-            <p className="text-xs text-slate-400">Focused workspaces for weekly pipeline review and cleanup.</p>
-          </div>
-          <div className="grid grid-cols-1 gap-0 divide-y divide-slate-100">
-            {operationalViews.map((view) => (
-              <Link
-                key={view.to}
-                to={view.to}
-                className="group px-6 py-5 hover:bg-slate-50 transition-colors"
-              >
-                <div className="flex items-start justify-between gap-4">
-                  <div className="space-y-2">
-                    <div className="flex items-center gap-2">
-                      <view.icon className="h-4 w-4 text-slate-400 group-hover:text-[#CC0000]" />
-                      <h3 className="text-sm font-semibold text-slate-900">{view.title}</h3>
-                    </div>
-                    <p className="text-sm leading-relaxed text-slate-500 max-w-md">{view.description}</p>
-                  </div>
-                  <ArrowUpRight className="h-4 w-4 text-slate-300 group-hover:text-[#CC0000]" />
-                </div>
-              </Link>
-            ))}
-          </div>
-        </div>
 
         {/* ================================================================
             SAVED REPORTS PANEL
