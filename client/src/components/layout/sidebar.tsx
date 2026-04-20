@@ -78,18 +78,16 @@ export function Sidebar() {
     items.filter((item) => user && item.roles.includes(user.role));
 
   return (
-    <aside className="hidden md:flex flex-col w-60 bg-sidebar-bg text-white min-h-screen">
-      <div className="p-4 flex items-center gap-3">
-        <div className="flex-shrink-0 h-9 w-9 overflow-hidden rounded">
-          <img
-            src="/logo.png"
-            alt="T Rock"
-            className="h-[180%] w-[180%] object-cover object-[center_15%]"
-          />
+    <aside className="hidden min-h-screen w-60 flex-col bg-sidebar-bg text-white md:flex">
+      <div className="flex min-h-14 items-center gap-3 px-4 py-4">
+        <div className="flex h-10 w-10 items-center justify-center rounded-md bg-slate-800/80">
+          <img src="/logo.png" alt="T Rock" className="h-8 w-8 object-contain" />
         </div>
-        <div className="flex flex-col leading-tight">
-          <span className="text-sm font-bold tracking-wide text-white">T ROCK</span>
-          <span className="text-[10px] font-semibold tracking-widest text-gray-400">CRM</span>
+        <div className="flex flex-col justify-center leading-tight">
+          <span className="text-sm font-bold tracking-[0.18em] text-white">T ROCK</span>
+          <span className="text-[10px] font-semibold tracking-[0.28em] text-slate-400">
+            CRM
+          </span>
         </div>
       </div>
 

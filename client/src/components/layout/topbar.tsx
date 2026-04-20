@@ -26,15 +26,15 @@ export function Topbar() {
   }, []);
 
   return (
-    <header className="h-14 border-b bg-white flex items-center justify-between px-4 md:px-6">
+    <header className="flex h-[3.5rem] items-center justify-between border-b border-slate-200 bg-white/95 px-4 md:h-[3.75rem] md:px-6">
       <div className="flex items-center gap-2">
         <button
           onClick={() => setSearchOpen(true)}
-          className="flex items-center gap-2 px-3 py-1.5 text-sm text-gray-500 bg-gray-100 hover:bg-gray-200 rounded-md transition-colors"
+          className="flex h-9 w-9 items-center justify-center rounded-md bg-slate-100 text-slate-500 md:w-auto md:min-w-[11rem] md:justify-start md:gap-2 md:px-3"
         >
           <Search className="h-4 w-4" />
-          <span className="hidden sm:inline">Search</span>
-          <kbd className="hidden sm:inline-flex h-5 items-center gap-0.5 rounded border border-gray-300 bg-white px-1 text-xs text-gray-500 font-mono">
+          <span className="hidden md:inline">Search</span>
+          <kbd className="hidden md:inline-flex h-5 items-center gap-0.5 rounded border border-gray-300 bg-white px-1 font-mono text-xs text-gray-500">
             {"\u2318"}K
           </kbd>
         </button>
