@@ -1,6 +1,9 @@
 import type { ReactNode } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
+import dealsPageSource from "../../pages/deals/deal-list-page.tsx?raw";
+import contactsPageSource from "../../pages/contacts/contact-list-page.tsx?raw";
+import repDashboardSource from "../../pages/dashboard/rep-dashboard-page.tsx?raw";
 
 vi.mock("react-router-dom", () => ({
   Outlet: () => <span data-slot="outlet">Route content</span>,
@@ -83,5 +86,36 @@ describe("AppShell layout", () => {
     expect(html.indexOf('data-slot="route-content-frame"')).toBeLessThan(
       html.indexOf('data-slot="outlet"'),
     );
+  });
+
+  it("migrates the rep dashboard, deals, and contacts to PageHeader", () => {
+    expect(repDashboardSource).toContain(
+      'import { PageHeader } from "@/components/layout/page-header";',
+    );
+    expect(repDashboardSource).toContain("<PageHeader");
+    expect(repDashboardSource).not.toContain("<h2");
+    expect(repDashboardSource).not.toContain("max-w-");
+    expect(dealsPageSource).toContain(
+      'import { PageHeader } from "@/components/layout/page-header";',
+    );
+    expect(dealsPageSource).toContain("<PageHeader");
+    expect(dealsPageSource).toContain("<DealFilters");
+    expect(dealsPageSource.indexOf("<PageHeader")).toBeLessThan(
+      dealsPageSource.indexOf("<DealFilters"),
+    );
+    expect(dealsPageSource).not.toContain('<h2 className="text-2xl font-bold">Deals</h2>');
+    expect(dealsPageSource).not.toContain("max-w-");
+    expect(dealsPageSource).not.toContain("p-6");
+    expect(contactsPageSource).toContain(
+      'import { PageHeader } from "@/components/layout/page-header";',
+    );
+    expect(contactsPageSource).toContain("<PageHeader");
+    expect(contactsPageSource).toContain("<ContactFilters");
+    expect(contactsPageSource.indexOf("<PageHeader")).toBeLessThan(
+      contactsPageSource.indexOf("<ContactFilters"),
+    );
+    expect(contactsPageSource).not.toContain('<h2 className="text-2xl font-bold">Contacts</h2>');
+    expect(contactsPageSource).not.toContain("max-w-");
+    expect(contactsPageSource).not.toContain("p-6");
   });
 });

@@ -1,6 +1,7 @@
 import { useRepDashboard } from "@/hooks/use-dashboard";
 import { useAuth } from "@/lib/auth";
 import { useNavigate } from "react-router-dom";
+import { PageHeader } from "@/components/layout/page-header";
 import { StatCard } from "@/components/dashboard/stat-card";
 import { PipelineBarChart } from "@/components/charts/pipeline-bar-chart";
 import { formatCurrency } from "@/components/charts/chart-colors";
@@ -20,6 +21,8 @@ export function RepDashboardPage() {
   const { data, loading, error } = useRepDashboard();
   const { tasks: overdueTasks, refetch: refetchOverdue } = useTasks({ section: "overdue" });
   const { tasks: todayTasks, refetch: refetchToday } = useTasks({ section: "today" });
+  const firstName = user?.displayName?.split(" ")[0] ?? "there";
+  const currentYear = new Date().getFullYear();
 
   const refetchTasks = () => {
     refetchOverdue();
@@ -29,7 +32,10 @@ export function RepDashboardPage() {
   if (loading) {
     return (
       <div className="space-y-6">
-        <h2 className="text-2xl font-bold">Dashboard</h2>
+        <PageHeader
+          title={`Welcome back, ${firstName}`}
+          description={`Here is your sales activity overview for ${currentYear}.`}
+        />
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
           {Array.from({ length: 4 }).map((_, i) => (
             <Card key={i} className="animate-pulse">
@@ -44,7 +50,10 @@ export function RepDashboardPage() {
   if (error) {
     return (
       <div className="space-y-6">
-        <h2 className="text-2xl font-bold">Dashboard</h2>
+        <PageHeader
+          title={`Welcome back, ${firstName}`}
+          description={`Here is your sales activity overview for ${currentYear}.`}
+        />
         <Card>
           <CardContent className="p-6 text-center text-red-600">
             {error}
@@ -60,14 +69,10 @@ export function RepDashboardPage() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h2 className="text-2xl font-bold">
-          Welcome back, {user?.displayName?.split(" ")[0]}
-        </h2>
-        <p className="text-muted-foreground text-sm mt-1">
-          Here is your sales activity overview for {new Date().getFullYear()}.
-        </p>
-      </div>
+      <PageHeader
+        title={`Welcome back, ${firstName}`}
+        description={`Here is your sales activity overview for ${currentYear}.`}
+      />
 
       {/* Today's Tasks */}
       <Card>
