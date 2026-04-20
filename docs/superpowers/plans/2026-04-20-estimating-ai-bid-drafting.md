@@ -177,9 +177,19 @@ CREATE TABLE IF NOT EXISTS public.cost_catalog_sync_runs (
   metadata_json jsonb NOT NULL DEFAULT '{}'::jsonb
 );
 
+CREATE TABLE IF NOT EXISTS public.cost_catalog_snapshot_versions (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  source_id uuid NOT NULL REFERENCES public.cost_catalog_sources(id) ON DELETE CASCADE,
+  sync_run_id uuid NOT NULL REFERENCES public.cost_catalog_sync_runs(id) ON DELETE CASCADE,
+  status text NOT NULL DEFAULT 'staged',
+  created_at timestamptz NOT NULL DEFAULT now(),
+  promoted_at timestamptz
+);
+
 CREATE TABLE IF NOT EXISTS public.cost_catalog_codes (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   source_id uuid NOT NULL REFERENCES public.cost_catalog_sources(id) ON DELETE CASCADE,
+  snapshot_version_id uuid REFERENCES public.cost_catalog_snapshot_versions(id) ON DELETE SET NULL,
   external_id text NOT NULL,
   code text NOT NULL,
   name text NOT NULL,
@@ -195,6 +205,7 @@ CREATE TABLE IF NOT EXISTS public.cost_catalog_codes (
 CREATE TABLE IF NOT EXISTS public.cost_catalog_items (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   source_id uuid NOT NULL REFERENCES public.cost_catalog_sources(id) ON DELETE CASCADE,
+  snapshot_version_id uuid REFERENCES public.cost_catalog_snapshot_versions(id) ON DELETE SET NULL,
   external_id text NOT NULL,
   item_type text NOT NULL,
   name text NOT NULL,
@@ -223,6 +234,7 @@ CREATE TABLE IF NOT EXISTS public.cost_catalog_prices (
   catalog_item_id uuid NOT NULL REFERENCES public.cost_catalog_items(id) ON DELETE CASCADE,
   source_id uuid NOT NULL REFERENCES public.cost_catalog_sources(id) ON DELETE CASCADE,
   sync_run_id uuid REFERENCES public.cost_catalog_sync_runs(id) ON DELETE SET NULL,
+  snapshot_version_id uuid REFERENCES public.cost_catalog_snapshot_versions(id) ON DELETE SET NULL,
   material_unit_cost numeric(14, 2),
   labor_unit_cost numeric(14, 2),
   equipment_unit_cost numeric(14, 2),
@@ -243,12 +255,12 @@ CREATE TABLE IF NOT EXISTS estimate_source_documents (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   deal_id uuid NOT NULL,
   project_id uuid,
+  file_id uuid NOT NULL,
+  root_file_id uuid,
   document_type text NOT NULL,
   filename text NOT NULL,
-  storage_key text NOT NULL,
   mime_type text NOT NULL,
   file_size integer,
-  version_label text,
   uploaded_by_user_id uuid,
   content_hash text,
   ocr_status text NOT NULL DEFAULT 'queued',
@@ -557,36 +569,29 @@ export async function createEstimateSourceDocument({
   enqueueEstimateDocumentOcr,
   input,
 }: CreateEstimateSourceDocumentArgs) {
-  const existing = input.contentHash
+  const existing = input.fileId
     ? await tenantDb
         .select({
           id: estimateSourceDocuments.id,
-          contentHash: estimateSourceDocuments.contentHash,
-          versionLabel: estimateSourceDocuments.versionLabel,
+          fileId: estimateSourceDocuments.fileId,
+          rootFileId: estimateSourceDocuments.rootFileId,
         })
         .from(estimateSourceDocuments)
-        .where(
-          and(
-            eq(estimateSourceDocuments.contentHash, input.contentHash),
-            eq(estimateSourceDocuments.dealId, input.dealId),
-            input.projectId
-              ? eq(estimateSourceDocuments.projectId, input.projectId)
-              : isNull(estimateSourceDocuments.projectId)
-          )
-        )
+        .where(eq(estimateSourceDocuments.fileId, input.fileId))
+        .limit(1)
     : [];
 
-  const exactDuplicate = existing.find((row) => row.contentHash === input.contentHash);
-  if (exactDuplicate && input.reprocessExisting !== true) {
-    return exactDuplicate;
+  if (existing[0] && input.reprocessExisting !== true) {
+    return existing[0];
   }
 
-  const versionLabel = `v${existing.length + 1 || 1}`;
   const [document] = await tenantDb
     .insert(estimateSourceDocuments)
     .values({
       dealId: input.dealId,
       projectId: input.projectId ?? null,
+      fileId: input.fileId,
+      rootFileId: input.rootFileId ?? input.fileId,
       documentType:
         input.documentType ??
         classifyEstimateDocument({
@@ -594,11 +599,9 @@ export async function createEstimateSourceDocument({
           mimeType: input.mimeType,
         }),
       filename: input.filename,
-      storageKey: input.storageKey,
       mimeType: input.mimeType,
       fileSize: input.fileSize ?? null,
       contentHash: input.contentHash ?? null,
-      versionLabel,
       ocrStatus: "queued",
       uploadedByUserId: input.userId,
     })
@@ -717,7 +720,6 @@ router.post("/:dealId/estimating/documents", async (req, res) => {
     officeSlug: req.officeSlug!,
     userId: req.user!.id,
     uploadToken: req.body.uploadToken,
-    body: req.body,
   });
 
   const document = await createEstimateSourceDocument({
@@ -725,9 +727,12 @@ router.post("/:dealId/estimating/documents", async (req, res) => {
     enqueueEstimateDocumentOcr,
     input: {
       dealId: req.params.dealId,
+      fileId: uploadedFile.id,
+      rootFileId: uploadedFile.parentFileId ?? uploadedFile.id,
       filename: uploadedFile.originalName,
-      storageKey: uploadedFile.storageKey,
       mimeType: uploadedFile.mimeType,
+      fileSize: uploadedFile.fileSizeBytes,
+      contentHash: uploadedFile.contentHash ?? null,
       userId: req.user.id,
       officeId: req.user.activeOfficeId ?? req.user.officeId,
     },
@@ -1354,8 +1359,9 @@ describe("answerEstimatingCopilotQuestion", () => {
 
 Run: `npx vitest run client/src/components/estimating/estimating-workflow-shell.test.tsx`
 Run: `npx vitest run server/tests/modules/estimating/copilot-service.test.ts`
+Run: `npx vitest run server/tests/modules/estimating/workflow-state-routes.test.ts`
 
-Expected: FAIL because the workflow shell and copilot service do not exist yet.
+Expected: FAIL because the workflow shell, workflow-state routes, and copilot service do not exist yet.
 
 - [ ] **Step 4: Implement the workflow shell, overview panel, and review log**
 
@@ -1575,13 +1581,16 @@ Expected: PASS
 Run: `npx vitest run server/tests/modules/estimating/copilot-service.test.ts`
 Expected: PASS
 
+Run: `npx vitest run server/tests/modules/estimating/workflow-state-routes.test.ts`
+Expected: PASS
+
 Run: `npm run typecheck`
 Expected: PASS
 
 - [ ] **Step 9: Commit the workflow UI task**
 
 ```bash
-git add client/src/components/estimating/estimating-workflow-shell.tsx client/src/components/estimating/estimate-overview-panel.tsx client/src/components/estimating/estimate-extraction-review-table.tsx client/src/components/estimating/estimate-catalog-match-table.tsx client/src/components/estimating/estimate-pricing-review-table.tsx client/src/components/estimating/estimate-review-log-panel.tsx client/src/components/estimating/estimate-copilot-panel.tsx client/src/pages/deals/deal-estimates-tab.tsx server/src/modules/estimating/copilot-service.ts server/src/modules/deals/routes.ts server/tests/modules/estimating/copilot-service.test.ts client/src/components/estimating/estimating-workflow-shell.test.tsx
+git add client/src/components/estimating/estimating-workflow-shell.tsx client/src/components/estimating/estimate-overview-panel.tsx client/src/components/estimating/estimate-extraction-review-table.tsx client/src/components/estimating/estimate-catalog-match-table.tsx client/src/components/estimating/estimate-pricing-review-table.tsx client/src/components/estimating/estimate-review-log-panel.tsx client/src/components/estimating/estimate-copilot-panel.tsx client/src/pages/deals/deal-estimates-tab.tsx server/src/modules/estimating/copilot-service.ts server/src/modules/deals/routes.ts server/tests/modules/estimating/copilot-service.test.ts server/tests/modules/estimating/workflow-state-routes.test.ts client/src/components/estimating/estimating-workflow-shell.test.tsx
 git commit -m "feat: add estimating workflow review ui and copilot"
 ```
 
