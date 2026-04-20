@@ -239,22 +239,23 @@ function buildTuningGuidance(
   };
 }
 
-function getReviewWindowCutoff(window: InterventionPolicyRecommendationReviewWindow) {
+function getReviewWindowCutoff(window: InterventionPolicyRecommendationReviewWindow, now = new Date()) {
   const windowMs =
     window === "last_7_days"
       ? 7 * 24 * 60 * 60 * 1000
       : window === "last_90_days"
         ? 90 * 24 * 60 * 60 * 1000
         : 30 * 24 * 60 * 60 * 1000;
-  return Date.now() - windowMs;
+  return now.getTime() - windowMs;
 }
 
 async function fetchWindowDecisionRows(
   tenantDb: TenantDb | InMemoryTenantDb,
   officeId: string,
-  window: InterventionPolicyRecommendationReviewWindow
+  window: InterventionPolicyRecommendationReviewWindow,
+  now = new Date()
 ) {
-  const cutoff = getReviewWindowCutoff(window);
+  const cutoff = getReviewWindowCutoff(window, now);
 
   if (isInMemoryTenantDb(tenantDb)) {
     return ((tenantDb.state.policyRecommendationDecisions ?? []) as Array<Record<string, any>>)
@@ -362,9 +363,10 @@ async function fetchActorDisplayName(
 async function fetchRecentHistory(
   tenantDb: TenantDb | InMemoryTenantDb,
   officeId: string,
-  window: InterventionPolicyRecommendationReviewWindow
+  window: InterventionPolicyRecommendationReviewWindow,
+  now = new Date()
 ): Promise<InterventionPolicyRecommendationHistoryEntry[]> {
-  const cutoff = getReviewWindowCutoff(window);
+  const cutoff = getReviewWindowCutoff(window, now);
 
   const renderedRows = isInMemoryTenantDb(tenantDb)
     ? (((tenantDb.state.policyRecommendationRows ?? []) as PolicyRecommendationRow[]).filter(
@@ -498,8 +500,9 @@ export async function getInterventionPolicyRecommendationReview(
       decision: null,
     }),
   ]);
-  const windowDecisionRows = await fetchWindowDecisionRows(tenantDb, input.officeId, window);
-  const recentHistory = await fetchRecentHistory(tenantDb, input.officeId, window);
+  const reviewNow = input.now ?? new Date();
+  const windowDecisionRows = await fetchWindowDecisionRows(tenantDb, input.officeId, window, reviewNow);
+  const recentHistory = await fetchRecentHistory(tenantDb, input.officeId, window, reviewNow);
 
   if (!snapshot) {
     return {

@@ -472,6 +472,57 @@ describe("intervention policy recommendations service", () => {
     ).toBe(false);
   });
 
+  it("uses the caller-provided now value for review window cutoffs", async () => {
+    const tenantDb = createTenantDb({
+      users: [{ id: "admin-1", displayName: "Admin User" }],
+    });
+
+    tenantDb.state.policyRecommendationDecisions.push({
+      office_id: "office-1",
+      taxonomy: "snooze_policy_adjustment",
+      grouping_key: "waiting_on_customer",
+      decision: "suppressed_by_threshold",
+      suppression_reason: "threshold_not_met",
+      score: 52,
+      confidence: "medium",
+      used_fallback_copy: false,
+      used_fallback_structured_payload: false,
+      created_at: new Date("2024-01-15T12:00:00.000Z"),
+    });
+
+    tenantDb.state.policyRecommendationRows.push({
+      recommendation_id: "rec-boundary",
+      snapshot_id: "snapshot-boundary",
+      office_id: "office-1",
+      taxonomy: "snooze_policy_adjustment",
+      title: "Boundary recommendation",
+      generated_at: new Date("2024-01-15T12:00:00.000Z"),
+    });
+
+    const review = await getInterventionPolicyRecommendationReview(tenantDb as any, {
+      officeId: "office-1",
+      viewerUserId: "admin-1",
+      window: "last_30_days",
+      decision: "all",
+      now: new Date("2024-01-31T12:00:00.000Z"),
+    });
+
+    expect(review.yield.dominantSuppressionReasons).toEqual([
+      {
+        reason: "threshold_not_met",
+        count: 1,
+      },
+    ]);
+    expect(review.recentHistory).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          recommendationId: "rec-boundary",
+          eventType: "rendered",
+        }),
+      ])
+    );
+  });
+
   it("seeds deterministic qualification data for non-production offices and surfaces qualifying recommendations", async () => {
     const tenantDb = createTenantDb({
       users: [
