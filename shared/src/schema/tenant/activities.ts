@@ -45,6 +45,8 @@ export const activities = pgTable(
     subject: varchar("subject", { length: 500 }),
     body: text("body"),
     outcome: varchar("outcome", { length: 100 }),
+    nextStep: text("next_step"),
+    nextStepDueAt: timestamp("next_step_due_at", { withTimezone: true }),
     durationMinutes: integer("duration_minutes"),
     occurredAt: timestamp("occurred_at", { withTimezone: true }).defaultNow().notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),

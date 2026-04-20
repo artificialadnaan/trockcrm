@@ -84,6 +84,8 @@ router.post("/", async (req, res, next) => {
       subject,
       body,
       outcome,
+      nextStep,
+      nextStepDueAt,
       durationMinutes,
       companyId,
       propertyId,
@@ -132,6 +134,8 @@ router.post("/", async (req, res, next) => {
       subject,
       body,
       outcome,
+      nextStep,
+      nextStepDueAt,
       durationMinutes,
       occurredAt,
     });

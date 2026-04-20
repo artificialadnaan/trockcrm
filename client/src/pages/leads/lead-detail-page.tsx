@@ -6,13 +6,15 @@ import { Card, CardContent } from "@/components/ui/card";
 import { LeadForm } from "@/components/leads/lead-form";
 import { LeadStageBadge } from "@/components/leads/lead-stage-badge";
 import { LeadTimelineTab } from "@/components/leads/lead-timeline-tab";
-import { formatLeadPropertyLine, useLeadDetail } from "@/hooks/use-leads";
+import { ForecastEditor } from "@/components/shared/forecast-editor";
+import { NextStepEditor } from "@/components/shared/next-step-editor";
+import { formatLeadPropertyLine, updateLead, useLeadDetail } from "@/hooks/use-leads";
 import { usePipelineStages } from "@/hooks/use-pipeline-config";
 
 export function LeadDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const { lead, loading, error } = useLeadDetail(id);
+  const { lead, loading, error, refetch } = useLeadDetail(id);
   const { stages } = usePipelineStages();
 
   const currentStage = useMemo(
@@ -112,6 +114,37 @@ export function LeadDetailPage() {
               </CardContent>
             </Card>
           </div>
+
+          <ForecastEditor
+            value={{
+              forecastWindow: lead.forecastWindow,
+              forecastCategory: lead.forecastCategory,
+              forecastConfidencePercent: lead.forecastConfidencePercent,
+              forecastRevenue: lead.forecastRevenue,
+              forecastGrossProfit: lead.forecastGrossProfit,
+              forecastBlockers: lead.forecastBlockers,
+              nextMilestoneAt: lead.nextMilestoneAt,
+            }}
+            onSave={async (payload) => {
+              await updateLead(lead.id, payload);
+              await refetch();
+            }}
+          />
+
+          <NextStepEditor
+            value={{
+              nextStep: lead.nextStep,
+              nextStepDueAt: lead.nextStepDueAt,
+              supportNeededType: lead.supportNeededType,
+              supportNeededNotes: lead.supportNeededNotes,
+              decisionMakerName: lead.decisionMakerName,
+              budgetStatus: lead.budgetStatus,
+            }}
+            onSave={async (payload) => {
+              await updateLead(lead.id, payload);
+              await refetch();
+            }}
+          />
 
           <LeadTimelineTab leadId={lead.id} convertedDealId={lead.convertedDealId} convertedAt={convertedAt} />
         </div>

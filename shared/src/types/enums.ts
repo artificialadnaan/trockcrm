@@ -37,7 +37,41 @@ export type ContactCategory = (typeof CONTACT_CATEGORIES)[number];
 export const LEAD_STATUSES = ["open", "converted", "disqualified"] as const;
 export type LeadStatus = (typeof LEAD_STATUSES)[number];
 
-export const ACTIVITY_TYPES = ["call", "note", "meeting", "email", "task_completed"] as const;
+export const FORECAST_WINDOWS = [
+  "30_days",
+  "60_days",
+  "90_days",
+  "beyond_90",
+  "uncommitted",
+] as const;
+export type ForecastWindow = (typeof FORECAST_WINDOWS)[number];
+
+export const FORECAST_CATEGORIES = ["commit", "best_case", "pipeline"] as const;
+export type ForecastCategory = (typeof FORECAST_CATEGORIES)[number];
+
+export const SUPPORT_NEEDED_TYPES = [
+  "leadership",
+  "estimating",
+  "operations",
+  "executive_team",
+] as const;
+export type SupportNeededType = (typeof SUPPORT_NEEDED_TYPES)[number];
+
+export const ACTIVITY_TYPES = [
+  "call",
+  "note",
+  "meeting",
+  "email",
+  "task_completed",
+  "voicemail",
+  "lunch",
+  "site_visit",
+  "proposal_sent",
+  "redline_review",
+  "go_no_go",
+  "follow_up",
+  "support_request",
+] as const;
 export type ActivityType = (typeof ACTIVITY_TYPES)[number];
 
 export const CALL_OUTCOMES = [

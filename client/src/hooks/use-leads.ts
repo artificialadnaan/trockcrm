@@ -12,6 +12,25 @@ export interface LeadRecord {
   status: "open" | "converted" | "disqualified";
   source: string | null;
   description: string | null;
+  decisionMakerName: string | null;
+  decisionProcess: string | null;
+  budgetStatus: string | null;
+  incumbentVendor: string | null;
+  unitCount: number | null;
+  buildYear: number | null;
+  forecastWindow: "30_days" | "60_days" | "90_days" | "beyond_90" | "uncommitted" | null;
+  forecastCategory: "commit" | "best_case" | "pipeline" | null;
+  forecastConfidencePercent: number | null;
+  forecastRevenue: string | null;
+  forecastGrossProfit: string | null;
+  forecastBlockers: string | null;
+  nextStep: string | null;
+  nextStepDueAt: string | null;
+  nextMilestoneAt: string | null;
+  supportNeededType: "leadership" | "estimating" | "operations" | "executive_team" | null;
+  supportNeededNotes: string | null;
+  forecastUpdatedAt: string | null;
+  forecastUpdatedBy: string | null;
   lastActivityAt: string | null;
   stageEnteredAt: string;
   convertedAt: string | null;
@@ -124,6 +143,42 @@ export async function createLead(input: {
 }) {
   return api<{ lead: LeadRecord }>("/leads", {
     method: "POST",
+    json: input,
+  });
+}
+
+export async function updateLead(
+  leadId: string,
+  input: Partial<Pick<
+    LeadRecord,
+    | "stageId"
+    | "assignedRepId"
+    | "primaryContactId"
+    | "name"
+    | "source"
+    | "description"
+    | "status"
+    | "decisionMakerName"
+    | "decisionProcess"
+    | "budgetStatus"
+    | "incumbentVendor"
+    | "unitCount"
+    | "buildYear"
+    | "forecastWindow"
+    | "forecastCategory"
+    | "forecastConfidencePercent"
+    | "forecastRevenue"
+    | "forecastGrossProfit"
+    | "forecastBlockers"
+    | "nextStep"
+    | "nextStepDueAt"
+    | "nextMilestoneAt"
+    | "supportNeededType"
+    | "supportNeededNotes"
+  >>
+) {
+  return api<{ lead: LeadRecord }>(`/leads/${leadId}`, {
+    method: "PATCH",
     json: input,
   });
 }

@@ -32,10 +32,12 @@ import { DealEstimatingSubstage } from "./deal-estimating-substage";
 import { LeadForm } from "@/components/leads/lead-form";
 import { LeadTimelineTab } from "@/components/leads/lead-timeline-tab";
 import { ActivityLogForm } from "@/components/activities/activity-log-form";
+import { ForecastEditor } from "@/components/shared/forecast-editor";
+import { NextStepEditor } from "@/components/shared/next-step-editor";
 import { StageChangeDialog } from "@/components/deals/stage-change-dialog";
 import { TaskCreateDialog } from "@/components/tasks/task-create-dialog";
 import { useActivities, createActivity } from "@/hooks/use-activities";
-import { useDealDetail, deleteDeal as apiDeleteDeal, type DealDetail } from "@/hooks/use-deals";
+import { useDealDetail, deleteDeal as apiDeleteDeal, updateDeal, type DealDetail } from "@/hooks/use-deals";
 import { useCompanyDetail } from "@/hooks/use-companies";
 import { usePipelineStages } from "@/hooks/use-pipeline-config";
 import { useAuth } from "@/lib/auth";
@@ -324,6 +326,35 @@ export function DealDetailPage() {
             <DealProposalCard deal={deal} onUpdate={refetch} />
           )}
           <DealOverviewTab deal={deal} />
+          <ForecastEditor
+            value={{
+              forecastWindow: deal.forecastWindow,
+              forecastCategory: deal.forecastCategory,
+              forecastConfidencePercent: deal.forecastConfidencePercent,
+              forecastRevenue: deal.forecastRevenue,
+              forecastGrossProfit: deal.forecastGrossProfit,
+              forecastBlockers: deal.forecastBlockers,
+              nextMilestoneAt: deal.nextMilestoneAt,
+            }}
+            onSave={async (payload) => {
+              await updateDeal(deal.id, payload);
+              await refetch();
+            }}
+          />
+          <NextStepEditor
+            value={{
+              nextStep: deal.nextStep,
+              nextStepDueAt: deal.nextStepDueAt,
+              supportNeededType: deal.supportNeededType,
+              supportNeededNotes: deal.supportNeededNotes,
+              decisionMakerName: deal.decisionMakerName,
+              budgetStatus: deal.budgetStatus,
+            }}
+            onSave={async (payload) => {
+              await updateDeal(deal.id, payload);
+              await refetch();
+            }}
+          />
         </div>
       )}
       {activeTab === "lead" && (
@@ -376,6 +407,8 @@ function DealActivityPanel({ dealId }: { dealId: string }) {
     subject: string;
     body: string;
     outcome?: string;
+    nextStep?: string;
+    nextStepDueAt?: string;
     durationMinutes?: number;
   }) => {
     await createActivity({
@@ -383,6 +416,8 @@ function DealActivityPanel({ dealId }: { dealId: string }) {
       subject: data.subject,
       body: data.body,
       outcome: data.outcome,
+      nextStep: data.nextStep,
+      nextStepDueAt: data.nextStepDueAt,
       durationMinutes: data.durationMinutes,
       dealId,
     });

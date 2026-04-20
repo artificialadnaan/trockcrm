@@ -86,6 +86,23 @@ export interface UpdateDealInput {
   source?: string | null;
   winProbability?: number | null;
   expectedCloseDate?: string | null;
+  decisionMakerName?: string | null;
+  decisionProcess?: string | null;
+  budgetStatus?: string | null;
+  incumbentVendor?: string | null;
+  unitCount?: number | null;
+  buildYear?: number | null;
+  forecastWindow?: "30_days" | "60_days" | "90_days" | "beyond_90" | "uncommitted" | null;
+  forecastCategory?: "commit" | "best_case" | "pipeline" | null;
+  forecastConfidencePercent?: number | null;
+  forecastRevenue?: string | null;
+  forecastGrossProfit?: string | null;
+  forecastBlockers?: string | null;
+  nextStep?: string | null;
+  nextStepDueAt?: string | null;
+  nextMilestoneAt?: string | null;
+  supportNeededType?: "leadership" | "estimating" | "operations" | "executive_team" | null;
+  supportNeededNotes?: string | null;
   proposalStatus?: string | null;
   proposalNotes?: string | null;
   estimatingSubstage?: string | null;
@@ -572,6 +589,29 @@ export async function updateDeal(
   if (input.source !== undefined) updates.source = input.source;
   if (input.winProbability !== undefined) updates.winProbability = input.winProbability;
   if (input.expectedCloseDate !== undefined) updates.expectedCloseDate = input.expectedCloseDate;
+  if (input.decisionMakerName !== undefined) updates.decisionMakerName = input.decisionMakerName;
+  if (input.decisionProcess !== undefined) updates.decisionProcess = input.decisionProcess;
+  if (input.budgetStatus !== undefined) updates.budgetStatus = input.budgetStatus;
+  if (input.incumbentVendor !== undefined) updates.incumbentVendor = input.incumbentVendor;
+  if (input.unitCount !== undefined) updates.unitCount = input.unitCount;
+  if (input.buildYear !== undefined) updates.buildYear = input.buildYear;
+  if (input.forecastWindow !== undefined) updates.forecastWindow = input.forecastWindow;
+  if (input.forecastCategory !== undefined) updates.forecastCategory = input.forecastCategory;
+  if (input.forecastConfidencePercent !== undefined) {
+    updates.forecastConfidencePercent = input.forecastConfidencePercent;
+  }
+  if (input.forecastRevenue !== undefined) updates.forecastRevenue = input.forecastRevenue;
+  if (input.forecastGrossProfit !== undefined) updates.forecastGrossProfit = input.forecastGrossProfit;
+  if (input.forecastBlockers !== undefined) updates.forecastBlockers = input.forecastBlockers;
+  if (input.nextStep !== undefined) updates.nextStep = input.nextStep;
+  if (input.nextStepDueAt !== undefined) {
+    updates.nextStepDueAt = input.nextStepDueAt ? new Date(input.nextStepDueAt) : null;
+  }
+  if (input.nextMilestoneAt !== undefined) {
+    updates.nextMilestoneAt = input.nextMilestoneAt ? new Date(input.nextMilestoneAt) : null;
+  }
+  if (input.supportNeededType !== undefined) updates.supportNeededType = input.supportNeededType;
+  if (input.supportNeededNotes !== undefined) updates.supportNeededNotes = input.supportNeededNotes;
   if (input.proposalNotes !== undefined) updates.proposalNotes = input.proposalNotes;
   if (input.workflowRoute !== undefined) {
     const stage = await getStageById(existing.stageId, workflowFamilyForRoute(input.workflowRoute));
@@ -674,6 +714,19 @@ export async function updateDeal(
 
   if (Object.keys(updates).length === 0) {
     return existing;
+  }
+
+  if (
+    input.forecastWindow !== undefined ||
+    input.forecastCategory !== undefined ||
+    input.forecastConfidencePercent !== undefined ||
+    input.forecastRevenue !== undefined ||
+    input.forecastGrossProfit !== undefined ||
+    input.forecastBlockers !== undefined ||
+    input.nextMilestoneAt !== undefined
+  ) {
+    updates.forecastUpdatedAt = new Date();
+    updates.forecastUpdatedBy = userId;
   }
 
   const result = await tenantDb

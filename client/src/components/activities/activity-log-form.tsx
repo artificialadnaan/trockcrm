@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Phone, FileText, Calendar, Plus } from "lucide-react";
+import { Phone, FileText, Calendar, Plus, Handshake, MapPinned, PhoneCall, SendHorizontal } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -15,7 +15,16 @@ import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import type { ActivitySourceEntityType } from "@/hooks/use-activities";
 
-type LogType = "call" | "note" | "meeting";
+type LogType =
+  | "call"
+  | "note"
+  | "meeting"
+  | "voicemail"
+  | "lunch"
+  | "site_visit"
+  | "proposal_sent"
+  | "follow_up"
+  | "go_no_go";
 
 interface ActivityTargetOption {
   id: string;
@@ -29,6 +38,8 @@ interface ActivityLogFormProps {
     subject: string;
     body: string;
     outcome?: string;
+    nextStep?: string;
+    nextStepDueAt?: string;
     durationMinutes?: number;
     responsibleUserId?: string;
     sourceEntityType?: ActivitySourceEntityType;
@@ -67,6 +78,8 @@ export function ActivityLogForm({
   const [body, setBody] = useState("");
   const [outcome, setOutcome] = useState<string>("");
   const [duration, setDuration] = useState<string>("");
+  const [nextStep, setNextStep] = useState("");
+  const [nextStepDueAt, setNextStepDueAt] = useState("");
   const [target, setTarget] = useState<string>(targetOptions[0] ? encodeTarget(targetOptions[0]) : "");
   const [assignees, setAssignees] = useState<Assignee[]>([]);
   const [responsibleUserId, setResponsibleUserId] = useState<string>(
@@ -134,6 +147,8 @@ export function ActivityLogForm({
         subject: `${activeForm} logged`,
         body: body.trim(),
         outcome: outcome || undefined,
+        nextStep: nextStep || undefined,
+        nextStepDueAt: nextStepDueAt || undefined,
         durationMinutes: duration ? parseInt(duration, 10) : undefined,
         responsibleUserId: responsibleUserId || undefined,
         sourceEntityType: selectedTarget?.sourceEntityType,
@@ -142,6 +157,8 @@ export function ActivityLogForm({
       setBody("");
       setOutcome("");
       setDuration("");
+      setNextStep("");
+      setNextStepDueAt("");
       setActiveForm(null);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to log activity");
@@ -174,6 +191,18 @@ export function ActivityLogForm({
           onClick={() => setActiveForm(activeForm === "meeting" ? null : "meeting")}
         >
           <Calendar className="h-4 w-4 mr-1" /> Log Meeting
+        </Button>
+        <Button size="sm" variant={activeForm === "voicemail" ? "default" : "outline"} onClick={() => setActiveForm(activeForm === "voicemail" ? null : "voicemail")}>
+          <PhoneCall className="h-4 w-4 mr-1" /> Voicemail
+        </Button>
+        <Button size="sm" variant={activeForm === "lunch" ? "default" : "outline"} onClick={() => setActiveForm(activeForm === "lunch" ? null : "lunch")}>
+          <Handshake className="h-4 w-4 mr-1" /> Lunch
+        </Button>
+        <Button size="sm" variant={activeForm === "site_visit" ? "default" : "outline"} onClick={() => setActiveForm(activeForm === "site_visit" ? null : "site_visit")}>
+          <MapPinned className="h-4 w-4 mr-1" /> Site Visit
+        </Button>
+        <Button size="sm" variant={activeForm === "proposal_sent" ? "default" : "outline"} onClick={() => setActiveForm(activeForm === "proposal_sent" ? null : "proposal_sent")}>
+          <SendHorizontal className="h-4 w-4 mr-1" /> Proposal Sent
         </Button>
       </div>
 
@@ -265,6 +294,24 @@ export function ActivityLogForm({
                 />
               </div>
             )}
+            <div className="grid gap-3 md:grid-cols-2">
+              <div>
+                <label className="text-xs text-muted-foreground mb-1 block">Next Step</label>
+                <Input
+                  value={nextStep}
+                  onChange={(e) => setNextStep(e.target.value)}
+                  placeholder="Optional next step"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-muted-foreground mb-1 block">Next Step Due</label>
+                <Input
+                  type="date"
+                  value={nextStepDueAt}
+                  onChange={(e) => setNextStepDueAt(e.target.value)}
+                />
+              </div>
+            </div>
             {error && <p className="text-sm text-red-600">{error}</p>}
             <div className="flex gap-2">
               <Button size="sm" onClick={handleSubmit} disabled={submitting || !body.trim()}>
@@ -278,6 +325,8 @@ export function ActivityLogForm({
                   setBody("");
                   setOutcome("");
                   setDuration("");
+                  setNextStep("");
+                  setNextStepDueAt("");
                   setError(null);
                 }}
               >

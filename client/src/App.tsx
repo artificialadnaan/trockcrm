@@ -31,6 +31,7 @@ import { RepDashboardPage } from "@/pages/dashboard/rep-dashboard-page";
 import { DirectorDashboardPage } from "@/pages/director/director-dashboard-page";
 import { DirectorRepDetail } from "@/pages/director/director-rep-detail";
 import { ReportsPage } from "@/pages/reports/reports-page";
+import { SalesReviewPage } from "@/pages/sales-review/sales-review-page";
 import { ProjectsPage } from "@/pages/projects/projects-page";
 import { ProcoreSyncPage } from "@/pages/admin/procore-sync-page";
 import { MigrationDashboardPage } from "@/pages/admin/migration/migration-dashboard-page";
@@ -55,6 +56,7 @@ import { AdminGuidePage } from "@/pages/admin/help/admin-guide-page";
 import { CompanyCamPage } from "@/pages/admin/companycam-page";
 import { PhotoCapturePage } from "@/pages/photos/photo-capture-page";
 import { PhotoFeedPage } from "@/pages/photos/photo-feed-page";
+import { PipelineHygienePage } from "@/pages/pipeline/pipeline-hygiene-page";
 import { Toaster } from "@/components/ui/sonner";
 
 function HomePage() {
@@ -110,6 +112,8 @@ export function App() {
               <Route path="/tasks" element={<TaskListPage />} />
               <Route path="/files" element={<FilesPage />} />
               <Route path="/reports" element={<ReportsPage />} />
+              <Route path="/sales-review" element={<SalesReviewPage />} />
+              <Route path="/pipeline/hygiene" element={<PipelineHygienePage />} />
               <Route path="/projects" element={<ProjectsPage />} />
               <Route
                 path="/director"

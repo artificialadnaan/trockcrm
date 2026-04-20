@@ -14,7 +14,12 @@ import {
 import { WORKFLOW_ROUTES } from "../../types/enums.js";
 import { companies } from "./companies.js";
 import { contacts } from "./contacts.js";
-import { leads } from "./leads.js";
+import {
+  forecastCategoryEnum as dealForecastCategoryEnum,
+  forecastWindowEnum as dealForecastWindowEnum,
+  leads,
+  supportNeededTypeEnum as dealSupportNeededTypeEnum,
+} from "./leads.js";
 import { properties } from "./properties.js";
 
 export const proposalStatusEnum = pgEnum("proposal_status", [
@@ -66,6 +71,25 @@ export const deals = pgTable("deals", {
   regionId: uuid("region_id"),
   source: varchar("source", { length: 100 }),
   winProbability: integer("win_probability"),
+  decisionMakerName: varchar("decision_maker_name", { length: 255 }),
+  decisionProcess: text("decision_process"),
+  budgetStatus: varchar("budget_status", { length: 100 }),
+  incumbentVendor: varchar("incumbent_vendor", { length: 255 }),
+  unitCount: integer("unit_count"),
+  buildYear: integer("build_year"),
+  forecastWindow: dealForecastWindowEnum("forecast_window"),
+  forecastCategory: dealForecastCategoryEnum("forecast_category"),
+  forecastConfidencePercent: integer("forecast_confidence_percent"),
+  forecastRevenue: numeric("forecast_revenue", { precision: 14, scale: 2 }),
+  forecastGrossProfit: numeric("forecast_gross_profit", { precision: 14, scale: 2 }),
+  forecastBlockers: text("forecast_blockers"),
+  nextStep: text("next_step"),
+  nextStepDueAt: timestamp("next_step_due_at", { withTimezone: true }),
+  nextMilestoneAt: timestamp("next_milestone_at", { withTimezone: true }),
+  supportNeededType: dealSupportNeededTypeEnum("support_needed_type"),
+  supportNeededNotes: text("support_needed_notes"),
+  forecastUpdatedAt: timestamp("forecast_updated_at", { withTimezone: true }),
+  forecastUpdatedBy: uuid("forecast_updated_by"),
   procoreProjectId: bigint("procore_project_id", { mode: "number" }),
   procoreBidId: bigint("procore_bid_id", { mode: "number" }),
   procoreLastSyncedAt: timestamp("procore_last_synced_at", { withTimezone: true }),

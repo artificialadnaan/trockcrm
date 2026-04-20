@@ -22,6 +22,8 @@ export interface CreateActivityInput {
   subject?: string;
   body?: string;
   outcome?: string;
+  nextStep?: string;
+  nextStepDueAt?: string;
   durationMinutes?: number;
   occurredAt?: string;
 }
@@ -174,6 +176,8 @@ export async function createActivity(
       subject: input.subject ?? null,
       body: input.body ?? null,
       outcome: input.outcome ?? null,
+      nextStep: input.nextStep ?? null,
+      nextStepDueAt: input.nextStepDueAt ? new Date(input.nextStepDueAt) : null,
       durationMinutes: input.durationMinutes ?? null,
       occurredAt: input.occurredAt ? new Date(input.occurredAt) : new Date(),
     })
