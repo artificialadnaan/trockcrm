@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { api } from "@/lib/api";
+import type { WorkflowFamily } from "@trock-crm/shared/types";
 
 export interface PipelineStage {
   id: string;
@@ -7,6 +8,7 @@ export interface PipelineStage {
   slug: string;
   workflowFamily: "lead" | "standard_deal" | "service_deal";
   displayOrder: number;
+  workflowFamily: WorkflowFamily;
   isActivePipeline: boolean;
   isTerminal: boolean;
   requiredFields: string[];

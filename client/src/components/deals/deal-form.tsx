@@ -15,6 +15,7 @@ import { usePipelineStages, useProjectTypes, useRegions } from "@/hooks/use-pipe
 import { createDeal, updateDeal } from "@/hooks/use-deals";
 import type { Deal } from "@/hooks/use-deals";
 import { Loader2 } from "lucide-react";
+import { getDefaultDealStageId, getNewDealStages } from "./deal-form.helpers";
 
 interface DealFormProps {
   deal?: Deal; // If provided, we're editing; otherwise creating
@@ -28,7 +29,7 @@ export function DealForm({ deal, onSuccess }: DealFormProps) {
   const { regions } = useRegions();
 
   const isEdit = !!deal;
-  const activeStages = stages.filter((s) => !s.isTerminal);
+  const activeStages = getNewDealStages(stages);
 
   const [formData, setFormData] = useState({
     name: deal?.name ?? "",
@@ -56,9 +57,9 @@ export function DealForm({ deal, onSuccess }: DealFormProps) {
   // Default stageId when activeStages finishes loading and form stageId is still empty
   useEffect(() => {
     if (!isEdit && !formData.stageId && activeStages.length > 0) {
-      setFormData((prev) => ({ ...prev, stageId: activeStages[0].id }));
+      setFormData((prev) => ({ ...prev, stageId: getDefaultDealStageId(stages) }));
     }
-  }, [activeStages, formData.stageId, isEdit]);
+  }, [activeStages.length, formData.stageId, isEdit, stages]);
 
   const handleChange = (field: string, value: string) => {
     setFormData((prev) => ({ ...prev, [field]: value }));
