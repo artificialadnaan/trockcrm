@@ -69,7 +69,11 @@ type TransitionBlockedResult = {
   reason: "missing_requirements";
   targetStageId: string;
   resolution: "inline" | "detail";
-  missing: string[];
+  missing: Array<{
+    key: string;
+    label: string;
+    resolution: "inline" | "detail";
+  }>;
 };
 
 type TransitionSuccessResult = {
@@ -99,6 +103,15 @@ const QUALIFIED_LEAD_REQUIREMENTS = [
   "qualificationBudgetAmount",
   "qualificationCompanyFit",
 ] as const;
+
+const REQUIREMENT_METADATA: Record<string, { label: string; resolution: "inline" | "detail" }> = {
+  property: { label: "Linked property", resolution: "detail" },
+  source: { label: "Lead source", resolution: "inline" },
+  qualificationScope: { label: "Project scope / category", resolution: "inline" },
+  qualificationBudgetAmount: { label: "Approximate budget / dollar amount", resolution: "inline" },
+  qualificationCompanyFit: { label: "Company fit / serviceability confirmation", resolution: "inline" },
+  directorReviewDecision: { label: "Director decision", resolution: "inline" },
+};
 
 function isBlank(value: unknown) {
   return value === null || value === undefined || (typeof value === "string" && value.trim().length === 0);
@@ -362,12 +375,7 @@ export function createLeadService(
     const updates: Record<string, unknown> = {};
 
     if (input.stageId !== undefined) {
-      const stage = await deps.getStageById(input.stageId, "lead");
-      if (!stage) {
-        throw new AppError(400, "Invalid lead stage ID");
-      }
-      updates.stageId = input.stageId;
-      updates.stageEnteredAt = deps.now();
+      throw new AppError(400, "Use the lead stage transition endpoint to move a lead");
     }
 
     if (input.assignedRepId !== undefined) {
@@ -390,10 +398,15 @@ export function createLeadService(
     if (input.qualificationCompanyFit !== undefined) updates.qualificationCompanyFit = input.qualificationCompanyFit;
     if (input.qualificationCompletedAt !== undefined) updates.qualificationCompletedAt = input.qualificationCompletedAt;
     if (input.directorReviewDecision !== undefined) {
+      if (userRole === "rep") {
+        throw new AppError(403, "Only directors can record go/no-go decisions");
+      }
       updates.directorReviewDecision = input.directorReviewDecision;
       if (input.directorReviewDecision === "no_go" && isBlank(input.directorReviewReason)) {
         throw new AppError(400, "No-go decisions require a reason");
       }
+      updates.directorReviewedAt = deps.now();
+      updates.directorReviewedBy = userId;
     }
     if (input.directorReviewReason !== undefined) updates.directorReviewReason = input.directorReviewReason;
 
@@ -450,6 +463,10 @@ export function createLeadService(
       ...input.inlinePatch,
     };
 
+    if (input.inlinePatch?.directorReviewDecision !== undefined && input.userRole === "rep") {
+      throw new AppError(403, "Only directors can record go/no-go decisions");
+    }
+
     if (effectiveLead.directorReviewDecision === "no_go" && isBlank(effectiveLead.directorReviewReason)) {
       throw new AppError(400, "No-go decisions require a reason");
     }
@@ -503,7 +520,11 @@ export function createLeadService(
         reason: "missing_requirements",
         targetStageId: input.targetStageId,
         resolution: "inline",
-        missing,
+        missing: missing.map((key) => ({
+          key,
+          label: REQUIREMENT_METADATA[key]?.label ?? key,
+          resolution: REQUIREMENT_METADATA[key]?.resolution ?? "inline",
+        })),
       };
     }
 

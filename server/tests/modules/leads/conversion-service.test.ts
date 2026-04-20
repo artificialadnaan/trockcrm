@@ -944,7 +944,12 @@ describe("Lead Service", () => {
       reason: "missing_requirements",
       targetStageId: qualifiedLeadStage.id,
       resolution: "inline",
-      missing: ["source", "qualificationScope", "qualificationBudgetAmount", "qualificationCompanyFit"],
+      missing: [
+        { key: "source", label: "Lead source", resolution: "inline" },
+        { key: "qualificationScope", label: "Project scope / category", resolution: "inline" },
+        { key: "qualificationBudgetAmount", label: "Approximate budget / dollar amount", resolution: "inline" },
+        { key: "qualificationCompanyFit", label: "Company fit / serviceability confirmation", resolution: "inline" },
+      ],
     });
   });
 
@@ -1025,6 +1030,86 @@ describe("Lead Service", () => {
         inlinePatch: { directorReviewDecision: "no_go", directorReviewReason: null },
       })
     ).rejects.toMatchObject({ statusCode: 400, message: "No-go decisions require a reason" });
+  });
+
+  it("prevents reps from recording director go/no-go decisions", async () => {
+    const tenantDb = createFakeTenantDb({
+      leads: [
+        {
+          id: "lead-director-1",
+          companyId: "company-1",
+          propertyId: "property-1",
+          primaryContactId: "contact-1",
+          name: "Palm Villas repaint",
+          stageId: directorReviewStage.id,
+          assignedRepId: "rep-1",
+          status: "open",
+          source: "Referral",
+          description: null,
+          qualificationScope: "Exterior repaint",
+          qualificationBudgetAmount: "120000.00",
+          qualificationCompanyFit: true,
+          qualificationCompletedAt: new Date("2026-04-14T15:00:00.000Z"),
+          stageEnteredAt: new Date("2026-04-14T15:00:00.000Z"),
+          convertedAt: null,
+          isActive: true,
+          createdAt: new Date("2026-04-12T15:00:00.000Z"),
+          updatedAt: new Date("2026-04-14T15:00:00.000Z"),
+        },
+      ],
+    });
+    const service = createLeadService({
+      getStageById: pipelineMocks.getStageById,
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+    });
+
+    await expect(
+      service.transitionLeadStage(tenantDb as never, {
+        leadId: "lead-director-1",
+        targetStageId: readyForOpportunityStage.id,
+        userId: "rep-1",
+        userRole: "rep",
+        inlinePatch: { directorReviewDecision: "go" },
+      })
+    ).rejects.toMatchObject({ statusCode: 403, message: "Only directors can record go/no-go decisions" });
+  });
+
+  it("rejects direct lead stage changes through updateLead", async () => {
+    const tenantDb = createFakeTenantDb({
+      leads: [
+        {
+          id: "lead-1",
+          companyId: "company-1",
+          propertyId: "property-1",
+          primaryContactId: "contact-1",
+          name: "Palm Villas repaint",
+          stageId: leadStage.id,
+          assignedRepId: "rep-1",
+          status: "open",
+          source: "Referral",
+          description: null,
+          stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+          convertedAt: null,
+          isActive: true,
+          createdAt: new Date("2026-04-12T15:00:00.000Z"),
+          updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+        },
+      ],
+    });
+    const service = createLeadService({
+      getStageById: pipelineMocks.getStageById,
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+    });
+
+    await expect(
+      service.updateLead(
+        tenantDb as never,
+        "lead-1",
+        { stageId: qualifiedLeadStage.id },
+        "director",
+        "director-1"
+      )
+    ).rejects.toMatchObject({ statusCode: 400, message: "Use the lead stage transition endpoint to move a lead" });
   });
 });
 

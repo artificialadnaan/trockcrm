@@ -104,7 +104,10 @@ describe("lead stage transition route", () => {
       reason: "missing_requirements",
       targetStageId: "stage-qualified-lead",
       resolution: "inline",
-      missing: ["source", "qualificationScope"],
+      missing: [
+        { key: "source", label: "Lead source", resolution: "inline" },
+        { key: "qualificationScope", label: "Project scope / category", resolution: "inline" },
+      ],
     });
 
     const { req, res } = await invokeLeadRoute({ targetStageId: "stage-qualified-lead" });
@@ -125,7 +128,10 @@ describe("lead stage transition route", () => {
       reason: "missing_requirements",
       targetStageId: "stage-qualified-lead",
       resolution: "inline",
-      missing: ["source", "qualificationScope"],
+      missing: [
+        { key: "source", label: "Lead source", resolution: "inline" },
+        { key: "qualificationScope", label: "Project scope / category", resolution: "inline" },
+      ],
     });
   });
 });
