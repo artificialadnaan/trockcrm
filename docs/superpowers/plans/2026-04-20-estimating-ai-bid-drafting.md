@@ -565,7 +565,15 @@ export async function createEstimateSourceDocument({
           versionLabel: estimateSourceDocuments.versionLabel,
         })
         .from(estimateSourceDocuments)
-        .where(eq(estimateSourceDocuments.contentHash, input.contentHash))
+        .where(
+          and(
+            eq(estimateSourceDocuments.contentHash, input.contentHash),
+            eq(estimateSourceDocuments.dealId, input.dealId),
+            input.projectId
+              ? eq(estimateSourceDocuments.projectId, input.projectId)
+              : isNull(estimateSourceDocuments.projectId)
+          )
+        )
     : [];
 
   const exactDuplicate = existing.find((row) => row.contentHash === input.contentHash);
@@ -704,12 +712,12 @@ router.post("/:dealId/estimating/documents", async (req, res) => {
   const deal = await getDealById(req.tenantDb!, req.params.dealId, req.user!.role, req.user!.id);
   if (!deal) throw new AppError(404, "Deal not found");
 
-  const uploadedFile = await finalizeUploadedFileForDeal({
+  const uploadedFile = await confirmUpload({
     tenantDb: req.tenantDb!,
     officeSlug: req.officeSlug!,
     userId: req.user!.id,
     uploadToken: req.body.uploadToken,
-    dealId: req.params.dealId,
+    body: req.body,
   });
 
   const document = await createEstimateSourceDocument({
@@ -1368,7 +1376,6 @@ export function EstimatingWorkflowShell(props: EstimatingWorkflowShellProps) {
       <EstimateExtractionReviewTable rows={props.extractionRows} />
       <EstimateCatalogMatchTable rows={props.matchRows} />
       <EstimatePricingReviewTable rows={props.pricingRows} />
-      <ExistingEstimateEditor sections={props.sections} onRefresh={props.onRefreshEstimate} />
       {props.copilotEnabled ? <EstimateCopilotPanel dealId={props.dealId} /> : null}
       <EstimateReviewLogPanel events={props.reviewEvents} />
     </div>
