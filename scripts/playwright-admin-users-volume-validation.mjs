@@ -52,7 +52,7 @@ async function writeReport(summary) {
 }
 
 async function login(page, checks) {
-  await page.goto(`${targetUrl}/admin/users`, { waitUntil: "networkidle" });
+  await page.goto(`${targetUrl}/admin/users`, { waitUntil: "load" });
 
   if (await page.getByRole("heading", { name: "Users" }).isVisible().catch(() => false)) {
     checks.push("Admin users page opened without an interactive login prompt.");
@@ -63,21 +63,39 @@ async function login(page, checks) {
     invariant(authEmail, "AUTH_EMAIL is required for dev-picker mode.");
     const devButton = page.getByRole("button", { name: new RegExp(authEmail, "i") });
     await devButton.waitFor({ state: "visible" });
-    await devButton.click();
+    await Promise.all([
+      page.waitForResponse(
+        (response) => response.url().includes("/api/auth/dev/login") && response.ok(),
+        { timeout: 15000 },
+      ),
+      devButton.click(),
+    ]);
     checks.push(`Signed in through dev-picker as ${authEmail}.`);
   } else if (authMode === "local-credentials") {
     invariant(authEmail, "AUTH_EMAIL is required for local-credentials mode.");
     invariant(authPassword, "AUTH_PASSWORD is required for local-credentials mode.");
     await page.getByLabel("Email").fill(authEmail);
     await page.getByLabel("Password").fill(authPassword);
-    await page.getByRole("button", { name: /^sign in$/i }).click();
+    await Promise.all([
+      page.waitForResponse(
+        (response) => response.url().includes("/api/auth/local/login") && response.ok(),
+        { timeout: 15000 },
+      ),
+      page.getByRole("button", { name: /^sign in$/i }).click(),
+    ]);
     checks.push(`Signed in with local credentials as ${authEmail}.`);
   } else {
     throw new Error(`Unsupported AUTH_MODE: ${authMode}`);
   }
 
-  await page.waitForURL((url) => !url.pathname.includes("/login"), { timeout: 15000 }).catch(() => {});
-  await page.goto(`${targetUrl}/admin/users`, { waitUntil: "networkidle" });
+  await page.waitForFunction(
+    () => {
+      return document.body.innerText.includes("Dashboard")
+        || document.body.innerText.includes("Users");
+    },
+    { timeout: 15000 },
+  );
+  await page.goto(`${targetUrl}/admin/users`, { waitUntil: "load" });
   await page.getByRole("heading", { name: "Users" }).waitFor({ state: "visible" });
 }
 
@@ -92,7 +110,7 @@ async function validateAdminUsers(page, checks) {
 
   await page.getByPlaceholder("Search by name or email").waitFor({ state: "visible" });
   for (const label of ["Role", "Status", "Source", "Login"]) {
-    await page.getByText(label, { exact: true }).waitFor({ state: "visible" });
+    await page.locator("label", { hasText: label }).waitFor({ state: "visible" });
   }
   checks.push("Search and filter controls rendered.");
 
