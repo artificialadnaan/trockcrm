@@ -28,6 +28,7 @@ import {
 import {
   applyInterventionPolicyRecommendation,
   getInterventionPolicyRecommendationEvaluationSummary,
+  revertInterventionPolicyRecommendation,
 } from "./intervention-policy-application-service.js";
 import { getInterventionPolicyRecommendationReview } from "./intervention-policy-recommendation-review-service.js";
 import { seedInterventionPolicyRecommendationQualificationData } from "./intervention-policy-recommendation-seed-service.js";
@@ -525,6 +526,35 @@ router.post("/ops/intervention-policy-recommendations/:recommendationId/apply", 
       throw new AppError(400, "recommendationIdempotencyKey is required");
     }
     const result = await applyInterventionPolicyRecommendation(req.tenantDb!, {
+      officeId: getActiveOfficeId(req),
+      recommendationId,
+      snapshotId,
+      actorUserId: req.user!.id,
+      recommendationIdempotencyKey,
+    });
+    await req.commitTransaction!();
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/ops/intervention-policy-recommendations/:recommendationId/revert", requireRole("admin", "director"), async (req, res, next) => {
+  try {
+    const recommendationId = String(req.params.recommendationId ?? "");
+    if (!UUID_PATTERN.test(recommendationId)) {
+      throw new AppError(400, "recommendationId must be a valid UUID");
+    }
+    const snapshotId = typeof req.body?.snapshotId === "string" ? req.body.snapshotId : null;
+    const recommendationIdempotencyKey =
+      typeof req.body?.recommendationIdempotencyKey === "string" ? req.body.recommendationIdempotencyKey : null;
+    if (!snapshotId || !UUID_PATTERN.test(snapshotId)) {
+      throw new AppError(400, "snapshotId must be a valid UUID");
+    }
+    if (!recommendationIdempotencyKey) {
+      throw new AppError(400, "recommendationIdempotencyKey is required");
+    }
+    const result = await revertInterventionPolicyRecommendation(req.tenantDb!, {
       officeId: getActiveOfficeId(req),
       recommendationId,
       snapshotId,

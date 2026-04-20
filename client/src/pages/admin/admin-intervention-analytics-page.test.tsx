@@ -334,6 +334,43 @@ const policyRecommendationReview = {
       createdAt: "2026-04-16T13:10:00.000Z",
     },
   ],
+  recentHistory: [
+    {
+      recommendationId: "11111111-1111-4111-8111-111111111111",
+      snapshotId: "policy-snapshot-1",
+      taxonomy: "snooze_policy_adjustment",
+      title: "Tighten waiting-on-customer snoozes",
+      eventType: "rendered",
+      actorName: null,
+      summary: "Rendered in the latest active snapshot.",
+      occurredAt: "2026-04-16T13:10:00.000Z",
+    },
+    {
+      recommendationId: "11111111-1111-4111-8111-111111111111",
+      snapshotId: "policy-snapshot-1",
+      taxonomy: "snooze_policy_adjustment",
+      title: "Tighten waiting-on-customer snoozes",
+      eventType: "applied",
+      actorName: "Admin User",
+      summary: "Applied to waiting-on-customer snooze policy.",
+      occurredAt: "2026-04-16T13:12:00.000Z",
+    },
+  ],
+  tuning: {
+    currentThresholds: {
+      qualificationFloor: 55,
+      strongRecommendationFloor: 70,
+      primaryCap: 3,
+      secondaryCap: 2,
+    },
+    guidance: [
+      {
+        taxonomy: "snooze_policy_adjustment",
+        recommendedAction: "review_ranking_cap",
+        summary: "This taxonomy is qualifying but being crowded out by ranking cap pressure.",
+      },
+    ],
+  },
 } as const;
 
 beforeEach(() => {
@@ -477,7 +514,10 @@ describe("AdminInterventionAnalyticsPage", () => {
     expect(html).toContain("Waiting-on-customer breach rate");
     expect(html).toContain("Why this qualified");
     expect(html).toContain("Apply change");
+    expect(html).toContain("2 policy values would change.");
     expect(html).toContain("Review recommendation quality");
+    expect(html).toContain("Recent history: 2 events");
+    expect(html).toContain("Qualification floor 55");
     expect(html).not.toContain("Manager Readout");
     expect(html).toContain("Run Manager Alert Scan");
     expect(html).toContain("Send Alerts");
@@ -565,6 +605,36 @@ describe("AdminInterventionAnalyticsPage", () => {
     expect(html).toContain("Generate Recommendations");
   });
 
+  it("renders an undo affordance for an applied recommendation", () => {
+    mocks.useInterventionPolicyRecommendations.mockReturnValue({
+      data: {
+        ...policyRecommendationView,
+        recommendations: [
+          {
+            ...policyRecommendationView.recommendations[0],
+            applyStatus: {
+              status: "applied",
+              appliedAt: "2026-04-16T13:12:00.000Z",
+              appliedBy: "Admin User",
+              reason: null,
+            },
+          },
+        ],
+      },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <AdminInterventionAnalyticsPage />
+      </MemoryRouter>
+    );
+
+    expect(html).toContain("Undo change");
+  });
+
   it("renders an explained empty recommendation state when nothing qualifies", () => {
     mocks.useInterventionPolicyRecommendations.mockReturnValueOnce({
       data: {
@@ -595,5 +665,37 @@ describe("AdminInterventionAnalyticsPage", () => {
 
     expect(html).toContain("No policy changes are recommended right now.");
     expect(html).toContain("qualification predicates were not met");
+  });
+
+  it("renders the read-only taxonomy message for review-only recommendations", () => {
+    mocks.useInterventionPolicyRecommendations.mockReturnValue({
+      data: {
+        ...policyRecommendationView,
+        recommendations: [
+          {
+            ...policyRecommendationView.recommendations[0],
+            taxonomy: "disconnect_playbook_change",
+            title: "Change the missing next task playbook",
+            proposedChange: null,
+            applyEligibility: {
+              eligible: false,
+              reason: "read_only_taxonomy",
+              message: "This recommendation remains review-only in the current release.",
+            },
+          },
+        ],
+      },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <AdminInterventionAnalyticsPage />
+      </MemoryRouter>
+    );
+
+    expect(html).toContain("This recommendation remains review-only in the current release.");
   });
 });

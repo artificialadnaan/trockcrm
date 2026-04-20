@@ -402,7 +402,10 @@ export type InterventionPolicyRecommendationApplyEventStatus =
   | "applied_noop"
   | "rejected_validation"
   | "rejected_stale"
-  | "rejected_conflict";
+  | "rejected_conflict"
+  | "reverted"
+  | "revert_noop"
+  | "revert_rejected_conflict";
 
 export type InterventionPolicyRecommendationApplyEligibilityReason =
   | "eligible"
@@ -579,6 +582,33 @@ export type InterventionPolicyRecommendationReviewDecisionFilter =
 
 export type InterventionPolicyRecommendationReviewScope = "latest_snapshot";
 
+export type InterventionPolicyRecommendationHistoryEventType =
+  | "rendered"
+  | InterventionPolicyRecommendationApplyEventStatus;
+
+export interface InterventionPolicyRecommendationHistoryEntry {
+  recommendationId: string;
+  snapshotId: string;
+  taxonomy: InterventionPolicyRecommendationTaxonomy;
+  title: string;
+  eventType: InterventionPolicyRecommendationHistoryEventType;
+  actorName: string | null;
+  summary: string;
+  occurredAt: string;
+}
+
+export type InterventionPolicyRecommendationTuningAction =
+  | "hold_thresholds"
+  | "lower_qualification_floor"
+  | "review_ranking_cap"
+  | "seed_more_history";
+
+export interface InterventionPolicyRecommendationTuningGuidanceEntry {
+  taxonomy: InterventionPolicyRecommendationTaxonomy;
+  recommendedAction: InterventionPolicyRecommendationTuningAction;
+  summary: string;
+}
+
 export interface InterventionPolicyRecommendationReviewRow {
   taxonomy: InterventionPolicyRecommendationTaxonomy;
   groupingKey: string;
@@ -597,6 +627,16 @@ export interface InterventionPolicyRecommendationReviewModel {
   emptyStateScope: InterventionPolicyRecommendationReviewScope;
   emptyStateReason: string | null;
   latestDecisionRows: InterventionPolicyRecommendationReviewRow[];
+  recentHistory: InterventionPolicyRecommendationHistoryEntry[];
+  tuning: {
+    currentThresholds: {
+      qualificationFloor: number;
+      strongRecommendationFloor: number;
+      primaryCap: number;
+      secondaryCap: number;
+    };
+    guidance: InterventionPolicyRecommendationTuningGuidanceEntry[];
+  };
 }
 
 export interface InterventionAnalyticsDashboard {

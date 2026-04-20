@@ -2,6 +2,7 @@ import { useState } from "react";
 import {
   applyInterventionPolicyRecommendation,
   regenerateInterventionPolicyRecommendations,
+  revertInterventionPolicyRecommendation,
   submitInterventionPolicyRecommendationFeedback,
   type InterventionPolicyRecommendation,
   type InterventionPolicyRecommendationReviewDecisionFilter,
@@ -16,6 +17,72 @@ function formatFreshnessLabel(value: string | null | undefined) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "Unknown freshness";
   return `Generated ${date.toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}`;
+}
+
+function formatHistoryEventLabel(value: string) {
+  if (value === "applied_noop") return "Applied no-op";
+  if (value === "revert_noop") return "Undo no-op";
+  if (value === "revert_rejected_conflict") return "Undo rejected";
+  return value.split("_").join(" ");
+}
+
+function formatPolicyDiffValue(value: number | string | null | undefined, mode?: "percent") {
+  if (value == null) return "Not set";
+  if (mode === "percent") return `${value}%`;
+  return String(value);
+}
+
+export function buildPolicyDiffRows(
+  proposedChange: InterventionPolicyRecommendation["proposedChange"]
+) {
+  if (!proposedChange) return [] as Array<{ label: string; before: string; after: string }>;
+
+  const rows =
+    proposedChange.kind === "snooze_policy_adjustment"
+      ? [
+          {
+            label: "Max snooze days",
+            before: formatPolicyDiffValue(proposedChange.currentValue.maxSnoozeDays),
+            after: formatPolicyDiffValue(proposedChange.proposedValue.maxSnoozeDays),
+          },
+          {
+            label: "Breach review threshold",
+            before: formatPolicyDiffValue(proposedChange.currentValue.breachReviewThresholdPercent, "percent"),
+            after: formatPolicyDiffValue(proposedChange.proposedValue.breachReviewThresholdPercent, "percent"),
+          },
+        ]
+      : proposedChange.kind === "escalation_policy_adjustment"
+        ? [
+            {
+              label: "Routing mode",
+              before: formatPolicyDiffValue(proposedChange.currentValue.routingMode),
+              after: formatPolicyDiffValue(proposedChange.proposedValue.routingMode),
+            },
+            {
+              label: "Escalation threshold",
+              before: formatPolicyDiffValue(proposedChange.currentValue.escalationThresholdPercent, "percent"),
+              after: formatPolicyDiffValue(proposedChange.proposedValue.escalationThresholdPercent, "percent"),
+            },
+          ]
+        : [
+            {
+              label: "Balancing mode",
+              before: formatPolicyDiffValue(proposedChange.currentValue.balancingMode),
+              after: formatPolicyDiffValue(proposedChange.proposedValue.balancingMode),
+            },
+            {
+              label: "Overload share threshold",
+              before: formatPolicyDiffValue(proposedChange.currentValue.overloadSharePercent, "percent"),
+              after: formatPolicyDiffValue(proposedChange.proposedValue.overloadSharePercent, "percent"),
+            },
+            {
+              label: "Minimum high-risk cases",
+              before: formatPolicyDiffValue(proposedChange.currentValue.minHighRiskCases),
+              after: formatPolicyDiffValue(proposedChange.proposedValue.minHighRiskCases),
+            },
+          ];
+
+  return rows.filter((row) => row.before !== row.after);
 }
 
 function PolicyRecommendationCard({
@@ -77,6 +144,32 @@ function PolicyRecommendationCard({
     }
   }
 
+  async function handleRevert() {
+    setApplying(true);
+    setActionError(null);
+    try {
+      const result = await revertInterventionPolicyRecommendation({
+        recommendationId: recommendation.id,
+        snapshotId: recommendation.snapshotId,
+        recommendationIdempotencyKey: `${recommendation.id}:revert:${Date.now()}`,
+      });
+      setLocalApplyStatus({
+        status:
+          result.status === "reverted" || result.status === "revert_noop"
+            ? "not_applied"
+            : result.status,
+        appliedAt: result.appliedAt,
+        appliedBy: result.appliedBy,
+        reason: result.reason,
+      });
+      await onRefresh();
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "Failed to undo recommendation");
+    } finally {
+      setApplying(false);
+    }
+  }
+
   function renderPolicyValue(value: Record<string, unknown>) {
     return Object.entries(value)
       .map(([key, current]) => `${key}: ${String(current)}`)
@@ -84,11 +177,15 @@ function PolicyRecommendationCard({
   }
 
   const applyStatus = localApplyStatus;
+  const diffRows = buildPolicyDiffRows(recommendation.proposedChange);
   const canApply =
     recommendation.applyEligibility.eligible &&
     recommendation.proposedChange &&
     applyStatus.status !== "applied" &&
     applyStatus.status !== "applied_noop";
+  const canRevert =
+    recommendation.applyEligibility.eligible &&
+    (applyStatus.status === "applied" || applyStatus.status === "applied_noop");
 
   return (
     <article className="rounded-xl border border-border/80 bg-white px-4 py-4 shadow-sm">
@@ -147,12 +244,21 @@ function PolicyRecommendationCard({
           <Button onClick={() => setShowApplyPreview((value) => !value)} disabled={applying}>
             Apply change
           </Button>
+        ) : canRevert ? (
+          <Button variant="outline" onClick={() => void handleRevert()} disabled={applying}>
+            Undo change
+          </Button>
         ) : (
           <div className="rounded-lg border border-border/70 bg-muted/20 px-3 py-2 text-sm text-muted-foreground">
-            Not yet apply-eligible
+            {recommendation.applyEligibility.message}
           </div>
         )}
       </div>
+      {diffRows.length ? (
+        <div className="mt-3 text-sm text-muted-foreground">
+          {diffRows.length} policy value{diffRows.length === 1 ? "" : "s"} would change.
+        </div>
+      ) : null}
 
       {showReviewDetails && (
         <div className="mt-4 rounded-lg border border-border/70 bg-muted/20 px-3 py-3 text-sm leading-6 text-gray-900">
@@ -171,8 +277,32 @@ function PolicyRecommendationCard({
         <div className="mt-4 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-3 text-sm leading-6 text-emerald-950">
           <div className="font-medium">Apply preview</div>
           <div className="mt-2">Target policy surface: {recommendation.proposedChange.policyLabel}</div>
-          <div className="mt-2">Current value: {renderPolicyValue(recommendation.proposedChange.currentValue as Record<string, unknown>)}</div>
-          <div className="mt-2">
+          <div className="mt-3 rounded-lg border border-emerald-200/80 bg-white/70 px-3 py-3">
+            <div className="text-[11px] uppercase tracking-widest text-emerald-900/70">Before / after policy diff</div>
+            {diffRows.length ? (
+              <div className="mt-3 space-y-2">
+                {diffRows.map((row) => (
+                  <div key={row.label} className="grid gap-2 rounded-md border border-emerald-200/70 px-3 py-2 md:grid-cols-[1.2fr_1fr_1fr]">
+                    <div className="font-medium">{row.label}</div>
+                    <div>
+                      <div className="text-[10px] uppercase tracking-widest text-emerald-900/60">Before</div>
+                      <div>{row.before}</div>
+                    </div>
+                    <div>
+                      <div className="text-[10px] uppercase tracking-widest text-emerald-900/60">After</div>
+                      <div>{row.after}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="mt-2 text-emerald-900/80">No policy value change is required.</div>
+            )}
+          </div>
+          <div className="mt-2 text-emerald-900/80">
+            Current value: {renderPolicyValue(recommendation.proposedChange.currentValue as Record<string, unknown>)}
+          </div>
+          <div className="mt-2 text-emerald-900/80">
             Proposed value: {renderPolicyValue(recommendation.proposedChange.proposedValue as Record<string, unknown>)}
           </div>
           <div className="mt-2 text-emerald-900/80">{recommendation.expectedImpact}</div>
@@ -278,7 +408,17 @@ export function InterventionPolicyRecommendationsSection({
   const reviewControls = (
     <div className="rounded-lg border border-border/70 bg-muted/20 px-4 py-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="text-sm font-semibold text-gray-900">Recommendation review</div>
+        <div>
+          <div className="text-sm font-semibold text-gray-900">Recommendation review</div>
+          <div className="mt-1 text-xs text-muted-foreground">
+            Recent history: {review.data?.recentHistory.length ?? 0} events
+          </div>
+          <div className="mt-1 text-xs text-muted-foreground">
+            Qualification floor {review.data?.tuning.currentThresholds.qualificationFloor ?? 55} · strong{" "}
+            {review.data?.tuning.currentThresholds.strongRecommendationFloor ?? 70} · cap{" "}
+            {review.data?.tuning.currentThresholds.primaryCap ?? 3} + {review.data?.tuning.currentThresholds.secondaryCap ?? 2}
+          </div>
+        </div>
         <Button variant="outline" onClick={() => setShowReview((value) => !value)}>
           Review recommendation quality
         </Button>
@@ -336,6 +476,54 @@ export function InterventionPolicyRecommendationsSection({
                 ))
               ) : (
                 <div className="text-sm text-muted-foreground">No diagnostics are available yet.</div>
+              )}
+            </div>
+          </div>
+          <div className="rounded-lg border border-border/70 bg-white px-3 py-3">
+            <div className="text-[11px] uppercase tracking-widest text-muted-foreground">Recent recommendation history</div>
+            <div className="mt-3 space-y-2">
+              {review.loading ? (
+                <div className="text-sm text-muted-foreground">Loading recommendation history...</div>
+              ) : review.error ? (
+                <div className="text-sm text-red-700">{review.error}</div>
+              ) : review.data?.recentHistory.length ? (
+                review.data.recentHistory.map((entry) => (
+                  <div
+                    key={`${entry.recommendationId}:${entry.eventType}:${entry.occurredAt}`}
+                    className="rounded-md border border-border/60 px-3 py-2 text-sm"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="font-medium text-gray-900">{entry.title}</div>
+                      <div className="text-xs uppercase tracking-widest text-muted-foreground">
+                        {formatHistoryEventLabel(entry.eventType)}
+                      </div>
+                    </div>
+                    <div className="mt-1 text-muted-foreground">
+                      {entry.taxonomy}
+                      {entry.actorName ? ` · ${entry.actorName}` : ""}
+                      {entry.occurredAt ? ` · ${formatFreshnessLabel(entry.occurredAt)}` : ""}
+                    </div>
+                    <div className="mt-1 text-muted-foreground">{entry.summary}</div>
+                  </div>
+                ))
+              ) : (
+                <div className="text-sm text-muted-foreground">No recommendation history is available yet.</div>
+              )}
+            </div>
+          </div>
+          <div className="rounded-lg border border-border/70 bg-white px-3 py-3">
+            <div className="text-[11px] uppercase tracking-widest text-muted-foreground">Threshold tuning guidance</div>
+            <div className="mt-3 space-y-2">
+              {review.data?.tuning.guidance.length ? (
+                review.data.tuning.guidance.map((entry) => (
+                  <div key={entry.taxonomy} className="rounded-md border border-border/60 px-3 py-2 text-sm">
+                    <div className="font-medium text-gray-900">{entry.taxonomy}</div>
+                    <div className="text-muted-foreground">{entry.recommendedAction.split("_").join(" ")}</div>
+                    <div className="mt-1 text-muted-foreground">{entry.summary}</div>
+                  </div>
+                ))
+              ) : (
+                <div className="text-sm text-muted-foreground">No tuning guidance is available yet.</div>
               )}
             </div>
           </div>

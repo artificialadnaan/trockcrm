@@ -7,6 +7,7 @@ const {
 } = await import("../../../src/modules/ai-copilot/intervention-service");
 const {
   applyInterventionPolicyRecommendation,
+  revertInterventionPolicyRecommendation,
   getInterventionPolicyRecommendationEvaluationSummary,
 } = await import("../../../src/modules/ai-copilot/intervention-policy-application-service");
 const {
@@ -221,6 +222,20 @@ describe("intervention policy recommendations service", () => {
 
     expect(secondApplyResult.status).toBe("applied_noop");
 
+    const revertResult = await revertInterventionPolicyRecommendation(tenantDb as any, {
+      officeId: "office-1",
+      recommendationId: stableRecommendationId!,
+      snapshotId: secondResult.snapshotId,
+      actorUserId: "admin-1",
+      recommendationIdempotencyKey: "req-3",
+    });
+
+    expect(revertResult.status).toBe("reverted");
+    expect(tenantDb.state.interventionAssigneeBalancingPolicies[0]).toMatchObject({
+      overload_share_percent: 35,
+      min_high_risk_cases: 5,
+    });
+
     const refreshedView = await getInterventionPolicyRecommendationsView(tenantDb as any, {
       officeId: "office-1",
       viewerUserId: "admin-1",
@@ -230,7 +245,7 @@ describe("intervention policy recommendations service", () => {
     expect(refreshedView.status).toBe("active");
     expect(refreshedView.recommendations[0]).toMatchObject({
       applyStatus: {
-        status: "applied_noop",
+        status: "not_applied",
       },
     });
 
@@ -286,6 +301,93 @@ describe("intervention policy recommendations service", () => {
     expect(review.latestDecisionRows[0]).toMatchObject({
       taxonomy: expect.any(String),
       decision: expect.not.stringMatching(/^qualified_rendered$/),
+    });
+    expect(review.recentHistory).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          eventType: "rendered",
+          taxonomy: "assignee_load_balancing",
+          actorName: null,
+        }),
+      ])
+    );
+    expect(review.tuning.currentThresholds).toMatchObject({
+      qualificationFloor: 55,
+      strongRecommendationFloor: 70,
+      primaryCap: 3,
+      secondaryCap: 2,
+    });
+    expect(review.tuning.guidance).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          taxonomy: "assignee_load_balancing",
+          recommendedAction: "seed_more_history",
+        }),
+      ])
+    );
+  });
+
+  it("keeps read-only taxonomies review-only in the hydrated recommendations view", async () => {
+    const tenantDb = createTenantDb({
+      users: [{ id: "admin-1", displayName: "Admin User" }],
+    });
+
+    tenantDb.state.policyRecommendationSnapshots.push({
+      id: "snapshot-readonly",
+      office_id: "office-1",
+      status: "active",
+      generated_at: new Date("2026-04-19T12:00:00.000Z"),
+      stale_at: new Date("2026-04-20T12:00:00.000Z"),
+      superseded_at: null,
+    });
+    tenantDb.state.policyRecommendationRows.push({
+      snapshot_id: "snapshot-readonly",
+      office_id: "office-1",
+      recommendation_id: "44444444-4444-4444-8444-444444444444",
+      taxonomy: "disconnect_playbook_change",
+      primary_grouping_key: "missing_next_task",
+      title: "Change the missing next task playbook",
+      statement: "Resolve is the dominant path here, but it is reopening too often.",
+      why_now: "Missing next task has enough volume to justify a targeted playbook change.",
+      expected_impact: "Improve first-pass handling and reduce repeat intervention churn.",
+      confidence: "medium",
+      priority: 72,
+      suggested_action: "Update the default conclusion guidance for missing next task.",
+      counter_signal: null,
+      render_status: "active",
+      evidence_json: [],
+      proposed_change_json: null,
+      review_details_json: {
+        decision: "qualified_rendered",
+        primaryTrigger: "missing next task is reopening too often through its dominant path.",
+        thresholdSummary: "12 conclusions and 30% dominant-family reopen rate.",
+        rankingSummary: "Score 72.",
+        score: 72,
+        impactScore: 30,
+        volumeScore: 17,
+        persistenceScore: 10,
+        actionabilityScore: 15,
+        usedFallbackCopy: false,
+        usedFallbackStructuredPayload: false,
+      },
+      generated_at: new Date("2026-04-19T12:00:00.000Z"),
+      stale_at: new Date("2026-04-20T12:00:00.000Z"),
+    });
+
+    const view = await getInterventionPolicyRecommendationsView(tenantDb as any, {
+      officeId: "office-1",
+      viewerUserId: "admin-1",
+      now: new Date("2026-04-19T12:30:00.000Z"),
+    });
+
+    expect(view.status).toBe("active");
+    expect(view.recommendations[0]).toMatchObject({
+      taxonomy: "disconnect_playbook_change",
+      applyEligibility: {
+        eligible: false,
+        reason: "read_only_taxonomy",
+        message: "This recommendation remains review-only in the current release.",
+      },
     });
   });
 
