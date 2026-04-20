@@ -514,6 +514,21 @@ const [run] = await db.insert(costCatalogSyncRuns).values({
 }).returning();
 ```
 
+```ts
+await db.transaction(async (tx) => {
+  const snapshotVersion = await createCatalogSnapshotVersion(tx, {
+    sourceId,
+    syncRunId: run.id,
+    status: "staged",
+  });
+
+  await writeCatalogSnapshot(tx, snapshotVersion.id, normalizedItems);
+  await deactivateStaleCatalogRows(tx, sourceId, snapshotVersion.id);
+  await promoteCatalogSnapshot(tx, sourceId, snapshotVersion.id);
+  await markCatalogSyncRunSucceeded(tx, run.id);
+});
+```
+
 - [ ] **Step 6: Re-run the catalog test and the broader Procore tests**
 
 Run: `npx vitest run server/tests/modules/procore/catalog-sync-service.test.ts server/tests/modules/procore/*.test.ts`
@@ -588,10 +603,18 @@ export async function createEstimateSourceDocument({
           id: estimateSourceDocuments.id,
           fileId: estimateSourceDocuments.fileId,
           rootFileId: estimateSourceDocuments.rootFileId,
+          contentHash: estimateSourceDocuments.contentHash,
         })
         .from(estimateSourceDocuments)
-        .where(eq(estimateSourceDocuments.fileId, input.fileId))
-        .limit(1)
+        .where(
+          and(
+            eq(estimateSourceDocuments.dealId, input.dealId),
+            input.projectId
+              ? eq(estimateSourceDocuments.projectId, input.projectId)
+              : isNull(estimateSourceDocuments.projectId),
+            eq(estimateSourceDocuments.contentHash, input.contentHash ?? "")
+          )
+        )
     : [];
 
   if (existing[0] && input.reprocessExisting !== true) {
@@ -1044,49 +1067,62 @@ export async function rankExtractionMatches({
 ```ts
 const historicalSignals = await getHistoricalPricingSignals(tenantDb, deal.id);
 const catalogSnapshotVersionId = await resolveActiveCatalogSnapshotVersionId(tenantDb, catalogSourceId);
-
-for (const extraction of pendingExtractions) {
-  const catalogItems = await listCatalogCandidatesForMatching(
-    tenantDb,
-    catalogSourceId,
-    catalogSnapshotVersionId
-  );
-  const matches = await rankExtractionMatches({
-    extraction,
-    catalogItems,
-    historicalItems: historicalSignals.historicalItems,
-  });
-  const topMatch = matches[0];
-  if (!topMatch) {
-    await insertEstimateReviewEvent(tenantDb, {
-      dealId: extraction.dealId,
-      subjectType: "estimate_extraction",
-      subjectId: extraction.id,
-      eventType: "unmatched",
-      afterJson: { normalizedLabel: extraction.normalizedLabel },
+try {
+  for (const extraction of pendingExtractions) {
+    const catalogItems = await listCatalogCandidatesForMatching(
+      tenantDb,
+      catalogSourceId,
+      catalogSnapshotVersionId
+    );
+    const matches = await rankExtractionMatches({
+      extraction,
+      catalogItems,
+      historicalItems: historicalSignals.historicalItems,
     });
-    continue;
+    const topMatch = matches[0];
+    if (!topMatch) {
+      await insertEstimateReviewEvent(tenantDb, {
+        dealId: extraction.dealId,
+        subjectType: "estimate_extraction",
+        subjectId: extraction.id,
+        eventType: "unmatched",
+        afterJson: { normalizedLabel: extraction.normalizedLabel },
+      });
+      continue;
+    }
+
+    const recommendation = buildPricingRecommendation({
+      quantity: Number(extraction.quantity ?? 1),
+      catalogBaselinePrice: topMatch.catalogBaselinePrice ?? null,
+      historicalPrices: topMatch.historicalUnitPrices ?? [],
+      vendorQuotePrice: topMatch.vendorQuotePrice ?? historicalSignals.vendorQuotes[0]?.unitPrice ?? null,
+      awardedOutcomeAdjustmentPercent:
+        topMatch.awardedOutcomeAdjustmentPercent ?? deriveAwardedOutcomeAdjustment(historicalSignals.awardedOutcomes),
+      internalAdjustmentPercent: topMatch.internalAdjustmentPercent ?? 0,
+      regionId: deal.regionId,
+      projectTypeId: deal.projectTypeId,
+    });
+
+    await saveExtractionMatchAndRecommendation({
+      extraction,
+      topMatch,
+      recommendation,
+      runId,
+      catalogSnapshotVersionId,
+    });
   }
 
-  const recommendation = buildPricingRecommendation({
-    quantity: Number(extraction.quantity ?? 1),
-    catalogBaselinePrice: topMatch.catalogBaselinePrice ?? null,
-    historicalPrices: topMatch.historicalUnitPrices ?? [],
-    vendorQuotePrice: topMatch.vendorQuotePrice ?? historicalSignals.vendorQuotes[0]?.unitPrice ?? null,
-    awardedOutcomeAdjustmentPercent:
-      topMatch.awardedOutcomeAdjustmentPercent ?? deriveAwardedOutcomeAdjustment(historicalSignals.awardedOutcomes),
-    internalAdjustmentPercent: topMatch.internalAdjustmentPercent ?? 0,
-    regionId: deal.regionId,
-    projectTypeId: deal.projectTypeId,
-  });
-
-  await saveExtractionMatchAndRecommendation({
-    extraction,
-    topMatch,
-    recommendation,
-    runId,
+  await markEstimateGenerationRunSucceeded(tenantDb, runId, {
     catalogSnapshotVersionId,
   });
+} catch (error) {
+  await markEstimateGenerationRunFailed(tenantDb, runId, {
+    errorSummary: error instanceof Error ? error.message : "estimate generation failed",
+    partialOutputSummary: await loadPartialGenerationSummary(tenantDb, runId),
+  });
+  throw error;
+} finally {
+  await finalizeEstimateGenerationRun(tenantDb, runId);
 }
 ```
 
@@ -1503,6 +1539,15 @@ router.post("/:dealId/estimating/recommendations/:recommendationId/reject", asyn
     recommendationId: req.params.recommendationId,
     userId: req.user.id,
     reason: req.body.reason,
+  });
+
+  await insertEstimateReviewEvent(req.tenantDb!, {
+    dealId: req.params.dealId,
+    subjectType: "estimate_pricing_recommendation",
+    subjectId: req.params.recommendationId,
+    eventType: "rejected",
+    reason: req.body.reason,
+    userId: req.user!.id,
   });
 
   res.status(200).json({ recommendation });
