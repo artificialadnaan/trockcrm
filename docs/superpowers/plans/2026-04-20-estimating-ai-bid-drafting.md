@@ -13,7 +13,7 @@
 ## File Structure
 
 - Create: `migrations/0020_cost_catalog_and_estimate_generation.sql`
-  Responsibility: add local Procore-backed catalog tables and project-specific estimate generation tables.
+  Responsibility: add local Procore-backed catalog tables in `public` and tenant-scoped estimate generation tables using the repo's `office_<slug>` tenant-schema migration pattern.
 - Create: `shared/src/schema/public/cost-catalog-sources.ts`
   Responsibility: schema for catalog source metadata and sync runs.
 - Create: `shared/src/schema/public/cost-catalog-items.ts`
@@ -221,7 +221,12 @@ CREATE TABLE IF NOT EXISTS public.cost_catalog_prices (
   metadata_json jsonb NOT NULL DEFAULT '{}'::jsonb
 );
 
-CREATE TABLE IF NOT EXISTS tenant.estimate_source_documents (
+-- TENANT_SCHEMA_START
+-- Create these tables inside each office schema following the existing
+-- office_dallas placeholder pattern from the baseline migration.
+SET search_path = 'office_dallas', 'public';
+
+CREATE TABLE IF NOT EXISTS estimate_source_documents (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   deal_id uuid NOT NULL,
   project_id uuid,
@@ -238,9 +243,9 @@ CREATE TABLE IF NOT EXISTS tenant.estimate_source_documents (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE TABLE IF NOT EXISTS tenant.estimate_document_pages (
+CREATE TABLE IF NOT EXISTS estimate_document_pages (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  document_id uuid NOT NULL REFERENCES tenant.estimate_source_documents(id) ON DELETE CASCADE,
+  document_id uuid NOT NULL REFERENCES estimate_source_documents(id) ON DELETE CASCADE,
   page_number integer NOT NULL,
   sheet_label text,
   sheet_type text,
@@ -249,12 +254,12 @@ CREATE TABLE IF NOT EXISTS tenant.estimate_document_pages (
   metadata_json jsonb NOT NULL DEFAULT '{}'::jsonb
 );
 
-CREATE TABLE IF NOT EXISTS tenant.estimate_extractions (
+CREATE TABLE IF NOT EXISTS estimate_extractions (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   deal_id uuid NOT NULL,
   project_id uuid,
-  document_id uuid NOT NULL REFERENCES tenant.estimate_source_documents(id) ON DELETE CASCADE,
-  page_id uuid REFERENCES tenant.estimate_document_pages(id) ON DELETE SET NULL,
+  document_id uuid NOT NULL REFERENCES estimate_source_documents(id) ON DELETE CASCADE,
+  page_id uuid REFERENCES estimate_document_pages(id) ON DELETE SET NULL,
   extraction_type text NOT NULL,
   raw_label text NOT NULL,
   normalized_label text NOT NULL,
@@ -268,23 +273,23 @@ CREATE TABLE IF NOT EXISTS tenant.estimate_extractions (
   metadata_json jsonb NOT NULL DEFAULT '{}'::jsonb
 );
 
-CREATE TABLE IF NOT EXISTS tenant.estimate_extraction_matches (
+CREATE TABLE IF NOT EXISTS estimate_extraction_matches (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  extraction_id uuid NOT NULL REFERENCES tenant.estimate_extractions(id) ON DELETE CASCADE,
+  extraction_id uuid NOT NULL REFERENCES estimate_extractions(id) ON DELETE CASCADE,
   catalog_item_id uuid REFERENCES public.cost_catalog_items(id) ON DELETE SET NULL,
   catalog_code_id uuid REFERENCES public.cost_catalog_codes(id) ON DELETE SET NULL,
-  historical_line_item_id uuid REFERENCES tenant.estimate_line_items(id) ON DELETE SET NULL,
+  historical_line_item_id uuid REFERENCES estimate_line_items(id) ON DELETE SET NULL,
   match_type text NOT NULL,
   match_score numeric(5, 2) NOT NULL DEFAULT 0,
   status text NOT NULL DEFAULT 'suggested',
   reason_json jsonb NOT NULL DEFAULT '{}'::jsonb
 );
 
-CREATE TABLE IF NOT EXISTS tenant.estimate_pricing_recommendations (
+CREATE TABLE IF NOT EXISTS estimate_pricing_recommendations (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   deal_id uuid NOT NULL,
   project_id uuid,
-  extraction_match_id uuid NOT NULL REFERENCES tenant.estimate_extraction_matches(id) ON DELETE CASCADE,
+  extraction_match_id uuid NOT NULL REFERENCES estimate_extraction_matches(id) ON DELETE CASCADE,
   recommended_quantity numeric(14, 3),
   recommended_unit text,
   recommended_unit_price numeric(14, 2),
@@ -295,10 +300,10 @@ CREATE TABLE IF NOT EXISTS tenant.estimate_pricing_recommendations (
   market_adjustment_percent numeric(8, 3) NOT NULL DEFAULT 0,
   confidence numeric(5, 2) NOT NULL DEFAULT 0,
   assumptions_json jsonb NOT NULL DEFAULT '{}'::jsonb,
-  created_by_run_id uuid REFERENCES tenant.estimate_generation_runs(id) ON DELETE SET NULL
+  created_by_run_id uuid REFERENCES estimate_generation_runs(id) ON DELETE SET NULL
 );
 
-CREATE TABLE IF NOT EXISTS tenant.estimate_generation_runs (
+CREATE TABLE IF NOT EXISTS estimate_generation_runs (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   deal_id uuid NOT NULL,
   project_id uuid,
@@ -307,10 +312,11 @@ CREATE TABLE IF NOT EXISTS tenant.estimate_generation_runs (
   output_summary_json jsonb NOT NULL DEFAULT '{}'::jsonb,
   error_summary text,
   started_at timestamptz NOT NULL DEFAULT now(),
-  completed_at timestamptz
+  completed_at timestamptz,
+  catalog_sync_run_id uuid REFERENCES public.cost_catalog_sync_runs(id) ON DELETE SET NULL
 );
 
-CREATE TABLE IF NOT EXISTS tenant.estimate_review_events (
+CREATE TABLE IF NOT EXISTS estimate_review_events (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   deal_id uuid NOT NULL,
   project_id uuid,
@@ -323,6 +329,7 @@ CREATE TABLE IF NOT EXISTS tenant.estimate_review_events (
   user_id uuid,
   created_at timestamptz NOT NULL DEFAULT now()
 );
+-- TENANT_SCHEMA_END
 ```
 
 - [ ] **Step 4: Add the Drizzle schema files and exports**
@@ -438,16 +445,38 @@ export async function runProcoreSync(deps: SyncDeps) {
 }
 ```
 
-- [ ] **Step 5: Re-run the catalog test and the broader Procore tests**
+- [ ] **Step 5: Add explicit on-demand and scheduled catalog refresh entrypoints plus snapshot linkage**
+
+```ts
+router.post("/admin/procore/catalog-sync", async (req, res) => {
+  const syncRun = await startCatalogSync({ triggeredByUserId: req.user.id });
+  res.status(202).json({ syncRun });
+});
+```
+
+```ts
+export async function runScheduledCatalogSync() {
+  return syncCostCatalog({ trigger: "scheduled" });
+}
+```
+
+```ts
+const [run] = await db.insert(costCatalogSyncRuns).values({
+  sourceId,
+  status: "running",
+}).returning();
+```
+
+- [ ] **Step 6: Re-run the catalog test and the broader Procore tests**
 
 Run: `npx vitest run server/tests/modules/procore/catalog-sync-service.test.ts server/tests/modules/procore/*.test.ts`
 
 Expected: PASS for the new catalog test, existing Procore tests remain green.
 
-- [ ] **Step 6: Commit the catalog sync task**
+- [ ] **Step 7: Commit the catalog sync task**
 
 ```bash
-git add server/src/modules/procore/catalog-sync-service.ts server/src/modules/procore/sync-service.ts worker/src/jobs/procore-sync.ts server/tests/modules/procore/catalog-sync-service.test.ts
+git add server/src/modules/procore/catalog-sync-service.ts server/src/modules/procore/sync-service.ts server/src/modules/procore/routes.ts worker/src/jobs/procore-sync.ts server/tests/modules/procore/catalog-sync-service.test.ts
 git commit -m "feat: sync procore cost catalog into local tables"
 ```
 
@@ -803,18 +832,60 @@ export async function promoteApprovedRecommendationsToEstimate({
 - [ ] **Step 4: Add the promotion route**
 
 ```ts
+router.post("/deals/:dealId/estimating/recommendations/:recommendationId/approve", async (req, res) => {
+  const recommendation = await approveEstimateRecommendation({
+    tenantDb: req.tenantDb,
+    dealId: req.params.dealId,
+    recommendationId: req.params.recommendationId,
+    userId: req.user.id,
+    reason: req.body.reason ?? null,
+  });
+
+  res.status(200).json({ recommendation });
+});
+```
+
+```ts
+export async function approveEstimateRecommendation(args: ApproveEstimateRecommendationArgs) {
+  await assertRecommendationBelongsToDeal(args.tenantDb, args.dealId, args.recommendationId);
+  await markRecommendationApproved(args.tenantDb, args.recommendationId);
+  await insertEstimateReviewEvent(args.tenantDb, {
+    dealId: args.dealId,
+    subjectType: "estimate_pricing_recommendation",
+    subjectId: args.recommendationId,
+    eventType: "approved",
+    userId: args.userId,
+    reason: args.reason,
+  });
+}
+```
+
+- [ ] **Step 5: Add the gated promotion route**
+
+```ts
 router.post("/deals/:dealId/estimating/promote", async (req, res) => {
+  const approvedRecommendationIds = await listApprovedRecommendationIdsForRun(
+    req.tenantDb,
+    req.params.dealId,
+    req.body.generationRunId
+  );
+
+  if (approvedRecommendationIds.length === 0) {
+    throw new AppError(400, "At least one approved recommendation is required before promotion");
+  }
+
   await promoteApprovedRecommendationsToEstimate({
     tenantDb: req.tenantDb,
     dealId: req.params.dealId,
-    recommendations: req.body.recommendations,
+    generationRunId: req.body.generationRunId,
+    approvedRecommendationIds,
   });
 
   res.status(200).json({ ok: true });
 });
 ```
 
-- [ ] **Step 5: Re-run the promotion test and current estimate-service tests**
+- [ ] **Step 6: Re-run the promotion test and current estimate-service tests**
 
 Run: `npx vitest run server/tests/modules/estimating/draft-estimate-service.test.ts`
 Expected: PASS
@@ -822,7 +893,7 @@ Expected: PASS
 Run: `npm run typecheck`
 Expected: PASS
 
-- [ ] **Step 6: Commit the draft estimate promotion task**
+- [ ] **Step 7: Commit the draft estimate promotion task**
 
 ```bash
 git add server/src/modules/estimating/draft-estimate-service.ts server/src/modules/deals/estimate-service.ts server/src/modules/estimating/routes.ts server/tests/modules/estimating/draft-estimate-service.test.ts
@@ -888,6 +959,21 @@ describe("answerEstimatingCopilotQuestion", () => {
     expect(result.answer).toContain("121.54");
     expect(result.evidence.length).toBeGreaterThan(0);
   });
+
+  it("answers a historical win-pattern question with grouped evidence", async () => {
+    const result = await answerEstimatingCopilotQuestion({
+      question: "What kinds of bids have we historically won?",
+      context: {
+        wonBidPatterns: [
+          { id: "won-1", projectType: "roofing", region: "DFW", marginBand: "standard" },
+          { id: "won-2", projectType: "roofing", region: "DFW", marginBand: "standard" },
+        ],
+      } as any,
+    });
+
+    expect(result.answer.toLowerCase()).toContain("roofing");
+    expect(result.evidence.some((row: any) => row.type === "won_bid_pattern")).toBe(true);
+  });
 });
 ```
 
@@ -927,18 +1013,35 @@ export function EstimatingWorkflowShell(props: EstimatingWorkflowShellProps) {
 
 ```ts
 export async function answerEstimatingCopilotQuestion(input: AnswerEstimatingCopilotQuestionArgs) {
-  return {
-    answer: `Recommended unit price: ${input.context.pricingRecommendation.recommendedUnitPrice}`,
-    evidence: [
-      {
-        type: "pricing_recommendation",
-        id: input.context.pricingRecommendation.id ?? "generated",
-      },
-      ...input.context.historicalComparables.map((row: any) => ({
-        type: "historical_line_item",
+  if (/historically won|won bids|win patterns/i.test(input.question)) {
+    return {
+      answer: summarizeWonBidPatterns(input.context.wonBidPatterns ?? []),
+      evidence: (input.context.wonBidPatterns ?? []).map((row: any) => ({
+        type: "won_bid_pattern",
         id: row.id,
       })),
-    ],
+    };
+  }
+
+  if (/line item|price/i.test(input.question)) {
+    return {
+      answer: `Recommended unit price: ${input.context.pricingRecommendation.recommendedUnitPrice}`,
+      evidence: [
+        {
+          type: "pricing_recommendation",
+          id: input.context.pricingRecommendation.id ?? "generated",
+        },
+        ...input.context.historicalComparables.map((row: any) => ({
+          type: "historical_line_item",
+          id: row.id,
+        })),
+      ],
+    };
+  }
+
+  return {
+    answer: summarizeEstimateRiskAndAssumptions(input.context),
+    evidence: collectRiskEvidence(input.context),
   };
 }
 ```
