@@ -157,7 +157,6 @@ describe("intervention mutation summaries", () => {
     ).toBe(true);
   });
 });
-
 describe("intervention mutation helpers", () => {
   beforeEach(() => {
     apiMock.mockReset();
