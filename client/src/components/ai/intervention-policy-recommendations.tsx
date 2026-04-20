@@ -407,9 +407,11 @@ export function InterventionPolicyRecommendationsSection({
   const [showReview, setShowReview] = useState(false);
   const [reviewWindow, setReviewWindow] = useState<InterventionPolicyRecommendationReviewWindow>("last_30_days");
   const [reviewDecision, setReviewDecision] = useState<InterventionPolicyRecommendationReviewDecisionFilter>("all");
+  const [reviewRefreshKey, setReviewRefreshKey] = useState(0);
   const review = useInterventionPolicyRecommendationReview({
     window: reviewWindow,
     decision: reviewDecision,
+    refreshKey: reviewRefreshKey,
   });
 
   async function handleRegenerate() {
@@ -421,7 +423,9 @@ export function InterventionPolicyRecommendationsSection({
         refreshView: async () => {
           await onRefresh();
         },
-        refreshReview: review.refetch,
+        refreshReview: async () => {
+          setReviewRefreshKey((value) => value + 1);
+        },
       });
     } catch (error) {
       setActionError(error instanceof Error ? error.message : "Failed to refresh recommendations");

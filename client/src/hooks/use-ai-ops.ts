@@ -854,11 +854,13 @@ export function useInterventionPolicyRecommendations() {
 export function useInterventionPolicyRecommendationReview(input?: {
   window?: InterventionPolicyRecommendationReviewWindow;
   decision?: InterventionPolicyRecommendationReviewDecisionFilter;
+  refreshKey?: number;
 }) {
   const window = input?.window ?? "last_30_days";
   const decision = input?.decision ?? "all";
+  const refreshKey = input?.refreshKey ?? 0;
   return useAiOpsQuery<InterventionPolicyRecommendationReviewModel>(
-    `/ai/ops/intervention-policy-recommendations/review?window=${window}&decision=${decision}`,
+    `/ai/ops/intervention-policy-recommendations/review?window=${window}&decision=${decision}&refreshKey=${refreshKey}`,
     "Failed to load recommendation review"
   );
 }
