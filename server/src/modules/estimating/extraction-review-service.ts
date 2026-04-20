@@ -35,6 +35,25 @@ async function insertReviewEvent(
   return event;
 }
 
+async function loadEstimateExtraction(
+  tenantDb: TenantDb,
+  dealId: string,
+  extractionId: string
+) {
+  const [extraction] = await tenantDb
+    .select()
+    .from(estimateExtractions)
+    .where(
+      and(
+        eq(estimateExtractions.id, extractionId),
+        eq(estimateExtractions.dealId, dealId)
+      )
+    )
+    .limit(1);
+
+  return extraction ?? null;
+}
+
 export async function updateEstimateExtraction(args: {
   tenantDb: TenantDb;
   dealId: string;
@@ -47,16 +66,7 @@ export async function updateEstimateExtraction(args: {
     divisionHint?: string | null;
   };
 }) {
-  const [existing] = await args.tenantDb
-    .select()
-    .from(estimateExtractions)
-    .where(
-      and(
-        eq(estimateExtractions.id, args.extractionId),
-        eq(estimateExtractions.dealId, args.dealId)
-      )
-    )
-    .limit(1);
+  const existing = await loadEstimateExtraction(args.tenantDb, args.dealId, args.extractionId);
 
   if (!existing) {
     throw new AppError(404, "Estimate extraction not found");
@@ -102,6 +112,12 @@ export async function approveEstimateExtraction(args: {
   extractionId: string;
   userId: string;
 }) {
+  const existing = await loadEstimateExtraction(args.tenantDb, args.dealId, args.extractionId);
+
+  if (!existing) {
+    throw new AppError(404, "Estimate extraction not found");
+  }
+
   const [updated] = await args.tenantDb
     .update(estimateExtractions)
     .set({
@@ -125,7 +141,20 @@ export async function approveEstimateExtraction(args: {
     subjectId: args.extractionId,
     eventType: "approved",
     userId: args.userId,
-    afterJson: { status: "approved" },
+    beforeJson: {
+      status: existing.status,
+      normalizedLabel: existing.normalizedLabel,
+      quantity: existing.quantity,
+      unit: existing.unit,
+      divisionHint: existing.divisionHint,
+    },
+    afterJson: {
+      status: "approved",
+      normalizedLabel: updated.normalizedLabel,
+      quantity: updated.quantity,
+      unit: updated.unit,
+      divisionHint: updated.divisionHint,
+    },
   });
 
   return { extraction: updated, reviewEvent };
@@ -138,6 +167,12 @@ export async function rejectEstimateExtraction(args: {
   userId: string;
   reason?: string | null;
 }) {
+  const existing = await loadEstimateExtraction(args.tenantDb, args.dealId, args.extractionId);
+
+  if (!existing) {
+    throw new AppError(404, "Estimate extraction not found");
+  }
+
   const [updated] = await args.tenantDb
     .update(estimateExtractions)
     .set({
@@ -161,7 +196,20 @@ export async function rejectEstimateExtraction(args: {
     subjectId: args.extractionId,
     eventType: "rejected",
     userId: args.userId,
-    afterJson: { status: "rejected" },
+    beforeJson: {
+      status: existing.status,
+      normalizedLabel: existing.normalizedLabel,
+      quantity: existing.quantity,
+      unit: existing.unit,
+      divisionHint: existing.divisionHint,
+    },
+    afterJson: {
+      status: "rejected",
+      normalizedLabel: updated.normalizedLabel,
+      quantity: updated.quantity,
+      unit: updated.unit,
+      divisionHint: updated.divisionHint,
+    },
     reason: args.reason ?? null,
   });
 
