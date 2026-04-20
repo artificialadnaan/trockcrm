@@ -325,6 +325,26 @@ describe("intervention policy recommendations service", () => {
         }),
       ])
     );
+    expect(review.yield.renderedTotals).toMatchObject({
+      window: "last_30_days",
+    });
+    expect(review.yield.renderedByTaxonomy).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          taxonomy: "assignee_load_balancing",
+          renderedCount: expect.any(Number),
+        }),
+      ])
+    );
+    expect(review.yield.dominantSuppressionReasons).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          reason: expect.any(String),
+          count: expect.any(Number),
+        }),
+      ])
+    );
+    expect(review.yield.recommendedNextAction).toBe("seed_or_wait_for_more_history");
   });
 
   it("keeps read-only taxonomies review-only in the hydrated recommendations view", async () => {
@@ -389,6 +409,58 @@ describe("intervention policy recommendations service", () => {
         message: "This recommendation remains review-only in the current release.",
       },
     });
+  });
+
+  it("normalizes recent decision history to newest-first lifecycle events and caps the timeline", async () => {
+    const tenantDb = createTenantDb({
+      users: [{ id: "admin-1", displayName: "Admin User" }],
+    });
+
+    for (let index = 0; index < 25; index += 1) {
+      tenantDb.state.policyRecommendationRows.push({
+        recommendation_id: `rec-${index}`,
+        snapshot_id: `snapshot-${index}`,
+        office_id: "office-1",
+        taxonomy: "snooze_policy_adjustment",
+        title: `Recommendation ${index}`,
+        generated_at: new Date(`2026-04-19T12:${String(index).padStart(2, "0")}:00.000Z`),
+      });
+    }
+
+    tenantDb.state.policyRecommendationApplyEvents.push({
+      office_id: "office-1",
+      recommendation_id: "rec-24",
+      snapshot_id: "snapshot-24",
+      taxonomy: "snooze_policy_adjustment",
+      actor_user_id: "admin-1",
+      actor_display_name: "Admin User",
+      status: "applied",
+      rejection_reason: null,
+      created_at: new Date("2026-04-19T13:00:00.000Z"),
+      title: "Recommendation 24",
+    });
+
+    const review = await getInterventionPolicyRecommendationReview(tenantDb as any, {
+      officeId: "office-1",
+      viewerUserId: "admin-1",
+      window: "last_30_days",
+      decision: "all",
+    });
+
+    expect(review.recentHistory).toHaveLength(20);
+    expect(review.recentHistory[0]).toMatchObject({
+      recommendationId: "rec-24",
+      eventType: "applied",
+      actorName: "Admin User",
+    });
+    expect(
+      review.recentHistory.some(
+        (entry) =>
+          entry.recommendationId === "rec-24" &&
+          entry.snapshotId === "snapshot-24" &&
+          entry.eventType === "rendered"
+      )
+    ).toBe(false);
   });
 
   it("seeds deterministic qualification data for non-production offices and surfaces qualifying recommendations", async () => {
