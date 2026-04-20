@@ -1,8 +1,18 @@
 import { useState, useEffect, useCallback } from "react";
 import { api } from "@/lib/api";
 
+export interface FunnelBucketSummary {
+  key: "lead" | "qualified_lead" | "opportunity" | "due_diligence" | "estimating";
+  label: string;
+  count: number;
+  totalValue: number | null;
+  route: "/leads" | "/deals";
+  bucket: "lead" | "qualified_lead" | "opportunity" | "due_diligence" | "estimating";
+}
+
 export interface RepDashboardData {
   activeLeads: { count: number };
+  funnelBuckets: FunnelBucketSummary[];
   activeDeals: { count: number; totalValue: number };
   tasksToday: { overdue: number; today: number };
   activityThisWeek: {

@@ -4,6 +4,7 @@ import {
   companies,
   contacts,
   deals,
+  leadStageHistory,
   leads,
   properties,
   userOfficeAccess,
@@ -46,6 +47,12 @@ export interface UpdateLeadInput {
   name?: string;
   source?: string | null;
   description?: string | null;
+  qualificationScope?: string | null;
+  qualificationBudgetAmount?: string | null;
+  qualificationCompanyFit?: boolean | null;
+  qualificationCompletedAt?: Date | null;
+  directorReviewDecision?: "go" | "no_go" | null;
+  directorReviewReason?: string | null;
   status?: "open" | "disqualified";
   decisionMakerName?: string | null;
   decisionProcess?: string | null;
@@ -66,9 +73,37 @@ export interface UpdateLeadInput {
   supportNeededNotes?: string | null;
 }
 
+interface TransitionLeadStageInput {
+  leadId: string;
+  targetStageId: string;
+  userId: string;
+  userRole: string;
+  officeId?: string;
+  inlinePatch?: Partial<UpdateLeadInput>;
+}
+
+type TransitionBlockedResult = {
+  ok: false;
+  reason: "missing_requirements";
+  targetStageId: string;
+  resolution: "inline" | "detail";
+  missing: Array<{
+    key: string;
+    label: string;
+    resolution: "inline" | "detail";
+  }>;
+};
+
+type TransitionSuccessResult = {
+  ok: true;
+  lead: Record<string, unknown>;
+};
+
 interface LeadServiceDependencies {
   getStageById: (id: string, workflowFamily?: WorkflowFamily) => Promise<{
     id: string;
+    slug: string;
+    displayOrder: number;
     isTerminal: boolean;
   } | null>;
   now: () => Date;
@@ -78,6 +113,27 @@ const defaultDependencies: LeadServiceDependencies = {
   getStageById,
   now: () => new Date(),
 };
+
+const QUALIFIED_LEAD_REQUIREMENTS = [
+  "property",
+  "source",
+  "qualificationScope",
+  "qualificationBudgetAmount",
+  "qualificationCompanyFit",
+] as const;
+
+const REQUIREMENT_METADATA: Record<string, { label: string; resolution: "inline" | "detail" }> = {
+  property: { label: "Linked property", resolution: "detail" },
+  source: { label: "Lead source", resolution: "inline" },
+  qualificationScope: { label: "Project scope / category", resolution: "inline" },
+  qualificationBudgetAmount: { label: "Approximate budget / dollar amount", resolution: "inline" },
+  qualificationCompanyFit: { label: "Company fit / serviceability confirmation", resolution: "inline" },
+  directorReviewDecision: { label: "Director decision", resolution: "inline" },
+};
+
+function isBlank(value: unknown) {
+  return value === null || value === undefined || (typeof value === "string" && value.trim().length === 0);
+}
 
 async function decorateLeads(
   tenantDb: TenantDb,
@@ -339,12 +395,7 @@ export function createLeadService(
       input.assignedRepId !== undefined ? input.assignedRepId : existing.assignedRepId;
 
     if (input.stageId !== undefined) {
-      const stage = await deps.getStageById(input.stageId, "lead");
-      if (!stage) {
-        throw new AppError(400, "Invalid lead stage ID");
-      }
-      updates.stageId = input.stageId;
-      updates.stageEnteredAt = deps.now();
+      throw new AppError(400, "Use the lead stage transition endpoint to move a lead");
     }
 
     if (input.assignedRepId !== undefined) {
@@ -385,6 +436,22 @@ export function createLeadService(
     }
     if (input.supportNeededType !== undefined) updates.supportNeededType = input.supportNeededType;
     if (input.supportNeededNotes !== undefined) updates.supportNeededNotes = input.supportNeededNotes;
+    if (input.qualificationScope !== undefined) updates.qualificationScope = input.qualificationScope;
+    if (input.qualificationBudgetAmount !== undefined) updates.qualificationBudgetAmount = input.qualificationBudgetAmount;
+    if (input.qualificationCompanyFit !== undefined) updates.qualificationCompanyFit = input.qualificationCompanyFit;
+    if (input.qualificationCompletedAt !== undefined) updates.qualificationCompletedAt = input.qualificationCompletedAt;
+    if (input.directorReviewDecision !== undefined) {
+      if (userRole === "rep") {
+        throw new AppError(403, "Only directors can record go/no-go decisions");
+      }
+      updates.directorReviewDecision = input.directorReviewDecision;
+      if (input.directorReviewDecision === "no_go" && isBlank(input.directorReviewReason)) {
+        throw new AppError(400, "No-go decisions require a reason");
+      }
+      updates.directorReviewedAt = deps.now();
+      updates.directorReviewedBy = userId;
+    }
+    if (input.directorReviewReason !== undefined) updates.directorReviewReason = input.directorReviewReason;
 
     if (input.status !== undefined) {
       if (input.status === "open" || input.status === "disqualified") {
@@ -438,6 +505,134 @@ export function createLeadService(
     return lead;
   }
 
+  async function transitionLeadStage(
+    tenantDb: TenantDb,
+    input: TransitionLeadStageInput
+  ): Promise<TransitionBlockedResult | TransitionSuccessResult> {
+    const existing = await getLeadById(tenantDb, input.leadId, input.userRole, input.userId);
+    if (!existing) {
+      throw new AppError(404, "Lead not found");
+    }
+
+    if (input.userRole === "rep" && existing.assignedRepId !== input.userId) {
+      throw new AppError(403, "You can only edit your own leads");
+    }
+
+    const currentStage = await deps.getStageById(existing.stageId, "lead");
+    const targetStage = await deps.getStageById(input.targetStageId, "lead");
+
+    if (!currentStage || !targetStage) {
+      throw new AppError(400, "Invalid lead stage ID");
+    }
+
+    if (targetStage.displayOrder !== currentStage.displayOrder + 1) {
+      throw new AppError(400, "Lead stages must advance one step at a time");
+    }
+
+    const effectiveLead = {
+      ...existing,
+      ...input.inlinePatch,
+    };
+
+    if (input.inlinePatch?.directorReviewDecision !== undefined && input.userRole === "rep") {
+      throw new AppError(403, "Only directors can record go/no-go decisions");
+    }
+
+    if (effectiveLead.directorReviewDecision === "no_go" && isBlank(effectiveLead.directorReviewReason)) {
+      throw new AppError(400, "No-go decisions require a reason");
+    }
+
+    const missing: string[] = [];
+
+    if (targetStage.slug === "qualified_lead") {
+      for (const requirement of QUALIFIED_LEAD_REQUIREMENTS) {
+        if (requirement === "property") {
+          if (!existing.propertyId || !existing.property) missing.push("property");
+          continue;
+        }
+
+        if (requirement === "qualificationCompanyFit") {
+          if (effectiveLead.qualificationCompanyFit !== true) missing.push("qualificationCompanyFit");
+          continue;
+        }
+
+        if (isBlank(effectiveLead[requirement])) missing.push(requirement);
+      }
+    }
+
+    const now = deps.now();
+    const updates: Record<string, unknown> = { updatedAt: now };
+
+    if (input.inlinePatch?.source !== undefined) updates.source = input.inlinePatch.source;
+    if (input.inlinePatch?.description !== undefined) updates.description = input.inlinePatch.description;
+    if (input.inlinePatch?.qualificationScope !== undefined) updates.qualificationScope = input.inlinePatch.qualificationScope;
+    if (input.inlinePatch?.qualificationBudgetAmount !== undefined) {
+      updates.qualificationBudgetAmount = input.inlinePatch.qualificationBudgetAmount;
+    }
+    if (input.inlinePatch?.qualificationCompanyFit !== undefined) {
+      updates.qualificationCompanyFit = input.inlinePatch.qualificationCompanyFit;
+    }
+    if (input.inlinePatch?.directorReviewDecision !== undefined) {
+      updates.directorReviewDecision = input.inlinePatch.directorReviewDecision;
+      updates.directorReviewedAt = now;
+      updates.directorReviewedBy = input.userId;
+    }
+    if (input.inlinePatch?.directorReviewReason !== undefined) {
+      updates.directorReviewReason = input.inlinePatch.directorReviewReason;
+    }
+
+    if (missing.length > 0) {
+      if (Object.keys(updates).length > 1) {
+        await tenantDb.update(leads).set(updates).where(eq(leads.id, input.leadId));
+      }
+
+      return {
+        ok: false,
+        reason: "missing_requirements",
+        targetStageId: input.targetStageId,
+        resolution: "inline",
+        missing: missing.map((key) => ({
+          key,
+          label: REQUIREMENT_METADATA[key]?.label ?? key,
+          resolution: REQUIREMENT_METADATA[key]?.resolution ?? "inline",
+        })),
+      };
+    }
+
+    if (targetStage.slug === "qualified_lead") {
+      updates.qualificationCompletedAt = now;
+    }
+
+    if (targetStage.slug === "ready_for_opportunity") {
+      if (effectiveLead.directorReviewDecision !== "go") {
+        throw new AppError(400, "Director review must be marked go before the lead is ready for opportunity");
+      }
+      if (!updates.directorReviewedAt) updates.directorReviewedAt = now;
+      if (!updates.directorReviewedBy) updates.directorReviewedBy = input.userId;
+    }
+
+    updates.stageId = input.targetStageId;
+    updates.stageEnteredAt = now;
+
+    await tenantDb.insert(leadStageHistory).values({
+      leadId: input.leadId,
+      fromStageId: existing.stageId,
+      toStageId: input.targetStageId,
+      changedBy: input.userId,
+      isBackwardMove: false,
+      durationInPreviousStage: null,
+      createdAt: now,
+    });
+
+    await tenantDb.update(leads).set(updates).where(eq(leads.id, input.leadId));
+    const lead = await getLeadById(tenantDb, input.leadId, input.userRole, input.userId);
+    if (!lead) {
+      throw new AppError(404, "Lead not found after transition");
+    }
+
+    return { ok: true, lead };
+  }
+
   async function deleteLead(
     tenantDb: TenantDb,
     leadId: string,
@@ -463,6 +658,7 @@ export function createLeadService(
     listLeads,
     createLead,
     updateLead,
+    transitionLeadStage,
     deleteLead,
   };
 }
@@ -473,4 +669,5 @@ export const getLeadById = liveService.getLeadById;
 export const listLeads = liveService.listLeads;
 export const createLead = liveService.createLead;
 export const updateLead = liveService.updateLead;
+export const transitionLeadStage = liveService.transitionLeadStage;
 export const deleteLead = liveService.deleteLead;

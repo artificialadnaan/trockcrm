@@ -158,6 +158,42 @@ describe("Dashboard Service", () => {
       expect(activityQueryText).toContain("responsible_user_id");
       expect(activityQueryText).not.toContain("where user_id =");
     });
+
+    it("returns canonical funnel buckets for the rep dashboard", async () => {
+      const { getRepDashboard } = await import("../../../src/modules/dashboard/service.js");
+      const tenantDb = createMockTenantDb([
+        [{ count: "4" }],
+        [{ count: "2", total_value: "250000" }],
+        [{ overdue: "1", today: "2" }],
+        [{ calls: "1", emails: "2", meetings: "0", notes: "1", total: "4" }],
+        [{ total: "5", on_time: "4" }],
+        [{ stage_id: "deal-stage-1", stage_name: "DD", stage_color: "#2563EB", display_order: 1, deal_count: "1", total_value: "100000" }],
+        [],
+        [],
+        [],
+        [
+          { slug: "contacted", count: "4" },
+          { slug: "qualified_lead", count: "2" },
+          { slug: "director_go_no_go", count: "1" },
+          { slug: "ready_for_opportunity", count: "2" },
+        ],
+        [
+          { slug: "dd", count: "3", total_value: "120000" },
+          { slug: "estimating", count: "2", total_value: "70000" },
+          { slug: "bid_sent", count: "1", total_value: "50000" },
+        ],
+      ]);
+
+      const result = await getRepDashboard(tenantDb, "user-1");
+
+      expect(result.funnelBuckets).toEqual([
+        { key: "lead", label: "Leads", count: 4, totalValue: null, route: "/leads", bucket: "lead" },
+        { key: "qualified_lead", label: "Qualified Leads", count: 2, totalValue: null, route: "/leads", bucket: "qualified_lead" },
+        { key: "opportunity", label: "Opportunities", count: 3, totalValue: null, route: "/leads", bucket: "opportunity" },
+        { key: "due_diligence", label: "Due Diligence", count: 3, totalValue: 120000, route: "/deals", bucket: "due_diligence" },
+        { key: "estimating", label: "Estimating", count: 3, totalValue: 120000, route: "/deals", bucket: "estimating" },
+      ]);
+    });
   });
 
   describe("getDirectorDashboard", () => {
@@ -185,6 +221,44 @@ describe("Dashboard Service", () => {
       const repCardsQueryText = extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase();
       expect(repCardsQueryText).toContain("a.responsible_user_id as rep_id");
       expect(repCardsQueryText).not.toContain("a.user_id");
+    });
+
+    it("returns office funnel buckets and rep rows in default workload order", async () => {
+      const { getDirectorDashboard } = await import("../../../src/modules/dashboard/service.js");
+      const tenantDb = createMockTenantDb([
+        [],
+        [],
+        [],
+        [],
+        [],
+        [{ dd_value: "0", dd_count: "0", pipeline_value: "0", pipeline_count: "0", total_value: "0", total_count: "0" }],
+        [
+          { slug: "contacted", count: "5" },
+          { slug: "qualified_lead", count: "3" },
+          { slug: "director_go_no_go", count: "1" },
+          { slug: "ready_for_opportunity", count: "1" },
+        ],
+        [
+          { slug: "dd", count: "2", total_value: "60000" },
+          { slug: "estimating", count: "1", total_value: "40000" },
+          { slug: "bid_sent", count: "2", total_value: "90000" },
+        ],
+        [
+          { rep_id: "rep-2", rep_name: "Alex Rep", leads: "2", qualified_leads: "1", opportunities: "1", due_diligence: "1", estimating: "1" },
+          { rep_id: "rep-1", rep_name: "Blair Rep", leads: "3", qualified_leads: "2", opportunities: "0", due_diligence: "2", estimating: "1" },
+        ],
+      ]);
+
+      const result = await getDirectorDashboard(tenantDb, { from: "2026-01-01", to: "2026-12-31" });
+
+      expect(result.officeFunnelBuckets).toEqual([
+        { key: "lead", label: "Leads", count: 5, totalValue: null, route: "/leads", bucket: "lead" },
+        { key: "qualified_lead", label: "Qualified Leads", count: 3, totalValue: null, route: "/leads", bucket: "qualified_lead" },
+        { key: "opportunity", label: "Opportunities", count: 2, totalValue: null, route: "/leads", bucket: "opportunity" },
+        { key: "due_diligence", label: "Due Diligence", count: 2, totalValue: 60000, route: "/deals", bucket: "due_diligence" },
+        { key: "estimating", label: "Estimating", count: 3, totalValue: 130000, route: "/deals", bucket: "estimating" },
+      ]);
+      expect(result.repFunnelRows.map((row) => row.repName)).toEqual(["Blair Rep", "Alex Rep"]);
     });
   });
 
@@ -218,6 +292,7 @@ describe("Dashboard Service", () => {
       expect(result).toHaveProperty("tasksToday");
       expect(result).toHaveProperty("activityThisWeek");
       expect(result).toHaveProperty("followUpCompliance");
+      expect(result).toHaveProperty("funnelBuckets");
       expect(result).toHaveProperty("pipelineByStage");
       expect(result).toHaveProperty("leadSnapshot");
       expect(result).toHaveProperty("dealSnapshot");

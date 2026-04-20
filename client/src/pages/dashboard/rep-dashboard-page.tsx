@@ -8,6 +8,7 @@ import { formatCurrency } from "@/components/charts/chart-colors";
 import { useTasks } from "@/hooks/use-tasks";
 import { useSalesReview } from "@/hooks/use-sales-review";
 import { TaskSection } from "@/components/tasks/task-section";
+import { FunnelBucketRow } from "@/components/dashboard/funnel-bucket-row";
 import {
   ArrowUpRight,
   Briefcase,
@@ -252,6 +253,8 @@ export function RepDashboardPage() {
           </CardContent>
         </Card>
       </div>
+
+      <FunnelBucketRow buckets={data.funnelBuckets} />
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-5">
         <StatCard

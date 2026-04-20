@@ -49,6 +49,11 @@ const pipelineFamilyMigrationPath = resolve(
   "../../../../migrations/0020_pipeline_workflow_families.sql"
 );
 const pipelineFamilyMigrationSql = readFileSync(pipelineFamilyMigrationPath, "utf8");
+const salesFunnelAlignmentMigrationPath = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../../migrations/0028_sales_funnel_model_alignment.sql"
+);
+const salesFunnelAlignmentMigrationSql = readFileSync(salesFunnelAlignmentMigrationPath, "utf8");
 
 function expectSqlToMatch(pattern: RegExp): void {
   expect(migrationSql).toMatch(pattern);
@@ -56,6 +61,10 @@ function expectSqlToMatch(pattern: RegExp): void {
 
 function expectPipelineFamilySqlToMatch(pattern: RegExp): void {
   expect(pipelineFamilyMigrationSql).toMatch(pattern);
+}
+
+function expectSalesFunnelAlignmentSqlToMatch(pattern: RegExp): void {
+  expect(salesFunnelAlignmentMigrationSql).toMatch(pattern);
 }
 
 type RouteServiceMocks = {
@@ -239,6 +248,14 @@ interface FakeLeadRow {
   status: "open" | "converted" | "disqualified";
   source: string | null;
   description: string | null;
+  qualificationScope?: string | null;
+  qualificationBudgetAmount?: string | null;
+  qualificationCompanyFit?: boolean | null;
+  qualificationCompletedAt?: Date | null;
+  directorReviewDecision?: "go" | "no_go" | null;
+  directorReviewedAt?: Date | null;
+  directorReviewedBy?: string | null;
+  directorReviewReason?: string | null;
   stageEnteredAt: Date;
   convertedAt: Date | null;
   isActive: boolean;
@@ -601,6 +618,36 @@ const leadStage = {
   isTerminal: false,
 };
 
+const qualifiedLeadStage = {
+  id: "stage-qualified-lead",
+  name: "Qualified Lead",
+  slug: "qualified_lead",
+  displayOrder: 2,
+  workflowFamily: "lead" as const,
+  isActivePipeline: true,
+  isTerminal: false,
+};
+
+const directorReviewStage = {
+  id: "stage-director-go-no-go",
+  name: "Director Go/No-Go",
+  slug: "director_go_no_go",
+  displayOrder: 3,
+  workflowFamily: "lead" as const,
+  isActivePipeline: true,
+  isTerminal: false,
+};
+
+const readyForOpportunityStage = {
+  id: "stage-ready-for-opportunity",
+  name: "Ready for Opportunity",
+  slug: "ready_for_opportunity",
+  displayOrder: 4,
+  workflowFamily: "lead" as const,
+  isActivePipeline: true,
+  isTerminal: false,
+};
+
 const convertedLeadStage = {
   id: "lead-stage-converted",
   name: "Converted",
@@ -624,9 +671,16 @@ const dealStage = {
 beforeEach(() => {
   pipelineMocks.getStageById.mockReset();
   pipelineMocks.getStageBySlug.mockReset();
-  pipelineMocks.getStageById.mockImplementation(async (_id: string, workflowFamily?: string) => {
+  pipelineMocks.getStageById.mockImplementation(async (id: string, workflowFamily?: string) => {
     if (workflowFamily === "lead") {
-      return leadStage;
+      const stageMap = new Map([
+        [leadStage.id, leadStage],
+        [qualifiedLeadStage.id, qualifiedLeadStage],
+        [directorReviewStage.id, directorReviewStage],
+        [readyForOpportunityStage.id, readyForOpportunityStage],
+        [convertedLeadStage.id, convertedLeadStage],
+      ]);
+      return stageMap.get(id) ?? leadStage;
     }
 
     return dealStage;
@@ -676,9 +730,31 @@ describe("Lead Conversion Shared Contract", () => {
     expect(config.foreignKeys.map((fk) => fk.getName()).sort()).toEqual([
       "leads_assigned_rep_id_users_id_fk",
       "leads_company_id_companies_id_fk",
+      "leads_director_reviewed_by_users_id_fk",
+      "leads_forecast_updated_by_users_id_fk",
       "leads_primary_contact_id_contacts_id_fk",
       "leads_property_id_properties_id_fk",
     ]);
+  });
+
+  it("stores qualification and director review metadata on leads", () => {
+    const columns = getTableColumns(leads);
+
+    expect(columns).toHaveProperty("qualificationCompletedAt");
+    expect(columns).toHaveProperty("qualificationBudgetAmount");
+    expect(columns).toHaveProperty("qualificationScope");
+    expect(columns).toHaveProperty("qualificationCompanyFit");
+    expect(columns).toHaveProperty("directorReviewDecision");
+    expect(columns).toHaveProperty("directorReviewedAt");
+    expect(columns).toHaveProperty("directorReviewedBy");
+    expect(columns).toHaveProperty("directorReviewReason");
+  });
+
+  it("adds qualification and director review columns to each tenant lead table", () => {
+    expectSalesFunnelAlignmentSqlToMatch(/table_name = 'leads'/);
+    expectSalesFunnelAlignmentSqlToMatch(/ALTER TABLE %I\.leads[\s\S]*qualification_scope varchar\(255\)/);
+    expectSalesFunnelAlignmentSqlToMatch(/director_reviewed_by uuid REFERENCES public\.users\(id\)/);
+    expectSalesFunnelAlignmentSqlToMatch(/director_review_reason text/);
   });
 
   it("stores lead stage lineage separately from deals", () => {
@@ -829,6 +905,213 @@ describe("Lead Service", () => {
       message: "Primary contact does not belong to the company",
     });
   });
+
+  it("blocks moving a lead into qualified lead when required data is missing", async () => {
+    const tenantDb = createFakeTenantDb({
+      leads: [
+        {
+          id: "lead-1",
+          companyId: "company-1",
+          propertyId: "property-1",
+          primaryContactId: "contact-1",
+          name: "Palm Villas repaint",
+          stageId: leadStage.id,
+          assignedRepId: "rep-1",
+          status: "open",
+          source: null,
+          description: null,
+          stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+          convertedAt: null,
+          isActive: true,
+          createdAt: new Date("2026-04-12T15:00:00.000Z"),
+          updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+        },
+      ],
+    });
+    const service = createLeadService({
+      getStageById: pipelineMocks.getStageById,
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+    });
+
+    const result = await service.transitionLeadStage(tenantDb as never, {
+      leadId: "lead-1",
+      targetStageId: qualifiedLeadStage.id,
+      userId: "rep-1",
+      userRole: "rep",
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      reason: "missing_requirements",
+      targetStageId: qualifiedLeadStage.id,
+      resolution: "inline",
+      missing: [
+        { key: "source", label: "Lead source", resolution: "inline" },
+        { key: "qualificationScope", label: "Project scope / category", resolution: "inline" },
+        { key: "qualificationBudgetAmount", label: "Approximate budget / dollar amount", resolution: "inline" },
+        { key: "qualificationCompanyFit", label: "Company fit / serviceability confirmation", resolution: "inline" },
+      ],
+    });
+  });
+
+  it("blocks moving directly from lead to director review", async () => {
+    const tenantDb = createFakeTenantDb({
+      leads: [
+        {
+          id: "lead-1",
+          companyId: "company-1",
+          propertyId: "property-1",
+          primaryContactId: "contact-1",
+          name: "Palm Villas repaint",
+          stageId: leadStage.id,
+          assignedRepId: "rep-1",
+          status: "open",
+          source: "Referral",
+          description: null,
+          stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+          convertedAt: null,
+          isActive: true,
+          createdAt: new Date("2026-04-12T15:00:00.000Z"),
+          updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+        },
+      ],
+    });
+    const service = createLeadService({
+      getStageById: pipelineMocks.getStageById,
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+    });
+
+    await expect(
+      service.transitionLeadStage(tenantDb as never, {
+        leadId: "lead-1",
+        targetStageId: directorReviewStage.id,
+        userId: "rep-1",
+        userRole: "rep",
+      })
+    ).rejects.toMatchObject({ statusCode: 400 });
+  });
+
+  it("requires a reason when a director records no_go", async () => {
+    const tenantDb = createFakeTenantDb({
+      leads: [
+        {
+          id: "lead-director-1",
+          companyId: "company-1",
+          propertyId: "property-1",
+          primaryContactId: "contact-1",
+          name: "Palm Villas repaint",
+          stageId: directorReviewStage.id,
+          assignedRepId: "rep-1",
+          status: "open",
+          source: "Referral",
+          description: null,
+          qualificationScope: "Exterior repaint",
+          qualificationBudgetAmount: "120000.00",
+          qualificationCompanyFit: true,
+          qualificationCompletedAt: new Date("2026-04-14T15:00:00.000Z"),
+          stageEnteredAt: new Date("2026-04-14T15:00:00.000Z"),
+          convertedAt: null,
+          isActive: true,
+          createdAt: new Date("2026-04-12T15:00:00.000Z"),
+          updatedAt: new Date("2026-04-14T15:00:00.000Z"),
+        },
+      ],
+    });
+    const service = createLeadService({
+      getStageById: pipelineMocks.getStageById,
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+    });
+
+    await expect(
+      service.transitionLeadStage(tenantDb as never, {
+        leadId: "lead-director-1",
+        targetStageId: readyForOpportunityStage.id,
+        userId: "director-1",
+        userRole: "director",
+        inlinePatch: { directorReviewDecision: "no_go", directorReviewReason: null },
+      })
+    ).rejects.toMatchObject({ statusCode: 400, message: "No-go decisions require a reason" });
+  });
+
+  it("prevents reps from recording director go/no-go decisions", async () => {
+    const tenantDb = createFakeTenantDb({
+      leads: [
+        {
+          id: "lead-director-1",
+          companyId: "company-1",
+          propertyId: "property-1",
+          primaryContactId: "contact-1",
+          name: "Palm Villas repaint",
+          stageId: directorReviewStage.id,
+          assignedRepId: "rep-1",
+          status: "open",
+          source: "Referral",
+          description: null,
+          qualificationScope: "Exterior repaint",
+          qualificationBudgetAmount: "120000.00",
+          qualificationCompanyFit: true,
+          qualificationCompletedAt: new Date("2026-04-14T15:00:00.000Z"),
+          stageEnteredAt: new Date("2026-04-14T15:00:00.000Z"),
+          convertedAt: null,
+          isActive: true,
+          createdAt: new Date("2026-04-12T15:00:00.000Z"),
+          updatedAt: new Date("2026-04-14T15:00:00.000Z"),
+        },
+      ],
+    });
+    const service = createLeadService({
+      getStageById: pipelineMocks.getStageById,
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+    });
+
+    await expect(
+      service.transitionLeadStage(tenantDb as never, {
+        leadId: "lead-director-1",
+        targetStageId: readyForOpportunityStage.id,
+        userId: "rep-1",
+        userRole: "rep",
+        inlinePatch: { directorReviewDecision: "go" },
+      })
+    ).rejects.toMatchObject({ statusCode: 403, message: "Only directors can record go/no-go decisions" });
+  });
+
+  it("rejects direct lead stage changes through updateLead", async () => {
+    const tenantDb = createFakeTenantDb({
+      leads: [
+        {
+          id: "lead-1",
+          companyId: "company-1",
+          propertyId: "property-1",
+          primaryContactId: "contact-1",
+          name: "Palm Villas repaint",
+          stageId: leadStage.id,
+          assignedRepId: "rep-1",
+          status: "open",
+          source: "Referral",
+          description: null,
+          stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+          convertedAt: null,
+          isActive: true,
+          createdAt: new Date("2026-04-12T15:00:00.000Z"),
+          updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+        },
+      ],
+    });
+    const service = createLeadService({
+      getStageById: pipelineMocks.getStageById,
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+    });
+
+    await expect(
+      service.updateLead(
+        tenantDb as never,
+        "lead-1",
+        { stageId: qualifiedLeadStage.id },
+        "director",
+        "director-1"
+      )
+    ).rejects.toMatchObject({ statusCode: 400, message: "Use the lead stage transition endpoint to move a lead" });
+  });
 });
 
 describe("Lead Conversion Service", () => {
@@ -841,11 +1124,14 @@ describe("Lead Conversion Service", () => {
           propertyId: "property-1",
           primaryContactId: null,
           name: "Palm Villas repaint",
-          stageId: "lead-stage-1",
+          stageId: readyForOpportunityStage.id,
           assignedRepId: "rep-1",
           status: "open",
           source: "Referral",
           description: "Property manager requested pre-bid walk",
+          directorReviewDecision: "go",
+          directorReviewedAt: new Date("2026-04-14T15:00:00.000Z"),
+          directorReviewedBy: "director-1",
           stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
           convertedAt: null,
           isActive: true,
@@ -891,7 +1177,7 @@ describe("Lead Conversion Service", () => {
     expect(tenantDb.state.leadStageHistory).toEqual([
       expect.objectContaining({
         leadId: "lead-1",
-        fromStageId: "lead-stage-1",
+        fromStageId: readyForOpportunityStage.id,
         toStageId: "lead-stage-converted",
         changedBy: "rep-1",
       }),
@@ -908,11 +1194,14 @@ describe("Lead Conversion Service", () => {
           propertyId: "property-1",
           primaryContactId: null,
           name: "Palm Villas repaint",
-          stageId: "lead-stage-1",
+          stageId: readyForOpportunityStage.id,
           assignedRepId: "rep-1",
           status: "open",
           source: "Referral",
           description: null,
+          directorReviewDecision: "go",
+          directorReviewedAt: new Date("2026-04-14T15:00:00.000Z"),
+          directorReviewedBy: "director-1",
           stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
           convertedAt: null,
           isActive: true,
@@ -970,11 +1259,14 @@ describe("Lead Conversion Service", () => {
           propertyId: "property-1",
           primaryContactId: null,
           name: "Palm Villas repaint",
-          stageId: "lead-stage-1",
+          stageId: readyForOpportunityStage.id,
           assignedRepId: "rep-1",
           status: "open",
           source: "Referral",
           description: "Preserve lineage",
+          directorReviewDecision: "go",
+          directorReviewedAt: new Date("2026-04-14T15:00:00.000Z"),
+          directorReviewedBy: "director-1",
           stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
           convertedAt: null,
           isActive: true,
@@ -1026,11 +1318,14 @@ describe("Lead Conversion Service", () => {
           propertyId: "property-1",
           primaryContactId: null,
           name: "Palm Villas repaint",
-          stageId: "lead-stage-1",
+          stageId: readyForOpportunityStage.id,
           assignedRepId: "rep-2",
           status: "open",
           source: "Referral",
           description: null,
+          directorReviewDecision: "go",
+          directorReviewedAt: new Date("2026-04-14T15:00:00.000Z"),
+          directorReviewedBy: "director-1",
           stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
           convertedAt: null,
           isActive: true,
@@ -1069,11 +1364,14 @@ describe("Lead Conversion Service", () => {
           propertyId: "property-1",
           primaryContactId: null,
           name: "Palm Villas repaint",
-          stageId: "lead-stage-1",
+          stageId: readyForOpportunityStage.id,
           assignedRepId: "rep-1",
           status: "open",
           source: "Referral",
           description: null,
+          directorReviewDecision: "go",
+          directorReviewedAt: new Date("2026-04-14T15:00:00.000Z"),
+          directorReviewedBy: "director-1",
           stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
           convertedAt: null,
           isActive: true,
@@ -1169,11 +1467,14 @@ describe("Lead Conversion Service", () => {
           propertyId: "property-1",
           primaryContactId: null,
           name: "Palm Villas repaint",
-          stageId: "lead-stage-1",
+          stageId: readyForOpportunityStage.id,
           assignedRepId: "rep-1",
           status: "open",
           source: "Referral",
           description: null,
+          directorReviewDecision: "go",
+          directorReviewedAt: new Date("2026-04-14T15:00:00.000Z"),
+          directorReviewedBy: "director-1",
           stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
           convertedAt: null,
           isActive: true,

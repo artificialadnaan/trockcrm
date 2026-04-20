@@ -5,6 +5,7 @@ import {
   deleteLead,
   getLeadById,
   listLeads,
+  transitionLeadStage,
   updateLead,
 } from "./service.js";
 import { convertLead } from "./conversion-service.js";
@@ -98,6 +99,25 @@ router.patch("/:id", async (req, res, next) => {
 
     await req.commitTransaction!();
     res.json({ lead });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/leads/:id/stage-transition
+router.post("/:id/stage-transition", async (req, res, next) => {
+  try {
+    const result = await transitionLeadStage(req.tenantDb!, {
+      leadId: req.params.id,
+      targetStageId: req.body.targetStageId,
+      userId: req.user!.id,
+      userRole: req.user!.role,
+      officeId: req.user!.activeOfficeId,
+      inlinePatch: req.body.inlinePatch,
+    });
+
+    await req.commitTransaction!();
+    res.status(result.ok ? 200 : 409).json(result);
   } catch (err) {
     next(err);
   }

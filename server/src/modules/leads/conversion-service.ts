@@ -5,7 +5,7 @@ import type * as schema from "@trock-crm/shared/schema";
 import type { WorkflowRoute } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 import { createDeal } from "../deals/service.js";
-import { getStageBySlug } from "../pipeline/service.js";
+import { getStageById, getStageBySlug } from "../pipeline/service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -31,12 +31,14 @@ export interface ConvertLeadInput {
 
 interface LeadConversionDependencies {
   createDeal: typeof createDeal;
+  getStageById: typeof getStageById;
   getStageBySlug: typeof getStageBySlug;
   now: () => Date;
 }
 
 const defaultDependencies: LeadConversionDependencies = {
   createDeal,
+  getStageById,
   getStageBySlug,
   now: () => new Date(),
 };
@@ -73,6 +75,11 @@ export function createLeadConversionService(
 
     if (!lead.isActive) {
       throw new AppError(400, "Inactive leads cannot be converted");
+    }
+
+    const currentLeadStage = await deps.getStageById(lead.stageId, "lead");
+    if (!currentLeadStage || currentLeadStage.slug !== "ready_for_opportunity" || (lead as typeof lead & { directorReviewDecision?: string | null }).directorReviewDecision !== "go") {
+      throw new AppError(400, "Lead is not ready for opportunity conversion");
     }
 
     const [existingDeal] = await tenantDb
