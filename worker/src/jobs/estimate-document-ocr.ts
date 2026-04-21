@@ -20,7 +20,13 @@ async function resolveSchemaName(officeId: string | null) {
 }
 
 export async function runEstimateDocumentOcr(
-  payload: { documentId: string; dealId?: string; parseMeasurementsEnabled?: boolean },
+  payload: {
+    documentId: string;
+    dealId?: string;
+    parseProvider?: string | null;
+    parseProfile?: string | null;
+    parseMeasurementsEnabled?: boolean;
+  },
   officeId: string | null
 ) {
   const schemaName = await resolveSchemaName(officeId);
@@ -41,8 +47,8 @@ export async function runEstimateDocumentOcr(
     tenantDb: tenantDb as any,
     document,
     options: {
-      provider: document.parseProvider ?? "default",
-      profile: document.parseProfile ?? "balanced",
+      provider: payload.parseProvider ?? document.parseProvider ?? "default",
+      profile: payload.parseProfile ?? document.parseProfile ?? "balanced",
       measurementsEnabled:
         payload.parseMeasurementsEnabled ?? document.parseMeasurementsEnabled ?? false,
     },

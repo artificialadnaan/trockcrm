@@ -29,9 +29,9 @@ describe("runEstimateDocumentOcr", () => {
         id: "doc-ocr-1",
         dealId: "deal-1",
         filename: "plans.pdf",
-        parseProvider: "default",
-        parseProfile: "balanced",
-        parseMeasurementsEnabled: true,
+        parseProvider: "stale-provider",
+        parseProfile: "stale-profile",
+        parseMeasurementsEnabled: false,
         parseStatus: "processing",
         ocrStatus: "processing",
         activeParseRunId: null,
@@ -78,11 +78,21 @@ describe("runEstimateDocumentOcr", () => {
 
     const { runEstimateDocumentOcr } = await import("../../../../worker/src/jobs/estimate-document-ocr.js");
 
-    await runEstimateDocumentOcr({ documentId: "doc-ocr-1" }, "office-1");
+    await runEstimateDocumentOcr(
+      {
+        documentId: "doc-ocr-1",
+        parseProvider: "queued-provider",
+        parseProfile: "queued-profile",
+        parseMeasurementsEnabled: true,
+      },
+      "office-1"
+    );
 
     expect(runEstimateDocumentParse).toHaveBeenCalledWith(
       expect.objectContaining({
         options: expect.objectContaining({
+          provider: "queued-provider",
+          profile: "queued-profile",
           measurementsEnabled: true,
         }),
       })
@@ -153,8 +163,131 @@ describe("createEstimateSourceDocument", () => {
       documentId: "doc-1",
       dealId: "deal-1",
       officeId: "office-1",
+      parseProvider: "default",
+      parseProfile: "balanced",
       parseMeasurementsEnabled: true,
     });
+  });
+
+  it("normalizes blank rerun provider and profile values and snapshots each queued payload", async () => {
+    const enqueueEstimateDocumentOcr = vi.fn().mockResolvedValue(undefined);
+    const currentDocument = {
+      parseProvider: "stale-provider",
+      parseProfile: "stale-profile",
+      parseMeasurementsEnabled: false,
+    };
+    const firstUpdatedDocument = {
+      id: "doc-1",
+      dealId: "deal-1",
+      filename: "plans.pdf",
+      parseStatus: "queued",
+      activeParseRunId: null,
+      parseProfile: "balanced",
+      parseProvider: "default",
+      parseMeasurementsEnabled: false,
+      parseErrorSummary: null,
+      ocrStatus: "queued",
+      parsedAt: null,
+    };
+    const secondUpdatedDocument = {
+      id: "doc-1",
+      dealId: "deal-1",
+      filename: "plans.pdf",
+      parseStatus: "queued",
+      activeParseRunId: null,
+      parseProfile: "text-heavy",
+      parseProvider: "measurement-heavy",
+      parseMeasurementsEnabled: true,
+      parseErrorSummary: null,
+      ocrStatus: "queued",
+      parsedAt: null,
+    };
+
+    const updateReturning = vi
+      .fn()
+      .mockResolvedValueOnce([firstUpdatedDocument])
+      .mockResolvedValueOnce([secondUpdatedDocument]);
+    const updateWhere = vi.fn(() => ({
+      returning: updateReturning,
+    }));
+    const updateSet = vi.fn(() => ({
+      where: updateWhere,
+    }));
+    const selectWhere = vi.fn(() => ({
+      limit: vi.fn().mockResolvedValue([currentDocument]),
+    }));
+
+    const tenantDb = {
+      select: vi.fn(() => ({
+        from: vi.fn(() => ({
+          where: selectWhere,
+        })),
+      })),
+      update: vi.fn(() => ({
+        set: updateSet,
+      })),
+    } as any;
+
+    await reprocessEstimateSourceDocument({
+      tenantDb,
+      enqueueEstimateDocumentOcr,
+      input: {
+        dealId: "deal-1",
+        documentId: "doc-1",
+        userId: "user-1",
+        officeId: "office-1",
+        parseProvider: "   ",
+        parseProfile: "\t",
+        parseMeasurementsEnabled: false,
+      },
+    });
+
+    await reprocessEstimateSourceDocument({
+      tenantDb,
+      enqueueEstimateDocumentOcr,
+      input: {
+        dealId: "deal-1",
+        documentId: "doc-1",
+        userId: "user-1",
+        officeId: "office-1",
+        parseProvider: "measurement-heavy",
+        parseProfile: "text-heavy",
+        parseMeasurementsEnabled: true,
+      },
+    });
+
+    expect(updateSet).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        parseProvider: "default",
+        parseProfile: "balanced",
+        parseMeasurementsEnabled: false,
+      })
+    );
+    expect(updateSet).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        parseProvider: "measurement-heavy",
+        parseProfile: "text-heavy",
+        parseMeasurementsEnabled: true,
+      })
+    );
+    expect(enqueueEstimateDocumentOcr).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        parseProvider: "default",
+        parseProfile: "balanced",
+        parseMeasurementsEnabled: false,
+      })
+    );
+    expect(enqueueEstimateDocumentOcr).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        parseProvider: "measurement-heavy",
+        parseProfile: "text-heavy",
+        parseMeasurementsEnabled: true,
+      })
+    );
   });
 
   it("classifies spec files separately from plan files", () => {
@@ -240,6 +373,8 @@ describe("reprocessEstimateSourceDocument", () => {
       documentId: "doc-1",
       dealId: "deal-1",
       officeId: "office-1",
+      parseProvider: "default",
+      parseProfile: "measurement-heavy",
       parseMeasurementsEnabled: true,
     });
   });

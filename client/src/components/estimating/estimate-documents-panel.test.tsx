@@ -76,4 +76,32 @@ describe("EstimateDocumentsPanel", () => {
     );
     expect(refresh).toHaveBeenCalledTimes(1);
   });
+
+  it("normalizes blank rerun provider and profile values before sending", async () => {
+    const refresh = vi.fn().mockResolvedValue(undefined);
+    mocks.apiMock.mockResolvedValue({});
+
+    await runEstimateDocumentRerunAction({
+      dealId: "deal-1",
+      documentId: "doc-1",
+      options: {
+        parseProvider: "   ",
+        parseProfile: "\t",
+        parseMeasurementsEnabled: false,
+      },
+      refresh,
+    });
+
+    expect(mocks.apiMock).toHaveBeenCalledWith(
+      "/deals/deal-1/estimating/documents/doc-1/reprocess",
+      {
+        method: "POST",
+        json: {
+          parseProvider: "default",
+          parseProfile: "balanced",
+          parseMeasurementsEnabled: false,
+        },
+      }
+    );
+  });
 });

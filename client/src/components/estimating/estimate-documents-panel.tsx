@@ -25,14 +25,19 @@ type DocumentParseDraft = {
   parseMeasurementsEnabled: boolean;
 };
 
+function normalizeDocumentParseValue(value: string | null | undefined, fallback: string) {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : fallback;
+}
+
 function buildDocumentParseDraft(document: {
   parseProvider?: string | null;
   parseProfile?: string | null;
   parseMeasurementsEnabled?: boolean | null;
 }): DocumentParseDraft {
   return {
-    parseProvider: document.parseProvider ?? "default",
-    parseProfile: document.parseProfile ?? "balanced",
+    parseProvider: normalizeDocumentParseValue(document.parseProvider, "default"),
+    parseProfile: normalizeDocumentParseValue(document.parseProfile, "balanced"),
     parseMeasurementsEnabled: document.parseMeasurementsEnabled ?? false,
   };
 }
@@ -77,12 +82,18 @@ export async function runEstimateDocumentRerunAction({
   options: DocumentParseDraft;
   refresh: () => Promise<void>;
 }) {
+  const normalizedOptions = {
+    parseProvider: normalizeDocumentParseValue(options.parseProvider, "default"),
+    parseProfile: normalizeDocumentParseValue(options.parseProfile, "balanced"),
+    parseMeasurementsEnabled: options.parseMeasurementsEnabled,
+  };
+
   await api(`/deals/${dealId}/estimating/documents/${documentId}/reprocess`, {
     method: "POST",
     json: {
-      parseProvider: options.parseProvider,
-      parseProfile: options.parseProfile,
-      parseMeasurementsEnabled: options.parseMeasurementsEnabled,
+      parseProvider: normalizedOptions.parseProvider,
+      parseProfile: normalizedOptions.parseProfile,
+      parseMeasurementsEnabled: normalizedOptions.parseMeasurementsEnabled,
     },
   });
   await refresh();

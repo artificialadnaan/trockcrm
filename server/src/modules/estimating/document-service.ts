@@ -11,6 +11,8 @@ export interface CreateEstimateSourceDocumentArgs {
     documentId: string;
     dealId: string;
     officeId: string | null;
+    parseProvider?: string | null;
+    parseProfile?: string | null;
     parseMeasurementsEnabled?: boolean;
   }) => Promise<void>;
   input: {
@@ -38,6 +40,8 @@ export interface ReprocessEstimateSourceDocumentArgs {
     documentId: string;
     dealId: string;
     officeId: string | null;
+    parseProvider?: string | null;
+    parseProfile?: string | null;
     parseMeasurementsEnabled?: boolean;
   }) => Promise<void>;
   input: {
@@ -57,12 +61,20 @@ export function classifyEstimateDocument(input: { filename: string; mimeType: st
   return "supporting_package";
 }
 
+function normalizeParseOption(value: string | null | undefined, fallback: string) {
+  if (value == null) return fallback;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : fallback;
+}
+
 export async function enqueueEstimateDocumentOcrJob(
   tenantDb: TenantDb,
   payload: {
     documentId: string;
     dealId: string;
     officeId: string | null;
+    parseProvider?: string | null;
+    parseProfile?: string | null;
     parseMeasurementsEnabled?: boolean;
   }
 ) {
@@ -73,6 +85,8 @@ export async function enqueueEstimateDocumentOcrJob(
           ${JSON.stringify({
             documentId: payload.documentId,
             dealId: payload.dealId,
+            parseProvider: payload.parseProvider ?? null,
+            parseProfile: payload.parseProfile ?? null,
             parseMeasurementsEnabled: payload.parseMeasurementsEnabled ?? false,
           })}::jsonb,
           ${payload.officeId}::uuid,
@@ -153,6 +167,8 @@ export async function createEstimateSourceDocument({
     documentId: document.id,
     dealId: document.dealId,
     officeId: input.officeId,
+    parseProvider: normalizeParseOption(document.parseProvider, "default"),
+    parseProfile: normalizeParseOption(document.parseProfile, "balanced"),
     parseMeasurementsEnabled: document.parseMeasurementsEnabled,
   });
 
@@ -183,8 +199,14 @@ export async function reprocessEstimateSourceDocument({
     return null;
   }
 
-  const nextParseProvider = input.parseProvider ?? currentDocument.parseProvider ?? null;
-  const nextParseProfile = input.parseProfile ?? currentDocument.parseProfile ?? null;
+  const nextParseProvider =
+    input.parseProvider != null
+      ? normalizeParseOption(input.parseProvider, "default")
+      : normalizeParseOption(currentDocument.parseProvider, "default");
+  const nextParseProfile =
+    input.parseProfile != null
+      ? normalizeParseOption(input.parseProfile, "balanced")
+      : normalizeParseOption(currentDocument.parseProfile, "balanced");
   const nextParseMeasurementsEnabled =
     input.parseMeasurementsEnabled ?? currentDocument.parseMeasurementsEnabled ?? false;
 
@@ -216,6 +238,8 @@ export async function reprocessEstimateSourceDocument({
     documentId: document.id,
     dealId: document.dealId,
     officeId: input.officeId,
+    parseProvider: document.parseProvider,
+    parseProfile: document.parseProfile,
     parseMeasurementsEnabled: document.parseMeasurementsEnabled,
   });
 
