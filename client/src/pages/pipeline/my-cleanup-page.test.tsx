@@ -28,7 +28,14 @@ vi.mock("./my-cleanup-deal-editor-dialog", () => ({
     return props.open ? (
       <div>
         <div>Deal editor open for {props.dealId}</div>
-        <button onClick={props.onSaved}>Save Cleanup Deal</button>
+        <button
+          onClick={() => {
+            props.onSaved();
+            props.onOpenChange(false);
+          }}
+        >
+          Save Cleanup Deal
+        </button>
         <button onClick={() => props.onOpenChange(false)}>Close Cleanup Deal</button>
       </div>
     ) : null;
@@ -164,6 +171,7 @@ describe("MyCleanupPage route", () => {
     });
 
     expect(mocks.refetchMock).toHaveBeenCalledTimes(1);
+    expect(container.textContent).not.toContain("Deal editor open for deal-1");
   });
 
   it("keeps an explicit edit button for deal rows", () => {

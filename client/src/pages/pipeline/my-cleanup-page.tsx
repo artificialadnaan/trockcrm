@@ -132,9 +132,7 @@ export function MyCleanupPage() {
         onOpenChange={(open) => {
           if (!open) setSelectedDealId(null);
         }}
-        onSaved={() => {
-          void refetch();
-        }}
+        onSaved={refetch}
       />
     </div>
   );
