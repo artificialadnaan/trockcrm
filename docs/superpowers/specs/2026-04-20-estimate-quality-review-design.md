@@ -259,7 +259,7 @@ Manual row storage contract:
 `source_row_identity` definition:
 
 - for extracted rows: `extraction:<source_extraction_id>`
-- for inferred rows: `inferred:<normalized_intent>:<estimate_section_name>`
+- for inferred rows: `inferred:<normalized_intent>:<canonicalized_estimate_section_name>`
 - for manual rows: `manual:<manual_identity_key>`
 
 This field must be persisted directly on the recommendation row so refresh and dedupe logic do not depend on nullable foreign keys alone.
@@ -400,13 +400,13 @@ Persistence rule:
 
 - `needs_review` is the presentation label for the persisted parent-row state `pending_review`
 
-Duplicate suppression order:
+Duplicate grouping and inferred-suppression order:
 
 1. same selected catalog item id within the same section
 2. same normalized intent within the same section for extracted or inferred rows
 3. same normalized intent within the same section for manual rows
 
-All duplicate-review grouping in this slice is section-scoped. For explicit extracted/manual rows, this ordered list defines duplicate-review grouping signals rather than auto-suppression behavior.
+All duplicate-review grouping in this slice is section-scoped. For explicit extracted/manual rows, this ordered list defines duplicate-review grouping signals rather than auto-suppression behavior; only inferred rows are actually suppressed by these rules.
 
 If a duplicate is detected, prefer the explicit extracted row over inferred scope.
 
