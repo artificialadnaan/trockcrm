@@ -163,9 +163,16 @@ Parent recommendation rows should carry:
 - selected option id
 - selected source type
 - catalog backing type
-- promotable flag
+- derived promotable flag
 - promoted estimate line item id, nullable until promotion
 - inference rationale summary for inferred rows
+
+`promotable` is a derived workflow field, not a separately stored source of truth. A row is promotable only when:
+
+- review state is `accepted`, `alternate_selected`, or `overridden`
+- `promoted_estimate_line_item_id` is null
+- the row is not blocked by duplicate-review gating
+- the row satisfies any baseline-selection requirements for override/promotion in this spec
 
 Required linkage fields:
 
@@ -668,3 +675,12 @@ This slice does not include:
 - autonomous estimate finalization
 
 It is intentionally focused on estimate-quality review inside the current estimator workbench.
+
+## Migration and Backfill
+
+This slice does not backfill legacy draft estimates into the new recommendation-review model.
+
+- existing canonical estimate rows remain intact and are not rewritten
+- historical recommendation rows that predate these required workflow fields are treated as legacy and are not relied on by the new workbench
+- the new workflow applies to recommendation rows created or regenerated after this slice lands
+- if an older draft needs to enter the new workflow, the implementation should create a fresh generation run and new recommendation rows rather than guessing backfilled `source_row_identity`, `generation_run_id`, or `manual_origin` values
