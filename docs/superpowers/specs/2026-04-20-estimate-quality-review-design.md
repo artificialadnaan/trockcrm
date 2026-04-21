@@ -358,6 +358,7 @@ Deterministic ranking rules:
   5. stable id ordering as final tie-break
 - return at most one recommended default plus up to four alternates
 - suppress duplicate options that resolve to the same catalog item or same normalized custom item
+  - a `normalized custom item` uses the existing `normalized_intent` contract over the custom/manual label plus the canonicalized section scope
 
 Deterministic scoring inputs for this slice:
 
@@ -422,7 +423,7 @@ Explicit-row duplicate rule for this slice:
 - instead, both remain visible and the workbench flags them as a duplicate-review condition for the estimator
 - duplicate suppression only removes inferred rows when an explicit extracted or manual row already covers that intent
 - duplicate-review grouping is determined by same `estimate_section_name` plus either matching `normalized_intent` or matching selected catalog item id
-- only one row in a duplicate-review group may remain promotable; the workbench must block promotion for the group until the estimator rejects the extra rows or explicitly returns them to `pending_review`
+- only one row in a duplicate-review group may remain promotable; when multiple rows in the group are simultaneously eligible, all of them are duplicate-blocked until the estimator rejects or returns enough rows to `pending_review` so exactly one promotable row remains
 - carried-forward clones must re-evaluate duplicate-review grouping against already-promoted rows for the deal, so a group with an already promoted winner stays blocked until the remaining rows are edited into a different group or rejected
 - the first promoted row in a duplicate-review group becomes the canonical winner for that deal in this slice; later rows in the same group cannot supersede it without a separate reopen/supersede flow, which is out of scope here
 - when no prior winner exists, a duplicate group only gets a winner from a promotion request that contains exactly one promotable row from that group
@@ -515,6 +516,7 @@ Allowed actions:
   - uses `catalog_backing = 'estimate_only'` when no catalog option is selected
   - leaves the row in `pending_review` until the estimator explicitly accepts it or overrides it
 - promote custom row to local catalog:
+  - applies only to free-text custom manual rows that do not currently have a selected catalog-backed child option
   - creates a reusable local catalog item
   - writes its id to `promoted_local_catalog_item_id` on the parent recommendation row
   - flips `catalog_backing` to `local_promoted`
