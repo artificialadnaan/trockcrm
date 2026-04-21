@@ -263,13 +263,14 @@ interface FakeDealRow {
   dealNumber: string;
   name: string;
   stageId: string;
+  pipelineDisposition?: "opportunity" | "deals" | "service" | null;
   assignedRepId: string;
   primaryContactId: string | null;
   companyId: string | null;
   propertyId: string | null;
   sourceLeadId: string | null;
   source: string | null;
-  workflowRoute: "estimating" | "service";
+  workflowRoute: "estimating" | "service" | null;
 }
 
 interface FakeUserOfficeAccessRow {
@@ -633,6 +634,16 @@ const dealStage = {
   isTerminal: false,
 };
 
+const opportunityDealStage = {
+  id: "stage-opportunity-standard",
+  name: "Opportunity",
+  slug: "opportunity",
+  displayOrder: 1,
+  workflowFamily: "standard_deal" as const,
+  isActivePipeline: true,
+  isTerminal: false,
+};
+
 beforeEach(() => {
   pipelineMocks.getStageById.mockReset();
   pipelineMocks.getStageBySlug.mockReset();
@@ -646,6 +657,10 @@ beforeEach(() => {
   pipelineMocks.getStageBySlug.mockImplementation(async (slug: string, workflowFamily?: string) => {
     if (workflowFamily === "lead" && slug === "converted") {
       return convertedLeadStage;
+    }
+
+    if (workflowFamily === "standard_deal" && slug === "opportunity") {
+      return opportunityDealStage;
     }
 
     return null;
@@ -931,6 +946,79 @@ describe("Lead Conversion Service", () => {
       }),
     ]);
     expect(tenantDb.state.deals).toHaveLength(1);
+  });
+
+  it("converts qualified leads into a neutral opportunity deal", async () => {
+    const tenantDb = createFakeTenantDb({
+      leads: [
+        {
+          id: "lead-1",
+          companyId: "company-1",
+          propertyId: "property-1",
+          primaryContactId: null,
+          name: "Palm Villas repaint",
+          stageId: "lead-stage-1",
+          assignedRepId: "rep-1",
+          status: "open",
+          source: "Referral",
+          description: "Property manager requested pre-bid walk",
+          stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+          convertedAt: null,
+          isActive: true,
+          createdAt: new Date("2026-04-12T15:00:00.000Z"),
+          updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+        },
+      ],
+    });
+    const service = createLeadConversionService({
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+      getStageBySlug: async (slug: string, workflowFamily?: string) => {
+        if (workflowFamily === "lead" && slug === "converted") {
+          return convertedLeadStage as never;
+        }
+
+        if (workflowFamily === "standard_deal" && slug === "opportunity") {
+          return {
+            id: "stage-opportunity-standard",
+            name: "Opportunity",
+            slug: "opportunity",
+            workflowFamily: "standard_deal",
+            displayOrder: 1,
+            isTerminal: false,
+            isActivePipeline: true,
+          } as never;
+        }
+
+        return null;
+      },
+      createDeal: async (_tenantDb, input) => {
+        const deal = {
+          id: "deal-2",
+          dealNumber: "TR-2026-0002",
+          pipelineDisposition: input.pipelineDisposition ?? null,
+          workflowRoute: input.workflowRoute ?? null,
+          primaryContactId: input.primaryContactId ?? null,
+          companyId: input.companyId ?? null,
+          propertyId: input.propertyId ?? null,
+          sourceLeadId: input.sourceLeadId ?? null,
+          source: input.source ?? null,
+          assignedRepId: input.assignedRepId,
+          stageId: input.stageId,
+          name: input.name,
+        };
+        return deal as never;
+      },
+    });
+
+    const result = await service.convertLead(tenantDb as never, {
+      leadId: "lead-1",
+      userRole: "rep",
+      userId: "rep-1",
+    } as any);
+
+    expect(result.deal.stageId).toBe("stage-opportunity-standard");
+    expect(result.deal.pipelineDisposition).toBe("opportunity");
+    expect(result.deal.workflowRoute).toBeNull();
   });
 
   it("prevents multiple conversions from the same lead", async () => {
@@ -1557,6 +1645,12 @@ describe("Deal Lineage Enforcement", () => {
 });
 
 describe("Public Deal Route Guardrails", () => {
+  it("exposes a dedicated routing review route", async () => {
+    const { dealRoutes } = await loadDealRoutesWithServiceMocks();
+
+    expect(() => findDealRouteHandler(dealRoutes, "post", "/:id/routing-review")).not.toThrow();
+  });
+
   it("strips migrationMode from public deal-create requests", async () => {
     const { dealRoutes, routeServiceMocks } = await loadDealRoutesWithServiceMocks();
     routeServiceMocks.createDeal.mockResolvedValueOnce({ id: "deal-1" });

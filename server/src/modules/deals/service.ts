@@ -13,7 +13,7 @@ import {
   tasks,
   jobQueue,
 } from "@trock-crm/shared/schema";
-import type { WorkflowRoute } from "@trock-crm/shared/types";
+import type { DealPipelineDisposition, WorkflowRoute } from "@trock-crm/shared/types";
 import type * as schema from "@trock-crm/shared/schema";
 import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
@@ -45,7 +45,8 @@ export interface CreateDealInput {
   propertyId?: string;
   sourceLeadId?: string;
   sourceLeadWriteMode?: "direct" | "lead_conversion";
-  workflowRoute?: WorkflowRoute;
+  pipelineDisposition?: DealPipelineDisposition;
+  workflowRoute?: WorkflowRoute | null;
   migrationMode?: boolean;
   primaryContactId?: string;
   ddEstimate?: string;
@@ -70,7 +71,8 @@ export interface UpdateDealInput {
   sourceLeadId?: string | null;
   companyId?: string | null;
   propertyId?: string | null;
-  workflowRoute?: WorkflowRoute;
+  pipelineDisposition?: DealPipelineDisposition | null;
+  workflowRoute?: WorkflowRoute | null;
   migrationMode?: boolean;
   ddEstimate?: string | null;
   bidEstimate?: string | null;
@@ -142,6 +144,21 @@ async function validateAssignee(tenantDb: TenantDb, assigneeId: string, officeId
 
 function workflowFamilyForRoute(workflowRoute: WorkflowRoute) {
   return workflowRoute === "service" ? "service_deal" : "standard_deal";
+}
+
+function workflowFamilyForDisposition(
+  pipelineDisposition: DealPipelineDisposition,
+  workflowRoute: WorkflowRoute | null | undefined
+) {
+  if (pipelineDisposition === "service") {
+    return "service_deal" as const;
+  }
+
+  if (pipelineDisposition === "deals") {
+    return workflowFamilyForRoute(workflowRoute ?? "estimating");
+  }
+
+  return "standard_deal" as const;
 }
 
 async function validateDealPrimaryContact(
@@ -389,8 +406,14 @@ export async function getDealDetail(tenantDb: TenantDb, dealId: string, userRole
  * Create a new deal.
  */
 export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
-  const workflowRoute = input.workflowRoute ?? "estimating";
-  const stage = await getStageById(input.stageId, workflowFamilyForRoute(workflowRoute));
+  const pipelineDisposition =
+    input.pipelineDisposition ??
+    (input.workflowRoute === "service" ? "service" : "deals");
+  const workflowRoute = input.workflowRoute ?? null;
+  const stage = await getStageById(
+    input.stageId,
+    workflowFamilyForDisposition(pipelineDisposition, workflowRoute)
+  );
   if (!stage) {
     throw new AppError(400, "Invalid stage ID for workflow route");
   }
@@ -451,6 +474,7 @@ export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
       source: lineage.source,
       winProbability: input.winProbability ?? null,
       expectedCloseDate: input.expectedCloseDate ?? null,
+      pipelineDisposition,
       workflowRoute,
     })
     .returning();
@@ -558,11 +582,11 @@ export async function updateDeal(
   if (input.expectedCloseDate !== undefined) updates.expectedCloseDate = input.expectedCloseDate;
   if (input.proposalNotes !== undefined) updates.proposalNotes = input.proposalNotes;
   if (input.workflowRoute !== undefined) {
-    const stage = await getStageById(existing.stageId, workflowFamilyForRoute(input.workflowRoute));
-    if (!stage) {
-      throw new AppError(400, "Current stage is not valid for the requested workflow route");
-    }
-    updates.workflowRoute = input.workflowRoute;
+    throw new AppError(400, "Use /api/deals/:id/routing-review for route changes");
+  }
+
+  if (input.pipelineDisposition !== undefined) {
+    throw new AppError(400, "Use /api/deals/:id/routing-review for route changes");
   }
 
   if (input.sourceLeadId !== undefined) {

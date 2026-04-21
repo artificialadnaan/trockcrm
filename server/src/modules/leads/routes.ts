@@ -126,22 +126,17 @@ router.post("/:id/stage/preflight", async (req, res, next) => {
 router.post("/:id/convert", async (req, res, next) => {
   try {
     const body = { ...req.body };
-    const { dealStageId, ...rest } = body;
-    if (!dealStageId) {
-      throw new AppError(400, "dealStageId is required");
-    }
 
     if (req.user!.role === "rep" && body.assignedRepId !== undefined) {
-      delete rest.assignedRepId;
+      delete body.assignedRepId;
     }
 
     const result = await convertLead(req.tenantDb!, {
       leadId: req.params.id,
-      dealStageId,
       userId: req.user!.id,
       userRole: req.user!.role,
       officeId: req.user!.activeOfficeId,
-      ...rest,
+      ...body,
     });
 
     await req.commitTransaction!();

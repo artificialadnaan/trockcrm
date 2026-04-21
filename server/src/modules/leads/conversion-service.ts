@@ -2,7 +2,6 @@ import { eq } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { deals, leadStageHistory, leads } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
-import type { WorkflowRoute } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 import { createDeal } from "../deals/service.js";
 import { getStageBySlug } from "../pipeline/service.js";
@@ -11,10 +10,8 @@ type TenantDb = NodePgDatabase<typeof schema>;
 
 export interface ConvertLeadInput {
   leadId: string;
-  dealStageId: string;
   userId: string;
   userRole: string;
-  workflowRoute?: WorkflowRoute;
   assignedRepId?: string;
   primaryContactId?: string | null;
   officeId?: string;
@@ -95,12 +92,18 @@ export function createLeadConversionService(
       throw new AppError(500, "Missing converted lead stage configuration");
     }
 
+    const opportunityStage = await deps.getStageBySlug("opportunity", "standard_deal");
+    if (!opportunityStage) {
+      throw new AppError(500, "Missing opportunity stage configuration");
+    }
+
     const transitionedToConvertedStage = convertedStage.id !== lead.stageId;
 
     const deal = await deps.createDeal(tenantDb, {
       name: input.name ?? lead.name,
-      stageId: input.dealStageId,
-      workflowRoute: input.workflowRoute ?? "estimating",
+      stageId: opportunityStage.id,
+      pipelineDisposition: "opportunity",
+      workflowRoute: null,
       assignedRepId: successorAssignedRepId,
       officeId: input.officeId,
       primaryContactId:

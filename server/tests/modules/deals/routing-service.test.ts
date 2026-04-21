@@ -28,6 +28,14 @@ const dealDepartmentHandoffsSchemaPath = resolve(
 const sharedSchemaIndexPath = resolve(repoRoot, "shared/src/schema/index.ts");
 const sharedSchemaIndexSource = readFileSync(sharedSchemaIndexPath, "utf8");
 
+async function loadRoutingServiceModule() {
+  try {
+    return await import("../../../src/modules/deals/routing-service.js");
+  } catch {
+    return null;
+  }
+}
+
 describe("Workflow Alignment Routing Contract", () => {
   it("creates schema files for lead qualification and routing ownership tables", () => {
     expect(existsSync(leadQualificationSchemaPath)).toBe(true);
@@ -55,5 +63,14 @@ describe("Workflow Alignment Routing Contract", () => {
     expect(workflowAlignmentMigrationSql).toContain("value_source");
     expect(workflowAlignmentMigrationSql).toContain("from_workflow_route");
     expect(workflowAlignmentMigrationSql).toContain("to_workflow_route");
+  });
+
+  it("routes deals under 50k into service and 50k+ into the deals path", async () => {
+    const mod = await loadRoutingServiceModule();
+
+    expect(mod).not.toBeNull();
+    expect(mod!.routeForAmount("42000.00")).toBe("service");
+    expect(mod!.routeForAmount("50000.00")).toBe("estimating");
+    expect(mod!.routeForAmount("65000.00")).toBe("estimating");
   });
 });

@@ -62,6 +62,7 @@ import {
   routeRevisionToEstimating,
   upsertDealScopingIntake,
 } from "./scoping-service.js";
+import { applyOpportunityRoutingReview } from "./routing-service.js";
 
 const router = Router();
 
@@ -531,6 +532,29 @@ router.post("/:id/stage/preflight", async (req, res, next) => {
       req.user!.role,
       req.user!.id
     );
+
+    await req.commitTransaction!();
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/deals/:id/routing-review
+router.post("/:id/routing-review", async (req, res, next) => {
+  try {
+    const { valueSource, amount, reason } = req.body;
+    if (!valueSource || !amount) {
+      throw new AppError(400, "valueSource and amount are required");
+    }
+
+    const result = await applyOpportunityRoutingReview(req.tenantDb!, {
+      dealId: req.params.id,
+      valueSource,
+      amount,
+      reason,
+      userId: req.user!.id,
+    });
 
     await req.commitTransaction!();
     res.json(result);
