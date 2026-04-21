@@ -94,6 +94,32 @@ describe("resolveMarketContext", () => {
     expect(result.resolutionSource.type).toBe("state");
   });
 
+  it("falls back to region geography when deal region is present and ZIP/state are blank", async () => {
+    const provider = createProvider({
+      findMarketByZip: vi.fn().mockResolvedValue(null),
+      findMarketByFallbackGeography: vi.fn().mockImplementation(async (input: any) => {
+        if (input.resolutionType === "region") {
+          return createMarket("market-region", "region");
+        }
+        return null;
+      }),
+    });
+
+    const result = await resolveMarketContext(provider, {
+      dealId: "deal-1",
+      dealZip: null,
+      dealState: null,
+      dealRegionId: "region-1",
+    });
+
+    expect(provider.findMarketByFallbackGeography).toHaveBeenCalledWith(
+      expect.objectContaining({ resolutionType: "region", resolutionKey: "region-1" })
+    );
+    expect(result.location.regionId).toBe("region-1");
+    expect(result.market.id).toBe("market-region");
+    expect(result.resolutionLevel).toBe("region");
+  });
+
   it("uses the global default when no geographic rule matches", async () => {
     const provider = createProvider({
       findMarketByZip: vi.fn().mockResolvedValue(null),

@@ -1,13 +1,14 @@
 import type {
   MarketAdjustmentRuleRecord,
   MarketRateProvider,
+  PricingScopeType,
 } from "./market-rate-provider.js";
 import type { ResolvedMarketContext } from "./market-resolution-service.js";
 
 export interface MarketAdjustmentSelectionInput {
   marketId: string | null;
-  scopeType: "global" | "metro" | "state" | "region";
-  scopeKey: string;
+  pricingScopeType: PricingScopeType;
+  pricingScopeKey: string;
   asOf?: Date;
 }
 
@@ -19,8 +20,8 @@ export interface MarketComponentBreakdown {
 
 export interface MarketRateAdjustmentInput {
   marketResolution: ResolvedMarketContext;
-  scopeType: "global" | "metro" | "state" | "region";
-  scopeKey: string;
+  pricingScopeType: PricingScopeType;
+  pricingScopeKey: string;
   baselinePrice: number;
   componentBreakdown?: MarketComponentBreakdown | null;
   asOf?: Date;
@@ -72,11 +73,12 @@ function isRuleActiveAt(rule: MarketAdjustmentRuleRecord, asOf: Date) {
 function getRuleTier(
   rule: MarketAdjustmentRuleRecord,
   marketId: string | null,
-  scopeType: MarketAdjustmentSelectionInput["scopeType"],
-  scopeKey: string
+  pricingScopeType: MarketAdjustmentSelectionInput["pricingScopeType"],
+  pricingScopeKey: string
 ) {
-  const exactScope = rule.scopeType === scopeType && rule.scopeKey === scopeKey;
-  const fallbackScope = rule.fallbackScopeType === scopeType && rule.fallbackScopeKey === scopeKey;
+  const exactScope = rule.scopeType === pricingScopeType && rule.scopeKey === pricingScopeKey;
+  const fallbackScope =
+    rule.fallbackScopeType === pricingScopeType && rule.fallbackScopeKey === pricingScopeKey;
   const marketSpecific = marketId != null && rule.marketId === marketId;
   const globalRule = rule.marketId == null;
 
@@ -91,11 +93,12 @@ function compareRules(
   a: MarketAdjustmentRuleRecord,
   b: MarketAdjustmentRuleRecord,
   marketId: string | null,
-  scopeType: MarketAdjustmentSelectionInput["scopeType"],
-  scopeKey: string
+  pricingScopeType: MarketAdjustmentSelectionInput["pricingScopeType"],
+  pricingScopeKey: string
 ) {
   const tierDelta =
-    getRuleTier(a, marketId, scopeType, scopeKey) - getRuleTier(b, marketId, scopeType, scopeKey);
+    getRuleTier(a, marketId, pricingScopeType, pricingScopeKey) -
+    getRuleTier(b, marketId, pricingScopeType, pricingScopeKey);
   if (tierDelta !== 0) return tierDelta;
 
   const priorityDelta = toNumber(b.priority) - toNumber(a.priority);
@@ -119,10 +122,27 @@ function normalizeWeights(
   const fallbackMaterialWeight = rule ? toNumber(rule.defaultMaterialWeight) : 0.3333;
   const fallbackEquipmentWeight = rule ? toNumber(rule.defaultEquipmentWeight) : 0.3334;
 
+  const weights = {
+    labor: componentBreakdown?.labor != null ? toNumber(componentBreakdown.labor) : fallbackLaborWeight,
+    material:
+      componentBreakdown?.material != null ? toNumber(componentBreakdown.material) : fallbackMaterialWeight,
+    equipment:
+      componentBreakdown?.equipment != null ? toNumber(componentBreakdown.equipment) : fallbackEquipmentWeight,
+  };
+  const total = weights.labor + weights.material + weights.equipment;
+
+  if (total <= 0) {
+    return {
+      labor: fallbackLaborWeight,
+      material: fallbackMaterialWeight,
+      equipment: fallbackEquipmentWeight,
+    };
+  }
+
   return {
-    labor: toNumber(componentBreakdown?.labor, fallbackLaborWeight),
-    material: toNumber(componentBreakdown?.material, fallbackMaterialWeight),
-    equipment: toNumber(componentBreakdown?.equipment, fallbackEquipmentWeight),
+    labor: weights.labor / total,
+    material: weights.material / total,
+    equipment: weights.equipment / total,
   };
 }
 
@@ -179,14 +199,16 @@ export async function selectBestMarketAdjustmentRule(
   const asOf = input.asOf ?? new Date();
   const rules = await provider.listMarketAdjustmentRules({
     marketId: input.marketId,
-    scopeType: input.scopeType,
-    scopeKey: input.scopeKey,
+    pricingScopeType: input.pricingScopeType,
+    pricingScopeKey: input.pricingScopeKey,
     asOf,
   });
 
   return [...rules]
     .filter((rule) => rule.isActive && isRuleActiveAt(rule, asOf))
-    .sort((a, b) => compareRules(a, b, input.marketId, input.scopeType, input.scopeKey))[0] ?? null;
+    .sort((a, b) =>
+      compareRules(a, b, input.marketId, input.pricingScopeType, input.pricingScopeKey)
+    )[0] ?? null;
 }
 
 export async function calculateMarketRateAdjustment(
@@ -195,8 +217,8 @@ export async function calculateMarketRateAdjustment(
 ): Promise<MarketRateAdjustmentResult> {
   const selectedRule = await selectBestMarketAdjustmentRule(provider, {
     marketId: input.marketResolution.market.id,
-    scopeType: input.scopeType,
-    scopeKey: input.scopeKey,
+    pricingScopeType: input.pricingScopeType,
+    pricingScopeKey: input.pricingScopeKey,
     asOf: input.asOf,
   });
 

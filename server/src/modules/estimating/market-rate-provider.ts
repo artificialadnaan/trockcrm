@@ -14,7 +14,7 @@ type TenantDb = NodePgDatabase<typeof schema>;
 export type MarketIdentity = typeof estimateMarkets.$inferSelect;
 export type MarketAdjustmentRuleRecord = typeof estimateMarketAdjustmentRules.$inferSelect;
 export type MarketResolutionType = "global" | "metro" | "state" | "region";
-export type MarketScopeType = MarketResolutionType;
+export type PricingScopeType = "division" | "trade" | "general";
 
 export interface MarketRateProvider {
   findDealMarketOverride(dealId: string): Promise<MarketIdentity | null>;
@@ -26,8 +26,8 @@ export interface MarketRateProvider {
   getDefaultMarket(): Promise<MarketIdentity | null>;
   listMarketAdjustmentRules(input: {
     marketId: string | null;
-    scopeType: MarketScopeType;
-    scopeKey: string;
+    pricingScopeType: PricingScopeType;
+    pricingScopeKey: string;
     asOf: Date;
   }): Promise<MarketAdjustmentRuleRecord[]>;
 }
@@ -182,12 +182,12 @@ export function createMarketRateProvider(tenantDb: TenantDb): MarketRateProvider
             marketFilter,
             or(
               and(
-                eq(estimateMarketAdjustmentRules.scopeType, input.scopeType),
-                eq(estimateMarketAdjustmentRules.scopeKey, input.scopeKey)
+                eq(estimateMarketAdjustmentRules.scopeType, input.pricingScopeType),
+                eq(estimateMarketAdjustmentRules.scopeKey, input.pricingScopeKey)
               ),
               and(
-                eq(estimateMarketAdjustmentRules.fallbackScopeType, input.scopeType),
-                eq(estimateMarketAdjustmentRules.fallbackScopeKey, input.scopeKey)
+                eq(estimateMarketAdjustmentRules.fallbackScopeType, input.pricingScopeType),
+                eq(estimateMarketAdjustmentRules.fallbackScopeKey, input.pricingScopeKey)
               )
             )
           )

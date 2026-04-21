@@ -8,7 +8,7 @@ function makeRule(input: Partial<Record<string, unknown>> & { id: string }) {
   return {
     id: input.id,
     marketId: (input.marketId ?? null) as string | null,
-    scopeType: (input.scopeType ?? "global") as string,
+    scopeType: (input.scopeType ?? "general") as string,
     scopeKey: (input.scopeKey ?? "default") as string,
     fallbackScopeType: (input.fallbackScopeType ?? null) as string | null,
     fallbackScopeKey: (input.fallbackScopeKey ?? null) as string | null,
@@ -27,21 +27,21 @@ function makeRule(input: Partial<Record<string, unknown>> & { id: string }) {
 }
 
 describe("market-rate-service", () => {
-  it("chooses an exact market and scope match over broader fallback rules", async () => {
+  it("chooses an exact market and pricing scope match over broader fallback rules", async () => {
     const provider = {
       listMarketAdjustmentRules: vi.fn().mockResolvedValue([
         makeRule({
           id: "global-broad",
           marketId: null,
-          scopeType: "state",
-          scopeKey: "TX",
+          scopeType: "general",
+          scopeKey: "default",
           priority: 100,
         }),
         makeRule({
           id: "market-exact",
           marketId: "market-1",
-          scopeType: "state",
-          scopeKey: "TX",
+          scopeType: "division",
+          scopeKey: "07",
           priority: 0,
         }),
       ]),
@@ -49,8 +49,8 @@ describe("market-rate-service", () => {
 
     const result = await selectBestMarketAdjustmentRule(provider, {
       marketId: "market-1",
-      scopeType: "state",
-      scopeKey: "TX",
+      pricingScopeType: "division",
+      pricingScopeKey: "07",
       asOf: new Date("2026-04-21T00:00:00Z"),
     });
 
@@ -63,15 +63,15 @@ describe("market-rate-service", () => {
         makeRule({
           id: "expired",
           marketId: "market-1",
-          scopeType: "metro",
-          scopeKey: "76102",
+          scopeType: "trade",
+          scopeKey: "roofing",
           effectiveTo: new Date("2025-01-01T00:00:00Z"),
         }),
         makeRule({
           id: "active",
           marketId: "market-1",
-          scopeType: "metro",
-          scopeKey: "76102",
+          scopeType: "trade",
+          scopeKey: "roofing",
           effectiveFrom: new Date("2020-01-01T00:00:00Z"),
         }),
       ]),
@@ -79,12 +79,62 @@ describe("market-rate-service", () => {
 
     const result = await selectBestMarketAdjustmentRule(provider, {
       marketId: "market-1",
-      scopeType: "metro",
-      scopeKey: "76102",
+      pricingScopeType: "trade",
+      pricingScopeKey: "roofing",
       asOf: new Date("2026-04-21T00:00:00Z"),
     });
 
     expect(result?.id).toBe("active");
+  });
+
+  it("normalizes partial split weights so missing components do not overcount the baseline", async () => {
+    const provider = {
+      listMarketAdjustmentRules: vi.fn().mockResolvedValue([
+        makeRule({
+          id: "active",
+          marketId: "market-1",
+          scopeType: "division",
+          scopeKey: "07",
+          laborAdjustmentPercent: 0,
+          materialAdjustmentPercent: 0,
+          equipmentAdjustmentPercent: 0,
+          defaultLaborWeight: 0.5,
+          defaultMaterialWeight: 0.3,
+          defaultEquipmentWeight: 0.2,
+        }),
+      ]),
+    } as any;
+
+    const result = await calculateMarketRateAdjustment(provider, {
+      marketResolution: {
+        market: {
+          id: "market-1",
+          name: "Texas Market",
+          slug: "tx",
+          type: "state",
+          stateCode: "TX",
+          regionId: null,
+        },
+        resolutionLevel: "state",
+        resolutionSource: { type: "state", key: "TX", marketId: "market-1" },
+        location: { zip: "76102", state: "TX", regionId: null },
+      } as any,
+      pricingScopeType: "division",
+      pricingScopeKey: "07",
+      baselinePrice: 100,
+      componentBreakdown: {
+        labor: 0.5,
+      },
+      asOf: new Date("2026-04-21T00:00:00Z"),
+    });
+
+    expect(result.componentAdjustments.map((component: any) => component.weight)).toEqual([
+      0.5,
+      0.3,
+      0.2,
+    ]);
+    expect(result.componentAdjustments.reduce((sum, component) => sum + component.baselineAmount, 0)).toBeCloseTo(100, 2);
+    expect(result.adjustedPrice).toBeCloseTo(100, 2);
   });
 
   it("applies labor, material, and equipment deltas separately", async () => {
@@ -93,8 +143,8 @@ describe("market-rate-service", () => {
         makeRule({
           id: "active",
           marketId: "market-1",
-          scopeType: "state",
-          scopeKey: "TX",
+          scopeType: "division",
+          scopeKey: "07",
           laborAdjustmentPercent: 10,
           materialAdjustmentPercent: -20,
           equipmentAdjustmentPercent: 0,
@@ -119,8 +169,8 @@ describe("market-rate-service", () => {
         resolutionSource: { type: "state", key: "TX", marketId: "market-1" },
         location: { zip: "76102", state: "TX", regionId: null },
       } as any,
-      scopeType: "state",
-      scopeKey: "TX",
+      pricingScopeType: "division",
+      pricingScopeKey: "07",
       baselinePrice: 100,
       componentBreakdown: {
         labor: 0.5,
@@ -147,7 +197,7 @@ describe("market-rate-service", () => {
         makeRule({
           id: "active",
           marketId: "market-1",
-          scopeType: "global",
+          scopeType: "general",
           scopeKey: "default",
           laborAdjustmentPercent: 0,
           materialAdjustmentPercent: 0,
@@ -173,8 +223,8 @@ describe("market-rate-service", () => {
         resolutionSource: { type: "global", key: "default", marketId: "market-1" },
         location: { zip: null, state: null, regionId: null },
       } as any,
-      scopeType: "global",
-      scopeKey: "default",
+      pricingScopeType: "general",
+      pricingScopeKey: "default",
       baselinePrice: 100,
       componentBreakdown: null,
       asOf: new Date("2026-04-21T00:00:00Z"),
@@ -198,8 +248,8 @@ describe("market-rate-service", () => {
         makeRule({
           id: "active",
           marketId: "market-1",
-          scopeType: "state",
-          scopeKey: "TX",
+          scopeType: "division",
+          scopeKey: "07",
           laborAdjustmentPercent: 5,
           materialAdjustmentPercent: 0,
           equipmentAdjustmentPercent: -5,
@@ -224,8 +274,8 @@ describe("market-rate-service", () => {
         resolutionSource: { type: "state", key: "TX", marketId: "market-1" },
         location: { zip: "76102", state: "TX", regionId: null },
       } as any,
-      scopeType: "state",
-      scopeKey: "TX",
+      pricingScopeType: "division",
+      pricingScopeKey: "07",
       baselinePrice: 120,
       componentBreakdown: null,
       asOf: new Date("2026-04-21T00:00:00Z"),
