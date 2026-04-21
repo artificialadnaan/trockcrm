@@ -10,6 +10,7 @@ import { LeadTimelineTab } from "@/components/leads/lead-timeline-tab";
 import { ForecastEditor } from "@/components/shared/forecast-editor";
 import { NextStepEditor } from "@/components/shared/next-step-editor";
 import { LeadQualificationPanel } from "@/components/leads/lead-qualification-panel";
+import { LeadScopingWorkspace } from "@/components/leads/lead-scoping-workspace";
 import { LeadStageChangeDialog } from "@/components/leads/lead-stage-change-dialog";
 import { LeadConvertDialog } from "@/components/leads/lead-convert-dialog";
 import { formatLeadPropertyLine, updateLead, useLeadDetail } from "@/hooks/use-leads";
@@ -82,6 +83,7 @@ export function LeadDetailPage() {
   const canConvertToOpportunity =
     currentStage?.slug === "qualified_for_opportunity" && !lead.convertedDealId && !isConvertedLead;
   const qualificationFocused = searchParams.get("focus") === "qualification";
+  const scopingFocused = searchParams.get("focus") === "scoping";
 
   const handleAssignmentSave = async (assignedRepId: string) => {
     if (assignedRepId === lead.assignedRepId) return;
@@ -227,17 +229,27 @@ export function LeadDetailPage() {
 
           {isLeadStage && (
             <div className="space-y-3">
-              {qualificationFocused ? (
+              {qualificationFocused || scopingFocused ? (
                 <Card className="border-brand-red/30 bg-brand-red/5">
                   <CardContent className="space-y-1 pt-4">
-                    <p className="text-sm font-semibold text-foreground">Complete Qualification Intake</p>
+                    <p className="text-sm font-semibold text-foreground">
+                      {scopingFocused ? "Complete Lead Scoping Checklist" : "Complete Qualification Intake"}
+                    </p>
                     <p className="text-sm text-muted-foreground">
-                      Complete the qualification intake below to satisfy the current stage requirements.
+                      {scopingFocused
+                        ? "Complete the lead scoping checklist below before moving this lead into Lead Go/No-Go."
+                        : "Complete the qualification intake below to satisfy the current stage requirements."}
                     </p>
                   </CardContent>
                 </Card>
               ) : null}
               <LeadQualificationPanel
+                leadId={lead.id}
+                onSaved={() => {
+                  void refetch();
+                }}
+              />
+              <LeadScopingWorkspace
                 leadId={lead.id}
                 onSaved={() => {
                   void refetch();

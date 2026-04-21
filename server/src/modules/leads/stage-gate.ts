@@ -3,13 +3,15 @@ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { leads } from "@trock-crm/shared/schema";
 import {
   LEAD_COMPANY_PREQUAL_FIELD_KEYS,
-  LEAD_SCOPING_SUBSET_FIELD_KEYS,
+  LEAD_GO_NO_GO_GATE_FIELD_KEYS,
   LEAD_VALUE_ASSIGNMENT_FIELD_KEYS,
   WORKFLOW_GATE_FIELD_LABELS,
+  type LeadScopingReadiness,
 } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 import { getStageById } from "../pipeline/service.js";
 import { getLeadQualificationByLeadId } from "./qualification-service.js";
+import { getLeadScopingSnapshot } from "./scoping-service.js";
 
 type TenantDb = NodePgDatabase<any>;
 
@@ -67,12 +69,8 @@ const LEAD_STAGE_REQUIREMENTS: Record<string, string[]> = {
     ...LEAD_COMPANY_PREQUAL_FIELD_KEYS,
     ...LEAD_VALUE_ASSIGNMENT_FIELD_KEYS,
   ],
-  lead_go_no_go: ["estimatedOpportunityValue", ...LEAD_SCOPING_SUBSET_FIELD_KEYS],
-  qualified_for_opportunity: [
-    "goDecision",
-    "goDecisionNotes",
-    ...LEAD_SCOPING_SUBSET_FIELD_KEYS,
-  ],
+  lead_go_no_go: [...LEAD_GO_NO_GO_GATE_FIELD_KEYS],
+  qualified_for_opportunity: ["goDecision", "goDecisionNotes"],
 };
 
 function fallbackLabel(field: string) {
@@ -111,6 +109,7 @@ function hasValue(value: unknown): boolean {
 function getRequirementValue(
   lead: LeadSnapshot,
   qualification: QualificationSnapshot,
+  leadScopingReadiness: LeadScopingReadiness | null,
   field: string
 ) {
   if (field.startsWith("qualification.")) {
@@ -131,6 +130,10 @@ function getRequirementValue(
 
   if (field === "goDecisionNotes") {
     return qualification?.goDecisionNotes;
+  }
+
+  if (field === "leadScoping.completedChecklist") {
+    return leadScopingReadiness?.isReadyForGoNoGo ?? false;
   }
 
   return lead[field as keyof LeadSnapshot];
@@ -171,12 +174,21 @@ function normalizeQualificationSnapshot(
 export function evaluateLeadStageGate(input: {
   lead: LeadSnapshot;
   qualification: QualificationSnapshot;
+  leadScopingReadiness?: LeadScopingReadiness | null;
   currentStage: LeadStageRecord;
   targetStage: LeadStageRecord;
 }): LeadStageGateResult {
   const requiredFields = LEAD_STAGE_REQUIREMENTS[input.targetStage.slug] ?? [];
   const missingFields = requiredFields.filter(
-    (field) => !hasValue(getRequirementValue(input.lead, input.qualification, field))
+    (field) =>
+      !hasValue(
+        getRequirementValue(
+          input.lead,
+          input.qualification,
+          input.leadScopingReadiness ?? null,
+          field
+        )
+      )
   );
 
   return {
@@ -216,10 +228,11 @@ export async function validateLeadStageGate(
     throw new AppError(403, "You can only edit your own leads");
   }
 
-  const [currentStage, targetStage, qualification] = await Promise.all([
+  const [currentStage, targetStage, qualification, leadScopingSnapshot] = await Promise.all([
     getStageById(lead.stageId, "lead"),
     getStageById(targetStageId, "lead"),
     getLeadQualificationByLeadId(tenantDb, leadId),
+    getLeadScopingSnapshot(tenantDb, leadId),
   ]);
 
   if (!currentStage || !targetStage) {
@@ -231,6 +244,7 @@ export async function validateLeadStageGate(
     qualification: normalizeQualificationSnapshot(
       qualification as Record<string, unknown> | null
     ),
+    leadScopingReadiness: leadScopingSnapshot.readiness,
     currentStage,
     targetStage,
   });

@@ -11,7 +11,7 @@ const currentStage = {
 };
 
 describe("Lead Stage Gate Evaluation", () => {
-  it("blocks advancement into lead_go_no_go when pre-qual value is missing", async () => {
+  it("blocks advancement into lead_go_no_go when the full lead scoping checklist is incomplete", () => {
     const result = evaluateLeadStageGate({
       lead: {
         id: "lead-1",
@@ -20,6 +20,7 @@ describe("Lead Stage Gate Evaluation", () => {
         source: "Referral",
       },
       qualification: {
+        estimatedOpportunityValue: "42000.00",
         qualificationData: {
           projectLocation: "Dallas, TX",
           propertyName: "Palm Villas",
@@ -38,49 +39,11 @@ describe("Lead Stage Gate Evaluation", () => {
         },
         scopingSubsetData: {},
       },
-      currentStage,
-      targetStage: {
-        ...currentStage,
-        id: "stage-go-no-go",
-        slug: "lead_go_no_go",
-        name: "Lead Go/No-Go",
-      },
-    });
-
-    expect(result.allowed).toBe(false);
-    expect(result.missingRequirements.fields).toContain("estimatedOpportunityValue");
-  });
-
-  it("blocks advancement into lead_go_no_go when the scoping subset is incomplete", async () => {
-    const result = evaluateLeadStageGate({
-      lead: {
-        id: "lead-1",
-        companyId: "company-1",
-        propertyId: "property-1",
-        source: "Referral",
-      },
-      qualification: {
-        estimatedOpportunityValue: "42000.00",
-        qualificationData: {
-          projectLocation: "Dallas, TX",
-          propertyName: "Palm Villas",
-          propertyAddress: "123 Palm Way",
-          propertyCity: "Dallas",
-          propertyState: "TX",
-          unitCount: 120,
-          stakeholderName: "Alex PM",
-          stakeholderRole: "Property Manager",
-          projectType: "Exterior Painting",
-          scopeSummary: "Repaint all buildings",
-          budgetStatus: "Budgeted",
-          budgetQuarter: "Q2",
-          specPackageStatus: "Provided",
-          checklistStarted: true,
-        },
-        scopingSubsetData: {
-          propertyDetails: true,
-          scopeSummary: true,
-        },
+      leadScopingReadiness: {
+        status: "draft",
+        isReadyForGoNoGo: false,
+        completionState: {},
+        errors: { sections: {}, attachments: {} },
       },
       currentStage,
       targetStage: {
@@ -92,11 +55,10 @@ describe("Lead Stage Gate Evaluation", () => {
     });
 
     expect(result.allowed).toBe(false);
-    expect(result.missingRequirements.fields).toContain("scopingSubset.projectOverview");
-    expect(result.missingRequirements.fields).toContain("scopingSubset.budgetAndBidContext");
+    expect(result.missingRequirements.fields).toContain("leadScoping.completedChecklist");
   });
 
-  it("blocks conversion readiness when partial scoping subset is incomplete", async () => {
+  it("blocks qualification completion when go/no-go notes are missing", () => {
     const result = evaluateLeadStageGate({
       lead: {
         id: "lead-1",
@@ -107,7 +69,6 @@ describe("Lead Stage Gate Evaluation", () => {
       qualification: {
         estimatedOpportunityValue: "42000.00",
         goDecision: "go",
-        goDecisionNotes: "Proceed",
         qualificationData: {
           projectLocation: "Dallas, TX",
           propertyName: "Palm Villas",
@@ -128,6 +89,12 @@ describe("Lead Stage Gate Evaluation", () => {
           propertyDetails: true,
           scopeSummary: true,
         },
+      },
+      leadScopingReadiness: {
+        status: "ready",
+        isReadyForGoNoGo: true,
+        completionState: {},
+        errors: { sections: {}, attachments: {} },
       },
       currentStage,
       targetStage: {
@@ -139,10 +106,10 @@ describe("Lead Stage Gate Evaluation", () => {
     });
 
     expect(result.allowed).toBe(false);
-    expect(result.missingRequirements.fields).toContain("scopingSubset.projectOverview");
+    expect(result.missingRequirements.fields).toContain("goDecisionNotes");
   });
 
-  it("requires property and checklist metadata before pre-qual value assignment", async () => {
+  it("requires property and checklist metadata before pre-qual value assignment", () => {
     const result = evaluateLeadStageGate({
       lead: {
         id: "lead-1",
@@ -166,6 +133,12 @@ describe("Lead Stage Gate Evaluation", () => {
           specPackageStatus: "Provided",
         },
         scopingSubsetData: {},
+      },
+      leadScopingReadiness: {
+        status: "draft",
+        isReadyForGoNoGo: false,
+        completionState: {},
+        errors: { sections: {}, attachments: {} },
       },
       currentStage,
       targetStage: {

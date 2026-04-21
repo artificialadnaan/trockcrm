@@ -1,8 +1,28 @@
 import { eq } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { leadQualification } from "@trock-crm/shared/schema";
+import { AppError } from "../../middleware/error-handler.js";
 
 type TenantDb = NodePgDatabase<any>;
+
+function normalizeNumericInput(value: string | null | undefined, label: string) {
+  if (value === null || value === undefined) {
+    return value ?? null;
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const normalized = trimmed.replace(/[$,\s]/g, "");
+  const numericValue = Number(normalized);
+  if (!Number.isFinite(numericValue)) {
+    throw new AppError(400, `${label} must be a valid number`);
+  }
+
+  return numericValue.toFixed(2);
+}
 
 export interface LeadQualificationPatch {
   estimatedOpportunityValue?: string | null;
@@ -42,13 +62,17 @@ export async function upsertLeadQualification(
     ...(existing?.scopingSubsetData ?? {}),
     ...(patch.scopingSubsetData ?? {}),
   };
+  const normalizedEstimatedOpportunityValue =
+    patch.estimatedOpportunityValue !== undefined
+      ? normalizeNumericInput(patch.estimatedOpportunityValue, "Estimated opportunity value")
+      : undefined;
 
   if (existing) {
     const [updated] = await tenantDb
       .update(leadQualification)
       .set({
         estimatedOpportunityValue:
-          patch.estimatedOpportunityValue ?? existing.estimatedOpportunityValue,
+          normalizedEstimatedOpportunityValue ?? existing.estimatedOpportunityValue,
         goDecision: patch.goDecision ?? existing.goDecision,
         goDecisionNotes: patch.goDecisionNotes ?? existing.goDecisionNotes,
         qualificationData: nextQualificationData,
@@ -69,7 +93,7 @@ export async function upsertLeadQualification(
     .insert(leadQualification)
     .values({
       leadId,
-      estimatedOpportunityValue: patch.estimatedOpportunityValue ?? null,
+      estimatedOpportunityValue: normalizedEstimatedOpportunityValue ?? null,
       goDecision: patch.goDecision ?? null,
       goDecisionNotes: patch.goDecisionNotes ?? null,
       qualificationData: nextQualificationData,

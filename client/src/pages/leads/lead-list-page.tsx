@@ -15,8 +15,8 @@ import { PipelineBoard } from "@/components/pipeline/pipeline-board";
 import { transitionLeadStage, useLeadBoard } from "@/hooks/use-leads";
 import { useNormalizedPipelineRoute } from "@/lib/pipeline-scope";
 
-export function buildLeadIntakePath(leadId: string) {
-  return `/leads/${leadId}?focus=qualification`;
+export function buildLeadIntakePath(leadId: string, focus: "qualification" | "scoping" = "qualification") {
+  return `/leads/${leadId}?focus=${focus}`;
 }
 
 export function isImmediateNextStageMove(
@@ -51,6 +51,7 @@ export function LeadListPage() {
     leadName: string;
     targetStageName: string;
     missingLabels: string[];
+    focus: "qualification" | "scoping";
   } | null>(null);
 
   const bucket = searchParams.get("bucket");
@@ -111,11 +112,19 @@ export function LeadListPage() {
           void transitionLeadStage(activeId, { targetStageId })
             .then(async (result) => {
               if (!result.ok) {
+                const missingKeys = result.missingRequirements.effectiveChecklist.fields
+                  .filter((field) => !field.satisfied)
+                  .map((field) => field.key);
                 setBlockedMove({
                   leadId: activeLead.id,
                   leadName: activeLead.name,
                   targetStageName: targetColumn.stage.name,
-                  missingLabels: result.missing.map((field) => field.label),
+                  missingLabels: result.missingRequirements.effectiveChecklist.fields
+                    .filter((field) => !field.satisfied)
+                    .map((field) => field.label),
+                  focus: missingKeys.some((key) => key.startsWith("leadScoping."))
+                    ? "scoping"
+                    : "qualification",
                 });
                 return;
               }
@@ -147,7 +156,7 @@ export function LeadListPage() {
               Close
             </Button>
             {blockedMove ? (
-              <Button onClick={() => navigate(buildLeadIntakePath(blockedMove.leadId))}>
+              <Button onClick={() => navigate(buildLeadIntakePath(blockedMove.leadId, blockedMove.focus))}>
                 Open Lead Intake
                 <ArrowRight className="ml-2 h-4 w-4" />
               </Button>

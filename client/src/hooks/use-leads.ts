@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, resolveApiBase } from "@/lib/api";
 import type { StagePageQuery } from "@/lib/pipeline-stage-page";
+import type { LeadScopingReadiness, LeadScopingSectionData } from "../../../shared/src/types/lead-scoping.js";
 
 export interface LeadQualificationRecord {
   id: string;
@@ -12,6 +13,23 @@ export interface LeadQualificationRecord {
   scopingSubsetData: Record<string, unknown>;
   disqualificationReason: string | null;
   disqualificationNotes: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface LeadScopingIntakeRecord {
+  id: string;
+  leadId: string;
+  officeId: string;
+  status: "draft" | "ready" | "completed";
+  sectionData: LeadScopingSectionData;
+  completionState: Record<string, unknown>;
+  readinessErrors: Record<string, unknown>;
+  firstReadyAt: string | null;
+  completedAt: string | null;
+  lastAutosavedAt: string;
+  createdBy: string;
+  lastEditedBy: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -257,6 +275,41 @@ export function useLeadQualification(leadId: string | undefined) {
   return { qualification, loading, error, refetch: fetchQualification };
 }
 
+export function useLeadScoping(leadId: string | undefined) {
+  const [intake, setIntake] = useState<LeadScopingIntakeRecord | null>(null);
+  const [readiness, setReadiness] = useState<LeadScopingReadiness | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchScoping = useCallback(async () => {
+    if (!leadId) {
+      setLoading(false);
+      return;
+    }
+
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await api<{
+        intake: LeadScopingIntakeRecord | null;
+        readiness: LeadScopingReadiness;
+      }>(`/leads/${leadId}/scoping`);
+      setIntake(data.intake);
+      setReadiness(data.readiness);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to load lead scoping");
+    } finally {
+      setLoading(false);
+    }
+  }, [leadId]);
+
+  useEffect(() => {
+    fetchScoping();
+  }, [fetchScoping]);
+
+  return { intake, readiness, loading, error, refetch: fetchScoping };
+}
+
 export async function createLead(input: {
   companyId: string;
   propertyId: string;
@@ -320,6 +373,19 @@ export async function updateLead(leadId: string, input: LeadUpdatePayload) {
     method: "PATCH",
     json: input,
   });
+}
+
+export async function updateLeadScoping(
+  leadId: string,
+  input: { sectionData: LeadScopingSectionData }
+) {
+  return api<{ intake: LeadScopingIntakeRecord | null; readiness: LeadScopingReadiness }>(
+    `/leads/${leadId}/scoping`,
+    {
+      method: "PATCH",
+      json: input,
+    }
+  );
 }
 
 export interface LeadTransitionMissingRequirement {

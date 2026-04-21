@@ -13,6 +13,7 @@ import {
 import { convertLead } from "./conversion-service.js";
 import { preflightLeadStageCheck } from "./stage-gate.js";
 import { getLeadQualificationByLeadId } from "./qualification-service.js";
+import { getLeadScopingSnapshot, upsertLeadScopingIntake } from "./scoping-service.js";
 
 const router = Router();
 
@@ -115,6 +116,51 @@ router.get("/:id/qualification", async (req, res, next) => {
     const qualification = await getLeadQualificationByLeadId(req.tenantDb!, req.params.id);
     await req.commitTransaction!();
     res.json({ qualification });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/leads/:id/scoping
+router.get("/:id/scoping", async (req, res, next) => {
+  try {
+    const lead = await getLeadById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    if (!lead) {
+      throw new AppError(404, "Lead not found");
+    }
+
+    const snapshot = await getLeadScopingSnapshot(req.tenantDb!, req.params.id);
+    await req.commitTransaction!();
+    res.json(snapshot);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// PATCH /api/leads/:id/scoping
+router.patch("/:id/scoping", async (req, res, next) => {
+  try {
+    const lead = await getLeadById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    if (!lead) {
+      throw new AppError(404, "Lead not found");
+    }
+
+    const sectionData =
+      req.body?.sectionData &&
+      typeof req.body.sectionData === "object" &&
+      !Array.isArray(req.body.sectionData)
+        ? req.body.sectionData
+        : {};
+
+    const snapshot = await upsertLeadScopingIntake(req.tenantDb!, {
+      leadId: req.params.id,
+      officeId: req.user!.activeOfficeId ?? req.user!.officeId,
+      userId: req.user!.id,
+      sectionData,
+    });
+
+    await req.commitTransaction!();
+    res.json(snapshot);
   } catch (err) {
     next(err);
   }

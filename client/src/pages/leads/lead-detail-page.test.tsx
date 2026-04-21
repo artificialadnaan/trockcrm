@@ -123,6 +123,18 @@ vi.mock("@/hooks/use-leads", () => ({
     error: null,
     refetch: vi.fn(),
   })),
+  useLeadScoping: vi.fn(() => ({
+    intake: null,
+    readiness: {
+      status: "draft",
+      isReadyForGoNoGo: false,
+      completionState: {},
+      errors: { sections: {}, attachments: {} },
+    },
+    loading: false,
+    error: null,
+    refetch: vi.fn(),
+  })),
   formatLeadPropertyLine: vi.fn((currentLead: typeof lead) =>
     [
       currentLead.property?.address,
@@ -135,6 +147,7 @@ vi.mock("@/hooks/use-leads", () => ({
   updateLead: vi.fn(),
   preflightLeadStageCheck: vi.fn(),
   convertLeadToOpportunity: vi.fn(),
+  updateLeadScoping: vi.fn(),
 }));
 
 vi.mock("@/hooks/use-pipeline-config", () => ({
@@ -184,6 +197,16 @@ function renderLeadDetail() {
 function renderLeadDetailWithQualificationFocus() {
   return renderToStaticMarkup(
     <MemoryRouter initialEntries={["/leads/lead-1?focus=qualification"]}>
+      <Routes>
+        <Route path="/leads/:id" element={<LeadDetailPage />} />
+      </Routes>
+    </MemoryRouter>
+  );
+}
+
+function renderLeadDetailWithScopingFocus() {
+  return renderToStaticMarkup(
+    <MemoryRouter initialEntries={["/leads/lead-1?focus=scoping"]}>
       <Routes>
         <Route path="/leads/:id" element={<LeadDetailPage />} />
       </Routes>
@@ -241,6 +264,22 @@ describe("LeadDetailPage", () => {
 
     expect(html).toContain("Complete Qualification Intake");
     expect(html).toContain("Complete the qualification intake below to satisfy the current stage requirements.");
+  });
+
+  it("shows a lead-scoping helper when opened from a blocked scoping gate", () => {
+    lead = {
+      ...lead,
+      stageId: "stage-lead",
+      convertedAt: null,
+      convertedDealId: null,
+      convertedDealNumber: null,
+      status: "open",
+    };
+
+    const html = renderLeadDetailWithScopingFocus();
+
+    expect(html).toContain("Complete Lead Scoping Checklist");
+    expect(html).toContain("Complete the lead scoping checklist below before moving this lead into Lead Go/No-Go.");
   });
 
   it("switches the CTA to open the deal once the lead is converted", () => {

@@ -89,6 +89,7 @@ function normalize(html: string) {
 describe("LeadListPage", () => {
   it("builds the lead intake path for blocked moves", () => {
     expect(buildLeadIntakePath("lead-1")).toBe("/leads/lead-1?focus=qualification");
+    expect(buildLeadIntakePath("lead-1", "scoping")).toBe("/leads/lead-1?focus=scoping");
   });
 
   it("treats sparse display-order stages as valid immediate moves when mapped as next stage", () => {

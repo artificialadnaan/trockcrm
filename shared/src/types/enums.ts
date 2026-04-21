@@ -42,6 +42,9 @@ export type DealPipelineDisposition = (typeof DEAL_PIPELINE_DISPOSITIONS)[number
 export const DEAL_SCOPING_INTAKE_STATUSES = ["draft", "ready", "activated"] as const;
 export type DealScopingIntakeStatus = (typeof DEAL_SCOPING_INTAKE_STATUSES)[number];
 
+export const LEAD_SCOPING_INTAKE_STATUSES = ["draft", "ready", "completed"] as const;
+export type LeadScopingIntakeStatus = (typeof LEAD_SCOPING_INTAKE_STATUSES)[number];
+
 export const CONTACT_CATEGORIES = [
   "client",
   "subcontractor",

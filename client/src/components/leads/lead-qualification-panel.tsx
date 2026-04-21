@@ -20,6 +20,14 @@ function getBooleanValue(record: Record<string, unknown>, key: string) {
   return record[key] === true;
 }
 
+function normalizeCurrencyInput(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return "";
+  }
+  return trimmed.replace(/[$,\s]/g, "");
+}
+
 export function LeadQualificationPanel({
   leadId,
   onSaved,
@@ -58,7 +66,7 @@ export function LeadQualificationPanel({
     setError(null);
     try {
       await updateLead(leadId, {
-        estimatedOpportunityValue: estimatedOpportunityValue || null,
+        estimatedOpportunityValue: normalizeCurrencyInput(estimatedOpportunityValue) || null,
         goDecision: goDecision || null,
         goDecisionNotes: goDecisionNotes || null,
         qualificationData,
