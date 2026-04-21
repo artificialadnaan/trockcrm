@@ -15,7 +15,7 @@ import { usePipelineStages, useProjectTypes, useRegions } from "@/hooks/use-pipe
 import { createDeal, updateDeal } from "@/hooks/use-deals";
 import type { Deal } from "@/hooks/use-deals";
 import { Loader2 } from "lucide-react";
-import { getDefaultDealStageId, getNewDealStages } from "./deal-form.helpers";
+import { getDefaultDealStageId, getNewDealStages, getSelectedOptionLabel } from "./deal-form.helpers";
 import { CompanySelector } from "@/components/companies/company-selector";
 import { PropertySelector } from "@/components/properties/property-selector";
 
@@ -32,6 +32,10 @@ export function DealForm({ deal, onSuccess }: DealFormProps) {
 
   const isEdit = !!deal;
   const activeStages = getNewDealStages(stages);
+  const projectTypeOptions = projectTypeHierarchy.flatMap((parent) => [
+    { id: parent.id, name: parent.name },
+    ...parent.children.map((child) => ({ id: child.id, name: child.name })),
+  ]);
 
   const [formData, setFormData] = useState({
     name: deal?.name ?? "",
@@ -246,7 +250,9 @@ export function DealForm({ deal, onSuccess }: DealFormProps) {
                 onValueChange={(val) => handleChange("stageId", val ?? "")}
               >
                 <SelectTrigger>
-                  <SelectValue placeholder="Select stage" />
+                  <SelectValue placeholder="Select stage">
+                    {getSelectedOptionLabel(activeStages, formData.stageId, "Select stage")}
+                  </SelectValue>
                 </SelectTrigger>
                 <SelectContent>
                   {activeStages.map((s) => (
@@ -305,7 +311,9 @@ export function DealForm({ deal, onSuccess }: DealFormProps) {
                 onValueChange={(val) => handleChange("projectTypeId", val ?? "")}
               >
                 <SelectTrigger>
-                  <SelectValue placeholder="Select type" />
+                  <SelectValue placeholder="Select type">
+                    {getSelectedOptionLabel(projectTypeOptions, formData.projectTypeId, "Select type")}
+                  </SelectValue>
                 </SelectTrigger>
                 <SelectContent>
                   {projectTypeHierarchy.flatMap((parent) => [
@@ -328,7 +336,9 @@ export function DealForm({ deal, onSuccess }: DealFormProps) {
                 onValueChange={(val) => handleChange("regionId", val ?? "")}
               >
                 <SelectTrigger>
-                  <SelectValue placeholder="Select region" />
+                  <SelectValue placeholder="Select region">
+                    {getSelectedOptionLabel(regions, formData.regionId, "Select region")}
+                  </SelectValue>
                 </SelectTrigger>
                 <SelectContent>
                   {regions.map((r) => (

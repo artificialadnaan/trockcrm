@@ -6,11 +6,10 @@ function normalize(source: string) {
 }
 
 describe("LeadNewPage select labels", () => {
-  it("uses native SelectValue placeholders instead of rendering raw ids", () => {
+  it("renders explicit user-facing labels for selected values", () => {
     const source = normalize(leadNewPageSource);
 
-    expect(source).toContain('<SelectValue placeholder="Select lead stage" />');
-    expect(source).toContain('<SelectValue placeholder="Select rep" />');
-    expect(source).not.toContain("getSelectedOptionLabel");
+    expect(source).toContain('getSelectedOptionLabel(leadStages, formData.stageId, "Select lead stage")');
+    expect(source).toContain('getSelectedOptionLabel(repOptions, formData.assignedRepId, "Select rep")');
   });
 });
