@@ -196,21 +196,24 @@ async function resolveCatalogFirstOptions(args: {
   catalogQuery?: string | null;
   catalogOptions?: ManualRecommendationOptionInput[];
   selectedOptionStableId?: string | null;
+  forceCatalogSelection?: boolean;
 }) {
   if (args.catalogOptions && args.catalogOptions.length > 0) {
+    const selectedOption = args.catalogOptions.find((option) => option.stableId === args.selectedOptionStableId) ?? null;
     return {
       optionRows: args.catalogOptions,
-      selectedOption:
-        args.catalogOptions.find((option) => option.stableId === args.selectedOptionStableId) ?? null,
+      selectedOption: args.forceCatalogSelection
+        ? selectedOption ?? args.catalogOptions[0] ?? null
+        : selectedOption,
     };
   }
 
   if (args.catalogQuery && args.appDb) {
     const optionRows = await searchManualCatalogOptions(args.appDb, args.catalogQuery);
+    const selectedOption = optionRows.find((option) => option.stableId === args.selectedOptionStableId) ?? null;
     return {
       optionRows,
-      selectedOption:
-        optionRows.find((option) => option.stableId === args.selectedOptionStableId) ?? optionRows[0] ?? null,
+      selectedOption: args.forceCatalogSelection ? selectedOption ?? optionRows[0] ?? null : selectedOption,
     };
   }
 
@@ -233,6 +236,7 @@ export async function createManualEstimateRow(args: {
     catalogQuery: args.input.catalogQuery ?? null,
     catalogOptions: args.input.catalogOptions ?? [],
     selectedOptionStableId: args.input.selectedOptionStableId ?? null,
+    forceCatalogSelection: args.input.selectedSourceType === "catalog_option",
   });
   const selectedSourceType =
     selectedOption || args.input.selectedSourceType === "catalog_option" ? "catalog_option" : "manual";
@@ -327,6 +331,7 @@ export async function updateManualEstimateRow(args: {
     catalogQuery: args.input.catalogQuery ?? null,
     catalogOptions: args.input.catalogOptions ?? [],
     selectedOptionStableId: args.input.selectedOptionStableId ?? null,
+    forceCatalogSelection: args.input.selectedSourceType === "catalog_option",
   });
   const selectedSourceType =
     args.input.selectedSourceType === "catalog_option" || selectedOption ? "catalog_option" : "manual";

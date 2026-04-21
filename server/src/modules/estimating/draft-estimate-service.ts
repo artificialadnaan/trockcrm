@@ -492,31 +492,28 @@ export async function cloneManualRowsForGenerationRun(args: {
     }
 
     let clonedSelectedOptionId: string | null = null;
-    if (sourceRow.selectedSourceType === "catalog_option" && sourceRow.selectedOptionId) {
-      const optionRows = await args.tenantDb
-        .select()
-        .from(estimatePricingRecommendationOptions)
-        .where(eq(estimatePricingRecommendationOptions.recommendationId, sourceRow.id));
+    const optionRows = await args.tenantDb
+      .select()
+      .from(estimatePricingRecommendationOptions)
+      .where(eq(estimatePricingRecommendationOptions.recommendationId, sourceRow.id));
 
-      for (const optionRow of optionRows) {
-        const clonedOptionResult = await args.tenantDb
-          .insert(estimatePricingRecommendationOptions)
-          .values({
-            recommendationId: inserted.id,
-            rank: optionRow.rank,
-            optionLabel: optionRow.optionLabel,
-            optionKind: optionRow.optionKind,
-            catalogItemId: optionRow.catalogItemId,
-            localCatalogItemId: optionRow.localCatalogItemId,
-          })
-          ;
-        const clonedOption = Array.isArray(clonedOptionResult)
-          ? clonedOptionResult[0]
-          : clonedOptionResult;
+    for (const optionRow of optionRows) {
+      const clonedOptionResult = await args.tenantDb
+        .insert(estimatePricingRecommendationOptions)
+        .values({
+          recommendationId: inserted.id,
+          rank: optionRow.rank,
+          optionLabel: optionRow.optionLabel,
+          optionKind: optionRow.optionKind,
+          catalogItemId: optionRow.catalogItemId,
+          localCatalogItemId: optionRow.localCatalogItemId,
+        }) as any;
+      const clonedOption = Array.isArray(clonedOptionResult)
+        ? clonedOptionResult[0]
+        : clonedOptionResult;
 
-        if (optionRow.id === sourceRow.selectedOptionId) {
-          clonedSelectedOptionId = clonedOption?.id ?? null;
-        }
+      if (optionRow.id === sourceRow.selectedOptionId) {
+        clonedSelectedOptionId = clonedOption?.id ?? null;
       }
     }
 

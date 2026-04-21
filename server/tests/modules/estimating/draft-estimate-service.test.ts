@@ -942,7 +942,7 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
                 manualUnitPrice: "75.00",
                 manualNotes: "field measured",
                 selectedSourceType: "catalog_option",
-                selectedOptionId: "option-source-1",
+                selectedOptionId: null,
                 catalogBacking: "local_promoted",
                 promotedLocalCatalogItemId: "local-cat-1",
                 overrideQuantity: "3",
@@ -1018,7 +1018,7 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
       expect.objectContaining({
         id: "rec-cloned-1",
         createdByRunId: "run-new",
-        selectedOptionId: "opt-cloned-1",
+        selectedOptionId: null,
         promotedLocalCatalogItemId: "local-cat-1",
         manualIdentityKey: "manual-key-1",
       }),

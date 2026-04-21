@@ -65,13 +65,14 @@ describe("manual-row-service", () => {
     );
     expect(insertValues).toHaveBeenCalledWith(
       expect.objectContaining({
-        selectedSourceType: "catalog_option",
-        catalogBacking: "procore_synced",
+        selectedSourceType: null,
+        catalogBacking: "estimate_only",
       })
     );
     expect(result.recommendation).toEqual(
       expect.objectContaining({
-        selectedSourceType: "catalog_option",
+        selectedSourceType: null,
+        catalogBacking: "estimate_only",
       })
     );
   });
