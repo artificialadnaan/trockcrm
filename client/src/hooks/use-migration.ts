@@ -143,6 +143,45 @@ export interface StagedLead {
   promotedAt: string | null;
 }
 
+export interface OwnershipQueueRow {
+  recordType: "lead" | "deal";
+  recordId: string;
+  recordName: string;
+  officeId: string;
+  officeName: string;
+  assignedRepId: string | null;
+  assignedUserName: string | null;
+  reasonCode: string;
+  reasonCodes: string[];
+  severity: "high" | "medium" | "low";
+  generatedAt: string | null;
+  evaluatedAt: string | null;
+}
+
+export interface OwnershipQueueResponse {
+  rows: OwnershipQueueRow[];
+  byReason: Array<{ reasonCode: string; count: number }>;
+}
+
+export interface OfficeAssignee {
+  id: string;
+  displayName: string;
+}
+
+const EMPTY_OWNERSHIP_QUEUE: OwnershipQueueResponse = {
+  rows: [],
+  byReason: [],
+};
+
+function normalizeOwnershipQueueResponse(
+  data: Partial<OwnershipQueueResponse> | null | undefined
+): OwnershipQueueResponse {
+  return {
+    rows: data?.rows ?? [],
+    byReason: data?.byReason ?? [],
+  };
+}
+
 export function useMigrationSummary() {
   const [summary, setSummary] = useState<MigrationSummary | null>(null);
   const [loading, setLoading] = useState(true);
@@ -192,6 +231,58 @@ export function useMigrationExceptions() {
   useEffect(() => { load(); }, [load]);
 
   return { exceptions, loading, error, refetch: load };
+}
+
+export function useOfficeOwnershipQueue(officeId?: string) {
+  const [data, setData] = useState<OwnershipQueueResponse>(EMPTY_OWNERSHIP_QUEUE);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    if (!officeId) {
+      setData(EMPTY_OWNERSHIP_QUEUE);
+      setError(null);
+      setLoading(false);
+      return;
+    }
+
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await api<OwnershipQueueResponse>(
+        `/admin/cleanup/office?officeId=${encodeURIComponent(officeId)}`
+      );
+      setData(normalizeOwnershipQueueResponse(data));
+    } catch (err) {
+      setData(EMPTY_OWNERSHIP_QUEUE);
+      setError("Failed to load ownership queue");
+    } finally {
+      setLoading(false);
+    }
+  }, [officeId]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  return {
+    rows: data.rows,
+    byReason: data.byReason,
+    loading,
+    error,
+    refetch: load,
+  };
+}
+
+export async function bulkReassignOwnershipQueueRows(input: {
+  officeId: string;
+  rows: Array<{ recordType: "lead" | "deal"; recordId: string }>;
+  assigneeId: string;
+}) {
+  return api("/admin/cleanup/reassign", {
+    method: "POST",
+    json: input,
+  });
 }
 
 export function useStagedDeals(validationStatus?: string) {

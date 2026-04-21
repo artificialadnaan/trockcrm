@@ -1,10 +1,19 @@
 import { CheckCircle2, XCircle, Clock, RefreshCw, Play, ArrowUpRight, Rows3 } from "lucide-react";
+import { useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Link } from "react-router-dom";
-import { useMigrationSummary, useMigrationExceptions } from "@/hooks/use-migration";
-import { useState } from "react";
+import { useAuth } from "@/lib/auth";
+import {
+  bulkReassignOwnershipQueueRows,
+  useMigrationSummary,
+  useMigrationExceptions,
+  useOfficeOwnershipQueue,
+  type OwnershipQueueRow,
+} from "@/hooks/use-migration";
+import { OwnershipQueueTable } from "@/components/admin/ownership-queue-table";
+import { OwnershipReassignDialog } from "@/components/admin/ownership-reassign-dialog";
 
 const STATUS_COLORS: Record<string, string> = {
   valid: "bg-green-100 text-green-800",
@@ -116,7 +125,13 @@ function ExceptionBucketCard({
   );
 }
 
+function getOwnershipQueueRowKey(row: OwnershipQueueRow) {
+  return `${row.recordType}:${row.recordId}`;
+}
+
 export function MigrationDashboardPage() {
+  const { user } = useAuth();
+  const officeId = user?.activeOfficeId ?? user?.officeId;
   const { summary, loading, error, refetch, runValidation } = useMigrationSummary();
   const {
     exceptions,
@@ -124,8 +139,42 @@ export function MigrationDashboardPage() {
     error: exceptionsError,
     refetch: refetchExceptions,
   } = useMigrationExceptions();
+  const {
+    rows: ownershipRows,
+    byReason: ownershipReasons,
+    loading: ownershipLoading,
+    error: ownershipError,
+    refetch: refetchOwnershipQueue,
+  } = useOfficeOwnershipQueue(officeId);
   const [validating, setValidating] = useState(false);
+  const [selectedOwnershipKeys, setSelectedOwnershipKeys] = useState<Set<string>>(new Set());
+  const [reassignOpen, setReassignOpen] = useState(false);
   const exceptionTotal = exceptions.reduce((sum, group) => sum + group.count, 0);
+
+  const selectedOwnershipRows = useMemo(
+    () => ownershipRows.filter((row) => selectedOwnershipKeys.has(getOwnershipQueueRowKey(row))),
+    [ownershipRows, selectedOwnershipKeys]
+  );
+
+  const allVisibleOwnershipSelected = ownershipRows.length > 0
+    && ownershipRows.every((row) => selectedOwnershipKeys.has(getOwnershipQueueRowKey(row)));
+
+  const toggleOwnershipRow = (row: OwnershipQueueRow) => {
+    const next = new Set(selectedOwnershipKeys);
+    const key = getOwnershipQueueRowKey(row);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
+    setSelectedOwnershipKeys(next);
+  };
+
+  const toggleAllVisibleOwnershipRows = () => {
+    if (allVisibleOwnershipSelected) {
+      setSelectedOwnershipKeys(new Set());
+      return;
+    }
+
+    setSelectedOwnershipKeys(new Set(ownershipRows.map((row) => getOwnershipQueueRowKey(row))));
+  };
 
   const handleValidate = async () => {
     setValidating(true);
@@ -135,6 +184,23 @@ export function MigrationDashboardPage() {
     } finally {
       setValidating(false);
     }
+  };
+
+  const handleReassignOwnershipRows = async (assigneeId: string) => {
+    if (!officeId) {
+      throw new Error("No office is currently selected");
+    }
+
+    await bulkReassignOwnershipQueueRows({
+      officeId,
+      assigneeId,
+      rows: selectedOwnershipRows.map((row) => ({
+        recordType: row.recordType,
+        recordId: row.recordId,
+      })),
+    });
+    setSelectedOwnershipKeys(new Set());
+    await Promise.all([refetchOwnershipQueue(), refetch()]);
   };
 
   return (
@@ -179,6 +245,73 @@ export function MigrationDashboardPage() {
           <StatCard label="Leads" stats={summary.leads} />
         </div>
       )}
+
+      <Card className="border-amber-200 bg-gradient-to-br from-amber-50 via-white to-slate-50">
+        <CardHeader className="pb-2">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+            <div className="space-y-1">
+              <CardTitle className="text-sm font-medium uppercase tracking-wide text-amber-900">
+                Office Ownership Queue
+              </CardTitle>
+              <p className="text-sm text-slate-600">
+                Unassigned active records are waiting for a valid CRM owner before they can leave migration cleanup.
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button variant="outline" size="sm" onClick={refetchOwnershipQueue} disabled={ownershipLoading}>
+                <RefreshCw className={`h-4 w-4 mr-1 ${ownershipLoading ? "animate-spin" : ""}`} />
+                Refresh Queue
+              </Button>
+              <Button
+                size="sm"
+                onClick={() => setReassignOpen(true)}
+                disabled={selectedOwnershipRows.length === 0 || !officeId}
+                className="bg-amber-600 hover:bg-amber-700 text-white"
+              >
+                Reassign selected
+              </Button>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {ownershipError && (
+            <div className="rounded-md border border-red-200 bg-red-50 p-4 text-sm text-red-800">
+              {ownershipError}
+            </div>
+          )}
+
+          <div className="flex flex-wrap items-center gap-2">
+            {ownershipReasons.length > 0 ? (
+              ownershipReasons.map((reason) => (
+                <Badge key={reason.reasonCode} variant="secondary" className="bg-white text-slate-700">
+                  {reason.reasonCode.replace(/_/g, " ")} · {reason.count}
+                </Badge>
+              ))
+            ) : (
+              <div className="text-sm text-slate-500">No queue reasons are currently active.</div>
+            )}
+          </div>
+
+          <div className="rounded-xl border border-amber-100 bg-white/80 shadow-sm">
+            <OwnershipQueueTable
+              rows={ownershipRows}
+              loading={ownershipLoading}
+              selectedRowKeys={selectedOwnershipKeys}
+              onToggleRow={toggleOwnershipRow}
+              onToggleAllVisible={toggleAllVisibleOwnershipRows}
+              allVisibleSelected={allVisibleOwnershipSelected}
+            />
+          </div>
+        </CardContent>
+      </Card>
+
+      <OwnershipReassignDialog
+        open={reassignOpen}
+        onOpenChange={setReassignOpen}
+        officeName="current office"
+        rows={selectedOwnershipRows}
+        onReassign={handleReassignOwnershipRows}
+      />
 
       <Card>
         <CardHeader className="pb-2">
