@@ -26,4 +26,9 @@ describe("App route guards", () => {
   it("opens migration tooling to directors and admins", () => {
     expect(source).toContain('path="/admin/migration" element={( <RequireRole allowedRoles={["admin", "director"]}> <MigrationDashboardPage />');
   });
+
+  it("exposes team and global commissions routes with role guards", () => {
+    expect(source).toContain('path="/director/commissions" element={( <RequireRole allowedRoles={["admin", "director"]}> <TeamCommissionsPage />');
+    expect(source).toContain('path="/admin/commissions" element={( <RequireRole allowedRoles={["admin"]}> <GlobalCommissionsPage />');
+  });
 });

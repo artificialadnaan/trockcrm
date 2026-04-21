@@ -22,4 +22,9 @@ describe("Sidebar navigation metadata", () => {
   it("adds a rep-only commissions navigation item", () => {
     expect(source).toContain('{ to: "/commissions", icon: DollarSign, label: "Commissions", roles: ["rep"] }');
   });
+
+  it("includes director team commissions and admin global commissions entries", () => {
+    expect(source).toContain('{ to: "/director/commissions", icon: DollarSign, label: "Team Commissions", roles: ["admin", "director"] }');
+    expect(source).toContain('{ to: "/admin/commissions", icon: DollarSign, label: "Global Commissions", roles: ["admin"] }');
+  });
 });

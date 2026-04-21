@@ -78,6 +78,12 @@ const DirectorDashboardPage = lazy(() =>
 const RepCommissionsPage = lazy(() =>
   import("@/pages/commissions/rep-commissions-page").then((module) => ({ default: module.RepCommissionsPage }))
 );
+const TeamCommissionsPage = lazy(() =>
+  import("@/pages/commissions/team-commissions-page").then((module) => ({ default: module.TeamCommissionsPage }))
+);
+const GlobalCommissionsPage = lazy(() =>
+  import("@/pages/admin/global-commissions-page").then((module) => ({ default: module.GlobalCommissionsPage }))
+);
 
 function BoardAliasRedirect({ entity }: { entity: "leads" | "deals" }) {
   const [searchParams] = useSearchParams();
@@ -174,6 +180,14 @@ export function App() {
                   </RequireRole>
                 )}
               />
+              <Route
+                path="/director/commissions"
+                element={(
+                  <RequireRole allowedRoles={["admin", "director"]}>
+                    <TeamCommissionsPage />
+                  </RequireRole>
+                )}
+              />
               <Route path="/search" element={<SearchPage />} />
               <Route
                 path="/admin/offices"
@@ -196,6 +210,14 @@ export function App() {
                 element={(
                   <RequireRole allowedRoles={["admin"]}>
                     <PipelineConfigPage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/admin/commissions"
+                element={(
+                  <RequireRole allowedRoles={["admin"]}>
+                    <GlobalCommissionsPage />
                   </RequireRole>
                 )}
               />
