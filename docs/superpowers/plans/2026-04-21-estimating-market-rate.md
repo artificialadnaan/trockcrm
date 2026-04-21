@@ -90,7 +90,7 @@
   - `estimateDealMarketOverrides`
 
 - [ ] **Step 2: Run the focused schema test and verify it fails**
-  Run: `npx vitest run tests/modules/estimating/schema-exports.test.ts`
+  Run in `server/`: `npx vitest run tests/modules/estimating/schema-exports.test.ts`
   Expected: FAIL because the new tables are not exported yet.
 
 - [ ] **Step 3: Add market-rate tables and migration**
@@ -106,7 +106,7 @@
   - follow the tenant-schema replay migration pattern already used by recent tenant migrations, including the `DO $$ ... FOR schema_name ...` block and `TENANT_SCHEMA_START/END` replay section
 
 - [ ] **Step 4: Re-run the schema test and verify it passes**
-  Run: `npx vitest run tests/modules/estimating/schema-exports.test.ts`
+  Run in `server/`: `npx vitest run tests/modules/estimating/schema-exports.test.ts`
   Expected: PASS
 
 - [ ] **Step 5: Commit**
@@ -138,7 +138,7 @@
   - rationale payload includes resolved market, resolution level, baseline, and component adjustments
 
 - [ ] **Step 3: Run the focused service tests and verify they fail**
-  Run: `npx vitest run tests/modules/estimating/market-resolution-service.test.ts tests/modules/estimating/market-rate-service.test.ts`
+  Run in `server/`: `npx vitest run tests/modules/estimating/market-resolution-service.test.ts tests/modules/estimating/market-rate-service.test.ts`
   Expected: FAIL because the services do not exist yet.
 
 - [ ] **Step 4: Implement market resolution service**
@@ -157,7 +157,7 @@
   - expose the internal table-backed implementation through a `MarketRateProvider` or equivalent interface so worker, routes, and pricing logic depend on the abstraction instead of concrete services
 
 - [ ] **Step 6: Re-run the focused service tests and verify they pass**
-  Run: `npx vitest run tests/modules/estimating/market-resolution-service.test.ts tests/modules/estimating/market-rate-service.test.ts`
+  Run in `server/`: `npx vitest run tests/modules/estimating/market-resolution-service.test.ts tests/modules/estimating/market-rate-service.test.ts`
   Expected: PASS
 
 - [ ] **Step 7: Commit**
@@ -196,8 +196,8 @@
   - worker generation uses override market context when one exists
 
 - [ ] **Step 4: Run the focused generation tests and verify they fail**
-  Run: `npx vitest run tests/modules/estimating/pricing-service.test.ts tests/modules/estimating/recommendation-persistence-service.test.ts`
-  Run: `npx vitest run worker/tests/jobs/estimate-generation.test.ts`
+  Run in `server/`: `npx vitest run tests/modules/estimating/pricing-service.test.ts tests/modules/estimating/recommendation-persistence-service.test.ts`
+  Run in `worker/`: `npx vitest run tests/jobs/estimate-generation.test.ts`
   Expected: FAIL because market-rate enrichment is not wired into the stored recommendation generation path yet.
 
 - [ ] **Step 5: Integrate market-rate service into the actual recommendation generation path**
@@ -211,8 +211,8 @@
   - persist market-rate rationale into evidence/assumptions fields
 
 - [ ] **Step 6: Re-run the focused generation tests and verify they pass**
-  Run: `npx vitest run tests/modules/estimating/pricing-service.test.ts tests/modules/estimating/recommendation-persistence-service.test.ts`
-  Run: `npx vitest run worker/tests/jobs/estimate-generation.test.ts`
+  Run in `server/`: `npx vitest run tests/modules/estimating/pricing-service.test.ts tests/modules/estimating/recommendation-persistence-service.test.ts`
+  Run in `worker/`: `npx vitest run tests/jobs/estimate-generation.test.ts`
   Expected: PASS
 
 - [ ] **Step 7: Commit**
@@ -235,7 +235,7 @@
   - enqueue or rerun side effects for `estimate_generation` after override set/clear
 
 - [ ] **Step 2: Run the focused route tests and verify they fail**
-  Run: `npx vitest run tests/modules/estimating/workflow-state-routes.test.ts`
+  Run in `server/`: `npx vitest run tests/modules/estimating/workflow-state-routes.test.ts`
   Expected: FAIL because the endpoints and override service are missing.
 
 - [ ] **Step 3: Implement deal market override service and routes**
@@ -248,7 +248,7 @@
   - return the refreshed effective market payload
 
 - [ ] **Step 4: Re-run the focused route tests and verify they pass**
-  Run: `npx vitest run tests/modules/estimating/workflow-state-routes.test.ts`
+  Run in `server/`: `npx vitest run tests/modules/estimating/workflow-state-routes.test.ts`
   Expected: PASS
 
 - [ ] **Step 5: Commit**
@@ -270,7 +270,7 @@
   - while an override-triggered rerun is pending, the workbench keeps showing the newest completed run instead of partial rerun rows
 
 - [ ] **Step 2: Run the focused workbench tests and verify they fail**
-  Run: `npx vitest run tests/modules/estimating/workbench-service.test.ts`
+  Run in `server/`: `npx vitest run tests/modules/estimating/workbench-service.test.ts`
   Expected: FAIL because workbench state does not include market context yet.
 
 - [ ] **Step 3: Extend workbench state assembly**
@@ -283,7 +283,7 @@
   - attach market-rate rationale to each pricing row without breaking existing row fields
 
 - [ ] **Step 4: Re-run the focused workbench tests and verify they pass**
-  Run: `npx vitest run tests/modules/estimating/workbench-service.test.ts`
+  Run in `server/`: `npx vitest run tests/modules/estimating/workbench-service.test.ts`
   Expected: PASS
 
 - [ ] **Step 5: Commit**
@@ -311,7 +311,7 @@
   - clearing override removes override marker after refresh
 
 - [ ] **Step 2: Run the focused client tests and verify they fail**
-  Run: `npx vitest run src/components/estimating/estimate-market-override-panel.test.tsx src/components/estimating/estimate-recommendation-options-panel.test.tsx src/components/estimating/estimate-pricing-review-table.test.tsx src/components/estimating/estimating-workflow-shell.test.tsx`
+  Run in `client/`: `npx vitest run src/components/estimating/estimate-market-override-panel.test.tsx src/components/estimating/estimate-recommendation-options-panel.test.tsx src/components/estimating/estimate-pricing-review-table.test.tsx src/components/estimating/estimating-workflow-shell.test.tsx`
   Expected: FAIL because the client does not render market-rate UI yet.
 
 - [ ] **Step 3: Build the market override panel**
@@ -330,7 +330,7 @@
   - show fallback level when no exact market match was used
 
 - [ ] **Step 5: Re-run the focused client tests and verify they pass**
-  Run: `npx vitest run src/components/estimating/estimate-market-override-panel.test.tsx src/components/estimating/estimate-recommendation-options-panel.test.tsx src/components/estimating/estimate-pricing-review-table.test.tsx src/components/estimating/estimating-workflow-shell.test.tsx`
+  Run in `client/`: `npx vitest run src/components/estimating/estimate-market-override-panel.test.tsx src/components/estimating/estimate-recommendation-options-panel.test.tsx src/components/estimating/estimate-pricing-review-table.test.tsx src/components/estimating/estimating-workflow-shell.test.tsx`
   Expected: PASS
 
 - [ ] **Step 6: Commit**
@@ -353,8 +353,8 @@
   - worker-side generation coverage proves the production job uses new market-resolution inputs
 
 - [ ] **Step 2: Run the focused integration tests and verify they fail**
-  Run: `npx vitest run tests/modules/estimating/market-rate-integration.test.ts tests/modules/estimating/workflow-state-routes.test.ts`
-  Run: `npx vitest run worker/tests/jobs/estimate-generation.test.ts`
+  Run in `server/`: `npx vitest run tests/modules/estimating/market-rate-integration.test.ts tests/modules/estimating/workflow-state-routes.test.ts`
+  Run in `worker/`: `npx vitest run tests/jobs/estimate-generation.test.ts`
   Expected: FAIL because end-to-end market-rate generation and override-refresh coverage is not implemented yet.
 
 - [ ] **Step 3: Add the missing integration fixtures or wiring needed by the tests**
@@ -365,8 +365,8 @@
   - worker fixtures confirm the live generation path uses the override-triggered rerun flow
 
 - [ ] **Step 4: Re-run the focused integration tests and verify they pass**
-  Run: `npx vitest run tests/modules/estimating/market-rate-integration.test.ts tests/modules/estimating/workflow-state-routes.test.ts`
-  Run: `npx vitest run worker/tests/jobs/estimate-generation.test.ts`
+  Run in `server/`: `npx vitest run tests/modules/estimating/market-rate-integration.test.ts tests/modules/estimating/workflow-state-routes.test.ts`
+  Run in `worker/`: `npx vitest run tests/jobs/estimate-generation.test.ts`
   Expected: PASS
 
 - [ ] **Step 5: Commit**
@@ -378,15 +378,15 @@
 - Modify: any touched files from Tasks 1-7
 
 - [ ] **Step 1: Run the focused estimating server test suite**
-  Run: `npx vitest run tests/modules/estimating/*.test.ts`
+  Run in `server/`: `npx vitest run tests/modules/estimating/*.test.ts`
   Expected: PASS
 
 - [ ] **Step 2: Run the focused estimating client test suite**
-  Run: `npx vitest run src/components/estimating/*.test.tsx`
+  Run in `client/`: `npx vitest run src/components/estimating/*.test.tsx`
   Expected: PASS
 
 - [ ] **Step 3: Run workspace typecheck**
-  Run: `npm run typecheck --workspace=shared --workspace=server --workspace=client --workspace=worker`
+  Run from repo root: `npm run typecheck`
   Expected: PASS
 
 - [ ] **Step 4: Fix any remaining failures and rerun verification until green**
