@@ -842,4 +842,77 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
       }),
     ]);
   });
+
+  it("returns an explicit row error when a requested recommendation disappears before promotion", async () => {
+    estimateServiceMocks.createSection.mockResolvedValue({ id: "section-live" });
+    estimateServiceMocks.createLineItem.mockResolvedValue({ id: "line-live" });
+    const updateReturning = vi.fn().mockResolvedValue([{ id: "rec-live", promotedEstimateLineItemId: "line-live" }]);
+
+    const tenantDb = {
+      execute: vi.fn().mockResolvedValue(undefined),
+      select: vi
+        .fn()
+        .mockReturnValueOnce({
+          from: vi.fn(() => ({
+            innerJoin: vi.fn(() => ({
+              innerJoin: vi.fn(() => ({
+                where: vi.fn().mockResolvedValue([
+                  {
+                    recommendationId: "rec-live",
+                    description: "Termination Bar",
+                    quantity: "1",
+                    unit: "ea",
+                    unitPrice: "25.00",
+                    notes: null,
+                    sectionName: "Roof",
+                    sourceType: "explicit",
+                    selectedSourceType: "catalog_option",
+                    selectedOptionId: null,
+                    normalizedIntent: "termination bar",
+                    sourceRowIdentity: "roof:termination-bar",
+                    status: "approved",
+                    createdByRunId: "run-1",
+                    promotedEstimateLineItemId: null,
+                  },
+                ]),
+              })),
+            })),
+          })),
+        })
+        .mockReturnValueOnce({
+          from: vi.fn(() => ({
+            where: vi.fn(() => ({
+              limit: vi.fn().mockResolvedValue([]),
+            })),
+          })),
+        }),
+      insert: vi.fn(() => ({
+        values: vi.fn().mockResolvedValue(undefined),
+      })),
+      update: vi.fn(() => ({
+        set: vi.fn(() => ({
+          where: vi.fn(() => ({
+            returning: updateReturning,
+          })),
+        })),
+      })),
+    } as any;
+
+    const result = await promoteApprovedRecommendationsToEstimate({
+      tenantDb,
+      dealId: "deal-1",
+      generationRunId: "run-1",
+      approvedRecommendationIds: ["rec-live", "rec-missing"],
+    });
+
+    expect(result.promotedRecommendationIds).toEqual(["rec-live"]);
+    expect(result.rowErrors).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          recommendationId: "rec-missing",
+          code: "recommendation_unavailable",
+        }),
+      ])
+    );
+  });
 });

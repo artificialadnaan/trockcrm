@@ -193,6 +193,14 @@ function buildRowError(row: ReturnType<typeof deriveEstimatePricingWorkbenchRows
   };
 }
 
+function buildMissingRecommendationError(recommendationId: string) {
+  return {
+    recommendationId,
+    code: "recommendation_unavailable",
+    message: "Recommendation is no longer available for promotion.",
+  };
+}
+
 function resolvePromotionLineValues(
   row: PromotionCandidateRow,
   selectedOptionLabel?: string | null
@@ -275,9 +283,18 @@ export async function promoteApprovedRecommendationsToEstimate({
     const requestedRecommendations = derivedRecommendations.filter((row) =>
       requestedRecommendationIds.has(row.recommendationId)
     );
-    const rowErrors = requestedRecommendations
+    const loadedRecommendationIds = new Set(
+      requestedRecommendations.map((row) => row.recommendationId)
+    );
+    const missingRowErrors = approvedRecommendationIds
+      .filter((recommendationId) => !loadedRecommendationIds.has(recommendationId))
+      .map(buildMissingRecommendationError);
+    const rowErrors = [
+      ...missingRowErrors,
+      ...requestedRecommendations
       .map(buildRowError)
-      .filter((rowError): rowError is NonNullable<typeof rowError> => rowError !== null);
+      .filter((rowError): rowError is NonNullable<typeof rowError> => rowError !== null),
+    ];
     const promotableRecommendations = requestedRecommendations.filter((row) => row.promotable);
     const promotedRecommendationIds: string[] = [];
 
