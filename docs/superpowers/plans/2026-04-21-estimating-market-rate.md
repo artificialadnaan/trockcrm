@@ -35,7 +35,7 @@
 - Modify: `worker/src/jobs/estimate-generation.ts`
   Responsibility: wire market resolution and market-rate enrichment into the production estimate-generation job.
 - Modify: `server/src/modules/estimating/workbench-service.ts`
-  Responsibility: expose resolved market context, active-generation filtering, rerun status, and market-rate rationale in workbench pricing rows.
+  Responsibility: expose resolved market context, active-generation filtering, queued/running rerun status, and market-rate rationale in workbench pricing rows.
 - Modify: `server/src/modules/deals/routes.ts`
   Responsibility: add deal-level market context, market listing, and override endpoints for estimating.
 - Create: `server/tests/modules/estimating/market-resolution-service.test.ts`
@@ -62,6 +62,10 @@
   Responsibility: render structured market-rate rationale in the pricing review evidence footer instead of raw JSON.
 - Modify: `client/src/components/estimating/estimating-workflow-shell.tsx`
   Responsibility: render deal-level market override controls and refresh behavior.
+- Modify: `client/src/components/estimating/estimate-workbench-summary-strip.tsx`
+  Responsibility: surface queued/running/failed rerun status in the workbench summary strip.
+- Modify: `client/src/components/estimating/estimate-workbench-detail-pane.tsx`
+  Responsibility: surface queued/running/failed rerun status in the workbench detail pane.
 - Create: `client/src/components/estimating/estimate-market-override-panel.tsx`
   Responsibility: provide estimator controls to inspect, set, and clear the effective market, plus visible rerun status after override actions.
 - Modify: `client/src/components/estimating/estimate-recommendation-options-panel.test.tsx`
@@ -70,6 +74,10 @@
   Responsibility: verify structured market-rate evidence rendering in the pricing review footer.
 - Modify: `client/src/components/estimating/estimating-workflow-shell.test.tsx`
   Responsibility: verify market override controls and refresh behavior.
+- Create: `client/src/components/estimating/estimate-workbench-summary-strip.test.tsx`
+  Responsibility: verify rerun status rendering in the summary strip.
+- Create: `client/src/components/estimating/estimate-workbench-detail-pane.test.tsx`
+  Responsibility: verify rerun status rendering in the detail pane.
 - Create: `client/src/components/estimating/estimate-market-override-panel.test.tsx`
   Responsibility: verify override UI states and actions.
 
@@ -248,7 +256,7 @@
   - create or replace the single current override row for the deal
   - clear the override row cleanly
   - write estimating review events with before/after market context
-  - enqueue or rerun `estimate_generation` by inserting the required `public.job_queue` row with `job_type = 'estimate_generation'` and the required `officeId`
+  - enqueue or rerun `estimate_generation` by inserting the required `public.job_queue` row with `job_type = 'estimate_generation'`, `payload.dealId`, and the required `officeId`
   - return the refreshed effective market payload
 
 - [ ] **Step 4: Re-run the focused route tests and verify they pass**
@@ -272,7 +280,7 @@
   - fallback-resolution rows disclose the fallback source
   - only pricing rows from the active or refreshed generation run are returned after a market override rerun
   - while an override-triggered rerun is pending, the workbench keeps showing the newest completed run instead of partial rerun rows
-  - workbench payload includes explicit rerun status metadata when override-triggered refresh is pending or failed
+  - workbench payload includes explicit rerun status metadata when override-triggered refresh is queued, running, or failed
   - manual add context keeps using the active completed generation run while an override-triggered rerun is pending
 
 - [ ] **Step 2: Run the focused workbench tests and verify they fail**
@@ -284,7 +292,8 @@
   - include deal-level effective market summary
   - include override state and fallback source
   - define the active pricing run as the newest completed generation run for the deal, falling back to the newest started run only when no completed run exists yet
-  - keep the previous completed run active while an override-triggered rerun is pending or failed, and surface rerun status separately
+  - keep the previous completed run active while an override-triggered rerun is queued, pending, running, or failed, and surface rerun status separately
+  - derive queued rerun status from the newest matching `public.job_queue` entry for `estimate_generation` plus `dealId`/`officeId` until a newer worker-created generation run exists
   - expose explicit rerun status fields the client can render without inferring from raw generation rows
   - filter pricing rows so stale pre-override generation results do not mix with refreshed rows
   - bind `manualAddContext.generationRunId` to that same active pricing run instead of the newest started rerun
@@ -304,10 +313,14 @@
 - Modify: `client/src/components/estimating/estimate-recommendation-options-panel.tsx`
 - Modify: `client/src/components/estimating/estimate-pricing-review-table.tsx`
 - Modify: `client/src/components/estimating/estimating-workflow-shell.tsx`
+- Modify: `client/src/components/estimating/estimate-workbench-summary-strip.tsx`
+- Modify: `client/src/components/estimating/estimate-workbench-detail-pane.tsx`
 - Create: `client/src/components/estimating/estimate-market-override-panel.test.tsx`
 - Modify: `client/src/components/estimating/estimate-recommendation-options-panel.test.tsx`
 - Modify: `client/src/components/estimating/estimate-pricing-review-table.test.tsx`
 - Modify: `client/src/components/estimating/estimating-workflow-shell.test.tsx`
+- Create: `client/src/components/estimating/estimate-workbench-summary-strip.test.tsx`
+- Create: `client/src/components/estimating/estimate-workbench-detail-pane.test.tsx`
 
 - [ ] **Step 1: Write failing client tests for market evidence and override controls**
   Cover:
@@ -316,11 +329,11 @@
   - shell renders deal-level market override controls
   - override controls load canonical market choices from the server
   - override state is visible when active
-  - pending or failed override-triggered reruns show explicit status in the workbench UI
+  - queued, running, or failed override-triggered reruns show explicit status in the summary strip and detail pane
   - clearing override removes override marker after refresh
 
 - [ ] **Step 2: Run the focused client tests and verify they fail**
-  Run in `client/`: `npx vitest run src/components/estimating/estimate-market-override-panel.test.tsx src/components/estimating/estimate-recommendation-options-panel.test.tsx src/components/estimating/estimate-pricing-review-table.test.tsx src/components/estimating/estimating-workflow-shell.test.tsx`
+  Run in `client/`: `npx vitest run src/components/estimating/estimate-market-override-panel.test.tsx src/components/estimating/estimate-recommendation-options-panel.test.tsx src/components/estimating/estimate-pricing-review-table.test.tsx src/components/estimating/estimate-workbench-summary-strip.test.tsx src/components/estimating/estimate-workbench-detail-pane.test.tsx src/components/estimating/estimating-workflow-shell.test.tsx`
   Expected: FAIL because the client does not render market-rate UI yet.
 
 - [ ] **Step 3: Build the market override panel**
@@ -329,7 +342,7 @@
   - load and render canonical market choices from the new server route
   - support choosing a replacement market
   - support clearing the override
-  - show pending or failed rerun status from the workbench payload after override actions
+  - show queued, running, or failed rerun status from the workbench payload after override actions
   - call the new deal-level override endpoints and refresh the workbench
 
 - [ ] **Step 4: Extend pricing evidence rendering**
@@ -340,7 +353,7 @@
   - show fallback level when no exact market match was used
 
 - [ ] **Step 5: Re-run the focused client tests and verify they pass**
-  Run in `client/`: `npx vitest run src/components/estimating/estimate-market-override-panel.test.tsx src/components/estimating/estimate-recommendation-options-panel.test.tsx src/components/estimating/estimate-pricing-review-table.test.tsx src/components/estimating/estimating-workflow-shell.test.tsx`
+  Run in `client/`: `npx vitest run src/components/estimating/estimate-market-override-panel.test.tsx src/components/estimating/estimate-recommendation-options-panel.test.tsx src/components/estimating/estimate-pricing-review-table.test.tsx src/components/estimating/estimate-workbench-summary-strip.test.tsx src/components/estimating/estimate-workbench-detail-pane.test.tsx src/components/estimating/estimating-workflow-shell.test.tsx`
   Expected: PASS
 
 - [ ] **Step 6: Commit**
@@ -360,6 +373,7 @@
   - clearing the override restores auto-resolved geography on subsequent refreshes
   - refreshed workbench state excludes stale pricing rows from the pre-override generation run
   - pending override-triggered reruns keep the previous completed run visible until the new run completes
+  - queued override-triggered reruns surface status from `public.job_queue` before a new generation run exists
   - worker-side generation coverage proves the production job uses new market-resolution inputs
 
 - [ ] **Step 2: Run the focused integration tests and verify they fail**
@@ -372,6 +386,7 @@
   - generation fixtures exercise resolved market selection and persisted evidence
   - override route tests confirm refreshed workbench state reflects the new market context
   - override refresh uses the active generation run so stale pricing rows are not returned
+  - queued rerun fixtures verify workbench status before the worker creates the next generation run
   - worker fixtures confirm the live generation path uses the override-triggered rerun flow
 
 - [ ] **Step 4: Re-run the focused integration tests and verify they pass**
