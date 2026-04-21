@@ -13,6 +13,22 @@ export interface OwnershipSyncResult {
   unmatched: number;
   conflicts: number;
   inactiveUserConflicts: number;
+  examples: {
+    matched: OwnershipSyncExample[];
+    unmatched: OwnershipSyncExample[];
+    conflicts: OwnershipSyncExample[];
+    inactiveUserConflicts: OwnershipSyncExample[];
+  };
+}
+
+export interface OwnershipSyncExample {
+  recordType: OwnershipRecordType;
+  recordId: string;
+  ownerId: string;
+  ownerEmail: string | null;
+  assignedRepId: string | null;
+  mappingStatus: OwnershipSyncStatus;
+  reasonCode: string | null;
 }
 
 interface OwnershipTargetRow {
@@ -219,6 +235,34 @@ function rowMatchesUnresolvedState(
   );
 }
 
+function createExample(
+  recordType: OwnershipRecordType,
+  row: OwnershipTargetRow,
+  owner: OwnerMappingCandidate,
+  ownerEmail: string | null,
+  mappingStatus: OwnershipSyncStatus,
+  reasonCode: string | null,
+  assignedRepId: string | null
+): OwnershipSyncExample {
+  return {
+    recordType,
+    recordId: row.id,
+    ownerId: owner.id,
+    ownerEmail,
+    assignedRepId,
+    mappingStatus,
+    reasonCode,
+  };
+}
+
+function pushExample(
+  bucket: OwnershipSyncExample[],
+  example: OwnershipSyncExample,
+  limit = 3
+) {
+  if (bucket.length < limit) bucket.push(example);
+}
+
 export async function runOwnershipSync(input: { dryRun?: boolean } = {}): Promise<OwnershipSyncResult> {
   const dryRun = input.dryRun ?? false;
   const result: OwnershipSyncResult = {
@@ -227,6 +271,12 @@ export async function runOwnershipSync(input: { dryRun?: boolean } = {}): Promis
     unmatched: 0,
     conflicts: 0,
     inactiveUserConflicts: 0,
+    examples: {
+      matched: [],
+      unmatched: [],
+      conflicts: [],
+      inactiveUserConflicts: [],
+    },
   };
 
   const hubspotOwners = await fetchAllOwners();
@@ -289,7 +339,9 @@ export async function runOwnershipSync(input: { dryRun?: boolean } = {}): Promis
       failureReasonCode = "inactive_owner_match";
     }
 
-    await upsertOwnerMapping(owner, ownerEmail, mappingStatus, failureReasonCode, matchedUser);
+    if (!dryRun) {
+      await upsertOwnerMapping(owner, ownerEmail, mappingStatus, failureReasonCode, matchedUser);
+    }
 
     const recordTypes: OwnershipRecordType[] = ["deal", "lead"];
     for (const recordType of recordTypes) {
@@ -297,10 +349,18 @@ export async function runOwnershipSync(input: { dryRun?: boolean } = {}): Promis
       for (const row of rows) {
         if (row.ownershipSyncStatus === "manual_override") {
           result.unchanged++;
+          pushExample(
+            result.examples.matched,
+            createExample(recordType, row, owner, ownerEmail, "matched", "manual_override", row.assignedRepId)
+          );
           continue;
         }
 
         if (mappingStatus === "matched" && matchedUser) {
+          pushExample(
+            result.examples.matched,
+            createExample(recordType, row, owner, ownerEmail, mappingStatus, null, matchedUser.id)
+          );
           if (rowMatchesMatchedState(row, ownerEmail, matchedUser)) {
             result.unchanged++;
             continue;
@@ -315,16 +375,40 @@ export async function runOwnershipSync(input: { dryRun?: boolean } = {}): Promis
 
         if (rowMatchesUnresolvedState(row, ownerEmail, mappingStatus as "unmatched" | "conflict", failureReasonCode)) {
           result.unchanged++;
+          const example = createExample(
+            recordType,
+            row,
+            owner,
+            ownerEmail,
+            mappingStatus,
+            failureReasonCode,
+            row.assignedRepId
+          );
+          if (mappingStatus === "conflict") {
+            pushExample(result.examples.conflicts, example);
+            if (failureReasonCode === "inactive_owner_match") {
+              pushExample(result.examples.inactiveUserConflicts, example);
+            }
+          } else {
+            pushExample(result.examples.unmatched, example);
+          }
           continue;
         }
 
         if (mappingStatus === "conflict") {
           result.conflicts++;
+          const example = createExample(recordType, row, owner, ownerEmail, mappingStatus, failureReasonCode, null);
+          pushExample(result.examples.conflicts, example);
           if (failureReasonCode === "inactive_owner_match") {
             result.inactiveUserConflicts++;
+            pushExample(result.examples.inactiveUserConflicts, example);
           }
         } else {
           result.unmatched++;
+          pushExample(
+            result.examples.unmatched,
+            createExample(recordType, row, owner, ownerEmail, mappingStatus, failureReasonCode, null)
+          );
         }
 
         if (!dryRun) {

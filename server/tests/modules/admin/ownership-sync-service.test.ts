@@ -77,6 +77,7 @@ function createExecuteImplementation(options: {
   leadRowsByOwner: Record<string, Array<{ id: string; assignedRepId: string; hubspotOwnerEmail: string | null; ownershipSyncStatus: string | null; unassignedReasonCode: string | null }>>;
 }) {
   const updateQueries: string[] = [];
+  const writeQueries: string[] = [];
 
   dbExecuteMock.mockImplementation(async (query: unknown) => {
     const text = extractSqlText(query).replace(/\s+/g, " ").trim().toLowerCase();
@@ -140,11 +141,13 @@ function createExecuteImplementation(options: {
     }
 
     if (text.includes("insert into public.hubspot_owner_mappings")) {
+      writeQueries.push(text);
       return { rows: [] };
     }
 
     if (text.startsWith("update deals") || text.startsWith("update leads")) {
       updateQueries.push(text);
+      writeQueries.push(text);
       return { rows: [] };
     }
 
@@ -153,6 +156,7 @@ function createExecuteImplementation(options: {
 
   return {
     updateQueries,
+    writeQueries,
   };
 }
 
@@ -218,7 +222,7 @@ describe("ownership sync service", () => {
   });
 
   it("counts matched, unmatched, conflict, and unchanged rows on dry run without mutating records", async () => {
-    const { updateQueries } = createExecuteImplementation({
+    const { updateQueries, writeQueries } = createExecuteImplementation({
       owners: [
         { id: "owner-1", email: "Rep@One.com" },
         { id: "owner-2", email: "inactive@example.com" },
@@ -284,14 +288,37 @@ describe("ownership sync service", () => {
 
     const result = await runOwnershipSync({ dryRun: true });
 
-    expect(result).toEqual({
-      assigned: 1,
-      unchanged: 1,
-      unmatched: 1,
-      conflicts: 1,
-      inactiveUserConflicts: 1,
+    expect(result.assigned).toBe(1);
+    expect(result.unchanged).toBe(1);
+    expect(result.unmatched).toBe(1);
+    expect(result.conflicts).toBe(1);
+    expect(result.inactiveUserConflicts).toBe(1);
+    expect(result.examples.matched.length).toBeGreaterThan(0);
+    expect(result.examples.unmatched.length).toBeGreaterThan(0);
+    expect(result.examples.conflicts.length).toBeGreaterThan(0);
+    expect(result.examples.inactiveUserConflicts.length).toBeGreaterThan(0);
+    expect(result.examples.matched[0]).toMatchObject({
+      recordType: "deal",
+      recordId: "deal-1",
+      ownerId: "owner-1",
+      mappingStatus: "matched",
+    });
+    expect(result.examples.unmatched[0]).toMatchObject({
+      recordType: "lead",
+      recordId: "lead-2",
+      ownerId: "owner-3",
+      mappingStatus: "unmatched",
+    });
+    expect(result.examples.conflicts[0]).toMatchObject({
+      ownerId: "owner-2",
+      mappingStatus: "conflict",
+    });
+    expect(result.examples.inactiveUserConflicts[0]).toMatchObject({
+      ownerId: "owner-2",
+      reasonCode: "inactive_owner_match",
     });
     expect(updateQueries).toHaveLength(0);
+    expect(writeQueries).toHaveLength(0);
   });
 
   it("applies matched ownership and preserves manual overrides on rerun", async () => {
