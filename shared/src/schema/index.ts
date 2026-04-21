@@ -51,9 +51,12 @@ export {
   estimateExtractions,
   estimateExtractionMatches,
   estimateGenerationRuns,
-  estimatePricingRecommendations,
   estimateReviewEvents,
 } from "./tenant/estimate-extractions.js";
+export { estimatePricingRecommendations } from "./tenant/estimate-pricing-recommendations.js";
+export {
+  estimatePricingRecommendationOptions,
+} from "./tenant/estimate-pricing-recommendation-options.js";
 export { tasks, taskTypeEnum, taskPriorityEnum, taskStatusEnum } from "./tenant/tasks.js";
 export { taskResolutionState, taskResolutionStatusEnum } from "./tenant/task-resolution-state.js";
 export { notifications, notificationTypeEnum } from "./tenant/notifications.js";
