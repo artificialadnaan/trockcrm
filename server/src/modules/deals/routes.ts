@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { and, eq, desc, isNotNull, sql } from "drizzle-orm";
-import { dealApprovals, deals, jobQueue } from "@trock-crm/shared/schema";
+import { dealApprovals, dealPaymentEvents, deals, jobQueue } from "@trock-crm/shared/schema";
 import { requireRole } from "../../middleware/rbac.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { eventBus } from "../../events/bus.js";
@@ -283,6 +283,90 @@ router.get("/:id/detail", async (req, res, next) => {
     if (!detail) throw new AppError(404, "Deal not found");
     await req.commitTransaction!();
     res.json({ deal: detail });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/deals/:id/payments — cash-received events for commission visibility
+router.get("/:id/payments", async (req, res, next) => {
+  try {
+    const dealId = req.params.id as string;
+    const deal = await getDealById(req.tenantDb!, dealId, req.user!.role, req.user!.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+
+    const payments = await req.tenantDb!
+      .select()
+      .from(dealPaymentEvents)
+      .where(eq(dealPaymentEvents.dealId, dealId))
+      .orderBy(desc(dealPaymentEvents.paidAt));
+
+    await req.commitTransaction!();
+    res.json({ payments });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/deals/:id/payments — record a cash-received event (admin/director only)
+router.post("/:id/payments", requireRole("admin", "director"), async (req, res, next) => {
+  try {
+    const dealId = req.params.id as string;
+    const deal = await getDealById(req.tenantDb!, dealId, req.user!.role, req.user!.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+
+    const paidAt = new Date(String(req.body?.paidAt ?? ""));
+    if (Number.isNaN(paidAt.getTime())) {
+      throw new AppError(400, "paidAt must be a valid ISO date");
+    }
+
+    const grossRevenueAmount = Number(req.body?.grossRevenueAmount);
+    if (!Number.isFinite(grossRevenueAmount)) {
+      throw new AppError(400, "grossRevenueAmount must be a number");
+    }
+    const isCreditMemo = Boolean(req.body?.isCreditMemo ?? false);
+    if (isCreditMemo && grossRevenueAmount >= 0) {
+      throw new AppError(400, "grossRevenueAmount must be negative for credit memos");
+    }
+    if (!isCreditMemo && grossRevenueAmount < 0) {
+      throw new AppError(400, "grossRevenueAmount must be non-negative when not a credit memo");
+    }
+
+    const grossMarginRaw = req.body?.grossMarginAmount;
+    const grossMarginAmount =
+      grossMarginRaw === null || grossMarginRaw === undefined || grossMarginRaw === ""
+        ? null
+        : Number(grossMarginRaw);
+    if (grossMarginAmount !== null && !Number.isFinite(grossMarginAmount)) {
+      throw new AppError(400, "grossMarginAmount must be a number when provided");
+    }
+    if (grossMarginAmount !== null) {
+      if (isCreditMemo && grossMarginAmount >= 0) {
+        throw new AppError(400, "grossMarginAmount must be negative for credit memos");
+      }
+      if (!isCreditMemo && grossMarginAmount < 0) {
+        throw new AppError(400, "grossMarginAmount must be non-negative when not a credit memo");
+      }
+      if (Math.abs(grossMarginAmount) > Math.abs(grossRevenueAmount)) {
+        throw new AppError(400, "grossMarginAmount cannot exceed grossRevenueAmount");
+      }
+    }
+
+    const [payment] = await req.tenantDb!
+      .insert(dealPaymentEvents)
+      .values({
+        dealId,
+        recordedByUserId: req.user!.id,
+        paidAt,
+        grossRevenueAmount: String(grossRevenueAmount),
+        grossMarginAmount: grossMarginAmount === null ? null : String(grossMarginAmount),
+        isCreditMemo,
+        notes: typeof req.body?.notes === "string" ? req.body.notes : null,
+      })
+      .returning();
+
+    await req.commitTransaction!();
+    res.status(201).json({ payment });
   } catch (err) {
     next(err);
   }

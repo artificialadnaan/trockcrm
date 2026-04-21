@@ -1,5 +1,6 @@
 import { PipelineBoard } from "@/components/pipeline/pipeline-board";
 import { Button } from "@/components/ui/button";
+import { formatCurrency } from "@/components/charts/chart-colors";
 import type { RepDashboardData } from "@/hooks/use-dashboard";
 import type { DealBoardResponse } from "@/hooks/use-deals";
 import type { LeadBoardResponse } from "@/hooks/use-leads";
@@ -69,6 +70,27 @@ export function RepDashboardBoardShell({
         <div className="rounded-2xl border border-slate-200 bg-white p-4">
           <p className="text-xs uppercase tracking-[0.16em] text-slate-500">Stale Leads</p>
           <p className="mt-2 text-3xl font-semibold text-slate-950">{repSummary.staleLeads.count}</p>
+        </div>
+      </section>
+
+      <section aria-label="Commission summary" className="grid gap-4 md:grid-cols-3">
+        <div className="rounded-2xl border border-slate-200 bg-white p-4">
+          <p className="text-xs uppercase tracking-[0.16em] text-slate-500">Earned Commission (12M)</p>
+          <p className="mt-2 text-3xl font-semibold text-slate-950">
+            {formatCurrency(repSummary.commissionSummary.totalEarnedCommission)}
+          </p>
+        </div>
+        <div className="rounded-2xl border border-slate-200 bg-white p-4">
+          <p className="text-xs uppercase tracking-[0.16em] text-slate-500">Potential Commission</p>
+          <p className="mt-2 text-3xl font-semibold text-slate-950">
+            {formatCurrency(repSummary.commissionSummary.potentialCommission)}
+          </p>
+        </div>
+        <div className="rounded-2xl border border-slate-200 bg-white p-4">
+          <p className="text-xs uppercase tracking-[0.16em] text-slate-500">Floor Remaining</p>
+          <p className="mt-2 text-3xl font-semibold text-slate-950">
+            {formatCurrency(repSummary.commissionSummary.floorRemaining)}
+          </p>
         </div>
       </section>
     </div>

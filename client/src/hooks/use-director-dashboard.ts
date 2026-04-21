@@ -16,6 +16,15 @@ export interface RepPerformanceCard {
 export interface DirectorDashboardData {
   officeFunnelBuckets: FunnelBucketSummary[];
   repFunnelRows: DirectorRepFunnelRow[];
+  repCommissionRows: Array<{
+    repId: string;
+    repName: string;
+    totalEarnedCommission: number;
+    potentialCommission: number;
+    floorRemaining: number;
+    newCustomerShare: number;
+    meetsNewCustomerShare: boolean;
+  }>;
   repCards: RepPerformanceCard[];
   pipelineByStage: Array<{
     stageId: string;
@@ -79,6 +88,26 @@ export interface DirectorRepFunnelRow {
 
 export interface RepDetailData {
   activeDeals: { count: number; totalValue: number };
+  commissionSummary: {
+    commissionRate: number;
+    overrideRate: number;
+    rollingFloor: number;
+    rollingPaidRevenue: number;
+    rollingCommissionableMargin: number;
+    floorRemaining: number;
+    newCustomerRevenue: number;
+    newCustomerShare: number;
+    newCustomerShareFloor: number;
+    meetsNewCustomerShare: boolean;
+    estimatedPaymentCount: number;
+    excludedLowMarginRevenue: number;
+    directEarnedCommission: number;
+    overrideEarnedCommission: number;
+    totalEarnedCommission: number;
+    potentialRevenue: number;
+    potentialMargin: number;
+    potentialCommission: number;
+  };
   tasksToday: { overdue: number; today: number };
   activityThisWeek: {
     calls: number;

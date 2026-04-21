@@ -7,9 +7,18 @@ export interface AdminUser {
   displayName: string;
   role: "admin" | "director" | "rep";
   officeId: string;
+  reportsTo?: string | null;
   officeName: string | null;
   isActive: boolean;
   extraOfficeCount: number;
+  commissionRate?: number;
+  rollingFloor?: number;
+  overrideRate?: number;
+  estimatedMarginRate?: number;
+  minMarginPercent?: number;
+  newCustomerShareFloor?: number;
+  newCustomerWindowMonths?: number;
+  commissionConfigActive?: boolean;
   sourceSystems: Array<"hubspot" | "procore">;
   localAuthStatus:
     | "not_invited"
