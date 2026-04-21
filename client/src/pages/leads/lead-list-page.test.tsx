@@ -70,6 +70,7 @@ vi.mock("@/hooks/use-leads", () => ({
     refetch: vi.fn(),
   }),
   preflightLeadStageCheck: vi.fn(),
+  transitionLeadStage: vi.fn(),
   updateLead: vi.fn(),
 }));
 

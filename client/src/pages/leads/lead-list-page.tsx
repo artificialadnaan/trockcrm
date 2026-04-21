@@ -12,7 +12,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { PipelineBoard } from "@/components/pipeline/pipeline-board";
-import { preflightLeadStageCheck, updateLead, useLeadBoard } from "@/hooks/use-leads";
+import { transitionLeadStage, useLeadBoard } from "@/hooks/use-leads";
 import { useNormalizedPipelineRoute } from "@/lib/pipeline-scope";
 
 export function buildLeadIntakePath(leadId: string) {
@@ -108,21 +108,18 @@ export function LeadListPage() {
             return;
           }
 
-          void preflightLeadStageCheck(activeId, targetStageId)
+          void transitionLeadStage(activeId, { targetStageId })
             .then(async (result) => {
-              if (!result.allowed) {
+              if (!result.ok) {
                 setBlockedMove({
                   leadId: activeLead.id,
                   leadName: activeLead.name,
                   targetStageName: targetColumn.stage.name,
-                  missingLabels: result.missingRequirements.effectiveChecklist.fields
-                    .filter((field) => !field.satisfied)
-                    .map((field) => field.label),
+                  missingLabels: result.missing.map((field) => field.label),
                 });
                 return;
               }
 
-              await updateLead(activeId, { stageId: targetStageId });
               await refetch();
             })
             .catch((error: unknown) => {
