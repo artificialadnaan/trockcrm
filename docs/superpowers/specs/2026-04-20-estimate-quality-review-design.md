@@ -381,6 +381,7 @@ An inferred row should include:
 
 Deterministic inference rules:
 
+- an `explicit source signal` means direct document-backed evidence such as extracted scope text, sheet/spec text, or an accepted extracted row tied to uploaded project documents
 - only infer a row if at least one explicit source signal exists and at least one historical or dependency signal supports it
 - do not infer duplicate rows when an extracted or already-manual row with the same normalized intent already exists
 - inferred rows default to `needs_review`
@@ -467,6 +468,9 @@ Allowed actions:
   - marks the parent row `accepted`
   - records the recommended option as selected
   - sets `selected_source_type` to the selected recommendation source
+  - sets `catalog_backing` from the selected option source:
+    - `procore_synced` when the option references a synced catalog item
+    - `local_promoted` when the option references a local catalog item
 - accept manual row:
   - applies only to rows with `source_type = 'manual'`
   - marks the parent row `accepted`
@@ -477,6 +481,9 @@ Allowed actions:
   - marks the parent row `alternate_selected`
   - records the chosen alternate option id
   - sets `selected_source_type = 'catalog_option'`
+  - sets `catalog_backing` from the chosen option source:
+    - `procore_synced` when the option references a synced catalog item
+    - `local_promoted` when the option references a local catalog item
 - override:
   - marks the parent row `overridden`
   - stores overridden quantity/unit/price values on the parent recommendation row in `override_*` fields
