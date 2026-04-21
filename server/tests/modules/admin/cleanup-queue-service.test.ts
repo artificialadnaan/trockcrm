@@ -147,6 +147,7 @@ const officeDealRows: CleanupRowSeed[] = [
 
 function extractSqlText(value: unknown): string {
   if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
   if (!value || typeof value !== "object") return "";
 
   if (Array.isArray((value as { queryChunks?: unknown[] }).queryChunks)) {
@@ -156,6 +157,34 @@ function extractSqlText(value: unknown): string {
   if ("value" in (value as Record<string, unknown>)) {
     const chunkValue = (value as { value: unknown }).value;
     if (Array.isArray(chunkValue)) return chunkValue.map(extractSqlText).join("");
+    if (typeof chunkValue === "string") return chunkValue;
+  }
+
+  return "";
+}
+
+function extractSqlLiteralText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (!value || typeof value !== "object") return "";
+
+  if (Array.isArray((value as { queryChunks?: unknown[] }).queryChunks)) {
+    return (value as { queryChunks: unknown[] }).queryChunks
+      .map((chunk) => {
+        if (typeof chunk === "string") return chunk;
+        if (typeof chunk === "number" || typeof chunk === "boolean") return "";
+        if (!chunk || typeof chunk !== "object") return "";
+        if (!("value" in chunk)) return "";
+        const chunkValue = (chunk as { value: unknown }).value;
+        if (Array.isArray(chunkValue)) return chunkValue.map(extractSqlLiteralText).join("");
+        if (typeof chunkValue === "string") return chunkValue;
+        return "";
+      })
+      .join("");
+  }
+
+  if ("value" in (value as Record<string, unknown>)) {
+    const chunkValue = (value as { value: unknown }).value;
+    if (Array.isArray(chunkValue)) return chunkValue.map(extractSqlLiteralText).join("");
     if (typeof chunkValue === "string") return chunkValue;
   }
 
@@ -255,7 +284,23 @@ describe("cleanup queue service", () => {
     expect(grouped.get("missing_budget_status")).toBe(2);
   });
 
-  it("filters office queues by actor scope", async () => {
+  it("allows a director to view a non-active office they can access", async () => {
+    const tenantDb = makeTenantDb({ deals: officeDealRows, leads: officeLeadRows });
+
+    const result = await getOfficeOwnershipQueue(
+      tenantDb as any,
+      "office-2",
+      { id: "director-1", role: "director", officeId: "office-1", activeOfficeId: "office-1" } as any
+    );
+
+    expect(result.rows.map((row) => row.recordId)).toEqual(["deal-3", "lead-2"]);
+  });
+
+  it("rejects a director who lacks access to the requested office", async () => {
+    poolQueryMock.mockResolvedValueOnce({
+      rows: [{ id: "office-1", name: "Office One", slug: "office-one" }],
+    });
+
     const tenantDb = makeTenantDb({ deals: officeDealRows, leads: officeLeadRows });
 
     await expect(
@@ -375,5 +420,58 @@ describe("cleanup queue service", () => {
         }
       )
     ).rejects.toThrow(/ownership queue/i);
+  });
+
+  it("treats zero forecast confidence as present", async () => {
+    const tenantDb = makeTenantDb({
+      deals: [
+        {
+          id: "deal-zero",
+          name: "Zero Confidence Deal",
+          assignedRepId: "rep-1",
+          decisionMakerName: "Taylor",
+          budgetStatus: null,
+          nextStep: "Follow up",
+          nextStepDueAt: "2026-04-21T12:00:00.000Z",
+          forecastWindow: "Q2",
+          forecastConfidencePercent: 0,
+          lastActivityAt: "2026-04-21T12:00:00.000Z",
+          companyId: "company-1",
+          propertyId: "property-1",
+          ownershipSyncStatus: "matched",
+          unassignedReasonCode: null,
+        },
+      ],
+      leads: [],
+    });
+
+    const result = await getMyCleanupQueue(tenantDb as any, "rep-1", "office-1");
+    const zeroRow = result.rows.find((row) => row.recordId === "deal-zero");
+
+    expect(zeroRow).toBeDefined();
+    expect(zeroRow?.reasonCodes).not.toContain("missing_forecast_confidence");
+  });
+
+  it("keeps request IDs out of SQL literals when loading queue rows", async () => {
+    const tenantDb = makeTenantDb({ deals: [], leads: [] });
+    const maliciousId = "deal-1' OR 1=1 --";
+
+    await expect(
+      bulkReassignOwnershipQueueRows(
+        tenantDb as any,
+        { id: "director-1", role: "director", officeId: "office-1", activeOfficeId: "office-1" } as any,
+        {
+          officeId: "office-1",
+          rows: [{ recordType: "deal", recordId: maliciousId }],
+          assigneeId: "rep-1",
+        }
+      )
+    ).rejects.toThrow();
+
+    const sqlLiteralText = tenantDb.execute.mock.calls
+      .map(([query]) => extractSqlLiteralText(query))
+      .join(" ");
+
+    expect(sqlLiteralText).not.toContain(maliciousId);
   });
 });

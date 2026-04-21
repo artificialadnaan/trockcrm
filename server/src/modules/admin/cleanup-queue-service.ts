@@ -209,7 +209,9 @@ function evaluateRepCleanupReasons(row: CleanupSourceRow): CleanupReasonCode[] {
   if (!row.nextStep) reasons.push("missing_next_step");
   if (!row.nextStepDueAt) reasons.push("missing_next_step_due_at");
   if (!row.forecastWindow) reasons.push("missing_forecast_window");
-  if (!row.forecastConfidencePercent) reasons.push("missing_forecast_confidence");
+  if (row.forecastConfidencePercent === null || row.forecastConfidencePercent === undefined || row.forecastConfidencePercent === "") {
+    reasons.push("missing_forecast_confidence");
+  }
   if (!row.companyId || !row.propertyId) reasons.push("missing_company_or_property_link");
   if (isOlderThanDays(row.lastActivityAt, 14)) reasons.push("stale_no_recent_activity");
 
@@ -235,10 +237,14 @@ function evaluateOwnershipQueueReasons(row: CleanupSourceRow): CleanupReasonCode
 async function fetchRows(
   tenantDb: CleanupDb,
   recordType: "lead" | "deal",
-  whereClause: string
+  filters: {
+    assignedRepId?: string;
+    id?: string;
+    ownershipQueueOnly?: boolean;
+  } = {}
 ): Promise<CleanupSourceRow[]> {
   const table = recordType === "deal" ? "deals" : "leads";
-  const result = await tenantDb.execute(sql.raw(`
+  const result = await tenantDb.execute(sql`
     SELECT
       id,
       name AS "recordName",
@@ -254,10 +260,20 @@ async function fetchRows(
       property_id AS "propertyId",
       ownership_sync_status AS "ownershipSyncStatus",
       unassigned_reason_code AS "unassignedReasonCode"
-    FROM ${table}
+    FROM ${sql.raw(table)}
     WHERE is_active = true
-      ${whereClause}
-  `));
+      ${filters.assignedRepId !== undefined ? sql`AND assigned_rep_id = ${filters.assignedRepId}` : sql``}
+      ${filters.id !== undefined ? sql`AND id = ${filters.id}` : sql``}
+      ${
+        filters.ownershipQueueOnly
+          ? sql`AND (
+              assigned_rep_id IS NULL
+              OR ownership_sync_status IN ('unmatched', 'conflict')
+              OR unassigned_reason_code IN ('owner_mapping_failure', 'inactive_owner_match')
+            )`
+          : sql``
+      }
+  `);
 
   const rows = getRows<CleanupSourceRow>(result);
   return rows.map((row) => ({
@@ -282,7 +298,7 @@ async function fetchQueueRowById(
   recordType: "lead" | "deal",
   recordId: string
 ): Promise<CleanupSourceRow | null> {
-  const rows = await fetchRows(tenantDb, recordType, `AND id = '${recordId}'`);
+  const rows = await fetchRows(tenantDb, recordType, { id: recordId });
   return rows[0] ?? null;
 }
 
@@ -296,11 +312,12 @@ function sortRows(rows: CleanupQueueRow[]): CleanupQueueRow[] {
   });
 }
 
-function assertActorCanViewOffice(actor: CleanupActor | undefined, officeId: string) {
+async function assertActorCanViewOffice(actor: CleanupActor | undefined, officeId: string) {
   if (!actor) return;
   if (actor.role === "admin") return;
-  const activeOfficeId = actor.activeOfficeId ?? actor.officeId;
-  if (activeOfficeId !== officeId) {
+
+  const offices = await getAccessibleOffices(actor);
+  if (!offices.some((office) => office.id === officeId)) {
     throw new AppError(403, "Directors can only view cleanup queues for accessible offices");
   }
 }
@@ -311,14 +328,14 @@ async function writeManualOverride(
   recordId: string
 ) {
   const table = recordType === "deal" ? "deals" : "leads";
-  await tenantDb.execute(sql.raw(`
-    UPDATE ${table}
+  await tenantDb.execute(sql`
+    UPDATE ${sql.raw(table)}
     SET ownership_sync_status = 'manual_override',
         unassigned_reason_code = NULL,
         ownership_synced_at = NOW(),
         updated_at = NOW()
-    WHERE id = '${recordId}'
-  `));
+    WHERE id = ${recordId}
+  `);
 }
 
 export async function getMyCleanupQueue(
@@ -326,16 +343,8 @@ export async function getMyCleanupQueue(
   userId: string,
   officeId?: string
 ): Promise<CleanupQueueResult> {
-  const dealRows = await fetchRows(
-    tenantDb,
-    "deal",
-    `AND assigned_rep_id = '${userId}'`
-  );
-  const leadRows = await fetchRows(
-    tenantDb,
-    "lead",
-    `AND assigned_rep_id = '${userId}'`
-  );
+  const dealRows = await fetchRows(tenantDb, "deal", { assignedRepId: userId });
+  const leadRows = await fetchRows(tenantDb, "lead", { assignedRepId: userId });
 
   const rows = sortRows([
     ...dealRows.flatMap((row) => {
@@ -359,18 +368,10 @@ export async function getOfficeOwnershipQueue(
   officeId: string,
   actor?: CleanupActor
 ): Promise<CleanupQueueResult> {
-  assertActorCanViewOffice(actor, officeId);
+  await assertActorCanViewOffice(actor, officeId);
 
-  const whereClause = `
-      AND (
-        assigned_rep_id IS NULL
-        OR ownership_sync_status IN ('unmatched', 'conflict')
-        OR unassigned_reason_code IN ('owner_mapping_failure', 'inactive_owner_match')
-      )
-  `;
-
-  const dealRows = await fetchRows(tenantDb, "deal", whereClause);
-  const leadRows = await fetchRows(tenantDb, "lead", whereClause);
+  const dealRows = await fetchRows(tenantDb, "deal", { ownershipQueueOnly: true });
+  const leadRows = await fetchRows(tenantDb, "lead", { ownershipQueueOnly: true });
 
   const rows = sortRows([
     ...dealRows.flatMap((row) => {
