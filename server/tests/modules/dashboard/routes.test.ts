@@ -3,6 +3,7 @@ import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const getRepDashboardMock = vi.hoisted(() => vi.fn());
+const commitTransactionMock = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
 
 vi.mock("../../../../server/src/modules/dashboard/service.js", () => ({
   getRepDashboard: getRepDashboardMock,
@@ -27,7 +28,7 @@ function buildApp() {
     req.tenantDb = {
       execute: vi.fn(),
     };
-    req.commitTransaction = vi.fn().mockResolvedValue(undefined);
+    req.commitTransaction = commitTransactionMock;
     next();
   });
   app.use("/api/dashboard", dashboardRoutes);
@@ -37,6 +38,7 @@ function buildApp() {
 describe("dashboard routes", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    commitTransactionMock.mockResolvedValue(undefined);
   });
 
   it("serves GET /api/dashboard/rep with the cleanup summary envelope", async () => {
@@ -61,6 +63,7 @@ describe("dashboard routes", () => {
     expect(response.status).toBe(200);
     expect(getRepDashboardMock).toHaveBeenCalledOnce();
     expect(getRepDashboardMock).toHaveBeenCalledWith(expect.anything(), "rep-1");
+    expect(commitTransactionMock).toHaveBeenCalledOnce();
     expect(response.body).toEqual({
       data: {
         activeDeals: { count: 3, totalValue: 125000 },
