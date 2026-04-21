@@ -347,6 +347,167 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
     expect(updateReturning).toHaveBeenCalled();
   });
 
+  it("uses manual baseline values when promoting accepted manual rows", async () => {
+    estimateServiceMocks.createSection.mockResolvedValue({ id: "section-manual" });
+    estimateServiceMocks.createLineItem.mockResolvedValue({ id: "line-manual" });
+    const updateReturning = vi.fn().mockResolvedValue([{ id: "rec-manual", promotedEstimateLineItemId: "line-manual" }]);
+
+    const tenantDb = {
+      execute: vi.fn().mockResolvedValue(undefined),
+      select: vi
+        .fn()
+        .mockReturnValueOnce({
+          from: vi.fn(() => ({
+            innerJoin: vi.fn(() => ({
+              innerJoin: vi.fn(() => ({
+                where: vi.fn().mockResolvedValue([
+                  {
+                    recommendationId: "rec-manual",
+                    description: "Stale extracted label",
+                    quantity: "9",
+                    unit: "sq",
+                    unitPrice: "11.00",
+                    notes: "stale note",
+                    sectionName: "Roof",
+                    sourceType: "explicit",
+                    selectedSourceType: "manual",
+                    selectedOptionId: null,
+                    manualLabel: "Manual baseline label",
+                    manualQuantity: "2",
+                    manualUnit: "ea",
+                    manualUnitPrice: "75.00",
+                    manualNotes: "manual note",
+                    normalizedIntent: "manual row",
+                    sourceRowIdentity: "roof:manual-1",
+                    status: "approved",
+                    createdByRunId: "run-manual",
+                    promotedEstimateLineItemId: null,
+                  },
+                ]),
+              })),
+            })),
+          })),
+        })
+        .mockReturnValueOnce({
+          from: vi.fn(() => ({
+            where: vi.fn(() => ({
+              limit: vi.fn().mockResolvedValue([]),
+            })),
+          })),
+        }),
+      update: vi.fn(() => ({
+        set: vi.fn(() => ({
+          where: vi.fn(() => ({
+            returning: updateReturning,
+          })),
+        })),
+      })),
+      insert: vi.fn(() => ({
+        values: vi.fn().mockResolvedValue(undefined),
+      })),
+    } as any;
+
+    await promoteApprovedRecommendationsToEstimate({
+      tenantDb,
+      dealId: "deal-1",
+      generationRunId: "run-manual",
+      approvedRecommendationIds: ["rec-manual"],
+    });
+
+    expect(estimateServiceMocks.createLineItem).toHaveBeenCalledWith(
+      tenantDb,
+      "deal-1",
+      "section-manual",
+      expect.objectContaining({
+        description: "Manual baseline label",
+        quantity: "2",
+        unit: "ea",
+        unitPrice: "75.00",
+        notes: "manual note",
+      })
+    );
+  });
+
+  it("uses override values when promoting overridden rows", async () => {
+    estimateServiceMocks.createSection.mockResolvedValue({ id: "section-override" });
+    estimateServiceMocks.createLineItem.mockResolvedValue({ id: "line-override" });
+    const updateReturning = vi.fn().mockResolvedValue([{ id: "rec-override", promotedEstimateLineItemId: "line-override" }]);
+
+    const tenantDb = {
+      execute: vi.fn().mockResolvedValue(undefined),
+      select: vi
+        .fn()
+        .mockReturnValueOnce({
+          from: vi.fn(() => ({
+            innerJoin: vi.fn(() => ({
+              innerJoin: vi.fn(() => ({
+                where: vi.fn().mockResolvedValue([
+                  {
+                    recommendationId: "rec-override",
+                    description: "Existing description",
+                    quantity: "9",
+                    unit: "sq",
+                    unitPrice: "11.00",
+                    notes: "stale note",
+                    sectionName: "Roof",
+                    sourceType: "explicit",
+                    selectedSourceType: "override",
+                    selectedOptionId: null,
+                    overrideQuantity: "4",
+                    overrideUnit: "ea",
+                    overrideUnitPrice: "125.00",
+                    overrideNotes: "override note",
+                    normalizedIntent: "override row",
+                    sourceRowIdentity: "roof:override-1",
+                    status: "overridden",
+                    createdByRunId: "run-override",
+                    promotedEstimateLineItemId: null,
+                  },
+                ]),
+              })),
+            })),
+          })),
+        })
+        .mockReturnValueOnce({
+          from: vi.fn(() => ({
+            where: vi.fn(() => ({
+              limit: vi.fn().mockResolvedValue([]),
+            })),
+          })),
+        }),
+      update: vi.fn(() => ({
+        set: vi.fn(() => ({
+          where: vi.fn(() => ({
+            returning: updateReturning,
+          })),
+        })),
+      })),
+      insert: vi.fn(() => ({
+        values: vi.fn().mockResolvedValue(undefined),
+      })),
+    } as any;
+
+    await promoteApprovedRecommendationsToEstimate({
+      tenantDb,
+      dealId: "deal-1",
+      generationRunId: "run-override",
+      approvedRecommendationIds: ["rec-override"],
+    });
+
+    expect(estimateServiceMocks.createLineItem).toHaveBeenCalledWith(
+      tenantDb,
+      "deal-1",
+      "section-override",
+      expect.objectContaining({
+        description: "Existing description",
+        quantity: "4",
+        unit: "ea",
+        unitPrice: "125.00",
+        notes: "override note",
+      })
+    );
+  });
+
   it("claims promotion with a lock before creating canonical line items", async () => {
     estimateServiceMocks.createSection.mockResolvedValue({ id: "section-lock" });
     estimateServiceMocks.createLineItem.mockResolvedValue({ id: "line-lock" });

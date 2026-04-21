@@ -28,6 +28,15 @@ type PromotionCandidateRow = {
   sourceType?: string | null;
   selectedSourceType?: string | null;
   selectedOptionId?: string | null;
+  manualLabel?: string | null;
+  manualQuantity?: string | null;
+  manualUnit?: string | null;
+  manualUnitPrice?: string | null;
+  manualNotes?: string | null;
+  overrideQuantity?: string | null;
+  overrideUnit?: string | null;
+  overrideUnitPrice?: string | null;
+  overrideNotes?: string | null;
   normalizedIntent?: string | null;
   sourceRowIdentity?: string | null;
   promotedEstimateLineItemId?: string | null;
@@ -87,6 +96,15 @@ export async function loadApprovedRecommendationsForRun(
       sourceType: estimatePricingRecommendations.sourceType,
       selectedSourceType: estimatePricingRecommendations.selectedSourceType,
       selectedOptionId: estimatePricingRecommendations.selectedOptionId,
+      manualLabel: estimatePricingRecommendations.manualLabel,
+      manualQuantity: estimatePricingRecommendations.manualQuantity,
+      manualUnit: estimatePricingRecommendations.manualUnit,
+      manualUnitPrice: estimatePricingRecommendations.manualUnitPrice,
+      manualNotes: estimatePricingRecommendations.manualNotes,
+      overrideQuantity: estimatePricingRecommendations.overrideQuantity,
+      overrideUnit: estimatePricingRecommendations.overrideUnit,
+      overrideUnitPrice: estimatePricingRecommendations.overrideUnitPrice,
+      overrideNotes: estimatePricingRecommendations.overrideNotes,
       normalizedIntent: estimatePricingRecommendations.normalizedIntent,
       sourceRowIdentity: estimatePricingRecommendations.sourceRowIdentity,
       promotedEstimateLineItemId: estimatePricingRecommendations.promotedEstimateLineItemId,
@@ -175,6 +193,48 @@ function buildRowError(row: ReturnType<typeof deriveEstimatePricingWorkbenchRows
   };
 }
 
+function resolvePromotionLineValues(
+  row: PromotionCandidateRow,
+  selectedOptionLabel?: string | null
+) {
+  let description = selectedOptionLabel ?? row.description;
+  let quantity = row.quantity ?? "1";
+  let unit = row.unit ?? undefined;
+  let unitPrice = row.unitPrice ?? "0";
+  let notes = row.notes ?? undefined;
+
+  switch (row.selectedSourceType) {
+    case "manual":
+      description = row.manualLabel ?? description;
+      quantity = row.manualQuantity ?? quantity;
+      unit = row.manualUnit ?? unit;
+      unitPrice = row.manualUnitPrice ?? unitPrice;
+      notes = row.manualNotes ?? notes;
+      break;
+    case "override":
+      quantity = row.overrideQuantity ?? quantity;
+      unit = row.overrideUnit ?? unit;
+      unitPrice = row.overrideUnitPrice ?? unitPrice;
+      notes = row.overrideNotes ?? notes;
+      break;
+    case "catalog_option":
+    case "alternate":
+    case "recommended":
+      description = selectedOptionLabel ?? description;
+      break;
+    default:
+      break;
+  }
+
+  return {
+    description,
+    quantity,
+    unit,
+    unitPrice,
+    notes,
+  };
+}
+
 export async function promoteApprovedRecommendationsToEstimate({
   tenantDb,
   dealId,
@@ -234,7 +294,8 @@ export async function promoteApprovedRecommendationsToEstimate({
 
       for (const line of sectionGroup.lines) {
         const selectedOption =
-          line.selectedSourceType === "alternate" && line.selectedOptionId
+          ["alternate", "catalog_option", "recommended"].includes(line.selectedSourceType ?? "") &&
+          line.selectedOptionId
             ? await loadPricingRecommendationOption(
                 tx,
                 dealId,
@@ -242,13 +303,17 @@ export async function promoteApprovedRecommendationsToEstimate({
                 line.selectedOptionId
               )
             : null;
+        const lineValues = resolvePromotionLineValues(
+          line,
+          selectedOption?.optionLabel ?? null
+        );
 
         const lineItem = await createLineItem(tx as any, dealId, section.id, {
-          description: selectedOption?.optionLabel ?? line.description,
-          quantity: line.quantity ?? "1",
-          unit: line.unit ?? undefined,
-          unitPrice: line.unitPrice ?? "0",
-          notes: line.notes ?? undefined,
+          description: lineValues.description,
+          quantity: lineValues.quantity,
+          unit: lineValues.unit,
+          unitPrice: lineValues.unitPrice,
+          notes: lineValues.notes,
         });
 
         await tx

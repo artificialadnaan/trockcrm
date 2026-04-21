@@ -293,6 +293,75 @@ describe("buildEstimatingWorkbenchState", () => {
       ])
     );
   });
+
+  it("does not let pending or rejected siblings keep an approved row duplicate-blocked", async () => {
+    const tenantDb = makeTenantDb([
+      [{ id: "doc-1", activeParseRunId: "run-1", ocrStatus: "completed" }],
+      [
+        {
+          id: "ext-1",
+          documentId: "doc-1",
+          status: "approved",
+          metadataJson: { sourceParseRunId: "run-1", activeArtifact: true },
+        },
+      ],
+      [{ id: "match-1", extractionId: "ext-1", status: "selected" }],
+      [
+        {
+          id: "rec-approved",
+          extractionMatchId: "match-1",
+          status: "approved",
+          createdByRunId: "run-1",
+          sourceType: "explicit",
+          normalizedIntent: "coping metal",
+          sourceRowIdentity: "roof:coping-1",
+          sectionName: "Roof",
+        },
+        {
+          id: "rec-pending",
+          extractionMatchId: "match-1",
+          status: "pending_review",
+          createdByRunId: "run-1",
+          sourceType: "explicit",
+          normalizedIntent: "coping metal",
+          sourceRowIdentity: "roof:coping-2",
+          sectionName: "Roof",
+        },
+        {
+          id: "rec-rejected",
+          extractionMatchId: "match-1",
+          status: "rejected",
+          createdByRunId: "run-1",
+          sourceType: "explicit",
+          normalizedIntent: "coping metal",
+          sourceRowIdentity: "roof:coping-3",
+          sectionName: "Roof",
+        },
+      ],
+      [],
+    ]);
+
+    const state = await buildEstimatingWorkbenchState(tenantDb, "deal-1");
+
+    expect(state.summary.pricing).toEqual({
+      total: 3,
+      pending: 1,
+      approved: 1,
+      overridden: 0,
+      rejected: 1,
+      readyToPromote: 1,
+    });
+    expect(state.pricingRows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "rec-approved",
+          duplicateGroupBlocked: false,
+          promotable: true,
+          reviewState: "approved",
+        }),
+      ])
+    );
+  });
 });
 
 describe("updateEstimatePricingRecommendationReviewState", () => {
@@ -387,6 +456,154 @@ describe("updateEstimatePricingRecommendationReviewState", () => {
         },
       })
     ).rejects.toMatchObject({ statusCode: 400 });
+
+    expect(updateReturning).not.toHaveBeenCalled();
+    expect(insertReturning).not.toHaveBeenCalled();
+  });
+
+  it("records catalog option provenance when accepting the recommended option", async () => {
+    const updateReturning = vi.fn().mockResolvedValue([
+      {
+        id: "rec-1",
+        status: "approved",
+        selectedSourceType: "catalog_option",
+        selectedOptionId: "option-rec",
+        recommendedUnitPrice: "10.00",
+        recommendedTotalPrice: "10.00",
+        overrideQuantity: null,
+        overrideUnit: null,
+        overrideUnitPrice: null,
+        overrideNotes: null,
+      },
+    ]);
+    const insertReturning = vi.fn().mockResolvedValue([
+      {
+        id: "evt-2",
+        eventType: "accepted_recommended",
+      },
+    ]);
+    const tenantDb = {
+      select: vi
+        .fn()
+        .mockReturnValueOnce({
+          from: vi.fn(() => ({
+            where: vi.fn(() => ({
+              limit: vi.fn().mockResolvedValue([
+                {
+                  id: "rec-1",
+                  dealId: "deal-1",
+                  status: "pending_review",
+                  promotedEstimateLineItemId: null,
+                  selectedSourceType: null,
+                  selectedOptionId: null,
+                  recommendedUnitPrice: "10.00",
+                  recommendedTotalPrice: "10.00",
+                  overrideQuantity: null,
+                  overrideUnit: null,
+                  overrideUnitPrice: null,
+                  overrideNotes: null,
+                },
+              ]),
+            })),
+          })),
+        })
+        .mockReturnValueOnce({
+          from: vi.fn(() => ({
+            innerJoin: vi.fn(() => ({
+              where: vi.fn(() => ({
+                limit: vi.fn().mockResolvedValue([
+                  {
+                    id: "option-rec",
+                    recommendationId: "rec-1",
+                    optionLabel: "Catalog option",
+                    optionKind: "recommended",
+                  },
+                ]),
+              })),
+            })),
+          })),
+        }),
+      update: vi.fn(() => ({
+        set: vi.fn(() => ({
+          where: vi.fn(() => ({
+            returning: updateReturning,
+          })),
+        })),
+      })),
+      insert: vi.fn(() => ({
+        values: vi.fn(() => ({
+          returning: insertReturning,
+        })),
+      })),
+    } as any;
+
+    const result = await updateEstimatePricingRecommendationReviewState({
+      tenantDb,
+      dealId: "deal-1",
+      recommendationId: "rec-1",
+      userId: "user-1",
+      input: {
+        action: "accept_recommended",
+      },
+    });
+
+    expect(result.recommendation.selectedSourceType).toBe("catalog_option");
+    expect(result.recommendation.selectedOptionId).toBe("option-rec");
+    expect(result.reviewEvent.eventType).toBe("accepted_recommended");
+  });
+
+  it("blocks review-state mutations after a recommendation is promoted", async () => {
+    const updateReturning = vi.fn();
+    const insertReturning = vi.fn();
+    const tenantDb = {
+      select: vi.fn(() => ({
+        from: vi.fn(() => ({
+          where: vi.fn(() => ({
+            limit: vi.fn().mockResolvedValue([
+              {
+                id: "rec-1",
+                dealId: "deal-1",
+                status: "approved",
+                promotedEstimateLineItemId: "line-1",
+                selectedSourceType: "catalog_option",
+                selectedOptionId: "option-rec",
+                recommendedUnitPrice: "10.00",
+                recommendedTotalPrice: "10.00",
+                overrideQuantity: null,
+                overrideUnit: null,
+                overrideUnitPrice: null,
+                overrideNotes: null,
+              },
+            ]),
+          })),
+        })),
+      })),
+      update: vi.fn(() => ({
+        set: vi.fn(() => ({
+          where: vi.fn(() => ({
+            returning: updateReturning,
+          })),
+        })),
+      })),
+      insert: vi.fn(() => ({
+        values: vi.fn(() => ({
+          returning: insertReturning,
+        })),
+      })),
+    } as any;
+
+    await expect(
+      updateEstimatePricingRecommendationReviewState({
+        tenantDb,
+        dealId: "deal-1",
+        recommendationId: "rec-1",
+        userId: "user-1",
+        input: {
+          action: "reject",
+          reason: "too late",
+        },
+      })
+    ).rejects.toMatchObject({ statusCode: 409 });
 
     expect(updateReturning).not.toHaveBeenCalled();
     expect(insertReturning).not.toHaveBeenCalled();

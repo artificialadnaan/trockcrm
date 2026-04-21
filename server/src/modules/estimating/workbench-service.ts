@@ -69,6 +69,15 @@ function getReviewState(status: unknown): DerivedPricingRow["reviewState"] {
   return "approved";
 }
 
+function isDuplicateBlockingCandidate(
+  row: EstimatePricingRecommendationRow,
+  reviewState: DerivedPricingRow["reviewState"]
+) {
+  if (row.sourceType === "inferred") return true;
+  if (row.promotedEstimateLineItemId) return true;
+  return reviewState === "approved" || reviewState === "overridden";
+}
+
 function isActiveParseArtifact(
   row: ActiveParseArtifactRow,
   activeParseRunIdByDocumentId: Map<string, string | null>
@@ -96,6 +105,11 @@ export function deriveEstimatePricingWorkbenchRows(
   const duplicateGroupCounts = new Map<string, number>();
 
   for (const row of pricingRows) {
+    const reviewState = getReviewState(row.status);
+    if (!isDuplicateBlockingCandidate(row, reviewState)) {
+      continue;
+    }
+
     const sectionName = getPricingRowSectionName(row);
     const intent = getPricingRowIntent(row);
     const key = `${normalizeLookupKey(sectionName, "generated estimate")}::${normalizeLookupKey(intent, row.id ?? "unspecified")}`;
@@ -184,6 +198,35 @@ export async function loadPricingRecommendationOption(
   return option ?? null;
 }
 
+async function loadRecommendedPricingRecommendationOption(
+  tenantDb: TenantDb,
+  dealId: string,
+  recommendationId: string
+) {
+  const [option] = await tenantDb
+    .select({
+      id: estimatePricingRecommendationOptions.id,
+      recommendationId: estimatePricingRecommendationOptions.recommendationId,
+      optionLabel: estimatePricingRecommendationOptions.optionLabel,
+      optionKind: estimatePricingRecommendationOptions.optionKind,
+    })
+    .from(estimatePricingRecommendationOptions)
+    .innerJoin(
+      estimatePricingRecommendations,
+      eq(estimatePricingRecommendationOptions.recommendationId, estimatePricingRecommendations.id)
+    )
+    .where(
+      and(
+        eq(estimatePricingRecommendations.dealId, dealId),
+        eq(estimatePricingRecommendationOptions.recommendationId, recommendationId),
+        eq(estimatePricingRecommendationOptions.optionKind, "recommended")
+      )
+    )
+    .limit(1);
+
+  return option ?? null;
+}
+
 async function insertPricingReviewEvent(
   tenantDb: TenantDb,
   input: {
@@ -232,6 +275,10 @@ export async function updateEstimatePricingRecommendationReviewState(args: {
     throw new AppError(404, "Estimate pricing recommendation not found");
   }
 
+  if (existing.promotedEstimateLineItemId) {
+    throw new AppError(409, "Promoted recommendations cannot be reviewed");
+  }
+
   const beforeJson = {
     status: existing.status,
     selectedSourceType: existing.selectedSourceType ?? null,
@@ -250,15 +297,26 @@ export async function updateEstimatePricingRecommendationReviewState(args: {
   };
 
   switch (args.input.action) {
-    case "accept_recommended":
+    case "accept_recommended": {
+      const recommendedOption = await loadRecommendedPricingRecommendationOption(
+        args.tenantDb,
+        args.dealId,
+        args.recommendationId
+      );
+
+      if (!recommendedOption) {
+        throw new AppError(404, "Recommended pricing option not found");
+      }
+
       eventType = "accepted_recommended";
       patch = {
         ...patch,
         status: "approved",
-        selectedSourceType: "recommended",
-        selectedOptionId: null,
+        selectedSourceType: "catalog_option",
+        selectedOptionId: recommendedOption.id,
       };
       break;
+    }
     case "accept_manual_row":
       eventType = "accepted_manual_row";
       patch = {
