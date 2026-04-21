@@ -9,6 +9,7 @@ import {
 import {
   getUsersWithStats, getUserById, updateUser, grantOfficeAccess, revokeOfficeAccess,
 } from "./users-service.js";
+import { runOwnershipSync } from "./ownership-sync-service.js";
 import {
   listPipelineStages, updatePipelineStage, reorderPipelineStages,
 } from "./pipeline-service.js";
@@ -123,6 +124,24 @@ router.delete(
     }
   }
 );
+
+router.post("/admin/ownership-sync/dry-run", requireAdmin, async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    const result = await runOwnershipSync({ dryRun: true });
+    return res.json(result);
+  } catch (err) {
+    return next(err);
+  }
+});
+
+router.post("/admin/ownership-sync/apply", requireAdmin, async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    const result = await runOwnershipSync({ dryRun: false });
+    return res.json(result);
+  } catch (err) {
+    return next(err);
+  }
+});
 
 // ---------------------------------------------------------------------------
 // Pipeline config (admin only)

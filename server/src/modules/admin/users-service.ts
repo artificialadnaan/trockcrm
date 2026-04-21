@@ -102,6 +102,29 @@ export async function revokeOfficeAccess(userId: string, officeId: string) {
     );
 }
 
+export async function listActiveUsersWithOfficeAccess() {
+  const result = await db.execute(sql`
+    SELECT
+      u.id,
+      u.email,
+      u.display_name,
+      u.office_id,
+      u.is_active
+    FROM users u
+    WHERE u.is_active = true
+    ORDER BY u.display_name ASC
+  `);
+
+  const rows = (result as any).rows ?? result;
+  return rows.map((r: any) => ({
+    id: r.id,
+    email: r.email,
+    displayName: r.display_name,
+    officeId: r.office_id,
+    isActive: r.is_active,
+  }));
+}
+
 /** Get all users with their office counts for the admin overview table. */
 export async function getUsersWithStats() {
   const result = await db.execute(sql`
