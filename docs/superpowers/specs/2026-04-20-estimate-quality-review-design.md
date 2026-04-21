@@ -178,6 +178,10 @@ Required linkage fields:
 
 - `deal_id`
 - `estimate_section_name`
+- `source_type` with allowed values:
+  - `extracted`
+  - `inferred`
+  - `manual`
 - `source_document_id`, nullable for manual rows
 - `source_extraction_id`, nullable for inferred or manual rows
 - `normalized_intent`
@@ -410,6 +414,8 @@ Duplicate grouping and inferred-suppression order:
 All duplicate-review grouping in this slice is section-scoped. For explicit extracted/manual rows, this ordered list defines duplicate-review grouping signals rather than auto-suppression behavior; only inferred rows are actually suppressed by these rules.
 
 If a duplicate is detected, prefer the explicit extracted row over inferred scope.
+
+This explicit-over-inferred preference applies before canonical promotion. Once any row in the duplicate group has already been promoted, the promoted row remains the canonical winner for this slice unless a later reopen/supersede flow is introduced.
 
 If a manual row overlaps:
 
