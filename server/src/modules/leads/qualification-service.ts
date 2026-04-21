@@ -1,6 +1,6 @@
 import { eq } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
-import { leadQualification } from "../../../../shared/src/schema/tenant/lead-qualification.js";
+import { leadQualification } from "@trock-crm/shared/schema";
 
 type TenantDb = NodePgDatabase<any>;
 

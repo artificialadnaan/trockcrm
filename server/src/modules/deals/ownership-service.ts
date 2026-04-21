@@ -1,8 +1,8 @@
 import { desc, eq } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
+import { dealDepartmentHandoffs } from "@trock-crm/shared/schema";
 import type { DealPipelineDisposition, WorkflowRoute } from "@trock-crm/shared/types";
 import type * as schema from "@trock-crm/shared/schema";
-import { dealDepartmentHandoffs } from "../../../../shared/src/schema/tenant/deal-department-handoffs.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 

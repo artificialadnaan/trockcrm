@@ -3,6 +3,8 @@ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
   deals,
   pipelineStageConfig,
+  dealDepartmentHandoffs,
+  dealRoutingHistory,
 } from "@trock-crm/shared/schema";
 import type {
   DealPipelineDisposition,
@@ -10,8 +12,6 @@ import type {
   WorkflowRoute,
 } from "@trock-crm/shared/types";
 import type * as schema from "@trock-crm/shared/schema";
-import { dealDepartmentHandoffs } from "../../../../shared/src/schema/tenant/deal-department-handoffs.js";
-import { dealRoutingHistory } from "../../../../shared/src/schema/tenant/deal-routing-history.js";
 import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { getStageBySlug } from "../pipeline/service.js";
