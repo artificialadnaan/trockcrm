@@ -231,6 +231,7 @@ Uniqueness and refresh rules:
 - rerun carry-forward for manual rows is implemented as cloning qualifying manual recommendation rows into the new generation run; historical rows keep their original `generation_run_id`
 - dedupe within a single generation run uses the duplicate suppression rules in this spec
 - promotion idempotency is enforced by `promoted_estimate_line_item_id`; a row with that field set must not promote again
+- canonical estimate line creation plus `promoted_estimate_line_item_id` write-back must execute with atomic idempotency protection, such as a single transaction with locking or an equivalent uniqueness guard, so retries cannot create duplicate canonical lines
 
 Manual row storage contract:
 
@@ -604,8 +605,8 @@ Manual recommendation persistence:
 - free-text manual rows persist `estimate_section_name`, `manual_label`, `manual_identity_key`, `manual_quantity`, `manual_unit`, `manual_unit_price`, and `manual_notes` on the parent recommendation row before promotion
 - free-text manual rows also persist `normalized_intent` derived from `manual_label` using the contract above
 - free-text manual rows also persist `generation_run_id`, `manual_origin`, and `source_row_identity` on the parent recommendation row using the contracts above
-- if a manual row is later promoted to the local catalog, the new local catalog item is created from those persisted manual fields and linked back through `promoted_local_catalog_item_id` on the parent recommendation row
-- if `override_*` values exist at local-catalog promotion time, seed the new local catalog item from the effective overridden values instead of the pre-override manual baseline
+- if a free-text manual row is later promoted to the local catalog, the new local catalog item is created from those persisted manual fields and linked back through `promoted_local_catalog_item_id` on the parent recommendation row
+- if `override_*` values exist at local-catalog promotion time for that free-text manual row, seed the new local catalog item from the effective overridden values instead of the pre-override manual baseline
 
 Manual row refresh behavior:
 
