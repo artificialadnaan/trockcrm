@@ -118,6 +118,7 @@ export function createLeadConversionService(
       stageId: input.dealStageId,
       workflowRoute: input.workflowRoute ?? "estimating",
       assignedRepId: successorAssignedRepId,
+      actorUserId: input.userId,
       officeId: input.officeId,
       primaryContactId:
         input.primaryContactId === undefined

@@ -45,6 +45,7 @@ export interface CreateDealInput {
   name: string;
   stageId: string;
   assignedRepId: string;
+  actorUserId: string;
   officeId?: string; // Active office — used to validate assignee has access
   companyId?: string;
   propertyId?: string;
@@ -536,6 +537,16 @@ export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
     .returning();
 
   const newDeal = result[0];
+
+  await createAssignmentTaskIfNeeded(tenantDb, {
+    entityType: "deal",
+    entityId: newDeal.id,
+    entityName: newDeal.name,
+    previousAssignedRepId: null,
+    nextAssignedRepId: newDeal.assignedRepId,
+    actorUserId: input.actorUserId,
+    officeId: input.officeId ?? null,
+  });
 
   await captureInitialForecastMilestone(tenantDb, {
     deal: {

@@ -69,6 +69,7 @@ router.post("/", async (req, res, next) => {
       propertyId,
       stageId,
       assignedRepId: repId,
+      actorUserId: req.user!.id,
       officeId: req.user!.activeOfficeId,
       name,
       ...rest,

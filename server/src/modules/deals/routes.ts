@@ -408,6 +408,7 @@ router.post("/", async (req, res, next) => {
       name,
       stageId,
       assignedRepId: repId,
+      actorUserId: req.user!.id,
       officeId: req.user!.activeOfficeId,
       ...rest,
     });

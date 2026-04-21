@@ -32,6 +32,7 @@ export interface CreateLeadInput {
   propertyId: string;
   stageId: string;
   assignedRepId: string;
+  actorUserId: string;
   officeId?: string;
   primaryContactId?: string;
   name: string;
@@ -370,6 +371,16 @@ export function createLeadService(
         updatedAt: now,
       })
       .returning();
+
+    await createAssignmentTaskIfNeeded(tenantDb, {
+      entityType: "lead",
+      entityId: lead.id,
+      entityName: lead.name,
+      previousAssignedRepId: null,
+      nextAssignedRepId: input.assignedRepId,
+      actorUserId: input.actorUserId,
+      officeId: input.officeId ?? null,
+    });
 
     return lead;
   }
