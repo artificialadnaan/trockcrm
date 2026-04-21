@@ -1,4 +1,4 @@
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import {
@@ -10,7 +10,10 @@ import {
 } from "@trock-crm/shared/schema";
 import { createLineItem, createSection } from "../deals/estimate-service.js";
 import { AppError } from "../../middleware/error-handler.js";
-import { deriveEstimatePricingWorkbenchRows } from "./workbench-service.js";
+import {
+  deriveEstimatePricingWorkbenchRows,
+  loadPricingRecommendationOption,
+} from "./workbench-service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -23,6 +26,8 @@ type PromotionCandidateRow = {
   notes: string | null;
   sectionName: string | null;
   sourceType?: string | null;
+  selectedSourceType?: string | null;
+  selectedOptionId?: string | null;
   normalizedIntent?: string | null;
   sourceRowIdentity?: string | null;
   promotedEstimateLineItemId?: string | null;
@@ -70,6 +75,8 @@ export async function loadApprovedRecommendationsForRun(
       notes: estimateExtractions.evidenceText,
       sectionName: estimateExtractions.divisionHint,
       sourceType: estimatePricingRecommendations.sourceType,
+      selectedSourceType: estimatePricingRecommendations.selectedSourceType,
+      selectedOptionId: estimatePricingRecommendations.selectedOptionId,
       normalizedIntent: estimatePricingRecommendations.normalizedIntent,
       sourceRowIdentity: estimatePricingRecommendations.sourceRowIdentity,
       promotedEstimateLineItemId: estimatePricingRecommendations.promotedEstimateLineItemId,
@@ -95,17 +102,21 @@ export async function loadApprovedRecommendationsForRun(
     ) as Promise<PromotionCandidateRow[]>;
 }
 
-function groupRecommendationsIntoSections(
-  recommendations: Array<{
-    recommendationId: string;
-    description: string;
-    quantity: string | null;
-    unit: string | null;
-    unitPrice: string | null;
-    notes: string | null;
-    sectionName: string | null;
-  }>
+async function lockPromotionCandidates(
+  tenantDb: TenantDb,
+  dealId: string,
+  recommendationIds: string[]
 ) {
+  const uniqueIds = Array.from(new Set(recommendationIds)).sort();
+
+  for (const recommendationId of uniqueIds) {
+    await tenantDb.execute(
+      sql`SELECT pg_advisory_xact_lock(hashtext(${`estimate-promotion:${dealId}:${recommendationId}`}))`
+    );
+  }
+}
+
+function groupRecommendationsIntoSections(recommendations: Array<PromotionCandidateRow>) {
   const groups = new Map<string, typeof recommendations>();
 
   for (const recommendation of recommendations) {
@@ -182,6 +193,12 @@ export async function promoteApprovedRecommendationsToEstimate({
   };
 
   return runInTransaction(async (tx) => {
+    if (approvedRecommendationIds.length === 0) {
+      return { promotedRecommendationIds: [], rowErrors: [] };
+    }
+
+    await lockPromotionCandidates(tx, dealId, approvedRecommendationIds);
+
     const recommendations = await loadApprovedRecommendationsForRun(
       tx,
       dealId,
@@ -210,8 +227,18 @@ export async function promoteApprovedRecommendationsToEstimate({
       );
 
       for (const line of sectionGroup.lines) {
+        const selectedOption =
+          line.selectedSourceType === "alternate" && line.selectedOptionId
+            ? await loadPricingRecommendationOption(
+                tx,
+                dealId,
+                line.recommendationId,
+                line.selectedOptionId
+              )
+            : null;
+
         const lineItem = await createLineItem(tx as any, dealId, section.id, {
-          description: line.description,
+          description: selectedOption?.optionLabel ?? line.description,
           quantity: line.quantity ?? "1",
           unit: line.unit ?? undefined,
           unitPrice: line.unitPrice ?? "0",

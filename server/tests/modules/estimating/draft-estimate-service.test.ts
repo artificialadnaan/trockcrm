@@ -28,6 +28,7 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
     const updateReturning = vi.fn().mockResolvedValue([{ id: "rec-1", promotedEstimateLineItemId: "line-1" }]);
 
     const tenantDb = {
+      execute: vi.fn().mockResolvedValue(undefined),
       select: vi
         .fn()
         .mockReturnValueOnce({
@@ -82,6 +83,7 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
 
   it("is idempotent for the same approved recommendation set", async () => {
     const tenantDb = {
+      execute: vi.fn().mockResolvedValue(undefined),
       select: vi
         .fn()
         .mockReturnValueOnce({
@@ -133,6 +135,7 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
     estimateServiceMocks.createLineItem.mockResolvedValue({ id: "line-1" });
 
     const tenantDb = {
+      execute: vi.fn().mockResolvedValue(undefined),
       select: vi
         .fn()
         .mockReturnValueOnce({
@@ -195,6 +198,7 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
     const updateReturning = vi.fn().mockResolvedValue([{ id: "rec-ovr", promotedEstimateLineItemId: "line-ovr" }]);
 
     const tenantDb = {
+      execute: vi.fn().mockResolvedValue(undefined),
       select: vi
         .fn()
         .mockReturnValueOnce({
@@ -255,12 +259,168 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
     expect(updateReturning).toHaveBeenCalled();
   });
 
+  it("uses the selected alternate option label when promoting alternate-selected rows", async () => {
+    estimateServiceMocks.createSection.mockResolvedValue({ id: "section-alt" });
+    estimateServiceMocks.createLineItem.mockResolvedValue({ id: "line-alt" });
+    const updateReturning = vi.fn().mockResolvedValue([{ id: "rec-alt", promotedEstimateLineItemId: "line-alt" }]);
+
+    const tenantDb = {
+      execute: vi.fn().mockResolvedValue(undefined),
+      select: vi
+        .fn()
+        .mockReturnValueOnce({
+          from: vi.fn(() => ({
+            innerJoin: vi.fn(() => ({
+              innerJoin: vi.fn(() => ({
+                where: vi.fn().mockResolvedValue([
+                  {
+                    recommendationId: "rec-alt",
+                    description: "Recommendation default label",
+                    quantity: "4",
+                    unit: "ea",
+                    unitPrice: "32.00",
+                    notes: "Default notes",
+                    sectionName: "Roof",
+                    sourceType: "explicit",
+                    selectedSourceType: "alternate",
+                    selectedOptionId: "option-2",
+                    normalizedIntent: "roof vent",
+                    sourceRowIdentity: "roof:vent-1",
+                    status: "approved",
+                    createdByRunId: "run-alt",
+                    promotedEstimateLineItemId: null,
+                  },
+                ]),
+              })),
+            })),
+          })),
+        })
+        .mockReturnValueOnce({
+          from: vi.fn(() => ({
+            where: vi.fn(() => ({
+              limit: vi.fn().mockResolvedValue([{ id: "section-alt" }]),
+            })),
+          })),
+        })
+        .mockReturnValueOnce({
+          from: vi.fn(() => ({
+            innerJoin: vi.fn(() => ({
+              where: vi.fn(() => ({
+                limit: vi.fn().mockResolvedValue([
+                  {
+                    id: "option-2",
+                    optionLabel: "Alternate vent cover",
+                    optionKind: "alternate",
+                  },
+                ]),
+              })),
+            })),
+          })),
+        }),
+      update: vi.fn(() => ({
+        set: vi.fn(() => ({
+          where: vi.fn(() => ({
+            returning: updateReturning,
+          })),
+        })),
+      })),
+      insert: vi.fn(() => ({
+        values: vi.fn().mockResolvedValue(undefined),
+      })),
+    } as any;
+
+    await promoteApprovedRecommendationsToEstimate({
+      tenantDb,
+      dealId: "deal-1",
+      generationRunId: "run-alt",
+      approvedRecommendationIds: ["rec-alt"],
+    });
+
+    expect(estimateServiceMocks.createLineItem).toHaveBeenCalledWith(
+      tenantDb,
+      "deal-1",
+      "section-alt",
+      expect.objectContaining({
+        description: "Alternate vent cover",
+      })
+    );
+    expect(updateReturning).toHaveBeenCalled();
+  });
+
+  it("claims promotion with a lock before creating canonical line items", async () => {
+    estimateServiceMocks.createSection.mockResolvedValue({ id: "section-lock" });
+    estimateServiceMocks.createLineItem.mockResolvedValue({ id: "line-lock" });
+    const updateReturning = vi.fn().mockResolvedValue([{ id: "rec-lock", promotedEstimateLineItemId: "line-lock" }]);
+    const execute = vi.fn().mockResolvedValue(undefined);
+
+    const tenantDb = {
+      execute,
+      select: vi
+        .fn()
+        .mockReturnValueOnce({
+          from: vi.fn(() => ({
+            innerJoin: vi.fn(() => ({
+              innerJoin: vi.fn(() => ({
+                where: vi.fn().mockResolvedValue([
+                  {
+                    recommendationId: "rec-lock",
+                    description: "Termination Bar",
+                    quantity: "1",
+                    unit: "ea",
+                    unitPrice: "25.00",
+                    notes: null,
+                    sectionName: "Roof",
+                    sourceType: "explicit",
+                    normalizedIntent: "termination bar",
+                    sourceRowIdentity: "roof:termination-bar",
+                    status: "approved",
+                    createdByRunId: "run-lock",
+                    promotedEstimateLineItemId: null,
+                  },
+                ]),
+              })),
+            })),
+          })),
+        })
+        .mockReturnValueOnce({
+          from: vi.fn(() => ({
+            where: vi.fn(() => ({
+              limit: vi.fn().mockResolvedValue([]),
+            })),
+          })),
+        }),
+      update: vi.fn(() => ({
+        set: vi.fn(() => ({
+          where: vi.fn(() => ({
+            returning: updateReturning,
+          })),
+        })),
+      })),
+      insert: vi.fn(() => ({
+        values: vi.fn().mockResolvedValue(undefined),
+      })),
+    } as any;
+
+    await promoteApprovedRecommendationsToEstimate({
+      tenantDb,
+      dealId: "deal-1",
+      generationRunId: "run-lock",
+      approvedRecommendationIds: ["rec-lock"],
+    });
+
+    expect(execute).toHaveBeenCalled();
+    expect(
+      execute.mock.invocationCallOrder[0]
+    ).toBeLessThan(estimateServiceMocks.createLineItem.mock.invocationCallOrder[0]);
+  });
+
   it("runs promotion writes inside a transaction when available", async () => {
     estimateServiceMocks.createSection.mockResolvedValue({ id: "section-tx" });
     estimateServiceMocks.createLineItem.mockResolvedValue({ id: "line-tx" });
     const updateReturning = vi.fn().mockResolvedValue([{ id: "rec-tx", promotedEstimateLineItemId: "line-tx" }]);
 
     const txDb = {
+      execute: vi.fn().mockResolvedValue(undefined),
       select: vi
         .fn()
         .mockReturnValueOnce({
@@ -369,6 +529,7 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
 
   it("blocks duplicate recommendations from promotion and returns row-level errors", async () => {
     const tenantDb = {
+      execute: vi.fn().mockResolvedValue(undefined),
       select: vi
         .fn()
         .mockReturnValueOnce({

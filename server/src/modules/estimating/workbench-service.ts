@@ -4,11 +4,11 @@ import type * as schema from "@trock-crm/shared/schema";
 import {
   estimateExtractions,
   estimateExtractionMatches,
-  estimatePricingRecommendationOptions,
   estimatePricingRecommendations,
   estimateReviewEvents,
   estimateSourceDocuments,
 } from "@trock-crm/shared/schema";
+import { estimatePricingRecommendationOptions } from "../../../../shared/src/schema/tenant/estimate-pricing-recommendation-options.js";
 import { AppError } from "../../middleware/error-handler.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -154,7 +154,7 @@ async function loadEstimatePricingRecommendation(
   return recommendation ?? null;
 }
 
-async function loadPricingRecommendationOption(
+export async function loadPricingRecommendationOption(
   tenantDb: TenantDb,
   dealId: string,
   recommendationId: string,
