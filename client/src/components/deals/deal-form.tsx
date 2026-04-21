@@ -18,6 +18,8 @@ import { Loader2 } from "lucide-react";
 import { getDefaultDealStageId, getNewDealStages, getSelectedOptionLabel } from "./deal-form.helpers";
 import { CompanySelector } from "@/components/companies/company-selector";
 import { PropertySelector } from "@/components/properties/property-selector";
+import { useAuth } from "@/lib/auth";
+import { useTaskAssignees } from "@/hooks/use-task-assignees";
 
 interface DealFormProps {
   deal?: Deal; // If provided, we're editing; otherwise creating
@@ -26,9 +28,11 @@ interface DealFormProps {
 
 export function DealForm({ deal, onSuccess }: DealFormProps) {
   const navigate = useNavigate();
+  const { user } = useAuth();
   const { stages } = usePipelineStages();
   const { hierarchy: projectTypeHierarchy } = useProjectTypes();
   const { regions } = useRegions();
+  const { assignees, loading: assigneesLoading } = useTaskAssignees();
 
   const isEdit = !!deal;
   const activeStages = getNewDealStages(stages);
@@ -36,10 +40,12 @@ export function DealForm({ deal, onSuccess }: DealFormProps) {
     { id: parent.id, name: parent.name },
     ...parent.children.map((child) => ({ id: child.id, name: child.name })),
   ]);
+  const assigneeOptions = assignees.map((assignee) => ({ id: assignee.id, name: assignee.displayName }));
 
   const [formData, setFormData] = useState({
     name: deal?.name ?? "",
     stageId: deal?.stageId ?? "",
+    assignedRepId: deal?.assignedRepId ?? (user?.role === "rep" ? user.id : ""),
     companyId: deal?.companyId ?? "",
     propertyId: deal?.propertyId ?? "",
     description: deal?.description ?? "",
@@ -135,6 +141,10 @@ export function DealForm({ deal, onSuccess }: DealFormProps) {
       setError("Deal name is required");
       return;
     }
+    if (!isEdit && !formData.assignedRepId) {
+      setError("Assigned sales rep is required");
+      return;
+    }
     if (!formData.companyId || !formData.propertyId) {
       setError("Company and property are required");
       return;
@@ -175,6 +185,7 @@ export function DealForm({ deal, onSuccess }: DealFormProps) {
         result = resp.deal;
       } else {
         payload.stageId = formData.stageId;
+        payload.assignedRepId = formData.assignedRepId;
         const resp = await createDeal(payload as Partial<Deal> & { name: string; stageId: string });
         result = resp.deal;
       }
@@ -237,6 +248,31 @@ export function DealForm({ deal, onSuccess }: DealFormProps) {
                   required
                 />
               </div>
+            </div>
+          )}
+
+          {!isEdit && (
+            <div className="space-y-2">
+              <Label>Assigned Sales Rep <span className="text-red-500">*</span></Label>
+              <Select
+                value={formData.assignedRepId || "none"}
+                onValueChange={(value) => handleChange("assignedRepId", value && value !== "none" ? value : "")}
+                disabled={user?.role === "rep"}
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder={assigneesLoading ? "Loading assignees..." : "Select assignee"}>
+                    {getSelectedOptionLabel(assigneeOptions, formData.assignedRepId, assigneesLoading ? "Loading assignees..." : "Select assignee")}
+                  </SelectValue>
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">Select assignee</SelectItem>
+                  {assignees.map((assignee) => (
+                    <SelectItem key={assignee.id} value={assignee.id}>
+                      {assignee.displayName}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
           )}
 
