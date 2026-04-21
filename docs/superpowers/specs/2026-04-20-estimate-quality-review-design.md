@@ -144,11 +144,16 @@ Each recommendation option should carry:
 - pricing rationale
 - whether it was recommended default or alternate
 
-Custom promoted catalog items should be distinguishable from synced Procore catalog items:
+Catalog backing types should be distinguishable from synced Procore catalog items:
 
 - `procore_synced`
 - `local_promoted`
 - `estimate_only`
+
+Canonical meaning:
+
+- `estimate_only` is only a manual-row backing type for rows with no catalog item
+- it is not a source type and not a catalog table source
 
 Parent recommendation rows should carry:
 
@@ -162,7 +167,6 @@ Parent recommendation rows should carry:
 Required linkage fields:
 
 - `deal_id`
-- `project_id`
 - `estimate_section_name`
 - `source_document_id`, nullable for manual rows
 - `source_extraction_id`, nullable for inferred or manual rows
@@ -224,7 +228,7 @@ Persistence rules:
 
 - keep synced Procore items in the current catalog mirror
 - add local promoted items to a tenant-scoped local catalog table with `catalog_source = 'local_promoted'`
-- custom rows that are not promoted remain `estimate_only` and are not globally searchable
+- manual rows that are not promoted remain `estimate_only` and are not globally searchable
 
 Server responsibilities:
 
@@ -333,6 +337,12 @@ Duplicate suppression order:
 
 If a duplicate is detected, prefer the explicit extracted row over inferred scope.
 
+If a manual row overlaps:
+
+- manual beats inferred
+- extracted beats inferred
+- extracted and manual may both remain visible, but no new inferred suggestion should be generated for that normalized intent in that section
+
 ## Review Lifecycle
 
 Recommendation rows stay inside the workbench until promotion.
@@ -355,6 +365,12 @@ Promotion model:
   - `alternate_selected` and already promoted
   - `overridden` and already promoted
 - `rejected` rows are never promotable
+
+Concrete promote action:
+
+- there is a separate explicit promote action in the workbench
+- accept, alternate select, and override do not auto-promote
+- the explicit promote action writes canonical estimate lines for the current promotable set or a selected subset
 
 Promotable review states:
 
