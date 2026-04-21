@@ -1,4 +1,5 @@
 import { getTableColumns } from "drizzle-orm";
+import { getTableConfig } from "drizzle-orm/pg-core";
 import { describe, expect, it } from "vitest";
 import {
   costCatalogCodes,
@@ -61,6 +62,11 @@ describe("estimating schema exports", () => {
     expect(ruleColumns.marketId.notNull).toBe(false);
     expect(ruleColumns.priority).toBeDefined();
     expect(ruleColumns.fallbackPriority).toBeDefined();
+
+    const overrideConfig = getTableConfig(estimateDealMarketOverrides);
+    expect(
+      overrideConfig.foreignKeys.map((fk) => fk.getName())
+    ).toContain("estimate_deal_market_overrides_deal_id_deals_id_fk");
 
     const recommendationColumns = getTableColumns(estimatePricingRecommendations);
     expect(recommendationColumns.sourceType).toBeDefined();

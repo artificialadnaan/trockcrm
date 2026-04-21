@@ -1,5 +1,6 @@
 import {
   boolean,
+  check,
   index,
   integer,
   numeric,
@@ -12,6 +13,7 @@ import {
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { regionConfig } from "../public/region-config.js";
+import { deals } from "./deals.js";
 import { users } from "../public/users.js";
 
 export const estimateMarkets = pgTable(
@@ -33,6 +35,10 @@ export const estimateMarkets = pgTable(
     index("estimate_markets_state_idx").on(table.stateCode, table.isActive),
     index("estimate_markets_region_idx").on(table.regionId, table.isActive),
     index("estimate_markets_active_idx").on(table.isActive),
+    check(
+      "estimate_markets_type_check",
+      sql`${table.type} in ('global', 'metro', 'state', 'region')`
+    ),
   ]
 );
 
@@ -55,6 +61,10 @@ export const estimateMarketZipMappings = pgTable(
   (table) => [
     uniqueIndex("estimate_market_zip_mappings_zip_uidx").on(table.zip),
     index("estimate_market_zip_mappings_market_idx").on(table.marketId, table.isActive),
+    check(
+      "estimate_market_zip_mappings_source_confidence_check",
+      sql`${table.sourceConfidence} >= 0 and ${table.sourceConfidence} <= 1`
+    ),
   ]
 );
 
@@ -77,6 +87,10 @@ export const estimateMarketFallbackGeographies = pgTable(
       table.resolutionKey
     ),
     index("estimate_market_fallback_geographies_market_idx").on(table.marketId, table.isActive),
+    check(
+      "estimate_market_fallback_geographies_resolution_type_check",
+      sql`${table.resolutionType} in ('global', 'metro', 'state', 'region')`
+    ),
   ]
 );
 
@@ -137,6 +151,27 @@ export const estimateMarketAdjustmentRules = pgTable(
       table.fallbackScopeKey,
       table.fallbackPriority
     ),
+    check(
+      "estimate_market_adjustment_rules_scope_type_check",
+      sql`${table.scopeType} in ('global', 'metro', 'state', 'region')`
+    ),
+    check(
+      "estimate_market_adjustment_rules_fallback_scope_type_check",
+      sql`${table.fallbackScopeType} is null or ${table.fallbackScopeType} in ('global', 'metro', 'state', 'region')`
+    ),
+    check(
+      "estimate_market_adjustment_rules_weight_check",
+      sql`
+        ${table.defaultLaborWeight} >= 0 and ${table.defaultLaborWeight} <= 1 and
+        ${table.defaultMaterialWeight} >= 0 and ${table.defaultMaterialWeight} <= 1 and
+        ${table.defaultEquipmentWeight} >= 0 and ${table.defaultEquipmentWeight} <= 1 and
+        (${table.defaultLaborWeight} + ${table.defaultMaterialWeight} + ${table.defaultEquipmentWeight}) = 1
+      `
+    ),
+    check(
+      "estimate_market_adjustment_rules_effective_window_check",
+      sql`${table.effectiveTo} is null or ${table.effectiveTo} >= ${table.effectiveFrom}`
+    ),
   ]
 );
 
@@ -144,7 +179,9 @@ export const estimateDealMarketOverrides = pgTable(
   "estimate_deal_market_overrides",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    dealId: uuid("deal_id").notNull(),
+    dealId: uuid("deal_id")
+      .references(() => deals.id, { onDelete: "cascade" })
+      .notNull(),
     marketId: uuid("market_id")
       .references(() => estimateMarkets.id, { onDelete: "cascade" })
       .notNull(),

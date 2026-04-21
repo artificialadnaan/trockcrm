@@ -20,7 +20,8 @@ BEGIN
          is_active BOOLEAN NOT NULL DEFAULT TRUE,
          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-         CONSTRAINT estimate_markets_slug_uidx UNIQUE (slug)
+         CONSTRAINT estimate_markets_slug_uidx UNIQUE (slug),
+         CONSTRAINT estimate_markets_type_check CHECK (type IN ('global', 'metro', 'state', 'region'))
        )',
       schema_name
     );
@@ -59,7 +60,9 @@ BEGIN
          is_active BOOLEAN NOT NULL DEFAULT TRUE,
          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-         CONSTRAINT estimate_market_zip_mappings_zip_uidx UNIQUE (zip)
+         CONSTRAINT estimate_market_zip_mappings_zip_uidx UNIQUE (zip),
+         CONSTRAINT estimate_market_zip_mappings_source_confidence_check
+           CHECK (source_confidence >= 0 AND source_confidence <= 1)
        )',
       schema_name,
       schema_name
@@ -80,7 +83,9 @@ BEGIN
          is_active BOOLEAN NOT NULL DEFAULT TRUE,
          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-         CONSTRAINT estimate_market_fallback_geographies_scope_uidx UNIQUE (resolution_type, resolution_key)
+         CONSTRAINT estimate_market_fallback_geographies_scope_uidx UNIQUE (resolution_type, resolution_key),
+         CONSTRAINT estimate_market_fallback_geographies_resolution_type_check
+           CHECK (resolution_type IN ('global', 'metro', 'state', 'region'))
        )',
       schema_name,
       schema_name
@@ -112,7 +117,20 @@ BEGIN
          effective_to TIMESTAMPTZ,
          is_active BOOLEAN NOT NULL DEFAULT TRUE,
          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+         CONSTRAINT estimate_market_adjustment_rules_scope_type_check
+           CHECK (scope_type IN ('global', 'metro', 'state', 'region')),
+         CONSTRAINT estimate_market_adjustment_rules_fallback_scope_type_check
+           CHECK (fallback_scope_type IS NULL OR fallback_scope_type IN ('global', 'metro', 'state', 'region')),
+         CONSTRAINT estimate_market_adjustment_rules_weight_check
+           CHECK (
+             default_labor_weight >= 0 AND default_labor_weight <= 1 AND
+             default_material_weight >= 0 AND default_material_weight <= 1 AND
+             default_equipment_weight >= 0 AND default_equipment_weight <= 1 AND
+             (default_labor_weight + default_material_weight + default_equipment_weight) = 1
+           ),
+         CONSTRAINT estimate_market_adjustment_rules_effective_window_check
+           CHECK (effective_to IS NULL OR effective_to >= effective_from)
        )',
       schema_name,
       schema_name
@@ -147,7 +165,7 @@ BEGIN
     EXECUTE format(
       'CREATE TABLE IF NOT EXISTS %I.estimate_deal_market_overrides (
          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-         deal_id UUID NOT NULL,
+         deal_id UUID NOT NULL REFERENCES %I.deals(id) ON DELETE CASCADE,
          market_id UUID NOT NULL REFERENCES %I.estimate_markets(id) ON DELETE CASCADE,
          overridden_by_user_id UUID NOT NULL REFERENCES public.users(id),
          override_reason TEXT,
@@ -272,7 +290,8 @@ CREATE TABLE IF NOT EXISTS estimate_markets (
   is_active BOOLEAN NOT NULL DEFAULT TRUE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  CONSTRAINT estimate_markets_slug_uidx UNIQUE (slug)
+  CONSTRAINT estimate_markets_slug_uidx UNIQUE (slug),
+  CONSTRAINT estimate_markets_type_check CHECK (type IN ('global', 'metro', 'state', 'region'))
 );
 
 CREATE INDEX IF NOT EXISTS estimate_markets_active_idx
@@ -296,7 +315,9 @@ CREATE TABLE IF NOT EXISTS estimate_market_zip_mappings (
   is_active BOOLEAN NOT NULL DEFAULT TRUE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  CONSTRAINT estimate_market_zip_mappings_zip_uidx UNIQUE (zip)
+  CONSTRAINT estimate_market_zip_mappings_zip_uidx UNIQUE (zip),
+  CONSTRAINT estimate_market_zip_mappings_source_confidence_check
+    CHECK (source_confidence >= 0 AND source_confidence <= 1)
 );
 
 CREATE INDEX IF NOT EXISTS estimate_market_zip_mappings_market_idx
@@ -310,7 +331,9 @@ CREATE TABLE IF NOT EXISTS estimate_market_fallback_geographies (
   is_active BOOLEAN NOT NULL DEFAULT TRUE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  CONSTRAINT estimate_market_fallback_geographies_scope_uidx UNIQUE (resolution_type, resolution_key)
+  CONSTRAINT estimate_market_fallback_geographies_scope_uidx UNIQUE (resolution_type, resolution_key),
+  CONSTRAINT estimate_market_fallback_geographies_resolution_type_check
+    CHECK (resolution_type IN ('global', 'metro', 'state', 'region'))
 );
 
 CREATE INDEX IF NOT EXISTS estimate_market_fallback_geographies_market_idx
@@ -335,7 +358,20 @@ CREATE TABLE IF NOT EXISTS estimate_market_adjustment_rules (
   effective_to TIMESTAMPTZ,
   is_active BOOLEAN NOT NULL DEFAULT TRUE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT estimate_market_adjustment_rules_scope_type_check
+    CHECK (scope_type IN ('global', 'metro', 'state', 'region')),
+  CONSTRAINT estimate_market_adjustment_rules_fallback_scope_type_check
+    CHECK (fallback_scope_type IS NULL OR fallback_scope_type IN ('global', 'metro', 'state', 'region')),
+  CONSTRAINT estimate_market_adjustment_rules_weight_check
+    CHECK (
+      default_labor_weight >= 0 AND default_labor_weight <= 1 AND
+      default_material_weight >= 0 AND default_material_weight <= 1 AND
+      default_equipment_weight >= 0 AND default_equipment_weight <= 1 AND
+      (default_labor_weight + default_material_weight + default_equipment_weight) = 1
+    ),
+  CONSTRAINT estimate_market_adjustment_rules_effective_window_check
+    CHECK (effective_to IS NULL OR effective_to >= effective_from)
 );
 
 CREATE INDEX IF NOT EXISTS estimate_market_adjustment_rules_selection_idx
@@ -354,7 +390,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS estimate_market_adjustment_rules_default_scope
 
 CREATE TABLE IF NOT EXISTS estimate_deal_market_overrides (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  deal_id UUID NOT NULL,
+  deal_id UUID NOT NULL REFERENCES estimate_deals(id) ON DELETE CASCADE,
   market_id UUID NOT NULL REFERENCES estimate_markets(id) ON DELETE CASCADE,
   overridden_by_user_id UUID NOT NULL REFERENCES public.users(id),
   override_reason TEXT,
