@@ -243,6 +243,11 @@ Manual row storage contract:
   - if the estimator creates the manual row by selecting a catalog result in the add-item flow, create it directly in `accepted` state with that option selected
   - estimator-created catalog-backed manual rows still use `manual_origin = 'manual_estimator_added'`
   - rerun carry-forward clones of manual rows use `manual_origin = 'generated'`
+- if the estimator switches a catalog-backed manual row back to free-text:
+  - clear `selected_option_id`
+  - set `selected_source_type = 'manual'`
+  - set `catalog_backing = 'estimate_only'`
+  - keep `manual_*`, `manual_identity_key`, and `normalized_intent` as the active free-text baseline
 
 `source_row_identity` definition:
 
@@ -476,6 +481,7 @@ Allowed actions:
   - marks the parent row `overridden`
   - stores overridden quantity/unit/price values on the parent recommendation row in `override_*` fields
   - keeps a matching review event for audit
+  - when `override_*` fields are present, they take precedence over selected option or manual baseline values during promotion; `selected_option_id` remains provenance only
 - reject:
   - marks the parent row `rejected`
   - keeps audit evidence but removes it from promotable output
