@@ -1,5 +1,9 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { getTableColumns } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
+import * as publicSchema from "../../../../shared/src/schema/public/index.js";
+import * as rootSchema from "../../../../shared/src/schema/index.js";
 import { hubspotOwnerMappings } from "../../../../shared/src/schema/public/hubspot-owner-mappings.js";
 import { deals } from "../../../../shared/src/schema/tenant/deals.js";
 import { leads } from "../../../../shared/src/schema/tenant/leads.js";
@@ -33,5 +37,28 @@ describe("ownership sync schema contract", () => {
     expect(mappingColumns.lastSeenAt.name).toBe("last_seen_at");
     expect(mappingColumns.updatedAt.name).toBe("updated_at");
     expect(mappingColumns.createdAt.name).toBe("created_at");
+  });
+
+  it("re-exports hubspotOwnerMappings from the public and root schema barrels", () => {
+    expect(publicSchema.hubspotOwnerMappings).toBe(hubspotOwnerMappings);
+    expect(rootSchema.hubspotOwnerMappings).toBe(hubspotOwnerMappings);
+  });
+
+  it("includes the Task 1 ownership migration contract in SQL", () => {
+    const migrationSql = readFileSync(
+      resolve(process.cwd(), "../migrations/0042_hubspot_ownership_cleanup_phase_1.sql"),
+      "utf8"
+    );
+
+    expect(migrationSql).toContain("CREATE TABLE IF NOT EXISTS public.hubspot_owner_mappings");
+    expect(migrationSql).toContain("hubspot_owner_id varchar(64) NOT NULL UNIQUE");
+    expect(migrationSql).toContain("hubspot_owner_email varchar(320)");
+    expect(migrationSql).toContain("mapping_status varchar(32) NOT NULL DEFAULT 'pending'");
+    expect(migrationSql).toContain("ALTER TABLE deals");
+    expect(migrationSql).toContain("ADD COLUMN IF NOT EXISTS hubspot_owner_id varchar(64)");
+    expect(migrationSql).toContain("ADD COLUMN IF NOT EXISTS ownership_synced_at timestamptz");
+    expect(migrationSql).toContain("ADD COLUMN IF NOT EXISTS ownership_sync_status varchar(32)");
+    expect(migrationSql).toContain("ADD COLUMN IF NOT EXISTS unassigned_reason_code varchar(64)");
+    expect(migrationSql).toContain("ALTER TABLE leads");
   });
 });
