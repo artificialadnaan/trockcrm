@@ -24,8 +24,8 @@ import { MergeQueuePage } from "@/pages/admin/merge-queue-page";
 import { EmailInboxPage } from "@/pages/email/email-inbox-page";
 import { TaskListPage } from "@/pages/tasks/task-list-page";
 import { FilesPage } from "@/pages/files/files-page";
-import { RepDashboardPage } from "@/pages/dashboard/rep-dashboard-page";
 import { DirectorDashboardPage } from "@/pages/director/director-dashboard-page";
+import { HomeDashboardPage } from "@/pages/dashboard/home-dashboard-page";
 import { DirectorRepDetail } from "@/pages/director/director-rep-detail";
 import { ReportsPage } from "@/pages/reports/reports-page";
 import { ProjectsPage } from "@/pages/projects/projects-page";
@@ -52,12 +52,6 @@ import { PhotoCapturePage } from "@/pages/photos/photo-capture-page";
 import { PhotoFeedPage } from "@/pages/photos/photo-feed-page";
 import { Toaster } from "@/components/ui/sonner";
 
-function HomePage() {
-  const { user } = useAuth();
-  if (user?.role === "rep") return <RepDashboardPage />;
-  return <DirectorDashboardPage />;
-}
-
 function AuthGate({ children }: { children: ReactNode }) {
   const { user, loading } = useAuth();
 
@@ -81,7 +75,7 @@ export function App() {
           <Routes>
             <Route path="/photos/capture" element={<PhotoCapturePage />} />
             <Route element={<AppShell />}>
-              <Route path="/" element={<HomePage />} />
+              <Route path="/" element={<HomeDashboardPage />} />
               <Route path="/deals" element={<DealListPage />} />
               <Route path="/deals/new" element={<DealNewPage />} />
               <Route path="/deals/:id" element={<DealDetailPage />} />
