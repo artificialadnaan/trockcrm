@@ -1,5 +1,5 @@
 import { drizzle } from "drizzle-orm/node-postgres";
-import { and, eq, sql } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import * as schema from "@trock-crm/shared/schema";
 import {
   costCatalogSources,
@@ -19,6 +19,7 @@ import {
   buildPricingRecommendation,
   isConfirmedMeasurementCandidateForPricing,
 } from "../../../server/src/modules/estimating/pricing-service.js";
+import { cloneManualRowsForGenerationRun } from "../../../server/src/modules/estimating/draft-estimate-service.js";
 import { buildRecommendationOptionSet } from "../../../server/src/modules/estimating/recommendation-option-service.js";
 
 async function resolveSchemaName(officeId: string | null) {
@@ -146,6 +147,30 @@ export async function runEstimateGeneration(
 
     if (!payload.dealId) {
       throw new Error("dealId is required for estimate generation");
+    }
+
+    const previousRunQuery = tenantDb
+      .select({ id: estimateGenerationRuns.id })
+      .from(estimateGenerationRuns)
+      .where(
+        and(
+          eq(estimateGenerationRuns.dealId, payload.dealId),
+          eq(estimateGenerationRuns.status, "completed")
+        )
+      ) as any;
+    const previousRunRows =
+      typeof previousRunQuery.orderBy === "function"
+        ? await previousRunQuery.orderBy(desc(estimateGenerationRuns.startedAt)).limit(1)
+        : await previousRunQuery;
+    const [previousCompletedRun] = Array.isArray(previousRunRows) ? previousRunRows : [previousRunRows];
+
+    if (previousCompletedRun?.id) {
+      await cloneManualRowsForGenerationRun({
+        tenantDb: tenantDb as any,
+        dealId: payload.dealId,
+        sourceGenerationRunId: previousCompletedRun.id,
+        targetGenerationRunId: generationRunId,
+      });
     }
 
     const [source] = await appDb

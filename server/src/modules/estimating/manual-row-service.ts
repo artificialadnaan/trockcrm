@@ -3,12 +3,15 @@ import { and, eq } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import {
+  costCatalogSources,
   estimatePricingRecommendationOptions,
   estimatePricingRecommendations,
 } from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
+import { listCatalogCandidatesForMatching, resolveActiveCatalogSnapshotVersionId } from "./catalog-read-model-service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
+type AppDb = NodePgDatabase<typeof schema>;
 
 export type ManualRecommendationOptionInput = {
   optionLabel: string;
@@ -35,6 +38,7 @@ export type CreateManualEstimateRowInput = {
 
 export type UpdateManualEstimateRowInput = {
   estimateSectionName?: string | null;
+  catalogQuery?: string | null;
   manualLabel?: string | null;
   manualQuantity?: string | null;
   manualUnit?: string | null;
@@ -120,7 +124,7 @@ async function insertManualOptions(
   const inserted: Array<ManualRecommendationOptionInput & { id: string }> = [];
   for (let index = 0; index < options.length; index += 1) {
     const option = options[index]!;
-    const [row] = await tenantDb
+    const insertQuery = tenantDb
       .insert(estimatePricingRecommendationOptions)
       .values({
         recommendationId,
@@ -129,8 +133,10 @@ async function insertManualOptions(
         optionKind: option.optionKind ?? (index === 0 ? "recommended" : "alternate"),
         catalogItemId: option.catalogItemId ?? null,
         localCatalogItemId: option.localCatalogItemId ?? null,
-      })
-      .returning();
+      }) as any;
+    const rowResult =
+      typeof insertQuery.returning === "function" ? await insertQuery.returning() : await insertQuery;
+    const row = Array.isArray(rowResult) ? rowResult[0] : rowResult;
 
     if (row) {
       inserted.push({
@@ -143,15 +149,91 @@ async function insertManualOptions(
   return inserted;
 }
 
+async function insertRecommendationRow(tenantDb: TenantDb, values: Record<string, unknown>) {
+  const insertQuery = tenantDb.insert(estimatePricingRecommendations).values(values) as any;
+  if (typeof insertQuery.returning === "function") {
+    const rows = await insertQuery.returning();
+    return rows[0] ? { ...values, ...rows[0] } : { ...values };
+  }
+
+  const result = await insertQuery;
+  const row = Array.isArray(result) ? result[0] : result;
+  return row ? { ...values, ...row } : { ...values };
+}
+
+async function searchManualCatalogOptions(appDb: AppDb, catalogQuery: string) {
+  const sourceQuery = appDb
+    .select({ id: costCatalogSources.id })
+    .from(costCatalogSources)
+    .where(eq(costCatalogSources.provider, "procore")) as any;
+  const sourceRows = typeof sourceQuery.limit === "function" ? await sourceQuery.limit(1) : await sourceQuery;
+  const [source] = Array.isArray(sourceRows) ? sourceRows : [sourceRows];
+
+  if (!source) return [];
+
+  const snapshotVersionId = await resolveActiveCatalogSnapshotVersionId(appDb as any, source.id);
+  if (!snapshotVersionId) return [];
+
+  const candidates = await listCatalogCandidatesForMatching(appDb as any, source.id, snapshotVersionId);
+  const normalizedQuery = catalogQuery.trim().toLowerCase();
+
+  return candidates
+    .filter((candidate) => {
+      const haystack = `${candidate.name ?? ""} ${candidate.primaryCode ?? ""}`.toLowerCase();
+      return haystack.includes(normalizedQuery);
+    })
+    .map((candidate, index) => ({
+      optionLabel: candidate.name,
+      optionKind: index === 0 ? "recommended" : "alternate",
+      catalogItemId: candidate.id,
+      localCatalogItemId: null,
+      stableId: candidate.id,
+    }));
+}
+
+async function resolveCatalogFirstOptions(args: {
+  appDb?: AppDb | null;
+  catalogQuery?: string | null;
+  catalogOptions?: ManualRecommendationOptionInput[];
+  selectedOptionStableId?: string | null;
+}) {
+  if (args.catalogOptions && args.catalogOptions.length > 0) {
+    return {
+      optionRows: args.catalogOptions,
+      selectedOption:
+        args.catalogOptions.find((option) => option.stableId === args.selectedOptionStableId) ?? null,
+    };
+  }
+
+  if (args.catalogQuery && args.appDb) {
+    const optionRows = await searchManualCatalogOptions(args.appDb, args.catalogQuery);
+    return {
+      optionRows,
+      selectedOption:
+        optionRows.find((option) => option.stableId === args.selectedOptionStableId) ?? optionRows[0] ?? null,
+    };
+  }
+
+  return {
+    optionRows: [] as ManualRecommendationOptionInput[],
+    selectedOption: null,
+  };
+}
+
 export async function createManualEstimateRow(args: {
   tenantDb: TenantDb;
+  appDb?: AppDb | null;
   dealId: string;
   userId: string;
   input: CreateManualEstimateRowInput;
 }) {
   const manualIdentityKey = normalizeManualIdentityKey(args.input.manualIdentityKey);
-  const selectedOption =
-    args.input.catalogOptions?.find((option) => option.stableId === args.input.selectedOptionStableId) ?? null;
+  const { optionRows: resolvedCatalogOptions, selectedOption } = await resolveCatalogFirstOptions({
+    appDb: args.appDb ?? null,
+    catalogQuery: args.input.catalogQuery ?? null,
+    catalogOptions: args.input.catalogOptions ?? [],
+    selectedOptionStableId: args.input.selectedOptionStableId ?? null,
+  });
   const selectedSourceType =
     selectedOption || args.input.selectedSourceType === "catalog_option" ? "catalog_option" : "manual";
   const catalogBacking = selectedOption?.localCatalogItemId
@@ -177,21 +259,18 @@ export async function createManualEstimateRow(args: {
     promotedLocalCatalogItemId: null,
   });
 
-  const [recommendation] = await args.tenantDb
-    .insert(estimatePricingRecommendations)
-    .values(recommendationValues)
-    .returning();
+  const recommendation = await insertRecommendationRow(args.tenantDb, recommendationValues);
 
   if (!recommendation) {
     throw new AppError(500, "Failed to create manual recommendation");
   }
 
-  const optionRows = await insertManualOptions(args.tenantDb, recommendation.id, args.input.catalogOptions ?? []);
+  const optionRows = await insertManualOptions(args.tenantDb, recommendation.id, resolvedCatalogOptions);
 
   let updatedRecommendation = recommendation;
   if (selectedOption) {
     const [selectedRow] = optionRows.filter((option) => option.stableId === selectedOption.stableId);
-    const [patched] = await args.tenantDb
+    const patchedQuery = args.tenantDb
       .update(estimatePricingRecommendations)
       .set({
         selectedSourceType: "catalog_option",
@@ -203,8 +282,10 @@ export async function createManualEstimateRow(args: {
           eq(estimatePricingRecommendations.id, recommendation.id),
           eq(estimatePricingRecommendations.dealId, args.dealId)
         )
-      )
-      .returning();
+      ) as any;
+    const patchedRows =
+      typeof patchedQuery.returning === "function" ? await patchedQuery.returning() : await patchedQuery;
+    const [patched] = Array.isArray(patchedRows) ? patchedRows : [patchedRows];
 
     if (patched) {
       updatedRecommendation = patched;
@@ -219,6 +300,7 @@ export async function createManualEstimateRow(args: {
 
 export async function updateManualEstimateRow(args: {
   tenantDb: TenantDb;
+  appDb?: AppDb | null;
   dealId: string;
   recommendationId: string;
   userId: string;
@@ -240,8 +322,12 @@ export async function updateManualEstimateRow(args: {
   }
 
   const manualIdentityKey = normalizeManualIdentityKey(existing.manualIdentityKey);
-  const selectedOption =
-    args.input.catalogOptions?.find((option) => option.stableId === args.input.selectedOptionStableId) ?? null;
+  const { optionRows: resolvedCatalogOptions, selectedOption } = await resolveCatalogFirstOptions({
+    appDb: args.appDb ?? null,
+    catalogQuery: args.input.catalogQuery ?? null,
+    catalogOptions: args.input.catalogOptions ?? [],
+    selectedOptionStableId: args.input.selectedOptionStableId ?? null,
+  });
   const selectedSourceType =
     args.input.selectedSourceType === "catalog_option" || selectedOption ? "catalog_option" : "manual";
   const catalogBacking =
@@ -282,7 +368,7 @@ export async function updateManualEstimateRow(args: {
     patch.catalogBacking = "estimate_only";
   }
 
-  const [updated] = await args.tenantDb
+  const updateQuery = args.tenantDb
     .update(estimatePricingRecommendations)
     .set(patch)
     .where(
@@ -290,19 +376,21 @@ export async function updateManualEstimateRow(args: {
         eq(estimatePricingRecommendations.id, args.recommendationId),
         eq(estimatePricingRecommendations.dealId, args.dealId)
       )
-    )
-    .returning();
+    ) as any;
+  const updatedRows =
+    typeof updateQuery.returning === "function" ? await updateQuery.returning() : await updateQuery;
+  const [updated] = Array.isArray(updatedRows) ? updatedRows : [updatedRows];
 
   if (!updated) {
     throw new AppError(404, "Manual estimate recommendation not found");
   }
 
-  const optionRows = await insertManualOptions(args.tenantDb, updated.id, args.input.catalogOptions ?? []);
+  const optionRows = await insertManualOptions(args.tenantDb, updated.id, resolvedCatalogOptions);
 
   let finalRecommendation = updated;
   if (selectedOption && args.input.selectedOptionId == null) {
     const [selectedRow] = optionRows.filter((option) => option.stableId === selectedOption.stableId);
-    const [patched] = await args.tenantDb
+    const patchedQuery = args.tenantDb
       .update(estimatePricingRecommendations)
       .set({
         selectedSourceType: "catalog_option",
@@ -314,8 +402,10 @@ export async function updateManualEstimateRow(args: {
           eq(estimatePricingRecommendations.id, args.recommendationId),
           eq(estimatePricingRecommendations.dealId, args.dealId)
         )
-      )
-      .returning();
+      ) as any;
+    const patchedRows =
+      typeof patchedQuery.returning === "function" ? await patchedQuery.returning() : await patchedQuery;
+    const [patched] = Array.isArray(patchedRows) ? patchedRows : [patchedRows];
 
     if (patched) {
       finalRecommendation = patched;

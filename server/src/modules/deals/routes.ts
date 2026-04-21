@@ -1031,6 +1031,7 @@ router.post("/:id/estimating/manual-rows", async (req, res, next) => {
 
     const result = await createManualEstimateRow({
       tenantDb: req.tenantDb! as any,
+      appDb: req.appDb! as any,
       dealId: req.params.id,
       userId: req.user!.id,
       input: req.body,
@@ -1050,6 +1051,7 @@ router.patch("/:id/estimating/manual-rows/:recommendationId", async (req, res, n
 
     const result = await updateManualEstimateRow({
       tenantDb: req.tenantDb! as any,
+      appDb: req.appDb! as any,
       dealId: req.params.id,
       recommendationId: req.params.recommendationId,
       userId: req.user!.id,

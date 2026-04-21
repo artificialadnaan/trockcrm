@@ -20,6 +20,7 @@ const isConfirmedMeasurementCandidateForPricingMock = vi.fn((input: any) =>
   input.extractionType !== "measurement_candidate" ||
   input.metadataJson?.measurementConfirmationState === "approved"
 );
+const cloneManualRowsForGenerationRunMock = vi.fn();
 
 vi.mock("drizzle-orm/node-postgres", () => ({
   drizzle: drizzleMock,
@@ -49,6 +50,10 @@ vi.mock("../../../server/src/modules/estimating/pricing-service.js", () => ({
   buildPricingRecommendation: buildPricingRecommendationMock,
   isInferredRecommendationRowEligible: isInferredRecommendationRowEligibleMock,
   isConfirmedMeasurementCandidateForPricing: isConfirmedMeasurementCandidateForPricingMock,
+}));
+
+vi.mock("../../../server/src/modules/estimating/draft-estimate-service.js", () => ({
+  cloneManualRowsForGenerationRun: cloneManualRowsForGenerationRunMock,
 }));
 
 function readSqlText(query: any) {
@@ -171,6 +176,14 @@ describe("estimate generation job", () => {
           tenantSelectCallCount += 1;
 
           if (tenantSelectCallCount === 1) {
+            return {
+              where: vi.fn(() => ({
+                limit: vi.fn().mockResolvedValue([]),
+              })),
+            };
+          }
+
+          if (tenantSelectCallCount === 2) {
             return {
               where: extractionWhere,
             };
@@ -314,6 +327,13 @@ describe("estimate generation job", () => {
           tenantSelectCallCount += 1;
           if (tenantSelectCallCount === 1) {
             return {
+              where: vi.fn(() => ({
+                limit: vi.fn().mockResolvedValue([]),
+              })),
+            };
+          }
+          if (tenantSelectCallCount === 2) {
+            return {
               where: extractionWhere,
             };
           }
@@ -456,6 +476,13 @@ describe("estimate generation job", () => {
           tenantSelectCallCount += 1;
           if (tenantSelectCallCount === 1) {
             return {
+              where: vi.fn(() => ({
+                limit: vi.fn().mockResolvedValue([]),
+              })),
+            };
+          }
+          if (tenantSelectCallCount === 2) {
+            return {
               where: extractionWhere,
             };
           }
@@ -563,6 +590,13 @@ describe("estimate generation job", () => {
           tenantSelectCallCount += 1;
           if (tenantSelectCallCount === 1) {
             return {
+              where: vi.fn(() => ({
+                limit: vi.fn().mockResolvedValue([]),
+              })),
+            };
+          }
+          if (tenantSelectCallCount === 2) {
+            return {
               where: extractionWhere,
             };
           }
@@ -645,6 +679,14 @@ describe("estimate generation job", () => {
 
           if (tenantSelectCallCount === 1) {
             return {
+              where: vi.fn(() => ({
+                limit: vi.fn().mockResolvedValue([]),
+              })),
+            };
+          }
+
+          if (tenantSelectCallCount === 2) {
+            return {
               where: extractionWhere,
             };
           }
@@ -694,5 +736,96 @@ describe("estimate generation job", () => {
     );
     expect(generationRunWhere).toHaveBeenCalled();
     expect(lockedClient.release).toHaveBeenCalledTimes(1);
+  });
+
+  it("clones manual rows from the latest completed generation run before processing a rerun", async () => {
+    const sourceLimit = vi.fn().mockResolvedValue([{ id: "source-1" }]);
+    const extractionWhere = vi.fn().mockResolvedValue([]);
+    const appDb = {
+      select: vi.fn(() => ({
+        from: vi.fn(() => ({
+          where: vi.fn(() => ({
+            limit: sourceLimit,
+          })),
+        })),
+      })),
+    } as any;
+    const lockedClient = {
+      query: vi
+        .fn()
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [{ id: "doc-1", active_parse_run_id: "parse-run-1" }] })
+        .mockResolvedValueOnce({ rows: [] }),
+      release: vi.fn(),
+    } as any;
+    let tenantSelectCallCount = 0;
+    const tenantDb = {
+      select: vi.fn(() => ({
+        from: vi.fn(() => {
+          tenantSelectCallCount += 1;
+
+          if (tenantSelectCallCount === 1) {
+            return {
+              where: vi.fn(() => ({
+                orderBy: vi.fn(() => ({
+                  limit: vi.fn().mockResolvedValue([{ id: "run-prev" }]),
+                })),
+              })),
+            };
+          }
+
+          if (tenantSelectCallCount === 2) {
+            return {
+              where: extractionWhere,
+            };
+          }
+
+          throw new Error(`Unexpected tenant select call: ${tenantSelectCallCount}`);
+        }),
+      })),
+      insert: vi.fn(() => ({
+        values: vi.fn(() => ({
+          returning: vi.fn().mockResolvedValue([
+            {
+              id: "generation-run-1",
+            },
+          ]),
+        })),
+      })),
+      update: vi.fn(() => ({
+        set: vi.fn(() => ({
+          where: vi.fn().mockResolvedValue(undefined),
+        })),
+      })),
+    } as any;
+
+    getHistoricalPricingSignalsMock.mockResolvedValue({
+      historicalItems: [],
+      vendorQuotes: [],
+      currentDeal: null,
+    });
+    poolConnectMock.mockResolvedValue(lockedClient);
+    drizzleMock.mockReturnValueOnce(appDb).mockReturnValueOnce(tenantDb);
+
+    const { runEstimateGeneration } = await import("../../src/jobs/estimate-generation.js");
+
+    await runEstimateGeneration(
+      {
+        documentId: "doc-1",
+        dealId: "deal-1",
+        parseRunId: "parse-run-1",
+      },
+      "office-1"
+    );
+
+    expect(cloneManualRowsForGenerationRunMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        dealId: "deal-1",
+        sourceGenerationRunId: "run-prev",
+        targetGenerationRunId: "generation-run-1",
+      })
+    );
   });
 });
