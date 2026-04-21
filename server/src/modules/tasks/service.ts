@@ -340,6 +340,8 @@ export async function getTasks(
         assignedToName,
         createdBy: tasks.createdBy,
         dealId: tasks.dealId,
+        dealName: deals.name,
+        dealNumber: deals.dealNumber,
         contactId: tasks.contactId,
         emailId: tasks.emailId,
         dueDate: tasks.dueDate,
@@ -355,6 +357,7 @@ export async function getTasks(
         updatedAt: tasks.updatedAt,
       })
       .from(tasks)
+      .leftJoin(deals, eq(tasks.dealId, deals.id))
       .where(where)
       .orderBy(
         // Priority-sectioned ordering per spec:
@@ -442,6 +445,8 @@ export async function getProjectTasks(
       assignedToName,
       createdBy: tasks.createdBy,
       dealId: tasks.dealId,
+      dealName: deals.name,
+      dealNumber: deals.dealNumber,
       contactId: tasks.contactId,
       emailId: tasks.emailId,
       dueDate: tasks.dueDate,
@@ -457,6 +462,7 @@ export async function getProjectTasks(
       updatedAt: tasks.updatedAt,
     })
     .from(tasks)
+    .leftJoin(deals, eq(tasks.dealId, deals.id))
     .where(eq(tasks.dealId, dealId))
     .orderBy(desc(tasks.isOverdue), asc(priorityRank), asc(tasks.dueDate), asc(tasks.title));
 }

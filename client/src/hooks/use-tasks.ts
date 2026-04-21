@@ -21,6 +21,8 @@ export interface Task {
   assignedToName: string | null;
   createdBy: string | null;
   dealId: string | null;
+  dealName: string | null;
+  dealNumber: string | null;
   contactId: string | null;
   emailId: string | null;
   dueDate: string | null;

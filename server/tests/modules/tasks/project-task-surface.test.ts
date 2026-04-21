@@ -62,6 +62,7 @@ type TestUser = {
 function createAwaitableChain(rows: any[]) {
   const chain: Record<string, any> = {
     from: vi.fn(() => chain),
+    leftJoin: vi.fn(() => chain),
     where: vi.fn(() => chain),
     limit: vi.fn(() => chain),
     orderBy: vi.fn(() => chain),
@@ -104,6 +105,7 @@ function createCapturedGetTasksDb() {
   function createChain(rows: any[]) {
     const chain: Record<string, any> = {
       from: vi.fn(() => chain),
+      leftJoin: vi.fn(() => chain),
       where: vi.fn((condition: unknown) => {
         capturedWhere.push(condition);
         return chain;
@@ -355,5 +357,20 @@ describe("project task surface", () => {
 
     expect(result.tasks).toEqual([]);
     expect(flattened).toEqual(expect.arrayContaining(["rep-1", "deal-999"]));
+  });
+
+  it("includes project metadata in shared task payload selections", async () => {
+    const { db } = createCapturedGetTasksDb();
+
+    await (actualTaskService as Record<string, any>).getTasks(
+      db as any,
+      { status: "pending" },
+      "director",
+      "director-1"
+    );
+
+    const taskSelect = db.select.mock.calls[1]?.[0] as Record<string, unknown>;
+    expect(taskSelect).toBeTruthy();
+    expect(Object.keys(taskSelect)).toEqual(expect.arrayContaining(["dealName", "dealNumber"]));
   });
 });
