@@ -165,6 +165,7 @@ describe("DirectorDashboardPage", () => {
     expect(html).toContain("Activity summary");
     expect(html).toContain("Alpha Rep");
     expect(html).toContain("0 activities");
+    expect(html).toContain("/director/rep/rep-1?focus=activity");
   });
 
   it("uses router-based quick actions and rep drill-through inside router context", () => {
@@ -199,6 +200,7 @@ describe("DirectorDashboardPage", () => {
     expect(html).toContain('data-to="/admin/ai-actions"');
     expect(html).toContain('data-to="/deals?filter=stale"');
     expect(html).toContain('data-to="/reports"');
+    expect(html).toContain('data-to="/director/rep/rep-1?focus=activity"');
     expect(navigateSpy).toHaveBeenCalledWith("/director/rep/rep-1");
   });
 });

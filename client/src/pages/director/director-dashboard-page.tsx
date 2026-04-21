@@ -217,7 +217,11 @@ function DirectorDashboardPageLayout({
         <DirectorRepWorkspace repCards={data.repCards} onSelectRep={onSelectRep} />
 
         <div className="space-y-4">
-          <DirectorActivitySummary rows={activitySummaryRows} />
+          <DirectorActivitySummary
+            rows={activitySummaryRows}
+            NavigationLink={NavigationLink}
+            getRepHref={(repId) => `/director/rep/${repId}?focus=activity`}
+          />
 
           <section className="space-y-3">
             <DirectorAlertPanel staleDeals={data.staleDeals} staleLeads={data.staleLeads} />

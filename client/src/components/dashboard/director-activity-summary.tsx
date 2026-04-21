@@ -1,5 +1,15 @@
+import type { ReactNode } from "react";
+
+type ActivitySummaryLinkProps = {
+  to: string;
+  className: string;
+  children: ReactNode;
+};
+
 export function DirectorActivitySummary({
   rows,
+  NavigationLink,
+  getRepHref,
 }: {
   rows: Array<{
     repId: string;
@@ -10,6 +20,8 @@ export function DirectorActivitySummary({
     notes: number;
     total: number;
   }>;
+  NavigationLink: (props: ActivitySummaryLinkProps) => ReactNode;
+  getRepHref: (repId: string) => string;
 }) {
   const topRows = rows.slice().sort((left, right) => right.total - left.total).slice(0, 5);
 
@@ -21,13 +33,17 @@ export function DirectorActivitySummary({
       </p>
       <div className="mt-4 space-y-2">
         {topRows.map((row) => (
-          <div
+          <NavigationLink
             key={row.repId}
+            to={getRepHref(row.repId)}
             className="flex items-center justify-between rounded-xl bg-gray-50 px-3 py-2"
           >
-            <span className="text-sm font-medium text-gray-900">{row.repName}</span>
+            <div>
+              <span className="text-sm font-medium text-gray-900">{row.repName}</span>
+              <p className="text-xs text-gray-400">Open activity detail</p>
+            </div>
             <span className="text-sm text-gray-500">{row.total} activities</span>
-          </div>
+          </NavigationLink>
         ))}
       </div>
     </section>
