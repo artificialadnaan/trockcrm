@@ -78,6 +78,17 @@ function isDuplicateBlockingCandidate(
   return reviewState === "approved" || reviewState === "overridden";
 }
 
+function hasManualPromotionValues(row: EstimatePricingRecommendationRow) {
+  if (row.selectedSourceType !== "manual") {
+    return true;
+  }
+
+  const quantity = typeof row.manualQuantity === "string" ? row.manualQuantity.trim() : row.manualQuantity;
+  const unitPrice =
+    typeof row.manualUnitPrice === "string" ? row.manualUnitPrice.trim() : row.manualUnitPrice;
+  return Boolean(quantity && unitPrice);
+}
+
 function isActiveParseArtifact(
   row: ActiveParseArtifactRow,
   activeParseRunIdByDocumentId: Map<string, string | null>
@@ -133,6 +144,7 @@ export function deriveEstimatePricingWorkbenchRows(
     const suppressedByDuplicateGroup = isInferred;
     const promotable =
       !duplicateGroupBlocked &&
+      hasManualPromotionValues(row) &&
       (reviewState === "approved" || reviewState === "overridden") &&
       !row.promotedEstimateLineItemId;
 

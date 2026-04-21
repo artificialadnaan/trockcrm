@@ -6,6 +6,7 @@ import {
   costCatalogSources,
   estimateExtractions,
   estimateExtractionMatches,
+  estimateGenerationRuns,
   estimatePricingRecommendationOptions,
   estimatePricingRecommendations,
   estimateSourceDocuments,
@@ -135,6 +136,27 @@ async function ensureActiveExtractionMatch(
     (metadataJson as Record<string, unknown>).activeArtifact === false
   ) {
     throw new AppError(400, "Manual rows require an active extraction match");
+  }
+}
+
+async function ensureGenerationRunBelongsToDeal(
+  tenantDb: TenantDb,
+  dealId: string,
+  generationRunId: string
+) {
+  const [row] = await tenantDb
+    .select({ id: estimateGenerationRuns.id })
+    .from(estimateGenerationRuns)
+    .where(
+      and(
+        eq(estimateGenerationRuns.id, generationRunId),
+        eq(estimateGenerationRuns.dealId, dealId)
+      )
+    )
+    .limit(1);
+
+  if (!row) {
+    throw new AppError(400, "Manual rows require a valid generation run");
   }
 }
 
@@ -327,9 +349,13 @@ export async function createManualEstimateRow(args: {
   userId: string;
   input: CreateManualEstimateRowInput;
 }) {
+  if (!args.input.generationRunId?.trim()) {
+    throw new AppError(400, "Manual rows require a valid generation run");
+  }
   if (!args.input.extractionMatchId?.trim()) {
     throw new AppError(400, "Manual rows require an active extraction match");
   }
+  await ensureGenerationRunBelongsToDeal(args.tenantDb, args.dealId, args.input.generationRunId.trim());
   await ensureActiveExtractionMatch(args.tenantDb, args.dealId, args.input.extractionMatchId.trim());
 
   const manualIdentityKey = normalizeManualIdentityKey(args.input.manualIdentityKey);
@@ -350,6 +376,9 @@ export async function createManualEstimateRow(args: {
     : selectedOption?.catalogItemId
       ? "procore_synced"
       : "estimate_only";
+  if (selectedSourceType === "catalog_option" && (!args.input.manualQuantity?.trim() || !args.input.manualUnitPrice?.trim())) {
+    throw new AppError(400, "Catalog-backed manual rows require quantity and unit price");
+  }
 
   const recommendationValues = createManualRecommendationBase({
     dealId: args.dealId,

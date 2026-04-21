@@ -429,6 +429,72 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
     );
   });
 
+  it("blocks promotion for manual rows that still lack pricing", async () => {
+    const tenantDb = {
+      execute: vi.fn().mockResolvedValue(undefined),
+      select: vi
+        .fn()
+        .mockReturnValueOnce({
+          from: vi.fn(() => ({
+            innerJoin: vi.fn(() => ({
+              innerJoin: vi.fn(() => ({
+                where: vi.fn().mockResolvedValue([
+                  {
+                    recommendationId: "rec-manual-incomplete",
+                    description: "Stale extracted label",
+                    quantity: null,
+                    unit: "sq",
+                    unitPrice: null,
+                    notes: "stale note",
+                    sectionName: "Roof",
+                    sourceType: "manual",
+                    selectedSourceType: "manual",
+                    selectedOptionId: null,
+                    manualLabel: "Manual baseline label",
+                    manualQuantity: null,
+                    manualUnit: "ea",
+                    manualUnitPrice: null,
+                    manualNotes: "manual note",
+                    normalizedIntent: "manual row",
+                    sourceRowIdentity: "roof:manual-incomplete",
+                    status: "approved",
+                    createdByRunId: "run-manual",
+                    promotedEstimateLineItemId: null,
+                  },
+                ]),
+              })),
+            })),
+          })),
+        }),
+      update: vi.fn(() => ({
+        set: vi.fn(() => ({
+          where: vi.fn(() => ({
+            returning: vi.fn().mockResolvedValue([]),
+          })),
+        })),
+      })),
+      insert: vi.fn(() => ({
+        values: vi.fn().mockResolvedValue(undefined),
+      })),
+    } as any;
+
+    const result = await promoteApprovedRecommendationsToEstimate({
+      tenantDb,
+      dealId: "deal-1",
+      generationRunId: "run-manual",
+      approvedRecommendationIds: ["rec-manual-incomplete"],
+    });
+
+    expect(estimateServiceMocks.createLineItem).not.toHaveBeenCalled();
+    expect(result.promotedRecommendationIds).toEqual([]);
+    expect(result.rowErrors).toEqual([
+      expect.objectContaining({
+        recommendationId: "rec-manual-incomplete",
+        code: "not_promotable",
+      }),
+    ]);
+  });
+
   it("uses override values when promoting overridden rows", async () => {
     estimateServiceMocks.createSection.mockResolvedValue({ id: "section-override" });
     estimateServiceMocks.createLineItem.mockResolvedValue({ id: "line-override" });

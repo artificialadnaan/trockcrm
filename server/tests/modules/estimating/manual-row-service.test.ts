@@ -12,26 +12,35 @@ const { createManualEstimateRow, updateManualEstimateRow } = await import(
 );
 
 function makeActiveMatchSelect() {
-  return vi.fn(() => ({
-    from: vi.fn(() => ({
-      innerJoin: vi.fn(() => ({
+  return vi
+    .fn()
+    .mockReturnValueOnce({
+      from: vi.fn(() => ({
+        where: vi.fn(() => ({
+          limit: vi.fn().mockResolvedValue([{ id: "run-1" }]),
+        })),
+      })),
+    })
+    .mockReturnValueOnce({
+      from: vi.fn(() => ({
         innerJoin: vi.fn(() => ({
-          where: vi.fn(() => ({
-            limit: vi.fn().mockResolvedValue([
-              {
-                id: "match-1",
-                activeParseRunId: "parse-1",
-                metadataJson: {
-                  sourceParseRunId: "parse-1",
-                  activeArtifact: true,
+          innerJoin: vi.fn(() => ({
+            where: vi.fn(() => ({
+              limit: vi.fn().mockResolvedValue([
+                {
+                  id: "match-1",
+                  activeParseRunId: "parse-1",
+                  metadataJson: {
+                    sourceParseRunId: "parse-1",
+                    activeArtifact: true,
+                  },
                 },
-              },
-            ]),
+              ]),
+            })),
           })),
         })),
       })),
-    })),
-  }));
+    });
 }
 
 describe("manual-row-service", () => {
@@ -53,26 +62,35 @@ describe("manual-row-service", () => {
 
   it("rejects stale extraction matches when creating manual rows", async () => {
     const tenantDb = {
-      select: vi.fn(() => ({
-        from: vi.fn(() => ({
-          innerJoin: vi.fn(() => ({
+      select: vi
+        .fn()
+        .mockReturnValueOnce({
+          from: vi.fn(() => ({
+            where: vi.fn(() => ({
+              limit: vi.fn().mockResolvedValue([{ id: "run-1" }]),
+            })),
+          })),
+        })
+        .mockReturnValueOnce({
+          from: vi.fn(() => ({
             innerJoin: vi.fn(() => ({
-              where: vi.fn(() => ({
-                limit: vi.fn().mockResolvedValue([
-                  {
-                    id: "match-1",
-                    activeParseRunId: "parse-active",
-                    metadataJson: {
-                      sourceParseRunId: "parse-old",
-                      activeArtifact: false,
+              innerJoin: vi.fn(() => ({
+                where: vi.fn(() => ({
+                  limit: vi.fn().mockResolvedValue([
+                    {
+                      id: "match-1",
+                      activeParseRunId: "parse-active",
+                      metadataJson: {
+                        sourceParseRunId: "parse-old",
+                        activeArtifact: false,
+                      },
                     },
-                  },
-                ]),
+                  ]),
+                })),
               })),
             })),
           })),
-        })),
-      })),
+        }),
     } as any;
 
     await expect(
@@ -88,6 +106,32 @@ describe("manual-row-service", () => {
         },
       })
     ).rejects.toThrow("Manual rows require an active extraction match");
+  });
+
+  it("rejects invalid generation runs when creating manual rows", async () => {
+    const tenantDb = {
+      select: vi.fn(() => ({
+        from: vi.fn(() => ({
+          where: vi.fn(() => ({
+            limit: vi.fn().mockResolvedValue([]),
+          })),
+        })),
+      })),
+    } as any;
+
+    await expect(
+      createManualEstimateRow({
+        tenantDb,
+        dealId: "deal-1",
+        userId: "user-1",
+        input: {
+          generationRunId: "run-missing",
+          extractionMatchId: "match-1",
+          estimateSectionName: "Roofing",
+          manualLabel: "Custom flashing",
+        },
+      })
+    ).rejects.toThrow("Manual rows require a valid generation run");
   });
 
   it("normalizes blank manual numeric inputs to null before insert", async () => {
@@ -134,6 +178,37 @@ describe("manual-row-service", () => {
         recommendedTotalPrice: null,
       })
     );
+  });
+
+  it("requires quantity and unit price for catalog-backed manual rows", async () => {
+    const tenantDb = {
+      select: makeActiveMatchSelect(),
+    } as any;
+
+    await expect(
+      createManualEstimateRow({
+        tenantDb,
+        dealId: "deal-1",
+        userId: "user-1",
+        input: {
+          generationRunId: "run-1",
+          extractionMatchId: "match-1",
+          estimateSectionName: "Roofing",
+          manualLabel: "Catalog backed row",
+          selectedSourceType: "catalog_option",
+          selectedOptionStableId: "catalog-1",
+          catalogOptions: [
+            {
+              stableId: "catalog-1",
+              optionLabel: "Catalog item",
+              catalogItemId: "catalog-1",
+            },
+          ],
+          manualQuantity: "",
+          manualUnitPrice: "",
+        },
+      })
+    ).rejects.toThrow("Catalog-backed manual rows require quantity and unit price");
   });
 
   it("uses catalog-first lookup before falling back to free-text manual rows", async () => {
@@ -419,6 +494,8 @@ describe("manual-row-service", () => {
         extractionMatchId: "match-1",
         estimateSectionName: "Roofing",
         manualLabel: "Custom flashing",
+        manualQuantity: "2",
+        manualUnitPrice: "75.00",
         selectedSourceType: "catalog_option",
         selectedOptionStableId: "client-opt-1",
         catalogQuery: "flashing",
