@@ -259,6 +259,13 @@ This field must be persisted directly on the recommendation row so refresh and d
 - do not include section name inside `normalized_intent`; section-specific uniqueness is handled by `source_row_identity`
 - manual rows derive and persist `normalized_intent` from `manual_label` using this same contract at create time and recompute it when the estimator edits the manual label
 
+`estimate_section_name` canonicalization contract:
+
+- trim leading and trailing whitespace before persistence
+- collapse repeated internal whitespace to one space
+- promotion lookup and duplicate grouping compare section names using this canonicalized value
+- implementation may preserve a display label casing separately, but identity and reuse must use the canonicalized section name
+
 ## Local Catalog Model
 
 This slice assumes the existing synced catalog remains intact and adds a local extension layer rather than a separate catalog product.
@@ -430,6 +437,7 @@ Concrete promote action:
 - there is a separate explicit promote action in the workbench
 - accept, alternate select, and override do not auto-promote
 - the explicit promote action writes canonical estimate lines for the current promotable set or a selected subset
+- batch promote is row-scoped, not all-or-nothing: eligible rows promote independently, while blocked rows return row-level errors and create no canonical estimate line
 
 Post-promotion edit rule for this slice:
 
@@ -564,6 +572,7 @@ Manual row refresh behavior:
 - manual rows are not discarded when a new generation run is created
 - on rerun, unresolved manual rows for the deal that are not rejected and do not already have `promoted_estimate_line_item_id` are cloned into the new active generation run
 - carry-forward clones keep the same `source_row_identity`, `manual_*` fields, `manual_identity_key`, latest review state, and `promoted_local_catalog_item_id` so the estimator does not lose manually added work
+- carry-forward clones also preserve `selected_option_id`, `selected_source_type`, `catalog_backing`, and any `override_*` fields so the resolved manual-row state is reconstructed in the new run
 - rows with only `promoted_local_catalog_item_id` still carry forward if they have not yet been promoted into the canonical estimate model
 - rejected rows and rows with `promoted_estimate_line_item_id` remain attached to their historical run for audit and are not copied into the new active run
 
