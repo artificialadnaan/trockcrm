@@ -13,7 +13,7 @@
 ## File Structure
 
 - Create: `shared/src/schema/tenant/estimate-markets.ts`
-  Responsibility: define market, ZIP mapping, adjustment rule, and deal override tables.
+  Responsibility: define market, ZIP mapping, fallback geography, adjustment rule, and deal override tables.
 - Modify: `shared/src/schema/index.ts`
   Responsibility: export the new market-rate schema tables.
 - Create: `migrations/0033_estimating_market_rate.sql`
@@ -79,6 +79,7 @@
   Add expectations for:
   - `estimateMarkets`
   - `estimateMarketZipMappings`
+  - `estimateMarketFallbackGeographies`
   - `estimateMarketAdjustmentRules`
   - `estimateDealMarketOverrides`
 
@@ -90,10 +91,12 @@
   Requirements:
   - canonical market records with active flag
   - ZIP-to-market mapping rows
-  - metro-aware geography fields or mapping rows to support ZIP -> metro -> region/state -> default resolution
-  - market adjustment rules with fallback fields, component percentages, and effective dates
+  - explicit fallback geography storage for metro, state, region, and global/default resolution layers
+  - market adjustment rules with fallback fields, component percentages, default labor/material/equipment split weights, and effective dates
   - deal-level market override rows with user attribution and reason
+  - seed or backfill an initial active default market so fresh tenants have a resolvable fallback and a non-empty override picker
   - indexes for ZIP lookup, rule selection, and deal override reads
+  - follow the tenant-schema replay migration pattern already used by recent tenant migrations, including the `DO $$ ... FOR schema_name ...` block and `TENANT_SCHEMA_START/END` replay section
 
 - [ ] **Step 4: Re-run the schema test and verify it passes**
   Run: `npx vitest run tests/modules/estimating/schema-exports.test.ts`
@@ -123,6 +126,7 @@
   - exact market + scope match outranks broader fallback
   - effective-date filtering excludes expired rules
   - labor/material/equipment deltas are applied separately
+  - default split weights are available for weighted pricing math when a row has no explicit component breakdown
   - rationale payload includes resolved market, resolution level, baseline, and component adjustments
 
 - [ ] **Step 3: Run the focused service tests and verify they fail**
@@ -132,13 +136,13 @@
 - [ ] **Step 4: Implement market resolution service**
   Requirements:
   - accept deal/project location inputs
-  - resolve effective market by override, ZIP mapping, metro-aware geography, broader geography fallback, then default
+  - resolve effective market by override, ZIP mapping, explicit metro/state/region fallback geography storage, then default
   - return both market identity and resolution source
 
 - [ ] **Step 5: Implement market-rate adjustment service**
   Requirements:
   - resolve the best matching active rule for a pricing scope
-  - compute labor/material/equipment deltas from baseline price using rule weights
+  - compute labor/material/equipment deltas from baseline price using persisted default split weights
   - emit a normalized rationale payload with all applied components
 
 - [ ] **Step 6: Re-run the focused service tests and verify they pass**
