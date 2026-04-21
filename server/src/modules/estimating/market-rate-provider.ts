@@ -71,6 +71,25 @@ export function getAllowedPricingScopeTypes(requestedScopeType: PricingScopeType
   );
 }
 
+export function isPricingScopeCandidateRule(
+  rule: Pick<
+    MarketAdjustmentRuleRecord,
+    "scopeType" | "scopeKey" | "fallbackScopeType" | "fallbackScopeKey"
+  >,
+  input: {
+    pricingScopeType: PricingScopeType;
+    pricingScopeKey: string;
+  }
+) {
+  return (
+    (rule.scopeType === input.pricingScopeType && rule.scopeKey === input.pricingScopeKey) ||
+    (isPricingScopeBroadEnough(rule.scopeType, input.pricingScopeType) &&
+      rule.fallbackScopeType === input.pricingScopeType &&
+      rule.fallbackScopeKey === input.pricingScopeKey) ||
+    (rule.scopeType === "general" && rule.scopeKey === "default")
+  );
+}
+
 function buildPricingScopeCandidateFilter(input: {
   pricingScopeType: PricingScopeType;
   pricingScopeKey: string;

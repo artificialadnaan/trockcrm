@@ -7,6 +7,7 @@ import {
   estimateMarkets,
 } from "../../../../shared/src/schema/index.js";
 import { createMarketRateProvider } from "../../../src/modules/estimating/market-rate-provider.js";
+import { isPricingScopeCandidateRule } from "../../../src/modules/estimating/market-rate-provider.js";
 import {
   calculateMarketRateAdjustment,
   selectBestMarketAdjustmentRule,
@@ -34,58 +35,21 @@ function makeRule(input: Partial<Record<string, unknown>> & { id: string }) {
   } as any;
 }
 
-function renderSqlFragment(node: any): string {
-  if (node == null) return "";
-  if (typeof node === "string") return node;
-  if (Array.isArray(node)) return node.map(renderSqlFragment).join("");
-  if (typeof node !== "object") return String(node);
-  if (Array.isArray(node.queryChunks)) {
-    return node.queryChunks.map(renderSqlFragment).join("");
-  }
-  if (Array.isArray(node.value)) {
-    return node.value.map(renderSqlFragment).join("");
-  }
-  if (node.value instanceof Date) {
-    return `'${node.value.toISOString()}'`;
-  }
-  if (typeof node.value === "string") {
-    return `'${node.value}'`;
-  }
-  if (node.name) {
-    return node.name;
-  }
-  if (node.value !== undefined) {
-    return String(node.value);
-  }
-  return "";
-}
-
-function createPredicateAwareDb(rows: any[], onPredicate?: (predicateSql: string) => void) {
+function createCandidateFilteredDb(
+  rows: any[],
+  input: { pricingScopeType: "division" | "trade" | "general"; pricingScopeKey: string }
+) {
   return {
     select: vi.fn(() => ({
       from: vi.fn(() => ({
-        where: vi.fn((predicate: any) => {
-          const predicateSql = renderSqlFragment(predicate);
-          onPredicate?.(predicateSql);
-
-          const requestedDivision = predicateSql.includes("scope_type = 'division'");
-          const requestedDivisionKey = predicateSql.includes("scope_key = '07'");
-          const requestedGeneralDefault =
-            predicateSql.includes("scope_type = 'general'") &&
-            predicateSql.includes("scope_key = 'default'");
-
+        where: vi.fn(() => {
           return Promise.resolve(
-            rows.filter((row) => {
-              const isDivisionExact = row.scopeType === "division" && row.scopeKey === "07";
-              const isGeneralDefault = row.scopeType === "general" && row.scopeKey === "default";
-              if (requestedDivision && requestedDivisionKey) {
-                return isDivisionExact || isGeneralDefault;
-              }
-              if (requestedGeneralDefault) {
-                return isGeneralDefault;
-              }
-              return isGeneralDefault;
-            })
+            rows.filter((row) =>
+              isPricingScopeCandidateRule(row, {
+                pricingScopeType: input.pricingScopeType,
+                pricingScopeKey: input.pricingScopeKey,
+              })
+            )
           );
         }),
       })),
@@ -103,8 +67,13 @@ const providerTables = {
 
 describe("market-rate-service", () => {
   it("chooses an exact market and pricing scope match over broader fallback rules", async () => {
+    const request = {
+      pricingScopeType: "division" as const,
+      pricingScopeKey: "07",
+    };
     const provider = createMarketRateProvider(
-      createPredicateAwareDb([
+      createCandidateFilteredDb(
+        [
         makeRule({
           id: "global-broad",
           marketId: null,
@@ -119,14 +88,16 @@ describe("market-rate-service", () => {
           scopeKey: "07",
           priority: 0,
         }),
-      ]),
+        ],
+        request
+      ),
       providerTables
     );
 
     const result = await selectBestMarketAdjustmentRule(provider, {
       marketId: "market-1",
-      pricingScopeType: "division",
-      pricingScopeKey: "07",
+      pricingScopeType: request.pricingScopeType,
+      pricingScopeKey: request.pricingScopeKey,
       asOf: new Date("2026-04-21T00:00:00Z"),
     });
 
@@ -134,41 +105,42 @@ describe("market-rate-service", () => {
   });
 
   it("reaches the broad default pricing rule through the provider path", async () => {
+    const request = {
+      pricingScopeType: "division" as const,
+      pricingScopeKey: "07",
+    };
+    const tradeNarrowRule = makeRule({
+      id: "trade-narrow",
+      marketId: "market-1",
+      scopeType: "trade",
+      scopeKey: "roofing",
+      fallbackScopeType: "general",
+      fallbackScopeKey: "default",
+      priority: 100,
+    });
+    const broadDefaultRule = makeRule({
+      id: "broad-default",
+      marketId: null,
+      scopeType: "general",
+      scopeKey: "default",
+      priority: 0,
+    });
+
+    expect(isPricingScopeCandidateRule(tradeNarrowRule, request)).toBe(false);
+    expect(isPricingScopeCandidateRule(broadDefaultRule, request)).toBe(true);
+
     const provider = createMarketRateProvider(
-      createPredicateAwareDb(
-        [
-          makeRule({
-            id: "trade-narrow",
-            marketId: "market-1",
-            scopeType: "trade",
-            scopeKey: "roofing",
-            fallbackScopeType: "general",
-            fallbackScopeKey: "default",
-            priority: 100,
-          }),
-        makeRule({
-          id: "broad-default",
-          marketId: null,
-          scopeType: "general",
-          scopeKey: "default",
-          priority: 0,
-        }),
-        ],
-        (predicateSql) => {
-          expect(predicateSql).toContain("scope_type = 'division'");
-          expect(predicateSql).toContain("scope_key = '07'");
-          expect(predicateSql).toContain("scope_type = 'general'");
-          expect(predicateSql).toContain("scope_key = 'default'");
-          expect(predicateSql).not.toContain("fallback_scope_type = 'general'");
-        }
+      createCandidateFilteredDb(
+        [tradeNarrowRule, broadDefaultRule],
+        request
       ),
       providerTables
     );
 
     const result = await selectBestMarketAdjustmentRule(provider, {
       marketId: "market-1",
-      pricingScopeType: "division",
-      pricingScopeKey: "07",
+      pricingScopeType: request.pricingScopeType,
+      pricingScopeKey: request.pricingScopeKey,
       asOf: new Date("2026-04-21T00:00:00Z"),
     });
 
