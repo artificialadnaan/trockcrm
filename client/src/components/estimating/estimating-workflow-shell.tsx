@@ -87,16 +87,27 @@ export function EstimatingWorkflowShell({
       (runId): runId is string => Boolean(runId?.trim())
     )
   );
-  const promotionRunId = workflow.promotionReadiness.generationRunIds[0] ?? null;
+  const promotionRunId =
+    selectedPricingRow?.promotable &&
+    selectedPricingRow?.createdByRunId &&
+    activeGenerationRunIds.has(selectedPricingRow.createdByRunId)
+      ? selectedPricingRow.createdByRunId
+      : workflow.promotionReadiness.generationRunIds.length === 1
+        ? workflow.promotionReadiness.generationRunIds[0] ?? null
+        : null;
   const canPromote = workflow.promotionReadiness.canPromote && Boolean(promotionRunId);
   const selectedPricingRunId = selectedPricingRow?.createdByRunId ?? null;
+  const selectedExtractionMatchId = selectedPricingRow?.extractionMatchId ?? null;
   const manualAddGenerationRunId =
     selectedPricingRunId && activeGenerationRunIds.has(selectedPricingRunId)
       ? selectedPricingRunId
       : null;
   const manualAddSectionName = selectedPricingRow?.sectionName ?? null;
+  const manualAddExtractionMatchId = selectedExtractionMatchId?.trim() ? selectedExtractionMatchId : null;
   const canAddManualRow = Boolean(
-    manualAddGenerationRunId?.trim?.() && manualAddSectionName?.trim?.()
+    manualAddGenerationRunId?.trim?.() &&
+      manualAddSectionName?.trim?.() &&
+      manualAddExtractionMatchId?.trim?.()
   );
 
   const handlePricingReviewAction = async ({
@@ -231,7 +242,9 @@ export function EstimatingWorkflowShell({
                 <p className="text-xs text-muted-foreground">
                   {canPromote
                     ? "Approved rows can be promoted into the canonical estimate."
-                    : "Review and resolve rows before promotion."}
+                    : workflow.promotionReadiness.generationRunIds.length > 1
+                      ? "Focus a promotable row to choose which draft run to promote."
+                      : "Review and resolve rows before promotion."}
                 </p>
               </div>
               <div className="flex flex-wrap items-center gap-2">
@@ -314,6 +327,7 @@ export function EstimatingWorkflowShell({
       <EstimateManualRowDialog
         dealId={dealId}
         generationRunId={manualAddGenerationRunId}
+        extractionMatchId={manualAddExtractionMatchId}
         estimateSectionName={manualAddSectionName}
         open={manualAddOpen}
         onOpenChange={setManualAddOpen}

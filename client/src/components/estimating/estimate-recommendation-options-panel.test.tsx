@@ -121,6 +121,24 @@ describe("EstimateRecommendationOptionsPanel", () => {
     expect(html).toContain("Promote to local catalog");
   });
 
+  it("does not show local-catalog promotion for extracted rows that were only accepted as manual", () => {
+    const html = renderToStaticMarkup(
+      <EstimateRecommendationOptionsPanel
+        dealId="deal-1"
+        recommendation={{
+          id: "price-extracted-manual",
+          sourceType: "extracted",
+          selectedSourceType: "manual",
+          catalogBacking: "estimate_only",
+        }}
+        onReviewAction={vi.fn()}
+        onPromoteLocalCatalog={vi.fn()}
+      />
+    );
+
+    expect(html).not.toContain("Promote to local catalog");
+  });
+
   it("does not fall back to a catalog option as the selected option for free-text manual rows", () => {
     expect(
       getDisplayedSelectedOption({
@@ -144,6 +162,7 @@ describe("EstimateRecommendationOptionsPanel", () => {
       <EstimateManualRowDialog
         dealId="deal-1"
         generationRunId="run-1"
+        extractionMatchId="match-1"
         estimateSectionName="Doors"
         open
         onOpenChange={vi.fn()}
@@ -241,6 +260,7 @@ describe("EstimateRecommendationOptionsPanel", () => {
     await runEstimateManualRowCreateAction({
       dealId: "deal-1",
       generationRunId: "run-1",
+      extractionMatchId: "match-1",
       estimateSectionName: "Doors",
         input: {
           label: "Walk-in door kit",
@@ -266,6 +286,7 @@ describe("EstimateRecommendationOptionsPanel", () => {
       method: "POST",
       json: {
         generationRunId: "run-1",
+        extractionMatchId: "match-1",
         estimateSectionName: "Doors",
         manualLabel: "Walk-in door kit",
         manualQuantity: "2",
@@ -292,6 +313,7 @@ describe("EstimateRecommendationOptionsPanel", () => {
     await runEstimateManualRowCreateAction({
       dealId: "deal-1",
       generationRunId: "run-1",
+      extractionMatchId: "match-1",
       estimateSectionName: "Doors",
       input: {
         label: "Walk-in door kit",
@@ -323,6 +345,7 @@ describe("EstimateRecommendationOptionsPanel", () => {
       method: "POST",
       json: {
         generationRunId: "run-1",
+        extractionMatchId: "match-1",
         estimateSectionName: "Doors",
         manualLabel: "Walk-in door kit",
         manualQuantity: "2",

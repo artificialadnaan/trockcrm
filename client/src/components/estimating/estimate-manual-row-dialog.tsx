@@ -33,6 +33,7 @@ export interface ManualRowCatalogOption {
 export interface EstimateManualRowDialogProps {
   dealId: string;
   generationRunId?: string | null;
+  extractionMatchId?: string | null;
   estimateSectionName?: string | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -82,6 +83,7 @@ export function switchManualRowDraftToFreeText(draft: ManualRowDraft): ManualRow
 export async function runEstimateManualRowCreateAction({
   dealId,
   generationRunId,
+  extractionMatchId,
   estimateSectionName,
   input,
   catalogQuery,
@@ -90,6 +92,7 @@ export async function runEstimateManualRowCreateAction({
 }: {
   dealId: string;
   generationRunId: string;
+  extractionMatchId: string;
   estimateSectionName: string;
   input: ManualRowDraft;
   catalogQuery?: string;
@@ -98,6 +101,7 @@ export async function runEstimateManualRowCreateAction({
 }) {
   const json: Record<string, unknown> = {
     generationRunId,
+    extractionMatchId,
     estimateSectionName,
     manualLabel: input.label,
     manualQuantity: input.quantity,
@@ -148,6 +152,7 @@ export async function runEstimateManualRowCreateAction({
 export function EstimateManualRowDialog({
   dealId,
   generationRunId,
+  extractionMatchId,
   estimateSectionName,
   open,
   onOpenChange,
@@ -162,7 +167,9 @@ export function EstimateManualRowDialog({
   const [selectedCatalogOptionId, setSelectedCatalogOptionId] = useState<string | null>(
     initialValues?.selectedOptionId ?? null
   );
-  const canCreateManualRow = hasManualRowCreationContext(generationRunId, estimateSectionName);
+  const canCreateManualRow = Boolean(
+    extractionMatchId?.trim() && hasManualRowCreationContext(generationRunId, estimateSectionName)
+  );
 
   useEffect(() => {
     if (open) {
@@ -213,6 +220,7 @@ export function EstimateManualRowDialog({
       await runEstimateManualRowCreateAction({
         dealId,
         generationRunId: generationRunId!.trim(),
+        extractionMatchId: extractionMatchId!.trim(),
         estimateSectionName: estimateSectionName!.trim(),
         input: draft,
         catalogQuery,

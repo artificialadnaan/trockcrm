@@ -84,6 +84,7 @@ function buildWorkflow(canPromote: boolean) {
         id: "price-1",
         status: "approved",
         createdByRunId: "run-1",
+        extractionMatchId: "match-1",
         sectionName: "Doors",
         duplicateGroupBlocked: false,
         promotable: canPromote,
@@ -147,5 +148,46 @@ describe("EstimatingWorkflowShell", () => {
     expect(html).toContain("Manual add unavailable");
     expect(html).toContain("Search catalog options");
     expect(html).toContain("Use free-text/manual row instead");
+  });
+
+  it("requires a focused promotable row when multiple generation runs are ready", () => {
+    mocks.activePanel = "pricing";
+
+    const html = renderToStaticMarkup(
+      <EstimatingWorkflowShell
+        dealId="deal-1"
+        workflow={{
+          ...buildWorkflow(true),
+          pricingRows: [
+            {
+              id: "price-1",
+              status: "approved",
+              createdByRunId: "run-1",
+              extractionMatchId: "match-1",
+              sectionName: "Doors",
+              duplicateGroupBlocked: false,
+              promotable: false,
+            },
+            {
+              id: "price-2",
+              status: "approved",
+              createdByRunId: "run-2",
+              extractionMatchId: "match-2",
+              sectionName: "Windows",
+              duplicateGroupBlocked: false,
+              promotable: true,
+            },
+          ],
+          promotionReadiness: {
+            canPromote: true,
+            generationRunIds: ["run-1", "run-2"],
+          },
+        }}
+        onRefresh={async () => {}}
+      />
+    );
+
+    expect(html).toContain("Focus a promotable row to choose which draft run to promote.");
+    expect(html).toContain("Disabled");
   });
 });

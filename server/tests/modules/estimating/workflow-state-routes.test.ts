@@ -668,6 +668,7 @@ describe("estimating workflow routes", () => {
       params: { id: "deal-1" },
       body: {
         generationRunId: "run-1",
+        extractionMatchId: "match-1",
         estimateSectionName: "Roofing",
         manualLabel: "Custom flashing",
         manualQuantity: "2",
@@ -685,6 +686,7 @@ describe("estimating workflow routes", () => {
         userId: "user-1",
         input: expect.objectContaining({
           generationRunId: "run-1",
+          extractionMatchId: "match-1",
           estimateSectionName: "Roofing",
           manualLabel: "Custom flashing",
           catalogQuery: "flashing",

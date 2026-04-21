@@ -23,6 +23,7 @@ export type ManualRecommendationOptionInput = {
 
 export type CreateManualEstimateRowInput = {
   generationRunId: string;
+  extractionMatchId: string;
   estimateSectionName: string;
   manualLabel: string;
   manualQuantity?: string | null;
@@ -69,9 +70,21 @@ export function canonicalizeSectionName(value: string) {
   return value.trim().replace(/\s+/g, " ");
 }
 
+function calculateManualTotal(quantity?: string | null, unitPrice?: string | null) {
+  if (!quantity || !unitPrice) return null;
+  const numericQuantity = Number(quantity);
+  const numericUnitPrice = Number(unitPrice);
+  if (Number.isNaN(numericQuantity) || Number.isNaN(numericUnitPrice)) {
+    return null;
+  }
+
+  return (numericQuantity * numericUnitPrice).toFixed(2);
+}
+
 function createManualRecommendationBase(input: {
   dealId: string;
   generationRunId: string;
+  extractionMatchId: string;
   estimateSectionName: string;
   manualLabel: string;
   manualQuantity?: string | null;
@@ -88,6 +101,7 @@ function createManualRecommendationBase(input: {
   return {
     dealId: input.dealId,
     createdByRunId: input.generationRunId,
+    extractionMatchId: input.extractionMatchId,
     sourceType: "manual",
     sourceRowIdentity: `manual:${input.manualIdentityKey}`,
     normalizedIntent: normalizeManualIntent(input.manualLabel),
@@ -98,6 +112,11 @@ function createManualRecommendationBase(input: {
     manualUnit: input.manualUnit ?? null,
     manualUnitPrice: input.manualUnitPrice ?? null,
     manualNotes: input.manualNotes ?? null,
+    recommendedQuantity: input.manualQuantity ?? null,
+    recommendedUnit: input.manualUnit ?? null,
+    recommendedUnitPrice: input.manualUnitPrice ?? null,
+    recommendedTotalPrice: calculateManualTotal(input.manualQuantity ?? null, input.manualUnitPrice ?? null),
+    priceBasis: "manual_entry",
     selectedSourceType: input.selectedSourceType,
     selectedOptionId: input.selectedOptionId ?? null,
     catalogBacking: input.catalogBacking,
@@ -227,6 +246,10 @@ export async function createManualEstimateRow(args: {
   userId: string;
   input: CreateManualEstimateRowInput;
 }) {
+  if (!args.input.extractionMatchId?.trim()) {
+    throw new AppError(400, "Manual rows require an active extraction match");
+  }
+
   const manualIdentityKey = normalizeManualIdentityKey(args.input.manualIdentityKey);
   const requestedCatalogSelection = args.input.selectedSourceType === "catalog_option";
   const { optionRows: resolvedCatalogOptions, selectedOption } = await resolveCatalogFirstOptions({
@@ -249,6 +272,7 @@ export async function createManualEstimateRow(args: {
   const recommendationValues = createManualRecommendationBase({
     dealId: args.dealId,
     generationRunId: args.input.generationRunId,
+    extractionMatchId: args.input.extractionMatchId,
     estimateSectionName: args.input.estimateSectionName,
     manualLabel: args.input.manualLabel,
     manualQuantity: args.input.manualQuantity ?? null,
@@ -355,6 +379,14 @@ export async function updateManualEstimateRow(args: {
     manualUnit: args.input.manualUnit ?? existing.manualUnit,
     manualUnitPrice: args.input.manualUnitPrice ?? existing.manualUnitPrice,
     manualNotes: args.input.manualNotes ?? existing.manualNotes,
+    recommendedQuantity: args.input.manualQuantity ?? existing.manualQuantity ?? null,
+    recommendedUnit: args.input.manualUnit ?? existing.manualUnit ?? null,
+    recommendedUnitPrice: args.input.manualUnitPrice ?? existing.manualUnitPrice ?? null,
+    recommendedTotalPrice: calculateManualTotal(
+      args.input.manualQuantity ?? existing.manualQuantity ?? null,
+      args.input.manualUnitPrice ?? existing.manualUnitPrice ?? null
+    ),
+    priceBasis: "manual_entry",
     selectedSourceType: persistedSelectedSourceType,
     selectedOptionId:
       persistedSelectedSourceType === "catalog_option"

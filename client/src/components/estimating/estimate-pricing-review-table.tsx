@@ -101,7 +101,7 @@ export function isFreeTextManualRow(row: Pick<
   "selectedSourceType" | "selectedOptionId" | "catalogBacking" | "promotedLocalCatalogItemId" | "sourceType"
 >) {
   return (
-    (row.selectedSourceType === "manual" || row.sourceType === "manual") &&
+    row.sourceType === "manual" &&
     !row.selectedOptionId &&
     row.catalogBacking !== "local_catalog" &&
     !row.promotedLocalCatalogItemId

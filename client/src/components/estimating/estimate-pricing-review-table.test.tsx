@@ -103,6 +103,20 @@ describe("EstimatePricingReviewTable", () => {
     expect(html).not.toContain("Promote to local catalog");
   });
 
+  it("does not expose local-catalog promotion for extracted rows that were merely accepted as manual", () => {
+    const html = renderTable([
+      {
+        id: "price-3",
+        status: "pending_review",
+        sourceType: "extracted",
+        selectedSourceType: "manual",
+        catalogBacking: "estimate_only",
+      },
+    ]);
+
+    expect(html).not.toContain("Promote to local catalog");
+  });
+
   it("tracks the actual chosen row state instead of inferring recommended badges from availability", () => {
     const options = [
       {

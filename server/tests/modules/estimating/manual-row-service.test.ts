@@ -12,6 +12,22 @@ const { createManualEstimateRow, updateManualEstimateRow } = await import(
 );
 
 describe("manual-row-service", () => {
+  it("requires an active extraction match when creating manual rows", async () => {
+    await expect(
+      createManualEstimateRow({
+        tenantDb: {} as any,
+        dealId: "deal-1",
+        userId: "user-1",
+        input: {
+          generationRunId: "run-1",
+          extractionMatchId: "",
+          estimateSectionName: "Roofing",
+          manualLabel: "Custom flashing",
+        },
+      })
+    ).rejects.toThrow("Manual rows require an active extraction match");
+  });
+
   it("uses catalog-first lookup before falling back to free-text manual rows", async () => {
     catalogReadModelMocks.resolveActiveCatalogSnapshotVersionId.mockResolvedValue("snapshot-1");
     catalogReadModelMocks.listCatalogCandidatesForMatching.mockResolvedValue([
@@ -53,6 +69,7 @@ describe("manual-row-service", () => {
       userId: "user-1",
       input: {
         generationRunId: "run-1",
+        extractionMatchId: "match-1",
         estimateSectionName: "Roofing",
         manualLabel: "Custom flashing",
         catalogQuery: "flashing",
@@ -67,8 +84,10 @@ describe("manual-row-service", () => {
     );
     expect(insertValues).toHaveBeenCalledWith(
       expect.objectContaining({
+        extractionMatchId: "match-1",
         selectedSourceType: null,
         catalogBacking: "estimate_only",
+        priceBasis: "manual_entry",
       })
     );
     expect(result.recommendation).toEqual(
@@ -111,6 +130,7 @@ describe("manual-row-service", () => {
       userId: "user-1",
       input: {
         generationRunId: "run-1",
+        extractionMatchId: "match-1",
         estimateSectionName: "Roofing",
         manualLabel: "Custom flashing",
         catalogQuery: "missing thing",
@@ -119,8 +139,10 @@ describe("manual-row-service", () => {
 
     expect(insertValues).toHaveBeenCalledWith(
       expect.objectContaining({
+        extractionMatchId: "match-1",
         selectedSourceType: null,
         catalogBacking: "estimate_only",
+        priceBasis: "manual_entry",
       })
     );
     expect(result.recommendation).toEqual(
@@ -163,6 +185,7 @@ describe("manual-row-service", () => {
       userId: "user-1",
       input: {
         generationRunId: "run-1",
+        extractionMatchId: "match-1",
         estimateSectionName: "Roofing",
         manualLabel: "Custom flashing",
         catalogQuery: "missing thing",
@@ -172,9 +195,11 @@ describe("manual-row-service", () => {
 
     expect(insertValues).toHaveBeenCalledWith(
       expect.objectContaining({
+        extractionMatchId: "match-1",
         selectedSourceType: null,
         selectedOptionId: null,
         catalogBacking: "estimate_only",
+        priceBasis: "manual_entry",
       })
     );
     expect(result.recommendation).toEqual(
@@ -207,6 +232,7 @@ describe("manual-row-service", () => {
       userId: "user-1",
       input: {
         generationRunId: "run-1",
+        extractionMatchId: "match-1",
         estimateSectionName: "Roofing",
         manualLabel: "Custom flashing",
         catalogOptions: [
@@ -228,9 +254,11 @@ describe("manual-row-service", () => {
 
     expect(insertValues).toHaveBeenCalledWith(
       expect.objectContaining({
+        extractionMatchId: "match-1",
         selectedSourceType: null,
         selectedOptionId: null,
         catalogBacking: "estimate_only",
+        priceBasis: "manual_entry",
       })
     );
     expect(result.recommendation).toEqual(
@@ -275,6 +303,7 @@ describe("manual-row-service", () => {
       userId: "user-1",
       input: {
         generationRunId: "run-1",
+        extractionMatchId: "match-1",
         estimateSectionName: "Roofing",
         manualLabel: "Custom flashing",
         selectedSourceType: "catalog_option",
