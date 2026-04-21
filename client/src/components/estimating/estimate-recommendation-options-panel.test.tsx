@@ -139,6 +139,25 @@ describe("EstimateRecommendationOptionsPanel", () => {
     expect(html).not.toContain("Promote to local catalog");
   });
 
+  it("does not show local-catalog promotion for generated manual clones", () => {
+    const html = renderToStaticMarkup(
+      <EstimateRecommendationOptionsPanel
+        dealId="deal-1"
+        recommendation={{
+          id: "price-generated-manual",
+          sourceType: "manual",
+          manualOrigin: "generated",
+          selectedSourceType: null,
+          catalogBacking: "estimate_only",
+        }}
+        onReviewAction={vi.fn()}
+        onPromoteLocalCatalog={vi.fn()}
+      />
+    );
+
+    expect(html).not.toContain("Promote to local catalog");
+  });
+
   it("does not fall back to a catalog option as the selected option for free-text manual rows", () => {
     expect(
       getDisplayedSelectedOption({

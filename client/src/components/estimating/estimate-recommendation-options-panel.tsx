@@ -32,6 +32,7 @@ export interface EstimateRecommendationRow {
   normalizedIntent?: string | null;
   duplicateGroupKey?: string | null;
   duplicateGroupBlocked?: boolean | null;
+  manualOrigin?: string | null;
   selectedSourceType?: string | null;
   selectedOptionId?: string | null;
   catalogBacking?: string | null;

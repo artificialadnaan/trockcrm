@@ -11,6 +11,29 @@ const { createManualEstimateRow, updateManualEstimateRow } = await import(
   "../../../src/modules/estimating/manual-row-service.js"
 );
 
+function makeActiveMatchSelect() {
+  return vi.fn(() => ({
+    from: vi.fn(() => ({
+      innerJoin: vi.fn(() => ({
+        innerJoin: vi.fn(() => ({
+          where: vi.fn(() => ({
+            limit: vi.fn().mockResolvedValue([
+              {
+                id: "match-1",
+                activeParseRunId: "parse-1",
+                metadataJson: {
+                  sourceParseRunId: "parse-1",
+                  activeArtifact: true,
+                },
+              },
+            ]),
+          })),
+        })),
+      })),
+    })),
+  }));
+}
+
 describe("manual-row-service", () => {
   it("requires an active extraction match when creating manual rows", async () => {
     await expect(
@@ -28,9 +51,49 @@ describe("manual-row-service", () => {
     ).rejects.toThrow("Manual rows require an active extraction match");
   });
 
+  it("rejects stale extraction matches when creating manual rows", async () => {
+    const tenantDb = {
+      select: vi.fn(() => ({
+        from: vi.fn(() => ({
+          innerJoin: vi.fn(() => ({
+            innerJoin: vi.fn(() => ({
+              where: vi.fn(() => ({
+                limit: vi.fn().mockResolvedValue([
+                  {
+                    id: "match-1",
+                    activeParseRunId: "parse-active",
+                    metadataJson: {
+                      sourceParseRunId: "parse-old",
+                      activeArtifact: false,
+                    },
+                  },
+                ]),
+              })),
+            })),
+          })),
+        })),
+      })),
+    } as any;
+
+    await expect(
+      createManualEstimateRow({
+        tenantDb,
+        dealId: "deal-1",
+        userId: "user-1",
+        input: {
+          generationRunId: "run-1",
+          extractionMatchId: "match-1",
+          estimateSectionName: "Roofing",
+          manualLabel: "Custom flashing",
+        },
+      })
+    ).rejects.toThrow("Manual rows require an active extraction match");
+  });
+
   it("normalizes blank manual numeric inputs to null before insert", async () => {
     const insertValues = vi.fn().mockResolvedValue([{ id: "rec-blank-1" }]);
     const tenantDb = {
+      select: makeActiveMatchSelect(),
       insert: vi.fn(() => ({
         values: insertValues,
       })),
@@ -88,6 +151,7 @@ describe("manual-row-service", () => {
     const insertValues = vi.fn().mockResolvedValue([{ id: "rec-1" }]);
     const updateValues = vi.fn().mockResolvedValue([{ id: "rec-1", selectedSourceType: "catalog_option" }]);
     const tenantDb = {
+      select: makeActiveMatchSelect(),
       insert: vi.fn(() => ({
         values: insertValues,
       })),
@@ -149,6 +213,7 @@ describe("manual-row-service", () => {
 
     const insertValues = vi.fn().mockResolvedValue([{ id: "rec-2" }]);
     const tenantDb = {
+      select: makeActiveMatchSelect(),
       insert: vi.fn(() => ({
         values: insertValues,
       })),
@@ -204,6 +269,7 @@ describe("manual-row-service", () => {
 
     const insertValues = vi.fn().mockResolvedValue([{ id: "rec-3" }]);
     const tenantDb = {
+      select: makeActiveMatchSelect(),
       insert: vi.fn(() => ({
         values: insertValues,
       })),
@@ -259,6 +325,7 @@ describe("manual-row-service", () => {
   it("does not auto-select the first catalog option when the requested stable id is missing", async () => {
     const insertValues = vi.fn().mockResolvedValue([{ id: "rec-4" }]);
     const tenantDb = {
+      select: makeActiveMatchSelect(),
       insert: vi.fn(() => ({
         values: insertValues,
       })),
@@ -330,6 +397,7 @@ describe("manual-row-service", () => {
       },
     ]);
     const tenantDb = {
+      select: makeActiveMatchSelect(),
       insert: vi.fn(() => ({
         values: insertValues,
       })),

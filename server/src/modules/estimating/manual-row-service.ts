@@ -4,8 +4,11 @@ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import {
   costCatalogSources,
+  estimateExtractions,
+  estimateExtractionMatches,
   estimatePricingRecommendationOptions,
   estimatePricingRecommendations,
+  estimateSourceDocuments,
 } from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
 import { listCatalogCandidatesForMatching, resolveActiveCatalogSnapshotVersionId } from "./catalog-read-model-service.js";
@@ -89,6 +92,50 @@ function normalizeOptionalText(value?: string | null) {
 function normalizeOptionalNumeric(value?: string | null) {
   const trimmed = value?.trim();
   return trimmed && trimmed.length > 0 ? trimmed : null;
+}
+
+async function ensureActiveExtractionMatch(
+  tenantDb: TenantDb,
+  dealId: string,
+  extractionMatchId: string
+) {
+  const [row] = await tenantDb
+    .select({
+      id: estimateExtractionMatches.id,
+      metadataJson: estimateExtractions.metadataJson,
+      activeParseRunId: estimateSourceDocuments.activeParseRunId,
+    })
+    .from(estimateExtractionMatches)
+    .innerJoin(
+      estimateExtractions,
+      eq(estimateExtractionMatches.extractionId, estimateExtractions.id)
+    )
+    .innerJoin(
+      estimateSourceDocuments,
+      eq(estimateExtractions.documentId, estimateSourceDocuments.id)
+    )
+    .where(
+      and(
+        eq(estimateExtractionMatches.id, extractionMatchId),
+        eq(estimateExtractions.dealId, dealId)
+      )
+    )
+    .limit(1);
+
+  if (!row?.activeParseRunId) {
+    throw new AppError(400, "Manual rows require an active extraction match");
+  }
+
+  const metadataJson = row.metadataJson;
+  if (
+    !metadataJson ||
+    typeof metadataJson !== "object" ||
+    metadataJson === null ||
+    (metadataJson as Record<string, unknown>).sourceParseRunId !== row.activeParseRunId ||
+    (metadataJson as Record<string, unknown>).activeArtifact === false
+  ) {
+    throw new AppError(400, "Manual rows require an active extraction match");
+  }
 }
 
 function normalizeManualFields(input: {
@@ -283,6 +330,7 @@ export async function createManualEstimateRow(args: {
   if (!args.input.extractionMatchId?.trim()) {
     throw new AppError(400, "Manual rows require an active extraction match");
   }
+  await ensureActiveExtractionMatch(args.tenantDb, args.dealId, args.input.extractionMatchId.trim());
 
   const manualIdentityKey = normalizeManualIdentityKey(args.input.manualIdentityKey);
   const requestedCatalogSelection = args.input.selectedSourceType === "catalog_option";

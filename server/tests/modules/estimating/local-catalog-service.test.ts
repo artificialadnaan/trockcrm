@@ -11,6 +11,7 @@ describe("local-catalog-service", () => {
             id: "rec-1",
             dealId: "deal-1",
             sourceType: "manual",
+            manualOrigin: "manual_estimator_added",
             manualIdentityKey: "manual-key-1",
             manualLabel: "Custom flashing",
             manualQuantity: "2",
@@ -40,6 +41,7 @@ describe("local-catalog-service", () => {
                   id: "rec-1",
                   dealId: "deal-1",
                   sourceType: "manual",
+                  manualOrigin: "manual_estimator_added",
                   manualIdentityKey: "manual-key-1",
                   manualLabel: "Custom flashing",
                   manualQuantity: "2",
@@ -90,5 +92,37 @@ describe("local-catalog-service", () => {
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
     );
     expect(result.localCatalogItem.id).toBe(result.recommendation.promotedLocalCatalogItemId);
+  });
+
+  it("rejects generated manual rows from local-catalog promotion", async () => {
+    const tenantDb = {
+      select: vi.fn(() => ({
+        from: vi.fn(() => ({
+          where: vi.fn(() => ({
+            limit: vi.fn().mockResolvedValue([
+              {
+                id: "rec-gen-1",
+                dealId: "deal-1",
+                sourceType: "manual",
+                manualOrigin: "generated",
+                selectedSourceType: "manual",
+                selectedOptionId: null,
+                promotedLocalCatalogItemId: null,
+              },
+            ]),
+          })),
+        })),
+      })),
+    } as any;
+
+    await expect(
+      promoteManualRowToLocalCatalog({
+        tenantDb,
+        dealId: "deal-1",
+        recommendationId: "rec-gen-1",
+        userId: "user-1",
+        input: {},
+      })
+    ).rejects.toThrow("Generated manual rows cannot be promoted to the local catalog");
   });
 });

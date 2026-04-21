@@ -27,6 +27,7 @@ export interface PricingReviewRow {
   id: string;
   status?: string | null;
   reviewState?: string | null;
+  manualOrigin?: string | null;
   recommendedQuantity?: string | number | null;
   recommendedUnit?: string | null;
   recommendedUnitPrice?: string | number | null;
@@ -98,10 +99,16 @@ function formatOptionRank(option: PricingRecommendationOption, fallbackIndex: nu
 
 export function isFreeTextManualRow(row: Pick<
   PricingReviewRow,
-  "selectedSourceType" | "selectedOptionId" | "catalogBacking" | "promotedLocalCatalogItemId" | "sourceType"
+  | "selectedSourceType"
+  | "selectedOptionId"
+  | "catalogBacking"
+  | "promotedLocalCatalogItemId"
+  | "sourceType"
+  | "manualOrigin"
 >) {
   return (
     row.sourceType === "manual" &&
+    row.manualOrigin !== "generated" &&
     !row.selectedOptionId &&
     row.catalogBacking !== "local_promoted" &&
     !row.promotedLocalCatalogItemId

@@ -59,6 +59,10 @@ export async function promoteManualRowToLocalCatalog(args: {
     throw new AppError(400, "Only manual rows can be promoted to the local catalog");
   }
 
+  if (existing.manualOrigin === "generated") {
+    throw new AppError(400, "Generated manual rows cannot be promoted to the local catalog");
+  }
+
   if (existing.selectedSourceType === "catalog_option" || existing.selectedOptionId) {
     throw new AppError(400, "Catalog-backed manual rows are not eligible for local catalog promotion");
   }
