@@ -920,6 +920,9 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
   it("carries unresolved manual rows forward into the next generation run with cloned child options", async () => {
     const recommendationInsertValues = vi.fn().mockResolvedValue([{ id: "rec-cloned-1" }]);
     const optionInsertValues = vi.fn().mockResolvedValue([{ id: "opt-cloned-1" }]);
+    const recommendationUpdateReturning = vi.fn().mockResolvedValue([
+      { id: "rec-cloned-1", selectedOptionId: "opt-cloned-1" },
+    ]);
 
     const tenantDb = {
       select: vi
@@ -942,7 +945,7 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
                 manualUnitPrice: "75.00",
                 manualNotes: "field measured",
                 selectedSourceType: "catalog_option",
-                selectedOptionId: null,
+                selectedOptionId: "option-source-1",
                 catalogBacking: "local_promoted",
                 promotedLocalCatalogItemId: "local-cat-1",
                 overrideQuantity: "3",
@@ -977,6 +980,13 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
         .mockReturnValueOnce({
           values: optionInsertValues,
         }),
+      update: vi.fn(() => ({
+        set: vi.fn(() => ({
+          where: vi.fn(() => ({
+            returning: recommendationUpdateReturning,
+          })),
+        })),
+      })),
     } as any;
 
     const result = await cloneManualRowsForGenerationRun({
@@ -1014,11 +1024,12 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
         localCatalogItemId: "local-cat-1",
       })
     );
+    expect(recommendationUpdateReturning).toHaveBeenCalled();
     expect(result.clonedRows).toEqual([
       expect.objectContaining({
         id: "rec-cloned-1",
         createdByRunId: "run-new",
-        selectedOptionId: null,
+        selectedOptionId: "opt-cloned-1",
         promotedLocalCatalogItemId: "local-cat-1",
         manualIdentityKey: "manual-key-1",
       }),

@@ -103,7 +103,7 @@ export function isFreeTextManualRow(row: Pick<
   return (
     row.sourceType === "manual" &&
     !row.selectedOptionId &&
-    row.catalogBacking !== "local_catalog" &&
+    row.catalogBacking !== "local_promoted" &&
     !row.promotedLocalCatalogItemId
   );
 }
@@ -329,7 +329,7 @@ export function EstimatePricingReviewTable({
       );
     }
 
-    if (row.catalogBacking === "local_catalog" || row.promotedLocalCatalogItemId) {
+    if (row.catalogBacking === "local_promoted" || row.promotedLocalCatalogItemId) {
       badges.push(
         <Badge key="local-catalog" variant="secondary">
           Local catalog

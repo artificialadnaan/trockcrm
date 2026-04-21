@@ -519,8 +519,26 @@ export async function cloneManualRowsForGenerationRun(args: {
       }
     }
 
+    let persistedClone = inserted;
+    if (clonedSelectedOptionId) {
+      const updatedCloneResult = await args.tenantDb
+        .update(estimatePricingRecommendations)
+        .set({
+          selectedOptionId: clonedSelectedOptionId,
+          updatedAt: new Date(),
+        })
+        .where(eq(estimatePricingRecommendations.id, inserted.id))
+        .returning();
+      const updatedClone = Array.isArray(updatedCloneResult)
+        ? updatedCloneResult[0]
+        : updatedCloneResult;
+      if (updatedClone) {
+        persistedClone = updatedClone;
+      }
+    }
+
     clonedRows.push({
-      ...inserted,
+      ...persistedClone,
       dealId: args.dealId,
       createdByRunId: args.targetGenerationRunId,
       sourceType: "manual",

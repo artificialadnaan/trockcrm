@@ -96,7 +96,7 @@ describe("EstimatePricingReviewTable", () => {
         createdByRunId: "run-7",
         selectedSourceType: "catalog_option",
         duplicateGroupBlocked: false,
-        catalogBacking: "local_catalog",
+        catalogBacking: "local_promoted",
       },
     ]);
 

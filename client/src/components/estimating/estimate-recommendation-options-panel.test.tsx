@@ -44,7 +44,7 @@ describe("EstimateRecommendationOptionsPanel", () => {
           duplicateGroupBlocked: true,
           selectedSourceType: "catalog_option",
           selectedOptionId: "option-rec",
-          catalogBacking: "local_catalog",
+          catalogBacking: "local_promoted",
           recommendationOptions: [
             {
               id: "option-rec",

@@ -171,7 +171,7 @@ export function EstimateRecommendationOptionsPanel({
           {recommendation.duplicateGroupBlocked ? (
             <Badge variant="destructive">Duplicate blocked</Badge>
           ) : null}
-          {recommendation.catalogBacking === "local_catalog" ? (
+          {recommendation.catalogBacking === "local_promoted" ? (
             <Badge variant="secondary">Local catalog</Badge>
           ) : null}
           {recommendation.sourceType === "inferred" ? <Badge variant="outline">Inferred</Badge> : null}
