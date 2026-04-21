@@ -173,12 +173,16 @@ Required linkage fields:
 - `source_extraction_id`, nullable for inferred or manual rows
 - `source_row_identity`
 - `generation_run_id`
+- `manual_origin` with allowed values:
+  - `generated`
+  - `manual_estimator_added`
 - `selected_option_id`, nullable until selection exists
 - `catalog_backing` with allowed values:
   - `procore_synced`
   - `local_promoted`
   - `estimate_only`
 - `promoted_estimate_line_item_id`, nullable until promotion exists
+- `promoted_local_catalog_item_id`, nullable until local catalog promotion exists
 - `manual_label`, nullable unless `source_type = 'manual'`
 - `manual_quantity`, nullable unless `source_type = 'manual'`
 - `manual_unit`, nullable unless `source_type = 'manual'`
@@ -214,7 +218,9 @@ Manual row storage contract:
 - manual free-text rows are persisted on the parent recommendation row (`manual_*` fields)
 - for manual free-text rows:
   - `catalog_backing = 'estimate_only'`
+  - `manual_origin = 'manual_estimator_added'`
   - `selected_option_id = null`
+  - `generation_run_id` is set to the active generation run in the current workbench context; if no active run exists, create a synthetic manual generation run for the deal and use that id
 - if a manual row is catalog-backed or later mapped to catalog alternatives:
   - keep parent `manual_*` fields as the estimator-authored baseline
   - store catalog candidates as child option rows
@@ -227,6 +233,15 @@ Manual row storage contract:
 - for manual rows: `manual:<normalized_intent>:<estimate_section_name>:<manual_label>`
 
 This field must be persisted directly on the recommendation row so refresh and dedupe logic do not depend on nullable foreign keys alone.
+
+`normalized_intent` contract:
+
+- lowercase
+- trim leading and trailing whitespace
+- collapse repeated internal whitespace to one space
+- remove non-semantic punctuation
+- normalize common unit and scope aliases through a fixed alias map for this slice
+- do not include section name inside `normalized_intent`; section-specific uniqueness is handled by `source_row_identity`
 
 ## Local Catalog Model
 
@@ -422,6 +437,7 @@ Allowed actions:
   - uses `catalog_backing = 'estimate_only'` when no catalog option is selected
 - promote custom row to local catalog:
   - creates a reusable local catalog item
+  - writes its id to `promoted_local_catalog_item_id` on the parent recommendation row
   - does not itself promote the line into the canonical estimate model
 
 Audit behavior:
@@ -464,7 +480,9 @@ Manual estimate-only row mapping:
 Manual promoted-local-catalog row mapping:
 
 - same canonical estimate mapping as manual estimate-only rows
-- selected option or row also links to the new local catalog item id for future reuse
+- if the row remains free-text, the parent recommendation row links to the promoted local catalog item through `promoted_local_catalog_item_id`
+- if the row later selects a catalog-backed child option, the selected option row may also carry the local catalog linkage
+- promotion mapping must prefer `promoted_local_catalog_item_id` on the parent recommendation row when `selected_option_id` is null
 
 Promotion completion behavior:
 
@@ -487,7 +505,8 @@ Manual add flow:
 Manual recommendation persistence:
 
 - free-text manual rows persist `estimate_section_name`, `manual_label`, `manual_quantity`, `manual_unit`, `manual_unit_price`, and `manual_notes` on the parent recommendation row before promotion
-- if a manual row is later promoted to the local catalog, the new local catalog item is created from those persisted manual fields
+- free-text manual rows also persist `generation_run_id`, `manual_origin`, and `source_row_identity` on the parent recommendation row using the contracts above
+- if a manual row is later promoted to the local catalog, the new local catalog item is created from those persisted manual fields and linked back through `promoted_local_catalog_item_id` on the parent recommendation row
 
 Custom lines can be promoted immediately into the local catalog for reuse later. This is acceptable for the current demonstrative scope and avoids introducing approval workflow complexity in this slice.
 
