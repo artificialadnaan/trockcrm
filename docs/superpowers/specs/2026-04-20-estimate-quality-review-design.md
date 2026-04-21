@@ -185,7 +185,7 @@ Required linkage fields:
   - `manual`
   - `catalog_option`
 - `selected_option_id`, nullable until selection exists
-- `catalog_backing` with allowed values:
+- `catalog_backing`, nullable until selection exists for extracted/inferred rows, with allowed values:
   - `procore_synced`
   - `local_promoted`
   - `estimate_only`
@@ -240,6 +240,7 @@ Manual row storage contract:
   - set `selected_source_type = 'catalog_option'`
   - store catalog candidates as child option rows
   - set `selected_option_id` when a catalog candidate is chosen
+  - if the estimator creates the manual row by selecting a catalog result in the add-item flow, create it directly in `accepted` state with that option selected
 
 `source_row_identity` definition:
 
@@ -515,6 +516,7 @@ Section resolution contract:
 
 - recommendation rows persist `estimate_section_name` as the canonical section grouping field for this slice
 - promotion first looks up an existing estimate section for the deal by exact section name
+- that exact lookup uses the canonicalized `estimate_section_name` value, not raw user-entered whitespace or casing
 - if found, reuse it
 - if not found, create it
 - implementation should not invent an alternate section-key system for this slice
