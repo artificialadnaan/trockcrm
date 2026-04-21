@@ -172,6 +172,7 @@ export function EstimateManualRowDialog({
   const canCreateManualRow = Boolean(
     extractionMatchId?.trim() && hasManualRowCreationContext(generationRunId, estimateSectionName)
   );
+  const hasManualPricingValues = Boolean(draft.quantity.trim() && draft.unitPrice.trim());
 
   useEffect(() => {
     if (open) {
@@ -214,6 +215,10 @@ export function EstimateManualRowDialog({
   const handleSubmit = async () => {
     if (!canCreateManualRow) {
       toast.error("Manual row creation is unavailable until an active pricing run is selected.");
+      return;
+    }
+    if (!hasManualPricingValues) {
+      toast.error("Manual rows require quantity and unit price.");
       return;
     }
 
@@ -439,7 +444,12 @@ export function EstimateManualRowDialog({
           <Button variant="outline" onClick={() => onOpenChange(false)}>
             Cancel
           </Button>
-          <Button disabled={isSaving || !draft.label.trim() || !canCreateManualRow} onClick={handleSubmit}>
+          <Button
+            disabled={
+              isSaving || !draft.label.trim() || !canCreateManualRow || !hasManualPricingValues
+            }
+            onClick={handleSubmit}
+          >
             {isSaving ? "Saving..." : "Add row"}
           </Button>
         </DialogFooter>

@@ -395,14 +395,17 @@ export async function createManualEstimateRow(args: {
     : requestedCatalogSelection
       ? "manual"
       : "manual";
+  const hasManualPricingValues = Boolean(
+    args.input.manualQuantity?.trim() && args.input.manualUnitPrice?.trim()
+  );
+  if (!hasManualPricingValues) {
+    throw new AppError(400, "Manual rows require quantity and unit price");
+  }
   const catalogBacking = selectedOption?.localCatalogItemId
     ? "local_promoted"
     : selectedOption?.catalogItemId
       ? "procore_synced"
       : "estimate_only";
-  if (selectedSourceType === "catalog_option" && (!args.input.manualQuantity?.trim() || !args.input.manualUnitPrice?.trim())) {
-    throw new AppError(400, "Catalog-backed manual rows require quantity and unit price");
-  }
 
   const recommendationValues = createManualRecommendationBase({
     dealId: args.dealId,

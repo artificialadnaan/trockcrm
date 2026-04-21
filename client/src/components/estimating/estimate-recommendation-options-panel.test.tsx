@@ -242,6 +242,29 @@ describe("EstimateRecommendationOptionsPanel", () => {
     expect(html).toContain("disabled");
   });
 
+  it("keeps manual-row creation disabled until quantity and unit price are provided", () => {
+    const html = renderToStaticMarkup(
+      <EstimateManualRowDialog
+        dealId="deal-1"
+        generationRunId="run-1"
+        extractionMatchId="match-1"
+        estimateSectionName="Doors"
+        open
+        onOpenChange={vi.fn()}
+        onSubmitted={vi.fn()}
+        initialValues={{
+          label: "Walk-in door kit",
+          quantity: "",
+          unit: "ea",
+          unitPrice: "",
+          notes: "",
+        }}
+      />
+    );
+
+    expect(html).toContain("disabled");
+  });
+
   it("clears catalog-backed selection when switching back to free-text mode", () => {
     expect(
       switchManualRowDraftToFreeText({

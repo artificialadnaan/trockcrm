@@ -134,7 +134,7 @@ describe("manual-row-service", () => {
     ).rejects.toThrow("Manual rows require a valid generation run");
   });
 
-  it("normalizes blank manual numeric inputs to null before insert", async () => {
+  it("normalizes blank optional manual fields to null before insert", async () => {
     const insertValues = vi.fn().mockResolvedValue([{ id: "rec-blank-1" }]);
     const tenantDb = {
       select: makeActiveMatchSelect(),
@@ -158,24 +158,24 @@ describe("manual-row-service", () => {
         generationRunId: "run-1",
         extractionMatchId: "match-1",
         estimateSectionName: "Roofing",
-        manualLabel: "Label only row",
-        manualQuantity: "",
+        manualLabel: "Priced row",
+        manualQuantity: "2",
         manualUnit: "",
-        manualUnitPrice: "",
+        manualUnitPrice: "125.00",
         manualNotes: "",
       },
     });
 
     expect(insertValues).toHaveBeenCalledWith(
       expect.objectContaining({
-        manualQuantity: null,
+        manualQuantity: "2",
         manualUnit: null,
-        manualUnitPrice: null,
+        manualUnitPrice: "125.00",
         manualNotes: null,
-        recommendedQuantity: null,
+        recommendedQuantity: "2",
         recommendedUnit: null,
-        recommendedUnitPrice: null,
-        recommendedTotalPrice: null,
+        recommendedUnitPrice: "125.00",
+        recommendedTotalPrice: "250.00",
       })
     );
   });
@@ -230,7 +230,29 @@ describe("manual-row-service", () => {
           manualUnitPrice: "",
         },
       })
-    ).rejects.toThrow("Catalog-backed manual rows require quantity and unit price");
+    ).rejects.toThrow("Manual rows require quantity and unit price");
+  });
+
+  it("requires quantity and unit price for free-text manual rows", async () => {
+    const tenantDb = {
+      select: makeActiveMatchSelect(),
+    } as any;
+
+    await expect(
+      createManualEstimateRow({
+        tenantDb,
+        dealId: "deal-1",
+        userId: "user-1",
+        input: {
+          generationRunId: "run-1",
+          extractionMatchId: "match-1",
+          estimateSectionName: "Roofing",
+          manualLabel: "Free-text row",
+          manualQuantity: "",
+          manualUnitPrice: "",
+        },
+      })
+    ).rejects.toThrow("Manual rows require quantity and unit price");
   });
 
   it("uses catalog-first lookup before falling back to free-text manual rows", async () => {
@@ -278,6 +300,8 @@ describe("manual-row-service", () => {
         extractionMatchId: "match-1",
         estimateSectionName: "Roofing",
         manualLabel: "Custom flashing",
+        manualQuantity: "2",
+        manualUnitPrice: "125.00",
         catalogQuery: "flashing",
       },
     });
@@ -340,6 +364,8 @@ describe("manual-row-service", () => {
         extractionMatchId: "match-1",
         estimateSectionName: "Roofing",
         manualLabel: "Custom flashing",
+        manualQuantity: "2",
+        manualUnitPrice: "125.00",
         catalogQuery: "missing thing",
       },
     });
@@ -462,6 +488,8 @@ describe("manual-row-service", () => {
         extractionMatchId: "match-1",
         estimateSectionName: "Roofing",
         manualLabel: "Custom flashing",
+        manualQuantity: "2",
+        manualUnitPrice: "125.00",
         catalogQuery: "missing thing",
         selectedSourceType: "catalog_option",
       },
@@ -510,6 +538,8 @@ describe("manual-row-service", () => {
         extractionMatchId: "match-1",
         estimateSectionName: "Roofing",
         manualLabel: "Custom flashing",
+        manualQuantity: "2",
+        manualUnitPrice: "125.00",
         catalogOptions: [
           {
             stableId: "option-1",
