@@ -1,8 +1,13 @@
 import { eq, and, sql, gte, lte, inArray } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
+  auditLog,
+  aiDisconnectCases,
   deals,
   activities,
+  duplicateQueue,
+  jobQueue,
+  procoreSyncState,
   tasks,
   users,
   pipelineStageConfig,
@@ -509,5 +514,157 @@ export async function getRepDetail(
     winRateTrend: winTrend,
     staleDeals,
     staleLeads,
+  };
+}
+
+export interface AdminDashboardSummary {
+  aiActions: { pendingCount: number; oldestAgeLabel: string };
+  interventions: { openCount: number; oldestAgeLabel: string };
+  disconnects: { totalCount: number; primaryClusterLabel: string };
+  mergeQueue: { openCount: number; oldestAgeLabel: string };
+  migration: { unresolvedCount: number; oldestAgeLabel: string };
+  audit: { changeCount24h: number; lastActorLabel: string };
+  procore: { conflictCount: number; healthLabel: string };
+}
+
+function formatAgeLabel(value: string | number | null | undefined) {
+  const minutes = Number(value ?? 0);
+  if (!Number.isFinite(minutes) || minutes <= 0) return "0m";
+  if (minutes >= 1440) return `${Math.round(minutes / 1440)}d`;
+  if (minutes >= 60) return `${Math.round(minutes / 60)}h`;
+  return `${Math.round(minutes)}m`;
+}
+
+async function readAiActionSummary(tenantDb: TenantDb, activeOfficeId: string) {
+  const result = await tenantDb.execute(sql`
+    select
+      count(*)::int as pending_count,
+      coalesce(max(extract(epoch from now() - created_at) / 60), 0)::int as oldest_minutes
+    from job_queue
+    where office_id = ${activeOfficeId}
+      and status = 'pending'
+      and job_type like 'ai_%'
+  `);
+  const row = (result as any).rows?.[0] ?? {};
+  return {
+    pendingCount: Number(row.pending_count ?? 0),
+    oldestAgeLabel: formatAgeLabel(row.oldest_minutes),
+  };
+}
+
+async function readInterventionSummary(tenantDb: TenantDb, activeOfficeId: string) {
+  const result = await tenantDb.execute(sql`
+    select
+      count(*)::int as open_count,
+      coalesce(max(extract(epoch from now() - first_detected_at) / 60), 0)::int as oldest_minutes
+    from ai_disconnect_cases
+    where office_id = ${activeOfficeId}
+      and status = 'open'
+  `);
+  const row = (result as any).rows?.[0] ?? {};
+  return {
+    openCount: Number(row.open_count ?? 0),
+    oldestAgeLabel: formatAgeLabel(row.oldest_minutes),
+  };
+}
+
+async function readDisconnectSummary(tenantDb: TenantDb, activeOfficeId: string) {
+  const result = await tenantDb.execute(sql`
+    select
+      count(*)::int as total_count,
+      coalesce((
+        select cluster_key
+        from ai_disconnect_cases
+        where office_id = ${activeOfficeId}
+          and status = 'open'
+          and cluster_key is not null
+        group by cluster_key
+        order by count(*) desc, cluster_key asc
+        limit 1
+      ), 'No active cluster') as primary_cluster_label
+    from ai_disconnect_cases
+    where office_id = ${activeOfficeId}
+      and status = 'open'
+  `);
+  const row = (result as any).rows?.[0] ?? {};
+  return {
+    totalCount: Number(row.total_count ?? 0),
+    primaryClusterLabel: String(row.primary_cluster_label ?? "No active cluster"),
+  };
+}
+
+async function readMergeQueueSummary(tenantDb: TenantDb, _activeOfficeId: string) {
+  const result = await tenantDb.execute(sql`
+    select
+      count(*)::int as open_count,
+      coalesce(max(extract(epoch from now() - created_at) / 60), 0)::int as oldest_minutes
+    from duplicate_queue
+    where status = 'pending'
+  `);
+  const row = (result as any).rows?.[0] ?? {};
+  return {
+    openCount: Number(row.open_count ?? 0),
+    oldestAgeLabel: formatAgeLabel(row.oldest_minutes),
+  };
+}
+
+async function readMigrationSummary(_tenantDb: TenantDb, _activeOfficeId: string) {
+  return {
+    unresolvedCount: 0,
+    oldestAgeLabel: "0m",
+  };
+}
+
+async function readAuditSummary(tenantDb: TenantDb, _activeOfficeId: string) {
+  const result = await tenantDb.execute(sql`
+    select
+      count(*) filter (where created_at >= now() - interval '24 hours')::int as change_count_24h,
+      coalesce(max(actor_name), 'No recent changes') as last_actor_label
+    from audit_log
+  `);
+  const row = (result as any).rows?.[0] ?? {};
+  return {
+    changeCount24h: Number(row.change_count_24h ?? 0),
+    lastActorLabel: String(row.last_actor_label ?? "No recent changes"),
+  };
+}
+
+async function readProcoreSummary(tenantDb: TenantDb, activeOfficeId: string) {
+  const result = await tenantDb.execute(sql`
+    select
+      count(*) filter (where sync_status = 'conflict')::int as conflict_count
+    from procore_sync_state
+    where office_id = ${activeOfficeId}
+  `);
+  const row = (result as any).rows?.[0] ?? {};
+  const conflictCount = Number(row.conflict_count ?? 0);
+  return {
+    conflictCount,
+    healthLabel: conflictCount > 0 ? "Needs review" : "Healthy",
+  };
+}
+
+export async function getAdminDashboardSummary(
+  tenantDb: TenantDb,
+  activeOfficeId: string
+): Promise<AdminDashboardSummary> {
+  const [aiActions, interventions, disconnects, mergeQueue, migration, audit, procore] = await Promise.all([
+    readAiActionSummary(tenantDb, activeOfficeId),
+    readInterventionSummary(tenantDb, activeOfficeId),
+    readDisconnectSummary(tenantDb, activeOfficeId),
+    readMergeQueueSummary(tenantDb, activeOfficeId),
+    readMigrationSummary(tenantDb, activeOfficeId),
+    readAuditSummary(tenantDb, activeOfficeId),
+    readProcoreSummary(tenantDb, activeOfficeId),
+  ]);
+
+  return {
+    aiActions,
+    interventions,
+    disconnects,
+    mergeQueue,
+    migration,
+    audit,
+    procore,
   };
 }

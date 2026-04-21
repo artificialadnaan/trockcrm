@@ -1,16 +1,18 @@
-import { and, asc, desc, eq, ilike, inArray, or } from "drizzle-orm";
+import { and, asc, desc, eq, ilike, inArray, or, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
   companies,
   contacts,
   deals,
   leads,
+  pipelineStageConfig,
   properties,
   userOfficeAccess,
   users,
 } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import type { WorkflowFamily } from "@trock-crm/shared/types";
+import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { getStageById } from "../pipeline/service.js";
 
@@ -56,10 +58,249 @@ interface LeadServiceDependencies {
   now: () => Date;
 }
 
+type WorkspaceScope = "mine" | "team" | "all";
+
+export interface LeadBoardInput {
+  role: string;
+  userId: string;
+  activeOfficeId: string;
+  scope: WorkspaceScope;
+}
+
+export interface LeadStagePageInput extends LeadBoardInput {
+  stageId: string;
+  page: number;
+  pageSize: number;
+  search?: string;
+  sort?: string;
+  assignedRepId?: string;
+  staleOnly?: boolean;
+  status?: string;
+  workflowRoute?: string;
+  source?: string;
+}
+
+type LeadStageRow = {
+  id: string;
+  name: string;
+  stage_id: string;
+  assigned_rep_id: string;
+  office_id: string;
+  company_name: string | null;
+  property_city: string | null;
+  property_state: string | null;
+  source: string | null;
+  status: string;
+  last_activity_at: string | null;
+  stage_entered_at: string;
+  updated_at: string;
+};
+
 const defaultDependencies: LeadServiceDependencies = {
   getStageById,
   now: () => new Date(),
 };
+
+async function listLeadStages() {
+  return db
+    .select()
+    .from(pipelineStageConfig)
+    .where(eq(pipelineStageConfig.workflowFamily, "lead"))
+    .orderBy(asc(pipelineStageConfig.displayOrder));
+}
+
+async function getDefaultConversionDealStageId() {
+  const [stage] = await db
+    .select({ id: pipelineStageConfig.id })
+    .from(pipelineStageConfig)
+    .where(
+      and(
+        eq(pipelineStageConfig.workflowFamily, "standard_deal"),
+        eq(pipelineStageConfig.isActivePipeline, true)
+      )
+    )
+    .orderBy(asc(pipelineStageConfig.displayOrder))
+    .limit(1);
+
+  return stage?.id ?? null;
+}
+
+function buildLeadWorkspaceScope(input: LeadBoardInput | LeadStagePageInput) {
+  const filters = [
+    sql`l.is_active = true`,
+    sql`u.office_id = ${input.activeOfficeId}`,
+  ];
+
+  if (input.role === "rep" || input.scope === "mine") {
+    filters.push(sql`l.assigned_rep_id = ${input.userId}`);
+  }
+
+  if ("assignedRepId" in input && input.assignedRepId) {
+    filters.push(sql`l.assigned_rep_id = ${input.assignedRepId}`);
+  }
+
+  if ("status" in input && input.status) {
+    filters.push(sql`l.status = ${input.status}`);
+  } else {
+    filters.push(sql`l.status = 'open'`);
+  }
+
+  if ("source" in input && input.source) {
+    filters.push(sql`l.source = ${input.source}`);
+  }
+
+  if ("search" in input && input.search && input.search.trim().length >= 2) {
+    const term = `%${input.search.trim()}%`;
+    filters.push(sql`(l.name ilike ${term} or c.name ilike ${term} or p.city ilike ${term} or p.state ilike ${term})`);
+  }
+
+  if ("staleOnly" in input && input.staleOnly) {
+    filters.push(sql`l.last_activity_at is null or l.last_activity_at < now() - interval '14 days'`);
+  }
+
+  return sql.join(filters, sql` and `);
+}
+
+function normalizeLeadStageSort(sort?: string) {
+  switch (sort) {
+    case "name_asc":
+      return sql`l.name asc, l.updated_at desc`;
+    case "age_desc":
+      return sql`l.stage_entered_at asc, l.updated_at desc`;
+    default:
+      return sql`l.updated_at desc, l.name asc`;
+  }
+}
+
+function mapLeadStageRow(row: LeadStageRow) {
+  return {
+    id: row.id,
+    name: row.name,
+    stageId: row.stage_id,
+    assignedRepId: row.assigned_rep_id,
+    officeId: row.office_id,
+    companyName: row.company_name,
+    propertyCity: row.property_city,
+    propertyState: row.property_state,
+    source: row.source,
+    status: row.status,
+    lastActivityAt: row.last_activity_at,
+    stageEnteredAt: row.stage_entered_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function groupLeadBoardColumns(stages: Awaited<ReturnType<typeof listLeadStages>>, rows: LeadStageRow[]) {
+  return stages
+    .filter((stage) => !stage.isTerminal)
+    .map((stage) => {
+      const cards = rows
+        .filter((row) => row.stage_id === stage.id)
+        .map(mapLeadStageRow);
+
+      return {
+        stage,
+        count: cards.length,
+        cards,
+      };
+    });
+}
+
+export async function listLeadBoard(tenantDb: TenantDb, input: LeadBoardInput) {
+  const [stages, defaultConversionDealStageId, rowResult] = await Promise.all([
+    listLeadStages(),
+    getDefaultConversionDealStageId(),
+    tenantDb.execute(sql`
+      select
+        l.id,
+        l.name,
+        l.stage_id,
+        l.assigned_rep_id,
+        u.office_id,
+        c.name as company_name,
+        p.city as property_city,
+        p.state as property_state,
+        l.source,
+        l.status,
+        l.last_activity_at,
+        l.stage_entered_at,
+        l.updated_at
+      from leads l
+      join users u on u.id = l.assigned_rep_id
+      left join companies c on c.id = l.company_id
+      left join properties p on p.id = l.property_id
+      where ${buildLeadWorkspaceScope(input)}
+      order by l.stage_entered_at asc, l.updated_at desc
+    `),
+  ]);
+
+  return {
+    columns: groupLeadBoardColumns(stages, rowResult.rows as LeadStageRow[]),
+    defaultConversionDealStageId,
+  };
+}
+
+export async function listLeadStagePage(tenantDb: TenantDb, input: LeadStagePageInput) {
+  const [stage] = await listLeadStages().then((stages) => stages.filter((item) => item.id === input.stageId));
+  if (!stage) {
+    throw new AppError(404, "Lead stage not found");
+  }
+
+  const page = Math.max(1, input.page || 1);
+  const pageSize = Math.max(1, Math.min(100, input.pageSize || 25));
+  const offset = (page - 1) * pageSize;
+  const scope = buildLeadWorkspaceScope(input);
+  const countResult = await tenantDb.execute(sql`
+    select
+      count(*)::int as total
+    from leads l
+    join users u on u.id = l.assigned_rep_id
+    left join companies c on c.id = l.company_id
+    left join properties p on p.id = l.property_id
+    where ${scope} and l.stage_id = ${input.stageId}
+  `);
+  const rowResult = await tenantDb.execute(sql`
+    select
+      l.id,
+      l.name,
+      l.stage_id,
+      l.assigned_rep_id,
+      u.office_id,
+      c.name as company_name,
+      p.city as property_city,
+      p.state as property_state,
+      l.source,
+      l.status,
+      l.last_activity_at,
+      l.stage_entered_at,
+      l.updated_at
+    from leads l
+    join users u on u.id = l.assigned_rep_id
+    left join companies c on c.id = l.company_id
+    left join properties p on p.id = l.property_id
+    where ${scope} and l.stage_id = ${input.stageId}
+    order by ${normalizeLeadStageSort(input.sort)}
+    limit ${pageSize}
+    offset ${offset}
+  `);
+
+  const total = Number((countResult.rows[0] as { total?: number | string } | undefined)?.total ?? 0);
+
+  return {
+    stage,
+    scope: input.scope,
+    summary: {
+      count: total,
+    },
+    pagination: {
+      page,
+      pageSize,
+      total,
+      totalPages: Math.ceil(total / pageSize),
+    },
+    rows: (rowResult.rows as LeadStageRow[]).map(mapLeadStageRow),
+  };
+}
 
 async function decorateLeads(
   tenantDb: TenantDb,
