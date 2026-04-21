@@ -32,11 +32,6 @@ describe("RepDashboardPage", () => {
         followUpCompliance: { total: 3, onTime: 2, complianceRate: 67 },
         pipelineByStage: [],
         staleLeads: { count: 1, averageDaysInStage: 8, leads: [] },
-        commissionSummary: {
-          totalEarnedCommission: 12000,
-          potentialCommission: 18000,
-          floorRemaining: 3000,
-        },
       },
     });
     mocks.useDealBoardMock.mockReturnValue({ board: { columns: [] } });
@@ -53,5 +48,22 @@ describe("RepDashboardPage", () => {
     expect(html).toContain("My Board");
     expect(html).toContain("aria-pressed=\"true\"");
     expect(html).toContain("Stale Leads");
+  });
+
+  it("keeps the board shell visible while the summary hook is still loading", () => {
+    mocks.useRepDashboardMock.mockReturnValue({
+      loading: true,
+      error: null,
+      data: null,
+    });
+
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <RepDashboardPage />
+      </MemoryRouter>
+    );
+
+    expect(html).toContain("My Board");
+    expect(html).toContain("aria-label=\"My Board\"");
   });
 });

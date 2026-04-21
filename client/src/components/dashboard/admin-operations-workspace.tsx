@@ -1,24 +1,27 @@
 import { Link } from "react-router-dom";
+import type { AdminOperationsTile } from "@/lib/admin-dashboard-summary";
 
-export function AdminOperationsWorkspace({
-  items,
-}: {
-  items: Array<{ key: string; label: string; value: string; detail: string; href: string }>;
-}) {
+export function AdminOperationsWorkspace({ tiles }: { tiles: AdminOperationsTile[] }) {
   return (
-    <section className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
+    <section className="space-y-4" aria-label="Operations workspace">
       <div>
-        <h2 className="text-sm font-bold uppercase tracking-wide text-gray-900">Operations workspace</h2>
-        <p className="mt-1 text-sm text-gray-500">Prioritized action surfaces for queue triage, sync review, and admin oversight.</p>
+        <h2 className="text-lg font-semibold text-slate-950">Needs attention now</h2>
+        <p className="text-sm text-slate-500">Operational queues and system signals that need review first.</p>
       </div>
-      <div className="mt-4 grid gap-3 md:grid-cols-2">
-        {items.map((item) => (
-          <Link key={item.key} to={item.href} className="rounded-xl border border-gray-200 bg-gray-50 px-4 py-4 transition-colors hover:bg-white">
-            <div className="flex items-center justify-between">
-              <p className="text-sm font-semibold text-gray-900">{item.label}</p>
-              <span className="text-lg font-black text-gray-900">{item.value}</span>
+      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+        {tiles.map((tile) => (
+          <Link
+            key={tile.key}
+            to={tile.href}
+            className="rounded-2xl border border-slate-200 bg-white p-4 transition-colors hover:border-slate-300 hover:bg-slate-50"
+          >
+            <div className="space-y-2">
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-sm font-semibold text-slate-900">{tile.title}</span>
+                <span className="text-2xl font-semibold tracking-tight text-slate-950">{tile.valueLabel}</span>
+              </div>
+              <p className="text-xs uppercase tracking-[0.16em] text-slate-500">{tile.secondaryLabel}</p>
             </div>
-            <p className="mt-2 text-sm text-gray-500">{item.detail}</p>
           </Link>
         ))}
       </div>

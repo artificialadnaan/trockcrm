@@ -28,6 +28,7 @@ import {
   getDdVsPipeline,
   getWinLossRatioByRep,
 } from "../reports/service.js";
+import { getMigrationSummary } from "../migration/service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -1278,9 +1279,21 @@ async function readMergeQueueSummary(tenantDb: TenantDb, _activeOfficeId: string
 }
 
 async function readMigrationSummary(_tenantDb: TenantDb, _activeOfficeId: string) {
+  const summary = await getMigrationSummary();
+  const unresolvedCount =
+    (summary.deals?.needs_review ?? 0) +
+    (summary.contacts?.needs_review ?? 0) +
+    (summary.activities?.needs_review ?? 0) +
+    (summary.companies?.needs_review ?? 0) +
+    (summary.properties?.needs_review ?? 0) +
+    (summary.leads?.needs_review ?? 0);
+  const latestRunAt = summary.recentRuns[0]?.startedAt ?? null;
+
   return {
-    unresolvedCount: 0,
-    oldestAgeLabel: "0m",
+    unresolvedCount,
+    oldestAgeLabel: latestRunAt
+      ? formatAgeLabel(Math.round((Date.now() - new Date(latestRunAt).getTime()) / 60000))
+      : "No runs",
   };
 }
 

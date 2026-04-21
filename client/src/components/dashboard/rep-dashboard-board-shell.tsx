@@ -1,28 +1,43 @@
 import { PipelineBoard } from "@/components/pipeline/pipeline-board";
 import { Button } from "@/components/ui/button";
-import { formatCurrency } from "@/components/charts/chart-colors";
+import { useNavigate } from "react-router-dom";
 import type { RepDashboardData } from "@/hooks/use-dashboard";
 import type { DealBoardResponse } from "@/hooks/use-deals";
 import type { LeadBoardResponse } from "@/hooks/use-leads";
-import { useNavigate } from "react-router-dom";
 
 interface RepDashboardBoardShellProps {
   activeEntity: "deals" | "leads";
   onEntityChange: (entity: "deals" | "leads") => void;
-  repSummary: RepDashboardData;
+  repSummary: RepDashboardData | null;
+  summaryLoading: boolean;
+  summaryError: string | null;
   dealBoard: DealBoardResponse | null;
+  dealBoardLoading: boolean;
   leadBoard: LeadBoardResponse | null;
+  leadBoardLoading: boolean;
 }
 
 export function RepDashboardBoardShell({
   activeEntity,
   onEntityChange,
   repSummary,
+  summaryLoading,
+  summaryError,
   dealBoard,
+  dealBoardLoading,
   leadBoard,
+  leadBoardLoading,
 }: RepDashboardBoardShellProps) {
   const navigate = useNavigate();
   const boardColumns = activeEntity === "deals" ? dealBoard?.columns ?? [] : leadBoard?.columns ?? [];
+  const boardLoading = activeEntity === "deals" ? dealBoardLoading : leadBoardLoading;
+  const summaryCards = repSummary
+    ? [
+        { label: "Active Deals", value: String(repSummary.activeDeals.count) },
+        { label: "Tasks Today", value: String(repSummary.tasksToday.overdue + repSummary.tasksToday.today) },
+        { label: "Stale Leads", value: String(repSummary.staleLeads.count) },
+      ]
+    : [];
 
   return (
     <div className="space-y-8">
@@ -46,52 +61,34 @@ export function RepDashboardBoardShell({
         <PipelineBoard
           entity={activeEntity === "deals" ? "deal" : "lead"}
           columns={boardColumns}
-          loading={false}
-          onOpenStage={(stageId) =>
-            navigate(`/${activeEntity}/stages/${stageId}?scope=mine`)
-          }
-          onOpenRecord={(recordId) =>
-            navigate(`/${activeEntity}/${recordId}`)
-          }
+          loading={boardLoading}
+          onOpenStage={(stageId) => navigate(`/${activeEntity}/stages/${stageId}?scope=mine`)}
+          onOpenRecord={(recordId) => navigate(activeEntity === "deals" ? `/deals/${recordId}` : `/leads/${recordId}`)}
         />
       </section>
 
-      <section aria-label="Secondary summary" className="grid gap-4 md:grid-cols-3">
-        <div className="rounded-2xl border border-slate-200 bg-white p-4">
-          <p className="text-xs uppercase tracking-[0.16em] text-slate-500">Active Deals</p>
-          <p className="mt-2 text-3xl font-semibold text-slate-950">{repSummary.activeDeals.count}</p>
+      {summaryError ? (
+        <div className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+          {summaryError}
         </div>
-        <div className="rounded-2xl border border-slate-200 bg-white p-4">
-          <p className="text-xs uppercase tracking-[0.16em] text-slate-500">Tasks Today</p>
-          <p className="mt-2 text-3xl font-semibold text-slate-950">
-            {repSummary.tasksToday.overdue + repSummary.tasksToday.today}
-          </p>
-        </div>
-        <div className="rounded-2xl border border-slate-200 bg-white p-4">
-          <p className="text-xs uppercase tracking-[0.16em] text-slate-500">Stale Leads</p>
-          <p className="mt-2 text-3xl font-semibold text-slate-950">{repSummary.staleLeads.count}</p>
-        </div>
-      </section>
+      ) : null}
 
-      <section aria-label="Commission summary" className="grid gap-4 md:grid-cols-3">
-        <div className="rounded-2xl border border-slate-200 bg-white p-4">
-          <p className="text-xs uppercase tracking-[0.16em] text-slate-500">Earned Commission (12M)</p>
-          <p className="mt-2 text-3xl font-semibold text-slate-950">
-            {formatCurrency(repSummary.commissionSummary.totalEarnedCommission)}
-          </p>
-        </div>
-        <div className="rounded-2xl border border-slate-200 bg-white p-4">
-          <p className="text-xs uppercase tracking-[0.16em] text-slate-500">Potential Commission</p>
-          <p className="mt-2 text-3xl font-semibold text-slate-950">
-            {formatCurrency(repSummary.commissionSummary.potentialCommission)}
-          </p>
-        </div>
-        <div className="rounded-2xl border border-slate-200 bg-white p-4">
-          <p className="text-xs uppercase tracking-[0.16em] text-slate-500">Floor Remaining</p>
-          <p className="mt-2 text-3xl font-semibold text-slate-950">
-            {formatCurrency(repSummary.commissionSummary.floorRemaining)}
-          </p>
-        </div>
+      <section aria-label="Secondary summary" className="grid gap-4 md:grid-cols-3">
+        {summaryLoading && !repSummary ? (
+          Array.from({ length: 3 }).map((_, index) => (
+            <div key={index} className="rounded-2xl border border-slate-200 bg-white p-4">
+              <div className="h-3 w-24 animate-pulse rounded bg-slate-100" />
+              <div className="mt-3 h-8 w-16 animate-pulse rounded bg-slate-100" />
+            </div>
+          ))
+        ) : (
+          summaryCards.map((card) => (
+            <div key={card.label} className="rounded-2xl border border-slate-200 bg-white p-4">
+              <p className="text-xs uppercase tracking-[0.16em] text-slate-500">{card.label}</p>
+              <p className="mt-2 text-3xl font-semibold text-slate-950">{card.value}</p>
+            </div>
+          ))
+        )}
       </section>
     </div>
   );

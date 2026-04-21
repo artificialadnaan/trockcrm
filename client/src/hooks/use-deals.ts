@@ -449,7 +449,7 @@ export function useDealBoard(scope: "mine" | "team" | "all", includeDd: boolean)
 
   const refetch = useCallback(() => {
     setLoading(true);
-    return api<DealBoardApiResponse>(`/deals/pipeline?scope=${scope}&includeDd=${includeDd}`)
+    return api<DealBoardApiResponse>(`/deals/pipeline?scope=${scope}&includeDd=${includeDd}&previewLimit=8`)
       .then((result) => {
         const normalized = normalizeDealBoardResponse(result);
         setBoard(normalized);

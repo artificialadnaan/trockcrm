@@ -420,7 +420,7 @@ export function useLeadBoard(scope: "mine" | "team" | "all") {
 
   const refetch = useCallback(() => {
     setLoading(true);
-    return api<LeadBoardResponse>(`/leads/board?scope=${scope}`)
+    return api<LeadBoardResponse>(`/leads/board?scope=${scope}&previewLimit=8`)
       .then((result) => {
         setBoard(result);
         return result;

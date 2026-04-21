@@ -22,6 +22,7 @@ function readBoardInput(req: Parameters<typeof router.get>[1] extends never ? ne
     userId: req.user!.id,
     activeOfficeId: req.user!.activeOfficeId ?? req.user!.officeId,
     scope: (req.query.scope as "mine" | "team" | "all" | undefined) ?? "mine",
+    previewLimit: req.query.previewLimit ? Number(req.query.previewLimit) : undefined,
   };
 }
 

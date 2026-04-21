@@ -1,37 +1,43 @@
 import { PipelineBoard } from "@/components/pipeline/pipeline-board";
 import { Button } from "@/components/ui/button";
-import { formatCurrency } from "@/components/charts/chart-colors";
+import { useNavigate } from "react-router-dom";
 import type { DirectorDashboardData } from "@/hooks/use-director-dashboard";
 import type { DealBoardResponse } from "@/hooks/use-deals";
 import type { LeadBoardResponse } from "@/hooks/use-leads";
-import { useNavigate } from "react-router-dom";
 
 interface DirectorDashboardShellProps {
   boardEntity: "deals" | "leads";
   onBoardEntityChange: (entity: "deals" | "leads") => void;
-  directorSummary: DirectorDashboardData;
+  directorSummary: DirectorDashboardData | null;
+  summaryLoading: boolean;
+  summaryError: string | null;
   dealBoard: DealBoardResponse | null;
+  dealBoardLoading: boolean;
   leadBoard: LeadBoardResponse | null;
+  leadBoardLoading: boolean;
 }
 
 export function DirectorDashboardShell({
   boardEntity,
   onBoardEntityChange,
   directorSummary,
+  summaryLoading,
+  summaryError,
   dealBoard,
+  dealBoardLoading,
   leadBoard,
+  leadBoardLoading,
 }: DirectorDashboardShellProps) {
   const navigate = useNavigate();
   const boardColumns = boardEntity === "deals" ? dealBoard?.columns ?? [] : leadBoard?.columns ?? [];
-  const teamEarnedCommission = directorSummary.repCommissionRows.reduce(
-    (sum, row) => sum + row.totalEarnedCommission,
-    0
-  );
-  const teamPotentialCommission = directorSummary.repCommissionRows.reduce(
-    (sum, row) => sum + row.potentialCommission,
-    0
-  );
-  const repsBelowFloor = directorSummary.repCommissionRows.filter((row) => row.floorRemaining > 0).length;
+  const boardLoading = boardEntity === "deals" ? dealBoardLoading : leadBoardLoading;
+  const analyticsCards = directorSummary
+    ? [
+        { label: "Pipeline Value", value: String(directorSummary.ddVsPipeline.pipelineValue) },
+        { label: "Stale Deals", value: String(directorSummary.staleDeals.length) },
+        { label: "Stale Leads", value: String(directorSummary.staleLeads.length) },
+      ]
+    : [];
 
   return (
     <div className="space-y-8">
@@ -55,46 +61,34 @@ export function DirectorDashboardShell({
         <PipelineBoard
           entity={boardEntity === "deals" ? "deal" : "lead"}
           columns={boardColumns}
-          loading={false}
-          onOpenStage={(stageId) =>
-            navigate(`/${boardEntity}/stages/${stageId}?scope=team`)
-          }
-          onOpenRecord={(recordId) =>
-            navigate(`/${boardEntity}/${recordId}`)
-          }
+          loading={boardLoading}
+          onOpenStage={(stageId) => navigate(`/${boardEntity}/stages/${stageId}?scope=team`)}
+          onOpenRecord={(recordId) => navigate(boardEntity === "deals" ? `/deals/${recordId}` : `/leads/${recordId}`)}
         />
       </section>
 
-      <section aria-label="Secondary analytics" className="grid gap-4 md:grid-cols-3">
-        <div className="rounded-2xl border border-slate-200 bg-white p-4">
-          <p className="text-xs uppercase tracking-[0.16em] text-slate-500">Pipeline Value</p>
-          <p className="mt-2 text-3xl font-semibold text-slate-950">
-            {formatCurrency(directorSummary.ddVsPipeline.pipelineValue)}
-          </p>
+      {summaryError ? (
+        <div className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+          {summaryError}
         </div>
-        <div className="rounded-2xl border border-slate-200 bg-white p-4">
-          <p className="text-xs uppercase tracking-[0.16em] text-slate-500">Stale Deals</p>
-          <p className="mt-2 text-3xl font-semibold text-slate-950">{directorSummary.staleDeals.length}</p>
-        </div>
-        <div className="rounded-2xl border border-slate-200 bg-white p-4">
-          <p className="text-xs uppercase tracking-[0.16em] text-slate-500">Stale Leads</p>
-          <p className="mt-2 text-3xl font-semibold text-slate-950">{directorSummary.staleLeads.length}</p>
-        </div>
-      </section>
+      ) : null}
 
-      <section aria-label="Commission visibility" className="grid gap-4 md:grid-cols-3">
-        <div className="rounded-2xl border border-slate-200 bg-white p-4">
-          <p className="text-xs uppercase tracking-[0.16em] text-slate-500">Team Earned Commission (12M)</p>
-          <p className="mt-2 text-3xl font-semibold text-slate-950">{formatCurrency(teamEarnedCommission)}</p>
-        </div>
-        <div className="rounded-2xl border border-slate-200 bg-white p-4">
-          <p className="text-xs uppercase tracking-[0.16em] text-slate-500">Team Potential Commission</p>
-          <p className="mt-2 text-3xl font-semibold text-slate-950">{formatCurrency(teamPotentialCommission)}</p>
-        </div>
-        <div className="rounded-2xl border border-slate-200 bg-white p-4">
-          <p className="text-xs uppercase tracking-[0.16em] text-slate-500">Reps Below Floor</p>
-          <p className="mt-2 text-3xl font-semibold text-slate-950">{repsBelowFloor}</p>
-        </div>
+      <section aria-label="Secondary analytics" className="grid gap-4 md:grid-cols-3">
+        {summaryLoading && !directorSummary ? (
+          Array.from({ length: 3 }).map((_, index) => (
+            <div key={index} className="rounded-2xl border border-slate-200 bg-white p-4">
+              <div className="h-3 w-28 animate-pulse rounded bg-slate-100" />
+              <div className="mt-3 h-8 w-20 animate-pulse rounded bg-slate-100" />
+            </div>
+          ))
+        ) : (
+          analyticsCards.map((card) => (
+            <div key={card.label} className="rounded-2xl border border-slate-200 bg-white p-4">
+              <p className="text-xs uppercase tracking-[0.16em] text-slate-500">{card.label}</p>
+              <p className="mt-2 text-3xl font-semibold text-slate-950">{card.value}</p>
+            </div>
+          ))
+        )}
       </section>
     </div>
   );
