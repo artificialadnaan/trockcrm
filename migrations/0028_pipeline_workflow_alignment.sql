@@ -77,23 +77,47 @@ BEGIN
           AND table_name = 'leads'
       )
   LOOP
+    BEGIN
+      EXECUTE format(
+        'CREATE TYPE %I.workflow_route AS ENUM (''estimating'', ''service'')',
+        schema_name
+      );
+    EXCEPTION
+      WHEN duplicate_object THEN NULL;
+    END;
+
     EXECUTE format(
       'ALTER TABLE %I.deals
          ADD COLUMN IF NOT EXISTS pipeline_disposition deal_pipeline_disposition NOT NULL DEFAULT ''deals''',
       schema_name
     );
 
-    EXECUTE format(
-      'ALTER TABLE %I.deals
-         ALTER COLUMN workflow_route DROP NOT NULL',
-      schema_name
-    );
+    IF EXISTS (
+      SELECT 1
+      FROM information_schema.columns
+      WHERE table_schema = schema_name
+        AND table_name = 'deals'
+        AND column_name = 'workflow_route'
+    ) THEN
+      EXECUTE format(
+        'ALTER TABLE %I.deals
+           ALTER COLUMN workflow_route DROP NOT NULL',
+        schema_name
+      );
 
-    EXECUTE format(
-      'ALTER TABLE %I.deals
-         ALTER COLUMN workflow_route DROP DEFAULT',
-      schema_name
-    );
+      EXECUTE format(
+        'ALTER TABLE %I.deals
+           ALTER COLUMN workflow_route DROP DEFAULT',
+        schema_name
+      );
+    ELSE
+      EXECUTE format(
+        'ALTER TABLE %I.deals
+           ADD COLUMN IF NOT EXISTS workflow_route %I.workflow_route',
+        schema_name,
+        schema_name
+      );
+    END IF;
 
     EXECUTE format(
       'CREATE TABLE IF NOT EXISTS %I.lead_qualification (
