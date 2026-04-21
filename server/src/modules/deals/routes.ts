@@ -323,6 +323,13 @@ router.post("/:id/payments", requireRole("admin", "director"), async (req, res, 
     if (!Number.isFinite(grossRevenueAmount)) {
       throw new AppError(400, "grossRevenueAmount must be a number");
     }
+    const isCreditMemo = Boolean(req.body?.isCreditMemo ?? false);
+    if (isCreditMemo && grossRevenueAmount >= 0) {
+      throw new AppError(400, "grossRevenueAmount must be negative for credit memos");
+    }
+    if (!isCreditMemo && grossRevenueAmount < 0) {
+      throw new AppError(400, "grossRevenueAmount must be non-negative when not a credit memo");
+    }
 
     const grossMarginRaw = req.body?.grossMarginAmount;
     const grossMarginAmount =
@@ -331,6 +338,17 @@ router.post("/:id/payments", requireRole("admin", "director"), async (req, res, 
         : Number(grossMarginRaw);
     if (grossMarginAmount !== null && !Number.isFinite(grossMarginAmount)) {
       throw new AppError(400, "grossMarginAmount must be a number when provided");
+    }
+    if (grossMarginAmount !== null) {
+      if (isCreditMemo && grossMarginAmount >= 0) {
+        throw new AppError(400, "grossMarginAmount must be negative for credit memos");
+      }
+      if (!isCreditMemo && grossMarginAmount < 0) {
+        throw new AppError(400, "grossMarginAmount must be non-negative when not a credit memo");
+      }
+      if (Math.abs(grossMarginAmount) > Math.abs(grossRevenueAmount)) {
+        throw new AppError(400, "grossMarginAmount cannot exceed grossRevenueAmount");
+      }
     }
 
     const [payment] = await req.tenantDb!
@@ -341,7 +359,7 @@ router.post("/:id/payments", requireRole("admin", "director"), async (req, res, 
         paidAt,
         grossRevenueAmount: String(grossRevenueAmount),
         grossMarginAmount: grossMarginAmount === null ? null : String(grossMarginAmount),
-        isCreditMemo: Boolean(req.body?.isCreditMemo ?? false),
+        isCreditMemo,
         notes: typeof req.body?.notes === "string" ? req.body.notes : null,
       })
       .returning();

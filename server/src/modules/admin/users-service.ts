@@ -15,6 +15,24 @@ import {
   type LocalAuthStatus,
 } from "../auth/local-auth-service.js";
 
+function assertRate(name: string, value: number) {
+  if (!Number.isFinite(value) || value < 0 || value > 1) {
+    throw new AppError(400, `${name} must be between 0 and 1`);
+  }
+}
+
+function assertNonNegative(name: string, value: number) {
+  if (!Number.isFinite(value) || value < 0) {
+    throw new AppError(400, `${name} must be greater than or equal to 0`);
+  }
+}
+
+function assertPositiveInteger(name: string, value: number) {
+  if (!Number.isInteger(value) || value < 1) {
+    throw new AppError(400, `${name} must be an integer greater than or equal to 1`);
+  }
+}
+
 export async function listUsers(officeId?: string) {
   const rows = await db
     .select({
@@ -123,6 +141,14 @@ export async function updateUser(
     const newCustomerShareFloor = input.newCustomerShareFloor ?? Number(current?.newCustomerShareFloor ?? 0.1);
     const newCustomerWindowMonths = input.newCustomerWindowMonths ?? Number(current?.newCustomerWindowMonths ?? 6);
     const isActive = input.commissionConfigActive ?? Boolean(current?.isActive ?? true);
+
+    assertRate("commissionRate", commissionRate);
+    assertNonNegative("rollingFloor", rollingFloor);
+    assertRate("overrideRate", overrideRate);
+    assertRate("estimatedMarginRate", estimatedMarginRate);
+    assertRate("minMarginPercent", minMarginPercent);
+    assertRate("newCustomerShareFloor", newCustomerShareFloor);
+    assertPositiveInteger("newCustomerWindowMonths", newCustomerWindowMonths);
 
     await db
       .insert(userCommissionSettings)

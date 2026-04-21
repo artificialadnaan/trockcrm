@@ -13,8 +13,68 @@ CREATE TABLE IF NOT EXISTS public.user_commission_settings (
   new_customer_window_months INTEGER NOT NULL DEFAULT 6,
   is_active BOOLEAN NOT NULL DEFAULT true,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT user_commission_settings_rate_bounds_chk CHECK (
+    commission_rate >= 0
+    AND commission_rate <= 1
+    AND override_rate >= 0
+    AND override_rate <= 1
+    AND estimated_margin_rate >= 0
+    AND estimated_margin_rate <= 1
+    AND min_margin_percent >= 0
+    AND min_margin_percent <= 1
+    AND new_customer_share_floor >= 0
+    AND new_customer_share_floor <= 1
+  ),
+  CONSTRAINT user_commission_settings_floor_non_negative_chk CHECK (rolling_floor >= 0),
+  CONSTRAINT user_commission_settings_window_positive_chk CHECK (new_customer_window_months >= 1)
 );
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conname = 'user_commission_settings_rate_bounds_chk'
+      AND connamespace = 'public'::regnamespace
+  ) THEN
+    ALTER TABLE public.user_commission_settings
+      ADD CONSTRAINT user_commission_settings_rate_bounds_chk CHECK (
+        commission_rate >= 0
+        AND commission_rate <= 1
+        AND override_rate >= 0
+        AND override_rate <= 1
+        AND estimated_margin_rate >= 0
+        AND estimated_margin_rate <= 1
+        AND min_margin_percent >= 0
+        AND min_margin_percent <= 1
+        AND new_customer_share_floor >= 0
+        AND new_customer_share_floor <= 1
+      );
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conname = 'user_commission_settings_floor_non_negative_chk'
+      AND connamespace = 'public'::regnamespace
+  ) THEN
+    ALTER TABLE public.user_commission_settings
+      ADD CONSTRAINT user_commission_settings_floor_non_negative_chk
+      CHECK (rolling_floor >= 0);
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conname = 'user_commission_settings_window_positive_chk'
+      AND connamespace = 'public'::regnamespace
+  ) THEN
+    ALTER TABLE public.user_commission_settings
+      ADD CONSTRAINT user_commission_settings_window_positive_chk
+      CHECK (new_customer_window_months >= 1);
+  END IF;
+END $$;
 
 -- Seed baseline rates/floors from 2026-04-21 commission sheet.
 INSERT INTO public.user_commission_settings (
@@ -90,11 +150,69 @@ BEGIN
          is_credit_memo BOOLEAN NOT NULL DEFAULT false,
          notes TEXT,
          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+         CONSTRAINT deal_payment_events_credit_memo_sign_chk CHECK (
+           (
+             is_credit_memo = true
+             AND gross_revenue_amount < 0
+             AND (gross_margin_amount IS NULL OR gross_margin_amount < 0)
+           )
+           OR (
+             is_credit_memo = false
+             AND gross_revenue_amount >= 0
+             AND (gross_margin_amount IS NULL OR gross_margin_amount >= 0)
+           )
+         ),
+         CONSTRAINT deal_payment_events_margin_leq_revenue_chk CHECK (
+           gross_margin_amount IS NULL
+           OR ABS(gross_margin_amount) <= ABS(gross_revenue_amount)
+         )
        )',
       schema_name,
       schema_name
     );
+
+    IF NOT EXISTS (
+      SELECT 1
+      FROM pg_constraint c
+      JOIN pg_namespace n ON n.oid = c.connamespace
+      WHERE n.nspname = schema_name
+        AND c.conname = 'deal_payment_events_credit_memo_sign_chk'
+    ) THEN
+      EXECUTE format(
+        'ALTER TABLE %I.deal_payment_events
+          ADD CONSTRAINT deal_payment_events_credit_memo_sign_chk CHECK (
+            (
+              is_credit_memo = true
+              AND gross_revenue_amount < 0
+              AND (gross_margin_amount IS NULL OR gross_margin_amount < 0)
+            )
+            OR (
+              is_credit_memo = false
+              AND gross_revenue_amount >= 0
+              AND (gross_margin_amount IS NULL OR gross_margin_amount >= 0)
+            )
+          )',
+        schema_name
+      );
+    END IF;
+
+    IF NOT EXISTS (
+      SELECT 1
+      FROM pg_constraint c
+      JOIN pg_namespace n ON n.oid = c.connamespace
+      WHERE n.nspname = schema_name
+        AND c.conname = 'deal_payment_events_margin_leq_revenue_chk'
+    ) THEN
+      EXECUTE format(
+        'ALTER TABLE %I.deal_payment_events
+          ADD CONSTRAINT deal_payment_events_margin_leq_revenue_chk CHECK (
+            gross_margin_amount IS NULL
+            OR ABS(gross_margin_amount) <= ABS(gross_revenue_amount)
+          )',
+        schema_name
+      );
+    END IF;
 
     EXECUTE format(
       'CREATE INDEX IF NOT EXISTS deal_payment_events_deal_paid_at_idx
@@ -123,7 +241,23 @@ BEGIN
     is_credit_memo BOOLEAN NOT NULL DEFAULT false,
     notes TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT deal_payment_events_credit_memo_sign_chk CHECK (
+      (
+        is_credit_memo = true
+        AND gross_revenue_amount < 0
+        AND (gross_margin_amount IS NULL OR gross_margin_amount < 0)
+      )
+      OR (
+        is_credit_memo = false
+        AND gross_revenue_amount >= 0
+        AND (gross_margin_amount IS NULL OR gross_margin_amount >= 0)
+      )
+    ),
+    CONSTRAINT deal_payment_events_margin_leq_revenue_chk CHECK (
+      gross_margin_amount IS NULL
+      OR ABS(gross_margin_amount) <= ABS(gross_revenue_amount)
+    )
   );
 
   CREATE INDEX IF NOT EXISTS deal_payment_events_deal_paid_at_idx

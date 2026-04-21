@@ -335,6 +335,7 @@ async function getDirectorFunnelSummary(
 }
 
 type CommissionConfig = {
+  isActive: boolean;
   commissionRate: number;
   rollingFloor: number;
   overrideRate: number;
@@ -360,6 +361,7 @@ type DirectCommissionMetrics = {
 async function getCommissionConfig(tenantDb: TenantDb, userId: string): Promise<CommissionConfig> {
   const result = await tenantDb.execute(sql`
     SELECT
+      COALESCE(cs.is_active, true) AS is_active,
       COALESCE(cs.commission_rate, 0)::numeric AS commission_rate,
       COALESCE(cs.rolling_floor, 0)::numeric AS rolling_floor,
       COALESCE(cs.override_rate, 0)::numeric AS override_rate,
@@ -375,6 +377,7 @@ async function getCommissionConfig(tenantDb: TenantDb, userId: string): Promise<
   const rows = (result as any).rows ?? result;
   const row = rows[0] ?? {};
   return {
+    isActive: Boolean(row.is_active ?? true),
     commissionRate: Number(row.commission_rate ?? 0),
     rollingFloor: Number(row.rolling_floor ?? 0),
     overrideRate: Number(row.override_rate ?? 0),
@@ -398,8 +401,14 @@ async function getDirectCommissionMetrics(
         pe.id,
         pe.paid_at,
         d.company_id,
-        pe.gross_revenue_amount::numeric AS gross_revenue_amount,
-        COALESCE(pe.gross_margin_amount, pe.gross_revenue_amount * ${String(config.estimatedMarginRate)}::numeric)::numeric AS gross_margin_amount,
+        CASE
+          WHEN pe.is_credit_memo THEN -ABS(pe.gross_revenue_amount::numeric)
+          ELSE ABS(pe.gross_revenue_amount::numeric)
+        END AS gross_revenue_amount,
+        CASE
+          WHEN pe.is_credit_memo THEN -ABS(COALESCE(pe.gross_margin_amount, pe.gross_revenue_amount * ${String(config.estimatedMarginRate)}::numeric)::numeric)
+          ELSE ABS(COALESCE(pe.gross_margin_amount, pe.gross_revenue_amount * ${String(config.estimatedMarginRate)}::numeric)::numeric)
+        END AS gross_margin_amount,
         (pe.gross_margin_amount IS NULL) AS used_estimated_margin
       FROM ${dealPaymentEvents} pe
       JOIN ${deals} d ON d.id = pe.deal_id
@@ -411,7 +420,7 @@ async function getDirectCommissionMetrics(
         ev.*,
         CASE
           WHEN ev.gross_revenue_amount = 0 THEN NULL
-          ELSE (ev.gross_margin_amount / NULLIF(ev.gross_revenue_amount, 0))
+          ELSE (ABS(ev.gross_margin_amount) / NULLIF(ABS(ev.gross_revenue_amount), 0))
         END AS margin_percent,
         NOT EXISTS (
           SELECT 1
@@ -425,12 +434,16 @@ async function getDirectCommissionMetrics(
     eligible_events AS (
       SELECT *
       FROM scored_events
-      WHERE margin_percent IS NULL OR margin_percent >= ${String(config.minMarginPercent)}::numeric
+      WHERE gross_revenue_amount < 0
+        OR margin_percent IS NULL
+        OR margin_percent >= ${String(config.minMarginPercent)}::numeric
     ),
     low_margin_events AS (
       SELECT *
       FROM scored_events
-      WHERE margin_percent IS NOT NULL AND margin_percent < ${String(config.minMarginPercent)}::numeric
+      WHERE gross_revenue_amount >= 0
+        AND margin_percent IS NOT NULL
+        AND margin_percent < ${String(config.minMarginPercent)}::numeric
     )
     SELECT
       COALESCE((SELECT SUM(gross_revenue_amount) FROM eligible_events), 0)::numeric AS rolling_paid_revenue,
@@ -449,8 +462,11 @@ async function getDirectCommissionMetrics(
   const excludedLowMarginRevenue = Number(row.excluded_low_margin_revenue ?? 0);
   const newCustomerShare = rollingPaidRevenue > 0 ? newCustomerRevenue / rollingPaidRevenue : 0;
   const meetsNewCustomerShare = rollingPaidRevenue === 0 ? true : newCustomerShare >= config.newCustomerShareFloor;
-  const floorRemaining = Math.max(config.rollingFloor - rollingCommissionableMargin, 0);
-  const eligibleMarginAfterFloor = Math.max(rollingCommissionableMargin - config.rollingFloor, 0);
+  const floorRemaining = Math.max(config.rollingFloor - rollingPaidRevenue, 0);
+  const eligibleRevenueAfterFloor = Math.max(rollingPaidRevenue - config.rollingFloor, 0);
+  const realizedMarginRate =
+    rollingPaidRevenue > 0 ? rollingCommissionableMargin / rollingPaidRevenue : 0;
+  const eligibleMarginAfterFloor = Math.max(eligibleRevenueAfterFloor * realizedMarginRate, 0);
   const directEarnedCommission = meetsNewCustomerShare
     ? Number((eligibleMarginAfterFloor * config.commissionRate).toFixed(2))
     : 0;
@@ -509,6 +525,7 @@ async function getOverrideEarnedCommission(
     subordinateRows.map(async (row: any) => {
       const subordinateId = String(row.rep_id);
       const subordinateConfig = await getCommissionConfig(tenantDb, subordinateId);
+      if (!subordinateConfig.isActive) return 0;
       const subordinateMetrics = await getDirectCommissionMetrics(tenantDb, subordinateId, subordinateConfig);
       if (!subordinateMetrics.meetsNewCustomerShare) return 0;
       return subordinateMetrics.eligibleMarginAfterFloor * managerOverrideRate;
@@ -522,11 +539,20 @@ async function getRepCommissionSummary(
   tenantDb: TenantDb,
   repId: string
 ): Promise<RepCommissionSummary> {
-  const config = await getCommissionConfig(tenantDb, repId);
+  const rawConfig = await getCommissionConfig(tenantDb, repId);
+  const config = rawConfig.isActive
+    ? rawConfig
+    : {
+        ...rawConfig,
+        commissionRate: 0,
+        rollingFloor: 0,
+        overrideRate: 0,
+      };
   const direct = await getDirectCommissionMetrics(tenantDb, repId, config);
   const potentialRevenue = await getRepPotentialRevenue(tenantDb, repId);
   const potentialMargin = potentialRevenue * config.estimatedMarginRate;
-  const potentialCommissionBase = Math.max(potentialMargin - direct.floorRemaining, 0);
+  const potentialEligibleRevenue = Math.max(potentialRevenue - direct.floorRemaining, 0);
+  const potentialCommissionBase = potentialEligibleRevenue * config.estimatedMarginRate;
   const potentialCommission = Number((potentialCommissionBase * config.commissionRate).toFixed(2));
   const overrideEarnedCommission = await getOverrideEarnedCommission(tenantDb, repId, config.overrideRate);
   const totalEarnedCommission = Number((direct.directEarnedCommission + overrideEarnedCommission).toFixed(2));
