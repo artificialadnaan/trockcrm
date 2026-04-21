@@ -48,6 +48,15 @@ export interface PricingReviewRow {
   recommendationOptions?: PricingRecommendationOption[];
 }
 
+function hasNumericPriceValue(value: string | number | null | undefined) {
+  if (typeof value === "number") {
+    return Number.isFinite(value);
+  }
+
+  const trimmed = value?.trim();
+  return Boolean(trimmed) && !Number.isNaN(Number(trimmed));
+}
+
 export interface PricingReviewStateActionInput {
   action: PricingReviewStateAction;
   alternateOptionId?: string | null;
@@ -110,8 +119,22 @@ export function isFreeTextManualRow(row: Pick<
     row.sourceType === "manual" &&
     row.manualOrigin !== "generated" &&
     !row.selectedOptionId &&
+    (!row.catalogBacking || row.catalogBacking === "estimate_only") &&
     row.catalogBacking !== "local_promoted" &&
     !row.promotedLocalCatalogItemId
+  );
+}
+
+function getRecommendedOption(row: Pick<PricingReviewRow, "recommendationOptions">) {
+  return row.recommendationOptions?.find((option) => option.optionKind === "recommended") ?? null;
+}
+
+function canOverridePricingRow(
+  row: Pick<PricingReviewRow, "recommendedUnitPrice" | "recommendedTotalPrice">
+) {
+  return (
+    hasNumericPriceValue(row.recommendedUnitPrice) &&
+    hasNumericPriceValue(row.recommendedTotalPrice)
   );
 }
 
@@ -407,6 +430,8 @@ export function EstimatePricingReviewTable({
                   const options = row.recommendationOptions ?? [];
                   const alternates = options.filter((option) => option.optionKind === "alternate");
                   const selectionState = getPricingRowSelectionState(row);
+                  const recommendedOption = getRecommendedOption(row);
+                  const canOverride = canOverridePricingRow(row);
 
                   return (
                     <tr
@@ -473,18 +498,20 @@ export function EstimatePricingReviewTable({
                       </td>
                       <td className="px-3 py-2 text-right">
                         <div className="flex flex-wrap justify-end gap-2">
-                          <Button
-                            size="xs"
-                            variant="outline"
-                            disabled={rowActionBusy}
-                            onClick={() =>
-                              handleReviewAction(row, {
-                                action: "accept_recommended",
-                              })
-                            }
-                          >
-                            {approveBusy ? "Approving..." : "Accept recommended"}
-                          </Button>
+                          {recommendedOption ? (
+                            <Button
+                              size="xs"
+                              variant="outline"
+                              disabled={rowActionBusy}
+                              onClick={() =>
+                                handleReviewAction(row, {
+                                  action: "accept_recommended",
+                                })
+                              }
+                            >
+                              {approveBusy ? "Approving..." : "Accept recommended"}
+                            </Button>
+                          ) : null}
                           <Button
                             size="xs"
                             variant="outline"
@@ -509,21 +536,23 @@ export function EstimatePricingReviewTable({
                           >
                             Pending review
                           </Button>
-                          <Button
-                            size="xs"
-                            variant="outline"
-                            disabled={rowActionBusy}
-                            onClick={() =>
-                              handleReviewAction(row, {
-                                action: "override",
-                                recommendedUnitPrice: `${row.recommendedUnitPrice ?? ""}`,
-                                recommendedTotalPrice: `${row.recommendedTotalPrice ?? ""}`,
-                                reason: "Override from workbench",
-                              })
-                            }
-                          >
-                            {overrideBusy ? "Overriding..." : "Override"}
-                          </Button>
+                          {canOverride ? (
+                            <Button
+                              size="xs"
+                              variant="outline"
+                              disabled={rowActionBusy}
+                              onClick={() =>
+                                handleReviewAction(row, {
+                                  action: "override",
+                                  recommendedUnitPrice: `${row.recommendedUnitPrice ?? ""}`,
+                                  recommendedTotalPrice: `${row.recommendedTotalPrice ?? ""}`,
+                                  reason: "Override from workbench",
+                                })
+                              }
+                            >
+                              {overrideBusy ? "Overriding..." : "Override"}
+                            </Button>
+                          ) : null}
                           <Button
                             size="xs"
                             variant="destructive"

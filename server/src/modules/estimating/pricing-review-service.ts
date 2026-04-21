@@ -6,6 +6,7 @@ import {
   estimateReviewEvents,
 } from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
+import { normalizeOptionalNumeric } from "./manual-row-service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -58,8 +59,7 @@ async function insertPricingReviewEvent(
 }
 
 function normalizeOverridePrice(value: string | null | undefined) {
-  const trimmed = value?.trim();
-  return trimmed && trimmed.length > 0 ? trimmed : null;
+  return normalizeOptionalNumeric(value, "Override price");
 }
 
 export async function approveEstimatePricingRecommendation(args: {

@@ -74,6 +74,24 @@ export function canonicalizeSectionName(value: string) {
   return value.trim().replace(/\s+/g, " ");
 }
 
+function sanitizeNumericString(value: string) {
+  return value.replace(/,/g, "").trim();
+}
+
+export function normalizeOptionalNumeric(value?: string | null, fieldLabel = "Value") {
+  const trimmed = value?.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const sanitized = sanitizeNumericString(trimmed);
+  if (!/^-?\d+(\.\d+)?$/.test(sanitized)) {
+    throw new AppError(400, `${fieldLabel} must be a valid number`);
+  }
+
+  return sanitized;
+}
+
 function calculateManualTotal(quantity?: string | null, unitPrice?: string | null) {
   if (!quantity || !unitPrice) return null;
   const numericQuantity = Number(quantity);
@@ -86,11 +104,6 @@ function calculateManualTotal(quantity?: string | null, unitPrice?: string | nul
 }
 
 function normalizeOptionalText(value?: string | null) {
-  const trimmed = value?.trim();
-  return trimmed && trimmed.length > 0 ? trimmed : null;
-}
-
-function normalizeOptionalNumeric(value?: string | null) {
   const trimmed = value?.trim();
   return trimmed && trimmed.length > 0 ? trimmed : null;
 }
@@ -167,9 +180,9 @@ function normalizeManualFields(input: {
   manualNotes?: string | null;
 }) {
   return {
-    manualQuantity: normalizeOptionalNumeric(input.manualQuantity),
+    manualQuantity: normalizeOptionalNumeric(input.manualQuantity, "Manual quantity"),
     manualUnit: normalizeOptionalText(input.manualUnit),
-    manualUnitPrice: normalizeOptionalNumeric(input.manualUnitPrice),
+    manualUnitPrice: normalizeOptionalNumeric(input.manualUnitPrice, "Manual unit price"),
     manualNotes: normalizeOptionalText(input.manualNotes),
   };
 }

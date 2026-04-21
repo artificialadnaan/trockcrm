@@ -159,4 +159,39 @@ describe("local-catalog-service", () => {
       })
     ).rejects.toThrow("Manual rows require quantity and unit price before local catalog promotion");
   });
+
+  it("rejects manual rows that still carry catalog-backed provenance", async () => {
+    const tenantDb = {
+      select: vi.fn(() => ({
+        from: vi.fn(() => ({
+          where: vi.fn(() => ({
+            limit: vi.fn().mockResolvedValue([
+              {
+                id: "rec-catalog-1",
+                dealId: "deal-1",
+                sourceType: "manual",
+                manualOrigin: "manual_estimator_added",
+                manualQuantity: "2",
+                manualUnitPrice: "55.00",
+                selectedSourceType: "manual",
+                selectedOptionId: null,
+                catalogBacking: "procore_synced",
+                promotedLocalCatalogItemId: null,
+              },
+            ]),
+          })),
+        })),
+      })),
+    } as any;
+
+    await expect(
+      promoteManualRowToLocalCatalog({
+        tenantDb,
+        dealId: "deal-1",
+        recommendationId: "rec-catalog-1",
+        userId: "user-1",
+        input: {},
+      })
+    ).rejects.toThrow("Catalog-backed manual rows are not eligible for local catalog promotion");
+  });
 });

@@ -6,7 +6,7 @@ import {
   estimatePricingRecommendations,
 } from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
-import { resolveManualPromotionValues } from "./manual-row-service.js";
+import { normalizeOptionalNumeric, resolveManualPromotionValues } from "./manual-row-service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -34,8 +34,7 @@ function buildSyntheticLocalCatalogItem(args: {
 }
 
 function normalizePromotionNumeric(value?: string | null) {
-  const trimmed = value?.trim();
-  return trimmed && trimmed.length > 0 ? trimmed : null;
+  return normalizeOptionalNumeric(value, "Manual catalog promotion value");
 }
 
 export async function promoteManualRowToLocalCatalog(args: {
@@ -69,6 +68,9 @@ export async function promoteManualRowToLocalCatalog(args: {
   }
 
   if (existing.selectedSourceType === "catalog_option" || existing.selectedOptionId) {
+    throw new AppError(400, "Catalog-backed manual rows are not eligible for local catalog promotion");
+  }
+  if (existing.catalogBacking && existing.catalogBacking !== "estimate_only") {
     throw new AppError(400, "Catalog-backed manual rows are not eligible for local catalog promotion");
   }
 

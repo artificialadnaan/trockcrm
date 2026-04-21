@@ -121,6 +121,25 @@ describe("EstimateRecommendationOptionsPanel", () => {
     expect(html).toContain("Promote to local catalog");
   });
 
+  it("does not show local-catalog promotion for manual rows that still carry catalog-backed provenance", () => {
+    const html = renderToStaticMarkup(
+      <EstimateRecommendationOptionsPanel
+        dealId="deal-1"
+        recommendation={{
+          id: "price-manual-catalog",
+          sourceType: "manual",
+          manualOrigin: "manual_estimator_added",
+          selectedSourceType: "manual",
+          catalogBacking: "procore_synced",
+        }}
+        onReviewAction={vi.fn()}
+        onPromoteLocalCatalog={vi.fn()}
+      />
+    );
+
+    expect(html).not.toContain("Promote to local catalog");
+  });
+
   it("does not show local-catalog promotion for extracted rows that were only accepted as manual", () => {
     const html = renderToStaticMarkup(
       <EstimateRecommendationOptionsPanel

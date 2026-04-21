@@ -4,6 +4,7 @@ import type * as schema from "@trock-crm/shared/schema";
 import {
   estimateExtractions,
   estimateExtractionMatches,
+  estimateGenerationRuns,
   estimatePricingRecommendations,
   estimateReviewEvents,
   estimateSourceDocuments,
@@ -36,6 +37,12 @@ type ActiveParseArtifactRow = {
   metadataJson?: unknown;
 };
 
+type ManualAddContext = {
+  generationRunId: string | null;
+  extractionMatchId: string | null;
+  estimateSectionName: string | null;
+};
+
 function normalizeScopeLabel(value: unknown, fallback: string) {
   if (typeof value !== "string") return fallback;
   const trimmed = value.trim();
@@ -46,6 +53,21 @@ function normalizeLookupKey(value: unknown, fallback: string) {
   if (typeof value !== "string") return fallback;
   const trimmed = value.trim().toLowerCase();
   return trimmed.length > 0 ? trimmed : fallback;
+}
+
+function getExtractionSectionName(row: { divisionHint?: unknown; metadataJson?: unknown } | null) {
+  if (!row) {
+    return "Generated Estimate";
+  }
+
+  const metadataSectionName =
+    row.metadataJson &&
+    typeof row.metadataJson === "object" &&
+    row.metadataJson !== null
+      ? (row.metadataJson as Record<string, unknown>).sectionName
+      : null;
+
+  return normalizeScopeLabel(row.divisionHint ?? metadataSectionName, "Generated Estimate");
 }
 
 function getPricingRowSectionName(row: EstimatePricingRecommendationRow) {
@@ -459,7 +481,7 @@ export async function updateEstimatePricingRecommendationReviewState(args: {
 }
 
 export async function buildEstimatingWorkbenchState(tenantDb: TenantDb, dealId: string) {
-  const [documents, extractionRows, matchRows, pricingRows, reviewEvents] = await Promise.all([
+  const [documents, extractionRows, matchRows, pricingRows, reviewEvents, generationRuns] = await Promise.all([
     tenantDb
       .select()
       .from(estimateSourceDocuments)
@@ -501,6 +523,13 @@ export async function buildEstimatingWorkbenchState(tenantDb: TenantDb, dealId: 
       .from(estimateReviewEvents)
       .where(eq(estimateReviewEvents.dealId, dealId))
       .orderBy(desc(estimateReviewEvents.createdAt)),
+    tenantDb
+      .select({
+        id: estimateGenerationRuns.id,
+      })
+      .from(estimateGenerationRuns)
+      .where(eq(estimateGenerationRuns.dealId, dealId))
+      .orderBy(desc(estimateGenerationRuns.startedAt)),
   ]);
 
   const activeParseRunIdByDocumentId = new Map(
@@ -510,6 +539,7 @@ export async function buildEstimatingWorkbenchState(tenantDb: TenantDb, dealId: 
   const activeExtractionRows = extractionRows.filter((row) =>
     isActiveParseArtifact(row, activeParseRunIdByDocumentId)
   );
+  const extractionById = new Map(activeExtractionRows.map((row) => [row.id, row]));
   const activeExtractionIds = new Set(activeExtractionRows.map((row) => row.id));
   const activeMatchRows = matchRows.filter((row) => activeExtractionIds.has(row.extractionId));
   const activeMatchIds = new Set(activeMatchRows.map((row) => row.id));
@@ -581,6 +611,21 @@ export async function buildEstimatingWorkbenchState(tenantDb: TenantDb, dealId: 
         .filter((runId): runId is string => typeof runId === "string" && runId.length > 0)
     )
   );
+  const activeGenerationRunIds = Array.from(
+    new Set(
+      activePricingRows
+        .map((row) => row.createdByRunId)
+        .filter((runId): runId is string => typeof runId === "string" && runId.length > 0)
+    )
+  );
+  const fallbackMatchRow = activeMatchRows[0] ?? null;
+  const fallbackExtraction =
+    fallbackMatchRow?.extractionId ? extractionById.get(fallbackMatchRow.extractionId) ?? null : null;
+  const manualAddContext: ManualAddContext = {
+    generationRunId: activeGenerationRunIds[0] ?? generationRuns[0]?.id ?? null,
+    extractionMatchId: fallbackMatchRow?.id ?? null,
+    estimateSectionName: getExtractionSectionName(fallbackExtraction),
+  };
 
   const canPromote = promotablePricingRows.length > 0 && generationRunIds.length > 0;
 
@@ -600,5 +645,6 @@ export async function buildEstimatingWorkbenchState(tenantDb: TenantDb, dealId: 
       canPromote,
       generationRunIds,
     },
+    manualAddContext,
   };
 }

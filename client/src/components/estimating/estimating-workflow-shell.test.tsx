@@ -108,6 +108,11 @@ function buildWorkflow(canPromote: boolean) {
       canPromote,
       generationRunIds: canPromote ? ["run-1"] : [],
     },
+    manualAddContext: {
+      generationRunId: "run-1",
+      extractionMatchId: "match-1",
+      estimateSectionName: "Doors",
+    },
   } satisfies EstimatingWorkflowState;
 }
 
@@ -190,5 +195,35 @@ describe("EstimatingWorkflowShell", () => {
     expect(html).toContain("Focus a promotable row to choose which draft run to promote.");
     expect(html).toContain("Disabled");
     expect(html).toContain("Manual add ready");
+  });
+
+  it("keeps manual add available from workflow fallback context when no pricing rows exist", () => {
+    mocks.activePanel = "pricing";
+    mocks.manualDialogOpen = true;
+
+    const html = renderToStaticMarkup(
+      <EstimatingWorkflowShell
+        dealId="deal-1"
+        workflow={{
+          ...buildWorkflow(false),
+          pricingRows: [],
+          summary: {
+            ...buildWorkflow(false).summary,
+            pricing: {
+              total: 0,
+              pending: 0,
+              approved: 0,
+              overridden: 0,
+              rejected: 0,
+              readyToPromote: 0,
+            },
+          },
+        }}
+        onRefresh={async () => {}}
+      />
+    );
+
+    expect(html).toContain("Manual add ready");
+    expect(html).toContain("Search catalog options");
   });
 });

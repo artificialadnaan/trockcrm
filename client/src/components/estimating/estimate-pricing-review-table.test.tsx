@@ -103,6 +103,32 @@ describe("EstimatePricingReviewTable", () => {
     expect(html).not.toContain("Promote to local catalog");
   });
 
+  it("hides unsupported review actions when a row has no recommended option or prices", () => {
+    const html = renderTable([
+      {
+        id: "price-missing-actions",
+        status: "pending_review",
+        sourceType: "manual",
+        manualOrigin: "manual_estimator_added",
+        selectedSourceType: "manual",
+        selectedOptionId: null,
+        catalogBacking: "procore_synced",
+        recommendationOptions: [
+          {
+            id: "option-alt-1",
+            optionKind: "alternate",
+            optionLabel: "Alternate only",
+            rank: 2,
+          },
+        ],
+      },
+    ]);
+
+    expect(html).not.toContain("Accept recommended");
+    expect(html).not.toContain("Override");
+    expect(html).not.toContain("Promote to local catalog");
+  });
+
   it("does not expose local-catalog promotion for extracted rows that were merely accepted as manual", () => {
     const html = renderTable([
       {

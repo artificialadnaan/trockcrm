@@ -45,6 +45,11 @@ export interface EstimatingWorkflowState {
     canPromote: boolean;
     generationRunIds: string[];
   };
+  manualAddContext?: {
+    generationRunId?: string | null;
+    extractionMatchId?: string | null;
+    estimateSectionName?: string | null;
+  };
 }
 
 export type WorkbenchPanelId =
@@ -98,9 +103,12 @@ export function EstimatingWorkflowShell({
   const canPromote = workflow.promotionReadiness.canPromote && Boolean(promotionRunId);
   const selectedPricingRunId = selectedPricingRow?.createdByRunId ?? null;
   const selectedExtractionMatchId = selectedPricingRow?.extractionMatchId ?? null;
-  const manualAddGenerationRunId = selectedPricingRunId?.trim() ? selectedPricingRunId : null;
-  const manualAddSectionName = selectedPricingRow?.sectionName ?? null;
-  const manualAddExtractionMatchId = selectedExtractionMatchId?.trim() ? selectedExtractionMatchId : null;
+  const manualAddGenerationRunId =
+    selectedPricingRunId?.trim() || workflow.manualAddContext?.generationRunId?.trim() || null;
+  const manualAddSectionName =
+    selectedPricingRow?.sectionName ?? workflow.manualAddContext?.estimateSectionName ?? null;
+  const manualAddExtractionMatchId =
+    selectedExtractionMatchId?.trim() || workflow.manualAddContext?.extractionMatchId?.trim() || null;
   const canAddManualRow = Boolean(
     manualAddGenerationRunId?.trim?.() &&
       manualAddSectionName?.trim?.() &&

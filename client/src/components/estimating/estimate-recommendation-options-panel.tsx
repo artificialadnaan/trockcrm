@@ -75,6 +75,15 @@ function getRankLabel(option: RecommendationOption, index: number) {
   return `Rank ${index + 1}`;
 }
 
+function hasNumericPriceValue(value: string | number | null | undefined) {
+  if (typeof value === "number") {
+    return Number.isFinite(value);
+  }
+
+  const trimmed = value?.trim();
+  return Boolean(trimmed) && !Number.isNaN(Number(trimmed));
+}
+
 export function getDisplayedSelectedOption(recommendation: EstimateRecommendationRow | null) {
   if (!recommendation?.selectedOptionId) {
     return null;
@@ -139,6 +148,9 @@ export function EstimateRecommendationOptionsPanel({
     recommendationOptions: options,
   });
   const actionBusy = actionsDisabled || pendingAction !== null;
+  const canOverride =
+    hasNumericPriceValue(recommendation.recommendedUnitPrice) &&
+    hasNumericPriceValue(recommendation.recommendedTotalPrice);
 
   const handleReviewAction = async (action: RecommendationAction, successMessage: string) => {
     setPendingAction(action.action);
@@ -242,24 +254,26 @@ export function EstimateRecommendationOptionsPanel({
                 >
                   Accept recommended
                 </Button>
-                <Button
-                  size="xs"
-                  variant="outline"
-                  disabled={actionBusy}
-                  onClick={() =>
-                    handleReviewAction(
-                      {
-                        action: "override",
-                        recommendedUnitPrice: `${recommendation.recommendedUnitPrice ?? ""}`,
-                        recommendedTotalPrice: `${recommendation.recommendedTotalPrice ?? ""}`,
-                        reason: "Override from workbench",
-                      },
-                      "Pricing recommendation updated"
-                    )
-                  }
-                >
-                  Override
-                </Button>
+                {canOverride ? (
+                  <Button
+                    size="xs"
+                    variant="outline"
+                    disabled={actionBusy}
+                    onClick={() =>
+                      handleReviewAction(
+                        {
+                          action: "override",
+                          recommendedUnitPrice: `${recommendation.recommendedUnitPrice ?? ""}`,
+                          recommendedTotalPrice: `${recommendation.recommendedTotalPrice ?? ""}`,
+                          reason: "Override from workbench",
+                        },
+                        "Pricing recommendation updated"
+                      )
+                    }
+                  >
+                    Override
+                  </Button>
+                ) : null}
                 <Button
                   size="xs"
                   variant="ghost"

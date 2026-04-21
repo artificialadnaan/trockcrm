@@ -180,6 +180,28 @@ describe("manual-row-service", () => {
     );
   });
 
+  it("rejects malformed manual numeric inputs before insert", async () => {
+    const tenantDb = {
+      select: makeActiveMatchSelect(),
+    } as any;
+
+    await expect(
+      createManualEstimateRow({
+        tenantDb,
+        dealId: "deal-1",
+        userId: "user-1",
+        input: {
+          generationRunId: "run-1",
+          extractionMatchId: "match-1",
+          estimateSectionName: "Roofing",
+          manualLabel: "Broken numeric row",
+          manualQuantity: "2x",
+          manualUnitPrice: "1,200.00",
+        },
+      })
+    ).rejects.toThrow("Manual quantity must be a valid number");
+  });
+
   it("requires quantity and unit price for catalog-backed manual rows", async () => {
     const tenantDb = {
       select: makeActiveMatchSelect(),
