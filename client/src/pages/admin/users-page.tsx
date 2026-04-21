@@ -46,6 +46,11 @@ function formatDate(value: string | null) {
   }).format(new Date(value));
 }
 
+function formatPercentInput(value: number | undefined) {
+  if (typeof value !== "number" || Number.isNaN(value)) return "";
+  return (value * 100).toFixed(2);
+}
+
 export function UsersPage() {
   const {
     users,
@@ -82,6 +87,7 @@ export function UsersPage() {
     hubspot: "HubSpot",
     procore: "Procore",
   };
+  const managerOptions = users.filter((candidate) => candidate.isActive);
 
   const localAuthLabel = {
     not_invited: "Not invited",
@@ -128,6 +134,57 @@ export function UsersPage() {
     setUpdatingId(userId);
     try {
       await updateUser(userId, { isActive: !isActive });
+    } finally {
+      setUpdatingId(null);
+    }
+  };
+
+  const handleManagerChange = async (userId: string, managerId: string) => {
+    setUpdatingId(userId);
+    try {
+      await updateUser(userId, {
+        reportsTo: managerId === "none" ? null : managerId,
+      });
+      toast.success("Manager mapping updated");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to update manager mapping");
+    } finally {
+      setUpdatingId(null);
+    }
+  };
+
+  const handleCommissionFieldUpdate = async (
+    userId: string,
+    field:
+      | "commissionRate"
+      | "rollingFloor"
+      | "overrideRate"
+      | "estimatedMarginRate"
+      | "minMarginPercent"
+      | "newCustomerShareFloor",
+    rawValue: string
+  ) => {
+    const parsed = Number(rawValue);
+    if (Number.isNaN(parsed)) {
+      toast.error("Enter a numeric value");
+      return;
+    }
+
+    const decimalFields = new Set([
+      "commissionRate",
+      "overrideRate",
+      "estimatedMarginRate",
+      "minMarginPercent",
+      "newCustomerShareFloor",
+    ]);
+    const normalized = decimalFields.has(field) ? parsed / 100 : parsed;
+
+    setUpdatingId(userId);
+    try {
+      await updateUser(userId, { [field]: normalized });
+      toast.success("Commission setting updated");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to update commission setting");
     } finally {
       setUpdatingId(null);
     }
@@ -489,6 +546,8 @@ export function UsersPage() {
               <TableHead>Sources</TableHead>
               <TableHead>Extra Offices</TableHead>
               <TableHead>Status</TableHead>
+              <TableHead>Manager</TableHead>
+              <TableHead>Commission</TableHead>
               <TableHead>Login</TableHead>
               <TableHead>Actions</TableHead>
             </TableRow>
@@ -555,6 +614,61 @@ export function UsersPage() {
                   <Badge className={user.isActive ? "bg-green-100 text-xs text-green-800" : "bg-gray-100 text-xs text-gray-500"}>
                     {user.isActive ? "Active" : "Inactive"}
                   </Badge>
+                </TableCell>
+                <TableCell>
+                  <Select
+                    value={user.reportsTo ?? "none"}
+                    onValueChange={(value) => {
+                      if (!value) return;
+                      void handleManagerChange(user.id, value);
+                    }}
+                    disabled={updatingId === user.id || bulkUpdating}
+                  >
+                    <SelectTrigger className="h-8 w-36 text-xs">
+                      <SelectValue placeholder="No manager" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="none">No manager</SelectItem>
+                      {managerOptions
+                        .filter((candidate) => candidate.id !== user.id)
+                        .map((candidate) => (
+                          <SelectItem key={candidate.id} value={candidate.id}>
+                            {candidate.displayName}
+                          </SelectItem>
+                        ))}
+                    </SelectContent>
+                  </Select>
+                </TableCell>
+                <TableCell>
+                  <div className="grid min-w-[260px] grid-cols-3 gap-2">
+                    <div>
+                      <p className="text-[10px] uppercase tracking-wide text-slate-400">Rate %</p>
+                      <Input
+                        className="h-8 text-xs"
+                        defaultValue={formatPercentInput(user.commissionRate)}
+                        onBlur={(event) => handleCommissionFieldUpdate(user.id, "commissionRate", event.target.value)}
+                        disabled={updatingId === user.id || bulkUpdating}
+                      />
+                    </div>
+                    <div>
+                      <p className="text-[10px] uppercase tracking-wide text-slate-400">Floor</p>
+                      <Input
+                        className="h-8 text-xs"
+                        defaultValue={String(Math.round(user.rollingFloor ?? 0))}
+                        onBlur={(event) => handleCommissionFieldUpdate(user.id, "rollingFloor", event.target.value)}
+                        disabled={updatingId === user.id || bulkUpdating}
+                      />
+                    </div>
+                    <div>
+                      <p className="text-[10px] uppercase tracking-wide text-slate-400">Override %</p>
+                      <Input
+                        className="h-8 text-xs"
+                        defaultValue={formatPercentInput(user.overrideRate)}
+                        onBlur={(event) => handleCommissionFieldUpdate(user.id, "overrideRate", event.target.value)}
+                        disabled={updatingId === user.id || bulkUpdating}
+                      />
+                    </div>
+                  </div>
                 </TableCell>
                 <TableCell>
                   <div className="space-y-2">
@@ -641,7 +755,7 @@ export function UsersPage() {
 
             {filteredUsers.length === 0 && !loading && (
               <TableRow>
-                <TableCell colSpan={9} className="py-8 text-center text-gray-400">
+                <TableCell colSpan={11} className="py-8 text-center text-gray-400">
                   No users match the current filters
                 </TableCell>
               </TableRow>

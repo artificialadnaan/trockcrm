@@ -293,6 +293,7 @@ describe("Dashboard Service", () => {
       expect(result).toHaveProperty("activityThisWeek");
       expect(result).toHaveProperty("followUpCompliance");
       expect(result).toHaveProperty("funnelBuckets");
+      expect(result).toHaveProperty("commissionSummary");
       expect(result).toHaveProperty("pipelineByStage");
       expect(result).toHaveProperty("leadSnapshot");
       expect(result).toHaveProperty("dealSnapshot");
@@ -304,6 +305,7 @@ describe("Dashboard Service", () => {
       expect(typeof result.tasksToday.overdue).toBe("number");
       expect(typeof result.activityThisWeek.calls).toBe("number");
       expect(typeof result.followUpCompliance.complianceRate).toBe("number");
+      expect(typeof result.commissionSummary.totalEarnedCommission).toBe("number");
       expect(Array.isArray(result.pipelineByStage)).toBe(true);
       expect(Array.isArray(result.leadSnapshot)).toBe(true);
       expect(Array.isArray(result.dealSnapshot)).toBe(true);

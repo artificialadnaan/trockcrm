@@ -13,6 +13,26 @@ export interface FunnelBucketSummary {
 export interface RepDashboardData {
   activeLeads: { count: number };
   funnelBuckets: FunnelBucketSummary[];
+  commissionSummary: {
+    commissionRate: number;
+    overrideRate: number;
+    rollingFloor: number;
+    rollingPaidRevenue: number;
+    rollingCommissionableMargin: number;
+    floorRemaining: number;
+    newCustomerRevenue: number;
+    newCustomerShare: number;
+    newCustomerShareFloor: number;
+    meetsNewCustomerShare: boolean;
+    estimatedPaymentCount: number;
+    excludedLowMarginRevenue: number;
+    directEarnedCommission: number;
+    overrideEarnedCommission: number;
+    totalEarnedCommission: number;
+    potentialRevenue: number;
+    potentialMargin: number;
+    potentialCommission: number;
+  };
   activeDeals: { count: number; totalValue: number };
   tasksToday: { overdue: number; today: number };
   activityThisWeek: {
