@@ -42,6 +42,8 @@
   Responsibility: verify ZIP resolution, fallback behavior, and override precedence.
 - Create: `server/tests/modules/estimating/market-rate-service.test.ts`
   Responsibility: verify rule selection, component adjustments, and rationale output.
+- Modify: `server/tests/modules/estimating/historical-pricing-service.test.ts`
+  Responsibility: verify deal-to-property geography fallback used by market-rate generation inputs.
 - Modify: `server/tests/modules/estimating/pricing-service.test.ts`
   Responsibility: verify market-rate helper math and fallback behavior.
 - Create: `server/tests/modules/estimating/recommendation-persistence-service.test.ts`
@@ -120,6 +122,7 @@
 - Create: `server/src/modules/estimating/market-rate-provider.ts`
 - Create: `server/tests/modules/estimating/market-resolution-service.test.ts`
 - Create: `server/tests/modules/estimating/market-rate-service.test.ts`
+- Modify: `server/tests/modules/estimating/historical-pricing-service.test.ts`
 
 - [ ] **Step 1: Write failing tests for market resolution**
   Cover:
@@ -128,6 +131,7 @@
   - ZIP falls back to region/state rule when no market mapping exists
   - global default is used when no geographic rule matches
   - deal-level override wins over auto-resolution
+  - deal context falls back from deal ZIP/state fields to related property ZIP/state fields when deal geography is blank
 
 - [ ] **Step 2: Write failing tests for adjustment rule selection and math**
   Cover:
@@ -138,7 +142,7 @@
   - rationale payload includes resolved market, resolution level, baseline, and component adjustments
 
 - [ ] **Step 3: Run the focused service tests and verify they fail**
-  Run in `server/`: `npx vitest run tests/modules/estimating/market-resolution-service.test.ts tests/modules/estimating/market-rate-service.test.ts`
+  Run in `server/`: `npx vitest run tests/modules/estimating/market-resolution-service.test.ts tests/modules/estimating/market-rate-service.test.ts tests/modules/estimating/historical-pricing-service.test.ts`
   Expected: FAIL because the services do not exist yet.
 
 - [ ] **Step 4: Implement market resolution service**
@@ -157,7 +161,7 @@
   - expose the internal table-backed implementation through a `MarketRateProvider` or equivalent interface so worker, routes, and pricing logic depend on the abstraction instead of concrete services
 
 - [ ] **Step 6: Re-run the focused service tests and verify they pass**
-  Run in `server/`: `npx vitest run tests/modules/estimating/market-resolution-service.test.ts tests/modules/estimating/market-rate-service.test.ts`
+  Run in `server/`: `npx vitest run tests/modules/estimating/market-resolution-service.test.ts tests/modules/estimating/market-rate-service.test.ts tests/modules/estimating/historical-pricing-service.test.ts`
   Expected: PASS
 
 - [ ] **Step 7: Commit**
@@ -244,7 +248,7 @@
   - create or replace the single current override row for the deal
   - clear the override row cleanly
   - write estimating review events with before/after market context
-  - enqueue or rerun `estimate_generation` with the required `officeId` so pricing recommendations refresh after set/clear
+  - enqueue or rerun `estimate_generation` by inserting the required `public.job_queue` row with `job_type = 'estimate_generation'` and the required `officeId`
   - return the refreshed effective market payload
 
 - [ ] **Step 4: Re-run the focused route tests and verify they pass**
@@ -269,6 +273,7 @@
   - only pricing rows from the active or refreshed generation run are returned after a market override rerun
   - while an override-triggered rerun is pending, the workbench keeps showing the newest completed run instead of partial rerun rows
   - workbench payload includes explicit rerun status metadata when override-triggered refresh is pending or failed
+  - manual add context keeps using the active completed generation run while an override-triggered rerun is pending
 
 - [ ] **Step 2: Run the focused workbench tests and verify they fail**
   Run in `server/`: `npx vitest run tests/modules/estimating/workbench-service.test.ts`
@@ -282,6 +287,7 @@
   - keep the previous completed run active while an override-triggered rerun is pending or failed, and surface rerun status separately
   - expose explicit rerun status fields the client can render without inferring from raw generation rows
   - filter pricing rows so stale pre-override generation results do not mix with refreshed rows
+  - bind `manualAddContext.generationRunId` to that same active pricing run instead of the newest started rerun
   - attach market-rate rationale to each pricing row without breaking existing row fields
 
 - [ ] **Step 4: Re-run the focused workbench tests and verify they pass**
