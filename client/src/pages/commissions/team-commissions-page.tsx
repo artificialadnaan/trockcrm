@@ -1,6 +1,6 @@
 import { Link } from "react-router-dom";
 import { PageHeader } from "@/components/layout/page-header";
-import { useDirectorDashboard, presetToDateRange } from "@/hooks/use-director-dashboard";
+import { useDirectorCommissionWorkspace, presetToDateRange } from "@/hooks/use-director-dashboard";
 
 const USD = new Intl.NumberFormat("en-US", {
   style: "currency",
@@ -22,28 +22,8 @@ function formatPercent(value: number): string {
 }
 
 export function TeamCommissionsPage() {
-  const { data, loading, error } = useDirectorDashboard(presetToDateRange("ytd"));
-
-  const rows = (data?.repCommissionRows ?? []).map((commissionRow) => {
-    const activity = data?.activityByRep.find((row) => row.repId === commissionRow.repId);
-    const funnel = data?.repFunnelRows.find((row) => row.repId === commissionRow.repId);
-    const card = data?.repCards.find((row) => row.repId === commissionRow.repId);
-
-    return {
-      ...commissionRow,
-      activeDeals: card?.activeDeals ?? 0,
-      pipelineValue: card?.pipelineValue ?? 0,
-      leads: funnel?.leads ?? 0,
-      qualifiedLeads: funnel?.qualifiedLeads ?? 0,
-      opportunities: funnel?.opportunities ?? 0,
-      dueDiligence: funnel?.dueDiligence ?? 0,
-      estimating: funnel?.estimating ?? 0,
-      calls: activity?.calls ?? 0,
-      emails: activity?.emails ?? 0,
-      meetings: activity?.meetings ?? 0,
-      totalActivities: activity?.total ?? 0,
-    };
-  });
+  const { data, loading, error } = useDirectorCommissionWorkspace(presetToDateRange("ytd"));
+  const rows = data?.rows ?? [];
 
   return (
     <div className="space-y-6">

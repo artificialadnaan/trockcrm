@@ -1116,6 +1116,107 @@ export interface DirectorDashboardData {
   };
 }
 
+export interface DirectorCommissionWorkspaceRow {
+  repId: string;
+  repName: string;
+  totalEarnedCommission: number;
+  potentialCommission: number;
+  floorRemaining: number;
+  newCustomerShare: number;
+  meetsNewCustomerShare: boolean;
+  activeDeals: number;
+  pipelineValue: number;
+  leads: number;
+  qualifiedLeads: number;
+  opportunities: number;
+  dueDiligence: number;
+  estimating: number;
+  calls: number;
+  emails: number;
+  meetings: number;
+  notes: number;
+  totalActivities: number;
+}
+
+export interface DirectorCommissionWorkspaceData {
+  rows: DirectorCommissionWorkspaceRow[];
+}
+
+async function getRepDealPipelineSummary(
+  tenantDb: TenantDb
+): Promise<Array<{ repId: string; activeDeals: number; pipelineValue: number }>> {
+  const result = await tenantDb.execute(sql`
+    SELECT
+      d.assigned_rep_id AS rep_id,
+      COUNT(*) FILTER (WHERE d.is_active = true AND NOT psc.is_terminal)::int AS active_deals,
+      COALESCE(
+        SUM(COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0))
+          FILTER (WHERE d.is_active = true AND NOT psc.is_terminal AND psc.is_active_pipeline),
+        0
+      )::numeric AS pipeline_value
+    FROM ${deals} d
+    JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
+    GROUP BY d.assigned_rep_id
+  `);
+
+  const rows = (result as any).rows ?? result;
+  return rows.map((row: any) => ({
+    repId: String(row.rep_id),
+    activeDeals: Number(row.active_deals ?? 0),
+    pipelineValue: Number(row.pipeline_value ?? 0),
+  }));
+}
+
+export async function getDirectorCommissionWorkspace(
+  tenantDb: TenantDb,
+  options: { from?: string; to?: string } = {}
+): Promise<DirectorCommissionWorkspaceData> {
+  const year = new Date().getFullYear();
+  const from = options.from ?? `${year}-01-01`;
+  const to = options.to ?? `${year}-12-31`;
+
+  const [commissionRows, activityRows, funnelSummary, dealSummaryRows] = await Promise.all([
+    getDirectorRepCommissionRows(tenantDb),
+    getActivitySummaryByRep(tenantDb, { from, to }),
+    getDirectorFunnelSummary(tenantDb),
+    getRepDealPipelineSummary(tenantDb),
+  ]);
+
+  const activityByRep = new Map(activityRows.map((row) => [row.repId, row]));
+  const funnelByRep = new Map(funnelSummary.repFunnelRows.map((row) => [row.repId, row]));
+  const dealSummaryByRep = new Map(dealSummaryRows.map((row) => [row.repId, row]));
+
+  const rows = commissionRows.map((row) => {
+    const activity = activityByRep.get(row.repId);
+    const funnel = funnelByRep.get(row.repId);
+    const dealSummary = dealSummaryByRep.get(row.repId);
+
+    return {
+      repId: row.repId,
+      repName: row.repName,
+      totalEarnedCommission: row.totalEarnedCommission,
+      potentialCommission: row.potentialCommission,
+      floorRemaining: row.floorRemaining,
+      newCustomerShare: row.newCustomerShare,
+      meetsNewCustomerShare: row.meetsNewCustomerShare,
+      activeDeals: dealSummary?.activeDeals ?? 0,
+      pipelineValue: dealSummary?.pipelineValue ?? 0,
+      leads: funnel?.leads ?? 0,
+      qualifiedLeads: funnel?.qualifiedLeads ?? 0,
+      opportunities: funnel?.opportunities ?? 0,
+      dueDiligence: funnel?.dueDiligence ?? 0,
+      estimating: funnel?.estimating ?? 0,
+      calls: activity?.calls ?? 0,
+      emails: activity?.emails ?? 0,
+      meetings: activity?.meetings ?? 0,
+      notes: activity?.notes ?? 0,
+      totalActivities: activity?.total ?? 0,
+    };
+  });
+
+  return { rows };
+}
+
 /**
  * Aggregate all data for the director dashboard.
  * All queries run in parallel and use the date range (defaults to current calendar year).

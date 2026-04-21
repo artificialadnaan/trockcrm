@@ -27,7 +27,7 @@ import {
 } from "./pipeline-service.js";
 import { getAuditLog, getAuditLogTables } from "./audit-service.js";
 import { getAdminDataScrubOverview } from "./admin-reporting-service.js";
-import { getDirectorDashboard } from "../dashboard/service.js";
+import { getDirectorCommissionWorkspace } from "../dashboard/service.js";
 
 const router = Router();
 router.use(authMiddleware);
@@ -678,6 +678,49 @@ router.get(
         user.activeOfficeId ?? user.officeId
       );
 
+      const officeRows = await Promise.all(
+        offices.map(async (office) => {
+          try {
+            const workspace = await withOfficeTenantContext(
+              user,
+              office.id,
+              async (tenantDb) => getDirectorCommissionWorkspace(tenantDb)
+            );
+
+            return workspace.rows.map((row) => ({
+              officeId: office.id,
+              officeName: office.name,
+              officeSlug: office.slug,
+              repId: row.repId,
+              repName: row.repName,
+              totalEarnedCommission: row.totalEarnedCommission,
+              potentialCommission: row.potentialCommission,
+              floorRemaining: row.floorRemaining,
+              newCustomerShare: row.newCustomerShare,
+              meetsNewCustomerShare: row.meetsNewCustomerShare,
+              activeDeals: row.activeDeals,
+              pipelineValue: row.pipelineValue,
+              leads: row.leads,
+              qualifiedLeads: row.qualifiedLeads,
+              opportunities: row.opportunities,
+              dueDiligence: row.dueDiligence,
+              estimating: row.estimating,
+              calls: row.calls,
+              emails: row.emails,
+              meetings: row.meetings,
+              notes: row.notes,
+              totalActivities: row.totalActivities,
+            }));
+          } catch (officeErr) {
+            console.error(
+              `[GlobalCommissions] Failed to aggregate office ${office.slug}:`,
+              officeErr
+            );
+            return [];
+          }
+        })
+      );
+
       const rows: Array<{
         officeId: string;
         officeName: string;
@@ -701,67 +744,7 @@ router.get(
         meetings: number;
         notes: number;
         totalActivities: number;
-      }> = [];
-
-      for (const office of offices) {
-        try {
-          const officeRows = await withOfficeTenantContext(
-            user,
-            office.id,
-            async (tenantDb) => {
-              const dashboard = await getDirectorDashboard(tenantDb);
-
-              const activityByRep = new Map(
-                dashboard.activityByRep.map((activityRow) => [activityRow.repId, activityRow])
-              );
-              const funnelByRep = new Map(
-                dashboard.repFunnelRows.map((funnelRow) => [funnelRow.repId, funnelRow])
-              );
-              const cardByRep = new Map(
-                dashboard.repCards.map((cardRow) => [cardRow.repId, cardRow])
-              );
-
-              return dashboard.repCommissionRows.map((commissionRow) => {
-                const activity = activityByRep.get(commissionRow.repId);
-                const funnel = funnelByRep.get(commissionRow.repId);
-                const card = cardByRep.get(commissionRow.repId);
-
-                return {
-                  officeId: office.id,
-                  officeName: office.name,
-                  officeSlug: office.slug,
-                  repId: commissionRow.repId,
-                  repName: commissionRow.repName,
-                  totalEarnedCommission: commissionRow.totalEarnedCommission,
-                  potentialCommission: commissionRow.potentialCommission,
-                  floorRemaining: commissionRow.floorRemaining,
-                  newCustomerShare: commissionRow.newCustomerShare,
-                  meetsNewCustomerShare: commissionRow.meetsNewCustomerShare,
-                  activeDeals: card?.activeDeals ?? 0,
-                  pipelineValue: card?.pipelineValue ?? 0,
-                  leads: funnel?.leads ?? 0,
-                  qualifiedLeads: funnel?.qualifiedLeads ?? 0,
-                  opportunities: funnel?.opportunities ?? 0,
-                  dueDiligence: funnel?.dueDiligence ?? 0,
-                  estimating: funnel?.estimating ?? 0,
-                  calls: activity?.calls ?? 0,
-                  emails: activity?.emails ?? 0,
-                  meetings: activity?.meetings ?? 0,
-                  notes: activity?.notes ?? 0,
-                  totalActivities: activity?.total ?? 0,
-                };
-              });
-            }
-          );
-
-          rows.push(...officeRows);
-        } catch (officeErr) {
-          console.error(
-            `[GlobalCommissions] Failed to aggregate office ${office.slug}:`,
-            officeErr
-          );
-        }
-      }
+      }> = officeRows.flat();
 
       rows.sort((a, b) => {
         if (b.totalEarnedCommission !== a.totalEarnedCommission) {

@@ -5,6 +5,7 @@ import {
   getAdminDashboardSummary,
   getRepDashboard,
   getDirectorDashboard,
+  getDirectorCommissionWorkspace,
   getRepDetail,
 } from "./service.js";
 
@@ -45,6 +46,23 @@ router.get(
   async (req, res, next) => {
     try {
       const data = await getDirectorDashboard(req.tenantDb!, {
+        from: req.query.from as string | undefined,
+        to: req.query.to as string | undefined,
+      });
+      await req.commitTransaction!();
+      res.json({ data });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+router.get(
+  "/director/commissions",
+  requireRole("admin", "director"),
+  async (req, res, next) => {
+    try {
+      const data = await getDirectorCommissionWorkspace(req.tenantDb!, {
         from: req.query.from as string | undefined,
         to: req.query.to as string | undefined,
       });
