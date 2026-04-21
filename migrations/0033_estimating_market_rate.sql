@@ -153,6 +153,32 @@ BEGIN
     );
 
     EXECUTE format(
+      'ALTER TABLE %I.estimate_market_adjustment_rules
+         DROP CONSTRAINT IF EXISTS estimate_market_adjustment_rules_scope_type_check',
+      schema_name
+    );
+
+    EXECUTE format(
+      'ALTER TABLE %I.estimate_market_adjustment_rules
+         DROP CONSTRAINT IF EXISTS estimate_market_adjustment_rules_fallback_scope_type_check',
+      schema_name
+    );
+
+    EXECUTE format(
+      'ALTER TABLE %I.estimate_market_adjustment_rules
+         ADD CONSTRAINT estimate_market_adjustment_rules_scope_type_check
+         CHECK (scope_type IN (''general'', ''division'', ''trade''))',
+      schema_name
+    );
+
+    EXECUTE format(
+      'ALTER TABLE %I.estimate_market_adjustment_rules
+         ADD CONSTRAINT estimate_market_adjustment_rules_fallback_scope_type_check
+         CHECK (fallback_scope_type IS NULL OR fallback_scope_type IN (''general'', ''division'', ''trade''))',
+      schema_name
+    );
+
+    EXECUTE format(
       'CREATE INDEX IF NOT EXISTS estimate_market_adjustment_rules_selection_idx
          ON %I.estimate_market_adjustment_rules (market_id, scope_type, scope_key, priority, fallback_priority, is_active, effective_from, effective_to)',
       schema_name
@@ -454,7 +480,7 @@ INSERT INTO estimate_market_fallback_geographies (
   resolution_key,
   is_active
 )
-  SELECT id, 'general', 'default', TRUE
+  SELECT id, 'global', 'default', TRUE
   FROM estimate_markets
  WHERE slug = 'default'
 ON CONFLICT (resolution_type, resolution_key)
