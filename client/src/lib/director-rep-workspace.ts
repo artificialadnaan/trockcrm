@@ -17,17 +17,30 @@ export type DirectorRepSortKey =
   | "activeDeals"
   | "repName";
 
+function normalizeDirectorRepWorkspacePageSize(pageSize: number) {
+  return Number.isFinite(pageSize) && pageSize > 0 ? Math.floor(pageSize) : 1;
+}
+
 export function clampDirectorRepWorkspacePage(input: {
   page: number;
   totalRows: number;
   pageSize: number;
 }) {
-  const totalPages = Math.max(1, Math.ceil(input.totalRows / input.pageSize));
+  const normalizedPageSize = normalizeDirectorRepWorkspacePageSize(input.pageSize);
+  const totalPages = Math.max(1, Math.ceil(input.totalRows / normalizedPageSize));
   return Math.min(Math.max(1, input.page), totalPages);
 }
 
 function staleRiskScore(row: DirectorRepWorkspaceRow) {
   return row.staleDeals * 10 + row.staleLeads * 8 + row.activeDeals;
+}
+
+function compareStrings(left: string, right: string) {
+  return left.localeCompare(right);
+}
+
+function compareDescending(left: number, right: number) {
+  return right - left;
 }
 
 export function buildDirectorRepWorkspaceState(
@@ -39,34 +52,70 @@ export function buildDirectorRepWorkspaceState(
     pageSize: number;
   }
 ) {
+  const pageSize = normalizeDirectorRepWorkspacePageSize(input.pageSize);
   const normalizedQuery = input.query.trim().toLowerCase();
   const filtered = normalizedQuery
     ? rows.filter((row) => row.repName.toLowerCase().includes(normalizedQuery))
     : rows.slice();
 
   filtered.sort((left, right) => {
-    if (input.sortKey === "repName") return left.repName.localeCompare(right.repName);
-    if (input.sortKey === "activeDeals") return right.activeDeals - left.activeDeals;
-    if (input.sortKey === "winRate") return right.winRate - left.winRate;
-    if (input.sortKey === "activity") return right.activityScore - left.activityScore;
-    if (input.sortKey === "staleRisk") return staleRiskScore(right) - staleRiskScore(left);
-    return right.pipelineValue - left.pipelineValue;
+    if (input.sortKey === "repName") {
+      return compareStrings(left.repName, right.repName) || compareStrings(left.repId, right.repId);
+    }
+
+    if (input.sortKey === "activeDeals") {
+      return (
+        compareDescending(left.activeDeals, right.activeDeals) ||
+        compareStrings(left.repName, right.repName) ||
+        compareStrings(left.repId, right.repId)
+      );
+    }
+
+    if (input.sortKey === "winRate") {
+      return (
+        compareDescending(left.winRate, right.winRate) ||
+        compareStrings(left.repName, right.repName) ||
+        compareStrings(left.repId, right.repId)
+      );
+    }
+
+    if (input.sortKey === "activity") {
+      return (
+        compareDescending(left.activityScore, right.activityScore) ||
+        compareStrings(left.repName, right.repName) ||
+        compareStrings(left.repId, right.repId)
+      );
+    }
+
+    if (input.sortKey === "staleRisk") {
+      return (
+        compareDescending(staleRiskScore(left), staleRiskScore(right)) ||
+        compareStrings(left.repName, right.repName) ||
+        compareStrings(left.repId, right.repId)
+      );
+    }
+
+    return (
+      compareDescending(left.pipelineValue, right.pipelineValue) ||
+      compareStrings(left.repName, right.repName) ||
+      compareStrings(left.repId, right.repId)
+    );
   });
 
   const totalRows = filtered.length;
   const page = clampDirectorRepWorkspacePage({
     page: input.page,
     totalRows,
-    pageSize: input.pageSize,
+    pageSize,
   });
-  const start = (page - 1) * input.pageSize;
-  const rowsForPage = filtered.slice(start, start + input.pageSize);
+  const start = (page - 1) * pageSize;
+  const rowsForPage = filtered.slice(start, start + pageSize);
 
   return {
     page,
-    pageSize: input.pageSize,
+    pageSize,
     totalRows,
-    totalPages: Math.max(1, Math.ceil(totalRows / input.pageSize)),
+    totalPages: Math.max(1, Math.ceil(totalRows / pageSize)),
     rows: rowsForPage,
   };
 }
