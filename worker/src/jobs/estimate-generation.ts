@@ -46,10 +46,26 @@ function buildSourceRowIdentity(input: {
 }) {
   if (input.sourceType === "inferred") {
     const sectionSlug = (input.sectionName ?? "general").trim().toLowerCase().replace(/[^a-z0-9]+/g, "-");
-    return `inferred:${input.normalizedIntent}:${sectionSlug}`;
+    return `inferred:${input.normalizedIntent}:${sectionSlug}:${input.extractionId}`;
   }
 
   return `extracted:${input.extractionId}`;
+}
+
+async function insertWithOptionalReturning<TRecord extends { id: string }>(
+  db: any,
+  table: unknown,
+  values: Record<string, unknown> | Record<string, unknown>[]
+) {
+  const insertQuery = db.insert(table).values(values) as any;
+
+  if (typeof insertQuery.returning === "function") {
+    const rows = await insertQuery.returning();
+    return rows[0] as TRecord;
+  }
+
+  await insertQuery;
+  return null;
 }
 
 export async function runEstimateGeneration(
@@ -215,24 +231,6 @@ export async function runEstimateGeneration(
         continue;
       }
 
-      const extractionMatchInsert = tenantDb
-        .insert(estimateExtractionMatches)
-        .values({
-          extractionId: extraction.id,
-          catalogItemId: topMatch.catalogItemId,
-          matchType: "catalog_plus_history",
-          matchScore: topMatch.matchScore.toString(),
-          status: "suggested",
-          reasonJson: topMatch.reasons,
-          evidenceJson: {
-            historicalLineItemIds: topMatch.historicalLineItemIds,
-          },
-        }) as any;
-
-      const savedMatch = typeof extractionMatchInsert.returning === "function"
-        ? (await extractionMatchInsert.returning())[0]
-        : (await extractionMatchInsert, { id: extraction.id });
-
       const normalizedIntent = normalizeIntent(extraction.normalizedLabel ?? extraction.rawLabel ?? "");
       const sourceType =
         extraction.extractionType === "inferred_scope" ||
@@ -334,87 +332,113 @@ export async function runEstimateGeneration(
         },
       };
 
-      const recommendationInsert = tenantDb.insert(estimatePricingRecommendations).values({
-        dealId: extraction.dealId,
-        projectId: extraction.projectId,
-        extractionMatchId: savedMatch.id,
-        sourceDocumentId: extraction.documentId ?? null,
-        sourceExtractionId: extraction.id,
-        sourceType,
-        normalizedIntent,
-        sourceRowIdentity,
-        recommendedQuantity: String(extraction.quantity ?? 1),
-        recommendedUnit: extraction.unit ?? null,
-        recommendedUnitPrice: String(recommendation.recommendedUnitPrice),
-        recommendedTotalPrice: String(recommendation.recommendedTotalPrice),
-        priceBasis: recommendation.priceBasis,
-        catalogBaselinePrice:
-          recommendation.catalogBaselinePrice != null
-            ? String(recommendation.catalogBaselinePrice)
-            : null,
-        historicalMedianPrice:
-          recommendation.historicalMedianPrice != null
-            ? String(recommendation.historicalMedianPrice)
-            : null,
-        marketAdjustmentPercent: String(recommendation.marketAdjustmentPercent),
-        confidence: String(recommendation.confidence),
-        assumptionsJson: {
-          ...recommendation.assumptions,
-          rationaleJson,
-        },
-        evidenceJson: {
-          comparableHistoricalPrices: recommendation.comparableHistoricalPrices,
-          duplicateGroupMetadata: recommendationSet.duplicateGroupMetadata,
-          optionRows: recommendationSet.optionRows.map((option) => ({
-            rank: option.rank,
-            optionLabel: option.optionLabel,
-            optionKind: option.optionKind,
-            catalogItemId: option.catalogItemId,
-            localCatalogItemId: option.localCatalogItemId,
-            normalizedCustomItemKey: option.normalizedCustomItemKey,
-            stableId: option.stableId,
-          })),
-        },
-        createdByRunId: generationRunId,
-        selectedSourceType: null,
-        selectedOptionId: null,
-        catalogBacking: sourceType === "inferred" ? "estimate_only" : "procore_synced",
-        promotedLocalCatalogItemId: null,
-        manualOrigin: null,
-        manualLabel: null,
-        manualIdentityKey: null,
-        manualQuantity: null,
-        manualUnit: null,
-        manualUnitPrice: null,
-        manualNotes: null,
-        overrideQuantity: null,
-        overrideUnit: null,
-        overrideUnitPrice: null,
-        overrideNotes: null,
-        status: "pending",
-      }) as any;
-
-      const savedRecommendation = typeof recommendationInsert.returning === "function"
-        ? (await recommendationInsert.returning())[0]
-        : (await recommendationInsert, { id: savedMatch.id });
-
-      if (recommendationSet.optionRows.length > 0) {
-        await tenantDb.insert(estimatePricingRecommendationOptions).values(
-          recommendationSet.optionRows.map((option) => ({
-            recommendationId: savedRecommendation.id,
-            catalogItemId: option.catalogItemId,
-            localCatalogItemId: option.localCatalogItemId,
-            rank: option.rank,
-            optionLabel: option.optionLabel,
-            optionKind: option.optionKind,
-          }))
+      const persistRecommendationBundle = async (db: any) => {
+        const savedMatch = await insertWithOptionalReturning<{ id: string }>(
+          db,
+          estimateExtractionMatches,
+          {
+            extractionId: extraction.id,
+            catalogItemId: topMatch.catalogItemId,
+            matchType: "catalog_plus_history",
+            matchScore: topMatch.matchScore.toString(),
+            status: "suggested",
+            reasonJson: topMatch.reasons,
+            evidenceJson: {
+              historicalLineItemIds: topMatch.historicalLineItemIds,
+            },
+          }
         );
-      }
 
-      await tenantDb
-        .update(estimateExtractions)
-        .set({ status: "processed" })
-        .where(eq(estimateExtractions.id, extraction.id));
+        const savedRecommendation = await insertWithOptionalReturning<{ id: string }>(
+          db,
+          estimatePricingRecommendations,
+          {
+            dealId: extraction.dealId,
+            projectId: extraction.projectId,
+            extractionMatchId: savedMatch?.id ?? extraction.id,
+            sourceDocumentId: extraction.documentId ?? null,
+            sourceExtractionId: extraction.id,
+            sourceType,
+            normalizedIntent,
+            sourceRowIdentity,
+            recommendedQuantity: String(extraction.quantity ?? 1),
+            recommendedUnit: extraction.unit ?? null,
+            recommendedUnitPrice: String(recommendation.recommendedUnitPrice),
+            recommendedTotalPrice: String(recommendation.recommendedTotalPrice),
+            priceBasis: recommendation.priceBasis,
+            catalogBaselinePrice:
+              recommendation.catalogBaselinePrice != null
+                ? String(recommendation.catalogBaselinePrice)
+                : null,
+            historicalMedianPrice:
+              recommendation.historicalMedianPrice != null
+                ? String(recommendation.historicalMedianPrice)
+                : null,
+            marketAdjustmentPercent: String(recommendation.marketAdjustmentPercent),
+            confidence: String(recommendation.confidence),
+            assumptionsJson: {
+              ...recommendation.assumptions,
+              rationaleJson,
+            },
+            evidenceJson: {
+              comparableHistoricalPrices: recommendation.comparableHistoricalPrices,
+              duplicateGroupMetadata: recommendationSet.duplicateGroupMetadata,
+              optionRows: recommendationSet.optionRows.map((option) => ({
+                rank: option.rank,
+                optionLabel: option.optionLabel,
+                optionKind: option.optionKind,
+                catalogItemId: option.catalogItemId,
+                localCatalogItemId: option.localCatalogItemId,
+                normalizedCustomItemKey: option.normalizedCustomItemKey,
+                stableId: option.stableId,
+              })),
+            },
+            createdByRunId: generationRunId,
+            selectedSourceType: null,
+            selectedOptionId: null,
+            catalogBacking: sourceType === "inferred" ? "estimate_only" : "procore_synced",
+            promotedLocalCatalogItemId: null,
+            manualOrigin: null,
+            manualLabel: null,
+            manualIdentityKey: null,
+            manualQuantity: null,
+            manualUnit: null,
+            manualUnitPrice: null,
+            manualNotes: null,
+            overrideQuantity: null,
+            overrideUnit: null,
+            overrideUnitPrice: null,
+            overrideNotes: null,
+            status: "pending",
+          }
+        );
+
+        if (recommendationSet.optionRows.length > 0) {
+          await db.insert(estimatePricingRecommendationOptions).values(
+            recommendationSet.optionRows.map((option) => ({
+              recommendationId: savedRecommendation?.id ?? savedMatch?.id ?? extraction.id,
+              catalogItemId: option.catalogItemId,
+              localCatalogItemId: option.localCatalogItemId,
+              rank: option.rank,
+              optionLabel: option.optionLabel,
+              optionKind: option.optionKind,
+            }))
+          );
+        }
+
+        await db
+          .update(estimateExtractions)
+          .set({ status: "processed" })
+          .where(eq(estimateExtractions.id, extraction.id));
+      };
+
+      if (!lockedClient && typeof tenantDb.transaction === "function") {
+        await tenantDb.transaction(async (tx: any) => {
+          await persistRecommendationBundle(tx);
+        });
+      } else {
+        await persistRecommendationBundle(tenantDb as any);
+      }
     }
 
     await tenantDb

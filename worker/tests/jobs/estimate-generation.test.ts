@@ -8,6 +8,14 @@ const listCatalogCandidatesForMatchingMock = vi.fn();
 const resolveActiveCatalogSnapshotVersionIdMock = vi.fn();
 const rankExtractionMatchesMock = vi.fn();
 const buildPricingRecommendationMock = vi.fn();
+const isInferredRecommendationRowEligibleMock = vi.fn((input: any) => {
+  if (input.sourceType !== "inferred") return true;
+
+  return (
+    (input.documentEvidence?.documentId || input.documentEvidence?.sourceText?.trim()) &&
+    (input.historicalSupportCount > 0 || input.dependencySupportCount > 0)
+  );
+});
 const isConfirmedMeasurementCandidateForPricingMock = vi.fn((input: any) =>
   input.extractionType !== "measurement_candidate" ||
   input.metadataJson?.measurementConfirmationState === "approved"
@@ -39,6 +47,7 @@ vi.mock("../../../server/src/modules/estimating/matching-service.js", () => ({
 
 vi.mock("../../../server/src/modules/estimating/pricing-service.js", () => ({
   buildPricingRecommendation: buildPricingRecommendationMock,
+  isInferredRecommendationRowEligible: isInferredRecommendationRowEligibleMock,
   isConfirmedMeasurementCandidateForPricing: isConfirmedMeasurementCandidateForPricingMock,
 }));
 
@@ -390,6 +399,153 @@ describe("estimate generation job", () => {
     expect(rankedExtractionIds).toEqual(["ext-normal", "ext-confirmed"]);
     expect(rankedExtractionIds).not.toContain("ext-unconfirmed");
     expect(buildPricingRecommendationMock).toHaveBeenCalledTimes(2);
+    expect(lockedClient.query).toHaveBeenLastCalledWith("COMMIT");
+  });
+
+  it("assigns distinct source row identities to inferred rows that share section and normalized intent", async () => {
+    const sourceLimit = vi.fn().mockResolvedValue([{ id: "source-1" }]);
+    const extractionWhere = vi.fn().mockResolvedValue([
+      {
+        id: "ext-inferred-1",
+        dealId: "deal-1",
+        projectId: null,
+        documentId: "doc-1",
+        extractionType: "scope_line",
+        status: "pending",
+        quantity: "1",
+        unit: "ea",
+        normalizedLabel: "Companion flashing",
+        evidenceText: "Companion flashing implied by spec",
+        divisionHint: "Roofing",
+        metadataJson: {
+          sourceParseRunId: "parse-run-1",
+          activeArtifact: true,
+          sourceType: "inferred",
+          dependencySupportCount: 1,
+        },
+      },
+      {
+        id: "ext-inferred-2",
+        dealId: "deal-1",
+        projectId: null,
+        documentId: "doc-1",
+        extractionType: "scope_line",
+        status: "pending",
+        quantity: "1",
+        unit: "ea",
+        normalizedLabel: "Companion flashing",
+        evidenceText: "Companion flashing implied by spec",
+        divisionHint: "Roofing",
+        metadataJson: {
+          sourceParseRunId: "parse-run-1",
+          activeArtifact: true,
+          sourceType: "inferred",
+          dependencySupportCount: 1,
+        },
+      },
+    ]);
+    const appDb = {
+      select: vi.fn(() => ({
+        from: vi.fn(() => ({
+          where: vi.fn(() => ({
+            limit: sourceLimit,
+          })),
+        })),
+      })),
+    } as any;
+    const lockedClient = {
+      query: vi
+        .fn()
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [{ id: "doc-1", active_parse_run_id: "parse-run-1" }] })
+        .mockResolvedValueOnce({ rows: [] }),
+      release: vi.fn(),
+    } as any;
+    let tenantSelectCallCount = 0;
+    const insertPayloads: any[] = [];
+    const tenantDb = {
+      select: vi.fn(() => ({
+        from: vi.fn(() => {
+          tenantSelectCallCount += 1;
+          if (tenantSelectCallCount === 1) {
+            return {
+              where: extractionWhere,
+            };
+          }
+          throw new Error(`Unexpected tenant select call: ${tenantSelectCallCount}`);
+        }),
+      })),
+      insert: vi.fn(() => ({
+        values: vi.fn((payload: any) => {
+          insertPayloads.push(payload);
+          return {
+            returning: vi.fn().mockResolvedValue([{ id: `row-${insertPayloads.length}` }]),
+          };
+        }),
+      })),
+      update: vi.fn(() => ({
+        set: vi.fn(() => ({
+          where: vi.fn().mockResolvedValue(undefined),
+        })),
+      })),
+    } as any;
+
+    getHistoricalPricingSignalsMock.mockResolvedValue({
+      historicalItems: [],
+      vendorQuotes: [],
+      currentDeal: null,
+    });
+    resolveActiveCatalogSnapshotVersionIdMock.mockResolvedValue("snapshot-1");
+    listCatalogCandidatesForMatchingMock.mockResolvedValue([]);
+    rankExtractionMatchesMock.mockImplementation(async ({ extraction }: any) => [
+      {
+        catalogItemId: `catalog-${extraction.id}`,
+        matchScore: 99,
+        reasons: { matched: extraction.id },
+        historicalLineItemIds: [],
+        catalogBaselinePrice: 100,
+        historicalUnitPrices: [],
+        vendorQuotePrice: null,
+        awardedOutcomeAdjustmentPercent: 0,
+        internalAdjustmentPercent: 0,
+      },
+    ]);
+    buildPricingRecommendationMock.mockImplementation(() => ({
+      priceBasis: "mock",
+      recommendedUnitPrice: 10,
+      recommendedTotalPrice: 10,
+      comparableHistoricalPrices: [],
+      historicalMedianPrice: null,
+      catalogBaselinePrice: null,
+      marketAdjustmentPercent: 0,
+      assumptions: {},
+      confidence: 1,
+    }));
+    poolConnectMock.mockResolvedValue(lockedClient);
+    drizzleMock.mockReturnValueOnce(appDb).mockReturnValueOnce(tenantDb);
+
+    const { runEstimateGeneration } = await import("../../src/jobs/estimate-generation.js");
+
+    await runEstimateGeneration(
+      {
+        documentId: "doc-1",
+        dealId: "deal-1",
+        parseRunId: "parse-run-1",
+      },
+      "office-1"
+    );
+
+    const recommendationPayloads = insertPayloads.filter(
+      (payload) => payload && typeof payload === "object" && !Array.isArray(payload) && "sourceRowIdentity" in payload
+    );
+    const sourceRowIdentities = recommendationPayloads.map((payload: any) => payload.sourceRowIdentity);
+
+    expect(recommendationPayloads).toHaveLength(2);
+    expect(new Set(sourceRowIdentities).size).toBe(2);
+    expect(sourceRowIdentities[0]).toContain("ext-inferred-1");
+    expect(sourceRowIdentities[1]).toContain("ext-inferred-2");
     expect(lockedClient.query).toHaveBeenLastCalledWith("COMMIT");
   });
 

@@ -80,6 +80,17 @@ describe("buildPricingRecommendation", () => {
         dependencySupportCount: 2,
       })
     ).toBe(true);
+
+    expect(
+      isInferredRecommendationRowEligible({
+        sourceType: "inferred",
+        documentEvidence: {
+          sourceExtractionId: "extraction-1",
+        },
+        historicalSupportCount: 1,
+        dependencySupportCount: 0,
+      })
+    ).toBe(false);
   });
 
   it("builds rationale payloads that carry duplicate-group metadata for persistence", () => {

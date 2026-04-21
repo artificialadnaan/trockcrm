@@ -98,8 +98,7 @@ export function isInferredRecommendationRowEligible(input: {
 
   const hasDocumentEvidence =
     Boolean(input.documentEvidence?.documentId) ||
-    Boolean(input.documentEvidence?.sourceText?.trim()) ||
-    Boolean(input.documentEvidence?.sourceExtractionId);
+    Boolean(input.documentEvidence?.sourceText?.trim());
 
   return (
     hasDocumentEvidence &&
