@@ -78,7 +78,16 @@ export function createLeadConversionService(
     }
 
     const currentLeadStage = await deps.getStageById(lead.stageId, "lead");
-    if (!currentLeadStage || currentLeadStage.slug !== "ready_for_opportunity" || (lead as typeof lead & { directorReviewDecision?: string | null }).directorReviewDecision !== "go") {
+    const readyForOpportunityStage = await deps.getStageBySlug("ready_for_opportunity", "lead");
+    const directorReviewDecision = (lead as typeof lead & { directorReviewDecision?: string | null }).directorReviewDecision;
+    const usesExpandedLeadFunnel = Boolean(readyForOpportunityStage);
+
+    if (
+      !currentLeadStage ||
+      (usesExpandedLeadFunnel
+        ? currentLeadStage.slug !== "ready_for_opportunity" || directorReviewDecision !== "go"
+        : currentLeadStage.isTerminal)
+    ) {
       throw new AppError(400, "Lead is not ready for opportunity conversion");
     }
 

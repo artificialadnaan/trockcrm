@@ -686,8 +686,13 @@ beforeEach(() => {
     return dealStage;
   });
   pipelineMocks.getStageBySlug.mockImplementation(async (slug: string, workflowFamily?: string) => {
-    if (workflowFamily === "lead" && slug === "converted") {
-      return convertedLeadStage;
+    if (workflowFamily === "lead") {
+      if (slug === "converted") {
+        return convertedLeadStage;
+      }
+      if (slug === "ready_for_opportunity") {
+        return readyForOpportunityStage;
+      }
     }
 
     return null;
@@ -1309,6 +1314,117 @@ describe("Lead Conversion Service", () => {
     expect(result.deal.source).toBe("Referral");
   });
 
+  it("allows conversion from a legacy active lead stage when opportunity stages are not configured", async () => {
+    pipelineMocks.getStageBySlug.mockImplementation(async (slug: string, workflowFamily?: string) => {
+      if (workflowFamily === "lead" && slug === "converted") {
+        return convertedLeadStage;
+      }
+      return null;
+    });
+
+    const tenantDb = createFakeTenantDb({
+      leads: [
+        {
+          id: "lead-legacy",
+          companyId: "company-1",
+          propertyId: "property-1",
+          primaryContactId: null,
+          name: "Legacy conversion lead",
+          stageId: leadStage.id,
+          assignedRepId: "rep-1",
+          status: "open",
+          source: "Referral",
+          description: "Legacy funnel",
+          directorReviewDecision: null,
+          directorReviewedAt: null,
+          directorReviewedBy: null,
+          stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+          convertedAt: null,
+          isActive: true,
+          createdAt: new Date("2026-04-12T15:00:00.000Z"),
+          updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+        },
+      ],
+    });
+    const service = createLeadConversionService({
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+      createDeal: async (_tenantDb, input) => {
+        const deal = {
+          id: "deal-legacy",
+          dealNumber: "TR-2026-0099",
+          workflowRoute: input.workflowRoute ?? "estimating",
+          primaryContactId: input.primaryContactId ?? null,
+          companyId: input.companyId ?? null,
+          propertyId: input.propertyId ?? null,
+          sourceLeadId: input.sourceLeadId ?? null,
+          source: input.source ?? null,
+          assignedRepId: input.assignedRepId,
+          stageId: input.stageId,
+          name: input.name,
+        };
+        tenantDb.state.deals.push(deal);
+        return deal as never;
+      },
+    });
+
+    const result = await service.convertLead(tenantDb as never, {
+      leadId: "lead-legacy",
+      dealStageId: "deal-stage-1",
+      userRole: "rep",
+      userId: "rep-1",
+    });
+
+    expect(result.deal.id).toBe("deal-legacy");
+    expect(result.deal.sourceLeadId).toBe("lead-legacy");
+    expect(result.lead.status).toBe("converted");
+    expect(result.lead.stageId).toBe(convertedLeadStage.id);
+  });
+
+  it("keeps the strict readiness gate when opportunity stages are configured", async () => {
+    const tenantDb = createFakeTenantDb({
+      leads: [
+        {
+          id: "lead-not-ready",
+          companyId: "company-1",
+          propertyId: "property-1",
+          primaryContactId: null,
+          name: "Not ready lead",
+          stageId: leadStage.id,
+          assignedRepId: "rep-1",
+          status: "open",
+          source: "Referral",
+          description: null,
+          directorReviewDecision: null,
+          directorReviewedAt: null,
+          directorReviewedBy: null,
+          stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+          convertedAt: null,
+          isActive: true,
+          createdAt: new Date("2026-04-12T15:00:00.000Z"),
+          updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+        },
+      ],
+    });
+    const createDealSpy = vi.fn();
+    const service = createLeadConversionService({
+      createDeal: createDealSpy as never,
+    });
+
+    await expect(
+      service.convertLead(tenantDb as never, {
+        leadId: "lead-not-ready",
+        dealStageId: "deal-stage-1",
+        userRole: "rep",
+        userId: "rep-1",
+      })
+    ).rejects.toMatchObject<AppError>({
+      statusCode: 400,
+      message: "Lead is not ready for opportunity conversion",
+    });
+
+    expect(createDealSpy).not.toHaveBeenCalled();
+  });
+
   it("rejects converting another rep's lead", async () => {
     const tenantDb = createFakeTenantDb({
       leads: [
@@ -1457,7 +1573,12 @@ describe("Lead Conversion Service", () => {
   });
 
   it("fails conversion when the converted lead stage is not configured", async () => {
-    pipelineMocks.getStageBySlug.mockResolvedValueOnce(null);
+    pipelineMocks.getStageBySlug.mockImplementation(async (slug: string, workflowFamily?: string) => {
+      if (workflowFamily !== "lead") return null;
+      if (slug === "ready_for_opportunity") return readyForOpportunityStage;
+      if (slug === "converted") return null;
+      return null;
+    });
 
     const tenantDb = createFakeTenantDb({
       leads: [
