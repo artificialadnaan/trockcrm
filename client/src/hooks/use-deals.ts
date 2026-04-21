@@ -374,7 +374,7 @@ export function useDealBoard(scope: "mine" | "team" | "all", includeDd: boolean)
       }>;
       terminalStages: DealBoardResponse["terminalStages"];
       columns?: DealBoardColumn[];
-    }>(`/deals/pipeline?scope=${scope}&includeDd=${includeDd}`)
+    }>(`/deals/pipeline?scope=${scope}&includeDd=${includeDd}&previewLimit=8`)
       .then((result) => {
         const normalized: DealBoardResponse = {
           columns:

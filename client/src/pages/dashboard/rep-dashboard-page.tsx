@@ -7,19 +7,20 @@ import { RepDashboardBoardShell } from "@/components/dashboard/rep-dashboard-boa
 export function RepDashboardPage() {
   const boardState = usePipelineBoardState("deals");
   const { data, loading, error } = useRepDashboard();
-  const { board: dealBoard } = useDealBoard("mine", true);
-  const { board: leadBoard } = useLeadBoard("mine");
-
-  if (loading) return <div className="text-sm text-slate-500">Loading dashboard...</div>;
-  if (error || !data) return <div className="text-sm text-red-600">{error ?? "Failed to load dashboard"}</div>;
+  const { board: dealBoard, loading: dealBoardLoading } = useDealBoard("mine", true);
+  const { board: leadBoard, loading: leadBoardLoading } = useLeadBoard("mine");
 
   return (
     <RepDashboardBoardShell
       activeEntity={boardState.activeEntity}
       onEntityChange={boardState.setActiveEntity}
       repSummary={data}
+      summaryLoading={loading}
+      summaryError={error}
       dealBoard={dealBoard}
+      dealBoardLoading={dealBoardLoading}
       leadBoard={leadBoard}
+      leadBoardLoading={leadBoardLoading}
     />
   );
 }

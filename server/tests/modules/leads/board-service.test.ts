@@ -103,6 +103,41 @@ describe("listLeadBoard", () => {
     expect(result.defaultConversionDealStageId).toBe("deal-stage-1");
   });
 
+  it("limits board payload cards to the preview window while keeping the full count", async () => {
+    dbState.responses = [
+      [{ id: "stage-contacted", slug: "contacted", name: "Contacted", displayOrder: 1, isTerminal: false }],
+      [{ id: "deal-stage-1" }],
+    ];
+
+    const tenantDb = {
+      execute: vi.fn().mockResolvedValue({
+        rows: Array.from({ length: 10 }).map((_, index) => ({
+          id: `lead-${index + 1}`,
+          name: `Lead ${index + 1}`,
+          stage_id: "stage-contacted",
+          office_id: "office-1",
+          company_name: "Acme",
+          property_city: "Dallas",
+          property_state: "TX",
+          updated_at: "2026-04-21T10:00:00.000Z",
+          stage_entered_at: "2026-04-20T10:00:00.000Z",
+        })),
+      }),
+    } as any;
+
+    const { listLeadBoard } = await import("../../../src/modules/leads/service.js");
+    const result = await listLeadBoard(tenantDb, {
+      role: "director",
+      userId: "director-1",
+      activeOfficeId: "office-1",
+      scope: "team",
+      previewLimit: 8,
+    });
+
+    expect(result.columns[0]?.count).toBe(10);
+    expect(result.columns[0]?.cards).toHaveLength(8);
+  });
+
   it("scopes board queries to the active office even for admin all scope", async () => {
     dbState.responses = [
       [{ id: "stage-contacted", slug: "contacted", name: "Contacted", displayOrder: 1, isTerminal: false }],

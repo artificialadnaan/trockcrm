@@ -56,6 +56,15 @@ export function PipelineBoardColumn({
             {column.count}
           </span>
         </div>
+        {column.count > column.cards.length ? (
+          <button
+            type="button"
+            className="mt-2 text-xs font-medium text-slate-500 transition-colors hover:text-slate-900"
+            onClick={() => onOpenStage(column.stage.id)}
+          >
+            View all {column.count}
+          </button>
+        ) : null}
       </div>
       <div className="flex min-h-[12rem] flex-1 flex-col gap-2 p-3">
         {column.cards.length > 0 ? (

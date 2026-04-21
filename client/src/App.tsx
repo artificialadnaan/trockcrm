@@ -1,10 +1,8 @@
 import { Routes, Route, Navigate, useSearchParams } from "react-router-dom";
-import type { ReactNode } from "react";
+import { Suspense, lazy, type ReactNode } from "react";
 import { AuthProvider, useAuth } from "@/lib/auth";
 import { DevUserPicker } from "@/components/auth/dev-user-picker";
 import { AppShell } from "@/components/layout/app-shell";
-import { DealListPage } from "@/pages/deals/deal-list-page";
-import { DealStagePage } from "@/pages/deals/deal-stage-page";
 import { DealDetailPage } from "@/pages/deals/deal-detail-page";
 import { DealNewPage } from "@/pages/deals/deal-new-page";
 import { DealEditPage } from "@/pages/deals/deal-edit-page";
@@ -17,8 +15,6 @@ import { CompanyListPage } from "@/pages/companies/company-list-page";
 import { CompanyDetailPage } from "@/pages/companies/company-detail-page";
 import { CompanyNewPage } from "@/pages/companies/company-new-page";
 import { CompanyEditPage } from "@/pages/companies/company-edit-page";
-import { LeadListPage } from "@/pages/leads/lead-list-page";
-import { LeadStagePage } from "@/pages/leads/lead-stage-page";
 import { LeadDetailPage } from "@/pages/leads/lead-detail-page";
 import { PropertyListPage } from "@/pages/properties/property-list-page";
 import { PropertyDetailPage } from "@/pages/properties/property-detail-page";
@@ -26,8 +22,6 @@ import { MergeQueuePage } from "@/pages/admin/merge-queue-page";
 import { EmailInboxPage } from "@/pages/email/email-inbox-page";
 import { TaskListPage } from "@/pages/tasks/task-list-page";
 import { FilesPage } from "@/pages/files/files-page";
-import { HomeDashboardPage } from "@/pages/dashboard/home-dashboard-page";
-import { DirectorDashboardPage } from "@/pages/director/director-dashboard-page";
 import { DirectorRepDetail } from "@/pages/director/director-rep-detail";
 import { ReportsPage } from "@/pages/reports/reports-page";
 import { ProjectsPage } from "@/pages/projects/projects-page";
@@ -54,6 +48,25 @@ import { PhotoCapturePage } from "@/pages/photos/photo-capture-page";
 import { PhotoFeedPage } from "@/pages/photos/photo-feed-page";
 import { Toaster } from "@/components/ui/sonner";
 
+const HomeDashboardPage = lazy(() =>
+  import("@/pages/dashboard/home-dashboard-page").then((module) => ({ default: module.HomeDashboardPage }))
+);
+const DealListPage = lazy(() =>
+  import("@/pages/deals/deal-list-page").then((module) => ({ default: module.DealListPage }))
+);
+const DealStagePage = lazy(() =>
+  import("@/pages/deals/deal-stage-page").then((module) => ({ default: module.DealStagePage }))
+);
+const LeadListPage = lazy(() =>
+  import("@/pages/leads/lead-list-page").then((module) => ({ default: module.LeadListPage }))
+);
+const LeadStagePage = lazy(() =>
+  import("@/pages/leads/lead-stage-page").then((module) => ({ default: module.LeadStagePage }))
+);
+const DirectorDashboardPage = lazy(() =>
+  import("@/pages/director/director-dashboard-page").then((module) => ({ default: module.DirectorDashboardPage }))
+);
+
 function BoardAliasRedirect({ entity }: { entity: "leads" | "deals" }) {
   const [searchParams] = useSearchParams();
   const next = searchParams.toString();
@@ -75,69 +88,79 @@ function AuthGate({ children }: { children: ReactNode }) {
   return <>{children}</>;
 }
 
+function RouteFallback() {
+  return (
+    <div className="flex min-h-[12rem] items-center justify-center rounded-2xl border border-slate-200 bg-white text-sm text-slate-500">
+      Loading workspace...
+    </div>
+  );
+}
+
 export function App() {
   return (
     <AuthProvider>
       <AuthGate>
-        <>
-          <Routes>
-            <Route path="/photos/capture" element={<PhotoCapturePage />} />
-            <Route element={<AppShell />}>
-              <Route path="/" element={<HomeDashboardPage />} />
-              <Route path="/deals" element={<DealListPage />} />
-              <Route path="/deals/board" element={<BoardAliasRedirect entity="deals" />} />
-              <Route path="/deals/stages/:stageId" element={<DealStagePage />} />
-              <Route path="/deals/new" element={<DealNewPage />} />
-              <Route path="/deals/:id" element={<DealDetailPage />} />
-              <Route path="/deals/:id/edit" element={<DealEditPage />} />
-              <Route path="/leads" element={<LeadListPage />} />
-              <Route path="/leads/board" element={<BoardAliasRedirect entity="leads" />} />
-              <Route path="/leads/stages/:stageId" element={<LeadStagePage />} />
-              <Route path="/leads/:id" element={<LeadDetailPage />} />
-              <Route path="/properties" element={<PropertyListPage />} />
-              <Route path="/properties/:id" element={<PropertyDetailPage />} />
-              <Route path="/pipeline" element={<PipelinePage />} />
-              <Route path="/contacts" element={<ContactListPage />} />
-              <Route path="/contacts/new" element={<ContactNewPage />} />
-              <Route path="/contacts/:id" element={<ContactDetailPage />} />
-              <Route path="/contacts/:id/edit" element={<ContactEditPage />} />
-              <Route path="/companies" element={<CompanyListPage />} />
-              <Route path="/companies/new" element={<CompanyNewPage />} />
-              <Route path="/companies/:id" element={<CompanyDetailPage />} />
-              <Route path="/companies/:id/edit" element={<CompanyEditPage />} />
-              <Route path="/email" element={<EmailInboxPage />} />
-              <Route path="/tasks" element={<TaskListPage />} />
-              <Route path="/files" element={<FilesPage />} />
-              <Route path="/reports" element={<ReportsPage />} />
-              <Route path="/projects" element={<ProjectsPage />} />
-              <Route path="/director" element={<DirectorDashboardPage />} />
-              <Route path="/director/rep/:repId" element={<DirectorRepDetail />} />
-              <Route path="/search" element={<SearchPage />} />
-              <Route path="/admin/offices" element={<OfficesPage />} />
-              <Route path="/admin/users" element={<UsersPage />} />
-              <Route path="/admin/pipeline" element={<PipelineConfigPage />} />
-              <Route path="/admin/audit" element={<AuditLogPage />} />
-              <Route path="/admin/cross-office-reports" element={<CrossOfficeReportsPage />} />
-              <Route path="/admin/ai-actions" element={<AiActionQueuePage />} />
-              <Route path="/admin/interventions" element={<AdminInterventionWorkspacePage />} />
-              <Route path="/admin/sales-process-disconnects" element={<SalesProcessDisconnectsPage />} />
-              <Route path="/admin/merge-queue" element={<MergeQueuePage />} />
-              <Route path="/admin/procore" element={<ProcoreSyncPage />} />
-              <Route path="/admin/ai-ops" element={<AiOpsPage />} />
-              <Route path="/admin/ai-ops/reviews/:packetId" element={<AiPacketReviewPage />} />
-              <Route path="/admin/companycam" element={<CompanyCamPage />} />
-              <Route path="/admin/migration" element={<MigrationDashboardPage />} />
-              <Route path="/admin/migration/review" element={<MigrationReviewPage />} />
-              <Route path="/admin/migration/deals" element={<MigrationDealsPage />} />
-              <Route path="/admin/migration/contacts" element={<MigrationContactsPage />} />
-              <Route path="/photos/feed" element={<PhotoFeedPage />} />
-              <Route path="/help/user-guide" element={<UserGuidePage />} />
-              <Route path="/help/admin-guide" element={<AdminGuidePage />} />
-            </Route>
-            <Route path="*" element={<Navigate to="/" replace />} />
-          </Routes>
-          <Toaster position="top-right" richColors />
-        </>
+        <Suspense fallback={<RouteFallback />}>
+          <>
+            <Routes>
+              <Route path="/photos/capture" element={<PhotoCapturePage />} />
+              <Route element={<AppShell />}>
+                <Route path="/" element={<HomeDashboardPage />} />
+                <Route path="/deals" element={<DealListPage />} />
+                <Route path="/deals/board" element={<BoardAliasRedirect entity="deals" />} />
+                <Route path="/deals/stages/:stageId" element={<DealStagePage />} />
+                <Route path="/deals/new" element={<DealNewPage />} />
+                <Route path="/deals/:id" element={<DealDetailPage />} />
+                <Route path="/deals/:id/edit" element={<DealEditPage />} />
+                <Route path="/leads" element={<LeadListPage />} />
+                <Route path="/leads/board" element={<BoardAliasRedirect entity="leads" />} />
+                <Route path="/leads/stages/:stageId" element={<LeadStagePage />} />
+                <Route path="/leads/:id" element={<LeadDetailPage />} />
+                <Route path="/properties" element={<PropertyListPage />} />
+                <Route path="/properties/:id" element={<PropertyDetailPage />} />
+                <Route path="/pipeline" element={<PipelinePage />} />
+                <Route path="/contacts" element={<ContactListPage />} />
+                <Route path="/contacts/new" element={<ContactNewPage />} />
+                <Route path="/contacts/:id" element={<ContactDetailPage />} />
+                <Route path="/contacts/:id/edit" element={<ContactEditPage />} />
+                <Route path="/companies" element={<CompanyListPage />} />
+                <Route path="/companies/new" element={<CompanyNewPage />} />
+                <Route path="/companies/:id" element={<CompanyDetailPage />} />
+                <Route path="/companies/:id/edit" element={<CompanyEditPage />} />
+                <Route path="/email" element={<EmailInboxPage />} />
+                <Route path="/tasks" element={<TaskListPage />} />
+                <Route path="/files" element={<FilesPage />} />
+                <Route path="/reports" element={<ReportsPage />} />
+                <Route path="/projects" element={<ProjectsPage />} />
+                <Route path="/director" element={<DirectorDashboardPage />} />
+                <Route path="/director/rep/:repId" element={<DirectorRepDetail />} />
+                <Route path="/search" element={<SearchPage />} />
+                <Route path="/admin/offices" element={<OfficesPage />} />
+                <Route path="/admin/users" element={<UsersPage />} />
+                <Route path="/admin/pipeline" element={<PipelineConfigPage />} />
+                <Route path="/admin/audit" element={<AuditLogPage />} />
+                <Route path="/admin/cross-office-reports" element={<CrossOfficeReportsPage />} />
+                <Route path="/admin/ai-actions" element={<AiActionQueuePage />} />
+                <Route path="/admin/interventions" element={<AdminInterventionWorkspacePage />} />
+                <Route path="/admin/sales-process-disconnects" element={<SalesProcessDisconnectsPage />} />
+                <Route path="/admin/merge-queue" element={<MergeQueuePage />} />
+                <Route path="/admin/procore" element={<ProcoreSyncPage />} />
+                <Route path="/admin/ai-ops" element={<AiOpsPage />} />
+                <Route path="/admin/ai-ops/reviews/:packetId" element={<AiPacketReviewPage />} />
+                <Route path="/admin/companycam" element={<CompanyCamPage />} />
+                <Route path="/admin/migration" element={<MigrationDashboardPage />} />
+                <Route path="/admin/migration/review" element={<MigrationReviewPage />} />
+                <Route path="/admin/migration/deals" element={<MigrationDealsPage />} />
+                <Route path="/admin/migration/contacts" element={<MigrationContactsPage />} />
+                <Route path="/photos/feed" element={<PhotoFeedPage />} />
+                <Route path="/help/user-guide" element={<UserGuidePage />} />
+                <Route path="/help/admin-guide" element={<AdminGuidePage />} />
+              </Route>
+              <Route path="*" element={<Navigate to="/" replace />} />
+            </Routes>
+            <Toaster position="top-right" richColors />
+          </>
+        </Suspense>
       </AuthGate>
     </AuthProvider>
   );

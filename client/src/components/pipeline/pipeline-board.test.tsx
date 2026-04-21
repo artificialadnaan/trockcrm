@@ -6,7 +6,7 @@ import { PipelineBoard } from "./pipeline-board";
 const columns = [
   {
     stage: { id: "stage-estimating", name: "Estimating", slug: "estimating" },
-    count: 1,
+    count: 12,
     cards: [
       {
         id: "deal-1",
@@ -38,5 +38,6 @@ describe("PipelineBoard", () => {
     expect(html).toContain("Estimating");
     expect(html).toContain("North Campus");
     expect(html).toContain("TR-2026-0001");
+    expect(html).toContain("View all 12");
   });
 });

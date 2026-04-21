@@ -50,4 +50,21 @@ describe("DirectorDashboardPage", () => {
     expect(html).toContain("aria-pressed=\"true\"");
     expect(html).toContain("Stale Deals");
   });
+
+  it("keeps the team board shell visible while summary analytics are still loading", () => {
+    mocks.useDirectorDashboardMock.mockReturnValue({
+      loading: true,
+      error: null,
+      data: null,
+    });
+
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <DirectorDashboardPage />
+      </MemoryRouter>
+    );
+
+    expect(html).toContain("Team Pipeline Console");
+    expect(html).toContain("aria-label=\"Primary workspace\"");
+  });
 });

@@ -30,6 +30,7 @@ export interface DealBoardInput {
   activeOfficeId: string;
   scope: WorkspaceScope;
   includeDd?: boolean;
+  previewLimit?: number;
 }
 
 export interface DealStagePageInput extends DealBoardInput {
@@ -913,6 +914,7 @@ export async function getDealsForPipeline(
 }
 
 export async function listDealBoard(tenantDb: TenantDb, input: DealBoardInput) {
+  const previewLimit = Math.max(1, Math.min(12, input.previewLimit ?? 8));
   const stages = await listDealStages();
   const rowResult = await tenantDb.execute(sql`
     select
@@ -949,7 +951,7 @@ export async function listDealBoard(tenantDb: TenantDb, input: DealBoardInput) {
 
       return {
         stage,
-        deals: dealsForStage,
+        deals: dealsForStage.slice(0, previewLimit),
         totalValue: dealsForStage.reduce(
           (sum, deal) => sum + Number(deal.awardedAmount ?? deal.bidEstimate ?? deal.ddEstimate ?? 0),
           0
@@ -967,7 +969,7 @@ export async function listDealBoard(tenantDb: TenantDb, input: DealBoardInput) {
 
       return {
         stage,
-        deals: dealsForStage,
+        deals: dealsForStage.slice(0, Math.min(3, previewLimit)),
         count: dealsForStage.length,
       };
     });
@@ -975,7 +977,12 @@ export async function listDealBoard(tenantDb: TenantDb, input: DealBoardInput) {
   return {
     pipelineColumns,
     terminalStages,
-    columns: pipelineColumns,
+    columns: pipelineColumns.map((column) => ({
+      stage: column.stage,
+      count: column.count,
+      totalValue: column.totalValue,
+      cards: column.deals,
+    })),
   };
 }
 

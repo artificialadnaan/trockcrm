@@ -31,7 +31,7 @@ export function LeadListPage() {
             Leads and deals now share the same board language. Open a stage to inspect its records.
           </p>
         </div>
-        <Button onClick={() => navigate("/deals/new")}>
+        <Button onClick={() => navigate("/leads/new")}>
           <Plus className="mr-2 h-4 w-4" />
           New Lead
         </Button>

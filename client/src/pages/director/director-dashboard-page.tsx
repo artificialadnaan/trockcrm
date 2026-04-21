@@ -7,19 +7,20 @@ import { DirectorDashboardShell } from "@/components/dashboard/director-dashboar
 export function DirectorDashboardPage() {
   const boardState = usePipelineBoardState("deals");
   const { data, loading, error } = useDirectorDashboard();
-  const { board: dealBoard } = useDealBoard("team", true);
-  const { board: leadBoard } = useLeadBoard("team");
-
-  if (loading) return <div className="text-sm text-slate-500">Loading director dashboard...</div>;
-  if (error || !data) return <div className="text-sm text-red-600">{error ?? "Failed to load director dashboard"}</div>;
+  const { board: dealBoard, loading: dealBoardLoading } = useDealBoard("team", true);
+  const { board: leadBoard, loading: leadBoardLoading } = useLeadBoard("team");
 
   return (
     <DirectorDashboardShell
       boardEntity={boardState.activeEntity}
       onBoardEntityChange={boardState.setActiveEntity}
       directorSummary={data}
+      summaryLoading={loading}
+      summaryError={error}
       dealBoard={dealBoard}
+      dealBoardLoading={dealBoardLoading}
       leadBoard={leadBoard}
+      leadBoardLoading={leadBoardLoading}
     />
   );
 }
