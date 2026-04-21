@@ -17,6 +17,7 @@ const mocks = vi.hoisted(() => ({
   requireAdmin: vi.fn((_req: any, _res: any, next: any) => next()),
   requireDirector: vi.fn((_req: any, _res: any, next: any) => next()),
   runOwnershipSync: vi.fn(),
+  getMyCleanupQueue: vi.fn(),
   getOfficeOwnershipQueue: vi.fn(),
   bulkReassignOwnershipQueueRows: vi.fn(),
   poolQuery: vi.fn(),
@@ -68,7 +69,7 @@ vi.mock("../../../../server/src/modules/admin/ownership-sync-service.js", () => 
 }));
 
 vi.mock("../../../../server/src/modules/admin/cleanup-queue-service.js", () => ({
-  getMyCleanupQueue: vi.fn(),
+  getMyCleanupQueue: mocks.getMyCleanupQueue,
   getOfficeOwnershipQueue: mocks.getOfficeOwnershipQueue,
   bulkReassignOwnershipQueueRows: mocks.bulkReassignOwnershipQueueRows,
 }));
@@ -151,6 +152,45 @@ describe("admin ownership sync routes", () => {
     expect(response.status).toBe(200);
     expect(mocks.getOfficeOwnershipQueue).toHaveBeenCalledOnce();
     expect(mocks.getOfficeOwnershipQueue).toHaveBeenCalledWith(expect.anything(), "office-2", expect.any(Object));
+  });
+
+  it("routes /admin/cleanup/my through tenant auth wiring and returns rows", async () => {
+    mocks.tenantClient.query.mockImplementation(async (query: string) => {
+      if (query.includes("SELECT slug FROM public.offices")) {
+        return { rows: [{ slug: "office-one" }] };
+      }
+      if (query.includes("information_schema.schemata")) {
+        return { rows: [{ schema_name: "office_office-one" }] };
+      }
+      return { rows: [] };
+    });
+    mocks.getMyCleanupQueue.mockResolvedValue({
+      rows: [
+        {
+          recordId: "deal-1",
+          recordType: "deal",
+          recordName: "Queued Deal",
+        },
+      ],
+      byReason: [],
+    });
+
+    const response = await request(buildApp()).get("/api/admin/cleanup/my");
+
+    expect(response.status).toBe(200);
+    expect(mocks.authMiddleware).toHaveBeenCalledOnce();
+    expect(mocks.poolConnect).toHaveBeenCalledOnce();
+    expect(mocks.drizzle).toHaveBeenCalledOnce();
+    expect(mocks.getMyCleanupQueue).toHaveBeenCalledWith(expect.anything(), "admin-1", "office-1");
+    expect(response.body).toEqual({
+      rows: [
+        {
+          recordId: "deal-1",
+          recordType: "deal",
+          recordName: "Queued Deal",
+        },
+      ],
+    });
   });
 
   it("routes /admin/cleanup/reassign through the requested office context", async () => {
