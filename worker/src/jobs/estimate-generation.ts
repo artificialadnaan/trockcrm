@@ -52,7 +52,7 @@ function buildSourceRowIdentity(input: {
   return `extracted:${input.extractionId}`;
 }
 
-async function insertWithOptionalReturning<TRecord extends { id: string }>(
+async function insertWithReturningOrThrow<TRecord extends { id: string }>(
   db: any,
   table: unknown,
   values: Record<string, unknown> | Record<string, unknown>[]
@@ -64,8 +64,7 @@ async function insertWithOptionalReturning<TRecord extends { id: string }>(
     return rows[0] as TRecord;
   }
 
-  await insertQuery;
-  return null;
+  throw new Error("estimate generation requires returning() support for persisted recommendation rows");
 }
 
 export async function runEstimateGeneration(
@@ -333,7 +332,7 @@ export async function runEstimateGeneration(
       };
 
       const persistRecommendationBundle = async (db: any) => {
-        const savedMatch = await insertWithOptionalReturning<{ id: string }>(
+        const savedMatch = await insertWithReturningOrThrow<{ id: string }>(
           db,
           estimateExtractionMatches,
           {
@@ -349,7 +348,7 @@ export async function runEstimateGeneration(
           }
         );
 
-        const savedRecommendation = await insertWithOptionalReturning<{ id: string }>(
+        const savedRecommendation = await insertWithReturningOrThrow<{ id: string }>(
           db,
           estimatePricingRecommendations,
           {
@@ -416,7 +415,7 @@ export async function runEstimateGeneration(
         if (recommendationSet.optionRows.length > 0) {
           await db.insert(estimatePricingRecommendationOptions).values(
             recommendationSet.optionRows.map((option) => ({
-              recommendationId: savedRecommendation?.id ?? savedMatch?.id ?? extraction.id,
+              recommendationId: savedRecommendation.id,
               catalogItemId: option.catalogItemId,
               localCatalogItemId: option.localCatalogItemId,
               rank: option.rank,

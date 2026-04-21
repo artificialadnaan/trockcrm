@@ -308,7 +308,6 @@ describe("estimate generation job", () => {
       release: vi.fn(),
     } as any;
     let tenantSelectCallCount = 0;
-    let insertCallCount = 0;
     const tenantDb = {
       select: vi.fn(() => ({
         from: vi.fn(() => {
@@ -322,23 +321,9 @@ describe("estimate generation job", () => {
         }),
       })),
       insert: vi.fn(() => ({
-        values: vi.fn(() => {
-          insertCallCount += 1;
-
-          if (insertCallCount === 1) {
-            return {
-              returning: vi.fn().mockResolvedValue([{ id: "generation-run-1" }]),
-            };
-          }
-
-          if (insertCallCount % 2 === 0) {
-            return {
-              returning: vi.fn().mockResolvedValue([{ id: "match-1" }]),
-            };
-          }
-
-          return Promise.resolve(undefined);
-        }),
+        values: vi.fn(() => ({
+          returning: vi.fn().mockResolvedValue([{ id: "generated-id" }]),
+        })),
       })),
       update: vi.fn(() => ({
         set: vi.fn(() => ({
