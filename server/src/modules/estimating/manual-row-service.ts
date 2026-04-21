@@ -231,15 +231,19 @@ export async function createManualEstimateRow(args: {
   input: CreateManualEstimateRowInput;
 }) {
   const manualIdentityKey = normalizeManualIdentityKey(args.input.manualIdentityKey);
+  const requestedCatalogSelection = args.input.selectedSourceType === "catalog_option";
   const { optionRows: resolvedCatalogOptions, selectedOption } = await resolveCatalogFirstOptions({
     appDb: args.appDb ?? null,
     catalogQuery: args.input.catalogQuery ?? null,
     catalogOptions: args.input.catalogOptions ?? [],
     selectedOptionStableId: args.input.selectedOptionStableId ?? null,
-    forceCatalogSelection: args.input.selectedSourceType === "catalog_option",
+    forceCatalogSelection: requestedCatalogSelection,
   });
-  const selectedSourceType =
-    selectedOption || args.input.selectedSourceType === "catalog_option" ? "catalog_option" : "manual";
+  const selectedSourceType = selectedOption
+    ? "catalog_option"
+    : requestedCatalogSelection
+      ? "manual"
+      : "manual";
   const catalogBacking = selectedOption?.localCatalogItemId
     ? "local_promoted"
     : selectedOption?.catalogItemId
@@ -326,15 +330,19 @@ export async function updateManualEstimateRow(args: {
   }
 
   const manualIdentityKey = normalizeManualIdentityKey(existing.manualIdentityKey);
+  const requestedCatalogSelection = args.input.selectedSourceType === "catalog_option";
   const { optionRows: resolvedCatalogOptions, selectedOption } = await resolveCatalogFirstOptions({
     appDb: args.appDb ?? null,
     catalogQuery: args.input.catalogQuery ?? null,
     catalogOptions: args.input.catalogOptions ?? [],
     selectedOptionStableId: args.input.selectedOptionStableId ?? null,
-    forceCatalogSelection: args.input.selectedSourceType === "catalog_option",
+    forceCatalogSelection: requestedCatalogSelection,
   });
-  const selectedSourceType =
-    args.input.selectedSourceType === "catalog_option" || selectedOption ? "catalog_option" : "manual";
+  const selectedSourceType = selectedOption
+    ? "catalog_option"
+    : requestedCatalogSelection
+      ? "manual"
+      : "manual";
   const catalogBacking =
     args.input.catalogBacking ??
     (selectedOption?.localCatalogItemId
@@ -353,7 +361,7 @@ export async function updateManualEstimateRow(args: {
     manualNotes: args.input.manualNotes ?? existing.manualNotes,
     selectedSourceType: selectedSourceType === "catalog_option" ? "catalog_option" : "manual",
     selectedOptionId: args.input.selectedOptionId ?? existing.selectedOptionId ?? null,
-    catalogBacking,
+    catalogBacking: selectedSourceType === "catalog_option" ? catalogBacking : "estimate_only",
     evidenceJson: {
       ...(existing.evidenceJson as Record<string, unknown>),
       sectionName:

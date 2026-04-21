@@ -128,4 +128,59 @@ describe("manual-row-service", () => {
       })
     );
   });
+
+  it("downgrades an unresolved catalog-option request to a free-text manual row", async () => {
+    catalogReadModelMocks.resolveActiveCatalogSnapshotVersionId.mockResolvedValue("snapshot-1");
+    catalogReadModelMocks.listCatalogCandidatesForMatching.mockResolvedValue([]);
+
+    const insertValues = vi.fn().mockResolvedValue([{ id: "rec-3" }]);
+    const tenantDb = {
+      insert: vi.fn(() => ({
+        values: insertValues,
+      })),
+      update: vi.fn(() => ({
+        set: vi.fn(() => ({
+          where: vi.fn(() => ({
+            returning: vi.fn().mockResolvedValue([{ id: "rec-3", selectedSourceType: null }]),
+          })),
+        })),
+      })),
+    } as any;
+    const appDb = {
+      select: vi.fn(() => ({
+        from: vi.fn(() => ({
+          where: vi.fn().mockResolvedValue([{ id: "source-1" }]),
+        })),
+      })),
+    } as any;
+
+    const result = await createManualEstimateRow({
+      tenantDb,
+      appDb,
+      dealId: "deal-1",
+      userId: "user-1",
+      input: {
+        generationRunId: "run-1",
+        estimateSectionName: "Roofing",
+        manualLabel: "Custom flashing",
+        catalogQuery: "missing thing",
+        selectedSourceType: "catalog_option",
+      },
+    });
+
+    expect(insertValues).toHaveBeenCalledWith(
+      expect.objectContaining({
+        selectedSourceType: null,
+        selectedOptionId: null,
+        catalogBacking: "estimate_only",
+      })
+    );
+    expect(result.recommendation).toEqual(
+      expect.objectContaining({
+        selectedSourceType: null,
+        selectedOptionId: null,
+        catalogBacking: "estimate_only",
+      })
+    );
+  });
 });
