@@ -5,6 +5,7 @@ import { LeadDetailPage } from "./lead-detail-page";
 
 const stages = [
   { id: "stage-lead", name: "Contacted", slug: "contacted", workflowFamily: "lead" },
+  { id: "stage-converted", name: "Converted", slug: "converted", workflowFamily: "lead" },
   { id: "stage-estimating", name: "Estimating", slug: "estimating", workflowFamily: "standard_deal" },
 ];
 
@@ -173,6 +174,17 @@ describe("LeadDetailPage", () => {
 
     expect(html).toContain("Open Deal");
     expect(html).not.toContain("Convert to Deal");
+  });
+
+  it("treats the converted lead stage as post-conversion even though it stays in the lead workflow family", () => {
+    lead = { ...lead, stageId: "stage-converted", convertedAt: "2026-04-11T09:00:00.000Z", convertedDealId: "deal-1", convertedDealNumber: "TR-1001" };
+    activities = [];
+
+    const html = renderLeadDetail();
+
+    expect(html).toContain("Open Deal");
+    expect(html).toContain("This lead has already been converted");
+    expect(html).not.toContain("This record is still in the lead stage.");
   });
 
   it("splits lead and post-conversion activity into separate timeline sections", () => {

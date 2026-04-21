@@ -31,7 +31,8 @@ export function LeadDetailPage() {
     () => stages.find((stage) => stage.workflowFamily === "standard_deal" && stage.slug === "dd")?.id ?? null,
     [stages]
   );
-  const isLeadStage = currentStage?.workflowFamily === "lead";
+  const isConvertedLead = Boolean(lead?.convertedAt || lead?.convertedDealId || lead?.status === "converted");
+  const isLeadStage = currentStage?.workflowFamily === "lead" && !isConvertedLead;
   const convertedAt = lead?.convertedAt ?? null;
 
   if (loading) {
@@ -92,7 +93,7 @@ export function LeadDetailPage() {
               <span className="text-xs font-mono uppercase tracking-[0.18em] text-muted-foreground">
                 {lead.convertedDealNumber ?? lead.id.slice(0, 8)}
               </span>
-              <LeadStageBadge stageId={lead.stageId} converted={!isLeadStage} />
+              <LeadStageBadge stageId={lead.stageId} converted={isConvertedLead} />
             </div>
             <h1 className="text-4xl font-black tracking-tight text-foreground">{lead.name}</h1>
             <div className="flex flex-wrap items-center gap-4 text-sm text-muted-foreground">
@@ -200,7 +201,7 @@ export function LeadDetailPage() {
               description: lead.description,
               stageEnteredAt: lead.stageEnteredAt,
             }}
-            converted={!isLeadStage}
+            converted={isConvertedLead}
             defaultDealStageId={defaultDealStageId}
           />
 
@@ -211,9 +212,11 @@ export function LeadDetailPage() {
                 <p className="text-sm font-medium">Lead context</p>
               </div>
               <p className="text-sm text-muted-foreground">
-                {isLeadStage
+                {isConvertedLead
+                  ? "This lead has already been converted, but the pre-RFP history remains available here."
+                  : isLeadStage
                   ? "This record is still in the lead stage. Converting it moves the work into the deal pipeline."
-                  : "This lead has already been converted, but the pre-RFP history remains available here."}
+                  : "This lead is in a downstream workflow stage. Use the linked deal to continue opportunity work."}
               </p>
               <div className="flex items-center gap-2 text-sm text-muted-foreground">
                 <User className="h-4 w-4" />
