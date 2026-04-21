@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { api } from "@/lib/api";
 import type { FileRecord } from "./use-files";
+import type { StagePageQuery } from "@/lib/pipeline-stage-page";
 
 export type WorkflowRoute = "estimating" | "service";
 export type DealScopingIntakeStatus = "draft" | "ready" | "activated";
@@ -163,6 +164,43 @@ export interface Pagination {
   totalPages: number;
 }
 
+export interface DealBoardColumn {
+  stage: {
+    id: string;
+    name: string;
+    slug: string;
+    color?: string | null;
+    displayOrder?: number;
+    isActivePipeline?: boolean;
+    isTerminal?: boolean;
+  };
+  count: number;
+  totalValue: number;
+  cards: Deal[];
+}
+
+export interface DealBoardResponse {
+  columns: DealBoardColumn[];
+  terminalStages: Array<{
+    stage: DealBoardColumn["stage"];
+    count: number;
+    deals: Deal[];
+  }>;
+}
+
+export interface DealStagePageResponse {
+  stage: DealBoardColumn["stage"];
+  scope: "mine" | "team" | "all";
+  summary: { count: number; totalValue: number };
+  pagination: {
+    page: number;
+    pageSize: number;
+    total: number;
+    totalPages: number;
+  };
+  rows: Deal[];
+}
+
 export function useDeals(filters: DealFilters = {}) {
   const [deals, setDeals] = useState<Deal[]>([]);
   const [pagination, setPagination] = useState<Pagination>({ page: 1, limit: 50, total: 0, totalPages: 0 });
@@ -319,6 +357,80 @@ export async function patchDealScopingIntake(
 
 export async function getDealScopingReadiness(dealId: string) {
   return api<{ readiness: DealScopingReadiness }>(`/deals/${dealId}/scoping-intake/readiness`);
+}
+
+export function useDealBoard(scope: "mine" | "team" | "all", includeDd: boolean) {
+  const [board, setBoard] = useState<DealBoardResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  const refetch = useCallback(() => {
+    setLoading(true);
+    return api<{
+      pipelineColumns: Array<{
+        stage: DealBoardColumn["stage"];
+        count: number;
+        totalValue: number;
+        deals: Deal[];
+      }>;
+      terminalStages: DealBoardResponse["terminalStages"];
+      columns?: DealBoardColumn[];
+    }>(`/deals/pipeline?scope=${scope}&includeDd=${includeDd}`)
+      .then((result) => {
+        const normalized: DealBoardResponse = {
+          columns:
+            result.columns ??
+            result.pipelineColumns.map((column) => ({
+              ...column,
+              cards: column.deals,
+            })),
+          terminalStages: result.terminalStages ?? [],
+        };
+        setBoard(normalized);
+        return normalized;
+      })
+      .finally(() => setLoading(false));
+  }, [includeDd, scope]);
+
+  useEffect(() => {
+    void refetch();
+  }, [refetch]);
+
+  return { board, loading, refetch };
+}
+
+export function useDealStagePage(input: StagePageQuery & { stageId: string; scope: "mine" | "team" | "all" }) {
+  const [data, setData] = useState<DealStagePageResponse | null>(null);
+
+  useEffect(() => {
+    const params = new URLSearchParams({
+      scope: input.scope,
+      page: String(input.page),
+      pageSize: String(input.pageSize),
+      sort: input.sort,
+      search: input.search,
+      ...(input.filters.assignedRepId ? { assignedRepId: input.filters.assignedRepId } : {}),
+      ...(input.filters.staleOnly ? { staleOnly: "true" } : {}),
+      ...(input.filters.status ? { status: input.filters.status } : {}),
+      ...(input.filters.workflowRoute ? { workflowRoute: input.filters.workflowRoute } : {}),
+      ...(input.filters.source ? { source: input.filters.source } : {}),
+    });
+
+    void api<DealStagePageResponse>(`/deals/stages/${input.stageId}?${params.toString()}`).then(setData);
+  }, [
+    input.filters.assignedRepId,
+    input.filters.source,
+    input.filters.staleOnly,
+    input.filters.status,
+    input.filters.workflowRoute,
+    input.page,
+    input.pageSize,
+    input.scope,
+    input.search,
+    input.sort,
+    input.stageId,
+  ]);
+
+  return { data };
 }
 
 export async function linkExistingScopingAttachment(

@@ -4,12 +4,39 @@ import {
   createLead,
   deleteLead,
   getLeadById,
+  listLeadBoard,
+  listLeadStagePage,
   listLeads,
   updateLead,
 } from "./service.js";
 import { convertLead } from "./conversion-service.js";
 
 const router = Router();
+
+function readBoardInput(req: Parameters<typeof router.get>[1] extends never ? never : any) {
+  return {
+    role: req.user!.role,
+    userId: req.user!.id,
+    activeOfficeId: req.user!.activeOfficeId ?? req.user!.officeId,
+    scope: (req.query.scope as "mine" | "team" | "all" | undefined) ?? "mine",
+  };
+}
+
+function readStageInput(req: Parameters<typeof router.get>[1] extends never ? never : any) {
+  return {
+    ...readBoardInput(req),
+    stageId: req.params.stageId,
+    page: Number(req.query.page ?? 1),
+    pageSize: Number(req.query.pageSize ?? 25),
+    search: req.query.search as string | undefined,
+    sort: req.query.sort as string | undefined,
+    assignedRepId: req.query.assignedRepId as string | undefined,
+    staleOnly: req.query.staleOnly === "true",
+    status: req.query.status as string | undefined,
+    workflowRoute: req.query.workflowRoute as string | undefined,
+    source: req.query.source as string | undefined,
+  };
+}
 
 // GET /api/leads
 router.get("/", async (req, res, next) => {
@@ -34,6 +61,26 @@ router.get("/", async (req, res, next) => {
     );
     await req.commitTransaction!();
     res.json({ leads: result });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/board", async (req, res, next) => {
+  try {
+    const board = await listLeadBoard(req.tenantDb!, readBoardInput(req));
+    await req.commitTransaction!();
+    res.json(board);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/stages/:stageId", async (req, res, next) => {
+  try {
+    const stagePage = await listLeadStagePage(req.tenantDb!, readStageInput(req));
+    await req.commitTransaction!();
+    res.json(stagePage);
   } catch (err) {
     next(err);
   }

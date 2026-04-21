@@ -1,9 +1,10 @@
-import { Routes, Route, Navigate } from "react-router-dom";
+import { Routes, Route, Navigate, useSearchParams } from "react-router-dom";
 import type { ReactNode } from "react";
 import { AuthProvider, useAuth } from "@/lib/auth";
 import { DevUserPicker } from "@/components/auth/dev-user-picker";
 import { AppShell } from "@/components/layout/app-shell";
 import { DealListPage } from "@/pages/deals/deal-list-page";
+import { DealStagePage } from "@/pages/deals/deal-stage-page";
 import { DealDetailPage } from "@/pages/deals/deal-detail-page";
 import { DealNewPage } from "@/pages/deals/deal-new-page";
 import { DealEditPage } from "@/pages/deals/deal-edit-page";
@@ -17,6 +18,7 @@ import { CompanyDetailPage } from "@/pages/companies/company-detail-page";
 import { CompanyNewPage } from "@/pages/companies/company-new-page";
 import { CompanyEditPage } from "@/pages/companies/company-edit-page";
 import { LeadListPage } from "@/pages/leads/lead-list-page";
+import { LeadStagePage } from "@/pages/leads/lead-stage-page";
 import { LeadDetailPage } from "@/pages/leads/lead-detail-page";
 import { PropertyListPage } from "@/pages/properties/property-list-page";
 import { PropertyDetailPage } from "@/pages/properties/property-detail-page";
@@ -24,7 +26,7 @@ import { MergeQueuePage } from "@/pages/admin/merge-queue-page";
 import { EmailInboxPage } from "@/pages/email/email-inbox-page";
 import { TaskListPage } from "@/pages/tasks/task-list-page";
 import { FilesPage } from "@/pages/files/files-page";
-import { RepDashboardPage } from "@/pages/dashboard/rep-dashboard-page";
+import { HomeDashboardPage } from "@/pages/dashboard/home-dashboard-page";
 import { DirectorDashboardPage } from "@/pages/director/director-dashboard-page";
 import { DirectorRepDetail } from "@/pages/director/director-rep-detail";
 import { ReportsPage } from "@/pages/reports/reports-page";
@@ -52,10 +54,10 @@ import { PhotoCapturePage } from "@/pages/photos/photo-capture-page";
 import { PhotoFeedPage } from "@/pages/photos/photo-feed-page";
 import { Toaster } from "@/components/ui/sonner";
 
-function HomePage() {
-  const { user } = useAuth();
-  if (user?.role === "rep") return <RepDashboardPage />;
-  return <DirectorDashboardPage />;
+function BoardAliasRedirect({ entity }: { entity: "leads" | "deals" }) {
+  const [searchParams] = useSearchParams();
+  const next = searchParams.toString();
+  return <Navigate to={next ? `/${entity}?${next}` : `/${entity}`} replace />;
 }
 
 function AuthGate({ children }: { children: ReactNode }) {
@@ -81,12 +83,16 @@ export function App() {
           <Routes>
             <Route path="/photos/capture" element={<PhotoCapturePage />} />
             <Route element={<AppShell />}>
-              <Route path="/" element={<HomePage />} />
+              <Route path="/" element={<HomeDashboardPage />} />
               <Route path="/deals" element={<DealListPage />} />
+              <Route path="/deals/board" element={<BoardAliasRedirect entity="deals" />} />
+              <Route path="/deals/stages/:stageId" element={<DealStagePage />} />
               <Route path="/deals/new" element={<DealNewPage />} />
               <Route path="/deals/:id" element={<DealDetailPage />} />
               <Route path="/deals/:id/edit" element={<DealEditPage />} />
               <Route path="/leads" element={<LeadListPage />} />
+              <Route path="/leads/board" element={<BoardAliasRedirect entity="leads" />} />
+              <Route path="/leads/stages/:stageId" element={<LeadStagePage />} />
               <Route path="/leads/:id" element={<LeadDetailPage />} />
               <Route path="/properties" element={<PropertyListPage />} />
               <Route path="/properties/:id" element={<PropertyDetailPage />} />
