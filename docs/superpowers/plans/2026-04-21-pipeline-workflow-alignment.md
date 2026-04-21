@@ -127,7 +127,7 @@ Expected: FAIL with missing migration/table/seed assertions.
 
 - [ ] **Step 3: Add new enums and schema fields**
 
-Update `shared/src/types/enums.ts` with the lead-stage slugs, routing source enum values, expanded team roles, and a neutral deal pipeline disposition enum that lets every converted lead start in `Opportunity` before a downstream route is chosen.
+Update `shared/src/types/enums.ts` with the lead-stage slugs, routing source enum values, expanded team roles, and a neutral deal pipeline disposition enum that lets every converted lead start in `Opportunity` before a downstream route is chosen. Add the matching `pipelineDisposition` enum/column contract in `shared/src/schema/tenant/deals.ts` and the migration so this state is persisted instead of inferred ad hoc.
 
 ```ts
 export const LEAD_STAGE_SLUGS = [
@@ -166,8 +166,33 @@ export const DEAL_TEAM_ROLES = [
 Create `shared/src/types/workflow-gates.ts` as the single source of truth for stored field keys and labels so the lead gate engine, admin allowlist, and client UI all consume the same contract.
 
 ```ts
+export const LEAD_COMPANY_PREQUAL_FIELD_KEYS = [
+  "qualification.projectLocation",
+  "qualification.propertyName",
+  "qualification.propertyAddress",
+  "qualification.propertyCity",
+  "qualification.propertyState",
+  "qualification.unitCount",
+  "qualification.stakeholderName",
+  "qualification.stakeholderRole",
+  "qualification.projectType",
+  "qualification.scopeSummary",
+] as const;
+
+export const LEAD_VALUE_ASSIGNMENT_FIELD_KEYS = [
+  "estimatedOpportunityValue",
+  "qualification.budgetStatus",
+  "qualification.budgetQuarter",
+  "qualification.specPackageStatus",
+  "qualification.checklistStarted",
+] as const;
+
 export const LEAD_QUALIFICATION_FIELD_KEYS = [
   "qualification.projectLocation",
+  "qualification.propertyName",
+  "qualification.propertyAddress",
+  "qualification.propertyCity",
+  "qualification.propertyState",
   "qualification.unitCount",
   "qualification.stakeholderName",
   "qualification.stakeholderRole",
@@ -193,6 +218,24 @@ export const OPPORTUNITY_GATE_FIELD_KEYS = [
   "opportunity.siteVisitDecision",
   "opportunity.siteVisitCompleted",
 ] as const;
+
+export const WORKFLOW_GATE_FIELD_LABELS = {
+  estimatedOpportunityValue: "Estimated Opportunity Value",
+  "qualification.projectLocation": "Project Location",
+  "qualification.propertyName": "Property Name",
+  "qualification.propertyAddress": "Property Address",
+  "qualification.propertyCity": "Property City",
+  "qualification.propertyState": "Property State",
+  "qualification.unitCount": "Number of Units",
+  "qualification.stakeholderName": "Stakeholder Name",
+  "qualification.stakeholderRole": "Stakeholder Role",
+  "qualification.budgetStatus": "Budget Status",
+  "qualification.budgetQuarter": "Budget Quarter",
+  "qualification.projectType": "Project Type",
+  "qualification.scopeSummary": "Scope Summary",
+  "qualification.specPackageStatus": "Spec Package Status",
+  "qualification.checklistStarted": "Project Checklist Started",
+} as const;
 ```
 
 Create focused schema tables for lead qualification payloads and routing history rather than overloading `description`.
@@ -248,7 +291,7 @@ Create `migrations/0028_pipeline_workflow_alignment.sql` to:
 
 - seed the ordered lead stages
 - seed the neutral `Opportunity` stage used by all newly converted leads
-- add any new lead/deal columns
+- add any new lead/deal columns, including persisted `deals.pipeline_disposition`
 - extend the `deal_team_role` enum with `client_services` and `operations`
 - create the new tenant tables
 - explicitly avoid auto-rewriting existing active `dd` deal rows in this migration
@@ -330,6 +373,13 @@ it("blocks conversion readiness when partial scoping subset is incomplete", asyn
   const result = await validateLeadStageGate(tenantDb as never, "lead-1", "stage-qualified-opportunity", "rep", "rep-1");
   expect(result.allowed).toBe(false);
   expect(result.missingRequirements.fields).toContain("scopingSubset.projectOverview");
+});
+
+it("requires property and checklist metadata before pre-qual value assignment", async () => {
+  const result = await validateLeadStageGate(tenantDb as never, "lead-1", "stage-pre-qual-value", "rep", "rep-1");
+  expect(result.allowed).toBe(false);
+  expect(result.missingRequirements.fields).toContain("qualification.propertyAddress");
+  expect(result.missingRequirements.fields).toContain("qualification.checklistStarted");
 });
 ```
 
@@ -416,15 +466,9 @@ Create `server/src/modules/leads/stage-gate.ts` mirroring the deal-stage preflig
 
 ```ts
 const LEAD_STAGE_REQUIREMENTS: Record<string, string[]> = {
-  company_pre_qualified: ["companyId", "propertyId", "source", "qualification.stakeholderName"],
-  scoping_in_progress: ["qualification.existingCustomerDecision"],
-  pre_qual_value_assigned: [
-    "qualification.projectLocation",
-    "qualification.unitCount",
-    "qualification.budgetStatus",
-    "qualification.projectType",
-    "qualification.scopeSummary",
-  ],
+  company_pre_qualified: ["companyId", "propertyId", "source", ...LEAD_COMPANY_PREQUAL_FIELD_KEYS],
+  scoping_in_progress: [...LEAD_COMPANY_PREQUAL_FIELD_KEYS],
+  pre_qual_value_assigned: [...LEAD_COMPANY_PREQUAL_FIELD_KEYS, ...LEAD_VALUE_ASSIGNMENT_FIELD_KEYS],
   lead_go_no_go: ["estimatedOpportunityValue"],
   qualified_for_opportunity: [
     "goDecision",
@@ -569,7 +613,7 @@ const deal = await deps.createDeal(tenantDb, {
 
 - [ ] **Step 4: Implement the routing service**
 
-Create `server/src/modules/deals/routing-service.ts` with one canonical threshold function, a route-review writer, and stage-resolution helpers that move a deal out of neutral `Opportunity` into the first configured stage of either downstream family.
+Create `server/src/modules/deals/routing-service.ts` with one canonical threshold function, a route-review writer, and stage-resolution helpers that move a deal out of neutral `Opportunity` into the first configured stage of either downstream family. Make this service the only writer of `workflowRoute` and `pipelineDisposition`.
 
 ```ts
 export function routeForAmount(amount: string) {
@@ -643,6 +687,14 @@ router.post("/:id/routing-review", async (req, res, next) => {
   await req.commitTransaction!();
   res.json(result);
 });
+```
+
+In `server/src/modules/deals/service.ts` and the generic `PATCH /api/deals/:id` flow, explicitly reject direct writes to `workflowRoute` or `pipelineDisposition` so all routing changes go through `/deals/:id/routing-review`.
+
+```ts
+if ("workflowRoute" in input || "pipelineDisposition" in input) {
+  throw new AppError(400, "Use /api/deals/:id/routing-review for route changes");
+}
 ```
 
 - [ ] **Step 5: Tighten deal-side Opportunity and scoping gates**
@@ -752,15 +804,14 @@ export const STAGE_GATE_ALLOWED_FIELDS = [
 
 - [ ] **Step 5: Update admin UI to present family-aware sections**
 
-Make `PipelineConfigPage` render separate sections or filters for `Lead`, `Deals`, and `Service`, and include the new lead gate option labels in `client/src/lib/lead-stage-options.ts`.
+Make `PipelineConfigPage` render separate sections or filters for `Lead`, `Deals`, and `Service`, and have `client/src/lib/lead-stage-options.ts` derive all labels/options from `WORKFLOW_GATE_FIELD_LABELS` plus the exported field groups in `shared/src/types/workflow-gates.ts` instead of hardcoded local copies.
 
 ```ts
-export const LEAD_STAGE_GATE_FIELD_OPTIONS: StageGateOption[] = [
-  { value: "estimatedOpportunityValue", label: "Estimated Opportunity Value" },
-  { value: "qualification.stakeholderRole", label: "Stakeholder Role" },
-  { value: "qualification.budgetStatus", label: "Budget Status" },
-  { value: "scopingSubset.projectOverview", label: "Scoping Subset: Project Overview" },
-];
+export const LEAD_STAGE_GATE_FIELD_OPTIONS = buildStageGateOptions([
+  ...LEAD_COMPANY_PREQUAL_FIELD_KEYS,
+  ...LEAD_VALUE_ASSIGNMENT_FIELD_KEYS,
+  ...LEAD_SCOPING_SUBSET_FIELD_KEYS,
+], WORKFLOW_GATE_FIELD_LABELS);
 ```
 
 - [ ] **Step 6: Run tests to verify they pass**
@@ -840,10 +891,9 @@ export async function preflightLeadStageCheck(leadId: string, targetStageId: str
   });
 }
 
-export async function convertLeadToOpportunity(leadId: string, input?: { workflowRoute?: WorkflowRoute }) {
+export async function convertLeadToOpportunity(leadId: string) {
   return api<{ lead: LeadRecord; deal: Deal }>(`/leads/${leadId}/convert`, {
     method: "POST",
-    json: input ?? {},
   });
 }
 ```
@@ -1023,13 +1073,14 @@ git commit -m "feat: expose opportunity routing and handoff visibility"
 - Create: `client/e2e/pipeline-workflow-alignment.spec.ts`
 - Test: `client/e2e/pipeline-workflow-alignment.spec.ts`
 
-- [ ] **Step 1: Write the failing Playwright setup test scaffold**
+- [ ] **Step 1: Write the Playwright setup scaffold**
 
 Add the missing Playwright infrastructure first:
 
 - install `@playwright/test` in `client/package.json`
 - create `playwright.config.ts` at repo root
 - define a `webServer` that starts the client with `npm run dev --workspace=client -- --host 127.0.0.1 --port 4173`
+- add a tagged `@bootstrap` smoke test in `client/e2e/pipeline-workflow-alignment.spec.ts` that only verifies the Leads page shell loads under the configured test runner
 
 ```ts
 export default defineConfig({
@@ -1047,17 +1098,17 @@ export default defineConfig({
 });
 ```
 
-- [ ] **Step 2: Run Playwright bootstrap to verify it fails**
+- [ ] **Step 2: Run Playwright bootstrap to verify it boots**
 
 Run:
 
 ```bash
 npm install --workspace=client -D @playwright/test
 npx playwright install chromium
-npx playwright test --list
+npx playwright test client/e2e/pipeline-workflow-alignment.spec.ts --grep @bootstrap
 ```
 
-Expected: bootstrap completes, test listing fails until the new scenario exists.
+Expected: PASS with the dev server booting, Chromium launching, and the tagged smoke test confirming the Playwright config is wired correctly.
 
 - [ ] **Step 3: Write the failing Playwright scenario**
 
