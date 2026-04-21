@@ -74,14 +74,20 @@ function extractSqlText(value: unknown): string {
 }
 
 function createExecuteImplementation(options: {
+  offices: Array<{ id: string; name: string; slug: string }>;
   owners: Array<{ id: string; email?: string | null }>;
   activeUsers: Array<{ id: string; email: string; displayName: string; officeId: string; isActive: boolean }>;
   allUsers: Array<{ id: string; email: string; displayName: string; officeId: string; isActive: boolean }>;
   dealRowsByOwner: Record<string, Array<{ id: string; assignedRepId: string; hubspotOwnerEmail: string | null; ownershipSyncStatus: string | null; unassignedReasonCode: string | null }>>;
   leadRowsByOwner: Record<string, Array<{ id: string; assignedRepId: string; hubspotOwnerEmail: string | null; ownershipSyncStatus: string | null; unassignedReasonCode: string | null }>>;
+  tenantRowsBySchema?: Record<string, {
+    dealRowsByOwner: Record<string, Array<{ id: string; assignedRepId: string; hubspotOwnerEmail: string | null; ownershipSyncStatus: string | null; unassignedReasonCode: string | null }>>;
+    leadRowsByOwner: Record<string, Array<{ id: string; assignedRepId: string; hubspotOwnerEmail: string | null; ownershipSyncStatus: string | null; unassignedReasonCode: string | null }>>;
+  }>;
 }) {
   const updateQueries: string[] = [];
   const writeQueries: string[] = [];
+  let currentSchema: string | null = null;
 
   dbTransactionMock.mockImplementation(async (callback: (client: { execute: typeof dbExecuteMock }) => Promise<unknown>) => {
     await callback({ execute: dbExecuteMock });
@@ -90,12 +96,41 @@ function createExecuteImplementation(options: {
   dbExecuteMock.mockImplementation(async (query: unknown) => {
     const text = extractSqlText(query).replace(/\s+/g, " ").trim().toLowerCase();
 
+    if (text.includes("set_config('search_path'")) {
+      const schemaMatch = extractSqlText(query).match(/office_[a-z0-9_-]+,public/i);
+      currentSchema = schemaMatch ? schemaMatch[0].split(",")[0] : null;
+      return { rows: [] };
+    }
+
+    if (text.includes("from public.offices")) {
+      return {
+        rows: options.offices.map((office) => ({
+          id: office.id,
+          name: office.name,
+          slug: office.slug,
+        })),
+      };
+    }
+
+    const schemaRows =
+      currentSchema && options.tenantRowsBySchema?.[currentSchema]
+        ? options.tenantRowsBySchema[currentSchema]
+        : undefined;
+
     if (text.includes("select distinct hubspot_owner_id") && text.includes("from deals")) {
-      return { rows: options.owners.map((owner) => ({ hubspot_owner_id: owner.id })) };
+      if (!currentSchema) throw new Error("search_path was not set before tenant query");
+      const rowsByOwner = schemaRows?.dealRowsByOwner ?? options.dealRowsByOwner;
+      return {
+        rows: Object.keys(rowsByOwner).map((ownerId) => ({ hubspot_owner_id: ownerId })),
+      };
     }
 
     if (text.includes("select distinct hubspot_owner_id") && text.includes("from leads")) {
-      return { rows: options.owners.map((owner) => ({ hubspot_owner_id: owner.id })) };
+      if (!currentSchema) throw new Error("search_path was not set before tenant query");
+      const rowsByOwner = schemaRows?.leadRowsByOwner ?? options.leadRowsByOwner;
+      return {
+        rows: Object.keys(rowsByOwner).map((ownerId) => ({ hubspot_owner_id: ownerId })),
+      };
     }
 
     if (text.includes("from users u") && text.includes("where u.is_active = true")) {
@@ -123,9 +158,11 @@ function createExecuteImplementation(options: {
     }
 
     if (text.includes("from deals") && text.includes("where is_active = true") && text.includes("hubspot_owner_id =")) {
+      if (!currentSchema) throw new Error("search_path was not set before tenant query");
+      const rowsByOwner = schemaRows?.dealRowsByOwner ?? options.dealRowsByOwner;
       const ownerId = extractSqlText(query).match(/hubspot_owner_id = ([^ \n]+)/i)?.[1]?.replace(/['"]/g, "");
       return {
-        rows: (options.dealRowsByOwner[ownerId ?? ""] ?? []).map((row) => ({
+        rows: (rowsByOwner[ownerId ?? ""] ?? []).map((row) => ({
           id: row.id,
           assigned_rep_id: row.assignedRepId,
           hubspot_owner_email: row.hubspotOwnerEmail,
@@ -136,9 +173,11 @@ function createExecuteImplementation(options: {
     }
 
     if (text.includes("from leads") && text.includes("where is_active = true") && text.includes("hubspot_owner_id =")) {
+      if (!currentSchema) throw new Error("search_path was not set before tenant query");
+      const rowsByOwner = schemaRows?.leadRowsByOwner ?? options.leadRowsByOwner;
       const ownerId = extractSqlText(query).match(/hubspot_owner_id = ([^ \n]+)/i)?.[1]?.replace(/['"]/g, "");
       return {
-        rows: (options.leadRowsByOwner[ownerId ?? ""] ?? []).map((row) => ({
+        rows: (rowsByOwner[ownerId ?? ""] ?? []).map((row) => ({
           id: row.id,
           assigned_rep_id: row.assignedRepId,
           hubspot_owner_email: row.hubspotOwnerEmail,
@@ -231,6 +270,7 @@ describe("ownership sync service", () => {
 
   it("counts matched, unmatched, conflict, and unchanged rows on dry run without mutating records", async () => {
     const { updateQueries, writeQueries } = createExecuteImplementation({
+      offices: [{ id: "office-1", name: "Office One", slug: "one" }],
       owners: [
         { id: "owner-1", email: "Rep@One.com" },
         { id: "owner-2", email: "inactive@example.com" },
@@ -327,7 +367,7 @@ describe("ownership sync service", () => {
     });
     expect(updateQueries).toHaveLength(0);
     expect(writeQueries).toHaveLength(0);
-    expect(dbTransactionMock).not.toHaveBeenCalled();
+    expect(dbTransactionMock).toHaveBeenCalledOnce();
   });
 
   it("wraps apply-mode writes in a database transaction", async () => {
@@ -379,8 +419,78 @@ describe("ownership sync service", () => {
     expect(typeof transactionCallbacks[0]).toBe("function");
   });
 
+  it("switches tenant search_path for each active office during dry run", async () => {
+    const { writeQueries } = createExecuteImplementation({
+      offices: [
+        { id: "office-1", name: "Office One", slug: "one" },
+        { id: "office-2", name: "Office Two", slug: "two" },
+      ],
+      owners: [
+        { id: "owner-1", email: "rep1@one.com" },
+        { id: "owner-2", email: "rep2@two.com" },
+      ],
+      activeUsers: [
+        { id: "user-1", email: "rep1@one.com", displayName: "Rep One", officeId: "office-1", isActive: true },
+        { id: "user-2", email: "rep2@two.com", displayName: "Rep Two", officeId: "office-2", isActive: true },
+      ],
+      allUsers: [
+        { id: "user-1", email: "rep1@one.com", displayName: "Rep One", officeId: "office-1", isActive: true },
+        { id: "user-2", email: "rep2@two.com", displayName: "Rep Two", officeId: "office-2", isActive: true },
+      ],
+      tenantRowsBySchema: {
+        office_one: {
+          dealRowsByOwner: {
+            "owner-1": [
+              {
+                id: "deal-1",
+                assignedRepId: "user-old",
+                hubspotOwnerEmail: "old@example.com",
+                ownershipSyncStatus: null,
+                unassignedReasonCode: null,
+              },
+            ],
+          },
+          leadRowsByOwner: {},
+        },
+        office_two: {
+          dealRowsByOwner: {},
+          leadRowsByOwner: {
+            "owner-2": [
+              {
+                id: "lead-2",
+                assignedRepId: "user-old",
+                hubspotOwnerEmail: "old@example.com",
+                ownershipSyncStatus: null,
+                unassignedReasonCode: null,
+              },
+            ],
+          },
+        },
+      },
+      dealRowsByOwner: {},
+      leadRowsByOwner: {},
+    });
+
+    fetchAllOwnersMock.mockResolvedValue([
+      { id: "owner-1", email: "rep1@one.com" },
+      { id: "owner-2", email: "rep2@two.com" },
+    ]);
+    listActiveUsersWithOfficeAccessMock.mockResolvedValue([]);
+
+    await runOwnershipSync({ dryRun: true });
+
+    const searchPathCalls = dbExecuteMock.mock.calls
+      .map(([query]) => extractSqlText(query))
+      .filter((text) => text.toLowerCase().includes("set_config('search_path'"));
+
+    expect(searchPathCalls.some((text) => text.includes("office_one,public"))).toBe(true);
+    expect(searchPathCalls.some((text) => text.includes("office_two,public"))).toBe(true);
+    expect(writeQueries).toHaveLength(0);
+  });
+
   it("applies matched ownership and preserves manual overrides on rerun", async () => {
     const { updateQueries } = createExecuteImplementation({
+      offices: [{ id: "office-1", name: "Office One", slug: "one" }],
       owners: [
         { id: "owner-1", email: "rep@one.com" },
         { id: "owner-2" },
