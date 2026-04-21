@@ -6,6 +6,7 @@ import { AppError } from "../../middleware/error-handler.js";
 import { requireAdmin, requireDirector } from "../../middleware/rbac.js";
 import { tenantMiddleware } from "../../middleware/tenant.js";
 import { pool } from "../../db.js";
+import { getAccessibleOffices } from "../auth/service.js";
 import {
   listOffices, getOfficeById, createOffice, updateOffice,
 } from "./offices-service.js";
@@ -31,7 +32,7 @@ async function withOfficeTenantContext<T>(
   officeId: string,
   handler: (tenantDb: NonNullable<Request["tenantDb"]>) => Promise<T>
 ): Promise<T> {
-  const accessibleOffices = await getAccessibleOfficeSlugs(user.id, user.role, user.activeOfficeId ?? user.officeId);
+  const accessibleOffices = await getAccessibleOffices(user.id, user.role, user.activeOfficeId ?? user.officeId);
   const office = accessibleOffices.find((candidate) => candidate.id === officeId);
   if (!office) {
     throw new AppError(403, "Requested office is not accessible");

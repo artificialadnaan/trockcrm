@@ -17,6 +17,7 @@ const mocks = vi.hoisted(() => ({
   requireAdmin: vi.fn((_req: any, _res: any, next: any) => next()),
   requireDirector: vi.fn((_req: any, _res: any, next: any) => next()),
   runOwnershipSync: vi.fn(),
+  getAccessibleOffices: vi.fn(),
   getMyCleanupQueue: vi.fn(),
   getOfficeOwnershipQueue: vi.fn(),
   bulkReassignOwnershipQueueRows: vi.fn(),
@@ -36,6 +37,10 @@ vi.mock("../../../../server/src/middleware/auth.js", () => ({
 vi.mock("../../../../server/src/middleware/rbac.js", () => ({
   requireAdmin: mocks.requireAdmin,
   requireDirector: mocks.requireDirector,
+}));
+
+vi.mock("../../../../server/src/modules/auth/service.js", () => ({
+  getAccessibleOffices: mocks.getAccessibleOffices,
 }));
 
 vi.mock("../../../../server/src/db.js", () => ({
@@ -138,10 +143,11 @@ describe("admin ownership sync routes", () => {
     expect(mocks.runOwnershipSync).toHaveBeenCalledWith({ dryRun: false });
   });
 
-  it("routes /admin/cleanup/office through the requested office context", async () => {
-    mocks.poolQuery.mockResolvedValueOnce({
-      rows: [{ id: "office-2", name: "Office Two", slug: "office-two" }],
-    });
+  it("routes /admin/cleanup/office through a cross-office selection without a role override", async () => {
+    mocks.getAccessibleOffices.mockResolvedValue([
+      { id: "office-1", name: "Office One", slug: "office-one" },
+      { id: "office-2", name: "Office Two", slug: "office-two" },
+    ]);
     mocks.getOfficeOwnershipQueue.mockResolvedValue({
       rows: [{ recordId: "deal-1" }],
       byReason: [],
@@ -150,6 +156,7 @@ describe("admin ownership sync routes", () => {
     const response = await request(buildApp()).get("/api/admin/cleanup/office?officeId=office-2");
 
     expect(response.status).toBe(200);
+    expect(mocks.getAccessibleOffices).toHaveBeenCalledWith("admin-1", "admin", "office-1");
     expect(mocks.getOfficeOwnershipQueue).toHaveBeenCalledOnce();
     expect(mocks.getOfficeOwnershipQueue).toHaveBeenCalledWith(expect.anything(), "office-2", expect.any(Object));
   });
@@ -193,10 +200,11 @@ describe("admin ownership sync routes", () => {
     });
   });
 
-  it("routes /admin/cleanup/reassign through the requested office context", async () => {
-    mocks.poolQuery.mockResolvedValueOnce({
-      rows: [{ id: "office-2", name: "Office Two", slug: "office-two" }],
-    });
+  it("routes /admin/cleanup/reassign through a cross-office selection without a role override", async () => {
+    mocks.getAccessibleOffices.mockResolvedValue([
+      { id: "office-1", name: "Office One", slug: "office-one" },
+      { id: "office-2", name: "Office Two", slug: "office-two" },
+    ]);
     mocks.bulkReassignOwnershipQueueRows.mockResolvedValue({ updated: 1 });
 
     const response = await request(buildApp())
@@ -204,10 +212,11 @@ describe("admin ownership sync routes", () => {
       .send({
         officeId: "office-2",
         assigneeId: "rep-1",
-        rows: [{ recordType: "deal", recordId: "deal-1" }],
-      });
+      rows: [{ recordType: "deal", recordId: "deal-1" }],
+    });
 
     expect(response.status).toBe(200);
+    expect(mocks.getAccessibleOffices).toHaveBeenCalledWith("admin-1", "admin", "office-1");
     expect(mocks.bulkReassignOwnershipQueueRows).toHaveBeenCalledOnce();
     expect(mocks.bulkReassignOwnershipQueueRows).toHaveBeenCalledWith(
       expect.anything(),
