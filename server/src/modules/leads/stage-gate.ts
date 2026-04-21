@@ -6,7 +6,7 @@ import {
   LEAD_SCOPING_SUBSET_FIELD_KEYS,
   LEAD_VALUE_ASSIGNMENT_FIELD_KEYS,
   WORKFLOW_GATE_FIELD_LABELS,
-} from "../../../../shared/src/types/workflow-gates.js";
+} from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 import { getStageById } from "../pipeline/service.js";
 import { getLeadQualificationByLeadId } from "./qualification-service.js";

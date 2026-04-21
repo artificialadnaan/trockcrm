@@ -4,7 +4,7 @@ import {
   LEAD_QUALIFICATION_FIELD_KEYS,
   LEAD_SCOPING_SUBSET_FIELD_KEYS,
   OPPORTUNITY_GATE_FIELD_KEYS,
-} from "../../../../shared/src/types/workflow-gates.js";
+} from "@trock-crm/shared/types";
 import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 
