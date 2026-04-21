@@ -2,6 +2,7 @@ import { sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type { AuthenticatedUser } from "@trock-crm/shared/types";
 import type * as schema from "@trock-crm/shared/schema";
+import { pool } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { updateDeal } from "../deals/service.js";
 import { updateLead } from "../leads/service.js";
@@ -61,6 +62,12 @@ type CleanupDb = {
 
 type CleanupActor = Pick<AuthenticatedUser, "id" | "role" | "officeId" | "activeOfficeId">;
 
+type OfficeRow = {
+  id: string;
+  name: string;
+  slug: string;
+};
+
 const REASON_PRIORITY: CleanupReasonCode[] = [
   "missing_next_step",
   "missing_budget_status",
@@ -93,6 +100,41 @@ function getRows<T>(result: unknown): T[] {
     return (result as { rows: T[] }).rows;
   }
   return [];
+}
+
+async function getAccessibleOffices(actor: CleanupActor): Promise<OfficeRow[]> {
+  if (actor.role === "admin") {
+    const result = await pool.query<OfficeRow>(
+      "SELECT id, name, slug FROM public.offices WHERE is_active = true ORDER BY name"
+    );
+    return result.rows;
+  }
+
+  const result = await pool.query<OfficeRow>(
+    `SELECT DISTINCT o.id, o.name, o.slug
+     FROM public.offices o
+     WHERE o.is_active = true
+       AND (
+         o.id = $1
+         OR o.id IN (
+           SELECT office_id FROM public.user_office_access
+           WHERE user_id = $2 AND role_override IN ('director', 'admin')
+         )
+       )
+     ORDER BY o.name`,
+    [actor.activeOfficeId ?? actor.officeId, actor.id]
+  );
+
+  return result.rows;
+}
+
+async function assertOfficeAccessible(actor: CleanupActor, officeId: string): Promise<OfficeRow> {
+  const offices = await getAccessibleOffices(actor);
+  const office = offices.find((row) => row.id === officeId);
+  if (!office) {
+    throw new AppError(403, "Requested office is not accessible");
+  }
+  return office;
 }
 
 function isOlderThanDays(value: string | Date | null | undefined, days: number, now = new Date()): boolean {
@@ -235,6 +277,15 @@ async function fetchRows(
   }));
 }
 
+async function fetchQueueRowById(
+  tenantDb: CleanupDb,
+  recordType: "lead" | "deal",
+  recordId: string
+): Promise<CleanupSourceRow | null> {
+  const rows = await fetchRows(tenantDb, recordType, `AND id = '${recordId}'`);
+  return rows[0] ?? null;
+}
+
 function sortRows(rows: CleanupQueueRow[]): CleanupQueueRow[] {
   return [...rows].sort((left, right) => {
     const severityRank: Record<CleanupQueueRow["severity"], number> = { high: 0, medium: 1, low: 2 };
@@ -342,6 +393,7 @@ export async function bulkReassignOwnershipQueueRows(
   tenantDb: CleanupDb,
   actor: CleanupActor,
   input: {
+    officeId: string;
     rows: Array<{ recordType: "lead" | "deal"; recordId: string }>;
     assigneeId: string;
   }
@@ -354,11 +406,16 @@ export async function bulkReassignOwnershipQueueRows(
     throw new AppError(400, "assigneeId is required");
   }
 
+  if (!input.officeId) {
+    throw new AppError(400, "officeId is required");
+  }
+
   if (!Array.isArray(input.rows) || input.rows.length === 0) {
     throw new AppError(400, "rows are required");
   }
 
-  const officeId = actor.activeOfficeId ?? actor.officeId;
+  await assertOfficeAccessible(actor, input.officeId);
+
   const uniqueRows = new Map<string, { recordType: "lead" | "deal"; recordId: string }>();
   for (const row of input.rows) {
     uniqueRows.set(`${row.recordType}:${row.recordId}`, row);
@@ -366,8 +423,25 @@ export async function bulkReassignOwnershipQueueRows(
 
   let updated = 0;
   for (const row of uniqueRows.values()) {
+    const sourceRow = await fetchQueueRowById(tenantDb, row.recordType, row.recordId);
+    if (!sourceRow) {
+      throw new AppError(404, `Queue row not found: ${row.recordType}:${row.recordId}`);
+    }
+
+    const queueReasons = evaluateOwnershipQueueReasons(sourceRow);
+    if (queueReasons.length === 0) {
+      throw new AppError(400, `Record is not currently in the ownership queue: ${row.recordType}:${row.recordId}`);
+    }
+
     if (row.recordType === "deal") {
-      await updateDeal(tenantDb as any, row.recordId, { assignedRepId: input.assigneeId }, actor.role, actor.id, officeId);
+      await updateDeal(
+        tenantDb as any,
+        row.recordId,
+        { assignedRepId: input.assigneeId },
+        actor.role,
+        actor.id,
+        input.officeId
+      );
       await writeManualOverride(tenantDb, "deal", row.recordId);
       updated++;
       continue;
@@ -376,7 +450,7 @@ export async function bulkReassignOwnershipQueueRows(
     await updateLead(
       tenantDb as any,
       row.recordId,
-      { assignedRepId: input.assigneeId, officeId },
+      { assignedRepId: input.assigneeId, officeId: input.officeId },
       actor.role,
       actor.id
     );

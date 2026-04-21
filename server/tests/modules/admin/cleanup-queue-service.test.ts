@@ -2,6 +2,7 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 
 const updateDealMock = vi.hoisted(() => vi.fn());
 const updateLeadMock = vi.hoisted(() => vi.fn());
+const poolQueryMock = vi.hoisted(() => vi.fn());
 
 vi.mock("../../../../server/src/modules/deals/service.js", async () => {
   const actual = await vi.importActual<typeof import("../../../../server/src/modules/deals/service.js")>(
@@ -22,6 +23,12 @@ vi.mock("../../../../server/src/modules/leads/service.js", async () => {
     updateLead: updateLeadMock,
   };
 });
+
+vi.mock("../../../../server/src/db.js", () => ({
+  pool: {
+    query: poolQueryMock,
+  },
+}));
 
 import {
   bulkReassignOwnershipQueueRows,
@@ -161,6 +168,10 @@ function makeTenantDb(rowsByTable: Record<string, CleanupRowSeed[]>) {
 
     if (text.includes("from deals")) {
       const rows = rowsByTable.deals ?? [];
+      if (/(?:^|\s)id\s*=/i.test(text)) {
+        const id = extractSqlText(query).match(/id = ([^ \n]+)/i)?.[1]?.replace(/['"]/g, "");
+        return { rows: rows.filter((row) => row.id === id) };
+      }
       if (text.includes("assigned_rep_id =")) {
         const assignee = extractSqlText(query).match(/assigned_rep_id = ([^ \n]+)/i)?.[1]?.replace(/['"]/g, "");
         return { rows: rows.filter((row) => row.assignedRepId === assignee) };
@@ -173,6 +184,10 @@ function makeTenantDb(rowsByTable: Record<string, CleanupRowSeed[]>) {
 
     if (text.includes("from leads")) {
       const rows = rowsByTable.leads ?? [];
+      if (/(?:^|\s)id\s*=/i.test(text)) {
+        const id = extractSqlText(query).match(/id = ([^ \n]+)/i)?.[1]?.replace(/['"]/g, "");
+        return { rows: rows.filter((row) => row.id === id) };
+      }
       if (text.includes("assigned_rep_id =")) {
         const assignee = extractSqlText(query).match(/assigned_rep_id = ([^ \n]+)/i)?.[1]?.replace(/['"]/g, "");
         return { rows: rows.filter((row) => row.assignedRepId === assignee) };
@@ -194,6 +209,13 @@ function makeTenantDb(rowsByTable: Record<string, CleanupRowSeed[]>) {
 beforeEach(() => {
   updateDealMock.mockReset();
   updateLeadMock.mockReset();
+  poolQueryMock.mockReset();
+  poolQueryMock.mockResolvedValue({
+    rows: [
+      { id: "office-1", name: "Office One", slug: "office-one" },
+      { id: "office-2", name: "Office Two", slug: "office-two" },
+    ],
+  });
 });
 
 describe("cleanup queue service", () => {
@@ -246,7 +268,44 @@ describe("cleanup queue service", () => {
   });
 
   it("bulk reassigns rows only to active users with access to the row office", async () => {
-    const tenantDb = makeTenantDb({ deals: [], leads: [] });
+    const tenantDb = makeTenantDb({
+      deals: [
+        {
+          id: "deal-1",
+          name: "Office Deal",
+          assignedRepId: null,
+          decisionMakerName: null,
+          budgetStatus: null,
+          nextStep: null,
+          nextStepDueAt: null,
+          forecastWindow: null,
+          forecastConfidencePercent: null,
+          lastActivityAt: null,
+          companyId: null,
+          propertyId: null,
+          ownershipSyncStatus: "conflict",
+          unassignedReasonCode: "inactive_owner_match",
+        },
+      ],
+      leads: [
+        {
+          id: "lead-1",
+          name: "Office Lead",
+          assignedRepId: null,
+          decisionMakerName: null,
+          budgetStatus: null,
+          nextStep: null,
+          nextStepDueAt: null,
+          forecastWindow: null,
+          forecastConfidencePercent: null,
+          lastActivityAt: null,
+          companyId: null,
+          propertyId: null,
+          ownershipSyncStatus: "unmatched",
+          unassignedReasonCode: "owner_mapping_failure",
+        },
+      ],
+    });
     updateDealMock.mockResolvedValue({ id: "deal-1" });
     updateLeadMock.mockResolvedValue({ id: "lead-1" });
 
@@ -254,6 +313,7 @@ describe("cleanup queue service", () => {
       tenantDb as any,
       { id: "director-1", role: "director", officeId: "office-1", activeOfficeId: "office-1" } as any,
       {
+        officeId: "office-2",
         rows: [
           { recordType: "deal", recordId: "deal-1" },
           { recordType: "lead", recordId: "lead-1" },
@@ -269,15 +329,51 @@ describe("cleanup queue service", () => {
       { assignedRepId: "rep-1" },
       "director",
       "director-1",
-      "office-1"
+      "office-2"
     );
     expect(updateLeadMock).toHaveBeenCalledWith(
       tenantDb,
       "lead-1",
-      { assignedRepId: "rep-1", officeId: "office-1" },
+      { assignedRepId: "rep-1", officeId: "office-2" },
       "director",
       "director-1"
     );
     expect(tenantDb.execute).toHaveBeenCalled();
+  });
+
+  it("rejects non-queue rows before reassignment", async () => {
+    const tenantDb = makeTenantDb({
+      deals: [
+        {
+          id: "deal-99",
+          name: "Clean Deal",
+          assignedRepId: "rep-1",
+          decisionMakerName: "Taylor",
+          budgetStatus: "confirmed",
+          nextStep: "Follow up",
+          nextStepDueAt: "2026-04-21T12:00:00.000Z",
+          forecastWindow: "Q2",
+          forecastConfidencePercent: 80,
+          lastActivityAt: "2026-04-21T12:00:00.000Z",
+          companyId: "company-1",
+          propertyId: "property-1",
+          ownershipSyncStatus: "matched",
+          unassignedReasonCode: null,
+        },
+      ],
+      leads: [],
+    });
+
+    await expect(
+      bulkReassignOwnershipQueueRows(
+        tenantDb as any,
+        { id: "director-1", role: "director", officeId: "office-1", activeOfficeId: "office-1" } as any,
+        {
+          officeId: "office-2",
+          rows: [{ recordType: "deal", recordId: "deal-99" }],
+          assigneeId: "rep-1",
+        }
+      )
+    ).rejects.toThrow(/ownership queue/i);
   });
 });

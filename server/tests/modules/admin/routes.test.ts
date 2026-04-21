@@ -17,6 +17,15 @@ const mocks = vi.hoisted(() => ({
   requireAdmin: vi.fn((_req: any, _res: any, next: any) => next()),
   requireDirector: vi.fn((_req: any, _res: any, next: any) => next()),
   runOwnershipSync: vi.fn(),
+  getOfficeOwnershipQueue: vi.fn(),
+  bulkReassignOwnershipQueueRows: vi.fn(),
+  poolQuery: vi.fn(),
+  poolConnect: vi.fn(),
+  drizzle: vi.fn(),
+  tenantClient: {
+    query: vi.fn(),
+    release: vi.fn(),
+  },
 }));
 
 vi.mock("../../../../server/src/middleware/auth.js", () => ({
@@ -30,8 +39,13 @@ vi.mock("../../../../server/src/middleware/rbac.js", () => ({
 
 vi.mock("../../../../server/src/db.js", () => ({
   pool: {
-    query: vi.fn(),
+    query: mocks.poolQuery,
+    connect: mocks.poolConnect,
   },
+}));
+
+vi.mock("drizzle-orm/node-postgres", () => ({
+  drizzle: mocks.drizzle,
 }));
 
 vi.mock("../../../../server/src/modules/admin/offices-service.js", () => ({
@@ -53,6 +67,12 @@ vi.mock("../../../../server/src/modules/admin/ownership-sync-service.js", () => 
   runOwnershipSync: mocks.runOwnershipSync,
 }));
 
+vi.mock("../../../../server/src/modules/admin/cleanup-queue-service.js", () => ({
+  getMyCleanupQueue: vi.fn(),
+  getOfficeOwnershipQueue: mocks.getOfficeOwnershipQueue,
+  bulkReassignOwnershipQueueRows: mocks.bulkReassignOwnershipQueueRows,
+}));
+
 vi.mock("../../../../server/src/modules/admin/pipeline-service.js", () => ({
   listPipelineStages: vi.fn(),
   updatePipelineStage: vi.fn(),
@@ -69,6 +89,9 @@ import { adminRoutes } from "../../../../server/src/modules/admin/routes.js";
 describe("admin ownership sync routes", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.poolConnect.mockResolvedValue(mocks.tenantClient);
+    mocks.drizzle.mockReturnValue({ execute: vi.fn() });
+    mocks.tenantClient.query.mockResolvedValue({ rows: [] });
   });
 
   function buildApp() {
@@ -112,5 +135,44 @@ describe("admin ownership sync routes", () => {
     expect(mocks.authMiddleware).toHaveBeenCalledOnce();
     expect(mocks.requireAdmin).toHaveBeenCalledOnce();
     expect(mocks.runOwnershipSync).toHaveBeenCalledWith({ dryRun: false });
+  });
+
+  it("routes /admin/cleanup/office through the requested office context", async () => {
+    mocks.poolQuery.mockResolvedValueOnce({
+      rows: [{ id: "office-2", name: "Office Two", slug: "office-two" }],
+    });
+    mocks.getOfficeOwnershipQueue.mockResolvedValue({
+      rows: [{ recordId: "deal-1" }],
+      byReason: [],
+    });
+
+    const response = await request(buildApp()).get("/api/admin/cleanup/office?officeId=office-2");
+
+    expect(response.status).toBe(200);
+    expect(mocks.getOfficeOwnershipQueue).toHaveBeenCalledOnce();
+    expect(mocks.getOfficeOwnershipQueue).toHaveBeenCalledWith(expect.anything(), "office-2", expect.any(Object));
+  });
+
+  it("routes /admin/cleanup/reassign through the requested office context", async () => {
+    mocks.poolQuery.mockResolvedValueOnce({
+      rows: [{ id: "office-2", name: "Office Two", slug: "office-two" }],
+    });
+    mocks.bulkReassignOwnershipQueueRows.mockResolvedValue({ updated: 1 });
+
+    const response = await request(buildApp())
+      .post("/api/admin/cleanup/reassign")
+      .send({
+        officeId: "office-2",
+        assigneeId: "rep-1",
+        rows: [{ recordType: "deal", recordId: "deal-1" }],
+      });
+
+    expect(response.status).toBe(200);
+    expect(mocks.bulkReassignOwnershipQueueRows).toHaveBeenCalledOnce();
+    expect(mocks.bulkReassignOwnershipQueueRows).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.any(Object),
+      expect.objectContaining({ officeId: "office-2", assigneeId: "rep-1" })
+    );
   });
 });

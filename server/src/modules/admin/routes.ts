@@ -1,5 +1,8 @@
 import { Router, type Request, type Response, type NextFunction } from "express";
+import { drizzle } from "drizzle-orm/node-postgres";
+import * as schema from "@trock-crm/shared/schema";
 import { authMiddleware } from "../../middleware/auth.js";
+import { AppError } from "../../middleware/error-handler.js";
 import { requireAdmin, requireDirector } from "../../middleware/rbac.js";
 import { tenantMiddleware } from "../../middleware/tenant.js";
 import { pool } from "../../db.js";
@@ -22,6 +25,36 @@ import { getAuditLog, getAuditLogTables } from "./audit-service.js";
 
 const router = Router();
 router.use(authMiddleware);
+
+async function withOfficeTenantContext<T>(
+  user: NonNullable<Request["user"]>,
+  officeId: string,
+  handler: (tenantDb: NonNullable<Request["tenantDb"]>) => Promise<T>
+): Promise<T> {
+  const accessibleOffices = await getAccessibleOfficeSlugs(user.id, user.role, user.activeOfficeId ?? user.officeId);
+  const office = accessibleOffices.find((candidate) => candidate.id === officeId);
+  if (!office) {
+    throw new AppError(403, "Requested office is not accessible");
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SET LOCAL statement_timeout = '30s'");
+    await client.query("SELECT set_config('search_path', $1, true)", [`office_${office.slug},public`]);
+    await client.query("SELECT set_config('app.current_user_id', $1, true)", [user.id]);
+
+    const tenantDb = drizzle(client, { schema }) as NonNullable<Request["tenantDb"]>;
+    const result = await handler(tenantDb);
+    await client.query("COMMIT");
+    return result;
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Offices (admin only)
@@ -159,24 +192,33 @@ router.get("/admin/cleanup/my", tenantMiddleware, async (req: Request, res: Resp
   }
 });
 
-router.get("/admin/cleanup/office", requireDirector, tenantMiddleware, async (req: Request, res: Response, next: NextFunction) => {
+router.get("/admin/cleanup/office", requireDirector, async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const officeId = (req.query.officeId as string) ?? (req.user!.activeOfficeId ?? req.user!.officeId);
-    const result = await getOfficeOwnershipQueue(req.tenantDb!, officeId, req.user!);
-    await req.commitTransaction!();
+    const officeId = req.query.officeId as string | undefined;
+    if (!officeId) {
+      return res.status(400).json({ error: "officeId required" });
+    }
+
+    const result = await withOfficeTenantContext(req.user!, officeId, async (tenantDb) =>
+      getOfficeOwnershipQueue(tenantDb!, officeId, req.user!)
+    );
     return res.json({ rows: result.rows });
   } catch (err) {
     return next(err);
   }
 });
 
-router.post("/admin/cleanup/reassign", requireDirector, tenantMiddleware, async (req: Request, res: Response, next: NextFunction) => {
+router.post("/admin/cleanup/reassign", requireDirector, async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { rows, assigneeId } = req.body as {
+    const { officeId, rows, assigneeId } = req.body as {
+      officeId: string;
       rows: Array<{ recordType: "lead" | "deal"; recordId: string }>;
       assigneeId: string;
     };
 
+    if (!officeId) {
+      return res.status(400).json({ error: "officeId required" });
+    }
     if (!Array.isArray(rows) || rows.length === 0) {
       return res.status(400).json({ error: "rows are required" });
     }
@@ -185,11 +227,13 @@ router.post("/admin/cleanup/reassign", requireDirector, tenantMiddleware, async 
       return res.status(400).json({ error: "assigneeId is required" });
     }
 
-    const result = await bulkReassignOwnershipQueueRows(req.tenantDb!, req.user!, {
-      rows,
-      assigneeId,
-    });
-    await req.commitTransaction!();
+    const result = await withOfficeTenantContext(req.user!, officeId, async (tenantDb) =>
+      bulkReassignOwnershipQueueRows(tenantDb!, req.user!, {
+        officeId,
+        rows,
+        assigneeId,
+      })
+    );
     return res.json(result);
   } catch (err) {
     return next(err);
