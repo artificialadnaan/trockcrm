@@ -117,14 +117,16 @@ BEGIN
       'CREATE TABLE IF NOT EXISTS %I.deal_routing_history (
          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
          deal_id UUID NOT NULL REFERENCES %I.deals(id),
-         from_workflow_route workflow_route,
-         to_workflow_route workflow_route NOT NULL,
+         from_workflow_route %I.workflow_route,
+         to_workflow_route %I.workflow_route NOT NULL,
          value_source VARCHAR(80) NOT NULL,
          triggering_value NUMERIC(14,2) NOT NULL,
          reason TEXT,
          changed_by UUID NOT NULL REFERENCES public.users(id),
          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
        )',
+      schema_name,
+      schema_name,
       schema_name,
       schema_name
     );
