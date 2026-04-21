@@ -15,7 +15,12 @@ vi.mock("@/lib/api", () => ({
 
 function renderTable(rows: any[], onRefresh = vi.fn().mockResolvedValue(undefined)) {
   return renderToStaticMarkup(
-    <EstimatePricingReviewTable dealId="deal-1" rows={rows} onRefresh={onRefresh} />
+    <EstimatePricingReviewTable
+      dealId="deal-1"
+      rows={rows}
+      onRefresh={onRefresh}
+      onPromoteLocalCatalog={vi.fn()}
+    />
   );
 }
 
@@ -78,6 +83,7 @@ describe("EstimatePricingReviewTable", () => {
     expect(html).toContain("Override");
     expect(html).toContain("Reject");
     expect(html).toContain("Pending review");
+    expect(html).toContain("Promote to local catalog");
   });
 
   it("posts pricing review actions then refreshes", async () => {

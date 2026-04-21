@@ -4,6 +4,7 @@ import { EstimatingWorkflowShell } from "./estimating-workflow-shell";
 
 const mocks = vi.hoisted(() => ({
   activePanel: null as string | null,
+  manualDialogOpen: null as boolean | null,
 }));
 
 vi.mock("react", async (importOriginal) => {
@@ -16,10 +17,23 @@ vi.mock("react", async (importOriginal) => {
         return [mocks.activePanel as T, vi.fn()] as const;
       }
 
+      if (mocks.manualDialogOpen !== null && initialState === false) {
+        return [mocks.manualDialogOpen as T, vi.fn()] as const;
+      }
+
       return actual.useState(initialState);
     },
   };
 });
+
+vi.mock("@/components/ui/dialog", () => ({
+  Dialog: ({ children }: { children: any }) => <div>{children}</div>,
+  DialogContent: ({ children }: { children: any }) => <div>{children}</div>,
+  DialogDescription: ({ children }: { children: any }) => <div>{children}</div>,
+  DialogFooter: ({ children }: { children: any }) => <div>{children}</div>,
+  DialogHeader: ({ children }: { children: any }) => <div>{children}</div>,
+  DialogTitle: ({ children }: { children: any }) => <div>{children}</div>,
+}));
 
 vi.mock("./estimate-extraction-review-table", () => ({
   EstimateExtractionReviewTable: ({ onRefresh }: { onRefresh?: unknown }) => (
@@ -54,6 +68,7 @@ vi.mock("./estimate-pricing-review-table", () => ({
 
 afterEach(() => {
   mocks.activePanel = null;
+  mocks.manualDialogOpen = null;
   vi.restoreAllMocks();
 });
 
@@ -112,6 +127,7 @@ describe("EstimatingWorkflowShell", () => {
 
   it("shows promote-to-estimate gating when the workflow is not ready", () => {
     mocks.activePanel = "pricing";
+    mocks.manualDialogOpen = true;
 
     const html = renderToStaticMarkup(
       <EstimatingWorkflowShell
@@ -125,5 +141,7 @@ describe("EstimatingWorkflowShell", () => {
     expect(html).toContain("Promote to estimate");
     expect(html).toContain("Disabled");
     expect(html).toContain("Needs review");
+    expect(html).toContain("Add manual estimate row");
+    expect(html).toContain("Free-text manual row");
   });
 });

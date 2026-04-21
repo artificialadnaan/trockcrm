@@ -234,6 +234,7 @@ export function EstimatingWorkflowShell({
               onFocusRow={setSelectedPricingRowId}
               onOpenManualAdd={() => setManualAddOpen(true)}
               onPromoteToEstimate={handlePromoteToEstimate}
+              onPromoteLocalCatalog={handlePromoteLocalCatalog}
             />
 
             <EstimateRecommendationOptionsPanel

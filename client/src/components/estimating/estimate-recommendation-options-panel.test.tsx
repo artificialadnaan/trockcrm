@@ -4,6 +4,7 @@ import {
   EstimateRecommendationOptionsPanel,
   runEstimatePricingReviewStateAction,
 } from "./estimate-recommendation-options-panel";
+import { EstimateManualRowDialog } from "./estimate-manual-row-dialog";
 import {
   runEstimateManualRowCreateAction,
 } from "./estimate-manual-row-dialog";
@@ -14,6 +15,15 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("@/lib/api", () => ({
   api: mocks.apiMock,
+}));
+
+vi.mock("@/components/ui/dialog", () => ({
+  Dialog: ({ children }: { children: any }) => <div>{children}</div>,
+  DialogContent: ({ children }: { children: any }) => <div>{children}</div>,
+  DialogDescription: ({ children }: { children: any }) => <div>{children}</div>,
+  DialogFooter: ({ children }: { children: any }) => <div>{children}</div>,
+  DialogHeader: ({ children }: { children: any }) => <div>{children}</div>,
+  DialogTitle: ({ children }: { children: any }) => <div>{children}</div>,
 }));
 
 describe("EstimateRecommendationOptionsPanel", () => {
@@ -80,6 +90,31 @@ describe("EstimateRecommendationOptionsPanel", () => {
     expect(html).toContain("Promote to local catalog");
     expect(html).toContain("Evidence");
     expect(html).toContain("Best match for the selected extraction");
+  });
+
+  it("renders the manual add dialog with catalog-first and free-text controls", () => {
+    const html = renderToStaticMarkup(
+      <EstimateManualRowDialog
+        dealId="deal-1"
+        open
+        onOpenChange={vi.fn()}
+        onSubmitted={vi.fn()}
+        initialValues={{
+          label: "Walk-in door kit",
+          quantity: "2",
+          unit: "ea",
+          unitPrice: "125.00",
+          notes: "Estimator note",
+        }}
+      />
+    );
+
+    expect(html).toContain("Add manual estimate row");
+    expect(html).toContain("Free-text manual row");
+    expect(html).toContain("Catalog option");
+    expect(html).toContain("Walk-in door kit");
+    expect(html).toContain("Estimator note");
+    expect(html).toContain("Add row");
   });
 
   it("posts review-state actions through the workbench helper", async () => {

@@ -175,6 +175,7 @@ export function EstimatePricingReviewTable({
   onFocusRow,
   onOpenManualAdd,
   onPromoteToEstimate,
+  onPromoteLocalCatalog,
 }: {
   dealId: string;
   rows: PricingReviewRow[];
@@ -183,12 +184,14 @@ export function EstimatePricingReviewTable({
   onFocusRow?: (rowId: string) => void;
   onOpenManualAdd?: () => void;
   onPromoteToEstimate?: () => void;
+  onPromoteLocalCatalog?: (rowId: string) => Promise<void> | void;
 }) {
   const [selectedRowId, setSelectedRowId] = useState<string | null>(rows[0]?.id ?? null);
   const [pendingAction, setPendingAction] = useState<string | null>(null);
 
   void onOpenManualAdd;
   void onPromoteToEstimate;
+  void onPromoteLocalCatalog;
 
   const selectedRow = rows.find((row) => row.id === selectedRowId) ?? rows[0] ?? null;
 
@@ -463,10 +466,22 @@ export function EstimatePricingReviewTable({
                                   alternateOptionId: option.id,
                                 })
                               }
-                            >
+                              >
                               Switch {option.optionLabel}
                             </Button>
                           ))}
+                          {(row.catalogBacking === "local_catalog" ||
+                            row.promotedLocalCatalogItemId ||
+                            row.selectedSourceType === "catalog_option") &&
+                          onPromoteLocalCatalog ? (
+                            <Button
+                              size="xs"
+                              variant="outline"
+                              onClick={() => onPromoteLocalCatalog(row.id)}
+                            >
+                              Promote to local catalog
+                            </Button>
+                          ) : null}
                         </div>
                       </td>
                     </tr>
