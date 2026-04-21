@@ -75,6 +75,9 @@ import {
   promoteApprovedRecommendationsToEstimate,
 } from "../estimating/draft-estimate-service.js";
 import {
+  updateEstimatePricingRecommendationReviewState,
+} from "../estimating/workbench-service.js";
+import {
   answerEstimatingCopilotQuestion,
   buildEstimatingCopilotContext,
   getEstimatingWorkflowState,
@@ -959,6 +962,29 @@ router.post("/:id/estimating/pricing-recommendations/:recommendationId/approve",
   }
 });
 
+router.post(
+  "/:id/estimating/pricing-recommendations/:recommendationId/review-state",
+  async (req, res, next) => {
+    try {
+      const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+      if (!deal) throw new AppError(404, "Deal not found");
+
+      const result = await updateEstimatePricingRecommendationReviewState({
+        tenantDb: req.tenantDb! as any,
+        dealId: req.params.id,
+        recommendationId: req.params.recommendationId,
+        userId: req.user!.id,
+        input: req.body,
+      });
+
+      await req.commitTransaction!();
+      res.status(200).json(result);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
 router.post("/:id/estimating/promote", async (req, res, next) => {
   try {
     const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
@@ -977,7 +1003,7 @@ router.post("/:id/estimating/promote", async (req, res, next) => {
       throw new AppError(400, "At least one approved recommendation is required before promotion");
     }
 
-    await promoteApprovedRecommendationsToEstimate({
+    const result = await promoteApprovedRecommendationsToEstimate({
       tenantDb: req.tenantDb! as any,
       dealId: req.params.id,
       generationRunId: req.body.generationRunId,
@@ -985,7 +1011,7 @@ router.post("/:id/estimating/promote", async (req, res, next) => {
     });
 
     await req.commitTransaction!();
-    res.status(200).json({ ok: true });
+    res.status(200).json(result);
   } catch (err) {
     next(err);
   }

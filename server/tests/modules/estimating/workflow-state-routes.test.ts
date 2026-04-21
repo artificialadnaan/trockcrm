@@ -45,6 +45,20 @@ const pricingReviewServiceMocks = vi.hoisted(() => ({
 
 vi.mock("../../../src/modules/estimating/pricing-review-service.js", () => pricingReviewServiceMocks);
 
+const draftEstimateServiceMocks = vi.hoisted(() => ({
+  approveEstimateRecommendation: vi.fn(),
+  listApprovedRecommendationIdsForRun: vi.fn(),
+  promoteApprovedRecommendationsToEstimate: vi.fn(),
+}));
+
+vi.mock("../../../src/modules/estimating/draft-estimate-service.js", () => draftEstimateServiceMocks);
+
+const estimatingWorkbenchServiceMocks = vi.hoisted(() => ({
+  updateEstimatePricingRecommendationReviewState: vi.fn(),
+}));
+
+vi.mock("../../../src/modules/estimating/workbench-service.js", () => estimatingWorkbenchServiceMocks);
+
 const documentServiceMocks = vi.hoisted(() => ({
   createEstimateSourceDocument: vi.fn(),
   enqueueEstimateDocumentOcrJob: vi.fn(),
@@ -526,5 +540,99 @@ describe("estimating workflow routes", () => {
       })
     );
     expect(res.body.recommendation.status).toBe("overridden");
+  });
+
+  it.each([
+    {
+      action: "accept_recommended",
+      body: {},
+      eventType: "accepted_recommended",
+      status: "approved",
+    },
+    {
+      action: "accept_manual_row",
+      body: {},
+      eventType: "accepted_manual_row",
+      status: "approved",
+    },
+    {
+      action: "switch_to_alternate",
+      body: { alternateOptionId: "option-2" },
+      eventType: "switched_to_alternate",
+      status: "approved",
+    },
+    {
+      action: "override",
+      body: {
+        recommendedUnitPrice: "95.00",
+        recommendedTotalPrice: "285.00",
+        reason: "field conditions changed",
+      },
+      eventType: "overridden",
+      status: "overridden",
+    },
+    {
+      action: "reject",
+      body: { reason: "not viable" },
+      eventType: "rejected",
+      status: "rejected",
+    },
+    {
+      action: "pending_review",
+      body: {},
+      eventType: "pending_review",
+      status: "pending_review",
+    },
+  ])("updates review state for $action", async ({ action, body, eventType, status }) => {
+    estimatingWorkbenchServiceMocks.updateEstimatePricingRecommendationReviewState.mockResolvedValue({
+      recommendation: { id: "rec-9", status },
+      reviewEvent: { id: "evt-9", eventType },
+    });
+
+    const { res } = await invokeRoute("post", "/:id/estimating/pricing-recommendations/:recommendationId/review-state", {
+      params: { id: "deal-1", recommendationId: "rec-9" },
+      body: {
+        action,
+        ...body,
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(estimatingWorkbenchServiceMocks.updateEstimatePricingRecommendationReviewState).toHaveBeenCalledWith(
+      expect.objectContaining({
+        dealId: "deal-1",
+        recommendationId: "rec-9",
+        userId: "user-1",
+        input: expect.objectContaining({
+          action,
+          ...body,
+        }),
+      })
+    );
+    expect(res.body.recommendation.status).toBe(status);
+  });
+
+  it("returns row-level promotion errors when duplicate recommendations are blocked", async () => {
+    const rowErrors = [{ recommendationId: "rec-dup-1", code: "duplicate_blocked", message: "Blocked by a duplicate group" }];
+    draftEstimateServiceMocks.listApprovedRecommendationIdsForRun.mockResolvedValue(["rec-dup-1"]);
+    draftEstimateServiceMocks.promoteApprovedRecommendationsToEstimate.mockResolvedValue({
+      promotedRecommendationIds: [],
+      rowErrors,
+    });
+
+    const { res } = await invokeRoute("post", "/:id/estimating/promote", {
+      params: { id: "deal-1" },
+      body: { generationRunId: "run-1" },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(draftEstimateServiceMocks.promoteApprovedRecommendationsToEstimate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        dealId: "deal-1",
+        generationRunId: "run-1",
+        approvedRecommendationIds: ["rec-dup-1"],
+      })
+    );
+    expect(res.body.rowErrors).toEqual(rowErrors);
   });
 });

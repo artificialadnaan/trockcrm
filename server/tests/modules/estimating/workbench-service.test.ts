@@ -199,4 +199,95 @@ describe("buildEstimatingWorkbenchState", () => {
       generationRunIds: [],
     });
   });
+
+  it("groups explicit duplicates by section, auto-suppresses inferred rows, and blocks promotion", async () => {
+    const tenantDb = makeTenantDb([
+      [{ id: "doc-1", activeParseRunId: "run-1", ocrStatus: "completed" }],
+      [
+        {
+          id: "ext-1",
+          documentId: "doc-1",
+          status: "approved",
+          metadataJson: { sourceParseRunId: "run-1", activeArtifact: true },
+        },
+      ],
+      [{ id: "match-1", extractionId: "ext-1", status: "selected" }],
+      [
+        {
+          id: "rec-1",
+          extractionMatchId: "match-1",
+          status: "approved",
+          createdByRunId: "run-1",
+          sourceType: "explicit",
+          normalizedIntent: "parapet flashing",
+          sourceRowIdentity: "roof:parapet-1",
+          sectionName: "Roof",
+        },
+        {
+          id: "rec-2",
+          extractionMatchId: "match-1",
+          status: "approved",
+          createdByRunId: "run-1",
+          sourceType: "explicit",
+          normalizedIntent: "parapet flashing",
+          sourceRowIdentity: "roof:parapet-2",
+          sectionName: "Roof",
+        },
+        {
+          id: "rec-3",
+          extractionMatchId: "match-1",
+          status: "approved",
+          createdByRunId: "run-1",
+          sourceType: "inferred",
+          normalizedIntent: "parapet flashing",
+          sourceRowIdentity: "roof:parapet-3",
+          sectionName: "Roof",
+        },
+      ],
+      [],
+    ]);
+
+    const state = await buildEstimatingWorkbenchState(tenantDb, "deal-1");
+
+    expect(state.summary.pricing).toEqual({
+      total: 3,
+      pending: 0,
+      approved: 3,
+      overridden: 0,
+      rejected: 0,
+      readyToPromote: 0,
+    });
+    expect(state.promotionReadiness).toEqual({
+      canPromote: false,
+      generationRunIds: [],
+    });
+    expect(state.pricingRows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "rec-1",
+          duplicateGroupKey: "Roof::parapet flashing",
+          duplicateGroupBlocked: true,
+          suppressedByDuplicateGroup: false,
+          promotable: false,
+          reviewState: "approved",
+        }),
+        expect.objectContaining({
+          id: "rec-2",
+          duplicateGroupKey: "Roof::parapet flashing",
+          duplicateGroupBlocked: true,
+          suppressedByDuplicateGroup: false,
+          promotable: false,
+          reviewState: "approved",
+        }),
+        expect.objectContaining({
+          id: "rec-3",
+          duplicateGroupKey: "Roof::parapet flashing",
+          duplicateGroupBlocked: true,
+          suppressedByDuplicateGroup: true,
+          promotable: false,
+          reviewState: "approved",
+        }),
+      ])
+    );
+  });
 });

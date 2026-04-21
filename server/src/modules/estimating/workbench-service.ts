@@ -1,20 +1,73 @@
-import { desc, eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import {
   estimateExtractions,
   estimateExtractionMatches,
+  estimatePricingRecommendationOptions,
   estimatePricingRecommendations,
   estimateReviewEvents,
   estimateSourceDocuments,
 } from "@trock-crm/shared/schema";
+import { AppError } from "../../middleware/error-handler.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
+
+type EstimatePricingRecommendationRow = Record<string, any>;
+
+export type EstimatePricingRecommendationReviewAction =
+  | "accept_recommended"
+  | "accept_manual_row"
+  | "switch_to_alternate"
+  | "override"
+  | "reject"
+  | "pending_review";
+
+type DerivedPricingRow = EstimatePricingRecommendationRow & {
+  reviewState: "pending_review" | "approved" | "overridden" | "rejected";
+  duplicateGroupKey: string;
+  duplicateGroupBlocked: boolean;
+  suppressedByDuplicateGroup: boolean;
+  promotable: boolean;
+};
 
 type ActiveParseArtifactRow = {
   documentId: string;
   metadataJson?: unknown;
 };
+
+function normalizeScopeLabel(value: unknown, fallback: string) {
+  if (typeof value !== "string") return fallback;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : fallback;
+}
+
+function normalizeLookupKey(value: unknown, fallback: string) {
+  if (typeof value !== "string") return fallback;
+  const trimmed = value.trim().toLowerCase();
+  return trimmed.length > 0 ? trimmed : fallback;
+}
+
+function getPricingRowSectionName(row: EstimatePricingRecommendationRow) {
+  return normalizeScopeLabel(
+    row.sectionName ?? row.divisionHint ?? row.evidenceJson?.sectionName,
+    "Generated Estimate"
+  );
+}
+
+function getPricingRowIntent(row: EstimatePricingRecommendationRow) {
+  return normalizeScopeLabel(
+    row.normalizedIntent ?? row.sourceRowIdentity ?? row.manualLabel ?? row.id,
+    row.id ?? "unspecified"
+  );
+}
+
+function getReviewState(status: unknown): DerivedPricingRow["reviewState"] {
+  if (status === "overridden") return "overridden";
+  if (status === "rejected") return "rejected";
+  if (status === "pending_review" || status === "pending") return "pending_review";
+  return "approved";
+}
 
 function isActiveParseArtifact(
   row: ActiveParseArtifactRow,
@@ -35,6 +88,285 @@ function isActiveParseArtifact(
   }
 
   return (metadataJson as Record<string, unknown>).activeArtifact !== false;
+}
+
+export function deriveEstimatePricingWorkbenchRows(
+  pricingRows: EstimatePricingRecommendationRow[]
+): DerivedPricingRow[] {
+  const duplicateGroupCounts = new Map<string, number>();
+
+  for (const row of pricingRows) {
+    const sectionName = getPricingRowSectionName(row);
+    const intent = getPricingRowIntent(row);
+    const key = `${normalizeLookupKey(sectionName, "generated estimate")}::${normalizeLookupKey(intent, row.id ?? "unspecified")}`;
+    duplicateGroupCounts.set(key, (duplicateGroupCounts.get(key) ?? 0) + 1);
+  }
+
+  return pricingRows.map((row) => {
+    const sectionName = getPricingRowSectionName(row);
+    const intent = getPricingRowIntent(row);
+    const duplicateGroupKey = `${sectionName}::${intent}`;
+    const duplicateGroupCount =
+      duplicateGroupCounts.get(
+        `${normalizeLookupKey(sectionName, "generated estimate")}::${normalizeLookupKey(
+          intent,
+          row.id ?? "unspecified"
+        )}`
+      ) ?? 1;
+    const reviewState = getReviewState(row.status);
+    const isInferred = row.sourceType === "inferred";
+    const duplicateGroupBlocked = isInferred || duplicateGroupCount > 1;
+    const suppressedByDuplicateGroup = isInferred;
+    const promotable =
+      !duplicateGroupBlocked &&
+      (reviewState === "approved" || reviewState === "overridden") &&
+      !row.promotedEstimateLineItemId;
+
+    return {
+      ...row,
+      sectionName,
+      normalizedIntent: intent,
+      reviewState,
+      duplicateGroupKey,
+      duplicateGroupBlocked,
+      suppressedByDuplicateGroup,
+      promotable,
+    };
+  });
+}
+
+async function loadEstimatePricingRecommendation(
+  tenantDb: TenantDb,
+  dealId: string,
+  recommendationId: string
+) {
+  const [recommendation] = await tenantDb
+    .select()
+    .from(estimatePricingRecommendations)
+    .where(
+      and(
+        eq(estimatePricingRecommendations.id, recommendationId),
+        eq(estimatePricingRecommendations.dealId, dealId)
+      )
+    )
+    .limit(1);
+
+  return recommendation ?? null;
+}
+
+async function loadPricingRecommendationOption(
+  tenantDb: TenantDb,
+  dealId: string,
+  recommendationId: string,
+  optionId: string
+) {
+  const [option] = await tenantDb
+    .select({
+      id: estimatePricingRecommendationOptions.id,
+      recommendationId: estimatePricingRecommendationOptions.recommendationId,
+      optionLabel: estimatePricingRecommendationOptions.optionLabel,
+      optionKind: estimatePricingRecommendationOptions.optionKind,
+    })
+    .from(estimatePricingRecommendationOptions)
+    .innerJoin(
+      estimatePricingRecommendations,
+      eq(estimatePricingRecommendationOptions.recommendationId, estimatePricingRecommendations.id)
+    )
+    .where(
+      and(
+        eq(estimatePricingRecommendations.dealId, dealId),
+        eq(estimatePricingRecommendationOptions.recommendationId, recommendationId),
+        eq(estimatePricingRecommendationOptions.id, optionId)
+      )
+    )
+    .limit(1);
+
+  return option ?? null;
+}
+
+async function insertPricingReviewEvent(
+  tenantDb: TenantDb,
+  input: {
+    dealId: string;
+    recommendationId: string;
+    userId: string;
+    eventType: string;
+    beforeJson?: Record<string, unknown>;
+    afterJson?: Record<string, unknown>;
+    reason?: string | null;
+  }
+) {
+  const [event] = await tenantDb
+    .insert(estimateReviewEvents)
+    .values({
+      dealId: input.dealId,
+      subjectType: "estimate_pricing_recommendation",
+      subjectId: input.recommendationId,
+      eventType: input.eventType,
+      userId: input.userId,
+      beforeJson: input.beforeJson ?? {},
+      afterJson: input.afterJson ?? {},
+      reason: input.reason ?? null,
+    })
+    .returning();
+
+  return event;
+}
+
+export async function updateEstimatePricingRecommendationReviewState(args: {
+  tenantDb: TenantDb;
+  dealId: string;
+  recommendationId: string;
+  userId: string;
+  input: {
+    action: EstimatePricingRecommendationReviewAction;
+    alternateOptionId?: string | null;
+    recommendedUnitPrice?: string;
+    recommendedTotalPrice?: string;
+    reason?: string | null;
+  };
+}) {
+  const existing = await loadEstimatePricingRecommendation(args.tenantDb, args.dealId, args.recommendationId);
+
+  if (!existing) {
+    throw new AppError(404, "Estimate pricing recommendation not found");
+  }
+
+  const beforeJson = {
+    status: existing.status,
+    selectedSourceType: existing.selectedSourceType ?? null,
+    selectedOptionId: existing.selectedOptionId ?? null,
+    recommendedUnitPrice: existing.recommendedUnitPrice ?? null,
+    recommendedTotalPrice: existing.recommendedTotalPrice ?? null,
+    overrideQuantity: existing.overrideQuantity ?? null,
+    overrideUnit: existing.overrideUnit ?? null,
+    overrideUnitPrice: existing.overrideUnitPrice ?? null,
+    overrideNotes: existing.overrideNotes ?? null,
+  };
+
+  let eventType = "pending_review";
+  let patch: Record<string, unknown> = {
+    updatedAt: new Date(),
+  };
+
+  switch (args.input.action) {
+    case "accept_recommended":
+      eventType = "accepted_recommended";
+      patch = {
+        ...patch,
+        status: "approved",
+        selectedSourceType: "recommended",
+        selectedOptionId: null,
+      };
+      break;
+    case "accept_manual_row":
+      eventType = "accepted_manual_row";
+      patch = {
+        ...patch,
+        status: "approved",
+        selectedSourceType: "manual",
+        selectedOptionId: null,
+      };
+      break;
+    case "switch_to_alternate":
+      if (!args.input.alternateOptionId?.trim()) {
+        throw new AppError(400, "alternateOptionId is required when switching to an alternate");
+      }
+
+      const alternateOption = await loadPricingRecommendationOption(
+        args.tenantDb,
+        args.dealId,
+        args.recommendationId,
+        args.input.alternateOptionId
+      );
+
+      if (!alternateOption) {
+        throw new AppError(404, "Estimate pricing recommendation option not found");
+      }
+
+      eventType = "switched_to_alternate";
+      patch = {
+        ...patch,
+        status: "approved",
+        selectedSourceType: "alternate",
+        selectedOptionId: alternateOption.id,
+      };
+      break;
+    case "override":
+      if (!args.input.reason?.trim()) {
+        throw new AppError(400, "Override reason is required");
+      }
+
+      eventType = "overridden";
+      patch = {
+        ...patch,
+        status: "overridden",
+        selectedSourceType: "override",
+        selectedOptionId: null,
+        recommendedUnitPrice: args.input.recommendedUnitPrice ?? existing.recommendedUnitPrice ?? null,
+        recommendedTotalPrice: args.input.recommendedTotalPrice ?? existing.recommendedTotalPrice ?? null,
+        overrideUnitPrice: args.input.recommendedUnitPrice ?? existing.overrideUnitPrice ?? null,
+        overrideNotes: args.input.reason,
+      };
+      break;
+    case "reject":
+      eventType = "rejected";
+      patch = {
+        ...patch,
+        status: "rejected",
+        selectedSourceType: null,
+        selectedOptionId: null,
+      };
+      break;
+    case "pending_review":
+      eventType = "pending_review";
+      patch = {
+        ...patch,
+        status: "pending_review",
+        selectedSourceType: null,
+        selectedOptionId: null,
+      };
+      break;
+    default:
+      throw new AppError(400, `Unsupported review action: ${args.input.action}`);
+  }
+
+  const [updated] = await args.tenantDb
+    .update(estimatePricingRecommendations)
+    .set(patch)
+    .where(
+      and(
+        eq(estimatePricingRecommendations.id, args.recommendationId),
+        eq(estimatePricingRecommendations.dealId, args.dealId)
+      )
+    )
+    .returning();
+
+  if (!updated) {
+    throw new AppError(404, "Estimate pricing recommendation not found");
+  }
+
+  const reviewEvent = await insertPricingReviewEvent(args.tenantDb, {
+    dealId: args.dealId,
+    recommendationId: args.recommendationId,
+    userId: args.userId,
+    eventType,
+    beforeJson,
+    afterJson: {
+      status: updated.status,
+      selectedSourceType: updated.selectedSourceType ?? null,
+      selectedOptionId: updated.selectedOptionId ?? null,
+      recommendedUnitPrice: updated.recommendedUnitPrice ?? null,
+      recommendedTotalPrice: updated.recommendedTotalPrice ?? null,
+      overrideQuantity: updated.overrideQuantity ?? null,
+      overrideUnit: updated.overrideUnit ?? null,
+      overrideUnitPrice: updated.overrideUnitPrice ?? null,
+      overrideNotes: updated.overrideNotes ?? null,
+    },
+    reason: args.input.reason ?? null,
+  });
+
+  return { recommendation: updated, reviewEvent };
 }
 
 export async function buildEstimatingWorkbenchState(tenantDb: TenantDb, dealId: string) {
@@ -93,6 +425,8 @@ export async function buildEstimatingWorkbenchState(tenantDb: TenantDb, dealId: 
   const activeMatchRows = matchRows.filter((row) => activeExtractionIds.has(row.extractionId));
   const activeMatchIds = new Set(activeMatchRows.map((row) => row.id));
   const activePricingRows = pricingRows.filter((row) => activeMatchIds.has(row.extractionMatchId));
+  const derivedPricingRows = deriveEstimatePricingWorkbenchRows(activePricingRows as EstimatePricingRecommendationRow[]);
+  const promotablePricingRows = derivedPricingRows.filter((row) => row.promotable);
 
   const documentsSummary = {
     total: documents.length,
@@ -115,16 +449,12 @@ export async function buildEstimatingWorkbenchState(tenantDb: TenantDb, dealId: 
     rejected: activeMatchRows.filter((row) => row.status === "rejected").length,
   };
 
-  const promotablePricingRows = activePricingRows.filter(
-    (row) => row.status === "approved" || row.status === "overridden"
-  );
-
   const pricingSummary = {
-    total: activePricingRows.length,
-    pending: activePricingRows.filter((row) => row.status === "pending").length,
-    approved: activePricingRows.filter((row) => row.status === "approved").length,
-    overridden: activePricingRows.filter((row) => row.status === "overridden").length,
-    rejected: activePricingRows.filter((row) => row.status === "rejected").length,
+    total: derivedPricingRows.length,
+    pending: derivedPricingRows.filter((row) => row.reviewState === "pending_review").length,
+    approved: derivedPricingRows.filter((row) => row.reviewState === "approved").length,
+    overridden: derivedPricingRows.filter((row) => row.reviewState === "overridden").length,
+    rejected: derivedPricingRows.filter((row) => row.reviewState === "rejected").length,
     readyToPromote: promotablePricingRows.length,
   };
 
@@ -142,7 +472,7 @@ export async function buildEstimatingWorkbenchState(tenantDb: TenantDb, dealId: 
     documents,
     extractionRows: activeExtractionRows,
     matchRows: activeMatchRows,
-    pricingRows: activePricingRows,
+    pricingRows: derivedPricingRows,
     reviewEvents,
     summary: {
       documents: documentsSummary,

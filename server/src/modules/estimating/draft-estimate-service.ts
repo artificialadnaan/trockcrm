@@ -10,8 +10,25 @@ import {
 } from "@trock-crm/shared/schema";
 import { createLineItem, createSection } from "../deals/estimate-service.js";
 import { AppError } from "../../middleware/error-handler.js";
+import { deriveEstimatePricingWorkbenchRows } from "./workbench-service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
+
+type PromotionCandidateRow = {
+  recommendationId: string;
+  description: string;
+  quantity: string | null;
+  unit: string | null;
+  unitPrice: string | null;
+  notes: string | null;
+  sectionName: string | null;
+  sourceType?: string | null;
+  normalizedIntent?: string | null;
+  sourceRowIdentity?: string | null;
+  promotedEstimateLineItemId?: string | null;
+  status?: string | null;
+  createdByRunId?: string | null;
+};
 
 export async function listPreviouslyPromotedRecommendationIds(
   tenantDb: TenantDb,
@@ -52,6 +69,12 @@ export async function loadApprovedRecommendationsForRun(
       unitPrice: estimatePricingRecommendations.recommendedUnitPrice,
       notes: estimateExtractions.evidenceText,
       sectionName: estimateExtractions.divisionHint,
+      sourceType: estimatePricingRecommendations.sourceType,
+      normalizedIntent: estimatePricingRecommendations.normalizedIntent,
+      sourceRowIdentity: estimatePricingRecommendations.sourceRowIdentity,
+      promotedEstimateLineItemId: estimatePricingRecommendations.promotedEstimateLineItemId,
+      status: estimatePricingRecommendations.status,
+      createdByRunId: estimatePricingRecommendations.createdByRunId,
     })
     .from(estimatePricingRecommendations)
     .innerJoin(
@@ -69,7 +92,7 @@ export async function loadApprovedRecommendationsForRun(
         eq(estimatePricingRecommendations.status, "approved"),
         inArray(estimatePricingRecommendations.id, recommendationIds)
       )
-    );
+    ) as Promise<PromotionCandidateRow[]>;
 }
 
 function groupRecommendationsIntoSections(
@@ -119,6 +142,25 @@ async function getOrCreateEstimateSection(
   return createSection(tenantDb as any, dealId, sectionName);
 }
 
+function buildRowError(row: ReturnType<typeof deriveEstimatePricingWorkbenchRows>[number]) {
+  if (row.promotable) return null;
+  if (row.promotedEstimateLineItemId) return null;
+
+  if (row.duplicateGroupBlocked) {
+    return {
+      recommendationId: row.recommendationId,
+      code: "duplicate_blocked",
+      message: "Recommendation is blocked by a duplicate group and cannot be promoted.",
+    };
+  }
+
+  return {
+    recommendationId: row.recommendationId,
+    code: "not_promotable",
+    message: "Recommendation is not in a promotable state.",
+  };
+}
+
 export async function promoteApprovedRecommendationsToEstimate({
   tenantDb,
   dealId,
@@ -143,7 +185,20 @@ export async function promoteApprovedRecommendationsToEstimate({
     approvedRecommendationIds.filter((id) => !alreadyPromoted.includes(id))
   );
 
-  for (const sectionGroup of groupRecommendationsIntoSections(recommendations)) {
+  const derivedRecommendations = deriveEstimatePricingWorkbenchRows(
+    recommendations as unknown as PromotionCandidateRow[]
+  );
+  const rowErrors = derivedRecommendations
+    .map(buildRowError)
+    .filter((rowError): rowError is NonNullable<typeof rowError> => rowError !== null);
+  const promotableRecommendations = derivedRecommendations.filter((row) => row.promotable);
+  const promotedRecommendationIds: string[] = [];
+
+  if (promotableRecommendations.length === 0) {
+    return { promotedRecommendationIds, rowErrors };
+  }
+
+  for (const sectionGroup of groupRecommendationsIntoSections(promotableRecommendations)) {
     const section = await getOrCreateEstimateSection(
       tenantDb,
       dealId,
@@ -159,6 +214,20 @@ export async function promoteApprovedRecommendationsToEstimate({
         notes: line.notes ?? undefined,
       });
 
+      await tenantDb
+        .update(estimatePricingRecommendations)
+        .set({
+          promotedEstimateLineItemId: lineItem.id,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(estimatePricingRecommendations.id, line.recommendationId),
+            eq(estimatePricingRecommendations.dealId, dealId)
+          )
+        )
+        .returning();
+
       await tenantDb.insert(estimateReviewEvents).values({
         dealId,
         subjectType: "estimate_pricing_recommendation",
@@ -166,8 +235,12 @@ export async function promoteApprovedRecommendationsToEstimate({
         eventType: "promoted",
         afterJson: { estimateLineItemId: lineItem.id },
       });
+
+      promotedRecommendationIds.push(line.recommendationId);
     }
   }
+
+  return { promotedRecommendationIds, rowErrors };
 }
 
 export async function approveEstimateRecommendation(args: {
