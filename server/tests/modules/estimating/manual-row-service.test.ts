@@ -735,4 +735,86 @@ describe("manual-row-service", () => {
       })
     );
   });
+
+  it("downgrades an unresolved explicit catalog selection back to manual mode on update", async () => {
+    const updateReturning = vi.fn().mockResolvedValue([
+      {
+        id: "rec-8",
+        selectedSourceType: "manual",
+        selectedOptionId: null,
+        catalogBacking: "estimate_only",
+      },
+    ]);
+    const updateSet = vi.fn(() => ({
+      where: vi.fn(() => ({
+        returning: updateReturning,
+      })),
+    }));
+    const tenantDb = {
+      select: vi.fn(() => ({
+        from: vi.fn(() => ({
+          where: vi.fn(() => ({
+            limit: vi.fn().mockResolvedValue([
+              {
+                id: "rec-8",
+                dealId: "deal-1",
+                manualIdentityKey: "manual-key-8",
+                manualLabel: "Existing manual label",
+                manualQuantity: "2",
+                manualUnit: "ea",
+                manualUnitPrice: "50.00",
+                manualNotes: "existing note",
+                selectedSourceType: "manual",
+                selectedOptionId: null,
+                catalogBacking: "estimate_only",
+                evidenceJson: {
+                  sectionName: "Roofing",
+                  manualLabel: "Existing manual label",
+                },
+              },
+            ]),
+          })),
+        })),
+      })),
+      update: vi.fn(() => ({
+        set: updateSet,
+      })),
+      insert: vi.fn(() => ({
+        values: vi.fn().mockResolvedValue([]),
+      })),
+    } as any;
+
+    const result = await updateManualEstimateRow({
+      tenantDb,
+      dealId: "deal-1",
+      recommendationId: "rec-8",
+      userId: "user-1",
+      input: {
+        selectedSourceType: "catalog_option",
+        selectedOptionStableId: "missing-option",
+        catalogOptions: [
+          {
+            stableId: "different-option",
+            optionLabel: "Different option",
+            catalogItemId: "catalog-1",
+          },
+        ],
+      },
+    });
+
+    expect(updateSet).toHaveBeenCalledWith(
+      expect.objectContaining({
+        selectedSourceType: "manual",
+        selectedOptionId: null,
+        catalogBacking: "estimate_only",
+      })
+    );
+    expect(result.recommendation).toEqual(
+      expect.objectContaining({
+        selectedSourceType: "manual",
+        selectedOptionId: null,
+        catalogBacking: "estimate_only",
+      })
+    );
+  });
 });

@@ -475,7 +475,7 @@ export async function updateManualEstimateRow(args: {
     selectedOptionStableId: args.input.selectedOptionStableId ?? null,
   });
   const persistedSelectedSourceType =
-    preserveCatalogSelection || selectedOption || requestedCatalogSelection ? "catalog_option" : "manual";
+    preserveCatalogSelection || selectedOption ? "catalog_option" : requestedCatalogSelection ? "manual" : "manual";
   const catalogBacking = preserveCatalogSelection
     ? existing.catalogBacking
     : args.input.catalogBacking ??

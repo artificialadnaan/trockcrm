@@ -534,6 +534,89 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
     );
   });
 
+  it("falls back to legacy manual fields when a manual row has no selectedSourceType", async () => {
+    estimateServiceMocks.createSection.mockResolvedValue({ id: "section-legacy-manual" });
+    estimateServiceMocks.createLineItem.mockResolvedValue({ id: "line-legacy-manual" });
+    const updateReturning = vi.fn().mockResolvedValue([
+      { id: "rec-legacy-manual", promotedEstimateLineItemId: "line-legacy-manual" },
+    ]);
+
+    const tenantDb = {
+      execute: vi.fn().mockResolvedValue(undefined),
+      select: vi
+        .fn()
+        .mockReturnValueOnce({
+          from: vi.fn(() => ({
+            innerJoin: vi.fn(() => ({
+              innerJoin: vi.fn(() => ({
+                where: vi.fn().mockResolvedValue([
+                  {
+                    recommendationId: "rec-legacy-manual",
+                    description: "Legacy manual description",
+                    quantity: null,
+                    unit: null,
+                    unitPrice: null,
+                    notes: null,
+                    sectionName: "Roof",
+                    sourceType: "manual",
+                    selectedSourceType: null,
+                    selectedOptionId: null,
+                    manualLabel: "Legacy manual label",
+                    manualQuantity: "5",
+                    manualUnit: "ea",
+                    manualUnitPrice: "12.00",
+                    manualNotes: "legacy note",
+                    normalizedIntent: "manual row",
+                    sourceRowIdentity: "roof:legacy-manual",
+                    status: "approved",
+                    createdByRunId: "run-legacy-manual",
+                    promotedEstimateLineItemId: null,
+                  },
+                ]),
+              })),
+            })),
+          })),
+        })
+        .mockReturnValueOnce({
+          from: vi.fn(() => ({
+            where: vi.fn(() => ({
+              limit: vi.fn().mockResolvedValue([]),
+            })),
+          })),
+        }),
+      update: vi.fn(() => ({
+        set: vi.fn(() => ({
+          where: vi.fn(() => ({
+            returning: updateReturning,
+          })),
+        })),
+      })),
+      insert: vi.fn(() => ({
+        values: vi.fn().mockResolvedValue(undefined),
+      })),
+    } as any;
+
+    await promoteApprovedRecommendationsToEstimate({
+      tenantDb,
+      dealId: "deal-1",
+      generationRunId: "run-legacy-manual",
+      approvedRecommendationIds: ["rec-legacy-manual"],
+    });
+
+    expect(estimateServiceMocks.createLineItem).toHaveBeenCalledWith(
+      tenantDb,
+      "deal-1",
+      "section-legacy-manual",
+      expect.objectContaining({
+        description: "Legacy manual label",
+        quantity: "5",
+        unit: "ea",
+        unitPrice: "12.00",
+        notes: "legacy note",
+      })
+    );
+  });
+
   it("blocks promotion for manual rows that still lack pricing", async () => {
     const tenantDb = {
       execute: vi.fn().mockResolvedValue(undefined),

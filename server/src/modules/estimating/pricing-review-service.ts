@@ -57,6 +57,11 @@ async function insertPricingReviewEvent(
   return event;
 }
 
+function normalizeOverridePrice(value: string | null | undefined) {
+  const trimmed = value?.trim();
+  return trimmed && trimmed.length > 0 ? trimmed : null;
+}
+
 export async function approveEstimatePricingRecommendation(args: {
   tenantDb: TenantDb;
   dealId: string;
@@ -173,6 +178,11 @@ export async function overrideEstimatePricingRecommendation(args: {
   if (!args.input.reason?.trim()) {
     throw new AppError(400, "Override reason is required");
   }
+  const normalizedUnitPrice = normalizeOverridePrice(args.input.recommendedUnitPrice);
+  const normalizedTotalPrice = normalizeOverridePrice(args.input.recommendedTotalPrice);
+  if (!normalizedUnitPrice || !normalizedTotalPrice) {
+    throw new AppError(400, "Override price and total are required");
+  }
 
   const existing = await loadEstimatePricingRecommendation(args.tenantDb, args.dealId, args.recommendationId);
 
@@ -184,8 +194,8 @@ export async function overrideEstimatePricingRecommendation(args: {
     .update(estimatePricingRecommendations)
     .set({
       status: "overridden",
-      recommendedUnitPrice: args.input.recommendedUnitPrice,
-      recommendedTotalPrice: args.input.recommendedTotalPrice,
+      recommendedUnitPrice: normalizedUnitPrice,
+      recommendedTotalPrice: normalizedTotalPrice,
       updatedAt: new Date(),
     })
     .where(

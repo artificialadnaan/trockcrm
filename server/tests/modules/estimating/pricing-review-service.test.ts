@@ -170,4 +170,20 @@ describe("pricing-review-service", () => {
       })
     ).rejects.toMatchObject({ statusCode: 400 });
   });
+
+  it("requires override price and total values", async () => {
+    await expect(
+      overrideEstimatePricingRecommendation({
+        tenantDb: {} as any,
+        dealId: "deal-1",
+        recommendationId: "rec-5",
+        userId: "user-1",
+        input: {
+          recommendedUnitPrice: " ",
+          recommendedTotalPrice: "",
+          reason: "site conditions changed",
+        },
+      })
+    ).rejects.toMatchObject({ statusCode: 400 });
+  });
 });

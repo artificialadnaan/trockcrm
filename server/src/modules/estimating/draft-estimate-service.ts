@@ -240,6 +240,13 @@ function resolvePromotionLineValues(
       }
       break;
     default:
+      if (row.sourceType === "manual") {
+        description = row.manualLabel ?? description;
+        quantity = row.manualQuantity ?? quantity;
+        unit = row.manualUnit ?? unit;
+        unitPrice = row.manualUnitPrice ?? unitPrice;
+        notes = row.manualNotes ?? notes;
+      }
       break;
   }
 
