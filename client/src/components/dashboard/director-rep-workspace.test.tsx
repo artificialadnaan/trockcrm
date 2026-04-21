@@ -83,8 +83,8 @@ class FakeNode {
     return true;
   }
 
-  contains(node: FakeNode | null) {
-    return node != null && (node === this || this.childNodes.some((child) => child.contains(node)));
+  contains(node: FakeNode | null): boolean {
+    return node != null && (node === this || this.childNodes.some((child): boolean => child.contains(node)));
   }
 }
 
