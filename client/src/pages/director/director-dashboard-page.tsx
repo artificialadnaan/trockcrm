@@ -1,15 +1,23 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
+import { Link, useInRouterContext, useNavigate } from "react-router-dom";
 import {
   presetToDateRange,
   useDirectorDashboard,
   type DateRangePreset,
+  type DirectorDashboardData,
 } from "@/hooks/use-director-dashboard";
-import { useRepPerformance } from "@/hooks/use-rep-performance";
+import {
+  useRepPerformance,
+  type RepPerformanceData,
+} from "@/hooks/use-rep-performance";
 import { DirectorBlindSpotList } from "@/components/ai/director-blind-spot-list";
 import { PipelineBarChart } from "@/components/charts/pipeline-bar-chart";
 import { WinRateTrendChart } from "@/components/charts/win-rate-trend-chart";
 import { formatCurrency } from "@/components/charts/chart-colors";
-import { DashboardKpiBand } from "@/components/dashboard/dashboard-kpi-band";
+import {
+  DashboardKpiBand,
+  type DashboardKpiItem,
+} from "@/components/dashboard/dashboard-kpi-band";
 import { DirectorActivitySummary } from "@/components/dashboard/director-activity-summary";
 import { DirectorAlertPanel } from "@/components/dashboard/director-alert-panel";
 import { DirectorRepWorkspace } from "@/components/dashboard/director-rep-workspace";
@@ -30,11 +38,14 @@ const PERF_PERIODS = [
   { value: "year" as const, label: "Year" },
 ];
 
-function visit(to: string) {
-  if (typeof window !== "undefined") {
-    window.location.assign(to);
-  }
-}
+type NavigationLinkProps = {
+  to: string;
+  title?: string;
+  className: string;
+  children: ReactNode;
+};
+
+type NavigationLinkComponent = (props: NavigationLinkProps) => ReactNode;
 
 function DeltaCell({
   value,
@@ -71,52 +82,62 @@ function DeltaCell({
   return <span className={`text-xs font-semibold ${colorClass}`}>{prefix}{value}</span>;
 }
 
-export function DirectorDashboardPage() {
-  const [preset, setPreset] = useState<DateRangePreset>("ytd");
-  const [perfPeriod, setPerfPeriod] = useState<"month" | "quarter" | "year">("month");
-  const dateRange = presetToDateRange(preset);
-  const { data, loading, error } = useDirectorDashboard(dateRange);
-  const { data: perfData, loading: perfLoading } = useRepPerformance(perfPeriod);
+function buildActivitySummaryRows(data: DirectorDashboardData) {
+  const activityByRep = new Map(data.activityByRep.map((row) => [row.repId, row]));
+  const seen = new Set<string>();
 
-  if (loading) {
-    return (
-      <div className="min-h-screen space-y-6 bg-gray-50 p-6">
-        <div className="space-y-2">
-          <div className="h-8 w-64 animate-pulse rounded bg-gray-200" />
-          <div className="h-4 w-80 animate-pulse rounded bg-gray-100" />
-        </div>
-        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-          {Array.from({ length: 4 }).map((_, index) => (
-            <div key={index} className="h-28 animate-pulse rounded-2xl bg-white" />
-          ))}
-        </div>
-        <div className="grid gap-4 xl:grid-cols-[minmax(0,2fr)_minmax(320px,1fr)]">
-          <div className="h-96 animate-pulse rounded-2xl bg-white" />
-          <div className="space-y-4">
-            <div className="h-48 animate-pulse rounded-2xl bg-white" />
-            <div className="h-48 animate-pulse rounded-2xl bg-white" />
-          </div>
-        </div>
-      </div>
-    );
-  }
+  const rows = data.repCards.map((rep) => {
+    seen.add(rep.repId);
+    const activity = activityByRep.get(rep.repId);
 
-  if (error) {
-    return (
-      <div className="min-h-screen space-y-4 bg-gray-50 p-6">
-        <h1 className="text-3xl font-black tracking-tight text-gray-900">Director Dashboard</h1>
-        <div className="rounded-2xl border border-rose-200 bg-rose-50 p-6 text-sm text-rose-700">
-          {error}
-        </div>
-      </div>
-    );
-  }
+    return {
+      repId: rep.repId,
+      repName: rep.repName,
+      calls: activity?.calls ?? 0,
+      emails: activity?.emails ?? 0,
+      meetings: activity?.meetings ?? 0,
+      notes: activity?.notes ?? 0,
+      total: activity?.total ?? 0,
+    };
+  });
 
-  if (!data) {
-    return null;
-  }
+  return rows.concat(
+    data.activityByRep
+      .filter((row) => !seen.has(row.repId))
+      .map((row) => ({
+        repId: row.repId,
+        repName: row.repName,
+        calls: row.calls,
+        emails: row.emails,
+        meetings: row.meetings,
+        notes: row.notes,
+        total: row.total,
+      }))
+  );
+}
 
-  const kpis = [
+function DirectorDashboardPageLayout({
+  data,
+  perfData,
+  perfLoading,
+  preset,
+  setPreset,
+  perfPeriod,
+  setPerfPeriod,
+  NavigationLink,
+  onSelectRep,
+}: {
+  data: DirectorDashboardData;
+  perfData: RepPerformanceData | null;
+  perfLoading: boolean;
+  preset: DateRangePreset;
+  setPreset: (preset: DateRangePreset) => void;
+  perfPeriod: "month" | "quarter" | "year";
+  setPerfPeriod: (period: "month" | "quarter" | "year") => void;
+  NavigationLink: NavigationLinkComponent;
+  onSelectRep: (repId: string) => void;
+}) {
+  const kpis: DashboardKpiItem[] = [
     {
       label: "True pipeline",
       value: formatCurrency(data.ddVsPipeline.pipelineValue),
@@ -138,7 +159,9 @@ export function DirectorDashboardPage() {
       detail: `${data.staleLeads.length} stale leads`,
       tone: data.staleDeals.length > 0 ? "warning" : "default",
     },
-  ] as const;
+  ];
+
+  const activitySummaryRows = buildActivitySummaryRows(data);
 
   return (
     <div className="min-h-screen space-y-6 bg-gray-50 p-6">
@@ -175,14 +198,14 @@ export function DirectorDashboardPage() {
 
           <div className="flex flex-wrap gap-2">
             {DIRECTOR_DASHBOARD_ACTIONS.map((action) => (
-              <a
+              <NavigationLink
                 key={action.key}
-                href={action.to}
+                to={action.to}
                 title={action.title}
                 className="inline-flex items-center rounded-full border border-gray-200 bg-white px-4 py-2 text-sm font-semibold text-gray-700 transition hover:border-gray-300 hover:text-gray-900"
               >
                 {action.label}
-              </a>
+              </NavigationLink>
             ))}
           </div>
         </div>
@@ -191,11 +214,29 @@ export function DirectorDashboardPage() {
       <DashboardKpiBand items={kpis} />
 
       <section className="grid gap-4 xl:grid-cols-[minmax(0,2fr)_minmax(320px,1fr)]">
-        <DirectorRepWorkspace repCards={data.repCards} onSelectRep={(repId) => visit(`/director/rep/${repId}`)} />
+        <DirectorRepWorkspace repCards={data.repCards} onSelectRep={onSelectRep} />
 
         <div className="space-y-4">
-          <DirectorActivitySummary rows={data.activityByRep} />
-          <DirectorAlertPanel staleDeals={data.staleDeals} staleLeads={data.staleLeads} />
+          <DirectorActivitySummary rows={activitySummaryRows} />
+
+          <section className="space-y-3">
+            <DirectorAlertPanel staleDeals={data.staleDeals} staleLeads={data.staleLeads} />
+            <div className="flex flex-wrap gap-2">
+              <NavigationLink
+                to="/reports/stale-deals"
+                className="inline-flex items-center rounded-full border border-amber-200 bg-white px-4 py-2 text-sm font-semibold text-amber-700 transition hover:border-amber-300 hover:text-amber-900"
+              >
+                Review stale deals
+              </NavigationLink>
+              <NavigationLink
+                to="/reports"
+                className="inline-flex items-center rounded-full border border-gray-200 bg-white px-4 py-2 text-sm font-semibold text-gray-700 transition hover:border-gray-300 hover:text-gray-900"
+              >
+                Review stale leads
+              </NavigationLink>
+            </div>
+          </section>
+
           <DirectorBlindSpotList />
         </div>
       </section>
@@ -207,9 +248,12 @@ export function DirectorDashboardPage() {
               <h2 className="text-sm font-bold uppercase tracking-wide text-gray-900">Pipeline by stage</h2>
               <p className="mt-1 text-sm text-gray-500">Stage concentration across the selected date range.</p>
             </div>
-            <a href="/pipeline" className="text-sm font-semibold text-gray-500 hover:text-gray-900">
+            <NavigationLink
+              to="/pipeline"
+              className="text-sm font-semibold text-gray-500 hover:text-gray-900"
+            >
               Open pipeline
-            </a>
+            </NavigationLink>
           </div>
           <div className="p-4">
             {data.pipelineByStage.length > 0 ? (
@@ -332,5 +376,114 @@ export function DirectorDashboardPage() {
         )}
       </section>
     </div>
+  );
+}
+
+function DirectorDashboardPageWithRouter(props: {
+  data: DirectorDashboardData;
+  perfData: RepPerformanceData | null;
+  perfLoading: boolean;
+  preset: DateRangePreset;
+  setPreset: (preset: DateRangePreset) => void;
+  perfPeriod: "month" | "quarter" | "year";
+  setPerfPeriod: (period: "month" | "quarter" | "year") => void;
+}) {
+  const navigate = useNavigate();
+
+  return (
+    <DirectorDashboardPageLayout
+      {...props}
+      NavigationLink={({ to, title, className, children }) => (
+        <Link to={to} title={title} className={className}>
+          {children}
+        </Link>
+      )}
+      onSelectRep={(repId) => navigate(`/director/rep/${repId}`)}
+    />
+  );
+}
+
+function DirectorDashboardPageWithoutRouter(props: {
+  data: DirectorDashboardData;
+  perfData: RepPerformanceData | null;
+  perfLoading: boolean;
+  preset: DateRangePreset;
+  setPreset: (preset: DateRangePreset) => void;
+  perfPeriod: "month" | "quarter" | "year";
+  setPerfPeriod: (period: "month" | "quarter" | "year") => void;
+}) {
+  return (
+    <DirectorDashboardPageLayout
+      {...props}
+      NavigationLink={({ to, title, className, children }) => (
+        <a href={to} title={title} className={className}>
+          {children}
+        </a>
+      )}
+      onSelectRep={() => {}}
+    />
+  );
+}
+
+export function DirectorDashboardPage() {
+  const [preset, setPreset] = useState<DateRangePreset>("ytd");
+  const [perfPeriod, setPerfPeriod] = useState<"month" | "quarter" | "year">("month");
+  const inRouterContext = useInRouterContext();
+  const dateRange = presetToDateRange(preset);
+  const { data, loading, error } = useDirectorDashboard(dateRange);
+  const { data: perfData, loading: perfLoading } = useRepPerformance(perfPeriod);
+
+  if (loading) {
+    return (
+      <div className="min-h-screen space-y-6 bg-gray-50 p-6">
+        <div className="space-y-2">
+          <div className="h-8 w-64 animate-pulse rounded bg-gray-200" />
+          <div className="h-4 w-80 animate-pulse rounded bg-gray-100" />
+        </div>
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+          {Array.from({ length: 4 }).map((_, index) => (
+            <div key={index} className="h-28 animate-pulse rounded-2xl bg-white" />
+          ))}
+        </div>
+        <div className="grid gap-4 xl:grid-cols-[minmax(0,2fr)_minmax(320px,1fr)]">
+          <div className="h-96 animate-pulse rounded-2xl bg-white" />
+          <div className="space-y-4">
+            <div className="h-48 animate-pulse rounded-2xl bg-white" />
+            <div className="h-48 animate-pulse rounded-2xl bg-white" />
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="min-h-screen space-y-4 bg-gray-50 p-6">
+        <h1 className="text-3xl font-black tracking-tight text-gray-900">Director Dashboard</h1>
+        <div className="rounded-2xl border border-rose-200 bg-rose-50 p-6 text-sm text-rose-700">
+          {error}
+        </div>
+      </div>
+    );
+  }
+
+  if (!data) {
+    return null;
+  }
+
+  const sharedProps = {
+    data,
+    perfData,
+    perfLoading,
+    preset,
+    setPreset,
+    perfPeriod,
+    setPerfPeriod,
+  };
+
+  return inRouterContext ? (
+    <DirectorDashboardPageWithRouter {...sharedProps} />
+  ) : (
+    <DirectorDashboardPageWithoutRouter {...sharedProps} />
   );
 }
