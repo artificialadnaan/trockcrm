@@ -11,6 +11,26 @@ import {
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
+type ActiveParseArtifactRow = {
+  documentId: string;
+  metadataJson?: Record<string, unknown> | null;
+};
+
+function isActiveParseArtifact(
+  row: ActiveParseArtifactRow,
+  activeParseRunIdByDocumentId: Map<string, string | null>
+) {
+  const activeParseRunId = activeParseRunIdByDocumentId.get(row.documentId) ?? null;
+  if (!activeParseRunId) return false;
+
+  const metadataJson = row.metadataJson;
+  if (!metadataJson || metadataJson.sourceParseRunId !== activeParseRunId) {
+    return false;
+  }
+
+  return metadataJson.activeArtifact !== false;
+}
+
 export async function buildEstimatingWorkbenchState(tenantDb: TenantDb, dealId: string) {
   const [documents, extractionRows, matchRows, pricingRows, reviewEvents] = await Promise.all([
     tenantDb
@@ -56,6 +76,18 @@ export async function buildEstimatingWorkbenchState(tenantDb: TenantDb, dealId: 
       .orderBy(desc(estimateReviewEvents.createdAt)),
   ]);
 
+  const activeParseRunIdByDocumentId = new Map(
+    documents.map((document) => [document.id, document.activeParseRunId ?? null])
+  );
+
+  const activeExtractionRows = extractionRows.filter((row) =>
+    isActiveParseArtifact(row, activeParseRunIdByDocumentId)
+  );
+  const activeExtractionIds = new Set(activeExtractionRows.map((row) => row.id));
+  const activeMatchRows = matchRows.filter((row) => activeExtractionIds.has(row.extractionId));
+  const activeMatchIds = new Set(activeMatchRows.map((row) => row.id));
+  const activePricingRows = pricingRows.filter((row) => activeMatchIds.has(row.extractionMatchId));
+
   const documentsSummary = {
     total: documents.length,
     queued: documents.filter((row) => row.ocrStatus === "queued").length,
@@ -63,30 +95,30 @@ export async function buildEstimatingWorkbenchState(tenantDb: TenantDb, dealId: 
   };
 
   const extractionsSummary = {
-    total: extractionRows.length,
-    pending: extractionRows.filter((row) => row.status === "pending").length,
-    approved: extractionRows.filter((row) => row.status === "approved").length,
-    rejected: extractionRows.filter((row) => row.status === "rejected").length,
-    unmatched: extractionRows.filter((row) => row.status === "unmatched").length,
+    total: activeExtractionRows.length,
+    pending: activeExtractionRows.filter((row) => row.status === "pending").length,
+    approved: activeExtractionRows.filter((row) => row.status === "approved").length,
+    rejected: activeExtractionRows.filter((row) => row.status === "rejected").length,
+    unmatched: activeExtractionRows.filter((row) => row.status === "unmatched").length,
   };
 
   const matchesSummary = {
-    total: matchRows.length,
-    suggested: matchRows.filter((row) => row.status === "suggested").length,
-    selected: matchRows.filter((row) => row.status === "selected").length,
-    rejected: matchRows.filter((row) => row.status === "rejected").length,
+    total: activeMatchRows.length,
+    suggested: activeMatchRows.filter((row) => row.status === "suggested").length,
+    selected: activeMatchRows.filter((row) => row.status === "selected").length,
+    rejected: activeMatchRows.filter((row) => row.status === "rejected").length,
   };
 
-  const promotablePricingRows = pricingRows.filter(
+  const promotablePricingRows = activePricingRows.filter(
     (row) => row.status === "approved" || row.status === "overridden"
   );
 
   const pricingSummary = {
-    total: pricingRows.length,
-    pending: pricingRows.filter((row) => row.status === "pending").length,
-    approved: pricingRows.filter((row) => row.status === "approved").length,
-    overridden: pricingRows.filter((row) => row.status === "overridden").length,
-    rejected: pricingRows.filter((row) => row.status === "rejected").length,
+    total: activePricingRows.length,
+    pending: activePricingRows.filter((row) => row.status === "pending").length,
+    approved: activePricingRows.filter((row) => row.status === "approved").length,
+    overridden: activePricingRows.filter((row) => row.status === "overridden").length,
+    rejected: activePricingRows.filter((row) => row.status === "rejected").length,
     readyToPromote: promotablePricingRows.length,
   };
 
@@ -102,9 +134,9 @@ export async function buildEstimatingWorkbenchState(tenantDb: TenantDb, dealId: 
 
   return {
     documents,
-    extractionRows,
-    matchRows,
-    pricingRows,
+    extractionRows: activeExtractionRows,
+    matchRows: activeMatchRows,
+    pricingRows: activePricingRows,
     reviewEvents,
     summary: {
       documents: documentsSummary,

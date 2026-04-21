@@ -35,30 +35,62 @@ function makeTenantDb(results: any[]) {
 }
 
 describe("buildEstimatingWorkbenchState", () => {
-  it("builds nested summary counts and promotion readiness from eligible pricing rows", async () => {
+  it("filters workbench rows to the active parse run before summarizing", async () => {
     const tenantDb = makeTenantDb([
       [
-        { id: "doc-1", ocrStatus: "queued" },
-        { id: "doc-2", ocrStatus: "failed" },
-        { id: "doc-3", ocrStatus: "queued" },
+        { id: "doc-1", activeParseRunId: "run-1", ocrStatus: "queued" },
+        { id: "doc-2", activeParseRunId: "run-2", ocrStatus: "failed" },
       ],
       [
-        { id: "ext-1", status: "pending" },
-        { id: "ext-2", status: "approved" },
-        { id: "ext-3", status: "rejected" },
-        { id: "ext-4", status: "unmatched" },
+        {
+          id: "ext-1",
+          documentId: "doc-1",
+          status: "pending",
+          metadataJson: { sourceParseRunId: "run-1", activeArtifact: true },
+        },
+        {
+          id: "ext-2",
+          documentId: "doc-1",
+          status: "approved",
+          metadataJson: { sourceParseRunId: "run-1", activeArtifact: true },
+        },
+        {
+          id: "ext-3",
+          documentId: "doc-1",
+          status: "rejected",
+          metadataJson: { sourceParseRunId: "run-old", activeArtifact: false },
+        },
+        {
+          id: "ext-4",
+          documentId: "doc-2",
+          status: "unmatched",
+          metadataJson: { sourceParseRunId: "run-2", activeArtifact: true },
+        },
       ],
       [
-        { id: "match-1", status: "suggested" },
-        { id: "match-2", status: "selected" },
-        { id: "match-3", status: "rejected" },
+        { id: "match-1", extractionId: "ext-1", status: "suggested" },
+        { id: "match-2", extractionId: "ext-3", status: "selected" },
+        { id: "match-3", extractionId: "ext-4", status: "rejected" },
       ],
       [
-        { id: "rec-1", status: "pending", createdByRunId: "run-pending" },
-        { id: "rec-2", status: "approved", createdByRunId: "run-approved-1" },
-        { id: "rec-3", status: "overridden", createdByRunId: "run-approved-1" },
-        { id: "rec-4", status: "overridden", createdByRunId: "run-approved-2" },
-        { id: "rec-5", status: "rejected", createdByRunId: "run-rejected" },
+        {
+          id: "rec-1",
+          extractionMatchId: "match-1",
+          status: "pending",
+          createdByRunId: "run-pending",
+        },
+        {
+          id: "rec-2",
+          extractionMatchId: "match-2",
+          status: "approved",
+          createdByRunId: "run-approved-stale",
+        },
+        {
+          id: "rec-3",
+          extractionMatchId: "match-3",
+          status: "overridden",
+          createdByRunId: "run-approved-active",
+        },
       ],
       [{ id: "event-1" }],
     ]);
@@ -67,48 +99,67 @@ describe("buildEstimatingWorkbenchState", () => {
 
     expect(state.summary).toEqual({
       documents: {
-        total: 3,
-        queued: 2,
+        total: 2,
+        queued: 1,
         failed: 1,
       },
       extractions: {
-        total: 4,
+        total: 3,
         pending: 1,
         approved: 1,
-        rejected: 1,
+        rejected: 0,
         unmatched: 1,
       },
       matches: {
-        total: 3,
+        total: 2,
         suggested: 1,
-        selected: 1,
+        selected: 0,
         rejected: 1,
       },
       pricing: {
-        total: 5,
+        total: 2,
         pending: 1,
-        approved: 1,
-        overridden: 2,
-        rejected: 1,
-        readyToPromote: 3,
+        approved: 0,
+        overridden: 1,
+        rejected: 0,
+        readyToPromote: 1,
       },
     });
     expect(state.promotionReadiness).toEqual({
       canPromote: true,
-      generationRunIds: ["run-approved-1", "run-approved-2"],
+      generationRunIds: ["run-approved-active"],
     });
-    expect(state.documents).toHaveLength(3);
-    expect(state.pricingRows).toHaveLength(5);
+    expect(state.documents).toHaveLength(2);
+    expect(state.extractionRows).toHaveLength(3);
+    expect(state.matchRows).toHaveLength(2);
+    expect(state.pricingRows).toHaveLength(2);
   });
 
   it("keeps promotion disabled when eligible rows have no generation run ids", async () => {
     const tenantDb = makeTenantDb([
-      [],
-      [],
-      [],
+      [{ id: "doc-1", activeParseRunId: "run-1", ocrStatus: "completed" }],
       [
-        { id: "rec-1", status: "approved", createdByRunId: null },
-        { id: "rec-2", status: "overridden", createdByRunId: "" },
+        {
+          id: "ext-1",
+          documentId: "doc-1",
+          status: "approved",
+          metadataJson: { sourceParseRunId: "run-1", activeArtifact: true },
+        },
+      ],
+      [{ id: "match-1", extractionId: "ext-1", status: "selected" }],
+      [
+        {
+          id: "rec-1",
+          extractionMatchId: "match-1",
+          status: "approved",
+          createdByRunId: null,
+        },
+        {
+          id: "rec-2",
+          extractionMatchId: "match-1",
+          status: "overridden",
+          createdByRunId: "",
+        },
       ],
       [],
     ]);
@@ -117,21 +168,21 @@ describe("buildEstimatingWorkbenchState", () => {
 
     expect(state.summary).toEqual({
       documents: {
-        total: 0,
+        total: 1,
         queued: 0,
         failed: 0,
       },
       extractions: {
-        total: 0,
+        total: 1,
         pending: 0,
-        approved: 0,
+        approved: 1,
         rejected: 0,
         unmatched: 0,
       },
       matches: {
-        total: 0,
+        total: 1,
         suggested: 0,
-        selected: 0,
+        selected: 1,
         rejected: 0,
       },
       pricing: {

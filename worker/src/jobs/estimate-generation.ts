@@ -13,7 +13,10 @@ import { pool } from "../db.js";
 import { listCatalogCandidatesForMatching, resolveActiveCatalogSnapshotVersionId } from "../../../server/src/modules/estimating/catalog-read-model-service.js";
 import { getHistoricalPricingSignals } from "../../../server/src/modules/estimating/historical-pricing-service.js";
 import { rankExtractionMatches } from "../../../server/src/modules/estimating/matching-service.js";
-import { buildPricingRecommendation } from "../../../server/src/modules/estimating/pricing-service.js";
+import {
+  buildPricingRecommendation,
+  isConfirmedMeasurementDerivedExtraction,
+} from "../../../server/src/modules/estimating/pricing-service.js";
 
 async function resolveSchemaName(officeId: string | null) {
   if (!officeId) throw new Error("Unable to resolve office schema for estimate generation");
@@ -153,13 +156,16 @@ export async function runEstimateGeneration(
       .select()
       .from(estimateExtractions)
       .where(and(...pendingExtractionFilters));
+    const eligibleExtractions = pendingExtractions.filter((extraction) =>
+      isConfirmedMeasurementDerivedExtraction(extraction)
+    );
 
     const catalogItems =
       source && catalogSnapshotVersionId
         ? await listCatalogCandidatesForMatching(appDb as any, source.id, catalogSnapshotVersionId)
         : [];
 
-    for (const extraction of pendingExtractions) {
+    for (const extraction of eligibleExtractions) {
       const matches = await rankExtractionMatches({
         extraction,
         catalogItems: catalogItems as any,

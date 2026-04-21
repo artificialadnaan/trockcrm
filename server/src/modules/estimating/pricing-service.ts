@@ -61,3 +61,12 @@ export function buildPricingRecommendation(input: BuildPricingRecommendationInpu
     confidence: historicalMedian != null ? 0.84 : 0.58,
   };
 }
+
+export function isConfirmedMeasurementDerivedExtraction(input: {
+  metadataJson?: Record<string, unknown> | null;
+}) {
+  const metadataJson = input.metadataJson ?? null;
+  if (metadataJson?.measurementDerived !== true) return true;
+
+  return metadataJson.measurementConfirmationState === "approved";
+}
