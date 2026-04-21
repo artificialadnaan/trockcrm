@@ -1345,7 +1345,7 @@ export async function associateEmailToEntity(
   tenantDb: TenantDb,
   emailId: string,
   input: {
-    assignedEntityType: "deal" | "company" | "property" | "lead";
+    assignedEntityType: "deal" | "company" | "property" | "lead" | "contact";
     assignedEntityId: string;
     assignedDealId?: string | null;
   },
@@ -1356,7 +1356,7 @@ export async function associateEmailToEntity(
   const email = await getEmailById(tenantDb, emailId);
   if (!email) throw new AppError(404, "Email not found");
 
-  if (!["deal", "company", "property", "lead"].includes(input.assignedEntityType)) {
+  if (!["deal", "company", "property", "lead", "contact"].includes(input.assignedEntityType)) {
     throw new AppError(400, "Unsupported assignment target");
   }
 
@@ -1366,7 +1366,7 @@ export async function associateEmailToEntity(
   }
 
   let assignmentLinks: {
-    sourceEntityType: "company" | "property" | "lead" | "deal";
+    sourceEntityType: "company" | "property" | "lead" | "deal" | "contact";
     sourceEntityId: string;
     companyId: string | null;
     propertyId: string | null;
@@ -1424,6 +1424,22 @@ export async function associateEmailToEntity(
       sourceEntityId: input.assignedEntityId,
       companyId: property.companyId ?? null,
       propertyId: input.assignedEntityId,
+      leadId: null,
+      dealId: null,
+    };
+  } else if (input.assignedEntityType === "contact") {
+    const [contact] = await tenantDb
+      .select({ id: contacts.id, companyId: contacts.companyId })
+      .from(contacts)
+      .where(eq(contacts.id, input.assignedEntityId))
+      .limit(1);
+    if (!contact) throw new AppError(404, "Contact not found");
+
+    assignmentLinks = {
+      sourceEntityType: "contact",
+      sourceEntityId: input.assignedEntityId,
+      companyId: contact.companyId ?? null,
+      propertyId: null,
       leadId: null,
       dealId: null,
     };

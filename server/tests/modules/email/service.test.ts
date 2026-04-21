@@ -255,27 +255,81 @@ describe("email service inbound association", () => {
     expect(insertPayloads.some((entry) => entry.jobType === "domain_event" && entry.payload?.eventName === "task.completed")).toBe(true);
   });
 
-  it("rejects unsupported association targets", async () => {
+  it("persists contact assignments without forcing a deal id", async () => {
+    const updatePayloads: Array<{ table: string; payload: any }> = [];
+    const insertPayloads: Array<any> = [];
     const tenantDb = {
-      select: vi.fn(() => createSelectChain([{ id: "email-1", userId: "user-1" }])),
-      update: vi.fn(),
-      insert: vi.fn(),
+      select: vi.fn(() => {
+        const chain: any = {
+          from: vi.fn(() => chain),
+          where: vi.fn(() => chain),
+          limit: vi.fn(() => chain),
+          then(resolve: (value: any) => void) {
+            const callIndex = (tenantDb.select as any).mock.calls.length;
+            if (callIndex === 1) {
+              resolve([{ id: "email-1", userId: "user-1", contactId: "contact-1", subject: "Hello", bodyPreview: "Hi", bodyHtml: null, sentAt: new Date("2026-04-20T00:00:00.000Z") }]);
+            } else if (callIndex === 2) {
+              resolve([{ id: "contact-1", companyId: "company-1" }]);
+            } else {
+              resolve([]);
+            }
+          },
+        };
+        return chain;
+      }),
+      update: vi.fn((table: any) => ({
+        set: vi.fn((payload: any) => {
+          updatePayloads.push({ table: table?.name ?? "unknown", payload });
+          return {
+            where: vi.fn(() => ({
+              returning: vi.fn(async () => []),
+            })),
+          };
+        }),
+      })),
+      insert: vi.fn(() => ({
+        values: vi.fn(async (payload: any) => {
+          insertPayloads.push(payload);
+          return [];
+        }),
+      })),
     };
 
-    await expect(
-      associateEmailToEntity(
-        tenantDb as any,
-        "email-1",
-        {
-          assignedEntityType: "contact" as any,
-          assignedEntityId: "contact-1",
-          assignedDealId: null,
-        },
-        "director",
-        "director-1",
-        "office-1"
-      )
-    ).rejects.toThrow("Unsupported assignment target");
+    await associateEmailToEntity(
+      tenantDb as any,
+      "email-1",
+      {
+        assignedEntityType: "contact" as any,
+        assignedEntityId: "contact-1",
+        assignedDealId: null,
+      },
+      "director",
+      "director-1",
+      "office-1"
+    );
+
+    expect(updatePayloads).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          payload: expect.objectContaining({
+            assignedEntityType: "contact",
+            assignedEntityId: "contact-1",
+            dealId: null,
+          }),
+        }),
+      ])
+    );
+    expect(insertPayloads).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          sourceEntityType: "contact",
+          sourceEntityId: "contact-1",
+          companyId: "company-1",
+          contactId: "contact-1",
+          dealId: null,
+        }),
+      ])
+    );
   });
 
   it("persists company assignments without forcing a deal id", async () => {

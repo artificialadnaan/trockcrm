@@ -22,6 +22,7 @@ import {
 import { getDealById } from "../deals/service.js";
 import { getLeadById } from "../leads/service.js";
 import { getCompanyById } from "../companies/service.js";
+import { getContactById } from "../contacts/service.js";
 import { getPropertyDetail } from "../properties/service.js";
 
 const router = Router();
@@ -291,8 +292,8 @@ router.get("/:id", async (req, res, next) => {
 router.post("/:id/associate", async (req, res, next) => {
   try {
     const requestedEntityType = req.body.assignedEntityType as string | undefined;
-    const assignedEntityType = (requestedEntityType ?? "deal") as "deal" | "lead" | "property" | "company";
-    if (!["deal", "lead", "property", "company"].includes(assignedEntityType)) {
+    const assignedEntityType = (requestedEntityType ?? "deal") as "deal" | "lead" | "property" | "company" | "contact";
+    if (!["deal", "lead", "property", "company", "contact"].includes(assignedEntityType)) {
       throw new AppError(400, "Unsupported assignment target");
     }
     const assignedEntityId = (req.body.assignedEntityId as string | undefined) ?? (req.body.dealId as string | undefined);
@@ -325,10 +326,10 @@ router.post("/:id/associate", async (req, res, next) => {
     let emailContactCompanyId: string | null = null;
     if (
       req.user!.role === "rep" &&
-      (assignedEntityType === "company" || assignedEntityType === "property")
+      (assignedEntityType === "company" || assignedEntityType === "property" || assignedEntityType === "contact")
     ) {
       if (!email.contactId) {
-        throw new AppError(403, "This email does not have enough CRM context for company or property resolution");
+        throw new AppError(403, "This email does not have enough CRM context for company, property, or contact resolution");
       }
 
       const [contact] = await req.tenantDb!
@@ -339,13 +340,19 @@ router.post("/:id/associate", async (req, res, next) => {
 
       emailContactCompanyId = contact?.companyId ?? null;
       if (!emailContactCompanyId) {
-        throw new AppError(403, "This email does not have enough CRM company context for company or property resolution");
+        throw new AppError(403, "This email does not have enough CRM company context for company, property, or contact resolution");
       }
     }
 
     if (assignedEntityType === "deal") {
       const deal = await getDealById(req.tenantDb!, assignedEntityId, req.user!.role, req.user!.id);
       if (!deal) throw new AppError(404, "Deal not found");
+    } else if (assignedEntityType === "contact") {
+      const contact = await getContactById(req.tenantDb!, assignedEntityId);
+      if (!contact) throw new AppError(404, "Contact not found");
+      if (req.user!.role === "rep" && contact.companyId !== emailContactCompanyId) {
+        throw new AppError(403, "You can only resolve this email to a contact under its contact company");
+      }
     } else if (assignedEntityType === "lead") {
       const lead = await getLeadById(req.tenantDb!, assignedEntityId, req.user!.role, req.user!.id);
       if (!lead) throw new AppError(404, "Lead not found");
