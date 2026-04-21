@@ -175,6 +175,10 @@ Required linkage fields:
 - `manual_unit`, nullable unless `source_type = 'manual'`
 - `manual_unit_price`, nullable unless `source_type = 'manual'`
 - `manual_notes`, nullable unless `source_type = 'manual'`
+- `override_quantity`, nullable unless the row is overridden
+- `override_unit`, nullable unless the row is overridden
+- `override_unit_price`, nullable unless the row is overridden
+- `override_notes`, nullable unless the row is overridden
 
 Required option-row linkage fields:
 
@@ -190,7 +194,7 @@ Required option-row linkage fields:
 
 Uniqueness and refresh rules:
 
-- one recommendation row per `generation_run_id + source_row_identity + normalized_intent`
+- one recommendation row per `generation_run_id + source_row_identity`
 - one option row per `recommendation_id + rank`
 - rerunning generation creates a new generation run and a new recommendation set rather than mutating prior runs in place
 - dedupe within a single generation run uses the duplicate suppression rules in this spec
@@ -368,7 +372,8 @@ Allowed actions:
   - records the chosen alternate option id
 - override:
   - marks the parent row `overridden`
-  - stores overridden quantity/unit/price values on the review outcome
+  - stores overridden quantity/unit/price values on the parent recommendation row in `override_*` fields
+  - keeps a matching review event for audit
 - reject:
   - marks the parent row `rejected`
   - keeps audit evidence but removes it from promotable output
@@ -437,10 +442,11 @@ Manual add flow:
 - catalog-first search against synced and local catalog items
 - free-text custom fallback
 - editable quantity, unit, unit price, and notes
+- required section selection using `estimate_section_name`
 
 Manual recommendation persistence:
 
-- free-text manual rows persist `manual_label`, `manual_quantity`, `manual_unit`, `manual_unit_price`, and `manual_notes` on the parent recommendation row before promotion
+- free-text manual rows persist `estimate_section_name`, `manual_label`, `manual_quantity`, `manual_unit`, `manual_unit_price`, and `manual_notes` on the parent recommendation row before promotion
 - if a manual row is later promoted to the local catalog, the new local catalog item is created from those persisted manual fields
 
 Custom lines can be promoted immediately into the local catalog for reuse later. This is acceptable for the current demonstrative scope and avoids introducing approval workflow complexity in this slice.
