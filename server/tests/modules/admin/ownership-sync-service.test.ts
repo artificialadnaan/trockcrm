@@ -330,6 +330,55 @@ describe("ownership sync service", () => {
     expect(dbTransactionMock).not.toHaveBeenCalled();
   });
 
+  it("wraps apply-mode writes in a database transaction", async () => {
+    const transactionCallbacks: Array<(client: { execute: typeof dbExecuteMock }) => Promise<unknown>> = [];
+    dbTransactionMock.mockImplementation(async (callback: (client: { execute: typeof dbExecuteMock }) => Promise<unknown>) => {
+      transactionCallbacks.push(callback);
+      await callback({ execute: dbExecuteMock });
+    });
+
+    dbExecuteMock.mockImplementation(async (query: unknown) => {
+      const text = extractSqlText(query).replace(/\s+/g, " ").trim().toLowerCase();
+      if (text.includes("select distinct hubspot_owner_id")) return { rows: [{ hubspot_owner_id: "owner-1" }] };
+      if (text.includes("from users u") && text.includes("where u.is_active = true")) {
+        return {
+          rows: [{ id: "user-1", email: "rep@one.com", display_name: "Rep One", office_id: "office-1", is_active: true }],
+        };
+      }
+      if (text.includes("from users") && !text.includes("where u.is_active = true")) {
+        return {
+          rows: [{ id: "user-1", email: "rep@one.com", display_name: "Rep One", office_id: "office-1", is_active: true }],
+        };
+      }
+      if (text.includes("from deals") && text.includes("hubspot_owner_id =")) {
+        return {
+          rows: [{
+            id: "deal-1",
+            assigned_rep_id: "user-old",
+            hubspot_owner_email: "old@example.com",
+            ownership_sync_status: null,
+            unassigned_reason_code: null,
+          }],
+        };
+      }
+      if (text.includes("from leads") && text.includes("hubspot_owner_id =")) {
+        return { rows: [] };
+      }
+      return { rows: [] };
+    });
+
+    fetchAllOwnersMock.mockResolvedValue([{ id: "owner-1", email: "rep@one.com" }]);
+    listActiveUsersWithOfficeAccessMock.mockResolvedValue([
+      { id: "user-1", email: "rep@one.com", displayName: "Rep One", officeId: "office-1", isActive: true },
+    ]);
+
+    await runOwnershipSync({ dryRun: false });
+
+    expect(dbTransactionMock).toHaveBeenCalledOnce();
+    expect(transactionCallbacks).toHaveLength(1);
+    expect(typeof transactionCallbacks[0]).toBe("function");
+  });
+
   it("applies matched ownership and preserves manual overrides on rerun", async () => {
     const { updateQueries } = createExecuteImplementation({
       owners: [
