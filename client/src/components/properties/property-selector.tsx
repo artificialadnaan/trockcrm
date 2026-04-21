@@ -16,7 +16,7 @@ export function PropertySelector({ companyId, value, onChange, required }: Prope
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [selectedLabel, setSelectedLabel] = useState<string | null>(null);
-  const { properties, loading } = useProperties({ companyId: companyId || undefined, limit: 500 });
+  const { properties, loading, refetch } = useProperties({ companyId: companyId || undefined, limit: 500 });
 
   useEffect(() => {
     if (!value) {
@@ -24,7 +24,9 @@ export function PropertySelector({ companyId, value, onChange, required }: Prope
       return;
     }
     const match = properties.find((property) => property.id === value);
-    setSelectedLabel(match ? formatPropertyLabel(match) : null);
+    if (match) {
+      setSelectedLabel(formatPropertyLabel(match));
+    }
   }, [properties, value]);
 
   const filteredProperties = useMemo(() => {
@@ -95,6 +97,7 @@ export function PropertySelector({ companyId, value, onChange, required }: Prope
             onCreated={(property) => {
               setSelectedLabel(formatPropertyLabel(property));
               onChange(property.id);
+              void refetch();
               setOpen(false);
               setQuery("");
             }}
