@@ -897,6 +897,7 @@ router.post("/:id/estimating/documents", async (req, res, next) => {
         contentHash: uploadedFile.r2Key,
         userId: req.user!.id,
         officeId,
+        parseMeasurementsEnabled: req.body.parseMeasurementsEnabled,
       },
     });
 
@@ -922,6 +923,7 @@ router.post("/:id/estimating/documents/:documentId/reprocess", async (req, res, 
         documentId: req.params.documentId,
         userId: req.user!.id,
         officeId,
+        parseMeasurementsEnabled: req.body.parseMeasurementsEnabled,
       },
     });
 

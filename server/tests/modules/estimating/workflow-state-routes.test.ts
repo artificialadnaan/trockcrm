@@ -53,6 +53,21 @@ const documentServiceMocks = vi.hoisted(() => ({
 
 vi.mock("../../../src/modules/estimating/document-service.js", () => documentServiceMocks);
 
+const fileServiceMocks = vi.hoisted(() => ({
+  confirmUpload: vi.fn(),
+}));
+
+vi.mock("../../../src/modules/files/service.js", async () => {
+  const actual = await vi.importActual<typeof import("../../../src/modules/files/service.js")>(
+    "../../../src/modules/files/service.js"
+  );
+
+  return {
+    ...actual,
+    confirmUpload: fileServiceMocks.confirmUpload,
+  };
+});
+
 const { dealRoutes } = await import("../../../src/modules/deals/routes.js");
 
 function findRouteHandler(method: "get" | "post" | "patch", path: string) {
@@ -109,6 +124,14 @@ describe("estimating workflow routes", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     dealsServiceMocks.getDealById.mockResolvedValue({ id: "deal-1" });
+    fileServiceMocks.confirmUpload.mockResolvedValue({
+      id: "file-1",
+      parentFileId: null,
+      originalFilename: "plans.pdf",
+      mimeType: "application/pdf",
+      fileSizeBytes: 1024,
+      r2Key: "r2/doc-1.pdf",
+    });
   });
 
   it("returns workflow state for the estimating shell", async () => {
@@ -208,6 +231,46 @@ describe("estimating workflow routes", () => {
           documentId: "missing-doc",
           userId: "user-1",
           officeId: "office-1",
+          parseMeasurementsEnabled: undefined,
+        }),
+      })
+    );
+  });
+
+  it("passes parse measurement options through document upload and reprocess routes", async () => {
+    documentServiceMocks.createEstimateSourceDocument.mockResolvedValue({
+      id: "doc-1",
+    });
+    documentServiceMocks.reprocessEstimateSourceDocument.mockResolvedValue({
+      id: "doc-1",
+    });
+
+    await invokeRoute("post", "/:id/estimating/documents", {
+      params: { id: "deal-1" },
+      body: {
+        uploadToken: "upload-1",
+        parseMeasurementsEnabled: true,
+      },
+    });
+
+    await invokeRoute("post", "/:id/estimating/documents/:documentId/reprocess", {
+      params: { id: "deal-1", documentId: "doc-1" },
+      body: {
+        parseMeasurementsEnabled: false,
+      },
+    });
+
+    expect(documentServiceMocks.createEstimateSourceDocument).toHaveBeenCalledWith(
+      expect.objectContaining({
+        input: expect.objectContaining({
+          parseMeasurementsEnabled: true,
+        }),
+      })
+    );
+    expect(documentServiceMocks.reprocessEstimateSourceDocument).toHaveBeenCalledWith(
+      expect.objectContaining({
+        input: expect.objectContaining({
+          parseMeasurementsEnabled: false,
         }),
       })
     );

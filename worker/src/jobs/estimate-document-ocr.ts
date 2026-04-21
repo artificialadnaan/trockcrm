@@ -19,7 +19,10 @@ async function resolveSchemaName(officeId: string | null) {
   return `office_${slug}`;
 }
 
-export async function runEstimateDocumentOcr(payload: { documentId: string; dealId?: string }, officeId: string | null) {
+export async function runEstimateDocumentOcr(
+  payload: { documentId: string; dealId?: string; parseMeasurementsEnabled?: boolean },
+  officeId: string | null
+) {
   const schemaName = await resolveSchemaName(officeId);
   const tenantDb = drizzle(pool, { schema, casing: "snake_case" as any });
   await tenantDb.execute(sql.raw(`SET search_path TO ${schemaName}, public`));
@@ -40,6 +43,8 @@ export async function runEstimateDocumentOcr(payload: { documentId: string; deal
     options: {
       provider: document.parseProvider ?? "default",
       profile: document.parseProfile ?? "balanced",
+      measurementsEnabled:
+        payload.parseMeasurementsEnabled ?? document.parseMeasurementsEnabled ?? false,
     },
   });
 

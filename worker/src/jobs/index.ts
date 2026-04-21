@@ -148,11 +148,17 @@ export function registerAllJobs() {
   });
 
   registerJobHandler("estimate_document_ocr", async (payload, officeId) => {
-    await runEstimateDocumentOcr(payload as { documentId: string; dealId?: string }, officeId);
+    await runEstimateDocumentOcr(
+      payload as { documentId: string; dealId?: string; parseMeasurementsEnabled?: boolean },
+      officeId
+    );
   });
 
   registerJobHandler("estimate_generation", async (payload, officeId) => {
-    await runEstimateGeneration(payload as { documentId?: string; dealId?: string }, officeId);
+    await runEstimateGeneration(
+      payload as { documentId?: string; dealId?: string; parseRunId?: string },
+      officeId
+    );
   });
 
   // Daily task generation (triggered via job_queue or cron)

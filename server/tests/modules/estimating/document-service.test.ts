@@ -31,6 +31,7 @@ describe("runEstimateDocumentOcr", () => {
         filename: "plans.pdf",
         parseProvider: "default",
         parseProfile: "balanced",
+        parseMeasurementsEnabled: true,
         parseStatus: "processing",
         ocrStatus: "processing",
         activeParseRunId: null,
@@ -79,7 +80,13 @@ describe("runEstimateDocumentOcr", () => {
 
     await runEstimateDocumentOcr({ documentId: "doc-ocr-1" }, "office-1");
 
-    expect(runEstimateDocumentParse).toHaveBeenCalled();
+    expect(runEstimateDocumentParse).toHaveBeenCalledWith(
+      expect.objectContaining({
+        options: expect.objectContaining({
+          measurementsEnabled: true,
+        }),
+      })
+    );
     expect(limit).toHaveBeenCalledTimes(1);
     expect(tenantDb.execute).toHaveBeenCalledTimes(2);
     const enqueueSql = readSqlText(tenantDb.execute.mock.calls[1]?.[0]);
@@ -103,6 +110,7 @@ describe("createEstimateSourceDocument", () => {
       activeParseRunId: null,
       parseProfile: null,
       parseProvider: null,
+      parseMeasurementsEnabled: true,
       parseErrorSummary: null,
     };
 
@@ -127,6 +135,7 @@ describe("createEstimateSourceDocument", () => {
         mimeType: "application/pdf",
         userId: "user-1",
         officeId: "office-1",
+        parseMeasurementsEnabled: true,
       },
     });
 
@@ -134,6 +143,7 @@ describe("createEstimateSourceDocument", () => {
       expect.objectContaining({
         parseStatus: "queued",
         activeParseRunId: null,
+        parseMeasurementsEnabled: true,
       })
     );
     expect(result.filename).toBe("plans.pdf");
@@ -143,6 +153,7 @@ describe("createEstimateSourceDocument", () => {
       documentId: "doc-1",
       dealId: "deal-1",
       officeId: "office-1",
+      parseMeasurementsEnabled: true,
     });
   });
 
@@ -164,6 +175,7 @@ describe("reprocessEstimateSourceDocument", () => {
       activeParseRunId: null,
       parseProfile: null,
       parseProvider: null,
+      parseMeasurementsEnabled: false,
       parseErrorSummary: null,
       ocrStatus: "queued",
       parsedAt: null,
@@ -191,6 +203,7 @@ describe("reprocessEstimateSourceDocument", () => {
         documentId: "doc-1",
         userId: "user-1",
         officeId: "office-1",
+        parseMeasurementsEnabled: false,
       },
     });
 
@@ -201,6 +214,7 @@ describe("reprocessEstimateSourceDocument", () => {
         activeParseRunId: null,
         parseProfile: null,
         parseProvider: null,
+        parseMeasurementsEnabled: false,
         parseErrorSummary: null,
         ocrStatus: "queued",
         parsedAt: null,
@@ -211,6 +225,7 @@ describe("reprocessEstimateSourceDocument", () => {
       documentId: "doc-1",
       dealId: "deal-1",
       officeId: "office-1",
+      parseMeasurementsEnabled: false,
     });
   });
 

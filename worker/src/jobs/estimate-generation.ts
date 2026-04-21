@@ -34,11 +34,11 @@ export async function runEstimateGeneration(
 ) {
   const schemaName = await resolveSchemaName(officeId);
   const appDb = drizzle(pool, { schema, casing: "snake_case" as any });
-  const lockedClient =
-    payload.documentId && payload.parseRunId ? await pool.connect() : null;
+  const lockedClient = payload.documentId ? await pool.connect() : null;
   const tenantDb = drizzle(lockedClient ?? pool, { schema, casing: "snake_case" as any });
   let transactionClosed = false;
   let generationRunId: string | null = null;
+  let effectiveParseRunId = payload.parseRunId ?? null;
 
   try {
     if (lockedClient) {
@@ -54,6 +54,7 @@ export async function runEstimateGeneration(
         status: "running",
         inputSnapshotJson: {
           documentId: payload.documentId ?? null,
+          parseRunId: effectiveParseRunId,
         },
       })
       .returning();
@@ -64,10 +65,11 @@ export async function runEstimateGeneration(
       await lockedClient.query(`SET LOCAL search_path TO ${schemaName}, public`);
 
       const documentLock = await lockedClient.query(
-        `SELECT id
+        `SELECT id, active_parse_run_id
          FROM ${schemaName}.estimate_source_documents
          WHERE id = $1
-           AND active_parse_run_id = $2
+           AND active_parse_run_id IS NOT NULL
+           AND ($2::uuid IS NULL OR active_parse_run_id = $2)
            AND parse_status = 'completed'
            AND ocr_status = 'completed'
          LIMIT 1
@@ -88,6 +90,19 @@ export async function runEstimateGeneration(
           .where(eq(estimateGenerationRuns.id, generationRunId));
         return;
       }
+
+      effectiveParseRunId =
+        documentLock.rows[0]?.active_parse_run_id ?? effectiveParseRunId;
+
+      await tenantDb
+        .update(estimateGenerationRuns)
+        .set({
+          inputSnapshotJson: {
+            documentId: payload.documentId ?? null,
+            parseRunId: effectiveParseRunId,
+          },
+        })
+        .where(eq(estimateGenerationRuns.id, generationRunId));
     }
 
     if (!payload.dealId) {
@@ -103,19 +118,26 @@ export async function runEstimateGeneration(
     const pendingExtractionFilters = [
       eq(estimateExtractions.dealId, payload.dealId),
       eq(estimateExtractions.status, "pending"),
+      sql`${estimateExtractions.metadataJson}->>'activeArtifact' = 'true'`,
     ];
 
-    if (payload.documentId && payload.parseRunId) {
+    if (payload.documentId) {
       pendingExtractionFilters.push(eq(estimateExtractions.documentId, payload.documentId));
+    }
+
+    if (effectiveParseRunId) {
       pendingExtractionFilters.push(
-        sql`${estimateExtractions.metadataJson}->>'sourceParseRunId' = ${payload.parseRunId}`
+        sql`${estimateExtractions.metadataJson}->>'sourceParseRunId' = ${effectiveParseRunId}`
       );
+    }
+
+    if (payload.documentId && effectiveParseRunId) {
       pendingExtractionFilters.push(sql`
         exists (
           select 1
           from estimate_source_documents as document
           where document.id = ${payload.documentId}
-            and document.active_parse_run_id = ${payload.parseRunId}
+            and document.active_parse_run_id = ${effectiveParseRunId}
             and document.parse_status = 'completed'
             and document.ocr_status = 'completed'
         )

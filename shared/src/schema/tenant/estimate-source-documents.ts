@@ -1,4 +1,4 @@
-import { bigint, index, integer, jsonb, pgTable, text, timestamp, uuid, varchar } from "drizzle-orm/pg-core";
+import { bigint, boolean, index, integer, jsonb, pgTable, text, timestamp, uuid, varchar } from "drizzle-orm/pg-core";
 import { files } from "./files.js";
 
 export const estimateSourceDocuments = pgTable(
@@ -25,6 +25,7 @@ export const estimateSourceDocuments = pgTable(
     }),
     parseProfile: text("parse_profile"),
     parseProvider: text("parse_provider"),
+    parseMeasurementsEnabled: boolean("parse_measurements_enabled").default(false).notNull(),
     parseErrorSummary: text("parse_error_summary"),
     ocrStatus: text("ocr_status").default("queued").notNull(),
     parsedAt: timestamp("parsed_at", { withTimezone: true }),
@@ -46,6 +47,7 @@ export const estimateDocumentParseRuns = pgTable(
     status: text("status").default("queued").notNull(),
     parseProfile: text("parse_profile"),
     parseProvider: text("parse_provider"),
+    parseMeasurementsEnabled: boolean("parse_measurements_enabled").default(false).notNull(),
     errorSummary: text("error_summary"),
     startedAt: timestamp("started_at", { withTimezone: true }).defaultNow().notNull(),
     completedAt: timestamp("completed_at", { withTimezone: true }),

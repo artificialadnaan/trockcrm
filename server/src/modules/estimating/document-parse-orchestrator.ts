@@ -15,6 +15,7 @@ type TenantDb = NodePgDatabase<typeof schema>;
 export interface EstimateDocumentParseOptions {
   provider?: string | null;
   profile?: string | null;
+  measurementsEnabled?: boolean | null;
 }
 
 export interface EstimateDocumentParseDocument {
@@ -27,6 +28,7 @@ export interface EstimateDocumentParseDocument {
   storageKey?: string | null;
   contentHash?: string | null;
   activeParseRunId?: string | null;
+  parseMeasurementsEnabled?: boolean | null;
 }
 
 export interface EstimateDocumentParseResult {
@@ -40,6 +42,7 @@ function resolveParseOptions(options?: EstimateDocumentParseOptions) {
   return {
     provider: options?.provider ?? "default",
     profile: options?.profile ?? "balanced",
+    measurementsEnabled: options?.measurementsEnabled ?? false,
   };
 }
 
@@ -77,7 +80,7 @@ async function claimDocumentProcessingRun(args: {
     startedAt: Date | string | null;
     createdAt: Date | string | null;
   };
-  options: { provider: string; profile: string };
+  options: { provider: string; profile: string; measurementsEnabled: boolean };
 }) {
   await args.tenantDb.execute(sql`
     update estimate_source_documents as document
@@ -113,7 +116,7 @@ async function activateCompletedParseRun(args: {
   tenantDb: TenantDb;
   documentId: string;
   parseRunId: string;
-  options: { provider: string; profile: string };
+  options: { provider: string; profile: string; measurementsEnabled: boolean };
 }) {
   await args.tenantDb.execute(sql`
     with candidate_run as (
@@ -203,7 +206,7 @@ async function markParseFailed(args: {
   tenantDb: TenantDb;
   document: EstimateDocumentParseDocument;
   parseRunId: string;
-  options: { provider: string; profile: string };
+  options: { provider: string; profile: string; measurementsEnabled: boolean };
   errorSummary: string;
 }) {
   const [parseRun] = await args.tenantDb
@@ -248,6 +251,7 @@ export async function runEstimateDocumentParse(args: {
       status: "processing",
       parseProvider: options.provider,
       parseProfile: options.profile,
+      parseMeasurementsEnabled: options.measurementsEnabled,
     })
     .returning();
 
@@ -290,6 +294,7 @@ export async function runEstimateDocumentParse(args: {
           pageHeight: page.height,
           ocrProvider: options.provider,
           ocrMethod: "deterministic_normalizer",
+          measurementsEnabled: options.measurementsEnabled,
           activeArtifact: false,
           blocks: parsed.blocks,
         },
@@ -315,6 +320,8 @@ export async function runEstimateDocumentParse(args: {
         blocks: Array.isArray(page.metadataJson?.blocks) ? page.metadataJson.blocks : undefined,
         metadata: {
           sourceKind: page.metadataJson?.sourceKind ?? null,
+          measurementsEnabled:
+            page.metadataJson?.measurementsEnabled ?? options.measurementsEnabled,
           activeArtifact: false,
         },
       })),

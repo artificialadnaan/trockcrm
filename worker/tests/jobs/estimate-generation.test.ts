@@ -205,6 +205,7 @@ describe("estimate generation job", () => {
     expect(lockedClient.query).toHaveBeenLastCalledWith("COMMIT");
     expect(lockedClient.release).toHaveBeenCalledTimes(1);
     expect(extractionFilterSql).toContain("sourceParseRunId");
+    expect(extractionFilterSql).toContain("activeArtifact");
     expect(extractionFilterSql).toContain("estimate_source_documents as document");
     expect(extractionFilterSql).toContain("active_parse_run_id");
     expect(extractionFilterSql).toContain("document.parse_status = 'completed'");
@@ -218,6 +219,83 @@ describe("estimate generation job", () => {
     expect(rankExtractionMatchesMock).not.toHaveBeenCalled();
     expect(buildPricingRecommendationMock).not.toHaveBeenCalled();
     expect(tenantDb.insert).toHaveBeenCalledTimes(1);
+  });
+
+  it("derives and filters by the active parse run when payload.parseRunId is missing", async () => {
+    const sourceLimit = vi.fn().mockResolvedValue([]);
+    const extractionWhere = vi.fn().mockResolvedValue([]);
+    const appDb = {
+      select: vi.fn(() => ({
+        from: vi.fn(() => ({
+          where: vi.fn(() => ({
+            limit: sourceLimit,
+          })),
+        })),
+      })),
+    } as any;
+    const lockedClient = {
+      query: vi
+        .fn()
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [{ id: "doc-1", active_parse_run_id: "parse-run-active" }] })
+        .mockResolvedValueOnce({ rows: [] }),
+      release: vi.fn(),
+    } as any;
+    let tenantSelectCallCount = 0;
+    const tenantDb = {
+      select: vi.fn(() => ({
+        from: vi.fn(() => {
+          tenantSelectCallCount += 1;
+          if (tenantSelectCallCount === 1) {
+            return {
+              where: extractionWhere,
+            };
+          }
+          throw new Error(`Unexpected tenant select call: ${tenantSelectCallCount}`);
+        }),
+      })),
+      insert: vi.fn(() => ({
+        values: vi.fn(() => ({
+          returning: vi.fn().mockResolvedValue([
+            {
+              id: "generation-run-1",
+            },
+          ]),
+        })),
+      })),
+      update: vi.fn(() => ({
+        set: vi.fn(() => ({
+          where: vi.fn().mockResolvedValue(undefined),
+        })),
+      })),
+    } as any;
+
+    getHistoricalPricingSignalsMock.mockResolvedValue({
+      historicalItems: [],
+      vendorQuotes: [],
+      currentDeal: null,
+    });
+    poolConnectMock.mockResolvedValue(lockedClient);
+    drizzleMock.mockReturnValueOnce(appDb).mockReturnValueOnce(tenantDb);
+
+    const { runEstimateGeneration } = await import("../../src/jobs/estimate-generation.js");
+
+    await runEstimateGeneration(
+      {
+        documentId: "doc-1",
+        dealId: "deal-1",
+      },
+      "office-1"
+    );
+
+    expect(String(lockedClient.query.mock.calls[3]?.[0])).toContain("FOR UPDATE");
+    const extractionFilterSql = readSqlText(extractionWhere.mock.calls[0]?.[0]);
+    expect(extractionFilterSql).toContain("sourceParseRunId");
+    expect(extractionFilterSql).toContain("activeArtifact");
+    expect(extractionFilterSql).toContain("estimate_source_documents as document");
+    expect(extractionFilterSql).toContain("active_parse_run_id");
   });
 
   it("marks the persisted generation run failed when locked generation work throws", async () => {

@@ -11,6 +11,7 @@ export interface CreateEstimateSourceDocumentArgs {
     documentId: string;
     dealId: string;
     officeId: string | null;
+    parseMeasurementsEnabled?: boolean;
   }) => Promise<void>;
   input: {
     dealId: string;
@@ -27,6 +28,7 @@ export interface CreateEstimateSourceDocumentArgs {
     userId: string;
     officeId: string | null;
     reprocessExisting?: boolean;
+    parseMeasurementsEnabled?: boolean;
   };
 }
 
@@ -36,12 +38,14 @@ export interface ReprocessEstimateSourceDocumentArgs {
     documentId: string;
     dealId: string;
     officeId: string | null;
+    parseMeasurementsEnabled?: boolean;
   }) => Promise<void>;
   input: {
     dealId: string;
     documentId: string;
     userId: string;
     officeId: string | null;
+    parseMeasurementsEnabled?: boolean;
   };
 }
 
@@ -53,13 +57,22 @@ export function classifyEstimateDocument(input: { filename: string; mimeType: st
 
 export async function enqueueEstimateDocumentOcrJob(
   tenantDb: TenantDb,
-  payload: { documentId: string; dealId: string; officeId: string | null }
+  payload: {
+    documentId: string;
+    dealId: string;
+    officeId: string | null;
+    parseMeasurementsEnabled?: boolean;
+  }
 ) {
   await tenantDb.execute(
     sql`INSERT INTO public.job_queue (job_type, payload, office_id, status, run_after)
         VALUES (
           'estimate_document_ocr',
-          ${JSON.stringify({ documentId: payload.documentId, dealId: payload.dealId })}::jsonb,
+          ${JSON.stringify({
+            documentId: payload.documentId,
+            dealId: payload.dealId,
+            parseMeasurementsEnabled: payload.parseMeasurementsEnabled ?? false,
+          })}::jsonb,
           ${payload.officeId}::uuid,
           'pending',
           NOW()
@@ -85,6 +98,7 @@ export async function createEstimateSourceDocument({
           activeParseRunId: estimateSourceDocuments.activeParseRunId,
           parseProfile: estimateSourceDocuments.parseProfile,
           parseProvider: estimateSourceDocuments.parseProvider,
+          parseMeasurementsEnabled: estimateSourceDocuments.parseMeasurementsEnabled,
           parseErrorSummary: estimateSourceDocuments.parseErrorSummary,
         })
         .from(estimateSourceDocuments)
@@ -126,6 +140,7 @@ export async function createEstimateSourceDocument({
       activeParseRunId: null,
       parseProfile: null,
       parseProvider: null,
+      parseMeasurementsEnabled: input.parseMeasurementsEnabled ?? false,
       parseErrorSummary: null,
       ocrStatus: "queued",
       uploadedByUserId: input.userId,
@@ -136,6 +151,7 @@ export async function createEstimateSourceDocument({
     documentId: document.id,
     dealId: document.dealId,
     officeId: input.officeId,
+    parseMeasurementsEnabled: document.parseMeasurementsEnabled,
   });
 
   return document;
@@ -153,6 +169,9 @@ export async function reprocessEstimateSourceDocument({
       activeParseRunId: null,
       parseProfile: null,
       parseProvider: null,
+      ...(input.parseMeasurementsEnabled !== undefined
+        ? { parseMeasurementsEnabled: input.parseMeasurementsEnabled }
+        : {}),
       parseErrorSummary: null,
       ocrStatus: "queued",
       parsedAt: null,
@@ -173,6 +192,7 @@ export async function reprocessEstimateSourceDocument({
     documentId: document.id,
     dealId: document.dealId,
     officeId: input.officeId,
+    parseMeasurementsEnabled: document.parseMeasurementsEnabled,
   });
 
   return document;
