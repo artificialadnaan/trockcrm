@@ -284,6 +284,10 @@ export async function updateEstimatePricingRecommendationReviewState(args: {
         throw new AppError(404, "Estimate pricing recommendation option not found");
       }
 
+      if (alternateOption.optionKind !== "alternate") {
+        throw new AppError(400, "alternateOptionId must reference an alternate option");
+      }
+
       eventType = "switched_to_alternate";
       patch = {
         ...patch,

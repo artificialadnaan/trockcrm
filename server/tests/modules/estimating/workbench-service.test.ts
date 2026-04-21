@@ -1,5 +1,8 @@
-import { describe, expect, it, vi } from "vitest";
-import { buildEstimatingWorkbenchState } from "../../../src/modules/estimating/workbench-service.js";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  buildEstimatingWorkbenchState,
+  updateEstimatePricingRecommendationReviewState,
+} from "../../../src/modules/estimating/workbench-service.js";
 
 function makeQueryResult(resolved: any) {
   return {
@@ -289,5 +292,103 @@ describe("buildEstimatingWorkbenchState", () => {
         }),
       ])
     );
+  });
+});
+
+describe("updateEstimatePricingRecommendationReviewState", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("rejects switch_to_alternate when the selected option is not an alternate", async () => {
+    const updateReturning = vi.fn().mockResolvedValue([
+      {
+        id: "rec-1",
+        status: "approved",
+        selectedSourceType: "alternate",
+        selectedOptionId: "option-1",
+        recommendedUnitPrice: "10.00",
+        recommendedTotalPrice: "10.00",
+        overrideQuantity: null,
+        overrideUnit: null,
+        overrideUnitPrice: null,
+        overrideNotes: null,
+      },
+    ]);
+    const insertReturning = vi.fn().mockResolvedValue([
+      {
+        id: "evt-1",
+        eventType: "switched_to_alternate",
+      },
+    ]);
+    const tenantDb = {
+      select: vi
+        .fn()
+        .mockReturnValueOnce({
+          from: vi.fn(() => ({
+            where: vi.fn(() => ({
+              limit: vi.fn().mockResolvedValue([
+                {
+                  id: "rec-1",
+                  dealId: "deal-1",
+                  status: "pending_review",
+                  selectedSourceType: null,
+                  selectedOptionId: null,
+                  recommendedUnitPrice: "10.00",
+                  recommendedTotalPrice: "10.00",
+                  overrideQuantity: null,
+                  overrideUnit: null,
+                  overrideUnitPrice: null,
+                  overrideNotes: null,
+                },
+              ]),
+            })),
+          })),
+        })
+        .mockReturnValueOnce({
+          from: vi.fn(() => ({
+            innerJoin: vi.fn(() => ({
+              where: vi.fn(() => ({
+                limit: vi.fn().mockResolvedValue([
+                  {
+                    id: "option-1",
+                    recommendationId: "rec-1",
+                    optionLabel: "Base option",
+                    optionKind: "recommended",
+                  },
+                ]),
+              })),
+            })),
+          })),
+        }),
+      update: vi.fn(() => ({
+        set: vi.fn(() => ({
+          where: vi.fn(() => ({
+            returning: updateReturning,
+          })),
+        })),
+      })),
+      insert: vi.fn(() => ({
+        values: vi.fn(() => ({
+          returning: insertReturning,
+        })),
+      })),
+    } as any;
+
+    await expect(
+      updateEstimatePricingRecommendationReviewState({
+        tenantDb,
+        dealId: "deal-1",
+        recommendationId: "rec-1",
+        userId: "user-1",
+        input: {
+          action: "switch_to_alternate",
+          alternateOptionId: "option-1",
+        },
+      })
+    ).rejects.toMatchObject({ statusCode: 400 });
+
+    expect(updateReturning).not.toHaveBeenCalled();
+    expect(insertReturning).not.toHaveBeenCalled();
   });
 });
