@@ -141,6 +141,8 @@ describe("EstimateRecommendationOptionsPanel", () => {
     const html = renderToStaticMarkup(
       <EstimateManualRowDialog
         dealId="deal-1"
+        generationRunId="run-1"
+        estimateSectionName="Doors"
         open
         onOpenChange={vi.fn()}
         onSubmitted={vi.fn()}
@@ -222,24 +224,109 @@ describe("EstimateRecommendationOptionsPanel", () => {
 
     await runEstimateManualRowCreateAction({
       dealId: "deal-1",
+      generationRunId: "run-1",
+      estimateSectionName: "Doors",
       input: {
         label: "Walk-in door kit",
         quantity: "2",
         unit: "ea",
         unitPrice: "125.00",
+        notes: "Estimator note",
         selectedSourceType: "manual",
       },
+      catalogQuery: "door",
+      catalogOptions: [
+        {
+          id: "cat-1",
+          optionLabel: "Walk-in door kit",
+          rationale: "Best match",
+        },
+      ],
       refresh,
     });
 
     expect(mocks.apiMock).toHaveBeenCalledWith("/deals/deal-1/estimating/manual-rows", {
       method: "POST",
       json: {
+        generationRunId: "run-1",
+        estimateSectionName: "Doors",
+        manualLabel: "Walk-in door kit",
+        manualQuantity: "2",
+        manualUnit: "ea",
+        manualUnitPrice: "125.00",
+        manualNotes: "Estimator note",
+        selectedSourceType: "manual",
+        catalogQuery: "door",
+        catalogOptions: [
+          {
+            optionLabel: "Walk-in door kit",
+            stableId: "cat-1",
+          },
+        ],
+      },
+    });
+    expect(refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("posts selected catalog options using stable ids for manual-add round trips", async () => {
+    const refresh = vi.fn().mockResolvedValue(undefined);
+    mocks.apiMock.mockResolvedValue({});
+
+    await runEstimateManualRowCreateAction({
+      dealId: "deal-1",
+      generationRunId: "run-1",
+      estimateSectionName: "Doors",
+      input: {
         label: "Walk-in door kit",
         quantity: "2",
         unit: "ea",
         unitPrice: "125.00",
-        selectedSourceType: "manual",
+        notes: "",
+        selectedSourceType: "catalog_option",
+        selectedOptionId: "cat-1",
+      },
+      catalogQuery: "door",
+      catalogOptions: [
+        {
+          id: "cat-1",
+          optionLabel: "Walk-in door kit",
+          optionKind: "recommended",
+          rationale: "Best match",
+        },
+        {
+          id: "cat-2",
+          optionLabel: "Door hardware",
+          optionKind: "alternate",
+        },
+      ],
+      refresh,
+    });
+
+    expect(mocks.apiMock).toHaveBeenCalledWith("/deals/deal-1/estimating/manual-rows", {
+      method: "POST",
+      json: {
+        generationRunId: "run-1",
+        estimateSectionName: "Doors",
+        manualLabel: "Walk-in door kit",
+        manualQuantity: "2",
+        manualUnit: "ea",
+        manualUnitPrice: "125.00",
+        manualNotes: "",
+        selectedSourceType: "catalog_option",
+        selectedOptionStableId: "cat-1",
+        catalogQuery: "door",
+        catalogOptions: [
+          {
+            optionLabel: "Walk-in door kit",
+            optionKind: "recommended",
+            stableId: "cat-1",
+          },
+          {
+            optionLabel: "Door hardware",
+            optionKind: "alternate",
+            stableId: "cat-2",
+          },
+        ],
       },
     });
     expect(refresh).toHaveBeenCalledTimes(1);

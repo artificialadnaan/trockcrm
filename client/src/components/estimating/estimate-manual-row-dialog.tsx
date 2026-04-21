@@ -19,19 +19,26 @@ export interface ManualRowDraft {
   selectedOptionId: string;
 }
 
+export interface ManualRowCatalogOption {
+  id: string;
+  optionLabel: string;
+  optionKind?: "recommended" | "alternate" | "manual";
+  rank?: number | null;
+  rationale?: string | null;
+  stableId?: string | null;
+  catalogItemId?: string | null;
+  localCatalogItemId?: string | null;
+}
+
 export interface EstimateManualRowDialogProps {
   dealId: string;
+  generationRunId?: string | null;
+  estimateSectionName?: string | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onSubmitted?: () => Promise<void> | void;
   initialValues?: Partial<ManualRowDraft>;
-  catalogOptions?: Array<{
-    id: string;
-    optionLabel: string;
-    optionKind?: string | null;
-    rank?: number | null;
-    rationale?: string | null;
-  }>;
+  catalogOptions?: ManualRowCatalogOption[];
 }
 
 const DEFAULT_DRAFT: ManualRowDraft = {
@@ -70,24 +77,61 @@ export function switchManualRowDraftToFreeText(draft: ManualRowDraft): ManualRow
 
 export async function runEstimateManualRowCreateAction({
   dealId,
+  generationRunId,
+  estimateSectionName,
   input,
+  catalogQuery,
+  catalogOptions = [],
   refresh,
 }: {
   dealId: string;
+  generationRunId: string;
+  estimateSectionName: string;
   input: ManualRowDraft;
+  catalogQuery?: string;
+  catalogOptions?: ManualRowCatalogOption[];
   refresh: () => Promise<void>;
 }) {
   const json: Record<string, unknown> = {
-    label: input.label,
-    quantity: input.quantity,
-    unit: input.unit,
-    unitPrice: input.unitPrice,
-    notes: input.notes,
+    generationRunId,
+    estimateSectionName,
+    manualLabel: input.label,
+    manualQuantity: input.quantity,
+    manualUnit: input.unit,
+    manualUnitPrice: input.unitPrice,
+    manualNotes: input.notes,
     selectedSourceType: input.selectedSourceType,
   };
 
+  const trimmedCatalogQuery = catalogQuery?.trim();
+  if (trimmedCatalogQuery) {
+    json.catalogQuery = trimmedCatalogQuery;
+  }
+
+  if (catalogOptions.length > 0) {
+    json.catalogOptions = catalogOptions.map((option) => {
+      const normalizedOption: Record<string, unknown> = {
+        optionLabel: option.optionLabel,
+        stableId: option.stableId ?? option.id,
+      };
+
+      if (option.optionKind && option.optionKind !== "manual") {
+        normalizedOption.optionKind = option.optionKind;
+      }
+      if (option.catalogItemId) {
+        normalizedOption.catalogItemId = option.catalogItemId;
+      }
+      if (option.localCatalogItemId) {
+        normalizedOption.localCatalogItemId = option.localCatalogItemId;
+      }
+
+      return normalizedOption;
+    });
+  }
+
   if (input.selectedOptionId?.trim()) {
-    json.selectedOptionId = input.selectedOptionId;
+    const selectedCatalogOption = catalogOptions.find((option) => option.id === input.selectedOptionId);
+    json.selectedOptionStableId = selectedCatalogOption?.stableId ?? selectedCatalogOption?.id ?? input.selectedOptionId;
   }
 
   await api(`/deals/${dealId}/estimating/manual-rows`, {
@@ -99,6 +143,8 @@ export async function runEstimateManualRowCreateAction({
 
 export function EstimateManualRowDialog({
   dealId,
+  generationRunId,
+  estimateSectionName,
   open,
   onOpenChange,
   onSubmitted,
@@ -156,7 +202,11 @@ export function EstimateManualRowDialog({
     try {
       await runEstimateManualRowCreateAction({
         dealId,
+        generationRunId: generationRunId ?? "",
+        estimateSectionName: estimateSectionName ?? "Generated Estimate",
         input: draft,
+        catalogQuery,
+        catalogOptions,
         refresh: async () => {
           if (onSubmitted) {
             await onSubmitted();

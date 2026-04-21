@@ -278,6 +278,8 @@ export function EstimatingWorkflowShell({
 
       <EstimateManualRowDialog
         dealId={dealId}
+        generationRunId={selectedPricingRow?.createdByRunId ?? promotionRunId}
+        estimateSectionName={selectedPricingRow?.sectionName ?? "Generated Estimate"}
         open={manualAddOpen}
         onOpenChange={setManualAddOpen}
         onSubmitted={onRefresh}

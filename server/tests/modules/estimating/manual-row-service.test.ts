@@ -242,6 +242,71 @@ describe("manual-row-service", () => {
     );
   });
 
+  it("selects a provided catalog-backed option when the stable id round-trips from the client", async () => {
+    const insertValues = vi
+      .fn()
+      .mockResolvedValueOnce([{ id: "rec-4b" }])
+      .mockResolvedValueOnce([{ id: "inserted-opt-1" }])
+      .mockResolvedValueOnce([{ id: "inserted-opt-2" }]);
+    const updateReturning = vi.fn().mockResolvedValue([
+      {
+        id: "rec-4b",
+        selectedSourceType: "catalog_option",
+        selectedOptionId: "inserted-opt-1",
+        catalogBacking: "procore_synced",
+      },
+    ]);
+    const tenantDb = {
+      insert: vi.fn(() => ({
+        values: insertValues,
+      })),
+      update: vi.fn(() => ({
+        set: vi.fn(() => ({
+          where: vi.fn(() => ({
+            returning: updateReturning,
+          })),
+        })),
+      })),
+    } as any;
+
+    const result = await createManualEstimateRow({
+      tenantDb,
+      dealId: "deal-1",
+      userId: "user-1",
+      input: {
+        generationRunId: "run-1",
+        estimateSectionName: "Roofing",
+        manualLabel: "Custom flashing",
+        selectedSourceType: "catalog_option",
+        selectedOptionStableId: "client-opt-1",
+        catalogQuery: "flashing",
+        catalogOptions: [
+          {
+            stableId: "client-opt-1",
+            optionLabel: "Custom flashing",
+            optionKind: "recommended",
+            catalogItemId: "catalog-1",
+          },
+          {
+            stableId: "client-opt-2",
+            optionLabel: "Secondary flashing",
+            optionKind: "alternate",
+            catalogItemId: "catalog-2",
+          },
+        ],
+      },
+    });
+
+    expect(updateReturning).toHaveBeenCalled();
+    expect(result.recommendation).toEqual(
+      expect.objectContaining({
+        selectedSourceType: "catalog_option",
+        selectedOptionId: "inserted-opt-1",
+        catalogBacking: "procore_synced",
+      })
+    );
+  });
+
   it("clears stale catalog selection state when switching a row back to manual mode", async () => {
     const updateSet = vi.fn(() => ({
       where: vi.fn(() => ({
