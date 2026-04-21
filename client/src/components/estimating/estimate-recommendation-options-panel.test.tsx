@@ -333,12 +333,6 @@ describe("EstimateRecommendationOptionsPanel", () => {
         manualNotes: "Estimator note",
         selectedSourceType: "manual",
         catalogQuery: "door",
-        catalogOptions: [
-          {
-            optionLabel: "Walk-in door kit",
-            stableId: "cat-1",
-          },
-        ],
       },
     });
     expect(refresh).toHaveBeenCalledTimes(1);

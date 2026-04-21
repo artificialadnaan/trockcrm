@@ -332,20 +332,31 @@ async function resolveCatalogFirstOptions(args: {
   catalogOptions?: ManualRecommendationOptionInput[];
   selectedOptionStableId?: string | null;
 }) {
-  if (args.catalogOptions && args.catalogOptions.length > 0) {
-    const selectedOption = args.catalogOptions.find((option) => option.stableId === args.selectedOptionStableId) ?? null;
+  const catalogOptions = args.catalogOptions ?? [];
+  const selectedOption =
+    catalogOptions.find((option) => option.stableId === args.selectedOptionStableId) ?? null;
+  const trimmedCatalogQuery = args.catalogQuery?.trim();
+
+  if (trimmedCatalogQuery && args.appDb && !selectedOption) {
+    const optionRows = await searchManualCatalogOptions(args.appDb, trimmedCatalogQuery);
     return {
-      optionRows: args.catalogOptions,
+      optionRows,
+      selectedOption: optionRows.find((option) => option.stableId === args.selectedOptionStableId) ?? null,
+    };
+  }
+
+  if (catalogOptions.length > 0) {
+    return {
+      optionRows: catalogOptions,
       selectedOption,
     };
   }
 
-  if (args.catalogQuery && args.appDb) {
-    const optionRows = await searchManualCatalogOptions(args.appDb, args.catalogQuery);
-    const selectedOption = optionRows.find((option) => option.stableId === args.selectedOptionStableId) ?? null;
+  if (trimmedCatalogQuery && args.appDb) {
+    const optionRows = await searchManualCatalogOptions(args.appDb, trimmedCatalogQuery);
     return {
       optionRows,
-      selectedOption,
+      selectedOption: optionRows.find((option) => option.stableId === args.selectedOptionStableId) ?? null,
     };
   }
 

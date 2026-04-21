@@ -99,6 +99,9 @@ export async function runEstimateManualRowCreateAction({
   catalogOptions?: ManualRowCatalogOption[];
   refresh: () => Promise<void>;
 }) {
+  const trimmedCatalogQuery = catalogQuery?.trim();
+  const shouldSearchBeyondPrefilledOptions =
+    Boolean(trimmedCatalogQuery) && !input.selectedOptionId?.trim();
   const json: Record<string, unknown> = {
     generationRunId,
     extractionMatchId,
@@ -111,12 +114,11 @@ export async function runEstimateManualRowCreateAction({
     selectedSourceType: input.selectedSourceType,
   };
 
-  const trimmedCatalogQuery = catalogQuery?.trim();
   if (trimmedCatalogQuery) {
     json.catalogQuery = trimmedCatalogQuery;
   }
 
-  if (catalogOptions.length > 0) {
+  if (!shouldSearchBeyondPrefilledOptions && catalogOptions.length > 0) {
     json.catalogOptions = catalogOptions.map((option) => {
       const normalizedOption: Record<string, unknown> = {
         optionLabel: option.optionLabel,
@@ -134,7 +136,7 @@ export async function runEstimateManualRowCreateAction({
       }
 
       return normalizedOption;
-    });
+      });
   }
 
   if (input.selectedOptionId?.trim()) {

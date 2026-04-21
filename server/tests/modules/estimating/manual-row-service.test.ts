@@ -360,6 +360,72 @@ describe("manual-row-service", () => {
     );
   });
 
+  it("prefers a live catalog query over preloaded shortlist options when nothing is selected", async () => {
+    catalogReadModelMocks.resolveActiveCatalogSnapshotVersionId.mockResolvedValue("snapshot-1");
+    catalogReadModelMocks.listCatalogCandidatesForMatching.mockResolvedValue([
+      {
+        id: "catalog-live-1",
+        name: "Live searched flashing",
+        unit: "ea",
+        primaryCode: "07 62 00",
+        catalogBaselinePrice: "42.50",
+      },
+    ]);
+
+    const insertValues = vi.fn().mockResolvedValue([{ id: "rec-live-1" }]);
+    const tenantDb = {
+      select: makeActiveMatchSelect(),
+      insert: vi.fn(() => ({
+        values: insertValues,
+      })),
+      update: vi.fn(() => ({
+        set: vi.fn(() => ({
+          where: vi.fn(() => ({
+            returning: vi.fn().mockResolvedValue([
+              { id: "rec-live-1", selectedSourceType: null },
+            ]),
+          })),
+        })),
+      })),
+    } as any;
+    const appDb = {
+      select: vi.fn(() => ({
+        from: vi.fn(() => ({
+          where: vi.fn().mockResolvedValue([{ id: "source-1" }]),
+        })),
+      })),
+    } as any;
+
+    await createManualEstimateRow({
+      tenantDb,
+      appDb,
+      dealId: "deal-1",
+      userId: "user-1",
+      input: {
+        generationRunId: "run-1",
+        extractionMatchId: "match-1",
+        estimateSectionName: "Roofing",
+        manualLabel: "Custom flashing",
+        manualQuantity: "2",
+        manualUnitPrice: "125.00",
+        catalogQuery: "live searched",
+        catalogOptions: [
+          {
+            stableId: "prefilled-1",
+            optionLabel: "Prefilled shortlist item",
+            catalogItemId: "prefilled-1",
+          },
+        ],
+      },
+    });
+
+    expect(catalogReadModelMocks.listCatalogCandidatesForMatching).toHaveBeenCalledWith(
+      appDb,
+      "source-1",
+      "snapshot-1"
+    );
+  });
+
   it("downgrades an unresolved catalog-option request to a free-text manual row", async () => {
     catalogReadModelMocks.resolveActiveCatalogSnapshotVersionId.mockResolvedValue("snapshot-1");
     catalogReadModelMocks.listCatalogCandidatesForMatching.mockResolvedValue([]);

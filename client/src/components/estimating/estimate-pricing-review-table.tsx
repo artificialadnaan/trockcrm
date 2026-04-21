@@ -65,6 +65,40 @@ export interface PricingReviewStateActionInput {
   reason?: string | null;
 }
 
+export function collectPricingOverrideInput(row: Pick<
+  PricingReviewRow,
+  "recommendedUnitPrice" | "recommendedTotalPrice"
+>) {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  const unitPrice = window.prompt(
+    "Override unit price",
+    row.recommendedUnitPrice == null ? "" : `${row.recommendedUnitPrice}`
+  );
+  if (unitPrice == null) {
+    return null;
+  }
+
+  const totalPrice = window.prompt(
+    "Override total price",
+    row.recommendedTotalPrice == null ? "" : `${row.recommendedTotalPrice}`
+  );
+  if (totalPrice == null) {
+    return null;
+  }
+
+  const reason =
+    window.prompt("Override reason", "Override from workbench") ?? "Override from workbench";
+
+  return {
+    recommendedUnitPrice: unitPrice,
+    recommendedTotalPrice: totalPrice,
+    reason: reason.trim() || "Override from workbench",
+  };
+}
+
 function formatCurrency(value: string | number | null | undefined) {
   if (value == null || value === "") return "No price";
   const numeric = typeof value === "number" ? value : Number(value);
@@ -541,14 +575,17 @@ export function EstimatePricingReviewTable({
                               size="xs"
                               variant="outline"
                               disabled={rowActionBusy}
-                              onClick={() =>
-                                handleReviewAction(row, {
+                              onClick={() => {
+                                const overrideInput = collectPricingOverrideInput(row);
+                                if (!overrideInput) {
+                                  return;
+                                }
+
+                                return handleReviewAction(row, {
                                   action: "override",
-                                  recommendedUnitPrice: `${row.recommendedUnitPrice ?? ""}`,
-                                  recommendedTotalPrice: `${row.recommendedTotalPrice ?? ""}`,
-                                  reason: "Override from workbench",
-                                })
-                              }
+                                  ...overrideInput,
+                                });
+                              }}
                             >
                               {overrideBusy ? "Overriding..." : "Override"}
                             </Button>

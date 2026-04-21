@@ -3,7 +3,7 @@ import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
-import { isFreeTextManualRow } from "./estimate-pricing-review-table";
+import { collectPricingOverrideInput, isFreeTextManualRow } from "./estimate-pricing-review-table";
 
 export { runEstimatePricingReviewStateAction } from "./estimate-pricing-review-table";
 
@@ -259,17 +259,20 @@ export function EstimateRecommendationOptionsPanel({
                     size="xs"
                     variant="outline"
                     disabled={actionBusy}
-                    onClick={() =>
-                      handleReviewAction(
+                    onClick={() => {
+                      const overrideInput = collectPricingOverrideInput(recommendation);
+                      if (!overrideInput) {
+                        return;
+                      }
+
+                      return handleReviewAction(
                         {
                           action: "override",
-                          recommendedUnitPrice: `${recommendation.recommendedUnitPrice ?? ""}`,
-                          recommendedTotalPrice: `${recommendation.recommendedTotalPrice ?? ""}`,
-                          reason: "Override from workbench",
+                          ...overrideInput,
                         },
                         "Pricing recommendation updated"
-                      )
-                    }
+                      );
+                    }}
                   >
                     Override
                   </Button>
