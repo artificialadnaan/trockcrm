@@ -1300,9 +1300,18 @@ async function readMigrationSummary(_tenantDb: TenantDb, _activeOfficeId: string
 async function readAuditSummary(tenantDb: TenantDb, _activeOfficeId: string) {
   const result = await tenantDb.execute(sql`
     select
-      count(*) filter (where created_at >= now() - interval '24 hours')::int as change_count_24h,
-      coalesce(max(actor_name), 'No recent changes') as last_actor_label
-    from audit_log
+      count(*) filter (where al.created_at >= now() - interval '24 hours')::int as change_count_24h,
+      coalesce(
+        (
+          select coalesce(u.display_name, al_latest.changed_by::text)
+          from audit_log al_latest
+          left join public.users u on u.id = al_latest.changed_by
+          order by al_latest.created_at desc
+          limit 1
+        ),
+        'No recent changes'
+      ) as last_actor_label
+    from audit_log al
   `);
   const row = (result as any).rows?.[0] ?? {};
   return {
