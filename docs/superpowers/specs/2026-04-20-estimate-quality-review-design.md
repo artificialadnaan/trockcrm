@@ -229,7 +229,7 @@ Manual row storage contract:
 - for manual free-text rows:
   - `catalog_backing = 'estimate_only'`
   - `manual_origin = 'manual_estimator_added'`
-  - `selected_source_type = 'manual'`
+  - `selected_source_type = null` until the row is explicitly accepted
   - `selected_option_id = null`
   - `generation_run_id` is set to the active generation run in the current workbench context; if no active run exists, create a synthetic manual generation run for the deal and use that id
   - `manual_identity_key` is generated once when the row is created and remains stable across later edits to label, section, quantity, unit, price, notes, and free-text versus catalog-backed mode changes
@@ -240,7 +240,7 @@ Manual row storage contract:
   - set `selected_source_type = 'catalog_option'`
   - store catalog candidates as child option rows
   - set `selected_option_id` when a catalog candidate is chosen
-  - if the estimator creates the manual row by selecting a catalog result in the add-item flow, create it directly in `accepted` state with that option selected
+  - if the estimator creates the manual row by selecting a catalog result in the add-item flow, create it in `pending_review` with that option preselected
   - estimator-created catalog-backed manual rows still use `manual_origin = 'manual_estimator_added'`
   - rerun carry-forward clones of manual rows use `manual_origin = 'generated'`
 - if the estimator switches a catalog-backed manual row back to free-text:
@@ -395,7 +395,7 @@ Persistence rule:
 Duplicate suppression order:
 
 1. exact normalized catalog intent match
-2. same selected catalog item id
+2. same selected catalog item id within the same section
 3. same normalized intent within the same section for manual rows
 
 For explicit extracted/manual rows, this ordered list defines duplicate-review grouping signals rather than auto-suppression behavior.
@@ -415,7 +415,6 @@ Explicit-row duplicate rule for this slice:
 - duplicate suppression only removes inferred rows when an explicit extracted or manual row already covers that intent
 - duplicate-review grouping is determined by same `estimate_section_name` plus either matching `normalized_intent` or matching selected catalog item id
 - only one row in a duplicate-review group may remain promotable; the workbench must block promotion for the group until the estimator rejects the extra rows or explicitly returns them to `pending_review`
-- when one row in a duplicate-review group is promoted, any other rows in that group that are still `accepted`, `alternate_selected`, or `overridden` are automatically moved back to `pending_review`
 - carried-forward clones must re-evaluate duplicate-review grouping against already-promoted rows for the deal, so a group with an already promoted winner stays blocked until the remaining rows are edited into a different group or rejected
 - the first promoted row in a duplicate-review group becomes the canonical winner for that deal in this slice; later rows in the same group cannot supersede it without a separate reopen/supersede flow, which is out of scope here
 - if a later promotion attempt targets a row in a duplicate-review group that already has a canonical winner, the promote action must fail with a duplicate-blocked result and create no canonical estimate line
@@ -474,8 +473,8 @@ Allowed actions:
 - accept manual row:
   - applies only to rows with `source_type = 'manual'`
   - marks the parent row `accepted`
-  - keeps `selected_source_type = 'manual'` when the row is still free-text estimate-only
-  - keeps `selected_option_id = null` when the row is still free-text estimate-only
+  - keeps `selected_source_type = 'manual'` and `selected_option_id = null` when the row is still free-text estimate-only
+  - if the manual row has a preselected catalog option, sets `selected_source_type = 'catalog_option'` and keeps the preselected `selected_option_id`
   - uses the persisted `manual_*` fields as the canonical values for later promotion unless an override is applied
 - switch to alternate:
   - marks the parent row `alternate_selected`
