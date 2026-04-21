@@ -35,6 +35,29 @@ function createTestApp() {
   return app;
 }
 
+function createRepTestApp() {
+  const app = express();
+  app.use(express.json());
+  app.use((req, _res, next) => {
+    (req as any).user = {
+      id: "rep-1",
+      role: "rep",
+      displayName: "Rep One",
+      email: "rep@example.com",
+      officeId: "office-1",
+      activeOfficeId: "office-1",
+    } as any;
+    (req as any).tenantClient = {
+      query: queryMock,
+    } as any;
+    (req as any).commitTransaction = vi.fn().mockResolvedValue(undefined);
+    next();
+  });
+  app.use("/api/procore", procoreRoutes);
+  app.use(errorHandler);
+  return app;
+}
+
 describe("procore routes", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -72,5 +95,42 @@ describe("procore routes", () => {
     const response = await request(createTestApp()).get("/api/procore/my-projects/deal-missing");
 
     expect(response.status).toBe(404);
+  });
+
+  it("allows a rep to fetch only their own project-backed deal", async () => {
+    queryMock
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: "deal-123",
+            deal_number: "TR-1001",
+            name: "Birchstone North Tower",
+            procore_project_id: 999,
+            procore_last_synced_at: "2026-04-19T10:00:00.000Z",
+            change_order_total: "12500",
+            stage_name: "In Production",
+            stage_color: "#0f766e",
+          },
+        ],
+      })
+      .mockResolvedValueOnce({ rows: [] });
+
+    const app = createRepTestApp();
+    const ownResponse = await request(app).get("/api/procore/my-projects/deal-123");
+    const unrelatedResponse = await request(app).get("/api/procore/my-projects/deal-999");
+
+    expect(ownResponse.status).toBe(200);
+    expect(ownResponse.body.project.id).toBe("deal-123");
+    expect(unrelatedResponse.status).toBe(404);
+    expect(queryMock).toHaveBeenNthCalledWith(
+      1,
+      expect.stringContaining("AND d.assigned_rep_id = $2"),
+      ["deal-123", "rep-1"],
+    );
+    expect(queryMock).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining("AND d.assigned_rep_id = $2"),
+      ["deal-999", "rep-1"],
+    );
   });
 });
