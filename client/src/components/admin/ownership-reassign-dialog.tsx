@@ -18,6 +18,7 @@ import { getOwnershipQueueRowKey } from "./ownership-queue-table";
 interface OwnershipReassignDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  officeId?: string;
   officeName: string;
   rows: OwnershipQueueRow[];
   onReassign: (assigneeId: string) => Promise<void> | void;
@@ -26,6 +27,7 @@ interface OwnershipReassignDialogProps {
 export function OwnershipReassignDialog({
   open,
   onOpenChange,
+  officeId,
   officeName,
   rows,
   onReassign,
@@ -53,11 +55,14 @@ export function OwnershipReassignDialog({
       setLoadingAssignees(true);
       setError(null);
       try {
-        const data = await api<{ users: OfficeAssignee[] }>("/tasks/assignees");
+        const data = await api<{ users: OfficeAssignee[] }>("/tasks/assignees", {
+          headers: officeId ? { "x-office-id": officeId } : undefined,
+        });
+        const nextUsers = data.users ?? [];
         if (!ignore) {
-          setAssignees(data.users ?? []);
-          if ((data.users ?? []).length > 0) {
-            setAssigneeId((current) => current || data.users[0]!.id);
+          setAssignees(nextUsers);
+          if (nextUsers.length > 0) {
+            setAssigneeId((current) => current || nextUsers[0]!.id);
           }
         }
       } catch (err) {
@@ -74,7 +79,7 @@ export function OwnershipReassignDialog({
     return () => {
       ignore = true;
     };
-  }, [open]);
+  }, [officeId, open]);
 
   useEffect(() => {
     if (!open) {
@@ -137,7 +142,7 @@ export function OwnershipReassignDialog({
             </label>
             <Select value={assigneeId} onValueChange={(value) => setAssigneeId(value ?? "")} disabled={loadingAssignees}>
               <SelectTrigger id="ownership-assignee">
-                <SelectValue placeholder={loadingAssignees ? "Loading assignees..." : "Select a user"} />
+                <SelectValue placeholder={loadingAssignees ? "Loading assignees..." : "Select an office user"} />
               </SelectTrigger>
               <SelectContent>
                 {assignees.map((assignee) => (

@@ -6,6 +6,7 @@ import { MigrationDashboardPage } from "./migration-dashboard-page";
 
 const mocks = vi.hoisted(() => ({
   useAuthMock: vi.fn(),
+  useAdminOfficesMock: vi.fn(),
   useMigrationSummaryMock: vi.fn(),
   useMigrationExceptionsMock: vi.fn(),
   useOfficeOwnershipQueueMock: vi.fn(),
@@ -13,6 +14,10 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("@/lib/auth", () => ({
   useAuth: mocks.useAuthMock,
+}));
+
+vi.mock("@/hooks/use-admin-offices", () => ({
+  useAdminOffices: mocks.useAdminOfficesMock,
 }));
 
 vi.mock("@/hooks/use-migration", () => ({
@@ -30,6 +35,14 @@ vi.mock("@/components/ui/card", () => ({
 
 vi.mock("@/components/ui/button", () => ({
   Button: ({ children }: { children: ReactNode }) => <button>{children}</button>,
+}));
+
+vi.mock("@/components/ui/select", () => ({
+  Select: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  SelectContent: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  SelectItem: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  SelectTrigger: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  SelectValue: ({ children }: { children?: ReactNode }) => <div>{children}</div>,
 }));
 
 vi.mock("@/components/ui/badge", () => ({
@@ -73,6 +86,36 @@ describe("MigrationDashboardPage", () => {
       },
     });
 
+    mocks.useAdminOfficesMock.mockReturnValue({
+      offices: [
+        {
+          id: "office-1",
+          name: "North Office",
+          slug: "north",
+          address: null,
+          phone: null,
+          isActive: true,
+          settings: {},
+          createdAt: "2026-04-21T12:00:00.000Z",
+        },
+        {
+          id: "office-2",
+          name: "South Office",
+          slug: "south",
+          address: null,
+          phone: null,
+          isActive: true,
+          settings: {},
+          createdAt: "2026-04-21T12:00:00.000Z",
+        },
+      ],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      createOffice: vi.fn(),
+      updateOffice: vi.fn(),
+    });
+
     mocks.useMigrationSummaryMock.mockReturnValue({
       summary: {
         deals: {},
@@ -102,6 +145,7 @@ describe("MigrationDashboardPage", () => {
           recordType: "deal",
           recordId: "deal-1",
           recordName: "Northstar Expansion",
+          stageName: "Qualification",
           officeId: "office-1",
           officeName: "Dallas",
           assignedRepId: null,
@@ -123,9 +167,18 @@ describe("MigrationDashboardPage", () => {
   it("renders the ownership queue and bulk reassignment entry point", () => {
     const html = renderPage();
 
+    expect(mocks.useOfficeOwnershipQueueMock).toHaveBeenCalledWith(
+      expect.objectContaining({ officeId: "office-1" })
+    );
     expect(html).toContain("Office Ownership Queue");
     expect(html).toContain("Unassigned active records");
     expect(html).toContain("Reassign selected");
     expect(html).toContain("Northstar Expansion");
+    expect(html).toContain("Office");
+    expect(html).toContain("Record type");
+    expect(html).toContain("Reason code");
+    expect(html).toContain("Stage");
+    expect(html).toContain("Stale age");
+    expect(html).toContain("North Office");
   });
 });

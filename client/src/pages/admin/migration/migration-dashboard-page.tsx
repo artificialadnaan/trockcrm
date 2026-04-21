@@ -1,19 +1,22 @@
-import { CheckCircle2, XCircle, Clock, RefreshCw, Play, ArrowUpRight, Rows3 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { CheckCircle2, XCircle, Clock, RefreshCw, Play, ArrowUpRight, Rows3, Filter } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Link } from "react-router-dom";
 import { useAuth } from "@/lib/auth";
+import { useAdminOffices } from "@/hooks/use-admin-offices";
 import {
   bulkReassignOwnershipQueueRows,
   useMigrationSummary,
   useMigrationExceptions,
   useOfficeOwnershipQueue,
   type OwnershipQueueRow,
+  type OwnershipQueueFilters,
 } from "@/hooks/use-migration";
 import { OwnershipQueueTable } from "@/components/admin/ownership-queue-table";
 import { OwnershipReassignDialog } from "@/components/admin/ownership-reassign-dialog";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 
 const STATUS_COLORS: Record<string, string> = {
   valid: "bg-green-100 text-green-800",
@@ -129,9 +132,23 @@ function getOwnershipQueueRowKey(row: OwnershipQueueRow) {
   return `${row.recordType}:${row.recordId}`;
 }
 
+const RECORD_TYPE_OPTIONS = [
+  { value: "all", label: "All record types" },
+  { value: "lead", label: "Leads" },
+  { value: "deal", label: "Deals" },
+] as const;
+
+const STALE_AGE_OPTIONS = [
+  { value: "all", label: "All ages" },
+  { value: "7", label: "7+ days" },
+  { value: "14", label: "14+ days" },
+  { value: "30", label: "30+ days" },
+  { value: "60", label: "60+ days" },
+] as const;
+
 export function MigrationDashboardPage() {
   const { user } = useAuth();
-  const officeId = user?.activeOfficeId ?? user?.officeId;
+  const { offices } = useAdminOffices();
   const { summary, loading, error, refetch, runValidation } = useMigrationSummary();
   const {
     exceptions,
@@ -139,25 +156,87 @@ export function MigrationDashboardPage() {
     error: exceptionsError,
     refetch: refetchExceptions,
   } = useMigrationExceptions();
+  const activeOffices = useMemo(() => offices.filter((office) => office.isActive), [offices]);
+  const [selectedOfficeId, setSelectedOfficeId] = useState<string | undefined>(undefined);
+  const [recordTypeFilter, setRecordTypeFilter] = useState<"all" | "lead" | "deal">("all");
+  const [reasonCodeFilter, setReasonCodeFilter] = useState<string>("all");
+  const [stageNameFilter, setStageNameFilter] = useState<string>("all");
+  const [staleAgeFilter, setStaleAgeFilter] = useState<"all" | "7" | "14" | "30" | "60">("all");
+  const [officeFilterError, setOfficeFilterError] = useState<string | null>(null);
+  const officeId = selectedOfficeId ?? user?.activeOfficeId ?? user?.officeId;
+  const selectedOffice = useMemo(
+    () => offices.find((office) => office.id === officeId) ?? null,
+    [officeId, offices]
+  );
+  const selectedOfficeName = selectedOffice?.name ?? "selected office";
+  const ownershipFilters = useMemo(
+    () => ({
+      officeId,
+      recordType: recordTypeFilter,
+      reasonCode: reasonCodeFilter !== "all" ? reasonCodeFilter : undefined,
+      stageName: stageNameFilter !== "all" ? stageNameFilter : undefined,
+      staleAgeDays: staleAgeFilter === "all" ? "all" : Number(staleAgeFilter),
+    }) satisfies OwnershipQueueFilters,
+    [officeId, recordTypeFilter, reasonCodeFilter, stageNameFilter, staleAgeFilter]
+  );
   const {
     rows: ownershipRows,
     byReason: ownershipReasons,
     loading: ownershipLoading,
     error: ownershipError,
     refetch: refetchOwnershipQueue,
-  } = useOfficeOwnershipQueue(officeId);
+  } = useOfficeOwnershipQueue(ownershipFilters);
   const [validating, setValidating] = useState(false);
   const [selectedOwnershipKeys, setSelectedOwnershipKeys] = useState<Set<string>>(new Set());
   const [reassignOpen, setReassignOpen] = useState(false);
   const exceptionTotal = exceptions.reduce((sum, group) => sum + group.count, 0);
 
+  useEffect(() => {
+    if (selectedOfficeId) return;
+    if (officeId) {
+      setSelectedOfficeId(officeId);
+      return;
+    }
+    if (activeOffices.length > 0) {
+      setSelectedOfficeId(activeOffices[0]!.id);
+    }
+  }, [activeOffices, officeId, selectedOfficeId]);
+
+  useEffect(() => {
+    if (selectedOfficeId && !offices.some((office) => office.id === selectedOfficeId)) {
+      setOfficeFilterError("Selected office is no longer available.");
+      setSelectedOfficeId(undefined);
+      return;
+    }
+    setOfficeFilterError(null);
+  }, [offices, selectedOfficeId]);
+
+  const filteredOwnershipRows = useMemo(() => {
+    const stageOptions = stageNameFilter === "all" ? null : stageNameFilter;
+    const staleThreshold = staleAgeFilter === "all" ? null : Number(staleAgeFilter);
+    const now = Date.now();
+
+    return ownershipRows.filter((row) => {
+      if (recordTypeFilter !== "all" && row.recordType !== recordTypeFilter) return false;
+      if (reasonCodeFilter !== "all" && !row.reasonCodes.includes(reasonCodeFilter)) return false;
+      if (stageOptions && (row.stageName ?? "") !== stageOptions) return false;
+      if (staleThreshold != null) {
+        const timestamp = row.evaluatedAt ?? row.generatedAt;
+        if (!timestamp) return false;
+        const ageDays = (now - new Date(timestamp).getTime()) / (1000 * 60 * 60 * 24);
+        if (Number.isNaN(ageDays) || ageDays < staleThreshold) return false;
+      }
+      return true;
+    });
+  }, [ownershipRows, reasonCodeFilter, recordTypeFilter, stageNameFilter, staleAgeFilter]);
+
   const selectedOwnershipRows = useMemo(
-    () => ownershipRows.filter((row) => selectedOwnershipKeys.has(getOwnershipQueueRowKey(row))),
-    [ownershipRows, selectedOwnershipKeys]
+    () => filteredOwnershipRows.filter((row) => selectedOwnershipKeys.has(getOwnershipQueueRowKey(row))),
+    [filteredOwnershipRows, selectedOwnershipKeys]
   );
 
-  const allVisibleOwnershipSelected = ownershipRows.length > 0
-    && ownershipRows.every((row) => selectedOwnershipKeys.has(getOwnershipQueueRowKey(row)));
+  const allVisibleOwnershipSelected = filteredOwnershipRows.length > 0
+    && filteredOwnershipRows.every((row) => selectedOwnershipKeys.has(getOwnershipQueueRowKey(row)));
 
   const toggleOwnershipRow = (row: OwnershipQueueRow) => {
     const next = new Set(selectedOwnershipKeys);
@@ -173,7 +252,7 @@ export function MigrationDashboardPage() {
       return;
     }
 
-    setSelectedOwnershipKeys(new Set(ownershipRows.map((row) => getOwnershipQueueRowKey(row))));
+    setSelectedOwnershipKeys(new Set(filteredOwnershipRows.map((row) => getOwnershipQueueRowKey(row))));
   };
 
   const handleValidate = async () => {
@@ -202,6 +281,14 @@ export function MigrationDashboardPage() {
     setSelectedOwnershipKeys(new Set());
     await Promise.all([refetchOwnershipQueue(), refetch()]);
   };
+
+  const stageOptions = useMemo(() => {
+    const values = new Set<string>();
+    for (const row of ownershipRows) {
+      if (row.stageName) values.add(row.stageName);
+    }
+    return Array.from(values).sort((a, b) => a.localeCompare(b));
+  }, [ownershipRows]);
 
   return (
     <div className="space-y-6 max-w-5xl mx-auto">
@@ -274,6 +361,105 @@ export function MigrationDashboardPage() {
           </div>
         </CardHeader>
         <CardContent className="space-y-4">
+          <div className="grid gap-3 lg:grid-cols-5">
+            <div className="space-y-2">
+              <div className="flex items-center gap-2 text-xs font-medium uppercase tracking-wide text-slate-500">
+                <Filter className="h-3.5 w-3.5" />
+                Office
+              </div>
+              <Select value={selectedOfficeId ?? ""} onValueChange={(value) => setSelectedOfficeId(value || undefined)}>
+                <SelectTrigger className="w-full">
+                  <SelectValue placeholder={user?.activeOfficeId ? "Select office" : "Loading offices..."} />
+                </SelectTrigger>
+                <SelectContent>
+                  {activeOffices.map((office) => (
+                    <SelectItem key={office.id} value={office.id}>
+                      {office.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2">
+              <div className="text-xs font-medium uppercase tracking-wide text-slate-500">Record type</div>
+              <Select
+                value={recordTypeFilter}
+                onValueChange={(value) =>
+                  setRecordTypeFilter((value ?? "all") as typeof recordTypeFilter)
+                }
+              >
+                <SelectTrigger className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {RECORD_TYPE_OPTIONS.map((option) => (
+                    <SelectItem key={option.value} value={option.value}>
+                      {option.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2">
+              <div className="text-xs font-medium uppercase tracking-wide text-slate-500">Reason code</div>
+              <Select value={reasonCodeFilter} onValueChange={(value) => setReasonCodeFilter(value ?? "all")}>
+                <SelectTrigger className="w-full">
+                  <SelectValue placeholder="All reasons" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All reasons</SelectItem>
+                  {ownershipReasons.map((reason) => (
+                    <SelectItem key={reason.reasonCode} value={reason.reasonCode}>
+                      {reason.reasonCode.replace(/_/g, " ")}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2">
+              <div className="text-xs font-medium uppercase tracking-wide text-slate-500">Stage</div>
+              <Select value={stageNameFilter} onValueChange={(value) => setStageNameFilter(value ?? "all")}>
+                <SelectTrigger className="w-full">
+                  <SelectValue placeholder="All stages" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All stages</SelectItem>
+                  {stageOptions.map((stage) => (
+                    <SelectItem key={stage} value={stage}>
+                      {stage}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2">
+              <div className="text-xs font-medium uppercase tracking-wide text-slate-500">Stale age</div>
+              <Select
+                value={staleAgeFilter}
+                onValueChange={(value) =>
+                  setStaleAgeFilter((value ?? "all") as typeof staleAgeFilter)
+                }
+              >
+                <SelectTrigger className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {STALE_AGE_OPTIONS.map((option) => (
+                    <SelectItem key={option.value} value={option.value}>
+                      {option.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+
+          {officeFilterError && (
+            <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800">
+              {officeFilterError}
+            </div>
+          )}
+
           {ownershipError && (
             <div className="rounded-md border border-red-200 bg-red-50 p-4 text-sm text-red-800">
               {ownershipError}
@@ -294,7 +480,7 @@ export function MigrationDashboardPage() {
 
           <div className="rounded-xl border border-amber-100 bg-white/80 shadow-sm">
             <OwnershipQueueTable
-              rows={ownershipRows}
+              rows={filteredOwnershipRows}
               loading={ownershipLoading}
               selectedRowKeys={selectedOwnershipKeys}
               onToggleRow={toggleOwnershipRow}
@@ -308,7 +494,8 @@ export function MigrationDashboardPage() {
       <OwnershipReassignDialog
         open={reassignOpen}
         onOpenChange={setReassignOpen}
-        officeName="current office"
+        officeId={officeId}
+        officeName={selectedOfficeName}
         rows={selectedOwnershipRows}
         onReassign={handleReassignOwnershipRows}
       />
