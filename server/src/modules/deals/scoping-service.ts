@@ -120,7 +120,7 @@ function buildDealWritebackPatch(
   const updates: Partial<DealRow> = {};
 
   if (patch.workflowRoute !== undefined) {
-    updates.workflowRoute = patch.workflowRoute;
+    throw new AppError(400, "Use /api/deals/:id/routing-review for route changes");
   }
 
   if (patch.projectTypeId !== undefined) {
@@ -565,6 +565,10 @@ export async function upsertDealScopingIntake(
   patch: DealScopingPatch,
   userId: string
 ): Promise<DealScopingServiceResult> {
+  if (patch.workflowRoute !== undefined) {
+    throw new AppError(400, "Use /api/deals/:id/routing-review for route changes");
+  }
+
   const [deal, editor, existingIntake] = await Promise.all([
     getDealOrThrow(tenantDb, dealId),
     getUserOrThrow(tenantDb, userId),

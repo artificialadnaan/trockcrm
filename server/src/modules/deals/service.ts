@@ -2,6 +2,7 @@ import { eq, and, desc, asc, ilike, inArray, sql, or, isNull, not } from "drizzl
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
   deals,
+  dealRoutingHistory,
   dealStageHistory,
   dealApprovals,
   changeOrders,
@@ -18,6 +19,7 @@ import type * as schema from "@trock-crm/shared/schema";
 import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { getStageById } from "../pipeline/service.js";
+import { getDealDepartmentOwnership } from "./ownership-service.js";
 
 // Type alias for the tenant-scoped Drizzle instance
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -376,7 +378,9 @@ export async function getDealDetail(tenantDb: TenantDb, dealId: string, userRole
   const deal = await getDealById(tenantDb, dealId, userRole, userId);
   if (!deal) return null;
 
-  const [stageHistory, approvals, cos] = await Promise.all([
+  const currentStage = await getStageById(deal.stageId);
+
+  const [stageHistory, approvals, cos, routingHistory, departmentOwnership] = await Promise.all([
     tenantDb
       .select()
       .from(dealStageHistory)
@@ -392,6 +396,17 @@ export async function getDealDetail(tenantDb: TenantDb, dealId: string, userRole
       .from(changeOrders)
       .where(eq(changeOrders.dealId, dealId))
       .orderBy(asc(changeOrders.coNumber)),
+    tenantDb
+      .select()
+      .from(dealRoutingHistory)
+      .where(eq(dealRoutingHistory.dealId, dealId))
+      .orderBy(desc(dealRoutingHistory.createdAt)),
+    getDealDepartmentOwnership(tenantDb, {
+      dealId,
+      stageSlug: currentStage?.slug ?? null,
+      pipelineDisposition: deal.pipelineDisposition,
+      workflowRoute: deal.workflowRoute,
+    }),
   ]);
 
   return {
@@ -399,6 +414,8 @@ export async function getDealDetail(tenantDb: TenantDb, dealId: string, userRole
     stageHistory,
     approvals,
     changeOrders: cos,
+    routingHistory,
+    departmentOwnership,
   };
 }
 

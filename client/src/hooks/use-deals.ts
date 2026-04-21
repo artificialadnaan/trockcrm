@@ -4,6 +4,8 @@ import type { FileRecord } from "./use-files";
 
 export type WorkflowRoute = "estimating" | "service";
 export type DealScopingIntakeStatus = "draft" | "ready" | "activated";
+export type DealPipelineDisposition = "opportunity" | "deals" | "service";
+export type DealDepartment = "sales" | "estimating" | "client_services" | "operations";
 
 export interface DealScopingSectionData {
   [sectionKey: string]: unknown;
@@ -61,7 +63,8 @@ export interface Deal {
   dealNumber: string;
   name: string;
   stageId: string;
-  workflowRoute: WorkflowRoute;
+  pipelineDisposition: DealPipelineDisposition;
+  workflowRoute: WorkflowRoute | null;
   assignedRepId: string;
   companyId: string | null;
   propertyId: string | null;
@@ -140,6 +143,23 @@ export interface DealDetail extends Deal {
     createdAt: string;
     updatedAt: string;
   }>;
+  routingHistory: Array<{
+    id: string;
+    dealId: string;
+    fromWorkflowRoute: WorkflowRoute | null;
+    toWorkflowRoute: WorkflowRoute;
+    valueSource: string;
+    triggeringValue: string;
+    reason: string | null;
+    changedBy: string;
+    createdAt: string;
+  }>;
+  departmentOwnership: {
+    currentDepartment: DealDepartment;
+    acceptanceStatus: "pending" | "accepted";
+    effectiveOwnerUserId: string | null;
+    pendingDepartment: DealDepartment | null;
+  };
 }
 
 export interface DealFilters {
@@ -315,6 +335,20 @@ export async function patchDealScopingIntake(
     `/deals/${dealId}/scoping-intake`,
     { method: "PATCH", json: input }
   );
+}
+
+export async function applyOpportunityRoutingReview(
+  dealId: string,
+  input: {
+    valueSource: "sales_estimated_opportunity_value" | "procore_bidboard_estimate";
+    amount: string;
+    reason?: string;
+  }
+) {
+  return api<{ deal: Deal }>(`/deals/${dealId}/routing-review`, {
+    method: "POST",
+    json: input,
+  });
 }
 
 export async function getDealScopingReadiness(dealId: string) {

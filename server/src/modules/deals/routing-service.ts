@@ -1,6 +1,7 @@
 import { and, asc, eq, ne } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
+  dealDepartmentHandoffs,
   dealRoutingHistory,
   deals,
   pipelineStageConfig,
@@ -14,6 +15,7 @@ import type * as schema from "@trock-crm/shared/schema";
 import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { getStageBySlug } from "../pipeline/service.js";
+import { inferDealDepartment } from "./ownership-service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -101,6 +103,13 @@ export async function applyOpportunityRoutingReview(
   }
 
   const nextStage = await resolveEntryStageForDisposition(nextDisposition);
+  const [currentStage] = await db
+    .select({
+      slug: pipelineStageConfig.slug,
+    })
+    .from(pipelineStageConfig)
+    .where(eq(pipelineStageConfig.id, deal.stageId))
+    .limit(1);
   const [updatedDeal] = await tenantDb
     .update(deals)
     .set({
@@ -122,6 +131,26 @@ export async function applyOpportunityRoutingReview(
     changedBy: input.userId,
     createdAt: new Date(),
   });
+
+  const fromDepartment = inferDealDepartment({
+    stageSlug: currentStage?.slug ?? null,
+    pipelineDisposition: deal.pipelineDisposition,
+    workflowRoute: deal.workflowRoute,
+  });
+  const toDepartment = nextRoute === "service" ? "client_services" : "estimating";
+
+  if (fromDepartment !== toDepartment) {
+    await tenantDb.insert(dealDepartmentHandoffs).values({
+      dealId: deal.id,
+      fromDepartment,
+      toDepartment,
+      effectiveOwnerUserId: null,
+      acceptanceStatus: "pending",
+      notes: input.reason ?? null,
+      createdBy: input.userId,
+      createdAt: new Date(),
+    });
+  }
 
   return { deal: updatedDeal, changed: true };
 }
