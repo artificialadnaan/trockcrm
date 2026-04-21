@@ -163,12 +163,14 @@ Required linkage fields:
 
 - `deal_id`
 - `project_id`
-- `section_key` or equivalent section grouping field used by promotion
+- `estimate_section_name`
 - `source_document_id`, nullable for manual rows
 - `source_extraction_id`, nullable for inferred or manual rows
+- `source_row_identity`
 - `generation_run_id`
 - `selected_option_id`, nullable until selection exists
 - `promoted_estimate_line_item_id`, nullable until promotion exists
+- `manual_label`, nullable unless `source_type = 'manual'`
 
 Required option-row linkage fields:
 
@@ -176,6 +178,7 @@ Required option-row linkage fields:
 - `catalog_item_id`, nullable for free-text custom options
 - `local_catalog_item_id`, nullable unless sourced from local catalog
 - `rank`
+- `option_label`
 - `option_kind`:
   - `recommended`
   - `alternate`
@@ -188,6 +191,14 @@ Uniqueness and refresh rules:
 - rerunning generation creates a new generation run and a new recommendation set rather than mutating prior runs in place
 - dedupe within a single generation run uses the duplicate suppression rules in this spec
 - promotion idempotency is enforced by `promoted_estimate_line_item_id`; a row with that field set must not promote again
+
+`source_row_identity` definition:
+
+- for extracted rows: `extraction:<source_extraction_id>`
+- for inferred rows: `inferred:<normalized_intent>:<estimate_section_name>`
+- for manual rows: `manual:<recommendation_id>`
+
+This field must be persisted directly on the recommendation row so refresh and dedupe logic do not depend on nullable foreign keys alone.
 
 ## Local Catalog Model
 
@@ -365,17 +376,25 @@ Audit behavior:
 
 Promotion into the canonical estimate model must support both catalog-backed and manual rows.
 
+Section resolution contract:
+
+- recommendation rows persist `estimate_section_name` as the canonical section grouping field for this slice
+- promotion first looks up an existing estimate section for the deal by exact section name
+- if found, reuse it
+- if not found, create it
+- implementation should not invent an alternate section-key system for this slice
+
 Catalog-backed row mapping:
 
-- section is resolved from the recommendation row section key
+- section is resolved from `estimate_section_name`
 - description comes from the selected option label or catalog item name
 - quantity, unit, unit price, and total come from the selected or overridden values
 - notes include rationale and optionally selected catalog/source references
 
 Manual estimate-only row mapping:
 
-- section is resolved from the recommendation row section key
-- description comes from the manual row label
+- section is resolved from `estimate_section_name`
+- description comes from `manual_label`
 - quantity, unit, unit price, and total come from the estimator-entered manual values
 - no catalog id is required
 - notes should preserve that the row originated as `estimate_only`
@@ -418,7 +437,10 @@ Default row fields:
 - recommended unit price
 - recommended total
 - confidence
-- source badge: `extracted` or `inferred`
+- source badge:
+  - `extracted`
+  - `inferred`
+  - `manual`
 
 Evidence panel fields:
 
