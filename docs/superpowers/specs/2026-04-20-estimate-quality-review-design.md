@@ -102,12 +102,36 @@ These events should remain tied to the deal, source row, recommended option, cho
 
 This slice should not replace the current estimate generation tables. It should extend them to support ranked choices and manual additions.
 
-Likely additions:
+Source of truth for this slice:
+
+- the existing estimate tables remain the canonical final output
+- recommendation and review tables remain the source of truth for the pre-promotion workbench state
+- promotion into the canonical estimate model only happens after estimator approval, as in the current estimating workflow
+
+Concrete persistence model:
+
+- keep `estimate_pricing_recommendations` as the parent recommendation row for one scope item under review
+- add `estimate_pricing_recommendation_options` as child rows for ranked default and alternates
+- store inferred missing-scope suggestions as recommendation rows with `source_type = 'inferred'`
+- store manual-added rows as recommendation rows with `source_type = 'manual'`
+- keep estimator decision history in review-event tables rather than mutating canonical estimate rows directly
+
+Required additions:
 
 - recommendation-option records for one recommendation set with multiple ranked candidates
-- inferred-scope records or a typed flag on recommendation rows
-- manual-added-row records or typed recommendation rows authored by estimators
+- explicit source typing on recommendation rows:
+  - `extracted`
+  - `inferred`
+  - `manual`
 - local catalog source tagging for promoted custom rows
+- selected-option linkage from the parent recommendation to the chosen option or chosen manual row
+
+Write-path rules:
+
+- generation creates or refreshes recommendation rows and option rows only
+- estimator review mutates recommendation state and option selection state only
+- promotion writes approved recommendation outcomes into the canonical estimate model
+- canonical estimate rows are never edited directly by recommendation ranking actions
 
 Each recommendation option should carry:
 
@@ -123,6 +147,52 @@ Custom promoted catalog items should be distinguishable from synced Procore cata
 - `procore_synced`
 - `local_promoted`
 - `estimate_only`
+
+Parent recommendation rows should carry:
+
+- current review status
+- selected option id
+- selected source type
+- whether the row is promotable
+- whether the row has already been promoted
+- inference rationale summary for inferred rows
+
+## Local Catalog Model
+
+This slice assumes the existing synced catalog remains intact and adds a local extension layer rather than a separate catalog product.
+
+Persistence rules:
+
+- keep synced Procore items in the current catalog mirror
+- add local promoted items to the same searchable catalog read model with `catalog_source = 'local_promoted'`
+- custom rows that are not promoted remain `estimate_only` and are not globally searchable
+
+Server responsibilities:
+
+- catalog search endpoint returns both `procore_synced` and `local_promoted` results in one list
+- manual-add flow can create either:
+  - a catalog-backed recommendation row
+  - an estimate-only custom recommendation row
+- promote-to-local-catalog creates a reusable local catalog item immediately and links the originating recommendation row to that new local item
+
+Client responsibilities:
+
+- manual add defaults to catalog search first
+- custom free-text entry is a fallback when search is not sufficient
+- promoted custom items become searchable in future manual-add and ranking flows
+
+Minimum persisted fields for local promoted items:
+
+- source label
+- normalized name
+- optional description
+- default unit
+- optional default pricing hints
+- created from deal id
+- created from recommendation id
+- catalog source tag
+
+This slice does not require a separate approval queue or a separate local-catalog management UI.
 
 ## Ranking Logic
 
@@ -142,6 +212,28 @@ The system should output:
 - ranked alternates
 - explicit rationale fields rather than opaque confidence alone
 
+Deterministic ranking rules:
+
+- only options above a minimum eligibility threshold are shown
+- if multiple options are eligible, sort by:
+  1. total weighted score
+  2. historical selection frequency for similar jobs
+  3. tighter unit compatibility
+  4. lower absolute price deviation from historical median
+  5. stable id ordering as final tie-break
+- return at most one recommended default plus up to four alternates
+- suppress duplicate options that resolve to the same catalog item or same normalized custom item
+
+Deterministic scoring inputs for this slice:
+
+- catalog similarity score
+- historical co-occurrence score
+- historical acceptance score
+- unit compatibility score
+- price plausibility score
+
+Weights can be tuned later, but the implementation plan should treat the ordering above as the deterministic contract for tie-breaks and duplicate suppression.
+
 ## Missing Scope Logic
 
 Missing-scope detection should be allowed even when the item was not directly extracted from OCR, but inferred items must remain clearly labeled.
@@ -159,6 +251,65 @@ An inferred row should include:
 - which source rows/spec text/history supported it
 - confidence
 - its current review-required state
+
+Deterministic inference rules:
+
+- only infer a row if at least one explicit source signal exists and at least one historical or dependency signal supports it
+- do not infer duplicate rows when an extracted or already-manual row with the same normalized intent already exists
+- inferred rows default to `needs_review`
+- inferred rows never skip straight to approved pricing
+- inferred rows use the same ranked-option model as extracted rows once created
+
+Duplicate suppression order:
+
+1. exact normalized catalog intent match
+2. same selected catalog item id
+3. same normalized manual custom line label within the same section
+
+If a duplicate is detected, prefer the explicit extracted row over inferred scope.
+
+## Review Lifecycle
+
+Recommendation rows stay inside the workbench until promotion.
+
+States for parent recommendation rows:
+
+- `pending_review`
+- `accepted`
+- `alternate_selected`
+- `overridden`
+- `rejected`
+- `promoted`
+
+Allowed actions:
+
+- accept recommended:
+  - marks the parent row `accepted`
+  - records the recommended option as selected
+- switch to alternate:
+  - marks the parent row `alternate_selected`
+  - records the chosen alternate option id
+- override:
+  - marks the parent row `overridden`
+  - stores overridden quantity/unit/price values on the review outcome
+- reject:
+  - marks the parent row `rejected`
+  - keeps audit evidence but removes it from promotable output
+- add missing item:
+  - creates a new parent recommendation row with `source_type = 'manual'`
+  - optionally links it to a catalog-backed option or stores it as `estimate_only`
+- promote custom row to local catalog:
+  - creates a reusable local catalog item
+  - does not itself promote the line into the canonical estimate model
+
+Audit behavior:
+
+- every action emits a review event
+- review events store before/after state and selected option references
+- promotion into the canonical estimate model only reads rows in:
+  - `accepted`
+  - `alternate_selected`
+  - `overridden`
 
 ## Manual Add and Catalog Promotion
 
