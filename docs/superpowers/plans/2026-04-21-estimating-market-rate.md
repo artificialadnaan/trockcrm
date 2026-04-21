@@ -28,6 +28,8 @@
   Responsibility: apply market-rate adjustment helpers and shared pricing math.
 - Modify: `server/src/modules/estimating/draft-estimate-service.ts`
   Responsibility: persist market-rate-enriched pricing recommendations through the real generation path.
+- Modify: `worker/src/jobs/estimate-generation.ts`
+  Responsibility: wire market resolution and market-rate enrichment into the production estimate-generation job.
 - Modify: `server/src/modules/estimating/workbench-service.ts`
   Responsibility: expose resolved market context and market-rate rationale in workbench pricing rows.
 - Modify: `server/src/modules/deals/routes.ts`
@@ -46,6 +48,8 @@
   Responsibility: verify market override routes and review-event behavior.
 - Create: `server/tests/modules/estimating/market-rate-integration.test.ts`
   Responsibility: verify end-to-end generation enrichment and override-triggered refresh behavior.
+- Modify: `worker/tests/jobs/estimate-generation.test.ts`
+  Responsibility: verify the real generation worker persists market-rate-enriched recommendations.
 - Modify: `client/src/components/estimating/estimate-recommendation-options-panel.tsx`
   Responsibility: render market-rate evidence for the selected pricing row.
 - Modify: `client/src/components/estimating/estimating-workflow-shell.tsx`
@@ -147,8 +151,10 @@
 **Files:**
 - Modify: `server/src/modules/estimating/pricing-service.ts`
 - Modify: `server/src/modules/estimating/draft-estimate-service.ts`
+- Modify: `worker/src/jobs/estimate-generation.ts`
 - Modify: `server/tests/modules/estimating/pricing-service.test.ts`
 - Modify: `server/tests/modules/estimating/draft-estimate-service.test.ts`
+- Modify: `worker/tests/jobs/estimate-generation.test.ts`
 
 - [ ] **Step 1: Write failing pricing-service tests for market-rate enrichment**
   Cover:
@@ -163,22 +169,31 @@
   - evidence/assumptions fields capture resolved market and component adjustments
   - persisted recommendations still emit one final unit price and total
 
-- [ ] **Step 3: Run the focused generation tests and verify they fail**
+- [ ] **Step 3: Write failing worker tests for the production generation job**
+  Cover:
+  - `estimate_generation` uses resolved market context during recommendation generation
+  - worker-generated pricing rows persist market-rate-enriched values
+  - worker generation uses override market context when one exists
+
+- [ ] **Step 4: Run the focused generation tests and verify they fail**
   Run: `npx vitest run tests/modules/estimating/pricing-service.test.ts tests/modules/estimating/draft-estimate-service.test.ts`
+  Run: `npx vitest run tests/jobs/estimate-generation.test.ts`
   Expected: FAIL because market-rate enrichment is not wired into the stored recommendation generation path yet.
 
-- [ ] **Step 4: Integrate market-rate service into the actual recommendation generation path**
+- [ ] **Step 5: Integrate market-rate service into the actual recommendation generation path**
   Requirements:
   - keep historical/catalog price as the baseline
   - apply component adjustments to the baseline
   - store the adjusted price back on persisted pricing recommendations through `draft-estimate-service.ts`
+  - wire the same market-resolution inputs through `worker/src/jobs/estimate-generation.ts`
   - persist market-rate rationale into evidence/assumptions fields
 
-- [ ] **Step 5: Re-run the focused generation tests and verify they pass**
+- [ ] **Step 6: Re-run the focused generation tests and verify they pass**
   Run: `npx vitest run tests/modules/estimating/pricing-service.test.ts tests/modules/estimating/draft-estimate-service.test.ts`
+  Run: `npx vitest run tests/jobs/estimate-generation.test.ts`
   Expected: PASS
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
   `git commit -m "feat: enrich estimate pricing with market rates"`
 
 ## Task 4: Add Deal-Level Market Override Routes and Audit Flow
@@ -204,6 +219,7 @@
   - create or replace the deal override row
   - clear the override row cleanly
   - write estimating review events with before/after market context
+  - enqueue or rerun `estimate_generation` so pricing recommendations refresh after set/clear
   - return the refreshed effective market payload
 
 - [ ] **Step 4: Re-run the focused route tests and verify they pass**
@@ -289,24 +305,29 @@
 **Files:**
 - Create: `server/tests/modules/estimating/market-rate-integration.test.ts`
 - Modify: `server/tests/modules/estimating/workflow-state-routes.test.ts`
+- Modify: `worker/tests/jobs/estimate-generation.test.ts`
 
 - [ ] **Step 1: Write failing integration tests for generation enrichment and override refresh**
   Cover:
   - estimate generation persists market-rate-enriched recommendations end to end
   - a deal market override changes downstream pricing context on refresh or rerun
   - clearing the override restores auto-resolved geography on subsequent refreshes
+  - worker-side generation coverage proves the production job uses new market-resolution inputs
 
 - [ ] **Step 2: Run the focused integration tests and verify they fail**
   Run: `npx vitest run tests/modules/estimating/market-rate-integration.test.ts tests/modules/estimating/workflow-state-routes.test.ts`
+  Run: `npx vitest run tests/jobs/estimate-generation.test.ts`
   Expected: FAIL because end-to-end market-rate generation and override-refresh coverage is not implemented yet.
 
 - [ ] **Step 3: Add the missing integration fixtures or wiring needed by the tests**
   Requirements:
   - generation fixtures exercise resolved market selection and persisted evidence
   - override route tests confirm refreshed workbench state reflects the new market context
+  - worker fixtures confirm the live generation path uses the override-triggered rerun flow
 
 - [ ] **Step 4: Re-run the focused integration tests and verify they pass**
   Run: `npx vitest run tests/modules/estimating/market-rate-integration.test.ts tests/modules/estimating/workflow-state-routes.test.ts`
+  Run: `npx vitest run tests/jobs/estimate-generation.test.ts`
   Expected: PASS
 
 - [ ] **Step 5: Commit**
