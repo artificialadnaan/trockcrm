@@ -32,6 +32,11 @@ describe("RepDashboardPage", () => {
         followUpCompliance: { total: 3, onTime: 2, complianceRate: 67 },
         pipelineByStage: [],
         staleLeads: { count: 1, averageDaysInStage: 8, leads: [] },
+        commissionSummary: {
+          totalEarnedCommission: 12000,
+          potentialCommission: 18000,
+          floorRemaining: 3000,
+        },
       },
     });
     mocks.useDealBoardMock.mockReturnValue({ board: { columns: [] } });

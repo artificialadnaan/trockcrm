@@ -27,6 +27,15 @@ describe("DirectorDashboardPage", () => {
       error: null,
       data: {
         repCards: [],
+        repCommissionRows: [
+          {
+            repId: "rep-1",
+            repName: "Rep One",
+            totalEarnedCommission: 12000,
+            potentialCommission: 18000,
+            floorRemaining: 3000,
+          },
+        ],
         pipelineByStage: [],
         winRateTrend: [],
         activityByRep: [],
