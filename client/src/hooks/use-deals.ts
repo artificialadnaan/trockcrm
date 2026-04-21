@@ -220,6 +220,37 @@ export interface DealStagePageResponse {
   rows: Deal[];
 }
 
+interface DealBoardApiColumn extends Omit<DealBoardColumn, "cards"> {
+  deals?: Deal[];
+  cards?: Deal[];
+}
+
+interface DealBoardApiResponse {
+  pipelineColumns: Array<{
+    stage: DealBoardColumn["stage"];
+    count: number;
+    totalValue: number;
+    deals: Deal[];
+  }>;
+  terminalStages: DealBoardResponse["terminalStages"];
+  columns?: DealBoardApiColumn[];
+}
+
+export function normalizeDealBoardResponse(result: DealBoardApiResponse): DealBoardResponse {
+  const normalizedColumns = (result.columns ?? result.pipelineColumns).map((column) => {
+    const sourceColumn = column as DealBoardApiColumn;
+    return {
+      ...column,
+      cards: sourceColumn.cards ?? sourceColumn.deals ?? [],
+    };
+  });
+
+  return {
+    columns: normalizedColumns,
+    terminalStages: result.terminalStages ?? [],
+  };
+}
+
 export function useDeals(filters: DealFilters = {}) {
   const [deals, setDeals] = useState<Deal[]>([]);
   const [pagination, setPagination] = useState<Pagination>({ page: 1, limit: 50, total: 0, totalPages: 0 });
@@ -384,26 +415,9 @@ export function useDealBoard(scope: "mine" | "team" | "all", includeDd: boolean)
 
   const refetch = useCallback(() => {
     setLoading(true);
-    return api<{
-      pipelineColumns: Array<{
-        stage: DealBoardColumn["stage"];
-        count: number;
-        totalValue: number;
-        deals: Deal[];
-      }>;
-      terminalStages: DealBoardResponse["terminalStages"];
-      columns?: DealBoardColumn[];
-    }>(`/deals/pipeline?scope=${scope}&includeDd=${includeDd}`)
+    return api<DealBoardApiResponse>(`/deals/pipeline?scope=${scope}&includeDd=${includeDd}`)
       .then((result) => {
-        const normalized: DealBoardResponse = {
-          columns:
-            result.columns ??
-            result.pipelineColumns.map((column) => ({
-              ...column,
-              cards: column.deals,
-            })),
-          terminalStages: result.terminalStages ?? [],
-        };
+        const normalized = normalizeDealBoardResponse(result);
         setBoard(normalized);
         return normalized;
       })
