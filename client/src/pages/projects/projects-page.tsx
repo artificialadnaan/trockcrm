@@ -120,7 +120,7 @@ export function ProjectsPage() {
               <TableRow key={project.id}>
                 <TableCell>
                   <Link
-                    to={`/deals/${project.id}`}
+                    to={`/projects/${project.id}`}
                     className="font-mono text-sm text-blue-600 hover:underline"
                   >
                     {project.deal_number}

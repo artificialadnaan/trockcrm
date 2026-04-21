@@ -57,6 +57,7 @@ import { CompanyCamPage } from "@/pages/admin/companycam-page";
 import { PhotoCapturePage } from "@/pages/photos/photo-capture-page";
 import { PhotoFeedPage } from "@/pages/photos/photo-feed-page";
 import { PipelineHygienePage } from "@/pages/pipeline/pipeline-hygiene-page";
+import { ProjectDetailPage } from "@/pages/projects/project-detail-page";
 import { Toaster } from "@/components/ui/sonner";
 
 function HomePage() {
@@ -115,6 +116,7 @@ export function App() {
               <Route path="/sales-review" element={<SalesReviewPage />} />
               <Route path="/pipeline/hygiene" element={<PipelineHygienePage />} />
               <Route path="/projects" element={<ProjectsPage />} />
+              <Route path="/projects/:id" element={<ProjectDetailPage />} />
               <Route
                 path="/director"
                 element={(
