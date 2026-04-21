@@ -95,6 +95,16 @@ Owner resolution should follow this order:
 
 The system should not use fuzzy name matching.
 
+The owner-ID mapping is global to the HubSpot owner, not office-scoped. `hubspot_owner_mappings.hubspot_owner_id` should be unique across the whole system. Each HubSpot owner ID may resolve to at most one CRM user at a time.
+
+If one HubSpot owner appears to map to multiple candidate CRM users, multiple offices, or any other conflicting identity state, the mapping row must remain unresolved:
+
+- `user_id = null`
+- `mapping_status = conflict`
+- `failure_reason_code = duplicate_user_match` or `cross_office_conflict`
+
+Those conflicts belong in the admin exception lane, not the normal office ownership queue.
+
 ### Assignment Rules
 
 - Active lead/deal with valid mapped owner: set `assignedRepId` to that CRM user.
@@ -130,6 +140,8 @@ That table should store:
 - mapping status
 - failure reason code
 - timestamps for last seen and last updated
+
+The table should enforce a unique key on `hubspot_owner_id`. It should not allow one HubSpot owner ID to point at multiple CRM users through office-scoped duplicates.
 
 ## Cleanup Evaluation Model
 
@@ -207,6 +219,15 @@ Expected behavior:
 
 Reps must not have access to bulk reassignment.
 
+Assignee eligibility must be tied to the queue row's office:
+
+- the selected assignee must be an active CRM user with access to that record's office
+- a director may only reassign rows from offices they can access
+- a director with access to multiple offices may still only choose assignees valid for the selected row's office
+- admins may reassign across offices, but the chosen assignee must still have access to the target row's office
+
+The UI should therefore use an office-filtered assignee list for bulk reassignment rather than a global office-agnostic picker.
+
 ## Sync Behavior
 
 Phase 1 needs two admin operations:
@@ -229,6 +250,17 @@ Returns counts and examples without mutating records:
 Runs the same evaluation and writes ownership metadata and assignments to active leads and deals.
 
 The sync should be rerunnable and idempotent. Re-running it should not create duplicate reassignment side effects when ownership did not actually change.
+
+Manual reassignment must take precedence over later HubSpot refreshes in Phase 1.
+
+When a director or admin resolves an ownership queue row manually:
+
+- `assignedRepId` is updated to the chosen CRM user
+- `ownershipSyncStatus` becomes `manual_override`
+- the latest HubSpot owner metadata may still be refreshed on rerun
+- but rerun sync must not overwrite `assignedRepId` while the record remains in `manual_override`
+
+If leadership wants to restore HubSpot-driven ownership later, that should require an explicit admin action in a later slice rather than an automatic rerun side effect.
 
 ## Access Control
 
