@@ -14,6 +14,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Badge } from "@/components/ui/badge";
 import type { OfficeAssignee, OwnershipQueueRow } from "@/hooks/use-migration";
 import { getOwnershipQueueRowKey } from "./ownership-queue-table";
+import { normalizeAssigneeSelection } from "./ownership-reassign-selection";
 
 interface OwnershipReassignDialogProps {
   open: boolean;
@@ -54,6 +55,7 @@ export function OwnershipReassignDialog({
     const loadAssignees = async () => {
       setLoadingAssignees(true);
       setError(null);
+      setAssigneeId("");
       try {
         const data = await api<{ users: OfficeAssignee[] }>("/tasks/assignees", {
           headers: officeId ? { "x-office-id": officeId } : undefined,
@@ -61,9 +63,7 @@ export function OwnershipReassignDialog({
         const nextUsers = data.users ?? [];
         if (!ignore) {
           setAssignees(nextUsers);
-          if (nextUsers.length > 0) {
-            setAssigneeId((current) => current || nextUsers[0]!.id);
-          }
+          setAssigneeId((current) => normalizeAssigneeSelection(current, nextUsers));
         }
       } catch (err) {
         if (!ignore) {
@@ -84,6 +84,7 @@ export function OwnershipReassignDialog({
   useEffect(() => {
     if (!open) {
       setAssigneeId("");
+      setAssignees([]);
       setError(null);
       setSubmitting(false);
     }

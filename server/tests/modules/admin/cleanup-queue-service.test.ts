@@ -331,6 +331,8 @@ describe("cleanup queue service", () => {
         {
           id: "deal-1",
           name: "Office Deal",
+          stageId: "stage-deal-4",
+          stageName: "Estimating",
           assignedRepId: null,
           decisionMakerName: null,
           budgetStatus: null,
@@ -349,6 +351,8 @@ describe("cleanup queue service", () => {
         {
           id: "lead-1",
           name: "Office Lead",
+          stageId: "stage-lead-3",
+          stageName: "Lead Qualification",
           assignedRepId: null,
           decisionMakerName: null,
           budgetStatus: null,
@@ -405,6 +409,8 @@ describe("cleanup queue service", () => {
         {
           id: "deal-99",
           name: "Clean Deal",
+          stageId: "stage-deal-5",
+          stageName: "Estimating",
           assignedRepId: "rep-1",
           decisionMakerName: "Taylor",
           budgetStatus: "confirmed",
@@ -441,6 +447,8 @@ describe("cleanup queue service", () => {
         {
           id: "deal-zero",
           name: "Zero Confidence Deal",
+          stageId: "stage-deal-6",
+          stageName: "Estimating",
           assignedRepId: "rep-1",
           decisionMakerName: "Taylor",
           budgetStatus: null,

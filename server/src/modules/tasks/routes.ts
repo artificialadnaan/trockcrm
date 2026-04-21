@@ -40,7 +40,7 @@ router.get("/assignees", async (req, res, next) => {
     if (requestedOfficeId && !accessibleOffices.some((office) => office.id === requestedOfficeId)) {
       throw new AppError(403, "Requested office is not accessible");
     }
-    const rows = await listUsers(officeId);
+    const rows = (await listUsers(officeId)) as Array<{ id: string; displayName: string; isActive: boolean }>;
     const users = rows
       .filter((u) => u.isActive)
       .map((u) => ({ id: u.id, displayName: u.displayName }));

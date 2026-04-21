@@ -4,21 +4,53 @@ import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 
 export async function listUsers(officeId?: string) {
-  const rows = await db
-    .select({
-      id: users.id,
-      email: users.email,
-      displayName: users.displayName,
-      role: users.role,
-      officeId: users.officeId,
-      isActive: users.isActive,
-      createdAt: users.createdAt,
-    })
-    .from(users)
-    .where(officeId ? eq(users.officeId, officeId) : undefined)
-    .orderBy(asc(users.displayName));
+  const rows = officeId
+    ? await db.execute(sql`
+        SELECT
+          u.id,
+          u.email,
+          u.display_name,
+          u.role,
+          u.office_id,
+          u.is_active,
+          u.created_at
+        FROM users u
+        WHERE u.office_id = ${officeId}
+          OR EXISTS (
+            SELECT 1
+            FROM user_office_access uoa
+            WHERE uoa.user_id = u.id
+              AND uoa.office_id = ${officeId}
+          )
+        ORDER BY u.display_name ASC
+      `)
+    : await db
+        .select({
+          id: users.id,
+          email: users.email,
+          displayName: users.displayName,
+          role: users.role,
+          officeId: users.officeId,
+          isActive: users.isActive,
+          createdAt: users.createdAt,
+        })
+        .from(users)
+        .orderBy(asc(users.displayName));
 
-  return rows;
+  const resultRows = (rows as any).rows ?? rows;
+  return resultRows.map((row: any) =>
+    officeId
+      ? {
+          id: row.id,
+          email: row.email,
+          displayName: row.display_name,
+          role: row.role,
+          officeId: row.office_id,
+          isActive: row.is_active,
+          createdAt: row.created_at,
+        }
+      : row
+  );
 }
 
 export async function getUserById(id: string) {
