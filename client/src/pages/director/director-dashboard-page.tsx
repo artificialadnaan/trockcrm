@@ -223,7 +223,7 @@ function DirectorDashboardPageLayout({
             <DirectorAlertPanel staleDeals={data.staleDeals} staleLeads={data.staleLeads} />
             <div className="flex flex-wrap gap-2">
               <NavigationLink
-                to="/reports/stale-deals"
+                to="/deals?filter=stale"
                 className="inline-flex items-center rounded-full border border-amber-200 bg-white px-4 py-2 text-sm font-semibold text-amber-700 transition hover:border-amber-300 hover:text-amber-900"
               >
                 Review stale deals

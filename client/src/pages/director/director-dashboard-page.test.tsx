@@ -197,7 +197,7 @@ describe("DirectorDashboardPage", () => {
     expect(html).toContain('data-router-link="true"');
     expect(html).toContain('data-to="/reports"');
     expect(html).toContain('data-to="/admin/ai-actions"');
-    expect(html).toContain('data-to="/reports/stale-deals"');
+    expect(html).toContain('data-to="/deals?filter=stale"');
     expect(html).toContain('data-to="/reports"');
     expect(navigateSpy).toHaveBeenCalledWith("/director/rep/rep-1");
   });
