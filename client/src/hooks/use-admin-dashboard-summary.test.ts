@@ -301,8 +301,12 @@ describe("useAdminDashboardSummary", () => {
   });
 
   it("does not surface a failing operational signal as an all-clear result", async () => {
+    vi.spyOn(Date, "now").mockReturnValue(new Date("2026-04-20T05:30:00.000Z").getTime());
+    let auditPath: string | null = null;
+
     apiMock.mockImplementation(async (path: string) => {
       if (path.startsWith("/admin/audit?")) {
+        auditPath = path;
         return {
           rows: [],
           total: 325,
@@ -320,6 +324,10 @@ describe("useAdminDashboardSummary", () => {
     await waitForIdle();
 
     expect(latestResult?.loading).toBe(false);
+    expect(auditPath).not.toBeNull();
+    expect(new URL(auditPath!, "https://example.test").searchParams.get("fromDate")).toBe(
+      "2026-04-19T05:30:00.000Z"
+    );
     expect(latestResult?.summary.kpis[1]).toEqual(
       expect.objectContaining({
         label: "System health",
