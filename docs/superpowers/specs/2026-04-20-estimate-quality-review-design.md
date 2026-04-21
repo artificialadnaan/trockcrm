@@ -171,6 +171,10 @@ Required linkage fields:
 - `selected_option_id`, nullable until selection exists
 - `promoted_estimate_line_item_id`, nullable until promotion exists
 - `manual_label`, nullable unless `source_type = 'manual'`
+- `manual_quantity`, nullable unless `source_type = 'manual'`
+- `manual_unit`, nullable unless `source_type = 'manual'`
+- `manual_unit_price`, nullable unless `source_type = 'manual'`
+- `manual_notes`, nullable unless `source_type = 'manual'`
 
 Required option-row linkage fields:
 
@@ -196,7 +200,7 @@ Uniqueness and refresh rules:
 
 - for extracted rows: `extraction:<source_extraction_id>`
 - for inferred rows: `inferred:<normalized_intent>:<estimate_section_name>`
-- for manual rows: `manual:<recommendation_id>`
+- for manual rows: `manual:<normalized_intent>:<estimate_section_name>:<manual_label>`
 
 This field must be persisted directly on the recommendation row so refresh and dedupe logic do not depend on nullable foreign keys alone.
 
@@ -204,10 +208,18 @@ This field must be persisted directly on the recommendation row so refresh and d
 
 This slice assumes the existing synced catalog remains intact and adds a local extension layer rather than a separate catalog product.
 
+Concrete persistence target:
+
+- keep Procore-synced catalog records in the current public catalog source/version model
+- add a new tenant-scoped table for local promoted catalog items rather than forcing them into the public source/version sync model
+- unified catalog search merges:
+  - public Procore-synced catalog search results
+  - tenant-scoped local promoted catalog item results
+
 Persistence rules:
 
 - keep synced Procore items in the current catalog mirror
-- add local promoted items to the same searchable catalog read model with `catalog_source = 'local_promoted'`
+- add local promoted items to a tenant-scoped local catalog table with `catalog_source = 'local_promoted'`
 - custom rows that are not promoted remain `estimate_only` and are not globally searchable
 
 Server responsibilities:
@@ -227,6 +239,7 @@ Client responsibilities:
 Minimum persisted fields for local promoted items:
 
 - office id / tenant scope
+- source type = `local_promoted`
 - source label
 - normalized name
 - optional description
@@ -303,6 +316,10 @@ Deterministic inference rules:
 - inferred rows default to `needs_review`
 - inferred rows never skip straight to approved pricing
 - inferred rows use the same ranked-option model as extracted rows once created
+
+Persistence rule:
+
+- `needs_review` is the presentation label for the persisted parent-row state `pending_review`
 
 Duplicate suppression order:
 
@@ -420,6 +437,11 @@ Manual add flow:
 - catalog-first search against synced and local catalog items
 - free-text custom fallback
 - editable quantity, unit, unit price, and notes
+
+Manual recommendation persistence:
+
+- free-text manual rows persist `manual_label`, `manual_quantity`, `manual_unit`, `manual_unit_price`, and `manual_notes` on the parent recommendation row before promotion
+- if a manual row is later promoted to the local catalog, the new local catalog item is created from those persisted manual fields
 
 Custom lines can be promoted immediately into the local catalog for reuse later. This is acceptable for the current demonstrative scope and avoids introducing approval workflow complexity in this slice.
 
