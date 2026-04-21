@@ -51,6 +51,8 @@ interface OwnerMappingCandidate {
   email?: string;
 }
 
+type OwnershipSyncWriteClient = Pick<typeof db, "execute">;
+
 function getRows<T>(result: unknown): T[] {
   if (!result) return [];
   if (Array.isArray(result)) return result as T[];
@@ -131,13 +133,14 @@ async function fetchAllUsersForSync(): Promise<SyncUserRow[]> {
 }
 
 async function upsertOwnerMapping(
+  client: OwnershipSyncWriteClient,
   owner: OwnerMappingCandidate,
   ownerEmail: string | null,
   mappingStatus: OwnershipSyncStatus,
   failureReasonCode: string | null,
   matchedUser: SyncUserRow | null
 ) {
-  await db.execute(sql`
+  await client.execute(sql`
     INSERT INTO public.hubspot_owner_mappings (
       hubspot_owner_id,
       hubspot_owner_email,
@@ -173,6 +176,7 @@ async function upsertOwnerMapping(
 }
 
 async function updateTargetRow(
+  client: OwnershipSyncWriteClient,
   recordType: OwnershipRecordType,
   row: OwnershipTargetRow,
   owner: OwnerMappingCandidate,
@@ -183,7 +187,7 @@ async function updateTargetRow(
 ) {
   const table = recordType === "deal" ? sql.raw("deals") : sql.raw("leads");
   if (mappingStatus === "matched" && matchedUser) {
-    await db.execute(sql`
+    await client.execute(sql`
       UPDATE ${table}
       SET assigned_rep_id = ${matchedUser.id},
           hubspot_owner_id = ${owner.id},
@@ -199,7 +203,7 @@ async function updateTargetRow(
     return;
   }
 
-  await db.execute(sql`
+  await client.execute(sql`
     UPDATE ${table}
     SET hubspot_owner_id = ${owner.id},
         hubspot_owner_email = ${ownerEmail},
@@ -316,107 +320,118 @@ export async function runOwnershipSync(input: { dryRun?: boolean } = {}): Promis
     ...[...recordOwnerIds].filter((ownerId) => !ownerById.has(ownerId)).map((ownerId) => ({ id: ownerId })),
   ];
 
-  for (const owner of orderedOwners) {
-    const ownerEmail = normalizeHubSpotOwnerEmail(owner);
-    const activeMatches = ownerEmail ? activeUsersByEmail.get(ownerEmail) ?? [] : [];
-    const inactiveMatches = ownerEmail
-      ? (allUsersByEmail.get(ownerEmail) ?? []).filter((user) => !user.isActive)
-      : [];
+  const runSync = async (writeClient?: OwnershipSyncWriteClient) => {
+    for (const owner of orderedOwners) {
+      const ownerEmail = normalizeHubSpotOwnerEmail(owner);
+      const activeMatches = ownerEmail ? activeUsersByEmail.get(ownerEmail) ?? [] : [];
+      const inactiveMatches = ownerEmail
+        ? (allUsersByEmail.get(ownerEmail) ?? []).filter((user) => !user.isActive)
+        : [];
 
-    let mappingStatus: OwnershipSyncStatus = "unmatched";
-    let failureReasonCode: string | null = "owner_mapping_failure";
-    let matchedUser: SyncUserRow | null = null;
+      let mappingStatus: OwnershipSyncStatus = "unmatched";
+      let failureReasonCode: string | null = "owner_mapping_failure";
+      let matchedUser: SyncUserRow | null = null;
 
-    if (activeMatches.length === 1) {
-      mappingStatus = "matched";
-      failureReasonCode = null;
-      matchedUser = activeMatches[0];
-    } else if (activeMatches.length > 1) {
-      mappingStatus = "conflict";
-      failureReasonCode = "duplicate_user_match";
-    } else if (inactiveMatches.length > 0) {
-      mappingStatus = "conflict";
-      failureReasonCode = "inactive_owner_match";
-    }
+      if (activeMatches.length === 1) {
+        mappingStatus = "matched";
+        failureReasonCode = null;
+        matchedUser = activeMatches[0];
+      } else if (activeMatches.length > 1) {
+        mappingStatus = "conflict";
+        failureReasonCode = "duplicate_user_match";
+      } else if (inactiveMatches.length > 0) {
+        mappingStatus = "conflict";
+        failureReasonCode = "inactive_owner_match";
+      }
 
-    if (!dryRun) {
-      await upsertOwnerMapping(owner, ownerEmail, mappingStatus, failureReasonCode, matchedUser);
-    }
+      if (writeClient) {
+        await upsertOwnerMapping(writeClient, owner, ownerEmail, mappingStatus, failureReasonCode, matchedUser);
+      }
 
-    const recordTypes: OwnershipRecordType[] = ["deal", "lead"];
-    for (const recordType of recordTypes) {
-      const rows = await fetchRowsForOwner(recordType, owner.id);
-      for (const row of rows) {
-        if (row.ownershipSyncStatus === "manual_override") {
-          result.unchanged++;
-          pushExample(
-            result.examples.matched,
-            createExample(recordType, row, owner, ownerEmail, "matched", "manual_override", row.assignedRepId)
-          );
-          continue;
-        }
-
-        if (mappingStatus === "matched" && matchedUser) {
-          pushExample(
-            result.examples.matched,
-            createExample(recordType, row, owner, ownerEmail, mappingStatus, null, matchedUser.id)
-          );
-          if (rowMatchesMatchedState(row, ownerEmail, matchedUser)) {
+      const recordTypes: OwnershipRecordType[] = ["deal", "lead"];
+      for (const recordType of recordTypes) {
+        const rows = await fetchRowsForOwner(recordType, owner.id);
+        for (const row of rows) {
+          if (row.ownershipSyncStatus === "manual_override") {
             result.unchanged++;
+            pushExample(
+              result.examples.matched,
+              createExample(recordType, row, owner, ownerEmail, "matched", "manual_override", row.assignedRepId)
+            );
             continue;
           }
 
-          result.assigned++;
-          if (!dryRun) {
-            await updateTargetRow(recordType, row, owner, ownerEmail, mappingStatus, failureReasonCode, matchedUser);
-          }
-          continue;
-        }
+          if (mappingStatus === "matched" && matchedUser) {
+            pushExample(
+              result.examples.matched,
+              createExample(recordType, row, owner, ownerEmail, mappingStatus, null, matchedUser.id)
+            );
+            if (rowMatchesMatchedState(row, ownerEmail, matchedUser)) {
+              result.unchanged++;
+              continue;
+            }
 
-        if (rowMatchesUnresolvedState(row, ownerEmail, mappingStatus as "unmatched" | "conflict", failureReasonCode)) {
-          result.unchanged++;
-          const example = createExample(
-            recordType,
-            row,
-            owner,
-            ownerEmail,
-            mappingStatus,
-            failureReasonCode,
-            row.assignedRepId
-          );
+            result.assigned++;
+            if (writeClient) {
+              await updateTargetRow(writeClient, recordType, row, owner, ownerEmail, mappingStatus, failureReasonCode, matchedUser);
+            }
+            continue;
+          }
+
+          if (rowMatchesUnresolvedState(row, ownerEmail, mappingStatus as "unmatched" | "conflict", failureReasonCode)) {
+            result.unchanged++;
+            const example = createExample(
+              recordType,
+              row,
+              owner,
+              ownerEmail,
+              mappingStatus,
+              failureReasonCode,
+              row.assignedRepId
+            );
+            if (mappingStatus === "conflict") {
+              pushExample(result.examples.conflicts, example);
+              if (failureReasonCode === "inactive_owner_match") {
+                pushExample(result.examples.inactiveUserConflicts, example);
+              }
+            } else {
+              pushExample(result.examples.unmatched, example);
+            }
+            continue;
+          }
+
           if (mappingStatus === "conflict") {
+            result.conflicts++;
+            const example = createExample(recordType, row, owner, ownerEmail, mappingStatus, failureReasonCode, null);
             pushExample(result.examples.conflicts, example);
             if (failureReasonCode === "inactive_owner_match") {
+              result.inactiveUserConflicts++;
               pushExample(result.examples.inactiveUserConflicts, example);
             }
           } else {
-            pushExample(result.examples.unmatched, example);
+            result.unmatched++;
+            pushExample(
+              result.examples.unmatched,
+              createExample(recordType, row, owner, ownerEmail, mappingStatus, failureReasonCode, null)
+            );
           }
-          continue;
-        }
 
-        if (mappingStatus === "conflict") {
-          result.conflicts++;
-          const example = createExample(recordType, row, owner, ownerEmail, mappingStatus, failureReasonCode, null);
-          pushExample(result.examples.conflicts, example);
-          if (failureReasonCode === "inactive_owner_match") {
-            result.inactiveUserConflicts++;
-            pushExample(result.examples.inactiveUserConflicts, example);
+          if (writeClient) {
+            await updateTargetRow(writeClient, recordType, row, owner, ownerEmail, mappingStatus, failureReasonCode, null);
           }
-        } else {
-          result.unmatched++;
-          pushExample(
-            result.examples.unmatched,
-            createExample(recordType, row, owner, ownerEmail, mappingStatus, failureReasonCode, null)
-          );
-        }
-
-        if (!dryRun) {
-          await updateTargetRow(recordType, row, owner, ownerEmail, mappingStatus, failureReasonCode, null);
         }
       }
     }
+  };
+
+  if (dryRun) {
+    await runSync();
+    return result;
   }
+
+  await db.transaction(async (tx) => {
+    await runSync(tx);
+  });
 
   return result;
 }

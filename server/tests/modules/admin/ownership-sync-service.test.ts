@@ -9,10 +9,12 @@ import { leads } from "../../../../shared/src/schema/tenant/leads.js";
 
 const {
   dbExecuteMock,
+  dbTransactionMock,
   fetchAllOwnersMock,
   listActiveUsersWithOfficeAccessMock,
 } = vi.hoisted(() => ({
   dbExecuteMock: vi.fn(),
+  dbTransactionMock: vi.fn(),
   fetchAllOwnersMock: vi.fn(),
   listActiveUsersWithOfficeAccessMock: vi.fn(),
 }));
@@ -20,6 +22,7 @@ const {
 vi.mock("../../../../server/src/db.js", () => ({
   db: {
     execute: dbExecuteMock,
+    transaction: dbTransactionMock,
   },
 }));
 
@@ -48,6 +51,7 @@ import { normalizeHubSpotOwnerEmail } from "../../../../server/src/modules/migra
 
 beforeEach(() => {
   dbExecuteMock.mockReset();
+  dbTransactionMock.mockReset();
   fetchAllOwnersMock.mockReset();
   listActiveUsersWithOfficeAccessMock.mockReset();
 });
@@ -78,6 +82,10 @@ function createExecuteImplementation(options: {
 }) {
   const updateQueries: string[] = [];
   const writeQueries: string[] = [];
+
+  dbTransactionMock.mockImplementation(async (callback: (client: { execute: typeof dbExecuteMock }) => Promise<unknown>) => {
+    await callback({ execute: dbExecuteMock });
+  });
 
   dbExecuteMock.mockImplementation(async (query: unknown) => {
     const text = extractSqlText(query).replace(/\s+/g, " ").trim().toLowerCase();
@@ -319,6 +327,7 @@ describe("ownership sync service", () => {
     });
     expect(updateQueries).toHaveLength(0);
     expect(writeQueries).toHaveLength(0);
+    expect(dbTransactionMock).not.toHaveBeenCalled();
   });
 
   it("applies matched ownership and preserves manual overrides on rerun", async () => {
@@ -390,5 +399,6 @@ describe("ownership sync service", () => {
     expect(result.inactiveUserConflicts).toBe(0);
     expect(updateQueries.some((query) => query.includes("update deals"))).toBe(true);
     expect(updateQueries.some((query) => query.includes("update leads") && query.includes("lead-2"))).toBe(false);
+    expect(dbTransactionMock).toHaveBeenCalledOnce();
   });
 });
