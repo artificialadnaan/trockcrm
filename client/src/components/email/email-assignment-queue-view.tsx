@@ -19,6 +19,11 @@ export interface EmailAssignmentQueuePropertyCandidate {
   relatedDealIds: string[];
 }
 
+export interface EmailAssignmentQueueCompanyCandidate {
+  id: string;
+  name: string;
+}
+
 export interface EmailAssignmentQueueItem {
   email: {
     id: string;
@@ -33,6 +38,7 @@ export interface EmailAssignmentQueueItem {
   candidateDeals: EmailAssignmentQueueDealCandidate[];
   candidateLeads: EmailAssignmentQueueLeadCandidate[];
   candidateProperties: EmailAssignmentQueuePropertyCandidate[];
+  candidateCompanies?: EmailAssignmentQueueCompanyCandidate[];
   suggestedAssignment: {
     assignedEntityType: string | null;
     assignedEntityId: string | null;
@@ -46,9 +52,9 @@ export interface EmailAssignmentQueueItem {
 }
 
 export interface EmailAssignmentTarget {
-  assignedEntityType: "deal";
+  assignedEntityType: "deal" | "lead" | "property" | "company";
   assignedEntityId: string;
-  assignedDealId: string;
+  assignedDealId: string | null;
 }
 
 interface EmailAssignmentQueueViewProps {
@@ -88,6 +94,41 @@ function buildAssignmentOptions(item: EmailAssignmentQueueItem): Array<{ label: 
     });
   }
 
+  for (const lead of item.candidateLeads) {
+    options.push({
+      label: `Lead · ${lead.leadNumber} · ${lead.name}`,
+      value: {
+        assignedEntityType: "lead",
+        assignedEntityId: lead.id,
+        assignedDealId: null,
+      },
+    });
+  }
+
+  for (const property of item.candidateProperties) {
+    options.push({
+      label: `Property · ${property.name}`,
+      value: {
+        assignedEntityType: "property",
+        assignedEntityId: property.id,
+        assignedDealId: null,
+      },
+    });
+  }
+
+  const companyId = item.companyId ?? item.suggestedAssignment.assignedEntityId;
+  const companyName = item.companyName;
+  if (companyId && companyName) {
+    options.push({
+      label: `Company · ${companyName}`,
+      value: {
+        assignedEntityType: "company",
+        assignedEntityId: companyId,
+        assignedDealId: null,
+      },
+    });
+  }
+
   return options;
 }
 
@@ -116,6 +157,7 @@ function AssignmentQueueCard({
           </p>
           <h3 className="truncate text-sm font-semibold">{item.email.subject ?? "(No Subject)"}</h3>
           <p className="text-xs text-muted-foreground">{item.email.fromAddress}</p>
+          <p className="mt-1 text-xs text-muted-foreground">Parking lot intake</p>
         </div>
         <span className="shrink-0 rounded-full border px-2 py-1 text-xs">
           {item.suggestedAssignment.confidence} confidence
@@ -186,10 +228,10 @@ function AssignmentQueueCard({
 export function EmailAssignmentQueueView({ items, onAssign }: EmailAssignmentQueueViewProps) {
   if (items.length === 0) {
     return (
-      <div className="rounded-lg border border-dashed p-6 text-sm text-muted-foreground">
-        No unresolved email assignments.
-      </div>
-    );
+        <div className="rounded-lg border border-dashed p-6 text-sm text-muted-foreground">
+        No unresolved parking-lot email intake.
+        </div>
+      );
   }
 
   return (

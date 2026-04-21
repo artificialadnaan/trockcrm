@@ -22,7 +22,23 @@ vi.mock("../../../src/modules/email/graph-auth.js", () => ({
   isGraphAuthConfigured: isGraphAuthConfiguredMock,
 }));
 
-const { autoAssociateEmailToDeal, associateEmailToEntity, sendEmail } = await import("../../../src/modules/email/service.js");
+const {
+  autoAssociateEmailToDeal,
+  associateEmailToEntity,
+  buildThreadAssignmentFallbackWhereClause,
+  isEmailAssignmentQueueCandidate,
+  sendEmail,
+} = await import("../../../src/modules/email/service.js");
+
+function hasColumnName(node: any, columnName: string, seen = new Set<unknown>()): boolean {
+  if (!node || typeof node !== "object") return false;
+  if (seen.has(node)) return false;
+  seen.add(node);
+  if (node.name === columnName) return true;
+  if (Array.isArray(node)) return node.some((entry) => hasColumnName(entry, columnName, seen));
+  if ("queryChunks" in node) return hasColumnName((node as any).queryChunks, columnName, seen);
+  return Object.values(node).some((entry) => hasColumnName(entry, columnName, seen));
+}
 
 function createSelectChain(result: any[]) {
   const chain: any = {
@@ -122,6 +138,36 @@ describe("email service inbound association", () => {
     expect(tenantDb.insert).not.toHaveBeenCalled();
   });
 
+  it("only treats ambiguous inbound mail as a parking-lot queue candidate", () => {
+    expect(
+      isEmailAssignmentQueueCandidate({
+        direction: "inbound",
+        assignmentAmbiguityReason: "multiple_deal_candidates",
+      })
+    ).toBe(true);
+
+    expect(
+      isEmailAssignmentQueueCandidate({
+        direction: "inbound",
+        assignmentAmbiguityReason: null,
+      })
+    ).toBe(false);
+
+    expect(
+      isEmailAssignmentQueueCandidate({
+        direction: "outbound",
+        assignmentAmbiguityReason: "multiple_deal_candidates",
+      })
+    ).toBe(false);
+  });
+
+  it("scopes prior-thread fallback lookup to the mailbox user", () => {
+    const whereClause = buildThreadAssignmentFallbackWhereClause("mailbox-user-1", "conversation-1");
+
+    expect(hasColumnName(whereClause, "user_id")).toBe(true);
+    expect(hasColumnName(whereClause, "graph_conversation_id")).toBe(true);
+  });
+
   it("completes inbound email tasks when an email is manually associated to a deal", async () => {
     const updatePayloads: Array<{ table: string; payload: any }> = [];
     const insertPayloads: Array<any> = [];
@@ -209,7 +255,7 @@ describe("email service inbound association", () => {
     expect(insertPayloads.some((entry) => entry.jobType === "domain_event" && entry.payload?.eventName === "task.completed")).toBe(true);
   });
 
-  it("rejects non-deal association targets", async () => {
+  it("rejects unsupported association targets", async () => {
     const tenantDb = {
       select: vi.fn(() => createSelectChain([{ id: "email-1", userId: "user-1" }])),
       update: vi.fn(),
@@ -221,15 +267,300 @@ describe("email service inbound association", () => {
         tenantDb as any,
         "email-1",
         {
-          assignedEntityType: "lead" as any,
-          assignedEntityId: "lead-1",
+          assignedEntityType: "contact" as any,
+          assignedEntityId: "contact-1",
           assignedDealId: null,
         },
         "director",
         "director-1",
         "office-1"
       )
-    ).rejects.toThrow("Only deal assignments are supported by this endpoint");
+    ).rejects.toThrow("Unsupported assignment target");
+  });
+
+  it("persists company assignments without forcing a deal id", async () => {
+    const updatePayloads: Array<{ table: string; payload: any }> = [];
+    const tenantDb = {
+      select: vi.fn(() => {
+        const chain: any = {
+          from: vi.fn(() => chain),
+          where: vi.fn(() => chain),
+          limit: vi.fn(() => chain),
+          then(resolve: (value: any) => void) {
+            const callIndex = (tenantDb.select as any).mock.calls.length;
+            if (callIndex === 1) {
+              resolve([{ id: "email-1", userId: "user-1" }]);
+            } else if (callIndex === 2) {
+              resolve([{ id: "company-1" }]);
+            } else {
+              resolve([]);
+            }
+          },
+        };
+        return chain;
+      }),
+      update: vi.fn((table: any) => ({
+        set: vi.fn((payload: any) => {
+          updatePayloads.push({ table: table?.name ?? "unknown", payload });
+          return {
+            where: vi.fn(() => ({
+              returning: vi.fn(async () => [{ id: "activity-1" }]),
+            })),
+          };
+        }),
+      })),
+      insert: vi.fn(),
+    };
+
+    await associateEmailToEntity(
+      tenantDb as any,
+      "email-1",
+      {
+        assignedEntityType: "company" as any,
+        assignedEntityId: "company-1",
+        assignedDealId: null,
+      },
+      "director",
+      "director-1",
+      "office-1"
+    );
+
+    expect(updatePayloads).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          payload: expect.objectContaining({
+            assignedEntityType: "company",
+            assignedEntityId: "company-1",
+            dealId: null,
+          }),
+        }),
+        expect.objectContaining({
+          payload: expect.objectContaining({
+            sourceEntityType: "company",
+            sourceEntityId: "company-1",
+            companyId: "company-1",
+            dealId: null,
+          }),
+        }),
+      ])
+    );
+  });
+
+  it("persists lead assignments without coercing them into deal ownership", async () => {
+    const updatePayloads: Array<{ table: string; payload: any }> = [];
+    const tenantDb = {
+      select: vi.fn(() => {
+        const chain: any = {
+          from: vi.fn(() => chain),
+          where: vi.fn(() => chain),
+          limit: vi.fn(() => chain),
+          then(resolve: (value: any) => void) {
+            const callIndex = (tenantDb.select as any).mock.calls.length;
+            if (callIndex === 1) {
+              resolve([{ id: "email-1", userId: "user-1" }]);
+            } else if (callIndex === 2) {
+              resolve([{ id: "lead-1", companyId: "company-1", propertyId: "property-1" }]);
+            } else {
+              resolve([]);
+            }
+          },
+        };
+        return chain;
+      }),
+      update: vi.fn((table: any) => ({
+        set: vi.fn((payload: any) => {
+          updatePayloads.push({ table: table?.name ?? "unknown", payload });
+          return {
+            where: vi.fn(() => ({
+              returning: vi.fn(async () => [{ id: "activity-1" }]),
+            })),
+          };
+        }),
+      })),
+      insert: vi.fn(),
+    };
+
+    await associateEmailToEntity(
+      tenantDb as any,
+      "email-1",
+      {
+        assignedEntityType: "lead" as any,
+        assignedEntityId: "lead-1",
+        assignedDealId: null,
+      },
+      "director",
+      "director-1",
+      "office-1"
+    );
+
+    expect(updatePayloads).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          payload: expect.objectContaining({
+            assignedEntityType: "lead",
+            assignedEntityId: "lead-1",
+            dealId: null,
+          }),
+        }),
+        expect.objectContaining({
+          payload: expect.objectContaining({
+            sourceEntityType: "lead",
+            sourceEntityId: "lead-1",
+            companyId: "company-1",
+            propertyId: "property-1",
+            leadId: "lead-1",
+            dealId: null,
+          }),
+        }),
+      ])
+    );
+  });
+
+  it("persists property assignments onto property-scoped activity without a deal id", async () => {
+    const updatePayloads: Array<{ table: string; payload: any }> = [];
+    const tenantDb = {
+      select: vi.fn(() => {
+        const chain: any = {
+          from: vi.fn(() => chain),
+          where: vi.fn(() => chain),
+          limit: vi.fn(() => chain),
+          then(resolve: (value: any) => void) {
+            const callIndex = (tenantDb.select as any).mock.calls.length;
+            if (callIndex === 1) {
+              resolve([{ id: "email-1", userId: "user-1" }]);
+            } else if (callIndex === 2) {
+              resolve([{ id: "property-1", companyId: "company-1" }]);
+            } else {
+              resolve([]);
+            }
+          },
+        };
+        return chain;
+      }),
+      update: vi.fn((table: any) => ({
+        set: vi.fn((payload: any) => {
+          updatePayloads.push({ table: table?.name ?? "unknown", payload });
+          return {
+            where: vi.fn(() => ({
+              returning: vi.fn(async () => [{ id: "activity-1" }]),
+            })),
+          };
+        }),
+      })),
+      insert: vi.fn(),
+    };
+
+    await associateEmailToEntity(
+      tenantDb as any,
+      "email-1",
+      {
+        assignedEntityType: "property" as any,
+        assignedEntityId: "property-1",
+        assignedDealId: null,
+      },
+      "director",
+      "director-1",
+      "office-1"
+    );
+
+    expect(updatePayloads).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          payload: expect.objectContaining({
+            assignedEntityType: "property",
+            assignedEntityId: "property-1",
+            dealId: null,
+          }),
+        }),
+        expect.objectContaining({
+          payload: expect.objectContaining({
+            sourceEntityType: "property",
+            sourceEntityId: "property-1",
+            companyId: "company-1",
+            propertyId: "property-1",
+            leadId: null,
+            dealId: null,
+          }),
+        }),
+      ])
+    );
+  });
+
+  it("creates a history activity when inbound email resolution has no existing activity row", async () => {
+    const insertPayloads: Array<any> = [];
+    const tenantDb = {
+      select: vi.fn(() => {
+        const chain: any = {
+          from: vi.fn(() => chain),
+          where: vi.fn(() => chain),
+          limit: vi.fn(() => chain),
+          then(resolve: (value: any) => void) {
+            const callIndex = (tenantDb.select as any).mock.calls.length;
+            if (callIndex === 1) {
+              resolve([
+                {
+                  id: "email-1",
+                  userId: "user-1",
+                  contactId: "contact-1",
+                  subject: "Need help",
+                  bodyPreview: "Inbound preview",
+                  bodyHtml: "<p>Inbound preview</p>",
+                  sentAt: new Date("2026-04-20T12:00:00.000Z"),
+                },
+              ]);
+            } else if (callIndex === 2) {
+              resolve([{ id: "company-1" }]);
+            } else {
+              resolve([]);
+            }
+          },
+        };
+        return chain;
+      }),
+      update: vi.fn(() => ({
+        set: vi.fn(() => ({
+          where: vi.fn(() => ({
+            returning: vi.fn(async () => []),
+          })),
+        })),
+      })),
+      insert: vi.fn(() => ({
+        values: vi.fn(async (payload: any) => {
+          insertPayloads.push(payload);
+          return [];
+        }),
+      })),
+    };
+
+    await associateEmailToEntity(
+      tenantDb as any,
+      "email-1",
+      {
+        assignedEntityType: "company" as any,
+        assignedEntityId: "company-1",
+        assignedDealId: null,
+      },
+      "director",
+      "director-1",
+      "office-1"
+    );
+
+    expect(insertPayloads).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "email",
+          sourceEntityType: "company",
+          sourceEntityId: "company-1",
+          companyId: "company-1",
+          dealId: null,
+          contactId: "contact-1",
+          emailId: "email-1",
+          subject: "Need help",
+          body: "Inbound preview",
+          occurredAt: new Date("2026-04-20T12:00:00.000Z"),
+        }),
+      ])
+    );
   });
 
   it("rejects mismatched deal identifiers", async () => {
