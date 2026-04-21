@@ -39,6 +39,20 @@ export const estimateMarkets = pgTable(
       "estimate_markets_type_check",
       sql`${table.type} in ('global', 'metro', 'state', 'region')`
     ),
+    check(
+      "estimate_markets_geography_check",
+      sql`
+        (
+          ${table.type} = 'global' and ${table.stateCode} is null and ${table.regionId} is null
+        ) or (
+          ${table.type} = 'metro' and ${table.stateCode} is not null and ${table.regionId} is null
+        ) or (
+          ${table.type} = 'state' and ${table.stateCode} is not null and ${table.regionId} is null
+        ) or (
+          ${table.type} = 'region' and ${table.stateCode} is null and ${table.regionId} is not null
+        )
+      `
+    ),
   ]
 );
 
@@ -160,12 +174,22 @@ export const estimateMarketAdjustmentRules = pgTable(
       sql`${table.fallbackScopeType} is null or ${table.fallbackScopeType} in ('global', 'metro', 'state', 'region')`
     ),
     check(
+      "estimate_market_adjustment_rules_fallback_pair_check",
+      sql`
+        (
+          ${table.fallbackScopeType} is null and ${table.fallbackScopeKey} is null
+        ) or (
+          ${table.fallbackScopeType} is not null and ${table.fallbackScopeKey} is not null
+        )
+      `
+    ),
+    check(
       "estimate_market_adjustment_rules_weight_check",
       sql`
         ${table.defaultLaborWeight} >= 0 and ${table.defaultLaborWeight} <= 1 and
         ${table.defaultMaterialWeight} >= 0 and ${table.defaultMaterialWeight} <= 1 and
         ${table.defaultEquipmentWeight} >= 0 and ${table.defaultEquipmentWeight} <= 1 and
-        (${table.defaultLaborWeight} + ${table.defaultMaterialWeight} + ${table.defaultEquipmentWeight}) = 1
+        abs((${table.defaultLaborWeight} + ${table.defaultMaterialWeight} + ${table.defaultEquipmentWeight}) - 1) <= 0.001
       `
     ),
     check(

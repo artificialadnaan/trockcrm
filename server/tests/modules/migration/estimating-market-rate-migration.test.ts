@@ -9,16 +9,30 @@ const migrationPath = resolve(
 );
 const migrationSql = readFileSync(migrationPath, "utf8");
 
+function getTenantReplaySection(sql: string): string {
+  const startMarker = "-- TENANT_SCHEMA_START";
+  const endMarker = "-- TENANT_SCHEMA_END";
+  const startIndex = sql.indexOf(startMarker);
+  const endIndex = sql.indexOf(endMarker);
+
+  expect(startIndex).toBeGreaterThanOrEqual(0);
+  expect(endIndex).toBeGreaterThan(startIndex);
+
+  return sql.slice(startIndex, endIndex);
+}
+
 describe("estimating market-rate migration contract", () => {
   it("keeps the tenant replay markers and default seed statements", () => {
     expect(migrationSql).toContain("-- TENANT_SCHEMA_START");
     expect(migrationSql).toContain("-- TENANT_SCHEMA_END");
-    expect(migrationSql).toContain("INSERT INTO %I.estimate_markets");
-    expect(migrationSql).toContain("VALUES (''Default Market'', ''default'', ''global'', NULL, NULL, TRUE)");
-    expect(migrationSql).toContain("INSERT INTO %I.estimate_market_fallback_geographies");
-    expect(migrationSql).toContain("resolution_type,\n         resolution_key,\n         is_active");
-    expect(migrationSql).toContain("INSERT INTO %I.estimate_market_adjustment_rules");
-    expect(migrationSql).toContain("ON CONFLICT (scope_type, scope_key, effective_from) WHERE market_id IS NULL");
-    expect(migrationSql).toContain("deal_id UUID NOT NULL REFERENCES %I.deals(id) ON DELETE CASCADE");
+
+    const tenantSql = getTenantReplaySection(migrationSql);
+    expect(tenantSql).toContain("CREATE TABLE IF NOT EXISTS estimate_markets");
+    expect(tenantSql).toContain("VALUES ('Default Market', 'default', 'global', NULL, NULL, TRUE)");
+    expect(tenantSql).toContain("CREATE TABLE IF NOT EXISTS estimate_market_fallback_geographies");
+    expect(tenantSql).toContain("CREATE TABLE IF NOT EXISTS estimate_market_adjustment_rules");
+    expect(tenantSql).toContain("ON CONFLICT (scope_type, scope_key, effective_from) WHERE market_id IS NULL");
+    expect(tenantSql).toContain("deal_id UUID NOT NULL REFERENCES deals(id) ON DELETE CASCADE");
+    expect(tenantSql).not.toContain("estimate_deals(id)");
   });
 });

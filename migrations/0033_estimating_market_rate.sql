@@ -21,7 +21,18 @@ BEGIN
          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
          CONSTRAINT estimate_markets_slug_uidx UNIQUE (slug),
-         CONSTRAINT estimate_markets_type_check CHECK (type IN ('global', 'metro', 'state', 'region'))
+         CONSTRAINT estimate_markets_type_check CHECK (type IN ('global', 'metro', 'state', 'region')),
+         CONSTRAINT estimate_markets_geography_check CHECK (
+           (
+             type = 'global' AND state_code IS NULL AND region_id IS NULL
+           ) OR (
+             type = 'metro' AND state_code IS NOT NULL AND region_id IS NULL
+           ) OR (
+             type = 'state' AND state_code IS NOT NULL AND region_id IS NULL
+           ) OR (
+             type = 'region' AND state_code IS NULL AND region_id IS NOT NULL
+           )
+         )
        )',
       schema_name
     );
@@ -122,12 +133,17 @@ BEGIN
            CHECK (scope_type IN ('global', 'metro', 'state', 'region')),
          CONSTRAINT estimate_market_adjustment_rules_fallback_scope_type_check
            CHECK (fallback_scope_type IS NULL OR fallback_scope_type IN ('global', 'metro', 'state', 'region')),
+         CONSTRAINT estimate_market_adjustment_rules_fallback_pair_check
+           CHECK (
+             (fallback_scope_type IS NULL AND fallback_scope_key IS NULL) OR
+             (fallback_scope_type IS NOT NULL AND fallback_scope_key IS NOT NULL)
+           ),
          CONSTRAINT estimate_market_adjustment_rules_weight_check
            CHECK (
              default_labor_weight >= 0 AND default_labor_weight <= 1 AND
              default_material_weight >= 0 AND default_material_weight <= 1 AND
              default_equipment_weight >= 0 AND default_equipment_weight <= 1 AND
-             (default_labor_weight + default_material_weight + default_equipment_weight) = 1
+             abs((default_labor_weight + default_material_weight + default_equipment_weight) - 1) <= 0.001
            ),
          CONSTRAINT estimate_market_adjustment_rules_effective_window_check
            CHECK (effective_to IS NULL OR effective_to >= effective_from)
@@ -291,7 +307,18 @@ CREATE TABLE IF NOT EXISTS estimate_markets (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   CONSTRAINT estimate_markets_slug_uidx UNIQUE (slug),
-  CONSTRAINT estimate_markets_type_check CHECK (type IN ('global', 'metro', 'state', 'region'))
+  CONSTRAINT estimate_markets_type_check CHECK (type IN ('global', 'metro', 'state', 'region')),
+  CONSTRAINT estimate_markets_geography_check CHECK (
+    (
+      type = 'global' AND state_code IS NULL AND region_id IS NULL
+    ) OR (
+      type = 'metro' AND state_code IS NOT NULL AND region_id IS NULL
+    ) OR (
+      type = 'state' AND state_code IS NOT NULL AND region_id IS NULL
+    ) OR (
+      type = 'region' AND state_code IS NULL AND region_id IS NOT NULL
+    )
+  )
 );
 
 CREATE INDEX IF NOT EXISTS estimate_markets_active_idx
@@ -363,12 +390,17 @@ CREATE TABLE IF NOT EXISTS estimate_market_adjustment_rules (
     CHECK (scope_type IN ('global', 'metro', 'state', 'region')),
   CONSTRAINT estimate_market_adjustment_rules_fallback_scope_type_check
     CHECK (fallback_scope_type IS NULL OR fallback_scope_type IN ('global', 'metro', 'state', 'region')),
+  CONSTRAINT estimate_market_adjustment_rules_fallback_pair_check
+    CHECK (
+      (fallback_scope_type IS NULL AND fallback_scope_key IS NULL) OR
+      (fallback_scope_type IS NOT NULL AND fallback_scope_key IS NOT NULL)
+    ),
   CONSTRAINT estimate_market_adjustment_rules_weight_check
     CHECK (
       default_labor_weight >= 0 AND default_labor_weight <= 1 AND
       default_material_weight >= 0 AND default_material_weight <= 1 AND
       default_equipment_weight >= 0 AND default_equipment_weight <= 1 AND
-      (default_labor_weight + default_material_weight + default_equipment_weight) = 1
+      abs((default_labor_weight + default_material_weight + default_equipment_weight) - 1) <= 0.001
     ),
   CONSTRAINT estimate_market_adjustment_rules_effective_window_check
     CHECK (effective_to IS NULL OR effective_to >= effective_from)
@@ -390,7 +422,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS estimate_market_adjustment_rules_default_scope
 
 CREATE TABLE IF NOT EXISTS estimate_deal_market_overrides (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  deal_id UUID NOT NULL REFERENCES estimate_deals(id) ON DELETE CASCADE,
+  deal_id UUID NOT NULL REFERENCES deals(id) ON DELETE CASCADE,
   market_id UUID NOT NULL REFERENCES estimate_markets(id) ON DELETE CASCADE,
   overridden_by_user_id UUID NOT NULL REFERENCES public.users(id),
   override_reason TEXT,
