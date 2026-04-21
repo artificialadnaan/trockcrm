@@ -56,12 +56,16 @@
   Responsibility: verify the real generation worker persists market-rate-enriched recommendations.
 - Modify: `client/src/components/estimating/estimate-recommendation-options-panel.tsx`
   Responsibility: render market-rate evidence for the selected pricing row.
+- Modify: `client/src/components/estimating/estimate-pricing-review-table.tsx`
+  Responsibility: render structured market-rate rationale in the pricing review evidence footer instead of raw JSON.
 - Modify: `client/src/components/estimating/estimating-workflow-shell.tsx`
   Responsibility: render deal-level market override controls and refresh behavior.
 - Create: `client/src/components/estimating/estimate-market-override-panel.tsx`
   Responsibility: provide estimator controls to inspect, set, and clear the effective market.
 - Modify: `client/src/components/estimating/estimate-recommendation-options-panel.test.tsx`
   Responsibility: verify market-rate evidence rendering.
+- Modify: `client/src/components/estimating/estimate-pricing-review-table.test.tsx`
+  Responsibility: verify structured market-rate evidence rendering in the pricing review footer.
 - Modify: `client/src/components/estimating/estimating-workflow-shell.test.tsx`
   Responsibility: verify market override controls and refresh behavior.
 - Create: `client/src/components/estimating/estimate-market-override-panel.test.tsx`
@@ -97,7 +101,7 @@
   - market adjustment rules with fallback fields, component percentages, default labor/material/equipment split weights, and effective dates
   - deal-level market override rows with user attribution and reason
   - enforce one active ZIP mapping per ZIP and one current override row per deal through unique constraints or equivalent upsert-safe semantics
-  - seed or backfill an initial active default market so fresh tenants have a resolvable fallback and a non-empty override picker
+  - seed or backfill an initial active default market, default/global fallback geography rows, and a default/global adjustment rule so fresh tenants can resolve and price without manual setup
   - indexes for ZIP lookup, rule selection, and deal override reads
   - follow the tenant-schema replay migration pattern already used by recent tenant migrations, including the `DO $$ ... FOR schema_name ...` block and `TENANT_SCHEMA_START/END` replay section
 
@@ -145,6 +149,8 @@
 
 - [ ] **Step 5: Implement market-rate adjustment service**
   Requirements:
+  - keep `pricing-service.ts` as the baseline recommendation builder and shared baseline math layer
+  - keep `market-rate-service.ts` as the pure market adjustment math layer with no dependency back into `pricing-service.ts`
   - resolve the best matching active rule for a pricing scope
   - compute labor/material/equipment deltas from baseline price using persisted default split weights
   - emit a normalized rationale payload with all applied components
@@ -196,10 +202,10 @@
 
 - [ ] **Step 5: Integrate market-rate service into the actual recommendation generation path**
   Requirements:
-  - keep historical/catalog price as the baseline
+  - keep historical/catalog price as the baseline built by `pricing-service.ts`
   - expand the current deal lookup or add an equivalent deal-context query so the live generation path has ZIP and state inputs, not only project type and region
-  - replace the old hardcoded regional adjustment path in `pricing-service.ts` with the new market-rate service
-  - apply component adjustments to the baseline
+  - replace the old hardcoded regional adjustment path with provider-driven market enrichment after the baseline recommendation is built
+  - apply component adjustments through the provider/resolver path without introducing a reverse dependency from `market-rate-service.ts` into `pricing-service.ts`
   - persist adjusted recommendations through a shared helper that `worker/src/jobs/estimate-generation.ts` actually calls
   - wire the same ZIP-first market-resolution inputs through `worker/src/jobs/estimate-generation.ts`
   - persist market-rate rationale into evidence/assumptions fields
@@ -288,21 +294,24 @@
 **Files:**
 - Create: `client/src/components/estimating/estimate-market-override-panel.tsx`
 - Modify: `client/src/components/estimating/estimate-recommendation-options-panel.tsx`
+- Modify: `client/src/components/estimating/estimate-pricing-review-table.tsx`
 - Modify: `client/src/components/estimating/estimating-workflow-shell.tsx`
 - Create: `client/src/components/estimating/estimate-market-override-panel.test.tsx`
 - Modify: `client/src/components/estimating/estimate-recommendation-options-panel.test.tsx`
+- Modify: `client/src/components/estimating/estimate-pricing-review-table.test.tsx`
 - Modify: `client/src/components/estimating/estimating-workflow-shell.test.tsx`
 
 - [ ] **Step 1: Write failing client tests for market evidence and override controls**
   Cover:
   - pricing evidence shows resolved market, resolution level, baseline, and component adjustments
+  - pricing review footer renders structured market-rate assumptions/evidence instead of raw JSON
   - shell renders deal-level market override controls
   - override controls load canonical market choices from the server
   - override state is visible when active
   - clearing override removes override marker after refresh
 
 - [ ] **Step 2: Run the focused client tests and verify they fail**
-  Run: `npx vitest run src/components/estimating/estimate-market-override-panel.test.tsx src/components/estimating/estimate-recommendation-options-panel.test.tsx src/components/estimating/estimating-workflow-shell.test.tsx`
+  Run: `npx vitest run src/components/estimating/estimate-market-override-panel.test.tsx src/components/estimating/estimate-recommendation-options-panel.test.tsx src/components/estimating/estimate-pricing-review-table.test.tsx src/components/estimating/estimating-workflow-shell.test.tsx`
   Expected: FAIL because the client does not render market-rate UI yet.
 
 - [ ] **Step 3: Build the market override panel**
@@ -315,12 +324,13 @@
 
 - [ ] **Step 4: Extend pricing evidence rendering**
   Requirements:
+  - render market-rate rationale through the pricing review table evidence footer where assumptions/evidence are already summarized
   - show baseline price, labor/material/equipment adjustments, final adjusted price
   - show whether the market was auto-detected or overridden
   - show fallback level when no exact market match was used
 
 - [ ] **Step 5: Re-run the focused client tests and verify they pass**
-  Run: `npx vitest run src/components/estimating/estimate-market-override-panel.test.tsx src/components/estimating/estimate-recommendation-options-panel.test.tsx src/components/estimating/estimating-workflow-shell.test.tsx`
+  Run: `npx vitest run src/components/estimating/estimate-market-override-panel.test.tsx src/components/estimating/estimate-recommendation-options-panel.test.tsx src/components/estimating/estimate-pricing-review-table.test.tsx src/components/estimating/estimating-workflow-shell.test.tsx`
   Expected: PASS
 
 - [ ] **Step 6: Commit**
