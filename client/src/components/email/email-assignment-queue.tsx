@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { AlertCircle, RefreshCw } from "lucide-react";
+import { toast } from "sonner";
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import {
@@ -49,11 +50,19 @@ export function EmailAssignmentQueue() {
   }, [page]);
 
   const handleAssign = async (emailId: string, target: EmailAssignmentTarget) => {
-    await api<{ success: boolean }>(`/email/${emailId}/associate`, {
-      method: "POST",
-      json: target,
-    });
-    await fetchQueue();
+    try {
+      await api<{ success: boolean }>(`/email/${emailId}/associate`, {
+        method: "POST",
+        json: target,
+      });
+      await fetchQueue();
+      toast.success("Email assignment saved");
+      return { ok: true as const };
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Failed to save email assignment";
+      toast.error(message);
+      return { ok: false as const, message };
+    }
   };
 
   return (
