@@ -237,7 +237,8 @@ Manual row storage contract:
 - if a manual row is catalog-backed or later mapped to catalog alternatives:
   - keep parent `manual_*` fields as the estimator-authored baseline
   - flip `catalog_backing` to `procore_synced` or `local_promoted` based on the selected option source
-  - set `selected_source_type = 'catalog_option'`
+  - keep `selected_source_type = null` while the row is still `pending_review`
+  - set `selected_source_type = 'catalog_option'` only when the row is explicitly accepted, switched, or otherwise selected for promotion
   - store catalog candidates as child option rows
   - set `selected_option_id` when a catalog candidate is chosen
   - if the estimator creates the manual row by selecting a catalog result in the add-item flow, create it in `pending_review` with that option preselected
@@ -418,6 +419,7 @@ Explicit-row duplicate rule for this slice:
 - only one row in a duplicate-review group may remain promotable; the workbench must block promotion for the group until the estimator rejects the extra rows or explicitly returns them to `pending_review`
 - carried-forward clones must re-evaluate duplicate-review grouping against already-promoted rows for the deal, so a group with an already promoted winner stays blocked until the remaining rows are edited into a different group or rejected
 - the first promoted row in a duplicate-review group becomes the canonical winner for that deal in this slice; later rows in the same group cannot supersede it without a separate reopen/supersede flow, which is out of scope here
+- when no prior winner exists, a duplicate group only gets a winner from a promotion request that contains exactly one promotable row from that group
 - if a later promotion attempt targets a row in a duplicate-review group that already has a canonical winner, the promote action must fail with a duplicate-blocked result and create no canonical estimate line
 
 ## Review Lifecycle
@@ -449,6 +451,7 @@ Concrete promote action:
 - accept, alternate select, and override do not auto-promote
 - the explicit promote action writes canonical estimate lines for the current promotable set or a selected subset
 - batch promote is row-scoped, not all-or-nothing: eligible rows promote independently, while blocked rows return row-level errors and create no canonical estimate line
+- batch promote must pre-validate duplicate-review groups and refuse to promote multiple rows from the same duplicate group in a single batch; all rows in that conflicting group return duplicate-blocked results
 
 Post-promotion edit rule for this slice:
 
@@ -467,7 +470,7 @@ Allowed actions:
 - accept recommended:
   - marks the parent row `accepted`
   - records the recommended option as selected
-  - sets `selected_source_type` to the selected recommendation source
+  - sets `selected_source_type = 'catalog_option'`
   - sets `catalog_backing` from the selected option source:
     - `procore_synced` when the option references a synced catalog item
     - `local_promoted` when the option references a local catalog item
