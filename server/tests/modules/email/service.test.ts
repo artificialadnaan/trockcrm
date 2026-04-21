@@ -428,6 +428,101 @@ describe("email service inbound association", () => {
     ).toBe(true);
   });
 
+  it("does not fail manual assignment when a legacy inbound-email task has an unknown origin rule", async () => {
+    const updatePayloads: Array<{ table: string; payload: any }> = [];
+    const insertPayloads: Array<any> = [];
+    const tenantDb = {
+      select: vi.fn(() => {
+        const chain: any = {
+          from: vi.fn(() => chain),
+          innerJoin: vi.fn(() => chain),
+          where: vi.fn(() => chain),
+          limit: vi.fn(() => chain),
+          then(resolve: (value: any) => void) {
+            const callIndex = (tenantDb.select as any).mock.calls.length;
+            if (callIndex === 1) {
+              resolve([{ id: "email-1", userId: "user-1", contactId: null, subject: "Subject", bodyPreview: "Body", bodyHtml: null, sentAt: new Date("2026-04-20T00:00:00.000Z") }]);
+            } else if (callIndex === 2) {
+              resolve([{ id: "contact-1", companyId: "company-1" }]);
+            } else {
+              resolve([
+                {
+                  id: "task-legacy-unknown-1",
+                  title: "Associate inbound email",
+                  status: "pending",
+                  assignedTo: "user-1",
+                  type: "inbound_email",
+                  originRule: "legacy_missing_rule_id",
+                  dedupeKey: "email:email-1:assignment_queue",
+                  reasonCode: "legacy_missing_rule_id",
+                  dealId: null,
+                  contactId: "contact-1",
+                  entitySnapshot: { emailId: "email-1" },
+                },
+              ]);
+            }
+          },
+        };
+        return chain;
+      }),
+      update: vi.fn((table: any) => ({
+        set: vi.fn((payload: any) => {
+          updatePayloads.push({ table: table?.name ?? "unknown", payload });
+          return {
+            where: vi.fn(() => ({
+              returning: vi.fn(async () => [
+                {
+                  id: "task-legacy-unknown-1",
+                  title: "Associate inbound email",
+                  status: payload.status ?? "completed",
+                  assignedTo: "user-1",
+                  type: "inbound_email",
+                  originRule: "legacy_missing_rule_id",
+                  dedupeKey: "email:email-1:assignment_queue",
+                  reasonCode: "legacy_missing_rule_id",
+                  dealId: payload.dealId ?? null,
+                  contactId: "contact-1",
+                  entitySnapshot: { emailId: "email-1" },
+                },
+              ]),
+            })),
+          };
+        }),
+      })),
+      insert: vi.fn(() => ({
+        values: vi.fn(async (payload: any) => {
+          insertPayloads.push(payload);
+          return [];
+        }),
+      })),
+    };
+
+    await expect(
+      associateEmailToEntity(
+        tenantDb as any,
+        "email-1",
+        {
+          assignedEntityType: "contact",
+          assignedEntityId: "contact-1",
+        },
+        "director",
+        "director-1",
+        "office-1"
+      )
+    ).resolves.toBeUndefined();
+
+    expect(updatePayloads.some((entry) => entry.payload.status === "completed")).toBe(true);
+    expect(
+      insertPayloads.some(
+        (entry) =>
+          entry.jobType === "domain_event" &&
+          entry.payload?.eventName === "task.completed" &&
+          entry.payload?.originRule === "legacy_missing_rule_id" &&
+          entry.payload?.suppressionWindowDays === null
+      )
+    ).toBe(true);
+  });
+
   it("persists contact assignments without forcing a deal id", async () => {
     const updatePayloads: Array<{ table: string; payload: any }> = [];
     const insertPayloads: Array<any> = [];
