@@ -142,7 +142,7 @@ export function CompanySelector({ value, onChange, required }: CompanySelectorPr
     });
   };
 
-  const handleInlineCreateKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+  const handleInlineCreateKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
     if (event.key !== "Enter") return;
     event.preventDefault();
     event.stopPropagation();
@@ -225,10 +225,7 @@ export function CompanySelector({ value, onChange, required }: CompanySelectorPr
 
       {/* Inline create form */}
       {open && showInlineForm && (
-        <div
-          className="absolute z-50 mt-1 w-full bg-background border rounded-md shadow-md p-3 space-y-3"
-          onKeyDown={handleInlineCreateKeyDown}
-        >
+        <div className="absolute z-50 mt-1 w-full bg-background border rounded-md shadow-md p-3 space-y-3">
           <p className="text-sm font-medium">New Company</p>
           {createError && (
             <p className="text-xs text-red-600">{createError}</p>
@@ -240,6 +237,7 @@ export function CompanySelector({ value, onChange, required }: CompanySelectorPr
                 autoFocus
                 value={newName}
                 onChange={(e) => setNewName(e.target.value)}
+                onKeyDown={handleInlineCreateKeyDown}
                 className="h-8 text-sm"
                 required
               />
