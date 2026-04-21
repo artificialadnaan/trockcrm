@@ -67,7 +67,7 @@ const LEAD_STAGE_REQUIREMENTS: Record<string, string[]> = {
     ...LEAD_COMPANY_PREQUAL_FIELD_KEYS,
     ...LEAD_VALUE_ASSIGNMENT_FIELD_KEYS,
   ],
-  lead_go_no_go: ["estimatedOpportunityValue"],
+  lead_go_no_go: ["estimatedOpportunityValue", ...LEAD_SCOPING_SUBSET_FIELD_KEYS],
   qualified_for_opportunity: [
     "goDecision",
     "goDecisionNotes",

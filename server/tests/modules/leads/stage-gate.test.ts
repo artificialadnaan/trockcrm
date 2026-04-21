@@ -1,12 +1,5 @@
 import { describe, expect, it } from "vitest";
-
-async function loadStageGateModule() {
-  try {
-    return await import("../../../src/modules/leads/stage-gate.js");
-  } catch {
-    return null;
-  }
-}
+import { evaluateLeadStageGate } from "../../../src/modules/leads/stage-gate.ts";
 
 const currentStage = {
   id: "stage-current",
@@ -19,11 +12,7 @@ const currentStage = {
 
 describe("Lead Stage Gate Evaluation", () => {
   it("blocks advancement into lead_go_no_go when pre-qual value is missing", async () => {
-    const mod = await loadStageGateModule();
-
-    expect(mod).not.toBeNull();
-
-    const result = mod!.evaluateLeadStageGate({
+    const result = evaluateLeadStageGate({
       lead: {
         id: "lead-1",
         companyId: "company-1",
@@ -62,12 +51,53 @@ describe("Lead Stage Gate Evaluation", () => {
     expect(result.missingRequirements.fields).toContain("estimatedOpportunityValue");
   });
 
+  it("blocks advancement into lead_go_no_go when the scoping subset is incomplete", async () => {
+    const result = evaluateLeadStageGate({
+      lead: {
+        id: "lead-1",
+        companyId: "company-1",
+        propertyId: "property-1",
+        source: "Referral",
+      },
+      qualification: {
+        estimatedOpportunityValue: "42000.00",
+        qualificationData: {
+          projectLocation: "Dallas, TX",
+          propertyName: "Palm Villas",
+          propertyAddress: "123 Palm Way",
+          propertyCity: "Dallas",
+          propertyState: "TX",
+          unitCount: 120,
+          stakeholderName: "Alex PM",
+          stakeholderRole: "Property Manager",
+          projectType: "Exterior Painting",
+          scopeSummary: "Repaint all buildings",
+          budgetStatus: "Budgeted",
+          budgetQuarter: "Q2",
+          specPackageStatus: "Provided",
+          checklistStarted: true,
+        },
+        scopingSubsetData: {
+          propertyDetails: true,
+          scopeSummary: true,
+        },
+      },
+      currentStage,
+      targetStage: {
+        ...currentStage,
+        id: "stage-go-no-go",
+        slug: "lead_go_no_go",
+        name: "Lead Go/No-Go",
+      },
+    });
+
+    expect(result.allowed).toBe(false);
+    expect(result.missingRequirements.fields).toContain("scopingSubset.projectOverview");
+    expect(result.missingRequirements.fields).toContain("scopingSubset.budgetAndBidContext");
+  });
+
   it("blocks conversion readiness when partial scoping subset is incomplete", async () => {
-    const mod = await loadStageGateModule();
-
-    expect(mod).not.toBeNull();
-
-    const result = mod!.evaluateLeadStageGate({
+    const result = evaluateLeadStageGate({
       lead: {
         id: "lead-1",
         companyId: "company-1",
@@ -113,11 +143,7 @@ describe("Lead Stage Gate Evaluation", () => {
   });
 
   it("requires property and checklist metadata before pre-qual value assignment", async () => {
-    const mod = await loadStageGateModule();
-
-    expect(mod).not.toBeNull();
-
-    const result = mod!.evaluateLeadStageGate({
+    const result = evaluateLeadStageGate({
       lead: {
         id: "lead-1",
         companyId: "company-1",
