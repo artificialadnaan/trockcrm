@@ -1,9 +1,10 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   buildDirectorRepWorkspaceState,
   type DirectorRepSortKey,
   type DirectorRepWorkspaceRow,
 } from "@/lib/director-rep-workspace";
+import { formatCurrency } from "@/components/charts/chart-colors";
 
 export function DirectorRepWorkspace({
   repCards,
@@ -23,6 +24,12 @@ export function DirectorRepWorkspace({
     () => buildDirectorRepWorkspaceState(repCards, { query, sortKey, page, pageSize }),
     [page, pageSize, query, repCards, sortKey]
   );
+
+  useEffect(() => {
+    if (page !== workspace.page) {
+      setPage(workspace.page);
+    }
+  }, [page, workspace.page]);
 
   return (
     <section className="rounded-2xl border border-gray-200 bg-white shadow-sm">
@@ -98,7 +105,7 @@ export function DirectorRepWorkspace({
                     {row.repName}
                   </button>
                 </td>
-                <td className="px-4 py-4 text-sm text-gray-600">${row.pipelineValue.toLocaleString()}</td>
+                <td className="px-4 py-4 text-sm text-gray-600">{formatCurrency(row.pipelineValue)}</td>
                 <td className="px-4 py-4 text-sm text-gray-600">{row.winRate}%</td>
                 <td className="px-4 py-4 text-sm text-gray-600">{row.activityScore}</td>
                 <td className="rounded-r-2xl px-4 py-4 text-sm text-gray-600">
