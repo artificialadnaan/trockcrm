@@ -33,6 +33,11 @@ function buildSyntheticLocalCatalogItem(args: {
   };
 }
 
+function normalizePromotionNumeric(value?: string | null) {
+  const trimmed = value?.trim();
+  return trimmed && trimmed.length > 0 ? trimmed : null;
+}
+
 export async function promoteManualRowToLocalCatalog(args: {
   tenantDb: TenantDb;
   dealId: string;
@@ -160,6 +165,15 @@ export async function promoteManualRowToLocalCatalog(args: {
     overrideUnitPrice: args.input.overrideUnitPrice ?? existing.overrideUnitPrice,
     overrideNotes: args.input.overrideNotes ?? existing.overrideNotes,
   });
+  const candidateQuantity = normalizePromotionNumeric(
+    args.input.overrideQuantity ?? existing.overrideQuantity ?? existing.manualQuantity
+  );
+  const candidateUnitPrice = normalizePromotionNumeric(
+    args.input.overrideUnitPrice ?? existing.overrideUnitPrice ?? existing.manualUnitPrice
+  );
+  if (!candidateQuantity || !candidateUnitPrice) {
+    throw new AppError(400, "Manual rows require quantity and unit price before local catalog promotion");
+  }
 
   const promotedLocalCatalogItemId = randomUUID();
 

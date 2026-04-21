@@ -477,6 +477,47 @@ describe("updateEstimatePricingRecommendationReviewState", () => {
     expect(insertReturning).not.toHaveBeenCalled();
   });
 
+  it("rejects overrides that omit pricing values", async () => {
+    const tenantDb = {
+      select: vi.fn().mockReturnValueOnce({
+        from: vi.fn(() => ({
+          where: vi.fn(() => ({
+            limit: vi.fn().mockResolvedValue([
+              {
+                id: "rec-override-missing",
+                dealId: "deal-1",
+                status: "pending_review",
+                selectedSourceType: null,
+                selectedOptionId: null,
+                recommendedUnitPrice: null,
+                recommendedTotalPrice: null,
+                overrideQuantity: null,
+                overrideUnit: null,
+                overrideUnitPrice: null,
+                overrideNotes: null,
+              },
+            ]),
+          })),
+        })),
+      }),
+    } as any;
+
+    await expect(
+      updateEstimatePricingRecommendationReviewState({
+        tenantDb,
+        dealId: "deal-1",
+        recommendationId: "rec-override-missing",
+        userId: "user-1",
+        input: {
+          action: "override",
+          recommendedUnitPrice: "",
+          recommendedTotalPrice: "",
+          reason: "Need manual pricing",
+        },
+      })
+    ).rejects.toThrow("Override price and total are required");
+  });
+
   it("records catalog option provenance when accepting the recommended option", async () => {
     const updateReturning = vi.fn().mockResolvedValue([
       {

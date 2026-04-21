@@ -611,4 +611,54 @@ describe("manual-row-service", () => {
       })
     );
   });
+
+  it("requires quantity and unit price when updating a row into catalog-backed mode", async () => {
+    const tenantDb = {
+      select: vi.fn(() => ({
+        from: vi.fn(() => ({
+          where: vi.fn(() => ({
+            limit: vi.fn().mockResolvedValue([
+              {
+                id: "rec-6",
+                dealId: "deal-1",
+                manualIdentityKey: "manual-key-6",
+                manualLabel: "Existing manual label",
+                manualQuantity: null,
+                manualUnit: "ea",
+                manualUnitPrice: null,
+                manualNotes: "existing note",
+                selectedSourceType: "manual",
+                selectedOptionId: null,
+                catalogBacking: "estimate_only",
+                evidenceJson: {
+                  sectionName: "Roofing",
+                  manualLabel: "Existing manual label",
+                },
+              },
+            ]),
+          })),
+        })),
+      })),
+    } as any;
+
+    await expect(
+      updateManualEstimateRow({
+        tenantDb,
+        dealId: "deal-1",
+        recommendationId: "rec-6",
+        userId: "user-1",
+        input: {
+          selectedSourceType: "catalog_option",
+          selectedOptionStableId: "catalog-1",
+          catalogOptions: [
+            {
+              stableId: "catalog-1",
+              optionLabel: "Catalog item",
+              catalogItemId: "catalog-1",
+            },
+          ],
+        },
+      })
+    ).rejects.toThrow("Catalog-backed manual rows require quantity and unit price");
+  });
 });

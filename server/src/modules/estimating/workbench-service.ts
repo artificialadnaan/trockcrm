@@ -79,14 +79,22 @@ function isDuplicateBlockingCandidate(
 }
 
 function hasManualPromotionValues(row: EstimatePricingRecommendationRow) {
-  if (row.selectedSourceType !== "manual") {
+  if (row.sourceType !== "manual") {
     return true;
   }
 
-  const quantity = typeof row.manualQuantity === "string" ? row.manualQuantity.trim() : row.manualQuantity;
+  const quantity =
+    typeof row.recommendedQuantity === "string" ? row.recommendedQuantity.trim() : row.recommendedQuantity;
   const unitPrice =
-    typeof row.manualUnitPrice === "string" ? row.manualUnitPrice.trim() : row.manualUnitPrice;
+    typeof row.recommendedUnitPrice === "string"
+      ? row.recommendedUnitPrice.trim()
+      : row.recommendedUnitPrice;
   return Boolean(quantity && unitPrice);
+}
+
+function normalizeOptionalNumericString(value: string | null | undefined) {
+  const trimmed = value?.trim();
+  return trimmed && trimmed.length > 0 ? trimmed : null;
 }
 
 function isActiveParseArtifact(
@@ -370,6 +378,11 @@ export async function updateEstimatePricingRecommendationReviewState(args: {
       if (!args.input.reason?.trim()) {
         throw new AppError(400, "Override reason is required");
       }
+      const overrideUnitPrice = normalizeOptionalNumericString(args.input.recommendedUnitPrice);
+      const overrideTotalPrice = normalizeOptionalNumericString(args.input.recommendedTotalPrice);
+      if (!overrideUnitPrice || !overrideTotalPrice) {
+        throw new AppError(400, "Override price and total are required");
+      }
 
       eventType = "overridden";
       patch = {
@@ -377,9 +390,9 @@ export async function updateEstimatePricingRecommendationReviewState(args: {
         status: "overridden",
         selectedSourceType: "override",
         selectedOptionId: null,
-        recommendedUnitPrice: args.input.recommendedUnitPrice ?? existing.recommendedUnitPrice ?? null,
-        recommendedTotalPrice: args.input.recommendedTotalPrice ?? existing.recommendedTotalPrice ?? null,
-        overrideUnitPrice: args.input.recommendedUnitPrice ?? existing.overrideUnitPrice ?? null,
+        recommendedUnitPrice: overrideUnitPrice,
+        recommendedTotalPrice: overrideTotalPrice,
+        overrideUnitPrice: overrideUnitPrice,
         overrideNotes: args.input.reason,
       };
       break;

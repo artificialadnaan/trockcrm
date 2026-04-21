@@ -487,6 +487,9 @@ export async function updateManualEstimateRow(args: {
     manualUnitPrice: args.input.manualUnitPrice ?? existing.manualUnitPrice,
     manualNotes: args.input.manualNotes ?? existing.manualNotes,
   });
+  if (persistedSelectedSourceType === "catalog_option" && (!normalizedManualFields.manualQuantity || !normalizedManualFields.manualUnitPrice)) {
+    throw new AppError(400, "Catalog-backed manual rows require quantity and unit price");
+  }
 
   const patch: Record<string, unknown> = {
     updatedAt: new Date(),
