@@ -1,6 +1,38 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "@/lib/api";
 
+export interface LeadQualificationRecord {
+  id: string;
+  leadId: string;
+  estimatedOpportunityValue: string | null;
+  goDecision: "go" | "no_go" | null;
+  goDecisionNotes: string | null;
+  qualificationData: Record<string, unknown>;
+  scopingSubsetData: Record<string, unknown>;
+  disqualificationReason: string | null;
+  disqualificationNotes: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface LeadStageGateResult {
+  allowed: boolean;
+  currentStage: { id: string; name: string; slug: string };
+  targetStage: { id: string; name: string; slug: string };
+  missingRequirements: {
+    fields: string[];
+    effectiveChecklist: {
+      fields: Array<{
+        key: string;
+        label: string;
+        satisfied: boolean;
+        source: "stage";
+      }>;
+    };
+  };
+  blockReason?: string;
+}
+
 export interface LeadRecord {
   id: string;
   companyId: string;
@@ -111,4 +143,69 @@ export function useLeadDetail(leadId: string | undefined) {
   }, [fetchLead]);
 
   return { lead, loading, error, refetch: fetchLead };
+}
+
+export function useLeadQualification(leadId: string | undefined) {
+  const [qualification, setQualification] = useState<LeadQualificationRecord | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchQualification = useCallback(async () => {
+    if (!leadId) {
+      setLoading(false);
+      return;
+    }
+
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await api<{ qualification: LeadQualificationRecord | null }>(
+        `/leads/${leadId}/qualification`
+      );
+      setQualification(data.qualification);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to load lead qualification");
+    } finally {
+      setLoading(false);
+    }
+  }, [leadId]);
+
+  useEffect(() => {
+    fetchQualification();
+  }, [fetchQualification]);
+
+  return { qualification, loading, error, refetch: fetchQualification };
+}
+
+export async function updateLead(
+  leadId: string,
+  input: Partial<
+    LeadRecord & {
+      estimatedOpportunityValue: string | null;
+      goDecision: "go" | "no_go" | null;
+      goDecisionNotes: string | null;
+      qualificationData: Record<string, unknown>;
+      scopingSubsetData: Record<string, unknown>;
+      disqualificationReason: string | null;
+      disqualificationNotes: string | null;
+    }
+  >
+) {
+  return api<{ lead: LeadRecord }>(`/leads/${leadId}`, {
+    method: "PATCH",
+    json: input,
+  });
+}
+
+export async function preflightLeadStageCheck(leadId: string, targetStageId: string) {
+  return api<LeadStageGateResult>(`/leads/${leadId}/stage/preflight`, {
+    method: "POST",
+    json: { targetStageId },
+  });
+}
+
+export async function convertLeadToOpportunity(leadId: string) {
+  return api<{ lead: LeadRecord; deal: { id: string } }>(`/leads/${leadId}/convert`, {
+    method: "POST",
+  });
 }

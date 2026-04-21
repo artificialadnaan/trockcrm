@@ -4,8 +4,9 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { LeadDetailPage } from "./lead-detail-page";
 
 const stages = [
-  { id: "stage-lead", name: "Lead", slug: "dd" },
-  { id: "stage-estimating", name: "Estimating", slug: "estimating" },
+  { id: "stage-lead", name: "New", slug: "lead_new", workflowFamily: "lead", displayOrder: 0 },
+  { id: "stage-qualified", name: "Qualified for Opportunity", slug: "qualified_for_opportunity", workflowFamily: "lead", displayOrder: 1 },
+  { id: "stage-estimating", name: "Estimating", slug: "estimating", workflowFamily: "standard_deal", displayOrder: 2 },
 ];
 
 let lead: {
@@ -88,11 +89,20 @@ vi.mock("@/hooks/use-leads", () => ({
     error: null,
     refetch: vi.fn(),
   })),
+  useLeadQualification: vi.fn(() => ({
+    qualification: null,
+    loading: false,
+    error: null,
+    refetch: vi.fn(),
+  })),
   formatLeadPropertyLine: vi.fn((currentLead: typeof lead) =>
     [currentLead.property?.address, [currentLead.property?.city, currentLead.property?.state].filter(Boolean).join(", "), currentLead.property?.zip]
       .filter(Boolean)
       .join(" ")
   ),
+  updateLead: vi.fn(),
+  preflightLeadStageCheck: vi.fn(),
+  convertLeadToOpportunity: vi.fn(),
 }));
 
 vi.mock("@/hooks/use-pipeline-config", () => ({
@@ -130,8 +140,8 @@ describe("LeadDetailPage", () => {
     expect(html).toContain("Alpha Roofing Follow-Up");
     expect(html).toContain("Alpha Roofing");
     expect(html).toContain("123 Main St");
-    expect(html).toContain("Convert to Deal");
-    expect(html).toContain("Lead");
+    expect(html).toContain("Lead context");
+    expect(html).toContain("New");
   });
 
   it("switches the CTA to open the deal once the lead is converted", () => {
@@ -169,5 +179,20 @@ describe("LeadDetailPage", () => {
     expect(html).toContain("Post-Conversion Activity");
     expect(html).toContain("Intro call");
     expect(html).toContain("Converted follow-up");
+  });
+
+  it("shows the opportunity conversion CTA once the lead reaches the qualified stage", () => {
+    lead = {
+      ...lead,
+      stageId: "stage-qualified",
+      convertedAt: null,
+      convertedDealId: null,
+      convertedDealNumber: null,
+    };
+    activities = [];
+
+    const html = renderLeadDetail();
+
+    expect(html).toContain("Convert to Opportunity");
   });
 });

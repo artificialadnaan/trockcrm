@@ -1,26 +1,48 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { ArrowLeft, Building2, MapPin, Clock3, User, Phone } from "lucide-react";
+import { ArrowLeft, ArrowRight, Building2, MapPin, Clock3, User, Phone } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { LeadForm } from "@/components/leads/lead-form";
 import { LeadStageBadge } from "@/components/leads/lead-stage-badge";
 import { LeadTimelineTab } from "@/components/leads/lead-timeline-tab";
+import { LeadQualificationPanel } from "@/components/leads/lead-qualification-panel";
+import { LeadStageChangeDialog } from "@/components/leads/lead-stage-change-dialog";
+import { LeadConvertDialog } from "@/components/leads/lead-convert-dialog";
 import { formatLeadPropertyLine, useLeadDetail } from "@/hooks/use-leads";
 import { usePipelineStages } from "@/hooks/use-pipeline-config";
 
 export function LeadDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const { lead, loading, error } = useLeadDetail(id);
+  const { lead, loading, error, refetch } = useLeadDetail(id);
   const { stages } = usePipelineStages();
+  const [targetStageId, setTargetStageId] = useState<string | null>(null);
+  const [stageDialogOpen, setStageDialogOpen] = useState(false);
+  const [convertDialogOpen, setConvertDialogOpen] = useState(false);
 
   const currentStage = useMemo(
     () => stages.find((stage) => stage.id === lead?.stageId) ?? null,
     [lead?.stageId, stages]
   );
-  const isLeadStage = currentStage?.slug === "dd";
+  const isLeadStage = currentStage?.workflowFamily === "lead";
   const convertedAt = lead?.convertedAt ?? null;
+  const leadStages = useMemo(
+    () =>
+      stages
+        .filter((stage) => stage.workflowFamily === "lead")
+        .sort((a, b) => a.displayOrder - b.displayOrder),
+    [stages]
+  );
+  const nextLeadStage = useMemo(() => {
+    if (!currentStage) {
+      return null;
+    }
+
+    return (
+      leadStages.find((stage) => stage.displayOrder > currentStage.displayOrder) ?? null
+    );
+  }, [currentStage, leadStages]);
 
   if (loading) {
     return (
@@ -45,6 +67,8 @@ export function LeadDetailPage() {
 
   const leadCompanyName = lead.companyName ?? null;
   const propertyLine = formatLeadPropertyLine(lead);
+  const canConvertToOpportunity =
+    currentStage?.slug === "qualified_for_opportunity" && !lead.convertedDealId;
 
   return (
     <div className="space-y-6">
@@ -133,7 +157,17 @@ export function LeadDetailPage() {
               stageEnteredAt: lead.stageEnteredAt,
             }}
             converted={!isLeadStage}
+            showPrimaryAction={false}
           />
+
+          {isLeadStage && (
+            <LeadQualificationPanel
+              leadId={lead.id}
+              onSaved={() => {
+                // qualification panel owns its own refetch and does not need parent state reset
+              }}
+            />
+          )}
 
           <Card>
             <CardContent className="space-y-3 pt-4">
@@ -154,10 +188,57 @@ export function LeadDetailPage() {
                 <Phone className="h-4 w-4" />
                 <span>{lead.lastActivityAt ? "Activity recorded" : "No activity yet"}</span>
               </div>
+              {isLeadStage && nextLeadStage && (
+                <Button
+                  variant="outline"
+                  className="w-full"
+                  onClick={() => {
+                    setTargetStageId(nextLeadStage.id);
+                    setStageDialogOpen(true);
+                  }}
+                >
+                  Advance to {nextLeadStage.name}
+                  <ArrowRight className="ml-2 h-4 w-4" />
+                </Button>
+              )}
+              {canConvertToOpportunity && (
+                <Button className="w-full" onClick={() => setConvertDialogOpen(true)}>
+                  Convert to Opportunity
+                  <ArrowRight className="ml-2 h-4 w-4" />
+                </Button>
+              )}
+              {!isLeadStage && lead.convertedDealId && (
+                <Button className="w-full" onClick={() => navigate(`/deals/${lead.convertedDealId}`)}>
+                  Open Deal
+                  <ArrowRight className="ml-2 h-4 w-4" />
+                </Button>
+              )}
             </CardContent>
           </Card>
         </div>
       </div>
+
+      {lead && (
+        <>
+          <LeadStageChangeDialog
+            lead={lead}
+            targetStageId={targetStageId}
+            open={stageDialogOpen}
+            onOpenChange={setStageDialogOpen}
+            onSuccess={() => {
+              setStageDialogOpen(false);
+              setTargetStageId(null);
+              void refetch();
+            }}
+          />
+          <LeadConvertDialog
+            lead={lead}
+            open={convertDialogOpen}
+            onOpenChange={setConvertDialogOpen}
+            onSuccess={(dealId) => navigate(`/deals/${dealId}`)}
+          />
+        </>
+      )}
     </div>
   );
 }

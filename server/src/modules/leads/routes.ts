@@ -9,6 +9,7 @@ import {
 } from "./service.js";
 import { convertLead } from "./conversion-service.js";
 import { preflightLeadStageCheck } from "./stage-gate.js";
+import { getLeadQualificationByLeadId } from "./qualification-service.js";
 
 const router = Router();
 
@@ -49,6 +50,22 @@ router.get("/:id", async (req, res, next) => {
     }
     await req.commitTransaction!();
     res.json({ lead });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/leads/:id/qualification
+router.get("/:id/qualification", async (req, res, next) => {
+  try {
+    const lead = await getLeadById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    if (!lead) {
+      throw new AppError(404, "Lead not found");
+    }
+
+    const qualification = await getLeadQualificationByLeadId(req.tenantDb!, req.params.id);
+    await req.commitTransaction!();
+    res.json({ qualification });
   } catch (err) {
     next(err);
   }

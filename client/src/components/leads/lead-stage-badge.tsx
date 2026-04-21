@@ -15,9 +15,9 @@ export function LeadStageBadge({ stageId, className, converted = false }: LeadSt
     return <Badge variant="outline" className={className}>Lead</Badge>;
   }
 
-  const isLeadStage = stage.slug === "dd";
+  const isLeadStage = stage.workflowFamily === "lead";
   const label = isLeadStage
-    ? "Lead"
+    ? stage.name
     : converted
       ? `Converted · ${stage.name}`
       : stage.name;

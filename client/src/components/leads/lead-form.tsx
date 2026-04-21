@@ -26,9 +26,10 @@ export interface LeadFormLead {
 interface LeadFormProps {
   lead: LeadFormLead;
   converted?: boolean;
+  showPrimaryAction?: boolean;
 }
 
-export function LeadForm({ lead, converted = false }: LeadFormProps) {
+export function LeadForm({ lead, converted = false, showPrimaryAction = true }: LeadFormProps) {
   const navigate = useNavigate();
   const propertyLabel = [lead.propertyAddress, [lead.propertyCity, lead.propertyState].filter(Boolean).join(", "), lead.propertyZip]
     .filter(Boolean)
@@ -78,12 +79,14 @@ export function LeadForm({ lead, converted = false }: LeadFormProps) {
         )}
 
         <div className="flex flex-wrap gap-2">
-          <Button
-            disabled={converted && !lead.convertedDealId}
-            onClick={() => navigate(converted ? `/deals/${lead.convertedDealId}` : "/deals/new")}
-          >
-            {converted ? "Open Deal" : "Convert to Deal"}
-          </Button>
+          {showPrimaryAction && (
+            <Button
+              disabled={converted && !lead.convertedDealId}
+              onClick={() => navigate(converted ? `/deals/${lead.convertedDealId}` : "/deals/new")}
+            >
+              {converted ? "Open Deal" : "Convert to Deal"}
+            </Button>
+          )}
           {lead.companyId && (
             <Button variant="outline" onClick={() => navigate(`/companies/${lead.companyId}`)}>
               View Company
