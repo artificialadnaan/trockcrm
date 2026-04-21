@@ -13,6 +13,7 @@ import {
   Target,
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { MyCleanupCard } from "../../components/dashboard/my-cleanup-card";
 
 export function RepDashboardPage() {
   const { user } = useAuth();
@@ -68,6 +69,8 @@ export function RepDashboardPage() {
           Here is your sales activity overview for {new Date().getFullYear()}.
         </p>
       </div>
+
+      <MyCleanupCard total={data.myCleanup.total} byReason={data.myCleanup.byReason} />
 
       {/* Today's Tasks */}
       <Card>
