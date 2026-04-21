@@ -1,5 +1,6 @@
 import jwt from "jsonwebtoken";
 import { eq, and, like } from "drizzle-orm";
+import { pool } from "../../db.js";
 import { db } from "../../db.js";
 import { offices, users, userOfficeAccess } from "@trock-crm/shared/schema";
 import type { JwtClaims } from "@trock-crm/shared/types";
@@ -125,4 +126,34 @@ export async function getOfficeAccess(
   const access = rows.find((a) => a.officeId === officeId);
   if (!access) return { hasAccess: false };
   return { hasAccess: true, roleOverride: access.roleOverride || undefined };
+}
+
+export async function getAccessibleOffices(
+  userId: string,
+  userRole: string,
+  primaryOfficeId: string
+): Promise<Array<{ id: string; name: string; slug: string }>> {
+  if (userRole === "admin") {
+    const result = await pool.query<{ id: string; name: string; slug: string }>(
+      "SELECT id, name, slug FROM public.offices WHERE is_active = true ORDER BY name"
+    );
+    return result.rows;
+  }
+
+  const result = await pool.query<{ id: string; name: string; slug: string }>(
+    `SELECT DISTINCT o.id, o.name, o.slug
+     FROM public.offices o
+     WHERE o.is_active = true
+       AND (
+         o.id = $1
+         OR o.id IN (
+           SELECT office_id FROM public.user_office_access
+           WHERE user_id = $2 AND role_override IN ('director', 'admin')
+         )
+       )
+     ORDER BY o.name`,
+    [primaryOfficeId, userId]
+  );
+
+  return result.rows;
 }

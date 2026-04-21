@@ -3,6 +3,7 @@ import { jobQueue } from "@trock-crm/shared/schema";
 import { TASK_PRIORITIES, TASK_TYPES } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 import { eventBus } from "../../events/bus.js";
+import { getAccessibleOffices } from "../auth/service.js";
 import { TASK_RULES } from "./rules/config.js";
 import { listUsers } from "../admin/users-service.js";
 import {
@@ -30,7 +31,15 @@ router.get("/assignees", async (req, res, next) => {
     }
 
     const requestedOfficeId = req.headers["x-office-id"] as string | undefined;
+    const accessibleOffices = await getAccessibleOffices(
+      req.user!.id,
+      req.user!.role,
+      req.user!.activeOfficeId ?? req.user!.officeId
+    );
     const officeId = requestedOfficeId ?? req.user!.activeOfficeId ?? req.user!.officeId;
+    if (requestedOfficeId && !accessibleOffices.some((office) => office.id === requestedOfficeId)) {
+      throw new AppError(403, "Requested office is not accessible");
+    }
     const rows = await listUsers(officeId);
     const users = rows
       .filter((u) => u.isActive)

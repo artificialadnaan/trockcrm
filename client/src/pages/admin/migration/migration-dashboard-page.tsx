@@ -5,7 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Link } from "react-router-dom";
 import { useAuth } from "@/lib/auth";
-import { useAdminOffices } from "@/hooks/use-admin-offices";
+import { useAccessibleOffices } from "@/hooks/use-accessible-offices";
 import {
   bulkReassignOwnershipQueueRows,
   useMigrationSummary,
@@ -148,7 +148,7 @@ const STALE_AGE_OPTIONS = [
 
 export function MigrationDashboardPage() {
   const { user } = useAuth();
-  const { offices } = useAdminOffices();
+  const { offices, loading: officesLoading } = useAccessibleOffices();
   const { summary, loading, error, refetch, runValidation } = useMigrationSummary();
   const {
     exceptions,
@@ -156,13 +156,20 @@ export function MigrationDashboardPage() {
     error: exceptionsError,
     refetch: refetchExceptions,
   } = useMigrationExceptions();
-  const activeOffices = useMemo(() => offices.filter((office) => office.isActive), [offices]);
   const [selectedOfficeId, setSelectedOfficeId] = useState<string | undefined>(undefined);
   const [recordTypeFilter, setRecordTypeFilter] = useState<"all" | "lead" | "deal">("all");
   const [reasonCodeFilter, setReasonCodeFilter] = useState<string>("all");
   const [staleAgeFilter, setStaleAgeFilter] = useState<"all" | "7" | "14" | "30" | "60">("all");
   const [officeFilterError, setOfficeFilterError] = useState<string | null>(null);
-  const officeId = selectedOfficeId ?? user?.activeOfficeId ?? user?.officeId;
+  const accessibleOfficeIds = useMemo(() => new Set(offices.map((office) => office.id)), [offices]);
+  const defaultOfficeId = useMemo(() => {
+    const currentOfficeId = user?.activeOfficeId ?? user?.officeId;
+    if (currentOfficeId && accessibleOfficeIds.has(currentOfficeId)) {
+      return currentOfficeId;
+    }
+    return offices[0]?.id;
+  }, [accessibleOfficeIds, offices, user?.activeOfficeId, user?.officeId]);
+  const officeId = selectedOfficeId ?? defaultOfficeId;
   const selectedOffice = useMemo(
     () => offices.find((office) => office.id === officeId) ?? null,
     [officeId, offices]
@@ -191,14 +198,10 @@ export function MigrationDashboardPage() {
 
   useEffect(() => {
     if (selectedOfficeId) return;
-    if (officeId) {
-      setSelectedOfficeId(officeId);
-      return;
+    if (defaultOfficeId) {
+      setSelectedOfficeId(defaultOfficeId);
     }
-    if (activeOffices.length > 0) {
-      setSelectedOfficeId(activeOffices[0]!.id);
-    }
-  }, [activeOffices, officeId, selectedOfficeId]);
+  }, [defaultOfficeId, selectedOfficeId]);
 
   useEffect(() => {
     if (selectedOfficeId && !offices.some((office) => office.id === selectedOfficeId)) {
@@ -357,10 +360,10 @@ export function MigrationDashboardPage() {
               </div>
               <Select value={selectedOfficeId ?? ""} onValueChange={(value) => setSelectedOfficeId(value || undefined)}>
                 <SelectTrigger className="w-full">
-                  <SelectValue placeholder={user?.activeOfficeId ? "Select office" : "Loading offices..."} />
+                  <SelectValue placeholder={officesLoading ? "Loading offices..." : "Select office"} />
                 </SelectTrigger>
                 <SelectContent>
-                  {activeOffices.map((office) => (
+                  {offices.map((office) => (
                     <SelectItem key={office.id} value={office.id}>
                       {office.name}
                     </SelectItem>

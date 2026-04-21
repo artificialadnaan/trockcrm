@@ -6,7 +6,7 @@ import { MigrationDashboardPage } from "./migration-dashboard-page";
 
 const mocks = vi.hoisted(() => ({
   useAuthMock: vi.fn(),
-  useAdminOfficesMock: vi.fn(),
+  useAccessibleOfficesMock: vi.fn(),
   useMigrationSummaryMock: vi.fn(),
   useMigrationExceptionsMock: vi.fn(),
   useOfficeOwnershipQueueMock: vi.fn(),
@@ -16,8 +16,8 @@ vi.mock("@/lib/auth", () => ({
   useAuth: mocks.useAuthMock,
 }));
 
-vi.mock("@/hooks/use-admin-offices", () => ({
-  useAdminOffices: mocks.useAdminOfficesMock,
+vi.mock("@/hooks/use-accessible-offices", () => ({
+  useAccessibleOffices: mocks.useAccessibleOfficesMock,
 }));
 
 vi.mock("@/hooks/use-migration", () => ({
@@ -86,27 +86,17 @@ describe("MigrationDashboardPage", () => {
       },
     });
 
-    mocks.useAdminOfficesMock.mockReturnValue({
+    mocks.useAccessibleOfficesMock.mockReturnValue({
       offices: [
         {
           id: "office-1",
           name: "North Office",
           slug: "north",
-          address: null,
-          phone: null,
-          isActive: true,
-          settings: {},
-          createdAt: "2026-04-21T12:00:00.000Z",
         },
         {
           id: "office-2",
           name: "South Office",
           slug: "south",
-          address: null,
-          phone: null,
-          isActive: true,
-          settings: {},
-          createdAt: "2026-04-21T12:00:00.000Z",
         },
       ],
       loading: false,
@@ -145,7 +135,6 @@ describe("MigrationDashboardPage", () => {
           recordType: "deal",
           recordId: "deal-1",
           recordName: "Northstar Expansion",
-          stageName: "Qualification",
           officeId: "office-1",
           officeName: "Dallas",
           assignedRepId: null,
