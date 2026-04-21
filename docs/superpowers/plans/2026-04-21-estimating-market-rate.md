@@ -16,7 +16,7 @@
   Responsibility: define market, ZIP mapping, adjustment rule, and deal override tables.
 - Modify: `shared/src/schema/index.ts`
   Responsibility: export the new market-rate schema tables.
-- Create: `migrations/0032_estimating_market_rate.sql`
+- Create: `migrations/0033_estimating_market_rate.sql`
   Responsibility: add market-rate tables and indexes.
 - Create: `server/src/modules/estimating/market-resolution-service.ts`
   Responsibility: resolve effective deal market from ZIP, fallback geography, and override state.
@@ -25,7 +25,9 @@
 - Create: `server/src/modules/estimating/deal-market-override-service.ts`
   Responsibility: set, clear, and audit estimator market overrides.
 - Modify: `server/src/modules/estimating/pricing-service.ts`
-  Responsibility: apply market-rate adjustments to baseline pricing and persist evidence/assumptions.
+  Responsibility: apply market-rate adjustment helpers and shared pricing math.
+- Modify: `server/src/modules/estimating/draft-estimate-service.ts`
+  Responsibility: persist market-rate-enriched pricing recommendations through the real generation path.
 - Modify: `server/src/modules/estimating/workbench-service.ts`
   Responsibility: expose resolved market context and market-rate rationale in workbench pricing rows.
 - Modify: `server/src/modules/deals/routes.ts`
@@ -35,11 +37,15 @@
 - Create: `server/tests/modules/estimating/market-rate-service.test.ts`
   Responsibility: verify rule selection, component adjustments, and rationale output.
 - Modify: `server/tests/modules/estimating/pricing-service.test.ts`
-  Responsibility: verify market-rate adjustments are applied to pricing recommendations.
+  Responsibility: verify market-rate helper math and fallback behavior.
+- Modify: `server/tests/modules/estimating/draft-estimate-service.test.ts`
+  Responsibility: verify stored pricing recommendations persist market-rate-enriched values and rationale.
 - Modify: `server/tests/modules/estimating/workbench-service.test.ts`
   Responsibility: verify workbench state exposes market context and evidence.
 - Modify: `server/tests/modules/estimating/workflow-state-routes.test.ts`
   Responsibility: verify market override routes and review-event behavior.
+- Create: `server/tests/modules/estimating/market-rate-integration.test.ts`
+  Responsibility: verify end-to-end generation enrichment and override-triggered refresh behavior.
 - Modify: `client/src/components/estimating/estimate-recommendation-options-panel.tsx`
   Responsibility: render market-rate evidence for the selected pricing row.
 - Modify: `client/src/components/estimating/estimating-workflow-shell.tsx`
@@ -60,7 +66,7 @@
 **Files:**
 - Create: `shared/src/schema/tenant/estimate-markets.ts`
 - Modify: `shared/src/schema/index.ts`
-- Create: `migrations/0032_estimating_market_rate.sql`
+- Create: `migrations/0033_estimating_market_rate.sql`
 - Modify: `server/tests/modules/estimating/schema-exports.test.ts`
 
 - [ ] **Step 1: Write failing schema-export coverage for market-rate tables**
@@ -78,6 +84,7 @@
   Requirements:
   - canonical market records with active flag
   - ZIP-to-market mapping rows
+  - metro-aware geography fields or mapping rows to support ZIP -> metro -> region/state -> default resolution
   - market adjustment rules with fallback fields, component percentages, and effective dates
   - deal-level market override rows with user attribution and reason
   - indexes for ZIP lookup, rule selection, and deal override reads
@@ -100,6 +107,7 @@
 - [ ] **Step 1: Write failing tests for market resolution**
   Cover:
   - ZIP resolves directly to a market
+  - ZIP resolves to metro context before broader fallback
   - ZIP falls back to region/state rule when no market mapping exists
   - global default is used when no geographic rule matches
   - deal-level override wins over auto-resolution
@@ -118,7 +126,7 @@
 - [ ] **Step 4: Implement market resolution service**
   Requirements:
   - accept deal/project location inputs
-  - resolve effective market by override, ZIP mapping, broader geography fallback, then default
+  - resolve effective market by override, ZIP mapping, metro-aware geography, broader geography fallback, then default
   - return both market identity and resolution source
 
 - [ ] **Step 5: Implement market-rate adjustment service**
@@ -138,32 +146,39 @@
 
 **Files:**
 - Modify: `server/src/modules/estimating/pricing-service.ts`
+- Modify: `server/src/modules/estimating/draft-estimate-service.ts`
 - Modify: `server/tests/modules/estimating/pricing-service.test.ts`
+- Modify: `server/tests/modules/estimating/draft-estimate-service.test.ts`
 
 - [ ] **Step 1: Write failing pricing-service tests for market-rate enrichment**
   Cover:
   - historical/catalog baseline is preserved before adjustment
   - component adjustments change the recommended unit price
-  - final recommendation still emits a single unit price and total
-  - rationale includes market-rate context when enrichment is applied
-  - fallback geography still produces a recommendation
+  - rationale includes market-rate context when helper math is applied
+  - fallback geography still produces an adjusted recommendation
 
-- [ ] **Step 2: Run the focused pricing tests and verify they fail**
-  Run: `npx vitest run tests/modules/estimating/pricing-service.test.ts`
-  Expected: FAIL because pricing does not apply market-rate enrichment yet.
+- [ ] **Step 2: Write failing draft-estimate-service tests for persisted market-rate recommendations**
+  Cover:
+  - stored recommendation rows persist adjusted unit price and total
+  - evidence/assumptions fields capture resolved market and component adjustments
+  - persisted recommendations still emit one final unit price and total
 
-- [ ] **Step 3: Integrate market-rate service into pricing generation**
+- [ ] **Step 3: Run the focused generation tests and verify they fail**
+  Run: `npx vitest run tests/modules/estimating/pricing-service.test.ts tests/modules/estimating/draft-estimate-service.test.ts`
+  Expected: FAIL because market-rate enrichment is not wired into the stored recommendation generation path yet.
+
+- [ ] **Step 4: Integrate market-rate service into the actual recommendation generation path**
   Requirements:
   - keep historical/catalog price as the baseline
   - apply component adjustments to the baseline
-  - store the adjusted price back on the pricing recommendation
+  - store the adjusted price back on persisted pricing recommendations through `draft-estimate-service.ts`
   - persist market-rate rationale into evidence/assumptions fields
 
-- [ ] **Step 4: Re-run the focused pricing tests and verify they pass**
-  Run: `npx vitest run tests/modules/estimating/pricing-service.test.ts`
+- [ ] **Step 5: Re-run the focused generation tests and verify they pass**
+  Run: `npx vitest run tests/modules/estimating/pricing-service.test.ts tests/modules/estimating/draft-estimate-service.test.ts`
   Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
   `git commit -m "feat: enrich estimate pricing with market rates"`
 
 ## Task 4: Add Deal-Level Market Override Routes and Audit Flow
@@ -269,10 +284,38 @@
 - [ ] **Step 6: Commit**
   `git commit -m "feat: add estimating market-rate workbench ui"`
 
-## Task 7: Final Verification and Hardening
+## Task 7: Add Integration Coverage for Generation and Override Refresh
 
 **Files:**
-- Modify: any touched files from Tasks 1-6
+- Create: `server/tests/modules/estimating/market-rate-integration.test.ts`
+- Modify: `server/tests/modules/estimating/workflow-state-routes.test.ts`
+
+- [ ] **Step 1: Write failing integration tests for generation enrichment and override refresh**
+  Cover:
+  - estimate generation persists market-rate-enriched recommendations end to end
+  - a deal market override changes downstream pricing context on refresh or rerun
+  - clearing the override restores auto-resolved geography on subsequent refreshes
+
+- [ ] **Step 2: Run the focused integration tests and verify they fail**
+  Run: `npx vitest run tests/modules/estimating/market-rate-integration.test.ts tests/modules/estimating/workflow-state-routes.test.ts`
+  Expected: FAIL because end-to-end market-rate generation and override-refresh coverage is not implemented yet.
+
+- [ ] **Step 3: Add the missing integration fixtures or wiring needed by the tests**
+  Requirements:
+  - generation fixtures exercise resolved market selection and persisted evidence
+  - override route tests confirm refreshed workbench state reflects the new market context
+
+- [ ] **Step 4: Re-run the focused integration tests and verify they pass**
+  Run: `npx vitest run tests/modules/estimating/market-rate-integration.test.ts tests/modules/estimating/workflow-state-routes.test.ts`
+  Expected: PASS
+
+- [ ] **Step 5: Commit**
+  `git commit -m "test: add estimating market-rate integration coverage"`
+
+## Task 8: Final Verification and Hardening
+
+**Files:**
+- Modify: any touched files from Tasks 1-7
 
 - [ ] **Step 1: Run the focused estimating server test suite**
   Run: `npx vitest run tests/modules/estimating/*.test.ts`
