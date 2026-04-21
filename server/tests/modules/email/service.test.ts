@@ -25,8 +25,10 @@ vi.mock("../../../src/modules/email/graph-auth.js", () => ({
 const {
   autoAssociateEmailToDeal,
   associateEmailToEntity,
+  associateEmailToDeal,
   buildThreadAssignmentFallbackWhereClause,
   getEmails,
+  getUserEmails,
   isEmailAssignmentQueueCandidate,
   sendEmail,
 } = await import("../../../src/modules/email/service.js");
@@ -246,6 +248,44 @@ describe("email service inbound association", () => {
     expect(
       hasColumnName(whereClauses[0], "assigned_entity_id") ||
         hasColumnName(whereClauses[0], "assignedEntityId")
+    ).toBe(true);
+  });
+
+  it("uses recency ordering based on sentAt or syncedAt for user inbox", async () => {
+    const orderByClauses: unknown[] = [];
+    const tenantDb = {
+      select: vi.fn(() => {
+        const callIndex = (tenantDb.select as any).mock.calls.length;
+        const chain: any = {
+          from: vi.fn(() => chain),
+          where: vi.fn(() => chain),
+          orderBy: vi.fn((...args: unknown[]) => {
+            orderByClauses.push(...args);
+            return chain;
+          }),
+          limit: vi.fn(() => chain),
+          offset: vi.fn(() => chain),
+          then(resolve: (value: any) => void) {
+            if (callIndex === 1) {
+              resolve([{ count: 1 }]);
+            } else {
+              resolve([]);
+            }
+          },
+        };
+        return chain;
+      }),
+    };
+
+    await getUserEmails(tenantDb as any, "user-1", { page: 1, limit: 25 });
+
+    expect(orderByClauses.length).toBeGreaterThan(0);
+    expect(
+      orderByClauses.some(
+        (clause) =>
+          (hasColumnName(clause, "synced_at") || hasColumnName(clause, "syncedAt")) &&
+          (hasColumnName(clause, "sent_at") || hasColumnName(clause, "sentAt"))
+      )
     ).toBe(true);
   });
 
@@ -584,6 +624,7 @@ describe("email service inbound association", () => {
             assignedEntityId: "contact-1",
             dealId: null,
             contactId: "contact-1",
+            syncedAt: expect.any(Date),
           }),
         }),
         expect.objectContaining({
@@ -605,6 +646,98 @@ describe("email service inbound association", () => {
           companyId: "company-1",
           contactId: "contact-1",
           dealId: null,
+        }),
+      ])
+    );
+  });
+
+  it("bumps email syncedAt when manually associating to a deal", async () => {
+    const updatePayloads: Array<{ table: string; payload: any }> = [];
+    const tenantDb = {
+      select: vi.fn(() => {
+        const chain: any = {
+          from: vi.fn(() => chain),
+          where: vi.fn(() => chain),
+          limit: vi.fn(() => chain),
+          then(resolve: (value: any) => void) {
+            const callIndex = (tenantDb.select as any).mock.calls.length;
+            if (callIndex === 1) {
+              resolve([{ id: "email-1", userId: "user-1", contactId: null, subject: "Hello", bodyPreview: "Hi", bodyHtml: null, sentAt: new Date("2026-04-20T00:00:00.000Z") }]);
+            } else if (callIndex === 2) {
+              resolve([{ id: "deal-1", companyId: "company-1", propertyId: "property-1", sourceLeadId: "lead-1" }]);
+            } else {
+              resolve([]);
+            }
+          },
+        };
+        return chain;
+      }),
+      update: vi.fn((table: any) => ({
+        set: vi.fn((payload: any) => {
+          updatePayloads.push({ table: table?.name ?? "unknown", payload });
+          return {
+            where: vi.fn(() => ({
+              returning: vi.fn(async () => []),
+            })),
+          };
+        }),
+      })),
+      insert: vi.fn(() => ({
+        values: vi.fn(async () => []),
+      })),
+    };
+
+    await associateEmailToEntity(
+      tenantDb as any,
+      "email-1",
+      {
+        assignedEntityType: "deal",
+        assignedEntityId: "deal-1",
+        assignedDealId: "deal-1",
+      },
+      "director",
+      "director-1",
+      "office-1"
+    );
+
+    expect(updatePayloads).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          payload: expect.objectContaining({
+            assignedEntityType: "deal",
+            assignedEntityId: "deal-1",
+            dealId: "deal-1",
+            syncedAt: expect.any(Date),
+          }),
+        }),
+      ])
+    );
+  });
+
+  it("bumps email syncedAt when using associateEmailToDeal helper", async () => {
+    const updatePayloads: Array<{ table: string; payload: any }> = [];
+    const tenantDb = {
+      update: vi.fn((table: any) => ({
+        set: vi.fn((payload: any) => {
+          updatePayloads.push({ table: table?.name ?? "unknown", payload });
+          return {
+            where: vi.fn(async () => []),
+          };
+        }),
+      })),
+    };
+
+    await associateEmailToDeal(tenantDb as any, "email-1", "deal-1");
+
+    expect(updatePayloads).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          payload: expect.objectContaining({
+            assignedEntityType: "deal",
+            assignedEntityId: "deal-1",
+            dealId: "deal-1",
+            syncedAt: expect.any(Date),
+          }),
         }),
       ])
     );

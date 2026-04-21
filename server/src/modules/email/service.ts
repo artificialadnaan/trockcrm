@@ -665,7 +665,10 @@ export async function getEmailAssignmentQueue(
       .select()
       .from(emails)
       .where(where)
-      .orderBy(desc(emails.sentAt))
+      .orderBy(
+        desc(sql`GREATEST(${emails.sentAt}, ${emails.syncedAt})`),
+        desc(emails.sentAt)
+      )
       .limit(limit)
       .offset(offset),
   ]);
@@ -1047,7 +1050,10 @@ export async function getEmails(
       .select()
       .from(emails)
       .where(where)
-      .orderBy(desc(emails.sentAt))
+      .orderBy(
+        desc(sql`GREATEST(${emails.sentAt}, ${emails.syncedAt})`),
+        desc(emails.sentAt)
+      )
       .limit(limit)
       .offset(offset),
   ]);
@@ -1176,7 +1182,10 @@ export async function getUserEmails(tenantDb: TenantDb, userId: string, filters:
       .select()
       .from(emails)
       .where(where)
-      .orderBy(desc(emails.sentAt))
+      .orderBy(
+        desc(sql`GREATEST(${emails.sentAt}, ${emails.syncedAt})`),
+        desc(emails.sentAt)
+      )
       .limit(limit)
       .offset(offset),
   ]);
@@ -1484,6 +1493,7 @@ export async function associateEmailToEntity(
       assignmentAmbiguityReason: null,
       dealId: assignedDealId,
       contactId: input.assignedEntityType === "contact" ? input.assignedEntityId : email.contactId ?? null,
+      syncedAt: new Date(),
     })
     .where(eq(emails.id, emailId));
 
@@ -1530,7 +1540,10 @@ export async function associateEmailToDeal(
 ): Promise<void> {
   await tenantDb
     .update(emails)
-    .set(assignmentUpdateForDeal(dealId))
+    .set({
+      ...assignmentUpdateForDeal(dealId),
+      syncedAt: new Date(),
+    })
     .where(eq(emails.id, emailId));
 
   await tenantDb
