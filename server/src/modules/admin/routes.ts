@@ -11,6 +11,11 @@ import {
 } from "./users-service.js";
 import { runOwnershipSync } from "./ownership-sync-service.js";
 import {
+  bulkReassignOwnershipQueueRows,
+  getMyCleanupQueue,
+  getOfficeOwnershipQueue,
+} from "./cleanup-queue-service.js";
+import {
   listPipelineStages, updatePipelineStage, reorderPipelineStages,
 } from "./pipeline-service.js";
 import { getAuditLog, getAuditLogTables } from "./audit-service.js";
@@ -137,6 +142,54 @@ router.post("/admin/ownership-sync/dry-run", requireAdmin, async (_req: Request,
 router.post("/admin/ownership-sync/apply", requireAdmin, async (_req: Request, res: Response, next: NextFunction) => {
   try {
     const result = await runOwnershipSync({ dryRun: false });
+    return res.json(result);
+  } catch (err) {
+    return next(err);
+  }
+});
+
+router.get("/admin/cleanup/my", tenantMiddleware, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const officeId = req.user!.activeOfficeId ?? req.user!.officeId;
+    const result = await getMyCleanupQueue(req.tenantDb!, req.user!.id, officeId);
+    await req.commitTransaction!();
+    return res.json({ rows: result.rows });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+router.get("/admin/cleanup/office", requireDirector, tenantMiddleware, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const officeId = (req.query.officeId as string) ?? (req.user!.activeOfficeId ?? req.user!.officeId);
+    const result = await getOfficeOwnershipQueue(req.tenantDb!, officeId, req.user!);
+    await req.commitTransaction!();
+    return res.json({ rows: result.rows });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+router.post("/admin/cleanup/reassign", requireDirector, tenantMiddleware, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { rows, assigneeId } = req.body as {
+      rows: Array<{ recordType: "lead" | "deal"; recordId: string }>;
+      assigneeId: string;
+    };
+
+    if (!Array.isArray(rows) || rows.length === 0) {
+      return res.status(400).json({ error: "rows are required" });
+    }
+
+    if (!assigneeId) {
+      return res.status(400).json({ error: "assigneeId is required" });
+    }
+
+    const result = await bulkReassignOwnershipQueueRows(req.tenantDb!, req.user!, {
+      rows,
+      assigneeId,
+    });
+    await req.commitTransaction!();
     return res.json(result);
   } catch (err) {
     return next(err);
