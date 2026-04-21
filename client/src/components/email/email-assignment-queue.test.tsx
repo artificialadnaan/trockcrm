@@ -40,7 +40,7 @@ describe("EmailAssignmentQueueView", () => {
             },
           },
         ]}
-        onAssign={async () => {}}
+        onAssign={async () => ({ ok: true })}
       />
     );
 
@@ -85,7 +85,7 @@ describe("EmailAssignmentQueueView", () => {
             },
           },
         ]}
-        onAssign={async () => {}}
+        onAssign={async () => ({ ok: true })}
       />
     );
 
@@ -95,7 +95,7 @@ describe("EmailAssignmentQueueView", () => {
   });
 
   it("renders an empty-state message when there are no items", () => {
-    const html = renderToStaticMarkup(<EmailAssignmentQueueView items={[]} onAssign={async () => {}} />);
+    const html = renderToStaticMarkup(<EmailAssignmentQueueView items={[]} onAssign={async () => ({ ok: true })} />);
     expect(html).toContain("No unresolved parking-lot email intake.");
   });
 });

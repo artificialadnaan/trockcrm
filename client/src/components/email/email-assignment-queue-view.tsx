@@ -80,7 +80,10 @@ type ManualSearchResult = {
 
 interface EmailAssignmentQueueViewProps {
   items: EmailAssignmentQueueItem[];
-  onAssign: (emailId: string, target: EmailAssignmentTarget) => Promise<void>;
+  onAssign: (
+    emailId: string,
+    target: EmailAssignmentTarget
+  ) => Promise<{ ok: true } | { ok: false; message: string }>;
 }
 
 type ContactSearchRow = {
@@ -297,7 +300,10 @@ function AssignmentTargetDialog({
 }: {
   item: EmailAssignmentQueueItem;
   safeOptions: Array<{ label: string; value: EmailAssignmentTarget }>;
-  onAssign: (emailId: string, target: EmailAssignmentTarget) => Promise<void>;
+  onAssign: (
+    emailId: string,
+    target: EmailAssignmentTarget
+  ) => Promise<{ ok: true } | { ok: false; message: string }>;
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
@@ -306,6 +312,7 @@ function AssignmentTargetDialog({
   const [results, setResults] = useState<ManualSearchResult[]>([]);
   const [searching, setSearching] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
+  const [assignmentError, setAssignmentError] = useState<string | null>(null);
   const [resolvingKey, setResolvingKey] = useState<string | null>(null);
 
   useEffect(() => {
@@ -313,6 +320,7 @@ function AssignmentTargetDialog({
       setQuery("");
       setResults([]);
       setSearchError(null);
+      setAssignmentError(null);
       setSearching(false);
       setResolvingKey(null);
       return;
@@ -359,8 +367,13 @@ function AssignmentTargetDialog({
   async function handleAssignTarget(target: EmailAssignmentTarget) {
     const key = `${target.assignedEntityType}:${target.assignedEntityId}`;
     setResolvingKey(key);
+    setAssignmentError(null);
     try {
-      await onAssign(item.email.id, target);
+      const result = await onAssign(item.email.id, target);
+      if (!result.ok) {
+        setAssignmentError(result.message);
+        return;
+      }
       onOpenChange(false);
     } finally {
       setResolvingKey(null);
@@ -384,8 +397,10 @@ function AssignmentTargetDialog({
               {safeOptions.map((option) => {
                 const key = `${option.value.assignedEntityType}:${option.value.assignedEntityId}`;
                 return (
-                  <div key={key} className="flex items-center justify-between gap-3 rounded-lg border p-3">
-                    <div className="min-w-0 text-sm">{option.label}</div>
+                  <div key={key} className="flex w-full min-w-0 items-start justify-between gap-3 overflow-hidden rounded-lg border p-3">
+                    <div className="min-w-0 flex-1 text-sm">
+                      <p className="truncate">{option.label}</p>
+                    </div>
                     <Button
                       size="sm"
                       onClick={() => void handleAssignTarget(option.value)}
@@ -426,6 +441,7 @@ function AssignmentTargetDialog({
           </div>
 
           {searchError && <p className="text-sm text-red-700">{searchError}</p>}
+          {assignmentError && <p className="text-sm text-red-700">{assignmentError}</p>}
 
           {query.trim().length < 2 ? (
             <p className="text-sm text-muted-foreground">Type at least 2 characters to search across {searchType}s.</p>
@@ -438,8 +454,8 @@ function AssignmentTargetDialog({
               {results.map((result) => {
                 const key = `${result.target.assignedEntityType}:${result.target.assignedEntityId}`;
                 return (
-                  <div key={result.id} className="flex items-center justify-between gap-3 rounded-lg border p-3">
-                    <div className="min-w-0">
+                  <div key={result.id} className="flex w-full min-w-0 items-start justify-between gap-3 overflow-hidden rounded-lg border p-3">
+                    <div className="min-w-0 flex-1">
                       <p className="truncate text-sm font-medium">{result.title}</p>
                       {result.subtitle && <p className="truncate text-xs text-muted-foreground">{result.subtitle}</p>}
                     </div>
@@ -468,7 +484,10 @@ function AssignmentQueueCard({
   onAssign,
 }: {
   item: EmailAssignmentQueueItem;
-  onAssign: (emailId: string, target: EmailAssignmentTarget) => Promise<void>;
+  onAssign: (
+    emailId: string,
+    target: EmailAssignmentTarget
+  ) => Promise<{ ok: true } | { ok: false; message: string }>;
 }) {
   const safeOptions = buildSafeAssignmentOptions(item);
   const [dialogOpen, setDialogOpen] = useState(false);
