@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   buildPricingRecommendation,
+  buildPricingRecommendationRationale,
+  isInferredRecommendationRowEligible,
   isConfirmedMeasurementCandidateForPricing,
 } from "../../../src/modules/estimating/pricing-service.js";
 
@@ -55,5 +57,60 @@ describe("buildPricingRecommendation", () => {
         },
       })
     ).toBe(true);
+  });
+
+  it("requires document-backed evidence plus historical or dependency support before pricing an inferred row", () => {
+    expect(
+      isInferredRecommendationRowEligible({
+        sourceType: "inferred",
+        documentEvidence: null,
+        historicalSupportCount: 0,
+        dependencySupportCount: 0,
+      })
+    ).toBe(false);
+
+    expect(
+      isInferredRecommendationRowEligible({
+        sourceType: "inferred",
+        documentEvidence: {
+          documentId: "doc-1",
+          sourceText: "Companion work implied by spec",
+        },
+        historicalSupportCount: 0,
+        dependencySupportCount: 2,
+      })
+    ).toBe(true);
+  });
+
+  it("builds rationale payloads that carry duplicate-group metadata for persistence", () => {
+    const result = buildPricingRecommendationRationale({
+      normalizedIntent: "roofing:tearoff",
+      sectionName: "Roofing",
+      sourceRowIdentity: "row-1",
+      optionRows: [
+        {
+          rank: 1,
+          optionLabel: "Tearoff base",
+          optionKind: "recommended",
+        },
+        {
+          rank: 2,
+          optionLabel: "Tearoff alternate",
+          optionKind: "alternate",
+        },
+      ],
+      duplicateGroupMetadata: {
+        duplicateKeys: ["catalog:cat-a"],
+        suppressedCount: 1,
+      },
+      evidenceJson: {
+        documentEvidence: ["sheet 2"],
+        historicalSupport: ["job-7"],
+      },
+    });
+
+    expect(result.duplicateGroupMetadata.duplicateKeys).toEqual(["catalog:cat-a"]);
+    expect(result.optionRows.map((option: any) => option.rank)).toEqual([1, 2]);
+    expect(result.evidenceJson.documentEvidence).toEqual(["sheet 2"]);
   });
 });

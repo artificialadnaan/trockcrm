@@ -9,6 +9,28 @@ export interface BuildPricingRecommendationInput {
   projectTypeId: string | null;
 }
 
+export interface BuildPricingRecommendationRationaleInput {
+  normalizedIntent: string;
+  sectionName: string | null;
+  sourceRowIdentity: string;
+  optionRows: Array<{
+    rank: number;
+    optionLabel: string;
+    optionKind: "recommended" | "alternate";
+    catalogItemId?: string | null;
+    localCatalogItemId?: string | null;
+    normalizedCustomItemKey?: string | null;
+  }>;
+  duplicateGroupMetadata: {
+    sectionName?: string | null;
+    normalizedIntent?: string;
+    sourceRowIdentity?: string;
+    duplicateKeys: string[];
+    suppressedCount: number;
+  };
+  evidenceJson: Record<string, unknown>;
+}
+
 export function getRegionalMarketAdjustmentPercent(input: {
   regionId: string | null;
   projectTypeId: string | null;
@@ -59,6 +81,57 @@ export function buildPricingRecommendation(input: BuildPricingRecommendationInpu
       internalAdjustmentPercent: input.internalAdjustmentPercent,
     },
     confidence: historicalMedian != null ? 0.84 : 0.58,
+  };
+}
+
+export function isInferredRecommendationRowEligible(input: {
+  sourceType?: string | null;
+  documentEvidence: {
+    documentId?: string | null;
+    sourceText?: string | null;
+    sourceExtractionId?: string | null;
+  } | null;
+  historicalSupportCount: number;
+  dependencySupportCount: number;
+}) {
+  if (input.sourceType !== "inferred") return true;
+
+  const hasDocumentEvidence =
+    Boolean(input.documentEvidence?.documentId) ||
+    Boolean(input.documentEvidence?.sourceText?.trim()) ||
+    Boolean(input.documentEvidence?.sourceExtractionId);
+
+  return (
+    hasDocumentEvidence &&
+    (input.historicalSupportCount > 0 || input.dependencySupportCount > 0)
+  );
+}
+
+export function buildPricingRecommendationRationale(
+  input: BuildPricingRecommendationRationaleInput
+) {
+  const duplicateGroupMetadata = {
+    sectionName: input.duplicateGroupMetadata.sectionName ?? input.sectionName,
+    normalizedIntent: input.duplicateGroupMetadata.normalizedIntent ?? input.normalizedIntent,
+    sourceRowIdentity: input.duplicateGroupMetadata.sourceRowIdentity ?? input.sourceRowIdentity,
+    duplicateKeys: [...input.duplicateGroupMetadata.duplicateKeys].sort(),
+    suppressedCount: input.duplicateGroupMetadata.suppressedCount,
+  };
+
+  return {
+    normalizedIntent: input.normalizedIntent,
+    sectionName: input.sectionName,
+    sourceRowIdentity: input.sourceRowIdentity,
+    optionRows: input.optionRows.map((option) => ({
+      rank: option.rank,
+      optionLabel: option.optionLabel,
+      optionKind: option.optionKind,
+      catalogItemId: option.catalogItemId ?? null,
+      localCatalogItemId: option.localCatalogItemId ?? null,
+      normalizedCustomItemKey: option.normalizedCustomItemKey ?? null,
+    })),
+    duplicateGroupMetadata,
+    evidenceJson: input.evidenceJson,
   };
 }
 

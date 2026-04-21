@@ -7,6 +7,7 @@ import {
   estimateExtractionMatches,
   estimateGenerationRuns,
   estimatePricingRecommendations,
+  estimatePricingRecommendationOptions,
   estimateReviewEvents,
 } from "@trock-crm/shared/schema";
 import { pool } from "../db.js";
@@ -14,9 +15,11 @@ import { listCatalogCandidatesForMatching, resolveActiveCatalogSnapshotVersionId
 import { getHistoricalPricingSignals } from "../../../server/src/modules/estimating/historical-pricing-service.js";
 import { rankExtractionMatches } from "../../../server/src/modules/estimating/matching-service.js";
 import {
+  isInferredRecommendationRowEligible,
   buildPricingRecommendation,
   isConfirmedMeasurementCandidateForPricing,
 } from "../../../server/src/modules/estimating/pricing-service.js";
+import { buildRecommendationOptionSet } from "../../../server/src/modules/estimating/recommendation-option-service.js";
 
 async function resolveSchemaName(officeId: string | null) {
   if (!officeId) throw new Error("Unable to resolve office schema for estimate generation");
@@ -29,6 +32,24 @@ async function resolveSchemaName(officeId: string | null) {
   const slug = result.rows[0]?.slug;
   if (!slug) throw new Error("Unable to resolve office schema for estimate generation");
   return `office_${slug}`;
+}
+
+function normalizeIntent(label: string) {
+  return label.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function buildSourceRowIdentity(input: {
+  sourceType: "extracted" | "inferred";
+  extractionId: string;
+  normalizedIntent: string;
+  sectionName: string | null;
+}) {
+  if (input.sourceType === "inferred") {
+    const sectionSlug = (input.sectionName ?? "general").trim().toLowerCase().replace(/[^a-z0-9]+/g, "-");
+    return `inferred:${input.normalizedIntent}:${sectionSlug}`;
+  }
+
+  return `extracted:${input.extractionId}`;
 }
 
 export async function runEstimateGeneration(
@@ -194,7 +215,7 @@ export async function runEstimateGeneration(
         continue;
       }
 
-      const [savedMatch] = await tenantDb
+      const extractionMatchInsert = tenantDb
         .insert(estimateExtractionMatches)
         .values({
           extractionId: extraction.id,
@@ -206,8 +227,93 @@ export async function runEstimateGeneration(
           evidenceJson: {
             historicalLineItemIds: topMatch.historicalLineItemIds,
           },
+        }) as any;
+
+      const savedMatch = typeof extractionMatchInsert.returning === "function"
+        ? (await extractionMatchInsert.returning())[0]
+        : (await extractionMatchInsert, { id: extraction.id });
+
+      const normalizedIntent = normalizeIntent(extraction.normalizedLabel ?? extraction.rawLabel ?? "");
+      const sourceType =
+        extraction.extractionType === "inferred_scope" ||
+        (typeof extraction.metadataJson === "object" &&
+          extraction.metadataJson !== null &&
+          (extraction.metadataJson as Record<string, unknown>).sourceType === "inferred")
+          ? "inferred"
+          : "extracted";
+      const sourceRowIdentity = buildSourceRowIdentity({
+        sourceType,
+        extractionId: extraction.id,
+        normalizedIntent,
+        sectionName: extraction.divisionHint ?? null,
+      });
+      const recommendationSet = buildRecommendationOptionSet({
+        sectionName: extraction.divisionHint ?? null,
+        normalizedIntent,
+        sourceRowIdentity,
+        candidates: [
+          ...matches.map((match) => ({
+            optionLabel: String(match.catalogItemId),
+            catalogItemId: match.catalogItemId,
+            score: match.matchScore,
+            historicalSelectionCount: match.historicalLineItemIds.length,
+            unitCompatibilityScore: match.reasons.unitMatched ? 10 : 0,
+            absolutePriceDeviation:
+              match.catalogBaselinePrice != null && match.vendorQuotePrice != null
+                ? Math.abs(Number(match.vendorQuotePrice) - Number(match.catalogBaselinePrice))
+                : 0,
+            stableId: match.catalogItemId,
+            evidenceJson: {
+              historicalLineItemIds: match.historicalLineItemIds,
+              reasons: match.reasons,
+            },
+          })),
+          ...(sourceType === "inferred"
+            ? []
+            : [
+                {
+                  optionLabel: extraction.rawLabel ?? extraction.normalizedLabel ?? "Custom item",
+                  normalizedCustomItemKey: normalizedIntent,
+                  score: Math.max((matches[0]?.matchScore ?? 0) - 1, 0),
+                  historicalSelectionCount: 0,
+                  unitCompatibilityScore: 0,
+                  absolutePriceDeviation: 0,
+                  stableId: `custom:${normalizedIntent}`,
+                  evidenceJson: {
+                    source: "custom_fallback",
+                    normalizedIntent,
+                  },
+                },
+              ]),
+        ],
+      });
+
+      const documentEvidence = {
+        documentId: extraction.documentId ?? null,
+        sourceExtractionId: extraction.id,
+        sourceText: extraction.evidenceText ?? extraction.rawLabel ?? extraction.normalizedLabel ?? null,
+      };
+      const dependencySupportCount =
+        typeof extraction.metadataJson === "object" &&
+        extraction.metadataJson !== null &&
+        Number((extraction.metadataJson as Record<string, unknown>).dependencySupportCount ?? 0);
+      const historicalSupportCount = topMatch.historicalLineItemIds.length;
+
+      if (
+        sourceType === "inferred" &&
+        !isInferredRecommendationRowEligible({
+          sourceType,
+          documentEvidence,
+          historicalSupportCount,
+          dependencySupportCount: Number.isFinite(dependencySupportCount) ? dependencySupportCount : 0,
         })
-        .returning();
+      ) {
+        await tenantDb
+          .update(estimateExtractions)
+          .set({ status: "unmatched" })
+          .where(eq(estimateExtractions.id, extraction.id));
+        continue;
+      }
 
       const recommendation = buildPricingRecommendation({
         quantity: Number(extraction.quantity ?? 1),
@@ -220,10 +326,23 @@ export async function runEstimateGeneration(
         projectTypeId: historicalSignals.currentDeal?.projectTypeId ?? null,
       });
 
-      await tenantDb.insert(estimatePricingRecommendations).values({
+      const rationaleJson = {
+        ...recommendationSet.rationaleJson,
+        evidenceJson: {
+          documentEvidence,
+          comparableHistoricalPrices: recommendation.comparableHistoricalPrices,
+        },
+      };
+
+      const recommendationInsert = tenantDb.insert(estimatePricingRecommendations).values({
         dealId: extraction.dealId,
         projectId: extraction.projectId,
         extractionMatchId: savedMatch.id,
+        sourceDocumentId: extraction.documentId ?? null,
+        sourceExtractionId: extraction.id,
+        sourceType,
+        normalizedIntent,
+        sourceRowIdentity,
         recommendedQuantity: String(extraction.quantity ?? 1),
         recommendedUnit: extraction.unit ?? null,
         recommendedUnitPrice: String(recommendation.recommendedUnitPrice),
@@ -239,13 +358,58 @@ export async function runEstimateGeneration(
             : null,
         marketAdjustmentPercent: String(recommendation.marketAdjustmentPercent),
         confidence: String(recommendation.confidence),
-        assumptionsJson: recommendation.assumptions,
+        assumptionsJson: {
+          ...recommendation.assumptions,
+          rationaleJson,
+        },
         evidenceJson: {
           comparableHistoricalPrices: recommendation.comparableHistoricalPrices,
+          duplicateGroupMetadata: recommendationSet.duplicateGroupMetadata,
+          optionRows: recommendationSet.optionRows.map((option) => ({
+            rank: option.rank,
+            optionLabel: option.optionLabel,
+            optionKind: option.optionKind,
+            catalogItemId: option.catalogItemId,
+            localCatalogItemId: option.localCatalogItemId,
+            normalizedCustomItemKey: option.normalizedCustomItemKey,
+            stableId: option.stableId,
+          })),
         },
         createdByRunId: generationRunId,
+        selectedSourceType: null,
+        selectedOptionId: null,
+        catalogBacking: sourceType === "inferred" ? "estimate_only" : "procore_synced",
+        promotedLocalCatalogItemId: null,
+        manualOrigin: null,
+        manualLabel: null,
+        manualIdentityKey: null,
+        manualQuantity: null,
+        manualUnit: null,
+        manualUnitPrice: null,
+        manualNotes: null,
+        overrideQuantity: null,
+        overrideUnit: null,
+        overrideUnitPrice: null,
+        overrideNotes: null,
         status: "pending",
-      });
+      }) as any;
+
+      const savedRecommendation = typeof recommendationInsert.returning === "function"
+        ? (await recommendationInsert.returning())[0]
+        : (await recommendationInsert, { id: savedMatch.id });
+
+      if (recommendationSet.optionRows.length > 0) {
+        await tenantDb.insert(estimatePricingRecommendationOptions).values(
+          recommendationSet.optionRows.map((option) => ({
+            recommendationId: savedRecommendation.id,
+            catalogItemId: option.catalogItemId,
+            localCatalogItemId: option.localCatalogItemId,
+            rank: option.rank,
+            optionLabel: option.optionLabel,
+            optionKind: option.optionKind,
+          }))
+        );
+      }
 
       await tenantDb
         .update(estimateExtractions)
