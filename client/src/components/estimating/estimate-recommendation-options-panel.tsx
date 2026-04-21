@@ -47,6 +47,7 @@ export interface EstimateRecommendationRow {
 export interface EstimateRecommendationOptionsPanelProps {
   dealId: string;
   recommendation: EstimateRecommendationRow | null;
+  actionsDisabled?: boolean;
   onReviewAction: (input: RecommendationAction) => Promise<void> | void;
   onPromoteLocalCatalog: (recommendationId: string) => Promise<void> | void;
 }
@@ -103,6 +104,7 @@ export async function runEstimatePromoteLocalCatalogAction({
 export function EstimateRecommendationOptionsPanel({
   dealId,
   recommendation,
+  actionsDisabled,
   onReviewAction,
   onPromoteLocalCatalog,
 }: EstimateRecommendationOptionsPanelProps) {
@@ -135,7 +137,7 @@ export function EstimateRecommendationOptionsPanel({
     ...recommendation,
     recommendationOptions: options,
   });
-  const actionBusy = pendingAction !== null;
+  const actionBusy = actionsDisabled || pendingAction !== null;
 
   const handleReviewAction = async (action: RecommendationAction, successMessage: string) => {
     setPendingAction(action.action);

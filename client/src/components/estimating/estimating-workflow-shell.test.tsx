@@ -49,6 +49,7 @@ vi.mock("./estimate-catalog-match-table", () => ({
 }));
 
 vi.mock("./estimate-pricing-review-table", () => ({
+  isFreeTextManualRow: () => false,
   EstimatePricingReviewTable: ({
     onRefresh,
     onOpenManualAdd,

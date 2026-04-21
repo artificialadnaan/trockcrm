@@ -211,6 +211,7 @@ export async function runEstimatePromoteToEstimateAction({
 export function EstimatePricingReviewTable({
   dealId,
   rows,
+  actionsDisabled,
   onRefresh,
   onReviewAction,
   onFocusRow,
@@ -220,6 +221,7 @@ export function EstimatePricingReviewTable({
 }: {
   dealId: string;
   rows: PricingReviewRow[];
+  actionsDisabled?: boolean;
   onRefresh: () => Promise<void>;
   onReviewAction?: (args: { row: PricingReviewRow; input: PricingReviewStateActionInput }) => Promise<void> | void;
   onFocusRow?: (rowId: string) => void;
@@ -389,7 +391,8 @@ export function EstimatePricingReviewTable({
               <tbody>
                 {rows.map((row) => {
                   const isSelected = row.id === selectedRow?.id;
-                  const rowActionBusy = pendingAction?.startsWith(`${row.id}:`) ?? false;
+                  const rowActionBusy =
+                    actionsDisabled || (pendingAction?.startsWith(`${row.id}:`) ?? false);
                   const approveBusy = pendingAction === `${row.id}:accept_recommended`;
                   const rejectBusy = pendingAction === `${row.id}:reject`;
                   const overrideBusy = pendingAction === `${row.id}:override`;

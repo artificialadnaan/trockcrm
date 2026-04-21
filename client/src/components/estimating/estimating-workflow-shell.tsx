@@ -75,6 +75,7 @@ export function EstimatingWorkflowShell({
   const [selectedPricingRowId, setSelectedPricingRowId] = useState<string | null>(
     workflow.pricingRows[0]?.id ?? null
   );
+  const [pricingMutationPending, setPricingMutationPending] = useState(false);
 
   const selectedPricingRow =
     workflow.pricingRows.find((row) => row.id === selectedPricingRowId) ??
@@ -105,12 +106,17 @@ export function EstimatingWorkflowShell({
     row: any;
     input: Parameters<typeof runEstimatePricingReviewStateAction>[0]["input"];
   }) => {
-    await runEstimatePricingReviewStateAction({
-      dealId,
-      recommendationId: row.id,
-      input,
-      refresh: onRefresh,
-    });
+    setPricingMutationPending(true);
+    try {
+      await runEstimatePricingReviewStateAction({
+        dealId,
+        recommendationId: row.id,
+        input,
+        refresh: onRefresh,
+      });
+    } finally {
+      setPricingMutationPending(false);
+    }
   };
 
   const handlePromoteToEstimate = async () => {
@@ -126,11 +132,16 @@ export function EstimatingWorkflowShell({
   };
 
   const handlePromoteLocalCatalog = async (recommendationId: string) => {
-    await runEstimatePromoteLocalCatalogAction({
-      dealId,
-      recommendationId,
-      refresh: onRefresh,
-    });
+    setPricingMutationPending(true);
+    try {
+      await runEstimatePromoteLocalCatalogAction({
+        dealId,
+        recommendationId,
+        refresh: onRefresh,
+      });
+    } finally {
+      setPricingMutationPending(false);
+    }
   };
 
   const steps = [
@@ -251,6 +262,7 @@ export function EstimatingWorkflowShell({
             <EstimatePricingReviewTable
               dealId={dealId}
               rows={workflow.pricingRows}
+              actionsDisabled={pricingMutationPending}
               onRefresh={onRefresh}
               onReviewAction={handlePricingReviewAction}
               onFocusRow={setSelectedPricingRowId}
@@ -262,6 +274,7 @@ export function EstimatingWorkflowShell({
             <EstimateRecommendationOptionsPanel
               dealId={dealId}
               recommendation={selectedPricingRow}
+              actionsDisabled={pricingMutationPending}
               onReviewAction={(input) =>
                 selectedPricingRow
                   ? handlePricingReviewAction({ row: selectedPricingRow, input })
