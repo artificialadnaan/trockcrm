@@ -253,12 +253,16 @@ describe("ownership sync schema contract", () => {
     expect(migrationSql).toContain("hubspot_owner_id varchar(64) NOT NULL UNIQUE");
     expect(migrationSql).toContain("hubspot_owner_email varchar(320)");
     expect(migrationSql).toContain("mapping_status varchar(32) NOT NULL DEFAULT 'pending'");
-    expect(migrationSql).toContain("ALTER TABLE deals");
+    expect(migrationSql).toContain("DO $$");
+    expect(migrationSql).toContain("WHERE nspname LIKE 'office\\_%' ESCAPE '\\'");
+    expect(migrationSql).toContain("ALTER TABLE %I.deals");
     expect(migrationSql).toContain("ADD COLUMN IF NOT EXISTS hubspot_owner_id varchar(64)");
     expect(migrationSql).toContain("ADD COLUMN IF NOT EXISTS ownership_synced_at timestamptz");
     expect(migrationSql).toContain("ADD COLUMN IF NOT EXISTS ownership_sync_status varchar(32)");
     expect(migrationSql).toContain("ADD COLUMN IF NOT EXISTS unassigned_reason_code varchar(64)");
-    expect(migrationSql).toContain("ALTER TABLE leads");
+    expect(migrationSql).toContain("ALTER TABLE %I.leads");
+    expect(migrationSql).toContain("CREATE INDEX IF NOT EXISTS deals_hubspot_owner_id_idx");
+    expect(migrationSql).toContain("CREATE INDEX IF NOT EXISTS leads_hubspot_owner_id_idx");
   });
 });
 
