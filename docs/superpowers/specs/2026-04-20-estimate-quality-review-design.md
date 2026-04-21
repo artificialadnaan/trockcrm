@@ -403,8 +403,8 @@ Persistence rule:
 
 Duplicate suppression order:
 
-1. exact normalized catalog intent match
-2. same selected catalog item id within the same section
+1. same selected catalog item id within the same section
+2. same normalized intent within the same section for extracted or inferred rows
 3. same normalized intent within the same section for manual rows
 
 All duplicate-review grouping in this slice is section-scoped. For explicit extracted/manual rows, this ordered list defines duplicate-review grouping signals rather than auto-suppression behavior.
