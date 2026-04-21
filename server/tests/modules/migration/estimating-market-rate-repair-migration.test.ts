@@ -23,6 +23,9 @@ describe("estimating market-rate repair migration", () => {
     const repairUpdateIndex = repairSection.indexOf(
       "SET scope_type = ''general'',"
     );
+    const legacyDeleteIndex = repairSection.indexOf(
+      "scope_type IN (''global'', ''metro'', ''state'', ''region'')"
+    );
     const addScopeConstraintIndex = repairSection.indexOf(
       "ADD CONSTRAINT estimate_market_adjustment_rules_scope_type_check"
     );
@@ -39,10 +42,13 @@ describe("estimating market-rate repair migration", () => {
     expect(migrationSql).toContain("CHECK (fallback_scope_type IS NULL OR fallback_scope_type IN ('general', 'division', 'trade'))");
     expect(dropScopeIndex).toBeGreaterThanOrEqual(0);
     expect(dropFallbackIndex).toBeGreaterThanOrEqual(0);
-    expect(addScopeConstraintIndex).toBeGreaterThan(dropFallbackIndex);
+    expect(legacyDeleteIndex).toBeGreaterThan(dropFallbackIndex);
     expect(repairUpdateIndex).toBeGreaterThan(dropFallbackIndex);
+    expect(repairUpdateIndex).toBeLessThan(repairInsertIndex);
     expect(repairUpdateIndex).toBeLessThan(addScopeConstraintIndex);
-    expect(repairInsertIndex).toBeGreaterThan(addScopeConstraintIndex);
+    expect(legacyDeleteIndex).toBeLessThan(addScopeConstraintIndex);
+    expect(repairInsertIndex).toBeGreaterThan(legacyDeleteIndex);
+    expect(repairInsertIndex).toBeLessThan(addScopeConstraintIndex);
   });
 
   it("is safe to run on tenants that are already correct", () => {

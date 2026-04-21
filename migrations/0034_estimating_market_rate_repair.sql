@@ -148,23 +148,17 @@ BEGIN
             AND effective_from = ''2000-01-01 00:00:00+00''',
         schema_name
       );
+      has_good_rule := TRUE;
     END IF;
 
     EXECUTE format(
-      'ALTER TABLE %I.estimate_market_adjustment_rules
-         ADD CONSTRAINT estimate_market_adjustment_rules_scope_type_check
-         CHECK (scope_type IN (''general'', ''division'', ''trade''))',
+      'DELETE FROM %I.estimate_market_adjustment_rules
+        WHERE scope_type IN (''global'', ''metro'', ''state'', ''region'')
+           OR fallback_scope_type IN (''global'', ''metro'', ''state'', ''region'')',
       schema_name
     );
 
-    EXECUTE format(
-      'ALTER TABLE %I.estimate_market_adjustment_rules
-         ADD CONSTRAINT estimate_market_adjustment_rules_fallback_scope_type_check
-         CHECK (fallback_scope_type IS NULL OR fallback_scope_type IN (''general'', ''division'', ''trade''))',
-      schema_name
-    );
-
-    IF NOT has_bad_rule AND NOT has_good_rule THEN
+    IF NOT has_good_rule THEN
       EXECUTE format(
         'INSERT INTO %I.estimate_market_adjustment_rules (
            market_id,
@@ -205,6 +199,21 @@ BEGIN
         schema_name
       );
     END IF;
+
+    EXECUTE format(
+      'ALTER TABLE %I.estimate_market_adjustment_rules
+         ADD CONSTRAINT estimate_market_adjustment_rules_scope_type_check
+         CHECK (scope_type IN (''general'', ''division'', ''trade''))',
+      schema_name
+    );
+
+    EXECUTE format(
+      'ALTER TABLE %I.estimate_market_adjustment_rules
+         ADD CONSTRAINT estimate_market_adjustment_rules_fallback_scope_type_check
+         CHECK (fallback_scope_type IS NULL OR fallback_scope_type IN (''general'', ''division'', ''trade''))',
+      schema_name
+    );
+
   END LOOP;
 END $$;
 

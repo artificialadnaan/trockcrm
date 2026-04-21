@@ -93,10 +93,6 @@ function buildPricingScopeCandidateFilter(input: {
     and(
       eq(input.estimateMarketAdjustmentRulesTable.scopeType, "general"),
       eq(input.estimateMarketAdjustmentRulesTable.scopeKey, "default")
-    ),
-    and(
-      eq(input.estimateMarketAdjustmentRulesTable.fallbackScopeType, "general"),
-      eq(input.estimateMarketAdjustmentRulesTable.fallbackScopeKey, "default")
     )
   );
 }

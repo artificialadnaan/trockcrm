@@ -241,8 +241,7 @@ export async function selectBestMarketAdjustmentRule(
         isRuleActiveAt(rule, asOf) &&
         (isMatchingPricingScope(rule, input.pricingScopeType, input.pricingScopeKey) ||
           isMatchingFallbackPricingScope(rule, input.pricingScopeType, input.pricingScopeKey) ||
-          isGeneralDefaultScope(rule) ||
-          (rule.fallbackScopeType === "general" && rule.fallbackScopeKey === "default"))
+          isGeneralDefaultScope(rule))
     )
     .sort((a, b) =>
       compareRules(a, b, input.marketId, input.pricingScopeType, input.pricingScopeKey)
