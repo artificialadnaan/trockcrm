@@ -21,11 +21,13 @@ import { createDeal, updateDeal } from "../../../src/modules/deals/service.js";
 import { createLeadService } from "../../../src/modules/leads/service.js";
 
 const pipelineMocks = vi.hoisted(() => ({
+  getAllStages: vi.fn(),
   getStageById: vi.fn(),
   getStageBySlug: vi.fn(),
 }));
 
 vi.mock("../../../src/modules/pipeline/service.js", () => ({
+  getAllStages: pipelineMocks.getAllStages,
   getStageById: pipelineMocks.getStageById,
   getStageBySlug: pipelineMocks.getStageBySlug,
 }));
@@ -612,7 +614,7 @@ const leadStage = {
   id: "lead-stage-1",
   name: "Contacted",
   slug: "contacted",
-  displayOrder: 1,
+  displayOrder: 10,
   workflowFamily: "lead" as const,
   isActivePipeline: true,
   isTerminal: false,
@@ -622,7 +624,7 @@ const qualifiedLeadStage = {
   id: "stage-qualified-lead",
   name: "Qualified Lead",
   slug: "qualified_lead",
-  displayOrder: 2,
+  displayOrder: 20,
   workflowFamily: "lead" as const,
   isActivePipeline: true,
   isTerminal: false,
@@ -632,7 +634,7 @@ const directorReviewStage = {
   id: "stage-director-go-no-go",
   name: "Director Go/No-Go",
   slug: "director_go_no_go",
-  displayOrder: 3,
+  displayOrder: 30,
   workflowFamily: "lead" as const,
   isActivePipeline: true,
   isTerminal: false,
@@ -642,7 +644,7 @@ const readyForOpportunityStage = {
   id: "stage-ready-for-opportunity",
   name: "Ready for Opportunity",
   slug: "ready_for_opportunity",
-  displayOrder: 4,
+  displayOrder: 40,
   workflowFamily: "lead" as const,
   isActivePipeline: true,
   isTerminal: false,
@@ -669,8 +671,21 @@ const dealStage = {
 };
 
 beforeEach(() => {
+  pipelineMocks.getAllStages.mockReset();
   pipelineMocks.getStageById.mockReset();
   pipelineMocks.getStageBySlug.mockReset();
+  pipelineMocks.getAllStages.mockImplementation(async (workflowFamily?: string) => {
+    if (workflowFamily === "lead") {
+      return [
+        leadStage,
+        qualifiedLeadStage,
+        directorReviewStage,
+        readyForOpportunityStage,
+        convertedLeadStage,
+      ];
+    }
+    return [dealStage];
+  });
   pipelineMocks.getStageById.mockImplementation(async (id: string, workflowFamily?: string) => {
     if (workflowFamily === "lead") {
       const stageMap = new Map([
