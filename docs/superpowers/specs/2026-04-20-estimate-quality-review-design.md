@@ -173,6 +173,7 @@ Required linkage fields:
 - `estimate_section_name`
 - `source_document_id`, nullable for manual rows
 - `source_extraction_id`, nullable for inferred or manual rows
+- `normalized_intent`
 - `source_row_identity`
 - `generation_run_id`
 - `manual_origin` with allowed values:
@@ -256,6 +257,7 @@ This field must be persisted directly on the recommendation row so refresh and d
 - remove non-semantic punctuation
 - normalize common unit and scope aliases through a fixed alias map for this slice
 - do not include section name inside `normalized_intent`; section-specific uniqueness is handled by `source_row_identity`
+- manual rows derive and persist `normalized_intent` from `manual_label` using this same contract at create time and recompute it when the estimator edits the manual label
 
 ## Local Catalog Model
 
@@ -398,6 +400,7 @@ Explicit-row duplicate rule for this slice:
 - when one row in a duplicate-review group is promoted, any other rows in that group that are still `accepted`, `alternate_selected`, or `overridden` are automatically moved back to `pending_review`
 - carried-forward clones must re-evaluate duplicate-review grouping against already-promoted rows for the deal, so a group with an already promoted winner stays blocked until the remaining rows are edited into a different group or rejected
 - the first promoted row in a duplicate-review group becomes the canonical winner for that deal in this slice; later rows in the same group cannot supersede it without a separate reopen/supersede flow, which is out of scope here
+- if a later promotion attempt targets a row in a duplicate-review group that already has a canonical winner, the promote action must fail with a duplicate-blocked result and create no canonical estimate line
 
 ## Review Lifecycle
 
@@ -479,6 +482,7 @@ Allowed actions:
   - must no-op and return the existing linked item when `promoted_local_catalog_item_id` is already set on that recommendation row
   - must also no-op and reuse an existing local catalog item when another recommendation row for the same `deal_id + manual_identity_key` has already linked one
   - automatic local-catalog reuse is deal-local for this slice; promoting equivalent manual content from a different deal creates a new tenant-scoped local catalog item unless future catalog-dedupe work says otherwise
+  - in a different deal, estimators may still search and select an existing tenant-scoped local catalog item directly through the catalog-first flow instead of promoting a new custom row
 
 Audit behavior:
 
@@ -547,6 +551,7 @@ Manual add flow:
 Manual recommendation persistence:
 
 - free-text manual rows persist `estimate_section_name`, `manual_label`, `manual_identity_key`, `manual_quantity`, `manual_unit`, `manual_unit_price`, and `manual_notes` on the parent recommendation row before promotion
+- free-text manual rows also persist `normalized_intent` derived from `manual_label` using the contract above
 - free-text manual rows also persist `generation_run_id`, `manual_origin`, and `source_row_identity` on the parent recommendation row using the contracts above
 - if a manual row is later promoted to the local catalog, the new local catalog item is created from those persisted manual fields and linked back through `promoted_local_catalog_item_id` on the parent recommendation row
 
