@@ -65,7 +65,7 @@ Lead conversion currently creates the successor deal and links lineage, but it d
 
 Add a dedicated `Lead Scoping` record owned by the lead lifecycle.
 
-This should be a separate schema from `deal_scoping_intake`, for example:
+This should be a separate schema from `deal_scoping_intake`:
 
 - `lead_scoping_intake`
 
@@ -78,6 +78,19 @@ The record stores:
 - readiness / validation errors
 - created / updated audit fields
 - completion timestamps
+
+### Canonical ownership and snapshot rules
+
+Some fields in the PDF overlap with canonical CRM entities or lead header fields.
+
+The system should use these rules:
+
+- `company`, `property`, and `primary contact` relations on the lead remain canonical relational fields
+- `lead_scoping_intake.section_data` stores intake snapshots of the checklist answers, even when they overlap with canonical records
+- lead-scoping edits do not automatically rewrite company, property, or contact master records
+- lead-scoping values may seed or refresh selected lead display fields where the product explicitly chooses to do that, but that must be a deliberate mapping rather than implicit two-way sync
+
+This avoids hidden side effects and keeps the scoping checklist auditable as a point-in-time intake artifact.
 
 ### Deal-side model
 
@@ -325,6 +338,12 @@ Fields:
 - scope documents
 - file location note
 
+For this section, the user must answer whether each attachment category is:
+
+- provided
+- not provided
+- n/a
+
 ## Answer Model
 
 ### `N/A` requirement
@@ -355,6 +374,11 @@ Completion means:
 - every required PDF field has either a real value or an explicit `N/A`
 - every checklist / yes-no / scope item has a chosen state, including `N/A`
 - required attachment-presence fields have been answered, even if the answer is `N/A`
+
+Additional attachment rule:
+
+- if an attachment category is marked `provided`, at least one uploaded file must be linked to that attachment category before the checklist counts as complete
+- if an attachment category is marked `not provided` or `N/A`, no upload is required for completeness
 
 This replaces the current smaller `scopingSubsetData` gate for this transition.
 
@@ -418,6 +442,7 @@ The file should be:
 - generated from the saved structured lead-scoping data
 - stored as a normal deal file
 - clearly marked as derived from lead conversion
+- immutable from the deal context; users may download or view it, but not edit the derived artifact in place
 
 ## Carry-Forward Rules
 
@@ -432,6 +457,12 @@ Recommended carry-forward fields:
 - quantities summary
 - selected attachments metadata
 
+Carry-forward should be one-way at conversion time:
+
+- lead scoping seeds selected deal-scoping defaults
+- later deal-scoping edits do not mutate the original lead-scoping record
+- the read-only lead-scoping artifact remains the audit record of pre-conversion intake
+
 The downstream deal scoping workspace remains editable and independent.
 
 The lead-scoping artifact on the deal remains read-only.
@@ -440,7 +471,7 @@ The lead-scoping artifact on the deal remains read-only.
 
 ### New schema
 
-Add a lead-scoping schema, likely:
+Add a lead-scoping schema:
 
 - `lead_scoping_intake`
 
@@ -460,6 +491,24 @@ Suggested columns:
 - `last_edited_by`
 - `created_at`
 - `updated_at`
+
+### Existing lead qualification model
+
+The current lead qualification record should remain responsible for:
+
+- estimated opportunity value
+- go / no-go decision
+- go / no-go notes
+- base qualification questions that are not part of the PDF-specific scoping artifact
+
+The current `scopingSubsetData` path should be retired as the gating source for lead scoping.
+
+Implementation rule:
+
+- do not keep two parallel lead-scoping systems active
+- migrate or replace `scopingSubsetData`-based gating with `lead_scoping_intake` readiness
+- preserve any useful historical values from the old subset if they can be deterministically mapped into the new lead-scoping structure
+- if a legacy record cannot be mapped cleanly, it should remain historical only and not satisfy the new `Lead Go/No-Go` gate
 
 ### Workflow gate metadata
 
