@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { ArrowLeft, ArrowRight, Building2, MapPin, Clock3, User, Phone } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -20,6 +20,7 @@ import { useTaskAssignees } from "@/hooks/use-task-assignees";
 export function LeadDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const { user } = useAuth();
   const { lead, loading, error, refetch } = useLeadDetail(id);
   const { stages } = usePipelineStages();
@@ -80,6 +81,7 @@ export function LeadDetailPage() {
     lead.assignedRepId;
   const canConvertToOpportunity =
     currentStage?.slug === "qualified_for_opportunity" && !lead.convertedDealId && !isConvertedLead;
+  const qualificationFocused = searchParams.get("focus") === "qualification";
 
   const handleAssignmentSave = async (assignedRepId: string) => {
     if (assignedRepId === lead.assignedRepId) return;
@@ -224,12 +226,24 @@ export function LeadDetailPage() {
           />
 
           {isLeadStage && (
-            <LeadQualificationPanel
-              leadId={lead.id}
-              onSaved={() => {
-                void refetch();
-              }}
-            />
+            <div className="space-y-3">
+              {qualificationFocused ? (
+                <Card className="border-brand-red/30 bg-brand-red/5">
+                  <CardContent className="space-y-1 pt-4">
+                    <p className="text-sm font-semibold text-foreground">Complete Qualification Intake</p>
+                    <p className="text-sm text-muted-foreground">
+                      Complete the qualification intake below to satisfy the current stage requirements.
+                    </p>
+                  </CardContent>
+                </Card>
+              ) : null}
+              <LeadQualificationPanel
+                leadId={lead.id}
+                onSaved={() => {
+                  void refetch();
+                }}
+              />
+            </div>
           )}
 
           <Card>

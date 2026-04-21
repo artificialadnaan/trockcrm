@@ -181,6 +181,16 @@ function renderLeadDetail() {
   );
 }
 
+function renderLeadDetailWithQualificationFocus() {
+  return renderToStaticMarkup(
+    <MemoryRouter initialEntries={["/leads/lead-1?focus=qualification"]}>
+      <Routes>
+        <Route path="/leads/:id" element={<LeadDetailPage />} />
+      </Routes>
+    </MemoryRouter>
+  );
+}
+
 describe("LeadDetailPage", () => {
   it("renders the lead detail surface with assignment and context", () => {
     lead = {
@@ -215,6 +225,22 @@ describe("LeadDetailPage", () => {
     const html = renderLeadDetail();
 
     expect(html).toContain("Convert to Opportunity");
+  });
+
+  it("shows a qualification-intake helper when opened from a blocked stage move", () => {
+    lead = {
+      ...lead,
+      stageId: "stage-lead",
+      convertedAt: null,
+      convertedDealId: null,
+      convertedDealNumber: null,
+      status: "open",
+    };
+
+    const html = renderLeadDetailWithQualificationFocus();
+
+    expect(html).toContain("Complete Qualification Intake");
+    expect(html).toContain("Complete the qualification intake below to satisfy the current stage requirements.");
   });
 
   it("switches the CTA to open the deal once the lead is converted", () => {

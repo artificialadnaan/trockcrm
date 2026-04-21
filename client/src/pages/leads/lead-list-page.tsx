@@ -15,6 +15,10 @@ import { PipelineBoard } from "@/components/pipeline/pipeline-board";
 import { preflightLeadStageCheck, updateLead, useLeadBoard } from "@/hooks/use-leads";
 import { useNormalizedPipelineRoute } from "@/lib/pipeline-scope";
 
+export function buildLeadIntakePath(leadId: string) {
+  return `/leads/${leadId}?focus=qualification`;
+}
+
 export function isImmediateNextStageMove(
   currentStageId: string,
   targetStageId: string,
@@ -146,8 +150,8 @@ export function LeadListPage() {
               Close
             </Button>
             {blockedMove ? (
-              <Button onClick={() => navigate(`/leads/${blockedMove.leadId}`)}>
-                Open Lead
+              <Button onClick={() => navigate(buildLeadIntakePath(blockedMove.leadId))}>
+                Open Lead Intake
                 <ArrowRight className="ml-2 h-4 w-4" />
               </Button>
             ) : null}
