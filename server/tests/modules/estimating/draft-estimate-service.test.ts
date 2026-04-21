@@ -12,6 +12,7 @@ vi.mock("../../../src/modules/deals/estimate-service.js", () => ({
 
 const {
   approveEstimateRecommendation,
+  listApprovedRecommendationIdsForRun,
   promoteApprovedRecommendationsToEstimate,
 } = await import("../../../src/modules/estimating/draft-estimate-service.js");
 
@@ -259,6 +260,22 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
     expect(estimateServiceMocks.createSection).toHaveBeenCalled();
     expect(estimateServiceMocks.createLineItem).toHaveBeenCalled();
     expect(updateReturning).toHaveBeenCalled();
+  });
+
+  it("lists approved and overridden recommendation ids for promotion", async () => {
+    const selectWhere = vi.fn().mockResolvedValue([{ id: "rec-1" }, { id: "rec-2" }]);
+    const tenantDb = {
+      select: vi.fn(() => ({
+        from: vi.fn(() => ({
+          where: selectWhere,
+        })),
+      })),
+    } as any;
+
+    const result = await listApprovedRecommendationIdsForRun(tenantDb, "deal-1", "run-4");
+
+    expect(result).toEqual(["rec-1", "rec-2"]);
+    expect(selectWhere).toHaveBeenCalled();
   });
 
   it("rejects approval when the recommendation does not exist", async () => {

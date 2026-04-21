@@ -292,7 +292,7 @@ export async function listApprovedRecommendationIdsForRun(
       and(
         eq(estimatePricingRecommendations.dealId, dealId),
         eq(estimatePricingRecommendations.createdByRunId, generationRunId),
-        eq(estimatePricingRecommendations.status, "approved")
+        inArray(estimatePricingRecommendations.status, ["approved", "overridden"])
       )
     );
 

@@ -614,7 +614,7 @@ describe("estimating workflow routes", () => {
 
   it("returns row-level promotion errors when duplicate recommendations are blocked", async () => {
     const rowErrors = [{ recommendationId: "rec-dup-1", code: "duplicate_blocked", message: "Blocked by a duplicate group" }];
-    draftEstimateServiceMocks.listApprovedRecommendationIdsForRun.mockResolvedValue(["rec-dup-1"]);
+    draftEstimateServiceMocks.listApprovedRecommendationIdsForRun.mockResolvedValue(["rec-ovr"]);
     draftEstimateServiceMocks.promoteApprovedRecommendationsToEstimate.mockResolvedValue({
       promotedRecommendationIds: [],
       rowErrors,
@@ -630,7 +630,7 @@ describe("estimating workflow routes", () => {
       expect.objectContaining({
         dealId: "deal-1",
         generationRunId: "run-1",
-        approvedRecommendationIds: ["rec-dup-1"],
+        approvedRecommendationIds: ["rec-ovr"],
       })
     );
     expect(res.body.rowErrors).toEqual(rowErrors);
