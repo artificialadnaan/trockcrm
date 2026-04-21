@@ -195,6 +195,17 @@ export interface Pagination {
   totalPages: number;
 }
 
+export interface ProjectTaskCreateInput {
+  title: string;
+  description?: string;
+  type?: string;
+  priority?: string;
+  assignedTo: string;
+  dueDate?: string;
+  dueTime?: string;
+  remindAt?: string;
+}
+
 export function useTasks(filters: TaskFilters = {}) {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [pagination, setPagination] = useState<Pagination>({ page: 1, limit: 100, total: 0, totalPages: 0 });
@@ -267,8 +278,46 @@ export function useTaskCounts(userId?: string) {
   return { counts, loading, refetch: fetchCounts };
 }
 
+export function useProjectTasks(projectId: string | undefined) {
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchProjectTasks = useCallback(async () => {
+    if (!projectId) {
+      setTasks([]);
+      setLoading(false);
+      return;
+    }
+
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await api<{ tasks: Task[] }>(`/procore/my-projects/${projectId}/tasks`);
+      setTasks(data.tasks);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to load project tasks");
+    } finally {
+      setLoading(false);
+    }
+  }, [projectId]);
+
+  useEffect(() => {
+    fetchProjectTasks();
+  }, [fetchProjectTasks]);
+
+  return { tasks, loading, error, refetch: fetchProjectTasks };
+}
+
 export async function createTask(input: Partial<Task> & { title: string }) {
   return api<{ task: Task }>("/tasks", { method: "POST", json: input });
+}
+
+export async function createProjectTask(projectId: string, input: ProjectTaskCreateInput) {
+  return api<{ task: Task }>(`/procore/my-projects/${projectId}/tasks`, {
+    method: "POST",
+    json: input,
+  });
 }
 
 export async function updateTask(taskId: string, input: Partial<Task>) {

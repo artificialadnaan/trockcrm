@@ -15,6 +15,7 @@ describe("ProjectDetailPage shell", () => {
     expect(source).toContain('role="tablist"');
     expect(source).toContain('aria-label="Project detail tabs"');
     expect(source).toContain("animate-pulse");
-    expect(source).toContain("Project-scoped task management will land here.");
+    expect(source).toContain("<ProjectTasksTab");
+    expect(source).toContain("Project-scoped task management.");
   });
 });

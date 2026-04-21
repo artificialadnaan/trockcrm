@@ -17,7 +17,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Plus } from "lucide-react";
-import { createTask } from "@/hooks/use-tasks";
+import { createProjectTask, createTask } from "@/hooks/use-tasks";
 import { useAuth } from "@/lib/auth";
 import { api } from "@/lib/api";
 
@@ -36,9 +36,15 @@ interface TaskCreateDialogProps {
   onCreated: () => void;
   defaultDealId?: string;
   defaultContactId?: string;
+  projectScopedProjectId?: string;
 }
 
-export function TaskCreateDialog({ onCreated, defaultDealId, defaultContactId }: TaskCreateDialogProps) {
+export function TaskCreateDialog({
+  onCreated,
+  defaultDealId,
+  defaultContactId,
+  projectScopedProjectId,
+}: TaskCreateDialogProps) {
   const { user } = useAuth();
   const [open, setOpen] = useState(false);
   const [title, setTitle] = useState("");
@@ -53,6 +59,7 @@ export function TaskCreateDialog({ onCreated, defaultDealId, defaultContactId }:
   const [deals, setDeals] = useState<DealOption[]>([]);
 
   const canAssign = user?.role === "admin" || user?.role === "director";
+  const isProjectScoped = Boolean(projectScopedProjectId);
 
   // Fetch assignees for directors/admins
   useEffect(() => {
@@ -64,11 +71,18 @@ export function TaskCreateDialog({ onCreated, defaultDealId, defaultContactId }:
 
   // Fetch deals for the deal picker (only if no defaultDealId)
   useEffect(() => {
-    if (defaultDealId || !open) return;
+    if (defaultDealId || !open || isProjectScoped) return;
     api<{ deals: DealOption[] }>("/deals?limit=50&isActive=true")
       .then((data) => setDeals(data.deals))
       .catch(() => setDeals([]));
-  }, [defaultDealId, open]);
+  }, [defaultDealId, isProjectScoped, open]);
+
+  useEffect(() => {
+    if (!open) return;
+    if (canAssign && !assignedTo && user?.id) {
+      setAssignedTo(user.id);
+    }
+  }, [assignedTo, canAssign, open, user?.id]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -77,16 +91,30 @@ export function TaskCreateDialog({ onCreated, defaultDealId, defaultContactId }:
     setSubmitting(true);
     setError(null);
     try {
-      await createTask({
-        title: title.trim(),
-        description: description.trim() || undefined,
-        type: "manual",
-        priority,
-        dueDate: dueDate || undefined,
-        assignedTo: canAssign && assignedTo ? assignedTo : undefined,
-        dealId: dealId || defaultDealId || undefined,
-        contactId: defaultContactId,
-      } as Parameters<typeof createTask>[0]);
+      if (isProjectScoped && projectScopedProjectId) {
+        if (!assignedTo) {
+          throw new Error("Choose an assignee");
+        }
+        await createProjectTask(projectScopedProjectId, {
+          title: title.trim(),
+          description: description.trim() || undefined,
+          type: "manual",
+          priority,
+          dueDate: dueDate || undefined,
+          assignedTo,
+        });
+      } else {
+        await createTask({
+          title: title.trim(),
+          description: description.trim() || undefined,
+          type: "manual",
+          priority,
+          dueDate: dueDate || undefined,
+          assignedTo: canAssign && assignedTo ? assignedTo : undefined,
+          dealId: dealId || defaultDealId || undefined,
+          contactId: defaultContactId,
+        } as Parameters<typeof createTask>[0]);
+      }
       setTitle("");
       setDescription("");
       setPriority("normal");
@@ -157,7 +185,7 @@ export function TaskCreateDialog({ onCreated, defaultDealId, defaultContactId }:
               <label className="text-xs text-muted-foreground mb-1 block">Assignee</label>
               <Select value={assignedTo} onValueChange={(v) => setAssignedTo(v ?? "")}>
                 <SelectTrigger>
-                  <SelectValue placeholder="Assign to myself" />
+                  <SelectValue placeholder={isProjectScoped ? "Choose assignee" : "Assign to myself"} />
                 </SelectTrigger>
                 <SelectContent>
                   {assignees.map((u) => (
@@ -169,7 +197,7 @@ export function TaskCreateDialog({ onCreated, defaultDealId, defaultContactId }:
               </Select>
             </div>
           )}
-          {!defaultDealId && deals.length > 0 && (
+          {!defaultDealId && !isProjectScoped && deals.length > 0 && (
             <div>
               <label className="text-xs text-muted-foreground mb-1 block">Link to Deal (optional)</label>
               <Select value={dealId || "__none__"} onValueChange={(v) => setDealId(v === "__none__" ? "" : (v ?? ""))}>

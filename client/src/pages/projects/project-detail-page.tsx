@@ -4,6 +4,7 @@ import { ArrowLeft, ExternalLink, FolderKanban } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { CardContent } from "@/components/ui/card";
+import { ProjectTasksTab } from "@/components/projects/project-tasks-tab";
 import { formatCurrency } from "@/lib/deal-utils";
 import { useProjectDetail } from "@/hooks/use-projects";
 
@@ -12,7 +13,7 @@ type ProjectTab = "overview" | "tasks";
 export function ProjectDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const { project, loading, error } = useProjectDetail(id);
+  const { project, loading, error, refetch } = useProjectDetail(id);
   const [activeTab, setActiveTab] = useState<ProjectTab>("tasks");
 
   useEffect(() => {
@@ -173,14 +174,12 @@ export function ProjectDetailPage() {
                 <div>
                   <p className="text-sm font-medium text-foreground">Tasks</p>
                   <p className="text-sm text-muted-foreground">
-                    Project-scoped task management will land here.
+                    Project-scoped task management.
                   </p>
                 </div>
-                <span className="text-xs text-muted-foreground">Initial shell</span>
+                <span className="text-xs text-muted-foreground">Linked to assignee task queues</span>
               </div>
-              <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50 px-4 py-6 text-sm text-muted-foreground">
-                No project task data has been wired into this view yet.
-              </div>
+              <ProjectTasksTab projectId={project.id} onChanged={refetch} />
             </>
           )}
         </CardContent>
