@@ -36,6 +36,8 @@
   Responsibility: wire market resolution and market-rate enrichment into the production estimate-generation job.
 - Modify: `server/src/modules/estimating/workbench-service.ts`
   Responsibility: expose resolved market context, active-generation filtering, queued/running rerun status, and market-rate rationale in workbench pricing rows.
+- Modify: `server/src/modules/estimating/copilot-service.ts`
+  Responsibility: thread office context into workbench-state requests used by deal estimating routes.
 - Modify: `server/src/modules/deals/routes.ts`
   Responsibility: add deal-level market context, market listing, and override endpoints for estimating.
 - Create: `server/tests/modules/estimating/market-resolution-service.test.ts`
@@ -244,7 +246,7 @@
   - setting an override with market id and optional reason
   - clearing an override
   - review-event creation for set/clear operations
-  - enqueue or rerun side effects for `estimate_generation` after override set/clear
+  - enqueue or rerun side effects for `estimate_generation` after override set/clear, including `dealId`, `rerunRequestId`, and `officeId` in the queued payload
 
 - [ ] **Step 2: Run the focused route tests and verify they fail**
   Run in `server/`: `npx vitest run tests/modules/estimating/workflow-state-routes.test.ts`
@@ -256,7 +258,7 @@
   - create or replace the single current override row for the deal
   - clear the override row cleanly
   - write estimating review events with before/after market context
-  - enqueue or rerun `estimate_generation` by inserting the required `public.job_queue` row with `job_type = 'estimate_generation'`, `payload.dealId`, and the required `officeId`
+  - enqueue or rerun `estimate_generation` by inserting the required `public.job_queue` row with `job_type = 'estimate_generation'`, `payload.dealId`, a unique `payload.rerunRequestId`, and the required `officeId`
   - return the refreshed effective market payload
 
 - [ ] **Step 4: Re-run the focused route tests and verify they pass**
@@ -270,6 +272,7 @@
 
 **Files:**
 - Modify: `server/src/modules/estimating/workbench-service.ts`
+- Modify: `server/src/modules/estimating/copilot-service.ts`
 - Modify: `server/tests/modules/estimating/workbench-service.test.ts`
 
 - [ ] **Step 1: Write failing workbench-state tests for market context**
@@ -289,11 +292,12 @@
 
 - [ ] **Step 3: Extend workbench state assembly**
   Requirements:
+  - extend `buildEstimatingWorkbenchState` and `getEstimatingWorkflowState` to accept the caller office id needed for public queue lookups
   - include deal-level effective market summary
   - include override state and fallback source
   - define the active pricing run as the newest completed generation run for the deal, falling back to the newest started run only when no completed run exists yet
   - keep the previous completed run active while an override-triggered rerun is queued, pending, running, or failed, and surface rerun status separately
-  - derive queued rerun status from the newest matching `public.job_queue` entry for `estimate_generation` plus `dealId`/`officeId` until a newer worker-created generation run exists
+  - derive queued rerun status from the newest matching `public.job_queue` entry for `estimate_generation` plus `dealId`/`officeId` until a worker-created generation run with the same `rerunRequestId` is created in `inputSnapshotJson`
   - expose explicit rerun status fields the client can render without inferring from raw generation rows
   - filter pricing rows so stale pre-override generation results do not mix with refreshed rows
   - bind `manualAddContext.generationRunId` to that same active pricing run instead of the newest started rerun
@@ -374,6 +378,7 @@
   - refreshed workbench state excludes stale pricing rows from the pre-override generation run
   - pending override-triggered reruns keep the previous completed run visible until the new run completes
   - queued override-triggered reruns surface status from `public.job_queue` before a new generation run exists
+  - queued rerun status clears only after a generation run with the same `rerunRequestId` exists
   - worker-side generation coverage proves the production job uses new market-resolution inputs
 
 - [ ] **Step 2: Run the focused integration tests and verify they fail**
@@ -387,6 +392,7 @@
   - override route tests confirm refreshed workbench state reflects the new market context
   - override refresh uses the active generation run so stale pricing rows are not returned
   - queued rerun fixtures verify workbench status before the worker creates the next generation run
+  - correlated rerun fixtures verify queue rows and generation runs are linked by `rerunRequestId`
   - worker fixtures confirm the live generation path uses the override-triggered rerun flow
 
 - [ ] **Step 4: Re-run the focused integration tests and verify they pass**
