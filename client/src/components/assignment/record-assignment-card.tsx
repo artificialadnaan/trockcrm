@@ -44,13 +44,7 @@ export function RecordAssignmentCard(props: {
           <>
             <Select value={selectedRepId} onValueChange={(value) => setSelectedRepId(value ?? "")}>
               <SelectTrigger className="w-full">
-                <SelectValue placeholder="Select rep">
-                  {(value) =>
-                    props.reps.find((rep) => rep.id === value)?.displayName ??
-                    props.assignedRepName ??
-                    "Unassigned"
-                  }
-                </SelectValue>
+                <SelectValue placeholder="Select rep">{selectedLabel}</SelectValue>
               </SelectTrigger>
               <SelectContent>
                 {props.reps.map((rep) => (

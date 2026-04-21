@@ -162,7 +162,7 @@ export function LeadNewPage() {
               <Select value={formData.stageId || "none"} onValueChange={(value) => handleChange("stageId", value && value !== "none" ? value : "")}>
                 <SelectTrigger>
                   <SelectValue placeholder="Select lead stage">
-                    {(value) => getSelectedOptionLabel(leadStages, value ?? "", "Select lead stage")}
+                    {getSelectedOptionLabel(leadStages, formData.stageId, "Select lead stage")}
                   </SelectValue>
                 </SelectTrigger>
                 <SelectContent>
@@ -185,7 +185,7 @@ export function LeadNewPage() {
               >
                 <SelectTrigger>
                   <SelectValue placeholder="Select rep">
-                    {(value) => getSelectedOptionLabel(repOptions, value ?? "", "Select rep")}
+                    {getSelectedOptionLabel(repOptions, formData.assignedRepId, "Select rep")}
                   </SelectValue>
                 </SelectTrigger>
                 <SelectContent>

@@ -248,7 +248,7 @@ export function DealForm({ deal, onSuccess }: DealFormProps) {
               >
                 <SelectTrigger>
                   <SelectValue placeholder="Select stage">
-                    {(value) => getSelectedOptionLabel(activeStages, value ?? "", "Select stage")}
+                    {getSelectedOptionLabel(activeStages, formData.stageId, "Select stage")}
                   </SelectValue>
                 </SelectTrigger>
                 <SelectContent>
@@ -309,12 +309,11 @@ export function DealForm({ deal, onSuccess }: DealFormProps) {
               >
                 <SelectTrigger>
                   <SelectValue placeholder="Select type">
-                    {(value) =>
-                      getSelectedOptionLabel(
-                        projectTypeHierarchy.flatMap((parent) => [parent, ...parent.children]),
-                        value ?? "",
-                        "Select type"
-                      )}
+                    {getSelectedOptionLabel(
+                      projectTypeHierarchy.flatMap((parent) => [parent, ...parent.children]),
+                      formData.projectTypeId,
+                      "Select type"
+                    )}
                   </SelectValue>
                 </SelectTrigger>
                 <SelectContent>
@@ -339,7 +338,7 @@ export function DealForm({ deal, onSuccess }: DealFormProps) {
               >
                 <SelectTrigger>
                   <SelectValue placeholder="Select region">
-                    {(value) => getSelectedOptionLabel(regions, value ?? "", "Select region")}
+                    {getSelectedOptionLabel(regions, formData.regionId, "Select region")}
                   </SelectValue>
                 </SelectTrigger>
                 <SelectContent>
