@@ -6,9 +6,9 @@ import { StatCard } from "@/components/dashboard/stat-card";
 import { PipelineBarChart } from "@/components/charts/pipeline-bar-chart";
 import { formatCurrency } from "@/components/charts/chart-colors";
 import { useTasks } from "@/hooks/use-tasks";
-import { useSalesReview } from "@/hooks/use-sales-review";
 import { TaskSection } from "@/components/tasks/task-section";
 import { FunnelBucketRow } from "@/components/dashboard/funnel-bucket-row";
+import { MyCleanupCard } from "@/components/dashboard/my-cleanup-card";
 import {
   ArrowUpRight,
   Briefcase,
@@ -110,7 +110,6 @@ export function RepDashboardPage() {
   const { user } = useAuth();
   const navigate = useNavigate();
   const { data, loading, error } = useRepDashboard();
-  const { data: salesReview } = useSalesReview();
   const { tasks: overdueTasks, refetch: refetchOverdue } = useTasks({ section: "overdue", limit: 50 });
   const { tasks: todayTasks, refetch: refetchToday } = useTasks({ section: "today", limit: 50 });
   const firstName = user?.displayName?.split(" ")[0] ?? "there";
@@ -156,9 +155,10 @@ export function RepDashboardPage() {
   if (!data) return null;
 
   const taskTotal = data.tasksToday.overdue + data.tasksToday.today;
-  const cleanupCount = salesReview?.hygiene.length ?? 0;
-  const ownershipCount =
-    salesReview?.hygiene.filter((row) => row.issueTypes.includes("unassigned_owner")).length ?? 0;
+  const cleanupCount = data.myCleanup.total;
+  const ownershipCount = data.myCleanup.byReason
+    .filter((reason) => reason.reasonCode.includes("owner"))
+    .reduce((sum, reason) => sum + reason.count, 0);
   const leadsSnapshot = data.leadSnapshot.map((lead) => ({
     id: lead.leadId,
     name: lead.leadName,
@@ -246,13 +246,15 @@ export function RepDashboardPage() {
             <p className="text-sm leading-relaxed text-slate-700">
               Keep forecast, next step, decision maker, and budget details current so leadership can trust what is in your book.
             </p>
-            <Button onClick={() => navigate("/pipeline/hygiene")} className="w-full">
+            <Button onClick={() => navigate("/pipeline/my-cleanup")} className="w-full">
               Open My Cleanup
               <ArrowUpRight className="ml-1 h-4 w-4" />
             </Button>
           </CardContent>
         </Card>
       </div>
+
+      <MyCleanupCard total={data.myCleanup.total} byReason={data.myCleanup.byReason} />
 
       <FunnelBucketRow buckets={data.funnelBuckets} />
 

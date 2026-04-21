@@ -17,6 +17,10 @@ const adminUsersMocks = vi.hoisted(() => ({
   listUsers: vi.fn(),
 }));
 
+const authServiceMocks = vi.hoisted(() => ({
+  getAccessibleOffices: vi.fn(),
+}));
+
 const eventBusMocks = vi.hoisted(() => ({
   emitLocal: vi.fn(),
   on: vi.fn(),
@@ -52,6 +56,17 @@ vi.mock("../../../src/modules/admin/users-service.js", async () => {
   return {
     ...actual,
     listUsers: adminUsersMocks.listUsers,
+  };
+});
+
+vi.mock("../../../src/modules/auth/service.js", async () => {
+  const actual = await vi.importActual<typeof import("../../../src/modules/auth/service.js")>(
+    "../../../src/modules/auth/service.js"
+  );
+
+  return {
+    ...actual,
+    getAccessibleOffices: authServiceMocks.getAccessibleOffices,
   };
 });
 
@@ -123,6 +138,7 @@ async function invokeRoute({
   query = {},
   body = {},
   tenantDb,
+  headers = {},
 }: {
   method: "get" | "post" | "patch";
   url: string;
@@ -130,6 +146,7 @@ async function invokeRoute({
   query?: Record<string, any>;
   body?: Record<string, any>;
   tenantDb?: Record<string, any>;
+  headers?: Record<string, string>;
 }) {
   const routePath =
     url === "/"
@@ -153,7 +170,7 @@ async function invokeRoute({
     user,
     tenantDb: resolvedTenantDb,
     commitTransaction: vi.fn().mockResolvedValue(undefined),
-    headers: {},
+    headers,
   };
   const res = makeResponse();
 
@@ -254,6 +271,9 @@ describe("task routes", () => {
   });
 
   it("filters inactive users out of the assignee picker for directors", async () => {
+    authServiceMocks.getAccessibleOffices.mockResolvedValue([
+      { id: "office-1", name: "Office One", slug: "office-one" },
+    ]);
     adminUsersMocks.listUsers.mockResolvedValue([
       { id: "user-1", displayName: "Active User", isActive: true },
       { id: "user-2", displayName: "Inactive User", isActive: false },
@@ -267,6 +287,42 @@ describe("task routes", () => {
 
     expect(adminUsersMocks.listUsers).toHaveBeenCalledWith("office-1");
     expect(res.body.users).toEqual([{ id: "user-1", displayName: "Active User" }]);
+  });
+
+  it("uses the requested office context when loading assignees", async () => {
+    authServiceMocks.getAccessibleOffices.mockResolvedValue([
+      { id: "office-2", name: "Office Two", slug: "office-two" },
+    ]);
+    adminUsersMocks.listUsers.mockResolvedValue([
+      { id: "user-3", displayName: "Selected Office User", isActive: true },
+    ]);
+
+    const { res } = await invokeRoute({
+      method: "get",
+      url: "/assignees",
+      user: makeDirectorUser(),
+      headers: { "x-office-id": "office-2" },
+    });
+
+    expect(adminUsersMocks.listUsers).toHaveBeenCalledWith("office-2");
+    expect(res.body.users).toEqual([{ id: "user-3", displayName: "Selected Office User" }]);
+  });
+
+  it("rejects assignee loading for an inaccessible office", async () => {
+    authServiceMocks.getAccessibleOffices.mockResolvedValue([
+      { id: "office-1", name: "Office One", slug: "office-one" },
+    ]);
+
+    await expect(
+      invokeRoute({
+        method: "get",
+        url: "/assignees",
+        user: makeDirectorUser(),
+        headers: { "x-office-id": "office-2" },
+      })
+    ).rejects.toThrow("Requested office is not accessible");
+
+    expect(adminUsersMocks.listUsers).not.toHaveBeenCalled();
   });
 
   it.each([

@@ -10,6 +10,7 @@ import { DealDetailPage } from "@/pages/deals/deal-detail-page";
 import { DealNewPage } from "@/pages/deals/deal-new-page";
 import { DealEditPage } from "@/pages/deals/deal-edit-page";
 import { PipelinePage } from "@/pages/pipeline/pipeline-page";
+import { MyCleanupPage } from "@/pages/pipeline/my-cleanup-page";
 import { ContactListPage } from "@/pages/contacts/contact-list-page";
 import { ContactDetailPage } from "@/pages/contacts/contact-detail-page";
 import { ContactNewPage } from "@/pages/contacts/contact-new-page";
@@ -95,6 +96,7 @@ export function App() {
               <Route path="/properties" element={<PropertyListPage />} />
               <Route path="/properties/:id" element={<PropertyDetailPage />} />
               <Route path="/pipeline" element={<PipelinePage />} />
+              <Route path="/pipeline/my-cleanup" element={<MyCleanupPage />} />
               <Route path="/contacts" element={<ContactListPage />} />
               <Route path="/contacts/new" element={<ContactNewPage />} />
               <Route path="/contacts/:id" element={<ContactDetailPage />} />

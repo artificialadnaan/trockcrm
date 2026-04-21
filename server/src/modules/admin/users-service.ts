@@ -15,21 +15,53 @@ import {
 } from "../auth/local-auth-service.js";
 
 export async function listUsers(officeId?: string) {
-  const rows = await db
-    .select({
-      id: users.id,
-      email: users.email,
-      displayName: users.displayName,
-      role: users.role,
-      officeId: users.officeId,
-      isActive: users.isActive,
-      createdAt: users.createdAt,
-    })
-    .from(users)
-    .where(officeId ? eq(users.officeId, officeId) : undefined)
-    .orderBy(asc(users.displayName));
+  const rows = officeId
+    ? await db.execute(sql`
+        SELECT
+          u.id,
+          u.email,
+          u.display_name,
+          u.role,
+          u.office_id,
+          u.is_active,
+          u.created_at
+        FROM users u
+        WHERE u.office_id = ${officeId}
+          OR EXISTS (
+            SELECT 1
+            FROM user_office_access uoa
+            WHERE uoa.user_id = u.id
+              AND uoa.office_id = ${officeId}
+          )
+        ORDER BY u.display_name ASC
+      `)
+    : await db
+        .select({
+          id: users.id,
+          email: users.email,
+          displayName: users.displayName,
+          role: users.role,
+          officeId: users.officeId,
+          isActive: users.isActive,
+          createdAt: users.createdAt,
+        })
+        .from(users)
+        .orderBy(asc(users.displayName));
 
-  return rows;
+  const resultRows = (rows as any).rows ?? rows;
+  return resultRows.map((row: any) =>
+    officeId
+      ? {
+          id: row.id,
+          email: row.email,
+          displayName: row.display_name,
+          role: row.role,
+          officeId: row.office_id,
+          isActive: row.is_active,
+          createdAt: row.created_at,
+        }
+      : row
+  );
 }
 
 export async function getUserById(id: string) {
@@ -111,6 +143,29 @@ export async function revokeOfficeAccess(userId: string, officeId: string) {
         eq(userOfficeAccess.officeId, officeId)
       )
     );
+}
+
+export async function listActiveUsersWithOfficeAccess() {
+  const result = await db.execute(sql`
+    SELECT
+      u.id,
+      u.email,
+      u.display_name,
+      u.office_id,
+      u.is_active
+    FROM users u
+    WHERE u.is_active = true
+    ORDER BY u.display_name ASC
+  `);
+
+  const rows = (result as any).rows ?? result;
+  return rows.map((r: any) => ({
+    id: r.id,
+    email: r.email,
+    displayName: r.display_name,
+    officeId: r.office_id,
+    isActive: r.is_active,
+  }));
 }
 
 /** Get all users with their office counts for the admin overview table. */

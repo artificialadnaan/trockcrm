@@ -1,7 +1,15 @@
 import { Router } from "express";
 import crypto from "crypto";
 import jwt from "jsonwebtoken";
-import { ensureDevDemoWorkspace, ensureDevUserPrimaryOffice, getDevUsers, getUserByEmail, getUserById, signJwt } from "./service.js";
+import {
+  ensureDevDemoWorkspace,
+  ensureDevUserPrimaryOffice,
+  getAccessibleOffices,
+  getDevUsers,
+  getUserByEmail,
+  getUserById,
+  signJwt,
+} from "./service.js";
 import { authMiddleware } from "../../middleware/auth.js";
 import { authLimiter } from "../../middleware/rate-limit.js";
 import { AppError } from "../../middleware/error-handler.js";
@@ -137,6 +145,15 @@ router.post("/local/login", authLimiter, async (req, res, next) => {
 // Get current user
 router.get("/me", authMiddleware, (req, res) => {
   res.json({ user: req.user });
+});
+
+router.get("/accessible-offices", authMiddleware, async (req, res, next) => {
+  try {
+    const offices = await getAccessibleOffices(req.user!.id, req.user!.role, req.user!.activeOfficeId ?? req.user!.officeId);
+    res.json({ offices });
+  } catch (err) {
+    next(err);
+  }
 });
 
 router.post("/local/change-password", authMiddleware, async (req, res, next) => {

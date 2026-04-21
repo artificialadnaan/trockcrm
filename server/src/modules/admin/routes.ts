@@ -1,8 +1,13 @@
 import { Router, type Request, type Response, type NextFunction } from "express";
+import { inArray } from "drizzle-orm";
+import { drizzle } from "drizzle-orm/node-postgres";
+import * as schema from "@trock-crm/shared/schema";
 import { authMiddleware } from "../../middleware/auth.js";
+import { AppError } from "../../middleware/error-handler.js";
 import { requireAdmin, requireDirector } from "../../middleware/rbac.js";
 import { tenantMiddleware } from "../../middleware/tenant.js";
 import { pool } from "../../db.js";
+import { getAccessibleOffices } from "../auth/service.js";
 import {
   listOffices, getOfficeById, createOffice, updateOffice,
 } from "./offices-service.js";
@@ -11,6 +16,12 @@ import {
 } from "./users-service.js";
 import { importExternalUsers } from "./user-import-service.js";
 import { previewUserInvite, revokeUserInvite, sendUserInvite } from "../auth/local-auth-service.js";
+import { runOwnershipSync } from "./ownership-sync-service.js";
+import {
+  bulkReassignOwnershipQueueRows,
+  getMyCleanupQueue,
+  getOfficeOwnershipQueue,
+} from "./cleanup-queue-service.js";
 import {
   listPipelineStages, updatePipelineStage, reorderPipelineStages,
 } from "./pipeline-service.js";
@@ -19,6 +30,36 @@ import { getAdminDataScrubOverview } from "./admin-reporting-service.js";
 
 const router = Router();
 router.use(authMiddleware);
+
+async function withOfficeTenantContext<T>(
+  user: NonNullable<Request["user"]>,
+  officeId: string,
+  handler: (tenantDb: NonNullable<Request["tenantDb"]>) => Promise<T>
+): Promise<T> {
+  const accessibleOffices = await getAccessibleOffices(user.id, user.role, user.activeOfficeId ?? user.officeId);
+  const office = accessibleOffices.find((candidate) => candidate.id === officeId);
+  if (!office) {
+    throw new AppError(403, "Requested office is not accessible");
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SET LOCAL statement_timeout = '30s'");
+    await client.query("SELECT set_config('search_path', $1, true)", [`office_${office.slug},public`]);
+    await client.query("SELECT set_config('app.current_user_id', $1, true)", [user.id]);
+
+    const tenantDb = drizzle(client, { schema }) as NonNullable<Request["tenantDb"]>;
+    const result = await handler(tenantDb);
+    await client.query("COMMIT");
+    return result;
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Offices (admin only)
@@ -180,6 +221,118 @@ router.delete(
     }
   }
 );
+
+router.post("/admin/ownership-sync/dry-run", requireAdmin, async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    const result = await runOwnershipSync({ dryRun: true });
+    return res.json(result);
+  } catch (err) {
+    return next(err);
+  }
+});
+
+router.post("/admin/ownership-sync/apply", requireAdmin, async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    const result = await runOwnershipSync({ dryRun: false });
+    return res.json(result);
+  } catch (err) {
+    return next(err);
+  }
+});
+
+router.get("/admin/cleanup/my", tenantMiddleware, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const officeId = req.user!.activeOfficeId ?? req.user!.officeId;
+    const result = await getMyCleanupQueue(req.tenantDb!, req.user!.id, officeId);
+    await req.commitTransaction!();
+    return res.json({ rows: result.rows });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+router.get("/admin/cleanup/office", requireDirector, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const officeId = req.query.officeId as string | undefined;
+    if (!officeId) {
+      return res.status(400).json({ error: "officeId required" });
+    }
+
+    const accessibleOffices = await getAccessibleOffices(req.user!.id, req.user!.role, req.user!.activeOfficeId ?? req.user!.officeId);
+    const office = accessibleOffices.find((candidate) => candidate.id === officeId);
+    if (!office) {
+      return res.status(403).json({ error: "Requested office is not accessible" });
+    }
+
+    const result = await withOfficeTenantContext(req.user!, officeId, async (tenantDb) => {
+      const queue = await getOfficeOwnershipQueue(tenantDb!, officeId, req.user!);
+      const assignedIds = Array.from(
+        new Set(
+          queue.rows
+            .map((row) => row.assignedRepId)
+            .filter((value): value is string => Boolean(value))
+        )
+      );
+
+      const assignedNames = assignedIds.length === 0
+        ? new Map<string, string>()
+        : new Map(
+            (
+              await tenantDb
+                .select({
+                  id: schema.users.id,
+                  displayName: schema.users.displayName,
+                })
+                .from(schema.users)
+                .where(inArray(schema.users.id, assignedIds))
+            ).map((user) => [user.id, user.displayName])
+          );
+
+      return {
+        rows: queue.rows.map((row) => ({
+          ...row,
+          officeName: office.name,
+          assignedUserName: row.assignedRepId ? assignedNames.get(row.assignedRepId) ?? null : null,
+        })),
+        byReason: queue.byReason,
+      };
+    });
+    return res.json(result);
+  } catch (err) {
+    return next(err);
+  }
+});
+
+router.post("/admin/cleanup/reassign", requireDirector, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { officeId, rows, assigneeId } = req.body as {
+      officeId: string;
+      rows: Array<{ recordType: "lead" | "deal"; recordId: string }>;
+      assigneeId: string;
+    };
+
+    if (!officeId) {
+      return res.status(400).json({ error: "officeId required" });
+    }
+    if (!Array.isArray(rows) || rows.length === 0) {
+      return res.status(400).json({ error: "rows are required" });
+    }
+    if (!assigneeId) {
+      return res.status(400).json({ error: "assigneeId is required" });
+    }
+
+    const result = await withOfficeTenantContext(req.user!, officeId, async (tenantDb) =>
+      bulkReassignOwnershipQueueRows(tenantDb!, req.user!, {
+        officeId,
+        rows,
+        assigneeId,
+      })
+    );
+    return res.json(result);
+  } catch (err) {
+    return next(err);
+  }
+});
 
 // ---------------------------------------------------------------------------
 // Pipeline config (admin only)
