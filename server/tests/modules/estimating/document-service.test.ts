@@ -167,15 +167,20 @@ describe("createEstimateSourceDocument", () => {
 describe("reprocessEstimateSourceDocument", () => {
   it("requeues the existing document in place and preserves the document id", async () => {
     const enqueueEstimateDocumentOcr = vi.fn().mockResolvedValue(undefined);
+    const currentDocument = {
+      parseProvider: "default",
+      parseProfile: "measurement-heavy",
+      parseMeasurementsEnabled: true,
+    };
     const updatedDocument = {
       id: "doc-1",
       dealId: "deal-1",
       filename: "plans.pdf",
       parseStatus: "queued",
       activeParseRunId: null,
-      parseProfile: null,
-      parseProvider: null,
-      parseMeasurementsEnabled: false,
+      parseProfile: "measurement-heavy",
+      parseProvider: "default",
+      parseMeasurementsEnabled: true,
       parseErrorSummary: null,
       ocrStatus: "queued",
       parsedAt: null,
@@ -188,8 +193,16 @@ describe("reprocessEstimateSourceDocument", () => {
     const updateSet = vi.fn(() => ({
       where: updateWhere,
     }));
+    const selectWhere = vi.fn(() => ({
+      limit: vi.fn().mockResolvedValue([currentDocument]),
+    }));
 
     const tenantDb = {
+      select: vi.fn(() => ({
+        from: vi.fn(() => ({
+          where: selectWhere,
+        })),
+      })),
       update: vi.fn(() => ({
         set: updateSet,
       })),
@@ -203,7 +216,9 @@ describe("reprocessEstimateSourceDocument", () => {
         documentId: "doc-1",
         userId: "user-1",
         officeId: "office-1",
-        parseMeasurementsEnabled: false,
+        parseProvider: "default",
+        parseProfile: "measurement-heavy",
+        parseMeasurementsEnabled: true,
       },
     });
 
@@ -212,9 +227,9 @@ describe("reprocessEstimateSourceDocument", () => {
       expect.objectContaining({
         parseStatus: "queued",
         activeParseRunId: null,
-        parseProfile: null,
-        parseProvider: null,
-        parseMeasurementsEnabled: false,
+        parseProfile: "measurement-heavy",
+        parseProvider: "default",
+        parseMeasurementsEnabled: true,
         parseErrorSummary: null,
         ocrStatus: "queued",
         parsedAt: null,
@@ -225,23 +240,21 @@ describe("reprocessEstimateSourceDocument", () => {
       documentId: "doc-1",
       dealId: "deal-1",
       officeId: "office-1",
-      parseMeasurementsEnabled: false,
+      parseMeasurementsEnabled: true,
     });
   });
 
   it("returns null when the document does not exist for the deal", async () => {
     const enqueueEstimateDocumentOcr = vi.fn().mockResolvedValue(undefined);
-    const updateReturning = vi.fn().mockResolvedValue([]);
-    const updateWhere = vi.fn(() => ({
-      returning: updateReturning,
-    }));
-    const updateSet = vi.fn(() => ({
-      where: updateWhere,
+    const selectWhere = vi.fn(() => ({
+      limit: vi.fn().mockResolvedValue([]),
     }));
 
     const tenantDb = {
-      update: vi.fn(() => ({
-        set: updateSet,
+      select: vi.fn(() => ({
+        from: vi.fn(() => ({
+          where: selectWhere,
+        })),
       })),
     } as any;
 

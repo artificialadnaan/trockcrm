@@ -56,6 +56,10 @@ describe("EstimatingWorkflowShell", () => {
               filename: "project-spec.pdf",
               documentType: "spec",
               ocrStatus: "completed",
+              parseStatus: "completed",
+              parseProvider: "default",
+              parseProfile: "measurement-heavy",
+              parseMeasurementsEnabled: true,
               versionLabel: "v1",
               createdAt: "2026-04-20T10:00:00.000Z",
             },
@@ -64,6 +68,10 @@ describe("EstimatingWorkflowShell", () => {
               filename: "addendum-a.pdf",
               documentType: "supporting_package",
               ocrStatus: "queued",
+              parseStatus: "queued",
+              parseProvider: null,
+              parseProfile: null,
+              parseMeasurementsEnabled: false,
               versionLabel: null,
               createdAt: "2026-04-20T11:00:00.000Z",
             },
@@ -126,6 +134,9 @@ describe("EstimatingWorkflowShell", () => {
     expect(html).toContain("Review Log");
     expect(html).toContain("Current panel");
     expect(html).toContain("Queued for OCR");
+    expect(html).toContain("Parsed");
+    expect(html).toContain("Measurements enabled");
+    expect(html).toContain("Re-run Parsing");
     expect(html).toContain("Documents");
     expect(html).toContain("addendum-a.pdf");
   });

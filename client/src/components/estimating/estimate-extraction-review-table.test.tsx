@@ -48,12 +48,31 @@ describe("EstimateExtractionReviewTable", () => {
         pageId: "page-4",
         evidenceText: "Install 1,200 SF of white TPO membrane",
       },
+      {
+        id: "ext-2",
+        status: "pending",
+        extractionType: "measurement_candidate",
+        normalizedLabel: "Roof area",
+        rawLabel: "Roof area estimate",
+        quantity: "3400",
+        unit: "sqft",
+        divisionHint: "Roofing",
+        confidence: "0.75",
+        sourceDocumentId: "doc-2",
+        pageId: "page-7",
+        evidenceText: "Measure 3,400 SF roof area",
+        metadataJson: {
+          measurementConfirmationState: "pending",
+        },
+      },
     ]);
 
     expect(html).toContain("Extraction");
     expect(html).toContain("TPO membrane");
     expect(html).toContain("60mil white TPO");
     expect(html).toContain("1200 sqft");
+    expect(html).toContain("Measurement candidate");
+    expect(html).toContain("Needs confirmation before pricing");
     expect(html).toContain("Approve");
     expect(html).toContain("Reject");
     expect(html).toContain("Selected");

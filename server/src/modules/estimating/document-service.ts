@@ -45,6 +45,8 @@ export interface ReprocessEstimateSourceDocumentArgs {
     documentId: string;
     userId: string;
     officeId: string | null;
+    parseProvider?: string | null;
+    parseProfile?: string | null;
     parseMeasurementsEnabled?: boolean;
   };
 }
@@ -162,16 +164,38 @@ export async function reprocessEstimateSourceDocument({
   enqueueEstimateDocumentOcr,
   input,
 }: ReprocessEstimateSourceDocumentArgs) {
+  const [currentDocument] = await tenantDb
+    .select({
+      parseProvider: estimateSourceDocuments.parseProvider,
+      parseProfile: estimateSourceDocuments.parseProfile,
+      parseMeasurementsEnabled: estimateSourceDocuments.parseMeasurementsEnabled,
+    })
+    .from(estimateSourceDocuments)
+    .where(
+      and(
+        eq(estimateSourceDocuments.id, input.documentId),
+        eq(estimateSourceDocuments.dealId, input.dealId)
+      )
+    )
+    .limit(1);
+
+  if (!currentDocument) {
+    return null;
+  }
+
+  const nextParseProvider = input.parseProvider ?? currentDocument.parseProvider ?? null;
+  const nextParseProfile = input.parseProfile ?? currentDocument.parseProfile ?? null;
+  const nextParseMeasurementsEnabled =
+    input.parseMeasurementsEnabled ?? currentDocument.parseMeasurementsEnabled ?? false;
+
   const [document] = await tenantDb
     .update(estimateSourceDocuments)
     .set({
       parseStatus: "queued",
       activeParseRunId: null,
-      parseProfile: null,
-      parseProvider: null,
-      ...(input.parseMeasurementsEnabled !== undefined
-        ? { parseMeasurementsEnabled: input.parseMeasurementsEnabled }
-        : {}),
+      parseProfile: nextParseProfile,
+      parseProvider: nextParseProvider,
+      parseMeasurementsEnabled: nextParseMeasurementsEnabled,
       parseErrorSummary: null,
       ocrStatus: "queued",
       parsedAt: null,

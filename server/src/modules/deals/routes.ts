@@ -923,6 +923,8 @@ router.post("/:id/estimating/documents/:documentId/reprocess", async (req, res, 
         documentId: req.params.documentId,
         userId: req.user!.id,
         officeId,
+        parseProvider: req.body.parseProvider,
+        parseProfile: req.body.parseProfile,
         parseMeasurementsEnabled: req.body.parseMeasurementsEnabled,
       },
     });

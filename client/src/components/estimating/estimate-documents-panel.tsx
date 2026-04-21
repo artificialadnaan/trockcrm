@@ -1,17 +1,62 @@
 import { useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { api } from "@/lib/api";
+
+const PARSE_PROFILE_OPTIONS = [
+  { value: "balanced", label: "Balanced" },
+  { value: "text-heavy", label: "Text-heavy" },
+  { value: "measurement-heavy", label: "Measurement-heavy" },
+];
+
+type DocumentParseDraft = {
+  parseProvider: string;
+  parseProfile: string;
+  parseMeasurementsEnabled: boolean;
+};
+
+function buildDocumentParseDraft(document: {
+  parseProvider?: string | null;
+  parseProfile?: string | null;
+  parseMeasurementsEnabled?: boolean | null;
+}): DocumentParseDraft {
+  return {
+    parseProvider: document.parseProvider ?? "default",
+    parseProfile: document.parseProfile ?? "balanced",
+    parseMeasurementsEnabled: document.parseMeasurementsEnabled ?? false,
+  };
+}
 
 function formatDocumentType(value: string | null | undefined) {
   if (!value) return "Unknown";
   return value.replace(/_/g, " ");
 }
 
-function formatDocumentStatus(value: string | null | undefined) {
+function formatParseStatus(value: string | null | undefined) {
+  if (!value) return "Not parsed yet";
+  if (value === "queued") return "Queued for parsing";
+  if (value === "processing") return "Parsing";
+  if (value === "completed") return "Parsed";
+  if (value === "failed") return "Parsing failed";
+  return value.replace(/_/g, " ");
+}
+
+function formatOcrStatus(value: string | null | undefined) {
   if (!value) return "Unknown";
-  if (value === "queued") return "Queued for OCR";
-  if (value === "completed") return "Ready";
+  if (value === "queued") return "Queued";
+  if (value === "completed") return "Complete";
+  if (value === "processing") return "Processing";
+  if (value === "failed") return "Failed";
   return value.replace(/_/g, " ");
 }
 
@@ -19,6 +64,28 @@ function formatTimestamp(value: string | Date | null | undefined) {
   if (!value) return "No timestamp";
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? "No timestamp" : date.toLocaleString();
+}
+
+export async function runEstimateDocumentRerunAction({
+  dealId,
+  documentId,
+  options,
+  refresh,
+}: {
+  dealId: string;
+  documentId: string;
+  options: DocumentParseDraft;
+  refresh: () => Promise<void>;
+}) {
+  await api(`/deals/${dealId}/estimating/documents/${documentId}/reprocess`, {
+    method: "POST",
+    json: {
+      parseProvider: options.parseProvider,
+      parseProfile: options.parseProfile,
+      parseMeasurementsEnabled: options.parseMeasurementsEnabled,
+    },
+  });
+  await refresh();
 }
 
 export function EstimateDocumentsPanel({
@@ -31,15 +98,18 @@ export function EstimateDocumentsPanel({
   onRefresh: () => Promise<void>;
 }) {
   const [reprocessingDocumentId, setReprocessingDocumentId] = useState<string | null>(null);
+  const [drafts, setDrafts] = useState<Record<string, DocumentParseDraft>>({});
 
-  const handleReprocess = async (documentId: string) => {
+  const handleReprocess = async (documentId: string, options: DocumentParseDraft) => {
     setReprocessingDocumentId(documentId);
     try {
-      await api(`/deals/${dealId}/estimating/documents/${documentId}/reprocess`, {
-        method: "POST",
+      await runEstimateDocumentRerunAction({
+        dealId,
+        documentId,
+        options,
+        refresh: onRefresh,
       });
-      toast.success("Document requeued for OCR");
-      await onRefresh();
+      toast.success("Document requeued for parsing");
     } catch (err: unknown) {
       toast.error(err instanceof Error ? err.message : "Failed to reprocess document");
     } finally {
@@ -52,7 +122,7 @@ export function EstimateDocumentsPanel({
       <div className="border-b px-4 py-3">
         <h3 className="text-sm font-semibold">Documents</h3>
         <p className="text-xs text-muted-foreground">
-          Source files feeding OCR, extraction, and estimator review.
+          Source files feeding parsing, extraction, and estimator review.
         </p>
       </div>
 
@@ -68,6 +138,7 @@ export function EstimateDocumentsPanel({
                 <th className="px-4 py-2 font-medium">Document</th>
                 <th className="px-4 py-2 font-medium">Type</th>
                 <th className="px-4 py-2 font-medium">Status</th>
+                <th className="px-4 py-2 font-medium">Rerun Options</th>
                 <th className="px-4 py-2 font-medium">Uploaded</th>
                 <th className="px-4 py-2 text-right font-medium">Action</th>
               </tr>
@@ -75,6 +146,8 @@ export function EstimateDocumentsPanel({
             <tbody>
               {documents.map((document) => {
                 const isReprocessing = reprocessingDocumentId === document.id;
+                const draft =
+                  drafts[document.id] ?? buildDocumentParseDraft(document);
 
                 return (
                   <tr key={document.id} className="border-b align-top last:border-b-0">
@@ -88,9 +161,108 @@ export function EstimateDocumentsPanel({
                       {formatDocumentType(document.documentType)}
                     </td>
                     <td className="px-4 py-3">
-                      <div className="font-medium">{formatDocumentStatus(document.ocrStatus)}</div>
+                      <div className="font-medium">
+                        {formatParseStatus(document.parseStatus ?? document.ocrStatus)}
+                      </div>
                       <div className="text-xs text-muted-foreground">
-                        {document.fileSize ? `${Number(document.fileSize).toLocaleString()} bytes` : "Size unavailable"}
+                        OCR {formatOcrStatus(document.ocrStatus)}
+                      </div>
+                      <div className="text-xs text-muted-foreground">
+                        Provider {document.parseProvider ?? "default"} · Profile{" "}
+                        {document.parseProfile ?? "balanced"}
+                      </div>
+                      <div className="text-xs text-muted-foreground">
+                        {document.parseMeasurementsEnabled ? "Measurements enabled" : "Measurements disabled"}
+                      </div>
+                      {document.parseErrorSummary ? (
+                        <div className="text-xs text-destructive">{document.parseErrorSummary}</div>
+                      ) : null}
+                    </td>
+                    <td className="px-4 py-3">
+                      <div className="space-y-2">
+                        <div className="space-y-1">
+                          <Label
+                            className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground"
+                            htmlFor={`parse-provider-${document.id}`}
+                          >
+                            Provider
+                          </Label>
+                          <Input
+                            id={`parse-provider-${document.id}`}
+                            className="h-7"
+                            value={draft.parseProvider}
+                            onChange={(event) =>
+                              setDrafts((current) => {
+                                const currentDraft =
+                                  current[document.id] ?? buildDocumentParseDraft(document);
+                                return {
+                                  ...current,
+                                  [document.id]: {
+                                    ...currentDraft,
+                                    parseProvider: event.target.value,
+                                  },
+                                };
+                              })
+                            }
+                          />
+                        </div>
+
+                        <div className="space-y-1">
+                          <Label
+                            className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground"
+                            htmlFor={`parse-profile-${document.id}`}
+                          >
+                            Profile
+                          </Label>
+                          <Select
+                            value={draft.parseProfile}
+                            onValueChange={(value) =>
+                              setDrafts((current) => {
+                                const currentDraft =
+                                  current[document.id] ?? buildDocumentParseDraft(document);
+                                return {
+                                  ...current,
+                                  [document.id]: {
+                                    ...currentDraft,
+                                    parseProfile: value,
+                                  },
+                                };
+                              })
+                            }
+                          >
+                            <SelectTrigger id={`parse-profile-${document.id}`} className="h-7 w-full">
+                              <SelectValue placeholder="Select profile" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {PARSE_PROFILE_OPTIONS.map((option) => (
+                                <SelectItem key={option.value} value={option.value}>
+                                  {option.label}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </div>
+
+                        <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                            <Checkbox
+                              checked={draft.parseMeasurementsEnabled}
+                              onCheckedChange={(checked) =>
+                              setDrafts((current) => {
+                                const currentDraft =
+                                  current[document.id] ?? buildDocumentParseDraft(document);
+                                return {
+                                  ...current,
+                                  [document.id]: {
+                                    ...currentDraft,
+                                    parseMeasurementsEnabled: checked,
+                                  },
+                                };
+                              })
+                            }
+                            className="mt-0.5"
+                          />
+                          <span>Enable measurements</span>
+                        </label>
                       </div>
                     </td>
                     <td className="px-4 py-3 text-muted-foreground">
@@ -101,9 +273,9 @@ export function EstimateDocumentsPanel({
                         size="sm"
                         variant="outline"
                         disabled={isReprocessing}
-                        onClick={() => handleReprocess(document.id)}
+                        onClick={() => handleReprocess(document.id, draft)}
                       >
-                        {isReprocessing ? "Reprocessing..." : "Reprocess"}
+                        {isReprocessing ? "Re-running..." : "Re-run Parsing"}
                       </Button>
                     </td>
                   </tr>

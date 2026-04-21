@@ -136,8 +136,24 @@ describe("estimating workflow routes", () => {
 
   it("returns workflow state for the estimating shell", async () => {
     estimatingServiceMocks.getEstimatingWorkflowState.mockResolvedValue({
-      documents: [],
-      extractionRows: [],
+      documents: [
+        {
+          id: "doc-1",
+          parseStatus: "completed",
+          parseProvider: "default",
+          parseProfile: "measurement-heavy",
+          parseMeasurementsEnabled: true,
+          ocrStatus: "completed",
+        },
+      ],
+      extractionRows: [
+        {
+          id: "ext-1",
+          metadataJson: {
+            measurementConfirmationState: "pending",
+          },
+        },
+      ],
       matchRows: [],
       pricingRows: [],
       reviewEvents: [],
@@ -213,6 +229,21 @@ describe("estimating workflow routes", () => {
       canPromote: false,
       generationRunIds: [],
     });
+    expect(res.body.documents[0]).toEqual(
+      expect.objectContaining({
+        parseStatus: "completed",
+        parseProvider: "default",
+        parseProfile: "measurement-heavy",
+        parseMeasurementsEnabled: true,
+      })
+    );
+    expect(res.body.extractionRows[0]).toEqual(
+      expect.objectContaining({
+        metadataJson: expect.objectContaining({
+          measurementConfirmationState: "pending",
+        }),
+      })
+    );
   });
 
   it("returns 404 when a reprocess target document is missing", async () => {
@@ -231,6 +262,8 @@ describe("estimating workflow routes", () => {
           documentId: "missing-doc",
           userId: "user-1",
           officeId: "office-1",
+          parseProvider: undefined,
+          parseProfile: undefined,
           parseMeasurementsEnabled: undefined,
         }),
       })
@@ -256,6 +289,8 @@ describe("estimating workflow routes", () => {
     await invokeRoute("post", "/:id/estimating/documents/:documentId/reprocess", {
       params: { id: "deal-1", documentId: "doc-1" },
       body: {
+        parseProvider: "default",
+        parseProfile: "measurement-heavy",
         parseMeasurementsEnabled: false,
       },
     });
@@ -270,6 +305,8 @@ describe("estimating workflow routes", () => {
     expect(documentServiceMocks.reprocessEstimateSourceDocument).toHaveBeenCalledWith(
       expect.objectContaining({
         input: expect.objectContaining({
+          parseProvider: "default",
+          parseProfile: "measurement-heavy",
           parseMeasurementsEnabled: false,
         }),
       })

@@ -20,6 +20,7 @@ interface ExtractionReviewRow {
   documentId?: string | null;
   pageId?: string | null;
   evidenceText?: string | null;
+  metadataJson?: Record<string, unknown> | null;
 }
 
 function formatLabel(row: ExtractionReviewRow) {
@@ -46,6 +47,14 @@ function formatConfidence(value: string | number | null | undefined) {
   const numeric = typeof value === "number" ? value : Number(value);
   if (Number.isNaN(numeric)) return `${value}`;
   return `${Math.round(numeric <= 1 ? numeric * 100 : numeric)}%`;
+}
+
+function formatMeasurementConfirmationState(value: unknown) {
+  if (value === "approved") return "Approved for pricing";
+  if (value === "rejected") return "Rejected for pricing";
+  if (value === "pending") return "Needs confirmation before pricing";
+  if (typeof value === "string" && value.length > 0) return value.replace(/_/g, " ");
+  return null;
 }
 
 export async function runEstimateExtractionReviewAction({
@@ -177,6 +186,18 @@ export function EstimateExtractionReviewTable({
                         <div className="text-xs text-muted-foreground">
                           Confidence {formatConfidence(row.confidence)}
                         </div>
+                        {row.extractionType === "measurement_candidate" ? (
+                          <>
+                            <div className="text-xs font-medium text-amber-700">
+                              Measurement candidate
+                            </div>
+                            <div className="text-xs text-amber-700">
+                              {formatMeasurementConfirmationState(
+                                row.metadataJson?.measurementConfirmationState
+                              ) ?? "Awaiting confirmation"}
+                            </div>
+                          </>
+                        ) : null}
                       </td>
                       <td className="px-3 py-2 text-right">
                         <div className="flex justify-end gap-2">
