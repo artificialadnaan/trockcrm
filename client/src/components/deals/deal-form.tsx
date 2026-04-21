@@ -18,7 +18,6 @@ import { Loader2 } from "lucide-react";
 import { getDefaultDealStageId, getNewDealStages } from "./deal-form.helpers";
 import { CompanySelector } from "@/components/companies/company-selector";
 import { PropertySelector } from "@/components/properties/property-selector";
-import { getSelectedOptionLabel } from "@/pages/leads/lead-new-page.helpers";
 
 interface DealFormProps {
   deal?: Deal; // If provided, we're editing; otherwise creating
@@ -247,9 +246,7 @@ export function DealForm({ deal, onSuccess }: DealFormProps) {
                 onValueChange={(val) => handleChange("stageId", val ?? "")}
               >
                 <SelectTrigger>
-                  <SelectValue placeholder="Select stage">
-                    {getSelectedOptionLabel(activeStages, formData.stageId, "Select stage")}
-                  </SelectValue>
+                  <SelectValue placeholder="Select stage" />
                 </SelectTrigger>
                 <SelectContent>
                   {activeStages.map((s) => (
@@ -308,13 +305,7 @@ export function DealForm({ deal, onSuccess }: DealFormProps) {
                 onValueChange={(val) => handleChange("projectTypeId", val ?? "")}
               >
                 <SelectTrigger>
-                  <SelectValue placeholder="Select type">
-                    {getSelectedOptionLabel(
-                      projectTypeHierarchy.flatMap((parent) => [parent, ...parent.children]),
-                      formData.projectTypeId,
-                      "Select type"
-                    )}
-                  </SelectValue>
+                  <SelectValue placeholder="Select type" />
                 </SelectTrigger>
                 <SelectContent>
                   {projectTypeHierarchy.flatMap((parent) => [
@@ -337,9 +328,7 @@ export function DealForm({ deal, onSuccess }: DealFormProps) {
                 onValueChange={(val) => handleChange("regionId", val ?? "")}
               >
                 <SelectTrigger>
-                  <SelectValue placeholder="Select region">
-                    {getSelectedOptionLabel(regions, formData.regionId, "Select region")}
-                  </SelectValue>
+                  <SelectValue placeholder="Select region" />
                 </SelectTrigger>
                 <SelectContent>
                   {regions.map((r) => (

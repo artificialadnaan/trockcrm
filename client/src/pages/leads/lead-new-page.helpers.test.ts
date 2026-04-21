@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { PipelineStage } from "@/hooks/use-pipeline-config";
-import { getLeadCreationStages, getSelectedOptionLabel } from "./lead-new-page.helpers";
+import { getLeadCreationStages } from "./lead-new-page.helpers";
 
 const baseStage: Omit<PipelineStage, "id" | "name" | "slug" | "displayOrder" | "workflowFamily"> = {
   isActivePipeline: true,
@@ -44,18 +44,5 @@ describe("lead new page helpers", () => {
     ];
 
     expect(getLeadCreationStages(stages).map((stage) => stage.id)).toEqual(["lead-qualified"]);
-  });
-
-  it("returns a user-facing selected label instead of the raw id", () => {
-    expect(
-      getSelectedOptionLabel(
-        [
-          { id: "company-1", name: "Alpha Roofing" },
-          { id: "company-2", name: "Birchstone Demo Holdings" },
-        ],
-        "company-2",
-        "Select company"
-      )
-    ).toBe("Birchstone Demo Holdings");
   });
 });

@@ -34,6 +34,33 @@ interface CompanyOption {
   category: string | null;
 }
 
+async function submitInlineCompanyCreate(input: {
+  name: string;
+  category: string;
+  onCreated: (company: { id: string; name: string }) => void;
+  onError: (message: string | null) => void;
+  onCreating: (value: boolean) => void;
+}) {
+  if (!input.name.trim()) {
+    input.onError("Name is required");
+    return;
+  }
+
+  input.onCreating(true);
+  input.onError(null);
+  try {
+    const result = await createCompany({
+      name: input.name.trim(),
+      category: input.category || null,
+    });
+    input.onCreated(result.company);
+  } catch (err: unknown) {
+    input.onError(err instanceof Error ? err.message : "Failed to create company");
+  } finally {
+    input.onCreating(false);
+  }
+}
+
 export function CompanySelector({ value, onChange, required }: CompanySelectorProps) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<CompanyOption[]>([]);
@@ -98,29 +125,29 @@ export function CompanySelector({ value, onChange, required }: CompanySelectorPr
     onChange(company.id);
   };
 
-  const handleCreateSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newName.trim()) {
-      setCreateError("Name is required");
-      return;
-    }
-    setCreating(true);
-    setCreateError(null);
-    try {
-      const result = await createCompany({
-        name: newName.trim(),
-        category: newCategory || null,
-      });
-      setSelectedName(result.company.name);
-      setShowInlineForm(false);
-      setNewName("");
-      setNewCategory("");
-      setOpen(false);
-      onChange(result.company.id);
-    } catch (err: unknown) {
-      setCreateError(err instanceof Error ? err.message : "Failed to create company");
-    } finally {
-      setCreating(false);
+  const handleCreateSubmit = async () => {
+    await submitInlineCompanyCreate({
+      name: newName,
+      category: newCategory,
+      onError: setCreateError,
+      onCreating: setCreating,
+      onCreated: (company) => {
+        setSelectedName(company.name);
+        setShowInlineForm(false);
+        setNewName("");
+        setNewCategory("");
+        setOpen(false);
+        onChange(company.id);
+      },
+    });
+  };
+
+  const handleInlineCreateKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (!creating) {
+      void handleCreateSubmit();
     }
   };
 
@@ -198,12 +225,15 @@ export function CompanySelector({ value, onChange, required }: CompanySelectorPr
 
       {/* Inline create form */}
       {open && showInlineForm && (
-        <div className="absolute z-50 mt-1 w-full bg-background border rounded-md shadow-md p-3 space-y-3">
+        <div
+          className="absolute z-50 mt-1 w-full bg-background border rounded-md shadow-md p-3 space-y-3"
+          onKeyDown={handleInlineCreateKeyDown}
+        >
           <p className="text-sm font-medium">New Company</p>
           {createError && (
             <p className="text-xs text-red-600">{createError}</p>
           )}
-          <form onSubmit={handleCreateSubmit} className="space-y-3">
+          <div className="space-y-3">
             <div className="space-y-1">
               <Label className="text-xs">Name *</Label>
               <Input
@@ -242,12 +272,12 @@ export function CompanySelector({ value, onChange, required }: CompanySelectorPr
               >
                 Back
               </Button>
-              <Button type="submit" size="sm" disabled={creating}>
+              <Button type="button" size="sm" disabled={creating} onClick={() => void handleCreateSubmit()}>
                 {creating && <Loader2 className="h-3 w-3 mr-1 animate-spin" />}
                 Create
               </Button>
             </div>
-          </form>
+          </div>
         </div>
       )}
     </div>

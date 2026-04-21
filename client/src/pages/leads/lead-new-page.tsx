@@ -19,7 +19,7 @@ import { useAdminUsers } from "@/hooks/use-admin-users";
 import { useAuth } from "@/lib/auth";
 import { CompanySelector } from "@/components/companies/company-selector";
 import { PropertySelector } from "@/components/properties/property-selector";
-import { getLeadCreationStages, getSelectedOptionLabel } from "./lead-new-page.helpers";
+import { getLeadCreationStages } from "./lead-new-page.helpers";
 
 export function LeadNewPage() {
   const navigate = useNavigate();
@@ -161,9 +161,7 @@ export function LeadNewPage() {
               <Label>Lead Stage *</Label>
               <Select value={formData.stageId || "none"} onValueChange={(value) => handleChange("stageId", value && value !== "none" ? value : "")}>
                 <SelectTrigger>
-                  <SelectValue placeholder="Select lead stage">
-                    {getSelectedOptionLabel(leadStages, formData.stageId, "Select lead stage")}
-                  </SelectValue>
+                  <SelectValue placeholder="Select lead stage" />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="none">Select lead stage</SelectItem>
@@ -184,9 +182,7 @@ export function LeadNewPage() {
                 disabled={user?.role === "rep"}
               >
                 <SelectTrigger>
-                  <SelectValue placeholder="Select rep">
-                    {getSelectedOptionLabel(repOptions, formData.assignedRepId, "Select rep")}
-                  </SelectValue>
+                  <SelectValue placeholder="Select rep" />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="none">Select rep</SelectItem>
