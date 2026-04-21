@@ -160,7 +160,6 @@ export function MigrationDashboardPage() {
   const [selectedOfficeId, setSelectedOfficeId] = useState<string | undefined>(undefined);
   const [recordTypeFilter, setRecordTypeFilter] = useState<"all" | "lead" | "deal">("all");
   const [reasonCodeFilter, setReasonCodeFilter] = useState<string>("all");
-  const [stageNameFilter, setStageNameFilter] = useState<string>("all");
   const [staleAgeFilter, setStaleAgeFilter] = useState<"all" | "7" | "14" | "30" | "60">("all");
   const [officeFilterError, setOfficeFilterError] = useState<string | null>(null);
   const officeId = selectedOfficeId ?? user?.activeOfficeId ?? user?.officeId;
@@ -174,10 +173,9 @@ export function MigrationDashboardPage() {
       officeId,
       recordType: recordTypeFilter,
       reasonCode: reasonCodeFilter !== "all" ? reasonCodeFilter : undefined,
-      stageName: stageNameFilter !== "all" ? stageNameFilter : undefined,
       staleAgeDays: staleAgeFilter === "all" ? "all" : Number(staleAgeFilter),
     }) satisfies OwnershipQueueFilters,
-    [officeId, recordTypeFilter, reasonCodeFilter, stageNameFilter, staleAgeFilter]
+    [officeId, recordTypeFilter, reasonCodeFilter, staleAgeFilter]
   );
   const {
     rows: ownershipRows,
@@ -212,14 +210,12 @@ export function MigrationDashboardPage() {
   }, [offices, selectedOfficeId]);
 
   const filteredOwnershipRows = useMemo(() => {
-    const stageOptions = stageNameFilter === "all" ? null : stageNameFilter;
     const staleThreshold = staleAgeFilter === "all" ? null : Number(staleAgeFilter);
     const now = Date.now();
 
     return ownershipRows.filter((row) => {
       if (recordTypeFilter !== "all" && row.recordType !== recordTypeFilter) return false;
       if (reasonCodeFilter !== "all" && !row.reasonCodes.includes(reasonCodeFilter)) return false;
-      if (stageOptions && (row.stageName ?? "") !== stageOptions) return false;
       if (staleThreshold != null) {
         const timestamp = row.evaluatedAt ?? row.generatedAt;
         if (!timestamp) return false;
@@ -228,7 +224,7 @@ export function MigrationDashboardPage() {
       }
       return true;
     });
-  }, [ownershipRows, reasonCodeFilter, recordTypeFilter, stageNameFilter, staleAgeFilter]);
+  }, [ownershipRows, reasonCodeFilter, recordTypeFilter, staleAgeFilter]);
 
   const selectedOwnershipRows = useMemo(
     () => filteredOwnershipRows.filter((row) => selectedOwnershipKeys.has(getOwnershipQueueRowKey(row))),
@@ -281,14 +277,6 @@ export function MigrationDashboardPage() {
     setSelectedOwnershipKeys(new Set());
     await Promise.all([refetchOwnershipQueue(), refetch()]);
   };
-
-  const stageOptions = useMemo(() => {
-    const values = new Set<string>();
-    for (const row of ownershipRows) {
-      if (row.stageName) values.add(row.stageName);
-    }
-    return Array.from(values).sort((a, b) => a.localeCompare(b));
-  }, [ownershipRows]);
 
   return (
     <div className="space-y-6 max-w-5xl mx-auto">
@@ -411,22 +399,6 @@ export function MigrationDashboardPage() {
                   {ownershipReasons.map((reason) => (
                     <SelectItem key={reason.reasonCode} value={reason.reasonCode}>
                       {reason.reasonCode.replace(/_/g, " ")}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="space-y-2">
-              <div className="text-xs font-medium uppercase tracking-wide text-slate-500">Stage</div>
-              <Select value={stageNameFilter} onValueChange={(value) => setStageNameFilter(value ?? "all")}>
-                <SelectTrigger className="w-full">
-                  <SelectValue placeholder="All stages" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">All stages</SelectItem>
-                  {stageOptions.map((stage) => (
-                    <SelectItem key={stage} value={stage}>
-                      {stage}
                     </SelectItem>
                   ))}
                 </SelectContent>

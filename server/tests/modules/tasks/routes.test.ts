@@ -121,6 +121,7 @@ async function invokeRoute({
   query = {},
   body = {},
   tenantDb,
+  headers = {},
 }: {
   method: "get" | "post" | "patch";
   url: string;
@@ -128,6 +129,7 @@ async function invokeRoute({
   query?: Record<string, any>;
   body?: Record<string, any>;
   tenantDb?: Record<string, any>;
+  headers?: Record<string, string>;
 }) {
   const routePath =
     url === "/"
@@ -151,7 +153,7 @@ async function invokeRoute({
     user,
     tenantDb: resolvedTenantDb,
     commitTransaction: vi.fn().mockResolvedValue(undefined),
-    headers: {},
+    headers,
   };
   const res = makeResponse();
 
@@ -262,6 +264,22 @@ describe("task routes", () => {
 
     expect(adminUsersMocks.listUsers).toHaveBeenCalledWith("office-1");
     expect(res.body.users).toEqual([{ id: "user-1", displayName: "Active User" }]);
+  });
+
+  it("uses the requested office context when loading assignees", async () => {
+    adminUsersMocks.listUsers.mockResolvedValue([
+      { id: "user-3", displayName: "Selected Office User", isActive: true },
+    ]);
+
+    const { res } = await invokeRoute({
+      method: "get",
+      url: "/assignees",
+      user: makeDirectorUser(),
+      headers: { "x-office-id": "office-2" },
+    });
+
+    expect(adminUsersMocks.listUsers).toHaveBeenCalledWith("office-2");
+    expect(res.body.users).toEqual([{ id: "user-3", displayName: "Selected Office User" }]);
   });
 
   it.each([

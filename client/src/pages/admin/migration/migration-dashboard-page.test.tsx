@@ -177,7 +177,6 @@ describe("MigrationDashboardPage", () => {
     expect(html).toContain("Office");
     expect(html).toContain("Record type");
     expect(html).toContain("Reason code");
-    expect(html).toContain("Stage");
     expect(html).toContain("Stale age");
     expect(html).toContain("North Office");
   });

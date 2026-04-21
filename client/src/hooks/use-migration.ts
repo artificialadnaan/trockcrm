@@ -173,7 +173,6 @@ export interface OwnershipQueueFilters {
   officeId?: string;
   recordType?: "all" | "lead" | "deal";
   reasonCode?: string;
-  stageName?: string;
   staleAgeDays?: number | "all";
 }
 
@@ -196,7 +195,6 @@ function buildOwnershipQueueQueryParams(filters: OwnershipQueueFilters): URLSear
   if (filters.officeId) params.set("officeId", filters.officeId);
   if (filters.recordType && filters.recordType !== "all") params.set("recordType", filters.recordType);
   if (filters.reasonCode) params.set("reasonCode", filters.reasonCode);
-  if (filters.stageName) params.set("stageName", filters.stageName);
   if (filters.staleAgeDays && filters.staleAgeDays !== "all") {
     params.set("staleAgeDays", String(filters.staleAgeDays));
   }

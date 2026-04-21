@@ -29,7 +29,8 @@ router.get("/assignees", async (req, res, next) => {
       return;
     }
 
-    const officeId = req.user!.activeOfficeId ?? req.user!.officeId;
+    const requestedOfficeId = req.headers["x-office-id"] as string | undefined;
+    const officeId = requestedOfficeId ?? req.user!.activeOfficeId ?? req.user!.officeId;
     const rows = await listUsers(officeId);
     const users = rows
       .filter((u) => u.isActive)
