@@ -88,47 +88,6 @@ BEGIN
     END IF;
 
     EXECUTE format(
-      'INSERT INTO %I.estimate_market_adjustment_rules (
-         market_id,
-         scope_type,
-         scope_key,
-         fallback_scope_type,
-         fallback_scope_key,
-         priority,
-         fallback_priority,
-         labor_adjustment_percent,
-         material_adjustment_percent,
-         equipment_adjustment_percent,
-         default_labor_weight,
-         default_material_weight,
-         default_equipment_weight,
-         effective_from,
-         effective_to,
-         is_active
-       )
-       SELECT
-         NULL,
-         ''general'',
-         ''default'',
-         NULL,
-         NULL,
-         0,
-         0,
-         0,
-         0,
-         0,
-         0.3333,
-         0.3333,
-         0.3334,
-         ''2000-01-01 00:00:00+00'',
-         NULL,
-         TRUE
-       ON CONFLICT (scope_type, scope_key, effective_from) WHERE market_id IS NULL
-       DO NOTHING',
-      schema_name
-    );
-
-    EXECUTE format(
       'SELECT EXISTS (
          SELECT 1
            FROM %I.estimate_market_adjustment_rules
@@ -202,6 +161,47 @@ BEGIN
          CHECK (fallback_scope_type IS NULL OR fallback_scope_type IN (''general'', ''division'', ''trade''))',
       schema_name
     );
+
+    EXECUTE format(
+      'INSERT INTO %I.estimate_market_adjustment_rules (
+         market_id,
+         scope_type,
+         scope_key,
+         fallback_scope_type,
+         fallback_scope_key,
+         priority,
+         fallback_priority,
+         labor_adjustment_percent,
+         material_adjustment_percent,
+         equipment_adjustment_percent,
+         default_labor_weight,
+         default_material_weight,
+         default_equipment_weight,
+         effective_from,
+         effective_to,
+         is_active
+       )
+       SELECT
+         NULL,
+         ''general'',
+         ''default'',
+         NULL,
+         NULL,
+         0,
+         0,
+         0,
+         0,
+         0,
+         0.3333,
+         0.3333,
+         0.3334,
+         ''2000-01-01 00:00:00+00'',
+         NULL,
+         TRUE
+       ON CONFLICT (scope_type, scope_key, effective_from) WHERE market_id IS NULL
+       DO NOTHING',
+      schema_name
+    );
   END LOOP;
 END $$;
 
@@ -220,6 +220,20 @@ DO UPDATE SET
   market_id = EXCLUDED.market_id,
   is_active = EXCLUDED.is_active,
   updated_at = NOW();
+
+ALTER TABLE estimate_market_adjustment_rules
+  DROP CONSTRAINT IF EXISTS estimate_market_adjustment_rules_scope_type_check;
+
+ALTER TABLE estimate_market_adjustment_rules
+  DROP CONSTRAINT IF EXISTS estimate_market_adjustment_rules_fallback_scope_type_check;
+
+ALTER TABLE estimate_market_adjustment_rules
+  ADD CONSTRAINT estimate_market_adjustment_rules_scope_type_check
+  CHECK (scope_type IN ('general', 'division', 'trade'));
+
+ALTER TABLE estimate_market_adjustment_rules
+  ADD CONSTRAINT estimate_market_adjustment_rules_fallback_scope_type_check
+  CHECK (fallback_scope_type IS NULL OR fallback_scope_type IN ('general', 'division', 'trade'));
 
 INSERT INTO estimate_market_adjustment_rules (
   market_id,
@@ -258,18 +272,4 @@ INSERT INTO estimate_market_adjustment_rules (
     TRUE
 ON CONFLICT (scope_type, scope_key, effective_from) WHERE market_id IS NULL
 DO NOTHING;
-
-ALTER TABLE estimate_market_adjustment_rules
-  DROP CONSTRAINT IF EXISTS estimate_market_adjustment_rules_scope_type_check;
-
-ALTER TABLE estimate_market_adjustment_rules
-  DROP CONSTRAINT IF EXISTS estimate_market_adjustment_rules_fallback_scope_type_check;
-
-ALTER TABLE estimate_market_adjustment_rules
-  ADD CONSTRAINT estimate_market_adjustment_rules_scope_type_check
-  CHECK (scope_type IN ('general', 'division', 'trade'));
-
-ALTER TABLE estimate_market_adjustment_rules
-  ADD CONSTRAINT estimate_market_adjustment_rules_fallback_scope_type_check
-  CHECK (fallback_scope_type IS NULL OR fallback_scope_type IN ('general', 'division', 'trade'));
 -- TENANT_SCHEMA_END

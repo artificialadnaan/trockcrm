@@ -11,6 +11,14 @@ const migrationSql = readFileSync(migrationPath, "utf8");
 
 describe("estimating market-rate repair migration", () => {
   it("repairs already-upgraded tenant schemas without changing the fallback geography seed", () => {
+    const dropScopeIndex = migrationSql.indexOf(
+      "DROP CONSTRAINT IF EXISTS estimate_market_adjustment_rules_scope_type_check"
+    );
+    const dropFallbackIndex = migrationSql.indexOf(
+      "DROP CONSTRAINT IF EXISTS estimate_market_adjustment_rules_fallback_scope_type_check"
+    );
+    const repairInsertIndex = migrationSql.indexOf("INSERT INTO %I.estimate_market_adjustment_rules");
+
     expect(migrationSql).toContain("INSERT INTO %I.estimate_market_fallback_geographies");
     expect(migrationSql).toContain("SELECT id, 'global', 'default', TRUE");
     expect(migrationSql).toContain("INSERT INTO %I.estimate_market_adjustment_rules");
@@ -20,6 +28,9 @@ describe("estimating market-rate repair migration", () => {
     expect(migrationSql).toContain("CHECK (scope_type IN ('general', 'division', 'trade'))");
     expect(migrationSql).toContain("DROP CONSTRAINT IF EXISTS estimate_market_adjustment_rules_fallback_scope_type_check");
     expect(migrationSql).toContain("CHECK (fallback_scope_type IS NULL OR fallback_scope_type IN ('general', 'division', 'trade'))");
+    expect(dropScopeIndex).toBeGreaterThanOrEqual(0);
+    expect(dropFallbackIndex).toBeGreaterThanOrEqual(0);
+    expect(repairInsertIndex).toBeGreaterThan(dropFallbackIndex);
   });
 
   it("is safe to run on tenants that are already correct", () => {

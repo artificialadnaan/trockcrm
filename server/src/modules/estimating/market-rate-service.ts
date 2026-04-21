@@ -3,6 +3,7 @@ import type {
   MarketRateProvider,
   PricingScopeType,
 } from "./market-rate-provider.js";
+import { getPricingScopeRank, isPricingScopeBroadEnough } from "./market-rate-provider.js";
 import type { ResolvedMarketContext } from "./market-resolution-service.js";
 
 export interface MarketAdjustmentSelectionInput {
@@ -88,7 +89,9 @@ function isMatchingFallbackPricingScope(
   pricingScopeKey: string
 ) {
   return (
-    rule.fallbackScopeType === pricingScopeType && rule.fallbackScopeKey === pricingScopeKey
+    isPricingScopeBroadEnough(rule.scopeType, pricingScopeType) &&
+    rule.fallbackScopeType === pricingScopeType &&
+    rule.fallbackScopeKey === pricingScopeKey
   );
 }
 
@@ -103,14 +106,17 @@ function getRuleTier(
   const generalDefault = isGeneralDefaultScope(rule);
   const marketSpecific = marketId != null && rule.marketId === marketId;
   const globalRule = rule.marketId == null;
+  const fallbackDistance = fallbackScope
+    ? getPricingScopeRank(pricingScopeType) - getPricingScopeRank(rule.scopeType)
+    : Number.POSITIVE_INFINITY;
 
   if (marketSpecific && exactScope) return 0;
-  if (marketSpecific && fallbackScope) return 1;
-  if (marketSpecific && generalDefault) return 2;
-  if (globalRule && exactScope) return 3;
-  if (globalRule && fallbackScope) return 4;
-  if (globalRule && generalDefault) return 5;
-  return 6;
+  if (marketSpecific && fallbackScope) return 1 + fallbackDistance;
+  if (marketSpecific && generalDefault) return 10;
+  if (globalRule && exactScope) return 20;
+  if (globalRule && fallbackScope) return 21 + fallbackDistance;
+  if (globalRule && generalDefault) return 30;
+  return 40;
 }
 
 function compareRules(

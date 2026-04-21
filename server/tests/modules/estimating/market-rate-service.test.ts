@@ -108,6 +108,38 @@ describe("market-rate-service", () => {
     expect(result?.id).toBe("broad-default");
   });
 
+  it("does not let a narrower trade rule win for a division request", async () => {
+    const provider = {
+      listMarketAdjustmentRules: vi.fn().mockResolvedValue([
+        makeRule({
+          id: "trade-narrow",
+          marketId: "market-1",
+          scopeType: "trade",
+          scopeKey: "roofing",
+          fallbackScopeType: "division",
+          fallbackScopeKey: "07",
+          priority: 100,
+        }),
+        makeRule({
+          id: "division-broad",
+          marketId: "market-1",
+          scopeType: "division",
+          scopeKey: "07",
+          priority: 0,
+        }),
+      ]),
+    } as any;
+
+    const result = await selectBestMarketAdjustmentRule(provider, {
+      marketId: "market-1",
+      pricingScopeType: "division",
+      pricingScopeKey: "07",
+      asOf: new Date("2026-04-21T00:00:00Z"),
+    });
+
+    expect(result?.id).toBe("division-broad");
+  });
+
   it("filters out expired rules before selecting the best match", async () => {
     const provider = {
       listMarketAdjustmentRules: vi.fn().mockResolvedValue([

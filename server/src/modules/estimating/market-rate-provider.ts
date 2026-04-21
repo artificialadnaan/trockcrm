@@ -16,6 +16,8 @@ export type MarketAdjustmentRuleRecord = typeof estimateMarketAdjustmentRules.$i
 export type MarketResolutionType = "global" | "metro" | "state" | "region";
 export type PricingScopeType = "division" | "trade" | "general";
 
+const pricingScopeOrder: PricingScopeType[] = ["general", "division", "trade"];
+
 export interface MarketRateProviderTables {
   estimateDealMarketOverrides: typeof estimateDealMarketOverrides;
   estimateMarketAdjustmentRules: typeof estimateMarketAdjustmentRules;
@@ -52,19 +54,41 @@ function normalizeZip(zip: string) {
   return zip.trim();
 }
 
+export function getPricingScopeRank(scopeType: PricingScopeType) {
+  return pricingScopeOrder.indexOf(scopeType);
+}
+
+export function isPricingScopeBroadEnough(
+  candidateScopeType: PricingScopeType,
+  requestedScopeType: PricingScopeType
+) {
+  return getPricingScopeRank(candidateScopeType) <= getPricingScopeRank(requestedScopeType);
+}
+
+export function getAllowedPricingScopeTypes(requestedScopeType: PricingScopeType) {
+  return pricingScopeOrder.filter((scopeType) =>
+    isPricingScopeBroadEnough(scopeType, requestedScopeType)
+  );
+}
+
 function buildPricingScopeCandidateFilter(input: {
   pricingScopeType: PricingScopeType;
   pricingScopeKey: string;
   estimateMarketAdjustmentRulesTable: MarketRateProviderTables["estimateMarketAdjustmentRules"];
 }) {
+  const allowedScopeTypes = getAllowedPricingScopeTypes(input.pricingScopeType);
+
   return or(
     and(
       eq(input.estimateMarketAdjustmentRulesTable.scopeType, input.pricingScopeType),
       eq(input.estimateMarketAdjustmentRulesTable.scopeKey, input.pricingScopeKey)
     ),
-    and(
-      eq(input.estimateMarketAdjustmentRulesTable.fallbackScopeType, input.pricingScopeType),
-      eq(input.estimateMarketAdjustmentRulesTable.fallbackScopeKey, input.pricingScopeKey)
+    ...allowedScopeTypes.map((scopeType) =>
+      and(
+        eq(input.estimateMarketAdjustmentRulesTable.scopeType, scopeType),
+        eq(input.estimateMarketAdjustmentRulesTable.fallbackScopeType, input.pricingScopeType),
+        eq(input.estimateMarketAdjustmentRulesTable.fallbackScopeKey, input.pricingScopeKey)
+      )
     ),
     and(
       eq(input.estimateMarketAdjustmentRulesTable.scopeType, "general"),
