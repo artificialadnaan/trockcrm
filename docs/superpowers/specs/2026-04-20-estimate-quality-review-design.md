@@ -231,7 +231,8 @@ Manual row storage contract:
   - `selected_source_type = 'manual'`
   - `selected_option_id = null`
   - `generation_run_id` is set to the active generation run in the current workbench context; if no active run exists, create a synthetic manual generation run for the deal and use that id
-  - `manual_identity_key` is generated once when the row is created and never changes after label edits
+  - `manual_identity_key` is generated once when the row is created and remains stable across later edits to label, section, quantity, unit, price, and notes
+  - mint a new `manual_identity_key` only when the estimator explicitly creates a separate new manual row, not when editing an existing one
 - if a manual row is catalog-backed or later mapped to catalog alternatives:
   - keep parent `manual_*` fields as the estimator-authored baseline
   - flip `catalog_backing` to `procore_synced` or `local_promoted` based on the selected option source
@@ -394,6 +395,8 @@ Explicit-row duplicate rule for this slice:
 - duplicate suppression only removes inferred rows when an explicit extracted or manual row already covers that intent
 - duplicate-review grouping is determined by same `estimate_section_name` plus either matching `normalized_intent` or matching selected catalog item id
 - only one row in a duplicate-review group may remain promotable; the workbench must block promotion for the group until the estimator rejects or otherwise demotes the extra rows
+- when one row in a duplicate-review group is promoted, any other rows in that group that are still `accepted`, `alternate_selected`, or `overridden` are automatically moved back to `pending_review`
+- carried-forward clones must re-evaluate duplicate-review grouping against already-promoted rows for the deal, so a group with an already promoted winner stays blocked until the remaining rows are edited into a different group or rejected
 
 ## Review Lifecycle
 
@@ -468,6 +471,9 @@ Allowed actions:
 - promote custom row to local catalog:
   - creates a reusable local catalog item
   - writes its id to `promoted_local_catalog_item_id` on the parent recommendation row
+  - flips `catalog_backing` to `local_promoted`
+  - keeps `source_type = 'manual'` because row origin does not change
+  - keeps `selected_source_type = 'manual'` unless the estimator later chooses a catalog-backed child option
   - does not itself promote the line into the canonical estimate model
   - must no-op and return the existing linked item when `promoted_local_catalog_item_id` is already set on that recommendation row
   - must also no-op and reuse an existing local catalog item when another recommendation row for the same `deal_id + manual_identity_key` has already linked one
