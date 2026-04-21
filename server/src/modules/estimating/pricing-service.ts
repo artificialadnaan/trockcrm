@@ -62,11 +62,11 @@ export function buildPricingRecommendation(input: BuildPricingRecommendationInpu
   };
 }
 
-export function isConfirmedMeasurementDerivedExtraction(input: {
+export function isConfirmedMeasurementCandidateForPricing(input: {
+  extractionType?: string | null;
   metadataJson?: Record<string, unknown> | null;
 }) {
-  const metadataJson = input.metadataJson ?? null;
-  if (metadataJson?.measurementDerived !== true) return true;
+  if (input.extractionType !== "measurement_candidate") return true;
 
-  return metadataJson.measurementConfirmationState === "approved";
+  return input.metadataJson?.measurementConfirmationState === "approved";
 }

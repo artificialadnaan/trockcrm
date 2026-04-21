@@ -15,7 +15,7 @@ import { getHistoricalPricingSignals } from "../../../server/src/modules/estimat
 import { rankExtractionMatches } from "../../../server/src/modules/estimating/matching-service.js";
 import {
   buildPricingRecommendation,
-  isConfirmedMeasurementDerivedExtraction,
+  isConfirmedMeasurementCandidateForPricing,
 } from "../../../server/src/modules/estimating/pricing-service.js";
 
 async function resolveSchemaName(officeId: string | null) {
@@ -118,24 +118,29 @@ export async function runEstimateGeneration(
       .where(eq(costCatalogSources.provider, "procore"))
       .limit(1);
 
-    const pendingExtractionFilters = [
+    const candidateExtractionFilters = [
       eq(estimateExtractions.dealId, payload.dealId),
-      eq(estimateExtractions.status, "pending"),
+      sql`
+        (
+          ${estimateExtractions.status} = 'pending'
+          or ${estimateExtractions.extractionType} = 'measurement_candidate'
+        )
+      `,
       sql`${estimateExtractions.metadataJson}->>'activeArtifact' = 'true'`,
     ];
 
     if (payload.documentId) {
-      pendingExtractionFilters.push(eq(estimateExtractions.documentId, payload.documentId));
+      candidateExtractionFilters.push(eq(estimateExtractions.documentId, payload.documentId));
     }
 
     if (effectiveParseRunId) {
-      pendingExtractionFilters.push(
+      candidateExtractionFilters.push(
         sql`${estimateExtractions.metadataJson}->>'sourceParseRunId' = ${effectiveParseRunId}`
       );
     }
 
     if (payload.documentId && effectiveParseRunId) {
-      pendingExtractionFilters.push(sql`
+      candidateExtractionFilters.push(sql`
         exists (
           select 1
           from estimate_source_documents as document
@@ -155,9 +160,9 @@ export async function runEstimateGeneration(
     const pendingExtractions = await tenantDb
       .select()
       .from(estimateExtractions)
-      .where(and(...pendingExtractionFilters));
+      .where(and(...candidateExtractionFilters));
     const eligibleExtractions = pendingExtractions.filter((extraction) =>
-      isConfirmedMeasurementDerivedExtraction(extraction)
+      isConfirmedMeasurementCandidateForPricing(extraction)
     );
 
     const catalogItems =

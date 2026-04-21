@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildPricingRecommendation,
-  isConfirmedMeasurementDerivedExtraction,
+  isConfirmedMeasurementCandidateForPricing,
 } from "../../../src/modules/estimating/pricing-service.js";
 
 describe("buildPricingRecommendation", () => {
@@ -24,23 +24,34 @@ describe("buildPricingRecommendation", () => {
     expect(result.confidence).toBeGreaterThan(0);
   });
 
-  it("excludes pending measurement-derived rows from pricing eligibility", () => {
+  it("excludes unconfirmed measurement candidates from pricing eligibility", () => {
     expect(
-      isConfirmedMeasurementDerivedExtraction({
+      isConfirmedMeasurementCandidateForPricing({
+        extractionType: "measurement_candidate",
         metadataJson: {
-          measurementDerived: true,
           measurementConfirmationState: "pending",
         },
       })
     ).toBe(false);
   });
 
-  it("allows confirmed measurement-derived rows into pricing eligibility", () => {
+  it("allows confirmed measurement candidates into pricing eligibility", () => {
     expect(
-      isConfirmedMeasurementDerivedExtraction({
+      isConfirmedMeasurementCandidateForPricing({
+        extractionType: "measurement_candidate",
         metadataJson: {
-          measurementDerived: true,
           measurementConfirmationState: "approved",
+        },
+      })
+    ).toBe(true);
+  });
+
+  it("allows non-measurement rows into pricing eligibility", () => {
+    expect(
+      isConfirmedMeasurementCandidateForPricing({
+        extractionType: "scope_line",
+        metadataJson: {
+          measurementConfirmationState: "pending",
         },
       })
     ).toBe(true);
