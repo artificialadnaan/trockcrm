@@ -489,6 +489,9 @@ Allowed actions:
     - `local_promoted` when the option references a local catalog item
 - override:
   - marks the parent row `overridden`
+  - requires a selected baseline before override:
+    - extracted or inferred rows must already have `selected_option_id`
+    - manual rows may override either a free-text manual baseline or a selected catalog option
   - stores overridden quantity/unit/price values on the parent recommendation row in `override_*` fields
   - keeps a matching review event for audit
   - when `override_*` fields are present, they take precedence over selected option or manual baseline values during promotion; `selected_option_id` remains provenance only
@@ -588,6 +591,7 @@ Manual recommendation persistence:
 - free-text manual rows also persist `normalized_intent` derived from `manual_label` using the contract above
 - free-text manual rows also persist `generation_run_id`, `manual_origin`, and `source_row_identity` on the parent recommendation row using the contracts above
 - if a manual row is later promoted to the local catalog, the new local catalog item is created from those persisted manual fields and linked back through `promoted_local_catalog_item_id` on the parent recommendation row
+- if `override_*` values exist at local-catalog promotion time, seed the new local catalog item from the effective overridden values instead of the pre-override manual baseline
 
 Manual row refresh behavior:
 
