@@ -1,7 +1,8 @@
 import { desc, eq, ne } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
-import { deals, estimateLineItems, estimateSections } from "@trock-crm/shared/schema";
+import { deals, estimateLineItems, estimateSections, properties } from "@trock-crm/shared/schema";
+import { resolveDealMarketLocation } from "./market-resolution-service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -11,10 +12,48 @@ export async function getHistoricalPricingSignals(tenantDb: TenantDb, dealId: st
       id: deals.id,
       projectTypeId: deals.projectTypeId,
       regionId: deals.regionId,
+      propertyId: deals.propertyId,
+      propertyZip: deals.propertyZip,
+      propertyState: deals.propertyState,
     })
     .from(deals)
     .where(eq(deals.id, dealId))
     .limit(1);
+
+  const currentDealRow = currentDeal[0] ?? null;
+  let propertyLocation = null;
+
+  if (currentDealRow?.propertyId && (!currentDealRow.propertyZip || !currentDealRow.propertyState)) {
+    const [propertyRow] = await tenantDb
+      .select({
+        zip: properties.zip,
+        state: properties.state,
+      })
+      .from(properties)
+      .where(eq(properties.id, currentDealRow.propertyId))
+      .limit(1);
+
+    propertyLocation = propertyRow ?? null;
+  }
+
+  const resolvedLocation = resolveDealMarketLocation({
+    dealZip: currentDealRow?.propertyZip ?? null,
+    dealState: currentDealRow?.propertyState ?? null,
+    dealRegionId: null,
+    propertyZip: propertyLocation?.zip ?? null,
+    propertyState: propertyLocation?.state ?? null,
+    propertyRegionId: null,
+  });
+
+  const resolvedDeal = currentDealRow
+    ? {
+        ...currentDealRow,
+        propertyZip: resolvedLocation.zip,
+        propertyState: resolvedLocation.state,
+        resolvedZip: resolvedLocation.zip,
+        resolvedState: resolvedLocation.state,
+      }
+    : null;
 
   const historicalItems = await tenantDb
     .select({
@@ -32,7 +71,7 @@ export async function getHistoricalPricingSignals(tenantDb: TenantDb, dealId: st
     .limit(200);
 
   return {
-    currentDeal: currentDeal[0] ?? null,
+    currentDeal: resolvedDeal,
     historicalItems,
     awardedOutcomes: [],
     vendorQuotes: historicalItems
