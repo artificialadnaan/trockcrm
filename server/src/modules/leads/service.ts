@@ -13,7 +13,7 @@ import {
 import type * as schema from "@trock-crm/shared/schema";
 import type { WorkflowFamily } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
-import { getStageById } from "../pipeline/service.js";
+import { getAllStages, getStageById } from "../pipeline/service.js";
 import { createAssignmentTaskIfNeeded } from "../assignment-tasks/service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -100,6 +100,12 @@ type TransitionSuccessResult = {
 };
 
 interface LeadServiceDependencies {
+  getAllStages: (workflowFamily?: WorkflowFamily) => Promise<Array<{
+    id: string;
+    slug: string;
+    displayOrder: number;
+    isTerminal: boolean;
+  }>>;
   getStageById: (id: string, workflowFamily?: WorkflowFamily) => Promise<{
     id: string;
     slug: string;
@@ -110,6 +116,7 @@ interface LeadServiceDependencies {
 }
 
 const defaultDependencies: LeadServiceDependencies = {
+  getAllStages,
   getStageById,
   now: () => new Date(),
 };
@@ -525,7 +532,16 @@ export function createLeadService(
       throw new AppError(400, "Invalid lead stage ID");
     }
 
-    if (targetStage.displayOrder !== currentStage.displayOrder + 1) {
+    const orderedLeadStages = await deps.getAllStages("lead");
+    const stageIndexById = new Map(orderedLeadStages.map((stage, index) => [stage.id, index]));
+    const currentStageIndex = stageIndexById.get(currentStage.id);
+    const targetStageIndex = stageIndexById.get(targetStage.id);
+
+    if (currentStageIndex === undefined || targetStageIndex === undefined) {
+      throw new AppError(400, "Invalid lead stage ID");
+    }
+
+    if (targetStageIndex !== currentStageIndex + 1) {
       throw new AppError(400, "Lead stages must advance one step at a time");
     }
 
