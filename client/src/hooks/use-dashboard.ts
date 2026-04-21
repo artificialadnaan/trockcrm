@@ -43,6 +43,18 @@ export interface RepDashboardData {
     potentialMargin: number;
     potentialCommission: number;
   };
+  commissionDeals: Array<{
+    dealId: string;
+    dealNumber: string | null;
+    dealName: string;
+    companyName: string | null;
+    propertyName: string | null;
+    paidRevenue: number;
+    commissionableMargin: number;
+    earnedCommission: number;
+    paymentCount: number;
+    lastPaidAt: string | null;
+  }>;
   activeDeals: { count: number; totalValue: number };
   tasksToday: { overdue: number; today: number };
   activityThisWeek: {
@@ -117,6 +129,7 @@ const DEFAULT_REP_DASHBOARD_DATA: RepDashboardData = {
     potentialMargin: 0,
     potentialCommission: 0,
   },
+  commissionDeals: [],
   activeDeals: { count: 0, totalValue: 0 },
   tasksToday: { overdue: 0, today: 0 },
   activityThisWeek: { calls: 0, emails: 0, meetings: 0, notes: 0, total: 0 },
@@ -148,6 +161,7 @@ function normalizeRepDashboardData(data: Partial<RepDashboardData> | null | unde
       ...DEFAULT_REP_DASHBOARD_DATA.commissionSummary,
       ...(data?.commissionSummary ?? {}),
     },
+    commissionDeals: data?.commissionDeals ?? [],
     activeDeals: {
       ...DEFAULT_REP_DASHBOARD_DATA.activeDeals,
       ...(data?.activeDeals ?? {}),

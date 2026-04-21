@@ -1,5 +1,6 @@
 import { useRepDashboard } from "@/hooks/use-dashboard";
 import { PageHeader } from "@/components/layout/page-header";
+import { Link } from "react-router-dom";
 
 const USD = new Intl.NumberFormat("en-US", {
   style: "currency",
@@ -23,6 +24,7 @@ function formatPercent(value: number) {
 export function RepCommissionsPage() {
   const { data, loading, error } = useRepDashboard();
   const summary = data?.commissionSummary;
+  const commissionDeals = data?.commissionDeals ?? [];
 
   return (
     <div className="space-y-6">
@@ -86,6 +88,13 @@ export function RepCommissionsPage() {
         </div>
       </section>
 
+      {!loading && summary && !summary.meetsNewCustomerShare ? (
+        <section className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+          New customer mix is below {formatPercent(summary.newCustomerShareFloor)}. This is a warning only and does
+          not block earned commission accrual.
+        </section>
+      ) : null}
+
       <section className="rounded-xl border border-slate-200 bg-white p-5">
         <h2 className="text-base font-semibold text-slate-900">Calculation Inputs</h2>
         <div className="mt-4 grid gap-3 text-sm text-slate-700 md:grid-cols-2">
@@ -114,6 +123,48 @@ export function RepCommissionsPage() {
             </span>
           </div>
         </div>
+      </section>
+
+      <section className="rounded-xl border border-slate-200 bg-white p-5">
+        <div className="flex items-center justify-between gap-3">
+          <h2 className="text-base font-semibold text-slate-900">Commission By Deal</h2>
+          <p className="text-xs uppercase tracking-[0.16em] text-slate-500">Click a deal to open details</p>
+        </div>
+        {loading ? (
+          <p className="mt-4 text-sm text-slate-500">Loading deals...</p>
+        ) : commissionDeals.length === 0 ? (
+          <p className="mt-4 text-sm text-slate-500">No deals with accrued commission yet.</p>
+        ) : (
+          <div className="mt-4 grid gap-3 lg:grid-cols-2">
+            {commissionDeals.map((deal) => (
+              <Link
+                key={deal.dealId}
+                to={`/deals/${deal.dealId}`}
+                className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 transition-colors hover:border-slate-300 hover:bg-slate-100"
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-semibold text-slate-950">
+                      {deal.dealNumber ? `${deal.dealNumber} - ` : ""}
+                      {deal.dealName}
+                    </p>
+                    <p className="mt-1 truncate text-xs text-slate-600">
+                      {[deal.companyName, deal.propertyName].filter(Boolean).join(" • ") || "No company/property linked"}
+                    </p>
+                    <p className="mt-1 text-xs text-slate-500">
+                      {deal.paymentCount} payment event{deal.paymentCount === 1 ? "" : "s"}
+                      {deal.lastPaidAt ? ` • Last paid ${new Date(deal.lastPaidAt).toLocaleDateString("en-US")}` : ""}
+                    </p>
+                  </div>
+                  <div className="shrink-0 text-right">
+                    <p className="text-sm font-semibold text-slate-950">{formatCurrency(deal.earnedCommission)}</p>
+                    <p className="mt-1 text-xs text-slate-500">{formatCurrency(deal.commissionableMargin)} margin</p>
+                  </div>
+                </div>
+              </Link>
+            ))}
+          </div>
+        )}
       </section>
     </div>
   );

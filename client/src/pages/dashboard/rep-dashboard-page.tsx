@@ -22,6 +22,7 @@ import {
   Target,
   TrendingUp,
   CalendarClock,
+  DollarSign,
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -284,7 +285,7 @@ export function RepDashboardPage() {
 
       <FunnelBucketRow buckets={data.funnelBuckets} />
 
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-5">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-6">
         <StatCard
           title="Active Leads"
           value={data.activeLeads.count}
@@ -330,6 +331,14 @@ export function RepDashboardPage() {
               ? "border-amber-200 bg-amber-50/60"
               : "border-slate-200 bg-white"
           }
+        />
+        <StatCard
+          title="Commission Earned"
+          value={formatCurrency(data.commissionSummary.totalEarnedCommission)}
+          subtitle={`${formatCurrency(data.commissionSummary.directEarnedCommission)} direct`}
+          icon={<DollarSign className="h-5 w-5" />}
+          className="border-amber-200 bg-amber-50/70"
+          onClick={() => navigate("/commissions")}
         />
       </div>
 
