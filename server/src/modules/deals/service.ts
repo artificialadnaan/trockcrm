@@ -2,7 +2,6 @@ import { eq, and, desc, asc, ilike, inArray, sql, or, isNull, not } from "drizzl
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
   deals,
-  dealRoutingHistory,
   dealStageHistory,
   dealApprovals,
   changeOrders,
@@ -16,6 +15,7 @@ import {
 } from "@trock-crm/shared/schema";
 import type { DealPipelineDisposition, WorkflowRoute } from "@trock-crm/shared/types";
 import type * as schema from "@trock-crm/shared/schema";
+import { dealRoutingHistory } from "../../../../shared/src/schema/tenant/deal-routing-history.js";
 import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { getStageById } from "../pipeline/service.js";
