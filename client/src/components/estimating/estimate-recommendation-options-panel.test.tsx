@@ -4,7 +4,7 @@ import {
   EstimateRecommendationOptionsPanel,
   runEstimatePricingReviewStateAction,
 } from "./estimate-recommendation-options-panel";
-import { EstimateManualRowDialog } from "./estimate-manual-row-dialog";
+import { EstimateManualRowDialog, switchManualRowDraftToFreeText } from "./estimate-manual-row-dialog";
 import {
   runEstimateManualRowCreateAction,
 } from "./estimate-manual-row-dialog";
@@ -145,6 +145,28 @@ describe("EstimateRecommendationOptionsPanel", () => {
     expect(html).toContain("Use free-text/manual row instead");
     expect(html).toContain("Walk-in door kit");
     expect(html).toContain("Door hardware");
+  });
+
+  it("clears catalog-backed selection when switching back to free-text mode", () => {
+    expect(
+      switchManualRowDraftToFreeText({
+        label: "Walk-in door kit",
+        quantity: "2",
+        unit: "ea",
+        unitPrice: "125.00",
+        notes: "Estimator note",
+        selectedSourceType: "catalog_option",
+        selectedOptionId: "cat-1",
+      })
+    ).toEqual({
+      label: "Walk-in door kit",
+      quantity: "2",
+      unit: "ea",
+      unitPrice: "125.00",
+      notes: "Estimator note",
+      selectedSourceType: "manual",
+      selectedOptionId: "",
+    });
   });
 
   it("posts review-state actions through the workbench helper", async () => {

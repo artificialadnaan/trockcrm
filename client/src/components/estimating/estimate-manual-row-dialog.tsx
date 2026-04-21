@@ -60,6 +60,14 @@ function normalizeSearch(value: string) {
   return value.trim().toLowerCase();
 }
 
+export function switchManualRowDraftToFreeText(draft: ManualRowDraft): ManualRowDraft {
+  return {
+    ...draft,
+    selectedSourceType: "manual",
+    selectedOptionId: "",
+  };
+}
+
 export async function runEstimateManualRowCreateAction({
   dealId,
   input,
@@ -137,6 +145,12 @@ export function EstimateManualRowDialog({
     }));
   };
 
+  const switchToManualMode = () => {
+    setMode("manual");
+    setSelectedCatalogOptionId(null);
+    setDraft((current) => switchManualRowDraftToFreeText(current));
+  };
+
   const handleSubmit = async () => {
     setIsSaving(true);
     try {
@@ -210,7 +224,7 @@ export function EstimateManualRowDialog({
               <Button
                 variant="ghost"
                 className="justify-start px-0"
-                onClick={() => setMode("manual")}
+                onClick={switchToManualMode}
               >
                 Use free-text/manual row instead
               </Button>
