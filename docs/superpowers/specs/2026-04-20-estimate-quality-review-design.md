@@ -374,6 +374,12 @@ If a manual row overlaps:
 - extracted beats inferred
 - extracted and manual may both remain visible, but no new inferred suggestion should be generated for that normalized intent in that section
 
+Explicit-row duplicate rule for this slice:
+
+- extracted and manual rows with the same normalized intent or selected catalog item are not auto-collapsed
+- instead, both remain visible and the workbench flags them as a duplicate-review condition for the estimator
+- duplicate suppression only removes inferred rows when an explicit extracted or manual row already covers that intent
+
 ## Review Lifecycle
 
 Recommendation rows stay inside the workbench until promotion.
@@ -420,6 +426,11 @@ Allowed actions:
 - accept recommended:
   - marks the parent row `accepted`
   - records the recommended option as selected
+- accept manual row:
+  - applies only to rows with `source_type = 'manual'`
+  - marks the parent row `accepted`
+  - keeps `selected_option_id = null` when the row is still free-text estimate-only
+  - uses the persisted `manual_*` fields as the canonical values for later promotion unless an override is applied
 - switch to alternate:
   - marks the parent row `alternate_selected`
   - records the chosen alternate option id
@@ -435,10 +446,12 @@ Allowed actions:
   - persists estimator-entered manual fields on the parent row
   - optionally links it to catalog-backed child options
   - uses `catalog_backing = 'estimate_only'` when no catalog option is selected
+  - leaves the row in `pending_review` until the estimator explicitly accepts it or overrides it
 - promote custom row to local catalog:
   - creates a reusable local catalog item
   - writes its id to `promoted_local_catalog_item_id` on the parent recommendation row
   - does not itself promote the line into the canonical estimate model
+  - must no-op and return the existing linked item when `promoted_local_catalog_item_id` is already set on that recommendation row
 
 Audit behavior:
 
@@ -483,6 +496,7 @@ Manual promoted-local-catalog row mapping:
 - if the row remains free-text, the parent recommendation row links to the promoted local catalog item through `promoted_local_catalog_item_id`
 - if the row later selects a catalog-backed child option, the selected option row may also carry the local catalog linkage
 - promotion mapping must prefer `promoted_local_catalog_item_id` on the parent recommendation row when `selected_option_id` is null
+- if both `promoted_local_catalog_item_id` and `selected_option_id` are present, the selected option is the source of truth for description, quantity, unit, and price, while the parent local-catalog link remains provenance only
 
 Promotion completion behavior:
 
@@ -507,6 +521,13 @@ Manual recommendation persistence:
 - free-text manual rows persist `estimate_section_name`, `manual_label`, `manual_quantity`, `manual_unit`, `manual_unit_price`, and `manual_notes` on the parent recommendation row before promotion
 - free-text manual rows also persist `generation_run_id`, `manual_origin`, and `source_row_identity` on the parent recommendation row using the contracts above
 - if a manual row is later promoted to the local catalog, the new local catalog item is created from those persisted manual fields and linked back through `promoted_local_catalog_item_id` on the parent recommendation row
+
+Manual row refresh behavior:
+
+- manual rows are not discarded when a new generation run is created
+- on rerun, unresolved manual rows for the deal that are not rejected and not already promoted are carried forward into the new active generation run
+- carry-forward keeps the same `source_row_identity`, `manual_*` fields, and latest review state so the estimator does not lose manually added work
+- promoted or rejected manual rows remain attached to their historical run for audit and are not copied into the new active run
 
 Custom lines can be promoted immediately into the local catalog for reuse later. This is acceptable for the current demonstrative scope and avoids introducing approval workflow complexity in this slice.
 
