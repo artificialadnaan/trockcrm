@@ -96,9 +96,12 @@ function formatOptionRank(option: PricingRecommendationOption, fallbackIndex: nu
   return `Rank ${option.rank ?? fallbackIndex + 1}`;
 }
 
-function isFreeTextManualRow(row: PricingReviewRow) {
+export function isFreeTextManualRow(row: Pick<
+  PricingReviewRow,
+  "selectedSourceType" | "selectedOptionId" | "catalogBacking" | "promotedLocalCatalogItemId" | "sourceType"
+>) {
   return (
-    row.selectedSourceType === "manual" &&
+    (row.selectedSourceType === "manual" || row.sourceType === "manual") &&
     !row.selectedOptionId &&
     row.catalogBacking !== "local_catalog" &&
     !row.promotedLocalCatalogItemId
@@ -260,6 +263,22 @@ export function EstimatePricingReviewTable({
     }
   };
 
+  const handlePromoteLocalCatalog = async (row: PricingReviewRow) => {
+    if (!onPromoteLocalCatalog) {
+      return;
+    }
+
+    setPendingAction(`${row.id}:promote_local_catalog`);
+    try {
+      await onPromoteLocalCatalog(row.id);
+      toast.success("Manual row promoted to local catalog");
+    } catch (err: unknown) {
+      toast.error(err instanceof Error ? err.message : "Failed to promote manual row");
+    } finally {
+      setPendingAction(null);
+    }
+  };
+
   const renderBadges = (row: PricingReviewRow) => {
     const badges: ReactNode[] = [];
     const selectionState = getPricingRowSelectionState(row);
@@ -370,9 +389,11 @@ export function EstimatePricingReviewTable({
               <tbody>
                 {rows.map((row) => {
                   const isSelected = row.id === selectedRow?.id;
+                  const rowActionBusy = pendingAction?.startsWith(`${row.id}:`) ?? false;
                   const approveBusy = pendingAction === `${row.id}:accept_recommended`;
                   const rejectBusy = pendingAction === `${row.id}:reject`;
                   const overrideBusy = pendingAction === `${row.id}:override`;
+                  const promoteBusy = pendingAction === `${row.id}:promote_local_catalog`;
                   const options = row.recommendationOptions ?? [];
                   const alternates = options.filter((option) => option.optionKind === "alternate");
                   const selectionState = getPricingRowSelectionState(row);
@@ -445,7 +466,7 @@ export function EstimatePricingReviewTable({
                           <Button
                             size="xs"
                             variant="outline"
-                            disabled={approveBusy || rejectBusy || overrideBusy}
+                            disabled={rowActionBusy}
                             onClick={() =>
                               handleReviewAction(row, {
                                 action: "accept_recommended",
@@ -457,7 +478,7 @@ export function EstimatePricingReviewTable({
                           <Button
                             size="xs"
                             variant="outline"
-                            disabled={approveBusy || rejectBusy || overrideBusy}
+                            disabled={rowActionBusy}
                             onClick={() =>
                               handleReviewAction(row, {
                                 action: "accept_manual_row",
@@ -469,7 +490,7 @@ export function EstimatePricingReviewTable({
                           <Button
                             size="xs"
                             variant="ghost"
-                            disabled={approveBusy || rejectBusy || overrideBusy}
+                            disabled={rowActionBusy}
                             onClick={() =>
                               handleReviewAction(row, {
                                 action: "pending_review",
@@ -481,7 +502,7 @@ export function EstimatePricingReviewTable({
                           <Button
                             size="xs"
                             variant="outline"
-                            disabled={approveBusy || rejectBusy || overrideBusy}
+                            disabled={rowActionBusy}
                             onClick={() =>
                               handleReviewAction(row, {
                                 action: "override",
@@ -496,7 +517,7 @@ export function EstimatePricingReviewTable({
                           <Button
                             size="xs"
                             variant="destructive"
-                            disabled={approveBusy || rejectBusy || overrideBusy}
+                            disabled={rowActionBusy}
                             onClick={() =>
                               handleReviewAction(row, {
                                 action: "reject",
@@ -510,7 +531,7 @@ export function EstimatePricingReviewTable({
                               key={option.id}
                               size="xs"
                               variant="secondary"
-                              disabled={approveBusy || rejectBusy || overrideBusy}
+                              disabled={rowActionBusy}
                               onClick={() =>
                                 handleReviewAction(row, {
                                   action: "switch_to_alternate",
@@ -525,9 +546,10 @@ export function EstimatePricingReviewTable({
                             <Button
                               size="xs"
                               variant="outline"
-                              onClick={() => onPromoteLocalCatalog(row.id)}
+                              disabled={rowActionBusy}
+                              onClick={() => handlePromoteLocalCatalog(row)}
                             >
-                              Promote to local catalog
+                              {promoteBusy ? "Promoting..." : "Promote to local catalog"}
                             </Button>
                           ) : null}
                         </div>

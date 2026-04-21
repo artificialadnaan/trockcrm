@@ -1,6 +1,9 @@
+import { useState } from "react";
+import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
+import { isFreeTextManualRow } from "./estimate-pricing-review-table";
 
 export { runEstimatePricingReviewStateAction } from "./estimate-pricing-review-table";
 
@@ -70,15 +73,6 @@ function getRankLabel(option: RecommendationOption, index: number) {
   return `Rank ${index + 1}`;
 }
 
-function isFreeTextManualRow(recommendation: EstimateRecommendationRow) {
-  return (
-    recommendation.selectedSourceType === "manual" &&
-    !recommendation.selectedOptionId &&
-    recommendation.catalogBacking !== "local_catalog" &&
-    !recommendation.promotedLocalCatalogItemId
-  );
-}
-
 export function getDisplayedSelectedOption(recommendation: EstimateRecommendationRow | null) {
   if (!recommendation?.selectedOptionId) {
     return null;
@@ -112,6 +106,8 @@ export function EstimateRecommendationOptionsPanel({
   onReviewAction,
   onPromoteLocalCatalog,
 }: EstimateRecommendationOptionsPanelProps) {
+  const [pendingAction, setPendingAction] = useState<string | null>(null);
+
   if (!recommendation) {
     return (
       <section className="rounded-lg border bg-background p-4 text-sm text-muted-foreground">
@@ -139,6 +135,31 @@ export function EstimateRecommendationOptionsPanel({
     ...recommendation,
     recommendationOptions: options,
   });
+  const actionBusy = pendingAction !== null;
+
+  const handleReviewAction = async (action: RecommendationAction, successMessage: string) => {
+    setPendingAction(action.action);
+    try {
+      await onReviewAction(action);
+      toast.success(successMessage);
+    } catch (err: unknown) {
+      toast.error(err instanceof Error ? err.message : "Failed to update pricing recommendation");
+    } finally {
+      setPendingAction(null);
+    }
+  };
+
+  const handlePromoteLocalCatalog = async () => {
+    setPendingAction("promote_local_catalog");
+    try {
+      await onPromoteLocalCatalog(recommendation.id);
+      toast.success("Manual row promoted to local catalog");
+    } catch (err: unknown) {
+      toast.error(err instanceof Error ? err.message : "Failed to promote manual row");
+    } finally {
+      setPendingAction(null);
+    }
+  };
 
   return (
     <section className="rounded-lg border bg-background" data-deal-id={dealId}>
@@ -209,27 +230,49 @@ export function EstimateRecommendationOptionsPanel({
                 {recommendedOption.rationale || "Ranked as the primary option."}
               </div>
               <div className="mt-3 flex flex-wrap gap-2">
-                <Button size="xs" onClick={() => onReviewAction({ action: "accept_recommended" })}>
+                <Button
+                  size="xs"
+                  disabled={actionBusy}
+                  onClick={() =>
+                    handleReviewAction({ action: "accept_recommended" }, "Pricing recommendation updated")
+                  }
+                >
                   Accept recommended
                 </Button>
                 <Button
                   size="xs"
                   variant="outline"
+                  disabled={actionBusy}
                   onClick={() =>
-                    onReviewAction({
-                      action: "override",
-                      recommendedUnitPrice: `${recommendation.recommendedUnitPrice ?? ""}`,
-                      recommendedTotalPrice: `${recommendation.recommendedTotalPrice ?? ""}`,
-                      reason: "Override from workbench",
-                    })
+                    handleReviewAction(
+                      {
+                        action: "override",
+                        recommendedUnitPrice: `${recommendation.recommendedUnitPrice ?? ""}`,
+                        recommendedTotalPrice: `${recommendation.recommendedTotalPrice ?? ""}`,
+                        reason: "Override from workbench",
+                      },
+                      "Pricing recommendation updated"
+                    )
                   }
                 >
                   Override
                 </Button>
-                <Button size="xs" variant="ghost" onClick={() => onReviewAction({ action: "pending_review" })}>
+                <Button
+                  size="xs"
+                  variant="ghost"
+                  disabled={actionBusy}
+                  onClick={() =>
+                    handleReviewAction({ action: "pending_review" }, "Pricing recommendation updated")
+                  }
+                >
                   Pending review
                 </Button>
-                <Button size="xs" variant="destructive" onClick={() => onReviewAction({ action: "reject" })}>
+                <Button
+                  size="xs"
+                  variant="destructive"
+                  disabled={actionBusy}
+                  onClick={() => handleReviewAction({ action: "reject" }, "Pricing recommendation updated")}
+                >
                   Reject
                 </Button>
               </div>
@@ -255,16 +298,27 @@ export function EstimateRecommendationOptionsPanel({
                     <Button
                       size="xs"
                       variant="outline"
+                      disabled={actionBusy}
                       onClick={() =>
-                        onReviewAction({
-                          action: "switch_to_alternate",
-                          alternateOptionId: option.id,
-                        })
+                        handleReviewAction(
+                          {
+                            action: "switch_to_alternate",
+                            alternateOptionId: option.id,
+                          },
+                          "Pricing recommendation updated"
+                        )
                       }
                     >
                       Switch to alternate
                     </Button>
-                    <Button size="xs" variant="ghost" onClick={() => onReviewAction({ action: "accept_manual_row" })}>
+                    <Button
+                      size="xs"
+                      variant="ghost"
+                      disabled={actionBusy}
+                      onClick={() =>
+                        handleReviewAction({ action: "accept_manual_row" }, "Pricing recommendation updated")
+                      }
+                    >
                       Accept manual row
                     </Button>
                   </div>
@@ -286,8 +340,13 @@ export function EstimateRecommendationOptionsPanel({
 
         <div className="flex flex-wrap gap-2">
           {isFreeTextManualRow(recommendation) ? (
-            <Button size="sm" variant="outline" onClick={() => onPromoteLocalCatalog(recommendation.id)}>
-              Promote to local catalog
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={actionBusy}
+              onClick={handlePromoteLocalCatalog}
+            >
+              {pendingAction === "promote_local_catalog" ? "Promoting..." : "Promote to local catalog"}
             </Button>
           ) : null}
         </div>

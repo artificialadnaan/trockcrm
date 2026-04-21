@@ -42,7 +42,8 @@ describe("EstimatePricingReviewTable", () => {
         priceBasis: "catalog option",
         confidence: "0.81",
         createdByRunId: "run-7",
-        selectedSourceType: "manual",
+        sourceType: "manual",
+        selectedSourceType: null,
         duplicateGroupBlocked: true,
         duplicateGroupKey: "Roofing::tpo membrane",
         catalogBacking: "estimate_only",
@@ -121,7 +122,8 @@ describe("EstimatePricingReviewTable", () => {
     expect(
       getPricingRowSelectionState({
         id: "price-manual",
-        selectedSourceType: "manual",
+        sourceType: "manual",
+        selectedSourceType: null,
         recommendationOptions: options,
       })
     ).toMatchObject({

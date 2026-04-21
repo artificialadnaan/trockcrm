@@ -101,7 +101,8 @@ describe("EstimateRecommendationOptionsPanel", () => {
           id: "price-manual",
           sectionName: "Roofing",
           normalizedIntent: "custom flashing",
-          selectedSourceType: "manual",
+          sourceType: "manual",
+          selectedSourceType: null,
           catalogBacking: "estimate_only",
           recommendationOptions: [
             {
@@ -124,7 +125,8 @@ describe("EstimateRecommendationOptionsPanel", () => {
     expect(
       getDisplayedSelectedOption({
         id: "price-manual",
-        selectedSourceType: "manual",
+        sourceType: "manual",
+        selectedSourceType: null,
         recommendationOptions: [
           {
             id: "option-rec",
