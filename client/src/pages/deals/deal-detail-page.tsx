@@ -25,11 +25,13 @@ import { DealScopingWorkspace } from "@/components/deals/deal-scoping-workspace"
 import { DealFileTab } from "@/components/files/deal-file-tab";
 import { DealTeamTab } from "./deal-team-tab";
 import { DealEstimatesTab } from "./deal-estimates-tab";
+import { DealPaymentsTab } from "./deal-payments-tab";
 import { DealPunchListTab } from "./deal-punch-list-tab";
 import { DealCloseoutTab } from "./deal-closeout-tab";
 import { DealTimersBanner } from "./deal-timers-banner";
 import { DealProposalCard } from "./deal-proposal-card";
 import { DealEstimatingSubstage } from "./deal-estimating-substage";
+import { OpportunityRoutingPanel } from "@/components/deals/opportunity-routing-panel";
 import { LeadForm } from "@/components/leads/lead-form";
 import { LeadTimelineTab } from "@/components/leads/lead-timeline-tab";
 import { ActivityLogForm } from "@/components/activities/activity-log-form";
@@ -46,7 +48,7 @@ import { useTaskAssignees } from "@/hooks/use-task-assignees";
 import { formatCurrency, bestEstimate } from "@/lib/deal-utils";
 import { useTasks, getTaskStatusLabel } from "@/hooks/use-tasks";
 
-type Tab = "overview" | "lead" | "scoping" | "files" | "email" | "activity" | "timeline" | "history" | "team" | "tasks" | "estimates" | "punch_list" | "closeout";
+type Tab = "overview" | "lead" | "scoping" | "files" | "email" | "activity" | "timeline" | "history" | "team" | "tasks" | "payments" | "estimates" | "punch_list" | "closeout";
 
 export function DealDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -115,6 +117,7 @@ export function DealDetailPage() {
     { key: "history", label: "History" },
     { key: "team", label: teamCount != null ? `Team (${teamCount})` : "Team" },
     { key: "tasks", label: `Tasks (${dealTasks.length})` },
+    { key: "payments", label: "Payments" },
     { key: "estimates", label: "Estimates" },
     ...(showPunchList ? [{ key: "punch_list" as Tab, label: "Punch List" }] : []),
     ...(showCloseout ? [{ key: "closeout" as Tab, label: "Close-Out" }] : []),
@@ -313,6 +316,14 @@ export function DealDetailPage() {
         </div>
       </div>
 
+      <OpportunityRoutingPanel
+        deal={deal}
+        currentStageSlug={currentStageSlug}
+        onUpdated={() => {
+          void refetch();
+        }}
+      />
+
       {/* Active Timers Banner */}
       <DealTimersBanner dealId={deal.id} />
 
@@ -441,6 +452,13 @@ export function DealDetailPage() {
             </div>
           )}
         </div>
+      )}
+      {activeTab === "payments" && (
+        <DealPaymentsTab
+          dealId={deal.id}
+          assignedRepId={deal.assignedRepId}
+          canEditPayments={user?.role === "admin"}
+        />
       )}
       {activeTab === "estimates" && <DealEstimatesTab dealId={deal.id} />}
       {activeTab === "punch_list" && <DealPunchListTab dealId={deal.id} />}

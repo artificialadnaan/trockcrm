@@ -1,12 +1,10 @@
 import { Routes, Route, Navigate, useSearchParams } from "react-router-dom";
-import type { ReactNode } from "react";
+import { Suspense, lazy, type ReactNode } from "react";
 import { AuthProvider, useAuth } from "@/lib/auth";
 import { AuthEntryScreen } from "@/components/auth/auth-entry-screen";
 import { ForcePasswordChangeScreen } from "@/components/auth/force-password-change-screen";
 import { RequireRole } from "@/components/auth/require-role";
 import { AppShell } from "@/components/layout/app-shell";
-import { DealListPage } from "@/pages/deals/deal-list-page";
-import { DealStagePage } from "@/pages/deals/deal-stage-page";
 import { DealDetailPage } from "@/pages/deals/deal-detail-page";
 import { DealNewPage } from "@/pages/deals/deal-new-page";
 import { DealEditPage } from "@/pages/deals/deal-edit-page";
@@ -20,8 +18,6 @@ import { CompanyListPage } from "@/pages/companies/company-list-page";
 import { CompanyDetailPage } from "@/pages/companies/company-detail-page";
 import { CompanyNewPage } from "@/pages/companies/company-new-page";
 import { CompanyEditPage } from "@/pages/companies/company-edit-page";
-import { LeadListPage } from "@/pages/leads/lead-list-page";
-import { LeadStagePage } from "@/pages/leads/lead-stage-page";
 import { LeadDetailPage } from "@/pages/leads/lead-detail-page";
 import { LeadNewPage } from "@/pages/leads/lead-new-page";
 import { PropertyListPage } from "@/pages/properties/property-list-page";
@@ -30,8 +26,6 @@ import { MergeQueuePage } from "@/pages/admin/merge-queue-page";
 import { EmailInboxPage } from "@/pages/email/email-inbox-page";
 import { TaskListPage } from "@/pages/tasks/task-list-page";
 import { FilesPage } from "@/pages/files/files-page";
-import { DirectorDashboardPage } from "@/pages/director/director-dashboard-page";
-import { HomeDashboardPage } from "@/pages/dashboard/home-dashboard-page";
 import { DirectorRepDetail } from "@/pages/director/director-rep-detail";
 import { ReportsPage } from "@/pages/reports/reports-page";
 import { SalesReviewPage } from "@/pages/sales-review/sales-review-page";
@@ -63,6 +57,25 @@ import { PipelineHygienePage } from "@/pages/pipeline/pipeline-hygiene-page";
 import { ProjectDetailPage } from "@/pages/projects/project-detail-page";
 import { Toaster } from "@/components/ui/sonner";
 
+const HomeDashboardPage = lazy(() =>
+  import("@/pages/dashboard/home-dashboard-page").then((module) => ({ default: module.HomeDashboardPage }))
+);
+const DealListPage = lazy(() =>
+  import("@/pages/deals/deal-list-page").then((module) => ({ default: module.DealListPage }))
+);
+const DealStagePage = lazy(() =>
+  import("@/pages/deals/deal-stage-page").then((module) => ({ default: module.DealStagePage }))
+);
+const LeadListPage = lazy(() =>
+  import("@/pages/leads/lead-list-page").then((module) => ({ default: module.LeadListPage }))
+);
+const LeadStagePage = lazy(() =>
+  import("@/pages/leads/lead-stage-page").then((module) => ({ default: module.LeadStagePage }))
+);
+const DirectorDashboardPage = lazy(() =>
+  import("@/pages/director/director-dashboard-page").then((module) => ({ default: module.DirectorDashboardPage }))
+);
+
 function BoardAliasRedirect({ entity }: { entity: "leads" | "deals" }) {
   const [searchParams] = useSearchParams();
   const next = searchParams.toString();
@@ -85,12 +98,21 @@ function AuthGate({ children }: { children: ReactNode }) {
   return <>{children}</>;
 }
 
+function RouteFallback() {
+  return (
+    <div className="flex min-h-[12rem] items-center justify-center rounded-2xl border border-slate-200 bg-white text-sm text-slate-500">
+      Loading workspace...
+    </div>
+  );
+}
+
 export function App() {
   return (
     <AuthProvider>
       <AuthGate>
-        <>
-          <Routes>
+        <Suspense fallback={<RouteFallback />}>
+          <>
+            <Routes>
             <Route path="/photos/capture" element={<PhotoCapturePage />} />
             <Route element={<AppShell />}>
               <Route path="/" element={<HomeDashboardPage />} />
@@ -306,9 +328,10 @@ export function App() {
               />
             </Route>
             <Route path="*" element={<Navigate to="/" replace />} />
-          </Routes>
-          <Toaster position="top-right" richColors />
-        </>
+            </Routes>
+            <Toaster position="top-right" richColors />
+          </>
+        </Suspense>
       </AuthGate>
     </AuthProvider>
   );

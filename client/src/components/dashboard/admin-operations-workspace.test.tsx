@@ -4,20 +4,18 @@ import { MemoryRouter } from "react-router-dom";
 import { AdminOperationsWorkspace } from "./admin-operations-workspace";
 
 describe("AdminOperationsWorkspace", () => {
-  it("renders ordered operational tiles with direct links", () => {
+  it("renders operation tiles and supporting labels", () => {
     const html = renderToStaticMarkup(
-      <MemoryRouter initialEntries={["/"]}>
+      <MemoryRouter>
         <AdminOperationsWorkspace
-          items={[
-            { key: "ai-actions", label: "AI Actions", value: "6", detail: "Open AI queue items", href: "/admin/ai-actions" },
-            { key: "interventions", label: "Interventions", value: "4", detail: "Open intervention cases", href: "/admin/interventions" },
+          tiles={[
+            { key: "ai-actions", title: "AI Actions", valueLabel: "4", secondaryLabel: "Oldest 14m", href: "/admin/ai-actions" },
           ]}
         />
       </MemoryRouter>
     );
 
     expect(html).toContain("AI Actions");
-    expect(html).toContain("/admin/ai-actions");
-    expect(html).toContain("Interventions");
+    expect(html).toContain("Oldest 14m");
   });
 });

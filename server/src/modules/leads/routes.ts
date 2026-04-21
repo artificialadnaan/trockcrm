@@ -11,6 +11,8 @@ import {
   updateLead,
 } from "./service.js";
 import { convertLead } from "./conversion-service.js";
+import { preflightLeadStageCheck } from "./stage-gate.js";
+import { getLeadQualificationByLeadId } from "./qualification-service.js";
 
 const router = Router();
 
@@ -20,6 +22,7 @@ function readBoardInput(req: Parameters<typeof router.get>[1] extends never ? ne
     userId: req.user!.id,
     activeOfficeId: req.user!.activeOfficeId ?? req.user!.officeId,
     scope: (req.query.scope as "mine" | "team" | "all" | undefined) ?? "mine",
+    previewLimit: req.query.previewLimit ? Number(req.query.previewLimit) : undefined,
   };
 }
 
@@ -101,6 +104,22 @@ router.get("/:id", async (req, res, next) => {
   }
 });
 
+// GET /api/leads/:id/qualification
+router.get("/:id/qualification", async (req, res, next) => {
+  try {
+    const lead = await getLeadById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    if (!lead) {
+      throw new AppError(404, "Lead not found");
+    }
+
+    const qualification = await getLeadQualificationByLeadId(req.tenantDb!, req.params.id);
+    await req.commitTransaction!();
+    res.json({ qualification });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // POST /api/leads
 router.post("/", async (req, res, next) => {
   try {
@@ -152,6 +171,24 @@ router.patch("/:id", async (req, res, next) => {
   }
 });
 
+// POST /api/leads/:id/stage/preflight
+router.post("/:id/stage/preflight", async (req, res, next) => {
+  try {
+    const result = await preflightLeadStageCheck(
+      req.tenantDb!,
+      req.params.id,
+      req.body.targetStageId,
+      req.user!.role,
+      req.user!.id
+    );
+
+    await req.commitTransaction!();
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
 // POST /api/leads/:id/stage-transition
 router.post("/:id/stage-transition", async (req, res, next) => {
   try {
@@ -175,22 +212,17 @@ router.post("/:id/stage-transition", async (req, res, next) => {
 router.post("/:id/convert", async (req, res, next) => {
   try {
     const body = { ...req.body };
-    const { dealStageId, ...rest } = body;
-    if (!dealStageId) {
-      throw new AppError(400, "dealStageId is required");
-    }
 
     if (req.user!.role === "rep" && body.assignedRepId !== undefined) {
-      delete rest.assignedRepId;
+      delete body.assignedRepId;
     }
 
     const result = await convertLead(req.tenantDb!, {
       leadId: req.params.id,
-      dealStageId,
       userId: req.user!.id,
       userRole: req.user!.role,
       officeId: req.user!.activeOfficeId,
-      ...rest,
+      ...body,
     });
 
     await req.commitTransaction!();

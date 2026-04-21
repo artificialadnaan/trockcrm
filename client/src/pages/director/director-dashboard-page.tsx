@@ -508,6 +508,16 @@ export function DirectorDashboardPage() {
           <div className="h-8 w-64 animate-pulse rounded bg-gray-200" />
           <div className="h-4 w-80 animate-pulse rounded bg-gray-100" />
         </div>
+        <section aria-label="Primary workspace">
+          <DirectorDashboardShell
+            boardEntity={boardState.activeEntity}
+            onBoardEntityChange={boardState.setActiveEntity}
+            dealBoard={dealBoard}
+            leadBoard={leadBoard}
+            loading={boardState.activeEntity === "deals" ? dealBoardLoading : leadBoardLoading}
+            error={boardState.activeEntity === "deals" ? dealBoardError : leadBoardError}
+          />
+        </section>
         <div className="h-80 animate-pulse rounded-2xl bg-white" />
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
           {Array.from({ length: 4 }).map((_, index) => (

@@ -231,39 +231,41 @@ END $$;
 -- TENANT_SCHEMA_START
 DO $tenant$
 BEGIN
-  CREATE TABLE IF NOT EXISTS deal_payment_events (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    deal_id UUID NOT NULL REFERENCES deals(id) ON DELETE CASCADE,
-    recorded_by_user_id UUID REFERENCES public.users(id),
-    paid_at TIMESTAMPTZ NOT NULL,
-    gross_revenue_amount NUMERIC(14,2) NOT NULL,
-    gross_margin_amount NUMERIC(14,2),
-    is_credit_memo BOOLEAN NOT NULL DEFAULT false,
-    notes TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT deal_payment_events_credit_memo_sign_chk CHECK (
-      (
-        is_credit_memo = true
-        AND gross_revenue_amount < 0
-        AND (gross_margin_amount IS NULL OR gross_margin_amount < 0)
+  IF to_regclass('deals') IS NOT NULL THEN
+    CREATE TABLE IF NOT EXISTS deal_payment_events (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      deal_id UUID NOT NULL REFERENCES deals(id) ON DELETE CASCADE,
+      recorded_by_user_id UUID REFERENCES public.users(id),
+      paid_at TIMESTAMPTZ NOT NULL,
+      gross_revenue_amount NUMERIC(14,2) NOT NULL,
+      gross_margin_amount NUMERIC(14,2),
+      is_credit_memo BOOLEAN NOT NULL DEFAULT false,
+      notes TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CONSTRAINT deal_payment_events_credit_memo_sign_chk CHECK (
+        (
+          is_credit_memo = true
+          AND gross_revenue_amount < 0
+          AND (gross_margin_amount IS NULL OR gross_margin_amount < 0)
+        )
+        OR (
+          is_credit_memo = false
+          AND gross_revenue_amount >= 0
+          AND (gross_margin_amount IS NULL OR gross_margin_amount >= 0)
+        )
+      ),
+      CONSTRAINT deal_payment_events_margin_leq_revenue_chk CHECK (
+        gross_margin_amount IS NULL
+        OR ABS(gross_margin_amount) <= ABS(gross_revenue_amount)
       )
-      OR (
-        is_credit_memo = false
-        AND gross_revenue_amount >= 0
-        AND (gross_margin_amount IS NULL OR gross_margin_amount >= 0)
-      )
-    ),
-    CONSTRAINT deal_payment_events_margin_leq_revenue_chk CHECK (
-      gross_margin_amount IS NULL
-      OR ABS(gross_margin_amount) <= ABS(gross_revenue_amount)
-    )
-  );
+    );
 
-  CREATE INDEX IF NOT EXISTS deal_payment_events_deal_paid_at_idx
-    ON deal_payment_events (deal_id, paid_at);
+    CREATE INDEX IF NOT EXISTS deal_payment_events_deal_paid_at_idx
+      ON deal_payment_events (deal_id, paid_at);
 
-  CREATE INDEX IF NOT EXISTS deal_payment_events_paid_at_idx
-    ON deal_payment_events (paid_at);
+    CREATE INDEX IF NOT EXISTS deal_payment_events_paid_at_idx
+      ON deal_payment_events (paid_at);
+  END IF;
 END $tenant$;
 -- TENANT_SCHEMA_END

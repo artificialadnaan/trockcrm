@@ -50,10 +50,16 @@ import {
   summarizeScopingRoute,
 } from "@/lib/scoping-intake";
 
-type SectionKey = "projectOverview" | "propertyDetails" | "scopeSummary" | "attachments";
+type SectionKey =
+  | "projectOverview"
+  | "opportunity"
+  | "propertyDetails"
+  | "scopeSummary"
+  | "attachments";
 
 const SECTION_ORDER: Array<{ key: SectionKey; label: string }> = [
   { key: "projectOverview", label: "Project Overview" },
+  { key: "opportunity", label: "Opportunity Review" },
   { key: "propertyDetails", label: "Property Details" },
   { key: "scopeSummary", label: "Scope Summary" },
   { key: "attachments", label: "Attachments" },
@@ -197,7 +203,6 @@ export function DealScopingWorkspace({
   const [intake, setIntake] = useState<DealScopingIntake | null>(null);
   const [readiness, setReadiness] = useState<DealScopingReadiness | null>(null);
   const [sectionData, setSectionData] = useState<Record<string, unknown>>({});
-  const [workflowRoute, setWorkflowRoute] = useState<WorkflowRoute>(deal.workflowRoute);
   const [projectTypeId, setProjectTypeId] = useState<string | null>(deal.projectTypeId);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -206,6 +211,7 @@ export function DealScopingWorkspace({
   const [activatingService, setActivatingService] = useState(false);
   const lastSavedFingerprintRef = useRef("");
   const hydrationCompleteRef = useRef(false);
+  const activeWorkflowRoute: WorkflowRoute = deal.workflowRoute ?? "estimating";
 
   const loadIntake = async () => {
     setLoading(true);
@@ -214,12 +220,10 @@ export function DealScopingWorkspace({
       const result = await getDealScopingIntake(deal.id);
       const nextSectionData = buildWorkspaceSectionData(deal, result.intake);
       setIntake(result.intake);
-      setReadiness(normalizeWorkspaceReadiness(result.readiness, deal.workflowRoute));
+      setReadiness(normalizeWorkspaceReadiness(result.readiness, activeWorkflowRoute));
       setSectionData(nextSectionData);
-      setWorkflowRoute(deal.workflowRoute);
       setProjectTypeId(result.intake.projectTypeId ?? deal.projectTypeId);
       lastSavedFingerprintRef.current = JSON.stringify({
-        workflowRoute: deal.workflowRoute,
         projectTypeId: result.intake.projectTypeId ?? deal.projectTypeId,
         sectionData: nextSectionData,
       });
@@ -242,7 +246,7 @@ export function DealScopingWorkspace({
       return;
     }
 
-    const fingerprint = JSON.stringify({ workflowRoute, projectTypeId, sectionData });
+    const fingerprint = JSON.stringify({ projectTypeId, sectionData });
     if (fingerprint === lastSavedFingerprintRef.current) {
       return;
     }
@@ -251,16 +255,14 @@ export function DealScopingWorkspace({
       setSaveState("saving");
       try {
         const result = await patchDealScopingIntake(deal.id, {
-          workflowRoute,
           projectTypeId,
           sectionData,
         });
         const nextSectionData = buildWorkspaceSectionData(deal, result.intake);
         setIntake(result.intake);
-        setReadiness(normalizeWorkspaceReadiness(result.readiness, workflowRoute));
+        setReadiness(normalizeWorkspaceReadiness(result.readiness, activeWorkflowRoute));
         setSectionData(nextSectionData);
         lastSavedFingerprintRef.current = JSON.stringify({
-          workflowRoute,
           projectTypeId,
           sectionData: nextSectionData,
         });
@@ -274,7 +276,7 @@ export function DealScopingWorkspace({
     }, 700);
 
     return () => window.clearTimeout(timeoutId);
-  }, [deal, deal.id, onDealUpdated, projectTypeId, sectionData, workflowRoute]);
+  }, [activeWorkflowRoute, deal, deal.id, onDealUpdated, projectTypeId, sectionData]);
 
   const completionCounts = getScopingCompletionCounts(readiness?.completionState);
   const attachmentRequirements = readiness?.attachmentRequirements ?? [];
@@ -301,6 +303,13 @@ export function DealScopingWorkspace({
       })
       .filter((requirement): requirement is (typeof ATTACHMENT_REQUIREMENTS)[number] & { status: DealScopingAttachmentRequirement | null } => Boolean(requirement));
   }, [attachmentRequirements, readiness?.requiredAttachmentKeys]);
+  const visibleSections = useMemo(
+    () =>
+      SECTION_ORDER.filter((section) =>
+        section.key === "attachments" || Boolean(readiness?.completionState[section.key])
+      ),
+    [readiness?.completionState]
+  );
   const linkedFilesByRequirement = useMemo(() => {
     const map = new Map<string, FileRecord[]>();
     for (const requirement of ATTACHMENT_REQUIREMENTS) {
@@ -414,7 +423,7 @@ export function DealScopingWorkspace({
           <CardContent className="space-y-4">
             <div className={`rounded-lg border px-3 py-2 text-sm ${getReadinessTone(readiness?.status ?? "draft")}`}>
               <div className="font-medium">
-                {summarizeScopingRoute(workflowRoute)}
+                {summarizeScopingRoute(deal.workflowRoute)}
               </div>
               <div className="mt-1 text-xs">
                 {completionCounts.completed}/{completionCounts.total} sections complete
@@ -422,7 +431,7 @@ export function DealScopingWorkspace({
             </div>
 
             <div className="space-y-2">
-              {SECTION_ORDER.map((section) => {
+              {visibleSections.map((section) => {
                 const entry = readiness?.completionState[section.key];
                 const complete = entry?.isComplete ?? false;
                 return (
@@ -486,15 +495,16 @@ export function DealScopingWorkspace({
           <CardContent className="grid gap-4 md:grid-cols-2">
             <div className="space-y-2">
               <Label htmlFor="workflowRoute">Workflow Route</Label>
-              <Select value={workflowRoute} onValueChange={(value) => setWorkflowRoute(value as WorkflowRoute)}>
-                <SelectTrigger id="workflowRoute">
-                  <SelectValue placeholder="Select route" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="estimating">Estimating</SelectItem>
-                  <SelectItem value="service">Service</SelectItem>
-                </SelectContent>
-              </Select>
+              <div
+                id="workflowRoute"
+                className="flex h-10 items-center rounded-md border px-3 text-sm text-muted-foreground"
+              >
+                {deal.workflowRoute === "service"
+                  ? "Service"
+                  : deal.workflowRoute === "estimating"
+                    ? "Deals"
+                    : "Pending Opportunity Review"}
+              </div>
             </div>
 
             <div className="space-y-2">
@@ -533,7 +543,7 @@ export function DealScopingWorkspace({
                 onChange={(event) => updateField("projectOverview", "propertyName", event.target.value)}
               />
             </div>
-            {workflowRoute === "estimating" && (
+            {activeWorkflowRoute === "estimating" && (
               <div className="space-y-2">
                 <Label htmlFor="bidDueDate">Bid Due Date</Label>
                 <Input
@@ -544,6 +554,100 @@ export function DealScopingWorkspace({
                 />
               </div>
             )}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Opportunity Review</CardTitle>
+            <CardDescription>
+              Capture the pre-bid meeting and site visit decision before deeper estimating work.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="grid gap-4 md:grid-cols-2">
+            <div className="space-y-2">
+              <Label htmlFor="preBidMeetingCompleted">Pre-Bid Meeting Completed</Label>
+              <Select
+                value={getSectionValue(sectionData, "opportunity", "preBidMeetingCompleted") || "__unset__"}
+                onValueChange={(value) =>
+                  updateField(
+                    "opportunity",
+                    "preBidMeetingCompleted",
+                    value === "__unset__" ? "" : (value ?? "")
+                  )
+                }
+              >
+                <SelectTrigger id="preBidMeetingCompleted">
+                  <SelectValue placeholder="Select status" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__unset__">Pending</SelectItem>
+                  <SelectItem value="yes">Completed</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="siteVisitDecision">Site Visit Decision</Label>
+              <Select
+                value={getSectionValue(sectionData, "opportunity", "siteVisitDecision") || "__unset__"}
+                onValueChange={(value) =>
+                  updateField(
+                    "opportunity",
+                    "siteVisitDecision",
+                    value === "__unset__" ? "" : (value ?? "")
+                  )
+                }
+              >
+                <SelectTrigger id="siteVisitDecision">
+                  <SelectValue placeholder="Select decision" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__unset__">Pending</SelectItem>
+                  <SelectItem value="required">Site Visit Required</SelectItem>
+                  <SelectItem value="not_required">No Site Visit Required</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="siteVisitCompleted">Site Visit Completed</Label>
+              <Select
+                value={getSectionValue(sectionData, "opportunity", "siteVisitCompleted") || "__unset__"}
+                onValueChange={(value) =>
+                  updateField(
+                    "opportunity",
+                    "siteVisitCompleted",
+                    value === "__unset__" ? "" : (value ?? "")
+                  )
+                }
+              >
+                <SelectTrigger id="siteVisitCompleted">
+                  <SelectValue placeholder="Select completion state" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__unset__">Pending</SelectItem>
+                  <SelectItem value="completed">Completed</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-2 md:col-span-2">
+              <Label htmlFor="estimatorConsultationNotes">Estimator Consultation Notes</Label>
+              <Textarea
+                id="estimatorConsultationNotes"
+                rows={3}
+                value={getSectionValue(sectionData, "opportunity", "estimatorConsultationNotes")}
+                onChange={(event) =>
+                  updateField(
+                    "opportunity",
+                    "estimatorConsultationNotes",
+                    event.target.value
+                  )
+                }
+                placeholder="Capture scope clarifications, bid strategy, and site-visit context."
+              />
+            </div>
           </CardContent>
         </Card>
 
@@ -703,7 +807,7 @@ export function DealScopingWorkspace({
           </CardContent>
         </Card>
 
-        {workflowRoute === "service" && (
+        {activeWorkflowRoute === "service" && (
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2">

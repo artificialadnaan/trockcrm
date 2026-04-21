@@ -1,10 +1,13 @@
-export interface StageGateOption {
-  value: string;
-  label: string;
-  description?: string;
-}
+import { WORKFLOW_GATE_FIELD_LABELS } from "../../../shared/src/types/workflow-gates.js";
+import {
+  LEAD_STAGE_GATE_OPTION_GROUPS,
+  type StageGateOption,
+  type StageGateOptionGroup,
+} from "./lead-stage-options";
 
-export const STAGE_GATE_FIELD_OPTIONS: StageGateOption[] = [
+export type { StageGateOption, StageGateOptionGroup } from "./lead-stage-options";
+
+const DEAL_STAGE_FIELD_OPTIONS: StageGateOption[] = [
   { value: "primaryContactId", label: "Primary Contact" },
   { value: "companyId", label: "Company" },
   { value: "projectTypeId", label: "Project Type" },
@@ -23,6 +26,25 @@ export const STAGE_GATE_FIELD_OPTIONS: StageGateOption[] = [
   { value: "lostNotes", label: "Lost Notes" },
   { value: "lostCompetitor", label: "Lost Competitor" },
 ];
+
+export const STAGE_GATE_FIELD_GROUPS: StageGateOptionGroup[] = [
+  {
+    key: "deal_core",
+    title: "Deal Core",
+    options: DEAL_STAGE_FIELD_OPTIONS,
+  },
+  ...LEAD_STAGE_GATE_OPTION_GROUPS,
+];
+
+export const STAGE_GATE_FIELD_OPTIONS: StageGateOption[] = [
+  ...DEAL_STAGE_FIELD_OPTIONS,
+  ...LEAD_STAGE_GATE_OPTION_GROUPS.flatMap((group) => group.options),
+].map((option) => ({
+  ...option,
+  label:
+    WORKFLOW_GATE_FIELD_LABELS[option.value as keyof typeof WORKFLOW_GATE_FIELD_LABELS] ??
+    option.label,
+}));
 
 export const STAGE_GATE_DOCUMENT_OPTIONS: StageGateOption[] = [
   { value: "photo", label: "Photo" },

@@ -15,8 +15,29 @@ export type DealStage = (typeof DEAL_STAGES)[number];
 export const WORKFLOW_ROUTES = ["estimating", "service"] as const;
 export type WorkflowRoute = (typeof WORKFLOW_ROUTES)[number];
 
+export const DEAL_ROUTE_VALUE_SOURCES = [
+  "sales_estimated_opportunity_value",
+  "procore_bidboard_estimate",
+  "manual_override",
+] as const;
+export type DealRouteValueSource = (typeof DEAL_ROUTE_VALUE_SOURCES)[number];
+
 export const WORKFLOW_FAMILIES = ["lead", "standard_deal", "service_deal"] as const;
 export type WorkflowFamily = (typeof WORKFLOW_FAMILIES)[number];
+
+export const LEAD_STAGE_SLUGS = [
+  "lead_new",
+  "company_pre_qualified",
+  "scoping_in_progress",
+  "pre_qual_value_assigned",
+  "lead_go_no_go",
+  "qualified_for_opportunity",
+  "lead_disqualified",
+] as const;
+export type LeadStageSlug = (typeof LEAD_STAGE_SLUGS)[number];
+
+export const DEAL_PIPELINE_DISPOSITIONS = ["opportunity", "deals", "service"] as const;
+export type DealPipelineDisposition = (typeof DEAL_PIPELINE_DISPOSITIONS)[number];
 
 export const DEAL_SCOPING_INTAKE_STATUSES = ["draft", "ready", "activated"] as const;
 export type DealScopingIntakeStatus = (typeof DEAL_SCOPING_INTAKE_STATUSES)[number];
@@ -207,6 +228,8 @@ export const DEAL_TEAM_ROLES = [
   "superintendent",
   "estimator",
   "project_manager",
+  "client_services",
+  "operations",
   "foreman",
   "other",
 ] as const;

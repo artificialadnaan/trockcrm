@@ -27,6 +27,18 @@ vi.mock("../../../src/modules/admin/cleanup-queue-service.js", () => ({
   getMyCleanupQueue: getMyCleanupQueueMock,
 }));
 
+vi.mock("../../../src/modules/migration/service.js", () => ({
+  getMigrationSummary: vi.fn().mockResolvedValue({
+    deals: { needs_review: 1 },
+    contacts: { needs_review: 2 },
+    activities: { needs_review: 0 },
+    companies: { needs_review: 0 },
+    properties: { needs_review: 0 },
+    leads: { needs_review: 3 },
+    recentRuns: [{ startedAt: "2026-04-21T00:00:00.000Z" }],
+  }),
+}));
+
 function createMockTenantDb(responses: any[][] = []) {
   let callIndex = 0;
   return {
@@ -341,6 +353,29 @@ describe("Dashboard Service", () => {
       expect(Array.isArray(result.dealSnapshot)).toBe(true);
       expect(typeof result.myCleanup.total).toBe("number");
       expect(Array.isArray(result.myCleanup.byReason)).toBe(true);
+    });
+  });
+
+  describe("getAdminDashboardSummary", () => {
+    it("reads audit actor labels from changed_by joined to users instead of actor_name", async () => {
+      const { getAdminDashboardSummary } = await import("../../../src/modules/dashboard/service.js");
+      const tenantDb = createMockTenantDb([
+        [{ pending_count: "1", oldest_minutes: "5" }],
+        [{ open_count: "2", oldest_minutes: "10" }],
+        [{ total_count: "3", primary_cluster_label: "handoff" }],
+        [{ open_count: "4", oldest_minutes: "15" }],
+        [{ change_count_24h: "6", last_actor_label: "Taylor Admin" }],
+        [{ conflict_count: "0" }],
+      ]);
+
+      const result = await getAdminDashboardSummary(tenantDb, "office-1");
+
+      expect(result.audit.lastActorLabel).toBe("Taylor Admin");
+
+      const auditQueryText = extractSqlText(tenantDb.execute.mock.calls[4][0]).toLowerCase();
+      expect(auditQueryText).toContain("changed_by");
+      expect(auditQueryText).toContain("left join public.users u on u.id =");
+      expect(auditQueryText).not.toContain("actor_name");
     });
   });
 });

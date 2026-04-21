@@ -31,14 +31,25 @@ interface LeadFormProps {
   lead: LeadFormLead;
   converted?: boolean;
   defaultDealStageId?: string | null;
+  showPrimaryAction?: boolean;
 }
 
-export function LeadForm({ lead, converted = false, defaultDealStageId = null }: LeadFormProps) {
+export function LeadForm({
+  lead,
+  converted = false,
+  defaultDealStageId = null,
+  showPrimaryAction = true,
+}: LeadFormProps) {
   const navigate = useNavigate();
   const [converting, setConverting] = useState(false);
-  const propertyLabel = [lead.propertyAddress, [lead.propertyCity, lead.propertyState].filter(Boolean).join(", "), lead.propertyZip]
-    .filter(Boolean)
-    .join(" ") || lead.propertyName || "--";
+  const propertyLabel =
+    [
+      lead.propertyAddress,
+      [lead.propertyCity, lead.propertyState].filter(Boolean).join(", "),
+      lead.propertyZip,
+    ]
+      .filter(Boolean)
+      .join(" ") || lead.propertyName || "--";
 
   const handlePrimaryAction = async () => {
     if (converted) {
@@ -49,7 +60,7 @@ export function LeadForm({ lead, converted = false, defaultDealStageId = null }:
     }
 
     if (!defaultDealStageId) {
-      toast.error("Default deal stage is not configured");
+      navigate("/deals/new");
       return;
     }
 
@@ -79,7 +90,7 @@ export function LeadForm({ lead, converted = false, defaultDealStageId = null }:
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
+        <div className="grid grid-cols-1 gap-4 text-sm sm:grid-cols-2">
           <div>
             <p className="text-muted-foreground">Lead Name</p>
             <p className="font-medium">{lead.name}</p>
@@ -102,25 +113,27 @@ export function LeadForm({ lead, converted = false, defaultDealStageId = null }:
           <p className="text-muted-foreground">Property</p>
           {lead.propertyId ? (
             <Link to={`/properties/${lead.propertyId}`} className="font-medium text-primary hover:underline">
-              {propertyLabel || "--"}
+              {propertyLabel}
             </Link>
           ) : (
-            <p className="font-medium">{propertyLabel || "--"}</p>
+            <p className="font-medium">{propertyLabel}</p>
           )}
         </div>
 
         {lead.description && (
-          <p className="text-sm text-muted-foreground whitespace-pre-wrap">{lead.description}</p>
+          <p className="whitespace-pre-wrap text-sm text-muted-foreground">{lead.description}</p>
         )}
 
         <div className="flex flex-wrap gap-2">
-          <Button
-            disabled={converting || (converted && !lead.convertedDealId)}
-            onClick={handlePrimaryAction}
-          >
-            {converting ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-            {converted ? "Open Deal" : "Convert to Deal"}
-          </Button>
+          {showPrimaryAction && (
+            <Button
+              disabled={converting || (converted && !lead.convertedDealId)}
+              onClick={handlePrimaryAction}
+            >
+              {converting ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+              {converted ? "Open Deal" : "Convert to Deal"}
+            </Button>
+          )}
           {lead.companyId && (
             <Button variant="outline" onClick={() => navigate(`/companies/${lead.companyId}`)}>
               View Company

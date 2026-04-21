@@ -1,72 +1,84 @@
 import { describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
-import {
-  LeadListPage,
-  isImmediateNextStageMove,
-  isValidDirectorDecisionForTarget,
-} from "./lead-list-page";
+import { LeadListPage, isImmediateNextStageMove } from "./lead-list-page";
 
 const boardColumns = [
   {
-    stage: { id: "stage-contacted", name: "Lead", slug: "contacted" },
+    stage: { id: "stage-new", name: "New", slug: "lead_new" },
     count: 1,
     cards: [
       {
         id: "lead-1",
-        name: "Contacted Lead",
-        stageId: "stage-contacted",
+        name: "Fresh Prospect",
+        stageId: "stage-new",
         stageEnteredAt: "2026-04-20T10:00:00.000Z",
         updatedAt: "2026-04-20T10:00:00.000Z",
       },
     ],
   },
   {
-    stage: { id: "stage-qualified", name: "Qualified Lead", slug: "qualified_lead" },
+    stage: { id: "stage-prequal", name: "Company Pre-Qualified", slug: "company_pre_qualified" },
+    count: 0,
+    cards: [],
+  },
+  {
+    stage: { id: "stage-scoping", name: "Scoping In Progress", slug: "scoping_in_progress" },
+    count: 0,
+    cards: [],
+  },
+  {
+    stage: {
+      id: "stage-value",
+      name: "Pre-Qual Value Assigned",
+      slug: "pre_qual_value_assigned",
+    },
     count: 1,
     cards: [
       {
         id: "lead-2",
         name: "Qualified Lead",
-        stageId: "stage-qualified",
+        stageId: "stage-value",
         stageEnteredAt: "2026-04-20T10:00:00.000Z",
         updatedAt: "2026-04-20T10:00:00.000Z",
       },
     ],
   },
   {
-    stage: { id: "stage-director", name: "Director Review", slug: "director_go_no_go" },
+    stage: { id: "stage-go", name: "Lead Go/No-Go", slug: "lead_go_no_go" },
     count: 0,
     cards: [],
   },
   {
-    stage: { id: "stage-ready", name: "Ready", slug: "ready_for_opportunity" },
+    stage: {
+      id: "stage-opportunity",
+      name: "Qualified for Opportunity",
+      slug: "qualified_for_opportunity",
+    },
     count: 0,
     cards: [],
   },
 ];
 
-vi.mock("@/lib/auth", () => ({
-  useAuth: () => ({
-    user: { role: "rep" },
-  }),
-}));
-
 vi.mock("@/hooks/use-leads", () => ({
   useLeadBoard: () => ({
     board: {
       columns: boardColumns,
-      defaultConversionDealStageId: "deal-stage-1",
+      defaultConversionDealStageId: null,
     },
     loading: false,
-    convertLead: vi.fn(),
     refetch: vi.fn(),
   }),
-  transitionLeadStage: vi.fn(),
+  preflightLeadStageCheck: vi.fn(),
+  updateLead: vi.fn(),
 }));
 
-vi.mock("@/components/leads/lead-conversion-dialog", () => ({
-  LeadConversionDialog: () => null,
+vi.mock("@/lib/pipeline-scope", () => ({
+  useNormalizedPipelineRoute: () => ({
+    allowedScope: "mine",
+    needsRedirect: false,
+    redirectTo: "/leads?scope=mine",
+  }),
 }));
 
 function normalize(html: string) {
@@ -76,17 +88,12 @@ function normalize(html: string) {
 describe("LeadListPage", () => {
   it("treats sparse display-order stages as valid immediate moves when mapped as next stage", () => {
     const nextStageById = new Map<string, string | null>([
-      ["stage-ready", "stage-converted"],
-      ["stage-converted", null],
+      ["stage-go", "stage-opportunity"],
+      ["stage-opportunity", null],
     ]);
 
-    expect(isImmediateNextStageMove("stage-ready", "stage-converted", nextStageById)).toBe(true);
-    expect(isImmediateNextStageMove("stage-ready", "stage-contacted", nextStageById)).toBe(false);
-  });
-
-  it("requires a go decision for ready_for_opportunity transitions", () => {
-    expect(isValidDirectorDecisionForTarget("ready_for_opportunity", "go")).toBe(true);
-    expect(isValidDirectorDecisionForTarget("ready_for_opportunity", "no_go")).toBe(false);
+    expect(isImmediateNextStageMove("stage-go", "stage-opportunity", nextStageById)).toBe(true);
+    expect(isImmediateNextStageMove("stage-go", "stage-new", nextStageById)).toBe(false);
   });
 
   it("filters lead buckets from the bucket query param", () => {
@@ -99,6 +106,7 @@ describe("LeadListPage", () => {
     );
 
     expect(html).toContain("Qualified Lead");
-    expect(html).not.toContain("Contacted Lead");
+    expect(html).not.toContain("Fresh Prospect");
+    expect(html).not.toContain("Qualified for Opportunity");
   });
 });

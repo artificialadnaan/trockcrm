@@ -63,6 +63,7 @@ import {
   routeRevisionToEstimating,
   upsertDealScopingIntake,
 } from "./scoping-service.js";
+import { applyOpportunityRoutingReview } from "./routing-service.js";
 
 const router = Router();
 
@@ -73,6 +74,7 @@ function readBoardInput(req: Parameters<typeof router.get>[1] extends never ? ne
     activeOfficeId: req.user!.activeOfficeId ?? req.user!.officeId,
     scope: (req.query.scope as "mine" | "team" | "all" | undefined) ?? "mine",
     includeDd: req.query.includeDd === "true",
+    previewLimit: req.query.previewLimit ? Number(req.query.previewLimit) : undefined,
   };
 }
 
@@ -307,8 +309,8 @@ router.get("/:id/payments", async (req, res, next) => {
   }
 });
 
-// POST /api/deals/:id/payments — record a cash-received event (admin/director only)
-router.post("/:id/payments", requireRole("admin", "director"), async (req, res, next) => {
+// POST /api/deals/:id/payments — record a cash-received event (admin only)
+router.post("/:id/payments", requireRole("admin"), async (req, res, next) => {
   try {
     const dealId = req.params.id as string;
     const deal = await getDealById(req.tenantDb!, dealId, req.user!.role, req.user!.id);
@@ -644,6 +646,29 @@ router.post("/:id/stage/preflight", async (req, res, next) => {
       req.user!.role,
       req.user!.id
     );
+
+    await req.commitTransaction!();
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/deals/:id/routing-review
+router.post("/:id/routing-review", async (req, res, next) => {
+  try {
+    const { valueSource, amount, reason } = req.body;
+    if (!valueSource || !amount) {
+      throw new AppError(400, "valueSource and amount are required");
+    }
+
+    const result = await applyOpportunityRoutingReview(req.tenantDb!, {
+      dealId: req.params.id,
+      valueSource,
+      amount,
+      reason,
+      userId: req.user!.id,
+    });
 
     await req.commitTransaction!();
     res.json(result);

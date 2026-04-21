@@ -17,6 +17,11 @@ import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { getAllStages, getStageById } from "../pipeline/service.js";
 import { createAssignmentTaskIfNeeded } from "../assignment-tasks/service.js";
+import {
+  type LeadQualificationPatch,
+  upsertLeadQualification,
+} from "./qualification-service.js";
+import { validateLeadStageGate } from "./stage-gate.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -74,6 +79,13 @@ export interface UpdateLeadInput {
   nextMilestoneAt?: string | null;
   supportNeededType?: "leadership" | "estimating" | "operations" | "executive_team" | null;
   supportNeededNotes?: string | null;
+  estimatedOpportunityValue?: string | null;
+  goDecision?: "go" | "no_go" | null;
+  goDecisionNotes?: string | null;
+  qualificationData?: Record<string, unknown>;
+  scopingSubsetData?: Record<string, unknown>;
+  disqualificationReason?: string | null;
+  disqualificationNotes?: string | null;
 }
 
 interface TransitionLeadStageInput {
@@ -125,6 +137,7 @@ export interface LeadBoardInput {
   userId: string;
   activeOfficeId: string;
   scope: WorkspaceScope;
+  previewLimit?: number;
 }
 
 export interface LeadStagePageInput extends LeadBoardInput {
@@ -288,6 +301,7 @@ function groupLeadBoardColumns(stages: Awaited<ReturnType<typeof listLeadStages>
 }
 
 export async function listLeadBoard(tenantDb: TenantDb, input: LeadBoardInput) {
+  const previewLimit = Math.max(1, Math.min(12, input.previewLimit ?? 8));
   const [stages, defaultConversionDealStageId, rowResult] = await Promise.all([
     listLeadStages(),
     getDefaultConversionDealStageId(),
@@ -316,7 +330,10 @@ export async function listLeadBoard(tenantDb: TenantDb, input: LeadBoardInput) {
   ]);
 
   return {
-    columns: groupLeadBoardColumns(stages, rowResult.rows as LeadStageRow[]),
+    columns: groupLeadBoardColumns(stages, rowResult.rows as LeadStageRow[]).map((column) => ({
+      ...column,
+      cards: column.cards.slice(0, previewLimit),
+    })),
     defaultConversionDealStageId,
   };
 }
@@ -651,9 +668,28 @@ export function createLeadService(
     const updates: Record<string, unknown> = {};
     const nextAssignedRepId =
       input.assignedRepId !== undefined ? input.assignedRepId : existing.assignedRepId;
+    const qualificationPatch: LeadQualificationPatch = {};
+    let hasQualificationPatch = false;
 
     if (input.stageId !== undefined) {
-      throw new AppError(400, "Use the lead stage transition endpoint to move a lead");
+      const stage = await deps.getStageById(input.stageId, "lead");
+      if (!stage) {
+        throw new AppError(400, "Invalid lead stage ID");
+      }
+      if (input.stageId !== existing.stageId) {
+        const gate = await validateLeadStageGate(
+          tenantDb,
+          leadId,
+          input.stageId,
+          userRole,
+          userId
+        );
+        if (!gate.allowed) {
+          throw new AppError(403, gate.blockReason ?? "Lead stage change not allowed");
+        }
+      }
+      updates.stageId = input.stageId;
+      updates.stageEnteredAt = deps.now();
     }
 
     if (input.assignedRepId !== undefined) {
@@ -711,6 +747,35 @@ export function createLeadService(
     }
     if (input.directorReviewReason !== undefined) updates.directorReviewReason = input.directorReviewReason;
 
+    if (input.estimatedOpportunityValue !== undefined) {
+      qualificationPatch.estimatedOpportunityValue = input.estimatedOpportunityValue;
+      hasQualificationPatch = true;
+    }
+    if (input.goDecision !== undefined) {
+      qualificationPatch.goDecision = input.goDecision;
+      hasQualificationPatch = true;
+    }
+    if (input.goDecisionNotes !== undefined) {
+      qualificationPatch.goDecisionNotes = input.goDecisionNotes;
+      hasQualificationPatch = true;
+    }
+    if (input.qualificationData !== undefined) {
+      qualificationPatch.qualificationData = input.qualificationData;
+      hasQualificationPatch = true;
+    }
+    if (input.scopingSubsetData !== undefined) {
+      qualificationPatch.scopingSubsetData = input.scopingSubsetData;
+      hasQualificationPatch = true;
+    }
+    if (input.disqualificationReason !== undefined) {
+      qualificationPatch.disqualificationReason = input.disqualificationReason;
+      hasQualificationPatch = true;
+    }
+    if (input.disqualificationNotes !== undefined) {
+      qualificationPatch.disqualificationNotes = input.disqualificationNotes;
+      hasQualificationPatch = true;
+    }
+
     if (input.status !== undefined) {
       if (input.status === "open" || input.status === "disqualified") {
         updates.status = input.status;
@@ -718,6 +783,18 @@ export function createLeadService(
       } else {
         throw new AppError(400, "Use the conversion endpoint to convert a lead");
       }
+    }
+
+    if (Object.keys(updates).length === 0 && !hasQualificationPatch) {
+      return existing;
+    }
+
+    if (Object.keys(updates).length > 0) {
+      updates.updatedAt = deps.now();
+    }
+
+    if (hasQualificationPatch) {
+      await upsertLeadQualification(tenantDb, leadId, qualificationPatch);
     }
 
     if (Object.keys(updates).length === 0) {
@@ -737,13 +814,7 @@ export function createLeadService(
       updates.forecastUpdatedBy = userId;
     }
 
-    updates.updatedAt = deps.now();
-
-    const [lead] = await tenantDb
-      .update(leads)
-      .set(updates)
-      .where(eq(leads.id, leadId))
-      .returning();
+    const [lead] = await tenantDb.update(leads).set(updates).where(eq(leads.id, leadId)).returning();
 
     if (
       input.assignedRepId !== undefined &&

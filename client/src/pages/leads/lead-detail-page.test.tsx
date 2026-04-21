@@ -4,9 +4,22 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { LeadDetailPage } from "./lead-detail-page";
 
 const stages = [
-  { id: "stage-lead", name: "Contacted", slug: "contacted", workflowFamily: "lead" },
-  { id: "stage-converted", name: "Converted", slug: "converted", workflowFamily: "lead" },
-  { id: "stage-estimating", name: "Estimating", slug: "estimating", workflowFamily: "standard_deal" },
+  { id: "stage-lead", name: "New", slug: "lead_new", workflowFamily: "lead", displayOrder: 0 },
+  {
+    id: "stage-qualified",
+    name: "Qualified for Opportunity",
+    slug: "qualified_for_opportunity",
+    workflowFamily: "lead",
+    displayOrder: 1,
+  },
+  { id: "stage-converted", name: "Converted", slug: "converted", workflowFamily: "lead", displayOrder: 2 },
+  {
+    id: "stage-estimating",
+    name: "Estimating",
+    slug: "estimating",
+    workflowFamily: "standard_deal",
+    displayOrder: 3,
+  },
 ];
 
 let lead: {
@@ -16,6 +29,7 @@ let lead: {
   companyId: string;
   propertyId: string;
   primaryContactId: string | null;
+  assignedRepId: string;
   companyName: string | null;
   property: {
     id: string;
@@ -33,6 +47,20 @@ let lead: {
   convertedDealNumber: string | null;
   updatedAt: string;
   lastActivityAt: string | null;
+  forecastWindow: null;
+  forecastCategory: null;
+  forecastConfidencePercent: null;
+  forecastRevenue: null;
+  forecastGrossProfit: null;
+  forecastBlockers: null;
+  nextMilestoneAt: null;
+  nextStep: null;
+  nextStepDueAt: null;
+  supportNeededType: null;
+  supportNeededNotes: null;
+  decisionMakerName: null;
+  budgetStatus: null;
+  status: "open" | "converted";
 } = {
   id: "lead-1",
   name: "Alpha Roofing Follow-Up",
@@ -40,6 +68,7 @@ let lead: {
   companyId: "company-1",
   propertyId: "property-1",
   primaryContactId: "contact-1",
+  assignedRepId: "rep-1",
   companyName: "Alpha Roofing",
   property: {
     id: "property-1",
@@ -57,6 +86,20 @@ let lead: {
   convertedDealNumber: null,
   updatedAt: "2026-04-11T10:00:00.000Z",
   lastActivityAt: "2026-04-11T10:00:00.000Z",
+  forecastWindow: null,
+  forecastCategory: null,
+  forecastConfidencePercent: null,
+  forecastRevenue: null,
+  forecastGrossProfit: null,
+  forecastBlockers: null,
+  nextMilestoneAt: null,
+  nextStep: null,
+  nextStepDueAt: null,
+  supportNeededType: null,
+  supportNeededNotes: null,
+  decisionMakerName: null,
+  budgetStatus: null,
+  status: "open",
 };
 
 let activities: Array<{
@@ -65,22 +108,7 @@ let activities: Array<{
   subject: string;
   body: string;
   occurredAt: string;
-}> = [
-  {
-    id: "activity-1",
-    type: "call",
-    subject: "Intro call",
-    body: "Discussed scope",
-    occurredAt: "2026-04-09T09:00:00.000Z",
-  },
-  {
-    id: "activity-2",
-    type: "email",
-    subject: "Converted follow-up",
-    body: "Sent estimate",
-    occurredAt: "2026-04-11T09:00:00.000Z",
-  },
-];
+}> = [];
 
 vi.mock("@/hooks/use-leads", () => ({
   useLeadDetail: vi.fn(() => ({
@@ -89,11 +117,24 @@ vi.mock("@/hooks/use-leads", () => ({
     error: null,
     refetch: vi.fn(),
   })),
+  useLeadQualification: vi.fn(() => ({
+    qualification: null,
+    loading: false,
+    error: null,
+    refetch: vi.fn(),
+  })),
   formatLeadPropertyLine: vi.fn((currentLead: typeof lead) =>
-    [currentLead.property?.address, [currentLead.property?.city, currentLead.property?.state].filter(Boolean).join(", "), currentLead.property?.zip]
+    [
+      currentLead.property?.address,
+      [currentLead.property?.city, currentLead.property?.state].filter(Boolean).join(", "),
+      currentLead.property?.zip,
+    ]
       .filter(Boolean)
       .join(" ")
   ),
+  updateLead: vi.fn(),
+  preflightLeadStageCheck: vi.fn(),
+  convertLeadToOpportunity: vi.fn(),
 }));
 
 vi.mock("@/hooks/use-pipeline-config", () => ({
@@ -141,76 +182,54 @@ function renderLeadDetail() {
 }
 
 describe("LeadDetailPage", () => {
-  it("renders the lead detail surface with the lead CTA", () => {
-    lead = { ...lead, stageId: "stage-lead", convertedAt: null, convertedDealId: null, convertedDealNumber: null };
-    activities = [];
+  it("renders the lead detail surface with assignment and context", () => {
+    lead = {
+      ...lead,
+      stageId: "stage-lead",
+      convertedAt: null,
+      convertedDealId: null,
+      convertedDealNumber: null,
+      status: "open",
+    };
 
     const html = renderLeadDetail();
 
     expect(html).toContain("Alpha Roofing Follow-Up");
     expect(html).toContain("Alpha Roofing");
     expect(html).toContain("123 Main St");
-    expect(html).toContain("Convert to Deal");
-    expect(html).toContain("Contacted");
     expect(html).toContain("Assigned Rep");
+    expect(html).toContain("Lead context");
+    expect(html).toContain("New");
   });
 
-  it("treats workflow-family lead stages as unconverted even when the slug is not dd", () => {
-    lead = { ...lead, stageId: "stage-lead", convertedAt: null, convertedDealId: null, convertedDealNumber: null };
-    activities = [];
+  it("shows the opportunity conversion CTA once the lead reaches the qualified stage", () => {
+    lead = {
+      ...lead,
+      stageId: "stage-qualified",
+      convertedAt: null,
+      convertedDealId: null,
+      convertedDealNumber: null,
+      status: "open",
+    };
 
     const html = renderLeadDetail();
 
-    expect(html).toContain("Convert to Deal");
-    expect(html).toContain("This record is still in the lead stage.");
-    expect(html).not.toContain("This lead has already been converted");
+    expect(html).toContain("Convert to Opportunity");
   });
 
   it("switches the CTA to open the deal once the lead is converted", () => {
-    lead = { ...lead, stageId: "stage-estimating", convertedAt: "2026-04-11T09:00:00.000Z", convertedDealId: "deal-1", convertedDealNumber: "TR-1001" };
-    activities = [];
-
-    const html = renderLeadDetail();
-
-    expect(html).toContain("Open Deal");
-    expect(html).not.toContain("Convert to Deal");
-  });
-
-  it("treats the converted lead stage as post-conversion even though it stays in the lead workflow family", () => {
-    lead = { ...lead, stageId: "stage-converted", convertedAt: "2026-04-11T09:00:00.000Z", convertedDealId: "deal-1", convertedDealNumber: "TR-1001" };
-    activities = [];
+    lead = {
+      ...lead,
+      stageId: "stage-estimating",
+      convertedAt: "2026-04-11T09:00:00.000Z",
+      convertedDealId: "deal-1",
+      convertedDealNumber: "TR-1001",
+      status: "converted",
+    };
 
     const html = renderLeadDetail();
 
     expect(html).toContain("Open Deal");
     expect(html).toContain("This lead has already been converted");
-    expect(html).not.toContain("This record is still in the lead stage.");
-  });
-
-  it("splits lead and post-conversion activity into separate timeline sections", () => {
-    lead = { ...lead, stageId: "stage-estimating", convertedAt: "2026-04-11T09:00:00.000Z", convertedDealId: "deal-1", convertedDealNumber: "TR-1001" };
-    activities = [
-      {
-        id: "activity-1",
-        type: "call",
-        subject: "Intro call",
-        body: "Discussed scope",
-        occurredAt: "2026-04-09T09:00:00.000Z",
-      },
-      {
-        id: "activity-2",
-        type: "email",
-        subject: "Converted follow-up",
-        body: "Sent estimate",
-        occurredAt: "2026-04-11T09:00:00.000Z",
-      },
-    ];
-
-    const html = renderLeadDetail();
-
-    expect(html).toContain("Lead Activity");
-    expect(html).toContain("Post-Conversion Activity");
-    expect(html).toContain("Intro call");
-    expect(html).toContain("Converted follow-up");
   });
 });

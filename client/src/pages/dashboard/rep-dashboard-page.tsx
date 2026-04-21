@@ -134,6 +134,16 @@ export function RepDashboardPage() {
           title={`Welcome back, ${firstName}`}
           description={`Here is your sales activity overview for ${currentYear}.`}
         />
+        <section aria-label="My Board">
+          <RepDashboardBoardShell
+            activeEntity={boardState.activeEntity}
+            onEntityChange={boardState.setActiveEntity}
+            dealBoard={dealBoard}
+            leadBoard={leadBoard}
+            loading={boardState.activeEntity === "deals" ? dealBoardLoading : leadBoardLoading}
+            error={boardState.activeEntity === "deals" ? dealBoardError : leadBoardError}
+          />
+        </section>
         <div className="grid grid-cols-1 gap-4 xl:grid-cols-4">
           {Array.from({ length: 4 }).map((_, i) => (
             <Card key={i} className="animate-pulse">

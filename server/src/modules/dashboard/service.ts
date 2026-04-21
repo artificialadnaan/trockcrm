@@ -29,6 +29,7 @@ import {
   getWinLossRatioByRep,
 } from "../reports/service.js";
 import { getMyCleanupQueue } from "../admin/cleanup-queue-service.js";
+import { getMigrationSummary } from "../migration/service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -168,7 +169,11 @@ function buildFunnelBuckets(leadRows: any[], dealRows: any[]): FunnelBucketSumma
     {
       key: "lead",
       label: "Leads",
-      count: leadCounts.get("contacted") ?? 0,
+      count:
+        (leadCounts.get("lead_new") ?? 0) +
+        (leadCounts.get("company_pre_qualified") ?? 0) +
+        (leadCounts.get("scoping_in_progress") ?? 0) +
+        (leadCounts.get("contacted") ?? 0),
       totalValue: null,
       route: "/leads",
       bucket: "lead",
@@ -176,7 +181,10 @@ function buildFunnelBuckets(leadRows: any[], dealRows: any[]): FunnelBucketSumma
     {
       key: "qualified_lead",
       label: "Qualified Leads",
-      count: leadCounts.get("qualified_lead") ?? 0,
+      count:
+        (leadCounts.get("pre_qual_value_assigned") ?? 0) +
+        (leadCounts.get("lead_go_no_go") ?? 0) +
+        (leadCounts.get("qualified_lead") ?? 0),
       totalValue: null,
       route: "/leads",
       bucket: "qualified_lead",
@@ -184,7 +192,10 @@ function buildFunnelBuckets(leadRows: any[], dealRows: any[]): FunnelBucketSumma
     {
       key: "opportunity",
       label: "Opportunities",
-      count: (leadCounts.get("director_go_no_go") ?? 0) + (leadCounts.get("ready_for_opportunity") ?? 0),
+      count:
+        (leadCounts.get("qualified_for_opportunity") ?? 0) +
+        (leadCounts.get("director_go_no_go") ?? 0) +
+        (leadCounts.get("ready_for_opportunity") ?? 0),
       totalValue: null,
       route: "/leads",
       bucket: "opportunity",
@@ -271,9 +282,15 @@ async function getDirectorFunnelSummary(
       WITH lead_counts AS (
         SELECT
           l.assigned_rep_id AS rep_id,
-          COUNT(*) FILTER (WHERE psc.slug = 'contacted')::int AS leads,
-          COUNT(*) FILTER (WHERE psc.slug = 'qualified_lead')::int AS qualified_leads,
-          COUNT(*) FILTER (WHERE psc.slug IN ('director_go_no_go', 'ready_for_opportunity'))::int AS opportunities
+          COUNT(*) FILTER (
+            WHERE psc.slug IN ('lead_new', 'company_pre_qualified', 'scoping_in_progress', 'contacted')
+          )::int AS leads,
+          COUNT(*) FILTER (
+            WHERE psc.slug IN ('pre_qual_value_assigned', 'lead_go_no_go', 'qualified_lead')
+          )::int AS qualified_leads,
+          COUNT(*) FILTER (
+            WHERE psc.slug IN ('qualified_for_opportunity', 'director_go_no_go', 'ready_for_opportunity')
+          )::int AS opportunities
         FROM leads l
         JOIN pipeline_stage_config psc ON psc.id = l.stage_id
         WHERE l.status = 'open'
@@ -1275,18 +1292,39 @@ async function readMergeQueueSummary(tenantDb: TenantDb, _activeOfficeId: string
 }
 
 async function readMigrationSummary(_tenantDb: TenantDb, _activeOfficeId: string) {
+  const summary = await getMigrationSummary();
+  const unresolvedCount =
+    (summary.deals?.needs_review ?? 0) +
+    (summary.contacts?.needs_review ?? 0) +
+    (summary.activities?.needs_review ?? 0) +
+    (summary.companies?.needs_review ?? 0) +
+    (summary.properties?.needs_review ?? 0) +
+    (summary.leads?.needs_review ?? 0);
+  const latestRunAt = summary.recentRuns[0]?.startedAt ?? null;
+
   return {
-    unresolvedCount: 0,
-    oldestAgeLabel: "0m",
+    unresolvedCount,
+    oldestAgeLabel: latestRunAt
+      ? formatAgeLabel(Math.round((Date.now() - new Date(latestRunAt).getTime()) / 60000))
+      : "No runs",
   };
 }
 
 async function readAuditSummary(tenantDb: TenantDb, _activeOfficeId: string) {
   const result = await tenantDb.execute(sql`
     select
-      count(*) filter (where created_at >= now() - interval '24 hours')::int as change_count_24h,
-      coalesce(max(actor_name), 'No recent changes') as last_actor_label
-    from audit_log
+      count(*) filter (where al.created_at >= now() - interval '24 hours')::int as change_count_24h,
+      coalesce(
+        (
+          select coalesce(u.display_name, al_latest.changed_by::text)
+          from audit_log al_latest
+          left join public.users u on u.id = al_latest.changed_by
+          order by al_latest.created_at desc
+          limit 1
+        ),
+        'No recent changes'
+      ) as last_actor_label
+    from audit_log al
   `);
   const row = (result as any).rows?.[0] ?? {};
   return {

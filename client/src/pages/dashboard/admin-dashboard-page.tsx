@@ -1,47 +1,43 @@
-import { AdminOperationsWorkspace } from "@/components/dashboard/admin-operations-workspace";
-import { DashboardKpiBand } from "@/components/dashboard/dashboard-kpi-band";
+import { buildAdminOperationsTiles } from "@/lib/admin-dashboard-summary";
 import { useAdminDashboardSummary } from "@/hooks/use-admin-dashboard-summary";
+import { AdminOperationsWorkspace } from "@/components/dashboard/admin-operations-workspace";
 
 export function AdminDashboardPage() {
-  const { summary, loading } = useAdminDashboardSummary();
-  const teamSnapshot = summary.kpis.find((item) => item.label === "Team snapshot");
-
-  if (loading) {
-    return <div className="space-y-4"><div className="h-24 rounded-2xl bg-gray-100 animate-pulse" /><div className="h-64 rounded-2xl bg-gray-100 animate-pulse" /></div>;
-  }
+  const { data, loading, error } = useAdminDashboardSummary();
+  const tiles = data ? buildAdminOperationsTiles(data) : [];
 
   return (
-    <div className="space-y-6">
-      <header>
-        <h1 className="text-3xl font-black tracking-tight text-gray-900">Admin Dashboard</h1>
-        <p className="mt-1 text-sm text-gray-500">Operational queues, system health, and workspace changes without the sales-team noise.</p>
-      </header>
-      <DashboardKpiBand items={summary.kpis} />
-      <AdminOperationsWorkspace items={summary.workspaceItems} />
-      <section className="grid gap-4 lg:grid-cols-[1.2fr_0.8fr]">
-        <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
-          <h2 className="text-sm font-bold uppercase tracking-wide text-gray-900">Team context</h2>
-          <p className="mt-1 text-sm text-gray-500">Compact business context so the admin home stays connected to active pipeline health.</p>
-          <div className="mt-4 grid gap-3 sm:grid-cols-2">
-            <div className="rounded-xl bg-gray-50 px-4 py-3">
-              <p className="text-[11px] font-semibold uppercase tracking-widest text-gray-400">Pipeline</p>
-              <p className="mt-2 text-2xl font-black text-gray-900">{teamSnapshot?.value ?? "—"}</p>
-              <p className="mt-1 text-sm text-gray-500">{teamSnapshot?.detail ?? "Team snapshot unavailable"}</p>
-            </div>
-          </div>
+    <div className="space-y-8">
+      <div className="space-y-2">
+        <h1 className="text-3xl font-semibold tracking-tight text-slate-950">Operations Console</h1>
+        <p className="max-w-3xl text-sm text-slate-500">
+          Admin home is now organized around operational risk and queue health first, with sales context kept secondary.
+        </p>
+      </div>
+      {error ? (
+        <div className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+          {error}
         </div>
-        <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
-          <h2 className="text-sm font-bold uppercase tracking-wide text-gray-900">Recent operational activity</h2>
-          <div className="mt-4 space-y-3">
-            {summary.recentActivity.map((item) => (
-              <div key={item.key} className="rounded-xl bg-gray-50 px-4 py-3">
-                <p className="text-sm font-semibold text-gray-900">{item.label}</p>
-                <p className="mt-1 text-sm text-gray-500">{item.detail}</p>
+      ) : null}
+      {loading && !data ? (
+        <section className="space-y-4" aria-label="Operations workspace">
+          <div>
+            <h2 className="text-lg font-semibold text-slate-950">Needs attention now</h2>
+            <p className="text-sm text-slate-500">Operational queues and system signals that need review first.</p>
+          </div>
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+            {Array.from({ length: 6 }).map((_, index) => (
+              <div key={index} className="rounded-2xl border border-slate-200 bg-white p-4">
+                <div className="h-4 w-24 animate-pulse rounded bg-slate-100" />
+                <div className="mt-4 h-8 w-12 animate-pulse rounded bg-slate-100" />
+                <div className="mt-2 h-3 w-28 animate-pulse rounded bg-slate-100" />
               </div>
             ))}
           </div>
-        </div>
-      </section>
+        </section>
+      ) : (
+        <AdminOperationsWorkspace tiles={tiles} />
+      )}
     </div>
   );
 }

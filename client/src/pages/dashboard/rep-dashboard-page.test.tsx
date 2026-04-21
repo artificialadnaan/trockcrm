@@ -174,4 +174,21 @@ describe("RepDashboardPage", () => {
     expect(html).toContain("Deals Snapshot");
     expect(html).toContain('href="/pipeline/my-cleanup"');
   });
+
+  it("keeps the board shell visible while the summary hook is still loading", () => {
+    mocks.useRepDashboardMock.mockReturnValue({
+      loading: true,
+      error: null,
+      data: null,
+    });
+
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <RepDashboardPage />
+      </MemoryRouter>
+    );
+
+    expect(html).toContain("My Board");
+    expect(html).toContain("aria-label=\"My Board\"");
+  });
 });

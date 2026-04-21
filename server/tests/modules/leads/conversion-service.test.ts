@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getTableColumns } from "drizzle-orm";
@@ -7,6 +7,7 @@ import {
   companies,
   contacts,
   deals,
+  dealTeamRoleEnum,
   leadStageHistory,
   leads,
   properties,
@@ -26,10 +27,22 @@ const pipelineMocks = vi.hoisted(() => ({
   getStageBySlug: vi.fn(),
 }));
 
+const leadStageGateMocks = vi.hoisted(() => ({
+  validateLeadStageGate: vi.fn(),
+}));
+
 vi.mock("../../../src/modules/pipeline/service.js", () => ({
   getAllStages: pipelineMocks.getAllStages,
   getStageById: pipelineMocks.getStageById,
   getStageBySlug: pipelineMocks.getStageBySlug,
+}));
+
+vi.mock("../../../src/modules/leads/stage-gate.js", () => ({
+  validateLeadStageGate: leadStageGateMocks.validateLeadStageGate,
+}));
+
+vi.mock("../../../src/modules/assignment-tasks/service.js", () => ({
+  createAssignmentTaskIfNeeded: vi.fn(async () => undefined),
 }));
 
 vi.mock("@trock-crm/shared/schema", async () => import("../../../../shared/src/schema/index.js"));
@@ -56,6 +69,13 @@ const salesFunnelAlignmentMigrationPath = resolve(
   "../../../../migrations/0028_sales_funnel_model_alignment.sql"
 );
 const salesFunnelAlignmentMigrationSql = readFileSync(salesFunnelAlignmentMigrationPath, "utf8");
+const workflowAlignmentMigrationPath = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../../migrations/0028_pipeline_workflow_alignment.sql"
+);
+const workflowAlignmentMigrationSql = existsSync(workflowAlignmentMigrationPath)
+  ? readFileSync(workflowAlignmentMigrationPath, "utf8")
+  : "";
 
 function expectSqlToMatch(pattern: RegExp): void {
   expect(migrationSql).toMatch(pattern);
@@ -67,6 +87,10 @@ function expectPipelineFamilySqlToMatch(pattern: RegExp): void {
 
 function expectSalesFunnelAlignmentSqlToMatch(pattern: RegExp): void {
   expect(salesFunnelAlignmentMigrationSql).toMatch(pattern);
+}
+
+function expectWorkflowAlignmentSqlToMatch(pattern: RegExp): void {
+  expect(workflowAlignmentMigrationSql).toMatch(pattern);
 }
 
 type RouteServiceMocks = {
@@ -270,13 +294,14 @@ interface FakeDealRow {
   dealNumber: string;
   name: string;
   stageId: string;
+  pipelineDisposition?: "opportunity" | "deals" | "service" | null;
   assignedRepId: string;
   primaryContactId: string | null;
   companyId: string | null;
   propertyId: string | null;
   sourceLeadId: string | null;
   source: string | null;
-  workflowRoute: "estimating" | "service";
+  workflowRoute: "estimating" | "service" | null;
 }
 
 interface FakeUserOfficeAccessRow {
@@ -670,10 +695,22 @@ const dealStage = {
   isTerminal: false,
 };
 
+const opportunityDealStage = {
+  id: "stage-opportunity-standard",
+  name: "Opportunity",
+  slug: "opportunity",
+  displayOrder: 1,
+  workflowFamily: "standard_deal" as const,
+  isActivePipeline: true,
+  isTerminal: false,
+};
+
 beforeEach(() => {
   pipelineMocks.getAllStages.mockReset();
   pipelineMocks.getStageById.mockReset();
   pipelineMocks.getStageBySlug.mockReset();
+  leadStageGateMocks.validateLeadStageGate.mockReset();
+  leadStageGateMocks.validateLeadStageGate.mockResolvedValue({ allowed: true });
   pipelineMocks.getAllStages.mockImplementation(async (workflowFamily?: string) => {
     if (workflowFamily === "lead") {
       return [
@@ -705,9 +742,21 @@ beforeEach(() => {
       if (slug === "converted") {
         return convertedLeadStage;
       }
+      if (slug === "qualified_for_opportunity") {
+        return {
+          ...readyForOpportunityStage,
+          id: "stage-qualified-for-opportunity",
+          name: "Qualified for Opportunity",
+          slug: "qualified_for_opportunity",
+        };
+      }
       if (slug === "ready_for_opportunity") {
         return readyForOpportunityStage;
       }
+    }
+
+    if (workflowFamily === "standard_deal" && slug === "opportunity") {
+      return opportunityDealStage;
     }
 
     return null;
@@ -835,6 +884,28 @@ describe("Lead Conversion Shared Contract", () => {
   it("seeds minimal lead-family stages for fresh environments", () => {
     expectPipelineFamilySqlToMatch(
       /INSERT INTO public\.pipeline_stage_config[\s\S]*\('Contacted',\s*'contacted',\s*1,\s*'lead',\s*true,\s*false,\s*'#2563EB'\)[\s\S]*\('Converted',\s*'converted',\s*99,\s*'lead',\s*false,\s*true,\s*'#16A34A'\)/s
+    );
+  });
+
+  it("adds workflow alignment migration seeds for lead qualification and opportunity", () => {
+    expectWorkflowAlignmentSqlToMatch(/'New',\s*'lead_new',\s*1,\s*'lead'/);
+    expectWorkflowAlignmentSqlToMatch(/'Lead Go\/No-Go',\s*'lead_go_no_go'/);
+    expectWorkflowAlignmentSqlToMatch(
+      /'Qualified for Opportunity',\s*'qualified_for_opportunity'/
+    );
+    expectWorkflowAlignmentSqlToMatch(/'Opportunity',\s*'opportunity',\s*1,\s*'standard_deal'/);
+  });
+
+  it("persists neutral opportunity routing state on deals", () => {
+    const columns = getTableColumns(deals) as Record<string, any>;
+
+    expect(columns.pipelineDisposition?.name).toBe("pipeline_disposition");
+    expect(columns.workflowRoute.notNull).toBe(false);
+  });
+
+  it("expands deal team roles for service and operations ownership", () => {
+    expect(dealTeamRoleEnum.enumValues).toEqual(
+      expect.arrayContaining(["client_services", "operations"])
     );
   });
 });
@@ -1144,7 +1215,7 @@ describe("Lead Service", () => {
     ).rejects.toMatchObject({ statusCode: 403, message: "Only directors can record go/no-go decisions" });
   });
 
-  it("rejects direct lead stage changes through updateLead", async () => {
+  it("allows direct lead stage changes through updateLead when the gate passes", async () => {
     const tenantDb = createFakeTenantDb({
       leads: [
         {
@@ -1171,15 +1242,15 @@ describe("Lead Service", () => {
       now: () => new Date("2026-04-15T15:00:00.000Z"),
     });
 
-    await expect(
-      service.updateLead(
-        tenantDb as never,
-        "lead-1",
-        { stageId: qualifiedLeadStage.id },
-        "director",
-        "director-1"
-      )
-    ).rejects.toMatchObject({ statusCode: 400, message: "Use the lead stage transition endpoint to move a lead" });
+    const updatedLead = await service.updateLead(
+      tenantDb as never,
+      "lead-1",
+      { stageId: qualifiedLeadStage.id },
+      "director",
+      "director-1"
+    );
+
+    expect(updatedLead.stageId).toBe(qualifiedLeadStage.id);
   });
 });
 
@@ -1252,6 +1323,79 @@ describe("Lead Conversion Service", () => {
       }),
     ]);
     expect(tenantDb.state.deals).toHaveLength(1);
+  });
+
+  it("converts qualified leads into a neutral opportunity deal", async () => {
+    const tenantDb = createFakeTenantDb({
+      leads: [
+        {
+          id: "lead-1",
+          companyId: "company-1",
+          propertyId: "property-1",
+          primaryContactId: null,
+          name: "Palm Villas repaint",
+          stageId: "lead-stage-1",
+          assignedRepId: "rep-1",
+          status: "open",
+          source: "Referral",
+          description: "Property manager requested pre-bid walk",
+          stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+          convertedAt: null,
+          isActive: true,
+          createdAt: new Date("2026-04-12T15:00:00.000Z"),
+          updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+        },
+      ],
+    });
+    const service = createLeadConversionService({
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+      getStageBySlug: async (slug: string, workflowFamily?: string) => {
+        if (workflowFamily === "lead" && slug === "converted") {
+          return convertedLeadStage as never;
+        }
+
+        if (workflowFamily === "standard_deal" && slug === "opportunity") {
+          return {
+            id: "stage-opportunity-standard",
+            name: "Opportunity",
+            slug: "opportunity",
+            workflowFamily: "standard_deal",
+            displayOrder: 1,
+            isTerminal: false,
+            isActivePipeline: true,
+          } as never;
+        }
+
+        return null;
+      },
+      createDeal: async (_tenantDb, input) => {
+        const deal = {
+          id: "deal-2",
+          dealNumber: "TR-2026-0002",
+          pipelineDisposition: input.pipelineDisposition ?? null,
+          workflowRoute: input.workflowRoute ?? null,
+          primaryContactId: input.primaryContactId ?? null,
+          companyId: input.companyId ?? null,
+          propertyId: input.propertyId ?? null,
+          sourceLeadId: input.sourceLeadId ?? null,
+          source: input.source ?? null,
+          assignedRepId: input.assignedRepId,
+          stageId: input.stageId,
+          name: input.name,
+        };
+        return deal as never;
+      },
+    });
+
+    const result = await service.convertLead(tenantDb as never, {
+      leadId: "lead-1",
+      userRole: "rep",
+      userId: "rep-1",
+    } as any);
+
+    expect(result.deal.stageId).toBe("stage-opportunity-standard");
+    expect(result.deal.pipelineDisposition).toBe("opportunity");
+    expect(result.deal.workflowRoute).toBeNull();
   });
 
   it("prevents multiple conversions from the same lead", async () => {
@@ -1382,6 +1526,9 @@ describe("Lead Conversion Service", () => {
     pipelineMocks.getStageBySlug.mockImplementation(async (slug: string, workflowFamily?: string) => {
       if (workflowFamily === "lead" && slug === "converted") {
         return convertedLeadStage;
+      }
+      if (workflowFamily === "standard_deal" && slug === "opportunity") {
+        return opportunityDealStage;
       }
       return null;
     });
@@ -2009,6 +2156,12 @@ describe("Deal Lineage Enforcement", () => {
 });
 
 describe("Public Deal Route Guardrails", () => {
+  it("exposes a dedicated routing review route", async () => {
+    const { dealRoutes } = await loadDealRoutesWithServiceMocks();
+
+    expect(() => findDealRouteHandler(dealRoutes, "post", "/:id/routing-review")).not.toThrow();
+  });
+
   it("strips migrationMode from public deal-create requests", async () => {
     const { dealRoutes, routeServiceMocks } = await loadDealRoutesWithServiceMocks();
     routeServiceMocks.createDeal.mockResolvedValueOnce({ id: "deal-1" });

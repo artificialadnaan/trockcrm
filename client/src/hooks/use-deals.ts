@@ -5,6 +5,8 @@ import type { StagePageQuery } from "@/lib/pipeline-stage-page";
 
 export type WorkflowRoute = "estimating" | "service";
 export type DealScopingIntakeStatus = "draft" | "ready" | "activated";
+export type DealPipelineDisposition = "opportunity" | "deals" | "service";
+export type DealDepartment = "sales" | "estimating" | "client_services" | "operations";
 
 export interface DealScopingSectionData {
   [sectionKey: string]: unknown;
@@ -57,12 +59,26 @@ export interface DealScopingIntake {
   updatedAt: string;
 }
 
+export interface DealPaymentEvent {
+  id: string;
+  dealId: string;
+  recordedByUserId: string | null;
+  paidAt: string;
+  grossRevenueAmount: string;
+  grossMarginAmount: string | null;
+  isCreditMemo: boolean;
+  notes: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface Deal {
   id: string;
   dealNumber: string;
   name: string;
   stageId: string;
-  workflowRoute: WorkflowRoute;
+  pipelineDisposition: DealPipelineDisposition;
+  workflowRoute: WorkflowRoute | null;
   assignedRepId: string;
   companyId: string | null;
   propertyId: string | null;
@@ -160,6 +176,23 @@ export interface DealDetail extends Deal {
     createdAt: string;
     updatedAt: string;
   }>;
+  routingHistory: Array<{
+    id: string;
+    dealId: string;
+    fromWorkflowRoute: WorkflowRoute | null;
+    toWorkflowRoute: WorkflowRoute;
+    valueSource: string;
+    triggeringValue: string;
+    reason: string | null;
+    changedBy: string;
+    createdAt: string;
+  }>;
+  departmentOwnership: {
+    currentDepartment: DealDepartment;
+    acceptanceStatus: "pending" | "accepted";
+    effectiveOwnerUserId: string | null;
+    pendingDepartment: DealDepartment | null;
+  };
 }
 
 export interface DealFilters {
@@ -343,6 +376,26 @@ export async function updateDeal(dealId: string, input: Partial<Deal>) {
   return api<{ deal: Deal }>(`/deals/${dealId}`, { method: "PATCH", json: input });
 }
 
+export async function getDealPayments(dealId: string) {
+  return api<{ payments: DealPaymentEvent[] }>(`/deals/${dealId}/payments`);
+}
+
+export async function createDealPayment(
+  dealId: string,
+  input: {
+    paidAt: string;
+    grossRevenueAmount: number;
+    grossMarginAmount?: number | null;
+    isCreditMemo?: boolean;
+    notes?: string | null;
+  }
+) {
+  return api<{ payment: DealPaymentEvent }>(`/deals/${dealId}/payments`, {
+    method: "POST",
+    json: input,
+  });
+}
+
 export async function changeDealStage(
   dealId: string,
   targetStageId: string,
@@ -405,6 +458,20 @@ export async function patchDealScopingIntake(
   );
 }
 
+export async function applyOpportunityRoutingReview(
+  dealId: string,
+  input: {
+    valueSource: "sales_estimated_opportunity_value" | "procore_bidboard_estimate";
+    amount: string;
+    reason?: string;
+  }
+) {
+  return api<{ deal: Deal }>(`/deals/${dealId}/routing-review`, {
+    method: "POST",
+    json: input,
+  });
+}
+
 export async function getDealScopingReadiness(dealId: string) {
   return api<{ readiness: DealScopingReadiness }>(`/deals/${dealId}/scoping-intake/readiness`);
 }
@@ -417,7 +484,7 @@ export function useDealBoard(scope: "mine" | "team" | "all", includeDd: boolean)
   const refetch = useCallback(() => {
     setLoading(true);
     setError(null);
-    return api<DealBoardApiResponse>(`/deals/pipeline?scope=${scope}&includeDd=${includeDd}`)
+    return api<DealBoardApiResponse>(`/deals/pipeline?scope=${scope}&includeDd=${includeDd}&previewLimit=8`)
       .then((result) => {
         const normalized = normalizeDealBoardResponse(result);
         setBoard(normalized);
