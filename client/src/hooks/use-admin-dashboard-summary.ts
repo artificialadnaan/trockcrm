@@ -30,9 +30,10 @@ export function useAdminDashboardSummary() {
   const { pagination, loading: mergeLoading } = useDuplicateQueue("pending");
   const { dashboard: disconnectDashboard, loading: disconnectLoading } = useSalesProcessDisconnectDashboard(10);
   const { data: directorData, loading: directorLoading } = useDirectorDashboard(presetToDateRange("ytd"));
-  const [auditChangeCount24h, setAuditChangeCount24h] = useState(0);
+  const [auditChangeCount24h, setAuditChangeCount24h] = useState<number | null>(0);
   const [unhealthySources, setUnhealthySources] = useState<string[]>([]);
-  const [procoreIssueCount, setProcoreIssueCount] = useState(0);
+  const [unavailableSources, setUnavailableSources] = useState<string[]>([]);
+  const [procoreIssueCount, setProcoreIssueCount] = useState<number | null>(0);
   const [extraLoading, setExtraLoading] = useState(true);
 
   const loadOperationalSignals = useCallback(async () => {
@@ -41,33 +42,37 @@ export function useAdminDashboardSummary() {
     const fromDate = twentyFourHoursAgo.toISOString().slice(0, 10);
 
     try {
-      const [auditResponse, procoreResponse] = await Promise.all([
+      const [auditResult, procoreResult] = await Promise.allSettled([
         api<AdminAuditResponse>(`/admin/audit?page=1&limit=200&fromDate=${fromDate}`),
         api<ProcoreSyncStatusResponse>("/procore/sync-status"),
       ]);
 
-      setAuditChangeCount24h(
-        auditResponse.rows.filter(
-          (row) => new Date(row.createdAt).getTime() >= twentyFourHoursAgo.getTime()
-        ).length
-      );
-
       const nextUnhealthySources: string[] = [];
-      const nextProcoreIssueCount =
-        procoreResponse.summary.conflict +
-        procoreResponse.summary.error +
-        (procoreResponse.circuit_breaker.state === "closed" ? 0 : 1);
+      const nextUnavailableSources: string[] = [];
+      const nextAuditChangeCount24h =
+        auditResult.status === "fulfilled" ? auditResult.value.total : null;
+      let nextProcoreIssueCount: number | null = null;
 
-      if (nextProcoreIssueCount > 0) {
-        nextUnhealthySources.push("procore");
+      if (auditResult.status !== "fulfilled") {
+        nextUnavailableSources.push("audit");
       }
 
+      if (procoreResult.status === "fulfilled") {
+        nextProcoreIssueCount =
+          procoreResult.value.summary.conflict +
+          procoreResult.value.summary.error +
+          (procoreResult.value.circuit_breaker.state === "closed" ? 0 : 1);
+        if (nextProcoreIssueCount > 0) {
+          nextUnhealthySources.push("procore");
+        }
+      } else {
+        nextUnavailableSources.push("procore");
+      }
+
+      setAuditChangeCount24h(nextAuditChangeCount24h);
       setProcoreIssueCount(nextProcoreIssueCount);
       setUnhealthySources(nextUnhealthySources);
-    } catch {
-      setAuditChangeCount24h(0);
-      setProcoreIssueCount(0);
-      setUnhealthySources([]);
+      setUnavailableSources(nextUnavailableSources);
     } finally {
       setExtraLoading(false);
     }
@@ -91,6 +96,7 @@ export function useAdminDashboardSummary() {
       migrationExceptionCount: exceptions.reduce((sum, group) => sum + group.count, 0),
       procoreIssueCount,
       unhealthySources: combinedUnhealthySources,
+      unavailableSources,
       auditChangeCount24h,
       pipelineValue: directorData?.ddVsPipeline.totalValue ?? 0,
       activeDealCount: directorData?.ddVsPipeline.totalCount ?? 0,
@@ -105,6 +111,7 @@ export function useAdminDashboardSummary() {
     pagination.total,
     procoreIssueCount,
     unhealthySources,
+    unavailableSources,
   ]);
 
   return {

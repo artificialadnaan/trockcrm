@@ -24,9 +24,10 @@ export function buildAdminDashboardSummary(input: {
   mergeQueueCount: number;
   disconnectCount: number;
   migrationExceptionCount: number;
-  procoreIssueCount: number;
+  procoreIssueCount: number | null;
   unhealthySources: string[];
-  auditChangeCount24h: number;
+  unavailableSources?: string[];
+  auditChangeCount24h: number | null;
   pipelineValue: number;
   activeDealCount: number;
 }) {
@@ -35,6 +36,11 @@ export function buildAdminDashboardSummary(input: {
     input.openInterventionCount +
     input.mergeQueueCount +
     input.migrationExceptionCount;
+  const unavailableSources = input.unavailableSources ?? [];
+  const healthDetails = [
+    ...input.unhealthySources,
+    ...unavailableSources.map((source) => `${source} unavailable`),
+  ];
 
   return {
     kpis: [
@@ -45,16 +51,19 @@ export function buildAdminDashboardSummary(input: {
       },
       {
         label: "System health",
-        value: String(input.unhealthySources.length),
+        value: String(healthDetails.length),
         detail:
-          input.unhealthySources.length === 0
+          healthDetails.length === 0
             ? "All monitored sources healthy"
-            : input.unhealthySources.join(" • "),
+            : healthDetails.join(" • "),
       },
       {
         label: "Workspace changes",
-        value: String(input.auditChangeCount24h),
-        detail: "Audit events in the last 24 hours",
+        value: input.auditChangeCount24h == null ? "—" : String(input.auditChangeCount24h),
+        detail:
+          input.auditChangeCount24h == null
+            ? "Audit signal unavailable"
+            : "Audit events in the last 24 hours",
       },
       {
         label: "Team snapshot",
@@ -101,15 +110,21 @@ export function buildAdminDashboardSummary(input: {
       {
         key: "audit-log",
         label: "Audit Log",
-        value: String(input.auditChangeCount24h),
-        detail: "Recent admin-facing audit events",
+        value: input.auditChangeCount24h == null ? "—" : String(input.auditChangeCount24h),
+        detail:
+          input.auditChangeCount24h == null
+            ? "Audit signal unavailable"
+            : "Recent admin-facing audit events",
         href: "/admin/audit",
       },
       {
         key: "procore-sync",
         label: "Procore Sync",
-        value: String(input.procoreIssueCount),
-        detail: "Current Procore sync issues",
+        value: input.procoreIssueCount == null ? "—" : String(input.procoreIssueCount),
+        detail:
+          input.procoreIssueCount == null
+            ? "Procore status unavailable"
+            : "Current Procore sync issues",
         href: "/admin/procore",
       },
     ] satisfies AdminWorkspaceItem[],
@@ -117,15 +132,18 @@ export function buildAdminDashboardSummary(input: {
       {
         key: "audit-window",
         label: "Audit window",
-        detail: `${input.auditChangeCount24h} admin-facing changes in the last 24 hours`,
+        detail:
+          input.auditChangeCount24h == null
+            ? "Audit signal unavailable"
+            : `${input.auditChangeCount24h} admin-facing changes in the last 24 hours`,
       },
       {
         key: "system-health",
         label: "System health detail",
         detail:
-          input.unhealthySources.length === 0
+          healthDetails.length === 0
             ? "All monitored sources healthy"
-            : `Watch ${input.unhealthySources.join(" • ")}`,
+            : `Watch ${healthDetails.join(" • ")}`,
       },
     ] satisfies AdminRecentActivityItem[],
   };
