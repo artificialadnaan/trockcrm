@@ -18,6 +18,7 @@ import {
   getDdVsPipeline,
   getWinLossRatioByRep,
 } from "../reports/service.js";
+import { getMyCleanupQueue } from "../admin/cleanup-queue-service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -29,6 +30,11 @@ export interface StaleLeadDashboardRow {
   stageName: string;
   repName: string;
   daysInStage: number;
+}
+
+export interface MyCleanupSummary {
+  total: number;
+  byReason: Array<{ reasonCode: string; count: number }>;
 }
 
 async function getStaleLeadWatchlist(
@@ -96,6 +102,7 @@ export interface RepDashboardData {
     averageDaysInStage: number | null;
     leads: StaleLeadDashboardRow[];
   };
+  myCleanup: MyCleanupSummary;
 }
 
 /**
@@ -122,6 +129,7 @@ export async function getRepDashboard(
     complianceResult,
     pipelineResult,
     staleLeadResult,
+    myCleanupResult,
   ] = await Promise.all([
     // 1. Active deals count + value for this rep
     tenantDb.execute(sql`
@@ -188,6 +196,8 @@ export async function getRepDashboard(
     `),
 
     getStaleLeadWatchlist(tenantDb, { repId: userId }),
+
+    getMyCleanupQueue(tenantDb, userId),
   ]);
 
   const adRows = (activeDealResult as any).rows ?? activeDealResult;
@@ -226,6 +236,10 @@ export async function getRepDashboard(
       count: staleLeadResult.length,
       averageDaysInStage: staleLeadAverage,
       leads: staleLeadResult,
+    },
+    myCleanup: {
+      total: myCleanupResult.rows.length,
+      byReason: myCleanupResult.byReason,
     },
   };
 }

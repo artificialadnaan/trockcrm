@@ -21,6 +21,12 @@ vi.mock("../../../src/db.js", () => ({
   db: createChainableMock([]),
 }));
 
+const getMyCleanupQueueMock = vi.hoisted(() => vi.fn());
+
+vi.mock("../../../src/modules/admin/cleanup-queue-service.js", () => ({
+  getMyCleanupQueue: getMyCleanupQueueMock,
+}));
+
 function createMockTenantDb(responses: any[][] = []) {
   let callIndex = 0;
   return {
@@ -59,9 +65,24 @@ function extractSqlText(value: unknown): string {
 }
 
 describe("Dashboard Service", () => {
+  beforeEach(() => {
+    getMyCleanupQueueMock.mockReset();
+    getMyCleanupQueueMock.mockResolvedValue({ rows: [], byReason: [] });
+  });
+
   describe("getRepDashboard", () => {
     it("should return all dashboard sections", async () => {
       const { getRepDashboard } = await import("../../../src/modules/dashboard/service.js");
+      getMyCleanupQueueMock.mockResolvedValue({
+        rows: [
+          { recordId: "deal-1" },
+          { recordId: "lead-1" },
+        ],
+        byReason: [
+          { reasonCode: "missing_next_step", count: 1 },
+          { reasonCode: "stale_no_recent_activity", count: 1 },
+        ],
+      });
       const tenantDb = createMockTenantDb([
         // active deals
         [{ count: "5", total_value: "500000" }],
@@ -78,11 +99,17 @@ describe("Dashboard Service", () => {
       ]);
 
       const result = await getRepDashboard(tenantDb, "user-1");
+      expect(getMyCleanupQueueMock).toHaveBeenCalledWith(tenantDb, "user-1");
       expect(result.activeDeals.count).toBe(5);
       expect(result.tasksToday.overdue).toBe(2);
       expect(result.activityThisWeek.total).toBe(20);
       expect(result.followUpCompliance.complianceRate).toBe(90);
       expect(result.pipelineByStage).toHaveLength(1);
+      expect(result.myCleanup.total).toBe(2);
+      expect(result.myCleanup.byReason).toEqual([
+        { reasonCode: "missing_next_step", count: 1 },
+        { reasonCode: "stale_no_recent_activity", count: 1 },
+      ]);
     });
 
     it("should handle empty data gracefully", async () => {
@@ -102,6 +129,8 @@ describe("Dashboard Service", () => {
       expect(result.activityThisWeek.total).toBe(0);
       expect(result.followUpCompliance.complianceRate).toBe(100);
       expect(result.pipelineByStage).toHaveLength(0);
+      expect(result.myCleanup.total).toBe(0);
+      expect(result.myCleanup.byReason).toEqual([]);
     });
 
     it("uses responsible activity ownership in the weekly activity query", async () => {
@@ -176,6 +205,7 @@ describe("Dashboard Service", () => {
       expect(result).toHaveProperty("activityThisWeek");
       expect(result).toHaveProperty("followUpCompliance");
       expect(result).toHaveProperty("pipelineByStage");
+      expect(result).toHaveProperty("myCleanup");
 
       // Verify types
       expect(typeof result.activeDeals.count).toBe("number");
@@ -184,6 +214,8 @@ describe("Dashboard Service", () => {
       expect(typeof result.activityThisWeek.calls).toBe("number");
       expect(typeof result.followUpCompliance.complianceRate).toBe("number");
       expect(Array.isArray(result.pipelineByStage)).toBe(true);
+      expect(typeof result.myCleanup.total).toBe("number");
+      expect(Array.isArray(result.myCleanup.byReason)).toBe(true);
     });
   });
 });
