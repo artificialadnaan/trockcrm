@@ -150,6 +150,13 @@ After the redesign:
 
 This preserves director access for admins without forcing admin home to lead with sales-rep browsing.
 
+Sidebar rule:
+
+- the shared `Dashboard` nav item continues to point to `/` for every role
+- the `Director` nav item continues to point to `/director` for admins and directors
+- for admins, `/` is the operational home and `/director` is the explicit team-performance lens
+- for directors, `/` and `/director` may resolve to the same director-focused dashboard surface in V1
+
 ### Functional preservation boundary
 
 This redesign does not remove:
@@ -158,6 +165,9 @@ This redesign does not remove:
 - rep drill-down navigation
 - pipeline charting
 - win-rate trend charting
+- the existing performance trends comparison table
+- the existing director blind-spot summary surface
+- the current dashboard quick actions, though they may be restyled or renamed for clarity
 - links into reports, pipeline, deals, AI actions, interventions, migration, audit, sync, and merge queue
 
 The redesign changes hierarchy and interaction model, not product capability.
@@ -225,12 +235,12 @@ Rules:
 
 Directors see:
 
+- `True pipeline`
+- `DD pipeline`
 - `Total pipeline`
-- `Active deals`
 - `Stale deals`
-- `Stale leads`
 
-These KPIs replace the current split emphasis on multiple pipeline variants as the first thing on screen. DD and pipeline-specific breakdowns remain available in supporting sections rather than consuming all top-row attention.
+These KPIs preserve the current DD-versus-pipeline operating view while removing less important top-row competition.
 
 ### Main workspace band
 
@@ -248,15 +258,25 @@ The director workspace includes:
 - page-size control
 - pagination controls
 - row click-through into the current rep detail page
+- a compact header action row preserving quick access to reports and AI actions
 
 ### Secondary context band
 
 Directors then see:
 
+- a compact stale-lead summary
 - pipeline by stage
 - win-rate trend
+- the existing performance trends comparison table in a lower-priority section
 - a compact activity summary
-- concise stale-work alerts
+- a concise stale-work alert panel
+- the existing director blind-spot summary surface
+
+Placement rule:
+
+- `ddVsPipeline` lives in the director primary KPI band
+- the performance trends comparison table and director blind-spot summary stay on the director page, but below the rep workspace
+- the old full activity-by-rep list does not return
 
 The existing activity-by-rep section is reduced to a summary block rather than another unbounded list.
 
@@ -273,10 +293,17 @@ Admins see:
 
 Definitions:
 
-- `Needs attention` combines queue and alert counts that indicate open work requiring triage
-- `System health` reflects sync and operational status
-- `Workspace changes` reflects recent user/config/audit movement
-- `Team snapshot` gives one lightweight commercial-health number so the admin page still feels connected to the business
+- `Needs attention` = the sum of open AI Actions, open Intervention cases, open Merge Queue items, and migration review items requiring action
+- `System health` = the count of currently unhealthy operational sources, starting with Procore sync plus any active migration or admin process failures surfaced by existing admin data
+- `Workspace changes` = the count of recent admin-facing audit events for users, offices, and pipeline configuration over a fixed trailing 24-hour window
+- `Team snapshot` = one lightweight commercial-health metric, recommended as total pipeline value with active deal count in the supporting label
+
+Counting rule:
+
+- in V1, these KPIs are source-based summaries, not deduplicated entity counts
+- if the same deal appears in both AI Actions and Interventions, each source still contributes to its own KPI because they represent different queues
+- each KPI must show its source breakdown in supporting text so the total is explainable
+- `System health` shows `0` when all monitored sources are healthy and a positive count when one or more monitored sources are failing; the supporting label names the failing sources
 
 ### Main workspace band
 
@@ -299,6 +326,11 @@ Each tile or row shows:
 - current count or status
 - one short description of why it matters
 - one direct action link
+
+Priority rule:
+
+- tiles are ordered by operational urgency, not alphabetically
+- the first row should surface the sources contributing to `Needs attention` before lower-urgency oversight surfaces
 
 The board should make “what needs action first” obvious without embedding full page replicas.
 
@@ -451,9 +483,11 @@ The director page can continue using:
 - rep cards
 - pipeline by stage
 - win-rate trend
+- performance comparison data for the current performance trends table
 - stale deals
 - stale leads
-- DD versus pipeline summary where still needed for secondary context
+- DD versus pipeline summary in the primary KPI band
+- director blind-spot summary data for the lower-priority blind-spot section
 
 ### Admin data
 
@@ -478,6 +512,11 @@ Rules:
 - show only actions that matter for the active role
 - prefer plain labels over icon-only affordances for the primary actions
 - keep the number of always-visible quick actions low
+
+Preservation rule:
+
+- the director-facing quick action row must keep direct access to Reports and AI Actions in V1
+- the admin-facing quick action row should prioritize Interventions, AI Actions, and Audit or Sync depending on which status source is currently failing
 
 ### Drill-down behavior
 
