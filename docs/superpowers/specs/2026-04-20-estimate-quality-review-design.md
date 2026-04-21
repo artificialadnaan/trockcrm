@@ -396,7 +396,7 @@ Explicit-row duplicate rule for this slice:
 - instead, both remain visible and the workbench flags them as a duplicate-review condition for the estimator
 - duplicate suppression only removes inferred rows when an explicit extracted or manual row already covers that intent
 - duplicate-review grouping is determined by same `estimate_section_name` plus either matching `normalized_intent` or matching selected catalog item id
-- only one row in a duplicate-review group may remain promotable; the workbench must block promotion for the group until the estimator rejects or otherwise demotes the extra rows
+- only one row in a duplicate-review group may remain promotable; the workbench must block promotion for the group until the estimator rejects the extra rows or explicitly returns them to `pending_review`
 - when one row in a duplicate-review group is promoted, any other rows in that group that are still `accepted`, `alternate_selected`, or `overridden` are automatically moved back to `pending_review`
 - carried-forward clones must re-evaluate duplicate-review grouping against already-promoted rows for the deal, so a group with an already promoted winner stays blocked until the remaining rows are edited into a different group or rejected
 - the first promoted row in a duplicate-review group becomes the canonical winner for that deal in this slice; later rows in the same group cannot supersede it without a separate reopen/supersede flow, which is out of scope here
@@ -466,6 +466,10 @@ Allowed actions:
 - reject:
   - marks the parent row `rejected`
   - keeps audit evidence but removes it from promotable output
+- return to pending review:
+  - applies when an estimator wants to keep a row visible but make it non-promotable
+  - sets the parent row back to `pending_review`
+  - is the explicit demotion action used to resolve duplicate-review groups without rejecting the row
 - add missing item:
   - creates a new parent recommendation row with `source_type = 'manual'`
   - persists estimator-entered manual fields on the parent row
