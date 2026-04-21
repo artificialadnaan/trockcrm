@@ -317,8 +317,9 @@ export async function runEstimateGeneration(
       };
       const dependencySupportCount =
         typeof extraction.metadataJson === "object" &&
-        extraction.metadataJson !== null &&
-        Number((extraction.metadataJson as Record<string, unknown>).dependencySupportCount ?? 0);
+        extraction.metadataJson !== null
+          ? Number((extraction.metadataJson as Record<string, unknown>).dependencySupportCount ?? 0)
+          : 0;
       const historicalSupportCount = topMatch.historicalLineItemIds.length;
 
       if (

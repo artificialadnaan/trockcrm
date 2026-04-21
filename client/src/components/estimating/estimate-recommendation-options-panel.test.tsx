@@ -240,14 +240,15 @@ describe("EstimateRecommendationOptionsPanel", () => {
       dealId: "deal-1",
       generationRunId: "run-1",
       estimateSectionName: "Doors",
-      input: {
-        label: "Walk-in door kit",
-        quantity: "2",
-        unit: "ea",
-        unitPrice: "125.00",
-        notes: "Estimator note",
-        selectedSourceType: "manual",
-      },
+        input: {
+          label: "Walk-in door kit",
+          quantity: "2",
+          unit: "ea",
+          unitPrice: "125.00",
+          notes: "Estimator note",
+          selectedSourceType: "manual",
+          selectedOptionId: "",
+        },
       catalogQuery: "door",
       catalogOptions: [
         {

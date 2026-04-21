@@ -64,6 +64,7 @@ export async function promoteManualRowToLocalCatalog(args: {
   }
 
   if (existing.promotedLocalCatalogItemId) {
+    const localCatalogItemId = existing.promotedLocalCatalogItemId;
     const values = resolveManualPromotionValues({
       manualLabel: existing.manualLabel,
       manualQuantity: existing.manualQuantity,
@@ -79,26 +80,28 @@ export async function promoteManualRowToLocalCatalog(args: {
     return {
       recommendation: existing,
       localCatalogItem: buildSyntheticLocalCatalogItem({
-        localCatalogItemId: existing.promotedLocalCatalogItemId,
+        localCatalogItemId,
         manualLabel: existing.manualLabel,
         values,
       }),
     };
   }
 
-  const [reused] = await args.tenantDb
-    .select({
-      id: estimatePricingRecommendations.promotedLocalCatalogItemId,
-    })
-    .from(estimatePricingRecommendations)
-    .where(
-      and(
-        eq(estimatePricingRecommendations.dealId, args.dealId),
-        eq(estimatePricingRecommendations.manualIdentityKey, existing.manualIdentityKey),
-        isNotNull(estimatePricingRecommendations.promotedLocalCatalogItemId)
-      )
-    )
-    .limit(1);
+  const [reused] = existing.manualIdentityKey
+    ? await args.tenantDb
+        .select({
+          id: estimatePricingRecommendations.promotedLocalCatalogItemId,
+        })
+        .from(estimatePricingRecommendations)
+        .where(
+          and(
+            eq(estimatePricingRecommendations.dealId, args.dealId),
+            eq(estimatePricingRecommendations.manualIdentityKey, existing.manualIdentityKey),
+            isNotNull(estimatePricingRecommendations.promotedLocalCatalogItemId)
+          )
+        )
+        .limit(1)
+    : [];
 
   if (reused?.id) {
     const [updated] = await args.tenantDb
@@ -135,7 +138,7 @@ export async function promoteManualRowToLocalCatalog(args: {
     return {
       recommendation: updated,
       localCatalogItem: buildSyntheticLocalCatalogItem({
-        localCatalogItemId: updated.promotedLocalCatalogItemId,
+        localCatalogItemId: updated.promotedLocalCatalogItemId ?? reused.id,
         manualLabel: updated.manualLabel,
         values,
       }),
@@ -178,7 +181,7 @@ export async function promoteManualRowToLocalCatalog(args: {
   return {
     recommendation: updated,
     localCatalogItem: buildSyntheticLocalCatalogItem({
-      localCatalogItemId: updated.promotedLocalCatalogItemId,
+      localCatalogItemId: updated.promotedLocalCatalogItemId ?? promotedLocalCatalogItemId,
       manualLabel: updated.manualLabel,
       values,
     }),

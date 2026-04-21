@@ -1,6 +1,7 @@
 import { describe, expect, it, vi, afterEach } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { EstimatingWorkflowShell } from "./estimating-workflow-shell";
+import type { EstimatingWorkflowState } from "./estimating-workflow-shell";
 
 const mocks = vi.hoisted(() => ({
   activePanel: null as string | null,
@@ -105,7 +106,7 @@ function buildWorkflow(canPromote: boolean) {
       canPromote,
       generationRunIds: canPromote ? ["run-1"] : [],
     },
-  } as const;
+  } satisfies EstimatingWorkflowState;
 }
 
 describe("EstimatingWorkflowShell", () => {

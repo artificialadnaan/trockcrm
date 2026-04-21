@@ -138,7 +138,9 @@ async function lockPromotionCandidates(
   }
 }
 
-function groupRecommendationsIntoSections(recommendations: Array<PromotionCandidateRow>) {
+type PromotionWorkbenchRow = ReturnType<typeof deriveEstimatePricingWorkbenchRows>[number];
+
+function groupRecommendationsIntoSections(recommendations: Array<PromotionWorkbenchRow>) {
   const groups = new Map<string, typeof recommendations>();
 
   for (const recommendation of recommendations) {
@@ -203,7 +205,7 @@ function buildMissingRecommendationError(recommendationId: string) {
 }
 
 function resolvePromotionLineValues(
-  row: PromotionCandidateRow,
+  row: ReturnType<typeof deriveEstimatePricingWorkbenchRows>[number],
   selectedOptionLabel?: string | null
 ) {
   let description = selectedOptionLabel ?? row.description;

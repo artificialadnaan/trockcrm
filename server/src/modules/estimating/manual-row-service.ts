@@ -149,7 +149,7 @@ async function insertManualOptions(
   return inserted;
 }
 
-async function insertRecommendationRow(tenantDb: TenantDb, values: Record<string, unknown>) {
+async function insertRecommendationRow(tenantDb: TenantDb, values: any) {
   const insertQuery = tenantDb.insert(estimatePricingRecommendations).values(values) as any;
   if (typeof insertQuery.returning === "function") {
     const rows = await insertQuery.returning();
@@ -161,7 +161,7 @@ async function insertRecommendationRow(tenantDb: TenantDb, values: Record<string
   return row ? { ...values, ...row } : { ...values };
 }
 
-async function searchManualCatalogOptions(appDb: AppDb, catalogQuery: string) {
+async function searchManualCatalogOptions(appDb: AppDb, catalogQuery: string): Promise<ManualRecommendationOptionInput[]> {
   const sourceQuery = appDb
     .select({ id: costCatalogSources.id })
     .from(costCatalogSources)
@@ -184,7 +184,7 @@ async function searchManualCatalogOptions(appDb: AppDb, catalogQuery: string) {
     })
     .map((candidate, index) => ({
       optionLabel: candidate.name,
-      optionKind: index === 0 ? "recommended" : "alternate",
+      optionKind: index === 0 ? ("recommended" as const) : ("alternate" as const),
       catalogItemId: candidate.id,
       localCatalogItemId: null,
       stableId: candidate.id,
