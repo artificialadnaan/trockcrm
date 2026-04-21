@@ -64,9 +64,17 @@ export function buildPricingRecommendation(input: BuildPricingRecommendationInpu
 
 export function isConfirmedMeasurementCandidateForPricing(input: {
   extractionType?: string | null;
-  metadataJson?: Record<string, unknown> | null;
+  metadataJson?: unknown;
 }) {
   if (input.extractionType !== "measurement_candidate") return true;
 
-  return input.metadataJson?.measurementConfirmationState === "approved";
+  if (
+    !input.metadataJson ||
+    typeof input.metadataJson !== "object" ||
+    input.metadataJson === null
+  ) {
+    return false;
+  }
+
+  return (input.metadataJson as Record<string, unknown>).measurementConfirmationState === "approved";
 }

@@ -13,7 +13,7 @@ type TenantDb = NodePgDatabase<typeof schema>;
 
 type ActiveParseArtifactRow = {
   documentId: string;
-  metadataJson?: Record<string, unknown> | null;
+  metadataJson?: unknown;
 };
 
 function isActiveParseArtifact(
@@ -24,11 +24,17 @@ function isActiveParseArtifact(
   if (!activeParseRunId) return false;
 
   const metadataJson = row.metadataJson;
-  if (!metadataJson || metadataJson.sourceParseRunId !== activeParseRunId) {
+  if (
+    !metadataJson ||
+    typeof metadataJson !== "object" ||
+    metadataJson === null ||
+    !("sourceParseRunId" in metadataJson) ||
+    (metadataJson as Record<string, unknown>).sourceParseRunId !== activeParseRunId
+  ) {
     return false;
   }
 
-  return metadataJson.activeArtifact !== false;
+  return (metadataJson as Record<string, unknown>).activeArtifact !== false;
 }
 
 export async function buildEstimatingWorkbenchState(tenantDb: TenantDb, dealId: string) {

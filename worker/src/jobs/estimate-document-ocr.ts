@@ -5,6 +5,16 @@ import { estimateSourceDocuments } from "@trock-crm/shared/schema";
 import { pool } from "../db.js";
 import { runEstimateDocumentParse } from "../../../server/src/modules/estimating/document-parse-orchestrator.js";
 
+export async function markEstimateDocumentOcrFailed(
+  tenantDb: Pick<ReturnType<typeof drizzle>, "update">,
+  documentId: string
+) {
+  await tenantDb
+    .update(estimateSourceDocuments)
+    .set({ ocrStatus: "failed" })
+    .where(eq(estimateSourceDocuments.id, documentId));
+}
+
 async function resolveSchemaName(officeId: string | null) {
   if (!officeId) throw new Error("Unable to resolve office schema for estimating OCR");
 

@@ -311,20 +311,27 @@ export async function runEstimateDocumentParse(args: {
       dealId: args.document.dealId,
       projectId: args.document.projectId ?? null,
       parseRunId: parseRun.id,
-      pages: insertedPages.map((page) => ({
-        pageId: page.id,
-        pageNumber: page.pageNumber,
-        text: page.ocrText ?? "",
-        provider: options.provider,
-        method: "deterministic_normalizer",
-        blocks: Array.isArray(page.metadataJson?.blocks) ? page.metadataJson.blocks : undefined,
-        metadata: {
-          sourceKind: page.metadataJson?.sourceKind ?? null,
-          measurementsEnabled:
-            page.metadataJson?.measurementsEnabled ?? options.measurementsEnabled,
-          activeArtifact: false,
-        },
-      })),
+      pages: insertedPages.map((page) => {
+        const pageMetadata = (page.metadataJson ?? {}) as Record<string, unknown>;
+
+        return {
+          pageId: page.id,
+          pageNumber: page.pageNumber,
+          text: page.ocrText ?? "",
+          provider: options.provider,
+          method: "deterministic_normalizer",
+          blocks: Array.isArray(pageMetadata.blocks) ? pageMetadata.blocks : undefined,
+          metadata: {
+            sourceKind:
+              typeof pageMetadata.sourceKind === "string" ? pageMetadata.sourceKind : null,
+            measurementsEnabled:
+              typeof pageMetadata.measurementsEnabled === "boolean"
+                ? pageMetadata.measurementsEnabled
+                : options.measurementsEnabled,
+            activeArtifact: false,
+          },
+        };
+      }),
     });
 
     if (extractionRows.length === 0) {

@@ -1,4 +1,16 @@
-import { bigint, boolean, index, integer, jsonb, pgTable, text, timestamp, uuid, varchar } from "drizzle-orm/pg-core";
+import {
+  bigint,
+  boolean,
+  index,
+  integer,
+  jsonb,
+  pgTable,
+  text,
+  timestamp,
+  uuid,
+  varchar,
+  type AnyPgColumn,
+} from "drizzle-orm/pg-core";
 import { files } from "./files.js";
 
 export const estimateSourceDocuments = pgTable(
@@ -20,7 +32,7 @@ export const estimateSourceDocuments = pgTable(
     uploadedByUserId: uuid("uploaded_by_user_id"),
     contentHash: text("content_hash"),
     parseStatus: text("parse_status").default("queued").notNull(),
-    activeParseRunId: uuid("active_parse_run_id").references(() => estimateDocumentParseRuns.id, {
+    activeParseRunId: uuid("active_parse_run_id").references((): AnyPgColumn => estimateDocumentParseRuns.id, {
       onDelete: "set null",
     }),
     parseProfile: text("parse_profile"),
@@ -42,7 +54,7 @@ export const estimateDocumentParseRuns = pgTable(
   {
     id: uuid("id").primaryKey().defaultRandom(),
     documentId: uuid("document_id")
-      .references(() => estimateSourceDocuments.id, { onDelete: "cascade" })
+      .references((): AnyPgColumn => estimateSourceDocuments.id, { onDelete: "cascade" })
       .notNull(),
     status: text("status").default("queued").notNull(),
     parseProfile: text("parse_profile"),
