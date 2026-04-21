@@ -82,6 +82,7 @@ function buildWorkflow(canPromote: boolean) {
         id: "price-1",
         status: "approved",
         createdByRunId: "run-1",
+        sectionName: "Doors",
         duplicateGroupBlocked: false,
         promotable: canPromote,
       },
@@ -141,6 +142,7 @@ describe("EstimatingWorkflowShell", () => {
     expect(html).toContain("Promote to estimate");
     expect(html).toContain("Disabled");
     expect(html).toContain("Needs review");
+    expect(html).toContain("Manual add unavailable");
     expect(html).toContain("Search catalog options");
     expect(html).toContain("Use free-text/manual row instead");
   });

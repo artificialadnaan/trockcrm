@@ -67,6 +67,10 @@ function normalizeSearch(value: string) {
   return value.trim().toLowerCase();
 }
 
+function hasManualRowCreationContext(generationRunId?: string | null, estimateSectionName?: string | null) {
+  return Boolean(generationRunId?.trim() && estimateSectionName?.trim());
+}
+
 export function switchManualRowDraftToFreeText(draft: ManualRowDraft): ManualRowDraft {
   return {
     ...draft,
@@ -158,6 +162,7 @@ export function EstimateManualRowDialog({
   const [selectedCatalogOptionId, setSelectedCatalogOptionId] = useState<string | null>(
     initialValues?.selectedOptionId ?? null
   );
+  const canCreateManualRow = hasManualRowCreationContext(generationRunId, estimateSectionName);
 
   useEffect(() => {
     if (open) {
@@ -198,12 +203,17 @@ export function EstimateManualRowDialog({
   };
 
   const handleSubmit = async () => {
+    if (!canCreateManualRow) {
+      toast.error("Manual row creation is unavailable until an active pricing run is selected.");
+      return;
+    }
+
     setIsSaving(true);
     try {
       await runEstimateManualRowCreateAction({
         dealId,
-        generationRunId: generationRunId ?? "",
-        estimateSectionName: estimateSectionName ?? "Generated Estimate",
+        generationRunId: generationRunId!.trim(),
+        estimateSectionName: estimateSectionName!.trim(),
         input: draft,
         catalogQuery,
         catalogOptions,
@@ -233,6 +243,11 @@ export function EstimateManualRowDialog({
         </DialogHeader>
 
         <div className="grid gap-4 py-1">
+          {!canCreateManualRow ? (
+            <div className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+              Manual row creation is unavailable until an active pricing run is selected.
+            </div>
+          ) : null}
           {mode === "catalog" ? (
             <div className="grid gap-3 rounded-lg border bg-muted/20 p-3">
               <div className="grid gap-2">
@@ -366,7 +381,7 @@ export function EstimateManualRowDialog({
           <Button variant="outline" onClick={() => onOpenChange(false)}>
             Cancel
           </Button>
-          <Button disabled={isSaving || !draft.label.trim()} onClick={handleSubmit}>
+          <Button disabled={isSaving || !draft.label.trim() || !canCreateManualRow} onClick={handleSubmit}>
             {isSaving ? "Saving..." : "Add row"}
           </Button>
         </DialogFooter>

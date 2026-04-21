@@ -81,8 +81,22 @@ export function EstimatingWorkflowShell({
     workflow.pricingRows[0] ??
     null;
 
+  const activeGenerationRunIds = new Set(
+    workflow.promotionReadiness.generationRunIds.filter(
+      (runId): runId is string => Boolean(runId?.trim())
+    )
+  );
   const promotionRunId = workflow.promotionReadiness.generationRunIds[0] ?? null;
   const canPromote = workflow.promotionReadiness.canPromote && Boolean(promotionRunId);
+  const selectedPricingRunId = selectedPricingRow?.createdByRunId ?? null;
+  const manualAddGenerationRunId =
+    selectedPricingRunId && activeGenerationRunIds.has(selectedPricingRunId)
+      ? selectedPricingRunId
+      : null;
+  const manualAddSectionName = selectedPricingRow?.sectionName ?? null;
+  const canAddManualRow = Boolean(
+    manualAddGenerationRunId?.trim?.() && manualAddSectionName?.trim?.()
+  );
 
   const handlePricingReviewAction = async ({
     row,
@@ -210,7 +224,12 @@ export function EstimatingWorkflowShell({
                 </p>
               </div>
               <div className="flex flex-wrap items-center gap-2">
-                <Button size="sm" variant="outline" onClick={() => setManualAddOpen(true)}>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={!canAddManualRow}
+                  onClick={() => setManualAddOpen(true)}
+                >
                   Add manual row
                 </Button>
                 <Button
@@ -220,6 +239,9 @@ export function EstimatingWorkflowShell({
                 >
                   Promote to estimate
                 </Button>
+                <span className="text-xs text-muted-foreground">
+                  {canAddManualRow ? "Manual add ready" : "Manual add unavailable"}
+                </span>
                 <span className="text-xs text-muted-foreground">
                   {canPromote ? "Ready to promote" : "Disabled"}
                 </span>
@@ -278,8 +300,8 @@ export function EstimatingWorkflowShell({
 
       <EstimateManualRowDialog
         dealId={dealId}
-        generationRunId={selectedPricingRow?.createdByRunId ?? promotionRunId}
-        estimateSectionName={selectedPricingRow?.sectionName ?? "Generated Estimate"}
+        generationRunId={manualAddGenerationRunId}
+        estimateSectionName={manualAddSectionName}
         open={manualAddOpen}
         onOpenChange={setManualAddOpen}
         onSubmitted={onRefresh}

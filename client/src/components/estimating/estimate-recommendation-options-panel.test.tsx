@@ -167,6 +167,20 @@ describe("EstimateRecommendationOptionsPanel", () => {
     expect(html).toContain("Door hardware");
   });
 
+  it("blocks manual-row creation without active generation-run context", () => {
+    const html = renderToStaticMarkup(
+      <EstimateManualRowDialog
+        dealId="deal-1"
+        open
+        onOpenChange={vi.fn()}
+        onSubmitted={vi.fn()}
+      />
+    );
+
+    expect(html).toContain("Manual row creation is unavailable until an active pricing run is selected.");
+    expect(html).toContain("disabled");
+  });
+
   it("clears catalog-backed selection when switching back to free-text mode", () => {
     expect(
       switchManualRowDraftToFreeText({
