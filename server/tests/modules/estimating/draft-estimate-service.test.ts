@@ -12,6 +12,7 @@ vi.mock("../../../src/modules/deals/estimate-service.js", () => ({
 
 const {
   approveEstimateRecommendation,
+  cloneManualRowsForGenerationRun,
   listApprovedRecommendationIdsForRun,
   promoteApprovedRecommendationsToEstimate,
 } = await import("../../../src/modules/estimating/draft-estimate-service.js");
@@ -914,5 +915,113 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
         }),
       ])
     );
+  });
+
+  it("carries unresolved manual rows forward into the next generation run with cloned child options", async () => {
+    const recommendationInsertValues = vi.fn().mockResolvedValue([{ id: "rec-cloned-1" }]);
+    const optionInsertValues = vi.fn().mockResolvedValue([{ id: "opt-cloned-1" }]);
+
+    const tenantDb = {
+      select: vi
+        .fn()
+        .mockReturnValueOnce({
+          from: vi.fn(() => ({
+            where: vi.fn().mockResolvedValue([
+              {
+                id: "rec-source-1",
+                dealId: "deal-1",
+                createdByRunId: "run-old",
+                sourceType: "manual",
+                status: "pending_review",
+                sourceRowIdentity: "manual:manual-key-1",
+                manualIdentityKey: "manual-key-1",
+                manualOrigin: "manual_estimator_added",
+                manualLabel: "Custom flashing",
+                manualQuantity: "2",
+                manualUnit: "ea",
+                manualUnitPrice: "75.00",
+                manualNotes: "field measured",
+                selectedSourceType: "catalog_option",
+                selectedOptionId: "option-source-1",
+                catalogBacking: "local_promoted",
+                promotedLocalCatalogItemId: "local-cat-1",
+                overrideQuantity: "3",
+                overrideUnit: "lf",
+                overrideUnitPrice: "18.00",
+                overrideNotes: "override note",
+                promotedEstimateLineItemId: null,
+              },
+            ]),
+          })),
+        })
+        .mockReturnValueOnce({
+          from: vi.fn(() => ({
+            where: vi.fn().mockResolvedValue([
+              {
+                id: "option-source-1",
+                recommendationId: "rec-source-1",
+                optionLabel: "Child catalog option",
+                optionKind: "manual_custom",
+                catalogItemId: null,
+                localCatalogItemId: "local-cat-1",
+                rank: 1,
+              },
+            ]),
+          })),
+        }),
+      insert: vi
+        .fn()
+        .mockReturnValueOnce({
+          values: recommendationInsertValues,
+        })
+        .mockReturnValueOnce({
+          values: optionInsertValues,
+        }),
+    } as any;
+
+    const result = await cloneManualRowsForGenerationRun({
+      tenantDb,
+      dealId: "deal-1",
+      sourceGenerationRunId: "run-old",
+      targetGenerationRunId: "run-new",
+      userId: "user-1",
+    });
+
+    expect(result.clonedRecommendationIds).toEqual(["rec-cloned-1"]);
+    expect(recommendationInsertValues).toHaveBeenCalledWith(
+      expect.objectContaining({
+        dealId: "deal-1",
+        createdByRunId: "run-new",
+        sourceType: "manual",
+        status: "pending_review",
+        sourceRowIdentity: "manual:manual-key-1",
+        manualIdentityKey: "manual-key-1",
+        manualOrigin: "generated",
+        selectedSourceType: "catalog_option",
+        catalogBacking: "local_promoted",
+        promotedLocalCatalogItemId: "local-cat-1",
+        overrideQuantity: "3",
+        overrideUnit: "lf",
+        overrideUnitPrice: "18.00",
+        overrideNotes: "override note",
+      })
+    );
+    expect(optionInsertValues).toHaveBeenCalledWith(
+      expect.objectContaining({
+        recommendationId: "rec-cloned-1",
+        optionLabel: "Child catalog option",
+        optionKind: "manual_custom",
+        localCatalogItemId: "local-cat-1",
+      })
+    );
+    expect(result.clonedRows).toEqual([
+      expect.objectContaining({
+        id: "rec-cloned-1",
+        createdByRunId: "run-new",
+        selectedOptionId: "opt-cloned-1",
+        promotedLocalCatalogItemId: "local-cat-1",
+        manualIdentityKey: "manual-key-1",
+      }),
+    ]);
   });
 });

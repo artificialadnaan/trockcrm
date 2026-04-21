@@ -59,6 +59,19 @@ const estimatingWorkbenchServiceMocks = vi.hoisted(() => ({
 
 vi.mock("../../../src/modules/estimating/workbench-service.js", () => estimatingWorkbenchServiceMocks);
 
+const manualRowServiceMocks = vi.hoisted(() => ({
+  createManualEstimateRow: vi.fn(),
+  updateManualEstimateRow: vi.fn(),
+}));
+
+vi.mock("../../../src/modules/estimating/manual-row-service.js", () => manualRowServiceMocks);
+
+const localCatalogServiceMocks = vi.hoisted(() => ({
+  promoteManualRowToLocalCatalog: vi.fn(),
+}));
+
+vi.mock("../../../src/modules/estimating/local-catalog-service.js", () => localCatalogServiceMocks);
+
 const documentServiceMocks = vi.hoisted(() => ({
   createEstimateSourceDocument: vi.fn(),
   enqueueEstimateDocumentOcrJob: vi.fn(),
@@ -634,5 +647,151 @@ describe("estimating workflow routes", () => {
       })
     );
     expect(res.body.rowErrors).toEqual(rowErrors);
+  });
+
+  it("creates a pending-review manual row from free text when no catalog item is selected", async () => {
+    manualRowServiceMocks.createManualEstimateRow.mockResolvedValue({
+      recommendation: {
+        id: "rec-manual-1",
+        status: "pending_review",
+        sourceType: "manual",
+        selectedSourceType: null,
+        selectedOptionId: null,
+        catalogBacking: "estimate_only",
+        promotedLocalCatalogItemId: null,
+        manualIdentityKey: "manual-key-1",
+      },
+      optionRows: [],
+    });
+
+    const { res } = await invokeRoute("post", "/:id/estimating/manual-rows", {
+      params: { id: "deal-1" },
+      body: {
+        generationRunId: "run-1",
+        estimateSectionName: "Roofing",
+        manualLabel: "Custom flashing",
+        manualQuantity: "2",
+        manualUnit: "ea",
+        manualUnitPrice: "75.00",
+        manualNotes: "field measured",
+        catalogQuery: "flashing",
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(manualRowServiceMocks.createManualEstimateRow).toHaveBeenCalledWith(
+      expect.objectContaining({
+        dealId: "deal-1",
+        userId: "user-1",
+        input: expect.objectContaining({
+          generationRunId: "run-1",
+          estimateSectionName: "Roofing",
+          manualLabel: "Custom flashing",
+          catalogQuery: "flashing",
+        }),
+      })
+    );
+    expect(res.body.recommendation).toEqual(
+      expect.objectContaining({
+        status: "pending_review",
+        sourceType: "manual",
+        catalogBacking: "estimate_only",
+      })
+    );
+  });
+
+  it("keeps an immutable manual identity when a manual row is edited into a catalog-backed selection", async () => {
+    manualRowServiceMocks.updateManualEstimateRow.mockResolvedValue({
+      recommendation: {
+        id: "rec-manual-2",
+        status: "pending_review",
+        sourceType: "manual",
+        selectedSourceType: "catalog_option",
+        selectedOptionId: "child-option-1",
+        catalogBacking: "local_promoted",
+        promotedLocalCatalogItemId: null,
+        manualIdentityKey: "manual-key-2",
+      },
+      optionRows: [{ id: "child-option-1", optionKind: "manual_custom" }],
+    });
+
+    const { res } = await invokeRoute("patch", "/:id/estimating/manual-rows/:recommendationId", {
+      params: { id: "deal-1", recommendationId: "rec-manual-2" },
+      body: {
+        manualIdentityKey: "attempted-change",
+        selectedSourceType: "catalog_option",
+        selectedOptionId: "child-option-1",
+        catalogBacking: "local_promoted",
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(manualRowServiceMocks.updateManualEstimateRow).toHaveBeenCalledWith(
+      expect.objectContaining({
+        dealId: "deal-1",
+        recommendationId: "rec-manual-2",
+        userId: "user-1",
+        input: expect.objectContaining({
+          manualIdentityKey: "attempted-change",
+          selectedSourceType: "catalog_option",
+          selectedOptionId: "child-option-1",
+          catalogBacking: "local_promoted",
+        }),
+      })
+    );
+    expect(res.body.recommendation).toEqual(
+      expect.objectContaining({
+        selectedSourceType: "catalog_option",
+        selectedOptionId: "child-option-1",
+        promotedLocalCatalogItemId: null,
+        manualIdentityKey: "manual-key-2",
+      })
+    );
+  });
+
+  it("promotes only free-text manual rows into the local catalog and seeds override values", async () => {
+    localCatalogServiceMocks.promoteManualRowToLocalCatalog.mockResolvedValue({
+      recommendation: {
+        id: "rec-manual-3",
+        promotedLocalCatalogItemId: "local-cat-1",
+        catalogBacking: "local_promoted",
+      },
+      localCatalogItem: {
+        id: "local-cat-1",
+        name: "Custom flashing",
+        unit: "lf",
+      },
+    });
+
+    const { res } = await invokeRoute("post", "/:id/estimating/manual-rows/:recommendationId/promote-local-catalog", {
+      params: { id: "deal-1", recommendationId: "rec-manual-3" },
+      body: {
+        overrideQuantity: "4",
+        overrideUnit: "lf",
+        overrideUnitPrice: "18.00",
+        overrideNotes: "use adjusted field measure",
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(localCatalogServiceMocks.promoteManualRowToLocalCatalog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        dealId: "deal-1",
+        recommendationId: "rec-manual-3",
+        userId: "user-1",
+        input: expect.objectContaining({
+          overrideQuantity: "4",
+          overrideUnit: "lf",
+          overrideUnitPrice: "18.00",
+          overrideNotes: "use adjusted field measure",
+        }),
+      })
+    );
+    expect(res.body.recommendation).toEqual(
+      expect.objectContaining({
+        promotedLocalCatalogItemId: "local-cat-1",
+        catalogBacking: "local_promoted",
+      })
+    );
   });
 });

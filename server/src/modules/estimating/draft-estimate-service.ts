@@ -14,6 +14,7 @@ import {
   deriveEstimatePricingWorkbenchRows,
   loadPricingRecommendationOption,
 } from "./workbench-service.js";
+import { estimatePricingRecommendationOptions } from "../../../../shared/src/schema/tenant/estimate-pricing-recommendation-options.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -417,4 +418,136 @@ export async function listApprovedRecommendationIdsForRun(
     );
 
   return rows.map((row) => row.id);
+}
+
+export async function cloneManualRowsForGenerationRun(args: {
+  tenantDb: TenantDb;
+  dealId: string;
+  sourceGenerationRunId: string;
+  targetGenerationRunId: string;
+  userId?: string;
+}) {
+  const sourceRows = await args.tenantDb
+    .select()
+    .from(estimatePricingRecommendations)
+    .where(
+      and(
+        eq(estimatePricingRecommendations.dealId, args.dealId),
+        eq(estimatePricingRecommendations.createdByRunId, args.sourceGenerationRunId),
+        eq(estimatePricingRecommendations.sourceType, "manual")
+      )
+    );
+
+  const eligibleRows = sourceRows.filter(
+    (row) => row.status !== "rejected" && !row.promotedEstimateLineItemId
+  );
+  const clonedRows: Array<Record<string, unknown>> = [];
+
+  for (const sourceRow of eligibleRows) {
+    const insertedResult = await args.tenantDb
+      .insert(estimatePricingRecommendations)
+      .values({
+        dealId: args.dealId,
+        createdByRunId: args.targetGenerationRunId,
+        sourceType: "manual",
+        sourceRowIdentity: sourceRow.sourceRowIdentity,
+        normalizedIntent: sourceRow.normalizedIntent,
+        manualOrigin: "generated",
+        manualIdentityKey: sourceRow.manualIdentityKey,
+        manualLabel: sourceRow.manualLabel,
+        manualQuantity: sourceRow.manualQuantity,
+        manualUnit: sourceRow.manualUnit,
+        manualUnitPrice: sourceRow.manualUnitPrice,
+        manualNotes: sourceRow.manualNotes,
+        selectedSourceType: sourceRow.selectedSourceType,
+        selectedOptionId: null,
+        catalogBacking: sourceRow.catalogBacking,
+        promotedLocalCatalogItemId: sourceRow.promotedLocalCatalogItemId,
+        overrideQuantity: sourceRow.overrideQuantity,
+        overrideUnit: sourceRow.overrideUnit,
+        overrideUnitPrice: sourceRow.overrideUnitPrice,
+        overrideNotes: sourceRow.overrideNotes,
+        status: sourceRow.status,
+        evidenceJson: sourceRow.evidenceJson ?? {},
+        assumptionsJson: sourceRow.assumptionsJson ?? {},
+        priceBasis: sourceRow.priceBasis,
+        recommendedQuantity: sourceRow.recommendedQuantity,
+        recommendedUnit: sourceRow.recommendedUnit,
+        recommendedUnitPrice: sourceRow.recommendedUnitPrice,
+        recommendedTotalPrice: sourceRow.recommendedTotalPrice,
+        catalogBaselinePrice: sourceRow.catalogBaselinePrice,
+        historicalMedianPrice: sourceRow.historicalMedianPrice,
+        marketAdjustmentPercent: sourceRow.marketAdjustmentPercent,
+        confidence: sourceRow.confidence,
+        sourceDocumentId: sourceRow.sourceDocumentId,
+        sourceExtractionId: sourceRow.sourceExtractionId,
+        extractionMatchId: sourceRow.extractionMatchId,
+        projectId: sourceRow.projectId,
+      })
+      ;
+    const inserted = Array.isArray(insertedResult) ? insertedResult[0] : insertedResult;
+
+    if (!inserted) {
+      continue;
+    }
+
+    let clonedSelectedOptionId: string | null = null;
+    if (sourceRow.selectedSourceType === "catalog_option" && sourceRow.selectedOptionId) {
+      const optionRows = await args.tenantDb
+        .select()
+        .from(estimatePricingRecommendationOptions)
+        .where(eq(estimatePricingRecommendationOptions.recommendationId, sourceRow.id));
+
+      for (const optionRow of optionRows) {
+        const clonedOptionResult = await args.tenantDb
+          .insert(estimatePricingRecommendationOptions)
+          .values({
+            recommendationId: inserted.id,
+            rank: optionRow.rank,
+            optionLabel: optionRow.optionLabel,
+            optionKind: optionRow.optionKind,
+            catalogItemId: optionRow.catalogItemId,
+            localCatalogItemId: optionRow.localCatalogItemId,
+          })
+          ;
+        const clonedOption = Array.isArray(clonedOptionResult)
+          ? clonedOptionResult[0]
+          : clonedOptionResult;
+
+        if (optionRow.id === sourceRow.selectedOptionId) {
+          clonedSelectedOptionId = clonedOption?.id ?? null;
+        }
+      }
+    }
+
+    clonedRows.push({
+      ...inserted,
+      dealId: args.dealId,
+      createdByRunId: args.targetGenerationRunId,
+      sourceType: "manual",
+      sourceRowIdentity: sourceRow.sourceRowIdentity,
+      normalizedIntent: sourceRow.normalizedIntent,
+      manualOrigin: "generated",
+      manualIdentityKey: sourceRow.manualIdentityKey,
+      manualLabel: sourceRow.manualLabel,
+      manualQuantity: sourceRow.manualQuantity,
+      manualUnit: sourceRow.manualUnit,
+      manualUnitPrice: sourceRow.manualUnitPrice,
+      manualNotes: sourceRow.manualNotes,
+      selectedSourceType: sourceRow.selectedSourceType,
+      selectedOptionId: clonedSelectedOptionId,
+      catalogBacking: sourceRow.catalogBacking,
+      promotedLocalCatalogItemId: sourceRow.promotedLocalCatalogItemId,
+      overrideQuantity: sourceRow.overrideQuantity,
+      overrideUnit: sourceRow.overrideUnit,
+      overrideUnitPrice: sourceRow.overrideUnitPrice,
+      overrideNotes: sourceRow.overrideNotes,
+      status: sourceRow.status,
+    });
+  }
+
+  return {
+    clonedRecommendationIds: clonedRows.map((row) => row.id as string),
+    clonedRows,
+  };
 }

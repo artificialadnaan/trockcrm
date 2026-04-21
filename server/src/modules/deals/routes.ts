@@ -78,6 +78,13 @@ import {
   updateEstimatePricingRecommendationReviewState,
 } from "../estimating/workbench-service.js";
 import {
+  createManualEstimateRow,
+  updateManualEstimateRow,
+} from "../estimating/manual-row-service.js";
+import {
+  promoteManualRowToLocalCatalog,
+} from "../estimating/local-catalog-service.js";
+import {
   answerEstimatingCopilotQuestion,
   buildEstimatingCopilotContext,
   getEstimatingWorkflowState,
@@ -1016,6 +1023,68 @@ router.post("/:id/estimating/promote", async (req, res, next) => {
     next(err);
   }
 });
+
+router.post("/:id/estimating/manual-rows", async (req, res, next) => {
+  try {
+    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+
+    const result = await createManualEstimateRow({
+      tenantDb: req.tenantDb! as any,
+      dealId: req.params.id,
+      userId: req.user!.id,
+      input: req.body,
+    });
+
+    await req.commitTransaction!();
+    res.status(200).json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.patch("/:id/estimating/manual-rows/:recommendationId", async (req, res, next) => {
+  try {
+    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+
+    const result = await updateManualEstimateRow({
+      tenantDb: req.tenantDb! as any,
+      dealId: req.params.id,
+      recommendationId: req.params.recommendationId,
+      userId: req.user!.id,
+      input: req.body,
+    });
+
+    await req.commitTransaction!();
+    res.status(200).json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post(
+  "/:id/estimating/manual-rows/:recommendationId/promote-local-catalog",
+  async (req, res, next) => {
+    try {
+      const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+      if (!deal) throw new AppError(404, "Deal not found");
+
+      const result = await promoteManualRowToLocalCatalog({
+        tenantDb: req.tenantDb! as any,
+        dealId: req.params.id,
+        recommendationId: req.params.recommendationId,
+        userId: req.user!.id,
+        input: req.body,
+      });
+
+      await req.commitTransaction!();
+      res.status(200).json(result);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
 
 router.get("/:id/estimating", async (req, res, next) => {
   try {
