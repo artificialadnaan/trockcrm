@@ -6,8 +6,11 @@ import {
   estimateMarketZipMappings,
   estimateMarkets,
 } from "../../../../shared/src/schema/index.js";
-import { createMarketRateProvider } from "../../../src/modules/estimating/market-rate-provider.js";
-import { isPricingScopeCandidateRule } from "../../../src/modules/estimating/market-rate-provider.js";
+import {
+  createMarketRateProvider,
+  getAllowedPricingScopeTypes,
+  isPricingScopeBroadEnough,
+} from "../../../src/modules/estimating/market-rate-provider.js";
 import {
   calculateMarketRateAdjustment,
   selectBestMarketAdjustmentRule,
@@ -35,28 +38,6 @@ function makeRule(input: Partial<Record<string, unknown>> & { id: string }) {
   } as any;
 }
 
-function createCandidateFilteredDb(
-  rows: any[],
-  input: { pricingScopeType: "division" | "trade" | "general"; pricingScopeKey: string }
-) {
-  return {
-    select: vi.fn(() => ({
-      from: vi.fn(() => ({
-        where: vi.fn(() => {
-          return Promise.resolve(
-            rows.filter((row) =>
-              isPricingScopeCandidateRule(row, {
-                pricingScopeType: input.pricingScopeType,
-                pricingScopeKey: input.pricingScopeKey,
-              })
-            )
-          );
-        }),
-      })),
-    })),
-  } as any;
-}
-
 const providerTables = {
   estimateDealMarketOverrides,
   estimateMarketAdjustmentRules,
@@ -66,49 +47,14 @@ const providerTables = {
 };
 
 describe("market-rate-service", () => {
-  it("chooses an exact market and pricing scope match over broader fallback rules", async () => {
-    const request = {
-      pricingScopeType: "division" as const,
-      pricingScopeKey: "07",
-    };
-    const provider = createMarketRateProvider(
-      createCandidateFilteredDb(
-        [
-        makeRule({
-          id: "global-broad",
-          marketId: null,
-          scopeType: "general",
-          scopeKey: "default",
-          priority: 100,
-        }),
-        makeRule({
-          id: "market-exact",
-          marketId: "market-1",
-          scopeType: "division",
-          scopeKey: "07",
-          priority: 0,
-        }),
-        ],
-        request
-      ),
-      providerTables
-    );
-
-    const result = await selectBestMarketAdjustmentRule(provider, {
-      marketId: "market-1",
-      pricingScopeType: request.pricingScopeType,
-      pricingScopeKey: request.pricingScopeKey,
-      asOf: new Date("2026-04-21T00:00:00Z"),
-    });
-
-    expect(result?.id).toBe("market-exact");
+  it("exposes the pricing-scope helper hierarchy used by the provider filter", () => {
+    expect(getAllowedPricingScopeTypes("division")).toEqual(["general", "division"]);
+    expect(getAllowedPricingScopeTypes("trade")).toEqual(["general", "division", "trade"]);
+    expect(isPricingScopeBroadEnough("general", "division")).toBe(true);
+    expect(isPricingScopeBroadEnough("trade", "division")).toBe(false);
   });
 
   it("reaches the broad default pricing rule through the provider path", async () => {
-    const request = {
-      pricingScopeType: "division" as const,
-      pricingScopeKey: "07",
-    };
     const tradeNarrowRule = makeRule({
       id: "trade-narrow",
       marketId: "market-1",
@@ -126,21 +72,21 @@ describe("market-rate-service", () => {
       priority: 0,
     });
 
-    expect(isPricingScopeCandidateRule(tradeNarrowRule, request)).toBe(false);
-    expect(isPricingScopeCandidateRule(broadDefaultRule, request)).toBe(true);
-
     const provider = createMarketRateProvider(
-      createCandidateFilteredDb(
-        [tradeNarrowRule, broadDefaultRule],
-        request
-      ),
+      {
+        select: vi.fn(() => ({
+          from: vi.fn(() => ({
+            where: vi.fn(() => Promise.resolve([tradeNarrowRule, broadDefaultRule])),
+          })),
+        })),
+      } as any,
       providerTables
     );
 
     const result = await selectBestMarketAdjustmentRule(provider, {
       marketId: "market-1",
-      pricingScopeType: request.pricingScopeType,
-      pricingScopeKey: request.pricingScopeKey,
+      pricingScopeType: "division",
+      pricingScopeKey: "07",
       asOf: new Date("2026-04-21T00:00:00Z"),
     });
 

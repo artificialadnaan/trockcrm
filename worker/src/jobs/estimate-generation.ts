@@ -4,23 +4,25 @@ import * as schema from "@trock-crm/shared/schema";
 import {
   costCatalogSources,
   estimateExtractions,
-  estimateExtractionMatches,
   estimateGenerationRuns,
-  estimatePricingRecommendations,
-  estimatePricingRecommendationOptions,
   estimateReviewEvents,
 } from "@trock-crm/shared/schema";
 import { pool } from "../db.js";
 import { listCatalogCandidatesForMatching, resolveActiveCatalogSnapshotVersionId } from "../../../server/src/modules/estimating/catalog-read-model-service.js";
 import { getHistoricalPricingSignals } from "../../../server/src/modules/estimating/historical-pricing-service.js";
+import { createMarketRateProvider } from "../../../server/src/modules/estimating/market-rate-provider.js";
+import { resolveMarketContext } from "../../../server/src/modules/estimating/market-resolution-service.js";
+import { calculateMarketRateAdjustment } from "../../../server/src/modules/estimating/market-rate-service.js";
 import { rankExtractionMatches } from "../../../server/src/modules/estimating/matching-service.js";
 import {
+  applyMarketRateAdjustment,
   isInferredRecommendationRowEligible,
   buildPricingRecommendation,
   isConfirmedMeasurementCandidateForPricing,
 } from "../../../server/src/modules/estimating/pricing-service.js";
 import { cloneManualRowsForGenerationRun } from "../../../server/src/modules/estimating/draft-estimate-service.js";
 import { buildRecommendationOptionSet } from "../../../server/src/modules/estimating/recommendation-option-service.js";
+import { persistPricingRecommendationBundle } from "../../../server/src/modules/estimating/recommendation-persistence-service.js";
 
 async function resolveSchemaName(officeId: string | null) {
   if (!officeId) throw new Error("Unable to resolve office schema for estimate generation");
@@ -53,23 +55,8 @@ function buildSourceRowIdentity(input: {
   return `extracted:${input.extractionId}`;
 }
 
-async function insertWithReturningOrThrow<TRecord extends { id: string }>(
-  db: any,
-  table: unknown,
-  values: Record<string, unknown> | Record<string, unknown>[]
-) {
-  const insertQuery = db.insert(table).values(values) as any;
-
-  if (typeof insertQuery.returning === "function") {
-    const rows = await insertQuery.returning();
-    return rows[0] as TRecord;
-  }
-
-  throw new Error("estimate generation requires returning() support for persisted recommendation rows");
-}
-
 export async function runEstimateGeneration(
-  payload: { documentId?: string; dealId?: string; parseRunId?: string },
+  payload: { documentId?: string; dealId?: string; parseRunId?: string; rerunRequestId?: string },
   officeId: string | null
 ) {
   const schemaName = await resolveSchemaName(officeId);
@@ -95,6 +82,7 @@ export async function runEstimateGeneration(
         inputSnapshotJson: {
           documentId: payload.documentId ?? null,
           parseRunId: effectiveParseRunId,
+          rerunRequestId: payload.rerunRequestId ?? null,
         },
       })
       .returning();
@@ -140,6 +128,7 @@ export async function runEstimateGeneration(
           inputSnapshotJson: {
             documentId: payload.documentId ?? null,
             parseRunId: effectiveParseRunId,
+            rerunRequestId: payload.rerunRequestId ?? null,
           },
         })
         .where(eq(estimateGenerationRuns.id, generationRunId));
@@ -214,6 +203,16 @@ export async function runEstimateGeneration(
     }
 
     const historicalSignals = await getHistoricalPricingSignals(tenantDb as any, payload.dealId);
+    const marketRateProvider = createMarketRateProvider(tenantDb as any);
+    const marketResolution = await resolveMarketContext(marketRateProvider, {
+      dealId: payload.dealId,
+      dealZip: historicalSignals.currentDeal?.dealZip ?? null,
+      dealState: historicalSignals.currentDeal?.dealState ?? null,
+      dealRegionId: historicalSignals.currentDeal?.dealRegionId ?? null,
+      propertyZip: historicalSignals.currentDeal?.propertyZip ?? null,
+      propertyState: historicalSignals.currentDeal?.propertyState ?? null,
+      propertyRegionId: null,
+    });
     const catalogSnapshotVersionId = source
       ? await resolveActiveCatalogSnapshotVersionId(appDb as any, source.id)
       : null;
@@ -345,124 +344,94 @@ export async function runEstimateGeneration(
         vendorQuotePrice: topMatch.vendorQuotePrice ?? historicalSignals.vendorQuotes[0]?.unitPrice ?? null,
         awardedOutcomeAdjustmentPercent: topMatch.awardedOutcomeAdjustmentPercent ?? 0,
         internalAdjustmentPercent: topMatch.internalAdjustmentPercent ?? 0,
-        regionId: historicalSignals.currentDeal?.regionId ?? null,
+        regionId: historicalSignals.currentDeal?.dealRegionId ?? null,
         projectTypeId: historicalSignals.currentDeal?.projectTypeId ?? null,
       });
-
-      const rationaleJson = {
+      const pricingScopeType = extraction.divisionHint ? "division" : "general";
+      const pricingScopeKey = extraction.divisionHint
+        ? extraction.divisionHint.trim()
+        : "default";
+      const marketAdjustment = await calculateMarketRateAdjustment(marketRateProvider, {
+        marketResolution,
+        pricingScopeType,
+        pricingScopeKey,
+        baselinePrice: recommendation.recommendedTotalPrice,
+        componentBreakdown: null,
+        asOf: new Date(),
+      });
+      const enrichedRecommendation = applyMarketRateAdjustment({
+        recommendation,
+        marketRateAdjustment: marketAdjustment,
+      });
+      const recommendationRationaleJson = {
         ...recommendationSet.rationaleJson,
         evidenceJson: {
           documentEvidence,
           comparableHistoricalPrices: recommendation.comparableHistoricalPrices,
+          marketRate: marketAdjustment.rationale,
         },
-      };
-
-      const persistRecommendationBundle = async (db: any) => {
-        const savedMatch = await insertWithReturningOrThrow<{ id: string }>(
-          db,
-          estimateExtractionMatches,
-          {
-            extractionId: extraction.id,
-            catalogItemId: topMatch.catalogItemId,
-            matchType: "catalog_plus_history",
-            matchScore: topMatch.matchScore.toString(),
-            status: "suggested",
-            reasonJson: topMatch.reasons,
-            evidenceJson: {
-              historicalLineItemIds: topMatch.historicalLineItemIds,
-            },
-          }
-        );
-
-        const savedRecommendation = await insertWithReturningOrThrow<{ id: string }>(
-          db,
-          estimatePricingRecommendations,
-          {
-            dealId: extraction.dealId,
-            projectId: extraction.projectId,
-            extractionMatchId: savedMatch?.id ?? extraction.id,
-            sourceDocumentId: extraction.documentId ?? null,
-            sourceExtractionId: extraction.id,
-            sourceType,
-            normalizedIntent,
-            sourceRowIdentity,
-            recommendedQuantity: String(extraction.quantity ?? 1),
-            recommendedUnit: extraction.unit ?? null,
-            recommendedUnitPrice: String(recommendation.recommendedUnitPrice),
-            recommendedTotalPrice: String(recommendation.recommendedTotalPrice),
-            priceBasis: recommendation.priceBasis,
-            catalogBaselinePrice:
-              recommendation.catalogBaselinePrice != null
-                ? String(recommendation.catalogBaselinePrice)
-                : null,
-            historicalMedianPrice:
-              recommendation.historicalMedianPrice != null
-                ? String(recommendation.historicalMedianPrice)
-                : null,
-            marketAdjustmentPercent: String(recommendation.marketAdjustmentPercent),
-            confidence: String(recommendation.confidence),
-            assumptionsJson: {
-              ...recommendation.assumptions,
-              rationaleJson,
-            },
-            evidenceJson: {
-              comparableHistoricalPrices: recommendation.comparableHistoricalPrices,
-              duplicateGroupMetadata: recommendationSet.duplicateGroupMetadata,
-              optionRows: recommendationSet.optionRows.map((option) => ({
-                rank: option.rank,
-                optionLabel: option.optionLabel,
-                optionKind: option.optionKind,
-                catalogItemId: option.catalogItemId,
-                localCatalogItemId: option.localCatalogItemId,
-                normalizedCustomItemKey: option.normalizedCustomItemKey,
-                stableId: option.stableId,
-              })),
-            },
-            createdByRunId: generationRunId,
-            selectedSourceType: null,
-            selectedOptionId: null,
-            catalogBacking: sourceType === "inferred" ? "estimate_only" : "procore_synced",
-            promotedLocalCatalogItemId: null,
-            manualOrigin: null,
-            manualLabel: null,
-            manualIdentityKey: null,
-            manualQuantity: null,
-            manualUnit: null,
-            manualUnitPrice: null,
-            manualNotes: null,
-            overrideQuantity: null,
-            overrideUnit: null,
-            overrideUnitPrice: null,
-            overrideNotes: null,
-            status: "pending",
-          }
-        );
-
-        if (recommendationSet.optionRows.length > 0) {
-          await db.insert(estimatePricingRecommendationOptions).values(
-            recommendationSet.optionRows.map((option) => ({
-              recommendationId: savedRecommendation.id,
-              catalogItemId: option.catalogItemId,
-              localCatalogItemId: option.localCatalogItemId,
-              rank: option.rank,
-              optionLabel: option.optionLabel,
-              optionKind: option.optionKind,
-            }))
-          );
-        }
-
-        await db
-          .update(estimateExtractions)
-          .set({ status: "processed" })
-          .where(eq(estimateExtractions.id, extraction.id));
       };
 
       if (!lockedClient && typeof tenantDb.transaction === "function") {
         await tenantDb.transaction(async (tx: any) => {
-          await persistRecommendationBundle(tx);
+          await persistPricingRecommendationBundle({
+            tenantDb: tx,
+            generationRunId,
+            extraction: {
+              id: extraction.id,
+              dealId: extraction.dealId,
+              projectId: extraction.projectId,
+              documentId: extraction.documentId ?? null,
+              quantity: Number(extraction.quantity ?? 1),
+              unit: extraction.unit ?? null,
+              sourceType,
+              normalizedIntent,
+              sourceRowIdentity,
+              evidenceText: extraction.evidenceText ?? null,
+              rawLabel: extraction.rawLabel ?? null,
+              normalizedLabel: extraction.normalizedLabel ?? null,
+            },
+            topMatch: {
+              catalogItemId: topMatch.catalogItemId,
+              matchScore: topMatch.matchScore,
+              reasons: topMatch.reasons,
+              historicalLineItemIds: topMatch.historicalLineItemIds,
+              catalogBaselinePrice: topMatch.catalogBaselinePrice ?? null,
+            },
+            recommendation: enrichedRecommendation,
+            recommendationSet,
+            rationaleJson: recommendationRationaleJson,
+          });
         });
       } else {
-        await persistRecommendationBundle(tenantDb as any);
+        await persistPricingRecommendationBundle({
+          tenantDb: tenantDb as any,
+          generationRunId,
+          extraction: {
+            id: extraction.id,
+            dealId: extraction.dealId,
+            projectId: extraction.projectId,
+            documentId: extraction.documentId ?? null,
+            quantity: Number(extraction.quantity ?? 1),
+            unit: extraction.unit ?? null,
+            sourceType,
+            normalizedIntent,
+            sourceRowIdentity,
+            evidenceText: extraction.evidenceText ?? null,
+            rawLabel: extraction.rawLabel ?? null,
+            normalizedLabel: extraction.normalizedLabel ?? null,
+          },
+          topMatch: {
+            catalogItemId: topMatch.catalogItemId,
+            matchScore: topMatch.matchScore,
+            reasons: topMatch.reasons,
+            historicalLineItemIds: topMatch.historicalLineItemIds,
+            catalogBaselinePrice: topMatch.catalogBaselinePrice ?? null,
+            },
+            recommendation: enrichedRecommendation,
+            recommendationSet,
+            rationaleJson: recommendationRationaleJson,
+        });
       }
     }
 

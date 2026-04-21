@@ -4,6 +4,10 @@ const drizzleMock = vi.fn();
 const poolQueryMock = vi.fn();
 const poolConnectMock = vi.fn();
 const getHistoricalPricingSignalsMock = vi.fn();
+const createMarketRateProviderMock = vi.fn();
+const resolveMarketContextMock = vi.fn();
+const calculateMarketRateAdjustmentMock = vi.fn();
+const applyMarketRateAdjustmentMock = vi.fn();
 const listCatalogCandidatesForMatchingMock = vi.fn();
 const resolveActiveCatalogSnapshotVersionIdMock = vi.fn();
 const rankExtractionMatchesMock = vi.fn();
@@ -42,12 +46,25 @@ vi.mock("../../../server/src/modules/estimating/historical-pricing-service.js", 
   getHistoricalPricingSignals: getHistoricalPricingSignalsMock,
 }));
 
+vi.mock("../../../server/src/modules/estimating/market-rate-provider.js", () => ({
+  createMarketRateProvider: createMarketRateProviderMock,
+}));
+
+vi.mock("../../../server/src/modules/estimating/market-resolution-service.js", () => ({
+  resolveMarketContext: resolveMarketContextMock,
+}));
+
+vi.mock("../../../server/src/modules/estimating/market-rate-service.js", () => ({
+  calculateMarketRateAdjustment: calculateMarketRateAdjustmentMock,
+}));
+
 vi.mock("../../../server/src/modules/estimating/matching-service.js", () => ({
   rankExtractionMatches: rankExtractionMatchesMock,
 }));
 
 vi.mock("../../../server/src/modules/estimating/pricing-service.js", () => ({
   buildPricingRecommendation: buildPricingRecommendationMock,
+  applyMarketRateAdjustment: applyMarketRateAdjustmentMock,
   isInferredRecommendationRowEligible: isInferredRecommendationRowEligibleMock,
   isConfirmedMeasurementCandidateForPricing: isConfirmedMeasurementCandidateForPricingMock,
 }));
@@ -78,6 +95,90 @@ describe("estimate generation job", () => {
     poolQueryMock.mockResolvedValue({
       rows: [{ slug: "estimating" }],
     });
+    createMarketRateProviderMock.mockReturnValue({
+      findDealMarketOverride: vi.fn(),
+      findMarketByZip: vi.fn(),
+      findMarketByFallbackGeography: vi.fn(),
+      getDefaultMarket: vi.fn(),
+      listMarketAdjustmentRules: vi.fn(),
+    });
+    buildPricingRecommendationMock.mockImplementation((input: any) => ({
+      quantity: Number(input.quantity ?? 1),
+      priceBasis: "mock",
+      recommendedUnitPrice: 10,
+      recommendedTotalPrice: 10,
+      comparableHistoricalPrices: [],
+      historicalMedianPrice: null,
+      catalogBaselinePrice: null,
+      marketAdjustmentPercent: 0,
+      assumptions: {},
+      confidence: 1,
+    }));
+    resolveMarketContextMock.mockResolvedValue({
+      market: {
+        id: "market-1",
+        name: "Default Market",
+        slug: "default",
+        type: "global",
+        stateCode: null,
+        regionId: null,
+        isActive: true,
+        createdAt: new Date("2026-04-21T00:00:00Z"),
+        updatedAt: new Date("2026-04-21T00:00:00Z"),
+      },
+      resolutionLevel: "global_default",
+      resolutionSource: { type: "global", key: "default", marketId: "market-1" },
+      location: { zip: null, state: null, regionId: null },
+    });
+    calculateMarketRateAdjustmentMock.mockResolvedValue({
+      market: {
+        id: "market-1",
+        name: "Default Market",
+        slug: "default",
+        type: "global",
+        stateCode: null,
+        regionId: null,
+        isActive: true,
+        createdAt: new Date("2026-04-21T00:00:00Z"),
+        updatedAt: new Date("2026-04-21T00:00:00Z"),
+      },
+      resolutionLevel: "global_default",
+      resolutionSource: { type: "global", key: "default", marketId: "market-1" },
+      baselinePrice: 0,
+      selectedRule: null,
+      componentAdjustments: [],
+      adjustedPrice: 0,
+      rationale: {
+        resolvedMarket: {
+          id: "market-1",
+          name: "Default Market",
+          slug: "default",
+          type: "global",
+          stateCode: null,
+          regionId: null,
+          isActive: true,
+          createdAt: new Date("2026-04-21T00:00:00Z"),
+          updatedAt: new Date("2026-04-21T00:00:00Z"),
+        },
+        resolutionLevel: "global_default",
+        resolutionSource: { type: "global", key: "default", marketId: "market-1" },
+        baselinePrice: 0,
+        selectedRuleId: null,
+        componentAdjustments: [],
+      },
+    });
+    applyMarketRateAdjustmentMock.mockImplementation(({ recommendation, marketRateAdjustment }: any) => ({
+      ...recommendation,
+      recommendedUnitPrice: marketRateAdjustment.adjustedPrice / recommendation.quantity,
+      recommendedTotalPrice: marketRateAdjustment.adjustedPrice,
+      marketAdjustmentPercent: 0,
+      marketRateContext: {
+        resolvedMarket: marketRateAdjustment.market,
+        resolutionLevel: marketRateAdjustment.resolutionLevel,
+        resolutionSource: marketRateAdjustment.resolutionSource,
+      },
+      marketRateRationale: marketRateAdjustment.rationale,
+    }));
   });
 
   it("persists a failed generation run when the queued parse run cannot be locked as the active document owner", async () => {
@@ -373,6 +474,7 @@ describe("estimate generation job", () => {
       },
     ]);
     buildPricingRecommendationMock.mockImplementation(() => ({
+      quantity: 1,
       priceBasis: "mock",
       recommendedUnitPrice: 10,
       recommendedTotalPrice: 10,
@@ -525,6 +627,7 @@ describe("estimate generation job", () => {
       },
     ]);
     buildPricingRecommendationMock.mockImplementation(() => ({
+      quantity: 1,
       priceBasis: "mock",
       recommendedUnitPrice: 10,
       recommendedTotalPrice: 10,
@@ -827,5 +930,260 @@ describe("estimate generation job", () => {
         targetGenerationRunId: "generation-run-1",
       })
     );
+  });
+
+  it("passes deal and property geography into market resolution and persists rerun request ids", async () => {
+    const sourceLimit = vi.fn().mockResolvedValue([{ id: "source-1" }]);
+    const extractionWhere = vi.fn().mockResolvedValue([
+      {
+        id: "ext-1",
+        dealId: "deal-1",
+        projectId: "project-1",
+        documentId: "doc-1",
+        extractionType: "scope_line",
+        status: "pending",
+        quantity: "2",
+        unit: "ea",
+        normalizedLabel: "Roofing tearoff",
+        divisionHint: "Roofing",
+        metadataJson: {
+          sourceParseRunId: "parse-run-1",
+          activeArtifact: true,
+        },
+      },
+    ]);
+    const appDb = {
+      select: vi.fn(() => ({
+        from: vi.fn(() => ({
+          where: vi.fn(() => ({
+            limit: sourceLimit,
+          })),
+        })),
+      })),
+    } as any;
+    const lockedClient = {
+      query: vi
+        .fn()
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [{ id: "doc-1", active_parse_run_id: "parse-run-1" }] })
+        .mockResolvedValueOnce({ rows: [] }),
+      release: vi.fn(),
+    } as any;
+    const insertPayloads: any[] = [];
+    let tenantSelectCallCount = 0;
+    const tenantDb = {
+      select: vi.fn(() => ({
+        from: vi.fn(() => {
+          tenantSelectCallCount += 1;
+          if (tenantSelectCallCount === 1) {
+            return {
+              where: vi.fn(() => ({
+                limit: vi.fn().mockResolvedValue([]),
+              })),
+            };
+          }
+          if (tenantSelectCallCount === 2) {
+            return {
+              where: extractionWhere,
+            };
+          }
+          throw new Error(`Unexpected tenant select call: ${tenantSelectCallCount}`);
+        }),
+      })),
+      insert: vi.fn((table: any) => ({
+        values: vi.fn((payload: any) => {
+          insertPayloads.push({ table, payload });
+          const id = payload.matchType ? "match-1" : payload.dealId ? "recommendation-1" : "option-1";
+          return {
+            returning: vi.fn().mockResolvedValue([{ id }]),
+          };
+        }),
+      })),
+      update: vi.fn(() => ({
+        set: vi.fn((payload: any) => ({
+          where: vi.fn(async () => {
+            insertPayloads.push({ table: "update", payload });
+          }),
+        })),
+      })),
+    } as any;
+
+    getHistoricalPricingSignalsMock.mockResolvedValue({
+      historicalItems: [],
+      vendorQuotes: [],
+      currentDeal: {
+        id: "deal-1",
+        projectTypeId: "roofing",
+        dealRegionId: "region-1",
+        dealZip: null,
+        dealState: null,
+        propertyId: "property-1",
+        propertyZip: "76102",
+        propertyState: "TX",
+      },
+    });
+    resolveMarketContextMock.mockResolvedValue({
+      market: {
+        id: "market-override",
+        name: "Override Market",
+        slug: "override",
+        type: "state",
+        stateCode: "TX",
+        regionId: null,
+        isActive: true,
+        createdAt: new Date("2026-04-21T00:00:00Z"),
+        updatedAt: new Date("2026-04-21T00:00:00Z"),
+      },
+      resolutionLevel: "zip",
+      resolutionSource: { type: "zip", key: "76102", marketId: "market-override" },
+      location: { zip: "76102", state: "TX", regionId: "region-1" },
+    });
+    calculateMarketRateAdjustmentMock.mockResolvedValue({
+      market: {
+        id: "market-override",
+        name: "Override Market",
+        slug: "override",
+        type: "state",
+        stateCode: "TX",
+        regionId: null,
+        isActive: true,
+        createdAt: new Date("2026-04-21T00:00:00Z"),
+        updatedAt: new Date("2026-04-21T00:00:00Z"),
+      },
+      resolutionLevel: "zip",
+      resolutionSource: { type: "zip", key: "76102", marketId: "market-override" },
+      baselinePrice: 10,
+      selectedRule: { id: "rule-override" },
+      componentAdjustments: [
+        {
+          component: "labor",
+          weight: 0.5,
+          baselineAmount: 5,
+          adjustmentPercent: 20,
+          adjustmentAmount: 1,
+          adjustedAmount: 6,
+        },
+        {
+          component: "material",
+          weight: 0.3,
+          baselineAmount: 3,
+          adjustmentPercent: 0,
+          adjustmentAmount: 0,
+          adjustedAmount: 3,
+        },
+        {
+          component: "equipment",
+          weight: 0.2,
+          baselineAmount: 2,
+          adjustmentPercent: 0,
+          adjustmentAmount: 0,
+          adjustedAmount: 2,
+        },
+      ],
+      adjustedPrice: 132,
+      rationale: {
+        resolvedMarket: {
+          id: "market-override",
+          name: "Override Market",
+          slug: "override",
+          type: "state",
+          stateCode: "TX",
+          regionId: null,
+          isActive: true,
+          createdAt: new Date("2026-04-21T00:00:00Z"),
+          updatedAt: new Date("2026-04-21T00:00:00Z"),
+        },
+        resolutionLevel: "zip",
+        resolutionSource: { type: "zip", key: "76102", marketId: "market-override" },
+        baselinePrice: 10,
+        selectedRuleId: "rule-override",
+        componentAdjustments: [
+          {
+            component: "labor",
+            weight: 0.5,
+            baselineAmount: 5,
+            adjustmentPercent: 20,
+            adjustmentAmount: 1,
+            adjustedAmount: 6,
+          },
+          {
+            component: "material",
+            weight: 0.3,
+            baselineAmount: 3,
+            adjustmentPercent: 0,
+            adjustmentAmount: 0,
+            adjustedAmount: 3,
+          },
+          {
+            component: "equipment",
+            weight: 0.2,
+            baselineAmount: 2,
+            adjustmentPercent: 0,
+            adjustmentAmount: 0,
+            adjustedAmount: 2,
+          },
+        ],
+      },
+    });
+    applyMarketRateAdjustmentMock.mockImplementation(({ recommendation, marketRateAdjustment }: any) => ({
+      ...recommendation,
+      recommendedUnitPrice: marketRateAdjustment.adjustedPrice / recommendation.quantity,
+      recommendedTotalPrice: marketRateAdjustment.adjustedPrice,
+      marketAdjustmentPercent: 32,
+      marketRateContext: {
+        resolvedMarket: marketRateAdjustment.market,
+        resolutionLevel: marketRateAdjustment.resolutionLevel,
+        resolutionSource: marketRateAdjustment.resolutionSource,
+      },
+      marketRateRationale: marketRateAdjustment.rationale,
+    }));
+
+    poolConnectMock.mockResolvedValue(lockedClient);
+    drizzleMock.mockReturnValueOnce(appDb).mockReturnValueOnce(tenantDb);
+
+    const { runEstimateGeneration } = await import("../../src/jobs/estimate-generation.js");
+
+    await runEstimateGeneration(
+      {
+        documentId: "doc-1",
+        dealId: "deal-1",
+        parseRunId: "parse-run-1",
+        rerunRequestId: "rerun-123",
+      },
+      "office-1"
+    );
+
+    expect(resolveMarketContextMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        dealZip: null,
+        dealState: null,
+        dealRegionId: "region-1",
+        propertyZip: "76102",
+        propertyState: "TX",
+      })
+    );
+    expect(calculateMarketRateAdjustmentMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        pricingScopeType: "division",
+        pricingScopeKey: "Roofing",
+        baselinePrice: 10,
+      })
+    );
+
+    const generationRunInsert = insertPayloads.find(({ payload }) => payload?.inputSnapshotJson)?.payload;
+    const recommendationInsert = insertPayloads.find(
+      ({ payload }) => payload && typeof payload === "object" && "recommendedUnitPrice" in payload
+    )?.payload;
+
+    expect(generationRunInsert.inputSnapshotJson.rerunRequestId).toBe("rerun-123");
+    expect(recommendationInsert.recommendedUnitPrice).toBe("66.00");
+    expect(recommendationInsert.recommendedTotalPrice).toBe("132.00");
+    expect(recommendationInsert.assumptionsJson.marketRate.resolutionSource.key).toBe("76102");
+    expect(recommendationInsert.evidenceJson.marketRate.resolvedMarket.slug).toBe("override");
+    expect(lockedClient.query).toHaveBeenLastCalledWith("COMMIT");
   });
 });

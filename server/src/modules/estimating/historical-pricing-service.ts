@@ -11,10 +11,10 @@ export async function getHistoricalPricingSignals(tenantDb: TenantDb, dealId: st
     .select({
       id: deals.id,
       projectTypeId: deals.projectTypeId,
-      regionId: deals.regionId,
+      dealRegionId: deals.regionId,
+      dealZip: deals.propertyZip,
+      dealState: deals.propertyState,
       propertyId: deals.propertyId,
-      propertyZip: deals.propertyZip,
-      propertyState: deals.propertyState,
     })
     .from(deals)
     .where(eq(deals.id, dealId))
@@ -23,7 +23,7 @@ export async function getHistoricalPricingSignals(tenantDb: TenantDb, dealId: st
   const currentDealRow = currentDeal[0] ?? null;
   let propertyLocation = null;
 
-  if (currentDealRow?.propertyId && (!currentDealRow.propertyZip || !currentDealRow.propertyState)) {
+  if (currentDealRow?.propertyId && (!currentDealRow.dealZip || !currentDealRow.dealState)) {
     const [propertyRow] = await tenantDb
       .select({
         zip: properties.zip,
@@ -37,9 +37,9 @@ export async function getHistoricalPricingSignals(tenantDb: TenantDb, dealId: st
   }
 
   const resolvedLocation = resolveDealMarketLocation({
-    dealZip: currentDealRow?.propertyZip ?? null,
-    dealState: currentDealRow?.propertyState ?? null,
-    dealRegionId: null,
+    dealZip: currentDealRow?.dealZip ?? null,
+    dealState: currentDealRow?.dealState ?? null,
+    dealRegionId: currentDealRow?.dealRegionId ?? null,
     propertyZip: propertyLocation?.zip ?? null,
     propertyState: propertyLocation?.state ?? null,
     propertyRegionId: null,
@@ -48,8 +48,8 @@ export async function getHistoricalPricingSignals(tenantDb: TenantDb, dealId: st
   const resolvedDeal = currentDealRow
     ? {
         ...currentDealRow,
-        propertyZip: resolvedLocation.zip,
-        propertyState: resolvedLocation.state,
+        propertyZip: propertyLocation?.zip ?? null,
+        propertyState: propertyLocation?.state ?? null,
         resolvedZip: resolvedLocation.zip,
         resolvedState: resolvedLocation.state,
       }

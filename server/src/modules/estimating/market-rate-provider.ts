@@ -90,7 +90,7 @@ export function isPricingScopeCandidateRule(
   );
 }
 
-function buildPricingScopeCandidateFilter(input: {
+export function buildPricingScopeCandidateFilter(input: {
   pricingScopeType: PricingScopeType;
   pricingScopeKey: string;
   estimateMarketAdjustmentRulesTable: MarketRateProviderTables["estimateMarketAdjustmentRules"];

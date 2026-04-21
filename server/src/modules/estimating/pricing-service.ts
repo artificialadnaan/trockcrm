@@ -1,3 +1,7 @@
+import type {
+  MarketRateAdjustmentResult,
+} from "./market-rate-service.js";
+
 export interface BuildPricingRecommendationInput {
   quantity: number;
   catalogBaselinePrice: number | null;
@@ -7,6 +11,33 @@ export interface BuildPricingRecommendationInput {
   internalAdjustmentPercent: number;
   regionId: string | null;
   projectTypeId: string | null;
+}
+
+export interface PricingRecommendation {
+  quantity: number;
+  priceBasis: string;
+  recommendedUnitPrice: number;
+  recommendedTotalPrice: number;
+  comparableHistoricalPrices: number[];
+  historicalMedianPrice: number | null;
+  catalogBaselinePrice: number | null;
+  marketAdjustmentPercent: number;
+  assumptions: {
+    catalogBaselineUsed: boolean;
+    vendorQuotePrice: number | null;
+    awardedOutcomeAdjustmentPercent: number;
+    internalAdjustmentPercent: number;
+  };
+  confidence: number;
+}
+
+export interface MarketRateEnrichedPricingRecommendation extends PricingRecommendation {
+  marketRateContext: {
+    resolvedMarket: MarketRateAdjustmentResult["market"];
+    resolutionLevel: MarketRateAdjustmentResult["resolutionLevel"];
+    resolutionSource: MarketRateAdjustmentResult["resolutionSource"];
+  };
+  marketRateRationale: MarketRateAdjustmentResult["rationale"];
 }
 
 export interface BuildPricingRecommendationRationaleInput {
@@ -31,19 +62,7 @@ export interface BuildPricingRecommendationRationaleInput {
   evidenceJson: Record<string, unknown>;
 }
 
-export function getRegionalMarketAdjustmentPercent(input: {
-  regionId: string | null;
-  projectTypeId: string | null;
-}) {
-  const table = {
-    "dfw:roofing": 10,
-    "dfw:waterproofing": 8,
-  } as const;
-
-  return table[`${input.regionId ?? "unknown"}:${input.projectTypeId ?? "unknown"}` as keyof typeof table] ?? 0;
-}
-
-export function buildPricingRecommendation(input: BuildPricingRecommendationInput) {
+export function buildPricingRecommendation(input: BuildPricingRecommendationInput): PricingRecommendation {
   const historicalMedian =
     input.historicalPrices.length > 0
       ? [...input.historicalPrices].sort((a, b) => a - b)[Math.floor(input.historicalPrices.length / 2)]
@@ -59,21 +78,15 @@ export function buildPricingRecommendation(input: BuildPricingRecommendationInpu
 
   const afterInternal = awardedAdjustedBase * (1 + input.internalAdjustmentPercent / 100);
 
-  const regionalAdjustmentPercent = getRegionalMarketAdjustmentPercent({
-    projectTypeId: input.projectTypeId,
-    regionId: input.regionId,
-  });
-
-  const adjusted = Number((afterInternal * (1 + regionalAdjustmentPercent / 100)).toFixed(2));
-
   return {
+    quantity: input.quantity,
     priceBasis: "catalog_baseline_with_adjustments",
-    recommendedUnitPrice: adjusted,
-    recommendedTotalPrice: Number((adjusted * input.quantity).toFixed(2)),
+    recommendedUnitPrice: Number(afterInternal.toFixed(2)),
+    recommendedTotalPrice: Number((afterInternal * input.quantity).toFixed(2)),
     comparableHistoricalPrices: input.historicalPrices,
     historicalMedianPrice: historicalMedian,
     catalogBaselinePrice: input.catalogBaselinePrice ?? null,
-    marketAdjustmentPercent: regionalAdjustmentPercent,
+    marketAdjustmentPercent: 0,
     assumptions: {
       catalogBaselineUsed: input.catalogBaselinePrice != null,
       vendorQuotePrice: input.vendorQuotePrice ?? null,
@@ -81,6 +94,39 @@ export function buildPricingRecommendation(input: BuildPricingRecommendationInpu
       internalAdjustmentPercent: input.internalAdjustmentPercent,
     },
     confidence: historicalMedian != null ? 0.84 : 0.58,
+  };
+}
+
+function roundCurrency(value: number) {
+  return Number(value.toFixed(2));
+}
+
+export function applyMarketRateAdjustment(input: {
+  recommendation: PricingRecommendation;
+  marketRateAdjustment: MarketRateAdjustmentResult;
+}): MarketRateEnrichedPricingRecommendation {
+  const adjustedTotal = roundCurrency(input.marketRateAdjustment.adjustedPrice);
+  const adjustedUnit = roundCurrency(adjustedTotal / input.recommendation.quantity);
+  const baselineTotal = input.recommendation.recommendedTotalPrice;
+  const marketAdjustmentPercent =
+    baselineTotal === 0
+      ? 0
+      : Number((((adjustedTotal - baselineTotal) / baselineTotal) * 100).toFixed(3));
+
+  return {
+    ...input.recommendation,
+    recommendedUnitPrice: adjustedUnit,
+    recommendedTotalPrice: adjustedTotal,
+    marketAdjustmentPercent,
+    assumptions: {
+      ...input.recommendation.assumptions,
+    },
+    marketRateContext: {
+      resolvedMarket: input.marketRateAdjustment.market,
+      resolutionLevel: input.marketRateAdjustment.resolutionLevel,
+      resolutionSource: input.marketRateAdjustment.resolutionSource,
+    },
+    marketRateRationale: input.marketRateAdjustment.rationale,
   };
 }
 
