@@ -89,7 +89,7 @@ export async function loadApprovedRecommendationsForRun(
       and(
         eq(estimatePricingRecommendations.dealId, dealId),
         eq(estimatePricingRecommendations.createdByRunId, generationRunId),
-        eq(estimatePricingRecommendations.status, "approved"),
+        inArray(estimatePricingRecommendations.status, ["approved", "overridden"]),
         inArray(estimatePricingRecommendations.id, recommendationIds)
       )
     ) as Promise<PromotionCandidateRow[]>;

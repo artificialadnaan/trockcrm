@@ -190,6 +190,77 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
     );
   });
 
+  it("promotes overridden recommendations that satisfy the gating rules", async () => {
+    estimateServiceMocks.createSection.mockResolvedValue({ id: "section-ovr" });
+    estimateServiceMocks.createLineItem.mockResolvedValue({ id: "line-ovr" });
+    const updateReturning = vi.fn().mockResolvedValue([{ id: "rec-ovr", promotedEstimateLineItemId: "line-ovr" }]);
+
+    const tenantDb = {
+      select: vi
+        .fn()
+        .mockReturnValueOnce({
+          from: vi.fn(() => ({
+            where: vi.fn().mockResolvedValue([]),
+          })),
+        })
+        .mockReturnValueOnce({
+          from: vi.fn(() => ({
+            innerJoin: vi.fn(() => ({
+              innerJoin: vi.fn(() => ({
+                where: vi.fn().mockResolvedValue([
+                  {
+                    recommendationId: "rec-ovr",
+                    description: "Seam Sealant",
+                    quantity: "2",
+                    unit: "ea",
+                    unitPrice: "75.00",
+                    notes: null,
+                    sectionName: "Roof",
+                    sourceType: "explicit",
+                    normalizedIntent: "seam sealant",
+                    sourceRowIdentity: "roof:seam-1",
+                    status: "overridden",
+                    createdByRunId: "run-3",
+                    promotedEstimateLineItemId: null,
+                  },
+                ]),
+              })),
+            })),
+          })),
+        })
+        .mockReturnValueOnce({
+          from: vi.fn(() => ({
+            where: vi.fn(() => ({
+              limit: vi.fn().mockResolvedValue([]),
+            })),
+          })),
+        }),
+      update: vi.fn(() => ({
+        set: vi.fn(() => ({
+          where: vi.fn(() => ({
+            returning: updateReturning,
+          })),
+        })),
+      })),
+      insert: vi.fn(() => ({
+        values: vi.fn().mockResolvedValue(undefined),
+      })),
+    } as any;
+
+    const result = await promoteApprovedRecommendationsToEstimate({
+      tenantDb,
+      dealId: "deal-1",
+      generationRunId: "run-3",
+      approvedRecommendationIds: ["rec-ovr"],
+    });
+
+    expect(result.promotedRecommendationIds).toEqual(["rec-ovr"]);
+    expect(result.rowErrors).toEqual([]);
+    expect(estimateServiceMocks.createSection).toHaveBeenCalled();
+    expect(estimateServiceMocks.createLineItem).toHaveBeenCalled();
+    expect(updateReturning).toHaveBeenCalled();
+  });
+
   it("rejects approval when the recommendation does not exist", async () => {
     const insertValues = vi.fn();
     const tenantDb = {
