@@ -30,6 +30,7 @@ import { DealCloseoutTab } from "./deal-closeout-tab";
 import { DealTimersBanner } from "./deal-timers-banner";
 import { DealProposalCard } from "./deal-proposal-card";
 import { DealEstimatingSubstage } from "./deal-estimating-substage";
+import { OpportunityRoutingPanel } from "@/components/deals/opportunity-routing-panel";
 import { LeadForm } from "@/components/leads/lead-form";
 import { LeadTimelineTab } from "@/components/leads/lead-timeline-tab";
 import { ActivityLogForm } from "@/components/activities/activity-log-form";
@@ -312,6 +313,14 @@ export function DealDetailPage() {
           </DropdownMenu>
         </div>
       </div>
+
+      <OpportunityRoutingPanel
+        deal={deal}
+        currentStageSlug={currentStageSlug}
+        onUpdated={() => {
+          void refetch();
+        }}
+      />
 
       {/* Active Timers Banner */}
       <DealTimersBanner dealId={deal.id} />

@@ -20,7 +20,14 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
 
-type TeamRole = "superintendent" | "estimator" | "project_manager" | "foreman" | "other";
+type TeamRole =
+  | "superintendent"
+  | "estimator"
+  | "project_manager"
+  | "client_services"
+  | "operations"
+  | "foreman"
+  | "other";
 
 interface TeamMember {
   id: string;
@@ -47,6 +54,8 @@ const ROLE_LABELS: Record<TeamRole, string> = {
   superintendent: "Superintendent",
   estimator: "Estimator",
   project_manager: "Project Manager",
+  client_services: "Client Services",
+  operations: "Operations",
   foreman: "Foreman",
   other: "Other",
 };
@@ -55,6 +64,8 @@ const ROLE_BADGE_CLASSES: Record<TeamRole, string> = {
   superintendent: "bg-red-100 text-red-700 border-red-200",
   estimator: "bg-blue-100 text-blue-700 border-blue-200",
   project_manager: "bg-amber-100 text-amber-700 border-amber-200",
+  client_services: "bg-emerald-100 text-emerald-700 border-emerald-200",
+  operations: "bg-violet-100 text-violet-700 border-violet-200",
   foreman: "bg-green-100 text-green-700 border-green-200",
   other: "bg-gray-100 text-gray-700 border-gray-200",
 };
@@ -63,6 +74,8 @@ const AVATAR_BG_CLASSES: Record<TeamRole, string> = {
   superintendent: "bg-red-600",
   estimator: "bg-blue-600",
   project_manager: "bg-amber-600",
+  client_services: "bg-emerald-600",
+  operations: "bg-violet-600",
   foreman: "bg-green-600",
   other: "bg-gray-600",
 };

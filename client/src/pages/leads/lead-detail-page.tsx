@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { ArrowLeft, Building2, MapPin, Clock3, User, Phone } from "lucide-react";
+import { ArrowLeft, ArrowRight, Building2, MapPin, Clock3, User, Phone } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { RecordAssignmentCard } from "@/components/assignment/record-assignment-card";
@@ -9,6 +9,9 @@ import { LeadStageBadge } from "@/components/leads/lead-stage-badge";
 import { LeadTimelineTab } from "@/components/leads/lead-timeline-tab";
 import { ForecastEditor } from "@/components/shared/forecast-editor";
 import { NextStepEditor } from "@/components/shared/next-step-editor";
+import { LeadQualificationPanel } from "@/components/leads/lead-qualification-panel";
+import { LeadStageChangeDialog } from "@/components/leads/lead-stage-change-dialog";
+import { LeadConvertDialog } from "@/components/leads/lead-convert-dialog";
 import { formatLeadPropertyLine, updateLead, useLeadDetail } from "@/hooks/use-leads";
 import { usePipelineStages } from "@/hooks/use-pipeline-config";
 import { useAuth } from "@/lib/auth";
@@ -22,18 +25,31 @@ export function LeadDetailPage() {
   const { stages } = usePipelineStages();
   const { assignees: availableReps } = useTaskAssignees();
   const [savingAssignment, setSavingAssignment] = useState(false);
+  const [targetStageId, setTargetStageId] = useState<string | null>(null);
+  const [stageDialogOpen, setStageDialogOpen] = useState(false);
+  const [convertDialogOpen, setConvertDialogOpen] = useState(false);
 
   const currentStage = useMemo(
     () => stages.find((stage) => stage.id === lead?.stageId) ?? null,
     [lead?.stageId, stages]
   );
-  const defaultDealStageId = useMemo(
-    () => stages.find((stage) => stage.workflowFamily === "standard_deal" && stage.slug === "dd")?.id ?? null,
-    [stages]
-  );
   const isConvertedLead = Boolean(lead?.convertedAt || lead?.convertedDealId || lead?.status === "converted");
   const isLeadStage = currentStage?.workflowFamily === "lead" && !isConvertedLead;
   const convertedAt = lead?.convertedAt ?? null;
+  const leadStages = useMemo(
+    () =>
+      stages
+        .filter((stage) => stage.workflowFamily === "lead")
+        .sort((a, b) => a.displayOrder - b.displayOrder),
+    [stages]
+  );
+  const nextLeadStage = useMemo(() => {
+    if (!currentStage || !isLeadStage) {
+      return null;
+    }
+
+    return leadStages.find((stage) => stage.displayOrder > currentStage.displayOrder) ?? null;
+  }, [currentStage, isLeadStage, leadStages]);
 
   if (loading) {
     return (
@@ -62,6 +78,8 @@ export function LeadDetailPage() {
   const assignedRepName =
     availableReps.find((assignee) => assignee.id === lead.assignedRepId)?.displayName ??
     lead.assignedRepId;
+  const canConvertToOpportunity =
+    currentStage?.slug === "qualified_for_opportunity" && !lead.convertedDealId && !isConvertedLead;
 
   const handleAssignmentSave = async (assignedRepId: string) => {
     if (assignedRepId === lead.assignedRepId) return;
@@ -183,17 +201,17 @@ export function LeadDetailPage() {
           />
 
           <LeadForm
-          lead={{
-            id: lead.id,
-            name: lead.name,
-            convertedDealId: lead.convertedDealId,
-            convertedDealNumber: lead.convertedDealNumber,
-            companyId: lead.companyId ?? null,
-            companyName: leadCompanyName,
-            stageId: lead.stageId,
-            propertyId: lead.propertyId,
-            propertyName: lead.property?.name ?? null,
-            propertyAddress: lead.property?.address ?? null,
+            lead={{
+              id: lead.id,
+              name: lead.name,
+              convertedDealId: lead.convertedDealId,
+              convertedDealNumber: lead.convertedDealNumber,
+              companyId: lead.companyId ?? null,
+              companyName: leadCompanyName,
+              stageId: lead.stageId,
+              propertyId: lead.propertyId,
+              propertyName: lead.property?.name ?? null,
+              propertyAddress: lead.property?.address ?? null,
               propertyCity: lead.property?.city ?? null,
               propertyState: lead.property?.state ?? null,
               propertyZip: lead.property?.zip ?? null,
@@ -202,8 +220,17 @@ export function LeadDetailPage() {
               stageEnteredAt: lead.stageEnteredAt,
             }}
             converted={isConvertedLead}
-            defaultDealStageId={defaultDealStageId}
+            showPrimaryAction={false}
           />
+
+          {isLeadStage && (
+            <LeadQualificationPanel
+              leadId={lead.id}
+              onSaved={() => {
+                void refetch();
+              }}
+            />
+          )}
 
           <Card>
             <CardContent className="space-y-3 pt-4">
@@ -215,8 +242,8 @@ export function LeadDetailPage() {
                 {isConvertedLead
                   ? "This lead has already been converted, but the pre-RFP history remains available here."
                   : isLeadStage
-                  ? "This record is still in the lead stage. Converting it moves the work into the deal pipeline."
-                  : "This lead is in a downstream workflow stage. Use the linked deal to continue opportunity work."}
+                    ? "This record is still in the lead stage. Converting it moves the work into the deal pipeline."
+                    : "This lead is in a downstream workflow stage. Use the linked deal to continue opportunity work."}
               </p>
               <div className="flex items-center gap-2 text-sm text-muted-foreground">
                 <User className="h-4 w-4" />
@@ -226,10 +253,55 @@ export function LeadDetailPage() {
                 <Phone className="h-4 w-4" />
                 <span>{lead.lastActivityAt ? "Activity recorded" : "No activity yet"}</span>
               </div>
+              {isLeadStage && nextLeadStage && (
+                <Button
+                  variant="outline"
+                  className="w-full"
+                  onClick={() => {
+                    setTargetStageId(nextLeadStage.id);
+                    setStageDialogOpen(true);
+                  }}
+                >
+                  Advance to {nextLeadStage.name}
+                  <ArrowRight className="ml-2 h-4 w-4" />
+                </Button>
+              )}
+              {canConvertToOpportunity && (
+                <Button className="w-full" onClick={() => setConvertDialogOpen(true)}>
+                  Convert to Opportunity
+                  <ArrowRight className="ml-2 h-4 w-4" />
+                </Button>
+              )}
+              {lead.convertedDealId && (
+                <Button className="w-full" onClick={() => navigate(`/deals/${lead.convertedDealId}`)}>
+                  Open Deal
+                  <ArrowRight className="ml-2 h-4 w-4" />
+                </Button>
+              )}
             </CardContent>
           </Card>
         </div>
       </div>
+
+      <>
+        <LeadStageChangeDialog
+          lead={lead}
+          targetStageId={targetStageId}
+          open={stageDialogOpen}
+          onOpenChange={setStageDialogOpen}
+          onSuccess={() => {
+            setStageDialogOpen(false);
+            setTargetStageId(null);
+            void refetch();
+          }}
+        />
+        <LeadConvertDialog
+          lead={lead}
+          open={convertDialogOpen}
+          onOpenChange={setConvertDialogOpen}
+          onSuccess={(dealId) => navigate(`/deals/${dealId}`)}
+        />
+      </>
     </div>
   );
 }

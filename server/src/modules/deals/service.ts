@@ -15,14 +15,16 @@ import {
   tasks,
   jobQueue,
 } from "@trock-crm/shared/schema";
-import type { WorkflowRoute } from "@trock-crm/shared/types";
+import type { DealPipelineDisposition, WorkflowRoute } from "@trock-crm/shared/types";
 import type * as schema from "@trock-crm/shared/schema";
+import { dealRoutingHistory } from "../../../../shared/src/schema/tenant/deal-routing-history.js";
 import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { getStageById } from "../pipeline/service.js";
 import { captureInitialForecastMilestone } from "../reports/forecast-milestones-service.js";
 import { createAssignmentTaskIfNeeded } from "../assignment-tasks/service.js";
 import { canCreateDealWithoutSourceLead } from "./direct-create-rules.js";
+import { getDealDepartmentOwnership } from "./ownership-service.js";
 
 // Type alias for the tenant-scoped Drizzle instance
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -93,7 +95,8 @@ export interface CreateDealInput {
   propertyId?: string;
   sourceLeadId?: string;
   sourceLeadWriteMode?: "direct" | "lead_conversion";
-  workflowRoute?: WorkflowRoute;
+  pipelineDisposition?: DealPipelineDisposition;
+  workflowRoute?: WorkflowRoute | null;
   migrationMode?: boolean;
   primaryContactId?: string;
   ddEstimate?: string;
@@ -118,7 +121,8 @@ export interface UpdateDealInput {
   sourceLeadId?: string | null;
   companyId?: string | null;
   propertyId?: string | null;
-  workflowRoute?: WorkflowRoute;
+  pipelineDisposition?: DealPipelineDisposition | null;
+  workflowRoute?: WorkflowRoute | null;
   migrationMode?: boolean;
   ddEstimate?: string | null;
   bidEstimate?: string | null;
@@ -283,6 +287,21 @@ function mapDealWorkspaceRow(row: DealWorkspaceRow) {
 
 function workflowFamilyForRoute(workflowRoute: WorkflowRoute) {
   return workflowRoute === "service" ? "service_deal" : "standard_deal";
+}
+
+function workflowFamilyForDisposition(
+  pipelineDisposition: DealPipelineDisposition,
+  workflowRoute: WorkflowRoute | null | undefined
+) {
+  if (pipelineDisposition === "service") {
+    return "service_deal" as const;
+  }
+
+  if (pipelineDisposition === "deals") {
+    return workflowFamilyForRoute(workflowRoute ?? "estimating");
+  }
+
+  return "standard_deal" as const;
 }
 
 async function validateDealPrimaryContact(
@@ -547,7 +566,9 @@ export async function getDealDetail(tenantDb: TenantDb, dealId: string, userRole
   const deal = await getDealById(tenantDb, dealId, userRole, userId);
   if (!deal) return null;
 
-  const [stageHistory, approvals, cos] = await Promise.all([
+  const currentStage = await getStageById(deal.stageId);
+
+  const [stageHistory, approvals, cos, routingHistory, departmentOwnership] = await Promise.all([
     tenantDb
       .select()
       .from(dealStageHistory)
@@ -563,6 +584,17 @@ export async function getDealDetail(tenantDb: TenantDb, dealId: string, userRole
       .from(changeOrders)
       .where(eq(changeOrders.dealId, dealId))
       .orderBy(asc(changeOrders.coNumber)),
+    tenantDb
+      .select()
+      .from(dealRoutingHistory)
+      .where(eq(dealRoutingHistory.dealId, dealId))
+      .orderBy(desc(dealRoutingHistory.createdAt)),
+    getDealDepartmentOwnership(tenantDb, {
+      dealId,
+      stageSlug: currentStage?.slug ?? null,
+      pipelineDisposition: deal.pipelineDisposition,
+      workflowRoute: deal.workflowRoute,
+    }),
   ]);
 
   return {
@@ -570,6 +602,8 @@ export async function getDealDetail(tenantDb: TenantDb, dealId: string, userRole
     stageHistory,
     approvals,
     changeOrders: cos,
+    routingHistory,
+    departmentOwnership,
   };
 }
 
@@ -577,8 +611,14 @@ export async function getDealDetail(tenantDb: TenantDb, dealId: string, userRole
  * Create a new deal.
  */
 export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
-  const workflowRoute = input.workflowRoute ?? "estimating";
-  const stage = await getStageById(input.stageId, workflowFamilyForRoute(workflowRoute));
+  const pipelineDisposition =
+    input.pipelineDisposition ??
+    (input.workflowRoute === "service" ? "service" : "deals");
+  const workflowRoute = input.workflowRoute ?? null;
+  const stage = await getStageById(
+    input.stageId,
+    workflowFamilyForDisposition(pipelineDisposition, workflowRoute)
+  );
   if (!stage) {
     throw new AppError(400, "Invalid stage ID for workflow route");
   }
@@ -650,6 +690,7 @@ export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
       source: lineage.source,
       winProbability: input.winProbability ?? null,
       expectedCloseDate: input.expectedCloseDate ?? null,
+      pipelineDisposition,
       workflowRoute,
     })
     .returning();
@@ -807,11 +848,11 @@ export async function updateDeal(
   if (input.supportNeededNotes !== undefined) updates.supportNeededNotes = input.supportNeededNotes;
   if (input.proposalNotes !== undefined) updates.proposalNotes = input.proposalNotes;
   if (input.workflowRoute !== undefined) {
-    const stage = await getStageById(existing.stageId, workflowFamilyForRoute(input.workflowRoute));
-    if (!stage) {
-      throw new AppError(400, "Current stage is not valid for the requested workflow route");
-    }
-    updates.workflowRoute = input.workflowRoute;
+    throw new AppError(400, "Use /api/deals/:id/routing-review for route changes");
+  }
+
+  if (input.pipelineDisposition !== undefined) {
+    throw new AppError(400, "Use /api/deals/:id/routing-review for route changes");
   }
 
   if (input.sourceLeadId !== undefined) {
@@ -828,7 +869,7 @@ export async function updateDeal(
           ? (existing.primaryContactId ?? undefined)
           : (input.primaryContactId ?? undefined),
       source: input.source === undefined ? (existing.source ?? undefined) : (input.source ?? undefined),
-      workflowRoute: input.workflowRoute ?? existing.workflowRoute,
+      workflowRoute: input.workflowRoute ?? existing.workflowRoute ?? "estimating",
     }, {
       existingDealId: existing.id,
     });

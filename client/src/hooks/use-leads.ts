@@ -2,6 +2,38 @@ import { useCallback, useEffect, useState } from "react";
 import { api, resolveApiBase } from "@/lib/api";
 import type { StagePageQuery } from "@/lib/pipeline-stage-page";
 
+export interface LeadQualificationRecord {
+  id: string;
+  leadId: string;
+  estimatedOpportunityValue: string | null;
+  goDecision: "go" | "no_go" | null;
+  goDecisionNotes: string | null;
+  qualificationData: Record<string, unknown>;
+  scopingSubsetData: Record<string, unknown>;
+  disqualificationReason: string | null;
+  disqualificationNotes: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface LeadStageGateResult {
+  allowed: boolean;
+  currentStage: { id: string; name: string; slug: string };
+  targetStage: { id: string; name: string; slug: string };
+  missingRequirements: {
+    fields: string[];
+    effectiveChecklist: {
+      fields: Array<{
+        key: string;
+        label: string;
+        satisfied: boolean;
+        source: "stage";
+      }>;
+    };
+  };
+  blockReason?: string;
+}
+
 export interface LeadRecord {
   id: string;
   companyId: string;
@@ -147,7 +179,14 @@ export function useLeads(filters: LeadFilters = {}) {
     } finally {
       setLoading(false);
     }
-  }, [filters.assignedRepId, filters.companyId, filters.isActive, filters.propertyId, filters.search, filters.status]);
+  }, [
+    filters.assignedRepId,
+    filters.companyId,
+    filters.isActive,
+    filters.propertyId,
+    filters.search,
+    filters.status,
+  ]);
 
   useEffect(() => {
     fetchLeads();
@@ -185,6 +224,39 @@ export function useLeadDetail(leadId: string | undefined) {
 
   return { lead, loading, error, refetch: fetchLead };
 }
+
+export function useLeadQualification(leadId: string | undefined) {
+  const [qualification, setQualification] = useState<LeadQualificationRecord | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchQualification = useCallback(async () => {
+    if (!leadId) {
+      setLoading(false);
+      return;
+    }
+
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await api<{ qualification: LeadQualificationRecord | null }>(
+        `/leads/${leadId}/qualification`
+      );
+      setQualification(data.qualification);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to load lead qualification");
+    } finally {
+      setLoading(false);
+    }
+  }, [leadId]);
+
+  useEffect(() => {
+    fetchQualification();
+  }, [fetchQualification]);
+
+  return { qualification, loading, error, refetch: fetchQualification };
+}
+
 export async function createLead(input: {
   companyId: string;
   propertyId: string;
@@ -200,9 +272,8 @@ export async function createLead(input: {
   });
 }
 
-export async function updateLead(
-  leadId: string,
-  input: Partial<Pick<
+type LeadUpdatePayload = Partial<
+  Pick<
     LeadRecord,
     | "stageId"
     | "assignedRepId"
@@ -228,8 +299,23 @@ export async function updateLead(
     | "nextMilestoneAt"
     | "supportNeededType"
     | "supportNeededNotes"
-  >>
-) {
+    | "qualificationScope"
+    | "qualificationBudgetAmount"
+    | "qualificationCompanyFit"
+    | "directorReviewDecision"
+    | "directorReviewReason"
+  > & {
+    estimatedOpportunityValue: string | null;
+    goDecision: "go" | "no_go" | null;
+    goDecisionNotes: string | null;
+    qualificationData: Record<string, unknown>;
+    scopingSubsetData: Record<string, unknown>;
+    disqualificationReason: string | null;
+    disqualificationNotes: string | null;
+  }
+>;
+
+export async function updateLead(leadId: string, input: LeadUpdatePayload) {
   return api<{ lead: LeadRecord }>(`/leads/${leadId}`, {
     method: "PATCH",
     json: input,
@@ -290,7 +376,8 @@ export async function transitionLeadStage(
   if (
     payload &&
     (response.status === 409 ||
-      (typeof payload === "object" && (payload as { reason?: string }).reason === "missing_requirements"))
+      (typeof payload === "object" &&
+        (payload as { reason?: string }).reason === "missing_requirements"))
   ) {
     return payload as LeadTransitionResult;
   }
@@ -306,7 +393,7 @@ export async function transitionLeadStage(
 export async function convertLead(
   leadId: string,
   input: {
-    dealStageId: string;
+    dealStageId?: string;
     workflowRoute?: "estimating" | "service";
     assignedRepId?: string;
     primaryContactId?: string | null;
@@ -347,7 +434,7 @@ export function useLeadBoard(scope: "mine" | "team" | "all") {
 
   async function convertLeadFromBoard(input: {
     leadId: string;
-    dealStageId: string;
+    dealStageId?: string;
     workflowRoute?: "estimating" | "service";
     assignedRepId?: string;
     primaryContactId?: string | null;
@@ -368,7 +455,9 @@ export function useLeadBoard(scope: "mine" | "team" | "all") {
   return { board, loading, convertLead: convertLeadFromBoard, refetch };
 }
 
-export function useLeadStagePage(input: StagePageQuery & { stageId: string; scope: "mine" | "team" | "all" }) {
+export function useLeadStagePage(
+  input: StagePageQuery & { stageId: string; scope: "mine" | "team" | "all" }
+) {
   const [data, setData] = useState<LeadStagePageResponse | null>(null);
 
   useEffect(() => {
@@ -385,7 +474,9 @@ export function useLeadStagePage(input: StagePageQuery & { stageId: string; scop
       ...(input.filters.source ? { source: input.filters.source } : {}),
     });
 
-    void api<LeadStagePageResponse>(`/leads/stages/${input.stageId}?${params.toString()}`).then(setData);
+    void api<LeadStagePageResponse>(`/leads/stages/${input.stageId}?${params.toString()}`).then(
+      setData
+    );
   }, [
     input.filters.assignedRepId,
     input.filters.source,
@@ -405,4 +496,17 @@ export function useLeadStagePage(input: StagePageQuery & { stageId: string; scop
 
 export async function updateLeadStage(leadId: string, stageId: string) {
   return api(`/leads/${leadId}`, { method: "PATCH", json: { stageId } });
+}
+
+export async function preflightLeadStageCheck(leadId: string, targetStageId: string) {
+  return api<LeadStageGateResult>(`/leads/${leadId}/stage/preflight`, {
+    method: "POST",
+    json: { targetStageId },
+  });
+}
+
+export async function convertLeadToOpportunity(leadId: string) {
+  return api<{ lead: LeadRecord; deal: { id: string } }>(`/leads/${leadId}/convert`, {
+    method: "POST",
+  });
 }

@@ -47,4 +47,24 @@ describe("pipeline stage gate validation", () => {
       )
     ).toThrowError("Unknown requiredApprovals value: rep");
   });
+
+  it("accepts canonical lead and opportunity workflow gate fields", () => {
+    const result = normalizeStageGateValues(
+      [
+        "estimatedOpportunityValue",
+        "qualification.stakeholderRole",
+        "scopingSubset.projectOverview",
+        "opportunity.preBidMeetingCompleted",
+      ],
+      STAGE_GATE_ALLOWED_FIELDS,
+      "requiredFields"
+    );
+
+    expect(result).toEqual([
+      "estimatedOpportunityValue",
+      "qualification.stakeholderRole",
+      "scopingSubset.projectOverview",
+      "opportunity.preBidMeetingCompleted",
+    ]);
+  });
 });

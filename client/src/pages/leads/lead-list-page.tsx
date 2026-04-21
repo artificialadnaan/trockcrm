@@ -12,8 +12,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { PipelineBoard } from "@/components/pipeline/pipeline-board";
-import { LeadConversionDialog } from "@/components/leads/lead-conversion-dialog";
-import { transitionLeadStage, useLeadBoard } from "@/hooks/use-leads";
+import { preflightLeadStageCheck, updateLead, useLeadBoard } from "@/hooks/use-leads";
 import { useNormalizedPipelineRoute } from "@/lib/pipeline-scope";
 
 export function isImmediateNextStageMove(
@@ -24,20 +23,25 @@ export function isImmediateNextStageMove(
   return nextStageById.get(currentStageId) === targetStageId;
 }
 
-export function isValidDirectorDecisionForTarget(
-  targetStageSlug: string | undefined,
-  decision: "" | "go" | "no_go"
-) {
-  if (targetStageSlug === "ready_for_opportunity") return decision === "go";
-  return decision === "go" || decision === "no_go";
+function matchesLeadBucket(bucket: string | null, slug: string) {
+  if (!bucket) return true;
+  if (bucket === "lead") {
+    return ["lead_new", "company_pre_qualified", "scoping_in_progress", "contacted"].includes(slug);
+  }
+  if (bucket === "qualified_lead") {
+    return ["pre_qual_value_assigned", "lead_go_no_go", "qualified_lead"].includes(slug);
+  }
+  if (bucket === "opportunity") {
+    return ["qualified_for_opportunity", "director_go_no_go", "ready_for_opportunity"].includes(slug);
+  }
+  return true;
 }
 
 export function LeadListPage() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const { allowedScope: scope, needsRedirect, redirectTo } = useNormalizedPipelineRoute("leads");
-  const { board, loading, convertLead, refetch } = useLeadBoard(scope);
-  const [conversionLeadId, setConversionLeadId] = useState<string | null>(null);
+  const { board, loading, refetch } = useLeadBoard(scope);
   const [blockedMove, setBlockedMove] = useState<{
     leadId: string;
     leadName: string;
@@ -46,25 +50,20 @@ export function LeadListPage() {
   } | null>(null);
 
   const bucket = searchParams.get("bucket");
-  const stageIndexById = useMemo(
+  const nextStageById = useMemo(
     () =>
-      new Map((board?.columns ?? []).map((column, index) => [column.stage.id, index])),
+      new Map(
+        (board?.columns ?? []).map((column, index, columns) => [
+          column.stage.id,
+          columns[index + 1]?.stage.id ?? null,
+        ])
+      ),
     [board?.columns]
   );
-  const filteredColumns = useMemo(() => {
-    const columns = board?.columns ?? [];
-    if (!bucket) return columns;
-
-    return columns.filter((column) => {
-      const slug = column.stage.slug;
-      if (bucket === "lead") return slug === "contacted";
-      if (bucket === "qualified_lead") return slug === "qualified_lead";
-      if (bucket === "opportunity") {
-        return slug === "director_go_no_go" || slug === "ready_for_opportunity";
-      }
-      return true;
-    });
-  }, [board?.columns, bucket]);
+  const filteredColumns = useMemo(
+    () => (board?.columns ?? []).filter((column) => matchesLeadBucket(bucket, column.stage.slug)),
+    [board?.columns, bucket]
+  );
 
   if (needsRedirect) return <Navigate to={redirectTo} replace />;
 
@@ -74,7 +73,7 @@ export function LeadListPage() {
         <div className="space-y-1">
           <h1 className="text-3xl font-semibold tracking-tight text-slate-950">Leads Board</h1>
           <p className="text-sm text-slate-500">
-            Use the board to move active leads forward. Open a stage to inspect it in a paginated workspace.
+            Use the board to move active leads forward. Open a lead to complete qualification intake and convert to Opportunity.
           </p>
         </div>
         <Button onClick={() => navigate("/leads/new")}>
@@ -89,7 +88,7 @@ export function LeadListPage() {
         loading={loading}
         onOpenStage={(stageId) => navigate(`/leads/stages/${stageId}?scope=${scope}`)}
         onOpenRecord={(leadId) => navigate(`/leads/${leadId}`)}
-        onMove={({ activeId, targetStageId, targetStageSlug }) => {
+        onMove={({ activeId, targetStageId }) => {
           const sourceColumn = (board?.columns ?? []).find((column) =>
             column.cards.some((card) => card.id === activeId)
           );
@@ -100,54 +99,31 @@ export function LeadListPage() {
             return;
           }
 
-          const currentIndex = stageIndexById.get(sourceColumn.stage.id) ?? -1;
-          const nextIndex = stageIndexById.get(targetStageId) ?? -1;
-
-          if (targetStageSlug === "converted") {
-            if (!board?.defaultConversionDealStageId) {
-              toast.error("No default deal stage is configured for lead conversion.");
-              return;
-            }
-            setConversionLeadId(activeId);
-            return;
-          }
-
-          if (nextIndex !== currentIndex + 1) {
+          if (!isImmediateNextStageMove(sourceColumn.stage.id, targetStageId, nextStageById)) {
             toast.error("Leads can only move one stage forward at a time.");
             return;
           }
 
-          void transitionLeadStage(activeId, { targetStageId })
+          void preflightLeadStageCheck(activeId, targetStageId)
             .then(async (result) => {
-              if (result.ok) {
-                await refetch();
+              if (!result.allowed) {
+                setBlockedMove({
+                  leadId: activeLead.id,
+                  leadName: activeLead.name,
+                  targetStageName: targetColumn.stage.name,
+                  missingLabels: result.missingRequirements.effectiveChecklist.fields
+                    .filter((field) => !field.satisfied)
+                    .map((field) => field.label),
+                });
                 return;
               }
 
-              setBlockedMove({
-                leadId: activeLead.id,
-                leadName: activeLead.name,
-                targetStageName: targetColumn.stage.name,
-                missingLabels: result.missing.map((item) => item.label),
-              });
+              await updateLead(activeId, { stageId: targetStageId });
+              await refetch();
             })
             .catch((error: unknown) => {
               toast.error(error instanceof Error ? error.message : "Failed to move lead");
             });
-        }}
-      />
-
-      <LeadConversionDialog
-        leadId={conversionLeadId}
-        defaultDealStageId={board?.defaultConversionDealStageId ?? null}
-        defaultWorkflowRoute="estimating"
-        onConfirm={async (input) => {
-          await convertLead(input);
-          await refetch();
-          setConversionLeadId(null);
-        }}
-        onOpenChange={(open) => {
-          if (!open) setConversionLeadId(null);
         }}
       />
 

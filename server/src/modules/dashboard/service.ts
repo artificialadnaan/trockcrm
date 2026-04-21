@@ -129,7 +129,11 @@ function buildFunnelBuckets(leadRows: any[], dealRows: any[]): FunnelBucketSumma
     {
       key: "lead",
       label: "Leads",
-      count: leadCounts.get("contacted") ?? 0,
+      count:
+        (leadCounts.get("lead_new") ?? 0) +
+        (leadCounts.get("company_pre_qualified") ?? 0) +
+        (leadCounts.get("scoping_in_progress") ?? 0) +
+        (leadCounts.get("contacted") ?? 0),
       totalValue: null,
       route: "/leads",
       bucket: "lead",
@@ -137,7 +141,10 @@ function buildFunnelBuckets(leadRows: any[], dealRows: any[]): FunnelBucketSumma
     {
       key: "qualified_lead",
       label: "Qualified Leads",
-      count: leadCounts.get("qualified_lead") ?? 0,
+      count:
+        (leadCounts.get("pre_qual_value_assigned") ?? 0) +
+        (leadCounts.get("lead_go_no_go") ?? 0) +
+        (leadCounts.get("qualified_lead") ?? 0),
       totalValue: null,
       route: "/leads",
       bucket: "qualified_lead",
@@ -145,7 +152,10 @@ function buildFunnelBuckets(leadRows: any[], dealRows: any[]): FunnelBucketSumma
     {
       key: "opportunity",
       label: "Opportunities",
-      count: (leadCounts.get("director_go_no_go") ?? 0) + (leadCounts.get("ready_for_opportunity") ?? 0),
+      count:
+        (leadCounts.get("qualified_for_opportunity") ?? 0) +
+        (leadCounts.get("director_go_no_go") ?? 0) +
+        (leadCounts.get("ready_for_opportunity") ?? 0),
       totalValue: null,
       route: "/leads",
       bucket: "opportunity",
@@ -232,9 +242,15 @@ async function getDirectorFunnelSummary(
       WITH lead_counts AS (
         SELECT
           l.assigned_rep_id AS rep_id,
-          COUNT(*) FILTER (WHERE psc.slug = 'contacted')::int AS leads,
-          COUNT(*) FILTER (WHERE psc.slug = 'qualified_lead')::int AS qualified_leads,
-          COUNT(*) FILTER (WHERE psc.slug IN ('director_go_no_go', 'ready_for_opportunity'))::int AS opportunities
+          COUNT(*) FILTER (
+            WHERE psc.slug IN ('lead_new', 'company_pre_qualified', 'scoping_in_progress', 'contacted')
+          )::int AS leads,
+          COUNT(*) FILTER (
+            WHERE psc.slug IN ('pre_qual_value_assigned', 'lead_go_no_go', 'qualified_lead')
+          )::int AS qualified_leads,
+          COUNT(*) FILTER (
+            WHERE psc.slug IN ('qualified_for_opportunity', 'director_go_no_go', 'ready_for_opportunity')
+          )::int AS opportunities
         FROM leads l
         JOIN pipeline_stage_config psc ON psc.id = l.stage_id
         WHERE l.status = 'open'
