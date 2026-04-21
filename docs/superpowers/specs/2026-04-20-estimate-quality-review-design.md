@@ -123,6 +123,8 @@ Required additions:
   - `extracted`
   - `inferred`
   - `manual`
+- `source_type` is immutable row origin and never changes after row creation
+- `selected_source_type` is the current chosen content source for pricing and promotion and may differ from `source_type` after review actions
 - local catalog source tagging for promoted custom rows
 - selected-option linkage from the parent recommendation to the chosen option or chosen manual row
 - stable source-row linkage for refresh and dedupe behavior
@@ -241,7 +243,7 @@ Manual row storage contract:
 
 - for extracted rows: `extraction:<source_extraction_id>`
 - for inferred rows: `inferred:<normalized_intent>:<estimate_section_name>`
-- for manual rows: `manual:<normalized_intent>:<estimate_section_name>:<manual_identity_key>`
+- for manual rows: `manual:<manual_identity_key>`
 
 This field must be persisted directly on the recommendation row so refresh and dedupe logic do not depend on nullable foreign keys alone.
 
@@ -390,6 +392,8 @@ Explicit-row duplicate rule for this slice:
 - extracted and manual rows with the same normalized intent or selected catalog item are not auto-collapsed
 - instead, both remain visible and the workbench flags them as a duplicate-review condition for the estimator
 - duplicate suppression only removes inferred rows when an explicit extracted or manual row already covers that intent
+- duplicate-review grouping is determined by same `estimate_section_name` plus either matching `normalized_intent` or matching selected catalog item id
+- only one row in a duplicate-review group may remain promotable; the workbench must block promotion for the group until the estimator rejects or otherwise demotes the extra rows
 
 ## Review Lifecycle
 
@@ -437,14 +441,17 @@ Allowed actions:
 - accept recommended:
   - marks the parent row `accepted`
   - records the recommended option as selected
+  - sets `selected_source_type` to the selected recommendation source
 - accept manual row:
   - applies only to rows with `source_type = 'manual'`
   - marks the parent row `accepted`
+  - keeps `selected_source_type = 'manual'` when the row is still free-text estimate-only
   - keeps `selected_option_id = null` when the row is still free-text estimate-only
   - uses the persisted `manual_*` fields as the canonical values for later promotion unless an override is applied
 - switch to alternate:
   - marks the parent row `alternate_selected`
   - records the chosen alternate option id
+  - sets `selected_source_type = 'catalog_option'`
 - override:
   - marks the parent row `overridden`
   - stores overridden quantity/unit/price values on the parent recommendation row in `override_*` fields
@@ -463,6 +470,7 @@ Allowed actions:
   - writes its id to `promoted_local_catalog_item_id` on the parent recommendation row
   - does not itself promote the line into the canonical estimate model
   - must no-op and return the existing linked item when `promoted_local_catalog_item_id` is already set on that recommendation row
+  - must also no-op and reuse an existing local catalog item when another recommendation row for the same `deal_id + manual_identity_key` has already linked one
 
 Audit behavior:
 
@@ -473,6 +481,7 @@ Audit behavior:
   - `alternate_selected`
   - `overridden`
   where `promoted_estimate_line_item_id` is null
+  and where the row is not blocked by an unresolved duplicate-review group
 
 ## Promotion Mapping
 
