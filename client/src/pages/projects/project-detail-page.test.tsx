@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { ProjectDetailPage } from "./project-detail-page";
@@ -22,7 +22,26 @@ function renderPage() {
 }
 
 describe("ProjectDetailPage", () => {
-  it("renders the project shell with the Tasks tab", () => {
+  beforeEach(() => {
+    mocks.useProjectDetailMock.mockReset();
+  });
+
+  it("renders the loading shell with back navigation", () => {
+    mocks.useProjectDetailMock.mockReturnValue({
+      project: null,
+      loading: true,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const html = renderPage();
+
+    expect(html).toContain("Projects");
+    expect(html).toContain("animate-pulse");
+    expect(html).not.toContain('role="tablist"');
+  });
+
+  it("renders the project shell with an active Tasks tab", () => {
     mocks.useProjectDetailMock.mockReturnValue({
       project: {
         id: "deal-123",
@@ -46,6 +65,9 @@ describe("ProjectDetailPage", () => {
     expect(html).toContain("TR-1001");
     expect(html).toContain("Project Surface");
     expect(html).toContain("Tasks");
+    expect(html).toContain('role="tablist"');
+    expect(html).toContain('aria-selected="true"');
+    expect(html).toContain("Project-scoped task management will land here.");
     expect(html).toContain("Deal-backed project view for the existing Procore-linked record");
     expect(html).toContain("Open in Procore");
   });
@@ -62,5 +84,6 @@ describe("ProjectDetailPage", () => {
 
     expect(html).toContain("Project not found");
     expect(html).toContain("Back to Projects");
+    expect(html).not.toContain('role="tablist"');
   });
 });

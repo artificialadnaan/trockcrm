@@ -246,4 +246,37 @@ router.get("/my-projects", async (req, res, next) => {
   }
 });
 
+// GET /api/procore/my-projects/:id — single deal-backed project for the project detail shell
+router.get("/my-projects/:id", async (req, res, next) => {
+  try {
+    const userId = req.user!.id;
+    const role = req.user!.role;
+    const params = role === "rep" ? [req.params.id, userId] : [req.params.id];
+
+    const rows = await req.tenantClient!.query(
+      `SELECT d.id, d.deal_number, d.name, d.procore_project_id,
+              d.procore_last_synced_at, d.change_order_total,
+              psc.name AS stage_name, psc.color AS stage_color
+       FROM deals d
+       JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
+       WHERE d.procore_project_id IS NOT NULL
+         AND d.is_active = true
+         AND d.id = $1
+         ${role === "rep" ? "AND d.assigned_rep_id = $2" : ""}
+       LIMIT 1`,
+      params
+    );
+
+    const project = rows.rows[0] ?? null;
+    if (!project) {
+      throw new AppError(404, "Project not found");
+    }
+
+    await req.commitTransaction!();
+    res.json({ project });
+  } catch (err) {
+    next(err);
+  }
+});
+
 export const procoreRoutes = router;

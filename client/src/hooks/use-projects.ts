@@ -26,8 +26,8 @@ export function useProjectDetail(projectId: string | undefined) {
     setLoading(true);
     setError(null);
     try {
-      const data = await api<{ deals: ProjectSummary[] }>("/procore/my-projects");
-      setProject(data.deals.find((entry) => entry.id === projectId) ?? null);
+      const data = await api<{ project: ProjectSummary }>(`/procore/my-projects/${projectId}`);
+      setProject(data.project);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to load project");
     } finally {

@@ -1,24 +1,42 @@
+import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { ArrowLeft, ExternalLink, FolderKanban } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
+import { CardContent } from "@/components/ui/card";
 import { formatCurrency } from "@/lib/deal-utils";
 import { useProjectDetail } from "@/hooks/use-projects";
+
+type ProjectTab = "overview" | "tasks";
 
 export function ProjectDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const { project, loading, error } = useProjectDetail(id);
+  const [activeTab, setActiveTab] = useState<ProjectTab>("tasks");
+
+  useEffect(() => {
+    setActiveTab("tasks");
+  }, [id]);
 
   if (loading) {
     return (
       <div className="space-y-6">
+        <Button
+          variant="ghost"
+          size="sm"
+          className="-ml-2 w-fit text-muted-foreground hover:text-foreground"
+          onClick={() => navigate("/projects")}
+        >
+          <ArrowLeft className="mr-1 h-4 w-4" />
+          Projects
+        </Button>
         <div className="space-y-3">
           <div className="h-6 w-32 rounded bg-muted animate-pulse" />
           <div className="h-8 w-80 rounded bg-muted animate-pulse" />
           <div className="h-4 w-96 rounded bg-muted animate-pulse" />
         </div>
+        <div className="h-12 rounded-lg bg-muted animate-pulse" />
         <div className="h-40 rounded-lg bg-muted animate-pulse" />
       </div>
     );
@@ -95,18 +113,76 @@ export function ProjectDetailPage() {
       </div>
 
       <div className="rounded-lg border border-slate-200 bg-white">
-        <div className="flex items-center gap-2 border-b border-slate-200 px-4 py-3">
-          <span className="text-sm font-medium text-foreground">Tasks</span>
-          <span className="text-xs text-muted-foreground">Initial shell</span>
-        </div>
-        <CardContent className="space-y-3 p-4">
-          <p className="text-sm text-muted-foreground">
-            This route is reserved for project-scoped task management. The current slice only
-            establishes the shell and route ownership for the deal-backed project record.
-          </p>
-          <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50 px-4 py-6 text-sm text-muted-foreground">
-            No project task data has been wired into this view yet.
+        <div className="border-b border-slate-200 px-4 pt-3">
+          <div
+            className="flex items-end gap-2"
+            role="tablist"
+            aria-label="Project detail tabs"
+          >
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeTab === "overview"}
+              className={`rounded-t-md border border-transparent px-3 py-2 text-sm font-medium transition-colors ${
+                activeTab === "overview"
+                  ? "border-slate-200 border-b-white bg-white text-foreground"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+              onClick={() => setActiveTab("overview")}
+            >
+              Overview
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeTab === "tasks"}
+              className={`rounded-t-md border border-transparent px-3 py-2 text-sm font-medium transition-colors ${
+                activeTab === "tasks"
+                  ? "border-slate-200 border-b-white bg-white text-foreground"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+              onClick={() => setActiveTab("tasks")}
+            >
+              Tasks
+            </button>
           </div>
+        </div>
+
+        <CardContent className="space-y-3 p-4">
+          {activeTab === "overview" ? (
+            <>
+              <p className="text-sm text-muted-foreground">
+                This route is a project-oriented view over the existing deal-backed record.
+              </p>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                  <p className="text-xs uppercase tracking-wide text-muted-foreground">Project id</p>
+                  <p className="mt-1 font-mono text-sm text-foreground">{project.id}</p>
+                </div>
+                <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                  <p className="text-xs uppercase tracking-wide text-muted-foreground">Procore link</p>
+                  <p className="mt-1 text-sm text-foreground">
+                    {project.procore_project_id ? "Available" : "Not linked"}
+                  </p>
+                </div>
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-sm font-medium text-foreground">Tasks</p>
+                  <p className="text-sm text-muted-foreground">
+                    Project-scoped task management will land here.
+                  </p>
+                </div>
+                <span className="text-xs text-muted-foreground">Initial shell</span>
+              </div>
+              <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50 px-4 py-6 text-sm text-muted-foreground">
+                No project task data has been wired into this view yet.
+              </div>
+            </>
+          )}
         </CardContent>
       </div>
     </div>
