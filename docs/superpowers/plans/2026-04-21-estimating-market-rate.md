@@ -22,6 +22,8 @@
   Responsibility: resolve effective deal market from ZIP, fallback geography, and override state.
 - Create: `server/src/modules/estimating/market-rate-service.ts`
   Responsibility: load active adjustment rules, apply labor/material/equipment adjustments, and emit rationale payloads.
+- Create: `server/src/modules/estimating/market-rate-provider.ts`
+  Responsibility: define the provider/resolver abstraction and the internal table-backed implementation used in this slice.
 - Modify: `server/src/modules/estimating/historical-pricing-service.ts`
   Responsibility: expose deal geography inputs required by the live recommendation generation path.
 - Create: `server/src/modules/estimating/deal-market-override-service.ts`
@@ -94,6 +96,7 @@
   - explicit fallback geography storage for metro, state, region, and global/default resolution layers
   - market adjustment rules with fallback fields, component percentages, default labor/material/equipment split weights, and effective dates
   - deal-level market override rows with user attribution and reason
+  - enforce one active ZIP mapping per ZIP and one current override row per deal through unique constraints or equivalent upsert-safe semantics
   - seed or backfill an initial active default market so fresh tenants have a resolvable fallback and a non-empty override picker
   - indexes for ZIP lookup, rule selection, and deal override reads
   - follow the tenant-schema replay migration pattern already used by recent tenant migrations, including the `DO $$ ... FOR schema_name ...` block and `TENANT_SCHEMA_START/END` replay section
@@ -110,6 +113,7 @@
 **Files:**
 - Create: `server/src/modules/estimating/market-resolution-service.ts`
 - Create: `server/src/modules/estimating/market-rate-service.ts`
+- Create: `server/src/modules/estimating/market-rate-provider.ts`
 - Create: `server/tests/modules/estimating/market-resolution-service.test.ts`
 - Create: `server/tests/modules/estimating/market-rate-service.test.ts`
 
@@ -144,6 +148,7 @@
   - resolve the best matching active rule for a pricing scope
   - compute labor/material/equipment deltas from baseline price using persisted default split weights
   - emit a normalized rationale payload with all applied components
+  - expose the internal table-backed implementation through a `MarketRateProvider` or equivalent interface so worker, routes, and pricing logic depend on the abstraction instead of concrete services
 
 - [ ] **Step 6: Re-run the focused service tests and verify they pass**
   Run: `npx vitest run tests/modules/estimating/market-resolution-service.test.ts tests/modules/estimating/market-rate-service.test.ts`
@@ -230,7 +235,7 @@
 - [ ] **Step 3: Implement deal market override service and routes**
   Requirements:
   - add a canonical active-market list or search route for the override UI
-  - create or replace the deal override row
+  - create or replace the single current override row for the deal
   - clear the override row cleanly
   - write estimating review events with before/after market context
   - enqueue or rerun `estimate_generation` so pricing recommendations refresh after set/clear
@@ -256,6 +261,7 @@
   - overridden deals surface override metadata distinctly from auto-detected markets
   - fallback-resolution rows disclose the fallback source
   - only pricing rows from the active or refreshed generation run are returned after a market override rerun
+  - while an override-triggered rerun is pending, the workbench keeps showing the newest completed run instead of partial rerun rows
 
 - [ ] **Step 2: Run the focused workbench tests and verify they fail**
   Run: `npx vitest run tests/modules/estimating/workbench-service.test.ts`
@@ -265,7 +271,8 @@
   Requirements:
   - include deal-level effective market summary
   - include override state and fallback source
-  - select the active generation run for pricing review state after market override reruns
+  - define the active pricing run as the newest completed generation run for the deal, falling back to the newest started run only when no completed run exists yet
+  - keep the previous completed run active while an override-triggered rerun is pending or failed, and surface rerun status separately
   - filter pricing rows so stale pre-override generation results do not mix with refreshed rows
   - attach market-rate rationale to each pricing row without breaking existing row fields
 
@@ -332,6 +339,7 @@
   - a deal market override changes downstream pricing context on refresh or rerun
   - clearing the override restores auto-resolved geography on subsequent refreshes
   - refreshed workbench state excludes stale pricing rows from the pre-override generation run
+  - pending override-triggered reruns keep the previous completed run visible until the new run completes
   - worker-side generation coverage proves the production job uses new market-resolution inputs
 
 - [ ] **Step 2: Run the focused integration tests and verify they fail**
