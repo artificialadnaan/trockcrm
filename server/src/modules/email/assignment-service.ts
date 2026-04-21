@@ -1,6 +1,6 @@
 import crypto from "crypto";
 
-export type EmailAssignmentEntityType = "deal" | "company" | "property" | "lead";
+export type EmailAssignmentEntityType = "deal" | "company" | "property" | "lead" | "contact";
 export type EmailAssignmentConfidence = "high" | "medium" | "low";
 export type EmailAssignmentMatch =
   | "explicit_deal_number"
