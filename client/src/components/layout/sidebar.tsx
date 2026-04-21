@@ -28,6 +28,7 @@ import {
   Radar,
   ClipboardCheck,
   ChevronDown,
+  DollarSign,
   type LucideIcon,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -63,6 +64,7 @@ const navItems: NavItem[] = [
   { to: "/photos/capture", icon: Camera, label: "Capture", roles: ["admin", "director", "rep"] },
   { to: "/photos/feed", icon: Image, label: "Feed", roles: ["admin", "director", "rep"] },
   { to: "/reports", icon: BarChart3, label: "Reports", roles: ["admin", "director", "rep"] },
+  { to: "/commissions", icon: DollarSign, label: "Commissions", roles: ["rep"] },
   { to: "/projects", icon: Building2, label: "Projects", roles: ["admin", "director", "rep"] },
 ];
 

@@ -19,6 +19,10 @@ describe("App route guards", () => {
     expect(source).toContain('path="/help/admin-guide" element={( <RequireRole allowedRoles={["admin"]}> <AdminGuidePage />');
   });
 
+  it("keeps commissions page restricted to sales reps", () => {
+    expect(source).toContain('path="/commissions" element={( <RequireRole allowedRoles={["rep"]}> <RepCommissionsPage />');
+  });
+
   it("opens migration tooling to directors and admins", () => {
     expect(source).toContain('path="/admin/migration" element={( <RequireRole allowedRoles={["admin", "director"]}> <MigrationDashboardPage />');
   });

@@ -5,7 +5,9 @@ import {
   Camera,
   Users,
   CheckSquare,
+  DollarSign,
 } from "lucide-react";
+import { useAuth } from "@/lib/auth";
 
 const mobileNavItems = [
   { to: "/", icon: LayoutDashboard, label: "Home" },
@@ -16,10 +18,15 @@ const mobileNavItems = [
 ];
 
 export function MobileNav() {
+  const { user } = useAuth();
+  const navItems = user?.role === "rep"
+    ? [...mobileNavItems, { to: "/commissions", icon: DollarSign, label: "Commissions" }]
+    : mobileNavItems;
+
   return (
     <nav className="md:hidden fixed bottom-0 left-0 right-0 bg-white border-t z-50">
       <div className="flex items-center justify-around h-16">
-        {mobileNavItems.map((item) => (
+        {navItems.map((item) => (
           <NavLink
             key={item.to}
             to={item.to}

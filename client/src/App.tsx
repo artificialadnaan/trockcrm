@@ -74,6 +74,9 @@ const LeadStagePage = lazy(() =>
 const DirectorDashboardPage = lazy(() =>
   import("@/pages/director/director-dashboard-page").then((module) => ({ default: module.DirectorDashboardPage }))
 );
+const RepCommissionsPage = lazy(() =>
+  import("@/pages/commissions/rep-commissions-page").then((module) => ({ default: module.RepCommissionsPage }))
+);
 
 function BoardAliasRedirect({ entity }: { entity: "leads" | "deals" }) {
   const [searchParams] = useSearchParams();
@@ -141,6 +144,14 @@ export function App() {
               <Route path="/tasks" element={<TaskListPage />} />
               <Route path="/files" element={<FilesPage />} />
               <Route path="/reports" element={<ReportsPage />} />
+              <Route
+                path="/commissions"
+                element={(
+                  <RequireRole allowedRoles={["rep"]}>
+                    <RepCommissionsPage />
+                  </RequireRole>
+                )}
+              />
               <Route path="/sales-review" element={<SalesReviewPage />} />
               <Route path="/pipeline/hygiene" element={<PipelineHygienePage />} />
               <Route path="/projects" element={<ProjectsPage />} />
