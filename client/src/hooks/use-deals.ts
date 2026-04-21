@@ -59,6 +59,19 @@ export interface DealScopingIntake {
   updatedAt: string;
 }
 
+export interface DealPaymentEvent {
+  id: string;
+  dealId: string;
+  recordedByUserId: string | null;
+  paidAt: string;
+  grossRevenueAmount: string;
+  grossMarginAmount: string | null;
+  isCreditMemo: boolean;
+  notes: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface Deal {
   id: string;
   dealNumber: string;
@@ -361,6 +374,26 @@ export async function createDeal(input: Partial<Deal> & { name: string; stageId:
 
 export async function updateDeal(dealId: string, input: Partial<Deal>) {
   return api<{ deal: Deal }>(`/deals/${dealId}`, { method: "PATCH", json: input });
+}
+
+export async function getDealPayments(dealId: string) {
+  return api<{ payments: DealPaymentEvent[] }>(`/deals/${dealId}/payments`);
+}
+
+export async function createDealPayment(
+  dealId: string,
+  input: {
+    paidAt: string;
+    grossRevenueAmount: number;
+    grossMarginAmount?: number | null;
+    isCreditMemo?: boolean;
+    notes?: string | null;
+  }
+) {
+  return api<{ payment: DealPaymentEvent }>(`/deals/${dealId}/payments`, {
+    method: "POST",
+    json: input,
+  });
 }
 
 export async function changeDealStage(

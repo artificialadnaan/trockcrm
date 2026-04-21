@@ -98,12 +98,14 @@ vi.mock("@/components/deals/deal-timeline-tab", () => ({ DealTimelineTab: () => 
 vi.mock("@/components/deals/deal-scoping-workspace", () => ({ DealScopingWorkspace: () => <div>Scoping Workspace</div> }));
 vi.mock("@/components/files/deal-file-tab", () => ({ DealFileTab: () => <div>Files Tab</div> }));
 vi.mock("./deal-team-tab", () => ({ DealTeamTab: () => <div>Team Tab</div> }));
+vi.mock("./deal-payments-tab", () => ({ DealPaymentsTab: () => <div>Payments Tab</div> }));
 vi.mock("./deal-estimates-tab", () => ({ DealEstimatesTab: () => <div>Estimates Tab</div> }));
 vi.mock("./deal-punch-list-tab", () => ({ DealPunchListTab: () => <div>Punch List Tab</div> }));
 vi.mock("./deal-closeout-tab", () => ({ DealCloseoutTab: () => <div>Closeout Tab</div> }));
 vi.mock("./deal-timers-banner", () => ({ DealTimersBanner: () => <div>Timers Banner</div> }));
 vi.mock("./deal-proposal-card", () => ({ DealProposalCard: () => <div>Proposal Card</div> }));
 vi.mock("./deal-estimating-substage", () => ({ DealEstimatingSubstage: () => <div>Estimating Substage</div> }));
+vi.mock("@/components/deals/opportunity-routing-panel", () => ({ OpportunityRoutingPanel: () => null }));
 vi.mock("@/components/leads/lead-form", () => ({ LeadForm: () => <div>Lead Form</div> }));
 vi.mock("@/components/leads/lead-timeline-tab", () => ({ LeadTimelineTab: () => <div>Lead Timeline</div> }));
 vi.mock("@/components/activities/activity-log-form", () => ({ ActivityLogForm: () => <div>Activity Form</div> }));
@@ -131,5 +133,6 @@ describe("DealDetailPage", () => {
     expect(html).toContain("Hill Place Interior Upgrade");
     expect(html).toContain("Assigned Rep");
     expect(html).toContain("Tasks");
+    expect(html).toContain("Payments");
   });
 });

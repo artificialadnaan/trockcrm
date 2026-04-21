@@ -309,8 +309,8 @@ router.get("/:id/payments", async (req, res, next) => {
   }
 });
 
-// POST /api/deals/:id/payments — record a cash-received event (admin/director only)
-router.post("/:id/payments", requireRole("admin", "director"), async (req, res, next) => {
+// POST /api/deals/:id/payments — record a cash-received event (admin only)
+router.post("/:id/payments", requireRole("admin"), async (req, res, next) => {
   try {
     const dealId = req.params.id as string;
     const deal = await getDealById(req.tenantDb!, dealId, req.user!.role, req.user!.id);
