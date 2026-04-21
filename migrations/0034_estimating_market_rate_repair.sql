@@ -121,18 +121,6 @@ BEGIN
              AND effective_from = ''2000-01-01 00:00:00+00''',
           schema_name
         );
-      ELSE
-        EXECUTE format(
-          'UPDATE %I.estimate_market_adjustment_rules
-              SET scope_type = ''general'',
-                  scope_key = ''default'',
-                  updated_at = NOW()
-            WHERE market_id IS NULL
-              AND scope_type = ''global''
-              AND scope_key = ''default''
-              AND effective_from = ''2000-01-01 00:00:00+00''',
-          schema_name
-        );
       END IF;
     END IF;
 
@@ -162,46 +150,61 @@ BEGIN
       schema_name
     );
 
-    EXECUTE format(
-      'INSERT INTO %I.estimate_market_adjustment_rules (
-         market_id,
-         scope_type,
-         scope_key,
-         fallback_scope_type,
-         fallback_scope_key,
-         priority,
-         fallback_priority,
-         labor_adjustment_percent,
-         material_adjustment_percent,
-         equipment_adjustment_percent,
-         default_labor_weight,
-         default_material_weight,
-         default_equipment_weight,
-         effective_from,
-         effective_to,
-         is_active
-       )
-       SELECT
-         NULL,
-         ''general'',
-         ''default'',
-         NULL,
-         NULL,
-         0,
-         0,
-         0,
-         0,
-         0,
-         0.3333,
-         0.3333,
-         0.3334,
-         ''2000-01-01 00:00:00+00'',
-         NULL,
-         TRUE
-       ON CONFLICT (scope_type, scope_key, effective_from) WHERE market_id IS NULL
-       DO NOTHING',
-      schema_name
-    );
+    IF has_bad_rule THEN
+      IF NOT has_good_rule THEN
+        EXECUTE format(
+          'UPDATE %I.estimate_market_adjustment_rules
+              SET scope_type = ''general'',
+                  scope_key = ''default'',
+                  updated_at = NOW()
+            WHERE market_id IS NULL
+              AND scope_type = ''global''
+              AND scope_key = ''default''
+              AND effective_from = ''2000-01-01 00:00:00+00''',
+          schema_name
+        );
+      END IF;
+    ELSIF NOT has_good_rule THEN
+      EXECUTE format(
+        'INSERT INTO %I.estimate_market_adjustment_rules (
+           market_id,
+           scope_type,
+           scope_key,
+           fallback_scope_type,
+           fallback_scope_key,
+           priority,
+           fallback_priority,
+           labor_adjustment_percent,
+           material_adjustment_percent,
+           equipment_adjustment_percent,
+           default_labor_weight,
+           default_material_weight,
+           default_equipment_weight,
+           effective_from,
+           effective_to,
+           is_active
+         )
+         VALUES (
+           NULL,
+           ''general'',
+           ''default'',
+           NULL,
+           NULL,
+           0,
+           0,
+           0,
+           0,
+           0,
+           0.3333,
+           0.3333,
+           0.3334,
+           ''2000-01-01 00:00:00+00'',
+           NULL,
+           TRUE
+         )',
+        schema_name
+      );
+    END IF;
   END LOOP;
 END $$;
 
