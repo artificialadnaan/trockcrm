@@ -47,9 +47,11 @@ The current slowdown is structural.
 
 ### Home routing
 
+- `/` remains role-aware.
 - `rep` users continue to land on the rep dashboard.
 - `director` users land on the director dashboard.
 - `admin` users land on a separate admin dashboard instead of sharing the director home surface.
+- `/director` remains a direct director route and should not be repurposed for admin home behavior.
 
 This removes the current overloading of `DirectorDashboardPage` as the default home for both admins and directors.
 
@@ -57,8 +59,10 @@ This removes the current overloading of `DirectorDashboardPage` as the default h
 
 - `/deals` remains the canonical deals workspace.
 - `/leads` becomes the canonical leads workspace.
-- `/pipeline` remains supported, but acts as a compatibility route to the canonical deal board.
-- dedicated stage routes remain the place for full-stage inspection and pagination.
+- `/pipeline` remains supported only as a compatibility redirect to `/deals`.
+- dedicated stage routes are explicit and remain the place for full-stage inspection and pagination:
+  - `/deals/stages/:stageId`
+  - `/leads/stages/:stageId`
 
 ## Loading Architecture
 
@@ -206,6 +210,11 @@ Stage pages support:
 - sort
 - stage-scoped filters
 - back navigation to the parent board
+
+Stage pages are canonical at:
+
+- `/deals/stages/:stageId`
+- `/leads/stages/:stageId`
 
 Stage pages are read-only for stage movement. Drag-and-drop remains on the board only.
 
