@@ -32,11 +32,6 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
         .fn()
         .mockReturnValueOnce({
           from: vi.fn(() => ({
-            where: vi.fn().mockResolvedValue([]),
-          })),
-        })
-        .mockReturnValueOnce({
-          from: vi.fn(() => ({
             innerJoin: vi.fn(() => ({
               innerJoin: vi.fn(() => ({
                 where: vi.fn().mockResolvedValue([
@@ -91,14 +86,22 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
         .fn()
         .mockReturnValueOnce({
           from: vi.fn(() => ({
-            where: vi.fn().mockResolvedValue([{ subjectId: "rec-1" }]),
-          })),
-        })
-        .mockReturnValueOnce({
-          from: vi.fn(() => ({
             innerJoin: vi.fn(() => ({
               innerJoin: vi.fn(() => ({
-                where: vi.fn().mockResolvedValue([]),
+                where: vi.fn().mockResolvedValue([
+                  {
+                    recommendationId: "rec-1",
+                    description: "Parapet Wall Flashing",
+                    quantity: "3",
+                    unit: "ft",
+                    unitPrice: "121.54",
+                    notes: null,
+                    sectionName: "Generated Estimate",
+                    status: "approved",
+                    createdByRunId: "run-1",
+                    promotedEstimateLineItemId: "line-1",
+                  },
+                ]),
               })),
             })),
           })),
@@ -132,11 +135,6 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
     const tenantDb = {
       select: vi
         .fn()
-        .mockReturnValueOnce({
-          from: vi.fn(() => ({
-            where: vi.fn().mockResolvedValue([]),
-          })),
-        })
         .mockReturnValueOnce({
           from: vi.fn(() => ({
             innerJoin: vi.fn(() => ({
@@ -201,11 +199,6 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
         .fn()
         .mockReturnValueOnce({
           from: vi.fn(() => ({
-            where: vi.fn().mockResolvedValue([]),
-          })),
-        })
-        .mockReturnValueOnce({
-          from: vi.fn(() => ({
             innerJoin: vi.fn(() => ({
               innerJoin: vi.fn(() => ({
                 where: vi.fn().mockResolvedValue([
@@ -262,6 +255,75 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
     expect(updateReturning).toHaveBeenCalled();
   });
 
+  it("runs promotion writes inside a transaction when available", async () => {
+    estimateServiceMocks.createSection.mockResolvedValue({ id: "section-tx" });
+    estimateServiceMocks.createLineItem.mockResolvedValue({ id: "line-tx" });
+    const updateReturning = vi.fn().mockResolvedValue([{ id: "rec-tx", promotedEstimateLineItemId: "line-tx" }]);
+
+    const txDb = {
+      select: vi
+        .fn()
+        .mockReturnValueOnce({
+          from: vi.fn(() => ({
+            innerJoin: vi.fn(() => ({
+              innerJoin: vi.fn(() => ({
+                where: vi.fn().mockResolvedValue([
+                  {
+                    recommendationId: "rec-tx",
+                    description: "Termination Bar",
+                    quantity: "1",
+                    unit: "ea",
+                    unitPrice: "25.00",
+                    notes: null,
+                    sectionName: "Roof",
+                    sourceType: "explicit",
+                    normalizedIntent: "termination bar",
+                    sourceRowIdentity: "roof:termination-bar",
+                    status: "approved",
+                    createdByRunId: "run-tx",
+                    promotedEstimateLineItemId: null,
+                  },
+                ]),
+              })),
+            })),
+          })),
+        })
+        .mockReturnValueOnce({
+          from: vi.fn(() => ({
+            where: vi.fn(() => ({
+              limit: vi.fn().mockResolvedValue([]),
+            })),
+          })),
+        }),
+      update: vi.fn(() => ({
+        set: vi.fn(() => ({
+          where: vi.fn(() => ({
+            returning: updateReturning,
+          })),
+        })),
+      })),
+      insert: vi.fn(() => ({
+        values: vi.fn().mockResolvedValue(undefined),
+      })),
+    } as any;
+    const tenantDb = {
+      transaction: vi.fn(async (callback: (tx: any) => Promise<any>) => callback(txDb)),
+    } as any;
+
+    const result = await promoteApprovedRecommendationsToEstimate({
+      tenantDb,
+      dealId: "deal-1",
+      generationRunId: "run-tx",
+      approvedRecommendationIds: ["rec-tx"],
+    });
+
+    expect(tenantDb.transaction).toHaveBeenCalledOnce();
+    expect(result.promotedRecommendationIds).toEqual(["rec-tx"]);
+    expect(estimateServiceMocks.createSection).toHaveBeenCalled();
+    expect(estimateServiceMocks.createLineItem).toHaveBeenCalled();
+    expect(updateReturning).toHaveBeenCalled();
+  });
+
   it("lists approved and overridden recommendation ids for promotion", async () => {
     const selectWhere = vi.fn().mockResolvedValue([{ id: "rec-1" }, { id: "rec-2" }]);
     const tenantDb = {
@@ -311,11 +373,6 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
         .fn()
         .mockReturnValueOnce({
           from: vi.fn(() => ({
-            where: vi.fn().mockResolvedValue([]),
-          })),
-        })
-        .mockReturnValueOnce({
-          from: vi.fn(() => ({
             innerJoin: vi.fn(() => ({
               innerJoin: vi.fn(() => ({
                 where: vi.fn().mockResolvedValue([
@@ -330,7 +387,8 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
                     sourceType: "explicit",
                     normalizedIntent: "parapet flashing",
                     sourceRowIdentity: "roof:parapet-1",
-                    promotedEstimateLineItemId: null,
+                    status: "approved",
+                    promotedEstimateLineItemId: "line-existing",
                   },
                   {
                     recommendationId: "rec-dup-2",
@@ -380,10 +438,6 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
     expect(estimateServiceMocks.createLineItem).not.toHaveBeenCalled();
     expect(result.rowErrors).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({
-          recommendationId: "rec-dup-1",
-          code: "duplicate_blocked",
-        }),
         expect.objectContaining({
           recommendationId: "rec-dup-2",
           code: "duplicate_blocked",

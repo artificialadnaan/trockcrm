@@ -172,75 +172,80 @@ export async function promoteApprovedRecommendationsToEstimate({
   generationRunId: string;
   approvedRecommendationIds: string[];
 }) {
-  const alreadyPromoted = await listPreviouslyPromotedRecommendationIds(
-    tenantDb,
-    dealId,
-    approvedRecommendationIds
-  );
+  const runInTransaction = async <T>(callback: (tx: TenantDb) => Promise<T>) => {
+    const transaction = (tenantDb as any).transaction;
+    if (typeof transaction === "function") {
+      return transaction.call(tenantDb, callback);
+    }
 
-  const recommendations = await loadApprovedRecommendationsForRun(
-    tenantDb,
-    dealId,
-    generationRunId,
-    approvedRecommendationIds.filter((id) => !alreadyPromoted.includes(id))
-  );
+    return callback(tenantDb);
+  };
 
-  const derivedRecommendations = deriveEstimatePricingWorkbenchRows(
-    recommendations as unknown as PromotionCandidateRow[]
-  );
-  const rowErrors = derivedRecommendations
-    .map(buildRowError)
-    .filter((rowError): rowError is NonNullable<typeof rowError> => rowError !== null);
-  const promotableRecommendations = derivedRecommendations.filter((row) => row.promotable);
-  const promotedRecommendationIds: string[] = [];
-
-  if (promotableRecommendations.length === 0) {
-    return { promotedRecommendationIds, rowErrors };
-  }
-
-  for (const sectionGroup of groupRecommendationsIntoSections(promotableRecommendations)) {
-    const section = await getOrCreateEstimateSection(
-      tenantDb,
+  return runInTransaction(async (tx) => {
+    const recommendations = await loadApprovedRecommendationsForRun(
+      tx,
       dealId,
-      sectionGroup.sectionName
+      generationRunId,
+      approvedRecommendationIds
     );
 
-    for (const line of sectionGroup.lines) {
-      const lineItem = await createLineItem(tenantDb as any, dealId, section.id, {
-        description: line.description,
-        quantity: line.quantity ?? "1",
-        unit: line.unit ?? undefined,
-        unitPrice: line.unitPrice ?? "0",
-        notes: line.notes ?? undefined,
-      });
+    const derivedRecommendations = deriveEstimatePricingWorkbenchRows(
+      recommendations as unknown as PromotionCandidateRow[]
+    );
+    const rowErrors = derivedRecommendations
+      .map(buildRowError)
+      .filter((rowError): rowError is NonNullable<typeof rowError> => rowError !== null);
+    const promotableRecommendations = derivedRecommendations.filter((row) => row.promotable);
+    const promotedRecommendationIds: string[] = [];
 
-      await tenantDb
-        .update(estimatePricingRecommendations)
-        .set({
-          promotedEstimateLineItemId: lineItem.id,
-          updatedAt: new Date(),
-        })
-        .where(
-          and(
-            eq(estimatePricingRecommendations.id, line.recommendationId),
-            eq(estimatePricingRecommendations.dealId, dealId)
-          )
-        )
-        .returning();
-
-      await tenantDb.insert(estimateReviewEvents).values({
-        dealId,
-        subjectType: "estimate_pricing_recommendation",
-        subjectId: line.recommendationId,
-        eventType: "promoted",
-        afterJson: { estimateLineItemId: lineItem.id },
-      });
-
-      promotedRecommendationIds.push(line.recommendationId);
+    if (promotableRecommendations.length === 0) {
+      return { promotedRecommendationIds, rowErrors };
     }
-  }
 
-  return { promotedRecommendationIds, rowErrors };
+    for (const sectionGroup of groupRecommendationsIntoSections(promotableRecommendations)) {
+      const section = await getOrCreateEstimateSection(
+        tx,
+        dealId,
+        sectionGroup.sectionName
+      );
+
+      for (const line of sectionGroup.lines) {
+        const lineItem = await createLineItem(tx as any, dealId, section.id, {
+          description: line.description,
+          quantity: line.quantity ?? "1",
+          unit: line.unit ?? undefined,
+          unitPrice: line.unitPrice ?? "0",
+          notes: line.notes ?? undefined,
+        });
+
+        await tx
+          .update(estimatePricingRecommendations)
+          .set({
+            promotedEstimateLineItemId: lineItem.id,
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(estimatePricingRecommendations.id, line.recommendationId),
+              eq(estimatePricingRecommendations.dealId, dealId)
+            )
+          )
+          .returning();
+
+        await tx.insert(estimateReviewEvents).values({
+          dealId,
+          subjectType: "estimate_pricing_recommendation",
+          subjectId: line.recommendationId,
+          eventType: "promoted",
+          afterJson: { estimateLineItemId: lineItem.id },
+        });
+
+        promotedRecommendationIds.push(line.recommendationId);
+      }
+    }
+
+    return { promotedRecommendationIds, rowErrors };
+  });
 }
 
 export async function approveEstimateRecommendation(args: {
