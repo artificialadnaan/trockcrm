@@ -38,7 +38,7 @@ export function EmailAssignmentQueue() {
       setItems(data.items);
       setPagination(data.pagination);
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to load assignment queue");
+      setError(err instanceof Error ? err.message : "Failed to load parking-lot intake");
     } finally {
       setLoading(false);
     }
@@ -60,9 +60,9 @@ export function EmailAssignmentQueue() {
     <section className="rounded-lg border bg-card p-4">
       <div className="mb-3 flex items-center justify-between gap-3">
         <div>
-          <h3 className="text-sm font-semibold">Assignment Queue</h3>
+          <h3 className="text-sm font-semibold">Parking Lot Intake</h3>
           <p className="text-xs text-muted-foreground">
-            Review unresolved emails and assign them to the correct deal.
+            Review unresolved CRM email intake and attach it to the right company, property, lead, or deal.
           </p>
         </div>
         <Button variant="outline" size="sm" onClick={() => void fetchQueue()} disabled={loading}>

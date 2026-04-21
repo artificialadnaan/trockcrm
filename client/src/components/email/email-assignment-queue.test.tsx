@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { EmailAssignmentQueueView } from "./email-assignment-queue-view";
 
 describe("EmailAssignmentQueueView", () => {
-  it("renders unresolved assignment details and reassignment actions", () => {
+  it("renders parking-lot intake details with broader CRM target options", () => {
     const html = renderToStaticMarkup(
       <EmailAssignmentQueueView
         items={[
@@ -49,13 +49,14 @@ describe("EmailAssignmentQueueView", () => {
     expect(html).toContain("TR-2026-0002");
     expect(html).toContain("Resolve");
     expect(html).toContain("multiple_deal_candidates");
-    expect(html).not.toContain("Lead · TR-2026-L001");
-    expect(html).not.toContain("Property · 123 Main St");
-    expect(html).not.toContain("Company only");
+    expect(html).toContain("Lead · TR-2026-L001 · Alpha Lead");
+    expect(html).toContain("Property · 123 Main St");
+    expect(html).toContain("Company · Alpha Roofing");
+    expect(html).toContain("Parking lot");
   });
 
   it("renders an empty-state message when there are no items", () => {
     const html = renderToStaticMarkup(<EmailAssignmentQueueView items={[]} onAssign={async () => {}} />);
-    expect(html).toContain("No unresolved email assignments.");
+    expect(html).toContain("No unresolved parking-lot email intake.");
   });
 });
