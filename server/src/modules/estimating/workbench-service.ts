@@ -1,4 +1,4 @@
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import {
@@ -487,7 +487,34 @@ export async function buildEstimatingWorkbenchState(tenantDb: TenantDb, dealId: 
   const activeMatchRows = matchRows.filter((row) => activeExtractionIds.has(row.extractionId));
   const activeMatchIds = new Set(activeMatchRows.map((row) => row.id));
   const activePricingRows = pricingRows.filter((row) => activeMatchIds.has(row.extractionMatchId));
-  const derivedPricingRows = deriveEstimatePricingWorkbenchRows(activePricingRows as EstimatePricingRecommendationRow[]);
+  const pricingRecommendationIds = activePricingRows
+    .map((row) => row.id)
+    .filter((id): id is string => typeof id === "string" && id.length > 0);
+  const recommendationOptionRows =
+    pricingRecommendationIds.length > 0
+      ? await tenantDb
+          .select()
+          .from(estimatePricingRecommendationOptions)
+          .where(inArray(estimatePricingRecommendationOptions.recommendationId, pricingRecommendationIds))
+          .orderBy(
+            estimatePricingRecommendationOptions.recommendationId,
+            estimatePricingRecommendationOptions.rank
+          )
+      : [];
+  const recommendationOptionsByRecommendationId = new Map<string, typeof recommendationOptionRows>();
+  for (const optionRow of recommendationOptionRows) {
+    const existingOptions =
+      recommendationOptionsByRecommendationId.get(optionRow.recommendationId) ?? [];
+    existingOptions.push(optionRow);
+    recommendationOptionsByRecommendationId.set(optionRow.recommendationId, existingOptions);
+  }
+  const pricingRowsWithOptions = activePricingRows.map((row) => ({
+    ...row,
+    recommendationOptions: recommendationOptionsByRecommendationId.get(row.id) ?? [],
+  }));
+  const derivedPricingRows = deriveEstimatePricingWorkbenchRows(
+    pricingRowsWithOptions as EstimatePricingRecommendationRow[]
+  );
   const promotablePricingRows = derivedPricingRows.filter((row) => row.promotable);
 
   const documentsSummary = {

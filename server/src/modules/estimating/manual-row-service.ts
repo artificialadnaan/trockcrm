@@ -81,6 +81,30 @@ function calculateManualTotal(quantity?: string | null, unitPrice?: string | nul
   return (numericQuantity * numericUnitPrice).toFixed(2);
 }
 
+function normalizeOptionalText(value?: string | null) {
+  const trimmed = value?.trim();
+  return trimmed && trimmed.length > 0 ? trimmed : null;
+}
+
+function normalizeOptionalNumeric(value?: string | null) {
+  const trimmed = value?.trim();
+  return trimmed && trimmed.length > 0 ? trimmed : null;
+}
+
+function normalizeManualFields(input: {
+  manualQuantity?: string | null;
+  manualUnit?: string | null;
+  manualUnitPrice?: string | null;
+  manualNotes?: string | null;
+}) {
+  return {
+    manualQuantity: normalizeOptionalNumeric(input.manualQuantity),
+    manualUnit: normalizeOptionalText(input.manualUnit),
+    manualUnitPrice: normalizeOptionalNumeric(input.manualUnitPrice),
+    manualNotes: normalizeOptionalText(input.manualNotes),
+  };
+}
+
 function createManualRecommendationBase(input: {
   dealId: string;
   generationRunId: string;
@@ -98,6 +122,13 @@ function createManualRecommendationBase(input: {
   catalogBacking: "estimate_only" | "procore_synced" | "local_promoted";
   promotedLocalCatalogItemId?: string | null;
 }) {
+  const normalizedManualFields = normalizeManualFields({
+    manualQuantity: input.manualQuantity,
+    manualUnit: input.manualUnit,
+    manualUnitPrice: input.manualUnitPrice,
+    manualNotes: input.manualNotes,
+  });
+
   return {
     dealId: input.dealId,
     createdByRunId: input.generationRunId,
@@ -108,14 +139,17 @@ function createManualRecommendationBase(input: {
     manualOrigin: input.manualOrigin,
     manualIdentityKey: input.manualIdentityKey,
     manualLabel: input.manualLabel,
-    manualQuantity: input.manualQuantity ?? null,
-    manualUnit: input.manualUnit ?? null,
-    manualUnitPrice: input.manualUnitPrice ?? null,
-    manualNotes: input.manualNotes ?? null,
-    recommendedQuantity: input.manualQuantity ?? null,
-    recommendedUnit: input.manualUnit ?? null,
-    recommendedUnitPrice: input.manualUnitPrice ?? null,
-    recommendedTotalPrice: calculateManualTotal(input.manualQuantity ?? null, input.manualUnitPrice ?? null),
+    manualQuantity: normalizedManualFields.manualQuantity,
+    manualUnit: normalizedManualFields.manualUnit,
+    manualUnitPrice: normalizedManualFields.manualUnitPrice,
+    manualNotes: normalizedManualFields.manualNotes,
+    recommendedQuantity: normalizedManualFields.manualQuantity,
+    recommendedUnit: normalizedManualFields.manualUnit,
+    recommendedUnitPrice: normalizedManualFields.manualUnitPrice,
+    recommendedTotalPrice: calculateManualTotal(
+      normalizedManualFields.manualQuantity,
+      normalizedManualFields.manualUnitPrice
+    ),
     priceBasis: "manual_entry",
     selectedSourceType: input.selectedSourceType,
     selectedOptionId: input.selectedOptionId ?? null,
@@ -125,10 +159,10 @@ function createManualRecommendationBase(input: {
     evidenceJson: {
       sectionName: canonicalizeSectionName(input.estimateSectionName),
       manualLabel: input.manualLabel,
-      manualQuantity: input.manualQuantity ?? null,
-      manualUnit: input.manualUnit ?? null,
-      manualUnitPrice: input.manualUnitPrice ?? null,
-      manualNotes: input.manualNotes ?? null,
+      manualQuantity: normalizedManualFields.manualQuantity,
+      manualUnit: normalizedManualFields.manualUnit,
+      manualUnitPrice: normalizedManualFields.manualUnitPrice,
+      manualNotes: normalizedManualFields.manualNotes,
     },
   };
 }
@@ -370,21 +404,27 @@ export async function updateManualEstimateRow(args: {
       : selectedOption?.catalogItemId
         ? "procore_synced"
         : "estimate_only");
+  const normalizedManualFields = normalizeManualFields({
+    manualQuantity: args.input.manualQuantity ?? existing.manualQuantity,
+    manualUnit: args.input.manualUnit ?? existing.manualUnit,
+    manualUnitPrice: args.input.manualUnitPrice ?? existing.manualUnitPrice,
+    manualNotes: args.input.manualNotes ?? existing.manualNotes,
+  });
 
   const patch: Record<string, unknown> = {
     updatedAt: new Date(),
     manualIdentityKey,
     manualLabel: args.input.manualLabel ?? existing.manualLabel,
-    manualQuantity: args.input.manualQuantity ?? existing.manualQuantity,
-    manualUnit: args.input.manualUnit ?? existing.manualUnit,
-    manualUnitPrice: args.input.manualUnitPrice ?? existing.manualUnitPrice,
-    manualNotes: args.input.manualNotes ?? existing.manualNotes,
-    recommendedQuantity: args.input.manualQuantity ?? existing.manualQuantity ?? null,
-    recommendedUnit: args.input.manualUnit ?? existing.manualUnit ?? null,
-    recommendedUnitPrice: args.input.manualUnitPrice ?? existing.manualUnitPrice ?? null,
+    manualQuantity: normalizedManualFields.manualQuantity,
+    manualUnit: normalizedManualFields.manualUnit,
+    manualUnitPrice: normalizedManualFields.manualUnitPrice,
+    manualNotes: normalizedManualFields.manualNotes,
+    recommendedQuantity: normalizedManualFields.manualQuantity,
+    recommendedUnit: normalizedManualFields.manualUnit,
+    recommendedUnitPrice: normalizedManualFields.manualUnitPrice,
     recommendedTotalPrice: calculateManualTotal(
-      args.input.manualQuantity ?? existing.manualQuantity ?? null,
-      args.input.manualUnitPrice ?? existing.manualUnitPrice ?? null
+      normalizedManualFields.manualQuantity,
+      normalizedManualFields.manualUnitPrice
     ),
     priceBasis: "manual_entry",
     selectedSourceType: persistedSelectedSourceType,
@@ -400,10 +440,10 @@ export async function updateManualEstimateRow(args: {
           ? canonicalizeSectionName(args.input.estimateSectionName)
           : (existing.evidenceJson as Record<string, unknown>)?.sectionName ?? null,
       manualLabel: args.input.manualLabel ?? existing.manualLabel,
-      manualQuantity: args.input.manualQuantity ?? existing.manualQuantity ?? null,
-      manualUnit: args.input.manualUnit ?? existing.manualUnit ?? null,
-      manualUnitPrice: args.input.manualUnitPrice ?? existing.manualUnitPrice ?? null,
-      manualNotes: args.input.manualNotes ?? existing.manualNotes ?? null,
+      manualQuantity: normalizedManualFields.manualQuantity,
+      manualUnit: normalizedManualFields.manualUnit,
+      manualUnitPrice: normalizedManualFields.manualUnitPrice,
+      manualNotes: normalizedManualFields.manualNotes,
     },
   };
 

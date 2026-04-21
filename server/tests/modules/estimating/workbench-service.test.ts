@@ -33,7 +33,8 @@ function makeTenantDb(results: any[]) {
       .mockReturnValueOnce(makeQueryResult(results[1]))
       .mockReturnValueOnce(makeJoinQueryResult(results[2]))
       .mockReturnValueOnce(makeQueryResult(results[3]))
-      .mockReturnValueOnce(makeQueryResult(results[4])),
+      .mockReturnValueOnce(makeQueryResult(results[4]))
+      .mockReturnValueOnce(makeQueryResult(results[5] ?? [])),
   } as any;
 }
 
@@ -96,6 +97,15 @@ describe("buildEstimatingWorkbenchState", () => {
         },
       ],
       [{ id: "event-1" }],
+      [
+        {
+          id: "option-1",
+          recommendationId: "rec-1",
+          optionLabel: "Recommended option",
+          optionKind: "recommended",
+          rank: 1,
+        },
+      ],
     ]);
 
     const state = await buildEstimatingWorkbenchState(tenantDb, "deal-1");
@@ -136,6 +146,12 @@ describe("buildEstimatingWorkbenchState", () => {
     expect(state.extractionRows).toHaveLength(3);
     expect(state.matchRows).toHaveLength(2);
     expect(state.pricingRows).toHaveLength(2);
+    expect(state.pricingRows[0]?.recommendationOptions).toEqual([
+      expect.objectContaining({
+        id: "option-1",
+        recommendationId: "rec-1",
+      }),
+    ]);
   });
 
   it("keeps promotion disabled when eligible rows have no generation run ids", async () => {

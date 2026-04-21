@@ -145,7 +145,7 @@ describe("EstimatingWorkflowShell", () => {
     expect(html).toContain("Promote to estimate");
     expect(html).toContain("Disabled");
     expect(html).toContain("Needs review");
-    expect(html).toContain("Manual add unavailable");
+    expect(html).toContain("Manual add ready");
     expect(html).toContain("Search catalog options");
     expect(html).toContain("Use free-text/manual row instead");
   });
@@ -189,5 +189,6 @@ describe("EstimatingWorkflowShell", () => {
 
     expect(html).toContain("Focus a promotable row to choose which draft run to promote.");
     expect(html).toContain("Disabled");
+    expect(html).toContain("Manual add ready");
   });
 });

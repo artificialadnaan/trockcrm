@@ -28,6 +28,51 @@ describe("manual-row-service", () => {
     ).rejects.toThrow("Manual rows require an active extraction match");
   });
 
+  it("normalizes blank manual numeric inputs to null before insert", async () => {
+    const insertValues = vi.fn().mockResolvedValue([{ id: "rec-blank-1" }]);
+    const tenantDb = {
+      insert: vi.fn(() => ({
+        values: insertValues,
+      })),
+      update: vi.fn(() => ({
+        set: vi.fn(() => ({
+          where: vi.fn(() => ({
+            returning: vi.fn().mockResolvedValue([{ id: "rec-blank-1" }]),
+          })),
+        })),
+      })),
+    } as any;
+
+    await createManualEstimateRow({
+      tenantDb,
+      dealId: "deal-1",
+      userId: "user-1",
+      input: {
+        generationRunId: "run-1",
+        extractionMatchId: "match-1",
+        estimateSectionName: "Roofing",
+        manualLabel: "Label only row",
+        manualQuantity: "",
+        manualUnit: "",
+        manualUnitPrice: "",
+        manualNotes: "",
+      },
+    });
+
+    expect(insertValues).toHaveBeenCalledWith(
+      expect.objectContaining({
+        manualQuantity: null,
+        manualUnit: null,
+        manualUnitPrice: null,
+        manualNotes: null,
+        recommendedQuantity: null,
+        recommendedUnit: null,
+        recommendedUnitPrice: null,
+        recommendedTotalPrice: null,
+      })
+    );
+  });
+
   it("uses catalog-first lookup before falling back to free-text manual rows", async () => {
     catalogReadModelMocks.resolveActiveCatalogSnapshotVersionId.mockResolvedValue("snapshot-1");
     catalogReadModelMocks.listCatalogCandidatesForMatching.mockResolvedValue([

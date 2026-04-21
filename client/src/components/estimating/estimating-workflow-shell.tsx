@@ -98,10 +98,7 @@ export function EstimatingWorkflowShell({
   const canPromote = workflow.promotionReadiness.canPromote && Boolean(promotionRunId);
   const selectedPricingRunId = selectedPricingRow?.createdByRunId ?? null;
   const selectedExtractionMatchId = selectedPricingRow?.extractionMatchId ?? null;
-  const manualAddGenerationRunId =
-    selectedPricingRunId && activeGenerationRunIds.has(selectedPricingRunId)
-      ? selectedPricingRunId
-      : null;
+  const manualAddGenerationRunId = selectedPricingRunId?.trim() ? selectedPricingRunId : null;
   const manualAddSectionName = selectedPricingRow?.sectionName ?? null;
   const manualAddExtractionMatchId = selectedExtractionMatchId?.trim() ? selectedExtractionMatchId : null;
   const canAddManualRow = Boolean(
