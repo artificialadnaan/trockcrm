@@ -35,7 +35,7 @@
 - Modify: `worker/src/jobs/estimate-generation.ts`
   Responsibility: wire market resolution and market-rate enrichment into the production estimate-generation job.
 - Modify: `server/src/modules/estimating/workbench-service.ts`
-  Responsibility: expose resolved market context, active-generation filtering, and market-rate rationale in workbench pricing rows.
+  Responsibility: expose resolved market context, active-generation filtering, rerun status, and market-rate rationale in workbench pricing rows.
 - Modify: `server/src/modules/deals/routes.ts`
   Responsibility: add deal-level market context, market listing, and override endpoints for estimating.
 - Create: `server/tests/modules/estimating/market-resolution-service.test.ts`
@@ -61,7 +61,7 @@
 - Modify: `client/src/components/estimating/estimating-workflow-shell.tsx`
   Responsibility: render deal-level market override controls and refresh behavior.
 - Create: `client/src/components/estimating/estimate-market-override-panel.tsx`
-  Responsibility: provide estimator controls to inspect, set, and clear the effective market.
+  Responsibility: provide estimator controls to inspect, set, and clear the effective market, plus visible rerun status after override actions.
 - Modify: `client/src/components/estimating/estimate-recommendation-options-panel.test.tsx`
   Responsibility: verify market-rate evidence rendering.
 - Modify: `client/src/components/estimating/estimate-pricing-review-table.test.tsx`
@@ -190,7 +190,7 @@
 
 - [ ] **Step 3: Write failing worker tests for the production generation job**
   Cover:
-  - `estimate_generation` receives ZIP/state geography inputs needed for ZIP-first market resolution
+  - `estimate_generation` receives ZIP/state geography inputs needed for ZIP-first market resolution, falling back from deal fields to related property fields when needed
   - `estimate_generation` uses resolved market context during recommendation generation
   - worker-generated pricing rows persist market-rate-enriched values
   - worker generation uses override market context when one exists
@@ -203,7 +203,7 @@
 - [ ] **Step 5: Integrate market-rate service into the actual recommendation generation path**
   Requirements:
   - keep historical/catalog price as the baseline built by `pricing-service.ts`
-  - expand the current deal lookup or add an equivalent deal-context query so the live generation path has ZIP and state inputs, not only project type and region
+  - expand the current deal lookup or add an equivalent deal-context query so the live generation path resolves ZIP and state from deal fields first and related property fields second, not only project type and region
   - replace the old hardcoded regional adjustment path with provider-driven market enrichment after the baseline recommendation is built
   - apply component adjustments through the provider/resolver path without introducing a reverse dependency from `market-rate-service.ts` into `pricing-service.ts`
   - persist adjusted recommendations through a shared helper that `worker/src/jobs/estimate-generation.ts` actually calls
@@ -244,7 +244,7 @@
   - create or replace the single current override row for the deal
   - clear the override row cleanly
   - write estimating review events with before/after market context
-  - enqueue or rerun `estimate_generation` so pricing recommendations refresh after set/clear
+  - enqueue or rerun `estimate_generation` with the required `officeId` so pricing recommendations refresh after set/clear
   - return the refreshed effective market payload
 
 - [ ] **Step 4: Re-run the focused route tests and verify they pass**
@@ -268,6 +268,7 @@
   - fallback-resolution rows disclose the fallback source
   - only pricing rows from the active or refreshed generation run are returned after a market override rerun
   - while an override-triggered rerun is pending, the workbench keeps showing the newest completed run instead of partial rerun rows
+  - workbench payload includes explicit rerun status metadata when override-triggered refresh is pending or failed
 
 - [ ] **Step 2: Run the focused workbench tests and verify they fail**
   Run in `server/`: `npx vitest run tests/modules/estimating/workbench-service.test.ts`
@@ -279,6 +280,7 @@
   - include override state and fallback source
   - define the active pricing run as the newest completed generation run for the deal, falling back to the newest started run only when no completed run exists yet
   - keep the previous completed run active while an override-triggered rerun is pending or failed, and surface rerun status separately
+  - expose explicit rerun status fields the client can render without inferring from raw generation rows
   - filter pricing rows so stale pre-override generation results do not mix with refreshed rows
   - attach market-rate rationale to each pricing row without breaking existing row fields
 
@@ -308,6 +310,7 @@
   - shell renders deal-level market override controls
   - override controls load canonical market choices from the server
   - override state is visible when active
+  - pending or failed override-triggered reruns show explicit status in the workbench UI
   - clearing override removes override marker after refresh
 
 - [ ] **Step 2: Run the focused client tests and verify they fail**
@@ -320,6 +323,7 @@
   - load and render canonical market choices from the new server route
   - support choosing a replacement market
   - support clearing the override
+  - show pending or failed rerun status from the workbench payload after override actions
   - call the new deal-level override endpoints and refresh the workbench
 
 - [ ] **Step 4: Extend pricing evidence rendering**
