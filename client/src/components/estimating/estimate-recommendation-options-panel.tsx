@@ -79,6 +79,18 @@ function isFreeTextManualRow(recommendation: EstimateRecommendationRow) {
   );
 }
 
+export function getDisplayedSelectedOption(recommendation: EstimateRecommendationRow | null) {
+  if (!recommendation?.selectedOptionId) {
+    return null;
+  }
+
+  return (
+    recommendation.recommendationOptions?.find(
+      (option) => option.id === recommendation.selectedOptionId
+    ) ?? null
+  );
+}
+
 export async function runEstimatePromoteLocalCatalogAction({
   dealId,
   recommendationId,
@@ -123,7 +135,10 @@ export function EstimateRecommendationOptionsPanel({
 
   const recommendedOption = options.find((option) => option.optionKind === "recommended") ?? null;
   const alternateOptions = options.filter((option) => option.optionKind === "alternate");
-  const selectedOption = options.find((option) => option.id === recommendation.selectedOptionId) ?? recommendedOption ?? options[0] ?? null;
+  const selectedOption = getDisplayedSelectedOption({
+    ...recommendation,
+    recommendationOptions: options,
+  });
 
   return (
     <section className="rounded-lg border bg-background" data-deal-id={dealId}>
@@ -165,6 +180,16 @@ export function EstimateRecommendationOptionsPanel({
               {selectedOption.evidenceText ? (
                 <div className="mt-2 text-xs text-muted-foreground">{selectedOption.evidenceText}</div>
               ) : null}
+            </div>
+          ) : isFreeTextManualRow(recommendation) ? (
+            <div className="rounded-lg border bg-muted/20 p-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="font-medium">Manual / free-text row</div>
+                <Badge variant="outline">Manual</Badge>
+              </div>
+              <div className="mt-2 text-xs text-muted-foreground">
+                This row is currently using a free-text manual entry and is not linked to a catalog option.
+              </div>
             </div>
           ) : (
             <div className="text-sm text-muted-foreground">No selected option available.</div>

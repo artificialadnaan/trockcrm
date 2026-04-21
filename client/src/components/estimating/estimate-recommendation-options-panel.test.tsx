@@ -2,6 +2,7 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
   EstimateRecommendationOptionsPanel,
+  getDisplayedSelectedOption,
   runEstimatePricingReviewStateAction,
 } from "./estimate-recommendation-options-panel";
 import { EstimateManualRowDialog, switchManualRowDraftToFreeText } from "./estimate-manual-row-dialog";
@@ -117,6 +118,23 @@ describe("EstimateRecommendationOptionsPanel", () => {
     );
 
     expect(html).toContain("Promote to local catalog");
+  });
+
+  it("does not fall back to a catalog option as the selected option for free-text manual rows", () => {
+    expect(
+      getDisplayedSelectedOption({
+        id: "price-manual",
+        selectedSourceType: "manual",
+        recommendationOptions: [
+          {
+            id: "option-rec",
+            optionKind: "recommended",
+            optionLabel: "Manual flashing",
+            rank: 1,
+          },
+        ],
+      })
+    ).toBeNull();
   });
 
   it("renders the manual add dialog with catalog-first and free-text controls", () => {

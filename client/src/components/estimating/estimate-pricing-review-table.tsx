@@ -105,6 +105,35 @@ function isFreeTextManualRow(row: PricingReviewRow) {
   );
 }
 
+export function getPricingRowSelectionState(row: PricingReviewRow) {
+  const options = row.recommendationOptions ?? [];
+  const selectedOption = row.selectedOptionId
+    ? options.find((option) => option.id === row.selectedOptionId) ?? null
+    : null;
+  const isManual = isFreeTextManualRow(row);
+  const isRecommended = selectedOption?.optionKind === "recommended";
+  const isDefault = isRecommended;
+  const isAlternate = selectedOption?.optionKind === "alternate";
+
+  let displayLabel = "No recommendation";
+  if (isManual) {
+    displayLabel = "Manual / free-text row";
+  } else if (selectedOption) {
+    displayLabel = selectedOption.optionLabel;
+  } else if (row.selectedSourceType === "catalog_option") {
+    displayLabel = "Catalog-backed row";
+  }
+
+  return {
+    selectedOption,
+    displayLabel,
+    isManual,
+    isRecommended,
+    isDefault,
+    isAlternate,
+  };
+}
+
 export async function runEstimatePricingReviewAction({
   action,
   dealId,
@@ -233,16 +262,32 @@ export function EstimatePricingReviewTable({
 
   const renderBadges = (row: PricingReviewRow) => {
     const badges: ReactNode[] = [];
+    const selectionState = getPricingRowSelectionState(row);
 
-    const options = row.recommendationOptions ?? [];
-    const recommendedOption = options.find((option) => option.optionKind === "recommended");
-    const selectedOption = options.find((option) => option.id === row.selectedOptionId);
-
-    if (recommendedOption || row.selectedSourceType === "catalog_option") {
+    if (selectionState.isRecommended) {
       badges.push(<Badge key="recommended">Recommended</Badge>);
+    }
+
+    if (selectionState.isDefault) {
       badges.push(
         <Badge key="default" variant="outline">
           Default
+        </Badge>
+      );
+    }
+
+    if (selectionState.isAlternate) {
+      badges.push(
+        <Badge key="alternate" variant="outline">
+          Alternate
+        </Badge>
+      );
+    }
+
+    if (selectionState.isManual) {
+      badges.push(
+        <Badge key="manual" variant="outline">
+          Manual
         </Badge>
       );
     }
@@ -271,10 +316,10 @@ export function EstimatePricingReviewTable({
       );
     }
 
-    if (selectedOption) {
+    if (selectionState.selectedOption) {
       badges.push(
         <Badge key="selected-option" variant="outline">
-          {selectedOption.optionLabel}
+          {selectionState.selectedOption.optionLabel}
         </Badge>
       );
     }
@@ -330,6 +375,7 @@ export function EstimatePricingReviewTable({
                   const overrideBusy = pendingAction === `${row.id}:override`;
                   const options = row.recommendationOptions ?? [];
                   const alternates = options.filter((option) => option.optionKind === "alternate");
+                  const selectionState = getPricingRowSelectionState(row);
 
                   return (
                     <tr
@@ -353,11 +399,7 @@ export function EstimatePricingReviewTable({
                         <div className="mt-2 flex flex-wrap gap-1">{renderBadges(row)}</div>
                       </td>
                       <td className="px-3 py-2">
-                        <div className="font-medium">
-                          {options.find((option) => option.optionKind === "recommended")?.optionLabel ||
-                            selectedRow?.id ||
-                            "No recommendation"}
-                        </div>
+                        <div className="font-medium">{selectionState.displayLabel}</div>
                         {alternates.length > 0 ? (
                           <div className="mt-2">
                             <div className="text-xs uppercase tracking-wide text-muted-foreground">

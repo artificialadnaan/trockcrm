@@ -2,6 +2,7 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
   EstimatePricingReviewTable,
+  getPricingRowSelectionState,
   runEstimatePricingReviewAction,
 } from "./estimate-pricing-review-table";
 
@@ -65,15 +66,13 @@ describe("EstimatePricingReviewTable", () => {
     ]);
 
     expect(html).toContain("Draft Pricing");
-    expect(html).toContain("Recommended");
-    expect(html).toContain("Default");
+    expect(html).toContain("Manual / free-text row");
     expect(html).toContain("12 sq");
     expect(html).toContain("$355.25");
     expect(html).toContain("$4,263.00");
     expect(html).toContain("catalog option");
     expect(html).toContain("Duplicate blocked");
     expect(html).toContain("Alternates");
-    expect(html).toContain("Recommended TPO membrane");
     expect(html).toContain("Accept recommended");
     expect(html).toContain("Accept manual row");
     expect(html).toContain("Override");
@@ -101,6 +100,68 @@ describe("EstimatePricingReviewTable", () => {
     ]);
 
     expect(html).not.toContain("Promote to local catalog");
+  });
+
+  it("tracks the actual chosen row state instead of inferring recommended badges from availability", () => {
+    const options = [
+      {
+        id: "option-rec",
+        optionKind: "recommended" as const,
+        optionLabel: "Recommended TPO membrane",
+        rank: 1,
+      },
+      {
+        id: "option-alt-1",
+        optionKind: "alternate" as const,
+        optionLabel: "Alternate TPO membrane",
+        rank: 2,
+      },
+    ];
+
+    expect(
+      getPricingRowSelectionState({
+        id: "price-manual",
+        selectedSourceType: "manual",
+        recommendationOptions: options,
+      })
+    ).toMatchObject({
+      displayLabel: "Manual / free-text row",
+      isManual: true,
+      isRecommended: false,
+      isDefault: false,
+      isAlternate: false,
+      selectedOption: null,
+    });
+
+    expect(
+      getPricingRowSelectionState({
+        id: "price-alt",
+        selectedSourceType: "catalog_option",
+        selectedOptionId: "option-alt-1",
+        recommendationOptions: options,
+      })
+    ).toMatchObject({
+      displayLabel: "Alternate TPO membrane",
+      isManual: false,
+      isRecommended: false,
+      isDefault: false,
+      isAlternate: true,
+    });
+
+    expect(
+      getPricingRowSelectionState({
+        id: "price-rec",
+        selectedSourceType: "catalog_option",
+        selectedOptionId: "option-rec",
+        recommendationOptions: options,
+      })
+    ).toMatchObject({
+      displayLabel: "Recommended TPO membrane",
+      isManual: false,
+      isRecommended: true,
+      isDefault: true,
+      isAlternate: false,
+    });
   });
 
   it("posts pricing review actions then refreshes", async () => {
