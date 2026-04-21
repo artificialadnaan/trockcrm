@@ -1,6 +1,7 @@
 import { eq, asc, and, sql } from "drizzle-orm";
 import {
   users,
+  userCommissionSettings,
   userOfficeAccess,
   offices,
   userExternalIdentities,
@@ -22,6 +23,7 @@ export async function listUsers(officeId?: string) {
       displayName: users.displayName,
       role: users.role,
       officeId: users.officeId,
+      reportsTo: users.reportsTo,
       isActive: users.isActive,
       createdAt: users.createdAt,
     })
@@ -60,8 +62,17 @@ export async function updateUser(
     displayName: string;
     role: "admin" | "director" | "rep";
     officeId: string;
+    reportsTo: string | null;
     isActive: boolean;
     notificationPrefs: Record<string, unknown>;
+    commissionRate: number;
+    rollingFloor: number;
+    overrideRate: number;
+    estimatedMarginRate: number;
+    minMarginPercent: number;
+    newCustomerShareFloor: number;
+    newCustomerWindowMonths: number;
+    commissionConfigActive: boolean;
   }>
 ) {
   const existing = await db
@@ -76,6 +87,7 @@ export async function updateUser(
   if (input.displayName !== undefined) updates.displayName = input.displayName;
   if (input.role !== undefined) updates.role = input.role;
   if (input.officeId !== undefined) updates.officeId = input.officeId;
+  if (input.reportsTo !== undefined) updates.reportsTo = input.reportsTo;
   if (input.isActive !== undefined) updates.isActive = input.isActive;
   if (input.notificationPrefs !== undefined) updates.notificationPrefs = input.notificationPrefs;
 
@@ -84,6 +96,62 @@ export async function updateUser(
     .set(updates)
     .where(eq(users.id, id))
     .returning();
+
+  const hasCommissionPatch =
+    input.commissionRate !== undefined ||
+    input.rollingFloor !== undefined ||
+    input.overrideRate !== undefined ||
+    input.estimatedMarginRate !== undefined ||
+    input.minMarginPercent !== undefined ||
+    input.newCustomerShareFloor !== undefined ||
+    input.newCustomerWindowMonths !== undefined ||
+    input.commissionConfigActive !== undefined;
+
+  if (hasCommissionPatch) {
+    const existingConfig = await db
+      .select()
+      .from(userCommissionSettings)
+      .where(eq(userCommissionSettings.userId, id))
+      .limit(1);
+    const current = existingConfig[0];
+
+    const commissionRate = input.commissionRate ?? Number(current?.commissionRate ?? 0);
+    const rollingFloor = input.rollingFloor ?? Number(current?.rollingFloor ?? 0);
+    const overrideRate = input.overrideRate ?? Number(current?.overrideRate ?? 0);
+    const estimatedMarginRate = input.estimatedMarginRate ?? Number(current?.estimatedMarginRate ?? 0.3);
+    const minMarginPercent = input.minMarginPercent ?? Number(current?.minMarginPercent ?? 0.2);
+    const newCustomerShareFloor = input.newCustomerShareFloor ?? Number(current?.newCustomerShareFloor ?? 0.1);
+    const newCustomerWindowMonths = input.newCustomerWindowMonths ?? Number(current?.newCustomerWindowMonths ?? 6);
+    const isActive = input.commissionConfigActive ?? Boolean(current?.isActive ?? true);
+
+    await db
+      .insert(userCommissionSettings)
+      .values({
+        userId: id,
+        commissionRate: String(commissionRate),
+        rollingFloor: String(rollingFloor),
+        overrideRate: String(overrideRate),
+        estimatedMarginRate: String(estimatedMarginRate),
+        minMarginPercent: String(minMarginPercent),
+        newCustomerShareFloor: String(newCustomerShareFloor),
+        newCustomerWindowMonths,
+        isActive,
+      })
+      .onConflictDoUpdate({
+        target: userCommissionSettings.userId,
+        set: {
+          commissionRate: String(commissionRate),
+          rollingFloor: String(rollingFloor),
+          overrideRate: String(overrideRate),
+          estimatedMarginRate: String(estimatedMarginRate),
+          minMarginPercent: String(minMarginPercent),
+          newCustomerShareFloor: String(newCustomerShareFloor),
+          newCustomerWindowMonths,
+          isActive,
+          updatedAt: new Date(),
+        },
+      });
+  }
 
   return updated;
 }
@@ -122,13 +190,39 @@ export async function getUsersWithStats() {
       u.display_name,
       u.role,
       u.office_id,
+      u.reports_to,
       u.is_active,
       o.name AS office_name,
-      COUNT(uoa.office_id)::int AS extra_office_count
+      COUNT(uoa.office_id)::int AS extra_office_count,
+      cs.commission_rate,
+      cs.rolling_floor,
+      cs.override_rate,
+      cs.estimated_margin_rate,
+      cs.min_margin_percent,
+      cs.new_customer_share_floor,
+      cs.new_customer_window_months,
+      cs.is_active AS commission_config_active
     FROM users u
     LEFT JOIN offices o ON o.id = u.office_id
     LEFT JOIN user_office_access uoa ON uoa.user_id = u.id
-    GROUP BY u.id, u.email, u.display_name, u.role, u.office_id, u.is_active, o.name
+    LEFT JOIN user_commission_settings cs ON cs.user_id = u.id
+    GROUP BY
+      u.id,
+      u.email,
+      u.display_name,
+      u.role,
+      u.office_id,
+      u.reports_to,
+      u.is_active,
+      o.name,
+      cs.commission_rate,
+      cs.rolling_floor,
+      cs.override_rate,
+      cs.estimated_margin_rate,
+      cs.min_margin_percent,
+      cs.new_customer_share_floor,
+      cs.new_customer_window_months,
+      cs.is_active
     ORDER BY u.display_name ASC
   `);
 
@@ -216,9 +310,18 @@ export async function getUsersWithStats() {
     displayName: r.display_name,
     role: r.role,
     officeId: r.office_id,
+    reportsTo: r.reports_to,
     officeName: r.office_name,
     isActive: r.is_active,
     extraOfficeCount: Number(r.extra_office_count ?? 0),
+    commissionRate: Number(r.commission_rate ?? 0),
+    rollingFloor: Number(r.rolling_floor ?? 0),
+    overrideRate: Number(r.override_rate ?? 0),
+    estimatedMarginRate: Number(r.estimated_margin_rate ?? 0.30),
+    minMarginPercent: Number(r.min_margin_percent ?? 0.20),
+    newCustomerShareFloor: Number(r.new_customer_share_floor ?? 0.10),
+    newCustomerWindowMonths: Number(r.new_customer_window_months ?? 6),
+    commissionConfigActive: Boolean(r.commission_config_active ?? false),
     sourceSystems: sourceSystemsByUserId.get(r.id) ?? [],
     localAuthStatus: getLocalAuthStatus(localAuthByUserId.get(r.id) ?? null),
     inviteSentAt: localAuthByUserId.get(r.id)?.inviteSentAt ?? null,

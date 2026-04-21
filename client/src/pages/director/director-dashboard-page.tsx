@@ -1,8 +1,8 @@
-import { useDirectorDashboard } from "@/hooks/use-director-dashboard";
-import { usePipelineBoardState } from "@/hooks/use-pipeline-board-state";
-import { useDealBoard } from "@/hooks/use-deals";
-import { useLeadBoard } from "@/hooks/use-leads";
 import { DirectorDashboardShell } from "@/components/dashboard/director-dashboard-shell";
+import { useDealBoard } from "@/hooks/use-deals";
+import { useDirectorDashboard } from "@/hooks/use-director-dashboard";
+import { useLeadBoard } from "@/hooks/use-leads";
+import { usePipelineBoardState } from "@/hooks/use-pipeline-board-state";
 
 export function DirectorDashboardPage() {
   const boardState = usePipelineBoardState("deals");

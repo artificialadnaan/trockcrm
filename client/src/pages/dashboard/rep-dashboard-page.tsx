@@ -1,8 +1,8 @@
-import { useRepDashboard } from "@/hooks/use-dashboard";
-import { usePipelineBoardState } from "@/hooks/use-pipeline-board-state";
-import { useDealBoard } from "@/hooks/use-deals";
-import { useLeadBoard } from "@/hooks/use-leads";
 import { RepDashboardBoardShell } from "@/components/dashboard/rep-dashboard-board-shell";
+import { useDealBoard } from "@/hooks/use-deals";
+import { useRepDashboard } from "@/hooks/use-dashboard";
+import { useLeadBoard } from "@/hooks/use-leads";
+import { usePipelineBoardState } from "@/hooks/use-pipeline-board-state";
 
 export function RepDashboardPage() {
   const boardState = usePipelineBoardState("deals");

@@ -16,6 +16,7 @@ export { userGraphTokens, graphTokenStatusEnum } from "./public/user-graph-token
 export { userExternalIdentities, externalUserSourceEnum } from "./public/user-external-identities.js";
 export { userLocalAuth } from "./public/user-local-auth.js";
 export { userLocalAuthEvents, localAuthEventTypeEnum } from "./public/user-local-auth-events.js";
+export { userCommissionSettings } from "./public/user-commission-settings.js";
 export { jobQueue, jobStatusEnum } from "./public/job-queue.js";
 
 // Tenant schema tables (used for Drizzle type resolution when querying via tenantDb)
@@ -28,6 +29,7 @@ export {
   forecastMilestoneCaptureSourceEnum,
 } from "./tenant/deal-forecast-milestones.js";
 export { changeOrders, changeOrderStatusEnum } from "./tenant/change-orders.js";
+export { dealPaymentEvents } from "./tenant/deal-payment-events.js";
 export { dealApprovals, approvalStatusEnum } from "./tenant/deal-approvals.js";
 export { companies } from "./tenant/companies.js";
 export { properties } from "./tenant/properties.js";
