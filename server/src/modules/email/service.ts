@@ -1325,7 +1325,11 @@ async function completeInboundEmailTasks(
       : null;
 
     if (completedTask.originRule && !completionRule) {
-      throw new AppError(500, `Missing rule configuration for completed task originRule ${completedTask.originRule}`);
+      // Legacy/backfilled tasks may carry origin rules that are no longer in TASK_RULES.
+      // Assignment must still succeed; we just skip suppression-window metadata.
+      console.warn(
+        `[email-assignment] Missing rule configuration for completed task originRule ${completedTask.originRule}`
+      );
     }
 
     await tenantDb.insert(jobQueue).values({
