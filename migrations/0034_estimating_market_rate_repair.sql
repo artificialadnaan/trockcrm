@@ -136,6 +136,20 @@ BEGIN
       schema_name
     );
 
+    IF has_bad_rule AND NOT has_good_rule THEN
+      EXECUTE format(
+        'UPDATE %I.estimate_market_adjustment_rules
+            SET scope_type = ''general'',
+                scope_key = ''default'',
+                updated_at = NOW()
+          WHERE market_id IS NULL
+            AND scope_type = ''global''
+            AND scope_key = ''default''
+            AND effective_from = ''2000-01-01 00:00:00+00''',
+        schema_name
+      );
+    END IF;
+
     EXECUTE format(
       'ALTER TABLE %I.estimate_market_adjustment_rules
          ADD CONSTRAINT estimate_market_adjustment_rules_scope_type_check
@@ -150,21 +164,7 @@ BEGIN
       schema_name
     );
 
-    IF has_bad_rule THEN
-      IF NOT has_good_rule THEN
-        EXECUTE format(
-          'UPDATE %I.estimate_market_adjustment_rules
-              SET scope_type = ''general'',
-                  scope_key = ''default'',
-                  updated_at = NOW()
-            WHERE market_id IS NULL
-              AND scope_type = ''global''
-              AND scope_key = ''default''
-              AND effective_from = ''2000-01-01 00:00:00+00''',
-          schema_name
-        );
-      END IF;
-    ELSIF NOT has_good_rule THEN
+    IF NOT has_bad_rule AND NOT has_good_rule THEN
       EXECUTE format(
         'INSERT INTO %I.estimate_market_adjustment_rules (
            market_id,
