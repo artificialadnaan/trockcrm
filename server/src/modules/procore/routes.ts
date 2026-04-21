@@ -3,7 +3,7 @@
 
 import { Router } from "express";
 import { eq, and, sql } from "drizzle-orm";
-import { jobQueue, procoreSyncState } from "@trock-crm/shared/schema";
+import { procoreSyncState } from "@trock-crm/shared/schema";
 import { TASK_PRIORITIES, TASK_TYPES } from "@trock-crm/shared/types";
 import { requireRole } from "../../middleware/rbac.js";
 import { AppError } from "../../middleware/error-handler.js";
@@ -14,10 +14,33 @@ import {
   isProcoreOauthRequiredError,
   procoreClient,
 } from "../../lib/procore-client.js";
+import { getUserById } from "../admin/users-service.js";
 import { listProjectValidationForOffice } from "./project-validation-service.js";
-import { createTask, getProjectTaskScope, getProjectTasks } from "../tasks/service.js";
+import {
+  createTask,
+  getProjectTaskScope,
+  getProjectTasks,
+  queueTaskCreateSideEffects,
+} from "../tasks/service.js";
 
 const router = Router();
+
+async function assertAssignableUserForOffice(assignedTo: string, officeId: string) {
+  const user = await getUserById(assignedTo);
+  if (!user || !user.isActive) {
+    throw new AppError(400, "Assigned user not found or inactive");
+  }
+
+  const hasOfficeAccess =
+    user.officeId === officeId ||
+    user.officeAccess.some((access) => access.officeId === officeId);
+
+  if (!hasOfficeAccess) {
+    throw new AppError(400, "Assigned user does not have access to this office");
+  }
+
+  return user;
+}
 
 // GET /api/procore/sync-status — admin overview
 router.get(
@@ -317,8 +340,12 @@ router.post(
     try {
       const projectId = req.params.id as string;
       const { title, description, type, priority, assignedTo, dueDate, dueTime, remindAt } = req.body;
+      const officeId = req.user!.activeOfficeId ?? req.user!.officeId;
 
       if (!title) throw new AppError(400, "Title is required");
+      if (typeof assignedTo !== "string" || assignedTo.length === 0) {
+        throw new AppError(400, "assignedTo is required");
+      }
       if (priority && !TASK_PRIORITIES.includes(priority)) {
         throw new AppError(400, `Invalid priority. Must be one of: ${TASK_PRIORITIES.join(", ")}`);
       }
@@ -336,13 +363,13 @@ router.post(
         throw new AppError(404, "Project not found");
       }
 
-      const targetAssignee = assignedTo ?? req.user!.id;
+      await assertAssignableUserForOffice(assignedTo, officeId);
       const task = await createTask(req.tenantDb!, {
         title,
         description,
         type: type ?? "manual",
         priority,
-        assignedTo: targetAssignee,
+        assignedTo,
         createdBy: req.user!.id,
         dealId: projectId,
         dueDate,
@@ -350,45 +377,23 @@ router.post(
         remindAt,
       });
 
-      if (targetAssignee !== req.user!.id) {
-        await req.tenantDb!.insert(jobQueue).values({
-          jobType: "domain_event",
-          payload: {
-            eventName: "task.assigned",
-            taskId: task.id,
-            assignedTo: targetAssignee,
-            title: task.title,
-          },
-          officeId: req.user!.activeOfficeId ?? req.user!.officeId,
-          status: "pending",
-          runAfter: new Date(),
-        });
-      }
-
-      await req.tenantDb!.insert(jobQueue).values({
-        jobType: "ai_refresh_copilot",
-        payload: {
-          dealId: task.dealId,
-          reason: "task_created",
-          taskId: task.id,
-        },
-        officeId: req.user!.activeOfficeId ?? req.user!.officeId,
-        status: "pending",
-        runAfter: new Date(),
+      const sideEffects = await queueTaskCreateSideEffects(req.tenantDb!, task, {
+        actorUserId: req.user!.id,
+        officeId,
       });
 
       await req.commitTransaction!();
 
-      if (targetAssignee !== req.user!.id) {
+      if (sideEffects.shouldEmitAssignmentEvent) {
         try {
           eventBus.emitLocal({
             name: "task.assigned",
             payload: {
               taskId: task.id,
-              assignedTo: targetAssignee,
+              assignedTo: task.assignedTo,
               title: task.title,
             },
-            officeId: req.user!.activeOfficeId ?? req.user!.officeId,
+            officeId,
             userId: req.user!.id,
             timestamp: new Date(),
           });

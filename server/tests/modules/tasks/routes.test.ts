@@ -5,6 +5,7 @@ const taskServiceMocks = vi.hoisted(() => ({
   getTaskCounts: vi.fn(),
   getTaskById: vi.fn(),
   createTask: vi.fn(),
+  queueTaskCreateSideEffects: vi.fn(),
   updateTask: vi.fn(),
   completeTask: vi.fn(),
   dismissTask: vi.fn(),
@@ -34,6 +35,7 @@ vi.mock("../../../src/modules/tasks/service.js", async () => {
     getTaskCounts: taskServiceMocks.getTaskCounts,
     getTaskById: taskServiceMocks.getTaskById,
     createTask: taskServiceMocks.createTask,
+    queueTaskCreateSideEffects: taskServiceMocks.queueTaskCreateSideEffects,
     updateTask: taskServiceMocks.updateTask,
     completeTask: taskServiceMocks.completeTask,
     dismissTask: taskServiceMocks.dismissTask,
@@ -200,6 +202,9 @@ function makeRepUser(overrides: Partial<TestUser> = {}): TestUser {
 describe("task routes", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    taskServiceMocks.queueTaskCreateSideEffects.mockResolvedValue({
+      shouldEmitAssignmentEvent: false,
+    });
   });
 
   it("forwards assignee filters when listing tasks", async () => {

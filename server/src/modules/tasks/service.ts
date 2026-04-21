@@ -1,6 +1,6 @@
 import { eq, and, desc, asc, sql, or, isNull, isNotNull, inArray } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
-import { deals, taskResolutionState, tasks } from "@trock-crm/shared/schema";
+import { deals, jobQueue, taskResolutionState, tasks } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
 import { TASK_RULES } from "./rules/config.js";
@@ -44,6 +44,11 @@ export interface CreateTaskInput {
   dueTime?: string;
   remindAt?: string;
 }
+
+type CreatedTaskSideEffectsInput = {
+  actorUserId: string;
+  officeId: string;
+};
 
 export interface UpdateTaskInput {
   title?: string;
@@ -552,6 +557,50 @@ export async function createTask(tenantDb: TenantDb, input: CreateTaskInput) {
     .returning();
 
   return result[0];
+}
+
+export async function queueTaskCreateSideEffects(
+  tenantDb: TenantDb,
+  task: {
+    id: string;
+    title: string;
+    assignedTo: string;
+    dealId: string | null;
+  },
+  input: CreatedTaskSideEffectsInput
+) {
+  if (task.assignedTo !== input.actorUserId) {
+    await tenantDb.insert(jobQueue).values({
+      jobType: "domain_event",
+      payload: {
+        eventName: "task.assigned",
+        taskId: task.id,
+        assignedTo: task.assignedTo,
+        title: task.title,
+      },
+      officeId: input.officeId,
+      status: "pending",
+      runAfter: new Date(),
+    });
+  }
+
+  if (task.dealId) {
+    await tenantDb.insert(jobQueue).values({
+      jobType: "ai_refresh_copilot",
+      payload: {
+        dealId: task.dealId,
+        reason: "task_created",
+        taskId: task.id,
+      },
+      officeId: input.officeId,
+      status: "pending",
+      runAfter: new Date(),
+    });
+  }
+
+  return {
+    shouldEmitAssignmentEvent: task.assignedTo !== input.actorUserId,
+  };
 }
 
 /**

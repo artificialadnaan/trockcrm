@@ -10,6 +10,7 @@ import {
   getTaskCounts,
   getTaskById,
   createTask,
+  queueTaskCreateSideEffects,
   updateTask,
   transitionTaskStatus,
   completeTask,
@@ -118,40 +119,15 @@ router.post("/", async (req, res, next) => {
       remindAt,
     });
 
-    // Outbox pattern: insert durable event BEFORE commit so worker gets it
-    if (targetAssignee !== req.user!.id) {
-      await req.tenantDb!.insert(jobQueue).values({
-        jobType: "domain_event",
-        payload: {
-          eventName: "task.assigned",
-          taskId: task.id,
-          assignedTo: targetAssignee,
-          title: task.title,
-        },
-        officeId: req.user!.activeOfficeId ?? req.user!.officeId,
-        status: "pending",
-        runAfter: new Date(),
-      });
-    }
-
-    if (task.dealId) {
-      await req.tenantDb!.insert(jobQueue).values({
-        jobType: "ai_refresh_copilot",
-        payload: {
-          dealId: task.dealId,
-          reason: "task_created",
-          taskId: task.id,
-        },
-        officeId: req.user!.activeOfficeId ?? req.user!.officeId,
-        status: "pending",
-        runAfter: new Date(),
-      });
-    }
+    const sideEffects = await queueTaskCreateSideEffects(req.tenantDb!, task, {
+      actorUserId: req.user!.id,
+      officeId: req.user!.activeOfficeId ?? req.user!.officeId,
+    });
 
     await req.commitTransaction!();
 
     // Best-effort local emit for SSE push (already persisted via outbox above)
-    if (targetAssignee !== req.user!.id) {
+    if (sideEffects.shouldEmitAssignmentEvent) {
       try {
         eventBus.emitLocal({
           name: "task.assigned",

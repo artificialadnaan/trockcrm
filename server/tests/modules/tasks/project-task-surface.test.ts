@@ -7,6 +7,11 @@ const taskServiceMocks = vi.hoisted(() => ({
   getProjectTasks: vi.fn(),
   createTask: vi.fn(),
   getTasks: vi.fn(),
+  queueTaskCreateSideEffects: vi.fn(),
+}));
+
+const adminUsersMocks = vi.hoisted(() => ({
+  getUserById: vi.fn(),
 }));
 
 vi.mock("../../../src/events/bus.js", () => ({
@@ -27,6 +32,16 @@ vi.mock("../../../src/modules/tasks/service.js", async () => {
     getProjectTasks: taskServiceMocks.getProjectTasks,
     createTask: taskServiceMocks.createTask,
     getTasks: taskServiceMocks.getTasks,
+    queueTaskCreateSideEffects: taskServiceMocks.queueTaskCreateSideEffects,
+  };
+});
+
+vi.mock("../../../src/modules/admin/users-service.js", async () => {
+  const actual = await vi.importActual("../../../src/modules/admin/users-service.js");
+
+  return {
+    ...(actual as Record<string, unknown>),
+    getUserById: adminUsersMocks.getUserById,
   };
 });
 
@@ -63,6 +78,54 @@ function createProjectTaskDb(responses: any[][]) {
 
   return {
     select: vi.fn(() => createAwaitableChain(queued.shift() ?? [])),
+  };
+}
+
+function flattenQueryChunks(input: unknown, seen = new WeakSet<object>()): unknown[] {
+  if (!input || typeof input !== "object") return [input];
+  if (seen.has(input as object)) return [];
+  seen.add(input as object);
+
+  const queryChunks = (input as { queryChunks?: unknown[] }).queryChunks;
+  if (Array.isArray(queryChunks)) {
+    return queryChunks.flatMap((chunk) => flattenQueryChunks(chunk, seen));
+  }
+
+  if ("value" in (input as Record<string, unknown>)) {
+    return [((input as Record<string, unknown>).value)];
+  }
+
+  return Object.values(input as Record<string, unknown>).flatMap((value) => flattenQueryChunks(value, seen));
+}
+
+function createCapturedGetTasksDb() {
+  const capturedWhere: unknown[] = [];
+
+  function createChain(rows: any[]) {
+    const chain: Record<string, any> = {
+      from: vi.fn(() => chain),
+      where: vi.fn((condition: unknown) => {
+        capturedWhere.push(condition);
+        return chain;
+      }),
+      limit: vi.fn(() => chain),
+      offset: vi.fn(() => chain),
+      orderBy: vi.fn(() => chain),
+      then: (onFulfilled: (value: any[]) => unknown, onRejected?: (reason: unknown) => unknown) =>
+        Promise.resolve(rows).then(onFulfilled, onRejected),
+    };
+
+    return chain;
+  }
+
+  return {
+    db: {
+      select: vi.fn((selection?: Record<string, unknown>) => {
+        const rows = selection && "count" in selection ? [{ count: 0 }] : [];
+        return createChain(rows);
+      }),
+    },
+    getCapturedWhere: () => capturedWhere,
   };
 }
 
@@ -116,6 +179,15 @@ function createTaskApp(user: TestUser, tenantDb = createTenantDbMock()) {
 describe("project task surface", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    taskServiceMocks.queueTaskCreateSideEffects.mockResolvedValue({
+      shouldEmitAssignmentEvent: true,
+    });
+    adminUsersMocks.getUserById.mockResolvedValue({
+      id: "rep-2",
+      officeId: "office-1",
+      isActive: true,
+      officeAccess: [],
+    });
   });
 
   it("allows a rep to read all tasks for a permitted project through the project-scoped helper", async () => {
@@ -203,6 +275,59 @@ describe("project task surface", () => {
         dealId: "deal-123",
       })
     );
+    expect(taskServiceMocks.queueTaskCreateSideEffects).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.objectContaining({
+        id: "task-1",
+        assignedTo: "rep-2",
+        dealId: "deal-123",
+      }),
+      expect.objectContaining({
+        actorUserId: "director-1",
+        officeId: "office-1",
+      })
+    );
+  });
+
+  it("requires assignedTo when creating project-scoped tasks", async () => {
+    taskServiceMocks.getProjectTaskScope.mockResolvedValue({
+      id: "deal-123",
+      procoreProjectId: 999,
+    });
+
+    const response = await request(createProcoreApp(createUser("director"))).post(
+      "/api/procore/my-projects/deal-123/tasks"
+    ).send({
+      title: "Schedule turnover walk",
+    });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error.message).toContain("assignedTo is required");
+    expect(taskServiceMocks.createTask).not.toHaveBeenCalled();
+  });
+
+  it("rejects project-scoped task creation when the assignee is inactive or lacks office access", async () => {
+    taskServiceMocks.getProjectTaskScope.mockResolvedValue({
+      id: "deal-123",
+      procoreProjectId: 999,
+    });
+    adminUsersMocks.getUserById.mockResolvedValue({
+      id: "rep-9",
+      officeId: "office-9",
+      isActive: true,
+      officeAccess: [],
+    });
+
+    const response = await request(createProcoreApp(createUser("director"))).post(
+      "/api/procore/my-projects/deal-123/tasks"
+    ).send({
+      title: "Schedule turnover walk",
+      assignedTo: "rep-9",
+    });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error.message).toContain("Assigned user does not have access to this office");
+    expect(taskServiceMocks.createTask).not.toHaveBeenCalled();
   });
 
   it("rejects project-scoped task creation for reps", async () => {
@@ -216,22 +341,19 @@ describe("project task surface", () => {
     expect(taskServiceMocks.createTask).not.toHaveBeenCalled();
   });
 
-  it("preserves generic rep restrictions when filtering the generic task list by dealId", async () => {
-    taskServiceMocks.getTasks.mockResolvedValue({
-      tasks: [],
-      pagination: { page: 1, limit: 100, total: 0, totalPages: 0 },
-    });
+  it("preserves generic rep restrictions by composing rep scope with dealId filters", async () => {
+    const { db, getCapturedWhere } = createCapturedGetTasksDb();
 
-    const response = await request(createTaskApp(createUser("rep"))).get(
-      "/api/tasks?dealId=deal-999"
-    );
-
-    expect(response.status).toBe(200);
-    expect(taskServiceMocks.getTasks).toHaveBeenCalledWith(
-      expect.any(Object),
-      expect.objectContaining({ dealId: "deal-999" }),
+    const result = await (actualTaskService as Record<string, any>).getTasks(
+      db as any,
+      { dealId: "deal-999" },
       "rep",
       "rep-1"
     );
+
+    const flattened = getCapturedWhere().flatMap((condition) => flattenQueryChunks(condition));
+
+    expect(result.tasks).toEqual([]);
+    expect(flattened).toEqual(expect.arrayContaining(["rep-1", "deal-999"]));
   });
 });
