@@ -241,6 +241,7 @@ Manual row storage contract:
   - store catalog candidates as child option rows
   - set `selected_option_id` when a catalog candidate is chosen
   - if the estimator creates the manual row by selecting a catalog result in the add-item flow, create it in `pending_review` with that option preselected
+  - if that preselected catalog result is an existing local catalog item, persist it only through the child option row plus `selected_option_id`; do not write `promoted_local_catalog_item_id` because no new local catalog item was created
   - estimator-created catalog-backed manual rows still use `manual_origin = 'manual_estimator_added'`
   - rerun carry-forward clones of manual rows use `manual_origin = 'generated'`
 - if the estimator switches a catalog-backed manual row back to free-text:
@@ -398,7 +399,7 @@ Duplicate suppression order:
 2. same selected catalog item id within the same section
 3. same normalized intent within the same section for manual rows
 
-For explicit extracted/manual rows, this ordered list defines duplicate-review grouping signals rather than auto-suppression behavior.
+All duplicate-review grouping in this slice is section-scoped. For explicit extracted/manual rows, this ordered list defines duplicate-review grouping signals rather than auto-suppression behavior.
 
 If a duplicate is detected, prefer the explicit extracted row over inferred scope.
 
