@@ -241,6 +241,8 @@ Manual row storage contract:
   - store catalog candidates as child option rows
   - set `selected_option_id` when a catalog candidate is chosen
   - if the estimator creates the manual row by selecting a catalog result in the add-item flow, create it directly in `accepted` state with that option selected
+  - estimator-created catalog-backed manual rows still use `manual_origin = 'manual_estimator_added'`
+  - rerun carry-forward clones of manual rows use `manual_origin = 'generated'`
 
 `source_row_identity` definition:
 
@@ -389,6 +391,8 @@ Duplicate suppression order:
 1. exact normalized catalog intent match
 2. same selected catalog item id
 3. same normalized intent within the same section for manual rows
+
+For explicit extracted/manual rows, this ordered list defines duplicate-review grouping signals rather than auto-suppression behavior.
 
 If a duplicate is detected, prefer the explicit extracted row over inferred scope.
 
@@ -575,6 +579,7 @@ Manual row refresh behavior:
 - on rerun, unresolved manual rows for the deal that are not rejected and do not already have `promoted_estimate_line_item_id` are cloned into the new active generation run
 - carry-forward clones keep the same `source_row_identity`, `manual_*` fields, `manual_identity_key`, latest review state, and `promoted_local_catalog_item_id` so the estimator does not lose manually added work
 - carry-forward clones also preserve `selected_option_id`, `selected_source_type`, `catalog_backing`, and any `override_*` fields so the resolved manual-row state is reconstructed in the new run
+- when a carried-forward manual row references catalog-backed child options, clone those option rows into the new recommendation set and remap `selected_option_id` to the cloned option row in the new run
 - rows with only `promoted_local_catalog_item_id` still carry forward if they have not yet been promoted into the canonical estimate model
 - rejected rows and rows with `promoted_estimate_line_item_id` remain attached to their historical run for audit and are not copied into the new active run
 
