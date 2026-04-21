@@ -1,5 +1,4 @@
 import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import { getTableColumns } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 import * as publicSchema from "../../../../shared/src/schema/public/index.js";
@@ -46,7 +45,7 @@ describe("ownership sync schema contract", () => {
 
   it("includes the Task 1 ownership migration contract in SQL", () => {
     const migrationSql = readFileSync(
-      resolve(process.cwd(), "../migrations/0042_hubspot_ownership_cleanup_phase_1.sql"),
+      new URL("../../../../migrations/0042_hubspot_ownership_cleanup_phase_1.sql", import.meta.url),
       "utf8"
     );
 
