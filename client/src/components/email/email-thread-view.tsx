@@ -16,12 +16,14 @@ import {
 } from "@/components/ui/dialog";
 import { useDeals } from "@/hooks/use-deals";
 import {
+  associateEmailToEntity,
   assignEmailThread,
   detachEmailThread,
   reassignEmailThread,
   useEmailThread,
   type EmailThread,
 } from "@/hooks/use-emails";
+import { EmailManualAssignmentDialog } from "./email-manual-assignment-dialog";
 
 interface EmailThreadViewProps {
   conversationId: string;
@@ -228,8 +230,9 @@ function ThreadAssignmentCard({
 }
 
 export function EmailThreadView({ conversationId, onBack }: EmailThreadViewProps) {
-  const { thread, loading, error, setThread } = useEmailThread(conversationId);
+  const { thread, loading, error, setThread, refetch } = useEmailThread(conversationId);
   const [dialogMode, setDialogMode] = useState<AssignmentMode | null>(null);
+  const [manualReassignEmailId, setManualReassignEmailId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
   const subject = thread.emails[0]?.subject ?? "(No Subject)";
@@ -330,7 +333,7 @@ export function EmailThreadView({ conversationId, onBack }: EmailThreadViewProps
                 isInbound ? "border-l-4 border-l-blue-400" : "border-l-4 border-l-green-400"
               }`}
             >
-              <div className="mb-2 flex items-center justify-between">
+              <div className="mb-2 flex items-center justify-between gap-3">
                 <div className="flex items-center gap-2">
                   {isInbound ? (
                     <ArrowDownLeft className="h-4 w-4 text-blue-500" />
@@ -341,9 +344,19 @@ export function EmailThreadView({ conversationId, onBack }: EmailThreadViewProps
                     {isInbound ? email.fromAddress : `To: ${email.toAddresses.join(", ")}`}
                   </span>
                 </div>
-                <span className="text-xs text-muted-foreground">
-                  {new Date(email.sentAt).toLocaleString()}
-                </span>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-muted-foreground">
+                    {new Date(email.sentAt).toLocaleString()}
+                  </span>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => setManualReassignEmailId(email.id)}
+                    disabled={saving}
+                  >
+                    Reassign email
+                  </Button>
+                </div>
               </div>
               <div
                 className="prose prose-sm max-w-none"
@@ -365,6 +378,21 @@ export function EmailThreadView({ conversationId, onBack }: EmailThreadViewProps
         }}
         onConfirm={handleAssignLikeAction}
         loading={saving}
+      />
+
+      <EmailManualAssignmentDialog
+        open={manualReassignEmailId !== null}
+        onOpenChange={(open) => {
+          if (!open) setManualReassignEmailId(null);
+        }}
+        title="Reassign email"
+        description="Attach this specific email to a different deal, lead, contact, company, or property."
+        onAssign={async (target) => {
+          if (!manualReassignEmailId) return;
+          await associateEmailToEntity(manualReassignEmailId, target);
+          await refetch();
+          toast.success("Email reassigned");
+        }}
       />
 
       {!canDetach && dialogMode === "reassign" ? null : null}

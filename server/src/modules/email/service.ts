@@ -1009,10 +1009,20 @@ export async function getEmails(
   }
 
   if (filters.dealId) {
-    conditions.push(eq(emails.dealId, filters.dealId));
+    conditions.push(
+      or(
+        eq(emails.dealId, filters.dealId),
+        and(eq(emails.assignedEntityType, "deal"), eq(emails.assignedEntityId, filters.dealId))
+      )
+    );
   }
   if (filters.contactId) {
-    conditions.push(eq(emails.contactId, filters.contactId));
+    conditions.push(
+      or(
+        eq(emails.contactId, filters.contactId),
+        and(eq(emails.assignedEntityType, "contact"), eq(emails.assignedEntityId, filters.contactId))
+      )
+    );
   }
   if (filters.direction) {
     conditions.push(eq(emails.direction, filters.direction));
@@ -1469,6 +1479,7 @@ export async function associateEmailToEntity(
       assignmentConfidence: "high",
       assignmentAmbiguityReason: null,
       dealId: assignedDealId,
+      contactId: input.assignedEntityType === "contact" ? input.assignedEntityId : email.contactId ?? null,
     })
     .where(eq(emails.id, emailId));
 
@@ -1481,6 +1492,7 @@ export async function associateEmailToEntity(
       propertyId: assignmentLinks.propertyId,
       leadId: assignmentLinks.leadId,
       dealId: assignmentLinks.dealId,
+      contactId: input.assignedEntityType === "contact" ? input.assignedEntityId : email.contactId ?? null,
     })
     .where(eq(activities.emailId, emailId))
     .returning({ id: activities.id });
@@ -1496,7 +1508,7 @@ export async function associateEmailToEntity(
       propertyId: assignmentLinks.propertyId,
       leadId: assignmentLinks.leadId,
       dealId: assignmentLinks.dealId,
-      contactId: email.contactId ?? null,
+      contactId: input.assignedEntityType === "contact" ? input.assignedEntityId : email.contactId ?? null,
       emailId: email.id,
       subject: email.subject ?? null,
       body: email.bodyPreview ?? (email.bodyHtml ? stripHtml(email.bodyHtml).substring(0, 1000) : null),

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { api } from "@/lib/api";
+import { api, resolveApiBase } from "@/lib/api";
 
 export interface LeadRecord {
   id: string;
@@ -12,6 +12,11 @@ export interface LeadRecord {
   status: "open" | "converted" | "disqualified";
   source: string | null;
   description: string | null;
+  qualificationScope: string | null;
+  qualificationBudgetAmount: string | null;
+  qualificationCompanyFit: boolean | null;
+  directorReviewDecision: "go" | "no_go" | null;
+  directorReviewReason: string | null;
   decisionMakerName: string | null;
   decisionProcess: string | null;
   budgetStatus: string | null;
@@ -180,6 +185,73 @@ export async function updateLead(
     method: "PATCH",
     json: input,
   });
+}
+
+export interface LeadTransitionMissingRequirement {
+  key: string;
+  label: string;
+  resolution: "inline" | "detail";
+}
+
+export type LeadTransitionResult =
+  | { ok: true; lead: LeadRecord }
+  | {
+      ok: false;
+      reason: "missing_requirements";
+      targetStageId: string;
+      resolution: "inline";
+      missing: LeadTransitionMissingRequirement[];
+    };
+
+export type LeadTransitionInlinePatch = Partial<
+  Pick<
+    LeadRecord,
+    | "source"
+    | "description"
+    | "qualificationScope"
+    | "qualificationBudgetAmount"
+    | "qualificationCompanyFit"
+    | "directorReviewDecision"
+    | "directorReviewReason"
+  >
+>;
+
+const LEADS_API_BASE = resolveApiBase(
+  (import.meta as any).env ?? {},
+  typeof window !== "undefined" ? window.location : undefined
+);
+
+export async function transitionLeadStage(
+  leadId: string,
+  input: {
+    targetStageId: string;
+    inlinePatch?: LeadTransitionInlinePatch;
+  }
+) {
+  const response = await fetch(`${LEADS_API_BASE}/leads/${leadId}/stage-transition`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    credentials: "include",
+    body: JSON.stringify(input),
+  });
+
+  const payload = await response.json().catch(() => null);
+  if (
+    payload &&
+    (response.status === 409 ||
+      (typeof payload === "object" && (payload as { reason?: string }).reason === "missing_requirements"))
+  ) {
+    return payload as LeadTransitionResult;
+  }
+
+  if (!response.ok) {
+    const message = payload?.error?.message || `HTTP ${response.status}`;
+    throw new Error(message);
+  }
+
+  return payload as LeadTransitionResult;
 }
 
 export async function convertLead(

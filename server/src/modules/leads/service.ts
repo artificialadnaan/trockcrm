@@ -560,6 +560,10 @@ export function createLeadService(
       }
     }
 
+    if (targetStage.slug === "ready_for_opportunity" && effectiveLead.directorReviewDecision !== "go") {
+      missing.push("directorReviewDecision");
+    }
+
     const now = deps.now();
     const updates: Record<string, unknown> = { updatedAt: now };
 
@@ -604,9 +608,6 @@ export function createLeadService(
     }
 
     if (targetStage.slug === "ready_for_opportunity") {
-      if (effectiveLead.directorReviewDecision !== "go") {
-        throw new AppError(400, "Director review must be marked go before the lead is ready for opportunity");
-      }
       if (!updates.directorReviewedAt) updates.directorReviewedAt = now;
       if (!updates.directorReviewedBy) updates.directorReviewedBy = input.userId;
     }

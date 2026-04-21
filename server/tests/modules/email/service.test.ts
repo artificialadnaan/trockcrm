@@ -26,6 +26,7 @@ const {
   autoAssociateEmailToDeal,
   associateEmailToEntity,
   buildThreadAssignmentFallbackWhereClause,
+  getEmails,
   isEmailAssignmentQueueCandidate,
   sendEmail,
 } = await import("../../../src/modules/email/service.js");
@@ -166,6 +167,86 @@ describe("email service inbound association", () => {
 
     expect(hasColumnName(whereClause, "user_id")).toBe(true);
     expect(hasColumnName(whereClause, "graph_conversation_id")).toBe(true);
+  });
+
+  it("includes assigned-entity fallback when filtering emails by contact", async () => {
+    const whereClauses: unknown[] = [];
+    const tenantDb = {
+      select: vi.fn(() => {
+        const callIndex = (tenantDb.select as any).mock.calls.length;
+        const chain: any = {
+          from: vi.fn(() => chain),
+          where: vi.fn((whereArg: unknown) => {
+            whereClauses.push(whereArg);
+            return chain;
+          }),
+          orderBy: vi.fn(() => chain),
+          limit: vi.fn(() => chain),
+          offset: vi.fn(() => chain),
+          then(resolve: (value: any) => void) {
+            if (callIndex === 1) {
+              resolve([{ count: 1 }]);
+            } else {
+              resolve([]);
+            }
+          },
+        };
+        return chain;
+      }),
+    };
+
+    await getEmails(tenantDb as any, { contactId: "contact-1" }, "director-1", "director");
+
+    expect(whereClauses.length).toBe(2);
+    expect(hasColumnName(whereClauses[0], "contact_id") || hasColumnName(whereClauses[0], "contactId")).toBe(true);
+    expect(
+      hasColumnName(whereClauses[0], "assigned_entity_type") ||
+        hasColumnName(whereClauses[0], "assignedEntityType")
+    ).toBe(true);
+    expect(
+      hasColumnName(whereClauses[0], "assigned_entity_id") ||
+        hasColumnName(whereClauses[0], "assignedEntityId")
+    ).toBe(true);
+  });
+
+  it("includes assigned-entity fallback when filtering emails by deal", async () => {
+    const whereClauses: unknown[] = [];
+    const tenantDb = {
+      select: vi.fn(() => {
+        const callIndex = (tenantDb.select as any).mock.calls.length;
+        const chain: any = {
+          from: vi.fn(() => chain),
+          where: vi.fn((whereArg: unknown) => {
+            whereClauses.push(whereArg);
+            return chain;
+          }),
+          orderBy: vi.fn(() => chain),
+          limit: vi.fn(() => chain),
+          offset: vi.fn(() => chain),
+          then(resolve: (value: any) => void) {
+            if (callIndex === 1) {
+              resolve([{ count: 1 }]);
+            } else {
+              resolve([]);
+            }
+          },
+        };
+        return chain;
+      }),
+    };
+
+    await getEmails(tenantDb as any, { dealId: "deal-1" }, "director-1", "director");
+
+    expect(whereClauses.length).toBe(2);
+    expect(hasColumnName(whereClauses[0], "deal_id") || hasColumnName(whereClauses[0], "dealId")).toBe(true);
+    expect(
+      hasColumnName(whereClauses[0], "assigned_entity_type") ||
+        hasColumnName(whereClauses[0], "assignedEntityType")
+    ).toBe(true);
+    expect(
+      hasColumnName(whereClauses[0], "assigned_entity_id") ||
+        hasColumnName(whereClauses[0], "assignedEntityId")
+    ).toBe(true);
   });
 
   it("completes inbound email tasks when an email is manually associated to a deal", async () => {
@@ -359,7 +440,7 @@ describe("email service inbound association", () => {
           then(resolve: (value: any) => void) {
             const callIndex = (tenantDb.select as any).mock.calls.length;
             if (callIndex === 1) {
-              resolve([{ id: "email-1", userId: "user-1", contactId: "contact-1", subject: "Hello", bodyPreview: "Hi", bodyHtml: null, sentAt: new Date("2026-04-20T00:00:00.000Z") }]);
+              resolve([{ id: "email-1", userId: "user-1", contactId: null, subject: "Hello", bodyPreview: "Hi", bodyHtml: null, sentAt: new Date("2026-04-20T00:00:00.000Z") }]);
             } else if (callIndex === 2) {
               resolve([{ id: "contact-1", companyId: "company-1" }]);
             } else {
@@ -407,6 +488,16 @@ describe("email service inbound association", () => {
             assignedEntityType: "contact",
             assignedEntityId: "contact-1",
             dealId: null,
+            contactId: "contact-1",
+          }),
+        }),
+        expect.objectContaining({
+          payload: expect.objectContaining({
+            sourceEntityType: "contact",
+            sourceEntityId: "contact-1",
+            companyId: "company-1",
+            dealId: null,
+            contactId: "contact-1",
           }),
         }),
       ])

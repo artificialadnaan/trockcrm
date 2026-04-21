@@ -51,6 +51,12 @@ export interface EmailThread {
   emails: Email[];
 }
 
+export interface EmailAssociationTarget {
+  assignedEntityType: "deal" | "lead" | "property" | "company" | "contact";
+  assignedEntityId: string;
+  assignedDealId: string | null;
+}
+
 export interface EmailFilters {
   direction?: "inbound" | "outbound";
   search?: string;
@@ -244,9 +250,17 @@ export async function sendEmail(input: {
 }
 
 export async function associateEmailToDeal(emailId: string, dealId: string) {
+  return associateEmailToEntity(emailId, {
+    assignedEntityType: "deal",
+    assignedEntityId: dealId,
+    assignedDealId: dealId,
+  });
+}
+
+export async function associateEmailToEntity(emailId: string, target: EmailAssociationTarget) {
   return api<{ success: boolean }>(`/email/${emailId}/associate`, {
     method: "POST",
-    json: { dealId },
+    json: target,
   });
 }
 

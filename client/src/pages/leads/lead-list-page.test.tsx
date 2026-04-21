@@ -1,7 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
-import { LeadListPage } from "./lead-list-page";
+import {
+  LeadListPage,
+  isImmediateNextStageMove,
+  isValidDirectorDecisionForTarget,
+} from "./lead-list-page";
 
 const leads = [
   {
@@ -63,10 +67,10 @@ vi.mock("@/hooks/use-leads", () => ({
 vi.mock("@/hooks/use-pipeline-config", () => ({
   usePipelineStages: () => ({
     stages: [
-      { id: "stage-contacted", name: "Lead", slug: "contacted" },
-      { id: "stage-qualified", name: "Qualified Lead", slug: "qualified_lead" },
-      { id: "stage-director", name: "Director Review", slug: "director_go_no_go" },
-      { id: "stage-ready", name: "Ready", slug: "ready_for_opportunity" },
+      { id: "stage-contacted", name: "Lead", slug: "contacted", workflowFamily: "lead", displayOrder: 1 },
+      { id: "stage-qualified", name: "Qualified Lead", slug: "qualified_lead", workflowFamily: "lead", displayOrder: 2 },
+      { id: "stage-director", name: "Director Review", slug: "director_go_no_go", workflowFamily: "lead", displayOrder: 3 },
+      { id: "stage-ready", name: "Ready", slug: "ready_for_opportunity", workflowFamily: "lead", displayOrder: 4 },
     ],
     loading: false,
   }),
@@ -77,6 +81,21 @@ function normalize(html: string) {
 }
 
 describe("LeadListPage", () => {
+  it("treats sparse display-order stages as valid immediate moves when mapped as next stage", () => {
+    const nextStageById = new Map<string, string | null>([
+      ["stage-ready", "stage-converted"],
+      ["stage-converted", null],
+    ]);
+
+    expect(isImmediateNextStageMove("stage-ready", "stage-converted", nextStageById)).toBe(true);
+    expect(isImmediateNextStageMove("stage-ready", "stage-contacted", nextStageById)).toBe(false);
+  });
+
+  it("requires a go decision for ready_for_opportunity transitions", () => {
+    expect(isValidDirectorDecisionForTarget("ready_for_opportunity", "go")).toBe(true);
+    expect(isValidDirectorDecisionForTarget("ready_for_opportunity", "no_go")).toBe(false);
+  });
+
   it("filters lead buckets from the bucket query param", () => {
     const html = normalize(
       renderToStaticMarkup(

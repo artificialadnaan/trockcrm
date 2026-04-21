@@ -996,6 +996,55 @@ describe("Lead Service", () => {
     ).rejects.toMatchObject({ statusCode: 400 });
   });
 
+  it("returns missing requirements when director go/no-go is not set before ready_for_opportunity", async () => {
+    const tenantDb = createFakeTenantDb({
+      leads: [
+        {
+          id: "lead-director-1",
+          companyId: "company-1",
+          propertyId: "property-1",
+          primaryContactId: "contact-1",
+          name: "Palm Villas repaint",
+          stageId: directorReviewStage.id,
+          assignedRepId: "rep-1",
+          status: "open",
+          source: "Referral",
+          description: null,
+          qualificationScope: "Exterior repaint",
+          qualificationBudgetAmount: "120000.00",
+          qualificationCompanyFit: true,
+          qualificationCompletedAt: new Date("2026-04-14T15:00:00.000Z"),
+          stageEnteredAt: new Date("2026-04-14T15:00:00.000Z"),
+          convertedAt: null,
+          isActive: true,
+          createdAt: new Date("2026-04-12T15:00:00.000Z"),
+          updatedAt: new Date("2026-04-14T15:00:00.000Z"),
+        },
+      ],
+    });
+    const service = createLeadService({
+      getStageById: pipelineMocks.getStageById,
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+    });
+
+    const result = await service.transitionLeadStage(tenantDb as never, {
+      leadId: "lead-director-1",
+      targetStageId: readyForOpportunityStage.id,
+      userId: "director-1",
+      userRole: "director",
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      reason: "missing_requirements",
+      targetStageId: readyForOpportunityStage.id,
+      resolution: "inline",
+      missing: [
+        { key: "directorReviewDecision", label: "Director decision", resolution: "inline" },
+      ],
+    });
+  });
+
   it("requires a reason when a director records no_go", async () => {
     const tenantDb = createFakeTenantDb({
       leads: [
