@@ -183,4 +183,60 @@ describe("manual-row-service", () => {
       })
     );
   });
+
+  it("does not auto-select the first catalog option when the requested stable id is missing", async () => {
+    const insertValues = vi.fn().mockResolvedValue([{ id: "rec-4" }]);
+    const tenantDb = {
+      insert: vi.fn(() => ({
+        values: insertValues,
+      })),
+      update: vi.fn(() => ({
+        set: vi.fn(() => ({
+          where: vi.fn(() => ({
+            returning: vi.fn().mockResolvedValue([{ id: "rec-4", selectedSourceType: null }]),
+          })),
+        })),
+      })),
+    } as any;
+
+    const result = await createManualEstimateRow({
+      tenantDb,
+      dealId: "deal-1",
+      userId: "user-1",
+      input: {
+        generationRunId: "run-1",
+        estimateSectionName: "Roofing",
+        manualLabel: "Custom flashing",
+        catalogOptions: [
+          {
+            stableId: "option-1",
+            optionLabel: "First option",
+            catalogItemId: "catalog-1",
+          },
+          {
+            stableId: "option-2",
+            optionLabel: "Second option",
+            catalogItemId: "catalog-2",
+          },
+        ],
+        selectedSourceType: "catalog_option",
+        selectedOptionStableId: "missing-option",
+      },
+    });
+
+    expect(insertValues).toHaveBeenCalledWith(
+      expect.objectContaining({
+        selectedSourceType: null,
+        selectedOptionId: null,
+        catalogBacking: "estimate_only",
+      })
+    );
+    expect(result.recommendation).toEqual(
+      expect.objectContaining({
+        selectedSourceType: null,
+        selectedOptionId: null,
+        catalogBacking: "estimate_only",
+      })
+    );
+  });
 });

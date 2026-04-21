@@ -196,15 +196,12 @@ async function resolveCatalogFirstOptions(args: {
   catalogQuery?: string | null;
   catalogOptions?: ManualRecommendationOptionInput[];
   selectedOptionStableId?: string | null;
-  forceCatalogSelection?: boolean;
 }) {
   if (args.catalogOptions && args.catalogOptions.length > 0) {
     const selectedOption = args.catalogOptions.find((option) => option.stableId === args.selectedOptionStableId) ?? null;
     return {
       optionRows: args.catalogOptions,
-      selectedOption: args.forceCatalogSelection
-        ? selectedOption ?? args.catalogOptions[0] ?? null
-        : selectedOption,
+      selectedOption,
     };
   }
 
@@ -213,7 +210,7 @@ async function resolveCatalogFirstOptions(args: {
     const selectedOption = optionRows.find((option) => option.stableId === args.selectedOptionStableId) ?? null;
     return {
       optionRows,
-      selectedOption: args.forceCatalogSelection ? selectedOption ?? optionRows[0] ?? null : selectedOption,
+      selectedOption,
     };
   }
 
@@ -237,7 +234,6 @@ export async function createManualEstimateRow(args: {
     catalogQuery: args.input.catalogQuery ?? null,
     catalogOptions: args.input.catalogOptions ?? [],
     selectedOptionStableId: args.input.selectedOptionStableId ?? null,
-    forceCatalogSelection: requestedCatalogSelection,
   });
   const selectedSourceType = selectedOption
     ? "catalog_option"
@@ -336,7 +332,6 @@ export async function updateManualEstimateRow(args: {
     catalogQuery: args.input.catalogQuery ?? null,
     catalogOptions: args.input.catalogOptions ?? [],
     selectedOptionStableId: args.input.selectedOptionStableId ?? null,
-    forceCatalogSelection: requestedCatalogSelection,
   });
   const selectedSourceType = selectedOption
     ? "catalog_option"
