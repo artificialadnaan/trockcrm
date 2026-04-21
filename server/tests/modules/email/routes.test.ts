@@ -19,6 +19,22 @@ const dealServiceMocks = vi.hoisted(() => ({
   getDealById: vi.fn(),
 }));
 
+const leadServiceMocks = vi.hoisted(() => ({
+  getLeadById: vi.fn(),
+}));
+
+const companyServiceMocks = vi.hoisted(() => ({
+  getCompanyById: vi.fn(),
+}));
+
+const contactServiceMocks = vi.hoisted(() => ({
+  getContactById: vi.fn(),
+}));
+
+const propertyServiceMocks = vi.hoisted(() => ({
+  getPropertyDetail: vi.fn(),
+}));
+
 vi.mock("../../../src/modules/email/service.js", async () => {
   const actual = await vi.importActual<typeof import("../../../src/modules/email/service.js")>(
     "../../../src/modules/email/service.js"
@@ -49,6 +65,50 @@ vi.mock("../../../src/modules/deals/service.js", async () => {
   return {
     ...actual,
     getDealById: dealServiceMocks.getDealById,
+  };
+});
+
+vi.mock("../../../src/modules/leads/service.js", async () => {
+  const actual = await vi.importActual<typeof import("../../../src/modules/leads/service.js")>(
+    "../../../src/modules/leads/service.js"
+  );
+
+  return {
+    ...actual,
+    getLeadById: leadServiceMocks.getLeadById,
+  };
+});
+
+vi.mock("../../../src/modules/companies/service.js", async () => {
+  const actual = await vi.importActual<typeof import("../../../src/modules/companies/service.js")>(
+    "../../../src/modules/companies/service.js"
+  );
+
+  return {
+    ...actual,
+    getCompanyById: companyServiceMocks.getCompanyById,
+  };
+});
+
+vi.mock("../../../src/modules/contacts/service.js", async () => {
+  const actual = await vi.importActual<typeof import("../../../src/modules/contacts/service.js")>(
+    "../../../src/modules/contacts/service.js"
+  );
+
+  return {
+    ...actual,
+    getContactById: contactServiceMocks.getContactById,
+  };
+});
+
+vi.mock("../../../src/modules/properties/service.js", async () => {
+  const actual = await vi.importActual<typeof import("../../../src/modules/properties/service.js")>(
+    "../../../src/modules/properties/service.js"
+  );
+
+  return {
+    ...actual,
+    getPropertyDetail: propertyServiceMocks.getPropertyDetail,
   };
 });
 
@@ -99,12 +159,14 @@ async function invokeRoute({
   user,
   query = {},
   body = {},
+  tenantDb = {},
 }: {
   method: "get" | "post";
   url: string;
   user: TestUser;
   query?: Record<string, any>;
   body?: Record<string, any>;
+  tenantDb?: Record<string, any>;
 }) {
   const routePath =
     url === "/assignment-queue"
@@ -134,7 +196,7 @@ async function invokeRoute({
           ? { conversationId: url.split("/")[2] }
           : {},
     user,
-    tenantDb: {},
+    tenantDb,
     commitTransaction: vi.fn().mockResolvedValue(undefined),
     headers: {},
   };
@@ -159,6 +221,18 @@ function makeDirectorUser(overrides: Partial<TestUser> = {}): TestUser {
     role: "director",
     displayName: "Director One",
     email: "director@example.com",
+    officeId: "office-1",
+    activeOfficeId: "office-1",
+    ...overrides,
+  };
+}
+
+function makeRepUser(overrides: Partial<TestUser> = {}): TestUser {
+  return {
+    id: "rep-1",
+    role: "rep",
+    displayName: "Rep One",
+    email: "rep@example.com",
     officeId: "office-1",
     activeOfficeId: "office-1",
     ...overrides,
@@ -222,17 +296,204 @@ describe("email routes", () => {
     expect(res.body).toEqual({ success: true });
   });
 
-  it("rejects non-deal association targets before hitting the service", async () => {
+  it("routes manual lead association through the generic entity resolver", async () => {
     emailServiceMocks.getEmailById.mockResolvedValue({ id: "email-1", userId: "director-1" });
+    leadServiceMocks.getLeadById.mockResolvedValue({ id: "lead-1" });
+
+    const { req, res } = await invokeRoute({
+      method: "post",
+      url: "/email-1/associate",
+      user: makeDirectorUser(),
+      body: { assignedEntityType: "lead", assignedEntityId: "lead-1" },
+    });
+
+    expect(leadServiceMocks.getLeadById).toHaveBeenCalledWith(expect.any(Object), "lead-1", "director", "director-1");
+    expect(emailServiceMocks.associateEmailToEntity).toHaveBeenCalledWith(
+      expect.any(Object),
+      "email-1",
+      {
+        assignedEntityType: "lead",
+        assignedEntityId: "lead-1",
+        assignedDealId: null,
+      },
+      "director",
+      "director-1",
+      "office-1"
+    );
+    expect(req.commitTransaction).toHaveBeenCalled();
+    expect(res.body).toEqual({ success: true });
+  });
+
+  it("routes manual company association through the generic entity resolver", async () => {
+    emailServiceMocks.getEmailById.mockResolvedValue({ id: "email-1", userId: "director-1", contactId: null });
+    companyServiceMocks.getCompanyById.mockResolvedValue({ id: "company-1" });
+
+    const { req, res } = await invokeRoute({
+      method: "post",
+      url: "/email-1/associate",
+      user: makeDirectorUser(),
+      body: { assignedEntityType: "company", assignedEntityId: "company-1" },
+    });
+
+    expect(companyServiceMocks.getCompanyById).toHaveBeenCalledWith(expect.any(Object), "company-1");
+    expect(emailServiceMocks.associateEmailToEntity).toHaveBeenCalledWith(
+      expect.any(Object),
+      "email-1",
+      {
+        assignedEntityType: "company",
+        assignedEntityId: "company-1",
+        assignedDealId: null,
+      },
+      "director",
+      "director-1",
+      "office-1"
+    );
+    expect(req.commitTransaction).toHaveBeenCalled();
+    expect(res.body).toEqual({ success: true });
+  });
+
+  it("routes manual property association through the generic entity resolver", async () => {
+    emailServiceMocks.getEmailById.mockResolvedValue({ id: "email-1", userId: "director-1", contactId: null });
+    propertyServiceMocks.getPropertyDetail.mockResolvedValue({ id: "property-1" });
+
+    const { req, res } = await invokeRoute({
+      method: "post",
+      url: "/email-1/associate",
+      user: makeDirectorUser(),
+      body: { assignedEntityType: "property", assignedEntityId: "property-1" },
+    });
+
+    expect(propertyServiceMocks.getPropertyDetail).toHaveBeenCalledWith(expect.any(Object), "property-1");
+    expect(emailServiceMocks.associateEmailToEntity).toHaveBeenCalledWith(
+      expect.any(Object),
+      "email-1",
+      {
+        assignedEntityType: "property",
+        assignedEntityId: "property-1",
+        assignedDealId: null,
+      },
+      "director",
+      "director-1",
+      "office-1"
+    );
+    expect(req.commitTransaction).toHaveBeenCalled();
+    expect(res.body).toEqual({ success: true });
+  });
+
+  it("routes manual contact association through the generic entity resolver", async () => {
+    emailServiceMocks.getEmailById.mockResolvedValue({ id: "email-1", userId: "director-1", contactId: "contact-1" });
+    contactServiceMocks.getContactById.mockResolvedValue({ id: "contact-1" });
+
+    const { req, res } = await invokeRoute({
+      method: "post",
+      url: "/email-1/associate",
+      user: makeDirectorUser(),
+      body: { assignedEntityType: "contact", assignedEntityId: "contact-1" },
+    });
+
+    expect(contactServiceMocks.getContactById).toHaveBeenCalledWith(expect.any(Object), "contact-1");
+    expect(emailServiceMocks.associateEmailToEntity).toHaveBeenCalledWith(
+      expect.any(Object),
+      "email-1",
+      {
+        assignedEntityType: "contact",
+        assignedEntityId: "contact-1",
+        assignedDealId: null,
+      },
+      "director",
+      "director-1",
+      "office-1"
+    );
+    expect(req.commitTransaction).toHaveBeenCalled();
+    expect(res.body).toEqual({ success: true });
+  });
+
+  it("prevents reps from resolving an email to a different company", async () => {
+    emailServiceMocks.getEmailById.mockResolvedValue({ id: "email-1", userId: "rep-1", contactId: "contact-1" });
+    companyServiceMocks.getCompanyById.mockResolvedValue({ id: "company-2" });
+    const tenantDb = {
+      select: vi.fn(() => {
+        const chain: any = {
+          from: vi.fn(() => chain),
+          where: vi.fn(() => chain),
+          limit: vi.fn(() => chain),
+          then(resolve: (value: any) => void) {
+            resolve([{ companyId: "company-1" }]);
+          },
+        };
+        return chain;
+      }),
+    };
 
     await expect(
       invokeRoute({
         method: "post",
         url: "/email-1/associate",
-        user: makeDirectorUser(),
-        body: { assignedEntityType: "lead", assignedEntityId: "lead-1" },
+        user: makeRepUser(),
+        body: { assignedEntityType: "company", assignedEntityId: "company-2" },
+        tenantDb,
       })
-    ).rejects.toThrow("Only deal assignments are supported by this endpoint");
+    ).rejects.toThrow("You can only resolve this email to its contact company");
+
+    expect(emailServiceMocks.associateEmailToEntity).not.toHaveBeenCalled();
+  });
+
+  it("prevents reps from resolving an email to a contact outside the contact company", async () => {
+    emailServiceMocks.getEmailById.mockResolvedValue({ id: "email-1", userId: "rep-1", contactId: "contact-1" });
+    contactServiceMocks.getContactById.mockResolvedValue({ id: "contact-2", companyId: "company-2" });
+    const tenantDb = {
+      select: vi.fn(() => {
+        const chain: any = {
+          from: vi.fn(() => chain),
+          where: vi.fn(() => chain),
+          limit: vi.fn(() => chain),
+          then(resolve: (value: any) => void) {
+            resolve([{ companyId: "company-1" }]);
+          },
+        };
+        return chain;
+      }),
+    };
+
+    await expect(
+      invokeRoute({
+        method: "post",
+        url: "/email-1/associate",
+        user: makeRepUser(),
+        body: { assignedEntityType: "contact", assignedEntityId: "contact-2" },
+        tenantDb,
+      })
+    ).rejects.toThrow("You can only resolve this email to a contact under its contact company");
+
+    expect(emailServiceMocks.associateEmailToEntity).not.toHaveBeenCalled();
+  });
+
+  it("prevents reps from resolving an email to a property outside the contact company", async () => {
+    emailServiceMocks.getEmailById.mockResolvedValue({ id: "email-1", userId: "rep-1", contactId: "contact-1" });
+    propertyServiceMocks.getPropertyDetail.mockResolvedValue({ property: { id: "property-2", companyId: "company-2" } });
+    const tenantDb = {
+      select: vi.fn(() => {
+        const chain: any = {
+          from: vi.fn(() => chain),
+          where: vi.fn(() => chain),
+          limit: vi.fn(() => chain),
+          then(resolve: (value: any) => void) {
+            resolve([{ companyId: "company-1" }]);
+          },
+        };
+        return chain;
+      }),
+    };
+
+    await expect(
+      invokeRoute({
+        method: "post",
+        url: "/email-1/associate",
+        user: makeRepUser(),
+        body: { assignedEntityType: "property", assignedEntityId: "property-2" },
+        tenantDb,
+      })
+    ).rejects.toThrow("You can only resolve this email to a property under its contact company");
 
     expect(emailServiceMocks.associateEmailToEntity).not.toHaveBeenCalled();
   });

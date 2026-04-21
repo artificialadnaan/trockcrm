@@ -6,8 +6,11 @@ import {
   emails,
   emailThreadBindings,
   activities,
+  companies,
   contacts,
   deals,
+  leads,
+  properties,
   contactDealAssociations,
   tasks,
   userGraphTokens,
@@ -71,6 +74,13 @@ export interface EmailAssignmentQueueItem {
   candidateLeads: EmailAssignmentLeadCandidate[];
   candidateProperties: EmailAssignmentPropertyCandidate[];
   suggestedAssignment: EmailAssignmentResult;
+}
+
+export function isEmailAssignmentQueueCandidate(emailRow: {
+  direction: "inbound" | "outbound";
+  assignmentAmbiguityReason: string | null;
+}) {
+  return emailRow.direction === "inbound" && emailRow.assignmentAmbiguityReason != null;
 }
 
 type ThreadBindingRecord = typeof emailThreadBindings.$inferSelect;
@@ -160,7 +170,7 @@ export async function resolveMailboxAccountIdForCrmUser(
   return tokenRow.id;
 }
 
-async function getThreadAssignment(
+export async function getThreadAssignment(
   tenantDb: TenantDb,
   mailboxAccountId: string,
   conversationId: string | null | undefined
@@ -176,6 +186,8 @@ async function getThreadAssignment(
     };
   }
 
+  const mailboxUserId = await resolveMailboxUserId(tenantDb, mailboxAccountId);
+  const fallbackWhere = buildThreadAssignmentFallbackWhereClause(mailboxUserId, conversationId);
   const [row] = await tenantDb
     .select({
       assignedEntityType: emails.assignedEntityType,
@@ -183,15 +195,7 @@ async function getThreadAssignment(
       dealId: emails.dealId,
     })
     .from(emails)
-    .where(
-      and(
-        eq(emails.graphConversationId, conversationId),
-        or(
-          sql`${emails.assignedEntityType} IS NOT NULL`,
-          sql`${emails.dealId} IS NOT NULL`
-        )
-      )
-    )
+    .where(fallbackWhere)
     .orderBy(desc(emails.sentAt))
     .limit(1);
 
@@ -205,9 +209,14 @@ async function getThreadAssignment(
     };
   }
 
-  if (row.assignedEntityType === "company" && row.assignedEntityId) {
+  if (
+    (row.assignedEntityType === "company" ||
+      row.assignedEntityType === "property" ||
+      row.assignedEntityType === "lead") &&
+    row.assignedEntityId
+  ) {
     return {
-      assignedEntityType: "company",
+      assignedEntityType: row.assignedEntityType,
       assignedEntityId: row.assignedEntityId,
       assignedDealId: null,
     };
@@ -222,6 +231,20 @@ async function getThreadAssignment(
   }
 
   return null;
+}
+
+export function buildThreadAssignmentFallbackWhereClause(
+  mailboxUserId: string,
+  conversationId: string
+) {
+  return and(
+    eq(emails.userId, mailboxUserId),
+    eq(emails.graphConversationId, conversationId),
+    or(
+      sql`${emails.assignedEntityType} IS NOT NULL`,
+      sql`${emails.dealId} IS NOT NULL`
+    )
+  );
 }
 
 async function getEmailCandidateDeals(
@@ -616,10 +639,7 @@ export async function getEmailAssignmentQueue(
 
   const conditions: any[] = [
     eq(emails.direction, "inbound"),
-    or(
-      sql`${emails.assignmentAmbiguityReason} IS NOT NULL`,
-      sql`${emails.assignedEntityType} IS NOT NULL AND ${emails.assignedEntityType} <> 'deal' AND ${emails.dealId} IS NULL`
-    ),
+    sql`${emails.assignmentAmbiguityReason} IS NOT NULL`,
   ];
 
   if (userId && userRole === "rep") {
@@ -651,7 +671,7 @@ export async function getEmailAssignmentQueue(
   ]);
 
   const items = await Promise.all(
-    emailRows.map(async (emailRow) => {
+    emailRows.filter(isEmailAssignmentQueueCandidate).map(async (emailRow) => {
       const [contactRow] = emailRow.contactId
         ? await tenantDb
             .select({
@@ -1324,7 +1344,11 @@ async function completeInboundEmailTasks(
 export async function associateEmailToEntity(
   tenantDb: TenantDb,
   emailId: string,
-  input: { assignedEntityType: "deal"; assignedEntityId: string; assignedDealId?: string | null },
+  input: {
+    assignedEntityType: "deal" | "company" | "property" | "lead" | "contact";
+    assignedEntityId: string;
+    assignedDealId?: string | null;
+  },
   userRole: string,
   userId: string,
   officeId: string
@@ -1332,21 +1356,110 @@ export async function associateEmailToEntity(
   const email = await getEmailById(tenantDb, emailId);
   if (!email) throw new AppError(404, "Email not found");
 
-  if (input.assignedEntityType !== "deal") {
-    throw new AppError(400, "Only deal assignments are supported by this endpoint");
+  if (!["deal", "company", "property", "lead", "contact"].includes(input.assignedEntityType)) {
+    throw new AppError(400, "Unsupported assignment target");
   }
 
-  const assignedDealId = input.assignedDealId ?? input.assignedEntityId;
-  if (assignedDealId !== input.assignedEntityId) {
+  const assignedDealId = input.assignedEntityType === "deal" ? input.assignedDealId ?? input.assignedEntityId : null;
+  if (input.assignedEntityType === "deal" && assignedDealId !== input.assignedEntityId) {
     throw new AppError(400, "assignedDealId must match assignedEntityId for deal assignments");
   }
 
-  const deal = await tenantDb
-    .select({ id: deals.id })
-    .from(deals)
-    .where(eq(deals.id, input.assignedEntityId))
-    .limit(1);
-  if (deal.length === 0) throw new AppError(404, "Deal not found");
+  let assignmentLinks: {
+    sourceEntityType: "company" | "property" | "lead" | "deal" | "contact";
+    sourceEntityId: string;
+    companyId: string | null;
+    propertyId: string | null;
+    leadId: string | null;
+    dealId: string | null;
+  };
+
+  if (input.assignedEntityType === "deal") {
+    const [deal] = await tenantDb
+      .select({
+        id: deals.id,
+        companyId: deals.companyId,
+        propertyId: deals.propertyId,
+        sourceLeadId: deals.sourceLeadId,
+      })
+      .from(deals)
+      .where(eq(deals.id, input.assignedEntityId))
+      .limit(1);
+    if (!deal) throw new AppError(404, "Deal not found");
+
+    assignmentLinks = {
+      sourceEntityType: "deal",
+      sourceEntityId: input.assignedEntityId,
+      companyId: deal.companyId ?? null,
+      propertyId: deal.propertyId ?? null,
+      leadId: deal.sourceLeadId ?? null,
+      dealId: assignedDealId,
+    };
+  } else if (input.assignedEntityType === "company") {
+    const [company] = await tenantDb
+      .select({ id: companies.id })
+      .from(companies)
+      .where(eq(companies.id, input.assignedEntityId))
+      .limit(1);
+    if (!company) throw new AppError(404, "Company not found");
+
+    assignmentLinks = {
+      sourceEntityType: "company",
+      sourceEntityId: input.assignedEntityId,
+      companyId: input.assignedEntityId,
+      propertyId: null,
+      leadId: null,
+      dealId: null,
+    };
+  } else if (input.assignedEntityType === "property") {
+    const [property] = await tenantDb
+      .select({ id: properties.id, companyId: properties.companyId })
+      .from(properties)
+      .where(eq(properties.id, input.assignedEntityId))
+      .limit(1);
+    if (!property) throw new AppError(404, "Property not found");
+
+    assignmentLinks = {
+      sourceEntityType: "property",
+      sourceEntityId: input.assignedEntityId,
+      companyId: property.companyId ?? null,
+      propertyId: input.assignedEntityId,
+      leadId: null,
+      dealId: null,
+    };
+  } else if (input.assignedEntityType === "contact") {
+    const [contact] = await tenantDb
+      .select({ id: contacts.id, companyId: contacts.companyId })
+      .from(contacts)
+      .where(eq(contacts.id, input.assignedEntityId))
+      .limit(1);
+    if (!contact) throw new AppError(404, "Contact not found");
+
+    assignmentLinks = {
+      sourceEntityType: "contact",
+      sourceEntityId: input.assignedEntityId,
+      companyId: contact.companyId ?? null,
+      propertyId: null,
+      leadId: null,
+      dealId: null,
+    };
+  } else {
+    const [lead] = await tenantDb
+      .select({ id: leads.id, companyId: leads.companyId, propertyId: leads.propertyId })
+      .from(leads)
+      .where(eq(leads.id, input.assignedEntityId))
+      .limit(1);
+    if (!lead) throw new AppError(404, "Lead not found");
+
+    assignmentLinks = {
+      sourceEntityType: "lead",
+      sourceEntityId: input.assignedEntityId,
+      companyId: lead.companyId ?? null,
+      propertyId: lead.propertyId ?? null,
+      leadId: input.assignedEntityId,
+      dealId: null,
+    };
+  }
 
   await tenantDb
     .update(emails)
@@ -1359,10 +1472,37 @@ export async function associateEmailToEntity(
     })
     .where(eq(emails.id, emailId));
 
-  await tenantDb
+  const updatedActivities = await tenantDb
     .update(activities)
-    .set({ dealId: assignedDealId })
-    .where(eq(activities.emailId, emailId));
+    .set({
+      sourceEntityType: assignmentLinks.sourceEntityType,
+      sourceEntityId: assignmentLinks.sourceEntityId,
+      companyId: assignmentLinks.companyId,
+      propertyId: assignmentLinks.propertyId,
+      leadId: assignmentLinks.leadId,
+      dealId: assignmentLinks.dealId,
+    })
+    .where(eq(activities.emailId, emailId))
+    .returning({ id: activities.id });
+
+  if (updatedActivities.length === 0) {
+    await tenantDb.insert(activities).values({
+      type: "email",
+      responsibleUserId: email.userId,
+      performedByUserId: email.userId,
+      sourceEntityType: assignmentLinks.sourceEntityType,
+      sourceEntityId: assignmentLinks.sourceEntityId,
+      companyId: assignmentLinks.companyId,
+      propertyId: assignmentLinks.propertyId,
+      leadId: assignmentLinks.leadId,
+      dealId: assignmentLinks.dealId,
+      contactId: email.contactId ?? null,
+      emailId: email.id,
+      subject: email.subject ?? null,
+      body: email.bodyPreview ?? (email.bodyHtml ? stripHtml(email.bodyHtml).substring(0, 1000) : null),
+      occurredAt: email.sentAt,
+    });
+  }
 
   await completeInboundEmailTasks(tenantDb, emailId, userRole, userId, officeId);
 }
