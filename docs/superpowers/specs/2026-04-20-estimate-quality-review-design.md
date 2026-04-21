@@ -125,6 +125,8 @@ Required additions:
   - `manual`
 - local catalog source tagging for promoted custom rows
 - selected-option linkage from the parent recommendation to the chosen option or chosen manual row
+- stable source-row linkage for refresh and dedupe behavior
+- deal and section linkage for promotion into canonical estimate sections
 
 Write-path rules:
 
@@ -153,9 +155,39 @@ Parent recommendation rows should carry:
 - current review status
 - selected option id
 - selected source type
-- whether the row is promotable
-- whether the row has already been promoted
+- promotable flag
+- promoted estimate line item id, nullable until promotion
 - inference rationale summary for inferred rows
+
+Required linkage fields:
+
+- `deal_id`
+- `project_id`
+- `section_key` or equivalent section grouping field used by promotion
+- `source_document_id`, nullable for manual rows
+- `source_extraction_id`, nullable for inferred or manual rows
+- `generation_run_id`
+- `selected_option_id`, nullable until selection exists
+- `promoted_estimate_line_item_id`, nullable until promotion exists
+
+Required option-row linkage fields:
+
+- `recommendation_id`
+- `catalog_item_id`, nullable for free-text custom options
+- `local_catalog_item_id`, nullable unless sourced from local catalog
+- `rank`
+- `option_kind`:
+  - `recommended`
+  - `alternate`
+  - `manual_custom`
+
+Uniqueness and refresh rules:
+
+- one recommendation row per `generation_run_id + source_row_identity + normalized_intent`
+- one option row per `recommendation_id + rank`
+- rerunning generation creates a new generation run and a new recommendation set rather than mutating prior runs in place
+- dedupe within a single generation run uses the duplicate suppression rules in this spec
+- promotion idempotency is enforced by `promoted_estimate_line_item_id`; a row with that field set must not promote again
 
 ## Local Catalog Model
 
@@ -183,6 +215,7 @@ Client responsibilities:
 
 Minimum persisted fields for local promoted items:
 
+- office id / tenant scope
 - source label
 - normalized name
 - optional description
@@ -279,7 +312,23 @@ States for parent recommendation rows:
 - `alternate_selected`
 - `overridden`
 - `rejected`
-- `promoted`
+
+Promotion model:
+
+- `promoted` is not a separate review state
+- promotion is orthogonal and is represented by `promoted_estimate_line_item_id`
+- a row can therefore be:
+  - `accepted` and not yet promoted
+  - `accepted` and already promoted
+  - `alternate_selected` and already promoted
+  - `overridden` and already promoted
+- `rejected` rows are never promotable
+
+Promotable review states:
+
+- `accepted`
+- `alternate_selected`
+- `overridden`
 
 Allowed actions:
 
@@ -310,6 +359,38 @@ Audit behavior:
   - `accepted`
   - `alternate_selected`
   - `overridden`
+  where `promoted_estimate_line_item_id` is null
+
+## Promotion Mapping
+
+Promotion into the canonical estimate model must support both catalog-backed and manual rows.
+
+Catalog-backed row mapping:
+
+- section is resolved from the recommendation row section key
+- description comes from the selected option label or catalog item name
+- quantity, unit, unit price, and total come from the selected or overridden values
+- notes include rationale and optionally selected catalog/source references
+
+Manual estimate-only row mapping:
+
+- section is resolved from the recommendation row section key
+- description comes from the manual row label
+- quantity, unit, unit price, and total come from the estimator-entered manual values
+- no catalog id is required
+- notes should preserve that the row originated as `estimate_only`
+
+Manual promoted-local-catalog row mapping:
+
+- same canonical estimate mapping as manual estimate-only rows
+- selected option or row also links to the new local catalog item id for future reuse
+
+Promotion completion behavior:
+
+- create the canonical estimate line item
+- write its id to `promoted_estimate_line_item_id`
+- emit a promotion review event
+- repeated promotion attempts for the same recommendation row must no-op if `promoted_estimate_line_item_id` is already set
 
 ## Manual Add and Catalog Promotion
 
