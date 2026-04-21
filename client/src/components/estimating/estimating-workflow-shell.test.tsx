@@ -141,7 +141,7 @@ describe("EstimatingWorkflowShell", () => {
     expect(html).toContain("Promote to estimate");
     expect(html).toContain("Disabled");
     expect(html).toContain("Needs review");
-    expect(html).toContain("Add manual estimate row");
-    expect(html).toContain("Free-text manual row");
+    expect(html).toContain("Search catalog options");
+    expect(html).toContain("Use free-text/manual row instead");
   });
 });

@@ -25,6 +25,13 @@ export interface EstimateManualRowDialogProps {
   onOpenChange: (open: boolean) => void;
   onSubmitted?: () => Promise<void> | void;
   initialValues?: Partial<ManualRowDraft>;
+  catalogOptions?: Array<{
+    id: string;
+    optionLabel: string;
+    optionKind?: string | null;
+    rank?: number | null;
+    rationale?: string | null;
+  }>;
 }
 
 const DEFAULT_DRAFT: ManualRowDraft = {
@@ -47,6 +54,10 @@ function normalizeManualRowDraft(draft: Partial<ManualRowDraft> | undefined): Ma
     selectedSourceType: draft?.selectedSourceType ?? DEFAULT_DRAFT.selectedSourceType,
     selectedOptionId: draft?.selectedOptionId ?? DEFAULT_DRAFT.selectedOptionId,
   };
+}
+
+function normalizeSearch(value: string) {
+  return value.trim().toLowerCase();
 }
 
 export async function runEstimateManualRowCreateAction({
@@ -84,15 +95,47 @@ export function EstimateManualRowDialog({
   onOpenChange,
   onSubmitted,
   initialValues,
+  catalogOptions = [],
 }: EstimateManualRowDialogProps) {
   const [draft, setDraft] = useState<ManualRowDraft>(() => normalizeManualRowDraft(initialValues));
   const [isSaving, setIsSaving] = useState(false);
+  const [mode, setMode] = useState<"catalog" | "manual">("catalog");
+  const [catalogQuery, setCatalogQuery] = useState("");
+  const [selectedCatalogOptionId, setSelectedCatalogOptionId] = useState<string | null>(
+    initialValues?.selectedOptionId ?? null
+  );
 
   useEffect(() => {
     if (open) {
       setDraft(normalizeManualRowDraft(initialValues));
+      setMode(initialValues?.selectedSourceType === "manual" ? "manual" : "catalog");
+      setCatalogQuery("");
+      setSelectedCatalogOptionId(initialValues?.selectedOptionId ?? null);
     }
   }, [initialValues, open]);
+
+  const filteredCatalogOptions = catalogOptions.filter((option) => {
+    const query = normalizeSearch(catalogQuery);
+    if (!query) return true;
+    return (
+      normalizeSearch(option.optionLabel).includes(query) ||
+      normalizeSearch(option.rationale ?? "").includes(query)
+    );
+  });
+
+  const selectedCatalogOption =
+    catalogOptions.find((option) => option.id === selectedCatalogOptionId) ?? null;
+
+  const useCatalogOption = (option: (typeof catalogOptions)[number]) => {
+    setMode("catalog");
+    setSelectedCatalogOptionId(option.id);
+    setDraft((current) => ({
+      ...current,
+      label: option.optionLabel,
+      selectedSourceType: "catalog_option",
+      selectedOptionId: option.id,
+    }));
+  };
 
   const handleSubmit = async () => {
     setIsSaving(true);
@@ -121,102 +164,138 @@ export function EstimateManualRowDialog({
         <DialogHeader>
           <DialogTitle>Add manual estimate row</DialogTitle>
           <DialogDescription>
-            Start from a free-text row or attach a catalog option when the row already exists in the local catalog.
+            Search catalog options first, or switch to free-text/manual entry when the item is not in catalog.
           </DialogDescription>
         </DialogHeader>
 
         <div className="grid gap-4 py-1">
-          <div className="grid gap-2">
-            <Label htmlFor="manual-row-label">Label</Label>
-            <Input
-              id="manual-row-label"
-              value={draft.label}
-              onChange={(event) =>
-                setDraft((current) => ({ ...current, label: event.target.value }))
-              }
-              placeholder="Walk-in door kit"
-            />
-          </div>
+          {mode === "catalog" ? (
+            <div className="grid gap-3 rounded-lg border bg-muted/20 p-3">
+              <div className="grid gap-2">
+                <Label htmlFor="manual-row-search">Search catalog options</Label>
+                <Input
+                  id="manual-row-search"
+                  value={catalogQuery}
+                  onChange={(event) => setCatalogQuery(event.target.value)}
+                  placeholder="Search by label or note"
+                />
+              </div>
 
-          <div className="grid gap-3 sm:grid-cols-3">
-            <div className="grid gap-2">
-              <Label htmlFor="manual-row-quantity">Quantity</Label>
-              <Input
-                id="manual-row-quantity"
-                value={draft.quantity}
-                onChange={(event) =>
-                  setDraft((current) => ({ ...current, quantity: event.target.value }))
-                }
-                placeholder="2"
-              />
-            </div>
-            <div className="grid gap-2">
-              <Label htmlFor="manual-row-unit">Unit</Label>
-              <Input
-                id="manual-row-unit"
-                value={draft.unit}
-                onChange={(event) =>
-                  setDraft((current) => ({ ...current, unit: event.target.value }))
-                }
-                placeholder="ea"
-              />
-            </div>
-            <div className="grid gap-2">
-              <Label htmlFor="manual-row-unit-price">Unit price</Label>
-              <Input
-                id="manual-row-unit-price"
-                value={draft.unitPrice}
-                onChange={(event) =>
-                  setDraft((current) => ({ ...current, unitPrice: event.target.value }))
-                }
-                placeholder="125.00"
-              />
-            </div>
-          </div>
+              <div className="space-y-2">
+                {filteredCatalogOptions.length > 0 ? (
+                  filteredCatalogOptions.map((option) => (
+                    <button
+                      key={option.id}
+                      type="button"
+                      className={`w-full rounded-lg border px-3 py-2 text-left text-sm transition-colors ${
+                        selectedCatalogOptionId === option.id
+                          ? "border-primary bg-primary/5"
+                          : "border-border bg-background hover:bg-muted"
+                      }`}
+                      onClick={() => useCatalogOption(option)}
+                    >
+                      <div className="font-medium">{option.optionLabel}</div>
+                      <div className="text-xs text-muted-foreground">
+                        {option.rationale || "Catalog option"}
+                      </div>
+                    </button>
+                  ))
+                ) : (
+                  <div className="text-sm text-muted-foreground">
+                    No catalog options match this search.
+                  </div>
+                )}
+              </div>
 
-          <div className="grid gap-2">
-            <Label htmlFor="manual-row-source-type">Source type</Label>
-            <select
-              id="manual-row-source-type"
-              className="h-8 rounded-lg border border-input bg-transparent px-2.5 text-sm outline-none"
-              value={draft.selectedSourceType}
-              onChange={(event) =>
-                setDraft((current) => ({
-                  ...current,
-                  selectedSourceType: event.target.value as ManualRowSelectionMode,
-                }))
-              }
-            >
-              <option value="manual">Free-text manual row</option>
-              <option value="catalog_option">Catalog option</option>
-            </select>
-          </div>
+              <Button
+                variant="ghost"
+                className="justify-start px-0"
+                onClick={() => setMode("manual")}
+              >
+                Use free-text/manual row instead
+              </Button>
 
-          {draft.selectedSourceType === "catalog_option" ? (
-            <div className="grid gap-2">
-              <Label htmlFor="manual-row-option-id">Catalog option id</Label>
-              <Input
-                id="manual-row-option-id"
-                value={draft.selectedOptionId}
-                onChange={(event) =>
-                  setDraft((current) => ({ ...current, selectedOptionId: event.target.value }))
-                }
-                placeholder="option-123"
-              />
+              {selectedCatalogOption ? (
+                <div className="text-xs text-muted-foreground">
+                  Selected catalog option: {selectedCatalogOption.optionLabel}
+                </div>
+              ) : null}
             </div>
-          ) : null}
+          ) : (
+            <div className="grid gap-3 rounded-lg border bg-muted/20 p-3">
+              <div className="flex items-center justify-between gap-2">
+                <div>
+                  <div className="text-sm font-medium">Free-text manual row</div>
+                  <div className="text-xs text-muted-foreground">
+                    Add a custom scope item when no catalog option applies.
+                  </div>
+                </div>
+                <Button variant="ghost" size="xs" onClick={() => setMode("catalog")}>
+                  Search catalog options
+                </Button>
+              </div>
 
-          <div className="grid gap-2">
-            <Label htmlFor="manual-row-notes">Notes</Label>
-            <Textarea
-              id="manual-row-notes"
-              value={draft.notes}
-              onChange={(event) =>
-                setDraft((current) => ({ ...current, notes: event.target.value }))
-              }
-              placeholder="Optional estimator notes"
-            />
-          </div>
+              <div className="grid gap-2">
+                <Label htmlFor="manual-row-label">Label</Label>
+                <Input
+                  id="manual-row-label"
+                  value={draft.label}
+                  onChange={(event) =>
+                    setDraft((current) => ({ ...current, label: event.target.value }))
+                  }
+                  placeholder="Walk-in door kit"
+                />
+              </div>
+
+              <div className="grid gap-3 sm:grid-cols-3">
+                <div className="grid gap-2">
+                  <Label htmlFor="manual-row-quantity">Quantity</Label>
+                  <Input
+                    id="manual-row-quantity"
+                    value={draft.quantity}
+                    onChange={(event) =>
+                      setDraft((current) => ({ ...current, quantity: event.target.value }))
+                    }
+                    placeholder="2"
+                  />
+                </div>
+                <div className="grid gap-2">
+                  <Label htmlFor="manual-row-unit">Unit</Label>
+                  <Input
+                    id="manual-row-unit"
+                    value={draft.unit}
+                    onChange={(event) =>
+                      setDraft((current) => ({ ...current, unit: event.target.value }))
+                    }
+                    placeholder="ea"
+                  />
+                </div>
+                <div className="grid gap-2">
+                  <Label htmlFor="manual-row-unit-price">Unit price</Label>
+                  <Input
+                    id="manual-row-unit-price"
+                    value={draft.unitPrice}
+                    onChange={(event) =>
+                      setDraft((current) => ({ ...current, unitPrice: event.target.value }))
+                    }
+                    placeholder="125.00"
+                  />
+                </div>
+              </div>
+
+              <div className="grid gap-2">
+                <Label htmlFor="manual-row-notes">Notes</Label>
+                <Textarea
+                  id="manual-row-notes"
+                  value={draft.notes}
+                  onChange={(event) =>
+                    setDraft((current) => ({ ...current, notes: event.target.value }))
+                  }
+                  placeholder="Optional estimator notes"
+                />
+              </div>
+            </div>
+          )}
         </div>
 
         <DialogFooter>

@@ -41,12 +41,10 @@ describe("EstimatePricingReviewTable", () => {
         priceBasis: "catalog option",
         confidence: "0.81",
         createdByRunId: "run-7",
-        selectedSourceType: "catalog_option",
-        selectedOptionId: "option-rec",
+        selectedSourceType: "manual",
         duplicateGroupBlocked: true,
         duplicateGroupKey: "Roofing::tpo membrane",
-        catalogBacking: "local_catalog",
-        sourceType: "inferred",
+        catalogBacking: "estimate_only",
         recommendationOptions: [
           {
             id: "option-rec",
@@ -73,9 +71,7 @@ describe("EstimatePricingReviewTable", () => {
     expect(html).toContain("$355.25");
     expect(html).toContain("$4,263.00");
     expect(html).toContain("catalog option");
-    expect(html).toContain("Inferred");
     expect(html).toContain("Duplicate blocked");
-    expect(html).toContain("Local catalog");
     expect(html).toContain("Alternates");
     expect(html).toContain("Recommended TPO membrane");
     expect(html).toContain("Accept recommended");
@@ -84,6 +80,27 @@ describe("EstimatePricingReviewTable", () => {
     expect(html).toContain("Reject");
     expect(html).toContain("Pending review");
     expect(html).toContain("Promote to local catalog");
+  });
+
+  it("does not expose local-catalog promotion for catalog-backed rows", () => {
+    const html = renderTable([
+      {
+        id: "price-2",
+        status: "pending_review",
+        recommendedQuantity: "12",
+        recommendedUnit: "sq",
+        recommendedUnitPrice: "355.25",
+        recommendedTotalPrice: "4263.00",
+        priceBasis: "catalog option",
+        confidence: "0.81",
+        createdByRunId: "run-7",
+        selectedSourceType: "catalog_option",
+        duplicateGroupBlocked: false,
+        catalogBacking: "local_catalog",
+      },
+    ]);
+
+    expect(html).not.toContain("Promote to local catalog");
   });
 
   it("posts pricing review actions then refreshes", async () => {

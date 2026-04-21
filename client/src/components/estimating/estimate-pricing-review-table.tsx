@@ -96,6 +96,15 @@ function formatOptionRank(option: PricingRecommendationOption, fallbackIndex: nu
   return `Rank ${option.rank ?? fallbackIndex + 1}`;
 }
 
+function isFreeTextManualRow(row: PricingReviewRow) {
+  return (
+    row.selectedSourceType === "manual" &&
+    !row.selectedOptionId &&
+    row.catalogBacking !== "local_catalog" &&
+    !row.promotedLocalCatalogItemId
+  );
+}
+
 export async function runEstimatePricingReviewAction({
   action,
   dealId,
@@ -470,10 +479,7 @@ export function EstimatePricingReviewTable({
                               Switch {option.optionLabel}
                             </Button>
                           ))}
-                          {(row.catalogBacking === "local_catalog" ||
-                            row.promotedLocalCatalogItemId ||
-                            row.selectedSourceType === "catalog_option") &&
-                          onPromoteLocalCatalog ? (
+                          {isFreeTextManualRow(row) && onPromoteLocalCatalog ? (
                             <Button
                               size="xs"
                               variant="outline"

@@ -281,6 +281,7 @@ export function EstimatingWorkflowShell({
         open={manualAddOpen}
         onOpenChange={setManualAddOpen}
         onSubmitted={onRefresh}
+        catalogOptions={selectedPricingRow?.recommendationOptions ?? []}
       />
     </div>
   );

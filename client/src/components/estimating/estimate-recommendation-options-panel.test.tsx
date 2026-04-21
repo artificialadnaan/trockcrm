@@ -87,9 +87,36 @@ describe("EstimateRecommendationOptionsPanel", () => {
     expect(html).toContain("Rank 1");
     expect(html).toContain("Duplicate blocked");
     expect(html).toContain("Local catalog");
-    expect(html).toContain("Promote to local catalog");
+    expect(html).not.toContain("Promote to local catalog");
     expect(html).toContain("Evidence");
     expect(html).toContain("Best match for the selected extraction");
+  });
+
+  it("shows local-catalog promotion for free-text manual rows", () => {
+    const html = renderToStaticMarkup(
+      <EstimateRecommendationOptionsPanel
+        dealId="deal-1"
+        recommendation={{
+          id: "price-manual",
+          sectionName: "Roofing",
+          normalizedIntent: "custom flashing",
+          selectedSourceType: "manual",
+          catalogBacking: "estimate_only",
+          recommendationOptions: [
+            {
+              id: "option-rec",
+              optionKind: "recommended",
+              optionLabel: "Manual flashing",
+              rank: 1,
+            },
+          ],
+        }}
+        onReviewAction={vi.fn()}
+        onPromoteLocalCatalog={vi.fn()}
+      />
+    );
+
+    expect(html).toContain("Promote to local catalog");
   });
 
   it("renders the manual add dialog with catalog-first and free-text controls", () => {
@@ -106,15 +133,18 @@ describe("EstimateRecommendationOptionsPanel", () => {
           unitPrice: "125.00",
           notes: "Estimator note",
         }}
+        catalogOptions={[
+          { id: "cat-1", optionLabel: "Walk-in door kit", optionKind: "recommended", rank: 1 },
+          { id: "cat-2", optionLabel: "Door hardware", optionKind: "alternate", rank: 2 },
+        ]}
       />
     );
 
     expect(html).toContain("Add manual estimate row");
-    expect(html).toContain("Free-text manual row");
-    expect(html).toContain("Catalog option");
+    expect(html).toContain("Search catalog options");
+    expect(html).toContain("Use free-text/manual row instead");
     expect(html).toContain("Walk-in door kit");
-    expect(html).toContain("Estimator note");
-    expect(html).toContain("Add row");
+    expect(html).toContain("Door hardware");
   });
 
   it("posts review-state actions through the workbench helper", async () => {

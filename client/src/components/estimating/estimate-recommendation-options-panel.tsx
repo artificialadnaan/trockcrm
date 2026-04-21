@@ -70,6 +70,15 @@ function getRankLabel(option: RecommendationOption, index: number) {
   return `Rank ${index + 1}`;
 }
 
+function isFreeTextManualRow(recommendation: EstimateRecommendationRow) {
+  return (
+    recommendation.selectedSourceType === "manual" &&
+    !recommendation.selectedOptionId &&
+    recommendation.catalogBacking !== "local_catalog" &&
+    !recommendation.promotedLocalCatalogItemId
+  );
+}
+
 export async function runEstimatePromoteLocalCatalogAction({
   dealId,
   recommendationId,
@@ -251,13 +260,11 @@ export function EstimateRecommendationOptionsPanel({
         </div>
 
         <div className="flex flex-wrap gap-2">
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => onPromoteLocalCatalog(recommendation.id)}
-          >
-            Promote to local catalog
-          </Button>
+          {isFreeTextManualRow(recommendation) ? (
+            <Button size="sm" variant="outline" onClick={() => onPromoteLocalCatalog(recommendation.id)}>
+              Promote to local catalog
+            </Button>
+          ) : null}
         </div>
       </div>
     </section>
