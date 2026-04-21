@@ -1,6 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
 import {
   EstimatePricingReviewTable,
   runEstimatePricingReviewAction,
@@ -16,14 +15,7 @@ vi.mock("@/lib/api", () => ({
 
 function renderTable(rows: any[], onRefresh = vi.fn().mockResolvedValue(undefined)) {
   return renderToStaticMarkup(
-    <MemoryRouter initialEntries={["/deals/deal-1/estimates"]}>
-      <Routes>
-        <Route
-          path="/deals/:dealId/estimates"
-          element={<EstimatePricingReviewTable rows={rows} onRefresh={onRefresh} />}
-        />
-      </Routes>
-    </MemoryRouter>
+    <EstimatePricingReviewTable dealId="deal-1" rows={rows} onRefresh={onRefresh} />
   );
 }
 
@@ -32,28 +24,60 @@ describe("EstimatePricingReviewTable", () => {
     mocks.apiMock.mockReset();
   });
 
-  it("renders pricing review rows with recommendation detail and actions", () => {
+  it("renders ranked pricing recommendation detail, duplicate blockers, and row actions", () => {
     const html = renderTable([
       {
         id: "price-1",
-        status: "pending",
+        status: "pending_review",
         recommendedQuantity: "12",
         recommendedUnit: "sq",
         recommendedUnitPrice: "355.25",
         recommendedTotalPrice: "4263.00",
-        priceBasis: "catalog",
+        priceBasis: "catalog option",
         confidence: "0.81",
         createdByRunId: "run-7",
+        selectedSourceType: "catalog_option",
+        selectedOptionId: "option-rec",
+        duplicateGroupBlocked: true,
+        duplicateGroupKey: "Roofing::tpo membrane",
+        catalogBacking: "local_catalog",
+        sourceType: "inferred",
+        recommendationOptions: [
+          {
+            id: "option-rec",
+            optionKind: "recommended",
+            optionLabel: "Recommended TPO membrane",
+            rank: 1,
+            rationale: "Best match for the selected extraction.",
+          },
+          {
+            id: "option-alt-1",
+            optionKind: "alternate",
+            optionLabel: "Alternate TPO membrane",
+            rank: 2,
+            rationale: "Good fallback if the recommended stock is unavailable.",
+          },
+        ],
       },
     ]);
 
     expect(html).toContain("Draft Pricing");
+    expect(html).toContain("Recommended");
+    expect(html).toContain("Default");
     expect(html).toContain("12 sq");
     expect(html).toContain("$355.25");
     expect(html).toContain("$4,263.00");
-    expect(html).toContain("catalog");
-    expect(html).toContain("Approve");
+    expect(html).toContain("catalog option");
+    expect(html).toContain("Inferred");
+    expect(html).toContain("Duplicate blocked");
+    expect(html).toContain("Local catalog");
+    expect(html).toContain("Alternates");
+    expect(html).toContain("Recommended TPO membrane");
+    expect(html).toContain("Accept recommended");
+    expect(html).toContain("Accept manual row");
+    expect(html).toContain("Override");
     expect(html).toContain("Reject");
+    expect(html).toContain("Pending review");
   });
 
   it("posts pricing review actions then refreshes", async () => {

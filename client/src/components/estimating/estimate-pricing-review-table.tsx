@@ -1,14 +1,32 @@
-import { useState } from "react";
-import { useParams } from "react-router-dom";
+import { useState, type ReactNode } from "react";
 import { toast } from "sonner";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
 
 type PricingReviewAction = "approve" | "reject";
 
-interface PricingReviewRow {
+export type PricingReviewStateAction =
+  | "accept_recommended"
+  | "accept_manual_row"
+  | "switch_to_alternate"
+  | "override"
+  | "reject"
+  | "pending_review";
+
+export interface PricingRecommendationOption {
+  id: string;
+  optionKind: "recommended" | "alternate" | "manual";
+  optionLabel: string;
+  rank?: number | null;
+  rationale?: string | null;
+  evidenceText?: string | null;
+}
+
+export interface PricingReviewRow {
   id: string;
   status?: string | null;
+  reviewState?: string | null;
   recommendedQuantity?: string | number | null;
   recommendedUnit?: string | null;
   recommendedUnitPrice?: string | number | null;
@@ -16,8 +34,25 @@ interface PricingReviewRow {
   priceBasis?: string | null;
   confidence?: string | number | null;
   createdByRunId?: string | null;
+  selectedSourceType?: string | null;
+  selectedOptionId?: string | null;
+  duplicateGroupKey?: string | null;
+  duplicateGroupBlocked?: boolean | null;
+  suppressedByDuplicateGroup?: boolean | null;
+  catalogBacking?: string | null;
+  promotedLocalCatalogItemId?: string | null;
+  sourceType?: string | null;
   assumptionsJson?: unknown;
   evidenceJson?: unknown;
+  recommendationOptions?: PricingRecommendationOption[];
+}
+
+export interface PricingReviewStateActionInput {
+  action: PricingReviewStateAction;
+  alternateOptionId?: string | null;
+  recommendedUnitPrice?: string;
+  recommendedTotalPrice?: string;
+  reason?: string | null;
 }
 
 function formatCurrency(value: string | number | null | undefined) {
@@ -57,6 +92,10 @@ function summarizeUnknown(value: unknown) {
   }
 }
 
+function formatOptionRank(option: PricingRecommendationOption, fallbackIndex: number) {
+  return `Rank ${option.rank ?? fallbackIndex + 1}`;
+}
+
 export async function runEstimatePricingReviewAction({
   action,
   dealId,
@@ -75,55 +114,176 @@ export async function runEstimatePricingReviewAction({
   await refresh();
 }
 
+export async function runEstimatePricingReviewStateAction({
+  dealId,
+  recommendationId,
+  input,
+  refresh,
+}: {
+  dealId: string;
+  recommendationId: string;
+  input: PricingReviewStateActionInput;
+  refresh: () => Promise<void>;
+}) {
+  const json: Record<string, unknown> = {
+    action: input.action,
+  };
+
+  if (input.alternateOptionId?.trim()) {
+    json.alternateOptionId = input.alternateOptionId;
+  }
+  if (typeof input.recommendedUnitPrice !== "undefined") {
+    json.recommendedUnitPrice = input.recommendedUnitPrice;
+  }
+  if (typeof input.recommendedTotalPrice !== "undefined") {
+    json.recommendedTotalPrice = input.recommendedTotalPrice;
+  }
+  if (typeof input.reason !== "undefined") {
+    json.reason = input.reason;
+  }
+
+  await api(`/deals/${dealId}/estimating/pricing-recommendations/${recommendationId}/review-state`, {
+    method: "POST",
+    json,
+  });
+  await refresh();
+}
+
+export async function runEstimatePromoteToEstimateAction({
+  dealId,
+  generationRunId,
+  refresh,
+}: {
+  dealId: string;
+  generationRunId: string;
+  refresh: () => Promise<void>;
+}) {
+  await api(`/deals/${dealId}/estimating/promote`, {
+    method: "POST",
+    json: {
+      generationRunId,
+    },
+  });
+  await refresh();
+}
+
 export function EstimatePricingReviewTable({
+  dealId,
   rows,
   onRefresh,
+  onReviewAction,
+  onFocusRow,
+  onOpenManualAdd,
+  onPromoteToEstimate,
 }: {
+  dealId: string;
   rows: PricingReviewRow[];
   onRefresh: () => Promise<void>;
+  onReviewAction?: (args: { row: PricingReviewRow; input: PricingReviewStateActionInput }) => Promise<void> | void;
+  onFocusRow?: (rowId: string) => void;
+  onOpenManualAdd?: () => void;
+  onPromoteToEstimate?: () => void;
 }) {
-  const { dealId } = useParams<{ dealId: string }>();
   const [selectedRowId, setSelectedRowId] = useState<string | null>(rows[0]?.id ?? null);
   const [pendingAction, setPendingAction] = useState<string | null>(null);
 
-  const selectedRow =
-    rows.find((row) => row.id === selectedRowId) ?? rows[0] ?? null;
+  void onOpenManualAdd;
+  void onPromoteToEstimate;
 
-  const handleAction = async (row: PricingReviewRow, action: PricingReviewAction) => {
-    if (!dealId) {
-      toast.error("Missing deal id for pricing review");
-      return;
-    }
+  const selectedRow = rows.find((row) => row.id === selectedRowId) ?? rows[0] ?? null;
 
-    setPendingAction(`${row.id}:${action}`);
+  const handleFocusRow = (rowId: string) => {
+    setSelectedRowId(rowId);
+    onFocusRow?.(rowId);
+  };
+
+  const handleReviewAction = async (row: PricingReviewRow, input: PricingReviewStateActionInput) => {
+    setPendingAction(`${row.id}:${input.action}`);
     try {
-      await runEstimatePricingReviewAction({
-        action,
-        dealId,
-        recommendationId: row.id,
-        refresh: onRefresh,
-      });
-      toast.success(
-        action === "approve"
-          ? "Pricing recommendation approved"
-          : "Pricing recommendation rejected"
-      );
+      if (onReviewAction) {
+        await onReviewAction({ row, input });
+      } else {
+        await runEstimatePricingReviewStateAction({
+          dealId,
+          recommendationId: row.id,
+          input,
+          refresh: onRefresh,
+        });
+      }
+
+      toast.success("Pricing recommendation updated");
     } catch (err: unknown) {
-      toast.error(
-        err instanceof Error ? err.message : "Failed to update pricing recommendation"
-      );
+      toast.error(err instanceof Error ? err.message : "Failed to update pricing recommendation");
     } finally {
       setPendingAction(null);
     }
   };
 
+  const renderBadges = (row: PricingReviewRow) => {
+    const badges: ReactNode[] = [];
+
+    const options = row.recommendationOptions ?? [];
+    const recommendedOption = options.find((option) => option.optionKind === "recommended");
+    const selectedOption = options.find((option) => option.id === row.selectedOptionId);
+
+    if (recommendedOption || row.selectedSourceType === "catalog_option") {
+      badges.push(<Badge key="recommended">Recommended</Badge>);
+      badges.push(
+        <Badge key="default" variant="outline">
+          Default
+        </Badge>
+      );
+    }
+
+    if (row.sourceType === "inferred") {
+      badges.push(
+        <Badge key="inferred" variant="outline">
+          Inferred
+        </Badge>
+      );
+    }
+
+    if (row.duplicateGroupBlocked) {
+      badges.push(
+        <Badge key="duplicate" variant="destructive">
+          Duplicate blocked
+        </Badge>
+      );
+    }
+
+    if (row.catalogBacking === "local_catalog" || row.promotedLocalCatalogItemId) {
+      badges.push(
+        <Badge key="local-catalog" variant="secondary">
+          Local catalog
+        </Badge>
+      );
+    }
+
+    if (selectedOption) {
+      badges.push(
+        <Badge key="selected-option" variant="outline">
+          {selectedOption.optionLabel}
+        </Badge>
+      );
+    }
+
+    return badges;
+  };
+
   return (
     <section className="flex h-full flex-col">
       <div className="border-b px-4 py-3">
-        <h3 className="text-sm font-semibold">Draft Pricing</h3>
-        <p className="text-xs text-muted-foreground">
-          Review recommendation math before anything is promoted into the estimate.
-        </p>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-semibold">Draft Pricing</h3>
+            <p className="text-xs text-muted-foreground">
+              Review recommendation math before anything is promoted into the estimate.
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">
+            {rows.length} recommendations
+          </div>
+        </div>
       </div>
 
       {rows.length === 0 ? (
@@ -133,10 +293,8 @@ export function EstimatePricingReviewTable({
       ) : (
         <>
           <div className="border-b bg-muted/20 px-4 py-2 text-xs text-muted-foreground">
-            {rows.length} pricing recommendations. Selected:{" "}
-            <span className="font-medium text-foreground">
-              {selectedRow?.id || "None"}
-            </span>
+            Selected:{" "}
+            <span className="font-medium text-foreground">{selectedRow?.id || "None"}</span>
           </div>
 
           <div className="overflow-x-auto">
@@ -144,6 +302,7 @@ export function EstimatePricingReviewTable({
               <thead className="border-b bg-muted/30 text-left text-[11px] uppercase tracking-wide text-muted-foreground">
                 <tr>
                   <th className="px-3 py-2 font-medium">Row</th>
+                  <th className="px-3 py-2 font-medium">Recommendation</th>
                   <th className="px-3 py-2 font-medium">Quantity</th>
                   <th className="px-3 py-2 font-medium">Unit Price</th>
                   <th className="px-3 py-2 font-medium">Total</th>
@@ -154,8 +313,11 @@ export function EstimatePricingReviewTable({
               <tbody>
                 {rows.map((row) => {
                   const isSelected = row.id === selectedRow?.id;
-                  const approveBusy = pendingAction === `${row.id}:approve`;
+                  const approveBusy = pendingAction === `${row.id}:accept_recommended`;
                   const rejectBusy = pendingAction === `${row.id}:reject`;
+                  const overrideBusy = pendingAction === `${row.id}:override`;
+                  const options = row.recommendationOptions ?? [];
+                  const alternates = options.filter((option) => option.optionKind === "alternate");
 
                   return (
                     <tr
@@ -167,7 +329,7 @@ export function EstimatePricingReviewTable({
                           <Button
                             size="xs"
                             variant={isSelected ? "secondary" : "ghost"}
-                            onClick={() => setSelectedRowId(row.id)}
+                            onClick={() => handleFocusRow(row.id)}
                           >
                             {isSelected ? "Selected" : "Focus"}
                           </Button>
@@ -176,6 +338,35 @@ export function EstimatePricingReviewTable({
                         <div className="text-xs text-muted-foreground">
                           Run {row.createdByRunId || "manual"}
                         </div>
+                        <div className="mt-2 flex flex-wrap gap-1">{renderBadges(row)}</div>
+                      </td>
+                      <td className="px-3 py-2">
+                        <div className="font-medium">
+                          {options.find((option) => option.optionKind === "recommended")?.optionLabel ||
+                            selectedRow?.id ||
+                            "No recommendation"}
+                        </div>
+                        {alternates.length > 0 ? (
+                          <div className="mt-2">
+                            <div className="text-xs uppercase tracking-wide text-muted-foreground">
+                              Alternates
+                            </div>
+                            <div className="mt-1 grid gap-1">
+                              {alternates.map((option, index) => (
+                                <div
+                                  key={option.id}
+                                  className="rounded-md border bg-background px-2 py-1 text-xs text-muted-foreground"
+                                >
+                                  <div className="flex flex-wrap items-center gap-2">
+                                    <span className="font-medium text-foreground">{option.optionLabel}</span>
+                                    <Badge variant="outline">{formatOptionRank(option, index)}</Badge>
+                                  </div>
+                                  <div className="mt-1">{option.rationale || "No rationale provided."}</div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        ) : null}
                       </td>
                       <td className="px-3 py-2">
                         <div className="font-medium">
@@ -192,27 +383,90 @@ export function EstimatePricingReviewTable({
                       <td className="px-3 py-2">
                         <div className="capitalize">{row.priceBasis || "unknown"}</div>
                         <div className="text-xs text-muted-foreground capitalize">
-                          {formatStatus(row.status)}
+                          {formatStatus(row.reviewState || row.status)}
                         </div>
                       </td>
                       <td className="px-3 py-2 text-right">
-                        <div className="flex justify-end gap-2">
+                        <div className="flex flex-wrap justify-end gap-2">
                           <Button
                             size="xs"
                             variant="outline"
-                            disabled={approveBusy || rejectBusy || !dealId}
-                            onClick={() => handleAction(row, "approve")}
+                            disabled={approveBusy || rejectBusy || overrideBusy}
+                            onClick={() =>
+                              handleReviewAction(row, {
+                                action: "accept_recommended",
+                              })
+                            }
                           >
-                            {approveBusy ? "Approving..." : "Approve"}
+                            {approveBusy ? "Approving..." : "Accept recommended"}
+                          </Button>
+                          <Button
+                            size="xs"
+                            variant="outline"
+                            disabled={approveBusy || rejectBusy || overrideBusy}
+                            onClick={() =>
+                              handleReviewAction(row, {
+                                action: "accept_manual_row",
+                              })
+                            }
+                          >
+                            Accept manual row
+                          </Button>
+                          <Button
+                            size="xs"
+                            variant="ghost"
+                            disabled={approveBusy || rejectBusy || overrideBusy}
+                            onClick={() =>
+                              handleReviewAction(row, {
+                                action: "pending_review",
+                              })
+                            }
+                          >
+                            Pending review
+                          </Button>
+                          <Button
+                            size="xs"
+                            variant="outline"
+                            disabled={approveBusy || rejectBusy || overrideBusy}
+                            onClick={() =>
+                              handleReviewAction(row, {
+                                action: "override",
+                                recommendedUnitPrice: `${row.recommendedUnitPrice ?? ""}`,
+                                recommendedTotalPrice: `${row.recommendedTotalPrice ?? ""}`,
+                                reason: "Override from workbench",
+                              })
+                            }
+                          >
+                            {overrideBusy ? "Overriding..." : "Override"}
                           </Button>
                           <Button
                             size="xs"
                             variant="destructive"
-                            disabled={approveBusy || rejectBusy || !dealId}
-                            onClick={() => handleAction(row, "reject")}
+                            disabled={approveBusy || rejectBusy || overrideBusy}
+                            onClick={() =>
+                              handleReviewAction(row, {
+                                action: "reject",
+                              })
+                            }
                           >
                             {rejectBusy ? "Rejecting..." : "Reject"}
                           </Button>
+                          {alternates.map((option) => (
+                            <Button
+                              key={option.id}
+                              size="xs"
+                              variant="secondary"
+                              disabled={approveBusy || rejectBusy || overrideBusy}
+                              onClick={() =>
+                                handleReviewAction(row, {
+                                  action: "switch_to_alternate",
+                                  alternateOptionId: option.id,
+                                })
+                              }
+                            >
+                              Switch {option.optionLabel}
+                            </Button>
+                          ))}
                         </div>
                       </td>
                     </tr>

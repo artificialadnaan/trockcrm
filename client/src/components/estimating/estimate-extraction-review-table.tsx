@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useParams } from "react-router-dom";
 import { toast } from "sonner";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
 
@@ -55,6 +56,14 @@ function formatMeasurementConfirmationState(value: unknown) {
   if (value === "pending") return "Needs confirmation before pricing";
   if (typeof value === "string" && value.length > 0) return value.replace(/_/g, " ");
   return null;
+}
+
+function isInferredExtraction(row: ExtractionReviewRow) {
+  return Boolean(row.metadataJson?.inferred || row.extractionType === "inferred_scope");
+}
+
+function hasMissingItemMarker(row: ExtractionReviewRow) {
+  return row.status === "unmatched" || Boolean(row.metadataJson?.missingItem);
 }
 
 export async function runEstimateExtractionReviewAction({
@@ -186,6 +195,12 @@ export function EstimateExtractionReviewTable({
                         <div className="text-xs text-muted-foreground">
                           Confidence {formatConfidence(row.confidence)}
                         </div>
+                        <div className="mt-2 flex flex-wrap gap-1">
+                          {isInferredExtraction(row) ? <Badge variant="outline">Inferred</Badge> : null}
+                          {hasMissingItemMarker(row) ? (
+                            <Badge variant="destructive">Missing item</Badge>
+                          ) : null}
+                        </div>
                         {row.extractionType === "measurement_candidate" ? (
                           <>
                             <div className="text-xs font-medium text-amber-700">
@@ -227,7 +242,10 @@ export function EstimateExtractionReviewTable({
           </div>
 
           <div className="px-4 py-3 text-xs text-muted-foreground">
-            {selectedRow?.evidenceText || "No extraction evidence captured for the selected row."}
+            {selectedRow?.evidenceText ||
+              (hasMissingItemMarker(selectedRow ?? ({} as ExtractionReviewRow))
+                ? "Mark as a manual add when the extraction is missing a scope item."
+                : "No extraction evidence captured for the selected row.")}
           </div>
         </>
       )}
