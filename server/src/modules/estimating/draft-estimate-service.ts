@@ -61,9 +61,19 @@ export async function loadApprovedRecommendationsForRun(
   tenantDb: TenantDb,
   dealId: string,
   generationRunId: string,
-  recommendationIds: string[]
+  recommendationIds?: string[]
 ) {
-  if (recommendationIds.length === 0) return [];
+  if (recommendationIds && recommendationIds.length === 0) return [];
+
+  const conditions = [
+    eq(estimatePricingRecommendations.dealId, dealId),
+    eq(estimatePricingRecommendations.createdByRunId, generationRunId),
+    inArray(estimatePricingRecommendations.status, ["approved", "overridden"]),
+  ];
+
+  if (recommendationIds) {
+    conditions.push(inArray(estimatePricingRecommendations.id, recommendationIds));
+  }
 
   return tenantDb
     .select({
@@ -92,14 +102,7 @@ export async function loadApprovedRecommendationsForRun(
       estimateExtractions,
       eq(estimateExtractionMatches.extractionId, estimateExtractions.id)
     )
-    .where(
-      and(
-        eq(estimatePricingRecommendations.dealId, dealId),
-        eq(estimatePricingRecommendations.createdByRunId, generationRunId),
-        inArray(estimatePricingRecommendations.status, ["approved", "overridden"]),
-        inArray(estimatePricingRecommendations.id, recommendationIds)
-      )
-    ) as Promise<PromotionCandidateRow[]>;
+    .where(and(...conditions)) as Promise<PromotionCandidateRow[]>;
 }
 
 async function lockPromotionCandidates(
@@ -202,17 +205,20 @@ export async function promoteApprovedRecommendationsToEstimate({
     const recommendations = await loadApprovedRecommendationsForRun(
       tx,
       dealId,
-      generationRunId,
-      approvedRecommendationIds
+      generationRunId
     );
 
+    const requestedRecommendationIds = new Set(approvedRecommendationIds);
     const derivedRecommendations = deriveEstimatePricingWorkbenchRows(
       recommendations as unknown as PromotionCandidateRow[]
     );
-    const rowErrors = derivedRecommendations
+    const requestedRecommendations = derivedRecommendations.filter((row) =>
+      requestedRecommendationIds.has(row.recommendationId)
+    );
+    const rowErrors = requestedRecommendations
       .map(buildRowError)
       .filter((rowError): rowError is NonNullable<typeof rowError> => rowError !== null);
-    const promotableRecommendations = derivedRecommendations.filter((row) => row.promotable);
+    const promotableRecommendations = requestedRecommendations.filter((row) => row.promotable);
     const promotedRecommendationIds: string[] = [];
 
     if (promotableRecommendations.length === 0) {

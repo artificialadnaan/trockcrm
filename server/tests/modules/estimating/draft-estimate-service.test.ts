@@ -606,4 +606,79 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
       ])
     );
   });
+
+  it("keeps a requested duplicate blocked when its sibling is outside the promote request", async () => {
+    const tenantDb = {
+      execute: vi.fn().mockResolvedValue(undefined),
+      select: vi
+        .fn()
+        .mockReturnValueOnce({
+          from: vi.fn(() => ({
+            innerJoin: vi.fn(() => ({
+              innerJoin: vi.fn(() => ({
+                where: vi.fn().mockResolvedValue([
+                  {
+                    recommendationId: "rec-dup-1",
+                    description: "Parapet Wall Flashing",
+                    quantity: "3",
+                    unit: "ft",
+                    unitPrice: "121.54",
+                    notes: null,
+                    sectionName: "Roof",
+                    sourceType: "explicit",
+                    normalizedIntent: "parapet flashing",
+                    sourceRowIdentity: "roof:parapet-1",
+                    status: "approved",
+                    createdByRunId: "run-1",
+                    promotedEstimateLineItemId: null,
+                  },
+                  {
+                    recommendationId: "rec-dup-2",
+                    description: "Parapet Wall Flashing",
+                    quantity: "3",
+                    unit: "ft",
+                    unitPrice: "121.54",
+                    notes: null,
+                    sectionName: "Roof",
+                    sourceType: "explicit",
+                    normalizedIntent: "parapet flashing",
+                    sourceRowIdentity: "roof:parapet-2",
+                    status: "approved",
+                    createdByRunId: "run-1",
+                    promotedEstimateLineItemId: null,
+                  },
+                ]),
+              })),
+            })),
+          })),
+        }),
+      insert: vi.fn(() => ({
+        values: vi.fn().mockResolvedValue(undefined),
+      })),
+      update: vi.fn(() => ({
+        set: vi.fn(() => ({
+          where: vi.fn(() => ({
+            returning: vi.fn().mockResolvedValue([]),
+          })),
+        })),
+      })),
+    } as any;
+
+    const result = await promoteApprovedRecommendationsToEstimate({
+      tenantDb,
+      dealId: "deal-1",
+      generationRunId: "run-1",
+      approvedRecommendationIds: ["rec-dup-2"],
+    });
+
+    expect(estimateServiceMocks.createSection).not.toHaveBeenCalled();
+    expect(estimateServiceMocks.createLineItem).not.toHaveBeenCalled();
+    expect(result.promotedRecommendationIds).toEqual([]);
+    expect(result.rowErrors).toEqual([
+      expect.objectContaining({
+        recommendationId: "rec-dup-2",
+        code: "duplicate_blocked",
+      }),
+    ]);
+  });
 });
