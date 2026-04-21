@@ -15,11 +15,14 @@
 ### Shared schema and types
 
 - Modify: `shared/src/types/enums.ts`
+- Create: `shared/src/types/workflow-gates.ts`
 - Modify: `shared/src/schema/public/pipeline-stage-config.ts`
 - Modify: `shared/src/schema/tenant/leads.ts`
 - Modify: `shared/src/schema/tenant/deals.ts`
+- Modify: `shared/src/schema/tenant/deal-team-members.ts`
 - Create: `shared/src/schema/tenant/lead-qualification.ts`
 - Create: `shared/src/schema/tenant/deal-routing-history.ts`
+- Create: `shared/src/schema/tenant/deal-department-handoffs.ts`
 - Modify: `shared/src/schema/index.ts`
 - Create: `migrations/0028_pipeline_workflow_alignment.sql`
 
@@ -34,10 +37,12 @@
 - Create: `server/src/modules/leads/stage-gate.ts`
 - Create: `server/src/modules/leads/qualification-service.ts`
 - Modify: `server/src/modules/deals/service.ts`
+- Modify: `server/src/modules/deals/routes.ts`
 - Modify: `server/src/modules/deals/stage-gate.ts`
 - Modify: `server/src/modules/deals/stage-change.ts`
 - Modify: `server/src/modules/deals/scoping-rules.ts`
 - Create: `server/src/modules/deals/routing-service.ts`
+- Create: `server/src/modules/deals/ownership-service.ts`
 
 ### Client lead, opportunity, and admin UI
 
@@ -71,6 +76,8 @@
 - Create: `client/src/pages/leads/lead-list-page.test.tsx`
 - Create: `client/src/components/leads/lead-stage-change-dialog.test.tsx`
 - Create: `client/src/components/leads/lead-convert-dialog.test.tsx`
+- Create: `playwright.config.ts`
+- Modify: `client/package.json`
 - Create: `client/e2e/pipeline-workflow-alignment.spec.ts`
 
 ---
@@ -80,11 +87,14 @@
 **Files:**
 - Create: `migrations/0028_pipeline_workflow_alignment.sql`
 - Modify: `shared/src/types/enums.ts`
+- Create: `shared/src/types/workflow-gates.ts`
 - Modify: `shared/src/schema/public/pipeline-stage-config.ts`
 - Modify: `shared/src/schema/tenant/leads.ts`
 - Modify: `shared/src/schema/tenant/deals.ts`
+- Modify: `shared/src/schema/tenant/deal-team-members.ts`
 - Create: `shared/src/schema/tenant/lead-qualification.ts`
 - Create: `shared/src/schema/tenant/deal-routing-history.ts`
+- Create: `shared/src/schema/tenant/deal-department-handoffs.ts`
 - Modify: `shared/src/schema/index.ts`
 - Test: `server/tests/modules/leads/conversion-service.test.ts`
 - Test: `server/tests/modules/deals/routing-service.test.ts`
@@ -117,7 +127,7 @@ Expected: FAIL with missing migration/table/seed assertions.
 
 - [ ] **Step 3: Add new enums and schema fields**
 
-Update `shared/src/types/enums.ts` with the lead-stage slugs, routing source enum values, and expanded team roles.
+Update `shared/src/types/enums.ts` with the lead-stage slugs, routing source enum values, expanded team roles, and a neutral deal pipeline disposition enum that lets every converted lead start in `Opportunity` before a downstream route is chosen.
 
 ```ts
 export const LEAD_STAGE_SLUGS = [
@@ -136,6 +146,12 @@ export const DEAL_ROUTE_VALUE_SOURCES = [
   "manual_override",
 ] as const;
 
+export const DEAL_PIPELINE_DISPOSITIONS = [
+  "opportunity",
+  "deals",
+  "service",
+] as const;
+
 export const DEAL_TEAM_ROLES = [
   "superintendent",
   "estimator",
@@ -144,6 +160,38 @@ export const DEAL_TEAM_ROLES = [
   "operations",
   "foreman",
   "other",
+] as const;
+```
+
+Create `shared/src/types/workflow-gates.ts` as the single source of truth for stored field keys and labels so the lead gate engine, admin allowlist, and client UI all consume the same contract.
+
+```ts
+export const LEAD_QUALIFICATION_FIELD_KEYS = [
+  "qualification.projectLocation",
+  "qualification.unitCount",
+  "qualification.stakeholderName",
+  "qualification.stakeholderRole",
+  "qualification.budgetStatus",
+  "qualification.budgetQuarter",
+  "qualification.projectType",
+  "qualification.scopeSummary",
+  "qualification.specPackageStatus",
+  "qualification.checklistStarted",
+] as const;
+
+export const LEAD_SCOPING_SUBSET_FIELD_KEYS = [
+  "scopingSubset.projectOverview",
+  "scopingSubset.propertyDetails",
+  "scopingSubset.scopeSummary",
+  "scopingSubset.budgetAndBidContext",
+  "scopingSubset.initialQuantities",
+  "scopingSubset.decisionTimeline",
+] as const;
+
+export const OPPORTUNITY_GATE_FIELD_KEYS = [
+  "opportunity.preBidMeetingCompleted",
+  "opportunity.siteVisitDecision",
+  "opportunity.siteVisitCompleted",
 ] as const;
 ```
 
@@ -179,15 +227,37 @@ export const dealRoutingHistory = pgTable("deal_routing_history", {
 });
 ```
 
+```ts
+export const dealDepartmentHandoffs = pgTable("deal_department_handoffs", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  dealId: uuid("deal_id").notNull(),
+  fromDepartment: varchar("from_department", { length: 40 }).notNull(),
+  toDepartment: varchar("to_department", { length: 40 }).notNull(),
+  effectiveOwnerUserId: uuid("effective_owner_user_id"),
+  acceptedAt: timestamp("accepted_at", { withTimezone: true }),
+  acceptanceStatus: varchar("acceptance_status", { length: 20 }).default("pending").notNull(),
+  notes: text("notes"),
+  createdBy: uuid("created_by").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+});
+```
+
 - [ ] **Step 4: Write the migration**
 
 Create `migrations/0028_pipeline_workflow_alignment.sql` to:
 
 - seed the ordered lead stages
-- seed `Opportunity` into both standard and service deal families
+- seed the neutral `Opportunity` stage used by all newly converted leads
 - add any new lead/deal columns
+- extend the `deal_team_role` enum with `client_services` and `operations`
 - create the new tenant tables
-- backfill current `dd` records into `opportunity` only where appropriate
+- explicitly avoid auto-rewriting existing active `dd` deal rows in this migration
+
+Backfill rule for this migration:
+
+- do **not** bulk-convert existing `dd` records into `opportunity`
+- only seed new structures and leave existing stage history untouched
+- create a follow-up reporting query or admin exception list for manual evaluation of legacy rows after rollout
 
 Use concrete SQL like:
 
@@ -210,10 +280,14 @@ SET name = EXCLUDED.name, display_order = EXCLUDED.display_order;
 INSERT INTO public.pipeline_stage_config
   (name, slug, display_order, workflow_family, is_active_pipeline, is_terminal, color)
 VALUES
-  ('Opportunity', 'opportunity', 1, 'standard_deal', true, false, '#6366F1'),
-  ('Opportunity', 'service_opportunity', 1, 'service_deal', true, false, '#6366F1')
+  ('Opportunity', 'opportunity', 1, 'standard_deal', true, false, '#6366F1')
 ON CONFLICT (slug) DO UPDATE
 SET name = EXCLUDED.name, display_order = EXCLUDED.display_order;
+```
+
+```sql
+ALTER TYPE deal_team_role ADD VALUE IF NOT EXISTS 'client_services';
+ALTER TYPE deal_team_role ADD VALUE IF NOT EXISTS 'operations';
 ```
 
 - [ ] **Step 5: Run tests to verify they pass**
@@ -225,7 +299,7 @@ Expected: PASS with the new migration and schema assertions satisfied.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add shared/src/types/enums.ts shared/src/schema/public/pipeline-stage-config.ts shared/src/schema/tenant/leads.ts shared/src/schema/tenant/deals.ts shared/src/schema/tenant/lead-qualification.ts shared/src/schema/tenant/deal-routing-history.ts shared/src/schema/index.ts migrations/0028_pipeline_workflow_alignment.sql server/tests/modules/leads/conversion-service.test.ts server/tests/modules/deals/routing-service.test.ts
+git add shared/src/types/enums.ts shared/src/types/workflow-gates.ts shared/src/schema/public/pipeline-stage-config.ts shared/src/schema/tenant/leads.ts shared/src/schema/tenant/deals.ts shared/src/schema/tenant/deal-team-members.ts shared/src/schema/tenant/lead-qualification.ts shared/src/schema/tenant/deal-routing-history.ts shared/src/schema/tenant/deal-department-handoffs.ts shared/src/schema/index.ts migrations/0028_pipeline_workflow_alignment.sql server/tests/modules/leads/conversion-service.test.ts server/tests/modules/deals/routing-service.test.ts
 git commit -m "feat: add workflow alignment schema"
 ```
 
@@ -342,9 +416,15 @@ Create `server/src/modules/leads/stage-gate.ts` mirroring the deal-stage preflig
 
 ```ts
 const LEAD_STAGE_REQUIREMENTS: Record<string, string[]> = {
-  company_pre_qualified: ["companyId", "propertyId", "source", "stakeholderName"],
-  scoping_in_progress: ["existingCustomerDecision"],
-  pre_qual_value_assigned: ["projectLocation", "unitCount", "budgetStatus", "projectType", "scopeSummary"],
+  company_pre_qualified: ["companyId", "propertyId", "source", "qualification.stakeholderName"],
+  scoping_in_progress: ["qualification.existingCustomerDecision"],
+  pre_qual_value_assigned: [
+    "qualification.projectLocation",
+    "qualification.unitCount",
+    "qualification.budgetStatus",
+    "qualification.projectType",
+    "qualification.scopeSummary",
+  ],
   lead_go_no_go: ["estimatedOpportunityValue"],
   qualified_for_opportunity: [
     "goDecision",
@@ -383,7 +463,7 @@ In `server/src/modules/leads/service.ts` and `routes.ts`, add support for:
 
 - qualification payload patching
 - stage preflight endpoint
-- enforced stage movement through the new gate engine
+- enforced stage movement through the new gate engine on the actual `PATCH /leads/:id` write path
 
 ```ts
 router.post("/:id/stage/preflight", async (req, res, next) => {
@@ -391,6 +471,15 @@ router.post("/:id/stage/preflight", async (req, res, next) => {
   await req.commitTransaction!();
   res.json(result);
 });
+```
+
+```ts
+if (input.stageId !== undefined && input.stageId !== existing.stageId) {
+  const gate = await validateLeadStageGate(tenantDb, leadId, input.stageId, userRole, userId);
+  if (!gate.allowed) {
+    throw new AppError(403, gate.blockReason ?? "Lead stage change not allowed");
+  }
+}
 ```
 
 - [ ] **Step 6: Run tests to verify they pass**
@@ -414,6 +503,7 @@ git commit -m "feat: enforce lead stage gates"
 - Modify: `server/src/modules/leads/conversion-service.ts`
 - Create: `server/src/modules/deals/routing-service.ts`
 - Modify: `server/src/modules/deals/service.ts`
+- Modify: `server/src/modules/deals/routes.ts`
 - Modify: `server/src/modules/deals/stage-gate.ts`
 - Modify: `server/src/modules/deals/stage-change.ts`
 - Modify: `server/src/modules/deals/scoping-rules.ts`
@@ -426,6 +516,7 @@ git commit -m "feat: enforce lead stage gates"
 Add tests proving:
 
 - converted leads always land in `Opportunity`
+- converted leads start with neutral pipeline disposition `opportunity`
 - early routing uses the sales estimated opportunity value
 - post-bid routing uses the bid estimate
 - threshold crossing writes routing history and flips workflow route
@@ -434,6 +525,8 @@ Add tests proving:
 it("converts every qualified lead into opportunity", async () => {
   const result = await convertLead(tenantDb as never, { leadId: "lead-1", userId: "rep-1", userRole: "rep" });
   expect(result.deal.stageId).toBe("stage-opportunity-standard");
+  expect(result.deal.pipelineDisposition).toBe("opportunity");
+  expect(result.deal.workflowRoute).toBeNull();
 });
 
 it("routes below-threshold opportunity into service", async () => {
@@ -455,19 +548,16 @@ Expected: FAIL because the new routing rules are not implemented.
 
 - [ ] **Step 3: Change conversion to resolve Opportunity stage automatically**
 
-Update `convertLead` so callers no longer pass an arbitrary deal stage. Resolve the stage from the correct deals family and always create the successor deal in `Opportunity`.
+Update `convertLead` so callers no longer pass an arbitrary deal stage. Conversion always creates the successor deal in neutral `Opportunity`; no downstream route is chosen at conversion time.
 
 ```ts
-const initialRoute = input.workflowRoute ?? "estimating";
-const opportunityStage = await deps.getStageBySlug(
-  initialRoute === "service" ? "service_opportunity" : "opportunity",
-  initialRoute === "service" ? "service_deal" : "standard_deal"
-);
+const opportunityStage = await deps.getStageBySlug("opportunity", "standard_deal");
 
 const deal = await deps.createDeal(tenantDb, {
   name: input.name ?? lead.name,
   stageId: opportunityStage!.id,
-  workflowRoute: initialRoute,
+  pipelineDisposition: "opportunity",
+  workflowRoute: null,
   sourceLeadId: lead.id,
   companyId: lead.companyId,
   propertyId: lead.propertyId,
@@ -479,7 +569,7 @@ const deal = await deps.createDeal(tenantDb, {
 
 - [ ] **Step 4: Implement the routing service**
 
-Create `server/src/modules/deals/routing-service.ts` with one canonical threshold function.
+Create `server/src/modules/deals/routing-service.ts` with one canonical threshold function, a route-review writer, and stage-resolution helpers that move a deal out of neutral `Opportunity` into the first configured stage of either downstream family.
 
 ```ts
 export function routeForAmount(amount: string) {
@@ -504,14 +594,20 @@ export async function applyOpportunityRoutingReview(
     .for("update");
 
   const nextRoute = routeForAmount(input.amount);
-  if (!deal || deal.workflowRoute === nextRoute) {
+  if (!deal) {
+    throw new AppError(404, "Deal not found");
+  }
+
+  const nextDisposition = nextRoute === "service" ? "service" : "deals";
+  if (deal.workflowRoute === nextRoute && deal.pipelineDisposition === nextDisposition) {
     return { deal, changed: false };
   }
 
-  const nextStage = await resolveParallelStageForRoute(tenantDb, deal.stageId, nextRoute);
+  const nextStage = await resolveEntryStageForDisposition(tenantDb, nextDisposition);
   const [updatedDeal] = await tenantDb
     .update(deals)
     .set({
+      pipelineDisposition: nextDisposition,
       workflowRoute: nextRoute,
       stageId: nextStage.id,
       updatedAt: new Date(),
@@ -533,7 +629,21 @@ export async function applyOpportunityRoutingReview(
 }
 ```
 
-Use family-aware stage resolution so an `Opportunity` deal stays in the equivalent stage order when switching families.
+Add the missing route endpoint in `server/src/modules/deals/routes.ts`.
+
+```ts
+router.post("/:id/routing-review", async (req, res, next) => {
+  const result = await applyOpportunityRoutingReview(req.tenantDb!, {
+    dealId: req.params.id,
+    valueSource: req.body.valueSource,
+    amount: req.body.amount,
+    reason: req.body.reason,
+    userId: req.user!.id,
+  });
+  await req.commitTransaction!();
+  res.json(result);
+});
+```
 
 - [ ] **Step 5: Tighten deal-side Opportunity and scoping gates**
 
@@ -544,7 +654,7 @@ Update `server/src/modules/deals/stage-gate.ts` and `scoping-rules.ts` so:
 - route changes are driven by authoritative values, not by ad hoc manual stage edits
 
 ```ts
-if (currentStage.slug === "opportunity" && ["estimating", "service_opportunity"].includes(targetStage.slug)) {
+if (currentStage.slug === "opportunity" && [DEALS_ENTRY_STAGE_SLUG, SERVICE_ENTRY_STAGE_SLUG].includes(targetStage.slug)) {
   const opportunityFields = [
     "opportunity.preBidMeetingCompleted",
     "opportunity.siteVisitDecision",
@@ -570,7 +680,7 @@ Expected: PASS with conversion fixed, routing history recorded, and opportunity 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add server/src/modules/leads/conversion-service.ts server/src/modules/deals/routing-service.ts server/src/modules/deals/service.ts server/src/modules/deals/stage-gate.ts server/src/modules/deals/stage-change.ts server/src/modules/deals/scoping-rules.ts server/tests/modules/leads/conversion-service.test.ts server/tests/modules/deals/routing-service.test.ts server/tests/modules/deals/stage-gate.test.ts
+git add server/src/modules/leads/conversion-service.ts server/src/modules/deals/routing-service.ts server/src/modules/deals/service.ts server/src/modules/deals/routes.ts server/src/modules/deals/stage-gate.ts server/src/modules/deals/stage-change.ts server/src/modules/deals/scoping-rules.ts server/tests/modules/leads/conversion-service.test.ts server/tests/modules/deals/routing-service.test.ts server/tests/modules/deals/stage-gate.test.ts
 git commit -m "feat: align opportunity conversion and routing"
 ```
 
@@ -626,7 +736,7 @@ router.get("/stages", async (req, res, next) => {
 
 - [ ] **Step 4: Expand allowed gate values**
 
-In `server/src/modules/admin/pipeline-service.ts`, expand the server-side allowlists to include the new lead qualification and opportunity fields.
+In `server/src/modules/admin/pipeline-service.ts`, expand the server-side allowlists by importing the canonical field keys from `shared/src/types/workflow-gates.ts` instead of duplicating string literals.
 
 ```ts
 export const STAGE_GATE_ALLOWED_FIELDS = [
@@ -634,14 +744,9 @@ export const STAGE_GATE_ALLOWED_FIELDS = [
   "projectTypeId",
   "description",
   "estimatedOpportunityValue",
-  "stakeholderRole",
-  "budgetStatus",
-  "budgetQuarter",
-  "qualification.projectLocation",
-  "qualification.unitCount",
-  "scopingSubset.projectOverview",
-  "opportunity.preBidMeetingCompleted",
-  "opportunity.siteVisitDecision",
+  ...LEAD_QUALIFICATION_FIELD_KEYS,
+  ...LEAD_SCOPING_SUBSET_FIELD_KEYS,
+  ...OPPORTUNITY_GATE_FIELD_KEYS,
 ] as const;
 ```
 
@@ -652,8 +757,8 @@ Make `PipelineConfigPage` render separate sections or filters for `Lead`, `Deals
 ```ts
 export const LEAD_STAGE_GATE_FIELD_OPTIONS: StageGateOption[] = [
   { value: "estimatedOpportunityValue", label: "Estimated Opportunity Value" },
-  { value: "stakeholderRole", label: "Stakeholder Role" },
-  { value: "budgetStatus", label: "Budget Status" },
+  { value: "qualification.stakeholderRole", label: "Stakeholder Role" },
+  { value: "qualification.budgetStatus", label: "Budget Status" },
   { value: "scopingSubset.projectOverview", label: "Scoping Subset: Project Overview" },
 ];
 ```
@@ -803,6 +908,9 @@ git commit -m "feat: add gated lead kanban workflow"
 - Modify: `client/src/components/deals/deal-scoping-workspace.tsx`
 - Modify: `client/src/pages/deals/deal-detail-page.tsx`
 - Modify: `client/src/pages/deals/deal-team-tab.tsx`
+- Modify: `server/src/modules/deals/service.ts`
+- Modify: `server/src/modules/deals/routes.ts`
+- Create: `server/src/modules/deals/ownership-service.ts`
 - Test: `server/tests/modules/deals/stage-gate.test.ts`
 - Test: `client/src/components/leads/lead-stage-change-dialog.test.tsx`
 
@@ -829,7 +937,7 @@ Expected: FAIL because opportunity routing controls are not rendered or enforced
 
 - [ ] **Step 3: Extend deal hooks and detail payload**
 
-Add routing history, route review endpoints, and ownership metadata to the deal hook types.
+Add routing history, route review endpoints, and ownership metadata to the deal hook types. Back them with a real server payload derived from the persisted `deal_department_handoffs` table and latest accepted handoff entry.
 
 ```ts
 export interface DealRoutingHistoryEntry {
@@ -840,6 +948,12 @@ export interface DealRoutingHistoryEntry {
   triggeringValue: string;
   reason: string | null;
   createdAt: string;
+}
+
+export interface DealDepartmentOwnership {
+  currentDepartment: "sales" | "estimating" | "client_services" | "operations";
+  acceptanceStatus: "pending" | "accepted";
+  effectiveOwnerUserId: string | null;
 }
 ```
 
@@ -874,7 +988,7 @@ In `client/src/components/deals/deal-scoping-workspace.tsx`, add:
 
 - [ ] **Step 5: Keep Sales visibility through downstream ownership**
 
-Update `deal-detail-page.tsx` and `deal-team-tab.tsx` so:
+Update `server/src/modules/deals/service.ts`, `deal-detail-page.tsx`, and `deal-team-tab.tsx` so:
 
 - current accountable department is always visible
 - Sales can see the full stage history and route changes
@@ -882,7 +996,7 @@ Update `deal-detail-page.tsx` and `deal-team-tab.tsx` so:
 
 ```tsx
 <Badge variant="outline">
-  Accountable Department: {deal.currentDepartmentOwner ?? "Sales"}
+  Accountable Department: {deal.departmentOwnership.currentDepartment}
 </Badge>
 ```
 
@@ -895,20 +1009,57 @@ Expected: PASS with Opportunity routing controls and department visibility rende
 - [ ] **Step 7: Commit**
 
 ```bash
-git add client/src/hooks/use-deals.ts client/src/components/deals/stage-gate-checklist.tsx client/src/components/deals/deal-scoping-workspace.tsx client/src/pages/deals/deal-detail-page.tsx client/src/pages/deals/deal-team-tab.tsx server/tests/modules/deals/stage-gate.test.ts client/src/components/leads/lead-stage-change-dialog.test.tsx
+git add client/src/hooks/use-deals.ts client/src/components/deals/stage-gate-checklist.tsx client/src/components/deals/deal-scoping-workspace.tsx client/src/pages/deals/deal-detail-page.tsx client/src/pages/deals/deal-team-tab.tsx server/src/modules/deals/service.ts server/src/modules/deals/routes.ts server/src/modules/deals/ownership-service.ts server/tests/modules/deals/stage-gate.test.ts client/src/components/leads/lead-stage-change-dialog.test.tsx
 git commit -m "feat: expose opportunity routing and handoff visibility"
 ```
 
 ---
 
-### Task 7: Verify the full workflow with automated tests and Playwright coverage
+### Task 7: Bootstrap Playwright and add the full workflow regression
 
 **Files:**
+- Create: `playwright.config.ts`
+- Modify: `client/package.json`
 - Create: `client/e2e/pipeline-workflow-alignment.spec.ts`
-- Modify: `package.json`
 - Test: `client/e2e/pipeline-workflow-alignment.spec.ts`
 
-- [ ] **Step 1: Write the failing Playwright scenario**
+- [ ] **Step 1: Write the failing Playwright setup test scaffold**
+
+Add the missing Playwright infrastructure first:
+
+- install `@playwright/test` in `client/package.json`
+- create `playwright.config.ts` at repo root
+- define a `webServer` that starts the client with `npm run dev --workspace=client -- --host 127.0.0.1 --port 4173`
+
+```ts
+export default defineConfig({
+  testDir: "./client/e2e",
+  use: {
+    baseURL: "http://127.0.0.1:4173",
+    browserName: "chromium",
+  },
+  webServer: {
+    command: "npm run dev --workspace=client -- --host 127.0.0.1 --port 4173",
+    url: "http://127.0.0.1:4173",
+    reuseExistingServer: true,
+    timeout: 120000,
+  },
+});
+```
+
+- [ ] **Step 2: Run Playwright bootstrap to verify it fails**
+
+Run:
+
+```bash
+npm install --workspace=client -D @playwright/test
+npx playwright install chromium
+npx playwright test --list
+```
+
+Expected: bootstrap completes, test listing fails until the new scenario exists.
+
+- [ ] **Step 3: Write the failing Playwright scenario**
 
 Create a full-path regression that:
 
@@ -935,31 +1086,32 @@ test("lead and deal workflow alignment end-to-end", async ({ page }) => {
 });
 ```
 
-- [ ] **Step 2: Run Playwright to verify it fails**
+- [ ] **Step 4: Run Playwright to verify it fails**
 
 Run: `npx playwright test client/e2e/pipeline-workflow-alignment.spec.ts`
 
 Expected: FAIL because the aligned UI and gating behavior are not implemented yet.
 
-- [ ] **Step 3: Wire any missing test helpers or scripts**
+- [ ] **Step 5: Wire any missing test helpers or scripts**
 
-If the repo needs a dedicated script entry, add it in `package.json`.
+Add the dedicated client script in `client/package.json`.
 
 ```json
 {
   "scripts": {
-    "test:e2e:pipeline": "playwright test client/e2e/pipeline-workflow-alignment.spec.ts"
+    "test:e2e:pipeline": "playwright test e2e/pipeline-workflow-alignment.spec.ts"
   }
 }
 ```
 
-- [ ] **Step 4: Run the full verification matrix**
+- [ ] **Step 6: Run the full verification matrix**
 
 Run:
 
 ```bash
 npm run typecheck
 npx vitest run server/tests/modules/leads/stage-gate.test.ts server/tests/modules/leads/conversion-service.test.ts server/tests/modules/deals/routing-service.test.ts server/tests/modules/deals/stage-gate.test.ts client/src/pages/leads/lead-list-page.test.tsx client/src/pages/leads/lead-detail-page.test.tsx client/src/components/leads/lead-convert-dialog.test.tsx
+npx playwright install chromium
 npx playwright test client/e2e/pipeline-workflow-alignment.spec.ts
 ```
 
@@ -969,10 +1121,10 @@ Expected:
 - targeted Vitest suites pass
 - Playwright scenario passes
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add client/e2e/pipeline-workflow-alignment.spec.ts package.json
+git add playwright.config.ts client/package.json client/e2e/pipeline-workflow-alignment.spec.ts
 git commit -m "test: cover workflow alignment end to end"
 ```
 
@@ -1099,5 +1251,5 @@ Expected: still green after merge and push.
 
 - Lead qualification uses `estimatedOpportunityValue` on the lead side.
 - Routing review uses `valueSource` values `sales_estimated_opportunity_value` and `procore_bidboard_estimate`.
-- Deal-side initial stage resolution uses `opportunity` / `service_opportunity`.
+- Conversion always starts with neutral `pipelineDisposition = "opportunity"` and `workflowRoute = null`.
 - `client_services` and `operations` are the new downstream ownership/team role labels used consistently across schema and UI.
