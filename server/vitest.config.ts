@@ -6,6 +6,7 @@ export default defineConfig({
     alias: {
       "@trock-crm/shared/schema": path.resolve(__dirname, "../shared/src/schema/index.ts"),
       "@trock-crm/shared/types": path.resolve(__dirname, "../shared/src/types/index.ts"),
+      "@trock-crm/shared/utils": path.resolve(__dirname, "../shared/src/utils/normalize.ts"),
       "@trock-crm/shared": path.resolve(__dirname, "../shared/src/schema/index.ts"),
     },
   },

@@ -27,6 +27,48 @@ import { canCreateDealWithoutSourceLead } from "./direct-create-rules.js";
 // Type alias for the tenant-scoped Drizzle instance
 type TenantDb = NodePgDatabase<typeof schema>;
 
+type WorkspaceScope = "mine" | "team" | "all";
+
+export interface DealBoardInput {
+  role: string;
+  userId: string;
+  activeOfficeId: string;
+  scope: WorkspaceScope;
+  includeDd?: boolean;
+}
+
+export interface DealStagePageInput extends DealBoardInput {
+  stageId: string;
+  page: number;
+  pageSize: number;
+  search?: string;
+  sort?: string;
+  assignedRepId?: string;
+  staleOnly?: boolean;
+  status?: string;
+  workflowRoute?: string;
+  source?: string;
+}
+
+type DealWorkspaceRow = {
+  id: string;
+  deal_number: string;
+  name: string;
+  stage_id: string;
+  assigned_rep_id: string;
+  office_id: string;
+  workflow_route: string;
+  awarded_amount: string | null;
+  bid_estimate: string | null;
+  dd_estimate: string | null;
+  property_city: string | null;
+  property_state: string | null;
+  source: string | null;
+  last_activity_at: string | null;
+  stage_entered_at: string;
+  updated_at: string;
+};
+
 export interface DealFilters {
   search?: string;
   stageIds?: string[];
@@ -161,6 +203,82 @@ async function validateAssignee(tenantDb: TenantDb, assigneeId: string, officeId
       .where(and(eq(userOfficeAccess.userId, assigneeId), eq(userOfficeAccess.officeId, officeId))).limit(1);
     if (!access) throw new AppError(400, "Assigned user does not have access to this office");
   }
+}
+
+async function listDealStages() {
+  return db
+    .select()
+    .from(pipelineStageConfig)
+    .where(inArray(pipelineStageConfig.workflowFamily, ["standard_deal", "service_deal"]))
+    .orderBy(asc(pipelineStageConfig.displayOrder));
+}
+
+function buildDealWorkspaceScope(input: DealBoardInput | DealStagePageInput) {
+  const filters = [
+    sql`d.is_active = true`,
+    sql`u.office_id = ${input.activeOfficeId}`,
+  ];
+
+  if (input.role === "rep" || input.scope === "mine") {
+    filters.push(sql`d.assigned_rep_id = ${input.userId}`);
+  }
+
+  if ("assignedRepId" in input && input.assignedRepId) {
+    filters.push(sql`d.assigned_rep_id = ${input.assignedRepId}`);
+  }
+
+  if ("source" in input && input.source) {
+    filters.push(sql`d.source = ${input.source}`);
+  }
+
+  if ("workflowRoute" in input && input.workflowRoute) {
+    filters.push(sql`d.workflow_route = ${input.workflowRoute}`);
+  }
+
+  if ("search" in input && input.search && input.search.trim().length >= 2) {
+    const term = `%${input.search.trim()}%`;
+    filters.push(sql`(d.name ilike ${term} or d.deal_number ilike ${term} or d.property_city ilike ${term} or d.property_state ilike ${term})`);
+  }
+
+  if ("staleOnly" in input && input.staleOnly) {
+    filters.push(sql`d.last_activity_at is null or d.last_activity_at < now() - interval '14 days'`);
+  }
+
+  return sql.join(filters, sql` and `);
+}
+
+function normalizeDealStageSort(sort?: string) {
+  switch (sort) {
+    case "value_desc":
+      return sql`coalesce(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0) desc, d.updated_at desc`;
+    case "name_asc":
+      return sql`d.name asc, d.updated_at desc`;
+    case "age_desc":
+      return sql`d.stage_entered_at asc, d.updated_at desc`;
+    default:
+      return sql`d.updated_at desc, d.name asc`;
+  }
+}
+
+function mapDealWorkspaceRow(row: DealWorkspaceRow) {
+  return {
+    id: row.id,
+    dealNumber: row.deal_number,
+    name: row.name,
+    stageId: row.stage_id,
+    assignedRepId: row.assigned_rep_id,
+    officeId: row.office_id,
+    workflowRoute: row.workflow_route,
+    awardedAmount: row.awarded_amount,
+    bidEstimate: row.bid_estimate,
+    ddEstimate: row.dd_estimate,
+    propertyCity: row.property_city,
+    propertyState: row.property_state,
+    source: row.source,
+    lastActivityAt: row.last_activity_at,
+    stageEnteredAt: row.stage_entered_at,
+    updatedAt: row.updated_at,
+  };
 }
 
 function workflowFamilyForRoute(workflowRoute: WorkflowRoute) {
@@ -951,6 +1069,137 @@ export async function getDealsForPipeline(
     }));
 
   return { pipelineColumns, terminalStages };
+}
+
+export async function listDealBoard(tenantDb: TenantDb, input: DealBoardInput) {
+  const stages = await listDealStages();
+  const rowResult = await tenantDb.execute(sql`
+    select
+      d.id,
+      d.deal_number,
+      d.name,
+      d.stage_id,
+      d.assigned_rep_id,
+      u.office_id,
+      d.workflow_route,
+      d.awarded_amount,
+      d.bid_estimate,
+      d.dd_estimate,
+      d.property_city,
+      d.property_state,
+      d.source,
+      d.last_activity_at,
+      d.stage_entered_at,
+      d.updated_at
+    from deals d
+    join users u on u.id = d.assigned_rep_id
+    where ${buildDealWorkspaceScope(input)}
+    order by d.updated_at desc
+  `);
+
+  const rows = rowResult.rows as DealWorkspaceRow[];
+  const pipelineColumns = stages
+    .filter((stage) => !stage.isTerminal)
+    .filter((stage) => input.includeDd || stage.isActivePipeline)
+    .map((stage) => {
+      const dealsForStage = rows
+        .filter((row) => row.stage_id === stage.id)
+        .map(mapDealWorkspaceRow);
+
+      return {
+        stage,
+        deals: dealsForStage,
+        totalValue: dealsForStage.reduce(
+          (sum, deal) => sum + Number(deal.awardedAmount ?? deal.bidEstimate ?? deal.ddEstimate ?? 0),
+          0
+        ),
+        count: dealsForStage.length,
+      };
+    });
+
+  const terminalStages = stages
+    .filter((stage) => stage.isTerminal)
+    .map((stage) => {
+      const dealsForStage = rows
+        .filter((row) => row.stage_id === stage.id)
+        .map(mapDealWorkspaceRow);
+
+      return {
+        stage,
+        deals: dealsForStage,
+        count: dealsForStage.length,
+      };
+    });
+
+  return {
+    pipelineColumns,
+    terminalStages,
+    columns: pipelineColumns,
+  };
+}
+
+export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePageInput) {
+  const [stage] = await listDealStages().then((stages) => stages.filter((item) => item.id === input.stageId));
+  if (!stage) {
+    throw new AppError(404, "Deal stage not found");
+  }
+
+  const page = Math.max(1, input.page || 1);
+  const pageSize = Math.max(1, Math.min(100, input.pageSize || 25));
+  const offset = (page - 1) * pageSize;
+  const scope = buildDealWorkspaceScope(input);
+  const countResult = await tenantDb.execute(sql`
+    select
+      count(*)::int as total,
+      coalesce(sum(coalesce(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)), 0)::numeric as total_value
+    from deals d
+    join users u on u.id = d.assigned_rep_id
+    where ${scope} and d.stage_id = ${input.stageId}
+  `);
+  const rowResult = await tenantDb.execute(sql`
+    select
+      d.id,
+      d.deal_number,
+      d.name,
+      d.stage_id,
+      d.assigned_rep_id,
+      u.office_id,
+      d.workflow_route,
+      d.awarded_amount,
+      d.bid_estimate,
+      d.dd_estimate,
+      d.property_city,
+      d.property_state,
+      d.source,
+      d.last_activity_at,
+      d.stage_entered_at,
+      d.updated_at
+    from deals d
+    join users u on u.id = d.assigned_rep_id
+    where ${scope} and d.stage_id = ${input.stageId}
+    order by ${normalizeDealStageSort(input.sort)}
+    limit ${pageSize}
+    offset ${offset}
+  `);
+
+  const summaryRow = (countResult.rows[0] as { total?: string | number; total_value?: string | number } | undefined) ?? {};
+  const total = Number(summaryRow.total ?? 0);
+
+  return {
+    stage,
+    scope: input.scope,
+    summary: {
+      count: total,
+      totalValue: Number(summaryRow.total_value ?? 0),
+    },
+    pagination: {
+      page,
+      pageSize,
+      total,
+      totalPages: Math.ceil(total / pageSize),
+    },
+    rows: (rowResult.rows as DealWorkspaceRow[]).map(mapDealWorkspaceRow),
+  };
 }
 
 /**

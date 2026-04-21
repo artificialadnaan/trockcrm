@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, resolveApiBase } from "@/lib/api";
+import type { StagePageQuery } from "@/lib/pipeline-stage-page";
 
 export interface LeadRecord {
   id: string;
@@ -62,6 +63,54 @@ export interface LeadFilters {
   assignedRepId?: string;
   status?: "open" | "converted" | "disqualified";
   isActive?: boolean | "all";
+}
+
+export interface LeadBoardStage {
+  id: string;
+  name: string;
+  slug: string;
+  color?: string | null;
+  displayOrder?: number;
+  isActivePipeline?: boolean;
+  isTerminal?: boolean;
+}
+
+export interface LeadBoardCard {
+  id: string;
+  name: string;
+  stageId: string;
+  assignedRepId?: string;
+  officeId?: string;
+  companyName?: string | null;
+  propertyCity?: string | null;
+  propertyState?: string | null;
+  source?: string | null;
+  status?: string;
+  lastActivityAt?: string | null;
+  stageEnteredAt: string;
+  updatedAt: string;
+}
+
+export interface LeadBoardResponse {
+  columns: Array<{
+    stage: LeadBoardStage;
+    count: number;
+    cards: LeadBoardCard[];
+  }>;
+  defaultConversionDealStageId: string | null;
+}
+
+export interface LeadStagePageResponse {
+  stage: LeadBoardStage;
+  scope: "mine" | "team" | "all";
+  summary: { count: number };
+  pagination: {
+    page: number;
+    pageSize: number;
+    total: number;
+    totalPages: number;
+  };
+  rows: LeadBoardCard[];
 }
 
 export function formatLeadPropertyLine(lead: Pick<LeadRecord, "property">) {
@@ -276,4 +325,110 @@ export async function convertLead(
     method: "POST",
     json: input,
   });
+}
+
+export function useLeadBoard(scope: "mine" | "team" | "all") {
+  const [board, setBoard] = useState<LeadBoardResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const refetch = useCallback(() => {
+    setLoading(true);
+    setError(null);
+    return api<LeadBoardResponse>(`/leads/board?scope=${scope}`)
+      .then((result) => {
+        setBoard(result);
+        return result;
+      })
+      .catch((err: unknown) => {
+        setError(err instanceof Error ? err.message : "Failed to load lead board");
+        throw err;
+      })
+      .finally(() => setLoading(false));
+  }, [scope]);
+
+  useEffect(() => {
+    void refetch().catch(() => undefined);
+  }, [refetch]);
+
+  async function convertLeadFromBoard(input: {
+    leadId: string;
+    dealStageId: string;
+    workflowRoute?: "estimating" | "service";
+    assignedRepId?: string;
+    primaryContactId?: string | null;
+    name?: string;
+    source?: string | null;
+    description?: string | null;
+    ddEstimate?: string | null;
+    bidEstimate?: string | null;
+    awardedAmount?: string | null;
+    projectTypeId?: string | null;
+    regionId?: string | null;
+    expectedCloseDate?: string | null;
+  }) {
+    const { leadId, ...rest } = input;
+    return convertLead(leadId, rest);
+  }
+
+  return { board, loading, error, convertLead: convertLeadFromBoard, refetch };
+}
+
+export function useLeadStagePage(input: StagePageQuery & { stageId: string; scope: "mine" | "team" | "all" }) {
+  const [data, setData] = useState<LeadStagePageResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const params = new URLSearchParams({
+      scope: input.scope,
+      page: String(input.page),
+      pageSize: String(input.pageSize),
+      sort: input.sort,
+      search: input.search,
+      ...(input.filters.assignedRepId ? { assignedRepId: input.filters.assignedRepId } : {}),
+      ...(input.filters.staleOnly ? { staleOnly: "true" } : {}),
+      ...(input.filters.status ? { status: input.filters.status } : {}),
+      ...(input.filters.workflowRoute ? { workflowRoute: input.filters.workflowRoute } : {}),
+      ...(input.filters.source ? { source: input.filters.source } : {}),
+    });
+
+    setLoading(true);
+    setError(null);
+    setData(null);
+
+    void api<LeadStagePageResponse>(`/leads/stages/${input.stageId}?${params.toString()}`)
+      .then((result) => {
+        if (!cancelled) setData(result);
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) setError(err instanceof Error ? err.message : "Failed to load stage");
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    input.filters.assignedRepId,
+    input.filters.source,
+    input.filters.staleOnly,
+    input.filters.status,
+    input.filters.workflowRoute,
+    input.page,
+    input.pageSize,
+    input.scope,
+    input.search,
+    input.sort,
+    input.stageId,
+  ]);
+
+  return { data, loading, error };
+}
+
+export async function updateLeadStage(leadId: string, stageId: string) {
+  return api(`/leads/${leadId}`, { method: "PATCH", json: { stageId } });
 }

@@ -15,4 +15,5 @@ export { userGraphTokens, graphTokenStatusEnum } from "./user-graph-tokens.js";
 export { userExternalIdentities, externalUserSourceEnum } from "./user-external-identities.js";
 export { userLocalAuth } from "./user-local-auth.js";
 export { userLocalAuthEvents, localAuthEventTypeEnum } from "./user-local-auth-events.js";
+export { userCommissionSettings } from "./user-commission-settings.js";
 export { jobQueue, jobStatusEnum } from "./job-queue.js";

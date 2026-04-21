@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { and, eq, desc, isNotNull, sql } from "drizzle-orm";
-import { dealApprovals, deals, jobQueue } from "@trock-crm/shared/schema";
+import { dealApprovals, dealPaymentEvents, deals, jobQueue } from "@trock-crm/shared/schema";
 import { requireRole } from "../../middleware/rbac.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { eventBus } from "../../events/bus.js";
@@ -11,7 +11,8 @@ import {
   createDeal,
   updateDeal,
   deleteDeal,
-  getDealsForPipeline,
+  listDealBoard,
+  listDealStagePage,
   getDealSources,
 } from "./service.js";
 import { activateServiceHandoff, changeDealStage } from "./stage-change.js";
@@ -64,6 +65,32 @@ import {
 } from "./scoping-service.js";
 
 const router = Router();
+
+function readBoardInput(req: Parameters<typeof router.get>[1] extends never ? never : any) {
+  return {
+    role: req.user!.role,
+    userId: req.user!.id,
+    activeOfficeId: req.user!.activeOfficeId ?? req.user!.officeId,
+    scope: (req.query.scope as "mine" | "team" | "all" | undefined) ?? "mine",
+    includeDd: req.query.includeDd === "true",
+  };
+}
+
+function readStageInput(req: Parameters<typeof router.get>[1] extends never ? never : any) {
+  return {
+    ...readBoardInput(req),
+    stageId: req.params.stageId,
+    page: Number(req.query.page ?? 1),
+    pageSize: Number(req.query.pageSize ?? 25),
+    search: req.query.search as string | undefined,
+    sort: req.query.sort as string | undefined,
+    assignedRepId: req.query.assignedRepId as string | undefined,
+    staleOnly: req.query.staleOnly === "true",
+    status: req.query.status as string | undefined,
+    workflowRoute: req.query.workflowRoute as string | undefined,
+    source: req.query.source as string | undefined,
+  };
+}
 
 async function queueDomainEvent(
   tenantDb: any,
@@ -170,16 +197,17 @@ router.get("/sources", async (req, res, next) => {
 // GET /api/deals/pipeline — deals grouped by stage for kanban
 router.get("/pipeline", async (req, res, next) => {
   try {
-    const filters = {
-      assignedRepId: req.query.assignedRepId as string | undefined,
-      includeDd: req.query.includeDd === "true",
-    };
-    const result = await getDealsForPipeline(
-      req.tenantDb!,
-      req.user!.role,
-      req.user!.id,
-      filters
-    );
+    const result = await listDealBoard(req.tenantDb!, readBoardInput(req));
+    await req.commitTransaction!();
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/stages/:stageId", async (req, res, next) => {
+  try {
+    const result = await listDealStagePage(req.tenantDb!, readStageInput(req));
     await req.commitTransaction!();
     res.json(result);
   } catch (err) {
@@ -254,6 +282,90 @@ router.get("/:id/detail", async (req, res, next) => {
     if (!detail) throw new AppError(404, "Deal not found");
     await req.commitTransaction!();
     res.json({ deal: detail });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/deals/:id/payments — cash-received events for commission visibility
+router.get("/:id/payments", async (req, res, next) => {
+  try {
+    const dealId = req.params.id as string;
+    const deal = await getDealById(req.tenantDb!, dealId, req.user!.role, req.user!.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+
+    const payments = await req.tenantDb!
+      .select()
+      .from(dealPaymentEvents)
+      .where(eq(dealPaymentEvents.dealId, dealId))
+      .orderBy(desc(dealPaymentEvents.paidAt));
+
+    await req.commitTransaction!();
+    res.json({ payments });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/deals/:id/payments — record a cash-received event (admin/director only)
+router.post("/:id/payments", requireRole("admin", "director"), async (req, res, next) => {
+  try {
+    const dealId = req.params.id as string;
+    const deal = await getDealById(req.tenantDb!, dealId, req.user!.role, req.user!.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+
+    const paidAt = new Date(String(req.body?.paidAt ?? ""));
+    if (Number.isNaN(paidAt.getTime())) {
+      throw new AppError(400, "paidAt must be a valid ISO date");
+    }
+
+    const grossRevenueAmount = Number(req.body?.grossRevenueAmount);
+    if (!Number.isFinite(grossRevenueAmount)) {
+      throw new AppError(400, "grossRevenueAmount must be a number");
+    }
+    const isCreditMemo = Boolean(req.body?.isCreditMemo ?? false);
+    if (isCreditMemo && grossRevenueAmount >= 0) {
+      throw new AppError(400, "grossRevenueAmount must be negative for credit memos");
+    }
+    if (!isCreditMemo && grossRevenueAmount < 0) {
+      throw new AppError(400, "grossRevenueAmount must be non-negative when not a credit memo");
+    }
+
+    const grossMarginRaw = req.body?.grossMarginAmount;
+    const grossMarginAmount =
+      grossMarginRaw === null || grossMarginRaw === undefined || grossMarginRaw === ""
+        ? null
+        : Number(grossMarginRaw);
+    if (grossMarginAmount !== null && !Number.isFinite(grossMarginAmount)) {
+      throw new AppError(400, "grossMarginAmount must be a number when provided");
+    }
+    if (grossMarginAmount !== null) {
+      if (isCreditMemo && grossMarginAmount >= 0) {
+        throw new AppError(400, "grossMarginAmount must be negative for credit memos");
+      }
+      if (!isCreditMemo && grossMarginAmount < 0) {
+        throw new AppError(400, "grossMarginAmount must be non-negative when not a credit memo");
+      }
+      if (Math.abs(grossMarginAmount) > Math.abs(grossRevenueAmount)) {
+        throw new AppError(400, "grossMarginAmount cannot exceed grossRevenueAmount");
+      }
+    }
+
+    const [payment] = await req.tenantDb!
+      .insert(dealPaymentEvents)
+      .values({
+        dealId,
+        recordedByUserId: req.user!.id,
+        paidAt,
+        grossRevenueAmount: String(grossRevenueAmount),
+        grossMarginAmount: grossMarginAmount === null ? null : String(grossMarginAmount),
+        isCreditMemo,
+        notes: typeof req.body?.notes === "string" ? req.body.notes : null,
+      })
+      .returning();
+
+    await req.commitTransaction!();
+    res.status(201).json({ payment });
   } catch (err) {
     next(err);
   }

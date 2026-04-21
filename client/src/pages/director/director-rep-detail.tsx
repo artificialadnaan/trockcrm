@@ -18,6 +18,7 @@ import {
   Briefcase,
   CheckSquare,
   Activity,
+  DollarSign,
   Target,
   Trophy,
   ArrowLeft,
@@ -116,7 +117,17 @@ export function DirectorRepDetail() {
       </div>
 
       {/* KPI Cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-4">
+        <StatCard
+          title="Earned Commission (12M)"
+          value={formatCurrency(data.commissionSummary.totalEarnedCommission)}
+          subtitle={
+            data.commissionSummary.overrideEarnedCommission > 0
+              ? `${formatCurrency(data.commissionSummary.overrideEarnedCommission)} override`
+              : `${Math.round(data.commissionSummary.newCustomerShare * 100)}% new-customer mix`
+          }
+          icon={<DollarSign className="h-5 w-5" />}
+        />
         <StatCard
           title="Active Deals"
           value={data.activeDeals.count}

@@ -10,6 +10,9 @@ import {
   useRepPerformance,
   type RepPerformanceData,
 } from "@/hooks/use-rep-performance";
+import { useDealBoard } from "@/hooks/use-deals";
+import { useLeadBoard } from "@/hooks/use-leads";
+import { usePipelineBoardState } from "@/hooks/use-pipeline-board-state";
 import { DirectorBlindSpotList } from "@/components/ai/director-blind-spot-list";
 import { PipelineBarChart } from "@/components/charts/pipeline-bar-chart";
 import { WinRateTrendChart } from "@/components/charts/win-rate-trend-chart";
@@ -22,6 +25,7 @@ import { FunnelBucketRow } from "@/components/dashboard/funnel-bucket-row";
 import { DirectorFunnelTable } from "@/components/dashboard/director-funnel-table";
 import { DirectorActivitySummary } from "@/components/dashboard/director-activity-summary";
 import { DirectorAlertPanel } from "@/components/dashboard/director-alert-panel";
+import { DirectorDashboardShell } from "@/components/dashboard/director-dashboard-shell";
 import { DirectorRepWorkspace } from "@/components/dashboard/director-rep-workspace";
 import { DIRECTOR_DASHBOARD_ACTIONS } from "@/lib/director-dashboard-actions";
 
@@ -126,6 +130,12 @@ function DirectorDashboardPageLayout({
   setPreset,
   perfPeriod,
   setPerfPeriod,
+  boardEntity,
+  onBoardEntityChange,
+  dealBoard,
+  leadBoard,
+  boardLoading,
+  boardError,
   NavigationLink,
   onSelectRep,
 }: {
@@ -136,6 +146,12 @@ function DirectorDashboardPageLayout({
   setPreset: (preset: DateRangePreset) => void;
   perfPeriod: "month" | "quarter" | "year";
   setPerfPeriod: (period: "month" | "quarter" | "year") => void;
+  boardEntity: "deals" | "leads";
+  onBoardEntityChange: (entity: "deals" | "leads") => void;
+  dealBoard: ReturnType<typeof useDealBoard>["board"];
+  leadBoard: ReturnType<typeof useLeadBoard>["board"];
+  boardLoading: boolean;
+  boardError: string | null;
   NavigationLink: NavigationLinkComponent;
   onSelectRep: (repId: string) => void;
 }) {
@@ -212,6 +228,15 @@ function DirectorDashboardPageLayout({
           </div>
         </div>
       </header>
+
+      <DirectorDashboardShell
+        boardEntity={boardEntity}
+        onBoardEntityChange={onBoardEntityChange}
+        dealBoard={dealBoard}
+        leadBoard={leadBoard}
+        loading={boardLoading}
+        error={boardError}
+      />
 
       <FunnelBucketRow buckets={data.officeFunnelBuckets} />
 
@@ -415,6 +440,12 @@ function DirectorDashboardPageWithRouter(props: {
   setPreset: (preset: DateRangePreset) => void;
   perfPeriod: "month" | "quarter" | "year";
   setPerfPeriod: (period: "month" | "quarter" | "year") => void;
+  boardEntity: "deals" | "leads";
+  onBoardEntityChange: (entity: "deals" | "leads") => void;
+  dealBoard: ReturnType<typeof useDealBoard>["board"];
+  leadBoard: ReturnType<typeof useLeadBoard>["board"];
+  boardLoading: boolean;
+  boardError: string | null;
 }) {
   const navigate = useNavigate();
 
@@ -439,6 +470,12 @@ function DirectorDashboardPageWithoutRouter(props: {
   setPreset: (preset: DateRangePreset) => void;
   perfPeriod: "month" | "quarter" | "year";
   setPerfPeriod: (period: "month" | "quarter" | "year") => void;
+  boardEntity: "deals" | "leads";
+  onBoardEntityChange: (entity: "deals" | "leads") => void;
+  dealBoard: ReturnType<typeof useDealBoard>["board"];
+  leadBoard: ReturnType<typeof useLeadBoard>["board"];
+  boardLoading: boolean;
+  boardError: string | null;
 }) {
   return (
     <DirectorDashboardPageLayout
@@ -457,9 +494,12 @@ export function DirectorDashboardPage() {
   const [preset, setPreset] = useState<DateRangePreset>("ytd");
   const [perfPeriod, setPerfPeriod] = useState<"month" | "quarter" | "year">("month");
   const inRouterContext = useInRouterContext();
+  const boardState = usePipelineBoardState("deals");
   const dateRange = presetToDateRange(preset);
   const { data, loading, error } = useDirectorDashboard(dateRange);
   const { data: perfData, loading: perfLoading } = useRepPerformance(perfPeriod);
+  const { board: dealBoard, loading: dealBoardLoading, error: dealBoardError } = useDealBoard("team", true);
+  const { board: leadBoard, loading: leadBoardLoading, error: leadBoardError } = useLeadBoard("team");
 
   if (loading) {
     return (
@@ -468,6 +508,7 @@ export function DirectorDashboardPage() {
           <div className="h-8 w-64 animate-pulse rounded bg-gray-200" />
           <div className="h-4 w-80 animate-pulse rounded bg-gray-100" />
         </div>
+        <div className="h-80 animate-pulse rounded-2xl bg-white" />
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
           {Array.from({ length: 4 }).map((_, index) => (
             <div key={index} className="h-28 animate-pulse rounded-2xl bg-white" />
@@ -507,6 +548,12 @@ export function DirectorDashboardPage() {
     setPreset,
     perfPeriod,
     setPerfPeriod,
+    boardEntity: boardState.activeEntity,
+    onBoardEntityChange: boardState.setActiveEntity,
+    dealBoard,
+    leadBoard,
+    boardLoading: boardState.activeEntity === "deals" ? dealBoardLoading : leadBoardLoading,
+    boardError: boardState.activeEntity === "deals" ? dealBoardError : leadBoardError,
   };
 
   return inRouterContext ? (

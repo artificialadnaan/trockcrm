@@ -23,6 +23,26 @@ export interface FunnelBucketSummary {
 export interface RepDashboardData {
   activeLeads: { count: number };
   funnelBuckets: FunnelBucketSummary[];
+  commissionSummary: {
+    commissionRate: number;
+    overrideRate: number;
+    rollingFloor: number;
+    rollingPaidRevenue: number;
+    rollingCommissionableMargin: number;
+    floorRemaining: number;
+    newCustomerRevenue: number;
+    newCustomerShare: number;
+    newCustomerShareFloor: number;
+    meetsNewCustomerShare: boolean;
+    estimatedPaymentCount: number;
+    excludedLowMarginRevenue: number;
+    directEarnedCommission: number;
+    overrideEarnedCommission: number;
+    totalEarnedCommission: number;
+    potentialRevenue: number;
+    potentialMargin: number;
+    potentialCommission: number;
+  };
   activeDeals: { count: number; totalValue: number };
   tasksToday: { overdue: number; today: number };
   activityThisWeek: {
@@ -77,6 +97,26 @@ export interface RepDashboardData {
 const DEFAULT_REP_DASHBOARD_DATA: RepDashboardData = {
   activeLeads: { count: 0 },
   funnelBuckets: [],
+  commissionSummary: {
+    commissionRate: 0,
+    overrideRate: 0,
+    rollingFloor: 0,
+    rollingPaidRevenue: 0,
+    rollingCommissionableMargin: 0,
+    floorRemaining: 0,
+    newCustomerRevenue: 0,
+    newCustomerShare: 0,
+    newCustomerShareFloor: 0,
+    meetsNewCustomerShare: false,
+    estimatedPaymentCount: 0,
+    excludedLowMarginRevenue: 0,
+    directEarnedCommission: 0,
+    overrideEarnedCommission: 0,
+    totalEarnedCommission: 0,
+    potentialRevenue: 0,
+    potentialMargin: 0,
+    potentialCommission: 0,
+  },
   activeDeals: { count: 0, totalValue: 0 },
   tasksToday: { overdue: 0, today: 0 },
   activityThisWeek: { calls: 0, emails: 0, meetings: 0, notes: 0, total: 0 },
@@ -104,6 +144,10 @@ function normalizeRepDashboardData(data: Partial<RepDashboardData> | null | unde
       ...(data?.activeLeads ?? {}),
     },
     funnelBuckets: data?.funnelBuckets ?? [],
+    commissionSummary: {
+      ...DEFAULT_REP_DASHBOARD_DATA.commissionSummary,
+      ...(data?.commissionSummary ?? {}),
+    },
     activeDeals: {
       ...DEFAULT_REP_DASHBOARD_DATA.activeDeals,
       ...(data?.activeDeals ?? {}),

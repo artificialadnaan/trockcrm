@@ -1,3 +1,4 @@
+import { RepDashboardBoardShell } from "@/components/dashboard/rep-dashboard-board-shell";
 import { useRepDashboard } from "@/hooks/use-dashboard";
 import { useAuth } from "@/lib/auth";
 import { useNavigate } from "react-router-dom";
@@ -9,6 +10,9 @@ import { useTasks } from "@/hooks/use-tasks";
 import { TaskSection } from "@/components/tasks/task-section";
 import { FunnelBucketRow } from "@/components/dashboard/funnel-bucket-row";
 import { MyCleanupCard } from "@/components/dashboard/my-cleanup-card";
+import { useDealBoard } from "@/hooks/use-deals";
+import { useLeadBoard } from "@/hooks/use-leads";
+import { usePipelineBoardState } from "@/hooks/use-pipeline-board-state";
 import {
   ArrowUpRight,
   Briefcase,
@@ -109,7 +113,10 @@ function SnapshotCard({
 export function RepDashboardPage() {
   const { user } = useAuth();
   const navigate = useNavigate();
+  const boardState = usePipelineBoardState("deals");
   const { data, loading, error } = useRepDashboard();
+  const { board: dealBoard, loading: dealBoardLoading, error: dealBoardError } = useDealBoard("mine", true);
+  const { board: leadBoard, loading: leadBoardLoading, error: leadBoardError } = useLeadBoard("mine");
   const { tasks: overdueTasks, refetch: refetchOverdue } = useTasks({ section: "overdue", limit: 50 });
   const { tasks: todayTasks, refetch: refetchToday } = useTasks({ section: "today", limit: 50 });
   const firstName = user?.displayName?.split(" ")[0] ?? "there";
@@ -185,6 +192,15 @@ export function RepDashboardPage() {
         description={`Here is your live sales cockpit for ${currentYear}.`}
       />
 
+      <RepDashboardBoardShell
+        activeEntity={boardState.activeEntity}
+        onEntityChange={boardState.setActiveEntity}
+        dealBoard={dealBoard}
+        leadBoard={leadBoard}
+        loading={boardState.activeEntity === "deals" ? dealBoardLoading : leadBoardLoading}
+        error={boardState.activeEntity === "deals" ? dealBoardError : leadBoardError}
+      />
+
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1.4fr)_minmax(320px,0.9fr)]">
         <Card className="overflow-hidden border-slate-200 bg-[linear-gradient(135deg,#0f172a_0%,#1e293b_55%,#334155_100%)] text-white">
           <CardContent className="p-6">
@@ -197,7 +213,7 @@ export function RepDashboardPage() {
                   Your book is live. Work the queue, protect follow-ups, and keep forecast fields current.
                 </h2>
                 <p className="max-w-xl text-sm leading-relaxed text-slate-300">
-                  This view now blends task pressure, cleanup pressure, and current pipeline movement into one place so you can move from triage into selling without hunting through pages.
+                  This view blends board movement, task pressure, cleanup pressure, and current pipeline movement into one place so you can move from triage into selling without hunting through pages.
                 </p>
               </div>
               <div className="grid min-w-[260px] gap-3 sm:grid-cols-2">
