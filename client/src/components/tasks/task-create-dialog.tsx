@@ -79,10 +79,10 @@ export function TaskCreateDialog({
 
   useEffect(() => {
     if (!open) return;
-    if (canAssign && !assignedTo && user?.id) {
+    if (isProjectScoped && canAssign && !assignedTo && user?.id) {
       setAssignedTo(user.id);
     }
-  }, [assignedTo, canAssign, open, user?.id]);
+  }, [assignedTo, canAssign, isProjectScoped, open, user?.id]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
