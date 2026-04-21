@@ -12,7 +12,12 @@ import {
 import type * as schema from "@trock-crm/shared/schema";
 import type { WorkflowFamily } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
+import {
+  type LeadQualificationPatch,
+  upsertLeadQualification,
+} from "./qualification-service.js";
 import { getStageById } from "../pipeline/service.js";
+import { validateLeadStageGate } from "./stage-gate.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -46,6 +51,13 @@ export interface UpdateLeadInput {
   source?: string | null;
   description?: string | null;
   status?: "open" | "disqualified";
+  estimatedOpportunityValue?: string | null;
+  goDecision?: "go" | "no_go" | null;
+  goDecisionNotes?: string | null;
+  qualificationData?: Record<string, unknown>;
+  scopingSubsetData?: Record<string, unknown>;
+  disqualificationReason?: string | null;
+  disqualificationNotes?: string | null;
 }
 
 interface LeadServiceDependencies {
@@ -317,11 +329,25 @@ export function createLeadService(
     }
 
     const updates: Record<string, unknown> = {};
+    const qualificationPatch: LeadQualificationPatch = {};
+    let hasQualificationPatch = false;
 
     if (input.stageId !== undefined) {
       const stage = await deps.getStageById(input.stageId, "lead");
       if (!stage) {
         throw new AppError(400, "Invalid lead stage ID");
+      }
+      if (input.stageId !== existing.stageId) {
+        const gate = await validateLeadStageGate(
+          tenantDb,
+          leadId,
+          input.stageId,
+          userRole,
+          userId
+        );
+        if (!gate.allowed) {
+          throw new AppError(403, gate.blockReason ?? "Lead stage change not allowed");
+        }
       }
       updates.stageId = input.stageId;
       updates.stageEnteredAt = deps.now();
@@ -343,6 +369,35 @@ export function createLeadService(
     if (input.source !== undefined) updates.source = input.source;
     if (input.description !== undefined) updates.description = input.description;
 
+    if (input.estimatedOpportunityValue !== undefined) {
+      qualificationPatch.estimatedOpportunityValue = input.estimatedOpportunityValue;
+      hasQualificationPatch = true;
+    }
+    if (input.goDecision !== undefined) {
+      qualificationPatch.goDecision = input.goDecision;
+      hasQualificationPatch = true;
+    }
+    if (input.goDecisionNotes !== undefined) {
+      qualificationPatch.goDecisionNotes = input.goDecisionNotes;
+      hasQualificationPatch = true;
+    }
+    if (input.qualificationData !== undefined) {
+      qualificationPatch.qualificationData = input.qualificationData;
+      hasQualificationPatch = true;
+    }
+    if (input.scopingSubsetData !== undefined) {
+      qualificationPatch.scopingSubsetData = input.scopingSubsetData;
+      hasQualificationPatch = true;
+    }
+    if (input.disqualificationReason !== undefined) {
+      qualificationPatch.disqualificationReason = input.disqualificationReason;
+      hasQualificationPatch = true;
+    }
+    if (input.disqualificationNotes !== undefined) {
+      qualificationPatch.disqualificationNotes = input.disqualificationNotes;
+      hasQualificationPatch = true;
+    }
+
     if (input.status !== undefined) {
       if (input.status === "open" || input.status === "disqualified") {
         updates.status = input.status;
@@ -352,17 +407,23 @@ export function createLeadService(
       }
     }
 
+    if (Object.keys(updates).length === 0 && !hasQualificationPatch) {
+      return existing;
+    }
+
+    if (Object.keys(updates).length > 0) {
+      updates.updatedAt = deps.now();
+    }
+
+    if (hasQualificationPatch) {
+      await upsertLeadQualification(tenantDb, leadId, qualificationPatch);
+    }
+
     if (Object.keys(updates).length === 0) {
       return existing;
     }
 
-    updates.updatedAt = deps.now();
-
-    const [lead] = await tenantDb
-      .update(leads)
-      .set(updates)
-      .where(eq(leads.id, leadId))
-      .returning();
+    const [lead] = await tenantDb.update(leads).set(updates).where(eq(leads.id, leadId)).returning();
 
     return lead;
   }

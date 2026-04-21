@@ -8,6 +8,7 @@ import {
   updateLead,
 } from "./service.js";
 import { convertLead } from "./conversion-service.js";
+import { preflightLeadStageCheck } from "./stage-gate.js";
 
 const router = Router();
 
@@ -98,6 +99,24 @@ router.patch("/:id", async (req, res, next) => {
 
     await req.commitTransaction!();
     res.json({ lead });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/leads/:id/stage/preflight
+router.post("/:id/stage/preflight", async (req, res, next) => {
+  try {
+    const result = await preflightLeadStageCheck(
+      req.tenantDb!,
+      req.params.id,
+      req.body.targetStageId,
+      req.user!.role,
+      req.user!.id
+    );
+
+    await req.commitTransaction!();
+    res.json(result);
   } catch (err) {
     next(err);
   }
