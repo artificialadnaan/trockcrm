@@ -3,16 +3,19 @@
 
 import { Router } from "express";
 import { eq, and, sql } from "drizzle-orm";
-import { procoreSyncState } from "@trock-crm/shared/schema";
+import { jobQueue, procoreSyncState } from "@trock-crm/shared/schema";
+import { TASK_PRIORITIES, TASK_TYPES } from "@trock-crm/shared/types";
 import { requireRole } from "../../middleware/rbac.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { db } from "../../db.js";
+import { eventBus } from "../../events/bus.js";
 import {
   isProcoreOauthRefreshError,
   isProcoreOauthRequiredError,
   procoreClient,
 } from "../../lib/procore-client.js";
 import { listProjectValidationForOffice } from "./project-validation-service.js";
+import { createTask, getProjectTaskScope, getProjectTasks } from "../tasks/service.js";
 
 const router = Router();
 
@@ -278,5 +281,127 @@ router.get("/my-projects/:id", async (req, res, next) => {
     next(err);
   }
 });
+
+// GET /api/procore/my-projects/:id/tasks — project-scoped task list
+router.get("/my-projects/:id/tasks", async (req, res, next) => {
+  try {
+    const project = await getProjectTaskScope(
+      req.tenantDb!,
+      req.params.id,
+      req.user!.role,
+      req.user!.id
+    );
+    if (!project) {
+      throw new AppError(404, "Project not found");
+    }
+
+    const tasks = await getProjectTasks(
+      req.tenantDb!,
+      req.params.id,
+      req.user!.role,
+      req.user!.id
+    );
+
+    await req.commitTransaction!();
+    res.json({ tasks });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/procore/my-projects/:id/tasks — create project-scoped task
+router.post(
+  "/my-projects/:id/tasks",
+  requireRole("admin", "director"),
+  async (req, res, next) => {
+    try {
+      const projectId = req.params.id as string;
+      const { title, description, type, priority, assignedTo, dueDate, dueTime, remindAt } = req.body;
+
+      if (!title) throw new AppError(400, "Title is required");
+      if (priority && !TASK_PRIORITIES.includes(priority)) {
+        throw new AppError(400, `Invalid priority. Must be one of: ${TASK_PRIORITIES.join(", ")}`);
+      }
+      if (type && !TASK_TYPES.includes(type)) {
+        throw new AppError(400, `Invalid task type. Must be one of: ${TASK_TYPES.join(", ")}`);
+      }
+
+      const project = await getProjectTaskScope(
+        req.tenantDb!,
+        projectId,
+        req.user!.role,
+        req.user!.id
+      );
+      if (!project) {
+        throw new AppError(404, "Project not found");
+      }
+
+      const targetAssignee = assignedTo ?? req.user!.id;
+      const task = await createTask(req.tenantDb!, {
+        title,
+        description,
+        type: type ?? "manual",
+        priority,
+        assignedTo: targetAssignee,
+        createdBy: req.user!.id,
+        dealId: projectId,
+        dueDate,
+        dueTime,
+        remindAt,
+      });
+
+      if (targetAssignee !== req.user!.id) {
+        await req.tenantDb!.insert(jobQueue).values({
+          jobType: "domain_event",
+          payload: {
+            eventName: "task.assigned",
+            taskId: task.id,
+            assignedTo: targetAssignee,
+            title: task.title,
+          },
+          officeId: req.user!.activeOfficeId ?? req.user!.officeId,
+          status: "pending",
+          runAfter: new Date(),
+        });
+      }
+
+      await req.tenantDb!.insert(jobQueue).values({
+        jobType: "ai_refresh_copilot",
+        payload: {
+          dealId: task.dealId,
+          reason: "task_created",
+          taskId: task.id,
+        },
+        officeId: req.user!.activeOfficeId ?? req.user!.officeId,
+        status: "pending",
+        runAfter: new Date(),
+      });
+
+      await req.commitTransaction!();
+
+      if (targetAssignee !== req.user!.id) {
+        try {
+          eventBus.emitLocal({
+            name: "task.assigned",
+            payload: {
+              taskId: task.id,
+              assignedTo: targetAssignee,
+              title: task.title,
+            },
+            officeId: req.user!.activeOfficeId ?? req.user!.officeId,
+            userId: req.user!.id,
+            timestamp: new Date(),
+          });
+        } catch (eventErr) {
+          console.error("[Tasks] Failed to emit task.assigned event:", eventErr);
+        }
+      }
+
+      res.status(201).json({ task });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
 
 export const procoreRoutes = router;

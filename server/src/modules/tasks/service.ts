@@ -1,6 +1,6 @@
-import { eq, and, desc, asc, sql, or, isNull, inArray } from "drizzle-orm";
+import { eq, and, desc, asc, sql, or, isNull, isNotNull, inArray } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
-import { taskResolutionState, tasks } from "@trock-crm/shared/schema";
+import { deals, taskResolutionState, tasks } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
 import { TASK_RULES } from "./rules/config.js";
@@ -371,6 +371,89 @@ export async function getTasks(
     tasks: taskRows,
     pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
   };
+}
+
+export async function getProjectTaskScope(
+  tenantDb: TenantDb,
+  dealId: string,
+  userRole: string,
+  userId: string
+) {
+  const conditions = [
+    eq(deals.id, dealId),
+    eq(deals.isActive, true),
+    isNotNull(deals.procoreProjectId),
+  ];
+
+  if (userRole === "rep") {
+    conditions.push(eq(deals.assignedRepId, userId));
+  }
+
+  const [project] = await tenantDb
+    .select({
+      id: deals.id,
+      dealNumber: deals.dealNumber,
+      name: deals.name,
+      procoreProjectId: deals.procoreProjectId,
+    })
+    .from(deals)
+    .where(and(...conditions))
+    .limit(1);
+
+  return project ?? null;
+}
+
+export async function getProjectTasks(
+  tenantDb: TenantDb,
+  dealId: string,
+  userRole: string,
+  userId: string
+) {
+  const project = await getProjectTaskScope(tenantDb, dealId, userRole, userId);
+  if (!project) {
+    throw new AppError(404, "Project not found");
+  }
+
+  const priorityRank = sql<number>`CASE ${tasks.priority}
+    WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 WHEN 'low' THEN 3 ELSE 4
+  END`;
+  const taskColumns = tasks as typeof tasks & {
+    scheduledFor: typeof tasks.dueDate;
+    waitingOn: typeof tasks.dueDate;
+    blockedBy: typeof tasks.dueDate;
+    startedAt: typeof tasks.createdAt;
+  };
+  const assignedToName = sql<string | null>`(SELECT display_name FROM public.users WHERE id = ${tasks.assignedTo})`.as("assignedToName");
+
+  return tenantDb
+    .select({
+      id: tasks.id,
+      title: tasks.title,
+      description: tasks.description,
+      type: tasks.type,
+      priority: tasks.priority,
+      status: tasks.status,
+      assignedTo: tasks.assignedTo,
+      assignedToName,
+      createdBy: tasks.createdBy,
+      dealId: tasks.dealId,
+      contactId: tasks.contactId,
+      emailId: tasks.emailId,
+      dueDate: tasks.dueDate,
+      dueTime: tasks.dueTime,
+      remindAt: tasks.remindAt,
+      scheduledFor: taskColumns.scheduledFor,
+      waitingOn: taskColumns.waitingOn,
+      blockedBy: taskColumns.blockedBy,
+      startedAt: taskColumns.startedAt,
+      completedAt: tasks.completedAt,
+      isOverdue: tasks.isOverdue,
+      createdAt: tasks.createdAt,
+      updatedAt: tasks.updatedAt,
+    })
+    .from(tasks)
+    .where(eq(tasks.dealId, dealId))
+    .orderBy(desc(tasks.isOverdue), asc(priorityRank), asc(tasks.dueDate), asc(tasks.title));
 }
 
 /**
