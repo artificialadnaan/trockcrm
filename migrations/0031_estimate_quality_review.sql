@@ -42,13 +42,6 @@ BEGIN
 
     EXECUTE format(
       'UPDATE %I.estimate_pricing_recommendations AS recommendations
-          SET generation_run_id = recommendations.created_by_run_id
-        WHERE recommendations.generation_run_id IS NULL',
-      schema_name
-    );
-
-    EXECUTE format(
-      'UPDATE %I.estimate_pricing_recommendations AS recommendations
           SET normalized_intent = COALESCE(extractions.normalized_label, extractions.raw_label, recommendations.source_row_identity, ''''),
               source_row_identity = COALESCE(
                 recommendations.source_row_identity,
@@ -80,8 +73,7 @@ BEGIN
          ALTER COLUMN source_type SET DEFAULT ''extracted'',
          ALTER COLUMN source_type SET NOT NULL,
          ALTER COLUMN normalized_intent SET NOT NULL,
-         ALTER COLUMN source_row_identity SET NOT NULL,
-         ALTER COLUMN generation_run_id SET NOT NULL',
+         ALTER COLUMN source_row_identity SET NOT NULL',
       schema_name
     );
 
@@ -168,10 +160,6 @@ ALTER TABLE estimate_pricing_recommendations
   ADD COLUMN IF NOT EXISTS override_unit_price NUMERIC(14, 2),
   ADD COLUMN IF NOT EXISTS override_notes TEXT;
 
-UPDATE estimate_pricing_recommendations
-   SET generation_run_id = created_by_run_id
- WHERE generation_run_id IS NULL;
-
 UPDATE estimate_pricing_recommendations AS recommendations
    SET normalized_intent = COALESCE(extractions.normalized_label, extractions.raw_label, recommendations.source_row_identity, ''),
        source_row_identity = COALESCE(
@@ -196,8 +184,7 @@ ALTER TABLE estimate_pricing_recommendations
   ALTER COLUMN source_type SET DEFAULT 'extracted',
   ALTER COLUMN source_type SET NOT NULL,
   ALTER COLUMN normalized_intent SET NOT NULL,
-  ALTER COLUMN source_row_identity SET NOT NULL,
-  ALTER COLUMN generation_run_id SET NOT NULL;
+  ALTER COLUMN source_row_identity SET NOT NULL;
 
 ALTER TABLE estimate_pricing_recommendations
   DROP CONSTRAINT IF EXISTS estimate_pricing_recommendations_run_source_uidx;

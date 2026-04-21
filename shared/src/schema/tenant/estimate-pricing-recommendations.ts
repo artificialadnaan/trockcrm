@@ -32,9 +32,9 @@ export const estimatePricingRecommendations = pgTable(
     sourceType: text("source_type").default("extracted").notNull(),
     normalizedIntent: text("normalized_intent").notNull(),
     sourceRowIdentity: text("source_row_identity").notNull(),
-    createdByRunId: uuid("generation_run_id")
-      .references(() => estimateGenerationRuns.id, { onDelete: "cascade" })
-      .notNull(),
+    createdByRunId: uuid("generation_run_id").references(() => estimateGenerationRuns.id, {
+      onDelete: "cascade",
+    }),
     manualOrigin: text("manual_origin"),
     selectedSourceType: text("selected_source_type"),
     selectedOptionId: uuid("selected_option_id"),
