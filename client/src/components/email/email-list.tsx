@@ -1,9 +1,11 @@
 import { useState } from "react";
 import DOMPurify from "dompurify";
 import { Mail } from "lucide-react";
+import { toast } from "sonner";
 import { EmailRow } from "./email-row";
 import { EmailThreadView } from "./email-thread-view";
-import type { Email, Pagination } from "@/hooks/use-emails";
+import { EmailManualAssignmentDialog } from "./email-manual-assignment-dialog";
+import { associateEmailToEntity, type Email, type Pagination } from "@/hooks/use-emails";
 import { Button } from "@/components/ui/button";
 
 interface EmailListProps {
@@ -24,6 +26,17 @@ export function EmailList({
   emptyMessage = "No emails yet",
 }: EmailListProps) {
   const [selectedEmail, setSelectedEmail] = useState<Email | null>(null);
+  const [manualDialogOpen, setManualDialogOpen] = useState(false);
+
+  function handleSelectEmail(email: Email) {
+    setManualDialogOpen(false);
+    setSelectedEmail(email);
+  }
+
+  function handleBackToList() {
+    setManualDialogOpen(false);
+    setSelectedEmail(null);
+  }
 
   if (loading) {
     return (
@@ -52,9 +65,14 @@ export function EmailList({
     // Single email view (no conversation ID)
     return (
       <div className="space-y-4">
-        <Button variant="ghost" size="sm" onClick={() => setSelectedEmail(null)}>
+        <Button variant="ghost" size="sm" onClick={handleBackToList}>
           Back to list
         </Button>
+        <div className="flex justify-end">
+          <Button variant="outline" size="sm" onClick={() => setManualDialogOpen(true)}>
+            Reassign email
+          </Button>
+        </div>
         <div className="border rounded-lg p-4">
           <div className="flex justify-between items-start mb-3">
             <div>
@@ -77,6 +95,16 @@ export function EmailList({
             }}
           />
         </div>
+        <EmailManualAssignmentDialog
+          open={manualDialogOpen}
+          onOpenChange={setManualDialogOpen}
+          title="Reassign email"
+          description="Attach this email to a different deal, lead, contact, company, or property."
+          onAssign={async (target) => {
+            await associateEmailToEntity(selectedEmail.id, target);
+            toast.success("Email reassigned");
+          }}
+        />
       </div>
     );
   }
@@ -97,7 +125,7 @@ export function EmailList({
           <EmailRow
             key={email.id}
             email={email}
-            onClick={setSelectedEmail}
+            onClick={handleSelectEmail}
           />
         ))}
       </div>

@@ -25,6 +25,7 @@ vi.mock("@/hooks/use-deals", () => ({
 
 vi.mock("@/hooks/use-emails", () => ({
   useEmailThread: (...args: unknown[]) => useEmailThreadMock(...args),
+  associateEmailToEntity: vi.fn(),
   assignEmailThread: vi.fn(),
   reassignEmailThread: vi.fn(),
   detachEmailThread: vi.fn(),
@@ -77,6 +78,7 @@ describe("EmailThreadView", () => {
 
     expect(html).toContain("Thread is not assigned to a deal");
     expect(html).toContain("Assign to Deal");
+    expect(html).toContain("Reassign email");
     expect(html).toContain("Need help");
   });
 
@@ -115,5 +117,6 @@ describe("EmailThreadView", () => {
     expect(html).toContain("Project Alpha");
     expect(html).toContain("Reassign");
     expect(html).toContain("Detach");
+    expect(html).toContain("Reassign email");
   });
 });
