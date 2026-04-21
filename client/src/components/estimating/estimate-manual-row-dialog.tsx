@@ -309,6 +309,54 @@ export function EstimateManualRowDialog({
                   Selected catalog option: {selectedCatalogOption.optionLabel}
                 </div>
               ) : null}
+
+              <div className="grid gap-3 sm:grid-cols-3">
+                <div className="grid gap-2">
+                  <Label htmlFor="catalog-row-quantity">Quantity</Label>
+                  <Input
+                    id="catalog-row-quantity"
+                    value={draft.quantity}
+                    onChange={(event) =>
+                      setDraft((current) => ({ ...current, quantity: event.target.value }))
+                    }
+                    placeholder="2"
+                  />
+                </div>
+                <div className="grid gap-2">
+                  <Label htmlFor="catalog-row-unit">Unit</Label>
+                  <Input
+                    id="catalog-row-unit"
+                    value={draft.unit}
+                    onChange={(event) =>
+                      setDraft((current) => ({ ...current, unit: event.target.value }))
+                    }
+                    placeholder="ea"
+                  />
+                </div>
+                <div className="grid gap-2">
+                  <Label htmlFor="catalog-row-unit-price">Unit price</Label>
+                  <Input
+                    id="catalog-row-unit-price"
+                    value={draft.unitPrice}
+                    onChange={(event) =>
+                      setDraft((current) => ({ ...current, unitPrice: event.target.value }))
+                    }
+                    placeholder="125.00"
+                  />
+                </div>
+              </div>
+
+              <div className="grid gap-2">
+                <Label htmlFor="catalog-row-notes">Notes</Label>
+                <Textarea
+                  id="catalog-row-notes"
+                  value={draft.notes}
+                  onChange={(event) =>
+                    setDraft((current) => ({ ...current, notes: event.target.value }))
+                  }
+                  placeholder="Optional estimator notes"
+                />
+              </div>
             </div>
           ) : (
             <div className="grid gap-3 rounded-lg border bg-muted/20 p-3">

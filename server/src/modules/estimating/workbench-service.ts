@@ -116,9 +116,21 @@ function hasManualPromotionValues(row: EstimatePricingRecommendationRow) {
   return Boolean(quantity && unitPrice);
 }
 
-function normalizeOptionalNumericString(value: string | null | undefined) {
+function normalizeOptionalNumericString(
+  value: string | null | undefined,
+  fieldLabel = "Value"
+) {
   const trimmed = value?.trim();
-  return trimmed && trimmed.length > 0 ? trimmed : null;
+  if (!trimmed) {
+    return null;
+  }
+
+  const sanitized = trimmed.replace(/,/g, "");
+  if (!/^-?\d+(\.\d+)?$/.test(sanitized)) {
+    throw new AppError(400, `${fieldLabel} must be a valid number`);
+  }
+
+  return sanitized;
 }
 
 function isActiveParseArtifact(
@@ -402,8 +414,14 @@ export async function updateEstimatePricingRecommendationReviewState(args: {
       if (!args.input.reason?.trim()) {
         throw new AppError(400, "Override reason is required");
       }
-      const overrideUnitPrice = normalizeOptionalNumericString(args.input.recommendedUnitPrice);
-      const overrideTotalPrice = normalizeOptionalNumericString(args.input.recommendedTotalPrice);
+      const overrideUnitPrice = normalizeOptionalNumericString(
+        args.input.recommendedUnitPrice,
+        "Override unit price"
+      );
+      const overrideTotalPrice = normalizeOptionalNumericString(
+        args.input.recommendedTotalPrice,
+        "Override total price"
+      );
       if (!overrideUnitPrice || !overrideTotalPrice) {
         throw new AppError(400, "Override price and total are required");
       }

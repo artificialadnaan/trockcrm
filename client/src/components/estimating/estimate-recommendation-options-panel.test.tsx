@@ -224,6 +224,8 @@ describe("EstimateRecommendationOptionsPanel", () => {
     expect(html).toContain("Use free-text/manual row instead");
     expect(html).toContain("Walk-in door kit");
     expect(html).toContain("Door hardware");
+    expect(html).toContain("Quantity");
+    expect(html).toContain("Unit price");
   });
 
   it("blocks manual-row creation without active generation-run context", () => {

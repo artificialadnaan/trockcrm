@@ -34,7 +34,8 @@ function makeTenantDb(results: any[]) {
       .mockReturnValueOnce(makeJoinQueryResult(results[2]))
       .mockReturnValueOnce(makeQueryResult(results[3]))
       .mockReturnValueOnce(makeQueryResult(results[4]))
-      .mockReturnValueOnce(makeQueryResult(results[5] ?? [])),
+      .mockReturnValueOnce(makeQueryResult(results[5] ?? []))
+      .mockReturnValueOnce(makeQueryResult(results[6] ?? [])),
   } as any;
 }
 
@@ -97,6 +98,7 @@ describe("buildEstimatingWorkbenchState", () => {
         },
       ],
       [{ id: "event-1" }],
+      [],
       [
         {
           id: "option-1",
@@ -516,6 +518,47 @@ describe("updateEstimatePricingRecommendationReviewState", () => {
         },
       })
     ).rejects.toThrow("Override price and total are required");
+  });
+
+  it("rejects overrides that provide malformed numeric values", async () => {
+    const tenantDb = {
+      select: vi.fn().mockReturnValueOnce({
+        from: vi.fn(() => ({
+          where: vi.fn(() => ({
+            limit: vi.fn().mockResolvedValue([
+              {
+                id: "rec-override-invalid",
+                dealId: "deal-1",
+                status: "pending_review",
+                selectedSourceType: null,
+                selectedOptionId: null,
+                recommendedUnitPrice: "10.00",
+                recommendedTotalPrice: "20.00",
+                overrideQuantity: null,
+                overrideUnit: null,
+                overrideUnitPrice: null,
+                overrideNotes: null,
+              },
+            ]),
+          })),
+        })),
+      }),
+    } as any;
+
+    await expect(
+      updateEstimatePricingRecommendationReviewState({
+        tenantDb,
+        dealId: "deal-1",
+        recommendationId: "rec-override-invalid",
+        userId: "user-1",
+        input: {
+          action: "override",
+          recommendedUnitPrice: "12x",
+          recommendedTotalPrice: "24.00",
+          reason: "Need manual pricing",
+        },
+      })
+    ).rejects.toThrow("Override unit price must be a valid number");
   });
 
   it("records catalog option provenance when accepting the recommended option", async () => {
