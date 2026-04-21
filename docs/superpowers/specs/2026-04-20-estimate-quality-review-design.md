@@ -160,6 +160,7 @@ Parent recommendation rows should carry:
 - current review status
 - selected option id
 - selected source type
+- catalog backing type
 - promotable flag
 - promoted estimate line item id, nullable until promotion
 - inference rationale summary for inferred rows
@@ -173,6 +174,10 @@ Required linkage fields:
 - `source_row_identity`
 - `generation_run_id`
 - `selected_option_id`, nullable until selection exists
+- `catalog_backing` with allowed values:
+  - `procore_synced`
+  - `local_promoted`
+  - `estimate_only`
 - `promoted_estimate_line_item_id`, nullable until promotion exists
 - `manual_label`, nullable unless `source_type = 'manual'`
 - `manual_quantity`, nullable unless `source_type = 'manual'`
@@ -194,7 +199,7 @@ Required option-row linkage fields:
 - `option_kind`:
   - `recommended`
   - `alternate`
-  - `manual_custom`
+  - `manual_custom` (only for manual rows that are catalog-backed alternatives, not free-text estimate-only rows)
 
 Uniqueness and refresh rules:
 
@@ -203,6 +208,17 @@ Uniqueness and refresh rules:
 - rerunning generation creates a new generation run and a new recommendation set rather than mutating prior runs in place
 - dedupe within a single generation run uses the duplicate suppression rules in this spec
 - promotion idempotency is enforced by `promoted_estimate_line_item_id`; a row with that field set must not promote again
+
+Manual row storage contract:
+
+- manual free-text rows are persisted on the parent recommendation row (`manual_*` fields)
+- for manual free-text rows:
+  - `catalog_backing = 'estimate_only'`
+  - `selected_option_id = null`
+- if a manual row is catalog-backed or later mapped to catalog alternatives:
+  - keep parent `manual_*` fields as the estimator-authored baseline
+  - store catalog candidates as child option rows
+  - set `selected_option_id` when a catalog candidate is chosen
 
 `source_row_identity` definition:
 
@@ -372,6 +388,12 @@ Concrete promote action:
 - accept, alternate select, and override do not auto-promote
 - the explicit promote action writes canonical estimate lines for the current promotable set or a selected subset
 
+Post-promotion edit rule for this slice:
+
+- once `promoted_estimate_line_item_id` is set, review-selection and override actions on that recommendation row are blocked
+- changing a promoted row requires an explicit reopen flow in a later slice; reopening is out of scope here
+- this keeps canonical estimate lines and workbench state from diverging in this slice
+
 Promotable review states:
 
 - `accepted`
@@ -395,7 +417,9 @@ Allowed actions:
   - keeps audit evidence but removes it from promotable output
 - add missing item:
   - creates a new parent recommendation row with `source_type = 'manual'`
-  - optionally links it to a catalog-backed option or stores it as `estimate_only`
+  - persists estimator-entered manual fields on the parent row
+  - optionally links it to catalog-backed child options
+  - uses `catalog_backing = 'estimate_only'` when no catalog option is selected
 - promote custom row to local catalog:
   - creates a reusable local catalog item
   - does not itself promote the line into the canonical estimate model
