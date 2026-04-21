@@ -338,6 +338,7 @@ export async function updateManualEstimateRow(args: {
     : requestedCatalogSelection
       ? "manual"
       : "manual";
+  const persistedSelectedSourceType = selectedSourceType === "catalog_option" ? "catalog_option" : "manual";
   const catalogBacking =
     args.input.catalogBacking ??
     (selectedOption?.localCatalogItemId
@@ -354,9 +355,12 @@ export async function updateManualEstimateRow(args: {
     manualUnit: args.input.manualUnit ?? existing.manualUnit,
     manualUnitPrice: args.input.manualUnitPrice ?? existing.manualUnitPrice,
     manualNotes: args.input.manualNotes ?? existing.manualNotes,
-    selectedSourceType: selectedSourceType === "catalog_option" ? "catalog_option" : "manual",
-    selectedOptionId: args.input.selectedOptionId ?? existing.selectedOptionId ?? null,
-    catalogBacking: selectedSourceType === "catalog_option" ? catalogBacking : "estimate_only",
+    selectedSourceType: persistedSelectedSourceType,
+    selectedOptionId:
+      persistedSelectedSourceType === "catalog_option"
+        ? args.input.selectedOptionId ?? existing.selectedOptionId ?? null
+        : null,
+    catalogBacking: persistedSelectedSourceType === "catalog_option" ? catalogBacking : "estimate_only",
     evidenceJson: {
       ...(existing.evidenceJson as Record<string, unknown>),
       sectionName:
@@ -370,11 +374,6 @@ export async function updateManualEstimateRow(args: {
       manualNotes: args.input.manualNotes ?? existing.manualNotes ?? null,
     },
   };
-
-  if (selectedSourceType === "manual" && args.input.selectedOptionId == null) {
-    patch.selectedOptionId = null;
-    patch.catalogBacking = "estimate_only";
-  }
 
   const updateQuery = args.tenantDb
     .update(estimatePricingRecommendations)

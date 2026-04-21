@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { and, eq, isNotNull } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
@@ -17,12 +18,12 @@ export type PromoteManualRowToLocalCatalogInput = {
 };
 
 function buildSyntheticLocalCatalogItem(args: {
-  recommendationId: string;
+  localCatalogItemId: string;
   manualLabel: string | null;
   values: ReturnType<typeof resolveManualPromotionValues>;
 }) {
   return {
-    id: `${args.recommendationId}:local-catalog`,
+    id: args.localCatalogItemId,
     sourceType: "local_promoted",
     name: args.manualLabel ?? args.values.description,
     description: args.values.notes ?? null,
@@ -78,7 +79,7 @@ export async function promoteManualRowToLocalCatalog(args: {
     return {
       recommendation: existing,
       localCatalogItem: buildSyntheticLocalCatalogItem({
-        recommendationId: existing.id,
+        localCatalogItemId: existing.promotedLocalCatalogItemId,
         manualLabel: existing.manualLabel,
         values,
       }),
@@ -134,7 +135,7 @@ export async function promoteManualRowToLocalCatalog(args: {
     return {
       recommendation: updated,
       localCatalogItem: buildSyntheticLocalCatalogItem({
-        recommendationId: updated.id,
+        localCatalogItemId: updated.promotedLocalCatalogItemId,
         manualLabel: updated.manualLabel,
         values,
       }),
@@ -153,7 +154,7 @@ export async function promoteManualRowToLocalCatalog(args: {
     overrideNotes: args.input.overrideNotes ?? existing.overrideNotes,
   });
 
-  const promotedLocalCatalogItemId = `${existing.id}:local-catalog`;
+  const promotedLocalCatalogItemId = randomUUID();
 
   const [updated] = await args.tenantDb
     .update(estimatePricingRecommendations)
@@ -177,10 +178,9 @@ export async function promoteManualRowToLocalCatalog(args: {
   return {
     recommendation: updated,
     localCatalogItem: buildSyntheticLocalCatalogItem({
-      recommendationId: updated.id,
+      localCatalogItemId: updated.promotedLocalCatalogItemId,
       manualLabel: updated.manualLabel,
       values,
     }),
   };
 }
-
