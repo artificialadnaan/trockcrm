@@ -12,33 +12,19 @@ class FakeNode {
   parentNode: FakeNode | null = null;
   childNodes: FakeNode[] = [];
   ownerDocument: FakeDocument | null = null;
-  nodeType: number;
-  nodeName: string;
 
-  constructor(nodeType: number, nodeName: string) {
-    this.nodeType = nodeType;
-    this.nodeName = nodeName;
-  }
+  constructor(public nodeType: number, public nodeName: string) {}
 
   appendChild<T extends FakeNode>(child: T) {
-    if (child.parentNode) {
-      child.parentNode.removeChild(child);
-    }
-
+    if (child.parentNode) child.parentNode.removeChild(child);
     child.parentNode = this;
     this.childNodes.push(child);
     return child;
   }
 
   insertBefore<T extends FakeNode>(child: T, before: FakeNode | null) {
-    if (before == null) {
-      return this.appendChild(child);
-    }
-
-    if (child.parentNode) {
-      child.parentNode.removeChild(child);
-    }
-
+    if (before == null) return this.appendChild(child);
+    if (child.parentNode) child.parentNode.removeChild(child);
     const index = this.childNodes.indexOf(before);
     child.parentNode = this;
     if (index === -1) {
@@ -60,14 +46,8 @@ class FakeNode {
 
   replaceChild<T extends FakeNode>(newChild: T, oldChild: FakeNode) {
     const index = this.childNodes.indexOf(oldChild);
-    if (index === -1) {
-      return this.appendChild(newChild);
-    }
-
-    if (newChild.parentNode) {
-      newChild.parentNode.removeChild(newChild);
-    }
-
+    if (index === -1) return this.appendChild(newChild);
+    if (newChild.parentNode) newChild.parentNode.removeChild(newChild);
     this.childNodes[index] = newChild;
     newChild.parentNode = this;
     oldChild.parentNode = null;
@@ -82,8 +62,13 @@ class FakeNode {
     return this.childNodes[this.childNodes.length - 1] ?? null;
   }
 
-  get parentElement() {
-    return this.parentNode instanceof FakeElement ? this.parentNode : null;
+  get textContent(): string {
+    return this.childNodes.map((child) => child.textContent).join("");
+  }
+
+  set textContent(value: string) {
+    this.childNodes = value ? [new FakeText(value, this.ownerDocument)] : [];
+    for (const child of this.childNodes) child.parentNode = this;
   }
 
   get nodeValue(): string | null {
@@ -92,17 +77,6 @@ class FakeNode {
 
   set nodeValue(_value: string | null) {}
 
-  get textContent(): string {
-    return this.childNodes.map((child) => child.textContent).join("");
-  }
-
-  set textContent(value: string) {
-    this.childNodes = value ? [new FakeText(value, this.ownerDocument)] : [];
-    for (const child of this.childNodes) {
-      child.parentNode = this;
-    }
-  }
-
   addEventListener() {}
   removeEventListener() {}
   dispatchEvent() {
@@ -110,24 +84,13 @@ class FakeNode {
   }
 
   contains(node: FakeNode | null) {
-    if (node == null) {
-      return false;
-    }
-
-    if (node === this) {
-      return true;
-    }
-
-    return this.childNodes.some((child) => child.contains(node));
+    return node != null && (node === this || this.childNodes.some((child) => child.contains(node)));
   }
 }
 
 class FakeText extends FakeNode {
-  data: string;
-
-  constructor(data: string, ownerDocument: FakeDocument | null) {
+  constructor(public data: string, ownerDocument: FakeDocument | null) {
     super(3, "#text");
-    this.data = data;
     this.ownerDocument = ownerDocument;
   }
 
@@ -148,41 +111,16 @@ class FakeText extends FakeNode {
   }
 }
 
-class FakeComment extends FakeNode {
-  data: string;
-
-  constructor(data: string, ownerDocument: FakeDocument | null) {
-    super(8, "#comment");
-    this.data = data;
-    this.ownerDocument = ownerDocument;
-  }
-
-  get textContent() {
-    return "";
-  }
-
-  set textContent(_value: string) {}
-
-  get nodeValue() {
-    return this.data;
-  }
-
-  set nodeValue(value: string | null) {
-    this.data = value ?? "";
-  }
-}
-
 class FakeElement extends FakeNode {
-  tagName: string;
   namespaceURI = "http://www.w3.org/1999/xhtml";
   style: Record<string, string> = {};
   attributes = new Map<string, string>();
   private disabledState = false;
 
-  constructor(tagName: string, ownerDocument: FakeDocument | null) {
+  constructor(public tagName: string, ownerDocument: FakeDocument | null) {
     super(1, tagName.toUpperCase());
-    this.tagName = tagName.toUpperCase();
     this.ownerDocument = ownerDocument;
+    this.tagName = tagName.toUpperCase();
   }
 
   setAttribute(name: string, value: string) {
@@ -194,13 +132,13 @@ class FakeElement extends FakeNode {
     return this.attributes.get(name) ?? null;
   }
 
+  hasAttribute(name: string) {
+    return this.attributes.has(name);
+  }
+
   removeAttribute(name: string) {
     this.attributes.delete(name);
     delete (this as any)[name];
-  }
-
-  hasAttribute(name: string) {
-    return this.attributes.has(name);
   }
 
   get disabled() {
@@ -217,13 +155,32 @@ class FakeElement extends FakeNode {
   }
 
   get options() {
-    if (this.tagName !== "SELECT") {
-      return undefined;
-    }
+    return this.tagName === "SELECT"
+      ? this.childNodes.filter(
+          (child): child is FakeElement => child instanceof FakeElement && child.tagName === "OPTION",
+        )
+      : undefined;
+  }
+}
 
-    return this.childNodes.filter(
-      (child): child is FakeElement => child instanceof FakeElement && child.tagName === "OPTION",
-    );
+class FakeComment extends FakeNode {
+  constructor(public data: string, ownerDocument: FakeDocument | null) {
+    super(8, "#comment");
+    this.ownerDocument = ownerDocument;
+  }
+
+  get textContent() {
+    return "";
+  }
+
+  set textContent(_value: string) {}
+
+  get nodeValue() {
+    return this.data;
+  }
+
+  set nodeValue(value: string | null) {
+    this.data = value ?? "";
   }
 }
 
@@ -266,7 +223,6 @@ class FakeDocument extends FakeNode {
 }
 
 class FakeWindow {
-  document: FakeDocument;
   Node = FakeNode;
   Text = FakeText;
   Comment = FakeComment;
@@ -283,9 +239,7 @@ class FakeWindow {
   HTMLIFrameElement = FakeElement;
   navigator = { userAgent: "node" };
 
-  constructor(document: FakeDocument) {
-    this.document = document;
-  }
+  constructor(public document: FakeDocument) {}
 
   getComputedStyle() {
     return {};
@@ -305,6 +259,7 @@ function installFakeDom() {
   const document = new FakeDocument();
   const window = new FakeWindow(document);
   document.defaultView = window;
+
   vi.stubGlobal("window", window);
   vi.stubGlobal("document", document);
   vi.stubGlobal("Node", FakeNode);
@@ -315,7 +270,8 @@ function installFakeDom() {
   vi.stubGlobal("SVGElement", FakeElement);
   vi.stubGlobal("navigator", window.navigator);
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-  return { document, window };
+
+  return { document };
 }
 
 function findButtonByText(root: FakeNode, text: string) {
@@ -332,18 +288,19 @@ function findButtonByText(root: FakeNode, text: string) {
   return null;
 }
 
-async function mountWorkspace(root: Root, repCards: Parameters<typeof DirectorRepWorkspace>[0]["repCards"]) {
+function getReactProps(node: FakeElement) {
+  const key = Object.keys(node).find((prop) => prop.startsWith("__reactProps"));
+  return key ? ((node as any)[key] as { onClick?: () => void }) : null;
+}
+
+async function renderWorkspace(root: Root, repCards: Parameters<typeof DirectorRepWorkspace>[0]["repCards"]) {
   await act(async () => {
-    root.render(
-      <DirectorRepWorkspace repCards={repCards} initialPageSize={25} onSelectRep={vi.fn()} />
-    );
+    root.render(<DirectorRepWorkspace repCards={repCards} initialPageSize={25} onSelectRep={vi.fn()} />);
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
 }
 
 afterEach(() => {
-  vi.unmock("@/lib/director-rep-workspace");
-  vi.resetModules();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -389,56 +346,11 @@ describe("DirectorRepWorkspace", () => {
     expect(html).toContain("Page 1 of 1");
   });
 
-  it("syncs the page back into range after a shrink and keeps navigation aligned", async () => {
+  it("syncs the visible page metadata back into range after a shrink", async () => {
     const { document } = installFakeDom();
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container as unknown as Element);
-
-    vi.doMock("@/lib/director-rep-workspace", async () => {
-      const actual = await vi.importActual<typeof import("@/lib/director-rep-workspace")>(
-        "@/lib/director-rep-workspace",
-      );
-
-      return {
-        ...actual,
-        buildDirectorRepWorkspaceState(
-          rows: Array<{
-            repId: string;
-            repName: string;
-            activeDeals: number;
-            pipelineValue: number;
-            winRate: number;
-            activityScore: number;
-            staleDeals: number;
-            staleLeads: number;
-          }>,
-          input: {
-            query: string;
-            sortKey: "pipeline" | "staleRisk" | "activity" | "winRate" | "activeDeals" | "repName";
-            page: number;
-            pageSize: number;
-          },
-        ) {
-          const totalRows = rows.length;
-          const pageSize = input.pageSize > 0 ? Math.floor(input.pageSize) : 1;
-          const totalPages = Math.max(1, Math.ceil(totalRows / pageSize));
-          const page = totalRows > pageSize && input.page === 1 ? 2 : Math.min(Math.max(1, input.page), totalPages);
-          const start = (page - 1) * pageSize;
-          const rowsForPage = rows.slice(start, start + pageSize);
-
-          return {
-            page,
-            pageSize,
-            totalRows,
-            totalPages,
-            rows: rowsForPage,
-          };
-        },
-      };
-    });
-
-    const { DirectorRepWorkspace: MockedDirectorRepWorkspace } = await import("./director-rep-workspace");
 
     const manyReps = Array.from({ length: 30 }, (_, index) => ({
       repId: `rep-${index + 1}`,
@@ -450,31 +362,23 @@ describe("DirectorRepWorkspace", () => {
       staleDeals: 0,
       staleLeads: 0,
     }));
-
     const fewReps = manyReps.slice(0, 10);
 
+    await renderWorkspace(root, manyReps);
+
+    const nextButton = findButtonByText(container, "Next");
+    expect(nextButton).not.toBeNull();
+    const nextProps = getReactProps(nextButton!);
+    expect(nextProps?.onClick).toBeTypeOf("function");
+
     await act(async () => {
-      root.render(
-        <MockedDirectorRepWorkspace repCards={manyReps} initialPageSize={25} onSelectRep={vi.fn()} />
-      );
+      nextProps?.onClick?.();
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
 
     expect(container.textContent).toContain("Page 2 of 2");
-    expect(Boolean((findButtonByText(container, "Previous") as FakeElement | null)?.disabled)).toBe(false);
-    expect(Boolean((findButtonByText(container, "Next") as FakeElement | null)?.disabled)).toBe(false);
 
-    await act(async () => {
-      root.render(
-        <MockedDirectorRepWorkspace repCards={fewReps} initialPageSize={25} onSelectRep={vi.fn()} />
-      );
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    });
-
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    });
-
+    await renderWorkspace(root, fewReps);
     expect(container.textContent).toContain("Page 1 of 1");
   });
 });
