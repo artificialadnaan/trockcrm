@@ -130,9 +130,9 @@ BEGIN
          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
          CONSTRAINT estimate_market_adjustment_rules_scope_type_check
-           CHECK (scope_type IN ('global', 'metro', 'state', 'region')),
+           CHECK (scope_type IN ('general', 'division', 'trade')),
          CONSTRAINT estimate_market_adjustment_rules_fallback_scope_type_check
-           CHECK (fallback_scope_type IS NULL OR fallback_scope_type IN ('global', 'metro', 'state', 'region')),
+           CHECK (fallback_scope_type IS NULL OR fallback_scope_type IN ('general', 'division', 'trade')),
          CONSTRAINT estimate_market_adjustment_rules_fallback_pair_check
            CHECK (
              (fallback_scope_type IS NULL AND fallback_scope_key IS NULL) OR
@@ -259,7 +259,7 @@ BEGIN
        )
        SELECT
          NULL,
-         ''global'',
+         ''general'',
          ''default'',
          NULL,
          NULL,
@@ -387,9 +387,9 @@ CREATE TABLE IF NOT EXISTS estimate_market_adjustment_rules (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   CONSTRAINT estimate_market_adjustment_rules_scope_type_check
-    CHECK (scope_type IN ('global', 'metro', 'state', 'region')),
+    CHECK (scope_type IN ('general', 'division', 'trade')),
   CONSTRAINT estimate_market_adjustment_rules_fallback_scope_type_check
-    CHECK (fallback_scope_type IS NULL OR fallback_scope_type IN ('global', 'metro', 'state', 'region')),
+    CHECK (fallback_scope_type IS NULL OR fallback_scope_type IN ('general', 'division', 'trade')),
   CONSTRAINT estimate_market_adjustment_rules_fallback_pair_check
     CHECK (
       (fallback_scope_type IS NULL AND fallback_scope_key IS NULL) OR
@@ -454,7 +454,7 @@ INSERT INTO estimate_market_fallback_geographies (
   resolution_key,
   is_active
 )
-SELECT id, 'global', 'default', TRUE
+  SELECT id, 'general', 'default', TRUE
   FROM estimate_markets
  WHERE slug = 'default'
 ON CONFLICT (resolution_type, resolution_key)
@@ -481,10 +481,10 @@ INSERT INTO estimate_market_adjustment_rules (
   effective_to,
   is_active
 )
-SELECT
-  NULL,
-  'global',
-  'default',
+  SELECT
+    NULL,
+    'general',
+    'default',
   NULL,
   NULL,
   0,

@@ -31,6 +31,10 @@ describe("estimating market-rate migration contract", () => {
     expect(tenantSql).toContain("VALUES ('Default Market', 'default', 'global', NULL, NULL, TRUE)");
     expect(tenantSql).toContain("CREATE TABLE IF NOT EXISTS estimate_market_fallback_geographies");
     expect(tenantSql).toContain("CREATE TABLE IF NOT EXISTS estimate_market_adjustment_rules");
+    expect(tenantSql).toContain("CHECK (scope_type IN ('general', 'division', 'trade'))");
+    expect(tenantSql).toContain("CHECK (fallback_scope_type IS NULL OR fallback_scope_type IN ('general', 'division', 'trade'))");
+    expect(tenantSql).toContain("SELECT");
+    expect(tenantSql).toContain("'general',");
     expect(tenantSql).toContain("ON CONFLICT (scope_type, scope_key, effective_from) WHERE market_id IS NULL");
     expect(tenantSql).toContain("deal_id UUID NOT NULL REFERENCES deals(id) ON DELETE CASCADE");
     expect(tenantSql).not.toContain("estimate_deals(id)");

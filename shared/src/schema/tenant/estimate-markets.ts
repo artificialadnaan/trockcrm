@@ -167,11 +167,11 @@ export const estimateMarketAdjustmentRules = pgTable(
     ),
     check(
       "estimate_market_adjustment_rules_scope_type_check",
-      sql`${table.scopeType} in ('global', 'metro', 'state', 'region')`
+      sql`${table.scopeType} in ('general', 'division', 'trade')`
     ),
     check(
       "estimate_market_adjustment_rules_fallback_scope_type_check",
-      sql`${table.fallbackScopeType} is null or ${table.fallbackScopeType} in ('global', 'metro', 'state', 'region')`
+      sql`${table.fallbackScopeType} is null or ${table.fallbackScopeType} in ('general', 'division', 'trade')`
     ),
     check(
       "estimate_market_adjustment_rules_fallback_pair_check",

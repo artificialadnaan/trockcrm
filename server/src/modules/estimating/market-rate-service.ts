@@ -70,23 +70,47 @@ function isRuleActiveAt(rule: MarketAdjustmentRuleRecord, asOf: Date) {
   return effectiveFrom <= asOf && (effectiveTo == null || effectiveTo >= asOf);
 }
 
+function isGeneralDefaultScope(rule: MarketAdjustmentRuleRecord) {
+  return rule.scopeType === "general" && rule.scopeKey === "default";
+}
+
+function isMatchingPricingScope(
+  rule: MarketAdjustmentRuleRecord,
+  pricingScopeType: MarketAdjustmentSelectionInput["pricingScopeType"],
+  pricingScopeKey: string
+) {
+  return rule.scopeType === pricingScopeType && rule.scopeKey === pricingScopeKey;
+}
+
+function isMatchingFallbackPricingScope(
+  rule: MarketAdjustmentRuleRecord,
+  pricingScopeType: MarketAdjustmentSelectionInput["pricingScopeType"],
+  pricingScopeKey: string
+) {
+  return (
+    rule.fallbackScopeType === pricingScopeType && rule.fallbackScopeKey === pricingScopeKey
+  );
+}
+
 function getRuleTier(
   rule: MarketAdjustmentRuleRecord,
   marketId: string | null,
   pricingScopeType: MarketAdjustmentSelectionInput["pricingScopeType"],
   pricingScopeKey: string
 ) {
-  const exactScope = rule.scopeType === pricingScopeType && rule.scopeKey === pricingScopeKey;
-  const fallbackScope =
-    rule.fallbackScopeType === pricingScopeType && rule.fallbackScopeKey === pricingScopeKey;
+  const exactScope = isMatchingPricingScope(rule, pricingScopeType, pricingScopeKey);
+  const fallbackScope = isMatchingFallbackPricingScope(rule, pricingScopeType, pricingScopeKey);
+  const generalDefault = isGeneralDefaultScope(rule);
   const marketSpecific = marketId != null && rule.marketId === marketId;
   const globalRule = rule.marketId == null;
 
   if (marketSpecific && exactScope) return 0;
   if (marketSpecific && fallbackScope) return 1;
-  if (globalRule && exactScope) return 2;
-  if (globalRule && fallbackScope) return 3;
-  return 4;
+  if (marketSpecific && generalDefault) return 2;
+  if (globalRule && exactScope) return 3;
+  if (globalRule && fallbackScope) return 4;
+  if (globalRule && generalDefault) return 5;
+  return 6;
 }
 
 function compareRules(
@@ -205,7 +229,15 @@ export async function selectBestMarketAdjustmentRule(
   });
 
   return [...rules]
-    .filter((rule) => rule.isActive && isRuleActiveAt(rule, asOf))
+    .filter(
+      (rule) =>
+        rule.isActive &&
+        isRuleActiveAt(rule, asOf) &&
+        (isMatchingPricingScope(rule, input.pricingScopeType, input.pricingScopeKey) ||
+          isMatchingFallbackPricingScope(rule, input.pricingScopeType, input.pricingScopeKey) ||
+          isGeneralDefaultScope(rule) ||
+          (rule.fallbackScopeType === "general" && rule.fallbackScopeKey === "default"))
+    )
     .sort((a, b) =>
       compareRules(a, b, input.marketId, input.pricingScopeType, input.pricingScopeKey)
     )[0] ?? null;

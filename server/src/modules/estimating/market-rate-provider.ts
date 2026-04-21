@@ -16,6 +16,22 @@ export type MarketAdjustmentRuleRecord = typeof estimateMarketAdjustmentRules.$i
 export type MarketResolutionType = "global" | "metro" | "state" | "region";
 export type PricingScopeType = "division" | "trade" | "general";
 
+export interface MarketRateProviderTables {
+  estimateDealMarketOverrides: typeof estimateDealMarketOverrides;
+  estimateMarketAdjustmentRules: typeof estimateMarketAdjustmentRules;
+  estimateMarketFallbackGeographies: typeof estimateMarketFallbackGeographies;
+  estimateMarketZipMappings: typeof estimateMarketZipMappings;
+  estimateMarkets: typeof estimateMarkets;
+}
+
+const defaultTables: MarketRateProviderTables = {
+  estimateDealMarketOverrides,
+  estimateMarketAdjustmentRules,
+  estimateMarketFallbackGeographies,
+  estimateMarketZipMappings,
+  estimateMarkets,
+};
+
 export interface MarketRateProvider {
   findDealMarketOverride(dealId: string): Promise<MarketIdentity | null>;
   findMarketByZip(zip: string): Promise<MarketIdentity | null>;
@@ -36,6 +52,31 @@ function normalizeZip(zip: string) {
   return zip.trim();
 }
 
+function buildPricingScopeCandidateFilter(input: {
+  pricingScopeType: PricingScopeType;
+  pricingScopeKey: string;
+  estimateMarketAdjustmentRulesTable: MarketRateProviderTables["estimateMarketAdjustmentRules"];
+}) {
+  return or(
+    and(
+      eq(input.estimateMarketAdjustmentRulesTable.scopeType, input.pricingScopeType),
+      eq(input.estimateMarketAdjustmentRulesTable.scopeKey, input.pricingScopeKey)
+    ),
+    and(
+      eq(input.estimateMarketAdjustmentRulesTable.fallbackScopeType, input.pricingScopeType),
+      eq(input.estimateMarketAdjustmentRulesTable.fallbackScopeKey, input.pricingScopeKey)
+    ),
+    and(
+      eq(input.estimateMarketAdjustmentRulesTable.scopeType, "general"),
+      eq(input.estimateMarketAdjustmentRulesTable.scopeKey, "default")
+    ),
+    and(
+      eq(input.estimateMarketAdjustmentRulesTable.fallbackScopeType, "general"),
+      eq(input.estimateMarketAdjustmentRulesTable.fallbackScopeKey, "default")
+    )
+  );
+}
+
 function mapMarketIdentity(row: typeof estimateMarkets.$inferSelect | null | undefined): MarketIdentity | null {
   return row
     ? {
@@ -52,28 +93,31 @@ function mapMarketIdentity(row: typeof estimateMarkets.$inferSelect | null | und
     : null;
 }
 
-export function createMarketRateProvider(tenantDb: TenantDb): MarketRateProvider {
+export function createMarketRateProvider(
+  tenantDb: TenantDb,
+  tables: MarketRateProviderTables = defaultTables
+): MarketRateProvider {
   return {
     async findDealMarketOverride(dealId: string) {
       const [row] = await tenantDb
         .select({
-          id: estimateMarkets.id,
-          name: estimateMarkets.name,
-          slug: estimateMarkets.slug,
-          type: estimateMarkets.type,
-          stateCode: estimateMarkets.stateCode,
-          regionId: estimateMarkets.regionId,
-          isActive: estimateMarkets.isActive,
-          createdAt: estimateMarkets.createdAt,
-          updatedAt: estimateMarkets.updatedAt,
+          id: tables.estimateMarkets.id,
+          name: tables.estimateMarkets.name,
+          slug: tables.estimateMarkets.slug,
+          type: tables.estimateMarkets.type,
+          stateCode: tables.estimateMarkets.stateCode,
+          regionId: tables.estimateMarkets.regionId,
+          isActive: tables.estimateMarkets.isActive,
+          createdAt: tables.estimateMarkets.createdAt,
+          updatedAt: tables.estimateMarkets.updatedAt,
         })
-        .from(estimateDealMarketOverrides)
-        .innerJoin(estimateMarkets, eq(estimateDealMarketOverrides.marketId, estimateMarkets.id))
+        .from(tables.estimateDealMarketOverrides)
+        .innerJoin(tables.estimateMarkets, eq(tables.estimateDealMarketOverrides.marketId, tables.estimateMarkets.id))
         .where(
           and(
-            eq(estimateDealMarketOverrides.dealId, dealId),
-            eq(estimateDealMarketOverrides.marketId, estimateMarkets.id),
-            eq(estimateMarkets.isActive, true)
+            eq(tables.estimateDealMarketOverrides.dealId, dealId),
+            eq(tables.estimateDealMarketOverrides.marketId, tables.estimateMarkets.id),
+            eq(tables.estimateMarkets.isActive, true)
           )
         )
         .limit(1);
@@ -84,23 +128,23 @@ export function createMarketRateProvider(tenantDb: TenantDb): MarketRateProvider
     async findMarketByZip(zip: string) {
       const [row] = await tenantDb
         .select({
-          id: estimateMarkets.id,
-          name: estimateMarkets.name,
-          slug: estimateMarkets.slug,
-          type: estimateMarkets.type,
-          stateCode: estimateMarkets.stateCode,
-          regionId: estimateMarkets.regionId,
-          isActive: estimateMarkets.isActive,
-          createdAt: estimateMarkets.createdAt,
-          updatedAt: estimateMarkets.updatedAt,
+          id: tables.estimateMarkets.id,
+          name: tables.estimateMarkets.name,
+          slug: tables.estimateMarkets.slug,
+          type: tables.estimateMarkets.type,
+          stateCode: tables.estimateMarkets.stateCode,
+          regionId: tables.estimateMarkets.regionId,
+          isActive: tables.estimateMarkets.isActive,
+          createdAt: tables.estimateMarkets.createdAt,
+          updatedAt: tables.estimateMarkets.updatedAt,
         })
-        .from(estimateMarketZipMappings)
-        .innerJoin(estimateMarkets, eq(estimateMarketZipMappings.marketId, estimateMarkets.id))
+        .from(tables.estimateMarketZipMappings)
+        .innerJoin(tables.estimateMarkets, eq(tables.estimateMarketZipMappings.marketId, tables.estimateMarkets.id))
         .where(
           and(
-            eq(estimateMarketZipMappings.zip, normalizeZip(zip)),
-            eq(estimateMarketZipMappings.isActive, true),
-            eq(estimateMarkets.isActive, true)
+            eq(tables.estimateMarketZipMappings.zip, normalizeZip(zip)),
+            eq(tables.estimateMarketZipMappings.isActive, true),
+            eq(tables.estimateMarkets.isActive, true)
           )
         )
         .limit(1);
@@ -111,24 +155,27 @@ export function createMarketRateProvider(tenantDb: TenantDb): MarketRateProvider
     async findMarketByFallbackGeography(input) {
       const [row] = await tenantDb
         .select({
-          id: estimateMarkets.id,
-          name: estimateMarkets.name,
-          slug: estimateMarkets.slug,
-          type: estimateMarkets.type,
-          stateCode: estimateMarkets.stateCode,
-          regionId: estimateMarkets.regionId,
-          isActive: estimateMarkets.isActive,
-          createdAt: estimateMarkets.createdAt,
-          updatedAt: estimateMarkets.updatedAt,
+          id: tables.estimateMarkets.id,
+          name: tables.estimateMarkets.name,
+          slug: tables.estimateMarkets.slug,
+          type: tables.estimateMarkets.type,
+          stateCode: tables.estimateMarkets.stateCode,
+          regionId: tables.estimateMarkets.regionId,
+          isActive: tables.estimateMarkets.isActive,
+          createdAt: tables.estimateMarkets.createdAt,
+          updatedAt: tables.estimateMarkets.updatedAt,
         })
-        .from(estimateMarketFallbackGeographies)
-        .innerJoin(estimateMarkets, eq(estimateMarketFallbackGeographies.marketId, estimateMarkets.id))
+        .from(tables.estimateMarketFallbackGeographies)
+        .innerJoin(
+          tables.estimateMarkets,
+          eq(tables.estimateMarketFallbackGeographies.marketId, tables.estimateMarkets.id)
+        )
         .where(
           and(
-            eq(estimateMarketFallbackGeographies.resolutionType, input.resolutionType),
-            eq(estimateMarketFallbackGeographies.resolutionKey, input.resolutionKey),
-            eq(estimateMarketFallbackGeographies.isActive, true),
-            eq(estimateMarkets.isActive, true)
+            eq(tables.estimateMarketFallbackGeographies.resolutionType, input.resolutionType),
+            eq(tables.estimateMarketFallbackGeographies.resolutionKey, input.resolutionKey),
+            eq(tables.estimateMarketFallbackGeographies.isActive, true),
+            eq(tables.estimateMarkets.isActive, true)
           )
         )
         .limit(1);
@@ -139,24 +186,27 @@ export function createMarketRateProvider(tenantDb: TenantDb): MarketRateProvider
     async getDefaultMarket() {
       return tenantDb
         .select({
-          id: estimateMarkets.id,
-          name: estimateMarkets.name,
-          slug: estimateMarkets.slug,
-          type: estimateMarkets.type,
-          stateCode: estimateMarkets.stateCode,
-          regionId: estimateMarkets.regionId,
-          isActive: estimateMarkets.isActive,
-          createdAt: estimateMarkets.createdAt,
-          updatedAt: estimateMarkets.updatedAt,
+          id: tables.estimateMarkets.id,
+          name: tables.estimateMarkets.name,
+          slug: tables.estimateMarkets.slug,
+          type: tables.estimateMarkets.type,
+          stateCode: tables.estimateMarkets.stateCode,
+          regionId: tables.estimateMarkets.regionId,
+          isActive: tables.estimateMarkets.isActive,
+          createdAt: tables.estimateMarkets.createdAt,
+          updatedAt: tables.estimateMarkets.updatedAt,
         })
-        .from(estimateMarketFallbackGeographies)
-        .innerJoin(estimateMarkets, eq(estimateMarketFallbackGeographies.marketId, estimateMarkets.id))
+        .from(tables.estimateMarketFallbackGeographies)
+        .innerJoin(
+          tables.estimateMarkets,
+          eq(tables.estimateMarketFallbackGeographies.marketId, tables.estimateMarkets.id)
+        )
         .where(
           and(
-            eq(estimateMarketFallbackGeographies.resolutionType, "global"),
-            eq(estimateMarketFallbackGeographies.resolutionKey, "default"),
-            eq(estimateMarketFallbackGeographies.isActive, true),
-            eq(estimateMarkets.isActive, true)
+            eq(tables.estimateMarketFallbackGeographies.resolutionType, "global"),
+            eq(tables.estimateMarketFallbackGeographies.resolutionKey, "default"),
+            eq(tables.estimateMarketFallbackGeographies.isActive, true),
+            eq(tables.estimateMarkets.isActive, true)
           )
         )
         .limit(1)
@@ -165,31 +215,29 @@ export function createMarketRateProvider(tenantDb: TenantDb): MarketRateProvider
 
     async listMarketAdjustmentRules(input) {
       const marketFilter = input.marketId
-        ? or(isNull(estimateMarketAdjustmentRules.marketId), eq(estimateMarketAdjustmentRules.marketId, input.marketId))
-        : isNull(estimateMarketAdjustmentRules.marketId);
+        ? or(
+            isNull(tables.estimateMarketAdjustmentRules.marketId),
+            eq(tables.estimateMarketAdjustmentRules.marketId, input.marketId)
+          )
+        : isNull(tables.estimateMarketAdjustmentRules.marketId);
 
       return tenantDb
         .select()
-        .from(estimateMarketAdjustmentRules)
+        .from(tables.estimateMarketAdjustmentRules)
         .where(
           and(
-            eq(estimateMarketAdjustmentRules.isActive, true),
-            lte(estimateMarketAdjustmentRules.effectiveFrom, input.asOf),
+            eq(tables.estimateMarketAdjustmentRules.isActive, true),
+            lte(tables.estimateMarketAdjustmentRules.effectiveFrom, input.asOf),
             or(
-              isNull(estimateMarketAdjustmentRules.effectiveTo),
-              gte(estimateMarketAdjustmentRules.effectiveTo, input.asOf)
+              isNull(tables.estimateMarketAdjustmentRules.effectiveTo),
+              gte(tables.estimateMarketAdjustmentRules.effectiveTo, input.asOf)
             ),
             marketFilter,
-            or(
-              and(
-                eq(estimateMarketAdjustmentRules.scopeType, input.pricingScopeType),
-                eq(estimateMarketAdjustmentRules.scopeKey, input.pricingScopeKey)
-              ),
-              and(
-                eq(estimateMarketAdjustmentRules.fallbackScopeType, input.pricingScopeType),
-                eq(estimateMarketAdjustmentRules.fallbackScopeKey, input.pricingScopeKey)
-              )
-            )
+            buildPricingScopeCandidateFilter({
+              pricingScopeType: input.pricingScopeType,
+              pricingScopeKey: input.pricingScopeKey,
+              estimateMarketAdjustmentRulesTable: tables.estimateMarketAdjustmentRules,
+            })
           )
         );
     },

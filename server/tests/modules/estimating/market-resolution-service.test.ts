@@ -86,7 +86,7 @@ describe("resolveMarketContext", () => {
       dealId: "deal-1",
       dealZip: "76102",
       dealState: "TX",
-      regionId: "region-1",
+      dealRegionId: "region-1",
     });
 
     expect(result.market.id).toBe("market-state");

@@ -1,5 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  estimateDealMarketOverrides,
+  estimateMarketAdjustmentRules,
+  estimateMarketFallbackGeographies,
+  estimateMarketZipMappings,
+  estimateMarkets,
+} from "../../../../shared/src/schema/index.js";
+import { createMarketRateProvider } from "../../../src/modules/estimating/market-rate-provider.js";
+import {
   calculateMarketRateAdjustment,
   selectBestMarketAdjustmentRule,
 } from "../../../src/modules/estimating/market-rate-service.js";
@@ -26,10 +34,28 @@ function makeRule(input: Partial<Record<string, unknown>> & { id: string }) {
   } as any;
 }
 
+function createDbWithRules(rows: any[]) {
+  return {
+    select: vi.fn(() => ({
+      from: vi.fn(() => ({
+        where: vi.fn().mockResolvedValue(rows),
+      })),
+    })),
+  } as any;
+}
+
+const providerTables = {
+  estimateDealMarketOverrides,
+  estimateMarketAdjustmentRules,
+  estimateMarketFallbackGeographies,
+  estimateMarketZipMappings,
+  estimateMarkets,
+};
+
 describe("market-rate-service", () => {
   it("chooses an exact market and pricing scope match over broader fallback rules", async () => {
-    const provider = {
-      listMarketAdjustmentRules: vi.fn().mockResolvedValue([
+    const provider = createMarketRateProvider(
+      createDbWithRules([
         makeRule({
           id: "global-broad",
           marketId: null,
@@ -45,7 +71,8 @@ describe("market-rate-service", () => {
           priority: 0,
         }),
       ]),
-    } as any;
+      providerTables
+    );
 
     const result = await selectBestMarketAdjustmentRule(provider, {
       marketId: "market-1",
@@ -55,6 +82,30 @@ describe("market-rate-service", () => {
     });
 
     expect(result?.id).toBe("market-exact");
+  });
+
+  it("reaches the broad default pricing rule through the provider path", async () => {
+    const provider = createMarketRateProvider(
+      createDbWithRules([
+        makeRule({
+          id: "broad-default",
+          marketId: null,
+          scopeType: "general",
+          scopeKey: "default",
+          priority: 0,
+        }),
+      ]),
+      providerTables
+    );
+
+    const result = await selectBestMarketAdjustmentRule(provider, {
+      marketId: "market-1",
+      pricingScopeType: "division",
+      pricingScopeKey: "07",
+      asOf: new Date("2026-04-21T00:00:00Z"),
+    });
+
+    expect(result?.id).toBe("broad-default");
   });
 
   it("filters out expired rules before selecting the best match", async () => {
