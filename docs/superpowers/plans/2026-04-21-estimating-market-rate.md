@@ -26,8 +26,8 @@
   Responsibility: set, clear, and audit estimator market overrides.
 - Modify: `server/src/modules/estimating/pricing-service.ts`
   Responsibility: apply market-rate adjustment helpers and shared pricing math.
-- Modify: `server/src/modules/estimating/draft-estimate-service.ts`
-  Responsibility: persist market-rate-enriched pricing recommendations through the real generation path.
+- Create: `server/src/modules/estimating/recommendation-persistence-service.ts`
+  Responsibility: provide a shared persistence helper for market-rate-enriched recommendation writes used by the worker generation path.
 - Modify: `worker/src/jobs/estimate-generation.ts`
   Responsibility: wire market resolution and market-rate enrichment into the production estimate-generation job.
 - Modify: `server/src/modules/estimating/workbench-service.ts`
@@ -40,8 +40,8 @@
   Responsibility: verify rule selection, component adjustments, and rationale output.
 - Modify: `server/tests/modules/estimating/pricing-service.test.ts`
   Responsibility: verify market-rate helper math and fallback behavior.
-- Modify: `server/tests/modules/estimating/draft-estimate-service.test.ts`
-  Responsibility: verify stored pricing recommendations persist market-rate-enriched values and rationale.
+- Create: `server/tests/modules/estimating/recommendation-persistence-service.test.ts`
+  Responsibility: verify persisted recommendation rows carry market-rate-enriched values and rationale.
 - Modify: `server/tests/modules/estimating/workbench-service.test.ts`
   Responsibility: verify workbench state exposes market context and evidence.
 - Modify: `server/tests/modules/estimating/workflow-state-routes.test.ts`
@@ -150,10 +150,10 @@
 
 **Files:**
 - Modify: `server/src/modules/estimating/pricing-service.ts`
-- Modify: `server/src/modules/estimating/draft-estimate-service.ts`
+- Create: `server/src/modules/estimating/recommendation-persistence-service.ts`
 - Modify: `worker/src/jobs/estimate-generation.ts`
 - Modify: `server/tests/modules/estimating/pricing-service.test.ts`
-- Modify: `server/tests/modules/estimating/draft-estimate-service.test.ts`
+- Create: `server/tests/modules/estimating/recommendation-persistence-service.test.ts`
 - Modify: `worker/tests/jobs/estimate-generation.test.ts`
 
 - [ ] **Step 1: Write failing pricing-service tests for market-rate enrichment**
@@ -162,8 +162,9 @@
   - component adjustments change the recommended unit price
   - rationale includes market-rate context when helper math is applied
   - fallback geography still produces an adjusted recommendation
+  - the old hardcoded regional adjustment path is replaced so geography is applied from one source only
 
-- [ ] **Step 2: Write failing draft-estimate-service tests for persisted market-rate recommendations**
+- [ ] **Step 2: Write failing recommendation-persistence tests for stored market-rate recommendations**
   Cover:
   - stored recommendation rows persist adjusted unit price and total
   - evidence/assumptions fields capture resolved market and component adjustments
@@ -176,21 +177,22 @@
   - worker generation uses override market context when one exists
 
 - [ ] **Step 4: Run the focused generation tests and verify they fail**
-  Run: `npx vitest run tests/modules/estimating/pricing-service.test.ts tests/modules/estimating/draft-estimate-service.test.ts`
-  Run: `npx vitest run tests/jobs/estimate-generation.test.ts`
+  Run: `npx vitest run tests/modules/estimating/pricing-service.test.ts tests/modules/estimating/recommendation-persistence-service.test.ts`
+  Run: `npx vitest run worker/tests/jobs/estimate-generation.test.ts`
   Expected: FAIL because market-rate enrichment is not wired into the stored recommendation generation path yet.
 
 - [ ] **Step 5: Integrate market-rate service into the actual recommendation generation path**
   Requirements:
   - keep historical/catalog price as the baseline
+  - replace the old hardcoded regional adjustment path in `pricing-service.ts` with the new market-rate service
   - apply component adjustments to the baseline
-  - store the adjusted price back on persisted pricing recommendations through `draft-estimate-service.ts`
+  - persist adjusted recommendations through a shared helper that `worker/src/jobs/estimate-generation.ts` actually calls
   - wire the same market-resolution inputs through `worker/src/jobs/estimate-generation.ts`
   - persist market-rate rationale into evidence/assumptions fields
 
 - [ ] **Step 6: Re-run the focused generation tests and verify they pass**
-  Run: `npx vitest run tests/modules/estimating/pricing-service.test.ts tests/modules/estimating/draft-estimate-service.test.ts`
-  Run: `npx vitest run tests/jobs/estimate-generation.test.ts`
+  Run: `npx vitest run tests/modules/estimating/pricing-service.test.ts tests/modules/estimating/recommendation-persistence-service.test.ts`
+  Run: `npx vitest run worker/tests/jobs/estimate-generation.test.ts`
   Expected: PASS
 
 - [ ] **Step 7: Commit**
@@ -209,6 +211,7 @@
   - setting an override with market id and optional reason
   - clearing an override
   - review-event creation for set/clear operations
+  - enqueue or rerun side effects for `estimate_generation` after override set/clear
 
 - [ ] **Step 2: Run the focused route tests and verify they fail**
   Run: `npx vitest run tests/modules/estimating/workflow-state-routes.test.ts`
@@ -316,7 +319,7 @@
 
 - [ ] **Step 2: Run the focused integration tests and verify they fail**
   Run: `npx vitest run tests/modules/estimating/market-rate-integration.test.ts tests/modules/estimating/workflow-state-routes.test.ts`
-  Run: `npx vitest run tests/jobs/estimate-generation.test.ts`
+  Run: `npx vitest run worker/tests/jobs/estimate-generation.test.ts`
   Expected: FAIL because end-to-end market-rate generation and override-refresh coverage is not implemented yet.
 
 - [ ] **Step 3: Add the missing integration fixtures or wiring needed by the tests**
@@ -327,7 +330,7 @@
 
 - [ ] **Step 4: Re-run the focused integration tests and verify they pass**
   Run: `npx vitest run tests/modules/estimating/market-rate-integration.test.ts tests/modules/estimating/workflow-state-routes.test.ts`
-  Run: `npx vitest run tests/jobs/estimate-generation.test.ts`
+  Run: `npx vitest run worker/tests/jobs/estimate-generation.test.ts`
   Expected: PASS
 
 - [ ] **Step 5: Commit**
