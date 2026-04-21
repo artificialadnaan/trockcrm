@@ -176,6 +176,11 @@ Required linkage fields:
 - `manual_origin` with allowed values:
   - `generated`
   - `manual_estimator_added`
+- `selected_source_type`, nullable until a recommendation or manual row is accepted, with allowed values:
+  - `extracted`
+  - `inferred`
+  - `manual`
+  - `catalog_option`
 - `selected_option_id`, nullable until selection exists
 - `catalog_backing` with allowed values:
   - `procore_synced`
@@ -184,6 +189,7 @@ Required linkage fields:
 - `promoted_estimate_line_item_id`, nullable until promotion exists
 - `promoted_local_catalog_item_id`, nullable until local catalog promotion exists
 - `manual_label`, nullable unless `source_type = 'manual'`
+- `manual_identity_key`, nullable unless `source_type = 'manual'`
 - `manual_quantity`, nullable unless `source_type = 'manual'`
 - `manual_unit`, nullable unless `source_type = 'manual'`
 - `manual_unit_price`, nullable unless `source_type = 'manual'`
@@ -210,6 +216,7 @@ Uniqueness and refresh rules:
 - one recommendation row per `generation_run_id + source_row_identity`
 - one option row per `recommendation_id + rank`
 - rerunning generation creates a new generation run and a new recommendation set rather than mutating prior runs in place
+- rerun carry-forward for manual rows is implemented as cloning qualifying manual recommendation rows into the new generation run; historical rows keep their original `generation_run_id`
 - dedupe within a single generation run uses the duplicate suppression rules in this spec
 - promotion idempotency is enforced by `promoted_estimate_line_item_id`; a row with that field set must not promote again
 
@@ -219,10 +226,14 @@ Manual row storage contract:
 - for manual free-text rows:
   - `catalog_backing = 'estimate_only'`
   - `manual_origin = 'manual_estimator_added'`
+  - `selected_source_type = 'manual'`
   - `selected_option_id = null`
   - `generation_run_id` is set to the active generation run in the current workbench context; if no active run exists, create a synthetic manual generation run for the deal and use that id
+  - `manual_identity_key` is generated once when the row is created and never changes after label edits
 - if a manual row is catalog-backed or later mapped to catalog alternatives:
   - keep parent `manual_*` fields as the estimator-authored baseline
+  - flip `catalog_backing` to `procore_synced` or `local_promoted` based on the selected option source
+  - set `selected_source_type = 'catalog_option'`
   - store catalog candidates as child option rows
   - set `selected_option_id` when a catalog candidate is chosen
 
@@ -230,7 +241,7 @@ Manual row storage contract:
 
 - for extracted rows: `extraction:<source_extraction_id>`
 - for inferred rows: `inferred:<normalized_intent>:<estimate_section_name>`
-- for manual rows: `manual:<normalized_intent>:<estimate_section_name>:<manual_label>`
+- for manual rows: `manual:<normalized_intent>:<estimate_section_name>:<manual_identity_key>`
 
 This field must be persisted directly on the recommendation row so refresh and dedupe logic do not depend on nullable foreign keys alone.
 
@@ -364,7 +375,7 @@ Duplicate suppression order:
 
 1. exact normalized catalog intent match
 2. same selected catalog item id
-3. same normalized manual custom line label within the same section
+3. same normalized intent within the same section for manual rows
 
 If a duplicate is detected, prefer the explicit extracted row over inferred scope.
 
@@ -518,16 +529,17 @@ Manual add flow:
 
 Manual recommendation persistence:
 
-- free-text manual rows persist `estimate_section_name`, `manual_label`, `manual_quantity`, `manual_unit`, `manual_unit_price`, and `manual_notes` on the parent recommendation row before promotion
+- free-text manual rows persist `estimate_section_name`, `manual_label`, `manual_identity_key`, `manual_quantity`, `manual_unit`, `manual_unit_price`, and `manual_notes` on the parent recommendation row before promotion
 - free-text manual rows also persist `generation_run_id`, `manual_origin`, and `source_row_identity` on the parent recommendation row using the contracts above
 - if a manual row is later promoted to the local catalog, the new local catalog item is created from those persisted manual fields and linked back through `promoted_local_catalog_item_id` on the parent recommendation row
 
 Manual row refresh behavior:
 
 - manual rows are not discarded when a new generation run is created
-- on rerun, unresolved manual rows for the deal that are not rejected and not already promoted are carried forward into the new active generation run
-- carry-forward keeps the same `source_row_identity`, `manual_*` fields, and latest review state so the estimator does not lose manually added work
-- promoted or rejected manual rows remain attached to their historical run for audit and are not copied into the new active run
+- on rerun, unresolved manual rows for the deal that are not rejected and do not already have `promoted_estimate_line_item_id` are cloned into the new active generation run
+- carry-forward clones keep the same `source_row_identity`, `manual_*` fields, `manual_identity_key`, latest review state, and `promoted_local_catalog_item_id` so the estimator does not lose manually added work
+- rows with only `promoted_local_catalog_item_id` still carry forward if they have not yet been promoted into the canonical estimate model
+- rejected rows and rows with `promoted_estimate_line_item_id` remain attached to their historical run for audit and are not copied into the new active run
 
 Custom lines can be promoted immediately into the local catalog for reuse later. This is acceptable for the current demonstrative scope and avoids introducing approval workflow complexity in this slice.
 
