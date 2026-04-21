@@ -187,8 +187,6 @@ Required linkage fields:
   - `generated`
   - `manual_estimator_added`
 - `selected_source_type`, nullable until a recommendation or manual row is accepted, with allowed values:
-  - `extracted`
-  - `inferred`
   - `manual`
   - `catalog_option`
 - `selected_option_id`, nullable until selection exists
@@ -280,6 +278,7 @@ This field must be persisted directly on the recommendation row so refresh and d
 
 - trim leading and trailing whitespace before persistence
 - collapse repeated internal whitespace to one space
+- compare section identity case-insensitively using a lowercase canonical form
 - promotion lookup and duplicate grouping compare section names using this canonicalized value
 - implementation may preserve a display label casing separately, but identity and reuse must use the canonicalized section name
 
@@ -569,9 +568,9 @@ Manual estimate-only row mapping:
 Manual promoted-local-catalog row mapping:
 
 - same canonical estimate mapping as manual estimate-only rows
-- if the row remains free-text, the parent recommendation row links to the promoted local catalog item through `promoted_local_catalog_item_id`
+- if the row remains free-text, the parent recommendation row links to the promoted local catalog item through `promoted_local_catalog_item_id`, but canonical estimate promotion still uses the effective manual baseline or override values for description, quantity, unit, and price
 - if the row later selects a catalog-backed child option, the selected option row may also carry the local catalog linkage
-- promotion mapping must prefer `promoted_local_catalog_item_id` on the parent recommendation row when `selected_option_id` is null
+- when `selected_option_id` is null, `promoted_local_catalog_item_id` is provenance and reuse linkage only, not the source of truth for canonical estimate values
 - if both `promoted_local_catalog_item_id` and `selected_option_id` are present, the selected option is the source of truth for description, quantity, unit, and price, while the parent local-catalog link remains provenance only
 
 Promotion completion behavior:
