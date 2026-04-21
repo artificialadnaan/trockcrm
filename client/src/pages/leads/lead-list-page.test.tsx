@@ -7,73 +7,66 @@ import {
   isValidDirectorDecisionForTarget,
 } from "./lead-list-page";
 
-const leads = [
+const boardColumns = [
   {
-    id: "lead-1",
-    companyId: "company-1",
-    propertyId: "property-1",
-    primaryContactId: null,
-    name: "Contacted Lead",
-    stageId: "stage-contacted",
-    status: "open",
-    source: "trade-show",
-    description: null,
-    lastActivityAt: null,
-    stageEnteredAt: "2026-04-20T10:00:00.000Z",
-    convertedAt: null,
-    isActive: true,
-    createdAt: "2026-04-20T10:00:00.000Z",
-    updatedAt: "2026-04-20T10:00:00.000Z",
-    assignedRepId: "rep-1",
-    companyName: "Alpha",
-    property: null,
-    convertedDealId: null,
-    convertedDealNumber: null,
+    stage: { id: "stage-contacted", name: "Lead", slug: "contacted" },
+    count: 1,
+    cards: [
+      {
+        id: "lead-1",
+        name: "Contacted Lead",
+        stageId: "stage-contacted",
+        stageEnteredAt: "2026-04-20T10:00:00.000Z",
+        updatedAt: "2026-04-20T10:00:00.000Z",
+      },
+    ],
   },
   {
-    id: "lead-2",
-    companyId: "company-2",
-    propertyId: "property-2",
-    primaryContactId: null,
-    name: "Qualified Lead",
-    stageId: "stage-qualified",
-    status: "open",
-    source: "referral",
-    description: null,
-    lastActivityAt: null,
-    stageEnteredAt: "2026-04-20T10:00:00.000Z",
-    convertedAt: null,
-    isActive: true,
-    createdAt: "2026-04-20T10:00:00.000Z",
-    updatedAt: "2026-04-20T10:00:00.000Z",
-    assignedRepId: "rep-1",
-    companyName: "Beta",
-    property: null,
-    convertedDealId: null,
-    convertedDealNumber: null,
+    stage: { id: "stage-qualified", name: "Qualified Lead", slug: "qualified_lead" },
+    count: 1,
+    cards: [
+      {
+        id: "lead-2",
+        name: "Qualified Lead",
+        stageId: "stage-qualified",
+        stageEnteredAt: "2026-04-20T10:00:00.000Z",
+        updatedAt: "2026-04-20T10:00:00.000Z",
+      },
+    ],
+  },
+  {
+    stage: { id: "stage-director", name: "Director Review", slug: "director_go_no_go" },
+    count: 0,
+    cards: [],
+  },
+  {
+    stage: { id: "stage-ready", name: "Ready", slug: "ready_for_opportunity" },
+    count: 0,
+    cards: [],
   },
 ];
 
-vi.mock("@/hooks/use-leads", () => ({
-  useLeads: () => ({
-    leads,
-    loading: false,
-    error: null,
-    refetch: vi.fn(),
+vi.mock("@/lib/auth", () => ({
+  useAuth: () => ({
+    user: { role: "rep" },
   }),
-  formatLeadPropertyLine: () => "",
 }));
 
-vi.mock("@/hooks/use-pipeline-config", () => ({
-  usePipelineStages: () => ({
-    stages: [
-      { id: "stage-contacted", name: "Lead", slug: "contacted", workflowFamily: "lead", displayOrder: 1 },
-      { id: "stage-qualified", name: "Qualified Lead", slug: "qualified_lead", workflowFamily: "lead", displayOrder: 2 },
-      { id: "stage-director", name: "Director Review", slug: "director_go_no_go", workflowFamily: "lead", displayOrder: 3 },
-      { id: "stage-ready", name: "Ready", slug: "ready_for_opportunity", workflowFamily: "lead", displayOrder: 4 },
-    ],
+vi.mock("@/hooks/use-leads", () => ({
+  useLeadBoard: () => ({
+    board: {
+      columns: boardColumns,
+      defaultConversionDealStageId: "deal-stage-1",
+    },
     loading: false,
+    convertLead: vi.fn(),
+    refetch: vi.fn(),
   }),
+  transitionLeadStage: vi.fn(),
+}));
+
+vi.mock("@/components/leads/lead-conversion-dialog", () => ({
+  LeadConversionDialog: () => null,
 }));
 
 function normalize(html: string) {
@@ -99,7 +92,7 @@ describe("LeadListPage", () => {
   it("filters lead buckets from the bucket query param", () => {
     const html = normalize(
       renderToStaticMarkup(
-        <MemoryRouter initialEntries={["/leads?bucket=qualified_lead"]}>
+        <MemoryRouter initialEntries={["/leads?bucket=qualified_lead&scope=mine"]}>
           <LeadListPage />
         </MemoryRouter>
       )

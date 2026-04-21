@@ -1,4 +1,4 @@
-import { Routes, Route, Navigate } from "react-router-dom";
+import { Routes, Route, Navigate, useSearchParams } from "react-router-dom";
 import type { ReactNode } from "react";
 import { AuthProvider, useAuth } from "@/lib/auth";
 import { AuthEntryScreen } from "@/components/auth/auth-entry-screen";
@@ -6,6 +6,7 @@ import { ForcePasswordChangeScreen } from "@/components/auth/force-password-chan
 import { RequireRole } from "@/components/auth/require-role";
 import { AppShell } from "@/components/layout/app-shell";
 import { DealListPage } from "@/pages/deals/deal-list-page";
+import { DealStagePage } from "@/pages/deals/deal-stage-page";
 import { DealDetailPage } from "@/pages/deals/deal-detail-page";
 import { DealNewPage } from "@/pages/deals/deal-new-page";
 import { DealEditPage } from "@/pages/deals/deal-edit-page";
@@ -19,6 +20,7 @@ import { CompanyDetailPage } from "@/pages/companies/company-detail-page";
 import { CompanyNewPage } from "@/pages/companies/company-new-page";
 import { CompanyEditPage } from "@/pages/companies/company-edit-page";
 import { LeadListPage } from "@/pages/leads/lead-list-page";
+import { LeadStagePage } from "@/pages/leads/lead-stage-page";
 import { LeadDetailPage } from "@/pages/leads/lead-detail-page";
 import { LeadNewPage } from "@/pages/leads/lead-new-page";
 import { PropertyListPage } from "@/pages/properties/property-list-page";
@@ -60,6 +62,12 @@ import { PipelineHygienePage } from "@/pages/pipeline/pipeline-hygiene-page";
 import { ProjectDetailPage } from "@/pages/projects/project-detail-page";
 import { Toaster } from "@/components/ui/sonner";
 
+function BoardAliasRedirect({ entity }: { entity: "leads" | "deals" }) {
+  const [searchParams] = useSearchParams();
+  const next = searchParams.toString();
+  return <Navigate to={next ? `/${entity}?${next}` : `/${entity}`} replace />;
+}
+
 function AuthGate({ children }: { children: ReactNode }) {
   const { user, loading } = useAuth();
 
@@ -86,10 +94,14 @@ export function App() {
             <Route element={<AppShell />}>
               <Route path="/" element={<HomeDashboardPage />} />
               <Route path="/deals" element={<DealListPage />} />
+              <Route path="/deals/board" element={<BoardAliasRedirect entity="deals" />} />
+              <Route path="/deals/stages/:stageId" element={<DealStagePage />} />
               <Route path="/deals/new" element={<DealNewPage />} />
               <Route path="/deals/:id" element={<DealDetailPage />} />
               <Route path="/deals/:id/edit" element={<DealEditPage />} />
               <Route path="/leads" element={<LeadListPage />} />
+              <Route path="/leads/board" element={<BoardAliasRedirect entity="leads" />} />
+              <Route path="/leads/stages/:stageId" element={<LeadStagePage />} />
               <Route path="/leads/new" element={<LeadNewPage />} />
               <Route path="/leads/:id" element={<LeadDetailPage />} />
               <Route path="/properties" element={<PropertyListPage />} />

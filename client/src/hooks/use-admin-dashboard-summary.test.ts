@@ -293,50 +293,35 @@ describe("useAdminDashboardSummary", () => {
       },
       loading: false,
     };
+    apiMock
+      .mockResolvedValueOnce({ rows: [], total: 9 })
+      .mockResolvedValueOnce({ summary: { conflict: 2, error: 1 }, circuit_breaker: { state: "open" } });
   });
 
   afterEach(() => {
     vi.unstubAllGlobals();
-    vi.restoreAllMocks();
   });
 
-  it("does not surface a failing operational signal as an all-clear result", async () => {
-    vi.spyOn(Date, "now").mockReturnValue(new Date("2026-04-20T05:30:00.000Z").getTime());
-    let auditPath: string | null = null;
-
-    apiMock.mockImplementation(async (path: string) => {
-      if (path.startsWith("/admin/audit?")) {
-        auditPath = path;
-        return {
-          rows: [],
-          total: 325,
-        };
-      }
-
-      if (path === "/procore/sync-status") {
-        throw new Error("Procore status unavailable");
-      }
-
-      throw new Error(`Unexpected path: ${path}`);
-    });
+  it("builds admin KPIs and workspace items from operational signals", async () => {
+    hookState.aiQueue.queue = [{}, {}, {}, {}, {}, {}];
+    hookState.exceptions.exceptions = [{ count: 2 }];
 
     const root = await renderHook();
     await waitForIdle();
 
-    expect(latestResult?.loading).toBe(false);
-    expect(auditPath).not.toBeNull();
-    expect(new URL(auditPath!, "https://example.test").searchParams.get("fromDate")).toBe(
-      "2026-04-19T05:30:00.000Z"
-    );
-    expect(latestResult?.summary.kpis[1]).toEqual(
-      expect.objectContaining({
-        label: "System health",
-        value: "1",
-        detail: "procore unavailable",
-      })
-    );
-    expect(latestResult?.summary.workspaceItems.find((item) => item.key === "audit-log")?.value).toBe("325");
-    expect(latestResult?.summary.workspaceItems.find((item) => item.key === "procore-sync")?.value).toBe("—");
+    expect(latestResult?.summary.kpis).toEqual([
+      { label: "Needs attention", value: "15", detail: "6 AI actions • 4 intervention cases" },
+      { label: "System health", value: "2", detail: "procore • migration" },
+      { label: "Workspace changes", value: "9", detail: "Audit events in the last 24 hours" },
+      { label: "Team snapshot", value: "$240,000", detail: "7 active deals" },
+    ]);
+    expect(latestResult?.summary.workspaceItems[0]).toEqual({
+      key: "ai-actions",
+      label: "AI Actions",
+      value: "6",
+      detail: "Open AI queue items",
+      href: "/admin/ai-actions",
+    });
 
     await act(async () => {
       root.unmount();

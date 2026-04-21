@@ -1,226 +1,53 @@
-import { type ReactNode } from "react";
-import { describe, expect, it, beforeEach, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
-
-const {
-  navigateSpy,
-  mockDashboardData,
-  setAutoSelectRep,
-  shouldAutoSelectRep,
-} = vi.hoisted(() => {
-  const navigateSpy = vi.fn();
-  const mockDashboardData = {
-    officeFunnelBuckets: [
-      { key: "lead", label: "Leads", count: 8, totalValue: null, route: "/leads", bucket: "lead" },
-      { key: "qualified_lead", label: "Qualified Leads", count: 3, totalValue: null, route: "/leads", bucket: "qualified_lead" },
-      { key: "opportunity", label: "Opportunities", count: 2, totalValue: null, route: "/leads", bucket: "opportunity" },
-      { key: "due_diligence", label: "Due Diligence", count: 4, totalValue: 90000, route: "/deals", bucket: "due_diligence" },
-      { key: "estimating", label: "Estimating", count: 5, totalValue: 210000, route: "/deals", bucket: "estimating" },
-    ],
-    repFunnelRows: [
-      {
-        repId: "rep-1",
-        repName: "Alpha Rep",
-        leads: 3,
-        qualifiedLeads: 1,
-        opportunities: 1,
-        dueDiligence: 2,
-        estimating: 2,
-      },
-    ],
-    repCards: [
-      {
-        repId: "rep-1",
-        repName: "Alpha Rep",
-        activeDeals: 4,
-        pipelineValue: 150000,
-        winRate: 40,
-        activityScore: 12,
-        staleDeals: 1,
-        staleLeads: 0,
-      },
-    ],
-    pipelineByStage: [],
-    winRateTrend: [],
-    activityByRep: [],
-    staleDeals: [] as Array<{
-      dealId: string;
-      dealName: string;
-      repName: string;
-      daysInStage: number;
-      stageName: string;
-    }>,
-    staleLeads: [] as Array<{
-      leadId: string;
-      leadName: string;
-      repName: string;
-      daysInStage: number;
-      stageName: string;
-    }>,
-    ddVsPipeline: {
-      ddValue: 90000,
-      ddCount: 3,
-      pipelineValue: 150000,
-      pipelineCount: 4,
-      totalValue: 240000,
-      totalCount: 7,
-    },
-  };
-
-  let autoSelectRep = false;
-
-  return {
-    navigateSpy,
-    mockDashboardData,
-    setAutoSelectRep(nextValue: boolean) {
-      autoSelectRep = nextValue;
-    },
-    shouldAutoSelectRep() {
-      return autoSelectRep;
-    },
-  };
-});
-
-vi.mock("react-router-dom", async () => {
-  const actual = await vi.importActual<typeof import("react-router-dom")>("react-router-dom");
-
-  return {
-    ...actual,
-    Link: ({
-      to,
-      children,
-      ...props
-    }: {
-      to: string;
-      children?: ReactNode;
-      [key: string]: unknown;
-    }) => (
-      <a data-router-link="true" data-to={to} href={to} {...props}>
-        {children}
-      </a>
-    ),
-    useNavigate: () => navigateSpy,
-  };
-});
-
-vi.mock("@/hooks/use-director-dashboard", () => ({
-  presetToDateRange: vi.fn(() => ({ from: "2026-01-01", to: "2026-12-31" })),
-  useDirectorDashboard: vi.fn(() => ({
-    loading: false,
-    error: null,
-    data: mockDashboardData,
-  })),
-}));
-
-vi.mock("@/hooks/use-rep-performance", () => ({
-  useRepPerformance: vi.fn(() => ({
-    loading: false,
-    data: {
-      reps: [],
-      periodLabel: { current: "This Month", previous: "Last Month" },
-    },
-  })),
-}));
-
-vi.mock("@/components/ai/director-blind-spot-list", () => ({
-  DirectorBlindSpotList: () => <div>Director Blind Spots</div>,
-}));
-
-vi.mock("@/components/dashboard/director-rep-workspace", () => ({
-  DirectorRepWorkspace: ({
-    onSelectRep,
-  }: {
-    onSelectRep: (repId: string) => void;
-  }) => {
-    if (shouldAutoSelectRep()) {
-      onSelectRep("rep-1");
-    }
-
-    return <div>Rep performance</div>;
-  },
-}));
-
 import { MemoryRouter } from "react-router-dom";
+
+const mocks = vi.hoisted(() => ({
+  useDirectorDashboardMock: vi.fn(),
+  usePipelineBoardStateMock: vi.fn(),
+  useDealBoardMock: vi.fn(),
+  useLeadBoardMock: vi.fn(),
+}));
+
+vi.mock("@/hooks/use-director-dashboard", () => ({ useDirectorDashboard: mocks.useDirectorDashboardMock }));
+vi.mock("@/hooks/use-pipeline-board-state", () => ({ usePipelineBoardState: mocks.usePipelineBoardStateMock }));
+vi.mock("@/hooks/use-deals", () => ({ useDealBoard: mocks.useDealBoardMock }));
+vi.mock("@/hooks/use-leads", () => ({ useLeadBoard: mocks.useLeadBoardMock }));
+
 import { DirectorDashboardPage } from "./director-dashboard-page";
 
 describe("DirectorDashboardPage", () => {
   beforeEach(() => {
-    navigateSpy.mockReset();
-    setAutoSelectRep(false);
-    mockDashboardData.repCards = [
-      {
-        repId: "rep-1",
-        repName: "Alpha Rep",
-        activeDeals: 4,
-        pipelineValue: 150000,
-        winRate: 40,
-        activityScore: 12,
-        staleDeals: 1,
-        staleLeads: 0,
+    mocks.usePipelineBoardStateMock.mockReturnValue({
+      activeEntity: "leads",
+      setActiveEntity: vi.fn(),
+    });
+    mocks.useDirectorDashboardMock.mockReturnValue({
+      loading: false,
+      error: null,
+      data: {
+        repCards: [],
+        pipelineByStage: [],
+        winRateTrend: [],
+        activityByRep: [],
+        staleDeals: [{ dealId: "deal-1" }],
+        staleLeads: [{ leadId: "lead-1" }],
+        ddVsPipeline: { ddValue: 0, ddCount: 0, pipelineValue: 500000, pipelineCount: 8, totalValue: 500000, totalCount: 8 },
       },
-    ];
-    mockDashboardData.pipelineByStage = [];
-    mockDashboardData.winRateTrend = [];
-    mockDashboardData.activityByRep = [];
-    mockDashboardData.staleDeals = [];
-    mockDashboardData.staleLeads = [];
+    });
+    mocks.useDealBoardMock.mockReturnValue({ board: { columns: [] } });
+    mocks.useLeadBoardMock.mockReturnValue({ board: { columns: [], defaultConversionDealStageId: null } });
   });
 
-  it("preserves dd vs pipeline, rep workspace, performance trends, and blind spots", () => {
-    const html = renderToStaticMarkup(<DirectorDashboardPage />);
-
-    expect(html).toContain("Qualified Leads");
-    expect(html).toContain("Funnel distribution by rep");
-    expect(html).toContain("True pipeline");
-    expect(html).toContain("DD pipeline");
-    expect(html).toContain("Total pipeline");
-    expect(html).toContain("Rep performance");
-    expect(html).toContain("Performance trends");
-    expect(html).toContain("Director Blind Spots");
-  });
-
-  it("keeps zero-activity reps visible in the summary layer", () => {
-    const html = renderToStaticMarkup(<DirectorDashboardPage />);
-
-    expect(html).toContain("Activity summary");
-    expect(html).toContain("Alpha Rep");
-    expect(html).toContain("0 activities");
-    expect(html).toContain("/director/rep/rep-1?focus=activity");
-  });
-
-  it("uses router-based quick actions and rep drill-through inside router context", () => {
-    mockDashboardData.staleDeals = [
-      {
-        dealId: "deal-1",
-        dealName: "Deal One",
-        repName: "Alpha Rep",
-        daysInStage: 21,
-        stageName: "Proposal",
-      },
-    ];
-    mockDashboardData.staleLeads = [
-      {
-        leadId: "lead-1",
-        leadName: "Lead One",
-        repName: "Alpha Rep",
-        daysInStage: 14,
-        stageName: "Qualified",
-      },
-    ];
-    setAutoSelectRep(true);
-
+  it("shows the team board switcher and stage-pressure workspace before the trend panels", () => {
     const html = renderToStaticMarkup(
-      <MemoryRouter initialEntries={["/director"]}>
+      <MemoryRouter>
         <DirectorDashboardPage />
       </MemoryRouter>
     );
 
-    expect(html).toContain('data-router-link="true"');
-    expect(html).toContain('data-to="/reports"');
-    expect(html).toContain('data-to="/admin/ai-actions"');
-    expect(html).toContain('data-to="/deals?filter=stale"');
-    expect(html).toContain('data-to="/reports"');
-    expect(html).toContain('data-to="/director/rep/rep-1?focus=activity"');
-    expect(navigateSpy).toHaveBeenCalledWith("/director/rep/rep-1");
+    expect(html).toContain("Team Pipeline Console");
+    expect(html).toContain("aria-pressed=\"true\"");
+    expect(html).toContain("Stale Deals");
   });
 });
