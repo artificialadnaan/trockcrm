@@ -48,6 +48,20 @@ describe("estimating schema exports", () => {
     expect(estimateGenerationRuns).toBeDefined();
     expect(estimateReviewEvents).toBeDefined();
 
+    const marketColumns = getTableColumns(estimateMarkets);
+    expect(marketColumns.type).toBeDefined();
+    expect(marketColumns.stateCode).toBeDefined();
+    expect(marketColumns.regionId).toBeDefined();
+
+    const zipColumns = getTableColumns(estimateMarketZipMappings);
+    expect(zipColumns.sourceType).toBeDefined();
+    expect(zipColumns.sourceConfidence).toBeDefined();
+
+    const ruleColumns = getTableColumns(estimateMarketAdjustmentRules);
+    expect(ruleColumns.marketId.notNull).toBe(false);
+    expect(ruleColumns.priority).toBeDefined();
+    expect(ruleColumns.fallbackPriority).toBeDefined();
+
     const recommendationColumns = getTableColumns(estimatePricingRecommendations);
     expect(recommendationColumns.sourceType).toBeDefined();
     expect(recommendationColumns.sourceType.name).toBe("source_type");
