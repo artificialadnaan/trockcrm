@@ -232,6 +232,12 @@ function resolvePromotionLineValues(
     case "alternate":
     case "recommended":
       description = selectedOptionLabel ?? description;
+      if (row.sourceType === "manual") {
+        quantity = row.quantity ?? row.manualQuantity ?? quantity;
+        unit = row.unit ?? row.manualUnit ?? unit;
+        unitPrice = row.unitPrice ?? row.manualUnitPrice ?? unitPrice;
+        notes = row.notes ?? row.manualNotes ?? notes;
+      }
       break;
     default:
       break;

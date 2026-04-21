@@ -317,6 +317,13 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
               })),
             })),
           })),
+        })
+        .mockReturnValueOnce({
+          from: vi.fn(() => ({
+            where: vi.fn(() => ({
+              limit: vi.fn().mockResolvedValue([]),
+            })),
+          })),
         }),
       update: vi.fn(() => ({
         set: vi.fn(() => ({
@@ -425,6 +432,104 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
         unit: "ea",
         unitPrice: "75.00",
         notes: "manual note",
+      })
+    );
+  });
+
+  it("falls back to legacy manual fields when promoting catalog-backed manual rows", async () => {
+    estimateServiceMocks.createSection.mockResolvedValue({ id: "section-manual-catalog" });
+    estimateServiceMocks.createLineItem.mockResolvedValue({ id: "line-manual-catalog" });
+    const updateReturning = vi.fn().mockResolvedValue([
+      { id: "rec-manual-catalog", promotedEstimateLineItemId: "line-manual-catalog" },
+    ]);
+
+    const tenantDb = {
+      execute: vi.fn().mockResolvedValue(undefined),
+      select: vi
+        .fn()
+        .mockReturnValueOnce({
+          from: vi.fn(() => ({
+            innerJoin: vi.fn(() => ({
+              innerJoin: vi.fn(() => ({
+                where: vi.fn().mockResolvedValue([
+                  {
+                    recommendationId: "rec-manual-catalog",
+                    description: "Stale extracted label",
+                    quantity: null,
+                    unit: null,
+                    unitPrice: null,
+                    notes: null,
+                    sectionName: "Roof",
+                    sourceType: "manual",
+                    selectedSourceType: "catalog_option",
+                    selectedOptionId: "option-catalog-1",
+                    manualLabel: "Legacy manual label",
+                    manualQuantity: "3",
+                    manualUnit: "ea",
+                    manualUnitPrice: "42.00",
+                    manualNotes: "legacy manual note",
+                    normalizedIntent: "manual row",
+                    sourceRowIdentity: "roof:manual-catalog-legacy",
+                    status: "approved",
+                    createdByRunId: "run-manual-catalog",
+                    promotedEstimateLineItemId: null,
+                  },
+                ]),
+              })),
+            })),
+          })),
+        })
+        .mockReturnValueOnce({
+          from: vi.fn(() => ({
+            where: vi.fn(() => ({
+              limit: vi.fn().mockResolvedValue([]),
+            })),
+          })),
+        })
+        .mockReturnValueOnce({
+          from: vi.fn(() => ({
+            innerJoin: vi.fn(() => ({
+              where: vi.fn(() => ({
+                limit: vi.fn().mockResolvedValue([
+                  {
+                    id: "option-catalog-1",
+                    optionLabel: "Catalog-backed manual option",
+                    optionKind: "recommended",
+                  },
+                ]),
+              })),
+            })),
+          })),
+        }),
+      update: vi.fn(() => ({
+        set: vi.fn(() => ({
+          where: vi.fn(() => ({
+            returning: updateReturning,
+          })),
+        })),
+      })),
+      insert: vi.fn(() => ({
+        values: vi.fn().mockResolvedValue(undefined),
+      })),
+    } as any;
+
+    await promoteApprovedRecommendationsToEstimate({
+      tenantDb,
+      dealId: "deal-1",
+      generationRunId: "run-manual-catalog",
+      approvedRecommendationIds: ["rec-manual-catalog"],
+    });
+
+    expect(estimateServiceMocks.createLineItem).toHaveBeenCalledWith(
+      tenantDb,
+      "deal-1",
+      "section-manual-catalog",
+      expect.objectContaining({
+        description: "Catalog-backed manual option",
+        quantity: "3",
+        unit: "ea",
+        unitPrice: "42.00",
+        notes: "legacy manual note",
       })
     );
   });

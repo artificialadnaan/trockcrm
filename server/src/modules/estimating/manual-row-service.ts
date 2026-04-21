@@ -462,25 +462,28 @@ export async function updateManualEstimateRow(args: {
 
   const manualIdentityKey = normalizeManualIdentityKey(existing.manualIdentityKey);
   const requestedCatalogSelection = args.input.selectedSourceType === "catalog_option";
+  const preserveCatalogSelection =
+    existing.selectedSourceType === "catalog_option" &&
+    args.input.selectedSourceType == null &&
+    args.input.selectedOptionStableId == null &&
+    args.input.catalogOptions == null &&
+    args.input.catalogQuery == null;
   const { optionRows: resolvedCatalogOptions, selectedOption } = await resolveCatalogFirstOptions({
     appDb: args.appDb ?? null,
     catalogQuery: args.input.catalogQuery ?? null,
     catalogOptions: args.input.catalogOptions ?? [],
     selectedOptionStableId: args.input.selectedOptionStableId ?? null,
   });
-  const selectedSourceType = selectedOption
-    ? "catalog_option"
-    : requestedCatalogSelection
-      ? "manual"
-      : "manual";
-  const persistedSelectedSourceType = selectedSourceType === "catalog_option" ? "catalog_option" : "manual";
-  const catalogBacking =
-    args.input.catalogBacking ??
-    (selectedOption?.localCatalogItemId
-      ? "local_promoted"
-      : selectedOption?.catalogItemId
-        ? "procore_synced"
-        : "estimate_only");
+  const persistedSelectedSourceType =
+    preserveCatalogSelection || selectedOption || requestedCatalogSelection ? "catalog_option" : "manual";
+  const catalogBacking = preserveCatalogSelection
+    ? existing.catalogBacking
+    : args.input.catalogBacking ??
+      (selectedOption?.localCatalogItemId
+        ? "local_promoted"
+        : selectedOption?.catalogItemId
+          ? "procore_synced"
+          : "estimate_only");
   const normalizedManualFields = normalizeManualFields({
     manualQuantity: args.input.manualQuantity ?? existing.manualQuantity,
     manualUnit: args.input.manualUnit ?? existing.manualUnit,
@@ -510,7 +513,9 @@ export async function updateManualEstimateRow(args: {
     selectedSourceType: persistedSelectedSourceType,
     selectedOptionId:
       persistedSelectedSourceType === "catalog_option"
-        ? args.input.selectedOptionId ?? existing.selectedOptionId ?? null
+        ? selectedOption
+          ? args.input.selectedOptionId ?? existing.selectedOptionId ?? null
+          : existing.selectedOptionId ?? null
         : null,
     catalogBacking: persistedSelectedSourceType === "catalog_option" ? catalogBacking : "estimate_only",
     evidenceJson: {

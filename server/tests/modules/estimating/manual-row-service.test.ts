@@ -661,4 +661,78 @@ describe("manual-row-service", () => {
       })
     ).rejects.toThrow("Catalog-backed manual rows require quantity and unit price");
   });
+
+  it("preserves an existing catalog-backed selection during partial edits", async () => {
+    const updateReturning = vi.fn().mockResolvedValue([
+      {
+        id: "rec-7",
+        selectedSourceType: "catalog_option",
+        selectedOptionId: "opt-existing-1",
+        catalogBacking: "procore_synced",
+      },
+    ]);
+    const updateSet = vi.fn(() => ({
+      where: vi.fn(() => ({
+        returning: updateReturning,
+      })),
+    }));
+    const tenantDb = {
+      select: vi.fn(() => ({
+        from: vi.fn(() => ({
+          where: vi.fn(() => ({
+            limit: vi.fn().mockResolvedValue([
+              {
+                id: "rec-7",
+                dealId: "deal-1",
+                manualIdentityKey: "manual-key-7",
+                manualLabel: "Existing manual label",
+                manualQuantity: "2",
+                manualUnit: "ea",
+                manualUnitPrice: "50.00",
+                manualNotes: "existing note",
+                selectedSourceType: "catalog_option",
+                selectedOptionId: "opt-existing-1",
+                catalogBacking: "procore_synced",
+                evidenceJson: {
+                  sectionName: "Roofing",
+                  manualLabel: "Existing manual label",
+                },
+              },
+            ]),
+          })),
+        })),
+      })),
+      update: vi.fn(() => ({
+        set: updateSet,
+      })),
+      insert: vi.fn(() => ({
+        values: vi.fn().mockResolvedValue([]),
+      })),
+    } as any;
+
+    const result = await updateManualEstimateRow({
+      tenantDb,
+      dealId: "deal-1",
+      recommendationId: "rec-7",
+      userId: "user-1",
+      input: {
+        manualLabel: "Edited manual label",
+      },
+    });
+
+    expect(updateSet).toHaveBeenCalledWith(
+      expect.objectContaining({
+        selectedSourceType: "catalog_option",
+        selectedOptionId: "opt-existing-1",
+        catalogBacking: "procore_synced",
+      })
+    );
+    expect(result.recommendation).toEqual(
+      expect.objectContaining({
+        selectedSourceType: "catalog_option",
+        selectedOptionId: "opt-existing-1",
+        catalogBacking: "procore_synced",
+      })
+    );
+  });
 });

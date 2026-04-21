@@ -84,11 +84,13 @@ function hasManualPromotionValues(row: EstimatePricingRecommendationRow) {
   }
 
   const quantity =
-    typeof row.recommendedQuantity === "string" ? row.recommendedQuantity.trim() : row.recommendedQuantity;
+    typeof (row.recommendedQuantity ?? row.manualQuantity) === "string"
+      ? (row.recommendedQuantity ?? row.manualQuantity).trim()
+      : (row.recommendedQuantity ?? row.manualQuantity);
   const unitPrice =
-    typeof row.recommendedUnitPrice === "string"
-      ? row.recommendedUnitPrice.trim()
-      : row.recommendedUnitPrice;
+    typeof (row.recommendedUnitPrice ?? row.manualUnitPrice) === "string"
+      ? (row.recommendedUnitPrice ?? row.manualUnitPrice).trim()
+      : (row.recommendedUnitPrice ?? row.manualUnitPrice);
   return Boolean(quantity && unitPrice);
 }
 
