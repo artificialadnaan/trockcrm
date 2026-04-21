@@ -148,7 +148,7 @@ export async function getAccessibleOffices(
          o.id = $1
          OR o.id IN (
            SELECT office_id FROM public.user_office_access
-           WHERE user_id = $2 AND role_override IN ('director', 'admin')
+           WHERE user_id = $2
          )
        )
      ORDER BY o.name`,

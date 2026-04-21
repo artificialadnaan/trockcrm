@@ -24,6 +24,8 @@ export interface CleanupQueueRow {
   recordType: "lead" | "deal";
   recordId: string;
   recordName: string;
+  stageId: string;
+  stageName: string | null;
   officeId: string;
   assignedUserId: string | null;
   assignedRepId: string | null;
@@ -42,6 +44,8 @@ export interface CleanupQueueResult {
 export interface CleanupSourceRow {
   id: string;
   recordName: string;
+  stageId: string;
+  stageName: string | null;
   assignedRepId: string | null;
   decisionMakerName: string | null;
   budgetStatus: string | null;
@@ -118,7 +122,7 @@ async function getAccessibleOffices(actor: CleanupActor): Promise<OfficeRow[]> {
          o.id = $1
          OR o.id IN (
            SELECT office_id FROM public.user_office_access
-           WHERE user_id = $2 AND role_override IN ('director', 'admin')
+           WHERE user_id = $2
          )
        )
      ORDER BY o.name`,
@@ -190,6 +194,8 @@ function buildCleanupRow(
     recordType,
     recordId: source.id,
     recordName: source.recordName,
+    stageId: source.stageId,
+    stageName: source.stageName,
     officeId,
     assignedUserId: source.assignedRepId,
     assignedRepId: source.assignedRepId,
@@ -246,30 +252,33 @@ async function fetchRows(
   const table = recordType === "deal" ? "deals" : "leads";
   const result = await tenantDb.execute(sql`
     SELECT
-      id,
-      name AS "recordName",
-      assigned_rep_id AS "assignedRepId",
-      decision_maker_name AS "decisionMakerName",
-      budget_status AS "budgetStatus",
-      next_step AS "nextStep",
-      next_step_due_at AS "nextStepDueAt",
-      forecast_window AS "forecastWindow",
-      forecast_confidence_percent AS "forecastConfidencePercent",
-      last_activity_at AS "lastActivityAt",
-      company_id AS "companyId",
-      property_id AS "propertyId",
-      ownership_sync_status AS "ownershipSyncStatus",
-      unassigned_reason_code AS "unassignedReasonCode"
-    FROM ${sql.raw(table)}
-    WHERE is_active = true
-      ${filters.assignedRepId !== undefined ? sql`AND assigned_rep_id = ${filters.assignedRepId}` : sql``}
-      ${filters.id !== undefined ? sql`AND id = ${filters.id}` : sql``}
+      t.id,
+      t.name AS "recordName",
+      t.stage_id AS "stageId",
+      psc.name AS "stageName",
+      t.assigned_rep_id AS "assignedRepId",
+      t.decision_maker_name AS "decisionMakerName",
+      t.budget_status AS "budgetStatus",
+      t.next_step AS "nextStep",
+      t.next_step_due_at AS "nextStepDueAt",
+      t.forecast_window AS "forecastWindow",
+      t.forecast_confidence_percent AS "forecastConfidencePercent",
+      t.last_activity_at AS "lastActivityAt",
+      t.company_id AS "companyId",
+      t.property_id AS "propertyId",
+      t.ownership_sync_status AS "ownershipSyncStatus",
+      t.unassigned_reason_code AS "unassignedReasonCode"
+    FROM ${sql.raw(table)} t
+    LEFT JOIN public.pipeline_stage_config psc ON psc.id = t.stage_id
+    WHERE t.is_active = true
+      ${filters.assignedRepId !== undefined ? sql`AND t.assigned_rep_id = ${filters.assignedRepId}` : sql``}
+      ${filters.id !== undefined ? sql`AND t.id = ${filters.id}` : sql``}
       ${
         filters.ownershipQueueOnly
           ? sql`AND (
-              assigned_rep_id IS NULL
-              OR ownership_sync_status IN ('unmatched', 'conflict')
-              OR unassigned_reason_code IN ('owner_mapping_failure', 'inactive_owner_match')
+              t.assigned_rep_id IS NULL
+              OR t.ownership_sync_status IN ('unmatched', 'conflict')
+              OR t.unassigned_reason_code IN ('owner_mapping_failure', 'inactive_owner_match')
             )`
           : sql``
       }
@@ -278,6 +287,7 @@ async function fetchRows(
   const rows = getRows<CleanupSourceRow>(result);
   return rows.map((row) => ({
     ...row,
+    stageName: row.stageName ?? null,
     assignedRepId: row.assignedRepId ?? null,
     decisionMakerName: row.decisionMakerName ?? null,
     budgetStatus: row.budgetStatus ?? null,

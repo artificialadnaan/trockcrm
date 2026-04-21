@@ -39,6 +39,8 @@ import {
 type CleanupRowSeed = {
   id: string;
   name: string;
+  stageId: string;
+  stageName: string;
   assignedRepId: string | null;
   decisionMakerName: string | null;
   budgetStatus: string | null;
@@ -57,6 +59,8 @@ const repLeadRows: CleanupRowSeed[] = [
   {
     id: "lead-1",
     name: "Rep Lead",
+    stageId: "stage-lead-1",
+    stageName: "Lead Qualification",
     assignedRepId: "rep-1",
     decisionMakerName: null,
     budgetStatus: null,
@@ -76,6 +80,8 @@ const repDealRows: CleanupRowSeed[] = [
   {
     id: "deal-1",
     name: "Rep Deal",
+    stageId: "stage-deal-1",
+    stageName: "Estimating",
     assignedRepId: "rep-1",
     decisionMakerName: "Taylor",
     budgetStatus: null,
@@ -92,6 +98,8 @@ const repDealRows: CleanupRowSeed[] = [
   {
     id: "deal-2",
     name: "Other Rep Deal",
+    stageId: "stage-deal-2",
+    stageName: "Estimating",
     assignedRepId: "rep-2",
     decisionMakerName: null,
     budgetStatus: null,
@@ -111,6 +119,8 @@ const officeLeadRows: CleanupRowSeed[] = [
   {
     id: "lead-2",
     name: "Office Lead",
+    stageId: "stage-lead-2",
+    stageName: "Lead Qualification",
     assignedRepId: null,
     decisionMakerName: null,
     budgetStatus: null,
@@ -130,6 +140,8 @@ const officeDealRows: CleanupRowSeed[] = [
   {
     id: "deal-3",
     name: "Office Deal",
+    stageId: "stage-deal-3",
+    stageName: "Qualification",
     assignedRepId: "rep-3",
     decisionMakerName: null,
     budgetStatus: null,
@@ -264,6 +276,7 @@ describe("cleanup queue service", () => {
     const result = await getOfficeOwnershipQueue(tenantDb as any, "office-1");
 
     expect(result.rows.map((row) => row.recordId)).toEqual(["deal-3", "lead-2"]);
+    expect(result.rows.map((row) => row.stageName)).toEqual(["Qualification", "Lead Qualification"]);
     expect(
       result.rows.every((row) =>
         row.reasonCodes.some((reason) =>
@@ -419,7 +432,7 @@ describe("cleanup queue service", () => {
           assigneeId: "rep-1",
         }
       )
-    ).rejects.toThrow(/ownership queue/i);
+    ).rejects.toThrow(/Queue row not found/i);
   });
 
   it("treats zero forecast confidence as present", async () => {

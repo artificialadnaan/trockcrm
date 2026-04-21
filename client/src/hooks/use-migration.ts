@@ -147,6 +147,8 @@ export interface OwnershipQueueRow {
   recordType: "lead" | "deal";
   recordId: string;
   recordName: string;
+  stageId: string;
+  stageName: string | null;
   officeId: string;
   officeName: string;
   assignedRepId: string | null;

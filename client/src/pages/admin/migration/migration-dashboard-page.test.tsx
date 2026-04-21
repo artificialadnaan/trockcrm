@@ -135,6 +135,8 @@ describe("MigrationDashboardPage", () => {
           recordType: "deal",
           recordId: "deal-1",
           recordName: "Northstar Expansion",
+          stageId: "stage-1",
+          stageName: "Qualification",
           officeId: "office-1",
           officeName: "Dallas",
           assignedRepId: null,
@@ -165,6 +167,7 @@ describe("MigrationDashboardPage", () => {
     expect(html).toContain("Northstar Expansion");
     expect(html).toContain("Office");
     expect(html).toContain("Record type");
+    expect(html).toContain("Stage");
     expect(html).toContain("Reason code");
     expect(html).toContain("Stale age");
     expect(html).toContain("North Office");

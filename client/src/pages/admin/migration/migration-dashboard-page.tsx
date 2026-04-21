@@ -138,6 +138,8 @@ const RECORD_TYPE_OPTIONS = [
   { value: "deal", label: "Deals" },
 ] as const;
 
+const STAGE_FILTER_ALL = "all";
+
 const STALE_AGE_OPTIONS = [
   { value: "all", label: "All ages" },
   { value: "7", label: "7+ days" },
@@ -158,6 +160,7 @@ export function MigrationDashboardPage() {
   } = useMigrationExceptions();
   const [selectedOfficeId, setSelectedOfficeId] = useState<string | undefined>(undefined);
   const [recordTypeFilter, setRecordTypeFilter] = useState<"all" | "lead" | "deal">("all");
+  const [stageFilter, setStageFilter] = useState<string>(STAGE_FILTER_ALL);
   const [reasonCodeFilter, setReasonCodeFilter] = useState<string>("all");
   const [staleAgeFilter, setStaleAgeFilter] = useState<"all" | "7" | "14" | "30" | "60">("all");
   const [officeFilterError, setOfficeFilterError] = useState<string | null>(null);
@@ -195,6 +198,14 @@ export function MigrationDashboardPage() {
   const [selectedOwnershipKeys, setSelectedOwnershipKeys] = useState<Set<string>>(new Set());
   const [reassignOpen, setReassignOpen] = useState(false);
   const exceptionTotal = exceptions.reduce((sum, group) => sum + group.count, 0);
+  const stageOptions = useMemo(() => {
+    const names = new Set(
+      ownershipRows
+        .map((row) => row.stageName?.trim())
+        .filter((name): name is string => Boolean(name))
+    );
+    return [STAGE_FILTER_ALL, ...Array.from(names).sort((left, right) => left.localeCompare(right))];
+  }, [ownershipRows]);
 
   useEffect(() => {
     if (selectedOfficeId) return;
@@ -218,6 +229,7 @@ export function MigrationDashboardPage() {
 
     return ownershipRows.filter((row) => {
       if (recordTypeFilter !== "all" && row.recordType !== recordTypeFilter) return false;
+      if (stageFilter !== STAGE_FILTER_ALL && row.stageName !== stageFilter) return false;
       if (reasonCodeFilter !== "all" && !row.reasonCodes.includes(reasonCodeFilter)) return false;
       if (staleThreshold != null) {
         const timestamp = row.evaluatedAt ?? row.generatedAt;
@@ -227,7 +239,7 @@ export function MigrationDashboardPage() {
       }
       return true;
     });
-  }, [ownershipRows, reasonCodeFilter, recordTypeFilter, staleAgeFilter]);
+  }, [ownershipRows, reasonCodeFilter, recordTypeFilter, stageFilter, staleAgeFilter]);
 
   const selectedOwnershipRows = useMemo(
     () => filteredOwnershipRows.filter((row) => selectedOwnershipKeys.has(getOwnershipQueueRowKey(row))),
@@ -388,6 +400,24 @@ export function MigrationDashboardPage() {
                       {option.label}
                     </SelectItem>
                   ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2">
+              <div className="text-xs font-medium uppercase tracking-wide text-slate-500">Stage</div>
+              <Select value={stageFilter} onValueChange={(value) => setStageFilter(value ?? STAGE_FILTER_ALL)}>
+                <SelectTrigger className="w-full">
+                  <SelectValue placeholder="All stages" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={STAGE_FILTER_ALL}>All stages</SelectItem>
+                  {stageOptions
+                    .filter((stageName) => stageName !== STAGE_FILTER_ALL)
+                    .map((stageName) => (
+                      <SelectItem key={stageName} value={stageName}>
+                        {stageName}
+                      </SelectItem>
+                    ))}
                 </SelectContent>
               </Select>
             </div>
