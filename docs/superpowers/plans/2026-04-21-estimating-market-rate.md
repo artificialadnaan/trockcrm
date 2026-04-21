@@ -52,6 +52,8 @@
   Responsibility: verify persisted recommendation rows carry market-rate-enriched values and rationale.
 - Modify: `server/tests/modules/estimating/workbench-service.test.ts`
   Responsibility: verify workbench state exposes market context and evidence.
+- Modify: `server/tests/modules/estimating/copilot-service.test.ts`
+  Responsibility: verify office-context threading for workflow-state callers.
 - Modify: `server/tests/modules/estimating/workflow-state-routes.test.ts`
   Responsibility: verify market override routes and review-event behavior.
 - Create: `server/tests/modules/estimating/market-rate-integration.test.ts`
@@ -208,6 +210,7 @@
   - `estimate_generation` uses resolved market context during recommendation generation
   - worker-generated pricing rows persist market-rate-enriched values
   - worker generation uses override market context when one exists
+  - worker-created generation runs persist `rerunRequestId` in `inputSnapshotJson` when processing override-triggered reruns
 
 - [ ] **Step 4: Run the focused generation tests and verify they fail**
   Run in `server/`: `npx vitest run tests/modules/estimating/pricing-service.test.ts tests/modules/estimating/recommendation-persistence-service.test.ts`
@@ -222,6 +225,7 @@
   - apply component adjustments through the provider/resolver path without introducing a reverse dependency from `market-rate-service.ts` into `pricing-service.ts`
   - persist adjusted recommendations through a shared helper that `worker/src/jobs/estimate-generation.ts` actually calls
   - wire the same ZIP-first market-resolution inputs through `worker/src/jobs/estimate-generation.ts`
+  - persist `rerunRequestId` from the queue payload into `estimate_generation_runs.inputSnapshotJson` so queued reruns can be correlated to started/completed runs
   - persist market-rate rationale into evidence/assumptions fields
 
 - [ ] **Step 6: Re-run the focused generation tests and verify they pass**
@@ -273,7 +277,9 @@
 **Files:**
 - Modify: `server/src/modules/estimating/workbench-service.ts`
 - Modify: `server/src/modules/estimating/copilot-service.ts`
+- Modify: `server/src/modules/deals/routes.ts`
 - Modify: `server/tests/modules/estimating/workbench-service.test.ts`
+- Modify: `server/tests/modules/estimating/copilot-service.test.ts`
 
 - [ ] **Step 1: Write failing workbench-state tests for market context**
   Cover:
@@ -287,12 +293,13 @@
   - manual add context keeps using the active completed generation run while an override-triggered rerun is pending
 
 - [ ] **Step 2: Run the focused workbench tests and verify they fail**
-  Run in `server/`: `npx vitest run tests/modules/estimating/workbench-service.test.ts`
+  Run in `server/`: `npx vitest run tests/modules/estimating/workbench-service.test.ts tests/modules/estimating/copilot-service.test.ts`
   Expected: FAIL because workbench state does not include market context yet.
 
 - [ ] **Step 3: Extend workbench state assembly**
   Requirements:
   - extend `buildEstimatingWorkbenchState` and `getEstimatingWorkflowState` to accept the caller office id needed for public queue lookups
+  - update the deal estimating workflow route and its tests to pass that office context through the existing caller chain
   - include deal-level effective market summary
   - include override state and fallback source
   - define the active pricing run as the newest completed generation run for the deal, falling back to the newest started run only when no completed run exists yet
@@ -304,7 +311,7 @@
   - attach market-rate rationale to each pricing row without breaking existing row fields
 
 - [ ] **Step 4: Re-run the focused workbench tests and verify they pass**
-  Run in `server/`: `npx vitest run tests/modules/estimating/workbench-service.test.ts`
+  Run in `server/`: `npx vitest run tests/modules/estimating/workbench-service.test.ts tests/modules/estimating/copilot-service.test.ts`
   Expected: PASS
 
 - [ ] **Step 5: Commit**
