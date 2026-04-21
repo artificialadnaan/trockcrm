@@ -8,11 +8,16 @@ import {
   costCatalogSnapshotVersions,
   costCatalogSources,
   costCatalogSyncRuns,
+  estimateDealMarketOverrides,
   estimateDocumentParseRuns,
   estimateDocumentPages,
   estimateExtractions,
   estimateExtractionMatches,
   estimateGenerationRuns,
+  estimateMarketAdjustmentRules,
+  estimateMarketFallbackGeographies,
+  estimateMarketZipMappings,
+  estimateMarkets,
   estimatePricingRecommendations,
   estimatePricingRecommendationOptions,
   estimateReviewEvents,
@@ -31,6 +36,11 @@ describe("estimating schema exports", () => {
     expect(estimateSourceDocuments).toBeDefined();
     expect(estimateDocumentParseRuns).toBeDefined();
     expect(estimateDocumentPages).toBeDefined();
+    expect(estimateMarkets).toBeDefined();
+    expect(estimateMarketZipMappings).toBeDefined();
+    expect(estimateMarketFallbackGeographies).toBeDefined();
+    expect(estimateMarketAdjustmentRules).toBeDefined();
+    expect(estimateDealMarketOverrides).toBeDefined();
     expect(estimateExtractions).toBeDefined();
     expect(estimateExtractionMatches).toBeDefined();
     expect(estimatePricingRecommendations).toBeDefined();

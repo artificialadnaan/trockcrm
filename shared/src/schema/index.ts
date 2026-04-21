@@ -32,6 +32,13 @@ export { dealScopingIntake, dealScopingIntakeStatusEnum } from "./tenant/deal-sc
 export { dealStageHistory } from "./tenant/deal-stage-history.js";
 export { changeOrders, changeOrderStatusEnum } from "./tenant/change-orders.js";
 export { dealApprovals, approvalStatusEnum } from "./tenant/deal-approvals.js";
+export {
+  estimateMarkets,
+  estimateMarketZipMappings,
+  estimateMarketFallbackGeographies,
+  estimateMarketAdjustmentRules,
+  estimateDealMarketOverrides,
+} from "./tenant/estimate-markets.js";
 export { companies } from "./tenant/companies.js";
 export { properties } from "./tenant/properties.js";
 export { contacts, contactCategoryEnum } from "./tenant/contacts.js";
