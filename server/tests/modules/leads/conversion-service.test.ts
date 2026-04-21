@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getTableColumns } from "drizzle-orm";
@@ -7,6 +7,7 @@ import {
   companies,
   contacts,
   deals,
+  dealTeamRoleEnum,
   leadStageHistory,
   leads,
   properties,
@@ -49,6 +50,13 @@ const pipelineFamilyMigrationPath = resolve(
   "../../../../migrations/0020_pipeline_workflow_families.sql"
 );
 const pipelineFamilyMigrationSql = readFileSync(pipelineFamilyMigrationPath, "utf8");
+const workflowAlignmentMigrationPath = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../../migrations/0028_pipeline_workflow_alignment.sql"
+);
+const workflowAlignmentMigrationSql = existsSync(workflowAlignmentMigrationPath)
+  ? readFileSync(workflowAlignmentMigrationPath, "utf8")
+  : "";
 
 function expectSqlToMatch(pattern: RegExp): void {
   expect(migrationSql).toMatch(pattern);
@@ -56,6 +64,10 @@ function expectSqlToMatch(pattern: RegExp): void {
 
 function expectPipelineFamilySqlToMatch(pattern: RegExp): void {
   expect(pipelineFamilyMigrationSql).toMatch(pattern);
+}
+
+function expectWorkflowAlignmentSqlToMatch(pattern: RegExp): void {
+  expect(workflowAlignmentMigrationSql).toMatch(pattern);
 }
 
 type RouteServiceMocks = {
@@ -739,6 +751,28 @@ describe("Lead Conversion Shared Contract", () => {
   it("seeds minimal lead-family stages for fresh environments", () => {
     expectPipelineFamilySqlToMatch(
       /INSERT INTO public\.pipeline_stage_config[\s\S]*\('Contacted',\s*'contacted',\s*1,\s*'lead',\s*true,\s*false,\s*'#2563EB'\)[\s\S]*\('Converted',\s*'converted',\s*99,\s*'lead',\s*false,\s*true,\s*'#16A34A'\)/s
+    );
+  });
+
+  it("adds workflow alignment migration seeds for lead qualification and opportunity", () => {
+    expectWorkflowAlignmentSqlToMatch(/'New',\s*'lead_new',\s*1,\s*'lead'/);
+    expectWorkflowAlignmentSqlToMatch(/'Lead Go\/No-Go',\s*'lead_go_no_go'/);
+    expectWorkflowAlignmentSqlToMatch(
+      /'Qualified for Opportunity',\s*'qualified_for_opportunity'/
+    );
+    expectWorkflowAlignmentSqlToMatch(/'Opportunity',\s*'opportunity',\s*1,\s*'standard_deal'/);
+  });
+
+  it("persists neutral opportunity routing state on deals", () => {
+    const columns = getTableColumns(deals) as Record<string, any>;
+
+    expect(columns.pipelineDisposition?.name).toBe("pipeline_disposition");
+    expect(columns.workflowRoute.notNull).toBe(false);
+  });
+
+  it("expands deal team roles for service and operations ownership", () => {
+    expect(dealTeamRoleEnum.enumValues).toEqual(
+      expect.arrayContaining(["client_services", "operations"])
     );
   });
 });

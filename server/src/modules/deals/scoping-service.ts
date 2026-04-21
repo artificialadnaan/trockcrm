@@ -284,6 +284,12 @@ function hasNonEmptyText(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
 }
 
+function resolveScopingWorkflowRoute(
+  workflowRoute: WorkflowRoute | null | undefined
+): WorkflowRoute {
+  return workflowRoute ?? "estimating";
+}
+
 function getRequiredScopingAttachmentRequirements(
   workflowRoute: WorkflowRoute
 ): DealScopingAttachmentRequirement[] {
@@ -482,9 +488,10 @@ export async function evaluateDealScopingReadiness(
   const attachments = await listLinkedScopingAttachments(tenantDb, dealId);
   const sectionData = buildBaseSectionData(existingIntake, deal);
   const projectTypeId = existingIntake?.projectTypeId ?? deal.projectTypeId ?? null;
+  const workflowRoute = resolveScopingWorkflowRoute(deal.workflowRoute);
   const readiness = buildScopingReadiness({
     currentStatus: (existingIntake?.status ?? "draft") as DealScopingIntakeStatus,
-    workflowRoute: deal.workflowRoute,
+    workflowRoute,
     projectTypeId,
     sectionData,
     attachments,
@@ -500,7 +507,7 @@ export async function evaluateDealScopingReadiness(
         deal,
         userId: existingIntake.lastEditedBy,
         editorOfficeId: user.officeId,
-        route: deal.workflowRoute,
+        route: workflowRoute,
         projectTypeId,
         sectionData,
         readiness,
@@ -528,10 +535,11 @@ export async function activateDealScopingIntake(
   }
 
   const now = new Date();
+  const workflowRoute = resolveScopingWorkflowRoute(deal.workflowRoute);
   const [savedIntake] = await tenantDb
     .update(dealScopingIntake)
     .set({
-      workflowRouteSnapshot: deal.workflowRoute,
+      workflowRouteSnapshot: workflowRoute,
       status: "activated",
       activatedAt: existingIntake.activatedAt ?? now,
       updatedAt: now,
@@ -580,7 +588,9 @@ export async function upsertDealScopingIntake(
       .returning();
   }
 
-  const nextRoute = patch.workflowRoute ?? dealUpdates.workflowRoute ?? deal.workflowRoute;
+  const nextRoute = resolveScopingWorkflowRoute(
+    patch.workflowRoute ?? dealUpdates.workflowRoute ?? deal.workflowRoute
+  );
   const projectTypeId =
     patch.projectTypeId === undefined
       ? existingIntake?.projectTypeId ?? deal.projectTypeId ?? null

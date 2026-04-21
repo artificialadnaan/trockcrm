@@ -579,7 +579,7 @@ export async function updateDeal(
           ? (existing.primaryContactId ?? undefined)
           : (input.primaryContactId ?? undefined),
       source: input.source === undefined ? (existing.source ?? undefined) : (input.source ?? undefined),
-      workflowRoute: input.workflowRoute ?? existing.workflowRoute,
+      workflowRoute: input.workflowRoute ?? existing.workflowRoute ?? "estimating",
     }, {
       existingDealId: existing.id,
     });
