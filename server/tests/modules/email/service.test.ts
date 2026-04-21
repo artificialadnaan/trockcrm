@@ -255,6 +255,98 @@ describe("email service inbound association", () => {
     expect(insertPayloads.some((entry) => entry.jobType === "domain_event" && entry.payload?.eventName === "task.completed")).toBe(true);
   });
 
+  it("completes legacy email assignment queue tasks when an email is manually associated", async () => {
+    const updatePayloads: Array<{ table: string; payload: any }> = [];
+    const insertPayloads: Array<any> = [];
+    const tenantDb = {
+      select: vi.fn(() => {
+        const chain: any = {
+          from: vi.fn(() => chain),
+          innerJoin: vi.fn(() => chain),
+          where: vi.fn(() => chain),
+          limit: vi.fn(() => chain),
+          then(resolve: (value: any) => void) {
+            const callIndex = (tenantDb.select as any).mock.calls.length;
+            if (callIndex === 1) {
+              resolve([{ id: "email-1", userId: "user-1" }]);
+            } else if (callIndex === 2) {
+              resolve([{ id: "contact-1", companyId: "company-1" }]);
+            } else {
+              resolve([
+                {
+                  id: "task-legacy-1",
+                  title: "Associate inbound email",
+                  status: "pending",
+                  assignedTo: "user-1",
+                  type: "inbound_email",
+                  originRule: "email_assignment_queue",
+                  dedupeKey: "email:email-1:assignment_queue",
+                  reasonCode: "email_assignment_queue",
+                  dealId: null,
+                  contactId: "contact-1",
+                  entitySnapshot: { emailId: "email-1" },
+                },
+              ]);
+            }
+          },
+        };
+        return chain;
+      }),
+      update: vi.fn((table: any) => ({
+        set: vi.fn((payload: any) => {
+          updatePayloads.push({ table: table?.name ?? "unknown", payload });
+          return {
+            where: vi.fn(() => ({
+              returning: vi.fn(async () => [
+                {
+                  id: "task-legacy-1",
+                  title: "Associate inbound email",
+                  status: payload.status ?? "completed",
+                  assignedTo: "user-1",
+                  type: "inbound_email",
+                  originRule: "email_assignment_queue",
+                  dedupeKey: "email:email-1:assignment_queue",
+                  reasonCode: "email_assignment_queue",
+                  dealId: payload.dealId ?? null,
+                  contactId: "contact-1",
+                  entitySnapshot: { emailId: "email-1" },
+                },
+              ]),
+            })),
+          };
+        }),
+      })),
+      insert: vi.fn(() => ({
+        values: vi.fn(async (payload: any) => {
+          insertPayloads.push(payload);
+          return [];
+        }),
+      })),
+    };
+
+    await associateEmailToEntity(
+      tenantDb as any,
+      "email-1",
+      {
+        assignedEntityType: "contact",
+        assignedEntityId: "contact-1",
+      },
+      "director",
+      "director-1",
+      "office-1"
+    );
+
+    expect(updatePayloads.some((entry) => entry.payload.status === "completed")).toBe(true);
+    expect(
+      insertPayloads.some(
+        (entry) =>
+          entry.jobType === "domain_event" &&
+          entry.payload?.eventName === "task.completed" &&
+          entry.payload?.originRule === "email_assignment_queue"
+      )
+    ).toBe(true);
+  });
+
   it("persists contact assignments without forcing a deal id", async () => {
     const updatePayloads: Array<{ table: string; payload: any }> = [];
     const insertPayloads: Array<any> = [];
