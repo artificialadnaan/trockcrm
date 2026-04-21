@@ -176,7 +176,7 @@ Required linkage fields:
 - `normalized_intent`
 - `source_row_identity`
 - `generation_run_id`
-- `manual_origin` with allowed values:
+- `manual_origin`, nullable unless `source_type = 'manual'`, with allowed values:
   - `generated`
   - `manual_estimator_added`
 - `selected_source_type`, nullable until a recommendation or manual row is accepted, with allowed values:
@@ -513,7 +513,7 @@ Allowed actions:
   - writes its id to `promoted_local_catalog_item_id` on the parent recommendation row
   - flips `catalog_backing` to `local_promoted`
   - keeps `source_type = 'manual'` because row origin does not change
-  - keeps `selected_source_type = 'manual'` unless the estimator later chooses a catalog-backed child option
+  - keeps `selected_source_type = null` while the row is still `pending_review`; once the row is accepted as free-text it becomes `manual`, and if the estimator later chooses a catalog-backed child option it becomes `catalog_option`
   - does not itself promote the line into the canonical estimate model
   - must no-op and return the existing linked item when `promoted_local_catalog_item_id` is already set on that recommendation row
   - must also no-op and reuse an existing local catalog item when another recommendation row for the same `deal_id + manual_identity_key` has already linked one
