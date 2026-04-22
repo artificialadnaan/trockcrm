@@ -14,6 +14,7 @@ export { procoreOauthTokens } from "./public/procore-oauth-tokens.js";
 export { procoreWebhookLog } from "./public/procore-webhook-log.js";
 export { userGraphTokens, graphTokenStatusEnum } from "./public/user-graph-tokens.js";
 export { jobQueue, jobStatusEnum } from "./public/job-queue.js";
+export * from "../types/sales-workflow.js";
 
 // Tenant schema tables (used for Drizzle type resolution when querying via tenantDb)
 export {

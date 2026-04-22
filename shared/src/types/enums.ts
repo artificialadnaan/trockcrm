@@ -15,6 +15,9 @@ export type DealStage = (typeof DEAL_STAGES)[number];
 export const WORKFLOW_ROUTES = ["estimating", "service"] as const;
 export type WorkflowRoute = (typeof WORKFLOW_ROUTES)[number];
 
+export const SALES_WORKFLOW_ROUTES = WORKFLOW_ROUTES;
+export type SalesWorkflowRoute = WorkflowRoute;
+
 export const WORKFLOW_FAMILIES = ["lead", "standard_deal", "service_deal"] as const;
 export type WorkflowFamily = (typeof WORKFLOW_FAMILIES)[number];
 
