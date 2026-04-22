@@ -6,7 +6,7 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { LeadStageBadge } from "./lead-stage-badge";
-import { convertLead } from "@/hooks/use-leads";
+import { convertLeadToOpportunity } from "@/hooks/use-leads";
 
 export interface LeadFormLead {
   id: string;
@@ -30,14 +30,12 @@ export interface LeadFormLead {
 interface LeadFormProps {
   lead: LeadFormLead;
   converted?: boolean;
-  defaultDealStageId?: string | null;
   showPrimaryAction?: boolean;
 }
 
 export function LeadForm({
   lead,
   converted = false,
-  defaultDealStageId = null,
   showPrimaryAction = true,
 }: LeadFormProps) {
   const navigate = useNavigate();
@@ -59,21 +57,11 @@ export function LeadForm({
       return;
     }
 
-    if (!defaultDealStageId) {
-      navigate("/deals/new");
-      return;
-    }
-
     setConverting(true);
     try {
-      const result = await convertLead(lead.id, {
-        dealStageId: defaultDealStageId,
-        name: lead.name,
-        source: lead.source,
-        description: lead.description,
-      });
+      const result = await convertLeadToOpportunity(lead.id);
       toast.success("Lead converted to deal");
-      navigate(`/deals/${result.deal.id}`);
+      navigate(`/deals/${result.deal.id}?enrichment=1`);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to convert lead");
     } finally {

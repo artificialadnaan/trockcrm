@@ -1,4 +1,9 @@
-import { describe, expect, it, vi } from "vitest";
+// @vitest-environment jsdom
+
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { act } from "react";
+import { createRoot, type Root } from "react-dom/client";
+import type { ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { LeadDetailPage } from "./lead-detail-page";
@@ -110,6 +115,8 @@ let activities: Array<{
   occurredAt: string;
 }> = [];
 
+const navigateMock = vi.fn();
+
 vi.mock("@/hooks/use-leads", () => ({
   useLeadDetail: vi.fn(() => ({
     lead,
@@ -150,6 +157,14 @@ vi.mock("@/hooks/use-leads", () => ({
   updateLeadScoping: vi.fn(),
 }));
 
+vi.mock("react-router-dom", async () => {
+  const actual = await vi.importActual<typeof import("react-router-dom")>("react-router-dom");
+  return {
+    ...actual,
+    useNavigate: () => navigateMock,
+  };
+});
+
 vi.mock("@/hooks/use-pipeline-config", () => ({
   usePipelineStages: vi.fn(() => ({
     stages,
@@ -184,6 +199,35 @@ vi.mock("@/hooks/use-activities", () => ({
   })),
 }));
 
+vi.mock("@/components/leads/lead-convert-dialog", () => ({
+  LeadConvertDialog: ({
+    open,
+    onSuccess,
+  }: {
+    open: boolean;
+    onSuccess: (dealId: string) => void;
+  }) => (open ? <button onClick={() => onSuccess("deal-1")}>Confirm Conversion</button> : null),
+}));
+
+function renderLeadDetailInDom() {
+  const container = document.createElement("div");
+  document.body.innerHTML = "";
+  document.body.appendChild(container);
+  const root = createRoot(container);
+
+  act(() => {
+    root.render(
+      <MemoryRouter initialEntries={["/leads/lead-1"]}>
+        <Routes>
+          <Route path="/leads/:id" element={<LeadDetailPage />} />
+        </Routes>
+      </MemoryRouter>
+    );
+  });
+
+  return { container, root };
+}
+
 function renderLeadDetail() {
   return renderToStaticMarkup(
     <MemoryRouter initialEntries={["/leads/lead-1"]}>
@@ -215,6 +259,13 @@ function renderLeadDetailWithScopingFocus() {
 }
 
 describe("LeadDetailPage", () => {
+  beforeEach(() => {
+    // React 18 expects this flag in jsdom-based tests that call act().
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+    navigateMock.mockReset();
+  });
+
   it("renders the lead detail surface with assignment and context", () => {
     lead = {
       ...lead,
@@ -312,5 +363,43 @@ describe("LeadDetailPage", () => {
 
     expect(html).toContain("Open Deal");
     expect(html).toContain("This lead has already been converted");
+  });
+
+  it("routes successful opportunity conversion to the deal enrichment landing", () => {
+    lead = {
+      ...lead,
+      stageId: "stage-qualified",
+      convertedAt: null,
+      convertedDealId: null,
+      convertedDealNumber: null,
+      status: "open",
+    };
+
+    const { container, root } = renderLeadDetailInDom();
+
+    const convertButton = Array.from(container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("Convert to Opportunity")
+    );
+    expect(convertButton).toBeTruthy();
+
+    act(() => {
+      convertButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    const confirmButton = Array.from(container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("Confirm Conversion")
+    );
+    expect(confirmButton).toBeTruthy();
+
+    act(() => {
+      confirmButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(navigateMock).toHaveBeenCalledWith("/deals/deal-1?enrichment=1");
+
+    act(() => {
+      root.unmount();
+    });
+    container.remove();
   });
 });

@@ -325,7 +325,7 @@ export function LeadDetailPage() {
           lead={lead}
           open={convertDialogOpen}
           onOpenChange={setConvertDialogOpen}
-          onSuccess={(dealId) => navigate(`/deals/${dealId}`)}
+          onSuccess={(dealId) => navigate(`/deals/${dealId}?enrichment=1`)}
         />
       </>
     </div>

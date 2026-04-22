@@ -134,6 +134,12 @@ export interface Deal {
 }
 
 export interface DealDetail extends Deal {
+  postConversionEnrichment?: {
+    applies: boolean;
+    isComplete: boolean;
+    requiredFields: Array<"projectTypeId" | "regionId" | "expectedCloseDate" | "nextStep">;
+    missingFields: Array<"projectTypeId" | "regionId" | "expectedCloseDate" | "nextStep">;
+  };
   proposalStatus: string | null;
   proposalSentAt: string | null;
   proposalAcceptedAt: string | null;

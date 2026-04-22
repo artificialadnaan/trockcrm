@@ -9,6 +9,12 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { RecordAssignmentCard } from "@/components/assignment/record-assignment-card";
 import {
   DropdownMenu,
@@ -30,6 +36,8 @@ import { DealPunchListTab } from "./deal-punch-list-tab";
 import { DealCloseoutTab } from "./deal-closeout-tab";
 import { DealTimersBanner } from "./deal-timers-banner";
 import { DealProposalCard } from "./deal-proposal-card";
+import { DealForm } from "@/components/deals/deal-form";
+import { PostConversionEnrichmentPanel } from "@/components/deals/post-conversion-enrichment-panel";
 import { DealEstimatingSubstage } from "./deal-estimating-substage";
 import { OpportunityRoutingPanel } from "@/components/deals/opportunity-routing-panel";
 import { LeadForm } from "@/components/leads/lead-form";
@@ -65,6 +73,9 @@ export function DealDetailPage() {
   const [targetStageId, setTargetStageId] = useState<string | null>(null);
   const [teamCount, setTeamCount] = useState<number | null>(null);
   const [savingAssignment, setSavingAssignment] = useState(false);
+  const [enrichmentPanelDismissed, setEnrichmentPanelDismissed] = useState(false);
+  const [enrichmentEditOpen, setEnrichmentEditOpen] = useState(false);
+  const [nextStepFocusPending, setNextStepFocusPending] = useState(false);
   const currentStage = stages.find((s) => s.id === deal?.stageId);
   const isDirectorOrAdmin = user?.role === "director" || user?.role === "admin";
 
@@ -125,6 +136,7 @@ export function DealDetailPage() {
   const availableTabs = tabs.map((tab) => tab.key);
   const requestedTab = searchParams.get("tab");
   const requestedFocus = searchParams.get("focus");
+  const requestedEnrichment = searchParams.get("enrichment") === "1";
 
   useEffect(() => {
     const nextTab =
@@ -133,6 +145,16 @@ export function DealDetailPage() {
         : "overview";
     setActiveTab((current) => (current === nextTab ? current : nextTab));
   }, [availableTabs, requestedTab]);
+
+  useEffect(() => {
+    if (!requestedEnrichment) {
+      return;
+    }
+
+    const nextParams = new URLSearchParams(searchParams);
+    nextParams.delete("enrichment");
+    setSearchParams(nextParams, { replace: true });
+  }, [requestedEnrichment, searchParams, setSearchParams]);
 
   useEffect(() => {
     if (activeTab !== "overview" || requestedFocus !== "copilot") {
@@ -148,6 +170,29 @@ export function DealDetailPage() {
 
     return () => window.cancelAnimationFrame(frame);
   }, [activeTab, requestedFocus]);
+
+  useEffect(() => {
+    if (deal?.postConversionEnrichment?.isComplete) {
+      setEnrichmentPanelDismissed(false);
+    }
+  }, [deal?.postConversionEnrichment?.isComplete]);
+
+  useEffect(() => {
+    if (!nextStepFocusPending || activeTab !== "overview") {
+      return;
+    }
+
+    const frame = window.requestAnimationFrame(() => {
+      const element = document.getElementById("deal-next-step-editor");
+      element?.scrollIntoView({ behavior: "smooth", block: "start" });
+      if (element instanceof HTMLElement) {
+        element.focus();
+      }
+      setNextStepFocusPending(false);
+    });
+
+    return () => window.cancelAnimationFrame(frame);
+  }, [activeTab, nextStepFocusPending]);
 
   if (loading) {
     return (
@@ -192,6 +237,18 @@ export function DealDetailPage() {
     } finally {
       setSavingAssignment(false);
     }
+  };
+
+  const showPostConversionEnrichmentPanel =
+    deal.postConversionEnrichment?.applies === true &&
+    deal.postConversionEnrichment.isComplete === false &&
+    !enrichmentPanelDismissed;
+
+  const handleEditNextStep = () => {
+    if (activeTab !== "overview") {
+      handleTabSelect("overview");
+    }
+    setNextStepFocusPending(true);
   };
 
   return (
@@ -332,6 +389,16 @@ export function DealDetailPage() {
         <DealEstimatingSubstage deal={deal} onUpdate={refetch} />
       )}
 
+      {showPostConversionEnrichmentPanel ? (
+        <PostConversionEnrichmentPanel
+          requiredFields={deal.postConversionEnrichment.requiredFields}
+          missingFields={deal.postConversionEnrichment.missingFields}
+          onDismiss={() => setEnrichmentPanelDismissed(true)}
+          onEditDetails={() => setEnrichmentEditOpen(true)}
+          onEditNextStep={handleEditNextStep}
+        />
+      ) : null}
+
       {/* Tabs */}
       <div className="border-b">
         <div className="flex gap-6">
@@ -382,20 +449,22 @@ export function DealDetailPage() {
               await refetch();
             }}
           />
-          <NextStepEditor
-            value={{
-              nextStep: deal.nextStep,
-              nextStepDueAt: deal.nextStepDueAt,
-              supportNeededType: deal.supportNeededType,
-              supportNeededNotes: deal.supportNeededNotes,
-              decisionMakerName: deal.decisionMakerName,
-              budgetStatus: deal.budgetStatus,
-            }}
-            onSave={async (payload) => {
-              await updateDeal(deal.id, payload);
-              await refetch();
-            }}
-          />
+          <div id="deal-next-step-editor" tabIndex={-1}>
+            <NextStepEditor
+              value={{
+                nextStep: deal.nextStep,
+                nextStepDueAt: deal.nextStepDueAt,
+                supportNeededType: deal.supportNeededType,
+                supportNeededNotes: deal.supportNeededNotes,
+                decisionMakerName: deal.decisionMakerName,
+                budgetStatus: deal.budgetStatus,
+              }}
+              onSave={async (payload) => {
+                await updateDeal(deal.id, payload);
+                await refetch();
+              }}
+            />
+          </div>
         </div>
       )}
       {activeTab === "lead" && (
@@ -477,6 +546,21 @@ export function DealDetailPage() {
           onSuccess={handleStageChangeSuccess}
         />
       )}
+
+      <Dialog open={enrichmentEditOpen} onOpenChange={setEnrichmentEditOpen}>
+        <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-4xl">
+          <DialogHeader>
+            <DialogTitle>Complete Deal Setup</DialogTitle>
+          </DialogHeader>
+          <DealForm
+            deal={deal}
+            onSuccess={() => {
+              setEnrichmentEditOpen(false);
+              void refetch();
+            }}
+          />
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
