@@ -90,6 +90,13 @@ const leadPipelineRemapMigrationPath = resolve(
 const leadPipelineRemapMigrationSql = existsSync(leadPipelineRemapMigrationPath)
   ? readFileSync(leadPipelineRemapMigrationPath, "utf8")
   : "";
+const convertedLeadReconciliationMigrationPath = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../../migrations/0048_reconcile_converted_leads_with_successor_deals.sql"
+);
+const convertedLeadReconciliationMigrationSql = existsSync(convertedLeadReconciliationMigrationPath)
+  ? readFileSync(convertedLeadReconciliationMigrationPath, "utf8")
+  : "";
 
 function expectSqlToMatch(pattern: RegExp): void {
   expect(migrationSql).toMatch(pattern);
@@ -933,6 +940,17 @@ describe("Lead Conversion Shared Contract", () => {
     expect(leadPipelineRemapMigrationSql).toContain("slug = 'qualified_for_opportunity'");
     expect(leadPipelineRemapMigrationSql).toContain("status = 'open'");
     expect(leadPipelineRemapMigrationSql).not.toContain("UPDATE public.leads");
+  });
+
+  it("reconciles leads that already have successor deals into converted status", () => {
+    expect(existsSync(convertedLeadReconciliationMigrationPath)).toBe(true);
+    expect(convertedLeadReconciliationMigrationSql).toContain("nspname LIKE 'office\\_%'");
+    expect(convertedLeadReconciliationMigrationSql).toContain("table_name = 'leads'");
+    expect(convertedLeadReconciliationMigrationSql).toContain("table_name = 'deals'");
+    expect(convertedLeadReconciliationMigrationSql).toContain("slug = 'converted'");
+    expect(convertedLeadReconciliationMigrationSql).toContain("status = 'converted'");
+    expect(convertedLeadReconciliationMigrationSql).toContain("is_active = false");
+    expect(convertedLeadReconciliationMigrationSql).toContain("d.source_lead_id = l.id");
   });
 
   it("persists neutral opportunity routing state on deals", () => {
