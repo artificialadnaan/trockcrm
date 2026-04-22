@@ -5,7 +5,10 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import type { LeadQualificationFieldId } from "@trock-crm/shared/types";
-import { LEAD_QUALIFICATION_FIELDS } from "@trock-crm/shared/types";
+import {
+  getLeadValidationQuestionSetForProjectType,
+  LEAD_QUALIFICATION_FIELDS,
+} from "@trock-crm/shared/types";
 import {
   Select,
   SelectContent,
@@ -83,6 +86,10 @@ interface LeadStageGateErrorState {
     name?: string;
   };
 }
+
+const LEAD_QUALIFICATION_FIELD_LABELS = new Map(
+  LEAD_QUALIFICATION_FIELDS.map((field) => [field.id, field.label])
+);
 
 function getEditableFormState(lead?: LeadFormLead) {
   return {
@@ -285,6 +292,14 @@ function EditableLeadForm({ mode, lead }: { mode: LeadEditableMode; lead?: LeadF
     () => getValidationQuestionSetForProjectType(selectedProjectType?.slug ?? null),
     [selectedProjectType?.slug]
   );
+  const gateQuestionSet = useMemo(
+    () => getLeadValidationQuestionSetForProjectType(selectedProjectType?.slug ?? lead?.projectTypeId ?? null),
+    [lead?.projectTypeId, selectedProjectType?.slug]
+  );
+  const gateQuestionLabels = useMemo(
+    () => new Map(gateQuestionSet.questions.map((question) => [question.id, question.label])),
+    [gateQuestionSet.questions]
+  );
 
   const handleFieldChange = (field: keyof typeof formData, value: string) => {
     setFormData((current) => ({ ...current, [field]: value }));
@@ -383,6 +398,8 @@ function EditableLeadForm({ mode, lead }: { mode: LeadEditableMode; lead?: LeadF
           currentStage: err.currentStage as LeadStageGateErrorState["currentStage"],
           targetStage: err.targetStage as LeadStageGateErrorState["targetStage"],
         });
+        setError(null);
+        return;
       }
       setError(err instanceof Error ? err.message : "Failed to save lead");
     } finally {
@@ -408,12 +425,18 @@ function EditableLeadForm({ mode, lead }: { mode: LeadEditableMode; lead?: LeadF
               )}
               {stageGateError.missingRequirements?.qualificationFields?.length ? (
                 <p className="mt-2 text-xs text-amber-800">
-                  Missing qualification fields: {stageGateError.missingRequirements.qualificationFields.join(", ")}
+                  Missing qualification fields:{" "}
+                  {stageGateError.missingRequirements.qualificationFields
+                    .map((fieldId) => LEAD_QUALIFICATION_FIELD_LABELS.get(fieldId as LeadQualificationFieldId) ?? fieldId)
+                    .join(", ")}
                 </p>
               ) : null}
               {stageGateError.missingRequirements?.projectTypeQuestionIds?.length ? (
                 <p className="mt-1 text-xs text-amber-800">
-                  Missing Top 5 answers: {stageGateError.missingRequirements.projectTypeQuestionIds.join(", ")}
+                  Missing Top 5 answers:{" "}
+                  {stageGateError.missingRequirements.projectTypeQuestionIds
+                    .map((questionId) => gateQuestionLabels.get(questionId) ?? questionId)
+                    .join(", ")}
                 </p>
               ) : null}
             </div>
