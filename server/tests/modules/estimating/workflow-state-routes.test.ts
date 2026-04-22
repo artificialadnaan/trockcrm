@@ -489,7 +489,14 @@ describe("estimating workflow routes", () => {
     });
 
     expect(res.statusCode).toBe(200);
-    expect(estimatingServiceMocks.getEstimatingWorkflowState).toHaveBeenCalled();
+    expect(estimatingServiceMocks.getEstimatingWorkflowState).toHaveBeenCalledWith(
+      expect.anything(),
+      "deal-1",
+      expect.objectContaining({
+        appDb: expect.anything(),
+        officeId: "office-1",
+      })
+    );
     expect(res.body.summary).toEqual({
       documents: {
         total: 0,
