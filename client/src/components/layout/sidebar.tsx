@@ -270,15 +270,6 @@ export function Sidebar() {
                     className={`h-4 w-4 transition-transform ${isExpanded(group) ? "rotate-0" : "-rotate-90"}`}
                   />
                 </button>
-<<<<<<< HEAD
-                  {isExpanded(group) ? (
-                    <div className="space-y-1">
-                      {group.items.map((item) => (
-                      <NavLink key={getNavItemKey(item)} to={item.to} className={navLinkClass}>
-                          <item.icon className="h-4 w-4" />
-                          {item.label}
-                        </NavLink>
-=======
                 {isExpanded(group) ? (
                   <div className="space-y-1">
                     {group.items.map((item) => (
@@ -286,7 +277,6 @@ export function Sidebar() {
                         <item.icon className="h-4 w-4" />
                         {item.label}
                       </NavLink>
->>>>>>> a43fcfc (fix: align lead creation with canonical pipeline)
                     ))}
                   </div>
                 ) : null}
