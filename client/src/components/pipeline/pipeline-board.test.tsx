@@ -7,6 +7,7 @@ const columns = [
   {
     stage: { id: "stage-estimating", name: "Estimating", slug: "estimating" },
     count: 12,
+    totalValue: 245000,
     cards: [
       {
         id: "deal-1",
@@ -38,6 +39,9 @@ describe("PipelineBoard", () => {
     expect(html).toContain("Estimating");
     expect(html).toContain("North Campus");
     expect(html).toContain("TR-2026-0001");
+    expect(html).toContain("$245K");
+    expect(html).toContain("Dallas");
+    expect(html).toContain("2d in stage");
     expect(html).toContain("View all 12");
   });
 });

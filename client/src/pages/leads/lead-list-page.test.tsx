@@ -115,4 +115,21 @@ describe("LeadListPage", () => {
     expect(html).not.toContain("Fresh Prospect");
     expect(html).not.toContain("Qualified for Opportunity");
   });
+
+  it("renders the restored board header and summary strip", () => {
+    const html = normalize(
+      renderToStaticMarkup(
+        <MemoryRouter initialEntries={["/leads?scope=mine"]}>
+          <LeadListPage />
+        </MemoryRouter>
+      )
+    );
+
+    expect(html).toContain("Lead Pipeline");
+    expect(html).toContain("Live engine");
+    expect(html).toContain("Qualified pressure");
+    expect(html).toContain("Active leads");
+    expect(html).toContain("Avg. stage age");
+    expect(html).toContain("New Lead");
+  });
 });

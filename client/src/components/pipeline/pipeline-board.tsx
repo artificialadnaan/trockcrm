@@ -10,6 +10,7 @@ import {
 } from "@dnd-kit/core";
 import { PipelineBoardColumn, type PipelineBoardColumnData } from "./pipeline-board-column";
 import { PipelineRecordCard } from "./pipeline-record-card";
+import { cn } from "@/lib/utils";
 
 export interface PipelineBoardProps {
   entity: "lead" | "deal";
@@ -34,7 +35,14 @@ export function PipelineBoard({
     columns.flatMap((column) => column.cards).find((record) => record.id === activeRecordId) ?? null;
 
   if (loading) {
-    return <div className="rounded-2xl border border-slate-200 bg-slate-50 p-6 text-sm text-slate-500">Loading board...</div>;
+    return (
+      <div className="overflow-hidden rounded-[2rem] border border-slate-200 bg-[#eef2f6] shadow-sm">
+        <div className="border-b border-slate-200/80 px-6 py-4">
+          <div className="h-3 w-32 rounded-full bg-slate-200" />
+        </div>
+        <div className="px-6 py-12 text-sm font-medium text-slate-500">Loading board...</div>
+      </div>
+    );
   }
 
   const handleDragStart = (event: DragStartEvent) => {
@@ -59,7 +67,13 @@ export function PipelineBoard({
 
   return (
     <DndContext sensors={sensors} onDragStart={handleDragStart} onDragEnd={handleDragEnd}>
-      <div className="flex gap-4 overflow-x-auto pb-4">
+      <div className="overflow-x-auto rounded-[2rem] border border-slate-200/80 bg-[#eef2f6] px-4 py-5 shadow-sm">
+        <div
+          className={cn(
+            "flex min-w-max gap-4 pb-2",
+            columns.length <= 4 ? "justify-between" : ""
+          )}
+        >
         {columns.map((column) => (
           <PipelineBoardColumn
             key={column.stage.id}
@@ -70,6 +84,7 @@ export function PipelineBoard({
             activeRecordId={activeRecordId}
           />
         ))}
+        </div>
       </div>
       <DragOverlay>
         {activeRecord ? <PipelineRecordCard entity={entity} record={activeRecord} isDragging /> : null}

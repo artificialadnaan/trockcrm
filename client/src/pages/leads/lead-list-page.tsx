@@ -13,6 +13,7 @@ import {
 } from "@/components/ui/dialog";
 import { PipelineBoard } from "@/components/pipeline/pipeline-board";
 import { transitionLeadStage, useLeadBoard } from "@/hooks/use-leads";
+import { buildLeadBoardSummary } from "@/lib/pipeline-board-summary";
 import { useNormalizedPipelineRoute } from "@/lib/pipeline-scope";
 
 export function buildLeadIntakePath(leadId: string, focus: "qualification" | "scoping" = "qualification") {
@@ -46,6 +47,7 @@ export function LeadListPage() {
   const [searchParams] = useSearchParams();
   const { allowedScope: scope, needsRedirect, redirectTo } = useNormalizedPipelineRoute("leads");
   const { board, loading, refetch } = useLeadBoard(scope);
+  const summary = buildLeadBoardSummary(board);
   const [blockedMove, setBlockedMove] = useState<{
     leadId: string;
     leadName: string;
@@ -74,18 +76,40 @@ export function LeadListPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-start justify-between gap-4">
-        <div className="space-y-1">
-          <h1 className="text-3xl font-semibold tracking-tight text-slate-950">Leads Board</h1>
-          <p className="text-sm text-slate-500">
-            Use the board to move active leads forward. Open a lead to complete qualification intake and convert to Opportunity.
-          </p>
+      <section className="overflow-hidden rounded-[2rem] border border-slate-200 bg-white shadow-sm">
+        <div className="flex items-start justify-between gap-4 px-7 pb-6 pt-7">
+          <div className="space-y-3">
+            <div className="space-y-2">
+              <h1 className="text-[2.5rem] leading-none font-black tracking-tight text-slate-950">
+                Lead Pipeline
+              </h1>
+              <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-sm font-semibold text-slate-600">
+                <span className="inline-flex items-center gap-2">
+                  <span className="h-2.5 w-2.5 rounded-full bg-rose-500" />
+                  <span className="tracking-[0.16em] uppercase">{summary.liveStageCount} Live engine</span>
+                </span>
+                <span>
+                  Qualified pressure:{" "}
+                  <span className="font-black text-slate-950">{summary.qualifiedPressureCount}</span>
+                </span>
+              </div>
+            </div>
+            <p className="max-w-2xl text-sm text-slate-500">
+              Use the board to move active leads forward. Open a lead to complete qualification intake and convert to Opportunity.
+            </p>
+          </div>
+          <Button onClick={() => navigate("/leads/new")}>
+            <Plus className="mr-2 h-4 w-4" />
+            New Lead
+          </Button>
         </div>
-        <Button onClick={() => navigate("/leads/new")}>
-          <Plus className="mr-2 h-4 w-4" />
-          New Lead
-        </Button>
-      </div>
+        <div className="grid gap-4 border-t border-slate-200 bg-[#f7f8fb] px-7 py-5 md:grid-cols-4">
+          <SummaryMetric label="Active leads" value={String(summary.totalCount)} />
+          <SummaryMetric label="Avg. stage age" value={`${summary.averageAgeDays} days`} />
+          <SummaryMetric label="Qualified pressure" value={String(summary.qualifiedPressureCount)} />
+          <SummaryMetric label="Opportunity ready" value={String(summary.opportunityCount)} />
+        </div>
+      </section>
 
       <PipelineBoard
         entity="lead"
@@ -160,6 +184,15 @@ export function LeadListPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+    </div>
+  );
+}
+
+function SummaryMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="space-y-1">
+      <p className="text-[11px] font-black tracking-[0.18em] text-slate-500 uppercase">{label}</p>
+      <p className="text-[2rem] leading-none font-black tracking-tight text-slate-950">{value}</p>
     </div>
   );
 }

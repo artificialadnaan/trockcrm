@@ -1,9 +1,8 @@
 import { useNavigate } from "react-router-dom";
 import { useDraggable } from "@dnd-kit/core";
 import { GripVertical, Clock, MapPin } from "lucide-react";
-import { Card } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
 import { formatCurrencyCompact, daysInStage } from "@/lib/deal-utils";
+import { cn } from "@/lib/utils";
 
 export interface PipelineRecordCardData {
   id: string;
@@ -11,6 +10,7 @@ export interface PipelineRecordCardData {
   stageId: string;
   stageEnteredAt: string;
   updatedAt: string;
+  status?: string | null;
   propertyCity?: string | null;
   propertyState?: string | null;
   companyName?: string | null;
@@ -50,7 +50,8 @@ export function PipelineRecordCard({
     : undefined;
   const value = formatValue(record);
   const location = [record.propertyCity, record.propertyState].filter(Boolean).join(", ");
-  const secondaryLine = record.companyName ?? location ?? record.source ?? "Unassigned";
+  const contextLine = record.companyName ?? record.source ?? null;
+  const ageLabel = `${daysInStage(record.stageEnteredAt)}d in stage`;
 
   const openRecord = () => {
     if (onOpenRecord) {
@@ -61,47 +62,83 @@ export function PipelineRecordCard({
   };
 
   return (
-    <Card
+    <div
       ref={setNodeRef}
       style={style}
-      className={`cursor-pointer border border-slate-200 bg-white p-3 transition-shadow ${
-        isDragging ? "shadow-lg opacity-80" : "hover:shadow-md"
-      }`}
+      className={cn(
+        "cursor-pointer rounded-[1.2rem] border border-slate-200/90 bg-white px-4 py-3.5 shadow-[0_1px_1px_rgba(15,23,42,0.04)] transition-all",
+        isDragging ? "scale-[1.01] opacity-80 shadow-lg" : "hover:-translate-y-0.5 hover:shadow-md"
+      )}
       onClick={openRecord}
     >
-      <div className="flex items-start gap-2">
+      <div className="flex items-start gap-3">
         <button
           {...attributes}
           {...listeners}
-          className="mt-0.5 cursor-grab text-slate-400 transition-colors hover:text-slate-700 active:cursor-grabbing"
+          className="mt-1 cursor-grab text-slate-300 transition-colors hover:text-slate-600 active:cursor-grabbing"
           onClick={(event) => event.stopPropagation()}
           aria-label={`Drag ${record.name}`}
         >
           <GripVertical className="h-4 w-4" />
         </button>
-        <div className="min-w-0 flex-1 space-y-1.5">
-          <div className="flex items-center justify-between gap-2">
-            <div className="min-w-0">
-              <p className="truncate text-sm font-semibold text-slate-900">{record.name}</p>
-              <p className="truncate text-[11px] text-slate-500">{secondaryLine}</p>
+        <div className="min-w-0 flex-1 space-y-3">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0 space-y-2">
+              {record.dealNumber ? (
+                <span className="inline-flex rounded-md bg-slate-100 px-2 py-1 text-[10px] font-black tracking-[0.16em] text-slate-500 uppercase">
+                  {record.dealNumber}
+                </span>
+              ) : null}
+              <p className="line-clamp-2 text-[15px] leading-5 font-semibold text-slate-900">{record.name}</p>
             </div>
-            {value ? <span className="text-xs font-semibold text-slate-900">{value}</span> : null}
+            {value ? (
+              <span className="shrink-0 text-right text-[1.1rem] leading-none font-black tracking-tight text-slate-900">
+                {value}
+              </span>
+            ) : null}
           </div>
-          <div className="flex items-center gap-2 text-[11px] text-slate-500">
-            {record.dealNumber ? <Badge variant="outline">{record.dealNumber}</Badge> : null}
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] font-medium text-slate-500">
             <span className="inline-flex items-center gap-1">
               <Clock className="h-3 w-3" />
-              {daysInStage(record.stageEnteredAt)}d
+              {ageLabel}
             </span>
             {location ? (
               <span className="inline-flex min-w-0 items-center gap-1 truncate">
+                <span className="text-slate-300">•</span>
                 <MapPin className="h-3 w-3" />
                 <span className="truncate">{location}</span>
               </span>
             ) : null}
+            {contextLine ? (
+              <span className="inline-flex min-w-0 items-center gap-1 truncate">
+                <span className="text-slate-300">•</span>
+                <span className="truncate">{contextLine}</span>
+              </span>
+            ) : null}
+            {!location && !contextLine ? (
+              <span className="inline-flex items-center gap-1">
+                <span className="text-slate-300">•</span>
+                Unassigned
+              </span>
+            ) : null}
           </div>
+          {entity === "lead" && value ? (
+            <div className="text-[11px] font-semibold tracking-[0.16em] text-slate-400 uppercase">
+              estimated value
+            </div>
+          ) : null}
+          {entity === "deal" && !value && record.workflowRoute ? (
+            <div className="text-[11px] font-semibold tracking-[0.16em] text-slate-400 uppercase">
+              {record.workflowRoute}
+            </div>
+          ) : null}
+          {entity === "lead" && record.status ? (
+            <div className="text-[11px] font-semibold tracking-[0.16em] text-slate-400 uppercase">
+              {record.status}
+            </div>
+          ) : null}
         </div>
       </div>
-    </Card>
+    </div>
   );
 }
