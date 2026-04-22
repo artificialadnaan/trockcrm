@@ -661,7 +661,7 @@ export function MigrationDashboardPage() {
       ) : null}
 
       {/* Recent runs */}
-      {summary?.recentRuns && summary.recentRuns.length > 0 && (
+      {isAdmin && summary?.recentRuns && summary.recentRuns.length > 0 && (
         <div>
           <h2 className="text-sm font-medium text-gray-700 uppercase tracking-wide mb-3">
             Recent Import Runs
@@ -705,34 +705,36 @@ export function MigrationDashboardPage() {
       )}
 
       {/* Phase instructions */}
-      <div className="rounded-lg border bg-amber-50 border-amber-200 p-4">
-        <h3 className="font-medium text-amber-900 mb-2">Migration Steps</h3>
-        <ol className="text-sm text-amber-800 space-y-1 list-decimal list-inside">
-          <li>
-            Run extract script on Railway:{" "}
-            <code className="bg-amber-100 px-1 rounded font-mono text-xs">
-              railway run npx tsx scripts/migration-extract.ts
-            </code>
-          </li>
-          <li>Click "Run Validation" above to auto-validate all staged records</li>
-          <li>
-            Review flagged deals in{" "}
-            <Link to="/admin/migration/deals" className="underline font-medium">
-              Deals
-            </Link>{" "}
-            and contacts in{" "}
-            <Link to="/admin/migration/contacts" className="underline font-medium">
-              Contacts
-            </Link>
-          </li>
-          <li>
-            Promote approved records:{" "}
-            <code className="bg-amber-100 px-1 rounded font-mono text-xs">
-              OFFICE_SLUG=dallas railway run npx tsx scripts/migration-promote.ts
-            </code>
-          </li>
-        </ol>
-      </div>
+      {isAdmin ? (
+        <div className="rounded-lg border bg-amber-50 border-amber-200 p-4">
+          <h3 className="font-medium text-amber-900 mb-2">Migration Steps</h3>
+          <ol className="text-sm text-amber-800 space-y-1 list-decimal list-inside">
+            <li>
+              Run extract script on Railway:{" "}
+              <code className="bg-amber-100 px-1 rounded font-mono text-xs">
+                railway run npx tsx scripts/migration-extract.ts
+              </code>
+            </li>
+            <li>Click "Run Validation" above to auto-validate all staged records</li>
+            <li>
+              Review flagged deals in{" "}
+              <Link to="/admin/migration/deals" className="underline font-medium">
+                Deals
+              </Link>{" "}
+              and contacts in{" "}
+              <Link to="/admin/migration/contacts" className="underline font-medium">
+                Contacts
+              </Link>
+            </li>
+            <li>
+              Promote approved records:{" "}
+              <code className="bg-amber-100 px-1 rounded font-mono text-xs">
+                OFFICE_SLUG=dallas railway run npx tsx scripts/migration-promote.ts
+              </code>
+            </li>
+          </ol>
+        </div>
+      ) : null}
     </div>
   );
 }

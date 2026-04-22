@@ -47,6 +47,11 @@ export function OwnershipReassignDialog({
         .join(", "),
     [rows]
   );
+  const selectedAssigneeLabel = useMemo(
+    () => assignees.find((assignee) => assignee.id === assigneeId)?.displayName ?? "",
+    [assigneeId, assignees]
+  );
+  const assigneeTriggerLabel = selectedAssigneeLabel || (loadingAssignees ? "Loading assignees..." : "Select an office user");
 
   useEffect(() => {
     if (!open) return;
@@ -143,7 +148,7 @@ export function OwnershipReassignDialog({
             </label>
             <Select value={assigneeId} onValueChange={(value) => setAssigneeId(value ?? "")} disabled={loadingAssignees}>
               <SelectTrigger id="ownership-assignee">
-                <SelectValue placeholder={loadingAssignees ? "Loading assignees..." : "Select an office user"} />
+                <SelectValue>{assigneeTriggerLabel}</SelectValue>
               </SelectTrigger>
               <SelectContent>
                 {assignees.map((assignee) => (

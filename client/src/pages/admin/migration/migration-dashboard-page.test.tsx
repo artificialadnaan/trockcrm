@@ -230,6 +230,8 @@ describe("MigrationDashboardPage", () => {
     expect(html).not.toContain("Preview Sync");
     expect(html).not.toContain("Apply Sync");
     expect(html).not.toContain("Migration Exceptions");
+    expect(html).not.toContain("Migration Steps");
+    expect(html).not.toContain("Run Validation");
     expect(html).not.toContain("Failed to load migration summary");
     expect(html).not.toContain("Failed to load migration exceptions");
     expect(html).toContain("Refresh Queue");
