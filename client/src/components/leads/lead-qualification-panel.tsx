@@ -120,6 +120,20 @@ export function LeadQualificationPanel({
             />
           </div>
           <div className="space-y-2">
+            <Label>Property City</Label>
+            <Input
+              value={getStringValue(qualificationData, "propertyCity")}
+              onChange={(event) => updateQualificationField("propertyCity", event.target.value)}
+            />
+          </div>
+          <div className="space-y-2">
+            <Label>Property State</Label>
+            <Input
+              value={getStringValue(qualificationData, "propertyState")}
+              onChange={(event) => updateQualificationField("propertyState", event.target.value)}
+            />
+          </div>
+          <div className="space-y-2">
             <Label>Units</Label>
             <Input
               value={getStringValue(qualificationData, "unitCount")}

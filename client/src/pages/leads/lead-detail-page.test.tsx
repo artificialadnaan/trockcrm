@@ -266,6 +266,22 @@ describe("LeadDetailPage", () => {
     expect(html).toContain("Complete the qualification intake below to satisfy the current stage requirements.");
   });
 
+  it("renders property city and state inputs in the qualification intake", () => {
+    lead = {
+      ...lead,
+      stageId: "stage-lead",
+      convertedAt: null,
+      convertedDealId: null,
+      convertedDealNumber: null,
+      status: "open",
+    };
+
+    const html = renderLeadDetailWithQualificationFocus();
+
+    expect(html).toContain("Property City");
+    expect(html).toContain("Property State");
+  });
+
   it("shows a lead-scoping helper when opened from a blocked scoping gate", () => {
     lead = {
       ...lead,
