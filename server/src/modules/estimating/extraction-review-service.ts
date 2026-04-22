@@ -3,6 +3,7 @@ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import { estimateExtractions, estimateReviewEvents } from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
+import { resolvePricingScopeFromExtraction } from "./pricing-service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -54,6 +55,37 @@ async function loadEstimateExtraction(
   return extraction ?? null;
 }
 
+function buildUpdatedPricingScopeMetadata(input: {
+  existingMetadataJson: unknown;
+  normalizedLabel: string | null | undefined;
+  divisionHint: string | null | undefined;
+  rawLabel: string | null | undefined;
+}) {
+  const metadata =
+    input.existingMetadataJson &&
+    typeof input.existingMetadataJson === "object" &&
+    input.existingMetadataJson !== null
+      ? { ...(input.existingMetadataJson as Record<string, unknown>) }
+      : {};
+
+  delete metadata.pricingScopeType;
+  delete metadata.pricingScopeKey;
+  delete metadata.scopeType;
+  delete metadata.scopeKey;
+
+  const pricingScope = resolvePricingScopeFromExtraction({
+    divisionHint: input.divisionHint ?? null,
+    metadataJson: metadata,
+    normalizedIntent: input.normalizedLabel ?? input.rawLabel ?? null,
+    rawLabel: input.rawLabel ?? input.normalizedLabel ?? null,
+  });
+
+  return {
+    ...metadata,
+    ...pricingScope,
+  };
+}
+
 export async function updateEstimateExtraction(args: {
   tenantDb: TenantDb;
   dealId: string;
@@ -79,6 +111,12 @@ export async function updateEstimateExtraction(args: {
       quantity: args.input.quantity ?? existing.quantity,
       unit: args.input.unit ?? existing.unit,
       divisionHint: args.input.divisionHint ?? existing.divisionHint,
+      metadataJson: buildUpdatedPricingScopeMetadata({
+        existingMetadataJson: existing.metadataJson,
+        normalizedLabel: args.input.normalizedLabel ?? existing.normalizedLabel,
+        divisionHint: args.input.divisionHint ?? existing.divisionHint,
+        rawLabel: existing.rawLabel ?? existing.normalizedLabel ?? null,
+      }),
       updatedAt: new Date(),
     })
     .where(eq(estimateExtractions.id, args.extractionId))

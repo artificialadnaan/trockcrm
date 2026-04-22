@@ -351,6 +351,8 @@ export async function runEstimateGeneration(
       const pricingScope = resolvePricingScopeFromExtraction({
         divisionHint: extraction.divisionHint,
         metadataJson: extraction.metadataJson,
+        normalizedIntent,
+        rawLabel: extraction.rawLabel ?? extraction.normalizedLabel ?? null,
       });
       const marketAdjustment = await calculateMarketRateAdjustment(marketRateProvider, {
         marketResolution,

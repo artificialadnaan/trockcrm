@@ -1194,4 +1194,131 @@ describe("estimate generation job", () => {
     expect(recommendationInsert.evidenceJson.marketRate.resolvedMarket.slug).toBe("override");
     expect(lockedClient.query).toHaveBeenLastCalledWith("COMMIT");
   });
+
+  it("falls back to trade scope from legacy extraction text when pricing-scope metadata is absent", async () => {
+    const sourceLimit = vi.fn().mockResolvedValue([{ id: "source-1" }]);
+    const extractionWhere = vi.fn().mockResolvedValue([
+      {
+        id: "ext-legacy",
+        dealId: "deal-1",
+        projectId: null,
+        documentId: "doc-1",
+        extractionType: "scope_line",
+        status: "pending",
+        quantity: "2",
+        unit: "ea",
+        normalizedLabel: "Roofing tearoff",
+        divisionHint: null,
+        metadataJson: {
+          sourceParseRunId: "parse-run-1",
+          activeArtifact: true,
+        },
+      },
+    ]);
+    const appDb = {
+      select: vi.fn(() => ({
+        from: vi.fn(() => ({
+          where: vi.fn(() => ({
+            limit: sourceLimit,
+          })),
+        })),
+      })),
+    } as any;
+    const lockedClient = {
+      query: vi
+        .fn()
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [{ id: "doc-1", active_parse_run_id: "parse-run-1" }] })
+        .mockResolvedValueOnce({ rows: [] }),
+      release: vi.fn(),
+    } as any;
+    let tenantSelectCallCount = 0;
+    const tenantDb = {
+      select: vi.fn(() => ({
+        from: vi.fn(() => {
+          tenantSelectCallCount += 1;
+          if (tenantSelectCallCount === 1) {
+            return {
+              where: vi.fn(() => ({
+                limit: vi.fn().mockResolvedValue([]),
+              })),
+            };
+          }
+          if (tenantSelectCallCount === 2) {
+            return {
+              where: extractionWhere,
+            };
+          }
+          throw new Error(`Unexpected tenant select call: ${tenantSelectCallCount}`);
+        }),
+      })),
+      insert: vi.fn(() => ({
+        values: vi.fn(() => ({
+          returning: vi.fn().mockResolvedValue([{ id: "generated-id" }]),
+        })),
+      })),
+      update: vi.fn(() => ({
+        set: vi.fn(() => ({
+          where: vi.fn().mockResolvedValue(undefined),
+        })),
+      })),
+    } as any;
+
+    getHistoricalPricingSignalsMock.mockResolvedValue({
+      historicalItems: [],
+      vendorQuotes: [],
+      currentDeal: null,
+    });
+    resolveActiveCatalogSnapshotVersionIdMock.mockResolvedValue("snapshot-1");
+    listCatalogCandidatesForMatchingMock.mockResolvedValue([]);
+    rankExtractionMatchesMock.mockImplementation(async ({ extraction }: any) => [
+      {
+        catalogItemId: `catalog-${extraction.id}`,
+        matchScore: 99,
+        reasons: { matched: extraction.id },
+        historicalLineItemIds: [],
+        catalogBaselinePrice: 100,
+        historicalUnitPrices: [],
+        vendorQuotePrice: null,
+        awardedOutcomeAdjustmentPercent: 0,
+        internalAdjustmentPercent: 0,
+      },
+    ]);
+    buildPricingRecommendationMock.mockImplementation(() => ({
+      quantity: 2,
+      priceBasis: "mock",
+      recommendedUnitPrice: 10,
+      recommendedTotalPrice: 20,
+      comparableHistoricalPrices: [],
+      historicalMedianPrice: null,
+      catalogBaselinePrice: null,
+      marketAdjustmentPercent: 0,
+      assumptions: {},
+      confidence: 1,
+    }));
+    poolConnectMock.mockResolvedValue(lockedClient);
+    drizzleMock.mockReturnValueOnce(appDb).mockReturnValueOnce(tenantDb);
+
+    const { runEstimateGeneration } = await import("../../src/jobs/estimate-generation.js");
+
+    await runEstimateGeneration(
+      {
+        documentId: "doc-1",
+        dealId: "deal-1",
+        parseRunId: "parse-run-1",
+      },
+      "office-1"
+    );
+
+    expect(calculateMarketRateAdjustmentMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        pricingScopeType: "trade",
+        pricingScopeKey: "roofing",
+      })
+    );
+    expect(lockedClient.query).toHaveBeenLastCalledWith("COMMIT");
+  });
 });

@@ -150,6 +150,12 @@ describe("extraction-review-service", () => {
       quantity: "1.000",
       unit: "ea",
       divisionHint: "05",
+      rawLabel: "Roofing tearoff",
+      metadataJson: {
+        pricingScopeType: "trade",
+        pricingScopeKey: "roofing",
+        activeArtifact: true,
+      },
     };
     const updatedRow = {
       id: "ext-3",
@@ -157,9 +163,19 @@ describe("extraction-review-service", () => {
       quantity: "2.000",
       unit: "ft",
       divisionHint: "07",
+      metadataJson: {
+        activeArtifact: true,
+        pricingScopeType: "division",
+        pricingScopeKey: "07",
+      },
     };
     const selectLimit = vi.fn().mockResolvedValue([existing]);
     const updateReturning = vi.fn().mockResolvedValue([updatedRow]);
+    const updateSet = vi.fn(() => ({
+      where: vi.fn(() => ({
+        returning: updateReturning,
+      })),
+    }));
     const insertReturning = vi.fn().mockResolvedValue([{ id: "evt-3", eventType: "edited" }]);
     const tenantDb = {
       select: vi.fn(() => ({
@@ -170,11 +186,7 @@ describe("extraction-review-service", () => {
         })),
       })),
       update: vi.fn(() => ({
-        set: vi.fn(() => ({
-          where: vi.fn(() => ({
-            returning: updateReturning,
-          })),
-        })),
+        set: updateSet,
       })),
       insert: vi.fn(() => ({
         values: vi.fn(() => ({
@@ -198,6 +210,19 @@ describe("extraction-review-service", () => {
 
     expect(result.extraction).toEqual(updatedRow);
     expect(result.reviewEvent.eventType).toBe("edited");
+    expect(updateSet).toHaveBeenCalledWith(
+      expect.objectContaining({
+        normalizedLabel: "New Label",
+        quantity: "2.000",
+        unit: "ft",
+        divisionHint: "07",
+        metadataJson: {
+          activeArtifact: true,
+          pricingScopeType: "division",
+          pricingScopeKey: "07",
+        },
+      })
+    );
     expect(insertReturning).toHaveBeenCalledWith();
   });
 });
