@@ -24,9 +24,17 @@ BEGIN
 END $$;
 
 -- TENANT_SCHEMA_START
-ALTER TABLE estimate_source_documents
-  ADD COLUMN IF NOT EXISTS parse_measurements_enabled BOOLEAN NOT NULL DEFAULT false;
+DO $tenant$
+BEGIN
+  IF to_regclass('estimate_source_documents') IS NULL THEN
+    RETURN;
+  END IF;
 
-ALTER TABLE estimate_document_parse_runs
-  ADD COLUMN IF NOT EXISTS parse_measurements_enabled BOOLEAN NOT NULL DEFAULT false;
+  ALTER TABLE estimate_source_documents
+    ADD COLUMN IF NOT EXISTS parse_measurements_enabled BOOLEAN NOT NULL DEFAULT false;
+
+  ALTER TABLE estimate_document_parse_runs
+    ADD COLUMN IF NOT EXISTS parse_measurements_enabled BOOLEAN NOT NULL DEFAULT false;
+END
+$tenant$;
 -- TENANT_SCHEMA_END
