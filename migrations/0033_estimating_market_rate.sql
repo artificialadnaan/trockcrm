@@ -216,6 +216,7 @@ BEGIN
          CONSTRAINT estimate_deal_market_overrides_deal_uidx UNIQUE (deal_id)
        )',
       schema_name,
+      schema_name,
       schema_name
     );
 
@@ -322,6 +323,12 @@ BEGIN
 END $$;
 
 -- TENANT_SCHEMA_START
+DO $tenant$
+BEGIN
+  IF to_regclass('deals') IS NULL THEN
+    RETURN;
+  END IF;
+
 CREATE TABLE IF NOT EXISTS estimate_markets (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   name VARCHAR(255) NOT NULL,
@@ -539,4 +546,5 @@ DO UPDATE SET
   effective_to = EXCLUDED.effective_to,
   is_active = EXCLUDED.is_active,
   updated_at = NOW();
+END $tenant$;
 -- TENANT_SCHEMA_END

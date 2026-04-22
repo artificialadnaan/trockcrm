@@ -218,6 +218,14 @@ BEGIN
 END $$;
 
 -- TENANT_SCHEMA_START
+DO $tenant$
+BEGIN
+  IF to_regclass('estimate_market_fallback_geographies') IS NULL
+     OR to_regclass('estimate_market_adjustment_rules') IS NULL
+     OR to_regclass('estimate_markets') IS NULL THEN
+    RETURN;
+  END IF;
+
 INSERT INTO estimate_market_fallback_geographies (
   market_id,
   resolution_type,
@@ -284,4 +292,5 @@ INSERT INTO estimate_market_adjustment_rules (
     TRUE
 ON CONFLICT (scope_type, scope_key, effective_from) WHERE market_id IS NULL
 DO NOTHING;
+END $tenant$;
 -- TENANT_SCHEMA_END
