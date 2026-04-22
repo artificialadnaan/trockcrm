@@ -21,7 +21,10 @@ export function MyCleanupDealEditorDialog({
 
   const handleSectionSave = async (payload: Record<string, unknown>) => {
     if (!dealId) return;
-    await updateDeal(dealId, payload);
+    await updateDeal(dealId, {
+      ...payload,
+      migrationMode: deal && !deal.sourceLeadId ? true : undefined,
+    });
     await refetch();
     await onSaved();
   };

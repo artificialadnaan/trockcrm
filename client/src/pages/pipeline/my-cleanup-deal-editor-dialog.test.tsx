@@ -140,7 +140,10 @@ describe("MyCleanupDealEditorDialog", () => {
       nextStepSave?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
 
-    expect(mocks.updateDealMock).toHaveBeenCalledWith("deal-2", { nextStep: "Call owner" });
+    expect(mocks.updateDealMock).toHaveBeenCalledWith("deal-2", {
+      nextStep: "Call owner",
+      migrationMode: true,
+    });
     expect(mocks.refetchMock).toHaveBeenCalledTimes(1);
     expect(mocks.onSavedMock).toHaveBeenCalledTimes(1);
     expect(mocks.onOpenChangeMock).not.toHaveBeenCalled();
@@ -166,7 +169,10 @@ describe("MyCleanupDealEditorDialog", () => {
       forecastSave?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
 
-    expect(mocks.updateDealMock).toHaveBeenCalledWith("deal-3", { forecastWindow: "30_days" });
+    expect(mocks.updateDealMock).toHaveBeenCalledWith("deal-3", {
+      forecastWindow: "30_days",
+      migrationMode: true,
+    });
     expect(mocks.refetchMock).toHaveBeenCalledTimes(1);
     expect(mocks.onSavedMock).toHaveBeenCalledTimes(1);
     expect(mocks.onOpenChangeMock).not.toHaveBeenCalled();

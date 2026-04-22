@@ -181,6 +181,9 @@ export function DealForm({ deal, onSuccess }: DealFormProps) {
 
       let result: Deal;
       if (isEdit) {
+        if (!deal.sourceLeadId) {
+          payload.migrationMode = true;
+        }
         const resp = await updateDeal(deal.id, payload as Partial<Deal>);
         result = resp.deal;
       } else {

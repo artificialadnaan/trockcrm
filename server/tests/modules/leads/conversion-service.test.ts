@@ -2192,7 +2192,7 @@ describe("Public Deal Route Guardrails", () => {
     expect(routeServiceMocks.createDeal.mock.calls[0]?.[1]).not.toHaveProperty("migrationMode");
   });
 
-  it("strips migrationMode from public deal-update requests", async () => {
+  it("preserves migrationMode on public deal-update requests", async () => {
     const { dealRoutes, routeServiceMocks } = await loadDealRoutesWithServiceMocks();
     routeServiceMocks.updateDeal.mockResolvedValueOnce({ id: "deal-1" });
 
@@ -2213,11 +2213,11 @@ describe("Public Deal Route Guardrails", () => {
       "deal-1",
       expect.objectContaining({
         sourceLeadId: "lead-1",
+        migrationMode: true,
       }),
       "director",
       "director-1",
       "office-1"
     );
-    expect(routeServiceMocks.updateDeal.mock.calls[0]?.[2]).not.toHaveProperty("migrationMode");
   });
 });

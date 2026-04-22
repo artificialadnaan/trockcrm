@@ -21,4 +21,10 @@ describe("DealForm select labels", () => {
     expect(source).toContain('payload.assignedRepId = formData.assignedRepId;');
     expect(source).toContain('Assigned sales rep is required');
   });
+
+  it("sends migrationMode for legacy deal edits without source lead lineage", () => {
+    const source = normalize(dealFormSource);
+
+    expect(source).toContain('if (!deal.sourceLeadId) { payload.migrationMode = true; }');
+  });
 });

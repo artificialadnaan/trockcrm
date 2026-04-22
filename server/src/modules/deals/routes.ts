@@ -538,7 +538,6 @@ router.patch("/:id", async (req, res, next) => {
   try {
     const body = { ...req.body };
     validateDealPayload(body);
-    delete body.migrationMode;
 
     // Reps cannot change assignedRepId (reassign deals)
     if (req.user!.role === "rep" && body.assignedRepId !== undefined) {
