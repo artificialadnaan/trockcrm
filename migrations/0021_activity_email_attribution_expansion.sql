@@ -239,7 +239,7 @@ BEGIN
           AND table_name = 'emails'
       )
   LOOP
-    EXECUTE format('SET LOCAL search_path = %I, public', tenant_schema);
+    PERFORM set_config('search_path', format('%I,public', tenant_schema), true);
     EXECUTE tenant_sql;
     RAISE NOTICE 'Applied activity attribution migration to schema: %', tenant_schema;
   END LOOP;
