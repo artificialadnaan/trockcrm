@@ -89,9 +89,11 @@ function isMatchingFallbackPricingScope(
   pricingScopeType: MarketAdjustmentSelectionInput["pricingScopeType"],
   pricingScopeKey: string
 ) {
+  const scopeType = rule.scopeType as PricingScopeType;
+  const fallbackScopeType = rule.fallbackScopeType as PricingScopeType | null;
   return (
-    isPricingScopeBroadEnough(rule.scopeType, pricingScopeType) &&
-    rule.fallbackScopeType === pricingScopeType &&
+    isPricingScopeBroadEnough(scopeType, pricingScopeType) &&
+    fallbackScopeType === pricingScopeType &&
     rule.fallbackScopeKey === pricingScopeKey
   );
 }
@@ -108,7 +110,8 @@ function getRuleTier(
   const marketSpecific = marketId != null && rule.marketId === marketId;
   const globalRule = rule.marketId == null;
   const fallbackDistance = fallbackScope
-    ? getPricingScopeRank(pricingScopeType) - getPricingScopeRank(rule.scopeType)
+    ? getPricingScopeRank(pricingScopeType) -
+      getPricingScopeRank(rule.scopeType as PricingScopeType)
     : Number.POSITIVE_INFINITY;
 
   if (marketSpecific && exactScope) return 0;

@@ -842,18 +842,18 @@ export async function buildEstimatingWorkbenchState(
       generationRunIds,
     },
     marketContext: {
-      effectiveMarket: marketContext.effectiveMarketContext.market,
-      resolutionLevel: marketContext.effectiveMarketContext.resolutionLevel,
-      resolutionSource: marketContext.effectiveMarketContext.resolutionSource,
-      location: marketContext.effectiveMarketContext.location,
-      isOverridden: marketContext.effectiveMarketContext.resolutionLevel === "override",
-      override: marketContext.currentOverride,
+      effectiveMarket: marketContext.effectiveMarket,
+      resolutionLevel: marketContext.resolutionLevel,
+      resolutionSource: marketContext.resolutionSource,
+      location: marketContext.location,
+      isOverridden: marketContext.resolutionLevel === "override",
+      override: marketContext.override,
       fallbackSource:
-        marketContext.effectiveMarketContext.resolutionLevel === "metro" ||
-        marketContext.effectiveMarketContext.resolutionLevel === "state" ||
-        marketContext.effectiveMarketContext.resolutionLevel === "region" ||
-        marketContext.effectiveMarketContext.resolutionLevel === "global_default"
-          ? marketContext.effectiveMarketContext.resolutionSource
+        marketContext.resolutionLevel === "metro" ||
+        marketContext.resolutionLevel === "state" ||
+        marketContext.resolutionLevel === "region" ||
+        marketContext.resolutionLevel === "global_default"
+          ? marketContext.resolutionSource
           : null,
     },
     activePricingRunId: activePricingRun?.id ?? null,

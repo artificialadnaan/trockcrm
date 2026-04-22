@@ -81,12 +81,14 @@ export function isPricingScopeCandidateRule(
     pricingScopeKey: string;
   }
 ) {
+  const scopeType = rule.scopeType as PricingScopeType;
+  const fallbackScopeType = rule.fallbackScopeType as PricingScopeType | null;
   return (
-    (rule.scopeType === input.pricingScopeType && rule.scopeKey === input.pricingScopeKey) ||
-    (isPricingScopeBroadEnough(rule.scopeType, input.pricingScopeType) &&
-      rule.fallbackScopeType === input.pricingScopeType &&
+    (scopeType === input.pricingScopeType && rule.scopeKey === input.pricingScopeKey) ||
+    (isPricingScopeBroadEnough(scopeType, input.pricingScopeType) &&
+      fallbackScopeType === input.pricingScopeType &&
       rule.fallbackScopeKey === input.pricingScopeKey) ||
-    (rule.scopeType === "general" && rule.scopeKey === "default")
+    (scopeType === "general" && rule.scopeKey === "default")
   );
 }
 

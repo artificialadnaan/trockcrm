@@ -1100,7 +1100,14 @@ router.get("/:id/estimating", async (req, res, next) => {
   try {
     const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
     if (!deal) throw new AppError(404, "Deal not found");
-    const workflow = await getEstimatingWorkflowState(req.tenantDb! as any, req.params.id);
+    const workflow = await getEstimatingWorkflowState(
+      req.tenantDb! as any,
+      req.params.id,
+      {
+        appDb: db as any,
+        officeId: req.user!.activeOfficeId ?? req.user!.officeId ?? null,
+      }
+    );
     await req.commitTransaction!();
     res.status(200).json(workflow);
   } catch (err) {
@@ -1355,6 +1362,7 @@ router.post("/:id/estimating/copilot", async (req, res, next) => {
       tenantDb: req.tenantDb! as any,
       appDb: db as any,
       dealId: req.params.id,
+      officeId: req.user!.activeOfficeId ?? req.user!.officeId ?? null,
       question: req.body.question,
     });
     const answer = await answerEstimatingCopilotQuestion({

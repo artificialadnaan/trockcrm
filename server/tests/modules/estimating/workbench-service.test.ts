@@ -137,27 +137,24 @@ describe("buildEstimatingWorkbenchState", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     dealMarketOverrideServiceMocks.getDealEffectiveMarketContext.mockResolvedValue({
-      dealId: "deal-1",
-      effectiveMarketContext: {
-        market: {
-          id: "market-default",
-          name: "Default Market",
-          slug: "default-market",
-          type: "global",
-        },
-        resolutionLevel: "global_default",
-        resolutionSource: {
-          type: "global",
-          key: "default",
-          marketId: "market-default",
-        },
-        location: {
-          zip: null,
-          state: null,
-          regionId: null,
-        },
+      effectiveMarket: {
+        id: "market-default",
+        name: "Default Market",
+        slug: "default-market",
+        type: "global",
       },
-      currentOverride: null,
+      resolutionLevel: "global_default",
+      resolutionSource: {
+        type: "global",
+        key: "default",
+        marketId: "market-default",
+      },
+      location: {
+        zip: null,
+        state: null,
+        regionId: null,
+      },
+      override: null,
     });
   });
 
@@ -278,27 +275,24 @@ describe("buildEstimatingWorkbenchState", () => {
 
   it("exposes market context, fallback metadata, active completed run logic, rerun status, and market-rate rationale", async () => {
     dealMarketOverrideServiceMocks.getDealEffectiveMarketContext.mockResolvedValueOnce({
-      dealId: "deal-1",
-      effectiveMarketContext: {
-        market: {
-          id: "market-state",
-          name: "Texas",
-          slug: "tx",
-          type: "state",
-        },
-        resolutionLevel: "state",
-        resolutionSource: {
-          type: "state",
-          key: "TX",
-          marketId: "market-state",
-        },
-        location: {
-          zip: null,
-          state: "TX",
-          regionId: "region-south",
-        },
+      effectiveMarket: {
+        id: "market-state",
+        name: "Texas",
+        slug: "tx",
+        type: "state",
       },
-      currentOverride: null,
+      resolutionLevel: "state",
+      resolutionSource: {
+        type: "state",
+        key: "TX",
+        marketId: "market-state",
+      },
+      location: {
+        zip: null,
+        state: "TX",
+        regionId: "region-south",
+      },
+      override: null,
     });
 
     const { tenantDb, appDb } = makeDb({
@@ -412,30 +406,31 @@ describe("buildEstimatingWorkbenchState", () => {
 
   it("surfaces override metadata distinctly from auto-detected markets and keeps fallback rows separate", async () => {
     dealMarketOverrideServiceMocks.getDealEffectiveMarketContext.mockResolvedValueOnce({
-      dealId: "deal-1",
-      effectiveMarketContext: {
-        market: {
-          id: "market-override",
-          name: "Dallas Override",
-          slug: "dfw-override",
-          type: "metro",
-        },
-        resolutionLevel: "override",
-        resolutionSource: {
-          type: "override",
-          key: "deal-1",
-          marketId: "market-override",
-        },
-        location: {
-          zip: "75001",
-          state: "TX",
-          regionId: "region-south",
-        },
+      effectiveMarket: {
+        id: "market-override",
+        name: "Dallas Override",
+        slug: "dfw-override",
+        type: "metro",
       },
-      currentOverride: {
+      resolutionLevel: "override",
+      resolutionSource: {
+        type: "override",
+        key: "deal-1",
         marketId: "market-override",
+      },
+      location: {
+        zip: "75001",
+        state: "TX",
+        regionId: "region-south",
+      },
+      override: {
+        id: "override-1",
+        marketId: "market-override",
+        marketName: "Dallas Override",
+        marketSlug: "dfw-override",
         overriddenByUserId: "user-1",
         overrideReason: "Estimator override",
+        createdAt: new Date("2026-04-21T12:00:00Z"),
         updatedAt: new Date("2026-04-21T12:00:00Z"),
       },
     });
