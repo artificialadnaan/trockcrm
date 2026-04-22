@@ -55,7 +55,7 @@ export function LeadListPage() {
             {filtered.length} pre-RFP lead{filtered.length !== 1 ? "s" : ""}
           </p>
         </div>
-        <Button onClick={() => navigate("/deals/new")}>
+        <Button onClick={() => navigate("/leads/new")}>
           <Plus className="h-4 w-4 mr-2" />
           New Lead
         </Button>

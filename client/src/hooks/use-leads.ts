@@ -12,6 +12,12 @@ export interface LeadRecord {
   status: "open" | "converted" | "disqualified";
   source: string | null;
   description: string | null;
+  projectTypeId: string | null;
+  qualificationPayload: Record<string, string | boolean | number | null>;
+  projectTypeQuestionPayload: {
+    projectTypeId: string | null;
+    answers: Record<string, string | boolean | number | null>;
+  };
   lastActivityAt: string | null;
   stageEnteredAt: string;
   convertedAt: string | null;
@@ -111,4 +117,26 @@ export function useLeadDetail(leadId: string | undefined) {
   }, [fetchLead]);
 
   return { lead, loading, error, refetch: fetchLead };
+}
+
+export async function createLead(input: {
+  companyId: string;
+  propertyId: string;
+  stageId: string;
+  primaryContactId?: string | null;
+  name: string;
+  source?: string | null;
+  description?: string | null;
+  projectTypeId?: string | null;
+  qualificationPayload?: Record<string, string | boolean | number | null>;
+  projectTypeQuestionPayload?: {
+    projectTypeId: string | null;
+    answers: Record<string, string | boolean | number | null>;
+  };
+}) {
+  return api<{ lead: LeadRecord }>("/leads", { method: "POST", json: input });
+}
+
+export async function updateLead(leadId: string, input: Partial<LeadRecord>) {
+  return api<{ lead: LeadRecord }>(`/leads/${leadId}`, { method: "PATCH", json: input });
 }

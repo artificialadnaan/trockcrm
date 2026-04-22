@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { AppError } from "../../middleware/error-handler.js";
+import { LeadStageTransitionError } from "./stage-transition-service.js";
 import {
   createLead,
   deleteLead,
@@ -99,6 +100,18 @@ router.patch("/:id", async (req, res, next) => {
     await req.commitTransaction!();
     res.json({ lead });
   } catch (err) {
+    if (err instanceof LeadStageTransitionError) {
+      res.status(err.statusCode).json({
+        error: {
+          message: err.message,
+          code: err.code,
+          missingRequirements: err.result.missingRequirements,
+          currentStage: err.result.currentStage,
+          targetStage: err.result.targetStage,
+        },
+      });
+      return;
+    }
     next(err);
   }
 });
