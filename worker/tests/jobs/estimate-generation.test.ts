@@ -8,6 +8,7 @@ const createMarketRateProviderMock = vi.fn();
 const resolveMarketContextMock = vi.fn();
 const calculateMarketRateAdjustmentMock = vi.fn();
 const applyMarketRateAdjustmentMock = vi.fn();
+const resolvePricingScopeFromExtractionMock = vi.fn();
 const listCatalogCandidatesForMatchingMock = vi.fn();
 const resolveActiveCatalogSnapshotVersionIdMock = vi.fn();
 const rankExtractionMatchesMock = vi.fn();
@@ -65,6 +66,7 @@ vi.mock("../../../server/src/modules/estimating/matching-service.js", () => ({
 vi.mock("../../../server/src/modules/estimating/pricing-service.js", () => ({
   buildPricingRecommendation: buildPricingRecommendationMock,
   applyMarketRateAdjustment: applyMarketRateAdjustmentMock,
+  resolvePricingScopeFromExtraction: resolvePricingScopeFromExtractionMock,
   isInferredRecommendationRowEligible: isInferredRecommendationRowEligibleMock,
   isConfirmedMeasurementCandidateForPricing: isConfirmedMeasurementCandidateForPricingMock,
 }));
@@ -88,6 +90,12 @@ function readSqlText(query: any) {
     .join("");
 }
 
+function normalizeScopeKey(value: unknown, fallback: string) {
+  if (typeof value !== "string") return fallback;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : fallback;
+}
+
 describe("estimate generation job", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -101,6 +109,81 @@ describe("estimate generation job", () => {
       findMarketByFallbackGeography: vi.fn(),
       getDefaultMarket: vi.fn(),
       listMarketAdjustmentRules: vi.fn(),
+    });
+    resolvePricingScopeFromExtractionMock.mockImplementation((input: any) => {
+      const metadata =
+        input?.metadataJson &&
+        typeof input.metadataJson === "object" &&
+        input.metadataJson !== null
+          ? input.metadataJson
+          : {};
+      const metadataScopeType =
+        typeof metadata.pricingScopeType === "string"
+          ? metadata.pricingScopeType.trim().toLowerCase()
+          : typeof metadata.scopeType === "string"
+            ? metadata.scopeType.trim().toLowerCase()
+            : null;
+      const metadataScopeKey =
+        typeof metadata.pricingScopeKey === "string"
+          ? metadata.pricingScopeKey
+          : typeof metadata.scopeKey === "string"
+            ? metadata.scopeKey
+            : null;
+      const tradeHint =
+        typeof metadata.tradeHint === "string"
+          ? metadata.tradeHint
+          : metadata.tradeHint === true
+            ? input.normalizedIntent ?? input.rawLabel ?? null
+            : null;
+
+      if (metadataScopeType === "trade") {
+        return {
+          pricingScopeType: "trade",
+          pricingScopeKey: normalizeScopeKey(
+            metadataScopeKey ?? tradeHint ?? input.normalizedIntent ?? input.rawLabel ?? input.divisionHint,
+            "default"
+          ),
+        };
+      }
+
+      if (metadataScopeType === "division") {
+        return {
+          pricingScopeType: "division",
+          pricingScopeKey: normalizeScopeKey(
+            metadataScopeKey ?? input.divisionHint ?? input.normalizedIntent ?? input.rawLabel,
+            "default"
+          ),
+        };
+      }
+
+      if (metadataScopeType === "general") {
+        return {
+          pricingScopeType: "general",
+          pricingScopeKey: "default",
+        };
+      }
+
+      if (tradeHint != null) {
+        return {
+          pricingScopeType: "trade",
+          pricingScopeKey: normalizeScopeKey(
+            metadataScopeKey ?? tradeHint ?? input.normalizedIntent ?? input.rawLabel ?? input.divisionHint,
+            "default"
+          ),
+        };
+      }
+
+      if (typeof input.divisionHint === "string" && input.divisionHint.trim().length > 0) {
+        return {
+          pricingScopeType: "division",
+          pricingScopeKey: input.divisionHint.trim(),
+        };
+      }
+
+      return {
+        pricingScopeType: "general",
+        pricingScopeKey: "default",
+      };
     });
     buildPricingRecommendationMock.mockImplementation((input: any) => ({
       quantity: Number(input.quantity ?? 1),
@@ -949,6 +1032,8 @@ describe("estimate generation job", () => {
         metadataJson: {
           sourceParseRunId: "parse-run-1",
           activeArtifact: true,
+          pricingScopeType: "trade",
+          pricingScopeKey: "roofing",
         },
       },
     ]);
@@ -1165,11 +1250,20 @@ describe("estimate generation job", () => {
         propertyState: "TX",
       })
     );
+    expect(resolvePricingScopeFromExtractionMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        divisionHint: "Roofing",
+        metadataJson: expect.objectContaining({
+          pricingScopeType: "trade",
+          pricingScopeKey: "roofing",
+        }),
+      })
+    );
     expect(calculateMarketRateAdjustmentMock).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({
-        pricingScopeType: "division",
-        pricingScopeKey: "Roofing",
+        pricingScopeType: "trade",
+        pricingScopeKey: "roofing",
         baselinePrice: 10,
       })
     );

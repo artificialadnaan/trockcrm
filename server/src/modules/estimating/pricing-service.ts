@@ -40,6 +40,11 @@ export interface MarketRateEnrichedPricingRecommendation extends PricingRecommen
   marketRateRationale: MarketRateAdjustmentResult["rationale"];
 }
 
+export interface PricingScopeResolution {
+  pricingScopeType: "general" | "division" | "trade";
+  pricingScopeKey: string;
+}
+
 export interface BuildPricingRecommendationRationaleInput {
   normalizedIntent: string;
   sectionName: string | null;
@@ -101,12 +106,102 @@ function roundCurrency(value: number) {
   return Number(value.toFixed(2));
 }
 
+function normalizeScopeKey(value: unknown, fallback: string) {
+  if (typeof value !== "string") return fallback;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : fallback;
+}
+
+export function resolvePricingScopeFromExtraction(input: {
+  divisionHint?: unknown;
+  metadataJson?: unknown;
+  normalizedIntent?: string | null;
+  rawLabel?: string | null;
+}): PricingScopeResolution {
+  const metadata =
+    input.metadataJson &&
+    typeof input.metadataJson === "object" &&
+    input.metadataJson !== null
+      ? (input.metadataJson as Record<string, unknown>)
+      : null;
+
+  const metadataScopeType = typeof metadata?.pricingScopeType === "string"
+    ? metadata.pricingScopeType.trim().toLowerCase()
+    : typeof metadata?.scopeType === "string"
+      ? metadata.scopeType.trim().toLowerCase()
+      : null;
+  const metadataScopeKey = typeof metadata?.pricingScopeKey === "string"
+    ? metadata.pricingScopeKey
+    : typeof metadata?.scopeKey === "string"
+      ? metadata.scopeKey
+      : null;
+  const tradeHint =
+    typeof metadata?.tradeHint === "string"
+      ? metadata.tradeHint
+      : metadata?.tradeHint === true
+        ? input.normalizedIntent ?? input.rawLabel ?? null
+        : null;
+
+  if (metadataScopeType === "trade") {
+    return {
+      pricingScopeType: "trade",
+      pricingScopeKey: normalizeScopeKey(
+        metadataScopeKey ?? tradeHint ?? input.normalizedIntent ?? input.rawLabel ?? input.divisionHint,
+        "default"
+      ),
+    };
+  }
+
+  if (metadataScopeType === "division") {
+    return {
+      pricingScopeType: "division",
+      pricingScopeKey: normalizeScopeKey(
+        metadataScopeKey ?? input.divisionHint ?? input.normalizedIntent ?? input.rawLabel,
+        "default"
+      ),
+    };
+  }
+
+  if (metadataScopeType === "general") {
+    return {
+      pricingScopeType: "general",
+      pricingScopeKey: "default",
+    };
+  }
+
+  if (tradeHint != null) {
+    return {
+      pricingScopeType: "trade",
+      pricingScopeKey: normalizeScopeKey(
+        metadataScopeKey ?? tradeHint ?? input.normalizedIntent ?? input.rawLabel ?? input.divisionHint,
+        "default"
+      ),
+    };
+  }
+
+  if (typeof input.divisionHint === "string" && input.divisionHint.trim().length > 0) {
+    return {
+      pricingScopeType: "division",
+      pricingScopeKey: input.divisionHint.trim(),
+    };
+  }
+
+  return {
+    pricingScopeType: "general",
+    pricingScopeKey: "default",
+  };
+}
+
 export function applyMarketRateAdjustment(input: {
   recommendation: PricingRecommendation;
   marketRateAdjustment: MarketRateAdjustmentResult;
 }): MarketRateEnrichedPricingRecommendation {
-  const adjustedTotal = roundCurrency(input.marketRateAdjustment.adjustedPrice);
-  const adjustedUnit = roundCurrency(adjustedTotal / input.recommendation.quantity);
+  const safeQuantity =
+    Number.isFinite(input.recommendation.quantity) && input.recommendation.quantity > 0
+      ? input.recommendation.quantity
+      : 1;
+  const adjustedUnit = roundCurrency(input.marketRateAdjustment.adjustedPrice / safeQuantity);
+  const adjustedTotal = roundCurrency(adjustedUnit * safeQuantity);
   const baselineTotal = input.recommendation.recommendedTotalPrice;
   const marketAdjustmentPercent =
     baselineTotal === 0

@@ -18,6 +18,7 @@ import {
   applyMarketRateAdjustment,
   isInferredRecommendationRowEligible,
   buildPricingRecommendation,
+  resolvePricingScopeFromExtraction,
   isConfirmedMeasurementCandidateForPricing,
 } from "../../../server/src/modules/estimating/pricing-service.js";
 import { cloneManualRowsForGenerationRun } from "../../../server/src/modules/estimating/draft-estimate-service.js";
@@ -347,14 +348,16 @@ export async function runEstimateGeneration(
         regionId: historicalSignals.currentDeal?.dealRegionId ?? null,
         projectTypeId: historicalSignals.currentDeal?.projectTypeId ?? null,
       });
-      const pricingScopeType = extraction.divisionHint ? "division" : "general";
-      const pricingScopeKey = extraction.divisionHint
-        ? extraction.divisionHint.trim()
-        : "default";
+      const pricingScope = resolvePricingScopeFromExtraction({
+        divisionHint: extraction.divisionHint,
+        metadataJson: extraction.metadataJson,
+        normalizedIntent,
+        rawLabel: extraction.rawLabel ?? extraction.normalizedLabel ?? null,
+      });
       const marketAdjustment = await calculateMarketRateAdjustment(marketRateProvider, {
         marketResolution,
-        pricingScopeType,
-        pricingScopeKey,
+        pricingScopeType: pricingScope.pricingScopeType,
+        pricingScopeKey: pricingScope.pricingScopeKey,
         baselinePrice: recommendation.recommendedTotalPrice,
         componentBreakdown: null,
         asOf: new Date(),

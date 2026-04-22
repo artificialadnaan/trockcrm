@@ -5,6 +5,7 @@ import {
   buildPricingRecommendationRationale,
   isInferredRecommendationRowEligible,
   isConfirmedMeasurementCandidateForPricing,
+  resolvePricingScopeFromExtraction,
 } from "../../../src/modules/estimating/pricing-service.js";
 
 function makeMarketAdjustment(overrides: Partial<Record<string, unknown>> = {}) {
@@ -145,9 +146,46 @@ describe("buildPricingRecommendation", () => {
     });
 
     expect(adjusted.recommendedUnitPrice).not.toBeCloseTo(baseline.recommendedUnitPrice, 2);
-    expect(adjusted.recommendedTotalPrice).toBeCloseTo(117.16, 2);
+    expect(adjusted.recommendedTotalPrice).toBeCloseTo(adjusted.recommendedUnitPrice * adjusted.quantity, 2);
     expect(adjusted.marketRateContext.resolutionLevel).toBe("state");
     expect(adjusted.marketRateRationale.componentAdjustments).toHaveLength(3);
+  });
+
+  it("resolves normalized pricing scope from extraction metadata before falling back to division or general", () => {
+    expect(
+      resolvePricingScopeFromExtraction({
+        divisionHint: "07",
+        metadataJson: {
+          pricingScopeType: "trade",
+          pricingScopeKey: "roofing",
+        },
+      })
+    ).toEqual({
+      pricingScopeType: "trade",
+      pricingScopeKey: "roofing",
+    });
+
+    expect(
+      resolvePricingScopeFromExtraction({
+        divisionHint: "07",
+        metadataJson: {
+          scopeType: "division",
+          scopeKey: "05",
+        },
+      })
+    ).toEqual({
+      pricingScopeType: "division",
+      pricingScopeKey: "05",
+    });
+
+    expect(
+      resolvePricingScopeFromExtraction({
+        metadataJson: {},
+      })
+    ).toEqual({
+      pricingScopeType: "general",
+      pricingScopeKey: "default",
+    });
   });
 
   it("still produces an adjusted recommendation when market resolution falls back", () => {
@@ -176,6 +214,62 @@ describe("buildPricingRecommendation", () => {
     expect(adjusted.marketRateContext.resolutionLevel).toBe("global_default");
     expect(adjusted.recommendedTotalPrice).toBeCloseTo(92.5, 2);
     expect(adjusted.recommendedUnitPrice).toBeCloseTo(92.5, 2);
+  });
+
+  it("keeps unit and total prices internally consistent for non-even quantities", () => {
+    const baseline = buildPricingRecommendation({
+      quantity: 3,
+      catalogBaselinePrice: 100,
+      historicalPrices: [110, 115, 120],
+      vendorQuotePrice: 130,
+      awardedOutcomeAdjustmentPercent: -2,
+      internalAdjustmentPercent: 5,
+      regionId: "dfw",
+      projectTypeId: "roofing",
+    });
+
+    const adjusted = applyMarketRateAdjustment({
+      recommendation: baseline,
+      marketRateAdjustment: makeMarketAdjustment({ adjustedPrice: 117.16 }),
+    });
+
+    expect(adjusted.quantity).toBe(3);
+    expect(adjusted.recommendedUnitPrice).toBeCloseTo(39.05, 2);
+    expect(adjusted.recommendedTotalPrice).toBeCloseTo(117.15, 2);
+    expect(adjusted.recommendedUnitPrice * adjusted.quantity).toBeCloseTo(adjusted.recommendedTotalPrice, 2);
+  });
+
+  it("guards zero or negative quantities in market-adjusted recommendations", () => {
+    const zeroQuantityBaseline = buildPricingRecommendation({
+      quantity: 0,
+      catalogBaselinePrice: 80,
+      historicalPrices: [],
+      vendorQuotePrice: null,
+      awardedOutcomeAdjustmentPercent: 0,
+      internalAdjustmentPercent: 0,
+      regionId: null,
+      projectTypeId: null,
+    });
+    const negativeQuantityBaseline = {
+      ...zeroQuantityBaseline,
+      quantity: -2,
+    };
+
+    const zeroAdjusted = applyMarketRateAdjustment({
+      recommendation: zeroQuantityBaseline,
+      marketRateAdjustment: makeMarketAdjustment({ adjustedPrice: 42.25 }),
+    });
+    const negativeAdjusted = applyMarketRateAdjustment({
+      recommendation: negativeQuantityBaseline,
+      marketRateAdjustment: makeMarketAdjustment({ adjustedPrice: 42.25 }),
+    });
+
+    for (const adjusted of [zeroAdjusted, negativeAdjusted]) {
+      expect(Number.isFinite(adjusted.recommendedUnitPrice)).toBe(true);
+      expect(Number.isFinite(adjusted.recommendedTotalPrice)).toBe(true);
+      expect(adjusted.recommendedUnitPrice).toBeCloseTo(42.25, 2);
+      expect(adjusted.recommendedTotalPrice).toBeCloseTo(42.25, 2);
+    }
   });
 
   it("does not reintroduce a hardcoded regional adjustment path", () => {
