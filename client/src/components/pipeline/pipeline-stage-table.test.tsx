@@ -18,5 +18,6 @@ describe("PipelineStageTable", () => {
 
     expect(html).toContain("North Campus");
     expect(html).toContain("Page 2 of 2");
+    expect(html).toContain("30 total records");
   });
 });

@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
+import type { ReactNode } from "react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 
 const mocks = vi.hoisted(() => ({
@@ -19,14 +20,20 @@ vi.mock("@/components/pipeline/pipeline-stage-page-header", () => ({
     children,
     backTo,
     title,
+    subtitle,
+    summary,
   }: {
     children: string;
     backTo: string;
     title: string;
+    subtitle?: string;
+    summary?: ReactNode;
   }) => (
     <div>
       <a href={backTo}>Back to board</a>
       <h1>{title}</h1>
+      {subtitle ? <p>{subtitle}</p> : null}
+      {summary}
       {children}
     </div>
   ),
@@ -85,6 +92,8 @@ describe("LeadStagePage", () => {
 
     expect(html).toContain("Back to board");
     expect(html).toContain("/leads?scope=mine");
+    expect(html).toContain("Qualified pressure");
+    expect(html).toContain("Avg. visible age");
     expect(html).toContain("Acme Facility");
   });
 

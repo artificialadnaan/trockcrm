@@ -38,34 +38,46 @@ export function PipelineStageTable<T>({
 }: PipelineStageTableProps<T>) {
   return (
     <div className="space-y-4">
-      <Table>
+      <div className="flex items-center justify-between gap-4 px-1">
+        <p className="text-[11px] font-black tracking-[0.18em] text-slate-500 uppercase">
+          {pagination.total} total records
+        </p>
+        <p className="text-sm font-medium text-slate-500">
+          Page {pagination.page} of {pagination.totalPages || 1}
+        </p>
+      </div>
+      <Table className="overflow-hidden rounded-[1.25rem]">
         <TableHeader>
           <TableRow>
             {columns.map((column) => (
-              <TableHead key={column.key}>{column.header}</TableHead>
+              <TableHead
+                key={column.key}
+                className="border-b border-slate-200 bg-[#f7f8fb] px-4 py-3 text-[11px] font-black tracking-[0.16em] text-slate-500 uppercase"
+              >
+                {column.header}
+              </TableHead>
             ))}
           </TableRow>
         </TableHeader>
         <TableBody>
           {rows.map((row, index) => (
-            <TableRow key={index}>
+            <TableRow key={index} className="border-b border-slate-100 hover:bg-slate-50/80">
               {columns.map((column) => (
-                <TableCell key={column.key}>{column.render(row)}</TableCell>
+                <TableCell key={column.key} className="px-4 py-4 align-top text-sm text-slate-700">
+                  {column.render(row)}
+                </TableCell>
               ))}
             </TableRow>
           ))}
         </TableBody>
       </Table>
-      <div className="flex items-center justify-between">
-        <p className="text-sm text-slate-500">
-          Page {pagination.page} of {pagination.totalPages || 1}
-        </p>
-        <div className="flex items-center gap-2">
+      <div className="flex items-center justify-end gap-2 px-1">
           <Button
             variant="outline"
             size="sm"
             disabled={pagination.page <= 1}
             onClick={() => onPageChange(pagination.page - 1)}
+            className="rounded-full"
           >
             <ChevronLeft className="h-4 w-4" />
           </Button>
@@ -74,10 +86,10 @@ export function PipelineStageTable<T>({
             size="sm"
             disabled={pagination.page >= pagination.totalPages}
             onClick={() => onPageChange(pagination.page + 1)}
+            className="rounded-full"
           >
             <ChevronRight className="h-4 w-4" />
           </Button>
-        </div>
       </div>
     </div>
   );
