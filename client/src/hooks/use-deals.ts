@@ -372,7 +372,11 @@ export async function createDeal(input: Partial<Deal> & { name: string; stageId:
   return api<{ deal: Deal }>("/deals", { method: "POST", json: input });
 }
 
-export async function updateDeal(dealId: string, input: Partial<Deal>) {
+export type UpdateDealPayload = Partial<Deal> & {
+  migrationMode?: boolean;
+};
+
+export async function updateDeal(dealId: string, input: UpdateDealPayload) {
   return api<{ deal: Deal }>(`/deals/${dealId}`, { method: "PATCH", json: input });
 }
 
