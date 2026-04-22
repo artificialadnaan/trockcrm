@@ -207,5 +207,32 @@ describe("MigrationDashboardPage", () => {
     expect(html).toContain("Reason code");
     expect(html).toContain("Stale age");
     expect(html).toContain("North Office");
+    expect(html).toContain("All record types");
+    expect(html).toContain("All stages");
+    expect(html).toContain("All reasons");
+    expect(html).toContain("All ages");
+  });
+
+  it("renders the director ownership-queue experience without admin-only failures", () => {
+    mocks.useAuthMock.mockReturnValue({
+      user: {
+        id: "user-2",
+        role: "director",
+        officeId: "office-1",
+        activeOfficeId: "office-1",
+      },
+    });
+
+    const html = renderPage();
+
+    expect(mocks.useMigrationSummaryMock).toHaveBeenCalledWith(false);
+    expect(mocks.useMigrationExceptionsMock).toHaveBeenCalledWith(false);
+    expect(html).not.toContain("Preview Sync");
+    expect(html).not.toContain("Apply Sync");
+    expect(html).not.toContain("Migration Exceptions");
+    expect(html).not.toContain("Failed to load migration summary");
+    expect(html).not.toContain("Failed to load migration exceptions");
+    expect(html).toContain("Refresh Queue");
+    expect(html).toContain("North Office");
   });
 });

@@ -154,13 +154,13 @@ export function MigrationDashboardPage() {
   const { user } = useAuth();
   const isAdmin = user?.role === "admin";
   const { offices, loading: officesLoading } = useAccessibleOffices();
-  const { summary, loading, error, refetch, runValidation } = useMigrationSummary();
+  const { summary, loading, error, refetch, runValidation } = useMigrationSummary(isAdmin);
   const {
     exceptions,
     loading: exceptionsLoading,
     error: exceptionsError,
     refetch: refetchExceptions,
-  } = useMigrationExceptions();
+  } = useMigrationExceptions(isAdmin);
   const [selectedOfficeId, setSelectedOfficeId] = useState<string | undefined>(undefined);
   const [recordTypeFilter, setRecordTypeFilter] = useState<"all" | "lead" | "deal">("all");
   const [stageFilter, setStageFilter] = useState<string>(STAGE_FILTER_ALL);
@@ -181,6 +181,13 @@ export function MigrationDashboardPage() {
     [officeId, offices]
   );
   const selectedOfficeName = selectedOffice?.name ?? "selected office";
+  const selectedOfficeLabel = selectedOffice?.name ?? (officesLoading ? "Loading offices..." : "Select office");
+  const selectedRecordTypeLabel =
+    RECORD_TYPE_OPTIONS.find((option) => option.value === recordTypeFilter)?.label ?? "All record types";
+  const selectedStageLabel = stageFilter === STAGE_FILTER_ALL ? "All stages" : stageFilter;
+  const selectedReasonCodeLabel = reasonCodeFilter === "all" ? "All reasons" : reasonCodeFilter.replace(/_/g, " ");
+  const selectedStaleAgeLabel =
+    STALE_AGE_OPTIONS.find((option) => option.value === staleAgeFilter)?.label ?? "All ages";
   const ownershipFilters = useMemo(
     () => ({
       officeId,
@@ -273,6 +280,7 @@ export function MigrationDashboardPage() {
   };
 
   const handleValidate = async () => {
+    if (!isAdmin) return;
     setValidating(true);
     try {
       await runValidation();
@@ -283,6 +291,7 @@ export function MigrationDashboardPage() {
   };
 
   const handlePreviewOwnershipSync = async () => {
+    if (!isAdmin) return;
     setPreviewLoading(true);
     try {
       const preview = await previewOwnershipSync();
@@ -296,6 +305,7 @@ export function MigrationDashboardPage() {
   };
 
   const handleApplyOwnershipSync = async () => {
+    if (!isAdmin) return;
     setApplyLoading(true);
     try {
       const syncSummary = await applyOwnershipSync();
@@ -337,29 +347,38 @@ export function MigrationDashboardPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm" onClick={refetch} disabled={loading}>
-            <RefreshCw className={`h-4 w-4 mr-1 ${loading ? "animate-spin" : ""}`} />
-            Refresh
-          </Button>
-          <Button
-            size="sm"
-            onClick={handleValidate}
-            disabled={validating}
-            className="bg-blue-600 hover:bg-blue-700 text-white"
-          >
-            <Play className="h-4 w-4 mr-1" />
-            {validating ? "Validating..." : "Run Validation"}
-          </Button>
+          {isAdmin ? (
+            <>
+              <Button variant="outline" size="sm" onClick={refetch} disabled={loading}>
+                <RefreshCw className={`h-4 w-4 mr-1 ${loading ? "animate-spin" : ""}`} />
+                Refresh
+              </Button>
+              <Button
+                size="sm"
+                onClick={handleValidate}
+                disabled={validating}
+                className="bg-blue-600 hover:bg-blue-700 text-white"
+              >
+                <Play className="h-4 w-4 mr-1" />
+                {validating ? "Validating..." : "Run Validation"}
+              </Button>
+            </>
+          ) : (
+            <Button variant="outline" size="sm" onClick={refetchOwnershipQueue} disabled={ownershipLoading}>
+              <RefreshCw className={`h-4 w-4 mr-1 ${ownershipLoading ? "animate-spin" : ""}`} />
+              Refresh Queue
+            </Button>
+          )}
         </div>
       </div>
 
-      {error && (
+      {isAdmin && error && (
         <div className="rounded-md bg-red-50 border border-red-200 p-4 text-red-800 text-sm">
           {error}
         </div>
       )}
 
-      {summary && (
+      {isAdmin && summary && (
         <div className="grid grid-cols-1 md:grid-cols-3 xl:grid-cols-6 gap-4">
           <StatCard label="Deals" stats={summary.deals} href="/admin/migration/deals" />
           <StatCard label="Contacts" stats={summary.contacts} href="/admin/migration/contacts" />
@@ -447,7 +466,9 @@ export function MigrationDashboardPage() {
               </div>
               <Select value={selectedOfficeId ?? ""} onValueChange={(value) => setSelectedOfficeId(value || undefined)}>
                 <SelectTrigger className="w-full">
-                  <SelectValue placeholder={officesLoading ? "Loading offices..." : "Select office"} />
+                  <SelectValue placeholder={officesLoading ? "Loading offices..." : "Select office"}>
+                    {selectedOfficeLabel}
+                  </SelectValue>
                 </SelectTrigger>
                 <SelectContent>
                   {offices.map((office) => (
@@ -467,7 +488,7 @@ export function MigrationDashboardPage() {
                 }
               >
                 <SelectTrigger className="w-full">
-                  <SelectValue />
+                  <SelectValue>{selectedRecordTypeLabel}</SelectValue>
                 </SelectTrigger>
                 <SelectContent>
                   {RECORD_TYPE_OPTIONS.map((option) => (
@@ -482,7 +503,7 @@ export function MigrationDashboardPage() {
               <div className="text-xs font-medium uppercase tracking-wide text-slate-500">Stage</div>
               <Select value={stageFilter} onValueChange={(value) => setStageFilter(value ?? STAGE_FILTER_ALL)}>
                 <SelectTrigger className="w-full">
-                  <SelectValue placeholder="All stages" />
+                  <SelectValue placeholder="All stages">{selectedStageLabel}</SelectValue>
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value={STAGE_FILTER_ALL}>All stages</SelectItem>
@@ -500,7 +521,7 @@ export function MigrationDashboardPage() {
               <div className="text-xs font-medium uppercase tracking-wide text-slate-500">Reason code</div>
               <Select value={reasonCodeFilter} onValueChange={(value) => setReasonCodeFilter(value ?? "all")}>
                 <SelectTrigger className="w-full">
-                  <SelectValue placeholder="All reasons" />
+                  <SelectValue placeholder="All reasons">{selectedReasonCodeLabel}</SelectValue>
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="all">All reasons</SelectItem>
@@ -521,7 +542,7 @@ export function MigrationDashboardPage() {
                 }
               >
                 <SelectTrigger className="w-full">
-                  <SelectValue />
+                  <SelectValue>{selectedStaleAgeLabel}</SelectValue>
                 </SelectTrigger>
                 <SelectContent>
                   {STALE_AGE_OPTIONS.map((option) => (
@@ -605,37 +626,39 @@ export function MigrationDashboardPage() {
         </CardContent>
       </Card>
 
-      <div className="space-y-3">
-        <div className="flex items-center justify-between">
-          <h2 className="text-sm font-medium text-gray-700 uppercase tracking-wide">
-            Migration Exceptions
-          </h2>
-          <div className="text-xs text-gray-500">
-            {exceptionTotal.toLocaleString()} unresolved mappings
+      {isAdmin ? (
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <h2 className="text-sm font-medium text-gray-700 uppercase tracking-wide">
+              Migration Exceptions
+            </h2>
+            <div className="text-xs text-gray-500">
+              {exceptionTotal.toLocaleString()} unresolved mappings
+            </div>
+            <Button variant="outline" size="sm" onClick={refetchExceptions} disabled={exceptionsLoading}>
+              <RefreshCw className={`h-4 w-4 mr-1 ${exceptionsLoading ? "animate-spin" : ""}`} />
+              Refresh Exceptions
+            </Button>
           </div>
-          <Button variant="outline" size="sm" onClick={refetchExceptions} disabled={exceptionsLoading}>
-            <RefreshCw className={`h-4 w-4 mr-1 ${exceptionsLoading ? "animate-spin" : ""}`} />
-            Refresh Exceptions
-          </Button>
-        </div>
 
-        {exceptionsError && (
-          <div className="rounded-md bg-red-50 border border-red-200 p-4 text-red-800 text-sm">
-            {exceptionsError}
+          {exceptionsError && (
+            <div className="rounded-md bg-red-50 border border-red-200 p-4 text-red-800 text-sm">
+              {exceptionsError}
+            </div>
+          )}
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            {exceptions.map((group) => (
+              <ExceptionBucketCard
+                key={group.bucket}
+                label={group.label}
+                count={group.count}
+                items={group.items}
+              />
+            ))}
           </div>
-        )}
-
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          {exceptions.map((group) => (
-            <ExceptionBucketCard
-              key={group.bucket}
-              label={group.label}
-              count={group.count}
-              items={group.items}
-            />
-          ))}
         </div>
-      </div>
+      ) : null}
 
       {/* Recent runs */}
       {summary?.recentRuns && summary.recentRuns.length > 0 && (

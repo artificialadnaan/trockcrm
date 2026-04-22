@@ -202,12 +202,18 @@ function buildOwnershipQueueQueryParams(filters: OwnershipQueueFilters): URLSear
   return params;
 }
 
-export function useMigrationSummary() {
+export function useMigrationSummary(enabled = true) {
   const [summary, setSummary] = useState<MigrationSummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
+    if (!enabled) {
+      setSummary(null);
+      setError(null);
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     setError(null);
     try {
@@ -218,9 +224,10 @@ export function useMigrationSummary() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [enabled]);
 
   const runValidation = async () => {
+    if (!enabled) return;
     await api("/migration/validate", { method: "POST" });
     await load();
   };
@@ -230,12 +237,18 @@ export function useMigrationSummary() {
   return { summary, loading, error, refetch: load, runValidation };
 }
 
-export function useMigrationExceptions() {
+export function useMigrationExceptions(enabled = true) {
   const [exceptions, setExceptions] = useState<MigrationExceptionGroup[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
+    if (!enabled) {
+      setExceptions([]);
+      setError(null);
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     setError(null);
     try {
@@ -246,7 +259,7 @@ export function useMigrationExceptions() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [enabled]);
 
   useEffect(() => { load(); }, [load]);
 
