@@ -35,6 +35,36 @@ interface ApiOptions extends RequestInit {
   json?: Record<string, any>;
 }
 
+interface ApiErrorPayload {
+  message?: string;
+  code?: string;
+  missingRequirements?: unknown;
+  currentStage?: unknown;
+  targetStage?: unknown;
+}
+
+export class ApiError extends Error {
+  status: number;
+  code?: string;
+  missingRequirements?: unknown;
+  currentStage?: unknown;
+  targetStage?: unknown;
+
+  constructor(status: number, payload?: ApiErrorPayload) {
+    super(payload?.message || `HTTP ${status}`);
+    this.name = "ApiError";
+    this.status = status;
+    this.code = payload?.code;
+    this.missingRequirements = payload?.missingRequirements;
+    this.currentStage = payload?.currentStage;
+    this.targetStage = payload?.targetStage;
+  }
+}
+
+export function isApiError(error: unknown): error is ApiError {
+  return error instanceof ApiError;
+}
+
 export async function api<T = any>(path: string, options: ApiOptions = {}): Promise<T> {
   const { json, ...fetchOptions } = options;
 
@@ -55,7 +85,7 @@ export async function api<T = any>(path: string, options: ApiOptions = {}): Prom
 
   if (!res.ok) {
     const error = await res.json().catch(() => ({ error: { message: "Request failed" } }));
-    throw new Error(error.error?.message || `HTTP ${res.status}`);
+    throw new ApiError(res.status, error.error);
   }
 
   return res.json();

@@ -4,6 +4,8 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import type { LeadQualificationFieldId } from "@trock-crm/shared/types";
+import { LEAD_QUALIFICATION_FIELDS } from "@trock-crm/shared/types";
 import {
   Select,
   SelectContent,
@@ -17,10 +19,8 @@ import { useCompanyContacts } from "@/hooks/use-companies";
 import { createLead, updateLead } from "@/hooks/use-leads";
 import { usePipelineStages, useProjectTypes } from "@/hooks/use-pipeline-config";
 import { formatPropertyLabel, useProperties } from "@/hooks/use-properties";
-import {
-  getValidationQuestionSetForProjectType,
-  LEAD_QUALIFICATION_FIELDS,
-} from "@/lib/validation-question-sets";
+import { isApiError } from "@/lib/api";
+import { getValidationQuestionSetForProjectType } from "@/lib/validation-question-sets";
 import { CRM_OWNED_LEAD_STAGE_SLUGS } from "@/lib/sales-workflow";
 
 type LeadAnswerValue = string | boolean | number | null;
@@ -68,6 +68,21 @@ type LeadUpdateFormProps = {
 type LeadFormProps = LeadSummaryFormProps | LeadCreateFormProps | LeadUpdateFormProps;
 
 type LeadEditableMode = "create" | "edit";
+
+interface LeadStageGateErrorState {
+  message: string;
+  code?: string;
+  missingRequirements?: {
+    qualificationFields?: string[];
+    projectTypeQuestionIds?: string[];
+  };
+  currentStage?: {
+    name?: string;
+  };
+  targetStage?: {
+    name?: string;
+  };
+}
 
 function getEditableFormState(lead?: LeadFormLead) {
   return {
@@ -172,7 +187,7 @@ function SummaryLeadForm({ lead, converted = false }: LeadSummaryFormProps) {
         <div className="space-y-3 rounded-lg border p-3">
           <p className="text-sm font-medium">Sales Validation</p>
           <div className="grid gap-3 text-sm sm:grid-cols-2">
-            {LEAD_QUALIFICATION_FIELDS.map((field) => (
+            {LEAD_QUALIFICATION_FIELDS.map((field: { id: LeadQualificationFieldId; label: string }) => (
               <div key={field.id}>
                 <p className="text-muted-foreground">{field.label}</p>
                 <p className="font-medium">{renderAnswerValue(lead.qualificationPayload?.[field.id])}</p>
@@ -233,6 +248,7 @@ function EditableLeadForm({ mode, lead }: { mode: LeadEditableMode; lead?: LeadF
   const [formData, setFormData] = useState(() => getEditableFormState(lead));
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [stageGateError, setStageGateError] = useState<LeadStageGateErrorState | null>(null);
 
   useEffect(() => {
     setFormData(getEditableFormState(lead));
@@ -317,6 +333,7 @@ function EditableLeadForm({ mode, lead }: { mode: LeadEditableMode; lead?: LeadF
 
     setSubmitting(true);
     setError(null);
+    setStageGateError(null);
 
     try {
       const payload = {
@@ -358,6 +375,15 @@ function EditableLeadForm({ mode, lead }: { mode: LeadEditableMode; lead?: LeadF
         navigate(`/leads/${result.lead.id}`);
       }
     } catch (err: unknown) {
+      if (isApiError(err) && err.code === "LEAD_STAGE_REQUIREMENTS_UNMET") {
+        setStageGateError({
+          message: err.message,
+          code: err.code,
+          missingRequirements: err.missingRequirements as LeadStageGateErrorState["missingRequirements"],
+          currentStage: err.currentStage as LeadStageGateErrorState["currentStage"],
+          targetStage: err.targetStage as LeadStageGateErrorState["targetStage"],
+        });
+      }
       setError(err instanceof Error ? err.message : "Failed to save lead");
     } finally {
       setSubmitting(false);
@@ -372,6 +398,26 @@ function EditableLeadForm({ mode, lead }: { mode: LeadEditableMode; lead?: LeadF
         </CardHeader>
         <CardContent className="space-y-4">
           {error && <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div>}
+          {stageGateError && (
+            <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-3 text-sm text-amber-900">
+              <p className="font-medium">{stageGateError.message}</p>
+              {stageGateError.currentStage?.name && stageGateError.targetStage?.name && (
+                <p className="mt-1 text-xs text-amber-800">
+                  {stageGateError.currentStage.name} → {stageGateError.targetStage.name}
+                </p>
+              )}
+              {stageGateError.missingRequirements?.qualificationFields?.length ? (
+                <p className="mt-2 text-xs text-amber-800">
+                  Missing qualification fields: {stageGateError.missingRequirements.qualificationFields.join(", ")}
+                </p>
+              ) : null}
+              {stageGateError.missingRequirements?.projectTypeQuestionIds?.length ? (
+                <p className="mt-1 text-xs text-amber-800">
+                  Missing Top 5 answers: {stageGateError.missingRequirements.projectTypeQuestionIds.join(", ")}
+                </p>
+              ) : null}
+            </div>
+          )}
 
           {isCreate ? (
             <>
@@ -569,7 +615,7 @@ function EditableLeadForm({ mode, lead }: { mode: LeadEditableMode; lead?: LeadF
           <CardTitle>Sales Validation Fields</CardTitle>
         </CardHeader>
         <CardContent className="grid gap-4 sm:grid-cols-3">
-          {LEAD_QUALIFICATION_FIELDS.map((field) => (
+          {LEAD_QUALIFICATION_FIELDS.map((field: { id: LeadQualificationFieldId; label: string; input: string }) => (
             <div key={field.id} className="space-y-2">
               <Label htmlFor={field.id}>{field.label}</Label>
               <Input
