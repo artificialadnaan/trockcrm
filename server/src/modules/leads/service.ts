@@ -880,26 +880,64 @@ export function createLeadService(
       throw new AppError(400, "No-go decisions require a reason");
     }
 
-    const missing: string[] = [];
+    const legacyMissing: string[] = [];
 
     if (targetStage.slug === "qualified_lead") {
       for (const requirement of QUALIFIED_LEAD_REQUIREMENTS) {
         if (requirement === "property") {
-          if (!existing.propertyId || !existing.property) missing.push("property");
+          if (!existing.propertyId || !existing.property) legacyMissing.push("property");
           continue;
         }
 
         if (requirement === "qualificationCompanyFit") {
-          if (effectiveLead.qualificationCompanyFit !== true) missing.push("qualificationCompanyFit");
+          if (effectiveLead.qualificationCompanyFit !== true) legacyMissing.push("qualificationCompanyFit");
           continue;
         }
 
-        if (isBlank(effectiveLead[requirement])) missing.push(requirement);
+        if (isBlank(effectiveLead[requirement])) legacyMissing.push(requirement);
       }
     }
 
     if (targetStage.slug === "ready_for_opportunity" && effectiveLead.directorReviewDecision !== "go") {
-      missing.push("directorReviewDecision");
+      legacyMissing.push("directorReviewDecision");
+    }
+
+    if (legacyMissing.length > 0) {
+      return {
+        ok: false,
+        reason: "missing_requirements",
+        targetStageId: input.targetStageId,
+        resolution: "inline",
+        missing: legacyMissing.map((key) => ({
+          key,
+          label: REQUIREMENT_METADATA[key]?.label ?? key,
+          resolution: REQUIREMENT_METADATA[key]?.resolution ?? "inline",
+        })),
+      };
+    }
+
+    const preflight = await validateLeadStageGate(
+      tenantDb,
+      input.leadId,
+      input.targetStageId,
+      input.userRole,
+      input.userId
+    );
+
+    if (!preflight.allowed) {
+      return {
+        ok: false,
+        reason: "missing_requirements",
+        targetStageId: input.targetStageId,
+        resolution: "detail",
+        missing: preflight.missingRequirements.effectiveChecklist.fields
+          .filter((field) => !field.satisfied)
+          .map((field) => ({
+            key: field.key,
+            label: field.label,
+            resolution: field.key.startsWith("leadScoping.") ? "detail" : "detail",
+          })),
+      };
     }
 
     const now = deps.now();
@@ -921,24 +959,6 @@ export function createLeadService(
     }
     if (input.inlinePatch?.directorReviewReason !== undefined) {
       updates.directorReviewReason = input.inlinePatch.directorReviewReason;
-    }
-
-    if (missing.length > 0) {
-      if (Object.keys(updates).length > 1) {
-        await tenantDb.update(leads).set(updates).where(eq(leads.id, input.leadId));
-      }
-
-      return {
-        ok: false,
-        reason: "missing_requirements",
-        targetStageId: input.targetStageId,
-        resolution: "inline",
-        missing: missing.map((key) => ({
-          key,
-          label: REQUIREMENT_METADATA[key]?.label ?? key,
-          resolution: REQUIREMENT_METADATA[key]?.resolution ?? "inline",
-        })),
-      };
     }
 
     if (targetStage.slug === "qualified_lead") {

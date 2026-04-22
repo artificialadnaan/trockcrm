@@ -112,16 +112,12 @@ export function LeadListPage() {
           void transitionLeadStage(activeId, { targetStageId })
             .then(async (result) => {
               if (!result.ok) {
-                const missingKeys = result.missingRequirements.effectiveChecklist.fields
-                  .filter((field) => !field.satisfied)
-                  .map((field) => field.key);
+                const missingKeys = result.missing.map((field) => field.key);
                 setBlockedMove({
                   leadId: activeLead.id,
                   leadName: activeLead.name,
                   targetStageName: targetColumn.stage.name,
-                  missingLabels: result.missingRequirements.effectiveChecklist.fields
-                    .filter((field) => !field.satisfied)
-                    .map((field) => field.label),
+                  missingLabels: result.missing.map((field) => field.label),
                   focus: missingKeys.some((key) => key.startsWith("leadScoping."))
                     ? "scoping"
                     : "qualification",
