@@ -22,6 +22,8 @@ const COMPANY_CATEGORY_LABELS: Record<string, string> = {
   other: "Other",
 };
 
+const SEARCH_DEBOUNCE_MS = 150;
+
 interface CompanySelectorProps {
   value: string | null;
   onChange: (companyId: string) => void;
@@ -100,21 +102,22 @@ export function CompanySelector({ value, onChange, required }: CompanySelectorPr
   // Debounced search
   useEffect(() => {
     if (!open) return;
-    if (query.length < 1) {
+    const trimmedQuery = query.trim();
+    if (trimmedQuery.length < 1) {
       setResults([]);
       return;
     }
     const timer = setTimeout(async () => {
       setSearching(true);
       try {
-        const data = await searchCompanies(query);
+        const data = await searchCompanies(trimmedQuery);
         setResults(data.companies);
       } catch {
         setResults([]);
       } finally {
         setSearching(false);
       }
-    }, 300);
+    }, SEARCH_DEBOUNCE_MS);
     return () => clearTimeout(timer);
   }, [query, open]);
 

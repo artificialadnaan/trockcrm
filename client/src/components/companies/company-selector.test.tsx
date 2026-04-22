@@ -16,4 +16,14 @@ describe("CompanySelector inline create", () => {
     expect(source).not.toContain("<form onSubmit={handleCreateSubmit}");
     expect(source).toContain('type="button" size="sm" disabled={creating} onClick={() => void handleCreateSubmit()}');
   });
+
+  it("uses a trimmed fast debounce for search instead of the older slower delay", () => {
+    const source = normalize(companySelectorSource);
+
+    expect(source).toContain("const SEARCH_DEBOUNCE_MS = 150");
+    expect(source).toContain("const trimmedQuery = query.trim();");
+    expect(source).toContain("setTimeout(async () =>");
+    expect(source).toContain("}, SEARCH_DEBOUNCE_MS);");
+    expect(source).not.toContain("}, 300);");
+  });
 });

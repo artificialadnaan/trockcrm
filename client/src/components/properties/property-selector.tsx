@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
+import { useDeferredValue, useEffect, useState } from "react";
 import { ChevronsUpDown, Loader2, Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { api } from "@/lib/api";
 import { formatPropertyLabel, useProperties } from "@/hooks/use-properties";
 import { PropertyCreateDialog } from "./property-create-dialog";
 
@@ -12,34 +13,51 @@ interface PropertySelectorProps {
   required?: boolean;
 }
 
+export async function resolveSelectedPropertyLabel(
+  propertyId: string,
+  properties: Array<Parameters<typeof formatPropertyLabel>[0] & { id: string }>
+) {
+  const match = properties.find((property) => property.id === propertyId);
+  if (match) {
+    return formatPropertyLabel(match);
+  }
+
+  const data = await api<{
+    property: Parameters<typeof formatPropertyLabel>[0] & { id: string };
+  }>(`/properties/${propertyId}`);
+  return formatPropertyLabel(data.property);
+}
+
 export function PropertySelector({ companyId, value, onChange, required }: PropertySelectorProps) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [selectedLabel, setSelectedLabel] = useState<string | null>(null);
-  const { properties, loading, refetch } = useProperties({ companyId: companyId || undefined, limit: 500 });
+  const deferredQuery = useDeferredValue(query.trim());
+  const { properties, loading, refetch } = useProperties({
+    companyId: companyId || undefined,
+    search: deferredQuery || undefined,
+    limit: 25,
+  });
 
   useEffect(() => {
     if (!value) {
       setSelectedLabel(null);
       return;
     }
-    const match = properties.find((property) => property.id === value);
-    if (match) {
-      setSelectedLabel(formatPropertyLabel(match));
-    }
-  }, [properties, value]);
+    let cancelled = false;
 
-  const filteredProperties = useMemo(() => {
-    const trimmed = query.trim().toLowerCase();
-    if (!trimmed) return properties;
-    return properties.filter((property) =>
-      [property.name, property.address, property.city, property.state, property.zip]
-        .filter(Boolean)
-        .join(" ")
-        .toLowerCase()
-        .includes(trimmed)
-    );
-  }, [properties, query]);
+    void resolveSelectedPropertyLabel(value, properties)
+      .then((label) => {
+        if (!cancelled) {
+          setSelectedLabel(label);
+        }
+      })
+      .catch(() => {});
+
+    return () => {
+      cancelled = true;
+    };
+  }, [properties, value]);
 
   return (
     <div className="space-y-2">
@@ -70,10 +88,10 @@ export function PropertySelector({ companyId, value, onChange, required }: Prope
                 <Loader2 className="h-4 w-4 animate-spin" />
                 Loading properties...
               </div>
-            ) : filteredProperties.length === 0 ? (
+            ) : properties.length === 0 ? (
               <p className="px-2 py-2 text-sm text-muted-foreground">No properties found.</p>
             ) : (
-              filteredProperties.map((property) => (
+              properties.map((property) => (
                 <button
                   key={property.id}
                   type="button"
