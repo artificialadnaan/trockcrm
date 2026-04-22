@@ -1,3 +1,8 @@
+import {
+  formatEstimateResolutionLevel,
+  getEstimateResolutionSourceLabel,
+  getEstimateRerunLabel,
+} from "./estimate-market-override-panel";
 import type { EstimatingWorkflowState, WorkbenchPanelId } from "./estimating-workflow-shell";
 
 const PANEL_COPY: Record<WorkbenchPanelId, { title: string; body: string }> = {
@@ -43,6 +48,17 @@ export function EstimateWorkbenchDetailPane({
   workflow: EstimatingWorkflowState;
 }) {
   const reviewReady = workflow.summary.pricing.readyToPromote;
+  const rerunStatus = workflow.rerunStatus?.status ?? "idle";
+  const rerunLabel =
+    rerunStatus === "queued"
+      ? "Queued"
+      : rerunStatus === "running"
+        ? "Running"
+        : rerunStatus === "failed"
+          ? "Failed"
+          : "Idle";
+  const marketName = workflow.marketContext?.effectiveMarket?.name ?? "No market";
+  const marketMode = workflow.marketContext?.isOverridden ? "Override active" : "Auto-detected";
 
   return (
     <aside className="rounded-lg border bg-background">
@@ -67,6 +83,31 @@ export function EstimateWorkbenchDetailPane({
             {workflow.promotionReadiness.canPromote
               ? "At least one generation run can be promoted."
               : "No approved pricing run is ready for promotion yet."}
+          </div>
+        </div>
+        <div>
+          <div className="text-xs uppercase tracking-wide text-muted-foreground">Effective market</div>
+          <div className="mt-1 text-xl font-semibold">{marketName}</div>
+          <div className="mt-1 text-xs text-muted-foreground">
+            {marketMode} · {formatEstimateResolutionLevel(workflow.marketContext?.resolutionLevel)}
+          </div>
+          <div className="mt-1 text-xs text-muted-foreground">
+            {getEstimateResolutionSourceLabel(workflow.marketContext?.resolutionSource ?? null)}
+          </div>
+          {workflow.marketContext?.override?.overrideReason ? (
+            <div className="mt-1 text-xs text-muted-foreground">
+              Reason: {workflow.marketContext.override.overrideReason}
+            </div>
+          ) : null}
+        </div>
+        <div>
+          <div className="text-xs uppercase tracking-wide text-muted-foreground">Override rerun</div>
+          <div className="mt-1 text-xl font-semibold">{rerunLabel}</div>
+          <div className="mt-1 text-xs text-muted-foreground">
+            {getEstimateRerunLabel(workflow.rerunStatus ?? null)}
+          </div>
+          <div className="mt-1 text-xs text-muted-foreground">
+            {workflow.rerunStatus?.errorSummary ?? "Status reflects queued, running, or failed override refreshes."}
           </div>
         </div>
       </div>

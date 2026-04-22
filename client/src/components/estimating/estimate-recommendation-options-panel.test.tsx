@@ -75,6 +75,16 @@ describe("EstimateRecommendationOptionsPanel", () => {
           },
           assumptionsJson: {
             source: "document-backed",
+            marketRate: {
+              resolvedMarket: { name: "North Texas" },
+              resolutionLevel: "state",
+              resolutionSource: { type: "state", key: "TX" },
+              baselinePrice: 320,
+              adjustedPrice: 342.5,
+              componentAdjustments: [
+                { component: "labor", adjustmentPercent: 8, adjustedAmount: 120 },
+              ],
+            },
           },
         }}
         onReviewAction={vi.fn()}
@@ -90,6 +100,14 @@ describe("EstimateRecommendationOptionsPanel", () => {
     expect(html).toContain("Local catalog");
     expect(html).not.toContain("Promote to local catalog");
     expect(html).toContain("Evidence");
+    expect(html).toContain("Market: North Texas");
+    expect(html).toContain("Auto-detected");
+    expect(html).toContain("Baseline: $320.00");
+    expect(html).toContain("Adjusted: $342.50");
+    expect(html).toContain("labor: +8%");
+    expect(html).toContain("Resolution source: state");
+    expect(html).toContain("Assumptions:");
+    expect(html).toContain("document-backed");
     expect(html).toContain("Best match for the selected extraction");
   });
 

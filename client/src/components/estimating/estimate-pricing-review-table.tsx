@@ -136,8 +136,105 @@ function summarizeUnknown(value: unknown) {
   }
 }
 
+function getNumberValue(value: unknown) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string" && value.trim().length > 0) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
 function formatOptionRank(option: PricingRecommendationOption, fallbackIndex: number) {
   return `Rank ${option.rank ?? fallbackIndex + 1}`;
+}
+
+function getObjectValue(value: unknown) {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function getMarketRateEvidence(row: PricingReviewRow | null) {
+  if (!row) return null;
+  const assumptions = getObjectValue(row.assumptionsJson);
+  const evidence = getObjectValue(row.evidenceJson);
+  const marketRate = getObjectValue(assumptions?.marketRate) ?? getObjectValue(evidence?.marketRate);
+  return marketRate;
+}
+
+function getSupplementalJsonSummary(value: unknown) {
+  const objectValue = getObjectValue(value);
+  if (!objectValue) {
+    return summarizeUnknown(value);
+  }
+
+  const { marketRate: _marketRate, ...rest } = objectValue;
+  if (Object.keys(rest).length === 0) {
+    return "No additional detail";
+  }
+
+  return summarizeUnknown(rest);
+}
+
+function formatAdjustmentPercent(value: unknown) {
+  const numeric = getNumberValue(value);
+  if (numeric == null) {
+    return "No delta";
+  }
+
+  return `${numeric > 0 ? "+" : ""}${numeric}%`;
+}
+
+function renderMarketRateEvidence(row: PricingReviewRow | null) {
+  const marketRate = getMarketRateEvidence(row);
+  if (!marketRate) return null;
+
+  const resolvedMarket = getObjectValue(marketRate.resolvedMarket);
+  const resolutionSource = getObjectValue(marketRate.resolutionSource);
+  const componentAdjustments = Array.isArray(marketRate.componentAdjustments)
+    ? (marketRate.componentAdjustments as Array<Record<string, unknown>>)
+    : [];
+  const adjustedPrice =
+    getNumberValue(marketRate.adjustedPrice) ??
+    getNumberValue(row?.recommendedUnitPrice) ??
+    getNumberValue(row?.recommendedTotalPrice);
+  const fallbackSource = getObjectValue(marketRate.fallbackSource);
+  const mode = marketRate.resolutionLevel === "override" ? "Override active" : "Auto-detected";
+
+  return (
+    <div className="grid gap-2 rounded-md border bg-muted/20 p-3">
+      <div className="text-[11px] uppercase tracking-wide text-muted-foreground">
+        Market-rate rationale
+      </div>
+      <div>
+        Market rate: {String(resolvedMarket?.name ?? "Unknown market")} ·{" "}
+        {String(marketRate.resolutionLevel ?? "unknown")}
+      </div>
+      <div>{mode}</div>
+      <div>Baseline: {formatCurrency(marketRate.baselinePrice as string | number | null | undefined)}</div>
+      <div>Adjusted: {formatCurrency(adjustedPrice)}</div>
+      {componentAdjustments.map((component) => (
+        <div key={String(component.component ?? "component")}>
+          {String(component.component ?? "component")}:{" "}
+          {formatAdjustmentPercent(component.adjustmentPercent)}{" "}
+          ({formatCurrency(component.adjustedAmount as string | number | null | undefined)})
+        </div>
+      ))}
+      <div>
+        Resolution source: {String(resolutionSource?.type ?? "unknown")}
+        {resolutionSource?.key ? ` (${String(resolutionSource.key)})` : ""}
+      </div>
+      {fallbackSource ? (
+        <div>
+          Fallback: {String(fallbackSource.type ?? "unknown")}
+          {fallbackSource.key ? ` (${String(fallbackSource.key)})` : ""}
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
 export function isFreeTextManualRow(row: Pick<
@@ -638,8 +735,14 @@ export function EstimatePricingReviewTable({
           </div>
 
           <div className="grid gap-1 border-t px-4 py-3 text-xs text-muted-foreground">
-            <div>Assumptions: {selectedRow ? summarizeUnknown(selectedRow.assumptionsJson) : "No detail"}</div>
-            <div>Evidence: {selectedRow ? summarizeUnknown(selectedRow.evidenceJson) : "No detail"}</div>
+            {selectedRow ? renderMarketRateEvidence(selectedRow) : null}
+            <div>
+              Assumptions:{" "}
+              {selectedRow ? getSupplementalJsonSummary(selectedRow.assumptionsJson) : "No detail"}
+            </div>
+            <div>
+              Evidence: {selectedRow ? getSupplementalJsonSummary(selectedRow.evidenceJson) : "No detail"}
+            </div>
           </div>
         </>
       )}

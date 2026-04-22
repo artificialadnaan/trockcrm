@@ -68,6 +68,17 @@ function summarizeUnknown(value: unknown) {
   }
 }
 
+function getNumberValue(value: unknown) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string" && value.trim().length > 0) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
 function getRankLabel(option: RecommendationOption, index: number) {
   if (typeof option.rank === "number" && Number.isFinite(option.rank)) {
     return `Rank ${option.rank}`;
@@ -82,6 +93,54 @@ function hasNumericPriceValue(value: string | number | null | undefined) {
 
   const trimmed = value?.trim();
   return Boolean(trimmed) && !Number.isNaN(Number(trimmed));
+}
+
+function formatCurrency(value: unknown) {
+  const numeric = getNumberValue(value);
+  if (numeric == null) {
+    return summarizeUnknown(value);
+  }
+
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+  }).format(numeric);
+}
+
+function getObjectValue(value: unknown) {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function getMarketRateEvidence(recommendation: EstimateRecommendationRow | null) {
+  if (!recommendation) return null;
+  const assumptions = getObjectValue(recommendation.assumptionsJson);
+  const evidence = getObjectValue(recommendation.evidenceJson);
+  return getObjectValue(assumptions?.marketRate) ?? getObjectValue(evidence?.marketRate);
+}
+
+function getSupplementalJsonSummary(value: unknown) {
+  const objectValue = getObjectValue(value);
+  if (!objectValue) {
+    return summarizeUnknown(value);
+  }
+
+  const { marketRate: _marketRate, ...rest } = objectValue;
+  if (Object.keys(rest).length === 0) {
+    return "No additional detail";
+  }
+
+  return summarizeUnknown(rest);
+}
+
+function formatAdjustmentPercent(value: unknown) {
+  const numeric = getNumberValue(value);
+  if (numeric == null) {
+    return "No delta";
+  }
+
+  return `${numeric > 0 ? "+" : ""}${numeric}%`;
 }
 
 export function getDisplayedSelectedOption(recommendation: EstimateRecommendationRow | null) {
@@ -147,6 +206,7 @@ export function EstimateRecommendationOptionsPanel({
     ...recommendation,
     recommendationOptions: options,
   });
+  const marketRate = getMarketRateEvidence(recommendation);
   const actionBusy = actionsDisabled || pendingAction !== null;
   const canOverride =
     hasNumericPriceValue(recommendation.recommendedUnitPrice) &&
@@ -350,11 +410,56 @@ export function EstimateRecommendationOptionsPanel({
 
         <div className="grid gap-2">
           <div className="text-xs uppercase tracking-wide text-muted-foreground">Evidence</div>
+          {marketRate ? (
+            <div className="rounded-lg border bg-muted/20 p-3 text-xs text-muted-foreground">
+              <div>
+                Market: {String(getObjectValue(marketRate.resolvedMarket)?.name ?? "Unknown market")} ·{" "}
+                {String(marketRate.resolutionLevel ?? "unknown")}
+              </div>
+              <div>
+                {marketRate.resolutionLevel === "override" ? "Override active" : "Auto-detected"}
+              </div>
+              <div>
+                Baseline: {typeof marketRate.baselinePrice !== "undefined"
+                  ? formatCurrency(marketRate.baselinePrice)
+                  : "No baseline"}
+              </div>
+              <div>
+                Adjusted:{" "}
+                {getNumberValue(marketRate.adjustedPrice ?? recommendation.recommendedUnitPrice) != null
+                  ? formatCurrency(marketRate.adjustedPrice ?? recommendation.recommendedUnitPrice)
+                  : "No adjusted price"}
+              </div>
+              {Array.isArray(marketRate.componentAdjustments)
+                ? (marketRate.componentAdjustments as Array<Record<string, unknown>>).map((component) => (
+                    <div key={String(component.component ?? "component")}>
+                      {String(component.component ?? "component")}:{" "}
+                      {formatAdjustmentPercent(component.adjustmentPercent)} (
+                      {formatCurrency(component.adjustedAmount)})
+                    </div>
+                  ))
+                : null}
+              <div>
+                Resolution source: {String(getObjectValue(marketRate.resolutionSource)?.type ?? "unknown")}
+                {getObjectValue(marketRate.resolutionSource)?.key
+                  ? ` (${String(getObjectValue(marketRate.resolutionSource)?.key)})`
+                  : ""}
+              </div>
+              {getObjectValue(marketRate.fallbackSource) ? (
+                <div>
+                  Fallback: {String(getObjectValue(marketRate.fallbackSource)?.type ?? "unknown")}
+                  {getObjectValue(marketRate.fallbackSource)?.key
+                    ? ` (${String(getObjectValue(marketRate.fallbackSource)?.key)})`
+                    : ""}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
           <div className="rounded-lg border bg-muted/20 p-3 text-xs text-muted-foreground">
-            {summarizeUnknown(recommendation.evidenceJson)}
+            {getSupplementalJsonSummary(recommendation.evidenceJson)}
           </div>
           <div className="rounded-lg border bg-muted/20 p-3 text-xs text-muted-foreground">
-            Assumptions: {summarizeUnknown(recommendation.assumptionsJson)}
+            Assumptions: {getSupplementalJsonSummary(recommendation.assumptionsJson)}
           </div>
         </div>
 

@@ -10,6 +10,11 @@ import {
   runEstimatePricingReviewStateAction,
   runEstimatePromoteToEstimateAction,
 } from "./estimate-pricing-review-table";
+import {
+  EstimateMarketOverridePanel,
+  type EstimateMarketContext,
+  type EstimateRerunStatus,
+} from "./estimate-market-override-panel";
 import { EstimateRecommendationOptionsPanel, runEstimatePromoteLocalCatalogAction } from "./estimate-recommendation-options-panel";
 import { EstimateReviewLogPanel } from "./estimate-review-log-panel";
 import { EstimateWorkbenchDetailPane } from "./estimate-workbench-detail-pane";
@@ -45,6 +50,9 @@ export interface EstimatingWorkflowState {
     canPromote: boolean;
     generationRunIds: string[];
   };
+  marketContext?: EstimateMarketContext;
+  rerunStatus?: EstimateRerunStatus;
+  activePricingRunId?: string | null;
   manualAddContext?: {
     generationRunId?: string | null;
     extractionMatchId?: string | null;
@@ -316,6 +324,12 @@ export function EstimatingWorkflowShell({
   return (
     <div className="space-y-4">
       <EstimateWorkbenchSummaryStrip workflow={workflow} />
+      <EstimateMarketOverridePanel
+        dealId={dealId}
+        marketContext={workflow.marketContext ?? null}
+        rerunStatus={workflow.rerunStatus ?? null}
+        onRefresh={onRefresh}
+      />
 
       <div className="grid gap-4 xl:grid-cols-[240px_minmax(0,1fr)_280px]">
         <EstimateWorkbenchSidebar

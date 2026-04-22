@@ -1,4 +1,8 @@
 import { Badge } from "@/components/ui/badge";
+import {
+  formatEstimateResolutionLevel,
+  getEstimateRerunLabel,
+} from "./estimate-market-override-panel";
 import type { EstimatingWorkflowState } from "./estimating-workflow-shell";
 
 export function EstimateWorkbenchSummaryStrip({
@@ -7,6 +11,14 @@ export function EstimateWorkbenchSummaryStrip({
   workflow: EstimatingWorkflowState;
 }) {
   const reviewReady = workflow.summary.pricing.readyToPromote > 0 || workflow.promotionReadiness.canPromote;
+  const rerunStatus = workflow.rerunStatus?.status ?? "idle";
+  const rerunLabel = getEstimateRerunLabel(workflow.rerunStatus ?? null);
+  const marketName = workflow.marketContext?.effectiveMarket?.name ?? "No market";
+  const marketDetail = workflow.marketContext?.isOverridden
+    ? "Override active"
+    : workflow.marketContext
+      ? `Auto-detected · ${formatEstimateResolutionLevel(workflow.marketContext.resolutionLevel)}`
+      : "No market context";
 
   return (
     <section className="rounded-lg border bg-background">
@@ -20,9 +32,12 @@ export function EstimateWorkbenchSummaryStrip({
             {workflow.summary.pricing.readyToPromote} review-ready pricing items.
           </p>
         </div>
-        <Badge variant={reviewReady ? "secondary" : "outline"}>
-          {reviewReady ? "Review-ready" : "Needs review"}
-        </Badge>
+        <div className="flex flex-wrap items-center gap-2">
+          <Badge variant={reviewReady ? "secondary" : "outline"}>
+            {reviewReady ? "Review-ready" : "Needs review"}
+          </Badge>
+          <Badge variant={rerunStatus === "failed" ? "destructive" : "outline"}>{rerunLabel}</Badge>
+        </div>
       </div>
 
       <div className="grid gap-px bg-border sm:grid-cols-2 lg:grid-cols-5">
@@ -30,7 +45,7 @@ export function EstimateWorkbenchSummaryStrip({
         <SummaryCell label="Extraction" value={`${workflow.summary.extractions.pending} pending`} detail={`${workflow.summary.extractions.approved} approved`} />
         <SummaryCell label="Catalog Match" value={`${workflow.summary.matches.suggested} suggested`} detail={`${workflow.summary.matches.selected} selected`} />
         <SummaryCell label="Draft Pricing" value={`${workflow.summary.pricing.pending} pending`} detail={`${workflow.summary.pricing.readyToPromote} ready to promote`} />
-        <SummaryCell label="Review Log" value={`${workflow.reviewEvents.length} events`} detail={`${workflow.promotionReadiness.generationRunIds.length} active run ids`} />
+        <SummaryCell label="Market" value={marketName} detail={`${marketDetail} · ${rerunLabel}`} />
       </div>
     </section>
   );

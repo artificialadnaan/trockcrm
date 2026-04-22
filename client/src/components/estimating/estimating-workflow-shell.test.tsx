@@ -108,6 +108,17 @@ function buildWorkflow(canPromote: boolean) {
       canPromote,
       generationRunIds: canPromote ? ["run-1"] : [],
     },
+    marketContext: {
+      effectiveMarket: { id: "market-1", name: "North Texas", type: "state" },
+      resolutionLevel: "state",
+      resolutionSource: { type: "state", key: "TX", marketId: "market-1" },
+      isOverridden: false,
+      override: null,
+    },
+    rerunStatus: {
+      status: "idle",
+      rerunRequestId: null,
+    },
     manualAddContext: {
       generationRunId: "run-1",
       extractionMatchId: "match-1",
@@ -132,6 +143,9 @@ describe("EstimatingWorkflowShell", () => {
     expect(html).toContain("manual add function");
     expect(html).toContain("promote function");
     expect(html).toContain("review function");
+    expect(html).toContain("Market Context");
+    expect(html).toContain("North Texas");
+    expect(html).toContain("Auto-detected");
   });
 
   it("shows promote-to-estimate gating when the workflow is not ready", () => {

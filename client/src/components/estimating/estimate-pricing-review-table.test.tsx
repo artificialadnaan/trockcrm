@@ -63,6 +63,19 @@ describe("EstimatePricingReviewTable", () => {
             rationale: "Good fallback if the recommended stock is unavailable.",
           },
         ],
+        assumptionsJson: {
+          marketRate: {
+            resolvedMarket: { name: "North Texas" },
+            resolutionLevel: "state",
+            resolutionSource: { type: "state", key: "TX" },
+            baselinePrice: 320,
+            adjustedPrice: 355.25,
+            componentAdjustments: [
+              { component: "labor", adjustmentPercent: 8, adjustedAmount: 120 },
+            ],
+          },
+          source: "document-backed",
+        },
       },
     ]);
 
@@ -74,6 +87,13 @@ describe("EstimatePricingReviewTable", () => {
     expect(html).toContain("catalog option");
     expect(html).toContain("Duplicate blocked");
     expect(html).toContain("Alternates");
+    expect(html).toContain("Market rate: North Texas");
+    expect(html).toContain("Baseline: $320.00");
+    expect(html).toContain("Adjusted: $355.25");
+    expect(html).toContain("Auto-detected");
+    expect(html).toContain("labor: +8%");
+    expect(html).toContain("Assumptions:");
+    expect(html).toContain("document-backed");
     expect(html).toContain("Accept recommended");
     expect(html).toContain("Accept manual row");
     expect(html).toContain("Override");
