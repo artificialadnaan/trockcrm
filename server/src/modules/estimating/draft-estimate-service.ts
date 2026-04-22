@@ -5,6 +5,7 @@ import {
   estimateExtractions,
   estimateExtractionMatches,
   estimatePricingRecommendations,
+  estimatePricingRecommendationOptions,
   estimateReviewEvents,
   estimateSections,
 } from "@trock-crm/shared/schema";
@@ -14,7 +15,6 @@ import {
   deriveEstimatePricingWorkbenchRows,
   loadPricingRecommendationOption,
 } from "./workbench-service.js";
-import { estimatePricingRecommendationOptions } from "../../../../shared/src/schema/tenant/estimate-pricing-recommendation-options.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 

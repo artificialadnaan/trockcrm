@@ -21,16 +21,16 @@ BEGIN
          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
          CONSTRAINT estimate_markets_slug_uidx UNIQUE (slug),
-         CONSTRAINT estimate_markets_type_check CHECK (type IN ('global', 'metro', 'state', 'region')),
+         CONSTRAINT estimate_markets_type_check CHECK (type IN (''global'', ''metro'', ''state'', ''region'')),
          CONSTRAINT estimate_markets_geography_check CHECK (
            (
-             type = 'global' AND state_code IS NULL AND region_id IS NULL
+             type = ''global'' AND state_code IS NULL AND region_id IS NULL
            ) OR (
-             type = 'metro' AND state_code IS NOT NULL AND region_id IS NULL
+             type = ''metro'' AND state_code IS NOT NULL AND region_id IS NULL
            ) OR (
-             type = 'state' AND state_code IS NOT NULL AND region_id IS NULL
+             type = ''state'' AND state_code IS NOT NULL AND region_id IS NULL
            ) OR (
-             type = 'region' AND state_code IS NULL AND region_id IS NOT NULL
+             type = ''region'' AND state_code IS NULL AND region_id IS NOT NULL
            )
          )
        )',
@@ -96,7 +96,7 @@ BEGIN
          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
          CONSTRAINT estimate_market_fallback_geographies_scope_uidx UNIQUE (resolution_type, resolution_key),
          CONSTRAINT estimate_market_fallback_geographies_resolution_type_check
-           CHECK (resolution_type IN ('global', 'metro', 'state', 'region'))
+           CHECK (resolution_type IN (''global'', ''metro'', ''state'', ''region''))
        )',
       schema_name,
       schema_name
@@ -130,9 +130,9 @@ BEGIN
          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
          CONSTRAINT estimate_market_adjustment_rules_scope_type_check
-           CHECK (scope_type IN ('general', 'division', 'trade')),
+           CHECK (scope_type IN (''general'', ''division'', ''trade'')),
          CONSTRAINT estimate_market_adjustment_rules_fallback_scope_type_check
-           CHECK (fallback_scope_type IS NULL OR fallback_scope_type IN ('general', 'division', 'trade')),
+           CHECK (fallback_scope_type IS NULL OR fallback_scope_type IN (''general'', ''division'', ''trade'')),
          CONSTRAINT estimate_market_adjustment_rules_fallback_pair_check
            CHECK (
              (fallback_scope_type IS NULL AND fallback_scope_key IS NULL) OR
@@ -215,6 +215,7 @@ BEGIN
          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
          CONSTRAINT estimate_deal_market_overrides_deal_uidx UNIQUE (deal_id)
        )',
+      schema_name,
       schema_name,
       schema_name
     );
@@ -322,6 +323,12 @@ BEGIN
 END $$;
 
 -- TENANT_SCHEMA_START
+DO $tenant$
+BEGIN
+  IF to_regclass('deals') IS NULL THEN
+    RETURN;
+  END IF;
+
 CREATE TABLE IF NOT EXISTS estimate_markets (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   name VARCHAR(255) NOT NULL,
@@ -539,4 +546,5 @@ DO UPDATE SET
   effective_to = EXCLUDED.effective_to,
   is_active = EXCLUDED.is_active,
   updated_at = NOW();
+END $tenant$;
 -- TENANT_SCHEMA_END
