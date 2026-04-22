@@ -59,6 +59,20 @@ const estimatingWorkbenchServiceMocks = vi.hoisted(() => ({
 
 vi.mock("../../../src/modules/estimating/workbench-service.js", () => estimatingWorkbenchServiceMocks);
 
+const dealMarketOverrideServiceMocks = vi.hoisted(() => ({
+  getDealEffectiveMarketContext: vi.fn(),
+  listActiveMarketChoices: vi.fn(),
+  setDealMarketOverride: vi.fn(),
+  clearDealMarketOverride: vi.fn(),
+}));
+
+vi.mock("../../../src/modules/estimating/deal-market-override-service.js", () => ({
+  getDealEffectiveMarketContext: dealMarketOverrideServiceMocks.getDealEffectiveMarketContext,
+  listActiveMarketChoices: dealMarketOverrideServiceMocks.listActiveMarketChoices,
+  setDealMarketOverride: dealMarketOverrideServiceMocks.setDealMarketOverride,
+  clearDealMarketOverride: dealMarketOverrideServiceMocks.clearDealMarketOverride,
+}));
+
 const manualRowServiceMocks = vi.hoisted(() => ({
   createManualEstimateRow: vi.fn(),
   updateManualEstimateRow: vi.fn(),
@@ -97,7 +111,7 @@ vi.mock("../../../src/modules/files/service.js", async () => {
 
 const { dealRoutes } = await import("../../../src/modules/deals/routes.js");
 
-function findRouteHandler(method: "get" | "post" | "patch", path: string) {
+function findRouteHandler(method: "get" | "post" | "patch" | "put" | "delete", path: string) {
   const layer = (dealRoutes as any).stack.find(
     (entry: any) => entry.route?.path === path && entry.route?.methods?.[method]
   );
@@ -108,18 +122,26 @@ function findRouteHandler(method: "get" | "post" | "patch", path: string) {
 }
 
 async function invokeRoute(
-  method: "get" | "post" | "patch",
+  method: "get" | "post" | "patch" | "put" | "delete",
   path: string,
-  options?: { params?: Record<string, string>; body?: any }
+  options?: {
+    params?: Record<string, string>;
+    body?: any;
+    query?: Record<string, any>;
+    tenantDb?: any;
+    appDb?: any;
+    user?: Record<string, any>;
+  }
 ) {
   const handler = findRouteHandler(method, path);
   const req = {
     params: options?.params ?? {},
     body: options?.body ?? {},
-    tenantDb: {},
-    appDb: {},
+    query: options?.query ?? {},
+    tenantDb: options?.tenantDb ?? {},
+    appDb: options?.appDb ?? {},
     officeSlug: "office-a",
-    user: {
+    user: options?.user ?? {
       id: "user-1",
       role: "director",
       officeId: "office-1",
@@ -147,10 +169,71 @@ async function invokeRoute(
   return { req, res };
 }
 
+function createTenantInsertRecorder() {
+  const insertCalls: Array<{ table: any; payload: any }> = [];
+  const tenantDb = {
+    insert: vi.fn((table: any) => ({
+      values: vi.fn((payload: any) => {
+        insertCalls.push({ table, payload });
+        return {
+          returning: vi.fn().mockResolvedValue([
+            {
+              id: payload.jobType ? "job-1" : "evt-1",
+            },
+          ]),
+        };
+      }),
+    })),
+  } as any;
+
+  return { tenantDb, insertCalls };
+}
+
 describe("estimating workflow routes", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     dealsServiceMocks.getDealById.mockResolvedValue({ id: "deal-1" });
+    dealMarketOverrideServiceMocks.getDealEffectiveMarketContext.mockResolvedValue({
+      effectiveMarket: {
+        id: "market-1",
+        name: "Default Market",
+        slug: "default",
+        type: "global",
+      },
+      resolutionLevel: "global_default",
+      resolutionSource: {
+        type: "global",
+        key: "default",
+        marketId: "market-1",
+      },
+      location: {
+        zip: null,
+        state: null,
+        regionId: null,
+      },
+      override: null,
+    });
+    dealMarketOverrideServiceMocks.listActiveMarketChoices.mockResolvedValue([]);
+    dealMarketOverrideServiceMocks.setDealMarketOverride.mockResolvedValue({
+      rerunRequestId: "rerun-default-set",
+      effectiveMarket: {
+        id: "market-override",
+        name: "Override Market",
+        slug: "override-market",
+        type: "state",
+      },
+      reviewEvent: { id: "evt-set", eventType: "market_override_set" },
+    });
+    dealMarketOverrideServiceMocks.clearDealMarketOverride.mockResolvedValue({
+      rerunRequestId: "rerun-default-clear",
+      effectiveMarket: {
+        id: "market-1",
+        name: "Default Market",
+        slug: "default",
+        type: "global",
+      },
+      reviewEvent: { id: "evt-clear", eventType: "market_override_cleared" },
+    });
     fileServiceMocks.confirmUpload.mockResolvedValue({
       id: "file-1",
       parentFileId: null,
@@ -553,6 +636,248 @@ describe("estimating workflow routes", () => {
       })
     );
     expect(res.body.recommendation.status).toBe("overridden");
+  });
+
+  it("returns the effective market context for a deal", async () => {
+    dealMarketOverrideServiceMocks.getDealEffectiveMarketContext.mockResolvedValueOnce({
+      effectiveMarket: {
+        id: "market-2",
+        name: "North Texas",
+        slug: "north-texas",
+        type: "state",
+      },
+      resolutionLevel: "state",
+      resolutionSource: { type: "state", key: "TX", marketId: "market-2" },
+      location: { zip: "76102", state: "TX", regionId: null },
+      override: {
+        id: "override-1",
+        marketId: "market-2",
+        marketName: "North Texas",
+        marketSlug: "north-texas",
+        overrideReason: "storm area",
+        overriddenByUserId: "user-1",
+        createdAt: new Date("2026-04-21T00:00:00Z"),
+        updatedAt: new Date("2026-04-21T00:00:00Z"),
+      },
+    });
+
+    const { res } = await invokeRoute("get", "/:id/estimating/market-context", {
+      params: { id: "deal-1" },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(dealMarketOverrideServiceMocks.getDealEffectiveMarketContext).toHaveBeenCalledWith(
+      expect.anything(),
+      "deal-1"
+    );
+    expect(res.body.marketContext.effectiveMarket.id).toBe("market-2");
+    expect(res.body.marketContext.override.marketId).toBe("market-2");
+  });
+
+  it("lists active market choices for override selection", async () => {
+    dealMarketOverrideServiceMocks.listActiveMarketChoices.mockResolvedValueOnce([
+      {
+        id: "market-1",
+        name: "Default Market",
+        slug: "default",
+        type: "global",
+        stateCode: null,
+        regionId: null,
+        isActive: true,
+        createdAt: new Date("2026-04-21T00:00:00Z"),
+        updatedAt: new Date("2026-04-21T00:00:00Z"),
+      },
+    ]);
+
+    const { res } = await invokeRoute("get", "/:id/estimating/markets", {
+      params: { id: "deal-1" },
+      query: { search: "Default" },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(dealMarketOverrideServiceMocks.listActiveMarketChoices).toHaveBeenCalledWith(
+      expect.anything(),
+      "Default"
+    );
+    expect(res.body.markets).toHaveLength(1);
+    expect(res.body.markets[0].slug).toBe("default");
+  });
+
+  it("sets a market override, writes an audit event, and enqueues an estimate generation rerun", async () => {
+    const { tenantDb, insertCalls } = createTenantInsertRecorder();
+    dealMarketOverrideServiceMocks.getDealEffectiveMarketContext
+      .mockResolvedValueOnce({
+        effectiveMarket: {
+          id: "market-1",
+          name: "Default Market",
+          slug: "default",
+          type: "global",
+        },
+        resolutionLevel: "global_default",
+        resolutionSource: {
+          type: "global",
+          key: "default",
+          marketId: "market-1",
+        },
+        location: {
+          zip: null,
+          state: null,
+          regionId: null,
+        },
+        override: null,
+      })
+      .mockResolvedValueOnce({
+        effectiveMarket: {
+          id: "market-override",
+          name: "North Texas",
+          slug: "north-texas",
+          type: "state",
+        },
+        resolutionLevel: "override",
+        resolutionSource: { type: "override", key: "deal-1", marketId: "market-override" },
+        location: { zip: null, state: null, regionId: null },
+        override: {
+          id: "override-1",
+          marketId: "market-override",
+          marketName: "North Texas",
+          marketSlug: "north-texas",
+          overrideReason: "storm area",
+          overriddenByUserId: "user-1",
+          createdAt: new Date("2026-04-21T00:00:00Z"),
+          updatedAt: new Date("2026-04-21T00:00:00Z"),
+        },
+      });
+    dealMarketOverrideServiceMocks.setDealMarketOverride.mockResolvedValueOnce({
+      override: {
+        id: "override-1",
+        marketId: "market-override",
+        marketName: "North Texas",
+        marketSlug: "north-texas",
+        overrideReason: "storm area",
+        overriddenByUserId: "user-1",
+        createdAt: new Date("2026-04-21T00:00:00Z"),
+        updatedAt: new Date("2026-04-21T00:00:00Z"),
+      },
+    });
+
+    const { res } = await invokeRoute("put", "/:id/estimating/market-override", {
+      params: { id: "deal-1" },
+      body: { marketId: "market-override", reason: "storm area" },
+      tenantDb,
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(dealMarketOverrideServiceMocks.setDealMarketOverride).toHaveBeenCalledWith(
+      expect.objectContaining({
+        dealId: "deal-1",
+        marketId: "market-override",
+        userId: "user-1",
+        reason: "storm area",
+      })
+    );
+    expect(res.body.rerunRequestId).toEqual(expect.any(String));
+    expect(res.body.effectiveMarket.id).toBe("market-override");
+    const reviewInsert = insertCalls.find((call) => !call.payload.jobType);
+    const jobInsert = insertCalls.find((call) => call.payload.jobType === "estimate_generation");
+    expect(reviewInsert?.payload).toMatchObject({
+      dealId: "deal-1",
+      subjectType: "deal_market_override",
+      subjectId: "deal-1",
+      eventType: "market_override_set",
+      userId: "user-1",
+      reason: "storm area",
+    });
+    expect(jobInsert?.payload).toMatchObject({
+      jobType: "estimate_generation",
+      officeId: "office-1",
+      payload: expect.objectContaining({
+        dealId: "deal-1",
+        officeId: "office-1",
+        reason: "storm area",
+        marketOverrideAction: "set",
+        rerunRequestId: expect.any(String),
+      }),
+    });
+  });
+
+  it("clears a market override, writes an audit event, and enqueues an estimate generation rerun", async () => {
+    const { tenantDb, insertCalls } = createTenantInsertRecorder();
+    dealMarketOverrideServiceMocks.getDealEffectiveMarketContext
+      .mockResolvedValueOnce({
+        effectiveMarket: {
+          id: "market-override",
+          name: "North Texas",
+          slug: "north-texas",
+          type: "state",
+        },
+        resolutionLevel: "override",
+        resolutionSource: { type: "override", key: "deal-1", marketId: "market-override" },
+        location: { zip: null, state: null, regionId: null },
+        override: {
+          id: "override-1",
+          marketId: "market-override",
+          marketName: "North Texas",
+          marketSlug: "north-texas",
+          overrideReason: "clear reason",
+          overriddenByUserId: "user-1",
+          createdAt: new Date("2026-04-21T00:00:00Z"),
+          updatedAt: new Date("2026-04-21T00:00:00Z"),
+        },
+      })
+      .mockResolvedValueOnce({
+        effectiveMarket: {
+          id: "market-1",
+          name: "Default Market",
+          slug: "default",
+          type: "global",
+        },
+        resolutionLevel: "global_default",
+        resolutionSource: { type: "global", key: "default", marketId: "market-1" },
+        location: { zip: null, state: null, regionId: null },
+        override: null,
+      });
+    dealMarketOverrideServiceMocks.clearDealMarketOverride.mockResolvedValueOnce({
+      marketId: "market-override",
+      overrideReason: "seasonal reset",
+      overriddenByUserId: "user-1",
+      updatedAt: new Date("2026-04-21T00:00:00Z"),
+    });
+
+    const { res } = await invokeRoute("delete", "/:id/estimating/market-override", {
+      params: { id: "deal-1" },
+      body: { reason: "seasonal reset" },
+      tenantDb,
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(dealMarketOverrideServiceMocks.clearDealMarketOverride).toHaveBeenCalledWith(
+      expect.objectContaining({
+        dealId: "deal-1",
+      })
+    );
+    expect(res.body.rerunRequestId).toEqual(expect.any(String));
+    expect(res.body.effectiveMarket.id).toBe("market-1");
+    const reviewInsert = insertCalls.find((call) => !call.payload.jobType);
+    const jobInsert = insertCalls.find((call) => call.payload.jobType === "estimate_generation");
+    expect(reviewInsert?.payload).toMatchObject({
+      dealId: "deal-1",
+      subjectType: "deal_market_override",
+      subjectId: "deal-1",
+      eventType: "market_override_cleared",
+      userId: "user-1",
+      reason: "seasonal reset",
+    });
+    expect(jobInsert?.payload).toMatchObject({
+      jobType: "estimate_generation",
+      officeId: "office-1",
+      payload: expect.objectContaining({
+        dealId: "deal-1",
+        officeId: "office-1",
+        reason: "seasonal reset",
+        marketOverrideAction: "clear",
+        rerunRequestId: expect.any(String),
+      }),
+    });
   });
 
   it.each([

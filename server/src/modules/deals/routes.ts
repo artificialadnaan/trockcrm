@@ -1,6 +1,7 @@
+import { randomUUID } from "crypto";
 import { Router } from "express";
 import { and, eq, desc, isNotNull, sql } from "drizzle-orm";
-import { dealApprovals, deals, jobQueue } from "@trock-crm/shared/schema";
+import { dealApprovals, deals, estimateReviewEvents, jobQueue } from "@trock-crm/shared/schema";
 import { requireRole } from "../../middleware/rbac.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { eventBus } from "../../events/bus.js";
@@ -104,6 +105,12 @@ import {
   rejectEstimateExtractionMatch,
   selectEstimateExtractionMatch,
 } from "../estimating/match-review-service.js";
+import {
+  clearDealMarketOverride,
+  getDealEffectiveMarketContext,
+  listActiveMarketChoices,
+  setDealMarketOverride,
+} from "../estimating/deal-market-override-service.js";
 
 const router = Router();
 
