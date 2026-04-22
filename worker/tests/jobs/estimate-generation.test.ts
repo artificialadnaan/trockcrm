@@ -173,8 +173,9 @@ describe("estimate generation job", () => {
     });
     applyMarketRateAdjustmentMock.mockImplementation(({ recommendation, marketRateAdjustment }: any) => ({
       ...recommendation,
-      recommendedUnitPrice: marketRateAdjustment.adjustedPrice / recommendation.quantity,
-      recommendedTotalPrice: marketRateAdjustment.adjustedPrice,
+      recommendedUnitPrice:
+        recommendation.quantity > 0 ? marketRateAdjustment.adjustedPrice / recommendation.quantity : 0,
+      recommendedTotalPrice: recommendation.quantity > 0 ? marketRateAdjustment.adjustedPrice : 0,
       marketAdjustmentPercent: 0,
       marketRateContext: {
         resolvedMarket: marketRateAdjustment.market,
@@ -948,11 +949,13 @@ describe("estimate generation job", () => {
         status: "pending",
         quantity: "2",
         unit: "ea",
-        normalizedLabel: "Roofing tearoff",
+        normalizedLabel: "Generic line item",
         divisionHint: null,
         metadataJson: {
           sourceParseRunId: "parse-run-1",
           activeArtifact: true,
+          pricingScopeType: "trade",
+          pricingScopeKey: "roofing",
         },
       },
     ]);
@@ -1133,8 +1136,9 @@ describe("estimate generation job", () => {
     });
     applyMarketRateAdjustmentMock.mockImplementation(({ recommendation, marketRateAdjustment }: any) => ({
       ...recommendation,
-      recommendedUnitPrice: marketRateAdjustment.adjustedPrice / recommendation.quantity,
-      recommendedTotalPrice: marketRateAdjustment.adjustedPrice,
+      recommendedUnitPrice:
+        recommendation.quantity > 0 ? marketRateAdjustment.adjustedPrice / recommendation.quantity : 0,
+      recommendedTotalPrice: recommendation.quantity > 0 ? marketRateAdjustment.adjustedPrice : 0,
       marketAdjustmentPercent: 32,
       marketRateContext: {
         resolvedMarket: marketRateAdjustment.market,

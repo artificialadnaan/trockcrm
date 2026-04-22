@@ -27,6 +27,7 @@ export interface PricingRecommendation {
     vendorQuotePrice: number | null;
     awardedOutcomeAdjustmentPercent: number;
     internalAdjustmentPercent: number;
+    invalidQuantity?: boolean;
   };
   confidence: number;
 }
@@ -244,12 +245,34 @@ export function applyMarketRateAdjustment(input: {
   recommendation: PricingRecommendation;
   marketRateAdjustment: MarketRateAdjustmentResult;
 }): MarketRateEnrichedPricingRecommendation {
-  const safeQuantity =
-    Number.isFinite(input.recommendation.quantity) && input.recommendation.quantity > 0
-      ? input.recommendation.quantity
-      : 1;
-  const adjustedUnit = roundCurrency(input.marketRateAdjustment.adjustedPrice / safeQuantity);
-  const adjustedTotal = roundCurrency(adjustedUnit * safeQuantity);
+  const hasValidQuantity =
+    Number.isFinite(input.recommendation.quantity) && input.recommendation.quantity > 0;
+
+  if (!hasValidQuantity) {
+    return {
+      ...input.recommendation,
+      quantity: 0,
+      recommendedUnitPrice: 0,
+      recommendedTotalPrice: 0,
+      marketAdjustmentPercent: 0,
+      assumptions: {
+        ...input.recommendation.assumptions,
+        invalidQuantity: true,
+      },
+      marketRateContext: {
+        resolvedMarket: input.marketRateAdjustment.market,
+        resolutionLevel: input.marketRateAdjustment.resolutionLevel,
+        resolutionSource: input.marketRateAdjustment.resolutionSource,
+      },
+      marketRateRationale: {
+        ...input.marketRateAdjustment.rationale,
+        invalidQuantity: true,
+      },
+    };
+  }
+
+  const adjustedUnit = roundCurrency(input.marketRateAdjustment.adjustedPrice / input.recommendation.quantity);
+  const adjustedTotal = roundCurrency(adjustedUnit * input.recommendation.quantity);
   const baselineTotal = input.recommendation.recommendedTotalPrice;
   const marketAdjustmentPercent =
     baselineTotal === 0
@@ -258,7 +281,7 @@ export function applyMarketRateAdjustment(input: {
 
   return {
     ...input.recommendation,
-    quantity: safeQuantity,
+    quantity: input.recommendation.quantity,
     recommendedUnitPrice: adjustedUnit,
     recommendedTotalPrice: adjustedTotal,
     marketAdjustmentPercent,

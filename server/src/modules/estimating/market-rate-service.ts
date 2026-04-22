@@ -52,6 +52,7 @@ export interface MarketRateAdjustmentResult {
     baselinePrice: number;
     selectedRuleId: string | null;
     componentAdjustments: MarketComponentAdjustment[];
+    invalidQuantity?: boolean;
   };
 }
 

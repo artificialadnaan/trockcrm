@@ -1,3 +1,5 @@
+import { resolvePricingScopeFromExtraction } from "./pricing-service.js";
+
 export interface ExtractEstimateScopeRowsInput {
   documentId: string;
   dealId: string;
@@ -69,6 +71,12 @@ export function extractEstimateScopeRows(input: ExtractEstimateScopeRowsInput) {
           sourceBlockIndex: line.sourceBlockIndex,
           extractionProvider: page.provider ?? "deterministic_parser",
           extractionMethod: page.method ?? "structured_normalizer",
+          ...resolvePricingScopeFromExtraction({
+            divisionHint: page.metadata?.divisionHint ?? null,
+            metadataJson: page.metadata ?? {},
+            normalizedIntent: line.rawLabel,
+            rawLabel: line.rawLabel,
+          }),
         },
       }))
   );
