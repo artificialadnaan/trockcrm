@@ -16,7 +16,13 @@ export { userGraphTokens, graphTokenStatusEnum } from "./public/user-graph-token
 export { jobQueue, jobStatusEnum } from "./public/job-queue.js";
 
 // Tenant schema tables (used for Drizzle type resolution when querying via tenantDb)
-export { deals, workflowRouteEnum, proposalStatusEnum, estimatingSubstageEnum } from "./tenant/deals.js";
+export {
+  deals,
+  workflowRouteEnum,
+  dealPipelineTypeSnapshotEnum,
+  proposalStatusEnum,
+  estimatingSubstageEnum,
+} from "./tenant/deals.js";
 export { dealScopingIntake, dealScopingIntakeStatusEnum } from "./tenant/deal-scoping-intake.js";
 export { dealStageHistory } from "./tenant/deal-stage-history.js";
 export { changeOrders, changeOrderStatusEnum } from "./tenant/change-orders.js";
@@ -25,7 +31,12 @@ export { companies } from "./tenant/companies.js";
 export { properties } from "./tenant/properties.js";
 export { contacts, contactCategoryEnum } from "./tenant/contacts.js";
 export { contactDealAssociations } from "./tenant/contact-deal-associations.js";
-export { leads, leadStatusEnum } from "./tenant/leads.js";
+export {
+  leads,
+  leadStatusEnum,
+  leadPipelineTypeEnum,
+  leadDisqualificationReasonEnum,
+} from "./tenant/leads.js";
 export { leadStageHistory } from "./tenant/lead-stage-history.js";
 export { duplicateQueue, duplicateMatchTypeEnum, duplicateStatusEnum } from "./tenant/duplicate-queue.js";
 export { emails, emailDirectionEnum } from "./tenant/emails.js";

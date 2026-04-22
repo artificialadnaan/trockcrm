@@ -13,6 +13,12 @@ import {
   userOfficeAccess,
   users,
 } from "../../../../shared/src/schema/index.js";
+import {
+  BID_BOARD_MIRRORED_STAGE_SLUGS,
+  CRM_OWNED_LEAD_STAGE_SLUGS,
+  SALES_WORKFLOW_DISQUALIFICATION_REASONS,
+  SALES_WORKFLOW_PIPELINE_TYPES,
+} from "../../../../shared/src/types/sales-workflow.js";
 import { LEAD_STATUSES } from "../../helpers/worktree-shared-contracts.js";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AppError } from "../../../src/middleware/error-handler.js";
@@ -57,6 +63,86 @@ function expectSqlToMatch(pattern: RegExp): void {
 function expectPipelineFamilySqlToMatch(pattern: RegExp): void {
   expect(pipelineFamilyMigrationSql).toMatch(pattern);
 }
+
+describe("Sales workflow shared contract", () => {
+  it("publishes the canonical CRM-owned lead stages and pipeline split", () => {
+    expect(CRM_OWNED_LEAD_STAGE_SLUGS).toEqual([
+      "new_lead",
+      "qualified_lead",
+      "sales_validation_stage",
+      "opportunity",
+    ]);
+    expect(SALES_WORKFLOW_PIPELINE_TYPES).toEqual(["service", "normal"]);
+  });
+
+  it("publishes the terminal CRM disqualification taxonomy and mirrored bid board stages", () => {
+    expect(SALES_WORKFLOW_DISQUALIFICATION_REASONS).toEqual([
+      "no_budget",
+      "not_a_fit",
+      "no_authority",
+      "no_timeline",
+      "duplicate",
+      "unresponsive",
+      "customer_declined",
+      "other",
+    ]);
+    expect(BID_BOARD_MIRRORED_STAGE_SLUGS).toEqual([
+      "estimating",
+      "bid_sent",
+      "in_production",
+      "close_out",
+      "closed_won",
+      "closed_lost",
+    ]);
+  });
+
+  it("adds the CRM-owned pre-estimating fields to leads", () => {
+    const columns = getTableColumns(leads);
+
+    expect(columns.pipelineType.name).toBe("pipeline_type");
+    expect(columns.pipelineType.hasDefault).toBe(true);
+    expect(columns.pipelineType.default).toBe("normal");
+    expect(columns.existingCustomerResolution.name).toBe("existing_customer_resolution");
+    expect(columns.existingCustomerResolvedAt.name).toBe("existing_customer_resolved_at");
+    expect(columns.existingCustomerResolvedBy.name).toBe("existing_customer_resolved_by");
+    expect(columns.projectTypeId.name).toBe("project_type_id");
+    expect(columns.qualificationPayload.name).toBe("qualification_payload");
+    expect(columns.projectTypeQuestionPayload.name).toBe("project_type_question_payload");
+    expect(columns.preQualValue.name).toBe("pre_qual_value");
+    expect(columns.submissionStartedAt.name).toBe("submission_started_at");
+    expect(columns.submissionCompletedAt.name).toBe("submission_completed_at");
+    expect(columns.submissionDurationSeconds.name).toBe("submission_duration_seconds");
+    expect(columns.executiveDecision.name).toBe("executive_decision");
+    expect(columns.executiveDecisionAt.name).toBe("executive_decision_at");
+    expect(columns.executiveDecisionBy.name).toBe("executive_decision_by");
+    expect(columns.disqualificationReason.name).toBe("disqualification_reason");
+    expect(columns.disqualificationReasonNotes.name).toBe("disqualification_reason_notes");
+    expect(columns.disqualifiedAt.name).toBe("disqualified_at");
+    expect(columns.disqualifiedBy.name).toBe("disqualified_by");
+  });
+
+  it("adds read-only bid board mirror metadata to deals", () => {
+    const columns = getTableColumns(deals);
+
+    expect(columns.isBidBoardOwned.name).toBe("is_bid_board_owned");
+    expect(columns.isBidBoardOwned.hasDefault).toBe(true);
+    expect(columns.isBidBoardOwned.default).toBe(false);
+    expect(columns.bidBoardStageSlug.name).toBe("bid_board_stage_slug");
+    expect(columns.bidBoardStageStatus.name).toBe("bid_board_stage_status");
+    expect(columns.bidBoardStageEnteredAt.name).toBe("bid_board_stage_entered_at");
+    expect(columns.bidBoardStageExitedAt.name).toBe("bid_board_stage_exited_at");
+    expect(columns.bidBoardStageDuration.name).toBe("bid_board_stage_duration");
+    expect(columns.bidBoardMirrorSourceEnteredAt.name).toBe("bid_board_mirror_source_entered_at");
+    expect(columns.bidBoardMirrorSourceExitedAt.name).toBe("bid_board_mirror_source_exited_at");
+    expect(columns.pipelineTypeSnapshot.name).toBe("pipeline_type_snapshot");
+    expect(columns.pipelineTypeSnapshot.hasDefault).toBe(true);
+    expect(columns.pipelineTypeSnapshot.default).toBe("normal");
+    expect(columns.regionClassification.name).toBe("region_classification");
+    expect(columns.isReadOnlyMirror.name).toBe("is_read_only_mirror");
+    expect(columns.isReadOnlySyncDirty.name).toBe("is_read_only_sync_dirty");
+    expect(columns.readOnlySyncedAt.name).toBe("read_only_synced_at");
+  });
+});
 
 type RouteServiceMocks = {
   createDeal: ReturnType<typeof vi.fn>;
@@ -676,7 +762,11 @@ describe("Lead Conversion Shared Contract", () => {
     expect(config.foreignKeys.map((fk) => fk.getName()).sort()).toEqual([
       "leads_assigned_rep_id_users_id_fk",
       "leads_company_id_companies_id_fk",
+      "leads_disqualified_by_users_id_fk",
+      "leads_executive_decision_by_users_id_fk",
+      "leads_existing_customer_resolved_by_users_id_fk",
       "leads_primary_contact_id_contacts_id_fk",
+      "leads_project_type_id_project_type_config_id_fk",
       "leads_property_id_properties_id_fk",
     ]);
   });
