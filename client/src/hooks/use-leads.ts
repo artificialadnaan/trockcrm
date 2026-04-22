@@ -13,6 +13,11 @@ export interface LeadRecord {
   source: string | null;
   description: string | null;
   projectTypeId: string | null;
+  projectType: {
+    id: string;
+    name: string;
+    slug: string;
+  } | null;
   qualificationPayload: Record<string, string | boolean | number | null>;
   projectTypeQuestionPayload: {
     projectTypeId: string | null;

@@ -131,6 +131,7 @@ export function LeadDetailPage() {
               source: lead.source,
               description: lead.description,
               projectTypeId: lead.projectTypeId,
+              projectType: lead.projectType,
               qualificationPayload: lead.qualificationPayload,
               projectTypeQuestionPayload: lead.projectTypeQuestionPayload,
               stageEnteredAt: lead.stageEnteredAt,

@@ -45,6 +45,11 @@ export interface LeadFormLead {
   source: string | null;
   description: string | null;
   projectTypeId?: string | null;
+  projectType?: {
+    id: string;
+    name: string;
+    slug: string;
+  } | null;
   qualificationPayload?: Record<string, LeadAnswerValue>;
   projectTypeQuestionPayload?: {
     projectTypeId: string | null;
@@ -141,7 +146,7 @@ function SummaryLeadForm({ lead, converted = false }: LeadSummaryFormProps) {
   const propertyLabel = [lead.propertyAddress, [lead.propertyCity, lead.propertyState].filter(Boolean).join(", "), lead.propertyZip]
     .filter(Boolean)
     .join(" ") || lead.propertyName || "--";
-  const projectType = projectTypes.find((entry) => entry.id === lead.projectTypeId) ?? null;
+  const projectType = lead.projectType ?? projectTypes.find((entry) => entry.id === lead.projectTypeId) ?? null;
   const questionSet = getValidationQuestionSetForProjectType(projectType?.slug ?? null);
 
   return (
@@ -288,13 +293,14 @@ function EditableLeadForm({ mode, lead }: { mode: LeadEditableMode; lead?: LeadF
   }, [companyId, contacts, isCreate, properties]);
 
   const selectedProjectType = projectTypes.find((entry) => entry.id === formData.projectTypeId) ?? null;
+  const existingLeadProjectTypeSlug = lead?.projectType?.slug ?? null;
   const questionSet = useMemo(
-    () => getValidationQuestionSetForProjectType(selectedProjectType?.slug ?? null),
-    [selectedProjectType?.slug]
+    () => getValidationQuestionSetForProjectType(selectedProjectType?.slug ?? existingLeadProjectTypeSlug),
+    [existingLeadProjectTypeSlug, selectedProjectType?.slug]
   );
   const gateQuestionSet = useMemo(
-    () => getLeadValidationQuestionSetForProjectType(selectedProjectType?.slug ?? lead?.projectTypeId ?? null),
-    [lead?.projectTypeId, selectedProjectType?.slug]
+    () => getLeadValidationQuestionSetForProjectType(selectedProjectType?.slug ?? existingLeadProjectTypeSlug),
+    [existingLeadProjectTypeSlug, selectedProjectType?.slug]
   );
   const gateQuestionLabels = useMemo(
     () => new Map(gateQuestionSet.questions.map((question) => [question.id, question.label])),

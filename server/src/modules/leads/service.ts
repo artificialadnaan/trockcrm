@@ -5,6 +5,7 @@ import {
   contacts,
   deals,
   leads,
+  projectTypeConfig,
   properties,
   userOfficeAccess,
   users,
@@ -137,9 +138,10 @@ async function decorateLeads(
 
   const companyIds = [...new Set(rows.map((lead) => lead.companyId).filter(Boolean))];
   const propertyIds = [...new Set(rows.map((lead) => lead.propertyId).filter(Boolean))];
+  const projectTypeIds = [...new Set(rows.map((lead) => lead.projectTypeId).filter(Boolean))];
   const leadIds = rows.map((lead) => lead.id);
 
-  const [companyRows, propertyRows, convertedDealRows] = await Promise.all([
+  const [companyRows, propertyRows, projectTypeRows, convertedDealRows] = await Promise.all([
     companyIds.length === 0
       ? []
       : tenantDb
@@ -159,6 +161,16 @@ async function decorateLeads(
           })
           .from(properties)
           .where(inArray(properties.id, propertyIds)),
+    projectTypeIds.length === 0
+      ? []
+      : tenantDb
+          .select({
+            id: projectTypeConfig.id,
+            name: projectTypeConfig.name,
+            slug: projectTypeConfig.slug,
+          })
+          .from(projectTypeConfig)
+          .where(inArray(projectTypeConfig.id, projectTypeIds as string[])),
     tenantDb
       .select({
         sourceLeadId: deals.sourceLeadId,
@@ -171,6 +183,7 @@ async function decorateLeads(
 
   const companyMap = new Map(companyRows.map((company) => [company.id, company.name]));
   const propertyMap = new Map(propertyRows.map((property) => [property.id, property]));
+  const projectTypeMap = new Map(projectTypeRows.map((projectType) => [projectType.id, projectType]));
   const convertedDealMap = new Map(
     convertedDealRows
       .filter((deal) => deal.sourceLeadId)
@@ -181,6 +194,7 @@ async function decorateLeads(
     ...lead,
     companyName: companyMap.get(lead.companyId) ?? null,
     property: propertyMap.get(lead.propertyId) ?? null,
+    projectType: lead.projectTypeId ? projectTypeMap.get(lead.projectTypeId) ?? null : null,
     convertedDealId: convertedDealMap.get(lead.id)?.id ?? null,
     convertedDealNumber: convertedDealMap.get(lead.id)?.dealNumber ?? null,
   }));
