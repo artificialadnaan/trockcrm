@@ -177,6 +177,7 @@ export function evaluateLeadStageGate(input: {
   leadScopingReadiness?: LeadScopingReadiness | null;
   currentStage: LeadStageRecord;
   targetStage: LeadStageRecord;
+  userRole?: string;
 }): LeadStageGateResult {
   const requiredFields = LEAD_STAGE_REQUIREMENTS[input.targetStage.slug] ?? [];
   const missingFields = requiredFields.filter(
@@ -190,24 +191,35 @@ export function evaluateLeadStageGate(input: {
         )
       )
   );
+  const blockedByApprovalRole =
+    input.targetStage.slug === "qualified_for_opportunity" &&
+    input.userRole !== "director" &&
+    input.userRole !== "admin";
+  const effectiveMissingFields = blockedByApprovalRole
+    ? [...missingFields, "approval.directorAdmin"]
+    : missingFields;
 
   return {
-    allowed: missingFields.length === 0,
+    allowed: effectiveMissingFields.length === 0,
     currentStage: input.currentStage,
     targetStage: input.targetStage,
     missingRequirements: {
-      fields: missingFields,
+      fields: effectiveMissingFields,
       effectiveChecklist: {
-        fields: requiredFields.map((field) => ({
+        fields: [...requiredFields, ...(blockedByApprovalRole ? ["approval.directorAdmin"] : [])].map((field) => ({
           key: field,
           label: getFieldLabel(field),
-          satisfied: !missingFields.includes(field),
+          satisfied: !effectiveMissingFields.includes(field),
           source: "stage" as const,
         })),
       },
     },
     blockReason:
-      missingFields.length > 0 ? "Lead stage change not allowed until required intake is complete" : undefined,
+      blockedByApprovalRole
+        ? "Lead stage change requires director/admin approval"
+        : effectiveMissingFields.length > 0
+          ? "Lead stage change not allowed until required intake is complete"
+          : undefined,
   };
 }
 
@@ -247,6 +259,7 @@ export async function validateLeadStageGate(
     leadScopingReadiness: leadScopingSnapshot.readiness,
     currentStage,
     targetStage,
+    userRole,
   });
 }
 

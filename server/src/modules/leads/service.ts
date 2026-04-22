@@ -17,6 +17,8 @@ import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { getAllStages, getStageById } from "../pipeline/service.js";
 import { createAssignmentTaskIfNeeded } from "../assignment-tasks/service.js";
+import { createNotification } from "../notifications/service.js";
+import { createTask } from "../tasks/service.js";
 import {
   type LeadQualificationPatch,
   upsertLeadQualification,
@@ -128,6 +130,8 @@ interface LeadServiceDependencies {
     isTerminal: boolean;
   } | null>;
   now: () => Date;
+  createApprovalNotification: typeof createNotification;
+  createApprovalTask: typeof createTask;
 }
 
 type WorkspaceScope = "mine" | "team" | "all";
@@ -173,6 +177,8 @@ const defaultDependencies: LeadServiceDependencies = {
   getAllStages,
   getStageById,
   now: () => new Date(),
+  createApprovalNotification: createNotification,
+  createApprovalTask: createTask,
 };
 
 const QUALIFIED_LEAD_REQUIREMENTS = [
@@ -194,6 +200,10 @@ const REQUIREMENT_METADATA: Record<string, { label: string; resolution: "inline"
 
 function isBlank(value: unknown) {
   return value === null || value === undefined || (typeof value === "string" && value.trim().length === 0);
+}
+
+function isDirectorOrAdmin(role: string | null | undefined) {
+  return role === "director" || role === "admin";
 }
 
 async function listLeadStages() {
@@ -490,6 +500,68 @@ async function validateAssignee(tenantDb: TenantDb, assigneeId: string, officeId
   }
 }
 
+async function listLeadApprovalRecipients(tenantDb: TenantDb, officeId: string) {
+  const [userRows, accessRows] = await Promise.all([
+    tenantDb.select().from(users),
+    tenantDb.select().from(userOfficeAccess),
+  ]);
+
+  const officeAccessIds = new Set(
+    accessRows
+      .filter((access) => access.officeId === officeId && isDirectorOrAdmin(access.roleOverride))
+      .map((access) => access.userId)
+  );
+
+  return userRows.filter((user) => {
+    if (user.isActive !== true || !isDirectorOrAdmin((user as { role?: string | null }).role ?? null)) {
+      return false;
+    }
+
+    return user.officeId === officeId || officeAccessIds.has(user.id);
+  });
+}
+
+async function createLeadGoNoGoApprovalRequests(
+  tenantDb: TenantDb,
+  input: {
+    leadId: string;
+    leadName: string;
+    officeId?: string;
+    actorUserId: string;
+  },
+  deps: LeadServiceDependencies
+) {
+  if (!input.officeId) {
+    return;
+  }
+
+  const recipients = (await listLeadApprovalRecipients(tenantDb, input.officeId)).filter(
+    (recipient) => recipient.id !== input.actorUserId
+  );
+
+  await Promise.all(
+    recipients.map(async (recipient) => {
+      await deps.createApprovalTask(tenantDb, {
+        title: `Approve lead go/no-go: ${input.leadName}`,
+        description: "Lead reached Go/No-Go and needs director/admin approval before opportunity conversion.",
+        type: "approval_request",
+        priority: "high",
+        assignedTo: recipient.id,
+        createdBy: input.actorUserId,
+      });
+
+      await deps.createApprovalNotification(tenantDb, {
+        userId: recipient.id,
+        type: "approval_needed",
+        title: "Lead Go/No-Go Approval Needed",
+        body: `${input.leadName} reached Lead Go/No-Go and is waiting for director/admin approval.`,
+        link: `/leads/${input.leadId}`,
+        recipientEmail: recipient.email ?? undefined,
+      });
+    })
+  );
+}
+
 async function validateLeadHierarchy(
   tenantDb: TenantDb,
   input: Pick<CreateLeadInput, "companyId" | "propertyId" | "primaryContactId">
@@ -757,10 +829,16 @@ export function createLeadService(
       hasQualificationPatch = true;
     }
     if (input.goDecision !== undefined) {
+      if (!isDirectorOrAdmin(userRole)) {
+        throw new AppError(403, "Only directors and admins can approve lead go/no-go decisions");
+      }
       qualificationPatch.goDecision = input.goDecision;
       hasQualificationPatch = true;
     }
     if (input.goDecisionNotes !== undefined) {
+      if (!isDirectorOrAdmin(userRole)) {
+        throw new AppError(403, "Only directors and admins can approve lead go/no-go decisions");
+      }
       qualificationPatch.goDecisionNotes = input.goDecisionNotes;
       hasQualificationPatch = true;
     }
@@ -819,6 +897,7 @@ export function createLeadService(
       updates.forecastUpdatedBy = userId;
     }
 
+    const previousStageId = existing.stageId;
     const [lead] = await tenantDb.update(leads).set(updates).where(eq(leads.id, leadId)).returning();
 
     if (
@@ -834,6 +913,22 @@ export function createLeadService(
         actorUserId: userId,
         officeId: input.officeId ?? null,
       });
+    }
+
+    if (input.stageId !== undefined && input.stageId !== previousStageId) {
+      const targetStage = await deps.getStageById(input.stageId, "lead");
+      if (targetStage?.slug === "lead_go_no_go") {
+        await createLeadGoNoGoApprovalRequests(
+          tenantDb,
+          {
+            leadId: lead.id,
+            leadName: lead.name,
+            officeId: input.officeId,
+            actorUserId: userId,
+          },
+          deps
+        );
+      }
     }
 
     return lead;
@@ -870,6 +965,22 @@ export function createLeadService(
 
     if (targetStageIndex !== currentStageIndex + 1) {
       throw new AppError(400, "Lead stages must advance one step at a time");
+    }
+
+    if (targetStage.slug === "qualified_for_opportunity" && !isDirectorOrAdmin(input.userRole)) {
+      return {
+        ok: false,
+        reason: "missing_requirements",
+        targetStageId: input.targetStageId,
+        resolution: "detail",
+        missing: [
+          {
+            key: "approval.directorAdmin",
+            label: "Director/Admin Approval Required",
+            resolution: "detail",
+          },
+        ],
+      };
     }
 
     const effectiveLead = {
@@ -992,6 +1103,19 @@ export function createLeadService(
     const lead = await getLeadById(tenantDb, input.leadId, input.userRole, input.userId);
     if (!lead) {
       throw new AppError(404, "Lead not found after transition");
+    }
+
+    if (targetStage.slug === "lead_go_no_go") {
+      await createLeadGoNoGoApprovalRequests(
+        tenantDb,
+        {
+          leadId: String(lead.id),
+          leadName: String(lead.name),
+          officeId: input.officeId,
+          actorUserId: input.userId,
+        },
+        deps
+      );
     }
 
     return { ok: true, lead };

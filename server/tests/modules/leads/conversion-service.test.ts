@@ -45,6 +45,22 @@ vi.mock("../../../src/modules/assignment-tasks/service.js", () => ({
   createAssignmentTaskIfNeeded: vi.fn(async () => undefined),
 }));
 
+const notificationMocks = vi.hoisted(() => ({
+  createNotification: vi.fn(async () => undefined),
+}));
+
+const taskMocks = vi.hoisted(() => ({
+  createTask: vi.fn(async () => undefined),
+}));
+
+vi.mock("../../../src/modules/notifications/service.js", () => ({
+  createNotification: notificationMocks.createNotification,
+}));
+
+vi.mock("../../../src/modules/tasks/service.js", () => ({
+  createTask: taskMocks.createTask,
+}));
+
 vi.mock("@trock-crm/shared/schema", async () => import("../../../../shared/src/schema/index.js"));
 vi.mock("../../../src/db.js", () => ({
   db: {
@@ -282,6 +298,8 @@ interface FakeUserRow {
   id: string;
   officeId: string;
   isActive: boolean;
+  role?: "admin" | "director" | "rep";
+  email?: string | null;
 }
 
 interface FakeLeadRow {
@@ -731,6 +749,8 @@ beforeEach(() => {
   pipelineMocks.getStageById.mockReset();
   pipelineMocks.getStageBySlug.mockReset();
   leadStageGateMocks.validateLeadStageGate.mockReset();
+  notificationMocks.createNotification.mockReset();
+  taskMocks.createTask.mockReset();
   leadStageGateMocks.validateLeadStageGate.mockResolvedValue({ allowed: true });
   pipelineMocks.getAllStages.mockImplementation(async (workflowFamily?: string) => {
     if (workflowFamily === "lead") {
@@ -1270,6 +1290,125 @@ describe("Lead Service", () => {
         inlinePatch: { directorReviewDecision: "go" },
       })
     ).rejects.toMatchObject({ statusCode: 403, message: "Only directors can record go/no-go decisions" });
+  });
+
+  it("prevents reps from recording the final go/no-go approval fields", async () => {
+    const tenantDb = createFakeTenantDb({
+      leads: [
+        {
+          id: "lead-1",
+          companyId: "company-1",
+          propertyId: "property-1",
+          primaryContactId: "contact-1",
+          name: "Palm Villas repaint",
+          stageId: directorReviewStage.id,
+          assignedRepId: "rep-1",
+          status: "open",
+          source: "Referral",
+          description: null,
+          stageEnteredAt: new Date("2026-04-14T15:00:00.000Z"),
+          convertedAt: null,
+          isActive: true,
+          createdAt: new Date("2026-04-12T15:00:00.000Z"),
+          updatedAt: new Date("2026-04-14T15:00:00.000Z"),
+        },
+      ],
+    });
+    const service = createLeadService({
+      getStageById: pipelineMocks.getStageById,
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+    });
+
+    await expect(
+      service.updateLead(
+        tenantDb as never,
+        "lead-1",
+        { goDecision: "go", goDecisionNotes: "Rep should not be able to approve" },
+        "rep",
+        "rep-1"
+      )
+    ).rejects.toMatchObject<AppError>({ statusCode: 403 });
+  });
+
+  it("creates approval requests for office directors/admins when a lead enters go/no-go", async () => {
+    const preQualStage = {
+      id: "stage-pre-qual",
+      name: "Pre-Qual Value Assigned",
+      slug: "pre_qual_value_assigned",
+      displayOrder: 3,
+      workflowFamily: "lead" as const,
+      isActivePipeline: true,
+      isTerminal: false,
+    };
+    const goNoGoStage = {
+      id: "stage-go-no-go",
+      name: "Lead Go/No-Go",
+      slug: "lead_go_no_go",
+      displayOrder: 4,
+      workflowFamily: "lead" as const,
+      isActivePipeline: true,
+      isTerminal: false,
+    };
+    const qualifiedStage = {
+      id: "stage-qualified",
+      name: "Qualified for Opportunity",
+      slug: "qualified_for_opportunity",
+      displayOrder: 5,
+      workflowFamily: "lead" as const,
+      isActivePipeline: true,
+      isTerminal: false,
+    };
+    const tenantDb = createFakeTenantDb({
+      users: [
+        { id: "rep-1", officeId: "office-1", isActive: true, role: "rep", email: "rep@trock.dev" },
+        { id: "director-1", officeId: "office-1", isActive: true, role: "director", email: "director@trock.dev" },
+        { id: "admin-1", officeId: "office-1", isActive: true, role: "admin", email: "admin@trock.dev" },
+      ],
+      leads: [
+        {
+          id: "lead-1",
+          companyId: "company-1",
+          propertyId: "property-1",
+          primaryContactId: "contact-1",
+          name: "Palm Villas repaint",
+          stageId: preQualStage.id,
+          assignedRepId: "rep-1",
+          status: "open",
+          source: "Referral",
+          description: null,
+          stageEnteredAt: new Date("2026-04-14T15:00:00.000Z"),
+          convertedAt: null,
+          isActive: true,
+          createdAt: new Date("2026-04-12T15:00:00.000Z"),
+          updatedAt: new Date("2026-04-14T15:00:00.000Z"),
+        },
+      ],
+    });
+    leadStageGateMocks.validateLeadStageGate.mockResolvedValue({
+      allowed: true,
+      currentStage: preQualStage,
+      targetStage: goNoGoStage,
+      missingRequirements: { fields: [], effectiveChecklist: { fields: [] } },
+    });
+
+    const service = createLeadService({
+      getAllStages: async () => [preQualStage, goNoGoStage, qualifiedStage],
+      getStageById: async (id: string) =>
+        [preQualStage, goNoGoStage, qualifiedStage].find((stage) => stage.id === id) ?? null,
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+    });
+
+    const result = await service.transitionLeadStage(tenantDb as never, {
+      leadId: "lead-1",
+      targetStageId: goNoGoStage.id,
+      userId: "rep-1",
+      userRole: "rep",
+      officeId: "office-1",
+    });
+
+    expect(result.ok).toBe(true);
+    expect(taskMocks.createTask).toHaveBeenCalledTimes(2);
+    expect(notificationMocks.createNotification).toHaveBeenCalledTimes(2);
   });
 
   it("allows direct lead stage changes through updateLead when the gate passes", async () => {
