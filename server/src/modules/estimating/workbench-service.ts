@@ -5,12 +5,12 @@ import {
   estimateExtractions,
   estimateExtractionMatches,
   estimateGenerationRuns,
+  estimatePricingRecommendationOptions,
   estimatePricingRecommendations,
   estimateReviewEvents,
   estimateSourceDocuments,
   jobQueue,
 } from "@trock-crm/shared/schema";
-import { estimatePricingRecommendationOptions } from "../../../../shared/src/schema/tenant/estimate-pricing-recommendation-options.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { getDealEffectiveMarketContext } from "./deal-market-override-service.js";
 
