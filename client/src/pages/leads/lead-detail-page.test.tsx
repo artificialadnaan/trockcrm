@@ -109,6 +109,7 @@ let activities: Array<{
   body: string;
   occurredAt: string;
 }> = [];
+let currentUserRole: "director" | "admin" | "rep" = "director";
 
 vi.mock("@/hooks/use-leads", () => ({
   useLeadDetail: vi.fn(() => ({
@@ -159,9 +160,9 @@ vi.mock("@/hooks/use-pipeline-config", () => ({
 vi.mock("@/lib/auth", () => ({
   useAuth: vi.fn(() => ({
     user: {
-      id: "director-1",
-      displayName: "Dana Director",
-      role: "director",
+      id: currentUserRole === "rep" ? "rep-1" : "director-1",
+      displayName: currentUserRole === "rep" ? "Riley Rep" : "Dana Director",
+      role: currentUserRole,
       officeId: "office-1",
     },
   })),
@@ -216,6 +217,7 @@ function renderLeadDetailWithScopingFocus() {
 
 describe("LeadDetailPage", () => {
   it("renders the lead detail surface with assignment and context", () => {
+    currentUserRole = "director";
     lead = {
       ...lead,
       stageId: "stage-lead",
@@ -240,6 +242,7 @@ describe("LeadDetailPage", () => {
   });
 
   it("shows the opportunity conversion CTA once the lead reaches the qualified stage", () => {
+    currentUserRole = "director";
     lead = {
       ...lead,
       stageId: "stage-qualified",
@@ -255,6 +258,7 @@ describe("LeadDetailPage", () => {
   });
 
   it("shows a qualification-intake helper when opened from a blocked stage move", () => {
+    currentUserRole = "director";
     lead = {
       ...lead,
       stageId: "stage-lead",
@@ -271,6 +275,7 @@ describe("LeadDetailPage", () => {
   });
 
   it("renders property city and state inputs in the qualification intake", () => {
+    currentUserRole = "director";
     lead = {
       ...lead,
       stageId: "stage-lead",
@@ -287,6 +292,7 @@ describe("LeadDetailPage", () => {
   });
 
   it("shows a lead-scoping helper when opened from a blocked scoping gate", () => {
+    currentUserRole = "director";
     lead = {
       ...lead,
       stageId: "stage-lead",
@@ -302,7 +308,27 @@ describe("LeadDetailPage", () => {
     expect(html).toContain("Complete the lead scoping checklist below before moving this lead into Lead Go/No-Go.");
   });
 
+  it("shows the recommendation and approval handoff sections to reps on active leads", () => {
+    currentUserRole = "rep";
+    lead = {
+      ...lead,
+      stageId: "stage-lead",
+      convertedAt: null,
+      convertedDealId: null,
+      convertedDealNumber: null,
+      status: "open",
+    };
+
+    const html = renderLeadDetail();
+
+    expect(html).toContain("Rep Recommendation");
+    expect(html).toContain("Rep Recommendation Notes");
+    expect(html).toContain("Approval Status");
+    expect(html).toContain("Director/Admin Decision");
+  });
+
   it("switches the CTA to open the deal once the lead is converted", () => {
+    currentUserRole = "director";
     lead = {
       ...lead,
       stageId: "stage-estimating",

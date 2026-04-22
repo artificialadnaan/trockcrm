@@ -5,6 +5,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Button } from "@/components/ui/button";
+import { useAuth } from "@/lib/auth";
 import {
   useLeadQualification,
   updateLead,
@@ -35,6 +36,7 @@ export function LeadQualificationPanel({
   leadId: string;
   onSaved?: () => void;
 }) {
+  const { user } = useAuth();
   const { qualification, loading, refetch } = useLeadQualification(leadId);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -43,6 +45,7 @@ export function LeadQualificationPanel({
   const [goDecisionNotes, setGoDecisionNotes] = useState("");
   const [qualificationData, setQualificationData] = useState<Record<string, unknown>>({});
   const [scopingSubsetData, setScopingSubsetData] = useState<Record<string, unknown>>({});
+  const canApprove = user?.role === "director" || user?.role === "admin";
 
   useEffect(() => {
     const record = qualification as LeadQualificationRecord | null;
@@ -61,14 +64,17 @@ export function LeadQualificationPanel({
     setScopingSubsetData((current) => ({ ...current, [key]: value }));
   };
 
+  const approvalStatus =
+    goDecision === "go" ? "Approved" : goDecision === "no_go" ? "Rejected" : "Pending Director/Admin Approval";
+
   const handleSave = async () => {
     setSaving(true);
     setError(null);
     try {
       await updateLead(leadId, {
         estimatedOpportunityValue: normalizeCurrencyInput(estimatedOpportunityValue) || null,
-        goDecision: goDecision || null,
-        goDecisionNotes: goDecisionNotes || null,
+        goDecision: canApprove ? goDecision || null : undefined,
+        goDecisionNotes: canApprove ? goDecisionNotes || null : undefined,
         qualificationData,
         scopingSubsetData,
       });
@@ -212,10 +218,32 @@ export function LeadQualificationPanel({
 
         <div className="grid gap-4 sm:grid-cols-2">
           <div className="space-y-2">
-            <Label>Go / No-Go Decision</Label>
+            <Label>Rep Recommendation</Label>
+            <select
+              className="h-9 w-full rounded-lg border border-input bg-background px-3 text-sm"
+              value={getStringValue(qualificationData, "goRecommendation") || "pending"}
+              onChange={(event) =>
+                updateQualificationField(
+                  "goRecommendation",
+                  event.target.value === "pending" ? "" : event.target.value
+                )
+              }
+            >
+              <option value="pending">Pending</option>
+              <option value="go">Go</option>
+              <option value="no_go">No-Go</option>
+            </select>
+          </div>
+          <div className="space-y-2">
+            <Label>Approval Status</Label>
+            <Input value={approvalStatus} readOnly />
+          </div>
+          <div className="space-y-2">
+            <Label>Director/Admin Decision</Label>
             <select
               className="h-9 w-full rounded-lg border border-input bg-background px-3 text-sm"
               value={goDecision || "pending"}
+              disabled={!canApprove}
               onChange={(event) => setGoDecision(event.target.value === "pending" ? "" : (event.target.value as "go" | "no_go"))}
             >
               <option value="pending">Pending</option>
@@ -268,8 +296,25 @@ export function LeadQualificationPanel({
         </div>
 
         <div className="space-y-2">
-          <Label>Go / No-Go Notes</Label>
-          <Textarea value={goDecisionNotes} onChange={(event) => setGoDecisionNotes(event.target.value)} />
+          <Label>Rep Recommendation Notes</Label>
+          <Textarea
+            value={getStringValue(qualificationData, "goRecommendationNotes")}
+            onChange={(event) => updateQualificationField("goRecommendationNotes", event.target.value)}
+          />
+        </div>
+
+        <div className="space-y-2">
+          <Label>Director/Admin Decision Notes</Label>
+          <Textarea
+            value={goDecisionNotes}
+            disabled={!canApprove}
+            onChange={(event) => setGoDecisionNotes(event.target.value)}
+          />
+          {!canApprove ? (
+            <p className="text-xs text-muted-foreground">
+              Only directors and admins can record the final go/no-go approval.
+            </p>
+          ) : null}
         </div>
 
         {error && <p className="text-sm text-red-600">{error}</p>}

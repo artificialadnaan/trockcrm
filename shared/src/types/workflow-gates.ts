@@ -64,6 +64,7 @@ export const WORKFLOW_GATE_FIELD_LABELS = {
   "scopingSubset.initialQuantities": "Scoping Subset: Initial Quantities",
   "scopingSubset.decisionTimeline": "Scoping Subset: Decision Timeline",
   "leadScoping.completedChecklist": "Lead Scoping Checklist Completed",
+  "approval.directorAdmin": "Director/Admin Approval Required",
   "opportunity.preBidMeetingCompleted": "Pre-Bid Meeting Completed",
   "opportunity.siteVisitDecision": "Site Visit Decision",
   "opportunity.siteVisitCompleted": "Site Visit Completed",

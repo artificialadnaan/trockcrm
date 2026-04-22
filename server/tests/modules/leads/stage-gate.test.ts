@@ -60,6 +60,7 @@ describe("Lead Stage Gate Evaluation", () => {
 
   it("blocks qualification completion when go/no-go notes are missing", () => {
     const result = evaluateLeadStageGate({
+      userRole: "director",
       lead: {
         id: "lead-1",
         companyId: "company-1",
@@ -107,6 +108,62 @@ describe("Lead Stage Gate Evaluation", () => {
 
     expect(result.allowed).toBe(false);
     expect(result.missingRequirements.fields).toContain("goDecisionNotes");
+  });
+
+  it("blocks reps from advancing a lead out of go/no-go even when approval fields are present", () => {
+    const result = evaluateLeadStageGate({
+      userRole: "rep",
+      lead: {
+        id: "lead-1",
+        companyId: "company-1",
+        propertyId: "property-1",
+        source: "Referral",
+      },
+      qualification: {
+        estimatedOpportunityValue: "42000.00",
+        goDecision: "go",
+        goDecisionNotes: "Approved for opportunity creation.",
+        qualificationData: {
+          projectLocation: "Dallas, TX",
+          propertyName: "Palm Villas",
+          propertyAddress: "123 Palm Way",
+          propertyCity: "Dallas",
+          propertyState: "TX",
+          unitCount: 120,
+          stakeholderName: "Alex PM",
+          stakeholderRole: "Property Manager",
+          projectType: "Exterior Painting",
+          scopeSummary: "Repaint all buildings",
+          budgetStatus: "Budgeted",
+          budgetQuarter: "Q2",
+          specPackageStatus: "Provided",
+          checklistStarted: true,
+        },
+        scopingSubsetData: {},
+      },
+      leadScopingReadiness: {
+        status: "ready",
+        isReadyForGoNoGo: true,
+        completionState: {},
+        errors: { sections: {}, attachments: {} },
+      },
+      currentStage: {
+        ...currentStage,
+        id: "stage-go-no-go",
+        slug: "lead_go_no_go",
+        name: "Lead Go/No-Go",
+      },
+      targetStage: {
+        ...currentStage,
+        id: "stage-qualified",
+        slug: "qualified_for_opportunity",
+        name: "Qualified for Opportunity",
+      },
+    });
+
+    expect(result.allowed).toBe(false);
+    expect(result.missingRequirements.fields).toContain("approval.directorAdmin");
+    expect(result.blockReason).toContain("director");
   });
 
   it("requires property and checklist metadata before pre-qual value assignment", () => {
