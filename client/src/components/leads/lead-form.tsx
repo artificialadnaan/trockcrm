@@ -14,7 +14,7 @@ import {
 import { CompanySelector } from "@/components/companies/company-selector";
 import { LeadStageBadge } from "./lead-stage-badge";
 import { useCompanyContacts } from "@/hooks/use-companies";
-import { createLead } from "@/hooks/use-leads";
+import { createLead, updateLead } from "@/hooks/use-leads";
 import { usePipelineStages, useProjectTypes } from "@/hooks/use-pipeline-config";
 import { formatPropertyLabel, useProperties } from "@/hooks/use-properties";
 import {
@@ -56,11 +56,49 @@ type LeadSummaryFormProps = {
   converted?: boolean;
 };
 
-type LeadEditFormProps = {
-  mode: "edit";
+type LeadCreateFormProps = {
+  mode: "create";
 };
 
-type LeadFormProps = LeadSummaryFormProps | LeadEditFormProps;
+type LeadUpdateFormProps = {
+  mode: "edit";
+  lead: LeadFormLead;
+};
+
+type LeadFormProps = LeadSummaryFormProps | LeadCreateFormProps | LeadUpdateFormProps;
+
+type LeadEditableMode = "create" | "edit";
+
+function getEditableFormState(lead?: LeadFormLead) {
+  return {
+    companyId: lead?.companyId ?? "",
+    propertyId: lead?.propertyId ?? "",
+    primaryContactId: "",
+    name: lead?.name ?? "",
+    stageId: lead?.stageId ?? "",
+    source: lead?.source ?? "",
+    description: lead?.description ?? "",
+    projectTypeId: lead?.projectTypeId ?? "",
+    qualificationPayload: {
+      existing_customer_status:
+        typeof lead?.qualificationPayload?.existing_customer_status === "string"
+          ? lead.qualificationPayload.existing_customer_status
+          : "",
+      estimated_value:
+        lead?.qualificationPayload?.estimated_value == null
+          ? ""
+          : String(lead.qualificationPayload.estimated_value),
+      timeline_status:
+        typeof lead?.qualificationPayload?.timeline_status === "string"
+          ? lead.qualificationPayload.timeline_status
+          : "",
+    } as Record<string, string>,
+    projectTypeQuestionAnswers: { ...(lead?.projectTypeQuestionPayload?.answers ?? {}) } as Record<
+      string,
+      LeadAnswerValue
+    >,
+  };
+}
 
 function renderAnswerValue(value: LeadAnswerValue | undefined) {
   if (value == null) {
@@ -180,43 +218,38 @@ function SummaryLeadForm({ lead, converted = false }: LeadSummaryFormProps) {
   );
 }
 
-function EditableLeadForm() {
+function EditableLeadForm({ mode, lead }: { mode: LeadEditableMode; lead?: LeadFormLead }) {
   const navigate = useNavigate();
   const { stages } = usePipelineStages();
   const { projectTypes, hierarchy: projectTypeHierarchy } = useProjectTypes();
-  const [companyId, setCompanyId] = useState<string | null>(null);
+  const isCreate = mode === "create";
+  const [companyId, setCompanyId] = useState<string | null>(lead?.companyId ?? null);
   const { properties } = useProperties(companyId ? { companyId, limit: 500 } : { limit: 0 });
   const { contacts } = useCompanyContacts(companyId ?? undefined);
   const leadStages = stages.filter(
     (stage) => CRM_OWNED_LEAD_STAGE_SLUGS.includes(stage.slug as (typeof CRM_OWNED_LEAD_STAGE_SLUGS)[number]) && !stage.isTerminal
   );
 
-  const [formData, setFormData] = useState({
-    companyId: "",
-    propertyId: "",
-    primaryContactId: "",
-    name: "",
-    stageId: "",
-    source: "",
-    description: "",
-    projectTypeId: "",
-    qualificationPayload: {
-      existing_customer_status: "",
-      estimated_value: "",
-      timeline_status: "",
-    } as Record<string, string>,
-    projectTypeQuestionAnswers: {} as Record<string, LeadAnswerValue>,
-  });
+  const [formData, setFormData] = useState(() => getEditableFormState(lead));
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!formData.stageId && leadStages.length > 0) {
-      setFormData((current) => ({ ...current, stageId: leadStages[0].id }));
-    }
-  }, [formData.stageId, leadStages]);
+    setFormData(getEditableFormState(lead));
+    setCompanyId(lead?.companyId ?? null);
+  }, [lead]);
 
   useEffect(() => {
+    if (isCreate && !formData.stageId && leadStages.length > 0) {
+      setFormData((current) => ({ ...current, stageId: leadStages[0].id }));
+    }
+  }, [formData.stageId, isCreate, leadStages]);
+
+  useEffect(() => {
+    if (!isCreate) {
+      return;
+    }
+
     setFormData((current) => ({
       ...current,
       companyId: companyId ?? "",
@@ -229,7 +262,7 @@ function EditableLeadForm() {
           ? current.primaryContactId
           : "",
     }));
-  }, [companyId, contacts, properties]);
+  }, [companyId, contacts, isCreate, properties]);
 
   const selectedProjectType = projectTypes.find((entry) => entry.id === formData.projectTypeId) ?? null;
   const questionSet = useMemo(
@@ -286,14 +319,7 @@ function EditableLeadForm() {
     setError(null);
 
     try {
-      const result = await createLead({
-        companyId: formData.companyId,
-        propertyId: formData.propertyId,
-        primaryContactId: formData.primaryContactId || null,
-        name: formData.name.trim(),
-        stageId: formData.stageId,
-        source: formData.source.trim() || null,
-        description: formData.description.trim() || null,
+      const payload = {
         projectTypeId: formData.projectTypeId || null,
         qualificationPayload: {
           existing_customer_status: formData.qualificationPayload.existing_customer_status.trim() || null,
@@ -312,9 +338,25 @@ function EditableLeadForm() {
             ])
           ),
         },
-      });
+      };
 
-      navigate(`/leads/${result.lead.id}`);
+      if (isCreate) {
+        const result = await createLead({
+          companyId: formData.companyId,
+          propertyId: formData.propertyId,
+          primaryContactId: formData.primaryContactId || null,
+          name: formData.name.trim(),
+          stageId: formData.stageId,
+          source: formData.source.trim() || null,
+          description: formData.description.trim() || null,
+          ...payload,
+        });
+
+        navigate(`/leads/${result.lead.id}`);
+      } else if (lead) {
+        const result = await updateLead(lead.id, payload);
+        navigate(`/leads/${result.lead.id}`);
+      }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to save lead");
     } finally {
@@ -326,142 +368,199 @@ function EditableLeadForm() {
     <form onSubmit={handleSubmit} className="max-w-4xl space-y-6">
       <Card>
         <CardHeader>
-          <CardTitle>Lead Information</CardTitle>
+          <CardTitle>{isCreate ? "Lead Information" : "Lead Qualification"}</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
           {error && <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div>}
 
-          <div className="space-y-2">
-            <Label>Company</Label>
-            <CompanySelector value={companyId} onChange={setCompanyId} required />
-          </div>
+          {isCreate ? (
+            <>
+              <div className="space-y-2">
+                <Label>Company</Label>
+                <CompanySelector value={companyId} onChange={setCompanyId} required />
+              </div>
 
-          <div className="grid gap-4 sm:grid-cols-2">
-            <div className="space-y-2">
-              <Label htmlFor="propertyId">Property</Label>
-              <Select
-                value={formData.propertyId || "__none__"}
-                onValueChange={(value) =>
-                  handleFieldChange("propertyId", !value || value === "__none__" ? "" : value)
-                }
-              >
-                <SelectTrigger id="propertyId">
-                  <SelectValue placeholder="Select property" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="__none__">Select property</SelectItem>
-                  {properties.map((property) => (
-                    <SelectItem key={property.id} value={property.id}>
-                      {formatPropertyLabel(property)}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div className="space-y-2">
+                  <Label htmlFor="propertyId">Property</Label>
+                  <Select
+                    value={formData.propertyId || "__none__"}
+                    onValueChange={(value) =>
+                      handleFieldChange("propertyId", !value || value === "__none__" ? "" : value)
+                    }
+                  >
+                    <SelectTrigger id="propertyId">
+                      <SelectValue placeholder="Select property" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__none__">Select property</SelectItem>
+                      {properties.map((property) => (
+                        <SelectItem key={property.id} value={property.id}>
+                          {formatPropertyLabel(property)}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
 
-            <div className="space-y-2">
-              <Label htmlFor="primaryContactId">Primary Contact</Label>
-              <Select
-                value={formData.primaryContactId || "__none__"}
-                onValueChange={(value) =>
-                  handleFieldChange("primaryContactId", !value || value === "__none__" ? "" : value)
-                }
-              >
-                <SelectTrigger id="primaryContactId">
-                  <SelectValue placeholder="Optional" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="__none__">No primary contact</SelectItem>
-                  {contacts.map((contact) => (
-                    <SelectItem key={contact.id} value={contact.id}>
-                      {contact.firstName} {contact.lastName}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
+                <div className="space-y-2">
+                  <Label htmlFor="primaryContactId">Primary Contact</Label>
+                  <Select
+                    value={formData.primaryContactId || "__none__"}
+                    onValueChange={(value) =>
+                      handleFieldChange("primaryContactId", !value || value === "__none__" ? "" : value)
+                    }
+                  >
+                    <SelectTrigger id="primaryContactId">
+                      <SelectValue placeholder="Optional" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__none__">No primary contact</SelectItem>
+                      {contacts.map((contact) => (
+                        <SelectItem key={contact.id} value={contact.id}>
+                          {contact.firstName} {contact.lastName}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
 
-          <div className="grid gap-4 sm:grid-cols-2">
-            <div className="space-y-2">
-              <Label htmlFor="name">Lead Name</Label>
-              <Input
-                id="name"
-                value={formData.name}
-                onChange={(event) => handleFieldChange("name", event.target.value)}
-                placeholder="e.g., Palm Villas exterior refresh"
-              />
-            </div>
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div className="space-y-2">
+                  <Label htmlFor="name">Lead Name</Label>
+                  <Input
+                    id="name"
+                    value={formData.name}
+                    onChange={(event) => handleFieldChange("name", event.target.value)}
+                    placeholder="e.g., Palm Villas exterior refresh"
+                  />
+                </div>
 
-            <div className="space-y-2">
-              <Label htmlFor="stageId">Initial Stage</Label>
-              <Select
-                value={formData.stageId}
-                onValueChange={(value) => handleFieldChange("stageId", value ?? "")}
-              >
-                <SelectTrigger id="stageId">
-                  <SelectValue placeholder="Select stage" />
-                </SelectTrigger>
-                <SelectContent>
-                  {leadStages.map((stage) => (
-                    <SelectItem key={stage.id} value={stage.id}>
-                      {stage.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
+                <div className="space-y-2">
+                  <Label htmlFor="stageId">Initial Stage</Label>
+                  <Select
+                    value={formData.stageId}
+                    onValueChange={(value) => handleFieldChange("stageId", value ?? "")}
+                  >
+                    <SelectTrigger id="stageId">
+                      <SelectValue placeholder="Select stage" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {leadStages.map((stage) => (
+                        <SelectItem key={stage.id} value={stage.id}>
+                          {stage.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
 
-          <div className="grid gap-4 sm:grid-cols-2">
-            <div className="space-y-2">
-              <Label htmlFor="source">Source</Label>
-              <Input
-                id="source"
-                value={formData.source}
-                onChange={(event) => handleFieldChange("source", event.target.value)}
-                placeholder="Referral, inbound, repeat customer..."
-              />
-            </div>
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div className="space-y-2">
+                  <Label htmlFor="source">Source</Label>
+                  <Input
+                    id="source"
+                    value={formData.source}
+                    onChange={(event) => handleFieldChange("source", event.target.value)}
+                    placeholder="Referral, inbound, repeat customer..."
+                  />
+                </div>
 
-            <div className="space-y-2">
-              <Label htmlFor="projectTypeId">Project Type</Label>
-              <Select
-                value={formData.projectTypeId || "__none__"}
-                onValueChange={(value) =>
-                  handleFieldChange("projectTypeId", !value || value === "__none__" ? "" : value)
-                }
-              >
-                <SelectTrigger id="projectTypeId">
-                  <SelectValue placeholder="Select project type" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="__none__">Select project type</SelectItem>
-                  {projectTypeHierarchy.flatMap((parent) => [
-                    <SelectItem key={parent.id} value={parent.id} className="font-medium">
-                      {parent.name}
-                    </SelectItem>,
-                    ...parent.children.map((child) => (
-                      <SelectItem key={child.id} value={child.id} className="pl-6">
-                        {child.name}
-                      </SelectItem>
-                    )),
-                  ])}
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
+                <div className="space-y-2">
+                  <Label htmlFor="projectTypeId">Project Type</Label>
+                  <Select
+                    value={formData.projectTypeId || "__none__"}
+                    onValueChange={(value) =>
+                      handleFieldChange("projectTypeId", !value || value === "__none__" ? "" : value)
+                    }
+                  >
+                    <SelectTrigger id="projectTypeId">
+                      <SelectValue placeholder="Select project type" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__none__">Select project type</SelectItem>
+                      {projectTypeHierarchy.flatMap((parent) => [
+                        <SelectItem key={parent.id} value={parent.id} className="font-medium">
+                          {parent.name}
+                        </SelectItem>,
+                        ...parent.children.map((child) => (
+                          <SelectItem key={child.id} value={child.id} className="pl-6">
+                            {child.name}
+                          </SelectItem>
+                        )),
+                      ])}
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
 
-          <div className="space-y-2">
-            <Label htmlFor="description">Description</Label>
-            <textarea
-              id="description"
-              className="flex min-h-[96px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              value={formData.description}
-              onChange={(event) => handleFieldChange("description", event.target.value)}
-              placeholder="Brief summary of the lead..."
-            />
-          </div>
+              <div className="space-y-2">
+                <Label htmlFor="description">Description</Label>
+                <textarea
+                  id="description"
+                  className="flex min-h-[96px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  value={formData.description}
+                  onChange={(event) => handleFieldChange("description", event.target.value)}
+                  placeholder="Brief summary of the lead..."
+                />
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="grid gap-4 text-sm sm:grid-cols-2">
+                <div>
+                  <p className="text-muted-foreground">Lead</p>
+                  <p className="font-medium">{lead?.name ?? "--"}</p>
+                </div>
+                <div>
+                  <p className="text-muted-foreground">Company</p>
+                  <p className="font-medium">{lead?.companyName ?? "--"}</p>
+                </div>
+                <div>
+                  <p className="text-muted-foreground">Property</p>
+                  <p className="font-medium">
+                    {lead
+                      ? formatPropertyLabel({
+                          name: lead.propertyName ?? "",
+                          address: lead.propertyAddress,
+                          city: lead.propertyCity,
+                          state: lead.propertyState,
+                          zip: lead.propertyZip,
+                        })
+                      : "--"}
+                  </p>
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="projectTypeId">Project Type</Label>
+                  <Select
+                    value={formData.projectTypeId || "__none__"}
+                    onValueChange={(value) =>
+                      handleFieldChange("projectTypeId", !value || value === "__none__" ? "" : value)
+                    }
+                  >
+                    <SelectTrigger id="projectTypeId">
+                      <SelectValue placeholder="Select project type" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__none__">Select project type</SelectItem>
+                      {projectTypeHierarchy.flatMap((parent) => [
+                        <SelectItem key={parent.id} value={parent.id} className="font-medium">
+                          {parent.name}
+                        </SelectItem>,
+                        ...parent.children.map((child) => (
+                          <SelectItem key={child.id} value={child.id} className="pl-6">
+                            {child.name}
+                          </SelectItem>
+                        )),
+                      ])}
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+            </>
+          )}
         </CardContent>
       </Card>
 
@@ -552,9 +651,13 @@ function EditableLeadForm() {
 
       <div className="flex gap-2">
         <Button type="submit" disabled={submitting}>
-          {submitting ? "Saving..." : "Create Lead"}
+          {submitting ? "Saving..." : isCreate ? "Create Lead" : "Save Qualification"}
         </Button>
-        <Button type="button" variant="outline" onClick={() => navigate("/leads")}>
+        <Button
+          type="button"
+          variant="outline"
+          onClick={() => navigate(isCreate ? "/leads" : `/leads/${lead?.id}`)}
+        >
           Cancel
         </Button>
       </div>
@@ -563,8 +666,12 @@ function EditableLeadForm() {
 }
 
 export function LeadForm(props: LeadFormProps) {
+  if (props.mode === "create") {
+    return <EditableLeadForm mode="create" />;
+  }
+
   if (props.mode === "edit") {
-    return <EditableLeadForm />;
+    return <EditableLeadForm mode="edit" lead={props.lead} />;
   }
 
   return <SummaryLeadForm {...props} />;

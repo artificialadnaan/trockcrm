@@ -130,10 +130,17 @@ export function LeadDetailPage() {
               propertyZip: lead.property?.zip ?? null,
               source: lead.source,
               description: lead.description,
+              projectTypeId: lead.projectTypeId,
+              qualificationPayload: lead.qualificationPayload,
+              projectTypeQuestionPayload: lead.projectTypeQuestionPayload,
               stageEnteredAt: lead.stageEnteredAt,
             }}
             converted={!isLeadStage}
           />
+
+          <Button variant="outline" onClick={() => navigate(`/leads/${lead.id}/edit`)}>
+            Edit Qualification
+          </Button>
 
           <Card>
             <CardContent className="space-y-3 pt-4">

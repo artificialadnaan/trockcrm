@@ -15,7 +15,7 @@ export function LeadNewPage() {
         </Button>
         <h2 className="text-2xl font-bold">New Lead</h2>
       </div>
-      <LeadForm mode="edit" />
+      <LeadForm mode="create" />
     </div>
   );
 }
