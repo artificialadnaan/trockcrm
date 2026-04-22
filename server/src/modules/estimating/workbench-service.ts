@@ -8,11 +8,14 @@ import {
   estimatePricingRecommendations,
   estimateReviewEvents,
   estimateSourceDocuments,
+  jobQueue,
 } from "@trock-crm/shared/schema";
 import { estimatePricingRecommendationOptions } from "../../../../shared/src/schema/tenant/estimate-pricing-recommendation-options.js";
 import { AppError } from "../../middleware/error-handler.js";
+import { getDealEffectiveMarketContext } from "./deal-market-override-service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
+type AppDb = NodePgDatabase<typeof schema>;
 
 type EstimatePricingRecommendationRow = Record<string, any>;
 
@@ -41,6 +44,20 @@ type ManualAddContext = {
   generationRunId: string | null;
   extractionMatchId: string | null;
   estimateSectionName: string | null;
+};
+
+type WorkbenchRerunStatus = {
+  status: "queued" | "running" | "failed" | "idle";
+  rerunRequestId: string | null;
+  queueJobId: number | null;
+  generationRunId: string | null;
+  source: "job_queue" | "generation_run" | null;
+  errorSummary: string | null;
+};
+
+type BuildEstimatingWorkbenchStateOptions = {
+  appDb?: AppDb | null;
+  officeId?: string | null;
 };
 
 function normalizeScopeLabel(value: unknown, fallback: string) {
@@ -152,6 +169,110 @@ function isActiveParseArtifact(
   }
 
   return (metadataJson as Record<string, unknown>).activeArtifact !== false;
+}
+
+function getJsonObject(value: unknown) {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function getStringValue(value: unknown) {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
+function getMarketRatePayload(row: EstimatePricingRecommendationRow) {
+  const assumptionsMarketRate = getJsonObject(getJsonObject(row.assumptionsJson)?.marketRate);
+  const evidenceMarketRate = getJsonObject(getJsonObject(row.evidenceJson)?.marketRate);
+  return assumptionsMarketRate ?? evidenceMarketRate;
+}
+
+function getRerunRequestId(value: unknown) {
+  return getStringValue(getJsonObject(value)?.rerunRequestId);
+}
+
+function getQueueDealId(value: unknown) {
+  return getStringValue(getJsonObject(value)?.dealId);
+}
+
+function getQueueRerunRequestId(value: unknown) {
+  return getStringValue(getJsonObject(value)?.rerunRequestId);
+}
+
+function selectActivePricingRun(
+  generationRuns: Array<{
+    id: string;
+    status: string;
+    inputSnapshotJson: unknown;
+    startedAt: Date;
+    completedAt: Date | null;
+    errorSummary: string | null;
+  }>,
+  queuedRerunJobs: Array<{
+    id: number;
+    status: string;
+    payload: unknown;
+    createdAt: Date;
+  }>
+) {
+  const newestCompletedRun =
+    generationRuns.find((row) => row.status === "completed") ?? null;
+  const newestRun = generationRuns[0] ?? null;
+  const activePricingRun = newestCompletedRun ?? newestRun;
+
+  const queuedJob = queuedRerunJobs[0] ?? null;
+  const queuedRerunRequestId = queuedJob ? getQueueRerunRequestId(queuedJob.payload) : null;
+  const rerunRun = queuedRerunRequestId
+    ? generationRuns.find(
+        (row) => getRerunRequestId(row.inputSnapshotJson) === queuedRerunRequestId
+      ) ?? null
+    : null;
+
+  let rerunStatus: WorkbenchRerunStatus = {
+    status: "idle",
+    rerunRequestId: null,
+    queueJobId: null,
+    generationRunId: null,
+    source: null,
+    errorSummary: null,
+  };
+
+  if (queuedRerunRequestId && rerunRun) {
+    if (rerunRun.status === "failed") {
+      rerunStatus = {
+        status: "failed",
+        rerunRequestId: queuedRerunRequestId,
+        queueJobId: queuedJob?.id ?? null,
+        generationRunId: rerunRun.id,
+        source: "generation_run",
+        errorSummary: rerunRun.errorSummary ?? null,
+      };
+    } else if (rerunRun.status !== "completed") {
+      rerunStatus = {
+        status: "running",
+        rerunRequestId: queuedRerunRequestId,
+        queueJobId: queuedJob?.id ?? null,
+        generationRunId: rerunRun.id,
+        source: "generation_run",
+        errorSummary: null,
+      };
+    }
+  } else if (queuedJob && queuedRerunRequestId) {
+    rerunStatus = {
+      status: "queued",
+      rerunRequestId: queuedRerunRequestId,
+      queueJobId: queuedJob.id,
+      generationRunId: null,
+      source: "job_queue",
+      errorSummary: null,
+    };
+  }
+
+  return {
+    activePricingRun:
+      rerunStatus.status !== "idle" && newestCompletedRun ? newestCompletedRun : activePricingRun,
+    rerunStatus,
+  };
 }
 
 export function deriveEstimatePricingWorkbenchRows(
@@ -498,8 +619,21 @@ export async function updateEstimatePricingRecommendationReviewState(args: {
   return { recommendation: updated, reviewEvent };
 }
 
-export async function buildEstimatingWorkbenchState(tenantDb: TenantDb, dealId: string) {
-  const [documents, extractionRows, matchRows, pricingRows, reviewEvents, generationRuns] = await Promise.all([
+export async function buildEstimatingWorkbenchState(
+  tenantDb: TenantDb,
+  dealId: string,
+  options: BuildEstimatingWorkbenchStateOptions = {}
+) {
+  const [
+    documents,
+    extractionRows,
+    matchRows,
+    pricingRows,
+    reviewEvents,
+    generationRuns,
+    marketContext,
+    queuedRerunJobs,
+  ] = await Promise.all([
     tenantDb
       .select()
       .from(estimateSourceDocuments)
@@ -544,11 +678,43 @@ export async function buildEstimatingWorkbenchState(tenantDb: TenantDb, dealId: 
     tenantDb
       .select({
         id: estimateGenerationRuns.id,
+        status: estimateGenerationRuns.status,
+        inputSnapshotJson: estimateGenerationRuns.inputSnapshotJson,
+        startedAt: estimateGenerationRuns.startedAt,
+        completedAt: estimateGenerationRuns.completedAt,
+        errorSummary: estimateGenerationRuns.errorSummary,
       })
       .from(estimateGenerationRuns)
       .where(eq(estimateGenerationRuns.dealId, dealId))
       .orderBy(desc(estimateGenerationRuns.startedAt)),
+    getDealEffectiveMarketContext(tenantDb, dealId),
+    options.appDb && options.officeId
+      ? options.appDb
+          .select({
+            id: jobQueue.id,
+            status: jobQueue.status,
+            payload: jobQueue.payload,
+            createdAt: jobQueue.createdAt,
+            startedProcessingAt: jobQueue.startedProcessingAt,
+            completedAt: jobQueue.completedAt,
+            lastError: jobQueue.lastError,
+          })
+          .from(jobQueue)
+          .where(and(eq(jobQueue.officeId, options.officeId), eq(jobQueue.jobType, "estimate_generation")))
+          .orderBy(desc(jobQueue.createdAt))
+      : Promise.resolve([]),
   ]);
+  const matchingQueuedRerunJobs = queuedRerunJobs.filter(
+    (row) =>
+      row.status !== "completed" &&
+      row.status !== "dead" &&
+      getQueueDealId(row.payload) === dealId &&
+      getQueueRerunRequestId(row.payload)
+  );
+  const { activePricingRun, rerunStatus } = selectActivePricingRun(
+    generationRuns,
+    matchingQueuedRerunJobs
+  );
 
   const activeParseRunIdByDocumentId = new Map(
     documents.map((document) => [document.id, document.activeParseRunId ?? null])
@@ -561,7 +727,11 @@ export async function buildEstimatingWorkbenchState(tenantDb: TenantDb, dealId: 
   const activeExtractionIds = new Set(activeExtractionRows.map((row) => row.id));
   const activeMatchRows = matchRows.filter((row) => activeExtractionIds.has(row.extractionId));
   const activeMatchIds = new Set(activeMatchRows.map((row) => row.id));
-  const activePricingRows = pricingRows.filter((row) => activeMatchIds.has(row.extractionMatchId));
+  const activePricingRows = pricingRows.filter(
+    (row) =>
+      activeMatchIds.has(row.extractionMatchId) &&
+      (!activePricingRun?.id || row.createdByRunId === activePricingRun.id)
+  );
   const pricingRecommendationIds = activePricingRows
     .map((row) => row.id)
     .filter((id): id is string => typeof id === "string" && id.length > 0);
@@ -586,6 +756,14 @@ export async function buildEstimatingWorkbenchState(tenantDb: TenantDb, dealId: 
   const pricingRowsWithOptions = activePricingRows.map((row) => ({
     ...row,
     recommendationOptions: recommendationOptionsByRecommendationId.get(row.id) ?? [],
+    marketRateRationale: getMarketRatePayload(row),
+    marketRateContext: getMarketRatePayload(row)
+      ? {
+          resolvedMarket: getJsonObject(getMarketRatePayload(row))?.resolvedMarket ?? null,
+          resolutionLevel: getJsonObject(getMarketRatePayload(row))?.resolutionLevel ?? null,
+          resolutionSource: getJsonObject(getMarketRatePayload(row))?.resolutionSource ?? null,
+        }
+      : null,
   }));
   const derivedPricingRows = deriveEstimatePricingWorkbenchRows(
     pricingRowsWithOptions as EstimatePricingRecommendationRow[]
@@ -640,7 +818,7 @@ export async function buildEstimatingWorkbenchState(tenantDb: TenantDb, dealId: 
   const fallbackExtraction =
     fallbackMatchRow?.extractionId ? extractionById.get(fallbackMatchRow.extractionId) ?? null : null;
   const manualAddContext: ManualAddContext = {
-    generationRunId: activeGenerationRunIds[0] ?? generationRuns[0]?.id ?? null,
+    generationRunId: activePricingRun?.id ?? activeGenerationRunIds[0] ?? generationRuns[0]?.id ?? null,
     extractionMatchId: fallbackMatchRow?.id ?? null,
     estimateSectionName: getExtractionSectionName(fallbackExtraction),
   };
@@ -663,6 +841,23 @@ export async function buildEstimatingWorkbenchState(tenantDb: TenantDb, dealId: 
       canPromote,
       generationRunIds,
     },
+    marketContext: {
+      effectiveMarket: marketContext.effectiveMarketContext.market,
+      resolutionLevel: marketContext.effectiveMarketContext.resolutionLevel,
+      resolutionSource: marketContext.effectiveMarketContext.resolutionSource,
+      location: marketContext.effectiveMarketContext.location,
+      isOverridden: marketContext.effectiveMarketContext.resolutionLevel === "override",
+      override: marketContext.currentOverride,
+      fallbackSource:
+        marketContext.effectiveMarketContext.resolutionLevel === "metro" ||
+        marketContext.effectiveMarketContext.resolutionLevel === "state" ||
+        marketContext.effectiveMarketContext.resolutionLevel === "region" ||
+        marketContext.effectiveMarketContext.resolutionLevel === "global_default"
+          ? marketContext.effectiveMarketContext.resolutionSource
+          : null,
+    },
+    activePricingRunId: activePricingRun?.id ?? null,
+    rerunStatus,
     manualAddContext,
   };
 }

@@ -11,8 +11,12 @@ import { buildEstimatingWorkbenchState } from "./workbench-service.js";
 type TenantDb = NodePgDatabase<typeof schema>;
 type AppDb = NodePgDatabase<typeof schema>;
 
-export async function getEstimatingWorkflowState(tenantDb: TenantDb, dealId: string) {
-  return buildEstimatingWorkbenchState(tenantDb, dealId);
+export async function getEstimatingWorkflowState(
+  tenantDb: TenantDb,
+  dealId: string,
+  options: { appDb?: AppDb | null; officeId?: string | null } = {}
+) {
+  return buildEstimatingWorkbenchState(tenantDb, dealId, options);
 }
 
 export async function listEstimateReviewEvents(tenantDb: TenantDb, dealId: string) {
@@ -27,8 +31,13 @@ export async function buildEstimatingCopilotContext(input: {
   tenantDb: TenantDb;
   appDb: AppDb;
   dealId: string;
+  officeId?: string | null;
   question: string;
 }) {
+  const workflowState = await buildEstimatingWorkbenchState(input.tenantDb, input.dealId, {
+    appDb: input.appDb,
+    officeId: input.officeId ?? null,
+  });
   const historicalSignals = await getHistoricalPricingSignals(input.tenantDb, input.dealId);
   const [pricingRecommendation] = await input.tenantDb
     .select()
@@ -38,6 +47,7 @@ export async function buildEstimatingCopilotContext(input: {
     .limit(1);
 
   return {
+    workflowState,
     historicalComparables: historicalSignals.historicalItems,
     wonBidPatterns: historicalSignals.wonBidPatterns,
     pricingRecommendation,
