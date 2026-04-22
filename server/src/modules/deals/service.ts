@@ -18,6 +18,7 @@ import type * as schema from "@trock-crm/shared/schema";
 import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { getStageById } from "../pipeline/service.js";
+import { evaluatePostConversionEnrichment } from "./post-conversion-enrichment.js";
 
 // Type alias for the tenant-scoped Drizzle instance
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -359,6 +360,11 @@ export async function getDealDetail(tenantDb: TenantDb, dealId: string, userRole
   const deal = await getDealById(tenantDb, dealId, userRole, userId);
   if (!deal) return null;
 
+  const currentStage = await getStageById(
+    deal.stageId,
+    deal.workflowRoute === "service" ? "service_deal" : "standard_deal"
+  );
+
   const [stageHistory, approvals, cos] = await Promise.all([
     tenantDb
       .select()
@@ -379,6 +385,7 @@ export async function getDealDetail(tenantDb: TenantDb, dealId: string, userRole
 
   return {
     ...deal,
+    postConversionEnrichment: evaluatePostConversionEnrichment(deal as any, currentStage ?? { isTerminal: true }),
     stageHistory,
     approvals,
     changeOrders: cos,
