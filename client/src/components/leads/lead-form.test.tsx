@@ -111,4 +111,46 @@ describe("LeadForm", () => {
     expect(mocks.convertLeadToOpportunityMock).toHaveBeenCalledWith("lead-1");
     expect(mocks.navigateMock).toHaveBeenCalledWith("/deals/deal-9?enrichment=1");
   });
+
+  it("keeps the safe new-deal fallback for lead summaries that are not opportunity conversions", async () => {
+    act(() => {
+      root.render(
+        <MemoryRouter>
+          <LeadForm
+            lead={{
+              id: "lead-2",
+              name: "Beta Follow-Up",
+              convertedDealId: null,
+              convertedDealNumber: null,
+              companyId: "company-2",
+              companyName: "Beta",
+              stageId: "stage-dd",
+              propertyId: null,
+              propertyName: null,
+              propertyAddress: null,
+              propertyCity: null,
+              propertyState: null,
+              propertyZip: null,
+              source: null,
+              description: null,
+              stageEnteredAt: "2026-04-10T10:00:00.000Z",
+            }}
+            primaryActionMode="newDeal"
+          />
+        </MemoryRouter>
+      );
+    });
+
+    const convertButton = Array.from(container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("Convert to Deal")
+    );
+    expect(convertButton).toBeTruthy();
+
+    await act(async () => {
+      convertButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(mocks.convertLeadToOpportunityMock).not.toHaveBeenCalled();
+    expect(mocks.navigateMock).toHaveBeenCalledWith("/deals/new");
+  });
 });

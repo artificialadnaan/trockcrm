@@ -14,18 +14,14 @@ export function PostConversionEnrichmentPanel({
   requiredFields,
   missingFields,
   onDismiss,
-  onEditDetails,
-  onEditNextStep,
+  onEditField,
 }: {
   requiredFields: EnrichmentField[];
   missingFields: EnrichmentField[];
   onDismiss: () => void;
-  onEditDetails: () => void;
-  onEditNextStep: () => void;
+  onEditField: (field: EnrichmentField) => void;
 }) {
   const completedCount = Math.max(requiredFields.length - missingFields.length, 0);
-  const missingDetailFields = missingFields.filter((field) => field !== "nextStep");
-  const nextStepMissing = missingFields.includes("nextStep");
 
   return (
     <Card className="border-brand-red/25 bg-brand-red/5">
@@ -44,28 +40,19 @@ export function PostConversionEnrichmentPanel({
       </CardHeader>
       <CardContent className="space-y-4">
         <div className="space-y-2">
-          <p className="text-sm font-medium">Missing fields</p>
+          <p className="text-sm font-medium">Finish these fields</p>
           <div className="flex flex-wrap gap-2">
             {missingFields.map((field) => (
-              <span
+              <Button
                 key={field}
-                className="rounded-full border border-brand-red/20 bg-background px-3 py-1 text-sm"
+                variant="outline"
+                className="justify-start rounded-full border-brand-red/20 bg-background text-sm"
+                onClick={() => onEditField(field)}
               >
                 {FIELD_LABELS[field]}
-              </span>
+              </Button>
             ))}
           </div>
-        </div>
-
-        <div className="flex flex-wrap gap-2">
-          {missingDetailFields.length > 0 ? (
-            <Button onClick={onEditDetails}>Complete Deal Details</Button>
-          ) : null}
-          {nextStepMissing ? (
-            <Button variant="outline" onClick={onEditNextStep}>
-              Update Next Step
-            </Button>
-          ) : null}
         </div>
       </CardContent>
     </Card>

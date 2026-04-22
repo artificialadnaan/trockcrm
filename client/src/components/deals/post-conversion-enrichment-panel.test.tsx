@@ -38,8 +38,7 @@ describe("PostConversionEnrichmentPanel", () => {
 
   it("shows progress, friendly labels, and routes actions to the matching callbacks", () => {
     const onDismiss = vi.fn();
-    const onEditDetails = vi.fn();
-    const onEditNextStep = vi.fn();
+    const onEditField = vi.fn();
 
     act(() => {
       root.render(
@@ -47,8 +46,7 @@ describe("PostConversionEnrichmentPanel", () => {
           requiredFields={["projectTypeId", "regionId", "expectedCloseDate", "nextStep"]}
           missingFields={["projectTypeId", "expectedCloseDate", "nextStep"]}
           onDismiss={onDismiss}
-          onEditDetails={onEditDetails}
-          onEditNextStep={onEditNextStep}
+          onEditField={onEditField}
         />
       );
     });
@@ -59,12 +57,14 @@ describe("PostConversionEnrichmentPanel", () => {
     expect(container.textContent).toContain("Expected Close Date");
     expect(container.textContent).toContain("Next Step");
 
-    clickButton(container, "Complete Deal Details");
-    clickButton(container, "Update Next Step");
+    clickButton(container, "Project Type");
+    clickButton(container, "Expected Close Date");
+    clickButton(container, "Next Step");
     clickButton(container, "Dismiss");
 
-    expect(onEditDetails).toHaveBeenCalledTimes(1);
-    expect(onEditNextStep).toHaveBeenCalledTimes(1);
+    expect(onEditField).toHaveBeenNthCalledWith(1, "projectTypeId");
+    expect(onEditField).toHaveBeenNthCalledWith(2, "expectedCloseDate");
+    expect(onEditField).toHaveBeenNthCalledWith(3, "nextStep");
     expect(onDismiss).toHaveBeenCalledTimes(1);
   });
 });

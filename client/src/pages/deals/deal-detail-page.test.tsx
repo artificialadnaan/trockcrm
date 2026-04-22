@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type { ReactNode } from "react";
-import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { DealDetailPage } from "./deal-detail-page";
 
 const mocks = vi.hoisted(() => ({
@@ -208,6 +208,11 @@ function LocationProbe() {
   return <div data-location={`${location.pathname}${location.search}`} />;
 }
 
+function NavigateButton({ to }: { to: string }) {
+  const navigate = useNavigate();
+  return <button onClick={() => navigate(to)}>Navigate</button>;
+}
+
 function renderDealDetail(initialEntry = "/deals/deal-1") {
   const container = document.createElement("div");
   document.body.appendChild(container);
@@ -223,6 +228,7 @@ function renderDealDetail(initialEntry = "/deals/deal-1") {
               <>
                 <DealDetailPage />
                 <LocationProbe />
+                <NavigateButton to="/deals/deal-2" />
               </>
             }
           />
@@ -365,10 +371,34 @@ describe("DealDetailPage", () => {
     expect(container?.textContent).toContain("Complete Deal Setup");
   });
 
+  it("resets the dismissed state when navigating to a different deal id", () => {
+    mocks.useDealDetailMock.mockImplementation((dealId?: string) => ({
+      deal: {
+        ...baseDeal,
+        id: dealId ?? "deal-1",
+        dealNumber: dealId === "deal-2" ? "TR-2026-0002" : "TR-2026-0001",
+        name: dealId === "deal-2" ? "Elm Ridge Exterior Refresh" : baseDeal.name,
+      },
+      loading: false,
+      error: null,
+      refetch: mocks.refetchMock,
+    }));
+
+    ({ container, root } = renderDealDetail());
+
+    clickButton(container as HTMLElement, "Dismiss");
+    expect(container?.textContent).not.toContain("Complete Deal Setup");
+
+    clickButton(container as HTMLElement, "Navigate");
+
+    expect(container?.textContent).toContain("Elm Ridge Exterior Refresh");
+    expect(container?.textContent).toContain("Complete Deal Setup");
+  });
+
   it("opens the existing deal form from the enrichment panel", async () => {
     ({ container, root } = renderDealDetail());
 
-    clickButton(container as HTMLElement, "Complete Deal Details");
+    clickButton(container as HTMLElement, "Project Type");
 
     expect(container?.textContent).toContain("Complete Deal Setup");
     expect(container?.textContent).toContain("Save Hill Place Interior Upgrade");
@@ -391,7 +421,7 @@ describe("DealDetailPage", () => {
     expect(container?.textContent).toContain("Lead Form");
     expect(container?.querySelector("[data-location]")?.getAttribute("data-location")).toBe("/deals/deal-1?tab=lead");
 
-    clickButton(container as HTMLElement, "Update Next Step");
+    clickButton(container as HTMLElement, "Next Step");
 
     expect(container?.textContent).toContain("Overview Tab");
     expect(container?.textContent).toContain("Next Step Editor");

@@ -30,12 +30,14 @@ export interface LeadFormLead {
 interface LeadFormProps {
   lead: LeadFormLead;
   converted?: boolean;
+  primaryActionMode?: "opportunity" | "newDeal";
   showPrimaryAction?: boolean;
 }
 
 export function LeadForm({
   lead,
   converted = false,
+  primaryActionMode = "opportunity",
   showPrimaryAction = true,
 }: LeadFormProps) {
   const navigate = useNavigate();
@@ -54,6 +56,11 @@ export function LeadForm({
       if (lead.convertedDealId) {
         navigate(`/deals/${lead.convertedDealId}`);
       }
+      return;
+    }
+
+    if (primaryActionMode === "newDeal") {
+      navigate("/deals/new");
       return;
     }
 

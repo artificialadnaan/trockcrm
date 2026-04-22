@@ -178,6 +178,10 @@ export function DealDetailPage() {
   }, [deal?.postConversionEnrichment?.isComplete]);
 
   useEffect(() => {
+    setEnrichmentPanelDismissed(false);
+  }, [deal?.id]);
+
+  useEffect(() => {
     if (!nextStepFocusPending || activeTab !== "overview") {
       return;
     }
@@ -249,6 +253,15 @@ export function DealDetailPage() {
       handleTabSelect("overview");
     }
     setNextStepFocusPending(true);
+  };
+
+  const handleEditEnrichmentField = (field: "projectTypeId" | "regionId" | "expectedCloseDate" | "nextStep") => {
+    if (field === "nextStep") {
+      handleEditNextStep();
+      return;
+    }
+
+    setEnrichmentEditOpen(true);
   };
 
   return (
@@ -394,8 +407,7 @@ export function DealDetailPage() {
           requiredFields={deal.postConversionEnrichment.requiredFields}
           missingFields={deal.postConversionEnrichment.missingFields}
           onDismiss={() => setEnrichmentPanelDismissed(true)}
-          onEditDetails={() => setEnrichmentEditOpen(true)}
-          onEditNextStep={handleEditNextStep}
+          onEditField={handleEditEnrichmentField}
         />
       ) : null}
 
@@ -651,6 +663,7 @@ function DealLeadTab({
           stageEnteredAt: deal.stageEnteredAt,
         }}
         converted={isConverted}
+        primaryActionMode={isConverted ? "opportunity" : "newDeal"}
       />
 
       <LeadTimelineTab
