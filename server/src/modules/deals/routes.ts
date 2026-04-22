@@ -273,7 +273,10 @@ router.get("/:id/scoping-intake", async (req, res, next) => {
 // PATCH /api/deals/:id/scoping-intake — autosave scoping intake
 router.patch("/:id/scoping-intake", async (req, res, next) => {
   try {
-    const result = await upsertDealScopingIntake(req.tenantDb!, req.params.id, req.body, req.user!.id);
+    const patch = { ...req.body };
+    delete patch.workflowRoute;
+
+    const result = await upsertDealScopingIntake(req.tenantDb!, req.params.id, patch, req.user!.id);
     const officeId = req.user!.activeOfficeId ?? req.user!.officeId;
     const eventsToEmit: Array<{ name: string; payload: Record<string, unknown> }> = [];
 

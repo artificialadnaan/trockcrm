@@ -19,7 +19,7 @@ export function LeadDetailPage() {
     () => stages.find((stage) => stage.id === lead?.stageId) ?? null,
     [lead?.stageId, stages]
   );
-  const isLeadStage = currentStage?.slug === "dd";
+  const isConverted = lead?.status === "converted" || Boolean(lead?.convertedDealId);
   const convertedAt = lead?.convertedAt ?? null;
 
   if (loading) {
@@ -65,7 +65,7 @@ export function LeadDetailPage() {
               <span className="text-xs font-mono uppercase tracking-[0.18em] text-muted-foreground">
                 {lead.convertedDealNumber ?? lead.id.slice(0, 8)}
               </span>
-              <LeadStageBadge stageId={lead.stageId} converted={!isLeadStage} />
+              <LeadStageBadge stageId={lead.stageId} converted={isConverted} />
             </div>
             <h1 className="text-4xl font-black tracking-tight text-foreground">{lead.name}</h1>
             <div className="flex flex-wrap items-center gap-4 text-sm text-muted-foreground">
@@ -136,11 +136,11 @@ export function LeadDetailPage() {
               projectTypeQuestionPayload: lead.projectTypeQuestionPayload,
               stageEnteredAt: lead.stageEnteredAt,
             }}
-            converted={!isLeadStage}
+            converted={isConverted}
           />
 
           <Button variant="outline" onClick={() => navigate(`/leads/${lead.id}/edit`)}>
-            Edit Qualification
+            {currentStage?.slug === "sales_validation_stage" ? "Edit Sales Validation" : "Edit Lead"}
           </Button>
 
           <Card>
@@ -150,9 +150,9 @@ export function LeadDetailPage() {
                 <p className="text-sm font-medium">Lead context</p>
               </div>
               <p className="text-sm text-muted-foreground">
-                {isLeadStage
-                  ? "This record is still in the lead stage. Converting it moves the work into the deal pipeline."
-                  : "This lead has already been converted, but the pre-RFP history remains available here."}
+                {isConverted
+                  ? "This lead has already been promoted into an Opportunity. Pre-conversion history stays here, while scoping now lives in the deal record."
+                  : "This record is still on the lead side of the workflow. Sales Validation is the last lead checkpoint before promotion into an Opportunity."}
               </p>
               <div className="flex items-center gap-2 text-sm text-muted-foreground">
                 <User className="h-4 w-4" />

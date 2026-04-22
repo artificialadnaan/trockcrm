@@ -29,11 +29,13 @@ import { createLeadService } from "../../../src/modules/leads/service.js";
 const pipelineMocks = vi.hoisted(() => ({
   getStageById: vi.fn(),
   getStageBySlug: vi.fn(),
+  getActiveProjectTypes: vi.fn(async () => []),
 }));
 
 vi.mock("../../../src/modules/pipeline/service.js", () => ({
   getStageById: pipelineMocks.getStageById,
   getStageBySlug: pipelineMocks.getStageBySlug,
+  getActiveProjectTypes: pipelineMocks.getActiveProjectTypes,
 }));
 
 vi.mock("@trock-crm/shared/schema", async () => import("../../../../shared/src/schema/index.js"));
@@ -366,6 +368,8 @@ interface FakeLeadRow {
   stageId: string;
   assignedRepId: string;
   status: "open" | "converted" | "disqualified";
+  pipelineType?: "normal" | "service";
+  preQualValue?: string | null;
   source: string | null;
   description: string | null;
   stageEnteredAt: Date;
@@ -730,11 +734,21 @@ const leadStage = {
   isTerminal: false,
 };
 
-const convertedLeadStage = {
-  id: "lead-stage-converted",
-  name: "Converted",
-  slug: "converted",
-  displayOrder: 99,
+const salesValidationLeadStage = {
+  id: "lead-stage-sales-validation",
+  name: "Sales Validation Stage",
+  slug: "sales_validation_stage",
+  displayOrder: 3,
+  workflowFamily: "lead" as const,
+  isActivePipeline: true,
+  isTerminal: false,
+};
+
+const opportunityLeadStage = {
+  id: "lead-stage-opportunity",
+  name: "Opportunity",
+  slug: "opportunity",
+  displayOrder: 4,
   workflowFamily: "lead" as const,
   isActivePipeline: true,
   isTerminal: true,
@@ -753,16 +767,22 @@ const dealStage = {
 beforeEach(() => {
   pipelineMocks.getStageById.mockReset();
   pipelineMocks.getStageBySlug.mockReset();
-  pipelineMocks.getStageById.mockImplementation(async (_id: string, workflowFamily?: string) => {
+  pipelineMocks.getStageById.mockImplementation(async (id: string, workflowFamily?: string) => {
     if (workflowFamily === "lead") {
+      if (id === salesValidationLeadStage.id) {
+        return salesValidationLeadStage;
+      }
+      if (id === opportunityLeadStage.id) {
+        return opportunityLeadStage;
+      }
       return leadStage;
     }
 
     return dealStage;
   });
   pipelineMocks.getStageBySlug.mockImplementation(async (slug: string, workflowFamily?: string) => {
-    if (workflowFamily === "lead" && slug === "converted") {
-      return convertedLeadStage;
+    if (workflowFamily === "lead" && slug === "opportunity") {
+      return opportunityLeadStage;
     }
 
     return null;
@@ -974,9 +994,11 @@ describe("Lead Conversion Service", () => {
           propertyId: "property-1",
           primaryContactId: null,
           name: "Palm Villas repaint",
-          stageId: "lead-stage-1",
+          stageId: "lead-stage-sales-validation",
           assignedRepId: "rep-1",
           status: "open",
+          pipelineType: "normal",
+          preQualValue: "85000",
           source: "Referral",
           description: "Property manager requested pre-bid walk",
           stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
@@ -988,6 +1010,7 @@ describe("Lead Conversion Service", () => {
       ],
     });
     const service = createLeadConversionService({
+      getStageById: pipelineMocks.getStageById as never,
       now: () => new Date("2026-04-15T15:00:00.000Z"),
       createDeal: async (_tenantDb, input) => {
         const deal = {
@@ -1017,19 +1040,131 @@ describe("Lead Conversion Service", () => {
 
     expect(result.deal.id).toBe("deal-1");
     expect(result.deal.sourceLeadId).toBe("lead-1");
+    expect(result.deal.workflowRoute).toBe("estimating");
     expect(result.lead.status).toBe("converted");
     expect(result.lead.convertedAt).toEqual(new Date("2026-04-15T15:00:00.000Z"));
-    expect(result.lead.stageId).toBe("lead-stage-converted");
+    expect(result.lead.stageId).toBe("lead-stage-opportunity");
     expect(result.lead.stageEnteredAt).toEqual(new Date("2026-04-15T15:00:00.000Z"));
     expect(tenantDb.state.leadStageHistory).toEqual([
       expect.objectContaining({
         leadId: "lead-1",
-        fromStageId: "lead-stage-1",
-        toStageId: "lead-stage-converted",
+        fromStageId: "lead-stage-sales-validation",
+        toStageId: "lead-stage-opportunity",
         changedBy: "rep-1",
       }),
     ]);
     expect(tenantDb.state.deals).toHaveLength(1);
+  });
+
+  it("only promotes a lead into Opportunity from Sales Validation Stage", async () => {
+    const tenantDb = createFakeTenantDb({
+      leads: [
+        {
+          id: "lead-1",
+          companyId: "company-1",
+          propertyId: "property-1",
+          primaryContactId: null,
+          name: "Palm Villas repaint",
+          stageId: "lead-stage-1",
+          assignedRepId: "rep-1",
+          status: "open",
+          pipelineType: "normal",
+          preQualValue: "85000",
+          source: "Referral",
+          description: null,
+          stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+          convertedAt: null,
+          isActive: true,
+          createdAt: new Date("2026-04-12T15:00:00.000Z"),
+          updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+        },
+      ],
+    });
+    const createDealSpy = vi.fn();
+    const service = createLeadConversionService({
+      getStageById: pipelineMocks.getStageById as never,
+      createDeal: createDealSpy as never,
+    });
+
+    await expect(
+      service.convertLead(tenantDb as never, {
+        leadId: "lead-1",
+        dealStageId: "deal-stage-1",
+        userRole: "rep",
+        userId: "rep-1",
+      })
+    ).rejects.toMatchObject<AppError>({
+      statusCode: 409,
+      message: "Only Sales Validation Stage leads can be promoted to Opportunity",
+    });
+
+    expect(createDealSpy).not.toHaveBeenCalled();
+    expect(tenantDb.state.leads[0]?.status).toBe("open");
+  });
+
+  it.each([
+    {
+      name: "service work below the $50k boundary",
+      pipelineType: "service" as const,
+      preQualValue: "49999.99",
+      expectedRoute: "service" as const,
+    },
+    {
+      name: "normal work at or above the $50k boundary",
+      pipelineType: "normal" as const,
+      preQualValue: "50000",
+      expectedRoute: "estimating" as const,
+    },
+  ])("maps %s into the correct downstream route", async ({ pipelineType, preQualValue, expectedRoute }) => {
+    const tenantDb = createFakeTenantDb({
+      leads: [
+        {
+          id: "lead-1",
+          companyId: "company-1",
+          propertyId: "property-1",
+          primaryContactId: null,
+          name: "Palm Villas repaint",
+          stageId: "lead-stage-sales-validation",
+          assignedRepId: "rep-1",
+          status: "open",
+          pipelineType,
+          preQualValue,
+          source: "Referral",
+          description: null,
+          stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+          convertedAt: null,
+          isActive: true,
+          createdAt: new Date("2026-04-12T15:00:00.000Z"),
+          updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+        },
+      ],
+    });
+    const service = createLeadConversionService({
+      getStageById: pipelineMocks.getStageById as never,
+      createDeal: async (_tenantDb, input) =>
+        ({
+          id: "deal-1",
+          dealNumber: "TR-2026-0001",
+          workflowRoute: input.workflowRoute ?? "estimating",
+          primaryContactId: input.primaryContactId ?? null,
+          companyId: input.companyId ?? null,
+          propertyId: input.propertyId ?? null,
+          sourceLeadId: input.sourceLeadId ?? null,
+          source: input.source ?? null,
+          assignedRepId: input.assignedRepId,
+          stageId: input.stageId,
+          name: input.name,
+        }) as never,
+    });
+
+    const result = await service.convertLead(tenantDb as never, {
+      leadId: "lead-1",
+      dealStageId: "deal-stage-1",
+      userRole: "rep",
+      userId: "rep-1",
+    });
+
+    expect(result.deal.workflowRoute).toBe(expectedRoute);
   });
 
   it("prevents multiple conversions from the same lead", async () => {
@@ -1041,7 +1176,7 @@ describe("Lead Conversion Service", () => {
           propertyId: "property-1",
           primaryContactId: null,
           name: "Palm Villas repaint",
-          stageId: "lead-stage-1",
+          stageId: "lead-stage-sales-validation",
           assignedRepId: "rep-1",
           status: "open",
           source: "Referral",
@@ -1055,6 +1190,7 @@ describe("Lead Conversion Service", () => {
       ],
     });
     const service = createLeadConversionService({
+      getStageById: pipelineMocks.getStageById as never,
       createDeal: async (_tenantDb, input) => {
         const deal = {
           id: `deal-${tenantDb.state.deals.length + 1}`,
@@ -1103,7 +1239,7 @@ describe("Lead Conversion Service", () => {
           propertyId: "property-1",
           primaryContactId: null,
           name: "Palm Villas repaint",
-          stageId: "lead-stage-1",
+          stageId: "lead-stage-sales-validation",
           assignedRepId: "rep-1",
           status: "open",
           source: "Referral",
@@ -1117,6 +1253,7 @@ describe("Lead Conversion Service", () => {
       ],
     });
     const service = createLeadConversionService({
+      getStageById: pipelineMocks.getStageById as never,
       createDeal: async (_tenantDb, input) => {
         const deal = {
           id: "deal-1",
@@ -1174,6 +1311,7 @@ describe("Lead Conversion Service", () => {
     });
     const createDealSpy = vi.fn();
     const service = createLeadConversionService({
+      getStageById: pipelineMocks.getStageById as never,
       createDeal: createDealSpy as never,
     });
 
@@ -1202,7 +1340,7 @@ describe("Lead Conversion Service", () => {
           propertyId: "property-1",
           primaryContactId: null,
           name: "Palm Villas repaint",
-          stageId: "lead-stage-1",
+          stageId: "lead-stage-sales-validation",
           assignedRepId: "rep-1",
           status: "open",
           source: "Referral",
@@ -1217,6 +1355,7 @@ describe("Lead Conversion Service", () => {
     });
     const createDealSpy = vi.fn();
     const service = createLeadConversionService({
+      getStageById: pipelineMocks.getStageById as never,
       createDeal: createDealSpy as never,
     });
 
@@ -1272,6 +1411,7 @@ describe("Lead Conversion Service", () => {
     });
     const createDealSpy = vi.fn();
     const service = createLeadConversionService({
+      getStageById: pipelineMocks.getStageById as never,
       createDeal: createDealSpy as never,
     });
 
@@ -1291,7 +1431,7 @@ describe("Lead Conversion Service", () => {
     expect(tenantDb.state.deals).toHaveLength(0);
   });
 
-  it("fails conversion when the converted lead stage is not configured", async () => {
+  it("fails conversion when the opportunity lead stage is not configured", async () => {
     pipelineMocks.getStageBySlug.mockResolvedValueOnce(null);
 
     const tenantDb = createFakeTenantDb({
@@ -1302,7 +1442,7 @@ describe("Lead Conversion Service", () => {
           propertyId: "property-1",
           primaryContactId: null,
           name: "Palm Villas repaint",
-          stageId: "lead-stage-1",
+          stageId: "lead-stage-sales-validation",
           assignedRepId: "rep-1",
           status: "open",
           source: "Referral",
@@ -1329,7 +1469,7 @@ describe("Lead Conversion Service", () => {
       })
     ).rejects.toMatchObject<AppError>({
       statusCode: 500,
-      message: "Missing converted lead stage configuration",
+      message: "Missing opportunity lead stage configuration",
     });
 
     expect(createDealSpy).not.toHaveBeenCalled();

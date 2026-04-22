@@ -12,7 +12,6 @@ type DealRow = typeof deals.$inferSelect;
 type DealScopingIntakeRow = typeof dealScopingIntake.$inferSelect;
 
 export type DealScopingPatch = {
-  workflowRoute?: WorkflowRoute;
   projectTypeId?: string | null;
   sectionData?: DealScopingSectionData;
 } & Record<string, unknown>;
@@ -114,14 +113,10 @@ function normalizeText(value: unknown): string | null | undefined {
 }
 
 function buildDealWritebackPatch(
-  patch: Pick<DealScopingPatch, "workflowRoute" | "projectTypeId">,
+  patch: Pick<DealScopingPatch, "projectTypeId">,
   sectionData: DealScopingSectionData
 ): Partial<DealRow> {
   const updates: Partial<DealRow> = {};
-
-  if (patch.workflowRoute !== undefined) {
-    updates.workflowRoute = patch.workflowRoute;
-  }
 
   if (patch.projectTypeId !== undefined) {
     updates.projectTypeId = patch.projectTypeId;
@@ -189,6 +184,10 @@ function buildSeedSectionDataFromDeal(deal: DealRow): DealScopingSectionData {
   }
 
   return sectionData;
+}
+
+function resolveScopingWorkspaceRoute(deal: DealRow): WorkflowRoute {
+  return deal.workflowRoute;
 }
 
 function buildBaseSectionData(
@@ -580,7 +579,7 @@ export async function upsertDealScopingIntake(
       .returning();
   }
 
-  const nextRoute = patch.workflowRoute ?? dealUpdates.workflowRoute ?? deal.workflowRoute;
+  const nextRoute = resolveScopingWorkspaceRoute(deal);
   const projectTypeId =
     patch.projectTypeId === undefined
       ? existingIntake?.projectTypeId ?? deal.projectTypeId ?? null
@@ -598,7 +597,6 @@ export async function upsertDealScopingIntake(
     deal: {
       ...deal,
       ...dealUpdates,
-      workflowRoute: nextRoute,
       projectTypeId,
     },
     userId,

@@ -93,13 +93,14 @@ export function DealDetailPage() {
   };
 
   const currentStageSlug = currentStage?.slug ?? "";
+  const isOpportunityStage = currentStageSlug === "opportunity";
   const showPunchList = ["in_production", "close_out", "closed_won"].includes(currentStageSlug);
   const showCloseout = ["close_out", "closed_won"].includes(currentStageSlug);
 
   const tabs: { key: Tab; label: string }[] = [
     { key: "overview", label: "Overview" },
     { key: "lead", label: "Lead" },
-    { key: "scoping", label: "Scoping" },
+    { key: "scoping", label: isOpportunityStage ? "Opportunity Scope" : "Scoping" },
     { key: "files", label: "Files" },
     { key: "email", label: "Email" },
     { key: "activity", label: "Activity" },
@@ -118,9 +119,11 @@ export function DealDetailPage() {
     const nextTab =
       requestedTab && availableTabs.includes(requestedTab as Tab)
         ? (requestedTab as Tab)
-        : "overview";
+        : isOpportunityStage
+          ? "scoping"
+          : "overview";
     setActiveTab((current) => (current === nextTab ? current : nextTab));
-  }, [availableTabs, requestedTab]);
+  }, [availableTabs, isOpportunityStage, requestedTab]);
 
   useEffect(() => {
     if (activeTab !== "overview" || requestedFocus !== "copilot") {
@@ -330,7 +333,7 @@ export function DealDetailPage() {
         <DealLeadTab
           deal={deal}
           companyName={company?.name ?? null}
-          isConverted={currentStageSlug !== "dd"}
+          isConverted={Boolean(deal.sourceLeadId)}
         />
       )}
       {activeTab === "scoping" && <DealScopingWorkspace deal={deal} onDealUpdated={refetch} />}

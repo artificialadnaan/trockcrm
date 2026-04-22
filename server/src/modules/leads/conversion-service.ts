@@ -5,7 +5,7 @@ import type * as schema from "@trock-crm/shared/schema";
 import type { WorkflowRoute } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 import { createDeal } from "../deals/service.js";
-import { getStageBySlug } from "../pipeline/service.js";
+import { getStageById, getStageBySlug } from "../pipeline/service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -31,15 +31,32 @@ export interface ConvertLeadInput {
 
 interface LeadConversionDependencies {
   createDeal: typeof createDeal;
+  getStageById: typeof getStageById;
   getStageBySlug: typeof getStageBySlug;
   now: () => Date;
 }
 
 const defaultDependencies: LeadConversionDependencies = {
   createDeal,
+  getStageById,
   getStageBySlug,
   now: () => new Date(),
 };
+
+function resolveWorkflowRoute(lead: typeof leads.$inferSelect): WorkflowRoute {
+  const preQualValue =
+    typeof lead.preQualValue === "number"
+      ? lead.preQualValue
+      : typeof lead.preQualValue === "string"
+        ? Number(lead.preQualValue)
+        : Number.NaN;
+
+  if (Number.isFinite(preQualValue)) {
+    return preQualValue < 50000 ? "service" : "estimating";
+  }
+
+  return lead.pipelineType === "service" ? "service" : "estimating";
+}
 
 export function createLeadConversionService(
   dependencies: Partial<LeadConversionDependencies> = {}
@@ -90,17 +107,26 @@ export function createLeadConversionService(
       throw new AppError(403, "You cannot reassign the successor deal");
     }
 
-    const convertedStage = await deps.getStageBySlug("converted", "lead");
-    if (!convertedStage) {
-      throw new AppError(500, "Missing converted lead stage configuration");
+    const currentLeadStage = await deps.getStageById(lead.stageId, "lead");
+    if (!currentLeadStage) {
+      throw new AppError(500, "Missing current lead stage configuration");
     }
 
-    const transitionedToConvertedStage = convertedStage.id !== lead.stageId;
+    if (currentLeadStage.slug !== "sales_validation_stage") {
+      throw new AppError(409, "Only Sales Validation Stage leads can be promoted to Opportunity");
+    }
+
+    const opportunityStage = await deps.getStageBySlug("opportunity", "lead");
+    if (!opportunityStage) {
+      throw new AppError(500, "Missing opportunity lead stage configuration");
+    }
+
+    const transitionedToOpportunityStage = opportunityStage.id !== lead.stageId;
 
     const deal = await deps.createDeal(tenantDb, {
       name: input.name ?? lead.name,
       stageId: input.dealStageId,
-      workflowRoute: input.workflowRoute ?? "estimating",
+      workflowRoute: resolveWorkflowRoute(lead),
       assignedRepId: successorAssignedRepId,
       officeId: input.officeId,
       primaryContactId:
@@ -123,11 +149,11 @@ export function createLeadConversionService(
 
     const convertedAt = deps.now();
 
-    if (transitionedToConvertedStage) {
+    if (transitionedToOpportunityStage) {
       await tenantDb.insert(leadStageHistory).values({
         leadId: lead.id,
         fromStageId: lead.stageId,
-        toStageId: convertedStage.id,
+        toStageId: opportunityStage.id,
         changedBy: input.userId,
         isBackwardMove: false,
         durationInPreviousStage: null,
@@ -138,7 +164,7 @@ export function createLeadConversionService(
     const [updatedLead] = await tenantDb
       .update(leads)
       .set({
-        stageId: transitionedToConvertedStage ? convertedStage.id : lead.stageId,
+        stageId: transitionedToOpportunityStage ? opportunityStage.id : lead.stageId,
         status: "converted",
         stageEnteredAt: convertedAt,
         convertedAt,

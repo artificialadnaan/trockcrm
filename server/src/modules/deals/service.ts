@@ -565,6 +565,12 @@ export async function updateDeal(
   if (input.expectedCloseDate !== undefined) updates.expectedCloseDate = input.expectedCloseDate;
   if (input.proposalNotes !== undefined) updates.proposalNotes = input.proposalNotes;
   if (input.workflowRoute !== undefined) {
+    if (existing.sourceLeadId) {
+      throw new AppError(
+        400,
+        "workflowRoute is derived from lead routing and cannot be changed manually"
+      );
+    }
     const stage = await getStageById(existing.stageId, workflowFamilyForRoute(input.workflowRoute));
     if (!stage) {
       throw new AppError(400, "Current stage is not valid for the requested workflow route");

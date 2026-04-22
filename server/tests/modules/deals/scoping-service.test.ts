@@ -428,6 +428,70 @@ describe("Scoping Service", () => {
     });
   });
 
+  it("ignores manual workflow route overrides in the opportunity scoping workspace", async () => {
+    const tenantDb = createFakeTenantDb({
+      deals: [
+        {
+          id: "deal-1",
+          name: "Palm Villas",
+          workflowRoute: "estimating",
+          expectedCloseDate: null,
+          propertyAddress: "123 Palm Way",
+          propertyCity: "Miami",
+          propertyState: "FL",
+          propertyZip: "33101",
+          description: "Exterior refresh",
+          projectTypeId: "project-type-1",
+          assignedRepId: "rep-1",
+        },
+      ],
+    });
+
+    const result = await upsertDealScopingIntake(
+      tenantDb as never,
+      "deal-1",
+      {
+        workflowRoute: "service",
+        projectOverview: { propertyName: "Palm Villas" },
+        propertyDetails: { propertyAddress: "123 Palm Way" },
+        scopeSummary: { summary: "Exterior refresh" },
+      },
+      "user-1"
+    );
+
+    expect(tenantDb.state.deals[0]?.workflowRoute).toBe("estimating");
+    expect(result.intake.workflowRouteSnapshot).toBe("estimating");
+    expect(result.readiness.requiredAttachmentKeys).toEqual(["scope_docs", "site_photos"]);
+  });
+
+  it("stores assign percent in scoping data without deriving readiness from it", async () => {
+    const tenantDb = createFakeTenantDb();
+
+    const result = await upsertDealScopingIntake(
+      tenantDb as never,
+      "deal-1",
+      {
+        projectOverview: {
+          propertyName: "Palm Villas",
+          bidDueDate: "2026-04-30",
+          assignPercent: "35",
+        },
+        propertyDetails: { propertyAddress: "123 Palm Way" },
+        scopeSummary: { summary: "Exterior refresh" },
+      },
+      "user-1"
+    );
+
+    expect(result.intake.sectionData).toMatchObject({
+      projectOverview: {
+        propertyName: "Palm Villas",
+        bidDueDate: "2026-04-30",
+        assignPercent: "35",
+      },
+    });
+    expect(result.readiness.errors.sections.projectOverview ?? []).not.toContain("assignPercent");
+  });
+
   it("marks intake ready only when required sections and attachments are satisfied", async () => {
     const tenantDb = createFakeTenantDb({
       dealScopingIntake: [
