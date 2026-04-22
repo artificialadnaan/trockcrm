@@ -920,6 +920,9 @@ describe("Lead Conversion Shared Contract", () => {
 
   it("remaps open leads from legacy lead stages into canonical aligned stages", () => {
     expect(existsSync(leadPipelineRemapMigrationPath)).toBe(true);
+    expect(leadPipelineRemapMigrationSql).toContain("nspname LIKE 'office\\_%'");
+    expect(leadPipelineRemapMigrationSql).toContain("table_name = 'leads'");
+    expect(leadPipelineRemapMigrationSql).toContain("UPDATE %I.leads AS l");
     expect(leadPipelineRemapMigrationSql).toContain("slug = 'contacted'");
     expect(leadPipelineRemapMigrationSql).toContain("slug = 'lead_new'");
     expect(leadPipelineRemapMigrationSql).toContain("slug = 'qualified_lead'");
@@ -929,6 +932,7 @@ describe("Lead Conversion Shared Contract", () => {
     expect(leadPipelineRemapMigrationSql).toContain("slug = 'ready_for_opportunity'");
     expect(leadPipelineRemapMigrationSql).toContain("slug = 'qualified_for_opportunity'");
     expect(leadPipelineRemapMigrationSql).toContain("status = 'open'");
+    expect(leadPipelineRemapMigrationSql).not.toContain("UPDATE public.leads");
   });
 
   it("persists neutral opportunity routing state on deals", () => {
