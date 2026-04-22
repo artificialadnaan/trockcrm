@@ -154,11 +154,9 @@ describe("buildPricingRecommendation", () => {
   it("resolves normalized pricing scope from extraction metadata before falling back to division or general", () => {
     expect(
       resolvePricingScopeFromExtraction({
-        divisionHint: "07",
-        metadataJson: {
-          pricingScopeType: "trade",
-          pricingScopeKey: "roofing",
-        },
+        divisionHint: null,
+        normalizedIntent: "Roofing tearoff",
+        rawLabel: "Roofing tearoff",
       })
     ).toEqual({
       pricingScopeType: "trade",
@@ -267,8 +265,13 @@ describe("buildPricingRecommendation", () => {
     for (const adjusted of [zeroAdjusted, negativeAdjusted]) {
       expect(Number.isFinite(adjusted.recommendedUnitPrice)).toBe(true);
       expect(Number.isFinite(adjusted.recommendedTotalPrice)).toBe(true);
+      expect(adjusted.quantity).toBe(1);
       expect(adjusted.recommendedUnitPrice).toBeCloseTo(42.25, 2);
       expect(adjusted.recommendedTotalPrice).toBeCloseTo(42.25, 2);
+      expect(adjusted.recommendedUnitPrice * adjusted.quantity).toBeCloseTo(
+        adjusted.recommendedTotalPrice,
+        2
+      );
     }
   });
 

@@ -98,7 +98,7 @@ export async function persistPricingRecommendationBundle(input: PersistPricingRe
       sourceType: input.extraction.sourceType,
       normalizedIntent: input.extraction.normalizedIntent,
       sourceRowIdentity: input.extraction.sourceRowIdentity,
-      recommendedQuantity: String(input.extraction.quantity),
+      recommendedQuantity: String(input.recommendation.quantity),
       recommendedUnit: input.extraction.unit ?? null,
       recommendedUnitPrice: formatCurrency(input.recommendation.recommendedUnitPrice),
       recommendedTotalPrice: formatCurrency(input.recommendation.recommendedTotalPrice),

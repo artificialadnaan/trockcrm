@@ -112,6 +112,45 @@ function normalizeScopeKey(value: unknown, fallback: string) {
   return trimmed.length > 0 ? trimmed : fallback;
 }
 
+const tradeScopeHints = new Set([
+  "roofing",
+  "flashing",
+  "tearoff",
+  "sealant",
+  "membrane",
+  "metal",
+  "siding",
+  "gutter",
+  "coping",
+  "insulation",
+  "waterproofing",
+  "concrete",
+  "masonry",
+  "carpentry",
+  "painting",
+  "drywall",
+  "electrical",
+  "plumbing",
+  "hvac",
+]);
+
+function inferTradeScopeKeyFromText(value: unknown) {
+  if (typeof value !== "string") return null;
+
+  const tokens = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .split(/\s+/)
+    .filter(Boolean);
+
+  if (tokens.length === 0) return null;
+
+  if (tradeScopeHints.has(tokens[0])) return tokens[0];
+
+  return tokens.find((token) => tradeScopeHints.has(token)) ?? null;
+}
+
 export function resolvePricingScopeFromExtraction(input: {
   divisionHint?: unknown;
   metadataJson?: unknown;
@@ -179,6 +218,15 @@ export function resolvePricingScopeFromExtraction(input: {
     };
   }
 
+  const inferredTradeKey = inferTradeScopeKeyFromText(input.normalizedIntent ?? input.rawLabel ?? null);
+
+  if (!input.divisionHint && inferredTradeKey != null) {
+    return {
+      pricingScopeType: "trade",
+      pricingScopeKey: inferredTradeKey,
+    };
+  }
+
   if (typeof input.divisionHint === "string" && input.divisionHint.trim().length > 0) {
     return {
       pricingScopeType: "division",
@@ -210,6 +258,7 @@ export function applyMarketRateAdjustment(input: {
 
   return {
     ...input.recommendation,
+    quantity: safeQuantity,
     recommendedUnitPrice: adjustedUnit,
     recommendedTotalPrice: adjustedTotal,
     marketAdjustmentPercent,
