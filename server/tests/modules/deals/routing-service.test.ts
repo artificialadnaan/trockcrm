@@ -12,6 +12,13 @@ const workflowAlignmentMigrationPath = resolve(
 const workflowAlignmentMigrationSql = existsSync(workflowAlignmentMigrationPath)
   ? readFileSync(workflowAlignmentMigrationPath, "utf8")
   : "";
+const servicePipelineSeedMigrationPath = resolve(
+  repoRoot,
+  "migrations/0045_service_pipeline_stage_seed.sql"
+);
+const servicePipelineSeedMigrationSql = existsSync(servicePipelineSeedMigrationPath)
+  ? readFileSync(servicePipelineSeedMigrationPath, "utf8")
+  : "";
 
 const leadQualificationSchemaPath = resolve(
   repoRoot,
@@ -63,6 +70,15 @@ describe("Workflow Alignment Routing Contract", () => {
     expect(workflowAlignmentMigrationSql).toContain("value_source");
     expect(workflowAlignmentMigrationSql).toContain("from_workflow_route");
     expect(workflowAlignmentMigrationSql).toContain("to_workflow_route");
+  });
+
+  it("adds active service-deal stages so under-threshold routing has an entry stage", () => {
+    expect(existsSync(servicePipelineSeedMigrationPath)).toBe(true);
+    expect(servicePipelineSeedMigrationSql).toContain("'service_deal'");
+    expect(servicePipelineSeedMigrationSql).toContain("'service_review'");
+    expect(servicePipelineSeedMigrationSql).toContain("'service_scheduled'");
+    expect(servicePipelineSeedMigrationSql).toContain("'service_complete'");
+    expect(servicePipelineSeedMigrationSql).toContain("is_active_pipeline");
   });
 
   it("routes deals under 50k into service and 50k+ into the deals path", async () => {
