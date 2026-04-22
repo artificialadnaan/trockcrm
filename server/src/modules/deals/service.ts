@@ -25,6 +25,7 @@ import { captureInitialForecastMilestone } from "../reports/forecast-milestones-
 import { createAssignmentTaskIfNeeded } from "../assignment-tasks/service.js";
 import { canCreateDealWithoutSourceLead } from "./direct-create-rules.js";
 import { getDealDepartmentOwnership } from "./ownership-service.js";
+import { evaluatePostConversionEnrichment } from "./post-conversion-enrichment.js";
 
 // Type alias for the tenant-scoped Drizzle instance
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -568,7 +569,6 @@ export async function getDealDetail(tenantDb: TenantDb, dealId: string, userRole
   if (!deal) return null;
 
   const currentStage = await getStageById(deal.stageId);
-
   const [stageHistory, approvals, cos, routingHistory, departmentOwnership] = await Promise.all([
     tenantDb
       .select()
@@ -600,6 +600,7 @@ export async function getDealDetail(tenantDb: TenantDb, dealId: string, userRole
 
   return {
     ...deal,
+    postConversionEnrichment: evaluatePostConversionEnrichment(deal, currentStage),
     stageHistory,
     approvals,
     changeOrders: cos,
