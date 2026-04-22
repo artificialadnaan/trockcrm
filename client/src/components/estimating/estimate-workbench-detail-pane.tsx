@@ -58,7 +58,12 @@ export function EstimateWorkbenchDetailPane({
           ? "Failed"
           : "Idle";
   const marketName = workflow.marketContext?.effectiveMarket?.name ?? "No market";
-  const marketMode = workflow.marketContext?.isOverridden ? "Override active" : "Auto-detected";
+  const hasMarketContext = Boolean(workflow.marketContext);
+  const marketMode = workflow.marketContext?.isOverridden
+    ? "Override active"
+    : hasMarketContext
+      ? "Auto-detected"
+      : "No market context";
 
   return (
     <aside className="rounded-lg border bg-background">
@@ -89,11 +94,15 @@ export function EstimateWorkbenchDetailPane({
           <div className="text-xs uppercase tracking-wide text-muted-foreground">Effective market</div>
           <div className="mt-1 text-xl font-semibold">{marketName}</div>
           <div className="mt-1 text-xs text-muted-foreground">
-            {marketMode} · {formatEstimateResolutionLevel(workflow.marketContext?.resolutionLevel)}
+            {hasMarketContext
+              ? `${marketMode} · ${formatEstimateResolutionLevel(workflow.marketContext?.resolutionLevel)}`
+              : marketMode}
           </div>
-          <div className="mt-1 text-xs text-muted-foreground">
-            {getEstimateResolutionSourceLabel(workflow.marketContext?.resolutionSource ?? null)}
-          </div>
+          {hasMarketContext ? (
+            <div className="mt-1 text-xs text-muted-foreground">
+              {getEstimateResolutionSourceLabel(workflow.marketContext?.resolutionSource ?? null)}
+            </div>
+          ) : null}
           {workflow.marketContext?.override?.overrideReason ? (
             <div className="mt-1 text-xs text-muted-foreground">
               Reason: {workflow.marketContext.override.overrideReason}

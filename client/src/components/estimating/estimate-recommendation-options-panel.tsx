@@ -3,7 +3,11 @@ import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
-import { collectPricingOverrideInput, isFreeTextManualRow } from "./estimate-pricing-review-table";
+import {
+  collectPricingOverrideInput,
+  getDisplayedMarketRateAdjustedValue,
+  isFreeTextManualRow,
+} from "./estimate-pricing-review-table";
 
 export { runEstimatePricingReviewStateAction } from "./estimate-pricing-review-table";
 
@@ -207,6 +211,10 @@ export function EstimateRecommendationOptionsPanel({
     recommendationOptions: options,
   });
   const marketRate = getMarketRateEvidence(recommendation);
+  const adjustedMarketRateValue = getDisplayedMarketRateAdjustedValue({
+    marketRate,
+    recommendedTotalPrice: recommendation.recommendedTotalPrice,
+  });
   const actionBusy = actionsDisabled || pendingAction !== null;
   const canOverride =
     hasNumericPriceValue(recommendation.recommendedUnitPrice) &&
@@ -426,8 +434,8 @@ export function EstimateRecommendationOptionsPanel({
               </div>
               <div>
                 Adjusted:{" "}
-                {getNumberValue(marketRate.adjustedPrice ?? recommendation.recommendedUnitPrice) != null
-                  ? formatCurrency(marketRate.adjustedPrice ?? recommendation.recommendedUnitPrice)
+                {adjustedMarketRateValue != null
+                  ? formatCurrency(adjustedMarketRateValue)
                   : "No adjusted price"}
               </div>
               {Array.isArray(marketRate.componentAdjustments)

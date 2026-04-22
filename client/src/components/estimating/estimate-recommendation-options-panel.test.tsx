@@ -80,7 +80,6 @@ describe("EstimateRecommendationOptionsPanel", () => {
               resolutionLevel: "state",
               resolutionSource: { type: "state", key: "TX" },
               baselinePrice: 320,
-              adjustedPrice: 342.5,
               componentAdjustments: [
                 { component: "labor", adjustmentPercent: 8, adjustedAmount: 120 },
               ],
@@ -103,7 +102,7 @@ describe("EstimateRecommendationOptionsPanel", () => {
     expect(html).toContain("Market: North Texas");
     expect(html).toContain("Auto-detected");
     expect(html).toContain("Baseline: $320.00");
-    expect(html).toContain("Adjusted: $342.50");
+    expect(html).toContain("Adjusted: No adjusted price");
     expect(html).toContain("labor: +8%");
     expect(html).toContain("Resolution source: state");
     expect(html).toContain("Assumptions:");
@@ -137,6 +136,32 @@ describe("EstimateRecommendationOptionsPanel", () => {
     );
 
     expect(html).toContain("Promote to local catalog");
+  });
+
+  it("uses the actual recommendation total when market-rate evidence omits adjustedPrice", () => {
+    const html = renderToStaticMarkup(
+      <EstimateRecommendationOptionsPanel
+        dealId="deal-1"
+        recommendation={{
+          id: "price-adjusted-total",
+          recommendedUnitPrice: "33.33",
+          recommendedTotalPrice: "99.99",
+          assumptionsJson: {
+            marketRate: {
+              resolvedMarket: { name: "Gulf Coast" },
+              resolutionLevel: "metro",
+              resolutionSource: { type: "zip", key: "77001" },
+              baselinePrice: 90,
+            },
+          },
+        }}
+        onReviewAction={vi.fn()}
+        onPromoteLocalCatalog={vi.fn()}
+      />
+    );
+
+    expect(html).toContain("Adjusted: $99.99");
+    expect(html).not.toContain("Adjusted: $33.33");
   });
 
   it("does not show local-catalog promotion for manual rows that still carry catalog-backed provenance", () => {

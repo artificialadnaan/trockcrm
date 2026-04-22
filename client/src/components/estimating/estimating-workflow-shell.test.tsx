@@ -50,6 +50,8 @@ vi.mock("./estimate-catalog-match-table", () => ({
 
 vi.mock("./estimate-pricing-review-table", () => ({
   isFreeTextManualRow: () => false,
+  getDisplayedMarketRateAdjustedValue: ({ recommendedTotalPrice }: { recommendedTotalPrice?: string | number | null }) =>
+    recommendedTotalPrice ?? null,
   EstimatePricingReviewTable: ({
     onRefresh,
     onOpenManualAdd,

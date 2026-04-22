@@ -165,6 +165,17 @@ function getMarketRateEvidence(row: PricingReviewRow | null) {
   return marketRate;
 }
 
+export function getDisplayedMarketRateAdjustedValue(args: {
+  marketRate: Record<string, unknown> | null;
+  recommendedTotalPrice?: string | number | null;
+}) {
+  return (
+    getNumberValue(args.marketRate?.adjustedPrice) ??
+    getNumberValue(args.recommendedTotalPrice) ??
+    null
+  );
+}
+
 function getSupplementalJsonSummary(value: unknown) {
   const objectValue = getObjectValue(value);
   if (!objectValue) {
@@ -197,10 +208,10 @@ function renderMarketRateEvidence(row: PricingReviewRow | null) {
   const componentAdjustments = Array.isArray(marketRate.componentAdjustments)
     ? (marketRate.componentAdjustments as Array<Record<string, unknown>>)
     : [];
-  const adjustedPrice =
-    getNumberValue(marketRate.adjustedPrice) ??
-    getNumberValue(row?.recommendedUnitPrice) ??
-    getNumberValue(row?.recommendedTotalPrice);
+  const adjustedPrice = getDisplayedMarketRateAdjustedValue({
+    marketRate,
+    recommendedTotalPrice: row?.recommendedTotalPrice,
+  });
   const fallbackSource = getObjectValue(marketRate.fallbackSource);
   const mode = marketRate.resolutionLevel === "override" ? "Override active" : "Auto-detected";
 
@@ -215,7 +226,7 @@ function renderMarketRateEvidence(row: PricingReviewRow | null) {
       </div>
       <div>{mode}</div>
       <div>Baseline: {formatCurrency(marketRate.baselinePrice as string | number | null | undefined)}</div>
-      <div>Adjusted: {formatCurrency(adjustedPrice)}</div>
+      <div>Adjusted: {adjustedPrice == null ? "No adjusted price" : formatCurrency(adjustedPrice)}</div>
       {componentAdjustments.map((component) => (
         <div key={String(component.component ?? "component")}>
           {String(component.component ?? "component")}:{" "}

@@ -48,4 +48,20 @@ describe("EstimateWorkbenchDetailPane", () => {
     expect(html).toContain("Failed");
     expect(html).toContain("Queue worker timed out");
   });
+
+  it("shows a true no-context state when market resolution is unavailable", () => {
+    const html = renderToStaticMarkup(
+      <EstimateWorkbenchDetailPane
+        activePanel="pricing"
+        workflow={{
+          ...workflow,
+          marketContext: null,
+        }}
+      />
+    );
+
+    expect(html).toContain("No market context");
+    expect(html).not.toContain("Auto-detected");
+    expect(html).not.toContain("unknown source");
+  });
 });

@@ -118,6 +118,31 @@ export function getEstimateResolutionSourceLabel(
   return resolutionSource?.key ? `${sourceType} (${resolutionSource.key})` : sourceType;
 }
 
+export function canApplyEstimateMarketOverride(args: {
+  marketContext: EstimateMarketContext;
+  selectedMarketId: string;
+  pendingAction: "set" | "clear" | null;
+}) {
+  if (!args.selectedMarketId || args.pendingAction !== null) {
+    return false;
+  }
+
+  if (!args.marketContext) {
+    return true;
+  }
+
+  const currentMarketId = args.marketContext.override?.marketId ?? args.marketContext.effectiveMarket.id;
+  if (!currentMarketId) {
+    return true;
+  }
+
+  if (args.marketContext.isOverridden) {
+    return args.selectedMarketId !== currentMarketId;
+  }
+
+  return args.selectedMarketId !== args.marketContext.effectiveMarket.id;
+}
+
 function getEstimateLocationLabel(marketContext: EstimateMarketContext) {
   const parts = [
     marketContext?.location?.zip?.trim(),
@@ -144,6 +169,11 @@ export function EstimateMarketOverridePanel({
   const [reason, setReason] = useState<string>(marketContext?.override?.overrideReason ?? "");
   const [loadingChoices, setLoadingChoices] = useState(false);
   const [pendingAction, setPendingAction] = useState<"set" | "clear" | null>(null);
+  const canApplyOverride = canApplyEstimateMarketOverride({
+    marketContext,
+    selectedMarketId,
+    pendingAction,
+  });
 
   useEffect(() => {
     setSelectedMarketId(marketContext?.override?.marketId ?? marketContext?.effectiveMarket.id ?? "");
@@ -292,7 +322,7 @@ export function EstimateMarketOverridePanel({
         ) : null}
 
         <div className="flex flex-wrap gap-2">
-          <Button size="sm" disabled={!selectedMarketId || pendingAction !== null} onClick={handleApplyOverride}>
+          <Button size="sm" disabled={!canApplyOverride} onClick={handleApplyOverride}>
             {pendingAction === "set" ? "Applying..." : "Apply override"}
           </Button>
           <Button

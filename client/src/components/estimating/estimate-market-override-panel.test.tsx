@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
   EstimateMarketOverridePanel,
+  canApplyEstimateMarketOverride,
   loadEstimateMarketChoicesAction,
   runEstimateClearMarketOverrideAction,
   runEstimateSetMarketOverrideAction,
@@ -96,5 +97,33 @@ describe("EstimateMarketOverridePanel", () => {
       },
     });
     expect(refresh).toHaveBeenCalledTimes(2);
+  });
+
+  it("blocks a no-op override when the selected market already matches the auto-detected market", () => {
+    expect(
+      canApplyEstimateMarketOverride({
+        marketContext: {
+          effectiveMarket: { id: "market-1", name: "North Texas" },
+          resolutionLevel: "state",
+          isOverridden: false,
+          override: null,
+        },
+        selectedMarketId: "market-1",
+        pendingAction: null,
+      })
+    ).toBe(false);
+
+    expect(
+      canApplyEstimateMarketOverride({
+        marketContext: {
+          effectiveMarket: { id: "market-1", name: "North Texas" },
+          resolutionLevel: "override",
+          isOverridden: true,
+          override: { marketId: "market-1", marketName: "North Texas" },
+        },
+        selectedMarketId: "market-1",
+        pendingAction: null,
+      })
+    ).toBe(false);
   });
 });

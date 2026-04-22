@@ -259,11 +259,13 @@ function createMarketOverrideTenantDb() {
         insertCalls.push({ table, payload });
         if (isOverrideTable(table)) {
           overrideRow = payload;
+          (tenantDb as any).__overrideRow = overrideRow;
         }
         const chain: any = {
           onConflictDoUpdate() {
             if (isOverrideTable(table)) {
               overrideRow = payload;
+              (tenantDb as any).__overrideRow = overrideRow;
             }
             return chain;
           },
@@ -278,13 +280,71 @@ function createMarketOverrideTenantDb() {
           if (!isOverrideTable(table)) return [];
           const deleted = overrideRow ? [{ ...overrideRow }] : [];
           overrideRow = null;
+          (tenantDb as any).__overrideRow = overrideRow;
           return deleted;
         }),
       })),
     })),
   } as any;
+  tenantDb.__overrideRow = overrideRow;
 
   return { tenantDb, insertCalls, marketRow };
+}
+
+function installMarketContextMocksForOverrideFlow() {
+  marketRateProviderMocks.createMarketRateProvider.mockImplementation((tenantDb: any) => ({ tenantDb }));
+  marketResolutionServiceMocks.resolveMarketContext.mockImplementation(async (provider: any, input: any) => {
+    const overrideRow = provider?.tenantDb?.__overrideRow ?? null;
+    const location = {
+      zip: input.dealZip ?? input.propertyZip ?? null,
+      state: input.dealState ?? input.propertyState ?? null,
+      regionId: input.dealRegionId ?? input.propertyRegionId ?? null,
+    };
+
+    if (overrideRow) {
+      return {
+        market: {
+          id: overrideRow.marketId,
+          name: "Override Market",
+          slug: "override-market",
+          type: "state",
+          stateCode: "TX",
+          regionId: null,
+          isActive: true,
+          createdAt: new Date("2026-04-21T00:00:00Z"),
+          updatedAt: new Date("2026-04-21T00:00:00Z"),
+        },
+        resolutionLevel: "override",
+        resolutionSource: {
+          type: "override",
+          key: input.dealId,
+          marketId: overrideRow.marketId,
+        },
+        location,
+      };
+    }
+
+    return {
+      market: {
+        id: "market-1",
+        name: "Default Market",
+        slug: "default",
+        type: "global",
+        stateCode: null,
+        regionId: null,
+        isActive: true,
+        createdAt: new Date("2026-04-21T00:00:00Z"),
+        updatedAt: new Date("2026-04-21T00:00:00Z"),
+      },
+      resolutionLevel: "global_default",
+      resolutionSource: {
+        type: "global",
+        key: "default",
+        marketId: "market-1",
+      },
+      location,
+    };
+  });
 }
 
 describe("estimating workflow routes", () => {
@@ -966,6 +1026,7 @@ describe("estimating workflow routes", () => {
         properties: makeTable("properties", ["id", "zip", "state"]),
       };
     });
+    installMarketContextMocksForOverrideFlow();
     vi.doMock("../../../src/modules/estimating/market-rate-provider.js", () => marketRateProviderMocks);
     vi.doMock("../../../src/modules/estimating/market-resolution-service.js", () => marketResolutionServiceMocks);
     const actualService = await import("../../../src/modules/estimating/deal-market-override-service.js");
@@ -994,6 +1055,20 @@ describe("estimating workflow routes", () => {
       eventType: "market_override_set",
       userId: "user-1",
       reason: "storm area",
+    });
+    expect(reviewInsert?.payload.beforeJson).toMatchObject({
+      effectiveMarket: { id: "market-1" },
+      resolutionLevel: "global_default",
+      resolutionSource: { type: "global" },
+      override: null,
+    });
+    expect(reviewInsert?.payload.afterJson).toMatchObject({
+      effectiveMarket: { id: "market-override" },
+      resolutionLevel: "override",
+      resolutionSource: { type: "override" },
+      override: expect.objectContaining({
+        marketId: "market-override",
+      }),
     });
     expect(jobInsert?.payload).toMatchObject({
       jobType: "estimate_generation",
@@ -1051,6 +1126,7 @@ describe("estimating workflow routes", () => {
         properties: makeTable("properties", ["id", "zip", "state"]),
       };
     });
+    installMarketContextMocksForOverrideFlow();
     vi.doMock("../../../src/modules/estimating/market-rate-provider.js", () => marketRateProviderMocks);
     vi.doMock("../../../src/modules/estimating/market-resolution-service.js", () => marketResolutionServiceMocks);
     const actualService = await import("../../../src/modules/estimating/deal-market-override-service.js");
@@ -1086,6 +1162,20 @@ describe("estimating workflow routes", () => {
       eventType: "market_override_cleared",
       userId: "user-1",
       reason: "seasonal reset",
+    });
+    expect(reviewInsert?.payload.beforeJson).toMatchObject({
+      effectiveMarket: { id: "market-override" },
+      resolutionLevel: "override",
+      resolutionSource: { type: "override" },
+      override: expect.objectContaining({
+        marketId: "market-override",
+      }),
+    });
+    expect(reviewInsert?.payload.afterJson).toMatchObject({
+      effectiveMarket: { id: "market-1" },
+      resolutionLevel: "global_default",
+      resolutionSource: { type: "global" },
+      override: null,
     });
     expect(jobInsert?.payload).toMatchObject({
       jobType: "estimate_generation",

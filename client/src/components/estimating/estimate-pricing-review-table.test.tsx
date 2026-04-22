@@ -69,7 +69,6 @@ describe("EstimatePricingReviewTable", () => {
             resolutionLevel: "state",
             resolutionSource: { type: "state", key: "TX" },
             baselinePrice: 320,
-            adjustedPrice: 355.25,
             componentAdjustments: [
               { component: "labor", adjustmentPercent: 8, adjustedAmount: 120 },
             ],
@@ -89,7 +88,7 @@ describe("EstimatePricingReviewTable", () => {
     expect(html).toContain("Alternates");
     expect(html).toContain("Market rate: North Texas");
     expect(html).toContain("Baseline: $320.00");
-    expect(html).toContain("Adjusted: $355.25");
+    expect(html).toContain("Adjusted: $4,263.00");
     expect(html).toContain("Auto-detected");
     expect(html).toContain("labor: +8%");
     expect(html).toContain("Assumptions:");
@@ -100,6 +99,30 @@ describe("EstimatePricingReviewTable", () => {
     expect(html).toContain("Reject");
     expect(html).toContain("Pending review");
     expect(html).toContain("Promote to local catalog");
+  });
+
+  it("does not fall back to a unit price in the adjusted total slot when the market-rate payload omits adjustedPrice", () => {
+    const html = renderTable([
+      {
+        id: "price-adjusted-total",
+        status: "pending_review",
+        recommendedQuantity: "3",
+        recommendedUnit: "ea",
+        recommendedUnitPrice: "33.33",
+        recommendedTotalPrice: "99.99",
+        assumptionsJson: {
+          marketRate: {
+            resolvedMarket: { name: "Gulf Coast" },
+            resolutionLevel: "metro",
+            resolutionSource: { type: "zip", key: "77001" },
+            baselinePrice: 90,
+          },
+        },
+      },
+    ]);
+
+    expect(html).toContain("Adjusted: $99.99");
+    expect(html).not.toContain("Adjusted: $33.33");
   });
 
   it("does not expose local-catalog promotion for catalog-backed rows", () => {
