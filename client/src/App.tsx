@@ -1,13 +1,15 @@
-import { Routes, Route, Navigate } from "react-router-dom";
-import type { ReactNode } from "react";
+import { Routes, Route, Navigate, useSearchParams } from "react-router-dom";
+import { Suspense, lazy, type ReactNode } from "react";
 import { AuthProvider, useAuth } from "@/lib/auth";
-import { DevUserPicker } from "@/components/auth/dev-user-picker";
+import { AuthEntryScreen } from "@/components/auth/auth-entry-screen";
+import { ForcePasswordChangeScreen } from "@/components/auth/force-password-change-screen";
+import { RequireRole } from "@/components/auth/require-role";
 import { AppShell } from "@/components/layout/app-shell";
-import { DealListPage } from "@/pages/deals/deal-list-page";
 import { DealDetailPage } from "@/pages/deals/deal-detail-page";
 import { DealNewPage } from "@/pages/deals/deal-new-page";
 import { DealEditPage } from "@/pages/deals/deal-edit-page";
 import { PipelinePage } from "@/pages/pipeline/pipeline-page";
+import { MyCleanupPage } from "@/pages/pipeline/my-cleanup-page";
 import { ContactListPage } from "@/pages/contacts/contact-list-page";
 import { ContactDetailPage } from "@/pages/contacts/contact-detail-page";
 import { ContactNewPage } from "@/pages/contacts/contact-new-page";
@@ -16,18 +18,17 @@ import { CompanyListPage } from "@/pages/companies/company-list-page";
 import { CompanyDetailPage } from "@/pages/companies/company-detail-page";
 import { CompanyNewPage } from "@/pages/companies/company-new-page";
 import { CompanyEditPage } from "@/pages/companies/company-edit-page";
-import { LeadListPage } from "@/pages/leads/lead-list-page";
 import { LeadDetailPage } from "@/pages/leads/lead-detail-page";
+import { LeadNewPage } from "@/pages/leads/lead-new-page";
 import { PropertyListPage } from "@/pages/properties/property-list-page";
 import { PropertyDetailPage } from "@/pages/properties/property-detail-page";
 import { MergeQueuePage } from "@/pages/admin/merge-queue-page";
 import { EmailInboxPage } from "@/pages/email/email-inbox-page";
 import { TaskListPage } from "@/pages/tasks/task-list-page";
 import { FilesPage } from "@/pages/files/files-page";
-import { RepDashboardPage } from "@/pages/dashboard/rep-dashboard-page";
-import { DirectorDashboardPage } from "@/pages/director/director-dashboard-page";
 import { DirectorRepDetail } from "@/pages/director/director-rep-detail";
 import { ReportsPage } from "@/pages/reports/reports-page";
+import { SalesReviewPage } from "@/pages/sales-review/sales-review-page";
 import { ProjectsPage } from "@/pages/projects/projects-page";
 import { ProcoreSyncPage } from "@/pages/admin/procore-sync-page";
 import { MigrationDashboardPage } from "@/pages/admin/migration/migration-dashboard-page";
@@ -44,18 +45,50 @@ import { AiActionQueuePage } from "@/pages/admin/ai-action-queue-page";
 import { AiOpsPage } from "@/pages/admin/ai-ops-page";
 import { AiPacketReviewPage } from "@/pages/admin/ai-packet-review-page";
 import { AdminInterventionWorkspacePage } from "@/pages/admin/admin-intervention-workspace-page";
+import { AdminInterventionAnalyticsPage } from "@/pages/admin/admin-intervention-analytics-page";
 import { SalesProcessDisconnectsPage } from "@/pages/admin/sales-process-disconnects-page";
+import { AdminDataScrubPage } from "@/pages/admin/admin-data-scrub-page";
 import { UserGuidePage } from "@/pages/admin/help/user-guide-page";
 import { AdminGuidePage } from "@/pages/admin/help/admin-guide-page";
 import { CompanyCamPage } from "@/pages/admin/companycam-page";
 import { PhotoCapturePage } from "@/pages/photos/photo-capture-page";
 import { PhotoFeedPage } from "@/pages/photos/photo-feed-page";
+import { PipelineHygienePage } from "@/pages/pipeline/pipeline-hygiene-page";
+import { ProjectDetailPage } from "@/pages/projects/project-detail-page";
 import { Toaster } from "@/components/ui/sonner";
 
-function HomePage() {
-  const { user } = useAuth();
-  if (user?.role === "rep") return <RepDashboardPage />;
-  return <DirectorDashboardPage />;
+const HomeDashboardPage = lazy(() =>
+  import("@/pages/dashboard/home-dashboard-page").then((module) => ({ default: module.HomeDashboardPage }))
+);
+const DealListPage = lazy(() =>
+  import("@/pages/deals/deal-list-page").then((module) => ({ default: module.DealListPage }))
+);
+const DealStagePage = lazy(() =>
+  import("@/pages/deals/deal-stage-page").then((module) => ({ default: module.DealStagePage }))
+);
+const LeadListPage = lazy(() =>
+  import("@/pages/leads/lead-list-page").then((module) => ({ default: module.LeadListPage }))
+);
+const LeadStagePage = lazy(() =>
+  import("@/pages/leads/lead-stage-page").then((module) => ({ default: module.LeadStagePage }))
+);
+const DirectorDashboardPage = lazy(() =>
+  import("@/pages/director/director-dashboard-page").then((module) => ({ default: module.DirectorDashboardPage }))
+);
+const RepCommissionsPage = lazy(() =>
+  import("@/pages/commissions/rep-commissions-page").then((module) => ({ default: module.RepCommissionsPage }))
+);
+const TeamCommissionsPage = lazy(() =>
+  import("@/pages/commissions/team-commissions-page").then((module) => ({ default: module.TeamCommissionsPage }))
+);
+const GlobalCommissionsPage = lazy(() =>
+  import("@/pages/admin/global-commissions-page").then((module) => ({ default: module.GlobalCommissionsPage }))
+);
+
+function BoardAliasRedirect({ entity }: { entity: "leads" | "deals" }) {
+  const [searchParams] = useSearchParams();
+  const next = searchParams.toString();
+  return <Navigate to={next ? `/${entity}?${next}` : `/${entity}`} replace />;
 }
 
 function AuthGate({ children }: { children: ReactNode }) {
@@ -69,28 +102,44 @@ function AuthGate({ children }: { children: ReactNode }) {
     );
   }
 
-  if (!user) return <DevUserPicker />;
+  if (!user) return <AuthEntryScreen />;
+  if (user.mustChangePassword) return <ForcePasswordChangeScreen />;
   return <>{children}</>;
+}
+
+function RouteFallback() {
+  return (
+    <div className="flex min-h-[12rem] items-center justify-center rounded-2xl border border-slate-200 bg-white text-sm text-slate-500">
+      Loading workspace...
+    </div>
+  );
 }
 
 export function App() {
   return (
     <AuthProvider>
       <AuthGate>
-        <>
-          <Routes>
+        <Suspense fallback={<RouteFallback />}>
+          <>
+            <Routes>
             <Route path="/photos/capture" element={<PhotoCapturePage />} />
             <Route element={<AppShell />}>
-              <Route path="/" element={<HomePage />} />
+              <Route path="/" element={<HomeDashboardPage />} />
               <Route path="/deals" element={<DealListPage />} />
+              <Route path="/deals/board" element={<BoardAliasRedirect entity="deals" />} />
+              <Route path="/deals/stages/:stageId" element={<DealStagePage />} />
               <Route path="/deals/new" element={<DealNewPage />} />
               <Route path="/deals/:id" element={<DealDetailPage />} />
               <Route path="/deals/:id/edit" element={<DealEditPage />} />
               <Route path="/leads" element={<LeadListPage />} />
+              <Route path="/leads/board" element={<BoardAliasRedirect entity="leads" />} />
+              <Route path="/leads/stages/:stageId" element={<LeadStagePage />} />
+              <Route path="/leads/new" element={<LeadNewPage />} />
               <Route path="/leads/:id" element={<LeadDetailPage />} />
               <Route path="/properties" element={<PropertyListPage />} />
               <Route path="/properties/:id" element={<PropertyDetailPage />} />
               <Route path="/pipeline" element={<PipelinePage />} />
+              <Route path="/pipeline/my-cleanup" element={<MyCleanupPage />} />
               <Route path="/contacts" element={<ContactListPage />} />
               <Route path="/contacts/new" element={<ContactNewPage />} />
               <Route path="/contacts/:id" element={<ContactDetailPage />} />
@@ -103,35 +152,219 @@ export function App() {
               <Route path="/tasks" element={<TaskListPage />} />
               <Route path="/files" element={<FilesPage />} />
               <Route path="/reports" element={<ReportsPage />} />
+              <Route
+                path="/commissions"
+                element={(
+                  <RequireRole allowedRoles={["rep"]}>
+                    <RepCommissionsPage />
+                  </RequireRole>
+                )}
+              />
+              <Route path="/sales-review" element={<SalesReviewPage />} />
+              <Route path="/pipeline/hygiene" element={<PipelineHygienePage />} />
               <Route path="/projects" element={<ProjectsPage />} />
-              <Route path="/director" element={<DirectorDashboardPage />} />
-              <Route path="/director/rep/:repId" element={<DirectorRepDetail />} />
+              <Route path="/projects/:id" element={<ProjectDetailPage />} />
+              <Route
+                path="/director"
+                element={(
+                  <RequireRole allowedRoles={["admin", "director"]}>
+                    <DirectorDashboardPage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/director/rep/:repId"
+                element={(
+                  <RequireRole allowedRoles={["admin", "director"]}>
+                    <DirectorRepDetail />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/director/commissions"
+                element={(
+                  <RequireRole allowedRoles={["admin", "director"]}>
+                    <TeamCommissionsPage />
+                  </RequireRole>
+                )}
+              />
               <Route path="/search" element={<SearchPage />} />
-              <Route path="/admin/offices" element={<OfficesPage />} />
-              <Route path="/admin/users" element={<UsersPage />} />
-              <Route path="/admin/pipeline" element={<PipelineConfigPage />} />
-              <Route path="/admin/audit" element={<AuditLogPage />} />
-              <Route path="/admin/cross-office-reports" element={<CrossOfficeReportsPage />} />
-              <Route path="/admin/ai-actions" element={<AiActionQueuePage />} />
-              <Route path="/admin/interventions" element={<AdminInterventionWorkspacePage />} />
-              <Route path="/admin/sales-process-disconnects" element={<SalesProcessDisconnectsPage />} />
-              <Route path="/admin/merge-queue" element={<MergeQueuePage />} />
-              <Route path="/admin/procore" element={<ProcoreSyncPage />} />
-              <Route path="/admin/ai-ops" element={<AiOpsPage />} />
-              <Route path="/admin/ai-ops/reviews/:packetId" element={<AiPacketReviewPage />} />
-              <Route path="/admin/companycam" element={<CompanyCamPage />} />
-              <Route path="/admin/migration" element={<MigrationDashboardPage />} />
-              <Route path="/admin/migration/review" element={<MigrationReviewPage />} />
-              <Route path="/admin/migration/deals" element={<MigrationDealsPage />} />
-              <Route path="/admin/migration/contacts" element={<MigrationContactsPage />} />
+              <Route
+                path="/admin/offices"
+                element={(
+                  <RequireRole allowedRoles={["admin"]}>
+                    <OfficesPage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/admin/users"
+                element={(
+                  <RequireRole allowedRoles={["admin"]}>
+                    <UsersPage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/admin/pipeline"
+                element={(
+                  <RequireRole allowedRoles={["admin"]}>
+                    <PipelineConfigPage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/admin/commissions"
+                element={(
+                  <RequireRole allowedRoles={["admin"]}>
+                    <GlobalCommissionsPage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/admin/audit"
+                element={(
+                  <RequireRole allowedRoles={["admin", "director"]}>
+                    <AuditLogPage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/admin/data-scrub"
+                element={(
+                  <RequireRole allowedRoles={["admin", "director"]}>
+                    <AdminDataScrubPage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/admin/cross-office-reports"
+                element={(
+                  <RequireRole allowedRoles={["admin", "director"]}>
+                    <CrossOfficeReportsPage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/admin/ai-actions"
+                element={(
+                  <RequireRole allowedRoles={["admin", "director"]}>
+                    <AiActionQueuePage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/admin/interventions"
+                element={(
+                  <RequireRole allowedRoles={["admin", "director"]}>
+                    <AdminInterventionWorkspacePage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/admin/intervention-analytics"
+                element={(
+                  <RequireRole allowedRoles={["admin", "director"]}>
+                    <AdminInterventionAnalyticsPage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/admin/sales-process-disconnects"
+                element={(
+                  <RequireRole allowedRoles={["admin", "director"]}>
+                    <SalesProcessDisconnectsPage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/admin/merge-queue"
+                element={(
+                  <RequireRole allowedRoles={["admin", "director"]}>
+                    <MergeQueuePage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/admin/procore"
+                element={(
+                  <RequireRole allowedRoles={["admin"]}>
+                    <ProcoreSyncPage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/admin/ai-ops"
+                element={(
+                  <RequireRole allowedRoles={["admin", "director"]}>
+                    <AiOpsPage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/admin/ai-ops/reviews/:packetId"
+                element={(
+                  <RequireRole allowedRoles={["admin", "director"]}>
+                    <AiPacketReviewPage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/admin/companycam"
+                element={(
+                  <RequireRole allowedRoles={["admin"]}>
+                    <CompanyCamPage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/admin/migration"
+                element={(
+                  <RequireRole allowedRoles={["admin", "director"]}>
+                    <MigrationDashboardPage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/admin/migration/review"
+                element={(
+                  <RequireRole allowedRoles={["admin"]}>
+                    <MigrationReviewPage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/admin/migration/deals"
+                element={(
+                  <RequireRole allowedRoles={["admin"]}>
+                    <MigrationDealsPage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/admin/migration/contacts"
+                element={(
+                  <RequireRole allowedRoles={["admin"]}>
+                    <MigrationContactsPage />
+                  </RequireRole>
+                )}
+              />
               <Route path="/photos/feed" element={<PhotoFeedPage />} />
               <Route path="/help/user-guide" element={<UserGuidePage />} />
-              <Route path="/help/admin-guide" element={<AdminGuidePage />} />
+              <Route
+                path="/help/admin-guide"
+                element={(
+                  <RequireRole allowedRoles={["admin"]}>
+                    <AdminGuidePage />
+                  </RequireRole>
+                )}
+              />
             </Route>
             <Route path="*" element={<Navigate to="/" replace />} />
-          </Routes>
-          <Toaster position="top-right" richColors />
-        </>
+            </Routes>
+            <Toaster position="top-right" richColors />
+          </>
+        </Suspense>
       </AuthGate>
     </AuthProvider>
   );

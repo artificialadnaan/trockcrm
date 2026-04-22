@@ -11,10 +11,15 @@ import {
   date,
   timestamp,
 } from "drizzle-orm/pg-core";
-import { WORKFLOW_ROUTES } from "../../types/enums.js";
+import { DEAL_PIPELINE_DISPOSITIONS, WORKFLOW_ROUTES } from "../../types/enums.js";
 import { companies } from "./companies.js";
 import { contacts } from "./contacts.js";
-import { leads } from "./leads.js";
+import {
+  forecastCategoryEnum as dealForecastCategoryEnum,
+  forecastWindowEnum as dealForecastWindowEnum,
+  leads,
+  supportNeededTypeEnum as dealSupportNeededTypeEnum,
+} from "./leads.js";
 import { properties } from "./properties.js";
 
 export const proposalStatusEnum = pgEnum("proposal_status", [
@@ -42,13 +47,17 @@ export const estimatingSubstageEnum = pgEnum("estimating_substage", [
 // because Drizzle doesn't natively handle cross-schema references.
 
 export const workflowRouteEnum = pgEnum("workflow_route", WORKFLOW_ROUTES);
+export const dealPipelineDispositionEnum = pgEnum(
+  "deal_pipeline_disposition",
+  DEAL_PIPELINE_DISPOSITIONS
+);
 
 export const deals = pgTable("deals", {
   id: uuid("id").primaryKey().defaultRandom(),
   dealNumber: varchar("deal_number", { length: 50 }).unique().notNull(),
   name: varchar("name", { length: 500 }).notNull(),
   stageId: uuid("stage_id").notNull(),
-  assignedRepId: uuid("assigned_rep_id").notNull(),
+  assignedRepId: uuid("assigned_rep_id"),
   primaryContactId: uuid("primary_contact_id").references(() => contacts.id),
   companyId: uuid("company_id").references(() => companies.id),
   propertyId: uuid("property_id").references(() => properties.id),
@@ -66,16 +75,43 @@ export const deals = pgTable("deals", {
   regionId: uuid("region_id"),
   source: varchar("source", { length: 100 }),
   winProbability: integer("win_probability"),
+  decisionMakerName: varchar("decision_maker_name", { length: 255 }),
+  decisionProcess: text("decision_process"),
+  budgetStatus: varchar("budget_status", { length: 100 }),
+  incumbentVendor: varchar("incumbent_vendor", { length: 255 }),
+  unitCount: integer("unit_count"),
+  buildYear: integer("build_year"),
+  forecastWindow: dealForecastWindowEnum("forecast_window"),
+  forecastCategory: dealForecastCategoryEnum("forecast_category"),
+  forecastConfidencePercent: integer("forecast_confidence_percent"),
+  forecastRevenue: numeric("forecast_revenue", { precision: 14, scale: 2 }),
+  forecastGrossProfit: numeric("forecast_gross_profit", { precision: 14, scale: 2 }),
+  forecastBlockers: text("forecast_blockers"),
+  nextStep: text("next_step"),
+  nextStepDueAt: timestamp("next_step_due_at", { withTimezone: true }),
+  nextMilestoneAt: timestamp("next_milestone_at", { withTimezone: true }),
+  supportNeededType: dealSupportNeededTypeEnum("support_needed_type"),
+  supportNeededNotes: text("support_needed_notes"),
+  forecastUpdatedAt: timestamp("forecast_updated_at", { withTimezone: true }),
+  forecastUpdatedBy: uuid("forecast_updated_by"),
   procoreProjectId: bigint("procore_project_id", { mode: "number" }),
   procoreBidId: bigint("procore_bid_id", { mode: "number" }),
   procoreLastSyncedAt: timestamp("procore_last_synced_at", { withTimezone: true }),
+  hubspotOwnerId: varchar("hubspot_owner_id", { length: 64 }),
+  hubspotOwnerEmail: varchar("hubspot_owner_email", { length: 320 }),
+  ownershipSyncedAt: timestamp("ownership_synced_at", { withTimezone: true }),
+  ownershipSyncStatus: varchar("ownership_sync_status", { length: 32 }),
+  unassignedReasonCode: varchar("unassigned_reason_code", { length: 64 }),
   lostReasonId: uuid("lost_reason_id"),
   lostNotes: text("lost_notes"),
   lostCompetitor: varchar("lost_competitor", { length: 255 }),
   lostAt: timestamp("lost_at", { withTimezone: true }),
   expectedCloseDate: date("expected_close_date"),
   actualCloseDate: date("actual_close_date"),
-  workflowRoute: workflowRouteEnum("workflow_route").default("estimating").notNull(),
+  pipelineDisposition: dealPipelineDispositionEnum("pipeline_disposition")
+    .default("deals")
+    .notNull(),
+  workflowRoute: workflowRouteEnum("workflow_route"),
   lastActivityAt: timestamp("last_activity_at", { withTimezone: true }),
   stageEnteredAt: timestamp("stage_entered_at", { withTimezone: true }).defaultNow().notNull(),
   isActive: boolean("is_active").default(true).notNull(),

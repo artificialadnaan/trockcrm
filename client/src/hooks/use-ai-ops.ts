@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
 
 export interface AiOpsMetrics {
@@ -255,6 +255,636 @@ export interface SalesProcessDisconnectDashboard {
   rows: SalesProcessDisconnectRow[];
 }
 
+export interface InterventionAnalyticsHotspotRow {
+  key: string;
+  entityType: "assignee" | "disconnect_type" | "rep" | "company" | "stage";
+  filterValue: string | null;
+  label: string;
+  openCases: number;
+  overdueCases: number;
+  repeatOpenCases: number;
+  clearanceRate30d: number | null;
+  queueLink: string | null;
+}
+
+export interface InterventionAnalyticsBreachRow {
+  caseId: string;
+  severity: string;
+  disconnectType: string;
+  dealId: string | null;
+  dealLabel: string | null;
+  companyId: string | null;
+  companyLabel: string | null;
+  ageDays: number;
+  assignedTo: string | null;
+  escalated: boolean;
+  breachReasons: Array<"overdue" | "escalated_open" | "snooze_breached" | "repeat_open">;
+  detailLink: string;
+  queueLink: string;
+}
+
+export interface InterventionOutcomeEffectiveness {
+  summaryByConclusionFamily: Array<{
+    key: "resolve" | "snooze" | "escalate";
+    label: string;
+    volume: number;
+    reopenRate: number | null;
+    durableCloseRate: number | null;
+    medianDaysToReopen: number | null;
+    averageDaysToDurableClose: number | null;
+    queueLink: string;
+  }>;
+  resolveReasonPerformance: Array<{
+    key: string;
+    label: string;
+    volume: number;
+    reopenRate: number | null;
+    durableCloseRate: number | null;
+    medianDaysToReopen: number | null;
+    averageDaysToDurableClose: number | null;
+    queueLink: string;
+  }>;
+  snoozeReasonPerformance: Array<{
+    key: string;
+    label: string;
+    volume: number;
+    reopenRate: number | null;
+    durableCloseRate: number | null;
+    medianDaysToReopen: number | null;
+    averageDaysToDurableClose: number | null;
+    queueLink: string;
+  }>;
+  escalationReasonPerformance: Array<{
+    key: string;
+    label: string;
+    volume: number;
+    reopenRate: number | null;
+    durableCloseRate: number | null;
+    medianDaysToReopen: number | null;
+    averageDaysToDurableClose: number | null;
+    queueLink: string;
+  }>;
+  escalationTargetPerformance: Array<{
+    key: string;
+    label: string;
+    volume: number;
+    reopenRate: number | null;
+    durableCloseRate: number | null;
+    medianDaysToReopen: number | null;
+    averageDaysToDurableClose: number | null;
+    queueLink: string;
+  }>;
+  disconnectTypeInteractions: Array<{
+    disconnectType: string;
+    conclusionFamily: "resolve" | "snooze" | "escalate";
+    volume: number;
+    reopenRate: number | null;
+    durableCloseRate: number | null;
+    queueLink: string;
+  }>;
+  assigneeEffectiveness: Array<{
+    assigneeId: string | null;
+    assigneeName: string | null;
+    volume: number;
+    resolveCount: number;
+    snoozeCount: number;
+    escalateCount: number;
+    reopenRate: number | null;
+    durableCloseRate: number | null;
+    queueLink: string | null;
+  }>;
+  warnings: Array<{
+    kind:
+      | "snooze_reopen_risk"
+      | "escalation_reason_weak_close_through"
+      | "escalation_target_weak_close_through"
+      | "administrative_close_pattern";
+    key: string;
+    label: string;
+    volume: number;
+    rate: number | null;
+    queueLink: string;
+  }>;
+  reopenRateByConclusionFamily: Record<"resolve" | "snooze" | "escalate", number | null>;
+  reopenRateByResolveCategory: Array<{ key: string; rate: number | null; count: number }>;
+  reopenRateBySnoozeReason: Array<{ key: string; rate: number | null; count: number }>;
+  reopenRateByEscalationReason: Array<{ key: string; rate: number | null; count: number }>;
+  conclusionMixByDisconnectType: Array<{ key: string; resolveCount: number; snoozeCount: number; escalateCount: number }>;
+  conclusionMixByActingUser: Array<{
+    actorUserId: string;
+    actorName: string | null;
+    resolveCount: number;
+    snoozeCount: number;
+    escalateCount: number;
+  }>;
+  conclusionMixByAssigneeAtConclusion: Array<{
+    assigneeId: string | null;
+    assigneeName: string | null;
+    resolveCount: number;
+    snoozeCount: number;
+    escalateCount: number;
+  }>;
+  medianDaysToReopenByConclusionFamily: Array<{ key: string; medianDays: number | null }>;
+}
+
+export interface InterventionManagerBriefItem {
+  key: string;
+  text: string;
+  queueLink: string | null;
+}
+
+export interface InterventionManagerBrief {
+  headline: string;
+  summaryWindowLabel: string;
+  whatChanged: Array<InterventionManagerBriefItem & { tone: "improved" | "worsened" | "watch" }>;
+  focusNow: Array<InterventionManagerBriefItem & { priority: "high" | "medium" }>;
+  emergingPatterns: Array<{
+    key: string;
+    title: string;
+    summary: string;
+    confidence: "high" | "medium";
+    queueLink: string | null;
+  }>;
+  groundingNote: string;
+  error: string | null;
+}
+
+export interface InterventionAnalyticsDashboard {
+  summary: {
+    openCases: number;
+    overdueCases: number;
+    escalatedCases: number;
+    snoozeOverdueCases: number;
+    repeatOpenCases: number;
+    openCasesBySeverity: Record<string, number>;
+    overdueCasesBySeverity: Record<string, number>;
+  };
+  outcomes: {
+    clearanceRate30d: number | null;
+    reopenRate30d: number | null;
+    averageAgeOfOpenCases: number | null;
+    medianAgeOfOpenCases: number | null;
+    averageAgeToResolution: number | null;
+    actionVolume30d: Record<string, number>;
+  };
+  hotspots: {
+    assignees: InterventionAnalyticsHotspotRow[];
+    disconnectTypes: InterventionAnalyticsHotspotRow[];
+    reps: InterventionAnalyticsHotspotRow[];
+    companies: InterventionAnalyticsHotspotRow[];
+    stages: InterventionAnalyticsHotspotRow[];
+  };
+  breachQueue: {
+    items: InterventionAnalyticsBreachRow[];
+    totalCount: number;
+    pageSize: number;
+  };
+  slaRules: {
+    criticalDays: number;
+    highDays: number;
+    mediumDays: number;
+    lowDays: number;
+    timingBasis: "business_days";
+  };
+  managerBrief: InterventionManagerBrief;
+  outcomeEffectiveness: InterventionOutcomeEffectiveness;
+}
+
+export interface ManagerAlertSnapshot {
+  id: string;
+  officeId: string;
+  snapshotKind: "manager_alert_summary";
+  snapshotMode: "preview" | "sent";
+  snapshotJson: ManagerAlertSnapshotJson;
+  scannedAt: string;
+  sentAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ManagerAlertSnapshotJson {
+  version: 1;
+  officeId: string;
+  timezone: string;
+  officeLocalDate: string;
+  generatedAt: string;
+  link: string;
+  families: {
+    overdueHighCritical: {
+      count: number;
+      queueLink: string;
+      caseIds: string[];
+    };
+    snoozeBreached: {
+      count: number;
+      queueLink: string;
+      caseIds: string[];
+    };
+    escalatedOpen: {
+      count: number;
+      queueLink: string;
+      caseIds: string[];
+    };
+    assigneeOverload: {
+      count: number;
+      threshold: number;
+      queueLink: string | null;
+      items: Array<{
+        assigneeId: string;
+        assigneeLabel: string;
+        totalWeight: number;
+        caseCount: number;
+        queueLink: string;
+      }>;
+    };
+  };
+}
+
+export interface ManagerAlertSendResult {
+  snapshot: ManagerAlertSnapshot;
+  deliveries: Array<{
+    recipientUserId: string;
+    claimed: boolean;
+    notification: {
+      id: string;
+    } | null;
+  }>;
+}
+
+export type InterventionPolicyRecommendationFeedbackValue = "helpful" | "not_useful" | "wrong_direction";
+export type InterventionPolicyRecommendationDecisionStatus =
+  | "qualified_rendered"
+  | "qualified_suppressed_by_cap"
+  | "suppressed_by_threshold"
+  | "suppressed_by_predicate"
+  | "suppressed_by_missing_target"
+  | "suppressed_by_apply_ineligible";
+
+export type InterventionPolicyRecommendationApplyEventStatus =
+  | "applied"
+  | "applied_noop"
+  | "rejected_validation"
+  | "rejected_stale"
+  | "rejected_conflict"
+  | "reverted"
+  | "revert_noop"
+  | "revert_rejected_conflict";
+
+export interface InterventionPolicyRecommendationEvidenceItem {
+  metricKey: string;
+  label: string;
+  currentValue: number | string | null;
+  baselineValue: number | string | null;
+  delta: number | string | null;
+  window: "last_7_days_vs_prior_7_days" | "last_30_days" | "last_30_days_vs_prior_30_days";
+  direction: "up" | "down" | "flat" | "not_applicable";
+}
+
+export type InterventionPolicyRecommendationProposedChange =
+  | {
+      kind: "snooze_policy_adjustment";
+      targetKey: string;
+      policyLabel: string;
+      currentValue: {
+        maxSnoozeDays: number;
+        breachReviewThresholdPercent: number | null;
+      };
+      proposedValue: {
+        maxSnoozeDays: number;
+        breachReviewThresholdPercent: number | null;
+      };
+    }
+  | {
+      kind: "escalation_policy_adjustment";
+      targetKey: string;
+      policyLabel: string;
+      currentValue: {
+        routingMode: string;
+        escalationThresholdPercent: number;
+      };
+      proposedValue: {
+        routingMode: string;
+        escalationThresholdPercent: number;
+      };
+    }
+  | {
+      kind: "assignee_load_balancing";
+      targetKey: string;
+      policyLabel: string;
+      currentValue: {
+        balancingMode: string;
+        overloadSharePercent: number;
+        minHighRiskCases: number;
+      };
+      proposedValue: {
+        balancingMode: string;
+        overloadSharePercent: number;
+        minHighRiskCases: number;
+      };
+    };
+
+export interface InterventionPolicyRecommendationReviewDetails {
+  decision: InterventionPolicyRecommendationDecisionStatus;
+  primaryTrigger: string;
+  thresholdSummary: string;
+  rankingSummary: string;
+  score: number;
+  impactScore: number;
+  volumeScore: number;
+  persistenceScore: number;
+  actionabilityScore: number;
+  usedFallbackCopy: boolean;
+  usedFallbackStructuredPayload: boolean;
+}
+
+export interface InterventionPolicyRecommendation {
+  id: string;
+  officeId: string;
+  snapshotId: string;
+  taxonomy:
+    | "snooze_policy_adjustment"
+    | "escalation_policy_adjustment"
+    | "assignee_load_balancing"
+    | "disconnect_playbook_change"
+    | "monitor_only";
+  title: string;
+  statement: string;
+  whyNow: string;
+  expectedImpact: string;
+  confidence: "high" | "medium" | "low";
+  priority: number;
+  suggestedAction: string;
+  counterSignal: string | null;
+  evidence: InterventionPolicyRecommendationEvidenceItem[];
+  generatedAt: string;
+  staleAt: string;
+  renderStatus: "active" | "degraded";
+  proposedChange: InterventionPolicyRecommendationProposedChange | null;
+  reviewDetails: InterventionPolicyRecommendationReviewDetails;
+  applyEligibility: {
+    eligible: boolean;
+    reason: "eligible" | "read_only_taxonomy" | "low_confidence" | "missing_proposed_change";
+    message: string;
+  };
+  applyStatus: {
+    status: "not_applied" | InterventionPolicyRecommendationApplyEventStatus;
+    appliedAt: string | null;
+    appliedBy: string | null;
+    reason: string | null;
+  };
+  feedbackSummary: {
+    helpfulCount: number;
+    notUsefulCount: number;
+    wrongDirectionCount: number;
+    commentCount: number;
+  };
+  feedbackStateForViewer: InterventionPolicyRecommendationFeedbackValue | null;
+}
+
+export type InterventionPolicyRecommendationsView =
+  | {
+      status: "missing_snapshot";
+      canRegenerate: true;
+    }
+  | {
+      status: "active" | "degraded";
+      snapshot: {
+        id: string;
+        officeId: string;
+        status: "active" | "degraded";
+        generatedAt: string;
+        staleAt: string;
+        supersededAt: string | null;
+      };
+      recommendations: InterventionPolicyRecommendation[];
+    };
+
+export interface InterventionPolicyRecommendationEvaluationSummary {
+  window: "last_7_days" | "last_30_days" | "last_90_days";
+  generatedAt: string;
+  filters: {
+    taxonomy: InterventionPolicyRecommendation["taxonomy"] | null;
+    decision: InterventionPolicyRecommendationDecisionStatus | null;
+  };
+  totals: {
+    qualifiedRendered: number;
+    qualifiedSuppressedByCap: number;
+    suppressedByThreshold: number;
+    suppressedByPredicate: number;
+    suppressedByMissingTarget: number;
+    suppressedByApplyIneligible: number;
+  };
+  byTaxonomy: Array<{
+    taxonomy: InterventionPolicyRecommendation["taxonomy"];
+    counts: InterventionPolicyRecommendationEvaluationSummary["totals"];
+  }>;
+  feedback: Array<{
+    taxonomy: InterventionPolicyRecommendation["taxonomy"];
+    helpfulCount: number;
+    notUsefulCount: number;
+    wrongDirectionCount: number;
+  }>;
+  apply: Array<{
+    taxonomy: InterventionPolicyRecommendation["taxonomy"];
+    appliedCount: number;
+    appliedNoopCount: number;
+    rejectedCount: number;
+  }>;
+}
+
+export type InterventionPolicyRecommendationReviewWindow =
+  InterventionPolicyRecommendationEvaluationSummary["window"];
+
+export type InterventionPolicyRecommendationReviewDecisionFilter = "all" | "rendered" | "suppressed";
+
+export type InterventionPolicyRecommendationHistoryEventType =
+  | "rendered"
+  | InterventionPolicyRecommendationApplyEventStatus;
+
+export interface InterventionPolicyRecommendationHistoryEntry {
+  recommendationId: string;
+  snapshotId: string;
+  taxonomy: InterventionPolicyRecommendation["taxonomy"];
+  title: string;
+  eventType: InterventionPolicyRecommendationHistoryEventType;
+  actorName: string | null;
+  summary: string;
+  occurredAt: string;
+}
+
+export type InterventionPolicyRecommendationYieldNextAction =
+  | "hold_thresholds"
+  | "review_threshold_floor"
+  | "review_ranking_cap"
+  | "review_target_coverage"
+  | "seed_or_wait_for_more_history";
+
+export type InterventionPolicyRecommendationQualificationBlocker =
+  | "history_limited"
+  | "threshold_limited"
+  | "cap_limited"
+  | "target_limited"
+  | "eligibility_limited"
+  | "healthy_low_volume";
+
+export type InterventionPolicyRecommendationQualificationTuningAction =
+  | "seed_non_prod_validation"
+  | "review_threshold_floor_in_code"
+  | "review_ranking_cap_in_code"
+  | "review_target_coverage"
+  | "review_apply_eligibility"
+  | "hold_current_thresholds";
+
+export type InterventionPolicyRecommendationTuningAction =
+  | "hold_thresholds"
+  | "lower_qualification_floor"
+  | "review_ranking_cap"
+  | "seed_more_history";
+
+export interface InterventionPolicyRecommendationTuningGuidanceEntry {
+  taxonomy: InterventionPolicyRecommendation["taxonomy"];
+  recommendedAction: InterventionPolicyRecommendationTuningAction;
+  summary: string;
+}
+
+export interface InterventionPolicyRecommendationReviewRow {
+  taxonomy: InterventionPolicyRecommendation["taxonomy"];
+  groupingKey: string;
+  decision: InterventionPolicyRecommendationDecisionStatus;
+  suppressionReason: string | null;
+  score: number | null;
+  confidence: InterventionPolicyRecommendation["confidence"] | null;
+  usedFallbackCopy: boolean;
+  usedFallbackStructuredPayload: boolean;
+  createdAt: string | null;
+}
+
+export interface InterventionPolicyRecommendationTopSuppressedCandidate {
+  groupingKey: string;
+  decision: InterventionPolicyRecommendationDecisionStatus;
+  suppressionReason: string | null;
+  score: number | null;
+  confidence: InterventionPolicyRecommendation["confidence"] | null;
+  createdAt: string | null;
+}
+
+export interface InterventionPolicyRecommendationTaxonomyDiagnosticEntry {
+  scope: "historical_window";
+  taxonomy: InterventionPolicyRecommendation["taxonomy"];
+  renderedCount: number;
+  suppressedCounts: {
+    predicateBlocked: number;
+    thresholdBlocked: number;
+    capBlocked: number;
+    missingTarget: number;
+    applyIneligible: number;
+  };
+  dominantBlocker: InterventionPolicyRecommendationQualificationBlocker;
+  topSuppressedCandidates: InterventionPolicyRecommendationTopSuppressedCandidate[];
+  recommendedTuningAction: InterventionPolicyRecommendationQualificationTuningAction;
+}
+
+export type InterventionPolicyRecommendationThresholdCalibrationNoProposalReason =
+  | "threshold_pressure_not_dominant"
+  | "low_volume_dominates"
+  | "predicate_failure_dominates"
+  | "target_coverage_dominates"
+  | "cap_pressure_dominates";
+
+export interface InterventionPolicyRecommendationThresholdCalibrationBlockerEntry {
+  label: string;
+  count: number;
+}
+
+export interface InterventionPolicyRecommendationThresholdCalibrationProposal {
+  taxonomy: InterventionPolicyRecommendation["taxonomy"];
+  currentThreshold: string;
+  proposedThreshold: string;
+  dominantBlocker: InterventionPolicyRecommendationQualificationBlocker;
+  blockerBreakdown: InterventionPolicyRecommendationThresholdCalibrationBlockerEntry[];
+  rationale: string;
+  expectedYieldEffect: string;
+  guardrails: string[];
+  verificationChecklist: string[];
+}
+
+export interface InterventionPolicyRecommendationThresholdCalibrationProposalBlock {
+  generatedAt: string;
+  window: InterventionPolicyRecommendationReviewWindow;
+  selectionSummary: string;
+  noProposalReason: InterventionPolicyRecommendationThresholdCalibrationNoProposalReason | null;
+  proposals: InterventionPolicyRecommendationThresholdCalibrationProposal[];
+}
+
+export interface InterventionPolicyRecommendationSeedValidationTaxonomyStatus {
+  taxonomy: InterventionPolicyRecommendation["taxonomy"];
+  seedPathAvailable: boolean;
+  seedKey: string | null;
+  supportsApplyUndo: boolean;
+}
+
+export interface InterventionPolicyRecommendationSeedValidationStatus {
+  scope: "non_production_only";
+  validationMode: "manual_seed_script";
+  scriptPath: string;
+  taxonomies: InterventionPolicyRecommendationSeedValidationTaxonomyStatus[];
+}
+
+export interface InterventionPolicyRecommendationReviewModel {
+  snapshot: {
+    id: string;
+    officeId: string;
+    status: "active" | "degraded";
+    generatedAt: string;
+    staleAt: string;
+    supersededAt: string | null;
+  } | null;
+  summary: InterventionPolicyRecommendationEvaluationSummary;
+  emptyStateScope: "latest_snapshot";
+  emptyStateReason: string | null;
+  latestDecisionRows: InterventionPolicyRecommendationReviewRow[];
+  recentHistory: InterventionPolicyRecommendationHistoryEntry[];
+  diagnostics: {
+    window: InterventionPolicyRecommendationReviewWindow;
+    generatedAt: string;
+    systemDiagnostics: {
+      scope: "historical_window";
+      dominantBlockers: Array<{
+        blocker: InterventionPolicyRecommendationQualificationBlocker;
+        count: number;
+      }>;
+      recommendedNextAction: InterventionPolicyRecommendationQualificationTuningAction;
+    };
+    taxonomyDiagnostics: InterventionPolicyRecommendationTaxonomyDiagnosticEntry[];
+    seededValidationStatus: InterventionPolicyRecommendationSeedValidationStatus;
+  };
+  yield: {
+    renderedTotals: {
+      window: InterventionPolicyRecommendationReviewWindow;
+      total: number;
+    };
+    renderedByTaxonomy: Array<{
+      taxonomy: InterventionPolicyRecommendation["taxonomy"];
+      renderedCount: number;
+    }>;
+    dominantSuppressionReasons: Array<{
+      reason: string;
+      count: number;
+    }>;
+    recommendedNextAction: InterventionPolicyRecommendationYieldNextAction;
+  };
+  tuning: {
+    currentThresholds: {
+      qualificationFloor: number;
+      strongRecommendationFloor: number;
+      primaryCap: number;
+      secondaryCap: number;
+    };
+    guidance: InterventionPolicyRecommendationTuningGuidanceEntry[];
+  };
+  thresholdCalibrationProposals: InterventionPolicyRecommendationThresholdCalibrationProposalBlock;
+}
+
 export interface QueueAiBackfillResult {
   queued: boolean;
   sourceType: string | null;
@@ -272,6 +902,256 @@ export interface TriageAiActionResult {
   action: "mark_reviewed" | "resolve" | "dismiss" | "escalate";
   feedbackId: string;
   targetStatus: string;
+}
+
+export function useAiOpsQuery<T>(path: string, errorMessage = "Failed to load AI ops data") {
+  const [data, setData] = useState<T | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchData = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const response = await api<T>(path);
+      setData(response);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : errorMessage);
+    } finally {
+      setLoading(false);
+    }
+  }, [errorMessage, path]);
+
+  useEffect(() => {
+    void fetchData();
+  }, [fetchData]);
+
+  return {
+    data,
+    loading,
+    error,
+    refetch: fetchData,
+  };
+}
+
+export function useInterventionAnalytics() {
+  return useAiOpsQuery<InterventionAnalyticsDashboard>(
+    "/ai/ops/intervention-analytics",
+    "Failed to load intervention analytics"
+  );
+}
+
+export function useInterventionPolicyRecommendations() {
+  const [data, setData] = useState<InterventionPolicyRecommendationsView | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const requestVersionRef = useRef(0);
+
+  const fetchData = useCallback(async () => {
+    const requestVersion = ++requestVersionRef.current;
+    setLoading(true);
+    setError(null);
+    try {
+      const response = await api<InterventionPolicyRecommendationsView>("/ai/ops/intervention-policy-recommendations");
+      if (requestVersion !== requestVersionRef.current) return;
+      setData(response);
+    } catch (err: unknown) {
+      if (requestVersion !== requestVersionRef.current) return;
+      setError(err instanceof Error ? err.message : "Failed to load policy recommendations");
+    } finally {
+      if (requestVersion === requestVersionRef.current) setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void fetchData();
+  }, [fetchData]);
+
+  return {
+    data,
+    loading,
+    error,
+    refetch: fetchData,
+  };
+}
+
+export function useInterventionPolicyRecommendationReview(input?: {
+  window?: InterventionPolicyRecommendationReviewWindow;
+  decision?: InterventionPolicyRecommendationReviewDecisionFilter;
+  refreshKey?: number;
+}) {
+  const window = input?.window ?? "last_30_days";
+  const decision = input?.decision ?? "all";
+  const refreshKey = input?.refreshKey ?? 0;
+  return useAiOpsQuery<InterventionPolicyRecommendationReviewModel>(
+    `/ai/ops/intervention-policy-recommendations/review?window=${window}&decision=${decision}&refreshKey=${refreshKey}`,
+    "Failed to load recommendation review"
+  );
+}
+
+function isMissingManagerAlertSnapshotError(error: unknown) {
+  return error instanceof Error && error.message === "Manager alert snapshot not found";
+}
+
+export function useManagerAlertSnapshot() {
+  const [data, setData] = useState<ManagerAlertSnapshot | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const requestVersionRef = useRef(0);
+
+  const fetchData = useCallback(async () => {
+    const requestVersion = ++requestVersionRef.current;
+    setLoading(true);
+    setError(null);
+    try {
+      const response = await api<ManagerAlertSnapshot>("/ai/ops/intervention-manager-alerts");
+      if (requestVersion !== requestVersionRef.current) return;
+      setData(response);
+    } catch (err: unknown) {
+      if (requestVersion !== requestVersionRef.current) return;
+      if (isMissingManagerAlertSnapshotError(err)) {
+        setData(null);
+        setError(null);
+      } else {
+        setError(err instanceof Error ? err.message : "Failed to load manager alert snapshot");
+      }
+    } finally {
+      if (requestVersion === requestVersionRef.current) setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void fetchData();
+  }, [fetchData]);
+
+  return {
+    data,
+    loading,
+    error,
+    refetch: fetchData,
+  };
+}
+
+export async function runManagerAlertScan() {
+  return api<ManagerAlertSnapshot>("/ai/ops/intervention-manager-alerts/scan", {
+    method: "POST",
+    json: {},
+  });
+}
+
+export async function sendManagerAlertSummary() {
+  return api<ManagerAlertSendResult>("/ai/ops/intervention-manager-alerts/send", {
+    method: "POST",
+    json: {},
+  });
+}
+
+export async function regenerateInterventionPolicyRecommendations() {
+  return api<{ queued: true; snapshotId: string; status: string }>(
+    "/ai/ops/intervention-policy-recommendations/regenerate",
+    {
+      method: "POST",
+      json: {},
+    }
+  );
+}
+
+export async function submitInterventionPolicyRecommendationFeedback(input: {
+  recommendationId: string;
+  feedbackValue: InterventionPolicyRecommendationFeedbackValue;
+  comment?: string | null;
+}) {
+  return api<{
+    recommendationId: string;
+    feedbackValue: InterventionPolicyRecommendationFeedbackValue;
+    comment: string | null;
+  }>(`/ai/ops/intervention-policy-recommendations/${input.recommendationId}/feedback`, {
+    method: "POST",
+    json: {
+      feedbackValue: input.feedbackValue,
+      comment: input.comment ?? null,
+    },
+  });
+}
+
+export async function applyInterventionPolicyRecommendation(input: {
+  recommendationId: string;
+  snapshotId: string;
+  recommendationIdempotencyKey: string;
+}) {
+  return api<{
+    status: InterventionPolicyRecommendationApplyEventStatus;
+    applyEventId: string;
+    recommendationId: string;
+    snapshotId: string;
+    applyStatus: InterventionPolicyRecommendationApplyEventStatus;
+    appliedAt: string | null;
+    appliedBy: string | null;
+    reason: string | null;
+    beforeState: Record<string, unknown>;
+    proposedState: Record<string, unknown>;
+    appliedState: Record<string, unknown>;
+  }>(`/ai/ops/intervention-policy-recommendations/${input.recommendationId}/apply`, {
+    method: "POST",
+    json: {
+      snapshotId: input.snapshotId,
+      recommendationIdempotencyKey: input.recommendationIdempotencyKey,
+    },
+  });
+}
+
+export async function revertInterventionPolicyRecommendation(input: {
+  recommendationId: string;
+  snapshotId: string;
+  recommendationIdempotencyKey: string;
+}) {
+  return api<{
+    status: InterventionPolicyRecommendationApplyEventStatus;
+    applyEventId: string;
+    recommendationId: string;
+    snapshotId: string;
+    applyStatus: InterventionPolicyRecommendationApplyEventStatus;
+    appliedAt: string | null;
+    appliedBy: string | null;
+    reason: string | null;
+    beforeState: Record<string, unknown>;
+    proposedState: Record<string, unknown>;
+    appliedState: Record<string, unknown>;
+  }>(`/ai/ops/intervention-policy-recommendations/${input.recommendationId}/revert`, {
+    method: "POST",
+    json: {
+      snapshotId: input.snapshotId,
+      recommendationIdempotencyKey: input.recommendationIdempotencyKey,
+    },
+  });
+}
+
+export async function getInterventionPolicyRecommendationEvaluationSummary(input?: {
+  window?: "last_7_days" | "last_30_days" | "last_90_days";
+  taxonomy?: InterventionPolicyRecommendation["taxonomy"] | null;
+  decision?: InterventionPolicyRecommendationDecisionStatus | null;
+}) {
+  const params = new URLSearchParams();
+  if (input?.window) params.set("window", input.window);
+  if (input?.taxonomy) params.set("taxonomy", input.taxonomy);
+  if (input?.decision) params.set("decision", input.decision);
+  const query = params.toString();
+  return api<InterventionPolicyRecommendationEvaluationSummary>(
+    `/ai/ops/intervention-policy-recommendations/evaluation${query ? `?${query}` : ""}`
+  );
+}
+
+export async function getInterventionPolicyRecommendationReview(input?: {
+  window?: InterventionPolicyRecommendationReviewWindow;
+  decision?: InterventionPolicyRecommendationReviewDecisionFilter;
+}) {
+  const params = new URLSearchParams();
+  if (input?.window) params.set("window", input.window);
+  if (input?.decision) params.set("decision", input.decision);
+  const query = params.toString();
+  return api<InterventionPolicyRecommendationReviewModel>(
+    `/ai/ops/intervention-policy-recommendations/review${query ? `?${query}` : ""}`
+  );
 }
 
 export function useAiOps(limit = 20) {

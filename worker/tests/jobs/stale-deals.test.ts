@@ -44,6 +44,14 @@ describe("stale deal worker", () => {
         return { rows: [{ id: "office-1", slug: "beta" }] };
       }
 
+      if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") {
+        return { rows: [] };
+      }
+
+      if (sql.includes("pg_advisory_xact_lock")) {
+        return { rows: [] };
+      }
+
       if (sql.includes("FROM office_beta.deals")) {
         return {
           rows: [
@@ -96,5 +104,65 @@ describe("stale deal worker", () => {
     expect(
       queryMock.mock.calls.some(([sql]) => typeof sql === "string" && sql.includes("INSERT INTO office_beta.tasks"))
     ).toBe(false);
+  });
+
+  it("rolls back the office transaction when notification fan-out fails mid-deal", async () => {
+    queryMock.mockImplementation(async (sql: string, params?: unknown[]) => {
+      if (sql.includes("FROM public.offices")) {
+        return { rows: [{ id: "office-1", slug: "beta" }] };
+      }
+
+      if (sql.includes("pg_advisory_xact_lock")) {
+        return { rows: [] };
+      }
+
+      if (sql.includes("FROM office_beta.deals")) {
+        return {
+          rows: [
+            {
+              deal_id: "deal-1",
+              deal_name: "Alpha Roof",
+              deal_number: "D-1001",
+              assigned_rep_id: "user-1",
+              stage_entered_at: new Date("2026-03-01T12:00:00.000Z"),
+              stage_name: "Proposal",
+              stale_threshold_days: 15,
+              stale_escalation_tiers: [{ days: 20, severity: "critical" }],
+              days_in_stage: 31,
+            },
+          ],
+        };
+      }
+
+      if (sql.includes("FROM office_beta.notifications")) {
+        return { rows: [] };
+      }
+
+      if (sql.includes("reports_to")) {
+        return { rows: [{ reports_to: "manager-1" }] };
+      }
+
+      if (sql.includes("role IN ('director', 'admin')")) {
+        return { rows: [{ id: "admin-1" }] };
+      }
+
+      if (sql.includes("INSERT INTO office_beta.notifications")) {
+        if (params?.[0] === "admin-1") {
+          throw new Error("notify-failed");
+        }
+        return { rows: [{ id: "notification-1" }] };
+      }
+
+      if (sql.includes("SELECT pg_notify")) {
+        return { rows: [] };
+      }
+
+      return { rows: [] };
+    });
+
+    await expect(runStaleDealScan()).rejects.toThrow("notify-failed");
+
+    expect(queryMock).toHaveBeenCalledWith("ROLLBACK");
+    expect(evaluateTaskRulesMock).not.toHaveBeenCalled();
   });
 });

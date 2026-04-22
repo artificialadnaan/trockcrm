@@ -1,4 +1,6 @@
 import { Router } from "express";
+import { eq } from "drizzle-orm";
+import { contacts } from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
 import { eventBus } from "../../events/bus.js";
 import { DOMAIN_EVENTS } from "@trock-crm/shared/types";
@@ -8,11 +10,20 @@ import {
   getEmails,
   getEmailById,
   getEmailThread,
+  getEmailThreadForMutation,
   getUserEmails,
   getEmailAssignmentQueue,
   associateEmailToEntity,
+  bindThreadToDeal,
+  detachThreadByConversation,
+  previewThreadReassignmentImpact,
+  assertCanMutateEmailThread,
 } from "./service.js";
 import { getDealById } from "../deals/service.js";
+import { getLeadById } from "../leads/service.js";
+import { getCompanyById } from "../companies/service.js";
+import { getContactById } from "../contacts/service.js";
+import { getPropertyDetail } from "../properties/service.js";
 
 const router = Router();
 
@@ -156,7 +167,79 @@ router.get("/thread/:conversationId", async (req, res, next) => {
   try {
     const thread = await getEmailThread(req.tenantDb!, req.params.conversationId, req.user!.id, req.user!.role);
     await req.commitTransaction!();
-    res.json({ emails: thread });
+    res.json(thread);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/thread/:conversationId/assign", async (req, res, next) => {
+  try {
+    const dealId = req.body.dealId as string | undefined;
+    if (!dealId) throw new AppError(400, "dealId is required");
+
+    const thread = await getEmailThreadForMutation(req.tenantDb!, req.params.conversationId);
+    await assertCanMutateEmailThread(req.tenantDb!, thread, req.user!);
+
+    const deal = await getDealById(req.tenantDb!, dealId, req.user!.role, req.user!.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+
+    const result = await bindThreadToDeal(req.tenantDb!, {
+      mailboxAccountId: thread.mailboxAccountId,
+      providerConversationId: req.params.conversationId,
+      dealId,
+      actingUserId: req.user!.id,
+    });
+
+    const refreshedThread = await getEmailThread(req.tenantDb!, req.params.conversationId, req.user!.id, req.user!.role);
+    await req.commitTransaction!();
+    res.json({ ...result, thread: refreshedThread });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/thread/:conversationId/reassign", async (req, res, next) => {
+  try {
+    const dealId = req.body.dealId as string | undefined;
+    if (!dealId) throw new AppError(400, "dealId is required");
+
+    const thread = await getEmailThreadForMutation(req.tenantDb!, req.params.conversationId);
+    await assertCanMutateEmailThread(req.tenantDb!, thread, req.user!);
+
+    const deal = await getDealById(req.tenantDb!, dealId, req.user!.role, req.user!.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+
+    const preview = await previewThreadReassignmentImpact(req.tenantDb!, {
+      mailboxAccountId: thread.mailboxAccountId,
+      providerConversationId: req.params.conversationId,
+      nextDealId: dealId,
+    });
+
+    const result = await bindThreadToDeal(req.tenantDb!, {
+      mailboxAccountId: thread.mailboxAccountId,
+      providerConversationId: req.params.conversationId,
+      dealId,
+      actingUserId: req.user!.id,
+    });
+
+    const refreshedThread = await getEmailThread(req.tenantDb!, req.params.conversationId, req.user!.id, req.user!.role);
+    await req.commitTransaction!();
+    res.json({ ...result, preview, thread: refreshedThread });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/thread/:conversationId/detach", async (req, res, next) => {
+  try {
+    const thread = await getEmailThreadForMutation(req.tenantDb!, req.params.conversationId);
+    await assertCanMutateEmailThread(req.tenantDb!, thread, req.user!);
+
+    await detachThreadByConversation(req.tenantDb!, thread.mailboxAccountId, req.params.conversationId, req.user!.id);
+    const refreshedThread = await getEmailThread(req.tenantDb!, req.params.conversationId, req.user!.id, req.user!.role);
+    await req.commitTransaction!();
+    res.json({ success: true, thread: refreshedThread });
   } catch (err) {
     next(err);
   }
@@ -209,20 +292,27 @@ router.get("/:id", async (req, res, next) => {
 router.post("/:id/associate", async (req, res, next) => {
   try {
     const requestedEntityType = req.body.assignedEntityType as string | undefined;
-    if (requestedEntityType && requestedEntityType !== "deal") {
-      throw new AppError(400, "Only deal assignments are supported by this endpoint");
+    const assignedEntityType = (requestedEntityType ?? "deal") as "deal" | "lead" | "property" | "company" | "contact";
+    if (!["deal", "lead", "property", "company", "contact"].includes(assignedEntityType)) {
+      throw new AppError(400, "Unsupported assignment target");
     }
-
-    // Keep the public contract deal-only until non-deal assignment targets can be stored consistently.
-    const assignedEntityType = "deal" as const;
     const assignedEntityId = (req.body.assignedEntityId as string | undefined) ?? (req.body.dealId as string | undefined);
-    const assignedDealId = (req.body.assignedDealId as string | null | undefined) ?? (req.body.dealId as string | undefined) ?? assignedEntityId ?? null;
+    const assignedDealId =
+      assignedEntityType === "deal"
+        ? (req.body.assignedDealId as string | null | undefined) ??
+          (req.body.dealId as string | undefined) ??
+          assignedEntityId ??
+          null
+        : null;
 
     if (!assignedEntityId) {
       throw new AppError(400, "assignedEntityId is required");
     }
-    if (assignedDealId != null && assignedDealId !== assignedEntityId) {
+    if (assignedEntityType === "deal" && assignedDealId != null && assignedDealId !== assignedEntityId) {
       throw new AppError(400, "assignedDealId must match assignedEntityId for deal assignments");
+    }
+    if (assignedEntityType !== "deal" && req.body.assignedDealId != null) {
+      throw new AppError(400, "assignedDealId is only valid for deal assignments");
     }
 
     // Verify the email exists and the user has permission to modify it
@@ -233,9 +323,51 @@ router.post("/:id/associate", async (req, res, next) => {
       throw new AppError(403, "You can only modify your own emails");
     }
 
+    let emailContactCompanyId: string | null = null;
+    if (
+      req.user!.role === "rep" &&
+      (assignedEntityType === "company" || assignedEntityType === "property" || assignedEntityType === "contact")
+    ) {
+      if (!email.contactId) {
+        throw new AppError(403, "This email does not have enough CRM context for company, property, or contact resolution");
+      }
+
+      const [contact] = await req.tenantDb!
+        .select({ companyId: contacts.companyId })
+        .from(contacts)
+        .where(eq(contacts.id, email.contactId))
+        .limit(1);
+
+      emailContactCompanyId = contact?.companyId ?? null;
+      if (!emailContactCompanyId) {
+        throw new AppError(403, "This email does not have enough CRM company context for company, property, or contact resolution");
+      }
+    }
+
     if (assignedEntityType === "deal") {
       const deal = await getDealById(req.tenantDb!, assignedEntityId, req.user!.role, req.user!.id);
       if (!deal) throw new AppError(404, "Deal not found");
+    } else if (assignedEntityType === "contact") {
+      const contact = await getContactById(req.tenantDb!, assignedEntityId);
+      if (!contact) throw new AppError(404, "Contact not found");
+      if (req.user!.role === "rep" && contact.companyId !== emailContactCompanyId) {
+        throw new AppError(403, "You can only resolve this email to a contact under its contact company");
+      }
+    } else if (assignedEntityType === "lead") {
+      const lead = await getLeadById(req.tenantDb!, assignedEntityId, req.user!.role, req.user!.id);
+      if (!lead) throw new AppError(404, "Lead not found");
+    } else if (assignedEntityType === "company") {
+      const company = await getCompanyById(req.tenantDb!, assignedEntityId);
+      if (!company) throw new AppError(404, "Company not found");
+      if (req.user!.role === "rep" && emailContactCompanyId !== assignedEntityId) {
+        throw new AppError(403, "You can only resolve this email to its contact company");
+      }
+    } else if (assignedEntityType === "property") {
+      const property = await getPropertyDetail(req.tenantDb!, assignedEntityId);
+      if (!property) throw new AppError(404, "Property not found");
+      if (req.user!.role === "rep" && property.property.companyId !== emailContactCompanyId) {
+        throw new AppError(403, "You can only resolve this email to a property under its contact company");
+      }
     }
 
     await associateEmailToEntity(

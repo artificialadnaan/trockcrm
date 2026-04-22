@@ -22,6 +22,8 @@ const COMPANY_CATEGORY_LABELS: Record<string, string> = {
   other: "Other",
 };
 
+const SEARCH_DEBOUNCE_MS = 150;
+
 interface CompanySelectorProps {
   value: string | null;
   onChange: (companyId: string) => void;
@@ -32,6 +34,33 @@ interface CompanyOption {
   id: string;
   name: string;
   category: string | null;
+}
+
+async function submitInlineCompanyCreate(input: {
+  name: string;
+  category: string;
+  onCreated: (company: { id: string; name: string }) => void;
+  onError: (message: string | null) => void;
+  onCreating: (value: boolean) => void;
+}) {
+  if (!input.name.trim()) {
+    input.onError("Name is required");
+    return;
+  }
+
+  input.onCreating(true);
+  input.onError(null);
+  try {
+    const result = await createCompany({
+      name: input.name.trim(),
+      category: input.category || null,
+    });
+    input.onCreated(result.company);
+  } catch (err: unknown) {
+    input.onError(err instanceof Error ? err.message : "Failed to create company");
+  } finally {
+    input.onCreating(false);
+  }
 }
 
 export function CompanySelector({ value, onChange, required }: CompanySelectorProps) {
@@ -73,21 +102,22 @@ export function CompanySelector({ value, onChange, required }: CompanySelectorPr
   // Debounced search
   useEffect(() => {
     if (!open) return;
-    if (query.length < 1) {
+    const trimmedQuery = query.trim();
+    if (trimmedQuery.length < 1) {
       setResults([]);
       return;
     }
     const timer = setTimeout(async () => {
       setSearching(true);
       try {
-        const data = await searchCompanies(query);
+        const data = await searchCompanies(trimmedQuery);
         setResults(data.companies);
       } catch {
         setResults([]);
       } finally {
         setSearching(false);
       }
-    }, 300);
+    }, SEARCH_DEBOUNCE_MS);
     return () => clearTimeout(timer);
   }, [query, open]);
 
@@ -98,29 +128,29 @@ export function CompanySelector({ value, onChange, required }: CompanySelectorPr
     onChange(company.id);
   };
 
-  const handleCreateSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newName.trim()) {
-      setCreateError("Name is required");
-      return;
-    }
-    setCreating(true);
-    setCreateError(null);
-    try {
-      const result = await createCompany({
-        name: newName.trim(),
-        category: newCategory || null,
-      });
-      setSelectedName(result.company.name);
-      setShowInlineForm(false);
-      setNewName("");
-      setNewCategory("");
-      setOpen(false);
-      onChange(result.company.id);
-    } catch (err: unknown) {
-      setCreateError(err instanceof Error ? err.message : "Failed to create company");
-    } finally {
-      setCreating(false);
+  const handleCreateSubmit = async () => {
+    await submitInlineCompanyCreate({
+      name: newName,
+      category: newCategory,
+      onError: setCreateError,
+      onCreating: setCreating,
+      onCreated: (company) => {
+        setSelectedName(company.name);
+        setShowInlineForm(false);
+        setNewName("");
+        setNewCategory("");
+        setOpen(false);
+        onChange(company.id);
+      },
+    });
+  };
+
+  const handleInlineCreateKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (!creating) {
+      void handleCreateSubmit();
     }
   };
 
@@ -203,13 +233,14 @@ export function CompanySelector({ value, onChange, required }: CompanySelectorPr
           {createError && (
             <p className="text-xs text-red-600">{createError}</p>
           )}
-          <form onSubmit={handleCreateSubmit} className="space-y-3">
+          <div className="space-y-3">
             <div className="space-y-1">
               <Label className="text-xs">Name *</Label>
               <Input
                 autoFocus
                 value={newName}
                 onChange={(e) => setNewName(e.target.value)}
+                onKeyDown={handleInlineCreateKeyDown}
                 className="h-8 text-sm"
                 required
               />
@@ -242,12 +273,12 @@ export function CompanySelector({ value, onChange, required }: CompanySelectorPr
               >
                 Back
               </Button>
-              <Button type="submit" size="sm" disabled={creating}>
+              <Button type="button" size="sm" disabled={creating} onClick={() => void handleCreateSubmit()}>
                 {creating && <Loader2 className="h-3 w-3 mr-1 animate-spin" />}
                 Create
               </Button>
             </div>
-          </form>
+          </div>
         </div>
       )}
     </div>

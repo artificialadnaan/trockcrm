@@ -9,6 +9,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { RecordAssignmentCard } from "@/components/assignment/record-assignment-card";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -24,24 +25,30 @@ import { DealScopingWorkspace } from "@/components/deals/deal-scoping-workspace"
 import { DealFileTab } from "@/components/files/deal-file-tab";
 import { DealTeamTab } from "./deal-team-tab";
 import { DealEstimatesTab } from "./deal-estimates-tab";
+import { DealPaymentsTab } from "./deal-payments-tab";
 import { DealPunchListTab } from "./deal-punch-list-tab";
 import { DealCloseoutTab } from "./deal-closeout-tab";
 import { DealTimersBanner } from "./deal-timers-banner";
 import { DealProposalCard } from "./deal-proposal-card";
 import { DealEstimatingSubstage } from "./deal-estimating-substage";
+import { OpportunityRoutingPanel } from "@/components/deals/opportunity-routing-panel";
 import { LeadForm } from "@/components/leads/lead-form";
 import { LeadTimelineTab } from "@/components/leads/lead-timeline-tab";
 import { ActivityLogForm } from "@/components/activities/activity-log-form";
+import { ForecastEditor } from "@/components/shared/forecast-editor";
+import { NextStepEditor } from "@/components/shared/next-step-editor";
 import { StageChangeDialog } from "@/components/deals/stage-change-dialog";
 import { TaskCreateDialog } from "@/components/tasks/task-create-dialog";
 import { useActivities, createActivity } from "@/hooks/use-activities";
-import { useDealDetail, deleteDeal as apiDeleteDeal, type DealDetail } from "@/hooks/use-deals";
+import { useDealDetail, deleteDeal as apiDeleteDeal, updateDeal, type DealDetail } from "@/hooks/use-deals";
 import { useCompanyDetail } from "@/hooks/use-companies";
 import { usePipelineStages } from "@/hooks/use-pipeline-config";
 import { useAuth } from "@/lib/auth";
+import { useTaskAssignees } from "@/hooks/use-task-assignees";
 import { formatCurrency, bestEstimate } from "@/lib/deal-utils";
+import { useTasks, getTaskStatusLabel } from "@/hooks/use-tasks";
 
-type Tab = "overview" | "lead" | "scoping" | "files" | "email" | "activity" | "timeline" | "history" | "team" | "estimates" | "punch_list" | "closeout";
+type Tab = "overview" | "lead" | "scoping" | "files" | "email" | "activity" | "timeline" | "history" | "team" | "tasks" | "payments" | "estimates" | "punch_list" | "closeout";
 
 export function DealDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -51,10 +58,13 @@ export function DealDetailPage() {
   const { deal, loading, error, refetch } = useDealDetail(id);
   const { company } = useCompanyDetail(deal?.companyId ?? undefined);
   const { stages } = usePipelineStages();
+  const { assignees: availableReps } = useTaskAssignees();
+  const { tasks: dealTasks, loading: tasksLoading } = useTasks({ dealId: id, limit: 100 });
   const [activeTab, setActiveTab] = useState<Tab>("overview");
   const [stageChangeOpen, setStageChangeOpen] = useState(false);
   const [targetStageId, setTargetStageId] = useState<string | null>(null);
   const [teamCount, setTeamCount] = useState<number | null>(null);
+  const [savingAssignment, setSavingAssignment] = useState(false);
   const currentStage = stages.find((s) => s.id === deal?.stageId);
   const isDirectorOrAdmin = user?.role === "director" || user?.role === "admin";
 
@@ -106,6 +116,8 @@ export function DealDetailPage() {
     { key: "timeline", label: "Timeline" },
     { key: "history", label: "History" },
     { key: "team", label: teamCount != null ? `Team (${teamCount})` : "Team" },
+    { key: "tasks", label: `Tasks (${dealTasks.length})` },
+    { key: "payments", label: "Payments" },
     { key: "estimates", label: "Estimates" },
     ...(showPunchList ? [{ key: "punch_list" as Tab, label: "Punch List" }] : []),
     ...(showCloseout ? [{ key: "closeout" as Tab, label: "Close-Out" }] : []),
@@ -156,6 +168,9 @@ export function DealDetailPage() {
       </div>
     );
   }
+  const assignedRepName =
+    availableReps.find((assignee) => assignee.id === deal.assignedRepId)?.displayName ??
+    deal.assignedRepId;
   const handleTabSelect = (tab: Tab) => {
     setActiveTab(tab);
     const nextParams = new URLSearchParams(searchParams);
@@ -166,6 +181,17 @@ export function DealDetailPage() {
       nextParams.delete("focus");
     }
     setSearchParams(nextParams, { replace: true });
+  };
+
+  const handleAssignmentSave = async (assignedRepId: string) => {
+    if (assignedRepId === deal.assignedRepId) return;
+    setSavingAssignment(true);
+    try {
+      await updateDeal(deal.id, { assignedRepId });
+      await refetch();
+    } finally {
+      setSavingAssignment(false);
+    }
   };
 
   return (
@@ -290,6 +316,14 @@ export function DealDetailPage() {
         </div>
       </div>
 
+      <OpportunityRoutingPanel
+        deal={deal}
+        currentStageSlug={currentStageSlug}
+        onUpdated={() => {
+          void refetch();
+        }}
+      />
+
       {/* Active Timers Banner */}
       <DealTimersBanner dealId={deal.id} />
 
@@ -320,10 +354,48 @@ export function DealDetailPage() {
       {/* Tab Content */}
       {activeTab === "overview" && (
         <div className="space-y-4">
+          <RecordAssignmentCard
+            label="Assigned Rep"
+            assignedRepId={deal.assignedRepId}
+            assignedRepName={assignedRepName}
+            reps={availableReps}
+            canEdit={isDirectorOrAdmin}
+            saving={savingAssignment}
+            onSave={handleAssignmentSave}
+          />
           {(currentStageSlug === "estimating" || currentStageSlug === "bid_sent") && (
             <DealProposalCard deal={deal} onUpdate={refetch} />
           )}
           <DealOverviewTab deal={deal} />
+          <ForecastEditor
+            value={{
+              forecastWindow: deal.forecastWindow,
+              forecastCategory: deal.forecastCategory,
+              forecastConfidencePercent: deal.forecastConfidencePercent,
+              forecastRevenue: deal.forecastRevenue,
+              forecastGrossProfit: deal.forecastGrossProfit,
+              forecastBlockers: deal.forecastBlockers,
+              nextMilestoneAt: deal.nextMilestoneAt,
+            }}
+            onSave={async (payload) => {
+              await updateDeal(deal.id, payload);
+              await refetch();
+            }}
+          />
+          <NextStepEditor
+            value={{
+              nextStep: deal.nextStep,
+              nextStepDueAt: deal.nextStepDueAt,
+              supportNeededType: deal.supportNeededType,
+              supportNeededNotes: deal.supportNeededNotes,
+              decisionMakerName: deal.decisionMakerName,
+              budgetStatus: deal.budgetStatus,
+            }}
+            onSave={async (payload) => {
+              await updateDeal(deal.id, payload);
+              await refetch();
+            }}
+          />
         </div>
       )}
       {activeTab === "lead" && (
@@ -346,6 +418,47 @@ export function DealDetailPage() {
       {activeTab === "history" && <DealHistoryTab deal={deal} />}
       {activeTab === "team" && (
         <DealTeamTab dealId={deal.id} onCountChange={setTeamCount} />
+      )}
+      {activeTab === "tasks" && (
+        <div className="space-y-3 rounded-xl border bg-card p-4">
+          <div>
+            <h3 className="text-lg font-semibold">Project Tasks</h3>
+            <p className="text-sm text-muted-foreground">Tasks created from this project live here.</p>
+          </div>
+          {tasksLoading ? (
+            <p className="text-sm text-muted-foreground">Loading tasks...</p>
+          ) : dealTasks.length === 0 ? (
+            <div className="rounded-lg border border-dashed p-6 text-sm text-muted-foreground">
+              No tasks linked to this project yet.
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {dealTasks.map((task) => (
+                <div key={task.id} className="rounded-lg border p-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="font-medium">{task.title}</p>
+                      {task.description ? (
+                        <p className="mt-1 text-sm text-muted-foreground">{task.description}</p>
+                      ) : null}
+                    </div>
+                    <Badge variant="outline">{getTaskStatusLabel(task.status)}</Badge>
+                  </div>
+                  <div className="mt-2 text-xs text-muted-foreground">
+                    {task.assignedToName ? `Assigned to ${task.assignedToName}` : "Assigned"}{task.dueDate ? ` • Due ${new Date(`${task.dueDate}T00:00:00`).toLocaleDateString()}` : ""}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+      {activeTab === "payments" && (
+        <DealPaymentsTab
+          dealId={deal.id}
+          assignedRepId={deal.assignedRepId}
+          canEditPayments={user?.role === "admin"}
+        />
       )}
       {activeTab === "estimates" && <DealEstimatesTab dealId={deal.id} />}
       {activeTab === "punch_list" && <DealPunchListTab dealId={deal.id} />}
@@ -376,6 +489,8 @@ function DealActivityPanel({ dealId }: { dealId: string }) {
     subject: string;
     body: string;
     outcome?: string;
+    nextStep?: string;
+    nextStepDueAt?: string;
     durationMinutes?: number;
   }) => {
     await createActivity({
@@ -383,6 +498,8 @@ function DealActivityPanel({ dealId }: { dealId: string }) {
       subject: data.subject,
       body: data.body,
       outcome: data.outcome,
+      nextStep: data.nextStep,
+      nextStepDueAt: data.nextStepDueAt,
       durationMinutes: data.durationMinutes,
       dealId,
     });

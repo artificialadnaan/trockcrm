@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { EmailAssignmentQueueView } from "./email-assignment-queue-view";
 
 describe("EmailAssignmentQueueView", () => {
-  it("renders unresolved assignment details and reassignment actions", () => {
+  it("renders parking-lot intake details with broader CRM target options", () => {
     const html = renderToStaticMarkup(
       <EmailAssignmentQueueView
         items={[
@@ -40,22 +40,62 @@ describe("EmailAssignmentQueueView", () => {
             },
           },
         ]}
-        onAssign={async () => {}}
+        onAssign={async () => ({ ok: true })}
       />
     );
 
     expect(html).toContain("Casey Customer");
     expect(html).toContain("Question about TR-2026-0002");
-    expect(html).toContain("TR-2026-0002");
-    expect(html).toContain("Resolve");
+    expect(html).toContain("Assign manually");
+    expect(html).toContain("4 safe suggestions available");
     expect(html).toContain("multiple_deal_candidates");
-    expect(html).not.toContain("Lead · TR-2026-L001");
-    expect(html).not.toContain("Property · 123 Main St");
-    expect(html).not.toContain("Company only");
+    expect(html).toContain("Open manual assignment to use a suggestion or search anywhere in the CRM.");
+    expect(html).toContain("Alpha Roofing");
+    expect(html).toContain("Parking lot");
+  });
+
+  it("renders a manual assignment action when there are no safe suggestions", () => {
+    const html = renderToStaticMarkup(
+      <EmailAssignmentQueueView
+        items={[
+          {
+            email: {
+              id: "email-2",
+              subject: "Receipt",
+              bodyPreview: "Please keep this mail for your records.",
+              fromAddress: "homedepot@order.homedepot.com",
+              sentAt: "2026-04-20T19:03:34.000Z",
+            },
+            companyId: null,
+            contactName: null,
+            companyName: null,
+            candidateDeals: [],
+            candidateLeads: [],
+            candidateProperties: [],
+            candidateCompanies: [],
+            suggestedAssignment: {
+              assignedEntityType: null,
+              assignedEntityId: null,
+              assignedDealId: null,
+              confidence: "low",
+              ambiguityReason: "no_company_context",
+              matchedBy: "company_only",
+              requiresClassificationTask: true,
+              candidateDealIds: [],
+            },
+          },
+        ]}
+        onAssign={async () => ({ ok: true })}
+      />
+    );
+
+    expect(html).toContain("No safe match found");
+    expect(html).toContain("Assign manually");
+    expect(html).not.toContain("No safe assignment targets");
   });
 
   it("renders an empty-state message when there are no items", () => {
-    const html = renderToStaticMarkup(<EmailAssignmentQueueView items={[]} onAssign={async () => {}} />);
-    expect(html).toContain("No unresolved email assignments.");
+    const html = renderToStaticMarkup(<EmailAssignmentQueueView items={[]} onAssign={async () => ({ ok: true })} />);
+    expect(html).toContain("No unresolved parking-lot email intake.");
   });
 });

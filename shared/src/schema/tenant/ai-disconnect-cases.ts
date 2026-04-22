@@ -31,6 +31,8 @@ export const aiDisconnectCases = pgTable(
     reopenCount: integer("reopen_count").notNull().default(0),
     firstDetectedAt: timestamp("first_detected_at", { withTimezone: true }).notNull(),
     lastDetectedAt: timestamp("last_detected_at", { withTimezone: true }).notNull(),
+    currentLifecycleStartedAt: timestamp("current_lifecycle_started_at", { withTimezone: true }).notNull(),
+    lastReopenedAt: timestamp("last_reopened_at", { withTimezone: true }),
     lastIntervenedAt: timestamp("last_intervened_at", { withTimezone: true }),
     resolvedAt: timestamp("resolved_at", { withTimezone: true }),
     resolutionReason: varchar("resolution_reason", { length: 80 }),

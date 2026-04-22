@@ -38,6 +38,7 @@ import { propertyRoutes } from "./modules/properties/routes.js";
 import { adminRoutes } from "./modules/admin/routes.js";
 import { companycamRoutes } from "./modules/companycam/routes.js";
 import { aiCopilotRoutes } from "./modules/ai-copilot/routes.js";
+import { salesReviewRoutes } from "./modules/sales-review/routes.js";
 import { getAllowedCorsOrigins } from "./modules/auth/http-config.js";
 
 export function createApp() {
@@ -120,6 +121,7 @@ export function createApp() {
   tenantRouter.use("/activities", activityRoutes);
   tenantRouter.use("/notifications", notificationCrudRoutes);
   tenantRouter.use("/reports", reportRoutes);
+  tenantRouter.use("/sales-review", salesReviewRoutes);
   tenantRouter.use("/dashboard", dashboardRoutes);
   tenantRouter.use("/procore", procoreRoutes);
   tenantRouter.use("/search", searchRoutes);

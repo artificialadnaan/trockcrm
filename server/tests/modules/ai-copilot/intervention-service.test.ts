@@ -16,8 +16,10 @@ vi.mock("../../../src/modules/ai-copilot/service.js", async () => {
 });
 
 const {
+  INTERVENTION_SYSTEM_ACTOR_ID,
   materializeDisconnectCases,
   listInterventionCases,
+  getInterventionAnalyticsDashboard,
   getInterventionCaseDetail,
   assignInterventionCases,
   snoozeInterventionCases,
@@ -44,6 +46,8 @@ type DisconnectCaseRecord = {
   reopenCount: number;
   firstDetectedAt: Date;
   lastDetectedAt: Date;
+  currentLifecycleStartedAt: Date;
+  lastReopenedAt: Date | null;
   lastIntervenedAt: Date | null;
   resolvedAt: Date | null;
   resolutionReason: string | null;
@@ -73,6 +77,11 @@ type DealRecord = {
 type CompanyRecord = {
   id: string;
   name: string;
+};
+
+type UserRecord = {
+  id: string;
+  displayName: string;
 };
 
 type HistoryRecord = {
@@ -155,6 +164,8 @@ function makeCase(
     reopenCount: 0,
     firstDetectedAt: now,
     lastDetectedAt: now,
+    currentLifecycleStartedAt: now,
+    lastReopenedAt: null,
     lastIntervenedAt: null,
     resolvedAt: null,
     resolutionReason: null,
@@ -214,6 +225,7 @@ function createTenantDb(state?: {
   tasks?: TaskRecord[];
   deals?: DealRecord[];
   companies?: CompanyRecord[];
+  users?: UserRecord[];
   history?: HistoryRecord[];
   feedback?: FeedbackRecord[];
 }) {
@@ -222,6 +234,7 @@ function createTenantDb(state?: {
     tasks: state?.tasks ? state.tasks.map((row) => ({ ...row })) : [],
     deals: state?.deals ? state.deals.map((row) => ({ ...row })) : [],
     companies: state?.companies ? state.companies.map((row) => ({ ...row })) : [],
+    users: state?.users ? state.users.map((row) => ({ ...row })) : [],
     history: state?.history ? state.history.map((row) => ({ ...row })) : [],
     feedback: state?.feedback ? state.feedback.map((row) => ({ ...row })) : [],
   };
@@ -334,6 +347,141 @@ describe("AI intervention service", () => {
     });
   });
 
+  it("resets lifecycle timestamps when a resolved case reopens", async () => {
+    disconnectRowsMock.mockResolvedValue([makeDisconnectRow()]);
+
+    const now = new Date("2026-04-16T12:00:00.000Z");
+    const reopenedAt = new Date("2026-04-18T12:00:00.000Z");
+    const tenantDb = createTenantDb({
+      cases: [
+        makeCase({
+          status: "resolved",
+          currentLifecycleStartedAt: now,
+          lastReopenedAt: null,
+          resolvedAt: now,
+        }),
+      ],
+    });
+
+    await materializeDisconnectCases(tenantDb as any, { officeId: "office-1", now: reopenedAt });
+
+    expect(tenantDb.state.cases[0]).toMatchObject({
+      status: "open",
+      currentLifecycleStartedAt: reopenedAt,
+      lastReopenedAt: reopenedAt,
+      reopenCount: 1,
+    });
+  });
+
+  it("writes one reopened history event when a resolved case reopens", async () => {
+    disconnectRowsMock.mockResolvedValue([makeDisconnectRow()]);
+
+    const reopenedAt = new Date("2026-04-16T15:00:00.000Z");
+    const tenantDb = createTenantDb({
+      cases: [
+        makeCase({
+          status: "resolved",
+          resolvedAt: new Date("2026-04-15T10:00:00.000Z"),
+          resolutionReason: "owner_aligned",
+          reopenCount: 0,
+        }),
+      ],
+      history: [
+        makeHistory({
+          id: "history-resolve-1",
+          actionType: "resolve",
+          fromStatus: "open",
+          toStatus: "resolved",
+          metadataJson: {
+            conclusion: { kind: "resolve", outcomeCategory: "owner_aligned" },
+          },
+        }),
+      ],
+    });
+
+    await materializeDisconnectCases(tenantDb as any, {
+      officeId: "office-1",
+      now: reopenedAt,
+    });
+
+    expect(tenantDb.state.history.find((row) => row.actionType === "reopened")).toMatchObject({
+      actedBy: INTERVENTION_SYSTEM_ACTOR_ID,
+      fromStatus: "resolved",
+      toStatus: "open",
+      metadataJson: {
+        priorConclusionActionId: "history-resolve-1",
+        priorConclusionKind: "resolve",
+        reopenReason: "signal_still_present",
+        lifecycleStartedAt: reopenedAt.toISOString(),
+      },
+    });
+  });
+
+  it("does not duplicate reopened history events on repeated materialization retries", async () => {
+    disconnectRowsMock.mockResolvedValue([makeDisconnectRow()]);
+
+    const reopenedAt = new Date("2026-04-16T15:00:00.000Z");
+    const tenantDb = createTenantDb({
+      cases: [
+        makeCase({
+          status: "resolved",
+          resolvedAt: new Date("2026-04-15T10:00:00.000Z"),
+          resolutionReason: "owner_aligned",
+          reopenCount: 0,
+        }),
+      ],
+      history: [
+        makeHistory({
+          id: "history-resolve-1",
+          actionType: "resolve",
+          fromStatus: "open",
+          toStatus: "resolved",
+          metadataJson: {
+            conclusion: { kind: "resolve", outcomeCategory: "owner_aligned" },
+          },
+        }),
+      ],
+    });
+
+    await materializeDisconnectCases(tenantDb as any, {
+      officeId: "office-1",
+      now: reopenedAt,
+    });
+    await materializeDisconnectCases(tenantDb as any, {
+      officeId: "office-1",
+      now: reopenedAt,
+    });
+
+    expect(tenantDb.state.history.filter((row) => row.actionType === "reopened")).toHaveLength(1);
+  });
+
+  it("preserves lifecycle timestamps for already-open repeat cases during refresh", async () => {
+    disconnectRowsMock.mockResolvedValue([makeDisconnectRow()]);
+
+    const lifecycleStart = new Date("2026-04-10T12:00:00.000Z");
+    const reopenedAt = new Date("2026-04-10T12:00:00.000Z");
+    const refreshedAt = new Date("2026-04-18T12:00:00.000Z");
+    const tenantDb = createTenantDb({
+      cases: [
+        makeCase({
+          reopenCount: 2,
+          currentLifecycleStartedAt: lifecycleStart,
+          lastReopenedAt: reopenedAt,
+        }),
+      ],
+    });
+
+    await materializeDisconnectCases(tenantDb as any, { officeId: "office-1", now: refreshedAt });
+
+    expect(tenantDb.state.cases[0]).toMatchObject({
+      status: "open",
+      reopenCount: 2,
+      currentLifecycleStartedAt: lifecycleStart,
+      lastReopenedAt: reopenedAt,
+      lastDetectedAt: refreshedAt,
+    });
+  });
+
   it("excludes snoozed cases from the default queue until snoozed_until", async () => {
     const tenantDb = createTenantDb({
       cases: [
@@ -386,6 +534,127 @@ describe("AI intervention service", () => {
     expect(afterWindow.items.map((item) => item.id)).toEqual(["case-2", "case-1"]);
   });
 
+  it("lists overdue cases when view=overdue", async () => {
+    const tenantDb = createTenantDb({
+      cases: [
+        makeCase({
+          id: "case-overdue",
+          severity: "high",
+          currentLifecycleStartedAt: new Date("2026-04-13T15:00:00.000Z"),
+          metadataJson: {
+            evidenceSummary: "Deal has no open next-step task.",
+            ageDays: 1,
+          },
+        }),
+        makeCase({
+          id: "case-not-overdue",
+          severity: "high",
+          currentLifecycleStartedAt: new Date("2026-04-15T15:00:00.000Z"),
+          metadataJson: {
+            evidenceSummary: "Deal has no open next-step task.",
+            ageDays: 9,
+          },
+        }),
+        makeCase({
+          id: "case-resolved",
+          severity: "critical",
+          status: "resolved",
+          resolvedAt: new Date("2026-04-16T10:00:00.000Z"),
+          metadataJson: {
+            evidenceSummary: "Resolved case should not count as overdue.",
+            ageDays: 5,
+          },
+        }),
+      ],
+    });
+
+    const result = await listInterventionCases(tenantDb as any, {
+      officeId: "office-1",
+      view: "overdue",
+      status: undefined,
+      now: new Date("2026-04-16T15:00:00.000Z"),
+    });
+
+    expect(result.items.map((item) => item.id)).toEqual(["case-overdue"]);
+    expect(result.items[0]?.ageDays).toBe(3);
+  });
+
+  it("uses business-day aging for overdue queue classification", async () => {
+    const tenantDb = createTenantDb({
+      cases: [
+        makeCase({
+          id: "case-friday",
+          severity: "high",
+          currentLifecycleStartedAt: new Date("2026-04-17T15:00:00.000Z"),
+        }),
+      ],
+    });
+
+    const result = await listInterventionCases(tenantDb as any, {
+      officeId: "office-1",
+      view: "overdue",
+      status: undefined,
+      now: new Date("2026-04-20T15:00:00.000Z"),
+    });
+
+    expect(result.totalCount).toBe(0);
+  });
+
+  it("lists snooze-breached cases with source filters while preserving caseId as a deep-link selector", async () => {
+    const tenantDb = createTenantDb({
+      cases: [
+        makeCase({
+          id: "case-breached",
+          status: "snoozed",
+          snoozedUntil: new Date("2026-04-15T00:00:00.000Z"),
+          companyId: "company-1",
+          metadataJson: {
+            ...makeCase().metadataJson,
+            assignedRepId: "rep-1",
+            stageKey: "estimating",
+          },
+        }),
+        makeCase({
+          id: "case-other-company",
+          status: "snoozed",
+          snoozedUntil: new Date("2026-04-15T00:00:00.000Z"),
+          companyId: "company-2",
+          businessKey: "office-1:missing_next_task:deal:deal-2",
+          scopeId: "deal-2",
+          dealId: "deal-2",
+          metadataJson: {
+            ...makeCase().metadataJson,
+            assignedRepId: "rep-2",
+            stageKey: "proposal",
+          },
+        }),
+      ],
+      deals: [
+        { id: "deal-1", dealNumber: "D-1001", name: "Alpha Plaza", companyId: "company-1" },
+        { id: "deal-2", dealNumber: "D-1002", name: "Beta Tower", companyId: "company-2" },
+      ],
+      companies: [
+        { id: "company-1", name: "Acme Property Group" },
+        { id: "company-2", name: "Beta Holdings" },
+      ],
+    });
+
+    const result = await listInterventionCases(tenantDb as any, {
+      officeId: "office-1",
+      view: "snooze-breached",
+      status: undefined,
+      now: new Date("2026-04-16T15:00:00.000Z"),
+      filters: {
+        companyId: "company-1",
+        repId: "rep-1",
+        stageKey: "estimating",
+        caseId: "case-does-not-filter-the-queue",
+      },
+    });
+
+    expect(result.items.map((item) => item.id)).toEqual(["case-breached"]);
+  });
+
   it("projects generated task state into queue rows", async () => {
     const tenantDb = createTenantDb({
       cases: [
@@ -403,6 +672,10 @@ describe("AI intervention service", () => {
       ],
       deals: [{ id: "deal-1", dealNumber: "D-1001", name: "Alpha Plaza", companyId: "company-1" }],
       companies: [{ id: "company-1", name: "Acme Property Group" }],
+      users: [
+        { id: "manager-1", displayName: "Manager One" },
+        { id: "admin-2", displayName: "Admin Two" },
+      ],
       history: [
         makeHistory({
           actionType: "assign",
@@ -420,10 +693,12 @@ describe("AI intervention service", () => {
       expect.objectContaining({
         id: "case-1",
         assignedTo: "manager-1",
+        assignedToName: "Manager One",
         generatedTask: {
           id: "task-1",
           status: "in_progress",
           assignedTo: "admin-2",
+          assignedToName: "Admin Two",
           title: "Resolve Missing next task for D-1001",
         },
         deal: {
@@ -455,6 +730,7 @@ describe("AI intervention service", () => {
       tasks: [makeTask()],
       deals: [{ id: "deal-1", dealNumber: "D-1001", name: "Alpha Plaza", companyId: "company-1" }],
       companies: [{ id: "company-1", name: "Acme Property Group" }],
+      users: [{ id: "manager-1", displayName: "Manager One" }, { id: "admin-1", displayName: "Admin User" }, { id: "user-1", displayName: "Task Owner" }],
       history: [
         makeHistory({
           id: "history-2",
@@ -478,10 +754,12 @@ describe("AI intervention service", () => {
       case: {
         id: "case-1",
         businessKey: "office-1:missing_next_task:deal:deal-1",
+        assignedToName: "Manager One",
       },
       generatedTask: {
         id: "task-1",
         status: "pending",
+        assignedToName: "Task Owner",
       },
       crm: {
         deal: {
@@ -496,6 +774,54 @@ describe("AI intervention service", () => {
       },
     });
     expect(detail.history.map((entry) => entry.id)).toEqual(["history-1", "history-2"]);
+    expect(detail.history[0]).toMatchObject({
+      actedByName: "Admin User",
+      toAssigneeName: null,
+    });
+  });
+
+  it("falls back to metadata assignee labels in queue items when user lookup is unavailable", async () => {
+    const tenantDb = createTenantDb({
+      cases: [
+        makeCase({
+          assignedTo: "manager-1",
+          metadataJson: {
+            ...(makeCase().metadataJson ?? {}),
+            assignedRepName: "Manager One",
+          },
+        }),
+      ],
+      users: [],
+    });
+
+    const queue = await listInterventionCases(tenantDb as any, {
+      officeId: "office-1",
+      now: new Date("2026-04-16T15:00:00.000Z"),
+    });
+
+    expect(queue.items[0]?.assignedToName).toBe("Manager One");
+  });
+
+  it("falls back to metadata assignee labels in case detail when user lookup is unavailable", async () => {
+    const tenantDb = createTenantDb({
+      cases: [
+        makeCase({
+          assignedTo: "manager-1",
+          metadataJson: {
+            ...(makeCase().metadataJson ?? {}),
+            assignedRepName: "Manager One",
+          },
+        }),
+      ],
+      users: [],
+    });
+
+    const detail = await getInterventionCaseDetail(tenantDb as any, {
+      officeId: "office-1",
+      caseId: "case-1",
+    });
+
+    expect(detail.case.assignedToName).toBe("Manager One");
   });
 
   it("assigns intervention cases and syncs generated task assignees", async () => {
@@ -689,6 +1015,7 @@ describe("AI intervention service", () => {
         makeCase({
           id: "case-1",
           clusterKey: "follow_through_gap",
+          currentLifecycleStartedAt: new Date("2026-04-07T15:00:00.000Z"),
           metadataJson: { evidenceSummary: "Aging queue case", ageDays: 9 },
         }),
         makeCase({
@@ -706,6 +1033,7 @@ describe("AI intervention service", () => {
           scopeId: "deal-3",
           dealId: "deal-3",
           clusterKey: "follow_through_gap",
+          currentLifecycleStartedAt: new Date("2026-04-14T15:00:00.000Z"),
           metadataJson: { evidenceSummary: "Too new", ageDays: 2 },
         }),
       ],
@@ -717,6 +1045,7 @@ describe("AI intervention service", () => {
       clusterKey: "follow_through_gap",
       page: 1,
       pageSize: 50,
+      now: new Date("2026-04-16T15:00:00.000Z"),
     });
 
     expect(result.totalCount).toBe(1);
@@ -850,6 +1179,64 @@ describe("AI intervention service", () => {
       snoozedUntil: null,
     });
     expect(tenantDb.state.history).toHaveLength(0);
+  });
+
+  it("allows legacy-only resolve payloads while legacy outcome writes remain enabled", async () => {
+    const tenantDb = createTenantDb({
+      cases: [makeCase()],
+    });
+
+    const result = await resolveInterventionCases(tenantDb as any, {
+      officeId: "office-1",
+      actorUserId: "director-1",
+      actorRole: "director",
+      caseIds: ["case-1"],
+      resolutionReason: "task_completed",
+      conclusion: null,
+      allowLegacyOutcomeWrites: true,
+    });
+
+    expect(result.updatedCount).toBe(1);
+  });
+
+  it("rejects resolving without a structured conclusion payload once legacy outcome writes are disabled", async () => {
+    const tenantDb = createTenantDb({
+      cases: [makeCase()],
+    });
+
+    await expect(
+      resolveInterventionCases(tenantDb as any, {
+        officeId: "office-1",
+        actorUserId: "director-1",
+        actorRole: "director",
+        caseIds: ["case-1"],
+        resolutionReason: "task_completed",
+        conclusion: null,
+        allowLegacyOutcomeWrites: false,
+      })
+    ).rejects.toThrow("Structured resolve conclusion is required");
+  });
+
+  it("rejects invalid snooze reason and owner combinations", async () => {
+    const tenantDb = createTenantDb({
+      cases: [makeCase()],
+    });
+
+    await expect(
+      snoozeInterventionCases(tenantDb as any, {
+        officeId: "office-1",
+        actorUserId: "director-1",
+        actorRole: "director",
+        caseIds: ["case-1"],
+        snoozedUntil: "2026-04-20T00:00:00.000Z",
+        conclusion: {
+          kind: "snooze",
+          snoozeReasonCode: "waiting_on_customer",
+          expectedOwnerType: "rep",
+          expectedNextStepCode: "rep_follow_up_expected",
+        },
+      })
+    ).rejects.toThrow("Invalid snooze conclusion");
   });
 
   it("resolves intervention cases, maps generated task outcomes, and writes history plus feedback", async () => {
@@ -1109,5 +1496,82 @@ describe("AI intervention service", () => {
       assignedTo: "manager-1",
     });
     expect(tenantDb.state.history).toHaveLength(1);
+  });
+
+  it("counts recent resolutions and reopens from history even after a case reopens", async () => {
+    const now = new Date("2026-04-16T15:00:00.000Z");
+    const resolvedAt = new Date("2026-04-10T12:00:00.000Z");
+    const reopenedAt = new Date("2026-04-12T12:00:00.000Z");
+    const tenantDb = createTenantDb({
+      cases: [
+        makeCase({
+          id: "case-1",
+          status: "open",
+          currentLifecycleStartedAt: reopenedAt,
+          lastReopenedAt: reopenedAt,
+          resolvedAt: null,
+          reopenCount: 1,
+        }),
+        makeCase({
+          id: "case-2",
+          businessKey: "office-1:estimating_gate_missing:deal:deal-2",
+          disconnectType: "estimating_gate_missing",
+          severity: "medium",
+          currentLifecycleStartedAt: new Date("2026-04-11T12:00:00.000Z"),
+        }),
+      ],
+      history: [
+        makeHistory({
+          id: "history-resolve-1",
+          disconnectCaseId: "case-1",
+          actionType: "resolve",
+          actedAt: resolvedAt,
+          fromStatus: "open",
+          toStatus: "resolved",
+          metadataJson: {
+            lifecycleStartedAt: "2026-04-01T12:00:00.000Z",
+          },
+        }),
+        makeHistory({
+          id: "history-assign-2",
+          disconnectCaseId: "case-2",
+          actionType: "assign",
+          actedAt: new Date("2026-04-13T12:00:00.000Z"),
+        }),
+      ],
+      deals: [{ id: "deal-1", dealNumber: "D-1001", name: "Alpha Plaza", companyId: "company-1" }],
+      companies: [{ id: "company-1", name: "Acme Property Group" }],
+      users: [{ id: "user-1", displayName: "Manager One" }],
+    });
+
+    const dashboard = await getInterventionAnalyticsDashboard(tenantDb as any, {
+      officeId: "office-1",
+      now,
+    });
+
+    expect(dashboard.outcomes.clearanceRate30d).toBe(0.5);
+    expect(dashboard.outcomes.reopenRate30d).toBe(1);
+    expect(dashboard.outcomes.averageAgeToResolution).toBe(7);
+  });
+
+  it("treats a snooze expiring exactly at now as breached in analytics", async () => {
+    const now = new Date("2026-04-16T15:00:00.000Z");
+    const tenantDb = createTenantDb({
+      cases: [
+        makeCase({
+          id: "case-1",
+          status: "snoozed",
+          snoozedUntil: now,
+          currentLifecycleStartedAt: new Date("2026-04-10T12:00:00.000Z"),
+        }),
+      ],
+    });
+
+    const dashboard = await getInterventionAnalyticsDashboard(tenantDb as any, {
+      officeId: "office-1",
+      now,
+    });
+
+    expect(dashboard.summary.snoozeOverdueCases).toBe(1);
   });
 });

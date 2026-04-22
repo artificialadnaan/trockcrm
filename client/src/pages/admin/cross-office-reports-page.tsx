@@ -41,26 +41,42 @@ export function CrossOfficeReportsPage() {
   const [pipeline, setPipeline] = useState<OfficePipelineRow[]>([]);
   const [activity, setActivity] = useState<OfficeActivityRow[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [pipelineError, setPipelineError] = useState<string | null>(null);
+  const [activityError, setActivityError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    setError(null);
+    setPipelineError(null);
+    setActivityError(null);
 
-    Promise.all([
+    Promise.allSettled([
       api<{ offices: OfficePipelineRow[] }>("/admin/reports/cross-office-pipeline"),
       api<{ offices: OfficeActivityRow[] }>("/admin/reports/cross-office-activity"),
     ])
-      .then(([pipelineData, activityData]) => {
-        if (!cancelled) {
-          setPipeline(pipelineData.offices);
-          setActivity(activityData.offices);
+      .then(([pipelineResult, activityResult]) => {
+        if (cancelled) return;
+
+        if (pipelineResult.status === "fulfilled") {
+          setPipeline(pipelineResult.value.offices);
+        } else {
+          setPipeline([]);
+          setPipelineError(
+            pipelineResult.reason instanceof Error
+              ? pipelineResult.reason.message
+              : "Failed to load pipeline reports"
+          );
         }
-      })
-      .catch((err: unknown) => {
-        if (!cancelled) {
-          setError(err instanceof Error ? err.message : "Failed to load reports");
+
+        if (activityResult.status === "fulfilled") {
+          setActivity(activityResult.value.offices);
+        } else {
+          setActivity([]);
+          setActivityError(
+            activityResult.reason instanceof Error
+              ? activityResult.reason.message
+              : "Failed to load activity reports"
+          );
         }
       })
       .finally(() => {
@@ -91,10 +107,6 @@ export function CrossOfficeReportsPage() {
         <p className="text-sm text-gray-500 mt-1">Pipeline and activity metrics across all accessible offices</p>
       </div>
 
-      {error && (
-        <div className="p-4 bg-red-50 text-red-700 rounded-lg text-sm">{error}</div>
-      )}
-
       {loading ? (
         <div className="space-y-4">
           {Array.from({ length: 3 }).map((_, i) => (
@@ -106,6 +118,9 @@ export function CrossOfficeReportsPage() {
           {/* Pipeline Section */}
           <section className="space-y-4">
             <h2 className="text-lg font-medium text-gray-800">Pipeline by Office</h2>
+            {pipelineError && (
+              <div className="rounded-lg bg-red-50 p-4 text-sm text-red-700">{pipelineError}</div>
+            )}
 
             <div className="rounded-lg border bg-white p-4">
               <ResponsiveContainer width="100%" height={300}>
@@ -161,6 +176,9 @@ export function CrossOfficeReportsPage() {
           {/* Activity Section */}
           <section className="space-y-4">
             <h2 className="text-lg font-medium text-gray-800">Activity by Office</h2>
+            {activityError && (
+              <div className="rounded-lg bg-red-50 p-4 text-sm text-red-700">{activityError}</div>
+            )}
 
             <div className="rounded-lg border bg-white p-4">
               <ResponsiveContainer width="100%" height={300}>

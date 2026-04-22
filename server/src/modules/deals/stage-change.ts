@@ -14,6 +14,7 @@ import { validateStageGate } from "./stage-gate.js";
 import type { UserRole } from "@trock-crm/shared/types";
 import { createStageTimers } from "./timer-service.js";
 import { activateDealScopingIntake, evaluateDealScopingReadiness } from "./scoping-service.js";
+import { captureStageDrivenForecastMilestone } from "../reports/forecast-milestones-service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -166,6 +167,23 @@ export async function changeDealStage(
     .where(eq(deals.id, dealId))
     .returning();
   const updatedDeal = updatedDealResult[0];
+
+  await captureStageDrivenForecastMilestone(tenantDb, {
+    deal: {
+      id: updatedDeal.id,
+      assignedRepId: updatedDeal.assignedRepId,
+      workflowRoute: updatedDeal.workflowRoute,
+      ddEstimate: updatedDeal.ddEstimate,
+      bidEstimate: updatedDeal.bidEstimate,
+      awardedAmount: updatedDeal.awardedAmount,
+      stageId: updatedDeal.stageId,
+      expectedCloseDate: updatedDeal.expectedCloseDate,
+      source: updatedDeal.source,
+    },
+    currentStage: { slug: currentStage.slug },
+    targetStage: { slug: targetStage.slug },
+    userId,
+  });
 
   // Auto-dismiss pending/in-progress tasks when deal reaches a terminal stage
   if (targetStage.isTerminal) {

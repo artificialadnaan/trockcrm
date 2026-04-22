@@ -84,6 +84,8 @@ router.post("/", async (req, res, next) => {
       subject,
       body,
       outcome,
+      nextStep,
+      nextStepDueAt,
       durationMinutes,
       companyId,
       propertyId,
@@ -108,14 +110,18 @@ router.post("/", async (req, res, next) => {
       const { getDealById } = await import("../deals/service.js");
       const deal = await getDealById(req.tenantDb!, sourceEntityId, req.user!.role, req.user!.id);
       if (!deal) throw new AppError(404, "Deal not found");
-      resolvedResponsibleUserId ??= deal.assignedRepId;
+      if (!resolvedResponsibleUserId && deal.assignedRepId) {
+        resolvedResponsibleUserId = deal.assignedRepId;
+      }
     }
 
     if (sourceEntityType === "lead") {
       const { getLeadById } = await import("../leads/service.js");
       const lead = await getLeadById(req.tenantDb!, sourceEntityId, req.user!.role, req.user!.id);
       if (!lead) throw new AppError(404, "Lead not found");
-      resolvedResponsibleUserId ??= lead.assignedRepId;
+      if (!resolvedResponsibleUserId && lead.assignedRepId) {
+        resolvedResponsibleUserId = lead.assignedRepId;
+      }
     }
 
     const activity = await createActivity(req.tenantDb!, {
@@ -132,6 +138,8 @@ router.post("/", async (req, res, next) => {
       subject,
       body,
       outcome,
+      nextStep,
+      nextStepDueAt,
       durationMinutes,
       occurredAt,
     });

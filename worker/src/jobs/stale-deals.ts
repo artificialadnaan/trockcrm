@@ -1,8 +1,10 @@
 import { pool } from "../db.js";
 
-const SERVER_EVALUATOR_MODULE = "../../../server/src/modules/tasks/rules/evaluator.js" as string;
-const SERVER_TASK_RULES_MODULE = "../../../server/src/modules/tasks/rules/config.js" as string;
-const SERVER_TASK_PERSISTENCE_MODULE = "../../../server/src/modules/tasks/rules/persistence.js" as string;
+const SERVER_MODULE_ROOT =
+  process.env.NODE_ENV === "production" ? "../../../server/dist/modules" : "../../../server/src/modules";
+const SERVER_EVALUATOR_MODULE = `${SERVER_MODULE_ROOT}/tasks/rules/evaluator.js` as string;
+const SERVER_TASK_RULES_MODULE = `${SERVER_MODULE_ROOT}/tasks/rules/config.js` as string;
+const SERVER_TASK_PERSISTENCE_MODULE = `${SERVER_MODULE_ROOT}/tasks/rules/persistence.js` as string;
 
 /**
  * Scans all active deals across all offices for stale deals.
@@ -64,6 +66,7 @@ export async function runStaleDealScan(): Promise<void> {
   console.log("[Worker:stale-deals] Starting stale deal scan...");
 
   const client = await pool.connect();
+  let transactionOpen = false;
   try {
     // Get all active offices
     const offices = await client.query(
@@ -80,6 +83,14 @@ export async function runStaleDealScan(): Promise<void> {
         continue;
       }
       const schemaName = `office_${office.slug}`;
+      const lockKey = `stale_deals:${office.id}`;
+
+      await client.query("BEGIN");
+      transactionOpen = true;
+      await client.query(
+        `SELECT pg_advisory_xact_lock(hashtext($1))`,
+        [lockKey]
+      );
 
       // Find stale deals: join deals with pipeline config, check threshold.
       // Also fetch stale_escalation_tiers for tier logic.
@@ -103,6 +114,8 @@ export async function runStaleDealScan(): Promise<void> {
       );
 
       if (staleDeals.rows.length === 0) {
+        await client.query("COMMIT");
+        transactionOpen = false;
         continue;
       }
 
@@ -193,10 +206,16 @@ export async function runStaleDealScan(): Promise<void> {
           TASK_RULES
         );
       }
+
+      await client.query("COMMIT");
+      transactionOpen = false;
     }
 
     console.log(`[Worker:stale-deals] Scan complete. Total stale deals: ${totalStale}`);
   } catch (err) {
+    if (transactionOpen) {
+      await client.query("ROLLBACK").catch(() => {});
+    }
     console.error("[Worker:stale-deals] Scan failed:", err);
     throw err;
   } finally {

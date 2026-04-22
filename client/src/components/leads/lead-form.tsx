@@ -1,8 +1,12 @@
 import { Link } from "react-router-dom";
+import { useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { Loader2 } from "lucide-react";
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { LeadStageBadge } from "./lead-stage-badge";
+import { convertLead } from "@/hooks/use-leads";
 
 export interface LeadFormLead {
   id: string;
@@ -26,13 +30,56 @@ export interface LeadFormLead {
 interface LeadFormProps {
   lead: LeadFormLead;
   converted?: boolean;
+  defaultDealStageId?: string | null;
+  showPrimaryAction?: boolean;
 }
 
-export function LeadForm({ lead, converted = false }: LeadFormProps) {
+export function LeadForm({
+  lead,
+  converted = false,
+  defaultDealStageId = null,
+  showPrimaryAction = true,
+}: LeadFormProps) {
   const navigate = useNavigate();
-  const propertyLabel = [lead.propertyAddress, [lead.propertyCity, lead.propertyState].filter(Boolean).join(", "), lead.propertyZip]
-    .filter(Boolean)
-    .join(" ") || lead.propertyName || "--";
+  const [converting, setConverting] = useState(false);
+  const propertyLabel =
+    [
+      lead.propertyAddress,
+      [lead.propertyCity, lead.propertyState].filter(Boolean).join(", "),
+      lead.propertyZip,
+    ]
+      .filter(Boolean)
+      .join(" ") || lead.propertyName || "--";
+
+  const handlePrimaryAction = async () => {
+    if (converted) {
+      if (lead.convertedDealId) {
+        navigate(`/deals/${lead.convertedDealId}`);
+      }
+      return;
+    }
+
+    if (!defaultDealStageId) {
+      navigate("/deals/new");
+      return;
+    }
+
+    setConverting(true);
+    try {
+      const result = await convertLead(lead.id, {
+        dealStageId: defaultDealStageId,
+        name: lead.name,
+        source: lead.source,
+        description: lead.description,
+      });
+      toast.success("Lead converted to deal");
+      navigate(`/deals/${result.deal.id}`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to convert lead");
+    } finally {
+      setConverting(false);
+    }
+  };
 
   return (
     <Card>
@@ -43,7 +90,7 @@ export function LeadForm({ lead, converted = false }: LeadFormProps) {
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
+        <div className="grid grid-cols-1 gap-4 text-sm sm:grid-cols-2">
           <div>
             <p className="text-muted-foreground">Lead Name</p>
             <p className="font-medium">{lead.name}</p>
@@ -66,24 +113,27 @@ export function LeadForm({ lead, converted = false }: LeadFormProps) {
           <p className="text-muted-foreground">Property</p>
           {lead.propertyId ? (
             <Link to={`/properties/${lead.propertyId}`} className="font-medium text-primary hover:underline">
-              {propertyLabel || "--"}
+              {propertyLabel}
             </Link>
           ) : (
-            <p className="font-medium">{propertyLabel || "--"}</p>
+            <p className="font-medium">{propertyLabel}</p>
           )}
         </div>
 
         {lead.description && (
-          <p className="text-sm text-muted-foreground whitespace-pre-wrap">{lead.description}</p>
+          <p className="whitespace-pre-wrap text-sm text-muted-foreground">{lead.description}</p>
         )}
 
         <div className="flex flex-wrap gap-2">
-          <Button
-            disabled={converted && !lead.convertedDealId}
-            onClick={() => navigate(converted ? `/deals/${lead.convertedDealId}` : "/deals/new")}
-          >
-            {converted ? "Open Deal" : "Convert to Deal"}
-          </Button>
+          {showPrimaryAction && (
+            <Button
+              disabled={converting || (converted && !lead.convertedDealId)}
+              onClick={handlePrimaryAction}
+            >
+              {converting ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+              {converted ? "Open Deal" : "Convert to Deal"}
+            </Button>
+          )}
           {lead.companyId && (
             <Button variant="outline" onClick={() => navigate(`/companies/${lead.companyId}`)}>
               View Company

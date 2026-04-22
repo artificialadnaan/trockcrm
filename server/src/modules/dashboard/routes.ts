@@ -2,8 +2,10 @@ import { Router } from "express";
 import { requireRole } from "../../middleware/rbac.js";
 import { AppError } from "../../middleware/error-handler.js";
 import {
+  getAdminDashboardSummary,
   getRepDashboard,
   getDirectorDashboard,
+  getDirectorCommissionWorkspace,
   getRepDetail,
 } from "./service.js";
 
@@ -22,11 +24,45 @@ router.get("/rep", async (req, res, next) => {
 
 // GET /api/dashboard/director -- director overview (admin/director only)
 router.get(
+  "/admin",
+  requireRole("admin"),
+  async (req, res, next) => {
+    try {
+      const data = await getAdminDashboardSummary(
+        req.tenantDb!,
+        req.user!.activeOfficeId ?? req.user!.officeId
+      );
+      await req.commitTransaction!();
+      res.json({ data });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+router.get(
   "/director",
   requireRole("admin", "director"),
   async (req, res, next) => {
     try {
       const data = await getDirectorDashboard(req.tenantDb!, {
+        from: req.query.from as string | undefined,
+        to: req.query.to as string | undefined,
+      });
+      await req.commitTransaction!();
+      res.json({ data });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+router.get(
+  "/director/commissions",
+  requireRole("admin", "director"),
+  async (req, res, next) => {
+    try {
+      const data = await getDirectorCommissionWorkspace(req.tenantDb!, {
         from: req.query.from as string | undefined,
         to: req.query.to as string | undefined,
       });

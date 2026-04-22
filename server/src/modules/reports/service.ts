@@ -6,6 +6,8 @@ import {
   deals,
   dealStageHistory,
   activities,
+  contacts,
+  contactDealAssociations,
   tasks,
   pipelineStageConfig,
   users,
@@ -29,6 +31,288 @@ function defaultDateRange(from?: string, to?: string): { from: string; to: strin
 }
 
 const LEAD_STALE_THRESHOLD_DAYS = 14;
+
+export interface AnalyticsFilterInput {
+  from?: string;
+  to?: string;
+  officeId?: string;
+  regionId?: string;
+  repId?: string;
+  source?: string;
+}
+
+export interface NormalizedAnalyticsFilters {
+  from: string;
+  to: string;
+  officeId?: string;
+  regionId?: string;
+  repId?: string;
+  source?: string;
+}
+
+function normalizeAnalyticsValue(value?: string): string | undefined {
+  const normalized = value?.trim();
+  return normalized ? normalized : undefined;
+}
+
+export function normalizeAnalyticsFilters(
+  input: AnalyticsFilterInput = {}
+): NormalizedAnalyticsFilters {
+  const { from, to } = defaultDateRange(input.from, input.to);
+  return {
+    from,
+    to,
+    officeId: normalizeAnalyticsValue(input.officeId),
+    regionId: normalizeAnalyticsValue(input.regionId),
+    repId: normalizeAnalyticsValue(input.repId),
+    source: normalizeAnalyticsValue(input.source),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Forecast Accuracy / Pipeline Variance
+// ---------------------------------------------------------------------------
+
+export interface ForecastVarianceSummary {
+  comparableDeals: number;
+  avgInitialVariance: number;
+  avgQualifiedVariance: number;
+  avgEstimatingVariance: number;
+  avgCloseDriftDays: number;
+}
+
+export interface ForecastVarianceRepRollup {
+  repId: string;
+  repName: string;
+  comparableDeals: number;
+  avgInitialVariance: number;
+  avgQualifiedVariance: number;
+  avgEstimatingVariance: number;
+  avgCloseDriftDays: number;
+}
+
+export interface ForecastVarianceDealRow {
+  dealId: string;
+  dealName: string;
+  repName: string;
+  workflowRoute: WorkflowRoute;
+  initialForecast: number;
+  qualifiedForecast: number | null;
+  estimatingForecast: number | null;
+  awardedAmount: number;
+  initialVariance: number;
+  qualifiedVariance: number | null;
+  estimatingVariance: number | null;
+  closeDriftDays: number | null;
+}
+
+export interface ForecastVarianceOverview {
+  summary: ForecastVarianceSummary;
+  repRollups: ForecastVarianceRepRollup[];
+  deals: ForecastVarianceDealRow[];
+}
+
+function buildForecastVarianceFilterSql(filters: NormalizedAnalyticsFilters) {
+  const clauses = [
+    sql`cw.captured_at >= ${filters.from}::timestamptz`,
+    sql`cw.captured_at < (${filters.to}::date + INTERVAL '1 day')::timestamptz`,
+  ];
+
+  if (filters.officeId) {
+    clauses.push(sql`u.office_id = ${filters.officeId}::uuid`);
+  }
+  if (filters.regionId) {
+    clauses.push(sql`d.region_id = ${filters.regionId}::uuid`);
+  }
+  if (filters.repId) {
+    clauses.push(sql`d.assigned_rep_id = ${filters.repId}::uuid`);
+  }
+  if (filters.source) {
+    clauses.push(sql`d.source = ${filters.source}`);
+  }
+
+  return sql.join(clauses, sql` AND `);
+}
+
+function mapForecastVarianceSummaryRow(row?: Record<string, any>): ForecastVarianceSummary {
+  return {
+    comparableDeals: Number(row?.comparable_deals ?? 0),
+    avgInitialVariance: Number(row?.avg_initial_variance ?? 0),
+    avgQualifiedVariance: Number(row?.avg_qualified_variance ?? 0),
+    avgEstimatingVariance: Number(row?.avg_estimating_variance ?? 0),
+    avgCloseDriftDays: Number(row?.avg_close_drift_days ?? 0),
+  };
+}
+
+export async function getForecastVarianceOverview(
+  tenantDb: TenantDb,
+  input: AnalyticsFilterInput = {}
+): Promise<ForecastVarianceOverview> {
+  const filters = normalizeAnalyticsFilters(input);
+  const whereSql = buildForecastVarianceFilterSql(filters);
+
+  const summaryResult = await tenantDb.execute(sql`
+    WITH forecast_base AS (
+      SELECT
+        d.id AS deal_id,
+        d.name AS deal_name,
+        cw.workflow_route,
+        cw.assigned_rep_id,
+        u.display_name AS rep_name,
+        cw.awarded_amount,
+        cw.captured_at::date AS actual_close_date,
+        cw.expected_close_date,
+        initial.forecast_amount AS initial_forecast,
+        qualified.forecast_amount AS qualified_forecast,
+        estimating.forecast_amount AS estimating_forecast,
+        cw.captured_at AS closed_won_captured_at
+      FROM deals d
+      LEFT JOIN deal_scoping_intake dsi ON dsi.deal_id = d.id
+      JOIN deal_forecast_milestones cw
+        ON cw.deal_id = d.id
+       AND cw.milestone_key = 'closed_won'
+      JOIN users u ON u.id = cw.assigned_rep_id
+      LEFT JOIN deal_forecast_milestones initial
+        ON initial.deal_id = d.id
+       AND initial.milestone_key = 'initial'
+      LEFT JOIN deal_forecast_milestones qualified
+        ON qualified.deal_id = d.id
+       AND qualified.milestone_key = 'qualified'
+      LEFT JOIN deal_forecast_milestones estimating
+        ON estimating.deal_id = d.id
+       AND estimating.milestone_key = 'estimating'
+      WHERE ${whereSql}
+    )
+    SELECT
+      COUNT(*) FILTER (WHERE initial_forecast IS NOT NULL)::int AS comparable_deals,
+      COALESCE(AVG(ABS(awarded_amount - initial_forecast)), 0)::numeric AS avg_initial_variance,
+      COALESCE(AVG(ABS(awarded_amount - qualified_forecast)) FILTER (WHERE qualified_forecast IS NOT NULL), 0)::numeric AS avg_qualified_variance,
+      COALESCE(AVG(ABS(awarded_amount - estimating_forecast)) FILTER (WHERE estimating_forecast IS NOT NULL), 0)::numeric AS avg_estimating_variance,
+      COALESCE(AVG(ABS(actual_close_date - expected_close_date)) FILTER (WHERE actual_close_date IS NOT NULL AND expected_close_date IS NOT NULL), 0)::numeric AS avg_close_drift_days
+    FROM forecast_base
+  `);
+
+  const repRollupsResult = await tenantDb.execute(sql`
+    WITH forecast_base AS (
+      SELECT
+        d.id AS deal_id,
+        cw.assigned_rep_id,
+        u.display_name AS rep_name,
+        cw.awarded_amount,
+        cw.captured_at::date AS actual_close_date,
+        cw.expected_close_date,
+        initial.forecast_amount AS initial_forecast,
+        qualified.forecast_amount AS qualified_forecast,
+        estimating.forecast_amount AS estimating_forecast
+      FROM deals d
+      LEFT JOIN deal_scoping_intake dsi ON dsi.deal_id = d.id
+      JOIN deal_forecast_milestones cw
+        ON cw.deal_id = d.id
+       AND cw.milestone_key = 'closed_won'
+      JOIN users u ON u.id = cw.assigned_rep_id
+      LEFT JOIN deal_forecast_milestones initial
+        ON initial.deal_id = d.id
+       AND initial.milestone_key = 'initial'
+      LEFT JOIN deal_forecast_milestones qualified
+        ON qualified.deal_id = d.id
+       AND qualified.milestone_key = 'qualified'
+      LEFT JOIN deal_forecast_milestones estimating
+        ON estimating.deal_id = d.id
+       AND estimating.milestone_key = 'estimating'
+      WHERE ${whereSql}
+    )
+    SELECT
+      assigned_rep_id AS rep_id,
+      rep_name,
+      COUNT(*) FILTER (WHERE initial_forecast IS NOT NULL)::int AS comparable_deals,
+      COALESCE(AVG(ABS(awarded_amount - initial_forecast)), 0)::numeric AS avg_initial_variance,
+      COALESCE(AVG(ABS(awarded_amount - qualified_forecast)) FILTER (WHERE qualified_forecast IS NOT NULL), 0)::numeric AS avg_qualified_variance,
+      COALESCE(AVG(ABS(awarded_amount - estimating_forecast)) FILTER (WHERE estimating_forecast IS NOT NULL), 0)::numeric AS avg_estimating_variance,
+      COALESCE(AVG(ABS(actual_close_date - expected_close_date)) FILTER (WHERE actual_close_date IS NOT NULL AND expected_close_date IS NOT NULL), 0)::numeric AS avg_close_drift_days
+    FROM forecast_base
+    GROUP BY assigned_rep_id, rep_name
+    ORDER BY comparable_deals DESC, rep_name ASC
+  `);
+
+  const dealRowsResult = await tenantDb.execute(sql`
+    WITH forecast_base AS (
+      SELECT
+        d.id AS deal_id,
+        d.name AS deal_name,
+        cw.workflow_route,
+        u.display_name AS rep_name,
+        cw.awarded_amount,
+        cw.captured_at::date AS actual_close_date,
+        cw.expected_close_date,
+        initial.forecast_amount AS initial_forecast,
+        qualified.forecast_amount AS qualified_forecast,
+        estimating.forecast_amount AS estimating_forecast
+      FROM deals d
+      LEFT JOIN deal_scoping_intake dsi ON dsi.deal_id = d.id
+      JOIN deal_forecast_milestones cw
+        ON cw.deal_id = d.id
+       AND cw.milestone_key = 'closed_won'
+      JOIN users u ON u.id = cw.assigned_rep_id
+      LEFT JOIN deal_forecast_milestones initial
+        ON initial.deal_id = d.id
+       AND initial.milestone_key = 'initial'
+      LEFT JOIN deal_forecast_milestones qualified
+        ON qualified.deal_id = d.id
+       AND qualified.milestone_key = 'qualified'
+      LEFT JOIN deal_forecast_milestones estimating
+        ON estimating.deal_id = d.id
+       AND estimating.milestone_key = 'estimating'
+      WHERE ${whereSql}
+    )
+    SELECT
+      deal_id,
+      deal_name,
+      rep_name,
+      workflow_route,
+      initial_forecast,
+      qualified_forecast,
+      estimating_forecast,
+      awarded_amount,
+      ABS(awarded_amount - initial_forecast)::numeric AS initial_variance,
+      ABS(awarded_amount - qualified_forecast)::numeric AS qualified_variance,
+      ABS(awarded_amount - estimating_forecast)::numeric AS estimating_variance,
+      ABS(actual_close_date - expected_close_date)::int AS close_drift_days
+    FROM forecast_base
+    WHERE initial_forecast IS NOT NULL
+    ORDER BY initial_variance DESC NULLS LAST, deal_name ASC
+  `);
+
+  const summaryRows = (summaryResult as any).rows ?? summaryResult;
+  const repRows = (repRollupsResult as any).rows ?? repRollupsResult;
+  const dealRows = (dealRowsResult as any).rows ?? dealRowsResult;
+
+  return {
+    summary: mapForecastVarianceSummaryRow(summaryRows[0]),
+    repRollups: repRows.map((row: any) => ({
+      repId: row.rep_id,
+      repName: row.rep_name,
+      comparableDeals: Number(row.comparable_deals ?? 0),
+      avgInitialVariance: Number(row.avg_initial_variance ?? 0),
+      avgQualifiedVariance: Number(row.avg_qualified_variance ?? 0),
+      avgEstimatingVariance: Number(row.avg_estimating_variance ?? 0),
+      avgCloseDriftDays: Number(row.avg_close_drift_days ?? 0),
+    })),
+    deals: dealRows.map((row: any) => ({
+      dealId: row.deal_id,
+      dealName: row.deal_name,
+      repName: row.rep_name,
+      workflowRoute: row.workflow_route,
+      initialForecast: Number(row.initial_forecast ?? 0),
+      qualifiedForecast: row.qualified_forecast === null ? null : Number(row.qualified_forecast),
+      estimatingForecast: row.estimating_forecast === null ? null : Number(row.estimating_forecast),
+      awardedAmount: Number(row.awarded_amount ?? 0),
+      initialVariance: Number(row.initial_variance ?? 0),
+      qualifiedVariance: row.qualified_variance === null ? null : Number(row.qualified_variance),
+      estimatingVariance: row.estimating_variance === null ? null : Number(row.estimating_variance),
+      closeDriftDays: row.close_drift_days === null ? null : Number(row.close_drift_days),
+    })),
+  };
+}
 
 // ---------------------------------------------------------------------------
 // 1. Pipeline Summary by Stage
@@ -536,11 +820,12 @@ export async function getRevenueByProjectType(
 
 export interface LeadSourceROIRow {
   source: string;
-  totalDeals: number;
+  leadCount: number;
+  dealCount: number;
   activeDeals: number;
   wonDeals: number;
   lostDeals: number;
-  pipelineValue: number;
+  activePipelineValue: number;
   wonValue: number;
   winRate: number;
 }
@@ -550,43 +835,65 @@ export interface LeadSourceROIRow {
  */
 export async function getLeadSourceROI(
   tenantDb: TenantDb,
-  options: { from?: string; to?: string } = {}
+  options: AnalyticsFilterInput = {}
 ): Promise<LeadSourceROIRow[]> {
-  const { from, to } = defaultDateRange(options.from, options.to);
+  const filters = normalizeAnalyticsFilters(options);
+  const officeFilter = filters.officeId
+    ? sql`AND dsi.office_id = ${filters.officeId}`
+    : sql``;
+  const regionFilter = filters.regionId
+    ? sql`AND d.region_id = ${filters.regionId}`
+    : sql``;
+  const repFilter = filters.repId
+    ? sql`AND d.assigned_rep_id = ${filters.repId}`
+    : sql``;
+  const sourceFilter = filters.source
+    ? sql`AND COALESCE(NULLIF(TRIM(d.source), ''), 'Unknown') = ${filters.source}`
+    : sql``;
 
   const result = await tenantDb.execute(sql`
     SELECT
-      COALESCE(d.source, 'Unknown') AS source,
-      COUNT(*)::int AS total_deals,
-      COUNT(*) FILTER (WHERE d.is_active = true AND NOT psc.is_terminal)::int AS active_deals,
-      COUNT(*) FILTER (WHERE psc.slug = 'closed_won')::int AS won_deals,
-      COUNT(*) FILTER (WHERE psc.slug = 'closed_lost')::int AS lost_deals,
+      COALESCE(NULLIF(TRIM(d.source), ''), 'Unknown') AS source,
+      COUNT(DISTINCT dsi.id)::int AS lead_count,
+      COUNT(DISTINCT d.id)::int AS deal_count,
+      COUNT(DISTINCT d.id) FILTER (WHERE d.is_active = true AND NOT psc.is_terminal)::int AS active_deals,
+      COUNT(DISTINCT d.id) FILTER (WHERE psc.slug = 'closed_won')::int AS won_deals,
+      COUNT(DISTINCT d.id) FILTER (WHERE psc.slug = 'closed_lost')::int AS lost_deals,
       COALESCE(SUM(
         COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)
-      ) FILTER (WHERE d.is_active = true AND NOT psc.is_terminal), 0)::numeric AS pipeline_value,
+      ) FILTER (WHERE d.is_active = true AND NOT psc.is_terminal), 0)::numeric AS active_pipeline_value,
       COALESCE(SUM(
         COALESCE(d.awarded_amount, d.bid_estimate, 0)
       ) FILTER (WHERE psc.slug = 'closed_won'), 0)::numeric AS won_value
     FROM deals d
+    LEFT JOIN deal_scoping_intake dsi ON dsi.deal_id = d.id
     JOIN pipeline_stage_config psc ON psc.id = d.stage_id
-    WHERE d.created_at >= ${from}::timestamptz
-      AND d.created_at <= (${to}::date + INTERVAL '1 day')::timestamptz
-    GROUP BY COALESCE(d.source, 'Unknown')
+    WHERE d.created_at >= ${filters.from}::timestamptz
+      AND d.created_at <= (${filters.to}::date + INTERVAL '1 day')::timestamptz
+      ${officeFilter}
+      ${regionFilter}
+      ${repFilter}
+      ${sourceFilter}
+    GROUP BY COALESCE(NULLIF(TRIM(d.source), ''), 'Unknown')
     ORDER BY won_value DESC
   `);
 
   const rows = (result as any).rows ?? result;
   return rows.map((r: any) => {
+    const leadCount = Number(r.lead_count ?? 0);
+    const dealCount = Number(r.deal_count ?? r.total_deals ?? 0);
     const won = Number(r.won_deals ?? 0);
     const lost = Number(r.lost_deals ?? 0);
     const closedTotal = won + lost;
+    const activePipelineValue = Number(r.active_pipeline_value ?? r.pipeline_value ?? 0);
     return {
       source: r.source,
-      totalDeals: Number(r.total_deals ?? 0),
+      leadCount,
+      dealCount,
       activeDeals: Number(r.active_deals ?? 0),
       wonDeals: won,
       lostDeals: lost,
-      pipelineValue: Number(r.pipeline_value ?? 0),
+      activePipelineValue,
       wonValue: Number(r.won_value ?? 0),
       winRate: closedTotal > 0 ? Math.round((won / closedTotal) * 100) : 0,
     };
@@ -594,7 +901,521 @@ export async function getLeadSourceROI(
 }
 
 // ---------------------------------------------------------------------------
-// 10. Follow-up Compliance Rate
+// 10. Data Mining
+// ---------------------------------------------------------------------------
+
+export interface DataMiningUntouchedContactRow {
+  contactId: string;
+  contactName: string;
+  companyName: string;
+  daysSinceTouch: number;
+  lastTouchedAt: string | null;
+}
+
+export interface DataMiningDormantCompanyRow {
+  companyId: string;
+  companyName: string;
+  daysSinceActivity: number;
+  lastActivityAt: string | null;
+  activeDealCount: number;
+}
+
+export interface DataMiningOverview {
+  summary: {
+    untouchedContact30Count: number;
+    untouchedContact60Count: number;
+    untouchedContact90Count: number;
+    dormantCompany90Count: number;
+  };
+  untouchedContacts: DataMiningUntouchedContactRow[];
+  dormantCompanies: DataMiningDormantCompanyRow[];
+}
+
+export async function getDataMiningOverview(
+  tenantDb: TenantDb,
+  options: AnalyticsFilterInput = {}
+): Promise<DataMiningOverview> {
+  const filters = normalizeAnalyticsFilters(options);
+  const officeDealContext = sql`
+    office_deals AS (
+      SELECT DISTINCT
+        d.id,
+        d.company_id,
+        d.region_id,
+        d.assigned_rep_id,
+        d.is_active,
+        psc.is_terminal,
+        COALESCE(NULLIF(TRIM(d.source), ''), 'Unknown') AS source
+      FROM deals d
+      LEFT JOIN deal_scoping_intake dsi ON dsi.deal_id = d.id
+      JOIN pipeline_stage_config psc ON psc.id = d.stage_id
+      WHERE TRUE
+        ${filters.officeId ? sql`AND dsi.office_id = ${filters.officeId}` : sql``}
+        ${filters.regionId ? sql`AND d.region_id = ${filters.regionId}` : sql``}
+        ${filters.repId ? sql`AND d.assigned_rep_id = ${filters.repId}` : sql``}
+        ${filters.source ? sql`AND COALESCE(NULLIF(TRIM(d.source), ''), 'Unknown') = ${filters.source}` : sql``}
+    )
+  `;
+  const officeContactContext = sql`
+    office_contact_context AS (
+      SELECT DISTINCT
+        c.id AS contact_id,
+        c.company_id,
+        TRIM(CONCAT_WS(' ', c.first_name, c.last_name)) AS contact_name,
+        COALESCE(NULLIF(TRIM(c.company_name), ''), COALESCE(comp.name, 'Unassigned')) AS company_name,
+        c.created_at
+      FROM contacts c
+      LEFT JOIN companies comp ON comp.id = c.company_id
+      WHERE c.is_active = true
+        AND EXISTS (
+          SELECT 1
+          FROM contact_deal_associations cda
+          JOIN office_deals od ON od.id = cda.deal_id
+          WHERE cda.contact_id = c.id
+        )
+    )
+  `;
+  const officeCompanyContext = sql`
+    office_company_context AS (
+      SELECT DISTINCT
+        c.id AS company_id,
+        COALESCE(NULLIF(TRIM(c.name), ''), 'Unassigned') AS company_name,
+        c.created_at
+      FROM companies c
+      WHERE c.is_active = true
+        AND EXISTS (
+          SELECT 1
+          FROM office_deals od
+          WHERE od.company_id = c.id
+        )
+    )
+  `;
+  const officeContactActivityScope = sql`
+    office_contact_activity_scope AS (
+      SELECT
+        occ.contact_id,
+        occ.company_id,
+        a.occurred_at
+      FROM office_contact_context occ
+      JOIN activities a ON a.contact_id = occ.contact_id
+    )
+  `;
+  const officeOfficeActivityScope = sql`
+    office_office_activity_scope AS (
+      SELECT
+        occ.company_id,
+        a.occurred_at
+      FROM office_company_context occ
+      JOIN activities a ON a.company_id = occ.company_id
+      ${filters.officeId ? sql`
+      JOIN users u ON u.id = a.responsible_user_id
+      WHERE u.office_id = ${filters.officeId}
+      ` : sql`WHERE 1 = 0`}
+      UNION ALL
+      SELECT
+        od.company_id,
+        a.occurred_at
+      FROM office_deals od
+      JOIN activities a ON a.deal_id = od.id
+    )
+  `;
+
+  const [untouchedContactSummaryResult, untouchedContactRowsResult, dormantCompanySummaryResult, dormantCompanyRowsResult] = await Promise.all([
+    tenantDb.execute(sql`
+      WITH
+      ${officeDealContext},
+      ${officeContactContext},
+      ${officeContactActivityScope},
+      ${officeOfficeActivityScope},
+      contact_activity AS (
+        SELECT
+          activity.contact_id,
+          MAX(activity.occurred_at) AS last_activity_at
+        FROM (
+          SELECT contact_id, occurred_at
+          FROM office_contact_activity_scope
+          UNION ALL
+          SELECT occ.contact_id, oas.occurred_at
+          FROM office_contact_context occ
+          JOIN office_office_activity_scope oas ON oas.company_id = occ.company_id
+        ) activity
+        GROUP BY activity.contact_id
+      ),
+      ranked_contacts AS (
+        SELECT
+          occ.contact_id,
+          occ.contact_name,
+          occ.company_name,
+          GREATEST(COALESCE(ca.last_activity_at, occ.created_at), occ.created_at) AS last_touch_at,
+          EXTRACT(DAY FROM (${filters.to}::date + INTERVAL '1 day')::timestamptz - GREATEST(COALESCE(ca.last_activity_at, occ.created_at), occ.created_at))::int AS days_since_touch
+        FROM office_contact_context occ
+        LEFT JOIN contact_activity ca ON ca.contact_id = occ.contact_id
+      )
+      SELECT
+        COUNT(*) FILTER (WHERE days_since_touch >= 30)::int AS untouched_contact_30_count,
+        COUNT(*) FILTER (WHERE days_since_touch >= 60)::int AS untouched_contact_60_count,
+        COUNT(*) FILTER (WHERE days_since_touch >= 90)::int AS untouched_contact_90_count
+      FROM ranked_contacts
+    `),
+    tenantDb.execute(sql`
+      WITH
+      ${officeDealContext},
+      ${officeContactContext},
+      ${officeCompanyContext},
+      ${officeContactActivityScope},
+      ${officeOfficeActivityScope},
+      company_activity AS (
+        SELECT
+          activity.company_id,
+          MAX(activity.occurred_at) AS last_activity_at
+        FROM (
+          SELECT company_id, occurred_at
+          FROM office_office_activity_scope
+          UNION ALL
+          SELECT occ.company_id, oas.occurred_at
+          FROM office_contact_activity_scope oas
+          JOIN office_contact_context occ ON occ.contact_id = oas.contact_id
+        ) activity
+        GROUP BY activity.company_id
+      ),
+      ranked_companies AS (
+        SELECT
+          occ.company_id,
+          occ.company_name,
+          COALESCE(ca.last_activity_at, occ.created_at) AS last_touch_at,
+          EXTRACT(DAY FROM (${filters.to}::date + INTERVAL '1 day')::timestamptz - COALESCE(ca.last_activity_at, occ.created_at))::int AS days_since_activity,
+          (
+            SELECT COUNT(*)::int
+            FROM office_deals od
+            WHERE od.company_id = occ.company_id
+              AND od.is_active = true
+              AND od.is_terminal = false
+          ) AS active_deal_count
+        FROM office_company_context occ
+        LEFT JOIN company_activity ca ON ca.company_id = occ.company_id
+      )
+      SELECT
+        COUNT(*) FILTER (WHERE active_deal_count = 0 AND days_since_activity >= 90)::int AS dormant_company_90_count
+      FROM ranked_companies
+    `),
+    tenantDb.execute(sql`
+      WITH
+      ${officeDealContext},
+      ${officeContactContext},
+      ${officeContactActivityScope},
+      ${officeOfficeActivityScope},
+      contact_activity AS (
+        SELECT
+          activity.contact_id,
+          MAX(activity.occurred_at) AS last_activity_at
+        FROM (
+          SELECT contact_id, occurred_at
+          FROM office_contact_activity_scope
+          UNION ALL
+          SELECT occ.contact_id, oas.occurred_at
+          FROM office_contact_context occ
+          JOIN office_office_activity_scope oas ON oas.company_id = occ.company_id
+        ) activity
+        GROUP BY activity.contact_id
+      ),
+      ranked_contacts AS (
+        SELECT
+          occ.contact_id,
+          occ.contact_name,
+          occ.company_name,
+          GREATEST(COALESCE(ca.last_activity_at, occ.created_at), occ.created_at) AS last_touch_at,
+          EXTRACT(DAY FROM (${filters.to}::date + INTERVAL '1 day')::timestamptz - GREATEST(COALESCE(ca.last_activity_at, occ.created_at), occ.created_at))::int AS days_since_touch
+        FROM office_contact_context occ
+        LEFT JOIN contact_activity ca ON ca.contact_id = occ.contact_id
+      )
+      SELECT
+        contact_id,
+        contact_name,
+        company_name,
+        last_touch_at,
+        days_since_touch
+      FROM ranked_contacts
+      WHERE days_since_touch >= 30
+      ORDER BY days_since_touch DESC, contact_name ASC
+      LIMIT 25
+    `),
+    tenantDb.execute(sql`
+      WITH
+      ${officeDealContext},
+      ${officeContactContext},
+      ${officeCompanyContext},
+      ${officeContactActivityScope},
+      ${officeOfficeActivityScope},
+      company_activity AS (
+        SELECT
+          activity.company_id,
+          MAX(activity.occurred_at) AS last_activity_at
+        FROM (
+          SELECT company_id, occurred_at
+          FROM office_office_activity_scope
+          UNION ALL
+          SELECT occ.company_id, oas.occurred_at
+          FROM office_contact_activity_scope oas
+          JOIN office_contact_context occ ON occ.contact_id = oas.contact_id
+        ) activity
+        GROUP BY activity.company_id
+      ),
+      ranked_companies AS (
+        SELECT
+          occ.company_id,
+          occ.company_name,
+          COALESCE(ca.last_activity_at, occ.created_at) AS last_touch_at,
+          EXTRACT(DAY FROM (${filters.to}::date + INTERVAL '1 day')::timestamptz - COALESCE(ca.last_activity_at, occ.created_at))::int AS days_since_activity,
+          (
+            SELECT COUNT(*)::int
+            FROM office_deals od
+            WHERE od.company_id = occ.company_id
+              AND od.is_active = true
+              AND od.is_terminal = false
+          ) AS active_deal_count
+        FROM office_company_context occ
+        LEFT JOIN company_activity ca ON ca.company_id = occ.company_id
+      )
+      SELECT
+        company_id,
+        company_name,
+        last_touch_at,
+        days_since_activity,
+        active_deal_count
+      FROM ranked_companies
+      WHERE active_deal_count = 0
+        AND days_since_activity >= 90
+      ORDER BY days_since_activity DESC, company_name ASC
+      LIMIT 25
+    `),
+  ]);
+
+  const untouchedSummaryRows = (untouchedContactSummaryResult as any).rows ?? untouchedContactSummaryResult;
+  const untouchedContactRows = (untouchedContactRowsResult as any).rows ?? untouchedContactRowsResult;
+  const dormantSummaryRows = (dormantCompanySummaryResult as any).rows ?? dormantCompanySummaryResult;
+  const dormantCompanyRows = (dormantCompanyRowsResult as any).rows ?? dormantCompanyRowsResult;
+
+  const untouchedSummary = untouchedSummaryRows[0] ?? {};
+  const dormantSummary = dormantSummaryRows[0] ?? {};
+
+  return {
+    summary: {
+      untouchedContact30Count: Number(untouchedSummary.untouched_contact_30_count ?? 0),
+      untouchedContact60Count: Number(untouchedSummary.untouched_contact_60_count ?? 0),
+      untouchedContact90Count: Number(untouchedSummary.untouched_contact_90_count ?? 0),
+      dormantCompany90Count: Number(dormantSummary.dormant_company_90_count ?? 0),
+    },
+    untouchedContacts: untouchedContactRows.map((row: any) => ({
+      contactId: row.contact_id,
+      contactName: row.contact_name,
+      companyName: row.company_name,
+      daysSinceTouch: Number(row.days_since_touch ?? 0),
+      lastTouchedAt: row.last_touch_at ?? null,
+    })),
+    dormantCompanies: dormantCompanyRows.map((row: any) => ({
+      companyId: row.company_id,
+      companyName: row.company_name,
+      daysSinceActivity: Number(row.days_since_activity ?? 0),
+      lastActivityAt: row.last_touch_at ?? null,
+      activeDealCount: Number(row.active_deal_count ?? 0),
+    })),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 11. Regional and Rep Ownership Overview
+// ---------------------------------------------------------------------------
+
+export interface RegionalOwnershipRegionRollup {
+  regionId: string | null;
+  regionName: string;
+  dealCount: number;
+  pipelineValue: number;
+  staleDealCount: number;
+}
+
+export interface RegionalOwnershipRepRollup {
+  repId: string;
+  repName: string;
+  dealCount: number;
+  pipelineValue: number;
+  activityCount: number;
+  staleDealCount: number;
+}
+
+export interface RegionalOwnershipGap {
+  gapType: "missing_assigned_rep" | "missing_region";
+  count: number;
+}
+
+export interface RegionalOwnershipOverview {
+  regionRollups: RegionalOwnershipRegionRollup[];
+  repRollups: RegionalOwnershipRepRollup[];
+  ownershipGaps: RegionalOwnershipGap[];
+}
+
+export async function getRegionalOwnershipOverview(
+  tenantDb: TenantDb,
+  options: AnalyticsFilterInput = {}
+): Promise<RegionalOwnershipOverview> {
+  const filters = normalizeAnalyticsFilters(options);
+  if (!filters.officeId) {
+    throw new Error("officeId is required for regional ownership reporting");
+  }
+
+  const officeFilter = sql`AND dsi.office_id = ${filters.officeId}`;
+  const regionFilter = filters.regionId
+    ? sql`AND d.region_id = ${filters.regionId}`
+    : sql``;
+  const repFilter = filters.repId
+    ? sql`AND d.assigned_rep_id = ${filters.repId}`
+    : sql``;
+  const sourceFilter = filters.source
+    ? sql`AND COALESCE(NULLIF(TRIM(d.source), ''), 'Unknown') = ${filters.source}`
+    : sql``;
+  const dateFilter = sql`
+    AND d.created_at >= ${filters.from}::timestamptz
+    AND d.created_at <= (${filters.to}::date + INTERVAL '1 day')::timestamptz
+  `;
+
+  const [regionResult, repDealResult, repActivityResult, gapResult] = await Promise.all([
+    tenantDb.execute(sql`
+      SELECT
+        d.region_id,
+        COALESCE(rc.name, 'Unassigned') AS region_name,
+        COUNT(*) FILTER (WHERE d.is_active = true AND NOT psc.is_terminal)::int AS deal_count,
+        COALESCE(SUM(
+          COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)
+        ) FILTER (WHERE d.is_active = true AND NOT psc.is_terminal), 0)::numeric AS pipeline_value,
+        COUNT(*) FILTER (
+          WHERE d.is_active = true
+            AND NOT psc.is_terminal
+            AND psc.stale_threshold_days IS NOT NULL
+            AND EXTRACT(DAY FROM NOW() - d.stage_entered_at) > psc.stale_threshold_days
+        )::int AS stale_deal_count
+      FROM deals d
+      LEFT JOIN deal_scoping_intake dsi ON dsi.deal_id = d.id
+      LEFT JOIN region_config rc ON rc.id = d.region_id
+      JOIN pipeline_stage_config psc ON psc.id = d.stage_id
+      WHERE TRUE
+        ${dateFilter}
+        ${officeFilter}
+        ${regionFilter}
+        ${repFilter}
+        ${sourceFilter}
+      GROUP BY d.region_id, rc.name
+      ORDER BY pipeline_value DESC, region_name ASC
+    `),
+    tenantDb.execute(sql`
+      SELECT
+        d.assigned_rep_id AS rep_id,
+        COALESCE(u.display_name, 'Unassigned') AS rep_name,
+        COUNT(*) FILTER (WHERE d.is_active = true AND NOT psc.is_terminal)::int AS deal_count,
+        COALESCE(SUM(
+          COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)
+        ) FILTER (WHERE d.is_active = true AND NOT psc.is_terminal), 0)::numeric AS pipeline_value,
+        COUNT(*) FILTER (
+          WHERE d.is_active = true
+            AND NOT psc.is_terminal
+            AND psc.stale_threshold_days IS NOT NULL
+            AND EXTRACT(DAY FROM NOW() - d.stage_entered_at) > psc.stale_threshold_days
+        )::int AS stale_deal_count
+      FROM deals d
+      LEFT JOIN deal_scoping_intake dsi ON dsi.deal_id = d.id
+      LEFT JOIN users u ON u.id = d.assigned_rep_id
+      LEFT JOIN pipeline_stage_config psc ON psc.id = d.stage_id
+      WHERE TRUE
+        ${dateFilter}
+        ${officeFilter}
+        ${regionFilter}
+        ${repFilter}
+        ${sourceFilter}
+      GROUP BY d.assigned_rep_id, u.display_name
+      ORDER BY pipeline_value DESC, rep_name ASC
+    `),
+    tenantDb.execute(sql`
+      SELECT
+        d.assigned_rep_id AS rep_id,
+        COALESCE(u.display_name, 'Unassigned') AS rep_name,
+        COUNT(*)::int AS activity_count
+      FROM activities a
+      JOIN deals d ON d.id = a.deal_id
+      LEFT JOIN deal_scoping_intake dsi ON dsi.deal_id = d.id
+      LEFT JOIN users u ON u.id = d.assigned_rep_id
+      WHERE TRUE
+        ${dateFilter}
+        ${officeFilter}
+        ${regionFilter}
+        ${repFilter}
+        ${sourceFilter}
+      GROUP BY d.assigned_rep_id, u.display_name
+      ORDER BY activity_count DESC, rep_name ASC
+    `),
+    tenantDb.execute(sql`
+      SELECT gap_type, COUNT(*)::int AS count
+      FROM (
+        SELECT 'missing_assigned_rep' AS gap_type
+        FROM deals d
+        LEFT JOIN deal_scoping_intake dsi ON dsi.deal_id = d.id
+        WHERE TRUE
+          ${dateFilter}
+          ${officeFilter}
+          ${sourceFilter}
+          AND d.assigned_rep_id IS NULL
+        UNION ALL
+        SELECT 'missing_region' AS gap_type
+        FROM deals d
+        LEFT JOIN deal_scoping_intake dsi ON dsi.deal_id = d.id
+        WHERE TRUE
+          ${dateFilter}
+          ${officeFilter}
+          ${repFilter}
+          ${sourceFilter}
+          AND d.region_id IS NULL
+      ) ownership_gaps
+      GROUP BY gap_type
+      ORDER BY gap_type ASC
+    `),
+  ]);
+
+  const regionRows = (regionResult as any).rows ?? regionResult;
+  const repDealRows = (repDealResult as any).rows ?? repDealResult;
+  const repActivityRows = (repActivityResult as any).rows ?? repActivityResult;
+  const gapRows = (gapResult as any).rows ?? gapResult;
+  const activityCountByRep = new Map<string, number>();
+  for (const row of repActivityRows as any[]) {
+    if (row.rep_id) {
+      activityCountByRep.set(row.rep_id, Number(row.activity_count ?? 0));
+    }
+  }
+
+  return {
+    regionRollups: regionRows.map((row: any) => ({
+      regionId: row.region_id ?? null,
+      regionName: row.region_name,
+      dealCount: Number(row.deal_count ?? 0),
+      pipelineValue: Number(row.pipeline_value ?? 0),
+      staleDealCount: Number(row.stale_deal_count ?? 0),
+    })),
+    repRollups: repDealRows
+      .filter((row: any) => row.rep_id)
+      .map((row: any) => ({
+        repId: row.rep_id,
+        repName: row.rep_name,
+        dealCount: Number(row.deal_count ?? 0),
+        pipelineValue: Number(row.pipeline_value ?? 0),
+        activityCount: activityCountByRep.get(row.rep_id) ?? 0,
+        staleDealCount: Number(row.stale_deal_count ?? 0),
+      })),
+    ownershipGaps: gapRows.map((row: any) => ({
+      gapType: row.gap_type,
+      count: Number(row.count ?? 0),
+    })),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 11. Follow-up Compliance Rate
 // ---------------------------------------------------------------------------
 
 /**
@@ -636,7 +1457,7 @@ export async function getFollowUpCompliance(
 }
 
 // ---------------------------------------------------------------------------
-// 11. DD vs True Pipeline Value
+// 12. DD vs True Pipeline Value
 // ---------------------------------------------------------------------------
 
 export interface DdVsPipelineRow {
@@ -688,7 +1509,7 @@ export async function getDdVsPipeline(
 }
 
 // ---------------------------------------------------------------------------
-// 12. Closed-Won Summary Report
+// 13. Closed-Won Summary Report
 // ---------------------------------------------------------------------------
 
 export interface ClosedWonSummaryRepRow {
@@ -802,7 +1623,7 @@ export async function getClosedWonSummary(
 }
 
 // ---------------------------------------------------------------------------
-// 13. Pipeline by Rep
+// 14. Pipeline by Rep
 // ---------------------------------------------------------------------------
 
 export interface PipelineByRepStageRow {
@@ -871,7 +1692,7 @@ export async function getPipelineByRep(
 }
 
 // ---------------------------------------------------------------------------
-// 14. Unified Workflow Overview
+// 15. Unified Workflow Overview
 // ---------------------------------------------------------------------------
 
 export interface UnifiedLeadPipelineSummaryRow {
@@ -947,16 +1768,62 @@ export interface UnifiedWorkflowOverview {
 
 export async function getUnifiedWorkflowOverview(
   tenantDb: TenantDb,
-  options: { repId?: string } = {}
+  options: AnalyticsFilterInput = {}
 ): Promise<UnifiedWorkflowOverview> {
-  const leadRepFilter = options.repId
-    ? sql`AND (dsi.created_by = ${options.repId} OR dsi.last_edited_by = ${options.repId})`
+  const filters = normalizeAnalyticsFilters(options);
+  const leadRepFilter = filters.repId
+    ? sql`AND (dsi.created_by = ${filters.repId} OR dsi.last_edited_by = ${filters.repId})`
     : sql``;
-  const dealRepFilter = options.repId
-    ? sql`AND d.assigned_rep_id = ${options.repId}`
+  const leadOfficeFilter = filters.officeId
+    ? sql`AND dsi.office_id = ${filters.officeId}`
     : sql``;
-  const activityRepFilter = options.repId
-    ? sql`AND a.responsible_user_id = ${options.repId}`
+  const leadRegionFilter = filters.regionId
+    ? sql`AND d.region_id = ${filters.regionId}`
+    : sql``;
+  const leadSourceFilter = filters.source
+    ? sql`AND COALESCE(NULLIF(TRIM(d.source), ''), 'Unknown') = ${filters.source}`
+    : sql``;
+  const dealRepFilter = filters.repId
+    ? sql`AND d.assigned_rep_id = ${filters.repId}`
+    : sql``;
+  const dealOfficeFilter = filters.officeId
+    ? sql`AND dsi.office_id = ${filters.officeId}`
+    : sql``;
+  const dealRegionFilter = filters.regionId
+    ? sql`AND d.region_id = ${filters.regionId}`
+    : sql``;
+  const dealSourceFilter = filters.source
+    ? sql`AND COALESCE(NULLIF(TRIM(d.source), ''), 'Unknown') = ${filters.source}`
+    : sql``;
+  const activityRepFilter = filters.repId
+    ? sql`AND a.responsible_user_id = ${filters.repId}`
+    : sql``;
+  const activityOfficeFilter = filters.officeId
+    ? sql`AND dsi.office_id = ${filters.officeId}`
+    : sql``;
+  const activityRegionFilter = filters.regionId
+    ? sql`AND d.region_id = ${filters.regionId}`
+    : sql``;
+  const activitySourceFilter = filters.source
+    ? sql`AND COALESCE(NULLIF(TRIM(d.source), ''), 'Unknown') = ${filters.source}`
+    : sql``;
+  const staleLeadOfficeFilter = filters.officeId
+    ? sql`AND dsi.office_id = ${filters.officeId}`
+    : sql``;
+  const staleLeadRegionFilter = filters.regionId
+    ? sql`AND d.region_id = ${filters.regionId}`
+    : sql``;
+  const staleLeadSourceFilter = filters.source
+    ? sql`AND COALESCE(NULLIF(TRIM(d.source), ''), 'Unknown') = ${filters.source}`
+    : sql``;
+  const staleDealOfficeFilter = filters.officeId
+    ? sql`AND dsi.office_id = ${filters.officeId}`
+    : sql``;
+  const staleDealRegionFilter = filters.regionId
+    ? sql`AND d.region_id = ${filters.regionId}`
+    : sql``;
+  const staleDealSourceFilter = filters.source
+    ? sql`AND COALESCE(NULLIF(TRIM(d.source), ''), 'Unknown') = ${filters.source}`
     : sql``;
 
   const [
@@ -973,8 +1840,12 @@ export async function getUnifiedWorkflowOverview(
         dsi.status AS validation_status,
         COUNT(*)::int AS intake_count
       FROM deal_scoping_intake dsi
+      JOIN deals d ON d.id = dsi.deal_id
       WHERE dsi.workflow_route_snapshot IN ('estimating', 'service')
         ${leadRepFilter}
+        ${leadOfficeFilter}
+        ${leadRegionFilter}
+        ${leadSourceFilter}
       GROUP BY dsi.workflow_route_snapshot, dsi.status
       ORDER BY dsi.workflow_route_snapshot ASC, dsi.status ASC
     `),
@@ -993,8 +1864,12 @@ export async function getUnifiedWorkflowOverview(
         )::int AS stale_deal_count
       FROM deals d
       JOIN pipeline_stage_config psc ON psc.id = d.stage_id
+      LEFT JOIN deal_scoping_intake dsi ON dsi.deal_id = d.id
       WHERE d.workflow_route IN ('estimating', 'service')
         ${dealRepFilter}
+        ${dealOfficeFilter}
+        ${dealRegionFilter}
+        ${dealSourceFilter}
       GROUP BY d.workflow_route
       ORDER BY d.workflow_route ASC
     `),
@@ -1011,7 +1886,7 @@ export async function getUnifiedWorkflowOverview(
             COALESCE(LOWER(NULLIF(TRIM(d.property_city), '')), '') || '|' ||
             COALESCE(LOWER(NULLIF(TRIM(d.property_state), '')), '') || '|' ||
             COALESCE(LOWER(NULLIF(TRIM(d.property_zip), '')), '')
-        END)::int AS property_count,
+          END)::int AS property_count,
         COUNT(*)::int AS deal_count,
         COUNT(*) FILTER (WHERE d.is_active = true AND NOT psc.is_terminal)::int AS active_deal_count,
         COUNT(*) FILTER (WHERE d.workflow_route = 'estimating' AND NOT psc.is_terminal)::int AS standard_deal_count,
@@ -1025,6 +1900,9 @@ export async function getUnifiedWorkflowOverview(
       JOIN pipeline_stage_config psc ON psc.id = d.stage_id
       WHERE TRUE
         ${dealRepFilter}
+        ${dealOfficeFilter}
+        ${dealRegionFilter}
+        ${dealSourceFilter}
       GROUP BY d.company_id, c.name
       ORDER BY total_value DESC, company_name ASC
     `),
@@ -1045,6 +1923,9 @@ export async function getUnifiedWorkflowOverview(
         LEFT JOIN deal_scoping_intake dsi ON dsi.deal_id = d.id
         WHERE a.occurred_at <= (NOW() + INTERVAL '1 day')
           ${activityRepFilter}
+          ${activityOfficeFilter}
+          ${activityRegionFilter}
+          ${activitySourceFilter}
       )
       SELECT
         rep_id,
@@ -1078,6 +1959,9 @@ export async function getUnifiedWorkflowOverview(
       WHERE dsi.status IN ('draft', 'ready')
         AND EXTRACT(DAY FROM NOW() - COALESCE(dsi.first_ready_at, dsi.last_autosaved_at, dsi.created_at)) > ${LEAD_STALE_THRESHOLD_DAYS}
         ${leadRepFilter}
+        ${staleLeadOfficeFilter}
+        ${staleLeadRegionFilter}
+        ${staleLeadSourceFilter}
       ORDER BY age_in_days DESC, lead_name ASC
     `),
     tenantDb.execute(sql`
@@ -1094,11 +1978,15 @@ export async function getUnifiedWorkflowOverview(
       FROM deals d
       JOIN pipeline_stage_config psc ON psc.id = d.stage_id
       JOIN users u ON u.id = d.assigned_rep_id
+      LEFT JOIN deal_scoping_intake dsi ON dsi.deal_id = d.id
       WHERE d.is_active = true
         AND psc.is_terminal = false
         AND psc.stale_threshold_days IS NOT NULL
         AND EXTRACT(DAY FROM NOW() - d.stage_entered_at) > psc.stale_threshold_days
         ${dealRepFilter}
+        ${staleDealOfficeFilter}
+        ${staleDealRegionFilter}
+        ${staleDealSourceFilter}
       ORDER BY days_in_stage DESC, deal_name ASC
     `),
   ]);
@@ -1171,7 +2059,7 @@ export async function getUnifiedWorkflowOverview(
 }
 
 // ---------------------------------------------------------------------------
-// 14. Custom Report Query Executor
+// 16. Custom Report Query Executor
 // ---------------------------------------------------------------------------
 
 export interface ReportConfig {

@@ -1,4 +1,6 @@
 import { useMemo, useRef, useState } from "react";
+import { Link } from "react-router-dom";
+import { useAuth } from "@/lib/auth";
 import {
   useSavedReports,
   executeLockedReport,
@@ -6,11 +8,17 @@ import {
   createSavedReport,
   deleteSavedReport,
   useUnifiedWorkflowOverview,
+  useDataMiningOverview,
+  useRegionalOwnershipOverview,
   type SavedReport,
   type ReportConfig,
   type UnifiedWorkflowOverview,
 } from "@/hooks/use-reports";
 import { ReportChart } from "@/components/charts/report-chart";
+import { SourcePerformanceSection } from "@/components/reports/source-performance-section";
+import { ForecastVarianceSection } from "@/components/reports/forecast-variance-section";
+import { DataMiningSection } from "@/components/reports/data-mining-section";
+import { RegionalOwnershipSection } from "@/components/reports/regional-ownership-section";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -47,6 +55,8 @@ import {
   ClipboardList,
   Clock3,
   Activity,
+  ArrowUpRight,
+  ShieldCheck,
 } from "lucide-react";
 import {
   buildPrintableReportHtml,
@@ -202,6 +212,10 @@ function formatCurrency(n: number): string {
   return `$${n.toLocaleString()}`;
 }
 
+export function canViewDataMiningSection(role?: string | null): boolean {
+  return role === "director";
+}
+
 // ---------------------------------------------------------------------------
 // KPI Bento Card
 // ---------------------------------------------------------------------------
@@ -267,6 +281,15 @@ function formatWorkflowStatus(status: string) {
     .replace(/_/g, " ")
     .replace(/\b\w/g, (char) => char.toUpperCase());
 }
+
+const operationalViews = [
+  {
+    title: "Sales Review",
+    description: "Run the weekly 30/60/90 forecast, cadence, hygiene, and support review from CRM data.",
+    to: "/sales-review",
+    icon: ShieldCheck,
+  },
+] as const;
 
 interface WorkflowTableColumn<T> {
   key: string;
@@ -520,6 +543,7 @@ function WorkflowOverviewPanel({
 
 export function ReportsPage() {
   // --- preserved report hooks ---
+  const { user } = useAuth();
   const scheduleReportAction = getScheduleReportActionConfig();
   const { reports, loading, refetch } = useSavedReports();
   const [activeReport, setActiveReport] = useState<SavedReport | null>(null);
@@ -550,6 +574,24 @@ export function ReportsPage() {
     error: workflowOverviewError,
     refetch: refetchWorkflowOverview,
   } = useUnifiedWorkflowOverview();
+  const canViewDataMining = canViewDataMiningSection(user?.role);
+  const {
+    data: dataMiningOverview,
+    loading: dataMiningLoading,
+    error: dataMiningError,
+  } = useDataMiningOverview({}, { enabled: canViewDataMining });
+  const canViewRegionalOwnership = user?.role !== "rep";
+  const regionalOfficeId = user?.activeOfficeId ?? user?.officeId;
+  const {
+    data: regionalOwnership,
+    loading: regionalOwnershipLoading,
+    error: regionalOwnershipError,
+  } = useRegionalOwnershipOverview(
+    {
+      officeId: regionalOfficeId,
+    },
+    canViewRegionalOwnership
+  );
 
   // --- UI state ---
   const [showReportDrawer, setShowReportDrawer] = useState(false);
@@ -657,6 +699,7 @@ export function ReportsPage() {
     setReportError(null);
     setActiveReport(null);
     setReportData(null);
+    setShowReportDrawer(true);
 
     try {
       const result = await executeCustomReport(builderPreviewConfig);
@@ -822,9 +865,60 @@ export function ReportsPage() {
           </div>
         )}
 
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+          <div className="px-6 py-5 border-b border-slate-100">
+            <h2 className="text-sm font-bold text-slate-900">Operational Views</h2>
+            <p className="text-xs text-slate-400">Focused workspaces for weekly pipeline review and cleanup.</p>
+          </div>
+          <div className="grid grid-cols-1 gap-0 divide-y divide-slate-100">
+            {operationalViews.map((view) => (
+              <Link
+                key={view.to}
+                to={view.to}
+                className="group px-6 py-5 hover:bg-slate-50 transition-colors"
+              >
+                <div className="flex items-start justify-between gap-4">
+                  <div className="space-y-2">
+                    <div className="flex items-center gap-2">
+                      <view.icon className="h-4 w-4 text-slate-400 group-hover:text-[#CC0000]" />
+                      <h3 className="text-sm font-semibold text-slate-900">{view.title}</h3>
+                    </div>
+                    <p className="text-sm leading-relaxed text-slate-500 max-w-md">{view.description}</p>
+                  </div>
+                  <ArrowUpRight className="h-4 w-4 text-slate-300 group-hover:text-[#CC0000]" />
+                </div>
+              </Link>
+            ))}
+          </div>
+        </div>
+
         <div className="rounded-3xl border border-slate-200 bg-white shadow-sm p-6">
           <WorkflowOverviewPanel data={workflowOverview} loading={workflowOverviewLoading} />
         </div>
+
+        {user?.role !== "rep" && <ForecastVarianceSection />}
+
+        {user?.role === "director" && <SourcePerformanceSection />}
+
+        {canViewDataMining && (
+          <div className="rounded-3xl border border-slate-200 bg-white shadow-sm p-6">
+            <DataMiningSection
+              data={dataMiningOverview}
+              loading={dataMiningLoading}
+              error={dataMiningError}
+            />
+          </div>
+        )}
+
+        {canViewRegionalOwnership && (
+          <div className="rounded-3xl border border-slate-200 bg-white shadow-sm p-6">
+            <RegionalOwnershipSection
+              data={regionalOwnership}
+              loading={regionalOwnershipLoading}
+              error={regionalOwnershipError}
+            />
+          </div>
+        )}
 
         {/* ================================================================
             SAVED REPORTS PANEL

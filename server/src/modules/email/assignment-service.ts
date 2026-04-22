@@ -1,6 +1,6 @@
 import crypto from "crypto";
 
-export type EmailAssignmentEntityType = "deal" | "company";
+export type EmailAssignmentEntityType = "deal" | "company" | "property" | "lead" | "contact";
 export type EmailAssignmentConfidence = "high" | "medium" | "low";
 export type EmailAssignmentMatch =
   | "explicit_deal_number"
@@ -322,9 +322,13 @@ export function resolveEmailAssignment(context: EmailAssignmentContext): EmailAs
       );
     }
 
-    if (context.priorThreadAssignment.assignedEntityType === "company") {
+    if (
+      context.priorThreadAssignment.assignedEntityType === "company" ||
+      context.priorThreadAssignment.assignedEntityType === "property" ||
+      context.priorThreadAssignment.assignedEntityType === "lead"
+    ) {
       return {
-        assignedEntityType: "company",
+        assignedEntityType: context.priorThreadAssignment.assignedEntityType,
         assignedEntityId: context.priorThreadAssignment.assignedEntityId,
         assignedDealId: null,
         confidence: "high",

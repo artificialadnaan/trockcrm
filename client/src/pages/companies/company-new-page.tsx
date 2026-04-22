@@ -25,6 +25,14 @@ const COMPANY_CATEGORY_LABELS: Record<string, string> = {
   other: "Other",
 };
 
+function getCompanyCategoryLabel(value: string | null | undefined): string {
+  if (!value || value === "none") {
+    return "Select category";
+  }
+
+  return COMPANY_CATEGORY_LABELS[value] ?? "Select category";
+}
+
 interface CompanyFormData {
   name: string;
   category: string;
@@ -120,7 +128,9 @@ export function CompanyNewPage() {
                 onValueChange={(v) => handleChange("category", v != null && v !== "none" ? v : "")}
               >
                 <SelectTrigger>
-                  <SelectValue placeholder="Select category" />
+                  <SelectValue placeholder="Select category">
+                    {(value) => getCompanyCategoryLabel(value)}
+                  </SelectValue>
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="none">None</SelectItem>

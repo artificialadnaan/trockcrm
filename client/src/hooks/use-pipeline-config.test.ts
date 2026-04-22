@@ -33,8 +33,8 @@ describe("pipeline config loaders", () => {
     });
 
     const [first, second] = await Promise.all([
-      loadPipelineStages(fetcher),
-      loadPipelineStages(fetcher),
+      loadPipelineStages({ fetcher }),
+      loadPipelineStages({ fetcher }),
     ]);
 
     expect(fetcher).toHaveBeenCalledTimes(1);
@@ -46,8 +46,8 @@ describe("pipeline config loaders", () => {
       .mockResolvedValueOnce({ stages: [] })
       .mockResolvedValueOnce({ stages: [{ id: "unused" }] });
 
-    await loadPipelineStages(fetcher);
-    await loadPipelineStages(fetcher);
+    await loadPipelineStages({ fetcher });
+    await loadPipelineStages({ fetcher });
 
     expect(fetcher).toHaveBeenCalledTimes(1);
   });

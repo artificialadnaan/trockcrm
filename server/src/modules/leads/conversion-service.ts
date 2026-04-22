@@ -2,19 +2,16 @@ import { eq } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { deals, leadStageHistory, leads } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
-import type { WorkflowRoute } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 import { createDeal } from "../deals/service.js";
-import { getStageBySlug } from "../pipeline/service.js";
+import { getStageById, getStageBySlug } from "../pipeline/service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
 export interface ConvertLeadInput {
   leadId: string;
-  dealStageId: string;
   userId: string;
   userRole: string;
-  workflowRoute?: WorkflowRoute;
   assignedRepId?: string;
   primaryContactId?: string | null;
   officeId?: string;
@@ -31,12 +28,14 @@ export interface ConvertLeadInput {
 
 interface LeadConversionDependencies {
   createDeal: typeof createDeal;
+  getStageById: typeof getStageById;
   getStageBySlug: typeof getStageBySlug;
   now: () => Date;
 }
 
 const defaultDependencies: LeadConversionDependencies = {
   createDeal,
+  getStageById,
   getStageBySlug,
   now: () => new Date(),
 };
@@ -75,6 +74,22 @@ export function createLeadConversionService(
       throw new AppError(400, "Inactive leads cannot be converted");
     }
 
+    const currentLeadStage = await deps.getStageById(lead.stageId, "lead");
+    const qualifiedForOpportunityStage = await deps.getStageBySlug(
+      "qualified_for_opportunity",
+      "lead"
+    );
+    const usesExpandedLeadFunnel = Boolean(qualifiedForOpportunityStage);
+
+    if (
+      !currentLeadStage ||
+      (usesExpandedLeadFunnel
+        ? !["qualified_for_opportunity", "ready_for_opportunity"].includes(currentLeadStage.slug)
+        : currentLeadStage.isTerminal)
+    ) {
+      throw new AppError(400, "Lead is not ready for opportunity conversion");
+    }
+
     const [existingDeal] = await tenantDb
       .select()
       .from(deals)
@@ -95,13 +110,20 @@ export function createLeadConversionService(
       throw new AppError(500, "Missing converted lead stage configuration");
     }
 
+    const opportunityStage = await deps.getStageBySlug("opportunity", "standard_deal");
+    if (!opportunityStage) {
+      throw new AppError(500, "Missing opportunity stage configuration");
+    }
+
     const transitionedToConvertedStage = convertedStage.id !== lead.stageId;
 
     const deal = await deps.createDeal(tenantDb, {
       name: input.name ?? lead.name,
-      stageId: input.dealStageId,
-      workflowRoute: input.workflowRoute ?? "estimating",
+      stageId: opportunityStage.id,
+      pipelineDisposition: "opportunity",
+      workflowRoute: null,
       assignedRepId: successorAssignedRepId,
+      actorUserId: input.userId,
       officeId: input.officeId,
       primaryContactId:
         input.primaryContactId === undefined

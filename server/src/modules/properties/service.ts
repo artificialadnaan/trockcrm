@@ -7,6 +7,7 @@ import {
   properties,
 } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
+import { AppError } from "../../middleware/error-handler.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -16,6 +17,16 @@ export interface PropertyFilters {
   isActive?: boolean;
   page?: number;
   limit?: number;
+}
+
+export interface CreatePropertyInput {
+  companyId: string;
+  name: string;
+  address?: string | null;
+  city?: string | null;
+  state?: string | null;
+  zip?: string | null;
+  notes?: string | null;
 }
 
 function coerceCount(value: unknown) {
@@ -151,6 +162,34 @@ export async function listProperties(
     limit,
     total: Number(totalResult[0]?.count ?? 0),
   };
+}
+
+export async function createProperty(tenantDb: TenantDb, input: CreatePropertyInput) {
+  const [company] = await tenantDb
+    .select({ id: companies.id })
+    .from(companies)
+    .where(and(eq(companies.id, input.companyId), eq(companies.isActive, true)))
+    .limit(1);
+
+  if (!company) {
+    throw new AppError(400, "Company not found");
+  }
+
+  const [property] = await tenantDb
+    .insert(properties)
+    .values({
+      companyId: input.companyId,
+      name: input.name,
+      address: input.address ?? null,
+      city: input.city ?? null,
+      state: input.state ?? null,
+      zip: input.zip ?? null,
+      notes: input.notes ?? null,
+      isActive: true,
+    })
+    .returning();
+
+  return property;
 }
 
 export async function getPropertyDetail(tenantDb: TenantDb, propertyId: string) {

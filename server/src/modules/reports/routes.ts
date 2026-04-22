@@ -12,14 +12,18 @@ import {
   getLostDealsByReason,
   getRevenueByProjectType,
   getLeadSourceROI,
+  getForecastVarianceOverview,
   getFollowUpCompliance,
   getDdVsPipeline,
   getClosedWonSummary,
+  getRegionalOwnershipOverview,
   getPipelineByRep,
+  getDataMiningOverview,
   executeCustomReport,
   getRepPerformanceComparison,
+  normalizeAnalyticsFilters,
 } from "./service.js";
-import type { ReportConfig } from "./service.js";
+import type { AnalyticsFilterInput, ReportConfig } from "./service.js";
 import {
   getSavedReports,
   getSavedReportById,
@@ -30,6 +34,21 @@ import {
 } from "./saved-reports-service.js";
 
 const router = Router();
+
+function readQueryString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+export function parseAnalyticsFilters(query: Record<string, unknown>): AnalyticsFilterInput {
+  return normalizeAnalyticsFilters({
+    from: readQueryString(query.from),
+    to: readQueryString(query.to),
+    officeId: readQueryString(query.officeId),
+    regionId: readQueryString(query.regionId),
+    repId: readQueryString(query.repId),
+    source: readQueryString(query.source),
+  });
+}
 
 // -------------------------------------------------------------------------
 // Locked report execution endpoints
@@ -120,8 +139,11 @@ router.get("/activity-summary", requireDirector, async (req, res, next) => {
 // GET /api/reports/workflow-overview
 router.get("/workflow-overview", async (req, res, next) => {
   try {
-    const repId = req.user!.role === "rep" ? req.user!.id : undefined;
-    const data = await getUnifiedWorkflowOverview(req.tenantDb!, { repId });
+    const parsedFilters = parseAnalyticsFilters(req.query as Record<string, unknown>);
+    const data = await getUnifiedWorkflowOverview(req.tenantDb!, {
+      ...parsedFilters,
+      repId: req.user!.role === "rep" ? req.user!.id : parsedFilters.repId,
+    });
     await req.commitTransaction!();
     res.json({ data });
   } catch (err) {
@@ -177,9 +199,40 @@ router.get("/revenue-by-type", requireDirector, async (req, res, next) => {
 // GET /api/reports/lead-source-roi?from=2026-01-01&to=2026-12-31
 router.get("/lead-source-roi", requireDirector, async (req, res, next) => {
   try {
+    const filters = parseAnalyticsFilters(req.query as Record<string, unknown>);
     const data = await getLeadSourceROI(req.tenantDb!, {
-      from: req.query.from as string | undefined,
-      to: req.query.to as string | undefined,
+      ...filters,
+      officeId: filters.officeId ?? req.user!.activeOfficeId ?? req.user!.officeId,
+    });
+    await req.commitTransaction!();
+    res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/reports/forecast-variance?from=2026-01-01&to=2026-12-31
+router.get("/forecast-variance", requireDirector, async (req, res, next) => {
+  try {
+    const filters = parseAnalyticsFilters(req.query as Record<string, unknown>);
+    const data = await getForecastVarianceOverview(req.tenantDb!, {
+      ...filters,
+      officeId: filters.officeId ?? req.user!.activeOfficeId ?? req.user!.officeId,
+    });
+    await req.commitTransaction!();
+    res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/reports/data-mining?from=2026-01-01&to=2026-12-31
+router.get("/data-mining", requireDirector, async (req, res, next) => {
+  try {
+    const parsedFilters = parseAnalyticsFilters(req.query as Record<string, unknown>);
+    const data = await getDataMiningOverview(req.tenantDb!, {
+      ...parsedFilters,
+      officeId: parsedFilters.officeId ?? req.user!.activeOfficeId ?? req.user!.officeId,
     });
     await req.commitTransaction!();
     res.json({ data });
@@ -257,6 +310,27 @@ router.get("/rep-performance", requireDirector, async (req, res, next) => {
     );
     await req.commitTransaction!();
     res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/reports/regional-ownership?officeId=uuid&from=2026-01-01&to=2026-12-31
+router.get("/regional-ownership", requireDirector, async (req, res, next) => {
+  try {
+    const data = await getRegionalOwnershipOverview(req.tenantDb!, {
+      from: req.query.from as string | undefined,
+      to: req.query.to as string | undefined,
+      officeId:
+        (req.query.officeId as string | undefined) ??
+        req.user!.activeOfficeId ??
+        req.user!.officeId,
+      regionId: req.query.regionId as string | undefined,
+      repId: req.query.repId as string | undefined,
+      source: req.query.source as string | undefined,
+    });
+    await req.commitTransaction!();
+    res.json({ data });
   } catch (err) {
     next(err);
   }

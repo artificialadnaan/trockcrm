@@ -19,11 +19,35 @@ const serviceMocks = vi.hoisted(() => ({
 
 const interventionServiceMocks = vi.hoisted(() => ({
   listInterventionCases: vi.fn(),
+  getInterventionAnalyticsDashboard: vi.fn(),
+  getInterventionPolicyRecommendationsView: vi.fn(),
+  regenerateInterventionPolicyRecommendations: vi.fn(),
+  recordInterventionPolicyRecommendationFeedback: vi.fn(),
+  getLatestManagerAlertSnapshot: vi.fn(),
+  runManagerAlertPreview: vi.fn(),
+  sendManagerAlertSummary: vi.fn(),
   getInterventionCaseDetail: vi.fn(),
+  buildInterventionCopilotView: vi.fn(),
+  regenerateInterventionCopilot: vi.fn(),
   assignInterventionCases: vi.fn(),
+  assertHomogeneousBatchConclusionCohort: vi.fn(),
   snoozeInterventionCases: vi.fn(),
   resolveInterventionCases: vi.fn(),
   escalateInterventionCases: vi.fn(),
+}));
+
+const policyApplicationServiceMocks = vi.hoisted(() => ({
+  applyInterventionPolicyRecommendation: vi.fn(),
+  revertInterventionPolicyRecommendation: vi.fn(),
+  getInterventionPolicyRecommendationEvaluationSummary: vi.fn(),
+}));
+
+const policyReviewServiceMocks = vi.hoisted(() => ({
+  getInterventionPolicyRecommendationReview: vi.fn(),
+}));
+
+const policySeedServiceMocks = vi.hoisted(() => ({
+  seedInterventionPolicyRecommendationQualificationData: vi.fn(),
 }));
 
 const taskSuggestionMocks = vi.hoisted(() => ({
@@ -54,11 +78,41 @@ vi.mock("../../../src/modules/ai-copilot/service.js", () => ({
 
 vi.mock("../../../src/modules/ai-copilot/intervention-service.js", () => ({
   listInterventionCases: interventionServiceMocks.listInterventionCases,
+  getInterventionAnalyticsDashboard: interventionServiceMocks.getInterventionAnalyticsDashboard,
+  getInterventionPolicyRecommendationsView: interventionServiceMocks.getInterventionPolicyRecommendationsView,
+  regenerateInterventionPolicyRecommendations: interventionServiceMocks.regenerateInterventionPolicyRecommendations,
+  recordInterventionPolicyRecommendationFeedback:
+    interventionServiceMocks.recordInterventionPolicyRecommendationFeedback,
   getInterventionCaseDetail: interventionServiceMocks.getInterventionCaseDetail,
+  buildInterventionCopilotView: interventionServiceMocks.buildInterventionCopilotView,
+  regenerateInterventionCopilot: interventionServiceMocks.regenerateInterventionCopilot,
   assignInterventionCases: interventionServiceMocks.assignInterventionCases,
+  assertHomogeneousBatchConclusionCohort: interventionServiceMocks.assertHomogeneousBatchConclusionCohort,
   snoozeInterventionCases: interventionServiceMocks.snoozeInterventionCases,
   resolveInterventionCases: interventionServiceMocks.resolveInterventionCases,
   escalateInterventionCases: interventionServiceMocks.escalateInterventionCases,
+}));
+
+vi.mock("../../../src/modules/ai-copilot/intervention-manager-alerts-service.js", () => ({
+  getLatestManagerAlertSnapshot: interventionServiceMocks.getLatestManagerAlertSnapshot,
+  runManagerAlertPreview: interventionServiceMocks.runManagerAlertPreview,
+  sendManagerAlertSummary: interventionServiceMocks.sendManagerAlertSummary,
+}));
+
+vi.mock("../../../src/modules/ai-copilot/intervention-policy-application-service.js", () => ({
+  applyInterventionPolicyRecommendation: policyApplicationServiceMocks.applyInterventionPolicyRecommendation,
+  revertInterventionPolicyRecommendation: policyApplicationServiceMocks.revertInterventionPolicyRecommendation,
+  getInterventionPolicyRecommendationEvaluationSummary:
+    policyApplicationServiceMocks.getInterventionPolicyRecommendationEvaluationSummary,
+}));
+
+vi.mock("../../../src/modules/ai-copilot/intervention-policy-recommendation-review-service.js", () => ({
+  getInterventionPolicyRecommendationReview: policyReviewServiceMocks.getInterventionPolicyRecommendationReview,
+}));
+
+vi.mock("../../../src/modules/ai-copilot/intervention-policy-recommendation-seed-service.js", () => ({
+  seedInterventionPolicyRecommendationQualificationData:
+    policySeedServiceMocks.seedInterventionPolicyRecommendationQualificationData,
 }));
 
 vi.mock("../../../src/modules/ai-copilot/task-suggestion-service.js", () => ({
@@ -76,6 +130,8 @@ vi.mock("../../../src/modules/companies/service.js", () => ({
 const { aiCopilotRoutes } = await import("../../../src/modules/ai-copilot/routes.js");
 const { errorHandler } = await import("../../../src/middleware/error-handler.js");
 let insertMock: ReturnType<typeof vi.fn>;
+let selectMock: ReturnType<typeof vi.fn>;
+let executeMock: ReturnType<typeof vi.fn>;
 
 function createApp(role: "admin" | "director" | "rep" = "rep") {
   const app = express();
@@ -89,7 +145,7 @@ function createApp(role: "admin" | "director" | "rep" = "rep") {
       officeId: "office-1",
       activeOfficeId: "office-1",
     };
-    req.tenantDb = { insert: insertMock } as any;
+    req.tenantDb = { insert: insertMock, select: selectMock, execute: executeMock } as any;
     req.commitTransaction = vi.fn().mockResolvedValue(undefined);
     next();
   });
@@ -101,9 +157,16 @@ function createApp(role: "admin" | "director" | "rep" = "rep") {
 describe("ai copilot routes", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    delete process.env.ALLOW_LEGACY_OUTCOME_WRITES;
+    delete process.env.NODE_ENV;
+    delete process.env.POLICY_RECOMMENDATION_FIXTURE_OFFICE_IDS;
     insertMock = vi.fn(() => ({
       values: vi.fn().mockResolvedValue(undefined),
     }));
+    selectMock = vi.fn(() => ({
+      from: vi.fn().mockResolvedValue([]),
+    }));
+    executeMock = vi.fn().mockResolvedValue(undefined);
     dealsServiceMocks.getDealById.mockResolvedValue({
       id: "deal-1",
       assignedRepId: "rep-1",
@@ -111,6 +174,125 @@ describe("ai copilot routes", () => {
     companiesServiceMocks.getCompanyById.mockResolvedValue({
       id: "company-1",
       name: "Acme Property Group",
+    });
+    policyApplicationServiceMocks.getInterventionPolicyRecommendationEvaluationSummary.mockResolvedValue({
+      window: "last_30_days",
+      generatedAt: "2026-04-19T12:00:00.000Z",
+      filters: { taxonomy: null, decision: null },
+      totals: {
+        qualifiedRendered: 1,
+        qualifiedSuppressedByCap: 0,
+        suppressedByThreshold: 0,
+        suppressedByPredicate: 1,
+        suppressedByMissingTarget: 0,
+        suppressedByApplyIneligible: 0,
+      },
+      byTaxonomy: [],
+      feedback: [],
+      apply: [],
+    });
+    policyApplicationServiceMocks.applyInterventionPolicyRecommendation.mockResolvedValue({
+      status: "applied",
+      applyEventId: "apply-1",
+      recommendationId: "11111111-1111-4111-8111-111111111111",
+      snapshotId: "22222222-2222-4222-8222-222222222222",
+      applyStatus: "applied",
+      appliedAt: "2026-04-19T12:05:00.000Z",
+      appliedBy: "Admin User",
+      reason: null,
+      beforeState: { maxSnoozeDays: 7 },
+      proposedState: { maxSnoozeDays: 5 },
+      appliedState: { maxSnoozeDays: 5 },
+    });
+    policyReviewServiceMocks.getInterventionPolicyRecommendationReview.mockResolvedValue({
+      snapshot: {
+        id: "22222222-2222-4222-8222-222222222222",
+        officeId: "office-1",
+        status: "active",
+        generatedAt: "2026-04-19T12:00:00.000Z",
+        staleAt: "2026-04-20T12:00:00.000Z",
+        supersededAt: null,
+      },
+      summary: {
+        window: "last_30_days",
+        generatedAt: "2026-04-19T12:00:00.000Z",
+        filters: { taxonomy: null, decision: null },
+        totals: {
+          qualifiedRendered: 1,
+          qualifiedSuppressedByCap: 0,
+          suppressedByThreshold: 0,
+          suppressedByPredicate: 1,
+          suppressedByMissingTarget: 0,
+          suppressedByApplyIneligible: 0,
+        },
+        byTaxonomy: [],
+        feedback: [],
+        apply: [],
+      },
+      emptyStateScope: "latest_snapshot",
+      emptyStateReason: null,
+      latestDecisionRows: [],
+      recentHistory: [],
+      diagnostics: {
+        window: "last_30_days",
+        generatedAt: "2026-04-19T12:00:00.000Z",
+        systemDiagnostics: {
+          scope: "historical_window",
+          dominantBlockers: [{ blocker: "history_limited", count: 1 }],
+          recommendedNextAction: "seed_non_prod_validation",
+        },
+        taxonomyDiagnostics: [],
+        seededValidationStatus: {
+          scope: "non_production_only",
+          validationMode: "manual_seed_script",
+          scriptPath: "scripts/seed-intervention-policy-recommendation-qualification.ts",
+          taxonomies: [],
+        },
+      },
+      yield: {
+        renderedTotals: {
+          window: "last_30_days",
+          total: 1,
+        },
+        renderedByTaxonomy: [
+          {
+            taxonomy: "assignee_load_balancing",
+            renderedCount: 1,
+          },
+        ],
+        dominantSuppressionReasons: [
+          {
+            reason: "predicate_not_met",
+            count: 1,
+          },
+        ],
+        recommendedNextAction: "seed_or_wait_for_more_history",
+      },
+      tuning: {
+        currentThresholds: {
+          qualificationFloor: 55,
+          strongRecommendationFloor: 70,
+          primaryCap: 3,
+          secondaryCap: 2,
+        },
+        guidance: [],
+      },
+      thresholdCalibrationProposals: {
+        generatedAt: "2026-04-19T12:00:00.000Z",
+        window: "last_30_days",
+        selectionSummary: "No threshold-limited taxonomies qualify for calibration proposals right now.",
+        noProposalReason: "predicate_failure_dominates",
+        proposals: [],
+      },
+    });
+    policySeedServiceMocks.seedInterventionPolicyRecommendationQualificationData.mockResolvedValue({
+      seeded: true,
+      seedKey: "policy-recommendation-fixture",
+      patternsCreated: [
+        "snooze_policy_adjustment",
+        "escalation_policy_adjustment",
+        "assignee_load_balancing",
+      ],
     });
   });
 
@@ -297,6 +479,514 @@ describe("ai copilot routes", () => {
     expect(res.body.metrics.packetsGenerated24h).toBe(10);
   });
 
+  it("returns intervention analytics for admins", async () => {
+    interventionServiceMocks.getInterventionAnalyticsDashboard.mockResolvedValue({
+      summary: { openCases: 1 },
+      outcomes: { actionVolume30d: { assign: 0, snooze: 0, resolve: 0, escalate: 0 } },
+      hotspots: { assignees: [], disconnectTypes: [], reps: [], companies: [], stages: [] },
+      breachQueue: { items: [], totalCount: 0, pageSize: 25 },
+      slaRules: { criticalDays: 0, highDays: 2, mediumDays: 5, lowDays: 10, timingBasis: "business_days" },
+      managerBrief: {
+        headline: "No strong manager brief is available yet.",
+        summaryWindowLabel: "Compared with the prior 7 days",
+        whatChanged: [],
+        focusNow: [],
+        emergingPatterns: [],
+        groundingNote: "Manager brief unavailable. Continue monitoring queue health and outcome trends.",
+        error: null,
+      },
+    });
+
+    const app = createApp("admin");
+    const response = await request(app)
+      .get("/api/ai/ops/intervention-analytics");
+
+    expect(response.status).toBe(200);
+    expect(response.body.summary).toBeDefined();
+    expect(response.body.breachQueue.items).toBeInstanceOf(Array);
+    expect(response.body.managerBrief).toBeDefined();
+    expect(executeMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns a missing-snapshot policy recommendation response for admins", async () => {
+    interventionServiceMocks.getInterventionPolicyRecommendationsView.mockResolvedValue({
+      status: "missing_snapshot",
+      canRegenerate: true,
+    });
+
+    const app = createApp("admin");
+    const response = await request(app).get("/api/ai/ops/intervention-policy-recommendations");
+
+    expect(response.status).toBe(200);
+    expect(interventionServiceMocks.getInterventionPolicyRecommendationsView).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        officeId: "office-1",
+        viewerUserId: "admin-1",
+      })
+    );
+    expect(response.body).toEqual({
+      status: "missing_snapshot",
+      canRegenerate: true,
+    });
+  });
+
+  it("queues policy recommendation regeneration for admins", async () => {
+    interventionServiceMocks.regenerateInterventionPolicyRecommendations.mockResolvedValue({
+      queued: true,
+      snapshotId: "snapshot-1",
+      status: "active",
+    });
+
+    const app = createApp("admin");
+    const response = await request(app).post("/api/ai/ops/intervention-policy-recommendations/regenerate");
+
+    expect(response.status).toBe(202);
+    expect(interventionServiceMocks.regenerateInterventionPolicyRecommendations).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        officeId: "office-1",
+        requestedByUserId: "admin-1",
+      })
+    );
+    expect(response.body).toEqual({
+      queued: true,
+      snapshotId: "snapshot-1",
+      status: "active",
+    });
+  });
+
+  it("records policy recommendation feedback for admins", async () => {
+    interventionServiceMocks.recordInterventionPolicyRecommendationFeedback.mockResolvedValue({
+      recommendationId: "11111111-1111-4111-8111-111111111111",
+      feedbackValue: "helpful",
+      comment: "Useful signal",
+    });
+
+    const app = createApp("admin");
+    const response = await request(app)
+      .post("/api/ai/ops/intervention-policy-recommendations/11111111-1111-4111-8111-111111111111/feedback")
+      .send({
+        feedbackValue: "helpful",
+        comment: "Useful signal",
+      });
+
+    expect(response.status).toBe(200);
+    expect(interventionServiceMocks.recordInterventionPolicyRecommendationFeedback).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        officeId: "office-1",
+        recommendationId: "11111111-1111-4111-8111-111111111111",
+        userId: "admin-1",
+        feedbackValue: "helpful",
+        comment: "Useful signal",
+      })
+    );
+    expect(response.body.feedbackValue).toBe("helpful");
+  });
+
+  it("rejects invalid policy recommendation feedback values", async () => {
+    const app = createApp("admin");
+    const response = await request(app)
+      .post("/api/ai/ops/intervention-policy-recommendations/11111111-1111-4111-8111-111111111111/feedback")
+      .send({
+        feedbackValue: "love_it",
+      });
+
+    expect(response.status).toBe(400);
+    expect(interventionServiceMocks.recordInterventionPolicyRecommendationFeedback).not.toHaveBeenCalled();
+  });
+
+  it("returns policy recommendation evaluation summary for admins", async () => {
+    const app = createApp("admin");
+    const response = await request(app).get("/api/ai/ops/intervention-policy-recommendations/evaluation?window=last_30_days");
+
+    expect(response.status).toBe(200);
+    expect(policyApplicationServiceMocks.getInterventionPolicyRecommendationEvaluationSummary).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        officeId: "office-1",
+        window: "last_30_days",
+      })
+    );
+    expect(response.body.window).toBe("last_30_days");
+  });
+
+  it("returns policy recommendation review data for admins", async () => {
+    policyReviewServiceMocks.getInterventionPolicyRecommendationReview.mockResolvedValueOnce({
+      snapshot: {
+        id: "22222222-2222-4222-8222-222222222222",
+        officeId: "office-1",
+        status: "active",
+        generatedAt: "2026-04-19T12:00:00.000Z",
+        staleAt: "2026-04-20T12:00:00.000Z",
+        supersededAt: null,
+      },
+      summary: {
+        window: "last_30_days",
+        generatedAt: "2026-04-19T12:00:00.000Z",
+        filters: { taxonomy: null, decision: "suppressed" },
+        totals: {
+          qualifiedRendered: 0,
+          qualifiedSuppressedByCap: 0,
+          suppressedByThreshold: 0,
+          suppressedByPredicate: 1,
+          suppressedByMissingTarget: 0,
+          suppressedByApplyIneligible: 0,
+        },
+        byTaxonomy: [],
+        feedback: [],
+        apply: [],
+      },
+      emptyStateScope: "latest_snapshot",
+      emptyStateReason: null,
+      latestDecisionRows: [],
+      recentHistory: [],
+      diagnostics: {
+        window: "last_30_days",
+        generatedAt: "2026-04-19T12:00:00.000Z",
+        systemDiagnostics: {
+          scope: "historical_window",
+          dominantBlockers: [{ blocker: "history_limited", count: 1 }],
+          recommendedNextAction: "seed_non_prod_validation",
+        },
+        taxonomyDiagnostics: [],
+        seededValidationStatus: {
+          scope: "non_production_only",
+          validationMode: "manual_seed_script",
+          scriptPath: "scripts/seed-intervention-policy-recommendation-qualification.ts",
+          taxonomies: [],
+        },
+      },
+      yield: {
+        renderedTotals: {
+          window: "last_30_days",
+          total: 0,
+        },
+        renderedByTaxonomy: [],
+        dominantSuppressionReasons: [
+          {
+            reason: "predicate_not_met",
+            count: 1,
+          },
+        ],
+        recommendedNextAction: "seed_or_wait_for_more_history",
+      },
+      tuning: {
+        currentThresholds: {
+          qualificationFloor: 55,
+          strongRecommendationFloor: 70,
+          primaryCap: 3,
+          secondaryCap: 2,
+        },
+        guidance: [],
+      },
+      thresholdCalibrationProposals: {
+        generatedAt: "2026-04-19T12:00:00.000Z",
+        window: "last_30_days",
+        selectionSummary: "No threshold-limited taxonomies qualify for calibration proposals right now.",
+        noProposalReason: "predicate_failure_dominates",
+        proposals: [],
+      },
+    });
+    const app = createApp("admin");
+    const response = await request(app).get(
+      "/api/ai/ops/intervention-policy-recommendations/review?window=last_7_days&decision=suppressed"
+    );
+
+    expect(response.status).toBe(200);
+    expect(policyReviewServiceMocks.getInterventionPolicyRecommendationReview).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        officeId: "office-1",
+        viewerUserId: "admin-1",
+        window: "last_7_days",
+        decision: "suppressed",
+      })
+    );
+    expect(response.body).toMatchObject({
+      snapshot: expect.any(Object),
+      summary: {
+        window: "last_30_days",
+        filters: {
+          decision: "suppressed",
+        },
+      },
+      latestDecisionRows: expect.any(Array),
+      recentHistory: expect.any(Array),
+      diagnostics: {
+        window: "last_30_days",
+        generatedAt: expect.any(String),
+        systemDiagnostics: expect.objectContaining({
+          scope: "historical_window",
+          recommendedNextAction: "seed_non_prod_validation",
+        }),
+        taxonomyDiagnostics: expect.any(Array),
+        seededValidationStatus: expect.objectContaining({
+          scope: "non_production_only",
+          scriptPath: "scripts/seed-intervention-policy-recommendation-qualification.ts",
+        }),
+      },
+      yield: {
+        renderedTotals: {
+          window: "last_30_days",
+          total: 0,
+        },
+        renderedByTaxonomy: expect.any(Array),
+        dominantSuppressionReasons: expect.any(Array),
+        recommendedNextAction: "seed_or_wait_for_more_history",
+      },
+      thresholdCalibrationProposals: {
+        generatedAt: expect.any(String),
+        window: "last_30_days",
+        selectionSummary: expect.any(String),
+        noProposalReason: "predicate_failure_dominates",
+        proposals: expect.any(Array),
+      },
+    });
+  });
+
+  it("seeds policy recommendation qualification data for admins outside production", async () => {
+    process.env.NODE_ENV = "development";
+    process.env.POLICY_RECOMMENDATION_FIXTURE_OFFICE_IDS = "office-1,office-2";
+    interventionServiceMocks.regenerateInterventionPolicyRecommendations.mockResolvedValue({
+      queued: true,
+      snapshotId: "33333333-3333-4333-8333-333333333333",
+      status: "pending",
+    });
+
+    const app = createApp("admin");
+    const response = await request(app)
+      .post("/api/ai/ops/intervention-policy-recommendations/dev/seed-qualification")
+      .send({
+        seedKey: "fixture-smoke",
+      });
+
+    expect(response.status).toBe(200);
+    expect(policySeedServiceMocks.seedInterventionPolicyRecommendationQualificationData).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        officeId: "office-1",
+        actorUserId: "admin-1",
+        environment: "development",
+        allowedOfficeIds: ["office-1", "office-2"],
+        seedKey: "fixture-smoke",
+      })
+    );
+    expect(interventionServiceMocks.regenerateInterventionPolicyRecommendations).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        officeId: "office-1",
+        requestedByUserId: "admin-1",
+      })
+    );
+    expect(response.body).toMatchObject({
+      seeded: true,
+      seedKey: "policy-recommendation-fixture",
+      generation: {
+        snapshotId: "33333333-3333-4333-8333-333333333333",
+        status: "pending",
+      },
+    });
+  });
+
+  it("applies a policy recommendation for admins", async () => {
+    const app = createApp("admin");
+    const response = await request(app)
+      .post("/api/ai/ops/intervention-policy-recommendations/11111111-1111-4111-8111-111111111111/apply")
+      .send({
+        snapshotId: "22222222-2222-4222-8222-222222222222",
+        recommendationIdempotencyKey: "req-1",
+      });
+
+    expect(response.status).toBe(200);
+    expect(policyApplicationServiceMocks.applyInterventionPolicyRecommendation).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        officeId: "office-1",
+        recommendationId: "11111111-1111-4111-8111-111111111111",
+        snapshotId: "22222222-2222-4222-8222-222222222222",
+        recommendationIdempotencyKey: "req-1",
+      })
+    );
+    expect(response.body.status).toBe("applied");
+  });
+
+  it("reverts a policy recommendation for admins", async () => {
+    policyApplicationServiceMocks.revertInterventionPolicyRecommendation.mockResolvedValue({
+      status: "reverted",
+      applyEventId: "apply-2",
+      recommendationId: "11111111-1111-4111-8111-111111111111",
+      snapshotId: "22222222-2222-4222-8222-222222222222",
+      applyStatus: "reverted",
+      appliedAt: "2026-04-19T14:15:00.000Z",
+      appliedBy: "Admin User",
+      reason: null,
+      beforeState: { overloadSharePercent: 30 },
+      proposedState: { overloadSharePercent: 35 },
+      appliedState: { overloadSharePercent: 35 },
+    });
+
+    const app = createApp("admin");
+    const response = await request(app)
+      .post("/api/ai/ops/intervention-policy-recommendations/11111111-1111-4111-8111-111111111111/revert")
+      .send({
+        snapshotId: "22222222-2222-4222-8222-222222222222",
+        recommendationIdempotencyKey: "req-revert-1",
+      });
+
+    expect(response.status).toBe(200);
+    expect(policyApplicationServiceMocks.revertInterventionPolicyRecommendation).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        officeId: "office-1",
+        recommendationId: "11111111-1111-4111-8111-111111111111",
+        snapshotId: "22222222-2222-4222-8222-222222222222",
+        recommendationIdempotencyKey: "req-revert-1",
+      })
+    );
+    expect(response.body.status).toBe("reverted");
+  });
+
+  it("returns the latest persisted manager alert snapshot for the active office", async () => {
+    interventionServiceMocks.getLatestManagerAlertSnapshot.mockResolvedValue({
+      id: "snapshot-1",
+      officeId: "office-1",
+      snapshotKind: "manager_alert_summary",
+      snapshotMode: "sent",
+      snapshotJson: { version: 1, officeId: "office-1" },
+      scannedAt: new Date("2026-04-16T15:00:00.000Z"),
+      sentAt: new Date("2026-04-16T15:05:00.000Z"),
+      createdAt: new Date("2026-04-16T15:00:00.000Z"),
+      updatedAt: new Date("2026-04-16T15:05:00.000Z"),
+    });
+
+    const app = createApp("director");
+    const res = await request(app).get("/api/ai/ops/intervention-manager-alerts");
+
+    expect(res.status).toBe(200);
+    expect(interventionServiceMocks.getLatestManagerAlertSnapshot).toHaveBeenCalledWith(expect.anything(), {
+      officeId: "office-1",
+    });
+    expect(interventionServiceMocks.runManagerAlertPreview).not.toHaveBeenCalled();
+    expect(interventionServiceMocks.sendManagerAlertSummary).not.toHaveBeenCalled();
+    expect(res.body.snapshotMode).toBe("sent");
+    expect(res.body.snapshotKind).toBe("manager_alert_summary");
+  });
+
+  it("runs a preview-only manager alert scan for the active office", async () => {
+    interventionServiceMocks.runManagerAlertPreview.mockResolvedValue({
+      id: "snapshot-2",
+      officeId: "office-1",
+      snapshotKind: "manager_alert_summary",
+      snapshotMode: "preview",
+      snapshotJson: { version: 1, officeId: "office-1" },
+      scannedAt: new Date("2026-04-16T16:00:00.000Z"),
+      sentAt: null,
+      createdAt: new Date("2026-04-16T16:00:00.000Z"),
+      updatedAt: new Date("2026-04-16T16:00:00.000Z"),
+    });
+
+    const app = createApp("admin");
+    const res = await request(app)
+      .post("/api/ai/ops/intervention-manager-alerts/scan")
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(interventionServiceMocks.runManagerAlertPreview).toHaveBeenCalledWith(expect.anything(), {
+      officeId: "office-1",
+    });
+    expect(interventionServiceMocks.getLatestManagerAlertSnapshot).not.toHaveBeenCalled();
+    expect(interventionServiceMocks.sendManagerAlertSummary).not.toHaveBeenCalled();
+    expect(res.body.snapshotMode).toBe("preview");
+    expect(res.body.sentAt).toBeNull();
+  });
+
+  it("sends manager alerts manually for the current office context", async () => {
+    selectMock.mockReturnValue({
+      from: vi.fn().mockResolvedValue([
+        {
+          id: "admin-1",
+          officeId: "office-1",
+          role: "admin",
+          isActive: true,
+        },
+        {
+          id: "director-1",
+          officeId: "office-1",
+          role: "director",
+          isActive: true,
+        },
+        {
+          id: "rep-1",
+          officeId: "office-1",
+          role: "rep",
+          isActive: true,
+        },
+        {
+          id: "admin-other-office",
+          officeId: "office-2",
+          role: "admin",
+          isActive: true,
+        },
+        {
+          id: "inactive-director",
+          officeId: "office-1",
+          role: "director",
+          isActive: false,
+        },
+      ]),
+    });
+
+    interventionServiceMocks.sendManagerAlertSummary.mockResolvedValue({
+      claimed: true,
+      snapshot: {
+        id: "snapshot-3",
+        officeId: "office-1",
+        snapshotKind: "manager_alert_summary",
+        snapshotMode: "sent",
+        snapshotJson: { version: 1, officeId: "office-1" },
+        scannedAt: new Date("2026-04-16T17:00:00.000Z"),
+        sentAt: new Date("2026-04-16T17:01:00.000Z"),
+        createdAt: new Date("2026-04-16T17:00:00.000Z"),
+        updatedAt: new Date("2026-04-16T17:01:00.000Z"),
+      },
+      notification: {
+        id: "notification-1",
+        userId: "admin-1",
+        type: "manager_alert_summary",
+        title: "Manager alerts: 1 items need attention",
+        body: "High-priority intervention pressure needs attention today.",
+        link: "/admin/intervention-analytics",
+        isRead: false,
+        readAt: null,
+        createdAt: new Date("2026-04-16T17:01:00.000Z"),
+      },
+    });
+
+    const app = createApp("director");
+    const res = await request(app)
+      .post("/api/ai/ops/intervention-manager-alerts/send")
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(interventionServiceMocks.sendManagerAlertSummary).toHaveBeenCalledTimes(2);
+    expect(interventionServiceMocks.sendManagerAlertSummary).toHaveBeenNthCalledWith(1, expect.anything(), {
+      officeId: "office-1",
+      recipientUserId: "admin-1",
+    });
+    expect(interventionServiceMocks.sendManagerAlertSummary).toHaveBeenNthCalledWith(2, expect.anything(), {
+      officeId: "office-1",
+      recipientUserId: "director-1",
+    });
+    expect(interventionServiceMocks.getLatestManagerAlertSnapshot).not.toHaveBeenCalled();
+    expect(interventionServiceMocks.runManagerAlertPreview).not.toHaveBeenCalled();
+    expect(res.body.snapshot.snapshotMode).toBe("sent");
+    expect(res.body.snapshot.snapshotKind).toBe("manager_alert_summary");
+    expect(res.body.deliveries).toHaveLength(2);
+    expect(res.body.deliveries[0].notification.link).toBe("/admin/intervention-analytics");
+  });
+
   it("returns AI review queue for director users", async () => {
     serviceMocks.getAiReviewQueue.mockResolvedValue([
       { packetId: "packet-1", dealName: "Alpha Plaza" },
@@ -359,9 +1049,51 @@ describe("ai copilot routes", () => {
       status: "open",
       view: "aging",
       clusterKey: "follow_through_gap",
+      filters: {
+        caseId: undefined,
+        severity: undefined,
+        disconnectType: undefined,
+        assigneeId: undefined,
+        repId: undefined,
+        companyId: undefined,
+        stageKey: undefined,
+      },
     });
     expect(res.body.items).toHaveLength(1);
     expect(res.body.page).toBe(2);
+  });
+
+  it("passes overdue and source filters through the intervention queue route", async () => {
+    interventionServiceMocks.listInterventionCases.mockResolvedValue({
+      items: [],
+      totalCount: 0,
+      page: 1,
+      pageSize: 50,
+    });
+
+    const app = createApp("director");
+    const res = await request(app).get(
+      "/api/ai/ops/interventions?view=snooze-breached&companyId=company-1&caseId=case-1"
+    );
+
+    expect(res.status).toBe(200);
+    expect(interventionServiceMocks.listInterventionCases).toHaveBeenCalledWith(expect.anything(), {
+      officeId: "office-1",
+      page: undefined,
+      pageSize: undefined,
+      status: undefined,
+      view: "snooze-breached",
+      clusterKey: undefined,
+      filters: {
+        caseId: "case-1",
+        severity: undefined,
+        disconnectType: undefined,
+        assigneeId: undefined,
+        repId: undefined,
+        companyId: "company-1",
+        stageKey: undefined,
+      },
+    });
   });
 
   it("returns intervention case detail for director users", async () => {
@@ -419,6 +1151,156 @@ describe("ai copilot routes", () => {
     expect(res.status).toBe(404);
   });
 
+  it("returns intervention copilot view for director users", async () => {
+    interventionServiceMocks.buildInterventionCopilotView.mockResolvedValue({
+      packet: {
+        id: "packet-1",
+        scopeType: "intervention_case",
+        scopeId: "case-1",
+        packetKind: "intervention_case",
+        status: "ready",
+        snapshotHash: "hash-1",
+        modelName: "heuristic",
+        summaryText: "Owner alignment is likely needed.",
+        nextStepJson: null,
+        blindSpotsJson: [],
+        evidenceJson: [],
+        confidence: 0.78,
+        generatedAt: "2026-04-19T12:00:00.000Z",
+        expiresAt: null,
+        createdAt: "2026-04-19T12:00:00.000Z",
+        updatedAt: "2026-04-19T12:00:00.000Z",
+      },
+      recommendedAction: {
+        action: "assign",
+        rationale: "Task owner and case owner do not match.",
+        suggestedOwner: "Admin User",
+        suggestedOwnerId: "manager-1",
+      },
+      currentAssignee: { id: "manager-2", name: "Director User" },
+      evidence: [],
+      riskFlags: [],
+      rootCause: null,
+      blockerOwner: null,
+      reopenRisk: null,
+      similarCases: [],
+      isRefreshPending: false,
+      isStale: false,
+      latestCaseChangedAt: "2026-04-19T12:00:00.000Z",
+      packetGeneratedAt: "2026-04-19T12:00:00.000Z",
+      viewerFeedbackValue: null,
+    });
+
+    const app = createApp("director");
+    const res = await request(app).get("/api/ai/ops/interventions/case-1/copilot");
+
+    expect(res.status).toBe(200);
+    expect(interventionServiceMocks.buildInterventionCopilotView).toHaveBeenCalledWith(expect.anything(), {
+      officeId: "office-1",
+      caseId: "case-1",
+      viewerUserId: "director-1",
+    });
+    expect(res.body).toMatchObject({
+      packet: {
+        id: "packet-1",
+      },
+      recommendedAction: {
+        action: "assign",
+      },
+      currentAssignee: { id: "manager-2" },
+      evidence: [],
+      similarCases: [],
+      isRefreshPending: false,
+      isStale: false,
+      latestCaseChangedAt: "2026-04-19T12:00:00.000Z",
+      packetGeneratedAt: "2026-04-19T12:00:00.000Z",
+    });
+    expect(res.body.viewerFeedbackValue === null || typeof res.body.viewerFeedbackValue === "string").toBe(true);
+  });
+
+  it("returns intervention copilot view for admin users", async () => {
+    interventionServiceMocks.buildInterventionCopilotView.mockResolvedValue({
+      packet: {
+        id: "packet-1",
+        scopeType: "intervention_case",
+        scopeId: "case-1",
+        packetKind: "intervention_case",
+        status: "ready",
+        snapshotHash: "hash-1",
+        modelName: "heuristic",
+        summaryText: "Owner alignment is likely needed.",
+        nextStepJson: null,
+        blindSpotsJson: [],
+        evidenceJson: [],
+        confidence: 0.78,
+        generatedAt: "2026-04-19T12:00:00.000Z",
+        expiresAt: null,
+        createdAt: "2026-04-19T12:00:00.000Z",
+        updatedAt: "2026-04-19T12:00:00.000Z",
+      },
+      recommendedAction: null,
+      currentAssignee: null,
+      evidence: [],
+      riskFlags: [],
+      rootCause: null,
+      blockerOwner: null,
+      reopenRisk: null,
+      similarCases: [],
+      isRefreshPending: false,
+      isStale: false,
+      latestCaseChangedAt: null,
+      packetGeneratedAt: null,
+      viewerFeedbackValue: null,
+    });
+
+    const app = createApp("admin");
+    const res = await request(app).get("/api/ai/ops/interventions/case-1/copilot");
+
+    expect(res.status).toBe(200);
+    expect(interventionServiceMocks.buildInterventionCopilotView).toHaveBeenCalledWith(expect.anything(), {
+      officeId: "office-1",
+      caseId: "case-1",
+      viewerUserId: "admin-1",
+    });
+  });
+
+  it("regenerates intervention copilot packets for director users", async () => {
+    interventionServiceMocks.regenerateInterventionCopilot.mockResolvedValue({
+      queued: false,
+      packetId: "packet-1",
+      packetGeneratedAt: "2026-04-19T12:00:00.000Z",
+      requestedBy: "director-1",
+    });
+
+    const app = createApp("director");
+    const res = await request(app).post("/api/ai/ops/interventions/case-1/copilot/regenerate").send({});
+
+    expect(res.status).toBe(200);
+    expect(interventionServiceMocks.regenerateInterventionCopilot).toHaveBeenCalledWith(expect.anything(), {
+      officeId: "office-1",
+      caseId: "case-1",
+      requestedBy: "director-1",
+    });
+    expect(res.body).toEqual({
+      queued: false,
+      packetId: "packet-1",
+      packetGeneratedAt: "2026-04-19T12:00:00.000Z",
+      requestedBy: "director-1",
+    });
+  });
+
+  it("rejects intervention copilot routes for unauthorized roles", async () => {
+    const app = createApp("rep");
+
+    const getRes = await request(app).get("/api/ai/ops/interventions/case-1/copilot");
+    const postRes = await request(app).post("/api/ai/ops/interventions/case-1/copilot/regenerate").send({});
+
+    expect(getRes.status).toBe(403);
+    expect(postRes.status).toBe(403);
+    expect(interventionServiceMocks.buildInterventionCopilotView).not.toHaveBeenCalled();
+    expect(interventionServiceMocks.regenerateInterventionCopilot).not.toHaveBeenCalled();
+  });
+
   it("applies batch intervention mutations for director users", async () => {
     interventionServiceMocks.assignInterventionCases.mockResolvedValue({
       updatedCount: 1,
@@ -443,6 +1325,64 @@ describe("ai copilot routes", () => {
 
     const app = createApp("director");
 
+    const conflictingResolveRes = await request(app)
+      .post("/api/ai/ops/interventions/case-1/resolve")
+      .send({
+        resolutionReason: "owner_aligned",
+        conclusion: {
+          kind: "resolve",
+          outcomeCategory: "task_completed",
+          reasonCode: "missing_task_created_and_completed",
+          effectiveness: "confirmed",
+        },
+      });
+    expect(conflictingResolveRes.status).toBe(400);
+
+    const conflictingSnoozeRes = await request(app)
+      .post("/api/ai/ops/interventions/case-1/snooze")
+      .send({
+        snoozedUntil: "2026-04-20T00:00:00.000Z",
+        notes: "legacy note",
+        conclusion: {
+          kind: "snooze",
+          snoozeReasonCode: "waiting_on_customer",
+          expectedOwnerType: "rep",
+          expectedNextStepCode: "rep_follow_up_expected",
+        },
+      });
+    expect(conflictingSnoozeRes.status).toBe(400);
+
+    const missingStructuredResolveRes = await request(app)
+      .post("/api/ai/ops/interventions/batch-resolve")
+      .send({ caseIds: ["case-1"], resolutionReason: "owner_aligned" });
+    expect(missingStructuredResolveRes.status).toBe(400);
+
+    const missingStructuredSnoozeRes = await request(app)
+      .post("/api/ai/ops/interventions/batch-snooze")
+      .send({ caseIds: ["case-1"], snoozedUntil: "2026-04-20T00:00:00.000Z" });
+    expect(missingStructuredSnoozeRes.status).toBe(400);
+
+    const missingStructuredEscalateRes = await request(app)
+      .post("/api/ai/ops/interventions/batch-escalate")
+      .send({ caseIds: ["case-1"] });
+    expect(missingStructuredEscalateRes.status).toBe(400);
+
+    interventionServiceMocks.assertHomogeneousBatchConclusionCohort.mockRejectedValueOnce(
+      new AppError(400, "Batch conclusion requires a homogeneous cohort")
+    );
+    const heterogeneousBatchRes = await request(app)
+      .post("/api/ai/ops/interventions/batch-resolve")
+      .send({
+        caseIds: ["case-1", "case-2"],
+        conclusion: {
+          kind: "resolve",
+          outcomeCategory: "task_completed",
+          reasonCode: "missing_task_created_and_completed",
+          effectiveness: "confirmed",
+        },
+      });
+    expect(heterogeneousBatchRes.status).toBe(400);
+
     const assignRes = await request(app)
       .post("/api/ai/ops/interventions/batch-assign")
       .send({ caseIds: ["case-1", "case-2"], assignedTo: "manager-2", notes: "Rebalance queue" });
@@ -466,7 +1406,13 @@ describe("ai copilot routes", () => {
       .send({
         caseIds: ["case-1", "case-2"],
         snoozedUntil: "2026-04-20T00:00:00.000Z",
-        notes: "Waiting on customer reply",
+        conclusion: {
+          kind: "snooze",
+          snoozeReasonCode: "waiting_on_customer",
+          expectedOwnerType: "customer",
+          expectedNextStepCode: "customer_reply_expected",
+          notes: "Waiting on customer reply",
+        },
       });
     expect(snoozeRes.status).toBe(200);
     expect(snoozeRes.body).toEqual({
@@ -480,15 +1426,28 @@ describe("ai copilot routes", () => {
       actorRole: "director",
       caseIds: ["case-1", "case-2"],
       snoozedUntil: "2026-04-20T00:00:00.000Z",
-      notes: "Waiting on customer reply",
+      conclusion: {
+        kind: "snooze",
+        snoozeReasonCode: "waiting_on_customer",
+        expectedOwnerType: "customer",
+        expectedNextStepCode: "customer_reply_expected",
+        notes: "Waiting on customer reply",
+      },
+      allowLegacyOutcomeWrites: false,
+      notes: null,
     });
 
     const resolveRes = await request(app)
       .post("/api/ai/ops/interventions/batch-resolve")
       .send({
         caseIds: ["case-1", "case-2"],
-        resolutionReason: "owner_aligned",
-        notes: "Owner already aligned on next step",
+        conclusion: {
+          kind: "resolve",
+          outcomeCategory: "owner_aligned",
+          reasonCode: "owner_assigned_and_confirmed",
+          effectiveness: "likely",
+          notes: "Owner already aligned on next step",
+        },
       });
     expect(resolveRes.status).toBe(200);
     expect(resolveRes.body).toEqual({
@@ -502,7 +1461,15 @@ describe("ai copilot routes", () => {
       actorRole: "director",
       caseIds: ["case-1", "case-2"],
       resolutionReason: "owner_aligned",
-      notes: "Owner already aligned on next step",
+      conclusion: {
+        kind: "resolve",
+        outcomeCategory: "owner_aligned",
+        reasonCode: "owner_assigned_and_confirmed",
+        effectiveness: "likely",
+        notes: "Owner already aligned on next step",
+      },
+      allowLegacyOutcomeWrites: false,
+      notes: null,
     });
 
     const invalidResolveRes = await request(app)
@@ -510,12 +1477,27 @@ describe("ai copilot routes", () => {
       .send({
         caseIds: ["case-1", "case-2"],
         resolutionReason: "bad_reason",
+        conclusion: {
+          kind: "resolve",
+          outcomeCategory: "task_completed",
+          reasonCode: "missing_task_created_and_completed",
+          effectiveness: "confirmed",
+        },
       });
     expect(invalidResolveRes.status).toBe(400);
 
     const escalateRes = await request(app)
       .post("/api/ai/ops/interventions/batch-escalate")
-      .send({ caseIds: ["case-1", "case-2"], notes: "Needs leadership review" });
+      .send({
+        caseIds: ["case-1", "case-2"],
+        conclusion: {
+          kind: "escalate",
+          escalationReasonCode: "manager_visibility_required",
+          escalationTargetType: "director",
+          urgency: "high",
+          notes: "Needs leadership review",
+        },
+      });
     expect(escalateRes.status).toBe(200);
     expect(escalateRes.body).toEqual({
       updatedCount: 1,
@@ -527,7 +1509,15 @@ describe("ai copilot routes", () => {
       actorUserId: "director-1",
       actorRole: "director",
       caseIds: ["case-1", "case-2"],
-      notes: "Needs leadership review",
+      conclusion: {
+        kind: "escalate",
+        escalationReasonCode: "manager_visibility_required",
+        escalationTargetType: "director",
+        urgency: "high",
+        notes: "Needs leadership review",
+      },
+      allowLegacyOutcomeWrites: false,
+      notes: null,
     });
   });
 
@@ -575,7 +1565,16 @@ describe("ai copilot routes", () => {
 
     const snoozeRes = await request(app)
       .post("/api/ai/ops/interventions/case-1/snooze")
-      .send({ snoozedUntil: "2026-04-20T00:00:00.000Z", notes: "Waiting for reply" });
+      .send({
+        snoozedUntil: "2026-04-20T00:00:00.000Z",
+        conclusion: {
+          kind: "snooze",
+          snoozeReasonCode: "waiting_on_customer",
+          expectedOwnerType: "customer",
+          expectedNextStepCode: "customer_reply_expected",
+          notes: "Waiting for reply",
+        },
+      });
     expect(snoozeRes.status).toBe(200);
     expect(snoozeRes.body).toEqual({
       updatedCount: 0,
@@ -588,12 +1587,28 @@ describe("ai copilot routes", () => {
       actorRole: "director",
       caseIds: ["case-1"],
       snoozedUntil: "2026-04-20T00:00:00.000Z",
-      notes: "Waiting for reply",
+      conclusion: {
+        kind: "snooze",
+        snoozeReasonCode: "waiting_on_customer",
+        expectedOwnerType: "customer",
+        expectedNextStepCode: "customer_reply_expected",
+        notes: "Waiting for reply",
+      },
+      allowLegacyOutcomeWrites: false,
+      notes: null,
     });
 
     const resolveRes = await request(app)
       .post("/api/ai/ops/interventions/case-1/resolve")
-      .send({ resolutionReason: "task_completed", notes: "Task is complete" });
+      .send({
+        conclusion: {
+          kind: "resolve",
+          outcomeCategory: "task_completed",
+          reasonCode: "missing_task_created_and_completed",
+          effectiveness: "confirmed",
+          notes: "Task is complete",
+        },
+      });
     expect(resolveRes.status).toBe(200);
     expect(resolveRes.body).toEqual({
       updatedCount: 0,
@@ -606,17 +1621,41 @@ describe("ai copilot routes", () => {
       actorRole: "director",
       caseIds: ["case-1"],
       resolutionReason: "task_completed",
-      notes: "Task is complete",
+      conclusion: {
+        kind: "resolve",
+        outcomeCategory: "task_completed",
+        reasonCode: "missing_task_created_and_completed",
+        effectiveness: "confirmed",
+        notes: "Task is complete",
+      },
+      allowLegacyOutcomeWrites: false,
+      notes: null,
     });
 
     const invalidResolveRes = await request(app)
       .post("/api/ai/ops/interventions/case-1/resolve")
-      .send({ resolutionReason: "bad_reason" });
+      .send({
+        resolutionReason: "bad_reason",
+        conclusion: {
+          kind: "resolve",
+          outcomeCategory: "task_completed",
+          reasonCode: "missing_task_created_and_completed",
+          effectiveness: "confirmed",
+        },
+      });
     expect(invalidResolveRes.status).toBe(400);
 
     const escalateRes = await request(app)
       .post("/api/ai/ops/interventions/case-1/escalate")
-      .send({ notes: "Director visibility needed" });
+      .send({
+        conclusion: {
+          kind: "escalate",
+          escalationReasonCode: "manager_visibility_required",
+          escalationTargetType: "director",
+          urgency: "high",
+          notes: "Director visibility needed",
+        },
+      });
     expect(escalateRes.status).toBe(200);
     expect(escalateRes.body).toEqual({
       updatedCount: 0,
@@ -628,7 +1667,15 @@ describe("ai copilot routes", () => {
       actorUserId: "director-1",
       actorRole: "director",
       caseIds: ["case-1"],
-      notes: "Director visibility needed",
+      conclusion: {
+        kind: "escalate",
+        escalationReasonCode: "manager_visibility_required",
+        escalationTargetType: "director",
+        urgency: "high",
+        notes: "Director visibility needed",
+      },
+      allowLegacyOutcomeWrites: false,
+      notes: null,
     });
   });
 

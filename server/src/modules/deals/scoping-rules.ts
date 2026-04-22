@@ -58,13 +58,33 @@ function isMissingRequiredValue(value: unknown): boolean {
 export function getRequiredScopingRules(input: DealScopingRulesInput): DealScopingRules {
   const projectOverviewFields =
     input.workflowRoute === "service" ? ["propertyName"] : ["propertyName", "bidDueDate"];
+  const opportunityFields =
+    input.workflowRoute === "service"
+      ? []
+      : (() => {
+          const opportunityValue = isPlainRecord(input.sectionData.opportunity)
+            ? input.sectionData.opportunity
+            : {};
+          const baseFields = ["preBidMeetingCompleted", "siteVisitDecision"];
+          if (opportunityValue.siteVisitDecision === "required") {
+            baseFields.push("siteVisitCompleted");
+          }
+          return baseFields;
+        })();
 
   return {
-    requiredSections: ["projectOverview", "propertyDetails", "scopeSummary", "attachments"],
+    requiredSections: [
+      "projectOverview",
+      "propertyDetails",
+      "scopeSummary",
+      ...(opportunityFields.length > 0 ? ["opportunity"] : []),
+      "attachments",
+    ],
     requiredFieldsBySection: {
       projectOverview: projectOverviewFields,
       propertyDetails: ["propertyAddress"],
       scopeSummary: ["summary"],
+      ...(opportunityFields.length > 0 ? { opportunity: opportunityFields } : {}),
     },
     requiredAttachmentKeys: ["scope_docs", "site_photos"],
   };

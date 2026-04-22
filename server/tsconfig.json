@@ -2,7 +2,13 @@
   "extends": "../tsconfig.base.json",
   "compilerOptions": {
     "outDir": "./dist",
-    "rootDir": "./src"
+    "rootDir": "./src",
+    "baseUrl": ".",
+    "paths": {
+      "@trock-crm/shared/schema": ["../shared/dist/schema/index.d.ts"],
+      "@trock-crm/shared/types": ["../shared/dist/types/index.d.ts"],
+      "@trock-crm/shared/utils": ["../shared/dist/utils/normalize.d.ts"]
+    }
   },
   "include": ["src/**/*"],
   "references": [{ "path": "../shared" }]

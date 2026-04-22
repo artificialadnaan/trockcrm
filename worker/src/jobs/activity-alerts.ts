@@ -16,6 +16,7 @@ export async function runActivityDropDetection(): Promise<void> {
   console.log("[Worker:activity-alerts] Starting activity drop detection...");
 
   const client = await pool.connect();
+  let transactionOpen = false;
   try {
     const offices = await client.query(
       "SELECT id, slug FROM public.offices WHERE is_active = true"
@@ -33,6 +34,7 @@ export async function runActivityDropDetection(): Promise<void> {
 
       // Acquire advisory lock per office to prevent concurrent runs from racing
       await client.query("BEGIN");
+      transactionOpen = true;
       await client.query(
         `SELECT pg_advisory_xact_lock(hashtext('activity_drop_detection_' || $1))`,
         [office.id]
@@ -144,10 +146,14 @@ export async function runActivityDropDetection(): Promise<void> {
 
       // Release the advisory lock by committing the transaction for this office
       await client.query("COMMIT");
+      transactionOpen = false;
     }
 
     console.log(`[Worker:activity-alerts] Complete. Created ${totalAlerts} alerts`);
   } catch (err) {
+    if (transactionOpen) {
+      await client.query("ROLLBACK").catch(() => {});
+    }
     console.error("[Worker:activity-alerts] Failed:", err);
     throw err;
   } finally {

@@ -1,7 +1,15 @@
 import { Router } from "express";
 import crypto from "crypto";
 import jwt from "jsonwebtoken";
-import { ensureDevUserPrimaryOffice, getDevUsers, getUserByEmail, getUserById, signJwt } from "./service.js";
+import {
+  ensureDevDemoWorkspace,
+  ensureDevUserPrimaryOffice,
+  getAccessibleOffices,
+  getDevUsers,
+  getUserByEmail,
+  getUserById,
+  signJwt,
+} from "./service.js";
 import { authMiddleware } from "../../middleware/auth.js";
 import { authLimiter } from "../../middleware/rate-limit.js";
 import { AppError } from "../../middleware/error-handler.js";
@@ -18,6 +26,10 @@ import {
   getStoredProcoreOauthTokens,
   upsertProcoreOauthTokens,
 } from "../procore/oauth-token-service.js";
+import {
+  changeLocalPassword,
+  loginWithLocalPassword,
+} from "./local-auth-service.js";
 
 const router = Router();
 
@@ -70,11 +82,14 @@ router.post("/dev/login", authLimiter, async (req, res, next) => {
       throw new AppError(404, "User not found");
     }
 
+    await ensureDevDemoWorkspace(resolvedUser.id, demoDefaultOfficeSlug);
+
     const token = signJwt({
       userId: resolvedUser.id,
       email: resolvedUser.email,
       officeId: resolvedUser.officeId,
       role: resolvedUser.role,
+      authMethod: "dev",
     });
 
     res.cookie("token", token, tokenCookieOptions);
@@ -86,8 +101,37 @@ router.post("/dev/login", authLimiter, async (req, res, next) => {
         displayName: resolvedUser.displayName,
         role: resolvedUser.role,
         officeId: resolvedUser.officeId,
+        activeOfficeId: resolvedUser.officeId,
+        mustChangePassword: false,
       },
     });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/local/login", authLimiter, async (req, res, next) => {
+  try {
+    const email = typeof req.body?.email === "string" ? req.body.email : "";
+    const password =
+      typeof req.body?.password === "string" ? req.body.password : "";
+
+    if (!email || !password) {
+      throw new AppError(400, "Email and password are required");
+    }
+
+    const { user } = await loginWithLocalPassword({ email, password });
+
+    const token = signJwt({
+      userId: user.id,
+      email: user.email,
+      officeId: user.officeId,
+      role: user.role,
+      authMethod: "local",
+    });
+
+    res.cookie("token", token, tokenCookieOptions);
+    res.json({ user });
   } catch (err) {
     next(err);
   }
@@ -101,6 +145,45 @@ router.post("/dev/login", authLimiter, async (req, res, next) => {
 // Get current user
 router.get("/me", authMiddleware, (req, res) => {
   res.json({ user: req.user });
+});
+
+router.get("/accessible-offices", authMiddleware, async (req, res, next) => {
+  try {
+    const offices = await getAccessibleOffices(req.user!.id, req.user!.role, req.user!.activeOfficeId ?? req.user!.officeId);
+    res.json({ offices });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/local/change-password", authMiddleware, async (req, res, next) => {
+  try {
+    const currentPassword =
+      typeof req.body?.currentPassword === "string"
+        ? req.body.currentPassword
+        : "";
+    const newPassword =
+      typeof req.body?.newPassword === "string" ? req.body.newPassword : "";
+
+    if (!currentPassword || !newPassword) {
+      throw new AppError(400, "Current password and new password are required");
+    }
+
+    await changeLocalPassword({
+      userId: req.user!.id,
+      currentPassword,
+      newPassword,
+    });
+
+    res.json({
+      user: {
+        ...req.user!,
+        mustChangePassword: false,
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
 });
 
 // Logout
@@ -132,7 +215,9 @@ router.get("/graph/consent", authMiddleware, (req, res, next) => {
     res.cookie("graph_auth_nonce", nonce, {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
-      sameSite: "lax",
+      // Consent starts from the frontend origin and sets this cookie on the API origin via fetch.
+      // In production that is a cross-site request, so the nonce cookie must allow cross-site storage.
+      sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
       maxAge: 600_000, // 10 minutes
     });
 

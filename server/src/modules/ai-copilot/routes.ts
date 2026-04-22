@@ -1,18 +1,40 @@
 import { Router } from "express";
-import { jobQueue } from "@trock-crm/shared/schema";
+import { sql } from "drizzle-orm";
+import { jobQueue, users } from "@trock-crm/shared/schema";
 import { requireRole } from "../../middleware/rbac.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { getDealById } from "../deals/service.js";
 import { getCompanyById } from "../companies/service.js";
 import {
   assignInterventionCases,
+  assertHomogeneousBatchConclusionCohort,
+  buildInterventionCopilotView,
   escalateInterventionCases,
   getInterventionCaseDetail,
+  getInterventionAnalyticsDashboard,
+  getInterventionPolicyRecommendationsView,
   listInterventionCases,
+  recordInterventionPolicyRecommendationFeedback,
+  regenerateInterventionPolicyRecommendations,
+  regenerateInterventionCopilot,
   resolveInterventionCases,
   snoozeInterventionCases,
 } from "./intervention-service.js";
-import type { InterventionQueueView } from "./intervention-types.js";
+import {
+  getLatestManagerAlertSnapshot,
+  runManagerAlertPreview,
+  sendManagerAlertSummary,
+} from "./intervention-manager-alerts-service.js";
+import {
+  applyInterventionPolicyRecommendation,
+  getInterventionPolicyRecommendationEvaluationSummary,
+  revertInterventionPolicyRecommendation,
+} from "./intervention-policy-application-service.js";
+import { getInterventionPolicyRecommendationReview } from "./intervention-policy-recommendation-review-service.js";
+import { seedInterventionPolicyRecommendationQualificationData } from "./intervention-policy-recommendation-seed-service.js";
+import type { InterventionQueueFilters, InterventionQueueView } from "./intervention-types.js";
+import type { StructuredEscalateConclusion, StructuredResolveConclusion, StructuredSnoozeConclusion } from "./intervention-types.js";
+import { mapStructuredResolveReasonToLegacyResolutionReason } from "./intervention-outcome-taxonomy.js";
 import {
   getAiActionQueue,
   getCompanyCopilotView,
@@ -47,7 +69,13 @@ const INTERVENTION_QUEUE_VIEWS = new Set<InterventionQueueView>([
   "aging",
   "repeat",
   "generated-task-pending",
+  "overdue",
+  "snooze-breached",
 ]);
+
+function allowLegacyOutcomeWrites() {
+  return process.env.ALLOW_LEGACY_OUTCOME_WRITES === "true";
+}
 
 async function assertDealAccess(req: any, dealId: string) {
   const deal = await getDealById(req.tenantDb!, dealId, req.user!.role, req.user!.id);
@@ -69,11 +97,84 @@ function getActiveOfficeId(req: any) {
   return officeId;
 }
 
+async function recordManagerBriefServed(req: any) {
+  const execute = req?.tenantDb?.execute;
+  if (typeof execute !== "function") return;
+
+  try {
+    await execute(
+      sql`
+        INSERT INTO audit_log (table_name, record_id, action, changed_by, changes, full_row)
+        VALUES (
+          'intervention_manager_brief',
+          ${getActiveOfficeId(req)},
+          'update',
+          ${req.user?.id ?? null},
+          ${JSON.stringify({ event: "served", route: "/api/ai/ops/intervention-analytics" })}::jsonb,
+          ${JSON.stringify({ servedAt: new Date().toISOString() })}::jsonb
+        )
+      `
+    );
+  } catch {
+    // Brief telemetry must not take down analytics delivery.
+  }
+}
+
 function requireCaseIds(value: unknown) {
   if (!Array.isArray(value) || value.length === 0 || value.some((item) => typeof item !== "string")) {
     throw new AppError(400, "caseIds must be a non-empty array of case ids");
   }
   return value;
+}
+
+function getPolicyRecommendationFixtureOfficeIds() {
+  return (process.env.POLICY_RECOMMENDATION_FIXTURE_OFFICE_IDS ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+}
+
+function readStructuredConclusion(
+  body: any,
+  kind: "resolve"
+): StructuredResolveConclusion | null;
+function readStructuredConclusion(
+  body: any,
+  kind: "snooze"
+): StructuredSnoozeConclusion | null;
+function readStructuredConclusion(
+  body: any,
+  kind: "escalate"
+): StructuredEscalateConclusion | null;
+function readStructuredConclusion(body: any, kind: "resolve" | "snooze" | "escalate") {
+  if (body?.conclusion?.kind === kind) return body.conclusion;
+  if (!allowLegacyOutcomeWrites()) {
+    throw new AppError(400, `Structured ${kind} conclusion is required`);
+  }
+  return null;
+}
+
+function assertNoLegacyResolveConflict(input: {
+  legacyResolutionReason?: string | null;
+  structuredResolveConclusion?: { reasonCode?: string } | null;
+}) {
+  if (!input.legacyResolutionReason || !input.structuredResolveConclusion?.reasonCode) return;
+  const mappedLegacy = mapStructuredResolveReasonToLegacyResolutionReason(
+    input.structuredResolveConclusion.reasonCode
+  );
+  if (mappedLegacy !== input.legacyResolutionReason) {
+    throw new AppError(400, "Legacy resolutionReason conflicts with structured conclusion");
+  }
+}
+
+function assertNoLegacyConclusionConflict(input: {
+  notes?: string | null;
+  conclusion: { notes?: string | null } | null;
+  kind: "snooze" | "escalate";
+}) {
+  if (input.notes && input.conclusion) {
+    throw new AppError(400, `Legacy notes conflict with structured ${input.kind} conclusion`);
+  }
 }
 
 router.get("/deals/:id/copilot", async (req, res, next) => {
@@ -193,6 +294,280 @@ router.get("/ops/metrics", requireRole("admin", "director"), async (req, res, ne
   }
 });
 
+router.get("/ops/intervention-analytics", requireRole("admin", "director"), async (req, res, next) => {
+  try {
+    const dashboard = await getInterventionAnalyticsDashboard(req.tenantDb!, {
+      officeId: getActiveOfficeId(req),
+    });
+    await recordManagerBriefServed(req);
+    await req.commitTransaction!();
+    res.json(dashboard);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/ops/intervention-manager-alerts", requireRole("admin", "director"), async (req, res, next) => {
+  try {
+    const snapshot = await getLatestManagerAlertSnapshot(req.tenantDb!, {
+      officeId: getActiveOfficeId(req),
+    });
+    if (!snapshot) {
+      throw new AppError(404, "Manager alert snapshot not found");
+    }
+    await req.commitTransaction!();
+    res.json(snapshot);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/ops/intervention-manager-alerts/scan", requireRole("admin", "director"), async (req, res, next) => {
+  try {
+    const snapshot = await runManagerAlertPreview(req.tenantDb!, {
+      officeId: getActiveOfficeId(req),
+    });
+    await req.commitTransaction!();
+    res.json(snapshot);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/ops/intervention-manager-alerts/send", requireRole("admin", "director"), async (req, res, next) => {
+  try {
+    const officeId = getActiveOfficeId(req);
+    const recipients = (await req.tenantDb!.select().from(users)).filter(
+      (user) =>
+        user.officeId === officeId &&
+        user.isActive &&
+        (user.role === "admin" || user.role === "director")
+    );
+
+    let latestSnapshot = null;
+    const deliveries = [];
+    for (const recipient of recipients) {
+      const result = await sendManagerAlertSummary(req.tenantDb!, {
+        officeId,
+        recipientUserId: recipient.id,
+      });
+      latestSnapshot = result.snapshot;
+      deliveries.push({
+        recipientUserId: recipient.id,
+        claimed: result.claimed,
+        notification: result.notification,
+      });
+    }
+
+    await req.commitTransaction!();
+    if (!latestSnapshot) {
+      throw new AppError(404, "No active manager alert recipients found");
+    }
+    res.json({
+      snapshot: latestSnapshot,
+      deliveries,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/ops/intervention-policy-recommendations", requireRole("admin", "director"), async (req, res, next) => {
+  try {
+    const view = await getInterventionPolicyRecommendationsView(req.tenantDb!, {
+      officeId: getActiveOfficeId(req),
+      viewerUserId: req.user!.id,
+    });
+    await req.commitTransaction!();
+    res.json(view);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/ops/intervention-policy-recommendations/regenerate", requireRole("admin", "director"), async (req, res, next) => {
+  try {
+    const result = await regenerateInterventionPolicyRecommendations(req.tenantDb!, {
+      officeId: getActiveOfficeId(req),
+      requestedByUserId: req.user!.id,
+    });
+    await req.commitTransaction!();
+    res.status(202).json({
+      queued: result.queued,
+      snapshotId: result.snapshotId,
+      status: result.status,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post(
+  "/ops/intervention-policy-recommendations/:recommendationId/feedback",
+  requireRole("admin", "director"),
+  async (req, res, next) => {
+    try {
+      const recommendationId = String(req.params.recommendationId ?? "");
+      if (!UUID_PATTERN.test(recommendationId)) {
+        throw new AppError(400, "recommendationId must be a valid UUID");
+      }
+      const feedbackValue = String(req.body?.feedbackValue ?? "");
+      if (!["helpful", "not_useful", "wrong_direction"].includes(feedbackValue)) {
+        throw new AppError(400, "feedbackValue must be helpful, not_useful, or wrong_direction");
+      }
+      const feedback = await recordInterventionPolicyRecommendationFeedback(req.tenantDb!, {
+        officeId: getActiveOfficeId(req),
+        recommendationId,
+        userId: req.user!.id,
+        feedbackValue: feedbackValue as "helpful" | "not_useful" | "wrong_direction",
+        comment: typeof req.body?.comment === "string" ? req.body.comment : null,
+      });
+      await req.commitTransaction!();
+      res.json(feedback);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+router.get("/ops/intervention-policy-recommendations/evaluation", requireRole("admin", "director"), async (req, res, next) => {
+  try {
+    const window =
+      req.query.window === "last_7_days" || req.query.window === "last_90_days" || req.query.window === "last_30_days"
+        ? req.query.window
+        : "last_30_days";
+    const summary = await getInterventionPolicyRecommendationEvaluationSummary(req.tenantDb!, {
+      officeId: getActiveOfficeId(req),
+      window,
+      taxonomy: typeof req.query.taxonomy === "string" ? (req.query.taxonomy as any) : null,
+      decision: typeof req.query.decision === "string" ? req.query.decision : null,
+    });
+    await req.commitTransaction!();
+    res.json(summary);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/ops/intervention-policy-recommendations/review", requireRole("admin", "director"), async (req, res, next) => {
+  try {
+    const window =
+      req.query.window === "last_7_days" || req.query.window === "last_90_days" || req.query.window === "last_30_days"
+        ? req.query.window
+        : "last_30_days";
+    const decision =
+      req.query.decision === "rendered" || req.query.decision === "suppressed" || req.query.decision === "all"
+        ? req.query.decision
+        : "all";
+    const review = await getInterventionPolicyRecommendationReview(req.tenantDb!, {
+      officeId: getActiveOfficeId(req),
+      viewerUserId: req.user!.id,
+      window,
+      decision,
+    });
+    await req.commitTransaction!();
+    res.json(review);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/ops/intervention-policy-recommendations/dev/seed-qualification", requireRole("admin"), async (req, res, next) => {
+  try {
+    if (process.env.NODE_ENV === "production") {
+      throw new AppError(404, "Not found");
+    }
+
+    const officeId = getActiveOfficeId(req);
+    const seedKey =
+      typeof req.body?.seedKey === "string" && req.body.seedKey.trim().length > 0
+        ? req.body.seedKey.trim()
+        : undefined;
+    const seeded = await seedInterventionPolicyRecommendationQualificationData(req.tenantDb!, {
+      officeId,
+      actorUserId: req.user!.id,
+      environment: process.env.NODE_ENV ?? "development",
+      allowedOfficeIds: getPolicyRecommendationFixtureOfficeIds(),
+      seedKey,
+    });
+    const generation = await regenerateInterventionPolicyRecommendations(req.tenantDb!, {
+      officeId,
+      requestedByUserId: req.user!.id,
+    });
+
+    await req.commitTransaction!();
+    res.json({
+      ...seeded,
+      generation: {
+        snapshotId: generation.snapshotId,
+        status: generation.status,
+        recommendationCount: generation.recommendations?.length ?? null,
+        taxonomies: generation.recommendations?.map((item) => item.taxonomy) ?? [],
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/ops/intervention-policy-recommendations/:recommendationId/apply", requireRole("admin", "director"), async (req, res, next) => {
+  try {
+    const recommendationId = String(req.params.recommendationId ?? "");
+    if (!UUID_PATTERN.test(recommendationId)) {
+      throw new AppError(400, "recommendationId must be a valid UUID");
+    }
+    const snapshotId = typeof req.body?.snapshotId === "string" ? req.body.snapshotId : null;
+    const recommendationIdempotencyKey =
+      typeof req.body?.recommendationIdempotencyKey === "string" ? req.body.recommendationIdempotencyKey : null;
+    if (!snapshotId || !UUID_PATTERN.test(snapshotId)) {
+      throw new AppError(400, "snapshotId must be a valid UUID");
+    }
+    if (!recommendationIdempotencyKey) {
+      throw new AppError(400, "recommendationIdempotencyKey is required");
+    }
+    const result = await applyInterventionPolicyRecommendation(req.tenantDb!, {
+      officeId: getActiveOfficeId(req),
+      recommendationId,
+      snapshotId,
+      actorUserId: req.user!.id,
+      recommendationIdempotencyKey,
+    });
+    await req.commitTransaction!();
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/ops/intervention-policy-recommendations/:recommendationId/revert", requireRole("admin", "director"), async (req, res, next) => {
+  try {
+    const recommendationId = String(req.params.recommendationId ?? "");
+    if (!UUID_PATTERN.test(recommendationId)) {
+      throw new AppError(400, "recommendationId must be a valid UUID");
+    }
+    const snapshotId = typeof req.body?.snapshotId === "string" ? req.body.snapshotId : null;
+    const recommendationIdempotencyKey =
+      typeof req.body?.recommendationIdempotencyKey === "string" ? req.body.recommendationIdempotencyKey : null;
+    if (!snapshotId || !UUID_PATTERN.test(snapshotId)) {
+      throw new AppError(400, "snapshotId must be a valid UUID");
+    }
+    if (!recommendationIdempotencyKey) {
+      throw new AppError(400, "recommendationIdempotencyKey is required");
+    }
+    const result = await revertInterventionPolicyRecommendation(req.tenantDb!, {
+      officeId: getActiveOfficeId(req),
+      recommendationId,
+      snapshotId,
+      actorUserId: req.user!.id,
+      recommendationIdempotencyKey,
+    });
+    await req.commitTransaction!();
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
 router.get("/ops/reviews", requireRole("admin", "director"), async (req, res, next) => {
   try {
     const limit = req.query.limit ? Number(req.query.limit) : undefined;
@@ -232,6 +607,21 @@ router.get("/ops/interventions", requireRole("admin", "director"), async (req, r
       typeof req.query.clusterKey === "string" && req.query.clusterKey.length > 0
         ? req.query.clusterKey
         : undefined;
+    const filters: InterventionQueueFilters = {
+      caseId: typeof req.query.caseId === "string" && req.query.caseId.length > 0 ? req.query.caseId : undefined,
+      severity: typeof req.query.severity === "string" && req.query.severity.length > 0 ? req.query.severity : undefined,
+      disconnectType:
+        typeof req.query.disconnectType === "string" && req.query.disconnectType.length > 0
+          ? req.query.disconnectType
+          : undefined,
+      assigneeId:
+        typeof req.query.assigneeId === "string" && req.query.assigneeId.length > 0 ? req.query.assigneeId : undefined,
+      repId: typeof req.query.repId === "string" && req.query.repId.length > 0 ? req.query.repId : undefined,
+      companyId:
+        typeof req.query.companyId === "string" && req.query.companyId.length > 0 ? req.query.companyId : undefined,
+      stageKey:
+        typeof req.query.stageKey === "string" && req.query.stageKey.length > 0 ? req.query.stageKey : undefined,
+    };
 
     const result = await listInterventionCases(req.tenantDb!, {
       officeId: getActiveOfficeId(req),
@@ -240,6 +630,7 @@ router.get("/ops/interventions", requireRole("admin", "director"), async (req, r
       status,
       view,
       clusterKey,
+      filters,
     });
 
     await req.commitTransaction!();
@@ -259,6 +650,38 @@ router.get("/ops/interventions/:id", requireRole("admin", "director"), async (re
 
     await req.commitTransaction!();
     res.json(detail);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/ops/interventions/:id/copilot", requireRole("admin", "director"), async (req, res, next) => {
+  try {
+    const caseId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const view = await buildInterventionCopilotView(req.tenantDb!, {
+      officeId: getActiveOfficeId(req),
+      caseId,
+      viewerUserId: req.user!.id,
+    });
+
+    await req.commitTransaction!();
+    res.json(view);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/ops/interventions/:id/copilot/regenerate", requireRole("admin", "director"), async (req, res, next) => {
+  try {
+    const caseId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const result = await regenerateInterventionCopilot(req.tenantDb!, {
+      officeId: getActiveOfficeId(req),
+      caseId,
+      requestedBy: req.user!.id,
+    });
+
+    await req.commitTransaction!();
+    res.status(result.queued ? 202 : 200).json(result);
   } catch (err) {
     next(err);
   }
@@ -289,13 +712,25 @@ router.post("/ops/interventions/batch-snooze", requireRole("admin", "director"),
   try {
     const snoozedUntil = typeof req.body?.snoozedUntil === "string" ? req.body.snoozedUntil : null;
     if (!snoozedUntil) throw new AppError(400, "snoozedUntil is required");
+    const conclusion = readStructuredConclusion(req.body, "snooze");
+    assertNoLegacyConclusionConflict({
+      notes: typeof req.body?.notes === "string" ? req.body.notes : null,
+      conclusion,
+      kind: "snooze",
+    });
+    const caseIds = requireCaseIds(req.body?.caseIds);
+    if (conclusion) {
+      await assertHomogeneousBatchConclusionCohort(req.tenantDb!, getActiveOfficeId(req), caseIds, "snooze");
+    }
 
     const result = await snoozeInterventionCases(req.tenantDb!, {
       officeId: getActiveOfficeId(req),
       actorUserId: req.user!.id,
       actorRole: req.user!.role,
-      caseIds: requireCaseIds(req.body?.caseIds),
+      caseIds,
       snoozedUntil,
+      conclusion,
+      allowLegacyOutcomeWrites: allowLegacyOutcomeWrites(),
       notes: typeof req.body?.notes === "string" ? req.body.notes : null,
     });
 
@@ -308,18 +743,32 @@ router.post("/ops/interventions/batch-snooze", requireRole("admin", "director"),
 
 router.post("/ops/interventions/batch-resolve", requireRole("admin", "director"), async (req, res, next) => {
   try {
-    const resolutionReason = typeof req.body?.resolutionReason === "string" ? req.body.resolutionReason : null;
+    const conclusion = readStructuredConclusion(req.body, "resolve");
+    const legacyResolutionReason = typeof req.body?.resolutionReason === "string" ? req.body.resolutionReason : null;
+    const resolutionReason =
+      legacyResolutionReason ??
+      (conclusion ? mapStructuredResolveReasonToLegacyResolutionReason(conclusion.reasonCode) : null);
     if (!resolutionReason) throw new AppError(400, "resolutionReason is required");
     if (!RESOLUTION_REASONS.has(resolutionReason)) {
       throw new AppError(400, "Invalid resolutionReason");
+    }
+    assertNoLegacyResolveConflict({
+      legacyResolutionReason,
+      structuredResolveConclusion: conclusion,
+    });
+    const caseIds = requireCaseIds(req.body?.caseIds);
+    if (conclusion) {
+      await assertHomogeneousBatchConclusionCohort(req.tenantDb!, getActiveOfficeId(req), caseIds, "resolve");
     }
 
     const result = await resolveInterventionCases(req.tenantDb!, {
       officeId: getActiveOfficeId(req),
       actorUserId: req.user!.id,
       actorRole: req.user!.role,
-      caseIds: requireCaseIds(req.body?.caseIds),
+      caseIds,
       resolutionReason: resolutionReason as Parameters<typeof resolveInterventionCases>[1]["resolutionReason"],
+      conclusion,
+      allowLegacyOutcomeWrites: allowLegacyOutcomeWrites(),
       notes: typeof req.body?.notes === "string" ? req.body.notes : null,
     });
 
@@ -332,11 +781,23 @@ router.post("/ops/interventions/batch-resolve", requireRole("admin", "director")
 
 router.post("/ops/interventions/batch-escalate", requireRole("admin", "director"), async (req, res, next) => {
   try {
+    const conclusion = readStructuredConclusion(req.body, "escalate");
+    assertNoLegacyConclusionConflict({
+      notes: typeof req.body?.notes === "string" ? req.body.notes : null,
+      conclusion,
+      kind: "escalate",
+    });
+    const caseIds = requireCaseIds(req.body?.caseIds);
+    if (conclusion) {
+      await assertHomogeneousBatchConclusionCohort(req.tenantDb!, getActiveOfficeId(req), caseIds, "escalate");
+    }
     const result = await escalateInterventionCases(req.tenantDb!, {
       officeId: getActiveOfficeId(req),
       actorUserId: req.user!.id,
       actorRole: req.user!.role,
-      caseIds: requireCaseIds(req.body?.caseIds),
+      caseIds,
+      conclusion,
+      allowLegacyOutcomeWrites: allowLegacyOutcomeWrites(),
       notes: typeof req.body?.notes === "string" ? req.body.notes : null,
     });
 
@@ -374,6 +835,12 @@ router.post("/ops/interventions/:id/snooze", requireRole("admin", "director"), a
     const caseId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     const snoozedUntil = typeof req.body?.snoozedUntil === "string" ? req.body.snoozedUntil : null;
     if (!snoozedUntil) throw new AppError(400, "snoozedUntil is required");
+    const conclusion = readStructuredConclusion(req.body, "snooze");
+    assertNoLegacyConclusionConflict({
+      notes: typeof req.body?.notes === "string" ? req.body.notes : null,
+      conclusion,
+      kind: "snooze",
+    });
 
     const result = await snoozeInterventionCases(req.tenantDb!, {
       officeId: getActiveOfficeId(req),
@@ -381,6 +848,8 @@ router.post("/ops/interventions/:id/snooze", requireRole("admin", "director"), a
       actorRole: req.user!.role,
       caseIds: [caseId],
       snoozedUntil,
+      conclusion,
+      allowLegacyOutcomeWrites: allowLegacyOutcomeWrites(),
       notes: typeof req.body?.notes === "string" ? req.body.notes : null,
     });
 
@@ -394,11 +863,19 @@ router.post("/ops/interventions/:id/snooze", requireRole("admin", "director"), a
 router.post("/ops/interventions/:id/resolve", requireRole("admin", "director"), async (req, res, next) => {
   try {
     const caseId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
-    const resolutionReason = typeof req.body?.resolutionReason === "string" ? req.body.resolutionReason : null;
+    const conclusion = readStructuredConclusion(req.body, "resolve");
+    const legacyResolutionReason = typeof req.body?.resolutionReason === "string" ? req.body.resolutionReason : null;
+    const resolutionReason =
+      legacyResolutionReason ??
+      (conclusion ? mapStructuredResolveReasonToLegacyResolutionReason(conclusion.reasonCode) : null);
     if (!resolutionReason) throw new AppError(400, "resolutionReason is required");
     if (!RESOLUTION_REASONS.has(resolutionReason)) {
       throw new AppError(400, "Invalid resolutionReason");
     }
+    assertNoLegacyResolveConflict({
+      legacyResolutionReason,
+      structuredResolveConclusion: conclusion,
+    });
 
     const result = await resolveInterventionCases(req.tenantDb!, {
       officeId: getActiveOfficeId(req),
@@ -406,6 +883,8 @@ router.post("/ops/interventions/:id/resolve", requireRole("admin", "director"), 
       actorRole: req.user!.role,
       caseIds: [caseId],
       resolutionReason: resolutionReason as Parameters<typeof resolveInterventionCases>[1]["resolutionReason"],
+      conclusion,
+      allowLegacyOutcomeWrites: allowLegacyOutcomeWrites(),
       notes: typeof req.body?.notes === "string" ? req.body.notes : null,
     });
 
@@ -419,11 +898,19 @@ router.post("/ops/interventions/:id/resolve", requireRole("admin", "director"), 
 router.post("/ops/interventions/:id/escalate", requireRole("admin", "director"), async (req, res, next) => {
   try {
     const caseId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const conclusion = readStructuredConclusion(req.body, "escalate");
+    assertNoLegacyConclusionConflict({
+      notes: typeof req.body?.notes === "string" ? req.body.notes : null,
+      conclusion,
+      kind: "escalate",
+    });
     const result = await escalateInterventionCases(req.tenantDb!, {
       officeId: getActiveOfficeId(req),
       actorUserId: req.user!.id,
       actorRole: req.user!.role,
       caseIds: [caseId],
+      conclusion,
+      allowLegacyOutcomeWrites: allowLegacyOutcomeWrites(),
       notes: typeof req.body?.notes === "string" ? req.body.notes : null,
     });
 

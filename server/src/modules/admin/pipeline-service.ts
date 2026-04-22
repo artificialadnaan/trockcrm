@@ -1,5 +1,10 @@
 import { eq, asc } from "drizzle-orm";
 import { pipelineStageConfig } from "@trock-crm/shared/schema";
+import {
+  LEAD_QUALIFICATION_FIELD_KEYS,
+  LEAD_SCOPING_SUBSET_FIELD_KEYS,
+  OPPORTUNITY_GATE_FIELD_KEYS,
+} from "@trock-crm/shared/types";
 import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 
@@ -18,9 +23,13 @@ export const STAGE_GATE_ALLOWED_FIELDS = [
   "propertyZip",
   "winProbability",
   "description",
+  "estimatedOpportunityValue",
   "lostReasonId",
   "lostNotes",
   "lostCompetitor",
+  ...LEAD_QUALIFICATION_FIELD_KEYS,
+  ...LEAD_SCOPING_SUBSET_FIELD_KEYS,
+  ...OPPORTUNITY_GATE_FIELD_KEYS,
 ] as const;
 
 export const STAGE_GATE_ALLOWED_DOCUMENTS = [

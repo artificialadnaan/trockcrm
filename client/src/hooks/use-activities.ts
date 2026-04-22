@@ -19,6 +19,8 @@ export interface Activity {
   subject: string | null;
   body: string | null;
   outcome: string | null;
+  nextStep: string | null;
+  nextStepDueAt: string | null;
   durationMinutes: number | null;
   occurredAt: string;
   createdAt: string;
@@ -105,6 +107,8 @@ export async function createActivity(input: {
   subject?: string;
   body?: string;
   outcome?: string;
+  nextStep?: string;
+  nextStepDueAt?: string;
   durationMinutes?: number;
   responsibleUserId?: string;
   sourceEntityType?: ActivitySourceEntityType;
@@ -126,6 +130,8 @@ export async function createContactActivity(
     subject?: string;
     body?: string;
     outcome?: string;
+    nextStep?: string;
+    nextStepDueAt?: string;
     durationMinutes?: number;
     responsibleUserId?: string;
     dealId?: string;

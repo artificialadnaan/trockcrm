@@ -15,11 +15,35 @@ export type DealStage = (typeof DEAL_STAGES)[number];
 export const WORKFLOW_ROUTES = ["estimating", "service"] as const;
 export type WorkflowRoute = (typeof WORKFLOW_ROUTES)[number];
 
+export const DEAL_ROUTE_VALUE_SOURCES = [
+  "sales_estimated_opportunity_value",
+  "procore_bidboard_estimate",
+  "manual_override",
+] as const;
+export type DealRouteValueSource = (typeof DEAL_ROUTE_VALUE_SOURCES)[number];
+
 export const WORKFLOW_FAMILIES = ["lead", "standard_deal", "service_deal"] as const;
 export type WorkflowFamily = (typeof WORKFLOW_FAMILIES)[number];
 
+export const LEAD_STAGE_SLUGS = [
+  "lead_new",
+  "company_pre_qualified",
+  "scoping_in_progress",
+  "pre_qual_value_assigned",
+  "lead_go_no_go",
+  "qualified_for_opportunity",
+  "lead_disqualified",
+] as const;
+export type LeadStageSlug = (typeof LEAD_STAGE_SLUGS)[number];
+
+export const DEAL_PIPELINE_DISPOSITIONS = ["opportunity", "deals", "service"] as const;
+export type DealPipelineDisposition = (typeof DEAL_PIPELINE_DISPOSITIONS)[number];
+
 export const DEAL_SCOPING_INTAKE_STATUSES = ["draft", "ready", "activated"] as const;
 export type DealScopingIntakeStatus = (typeof DEAL_SCOPING_INTAKE_STATUSES)[number];
+
+export const LEAD_SCOPING_INTAKE_STATUSES = ["draft", "ready", "completed"] as const;
+export type LeadScopingIntakeStatus = (typeof LEAD_SCOPING_INTAKE_STATUSES)[number];
 
 export const CONTACT_CATEGORIES = [
   "client",
@@ -37,7 +61,41 @@ export type ContactCategory = (typeof CONTACT_CATEGORIES)[number];
 export const LEAD_STATUSES = ["open", "converted", "disqualified"] as const;
 export type LeadStatus = (typeof LEAD_STATUSES)[number];
 
-export const ACTIVITY_TYPES = ["call", "note", "meeting", "email", "task_completed"] as const;
+export const FORECAST_WINDOWS = [
+  "30_days",
+  "60_days",
+  "90_days",
+  "beyond_90",
+  "uncommitted",
+] as const;
+export type ForecastWindow = (typeof FORECAST_WINDOWS)[number];
+
+export const FORECAST_CATEGORIES = ["commit", "best_case", "pipeline"] as const;
+export type ForecastCategory = (typeof FORECAST_CATEGORIES)[number];
+
+export const SUPPORT_NEEDED_TYPES = [
+  "leadership",
+  "estimating",
+  "operations",
+  "executive_team",
+] as const;
+export type SupportNeededType = (typeof SUPPORT_NEEDED_TYPES)[number];
+
+export const ACTIVITY_TYPES = [
+  "call",
+  "note",
+  "meeting",
+  "email",
+  "task_completed",
+  "voicemail",
+  "lunch",
+  "site_visit",
+  "proposal_sent",
+  "redline_review",
+  "go_no_go",
+  "follow_up",
+  "support_request",
+] as const;
 export type ActivityType = (typeof ACTIVITY_TYPES)[number];
 
 export const CALL_OUTCOMES = [
@@ -103,6 +161,7 @@ export const NOTIFICATION_TYPES = [
   "task_assigned",
   "approval_needed",
   "activity_drop",
+  "manager_alert_summary",
   "deal_won",
   "deal_lost",
   "stage_change",
@@ -172,6 +231,8 @@ export const DEAL_TEAM_ROLES = [
   "superintendent",
   "estimator",
   "project_manager",
+  "client_services",
+  "operations",
   "foreman",
   "other",
 ] as const;

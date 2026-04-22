@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Send } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -34,6 +34,15 @@ export function EmailComposeDialog({
   const [body, setBody] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    setTo(defaultTo ?? "");
+    setCc("");
+    setSubject("");
+    setBody("");
+    setError(null);
+  }, [defaultTo, open]);
 
   const handleSend = async () => {
     if (!to.trim()) {
@@ -79,11 +88,6 @@ export function EmailComposeDialog({
         contactId,
       });
 
-      // Reset form
-      setTo(defaultTo ?? "");
-      setCc("");
-      setSubject("");
-      setBody("");
       onOpenChange(false);
       onSent?.();
     } catch (err: unknown) {

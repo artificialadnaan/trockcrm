@@ -1,10 +1,12 @@
 import { useState, useEffect } from "react";
 import { api } from "@/lib/api";
+import type { WorkflowFamily } from "@trock-crm/shared/types";
 
 export interface PipelineStageAdmin {
   id: string;
   name: string;
   slug: string;
+  workflowFamily: WorkflowFamily;
   displayOrder: number;
   isActivePipeline: boolean;
   isTerminal: boolean;

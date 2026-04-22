@@ -21,6 +21,24 @@ import {
 } from "@/lib/stage-gate-options";
 import { toast } from "sonner";
 
+const WORKFLOW_FAMILY_META = {
+  lead: {
+    label: "Lead",
+    summary: "Qualification and go/no-go gates before conversion.",
+    badgeClass: "bg-amber-100 text-amber-800",
+  },
+  standard_deal: {
+    label: "Deals",
+    summary: "Standard construction pipeline after Opportunity routing.",
+    badgeClass: "bg-blue-100 text-blue-700",
+  },
+  service_deal: {
+    label: "Service",
+    summary: "Service department pipeline for sub-threshold work.",
+    badgeClass: "bg-emerald-100 text-emerald-700",
+  },
+} as const;
+
 const EMPTY_GATE_TOUCH_STATE = {
   requiredFields: false,
   requiredDocuments: false,
@@ -29,6 +47,17 @@ const EMPTY_GATE_TOUCH_STATE = {
 
 function formatRequirementSummary(label: string, count: number) {
   return count === 0 ? `No ${label.toLowerCase()}` : `${count} ${label.toLowerCase()}`;
+}
+
+function getStageGatePreviewLabels(values: string[]) {
+  const labels = values
+    .map(
+      (value) =>
+        STAGE_GATE_FIELD_OPTIONS.find((option) => option.value === value)?.label ?? value
+    )
+    .slice(0, 3);
+
+  return labels;
 }
 
 function StageGateEditorSection({
@@ -105,6 +134,13 @@ export function PipelineConfigPage() {
     () => new Set(STAGE_GATE_APPROVAL_OPTIONS.map((option) => option.value)),
     []
   );
+  const familySummaries = useMemo(() => {
+    return Object.entries(WORKFLOW_FAMILY_META).map(([workflowFamily, meta]) => ({
+      workflowFamily,
+      ...meta,
+      count: stages.filter((stage) => stage.workflowFamily === workflowFamily).length,
+    }));
+  }, [stages]);
 
   const startEdit = (stage: PipelineStageAdmin) => {
     setEditingId(stage.id);
@@ -173,13 +209,29 @@ export function PipelineConfigPage() {
         <div>
           <h1 className="text-2xl font-semibold text-gray-900">Pipeline Configuration</h1>
           <p className="text-sm text-gray-500 mt-1">
-            Stage order, stale thresholds, stage gates, and Procore mappings
+            Family-aware stage order, stale thresholds, stage gates, and Procore mappings
           </p>
         </div>
         <Button variant="outline" size="sm" onClick={refetch} disabled={loading}>
           <RefreshCw className={`h-4 w-4 mr-1 ${loading ? "animate-spin" : ""}`} />
           Refresh
         </Button>
+      </div>
+
+      <div className="grid gap-3 md:grid-cols-3">
+        {familySummaries.map((family) => (
+          <Card key={family.workflowFamily} className="border-slate-200 shadow-sm">
+            <CardHeader className="space-y-2 pb-3">
+              <div className="flex items-center justify-between gap-2">
+                <CardTitle className="text-sm text-slate-900">{family.label}</CardTitle>
+                <Badge className={family.badgeClass}>{family.count} stages</Badge>
+              </div>
+              <CardDescription className="text-xs leading-5">
+                {family.summary}
+              </CardDescription>
+            </CardHeader>
+          </Card>
+        ))}
       </div>
 
       <div className="overflow-x-auto">
@@ -222,13 +274,18 @@ export function PipelineConfigPage() {
                       )}
                     </TableCell>
                     <TableCell>
-                      {stage.isTerminal ? (
-                        <Badge className="bg-gray-100 text-gray-600 text-xs">Terminal</Badge>
-                      ) : stage.isActivePipeline ? (
-                        <Badge className="bg-blue-100 text-blue-700 text-xs">Pipeline</Badge>
-                      ) : (
-                        <Badge className="bg-amber-100 text-amber-700 text-xs">DD</Badge>
-                      )}
+                      <div className="flex flex-wrap gap-2">
+                        <Badge className={WORKFLOW_FAMILY_META[stage.workflowFamily].badgeClass}>
+                          {WORKFLOW_FAMILY_META[stage.workflowFamily].label}
+                        </Badge>
+                        {stage.isTerminal ? (
+                          <Badge className="bg-gray-100 text-gray-600 text-xs">Terminal</Badge>
+                        ) : stage.isActivePipeline ? (
+                          <Badge className="bg-slate-100 text-slate-700 text-xs">Pipeline</Badge>
+                        ) : (
+                          <Badge className="bg-violet-100 text-violet-700 text-xs">Internal</Badge>
+                        )}
+                      </div>
                     </TableCell>
                     <TableCell>
                       {isEditing ? (
@@ -307,6 +364,19 @@ export function PipelineConfigPage() {
                           </Badge>
                         ) : null}
                       </div>
+                      {stage.requiredFields.length > 0 ? (
+                        <div className="mt-2 flex flex-wrap gap-1.5">
+                          {getStageGatePreviewLabels(stage.requiredFields).map((label) => (
+                            <Badge
+                              key={`${stage.id}-${label}`}
+                              variant="outline"
+                              className="border-slate-200 bg-slate-50 text-slate-600"
+                            >
+                              {label}
+                            </Badge>
+                          ))}
+                        </div>
+                      ) : null}
                     </TableCell>
                     <TableCell>
                       {isEditing ? (
