@@ -1166,6 +1166,7 @@ describe("estimate generation job", () => {
     expect(resolveMarketContextMock).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({
+        dealId: "deal-1",
         dealZip: null,
         dealState: null,
         dealRegionId: "region-1",

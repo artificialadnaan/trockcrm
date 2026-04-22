@@ -482,6 +482,46 @@ describe("estimating workflow routes", () => {
         canPromote: false,
         generationRunIds: [],
       },
+      marketContext: {
+        effectiveMarket: {
+          id: "market-1",
+          name: "Texas Market",
+          slug: "tx-market",
+          type: "state",
+        },
+        resolutionLevel: "state",
+        resolutionSource: {
+          type: "state",
+          key: "TX",
+          marketId: "market-1",
+        },
+        location: {
+          zip: "76102",
+          state: "TX",
+          regionId: "region-1",
+        },
+        isOverridden: false,
+        override: null,
+        fallbackSource: {
+          type: "state",
+          key: "TX",
+          marketId: "market-1",
+        },
+      },
+      rerunStatus: {
+        status: "queued",
+        rerunRequestId: "rerun-1",
+        queueJobId: 71,
+        generationRunId: null,
+        source: "job_queue",
+        errorSummary: null,
+      },
+      activePricingRunId: "run-completed",
+      manualAddContext: {
+        generationRunId: "run-completed",
+        extractionMatchId: null,
+        estimateSectionName: "Roofing",
+      },
     });
 
     const { res } = await invokeRoute("get", "/:id/estimating", {
@@ -528,6 +568,31 @@ describe("estimating workflow routes", () => {
     expect(res.body.promotionReadiness).toEqual({
       canPromote: false,
       generationRunIds: [],
+    });
+    expect(res.body.marketContext).toEqual(
+      expect.objectContaining({
+        effectiveMarket: expect.objectContaining({
+          id: "market-1",
+        }),
+        resolutionLevel: "state",
+        fallbackSource: expect.objectContaining({
+          key: "TX",
+        }),
+      })
+    );
+    expect(res.body.rerunStatus).toEqual({
+      status: "queued",
+      rerunRequestId: "rerun-1",
+      queueJobId: 71,
+      generationRunId: null,
+      source: "job_queue",
+      errorSummary: null,
+    });
+    expect(res.body.activePricingRunId).toBe("run-completed");
+    expect(res.body.manualAddContext).toEqual({
+      generationRunId: "run-completed",
+      extractionMatchId: null,
+      estimateSectionName: "Roofing",
     });
     expect(res.body.documents[0]).toEqual(
       expect.objectContaining({
