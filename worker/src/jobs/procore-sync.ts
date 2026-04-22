@@ -3,7 +3,25 @@
 // Also exports runProcoreSync() for 15-minute periodic poll.
 
 import { pool } from "../db.js";
-import { runScheduledCatalogSync as runServerScheduledCatalogSync } from "../../../server/src/modules/procore/sync-service.js";
+
+const SERVER_PROCORE_SYNC_MODULES = [
+  "../../../server/dist/modules/procore/sync-service.js",
+  "../../../server/src/modules/procore/sync-service.js",
+] as const;
+
+async function importFirstAvailable<T>(paths: readonly string[]): Promise<T> {
+  let lastError: unknown;
+
+  for (const path of paths) {
+    try {
+      return (await import(path)) as T;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error("Unable to import Procore sync module");
+}
 
 const PROCORE_BASE_URL = "https://api.procore.com";
 
@@ -847,6 +865,10 @@ export async function runScheduledCatalogSync(): Promise<void> {
     console.log("[Worker:catalog-sync] Dev mode — skipping actual Procore catalog refresh");
     return;
   }
+
+  const { runScheduledCatalogSync: runServerScheduledCatalogSync } = await importFirstAvailable<{
+    runScheduledCatalogSync: () => Promise<void>;
+  }>(SERVER_PROCORE_SYNC_MODULES);
 
   await runServerScheduledCatalogSync();
   console.log("[Worker:catalog-sync] Scheduled Procore catalog refresh completed");

@@ -37,33 +37,33 @@ vi.mock("../../src/db.js", () => ({
   },
 }));
 
-vi.mock("../../../server/src/modules/estimating/catalog-read-model-service.js", () => ({
+vi.mock("../../../server/dist/modules/estimating/catalog-read-model-service.js", () => ({
   listCatalogCandidatesForMatching: listCatalogCandidatesForMatchingMock,
   resolveActiveCatalogSnapshotVersionId: resolveActiveCatalogSnapshotVersionIdMock,
 }));
 
-vi.mock("../../../server/src/modules/estimating/historical-pricing-service.js", () => ({
+vi.mock("../../../server/dist/modules/estimating/historical-pricing-service.js", () => ({
   getHistoricalPricingSignals: getHistoricalPricingSignalsMock,
 }));
 
-vi.mock("../../../server/src/modules/estimating/market-rate-provider.js", () => ({
+vi.mock("../../../server/dist/modules/estimating/market-rate-provider.js", () => ({
   createMarketRateProvider: createMarketRateProviderMock,
 }));
 
-vi.mock("../../../server/src/modules/estimating/market-resolution-service.js", () => ({
+vi.mock("../../../server/dist/modules/estimating/market-resolution-service.js", () => ({
   resolveMarketContext: resolveMarketContextMock,
 }));
 
-vi.mock("../../../server/src/modules/estimating/market-rate-service.js", () => ({
+vi.mock("../../../server/dist/modules/estimating/market-rate-service.js", () => ({
   calculateMarketRateAdjustment: calculateMarketRateAdjustmentMock,
 }));
 
-vi.mock("../../../server/src/modules/estimating/matching-service.js", () => ({
+vi.mock("../../../server/dist/modules/estimating/matching-service.js", () => ({
   rankExtractionMatches: rankExtractionMatchesMock,
 }));
 
-vi.mock("../../../server/src/modules/estimating/pricing-service.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../../../server/src/modules/estimating/pricing-service.js")>();
+vi.mock("../../../server/dist/modules/estimating/pricing-service.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../server/dist/modules/estimating/pricing-service.js")>();
   return {
     ...actual,
     buildPricingRecommendation: buildPricingRecommendationMock,
@@ -73,7 +73,7 @@ vi.mock("../../../server/src/modules/estimating/pricing-service.js", async (impo
   };
 });
 
-vi.mock("../../../server/src/modules/estimating/draft-estimate-service.js", () => ({
+vi.mock("../../../server/dist/modules/estimating/draft-estimate-service.js", () => ({
   cloneManualRowsForGenerationRun: cloneManualRowsForGenerationRunMock,
 }));
 
