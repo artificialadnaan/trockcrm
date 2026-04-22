@@ -55,6 +55,11 @@ const pipelineFamilyMigrationPath = resolve(
   "../../../../migrations/0020_pipeline_workflow_families.sql"
 );
 const pipelineFamilyMigrationSql = readFileSync(pipelineFamilyMigrationPath, "utf8");
+const salesWorkflowRealignmentMigrationPath = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../../migrations/0028_sales_workflow_realignment.sql"
+);
+const salesWorkflowRealignmentMigrationSql = readFileSync(salesWorkflowRealignmentMigrationPath, "utf8");
 
 function expectSqlToMatch(pattern: RegExp): void {
   expect(migrationSql).toMatch(pattern);
@@ -62,6 +67,10 @@ function expectSqlToMatch(pattern: RegExp): void {
 
 function expectPipelineFamilySqlToMatch(pattern: RegExp): void {
   expect(pipelineFamilyMigrationSql).toMatch(pattern);
+}
+
+function expectSalesWorkflowRealignmentSqlToMatch(pattern: RegExp): void {
+  expect(salesWorkflowRealignmentMigrationSql).toMatch(pattern);
 }
 
 describe("Sales workflow shared contract", () => {
@@ -141,6 +150,40 @@ describe("Sales workflow shared contract", () => {
     expect(columns.isReadOnlyMirror.name).toBe("is_read_only_mirror");
     expect(columns.isReadOnlySyncDirty.name).toBe("is_read_only_sync_dirty");
     expect(columns.readOnlySyncedAt.name).toBe("read_only_synced_at");
+  });
+
+  it("backfills the sales workflow realignment migration contract", () => {
+    expect(salesWorkflowRealignmentMigrationSql).toContain(
+      "CREATE TYPE lead_pipeline_type AS ENUM ('service', 'normal')"
+    );
+    expect(salesWorkflowRealignmentMigrationSql).toContain("CREATE TYPE lead_disqualification_reason AS ENUM");
+    expect(salesWorkflowRealignmentMigrationSql).toContain("'no_budget'");
+    expect(salesWorkflowRealignmentMigrationSql).toContain("'other'");
+    expect(salesWorkflowRealignmentMigrationSql).toContain(
+      "ADD COLUMN IF NOT EXISTS pipeline_type lead_pipeline_type"
+    );
+    expect(salesWorkflowRealignmentMigrationSql).toContain(
+      "SET pipeline_type = COALESCE("
+    );
+    expect(salesWorkflowRealignmentMigrationSql).toContain(
+      "pipeline_type, ''normal''"
+    );
+    expect(salesWorkflowRealignmentMigrationSql).toContain(
+      "ALTER COLUMN pipeline_type SET DEFAULT ''normal''"
+    );
+    expect(salesWorkflowRealignmentMigrationSql).toContain(
+      "ALTER COLUMN pipeline_type SET NOT NULL"
+    );
+    expect(salesWorkflowRealignmentMigrationSql).toContain(
+      "ADD COLUMN IF NOT EXISTS pipeline_type_snapshot deal_pipeline_type_snapshot"
+    );
+    expect(salesWorkflowRealignmentMigrationSql).toContain("workflow_route = ''service''");
+    expect(salesWorkflowRealignmentMigrationSql).toContain(
+      "ALTER COLUMN pipeline_type_snapshot SET DEFAULT ''normal''"
+    );
+    expect(salesWorkflowRealignmentMigrationSql).toContain(
+      "ALTER COLUMN pipeline_type_snapshot SET NOT NULL"
+    );
   });
 });
 
