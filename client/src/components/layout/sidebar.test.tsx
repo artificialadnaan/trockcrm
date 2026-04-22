@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import sidebarSource from "./sidebar.tsx?raw";
+import mobileNavSource from "./mobile-nav.tsx?raw";
 
 function normalize(source: string) {
   return source.replace(/\s+/g, " ");
@@ -7,6 +8,7 @@ function normalize(source: string) {
 
 describe("Sidebar navigation metadata", () => {
   const source = normalize(sidebarSource);
+  const mobileSource = normalize(mobileNavSource);
 
   it("keeps migration visible to directors inside the system admin group", () => {
     expect(source).toContain('{ to: "/admin/migration", icon: ArrowRightLeft, label: "Migration", roles: ["admin", "director"] }');
@@ -31,6 +33,10 @@ describe("Sidebar navigation metadata", () => {
   it("does not key navigation entries by route alone when duplicate routes exist", () => {
     expect(source).toContain('{ to: "/deals", icon: Handshake, label: "Deals", roles: ["admin", "director", "rep"] }');
     expect(source).toContain('{ to: "/deals", icon: Kanban, label: "Pipeline", roles: ["admin", "director", "rep"] }');
+    expect(source).toContain("function getNavItemKey");
+    expect(source).toContain("key={getNavItemKey(item)}");
     expect(source).not.toContain("key={item.to}");
+    expect(mobileSource).toContain("function getNavItemKey");
+    expect(mobileSource).toContain("key={getNavItemKey(item)}");
   });
 });

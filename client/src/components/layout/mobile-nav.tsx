@@ -17,6 +17,10 @@ const mobileNavItems = [
   { to: "/tasks", icon: CheckSquare, label: "Tasks" },
 ];
 
+function getNavItemKey(item: { label: string; to: string }) {
+  return `${item.label}:${item.to}`;
+}
+
 export function MobileNav() {
   const { user } = useAuth();
   const navItems = user?.role === "rep"
@@ -28,7 +32,7 @@ export function MobileNav() {
       <div className="flex items-center justify-around h-16">
         {navItems.map((item) => (
           <NavLink
-            key={item.to}
+            key={getNavItemKey(item)}
             to={item.to}
             end={item.to === "/"}
             className={({ isActive }) =>

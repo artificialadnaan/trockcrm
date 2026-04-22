@@ -14,12 +14,28 @@ const baseStage: Omit<PipelineStage, "id" | "name" | "slug" | "displayOrder" | "
 };
 
 describe("lead new page helpers", () => {
-  it("only allows non-terminal lead workflow stages for new leads", () => {
+  it("only allows active canonical lead workflow stages for new leads", () => {
     const stages: PipelineStage[] = [
       {
-        id: "lead-qualified",
-        name: "Qualified Lead",
-        slug: "qualified-lead",
+        id: "lead-new",
+        name: "New",
+        slug: "lead_new",
+        displayOrder: 1,
+        workflowFamily: "lead",
+        ...baseStage,
+      },
+      {
+        id: "lead-prequal",
+        name: "Company Pre-Qualified",
+        slug: "company_pre_qualified",
+        displayOrder: 2,
+        workflowFamily: "lead",
+        ...baseStage,
+      },
+      {
+        id: "legacy-contacted",
+        name: "Contacted",
+        slug: "contacted",
         displayOrder: 1,
         workflowFamily: "lead",
         ...baseStage,
@@ -41,9 +57,21 @@ describe("lead new page helpers", () => {
         ...baseStage,
         isTerminal: true,
       },
+      {
+        id: "inactive-lead-stage",
+        name: "Scoping In Progress",
+        slug: "scoping_in_progress",
+        displayOrder: 3,
+        workflowFamily: "lead",
+        ...baseStage,
+        isActivePipeline: false,
+      },
     ];
 
-    expect(getLeadCreationStages(stages).map((stage) => stage.id)).toEqual(["lead-qualified"]);
+    expect(getLeadCreationStages(stages).map((stage) => stage.id)).toEqual([
+      "lead-new",
+      "lead-prequal",
+    ]);
   });
 
   it("returns a user-facing label for selected ids", () => {

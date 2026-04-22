@@ -1,7 +1,38 @@
 import type { PipelineStage } from "@/hooks/use-pipeline-config";
 
+const CANONICAL_LEAD_CREATION_STAGE_SLUGS = [
+  "lead_new",
+  "company_pre_qualified",
+  "scoping_in_progress",
+  "pre_qual_value_assigned",
+  "lead_go_no_go",
+  "qualified_for_opportunity",
+] as const;
+
+function isCanonicalLeadCreationStageSlug(
+  value: string
+): value is (typeof CANONICAL_LEAD_CREATION_STAGE_SLUGS)[number] {
+  return (CANONICAL_LEAD_CREATION_STAGE_SLUGS as readonly string[]).includes(value);
+}
+
 export function getLeadCreationStages(stages: PipelineStage[]) {
-  return stages.filter((stage) => stage.workflowFamily === "lead" && !stage.isTerminal);
+  const stagePriority = new Map<string, number>(
+    CANONICAL_LEAD_CREATION_STAGE_SLUGS.map((slug, index) => [slug, index])
+  );
+
+  return stages
+    .filter(
+      (stage) =>
+        stage.workflowFamily === "lead" &&
+        stage.isActivePipeline &&
+        !stage.isTerminal &&
+        isCanonicalLeadCreationStageSlug(stage.slug)
+    )
+    .sort((left, right) => {
+      const leftPriority = stagePriority.get(left.slug) ?? Number.MAX_SAFE_INTEGER;
+      const rightPriority = stagePriority.get(right.slug) ?? Number.MAX_SAFE_INTEGER;
+      return leftPriority - rightPriority;
+    });
 }
 
 export function getSelectedOptionLabel<T extends { id: string; name: string }>(

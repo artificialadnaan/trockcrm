@@ -30,13 +30,13 @@ export function isImmediateNextStageMove(
 function matchesLeadBucket(bucket: string | null, slug: string) {
   if (!bucket) return true;
   if (bucket === "lead") {
-    return ["lead_new", "company_pre_qualified", "scoping_in_progress", "contacted"].includes(slug);
+    return ["lead_new", "company_pre_qualified", "scoping_in_progress"].includes(slug);
   }
   if (bucket === "qualified_lead") {
-    return ["pre_qual_value_assigned", "lead_go_no_go", "qualified_lead"].includes(slug);
+    return ["pre_qual_value_assigned", "lead_go_no_go"].includes(slug);
   }
   if (bucket === "opportunity") {
-    return ["qualified_for_opportunity", "director_go_no_go", "ready_for_opportunity"].includes(slug);
+    return ["qualified_for_opportunity"].includes(slug);
   }
   return true;
 }

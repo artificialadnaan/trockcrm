@@ -76,6 +76,13 @@ const workflowAlignmentMigrationPath = resolve(
 const workflowAlignmentMigrationSql = existsSync(workflowAlignmentMigrationPath)
   ? readFileSync(workflowAlignmentMigrationPath, "utf8")
   : "";
+const leadPipelineCleanupMigrationPath = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../../migrations/0046_lead_pipeline_legacy_stage_cleanup.sql"
+);
+const leadPipelineCleanupMigrationSql = existsSync(leadPipelineCleanupMigrationPath)
+  ? readFileSync(leadPipelineCleanupMigrationPath, "utf8")
+  : "";
 
 function expectSqlToMatch(pattern: RegExp): void {
   expect(migrationSql).toMatch(pattern);
@@ -894,6 +901,14 @@ describe("Lead Conversion Shared Contract", () => {
       /'Qualified for Opportunity',\s*'qualified_for_opportunity'/
     );
     expectWorkflowAlignmentSqlToMatch(/'Opportunity',\s*'opportunity',\s*1,\s*'standard_deal'/);
+  });
+
+  it("deactivates legacy lead stages once the aligned lead pipeline is available", () => {
+    expect(existsSync(leadPipelineCleanupMigrationPath)).toBe(true);
+    expect(leadPipelineCleanupMigrationSql).toContain("workflow_family = 'lead'");
+    expect(leadPipelineCleanupMigrationSql).toContain("slug IN ('contacted'");
+    expect(leadPipelineCleanupMigrationSql).toContain("is_active_pipeline = false");
+    expect(leadPipelineCleanupMigrationSql).toContain("slug = 'lead_new'");
   });
 
   it("persists neutral opportunity routing state on deals", () => {
