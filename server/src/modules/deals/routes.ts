@@ -1,7 +1,6 @@
-import { randomUUID } from "crypto";
 import { Router } from "express";
 import { and, eq, desc, isNotNull, sql } from "drizzle-orm";
-import { dealApprovals, deals, estimateReviewEvents, jobQueue } from "@trock-crm/shared/schema";
+import { dealApprovals, deals, jobQueue } from "@trock-crm/shared/schema";
 import { requireRole } from "../../middleware/rbac.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { eventBus } from "../../events/bus.js";
@@ -108,7 +107,7 @@ import {
 import {
   clearDealMarketOverride,
   getDealEffectiveMarketContext,
-  listActiveMarketChoices,
+  listEstimateMarkets,
   setDealMarketOverride,
 } from "../estimating/deal-market-override-service.js";
 
@@ -1104,6 +1103,76 @@ router.get("/:id/estimating", async (req, res, next) => {
     const workflow = await getEstimatingWorkflowState(req.tenantDb! as any, req.params.id);
     await req.commitTransaction!();
     res.status(200).json(workflow);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/:id/estimating/market-context", async (req, res, next) => {
+  try {
+    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+
+    const marketContext = await getDealEffectiveMarketContext(req.tenantDb! as any, req.params.id);
+    await req.commitTransaction!();
+    res.status(200).json({ marketContext });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/:id/estimating/markets", async (req, res, next) => {
+  try {
+    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+
+    const markets = await listEstimateMarkets(req.tenantDb! as any);
+    await req.commitTransaction!();
+    res.status(200).json({ markets });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.put("/:id/estimating/market-override", async (req, res, next) => {
+  try {
+    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+    if (!req.body.marketId?.trim?.()) {
+      throw new AppError(400, "marketId is required");
+    }
+
+    const result = await setDealMarketOverride({
+      tenantDb: req.tenantDb! as any,
+      dealId: req.params.id,
+      marketId: req.body.marketId,
+      userId: req.user!.id,
+      officeId: req.user!.activeOfficeId ?? req.user!.officeId ?? null,
+      reason: req.body.reason ?? null,
+    });
+
+    await req.commitTransaction!();
+    res.status(200).json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.delete("/:id/estimating/market-override", async (req, res, next) => {
+  try {
+    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+
+    const result = await clearDealMarketOverride({
+      tenantDb: req.tenantDb! as any,
+      dealId: req.params.id,
+      userId: req.user!.id,
+      officeId: req.user!.activeOfficeId ?? req.user!.officeId ?? null,
+      reason: req.body.reason ?? null,
+    });
+
+    await req.commitTransaction!();
+    res.status(200).json(result);
   } catch (err) {
     next(err);
   }
