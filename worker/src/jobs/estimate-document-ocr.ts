@@ -3,7 +3,25 @@ import { eq, sql } from "drizzle-orm";
 import * as schema from "@trock-crm/shared/schema";
 import { estimateSourceDocuments } from "@trock-crm/shared/schema";
 import { pool } from "../db.js";
-import { runEstimateDocumentParse } from "../../../server/src/modules/estimating/document-parse-orchestrator.js";
+
+const SERVER_ESTIMATING_PARSE_MODULES = [
+  "../../../server/dist/modules/estimating/document-parse-orchestrator.js",
+  "../../../server/src/modules/estimating/document-parse-orchestrator.js",
+] as const;
+
+async function importFirstAvailable<T>(paths: readonly string[]): Promise<T> {
+  let lastError: unknown;
+
+  for (const path of paths) {
+    try {
+      return (await import(path)) as T;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error("Unable to import estimating parse module");
+}
 
 export async function markEstimateDocumentOcrFailed(
   tenantDb: Pick<ReturnType<typeof drizzle>, "update">,
@@ -52,6 +70,21 @@ export async function runEstimateDocumentOcr(
   if (!document) {
     throw new Error(`Estimate document ${payload.documentId} not found`);
   }
+
+  const { runEstimateDocumentParse } = await importFirstAvailable<{
+    runEstimateDocumentParse: (input: {
+      tenantDb: unknown;
+      document: typeof document;
+      options: {
+        provider: string;
+        profile: string;
+        measurementsEnabled: boolean;
+      };
+    }) => Promise<{
+      extractionCount: number;
+      parseRun: { id: string };
+    }>;
+  }>(SERVER_ESTIMATING_PARSE_MODULES);
 
   const result = await runEstimateDocumentParse({
     tenantDb: tenantDb as any,

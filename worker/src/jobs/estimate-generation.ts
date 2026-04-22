@@ -8,22 +8,63 @@ import {
   estimateReviewEvents,
 } from "@trock-crm/shared/schema";
 import { pool } from "../db.js";
-import { listCatalogCandidatesForMatching, resolveActiveCatalogSnapshotVersionId } from "../../../server/src/modules/estimating/catalog-read-model-service.js";
-import { getHistoricalPricingSignals } from "../../../server/src/modules/estimating/historical-pricing-service.js";
-import { createMarketRateProvider } from "../../../server/src/modules/estimating/market-rate-provider.js";
-import { resolveMarketContext } from "../../../server/src/modules/estimating/market-resolution-service.js";
-import { calculateMarketRateAdjustment } from "../../../server/src/modules/estimating/market-rate-service.js";
-import { rankExtractionMatches } from "../../../server/src/modules/estimating/matching-service.js";
-import {
-  applyMarketRateAdjustment,
-  isInferredRecommendationRowEligible,
-  buildPricingRecommendation,
-  resolvePricingScopeFromExtraction,
-  isConfirmedMeasurementCandidateForPricing,
-} from "../../../server/src/modules/estimating/pricing-service.js";
-import { cloneManualRowsForGenerationRun } from "../../../server/src/modules/estimating/draft-estimate-service.js";
-import { buildRecommendationOptionSet } from "../../../server/src/modules/estimating/recommendation-option-service.js";
-import { persistPricingRecommendationBundle } from "../../../server/src/modules/estimating/recommendation-persistence-service.js";
+
+const SERVER_ESTIMATING_MODULES = {
+  catalogReadModel: [
+    "../../../server/dist/modules/estimating/catalog-read-model-service.js",
+    "../../../server/src/modules/estimating/catalog-read-model-service.js",
+  ],
+  historicalPricing: [
+    "../../../server/dist/modules/estimating/historical-pricing-service.js",
+    "../../../server/src/modules/estimating/historical-pricing-service.js",
+  ],
+  marketRateProvider: [
+    "../../../server/dist/modules/estimating/market-rate-provider.js",
+    "../../../server/src/modules/estimating/market-rate-provider.js",
+  ],
+  marketResolution: [
+    "../../../server/dist/modules/estimating/market-resolution-service.js",
+    "../../../server/src/modules/estimating/market-resolution-service.js",
+  ],
+  marketRateService: [
+    "../../../server/dist/modules/estimating/market-rate-service.js",
+    "../../../server/src/modules/estimating/market-rate-service.js",
+  ],
+  matching: [
+    "../../../server/dist/modules/estimating/matching-service.js",
+    "../../../server/src/modules/estimating/matching-service.js",
+  ],
+  pricing: [
+    "../../../server/dist/modules/estimating/pricing-service.js",
+    "../../../server/src/modules/estimating/pricing-service.js",
+  ],
+  draftEstimate: [
+    "../../../server/dist/modules/estimating/draft-estimate-service.js",
+    "../../../server/src/modules/estimating/draft-estimate-service.js",
+  ],
+  recommendationOption: [
+    "../../../server/dist/modules/estimating/recommendation-option-service.js",
+    "../../../server/src/modules/estimating/recommendation-option-service.js",
+  ],
+  recommendationPersistence: [
+    "../../../server/dist/modules/estimating/recommendation-persistence-service.js",
+    "../../../server/src/modules/estimating/recommendation-persistence-service.js",
+  ],
+} as const;
+
+async function importFirstAvailable<T>(paths: readonly string[]): Promise<T> {
+  let lastError: unknown;
+
+  for (const path of paths) {
+    try {
+      return (await import(path)) as T;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error("Unable to import estimating module");
+}
 
 async function resolveSchemaName(officeId: string | null) {
   if (!officeId) throw new Error("Unable to resolve office schema for estimate generation");
@@ -138,6 +179,47 @@ export async function runEstimateGeneration(
     if (!payload.dealId) {
       throw new Error("dealId is required for estimate generation");
     }
+
+    const [
+      catalogReadModelModule,
+      historicalPricingModule,
+      marketRateProviderModule,
+      marketResolutionModule,
+      marketRateServiceModule,
+      matchingModule,
+      pricingModule,
+      draftEstimateModule,
+      recommendationOptionModule,
+      recommendationPersistenceModule,
+    ] = await Promise.all([
+      importFirstAvailable<any>(SERVER_ESTIMATING_MODULES.catalogReadModel),
+      importFirstAvailable<any>(SERVER_ESTIMATING_MODULES.historicalPricing),
+      importFirstAvailable<any>(SERVER_ESTIMATING_MODULES.marketRateProvider),
+      importFirstAvailable<any>(SERVER_ESTIMATING_MODULES.marketResolution),
+      importFirstAvailable<any>(SERVER_ESTIMATING_MODULES.marketRateService),
+      importFirstAvailable<any>(SERVER_ESTIMATING_MODULES.matching),
+      importFirstAvailable<any>(SERVER_ESTIMATING_MODULES.pricing),
+      importFirstAvailable<any>(SERVER_ESTIMATING_MODULES.draftEstimate),
+      importFirstAvailable<any>(SERVER_ESTIMATING_MODULES.recommendationOption),
+      importFirstAvailable<any>(SERVER_ESTIMATING_MODULES.recommendationPersistence),
+    ]);
+
+    const { listCatalogCandidatesForMatching, resolveActiveCatalogSnapshotVersionId } = catalogReadModelModule;
+    const { getHistoricalPricingSignals } = historicalPricingModule;
+    const { createMarketRateProvider } = marketRateProviderModule;
+    const { resolveMarketContext } = marketResolutionModule;
+    const { calculateMarketRateAdjustment } = marketRateServiceModule;
+    const { rankExtractionMatches } = matchingModule;
+    const {
+      applyMarketRateAdjustment,
+      isInferredRecommendationRowEligible,
+      buildPricingRecommendation,
+      resolvePricingScopeFromExtraction,
+      isConfirmedMeasurementCandidateForPricing,
+    } = pricingModule;
+    const { cloneManualRowsForGenerationRun } = draftEstimateModule;
+    const { buildRecommendationOptionSet } = recommendationOptionModule;
+    const { persistPricingRecommendationBundle } = recommendationPersistenceModule;
 
     const previousRunQuery = tenantDb
       .select({ id: estimateGenerationRuns.id })
@@ -274,7 +356,7 @@ export async function runEstimateGeneration(
         normalizedIntent,
         sourceRowIdentity,
         candidates: [
-          ...matches.map((match) => ({
+          ...matches.map((match: any) => ({
             optionLabel: String(match.catalogItemId),
             catalogItemId: match.catalogItemId,
             score: match.matchScore,
