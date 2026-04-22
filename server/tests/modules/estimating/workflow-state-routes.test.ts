@@ -113,6 +113,7 @@ vi.mock("../../../src/modules/estimating/document-service.js", () => documentSer
 
 const fileServiceMocks = vi.hoisted(() => ({
   confirmUpload: vi.fn(),
+  getFileById: vi.fn(),
 }));
 
 vi.mock("../../../src/modules/files/service.js", async () => {
@@ -123,6 +124,7 @@ vi.mock("../../../src/modules/files/service.js", async () => {
   return {
     ...actual,
     confirmUpload: fileServiceMocks.confirmUpload,
+    getFileById: fileServiceMocks.getFileById,
   };
 });
 
@@ -419,11 +421,21 @@ describe("estimating workflow routes", () => {
     });
     fileServiceMocks.confirmUpload.mockResolvedValue({
       id: "file-1",
+      dealId: "deal-1",
       parentFileId: null,
       originalFilename: "plans.pdf",
       mimeType: "application/pdf",
       fileSizeBytes: 1024,
       r2Key: "r2/doc-1.pdf",
+    });
+    fileServiceMocks.getFileById.mockResolvedValue({
+      id: "file-2",
+      dealId: "deal-1",
+      parentFileId: null,
+      originalFilename: "uploaded-plan.pdf",
+      mimeType: "application/pdf",
+      fileSizeBytes: 2048,
+      r2Key: "r2/doc-2.pdf",
     });
   });
 
@@ -673,6 +685,33 @@ describe("estimating workflow routes", () => {
           parseProvider: "default",
           parseProfile: "measurement-heavy",
           parseMeasurementsEnabled: false,
+        }),
+      })
+    );
+  });
+
+  it("accepts a pre-uploaded deal file when creating an estimate source document", async () => {
+    documentServiceMocks.createEstimateSourceDocument.mockResolvedValue({
+      id: "doc-2",
+    });
+
+    await invokeRoute("post", "/:id/estimating/documents", {
+      params: { id: "deal-1" },
+      body: {
+        fileId: "file-2",
+        parseMeasurementsEnabled: true,
+      },
+    });
+
+    expect(fileServiceMocks.getFileById).toHaveBeenCalledWith({}, "file-2");
+    expect(fileServiceMocks.confirmUpload).not.toHaveBeenCalled();
+    expect(documentServiceMocks.createEstimateSourceDocument).toHaveBeenCalledWith(
+      expect.objectContaining({
+        input: expect.objectContaining({
+          dealId: "deal-1",
+          fileId: "file-2",
+          filename: "uploaded-plan.pdf",
+          parseMeasurementsEnabled: true,
         }),
       })
     );

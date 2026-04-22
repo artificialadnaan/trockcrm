@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -12,6 +12,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { api } from "@/lib/api";
+import { uploadFile } from "@/hooks/use-files";
 
 const PARSE_PROFILE_OPTIONS = [
   { value: "balanced", label: "Balanced" },
@@ -99,6 +100,36 @@ export async function runEstimateDocumentRerunAction({
   await refresh();
 }
 
+export async function runEstimateDocumentUploadAction({
+  dealId,
+  files,
+  parseMeasurementsEnabled,
+  refresh,
+}: {
+  dealId: string;
+  files: File[];
+  parseMeasurementsEnabled: boolean;
+  refresh: () => Promise<void>;
+}) {
+  for (const file of files) {
+    const uploaded = await uploadFile({
+      file,
+      category: "estimate",
+      dealId,
+    });
+
+    await api(`/deals/${dealId}/estimating/documents`, {
+      method: "POST",
+      json: {
+        fileId: uploaded.id,
+        parseMeasurementsEnabled,
+      },
+    });
+  }
+
+  await refresh();
+}
+
 export function EstimateDocumentsPanel({
   dealId,
   documents,
@@ -108,8 +139,37 @@ export function EstimateDocumentsPanel({
   documents: any[];
   onRefresh: () => Promise<void>;
 }) {
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [uploadMeasurementsEnabled, setUploadMeasurementsEnabled] = useState(true);
   const [reprocessingDocumentId, setReprocessingDocumentId] = useState<string | null>(null);
   const [drafts, setDrafts] = useState<Record<string, DocumentParseDraft>>({});
+
+  const handleUploadFiles = async (fileList: FileList | null) => {
+    if (!fileList?.length) return;
+
+    setUploading(true);
+    try {
+      await runEstimateDocumentUploadAction({
+        dealId,
+        files: Array.from(fileList),
+        parseMeasurementsEnabled: uploadMeasurementsEnabled,
+        refresh: onRefresh,
+      });
+      toast.success(
+        fileList.length === 1
+          ? "Plan uploaded and queued for parsing"
+          : `${fileList.length} documents uploaded and queued for parsing`
+      );
+    } catch (err: unknown) {
+      toast.error(err instanceof Error ? err.message : "Failed to upload estimate documents");
+    } finally {
+      setUploading(false);
+      if (fileInputRef.current) {
+        fileInputRef.current.value = "";
+      }
+    }
+  };
 
   const handleReprocess = async (documentId: string, options: DocumentParseDraft) => {
     setReprocessingDocumentId(documentId);
@@ -131,15 +191,47 @@ export function EstimateDocumentsPanel({
   return (
     <section className="flex h-full flex-col">
       <div className="border-b px-4 py-3">
-        <h3 className="text-sm font-semibold">Documents</h3>
-        <p className="text-xs text-muted-foreground">
-          Source files feeding parsing, extraction, and estimator review.
-        </p>
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+          <div>
+            <h3 className="text-sm font-semibold">Documents</h3>
+            <p className="text-xs text-muted-foreground">
+              Source files feeding parsing, extraction, and estimator review.
+            </p>
+          </div>
+
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+            <label className="flex items-center gap-2 text-xs text-muted-foreground">
+              <Checkbox
+                checked={uploadMeasurementsEnabled}
+                onCheckedChange={(checked) => setUploadMeasurementsEnabled(checked === true)}
+              />
+              <span>Enable measurement detection on upload</span>
+            </label>
+
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".pdf,image/*,.tif,.tiff"
+              multiple
+              className="hidden"
+              onChange={(event) => {
+                void handleUploadFiles(event.target.files);
+              }}
+            />
+            <Button
+              size="sm"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={uploading}
+            >
+              {uploading ? "Uploading..." : "Upload Plans Here"}
+            </Button>
+          </div>
+        </div>
       </div>
 
       {documents.length === 0 ? (
         <div className="px-4 py-6 text-sm text-muted-foreground">
-          No source documents have been uploaded yet.
+          No source documents have been uploaded yet. Use <span className="font-medium text-foreground">Upload Plans Here</span> to add plans, specs, or blueprint images for estimate review.
         </div>
       ) : (
         <div className="overflow-x-auto">

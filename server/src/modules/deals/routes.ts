@@ -64,7 +64,7 @@ import {
   routeRevisionToEstimating,
   upsertDealScopingIntake,
 } from "./scoping-service.js";
-import { confirmUpload } from "../files/service.js";
+import { confirmUpload, getFileById } from "../files/service.js";
 import {
   createEstimateSourceDocument,
   enqueueEstimateDocumentOcrJob,
@@ -1031,9 +1031,22 @@ router.post("/:id/estimating/documents", async (req, res, next) => {
     const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
     if (!deal) throw new AppError(404, "Deal not found");
 
-    const uploadedFile = await confirmUpload(req.tenantDb!, req.user!.id, {
-      uploadToken: req.body.uploadToken,
-    });
+    let uploadedFile;
+    if (req.body.fileId) {
+      uploadedFile = await getFileById(req.tenantDb!, req.body.fileId);
+      if (!uploadedFile) {
+        throw new AppError(404, "Uploaded file not found");
+      }
+      if (uploadedFile.dealId !== req.params.id) {
+        throw new AppError(400, "Uploaded file must belong to the same deal");
+      }
+    } else if (req.body.uploadToken) {
+      uploadedFile = await confirmUpload(req.tenantDb!, req.user!.id, {
+        uploadToken: req.body.uploadToken,
+      });
+    } else {
+      throw new AppError(400, "Either uploadToken or fileId is required");
+    }
 
     const officeId = req.user!.activeOfficeId ?? req.user!.officeId;
     const document = await createEstimateSourceDocument({
