@@ -159,6 +159,86 @@ function createIntegrationDb(seed?: Partial<StoredRows>) {
   let sequence = 1;
   const nextId = (prefix: string) => `${prefix}-${sequence++}`;
 
+  const toCamelCase = (value: string) =>
+    value.replace(/_([a-z])/g, (_, char: string) => char.toUpperCase());
+
+  const getColumnTableName = (value: unknown) => {
+    if (!value || typeof value !== "object" || !("table" in value)) {
+      return null;
+    }
+
+    const table = (value as { table?: Record<PropertyKey, unknown> }).table;
+    if (!table) return null;
+    return String(table[Symbol.for("drizzle:Name")] ?? table.tableName ?? "");
+  };
+
+  const getColumnName = (value: unknown) =>
+    value && typeof value === "object" && "name" in value ? String((value as { name: unknown }).name) : null;
+
+  const getParamValue = (value: unknown) =>
+    value && typeof value === "object" && "value" in value ? (value as { value: unknown }).value : undefined;
+
+  const readPredicates = (
+    node: unknown
+  ): Array<{ tableName: string | null; columnName: string; operator: "eq" | "in"; value: unknown }> => {
+    if (!node || typeof node !== "object" || !("queryChunks" in node)) {
+      return [];
+    }
+
+    const chunks = Array.isArray((node as { queryChunks?: unknown[] }).queryChunks)
+      ? ((node as { queryChunks: unknown[] }).queryChunks as unknown[])
+      : [];
+    const predicates: Array<{ tableName: string | null; columnName: string; operator: "eq" | "in"; value: unknown }> =
+      [];
+
+    const columnName = chunks.length > 1 ? getColumnName(chunks[1]) : null;
+    const tableName = chunks.length > 1 ? getColumnTableName(chunks[1]) : null;
+    const operatorToken = chunks.length > 2 && chunks[2] && typeof chunks[2] === "object" && "value" in chunks[2]
+      ? String(((chunks[2] as { value: string[] }).value ?? []).join("")).trim().toLowerCase()
+      : null;
+
+    if (columnName && operatorToken === "=" && chunks.length > 3) {
+      predicates.push({
+        tableName,
+        columnName,
+        operator: "eq",
+        value: getParamValue(chunks[3]),
+      });
+    } else if (columnName && operatorToken === "in" && chunks.length > 3 && Array.isArray(chunks[3])) {
+      predicates.push({
+        tableName,
+        columnName,
+        operator: "in",
+        value: chunks[3].map((entry) => getParamValue(entry)),
+      });
+    } else {
+      for (const chunk of chunks) {
+        predicates.push(...readPredicates(chunk));
+      }
+    }
+
+    return predicates;
+  };
+
+  const rowMatchesPredicates = (
+    row: Record<string, unknown>,
+    predicates: Array<{ tableName: string | null; columnName: string; operator: "eq" | "in"; value: unknown }>,
+    activeTableName: string | null
+  ) =>
+    predicates.every((predicate) => {
+      const rowKey = toCamelCase(predicate.columnName);
+      if (!(rowKey in row)) {
+        return true;
+      }
+
+      const rowValue = row[rowKey];
+      if (predicate.operator === "eq") {
+        return rowValue === predicate.value;
+      }
+
+      return Array.isArray(predicate.value) ? predicate.value.includes(rowValue) : false;
+    });
+
   const getTableKey = (table: unknown) => {
     switch (table) {
       case estimateSourceDocuments:
@@ -194,31 +274,55 @@ function createIntegrationDb(seed?: Partial<StoredRows>) {
       (left === estimateExtractionMatches && right === estimateExtractions) ||
       (left === estimateExtractions && right === estimateExtractionMatches)
     ) {
-      return rows.matches.map((row) => ({ ...row }));
+      return rows.matches.map((row) => ({
+        ...rows.extractions.find((extraction) => extraction.id === row.extractionId),
+        ...row,
+      }));
     }
 
     if (
       (left === estimatePricingRecommendationOptions && right === estimatePricingRecommendations) ||
       (left === estimatePricingRecommendations && right === estimatePricingRecommendationOptions)
     ) {
-      return rows.recommendationOptions.map((row) => ({ ...row }));
+      return rows.recommendationOptions.map((row) => ({
+        ...rows.pricing.find((pricingRow) => pricingRow.id === row.recommendationId),
+        ...row,
+      }));
     }
 
     return [];
   };
 
+  const applyPredicate = (table: unknown, resultRows: any[], predicate: unknown) => {
+    const tableName =
+      table && typeof table === "object"
+        ? String((table as Record<PropertyKey, unknown>)[Symbol.for("drizzle:Name")] ?? "")
+        : null;
+    const predicates = readPredicates(predicate);
+    if (predicates.length === 0) {
+      return [...resultRows];
+    }
+
+    return resultRows.filter((row) => rowMatchesPredicates(row, predicates, tableName));
+  };
+
   const buildQueryResult = (resultRows: any[]) => ({
     orderBy: vi.fn(async () => [...resultRows]),
     limit: vi.fn(async (count: number) => resultRows.slice(0, count)),
+    then(resolve: any, reject: any) {
+      return Promise.resolve([...resultRows]).then(resolve, reject);
+    },
   });
 
   const select = vi.fn(() => ({
     from: vi.fn((table: unknown) => ({
-      where: vi.fn(() => buildQueryResult(getRows(table))),
+      where: vi.fn((predicate: unknown) => buildQueryResult(applyPredicate(table, getRows(table), predicate))),
       orderBy: vi.fn(async () => [...getRows(table)]),
       limit: vi.fn(async (count: number) => getRows(table).slice(0, count)),
       innerJoin: vi.fn((joinedTable: unknown) => ({
-        where: vi.fn(() => buildQueryResult(getJoinedRows(table, joinedTable))),
+        where: vi.fn((predicate: unknown) =>
+          buildQueryResult(applyPredicate(joinedTable, getJoinedRows(table, joinedTable), predicate))
+        ),
         orderBy: vi.fn(async () => [...getJoinedRows(table, joinedTable)]),
         limit: vi.fn(async (count: number) => getJoinedRows(table, joinedTable).slice(0, count)),
       })),
@@ -281,16 +385,26 @@ function createIntegrationDb(seed?: Partial<StoredRows>) {
 
   const update = vi.fn((table: unknown) => ({
     set: (payload: any) => ({
-      where: vi.fn(async () => {
+      where: vi.fn(async (predicate: unknown) => {
+        const filteredRows = applyPredicate(table, getRows(table), predicate);
+        const filteredRowIds = new Set(filteredRows.map((row) => row.id));
         if (table === estimateExtractions) {
           rows.extractions = rows.extractions.map((row) => ({
-            ...row,
-            ...payload,
+            ...(filteredRowIds.has(row.id)
+              ? {
+                  ...row,
+                  ...payload,
+                }
+              : row),
           }));
         } else if (table === estimateGenerationRuns) {
           rows.generationRuns = rows.generationRuns.map((row) => ({
-            ...row,
-            ...payload,
+            ...(filteredRowIds.has(row.id)
+              ? {
+                  ...row,
+                  ...payload,
+                }
+              : row),
           }));
         }
       }),
@@ -313,6 +427,8 @@ async function persistRecommendationForRun(input: {
   tenantDb: any;
   generationRunId: string;
   extractionId: string;
+  dealId?: string;
+  documentId?: string;
   normalizedIntent: string;
   unit: string;
   quantity: number;
@@ -358,9 +474,9 @@ async function persistRecommendationForRun(input: {
     generationRunId: input.generationRunId,
     extraction: {
       id: input.extractionId,
-      dealId: "deal-1",
+      dealId: input.dealId ?? "deal-1",
       projectId: null,
-      documentId: "doc-1",
+      documentId: input.documentId ?? "doc-1",
       quantity: input.quantity,
       unit: input.unit,
       sourceType: "extracted",
@@ -425,15 +541,6 @@ describe("market-rate estimating integration", () => {
     dealMarketOverrideServiceMocks.getDealEffectiveMarketContext.mockImplementation(async () => currentMarketContext);
 
     const { tenantDb, appDb, rows } = createIntegrationDb({
-      documents: [
-        {
-          id: "doc-1",
-          dealId: "deal-1",
-          activeParseRunId: "parse-1",
-          ocrStatus: "completed",
-          createdAt: new Date("2026-04-21T09:00:00Z"),
-        },
-      ],
       extractions: [
         {
           id: "ext-1",
@@ -448,6 +555,19 @@ describe("market-rate estimating integration", () => {
           metadataJson: { sourceParseRunId: "parse-1", activeArtifact: true },
           createdAt: new Date("2026-04-21T09:01:00Z"),
         },
+        {
+          id: "ext-other",
+          dealId: "deal-2",
+          documentId: "doc-other",
+          status: "approved",
+          quantity: "99",
+          unit: "ea",
+          divisionHint: "Contamination",
+          normalizedLabel: "should never leak",
+          rawLabel: "Should never leak",
+          metadataJson: { sourceParseRunId: "parse-other", activeArtifact: true },
+          createdAt: new Date("2026-04-21T09:02:00Z"),
+        },
       ],
       generationRuns: [
         {
@@ -460,10 +580,39 @@ describe("market-rate estimating integration", () => {
           errorSummary: null,
           createdAt: new Date("2026-04-21T09:10:00Z"),
         },
+        {
+          id: "run-other",
+          dealId: "deal-2",
+          status: "completed",
+          inputSnapshotJson: {},
+          startedAt: new Date("2026-04-21T09:11:00Z"),
+          completedAt: new Date("2026-04-21T09:12:00Z"),
+          errorSummary: null,
+          createdAt: new Date("2026-04-21T09:11:00Z"),
+        },
       ],
       dealRows: [
         {
           id: "deal-1",
+        },
+        {
+          id: "deal-2",
+        },
+      ],
+      documents: [
+        {
+          id: "doc-1",
+          dealId: "deal-1",
+          activeParseRunId: "parse-1",
+          ocrStatus: "completed",
+          createdAt: new Date("2026-04-21T09:00:00Z"),
+        },
+        {
+          id: "doc-other",
+          dealId: "deal-2",
+          activeParseRunId: "parse-other",
+          ocrStatus: "completed",
+          createdAt: new Date("2026-04-21T09:00:30Z"),
         },
       ],
     });
@@ -494,6 +643,34 @@ describe("market-rate estimating integration", () => {
       }),
     });
 
+    await persistRecommendationForRun({
+      tenantDb,
+      generationRunId: "run-other",
+      extractionId: "ext-other",
+      dealId: "deal-2",
+      documentId: "doc-other",
+      normalizedIntent: "contamination:other-deal",
+      unit: "ea",
+      quantity: 99,
+      sourceRowIdentity: "contamination:other",
+      sectionName: "Contamination",
+      recommendationTotal: 999,
+      marketAdjustment: makeMarketAdjustment({
+        marketId: "market-other",
+        marketName: "Other Market",
+        marketSlug: "other-market",
+        resolutionLevel: "state",
+        resolutionSource: {
+          type: "state",
+          key: "OK",
+          marketId: "market-other",
+        },
+        baselinePrice: 999,
+        adjustedPrice: 999,
+        selectedRuleId: "rule-other",
+      }),
+    });
+
     const initialState = await buildEstimatingWorkbenchState(tenantDb, "deal-1", {
       appDb,
       officeId: "office-1",
@@ -520,6 +697,8 @@ describe("market-rate estimating integration", () => {
         resolvedMarket: expect.objectContaining({ id: "market-auto" }),
       }),
     });
+    expect(initialState.pricingRows.map((row) => row.createdByRunId)).not.toContain("run-other");
+    expect(initialState.extractionRows.map((row) => row.id)).not.toContain("ext-other");
 
     currentMarketContext = overrideContext;
     rows.jobs.unshift({
@@ -743,6 +922,141 @@ describe("market-rate estimating integration", () => {
       generationRunId: null,
       source: null,
       errorSummary: null,
+    });
+  });
+
+  it("surfaces failed reruns while keeping the last completed pricing rows visible", async () => {
+    const overrideContext = makeMarketContext({
+      marketId: "market-override",
+      marketName: "Dallas Override",
+      marketSlug: "dfw-override",
+      resolutionLevel: "override",
+      resolutionSource: {
+        type: "override",
+        key: "deal-1",
+        marketId: "market-override",
+      },
+      override: {
+        id: "override-1",
+        marketId: "market-override",
+        marketName: "Dallas Override",
+        marketSlug: "dfw-override",
+        overriddenByUserId: "user-1",
+        overrideReason: "storm area",
+        createdAt: new Date("2026-04-21T10:00:00Z"),
+        updatedAt: new Date("2026-04-21T10:00:00Z"),
+      },
+    });
+    dealMarketOverrideServiceMocks.getDealEffectiveMarketContext.mockResolvedValue(overrideContext);
+
+    const { tenantDb, appDb, rows } = createIntegrationDb({
+      documents: [
+        {
+          id: "doc-1",
+          dealId: "deal-1",
+          activeParseRunId: "parse-1",
+          ocrStatus: "completed",
+          createdAt: new Date("2026-04-21T09:00:00Z"),
+        },
+      ],
+      extractions: [
+        {
+          id: "ext-1",
+          dealId: "deal-1",
+          documentId: "doc-1",
+          status: "approved",
+          quantity: "2",
+          unit: "ea",
+          divisionHint: "Roofing",
+          normalizedLabel: "roof tearoff",
+          rawLabel: "Roof tearoff",
+          metadataJson: { sourceParseRunId: "parse-1", activeArtifact: true },
+          createdAt: new Date("2026-04-21T09:01:00Z"),
+        },
+      ],
+      generationRuns: [
+        {
+          id: "run-auto",
+          dealId: "deal-1",
+          status: "completed",
+          inputSnapshotJson: {},
+          startedAt: new Date("2026-04-21T09:10:00Z"),
+          completedAt: new Date("2026-04-21T09:15:00Z"),
+          errorSummary: null,
+          createdAt: new Date("2026-04-21T09:10:00Z"),
+        },
+        {
+          id: "run-failed",
+          dealId: "deal-1",
+          status: "failed",
+          inputSnapshotJson: { rerunRequestId: "rerun-override-failed" },
+          startedAt: new Date("2026-04-21T09:20:00Z"),
+          completedAt: new Date("2026-04-21T09:22:00Z"),
+          errorSummary: "market refresh failed",
+          createdAt: new Date("2026-04-21T09:20:00Z"),
+        },
+      ],
+      jobs: [
+        {
+          id: 81,
+          officeId: "office-1",
+          jobType: "estimate_generation",
+          status: "failed",
+          payload: {
+            dealId: "deal-1",
+            officeId: "office-1",
+            rerunRequestId: "rerun-override-failed",
+            trigger: "deal_market_override",
+            reason: "market_override_set",
+          },
+          createdAt: new Date("2026-04-21T09:20:00Z"),
+        },
+      ],
+    });
+
+    await persistRecommendationForRun({
+      tenantDb,
+      generationRunId: "run-auto",
+      extractionId: "ext-1",
+      normalizedIntent: "roofing:tearoff:auto",
+      unit: "ea",
+      quantity: 2,
+      sourceRowIdentity: "roof:auto",
+      sectionName: "Roofing",
+      recommendationTotal: 100,
+      marketAdjustment: makeMarketAdjustment({
+        marketId: "market-auto",
+        marketName: "Texas Auto",
+        marketSlug: "tx-auto",
+        resolutionLevel: "state",
+        resolutionSource: {
+          type: "state",
+          key: "TX",
+          marketId: "market-auto",
+        },
+        baselinePrice: 100,
+        adjustedPrice: 110,
+        selectedRuleId: "rule-auto",
+      }),
+    });
+
+    const failedRerunState = await buildEstimatingWorkbenchState(tenantDb, "deal-1", {
+      appDb,
+      officeId: "office-1",
+    });
+
+    expect(failedRerunState.activePricingRunId).toBe("run-auto");
+    expect(failedRerunState.pricingRows).toHaveLength(1);
+    expect(failedRerunState.pricingRows[0]).toMatchObject({
+      createdByRunId: "run-auto",
+    });
+    expect(failedRerunState.rerunStatus).toEqual({
+      status: "failed",
+      rerunRequestId: "rerun-override-failed",
+      queueJobId: 81,
+      generationRunId: "run-failed",
+      source: "generation_run",
+      errorSummary: "market refresh failed",
     });
   });
 });
