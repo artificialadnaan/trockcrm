@@ -73,6 +73,23 @@ vi.mock("../../../src/modules/estimating/deal-market-override-service.js", () =>
   clearDealMarketOverride: dealMarketOverrideServiceMocks.clearDealMarketOverride,
 }));
 
+const marketRateProviderMocks = vi.hoisted(() => ({
+  createMarketRateProvider: vi.fn(),
+}));
+
+vi.mock("../../../src/modules/estimating/market-rate-provider.js", () => marketRateProviderMocks);
+
+const marketResolutionServiceMocks = vi.hoisted(() => ({
+  resolveMarketContext: vi.fn(),
+  resolveDealMarketLocation: vi.fn((input: any) => ({
+    zip: input.dealZip ?? input.propertyZip ?? null,
+    state: input.dealState ?? input.propertyState ?? null,
+    regionId: input.dealRegionId ?? input.propertyRegionId ?? null,
+  })),
+}));
+
+vi.mock("../../../src/modules/estimating/market-resolution-service.js", () => marketResolutionServiceMocks);
+
 const manualRowServiceMocks = vi.hoisted(() => ({
   createManualEstimateRow: vi.fn(),
   updateManualEstimateRow: vi.fn(),
@@ -162,9 +179,142 @@ async function invokeRoute(
   return { req, res };
 }
 
+function createMarketOverrideTenantDb() {
+  const insertCalls: Array<{ table: any; payload: any }> = [];
+  const marketRow = {
+    id: "market-1",
+    name: "Default Market",
+    slug: "default",
+    type: "global",
+    stateCode: null,
+    regionId: null,
+    isActive: true,
+    createdAt: new Date("2026-04-21T00:00:00Z"),
+    updatedAt: new Date("2026-04-21T00:00:00Z"),
+  };
+  const dealRow = {
+    id: "deal-1",
+    dealZip: "76102",
+    dealState: "TX",
+    dealRegionId: null,
+    propertyId: null,
+  };
+  let overrideRow: any = null;
+  const tableLabel = (table: any) =>
+    table?.[Symbol.for("drizzle:Name")] ?? table?.tableName ?? table?.name ?? "";
+  const isDealsTable = (table: any) => tableLabel(table) === "deals";
+  const isOverrideTable = (table: any) =>
+    tableLabel(table) === "estimate_deal_market_overrides" ||
+    tableLabel(table).endsWith(".estimate_deal_market_overrides");
+  const isMarketsTable = (table: any) =>
+    tableLabel(table) === "estimate_markets" || tableLabel(table).endsWith(".estimate_markets");
+
+  const selectRows = (table: any) => {
+    if (isDealsTable(table)) return [dealRow];
+    if (isOverrideTable(table)) {
+      return overrideRow
+        ? [
+            {
+              id: "override-1",
+              marketId: overrideRow.marketId,
+              overriddenByUserId: overrideRow.overriddenByUserId,
+              overrideReason: overrideRow.overrideReason,
+              createdAt: overrideRow.createdAt,
+              updatedAt: overrideRow.updatedAt,
+              marketName: marketRow.name,
+              marketSlug: marketRow.slug,
+            },
+        ]
+        : [];
+    }
+    if (isMarketsTable(table)) return [marketRow];
+    return [];
+  };
+
+  const tenantDb = {
+    select: vi.fn(() => {
+      let selectedTable: any = null;
+      const chain: any = {
+        from(table: any) {
+          selectedTable = table;
+          return chain;
+        },
+        innerJoin() {
+          return chain;
+        },
+        where() {
+          return chain;
+        },
+        limit() {
+          return Promise.resolve(selectRows(selectedTable));
+        },
+        then(resolve: any, reject: any) {
+          return Promise.resolve(selectRows(selectedTable)).then(resolve, reject);
+        },
+      };
+      return chain;
+    }),
+    insert: vi.fn((table: any) => ({
+      values: vi.fn((payload: any) => {
+        insertCalls.push({ table, payload });
+        if (isOverrideTable(table)) {
+          overrideRow = payload;
+        }
+        const chain: any = {
+          onConflictDoUpdate() {
+            if (isOverrideTable(table)) {
+              overrideRow = payload;
+            }
+            return chain;
+          },
+          returning: vi.fn(async () => [payload]),
+        };
+        return chain;
+      }),
+    })),
+    delete: vi.fn((table: any) => ({
+      where: vi.fn(() => ({
+        returning: vi.fn(async () => {
+          if (!isOverrideTable(table)) return [];
+          const deleted = overrideRow ? [{ ...overrideRow }] : [];
+          overrideRow = null;
+          return deleted;
+        }),
+      })),
+    })),
+  } as any;
+
+  return { tenantDb, insertCalls, marketRow };
+}
+
 describe("estimating workflow routes", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    marketRateProviderMocks.createMarketRateProvider.mockReturnValue({});
+    marketResolutionServiceMocks.resolveMarketContext.mockResolvedValue({
+      market: {
+        id: "market-1",
+        name: "Default Market",
+        slug: "default",
+        type: "global",
+        stateCode: null,
+        regionId: null,
+        isActive: true,
+        createdAt: new Date("2026-04-21T00:00:00Z"),
+        updatedAt: new Date("2026-04-21T00:00:00Z"),
+      },
+      resolutionLevel: "global_default",
+      resolutionSource: {
+        type: "global",
+        key: "default",
+        marketId: "market-1",
+      },
+      location: {
+        zip: null,
+        state: null,
+        regionId: null,
+      },
+    });
     dealsServiceMocks.getDealById.mockResolvedValue({ id: "deal-1" });
     dealMarketOverrideServiceMocks.getDealEffectiveMarketContext.mockResolvedValue({
       effectiveMarket: {
@@ -771,6 +921,183 @@ describe("estimating workflow routes", () => {
       })
     );
     expect(res.body).toEqual(clearResult);
+  });
+
+  it("service path writes the audit event and rerun job when setting a market override", async () => {
+    await vi.resetModules();
+    vi.doUnmock("../../../src/modules/estimating/deal-market-override-service.js");
+    vi.doMock("@trock-crm/shared/schema", () => {
+      const makeTable = (name: string, columns: string[] = []) => {
+        const table: Record<string, unknown> = {
+          name,
+          tableName: name,
+          [Symbol.for("drizzle:Name")]: name,
+        };
+        for (const column of columns) {
+          table[column] = { table: name, column };
+        }
+        return table;
+      };
+
+      return {
+        deals: makeTable("deals", ["id", "propertyZip", "propertyState", "regionId", "propertyId"]),
+        estimateDealMarketOverrides: makeTable("estimate_deal_market_overrides", [
+          "id",
+          "dealId",
+          "marketId",
+          "overriddenByUserId",
+          "overrideReason",
+          "createdAt",
+          "updatedAt",
+        ]),
+        estimateMarkets: makeTable("estimate_markets", [
+          "id",
+          "name",
+          "slug",
+          "type",
+          "stateCode",
+          "regionId",
+          "isActive",
+          "createdAt",
+          "updatedAt",
+        ]),
+        estimateReviewEvents: makeTable("estimate_review_events"),
+        jobQueue: makeTable("job_queue"),
+        properties: makeTable("properties", ["id", "zip", "state"]),
+      };
+    });
+    vi.doMock("../../../src/modules/estimating/market-rate-provider.js", () => marketRateProviderMocks);
+    vi.doMock("../../../src/modules/estimating/market-resolution-service.js", () => marketResolutionServiceMocks);
+    const actualService = await import("../../../src/modules/estimating/deal-market-override-service.js");
+    const { tenantDb, insertCalls } = createMarketOverrideTenantDb();
+
+    const result = await actualService.setDealMarketOverride({
+      tenantDb,
+      dealId: "deal-1",
+      marketId: "market-override",
+      userId: "user-1",
+      officeId: "office-1",
+      reason: "storm area",
+    });
+
+    expect(result.rerunRequestId).toEqual(expect.any(String));
+    const isTable = (table: any, name: string) =>
+      table?.tableName === name || table?.name === name || table?.[Symbol.for("drizzle:Name")] === name;
+    expect(insertCalls.some((call) => isTable(call.table, "estimate_review_events"))).toBe(true);
+    expect(insertCalls.some((call) => isTable(call.table, "job_queue"))).toBe(true);
+    const reviewInsert = insertCalls.find((call) => isTable(call.table, "estimate_review_events"));
+    const jobInsert = insertCalls.find((call) => isTable(call.table, "job_queue"));
+    expect(reviewInsert?.payload).toMatchObject({
+      dealId: "deal-1",
+      subjectType: "deal_market_override",
+      subjectId: "deal-1",
+      eventType: "market_override_set",
+      userId: "user-1",
+      reason: "storm area",
+    });
+    expect(jobInsert?.payload).toMatchObject({
+      jobType: "estimate_generation",
+      officeId: "office-1",
+      payload: expect.objectContaining({
+        dealId: "deal-1",
+        officeId: "office-1",
+        rerunRequestId: result.rerunRequestId,
+        trigger: "deal_market_override",
+        reason: "market_override_set",
+      }),
+    });
+  });
+
+  it("service path writes the audit event and rerun job when clearing a market override", async () => {
+    await vi.resetModules();
+    vi.doUnmock("../../../src/modules/estimating/deal-market-override-service.js");
+    vi.doMock("@trock-crm/shared/schema", () => {
+      const makeTable = (name: string, columns: string[] = []) => {
+        const table: Record<string, unknown> = {
+          name,
+          tableName: name,
+          [Symbol.for("drizzle:Name")]: name,
+        };
+        for (const column of columns) {
+          table[column] = { table: name, column };
+        }
+        return table;
+      };
+
+      return {
+        deals: makeTable("deals", ["id", "propertyZip", "propertyState", "regionId", "propertyId"]),
+        estimateDealMarketOverrides: makeTable("estimate_deal_market_overrides", [
+          "id",
+          "dealId",
+          "marketId",
+          "overriddenByUserId",
+          "overrideReason",
+          "createdAt",
+          "updatedAt",
+        ]),
+        estimateMarkets: makeTable("estimate_markets", [
+          "id",
+          "name",
+          "slug",
+          "type",
+          "stateCode",
+          "regionId",
+          "isActive",
+          "createdAt",
+          "updatedAt",
+        ]),
+        estimateReviewEvents: makeTable("estimate_review_events"),
+        jobQueue: makeTable("job_queue"),
+        properties: makeTable("properties", ["id", "zip", "state"]),
+      };
+    });
+    vi.doMock("../../../src/modules/estimating/market-rate-provider.js", () => marketRateProviderMocks);
+    vi.doMock("../../../src/modules/estimating/market-resolution-service.js", () => marketResolutionServiceMocks);
+    const actualService = await import("../../../src/modules/estimating/deal-market-override-service.js");
+    const { tenantDb, insertCalls } = createMarketOverrideTenantDb();
+
+    await actualService.setDealMarketOverride({
+      tenantDb,
+      dealId: "deal-1",
+      marketId: "market-override",
+      userId: "user-1",
+      officeId: "office-1",
+      reason: "storm area",
+    });
+    insertCalls.length = 0;
+
+    const result = await actualService.clearDealMarketOverride({
+      tenantDb,
+      dealId: "deal-1",
+      userId: "user-1",
+      officeId: "office-1",
+      reason: "seasonal reset",
+    });
+
+    expect(result.rerunRequestId).toEqual(expect.any(String));
+    const isTable = (table: any, name: string) =>
+      table?.tableName === name || table?.name === name || table?.[Symbol.for("drizzle:Name")] === name;
+    const reviewInsert = insertCalls.find((call) => isTable(call.table, "estimate_review_events"));
+    const jobInsert = insertCalls.find((call) => isTable(call.table, "job_queue"));
+    expect(reviewInsert?.payload).toMatchObject({
+      dealId: "deal-1",
+      subjectType: "deal_market_override",
+      subjectId: "deal-1",
+      eventType: "market_override_cleared",
+      userId: "user-1",
+      reason: "seasonal reset",
+    });
+    expect(jobInsert?.payload).toMatchObject({
+      jobType: "estimate_generation",
+      officeId: "office-1",
+      payload: expect.objectContaining({
+        dealId: "deal-1",
+        officeId: "office-1",
+        rerunRequestId: result.rerunRequestId,
+        trigger: "deal_market_override",
+        reason: "market_override_cleared",
+      }),
+    });
   });
 
   it.each([

@@ -137,6 +137,7 @@ async function enqueueGenerationRerun(args: {
     runAfter: new Date(),
     payload: {
       dealId: args.dealId,
+      officeId: args.officeId,
       rerunRequestId: args.rerunRequestId,
       trigger: "deal_market_override",
       reason: args.reason,
