@@ -1,6 +1,6 @@
 import { pool } from "../db.js";
 
-const SUPPORTED_SOURCE_TYPES = ["email_message", "activity_note", "estimate_snapshot"] as const;
+const SUPPORTED_SOURCE_TYPES = ["email_message", "activity_note", "estimate_snapshot", "deal_file"] as const;
 
 type SupportedSourceType = (typeof SUPPORTED_SOURCE_TYPES)[number];
 
@@ -125,6 +125,25 @@ async function loadBackfillCandidates(
          WHERE idx.id IS NULL
            AND COALESCE(NULLIF(TRIM(a.body), ''), NULLIF(TRIM(a.subject), '')) IS NOT NULL
          ORDER BY a.occurred_at DESC NULLS LAST, a.created_at DESC
+         LIMIT $1`,
+        [batchSize]
+      )
+    ).rows;
+  }
+
+  if (sourceType === "deal_file") {
+    return (
+      await client.query(
+        `SELECT f.id
+         FROM ${schemaName}.files f
+         LEFT JOIN ${schemaName}.ai_document_index idx
+           ON idx.source_type = 'deal_file'
+          AND idx.source_id = f.id
+         WHERE idx.id IS NULL
+           AND f.is_active = TRUE
+           AND f.deal_id IS NOT NULL
+           AND f.intake_requirement_key = 'scope_docs'
+         ORDER BY f.updated_at DESC, f.created_at DESC
          LIMIT $1`,
         [batchSize]
       )

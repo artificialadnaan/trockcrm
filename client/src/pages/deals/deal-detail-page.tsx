@@ -243,9 +243,10 @@ export function DealDetailPage() {
     }
   };
 
+  const postConversionEnrichment = deal.postConversionEnrichment ?? null;
   const showPostConversionEnrichmentPanel =
-    deal.postConversionEnrichment?.applies === true &&
-    deal.postConversionEnrichment.isComplete === false &&
+    postConversionEnrichment?.applies === true &&
+    postConversionEnrichment.isComplete === false &&
     !enrichmentPanelDismissed;
 
   const handleEditNextStep = () => {
@@ -404,8 +405,8 @@ export function DealDetailPage() {
 
       {showPostConversionEnrichmentPanel ? (
         <PostConversionEnrichmentPanel
-          requiredFields={deal.postConversionEnrichment.requiredFields}
-          missingFields={deal.postConversionEnrichment.missingFields}
+          requiredFields={postConversionEnrichment?.requiredFields ?? []}
+          missingFields={postConversionEnrichment?.missingFields ?? []}
           onDismiss={() => setEnrichmentPanelDismissed(true)}
           onEditField={handleEditEnrichmentField}
         />

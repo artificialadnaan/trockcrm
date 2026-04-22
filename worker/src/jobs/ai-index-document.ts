@@ -34,7 +34,7 @@ export async function runAiIndexDocument(payload: {
     throw new Error("ai_index_document requires officeId");
   }
 
-  if (!["email_message", "activity_note", "estimate_snapshot"].includes(payload.sourceType)) {
+  if (!["email_message", "activity_note", "estimate_snapshot", "deal_file"].includes(payload.sourceType)) {
     console.log(`[Worker:ai-index-document] Skipping unsupported sourceType=${payload.sourceType}`);
     return;
   }
@@ -118,7 +118,7 @@ export async function runAiIndexDocument(payload: {
         subject: activity.subject ?? null,
         occurredAt: activity.occurred_at,
       };
-    } else {
+    } else if (payload.sourceType === "estimate_snapshot") {
       const estimateResult = await client.query(
         `SELECT
            s.id AS section_id,
@@ -160,6 +160,53 @@ export async function runAiIndexDocument(payload: {
         dealId,
         sectionCount: sections.size,
         lineItemCount: estimateResult.rows.filter((row) => row.item_id).length,
+      };
+    } else {
+      const fileResult = await client.query(
+        `SELECT
+           id,
+           deal_id,
+           category,
+           display_name,
+           original_filename,
+           description,
+           notes,
+           tags,
+           intake_requirement_key,
+           created_at
+         FROM ${schemaName}.files
+         WHERE id = $1
+           AND is_active = TRUE
+         LIMIT 1`,
+        [payload.sourceId]
+      );
+      const file = fileResult.rows[0];
+      if (!file) {
+        throw new Error(`File ${payload.sourceId} not found in ${schemaName}`);
+      }
+
+      dealId = file.deal_id;
+      normalizedText = [
+        file.display_name,
+        file.original_filename && file.original_filename !== file.display_name
+          ? file.original_filename
+          : null,
+        file.description,
+        file.notes,
+        Array.isArray(file.tags) && file.tags.length > 0 ? file.tags.join(" ") : null,
+        file.intake_requirement_key === "scope_docs" ? "scope document uploaded for estimating" : null,
+      ]
+        .filter((value): value is string => Boolean(value && String(value).trim()))
+        .join("\n\n")
+        .trim();
+      metadata = {
+        ...metadata,
+        dealId,
+        category: file.category ?? null,
+        displayName: file.display_name ?? null,
+        originalFilename: file.original_filename ?? null,
+        intakeRequirementKey: file.intake_requirement_key ?? null,
+        uploadedAt: file.created_at ?? null,
       };
     }
 

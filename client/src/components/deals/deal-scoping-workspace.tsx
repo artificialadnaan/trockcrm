@@ -40,8 +40,10 @@ import {
   patchDealScopingIntake,
   type WorkflowRoute,
 } from "@/hooks/use-deals";
+import { queueAiBackfill } from "@/hooks/use-ai-ops";
 import { type FileRecord, uploadFile, useFiles } from "@/hooks/use-files";
 import { useProjectTypes } from "@/hooks/use-pipeline-config";
+import { api } from "@/lib/api";
 import {
   buildScopingSeedFromDeal,
   formatScopingAttachmentLabel,
@@ -339,6 +341,11 @@ export function DealScopingWorkspace({
     setError(null);
   };
 
+  const triggerScopeDocProcessing = async () => {
+    await queueAiBackfill("deal_file", 10);
+    await api(`/ai/deals/${deal.id}/regenerate`, { method: "POST" });
+  };
+
   const handleLinkExisting = async (fileId: string, requirementKey: string) => {
     try {
       await linkExistingScopingAttachment(deal.id, {
@@ -347,6 +354,20 @@ export function DealScopingWorkspace({
         intakeRequirementKey: requirementKey,
       });
       await Promise.all([refetchFiles(), loadIntake()]);
+      if (requirementKey === "scope_docs") {
+        try {
+          await triggerScopeDocProcessing();
+          toast.success("Linked scope document and queued AI processing.");
+        } catch (err) {
+          toast.error(
+            err instanceof Error
+              ? `Linked scope document, but failed to queue AI processing: ${err.message}`
+              : "Linked scope document, but failed to queue AI processing."
+          );
+        }
+        return;
+      }
+
       toast.success(`Linked file to ${formatScopingAttachmentLabel(requirementKey)}.`);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to link file");
@@ -374,6 +395,20 @@ export function DealScopingWorkspace({
         });
       }
       await Promise.all([refetchFiles(), loadIntake()]);
+      if (requirement.key === "scope_docs") {
+        try {
+          await triggerScopeDocProcessing();
+          toast.success("Scope docs uploaded, linked, and queued for AI processing.");
+        } catch (err) {
+          toast.error(
+            err instanceof Error
+              ? `Scope docs uploaded and linked, but failed to queue AI processing: ${err.message}`
+              : "Scope docs uploaded and linked, but failed to queue AI processing."
+          );
+        }
+        return;
+      }
+
       toast.success(`${requirement.label} uploaded and linked.`);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Upload failed");
