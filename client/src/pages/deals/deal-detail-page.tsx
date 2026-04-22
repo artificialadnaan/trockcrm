@@ -46,6 +46,7 @@ import { usePipelineStages } from "@/hooks/use-pipeline-config";
 import { useAuth } from "@/lib/auth";
 import { useTaskAssignees } from "@/hooks/use-task-assignees";
 import { formatCurrency, bestEstimate } from "@/lib/deal-utils";
+import { buildDealDetailSummary } from "@/lib/record-detail-summary";
 import { useTasks, getTaskStatusLabel } from "@/hooks/use-tasks";
 
 type Tab = "overview" | "lead" | "scoping" | "files" | "email" | "activity" | "timeline" | "history" | "team" | "tasks" | "payments" | "estimates" | "punch_list" | "closeout";
@@ -171,6 +172,10 @@ export function DealDetailPage() {
   const assignedRepName =
     availableReps.find((assignee) => assignee.id === deal.assignedRepId)?.displayName ??
     deal.assignedRepId;
+  const summary = buildDealDetailSummary(deal);
+  const contextLine = [company?.name, deal.propertyAddress, [deal.propertyCity, deal.propertyState].filter(Boolean).join(", ")]
+    .filter(Boolean)
+    .join(" • ");
   const handleTabSelect = (tab: Tab) => {
     setActiveTab(tab);
     const nextParams = new URLSearchParams(searchParams);
@@ -195,34 +200,42 @@ export function DealDetailPage() {
   };
 
   return (
-    <div className="space-y-4">
-      {/* Header */}
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="mb-1 -ml-2"
-            onClick={() => navigate("/deals")}
-          >
-            <ArrowLeft className="h-4 w-4 mr-1" />
-            Deals
-          </Button>
-          <div className="flex items-center gap-3">
-            <h2 className="text-2xl font-bold">{deal.name}</h2>
-            <span className="text-sm text-muted-foreground font-mono">
-              {deal.dealNumber}
-            </span>
+    <div className="space-y-5">
+      <section className="overflow-hidden rounded-[2rem] border border-slate-200 bg-white shadow-sm">
+        <div className="flex items-start justify-between gap-6 px-7 pb-6 pt-7">
+          <div className="space-y-4">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="-ml-2 text-slate-500 hover:text-slate-900"
+              onClick={() => navigate("/deals")}
+            >
+              <ArrowLeft className="h-4 w-4 mr-1" />
+              Deals
+            </Button>
+            <div className="space-y-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="rounded-md bg-slate-100 px-2 py-1 text-[10px] font-black tracking-[0.16em] text-slate-500 uppercase">
+                  {deal.dealNumber}
+                </span>
+                <DealStageBadge stageId={deal.stageId} />
+              </div>
+              <div className="space-y-2">
+                <h1 className="text-[2.5rem] leading-none font-black tracking-tight text-slate-950">{deal.name}</h1>
+                <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-sm font-semibold text-slate-600">
+                  <span>
+                    Value: <span className="font-black text-slate-950">{formatCurrency(bestEstimate(deal))}</span>
+                  </span>
+                  <span>
+                    Owner: <span className="font-black text-slate-950">{assignedRepName}</span>
+                  </span>
+                </div>
+              </div>
+              {contextLine ? <p className="max-w-3xl text-sm text-slate-500">{contextLine}</p> : null}
+            </div>
           </div>
-          <div className="flex items-center gap-3 mt-1">
-            <DealStageBadge stageId={deal.stageId} />
-            <span className="text-lg font-semibold">
-              {formatCurrency(bestEstimate(deal))}
-            </span>
-          </div>
-        </div>
 
-        <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center justify-end gap-2">
           {/* Stage Advancement Dropdown */}
           {!currentStage?.isTerminal && (
             <DropdownMenu>
@@ -314,7 +327,14 @@ export function DealDetailPage() {
             </DropdownMenuContent>
           </DropdownMenu>
         </div>
-      </div>
+        </div>
+        <div className="grid gap-4 border-t border-slate-200 bg-[#f7f8fb] px-7 py-5 md:grid-cols-4">
+          <SummaryMetric label="Pipeline context" value={currentStage?.name ?? "Pipeline"} />
+          <SummaryMetric label="Stage age" value={`${summary.ageDays} days`} />
+          <SummaryMetric label="Last update" value={`${summary.freshnessDays} days ago`} />
+          <SummaryMetric label="Next action" value={summary.hasNextStep ? "Queued" : "Needs capture"} />
+        </div>
+      </section>
 
       <OpportunityRoutingPanel
         deal={deal}
@@ -333,15 +353,15 @@ export function DealDetailPage() {
       )}
 
       {/* Tabs */}
-      <div className="border-b">
-        <div className="flex gap-6">
+      <div className="overflow-x-auto border-b border-slate-200">
+        <div className="flex min-w-max gap-2">
           {tabs.map((tab) => (
             <button
               key={tab.key}
-              className={`pb-2 text-sm font-medium border-b-2 transition-colors ${
+              className={`rounded-t-xl px-3 py-2 text-sm font-semibold transition-colors ${
                 activeTab === tab.key
-                  ? "border-brand-red text-foreground"
-                  : "border-transparent text-muted-foreground hover:text-foreground"
+                  ? "bg-slate-100 text-slate-950"
+                  : "text-slate-500 hover:text-slate-950"
               }`}
               onClick={() => handleTabSelect(tab.key)}
             >
@@ -532,6 +552,15 @@ function DealActivityPanel({ dealId }: { dealId: string }) {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+function SummaryMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="space-y-1">
+      <p className="text-[11px] font-black tracking-[0.18em] text-slate-500 uppercase">{label}</p>
+      <p className="text-[1.9rem] leading-none font-black tracking-tight text-slate-950">{value}</p>
     </div>
   );
 }

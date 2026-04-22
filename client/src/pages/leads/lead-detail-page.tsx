@@ -17,6 +17,7 @@ import { formatLeadPropertyLine, updateLead, useLeadDetail } from "@/hooks/use-l
 import { usePipelineStages } from "@/hooks/use-pipeline-config";
 import { useAuth } from "@/lib/auth";
 import { useTaskAssignees } from "@/hooks/use-task-assignees";
+import { buildLeadDetailSummary } from "@/lib/record-detail-summary";
 
 export function LeadDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -80,6 +81,7 @@ export function LeadDetailPage() {
   const assignedRepName =
     availableReps.find((assignee) => assignee.id === lead.assignedRepId)?.displayName ??
     lead.assignedRepId;
+  const summary = buildLeadDetailSummary(lead);
   const canConvertToOpportunity =
     currentStage?.slug === "qualified_for_opportunity" && !lead.convertedDealId && !isConvertedLead;
   const qualificationFocused = searchParams.get("focus") === "qualification";
@@ -98,40 +100,50 @@ export function LeadDetailPage() {
 
   return (
     <div className="space-y-6">
-      <Button
-        variant="ghost"
-        size="sm"
-        className="-ml-2 text-muted-foreground hover:text-foreground"
-        onClick={() => navigate("/leads")}
-      >
-        <ArrowLeft className="mr-1 h-4 w-4" />
-        Leads
-      </Button>
+      <section className="overflow-hidden rounded-[2rem] border border-slate-200 bg-white shadow-sm">
+        <div className="flex items-start justify-between gap-6 px-7 pb-6 pt-7">
+          <div className="space-y-4">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="-ml-2 text-slate-500 hover:text-slate-900"
+              onClick={() => navigate("/leads")}
+            >
+              <ArrowLeft className="mr-1 h-4 w-4" />
+              Leads
+            </Button>
+            <div className="space-y-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="rounded-md bg-slate-100 px-2 py-1 text-[10px] font-black tracking-[0.16em] text-slate-500 uppercase">
+                  {lead.convertedDealNumber ?? lead.id.slice(0, 8)}
+                </span>
+                <LeadStageBadge stageId={lead.stageId} converted={isConvertedLead} />
+              </div>
+              <div className="space-y-2">
+                <h1 className="text-[2.5rem] leading-none font-black tracking-tight text-slate-950">{lead.name}</h1>
+                <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-sm font-semibold text-slate-600">
+                  <span>
+                    Owner: <span className="font-black text-slate-950">{assignedRepName}</span>
+                  </span>
+                  <span>
+                    Company: <span className="font-black text-slate-950">{leadCompanyName ?? "Unassigned"}</span>
+                  </span>
+                </div>
+              </div>
+              {propertyLine ? <p className="max-w-3xl text-sm text-slate-500">{propertyLine}</p> : null}
+            </div>
+          </div>
+        </div>
+        <div className="grid gap-4 border-t border-slate-200 bg-[#f7f8fb] px-7 py-5 md:grid-cols-4">
+          <SummaryMetric label="Pipeline context" value={currentStage?.name ?? "Lead"} />
+          <SummaryMetric label="Stage age" value={`${summary.ageDays} days`} />
+          <SummaryMetric label="Last update" value={`${summary.freshnessDays} days ago`} />
+          <SummaryMetric label="Conversion status" value={summary.isConverted ? "Converted" : "Active"} />
+        </div>
+      </section>
 
       <div className="grid gap-6 lg:grid-cols-[1.35fr_0.9fr]">
         <div className="space-y-4">
-          <div className="space-y-3">
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="text-xs font-mono uppercase tracking-[0.18em] text-muted-foreground">
-                {lead.convertedDealNumber ?? lead.id.slice(0, 8)}
-              </span>
-              <LeadStageBadge stageId={lead.stageId} converted={isConvertedLead} />
-            </div>
-            <h1 className="text-4xl font-black tracking-tight text-foreground">{lead.name}</h1>
-            <div className="flex flex-wrap items-center gap-4 text-sm text-muted-foreground">
-              <span className="flex items-center gap-1">
-                <Building2 className="h-4 w-4" />
-                {leadCompanyName ?? "Unassigned company"}
-              </span>
-              {propertyLine && (
-                <span className="flex items-center gap-1">
-                  <MapPin className="h-4 w-4" />
-                  {propertyLine}
-                </span>
-              )}
-            </div>
-          </div>
-
           <div className="grid gap-4 sm:grid-cols-3">
             <Card>
               <CardContent className="pt-4">
@@ -328,6 +340,15 @@ export function LeadDetailPage() {
           onSuccess={(dealId) => navigate(`/deals/${dealId}`)}
         />
       </>
+    </div>
+  );
+}
+
+function SummaryMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="space-y-1">
+      <p className="text-[11px] font-black tracking-[0.18em] text-slate-500 uppercase">{label}</p>
+      <p className="text-[1.9rem] leading-none font-black tracking-tight text-slate-950">{value}</p>
     </div>
   );
 }

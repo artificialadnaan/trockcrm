@@ -228,6 +228,10 @@ describe("LeadDetailPage", () => {
     const html = renderLeadDetail();
 
     expect(html).toContain("Alpha Roofing Follow-Up");
+    expect(html).toContain("Pipeline context");
+    expect(html).toContain("Stage age");
+    expect(html).toContain("Last update");
+    expect(html).toContain("Conversion status");
     expect(html).toContain("Alpha Roofing");
     expect(html).toContain("123 Main St");
     expect(html).toContain("Assigned Rep");

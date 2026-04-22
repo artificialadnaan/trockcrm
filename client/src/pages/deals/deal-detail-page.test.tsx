@@ -131,6 +131,10 @@ describe("DealDetailPage", () => {
     const html = renderDealDetail();
 
     expect(html).toContain("Hill Place Interior Upgrade");
+    expect(html).toContain("Pipeline context");
+    expect(html).toContain("Stage age");
+    expect(html).toContain("Last update");
+    expect(html).toContain("Next action");
     expect(html).toContain("Assigned Rep");
     expect(html).toContain("Tasks");
     expect(html).toContain("Payments");

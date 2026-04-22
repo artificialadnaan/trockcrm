@@ -82,10 +82,10 @@ export function LeadForm({
   };
 
   return (
-    <Card>
+    <Card className="overflow-hidden border-slate-200 shadow-sm">
       <CardHeader className="pb-3">
         <div className="flex flex-wrap items-center gap-2">
-          <CardTitle className="text-sm font-medium text-muted-foreground">Lead Summary</CardTitle>
+          <CardTitle className="text-[11px] font-black tracking-[0.16em] text-slate-500 uppercase">Lead Summary</CardTitle>
           <LeadStageBadge stageId={lead.stageId} converted={converted} />
         </div>
       </CardHeader>
@@ -109,8 +109,8 @@ export function LeadForm({
           </div>
         </div>
 
-        <div className="rounded-lg border bg-muted/30 p-3 text-sm">
-          <p className="text-muted-foreground">Property</p>
+        <div className="rounded-lg border border-slate-200 bg-[#f7f8fb] p-3 text-sm">
+          <p className="text-[11px] font-black tracking-[0.16em] text-slate-500 uppercase">Property</p>
           {lead.propertyId ? (
             <Link to={`/properties/${lead.propertyId}`} className="font-medium text-primary hover:underline">
               {propertyLabel}
