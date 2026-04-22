@@ -3,6 +3,7 @@ import { deals } from "../../../../shared/src/schema/tenant/deals.js";
 import { dealApprovals } from "../../../../shared/src/schema/tenant/deal-approvals.js";
 import { changeOrders } from "../../../../shared/src/schema/tenant/change-orders.js";
 import { dealStageHistory } from "../../../../shared/src/schema/tenant/deal-stage-history.js";
+import { dealRoutingHistory } from "../../../../shared/src/schema/tenant/deal-routing-history.js";
 
 const pipelineMocks = vi.hoisted(() => ({
   getStageById: vi.fn(),
@@ -17,12 +18,20 @@ vi.mock("../../../src/modules/deals/ownership-service.js", () => ({
 }));
 
 vi.mock("@trock-crm/shared/schema", async () => {
-  const [dealsModule, approvalsModule, changeOrdersModule, historyModule, pipelineStageModule] =
+  const [
+    dealsModule,
+    approvalsModule,
+    changeOrdersModule,
+    historyModule,
+    routingHistoryModule,
+    pipelineStageModule,
+  ] =
     await Promise.all([
       import("../../../../shared/src/schema/tenant/deals.js"),
       import("../../../../shared/src/schema/tenant/deal-approvals.js"),
       import("../../../../shared/src/schema/tenant/change-orders.js"),
       import("../../../../shared/src/schema/tenant/deal-stage-history.js"),
+      import("../../../../shared/src/schema/tenant/deal-routing-history.js"),
       import("../../../../shared/src/schema/public/pipeline-stage-config.js"),
     ]);
 
@@ -31,6 +40,7 @@ vi.mock("@trock-crm/shared/schema", async () => {
     ...approvalsModule,
     ...changeOrdersModule,
     ...historyModule,
+    ...routingHistoryModule,
     ...pipelineStageModule,
   };
 });
@@ -49,6 +59,7 @@ function createFakeTenantDb(state: {
     [dealStageHistory, state.dealStageHistory ?? []],
     [dealApprovals, state.dealApprovals ?? []],
     [changeOrders, state.changeOrders ?? []],
+    [dealRoutingHistory, []],
   ]);
 
   return {
