@@ -4,6 +4,10 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { api } from "@/lib/api";
+import {
+  EstimatingWorkflowShell,
+  type EstimatingWorkflowState,
+} from "@/components/estimating/estimating-workflow-shell";
 
 interface EstimateItem {
   id: string;
@@ -36,6 +40,36 @@ interface DealEstimatesTabProps {
 
 export function DealEstimatesTab({ dealId }: DealEstimatesTabProps) {
   const [sections, setSections] = useState<EstimateSection[]>([]);
+  const [workflow, setWorkflow] = useState<EstimatingWorkflowState>({
+    documents: [],
+    extractionRows: [],
+    matchRows: [],
+    pricingRows: [],
+    reviewEvents: [],
+    summary: {
+      documents: { total: 0, queued: 0, failed: 0 },
+      extractions: {
+        total: 0,
+        pending: 0,
+        approved: 0,
+        rejected: 0,
+        unmatched: 0,
+      },
+      matches: { total: 0, suggested: 0, selected: 0, rejected: 0 },
+      pricing: {
+        total: 0,
+        pending: 0,
+        approved: 0,
+        overridden: 0,
+        rejected: 0,
+        readyToPromote: 0,
+      },
+    },
+    promotionReadiness: {
+      canPromote: false,
+      generationRunIds: [],
+    },
+  });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
@@ -45,10 +79,12 @@ export function DealEstimatesTab({ dealId }: DealEstimatesTabProps) {
   const fetchEstimates = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await api<{ sections: EstimateSection[] }>(
-        `/deals/${dealId}/estimates`
-      );
-      setSections(data.sections);
+      const [estimateData, workflowData] = await Promise.all([
+        api<{ sections: EstimateSection[] }>(`/deals/${dealId}/estimates`),
+        api<EstimatingWorkflowState>(`/deals/${dealId}/estimating`),
+      ]);
+      setSections(estimateData.sections);
+      setWorkflow(workflowData);
       setError(null);
     } catch (err: unknown) {
       toast.error(err instanceof Error ? err.message : "Failed to load estimates");
@@ -126,6 +162,12 @@ export function DealEstimatesTab({ dealId }: DealEstimatesTabProps) {
 
   return (
     <div className="space-y-4">
+      <EstimatingWorkflowShell
+        dealId={dealId}
+        workflow={workflow}
+        onRefresh={fetchEstimates}
+        copilotEnabled
+      />
       {sections.length === 0 && !addingSection ? (
         <div className="text-center py-12 border rounded-lg bg-muted/20">
           <Calculator className="h-8 w-8 text-muted-foreground mx-auto mb-3" />

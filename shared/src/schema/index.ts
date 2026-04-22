@@ -14,6 +14,17 @@ export { procoreOauthTokens } from "./public/procore-oauth-tokens.js";
 export { procoreWebhookLog } from "./public/procore-webhook-log.js";
 export { userGraphTokens, graphTokenStatusEnum } from "./public/user-graph-tokens.js";
 export { jobQueue, jobStatusEnum } from "./public/job-queue.js";
+export {
+  costCatalogSources,
+  costCatalogSnapshotVersions,
+  costCatalogSyncRuns,
+} from "./public/cost-catalog-sources.js";
+export {
+  costCatalogCodes,
+  costCatalogItemCodes,
+  costCatalogItems,
+  costCatalogPrices,
+} from "./public/cost-catalog-items.js";
 
 // Tenant schema tables (used for Drizzle type resolution when querying via tenantDb)
 export { deals, workflowRouteEnum, proposalStatusEnum, estimatingSubstageEnum } from "./tenant/deals.js";
@@ -21,6 +32,13 @@ export { dealScopingIntake, dealScopingIntakeStatusEnum } from "./tenant/deal-sc
 export { dealStageHistory } from "./tenant/deal-stage-history.js";
 export { changeOrders, changeOrderStatusEnum } from "./tenant/change-orders.js";
 export { dealApprovals, approvalStatusEnum } from "./tenant/deal-approvals.js";
+export {
+  estimateMarkets,
+  estimateMarketZipMappings,
+  estimateMarketFallbackGeographies,
+  estimateMarketAdjustmentRules,
+  estimateDealMarketOverrides,
+} from "./tenant/estimate-markets.js";
 export { companies } from "./tenant/companies.js";
 export { properties } from "./tenant/properties.js";
 export { contacts, contactCategoryEnum } from "./tenant/contacts.js";
@@ -31,6 +49,21 @@ export { duplicateQueue, duplicateMatchTypeEnum, duplicateStatusEnum } from "./t
 export { emails, emailDirectionEnum } from "./tenant/emails.js";
 export { activities, activityTypeEnum } from "./tenant/activities.js";
 export { files, fileCategoryEnum } from "./tenant/files.js";
+export {
+  estimateSourceDocuments,
+  estimateDocumentParseRuns,
+  estimateDocumentPages,
+} from "./tenant/estimate-source-documents.js";
+export {
+  estimateExtractions,
+  estimateExtractionMatches,
+  estimateGenerationRuns,
+  estimateReviewEvents,
+} from "./tenant/estimate-extractions.js";
+export { estimatePricingRecommendations } from "./tenant/estimate-pricing-recommendations.js";
+export {
+  estimatePricingRecommendationOptions,
+} from "./tenant/estimate-pricing-recommendation-options.js";
 export { tasks, taskTypeEnum, taskPriorityEnum, taskStatusEnum } from "./tenant/tasks.js";
 export { taskResolutionState, taskResolutionStatusEnum } from "./tenant/task-resolution-state.js";
 export { notifications, notificationTypeEnum } from "./tenant/notifications.js";

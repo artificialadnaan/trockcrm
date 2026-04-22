@@ -3,6 +3,7 @@
 // Also exports runProcoreSync() for 15-minute periodic poll.
 
 import { pool } from "../db.js";
+import { runScheduledCatalogSync as runServerScheduledCatalogSync } from "../../../server/src/modules/procore/sync-service.js";
 
 const PROCORE_BASE_URL = "https://api.procore.com";
 
@@ -819,4 +820,21 @@ export async function runProcoreSync(): Promise<void> {
   }
 
   console.log("[Worker:procore-sync] Poll complete");
+}
+
+export async function runScheduledCatalogSync(): Promise<void> {
+  console.log("[Worker:catalog-sync] Starting scheduled Procore catalog refresh...");
+
+  if (!process.env.PROCORE_COMPANY_ID && !isDevMode()) {
+    console.error("[Worker:catalog-sync] PROCORE_COMPANY_ID not set — skipping");
+    return;
+  }
+
+  if (isDevMode()) {
+    console.log("[Worker:catalog-sync] Dev mode — skipping actual Procore catalog refresh");
+    return;
+  }
+
+  await runServerScheduledCatalogSync();
+  console.log("[Worker:catalog-sync] Scheduled Procore catalog refresh completed");
 }

@@ -17,6 +17,8 @@ import { runAiGenerateDealCopilot } from "./ai-generate-deal-copilot.js";
 import { runAiDisconnectDigest } from "./ai-disconnect-digest.js";
 import { runAiDisconnectEscalationScan } from "./ai-disconnect-escalation.js";
 import { runAiDisconnectAdminTaskGeneration } from "./ai-disconnect-admin-tasks.js";
+import { runEstimateDocumentOcr } from "./estimate-document-ocr.js";
+import { runEstimateGeneration } from "./estimate-generation.js";
 
 const SERVER_EVALUATOR_MODULE = "../../../server/src/modules/tasks/rules/evaluator.js" as string;
 const SERVER_TASK_RULES_MODULE = "../../../server/src/modules/tasks/rules/config.js" as string;
@@ -143,6 +145,20 @@ export function registerAllJobs() {
 
   registerJobHandler("ai_disconnect_admin_tasks", async () => {
     await runAiDisconnectAdminTaskGeneration();
+  });
+
+  registerJobHandler("estimate_document_ocr", async (payload, officeId) => {
+    await runEstimateDocumentOcr(
+      payload as { documentId: string; dealId?: string; parseMeasurementsEnabled?: boolean },
+      officeId
+    );
+  });
+
+  registerJobHandler("estimate_generation", async (payload, officeId) => {
+    await runEstimateGeneration(
+      payload as { documentId?: string; dealId?: string; parseRunId?: string },
+      officeId
+    );
   });
 
   // Daily task generation (triggered via job_queue or cron)
