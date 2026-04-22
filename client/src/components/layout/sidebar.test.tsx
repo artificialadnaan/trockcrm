@@ -27,4 +27,10 @@ describe("Sidebar navigation metadata", () => {
     expect(source).toContain('{ to: "/director/commissions", icon: DollarSign, label: "Team Commissions", roles: ["admin", "director"] }');
     expect(source).toContain('{ to: "/admin/commissions", icon: DollarSign, label: "Global Commissions", roles: ["admin"] }');
   });
+
+  it("does not key navigation entries by route alone when duplicate routes exist", () => {
+    expect(source).toContain('{ to: "/deals", icon: Handshake, label: "Deals", roles: ["admin", "director", "rep"] }');
+    expect(source).toContain('{ to: "/deals", icon: Kanban, label: "Pipeline", roles: ["admin", "director", "rep"] }');
+    expect(source).not.toContain("key={item.to}");
+  });
 });

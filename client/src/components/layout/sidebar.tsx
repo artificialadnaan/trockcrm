@@ -126,6 +126,10 @@ export function getVisibleDirectorItems(role: Role | undefined) {
   return filterByRole(directorItems, role);
 }
 
+function getNavItemKey(item: NavItem) {
+  return `${item.to}:${item.label}`;
+}
+
 export function getVisibleAdminGroups(role: Role | undefined) {
   return adminGroups
     .map((group) => ({
@@ -222,7 +226,7 @@ export function Sidebar() {
       <nav className="flex-1 px-2 space-y-1">
         {visibleNavItems.map((item) => (
           <NavLink
-            key={item.to}
+            key={getNavItemKey(item)}
             to={item.to}
             end={item.to === "/"}
             className={navLinkClass}
@@ -238,7 +242,7 @@ export function Sidebar() {
             <p className="px-3 text-xs text-slate-500 uppercase tracking-wider">Director</p>
             {visibleDirectorItems.map((item) => (
               <NavLink
-                key={item.to}
+                key={getNavItemKey(item)}
                 to={item.to}
                 className={navLinkClass}
               >
@@ -266,13 +270,13 @@ export function Sidebar() {
                     className={`h-4 w-4 transition-transform ${isExpanded(group) ? "rotate-0" : "-rotate-90"}`}
                   />
                 </button>
-                {isExpanded(group) ? (
-                  <div className="space-y-1">
-                    {group.items.map((item) => (
-                      <NavLink key={item.to} to={item.to} className={navLinkClass}>
-                        <item.icon className="h-4 w-4" />
-                        {item.label}
-                      </NavLink>
+                  {isExpanded(group) ? (
+                    <div className="space-y-1">
+                      {group.items.map((item) => (
+                      <NavLink key={getNavItemKey(item)} to={item.to} className={navLinkClass}>
+                          <item.icon className="h-4 w-4" />
+                          {item.label}
+                        </NavLink>
                     ))}
                   </div>
                 ) : null}
@@ -287,7 +291,7 @@ export function Sidebar() {
             <p className="px-3 text-xs text-slate-500 uppercase tracking-wider">Help</p>
             {visibleHelpItems.map((item) => (
               <NavLink
-                key={item.to}
+                key={getNavItemKey(item)}
                 to={item.to}
                 className={navLinkClass}
               >
