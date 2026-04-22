@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const dbState = vi.hoisted(() => ({
   responses: [] as any[][],
+  chain: null as any,
 }));
 
 function createChainableMock() {
@@ -19,6 +20,7 @@ function createChainableMock() {
   chain.where.mockReturnValue(chain);
   chain.orderBy.mockReturnValue(chain);
   chain.limit.mockReturnValue(chain);
+  dbState.chain = chain;
 
   return chain;
 }
@@ -53,8 +55,8 @@ describe("listLeadBoard", () => {
   it("returns lead board columns grouped by active office stage with ordered cards", async () => {
     dbState.responses = [
       [
-        { id: "stage-contacted", slug: "contacted", name: "Contacted", displayOrder: 1, isTerminal: false },
-        { id: "stage-qualified", slug: "qualified", name: "Qualified", displayOrder: 2, isTerminal: false },
+        { id: "stage-new", slug: "lead_new", name: "New", displayOrder: 1, isTerminal: false, isActivePipeline: true },
+        { id: "stage-qualified", slug: "qualified_for_opportunity", name: "Qualified", displayOrder: 2, isTerminal: false, isActivePipeline: true },
       ],
       [{ id: "deal-stage-1" }],
     ];
@@ -65,7 +67,7 @@ describe("listLeadBoard", () => {
           {
             id: "lead-1",
             name: "Acme HQ",
-            stage_id: "stage-contacted",
+            stage_id: "stage-new",
             office_id: "office-1",
             company_name: "Acme",
             property_city: "Dallas",
@@ -76,7 +78,7 @@ describe("listLeadBoard", () => {
           {
             id: "lead-2",
             name: "Beta HQ",
-            stage_id: "stage-contacted",
+            stage_id: "stage-new",
             office_id: "office-1",
             company_name: "Beta",
             property_city: "Austin",
@@ -97,15 +99,38 @@ describe("listLeadBoard", () => {
     });
 
     expect(result.columns[0]).toMatchObject({
-      stage: { slug: "contacted" },
+      stage: { slug: "lead_new" },
       count: 2,
     });
     expect(result.defaultConversionDealStageId).toBe("deal-stage-1");
   });
 
+  it("queries only active lead pipeline stages for board columns", async () => {
+    dbState.responses = [
+      [{ id: "stage-new", slug: "lead_new", name: "New", displayOrder: 1, isTerminal: false, isActivePipeline: true }],
+      [{ id: "deal-stage-1" }],
+    ];
+
+    const tenantDb = {
+      execute: vi.fn().mockResolvedValue({ rows: [] }),
+    } as any;
+
+    const { listLeadBoard } = await import("../../../src/modules/leads/service.js");
+    await listLeadBoard(tenantDb, {
+      role: "director",
+      userId: "director-1",
+      activeOfficeId: "office-1",
+      scope: "team",
+    });
+
+    const whereText = extractSqlText(dbState.chain.where.mock.calls[0][0]).toLowerCase();
+    expect(whereText).toContain("workflow_family");
+    expect(whereText).toContain("is_active_pipeline");
+  });
+
   it("limits board payload cards to the preview window while keeping the full count", async () => {
     dbState.responses = [
-      [{ id: "stage-contacted", slug: "contacted", name: "Contacted", displayOrder: 1, isTerminal: false }],
+      [{ id: "stage-new", slug: "lead_new", name: "New", displayOrder: 1, isTerminal: false, isActivePipeline: true }],
       [{ id: "deal-stage-1" }],
     ];
 
@@ -114,7 +139,7 @@ describe("listLeadBoard", () => {
         rows: Array.from({ length: 10 }).map((_, index) => ({
           id: `lead-${index + 1}`,
           name: `Lead ${index + 1}`,
-          stage_id: "stage-contacted",
+          stage_id: "stage-new",
           office_id: "office-1",
           company_name: "Acme",
           property_city: "Dallas",
@@ -140,7 +165,7 @@ describe("listLeadBoard", () => {
 
   it("scopes board queries to the active office even for admin all scope", async () => {
     dbState.responses = [
-      [{ id: "stage-contacted", slug: "contacted", name: "Contacted", displayOrder: 1, isTerminal: false }],
+      [{ id: "stage-new", slug: "lead_new", name: "New", displayOrder: 1, isTerminal: false, isActivePipeline: true }],
       [{ id: "deal-stage-1" }],
     ];
 

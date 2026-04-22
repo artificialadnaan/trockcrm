@@ -83,6 +83,13 @@ const leadPipelineCleanupMigrationPath = resolve(
 const leadPipelineCleanupMigrationSql = existsSync(leadPipelineCleanupMigrationPath)
   ? readFileSync(leadPipelineCleanupMigrationPath, "utf8")
   : "";
+const leadPipelineRemapMigrationPath = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../../migrations/0047_remap_legacy_open_lead_stages.sql"
+);
+const leadPipelineRemapMigrationSql = existsSync(leadPipelineRemapMigrationPath)
+  ? readFileSync(leadPipelineRemapMigrationPath, "utf8")
+  : "";
 
 function expectSqlToMatch(pattern: RegExp): void {
   expect(migrationSql).toMatch(pattern);
@@ -909,6 +916,19 @@ describe("Lead Conversion Shared Contract", () => {
     expect(leadPipelineCleanupMigrationSql).toContain("slug IN ('contacted'");
     expect(leadPipelineCleanupMigrationSql).toContain("is_active_pipeline = false");
     expect(leadPipelineCleanupMigrationSql).toContain("slug = 'lead_new'");
+  });
+
+  it("remaps open leads from legacy lead stages into canonical aligned stages", () => {
+    expect(existsSync(leadPipelineRemapMigrationPath)).toBe(true);
+    expect(leadPipelineRemapMigrationSql).toContain("slug = 'contacted'");
+    expect(leadPipelineRemapMigrationSql).toContain("slug = 'lead_new'");
+    expect(leadPipelineRemapMigrationSql).toContain("slug = 'qualified_lead'");
+    expect(leadPipelineRemapMigrationSql).toContain("slug = 'pre_qual_value_assigned'");
+    expect(leadPipelineRemapMigrationSql).toContain("slug = 'director_go_no_go'");
+    expect(leadPipelineRemapMigrationSql).toContain("slug = 'lead_go_no_go'");
+    expect(leadPipelineRemapMigrationSql).toContain("slug = 'ready_for_opportunity'");
+    expect(leadPipelineRemapMigrationSql).toContain("slug = 'qualified_for_opportunity'");
+    expect(leadPipelineRemapMigrationSql).toContain("status = 'open'");
   });
 
   it("persists neutral opportunity routing state on deals", () => {

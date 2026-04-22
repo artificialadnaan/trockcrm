@@ -200,7 +200,12 @@ async function listLeadStages() {
   return db
     .select()
     .from(pipelineStageConfig)
-    .where(eq(pipelineStageConfig.workflowFamily, "lead"))
+    .where(
+      and(
+        eq(pipelineStageConfig.workflowFamily, "lead"),
+        eq(pipelineStageConfig.isActivePipeline, true)
+      )
+    )
     .orderBy(asc(pipelineStageConfig.displayOrder));
 }
 
