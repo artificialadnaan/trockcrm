@@ -4,10 +4,17 @@ import {
   CRM_OWNED_LEAD_STAGE_SLUGS,
   SALES_WORKFLOW_DISQUALIFICATION_REASONS,
   SALES_WORKFLOW_PIPELINE_TYPES,
-} from "./sales-workflow.js";
+} from "@trock-crm/shared/types";
+import * as clientSalesWorkflow from "./sales-workflow.js";
 
 describe("sales workflow client contract", () => {
   it("exposes the canonical stage, pipeline, reason, and mirror dictionaries", () => {
+    expect(clientSalesWorkflow.CRM_OWNED_LEAD_STAGE_SLUGS).toEqual(CRM_OWNED_LEAD_STAGE_SLUGS);
+    expect(clientSalesWorkflow.SALES_WORKFLOW_PIPELINE_TYPES).toEqual(SALES_WORKFLOW_PIPELINE_TYPES);
+    expect(clientSalesWorkflow.SALES_WORKFLOW_DISQUALIFICATION_REASONS).toEqual(
+      SALES_WORKFLOW_DISQUALIFICATION_REASONS
+    );
+    expect(clientSalesWorkflow.BID_BOARD_MIRRORED_STAGE_SLUGS).toEqual(BID_BOARD_MIRRORED_STAGE_SLUGS);
     expect(CRM_OWNED_LEAD_STAGE_SLUGS).toEqual([
       "new_lead",
       "qualified_lead",
