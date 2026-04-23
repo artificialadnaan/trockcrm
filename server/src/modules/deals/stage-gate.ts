@@ -338,8 +338,12 @@ export async function validateStageGate(
     }
   }
 
-  // Rule 2: Close-out checklist must be complete before moving to closed_won
-  if (targetStage.slug === "closed_won" && currentStage.slug === "close_out") {
+  // Rule 2: Sent-to-production handoff requires the close-out checklist when
+  // the legacy close-out workflow is still in use for a record.
+  if (
+    ["sent_to_production", "service_sent_to_production"].includes(targetStage.slug) &&
+    ["estimate_sent_to_client", "service_estimate_sent_to_client", "close_out"].includes(currentStage.slug)
+  ) {
     const checklistItems = await tenantDb
       .select()
       .from(closeoutChecklistItems)
@@ -382,7 +386,7 @@ export async function validateStageGate(
     }
   }
 
-  if (targetStage.slug === "estimating") {
+  if (["estimate_in_progress", "service_estimating"].includes(targetStage.slug)) {
     const scopingReadiness = await evaluateDealScopingReadiness(tenantDb, dealId);
     const scopingMissingFields = Object.entries(scopingReadiness.errors.sections).flatMap(
       ([sectionName, fieldNames]) => fieldNames.map((fieldName) => `${sectionName}.${fieldName}`)

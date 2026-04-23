@@ -673,10 +673,9 @@ async function getContactAssignmentContextRaw(
   }>;
 }> {
   const estimatingStageResult = await client.query(
-    `SELECT display_order
+    `SELECT MIN(display_order) AS display_order
        FROM public.pipeline_stage_config
-      WHERE slug = 'estimating'
-      LIMIT 1`
+      WHERE slug IN ('estimate_in_progress', 'service_estimating')`
   );
   const estimatingStageDisplayOrder = estimatingStageResult.rows[0]?.display_order ?? 2;
 

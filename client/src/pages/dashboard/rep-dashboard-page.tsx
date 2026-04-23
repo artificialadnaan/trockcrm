@@ -317,7 +317,7 @@ export function RepDashboardPage() {
 
         <Card className="border-slate-200">
           <CardHeader className="pb-2">
-            <CardTitle className="text-lg text-slate-950">Bid Board Bottlenecks</CardTitle>
+            <CardTitle className="text-lg text-slate-950">Bid Board Pressure</CardTitle>
           </CardHeader>
           <CardContent className="space-y-3">
             {data.downstreamBottlenecks && data.downstreamBottlenecks.length > 0 ? (
@@ -332,7 +332,7 @@ export function RepDashboardPage() {
                     <p className="text-sm font-semibold text-slate-950">{deal.dealName}</p>
                     <p className="mt-1 text-sm text-slate-600">{deal.stageName}</p>
                     <p className="mt-1 text-xs text-slate-500">
-                      {getWorkflowRouteLabel(deal.workflowRoute)} • {deal.regionClassification} • {deal.mirroredStageStatus ?? "Mirrored"}
+                      {getWorkflowRouteLabel(deal.workflowRoute)} • {deal.regionClassification} • {deal.mirroredStageStatus ?? "Synced"}
                     </p>
                   </div>
                   <div className="text-right">
@@ -344,7 +344,7 @@ export function RepDashboardPage() {
                 </button>
               ))
             ) : (
-              <p className="text-sm text-muted-foreground">No mirrored downstream bottlenecks right now.</p>
+              <p className="text-sm text-muted-foreground">No synced Bid Board pressure right now.</p>
             )}
           </CardContent>
         </Card>

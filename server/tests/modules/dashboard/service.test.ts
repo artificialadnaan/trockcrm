@@ -227,8 +227,8 @@ describe("Dashboard Service", () => {
         ],
         [
           { slug: "dd", count: "3", total_value: "120000" },
-          { slug: "estimating", count: "2", total_value: "70000" },
-          { slug: "bid_sent", count: "1", total_value: "50000" },
+          { slug: "estimate_in_progress", count: "2", total_value: "70000" },
+          { slug: "estimate_sent_to_client", count: "1", total_value: "50000" },
         ],
       ]);
 
@@ -239,7 +239,7 @@ describe("Dashboard Service", () => {
         { key: "qualified_lead", label: "Qualified Leads", count: 2, totalValue: null, route: "/leads", bucket: "qualified_lead" },
         { key: "opportunity", label: "Opportunities", count: 3, totalValue: null, route: "/leads", bucket: "opportunity" },
         { key: "due_diligence", label: "Due Diligence", count: 3, totalValue: 120000, route: "/deals", bucket: "due_diligence" },
-        { key: "estimating", label: "Estimating", count: 3, totalValue: 120000, route: "/deals", bucket: "estimating" },
+        { key: "estimating", label: "Bid Board Pipeline", count: 3, totalValue: 120000, route: "/deals", bucket: "estimating" },
       ]);
     });
   });
@@ -299,14 +299,14 @@ describe("Dashboard Service", () => {
 
           if (
             text.includes("from deals d") &&
-            text.includes("psc.slug in ('dd', 'estimating', 'bid_sent')") &&
+            text.includes("estimate_in_progress") &&
             text.includes("group by psc.slug")
           ) {
             return Promise.resolve({
               rows: [
                 { slug: "dd", count: "2", total_value: "60000" },
-                { slug: "estimating", count: "1", total_value: "40000" },
-                { slug: "bid_sent", count: "2", total_value: "90000" },
+                { slug: "estimate_in_progress", count: "1", total_value: "40000" },
+                { slug: "estimate_sent_to_client", count: "2", total_value: "90000" },
               ],
             });
           }
@@ -331,7 +331,7 @@ describe("Dashboard Service", () => {
         { key: "qualified_lead", label: "Qualified Leads", count: 3, totalValue: null, route: "/leads", bucket: "qualified_lead" },
         { key: "opportunity", label: "Opportunities", count: 2, totalValue: null, route: "/leads", bucket: "opportunity" },
         { key: "due_diligence", label: "Due Diligence", count: 2, totalValue: 60000, route: "/deals", bucket: "due_diligence" },
-        { key: "estimating", label: "Estimating", count: 3, totalValue: 130000, route: "/deals", bucket: "estimating" },
+        { key: "estimating", label: "Bid Board Pipeline", count: 3, totalValue: 130000, route: "/deals", bucket: "estimating" },
       ]);
       expect(result.repFunnelRows.map((row) => row.repName)).toEqual(["Blair Rep", "Alex Rep"]);
     });

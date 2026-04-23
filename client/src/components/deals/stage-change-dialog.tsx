@@ -74,7 +74,7 @@ export function StageChangeDialog({
 
     try {
       // Validate lost deal fields
-      if (preflight.targetStage.slug === "closed_lost") {
+      if (["production_lost", "service_lost"].includes(preflight.targetStage.slug)) {
         if (!lostReasonId) {
           setError("Please select a reason for losing this deal.");
           setSubmitting(false);
@@ -96,9 +96,15 @@ export function StageChangeDialog({
 
       await changeDealStage(deal.id, targetStageId, {
         overrideReason: preflight.requiresOverride ? overrideReason : undefined,
-        lostReasonId: preflight.targetStage.slug === "closed_lost" ? lostReasonId : undefined,
-        lostNotes: preflight.targetStage.slug === "closed_lost" ? lostNotes : undefined,
-        lostCompetitor: preflight.targetStage.slug === "closed_lost" ? lostCompetitor || undefined : undefined,
+        lostReasonId: ["production_lost", "service_lost"].includes(preflight.targetStage.slug)
+          ? lostReasonId
+          : undefined,
+        lostNotes: ["production_lost", "service_lost"].includes(preflight.targetStage.slug)
+          ? lostNotes
+          : undefined,
+        lostCompetitor: ["production_lost", "service_lost"].includes(preflight.targetStage.slug)
+          ? lostCompetitor || undefined
+          : undefined,
       });
 
       onSuccess();
@@ -112,8 +118,12 @@ export function StageChangeDialog({
   const isBlocked = preflight != null && !preflight.allowed;
   const bidBoardOwnership = preflight?.bidBoardOwnership;
   const isBidBoardLocked = Boolean(preflight?.bidBoardLocked);
-  const isClosedLost = preflight?.targetStage.slug === "closed_lost";
-  const isClosedWon = preflight?.targetStage.slug === "closed_won";
+  const isClosedLost =
+    preflight != null &&
+    ["production_lost", "service_lost"].includes(preflight.targetStage.slug);
+  const isClosedWon =
+    preflight != null &&
+    ["sent_to_production", "service_sent_to_production"].includes(preflight.targetStage.slug);
   const currentStageMeta =
     preflight == null
       ? null

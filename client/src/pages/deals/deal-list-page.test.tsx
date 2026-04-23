@@ -3,6 +3,29 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
 import { DealListPage } from "./deal-list-page";
 
+vi.mock("@/components/ui/button", () => ({
+  Button: ({ children }: { children: React.ReactNode }) => <button>{children}</button>,
+}));
+
+vi.mock("@/lib/deal-utils", () => ({
+  formatCurrencyCompact: (value: number) => `$${value.toLocaleString()}`,
+}));
+
+vi.mock("@/lib/pipeline-board-summary", () => ({
+  buildDealBoardSummary: () => ({
+    totalValue: 320000,
+    totalCount: 2,
+    averageAgeDays: 5,
+    liveStageCount: 2,
+  }),
+}));
+
+vi.mock("@/components/pipeline/pipeline-board", () => ({
+  PipelineBoard: ({ columns }: { columns: Array<{ stage: { name: string } }> }) => (
+    <div>{columns.map((column) => column.stage.name).join(", ")}</div>
+  ),
+}));
+
 vi.mock("@/hooks/use-deals", () => ({
   useDealBoard: () => ({
     board: {

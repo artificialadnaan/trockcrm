@@ -32,12 +32,26 @@ import { getMyCleanupQueue } from "../admin/cleanup-queue-service.js";
 import { getMigrationSummary } from "../migration/service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
-const MIRRORED_DOWNSTREAM_STAGE_SLUGS = ["estimating", "bid_sent", "in_production", "close_out"] as const;
+const ESTIMATING_PROGRESS_STAGE_SLUGS = [
+  "estimate_in_progress",
+  "service_estimating",
+  "estimate_under_review",
+  "service_estimate_under_review",
+  "estimate_sent_to_client",
+  "service_estimate_sent_to_client",
+] as const;
+const WON_STAGE_SLUGS = ["sent_to_production", "service_sent_to_production"] as const;
+const LOST_STAGE_SLUGS = ["production_lost", "service_lost"] as const;
+const LEGACY_WON_STAGE_SLUGS = ["closed_won"] as const;
+const LEGACY_LOST_STAGE_SLUGS = ["closed_lost"] as const;
+const MIRRORED_DOWNSTREAM_STAGE_SLUGS = ESTIMATING_PROGRESS_STAGE_SLUGS;
 const MIRRORED_DOWNSTREAM_STAGE_LABELS: Record<(typeof MIRRORED_DOWNSTREAM_STAGE_SLUGS)[number], string> = {
-  estimating: "Estimating",
-  bid_sent: "Bid Sent",
-  in_production: "In Production",
-  close_out: "Close Out",
+  estimate_in_progress: "Estimate in Progress",
+  service_estimating: "Service - Estimating",
+  estimate_under_review: "Estimate Under Review",
+  service_estimate_under_review: "Estimate Under Review",
+  estimate_sent_to_client: "Estimate Sent to Client",
+  service_estimate_sent_to_client: "Estimate Sent to Client",
 };
 
 function resolveMirroredStageLabel(
@@ -401,9 +415,9 @@ function buildFunnelBuckets(leadRows: any[], dealRows: any[]): FunnelBucketSumma
     },
     {
       key: "estimating",
-      label: "Estimating",
-      count: (dealCounts.get("estimating") ?? 0) + (dealCounts.get("bid_sent") ?? 0),
-      totalValue: (dealValues.get("estimating") ?? 0) + (dealValues.get("bid_sent") ?? 0),
+      label: "Bid Board Pipeline",
+      count: ESTIMATING_PROGRESS_STAGE_SLUGS.reduce((sum, slug) => sum + (dealCounts.get(slug) ?? 0), 0),
+      totalValue: ESTIMATING_PROGRESS_STAGE_SLUGS.reduce((sum, slug) => sum + (dealValues.get(slug) ?? 0), 0),
       route: "/deals",
       bucket: "estimating",
     },
@@ -433,7 +447,7 @@ async function getRepFunnelBuckets(tenantDb: TenantDb, repId: string): Promise<F
       JOIN pipeline_stage_config psc ON psc.id = d.stage_id
       WHERE d.is_active = true
         AND d.assigned_rep_id = ${repId}
-        AND psc.slug IN ('dd', 'estimating', 'bid_sent')
+        AND psc.slug IN ('dd', ${sql.join(ESTIMATING_PROGRESS_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})
       GROUP BY psc.slug
     `),
   ]);
@@ -466,7 +480,7 @@ async function getDirectorFunnelSummary(
       FROM deals d
       JOIN pipeline_stage_config psc ON psc.id = d.stage_id
       WHERE d.is_active = true
-        AND psc.slug IN ('dd', 'estimating', 'bid_sent')
+        AND psc.slug IN ('dd', ${sql.join(ESTIMATING_PROGRESS_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})
       GROUP BY psc.slug
     `),
     tenantDb.execute(sql`
@@ -493,11 +507,13 @@ async function getDirectorFunnelSummary(
         SELECT
           d.assigned_rep_id AS rep_id,
           COUNT(*) FILTER (WHERE psc.slug = 'dd')::int AS due_diligence,
-          COUNT(*) FILTER (WHERE psc.slug IN ('estimating', 'bid_sent'))::int AS estimating
+          COUNT(*) FILTER (
+            WHERE psc.slug IN (${sql.join(ESTIMATING_PROGRESS_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})
+          )::int AS estimating
         FROM deals d
         JOIN pipeline_stage_config psc ON psc.id = d.stage_id
         WHERE d.is_active = true
-          AND psc.slug IN ('dd', 'estimating', 'bid_sent')
+          AND psc.slug IN ('dd', ${sql.join(ESTIMATING_PROGRESS_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})
         GROUP BY d.assigned_rep_id
       )
       SELECT
@@ -1527,8 +1543,12 @@ async function buildRepPerformanceCards(
     rep_wins AS (
       SELECT
         d.assigned_rep_id AS rep_id,
-        COUNT(*) FILTER (WHERE psc.slug = 'closed_won')::int AS wins,
-        COUNT(*) FILTER (WHERE psc.slug = 'closed_lost')::int AS losses
+        COUNT(*) FILTER (
+          WHERE psc.slug IN (${sql.join([...WON_STAGE_SLUGS, ...LEGACY_WON_STAGE_SLUGS].map((slug) => sql`${slug}`), sql`, `)})
+        )::int AS wins,
+        COUNT(*) FILTER (
+          WHERE psc.slug IN (${sql.join([...LOST_STAGE_SLUGS, ...LEGACY_LOST_STAGE_SLUGS].map((slug) => sql`${slug}`), sql`, `)})
+        )::int AS losses
       FROM deal_stage_history dsh
       JOIN deals d ON d.id = dsh.deal_id
       JOIN pipeline_stage_config psc ON psc.id = dsh.to_stage_id

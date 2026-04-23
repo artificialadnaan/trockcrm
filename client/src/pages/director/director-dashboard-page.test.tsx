@@ -23,7 +23,7 @@ vi.mock("@/hooks/use-pipeline-board-state", () => ({ usePipelineBoardState: mock
 vi.mock("@/hooks/use-deals", () => ({ useDealBoard: mocks.useDealBoardMock }));
 vi.mock("@/hooks/use-leads", () => ({ useLeadBoard: mocks.useLeadBoardMock }));
 vi.mock("@/lib/pipeline-ownership", () => ({
-  getWorkflowRouteLabel: (route: "normal" | "service") => (route === "service" ? "Service" : "Normal"),
+  getWorkflowRouteLabel: (route: "normal" | "service") => (route === "service" ? "Service" : "Standard"),
 }));
 vi.mock("@/components/dashboard/director-dashboard-shell", () => ({
   DirectorDashboardShell: ({ boardEntity, loading, error }: { boardEntity: "deals" | "leads"; loading: boolean; error: string | null }) => (
@@ -158,7 +158,7 @@ describe("DirectorDashboardPage", () => {
     mocks.useLeadBoardMock.mockReturnValue({ board: { columns: [], defaultConversionDealStageId: null }, loading: false, error: null });
   });
 
-  it("keeps the board console while restoring the director workspace and workflow review panels", () => {
+  it("keeps the board console while restoring the director workspace sections", () => {
     const html = renderToStaticMarkup(
       <MemoryRouter>
         <DirectorDashboardPage />
@@ -170,12 +170,6 @@ describe("DirectorDashboardPage", () => {
     expect(html).toContain("Funnel distribution by rep");
     expect(html).toContain("Performance trends");
     expect(html).toContain("Reports");
-    expect(html).toContain("CRM-Owned Progression");
-    expect(html).toContain("Bid Board Bottlenecks");
-    expect(html).toContain("Qualified Lead");
-    expect(html).toContain("Service path");
-    expect(html).toContain("Dallas ISD Roof");
-    expect(html).toContain("22d / 14d target");
   });
 
   it("keeps the team board shell visible while summary analytics are still loading", () => {

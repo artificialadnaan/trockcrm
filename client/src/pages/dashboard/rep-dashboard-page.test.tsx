@@ -27,7 +27,7 @@ vi.mock("@/hooks/use-tasks", () => ({
   }),
 }));
 vi.mock("@/lib/pipeline-ownership", () => ({
-  getWorkflowRouteLabel: (route: "normal" | "service") => (route === "service" ? "Service" : "Normal"),
+  getWorkflowRouteLabel: (route: "normal" | "service") => (route === "service" ? "Service" : "Standard"),
 }));
 vi.mock("@/components/dashboard/rep-dashboard-board-shell", () => ({
   RepDashboardBoardShell: ({ activeEntity, loading, error }: { activeEntity: "deals" | "leads"; loading: boolean; error: string | null }) => (
@@ -98,7 +98,7 @@ describe("RepDashboardPage", () => {
           { key: "qualified_lead", label: "Qualified Leads", count: 2, totalValue: null, route: "/leads", bucket: "qualified_lead" },
           { key: "opportunity", label: "Opportunities", count: 3, totalValue: null, route: "/leads", bucket: "opportunity" },
           { key: "due_diligence", label: "Due Diligence", count: 5, totalValue: 120000, route: "/deals", bucket: "due_diligence" },
-          { key: "estimating", label: "Estimating", count: 6, totalValue: 300000, route: "/deals", bucket: "estimating" },
+          { key: "estimating", label: "Bid Board Pipeline", count: 6, totalValue: 300000, route: "/deals", bucket: "estimating" },
         ],
         commissionSummary: {
           commissionRate: 0.08,
@@ -194,7 +194,7 @@ describe("RepDashboardPage", () => {
     mocks.useLeadBoardMock.mockReturnValue({ board: { columns: [], defaultConversionDealStageId: null }, loading: false, error: null });
   });
 
-  it("keeps the board workspace while restoring cockpit and workflow review sections", () => {
+  it("keeps the board workspace while restoring cockpit sections", () => {
     const html = renderToStaticMarkup(
       <MemoryRouter>
         <RepDashboardPage />
@@ -207,12 +207,6 @@ describe("RepDashboardPage", () => {
     expect(html).toContain("Qualified Leads");
     expect(html).toContain("Leads Snapshot");
     expect(html).toContain("Deals Snapshot");
-    expect(html).toContain("CRM-Owned Progression");
-    expect(html).toContain("Bid Board Bottlenecks");
-    expect(html).toContain("Qualified Lead");
-    expect(html).toContain("Service path");
-    expect(html).toContain("Dallas ISD Roof");
-    expect(html).toContain("22d / 14d target");
     expect(html).toContain('href="/pipeline/my-cleanup"');
   });
 

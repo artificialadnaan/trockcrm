@@ -14,7 +14,7 @@ const stages = [
   { id: "stage-qualified", name: "Qualified Lead", slug: "qualified_lead" },
   { id: "stage-sales-validation", name: "Sales Validation Stage", slug: "sales_validation_stage" },
   { id: "stage-opportunity", name: "Opportunity", slug: "opportunity" },
-  { id: "stage-estimating", name: "Estimating", slug: "estimating" },
+  { id: "stage-estimating", name: "Estimate in Progress", slug: "estimate_in_progress" },
 ];
 
 describe("pipeline ownership helpers", () => {
@@ -61,7 +61,7 @@ describe("pipeline ownership helpers", () => {
     expect(metadata.label).toBe("Opportunity");
   });
 
-  it("treats opportunity as CRM-owned and estimating as a bid board mirror", () => {
+  it("treats opportunity as CRM-owned and estimate in progress as a bid board mirror", () => {
     const opportunity = getDealStageMetadata(
       {
         stageId: "stage-opportunity",
@@ -96,12 +96,12 @@ describe("pipeline ownership helpers", () => {
       label: "CRM editable",
       tone: "crm",
     });
-    expect(getDealColumnOwnership({ slug: "estimating" })).toEqual({
+    expect(getDealColumnOwnership({ slug: "estimate_in_progress" })).toEqual({
       label: "Bid Board mirror",
-      secondaryLabel: "Read-only in CRM",
+      secondaryLabel: "Synced from Bid Board",
       tone: "mirror",
     });
-    expect(getWorkflowRouteLabel("normal")).toBe("Normal");
+    expect(getWorkflowRouteLabel("normal")).toBe("Standard");
     expect(getWorkflowRouteLabel("service")).toBe("Service");
   });
 });

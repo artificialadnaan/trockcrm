@@ -21,11 +21,11 @@ import {
 interface LeadConversionDialogProps {
   leadId: string | null;
   defaultDealStageId: string | null;
-  defaultWorkflowRoute: "estimating" | "service";
+  defaultWorkflowRoute: "normal" | "service";
   onConfirm: (input: {
     leadId: string;
     dealStageId: string;
-    workflowRoute: "estimating" | "service";
+    workflowRoute: "normal" | "service";
   }) => Promise<unknown>;
   onOpenChange: (open: boolean) => void;
 }
@@ -38,7 +38,7 @@ export function LeadConversionDialog({
   onOpenChange,
 }: LeadConversionDialogProps) {
   const open = leadId != null;
-  const [workflowRoute, setWorkflowRoute] = useState<"estimating" | "service">(defaultWorkflowRoute);
+  const [workflowRoute, setWorkflowRoute] = useState<"normal" | "service">(defaultWorkflowRoute);
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
@@ -61,12 +61,12 @@ export function LeadConversionDialog({
           </div>
           <div className="space-y-2">
             <Label htmlFor="lead-conversion-route">Workflow Route</Label>
-            <Select value={workflowRoute} onValueChange={(value) => setWorkflowRoute(value as "estimating" | "service")}>
+            <Select value={workflowRoute} onValueChange={(value) => setWorkflowRoute(value as "normal" | "service")}>
               <SelectTrigger id="lead-conversion-route">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="estimating">Estimating</SelectItem>
+                <SelectItem value="normal">Standard</SelectItem>
                 <SelectItem value="service">Service</SelectItem>
               </SelectContent>
             </Select>

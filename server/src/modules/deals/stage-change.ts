@@ -147,7 +147,7 @@ export async function changeDealStage(
   }
 
   // Closed Lost: require lost_reason_id + lost_notes
-  if (targetStage.slug === "closed_lost") {
+  if (["production_lost", "service_lost"].includes(targetStage.slug)) {
     if (!lostReasonId) {
       throw new AppError(400, "lost_reason_id is required when closing a deal as lost");
     }
@@ -189,7 +189,7 @@ export async function changeDealStage(
     dealUpdates.readOnlySyncedAt = null;
   }
 
-  if (targetStage.slug === "estimating") {
+  if (["estimate_in_progress", "service_estimating"].includes(targetStage.slug)) {
     dealUpdates.isBidBoardOwned = true;
     dealUpdates.bidBoardStageSlug = targetStage.slug;
     dealUpdates.readOnlySyncedAt = new Date();
@@ -205,11 +205,11 @@ export async function changeDealStage(
   dealUpdates.lostAt = null;
 
   // Then set the fields specific to the target terminal stage
-  if (targetStage.slug === "closed_won") {
+  if (["sent_to_production", "service_sent_to_production"].includes(targetStage.slug)) {
     dealUpdates.actualCloseDate = new Date().toISOString().split("T")[0]; // DATE only
   }
 
-  if (targetStage.slug === "closed_lost") {
+  if (["production_lost", "service_lost"].includes(targetStage.slug)) {
     dealUpdates.lostReasonId = lostReasonId;
     dealUpdates.lostNotes = lostNotes;
     dealUpdates.lostCompetitor = lostCompetitor ?? null;
@@ -315,7 +315,7 @@ export async function changeDealStage(
     status: "pending",
   });
 
-  if (targetStage.slug === "estimating") {
+  if (["estimate_in_progress", "service_estimating"].includes(targetStage.slug)) {
     const scopingActivation = await activateDealScopingIntake(tenantDb, dealId);
     const scopingActivatedPayload = {
       dealId,
@@ -341,7 +341,7 @@ export async function changeDealStage(
   }
 
   // Closed Won
-  if (targetStage.slug === "closed_won") {
+  if (["sent_to_production", "service_sent_to_production"].includes(targetStage.slug)) {
     const wonPayload = {
       dealId,
       dealName: updatedDeal.name,
@@ -360,7 +360,7 @@ export async function changeDealStage(
   }
 
   // Closed Lost
-  if (targetStage.slug === "closed_lost") {
+  if (["production_lost", "service_lost"].includes(targetStage.slug)) {
     const lostPayload = {
       dealId,
       dealName: updatedDeal.name,

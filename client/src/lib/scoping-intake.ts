@@ -58,7 +58,7 @@ export function summarizeScopingRoute(route: WorkflowRoute | null | undefined) {
   if (!route) {
     return "Opportunity Review Pending";
   }
-  return route === "service" ? "Ready for Service" : "Ready for Estimating";
+  return route === "service" ? "Ready for Service Pipeline" : "Ready for Standard Pipeline";
 }
 
 export function getScopingCompletionCounts(

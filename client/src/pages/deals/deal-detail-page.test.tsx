@@ -159,17 +159,17 @@ function makeDealDetail(overrides: Record<string, unknown> = {}) {
     proposalNotes: null,
     estimatingSubstage: "building_estimate",
     isBidBoardOwned: true,
-    bidBoardStageSlug: "estimating",
+    bidBoardStageSlug: "estimate_in_progress",
     readOnlySyncedAt: "2026-04-21T10:00:00.000Z",
     bidBoardOwnership: {
       isOwned: true,
       sourceOfTruth: "bid_board",
-      handoffStageSlug: "estimating",
+      handoffStageSlug: "estimate_in_progress",
       downstreamStagesReadOnly: true,
       canEditInCrm: ["deal details", "files", "activity", "notes"],
       mirroredInCrm: ["stage progression", "proposal status", "estimating progress"],
-      reason: "Bid Board now owns downstream progression after the deal entered estimating.",
-      message: "Bid Board is now the source of truth once this deal entered estimating.",
+      reason: "Bid Board now owns downstream progression after the deal entered Estimate in Progress.",
+      message: "Bid Board is now the source of truth once this deal entered Estimate in Progress.",
     },
     stageHistory: [],
     approvals: [],
@@ -198,8 +198,8 @@ describe("DealDetailPage", () => {
     });
     mocks.usePipelineStagesMock.mockReturnValue({
       stages: [
-        { id: "stage-estimating", name: "Estimating", slug: "estimating", displayOrder: 2, isTerminal: false },
-        { id: "stage-close-out", name: "Closed Won", slug: "closed_won", displayOrder: 9, isTerminal: true },
+        { id: "stage-estimating", name: "Estimate in Progress", slug: "estimate_in_progress", displayOrder: 2, isTerminal: false },
+        { id: "stage-close-out", name: "Sent to Production", slug: "sent_to_production", displayOrder: 9, isTerminal: true },
       ],
     });
     mocks.useCompanyDetailMock.mockReturnValue({
@@ -246,8 +246,24 @@ describe("DealDetailPage", () => {
     const html = renderDealDetail();
 
     expect(html).toContain("Move Stage");
-    expect(html).toContain("Estimating");
-    expect(html).toContain("Estimating Substage");
+    expect(html).toContain("Estimate in Progress");
     expect(html).not.toContain("Proposal Card");
+  });
+
+  it("keeps punch list and close-out tabs reachable once a deal is sent to production", () => {
+    mocks.useDealDetailMock.mockReturnValue({
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      deal: makeDealDetail({
+        stageId: "stage-close-out",
+        bidBoardStageSlug: "sent_to_production",
+      }),
+    });
+
+    const html = renderDealDetail();
+
+    expect(html).toContain("Punch List");
+    expect(html).toContain("Close-Out");
   });
 });

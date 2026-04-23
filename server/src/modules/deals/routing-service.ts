@@ -28,9 +28,9 @@ async function resolveEntryStageForDisposition(
   disposition: Exclude<DealPipelineDisposition, "opportunity">
 ) {
   if (disposition === "deals") {
-    const estimatingStage = await getStageBySlug("estimating", "standard_deal");
-    if (estimatingStage) {
-      return estimatingStage;
+    const estimateInProgressStage = await getStageBySlug("estimate_in_progress", "standard_deal");
+    if (estimateInProgressStage) {
+      return estimateInProgressStage;
     }
 
     const [fallbackStandardStage] = await db

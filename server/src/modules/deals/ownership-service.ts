@@ -37,7 +37,10 @@ export function inferDealDepartment(input: {
   pipelineDisposition?: DealPipelineDisposition | null;
   workflowRoute?: WorkflowRoute | null;
 }): DealDepartment {
-  if (input.stageSlug && ["in_production", "close_out", "closed_won"].includes(input.stageSlug)) {
+  if (
+    input.stageSlug &&
+    ["sent_to_production", "service_sent_to_production"].includes(input.stageSlug)
+  ) {
     return "operations";
   }
 
@@ -45,7 +48,19 @@ export function inferDealDepartment(input: {
     return "client_services";
   }
 
-  if (input.stageSlug === "estimating") {
+  if (
+    input.stageSlug &&
+    [
+      "estimate_in_progress",
+      "estimate_under_review",
+      "estimate_sent_to_client",
+      "service_estimating",
+      "service_estimate_under_review",
+      "service_estimate_sent_to_client",
+    ].includes(
+      input.stageSlug
+    )
+  ) {
     return "estimating";
   }
 

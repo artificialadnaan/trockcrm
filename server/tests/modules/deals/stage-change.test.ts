@@ -17,10 +17,10 @@ vi.mock("../../../src/modules/deals/timer-service.js", () => ({
 vi.mock("../../../src/modules/pipeline/service.js", () => ({
   getStageBySlug: vi.fn(async () => ({
     id: "stage-estimating",
-    name: "Estimating",
-    slug: "estimating",
+    name: "Estimate in Progress",
+    slug: "estimate_in_progress",
     isTerminal: false,
-    displayOrder: 1,
+    displayOrder: 2,
   })),
   getStageById: vi.fn(),
 }));
@@ -174,6 +174,9 @@ function createTenantDb(overrides?: Partial<FakeDeal>) {
         },
       };
     },
+    execute() {
+      return Promise.resolve([]);
+    },
   };
 }
 
@@ -186,7 +189,7 @@ describe("changeDealStage", () => {
     vi.mocked(createStageTimers).mockResolvedValue(undefined as never);
   });
 
-  it("marks the deal as Bid Board-owned once CRM hands it off into estimating", async () => {
+  it("marks the deal as Bid Board-owned once CRM hands it off into estimate in progress", async () => {
     const tenantDb = createTenantDb();
     vi.mocked(validateStageGate).mockResolvedValue({
       allowed: true,
@@ -194,10 +197,10 @@ describe("changeDealStage", () => {
       requiresOverride: false,
       targetStage: {
         id: "stage-estimating",
-        name: "Estimating",
-        slug: "estimating",
+        name: "Estimate in Progress",
+        slug: "estimate_in_progress",
         isTerminal: false,
-        displayOrder: 1,
+        displayOrder: 2,
       },
       currentStage: {
         id: "stage-dd",
@@ -217,7 +220,7 @@ describe("changeDealStage", () => {
 
     expect(result.deal.stageId).toBe("stage-estimating");
     expect(result.deal.isBidBoardOwned).toBe(true);
-    expect(result.deal.bidBoardStageSlug).toBe("estimating");
+    expect(result.deal.bidBoardStageSlug).toBe("estimate_in_progress");
     expect(result.deal.readOnlySyncedAt).toBeInstanceOf(Date);
   });
 
@@ -225,7 +228,7 @@ describe("changeDealStage", () => {
     const tenantDb = createTenantDb({
       stageId: "stage-estimating",
       isBidBoardOwned: true,
-      bidBoardStageSlug: "estimating",
+      bidBoardStageSlug: "estimate_in_progress",
       readOnlySyncedAt: new Date("2026-04-21T12:00:00.000Z"),
     });
 
@@ -235,17 +238,17 @@ describe("changeDealStage", () => {
       requiresOverride: false,
       targetStage: {
         id: "stage-bid-sent",
-        name: "Bid Sent",
-        slug: "bid_sent",
+        name: "Estimate Under Review",
+        slug: "estimate_under_review",
         isTerminal: false,
-        displayOrder: 2,
+        displayOrder: 3,
       },
       currentStage: {
         id: "stage-estimating",
-        name: "Estimating",
-        slug: "estimating",
+        name: "Estimate in Progress",
+        slug: "estimate_in_progress",
         isTerminal: false,
-        displayOrder: 1,
+        displayOrder: 2,
       },
     } as never);
 
@@ -271,7 +274,7 @@ describe("changeDealStage", () => {
     const tenantDb = createTenantDb({
       stageId: "stage-bid-sent",
       isBidBoardOwned: true,
-      bidBoardStageSlug: "bid_sent",
+      bidBoardStageSlug: "estimate_under_review",
       readOnlySyncedAt: new Date("2026-04-21T12:00:00.000Z"),
     });
 
@@ -281,15 +284,15 @@ describe("changeDealStage", () => {
       requiresOverride: false,
       targetStage: {
         id: "stage-production",
-        name: "In Production",
-        slug: "in_production",
-        isTerminal: false,
-        displayOrder: 4,
+        name: "Sent to Production",
+        slug: "sent_to_production",
+        isTerminal: true,
+        displayOrder: 5,
       },
       currentStage: {
         id: "stage-bid-sent",
-        name: "Bid Sent",
-        slug: "bid_sent",
+        name: "Estimate Under Review",
+        slug: "estimate_under_review",
         isTerminal: false,
         displayOrder: 3,
       },
@@ -329,7 +332,7 @@ describe("changeDealStage", () => {
         id: "stage-production",
         name: "In Production",
         slug: "in_production",
-        isTerminal: false,
+        isTerminal: true,
         displayOrder: 4,
       },
       currentStage: {
@@ -363,7 +366,7 @@ describe("changeDealStage", () => {
     const tenantDb = createTenantDb({
       stageId: "stage-closed-won",
       isBidBoardOwned: true,
-      bidBoardStageSlug: "closed_won",
+      bidBoardStageSlug: "sent_to_production",
       readOnlySyncedAt: new Date("2026-04-21T12:00:00.000Z"),
       actualCloseDate: "2026-04-21",
     });
@@ -381,8 +384,8 @@ describe("changeDealStage", () => {
       },
       currentStage: {
         id: "stage-closed-won",
-        name: "Closed Won",
-        slug: "closed_won",
+        name: "Sent to Production",
+        slug: "sent_to_production",
         isTerminal: true,
         displayOrder: 10,
       },
@@ -426,7 +429,7 @@ describe("changeDealStage", () => {
     const tenantDb = createTenantDb({
       stageId: "stage-estimating",
       isBidBoardOwned: true,
-      bidBoardStageSlug: "estimating",
+      bidBoardStageSlug: "estimate_in_progress",
       readOnlySyncedAt: new Date("2026-04-21T12:00:00.000Z"),
     });
 
@@ -437,17 +440,17 @@ describe("changeDealStage", () => {
       requiresOverride: false,
       targetStage: {
         id: "stage-bid-sent",
-        name: "Bid Sent",
-        slug: "bid_sent",
+        name: "Estimate Under Review",
+        slug: "estimate_under_review",
         isTerminal: false,
-        displayOrder: 2,
+        displayOrder: 3,
       },
       currentStage: {
         id: "stage-estimating",
-        name: "Estimating",
-        slug: "estimating",
+        name: "Estimate in Progress",
+        slug: "estimate_in_progress",
         isTerminal: false,
-        displayOrder: 1,
+        displayOrder: 2,
       },
     } as never);
 
@@ -461,7 +464,7 @@ describe("changeDealStage", () => {
     ).rejects.toMatchObject<AppError>({
       statusCode: 500,
       code: "BID_BOARD_BOUNDARY_STAGE_MISSING",
-      message: "Estimating stage configuration is required to enforce the Bid Board ownership boundary.",
+      message: "Bid Board entry stage configuration is required to enforce the downstream ownership boundary.",
     });
   });
 });

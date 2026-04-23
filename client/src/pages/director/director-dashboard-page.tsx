@@ -299,9 +299,7 @@ function DirectorDashboardPageLayout({
         <section className="rounded-2xl border border-gray-200 bg-white shadow-sm">
           <div className="border-b border-gray-100 px-5 py-4">
             <h2 className="text-sm font-bold uppercase tracking-wide text-gray-900">Bid Board bottlenecks</h2>
-            <p className="mt-1 text-sm text-gray-500">
-              Mirrored downstream work that needs director visibility.
-            </p>
+            <p className="mt-1 text-sm text-gray-500">Synced Bid Board work that needs director visibility.</p>
           </div>
           <div className="space-y-3 p-4">
             {data.downstreamBottlenecks && data.downstreamBottlenecks.length > 0 ? (
@@ -311,7 +309,7 @@ function DirectorDashboardPageLayout({
                     <p className="text-sm font-semibold text-gray-900">{deal.dealName}</p>
                     <p className="mt-1 text-sm text-gray-600">{deal.stageName}</p>
                     <p className="mt-1 text-xs text-gray-500">
-                      {getWorkflowRouteLabel(deal.workflowRoute)} • {deal.regionClassification} • {deal.mirroredStageStatus ?? "Mirrored"}
+                      {getWorkflowRouteLabel(deal.workflowRoute)} • {deal.regionClassification} • {deal.mirroredStageStatus ?? "Synced"}
                     </p>
                   </div>
                   <div className="text-right">
@@ -323,7 +321,7 @@ function DirectorDashboardPageLayout({
                 </div>
               ))
             ) : (
-              <p className="text-sm text-gray-500">No mirrored downstream bottlenecks.</p>
+              <p className="text-sm text-gray-500">No synced Bid Board pressure.</p>
             )}
           </div>
         </section>

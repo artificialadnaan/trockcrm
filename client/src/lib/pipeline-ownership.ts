@@ -12,6 +12,14 @@ export const LEGACY_LEAD_BOARD_STAGE_SLUGS = [
   "lead_go_no_go",
   "qualified_for_opportunity",
 ] as const;
+const LEGACY_MIRRORED_DEAL_STAGE_SLUGS = [
+  "estimating",
+  "bid_sent",
+  "in_production",
+  "close_out",
+  "closed_won",
+  "closed_lost",
+] as const;
 
 export type LeadBoardStageSlug = Exclude<(typeof CRM_OWNED_LEAD_STAGE_SLUGS)[number], "opportunity">;
 export type LegacyLeadBoardStageSlug = (typeof LEGACY_LEAD_BOARD_STAGE_SLUGS)[number];
@@ -71,7 +79,7 @@ export function getLeadStageMetadata(
 }
 
 export function getWorkflowRouteLabel(route: "normal" | "service") {
-  return route === "service" ? "Service" : "Normal";
+  return route === "service" ? "Service" : "Standard";
 }
 
 export function getDealStageMetadata(
@@ -88,7 +96,12 @@ export function getDealStageMetadata(
   const slug = deal.bidBoardStageSlug ?? stage?.slug ?? null;
   const isMirroredStage =
     slug != null &&
-    BID_BOARD_MIRRORED_STAGE_SLUGS.includes(slug as (typeof BID_BOARD_MIRRORED_STAGE_SLUGS)[number]);
+    (BID_BOARD_MIRRORED_STAGE_SLUGS.includes(
+      slug as (typeof BID_BOARD_MIRRORED_STAGE_SLUGS)[number]
+    ) ||
+      LEGACY_MIRRORED_DEAL_STAGE_SLUGS.includes(
+        slug as (typeof LEGACY_MIRRORED_DEAL_STAGE_SLUGS)[number]
+      ));
   const isOpportunityStage = slug === "opportunity";
   const isReadOnlyInCrm = isMirroredStage || Boolean(deal.isBidBoardOwned || deal.readOnlySyncedAt);
 
@@ -115,11 +128,14 @@ export function getDealColumnOwnership(stage: { slug: string }) {
   if (
     BID_BOARD_MIRRORED_STAGE_SLUGS.includes(
       stage.slug as (typeof BID_BOARD_MIRRORED_STAGE_SLUGS)[number]
+    ) ||
+    LEGACY_MIRRORED_DEAL_STAGE_SLUGS.includes(
+      stage.slug as (typeof LEGACY_MIRRORED_DEAL_STAGE_SLUGS)[number]
     )
   ) {
     return {
       label: "Bid Board mirror",
-      secondaryLabel: "Read-only in CRM",
+      secondaryLabel: "Synced from Bid Board",
       tone: "mirror" as const,
     };
   }

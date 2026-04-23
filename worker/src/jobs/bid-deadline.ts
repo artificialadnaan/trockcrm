@@ -10,10 +10,10 @@ const SERVER_TASK_PERSISTENCE_MODULE = `${SERVER_MODULE_ROOT}/tasks/rules/persis
  * Bid deadline countdown job.
  *
  * Runs daily at 6:30 AM CT. For each active office:
- * 1. Find deals with expected_close_date set, in 'estimating' or 'bid_sent' stage
+ * 1. Find deals with expected_close_date set, in the active Bid Board estimating/review/client-sent stages
  * 2. Create countdown tasks at 14-day, 7-day, and 1-day thresholds
  * 3. Dedup: check if task with matching title already exists for this deal
- * 4. Auto-dismiss countdown tasks if deal has moved past Bid Sent stage
+ * 4. Auto-dismiss countdown tasks if deal has moved past the active estimate/proposal stages
  */
 export async function runBidDeadlineCountdown(): Promise<void> {
   console.log("[Worker:bid-deadline] Starting bid deadline countdown scan...");
@@ -48,7 +48,7 @@ export async function runBidDeadlineCountdown(): Promise<void> {
         [office.slug]
       );
 
-      // Auto-dismiss: find countdown tasks for deals no longer in estimating/bid_sent
+      // Auto-dismiss: find countdown tasks for deals no longer in the active estimate/review/client-sent stages.
       // NOTE: deals.stage_id is a UUID FK to public.pipeline_stage_config.
       //       We join to pipeline_stage_config and filter by slug.
       const dismissResult = await client.query(
@@ -60,7 +60,14 @@ export async function runBidDeadlineCountdown(): Promise<void> {
            AND t.type = 'system'
            AND t.status IN ('pending', 'in_progress')
            AND (t.title LIKE 'BID DUE%' OR t.title LIKE 'Prepare final bid%' OR t.title LIKE 'Confirm bid submission%')
-           AND psc.slug NOT IN ('estimating', 'bid_sent')`
+           AND psc.slug NOT IN (
+             'estimate_in_progress',
+             'service_estimating',
+             'estimate_under_review',
+             'service_estimate_under_review',
+             'estimate_sent_to_client',
+             'service_estimate_sent_to_client'
+           )`
       );
       totalTasksDismissed += dismissResult.rowCount ?? 0;
 
@@ -72,7 +79,14 @@ export async function runBidDeadlineCountdown(): Promise<void> {
          FROM ${schemaName}.deals d
          JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
          WHERE d.expected_close_date IS NOT NULL
-           AND psc.slug IN ('estimating', 'bid_sent')
+           AND psc.slug IN (
+             'estimate_in_progress',
+             'service_estimating',
+             'estimate_under_review',
+             'service_estimate_under_review',
+             'estimate_sent_to_client',
+             'service_estimate_sent_to_client'
+           )
            AND d.is_active = true
            AND d.assigned_rep_id IS NOT NULL
            AND d.expected_close_date > CURRENT_DATE`

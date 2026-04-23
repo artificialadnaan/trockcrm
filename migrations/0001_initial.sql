@@ -1011,12 +1011,12 @@ RESET search_path;
 -- Pipeline stages
 INSERT INTO pipeline_stage_config (name, slug, display_order, is_active_pipeline, is_terminal, stale_threshold_days, color) VALUES
   ('Due Diligence', 'dd', 1, FALSE, FALSE, 90, '#6B7280'),
-  ('Estimating', 'estimating', 2, TRUE, FALSE, 60, '#F59E0B'),
-  ('Bid Sent', 'bid_sent', 3, TRUE, FALSE, 30, '#3B82F6'),
-  ('In Production', 'in_production', 4, TRUE, FALSE, NULL, '#8B5CF6'),
-  ('Close Out', 'close_out', 5, TRUE, FALSE, 30, '#06B6D4'),
-  ('Closed Won', 'closed_won', 6, TRUE, TRUE, NULL, '#22C55E'),
-  ('Closed Lost', 'closed_lost', 7, TRUE, TRUE, NULL, '#EF4444')
+  ('Opportunity', 'opportunity', 2, TRUE, FALSE, 21, '#10B981'),
+  ('Estimate in Progress', 'estimate_in_progress', 3, TRUE, FALSE, 14, '#93C5FD'),
+  ('Estimate Under Review', 'estimate_under_review', 4, TRUE, FALSE, 7, '#4CAF50'),
+  ('Estimate Sent to Client', 'estimate_sent_to_client', 5, TRUE, FALSE, 5, '#F97316'),
+  ('Sent to Production', 'sent_to_production', 6, TRUE, TRUE, NULL, '#CCFBF1'),
+  ('Production Lost', 'production_lost', 7, TRUE, TRUE, NULL, '#DC2626')
 ON CONFLICT (slug) DO NOTHING;
 
 -- Project types (top-level)

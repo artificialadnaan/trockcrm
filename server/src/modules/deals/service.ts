@@ -161,7 +161,10 @@ export interface UpdateDealInput {
   estimatingSubstage?: string | null;
 }
 
-export const BID_BOARD_BOUNDARY_STAGE_SLUG = "estimating";
+export const BID_BOARD_BOUNDARY_STAGE_SLUGS = {
+  normal: "estimate_in_progress",
+  service: "service_estimating",
+} as const;
 export const VALID_PROPOSAL_STATUSES = [
   "not_started",
   "drafting",
@@ -197,17 +200,23 @@ export const BID_BOARD_MIRRORED_FIELDS = [
 export const BID_BOARD_STAGE_READ_ONLY_MESSAGE =
   "Deal stage progression is read-only in CRM after estimating handoff. Bid Board is now the source of truth for downstream stages.";
 export const BID_BOARD_BOUNDARY_STAGE_MISSING_MESSAGE =
-  "Estimating stage configuration is required to enforce the Bid Board ownership boundary.";
+  "Bid Board entry stage configuration is required to enforce the downstream ownership boundary.";
 
 export interface DealBidBoardOwnershipState {
   isOwned: boolean;
   sourceOfTruth: "crm" | "bid_board";
-  handoffStageSlug: typeof BID_BOARD_BOUNDARY_STAGE_SLUG;
+  handoffStageSlug: string;
   downstreamStagesReadOnly: boolean;
   canEditInCrm: readonly string[];
   mirroredInCrm: readonly string[];
   reason: string;
   message: string;
+}
+
+export function getBidBoardBoundaryStageSlug(workflowRoute: WorkflowRoute) {
+  return workflowRoute === "service"
+    ? BID_BOARD_BOUNDARY_STAGE_SLUGS.service
+    : BID_BOARD_BOUNDARY_STAGE_SLUGS.normal;
 }
 
 /**
@@ -265,14 +274,15 @@ export function workflowFamilyForRoute(workflowRoute: WorkflowRoute) {
 }
 
 export function buildBidBoardOwnershipState(
-  deal: Pick<typeof deals.$inferSelect, "isBidBoardOwned">
+  deal: Pick<typeof deals.$inferSelect, "isBidBoardOwned" | "workflowRoute">
 ): DealBidBoardOwnershipState {
   const isOwned = deal.isBidBoardOwned;
+  const handoffStageSlug = getBidBoardBoundaryStageSlug(deal.workflowRoute);
 
   return {
     isOwned,
     sourceOfTruth: isOwned ? "bid_board" : "crm",
-    handoffStageSlug: BID_BOARD_BOUNDARY_STAGE_SLUG,
+    handoffStageSlug,
     downstreamStagesReadOnly: isOwned,
     canEditInCrm: BID_BOARD_CRM_EDITABLE_FIELDS,
     mirroredInCrm: BID_BOARD_MIRRORED_FIELDS,
@@ -286,7 +296,7 @@ export function buildBidBoardOwnershipState(
 }
 
 export async function getEstimatingBoundaryStage(workflowRoute: WorkflowRoute) {
-  return getStageBySlug(BID_BOARD_BOUNDARY_STAGE_SLUG, workflowFamilyForRoute(workflowRoute));
+  return getStageBySlug(getBidBoardBoundaryStageSlug(workflowRoute), workflowFamilyForRoute(workflowRoute));
 }
 
 export async function getRequiredEstimatingBoundaryStage(workflowRoute: WorkflowRoute) {
@@ -306,11 +316,8 @@ export function isBidBoardOwnedDownstreamStage(
   targetStage: { slug: string; displayOrder: number; isTerminal: boolean },
   estimatingBoundary: { displayOrder: number } | null
 ) {
-  return (
-    Boolean(estimatingBoundary) &&
-    targetStage.slug !== BID_BOARD_BOUNDARY_STAGE_SLUG &&
-    targetStage.displayOrder > (estimatingBoundary?.displayOrder ?? Number.POSITIVE_INFINITY)
-  );
+  return Boolean(estimatingBoundary) &&
+    targetStage.displayOrder >= (estimatingBoundary?.displayOrder ?? Number.POSITIVE_INFINITY);
 }
 
 async function listDealStages() {
@@ -720,10 +727,16 @@ export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
     input.pipelineDisposition ??
     (input.workflowRoute === "service" ? "service" : "deals");
   const workflowRoute = input.workflowRoute ?? "normal";
-  const stage = await getStageById(
+  let stage = await getStageById(
     input.stageId,
     workflowFamilyForDisposition(pipelineDisposition, workflowRoute)
   );
+  if (!stage && workflowRoute === "service") {
+    const fallbackOpportunityStage = await getStageById(input.stageId, "standard_deal");
+    if (fallbackOpportunityStage?.slug === "opportunity") {
+      stage = fallbackOpportunityStage;
+    }
+  }
   if (!stage) {
     throw new AppError(400, "Invalid stage ID for workflow route");
   }

@@ -1,4 +1,4 @@
-import { eq, and, desc, sql, or } from "drizzle-orm";
+import { eq, and, desc, sql, or, inArray } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
   pipelineStageConfig,
@@ -268,11 +268,13 @@ async function getEmailCandidateDeals(
   }
 
   const [estimatingStageRow] = await tenantDb
-    .select({ displayOrder: pipelineStageConfig.displayOrder })
+    .select({
+      displayOrder: sql<number>`MIN(${pipelineStageConfig.displayOrder})`,
+    })
     .from(pipelineStageConfig)
-    .where(eq(pipelineStageConfig.slug, "estimating"))
+    .where(inArray(pipelineStageConfig.slug, ["estimate_in_progress", "service_estimating"]))
     .limit(1);
-  const estimatingStageDisplayOrder = estimatingStageRow?.displayOrder ?? 2;
+  const estimatingStageDisplayOrder = Number(estimatingStageRow?.displayOrder ?? 3);
 
   const [contactRow] = await tenantDb
     .select({

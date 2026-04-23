@@ -22,7 +22,7 @@ export function DirectorFunnelTable({ rows }: { rows: DirectorRepFunnelRow[] }) 
               Due Diligence
             </th>
             <th className="px-5 py-3 text-right text-[10px] font-bold uppercase tracking-widest text-gray-500">
-              Estimating
+              Bid Board Pipeline
             </th>
           </tr>
         </thead>

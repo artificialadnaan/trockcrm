@@ -1,9 +1,8 @@
 -- Migration 0045: Seed service pipeline stages for workflow routing
 -- The workflow alignment release introduced service routing but did not seed
 -- an active service_deal stage family. This forward migration backfills the
--- entry and working stages so under-threshold opportunity routing can land in
--- a valid pipeline immediately. Terminal closed_won/closed_lost stages remain
--- shared until the operating team finalizes dedicated service close states.
+-- mirrored service stages so under-threshold opportunity routing can land in
+-- the correct Bid Board-aligned service pipeline immediately.
 
 INSERT INTO public.pipeline_stage_config (
   name,
@@ -15,10 +14,11 @@ INSERT INTO public.pipeline_stage_config (
   color
 )
 VALUES
-  ('Service Review', 'service_review', 1, 'service_deal', true, false, '#10B981'),
-  ('Service Proposal Sent', 'service_proposal_sent', 2, 'service_deal', true, false, '#059669'),
-  ('Service Scheduled', 'service_scheduled', 3, 'service_deal', true, false, '#14B8A6'),
-  ('Service Complete', 'service_complete', 4, 'service_deal', true, false, '#0F766E')
+  ('Service - Estimating', 'service_estimating', 3, 'service_deal', true, false, '#6B7280'),
+  ('Estimate Under Review', 'service_estimate_under_review', 4, 'service_deal', true, false, '#4CAF50'),
+  ('Estimate Sent to Client', 'service_estimate_sent_to_client', 5, 'service_deal', true, false, '#F97316'),
+  ('Service - Sent to Production', 'service_sent_to_production', 6, 'service_deal', true, true, '#3B82F6'),
+  ('Service - Lost', 'service_lost', 7, 'service_deal', true, true, '#D1D5DB')
 ON CONFLICT (slug) DO UPDATE
 SET
   name = EXCLUDED.name,

@@ -30,7 +30,6 @@ import { DealPunchListTab } from "./deal-punch-list-tab";
 import { DealCloseoutTab } from "./deal-closeout-tab";
 import { DealTimersBanner } from "./deal-timers-banner";
 import { DealProposalCard } from "./deal-proposal-card";
-import { DealEstimatingSubstage } from "./deal-estimating-substage";
 import { OpportunityRoutingPanel } from "@/components/deals/opportunity-routing-panel";
 import { LeadForm } from "@/components/leads/lead-form";
 import { LeadTimelineTab } from "@/components/leads/lead-timeline-tab";
@@ -104,8 +103,8 @@ export function DealDetailPage() {
   };
 
   const currentStageSlug = currentStage?.slug ?? "";
-  const showPunchList = ["in_production", "close_out", "closed_won"].includes(currentStageSlug);
-  const showCloseout = ["close_out", "closed_won"].includes(currentStageSlug);
+  const showPunchList = ["sent_to_production", "service_sent_to_production"].includes(currentStageSlug);
+  const showCloseout = showPunchList;
 
   const tabs: { key: Tab; label: string }[] = [
     { key: "overview", label: "Overview" },
@@ -347,11 +346,6 @@ export function DealDetailPage() {
       {/* Active Timers Banner */}
       <DealTimersBanner dealId={deal.id} />
 
-      {/* Estimating Sub-Stage Indicator */}
-      {currentStageSlug === "estimating" && (
-        <DealEstimatingSubstage deal={deal} onUpdate={refetch} />
-      )}
-
       {/* Tabs */}
       <div className="overflow-x-auto border-b border-slate-200">
         <div className="flex min-w-max gap-2">
@@ -383,7 +377,13 @@ export function DealDetailPage() {
             saving={savingAssignment}
             onSave={handleAssignmentSave}
           />
-          {!deal.isBidBoardOwned && (currentStageSlug === "estimating" || currentStageSlug === "bid_sent") && (
+          {!deal.isBidBoardOwned &&
+            (currentStageSlug === "estimate_in_progress" ||
+              currentStageSlug === "service_estimating" ||
+              currentStageSlug === "estimate_under_review" ||
+              currentStageSlug === "estimate_sent_to_client" ||
+              currentStageSlug === "service_estimate_under_review" ||
+              currentStageSlug === "service_estimate_sent_to_client") && (
             <DealProposalCard deal={deal} onUpdate={refetch} />
           )}
           <DealOverviewTab deal={deal} />

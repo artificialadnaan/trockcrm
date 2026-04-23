@@ -108,7 +108,7 @@ function deriveInternalStageFamily(input: {
   const reviewSignal = input.proposalStatus ?? input.stageStatus;
 
   if (
-    input.stageSlug === "bid_sent" &&
+    input.stageSlug === "estimate_sent_to_client" &&
     (reviewSignal === "under_review" ||
       reviewSignal === "accepted" ||
       reviewSignal === "signed")
@@ -117,18 +117,21 @@ function deriveInternalStageFamily(input: {
   }
 
   switch (input.stageSlug) {
-    case "estimating":
+    case "estimate_in_progress":
+    case "service_estimating":
       return "estimating";
-    case "bid_sent":
+    case "estimate_under_review":
+    case "service_estimate_under_review":
+      return "review";
+    case "estimate_sent_to_client":
+    case "service_estimate_sent_to_client":
       return "proposal";
-    case "in_production":
+    case "sent_to_production":
+    case "service_sent_to_production":
       return "production";
-    case "close_out":
-      return "close_out";
-    case "closed_lost":
+    case "production_lost":
+    case "service_lost":
       return "terminal_loss";
-    case "closed_won":
-      return "terminal_win";
     default:
       return "downstream";
   }
@@ -136,18 +139,21 @@ function deriveInternalStageFamily(input: {
 
 function defaultStageFamilyForSlug(stageSlug: string) {
   switch (stageSlug) {
-    case "estimating":
+    case "estimate_in_progress":
+    case "service_estimating":
       return "estimating";
-    case "bid_sent":
+    case "estimate_under_review":
+    case "service_estimate_under_review":
+      return "review";
+    case "estimate_sent_to_client":
+    case "service_estimate_sent_to_client":
       return "proposal";
-    case "in_production":
+    case "sent_to_production":
+    case "service_sent_to_production":
       return "production";
-    case "close_out":
-      return "close_out";
-    case "closed_lost":
+    case "production_lost":
+    case "service_lost":
       return "terminal_loss";
-    case "closed_won":
-      return "terminal_win";
     default:
       return "downstream";
   }
@@ -227,7 +233,18 @@ export function buildBidBoardMirrorUpdate(input: {
   }
 
   updates.estimatingSubstage =
-    input.targetStage.slug === "estimating" ? estimatingSubstage : null;
+    [
+      "estimate_in_progress",
+      "service_estimating",
+      "estimate_under_review",
+      "estimate_sent_to_client",
+      "service_estimate_under_review",
+      "service_estimate_sent_to_client",
+    ].includes(
+      input.targetStage.slug
+    )
+      ? estimatingSubstage
+      : null;
   if (proposalStatus) {
     updates.proposalStatus = proposalStatus;
   }
@@ -239,11 +256,17 @@ export function buildBidBoardMirrorUpdate(input: {
   updates.lostAt = null;
   updates.bidBoardLossOutcome = null;
 
-  if (input.targetStage.slug === "closed_won") {
+  if (
+    input.targetStage.slug === "sent_to_production" ||
+    input.targetStage.slug === "service_sent_to_production"
+  ) {
     updates.actualCloseDate = now.toISOString().split("T")[0] ?? null;
   }
 
-  if (input.targetStage.slug === "closed_lost") {
+  if (
+    input.targetStage.slug === "production_lost" ||
+    input.targetStage.slug === "service_lost"
+  ) {
     updates.lostReasonId = input.payload.lostReasonId ?? null;
     updates.lostNotes = input.payload.lostNotes ?? null;
     updates.lostCompetitor = input.payload.lostCompetitor ?? null;

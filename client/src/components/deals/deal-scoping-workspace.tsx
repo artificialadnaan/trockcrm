@@ -489,7 +489,7 @@ export function DealScopingWorkspace({
           <CardHeader>
             <CardTitle>Scoping Workspace</CardTitle>
             <CardDescription>
-              Prefilled deal data is editable here and reused downstream for estimating or service handoff.
+              Prefilled deal data is editable here and reused downstream for Bid Board handoff.
             </CardDescription>
           </CardHeader>
           <CardContent className="grid gap-4 md:grid-cols-2">
@@ -499,7 +499,7 @@ export function DealScopingWorkspace({
                 id="workflowRoute"
                 className="flex h-10 items-center rounded-md border px-3 text-sm text-muted-foreground"
               >
-                {activeWorkflowRoute === "service" ? "Service" : "Normal"}
+                {activeWorkflowRoute === "service" ? "Service" : "Standard"}
               </div>
             </div>
 

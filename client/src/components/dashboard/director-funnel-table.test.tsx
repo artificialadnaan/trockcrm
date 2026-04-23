@@ -21,7 +21,7 @@ describe("DirectorFunnelTable", () => {
     expect(html).toContain("Representative");
     expect(html).toContain("Qualified Leads");
     expect(html).toContain("Due Diligence");
-    expect(html).toContain("Estimating");
+    expect(html).toContain("Bid Board Pipeline");
     expect(html).toContain("Alex Rep");
   });
 });
