@@ -48,7 +48,7 @@ describe("getUnifiedWorkflowOverview", () => {
       execute: vi.fn()
         .mockResolvedValueOnce({
           rows: [
-            { workflow_route: "estimating", validation_status: "draft", intake_count: "3" },
+            { workflow_route: "normal", validation_status: "draft", intake_count: "3" },
             { workflow_route: "service", validation_status: "ready", intake_count: "2" },
           ],
         })
@@ -62,7 +62,7 @@ describe("getUnifiedWorkflowOverview", () => {
     const result = await getUnifiedWorkflowOverview(tenantDb);
 
     expect(result.leadPipelineSummary).toEqual([
-      { workflowRoute: "estimating", validationStatus: "draft", intakeCount: 3 },
+      { workflowRoute: "normal", validationStatus: "draft", intakeCount: 3 },
       { workflowRoute: "service", validationStatus: "ready", intakeCount: 2 },
     ]);
   });
@@ -74,7 +74,7 @@ describe("getUnifiedWorkflowOverview", () => {
         .mockResolvedValueOnce({ rows: [] })
         .mockResolvedValueOnce({
           rows: [
-            { workflow_route: "estimating", deal_count: "6", total_value: "600000", stale_deal_count: "1" },
+            { workflow_route: "normal", deal_count: "6", total_value: "600000", stale_deal_count: "1" },
             { workflow_route: "service", deal_count: "4", total_value: "240000", stale_deal_count: "2" },
           ],
         })
@@ -87,7 +87,7 @@ describe("getUnifiedWorkflowOverview", () => {
     const result = await getUnifiedWorkflowOverview(tenantDb);
 
     expect(result.standardVsServiceRollups).toEqual([
-      { workflowRoute: "estimating", dealCount: 6, totalValue: 600000, staleDealCount: 1 },
+      { workflowRoute: "normal", dealCount: 6, totalValue: 600000, staleDealCount: 1 },
       { workflowRoute: "service", dealCount: 4, totalValue: 240000, staleDealCount: 2 },
     ]);
   });
@@ -219,7 +219,7 @@ describe("getUnifiedWorkflowOverview", () => {
               lead_id: "lead-1",
               lead_name: "Palm Villas",
               company_name: "Alpha Roofing",
-              workflow_route: "estimating",
+              workflow_route: "normal",
               validation_status: "ready",
               age_in_days: "21",
               stale_threshold_days: "14",
@@ -233,7 +233,7 @@ describe("getUnifiedWorkflowOverview", () => {
               deal_number: "TR-2026-0001",
               deal_name: "Roof Repair",
               stage_name: "Estimating",
-              workflow_route: "estimating",
+              workflow_route: "normal",
               rep_name: "Jordan",
               days_in_stage: "18",
               stale_threshold_days: "14",
@@ -250,7 +250,7 @@ describe("getUnifiedWorkflowOverview", () => {
         leadId: "lead-1",
         leadName: "Palm Villas",
         companyName: "Alpha Roofing",
-        workflowRoute: "estimating",
+        workflowRoute: "normal",
         validationStatus: "ready",
         ageInDays: 21,
         staleThresholdDays: 14,
@@ -262,7 +262,7 @@ describe("getUnifiedWorkflowOverview", () => {
         dealNumber: "TR-2026-0001",
         dealName: "Roof Repair",
         stageName: "Estimating",
-        workflowRoute: "estimating",
+        workflowRoute: "normal",
         repName: "Jordan",
         daysInStage: 18,
         staleThresholdDays: 14,

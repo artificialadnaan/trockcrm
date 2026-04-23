@@ -973,7 +973,7 @@ export async function getUnifiedWorkflowOverview(
         dsi.status AS validation_status,
         COUNT(*)::int AS intake_count
       FROM deal_scoping_intake dsi
-      WHERE dsi.workflow_route_snapshot IN ('estimating', 'service')
+      WHERE dsi.workflow_route_snapshot IN ('normal', 'service')
         ${leadRepFilter}
       GROUP BY dsi.workflow_route_snapshot, dsi.status
       ORDER BY dsi.workflow_route_snapshot ASC, dsi.status ASC
@@ -993,7 +993,7 @@ export async function getUnifiedWorkflowOverview(
         )::int AS stale_deal_count
       FROM deals d
       JOIN pipeline_stage_config psc ON psc.id = d.stage_id
-      WHERE d.workflow_route IN ('estimating', 'service')
+      WHERE d.workflow_route IN ('normal', 'service')
         ${dealRepFilter}
       GROUP BY d.workflow_route
       ORDER BY d.workflow_route ASC
@@ -1014,7 +1014,7 @@ export async function getUnifiedWorkflowOverview(
         END)::int AS property_count,
         COUNT(*)::int AS deal_count,
         COUNT(*) FILTER (WHERE d.is_active = true AND NOT psc.is_terminal)::int AS active_deal_count,
-        COUNT(*) FILTER (WHERE d.workflow_route = 'estimating' AND NOT psc.is_terminal)::int AS standard_deal_count,
+        COUNT(*) FILTER (WHERE d.workflow_route = 'normal' AND NOT psc.is_terminal)::int AS standard_deal_count,
         COUNT(*) FILTER (WHERE d.workflow_route = 'service' AND NOT psc.is_terminal)::int AS service_deal_count,
         COALESCE(SUM(
           COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)

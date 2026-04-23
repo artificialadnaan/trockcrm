@@ -123,13 +123,13 @@ describe("Deal Scoping Routes", () => {
 
     const { req, res } = await invokeRoute("patch", "/:id/scoping-intake", {
       params: { id: "deal-1" },
-      body: { workflowRoute: "estimating", sectionData: { scopeSummary: { summary: "Refresh" } } },
+      body: { workflowRoute: "normal", sectionData: { scopeSummary: { summary: "Refresh" } } },
     });
 
     expect(scopingService.upsertDealScopingIntake).toHaveBeenCalledWith(
       req.tenantDb,
       "deal-1",
-      { workflowRoute: "estimating", sectionData: { scopeSummary: { summary: "Refresh" } } },
+      { sectionData: { scopeSummary: { summary: "Refresh" } } },
       "user-1"
     );
     expect(res.body.readiness.status).toBe("ready");
