@@ -177,6 +177,7 @@ type LeadStageRow = {
   id: string;
   name: string;
   stage_id: string;
+  stage_slug: string | null;
   assigned_rep_id: string;
   office_id: string;
   company_name: string | null;
@@ -188,6 +189,35 @@ type LeadStageRow = {
   stage_entered_at: string;
   updated_at: string;
 };
+
+const NEW_LEAD_BOARD_STAGE_SLUGS = [
+  "contacted",
+  "lead_new",
+  "company_pre_qualified",
+  "scoping_in_progress",
+  "new_lead",
+] as const;
+
+const QUALIFIED_LEAD_BOARD_STAGE_SLUGS = [
+  "qualified_lead",
+  "pre_qual_value_assigned",
+  "director_go_no_go",
+] as const;
+
+const SALES_VALIDATION_BOARD_STAGE_SLUGS = [
+  "lead_go_no_go",
+  "qualified_for_opportunity",
+  "ready_for_opportunity",
+  "sales_validation_stage",
+] as const;
+
+const CANONICAL_LEAD_BOARD_STAGE_SLUGS = [
+  "new_lead",
+  "qualified_lead",
+  "sales_validation_stage",
+] as const;
+
+type CanonicalLeadBoardStageSlug = (typeof CANONICAL_LEAD_BOARD_STAGE_SLUGS)[number];
 
 const defaultDependencies: LeadServiceDependencies = {
   getAllStages,
@@ -281,7 +311,8 @@ async function listLeadStages() {
     .where(
       and(
         eq(pipelineStageConfig.workflowFamily, "lead"),
-        eq(pipelineStageConfig.isActivePipeline, true)
+        eq(pipelineStageConfig.isActivePipeline, true),
+        inArray(pipelineStageConfig.slug, [...CANONICAL_LEAD_BOARD_STAGE_SLUGS])
       )
     )
     .orderBy(asc(pipelineStageConfig.displayOrder));
@@ -368,11 +399,52 @@ function mapLeadStageRow(row: LeadStageRow) {
   };
 }
 
+function resolveCanonicalLeadBoardStageSlug(stageSlug: string | null | undefined): CanonicalLeadBoardStageSlug | null {
+  if (!stageSlug) {
+    return null;
+  }
+
+  if (NEW_LEAD_BOARD_STAGE_SLUGS.includes(stageSlug as (typeof NEW_LEAD_BOARD_STAGE_SLUGS)[number])) {
+    return "new_lead";
+  }
+
+  if (
+    QUALIFIED_LEAD_BOARD_STAGE_SLUGS.includes(
+      stageSlug as (typeof QUALIFIED_LEAD_BOARD_STAGE_SLUGS)[number]
+    )
+  ) {
+    return "qualified_lead";
+  }
+
+  if (
+    SALES_VALIDATION_BOARD_STAGE_SLUGS.includes(
+      stageSlug as (typeof SALES_VALIDATION_BOARD_STAGE_SLUGS)[number]
+    )
+  ) {
+    return "sales_validation_stage";
+  }
+
+  return null;
+}
+
+function listCanonicalBucketStageSlugs(canonicalStageSlug: string): readonly string[] {
+  switch (canonicalStageSlug) {
+    case "new_lead":
+      return NEW_LEAD_BOARD_STAGE_SLUGS;
+    case "qualified_lead":
+      return QUALIFIED_LEAD_BOARD_STAGE_SLUGS;
+    case "sales_validation_stage":
+      return SALES_VALIDATION_BOARD_STAGE_SLUGS;
+    default:
+      return [canonicalStageSlug];
+  }
+}
+
 function groupLeadBoardColumns(stages: Awaited<ReturnType<typeof listLeadStages>>, rows: LeadStageRow[]) {
   return stages
     .map((stage) => {
       const cards = rows
-        .filter((row) => row.stage_id === stage.id)
+        .filter((row) => resolveCanonicalLeadBoardStageSlug(row.stage_slug) === stage.slug)
         .map(mapLeadStageRow);
 
       return {
@@ -393,6 +465,7 @@ export async function listLeadBoard(tenantDb: TenantDb, input: LeadBoardInput) {
         l.id,
         l.name,
         l.stage_id,
+        psc.slug as stage_slug,
         l.assigned_rep_id,
         u.office_id,
         c.name as company_name,
@@ -405,6 +478,7 @@ export async function listLeadBoard(tenantDb: TenantDb, input: LeadBoardInput) {
         l.updated_at
       from leads l
       join users u on u.id = l.assigned_rep_id
+      join public.pipeline_stage_config psc on psc.id = l.stage_id
       left join companies c on c.id = l.company_id
       left join properties p on p.id = l.property_id
       where ${buildLeadWorkspaceScope(input)}
@@ -426,6 +500,7 @@ export async function listLeadStagePage(tenantDb: TenantDb, input: LeadStagePage
   if (!stage) {
     throw new AppError(404, "Lead stage not found");
   }
+  const bucketStageSlugs = listCanonicalBucketStageSlugs(stage.slug);
 
   const page = Math.max(1, input.page || 1);
   const pageSize = Math.max(1, Math.min(100, input.pageSize || 25));
@@ -436,15 +511,17 @@ export async function listLeadStagePage(tenantDb: TenantDb, input: LeadStagePage
       count(*)::int as total
     from leads l
     join users u on u.id = l.assigned_rep_id
+    join public.pipeline_stage_config psc on psc.id = l.stage_id
     left join companies c on c.id = l.company_id
     left join properties p on p.id = l.property_id
-    where ${scope} and l.stage_id = ${input.stageId}
+    where ${scope} and psc.slug in ${bucketStageSlugs}
   `);
   const rowResult = await tenantDb.execute(sql`
     select
       l.id,
       l.name,
       l.stage_id,
+      psc.slug as stage_slug,
       l.assigned_rep_id,
       u.office_id,
       c.name as company_name,
@@ -457,9 +534,10 @@ export async function listLeadStagePage(tenantDb: TenantDb, input: LeadStagePage
       l.updated_at
     from leads l
     join users u on u.id = l.assigned_rep_id
+    join public.pipeline_stage_config psc on psc.id = l.stage_id
     left join companies c on c.id = l.company_id
     left join properties p on p.id = l.property_id
-    where ${scope} and l.stage_id = ${input.stageId}
+    where ${scope} and psc.slug in ${bucketStageSlugs}
     order by ${normalizeLeadStageSort(input.sort)}
     limit ${pageSize}
     offset ${offset}

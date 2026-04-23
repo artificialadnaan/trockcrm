@@ -55,8 +55,9 @@ describe("listLeadBoard", () => {
   it("returns lead board columns grouped by active office stage with ordered cards", async () => {
     dbState.responses = [
       [
-        { id: "stage-new", slug: "lead_new", name: "New", displayOrder: 1, isTerminal: false, isActivePipeline: true },
-        { id: "stage-qualified", slug: "qualified_for_opportunity", name: "Qualified", displayOrder: 2, isTerminal: false, isActivePipeline: true },
+        { id: "stage-new", slug: "new_lead", name: "New Lead", displayOrder: 1, isTerminal: false, isActivePipeline: true },
+        { id: "stage-qualified", slug: "qualified_lead", name: "Qualified Lead", displayOrder: 2, isTerminal: false, isActivePipeline: true },
+        { id: "stage-validation", slug: "sales_validation_stage", name: "Sales Validation Stage", displayOrder: 3, isTerminal: false, isActivePipeline: true },
       ],
       [{ id: "deal-stage-1" }],
     ];
@@ -68,6 +69,7 @@ describe("listLeadBoard", () => {
             id: "lead-1",
             name: "Acme HQ",
             stage_id: "stage-new",
+            stage_slug: "lead_new",
             office_id: "office-1",
             company_name: "Acme",
             property_city: "Dallas",
@@ -79,6 +81,7 @@ describe("listLeadBoard", () => {
             id: "lead-2",
             name: "Beta HQ",
             stage_id: "stage-new",
+            stage_slug: "company_pre_qualified",
             office_id: "office-1",
             company_name: "Beta",
             property_city: "Austin",
@@ -99,7 +102,7 @@ describe("listLeadBoard", () => {
     });
 
     expect(result.columns[0]).toMatchObject({
-      stage: { slug: "lead_new" },
+      stage: { slug: "new_lead" },
       count: 2,
     });
     expect(result.defaultConversionDealStageId).toBe("deal-stage-1");
@@ -107,7 +110,7 @@ describe("listLeadBoard", () => {
 
   it("queries only active lead pipeline stages for board columns", async () => {
     dbState.responses = [
-      [{ id: "stage-new", slug: "lead_new", name: "New", displayOrder: 1, isTerminal: false, isActivePipeline: true }],
+      [{ id: "stage-new", slug: "new_lead", name: "New Lead", displayOrder: 1, isTerminal: false, isActivePipeline: true }],
       [{ id: "deal-stage-1" }],
     ];
 
@@ -126,11 +129,12 @@ describe("listLeadBoard", () => {
     const whereText = extractSqlText(dbState.chain.where.mock.calls[0][0]).toLowerCase();
     expect(whereText).toContain("workflow_family");
     expect(whereText).toContain("is_active_pipeline");
+    expect(dbState.chain.orderBy).toHaveBeenCalled();
   });
 
   it("limits board payload cards to the preview window while keeping the full count", async () => {
     dbState.responses = [
-      [{ id: "stage-new", slug: "lead_new", name: "New", displayOrder: 1, isTerminal: false, isActivePipeline: true }],
+      [{ id: "stage-new", slug: "new_lead", name: "New Lead", displayOrder: 1, isTerminal: false, isActivePipeline: true }],
       [{ id: "deal-stage-1" }],
     ];
 
@@ -140,6 +144,7 @@ describe("listLeadBoard", () => {
           id: `lead-${index + 1}`,
           name: `Lead ${index + 1}`,
           stage_id: "stage-new",
+          stage_slug: "lead_new",
           office_id: "office-1",
           company_name: "Acme",
           property_city: "Dallas",
@@ -165,7 +170,7 @@ describe("listLeadBoard", () => {
 
   it("scopes board queries to the active office even for admin all scope", async () => {
     dbState.responses = [
-      [{ id: "stage-new", slug: "lead_new", name: "New", displayOrder: 1, isTerminal: false, isActivePipeline: true }],
+      [{ id: "stage-new", slug: "new_lead", name: "New Lead", displayOrder: 1, isTerminal: false, isActivePipeline: true }],
       [{ id: "deal-stage-1" }],
     ];
 

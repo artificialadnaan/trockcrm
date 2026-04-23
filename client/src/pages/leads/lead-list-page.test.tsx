@@ -156,7 +156,7 @@ describe("LeadListPage", () => {
   it("renders legacy lead stages while the active pipeline config is still transitioning", () => {
     boardColumns.splice(0, boardColumns.length, ...[
       {
-        stage: { id: "stage-new", name: "New", slug: "lead_new" },
+        stage: { id: "stage-new", name: "New Lead", slug: "new_lead" },
         count: 1,
         cards: [
           {
@@ -169,7 +169,7 @@ describe("LeadListPage", () => {
         ],
       },
       {
-        stage: { id: "stage-qualified", name: "Pre-Qual Value Assigned", slug: "pre_qual_value_assigned" },
+        stage: { id: "stage-qualified", name: "Qualified Lead", slug: "qualified_lead" },
         count: 1,
         cards: [
           {
@@ -182,7 +182,7 @@ describe("LeadListPage", () => {
         ],
       },
       {
-        stage: { id: "stage-validation", name: "Qualified for Opportunity", slug: "qualified_for_opportunity" },
+        stage: { id: "stage-validation", name: "Sales Validation Stage", slug: "sales_validation_stage" },
         count: 1,
         cards: [
           {
@@ -204,7 +204,7 @@ describe("LeadListPage", () => {
       )
     );
 
-    expect(html).toContain("New, Pre-Qual Value Assigned, Qualified for Opportunity");
+    expect(html).toContain("New Lead, Qualified Lead, Sales Validation Stage");
     expect(html).toContain("Qualified pressure");
     expect(html).toContain(">2<");
     expect(html).toContain("Opportunity ready");

@@ -371,7 +371,7 @@ function EditableLeadForm({ mode, lead }: { mode: LeadEditableMode; lead?: LeadF
     setStageGateError(null);
 
     try {
-      const payload = {
+      const workflowPayload = {
         projectTypeId: formData.projectTypeId || null,
         qualificationPayload: {
           existing_customer_status: formData.qualificationPayload.existing_customer_status.trim() || null,
@@ -401,12 +401,16 @@ function EditableLeadForm({ mode, lead }: { mode: LeadEditableMode; lead?: LeadF
           stageId: formData.stageId,
           source: formData.source.trim() || null,
           description: formData.description.trim() || null,
-          ...payload,
+          ...workflowPayload,
         });
 
         navigate(`/leads/${result.lead.id}`);
       } else if (lead) {
-        const result = await updateLead(lead.id, payload);
+        const result = await updateLead(lead.id, {
+          source: formData.source.trim() || null,
+          description: formData.description.trim() || null,
+          ...workflowPayload,
+        });
         navigate(`/leads/${result.lead.id}`);
       }
     } catch (err: unknown) {
@@ -649,6 +653,15 @@ function EditableLeadForm({ mode, lead }: { mode: LeadEditableMode; lead?: LeadF
                     ])}
                   </SelectContent>
                 </Select>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="source">Source</Label>
+                <Input
+                  id="source"
+                  value={formData.source}
+                  onChange={(event) => handleFieldChange("source", event.target.value)}
+                  placeholder="Referral, inbound, repeat customer..."
+                />
               </div>
             </div>
           )}
