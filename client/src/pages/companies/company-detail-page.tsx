@@ -36,7 +36,7 @@ import { CompanyCopilotPanel } from "@/components/ai/company-copilot-panel";
 import { api } from "@/lib/api";
 import { formatPropertyLabel, useProperties } from "@/hooks/use-properties";
 import type { Activity } from "@/hooks/use-activities";
-import { PropertyCreateDialog } from "@/components/properties/property-create-dialog";
+import { CRM_OWNED_LEAD_STAGE_SLUGS } from "@trock-crm/shared/types";
 
 // --- Constants ---
 
@@ -727,9 +727,22 @@ function CompanyEmailsTab() {
 function CompanyPortfolioTab({ companyId, companyName }: { companyId: string; companyName: string }) {
   const { deals } = useCompanyDeals(companyId);
   const { leads } = useLeads({ companyId, isActive: "all" });
-  const { properties, refetch: refetchProperties } = useProperties({ companyId, limit: 500 });
+  const { properties } = useProperties({ companyId, limit: 500 });
   const { stages } = usePipelineStages();
-  const ddStageId = stages.find((stage) => stage.slug === "dd")?.id ?? "";
+  const leadDetailStageIds = useMemo(
+    () =>
+      new Set(
+        stages
+          .filter(
+            (stage) =>
+              CRM_OWNED_LEAD_STAGE_SLUGS.includes(
+                stage.slug as (typeof CRM_OWNED_LEAD_STAGE_SLUGS)[number]
+              ) && stage.slug !== "opportunity"
+          )
+          .map((stage) => stage.id)
+      ),
+    [stages]
+  );
   const [activities, setActivities] = useState<Activity[]>([]);
   const [activitiesLoading, setActivitiesLoading] = useState(true);
 
@@ -793,17 +806,9 @@ function CompanyPortfolioTab({ companyId, companyName }: { companyId: string; co
 
       <div className="grid gap-5 lg:grid-cols-[1fr_1fr]">
         <div className="space-y-4">
-          <div className="flex items-start justify-between gap-3">
-            <div>
+          <div>
             <p className="text-sm font-semibold">Related Properties</p>
-              <p className="text-sm text-muted-foreground">First-class property records attached to this company.</p>
-            </div>
-            <PropertyCreateDialog
-              initialCompanyId={companyId}
-              companyLocked
-              triggerLabel="Add Property"
-              onCreated={() => void refetchProperties()}
-            />
+                <p className="text-sm text-muted-foreground">First-class property records attached to this company.</p>
           </div>
           <div className="space-y-2">
             {properties.length === 0 ? (
@@ -886,25 +891,30 @@ function CompanyPortfolioTab({ companyId, companyName }: { companyId: string; co
               No related deals found.
             </div>
           ) : (
-            deals.map((deal) => (
-              <Link
-                key={deal.id}
-                to={deal.stageId === ddStageId ? `/leads/${deal.sourceLeadId ?? deal.id}` : `/deals/${deal.id}`}
-                className="block rounded-lg border bg-white p-3 transition-colors hover:bg-zinc-50"
-              >
-                <div className="flex items-start justify-between gap-3">
-                  <div>
-                    <p className="text-sm font-medium">{deal.name}</p>
-                    <p className="text-xs text-muted-foreground font-mono">{deal.dealNumber}</p>
+            deals.map((deal) => {
+              const opensLeadDetail =
+                Boolean(deal.sourceLeadId) && leadDetailStageIds.has(deal.stageId);
+
+              return (
+                <Link
+                  key={deal.id}
+                  to={opensLeadDetail ? `/leads/${deal.sourceLeadId ?? deal.id}` : `/deals/${deal.id}`}
+                  className="block rounded-lg border bg-white p-3 transition-colors hover:bg-zinc-50"
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-medium">{deal.name}</p>
+                      <p className="text-xs text-muted-foreground font-mono">{deal.dealNumber}</p>
+                    </div>
+                    {opensLeadDetail ? (
+                      <LeadStageBadge stageId={deal.stageId} />
+                    ) : (
+                      <DealStageBadge stageId={deal.stageId} />
+                    )}
                   </div>
-                  {deal.stageId === ddStageId ? (
-                    <LeadStageBadge stageId={deal.stageId} />
-                  ) : (
-                    <DealStageBadge stageId={deal.stageId} />
-                  )}
-                </div>
-              </Link>
-            ))
+                </Link>
+              );
+            })
           )}
         </div>
       </div>
