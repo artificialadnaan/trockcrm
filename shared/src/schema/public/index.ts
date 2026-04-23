@@ -1,7 +1,7 @@
 export { offices } from "./offices.js";
 export { users, userRoleEnum } from "./users.js";
 export { userOfficeAccess } from "./user-office-access.js";
-export { pipelineStageConfig } from "./pipeline-stage-config.js";
+export { pipelineStageConfig, workflowFamilyEnum } from "./pipeline-stage-config.js";
 export { lostDealReasons } from "./lost-deal-reasons.js";
 export { projectTypeConfig } from "./project-type-config.js";
 export { regionConfig } from "./region-config.js";
