@@ -337,7 +337,7 @@ describe("Reports Service", () => {
               deal_id: "deal-1",
               deal_number: "TR-1001",
               deal_name: "Bid Board Mirror",
-              stage_name: "Estimating",
+              stage_name: "Opportunity",
               workflow_route: "service",
               rep_name: "Avery Rep",
               days_in_stage: "22",
@@ -360,7 +360,7 @@ describe("Reports Service", () => {
           .mockResolvedValueOnce({
             rows: [{
               mirrored_stage_slug: "estimating",
-              mirrored_stage_name: "Estimating",
+              mirrored_stage_name: "Opportunity",
               mirrored_stage_status: "blocked",
               workflow_route: "service",
               deal_count: "2",
@@ -405,6 +405,7 @@ describe("Reports Service", () => {
         },
       ]);
       expect(result.staleDeals[0]).toMatchObject({
+        stageName: "Estimating",
         workflowRoute: "service",
         bidBoardStageSlug: "estimating",
         bidBoardStageStatus: "blocked",

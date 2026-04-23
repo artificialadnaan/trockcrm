@@ -30,6 +30,28 @@ function defaultDateRange(from?: string, to?: string): { from: string; to: strin
 
 const LEAD_STALE_THRESHOLD_DAYS = 14;
 const MIRRORED_DOWNSTREAM_STAGE_SLUGS = ["estimating", "bid_sent", "in_production", "close_out"] as const;
+const MIRRORED_DOWNSTREAM_STAGE_LABELS: Record<(typeof MIRRORED_DOWNSTREAM_STAGE_SLUGS)[number], string> = {
+  estimating: "Estimating",
+  bid_sent: "Bid Sent",
+  in_production: "In Production",
+  close_out: "Close Out",
+};
+
+function resolveMirroredStageLabel(
+  mirroredStageSlug: string | null | undefined,
+  fallbackStageName: string | null | undefined
+) {
+  if (
+    mirroredStageSlug &&
+    mirroredStageSlug in MIRRORED_DOWNSTREAM_STAGE_LABELS
+  ) {
+    return MIRRORED_DOWNSTREAM_STAGE_LABELS[
+      mirroredStageSlug as keyof typeof MIRRORED_DOWNSTREAM_STAGE_LABELS
+    ];
+  }
+
+  return fallbackStageName ?? "Unknown";
+}
 
 // ---------------------------------------------------------------------------
 // 1. Pipeline Summary by Stage
@@ -406,7 +428,7 @@ export async function getStaleDeals(
     dealNumber: r.deal_number,
     dealName: r.deal_name,
     stageId: r.stage_id,
-    stageName: r.stage_name,
+    stageName: resolveMirroredStageLabel(r.bid_board_stage_slug, r.stage_name),
     assignedRepId: r.assigned_rep_id,
     repName: r.rep_name,
     stageEnteredAt: r.stage_entered_at,
@@ -1280,7 +1302,7 @@ export async function getUnifiedWorkflowOverview(
       dealId: row.deal_id,
       dealNumber: row.deal_number,
       dealName: row.deal_name,
-      stageName: row.stage_name,
+      stageName: resolveMirroredStageLabel(row.bid_board_stage_slug, row.stage_name),
       workflowRoute: row.workflow_route,
       repName: row.rep_name,
       daysInStage: Number(row.days_in_stage ?? 0),
@@ -1299,7 +1321,7 @@ export async function getUnifiedWorkflowOverview(
     })),
     mirroredDownstreamSummary: mirroredDownstreamRows.map((row: any) => ({
       mirroredStageSlug: row.mirrored_stage_slug,
-      mirroredStageName: row.mirrored_stage_name,
+      mirroredStageName: resolveMirroredStageLabel(row.mirrored_stage_slug, row.mirrored_stage_name),
       mirroredStageStatus: row.mirrored_stage_status ?? null,
       workflowRoute: row.workflow_route,
       dealCount: Number(row.deal_count ?? 0),

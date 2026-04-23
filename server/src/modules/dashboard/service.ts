@@ -21,6 +21,28 @@ import {
 
 type TenantDb = NodePgDatabase<typeof schema>;
 const MIRRORED_DOWNSTREAM_STAGE_SLUGS = ["estimating", "bid_sent", "in_production", "close_out"] as const;
+const MIRRORED_DOWNSTREAM_STAGE_LABELS: Record<(typeof MIRRORED_DOWNSTREAM_STAGE_SLUGS)[number], string> = {
+  estimating: "Estimating",
+  bid_sent: "Bid Sent",
+  in_production: "In Production",
+  close_out: "Close Out",
+};
+
+function resolveMirroredStageLabel(
+  mirroredStageSlug: string | null | undefined,
+  fallbackStageName: string | null | undefined
+) {
+  if (
+    mirroredStageSlug &&
+    mirroredStageSlug in MIRRORED_DOWNSTREAM_STAGE_LABELS
+  ) {
+    return MIRRORED_DOWNSTREAM_STAGE_LABELS[
+      mirroredStageSlug as keyof typeof MIRRORED_DOWNSTREAM_STAGE_LABELS
+    ];
+  }
+
+  return fallbackStageName ?? "Unknown";
+}
 
 export interface StaleLeadDashboardRow {
   leadId: string;
@@ -189,6 +211,7 @@ async function getDownstreamBottlenecks(
       d.id AS deal_id,
       d.name AS deal_name,
       psc.name AS stage_name,
+      COALESCE(d.bid_board_stage_slug, psc.slug) AS mirrored_stage_slug,
       d.bid_board_stage_status AS mirrored_stage_status,
       d.workflow_route,
       COALESCE(NULLIF(TRIM(d.region_classification), ''), TRIM(CONCAT_WS(', ', d.property_city, d.property_state)), 'Unassigned region') AS region_classification,
@@ -215,7 +238,7 @@ async function getDownstreamBottlenecks(
   return rows.map((row: any) => ({
     dealId: row.deal_id,
     dealName: row.deal_name,
-    stageName: row.stage_name,
+    stageName: resolveMirroredStageLabel(row.mirrored_stage_slug, row.stage_name),
     mirroredStageStatus: row.mirrored_stage_status ?? null,
     workflowRoute: row.workflow_route,
     regionClassification: row.region_classification,
