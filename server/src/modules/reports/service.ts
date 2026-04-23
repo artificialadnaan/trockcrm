@@ -29,6 +29,7 @@ function defaultDateRange(from?: string, to?: string): { from: string; to: strin
 }
 
 const LEAD_STALE_THRESHOLD_DAYS = 14;
+const MIRRORED_DOWNSTREAM_STAGE_SLUGS = ["estimating", "bid_sent", "in_production", "close_out"] as const;
 
 // ---------------------------------------------------------------------------
 // 1. Pipeline Summary by Stage
@@ -354,6 +355,10 @@ export interface StaleDealRow {
   daysInStage: number;
   staleThresholdDays: number;
   dealValue: number;
+  workflowRoute?: WorkflowRoute;
+  bidBoardStageSlug?: string | null;
+  bidBoardStageStatus?: string | null;
+  regionClassification?: string | null;
 }
 
 /**
@@ -379,7 +384,11 @@ export async function getStaleDeals(
       d.stage_entered_at,
       EXTRACT(DAY FROM NOW() - d.stage_entered_at)::int AS days_in_stage,
       psc.stale_threshold_days,
-      COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)::numeric AS deal_value
+      COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)::numeric AS deal_value,
+      d.workflow_route,
+      d.bid_board_stage_slug,
+      d.bid_board_stage_status,
+      d.region_classification
     FROM deals d
     JOIN pipeline_stage_config psc ON psc.id = d.stage_id
     JOIN users u ON u.id = d.assigned_rep_id
@@ -404,6 +413,10 @@ export async function getStaleDeals(
     daysInStage: Number(r.days_in_stage ?? 0),
     staleThresholdDays: Number(r.stale_threshold_days ?? 0),
     dealValue: Number(r.deal_value ?? 0),
+    workflowRoute: r.workflow_route,
+    bidBoardStageSlug: r.bid_board_stage_slug ?? null,
+    bidBoardStageStatus: r.bid_board_stage_status ?? null,
+    regionClassification: r.region_classification ?? null,
   }));
 }
 
@@ -934,6 +947,32 @@ export interface UnifiedStaleDealRow {
   daysInStage: number;
   staleThresholdDays: number;
   dealValue: number;
+  bidBoardStageSlug: string | null;
+  bidBoardStageStatus: string | null;
+  regionClassification: string | null;
+}
+
+export interface UnifiedCrmOwnedProgressionRow {
+  workflowBucket: "lead" | "opportunity" | "crm_owned";
+  workflowRoute: WorkflowRoute;
+  stageName: string;
+  itemCount: number;
+  totalValue: number;
+}
+
+export interface UnifiedMirroredDownstreamSummaryRow {
+  mirroredStageSlug: string;
+  mirroredStageName: string;
+  mirroredStageStatus: string | null;
+  workflowRoute: WorkflowRoute;
+  dealCount: number;
+  totalValue: number;
+}
+
+export interface UnifiedReasonCodedDisqualificationRow {
+  workflowRoute: WorkflowRoute;
+  disqualificationReason: string;
+  leadCount: number;
 }
 
 export interface UnifiedWorkflowOverview {
@@ -943,6 +982,9 @@ export interface UnifiedWorkflowOverview {
   repActivitySplit: UnifiedRepActivitySplitRow[];
   staleLeads: UnifiedStaleLeadRow[];
   staleDeals: UnifiedStaleDealRow[];
+  crmOwnedProgression: UnifiedCrmOwnedProgressionRow[];
+  mirroredDownstreamSummary: UnifiedMirroredDownstreamSummaryRow[];
+  reasonCodedDisqualifications: UnifiedReasonCodedDisqualificationRow[];
 }
 
 export async function getUnifiedWorkflowOverview(
@@ -966,6 +1008,9 @@ export async function getUnifiedWorkflowOverview(
     repActivityResult,
     staleLeadResult,
     staleDealResult,
+    crmOwnedProgressionResult,
+    mirroredDownstreamResult,
+    disqualificationResult,
   ] = await Promise.all([
     tenantDb.execute(sql`
       SELECT
@@ -1090,7 +1135,10 @@ export async function getUnifiedWorkflowOverview(
         u.display_name AS rep_name,
         EXTRACT(DAY FROM NOW() - d.stage_entered_at)::int AS days_in_stage,
         psc.stale_threshold_days,
-        COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)::numeric AS deal_value
+        COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)::numeric AS deal_value,
+        d.bid_board_stage_slug,
+        d.bid_board_stage_status,
+        d.region_classification
       FROM deals d
       JOIN pipeline_stage_config psc ON psc.id = d.stage_id
       JOIN users u ON u.id = d.assigned_rep_id
@@ -1101,6 +1149,72 @@ export async function getUnifiedWorkflowOverview(
         ${dealRepFilter}
       ORDER BY days_in_stage DESC, deal_name ASC
     `),
+    tenantDb.execute(sql`
+      SELECT
+        'crm_owned'::text AS workflow_bucket,
+        workflow_route,
+        stage_name,
+        SUM(item_count)::int AS item_count,
+        COALESCE(SUM(total_value), 0)::numeric AS total_value
+      FROM (
+        SELECT
+          l.pipeline_type AS workflow_route,
+          psc.name AS stage_name,
+          COUNT(*)::int AS item_count,
+          COALESCE(SUM(COALESCE(l.pre_qual_value, 0)), 0)::numeric AS total_value
+        FROM leads l
+        JOIN pipeline_stage_config psc ON psc.id = l.stage_id
+        WHERE l.is_active = true
+          AND l.status = 'open'
+          AND psc.workflow_family = 'lead'
+          ${leadRepFilter}
+        GROUP BY l.pipeline_type, psc.name, psc.display_order
+
+        UNION ALL
+
+        SELECT
+          d.workflow_route,
+          psc.name AS stage_name,
+          COUNT(*)::int AS item_count,
+          COALESCE(SUM(COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)), 0)::numeric AS total_value
+        FROM deals d
+        JOIN pipeline_stage_config psc ON psc.id = d.stage_id
+        WHERE d.is_active = true
+          AND psc.slug = 'opportunity'
+          ${dealRepFilter}
+        GROUP BY d.workflow_route, psc.name, psc.display_order
+      ) crm_owned_progression
+      GROUP BY workflow_bucket, workflow_route, stage_name
+      ORDER BY stage_name ASC, workflow_route ASC
+    `),
+    tenantDb.execute(sql`
+      SELECT
+        COALESCE(d.bid_board_stage_slug, psc.slug) AS mirrored_stage_slug,
+        psc.name AS mirrored_stage_name,
+        d.bid_board_stage_status AS mirrored_stage_status,
+        d.workflow_route,
+        COUNT(*)::int AS deal_count,
+        COALESCE(SUM(COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)), 0)::numeric AS total_value
+      FROM deals d
+      JOIN pipeline_stage_config psc ON psc.id = d.stage_id
+      WHERE d.is_active = true
+        AND COALESCE(d.bid_board_stage_slug, psc.slug) IN (${sql.join(MIRRORED_DOWNSTREAM_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})
+        ${dealRepFilter}
+      GROUP BY COALESCE(d.bid_board_stage_slug, psc.slug), psc.name, d.bid_board_stage_status, d.workflow_route
+      ORDER BY deal_count DESC, total_value DESC, mirrored_stage_name ASC
+    `),
+    tenantDb.execute(sql`
+      SELECT
+        l.pipeline_type AS workflow_route,
+        COALESCE(l.disqualification_reason, 'other') AS disqualification_reason,
+        COUNT(*)::int AS lead_count
+      FROM leads l
+      WHERE l.status = 'disqualified'
+        AND l.disqualification_reason IS NOT NULL
+        ${options.repId ? sql`AND l.assigned_rep_id = ${options.repId}` : sql``}
+      GROUP BY l.pipeline_type, l.disqualification_reason
+      ORDER BY lead_count DESC, disqualification_reason ASC
+    `),
   ]);
 
   const leadRows = (leadPipelineResult as any).rows ?? leadPipelineResult;
@@ -1109,6 +1223,12 @@ export async function getUnifiedWorkflowOverview(
   const activityRows = (repActivityResult as any).rows ?? repActivityResult;
   const staleLeadRows = (staleLeadResult as any).rows ?? staleLeadResult;
   const staleDealRows = (staleDealResult as any).rows ?? staleDealResult;
+  const crmOwnedProgressionRows =
+    (crmOwnedProgressionResult as any).rows ?? crmOwnedProgressionResult;
+  const mirroredDownstreamRows =
+    (mirroredDownstreamResult as any).rows ?? mirroredDownstreamResult;
+  const disqualificationRows =
+    (disqualificationResult as any).rows ?? disqualificationResult;
 
   return {
     leadPipelineSummary: leadRows.map((row: any) => ({
@@ -1166,6 +1286,29 @@ export async function getUnifiedWorkflowOverview(
       daysInStage: Number(row.days_in_stage ?? 0),
       staleThresholdDays: Number(row.stale_threshold_days ?? 0),
       dealValue: Number(row.deal_value ?? 0),
+      bidBoardStageSlug: row.bid_board_stage_slug ?? null,
+      bidBoardStageStatus: row.bid_board_stage_status ?? null,
+      regionClassification: row.region_classification ?? null,
+    })),
+    crmOwnedProgression: crmOwnedProgressionRows.map((row: any) => ({
+      workflowBucket: row.workflow_bucket,
+      workflowRoute: row.workflow_route,
+      stageName: row.stage_name,
+      itemCount: Number(row.item_count ?? 0),
+      totalValue: Number(row.total_value ?? 0),
+    })),
+    mirroredDownstreamSummary: mirroredDownstreamRows.map((row: any) => ({
+      mirroredStageSlug: row.mirrored_stage_slug,
+      mirroredStageName: row.mirrored_stage_name,
+      mirroredStageStatus: row.mirrored_stage_status ?? null,
+      workflowRoute: row.workflow_route,
+      dealCount: Number(row.deal_count ?? 0),
+      totalValue: Number(row.total_value ?? 0),
+    })),
+    reasonCodedDisqualifications: disqualificationRows.map((row: any) => ({
+      workflowRoute: row.workflow_route,
+      disqualificationReason: row.disqualification_reason,
+      leadCount: Number(row.lead_count ?? 0),
     })),
   };
 }

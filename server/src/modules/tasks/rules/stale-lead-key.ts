@@ -16,7 +16,10 @@ export function buildStaleLeadDedupeKey(
   if (!leadId) return null;
 
   const normalizedStageEnteredAt = normalizeStaleLeadEpisodeTimestamp(stageEnteredAt);
-  if (!normalizedStageEnteredAt) return null;
+  if (!normalizedStageEnteredAt) {
+    // Preserve queue continuity for legacy/renamed lead stages that do not have a stable episode timestamp.
+    return `lead:${leadId}:stage_entered:unknown`;
+  }
 
   return `lead:${leadId}:stage_entered:${normalizedStageEnteredAt}`;
 }

@@ -6,6 +6,11 @@ export interface StaleLeadViewRow {
   stageName: string;
   repName: string;
   daysInStage: number;
+  pipelineType?: "normal" | "service";
+  locationLabel?: string | null;
+  estimatedValue?: number;
+  staleThresholdDays?: number;
+  daysPastDue?: number;
 }
 
 export interface StaleLeadAlertSummary {

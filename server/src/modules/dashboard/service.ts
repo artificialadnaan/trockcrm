@@ -20,6 +20,7 @@ import {
 } from "../reports/service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
+const MIRRORED_DOWNSTREAM_STAGE_SLUGS = ["estimating", "bid_sent", "in_production", "close_out"] as const;
 
 export interface StaleLeadDashboardRow {
   leadId: string;
@@ -29,6 +30,31 @@ export interface StaleLeadDashboardRow {
   stageName: string;
   repName: string;
   daysInStage: number;
+  pipelineType?: "normal" | "service";
+  locationLabel?: string;
+  estimatedValue?: number;
+  staleThresholdDays?: number;
+  daysPastDue?: number;
+}
+
+export interface DashboardCrmOwnedProgressionRow {
+  workflowBucket: "lead" | "opportunity";
+  workflowRoute: "normal" | "service";
+  stageName: string;
+  itemCount: number;
+  totalValue: number;
+}
+
+export interface DashboardDownstreamBottleneckRow {
+  dealId: string;
+  dealName: string;
+  stageName: string;
+  mirroredStageStatus: string | null;
+  workflowRoute: "normal" | "service";
+  regionClassification: string;
+  dealValue: number;
+  daysInStage: number;
+  staleThresholdDays: number;
 }
 
 async function getStaleLeadWatchlist(
@@ -47,7 +73,15 @@ async function getStaleLeadWatchlist(
       p.name AS property_name,
       psc.name AS stage_name,
       u.display_name AS rep_name,
-      EXTRACT(DAY FROM NOW() - l.stage_entered_at)::int AS days_in_stage
+      EXTRACT(DAY FROM NOW() - l.stage_entered_at)::int AS days_in_stage,
+      l.pipeline_type,
+      TRIM(CONCAT_WS(', ', p.city, p.state)) AS location_label,
+      COALESCE(l.pre_qual_value, 0)::numeric AS estimated_value,
+      psc.stale_threshold_days,
+      GREATEST(
+        EXTRACT(DAY FROM NOW() - l.stage_entered_at)::int - COALESCE(psc.stale_threshold_days, 0),
+        0
+      )::int AS days_past_due
     FROM leads l
     JOIN companies c ON c.id = l.company_id
     JOIN properties p ON p.id = l.property_id
@@ -72,6 +106,122 @@ async function getStaleLeadWatchlist(
     stageName: row.stage_name,
     repName: row.rep_name,
     daysInStage: Number(row.days_in_stage ?? 0),
+    pipelineType: row.pipeline_type ?? "normal",
+    locationLabel: row.location_label || null,
+    estimatedValue: Number(row.estimated_value ?? 0),
+    staleThresholdDays: Number(row.stale_threshold_days ?? 0),
+    daysPastDue: Number(row.days_past_due ?? 0),
+  }));
+}
+
+async function getCrmOwnedProgression(
+  tenantDb: TenantDb,
+  options: { repId?: string } = {}
+): Promise<DashboardCrmOwnedProgressionRow[]> {
+  const leadRepFilter = options.repId
+    ? sql`AND l.assigned_rep_id = ${options.repId}`
+    : sql``;
+  const dealRepFilter = options.repId
+    ? sql`AND d.assigned_rep_id = ${options.repId}`
+    : sql``;
+
+  const result = await tenantDb.execute(sql`
+    SELECT
+      workflow_bucket,
+      workflow_route,
+      stage_name,
+      SUM(item_count)::int AS item_count,
+      COALESCE(SUM(total_value), 0)::numeric AS total_value
+    FROM (
+      SELECT
+        'lead'::text AS workflow_bucket,
+        l.pipeline_type AS workflow_route,
+        psc.name AS stage_name,
+        COUNT(*)::int AS item_count,
+        COALESCE(SUM(COALESCE(l.pre_qual_value, 0)), 0)::numeric AS total_value
+      FROM leads l
+      JOIN pipeline_stage_config psc ON psc.id = l.stage_id
+      WHERE l.is_active = true
+        AND l.status = 'open'
+        AND psc.workflow_family = 'lead'
+        ${leadRepFilter}
+      GROUP BY l.pipeline_type, psc.name, psc.display_order
+
+      UNION ALL
+
+      SELECT
+        'opportunity'::text AS workflow_bucket,
+        d.workflow_route,
+        psc.name AS stage_name,
+        COUNT(*)::int AS item_count,
+        COALESCE(SUM(COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)), 0)::numeric AS total_value
+      FROM deals d
+      JOIN pipeline_stage_config psc ON psc.id = d.stage_id
+      WHERE d.is_active = true
+        AND psc.slug = 'opportunity'
+        ${dealRepFilter}
+      GROUP BY d.workflow_route, psc.name, psc.display_order
+    ) crm_owned_progression
+    GROUP BY workflow_bucket, workflow_route, stage_name
+    ORDER BY stage_name ASC, workflow_route ASC
+  `);
+
+  const rows = (result as any).rows ?? result;
+  return rows.map((row: any) => ({
+    workflowBucket: row.workflow_bucket,
+    workflowRoute: row.workflow_route,
+    stageName: row.stage_name,
+    itemCount: Number(row.item_count ?? 0),
+    totalValue: Number(row.total_value ?? 0),
+  }));
+}
+
+async function getDownstreamBottlenecks(
+  tenantDb: TenantDb,
+  options: { repId?: string } = {}
+): Promise<DashboardDownstreamBottleneckRow[]> {
+  const repFilter = options.repId
+    ? sql`AND d.assigned_rep_id = ${options.repId}`
+    : sql``;
+
+  const result = await tenantDb.execute(sql`
+    SELECT
+      d.id AS deal_id,
+      d.name AS deal_name,
+      psc.name AS stage_name,
+      d.bid_board_stage_status AS mirrored_stage_status,
+      d.workflow_route,
+      COALESCE(NULLIF(TRIM(d.region_classification), ''), TRIM(CONCAT_WS(', ', d.property_city, d.property_state)), 'Unassigned region') AS region_classification,
+      COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)::numeric AS deal_value,
+      EXTRACT(DAY FROM NOW() - COALESCE(d.bid_board_stage_entered_at, d.stage_entered_at))::int AS days_in_stage,
+      COALESCE(psc.stale_threshold_days, 14)::int AS stale_threshold_days
+    FROM deals d
+    JOIN pipeline_stage_config psc ON psc.id = d.stage_id
+    WHERE d.is_active = true
+      AND COALESCE(d.bid_board_stage_slug, psc.slug) IN (${sql.join(MIRRORED_DOWNSTREAM_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})
+      ${repFilter}
+    ORDER BY
+      GREATEST(
+        EXTRACT(DAY FROM NOW() - COALESCE(d.bid_board_stage_entered_at, d.stage_entered_at))::int
+        - COALESCE(psc.stale_threshold_days, 14),
+        0
+      ) DESC,
+      deal_value DESC,
+      deal_name ASC
+    LIMIT 8
+  `);
+
+  const rows = (result as any).rows ?? result;
+  return rows.map((row: any) => ({
+    dealId: row.deal_id,
+    dealName: row.deal_name,
+    stageName: row.stage_name,
+    mirroredStageStatus: row.mirrored_stage_status ?? null,
+    workflowRoute: row.workflow_route,
+    regionClassification: row.region_classification,
+    dealValue: Number(row.deal_value ?? 0),
+    daysInStage: Number(row.days_in_stage ?? 0),
+    staleThresholdDays: Number(row.stale_threshold_days ?? 14),
   }));
 }
 
@@ -96,6 +246,8 @@ export interface RepDashboardData {
     averageDaysInStage: number | null;
     leads: StaleLeadDashboardRow[];
   };
+  crmOwnedProgression: DashboardCrmOwnedProgressionRow[];
+  downstreamBottlenecks: DashboardDownstreamBottleneckRow[];
 }
 
 /**
@@ -122,6 +274,8 @@ export async function getRepDashboard(
     complianceResult,
     pipelineResult,
     staleLeadResult,
+    crmOwnedProgression,
+    downstreamBottlenecks,
   ] = await Promise.all([
     // 1. Active deals count + value for this rep
     tenantDb.execute(sql`
@@ -188,6 +342,8 @@ export async function getRepDashboard(
     `),
 
     getStaleLeadWatchlist(tenantDb, { repId: userId }),
+    getCrmOwnedProgression(tenantDb, { repId: userId }),
+    getDownstreamBottlenecks(tenantDb, { repId: userId }),
   ]);
 
   const adRows = (activeDealResult as any).rows ?? activeDealResult;
@@ -227,6 +383,8 @@ export async function getRepDashboard(
       averageDaysInStage: staleLeadAverage,
       leads: staleLeadResult,
     },
+    crmOwnedProgression,
+    downstreamBottlenecks,
   };
 }
 
@@ -272,8 +430,14 @@ export interface DirectorDashboardData {
     repName: string;
     daysInStage: number;
     dealValue: number;
+    workflowRoute?: "normal" | "service";
+    bidBoardStageStatus?: string | null;
+    regionClassification?: string | null;
+    staleThresholdDays?: number;
   }>;
   staleLeads: StaleLeadDashboardRow[];
+  crmOwnedProgression: DashboardCrmOwnedProgressionRow[];
+  downstreamBottlenecks: DashboardDownstreamBottleneckRow[];
   ddVsPipeline: {
     ddValue: number;
     ddCount: number;
@@ -304,6 +468,8 @@ export async function getDirectorDashboard(
     staleResult,
     staleLeadResult,
     ddResult,
+    crmOwnedProgression,
+    downstreamBottlenecks,
   ] = await Promise.all([
     // 1. Per-rep performance cards
     buildRepPerformanceCards(tenantDb, { from, to }),
@@ -325,6 +491,8 @@ export async function getDirectorDashboard(
 
     // 7. DD vs pipeline
     getDdVsPipeline(tenantDb),
+    getCrmOwnedProgression(tenantDb),
+    getDownstreamBottlenecks(tenantDb),
   ]);
 
   return {
@@ -354,8 +522,14 @@ export async function getDirectorDashboard(
       repName: s.repName,
       daysInStage: s.daysInStage,
       dealValue: s.dealValue,
+      workflowRoute: s.workflowRoute,
+      bidBoardStageStatus: s.bidBoardStageStatus ?? null,
+      regionClassification: s.regionClassification ?? null,
+      staleThresholdDays: s.staleThresholdDays,
     })),
     staleLeads: staleLeadResult,
+    crmOwnedProgression,
+    downstreamBottlenecks,
     ddVsPipeline: ddResult,
   };
 }

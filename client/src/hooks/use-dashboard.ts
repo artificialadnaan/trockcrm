@@ -30,8 +30,31 @@ export interface RepDashboardData {
       stageName: string;
       repName: string;
       daysInStage: number;
+      pipelineType?: "normal" | "service";
+      locationLabel?: string | null;
+      estimatedValue?: number;
+      staleThresholdDays?: number;
+      daysPastDue?: number;
     }>;
   };
+  crmOwnedProgression?: Array<{
+    workflowBucket: "lead" | "opportunity";
+    workflowRoute: "normal" | "service";
+    stageName: string;
+    itemCount: number;
+    totalValue: number;
+  }>;
+  downstreamBottlenecks?: Array<{
+    dealId: string;
+    dealName: string;
+    stageName: string;
+    mirroredStageStatus: string | null;
+    workflowRoute: "normal" | "service";
+    regionClassification: string;
+    dealValue: number;
+    daysInStage: number;
+    staleThresholdDays: number;
+  }>;
 }
 
 export function useRepDashboard() {

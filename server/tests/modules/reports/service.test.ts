@@ -307,4 +307,120 @@ describe("Reports Service", () => {
       expect(result[0].competitors).toHaveLength(2);
     });
   });
+
+  describe("getUnifiedWorkflowOverview", () => {
+    it("keeps CRM-owned progression, mirrored downstream bottlenecks, and reason-coded disqualifications queryable", async () => {
+      const { getUnifiedWorkflowOverview } = await import("../../../src/modules/reports/service.js");
+      const tenantDb = {
+        execute: vi.fn()
+          .mockResolvedValueOnce({
+            rows: [{ workflow_route: "normal", validation_status: "ready", intake_count: "2" }],
+          })
+          .mockResolvedValueOnce({
+            rows: [{ workflow_route: "service", deal_count: "1", total_value: "80000", stale_deal_count: "1" }],
+          })
+          .mockResolvedValueOnce({ rows: [] })
+          .mockResolvedValueOnce({ rows: [] })
+          .mockResolvedValueOnce({
+            rows: [{
+              lead_id: "lead-1",
+              lead_name: "Church Campus",
+              company_name: "North Star",
+              workflow_route: "normal",
+              validation_status: "ready",
+              age_in_days: "19",
+              stale_threshold_days: "14",
+            }],
+          })
+          .mockResolvedValueOnce({
+            rows: [{
+              deal_id: "deal-1",
+              deal_number: "TR-1001",
+              deal_name: "Bid Board Mirror",
+              stage_name: "Estimating",
+              workflow_route: "service",
+              rep_name: "Avery Rep",
+              days_in_stage: "22",
+              stale_threshold_days: "14",
+              deal_value: "275000",
+              bid_board_stage_slug: "estimating",
+              bid_board_stage_status: "blocked",
+              region_classification: "Texas / Southwest",
+            }],
+          })
+          .mockResolvedValueOnce({
+            rows: [{
+              workflow_bucket: "crm_owned",
+              workflow_route: "normal",
+              stage_name: "Opportunity",
+              item_count: "3",
+              total_value: "450000",
+            }],
+          })
+          .mockResolvedValueOnce({
+            rows: [{
+              mirrored_stage_slug: "estimating",
+              mirrored_stage_name: "Estimating",
+              mirrored_stage_status: "blocked",
+              workflow_route: "service",
+              deal_count: "2",
+              total_value: "275000",
+            }],
+          })
+          .mockResolvedValueOnce({
+            rows: [{
+              workflow_route: "normal",
+              disqualification_reason: "no_budget",
+              lead_count: "1",
+            }],
+          }),
+      } as any;
+
+      const result = await getUnifiedWorkflowOverview(tenantDb);
+
+      expect(result.crmOwnedProgression).toEqual([
+        {
+          workflowBucket: "crm_owned",
+          workflowRoute: "normal",
+          stageName: "Opportunity",
+          itemCount: 3,
+          totalValue: 450000,
+        },
+      ]);
+      expect(result.mirroredDownstreamSummary).toEqual([
+        {
+          mirroredStageSlug: "estimating",
+          mirroredStageName: "Estimating",
+          mirroredStageStatus: "blocked",
+          workflowRoute: "service",
+          dealCount: 2,
+          totalValue: 275000,
+        },
+      ]);
+      expect(result.reasonCodedDisqualifications).toEqual([
+        {
+          workflowRoute: "normal",
+          disqualificationReason: "no_budget",
+          leadCount: 1,
+        },
+      ]);
+      expect(result.staleDeals[0]).toMatchObject({
+        workflowRoute: "service",
+        bidBoardStageSlug: "estimating",
+        bidBoardStageStatus: "blocked",
+        regionClassification: "Texas / Southwest",
+      });
+
+      const progressionQuery = extractSqlText(tenantDb.execute.mock.calls[6][0]).toLowerCase();
+      const mirrorQuery = extractSqlText(tenantDb.execute.mock.calls[7][0]).toLowerCase();
+      const disqualificationQuery = extractSqlText(tenantDb.execute.mock.calls[8][0]).toLowerCase();
+
+      expect(progressionQuery).toContain("workflow_bucket");
+      expect(progressionQuery).toContain("opportunity");
+      expect(mirrorQuery).toContain("bid_board_stage_slug");
+      expect(mirrorQuery).toContain("bid_board_stage_status");
+      expect(disqualificationQuery).toContain("disqualification_reason");
+      expect(disqualificationQuery).toContain("pipeline_type");
+    });
+  });
 });

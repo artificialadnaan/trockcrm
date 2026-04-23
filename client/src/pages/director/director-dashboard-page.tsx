@@ -28,6 +28,7 @@ import {
 } from "lucide-react";
 import { DIRECTOR_DASHBOARD_ACTIONS } from "@/lib/director-dashboard-actions";
 import { buildStaleLeadAlertSummary } from "@/lib/stale-lead-dashboard";
+import { getWorkflowRouteLabel } from "@/lib/pipeline-ownership";
 
 const PRESETS: Array<{ value: DateRangePreset; label: string }> = [
   { value: "mtd", label: "MTD" },
@@ -95,6 +96,15 @@ function DeltaCell({ value, format = "number" }: { value: number; format?: "numb
       {display}
     </span>
   );
+}
+
+function formatPathLabel(route: "normal" | "service") {
+  return `${getWorkflowRouteLabel(route)} path`;
+}
+
+function formatMirrorStatus(status: string | null | undefined) {
+  if (!status) return "watch";
+  return status.replace(/_/g, " ");
 }
 
 export function DirectorDashboardPage() {
@@ -530,6 +540,71 @@ export function DirectorDashboardPage() {
               <WinRateTrendChart data={data.winRateTrend} />
             ) : (
               <p className="text-gray-400 text-sm text-center py-8">No closed deals yet.</p>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+        <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+          <div className="px-5 py-4 border-b border-gray-100">
+            <h3 className="text-sm font-bold text-gray-900 uppercase tracking-wide">
+              CRM-Owned Progression
+            </h3>
+          </div>
+          <div className="p-4 space-y-3">
+            {(data.crmOwnedProgression ?? []).length > 0 ? (
+              (data.crmOwnedProgression ?? []).map((row) => (
+                <div
+                  key={`${row.workflowBucket}-${row.workflowRoute}-${row.stageName}`}
+                  className="flex items-center justify-between rounded-lg border border-gray-100 p-3"
+                >
+                  <div>
+                    <p className="text-sm font-semibold text-gray-900">{row.stageName}</p>
+                    <p className="text-xs text-gray-500">
+                      {formatPathLabel(row.workflowRoute)} · {row.workflowBucket === "opportunity" ? "Opportunity-owned" : "Lead-stage"}
+                    </p>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-sm font-semibold text-gray-900">{row.itemCount}</p>
+                    <p className="text-xs text-gray-500">{formatCurrency(row.totalValue)}</p>
+                  </div>
+                </div>
+              ))
+            ) : (
+              <p className="text-sm text-gray-400">No CRM-owned progression to review.</p>
+            )}
+          </div>
+        </div>
+
+        <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+          <div className="px-5 py-4 border-b border-gray-100">
+            <h3 className="text-sm font-bold text-gray-900 uppercase tracking-wide">
+              Bid Board Bottlenecks
+            </h3>
+          </div>
+          <div className="p-4 space-y-3">
+            {(data.downstreamBottlenecks ?? []).length > 0 ? (
+              (data.downstreamBottlenecks ?? []).map((deal) => (
+                <div key={deal.dealId} className="rounded-lg border border-gray-100 p-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="text-sm font-semibold text-gray-900 truncate">{deal.dealName}</p>
+                      <p className="text-xs text-gray-500">
+                        {deal.stageName} · {formatMirrorStatus(deal.mirroredStageStatus)} · {formatPathLabel(deal.workflowRoute)}
+                      </p>
+                      <p className="text-xs text-gray-500">
+                        {deal.regionClassification} · {formatCurrency(deal.dealValue)}
+                      </p>
+                    </div>
+                    <p className="text-xs font-semibold text-amber-700 whitespace-nowrap">
+                      {deal.daysInStage}d / {deal.staleThresholdDays}d target
+                    </p>
+                  </div>
+                </div>
+              ))
+            ) : (
+              <p className="text-sm text-gray-400">No mirrored downstream bottlenecks to review.</p>
             )}
           </div>
         </div>
