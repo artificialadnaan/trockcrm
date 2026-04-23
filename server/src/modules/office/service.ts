@@ -5,6 +5,7 @@ import { eq } from "drizzle-orm";
 import { db, pool } from "../../db.js";
 import { offices } from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
+import { getOfficeTimezone } from "../../lib/office-timezone.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -35,7 +36,13 @@ export async function getOfficeBySlug(slug: string) {
   return result[0] ?? null;
 }
 
-export async function createOffice(name: string, slug: string, address?: string, phone?: string) {
+export async function createOffice(
+  name: string,
+  slug: string,
+  address?: string,
+  phone?: string,
+  timezone?: string | null
+) {
   // Validate slug format (SQL injection prevention)
   if (!/^[a-z][a-z0-9_]*$/.test(slug)) {
     throw new AppError(400, "Slug must be lowercase alphanumeric with underscores, starting with a letter");
@@ -54,10 +61,10 @@ export async function createOffice(name: string, slug: string, address?: string,
 
     // Create office record
     const insertResult = await client.query(
-      `INSERT INTO public.offices (name, slug, address, phone)
-       VALUES ($1, $2, $3, $4)
+      `INSERT INTO public.offices (name, slug, address, phone, timezone)
+       VALUES ($1, $2, $3, $4, $5)
        RETURNING *`,
-      [name, slug, address ?? null, phone ?? null]
+      [name, slug, address ?? null, phone ?? null, getOfficeTimezone({ timezone })]
     );
     const office = insertResult.rows[0];
 

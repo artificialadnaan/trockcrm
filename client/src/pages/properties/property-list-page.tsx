@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { formatPropertyLabel, useProperties } from "@/hooks/use-properties";
+import { PropertyCreateDialog } from "@/components/properties/property-create-dialog";
 
 export function PropertyListPage() {
   const navigate = useNavigate();
@@ -38,6 +39,10 @@ export function PropertyListPage() {
             {totals.properties} {totals.properties === 1 ? "property" : "properties"} across {totals.deals} deals
           </p>
         </div>
+        <PropertyCreateDialog
+          triggerLabel="New Property"
+          onCreated={(property) => navigate(`/properties/${property.id}`)}
+        />
       </div>
 
       <div className="relative">

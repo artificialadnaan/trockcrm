@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { AppError } from "../../middleware/error-handler.js";
-import { getPropertyDetail, listProperties } from "./service.js";
+import { createProperty, getPropertyDetail, listProperties } from "./service.js";
 
 const router = Router();
 
@@ -16,6 +16,31 @@ router.get("/", async (req, res, next) => {
     });
     await req.commitTransaction!();
     res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/", async (req, res, next) => {
+  try {
+    const { companyId, name, address, city, state, zip, notes } = req.body;
+    if (!companyId) {
+      throw new AppError(400, "companyId is required");
+    }
+    if (!name?.trim()) {
+      throw new AppError(400, "Property name is required");
+    }
+    const property = await createProperty(req.tenantDb!, {
+      companyId,
+      name: name.trim(),
+      address,
+      city,
+      state,
+      zip,
+      notes,
+    });
+    await req.commitTransaction!();
+    res.status(201).json({ property });
   } catch (err) {
     next(err);
   }

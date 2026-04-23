@@ -4,17 +4,43 @@
 import { Router } from "express";
 import { eq, and, sql } from "drizzle-orm";
 import { procoreSyncState } from "@trock-crm/shared/schema";
+import { TASK_PRIORITIES, TASK_TYPES } from "@trock-crm/shared/types";
 import { requireRole } from "../../middleware/rbac.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { db } from "../../db.js";
+import { eventBus } from "../../events/bus.js";
 import {
   isProcoreOauthRefreshError,
   isProcoreOauthRequiredError,
   procoreClient,
 } from "../../lib/procore-client.js";
+import { getUserById } from "../admin/users-service.js";
 import { listProjectValidationForOffice } from "./project-validation-service.js";
+import {
+  createTask,
+  getProjectTaskScope,
+  getProjectTasks,
+  queueTaskCreateSideEffects,
+} from "../tasks/service.js";
 
 const router = Router();
+
+async function assertAssignableUserForOffice(assignedTo: string, officeId: string) {
+  const user = await getUserById(assignedTo);
+  if (!user || !user.isActive) {
+    throw new AppError(400, "Assigned user not found or inactive");
+  }
+
+  const hasOfficeAccess =
+    user.officeId === officeId ||
+    user.officeAccess.some((access) => access.officeId === officeId);
+
+  if (!hasOfficeAccess) {
+    throw new AppError(400, "Assigned user does not have access to this office");
+  }
+
+  return user;
+}
 
 // GET /api/procore/sync-status — admin overview
 router.get(
@@ -245,5 +271,142 @@ router.get("/my-projects", async (req, res, next) => {
     next(err);
   }
 });
+
+// GET /api/procore/my-projects/:id — single deal-backed project for the project detail shell
+router.get("/my-projects/:id", async (req, res, next) => {
+  try {
+    const userId = req.user!.id;
+    const role = req.user!.role;
+    const params = role === "rep" ? [req.params.id, userId] : [req.params.id];
+
+    const rows = await req.tenantClient!.query(
+      `SELECT d.id, d.deal_number, d.name, d.procore_project_id,
+              d.procore_last_synced_at, d.change_order_total,
+              psc.name AS stage_name, psc.color AS stage_color
+       FROM deals d
+       JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
+       WHERE d.procore_project_id IS NOT NULL
+         AND d.is_active = true
+         AND d.id = $1
+         ${role === "rep" ? "AND d.assigned_rep_id = $2" : ""}
+       LIMIT 1`,
+      params
+    );
+
+    const project = rows.rows[0] ?? null;
+    if (!project) {
+      throw new AppError(404, "Project not found");
+    }
+
+    await req.commitTransaction!();
+    res.json({ project });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/procore/my-projects/:id/tasks — project-scoped task list
+router.get("/my-projects/:id/tasks", async (req, res, next) => {
+  try {
+    const project = await getProjectTaskScope(
+      req.tenantDb!,
+      req.params.id,
+      req.user!.role,
+      req.user!.id
+    );
+    if (!project) {
+      throw new AppError(404, "Project not found");
+    }
+
+    const tasks = await getProjectTasks(
+      req.tenantDb!,
+      req.params.id,
+      req.user!.role,
+      req.user!.id
+    );
+
+    await req.commitTransaction!();
+    res.json({ tasks });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/procore/my-projects/:id/tasks — create project-scoped task
+router.post(
+  "/my-projects/:id/tasks",
+  requireRole("admin", "director"),
+  async (req, res, next) => {
+    try {
+      const projectId = req.params.id as string;
+      const { title, description, type, priority, assignedTo, dueDate, dueTime, remindAt } = req.body;
+      const officeId = req.user!.activeOfficeId ?? req.user!.officeId;
+
+      if (!title) throw new AppError(400, "Title is required");
+      if (typeof assignedTo !== "string" || assignedTo.length === 0) {
+        throw new AppError(400, "assignedTo is required");
+      }
+      if (priority && !TASK_PRIORITIES.includes(priority)) {
+        throw new AppError(400, `Invalid priority. Must be one of: ${TASK_PRIORITIES.join(", ")}`);
+      }
+      if (type && !TASK_TYPES.includes(type)) {
+        throw new AppError(400, `Invalid task type. Must be one of: ${TASK_TYPES.join(", ")}`);
+      }
+
+      const project = await getProjectTaskScope(
+        req.tenantDb!,
+        projectId,
+        req.user!.role,
+        req.user!.id
+      );
+      if (!project) {
+        throw new AppError(404, "Project not found");
+      }
+
+      await assertAssignableUserForOffice(assignedTo, officeId);
+      const task = await createTask(req.tenantDb!, {
+        title,
+        description,
+        type: type ?? "manual",
+        priority,
+        assignedTo,
+        createdBy: req.user!.id,
+        dealId: projectId,
+        dueDate,
+        dueTime,
+        remindAt,
+      });
+
+      const sideEffects = await queueTaskCreateSideEffects(req.tenantDb!, task, {
+        actorUserId: req.user!.id,
+        officeId,
+      });
+
+      await req.commitTransaction!();
+
+      if (sideEffects.shouldEmitAssignmentEvent) {
+        try {
+          eventBus.emitLocal({
+            name: "task.assigned",
+            payload: {
+              taskId: task.id,
+              assignedTo: task.assignedTo,
+              title: task.title,
+            },
+            officeId,
+            userId: req.user!.id,
+            timestamp: new Date(),
+          });
+        } catch (eventErr) {
+          console.error("[Tasks] Failed to emit task.assigned event:", eventErr);
+        }
+      }
+
+      res.status(201).json({ task });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
 
 export const procoreRoutes = router;

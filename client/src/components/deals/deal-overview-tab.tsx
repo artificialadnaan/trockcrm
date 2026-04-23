@@ -34,9 +34,9 @@ export function DealOverviewTab({ deal }: DealOverviewTabProps) {
       {/* Left Column: Details */}
       <div className="lg:col-span-2 space-y-4">
         {/* Stage & Status */}
-        <Card>
+        <Card className="overflow-hidden border-slate-200 shadow-sm">
           <CardHeader className="pb-3">
-            <CardTitle className="text-sm font-medium text-muted-foreground">
+            <CardTitle className="text-[11px] font-black tracking-[0.16em] text-slate-500 uppercase">
               Stage & Status
             </CardTitle>
           </CardHeader>
@@ -66,9 +66,9 @@ export function DealOverviewTab({ deal }: DealOverviewTabProps) {
 
         {/* Property Info */}
         {(deal.propertyAddress || deal.propertyCity) && (
-          <Card>
+          <Card className="overflow-hidden border-slate-200 shadow-sm">
             <CardHeader className="pb-3">
-              <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-2">
+              <CardTitle className="text-[11px] font-black tracking-[0.16em] text-slate-500 uppercase flex items-center gap-2">
                 <MapPin className="h-4 w-4" />
                 Property
               </CardTitle>
@@ -97,9 +97,9 @@ export function DealOverviewTab({ deal }: DealOverviewTabProps) {
           </Card>
         )}
 
-        <Card>
+        <Card className="overflow-hidden border-slate-200 shadow-sm">
           <CardHeader className="pb-3">
-            <CardTitle className="text-sm font-medium text-muted-foreground">Lead Surface</CardTitle>
+            <CardTitle className="text-[11px] font-black tracking-[0.16em] text-slate-500 uppercase">Lead Surface</CardTitle>
           </CardHeader>
           <CardContent className="text-sm space-y-2">
             <p className="text-muted-foreground">
@@ -117,9 +117,9 @@ export function DealOverviewTab({ deal }: DealOverviewTabProps) {
         </Card>
 
         {/* Metadata */}
-        <Card>
+        <Card className="overflow-hidden border-slate-200 shadow-sm">
           <CardHeader className="pb-3">
-            <CardTitle className="text-sm font-medium text-muted-foreground">Details</CardTitle>
+            <CardTitle className="text-[11px] font-black tracking-[0.16em] text-slate-500 uppercase">Details</CardTitle>
           </CardHeader>
           <CardContent>
             <div className="grid grid-cols-2 gap-4 text-sm">
@@ -164,9 +164,9 @@ export function DealOverviewTab({ deal }: DealOverviewTabProps) {
 
         {/* Change Orders */}
         {deal.changeOrders.length > 0 && (
-          <Card>
+          <Card className="overflow-hidden border-slate-200 shadow-sm">
             <CardHeader className="pb-3">
-              <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-2">
+              <CardTitle className="text-[11px] font-black tracking-[0.16em] text-slate-500 uppercase flex items-center gap-2">
                 <FileText className="h-4 w-4" />
                 Change Orders ({deal.changeOrders.length})
               </CardTitle>
@@ -211,7 +211,7 @@ export function DealOverviewTab({ deal }: DealOverviewTabProps) {
 
         {/* Lost Deal Info */}
         {deal.lostReasonId && (
-          <Card className="border-red-200 bg-red-50/50">
+          <Card className="overflow-hidden border-red-200 bg-red-50/50 shadow-sm">
             <CardHeader className="pb-3">
               <CardTitle className="text-sm font-medium text-red-700">
                 Lost Deal Details
@@ -238,7 +238,7 @@ export function DealOverviewTab({ deal }: DealOverviewTabProps) {
 
         {/* Procore Link */}
         {deal.procoreProjectId && (
-          <Card>
+          <Card className="overflow-hidden border-slate-200 shadow-sm">
             <CardContent className="pt-4">
               <div className="flex items-center gap-2 text-sm">
                 <span className="text-muted-foreground">Procore Project:</span>

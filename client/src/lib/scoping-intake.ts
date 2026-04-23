@@ -10,6 +10,7 @@ const SECTION_LABELS: Record<string, string> = {
   projectOverview: "Project Overview",
   propertyDetails: "Property Details",
   scopeSummary: "Scope Summary",
+  opportunity: "Opportunity Review",
   attachments: "Attachments",
 };
 
@@ -21,6 +22,10 @@ const FIELD_LABELS: Record<string, string> = {
   propertyState: "Property State",
   propertyZip: "Property Zip",
   summary: "Summary",
+  preBidMeetingCompleted: "Pre-Bid Meeting Completed",
+  estimatorConsultationNotes: "Estimator Consultation Notes",
+  siteVisitDecision: "Site Visit Decision",
+  siteVisitCompleted: "Site Visit Completed",
 };
 
 function startCase(value: string) {
@@ -49,8 +54,11 @@ export function formatScopingAttachmentLabel(value: string) {
   return normalized.charAt(0).toUpperCase() + normalized.slice(1);
 }
 
-export function summarizeScopingRoute(route: WorkflowRoute) {
-  return route === "service" ? "Ready for Service" : "Ready for Normal";
+export function summarizeScopingRoute(route: WorkflowRoute | null | undefined) {
+  if (!route) {
+    return "Opportunity Review Pending";
+  }
+  return route === "service" ? "Ready for Service" : "Ready for Estimating";
 }
 
 export function getScopingCompletionCounts(
@@ -84,6 +92,12 @@ export function buildScopingSeedFromDeal(deal: {
     },
     scopeSummary: {
       summary: deal.description ?? "",
+    },
+    opportunity: {
+      preBidMeetingCompleted: "",
+      estimatorConsultationNotes: "",
+      siteVisitDecision: "",
+      siteVisitCompleted: "",
     },
     attachments: {},
   };

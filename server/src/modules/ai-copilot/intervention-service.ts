@@ -1,13 +1,17 @@
-import { and, desc, eq, inArray } from "drizzle-orm";
+import crypto from "crypto";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import {
   aiFeedback,
+  aiCopilotPackets,
   aiDisconnectCaseHistory,
   aiDisconnectCases,
   companies,
   deals,
+  jobQueue,
   tasks,
+  users,
 } from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
 import {
@@ -15,11 +19,46 @@ import {
   listCurrentSalesProcessDisconnectRows,
   type SalesProcessDisconnectRow,
 } from "./service.js";
+import { getAiCopilotProvider } from "./provider.js";
+import {
+  RESOLVE_OUTCOME_CATEGORY_TO_REASON_CODES,
+  SNOOZE_REASON_TO_EXPECTED_OPTIONS,
+  ESCALATION_TARGET_TYPES,
+  mapStructuredResolveReasonToLegacyResolutionReason,
+} from "./intervention-outcome-taxonomy.js";
 import type {
+  InterventionAnalyticsBreachRow,
+  InterventionAnalyticsDashboard,
+  InterventionAnalyticsHotspotRow,
   InterventionCaseDetail,
+  InterventionCopilotEvidenceItem,
+  InterventionCopilotOwnerContext,
+  InterventionCopilotPacketView,
+  InterventionCopilotRecommendedAction,
+  InterventionCopilotRiskFlag,
+  InterventionCopilotRootCause,
+  InterventionCopilotReopenRisk,
+  InterventionCopilotSimilarCase,
+  InterventionCopilotView,
+  InterventionManagerBrief,
+  InterventionPolicyRecommendationApplyEventStatus,
+  InterventionPolicyRecommendationDecisionStatus,
+  InterventionPolicyRecommendationEvaluationSummary,
+  InterventionPolicyRecommendation,
+  InterventionPolicyRecommendationProposedChange,
+  InterventionPolicyRecommendationReviewDetails,
+  InterventionPolicyRecommendationConfidence,
+  InterventionPolicyRecommendationFeedbackValue,
+  InterventionPolicyRecommendationsView,
+  InterventionOutcomeEffectiveness,
+  InterventionQueueFilters,
   InterventionQueueItem,
   InterventionQueueResult,
   InterventionQueueView,
+  StructuredEscalateConclusion,
+  StructuredInterventionConclusion,
+  StructuredResolveConclusion,
+  StructuredSnoozeConclusion,
 } from "./intervention-types.js";
 import {
   completeTask,
@@ -33,9 +72,11 @@ type TenantDb = NodePgDatabase<typeof schema>;
 type DisconnectCaseRow = typeof aiDisconnectCases.$inferSelect;
 type DisconnectCaseInsert = typeof aiDisconnectCases.$inferInsert;
 type DisconnectCaseHistoryRow = typeof aiDisconnectCaseHistory.$inferSelect;
+type AiCopilotPacketRow = typeof aiCopilotPackets.$inferSelect;
 type TaskRow = typeof tasks.$inferSelect;
 type DealRow = typeof deals.$inferSelect;
 type CompanyRow = typeof companies.$inferSelect;
+type UserRow = typeof users.$inferSelect;
 type AiFeedbackRow = typeof aiFeedback.$inferSelect;
 
 type InMemoryTenantDb = {
@@ -44,10 +85,25 @@ type InMemoryTenantDb = {
     tasks: TaskRow[];
     deals: Array<Pick<DealRow, "id" | "dealNumber" | "name" | "companyId">>;
     companies: Array<Pick<CompanyRow, "id" | "name">>;
+    users?: Array<Pick<UserRow, "id" | "displayName">>;
     history: DisconnectCaseHistoryRow[];
+    packets?: AiCopilotPacketRow[];
     feedback?: AiFeedbackRow[];
+    policyRecommendationSnapshots?: Array<Record<string, any>>;
+    policyRecommendationRows?: Array<Record<string, any>>;
+    policyRecommendationFeedback?: Array<Record<string, any>>;
+    policyRecommendationDecisions?: Array<Record<string, any>>;
+    policyRecommendationApplyEvents?: Array<Record<string, any>>;
+    interventionSnoozePolicies?: Array<Record<string, any>>;
+    interventionEscalationPolicies?: Array<Record<string, any>>;
+    interventionAssigneeBalancingPolicies?: Array<Record<string, any>>;
   };
 };
+
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+export const INTERVENTION_SYSTEM_ACTOR_ID = "00000000-0000-0000-0000-0000000000a1";
 
 function isInMemoryTenantDb(value: unknown): value is InMemoryTenantDb {
   return Boolean(value && typeof value === "object" && "state" in value);
@@ -73,6 +129,44 @@ function severityRank(value: string) {
   }
 }
 
+function interventionSlaThresholdDays(value: string) {
+  switch (value) {
+    case "critical":
+      return 0;
+    case "high":
+      return 2;
+    case "medium":
+      return 5;
+    case "low":
+      return 10;
+    default:
+      return Number.POSITIVE_INFINITY;
+  }
+}
+
+function startOfDay(date: Date) {
+  const result = new Date(date);
+  result.setHours(0, 0, 0, 0);
+  return result;
+}
+
+function calculateBusinessDaysElapsed(startedAt: Date | null | undefined, now: Date) {
+  if (!startedAt) return 0;
+  const current = startOfDay(startedAt);
+  const end = startOfDay(now);
+  let elapsed = 0;
+
+  while (current < end) {
+    current.setDate(current.getDate() + 1);
+    const dayOfWeek = current.getDay();
+    if (dayOfWeek !== 0 && dayOfWeek !== 6) {
+      elapsed++;
+    }
+  }
+
+  return elapsed;
+}
+
 function buildBusinessKey(officeId: string, row: SalesProcessDisconnectRow) {
   const identity = getDisconnectCaseIdentity(row);
   return `${officeId}:${row.disconnectType}:${identity.scopeType}:${identity.scopeId}`;
@@ -87,7 +181,9 @@ function buildCaseMetadata(row: SalesProcessDisconnectRow) {
     dealNumber: row.dealNumber,
     dealName: row.dealName,
     companyName: row.companyName,
+    stageKey: row.stageKey ?? null,
     stageName: row.stageName,
+    assignedRepId: row.assignedRepId ?? null,
     assignedRepName: row.assignedRepName,
     ageDays: row.ageDays,
     latestCustomerEmailAt: row.latestCustomerEmailAt,
@@ -119,6 +215,8 @@ function buildCaseInsert(
     reopenCount: 0,
     firstDetectedAt: now,
     lastDetectedAt: now,
+    currentLifecycleStartedAt: now,
+    lastReopenedAt: null,
     metadataJson: buildCaseMetadata(row),
   };
 }
@@ -128,6 +226,37 @@ function shouldReopenCase(existing: DisconnectCaseRow, now: Date) {
   if (existing.status !== "snoozed") return false;
   if (!existing.snoozedUntil) return true;
   return existing.snoozedUntil <= now;
+}
+
+function getSystemActorUserId() {
+  return INTERVENTION_SYSTEM_ACTOR_ID;
+}
+
+function buildReopenHistoryMetadata(input: {
+  priorConclusionActionId: string;
+  priorConclusionKind: "resolve" | "snooze" | "escalate";
+  reopenReason: string;
+  lifecycleStartedAt: string;
+}) {
+  return {
+    priorConclusionActionId: input.priorConclusionActionId,
+    priorConclusionKind: input.priorConclusionKind,
+    reopenReason: input.reopenReason,
+    lifecycleStartedAt: input.lifecycleStartedAt,
+  };
+}
+
+function readHistoryConclusionKind(
+  row: Pick<DisconnectCaseHistoryRow, "actionType" | "metadataJson">
+): "resolve" | "snooze" | "escalate" {
+  const kind = readHistoryMetadata(row).conclusion?.kind;
+  if (kind === "resolve" || kind === "snooze" || kind === "escalate") return kind;
+
+  if (row.actionType === "resolve" || row.actionType === "snooze" || row.actionType === "escalate") {
+    return row.actionType;
+  }
+
+  return "resolve";
 }
 
 function sortQueueItems(a: InterventionQueueItem, b: InterventionQueueItem) {
@@ -140,16 +269,90 @@ function sortQueueItems(a: InterventionQueueItem, b: InterventionQueueItem) {
   return a.businessKey.localeCompare(b.businessKey);
 }
 
+function readMetadataString(metadata: Record<string, unknown> | null | undefined, key: string) {
+  if (!metadata || typeof metadata !== "object") return null;
+  const value = metadata[key];
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function readMetadataDate(metadata: Record<string, unknown> | null | undefined, key: string) {
+  const value = readMetadataString(metadata, key);
+  if (!value) return null;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function resolveCaseAssigneeName(
+  usersMap: Map<string, string>,
+  assignedTo: string | null | undefined,
+  metadataJson: Record<string, unknown> | null | undefined
+) {
+  return usersMap.get(assignedTo ?? "") ?? readMetadataString(metadataJson, "assignedRepName") ?? null;
+}
+
+function readHistoryMetadata(row: Pick<DisconnectCaseHistoryRow, "metadataJson">) {
+  return (row.metadataJson ?? {}) as {
+    conclusion?: {
+      kind?: "resolve" | "snooze" | "escalate";
+      outcomeCategory?: string;
+      reasonCode?: string;
+      effectiveness?: "confirmed" | "likely" | "unclear";
+      snoozeReasonCode?: string;
+      escalationReasonCode?: string;
+      escalationTargetType?: string;
+    } | null;
+    priorConclusionActionId?: string;
+    assigneeAtConclusion?: string | null;
+    disconnectTypeAtConclusion?: string;
+    lifecycleStartedAt?: string;
+  };
+}
+
+function matchesQueueStatus(
+  row: DisconnectCaseRow,
+  input: { status?: "open" | "snoozed" | "resolved"; view?: InterventionQueueView; now: Date }
+) {
+  if (input.view === "overdue") {
+    if (row.status !== "open") return false;
+    return input.status ? row.status === input.status : true;
+  }
+
+  if (input.view === "snooze-breached") {
+    if (row.status !== "snoozed") return false;
+    if (!row.snoozedUntil || row.snoozedUntil > input.now) return false;
+    return input.status ? row.status === input.status : true;
+  }
+
+  if (input.status) return row.status === input.status;
+  if (row.status === "resolved") return false;
+  if (row.status === "snoozed" && (!row.snoozedUntil || row.snoozedUntil > input.now)) return false;
+  return true;
+}
+
+function matchesQueueFilters(row: DisconnectCaseRow, filters: InterventionQueueFilters | undefined) {
+  if (!filters) return true;
+  if (filters.severity && row.severity !== filters.severity) return false;
+  if (filters.disconnectType && row.disconnectType !== filters.disconnectType) return false;
+  if (filters.assigneeId && row.assignedTo !== filters.assigneeId) return false;
+  if (filters.companyId && row.companyId !== filters.companyId) return false;
+  if (filters.repId && readMetadataString(row.metadataJson as Record<string, unknown> | null, "assignedRepId") !== filters.repId) {
+    return false;
+  }
+  if (filters.stageKey && readMetadataString(row.metadataJson as Record<string, unknown> | null, "stageKey") !== filters.stageKey) {
+    return false;
+  }
+  return true;
+}
+
 function projectQueueItem(input: {
   row: DisconnectCaseRow;
   task: TaskRow | null;
   deal: Pick<DealRow, "id" | "dealNumber" | "name" | "companyId"> | null;
   company: Pick<CompanyRow, "id" | "name"> | null;
   history: DisconnectCaseHistoryRow | null;
+  usersMap: Map<string, string>;
+  now: Date;
 }): InterventionQueueItem {
-  const ageDaysRaw = input.row.metadataJson && typeof input.row.metadataJson === "object"
-    ? (input.row.metadataJson as Record<string, unknown>).ageDays
-    : null;
   const evidenceSummaryRaw = input.row.metadataJson && typeof input.row.metadataJson === "object"
     ? (input.row.metadataJson as Record<string, unknown>).evidenceSummary
     : null;
@@ -163,13 +366,19 @@ function projectQueueItem(input: {
     status: input.row.status as "open" | "snoozed" | "resolved",
     escalated: input.row.escalated,
     reopenCount: input.row.reopenCount,
-    ageDays: typeof ageDaysRaw === "number" ? ageDaysRaw : 0,
+    ageDays: calculateBusinessDaysElapsed(input.row.currentLifecycleStartedAt, input.now),
     assignedTo: input.row.assignedTo,
+    assignedToName: resolveCaseAssigneeName(
+      input.usersMap,
+      input.row.assignedTo,
+      input.row.metadataJson as Record<string, unknown> | null
+    ),
     generatedTask: input.task
       ? {
           id: input.task.id,
           status: input.task.status,
           assignedTo: input.task.assignedTo,
+          assignedToName: input.usersMap.get(input.task.assignedTo ?? "") ?? null,
           title: input.task.title,
         }
       : null,
@@ -252,8 +461,12 @@ export async function materializeDisconnectCases(
       existing.metadataJson = buildCaseMetadata(row);
       existing.updatedAt = now;
       if (shouldReopenCase(existing, now)) {
+        const nextLifecycleStartedAt = now;
+        await writeReopenedHistoryEvent(tenantDb, existing, nextLifecycleStartedAt);
         existing.status = "open";
         existing.reopenCount += 1;
+        existing.currentLifecycleStartedAt = nextLifecycleStartedAt;
+        existing.lastReopenedAt = nextLifecycleStartedAt;
         existing.snoozedUntil = null;
         existing.resolvedAt = null;
         existing.resolutionReason = null;
@@ -302,6 +515,9 @@ export async function materializeDisconnectCases(
     }
 
     const reopen = shouldReopenCase(existing, now);
+    if (reopen) {
+      await writeReopenedHistoryEvent(tenantDb, existing, now);
+    }
     await tenantDb
       .update(aiDisconnectCases)
       .set({
@@ -311,6 +527,8 @@ export async function materializeDisconnectCases(
         resolvedAt: reopen ? null : existing.resolvedAt,
         resolutionReason: reopen ? null : existing.resolutionReason,
         reopenCount: reopen ? existing.reopenCount + 1 : existing.reopenCount,
+        currentLifecycleStartedAt: reopen ? now : existing.currentLifecycleStartedAt,
+        lastReopenedAt: reopen ? now : existing.lastReopenedAt,
       })
       .where(eq(aiDisconnectCases.id, existing.id));
   }
@@ -325,6 +543,7 @@ export async function listInterventionCases(
     status?: "open" | "snoozed" | "resolved";
     view?: InterventionQueueView;
     clusterKey?: string;
+    filters?: InterventionQueueFilters;
     page?: number;
     pageSize?: number;
     now?: Date;
@@ -336,17 +555,15 @@ export async function listInterventionCases(
 
   if (isInMemoryTenantDb(tenantDb)) {
     let cases = tenantDb.state.cases.filter((row) => row.officeId === input.officeId);
-    cases = cases.filter((row) => {
-      if (input.status) return row.status === input.status;
-      if (row.status === "resolved") return false;
-      if (row.status === "snoozed" && (!row.snoozedUntil || row.snoozedUntil > now)) return false;
-      return true;
-    });
+    cases = cases
+      .filter((row) => matchesQueueStatus(row, { status: input.status, view: input.view, now }))
+      .filter((row) => matchesQueueFilters(row, input.filters));
 
     const latestHistoryByCase = new Map<string, DisconnectCaseHistoryRow>();
     for (const row of tenantDb.state.history.sort((a, b) => b.actedAt.getTime() - a.actedAt.getTime())) {
       if (!latestHistoryByCase.has(row.disconnectCaseId)) latestHistoryByCase.set(row.disconnectCaseId, row);
     }
+    const usersMap = new Map((tenantDb.state.users ?? []).map((user) => [user.id, user.displayName]));
 
     const items = cases
       .map((row) =>
@@ -356,6 +573,8 @@ export async function listInterventionCases(
           deal: tenantDb.state.deals.find((deal) => deal.id === row.dealId) ?? null,
           company: tenantDb.state.companies.find((company) => company.id === row.companyId) ?? null,
           history: latestHistoryByCase.get(row.id) ?? null,
+          usersMap,
+          now,
         })
       )
       .filter((item) => matchesInterventionView(item, input.view))
@@ -377,16 +596,14 @@ export async function listInterventionCases(
   });
 
   let cases = await getCasesByOffice(tenantDb, input.officeId);
-  cases = cases.filter((row) => {
-    if (input.status) return row.status === input.status;
-    if (row.status === "resolved") return false;
-    if (row.status === "snoozed" && (!row.snoozedUntil || row.snoozedUntil > now)) return false;
-    return true;
-  });
+  cases = cases
+    .filter((row) => matchesQueueStatus(row, { status: input.status, view: input.view, now }))
+    .filter((row) => matchesQueueFilters(row, input.filters));
 
   const taskIds = cases.map((row) => row.generatedTaskId).filter((value): value is string => Boolean(value));
   const dealIds = cases.map((row) => row.dealId).filter((value): value is string => Boolean(value));
   const companyIds = cases.map((row) => row.companyId).filter((value): value is string => Boolean(value));
+  const assigneeIds = [...new Set(cases.map((row) => row.assignedTo).filter((value): value is string => Boolean(value)))];
   const [taskRows, dealRows, companyRows, historyRows] = await Promise.all([
     taskIds.length ? tenantDb.select().from(tasks).where(inArray(tasks.id, taskIds)) : Promise.resolve([]),
     dealIds.length ? tenantDb.select().from(deals).where(inArray(deals.id, dealIds)) : Promise.resolve([]),
@@ -399,10 +616,16 @@ export async function listInterventionCases(
           .orderBy(desc(aiDisconnectCaseHistory.actedAt))
       : Promise.resolve([]),
   ]);
+  const taskAssigneeIds = taskRows.map((row) => row.assignedTo).filter((value): value is string => Boolean(value));
+  const userIds = [...new Set([...assigneeIds, ...taskAssigneeIds])];
+  const userRows = userIds.length
+    ? await tenantDb.select({ id: users.id, displayName: users.displayName }).from(users).where(inArray(users.id, userIds))
+    : [];
 
   const taskMap = new Map(taskRows.map((row) => [row.id, row]));
   const dealMap = new Map(dealRows.map((row) => [row.id, row]));
   const companyMap = new Map(companyRows.map((row) => [row.id, row]));
+  const usersMap = new Map(userRows.map((row) => [row.id, row.displayName]));
   const latestHistoryByCase = new Map<string, DisconnectCaseHistoryRow>();
   for (const row of historyRows) {
     if (!latestHistoryByCase.has(row.disconnectCaseId)) latestHistoryByCase.set(row.disconnectCaseId, row);
@@ -416,6 +639,8 @@ export async function listInterventionCases(
         deal: row.dealId ? dealMap.get(row.dealId) ?? null : null,
         company: row.companyId ? companyMap.get(row.companyId) ?? null : null,
         history: latestHistoryByCase.get(row.id) ?? null,
+        usersMap,
+        now,
       })
     )
     .filter((item) => matchesInterventionView(item, input.view))
@@ -436,6 +661,10 @@ function matchesInterventionView(item: InterventionQueueItem, view: Intervention
   switch (view) {
     case "all":
       return true;
+    case "overdue":
+      return item.status === "open" && item.ageDays > interventionSlaThresholdDays(item.severity);
+    case "snooze-breached":
+      return item.status === "snoozed";
     case "escalated":
       return item.escalated;
     case "unassigned":
@@ -450,6 +679,2755 @@ function matchesInterventionView(item: InterventionQueueItem, view: Intervention
     default:
       return item.status === "open";
   }
+}
+
+function buildSeverityCounts() {
+  return {
+    critical: 0,
+    high: 0,
+    medium: 0,
+    low: 0,
+  } satisfies Record<"critical" | "high" | "medium" | "low", number>;
+}
+
+function incrementSeverityCount(
+  counts: Record<"critical" | "high" | "medium" | "low", number>,
+  severity: string
+) {
+  if (severity === "critical" || severity === "high" || severity === "medium" || severity === "low") {
+    counts[severity] += 1;
+  }
+}
+
+function average(values: number[]) {
+  if (values.length === 0) return null;
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function median(values: number[]) {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const middle = Math.floor(sorted.length / 2);
+  if (sorted.length % 2 === 0) {
+    return (sorted[middle - 1] + sorted[middle]) / 2;
+  }
+  return sorted[middle] ?? null;
+}
+
+function formatAnalyticsLabel(value: string) {
+  return value.replace(/_/g, " ");
+}
+
+function isOverdueDisconnectCase(row: DisconnectCaseRow, now: Date) {
+  return row.status === "open" && calculateBusinessDaysElapsed(row.currentLifecycleStartedAt, now) > interventionSlaThresholdDays(row.severity);
+}
+
+function isSnoozeBreachedCase(row: DisconnectCaseRow, now: Date) {
+  return row.status === "snoozed" && Boolean(row.snoozedUntil && row.snoozedUntil <= now);
+}
+
+function isRepeatOpenCase(row: DisconnectCaseRow) {
+  return row.status === "open" && row.reopenCount > 0;
+}
+
+function isEscalatedOpenCase(row: DisconnectCaseRow) {
+  return row.escalated && row.status !== "resolved";
+}
+
+function formatQueueLink(input: {
+  view?: InterventionQueueView;
+  caseId?: string;
+  assigneeId?: string | null;
+  disconnectType?: string | null;
+  repId?: string | null;
+  companyId?: string | null;
+  stageKey?: string | null;
+}) {
+  const params = new URLSearchParams();
+  if (input.view && input.view !== "open") params.set("view", input.view);
+  if (input.assigneeId) params.set("assigneeId", input.assigneeId);
+  if (input.disconnectType) params.set("disconnectType", input.disconnectType);
+  if (input.repId) params.set("repId", input.repId);
+  if (input.companyId) params.set("companyId", input.companyId);
+  if (input.stageKey) params.set("stageKey", input.stageKey);
+  if (input.caseId) params.set("caseId", input.caseId);
+  const query = params.toString();
+  return query ? `/admin/interventions?${query}` : "/admin/interventions";
+}
+
+async function loadInterventionAnalyticsData(
+  tenantDb: TenantDb | InMemoryTenantDb,
+  officeId: string,
+  casesOverride?: DisconnectCaseRow[]
+) {
+  if (isInMemoryTenantDb(tenantDb)) {
+    const scopedCases = casesOverride ?? tenantDb.state.cases.filter((row) => row.officeId === officeId);
+    return {
+      cases: scopedCases,
+      deals: tenantDb.state.deals,
+      companies: tenantDb.state.companies,
+      users: tenantDb.state.users ?? [],
+      history: tenantDb.state.history.filter((row) =>
+        scopedCases.some((item) => item.id === row.disconnectCaseId)
+      ),
+    };
+  }
+
+  const cases = casesOverride ?? (await getCasesByOffice(tenantDb, officeId));
+  const persistedCaseIds = cases
+    .map((row) => row.id)
+    .filter((value): value is string => UUID_PATTERN.test(value));
+  const dealIds = cases.map((row) => row.dealId).filter((value): value is string => Boolean(value));
+  const companyIds = cases.map((row) => row.companyId).filter((value): value is string => Boolean(value));
+  const assigneeIds = [...new Set(cases.map((row) => row.assignedTo).filter((value): value is string => Boolean(value)))];
+  const [dealRows, companyRows, userRows, historyRows] = await Promise.all([
+    dealIds.length ? tenantDb.select().from(deals).where(inArray(deals.id, dealIds)) : Promise.resolve([]),
+    companyIds.length ? tenantDb.select().from(companies).where(inArray(companies.id, companyIds)) : Promise.resolve([]),
+    assigneeIds.length ? tenantDb.select({ id: users.id, displayName: users.displayName }).from(users).where(inArray(users.id, assigneeIds)) : Promise.resolve([]),
+    persistedCaseIds.length
+      ? tenantDb.select().from(aiDisconnectCaseHistory).where(inArray(aiDisconnectCaseHistory.disconnectCaseId, persistedCaseIds))
+      : Promise.resolve([]),
+  ]);
+
+  return {
+    cases,
+    deals: dealRows,
+    companies: companyRows,
+    users: userRows,
+    history: historyRows,
+  };
+}
+
+async function buildAnalyticsPreviewCases(
+  tenantDb: TenantDb,
+  input: { officeId: string; now: Date }
+) {
+  const [existingCases, currentRows] = await Promise.all([
+    getCasesByOffice(tenantDb, input.officeId),
+    // `tenantDb` is already scoped to the active office schema by tenant middleware.
+    listCurrentSalesProcessDisconnectRows(tenantDb, { limit: null }),
+  ]);
+  const existingByBusinessKey = new Map(existingCases.map((row) => [row.businessKey, row]));
+  const previewCases: DisconnectCaseRow[] = [...existingCases];
+
+  for (const row of currentRows) {
+    const businessKey = buildBusinessKey(input.officeId, row);
+    const existing = existingByBusinessKey.get(businessKey);
+    if (!existing) {
+      previewCases.push({
+        id: `preview:${businessKey}`,
+        ...buildCaseInsert(input.officeId, row, input.now),
+        createdAt: input.now,
+        updatedAt: input.now,
+      } as DisconnectCaseRow);
+      continue;
+    }
+
+    const reopen = shouldReopenCase(existing, input.now);
+    const previewRow: DisconnectCaseRow = {
+      ...existing,
+      severity: row.disconnectSeverity,
+      clusterKey: getDisconnectCaseIdentity(row).clusterKey,
+      companyId: row.companyId,
+      lastDetectedAt: input.now,
+      metadataJson: buildCaseMetadata(row),
+      updatedAt: input.now,
+      status: reopen ? "open" : existing.status,
+      snoozedUntil: reopen ? null : existing.snoozedUntil,
+      resolvedAt: reopen ? null : existing.resolvedAt,
+      resolutionReason: reopen ? null : existing.resolutionReason,
+      reopenCount: reopen ? existing.reopenCount + 1 : existing.reopenCount,
+      currentLifecycleStartedAt: reopen ? input.now : existing.currentLifecycleStartedAt,
+      lastReopenedAt: reopen ? input.now : existing.lastReopenedAt,
+    };
+
+    const previewIndex = previewCases.findIndex((item) => item.id === existing.id);
+    if (previewIndex >= 0) previewCases[previewIndex] = previewRow;
+  }
+
+  return previewCases;
+}
+
+function buildInterventionAnalyticsSummary(cases: DisconnectCaseRow[], now: Date) {
+  const openCases = cases.filter((row) => row.status === "open");
+  const overdueCases = openCases.filter((row) => isOverdueDisconnectCase(row, now));
+  const escalatedCases = cases.filter((row) => isEscalatedOpenCase(row));
+  const snoozeOverdueCases = cases.filter((row) => isSnoozeBreachedCase(row, now));
+  const repeatOpenCases = openCases.filter((row) => isRepeatOpenCase(row));
+
+  const openCasesBySeverity = buildSeverityCounts();
+  const overdueCasesBySeverity = buildSeverityCounts();
+  for (const row of openCases) incrementSeverityCount(openCasesBySeverity, row.severity);
+  for (const row of overdueCases) incrementSeverityCount(overdueCasesBySeverity, row.severity);
+
+  return {
+    openCases: openCases.length,
+    overdueCases: overdueCases.length,
+    escalatedCases: escalatedCases.length,
+    snoozeOverdueCases: snoozeOverdueCases.length,
+    repeatOpenCases: repeatOpenCases.length,
+    openCasesBySeverity,
+    overdueCasesBySeverity,
+  };
+}
+
+function buildInterventionAnalyticsOutcomes(
+  cases: DisconnectCaseRow[],
+  historyRows: DisconnectCaseHistoryRow[],
+  now: Date
+) {
+  const windowStart = new Date(now);
+  windowStart.setDate(windowStart.getDate() - 30);
+
+  const recentHistory = historyRows.filter((row) => row.actedAt >= windowStart);
+  const actionVolume30d = {
+    assign: recentHistory.filter((row) => row.actionType === "assign").length,
+    snooze: recentHistory.filter((row) => row.actionType === "snooze").length,
+    resolve: recentHistory.filter((row) => row.actionType === "resolve").length,
+    escalate: recentHistory.filter((row) => row.actionType === "escalate").length,
+  };
+  const recentResolutionCaseIds = new Set(
+    recentHistory
+      .filter((row) => row.actionType === "resolve")
+      .map((row) => row.disconnectCaseId)
+  );
+  const casesById = new Map(cases.map((row) => [row.id, row]));
+  const recentReopens = cases.filter(
+    (row) =>
+      Boolean(row.lastReopenedAt && row.lastReopenedAt >= windowStart) &&
+      recentResolutionCaseIds.has(row.id) &&
+      historyRows.some(
+        (entry) =>
+          entry.disconnectCaseId === row.id &&
+          entry.actionType === "resolve" &&
+          entry.actedAt < (row.lastReopenedAt as Date)
+      )
+  );
+  const intervenedCaseIds = new Set(recentHistory.map((row) => row.disconnectCaseId));
+  const openAges = cases
+    .filter((row) => row.status === "open")
+    .map((row) => calculateBusinessDaysElapsed(row.currentLifecycleStartedAt, now));
+  const resolutionAges = recentHistory
+    .filter((row) => row.actionType === "resolve")
+    .map((entry) => {
+      const lifecycleStartedAt =
+        readMetadataDate(entry.metadataJson as Record<string, unknown> | null | undefined, "lifecycleStartedAt") ??
+        (() => {
+          const currentRow = casesById.get(entry.disconnectCaseId);
+          if (!currentRow?.resolvedAt) return null;
+          return currentRow.resolvedAt.getTime() === entry.actedAt.getTime() ? currentRow.currentLifecycleStartedAt : null;
+        })();
+      return lifecycleStartedAt ? calculateBusinessDaysElapsed(lifecycleStartedAt, entry.actedAt) : null;
+    })
+    .filter((value): value is number => value !== null);
+  const clearanceDenominator = intervenedCaseIds.size;
+  const reopenDenominator = recentResolutionCaseIds.size;
+
+  return {
+    clearanceRate30d: clearanceDenominator === 0 ? null : recentResolutionCaseIds.size / clearanceDenominator,
+    reopenRate30d: reopenDenominator === 0 ? null : recentReopens.length / reopenDenominator,
+    averageAgeOfOpenCases: average(openAges),
+    medianAgeOfOpenCases: median(openAges),
+    averageAgeToResolution: average(resolutionAges),
+    actionVolume30d,
+  };
+}
+
+function buildGroupedRate(
+  rows: DisconnectCaseHistoryRow[],
+  keyFor: (row: DisconnectCaseHistoryRow) => string,
+  reopenedByActionId: Set<string>
+) {
+  const groups = new Map<string, DisconnectCaseHistoryRow[]>();
+  for (const row of rows) {
+    const key = keyFor(row);
+    if (!key) continue;
+    const group = groups.get(key) ?? [];
+    group.push(row);
+    groups.set(key, group);
+  }
+
+  return [...groups.entries()].reduce<Record<string, number | null>>((acc, [key, group]) => {
+    const reopened = group.filter((candidate) => reopenedByActionId.has(candidate.id));
+    acc[key] = group.length === 0 ? null : reopened.length / group.length;
+    return acc;
+  }, {});
+}
+
+function buildGroupedRateTable(
+  rows: DisconnectCaseHistoryRow[],
+  keyFor: (row: DisconnectCaseHistoryRow) => string,
+  reopenedByActionId: Set<string>
+) {
+  const rates = buildGroupedRate(rows, keyFor, reopenedByActionId);
+  return Object.entries(rates).map(([key, rate]) => ({
+    key,
+    rate,
+    count: rows.filter((row) => keyFor(row) === key).length,
+  }));
+}
+
+function buildGroupedCountTable(
+  rows: DisconnectCaseHistoryRow[],
+  keyFor: (row: DisconnectCaseHistoryRow) => string
+) {
+  const groups = new Map<string, number>();
+  for (const row of rows) {
+    const key = keyFor(row);
+    if (!key) continue;
+    groups.set(key, (groups.get(key) ?? 0) + 1);
+  }
+  return groups;
+}
+
+function buildConclusionMixByDisconnectType(rows: DisconnectCaseHistoryRow[]) {
+  const keys = [...new Set(rows.map((row) => readHistoryMetadata(row).disconnectTypeAtConclusion ?? "").filter(Boolean))];
+  return keys.map((key) => ({
+    key,
+    resolveCount: rows.filter((row) => readHistoryMetadata(row).disconnectTypeAtConclusion === key && readHistoryMetadata(row).conclusion?.kind === "resolve").length,
+    snoozeCount: rows.filter((row) => readHistoryMetadata(row).disconnectTypeAtConclusion === key && readHistoryMetadata(row).conclusion?.kind === "snooze").length,
+    escalateCount: rows.filter((row) => readHistoryMetadata(row).disconnectTypeAtConclusion === key && readHistoryMetadata(row).conclusion?.kind === "escalate").length,
+  }));
+}
+
+function buildConclusionMixByActingUser(
+  rows: DisconnectCaseHistoryRow[],
+  usersMap: Map<string, string>
+) {
+  const userIds = [...new Set(rows.map((row) => row.actedBy).filter(Boolean))];
+  return userIds.map((actorUserId) => ({
+    actorUserId,
+    actorName: usersMap.get(actorUserId) ?? null,
+    resolveCount: rows.filter((row) => row.actedBy === actorUserId && readHistoryMetadata(row).conclusion?.kind === "resolve").length,
+    snoozeCount: rows.filter((row) => row.actedBy === actorUserId && readHistoryMetadata(row).conclusion?.kind === "snooze").length,
+    escalateCount: rows.filter((row) => row.actedBy === actorUserId && readHistoryMetadata(row).conclusion?.kind === "escalate").length,
+  }));
+}
+
+function buildConclusionMixByAssigneeAtConclusion(
+  rows: DisconnectCaseHistoryRow[],
+  usersMap: Map<string, string>
+) {
+  const assigneeIds = [...new Set(rows.map((row) => readHistoryMetadata(row).assigneeAtConclusion ?? ""))];
+  return assigneeIds.map((assigneeId) => ({
+    assigneeId: assigneeId || null,
+    assigneeName: assigneeId ? usersMap.get(assigneeId) ?? null : null,
+    resolveCount: rows.filter((row) => (readHistoryMetadata(row).assigneeAtConclusion ?? "") === assigneeId && readHistoryMetadata(row).conclusion?.kind === "resolve").length,
+    snoozeCount: rows.filter((row) => (readHistoryMetadata(row).assigneeAtConclusion ?? "") === assigneeId && readHistoryMetadata(row).conclusion?.kind === "snooze").length,
+    escalateCount: rows.filter((row) => (readHistoryMetadata(row).assigneeAtConclusion ?? "") === assigneeId && readHistoryMetadata(row).conclusion?.kind === "escalate").length,
+  }));
+}
+
+function computeMedianDaysToLinkedReopen(
+  concludedRows: DisconnectCaseHistoryRow[],
+  history: DisconnectCaseHistoryRow[],
+  family: "resolve" | "snooze" | "escalate"
+) {
+  const reopenDurations = concludedRows
+    .filter((row) => readHistoryMetadata(row).conclusion?.kind === family)
+    .map((row) => {
+      const reopen = history.find(
+        (candidate) =>
+          candidate.actionType === "reopened" &&
+          readHistoryMetadata(candidate).priorConclusionActionId === row.id
+      );
+      if (!reopen) return null;
+      return Math.floor(
+        (new Date(String(reopen.actedAt)).getTime() - new Date(String(row.actedAt)).getTime()) /
+          (1000 * 60 * 60 * 24)
+      );
+    })
+    .filter((value): value is number => value !== null)
+    .sort((left, right) => left - right);
+  if (reopenDurations.length === 0) return null;
+  return reopenDurations[Math.floor(reopenDurations.length / 2)] ?? null;
+}
+
+function buildMedianDaysToReopenTable(
+  concludedRows: DisconnectCaseHistoryRow[],
+  history: DisconnectCaseHistoryRow[]
+) {
+  return (["resolve", "snooze", "escalate"] as const).map((key) => ({
+    key,
+    medianDays: computeMedianDaysToLinkedReopen(concludedRows, history, key),
+  }));
+}
+
+function findLinkedReopen(
+  history: DisconnectCaseHistoryRow[],
+  conclusionActionId: string
+) {
+  return history.find(
+    (candidate) =>
+      candidate.actionType === "reopened" &&
+      readHistoryMetadata(candidate).priorConclusionActionId === conclusionActionId
+  );
+}
+
+function isDurablyClosedConclusion(
+  row: DisconnectCaseHistoryRow,
+  history: DisconnectCaseHistoryRow[],
+  casesById: Map<string, DisconnectCaseRow>
+) {
+  if (findLinkedReopen(history, row.id)) return false;
+  const currentRow = casesById.get(row.disconnectCaseId);
+  if (!currentRow || currentRow.status !== "resolved" || !currentRow.resolvedAt) return false;
+  if (currentRow.lastReopenedAt && currentRow.lastReopenedAt > row.actedAt) return false;
+  return currentRow.resolvedAt >= row.actedAt;
+}
+
+function averageDaysToDurableClose(
+  rows: DisconnectCaseHistoryRow[],
+  history: DisconnectCaseHistoryRow[],
+  casesById: Map<string, DisconnectCaseRow>
+) {
+  const durations = rows
+    .filter((row) => isDurablyClosedConclusion(row, history, casesById))
+    .map((row) => {
+      const lifecycleStartedAt = readMetadataDate(row.metadataJson as Record<string, unknown> | null | undefined, "lifecycleStartedAt");
+      const currentRow = casesById.get(row.disconnectCaseId);
+      return lifecycleStartedAt && currentRow?.resolvedAt
+        ? calculateBusinessDaysElapsed(lifecycleStartedAt, currentRow.resolvedAt)
+        : null;
+    })
+    .filter((value): value is number => value !== null);
+
+  return average(durations);
+}
+
+function medianDaysToReopen(rows: DisconnectCaseHistoryRow[], history: DisconnectCaseHistoryRow[]) {
+  const durations = rows
+    .map((row) => {
+      const reopen = findLinkedReopen(history, row.id);
+      return reopen ? calculateBusinessDaysElapsed(row.actedAt, reopen.actedAt) : null;
+    })
+    .filter((value): value is number => value !== null);
+
+  return median(durations);
+}
+
+function buildConclusionFamilyQueueLink(family: "resolve" | "snooze" | "escalate", reopenedCount: number) {
+  if (family === "escalate") return formatQueueLink({ view: "escalated" });
+  if (family === "snooze") return formatQueueLink({ view: reopenedCount > 0 ? "repeat" : "snooze-breached" });
+  return formatQueueLink({ view: reopenedCount > 0 ? "repeat" : "open" });
+}
+
+function buildBestEffortReasonQueueLink(
+  family: "resolve" | "snooze" | "escalate",
+  rows: DisconnectCaseHistoryRow[],
+  history: DisconnectCaseHistoryRow[]
+) {
+  const sample = rows[0];
+  const disconnectType = sample ? readHistoryMetadata(sample).disconnectTypeAtConclusion ?? null : null;
+  const reopenedCount = rows.filter((row) => findLinkedReopen(history, row.id)).length;
+
+  if (family === "escalate") {
+    return formatQueueLink({ view: "escalated", disconnectType });
+  }
+  if (family === "snooze") {
+    return formatQueueLink({ view: reopenedCount > 0 ? "repeat" : "snooze-breached", disconnectType });
+  }
+  return formatQueueLink({ view: reopenedCount > 0 ? "repeat" : "open", disconnectType });
+}
+
+function buildSummaryByConclusionFamily(
+  concludedRows: DisconnectCaseHistoryRow[],
+  history: DisconnectCaseHistoryRow[],
+  reopenedByActionId: Set<string>,
+  casesById: Map<string, DisconnectCaseRow>
+) {
+  return (["resolve", "snooze", "escalate"] as const)
+    .map((key) => {
+      const rows = concludedRows.filter((row) => readHistoryMetadata(row).conclusion?.kind === key);
+      const durableCount = rows.filter((row) => isDurablyClosedConclusion(row, history, casesById)).length;
+      const reopenedCount = rows.filter((row) => reopenedByActionId.has(row.id)).length;
+      return {
+        key,
+        label: formatAnalyticsLabel(key),
+        volume: rows.length,
+        reopenRate: rows.length === 0 ? null : reopenedCount / rows.length,
+        durableCloseRate: rows.length === 0 ? null : durableCount / rows.length,
+        medianDaysToReopen: medianDaysToReopen(rows, history),
+        averageDaysToDurableClose: averageDaysToDurableClose(rows, history, casesById),
+        queueLink: buildConclusionFamilyQueueLink(key, reopenedCount),
+      };
+    })
+    .filter((row) => row.volume > 0);
+}
+
+function buildPerformanceRows(
+  rows: DisconnectCaseHistoryRow[],
+  history: DisconnectCaseHistoryRow[],
+  keyFor: (row: DisconnectCaseHistoryRow) => string,
+  family: "resolve" | "snooze" | "escalate",
+  casesById: Map<string, DisconnectCaseRow>
+) {
+  const groups = new Map<string, DisconnectCaseHistoryRow[]>();
+  for (const row of rows) {
+    const key = keyFor(row);
+    if (!key) continue;
+    const group = groups.get(key) ?? [];
+    group.push(row);
+    groups.set(key, group);
+  }
+
+  return [...groups.entries()]
+    .map(([key, group]) => {
+      const durableCount = group.filter((row) => isDurablyClosedConclusion(row, history, casesById)).length;
+      const reopenedCount = group.filter((row) => findLinkedReopen(history, row.id)).length;
+      return {
+        key,
+        label: formatAnalyticsLabel(key),
+        volume: group.length,
+        reopenRate: group.length === 0 ? null : reopenedCount / group.length,
+        durableCloseRate: group.length === 0 ? null : durableCount / group.length,
+        medianDaysToReopen: medianDaysToReopen(group, history),
+        averageDaysToDurableClose: averageDaysToDurableClose(group, history, casesById),
+        queueLink: buildBestEffortReasonQueueLink(family, group, history),
+      };
+    })
+    .sort((a, b) => {
+      if (b.volume !== a.volume) return b.volume - a.volume;
+      return a.label.localeCompare(b.label);
+    });
+}
+
+function buildDisconnectTypeInteractions(
+  concludedRows: DisconnectCaseHistoryRow[],
+  history: DisconnectCaseHistoryRow[],
+  casesById: Map<string, DisconnectCaseRow>
+) {
+  const groups = new Map<string, DisconnectCaseHistoryRow[]>();
+  for (const row of concludedRows) {
+    const family = readHistoryMetadata(row).conclusion?.kind;
+    const disconnectType = readHistoryMetadata(row).disconnectTypeAtConclusion;
+    if (!family || !disconnectType) continue;
+    const key = `${disconnectType}::${family}`;
+    const group = groups.get(key) ?? [];
+    group.push(row);
+    groups.set(key, group);
+  }
+
+  return [...groups.entries()]
+    .map(([key, group]) => {
+      const [disconnectType, conclusionFamily] = key.split("::") as [string, "resolve" | "snooze" | "escalate"];
+      const durableCount = group.filter((row) => isDurablyClosedConclusion(row, history, casesById)).length;
+      const reopenedCount = group.filter((row) => findLinkedReopen(history, row.id)).length;
+      return {
+        disconnectType,
+        conclusionFamily,
+        volume: group.length,
+        reopenRate: group.length === 0 ? null : reopenedCount / group.length,
+        durableCloseRate: group.length === 0 ? null : durableCount / group.length,
+        queueLink:
+          conclusionFamily === "escalate"
+            ? formatQueueLink({ view: "escalated", disconnectType })
+            : formatQueueLink({ view: reopenedCount > 0 ? "repeat" : "open", disconnectType }),
+      };
+    })
+    .sort((a, b) => {
+      if (b.volume !== a.volume) return b.volume - a.volume;
+      return a.disconnectType.localeCompare(b.disconnectType);
+    });
+}
+
+function buildAssigneeEffectiveness(
+  concludedRows: DisconnectCaseHistoryRow[],
+  history: DisconnectCaseHistoryRow[],
+  usersMap: Map<string, string>,
+  casesById: Map<string, DisconnectCaseRow>
+) {
+  const groups = new Map<string, DisconnectCaseHistoryRow[]>();
+  for (const row of concludedRows) {
+    const key = readHistoryMetadata(row).assigneeAtConclusion ?? "";
+    const group = groups.get(key) ?? [];
+    group.push(row);
+    groups.set(key, group);
+  }
+
+  return [...groups.entries()]
+    .map(([assigneeId, group]) => {
+      const durableCount = group.filter((row) => isDurablyClosedConclusion(row, history, casesById)).length;
+      const reopenedCount = group.filter((row) => findLinkedReopen(history, row.id)).length;
+      return {
+        assigneeId: assigneeId || null,
+        assigneeName: assigneeId ? usersMap.get(assigneeId) ?? null : null,
+        volume: group.length,
+        resolveCount: group.filter((row) => readHistoryMetadata(row).conclusion?.kind === "resolve").length,
+        snoozeCount: group.filter((row) => readHistoryMetadata(row).conclusion?.kind === "snooze").length,
+        escalateCount: group.filter((row) => readHistoryMetadata(row).conclusion?.kind === "escalate").length,
+        reopenRate: group.length === 0 ? null : reopenedCount / group.length,
+        durableCloseRate: group.length === 0 ? null : durableCount / group.length,
+        queueLink: assigneeId ? formatQueueLink({ view: "open", assigneeId }) : null,
+      };
+    })
+    .sort((a, b) => {
+      if (b.volume !== a.volume) return b.volume - a.volume;
+      return (a.assigneeName ?? a.assigneeId ?? "").localeCompare(b.assigneeName ?? b.assigneeId ?? "");
+    });
+}
+
+function buildOutcomeWarnings(
+  concludedRows: DisconnectCaseHistoryRow[],
+  history: DisconnectCaseHistoryRow[],
+  casesById: Map<string, DisconnectCaseRow>
+): InterventionOutcomeEffectiveness["warnings"] {
+  const warnings: InterventionOutcomeEffectiveness["warnings"] = [];
+  const snoozeRows = buildPerformanceRows(
+    concludedRows.filter((row) => readHistoryMetadata(row).conclusion?.kind === "snooze"),
+    history,
+    (row) => String(readHistoryMetadata(row).conclusion?.snoozeReasonCode ?? ""),
+    "snooze",
+    casesById
+  );
+  for (const row of snoozeRows) {
+    if (row.reopenRate !== null && row.reopenRate >= 0.35) {
+      warnings.push({
+        kind: "snooze_reopen_risk",
+        key: row.key,
+        label: row.label,
+        volume: row.volume,
+        rate: row.reopenRate,
+        queueLink: row.queueLink,
+      });
+    }
+  }
+
+  const escalationReasonRows = buildPerformanceRows(
+    concludedRows.filter((row) => readHistoryMetadata(row).conclusion?.kind === "escalate"),
+    history,
+    (row) => String(readHistoryMetadata(row).conclusion?.escalationReasonCode ?? ""),
+    "escalate",
+    casesById
+  );
+  for (const row of escalationReasonRows) {
+    if (row.durableCloseRate !== null && row.durableCloseRate <= 0.4) {
+      warnings.push({
+        kind: "escalation_reason_weak_close_through",
+        key: row.key,
+        label: row.label,
+        volume: row.volume,
+        rate: row.durableCloseRate,
+        queueLink: row.queueLink,
+      });
+    }
+  }
+
+  const escalationTargetRows = buildPerformanceRows(
+    concludedRows.filter((row) => readHistoryMetadata(row).conclusion?.kind === "escalate"),
+    history,
+    (row) => String(readHistoryMetadata(row).conclusion?.escalationTargetType ?? ""),
+    "escalate",
+    casesById
+  );
+  for (const row of escalationTargetRows) {
+    if (row.durableCloseRate !== null && row.durableCloseRate <= 0.4) {
+      warnings.push({
+        kind: "escalation_target_weak_close_through",
+        key: row.key,
+        label: row.label,
+        volume: row.volume,
+        rate: row.durableCloseRate,
+        queueLink: row.queueLink,
+      });
+    }
+  }
+
+  const administrativeGroups = buildGroupedCountTable(
+    concludedRows.filter(
+      (row) =>
+        readHistoryMetadata(row).conclusion?.kind === "resolve" &&
+        readHistoryMetadata(row).conclusion?.effectiveness === "unclear"
+    ),
+    (row) => String(readHistoryMetadata(row).disconnectTypeAtConclusion ?? "")
+  );
+
+  for (const [key, volume] of administrativeGroups.entries()) {
+    warnings.push({
+      kind: "administrative_close_pattern",
+      key,
+      label: formatAnalyticsLabel(key),
+      volume,
+      rate: null,
+      queueLink: formatQueueLink({ view: "open", disconnectType: key }),
+    });
+  }
+
+  return warnings.sort((a, b) => {
+    if (b.volume !== a.volume) return b.volume - a.volume;
+    return a.label.localeCompare(b.label);
+  });
+}
+
+function buildInterventionOutcomeEffectiveness(
+  history: DisconnectCaseHistoryRow[],
+  usersMap: Map<string, string>,
+  cases: DisconnectCaseRow[],
+  now: Date
+): InterventionOutcomeEffectiveness {
+  const windowStart = new Date(now);
+  windowStart.setDate(windowStart.getDate() - 30);
+  const recentHistory = history.filter((row) => row.actedAt >= windowStart);
+  const concludedRows = recentHistory.filter((row) => Boolean(readHistoryMetadata(row).conclusion?.kind));
+  const casesById = new Map(cases.map((row) => [row.id, row]));
+  const reopenedByActionId = new Set(
+    recentHistory
+      .filter((row) => row.actionType === "reopened")
+      .map((row) => String(readHistoryMetadata(row).priorConclusionActionId ?? ""))
+      .filter(Boolean)
+  );
+
+  const baseRates = buildGroupedRate(
+    concludedRows,
+    (row) => String(readHistoryMetadata(row).conclusion?.kind ?? ""),
+    reopenedByActionId
+  );
+
+  return {
+    summaryByConclusionFamily: buildSummaryByConclusionFamily(concludedRows, recentHistory, reopenedByActionId, casesById),
+    resolveReasonPerformance: buildPerformanceRows(
+      concludedRows.filter((row) => readHistoryMetadata(row).conclusion?.kind === "resolve"),
+      recentHistory,
+      (row) => String(readHistoryMetadata(row).conclusion?.reasonCode ?? ""),
+      "resolve",
+      casesById
+    ),
+    snoozeReasonPerformance: buildPerformanceRows(
+      concludedRows.filter((row) => readHistoryMetadata(row).conclusion?.kind === "snooze"),
+      recentHistory,
+      (row) => String(readHistoryMetadata(row).conclusion?.snoozeReasonCode ?? ""),
+      "snooze",
+      casesById
+    ),
+    escalationReasonPerformance: buildPerformanceRows(
+      concludedRows.filter((row) => readHistoryMetadata(row).conclusion?.kind === "escalate"),
+      recentHistory,
+      (row) => String(readHistoryMetadata(row).conclusion?.escalationReasonCode ?? ""),
+      "escalate",
+      casesById
+    ),
+    escalationTargetPerformance: buildPerformanceRows(
+      concludedRows.filter((row) => readHistoryMetadata(row).conclusion?.kind === "escalate"),
+      recentHistory,
+      (row) => String(readHistoryMetadata(row).conclusion?.escalationTargetType ?? ""),
+      "escalate",
+      casesById
+    ),
+    disconnectTypeInteractions: buildDisconnectTypeInteractions(concludedRows, recentHistory, casesById),
+    assigneeEffectiveness: buildAssigneeEffectiveness(concludedRows, recentHistory, usersMap, casesById),
+    warnings: buildOutcomeWarnings(concludedRows, recentHistory, casesById),
+    reopenRateByConclusionFamily: {
+      resolve: baseRates.resolve ?? null,
+      snooze: baseRates.snooze ?? null,
+      escalate: baseRates.escalate ?? null,
+    },
+    reopenRateByResolveCategory: buildGroupedRateTable(
+      concludedRows.filter((row) => readHistoryMetadata(row).conclusion?.kind === "resolve"),
+      (row) => String(readHistoryMetadata(row).conclusion?.outcomeCategory ?? ""),
+      reopenedByActionId
+    ),
+    reopenRateBySnoozeReason: buildGroupedRateTable(
+      concludedRows.filter((row) => readHistoryMetadata(row).conclusion?.kind === "snooze"),
+      (row) => String(readHistoryMetadata(row).conclusion?.snoozeReasonCode ?? ""),
+      reopenedByActionId
+    ),
+    reopenRateByEscalationReason: buildGroupedRateTable(
+      concludedRows.filter((row) => readHistoryMetadata(row).conclusion?.kind === "escalate"),
+      (row) => String(readHistoryMetadata(row).conclusion?.escalationReasonCode ?? ""),
+      reopenedByActionId
+    ),
+    conclusionMixByDisconnectType: buildConclusionMixByDisconnectType(concludedRows),
+    conclusionMixByActingUser: buildConclusionMixByActingUser(concludedRows, usersMap),
+    conclusionMixByAssigneeAtConclusion: buildConclusionMixByAssigneeAtConclusion(concludedRows, usersMap),
+    medianDaysToReopenByConclusionFamily: buildMedianDaysToReopenTable(concludedRows, recentHistory),
+  };
+}
+
+function isAllowedManagerBriefQueueLink(value: string) {
+  if (
+    value === "/admin/intervention-analytics#queue-health" ||
+    value === "/admin/intervention-analytics#manager-alerts" ||
+    value === "/admin/intervention-analytics#outcome-effectiveness" ||
+    value === "/admin/intervention-analytics#policy-recommendations"
+  ) {
+    return true;
+  }
+
+  if (!value.startsWith("/admin/interventions?")) return false;
+  const search = value.split("?")[1] ?? "";
+  const params = new URLSearchParams(search);
+  const view = params.get("view");
+  const caseId = params.get("caseId");
+
+  if (caseId) return false;
+  const keys = [...params.keys()];
+  const allowedKeys = new Set(["view", "assigneeId", "disconnectType", "stageKey", "companyId", "repId"]);
+  if (keys.some((key) => !allowedKeys.has(key))) return false;
+  if (![...params.values()].some(Boolean) && keys.length === 0) return false;
+
+  if (!view) return keys.length === 0;
+  if (!["overdue", "escalated", "snooze-breached", "repeat", "generated-task-pending", "all"].includes(view)) {
+    return false;
+  }
+
+  return true;
+}
+
+function sanitizeManagerBriefQueueLink(value: string | null | undefined) {
+  if (!value) return null;
+  return isAllowedManagerBriefQueueLink(value) ? value : null;
+}
+
+function countHistoryRowsInWindow(
+  history: DisconnectCaseHistoryRow[],
+  actionType: string,
+  range: { start: Date; end: Date }
+) {
+  return history.filter((row) => row.actionType === actionType && row.actedAt >= range.start && row.actedAt < range.end).length;
+}
+
+function buildManagerBrief(
+  history: DisconnectCaseHistoryRow[],
+  cases: DisconnectCaseRow[],
+  usersMap: Map<string, string>,
+  now: Date
+): InterventionManagerBrief {
+  const currentWindowEnd = new Date(now);
+  const currentWindowStart = new Date(now);
+  currentWindowStart.setDate(currentWindowStart.getDate() - 7);
+  const priorWindowStart = new Date(currentWindowStart);
+  priorWindowStart.setDate(priorWindowStart.getDate() - 7);
+  const currentWindow = { start: currentWindowStart, end: currentWindowEnd };
+  const priorWindow = { start: priorWindowStart, end: currentWindowStart };
+
+  const summary = buildInterventionAnalyticsSummary(cases, now);
+  const outcomeEffectiveness = buildInterventionOutcomeEffectiveness(history, usersMap, cases, now);
+  const hotspots = {
+    assignees: buildHotspotRows(cases, now, {
+      entityType: "assignee",
+      keyFromCase: (row) => row.assignedTo,
+      labelFromCase: (row) => usersMap.get(row.assignedTo ?? "") ?? row.assignedTo ?? "Unassigned",
+      queueLinkFromCase: (row) => formatQueueLink({ view: "all", assigneeId: row.assignedTo ?? null }),
+    }),
+    disconnectTypes: buildHotspotRows(cases, now, {
+      entityType: "disconnect_type",
+      keyFromCase: (row) => row.disconnectType,
+      labelFromCase: (row) => row.disconnectType,
+      queueLinkFromCase: (row) => formatQueueLink({ view: "all", disconnectType: row.disconnectType }),
+    }),
+  };
+
+  const currentEscalations = countHistoryRowsInWindow(history, "escalate", currentWindow);
+  const priorEscalations = countHistoryRowsInWindow(history, "escalate", priorWindow);
+  const currentReopens = countHistoryRowsInWindow(history, "reopened", currentWindow);
+  const priorReopens = countHistoryRowsInWindow(history, "reopened", priorWindow);
+  const currentResolves = countHistoryRowsInWindow(history, "resolve", currentWindow);
+  const priorResolves = countHistoryRowsInWindow(history, "resolve", priorWindow);
+
+  const headlineParts: string[] = [];
+  if (summary.overdueCases > 0) headlineParts.push(`${summary.overdueCases} overdue`);
+  if (summary.escalatedCases > 0) headlineParts.push(`${summary.escalatedCases} escalated-open`);
+  if (summary.snoozeOverdueCases > 0) headlineParts.push(`${summary.snoozeOverdueCases} snooze-breached`);
+  const headline =
+    headlineParts.length > 0
+      ? `Intervention pressure is concentrated in ${headlineParts.join(", ")} cases.`
+      : "No strong manager brief is available yet.";
+
+  const whatChanged: InterventionManagerBrief["whatChanged"] = [];
+  if (currentEscalations > priorEscalations) {
+    whatChanged.push({
+      key: "escalations_up",
+      tone: "worsened",
+      text: `Escalations rose to ${currentEscalations} in the last 7 days from ${priorEscalations} in the prior 7 days.`,
+      queueLink: sanitizeManagerBriefQueueLink("/admin/interventions?view=escalated"),
+    });
+  }
+  if (currentReopens > priorReopens) {
+    whatChanged.push({
+      key: "reopens_up",
+      tone: "worsened",
+      text: `Repeat-open pressure increased to ${currentReopens} reopened cases from ${priorReopens} in the prior week.`,
+      queueLink: sanitizeManagerBriefQueueLink("/admin/interventions?view=repeat"),
+    });
+  }
+  if (currentResolves > priorResolves) {
+    whatChanged.push({
+      key: "resolves_up",
+      tone: "improved",
+      text: `Durable closure activity improved with ${currentResolves} resolve actions versus ${priorResolves} in the prior week.`,
+      queueLink: sanitizeManagerBriefQueueLink("/admin/intervention-analytics#outcome-effectiveness"),
+    });
+  }
+  if (summary.snoozeOverdueCases > 0 && currentReopens <= priorReopens) {
+    whatChanged.push({
+      key: "snooze_watch",
+      tone: "watch",
+      text: `${summary.snoozeOverdueCases} snoozed cases are already past due and need active follow-through.`,
+      queueLink: sanitizeManagerBriefQueueLink("/admin/interventions?view=snooze-breached"),
+    });
+  }
+
+  const focusNow: InterventionManagerBrief["focusNow"] = [];
+  if (summary.overdueCases > 0) {
+    focusNow.push({
+      key: "focus_overdue",
+      priority: "high",
+      text: `Clear ${summary.overdueCases} overdue case${summary.overdueCases === 1 ? "" : "s"} before they roll into more escalations.`,
+      queueLink: sanitizeManagerBriefQueueLink("/admin/interventions?view=overdue"),
+    });
+  }
+  if (summary.escalatedCases > 0) {
+    focusNow.push({
+      key: "focus_escalated",
+      priority: "high",
+      text: `Review ${summary.escalatedCases} escalated-open case${summary.escalatedCases === 1 ? "" : "s"} for direct manager intervention.`,
+      queueLink: sanitizeManagerBriefQueueLink("/admin/interventions?view=escalated"),
+    });
+  }
+  const topAssignee = hotspots.assignees[0];
+  if (topAssignee?.queueLink && topAssignee.openCases > 0) {
+    focusNow.push({
+      key: "focus_assignee_load",
+      priority: topAssignee.overdueCases > 0 ? "high" : "medium",
+      text: `${topAssignee.label} is carrying ${topAssignee.openCases} open cases, including ${topAssignee.overdueCases} overdue.`,
+      queueLink: sanitizeManagerBriefQueueLink(topAssignee.queueLink),
+    });
+  }
+  const topDisconnectType = hotspots.disconnectTypes[0];
+  if (topDisconnectType?.queueLink && topDisconnectType.openCases > 0) {
+    focusNow.push({
+      key: "focus_disconnect_type",
+      priority: "medium",
+      text: `${topDisconnectType.label} is the heaviest open disconnect type at ${topDisconnectType.openCases} cases.`,
+      queueLink: sanitizeManagerBriefQueueLink(topDisconnectType.queueLink),
+    });
+  }
+
+  const emergingPatterns: InterventionManagerBrief["emergingPatterns"] = [];
+  const highestReopenFamily = Object.entries(outcomeEffectiveness.reopenRateByConclusionFamily)
+    .filter((entry): entry is ["resolve" | "snooze" | "escalate", number] => typeof entry[1] === "number")
+    .sort((a, b) => b[1] - a[1])[0];
+  if (highestReopenFamily && highestReopenFamily[1] >= 0.25) {
+    emergingPatterns.push({
+      key: `family_${highestReopenFamily[0]}`,
+      title: `${highestReopenFamily[0][0].toUpperCase()}${highestReopenFamily[0].slice(1)} outcomes are reopening`,
+      summary: `${Math.round(highestReopenFamily[1] * 100)}% of recent ${highestReopenFamily[0]} conclusions reopened inside the 30-day window.`,
+      confidence: highestReopenFamily[1] >= 0.4 ? "high" : "medium",
+      queueLink: sanitizeManagerBriefQueueLink("/admin/intervention-analytics#outcome-effectiveness"),
+    });
+  }
+  for (const warning of outcomeEffectiveness.warnings.slice(0, 2)) {
+    emergingPatterns.push({
+      key: `warning_${warning.kind}_${warning.key}`,
+      title: warning.label,
+      summary: `${warning.volume} recent conclusions are showing a ${Math.round((warning.rate ?? 0) * 100)}% weak-close/reopen signal.`,
+      confidence: (warning.rate ?? 0) >= 0.4 ? "high" : "medium",
+      queueLink: sanitizeManagerBriefQueueLink(warning.queueLink),
+    });
+  }
+  if (emergingPatterns.length === 0 && topDisconnectType?.openCases > 0) {
+    emergingPatterns.push({
+      key: "pattern_top_disconnect_type",
+      title: `${topDisconnectType.label} is dominating intervention load`,
+      summary: `${topDisconnectType.openCases} open cases are concentrated in the ${topDisconnectType.label} disconnect family.`,
+      confidence: topDisconnectType.overdueCases > 0 ? "high" : "medium",
+      queueLink: sanitizeManagerBriefQueueLink(topDisconnectType.queueLink),
+    });
+  }
+
+  return {
+    headline,
+    summaryWindowLabel: "Compared with the prior 7 days",
+    whatChanged: whatChanged.slice(0, 4),
+    focusNow: focusNow.slice(0, 4),
+    emergingPatterns: emergingPatterns.slice(0, 3),
+    groundingNote:
+      "Grounded in current intervention analytics, recent intervention history, queue pressure, and outcome-effectiveness trends.",
+    error: null,
+  };
+}
+
+export function buildManagerBriefSafely(
+  history: DisconnectCaseHistoryRow[],
+  cases: DisconnectCaseRow[],
+  usersMap: Map<string, string>,
+  now: Date,
+  builder: (
+    history: DisconnectCaseHistoryRow[],
+    cases: DisconnectCaseRow[],
+    usersMap: Map<string, string>,
+    now: Date
+  ) => InterventionManagerBrief = buildManagerBrief
+): InterventionManagerBrief {
+  try {
+    return builder(history, cases, usersMap, now);
+  } catch {
+    return {
+      headline: "No strong manager brief is available yet.",
+      summaryWindowLabel: "Compared with the prior 7 days",
+      whatChanged: [],
+      focusNow: [],
+      emergingPatterns: [],
+      groundingNote: "Manager brief unavailable. Continue monitoring queue health and outcome trends.",
+      error: "Failed to build manager brief",
+    };
+  }
+}
+
+function buildHotspotRows(
+  cases: DisconnectCaseRow[],
+  now: Date,
+  input: {
+    entityType: InterventionAnalyticsHotspotRow["entityType"];
+    keyFromCase: (row: DisconnectCaseRow) => string | null;
+    labelFromCase: (row: DisconnectCaseRow) => string;
+    queueLinkFromCase: (row: DisconnectCaseRow) => string | null;
+  }
+): InterventionAnalyticsHotspotRow[] {
+  const groups = new Map<string, { sample: DisconnectCaseRow; openCases: number; overdueCases: number; repeatOpenCases: number }>();
+
+  for (const row of cases) {
+    const key = input.keyFromCase(row);
+    if (!key) continue;
+    const existing = groups.get(key) ?? {
+      sample: row,
+      openCases: 0,
+      overdueCases: 0,
+      repeatOpenCases: 0,
+    };
+    if (row.status === "open") existing.openCases += 1;
+    if (isOverdueDisconnectCase(row, now)) existing.overdueCases += 1;
+    if (isRepeatOpenCase(row)) existing.repeatOpenCases += 1;
+    groups.set(key, existing);
+  }
+
+  return [...groups.entries()]
+    .map(([key, value]) => ({
+      key,
+      entityType: input.entityType,
+      filterValue: key,
+      label: input.labelFromCase(value.sample),
+      openCases: value.openCases,
+      overdueCases: value.overdueCases,
+      repeatOpenCases: value.repeatOpenCases,
+      clearanceRate30d: null,
+      queueLink: input.queueLinkFromCase(value.sample),
+    }))
+    .filter((row) => row.openCases > 0 || row.overdueCases > 0 || row.repeatOpenCases > 0)
+    .sort((a, b) => {
+      if (b.overdueCases !== a.overdueCases) return b.overdueCases - a.overdueCases;
+      if (b.openCases !== a.openCases) return b.openCases - a.openCases;
+      return a.label.localeCompare(b.label);
+    })
+    .slice(0, 10);
+}
+
+function buildInterventionAnalyticsBreachQueue(
+  cases: DisconnectCaseRow[],
+  dealsMap: Map<string, Pick<DealRow, "id" | "dealNumber" | "name" | "companyId">>,
+  companiesMap: Map<string, Pick<CompanyRow, "id" | "name">>,
+  usersMap: Map<string, string>,
+  now: Date
+) {
+  const items = cases
+    .map((row) => {
+      const breachReasons: InterventionAnalyticsBreachRow["breachReasons"] = [];
+      if (isOverdueDisconnectCase(row, now)) breachReasons.push("overdue");
+      if (isEscalatedOpenCase(row)) breachReasons.push("escalated_open");
+      if (isSnoozeBreachedCase(row, now)) breachReasons.push("snooze_breached");
+      if (isRepeatOpenCase(row)) breachReasons.push("repeat_open");
+      if (breachReasons.length === 0) return null;
+
+      const deal = row.dealId ? dealsMap.get(row.dealId) ?? null : null;
+      const company = row.companyId ? companiesMap.get(row.companyId) ?? null : null;
+      const primaryView: InterventionQueueView =
+        breachReasons[0] === "snooze_breached"
+          ? "snooze-breached"
+          : breachReasons[0] === "repeat_open"
+            ? "repeat"
+            : breachReasons[0] === "escalated_open"
+              ? "escalated"
+              : "overdue";
+
+      return {
+        caseId: row.id,
+        severity: row.severity,
+        disconnectType: row.disconnectType,
+        dealId: row.dealId,
+        dealLabel: deal ? `${deal.dealNumber} ${deal.name}` : readMetadataString(row.metadataJson as Record<string, unknown> | null, "dealName"),
+        companyId: row.companyId,
+        companyLabel: company?.name ?? readMetadataString(row.metadataJson as Record<string, unknown> | null, "companyName"),
+        ageDays: calculateBusinessDaysElapsed(row.currentLifecycleStartedAt, now),
+        assignedTo: usersMap.get(row.assignedTo ?? "") ?? row.assignedTo,
+        escalated: row.escalated,
+        breachReasons,
+        detailLink: formatQueueLink({ view: primaryView, caseId: row.id }),
+        queueLink: formatQueueLink({ view: primaryView, caseId: row.id }),
+      } satisfies InterventionAnalyticsBreachRow;
+    })
+    .filter((item): item is InterventionAnalyticsBreachRow => item !== null)
+    .sort((a, b) => {
+      const severityDelta = severityRank(b.severity) - severityRank(a.severity);
+      if (severityDelta !== 0) return severityDelta;
+      if (b.ageDays !== a.ageDays) return b.ageDays - a.ageDays;
+      if (a.escalated !== b.escalated) return a.escalated ? -1 : 1;
+      return (a.dealLabel ?? a.companyLabel ?? a.caseId).localeCompare(b.dealLabel ?? b.companyLabel ?? b.caseId);
+    });
+
+  return {
+    items: items.slice(0, 25),
+    totalCount: items.length,
+    pageSize: 25,
+  };
+}
+
+export async function getInterventionAnalyticsDashboard(
+  tenantDb: TenantDb | InMemoryTenantDb,
+  input: { officeId: string; now?: Date }
+): Promise<InterventionAnalyticsDashboard> {
+  const now = input.now ?? new Date();
+  const previewCases =
+    isInMemoryTenantDb(tenantDb) ? undefined : await buildAnalyticsPreviewCases(tenantDb, { officeId: input.officeId, now });
+
+  const { cases, deals: dealRows, companies: companyRows, users: userRows, history } = await loadInterventionAnalyticsData(
+    tenantDb,
+    input.officeId,
+    previewCases
+  );
+  const dealsMap = new Map(dealRows.map((row) => [row.id, row]));
+  const companiesMap = new Map(companyRows.map((row) => [row.id, row]));
+  const usersMap = new Map(userRows.map((row) => [row.id, row.displayName]));
+
+  return {
+    summary: buildInterventionAnalyticsSummary(cases, now),
+    outcomes: buildInterventionAnalyticsOutcomes(cases, history, now),
+    managerBrief: buildManagerBriefSafely(history, cases, usersMap, now),
+    outcomeEffectiveness: buildInterventionOutcomeEffectiveness(history, usersMap, cases, now),
+    hotspots: {
+      assignees: buildHotspotRows(cases, now, {
+        entityType: "assignee",
+        keyFromCase: (row) => row.assignedTo,
+        labelFromCase: (row) => usersMap.get(row.assignedTo ?? "") ?? row.assignedTo ?? "Unassigned",
+        queueLinkFromCase: (row) => formatQueueLink({ view: "open", assigneeId: row.assignedTo ?? null }),
+      }),
+      disconnectTypes: buildHotspotRows(cases, now, {
+        entityType: "disconnect_type",
+        keyFromCase: (row) => row.disconnectType,
+        labelFromCase: (row) => row.disconnectType,
+        queueLinkFromCase: (row) => formatQueueLink({ view: "open", disconnectType: row.disconnectType }),
+      }),
+      reps: buildHotspotRows(cases, now, {
+        entityType: "rep",
+        keyFromCase: (row) => readMetadataString(row.metadataJson as Record<string, unknown> | null, "assignedRepId"),
+        labelFromCase: (row) =>
+          readMetadataString(row.metadataJson as Record<string, unknown> | null, "assignedRepName") ?? "Unknown rep",
+        queueLinkFromCase: (row) =>
+          formatQueueLink({ view: "open", repId: readMetadataString(row.metadataJson as Record<string, unknown> | null, "assignedRepId") }),
+      }),
+      companies: buildHotspotRows(cases, now, {
+        entityType: "company",
+        keyFromCase: (row) => row.companyId,
+        labelFromCase: (row) =>
+          companiesMap.get(row.companyId ?? "")?.name ??
+          readMetadataString(row.metadataJson as Record<string, unknown> | null, "companyName") ??
+          "Unknown company",
+        queueLinkFromCase: (row) => formatQueueLink({ view: "open", companyId: row.companyId }),
+      }),
+      stages: buildHotspotRows(cases, now, {
+        entityType: "stage",
+        keyFromCase: (row) => readMetadataString(row.metadataJson as Record<string, unknown> | null, "stageKey"),
+        labelFromCase: (row) =>
+          readMetadataString(row.metadataJson as Record<string, unknown> | null, "stageName") ?? "Unknown stage",
+        queueLinkFromCase: (row) =>
+          formatQueueLink({ view: "open", stageKey: readMetadataString(row.metadataJson as Record<string, unknown> | null, "stageKey") }),
+      }),
+    },
+    breachQueue: buildInterventionAnalyticsBreachQueue(cases, dealsMap, companiesMap, usersMap, now),
+    slaRules: {
+      criticalDays: 0,
+      highDays: 2,
+      mediumDays: 5,
+      lowDays: 10,
+      timingBasis: "business_days",
+    },
+  };
+}
+
+type PolicySnapshotRow = {
+  id: string;
+  office_id: string;
+  status: "pending" | "active" | "degraded" | "superseded";
+  generated_at: Date | string;
+  stale_at: Date | string;
+  superseded_at: Date | string | null;
+};
+
+type PolicyRecommendationRow = {
+  snapshot_id: string;
+  office_id: string;
+  recommendation_id: string;
+  taxonomy: InterventionPolicyRecommendation["taxonomy"];
+  primary_grouping_key: string;
+  title: string;
+  statement: string;
+  why_now: string;
+  expected_impact: string;
+  confidence: InterventionPolicyRecommendationConfidence;
+  priority: number;
+  suggested_action: string;
+  counter_signal: string | null;
+  render_status: "active" | "degraded";
+  evidence_json: InterventionPolicyRecommendation["evidence"];
+  proposed_change_json: InterventionPolicyRecommendationProposedChange | null;
+  review_details_json: InterventionPolicyRecommendationReviewDetails;
+  generated_at: Date | string;
+  stale_at: Date | string;
+};
+
+type PolicyFeedbackRow = {
+  recommendation_id: string;
+  user_id: string;
+  feedback_value: InterventionPolicyRecommendationFeedbackValue;
+  comment: string | null;
+};
+
+type PolicyDecisionRow = {
+  id: string;
+  office_id: string;
+  snapshot_id: string;
+  recommendation_id: string | null;
+  taxonomy: InterventionPolicyRecommendation["taxonomy"];
+  grouping_key: string;
+  decision: InterventionPolicyRecommendationDecisionStatus;
+  suppression_reason: string | null;
+  score: number | null;
+  impact_score: number | null;
+  volume_score: number | null;
+  persistence_score: number | null;
+  actionability_score: number | null;
+  confidence: InterventionPolicyRecommendationConfidence | null;
+  qualified_at: Date | string | null;
+  rendered_at: Date | string | null;
+  used_fallback_copy: boolean;
+  used_fallback_structured_payload: boolean;
+  metrics_json: Record<string, unknown>;
+  created_at?: Date | string;
+};
+
+type PolicyApplyEventRow = {
+  id: string;
+  office_id: string;
+  recommendation_id: string;
+  snapshot_id: string;
+  taxonomy: InterventionPolicyRecommendation["taxonomy"];
+  actor_user_id: string;
+  actor_display_name?: string | null;
+  request_idempotency_key: string;
+  status: InterventionPolicyRecommendationApplyEventStatus;
+  target_type: string;
+  target_id: string;
+  before_state_json: Record<string, unknown>;
+  proposed_state_json: Record<string, unknown>;
+  applied_state_json: Record<string, unknown>;
+  rejection_reason: string | null;
+  created_at: Date | string;
+};
+
+export const POLICY_RECOMMENDATION_QUALIFICATION_FLOOR = 55;
+export const POLICY_RECOMMENDATION_STRONG_FLOOR = 70;
+export const POLICY_RECOMMENDATION_PRIMARY_CAP = 3;
+export const POLICY_RECOMMENDATION_SECONDARY_CAP = 2;
+
+type SnoozePolicyRow = {
+  office_id: string;
+  snooze_reason_key: string;
+  max_snooze_days: number;
+  breach_review_threshold_percent: number | null;
+};
+
+type EscalationPolicyRow = {
+  office_id: string;
+  disconnect_type_key: string;
+  routing_mode: string;
+  escalation_threshold_percent: number;
+};
+
+type AssigneeBalancingPolicyRow = {
+  office_id: string;
+  balancing_mode: string;
+  overload_share_percent: number;
+  min_high_risk_cases: number;
+};
+
+const PENDING_POLICY_SNAPSHOT_TIMEOUT_MS = 10 * 60 * 1000;
+
+function deterministicUuid(seed: string) {
+  const digest = crypto.createHash("sha1").update(seed).digest("hex").slice(0, 32);
+  return `${digest.slice(0, 8)}-${digest.slice(8, 12)}-4${digest.slice(13, 16)}-8${digest.slice(17, 20)}-${digest.slice(20)}`;
+}
+
+function toIso(value: Date | string | null | undefined) {
+  if (!value) return null;
+  return value instanceof Date ? value.toISOString() : String(value);
+}
+
+function asNumber(value: unknown) {
+  return typeof value === "number" ? value : value == null ? null : Number(value);
+}
+
+function mapPolicyConfidence(score: number): InterventionPolicyRecommendationConfidence | null {
+  if (score >= 75) return "high";
+  if (score >= 60) return "medium";
+  if (score >= 55) return "low";
+  return null;
+}
+
+function scaleScore(value: number, min: number, max: number, weight: number) {
+  if (value <= min) return 0;
+  if (value >= max) return weight;
+  return Math.round(((value - min) / (max - min)) * weight);
+}
+
+function defaultSnoozePolicy(reasonKey: string): SnoozePolicyRow {
+  return {
+    office_id: "",
+    snooze_reason_key: reasonKey,
+    max_snooze_days: 7,
+    breach_review_threshold_percent: 20,
+  };
+}
+
+function defaultEscalationPolicy(disconnectTypeKey: string): EscalationPolicyRow {
+  return {
+    office_id: "",
+    disconnect_type_key: disconnectTypeKey,
+    routing_mode: "manager_manual",
+    escalation_threshold_percent: 15,
+  };
+}
+
+function defaultAssigneeBalancingPolicy(): AssigneeBalancingPolicyRow {
+  return {
+    office_id: "",
+    balancing_mode: "weighted_share",
+    overload_share_percent: 35,
+    min_high_risk_cases: 5,
+  };
+}
+
+function buildReviewDetails(input: {
+  decision: InterventionPolicyRecommendationDecisionStatus;
+  primaryTrigger: string;
+  thresholdSummary: string;
+  rankingSummary: string;
+  score: number;
+  impactScore: number;
+  volumeScore: number;
+  persistenceScore: number;
+  actionabilityScore: number;
+  usedFallbackCopy?: boolean;
+  usedFallbackStructuredPayload?: boolean;
+}): InterventionPolicyRecommendationReviewDetails {
+  return {
+    decision: input.decision,
+    primaryTrigger: input.primaryTrigger,
+    thresholdSummary: input.thresholdSummary,
+    rankingSummary: input.rankingSummary,
+    score: input.score,
+    impactScore: input.impactScore,
+    volumeScore: input.volumeScore,
+    persistenceScore: input.persistenceScore,
+    actionabilityScore: input.actionabilityScore,
+    usedFallbackCopy: input.usedFallbackCopy ?? false,
+    usedFallbackStructuredPayload: input.usedFallbackStructuredPayload ?? false,
+  };
+}
+
+function buildPolicyRecommendationId(officeId: string, taxonomy: InterventionPolicyRecommendation["taxonomy"], primaryGroupingKey: string) {
+  return deterministicUuid(`${officeId}:${taxonomy}:${primaryGroupingKey}`);
+}
+
+type PolicyRecommendationCandidate = Omit<
+  InterventionPolicyRecommendation,
+  "snapshotId" | "feedbackSummary" | "feedbackStateForViewer" | "applyStatus" | "applyEligibility"
+> & {
+  primaryGroupingKey: string;
+  score: number;
+  impactScore: number;
+  volumeScore: number;
+  persistenceScore: number;
+  actionabilityScore: number;
+  affectedVolume: number;
+};
+
+function buildPolicyRecommendationCandidates(input: {
+  officeId: string;
+  cases: DisconnectCaseRow[];
+  history: DisconnectCaseHistoryRow[];
+  usersMap: Map<string, string>;
+  outcomeEffectiveness: InterventionOutcomeEffectiveness;
+  snoozePolicies: SnoozePolicyRow[];
+  escalationPolicies: EscalationPolicyRow[];
+  assigneeBalancingPolicy: AssigneeBalancingPolicyRow;
+  now: Date;
+}) {
+  const candidates: PolicyRecommendationCandidate[] = [];
+  const decisions: PolicyDecisionRow[] = [];
+  const staleAt = new Date(input.now.getTime() + 24 * 60 * 60 * 1000).toISOString();
+  const snoozePolicyByKey = new Map(input.snoozePolicies.map((row) => [row.snooze_reason_key, row]));
+  const escalationPolicyByKey = new Map(input.escalationPolicies.map((row) => [row.disconnect_type_key, row]));
+
+  function pushDecision(
+    taxonomy: InterventionPolicyRecommendation["taxonomy"],
+    groupingKey: string,
+    config: {
+      recommendationId?: string | null;
+      decision: InterventionPolicyRecommendationDecisionStatus;
+      suppressionReason?: string | null;
+      score?: number | null;
+      impactScore?: number | null;
+      volumeScore?: number | null;
+      persistenceScore?: number | null;
+      actionabilityScore?: number | null;
+      confidence?: InterventionPolicyRecommendationConfidence | null;
+      primaryTrigger: string;
+      thresholdSummary: string;
+      rankingSummary: string;
+      usedFallbackCopy?: boolean;
+      usedFallbackStructuredPayload?: boolean;
+    }
+  ) {
+    decisions.push({
+      id: crypto.randomUUID(),
+      office_id: input.officeId,
+      snapshot_id: "",
+      recommendation_id: config.recommendationId ?? null,
+      taxonomy,
+      grouping_key: groupingKey,
+      decision: config.decision,
+      suppression_reason: config.suppressionReason ?? null,
+      score: config.score ?? null,
+      impact_score: config.impactScore ?? null,
+      volume_score: config.volumeScore ?? null,
+      persistence_score: config.persistenceScore ?? null,
+      actionability_score: config.actionabilityScore ?? null,
+      confidence: config.confidence ?? null,
+      qualified_at: config.decision.startsWith("qualified") ? input.now.toISOString() : null,
+      rendered_at: config.decision === "qualified_rendered" ? input.now.toISOString() : null,
+      used_fallback_copy: config.usedFallbackCopy ?? false,
+      used_fallback_structured_payload: config.usedFallbackStructuredPayload ?? false,
+      metrics_json: {
+        primaryTrigger: config.primaryTrigger,
+        thresholdSummary: config.thresholdSummary,
+        rankingSummary: config.rankingSummary,
+      },
+      created_at: input.now.toISOString(),
+    });
+  }
+
+  const highRiskCases = input.cases.filter(
+    (row) =>
+      row.status === "open" &&
+      (row.severity === "critical" || row.severity === "high" || row.escalated || row.reopenCount > 0)
+  );
+  if (highRiskCases.length > 0) {
+    const assigneeGroups = new Map<string, DisconnectCaseRow[]>();
+    for (const row of highRiskCases) {
+      if (!row.assignedTo) continue;
+      const bucket = assigneeGroups.get(row.assignedTo) ?? [];
+      bucket.push(row);
+      assigneeGroups.set(row.assignedTo, bucket);
+    }
+    for (const [assigneeId, rows] of assigneeGroups) {
+      const share = rows.length / highRiskCases.length;
+      const volumeScore = scaleScore(rows.length, 4, 12, 25);
+      const impactScore = scaleScore(share, input.assigneeBalancingPolicy.overload_share_percent / 100, 0.75, 40);
+      const persistenceScore = scaleScore(rows.filter((row) => row.escalated).length, 0, rows.length, 20);
+      const actionabilityScore = 15;
+      const score = volumeScore + impactScore + persistenceScore + actionabilityScore;
+      const confidence = mapPolicyConfidence(score);
+      const thresholdSummary = `${rows.length} high-risk cases and ${(share * 100).toFixed(0)}% share against ${(input.assigneeBalancingPolicy.overload_share_percent).toFixed(0)}% threshold.`;
+      const rankingSummary = `Score ${score} = impact ${impactScore} + volume ${volumeScore} + persistence ${persistenceScore} + actionability ${actionabilityScore}.`;
+      if (rows.length < input.assigneeBalancingPolicy.min_high_risk_cases || share < input.assigneeBalancingPolicy.overload_share_percent / 100) {
+        pushDecision("assignee_load_balancing", assigneeId, {
+          decision: "suppressed_by_predicate",
+          suppressionReason: "threshold_not_met",
+          score,
+          impactScore,
+          volumeScore,
+          persistenceScore,
+          actionabilityScore,
+          confidence,
+          primaryTrigger: `High-risk concentration for ${assigneeId}`,
+          thresholdSummary,
+          rankingSummary,
+        });
+        continue;
+      }
+      if (!confidence) continue;
+      const assigneeName = input.usersMap.get(assigneeId) ?? "Assigned manager";
+      candidates.push({
+        id: buildPolicyRecommendationId(input.officeId, "assignee_load_balancing", assigneeId),
+        officeId: input.officeId,
+        taxonomy: "assignee_load_balancing",
+        title: `Rebalance ${assigneeName} load`,
+        statement: `${assigneeName} is carrying a disproportionate share of high-risk open intervention cases.`,
+        whyNow: `${rows.length} of ${highRiskCases.length} high-risk open cases are concentrated with this assignee.`,
+        expectedImpact: "Reduce escalation pileups and improve response time on overdue intervention work.",
+        confidence,
+        priority: score,
+        suggestedAction: "Reassign part of the high-risk queue or adjust fallback routing for new intervention cases.",
+        counterSignal: "Confirm this concentration is not driven by an intentional temporary ownership handoff.",
+        proposedChange: {
+          kind: "assignee_load_balancing",
+          targetKey: input.officeId,
+          policyLabel: "Office assignee balancing",
+          currentValue: {
+            balancingMode: input.assigneeBalancingPolicy.balancing_mode,
+            overloadSharePercent: input.assigneeBalancingPolicy.overload_share_percent,
+            minHighRiskCases: input.assigneeBalancingPolicy.min_high_risk_cases,
+          },
+          proposedValue: {
+            balancingMode: "weighted_share",
+            overloadSharePercent: Math.max(25, input.assigneeBalancingPolicy.overload_share_percent - 5),
+            minHighRiskCases: input.assigneeBalancingPolicy.min_high_risk_cases,
+          },
+        },
+        reviewDetails: buildReviewDetails({
+          decision: "qualified_rendered",
+          primaryTrigger: `${assigneeName} owns ${rows.length} high-risk open cases.`,
+          thresholdSummary,
+          rankingSummary,
+          score,
+          impactScore,
+          volumeScore,
+          persistenceScore,
+          actionabilityScore,
+        }),
+        evidence: [
+          {
+            metricKey: "high_risk_assignee_share",
+            label: "High-risk assignee share",
+            currentValue: Number(share.toFixed(2)),
+            baselineValue: 0.35,
+            delta: Number((share - 0.35).toFixed(2)),
+            window: "last_30_days",
+            direction: "up",
+          },
+        ],
+        generatedAt: input.now.toISOString(),
+        staleAt,
+        renderStatus: "active",
+        primaryGroupingKey: assigneeId,
+        score,
+        impactScore,
+        volumeScore,
+        persistenceScore,
+        actionabilityScore,
+        affectedVolume: rows.length,
+      });
+    }
+  }
+
+  const latestHistoryByCase = new Map<string, DisconnectCaseHistoryRow>();
+  for (const row of [...input.history].sort((left, right) => right.actedAt.getTime() - left.actedAt.getTime())) {
+    if (!latestHistoryByCase.has(row.disconnectCaseId)) latestHistoryByCase.set(row.disconnectCaseId, row);
+  }
+  const snoozeBreachCounts = new Map<string, number>();
+  for (const row of input.cases) {
+    if (row.status !== "snoozed" || !row.snoozedUntil || row.snoozedUntil > input.now) continue;
+    const historyRow = latestHistoryByCase.get(row.id);
+    const reasonCode = readHistoryMetadata(historyRow ?? { metadataJson: null }).conclusion?.snoozeReasonCode;
+    if (!reasonCode) continue;
+    snoozeBreachCounts.set(reasonCode, (snoozeBreachCounts.get(reasonCode) ?? 0) + 1);
+  }
+
+  for (const item of input.outcomeEffectiveness.snoozeReasonPerformance) {
+    const breachCount = snoozeBreachCounts.get(item.key) ?? 0;
+    const breachRate = item.volume > 0 ? breachCount / item.volume : 0;
+    const currentPolicy = snoozePolicyByKey.get(item.key) ?? defaultSnoozePolicy(item.key);
+    const volumeScore = scaleScore(item.volume, 4, 14, 25);
+    const impactScore = scaleScore(item.reopenRate ?? 0, 0.25, 0.6, 40);
+    const persistenceScore = scaleScore(breachRate, 0.2, 0.6, 20);
+    const actionabilityScore = 15;
+    const score = volumeScore + impactScore + persistenceScore + actionabilityScore;
+    const confidence = mapPolicyConfidence(score);
+    const thresholdSummary = `${item.volume} conclusions, ${(breachRate * 100).toFixed(0)}% breaches, ${(100 * (item.reopenRate ?? 0)).toFixed(0)}% reopen rate.`;
+    const rankingSummary = `Score ${score} = impact ${impactScore} + volume ${volumeScore} + persistence ${persistenceScore} + actionability ${actionabilityScore}.`;
+    if ((item.volume ?? 0) < 5 || breachRate < 0.2 || ((item.reopenRate ?? 0) < 0.25 && breachCount < 3)) {
+      pushDecision("snooze_policy_adjustment", item.key, {
+        decision: "suppressed_by_predicate",
+        suppressionReason: "threshold_not_met",
+        score,
+        impactScore,
+        volumeScore,
+        persistenceScore,
+        actionabilityScore,
+        confidence,
+        primaryTrigger: `${item.label} snoozes are being evaluated.`,
+        thresholdSummary,
+        rankingSummary,
+      });
+      continue;
+    }
+    if (!confidence) continue;
+    candidates.push({
+      id: buildPolicyRecommendationId(input.officeId, "snooze_policy_adjustment", item.key),
+      officeId: input.officeId,
+      taxonomy: "snooze_policy_adjustment",
+      title: `Tighten ${item.label} snoozes`,
+      statement: `Shorten or gate long ${item.label.toLowerCase()} snoozes for manager-owned intervention work.`,
+      whyNow: `${item.label} snoozes are reopening too often after conclusion and are underperforming the expected close-through baseline.`,
+      expectedImpact: "Reduce repeat-open volume and shorten breach recovery time.",
+      confidence,
+      priority: score,
+      suggestedAction: `Review the default ${item.label.toLowerCase()} snooze window and require a stronger next-step plan.`,
+      counterSignal: "Verify this is not driven by one-off customer-response delays before changing the default policy.",
+      proposedChange: {
+        kind: "snooze_policy_adjustment",
+        targetKey: item.key,
+        policyLabel: item.label,
+        currentValue: {
+          maxSnoozeDays: currentPolicy.max_snooze_days,
+          breachReviewThresholdPercent: currentPolicy.breach_review_threshold_percent,
+        },
+        proposedValue: {
+          maxSnoozeDays: Math.max(2, currentPolicy.max_snooze_days - 2),
+          breachReviewThresholdPercent: currentPolicy.breach_review_threshold_percent == null
+            ? 15
+            : Math.max(10, currentPolicy.breach_review_threshold_percent - 5),
+        },
+      },
+      reviewDetails: buildReviewDetails({
+        decision: "qualified_rendered",
+        primaryTrigger: `${item.label} snoozes are breaching and reopening above policy thresholds.`,
+        thresholdSummary,
+        rankingSummary,
+        score,
+        impactScore,
+        volumeScore,
+        persistenceScore,
+        actionabilityScore,
+      }),
+      evidence: [
+        {
+          metricKey: `${item.key}_breach_rate`,
+          label: `${item.label} breach rate`,
+          currentValue: Number(breachRate.toFixed(2)),
+          baselineValue: 0.2,
+          delta: Number((breachRate - 0.2).toFixed(2)),
+          window: "last_30_days",
+          direction: "up",
+        },
+      ],
+      generatedAt: input.now.toISOString(),
+      staleAt,
+      renderStatus: "active",
+      primaryGroupingKey: item.key,
+      score,
+      impactScore,
+      volumeScore,
+      persistenceScore,
+      actionabilityScore,
+      affectedVolume: item.volume,
+    });
+  }
+
+  const byDisconnectType = new Map<
+    string,
+    Array<InterventionOutcomeEffectiveness["disconnectTypeInteractions"][number]>
+  >();
+  for (const item of input.outcomeEffectiveness.disconnectTypeInteractions) {
+    const bucket = byDisconnectType.get(item.disconnectType) ?? [];
+    bucket.push(item);
+    byDisconnectType.set(item.disconnectType, bucket);
+  }
+
+  for (const [disconnectType, items] of byDisconnectType) {
+    const escalated = items.find((item) => item.conclusionFamily === "escalate");
+    const bestAlternative = items
+      .filter((item) => item.conclusionFamily !== "escalate" && item.durableCloseRate != null)
+      .sort((left, right) => (right.durableCloseRate ?? 0) - (left.durableCloseRate ?? 0))[0];
+    const currentEscalationPolicy = escalationPolicyByKey.get(disconnectType) ?? defaultEscalationPolicy(disconnectType);
+    if (escalated && (escalated.volume ?? 0) >= 5 && bestAlternative && (bestAlternative.durableCloseRate ?? 0) - (escalated.durableCloseRate ?? 0) >= 0.15) {
+      const gap = (bestAlternative.durableCloseRate ?? 0) - (escalated.durableCloseRate ?? 0);
+      const volumeScore = scaleScore(escalated.volume, 4, 14, 25);
+      const impactScore = scaleScore(gap, 0.15, 0.5, 40);
+      const persistenceScore = 20;
+      const actionabilityScore = 15;
+      const score = volumeScore + impactScore + persistenceScore + actionabilityScore;
+      const confidence = mapPolicyConfidence(score);
+      if (confidence) {
+        const thresholdSummary = `${escalated.volume} escalations with ${(gap * 100).toFixed(0)} point durable-close gap versus ${bestAlternative.conclusionFamily}.`;
+        const rankingSummary = `Score ${score} = impact ${impactScore} + volume ${volumeScore} + persistence ${persistenceScore} + actionability ${actionabilityScore}.`;
+        candidates.push({
+          id: buildPolicyRecommendationId(input.officeId, "escalation_policy_adjustment", disconnectType),
+          officeId: input.officeId,
+          taxonomy: "escalation_policy_adjustment",
+          title: `Reroute escalation handling for ${disconnectType.replace(/_/g, " ")}`,
+          statement: `Escalation is underperforming the best alternative conclusion path for this disconnect type.`,
+          whyNow: `${disconnectType.replace(/_/g, " ")} escalations are closing less durably than ${bestAlternative.conclusionFamily} over the current window.`,
+          expectedImpact: "Improve durable-close rate on recurring intervention patterns before they become repeat-open work.",
+          confidence,
+          priority: score,
+          suggestedAction: `Review the escalation playbook for ${disconnectType.replace(/_/g, " ")} and tighten when managers escalate versus resolve or snooze.`,
+          counterSignal: "Check whether recent escalations were intentionally reserved for the hardest edge cases.",
+          proposedChange: {
+            kind: "escalation_policy_adjustment",
+            targetKey: disconnectType,
+            policyLabel: disconnectType.replace(/_/g, " "),
+            currentValue: {
+              routingMode: currentEscalationPolicy.routing_mode,
+              escalationThresholdPercent: currentEscalationPolicy.escalation_threshold_percent,
+            },
+            proposedValue: {
+              routingMode: "resolve_first_then_escalate",
+              escalationThresholdPercent: Math.min(40, currentEscalationPolicy.escalation_threshold_percent + 5),
+            },
+          },
+          reviewDetails: buildReviewDetails({
+            decision: "qualified_rendered",
+            primaryTrigger: `${disconnectType.replace(/_/g, " ")} escalations underperform the best alternative path.`,
+            thresholdSummary,
+            rankingSummary,
+            score,
+            impactScore,
+            volumeScore,
+            persistenceScore,
+            actionabilityScore,
+          }),
+          evidence: [
+            {
+              metricKey: `${disconnectType}_escalation_close_gap`,
+              label: `${disconnectType.replace(/_/g, " ")} durable-close gap`,
+              currentValue: escalated.durableCloseRate,
+              baselineValue: bestAlternative.durableCloseRate,
+              delta: Number(gap.toFixed(2)),
+              window: "last_30_days",
+              direction: "down",
+            },
+          ],
+          generatedAt: input.now.toISOString(),
+          staleAt,
+          renderStatus: "active",
+          primaryGroupingKey: disconnectType,
+          score,
+          impactScore,
+          volumeScore,
+          persistenceScore,
+          actionabilityScore,
+          affectedVolume: escalated.volume,
+        });
+      }
+    } else {
+      pushDecision("escalation_policy_adjustment", disconnectType, {
+        decision: "suppressed_by_predicate",
+        suppressionReason: "threshold_not_met",
+        score: null,
+        impactScore: null,
+        volumeScore: null,
+        persistenceScore: null,
+        actionabilityScore: null,
+        confidence: null,
+        primaryTrigger: `${disconnectType.replace(/_/g, " ")} escalation performance is being evaluated.`,
+        thresholdSummary: "Did not clear the minimum escalation-volume or durable-close gap threshold.",
+        rankingSummary: "No score because predicate qualification failed.",
+      });
+    }
+
+    const dominant = [...items].sort((left, right) => right.volume - left.volume)[0];
+    if (dominant && items.reduce((sum, item) => sum + item.volume, 0) >= 10 && (dominant.reopenRate ?? 0) >= 0.25) {
+      const totalVolume = items.reduce((sum, item) => sum + item.volume, 0);
+      const volumeScore = scaleScore(totalVolume, 9, 20, 25);
+      const impactScore = scaleScore(dominant.reopenRate ?? 0, 0.25, 0.55, 40);
+      const persistenceScore = 20;
+      const actionabilityScore = 15;
+      const score = volumeScore + impactScore + persistenceScore + actionabilityScore;
+      const confidence = mapPolicyConfidence(score);
+      if (confidence) {
+        const thresholdSummary = `${totalVolume} conclusions and ${(100 * (dominant.reopenRate ?? 0)).toFixed(0)}% dominant-family reopen rate.`;
+        const rankingSummary = `Score ${score} = impact ${impactScore} + volume ${volumeScore} + persistence ${persistenceScore} + actionability ${actionabilityScore}.`;
+        candidates.push({
+          id: buildPolicyRecommendationId(input.officeId, "disconnect_playbook_change", disconnectType),
+          officeId: input.officeId,
+          taxonomy: "disconnect_playbook_change",
+          title: `Change the ${disconnectType.replace(/_/g, " ")} playbook`,
+          statement: `${dominant.conclusionFamily} is the dominant intervention path here, but it is reopening too often.`,
+          whyNow: `${disconnectType.replace(/_/g, " ")} has enough volume to justify a targeted playbook change.`,
+          expectedImpact: "Improve first-pass handling on a recurring disconnect type and reduce repeat intervention churn.",
+          confidence,
+          priority: score,
+          suggestedAction: `Update the default conclusion guidance for ${disconnectType.replace(/_/g, " ")} and coach managers toward the stronger path.`,
+          counterSignal: "Validate that the recent reopen pattern is not a short-lived mix shift before revising the shared playbook.",
+          proposedChange: null,
+          reviewDetails: buildReviewDetails({
+            decision: "qualified_rendered",
+            primaryTrigger: `${disconnectType.replace(/_/g, " ")} is reopening too often through its dominant path.`,
+            thresholdSummary,
+            rankingSummary,
+            score,
+            impactScore,
+            volumeScore,
+            persistenceScore,
+            actionabilityScore,
+          }),
+          evidence: [
+            {
+              metricKey: `${disconnectType}_dominant_reopen_rate`,
+              label: `${disconnectType.replace(/_/g, " ")} dominant-family reopen rate`,
+              currentValue: dominant.reopenRate,
+              baselineValue: 0.25,
+              delta: dominant.reopenRate == null ? null : Number((dominant.reopenRate - 0.25).toFixed(2)),
+              window: "last_30_days",
+              direction: "up",
+            },
+          ],
+          generatedAt: input.now.toISOString(),
+          staleAt,
+          renderStatus: "active",
+          primaryGroupingKey: disconnectType,
+          score,
+          impactScore,
+          volumeScore,
+          persistenceScore,
+          actionabilityScore,
+          affectedVolume: totalVolume,
+        });
+      }
+    } else {
+      pushDecision("disconnect_playbook_change", disconnectType, {
+        decision: "suppressed_by_predicate",
+        suppressionReason: "threshold_not_met",
+        primaryTrigger: `${disconnectType.replace(/_/g, " ")} playbook drift is being evaluated.`,
+        thresholdSummary: "Did not clear the minimum volume or reopen-rate threshold.",
+        rankingSummary: "No score because predicate qualification failed.",
+      });
+    }
+  }
+
+  if (candidates.length === 0) {
+    const warning = input.outcomeEffectiveness.warnings.find((item) => item.volume >= 5);
+    if (warning) {
+      const score = 58;
+      candidates.push({
+        id: buildPolicyRecommendationId(input.officeId, "monitor_only", `${warning.kind}:${warning.key}`),
+        officeId: input.officeId,
+        taxonomy: "monitor_only",
+        title: `Monitor ${warning.label.toLowerCase()}`,
+        statement: `This pattern is notable enough to track, but not yet strong enough for a policy change.`,
+        whyNow: `${warning.label} is elevated in the current intervention window.`,
+        expectedImpact: "Keeps managers aligned on a risk pattern before it hardens into a recurring policy problem.",
+        confidence: "low",
+        priority: score,
+        suggestedAction: "Continue monitoring this pattern and re-evaluate after another full recommendation cycle.",
+        counterSignal: "No prescriptive recommendation qualified above the action threshold yet.",
+        proposedChange: null,
+        reviewDetails: buildReviewDetails({
+          decision: "qualified_rendered",
+          primaryTrigger: `${warning.label} remains elevated without a stronger prescriptive pattern.`,
+          thresholdSummary: `${warning.volume} affected cases in the last 30 days.`,
+          rankingSummary: "Fixed monitor-only score 58 for notable but not prescriptive signals.",
+          score,
+          impactScore: 20,
+          volumeScore: 13,
+          persistenceScore: 10,
+          actionabilityScore: 15,
+        }),
+        evidence: [
+          {
+            metricKey: `${warning.kind}:${warning.key}`,
+            label: warning.label,
+            currentValue: warning.rate,
+            baselineValue: null,
+            delta: null,
+            window: "last_30_days",
+            direction: "not_applicable",
+          },
+        ],
+        generatedAt: input.now.toISOString(),
+        staleAt,
+        renderStatus: "active",
+        primaryGroupingKey: `${warning.kind}:${warning.key}`,
+        score,
+        impactScore: 20,
+        volumeScore: 13,
+        persistenceScore: 10,
+        actionabilityScore: 15,
+        affectedVolume: warning.volume,
+      });
+    }
+  }
+
+  const taxonomyOrder = [
+    "snooze_policy_adjustment",
+    "escalation_policy_adjustment",
+    "assignee_load_balancing",
+    "disconnect_playbook_change",
+    "monitor_only",
+  ] satisfies InterventionPolicyRecommendation["taxonomy"][];
+  const ranked = [...candidates].sort((left, right) => {
+    if (right.score !== left.score) return right.score - left.score;
+    if (right.impactScore !== left.impactScore) return right.impactScore - left.impactScore;
+    if (right.persistenceScore !== left.persistenceScore) return right.persistenceScore - left.persistenceScore;
+    if (right.affectedVolume !== left.affectedVolume) return right.affectedVolume - left.affectedVolume;
+    if (left.taxonomy !== right.taxonomy) {
+      return taxonomyOrder.indexOf(left.taxonomy) - taxonomyOrder.indexOf(right.taxonomy);
+    }
+    return left.primaryGroupingKey.localeCompare(right.primaryGroupingKey);
+  });
+  const qualifying = ranked.filter((candidate) => candidate.score >= POLICY_RECOMMENDATION_QUALIFICATION_FLOOR);
+  const primary = qualifying
+    .filter((candidate) => candidate.score >= POLICY_RECOMMENDATION_STRONG_FLOOR)
+    .slice(0, POLICY_RECOMMENDATION_PRIMARY_CAP);
+  const secondary = qualifying
+    .filter((candidate) => !primary.some((primaryCandidate) => primaryCandidate.id === candidate.id))
+    .slice(0, POLICY_RECOMMENDATION_SECONDARY_CAP);
+  const rendered = [...primary, ...secondary];
+
+  for (const candidate of ranked) {
+    const decision =
+      candidate.score < POLICY_RECOMMENDATION_QUALIFICATION_FLOOR
+        ? "suppressed_by_threshold"
+        : rendered.some((item) => item.id === candidate.id)
+          ? "qualified_rendered"
+          : "qualified_suppressed_by_cap";
+    pushDecision(candidate.taxonomy, candidate.primaryGroupingKey, {
+      recommendationId: candidate.id,
+      decision,
+      score: candidate.score,
+      impactScore: candidate.impactScore,
+      volumeScore: candidate.volumeScore,
+      persistenceScore: candidate.persistenceScore,
+      actionabilityScore: candidate.actionabilityScore,
+      confidence: candidate.confidence,
+      primaryTrigger: candidate.reviewDetails.primaryTrigger,
+      thresholdSummary: candidate.reviewDetails.thresholdSummary,
+      rankingSummary: candidate.reviewDetails.rankingSummary,
+    });
+  }
+
+  return {
+    recommendations: rendered,
+    decisions,
+  };
+}
+
+function finalizePolicyRecommendationCandidates(
+  input: ReturnType<typeof buildPolicyRecommendationCandidates>
+): {
+  snapshotStatus: "active" | "degraded";
+  recommendations: PolicyRecommendationCandidate[];
+  decisions: PolicyDecisionRow[];
+} {
+  let degraded = false;
+  const finalized = input.recommendations.map((candidate) => {
+    try {
+      if (!candidate.title || !candidate.statement || !candidate.whyNow) {
+        throw new Error("Incomplete recommendation copy");
+      }
+      return candidate;
+    } catch {
+      degraded = true;
+      return {
+        ...candidate,
+        title: candidate.title || "Monitor intervention policy drift",
+        statement: candidate.statement || "A policy pattern qualified but required fallback copy.",
+        whyNow: candidate.whyNow || "A qualifying intervention signal needs manual review.",
+        expectedImpact: candidate.expectedImpact || "Keep managers aligned on a qualifying policy signal.",
+        suggestedAction: candidate.suggestedAction || "Review the underlying analytics before making a policy change.",
+        renderStatus: "degraded" as const,
+        reviewDetails: {
+          ...candidate.reviewDetails,
+          usedFallbackCopy: true,
+        },
+      };
+    }
+  });
+
+  return {
+    snapshotStatus: degraded ? "degraded" : "active",
+    recommendations: finalized,
+    decisions: input.decisions.map((decision) => {
+      const finalizedRecommendation = finalized.find((candidate) => candidate.id === decision.recommendation_id);
+      return finalizedRecommendation
+        ? {
+            ...decision,
+            used_fallback_copy: finalizedRecommendation.reviewDetails.usedFallbackCopy,
+            used_fallback_structured_payload: finalizedRecommendation.reviewDetails.usedFallbackStructuredPayload,
+          }
+        : decision;
+    }),
+  };
+}
+
+function hydratePolicyRecommendationView(input: {
+  snapshot: PolicySnapshotRow & { status: "active" | "degraded" };
+  recommendationRows: PolicyRecommendationRow[];
+  feedbackRows: PolicyFeedbackRow[];
+  applyEventRows: PolicyApplyEventRow[];
+  viewerUserId: string;
+}): InterventionPolicyRecommendationsView {
+  const recommendations = input.recommendationRows.map((row) => {
+    const feedback = input.feedbackRows.filter((item) => item.recommendation_id === row.recommendation_id);
+    const viewerFeedback = feedback.find((item) => item.user_id === input.viewerUserId);
+    const latestApplyEvent = input.applyEventRows.filter((item) => item.recommendation_id === row.recommendation_id).at(-1);
+    const proposedChange = row.proposed_change_json ?? null;
+    const reviewDetails =
+      row.review_details_json ??
+      buildReviewDetails({
+        decision: "qualified_rendered",
+        primaryTrigger: "This recommendation was generated before detailed review metadata was persisted.",
+        thresholdSummary: "No detailed threshold metadata is available for this snapshot.",
+        rankingSummary: "No detailed ranking metadata is available for this snapshot.",
+        score: row.priority,
+        impactScore: 0,
+        volumeScore: 0,
+        persistenceScore: 0,
+        actionabilityScore: 0,
+      });
+    const applyEligibility =
+      row.taxonomy === "disconnect_playbook_change" || row.taxonomy === "monitor_only"
+        ? {
+            eligible: false,
+            reason: "read_only_taxonomy" as const,
+            message: "This recommendation remains review-only in the current release.",
+          }
+        : row.confidence === "low"
+          ? {
+              eligible: false,
+              reason: "low_confidence" as const,
+              message: "Only medium and high confidence recommendations are apply-eligible.",
+            }
+          : !proposedChange
+            ? {
+                eligible: false,
+                reason: "missing_proposed_change" as const,
+                message: "A deterministic policy change payload is not available for this recommendation.",
+              }
+            : {
+                eligible: true,
+                reason: "eligible" as const,
+                message: "This recommendation is eligible for preview and apply.",
+              };
+    return {
+      id: row.recommendation_id,
+      officeId: row.office_id,
+      snapshotId: row.snapshot_id,
+      taxonomy: row.taxonomy,
+      title: row.title,
+      statement: row.statement,
+      whyNow: row.why_now,
+      expectedImpact: row.expected_impact,
+      confidence: row.confidence,
+      priority: row.priority,
+      suggestedAction: row.suggested_action,
+      counterSignal: row.counter_signal,
+      evidence: Array.isArray(row.evidence_json) ? row.evidence_json : [],
+      generatedAt: toIso(row.generated_at) ?? new Date().toISOString(),
+      staleAt: toIso(row.stale_at) ?? new Date().toISOString(),
+      renderStatus: row.render_status,
+      proposedChange,
+      reviewDetails,
+      applyEligibility,
+      applyStatus: latestApplyEvent
+        ? ["reverted", "revert_noop"].includes(String(latestApplyEvent.status))
+          ? {
+              status: "not_applied",
+              appliedAt: null,
+              appliedBy: null,
+              reason: null,
+            }
+          : {
+              status: latestApplyEvent.status,
+              appliedAt: toIso(latestApplyEvent.created_at),
+              appliedBy: latestApplyEvent.actor_display_name ?? latestApplyEvent.actor_user_id,
+              reason: latestApplyEvent.rejection_reason,
+            }
+        : {
+            status: "not_applied",
+            appliedAt: null,
+            appliedBy: null,
+            reason: null,
+          },
+      feedbackSummary: {
+        helpfulCount: feedback.filter((item) => item.feedback_value === "helpful").length,
+        notUsefulCount: feedback.filter((item) => item.feedback_value === "not_useful").length,
+        wrongDirectionCount: feedback.filter((item) => item.feedback_value === "wrong_direction").length,
+        commentCount: feedback.filter((item) => Boolean(item.comment)).length,
+      },
+      feedbackStateForViewer: viewerFeedback?.feedback_value ?? null,
+    } satisfies InterventionPolicyRecommendation;
+  });
+
+  return {
+    status: input.snapshot.status,
+    snapshot: {
+      id: input.snapshot.id,
+      officeId: input.snapshot.office_id,
+      status: input.snapshot.status,
+      generatedAt: toIso(input.snapshot.generated_at) ?? new Date().toISOString(),
+      staleAt: toIso(input.snapshot.stale_at) ?? new Date().toISOString(),
+      supersededAt: toIso(input.snapshot.superseded_at),
+    },
+    recommendations,
+  };
+}
+
+async function fetchPolicyDecisionRows(
+  tenantDb: TenantDb | InMemoryTenantDb,
+  officeId: string,
+  snapshotId: string
+) {
+  if (isInMemoryTenantDb(tenantDb)) {
+    return ((tenantDb.state.policyRecommendationDecisions ?? []) as PolicyDecisionRow[]).filter(
+      (row) => row.office_id === officeId && row.snapshot_id === snapshotId
+    );
+  }
+
+  const result = await tenantDb.execute(sql`
+    SELECT *
+    FROM ai_policy_recommendation_decisions
+    WHERE office_id = ${officeId}
+      AND snapshot_id = ${snapshotId}
+    ORDER BY created_at ASC
+  `);
+  return ((result as any).rows ?? []) as PolicyDecisionRow[];
+}
+
+async function fetchPolicyApplyEventRows(
+  tenantDb: TenantDb | InMemoryTenantDb,
+  officeId: string,
+  recommendationIds: string[]
+) {
+  if (recommendationIds.length === 0) return [] as PolicyApplyEventRow[];
+  if (isInMemoryTenantDb(tenantDb)) {
+    return ((tenantDb.state.policyRecommendationApplyEvents ?? []) as PolicyApplyEventRow[]).filter((row) =>
+      recommendationIds.includes(row.recommendation_id)
+    );
+  }
+  const result = await tenantDb.execute(sql`
+    SELECT
+      a.id,
+      a.office_id,
+      a.recommendation_id,
+      a.snapshot_id,
+      a.taxonomy,
+      a.actor_user_id,
+      u.display_name AS actor_display_name,
+      a.request_idempotency_key,
+      a.status,
+      a.target_type,
+      a.target_id,
+      a.before_state_json,
+      a.proposed_state_json,
+      a.applied_state_json,
+      a.rejection_reason,
+      a.created_at
+    FROM ai_policy_recommendation_apply_events a
+    LEFT JOIN public.users u ON u.id = a.actor_user_id
+    WHERE a.office_id = ${officeId}
+      AND a.recommendation_id = ANY(${recommendationIds}::uuid[])
+    ORDER BY a.created_at ASC
+  `);
+  return ((result as any).rows ?? []) as PolicyApplyEventRow[];
+}
+
+async function fetchSnoozePolicyRows(tenantDb: TenantDb | InMemoryTenantDb, officeId: string) {
+  if (isInMemoryTenantDb(tenantDb)) {
+    return ((tenantDb.state.interventionSnoozePolicies ?? []) as SnoozePolicyRow[]).filter((row) => row.office_id === officeId);
+  }
+  const result = await tenantDb.execute(sql`
+    SELECT office_id, snooze_reason_key, max_snooze_days, breach_review_threshold_percent
+    FROM intervention_snooze_policies
+    WHERE office_id = ${officeId}
+  `);
+  return ((result as any).rows ?? []) as SnoozePolicyRow[];
+}
+
+async function fetchEscalationPolicyRows(tenantDb: TenantDb | InMemoryTenantDb, officeId: string) {
+  if (isInMemoryTenantDb(tenantDb)) {
+    return ((tenantDb.state.interventionEscalationPolicies ?? []) as EscalationPolicyRow[]).filter((row) => row.office_id === officeId);
+  }
+  const result = await tenantDb.execute(sql`
+    SELECT office_id, disconnect_type_key, routing_mode, escalation_threshold_percent
+    FROM intervention_escalation_policies
+    WHERE office_id = ${officeId}
+  `);
+  return ((result as any).rows ?? []) as EscalationPolicyRow[];
+}
+
+async function fetchAssigneeBalancingPolicyRow(tenantDb: TenantDb | InMemoryTenantDb, officeId: string) {
+  if (isInMemoryTenantDb(tenantDb)) {
+    return (
+      ((tenantDb.state.interventionAssigneeBalancingPolicies ?? []) as AssigneeBalancingPolicyRow[]).find(
+        (row) => row.office_id === officeId
+      ) ?? null
+    );
+  }
+  const result = await tenantDb.execute(sql`
+    SELECT office_id, balancing_mode, overload_share_percent, min_high_risk_cases
+    FROM intervention_assignee_balancing_policies
+    WHERE office_id = ${officeId}
+    LIMIT 1
+  `);
+  return (((result as any).rows ?? [])[0] ?? null) as AssigneeBalancingPolicyRow | null;
+}
+
+async function fetchLatestRenderablePolicySnapshot(tenantDb: TenantDb | InMemoryTenantDb, officeId: string) {
+  if (isInMemoryTenantDb(tenantDb)) {
+    const rows = (tenantDb.state.policyRecommendationSnapshots ?? []) as PolicySnapshotRow[];
+    return rows
+      .filter((row) => row.office_id === officeId && (row.status === "active" || row.status === "degraded"))
+      .sort((left, right) => new Date(toIso(right.generated_at) ?? 0).getTime() - new Date(toIso(left.generated_at) ?? 0).getTime())[0] as
+      | (PolicySnapshotRow & { status: "active" | "degraded" })
+      | undefined
+      | null;
+  }
+
+  const result = await tenantDb.execute(sql`
+    SELECT id, office_id, status, generated_at, stale_at, superseded_at
+    FROM ai_policy_recommendation_snapshots
+    WHERE office_id = ${officeId}
+      AND status IN ('active', 'degraded')
+    ORDER BY generated_at DESC
+    LIMIT 1
+  `);
+  return ((result as any).rows?.[0] ?? null) as (PolicySnapshotRow & { status: "active" | "degraded" }) | null;
+}
+
+async function fetchPendingPolicySnapshot(tenantDb: TenantDb | InMemoryTenantDb, officeId: string) {
+  if (isInMemoryTenantDb(tenantDb)) {
+    const rows = (tenantDb.state.policyRecommendationSnapshots ?? []) as Array<PolicySnapshotRow & { status: string }>;
+    return rows.find((row) => row.office_id === officeId && row.status === "pending") ?? null;
+  }
+
+  const result = await tenantDb.execute(sql`
+    SELECT id, office_id, status, generated_at, stale_at, superseded_at
+    FROM ai_policy_recommendation_snapshots
+    WHERE office_id = ${officeId}
+      AND status = 'pending'
+    ORDER BY generated_at DESC
+    LIMIT 1
+  `);
+  return ((result as any).rows?.[0] ?? null) as (PolicySnapshotRow & { status: string }) | null;
+}
+
+async function fetchPolicyRecommendationRows(
+  tenantDb: TenantDb | InMemoryTenantDb,
+  officeId: string,
+  snapshotId: string
+) {
+  if (isInMemoryTenantDb(tenantDb)) {
+    return ((tenantDb.state.policyRecommendationRows ?? []) as PolicyRecommendationRow[])
+      .filter((row) => row.office_id === officeId && row.snapshot_id === snapshotId)
+      .sort((left, right) => right.priority - left.priority);
+  }
+
+  const result = await tenantDb.execute(sql`
+    SELECT
+      snapshot_id,
+      office_id,
+      recommendation_id,
+      taxonomy,
+      primary_grouping_key,
+      title,
+      statement,
+      why_now,
+      expected_impact,
+      confidence,
+      priority,
+      suggested_action,
+      counter_signal,
+      render_status,
+      evidence_json,
+      proposed_change_json,
+      review_details_json,
+      generated_at,
+      stale_at
+    FROM ai_policy_recommendation_rows
+    WHERE office_id = ${officeId}
+      AND snapshot_id = ${snapshotId}
+    ORDER BY priority DESC, recommendation_id ASC
+  `);
+  return (((result as any).rows ?? []) as PolicyRecommendationRow[]).map((row) => ({
+    ...row,
+    evidence_json: Array.isArray((row as any).evidence_json) ? (row as any).evidence_json : [],
+  }));
+}
+
+async function fetchPolicyFeedbackRows(
+  tenantDb: TenantDb | InMemoryTenantDb,
+  officeId: string,
+  recommendationIds: string[]
+) {
+  if (recommendationIds.length === 0) return [] as PolicyFeedbackRow[];
+  if (isInMemoryTenantDb(tenantDb)) {
+    return ((tenantDb.state.policyRecommendationFeedback ?? []) as PolicyFeedbackRow[]).filter((row) =>
+      recommendationIds.includes(row.recommendation_id)
+    );
+  }
+  const result = await tenantDb.execute(sql`
+    SELECT recommendation_id, user_id, feedback_value, comment
+    FROM ai_policy_recommendation_feedback
+    WHERE office_id = ${officeId}
+      AND recommendation_id = ANY(${recommendationIds}::uuid[])
+  `);
+  return ((result as any).rows ?? []) as PolicyFeedbackRow[];
+}
+
+export async function getInterventionPolicyRecommendationsView(
+  tenantDb: TenantDb | InMemoryTenantDb,
+  input: { officeId: string; viewerUserId: string; now?: Date }
+): Promise<InterventionPolicyRecommendationsView> {
+  const snapshot = await fetchLatestRenderablePolicySnapshot(tenantDb, input.officeId);
+  if (!snapshot) {
+    return {
+      status: "missing_snapshot",
+      canRegenerate: true,
+    };
+  }
+
+  const rows = await fetchPolicyRecommendationRows(tenantDb, input.officeId, snapshot.id);
+  const feedback = await fetchPolicyFeedbackRows(
+    tenantDb,
+    input.officeId,
+    rows.map((row) => row.recommendation_id)
+  );
+  const applyEvents = await fetchPolicyApplyEventRows(
+    tenantDb,
+    input.officeId,
+    rows.map((row) => row.recommendation_id)
+  );
+  return hydratePolicyRecommendationView({
+    snapshot,
+    recommendationRows: rows,
+    feedbackRows: feedback,
+    applyEventRows: applyEvents,
+    viewerUserId: input.viewerUserId,
+  });
+}
+
+export async function regenerateInterventionPolicyRecommendations(
+  tenantDb: TenantDb | InMemoryTenantDb,
+  input: { officeId: string; requestedByUserId: string; now?: Date }
+) {
+  const now = input.now ?? new Date();
+  const pendingSnapshot = await fetchPendingPolicySnapshot(tenantDb, input.officeId);
+  if (pendingSnapshot) {
+    const pendingAge = now.getTime() - new Date(toIso(pendingSnapshot.generated_at) ?? now.toISOString()).getTime();
+    if (pendingAge < PENDING_POLICY_SNAPSHOT_TIMEOUT_MS) {
+      return {
+        queued: true as const,
+        snapshotId: pendingSnapshot.id,
+        status: "pending",
+      };
+    }
+
+    if (isInMemoryTenantDb(tenantDb)) {
+      const snapshots = (tenantDb.state.policyRecommendationSnapshots ??= []);
+      const row = snapshots.find((item) => item.id === pendingSnapshot.id);
+      if (row) row.status = "failed";
+    } else {
+      await tenantDb.execute(sql`
+        UPDATE ai_policy_recommendation_snapshots
+        SET status = 'failed', updated_at = ${now}
+        WHERE id = ${pendingSnapshot.id}
+      `);
+    }
+  }
+
+  const snapshotId = crypto.randomUUID();
+  const staleAt = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+  if (isInMemoryTenantDb(tenantDb)) {
+    const snapshots = (tenantDb.state.policyRecommendationSnapshots ??= []);
+    snapshots.push({
+      id: snapshotId,
+      office_id: input.officeId,
+      status: "pending",
+      requested_by_user_id: input.requestedByUserId,
+      supersedes_snapshot_id: null,
+      generated_at: now.toISOString(),
+      stale_at: staleAt.toISOString(),
+      superseded_at: null,
+    });
+  } else {
+    try {
+      await tenantDb.execute(sql`
+        INSERT INTO ai_policy_recommendation_snapshots (
+          id, office_id, status, requested_by_user_id, supersedes_snapshot_id, generated_at, stale_at, created_at, updated_at
+        )
+        VALUES (
+          ${snapshotId},
+          ${input.officeId},
+          'pending',
+          ${input.requestedByUserId},
+          ${null},
+          ${now},
+          ${staleAt},
+          ${now},
+          ${now}
+        )
+      `);
+    } catch {
+      const racingPending = await fetchPendingPolicySnapshot(tenantDb, input.officeId);
+      if (racingPending) {
+        return {
+          queued: true as const,
+          snapshotId: racingPending.id,
+          status: "pending",
+        };
+      }
+      throw new AppError(500, "Failed to queue intervention policy recommendations");
+    }
+  }
+
+  if (isInMemoryTenantDb(tenantDb)) {
+    const result = await generateInterventionPolicyRecommendationsSnapshot(tenantDb, {
+      officeId: input.officeId,
+      snapshotId,
+      now,
+    });
+    return {
+      queued: true as const,
+      snapshotId,
+      status: result.status,
+      recommendations: result.recommendations,
+    };
+  }
+
+  await tenantDb.insert(jobQueue).values({
+    jobType: "ai_generate_intervention_policy_recommendations",
+    payload: {
+      officeId: input.officeId,
+      snapshotId,
+      requestedByUserId: input.requestedByUserId,
+    },
+    officeId: input.officeId,
+    status: "pending",
+    runAfter: now,
+  });
+
+  return {
+    queued: true as const,
+    snapshotId,
+    status: "pending",
+  };
+}
+
+export async function generateInterventionPolicyRecommendationsSnapshot(
+  tenantDb: TenantDb | InMemoryTenantDb,
+  input: { officeId: string; snapshotId: string; now?: Date }
+) {
+  const now = input.now ?? new Date();
+  const staleAt = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+
+  try {
+    const { cases, users: userRows, history } = await loadInterventionAnalyticsData(tenantDb, input.officeId);
+    const usersMap = new Map(userRows.map((row) => [row.id, row.displayName]));
+    const outcomeEffectiveness = buildInterventionOutcomeEffectiveness(history, usersMap, cases, now);
+    const snoozePolicies = await fetchSnoozePolicyRows(tenantDb, input.officeId);
+    const escalationPolicies = await fetchEscalationPolicyRows(tenantDb, input.officeId);
+    const assigneeBalancingPolicy =
+      (await fetchAssigneeBalancingPolicyRow(tenantDb, input.officeId)) ?? defaultAssigneeBalancingPolicy();
+    const candidates = buildPolicyRecommendationCandidates({
+      officeId: input.officeId,
+      cases,
+      history,
+      usersMap,
+      outcomeEffectiveness,
+      snoozePolicies,
+      escalationPolicies,
+      assigneeBalancingPolicy,
+      now,
+    });
+    const finalized = finalizePolicyRecommendationCandidates(candidates);
+
+    const snapshotStatus = finalized.snapshotStatus;
+
+    if (isInMemoryTenantDb(tenantDb)) {
+      const snapshots = (tenantDb.state.policyRecommendationSnapshots ??= []);
+      const rows = (tenantDb.state.policyRecommendationRows ??= []);
+      const pendingRow = snapshots.find((item) => item.id === input.snapshotId);
+      if (!pendingRow || pendingRow.status !== "pending") {
+        return {
+          status: "failed" as const,
+          recommendations: [] as InterventionPolicyRecommendation[],
+        };
+      }
+      const prior = await fetchLatestRenderablePolicySnapshot(tenantDb, input.officeId);
+      if (prior) {
+        const priorRow = snapshots.find((item) => item.id === prior.id);
+        if (priorRow) {
+          priorRow.status = "superseded";
+          priorRow.superseded_at = now.toISOString();
+        }
+      }
+      pendingRow.status = snapshotStatus;
+      pendingRow.supersedes_snapshot_id = prior?.id ?? null;
+      pendingRow.stale_at = staleAt.toISOString();
+      const decisionRows = (tenantDb.state.policyRecommendationDecisions ??= []);
+      for (const decision of finalized.decisions) {
+        decisionRows.push({
+          ...decision,
+          snapshot_id: input.snapshotId,
+        });
+      }
+      for (const candidate of finalized.recommendations) {
+        rows.push({
+          snapshot_id: input.snapshotId,
+          office_id: input.officeId,
+          recommendation_id: candidate.id,
+          taxonomy: candidate.taxonomy,
+          primary_grouping_key: candidate.primaryGroupingKey,
+          title: candidate.title,
+          statement: candidate.statement,
+          why_now: candidate.whyNow,
+          expected_impact: candidate.expectedImpact,
+          confidence: candidate.confidence,
+          priority: candidate.priority,
+          suggested_action: candidate.suggestedAction,
+          counter_signal: candidate.counterSignal,
+          render_status: candidate.renderStatus,
+          evidence_json: candidate.evidence,
+          proposed_change_json: candidate.proposedChange,
+          review_details_json: candidate.reviewDetails,
+          generated_at: candidate.generatedAt,
+          stale_at: candidate.staleAt,
+        });
+      }
+    } else {
+      const prior = await fetchLatestRenderablePolicySnapshot(tenantDb, input.officeId);
+      const promoteResult = await tenantDb.execute(sql`
+        UPDATE ai_policy_recommendation_snapshots
+        SET status = ${snapshotStatus},
+            supersedes_snapshot_id = ${prior?.id ?? null},
+            stale_at = ${staleAt},
+            updated_at = ${now}
+        WHERE id = ${input.snapshotId}
+          AND status = 'pending'
+      `);
+      if (((promoteResult as any).rowCount ?? 0) === 0) {
+        return {
+          status: "failed" as const,
+          recommendations: [] as InterventionPolicyRecommendation[],
+        };
+      }
+      if (prior) {
+        await tenantDb.execute(sql`
+          UPDATE ai_policy_recommendation_snapshots
+          SET status = 'superseded', superseded_at = ${now}, updated_at = ${now}
+          WHERE id = ${prior.id}
+        `);
+      }
+      for (const decision of finalized.decisions) {
+        await tenantDb.execute(sql`
+          INSERT INTO ai_policy_recommendation_decisions (
+            id,
+            office_id,
+            snapshot_id,
+            recommendation_id,
+            taxonomy,
+            grouping_key,
+            decision,
+            suppression_reason,
+            score,
+            impact_score,
+            volume_score,
+            persistence_score,
+            actionability_score,
+            confidence,
+            qualified_at,
+            rendered_at,
+            used_fallback_copy,
+            used_fallback_structured_payload,
+            metrics_json,
+            created_at
+          )
+          VALUES (
+            ${decision.id},
+            ${input.officeId},
+            ${input.snapshotId},
+            ${decision.recommendation_id},
+            ${decision.taxonomy},
+            ${decision.grouping_key},
+            ${decision.decision},
+            ${decision.suppression_reason},
+            ${decision.score},
+            ${decision.impact_score},
+            ${decision.volume_score},
+            ${decision.persistence_score},
+            ${decision.actionability_score},
+            ${decision.confidence},
+            ${decision.qualified_at ? new Date(toIso(decision.qualified_at) ?? now.toISOString()) : null},
+            ${decision.rendered_at ? new Date(toIso(decision.rendered_at) ?? now.toISOString()) : null},
+            ${decision.used_fallback_copy},
+            ${decision.used_fallback_structured_payload},
+            ${JSON.stringify(decision.metrics_json)}::jsonb,
+            ${now}
+          )
+        `);
+      }
+      for (const candidate of finalized.recommendations) {
+        await tenantDb.execute(sql`
+          INSERT INTO ai_policy_recommendation_rows (
+            snapshot_id,
+            office_id,
+            recommendation_id,
+            taxonomy,
+            primary_grouping_key,
+            title,
+            statement,
+            why_now,
+            expected_impact,
+            confidence,
+            priority,
+            suggested_action,
+            counter_signal,
+            render_status,
+            evidence_json,
+            proposed_change_json,
+            review_details_json,
+            generated_at,
+            stale_at,
+            created_at,
+            updated_at
+          )
+          VALUES (
+            ${input.snapshotId},
+            ${input.officeId},
+            ${candidate.id},
+            ${candidate.taxonomy},
+            ${candidate.primaryGroupingKey},
+            ${candidate.title},
+            ${candidate.statement},
+            ${candidate.whyNow},
+            ${candidate.expectedImpact},
+            ${candidate.confidence},
+            ${candidate.priority},
+            ${candidate.suggestedAction},
+            ${candidate.counterSignal},
+            ${candidate.renderStatus},
+            ${JSON.stringify(candidate.evidence)}::jsonb,
+            ${JSON.stringify(candidate.proposedChange)}::jsonb,
+            ${JSON.stringify(candidate.reviewDetails)}::jsonb,
+            ${now},
+            ${staleAt},
+            ${now},
+            ${now}
+          )
+        `);
+      }
+    }
+
+    return {
+      status: snapshotStatus,
+      recommendations: finalized.recommendations.map(
+        ({ primaryGroupingKey: _primaryGroupingKey, score: _score, impactScore: _impactScore, volumeScore: _volumeScore, persistenceScore: _persistenceScore, actionabilityScore: _actionabilityScore, affectedVolume: _affectedVolume, ...candidate }) => ({
+        ...candidate,
+        snapshotId: input.snapshotId,
+        applyEligibility: {
+          eligible: false,
+          reason: "missing_proposed_change",
+          message: "Eligibility is hydrated when recommendations are read.",
+        },
+        applyStatus: {
+          status: "not_applied",
+          appliedAt: null,
+          appliedBy: null,
+          reason: null,
+        },
+        feedbackSummary: {
+          helpfulCount: 0,
+          notUsefulCount: 0,
+          wrongDirectionCount: 0,
+          commentCount: 0,
+        },
+        feedbackStateForViewer: null,
+      })
+      ),
+    };
+  } catch (error) {
+    if (isInMemoryTenantDb(tenantDb)) {
+      const snapshots = (tenantDb.state.policyRecommendationSnapshots ??= []);
+      const row = snapshots.find((item) => item.id === input.snapshotId);
+      if (row) row.status = "failed";
+    } else {
+      await tenantDb.execute(sql`
+        UPDATE ai_policy_recommendation_snapshots
+        SET status = 'failed', updated_at = ${now}
+        WHERE id = ${input.snapshotId}
+      `);
+    }
+    throw error;
+  }
+}
+
+export async function recordInterventionPolicyRecommendationFeedback(
+  tenantDb: TenantDb | InMemoryTenantDb,
+  input: {
+    officeId: string;
+    recommendationId: string;
+    userId: string;
+    feedbackValue: InterventionPolicyRecommendationFeedbackValue;
+    comment: string | null;
+  }
+) {
+  if (isInMemoryTenantDb(tenantDb)) {
+    const rows = (tenantDb.state.policyRecommendationFeedback ??= []);
+    const existing = rows.find(
+      (row) =>
+        row.recommendation_id === input.recommendationId &&
+        row.user_id === input.userId &&
+        (row.office_id ?? input.officeId) === input.officeId
+    );
+    if (existing) {
+      existing.feedback_value = input.feedbackValue;
+      existing.comment = input.comment ?? null;
+    } else {
+      rows.push({
+        id: crypto.randomUUID(),
+        office_id: input.officeId,
+        recommendation_id: input.recommendationId,
+        user_id: input.userId,
+        feedback_value: input.feedbackValue,
+        comment: input.comment ?? null,
+      });
+    }
+  } else {
+    await tenantDb.execute(sql`
+      INSERT INTO ai_policy_recommendation_feedback (
+        id,
+        office_id,
+        recommendation_id,
+        user_id,
+        feedback_value,
+        comment,
+        created_at,
+        updated_at
+      )
+      VALUES (
+        ${crypto.randomUUID()},
+        ${input.officeId},
+        ${input.recommendationId},
+        ${input.userId},
+        ${input.feedbackValue},
+        ${input.comment ?? null},
+        ${new Date()},
+        ${new Date()}
+      )
+      ON CONFLICT (office_id, recommendation_id, user_id)
+      DO UPDATE SET
+        feedback_value = EXCLUDED.feedback_value,
+        comment = EXCLUDED.comment,
+        updated_at = EXCLUDED.updated_at
+    `);
+  }
+
+  return {
+    recommendationId: input.recommendationId,
+    feedbackValue: input.feedbackValue,
+    comment: input.comment ?? null,
+  };
 }
 
 export async function getInterventionCaseDetail(
@@ -471,6 +3449,7 @@ export async function getInterventionCaseDetail(
     const history = tenantDb.state.history
       .filter((item) => item.disconnectCaseId === row.id)
       .sort((a, b) => b.actedAt.getTime() - a.actedAt.getTime());
+    const usersMap = new Map((tenantDb.state.users ?? []).map((user) => [user.id, user.displayName]));
 
     return {
       case: {
@@ -481,6 +3460,11 @@ export async function getInterventionCaseDetail(
         severity: row.severity,
         status: row.status as "open" | "snoozed" | "resolved",
         assignedTo: row.assignedTo,
+        assignedToName: resolveCaseAssigneeName(
+          usersMap,
+          row.assignedTo,
+          row.metadataJson as Record<string, unknown> | null | undefined
+        ),
         generatedTaskId: row.generatedTaskId,
         escalated: row.escalated,
         snoozedUntil: toIsoString(row.snoozedUntil),
@@ -497,6 +3481,7 @@ export async function getInterventionCaseDetail(
             title: task.title,
             status: task.status,
             assignedTo: task.assignedTo,
+            assignedToName: usersMap.get(task.assignedTo ?? "") ?? null,
           }
         : null,
       crm: {
@@ -518,11 +3503,14 @@ export async function getInterventionCaseDetail(
         id: entry.id,
         actionType: entry.actionType,
         actedBy: entry.actedBy,
+        actedByName: usersMap.get(entry.actedBy) ?? null,
         actedAt: entry.actedAt.toISOString(),
         fromStatus: entry.fromStatus,
         toStatus: entry.toStatus,
         fromAssignee: entry.fromAssignee,
+        fromAssigneeName: usersMap.get(entry.fromAssignee ?? "") ?? null,
         toAssignee: entry.toAssignee,
+        toAssigneeName: usersMap.get(entry.toAssignee ?? "") ?? null,
         fromSnoozedUntil: toIsoString(entry.fromSnoozedUntil),
         toSnoozedUntil: toIsoString(entry.toSnoozedUntil),
         notes: entry.notes,
@@ -559,6 +3547,19 @@ export async function getInterventionCaseDetail(
     .from(aiDisconnectCaseHistory)
     .where(eq(aiDisconnectCaseHistory.disconnectCaseId, row[0].id))
     .orderBy(desc(aiDisconnectCaseHistory.actedAt));
+  const userIds = [
+    ...new Set(
+      [
+        row[0].assignedTo,
+        taskRow?.assignedTo ?? null,
+        ...historyRows.flatMap((entry) => [entry.actedBy, entry.fromAssignee, entry.toAssignee]),
+      ].filter((value): value is string => Boolean(value))
+    ),
+  ];
+  const userRows = userIds.length
+    ? await tenantDb.select({ id: users.id, displayName: users.displayName }).from(users).where(inArray(users.id, userIds))
+    : [];
+  const usersMap = new Map(userRows.map((user) => [user.id, user.displayName]));
 
   return {
     case: {
@@ -569,6 +3570,11 @@ export async function getInterventionCaseDetail(
       severity: row[0].severity,
       status: row[0].status as "open" | "snoozed" | "resolved",
       assignedTo: row[0].assignedTo,
+      assignedToName: resolveCaseAssigneeName(
+        usersMap,
+        row[0].assignedTo,
+        row[0].metadataJson as Record<string, unknown> | null
+      ),
       generatedTaskId: row[0].generatedTaskId,
       escalated: row[0].escalated,
       snoozedUntil: toIsoString(row[0].snoozedUntil),
@@ -585,6 +3591,7 @@ export async function getInterventionCaseDetail(
           title: taskRow.title,
           status: taskRow.status,
           assignedTo: taskRow.assignedTo,
+          assignedToName: usersMap.get(taskRow.assignedTo ?? "") ?? null,
         }
       : null,
     crm: {
@@ -606,11 +3613,14 @@ export async function getInterventionCaseDetail(
       id: entry.id,
       actionType: entry.actionType,
       actedBy: entry.actedBy,
+      actedByName: usersMap.get(entry.actedBy) ?? null,
       actedAt: entry.actedAt.toISOString(),
       fromStatus: entry.fromStatus,
       toStatus: entry.toStatus,
       fromAssignee: entry.fromAssignee,
+      fromAssigneeName: usersMap.get(entry.fromAssignee ?? "") ?? null,
       toAssignee: entry.toAssignee,
+      toAssigneeName: usersMap.get(entry.toAssignee ?? "") ?? null,
       fromSnoozedUntil: toIsoString(entry.fromSnoozedUntil),
       toSnoozedUntil: toIsoString(entry.toSnoozedUntil),
       notes: entry.notes,
@@ -619,7 +3629,821 @@ export async function getInterventionCaseDetail(
   };
 }
 
-type MutationAction = "assign" | "snooze" | "resolve" | "escalate";
+const INTERVENTION_COPILOT_FEEDBACK_TYPE = "intervention_case_copilot";
+const INTERVENTION_COPILOT_ALLOWED_ACTIONS = new Set([
+  "assign",
+  "resolve",
+  "snooze",
+  "escalate",
+  "investigate",
+] as const);
+
+function isConclusionHistoryEntry(row: DisconnectCaseHistoryRow) {
+  return Boolean(readHistoryMetadata(row).conclusion?.kind || row.actionType === "resolve" || row.actionType === "snooze" || row.actionType === "escalate");
+}
+
+function toCopilotOwnerContext(
+  id: string | null,
+  name: string | null
+): InterventionCopilotOwnerContext {
+  return { id, name };
+}
+
+function toCopilotString(value: unknown) {
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (value instanceof Date) return value.toISOString();
+  if (value && typeof value === "object") {
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value);
+    }
+  }
+  return "";
+}
+
+function toCopilotObject(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function toCopilotObjectArray(value: unknown): Array<Record<string, unknown>> | null {
+  if (!Array.isArray(value)) return null;
+  return value.filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object" && !Array.isArray(item)));
+}
+
+function normalizePacketView(packet: AiCopilotPacketRow | null): InterventionCopilotPacketView {
+  return {
+    id: packet?.id ?? null,
+    scopeType: packet?.scopeType === "intervention_case" ? "intervention_case" : null,
+    scopeId: packet?.scopeId ?? null,
+    packetKind: packet?.packetKind === "intervention_case" ? "intervention_case" : null,
+    status: packet?.status ?? null,
+    snapshotHash: packet?.snapshotHash ?? null,
+    modelName: packet?.modelName ?? null,
+    summaryText: packet?.summaryText ?? null,
+    nextStepJson: toCopilotObject(packet?.nextStepJson ?? null),
+    blindSpotsJson: toCopilotObjectArray(packet?.blindSpotsJson ?? null),
+    evidenceJson: toCopilotObjectArray(packet?.evidenceJson ?? null),
+    confidence:
+      packet?.confidence == null
+        ? null
+        : Number.isFinite(Number(packet.confidence))
+          ? Number(packet.confidence)
+          : null,
+    generatedAt: toIsoString(packet?.generatedAt ?? null),
+    expiresAt: toIsoString(packet?.expiresAt ?? null),
+    createdAt: toIsoString(packet?.createdAt ?? null),
+    updatedAt: toIsoString(packet?.updatedAt ?? null),
+  };
+}
+
+function normalizeRiskFlags(
+  packet: AiCopilotPacketRow | null,
+  input: {
+    caseRow: DisconnectCaseRow;
+    currentAssigneeId: string | null;
+    task: TaskRow | null;
+    latestConclusion: DisconnectCaseHistoryRow | null;
+    now: Date;
+  }
+): InterventionCopilotRiskFlag[] {
+  const packetFlags: InterventionCopilotRiskFlag[] = (toCopilotObjectArray(packet?.blindSpotsJson ?? null) ?? []).map(
+    (flag, index) => ({
+      flagType:
+        typeof flag.flagType === "string"
+          ? flag.flagType
+          : typeof flag.kind === "string"
+            ? flag.kind
+            : `flag-${index + 1}`,
+      title:
+        typeof flag.title === "string"
+          ? flag.title
+          : typeof flag.label === "string"
+            ? flag.label
+            : `Risk flag ${index + 1}`,
+      severity:
+        flag.severity === "critical" || flag.severity === "high" || flag.severity === "medium" || flag.severity === "low"
+          ? flag.severity
+          : "medium",
+      details:
+        typeof flag.rationale === "string"
+          ? flag.rationale
+          : typeof flag.details === "string"
+            ? flag.details
+            : null,
+    })
+  );
+
+  const flags: InterventionCopilotRiskFlag[] = [];
+  if (!input.currentAssigneeId) {
+    flags.push({
+      flagType: "owner_gap",
+      title: "No current owner",
+      severity: "medium",
+      details: "The case is not assigned to a current owner.",
+    });
+  }
+  if (input.caseRow.reopenCount > 0) {
+    flags.push({
+      flagType: "reopen_risk",
+      title: "Reopen risk",
+      severity: input.caseRow.reopenCount > 1 ? "high" : "medium",
+      details: "The case has already reopened at least once.",
+    });
+  }
+  if (input.latestConclusion?.actionType === "snooze" && input.caseRow.snoozedUntil && input.caseRow.snoozedUntil <= input.now) {
+    flags.push({
+      flagType: "snooze_breach",
+      title: "Snooze breached",
+      severity: "high",
+      details: "The snooze window has expired.",
+    });
+  }
+  if (input.task && input.task.assignedTo !== (input.currentAssigneeId ?? null)) {
+    flags.push({
+      flagType: "owner_mismatch",
+      title: "Generated task needs owner alignment",
+      severity: "medium",
+      details:
+        input.currentAssigneeId
+          ? `The case assignee and generated task owner do not match.`
+          : `The generated task is currently assigned to ${input.task.assignedTo}.`,
+    });
+  }
+
+  const merged = [...packetFlags];
+  for (const derivedFlag of flags) {
+    if (!merged.some((flag) => flag.flagType === derivedFlag.flagType)) {
+      merged.push(derivedFlag);
+    }
+  }
+  return merged;
+}
+
+function buildCopilotEvidence(
+  packet: AiCopilotPacketRow | null,
+  input: { caseRow: DisconnectCaseRow; task: TaskRow | null; latestConclusion: DisconnectCaseHistoryRow | null }
+): InterventionCopilotEvidenceItem[] {
+  const packetEvidence = toCopilotObjectArray(packet?.evidenceJson ?? null);
+  if (packetEvidence && packetEvidence.length > 0) {
+    return packetEvidence.map((item, index) => ({
+      sourceType:
+        typeof item.sourceType === "string"
+          ? item.sourceType
+          : typeof item.source === "string"
+            ? item.source
+            : "unknown",
+      textSnippet:
+        typeof item.textSnippet === "string"
+          ? item.textSnippet
+          : typeof item.value === "string"
+            ? item.value
+            : typeof item.text === "string"
+              ? item.text
+              : toCopilotString(item.value ?? item.text ?? item.details ?? item.summary ?? item.label),
+      label: typeof item.label === "string" ? item.label : `Evidence ${index + 1}`,
+    }));
+  }
+
+  const evidence: InterventionCopilotEvidenceItem[] = [
+    {
+      sourceType: "case",
+      textSnippet:
+        readMetadataString(input.caseRow.metadataJson as Record<string, unknown> | null, "evidenceSummary") ??
+        readMetadataString(input.caseRow.metadataJson as Record<string, unknown> | null, "disconnectSummary") ??
+        "No case summary is available.",
+      label: "Case brief",
+    },
+    {
+      sourceType: "task",
+      textSnippet: input.task ? `${input.task.title} (${input.task.status})` : "No generated task is attached.",
+      label: "Current task",
+    },
+    {
+      sourceType: "history",
+      textSnippet: input.latestConclusion ? `${input.latestConclusion.actionType} at ${input.latestConclusion.actedAt.toISOString()}` : "No intervention history yet.",
+      label: "Latest intervention",
+    },
+  ];
+
+  return evidence;
+}
+
+function buildRootCause(
+  packet: AiCopilotPacketRow | null,
+  caseRow: DisconnectCaseRow
+): InterventionCopilotRootCause {
+  const packetRootCause = toCopilotObject(packet?.nextStepJson ?? null)?.rootCause;
+  if (packetRootCause && typeof packetRootCause === "object") {
+    const normalized = packetRootCause as Record<string, unknown>;
+    return {
+      label: typeof normalized.label === "string" ? normalized.label : null,
+      explanation:
+        typeof normalized.explanation === "string"
+          ? normalized.explanation
+          : typeof normalized.rationale === "string"
+            ? normalized.rationale
+            : typeof normalized.details === "string"
+              ? normalized.details
+              : null,
+    };
+  }
+
+  return {
+    label: readMetadataString(caseRow.metadataJson as Record<string, unknown> | null, "disconnectLabel") ?? caseRow.disconnectType,
+    explanation:
+      readMetadataString(caseRow.metadataJson as Record<string, unknown> | null, "disconnectDetails") ??
+      readMetadataString(caseRow.metadataJson as Record<string, unknown> | null, "disconnectSummary") ??
+      null,
+  };
+}
+
+function buildBlockerOwner(
+  packet: AiCopilotPacketRow | null,
+  input: { currentAssignee: InterventionCopilotOwnerContext | null; task: TaskRow | null }
+): InterventionCopilotOwnerContext {
+  const packetOwner = toCopilotObject(packet?.nextStepJson ?? null)?.blockerOwner;
+  if (packetOwner && typeof packetOwner === "object") {
+    const normalized = packetOwner as Record<string, unknown>;
+    return {
+      id:
+        typeof normalized.id === "string"
+          ? normalized.id
+          : typeof normalized.details === "string"
+            ? normalized.details
+            : null,
+      name: typeof normalized.name === "string" ? normalized.name : typeof normalized.label === "string" ? normalized.label : null,
+    };
+  }
+
+  if (input.task?.assignedTo && input.task.assignedTo !== (input.currentAssignee?.id ?? null)) {
+    return {
+      id: input.task.assignedTo,
+      name: null,
+    };
+  }
+
+  if (input.currentAssignee) return input.currentAssignee;
+
+  if (input.task?.assignedTo) {
+    return {
+      id: input.task.assignedTo,
+      name: null,
+    };
+  }
+
+  return {
+    id: null,
+    name: null,
+  };
+}
+
+function buildReopenRisk(
+  packet: AiCopilotPacketRow | null,
+  input: { caseRow: DisconnectCaseRow; latestConclusion: DisconnectCaseHistoryRow | null; now: Date }
+): InterventionCopilotReopenRisk {
+  const packetRisk = toCopilotObject(packet?.nextStepJson ?? null)?.reopenRisk;
+  if (packetRisk && typeof packetRisk === "object") {
+    const normalized = packetRisk as Record<string, unknown>;
+    return {
+      level:
+        normalized.level === "high" || normalized.level === "medium" || normalized.level === "low"
+          ? normalized.level
+          : "medium",
+      rationale:
+        typeof normalized.rationale === "string"
+          ? normalized.rationale
+          : typeof normalized.explanation === "string"
+            ? normalized.explanation
+            : typeof normalized.details === "string"
+              ? normalized.details
+              : null,
+    };
+  }
+
+  const level: InterventionCopilotReopenRisk["level"] =
+    input.caseRow.reopenCount > 1 || input.caseRow.escalated
+      ? "high"
+      : input.caseRow.reopenCount === 1
+        ? "medium"
+        : input.latestConclusion?.actionType === "snooze" && input.caseRow.snoozedUntil && input.caseRow.snoozedUntil <= input.now
+          ? "high"
+          : "low";
+
+  return {
+    level,
+    rationale:
+      input.caseRow.reopenCount > 0
+        ? "The case has reopened before."
+        : "The current state does not yet show a strong reopen signal.",
+  };
+}
+
+function buildRecommendedAction(
+  packet: AiCopilotPacketRow | null,
+  input: {
+    caseRow: DisconnectCaseRow;
+    currentAssignee: InterventionCopilotOwnerContext | null;
+    task: TaskRow | null;
+    riskFlags: InterventionCopilotRiskFlag[];
+    rootCause: InterventionCopilotRootCause;
+    reopenRisk: InterventionCopilotReopenRisk;
+  }
+): InterventionCopilotRecommendedAction {
+  if (input.caseRow.status === "resolved") {
+    return {
+      action: "resolve",
+      rationale: "The case already appears resolved.",
+      suggestedOwnerId: input.currentAssignee?.id ?? null,
+      suggestedOwner: input.currentAssignee?.name ?? null,
+    };
+  }
+
+  const nextStep = toCopilotObject(packet?.nextStepJson ?? null);
+  if (nextStep && typeof nextStep.action === "string" && INTERVENTION_COPILOT_ALLOWED_ACTIONS.has(nextStep.action as never)) {
+    return {
+      action: nextStep.action as InterventionCopilotRecommendedAction["action"],
+      rationale:
+        typeof nextStep.rationale === "string"
+          ? nextStep.rationale
+          : typeof nextStep.summary === "string"
+            ? nextStep.summary
+            : null,
+      suggestedOwnerId:
+        typeof nextStep.suggestedOwnerId === "string"
+          ? nextStep.suggestedOwnerId
+          : typeof nextStep.ownerId === "string"
+            ? nextStep.ownerId
+            : null,
+      suggestedOwner:
+        typeof nextStep.suggestedOwner === "string"
+          ? nextStep.suggestedOwner
+          : typeof nextStep.ownerName === "string"
+            ? nextStep.ownerName
+            : null,
+    };
+  }
+
+  if (!input.currentAssignee && input.task) {
+    return {
+      action: "assign",
+      rationale: "Assign the generated task owner so the case has a clear next step.",
+      suggestedOwnerId: input.task.assignedTo,
+      suggestedOwner: null,
+    };
+  }
+
+  if (input.reopenRisk.level === "high" || input.riskFlags.some((flag) => flag.flagType === "reopen_risk")) {
+    return {
+      action: "escalate",
+      rationale: "The case shows repeat reopen risk and should be escalated.",
+      suggestedOwnerId: input.currentAssignee?.id ?? null,
+      suggestedOwner: input.currentAssignee?.name ?? null,
+    };
+  }
+
+  return {
+    action: "investigate",
+    rationale: input.rootCause.explanation ?? "Review the evidence before mutating the case.",
+    suggestedOwnerId: input.currentAssignee?.id ?? input.task?.assignedTo ?? null,
+    suggestedOwner: input.currentAssignee?.name ?? null,
+  };
+}
+
+function buildLatestHistoryMap(historyRows: DisconnectCaseHistoryRow[]) {
+  const latestHistoryByCase = new Map<string, DisconnectCaseHistoryRow>();
+  const latestConclusionByCase = new Map<string, DisconnectCaseHistoryRow>();
+  const sorted = [...historyRows].sort((left, right) => right.actedAt.getTime() - left.actedAt.getTime());
+  for (const row of sorted) {
+    if (!latestHistoryByCase.has(row.disconnectCaseId)) {
+      latestHistoryByCase.set(row.disconnectCaseId, row);
+    }
+    if (!latestConclusionByCase.has(row.disconnectCaseId) && isConclusionHistoryEntry(row)) {
+      latestConclusionByCase.set(row.disconnectCaseId, row);
+    }
+  }
+  return { latestHistoryByCase, latestConclusionByCase };
+}
+
+function computeLatestCaseChangedAt(input: {
+  caseRow: DisconnectCaseRow;
+  task: TaskRow | null;
+  historyRows: DisconnectCaseHistoryRow[];
+}) {
+  const candidateDates: Array<Date | null | undefined> = [
+    input.caseRow.updatedAt,
+    input.caseRow.lastIntervenedAt,
+    input.caseRow.lastReopenedAt,
+    ...input.historyRows.map((row) => row.actedAt),
+    input.task?.updatedAt ?? null,
+    input.task?.createdAt ?? null,
+  ];
+
+  let latest: Date | null = null;
+  for (const candidate of candidateDates) {
+    if (!candidate) continue;
+    if (!latest || candidate.getTime() > latest.getTime()) {
+      latest = candidate;
+    }
+  }
+  return latest;
+}
+
+function normalizeViewerFeedbackValue(
+  feedbackRows: AiFeedbackRow[],
+  packetId: string | null,
+  viewerUserId: string | null | undefined
+) {
+  if (!packetId || !viewerUserId) return null;
+  const latest = feedbackRows
+    .filter(
+      (row) =>
+        row.targetType === "packet" &&
+        row.targetId === packetId &&
+        row.userId === viewerUserId &&
+        row.feedbackType === INTERVENTION_COPILOT_FEEDBACK_TYPE
+    )
+    .sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime())[0];
+  if (!latest) return null;
+  return latest.feedbackValue === "useful" || latest.feedbackValue === "not_useful" ? latest.feedbackValue : null;
+}
+
+function buildSimilarCases(input: {
+  officeId: string;
+  caseRow: DisconnectCaseRow;
+  cases: DisconnectCaseRow[];
+  latestConclusionByCase: Map<string, DisconnectCaseHistoryRow>;
+  historyRows: DisconnectCaseHistoryRow[];
+}): InterventionCopilotView["similarCases"] {
+  const currentStageKey = readMetadataString(input.caseRow.metadataJson as Record<string, unknown> | null, "stageKey");
+  const currentClusterKey = input.caseRow.clusterKey;
+
+  return input.cases
+    .filter((candidate) => candidate.officeId === input.officeId)
+    .filter((candidate) => candidate.id !== input.caseRow.id)
+    .filter((candidate) => candidate.disconnectType === input.caseRow.disconnectType)
+    .map((candidate) => {
+      const conclusion = input.latestConclusionByCase.get(candidate.id) ?? null;
+      if (!conclusion || candidate.status === "open") return null;
+
+      const candidateStageKey = readMetadataString(candidate.metadataJson as Record<string, unknown> | null, "stageKey");
+      const reopened = input.historyRows.some(
+        (row) =>
+          row.disconnectCaseId === candidate.id &&
+          row.actionType === "reopened" &&
+          readHistoryMetadata(row).priorConclusionActionId === conclusion.id
+      );
+      const durableClose = readHistoryConclusionKind(conclusion) === "resolve" && !reopened;
+      const lifecycleStartedAt =
+        readMetadataDate(conclusion.metadataJson as Record<string, unknown> | null, "lifecycleStartedAt") ??
+        candidate.currentLifecycleStartedAt ??
+        null;
+      const daysToDurableClosure =
+        durableClose && lifecycleStartedAt && candidate.resolvedAt
+          ? calculateBusinessDaysElapsed(lifecycleStartedAt, candidate.resolvedAt)
+          : null;
+
+      return {
+        caseId: candidate.id,
+        businessKey: candidate.businessKey,
+        disconnectType: candidate.disconnectType,
+        clusterKey: candidate.clusterKey,
+        assigneeAtConclusion:
+          readHistoryMetadata(conclusion).assigneeAtConclusion ??
+          conclusion.toAssignee ??
+          null,
+        conclusionKind: readHistoryConclusionKind(conclusion),
+        reasonCode:
+          readHistoryMetadata(conclusion).conclusion?.reasonCode ??
+          readHistoryMetadata(conclusion).conclusion?.snoozeReasonCode ??
+          readHistoryMetadata(conclusion).conclusion?.escalationReasonCode ??
+          null,
+        durableClose,
+        reopened,
+        daysToDurableClosure,
+        queueLink: formatQueueLink({ caseId: candidate.id }),
+        _score: [
+          currentClusterKey && candidate.clusterKey === currentClusterKey ? 1 : 0,
+          currentStageKey && candidateStageKey === currentStageKey ? 1 : 0,
+          candidate.severity === input.caseRow.severity ? 1 : 0,
+          conclusion.actedAt.getTime(),
+        ] as const,
+      };
+    })
+    .filter((item): item is NonNullable<typeof item> => item !== null)
+    .sort((left, right) => {
+      if (right._score[0] !== left._score[0]) return right._score[0] - left._score[0];
+      if (right._score[1] !== left._score[1]) return right._score[1] - left._score[1];
+      if (right._score[2] !== left._score[2]) return right._score[2] - left._score[2];
+      if (right._score[3] !== left._score[3]) return right._score[3] - left._score[3];
+      return left.businessKey.localeCompare(right.businessKey);
+    })
+    .slice(0, 5)
+    .map(({ _score: _scoreIgnored, ...item }) => item);
+}
+
+function normalizePacketTime(
+  packet: AiCopilotPacketRow | null
+): string | null {
+  return toIsoString(packet?.generatedAt ?? packet?.createdAt ?? null);
+}
+
+export async function getInterventionCopilotView(
+  tenantDb: TenantDb | InMemoryTenantDb,
+  input: {
+    officeId: string;
+    caseId: string;
+    viewerUserId?: string | null;
+    now?: Date;
+  }
+): Promise<InterventionCopilotView> {
+  const data = await loadInterventionAnalyticsData(tenantDb, input.officeId);
+  const caseRow = data.cases.find((row) => row.id === input.caseId && row.officeId === input.officeId);
+  if (!caseRow) {
+    throw new AppError(404, "Intervention case not found");
+  }
+
+  const task = caseRow.generatedTaskId
+    ? isInMemoryTenantDb(tenantDb)
+      ? tenantDb.state.tasks.find((row) => row.id === caseRow.generatedTaskId) ?? null
+      : (
+          await tenantDb
+            .select()
+            .from(tasks)
+            .where(eq(tasks.id, caseRow.generatedTaskId))
+            .limit(1)
+        )[0] ?? null
+    : null;
+
+  const packet = isInMemoryTenantDb(tenantDb)
+    ? [...(tenantDb.state.packets ?? [])]
+        .filter(
+          (row) =>
+            row.scopeType === "intervention_case" &&
+            row.scopeId === caseRow.id &&
+            row.packetKind === "intervention_case" &&
+            row.status === "ready"
+        )
+        .sort(
+          (left, right) =>
+            (right.generatedAt?.getTime() ?? right.createdAt.getTime()) -
+            (left.generatedAt?.getTime() ?? left.createdAt.getTime())
+        )[0] ?? null
+    : (
+        await tenantDb
+          .select()
+          .from(aiCopilotPackets)
+          .where(
+            and(
+              eq(aiCopilotPackets.scopeType, "intervention_case"),
+              eq(aiCopilotPackets.scopeId, caseRow.id),
+              eq(aiCopilotPackets.packetKind, "intervention_case"),
+              eq(aiCopilotPackets.status, "ready")
+            )
+          )
+          .orderBy(desc(aiCopilotPackets.generatedAt), desc(aiCopilotPackets.createdAt))
+          .limit(1)
+      )[0] ?? null;
+
+  const feedbackRows = isInMemoryTenantDb(tenantDb)
+    ? tenantDb.state.feedback ?? []
+    : await tenantDb
+        .select()
+        .from(aiFeedback)
+        .where(and(eq(aiFeedback.targetType, "packet"), eq(aiFeedback.feedbackType, INTERVENTION_COPILOT_FEEDBACK_TYPE)))
+        .orderBy(desc(aiFeedback.createdAt));
+
+  const { latestConclusionByCase } = buildLatestHistoryMap(data.history);
+  const currentHistoryRows = data.history.filter((row) => row.disconnectCaseId === caseRow.id);
+  const latestCurrentConclusion = latestConclusionByCase.get(caseRow.id) ?? null;
+  const now = input.now ?? new Date();
+  const normalizedPacket = normalizePacketView(packet);
+  const packetGeneratedAt = packet?.generatedAt ?? packet?.createdAt ?? null;
+  const latestCaseChangedAt = computeLatestCaseChangedAt({
+    caseRow,
+    task,
+    historyRows: currentHistoryRows,
+  });
+  const currentAssignee = caseRow.assignedTo
+    ? toCopilotOwnerContext(caseRow.assignedTo, data.users.find((user) => user.id === caseRow.assignedTo)?.displayName ?? null)
+    : null;
+  const rootCause = buildRootCause(packet, caseRow);
+  const reopenRisk = buildReopenRisk(packet, { caseRow, latestConclusion: latestCurrentConclusion, now });
+  const riskFlags = normalizeRiskFlags(packet, {
+    caseRow,
+    currentAssigneeId: caseRow.assignedTo ?? null,
+    task,
+    latestConclusion: latestCurrentConclusion,
+    now,
+  });
+  const recommendedAction = buildRecommendedAction(packet, {
+    caseRow,
+    currentAssignee,
+    task,
+    riskFlags,
+    rootCause,
+    reopenRisk,
+  });
+  const blockerOwner = buildBlockerOwner(packet, { currentAssignee, task });
+
+  return {
+    packet: normalizedPacket,
+    evidence: buildCopilotEvidence(packet, {
+      caseRow,
+      task,
+      latestConclusion: latestCurrentConclusion,
+    }),
+    riskFlags,
+    similarCases: buildSimilarCases({
+      officeId: input.officeId,
+      caseRow,
+      cases: data.cases,
+      latestConclusionByCase,
+      historyRows: data.history,
+    }),
+    recommendedAction,
+    rootCause,
+    blockerOwner,
+    reopenRisk,
+    currentAssignee,
+    isRefreshPending: Boolean(packet && packet.status && packet.status !== "ready"),
+    isStale: Boolean(latestCaseChangedAt && packetGeneratedAt && latestCaseChangedAt.getTime() > packetGeneratedAt.getTime()),
+    latestCaseChangedAt: toIsoString(latestCaseChangedAt),
+    packetGeneratedAt: normalizePacketTime(packet),
+    viewerFeedbackValue: normalizeViewerFeedbackValue(feedbackRows, packet?.id ?? null, input.viewerUserId ?? null),
+  };
+}
+
+export const buildInterventionCopilotView = getInterventionCopilotView;
+
+export async function regenerateInterventionCopilot(
+  tenantDb: TenantDb | InMemoryTenantDb,
+  input: {
+    officeId: string;
+    caseId: string;
+    requestedBy: string;
+    now?: Date;
+  }
+) {
+  const data = await loadInterventionAnalyticsData(tenantDb, input.officeId);
+  const caseRow = data.cases.find((row) => row.id === input.caseId && row.officeId === input.officeId);
+  if (!caseRow) {
+    throw new AppError(404, "Intervention case not found");
+  }
+
+  const now = input.now ?? new Date();
+  const task = caseRow.generatedTaskId
+    ? isInMemoryTenantDb(tenantDb)
+      ? tenantDb.state.tasks.find((row) => row.id === caseRow.generatedTaskId) ?? null
+      : (
+          await tenantDb
+            .select()
+            .from(tasks)
+            .where(eq(tasks.id, caseRow.generatedTaskId))
+            .limit(1)
+        )[0] ?? null
+    : null;
+  const { latestConclusionByCase } = buildLatestHistoryMap(data.history);
+  const similarCases = buildSimilarCases({
+    officeId: input.officeId,
+    caseRow,
+    cases: data.cases,
+    latestConclusionByCase,
+    historyRows: data.history,
+  });
+
+  const currentAssigneeName = data.users.find((user) => user.id === caseRow.assignedTo)?.displayName ?? null;
+  const generatedTaskOwnerName = data.users.find((user) => user.id === task?.assignedTo)?.displayName ?? null;
+  const ownerMismatch =
+    Boolean(task?.assignedTo) && task?.assignedTo !== (caseRow.assignedTo ?? null);
+  const rootCauseHints = [
+    readMetadataString(caseRow.metadataJson as Record<string, unknown> | null, "disconnectSummary"),
+    readMetadataString(caseRow.metadataJson as Record<string, unknown> | null, "disconnectDetails"),
+    ownerMismatch ? "The generated task owner does not match the current case owner." : null,
+  ].filter((value): value is string => Boolean(value));
+  const riskHints = [
+    caseRow.reopenCount > 1 ? "This case has reopened multiple times." : null,
+    caseRow.reopenCount === 1 ? "This case has reopened before." : null,
+    caseRow.status === "snoozed" ? "The case is snoozed and should be checked for breach risk." : null,
+    !caseRow.assignedTo ? "The case does not have a clear owner." : null,
+    caseRow.escalated ? "The case is already escalated." : null,
+  ].filter((value): value is string => Boolean(value));
+
+  const promptInput = {
+    context: {
+      caseId: caseRow.id,
+      disconnectType: caseRow.disconnectType,
+      severity: caseRow.severity,
+      status: caseRow.status,
+      currentAssigneeId: caseRow.assignedTo ?? null,
+      assignedToName: currentAssigneeName,
+      ownerTeamLabel:
+        readMetadataString(caseRow.metadataJson as Record<string, unknown> | null, "stageName") ??
+        readMetadataString(caseRow.metadataJson as Record<string, unknown> | null, "stageKey"),
+      generatedTaskOwnerId: task?.assignedTo ?? null,
+      generatedTaskOwnerName,
+      generatedTaskStatus: task?.status ?? null,
+      generatedTaskTitle: task?.title ?? null,
+      reopenCount: caseRow.reopenCount,
+      escalated: caseRow.escalated,
+      stageKey: readMetadataString(caseRow.metadataJson as Record<string, unknown> | null, "stageKey"),
+      stageName: readMetadataString(caseRow.metadataJson as Record<string, unknown> | null, "stageName"),
+    },
+    signals: {
+      rootCauseHints,
+      riskHints,
+      similarCaseSummaries: similarCases.slice(0, 3).map((item) => ({
+        label: item.businessKey,
+        outcome: `${item.conclusionKind}${item.reasonCode ? `:${item.reasonCode}` : ""}`,
+      })),
+    },
+    evidence: [
+      {
+        sourceType: "case",
+        textSnippet:
+          readMetadataString(caseRow.metadataJson as Record<string, unknown> | null, "evidenceSummary") ??
+          readMetadataString(caseRow.metadataJson as Record<string, unknown> | null, "disconnectSummary") ??
+          caseRow.businessKey,
+      },
+      {
+        sourceType: "task",
+        textSnippet: task ? `${task.title} (${task.status})` : "No generated task attached.",
+      },
+      ...similarCases.slice(0, 3).map((item) => ({
+        sourceType: "similar_case",
+        textSnippet: `${item.businessKey} -> ${item.conclusionKind}`,
+      })),
+    ],
+  };
+
+  const generated = await getAiCopilotProvider().generateInterventionCopilotPacket(promptInput);
+  const packetId = crypto.randomUUID();
+  const snapshotHash = crypto.createHash("sha256").update(JSON.stringify(promptInput)).digest("hex");
+
+  if (isInMemoryTenantDb(tenantDb)) {
+    tenantDb.state.packets = tenantDb.state.packets ?? [];
+    tenantDb.state.packets.push({
+      id: packetId,
+      scopeType: "intervention_case",
+      scopeId: caseRow.id,
+      dealId: caseRow.dealId,
+      packetKind: "intervention_case",
+      snapshotHash,
+      modelName: "heuristic",
+      status: "ready",
+      summaryText: generated.summary,
+      nextStepJson: {
+        ...generated.recommendedAction,
+        rootCause: generated.rootCause,
+        blockerOwner: generated.blockerOwner,
+        reopenRisk: generated.reopenRisk,
+      },
+      blindSpotsJson: generated.blindSpotFlags,
+      evidenceJson: generated.evidence,
+      confidence: String(generated.confidence),
+      generatedAt: now,
+      expiresAt: new Date(now.getTime() + 30 * 60 * 1000),
+      createdAt: now,
+      updatedAt: now,
+    } as AiCopilotPacketRow);
+  } else {
+    await tenantDb.insert(aiCopilotPackets).values({
+      id: packetId,
+      scopeType: "intervention_case",
+      scopeId: caseRow.id,
+      dealId: caseRow.dealId,
+      packetKind: "intervention_case",
+      snapshotHash,
+      modelName: "heuristic",
+      status: "ready",
+      summaryText: generated.summary,
+      nextStepJson: {
+        ...generated.recommendedAction,
+        rootCause: generated.rootCause,
+        blockerOwner: generated.blockerOwner,
+        reopenRisk: generated.reopenRisk,
+      },
+      blindSpotsJson: generated.blindSpotFlags,
+      evidenceJson: generated.evidence,
+      confidence: String(generated.confidence),
+      generatedAt: now,
+      expiresAt: new Date(now.getTime() + 30 * 60 * 1000),
+      updatedAt: now,
+    });
+  }
+
+  return {
+    queued: false,
+    packetId,
+    packetGeneratedAt: now.toISOString(),
+    requestedBy: input.requestedBy,
+  };
+}
+
+type MutationAction = "assign" | "snooze" | "resolve" | "escalate" | "reopened";
 
 interface MutationRecordInput {
   actionType: MutationAction;
@@ -638,6 +4462,50 @@ interface MutationResult {
   updatedCount: number;
   skippedCount: number;
   errors: Array<{ caseId: string; message: string }>;
+}
+
+function getConclusionReasonFamilyForCase(
+  row: { disconnectType: string },
+  actionKind: "resolve" | "snooze" | "escalate"
+) {
+  switch (`${actionKind}:${row.disconnectType}`) {
+    case "resolve:missing_next_task":
+      return "resolve:task_execution";
+    case "resolve:inbound_without_followup":
+      return "resolve:follow_up_execution";
+    case "snooze:estimating_gate_gap":
+      return "snooze:estimating_wait";
+    case "escalate:revision_loop":
+      return "escalate:manager_intervention";
+    default:
+      return `${actionKind}:${row.disconnectType}`;
+  }
+}
+
+export async function assertHomogeneousBatchConclusionCohort(
+  tenantDb: TenantDb | InMemoryTenantDb,
+  officeId: string,
+  caseIds: string[],
+  actionKind: "resolve" | "snooze" | "escalate"
+) {
+  const rows = await loadCasesForMutation(tenantDb, officeId, caseIds);
+  if (rows.length === 0) {
+    throw new AppError(400, "At least one intervention case is required");
+  }
+
+  const firstRow = rows[0];
+  if (!firstRow) {
+    throw new AppError(400, "At least one intervention case is required");
+  }
+
+  if (!rows.every((row) => row.disconnectType === firstRow.disconnectType)) {
+    throw new AppError(400, "Batch conclusion requires a homogeneous cohort");
+  }
+
+  const expectedReasonFamily = getConclusionReasonFamilyForCase(firstRow, actionKind);
+  if (!rows.every((row) => getConclusionReasonFamilyForCase(row, actionKind) === expectedReasonFamily)) {
+    throw new AppError(400, "Batch conclusion requires a homogeneous cohort");
+  }
 }
 
 function buildMutationError(caseId: string, message: string) {
@@ -753,6 +4621,95 @@ async function writeMutationArtifacts(
   return { historyId: createdHistory.id, feedbackId: createdFeedback.id };
 }
 
+async function getLatestConclusionHistoryEvent(
+  tenantDb: TenantDb | InMemoryTenantDb,
+  caseId: string
+): Promise<DisconnectCaseHistoryRow | null> {
+  if (isInMemoryTenantDb(tenantDb)) {
+    const row = [...tenantDb.state.history]
+      .filter(
+        (item) =>
+          item.disconnectCaseId === caseId &&
+          (item.actionType === "resolve" || item.actionType === "snooze" || item.actionType === "escalate")
+      )
+      .sort((left, right) => new Date(right.actedAt).getTime() - new Date(left.actedAt).getTime())[0];
+    return row ?? null;
+  }
+
+  const row = await tenantDb
+    .select()
+    .from(aiDisconnectCaseHistory)
+    .where(
+      and(
+        eq(aiDisconnectCaseHistory.disconnectCaseId, caseId),
+        inArray(aiDisconnectCaseHistory.actionType, ["resolve", "snooze", "escalate"])
+      )
+    )
+    .orderBy(desc(aiDisconnectCaseHistory.actedAt))
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
+
+  return row;
+}
+
+async function hasReopenHistoryForConclusionAction(
+  tenantDb: TenantDb | InMemoryTenantDb,
+  caseId: string,
+  priorConclusionActionId: string
+) {
+  if (isInMemoryTenantDb(tenantDb)) {
+    return (
+      tenantDb.state.history.find(
+        (item) =>
+          item.disconnectCaseId === caseId &&
+          item.actionType === "reopened" &&
+          readHistoryMetadata(item).priorConclusionActionId === priorConclusionActionId
+      ) ?? null
+    );
+  }
+
+  return tenantDb
+    .select({ id: aiDisconnectCaseHistory.id })
+    .from(aiDisconnectCaseHistory)
+    .where(
+      and(
+        eq(aiDisconnectCaseHistory.disconnectCaseId, caseId),
+        eq(aiDisconnectCaseHistory.actionType, "reopened"),
+        sql`${aiDisconnectCaseHistory.metadataJson}->>'priorConclusionActionId' = ${priorConclusionActionId}`
+      )
+    )
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
+}
+
+async function writeReopenedHistoryEvent(
+  tenantDb: TenantDb | InMemoryTenantDb,
+  row: DisconnectCaseRow,
+  nextLifecycleStartedAt: Date
+) {
+  const latestConclusionEvent = await getLatestConclusionHistoryEvent(tenantDb, row.id);
+  if (!latestConclusionEvent) return;
+  const priorConclusionActionId = latestConclusionEvent.id;
+  const existingReopen = await hasReopenHistoryForConclusionAction(tenantDb, row.id, priorConclusionActionId);
+  if (existingReopen) return;
+
+  await writeMutationArtifacts(tenantDb, row, {
+    actionType: "reopened",
+    actedBy: getSystemActorUserId(),
+    comment: null,
+    fromStatus: row.status,
+    toStatus: "open",
+    fromAssignee: row.assignedTo ?? null,
+    toAssignee: row.assignedTo ?? null,
+    metadataJson: buildReopenHistoryMetadata({
+      priorConclusionActionId,
+      priorConclusionKind: readHistoryConclusionKind(latestConclusionEvent),
+      reopenReason: "signal_still_present",
+      lifecycleStartedAt: nextLifecycleStartedAt.toISOString(),
+    }),
+  });
+}
+
 async function loadCasesForMutation(
   tenantDb: TenantDb | InMemoryTenantDb,
   officeId: string,
@@ -839,6 +4796,57 @@ const resolutionToTaskOutcome = {
   duplicate_case: "dismissed",
   issue_no_longer_relevant: "dismissed",
 } as const;
+
+function validateResolveConclusion(
+  conclusion: StructuredResolveConclusion | null | undefined,
+  resolutionReason: keyof typeof resolutionToTaskOutcome,
+  allowLegacyOutcomeWrites: boolean | undefined
+) {
+  if (!conclusion) {
+    if (allowLegacyOutcomeWrites !== false) return;
+    throw new AppError(400, "Structured resolve conclusion is required");
+  }
+
+  const validReasonCodes =
+    RESOLVE_OUTCOME_CATEGORY_TO_REASON_CODES[
+      conclusion.outcomeCategory as keyof typeof RESOLVE_OUTCOME_CATEGORY_TO_REASON_CODES
+    ];
+  if (!validReasonCodes || !validReasonCodes.includes(conclusion.reasonCode as never)) {
+    throw new AppError(400, "Invalid resolve conclusion");
+  }
+
+  const mappedReason = mapStructuredResolveReasonToLegacyResolutionReason(conclusion.reasonCode);
+  if (mappedReason !== resolutionReason) {
+    throw new AppError(400, "Resolve conclusion does not match resolutionReason");
+  }
+}
+
+function validateSnoozeConclusion(conclusion: StructuredSnoozeConclusion | null | undefined) {
+  if (!conclusion) return;
+
+  const validCombination =
+    SNOOZE_REASON_TO_EXPECTED_OPTIONS[
+      conclusion.snoozeReasonCode as keyof typeof SNOOZE_REASON_TO_EXPECTED_OPTIONS
+    ];
+  if (
+    !validCombination ||
+    !validCombination.ownerTypes.includes(conclusion.expectedOwnerType as never) ||
+    !validCombination.nextStepCodes.includes(conclusion.expectedNextStepCode as never)
+  ) {
+    throw new AppError(400, "Invalid snooze conclusion");
+  }
+}
+
+function validateEscalateConclusion(conclusion: StructuredEscalateConclusion | null | undefined) {
+  if (!conclusion) return;
+  if (!ESCALATION_TARGET_TYPES.includes(conclusion.escalationTargetType as never)) {
+    throw new AppError(400, "Invalid escalate conclusion");
+  }
+}
+
+function conclusionNotes(conclusion: StructuredInterventionConclusion | null | undefined) {
+  return conclusion?.notes ?? null;
+}
 
 async function syncGeneratedTaskResolution(
   tenantDb: TenantDb | InMemoryTenantDb,
@@ -940,11 +4948,17 @@ export async function snoozeInterventionCases(
     officeId: string;
     caseIds: string[];
     snoozedUntil: Date | string;
+    conclusion?: StructuredSnoozeConclusion | null;
+    allowLegacyOutcomeWrites?: boolean;
     actorUserId: string;
     actorRole: string;
     notes?: string | null;
   }
 ): Promise<MutationResult> {
+  validateSnoozeConclusion(input.conclusion);
+  if (input.caseIds.length > 1 && input.conclusion) {
+    await assertHomogeneousBatchConclusionCohort(tenantDb, input.officeId, input.caseIds, "snooze");
+  }
   const caseIds = dedupeCaseIds(input.caseIds);
   const snoozedUntil = input.snoozedUntil instanceof Date
     ? input.snoozedUntil
@@ -995,13 +5009,21 @@ export async function snoozeInterventionCases(
     await writeMutationArtifacts(tenantDb, row, {
       actionType: "snooze",
       actedBy: input.actorUserId,
-      comment: input.notes ?? null,
+      comment: input.notes ?? conclusionNotes(input.conclusion),
       fromStatus,
       toStatus: "snoozed",
       fromAssignee: row.assignedTo ?? null,
       toAssignee: row.assignedTo ?? null,
       fromSnoozedUntil,
       toSnoozedUntil: snoozedUntil,
+      metadataJson: input.conclusion
+        ? {
+            lifecycleStartedAt: row.currentLifecycleStartedAt.toISOString(),
+            assigneeAtConclusion: row.assignedTo ?? null,
+            disconnectTypeAtConclusion: row.disconnectType,
+            conclusion: input.conclusion,
+          }
+        : undefined,
     });
     updatedCount += 1;
   }
@@ -1019,11 +5041,17 @@ export async function resolveInterventionCases(
     officeId: string;
     caseIds: string[];
     resolutionReason: keyof typeof resolutionToTaskOutcome;
+    conclusion?: StructuredResolveConclusion | null;
+    allowLegacyOutcomeWrites?: boolean;
     actorUserId: string;
     actorRole: string;
     notes?: string | null;
   }
 ): Promise<MutationResult> {
+  validateResolveConclusion(input.conclusion, input.resolutionReason, input.allowLegacyOutcomeWrites);
+  if (input.caseIds.length > 1 && input.conclusion) {
+    await assertHomogeneousBatchConclusionCohort(tenantDb, input.officeId, input.caseIds, "resolve");
+  }
   const caseIds = dedupeCaseIds(input.caseIds);
   const rows = await loadCasesForMutation(tenantDb, input.officeId, caseIds);
   const rowsById = new Map(rows.map((row) => [row.id, row]));
@@ -1075,7 +5103,7 @@ export async function resolveInterventionCases(
     await writeMutationArtifacts(tenantDb, row, {
       actionType: "resolve",
       actedBy: input.actorUserId,
-      comment: input.notes ?? null,
+      comment: input.notes ?? conclusionNotes(input.conclusion),
       fromStatus,
       toStatus: "resolved",
       fromAssignee: row.assignedTo ?? null,
@@ -1083,6 +5111,10 @@ export async function resolveInterventionCases(
       metadataJson: {
         resolutionReason: input.resolutionReason,
         taskOutcome,
+        lifecycleStartedAt: row.currentLifecycleStartedAt.toISOString(),
+        assigneeAtConclusion: row.assignedTo ?? null,
+        disconnectTypeAtConclusion: row.disconnectType,
+        conclusion: input.conclusion ?? null,
       },
     });
     updatedCount += 1;
@@ -1100,11 +5132,17 @@ export async function escalateInterventionCases(
   input: {
     officeId: string;
     caseIds: string[];
+    conclusion?: StructuredEscalateConclusion | null;
+    allowLegacyOutcomeWrites?: boolean;
     actorUserId: string;
     actorRole: string;
     notes?: string | null;
   }
 ): Promise<MutationResult> {
+  validateEscalateConclusion(input.conclusion);
+  if (input.caseIds.length > 1 && input.conclusion) {
+    await assertHomogeneousBatchConclusionCohort(tenantDb, input.officeId, input.caseIds, "escalate");
+  }
   const caseIds = dedupeCaseIds(input.caseIds);
   const rows = await loadCasesForMutation(tenantDb, input.officeId, caseIds);
   const errors: Array<{ caseId: string; message: string }> = [];
@@ -1144,12 +5182,18 @@ export async function escalateInterventionCases(
     await writeMutationArtifacts(tenantDb, row, {
       actionType: "escalate",
       actedBy: input.actorUserId,
-      comment: input.notes ?? null,
+      comment: input.notes ?? conclusionNotes(input.conclusion),
       fromStatus: row.status,
       toStatus: row.status,
       fromAssignee: row.assignedTo ?? null,
       toAssignee: row.assignedTo ?? null,
-      metadataJson: { escalated: true },
+      metadataJson: {
+        escalated: true,
+        lifecycleStartedAt: row.currentLifecycleStartedAt.toISOString(),
+        assigneeAtConclusion: row.assignedTo ?? null,
+        disconnectTypeAtConclusion: row.disconnectType,
+        conclusion: input.conclusion ?? null,
+      },
     });
     updatedCount += 1;
   }

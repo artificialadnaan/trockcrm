@@ -1,4 +1,6 @@
 import { useState } from "react";
+import { Button } from "@/components/ui/button";
+import { EmailManualAssignmentDialog, type EmailAssociationTarget } from "./email-manual-assignment-dialog";
 
 export interface EmailAssignmentQueueDealCandidate {
   id: string;
@@ -19,6 +21,11 @@ export interface EmailAssignmentQueuePropertyCandidate {
   relatedDealIds: string[];
 }
 
+export interface EmailAssignmentQueueCompanyCandidate {
+  id: string;
+  name: string;
+}
+
 export interface EmailAssignmentQueueItem {
   email: {
     id: string;
@@ -33,6 +40,7 @@ export interface EmailAssignmentQueueItem {
   candidateDeals: EmailAssignmentQueueDealCandidate[];
   candidateLeads: EmailAssignmentQueueLeadCandidate[];
   candidateProperties: EmailAssignmentQueuePropertyCandidate[];
+  candidateCompanies?: EmailAssignmentQueueCompanyCandidate[];
   suggestedAssignment: {
     assignedEntityType: string | null;
     assignedEntityId: string | null;
@@ -45,15 +53,14 @@ export interface EmailAssignmentQueueItem {
   };
 }
 
-export interface EmailAssignmentTarget {
-  assignedEntityType: "deal";
-  assignedEntityId: string;
-  assignedDealId: string;
-}
+export type EmailAssignmentTarget = EmailAssociationTarget;
 
 interface EmailAssignmentQueueViewProps {
   items: EmailAssignmentQueueItem[];
-  onAssign: (emailId: string, target: EmailAssignmentTarget) => Promise<void>;
+  onAssign: (
+    emailId: string,
+    target: EmailAssociationTarget
+  ) => Promise<{ ok: true } | { ok: false; message: string }>;
 }
 
 function formatDateTime(value: string) {
@@ -61,21 +68,8 @@ function formatDateTime(value: string) {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
 }
 
-function encodeTarget(target: EmailAssignmentTarget) {
-  return JSON.stringify(target);
-}
-
-function decodeTarget(value: string): EmailAssignmentTarget | null {
-  if (!value) return null;
-  try {
-    return JSON.parse(value) as EmailAssignmentTarget;
-  } catch {
-    return null;
-  }
-}
-
-function buildAssignmentOptions(item: EmailAssignmentQueueItem): Array<{ label: string; value: EmailAssignmentTarget }> {
-  const options: Array<{ label: string; value: EmailAssignmentTarget }> = [];
+function buildSafeAssignmentOptions(item: EmailAssignmentQueueItem): Array<{ label: string; value: EmailAssociationTarget }> {
+  const options: Array<{ label: string; value: EmailAssociationTarget }> = [];
 
   for (const deal of item.candidateDeals) {
     options.push({
@@ -88,6 +82,54 @@ function buildAssignmentOptions(item: EmailAssignmentQueueItem): Array<{ label: 
     });
   }
 
+  for (const lead of item.candidateLeads) {
+    options.push({
+      label: `Lead · ${lead.leadNumber} · ${lead.name}`,
+      value: {
+        assignedEntityType: "lead",
+        assignedEntityId: lead.id,
+        assignedDealId: null,
+      },
+    });
+  }
+
+  for (const property of item.candidateProperties) {
+    options.push({
+      label: `Property · ${property.name}`,
+      value: {
+        assignedEntityType: "property",
+        assignedEntityId: property.id,
+        assignedDealId: null,
+      },
+    });
+  }
+
+  for (const company of item.candidateCompanies ?? []) {
+    options.push({
+      label: `Company · ${company.name}`,
+      value: {
+        assignedEntityType: "company",
+        assignedEntityId: company.id,
+        assignedDealId: null,
+      },
+    });
+  }
+
+  if (options.length === 0) {
+    const companyId = item.companyId ?? item.suggestedAssignment.assignedEntityId;
+    const companyName = item.companyName;
+    if (companyId && companyName) {
+      options.push({
+        label: `Company · ${companyName}`,
+        value: {
+          assignedEntityType: "company",
+          assignedEntityId: companyId,
+          assignedDealId: null,
+        },
+      });
+    }
+  }
+
   return options;
 }
 
@@ -96,15 +138,13 @@ function AssignmentQueueCard({
   onAssign,
 }: {
   item: EmailAssignmentQueueItem;
-  onAssign: (emailId: string, target: EmailAssignmentTarget) => Promise<void>;
+  onAssign: (
+    emailId: string,
+    target: EmailAssociationTarget
+  ) => Promise<{ ok: true } | { ok: false; message: string }>;
 }) {
-  const assignmentOptions = buildAssignmentOptions(item);
-  const [selectedTarget, setSelectedTarget] = useState(
-    assignmentOptions.length === 1 ? encodeTarget(assignmentOptions[0]!.value) : ""
-  );
-  const [saving, setSaving] = useState(false);
-
-  const parsedTarget = decodeTarget(selectedTarget);
+  const safeOptions = buildSafeAssignmentOptions(item);
+  const [dialogOpen, setDialogOpen] = useState(false);
 
   return (
     <div className="rounded-lg border bg-background p-4 shadow-sm">
@@ -116,6 +156,7 @@ function AssignmentQueueCard({
           </p>
           <h3 className="truncate text-sm font-semibold">{item.email.subject ?? "(No Subject)"}</h3>
           <p className="text-xs text-muted-foreground">{item.email.fromAddress}</p>
+          <p className="mt-1 text-xs text-muted-foreground">Parking lot intake</p>
         </div>
         <span className="shrink-0 rounded-full border px-2 py-1 text-xs">
           {item.suggestedAssignment.confidence} confidence
@@ -127,47 +168,21 @@ function AssignmentQueueCard({
       </p>
 
       <div className="mt-3 flex flex-wrap items-center gap-2">
-        <select
-          className="min-w-[300px] rounded-md border bg-background px-3 py-2 text-sm"
-          value={selectedTarget}
-          onChange={(event) => setSelectedTarget(event.target.value)}
-        >
-          {assignmentOptions.length === 0 ? (
-            <option value="">No safe assignment targets</option>
-          ) : (
-            <>
-              <option value="">Select a target...</option>
-              {assignmentOptions.map((option) => (
-                <option key={encodeTarget(option.value)} value={encodeTarget(option.value)}>
-                  {option.label}
-                </option>
-              ))}
-            </>
-          )}
-        </select>
-        <button
-          type="button"
-          className="rounded-md border px-3 py-2 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50"
-          disabled={!parsedTarget || saving}
-          onClick={async () => {
-            if (!parsedTarget) return;
-            setSaving(true);
-            try {
-              await onAssign(item.email.id, parsedTarget);
-            } finally {
-              setSaving(false);
-            }
-          }}
-        >
-          {saving ? "Assigning..." : "Resolve"}
-        </button>
+        <p className="text-sm text-muted-foreground">
+          {safeOptions.length > 0
+            ? `${safeOptions.length} safe ${safeOptions.length === 1 ? "suggestion" : "suggestions"} available`
+            : "No safe match found"}
+        </p>
+        <Button type="button" variant="outline" onClick={() => setDialogOpen(true)}>
+          Assign manually
+        </Button>
       </div>
 
-      {assignmentOptions.length === 0 && (
-        <p className="mt-2 text-xs text-muted-foreground">
-          This email can be reviewed, but it does not have a safe deal target yet.
-        </p>
-      )}
+      <p className="mt-2 text-xs text-muted-foreground">
+        {safeOptions.length > 0
+          ? "Open manual assignment to use a suggestion or search anywhere in the CRM."
+          : "This email can still be reviewed and manually assigned anywhere in the CRM."}
+      </p>
 
       <div className="mt-3 flex flex-wrap gap-2 text-xs">
         <span className="rounded-full border px-2 py-1">Matched by {item.suggestedAssignment.matchedBy}</span>
@@ -179,6 +194,18 @@ function AssignmentQueueCard({
       </div>
 
       <p className="mt-2 text-xs text-muted-foreground">{formatDateTime(item.email.sentAt)}</p>
+
+      <EmailManualAssignmentDialog
+        safeOptions={safeOptions}
+        onAssign={async (target) => {
+          const result = await onAssign(item.email.id, target);
+          if (!result.ok) {
+            throw new Error(result.message);
+          }
+        }}
+        open={dialogOpen}
+        onOpenChange={setDialogOpen}
+      />
     </div>
   );
 }
@@ -187,7 +214,7 @@ export function EmailAssignmentQueueView({ items, onAssign }: EmailAssignmentQue
   if (items.length === 0) {
     return (
       <div className="rounded-lg border border-dashed p-6 text-sm text-muted-foreground">
-        No unresolved email assignments.
+        No unresolved parking-lot email intake.
       </div>
     );
   }

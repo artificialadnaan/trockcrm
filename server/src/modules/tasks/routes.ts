@@ -3,6 +3,7 @@ import { jobQueue } from "@trock-crm/shared/schema";
 import { TASK_PRIORITIES, TASK_TYPES } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 import { eventBus } from "../../events/bus.js";
+import { getAccessibleOffices } from "../auth/service.js";
 import { TASK_RULES } from "./rules/config.js";
 import { listUsers } from "../admin/users-service.js";
 import {
@@ -10,6 +11,7 @@ import {
   getTaskCounts,
   getTaskById,
   createTask,
+  queueTaskCreateSideEffects,
   updateTask,
   transitionTaskStatus,
   completeTask,
@@ -29,8 +31,17 @@ router.get("/assignees", async (req, res, next) => {
       return;
     }
 
-    const officeId = req.user!.activeOfficeId ?? req.user!.officeId;
-    const rows = await listUsers(officeId);
+    const requestedOfficeId = req.headers["x-office-id"] as string | undefined;
+    const accessibleOffices = await getAccessibleOffices(
+      req.user!.id,
+      req.user!.role,
+      req.user!.activeOfficeId ?? req.user!.officeId
+    );
+    const officeId = requestedOfficeId ?? req.user!.activeOfficeId ?? req.user!.officeId;
+    if (requestedOfficeId && !accessibleOffices.some((office) => office.id === requestedOfficeId)) {
+      throw new AppError(403, "Requested office is not accessible");
+    }
+    const rows = (await listUsers(officeId)) as Array<{ id: string; displayName: string; isActive: boolean }>;
     const users = rows
       .filter((u) => u.isActive)
       .map((u) => ({ id: u.id, displayName: u.displayName }));
@@ -118,40 +129,15 @@ router.post("/", async (req, res, next) => {
       remindAt,
     });
 
-    // Outbox pattern: insert durable event BEFORE commit so worker gets it
-    if (targetAssignee !== req.user!.id) {
-      await req.tenantDb!.insert(jobQueue).values({
-        jobType: "domain_event",
-        payload: {
-          eventName: "task.assigned",
-          taskId: task.id,
-          assignedTo: targetAssignee,
-          title: task.title,
-        },
-        officeId: req.user!.activeOfficeId ?? req.user!.officeId,
-        status: "pending",
-        runAfter: new Date(),
-      });
-    }
-
-    if (task.dealId) {
-      await req.tenantDb!.insert(jobQueue).values({
-        jobType: "ai_refresh_copilot",
-        payload: {
-          dealId: task.dealId,
-          reason: "task_created",
-          taskId: task.id,
-        },
-        officeId: req.user!.activeOfficeId ?? req.user!.officeId,
-        status: "pending",
-        runAfter: new Date(),
-      });
-    }
+    const sideEffects = await queueTaskCreateSideEffects(req.tenantDb!, task, {
+      actorUserId: req.user!.id,
+      officeId: req.user!.activeOfficeId ?? req.user!.officeId,
+    });
 
     await req.commitTransaction!();
 
     // Best-effort local emit for SSE push (already persisted via outbox above)
-    if (targetAssignee !== req.user!.id) {
+    if (sideEffects.shouldEmitAssignmentEvent) {
       try {
         eventBus.emitLocal({
           name: "task.assigned",

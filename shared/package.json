@@ -19,7 +19,7 @@
     }
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc -b --force",
     "typecheck": "tsc --noEmit",
     "dev": "tsc --watch"
   },

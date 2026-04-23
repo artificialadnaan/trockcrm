@@ -12,6 +12,7 @@ import {
   index,
 } from "drizzle-orm/pg-core";
 import { FILE_CATEGORIES } from "../../types/enums.js";
+import { leads } from "./leads.js";
 
 export const fileCategoryEnum = pgEnum("file_category", FILE_CATEGORIES);
 
@@ -32,6 +33,7 @@ export const files = pgTable(
     r2Key: varchar("r2_key", { length: 1000 }).unique().notNull(),
     r2Bucket: varchar("r2_bucket", { length: 100 }).notNull(),
     dealId: uuid("deal_id"),
+    leadId: uuid("lead_id").references(() => leads.id),
     intakeSection: varchar("intake_section", { length: 100 }),
     intakeRequirementKey: varchar("intake_requirement_key", { length: 100 }),
     intakeSource: varchar("intake_source", { length: 30 }),
@@ -55,6 +57,7 @@ export const files = pgTable(
   },
   (table) => [
     index("files_deal_idx").on(table.dealId, table.category, table.createdAt),
+    index("files_lead_idx").on(table.leadId, table.category, table.createdAt),
     index("files_folder_idx").on(table.folderPath, table.displayName),
   ]
 );

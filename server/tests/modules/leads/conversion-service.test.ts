@@ -10,6 +10,7 @@ import {
   leadStageHistory,
   leads,
   properties,
+  tasks,
   userOfficeAccess,
   users,
 } from "../../../../shared/src/schema/index.js";
@@ -27,12 +28,14 @@ import { createDeal, updateDeal } from "../../../src/modules/deals/service.js";
 import { createLeadService } from "../../../src/modules/leads/service.js";
 
 const pipelineMocks = vi.hoisted(() => ({
+  getAllStages: vi.fn(),
   getStageById: vi.fn(),
   getStageBySlug: vi.fn(),
   getActiveProjectTypes: vi.fn(async () => []),
 }));
 
 vi.mock("../../../src/modules/pipeline/service.js", () => ({
+  getAllStages: pipelineMocks.getAllStages,
   getStageById: pipelineMocks.getStageById,
   getStageBySlug: pipelineMocks.getStageBySlug,
   getActiveProjectTypes: pipelineMocks.getActiveProjectTypes,
@@ -471,6 +474,7 @@ function createFakeTenantDb(initialState?: Partial<FakeTenantState>) {
     userOfficeAccess: [],
     leads: [],
     deals: [],
+    tasks: [],
     leadStageHistory: [],
     ...initialState,
   };
@@ -486,6 +490,7 @@ function createFakeTenantDb(initialState?: Partial<FakeTenantState>) {
     if (table === userOfficeAccess || tableName === "user_office_access") return state.userOfficeAccess;
     if (table === leads || tableName === "leads") return state.leads;
     if (table === deals || tableName === "deals") return state.deals;
+    if (table === tasks || tableName === "tasks") return state.tasks;
     if (table === leadStageHistory || tableName === "lead_stage_history") return state.leadStageHistory;
     if ("slug" in candidate && "category" in candidate && "website" in candidate) return state.companies;
     if ("lat" in candidate && "lng" in candidate && "companyId" in candidate) return state.properties;
@@ -494,6 +499,7 @@ function createFakeTenantDb(initialState?: Partial<FakeTenantState>) {
     if ("userId" in candidate && "roleOverride" in candidate) return state.userOfficeAccess;
     if ("convertedAt" in candidate && "stageEnteredAt" in candidate && "assignedRepId" in candidate) return state.leads;
     if ("dealNumber" in candidate && "workflowRoute" in candidate && "sourceLeadId" in candidate) return state.deals;
+    if ("assignedTo" in candidate && "entitySnapshot" in candidate && "dueDate" in candidate) return state.tasks;
     if ("leadId" in candidate && "changedBy" in candidate && "toStageId" in candidate) return state.leadStageHistory;
     throw new Error("Unexpected table in fake tenant db");
   }
@@ -825,9 +831,11 @@ describe("Lead Conversion Shared Contract", () => {
     expect(config.foreignKeys.map((fk) => fk.getName()).sort()).toEqual([
       "leads_assigned_rep_id_users_id_fk",
       "leads_company_id_companies_id_fk",
+      "leads_director_reviewed_by_users_id_fk",
       "leads_disqualified_by_users_id_fk",
       "leads_executive_decision_by_users_id_fk",
       "leads_existing_customer_resolved_by_users_id_fk",
+      "leads_forecast_updated_by_users_id_fk",
       "leads_primary_contact_id_contacts_id_fk",
       "leads_project_type_id_project_type_config_id_fk",
       "leads_property_id_properties_id_fk",

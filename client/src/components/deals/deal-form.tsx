@@ -15,6 +15,11 @@ import { usePipelineStages, useProjectTypes, useRegions } from "@/hooks/use-pipe
 import { createDeal, updateDeal } from "@/hooks/use-deals";
 import type { Deal } from "@/hooks/use-deals";
 import { Loader2 } from "lucide-react";
+import { getDefaultDealStageId, getNewDealStages, getSelectedOptionLabel } from "./deal-form.helpers";
+import { CompanySelector } from "@/components/companies/company-selector";
+import { PropertySelector } from "@/components/properties/property-selector";
+import { useAuth } from "@/lib/auth";
+import { useTaskAssignees } from "@/hooks/use-task-assignees";
 
 interface DealFormProps {
   deal?: Deal; // If provided, we're editing; otherwise creating
@@ -23,16 +28,26 @@ interface DealFormProps {
 
 export function DealForm({ deal, onSuccess }: DealFormProps) {
   const navigate = useNavigate();
+  const { user } = useAuth();
   const { stages } = usePipelineStages();
   const { hierarchy: projectTypeHierarchy } = useProjectTypes();
   const { regions } = useRegions();
+  const { assignees, loading: assigneesLoading } = useTaskAssignees();
 
   const isEdit = !!deal;
-  const activeStages = stages.filter((s) => !s.isTerminal);
+  const activeStages = getNewDealStages(stages);
+  const projectTypeOptions = projectTypeHierarchy.flatMap((parent) => [
+    { id: parent.id, name: parent.name },
+    ...parent.children.map((child) => ({ id: child.id, name: child.name })),
+  ]);
+  const assigneeOptions = assignees.map((assignee) => ({ id: assignee.id, name: assignee.displayName }));
 
   const [formData, setFormData] = useState({
     name: deal?.name ?? "",
     stageId: deal?.stageId ?? "",
+    assignedRepId: deal?.assignedRepId ?? (user?.role === "rep" ? user.id : ""),
+    companyId: deal?.companyId ?? "",
+    propertyId: deal?.propertyId ?? "",
     description: deal?.description ?? "",
     ddEstimate: deal?.ddEstimate ?? "",
     bidEstimate: deal?.bidEstimate ?? "",
@@ -56,12 +71,18 @@ export function DealForm({ deal, onSuccess }: DealFormProps) {
   // Default stageId when activeStages finishes loading and form stageId is still empty
   useEffect(() => {
     if (!isEdit && !formData.stageId && activeStages.length > 0) {
-      setFormData((prev) => ({ ...prev, stageId: activeStages[0].id }));
+      setFormData((prev) => ({ ...prev, stageId: getDefaultDealStageId(stages) }));
     }
-  }, [activeStages, formData.stageId, isEdit]);
+  }, [activeStages.length, formData.stageId, isEdit, stages]);
 
   const handleChange = (field: string, value: string) => {
-    setFormData((prev) => ({ ...prev, [field]: value }));
+    setFormData((prev) => {
+      const next = { ...prev, [field]: value };
+      if (field === "companyId") {
+        next.propertyId = "";
+      }
+      return next;
+    });
     if (fieldErrors[field]) {
       setFieldErrors((prev) => { const next = { ...prev }; delete next[field]; return next; });
     }
@@ -120,6 +141,14 @@ export function DealForm({ deal, onSuccess }: DealFormProps) {
       setError("Deal name is required");
       return;
     }
+    if (!isEdit && !formData.assignedRepId) {
+      setError("Assigned sales rep is required");
+      return;
+    }
+    if (!formData.companyId || !formData.propertyId) {
+      setError("Company and property are required");
+      return;
+    }
     if (!formData.stageId && !isEdit) {
       setError("Stage is required");
       return;
@@ -133,6 +162,8 @@ export function DealForm({ deal, onSuccess }: DealFormProps) {
     try {
       const payload: Record<string, unknown> = {
         name: formData.name.trim(),
+        companyId: formData.companyId,
+        propertyId: formData.propertyId,
         description: formData.description.trim() || null,
         ddEstimate: formData.ddEstimate || null,
         bidEstimate: formData.bidEstimate || null,
@@ -150,10 +181,14 @@ export function DealForm({ deal, onSuccess }: DealFormProps) {
 
       let result: Deal;
       if (isEdit) {
+        if (!deal.sourceLeadId) {
+          payload.migrationMode = true;
+        }
         const resp = await updateDeal(deal.id, payload as Partial<Deal>);
         result = resp.deal;
       } else {
         payload.stageId = formData.stageId;
+        payload.assignedRepId = formData.assignedRepId;
         const resp = await createDeal(payload as Partial<Deal> & { name: string; stageId: string });
         result = resp.deal;
       }
@@ -198,6 +233,53 @@ export function DealForm({ deal, onSuccess }: DealFormProps) {
           </div>
 
           {!isEdit && (
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <div className="space-y-2">
+                <Label>Company <span className="text-red-500">*</span></Label>
+                <CompanySelector
+                  value={formData.companyId || null}
+                  onChange={(companyId) => handleChange("companyId", companyId)}
+                  required
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>Property <span className="text-red-500">*</span></Label>
+                <PropertySelector
+                  companyId={formData.companyId || null}
+                  value={formData.propertyId || null}
+                  onChange={(propertyId) => handleChange("propertyId", propertyId)}
+                  required
+                />
+              </div>
+            </div>
+          )}
+
+          {!isEdit && (
+            <div className="space-y-2">
+              <Label>Assigned Sales Rep <span className="text-red-500">*</span></Label>
+              <Select
+                value={formData.assignedRepId || "none"}
+                onValueChange={(value) => handleChange("assignedRepId", value && value !== "none" ? value : "")}
+                disabled={user?.role === "rep"}
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder={assigneesLoading ? "Loading assignees..." : "Select assignee"}>
+                    {getSelectedOptionLabel(assigneeOptions, formData.assignedRepId, assigneesLoading ? "Loading assignees..." : "Select assignee")}
+                  </SelectValue>
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">Select assignee</SelectItem>
+                  {assignees.map((assignee) => (
+                    <SelectItem key={assignee.id} value={assignee.id}>
+                      {assignee.displayName}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          )}
+
+          {!isEdit && (
             <div className="space-y-2">
               <Label htmlFor="stage">
                 Initial Stage <span className="text-red-500">*</span>
@@ -208,7 +290,7 @@ export function DealForm({ deal, onSuccess }: DealFormProps) {
               >
                 <SelectTrigger>
                   <SelectValue placeholder="Select stage">
-                    {activeStages.find((s) => s.id === formData.stageId)?.name ?? "Select stage"}
+                    {getSelectedOptionLabel(activeStages, formData.stageId, "Select stage")}
                   </SelectValue>
                 </SelectTrigger>
                 <SelectContent>
@@ -268,7 +350,9 @@ export function DealForm({ deal, onSuccess }: DealFormProps) {
                 onValueChange={(val) => handleChange("projectTypeId", val ?? "")}
               >
                 <SelectTrigger>
-                  <SelectValue placeholder="Select type" />
+                  <SelectValue placeholder="Select type">
+                    {getSelectedOptionLabel(projectTypeOptions, formData.projectTypeId, "Select type")}
+                  </SelectValue>
                 </SelectTrigger>
                 <SelectContent>
                   {projectTypeHierarchy.flatMap((parent) => [
@@ -291,7 +375,9 @@ export function DealForm({ deal, onSuccess }: DealFormProps) {
                 onValueChange={(val) => handleChange("regionId", val ?? "")}
               >
                 <SelectTrigger>
-                  <SelectValue placeholder="Select region" />
+                  <SelectValue placeholder="Select region">
+                    {getSelectedOptionLabel(regions, formData.regionId, "Select region")}
+                  </SelectValue>
                 </SelectTrigger>
                 <SelectContent>
                   {regions.map((r) => (

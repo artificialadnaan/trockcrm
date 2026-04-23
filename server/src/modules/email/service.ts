@@ -4,11 +4,16 @@ import {
   pipelineStageConfig,
   jobQueue,
   emails,
+  emailThreadBindings,
   activities,
+  companies,
   contacts,
   deals,
+  leads,
+  properties,
   contactDealAssociations,
   tasks,
+  userGraphTokens,
 } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
@@ -71,6 +76,49 @@ export interface EmailAssignmentQueueItem {
   suggestedAssignment: EmailAssignmentResult;
 }
 
+export function isEmailAssignmentQueueCandidate(emailRow: {
+  direction: "inbound" | "outbound";
+  assignmentAmbiguityReason: string | null;
+}) {
+  return emailRow.direction === "inbound" && emailRow.assignmentAmbiguityReason != null;
+}
+
+type ThreadBindingRecord = typeof emailThreadBindings.$inferSelect;
+
+export interface EmailThreadResponse {
+  binding: {
+    id: string;
+    mailboxAccountId: string;
+    contactId: string | null;
+    contactName: string | null;
+    companyId: string | null;
+    companyName: string | null;
+    propertyId: string | null;
+    propertyName: string | null;
+    leadId: string | null;
+    leadName: string | null;
+    dealId: string | null;
+    dealName: string | null;
+    projectId: string | null;
+    projectName: string | null;
+    confidence: string;
+    assignmentReason: string | null;
+  } | null;
+  preview: {
+    affectedMessageCount: number;
+    affectedMessageIds: string[];
+    currentDealId: string | null;
+    nextDealId: string | null;
+  } | null;
+  emails: Array<typeof emails.$inferSelect>;
+}
+
+export interface EmailThreadMutationContext {
+  mailboxAccountId: string;
+  binding: ThreadBindingRecord | null;
+  emails: Array<typeof emails.$inferSelect>;
+}
+
 type EmailAssignmentUpdate = {
   assignedEntityType: EmailAssignmentEntityType | null;
   assignedEntityId: string | null;
@@ -89,12 +137,57 @@ function assignmentUpdateForDeal(dealId: string): EmailAssignmentUpdate {
   };
 }
 
-async function getThreadAssignment(
+function normalizeEmailSubject(subject: string): string {
+  return subject
+    .replace(/^(re|fw|fwd):\s*/gi, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function buildParticipantFingerprint(to: string[], cc: string[]): string {
+  return [...to, ...cc]
+    .map((address) => address.trim().toLowerCase())
+    .filter(Boolean)
+    .sort()
+    .join("|");
+}
+
+export async function resolveMailboxAccountIdForCrmUser(
   tenantDb: TenantDb,
+  crmUserId: string
+): Promise<string> {
+  const [tokenRow] = await tenantDb
+    .select({ id: userGraphTokens.id })
+    .from(userGraphTokens)
+    .where(and(eq(userGraphTokens.userId, crmUserId), eq(userGraphTokens.status, "active")))
+    .limit(1);
+
+  if (!tokenRow) {
+    throw new AppError(409, "Connect mailbox first");
+  }
+
+  return tokenRow.id;
+}
+
+export async function getThreadAssignment(
+  tenantDb: TenantDb,
+  mailboxAccountId: string,
   conversationId: string | null | undefined
 ): Promise<EmailAssignmentThreadAssignment | null> {
   if (!conversationId) return null;
 
+  const activeBinding = await getActiveThreadBinding(tenantDb, mailboxAccountId, conversationId);
+  if (activeBinding?.dealId) {
+    return {
+      assignedEntityType: "deal",
+      assignedEntityId: activeBinding.dealId,
+      assignedDealId: activeBinding.dealId,
+    };
+  }
+
+  const mailboxUserId = await resolveMailboxUserId(tenantDb, mailboxAccountId);
+  const fallbackWhere = buildThreadAssignmentFallbackWhereClause(mailboxUserId, conversationId);
   const [row] = await tenantDb
     .select({
       assignedEntityType: emails.assignedEntityType,
@@ -102,15 +195,7 @@ async function getThreadAssignment(
       dealId: emails.dealId,
     })
     .from(emails)
-    .where(
-      and(
-        eq(emails.graphConversationId, conversationId),
-        or(
-          sql`${emails.assignedEntityType} IS NOT NULL`,
-          sql`${emails.dealId} IS NOT NULL`
-        )
-      )
-    )
+    .where(fallbackWhere)
     .orderBy(desc(emails.sentAt))
     .limit(1);
 
@@ -124,9 +209,14 @@ async function getThreadAssignment(
     };
   }
 
-  if (row.assignedEntityType === "company" && row.assignedEntityId) {
+  if (
+    (row.assignedEntityType === "company" ||
+      row.assignedEntityType === "property" ||
+      row.assignedEntityType === "lead") &&
+    row.assignedEntityId
+  ) {
     return {
-      assignedEntityType: "company",
+      assignedEntityType: row.assignedEntityType,
       assignedEntityId: row.assignedEntityId,
       assignedDealId: null,
     };
@@ -141,6 +231,20 @@ async function getThreadAssignment(
   }
 
   return null;
+}
+
+export function buildThreadAssignmentFallbackWhereClause(
+  mailboxUserId: string,
+  conversationId: string
+) {
+  return and(
+    eq(emails.userId, mailboxUserId),
+    eq(emails.graphConversationId, conversationId),
+    or(
+      sql`${emails.assignedEntityType} IS NOT NULL`,
+      sql`${emails.dealId} IS NOT NULL`
+    )
+  );
 }
 
 async function getEmailCandidateDeals(
@@ -238,6 +342,291 @@ async function getEmailCandidateDeals(
   };
 }
 
+export async function getActiveThreadBinding(
+  tenantDb: TenantDb,
+  mailboxAccountId: string,
+  providerConversationId: string
+): Promise<ThreadBindingRecord | null> {
+  const [binding] = await tenantDb
+    .select()
+    .from(emailThreadBindings)
+    .where(
+      and(
+        eq(emailThreadBindings.mailboxAccountId, mailboxAccountId),
+        eq(emailThreadBindings.provider, "microsoft_graph"),
+        eq(emailThreadBindings.providerConversationId, providerConversationId),
+        sql`${emailThreadBindings.detachedAt} IS NULL`
+      )
+    )
+    .limit(1);
+  return binding ?? null;
+}
+
+async function getProvisionalThreadBinding(
+  tenantDb: TenantDb,
+  mailboxAccountId: string,
+  normalizedSubject: string,
+  participantFingerprint: string
+): Promise<ThreadBindingRecord | null> {
+  const [binding] = await tenantDb
+    .select()
+    .from(emailThreadBindings)
+    .where(
+      and(
+        eq(emailThreadBindings.mailboxAccountId, mailboxAccountId),
+        eq(emailThreadBindings.provider, "microsoft_graph"),
+        eq(emailThreadBindings.normalizedSubject, normalizedSubject),
+        eq(emailThreadBindings.participantFingerprint, participantFingerprint),
+        sql`${emailThreadBindings.providerConversationId} IS NULL`,
+        sql`${emailThreadBindings.detachedAt} IS NULL`,
+        sql`${emailThreadBindings.provisionalUntil} IS NOT NULL AND ${emailThreadBindings.provisionalUntil} > now()`
+      )
+    )
+    .limit(1);
+  return binding ?? null;
+}
+
+async function resolveMailboxUserId(
+  tenantDb: TenantDb,
+  mailboxAccountId: string
+): Promise<string> {
+  const [tokenRow] = await tenantDb
+    .select({ userId: userGraphTokens.userId })
+    .from(userGraphTokens)
+    .where(eq(userGraphTokens.id, mailboxAccountId))
+    .limit(1);
+
+  if (!tokenRow) {
+    throw new AppError(404, "Mailbox not found");
+  }
+
+  return tokenRow.userId;
+}
+
+export async function getEmailThreadForMutation(
+  tenantDb: TenantDb,
+  providerConversationId: string
+): Promise<EmailThreadMutationContext> {
+  const threadEmails = await tenantDb
+    .select()
+    .from(emails)
+    .where(eq(emails.graphConversationId, providerConversationId))
+    .orderBy(sql`${emails.sentAt} ASC`);
+
+  if (threadEmails.length === 0) {
+    throw new AppError(404, "Email thread not found");
+  }
+
+  const mailboxAccountId = await resolveMailboxAccountIdForCrmUser(tenantDb, threadEmails[0].userId);
+  const binding = await getActiveThreadBinding(tenantDb, mailboxAccountId, providerConversationId);
+
+  return {
+    mailboxAccountId,
+    binding,
+    emails: threadEmails,
+  };
+}
+
+export async function assertCanMutateEmailThread(
+  tenantDb: TenantDb,
+  thread: EmailThreadMutationContext,
+  user: { id: string; role: string }
+) {
+  if (user.role === "admin" || user.role === "director") {
+    return;
+  }
+
+  const mailboxAccountId = await resolveMailboxAccountIdForCrmUser(tenantDb, user.id);
+  if (thread.mailboxAccountId !== mailboxAccountId) {
+    throw new AppError(403, "You can only modify your own email threads");
+  }
+}
+
+export async function previewThreadReassignmentImpact(
+  tenantDb: TenantDb,
+  input: {
+    mailboxAccountId: string;
+    providerConversationId: string;
+    nextDealId: string;
+  }
+) {
+  const mailboxUserId = await resolveMailboxUserId(tenantDb, input.mailboxAccountId);
+  const messageRows = await tenantDb
+    .select({ id: emails.id, dealId: emails.dealId })
+    .from(emails)
+    .where(
+      and(
+        eq(emails.userId, mailboxUserId),
+        eq(emails.graphConversationId, input.providerConversationId)
+      )
+    );
+
+  return {
+    affectedMessageCount: messageRows.length,
+    affectedMessageIds: messageRows.map((row) => row.id),
+    currentDealId: messageRows[0]?.dealId ?? null,
+    nextDealId: input.nextDealId,
+  };
+}
+
+export async function detachThreadByConversation(
+  tenantDb: TenantDb,
+  mailboxAccountId: string,
+  providerConversationId: string,
+  actingUserId: string
+) {
+  await tenantDb
+    .update(emailThreadBindings)
+    .set({
+      detachedAt: new Date(),
+      updatedBy: actingUserId,
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(emailThreadBindings.mailboxAccountId, mailboxAccountId),
+        eq(emailThreadBindings.provider, "microsoft_graph"),
+        eq(emailThreadBindings.providerConversationId, providerConversationId),
+        sql`${emailThreadBindings.detachedAt} IS NULL`
+      )
+    );
+}
+
+async function backAssociateStoredMessagesForBinding(
+  tenantDb: TenantDb,
+  input: {
+    mailboxAccountId: string;
+    providerConversationId: string;
+    bindingId: string;
+    dealId: string;
+    actingUserId: string;
+  }
+) {
+  const mailboxUserId = await resolveMailboxUserId(tenantDb, input.mailboxAccountId);
+  await tenantDb
+    .update(emails)
+    .set({
+      dealId: input.dealId,
+      assignedEntityType: "deal",
+      assignedEntityId: input.dealId,
+      assignmentConfidence: "high",
+      assignmentAmbiguityReason: null,
+      threadBindingId: input.bindingId,
+    })
+    .where(
+      and(
+        eq(emails.userId, mailboxUserId),
+        eq(emails.graphConversationId, input.providerConversationId),
+        or(
+          sql`${emails.threadBindingId} IS NULL`,
+          eq(emails.threadBindingId, input.bindingId)
+        )
+      )
+    );
+}
+
+export async function bindThreadToDeal(
+  tenantDb: TenantDb,
+  input: {
+    mailboxAccountId: string;
+    providerConversationId: string;
+    dealId: string;
+    actingUserId: string;
+  }
+): Promise<{ binding: ThreadBindingRecord; previousBindingId: string | null }> {
+  const existing = await getActiveThreadBinding(tenantDb, input.mailboxAccountId, input.providerConversationId);
+
+  if (existing?.dealId === input.dealId) {
+    return { binding: existing, previousBindingId: null };
+  }
+
+  if (existing) {
+    await tenantDb
+      .update(emailThreadBindings)
+      .set({
+        detachedAt: new Date(),
+        updatedBy: input.actingUserId,
+        updatedAt: new Date(),
+      })
+      .where(eq(emailThreadBindings.id, existing.id));
+  }
+
+  const [binding] = await tenantDb
+    .insert(emailThreadBindings)
+    .values({
+      mailboxAccountId: input.mailboxAccountId,
+      provider: "microsoft_graph",
+      providerConversationId: input.providerConversationId,
+      dealId: input.dealId,
+      bindingSource: "manual",
+      confidence: "high",
+      assignmentReason: "manual_thread_assignment",
+      createdBy: input.actingUserId,
+      updatedBy: input.actingUserId,
+    })
+    .returning();
+
+  await backAssociateStoredMessagesForBinding(tenantDb, {
+    mailboxAccountId: input.mailboxAccountId,
+    providerConversationId: input.providerConversationId,
+    bindingId: binding.id,
+    dealId: input.dealId,
+    actingUserId: input.actingUserId,
+  });
+
+  return { binding, previousBindingId: existing?.id ?? null };
+}
+
+export async function seedOutboundThreadBinding(
+  tenantDb: TenantDb,
+  input: {
+    mailboxAccountId: string;
+    provider: "microsoft_graph";
+    providerConversationId?: string | null;
+    normalizedSubject: string;
+    participantFingerprint: string;
+    dealId: string;
+    actingUserId: string;
+  }
+): Promise<ThreadBindingRecord> {
+  if (input.providerConversationId) {
+    const result = await bindThreadToDeal(tenantDb, {
+      mailboxAccountId: input.mailboxAccountId,
+      providerConversationId: input.providerConversationId,
+      dealId: input.dealId,
+      actingUserId: input.actingUserId,
+    });
+    return result.binding;
+  }
+
+  const existing = await getProvisionalThreadBinding(
+    tenantDb,
+    input.mailboxAccountId,
+    input.normalizedSubject,
+    input.participantFingerprint
+  );
+  if (existing) return existing;
+
+  const [binding] = await tenantDb
+    .insert(emailThreadBindings)
+    .values({
+      mailboxAccountId: input.mailboxAccountId,
+      provider: input.provider,
+      normalizedSubject: input.normalizedSubject,
+      participantFingerprint: input.participantFingerprint,
+      dealId: input.dealId,
+      bindingSource: "outbound_seed",
+      confidence: "high",
+      assignmentReason: "outbound_thread_seed",
+      provisionalUntil: sql`now() + interval '24 hours'`,
+      createdBy: input.actingUserId,
+      updatedBy: input.actingUserId,
+    })
+    .returning();
+
+  return binding;
+}
+
 export async function getEmailAssignmentQueue(
   tenantDb: TenantDb,
   filters: EmailAssignmentQueueFilters = {},
@@ -250,10 +639,7 @@ export async function getEmailAssignmentQueue(
 
   const conditions: any[] = [
     eq(emails.direction, "inbound"),
-    or(
-      sql`${emails.assignmentAmbiguityReason} IS NOT NULL`,
-      sql`${emails.assignedEntityType} IS NOT NULL AND ${emails.assignedEntityType} <> 'deal' AND ${emails.dealId} IS NULL`
-    ),
+    sql`${emails.assignmentAmbiguityReason} IS NOT NULL`,
   ];
 
   if (userId && userRole === "rep") {
@@ -279,13 +665,16 @@ export async function getEmailAssignmentQueue(
       .select()
       .from(emails)
       .where(where)
-      .orderBy(desc(emails.sentAt))
+      .orderBy(
+        desc(sql`GREATEST(${emails.sentAt}, ${emails.syncedAt})`),
+        desc(emails.sentAt)
+      )
       .limit(limit)
       .offset(offset),
   ]);
 
   const items = await Promise.all(
-    emailRows.map(async (emailRow) => {
+    emailRows.filter(isEmailAssignmentQueueCandidate).map(async (emailRow) => {
       const [contactRow] = emailRow.contactId
         ? await tenantDb
             .select({
@@ -303,11 +692,12 @@ export async function getEmailAssignmentQueue(
         tenantDb,
         emailRow.contactId
       );
+      const mailboxAccountId = await resolveMailboxAccountIdForCrmUser(tenantDb, emailRow.userId);
       const suggestedAssignment = resolveEmailAssignment({
         subject: emailRow.subject,
         bodyPreview: emailRow.bodyPreview,
         bodyHtml: emailRow.bodyHtml,
-        priorThreadAssignment: await getThreadAssignment(tenantDb, emailRow.graphConversationId),
+        priorThreadAssignment: await getThreadAssignment(tenantDb, mailboxAccountId, emailRow.graphConversationId),
         contactCompanyId: contactRow?.companyId ?? companyId,
         dealCandidates,
         leadCandidates,
@@ -346,6 +736,40 @@ export async function sendEmail(
   userId: string,
   input: SendEmailInput
 ): Promise<any> {
+  let outboundAssignment: EmailAssignmentUpdate = {
+    assignedEntityType: null,
+    assignedEntityId: null,
+    assignmentConfidence: "low",
+    assignmentAmbiguityReason: null,
+    dealId: null,
+  };
+  if (input.dealId) {
+    outboundAssignment = assignmentUpdateForDeal(input.dealId);
+  } else if (input.contactId) {
+    const [contactRow] = await tenantDb
+      .select({ companyId: contacts.companyId })
+      .from(contacts)
+      .where(eq(contacts.id, input.contactId))
+      .limit(1);
+    if (contactRow?.companyId) {
+      outboundAssignment = {
+        assignedEntityType: "company",
+        assignedEntityId: contactRow.companyId,
+        assignmentConfidence: "medium",
+        assignmentAmbiguityReason: null,
+        dealId: null,
+      };
+    }
+  }
+
+  const activitySourceEntityType =
+    input.dealId ? "deal" : outboundAssignment.assignedEntityType === "company" ? "company" : "contact";
+  const activitySourceEntityId =
+    input.dealId ?? outboundAssignment.assignedEntityId ?? input.contactId ?? null;
+  if (!activitySourceEntityId) {
+    throw new AppError(400, "Outbound email must be associated to a deal, company, or contact.");
+  }
+
   // Dev mode: store email locally without sending via Graph
   if (!isGraphAuthConfigured()) {
     return createMockSentEmail(tenantDb, userId, input);
@@ -392,31 +816,6 @@ export async function sendEmail(
   const graphMessageId = draft.id ?? `sent-${crypto.randomUUID()}`;
   const graphConversationId: string | null = draft.conversationId ?? null;
   const fromAddress: string = draft.from?.emailAddress?.address ?? "";
-  let outboundAssignment: EmailAssignmentUpdate = {
-    assignedEntityType: null,
-    assignedEntityId: null,
-    assignmentConfidence: "low",
-    assignmentAmbiguityReason: null,
-    dealId: null,
-  };
-  if (input.dealId) {
-    outboundAssignment = assignmentUpdateForDeal(input.dealId);
-  } else if (input.contactId) {
-    const [contactRow] = await tenantDb
-      .select({ companyId: contacts.companyId })
-      .from(contacts)
-      .where(eq(contacts.id, input.contactId))
-      .limit(1);
-    if (contactRow?.companyId) {
-      outboundAssignment = {
-        assignedEntityType: "company",
-        assignedEntityId: contactRow.companyId,
-        assignmentConfidence: "medium",
-        assignmentAmbiguityReason: null,
-        dealId: null,
-      };
-    }
-  }
 
   // Step 2: Send the draft
   const sendResult = await graphRequest({
@@ -454,14 +853,27 @@ export async function sendEmail(
     })
     .returning();
 
-  // Create activity record for the unified feed
-  const activitySourceEntityType =
-    input.dealId ? "deal" : outboundAssignment.assignedEntityType === "company" ? "company" : "contact";
-  const activitySourceEntityId =
-    input.dealId ?? outboundAssignment.assignedEntityId ?? input.contactId ?? null;
-  if (!activitySourceEntityId) {
-    throw new AppError(400, "Outbound email must be associated to a deal, company, or contact.");
+  if (input.dealId) {
+    const mailboxAccountId = await resolveMailboxAccountIdForCrmUser(tenantDb, userId);
+    const binding = await seedOutboundThreadBinding(tenantDb, {
+      mailboxAccountId,
+      provider: "microsoft_graph",
+      providerConversationId: graphConversationId,
+      normalizedSubject: normalizeEmailSubject(input.subject),
+      participantFingerprint: buildParticipantFingerprint(input.to, input.cc ?? []),
+      dealId: input.dealId,
+      actingUserId: userId,
+    });
+
+    await tenantDb
+      .update(emails)
+      .set({ threadBindingId: binding.id })
+      .where(eq(emails.id, emailRecord.id));
+
+    emailRecord.threadBindingId = binding.id;
   }
+
+  // Create activity record for the unified feed
   await tenantDb.insert(activities).values({
     type: "email",
     responsibleUserId: userId,
@@ -534,6 +946,26 @@ async function createMockSentEmail(
     })
     .returning();
 
+  if (input.dealId) {
+    const mailboxAccountId = await resolveMailboxAccountIdForCrmUser(tenantDb, userId);
+    const binding = await seedOutboundThreadBinding(tenantDb, {
+      mailboxAccountId,
+      provider: "microsoft_graph",
+      providerConversationId: null,
+      normalizedSubject: normalizeEmailSubject(input.subject),
+      participantFingerprint: buildParticipantFingerprint(input.to, input.cc ?? []),
+      dealId: input.dealId,
+      actingUserId: userId,
+    });
+
+    await tenantDb
+      .update(emails)
+      .set({ threadBindingId: binding.id })
+      .where(eq(emails.id, emailRecord.id));
+
+    emailRecord.threadBindingId = binding.id;
+  }
+
   const activitySourceEntityType =
     input.dealId ? "deal" : outboundAssignment.assignedEntityType === "company" ? "company" : "contact";
   const activitySourceEntityId =
@@ -580,10 +1012,20 @@ export async function getEmails(
   }
 
   if (filters.dealId) {
-    conditions.push(eq(emails.dealId, filters.dealId));
+    conditions.push(
+      or(
+        eq(emails.dealId, filters.dealId),
+        and(eq(emails.assignedEntityType, "deal"), eq(emails.assignedEntityId, filters.dealId))
+      )
+    );
   }
   if (filters.contactId) {
-    conditions.push(eq(emails.contactId, filters.contactId));
+    conditions.push(
+      or(
+        eq(emails.contactId, filters.contactId),
+        and(eq(emails.assignedEntityType, "contact"), eq(emails.assignedEntityId, filters.contactId))
+      )
+    );
   }
   if (filters.direction) {
     conditions.push(eq(emails.direction, filters.direction));
@@ -608,7 +1050,10 @@ export async function getEmails(
       .select()
       .from(emails)
       .where(where)
-      .orderBy(desc(emails.sentAt))
+      .orderBy(
+        desc(sql`GREATEST(${emails.sentAt}, ${emails.syncedAt})`),
+        desc(emails.sentAt)
+      )
       .limit(limit)
       .offset(offset),
   ]);
@@ -646,8 +1091,8 @@ export async function getEmailThread(
   conversationId: string,
   userId?: string,
   userRole?: string
-) {
-  if (!conversationId) return [];
+) : Promise<EmailThreadResponse> {
+  if (!conversationId) return { binding: null, preview: null, emails: [] };
 
   const conditions: any[] = [eq(emails.graphConversationId, conversationId)];
 
@@ -657,11 +1102,52 @@ export async function getEmailThread(
   }
 
   // Thread view: chronological order (oldest first) for natural reading context
-  return tenantDb
+  const thread = await tenantDb
     .select()
     .from(emails)
     .where(and(...conditions))
     .orderBy(sql`${emails.sentAt} ASC`);
+
+  if (thread.length === 0) {
+    return { binding: null, preview: null, emails: [] };
+  }
+
+  const mutationContext = await getEmailThreadForMutation(tenantDb, conversationId);
+
+  let bindingPayload: EmailThreadResponse["binding"] = null;
+  if (mutationContext.binding) {
+    const [dealRow] = mutationContext.binding.dealId
+      ? await tenantDb
+          .select({ id: deals.id, name: deals.name })
+          .from(deals)
+          .where(eq(deals.id, mutationContext.binding.dealId))
+          .limit(1)
+      : [null];
+    bindingPayload = {
+      id: mutationContext.binding.id,
+      mailboxAccountId: mutationContext.binding.mailboxAccountId,
+      contactId: thread[0]?.contactId ?? null,
+      contactName: null,
+      companyId: null,
+      companyName: null,
+      propertyId: null,
+      propertyName: null,
+      leadId: null,
+      leadName: null,
+      dealId: mutationContext.binding.dealId ?? null,
+      dealName: dealRow?.name ?? null,
+      projectId: mutationContext.binding.projectId ?? null,
+      projectName: null,
+      confidence: mutationContext.binding.confidence,
+      assignmentReason: mutationContext.binding.assignmentReason ?? null,
+    };
+  }
+
+  return {
+    binding: bindingPayload,
+    preview: null,
+    emails: thread,
+  };
 }
 
 /**
@@ -696,7 +1182,10 @@ export async function getUserEmails(tenantDb: TenantDb, userId: string, filters:
       .select()
       .from(emails)
       .where(where)
-      .orderBy(desc(emails.sentAt))
+      .orderBy(
+        desc(sql`GREATEST(${emails.sentAt}, ${emails.syncedAt})`),
+        desc(emails.sentAt)
+      )
       .limit(limit)
       .offset(offset),
   ]);
@@ -845,7 +1334,11 @@ async function completeInboundEmailTasks(
       : null;
 
     if (completedTask.originRule && !completionRule) {
-      throw new AppError(500, `Missing rule configuration for completed task originRule ${completedTask.originRule}`);
+      // Legacy/backfilled tasks may carry origin rules that are no longer in TASK_RULES.
+      // Assignment must still succeed; we just skip suppression-window metadata.
+      console.warn(
+        `[email-assignment] Missing rule configuration for completed task originRule ${completedTask.originRule}`
+      );
     }
 
     await tenantDb.insert(jobQueue).values({
@@ -874,7 +1367,11 @@ async function completeInboundEmailTasks(
 export async function associateEmailToEntity(
   tenantDb: TenantDb,
   emailId: string,
-  input: { assignedEntityType: "deal"; assignedEntityId: string; assignedDealId?: string | null },
+  input: {
+    assignedEntityType: "deal" | "company" | "property" | "lead" | "contact";
+    assignedEntityId: string;
+    assignedDealId?: string | null;
+  },
   userRole: string,
   userId: string,
   officeId: string
@@ -882,21 +1379,110 @@ export async function associateEmailToEntity(
   const email = await getEmailById(tenantDb, emailId);
   if (!email) throw new AppError(404, "Email not found");
 
-  if (input.assignedEntityType !== "deal") {
-    throw new AppError(400, "Only deal assignments are supported by this endpoint");
+  if (!["deal", "company", "property", "lead", "contact"].includes(input.assignedEntityType)) {
+    throw new AppError(400, "Unsupported assignment target");
   }
 
-  const assignedDealId = input.assignedDealId ?? input.assignedEntityId;
-  if (assignedDealId !== input.assignedEntityId) {
+  const assignedDealId = input.assignedEntityType === "deal" ? input.assignedDealId ?? input.assignedEntityId : null;
+  if (input.assignedEntityType === "deal" && assignedDealId !== input.assignedEntityId) {
     throw new AppError(400, "assignedDealId must match assignedEntityId for deal assignments");
   }
 
-  const deal = await tenantDb
-    .select({ id: deals.id })
-    .from(deals)
-    .where(eq(deals.id, input.assignedEntityId))
-    .limit(1);
-  if (deal.length === 0) throw new AppError(404, "Deal not found");
+  let assignmentLinks: {
+    sourceEntityType: "company" | "property" | "lead" | "deal" | "contact";
+    sourceEntityId: string;
+    companyId: string | null;
+    propertyId: string | null;
+    leadId: string | null;
+    dealId: string | null;
+  };
+
+  if (input.assignedEntityType === "deal") {
+    const [deal] = await tenantDb
+      .select({
+        id: deals.id,
+        companyId: deals.companyId,
+        propertyId: deals.propertyId,
+        sourceLeadId: deals.sourceLeadId,
+      })
+      .from(deals)
+      .where(eq(deals.id, input.assignedEntityId))
+      .limit(1);
+    if (!deal) throw new AppError(404, "Deal not found");
+
+    assignmentLinks = {
+      sourceEntityType: "deal",
+      sourceEntityId: input.assignedEntityId,
+      companyId: deal.companyId ?? null,
+      propertyId: deal.propertyId ?? null,
+      leadId: deal.sourceLeadId ?? null,
+      dealId: assignedDealId,
+    };
+  } else if (input.assignedEntityType === "company") {
+    const [company] = await tenantDb
+      .select({ id: companies.id })
+      .from(companies)
+      .where(eq(companies.id, input.assignedEntityId))
+      .limit(1);
+    if (!company) throw new AppError(404, "Company not found");
+
+    assignmentLinks = {
+      sourceEntityType: "company",
+      sourceEntityId: input.assignedEntityId,
+      companyId: input.assignedEntityId,
+      propertyId: null,
+      leadId: null,
+      dealId: null,
+    };
+  } else if (input.assignedEntityType === "property") {
+    const [property] = await tenantDb
+      .select({ id: properties.id, companyId: properties.companyId })
+      .from(properties)
+      .where(eq(properties.id, input.assignedEntityId))
+      .limit(1);
+    if (!property) throw new AppError(404, "Property not found");
+
+    assignmentLinks = {
+      sourceEntityType: "property",
+      sourceEntityId: input.assignedEntityId,
+      companyId: property.companyId ?? null,
+      propertyId: input.assignedEntityId,
+      leadId: null,
+      dealId: null,
+    };
+  } else if (input.assignedEntityType === "contact") {
+    const [contact] = await tenantDb
+      .select({ id: contacts.id, companyId: contacts.companyId })
+      .from(contacts)
+      .where(eq(contacts.id, input.assignedEntityId))
+      .limit(1);
+    if (!contact) throw new AppError(404, "Contact not found");
+
+    assignmentLinks = {
+      sourceEntityType: "contact",
+      sourceEntityId: input.assignedEntityId,
+      companyId: contact.companyId ?? null,
+      propertyId: null,
+      leadId: null,
+      dealId: null,
+    };
+  } else {
+    const [lead] = await tenantDb
+      .select({ id: leads.id, companyId: leads.companyId, propertyId: leads.propertyId })
+      .from(leads)
+      .where(eq(leads.id, input.assignedEntityId))
+      .limit(1);
+    if (!lead) throw new AppError(404, "Lead not found");
+
+    assignmentLinks = {
+      sourceEntityType: "lead",
+      sourceEntityId: input.assignedEntityId,
+      companyId: lead.companyId ?? null,
+      propertyId: lead.propertyId ?? null,
+      leadId: input.assignedEntityId,
+      dealId: null,
+    };
+  }
 
   await tenantDb
     .update(emails)
@@ -906,13 +1492,43 @@ export async function associateEmailToEntity(
       assignmentConfidence: "high",
       assignmentAmbiguityReason: null,
       dealId: assignedDealId,
+      contactId: input.assignedEntityType === "contact" ? input.assignedEntityId : email.contactId ?? null,
+      syncedAt: new Date(),
     })
     .where(eq(emails.id, emailId));
 
-  await tenantDb
+  const updatedActivities = await tenantDb
     .update(activities)
-    .set({ dealId: assignedDealId })
-    .where(eq(activities.emailId, emailId));
+    .set({
+      sourceEntityType: assignmentLinks.sourceEntityType,
+      sourceEntityId: assignmentLinks.sourceEntityId,
+      companyId: assignmentLinks.companyId,
+      propertyId: assignmentLinks.propertyId,
+      leadId: assignmentLinks.leadId,
+      dealId: assignmentLinks.dealId,
+      contactId: input.assignedEntityType === "contact" ? input.assignedEntityId : email.contactId ?? null,
+    })
+    .where(eq(activities.emailId, emailId))
+    .returning({ id: activities.id });
+
+  if (updatedActivities.length === 0) {
+    await tenantDb.insert(activities).values({
+      type: "email",
+      responsibleUserId: email.userId,
+      performedByUserId: email.userId,
+      sourceEntityType: assignmentLinks.sourceEntityType,
+      sourceEntityId: assignmentLinks.sourceEntityId,
+      companyId: assignmentLinks.companyId,
+      propertyId: assignmentLinks.propertyId,
+      leadId: assignmentLinks.leadId,
+      dealId: assignmentLinks.dealId,
+      contactId: input.assignedEntityType === "contact" ? input.assignedEntityId : email.contactId ?? null,
+      emailId: email.id,
+      subject: email.subject ?? null,
+      body: email.bodyPreview ?? (email.bodyHtml ? stripHtml(email.bodyHtml).substring(0, 1000) : null),
+      occurredAt: email.sentAt,
+    });
+  }
 
   await completeInboundEmailTasks(tenantDb, emailId, userRole, userId, officeId);
 }
@@ -924,7 +1540,10 @@ export async function associateEmailToDeal(
 ): Promise<void> {
   await tenantDb
     .update(emails)
-    .set(assignmentUpdateForDeal(dealId))
+    .set({
+      ...assignmentUpdateForDeal(dealId),
+      syncedAt: new Date(),
+    })
     .where(eq(emails.id, emailId));
 
   await tenantDb

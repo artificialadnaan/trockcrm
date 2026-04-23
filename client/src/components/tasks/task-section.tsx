@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { TaskRow } from "./task-row";
 import type { Task } from "@/hooks/use-tasks";
 
@@ -11,6 +12,7 @@ interface TaskSectionProps {
   variant?: "danger" | "warning" | "default" | "muted";
   defaultOpen?: boolean;
   onUpdate: () => void;
+  pageSize?: number;
 }
 
 const variantStyles: Record<string, string> = {
@@ -34,8 +36,20 @@ export function TaskSection({
   variant = "default",
   defaultOpen = true,
   onUpdate,
+  pageSize = 10,
 }: TaskSectionProps) {
   const [open, setOpen] = useState(defaultOpen);
+  const [page, setPage] = useState(1);
+  const totalPages = Math.max(1, Math.ceil(tasks.length / pageSize));
+  const pageStart = (page - 1) * pageSize;
+  const visibleTasks = useMemo(
+    () => tasks.slice(pageStart, pageStart + pageSize),
+    [pageSize, pageStart, tasks],
+  );
+
+  useEffect(() => {
+    setPage((current) => Math.min(current, totalPages));
+  }, [totalPages]);
 
   return (
     <div className="border rounded-lg">
@@ -56,9 +70,37 @@ export function TaskSection({
 
       {open && tasks.length > 0 && (
         <div className="px-2 pb-2 space-y-0.5">
-          {tasks.map((task) => (
+          {visibleTasks.map((task) => (
             <TaskRow key={task.id} task={task} onUpdate={onUpdate} />
           ))}
+          {tasks.length > pageSize && (
+            <div className="flex items-center justify-between px-2 pt-3">
+              <p className="text-xs text-muted-foreground">
+                Showing {pageStart + 1}-{Math.min(pageStart + pageSize, tasks.length)} of {tasks.length}
+              </p>
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setPage((current) => Math.max(1, current - 1))}
+                  disabled={page === 1}
+                >
+                  Previous
+                </Button>
+                <span className="text-xs text-muted-foreground">
+                  {page}/{totalPages}
+                </span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setPage((current) => Math.min(totalPages, current + 1))}
+                  disabled={page === totalPages}
+                >
+                  Next
+                </Button>
+              </div>
+            </div>
+          )}
         </div>
       )}
 

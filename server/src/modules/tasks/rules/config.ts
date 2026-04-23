@@ -1223,11 +1223,26 @@ const inboundEmailDisambiguationRule: TaskRuleDefinition = {
   },
 };
 
+const legacyEmailAssignmentQueueRuleId = "email_assignment_queue";
+const legacyEmailAssignmentQueueRule: TaskRuleDefinition = {
+  id: legacyEmailAssignmentQueueRuleId,
+  sourceEvent: "email.received",
+  reasonCode: legacyEmailAssignmentQueueRuleId,
+  suppressionWindowDays: 30,
+  buildDedupeKey() {
+    return null;
+  },
+  buildTask() {
+    return null;
+  },
+};
+
 export const TASK_RULES: TaskRuleDefinition[] = [
   staleDealRule,
   staleLeadRule,
   inboundEmailReplyNeededRule,
   inboundEmailDisambiguationRule,
+  legacyEmailAssignmentQueueRule,
   contactOnboardingIntroEmailRule,
   contactOnboardingFollowUpCallRule,
   contactOnboardingCheckResponseRule,

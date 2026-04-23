@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { api } from "@/lib/api";
+import type { FunnelBucketSummary } from "./use-dashboard";
 
 export interface RepPerformanceCard {
   repId: string;
@@ -13,6 +14,17 @@ export interface RepPerformanceCard {
 }
 
 export interface DirectorDashboardData {
+  officeFunnelBuckets: FunnelBucketSummary[];
+  repFunnelRows: DirectorRepFunnelRow[];
+  repCommissionRows: Array<{
+    repId: string;
+    repName: string;
+    totalEarnedCommission: number;
+    potentialCommission: number;
+    floorRemaining: number;
+    newCustomerShare: number;
+    meetsNewCustomerShare: boolean;
+  }>;
   repCards: RepPerformanceCard[];
   pipelineByStage: Array<{
     stageId: string;
@@ -91,8 +103,62 @@ export interface DirectorDashboardData {
   };
 }
 
+export interface DirectorRepFunnelRow {
+  repId: string;
+  repName: string;
+  leads: number;
+  qualifiedLeads: number;
+  opportunities: number;
+  dueDiligence: number;
+  estimating: number;
+}
+
+export interface DirectorCommissionWorkspaceData {
+  rows: Array<{
+    repId: string;
+    repName: string;
+    totalEarnedCommission: number;
+    potentialCommission: number;
+    floorRemaining: number;
+    newCustomerShare: number;
+    meetsNewCustomerShare: boolean;
+    activeDeals: number;
+    pipelineValue: number;
+    leads: number;
+    qualifiedLeads: number;
+    opportunities: number;
+    dueDiligence: number;
+    estimating: number;
+    calls: number;
+    emails: number;
+    meetings: number;
+    notes: number;
+    totalActivities: number;
+  }>;
+}
+
 export interface RepDetailData {
   activeDeals: { count: number; totalValue: number };
+  commissionSummary: {
+    commissionRate: number;
+    overrideRate: number;
+    rollingFloor: number;
+    rollingPaidRevenue: number;
+    rollingCommissionableMargin: number;
+    floorRemaining: number;
+    newCustomerRevenue: number;
+    newCustomerShare: number;
+    newCustomerShareFloor: number;
+    meetsNewCustomerShare: boolean;
+    estimatedPaymentCount: number;
+    excludedLowMarginRevenue: number;
+    directEarnedCommission: number;
+    overrideEarnedCommission: number;
+    totalEarnedCommission: number;
+    potentialRevenue: number;
+    potentialMargin: number;
+    potentialCommission: number;
+  };
   tasksToday: { overdue: number; today: number };
   activityThisWeek: {
     calls: number;
@@ -208,6 +274,37 @@ export function useDirectorDashboard(dateRange?: { from: string; to: string }) {
       setData(res.data);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to load director dashboard");
+    } finally {
+      setLoading(false);
+    }
+  }, [dateRange?.from, dateRange?.to]);
+
+  useEffect(() => {
+    fetchData();
+  }, [fetchData]);
+
+  return { data, loading, error, refetch: fetchData };
+}
+
+export function useDirectorCommissionWorkspace(dateRange?: { from: string; to: string }) {
+  const [data, setData] = useState<DirectorCommissionWorkspaceData | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchData = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const params = new URLSearchParams();
+      if (dateRange?.from) params.set("from", dateRange.from);
+      if (dateRange?.to) params.set("to", dateRange.to);
+      const qs = params.toString();
+      const res = await api<{ data: DirectorCommissionWorkspaceData }>(
+        `/dashboard/director/commissions${qs ? `?${qs}` : ""}`
+      );
+      setData(res.data);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to load team commissions");
     } finally {
       setLoading(false);
     }

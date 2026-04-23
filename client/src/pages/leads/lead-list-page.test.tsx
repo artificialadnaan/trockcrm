@@ -1,151 +1,149 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
-import type { ReactNode } from "react";
-import { LeadListPage } from "./lead-list-page";
+import { LeadListPage, buildLeadIntakePath, isImmediateNextStageMove } from "./lead-list-page";
 
-const mocks = vi.hoisted(() => ({
-  useLeadsMock: vi.fn(),
-  usePipelineStagesMock: vi.fn(),
-}));
-
-vi.mock("@/hooks/use-leads", () => ({
-  useLeads: mocks.useLeadsMock,
-  getLeadStageMetadata: vi.fn((stageId: string, stages: Array<{ id: string; name: string; slug: string }>) => {
-    const stage = stages.find((entry) => entry.id === stageId) ?? null;
-    const slug = stage?.slug ?? null;
-    return {
-      stage,
-      slug,
-      label: stage?.name ?? "Lead",
-      isCrmOwnedLeadStage: ["new_lead", "qualified_lead", "sales_validation_stage", "opportunity"].includes(slug ?? ""),
-      isBoardStage: ["new_lead", "qualified_lead", "sales_validation_stage"].includes(slug ?? ""),
-      isOpportunityStage: slug === "opportunity",
-    };
-  }),
-  getLeadBoardStageLabel: vi.fn((slug: string) =>
-    ({
-      new_lead: "New Lead",
-      qualified_lead: "Qualified Lead",
-      sales_validation_stage: "Sales Validation Stage",
-    })[slug] ?? slug
-  ),
-  LEAD_BOARD_STAGE_SLUGS: ["new_lead", "qualified_lead", "sales_validation_stage"],
-  formatLeadPropertyLine: vi.fn(
-    (lead: {
-      property?: { address?: string | null; city?: string | null; state?: string | null; zip?: string | null } | null;
-    }) =>
-      [lead.property?.address, [lead.property?.city, lead.property?.state].filter(Boolean).join(", "), lead.property?.zip]
-        .filter(Boolean)
-        .join(" ")
-  ),
-}));
-
-vi.mock("@/hooks/use-pipeline-config", () => ({
-  usePipelineStages: mocks.usePipelineStagesMock,
-}));
-
-vi.mock("@/components/leads/lead-stage-badge", () => ({
-  LeadStageBadge: ({ stageId }: { stageId: string }) => <span>{stageId}</span>,
+vi.mock("sonner", () => ({
+  toast: {
+    error: vi.fn(),
+    success: vi.fn(),
+  },
 }));
 
 vi.mock("@/components/ui/button", () => ({
-  Button: ({ children }: { children: ReactNode }) => <button>{children}</button>,
+  Button: ({ children }: { children: React.ReactNode }) => <button>{children}</button>,
 }));
 
-vi.mock("@/components/ui/input", () => ({
-  Input: () => <input />,
+vi.mock("@/components/ui/dialog", () => ({
+  Dialog: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+  DialogContent: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+  DialogDescription: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+  DialogFooter: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+  DialogHeader: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+  DialogTitle: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
 }));
 
-vi.mock("@/components/ui/card", () => ({
-  Card: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+vi.mock("@/components/pipeline/pipeline-board", () => ({
+  PipelineBoard: ({ columns }: { columns: Array<{ stage: { name: string } }> }) => (
+    <div>{columns.map((column) => column.stage.name).join(", ")}</div>
+  ),
 }));
 
-function makeLead(stageId: string, name: string) {
-  return {
-    id: `${stageId}-${name}`,
-    companyId: "company-1",
-    propertyId: "property-1",
-    primaryContactId: null,
-    name,
-    stageId,
-    assignedRepId: "rep-1",
-    status: "open",
-    source: "referral",
-    description: null,
-    projectTypeId: null,
-    projectType: null,
-    qualificationPayload: {},
-    projectTypeQuestionPayload: { projectTypeId: null, answers: {} },
-    lastActivityAt: null,
-    stageEnteredAt: "2026-04-20T10:00:00.000Z",
-    convertedAt: null,
-    isActive: true,
-    createdAt: "2026-04-20T10:00:00.000Z",
-    updatedAt: "2026-04-20T10:00:00.000Z",
-    companyName: "Alpha Roofing",
-    property: {
-      id: "property-1",
-      name: "Dallas HQ",
-      address: "123 Main St",
-      city: "Dallas",
-      state: "TX",
-      zip: "75201",
+vi.mock("@/lib/pipeline-board-summary", () => ({
+  buildLeadBoardSummary: () => ({
+    totalCount: 2,
+    averageAgeDays: 4,
+    qualifiedPressureCount: 1,
+    opportunityCount: 0,
+    liveStageCount: 3,
+  }),
+}));
+
+const boardColumns = [
+  {
+    stage: { id: "stage-new", name: "New Lead", slug: "new_lead" },
+    count: 1,
+    cards: [
+      {
+        id: "lead-1",
+        name: "Fresh Prospect",
+        stageId: "stage-new",
+        stageEnteredAt: "2026-04-20T10:00:00.000Z",
+        updatedAt: "2026-04-20T10:00:00.000Z",
+      },
+    ],
+  },
+  {
+    stage: { id: "stage-qualified", name: "Qualified Lead", slug: "qualified_lead" },
+    count: 1,
+    cards: [
+      {
+        id: "lead-2",
+        name: "Qualified Lead",
+        stageId: "stage-qualified",
+        stageEnteredAt: "2026-04-20T10:00:00.000Z",
+        updatedAt: "2026-04-20T10:00:00.000Z",
+      },
+    ],
+  },
+  {
+    stage: { id: "stage-validation", name: "Sales Validation Stage", slug: "sales_validation_stage" },
+    count: 0,
+    cards: [],
+  },
+];
+
+vi.mock("@/hooks/use-leads", () => ({
+  useLeadBoard: () => ({
+    board: {
+      columns: boardColumns,
+      defaultConversionDealStageId: null,
     },
-    convertedDealId: null,
-    convertedDealNumber: null,
-  };
-}
+    loading: false,
+    refetch: vi.fn(),
+  }),
+  preflightLeadStageCheck: vi.fn(),
+  transitionLeadStage: vi.fn(),
+  updateLead: vi.fn(),
+}));
+
+vi.mock("@/lib/pipeline-scope", () => ({
+  useNormalizedPipelineRoute: () => ({
+    allowedScope: "mine",
+    needsRedirect: false,
+    redirectTo: "/leads?scope=mine",
+  }),
+}));
 
 function normalize(html: string) {
   return html.replace(/\s+/g, " ").trim();
 }
 
-function renderPage() {
-  return normalize(
-    renderToStaticMarkup(
-      <MemoryRouter>
-        <LeadListPage />
-      </MemoryRouter>
-    )
-  );
-}
-
 describe("LeadListPage", () => {
-  beforeEach(() => {
-    mocks.usePipelineStagesMock.mockReset();
-    mocks.useLeadsMock.mockReset();
-
-    mocks.usePipelineStagesMock.mockReturnValue({
-      stages: [
-        { id: "stage-new", name: "New Lead", slug: "new_lead" },
-        { id: "stage-qualified", name: "Qualified Lead", slug: "qualified_lead" },
-        { id: "stage-sales-validation", name: "Sales Validation Stage", slug: "sales_validation_stage" },
-        { id: "stage-opportunity", name: "Opportunity", slug: "opportunity" },
-      ],
-    });
-
-    mocks.useLeadsMock.mockReturnValue({
-      leads: [
-        makeLead("stage-new", "Inbound Church Lead"),
-        makeLead("stage-qualified", "Apartment Walkthrough"),
-        makeLead("stage-sales-validation", "Municipal Gym"),
-        makeLead("stage-opportunity", "Should Stay Off Board"),
-      ],
-      loading: false,
-      error: null,
-    });
+  it("builds the lead intake path for blocked moves", () => {
+    expect(buildLeadIntakePath("lead-1")).toBe("/leads/lead-1?focus=qualification");
+    expect(buildLeadIntakePath("lead-1", "scoping")).toBe("/leads/lead-1?focus=scoping");
   });
 
-  it("renders the CRM-owned lead board columns and excludes opportunity work", () => {
-    const html = renderPage();
+  it("treats sparse display-order stages as valid immediate moves when mapped as next stage", () => {
+    const nextStageById = new Map<string, string | null>([
+      ["stage-qualified", "stage-validation"],
+      ["stage-validation", null],
+    ]);
 
-    expect(html).toContain("New Lead");
+    expect(isImmediateNextStageMove("stage-qualified", "stage-validation", nextStageById)).toBe(true);
+    expect(isImmediateNextStageMove("stage-qualified", "stage-new", nextStageById)).toBe(false);
+  });
+
+  it("filters lead buckets from the bucket query param", () => {
+    const html = normalize(
+      renderToStaticMarkup(
+        <MemoryRouter initialEntries={["/leads?bucket=qualified_lead&scope=mine"]}>
+          <LeadListPage />
+        </MemoryRouter>
+      )
+    );
+
     expect(html).toContain("Qualified Lead");
+    expect(html).not.toContain("Fresh Prospect");
+    expect(html).not.toContain("Sales Validation Stage");
+  });
+
+  it("renders the restored board header and summary strip", () => {
+    const html = normalize(
+      renderToStaticMarkup(
+        <MemoryRouter initialEntries={["/leads?scope=mine"]}>
+          <LeadListPage />
+        </MemoryRouter>
+      )
+    );
+
+    expect(html).toContain("Lead Pipeline");
+    expect(html).toContain("Live engine");
+    expect(html).toContain("Qualified pressure");
+    expect(html).toContain("Active leads");
+    expect(html).toContain("Avg. stage age");
+    expect(html).toContain("New Lead");
     expect(html).toContain("Sales Validation Stage");
-    expect(html).toContain("Inbound Church Lead");
-    expect(html).toContain("Apartment Walkthrough");
-    expect(html).toContain("Municipal Gym");
-    expect(html).not.toContain("Should Stay Off Board");
   });
 });

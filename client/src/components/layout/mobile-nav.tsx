@@ -5,23 +5,34 @@ import {
   Camera,
   Users,
   CheckSquare,
+  DollarSign,
 } from "lucide-react";
+import { useAuth } from "@/lib/auth";
 
 const mobileNavItems = [
   { to: "/", icon: LayoutDashboard, label: "Home" },
-  { to: "/pipeline", icon: Kanban, label: "Pipeline" },
+  { to: "/deals", icon: Kanban, label: "Pipeline" },
   { to: "/photos/capture", icon: Camera, label: "Capture" },
   { to: "/contacts", icon: Users, label: "Contacts" },
   { to: "/tasks", icon: CheckSquare, label: "Tasks" },
 ];
 
+function getNavItemKey(item: { label: string; to: string }) {
+  return `${item.label}:${item.to}`;
+}
+
 export function MobileNav() {
+  const { user } = useAuth();
+  const navItems = user?.role === "rep"
+    ? [...mobileNavItems, { to: "/commissions", icon: DollarSign, label: "Commissions" }]
+    : mobileNavItems;
+
   return (
     <nav className="md:hidden fixed bottom-0 left-0 right-0 bg-white border-t z-50">
       <div className="flex items-center justify-around h-16">
-        {mobileNavItems.map((item) => (
+        {navItems.map((item) => (
           <NavLink
-            key={item.to}
+            key={getNavItemKey(item)}
             to={item.to}
             end={item.to === "/"}
             className={({ isActive }) =>

@@ -1,23 +1,27 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { toast } from "sonner";
-import type { InterventionMutationResult, InterventionResolutionReason } from "@/hooks/use-admin-interventions";
+import type { InterventionMutationResult } from "@/hooks/use-admin-interventions";
 import {
-  INTERVENTION_RESOLUTION_OPTIONS,
   assignIntervention,
   escalateIntervention,
-  localDateTimeInputToIso,
   resolveIntervention,
   snoozeIntervention,
   summarizeInterventionMutationResult,
   toLocalDateTimeInput,
   useAdminInterventionDetail,
 } from "@/hooks/use-admin-interventions";
+import type {
+  EscalateConclusionPayload,
+  ResolveConclusionPayload,
+  SnoozeConclusionPayload,
+} from "@/lib/intervention-outcome-taxonomy";
+import { InterventionConclusionForm } from "@/components/ai/intervention-conclusion-form";
+import { InterventionCaseCopilotPanel } from "@/components/ai/intervention-case-copilot-panel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
   Sheet,
   SheetContent,
@@ -25,7 +29,6 @@ import {
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet";
-import { Textarea } from "@/components/ui/textarea";
 
 function formatDate(value: string | null) {
   if (!value) return "N/A";
@@ -58,19 +61,11 @@ export function InterventionDetailPanel(props: {
 }) {
   const { detail, loading, error, refetch } = useAdminInterventionDetail(props.caseId);
   const [assignedTo, setAssignedTo] = useState("");
-  const [snoozedUntil, setSnoozedUntil] = useState("");
-  const [resolutionReason, setResolutionReason] = useState<InterventionResolutionReason>("task_completed");
-  const [notes, setNotes] = useState("");
   const [workingAction, setWorkingAction] = useState<string | null>(null);
+  const [formResetKey, setFormResetKey] = useState(0);
 
   useEffect(() => {
     setAssignedTo(detail?.case.assignedTo ?? "");
-    setSnoozedUntil(toLocalDateTimeInput(detail?.case.snoozedUntil ?? null));
-  }, [detail?.case.assignedTo, detail?.case.id, detail?.case.snoozedUntil]);
-
-  useEffect(() => {
-    setResolutionReason("task_completed");
-    setNotes("");
   }, [detail?.case.id]);
 
   async function runAction(action: string, work: () => Promise<InterventionMutationResult>) {
@@ -81,9 +76,7 @@ export function InterventionDetailPanel(props: {
       toast[outcome.summary.tone](outcome.summary.message);
       if (outcome.shouldRefreshDetail) {
         await refetch();
-        if (outcome.shouldClearNotes) {
-          setNotes("");
-        }
+        if (outcome.shouldClearNotes) setFormResetKey((current) => current + 1);
       }
     } catch (err: unknown) {
       toast.error(err instanceof Error ? err.message : "Failed to update intervention case");
@@ -139,7 +132,7 @@ export function InterventionDetailPanel(props: {
                 <div className="grid grid-cols-2 gap-3 text-sm">
                   <div>
                     <div className="text-xs uppercase tracking-widest text-muted-foreground">Assigned to</div>
-                    <div>{detail.case.assignedTo ?? "Unassigned"}</div>
+                    <div>{detail.case.assignedToName ?? detail.case.assignedTo ?? "Unassigned"}</div>
                   </div>
                   <div>
                     <div className="text-xs uppercase tracking-widest text-muted-foreground">Snoozed until</div>
@@ -162,12 +155,16 @@ export function InterventionDetailPanel(props: {
                   <div className="space-y-1 text-sm">
                     <div className="font-medium">{detail.generatedTask.title}</div>
                     <div className="text-muted-foreground">{detail.generatedTask.status}</div>
-                    <div className="text-muted-foreground">{detail.generatedTask.assignedTo ?? "No task assignee"}</div>
+                    <div className="text-muted-foreground">
+                      {detail.generatedTask.assignedToName ?? detail.generatedTask.assignedTo ?? "No task assignee"}
+                    </div>
                   </div>
                 ) : (
                   <div className="text-sm text-muted-foreground">No generated task is currently linked to this case.</div>
                 )}
               </div>
+
+              <InterventionCaseCopilotPanel caseId={detail.case.id} />
 
               <div className="rounded-lg border border-border/80 bg-white p-4 space-y-4">
                 <div className="text-sm font-semibold">Direct actions</div>
@@ -184,7 +181,7 @@ export function InterventionDetailPanel(props: {
                     disabled={workingAction !== null || assignedTo.trim().length === 0}
                     onClick={() =>
                       void runAction("assign", () =>
-                        assignIntervention(detail.case.id, { assignedTo: assignedTo.trim(), notes: notes.trim() || null })
+                        assignIntervention(detail.case.id, { assignedTo: assignedTo.trim(), notes: null })
                       )
                     }
                   >
@@ -192,77 +189,46 @@ export function InterventionDetailPanel(props: {
                   </Button>
                 </div>
 
-                <div className="space-y-2">
-                  <Label htmlFor="detail-snoozed-until">Snooze until</Label>
-                  <Input
-                    id="detail-snoozed-until"
-                    type="datetime-local"
-                    value={snoozedUntil}
-                    onChange={(event) => setSnoozedUntil(event.target.value)}
-                  />
-                  <Button
-                    variant="outline"
-                    disabled={workingAction !== null || snoozedUntil.trim().length === 0}
-                    onClick={() =>
-                      void runAction("snooze", () =>
-                        snoozeIntervention(detail.case.id, { snoozedUntil, notes: notes.trim() || null })
+                <div className="rounded-lg border border-border/70 p-4">
+                  <InterventionConclusionForm
+                    mode="snooze"
+                    submitLabel={workingAction === "snooze" ? "Saving..." : "Snooze case"}
+                    disabled={workingAction !== null}
+                    resetKey={`detail-snooze-${detail.case.id}-${formResetKey}`}
+                    initialSnoozedUntil={toLocalDateTimeInput(detail.case.snoozedUntil)}
+                    onSubmit={(payload) =>
+                      runAction("snooze", () =>
+                        snoozeIntervention(detail.case.id, { conclusion: payload as SnoozeConclusionPayload })
                       )
                     }
-                  >
-                    {workingAction === "snooze" ? "Saving..." : "Snooze case"}
-                  </Button>
+                  />
                 </div>
 
-                <div className="space-y-2">
-                  <Label htmlFor="detail-resolution-reason">Resolve reason</Label>
-                  <Select value={resolutionReason} onValueChange={(value) => setResolutionReason(value as InterventionResolutionReason)}>
-                    <SelectTrigger id="detail-resolution-reason">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {INTERVENTION_RESOLUTION_OPTIONS.map((option) => (
-                        <SelectItem key={option.value} value={option.value}>
-                          {option.label}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  <div className="flex flex-wrap gap-2">
-                    <Button
-                      disabled={workingAction !== null}
-                      onClick={() =>
-                        void runAction("resolve", () =>
-                          resolveIntervention(detail.case.id, {
-                            resolutionReason,
-                            notes: notes.trim() || null,
-                          })
-                        )
-                      }
-                    >
-                      {workingAction === "resolve" ? "Saving..." : "Resolve case"}
-                    </Button>
-                    <Button
-                      variant="outline"
-                      disabled={workingAction !== null}
-                      onClick={() =>
-                        void runAction("escalate", () =>
-                          escalateIntervention(detail.case.id, { notes: notes.trim() || null })
-                        )
-                      }
-                    >
-                      {workingAction === "escalate" ? "Saving..." : "Escalate case"}
-                    </Button>
-                  </div>
+                <div className="rounded-lg border border-border/70 p-4">
+                  <InterventionConclusionForm
+                    mode="resolve"
+                    submitLabel={workingAction === "resolve" ? "Saving..." : "Resolve case"}
+                    disabled={workingAction !== null}
+                    resetKey={`detail-resolve-${detail.case.id}-${formResetKey}`}
+                    onSubmit={(payload) =>
+                      runAction("resolve", () =>
+                        resolveIntervention(detail.case.id, { conclusion: payload as ResolveConclusionPayload })
+                      )
+                    }
+                  />
                 </div>
 
-                <div className="space-y-2">
-                  <Label htmlFor="detail-notes">Notes</Label>
-                  <Textarea
-                    id="detail-notes"
-                    value={notes}
-                    onChange={(event) => setNotes(event.target.value)}
-                    placeholder="Capture what changed or why this action is appropriate."
-                    rows={3}
+                <div className="rounded-lg border border-border/70 p-4">
+                  <InterventionConclusionForm
+                    mode="escalate"
+                    submitLabel={workingAction === "escalate" ? "Saving..." : "Escalate case"}
+                    disabled={workingAction !== null}
+                    resetKey={`detail-escalate-${detail.case.id}-${formResetKey}`}
+                    onSubmit={(payload) =>
+                      runAction("escalate", () =>
+                        escalateIntervention(detail.case.id, { conclusion: payload as EscalateConclusionPayload })
+                      )
+                    }
                   />
                 </div>
               </div>

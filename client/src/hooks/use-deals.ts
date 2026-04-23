@@ -2,9 +2,12 @@ import { useState, useEffect, useCallback } from "react";
 import { api } from "@/lib/api";
 import type { FileRecord } from "./use-files";
 export { getDealStageMetadata, getWorkflowRouteLabel } from "@/lib/pipeline-ownership";
+import type { StagePageQuery } from "@/lib/pipeline-stage-page";
 
 export type WorkflowRoute = "normal" | "service";
 export type DealScopingIntakeStatus = "draft" | "ready" | "activated";
+export type DealPipelineDisposition = "opportunity" | "deals" | "service";
+export type DealDepartment = "sales" | "estimating" | "client_services" | "operations";
 
 export interface DealScopingSectionData {
   [sectionKey: string]: unknown;
@@ -57,12 +60,26 @@ export interface DealScopingIntake {
   updatedAt: string;
 }
 
+export interface DealPaymentEvent {
+  id: string;
+  dealId: string;
+  recordedByUserId: string | null;
+  paidAt: string;
+  grossRevenueAmount: string;
+  grossMarginAmount: string | null;
+  isCreditMemo: boolean;
+  notes: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface Deal {
   id: string;
   dealNumber: string;
   name: string;
   stageId: string;
-  workflowRoute: WorkflowRoute;
+  pipelineDisposition: DealPipelineDisposition;
+  workflowRoute: WorkflowRoute | null;
   assignedRepId: string;
   companyId: string | null;
   propertyId: string | null;
@@ -81,6 +98,25 @@ export interface Deal {
   regionId: string | null;
   source: string | null;
   winProbability: number | null;
+  decisionMakerName: string | null;
+  decisionProcess: string | null;
+  budgetStatus: string | null;
+  incumbentVendor: string | null;
+  unitCount: number | null;
+  buildYear: number | null;
+  forecastWindow: "30_days" | "60_days" | "90_days" | "beyond_90" | "uncommitted" | null;
+  forecastCategory: "commit" | "best_case" | "pipeline" | null;
+  forecastConfidencePercent: number | null;
+  forecastRevenue: string | null;
+  forecastGrossProfit: string | null;
+  forecastBlockers: string | null;
+  nextStep: string | null;
+  nextStepDueAt: string | null;
+  nextMilestoneAt: string | null;
+  supportNeededType: "leadership" | "estimating" | "operations" | "executive_team" | null;
+  supportNeededNotes: string | null;
+  forecastUpdatedAt: string | null;
+  forecastUpdatedBy: string | null;
   procoreProjectId: number | null;
   procoreBidId: number | null;
   procoreLastSyncedAt: string | null;
@@ -154,6 +190,23 @@ export interface DealDetail extends Deal {
     createdAt: string;
     updatedAt: string;
   }>;
+  routingHistory: Array<{
+    id: string;
+    dealId: string;
+    fromWorkflowRoute: WorkflowRoute | null;
+    toWorkflowRoute: WorkflowRoute;
+    valueSource: string;
+    triggeringValue: string;
+    reason: string | null;
+    changedBy: string;
+    createdAt: string;
+  }>;
+  departmentOwnership: {
+    currentDepartment: DealDepartment;
+    acceptanceStatus: "pending" | "accepted";
+    effectiveOwnerUserId: string | null;
+    pendingDepartment: DealDepartment | null;
+  };
 }
 
 export interface DealFilters {
@@ -177,7 +230,73 @@ export interface Pagination {
   totalPages: number;
 }
 
-const DEAL_BOARD_PAGE_LIMIT = 100;
+export interface DealBoardColumn {
+  stage: {
+    id: string;
+    name: string;
+    slug: string;
+    color?: string | null;
+    displayOrder?: number;
+    isActivePipeline?: boolean;
+    isTerminal?: boolean;
+  };
+  count: number;
+  totalValue: number;
+  cards: Deal[];
+}
+
+export interface DealBoardResponse {
+  columns: DealBoardColumn[];
+  terminalStages: Array<{
+    stage: DealBoardColumn["stage"];
+    count: number;
+    deals: Deal[];
+  }>;
+}
+
+export interface DealStagePageResponse {
+  stage: DealBoardColumn["stage"];
+  scope: "mine" | "team" | "all";
+  summary: { count: number; totalValue: number };
+  pagination: {
+    page: number;
+    pageSize: number;
+    total: number;
+    totalPages: number;
+  };
+  rows: Deal[];
+}
+
+interface DealBoardApiColumn extends Omit<DealBoardColumn, "cards"> {
+  deals?: Deal[];
+  cards?: Deal[];
+}
+
+interface DealBoardApiResponse {
+  pipelineColumns: Array<{
+    stage: DealBoardColumn["stage"];
+    count: number;
+    totalValue: number;
+    deals: Deal[];
+  }>;
+  terminalStages: DealBoardResponse["terminalStages"];
+  columns?: DealBoardApiColumn[];
+}
+
+export function normalizeDealBoardResponse(result: DealBoardApiResponse): DealBoardResponse {
+  const normalizedColumns = (result.columns ?? result.pipelineColumns).map((column) => {
+    const sourceColumn = column as DealBoardApiColumn;
+    return {
+      ...column,
+      cards: sourceColumn.cards ?? sourceColumn.deals ?? [],
+    };
+  });
+
+  return {
+    columns: normalizedColumns,
+    terminalStages: result.terminalStages ?? [],
+  };
+}
 
 export function useDeals(filters: DealFilters = {}) {
   const [deals, setDeals] = useState<Deal[]>([]);
@@ -234,81 +353,6 @@ export function useDeals(filters: DealFilters = {}) {
   return { deals, pagination, loading, error, refetch: fetchDeals };
 }
 
-export function useDealBoard(filters: DealFilters = {}) {
-  const [deals, setDeals] = useState<Deal[]>([]);
-  const [pagination, setPagination] = useState<Pagination>({
-    page: 1,
-    limit: DEAL_BOARD_PAGE_LIMIT,
-    total: 0,
-    totalPages: 0,
-  });
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  const fetchBoardDeals = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-
-    try {
-      const collected: Deal[] = [];
-      let page = 1;
-      let totalPages = 1;
-      let total = 0;
-
-      while (page <= totalPages) {
-        const params = new URLSearchParams();
-        if (filters.search) params.set("search", filters.search);
-        if (filters.stageIds?.length) params.set("stageIds", filters.stageIds.join(","));
-        if (filters.assignedRepId) params.set("assignedRepId", filters.assignedRepId);
-        if (filters.projectTypeId) params.set("projectTypeId", filters.projectTypeId);
-        if (filters.regionId) params.set("regionId", filters.regionId);
-        if (filters.source) params.set("source", filters.source);
-        if (filters.isActive === false) params.set("isActive", "false");
-        if (filters.sortBy) params.set("sortBy", filters.sortBy);
-        if (filters.sortDir) params.set("sortDir", filters.sortDir);
-        params.set("page", String(page));
-        params.set("limit", String(DEAL_BOARD_PAGE_LIMIT));
-
-        const qs = params.toString();
-        const data = await api<{ deals: Deal[]; pagination: Pagination }>(`/deals?${qs}`);
-
-        collected.push(...data.deals);
-        totalPages = data.pagination.totalPages || 1;
-        total = data.pagination.total;
-        page += 1;
-      }
-
-      setDeals(collected);
-      setPagination({
-        page: 1,
-        limit: DEAL_BOARD_PAGE_LIMIT,
-        total,
-        totalPages,
-      });
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to load deals");
-    } finally {
-      setLoading(false);
-    }
-  }, [
-    filters.search,
-    filters.stageIds?.join(","),
-    filters.assignedRepId,
-    filters.projectTypeId,
-    filters.regionId,
-    filters.source,
-    filters.isActive,
-    filters.sortBy,
-    filters.sortDir,
-  ]);
-
-  useEffect(() => {
-    fetchBoardDeals();
-  }, [fetchBoardDeals]);
-
-  return { deals, pagination, loading, error, refetch: fetchBoardDeals };
-}
-
 export function useDealDetail(dealId: string | undefined) {
   const [deal, setDeal] = useState<DealDetail | null>(null);
   const [loading, setLoading] = useState(true);
@@ -342,8 +386,32 @@ export async function createDeal(input: Partial<Deal> & { name: string; stageId:
   return api<{ deal: Deal }>("/deals", { method: "POST", json: input });
 }
 
-export async function updateDeal(dealId: string, input: Partial<Deal>) {
+export type UpdateDealPayload = Partial<Deal> & {
+  migrationMode?: boolean;
+};
+
+export async function updateDeal(dealId: string, input: UpdateDealPayload) {
   return api<{ deal: Deal }>(`/deals/${dealId}`, { method: "PATCH", json: input });
+}
+
+export async function getDealPayments(dealId: string) {
+  return api<{ payments: DealPaymentEvent[] }>(`/deals/${dealId}/payments`);
+}
+
+export async function createDealPayment(
+  dealId: string,
+  input: {
+    paidAt: string;
+    grossRevenueAmount: number;
+    grossMarginAmount?: number | null;
+    isCreditMemo?: boolean;
+    notes?: string | null;
+  }
+) {
+  return api<{ payment: DealPaymentEvent }>(`/deals/${dealId}/payments`, {
+    method: "POST",
+    json: input,
+  });
 }
 
 export async function changeDealStage(
@@ -419,8 +487,105 @@ export async function patchDealScopingIntake(
   );
 }
 
+export async function applyOpportunityRoutingReview(
+  dealId: string,
+  input: {
+    valueSource: "sales_estimated_opportunity_value" | "procore_bidboard_estimate";
+    amount: string;
+    reason?: string;
+  }
+) {
+  return api<{ deal: Deal }>(`/deals/${dealId}/routing-review`, {
+    method: "POST",
+    json: input,
+  });
+}
+
 export async function getDealScopingReadiness(dealId: string) {
   return api<{ readiness: DealScopingReadiness }>(`/deals/${dealId}/scoping-intake/readiness`);
+}
+
+export function useDealBoard(scope: "mine" | "team" | "all", includeDd: boolean) {
+  const [board, setBoard] = useState<DealBoardResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const refetch = useCallback(() => {
+    setLoading(true);
+    setError(null);
+    return api<DealBoardApiResponse>(`/deals/pipeline?scope=${scope}&includeDd=${includeDd}&previewLimit=8`)
+      .then((result) => {
+        const normalized = normalizeDealBoardResponse(result);
+        setBoard(normalized);
+        return normalized;
+      })
+      .catch((err: unknown) => {
+        setError(err instanceof Error ? err.message : "Failed to load deal board");
+        throw err;
+      })
+      .finally(() => setLoading(false));
+  }, [includeDd, scope]);
+
+  useEffect(() => {
+    void refetch().catch(() => undefined);
+  }, [refetch]);
+
+  return { board, loading, error, refetch };
+}
+
+export function useDealStagePage(input: StagePageQuery & { stageId: string; scope: "mine" | "team" | "all" }) {
+  const [data, setData] = useState<DealStagePageResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const params = new URLSearchParams({
+      scope: input.scope,
+      page: String(input.page),
+      pageSize: String(input.pageSize),
+      sort: input.sort,
+      search: input.search,
+      ...(input.filters.assignedRepId ? { assignedRepId: input.filters.assignedRepId } : {}),
+      ...(input.filters.staleOnly ? { staleOnly: "true" } : {}),
+      ...(input.filters.status ? { status: input.filters.status } : {}),
+      ...(input.filters.workflowRoute ? { workflowRoute: input.filters.workflowRoute } : {}),
+      ...(input.filters.source ? { source: input.filters.source } : {}),
+    });
+
+    setLoading(true);
+    setError(null);
+    setData(null);
+
+    void api<DealStagePageResponse>(`/deals/stages/${input.stageId}?${params.toString()}`)
+      .then((result) => {
+        if (!cancelled) setData(result);
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) setError(err instanceof Error ? err.message : "Failed to load stage");
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    input.filters.assignedRepId,
+    input.filters.source,
+    input.filters.staleOnly,
+    input.filters.status,
+    input.filters.workflowRoute,
+    input.page,
+    input.pageSize,
+    input.scope,
+    input.search,
+    input.sort,
+    input.stageId,
+  ]);
+
+  return { data, loading, error };
 }
 
 export async function linkExistingScopingAttachment(

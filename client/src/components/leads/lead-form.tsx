@@ -62,6 +62,7 @@ type LeadSummaryFormProps = {
   mode?: "summary";
   lead: LeadFormLead;
   converted?: boolean;
+  showPrimaryAction?: boolean;
 };
 
 type LeadCreateFormProps = {
@@ -140,20 +141,28 @@ function renderAnswerValue(value: LeadAnswerValue | undefined) {
   return String(value);
 }
 
-function SummaryLeadForm({ lead, converted = false }: LeadSummaryFormProps) {
+function SummaryLeadForm({
+  lead,
+  converted = false,
+  showPrimaryAction = true,
+}: LeadSummaryFormProps) {
   const navigate = useNavigate();
   const { projectTypes } = useProjectTypes();
-  const propertyLabel = [lead.propertyAddress, [lead.propertyCity, lead.propertyState].filter(Boolean).join(", "), lead.propertyZip]
-    .filter(Boolean)
-    .join(" ") || lead.propertyName || "--";
-  const projectType = lead.projectType ?? projectTypes.find((entry) => entry.id === lead.projectTypeId) ?? null;
+  const propertyLabel =
+    [lead.propertyAddress, [lead.propertyCity, lead.propertyState].filter(Boolean).join(", "), lead.propertyZip]
+      .filter(Boolean)
+      .join(" ") || lead.propertyName || "--";
+  const projectType =
+    lead.projectType ?? projectTypes.find((entry) => entry.id === lead.projectTypeId) ?? null;
   const questionSet = getValidationQuestionSetForProjectType(projectType?.slug ?? null);
 
   return (
-    <Card>
+    <Card className="overflow-hidden border-slate-200 shadow-sm">
       <CardHeader className="pb-3">
         <div className="flex flex-wrap items-center gap-2">
-          <CardTitle className="text-sm font-medium text-muted-foreground">Lead Summary</CardTitle>
+          <CardTitle className="text-[11px] font-black tracking-[0.16em] text-slate-500 uppercase">
+            Lead Summary
+          </CardTitle>
           <LeadStageBadge stageId={lead.stageId} converted={converted} />
         </div>
       </CardHeader>
@@ -181,8 +190,8 @@ function SummaryLeadForm({ lead, converted = false }: LeadSummaryFormProps) {
           </div>
         </div>
 
-        <div className="rounded-lg border bg-muted/30 p-3 text-sm">
-          <p className="text-muted-foreground">Property</p>
+        <div className="rounded-lg border border-slate-200 bg-[#f7f8fb] p-3 text-sm">
+          <p className="text-[11px] font-black tracking-[0.16em] text-slate-500 uppercase">Property</p>
           {lead.propertyId ? (
             <Link to={`/properties/${lead.propertyId}`} className="font-medium text-primary hover:underline">
               {propertyLabel || "--"}
@@ -192,9 +201,9 @@ function SummaryLeadForm({ lead, converted = false }: LeadSummaryFormProps) {
           )}
         </div>
 
-        {lead.description && (
+        {lead.description ? (
           <p className="whitespace-pre-wrap text-sm text-muted-foreground">{lead.description}</p>
-        )}
+        ) : null}
 
         <div className="space-y-3 rounded-lg border p-3">
           <p className="text-sm font-medium">Sales Validation</p>
@@ -224,17 +233,19 @@ function SummaryLeadForm({ lead, converted = false }: LeadSummaryFormProps) {
         </div>
 
         <div className="flex flex-wrap gap-2">
-          <Button
-            disabled={converted && !lead.convertedDealId}
-            onClick={() => navigate(converted ? `/deals/${lead.convertedDealId}` : "/deals/new")}
-          >
-            {converted ? "Open Deal" : "Convert to Deal"}
-          </Button>
-          {lead.companyId && (
+          {showPrimaryAction ? (
+            <Button
+              disabled={converted && !lead.convertedDealId}
+              onClick={() => navigate(converted ? `/deals/${lead.convertedDealId}` : "/deals/new")}
+            >
+              {converted ? "Open Deal" : "Convert to Deal"}
+            </Button>
+          ) : null}
+          {lead.companyId ? (
             <Button variant="outline" onClick={() => navigate(`/companies/${lead.companyId}`)}>
               View Company
             </Button>
-          )}
+          ) : null}
         </div>
 
         <p className="text-xs text-muted-foreground">
@@ -254,7 +265,10 @@ function EditableLeadForm({ mode, lead }: { mode: LeadEditableMode; lead?: LeadF
   const { properties } = useProperties(companyId ? { companyId, limit: 500 } : { limit: 0 });
   const { contacts } = useCompanyContacts(companyId ?? undefined);
   const leadStages = stages.filter(
-    (stage) => CRM_OWNED_LEAD_STAGE_SLUGS.includes(stage.slug as (typeof CRM_OWNED_LEAD_STAGE_SLUGS)[number]) && !stage.isTerminal
+    (stage) =>
+      CRM_OWNED_LEAD_STAGE_SLUGS.includes(
+        stage.slug as (typeof CRM_OWNED_LEAD_STAGE_SLUGS)[number]
+      ) && !stage.isTerminal
   );
 
   const [formData, setFormData] = useState(() => getEditableFormState(lead));
@@ -420,20 +434,27 @@ function EditableLeadForm({ mode, lead }: { mode: LeadEditableMode; lead?: LeadF
           <CardTitle>{isCreate ? "Lead Information" : "Lead Qualification"}</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
-          {error && <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div>}
-          {stageGateError && (
+          {error ? (
+            <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+              {error}
+            </div>
+          ) : null}
+          {stageGateError ? (
             <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-3 text-sm text-amber-900">
               <p className="font-medium">{stageGateError.message}</p>
-              {stageGateError.currentStage?.name && stageGateError.targetStage?.name && (
+              {stageGateError.currentStage?.name && stageGateError.targetStage?.name ? (
                 <p className="mt-1 text-xs text-amber-800">
-                  {stageGateError.currentStage.name} → {stageGateError.targetStage.name}
+                  {stageGateError.currentStage.name} {"->"} {stageGateError.targetStage.name}
                 </p>
-              )}
+              ) : null}
               {stageGateError.missingRequirements?.qualificationFields?.length ? (
                 <p className="mt-2 text-xs text-amber-800">
                   Missing qualification fields:{" "}
                   {stageGateError.missingRequirements.qualificationFields
-                    .map((fieldId) => LEAD_QUALIFICATION_FIELD_LABELS.get(fieldId as LeadQualificationFieldId) ?? fieldId)
+                    .map(
+                      (fieldId) =>
+                        LEAD_QUALIFICATION_FIELD_LABELS.get(fieldId as LeadQualificationFieldId) ?? fieldId
+                    )
                     .join(", ")}
                 </p>
               ) : null}
@@ -446,7 +467,7 @@ function EditableLeadForm({ mode, lead }: { mode: LeadEditableMode; lead?: LeadF
                 </p>
               ) : null}
             </div>
-          )}
+          ) : null}
 
           {isCreate ? (
             <>
@@ -514,10 +535,7 @@ function EditableLeadForm({ mode, lead }: { mode: LeadEditableMode; lead?: LeadF
 
                 <div className="space-y-2">
                   <Label htmlFor="stageId">Initial Stage</Label>
-                  <Select
-                    value={formData.stageId}
-                    onValueChange={(value) => handleFieldChange("stageId", value ?? "")}
-                  >
+                  <Select value={formData.stageId} onValueChange={(value) => handleFieldChange("stageId", value ?? "")}>
                     <SelectTrigger id="stageId">
                       <SelectValue placeholder="Select stage" />
                     </SelectTrigger>
@@ -583,58 +601,56 @@ function EditableLeadForm({ mode, lead }: { mode: LeadEditableMode; lead?: LeadF
               </div>
             </>
           ) : (
-            <>
-              <div className="grid gap-4 text-sm sm:grid-cols-2">
-                <div>
-                  <p className="text-muted-foreground">Lead</p>
-                  <p className="font-medium">{lead?.name ?? "--"}</p>
-                </div>
-                <div>
-                  <p className="text-muted-foreground">Company</p>
-                  <p className="font-medium">{lead?.companyName ?? "--"}</p>
-                </div>
-                <div>
-                  <p className="text-muted-foreground">Property</p>
-                  <p className="font-medium">
-                    {lead
-                      ? formatPropertyLabel({
-                          name: lead.propertyName ?? "",
-                          address: lead.propertyAddress,
-                          city: lead.propertyCity,
-                          state: lead.propertyState,
-                          zip: lead.propertyZip,
-                        })
-                      : "--"}
-                  </p>
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="projectTypeId">Project Type</Label>
-                  <Select
-                    value={formData.projectTypeId || "__none__"}
-                    onValueChange={(value) =>
-                      handleFieldChange("projectTypeId", !value || value === "__none__" ? "" : value)
-                    }
-                  >
-                    <SelectTrigger id="projectTypeId">
-                      <SelectValue placeholder="Select project type" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="__none__">Select project type</SelectItem>
-                      {projectTypeHierarchy.flatMap((parent) => [
-                        <SelectItem key={parent.id} value={parent.id} className="font-medium">
-                          {parent.name}
-                        </SelectItem>,
-                        ...parent.children.map((child) => (
-                          <SelectItem key={child.id} value={child.id} className="pl-6">
-                            {child.name}
-                          </SelectItem>
-                        )),
-                      ])}
-                    </SelectContent>
-                  </Select>
-                </div>
+            <div className="grid gap-4 text-sm sm:grid-cols-2">
+              <div>
+                <p className="text-muted-foreground">Lead</p>
+                <p className="font-medium">{lead?.name ?? "--"}</p>
               </div>
-            </>
+              <div>
+                <p className="text-muted-foreground">Company</p>
+                <p className="font-medium">{lead?.companyName ?? "--"}</p>
+              </div>
+              <div>
+                <p className="text-muted-foreground">Property</p>
+                <p className="font-medium">
+                  {lead
+                    ? formatPropertyLabel({
+                        name: lead.propertyName ?? "",
+                        address: lead.propertyAddress,
+                        city: lead.propertyCity,
+                        state: lead.propertyState,
+                        zip: lead.propertyZip,
+                      })
+                    : "--"}
+                </p>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="projectTypeId">Project Type</Label>
+                <Select
+                  value={formData.projectTypeId || "__none__"}
+                  onValueChange={(value) =>
+                    handleFieldChange("projectTypeId", !value || value === "__none__" ? "" : value)
+                  }
+                >
+                  <SelectTrigger id="projectTypeId">
+                    <SelectValue placeholder="Select project type" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="__none__">Select project type</SelectItem>
+                    {projectTypeHierarchy.flatMap((parent) => [
+                      <SelectItem key={parent.id} value={parent.id} className="font-medium">
+                        {parent.name}
+                      </SelectItem>,
+                      ...parent.children.map((child) => (
+                        <SelectItem key={child.id} value={child.id} className="pl-6">
+                          {child.name}
+                        </SelectItem>
+                      )),
+                    ])}
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
           )}
         </CardContent>
       </Card>
@@ -644,17 +660,19 @@ function EditableLeadForm({ mode, lead }: { mode: LeadEditableMode; lead?: LeadF
           <CardTitle>Sales Validation Fields</CardTitle>
         </CardHeader>
         <CardContent className="grid gap-4 sm:grid-cols-3">
-          {LEAD_QUALIFICATION_FIELDS.map((field: { id: LeadQualificationFieldId; label: string; input: string }) => (
-            <div key={field.id} className="space-y-2">
-              <Label htmlFor={field.id}>{field.label}</Label>
-              <Input
-                id={field.id}
-                type={field.input === "number" ? "number" : "text"}
-                value={formData.qualificationPayload[field.id] ?? ""}
-                onChange={(event) => handleQualificationChange(field.id, event.target.value)}
-              />
-            </div>
-          ))}
+          {LEAD_QUALIFICATION_FIELDS.map(
+            (field: { id: LeadQualificationFieldId; label: string; input: string }) => (
+              <div key={field.id} className="space-y-2">
+                <Label htmlFor={field.id}>{field.label}</Label>
+                <Input
+                  id={field.id}
+                  type={field.input === "number" ? "number" : "text"}
+                  value={formData.qualificationPayload[field.id] ?? ""}
+                  onChange={(event) => handleQualificationChange(field.id, event.target.value)}
+                />
+              </div>
+            )
+          )}
         </CardContent>
       </Card>
 
@@ -680,11 +698,7 @@ function EditableLeadForm({ mode, lead }: { mode: LeadEditableMode; lead?: LeadF
                   />
                 ) : question.input === "boolean" ? (
                   <Select
-                    value={
-                      typeof currentValue === "boolean"
-                        ? String(currentValue)
-                        : "__unanswered__"
-                    }
+                    value={typeof currentValue === "boolean" ? String(currentValue) : "__unanswered__"}
                     onValueChange={(value) =>
                       handleQuestionAnswerChange(
                         question.id,
@@ -728,11 +742,7 @@ function EditableLeadForm({ mode, lead }: { mode: LeadEditableMode; lead?: LeadF
         <Button type="submit" disabled={submitting}>
           {submitting ? "Saving..." : isCreate ? "Create Lead" : "Save Qualification"}
         </Button>
-        <Button
-          type="button"
-          variant="outline"
-          onClick={() => navigate(isCreate ? "/leads" : `/leads/${lead?.id}`)}
-        >
+        <Button type="button" variant="outline" onClick={() => navigate(isCreate ? "/leads" : `/leads/${lead?.id}`)}>
           Cancel
         </Button>
       </div>

@@ -1,5 +1,6 @@
 import { useNavigate } from "react-router-dom";
 import { Plus, ChevronLeft, ChevronRight, Users } from "lucide-react";
+import { PageHeader } from "@/components/layout/page-header";
 import { Button } from "@/components/ui/button";
 import { ContactCard } from "@/components/contacts/contact-card";
 import { ContactFilters } from "@/components/contacts/contact-filters";
@@ -12,20 +13,19 @@ export function ContactListPage() {
   const { contacts, pagination, loading, error } = useContacts(filters);
 
   return (
-    <div className="space-y-4">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h2 className="text-2xl font-bold">Contacts</h2>
-          <p className="text-sm text-muted-foreground">
-            {pagination.total} contact{pagination.total !== 1 ? "s" : ""}
-          </p>
-        </div>
-        <Button onClick={() => navigate("/contacts/new")}>
-          <Plus className="h-4 w-4 mr-2" />
-          New Contact
-        </Button>
-      </div>
+    <div className="space-y-6">
+      <PageHeader
+        title="Contacts"
+        meta={`${pagination.total} contact${pagination.total !== 1 ? "s" : ""}`}
+        actions={{
+          primary: (
+            <Button onClick={() => navigate("/contacts/new")}>
+              <Plus className="mr-2 h-4 w-4" />
+              New Contact
+            </Button>
+          ),
+        }}
+      />
 
       {/* Filters */}
       <ContactFilters

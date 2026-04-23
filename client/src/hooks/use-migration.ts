@@ -143,12 +143,77 @@ export interface StagedLead {
   promotedAt: string | null;
 }
 
-export function useMigrationSummary() {
+export interface OwnershipQueueRow {
+  recordType: "lead" | "deal";
+  recordId: string;
+  recordName: string;
+  stageId: string;
+  stageName: string | null;
+  officeId: string;
+  officeName: string;
+  assignedRepId: string | null;
+  assignedUserName: string | null;
+  reasonCode: string;
+  reasonCodes: string[];
+  severity: "high" | "medium" | "low";
+  generatedAt: string | null;
+  evaluatedAt: string | null;
+}
+
+export interface OwnershipQueueResponse {
+  rows: OwnershipQueueRow[];
+  byReason: Array<{ reasonCode: string; count: number }>;
+}
+
+export interface OfficeAssignee {
+  id: string;
+  displayName: string;
+}
+
+export interface OwnershipQueueFilters {
+  officeId?: string;
+  recordType?: "all" | "lead" | "deal";
+  reasonCode?: string;
+  staleAgeDays?: number | "all";
+}
+
+const EMPTY_OWNERSHIP_QUEUE: OwnershipQueueResponse = {
+  rows: [],
+  byReason: [],
+};
+
+function normalizeOwnershipQueueResponse(
+  data: Partial<OwnershipQueueResponse> | null | undefined
+): OwnershipQueueResponse {
+  return {
+    rows: data?.rows ?? [],
+    byReason: data?.byReason ?? [],
+  };
+}
+
+function buildOwnershipQueueQueryParams(filters: OwnershipQueueFilters): URLSearchParams {
+  const params = new URLSearchParams();
+  if (filters.officeId) params.set("officeId", filters.officeId);
+  if (filters.recordType && filters.recordType !== "all") params.set("recordType", filters.recordType);
+  if (filters.reasonCode) params.set("reasonCode", filters.reasonCode);
+  if (filters.staleAgeDays && filters.staleAgeDays !== "all") {
+    params.set("staleAgeDays", String(filters.staleAgeDays));
+  }
+  return params;
+}
+
+export function useMigrationSummary(enabled = true) {
   const [summary, setSummary] = useState<MigrationSummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
+    if (!enabled) {
+      setSummary(null);
+      setError(null);
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     setError(null);
     try {
@@ -159,9 +224,10 @@ export function useMigrationSummary() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [enabled]);
 
   const runValidation = async () => {
+    if (!enabled) return;
     await api("/migration/validate", { method: "POST" });
     await load();
   };
@@ -171,12 +237,18 @@ export function useMigrationSummary() {
   return { summary, loading, error, refetch: load, runValidation };
 }
 
-export function useMigrationExceptions() {
+export function useMigrationExceptions(enabled = true) {
   const [exceptions, setExceptions] = useState<MigrationExceptionGroup[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
+    if (!enabled) {
+      setExceptions([]);
+      setError(null);
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     setError(null);
     try {
@@ -187,11 +259,70 @@ export function useMigrationExceptions() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [enabled]);
 
   useEffect(() => { load(); }, [load]);
 
   return { exceptions, loading, error, refetch: load };
+}
+
+export function useOfficeOwnershipQueue(filters: OwnershipQueueFilters = {}) {
+  const [data, setData] = useState<OwnershipQueueResponse>(EMPTY_OWNERSHIP_QUEUE);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    if (!filters.officeId) {
+      setData(EMPTY_OWNERSHIP_QUEUE);
+      setError(null);
+      setLoading(false);
+      return;
+    }
+
+    setLoading(true);
+    setError(null);
+    try {
+      const params = buildOwnershipQueueQueryParams(filters);
+      const data = await api<OwnershipQueueResponse>(
+        `/admin/cleanup/office?${params.toString()}`,
+        {
+          headers: filters.officeId ? { "x-office-id": filters.officeId } : undefined,
+        }
+      );
+      setData(normalizeOwnershipQueueResponse(data));
+    } catch (err) {
+      setData(EMPTY_OWNERSHIP_QUEUE);
+      setError("Failed to load ownership queue");
+    } finally {
+      setLoading(false);
+    }
+  }, [filters]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  return {
+    rows: data.rows,
+    byReason: data.byReason,
+    loading,
+    error,
+    refetch: load,
+  };
+}
+
+export async function bulkReassignOwnershipQueueRows(input: {
+  officeId: string;
+  rows: Array<{ recordType: "lead" | "deal"; recordId: string }>;
+  assigneeId: string;
+}) {
+  return api("/admin/cleanup/reassign", {
+    method: "POST",
+    json: input,
+    headers: {
+      "x-office-id": input.officeId,
+    },
+  });
 }
 
 export function useStagedDeals(validationStatus?: string) {

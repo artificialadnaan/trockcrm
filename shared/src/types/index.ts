@@ -3,3 +3,6 @@ export * from "./enums.js";
 export * from "./events.js";
 export * from "./lead-validation.js";
 export * from "./sales-workflow.js";
+export * from "./lead-scoping.js";
+export * from "./sales-review.js";
+export * from "./workflow-gates.js";

@@ -1,5 +1,6 @@
 import { useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
+import { useAuth } from "@/lib/auth";
 import {
   useSavedReports,
   executeLockedReport,
@@ -7,11 +8,17 @@ import {
   createSavedReport,
   deleteSavedReport,
   useUnifiedWorkflowOverview,
+  useDataMiningOverview,
+  useRegionalOwnershipOverview,
   type SavedReport,
   type ReportConfig,
   type UnifiedWorkflowOverview,
 } from "@/hooks/use-reports";
 import { ReportChart } from "@/components/charts/report-chart";
+import { SourcePerformanceSection } from "@/components/reports/source-performance-section";
+import { ForecastVarianceSection } from "@/components/reports/forecast-variance-section";
+import { DataMiningSection } from "@/components/reports/data-mining-section";
+import { RegionalOwnershipSection } from "@/components/reports/regional-ownership-section";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -203,6 +210,10 @@ function formatCurrency(n: number): string {
   if (n >= 1_000_000) return `$${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `$${(n / 1_000).toFixed(0)}K`;
   return `$${n.toLocaleString()}`;
+}
+
+export function canViewDataMiningSection(role?: string | null): boolean {
+  return role === "director";
 }
 
 // ---------------------------------------------------------------------------
@@ -580,6 +591,7 @@ function WorkflowOverviewPanel({
 
 export function ReportsPage() {
   // --- preserved report hooks ---
+  const { user } = useAuth();
   const scheduleReportAction = getScheduleReportActionConfig();
   const { reports, loading, refetch } = useSavedReports();
   const [activeReport, setActiveReport] = useState<SavedReport | null>(null);
@@ -610,6 +622,24 @@ export function ReportsPage() {
     error: workflowOverviewError,
     refetch: refetchWorkflowOverview,
   } = useUnifiedWorkflowOverview();
+  const canViewDataMining = canViewDataMiningSection(user?.role);
+  const {
+    data: dataMiningOverview,
+    loading: dataMiningLoading,
+    error: dataMiningError,
+  } = useDataMiningOverview({}, { enabled: canViewDataMining });
+  const canViewRegionalOwnership = user?.role !== "rep";
+  const regionalOfficeId = user?.activeOfficeId ?? user?.officeId;
+  const {
+    data: regionalOwnership,
+    loading: regionalOwnershipLoading,
+    error: regionalOwnershipError,
+  } = useRegionalOwnershipOverview(
+    {
+      officeId: regionalOfficeId,
+    },
+    canViewRegionalOwnership
+  );
 
   // --- UI state ---
   const [showReportDrawer, setShowReportDrawer] = useState(false);
@@ -717,6 +747,7 @@ export function ReportsPage() {
     setReportError(null);
     setActiveReport(null);
     setReportData(null);
+    setShowReportDrawer(true);
 
     try {
       const result = await executeCustomReport(builderPreviewConfig);
@@ -882,10 +913,6 @@ export function ReportsPage() {
           </div>
         )}
 
-        <div className="rounded-3xl border border-slate-200 bg-white shadow-sm p-6">
-          <WorkflowOverviewPanel data={workflowOverview} loading={workflowOverviewLoading} />
-        </div>
-
         <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
           <div className="px-6 py-5 border-b border-slate-100">
             <h2 className="text-sm font-bold text-slate-900">Operational Views</h2>
@@ -912,6 +939,34 @@ export function ReportsPage() {
             ))}
           </div>
         </div>
+
+        <div className="rounded-3xl border border-slate-200 bg-white shadow-sm p-6">
+          <WorkflowOverviewPanel data={workflowOverview} loading={workflowOverviewLoading} />
+        </div>
+
+        {user?.role !== "rep" && <ForecastVarianceSection />}
+
+        {user?.role === "director" && <SourcePerformanceSection />}
+
+        {canViewDataMining && (
+          <div className="rounded-3xl border border-slate-200 bg-white shadow-sm p-6">
+            <DataMiningSection
+              data={dataMiningOverview}
+              loading={dataMiningLoading}
+              error={dataMiningError}
+            />
+          </div>
+        )}
+
+        {canViewRegionalOwnership && (
+          <div className="rounded-3xl border border-slate-200 bg-white shadow-sm p-6">
+            <RegionalOwnershipSection
+              data={regionalOwnership}
+              loading={regionalOwnershipLoading}
+              error={regionalOwnershipError}
+            />
+          </div>
+        )}
 
         {/* ================================================================
             SAVED REPORTS PANEL

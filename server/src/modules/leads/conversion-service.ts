@@ -1,8 +1,8 @@
 import { eq } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { deals, leadStageHistory, leads } from "@trock-crm/shared/schema";
-import type * as schema from "@trock-crm/shared/schema";
 import type { WorkflowRoute } from "@trock-crm/shared/types";
+import type * as schema from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
 import { createDeal } from "../deals/service.js";
 import { getStageById, getStageBySlug } from "../pipeline/service.js";
@@ -11,10 +11,9 @@ type TenantDb = NodePgDatabase<typeof schema>;
 
 export interface ConvertLeadInput {
   leadId: string;
-  dealStageId: string;
   userId: string;
   userRole: string;
-  workflowRoute?: WorkflowRoute;
+  dealStageId?: string;
   assignedRepId?: string;
   primaryContactId?: string | null;
   officeId?: string;
@@ -125,9 +124,10 @@ export function createLeadConversionService(
 
     const deal = await deps.createDeal(tenantDb, {
       name: input.name ?? lead.name,
-      stageId: input.dealStageId,
+      stageId: input.dealStageId ?? opportunityStage.id,
       workflowRoute: resolveWorkflowRoute(lead),
       assignedRepId: successorAssignedRepId,
+      actorUserId: input.userId,
       officeId: input.officeId,
       primaryContactId:
         input.primaryContactId === undefined

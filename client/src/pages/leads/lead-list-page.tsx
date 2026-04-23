@@ -1,177 +1,233 @@
 import { useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
-import { ArrowRight, Building2, MapPin, Plus, Search } from "lucide-react";
+import { Navigate, useNavigate, useSearchParams } from "react-router-dom";
+import { ArrowRight, Plus } from "lucide-react";
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Card } from "@/components/ui/card";
-import { LeadStageBadge } from "@/components/leads/lead-stage-badge";
 import {
-  formatLeadPropertyLine,
-  getLeadBoardStageLabel,
-  getLeadStageMetadata,
-  LEAD_BOARD_STAGE_SLUGS,
-  useLeads,
-} from "@/hooks/use-leads";
-import { usePipelineStages } from "@/hooks/use-pipeline-config";
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { PipelineBoard } from "@/components/pipeline/pipeline-board";
+import { transitionLeadStage, useLeadBoard } from "@/hooks/use-leads";
+import { LEAD_BOARD_STAGE_SLUGS } from "@/lib/pipeline-ownership";
+import { useNormalizedPipelineRoute } from "@/lib/pipeline-scope";
+
+export function buildLeadIntakePath(leadId: string, focus: "qualification" | "scoping" = "qualification") {
+  return `/leads/${leadId}?focus=${focus}`;
+}
+
+export function isImmediateNextStageMove(
+  currentStageId: string,
+  targetStageId: string,
+  nextStageById: Map<string, string | null>
+) {
+  return nextStageById.get(currentStageId) === targetStageId;
+}
+
+function matchesLeadBucket(bucket: string | null, slug: string) {
+  if (!bucket) return true;
+  if (bucket === "lead") {
+    return ["lead_new", "company_pre_qualified", "scoping_in_progress", "new_lead"].includes(slug);
+  }
+  if (bucket === "qualified_lead") {
+    return ["pre_qual_value_assigned", "lead_go_no_go", "qualified_lead"].includes(slug);
+  }
+  if (bucket === "opportunity") {
+    return ["qualified_for_opportunity", "sales_validation_stage"].includes(slug);
+  }
+  return true;
+}
+
+function buildLeadBoardSummary(
+  columns: Array<{
+    count: number;
+    stage: { slug: string };
+    cards: Array<{ stageEnteredAt: string }>;
+  }>
+) {
+  const enteredAt = columns.flatMap((column) => column.cards.map((card) => card.stageEnteredAt));
+  const now = Date.now();
+  const averageAgeDays =
+    enteredAt.length === 0
+      ? 0
+      : Math.round(
+          enteredAt.reduce((sum, value) => {
+            const entered = new Date(value).getTime();
+            return sum + Math.floor((now - entered) / (1000 * 60 * 60 * 24));
+          }, 0) / enteredAt.length
+        );
+
+  return {
+    totalCount: columns.reduce((sum, column) => sum + column.count, 0),
+    liveStageCount: columns.filter((column) => column.count > 0).length,
+    averageAgeDays,
+    qualifiedPressureCount: columns
+      .filter((column) => ["qualified_lead", "sales_validation_stage"].includes(column.stage.slug))
+      .reduce((sum, column) => sum + column.count, 0),
+    opportunityCount: columns
+      .filter((column) => column.stage.slug === "sales_validation_stage")
+      .reduce((sum, column) => sum + column.count, 0),
+  };
+}
 
 export function LeadListPage() {
   const navigate = useNavigate();
-  const [search, setSearch] = useState("");
-  const { leads, loading, error } = useLeads();
-  const { stages } = usePipelineStages();
+  const [searchParams] = useSearchParams();
+  const { allowedScope: scope, needsRedirect, redirectTo } = useNormalizedPipelineRoute("leads");
+  const { board, loading, refetch } = useLeadBoard(scope);
+  const [blockedMove, setBlockedMove] = useState<{
+    leadId: string;
+    leadName: string;
+    targetStageName: string;
+    missingLabels: string[];
+    focus: "qualification" | "scoping";
+  } | null>(null);
 
-  const filtered = useMemo(() => {
-    const query = search.trim().toLowerCase();
-    return leads.filter((lead) => {
-      const stageMeta = getLeadStageMetadata(lead.stageId, stages);
-      if (!stageMeta.isBoardStage) {
-        return false;
-      }
-
-      if (!query) {
-        return true;
-      }
-
-      const haystack = [
-        lead.name,
-        lead.companyName,
-        lead.source,
-        lead.property?.name,
-        lead.property?.address,
-        lead.property?.city,
-        lead.property?.state,
-        lead.property?.zip,
-        lead.convertedDealNumber,
-      ]
-        .filter(Boolean)
-        .join(" ")
-        .toLowerCase();
-      return haystack.includes(query);
-    });
-  }, [leads, search, stages]);
-
-  const columns = useMemo(
+  const bucket = searchParams.get("bucket");
+  const nextStageById = useMemo(
     () =>
-      LEAD_BOARD_STAGE_SLUGS.map((slug) => ({
-        slug,
-        name: getLeadBoardStageLabel(slug),
-        leads: filtered.filter((lead) => getLeadStageMetadata(lead.stageId, stages).slug === slug),
-      })),
-    [filtered, stages]
+      new Map(
+        (board?.columns ?? []).map((column, index, columns) => [
+          column.stage.id,
+          columns[index + 1]?.stage.id ?? null,
+        ])
+      ),
+    [board?.columns]
   );
+  const filteredColumns = useMemo(
+    () =>
+      (board?.columns ?? [])
+        .filter((column) => LEAD_BOARD_STAGE_SLUGS.includes(column.stage.slug as (typeof LEAD_BOARD_STAGE_SLUGS)[number]))
+        .filter((column) => matchesLeadBucket(bucket, column.stage.slug)),
+    [board?.columns, bucket]
+  );
+  const summary = useMemo(() => buildLeadBoardSummary(filteredColumns), [filteredColumns]);
+
+  if (needsRedirect) return <Navigate to={redirectTo} replace />;
 
   return (
-    <div className="space-y-4">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <div className="flex items-center gap-2 mb-1">
-            <Building2 className="h-4 w-4 text-brand-red" />
-            <span className="text-[10px] font-bold uppercase tracking-widest text-brand-red">
-              Lead Pipeline
-            </span>
-          </div>
-          <h1 className="text-3xl font-black tracking-tight text-foreground">Leads</h1>
-          <p className="text-sm text-muted-foreground">
-            {filtered.length} CRM-owned pre-handoff lead{filtered.length !== 1 ? "s" : ""}
-          </p>
-        </div>
-        <Button onClick={() => navigate("/leads/new")}>
-          <Plus className="h-4 w-4 mr-2" />
-          New Lead
-        </Button>
-      </div>
-
-      <div className="flex items-center gap-3">
-        <div className="relative flex-1">
-          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-          <Input
-            value={search}
-            onChange={(event) => {
-              setSearch(event.target.value);
-            }}
-            placeholder="Search leads, companies, or properties..."
-            className="pl-9"
-          />
-        </div>
-      </div>
-
-      {error && <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div>}
-
-      {loading ? (
-        <div className="space-y-3">
-          {Array.from({ length: 5 }).map((_, index) => (
-            <div key={index} className="h-20 rounded-lg bg-muted animate-pulse" />
-          ))}
-        </div>
-      ) : filtered.length === 0 ? (
-        <div className="rounded-xl border border-dashed p-12 text-center text-muted-foreground">
-          <Building2 className="mx-auto mb-3 h-10 w-10 opacity-30" />
-          <p className="text-lg font-medium">No leads found</p>
-          <p className="text-sm mt-1">Try a different search or start a new lead.</p>
-        </div>
-      ) : (
-        <div className="grid gap-4 xl:grid-cols-3">
-          {columns.map((column) => (
-            <section key={column.slug} className="space-y-3 rounded-2xl border bg-muted/20 p-3">
-              <div className="flex items-start justify-between gap-3 border-b pb-3">
-                <div>
-                  <p className="text-xs font-black uppercase tracking-[0.18em] text-muted-foreground">
-                    {column.name}
-                  </p>
-                  <p className="mt-1 text-sm text-muted-foreground">
-                    {column.slug === "sales_validation_stage"
-                      ? "Last CRM checkpoint before Opportunity handoff."
-                      : "CRM-owned lead work."}
-                  </p>
-                </div>
-                <span className="rounded-full border bg-background px-2 py-1 text-xs font-semibold text-muted-foreground">
-                  {column.leads.length}
+    <div className="space-y-6">
+      <section className="overflow-hidden rounded-[2rem] border border-slate-200 bg-white shadow-sm">
+        <div className="flex items-start justify-between gap-4 px-7 pb-6 pt-7">
+          <div className="space-y-3">
+            <div className="space-y-2">
+              <h1 className="text-[2.5rem] leading-none font-black tracking-tight text-slate-950">
+                Lead Pipeline
+              </h1>
+              <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-sm font-semibold text-slate-600">
+                <span className="inline-flex items-center gap-2">
+                  <span className="h-2.5 w-2.5 rounded-full bg-rose-500" />
+                  <span className="tracking-[0.16em] uppercase">{summary.liveStageCount} Live engine</span>
+                </span>
+                <span>
+                  Qualified pressure:{" "}
+                  <span className="font-black text-slate-950">{summary.qualifiedPressureCount}</span>
                 </span>
               </div>
-
-              <div className="space-y-2">
-                {column.leads.length === 0 ? (
-                  <div className="rounded-xl border border-dashed bg-background/70 px-4 py-8 text-center text-sm text-muted-foreground">
-                    No leads in this stage
-                  </div>
-                ) : (
-                  column.leads.map((lead) => {
-                    const companyName = lead.companyName ?? "Unassigned";
-                    const propertyLine = formatLeadPropertyLine(lead);
-
-                    return (
-                      <Card
-                        key={lead.id}
-                        className="cursor-pointer p-4 transition-colors hover:bg-background"
-                        onClick={() => navigate(`/leads/${lead.id}`)}
-                      >
-                        <div className="flex items-start justify-between gap-4">
-                          <div className="min-w-0 flex-1 space-y-2">
-                            <div className="flex flex-wrap items-center gap-2">
-                              <LeadStageBadge stageId={lead.stageId} />
-                            </div>
-                            <h3 className="truncate text-lg font-semibold">{lead.name}</h3>
-                            <div className="flex flex-wrap items-center gap-4 text-sm text-muted-foreground">
-                              <span>{companyName}</span>
-                              {propertyLine && (
-                                <span className="flex items-center gap-1">
-                                  <MapPin className="h-3.5 w-3.5" />
-                                  {propertyLine}
-                                </span>
-                              )}
-                            </div>
-                          </div>
-                          <ArrowRight className="mt-1 h-4 w-4 shrink-0 text-muted-foreground" />
-                        </div>
-                      </Card>
-                    );
-                  })
-                )}
-              </div>
-            </section>
-          ))}
+            </div>
+            <p className="max-w-2xl text-sm text-slate-500">
+              Use the board to move active leads forward. Open a lead to complete qualification intake and convert to Opportunity.
+            </p>
+          </div>
+          <Button onClick={() => navigate("/leads/new")}>
+            <Plus className="mr-2 h-4 w-4" />
+            New Lead
+          </Button>
         </div>
-      )}
+        <div className="grid gap-4 border-t border-slate-200 bg-[#f7f8fb] px-7 py-5 md:grid-cols-4">
+          <SummaryMetric label="Active leads" value={String(summary.totalCount)} />
+          <SummaryMetric label="Avg. stage age" value={`${summary.averageAgeDays} days`} />
+          <SummaryMetric label="Qualified pressure" value={String(summary.qualifiedPressureCount)} />
+          <SummaryMetric label="Opportunity ready" value={String(summary.opportunityCount)} />
+        </div>
+      </section>
+
+      <PipelineBoard
+        entity="lead"
+        columns={filteredColumns}
+        loading={loading}
+        onOpenStage={(stageId) => navigate(`/leads/stages/${stageId}?scope=${scope}`)}
+        onOpenRecord={(leadId) => navigate(`/leads/${leadId}`)}
+        onMove={({ activeId, targetStageId }) => {
+          const sourceColumn = (board?.columns ?? []).find((column) =>
+            column.cards.some((card) => card.id === activeId)
+          );
+          const targetColumn = (board?.columns ?? []).find((column) => column.stage.id === targetStageId);
+          const activeLead = sourceColumn?.cards.find((card) => card.id === activeId) ?? null;
+
+          if (!sourceColumn || !targetColumn || !activeLead || sourceColumn.stage.id === targetStageId) {
+            return;
+          }
+
+          if (!isImmediateNextStageMove(sourceColumn.stage.id, targetStageId, nextStageById)) {
+            toast.error("Leads can only move one stage forward at a time.");
+            return;
+          }
+
+          void transitionLeadStage(activeId, { targetStageId })
+            .then(async (result) => {
+              if (!result.ok) {
+                const missingKeys = result.missing.map((field) => field.key);
+                setBlockedMove({
+                  leadId: activeLead.id,
+                  leadName: activeLead.name,
+                  targetStageName: targetColumn.stage.name,
+                  missingLabels: result.missing.map((field) => field.label),
+                  focus: missingKeys.some((key) => key.startsWith("leadScoping."))
+                    ? "scoping"
+                    : "qualification",
+                });
+                return;
+              }
+
+              await refetch();
+            })
+            .catch((error: unknown) => {
+              toast.error(error instanceof Error ? error.message : "Failed to move lead");
+            });
+        }}
+      />
+
+      <Dialog open={blockedMove !== null} onOpenChange={(open) => !open && setBlockedMove(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Complete Required Fields</DialogTitle>
+            <DialogDescription>
+              This lead cannot move to {blockedMove?.targetStageName ?? "the selected stage"} yet.
+            </DialogDescription>
+          </DialogHeader>
+          {blockedMove ? (
+            <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
+              <p className="font-semibold text-slate-950">{blockedMove.leadName}</p>
+              <p className="mt-1">{blockedMove.missingLabels.join(", ")}</p>
+            </div>
+          ) : null}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setBlockedMove(null)}>
+              Close
+            </Button>
+            {blockedMove ? (
+              <Button onClick={() => navigate(buildLeadIntakePath(blockedMove.leadId, blockedMove.focus))}>
+                Open Lead Intake
+                <ArrowRight className="ml-2 h-4 w-4" />
+              </Button>
+            ) : null}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
+
+function SummaryMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="space-y-1">
+      <p className="text-[11px] font-black tracking-[0.18em] text-slate-500 uppercase">{label}</p>
+      <p className="text-[2rem] leading-none font-black tracking-tight text-slate-950">{value}</p>
     </div>
   );
 }

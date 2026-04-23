@@ -25,6 +25,14 @@ const COMPANY_CATEGORY_LABELS: Record<string, string> = {
   other: "Other",
 };
 
+function getCompanyCategoryLabel(value: string | null | undefined): string {
+  if (!value || value === "none") {
+    return "Select category";
+  }
+
+  return COMPANY_CATEGORY_LABELS[value] ?? "Select category";
+}
+
 export function CompanyEditPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -146,7 +154,9 @@ export function CompanyEditPage() {
                 onValueChange={(v) => handleChange("category", v != null && v !== "none" ? v : "")}
               >
                 <SelectTrigger>
-                  <SelectValue placeholder="Select category" />
+                  <SelectValue placeholder="Select category">
+                    {(value) => getCompanyCategoryLabel(value)}
+                  </SelectValue>
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="none">None</SelectItem>

@@ -115,6 +115,11 @@ export interface HubSpotOwner {
   lastName?: string;
 }
 
+export function normalizeHubSpotOwnerEmail(owner: HubSpotOwner): string | null {
+  const email = owner.email?.trim().toLowerCase();
+  return email && email.length > 0 ? email : null;
+}
+
 // ---------------------------------------------------------------------------
 // Pagination helper
 // ---------------------------------------------------------------------------

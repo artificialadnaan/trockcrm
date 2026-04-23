@@ -14,10 +14,11 @@ import { runActivityDropDetection } from "./jobs/activity-alerts.js";
 import { runWeeklyDigest } from "./jobs/weekly-digest.js";
 import { runColdLeadWarming } from "./jobs/cold-lead-warming.js";
 import { runBidDeadlineCountdown } from "./jobs/bid-deadline.js";
-import { runProcoreSync } from "./jobs/procore-sync.js";
+import { runProcoreSync, runScheduledCatalogSync } from "./jobs/procore-sync.js";
 import { runAiDisconnectDigest } from "./jobs/ai-disconnect-digest.js";
 import { runAiDisconnectEscalationScan } from "./jobs/ai-disconnect-escalation.js";
 import { runAiDisconnectAdminTaskGeneration } from "./jobs/ai-disconnect-admin-tasks.js";
+import { runAiInterventionManagerAlerts } from "./jobs/ai-intervention-manager-alerts.js";
 
 const POLL_INTERVAL_MS = 2000; // Poll job queue every 2 seconds
 
@@ -142,6 +143,17 @@ async function main() {
   });
   console.log("[Worker] Cron scheduled: Procore sync poll every 15 minutes");
 
+  // Public Procore cost catalog refresh: every 6 hours at minute 7
+  cron.schedule("7 */6 * * *", async () => {
+    console.log("[Worker:cron] Running public Procore catalog refresh...");
+    try {
+      await runScheduledCatalogSync();
+    } catch (err) {
+      console.error("[Worker:cron] Public Procore catalog refresh failed:", err);
+    }
+  });
+  console.log("[Worker] Cron scheduled: public Procore catalog refresh every 6 hours");
+
   // Disconnect digest: weekdays at 7:15 AM CT
   cron.schedule("15 7 * * 1-5", async () => {
     console.log("[Worker:cron] Running disconnect digest...");
@@ -174,6 +186,17 @@ async function main() {
     }
   }, { timezone: "America/Chicago" });
   console.log("[Worker] Cron scheduled: disconnect escalation scan at 7:45 AM CT weekdays");
+
+  // Manager alerts: evaluate every 5 minutes and let office-local due gating decide when to send.
+  cron.schedule("*/5 * * * *", async () => {
+    console.log("[Worker:cron] Running intervention manager alerts...");
+    try {
+      await runAiInterventionManagerAlerts();
+    } catch (err) {
+      console.error("[Worker:cron] Intervention manager alerts failed:", err);
+    }
+  });
+  console.log("[Worker] Cron scheduled: intervention manager alerts every 5 minutes");
 
   console.log("[Worker] Ready.");
 }

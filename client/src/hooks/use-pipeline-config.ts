@@ -1,10 +1,12 @@
 import { useState, useEffect } from "react";
 import { api } from "@/lib/api";
+import type { WorkflowFamily } from "@trock-crm/shared/types";
 
 export interface PipelineStage {
   id: string;
   name: string;
   slug: string;
+  workflowFamily: WorkflowFamily;
   displayOrder: number;
   isActivePipeline: boolean;
   isTerminal: boolean;
@@ -70,10 +72,29 @@ function createCachedLoader<T>(load: (fetcher: ApiFetcher) => Promise<T>) {
   return { read, clear };
 }
 
-const stagesLoader = createCachedLoader(async (fetcher) => {
-  const data = await fetcher<{ stages: PipelineStage[] }>("/pipeline/stages");
-  return data.stages;
-});
+const stageLoaders = new Map<string, ReturnType<typeof createCachedLoader<PipelineStage[]>>>();
+
+function getStageLoader(workflowFamily?: WorkflowFamily) {
+  const key = workflowFamily ?? "all";
+  const cached = stageLoaders.get(key);
+  if (cached) {
+    return cached;
+  }
+
+  const loader = createCachedLoader(async (fetcher) => {
+    const params = new URLSearchParams();
+    if (workflowFamily) {
+      params.set("workflowFamily", workflowFamily);
+    }
+    const query = params.toString();
+    const data = await fetcher<{ stages: PipelineStage[] }>(
+      `/pipeline/stages${query ? `?${query}` : ""}`
+    );
+    return data.stages;
+  });
+  stageLoaders.set(key, loader);
+  return loader;
+}
 
 const lostReasonsLoader = createCachedLoader(async (fetcher) => {
   const data = await fetcher<{ reasons: LostReason[] }>("/pipeline/lost-reasons");
@@ -91,14 +112,19 @@ const regionsLoader = createCachedLoader(async (fetcher) => {
 });
 
 export function clearPipelineConfigCache() {
-  stagesLoader.clear();
+  for (const loader of stageLoaders.values()) {
+    loader.clear();
+  }
   lostReasonsLoader.clear();
   projectTypesLoader.clear();
   regionsLoader.clear();
 }
 
-export function loadPipelineStages(fetcher?: ApiFetcher) {
-  return stagesLoader.read(fetcher);
+export function loadPipelineStages(options?: {
+  workflowFamily?: WorkflowFamily;
+  fetcher?: ApiFetcher;
+}) {
+  return getStageLoader(options?.workflowFamily).read(options?.fetcher);
 }
 
 export function loadLostReasons(fetcher?: ApiFetcher) {
@@ -113,20 +139,20 @@ export function loadRegions(fetcher?: ApiFetcher) {
   return regionsLoader.read(fetcher);
 }
 
-export function usePipelineStages() {
+export function usePipelineStages(workflowFamily?: WorkflowFamily) {
   const [stages, setStages] = useState<PipelineStage[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     let cancelled = false;
-    loadPipelineStages()
+    loadPipelineStages({ workflowFamily })
       .then((data) => {
         if (!cancelled) setStages(data);
       })
       .catch((err) => console.error("Failed to load stages:", err))
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, []);
+  }, [workflowFamily]);
 
   return { stages, loading };
 }

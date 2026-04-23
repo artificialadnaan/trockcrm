@@ -14,13 +14,19 @@ import { runAiIndexDocument } from "./ai-index-document.js";
 import { runAiBackfillDocuments } from "./ai-backfill-documents.js";
 import { runAiRefreshCopilot } from "./ai-refresh-copilot.js";
 import { runAiGenerateDealCopilot } from "./ai-generate-deal-copilot.js";
+import { runAiGenerateInterventionPolicyRecommendations } from "./ai-generate-intervention-policy-recommendations.js";
 import { runAiDisconnectDigest } from "./ai-disconnect-digest.js";
 import { runAiDisconnectEscalationScan } from "./ai-disconnect-escalation.js";
 import { runAiDisconnectAdminTaskGeneration } from "./ai-disconnect-admin-tasks.js";
+import { runEstimateDocumentOcr } from "./estimate-document-ocr.js";
+import { runEstimateGeneration } from "./estimate-generation.js";
+import { runAiInterventionManagerAlerts } from "./ai-intervention-manager-alerts.js";
 
-const SERVER_EVALUATOR_MODULE = "../../../server/src/modules/tasks/rules/evaluator.js" as string;
-const SERVER_TASK_RULES_MODULE = "../../../server/src/modules/tasks/rules/config.js" as string;
-const SERVER_TASK_PERSISTENCE_MODULE = "../../../server/src/modules/tasks/rules/persistence.js" as string;
+const SERVER_MODULE_ROOT =
+  process.env.NODE_ENV === "production" ? "../../../server/dist/modules" : "../../../server/src/modules";
+const SERVER_EVALUATOR_MODULE = `${SERVER_MODULE_ROOT}/tasks/rules/evaluator.js` as string;
+const SERVER_TASK_RULES_MODULE = `${SERVER_MODULE_ROOT}/tasks/rules/config.js` as string;
+const SERVER_TASK_PERSISTENCE_MODULE = `${SERVER_MODULE_ROOT}/tasks/rules/persistence.js` as string;
 
 /**
  * Test handler that logs the payload. Used to validate the queue works end-to-end.
@@ -133,6 +139,10 @@ export function registerAllJobs() {
     await runAiGenerateDealCopilot(payload, officeId);
   });
 
+  registerJobHandler("ai_generate_intervention_policy_recommendations", async (payload) => {
+    await runAiGenerateInterventionPolicyRecommendations(payload);
+  });
+
   registerJobHandler("ai_disconnect_digest", async () => {
     await runAiDisconnectDigest();
   });
@@ -143,6 +153,24 @@ export function registerAllJobs() {
 
   registerJobHandler("ai_disconnect_admin_tasks", async () => {
     await runAiDisconnectAdminTaskGeneration();
+  });
+
+  registerJobHandler("estimate_document_ocr", async (payload, officeId) => {
+    await runEstimateDocumentOcr(
+      payload as { documentId: string; dealId?: string; parseMeasurementsEnabled?: boolean },
+      officeId
+    );
+  });
+
+  registerJobHandler("estimate_generation", async (payload, officeId) => {
+    await runEstimateGeneration(
+      payload as { documentId?: string; dealId?: string; parseRunId?: string },
+      officeId
+    );
+  });
+
+  registerJobHandler("ai_intervention_manager_alerts", async (payload) => {
+    await runAiInterventionManagerAlerts(payload);
   });
 
   // Daily task generation (triggered via job_queue or cron)

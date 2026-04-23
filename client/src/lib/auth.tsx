@@ -9,13 +9,17 @@ interface User {
   role: "admin" | "director" | "rep";
   officeId: string;
   activeOfficeId?: string;
+  mustChangePassword?: boolean;
 }
 
 interface AuthContextValue {
   user: User | null;
   loading: boolean;
   login: (email: string) => Promise<void>;
+  localLogin: (email: string, password: string) => Promise<void>;
+  changePassword: (currentPassword: string, newPassword: string) => Promise<void>;
   logout: () => Promise<void>;
+  refreshUser: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -47,13 +51,39 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(data.user);
   };
 
+  const localLogin = async (email: string, password: string) => {
+    const data = await api<{ user: User }>("/auth/local/login", {
+      method: "POST",
+      json: { email, password },
+    });
+    setUser(data.user);
+  };
+
+  const changePassword = async (currentPassword: string, newPassword: string) => {
+    const data = await api<{ user: User }>("/auth/local/change-password", {
+      method: "POST",
+      json: { currentPassword, newPassword },
+    });
+    setUser(data.user);
+  };
+
   const logout = async () => {
     await api("/auth/logout", { method: "POST" });
     setUser(null);
   };
 
   return (
-    <AuthContext.Provider value={{ user, loading, login, logout }}>
+    <AuthContext.Provider
+      value={{
+        user,
+        loading,
+        login,
+        localLogin,
+        changePassword,
+        logout,
+        refreshUser: fetchUser,
+      }}
+    >
       {children}
     </AuthContext.Provider>
   );

@@ -96,6 +96,14 @@ function formatDueDate(dueDate: string): string {
   });
 }
 
+function getTaskProjectContext(task: Pick<Task, "dealId" | "dealName" | "dealNumber">): string | null {
+  if (!task.dealId) return null;
+  if (task.dealNumber && task.dealName) return `${task.dealNumber} - ${task.dealName}`;
+  if (task.dealName) return task.dealName;
+  if (task.dealNumber) return task.dealNumber;
+  return "Project linked";
+}
+
 // ---------------------------------------------------------------------------
 // Sub-components
 // ---------------------------------------------------------------------------
@@ -202,6 +210,7 @@ function IndustrialTaskRow({
   const assigneeLabel = task.assignedToName ?? "Unassigned";
   const lifecycleSummary = getTaskLifecycleSummary(task);
   const timelineLabel = getTaskTimelineLabel(task);
+  const projectContext = getTaskProjectContext(task);
   const canResume = canTransitionTask(task.status, "pending");
   const canStart = canTransitionTask(task.status, "in_progress");
   const canSchedule = canTransitionTask(task.status, "scheduled");
@@ -326,6 +335,11 @@ function IndustrialTaskRow({
               {task.type.replace(/_/g, " ")}
             </span>
           </div>
+          {projectContext && (
+            <p className="text-[10px] font-mono uppercase tracking-wide text-gray-500 mt-1 truncate">
+              {projectContext}
+            </p>
+          )}
         </div>
       </div>
 

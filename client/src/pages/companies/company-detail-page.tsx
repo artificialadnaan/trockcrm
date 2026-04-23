@@ -36,6 +36,7 @@ import { CompanyCopilotPanel } from "@/components/ai/company-copilot-panel";
 import { api } from "@/lib/api";
 import { formatPropertyLabel, useProperties } from "@/hooks/use-properties";
 import type { Activity } from "@/hooks/use-activities";
+import { PropertyCreateDialog } from "@/components/properties/property-create-dialog";
 
 // --- Constants ---
 
@@ -726,7 +727,7 @@ function CompanyEmailsTab() {
 function CompanyPortfolioTab({ companyId, companyName }: { companyId: string; companyName: string }) {
   const { deals } = useCompanyDeals(companyId);
   const { leads } = useLeads({ companyId, isActive: "all" });
-  const { properties } = useProperties({ companyId, limit: 500 });
+  const { properties, refetch: refetchProperties } = useProperties({ companyId, limit: 500 });
   const { stages } = usePipelineStages();
   const ddStageId = stages.find((stage) => stage.slug === "dd")?.id ?? "";
   const [activities, setActivities] = useState<Activity[]>([]);
@@ -792,9 +793,17 @@ function CompanyPortfolioTab({ companyId, companyName }: { companyId: string; co
 
       <div className="grid gap-5 lg:grid-cols-[1fr_1fr]">
         <div className="space-y-4">
-          <div>
+          <div className="flex items-start justify-between gap-3">
+            <div>
             <p className="text-sm font-semibold">Related Properties</p>
-                <p className="text-sm text-muted-foreground">First-class property records attached to this company.</p>
+              <p className="text-sm text-muted-foreground">First-class property records attached to this company.</p>
+            </div>
+            <PropertyCreateDialog
+              initialCompanyId={companyId}
+              companyLocked
+              triggerLabel="Add Property"
+              onCreated={() => void refetchProperties()}
+            />
           </div>
           <div className="space-y-2">
             {properties.length === 0 ? (

@@ -17,7 +17,7 @@ export function LeadStageBadge({ stageId, className, converted = false }: LeadSt
     return <Badge variant="outline" className={className}>Lead</Badge>;
   }
 
-  const label = converted && metadata.isOpportunityStage ? "Converted · Opportunity" : metadata.label;
+  const label = converted && metadata.isOpportunityStage ? `Converted · ${stage.name}` : stage.name;
 
   const colorClass = metadata.slug === "new_lead"
     ? "bg-emerald-50 text-emerald-700 border-emerald-200"

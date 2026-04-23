@@ -76,12 +76,33 @@ export function getRequiredScopingRules(input: DealScopingRulesInput): DealScopi
       ? [...SERVICE_REQUIRED_ATTACHMENT_KEYS]
       : [...STANDARD_REQUIRED_ATTACHMENT_KEYS];
 
+  const opportunityFields =
+    input.workflowRoute === "service"
+      ? []
+      : (() => {
+          const opportunityValue = isPlainRecord(input.sectionData.opportunity)
+            ? input.sectionData.opportunity
+            : {};
+          const baseFields = ["preBidMeetingCompleted", "siteVisitDecision"];
+          if (opportunityValue.siteVisitDecision === "required") {
+            baseFields.push("siteVisitCompleted");
+          }
+          return baseFields;
+        })();
+
   return {
-    requiredSections: [...REQUIRED_SCOPING_SECTIONS],
+    requiredSections: [
+      "projectOverview",
+      "propertyDetails",
+      "scopeSummary",
+      ...(opportunityFields.length > 0 ? ["opportunity"] : []),
+      "attachments",
+    ],
     requiredFieldsBySection: {
       projectOverview: projectOverviewFields,
       propertyDetails: ["propertyAddress"],
       scopeSummary: ["summary"],
+      ...(opportunityFields.length > 0 ? { opportunity: opportunityFields } : {}),
     },
     requiredAttachmentKeys,
   };

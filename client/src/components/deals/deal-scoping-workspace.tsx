@@ -2,13 +2,10 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   CheckCircle2,
-  ChevronDown,
-  ChevronUp,
   Clock3,
   FileText,
   Image,
   Loader2,
-  MapPin,
   Upload,
   Wrench,
 } from "lucide-react";
@@ -53,10 +50,16 @@ import {
   summarizeScopingRoute,
 } from "@/lib/scoping-intake";
 
-type SectionKey = "projectOverview" | "propertyDetails" | "scopeSummary" | "attachments";
+type SectionKey =
+  | "projectOverview"
+  | "opportunity"
+  | "propertyDetails"
+  | "scopeSummary"
+  | "attachments";
 
 const SECTION_ORDER: Array<{ key: SectionKey; label: string }> = [
   { key: "projectOverview", label: "Project Overview" },
+  { key: "opportunity", label: "Opportunity Review" },
   { key: "propertyDetails", label: "Property Details" },
   { key: "scopeSummary", label: "Scope Summary" },
   { key: "attachments", label: "Attachments" },
@@ -81,7 +84,7 @@ const ATTACHMENT_REQUIREMENTS: Array<{
     label: "Site photos",
     category: "photo",
     icon: Image,
-    hint: "Upload current-condition photos that the downstream team needs immediately.",
+    hint: "Upload current-condition photos that estimating or service needs immediately.",
   },
 ];
 
@@ -134,23 +137,6 @@ function getSectionValue(
   }
   const value = sectionValue[field];
   return typeof value === "string" ? value : "";
-}
-
-function getProjectTypeScopingPrompt(projectTypeName: string | null) {
-  if (!projectTypeName) {
-    return "Choose the project type to tailor the Opportunity scoping prompts for this handoff.";
-  }
-
-  return `${projectTypeName} opportunities keep scoping in CRM until the downstream handoff is ready.`;
-}
-
-function formatPropertySummary(sectionData: Record<string, unknown>) {
-  const address = getSectionValue(sectionData, "propertyDetails", "propertyAddress");
-  const city = getSectionValue(sectionData, "propertyDetails", "propertyCity");
-  const state = getSectionValue(sectionData, "propertyDetails", "propertyState");
-  const zip = getSectionValue(sectionData, "propertyDetails", "propertyZip");
-
-  return [address, [city, state].filter(Boolean).join(", "), zip].filter(Boolean).join(" ");
 }
 
 function getReadinessTone(status: DealScopingReadiness["status"]) {
@@ -223,18 +209,9 @@ export function DealScopingWorkspace({
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [uploadingKey, setUploadingKey] = useState<string | null>(null);
   const [activatingService, setActivatingService] = useState(false);
-  const [collapsedSections, setCollapsedSections] = useState<Record<SectionKey, boolean>>({
-    projectOverview: false,
-    propertyDetails: false,
-    scopeSummary: false,
-    attachments: false,
-  });
   const lastSavedFingerprintRef = useRef("");
   const hydrationCompleteRef = useRef(false);
-  const workflowRoute = intake?.workflowRouteSnapshot ?? deal.workflowRoute;
-  const selectedProjectType =
-    projectTypes.find((type) => type.id === projectTypeId) ?? null;
-  const propertySummary = formatPropertySummary(sectionData);
+  const activeWorkflowRoute: WorkflowRoute = deal.workflowRoute ?? "normal";
 
   const loadIntake = async () => {
     setLoading(true);
@@ -243,7 +220,7 @@ export function DealScopingWorkspace({
       const result = await getDealScopingIntake(deal.id);
       const nextSectionData = buildWorkspaceSectionData(deal, result.intake);
       setIntake(result.intake);
-      setReadiness(normalizeWorkspaceReadiness(result.readiness, result.intake.workflowRouteSnapshot));
+      setReadiness(normalizeWorkspaceReadiness(result.readiness, activeWorkflowRoute));
       setSectionData(nextSectionData);
       setProjectTypeId(result.intake.projectTypeId ?? deal.projectTypeId);
       lastSavedFingerprintRef.current = JSON.stringify({
@@ -283,9 +260,7 @@ export function DealScopingWorkspace({
         });
         const nextSectionData = buildWorkspaceSectionData(deal, result.intake);
         setIntake(result.intake);
-        setReadiness(
-          normalizeWorkspaceReadiness(result.readiness, result.intake.workflowRouteSnapshot)
-        );
+        setReadiness(normalizeWorkspaceReadiness(result.readiness, activeWorkflowRoute));
         setSectionData(nextSectionData);
         lastSavedFingerprintRef.current = JSON.stringify({
           projectTypeId,
@@ -301,7 +276,7 @@ export function DealScopingWorkspace({
     }, 700);
 
     return () => window.clearTimeout(timeoutId);
-  }, [deal, deal.id, onDealUpdated, projectTypeId, sectionData]);
+  }, [activeWorkflowRoute, deal, deal.id, onDealUpdated, projectTypeId, sectionData]);
 
   const completionCounts = getScopingCompletionCounts(readiness?.completionState);
   const attachmentRequirements = readiness?.attachmentRequirements ?? [];
@@ -328,6 +303,13 @@ export function DealScopingWorkspace({
       })
       .filter((requirement): requirement is (typeof ATTACHMENT_REQUIREMENTS)[number] & { status: DealScopingAttachmentRequirement | null } => Boolean(requirement));
   }, [attachmentRequirements, readiness?.requiredAttachmentKeys]);
+  const visibleSections = useMemo(
+    () =>
+      SECTION_ORDER.filter((section) =>
+        section.key === "attachments" || Boolean(readiness?.completionState[section.key])
+      ),
+    [readiness?.completionState]
+  );
   const linkedFilesByRequirement = useMemo(() => {
     const map = new Map<string, FileRecord[]>();
     for (const requirement of ATTACHMENT_REQUIREMENTS) {
@@ -355,13 +337,6 @@ export function DealScopingWorkspace({
       })
     );
     setError(null);
-  };
-
-  const toggleSection = (section: SectionKey) => {
-    setCollapsedSections((current) => ({
-      ...current,
-      [section]: !current[section],
-    }));
   };
 
   const handleLinkExisting = async (fileId: string, requirementKey: string) => {
@@ -442,13 +417,13 @@ export function DealScopingWorkspace({
           <CardHeader>
             <CardTitle>Scoping Progress</CardTitle>
             <CardDescription>
-              Opportunity scoping must be complete in CRM before this deal moves into handoff.
+              Sales intake must be complete before this deal can move forward.
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className={`rounded-lg border px-3 py-2 text-sm ${getReadinessTone(readiness?.status ?? "draft")}`}>
               <div className="font-medium">
-                {summarizeScopingRoute(workflowRoute)}
+                {summarizeScopingRoute(activeWorkflowRoute)}
               </div>
               <div className="mt-1 text-xs">
                 {completionCounts.completed}/{completionCounts.total} sections complete
@@ -456,7 +431,7 @@ export function DealScopingWorkspace({
             </div>
 
             <div className="space-y-2">
-              {SECTION_ORDER.map((section) => {
+              {visibleSections.map((section) => {
                 const entry = readiness?.completionState[section.key];
                 const complete = entry?.isComplete ?? false;
                 return (
@@ -512,25 +487,20 @@ export function DealScopingWorkspace({
       <div className="space-y-4">
         <Card>
           <CardHeader>
-            <CardTitle>Opportunity Scoping</CardTitle>
+            <CardTitle>Scoping Workspace</CardTitle>
             <CardDescription>
-              Route is derived upstream. This workspace keeps the CRM-owned scope packet ready for normal or service handoff.
+              Prefilled deal data is editable here and reused downstream for estimating or service handoff.
             </CardDescription>
           </CardHeader>
-          <CardContent className="grid gap-4 md:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
-            <div className="rounded-xl border bg-muted/40 p-4">
-              <p className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">
-                Routed Workflow
-              </p>
-              <div className="mt-2 flex items-center gap-2">
-                <Badge variant="outline">{workflowRoute === "service" ? "Service" : "Normal"}</Badge>
-                <span className="text-sm text-muted-foreground">
-                  {summarizeScopingRoute(workflowRoute)}
-                </span>
+          <CardContent className="grid gap-4 md:grid-cols-2">
+            <div className="space-y-2">
+              <Label htmlFor="workflowRoute">Workflow Route</Label>
+              <div
+                id="workflowRoute"
+                className="flex h-10 items-center rounded-md border px-3 text-sm text-muted-foreground"
+              >
+                {activeWorkflowRoute === "service" ? "Service" : "Normal"}
               </div>
-              <p className="mt-3 text-sm text-muted-foreground">
-                This route is set from the lead qualification value at Opportunity promotion and is not edited here.
-              </p>
             </div>
 
             <div className="space-y-2">
@@ -551,258 +521,289 @@ export function DealScopingWorkspace({
                   ))}
                 </SelectContent>
               </Select>
-              <p className="text-sm text-muted-foreground">
-                {getProjectTypeScopingPrompt(selectedProjectType?.name ?? null)}
-              </p>
             </div>
           </CardContent>
         </Card>
 
         <Card>
-          <CardHeader className="pb-3">
-            <button
-              type="button"
-              className="flex w-full items-center justify-between gap-3 text-left"
-              onClick={() => toggleSection("projectOverview")}
-            >
-              <div>
-                <CardTitle>Project Overview</CardTitle>
-                <CardDescription>
-                  Capture the CRM-owned handoff summary for this {selectedProjectType?.name ?? "opportunity"}.
-                </CardDescription>
-              </div>
-              {collapsedSections.projectOverview ? (
-                <ChevronDown className="h-4 w-4 text-muted-foreground" />
-              ) : (
-                <ChevronUp className="h-4 w-4 text-muted-foreground" />
-              )}
-            </button>
+          <CardHeader>
+            <CardTitle>Project Overview</CardTitle>
+            <CardDescription>Route, property identity, and estimating kickoff timing.</CardDescription>
           </CardHeader>
-          {!collapsedSections.projectOverview && (
-            <CardContent className="grid gap-4 md:grid-cols-2">
+          <CardContent className="grid gap-4 md:grid-cols-2">
+            <div className="space-y-2">
+              <Label htmlFor="propertyName">Property Name</Label>
+              <Input
+                id="propertyName"
+                value={getSectionValue(sectionData, "projectOverview", "propertyName")}
+                onChange={(event) => updateField("projectOverview", "propertyName", event.target.value)}
+              />
+            </div>
+            {activeWorkflowRoute === "normal" && (
               <div className="space-y-2">
-                <Label htmlFor="propertyName">Property Name</Label>
+                <Label htmlFor="bidDueDate">Bid Due Date</Label>
                 <Input
-                  id="propertyName"
-                  value={getSectionValue(sectionData, "projectOverview", "propertyName")}
-                  onChange={(event) => updateField("projectOverview", "propertyName", event.target.value)}
+                  id="bidDueDate"
+                  type="date"
+                  value={getSectionValue(sectionData, "projectOverview", "bidDueDate")}
+                  onChange={(event) => updateField("projectOverview", "bidDueDate", event.target.value)}
                 />
               </div>
-              {workflowRoute === "normal" && (
-                <div className="space-y-2">
-                  <Label htmlFor="bidDueDate">Bid Due Date</Label>
-                  <Input
-                    id="bidDueDate"
-                    type="date"
-                    value={getSectionValue(sectionData, "projectOverview", "bidDueDate")}
-                    onChange={(event) => updateField("projectOverview", "bidDueDate", event.target.value)}
-                  />
-                </div>
-              )}
-              <div className="space-y-2">
-                <Label htmlFor="assignPercent">Assign %</Label>
-                <Input
-                  id="assignPercent"
-                  inputMode="decimal"
-                  placeholder="Store the current split or assignment note"
-                  value={getSectionValue(sectionData, "projectOverview", "assignPercent")}
-                  onChange={(event) => updateField("projectOverview", "assignPercent", event.target.value)}
-                />
-                <p className="text-xs text-muted-foreground">
-                  Stored for the opportunity packet only. No downstream logic is derived from this field yet.
-                </p>
-              </div>
-            </CardContent>
-          )}
+            )}
+          </CardContent>
         </Card>
 
         <Card>
-          <CardHeader className="pb-3">
-            <button
-              type="button"
-              className="flex w-full items-center justify-between gap-3 text-left"
-              onClick={() => toggleSection("propertyDetails")}
-            >
-              <div>
-                <CardTitle>Property Context</CardTitle>
-                <CardDescription>
-                  Prefilled from the linked property and deal address so the team is not re-entering location data in scoping.
-                </CardDescription>
-              </div>
-              {collapsedSections.propertyDetails ? (
-                <ChevronDown className="h-4 w-4 text-muted-foreground" />
-              ) : (
-                <ChevronUp className="h-4 w-4 text-muted-foreground" />
-              )}
-            </button>
+          <CardHeader>
+            <CardTitle>Opportunity Review</CardTitle>
+            <CardDescription>
+              Capture the pre-bid meeting and site visit decision before deeper estimating work.
+            </CardDescription>
           </CardHeader>
-          {!collapsedSections.propertyDetails && (
-            <CardContent>
-              <div className="rounded-xl border bg-muted/30 p-4">
-                <div className="flex items-start gap-3">
-                  <MapPin className="mt-0.5 h-4 w-4 text-muted-foreground" />
-                  <div className="space-y-1">
-                    <p className="font-medium">{propertySummary || "No property address on the deal yet."}</p>
-                    <p className="text-sm text-muted-foreground">
-                      Update the linked property or deal record if the address needs to change. Scoping reuses that source of truth.
-                    </p>
-                  </div>
-                </div>
-              </div>
-            </CardContent>
-          )}
+          <CardContent className="grid gap-4 md:grid-cols-2">
+            <div className="space-y-2">
+              <Label htmlFor="preBidMeetingCompleted">Pre-Bid Meeting Completed</Label>
+              <Select
+                value={getSectionValue(sectionData, "opportunity", "preBidMeetingCompleted") || "__unset__"}
+                onValueChange={(value) =>
+                  updateField(
+                    "opportunity",
+                    "preBidMeetingCompleted",
+                    value === "__unset__" ? "" : (value ?? "")
+                  )
+                }
+              >
+                <SelectTrigger id="preBidMeetingCompleted">
+                  <SelectValue placeholder="Select status" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__unset__">Pending</SelectItem>
+                  <SelectItem value="yes">Completed</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="siteVisitDecision">Site Visit Decision</Label>
+              <Select
+                value={getSectionValue(sectionData, "opportunity", "siteVisitDecision") || "__unset__"}
+                onValueChange={(value) =>
+                  updateField(
+                    "opportunity",
+                    "siteVisitDecision",
+                    value === "__unset__" ? "" : (value ?? "")
+                  )
+                }
+              >
+                <SelectTrigger id="siteVisitDecision">
+                  <SelectValue placeholder="Select decision" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__unset__">Pending</SelectItem>
+                  <SelectItem value="required">Site Visit Required</SelectItem>
+                  <SelectItem value="not_required">No Site Visit Required</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="siteVisitCompleted">Site Visit Completed</Label>
+              <Select
+                value={getSectionValue(sectionData, "opportunity", "siteVisitCompleted") || "__unset__"}
+                onValueChange={(value) =>
+                  updateField(
+                    "opportunity",
+                    "siteVisitCompleted",
+                    value === "__unset__" ? "" : (value ?? "")
+                  )
+                }
+              >
+                <SelectTrigger id="siteVisitCompleted">
+                  <SelectValue placeholder="Select completion state" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__unset__">Pending</SelectItem>
+                  <SelectItem value="completed">Completed</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-2 md:col-span-2">
+              <Label htmlFor="estimatorConsultationNotes">Estimator Consultation Notes</Label>
+              <Textarea
+                id="estimatorConsultationNotes"
+                rows={3}
+                value={getSectionValue(sectionData, "opportunity", "estimatorConsultationNotes")}
+                onChange={(event) =>
+                  updateField(
+                    "opportunity",
+                    "estimatorConsultationNotes",
+                    event.target.value
+                  )
+                }
+                placeholder="Capture scope clarifications, bid strategy, and site-visit context."
+              />
+            </div>
+          </CardContent>
         </Card>
 
         <Card>
-          <CardHeader className="pb-3">
-            <button
-              type="button"
-              className="flex w-full items-center justify-between gap-3 text-left"
-              onClick={() => toggleSection("scopeSummary")}
-            >
-              <div>
-                <CardTitle>Scope Summary</CardTitle>
-                <CardDescription>
-                  Summarize the work, constraints, and next-team context before handoff.
-                </CardDescription>
-              </div>
-              {collapsedSections.scopeSummary ? (
-                <ChevronDown className="h-4 w-4 text-muted-foreground" />
-              ) : (
-                <ChevronUp className="h-4 w-4 text-muted-foreground" />
-              )}
-            </button>
+          <CardHeader>
+            <CardTitle>Property Details</CardTitle>
+            <CardDescription>Keep the intake address synced with the deal so downstream teams do not re-enter it.</CardDescription>
           </CardHeader>
-          {!collapsedSections.scopeSummary && (
-            <CardContent>
-              <div className="space-y-2">
-                <Label htmlFor="scopeSummary">Summary</Label>
-                <Textarea
-                  id="scopeSummary"
-                  rows={6}
-                  value={getSectionValue(sectionData, "scopeSummary", "summary")}
-                  onChange={(event) => updateField("scopeSummary", "summary", event.target.value)}
-                  placeholder={`Describe the ${selectedProjectType?.name?.toLowerCase() ?? "project"} scope, constraints, and special conditions.`}
-                />
-              </div>
-            </CardContent>
-          )}
+          <CardContent className="grid gap-4 md:grid-cols-2">
+            <div className="space-y-2 md:col-span-2">
+              <Label htmlFor="propertyAddress">Property Address</Label>
+              <Input
+                id="propertyAddress"
+                value={getSectionValue(sectionData, "propertyDetails", "propertyAddress")}
+                onChange={(event) => updateField("propertyDetails", "propertyAddress", event.target.value)}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="propertyCity">City</Label>
+              <Input
+                id="propertyCity"
+                value={getSectionValue(sectionData, "propertyDetails", "propertyCity")}
+                onChange={(event) => updateField("propertyDetails", "propertyCity", event.target.value)}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="propertyState">State</Label>
+              <Input
+                id="propertyState"
+                value={getSectionValue(sectionData, "propertyDetails", "propertyState")}
+                onChange={(event) => updateField("propertyDetails", "propertyState", event.target.value)}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="propertyZip">Zip</Label>
+              <Input
+                id="propertyZip"
+                value={getSectionValue(sectionData, "propertyDetails", "propertyZip")}
+                onChange={(event) => updateField("propertyDetails", "propertyZip", event.target.value)}
+              />
+            </div>
+          </CardContent>
         </Card>
 
         <Card>
-          <CardHeader className="pb-3">
-            <button
-              type="button"
-              className="flex w-full items-center justify-between gap-3 text-left"
-              onClick={() => toggleSection("attachments")}
-            >
-              <div>
-                <CardTitle>Attachments</CardTitle>
-                <CardDescription>
-                  Keep the opportunity packet complete before the downstream team picks it up.
-                </CardDescription>
-              </div>
-              {collapsedSections.attachments ? (
-                <ChevronDown className="h-4 w-4 text-muted-foreground" />
-              ) : (
-                <ChevronUp className="h-4 w-4 text-muted-foreground" />
-              )}
-            </button>
+          <CardHeader>
+            <CardTitle>Scope Summary</CardTitle>
+            <CardDescription>This summary feeds the deal description and the next team’s kickoff context.</CardDescription>
           </CardHeader>
-          {!collapsedSections.attachments && (
-            <CardContent className="space-y-4">
-              {visibleAttachmentRequirements.map((requirement) => {
-                const RequirementIcon = requirement.icon;
-                const linkedFiles = linkedFilesByRequirement.get(requirement.key) ?? [];
-                const isSatisfied = requirement.status?.satisfied ?? false;
-                const categoryLabel =
-                  FILE_CATEGORY_LABELS[requirement.category] ?? requirement.category;
+          <CardContent>
+            <div className="space-y-2">
+              <Label htmlFor="scopeSummary">Summary</Label>
+              <Textarea
+                id="scopeSummary"
+                rows={6}
+                value={getSectionValue(sectionData, "scopeSummary", "summary")}
+                onChange={(event) => updateField("scopeSummary", "summary", event.target.value)}
+                placeholder="Describe the customer’s scope, constraints, and special conditions."
+              />
+            </div>
+          </CardContent>
+        </Card>
 
-                return (
-                  <div key={requirement.key} className="rounded-xl border p-4">
-                    <div className="flex items-start justify-between gap-3">
-                      <div>
-                        <div className="flex items-center gap-2">
-                          <RequirementIcon className="h-4 w-4 text-muted-foreground" />
-                          <h4 className="font-medium">{requirement.label}</h4>
-                          {isSatisfied ? (
-                            <Badge variant="outline" className="text-green-700">
-                              Complete
-                            </Badge>
-                          ) : (
-                            <Badge variant="outline" className="text-amber-700">
-                              Required
-                            </Badge>
-                          )}
-                        </div>
-                        <p className="mt-1 text-sm text-muted-foreground">
-                          {requirement.hint} Required category: {categoryLabel}.
-                        </p>
-                      </div>
-                      <Label className="inline-flex cursor-pointer items-center gap-2 rounded-md border px-3 py-2 text-sm font-medium hover:bg-muted">
-                        {uploadingKey === requirement.key ? (
-                          <Loader2 className="h-4 w-4 animate-spin" />
+        <Card>
+          <CardHeader>
+            <CardTitle>Attachments</CardTitle>
+            <CardDescription>Upload documents directly here or reuse existing deal files without double entry.</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {visibleAttachmentRequirements.map((requirement) => {
+              const RequirementIcon = requirement.icon;
+              const linkedFiles = linkedFilesByRequirement.get(requirement.key) ?? [];
+              const isSatisfied = requirement.status?.satisfied ?? false;
+              const categoryLabel =
+                FILE_CATEGORY_LABELS[requirement.category] ?? requirement.category;
+
+              return (
+                <div key={requirement.key} className="rounded-xl border p-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <RequirementIcon className="h-4 w-4 text-muted-foreground" />
+                        <h4 className="font-medium">{requirement.label}</h4>
+                        {isSatisfied ? (
+                          <Badge variant="outline" className="text-green-700">
+                            Complete
+                          </Badge>
                         ) : (
-                          <Upload className="h-4 w-4" />
+                          <Badge variant="outline" className="text-amber-700">
+                            Required
+                          </Badge>
                         )}
-                        Upload
-                        <input
-                          type="file"
-                          multiple
-                          className="hidden"
-                          onChange={(event) => {
-                            void handleUpload(requirement, event.target.files);
-                            event.currentTarget.value = "";
-                          }}
-                        />
-                      </Label>
-                    </div>
-
-                    <div className="mt-3 space-y-2">
-                      {linkedFiles.length === 0 ? (
-                        <p className="text-sm text-muted-foreground">No files linked yet.</p>
-                      ) : (
-                        linkedFiles.map((file) => (
-                          <div key={file.id} className="flex items-center justify-between rounded-md bg-muted px-3 py-2 text-sm">
-                            <span className="truncate">{file.displayName || file.originalFilename}</span>
-                            <span className="text-xs text-muted-foreground">
-                              {new Date(file.createdAt).toLocaleDateString()}
-                            </span>
-                          </div>
-                        ))
-                      )}
-                    </div>
-
-                    {unlinkedFiles.length > 0 && (
-                      <div className="mt-3 border-t pt-3">
-                        <p className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                          Reuse Existing Deal Files
-                        </p>
-                        <div className="space-y-2">
-                          {unlinkedFiles.slice(0, 6).map((file) => (
-                            <div key={`${requirement.key}-${file.id}`} className="flex items-center justify-between gap-3 rounded-md border px-3 py-2 text-sm">
-                              <span className="truncate">{file.displayName || file.originalFilename}</span>
-                              <Button
-                                type="button"
-                                variant="outline"
-                                size="sm"
-                                onClick={() => void handleLinkExisting(file.id, requirement.key)}
-                              >
-                                Link
-                              </Button>
-                            </div>
-                          ))}
-                        </div>
                       </div>
+                      <p className="mt-1 text-sm text-muted-foreground">
+                        {requirement.hint} Required category: {categoryLabel}.
+                      </p>
+                    </div>
+                    <Label className="inline-flex cursor-pointer items-center gap-2 rounded-md border px-3 py-2 text-sm font-medium hover:bg-muted">
+                      {uploadingKey === requirement.key ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <Upload className="h-4 w-4" />
+                      )}
+                      Upload
+                      <input
+                        type="file"
+                        multiple
+                        className="hidden"
+                        onChange={(event) => {
+                          void handleUpload(requirement, event.target.files);
+                          event.currentTarget.value = "";
+                        }}
+                      />
+                    </Label>
+                  </div>
+
+                  <div className="mt-3 space-y-2">
+                    {linkedFiles.length === 0 ? (
+                      <p className="text-sm text-muted-foreground">No files linked yet.</p>
+                    ) : (
+                      linkedFiles.map((file) => (
+                        <div key={file.id} className="flex items-center justify-between rounded-md bg-muted px-3 py-2 text-sm">
+                          <span className="truncate">{file.displayName || file.originalFilename}</span>
+                          <span className="text-xs text-muted-foreground">
+                            {new Date(file.createdAt).toLocaleDateString()}
+                          </span>
+                        </div>
+                      ))
                     )}
                   </div>
-                );
-              })}
-            </CardContent>
-          )}
+
+                  {unlinkedFiles.length > 0 && (
+                    <div className="mt-3 border-t pt-3">
+                      <p className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                        Reuse Existing Deal Files
+                      </p>
+                      <div className="space-y-2">
+                        {unlinkedFiles.slice(0, 6).map((file) => (
+                          <div key={`${requirement.key}-${file.id}`} className="flex items-center justify-between gap-3 rounded-md border px-3 py-2 text-sm">
+                            <span className="truncate">{file.displayName || file.originalFilename}</span>
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              onClick={() => void handleLinkExisting(file.id, requirement.key)}
+                            >
+                              Link
+                            </Button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </CardContent>
         </Card>
 
-        {workflowRoute === "service" && (
+        {activeWorkflowRoute === "service" && (
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2">

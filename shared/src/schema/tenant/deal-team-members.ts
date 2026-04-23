@@ -11,6 +11,8 @@ export const dealTeamRoleEnum = pgEnum("deal_team_role", [
   "superintendent",
   "estimator",
   "project_manager",
+  "client_services",
+  "operations",
   "foreman",
   "other",
 ]);

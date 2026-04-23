@@ -1,4 +1,5 @@
 import { Router } from "express";
+import type { WorkflowFamily } from "@trock-crm/shared/types";
 import {
   getAllStages,
   getActiveLostReasons,
@@ -11,7 +12,8 @@ const router = Router();
 // GET /api/pipeline/stages — all pipeline stages (ordered)
 router.get("/stages", async (req, res, next) => {
   try {
-    const stages = await getAllStages();
+    const workflowFamily = req.query.workflowFamily as WorkflowFamily | undefined;
+    const stages = await getAllStages(workflowFamily);
     await req.commitTransaction!();
     res.json({ stages });
   } catch (err) {

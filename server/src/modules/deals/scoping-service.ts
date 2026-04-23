@@ -116,11 +116,14 @@ function normalizeText(value: unknown): string | null | undefined {
 }
 
 function buildDealWritebackPatch(
-  patch: Pick<DealScopingPatch, "projectTypeId">,
+  patch: Partial<Pick<DealScopingPatch, "projectTypeId" | "workflowRoute">>,
   sectionData: DealScopingSectionData
 ): Partial<DealRow> {
   const updates: Partial<DealRow> = {};
 
+  if (patch.workflowRoute !== undefined) {
+    throw new AppError(400, "Use /api/deals/:id/routing-review for route changes");
+  }
   if (patch.projectTypeId !== undefined) {
     updates.projectTypeId = patch.projectTypeId;
   }
@@ -316,6 +319,12 @@ async function listLinkedScopingAttachments(
 
 function hasNonEmptyText(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
+}
+
+function resolveScopingWorkflowRoute(
+  workflowRoute: WorkflowRoute | null | undefined
+): WorkflowRoute {
+  return workflowRoute ?? "normal";
 }
 
 function getRequiredScopingAttachmentRequirements(
@@ -518,9 +527,10 @@ export async function evaluateDealScopingReadiness(
   const attachments = await listLinkedScopingAttachments(tenantDb, dealId);
   const sectionData = buildBaseSectionData(existingIntake, deal);
   const projectTypeId = existingIntake?.projectTypeId ?? deal.projectTypeId ?? null;
+  const workflowRoute = resolveScopingWorkflowRoute(deal.workflowRoute);
   const readiness = buildScopingReadiness({
     currentStatus: (existingIntake?.status ?? "draft") as DealScopingIntakeStatus,
-    workflowRoute: deal.workflowRoute,
+    workflowRoute,
     projectTypeId,
     sectionData,
     attachments,
@@ -536,7 +546,7 @@ export async function evaluateDealScopingReadiness(
         deal,
         userId: existingIntake.lastEditedBy,
         editorOfficeId: user.officeId,
-        route: deal.workflowRoute,
+        route: workflowRoute,
         projectTypeId,
         sectionData,
         readiness,
@@ -565,10 +575,11 @@ export async function activateDealScopingIntake(
   }
 
   const now = new Date();
+  const workflowRoute = resolveScopingWorkflowRoute(deal.workflowRoute);
   const [savedIntake] = await tenantDb
     .update(dealScopingIntake)
     .set({
-      workflowRouteSnapshot: deal.workflowRoute,
+      workflowRouteSnapshot: workflowRoute,
       status: "activated",
       activatedAt: existingIntake.activatedAt ?? now,
       updatedAt: now,
@@ -594,6 +605,10 @@ export async function upsertDealScopingIntake(
   patch: DealScopingPatch,
   userId: string
 ): Promise<DealScopingServiceResult> {
+  if (patch.workflowRoute !== undefined) {
+    throw new AppError(400, "Use /api/deals/:id/routing-review for route changes");
+  }
+
   const [deal, editor, existingIntake] = await Promise.all([
     getDealOrThrow(tenantDb, dealId),
     getUserOrThrow(tenantDb, userId),

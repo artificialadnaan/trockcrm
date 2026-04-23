@@ -60,6 +60,7 @@ describe("PropertyListPage", () => {
 
     expect(mocks.usePropertiesMock).toHaveBeenCalledWith({ search: "" });
     expect(html).toContain("1 property across 3 deals");
+    expect(html).toContain("New Property");
     expect(html).toContain("Alpha Roofing");
     expect(html).toContain("123 Main St");
     expect(html).toContain("2 leads");

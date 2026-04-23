@@ -1,6 +1,6 @@
-import { eq, and, desc, asc, sql, or, isNull, inArray } from "drizzle-orm";
+import { eq, and, desc, asc, sql, or, isNull, isNotNull, inArray } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
-import { taskResolutionState, tasks } from "@trock-crm/shared/schema";
+import { deals, jobQueue, taskResolutionState, tasks } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
 import { TASK_RULES } from "./rules/config.js";
@@ -44,6 +44,11 @@ export interface CreateTaskInput {
   dueTime?: string;
   remindAt?: string;
 }
+
+type CreatedTaskSideEffectsInput = {
+  actorUserId: string;
+  officeId: string;
+};
 
 export interface UpdateTaskInput {
   title?: string;
@@ -335,6 +340,8 @@ export async function getTasks(
         assignedToName,
         createdBy: tasks.createdBy,
         dealId: tasks.dealId,
+        dealName: deals.name,
+        dealNumber: deals.dealNumber,
         contactId: tasks.contactId,
         emailId: tasks.emailId,
         dueDate: tasks.dueDate,
@@ -350,6 +357,7 @@ export async function getTasks(
         updatedAt: tasks.updatedAt,
       })
       .from(tasks)
+      .leftJoin(deals, eq(tasks.dealId, deals.id))
       .where(where)
       .orderBy(
         // Priority-sectioned ordering per spec:
@@ -371,6 +379,92 @@ export async function getTasks(
     tasks: taskRows,
     pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
   };
+}
+
+export async function getProjectTaskScope(
+  tenantDb: TenantDb,
+  dealId: string,
+  userRole: string,
+  userId: string
+) {
+  const conditions = [
+    eq(deals.id, dealId),
+    eq(deals.isActive, true),
+    isNotNull(deals.procoreProjectId),
+  ];
+
+  if (userRole === "rep") {
+    conditions.push(eq(deals.assignedRepId, userId));
+  }
+
+  const [project] = await tenantDb
+    .select({
+      id: deals.id,
+      dealNumber: deals.dealNumber,
+      name: deals.name,
+      procoreProjectId: deals.procoreProjectId,
+    })
+    .from(deals)
+    .where(and(...conditions))
+    .limit(1);
+
+  return project ?? null;
+}
+
+export async function getProjectTasks(
+  tenantDb: TenantDb,
+  dealId: string,
+  userRole: string,
+  userId: string
+) {
+  const project = await getProjectTaskScope(tenantDb, dealId, userRole, userId);
+  if (!project) {
+    throw new AppError(404, "Project not found");
+  }
+
+  const priorityRank = sql<number>`CASE ${tasks.priority}
+    WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 WHEN 'low' THEN 3 ELSE 4
+  END`;
+  const taskColumns = tasks as typeof tasks & {
+    scheduledFor: typeof tasks.dueDate;
+    waitingOn: typeof tasks.dueDate;
+    blockedBy: typeof tasks.dueDate;
+    startedAt: typeof tasks.createdAt;
+  };
+  const assignedToName = sql<string | null>`(SELECT display_name FROM public.users WHERE id = ${tasks.assignedTo})`.as("assignedToName");
+
+  return tenantDb
+    .select({
+      id: tasks.id,
+      title: tasks.title,
+      description: tasks.description,
+      type: tasks.type,
+      priority: tasks.priority,
+      status: tasks.status,
+      assignedTo: tasks.assignedTo,
+      assignedToName,
+      createdBy: tasks.createdBy,
+      dealId: tasks.dealId,
+      dealName: deals.name,
+      dealNumber: deals.dealNumber,
+      contactId: tasks.contactId,
+      emailId: tasks.emailId,
+      dueDate: tasks.dueDate,
+      dueTime: tasks.dueTime,
+      remindAt: tasks.remindAt,
+      scheduledFor: taskColumns.scheduledFor,
+      waitingOn: taskColumns.waitingOn,
+      blockedBy: taskColumns.blockedBy,
+      startedAt: taskColumns.startedAt,
+      completedAt: tasks.completedAt,
+      isOverdue: tasks.isOverdue,
+      createdAt: tasks.createdAt,
+      updatedAt: tasks.updatedAt,
+    })
+    .from(tasks)
+    .leftJoin(deals, eq(tasks.dealId, deals.id))
+    .where(eq(tasks.dealId, dealId))
+    .orderBy(desc(tasks.isOverdue), asc(priorityRank), asc(tasks.dueDate), asc(tasks.title));
 }
 
 /**
@@ -469,6 +563,50 @@ export async function createTask(tenantDb: TenantDb, input: CreateTaskInput) {
     .returning();
 
   return result[0];
+}
+
+export async function queueTaskCreateSideEffects(
+  tenantDb: TenantDb,
+  task: {
+    id: string;
+    title: string;
+    assignedTo: string;
+    dealId: string | null;
+  },
+  input: CreatedTaskSideEffectsInput
+) {
+  if (task.assignedTo !== input.actorUserId) {
+    await tenantDb.insert(jobQueue).values({
+      jobType: "domain_event",
+      payload: {
+        eventName: "task.assigned",
+        taskId: task.id,
+        assignedTo: task.assignedTo,
+        title: task.title,
+      },
+      officeId: input.officeId,
+      status: "pending",
+      runAfter: new Date(),
+    });
+  }
+
+  if (task.dealId) {
+    await tenantDb.insert(jobQueue).values({
+      jobType: "ai_refresh_copilot",
+      payload: {
+        dealId: task.dealId,
+        reason: "task_created",
+        taskId: task.id,
+      },
+      officeId: input.officeId,
+      status: "pending",
+      runAfter: new Date(),
+    });
+  }
+
+  return {
+    shouldEmitAssignmentEvent: task.assignedTo !== input.actorUserId,
+  };
 }
 
 /**

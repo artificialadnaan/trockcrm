@@ -10,5 +10,21 @@ export { procoreSyncControls, procoreSyncModeEnum } from "./procore-sync-control
 export { procoreReconciliationState, procoreReconciliationStatusEnum } from "./procore-reconciliation-state.js";
 export { procoreSyncState, procoreEntityTypeEnum, syncDirectionEnum, syncStatusEnum } from "./procore-sync-state.js";
 export { procoreWebhookLog } from "./procore-webhook-log.js";
+export { hubspotOwnerMappings } from "./hubspot-owner-mappings.js";
 export { userGraphTokens, graphTokenStatusEnum } from "./user-graph-tokens.js";
+export { userExternalIdentities, externalUserSourceEnum } from "./user-external-identities.js";
+export { userLocalAuth } from "./user-local-auth.js";
+export { userLocalAuthEvents, localAuthEventTypeEnum } from "./user-local-auth-events.js";
+export { userCommissionSettings } from "./user-commission-settings.js";
 export { jobQueue, jobStatusEnum } from "./job-queue.js";
+export {
+  costCatalogSources,
+  costCatalogSnapshotVersions,
+  costCatalogSyncRuns,
+} from "./cost-catalog-sources.js";
+export {
+  costCatalogCodes,
+  costCatalogItemCodes,
+  costCatalogItems,
+  costCatalogPrices,
+} from "./cost-catalog-items.js";

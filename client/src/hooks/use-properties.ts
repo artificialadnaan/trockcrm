@@ -176,3 +176,15 @@ export function usePropertyDetail(propertyId: string | undefined) {
 
   return { property, leads, deals, loading, error, refetch: fetchProperty };
 }
+
+export async function createProperty(input: {
+  companyId: string;
+  name: string;
+  address?: string | null;
+  city?: string | null;
+  state?: string | null;
+  zip?: string | null;
+  notes?: string | null;
+}) {
+  return api<{ property: PropertySurface }>("/properties", { method: "POST", json: input });
+}

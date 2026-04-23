@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../lib/api";
+import {
+  mapStructuredResolveReasonToLegacyResolutionReason,
+  type EscalateConclusionPayload,
+  type ResolveConclusionPayload,
+  type SnoozeConclusionPayload,
+} from "@/lib/intervention-outcome-taxonomy";
 
 export type InterventionStatusFilter = "all" | "open" | "snoozed" | "resolved";
 export type InterventionResolutionReason =
@@ -9,6 +15,11 @@ export type InterventionResolutionReason =
   | "false_positive"
   | "duplicate_case"
   | "issue_no_longer_relevant";
+
+export type InterventionConclusionPayload =
+  | ResolveConclusionPayload
+  | SnoozeConclusionPayload
+  | EscalateConclusionPayload;
 
 export interface InterventionMutationResult {
   updatedCount: number;
@@ -117,18 +128,6 @@ export interface InterventionCaseDetail {
     metadataJson: Record<string, unknown> | null;
   }>;
 }
-
-export const INTERVENTION_RESOLUTION_OPTIONS: Array<{
-  value: InterventionResolutionReason;
-  label: string;
-}> = [
-  { value: "task_completed", label: "Task completed" },
-  { value: "follow_up_completed", label: "Follow-up completed" },
-  { value: "owner_aligned", label: "Owner aligned" },
-  { value: "false_positive", label: "False positive" },
-  { value: "duplicate_case", label: "Duplicate case" },
-  { value: "issue_no_longer_relevant", label: "Issue no longer relevant" },
-];
 
 export function buildAdminInterventionQuery(input: {
   page?: number;
@@ -412,43 +411,50 @@ export async function batchAssignInterventions(input: {
 
 export async function batchSnoozeInterventions(input: {
   caseIds: string[];
-  snoozedUntil: string;
-  notes?: string | null;
+  conclusion: SnoozeConclusionPayload;
 }) {
   return api<InterventionMutationResult>("/ai/ops/interventions/batch-snooze", {
     method: "POST",
     json: {
       caseIds: input.caseIds,
-      snoozedUntil: localDateTimeInputToIso(input.snoozedUntil),
-      notes: input.notes ?? null,
+      snoozedUntil: localDateTimeInputToIso(input.conclusion.snoozedUntil),
+      conclusion: {
+        ...input.conclusion,
+        notes: input.conclusion.notes ?? null,
+      },
     },
   });
 }
 
 export async function batchResolveInterventions(input: {
   caseIds: string[];
-  resolutionReason: InterventionResolutionReason;
-  notes?: string | null;
+  conclusion: ResolveConclusionPayload;
 }) {
   return api<InterventionMutationResult>("/ai/ops/interventions/batch-resolve", {
     method: "POST",
     json: {
       caseIds: input.caseIds,
-      resolutionReason: input.resolutionReason,
-      notes: input.notes ?? null,
+      resolutionReason: mapStructuredResolveReasonToLegacyResolutionReason(input.conclusion.reasonCode),
+      conclusion: {
+        ...input.conclusion,
+        notes: input.conclusion.notes ?? null,
+      },
     },
   });
 }
 
 export async function batchEscalateInterventions(input: {
   caseIds: string[];
-  notes?: string | null;
+  conclusion: EscalateConclusionPayload;
 }) {
   return api<InterventionMutationResult>("/ai/ops/interventions/batch-escalate", {
     method: "POST",
     json: {
       caseIds: input.caseIds,
-      notes: input.notes ?? null,
+      conclusion: {
+        ...input.conclusion,
+        notes: input.conclusion.notes ?? null,
+      },
     },
   });
 }
@@ -463,34 +469,40 @@ export async function assignIntervention(caseId: string, input: { assignedTo: st
   });
 }
 
-export async function snoozeIntervention(caseId: string, input: { snoozedUntil: string; notes?: string | null }) {
+export async function snoozeIntervention(caseId: string, input: { conclusion: SnoozeConclusionPayload }) {
   return api<InterventionMutationResult>(`/ai/ops/interventions/${caseId}/snooze`, {
     method: "POST",
     json: {
-      snoozedUntil: localDateTimeInputToIso(input.snoozedUntil),
-      notes: input.notes ?? null,
+      snoozedUntil: localDateTimeInputToIso(input.conclusion.snoozedUntil),
+      conclusion: {
+        ...input.conclusion,
+        notes: input.conclusion.notes ?? null,
+      },
     },
   });
 }
 
-export async function resolveIntervention(
-  caseId: string,
-  input: { resolutionReason: InterventionResolutionReason; notes?: string | null }
-) {
+export async function resolveIntervention(caseId: string, input: { conclusion: ResolveConclusionPayload }) {
   return api<InterventionMutationResult>(`/ai/ops/interventions/${caseId}/resolve`, {
     method: "POST",
     json: {
-      resolutionReason: input.resolutionReason,
-      notes: input.notes ?? null,
+      resolutionReason: mapStructuredResolveReasonToLegacyResolutionReason(input.conclusion.reasonCode),
+      conclusion: {
+        ...input.conclusion,
+        notes: input.conclusion.notes ?? null,
+      },
     },
   });
 }
 
-export async function escalateIntervention(caseId: string, input?: { notes?: string | null }) {
+export async function escalateIntervention(caseId: string, input: { conclusion: EscalateConclusionPayload }) {
   return api<InterventionMutationResult>(`/ai/ops/interventions/${caseId}/escalate`, {
     method: "POST",
     json: {
-      notes: input?.notes ?? null,
+      conclusion: {
+        ...input.conclusion,
+        notes: input.conclusion.notes ?? null,
+      },
     },
   });
 }

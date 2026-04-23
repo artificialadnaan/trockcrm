@@ -5,6 +5,7 @@ import {
   STAGE_GATE_APPROVAL_OPTIONS,
   STAGE_GATE_DOCUMENT_OPTIONS,
   STAGE_GATE_FIELD_OPTIONS,
+  STAGE_GATE_FIELD_GROUPS,
 } from "./stage-gate-options";
 
 describe("stage gate option helpers", () => {
@@ -28,5 +29,10 @@ describe("stage gate option helpers", () => {
     expect(STAGE_GATE_APPROVAL_OPTIONS.map((option) => option.value)).toEqual(["director", "admin"]);
     expect(STAGE_GATE_DOCUMENT_OPTIONS.some((option) => option.value === "contract")).toBe(true);
     expect(STAGE_GATE_FIELD_OPTIONS.some((option) => option.value === "expectedCloseDate")).toBe(true);
+    expect(STAGE_GATE_FIELD_OPTIONS.some((option) => option.value === "estimatedOpportunityValue")).toBe(true);
+    expect(
+      STAGE_GATE_FIELD_OPTIONS.some((option) => option.value === "qualification.stakeholderRole")
+    ).toBe(true);
+    expect(STAGE_GATE_FIELD_GROUPS.some((group) => group.key === "lead_company_prequal")).toBe(true);
   });
 });
