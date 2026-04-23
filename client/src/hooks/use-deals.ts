@@ -299,6 +299,7 @@ export async function preflightStageCheck(dealId: string, targetStageId: string)
     requiresOverride: boolean;
     overrideType: string | null;
     blockReason: string | null;
+    bidBoardLocked?: boolean;
     bidBoardOwnership?: {
       isOwned: boolean;
       sourceOfTruth: "crm" | "bid_board";

@@ -110,7 +110,7 @@ export function StageChangeDialog({
 
   const isBlocked = preflight != null && !preflight.allowed;
   const bidBoardOwnership = preflight?.bidBoardOwnership;
-  const isBidBoardLocked = Boolean(bidBoardOwnership?.isOwned && bidBoardOwnership.downstreamStagesReadOnly);
+  const isBidBoardLocked = Boolean(preflight?.bidBoardLocked);
   const isClosedLost = preflight?.targetStage.slug === "closed_lost";
   const isClosedWon = preflight?.targetStage.slug === "closed_won";
 

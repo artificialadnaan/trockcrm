@@ -30,6 +30,7 @@ const { validateStageGate } = await import("../../../src/modules/deals/stage-gat
 const scopingService = await import("../../../src/modules/deals/scoping-service.js");
 const { createStageTimers } = await import("../../../src/modules/deals/timer-service.js");
 const { changeDealStage } = await import("../../../src/modules/deals/stage-change.js");
+const pipelineService = await import("../../../src/modules/pipeline/service.js");
 
 type FakeDeal = {
   id: string;
@@ -263,5 +264,48 @@ describe("changeDealStage", () => {
 
     expect(tenantDb.state.deals[0]?.stageId).toBe("stage-estimating");
     expect(tenantDb.state.stageHistory).toHaveLength(0);
+  });
+
+  it("fails closed when the estimating boundary stage config is missing for an owned deal", async () => {
+    const tenantDb = createTenantDb({
+      stageId: "stage-estimating",
+      isBidBoardOwned: true,
+      bidBoardStageSlug: "estimating",
+      readOnlySyncedAt: new Date("2026-04-21T12:00:00.000Z"),
+    });
+
+    vi.mocked(pipelineService.getStageBySlug).mockResolvedValueOnce(null as never);
+    vi.mocked(validateStageGate).mockResolvedValue({
+      allowed: true,
+      isBackwardMove: false,
+      requiresOverride: false,
+      targetStage: {
+        id: "stage-bid-sent",
+        name: "Bid Sent",
+        slug: "bid_sent",
+        isTerminal: false,
+        displayOrder: 2,
+      },
+      currentStage: {
+        id: "stage-estimating",
+        name: "Estimating",
+        slug: "estimating",
+        isTerminal: false,
+        displayOrder: 1,
+      },
+    } as never);
+
+    await expect(
+      changeDealStage(tenantDb as never, {
+        dealId: "deal-1",
+        targetStageId: "stage-bid-sent",
+        userId: "user-1",
+        userRole: "director",
+      })
+    ).rejects.toMatchObject<AppError>({
+      statusCode: 500,
+      code: "BID_BOARD_BOUNDARY_STAGE_MISSING",
+      message: "Estimating stage configuration is required to enforce the Bid Board ownership boundary.",
+    });
   });
 });

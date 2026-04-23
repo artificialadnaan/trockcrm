@@ -52,7 +52,9 @@ vi.mock("@/components/ui/dropdown-menu", () => ({
   DropdownMenu: ({ children }: { children: ReactNode }) => <div>{children}</div>,
   DropdownMenuTrigger: ({ render }: { render: ReactNode }) => <>{render}</>,
   DropdownMenuContent: ({ children }: { children: ReactNode }) => <div>{children}</div>,
-  DropdownMenuItem: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  DropdownMenuItem: ({ children, disabled }: { children: ReactNode; disabled?: boolean }) => (
+    <div data-disabled={disabled ? "true" : "false"}>{children}</div>
+  ),
 }));
 
 vi.mock("@/components/deals/deal-stage-badge", () => ({
@@ -141,6 +143,72 @@ function renderPage() {
   );
 }
 
+function makeDealDetail(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "deal-1",
+    dealNumber: "TR-2026-0001",
+    name: "Palm Villas",
+    stageId: "stage-estimating",
+    workflowRoute: "normal",
+    assignedRepId: "rep-1",
+    companyId: "company-1",
+    propertyId: "property-1",
+    sourceLeadId: "lead-1",
+    primaryContactId: null,
+    ddEstimate: null,
+    bidEstimate: null,
+    awardedAmount: null,
+    changeOrderTotal: "0",
+    description: "Exterior refresh",
+    propertyAddress: "123 Palm Way",
+    propertyCity: "Dallas",
+    propertyState: "TX",
+    propertyZip: "75201",
+    projectTypeId: null,
+    regionId: null,
+    source: "referral",
+    winProbability: 50,
+    procoreProjectId: null,
+    procoreBidId: null,
+    procoreLastSyncedAt: null,
+    lostReasonId: null,
+    lostNotes: null,
+    lostCompetitor: null,
+    lostAt: null,
+    expectedCloseDate: null,
+    actualCloseDate: null,
+    lastActivityAt: null,
+    stageEnteredAt: "2026-04-21T10:00:00.000Z",
+    isActive: true,
+    hubspotDealId: null,
+    createdAt: "2026-04-20T10:00:00.000Z",
+    updatedAt: "2026-04-21T10:00:00.000Z",
+    proposalStatus: "drafting",
+    proposalSentAt: null,
+    proposalAcceptedAt: null,
+    proposalRevisionCount: 0,
+    proposalNotes: null,
+    estimatingSubstage: "building_estimate",
+    isBidBoardOwned: true,
+    bidBoardStageSlug: "estimating",
+    readOnlySyncedAt: "2026-04-21T10:00:00.000Z",
+    bidBoardOwnership: {
+      isOwned: true,
+      sourceOfTruth: "bid_board",
+      handoffStageSlug: "estimating",
+      downstreamStagesReadOnly: true,
+      canEditInCrm: ["deal details", "files", "activity", "notes"],
+      mirroredInCrm: ["stage progression", "proposal status", "estimating progress"],
+      reason: "Bid Board now owns downstream progression after the deal entered estimating.",
+      message: "Bid Board is now the source of truth once this deal entered estimating.",
+    },
+    stageHistory: [],
+    approvals: [],
+    changeOrders: [],
+    ...overrides,
+  };
+}
+
 describe("DealDetailPage", () => {
   beforeEach(() => {
     mocks.useCompanyDetailMock.mockReset();
@@ -180,68 +248,7 @@ describe("DealDetailPage", () => {
       loading: false,
       error: null,
       refetch: vi.fn(),
-      deal: {
-        id: "deal-1",
-        dealNumber: "TR-2026-0001",
-        name: "Palm Villas",
-        stageId: "stage-estimating",
-        workflowRoute: "normal",
-        assignedRepId: "rep-1",
-        companyId: "company-1",
-        propertyId: "property-1",
-        sourceLeadId: "lead-1",
-        primaryContactId: null,
-        ddEstimate: null,
-        bidEstimate: null,
-        awardedAmount: null,
-        changeOrderTotal: "0",
-        description: "Exterior refresh",
-        propertyAddress: "123 Palm Way",
-        propertyCity: "Dallas",
-        propertyState: "TX",
-        propertyZip: "75201",
-        projectTypeId: null,
-        regionId: null,
-        source: "referral",
-        winProbability: 50,
-        procoreProjectId: null,
-        procoreBidId: null,
-        procoreLastSyncedAt: null,
-        lostReasonId: null,
-        lostNotes: null,
-        lostCompetitor: null,
-        lostAt: null,
-        expectedCloseDate: null,
-        actualCloseDate: null,
-        lastActivityAt: null,
-        stageEnteredAt: "2026-04-21T10:00:00.000Z",
-        isActive: true,
-        hubspotDealId: null,
-        createdAt: "2026-04-20T10:00:00.000Z",
-        updatedAt: "2026-04-21T10:00:00.000Z",
-        proposalStatus: "drafting",
-        proposalSentAt: null,
-        proposalAcceptedAt: null,
-        proposalRevisionCount: 0,
-        proposalNotes: null,
-        estimatingSubstage: "building_estimate",
-        isBidBoardOwned: true,
-        bidBoardStageSlug: "estimating",
-        readOnlySyncedAt: "2026-04-21T10:00:00.000Z",
-        bidBoardOwnership: {
-          isOwned: true,
-          sourceOfTruth: "bid_board",
-          handoffStageSlug: "estimating",
-          downstreamStagesReadOnly: true,
-          canEditInCrm: ["deal details", "files", "activity", "notes"],
-          mirroredInCrm: ["stage progression", "proposal status", "estimating progress"],
-          reason: "Bid Board now owns downstream progression after the deal entered estimating.",
-          message: "Bid Board is now the source of truth once this deal entered estimating.",
-        },
-        stageHistory: [],
-        approvals: [],
-        changeOrders: [],
-      },
+      deal: makeDealDetail(),
     });
   });
 
@@ -263,5 +270,21 @@ describe("DealDetailPage", () => {
     expect(html).toContain("Mirrored from Bid Board");
     expect(html).toContain("stage progression");
     expect(html).toContain("proposal status");
+  });
+
+  it("keeps estimating manually reachable for owned deals that are still before the boundary", () => {
+    mocks.useDealDetailMock.mockReturnValueOnce({
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      deal: makeDealDetail({ stageId: "stage-dd" }),
+    });
+
+    const html = renderPage();
+    const managedCount = (html.match(/Bid Board managed/g) ?? []).length;
+
+    expect(html).toContain("Move Stage");
+    expect(html).toContain('data-disabled="false">Estimating');
+    expect(managedCount).toBe(2);
   });
 });

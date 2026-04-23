@@ -103,6 +103,10 @@ export const BID_BOARD_MIRRORED_FIELDS = [
   "proposal status",
   "estimating progress",
 ] as const;
+export const BID_BOARD_STAGE_READ_ONLY_MESSAGE =
+  "Deal stage progression is read-only in CRM after estimating handoff. Bid Board is now the source of truth for downstream stages.";
+export const BID_BOARD_BOUNDARY_STAGE_MISSING_MESSAGE =
+  "Estimating stage configuration is required to enforce the Bid Board ownership boundary.";
 
 export interface DealBidBoardOwnershipState {
   isOwned: boolean;
@@ -194,17 +198,27 @@ export async function getEstimatingBoundaryStage(workflowRoute: WorkflowRoute) {
   return getStageBySlug(BID_BOARD_BOUNDARY_STAGE_SLUG, workflowFamilyForRoute(workflowRoute));
 }
 
+export async function getRequiredEstimatingBoundaryStage(workflowRoute: WorkflowRoute) {
+  const boundaryStage = await getEstimatingBoundaryStage(workflowRoute);
+  if (!boundaryStage) {
+    throw new AppError(
+      500,
+      BID_BOARD_BOUNDARY_STAGE_MISSING_MESSAGE,
+      "BID_BOARD_BOUNDARY_STAGE_MISSING"
+    );
+  }
+
+  return boundaryStage;
+}
+
 export function isBidBoardOwnedDownstreamStage(
   targetStage: { slug: string; displayOrder: number; isTerminal: boolean },
   estimatingBoundary: { displayOrder: number } | null
 ) {
-  if (!estimatingBoundary) {
-    return targetStage.slug !== BID_BOARD_BOUNDARY_STAGE_SLUG && targetStage.isTerminal;
-  }
-
   return (
+    Boolean(estimatingBoundary) &&
     targetStage.slug !== BID_BOARD_BOUNDARY_STAGE_SLUG &&
-    targetStage.displayOrder > estimatingBoundary.displayOrder
+    targetStage.displayOrder > (estimatingBoundary?.displayOrder ?? Number.POSITIVE_INFINITY)
   );
 }
 

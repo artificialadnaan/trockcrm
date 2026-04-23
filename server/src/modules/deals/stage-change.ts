@@ -14,7 +14,11 @@ import { validateStageGate } from "./stage-gate.js";
 import type { UserRole } from "@trock-crm/shared/types";
 import { createStageTimers } from "./timer-service.js";
 import { activateDealScopingIntake, evaluateDealScopingReadiness } from "./scoping-service.js";
-import { getEstimatingBoundaryStage, isBidBoardOwnedDownstreamStage } from "./service.js";
+import {
+  BID_BOARD_STAGE_READ_ONLY_MESSAGE,
+  getRequiredEstimatingBoundaryStage,
+  isBidBoardOwnedDownstreamStage,
+} from "./service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -108,7 +112,9 @@ export async function changeDealStage(
 
   // Step 3: Terminal stage enforcement
   const targetStage = gateResult.targetStage;
-  const estimatingBoundary = await getEstimatingBoundaryStage(currentDeal[0].workflowRoute);
+  const estimatingBoundary = currentDeal[0].isBidBoardOwned
+    ? await getRequiredEstimatingBoundaryStage(currentDeal[0].workflowRoute)
+    : null;
 
   if (
     currentDeal[0].isBidBoardOwned &&
@@ -116,7 +122,7 @@ export async function changeDealStage(
   ) {
     throw new AppError(
       403,
-      "Deal stage progression is read-only in CRM after estimating handoff. Bid Board is now the source of truth for downstream stages.",
+      BID_BOARD_STAGE_READ_ONLY_MESSAGE,
       "BID_BOARD_OWNED_STAGE_READ_ONLY"
     );
   }

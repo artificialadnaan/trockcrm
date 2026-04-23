@@ -44,6 +44,28 @@ import { formatCurrency, bestEstimate } from "@/lib/deal-utils";
 
 type Tab = "overview" | "lead" | "scoping" | "files" | "email" | "activity" | "timeline" | "history" | "team" | "estimates" | "punch_list" | "closeout";
 
+function isBidBoardManagedStage(
+  stage: { slug: string; displayOrder: number },
+  options: {
+    isBidBoardOwned: boolean;
+    handoffStageSlug: string;
+    handoffStageDisplayOrder: number | null;
+  }
+) {
+  if (!options.isBidBoardOwned) {
+    return false;
+  }
+
+  if (options.handoffStageDisplayOrder == null) {
+    return stage.slug !== options.handoffStageSlug;
+  }
+
+  return (
+    stage.slug !== options.handoffStageSlug &&
+    stage.displayOrder > options.handoffStageDisplayOrder
+  );
+}
+
 export function DealDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -68,8 +90,22 @@ export function DealDetailPage() {
   const backwardStages = stages.filter(
     (s) => s.displayOrder < (currentStage?.displayOrder ?? 0) && !s.isTerminal
   );
-  const readonlyForwardStages = isBidBoardOwned ? forwardStages : [];
-  const manualForwardStages = isBidBoardOwned ? [] : forwardStages;
+  const handoffStageSlug = bidBoardOwnership?.handoffStageSlug ?? "estimating";
+  const handoffStage = stages.find((s) => s.slug === handoffStageSlug);
+  const readonlyForwardStages = forwardStages.filter((stage) =>
+    isBidBoardManagedStage(stage, {
+      isBidBoardOwned,
+      handoffStageSlug,
+      handoffStageDisplayOrder: handoffStage?.displayOrder ?? null,
+    })
+  );
+  const manualForwardStages = forwardStages.filter((stage) =>
+    !isBidBoardManagedStage(stage, {
+      isBidBoardOwned,
+      handoffStageSlug,
+      handoffStageDisplayOrder: handoffStage?.displayOrder ?? null,
+    })
+  );
 
   const handleStageChange = (stageId: string) => {
     setTargetStageId(stageId);
