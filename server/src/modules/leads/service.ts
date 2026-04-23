@@ -5,6 +5,7 @@ import {
   contacts,
   deals,
   leads,
+  projectTypeConfig,
   properties,
   userOfficeAccess,
   users,
@@ -12,7 +13,8 @@ import {
 import type * as schema from "@trock-crm/shared/schema";
 import type { WorkflowFamily } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
-import { getStageById } from "../pipeline/service.js";
+import { getActiveProjectTypes, getStageById } from "../pipeline/service.js";
+import { assertLeadStageTransitionAllowed } from "./stage-transition-service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -35,6 +37,12 @@ export interface CreateLeadInput {
   name: string;
   source?: string;
   description?: string;
+  projectTypeId?: string | null;
+  qualificationPayload?: Record<string, string | boolean | number | null>;
+  projectTypeQuestionPayload?: {
+    projectTypeId: string | null;
+    answers: Record<string, string | boolean | number | null>;
+  };
 }
 
 export interface UpdateLeadInput {
@@ -45,21 +53,80 @@ export interface UpdateLeadInput {
   name?: string;
   source?: string | null;
   description?: string | null;
+  projectTypeId?: string | null;
+  qualificationPayload?: Record<string, string | boolean | number | null>;
+  projectTypeQuestionPayload?: {
+    projectTypeId: string | null;
+    answers: Record<string, string | boolean | number | null>;
+  };
   status?: "open" | "disqualified";
 }
 
 interface LeadServiceDependencies {
   getStageById: (id: string, workflowFamily?: WorkflowFamily) => Promise<{
     id: string;
+    name?: string;
+    slug?: string;
+    displayOrder?: number;
     isTerminal: boolean;
   } | null>;
+  getActiveProjectTypes: typeof getActiveProjectTypes;
   now: () => Date;
 }
 
 const defaultDependencies: LeadServiceDependencies = {
   getStageById,
+  getActiveProjectTypes,
   now: () => new Date(),
 };
+
+async function resolveProjectType(
+  projectTypeId: string | null | undefined,
+  getProjectTypes: typeof getActiveProjectTypes
+) {
+  if (!projectTypeId) {
+    return null;
+  }
+
+  const projectTypes = await getProjectTypes();
+  const projectType = projectTypes.find((entry) => entry.id === projectTypeId) ?? null;
+
+  if (!projectType) {
+    throw new AppError(400, "Project type not found");
+  }
+
+  return projectType;
+}
+
+function normalizeQualificationPayload(
+  payload: Record<string, string | boolean | number | null> | undefined
+) {
+  return payload ?? {};
+}
+
+function normalizeProjectTypeQuestionPayload(
+  projectTypeId: string | null,
+  payload:
+    | {
+        projectTypeId: string | null;
+        answers: Record<string, string | boolean | number | null>;
+      }
+    | undefined
+) {
+  return {
+    projectTypeId,
+    answers: payload?.answers ?? {},
+  };
+}
+
+function coerceExistingQuestionPayload(value: unknown, projectTypeId: string | null) {
+  const payload = value as { projectTypeId?: string | null; answers?: Record<string, string | boolean | number | null> } | null;
+
+  return {
+    projectTypeId: payload?.projectTypeId ?? projectTypeId,
+    answers: payload?.answers ?? {},
+  };
+}
 
 async function decorateLeads(
   tenantDb: TenantDb,
@@ -71,9 +138,10 @@ async function decorateLeads(
 
   const companyIds = [...new Set(rows.map((lead) => lead.companyId).filter(Boolean))];
   const propertyIds = [...new Set(rows.map((lead) => lead.propertyId).filter(Boolean))];
+  const projectTypeIds = [...new Set(rows.map((lead) => lead.projectTypeId).filter(Boolean))];
   const leadIds = rows.map((lead) => lead.id);
 
-  const [companyRows, propertyRows, convertedDealRows] = await Promise.all([
+  const [companyRows, propertyRows, projectTypeRows, convertedDealRows] = await Promise.all([
     companyIds.length === 0
       ? []
       : tenantDb
@@ -93,6 +161,16 @@ async function decorateLeads(
           })
           .from(properties)
           .where(inArray(properties.id, propertyIds)),
+    projectTypeIds.length === 0
+      ? []
+      : tenantDb
+          .select({
+            id: projectTypeConfig.id,
+            name: projectTypeConfig.name,
+            slug: projectTypeConfig.slug,
+          })
+          .from(projectTypeConfig)
+          .where(inArray(projectTypeConfig.id, projectTypeIds as string[])),
     tenantDb
       .select({
         sourceLeadId: deals.sourceLeadId,
@@ -105,6 +183,7 @@ async function decorateLeads(
 
   const companyMap = new Map(companyRows.map((company) => [company.id, company.name]));
   const propertyMap = new Map(propertyRows.map((property) => [property.id, property]));
+  const projectTypeMap = new Map(projectTypeRows.map((projectType) => [projectType.id, projectType]));
   const convertedDealMap = new Map(
     convertedDealRows
       .filter((deal) => deal.sourceLeadId)
@@ -115,6 +194,7 @@ async function decorateLeads(
     ...lead,
     companyName: companyMap.get(lead.companyId) ?? null,
     property: propertyMap.get(lead.propertyId) ?? null,
+    projectType: lead.projectTypeId ? projectTypeMap.get(lead.projectTypeId) ?? null : null,
     convertedDealId: convertedDealMap.get(lead.id)?.id ?? null,
     convertedDealNumber: convertedDealMap.get(lead.id)?.dealNumber ?? null,
   }));
@@ -276,6 +356,7 @@ export function createLeadService(
 
     await validateLeadHierarchy(tenantDb, input);
     await validateAssignee(tenantDb, input.assignedRepId, input.officeId);
+    await resolveProjectType(input.projectTypeId ?? null, deps.getActiveProjectTypes);
 
     const now = deps.now();
     const [lead] = await tenantDb
@@ -290,6 +371,12 @@ export function createLeadService(
         status: "open",
         source: input.source ?? null,
         description: input.description ?? null,
+        projectTypeId: input.projectTypeId ?? null,
+        qualificationPayload: normalizeQualificationPayload(input.qualificationPayload),
+        projectTypeQuestionPayload: normalizeProjectTypeQuestionPayload(
+          input.projectTypeId ?? null,
+          input.projectTypeQuestionPayload
+        ),
         stageEnteredAt: now,
         isActive: true,
         createdAt: now,
@@ -317,12 +404,64 @@ export function createLeadService(
     }
 
     const updates: Record<string, unknown> = {};
+    const effectiveProjectTypeId =
+      input.projectTypeId !== undefined ? input.projectTypeId : existing.projectTypeId;
 
     if (input.stageId !== undefined) {
       const stage = await deps.getStageById(input.stageId, "lead");
       if (!stage) {
         throw new AppError(400, "Invalid lead stage ID");
       }
+
+      const currentStage = await deps.getStageById(existing.stageId, "lead");
+      if (!currentStage?.slug || currentStage.displayOrder == null || !currentStage.name) {
+        throw new AppError(500, "Current lead stage config is incomplete");
+      }
+      if (!stage.slug || stage.displayOrder == null || !stage.name) {
+        throw new AppError(500, "Target lead stage config is incomplete");
+      }
+
+      const projectType = await resolveProjectType(effectiveProjectTypeId ?? null, deps.getActiveProjectTypes);
+      assertLeadStageTransitionAllowed({
+        lead: {
+          id: existing.id,
+          stageId: existing.stageId,
+          stageSlug: currentStage.slug,
+          projectTypeId: effectiveProjectTypeId ?? null,
+          qualificationPayload:
+            input.qualificationPayload !== undefined
+              ? normalizeQualificationPayload(input.qualificationPayload)
+              : normalizeQualificationPayload(
+                  existing.qualificationPayload as Record<string, string | boolean | number | null>
+                ),
+          projectTypeQuestionPayload:
+            input.projectTypeQuestionPayload !== undefined || input.projectTypeId !== undefined
+              ? normalizeProjectTypeQuestionPayload(
+                  effectiveProjectTypeId ?? null,
+                  input.projectTypeQuestionPayload
+                )
+              : coerceExistingQuestionPayload(
+                  existing.projectTypeQuestionPayload,
+                  effectiveProjectTypeId ?? null
+                ),
+        },
+        currentStage: {
+          id: currentStage.id,
+          slug: currentStage.slug,
+          name: currentStage.name,
+          isTerminal: currentStage.isTerminal,
+          displayOrder: currentStage.displayOrder,
+        },
+        targetStage: {
+          id: stage.id,
+          slug: stage.slug,
+          name: stage.name,
+          isTerminal: stage.isTerminal,
+          displayOrder: stage.displayOrder,
+        },
+        projectTypeSlug: projectType?.slug ?? null,
+      });
+
       updates.stageId = input.stageId;
       updates.stageEnteredAt = deps.now();
     }
@@ -339,9 +478,23 @@ export function createLeadService(
       updates.primaryContactId = input.primaryContactId;
     }
 
+    if (input.projectTypeId !== undefined) {
+      await resolveProjectType(input.projectTypeId, deps.getActiveProjectTypes);
+      updates.projectTypeId = input.projectTypeId;
+    }
+
     if (input.name !== undefined) updates.name = input.name;
     if (input.source !== undefined) updates.source = input.source;
     if (input.description !== undefined) updates.description = input.description;
+    if (input.qualificationPayload !== undefined) {
+      updates.qualificationPayload = normalizeQualificationPayload(input.qualificationPayload);
+    }
+    if (input.projectTypeQuestionPayload !== undefined || input.projectTypeId !== undefined) {
+      updates.projectTypeQuestionPayload = normalizeProjectTypeQuestionPayload(
+        effectiveProjectTypeId ?? null,
+        input.projectTypeQuestionPayload
+      );
+    }
 
     if (input.status !== undefined) {
       if (input.status === "open" || input.status === "disqualified") {

@@ -5,9 +5,13 @@ import { requireRole } from "../../middleware/rbac.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { eventBus } from "../../events/bus.js";
 import {
+  BID_BOARD_STAGE_READ_ONLY_MESSAGE,
+  buildBidBoardOwnershipState,
   getDeals,
   getDealById,
   getDealDetail,
+  getRequiredEstimatingBoundaryStage,
+  isBidBoardOwnedDownstreamStage,
   createDeal,
   updateDeal,
   deleteDeal,
@@ -62,6 +66,7 @@ import {
   routeRevisionToEstimating,
   upsertDealScopingIntake,
 } from "./scoping-service.js";
+import { inferDealBidBoardOwnership } from "./workflow-backfill.js";
 
 const router = Router();
 
@@ -273,7 +278,10 @@ router.get("/:id/scoping-intake", async (req, res, next) => {
 // PATCH /api/deals/:id/scoping-intake — autosave scoping intake
 router.patch("/:id/scoping-intake", async (req, res, next) => {
   try {
-    const result = await upsertDealScopingIntake(req.tenantDb!, req.params.id, req.body, req.user!.id);
+    const patch = { ...req.body };
+    delete patch.workflowRoute;
+
+    const result = await upsertDealScopingIntake(req.tenantDb!, req.params.id, patch, req.user!.id);
     const officeId = req.user!.activeOfficeId ?? req.user!.officeId;
     const eventsToEmit: Array<{ name: string; payload: Record<string, unknown> }> = [];
 
@@ -532,8 +540,50 @@ router.post("/:id/stage/preflight", async (req, res, next) => {
       req.user!.id
     );
 
+    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    const inferredOwnership = deal
+      ? inferDealBidBoardOwnership({
+          id: deal.id,
+          stageSlug: result.currentStage.slug,
+          stageEnteredAt: deal.stageEnteredAt,
+          workflowRoute: deal.workflowRoute,
+          pipelineTypeSnapshot: deal.pipelineTypeSnapshot,
+          ddEstimate: deal.ddEstimate,
+          bidEstimate: deal.bidEstimate,
+          awardedAmount: deal.awardedAmount,
+          sourceLeadId: deal.sourceLeadId,
+          isBidBoardOwned: deal.isBidBoardOwned,
+          bidBoardStageSlug: deal.bidBoardStageSlug,
+          bidBoardStageEnteredAt: deal.bidBoardStageEnteredAt,
+          bidBoardMirrorSourceEnteredAt: deal.bidBoardMirrorSourceEnteredAt,
+          isReadOnlyMirror: deal.isReadOnlyMirror,
+          readOnlySyncedAt: deal.readOnlySyncedAt,
+        })
+      : null;
+    const bidBoardOwnership = deal
+      ? buildBidBoardOwnershipState({
+          ...deal,
+          isBidBoardOwned: inferredOwnership?.isBidBoardOwned ?? deal.isBidBoardOwned,
+        })
+      : null;
+    const estimatingBoundary =
+      deal && inferredOwnership?.isBidBoardOwned
+        ? await getRequiredEstimatingBoundaryStage(deal.workflowRoute)
+        : null;
+    const isBidBoardLocked =
+      Boolean(inferredOwnership?.isBidBoardOwned) &&
+      isBidBoardOwnedDownstreamStage(result.targetStage, estimatingBoundary);
+
     await req.commitTransaction!();
-    res.json(result);
+    res.json({
+      ...result,
+      allowed: isBidBoardLocked ? false : result.allowed,
+      blockReason: isBidBoardLocked
+        ? BID_BOARD_STAGE_READ_ONLY_MESSAGE
+        : result.blockReason,
+      bidBoardLocked: isBidBoardLocked,
+      bidBoardOwnership,
+    });
   } catch (err) {
     next(err);
   }

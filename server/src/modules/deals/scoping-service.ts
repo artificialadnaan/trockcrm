@@ -4,6 +4,9 @@ import { dealScopingIntake, dealTeamMembers, deals, files, tasks, users } from "
 import type * as schema from "@trock-crm/shared/schema";
 import type { DealScopingIntakeStatus, WorkflowRoute } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
+import { getStageById } from "../pipeline/service.js";
+import { BID_BOARD_STAGE_READ_ONLY_MESSAGE } from "./service.js";
+import { inferDealBidBoardOwnership } from "./workflow-backfill.js";
 import { evaluateScopingReadiness, type DealScopingReadinessSnapshot, type DealScopingSectionData } from "./scoping-rules.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -12,7 +15,6 @@ type DealRow = typeof deals.$inferSelect;
 type DealScopingIntakeRow = typeof dealScopingIntake.$inferSelect;
 
 export type DealScopingPatch = {
-  workflowRoute?: WorkflowRoute;
   projectTypeId?: string | null;
   sectionData?: DealScopingSectionData;
 } & Record<string, unknown>;
@@ -114,14 +116,10 @@ function normalizeText(value: unknown): string | null | undefined {
 }
 
 function buildDealWritebackPatch(
-  patch: Pick<DealScopingPatch, "workflowRoute" | "projectTypeId">,
+  patch: Pick<DealScopingPatch, "projectTypeId">,
   sectionData: DealScopingSectionData
 ): Partial<DealRow> {
   const updates: Partial<DealRow> = {};
-
-  if (patch.workflowRoute !== undefined) {
-    updates.workflowRoute = patch.workflowRoute;
-  }
 
   if (patch.projectTypeId !== undefined) {
     updates.projectTypeId = patch.projectTypeId;
@@ -191,6 +189,10 @@ function buildSeedSectionDataFromDeal(deal: DealRow): DealScopingSectionData {
   return sectionData;
 }
 
+function resolveScopingWorkspaceRoute(deal: DealRow): WorkflowRoute {
+  return deal.workflowRoute;
+}
+
 function buildBaseSectionData(
   existingIntake: DealScopingIntakeRow | null,
   deal: DealRow
@@ -209,6 +211,35 @@ async function getDealOrThrow(tenantDb: TenantDb, dealId: string) {
   }
 
   return deal;
+}
+
+async function assertDealScopingEditable(deal: DealRow) {
+  const currentStage = await getStageById(deal.stageId);
+  const ownership = inferDealBidBoardOwnership({
+    id: deal.id,
+    stageSlug: currentStage?.slug ?? null,
+    stageEnteredAt: deal.stageEnteredAt,
+    workflowRoute: deal.workflowRoute,
+    pipelineTypeSnapshot: deal.pipelineTypeSnapshot,
+    ddEstimate: deal.ddEstimate,
+    bidEstimate: deal.bidEstimate,
+    awardedAmount: deal.awardedAmount,
+    sourceLeadId: deal.sourceLeadId,
+    isBidBoardOwned: deal.isBidBoardOwned,
+    bidBoardStageSlug: deal.bidBoardStageSlug,
+    bidBoardStageEnteredAt: deal.bidBoardStageEnteredAt,
+    bidBoardMirrorSourceEnteredAt: deal.bidBoardMirrorSourceEnteredAt,
+    isReadOnlyMirror: deal.isReadOnlyMirror,
+    readOnlySyncedAt: deal.readOnlySyncedAt,
+  });
+
+  if (!ownership.reopenInCrmEditableFlow) {
+    throw new AppError(
+      403,
+      BID_BOARD_STAGE_READ_ONLY_MESSAGE,
+      "BID_BOARD_OWNED_STAGE_READ_ONLY"
+    );
+  }
 }
 
 async function getUserOrThrow(tenantDb: TenantDb, userId: string) {
@@ -239,6 +270,8 @@ export async function getOrCreateDealScopingIntake(
   const existingIntake = await getExistingIntake(tenantDb, dealId);
 
   if (existingIntake) {
+    const deal = await getDealOrThrow(tenantDb, dealId);
+    await assertDealScopingEditable(deal);
     const readiness = await evaluateDealScopingReadiness(tenantDb, dealId);
     const refreshedIntake = (await getExistingIntake(tenantDb, dealId)) ?? existingIntake;
 
@@ -250,6 +283,7 @@ export async function getOrCreateDealScopingIntake(
   }
 
   const deal = await getDealOrThrow(tenantDb, dealId);
+  await assertDealScopingEditable(deal);
 
   return upsertDealScopingIntake(
     tenantDb,
@@ -389,6 +423,7 @@ export async function linkDealFileToScopingRequirement(
   userId: string
 ) {
   const deal = await getDealOrThrow(tenantDb, dealId);
+  await assertDealScopingEditable(deal);
   await getUserOrThrow(tenantDb, userId);
 
   const [file] = await tenantDb
@@ -478,6 +513,7 @@ export async function evaluateDealScopingReadiness(
   dealId: string
 ): Promise<DealScopingReadinessResult> {
   const deal = await getDealOrThrow(tenantDb, dealId);
+  await assertDealScopingEditable(deal);
   const existingIntake = await getExistingIntake(tenantDb, dealId);
   const attachments = await listLinkedScopingAttachments(tenantDb, dealId);
   const sectionData = buildBaseSectionData(existingIntake, deal);
@@ -516,6 +552,7 @@ export async function activateDealScopingIntake(
   dealId: string
 ): Promise<DealScopingServiceResult> {
   const deal = await getDealOrThrow(tenantDb, dealId);
+  await assertDealScopingEditable(deal);
   const existingIntake = await getExistingIntake(tenantDb, dealId);
 
   if (!existingIntake) {
@@ -562,6 +599,7 @@ export async function upsertDealScopingIntake(
     getUserOrThrow(tenantDb, userId),
     getExistingIntake(tenantDb, dealId),
   ]);
+  await assertDealScopingEditable(deal);
   const baseSectionData = buildBaseSectionData(existingIntake, deal);
   const nextSectionData = mergeSectionData(
     baseSectionData,
@@ -580,7 +618,7 @@ export async function upsertDealScopingIntake(
       .returning();
   }
 
-  const nextRoute = patch.workflowRoute ?? dealUpdates.workflowRoute ?? deal.workflowRoute;
+  const nextRoute = resolveScopingWorkspaceRoute(deal);
   const projectTypeId =
     patch.projectTypeId === undefined
       ? existingIntake?.projectTypeId ?? deal.projectTypeId ?? null
@@ -598,7 +636,6 @@ export async function upsertDealScopingIntake(
     deal: {
       ...deal,
       ...dealUpdates,
-      workflowRoute: nextRoute,
       projectTypeId,
     },
     userId,
@@ -685,7 +722,7 @@ export async function routeRevisionToEstimating(
     context?.previousEstimatingSubstage ?? deal.estimatingSubstage;
 
   if (
-    deal.workflowRoute !== "estimating" ||
+    deal.workflowRoute !== "normal" ||
     targetProposalStatus !== "revision_requested" ||
     routingSubstage !== "sent_to_client"
   ) {

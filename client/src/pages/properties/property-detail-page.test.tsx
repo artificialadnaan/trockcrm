@@ -101,7 +101,7 @@ describe("PropertyDetailPage", () => {
           dealNumber: "TR-0001",
           name: "Alpha Roofing History",
           stageId: "stage-estimating",
-          workflowRoute: "estimating",
+          workflowRoute: "normal",
           assignedRepId: "rep-1",
           companyId: "company-1",
           propertyId: "property-1",

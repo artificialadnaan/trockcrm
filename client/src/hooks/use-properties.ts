@@ -52,7 +52,7 @@ export interface PropertyDeal {
   dealNumber: string;
   name: string;
   stageId: string;
-  workflowRoute: "estimating" | "service";
+  workflowRoute: "normal" | "service";
   assignedRepId: string;
   companyId: string | null;
   propertyId: string | null;
@@ -106,8 +106,16 @@ export function useProperties(filters: PropertyListFilters = {}) {
   const [properties, setProperties] = useState<PropertySurface[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const isDisabled = filters.limit === 0;
 
   const fetchProperties = useCallback(async () => {
+    if (isDisabled) {
+      setProperties([]);
+      setError(null);
+      setLoading(false);
+      return;
+    }
+
     setLoading(true);
     setError(null);
     try {
@@ -126,7 +134,7 @@ export function useProperties(filters: PropertyListFilters = {}) {
     } finally {
       setLoading(false);
     }
-  }, [filters.companyId, filters.isActive, filters.limit, filters.page, filters.search]);
+  }, [filters.companyId, filters.isActive, filters.limit, filters.page, filters.search, isDisabled]);
 
   useEffect(() => {
     fetchProperties();

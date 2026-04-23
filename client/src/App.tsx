@@ -18,6 +18,8 @@ import { CompanyNewPage } from "@/pages/companies/company-new-page";
 import { CompanyEditPage } from "@/pages/companies/company-edit-page";
 import { LeadListPage } from "@/pages/leads/lead-list-page";
 import { LeadDetailPage } from "@/pages/leads/lead-detail-page";
+import { LeadEditPage } from "@/pages/leads/lead-edit-page";
+import { LeadNewPage } from "@/pages/leads/lead-new-page";
 import { PropertyListPage } from "@/pages/properties/property-list-page";
 import { PropertyDetailPage } from "@/pages/properties/property-detail-page";
 import { MergeQueuePage } from "@/pages/admin/merge-queue-page";
@@ -87,6 +89,8 @@ export function App() {
               <Route path="/deals/:id" element={<DealDetailPage />} />
               <Route path="/deals/:id/edit" element={<DealEditPage />} />
               <Route path="/leads" element={<LeadListPage />} />
+              <Route path="/leads/new" element={<LeadNewPage />} />
+              <Route path="/leads/:id/edit" element={<LeadEditPage />} />
               <Route path="/leads/:id" element={<LeadDetailPage />} />
               <Route path="/properties" element={<PropertyListPage />} />
               <Route path="/properties/:id" element={<PropertyDetailPage />} />

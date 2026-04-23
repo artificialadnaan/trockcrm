@@ -18,7 +18,8 @@
     "downlevelIteration": true,
     "baseUrl": ".",
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": ["./src/*"],
+      "@trock-crm/shared/types": ["../shared/src/types/index.ts"]
     }
   },
   "include": ["src/**/*"]

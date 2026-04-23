@@ -261,8 +261,14 @@ function KpiCard({ label, value, indicator, badge, icon, loading }: KpiCardProps
 // Workflow Overview
 // ---------------------------------------------------------------------------
 
-function formatWorkflowRoute(route: "estimating" | "service") {
+function formatWorkflowRoute(route: "normal" | "service") {
   return route === "service" ? "Service" : "Standard";
+}
+
+function formatWorkflowBucket(bucket: "lead" | "opportunity" | "crm_owned") {
+  if (bucket === "opportunity") return "Opportunity";
+  if (bucket === "lead") return "Lead";
+  return "CRM Owned";
 }
 
 function formatWorkflowStatus(status: string) {
@@ -356,7 +362,7 @@ function WorkflowOverviewPanel({
   loading?: boolean;
 }) {
   const leadPipelineCount = data?.leadPipelineSummary.reduce((sum, row) => sum + row.intakeCount, 0) ?? 0;
-  const standardRollup = data?.standardVsServiceRollups.find((row) => row.workflowRoute === "estimating");
+  const standardRollup = data?.standardVsServiceRollups.find((row) => row.workflowRoute === "normal");
   const serviceRollup = data?.standardVsServiceRollups.find((row) => row.workflowRoute === "service");
   const companyCount = data?.companyRollups.length ?? 0;
   const staleLeadCount = data?.staleLeads.length ?? 0;
@@ -459,6 +465,36 @@ function WorkflowOverviewPanel({
         />
       </div>
 
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+        <WorkflowTableSection
+          title="CRM-Owned Progression"
+          subtitle="Lead-stage and opportunity-stage work in actual workflow order before mirrored downstream ownership begins."
+          rows={data?.crmOwnedProgression ?? []}
+          emptyMessage="No CRM-owned progression available."
+          columns={[
+            { key: "bucket", label: "Bucket", render: (row) => formatWorkflowBucket(row.workflowBucket) },
+            { key: "workflow", label: "Workflow", render: (row) => formatWorkflowRoute(row.workflowRoute) },
+            { key: "stage", label: "Stage", render: (row) => row.stageName },
+            { key: "count", label: "Count", align: "right", render: (row) => row.itemCount.toLocaleString() },
+            { key: "value", label: "Value", align: "right", render: (row) => formatCurrency(row.totalValue) },
+          ]}
+        />
+
+        <WorkflowTableSection
+          title="Mirrored Downstream Summary"
+          subtitle="Bid Board downstream stages summarized from mirrored slug labels and current downstream status."
+          rows={data?.mirroredDownstreamSummary ?? []}
+          emptyMessage="No mirrored downstream work available."
+          columns={[
+            { key: "stage", label: "Mirrored Stage", render: (row) => row.mirroredStageName },
+            { key: "status", label: "Status", render: (row) => row.mirroredStageStatus ? formatWorkflowStatus(row.mirroredStageStatus) : "Unspecified" },
+            { key: "workflow", label: "Workflow", render: (row) => formatWorkflowRoute(row.workflowRoute) },
+            { key: "count", label: "Deals", align: "right", render: (row) => row.dealCount.toLocaleString() },
+            { key: "value", label: "Value", align: "right", render: (row) => formatCurrency(row.totalValue) },
+          ]}
+        />
+      </div>
+
       <WorkflowTableSection
         title="Company Rollups"
         subtitle="Companies grouped across multiple properties, leads, and deals."
@@ -522,6 +558,18 @@ function WorkflowOverviewPanel({
           ]}
         />
       </div>
+
+      <WorkflowTableSection
+        title="Reason-Coded Disqualifications"
+        subtitle="Disqualified leads by workflow route and recorded reason code, including uncategorized fallbacks."
+        rows={data?.reasonCodedDisqualifications ?? []}
+        emptyMessage="No disqualifications found."
+        columns={[
+          { key: "workflow", label: "Workflow", render: (row) => formatWorkflowRoute(row.workflowRoute) },
+          { key: "reason", label: "Reason", render: (row) => formatWorkflowStatus(row.disqualificationReason) },
+          { key: "count", label: "Leads", align: "right", render: (row) => row.leadCount.toLocaleString() },
+        ]}
+      />
     </div>
   );
 }

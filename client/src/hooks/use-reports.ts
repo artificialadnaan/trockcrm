@@ -31,13 +31,13 @@ export interface ReportConfig {
 }
 
 export interface UnifiedLeadPipelineSummaryRow {
-  workflowRoute: "estimating" | "service";
+  workflowRoute: "normal" | "service";
   validationStatus: string;
   intakeCount: number;
 }
 
 export interface UnifiedRouteRollupRow {
-  workflowRoute: "estimating" | "service";
+  workflowRoute: "normal" | "service";
   dealCount: number;
   totalValue: number;
   staleDealCount: number;
@@ -74,7 +74,7 @@ export interface UnifiedStaleLeadRow {
   leadId: string;
   leadName: string;
   companyName: string;
-  workflowRoute: "estimating" | "service";
+  workflowRoute: "normal" | "service";
   validationStatus: string;
   ageInDays: number;
   staleThresholdDays: number;
@@ -85,11 +85,34 @@ export interface UnifiedStaleDealRow {
   dealNumber: string;
   dealName: string;
   stageName: string;
-  workflowRoute: "estimating" | "service";
+  workflowRoute: "normal" | "service";
   repName: string;
   daysInStage: number;
   staleThresholdDays: number;
   dealValue: number;
+}
+
+export interface UnifiedCrmOwnedProgressionRow {
+  workflowBucket: "lead" | "opportunity" | "crm_owned";
+  workflowRoute: "normal" | "service";
+  stageName: string;
+  itemCount: number;
+  totalValue: number;
+}
+
+export interface UnifiedMirroredDownstreamSummaryRow {
+  mirroredStageSlug: string;
+  mirroredStageName: string;
+  mirroredStageStatus: string | null;
+  workflowRoute: "normal" | "service";
+  dealCount: number;
+  totalValue: number;
+}
+
+export interface UnifiedReasonCodedDisqualificationRow {
+  workflowRoute: "normal" | "service";
+  disqualificationReason: string;
+  leadCount: number;
 }
 
 export interface UnifiedWorkflowOverview {
@@ -99,6 +122,9 @@ export interface UnifiedWorkflowOverview {
   repActivitySplit: UnifiedRepActivitySplitRow[];
   staleLeads: UnifiedStaleLeadRow[];
   staleDeals: UnifiedStaleDealRow[];
+  crmOwnedProgression: UnifiedCrmOwnedProgressionRow[];
+  mirroredDownstreamSummary: UnifiedMirroredDownstreamSummaryRow[];
+  reasonCodedDisqualifications: UnifiedReasonCodedDisqualificationRow[];
 }
 
 export function useSavedReports() {

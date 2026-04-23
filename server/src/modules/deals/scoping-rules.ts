@@ -35,6 +35,17 @@ export interface DealScopingReadinessSnapshot {
   requiredAttachmentKeys: string[];
 }
 
+const SERVICE_REQUIRED_PROJECT_OVERVIEW_FIELDS = ["propertyName"] as const;
+const STANDARD_REQUIRED_PROJECT_OVERVIEW_FIELDS = ["propertyName", "bidDueDate"] as const;
+const REQUIRED_SCOPING_SECTIONS = [
+  "projectOverview",
+  "propertyDetails",
+  "scopeSummary",
+  "attachments",
+] as const;
+const SERVICE_REQUIRED_ATTACHMENT_KEYS = ["site_photos"] as const;
+const STANDARD_REQUIRED_ATTACHMENT_KEYS = ["scope_docs", "site_photos"] as const;
+
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -57,16 +68,22 @@ function isMissingRequiredValue(value: unknown): boolean {
 
 export function getRequiredScopingRules(input: DealScopingRulesInput): DealScopingRules {
   const projectOverviewFields =
-    input.workflowRoute === "service" ? ["propertyName"] : ["propertyName", "bidDueDate"];
+    input.workflowRoute === "service"
+      ? [...SERVICE_REQUIRED_PROJECT_OVERVIEW_FIELDS]
+      : [...STANDARD_REQUIRED_PROJECT_OVERVIEW_FIELDS];
+  const requiredAttachmentKeys =
+    input.workflowRoute === "service"
+      ? [...SERVICE_REQUIRED_ATTACHMENT_KEYS]
+      : [...STANDARD_REQUIRED_ATTACHMENT_KEYS];
 
   return {
-    requiredSections: ["projectOverview", "propertyDetails", "scopeSummary", "attachments"],
+    requiredSections: [...REQUIRED_SCOPING_SECTIONS],
     requiredFieldsBySection: {
       projectOverview: projectOverviewFields,
       propertyDetails: ["propertyAddress"],
       scopeSummary: ["summary"],
     },
-    requiredAttachmentKeys: ["scope_docs", "site_photos"],
+    requiredAttachmentKeys,
   };
 }
 

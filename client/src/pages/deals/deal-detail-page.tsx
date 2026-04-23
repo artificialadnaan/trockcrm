@@ -6,6 +6,7 @@ import {
   Trash2,
   ChevronRight,
   MoreHorizontal,
+  Lock,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -43,6 +44,28 @@ import { formatCurrency, bestEstimate } from "@/lib/deal-utils";
 
 type Tab = "overview" | "lead" | "scoping" | "files" | "email" | "activity" | "timeline" | "history" | "team" | "estimates" | "punch_list" | "closeout";
 
+function isBidBoardManagedStage(
+  stage: { slug: string; displayOrder: number },
+  options: {
+    isBidBoardOwned: boolean;
+    handoffStageSlug: string;
+    handoffStageDisplayOrder: number | null;
+  }
+) {
+  if (!options.isBidBoardOwned) {
+    return false;
+  }
+
+  if (options.handoffStageDisplayOrder == null) {
+    return stage.slug !== options.handoffStageSlug;
+  }
+
+  return (
+    stage.slug !== options.handoffStageSlug &&
+    stage.displayOrder > options.handoffStageDisplayOrder
+  );
+}
+
 export function DealDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -57,6 +80,8 @@ export function DealDetailPage() {
   const [teamCount, setTeamCount] = useState<number | null>(null);
   const currentStage = stages.find((s) => s.id === deal?.stageId);
   const isDirectorOrAdmin = user?.role === "director" || user?.role === "admin";
+  const bidBoardOwnership = deal?.bidBoardOwnership;
+  const isBidBoardOwned = Boolean(deal?.isBidBoardOwned || bidBoardOwnership?.isOwned);
 
   // Build stage advancement options
   const forwardStages = stages.filter(
@@ -64,6 +89,22 @@ export function DealDetailPage() {
   );
   const backwardStages = stages.filter(
     (s) => s.displayOrder < (currentStage?.displayOrder ?? 0) && !s.isTerminal
+  );
+  const handoffStageSlug = bidBoardOwnership?.handoffStageSlug ?? "estimating";
+  const handoffStage = stages.find((s) => s.slug === handoffStageSlug);
+  const readonlyForwardStages = forwardStages.filter((stage) =>
+    isBidBoardManagedStage(stage, {
+      isBidBoardOwned,
+      handoffStageSlug,
+      handoffStageDisplayOrder: handoffStage?.displayOrder ?? null,
+    })
+  );
+  const manualForwardStages = forwardStages.filter((stage) =>
+    !isBidBoardManagedStage(stage, {
+      isBidBoardOwned,
+      handoffStageSlug,
+      handoffStageDisplayOrder: handoffStage?.displayOrder ?? null,
+    })
   );
 
   const handleStageChange = (stageId: string) => {
@@ -93,13 +134,14 @@ export function DealDetailPage() {
   };
 
   const currentStageSlug = currentStage?.slug ?? "";
+  const isOpportunityStage = currentStageSlug === "opportunity";
   const showPunchList = ["in_production", "close_out", "closed_won"].includes(currentStageSlug);
   const showCloseout = ["close_out", "closed_won"].includes(currentStageSlug);
 
   const tabs: { key: Tab; label: string }[] = [
     { key: "overview", label: "Overview" },
     { key: "lead", label: "Lead" },
-    { key: "scoping", label: "Scoping" },
+    { key: "scoping", label: isOpportunityStage ? "Opportunity Scope" : "Scoping" },
     { key: "files", label: "Files" },
     { key: "email", label: "Email" },
     { key: "activity", label: "Activity" },
@@ -118,9 +160,11 @@ export function DealDetailPage() {
     const nextTab =
       requestedTab && availableTabs.includes(requestedTab as Tab)
         ? (requestedTab as Tab)
-        : "overview";
+        : isOpportunityStage
+          ? "scoping"
+          : "overview";
     setActiveTab((current) => (current === nextTab ? current : nextTab));
-  }, [availableTabs, requestedTab]);
+  }, [availableTabs, isOpportunityStage, requestedTab]);
 
   useEffect(() => {
     if (activeTab !== "overview" || requestedFocus !== "copilot") {
@@ -207,7 +251,7 @@ export function DealDetailPage() {
                 </Button>}
               />
               <DropdownMenuContent align="end">
-                {forwardStages.map((s) => (
+                {manualForwardStages.map((s) => (
                   <DropdownMenuItem
                     key={s.id}
                     onClick={() => handleStageChange(s.id)}
@@ -218,6 +262,19 @@ export function DealDetailPage() {
                         Terminal
                       </Badge>
                     )}
+                  </DropdownMenuItem>
+                ))}
+                {readonlyForwardStages.map((s) => (
+                  <DropdownMenuItem
+                    key={s.id}
+                    disabled
+                  >
+                    <div className="flex w-full items-center justify-between gap-2">
+                      <span>{s.name}</span>
+                      <Badge variant="outline" className="text-xs">
+                        Bid Board managed
+                      </Badge>
+                    </div>
                   </DropdownMenuItem>
                 ))}
                 {isDirectorOrAdmin && backwardStages.length > 0 && (
@@ -241,7 +298,7 @@ export function DealDetailPage() {
           )}
 
           {/* Reopen button for terminal stages (directors only) */}
-          {currentStage?.isTerminal && isDirectorOrAdmin && (
+          {currentStage?.isTerminal && isDirectorOrAdmin && !isBidBoardOwned && (
             <DropdownMenu>
               <DropdownMenuTrigger
                 render={<Button variant="outline">Reopen Deal</Button>}
@@ -293,8 +350,12 @@ export function DealDetailPage() {
       {/* Active Timers Banner */}
       <DealTimersBanner dealId={deal.id} />
 
+      {isBidBoardOwned && bidBoardOwnership && (
+        <BidBoardOwnershipBanner ownership={bidBoardOwnership} />
+      )}
+
       {/* Estimating Sub-Stage Indicator */}
-      {currentStageSlug === "estimating" && (
+      {currentStageSlug === "estimating" && !isBidBoardOwned && (
         <DealEstimatingSubstage deal={deal} onUpdate={refetch} />
       )}
 
@@ -320,8 +381,11 @@ export function DealDetailPage() {
       {/* Tab Content */}
       {activeTab === "overview" && (
         <div className="space-y-4">
-          {(currentStageSlug === "estimating" || currentStageSlug === "bid_sent") && (
+          {(currentStageSlug === "estimating" || currentStageSlug === "bid_sent") && !isBidBoardOwned && (
             <DealProposalCard deal={deal} onUpdate={refetch} />
+          )}
+          {isBidBoardOwned && bidBoardOwnership && (
+            <BidBoardReadOnlySummary ownership={bidBoardOwnership} />
           )}
           <DealOverviewTab deal={deal} />
         </div>
@@ -330,7 +394,7 @@ export function DealDetailPage() {
         <DealLeadTab
           deal={deal}
           companyName={company?.name ?? null}
-          isConverted={currentStageSlug !== "dd"}
+          isConverted={Boolean(deal.sourceLeadId)}
         />
       )}
       {activeTab === "scoping" && <DealScopingWorkspace deal={deal} onDealUpdated={refetch} />}
@@ -365,6 +429,62 @@ export function DealDetailPage() {
         />
       )}
     </div>
+  );
+}
+
+function BidBoardOwnershipBanner({
+  ownership,
+}: {
+  ownership: NonNullable<DealDetail["bidBoardOwnership"]>;
+}) {
+  return (
+    <section className="rounded-xl border border-amber-300 bg-amber-50 p-4 text-amber-950">
+      <div className="flex items-start gap-3">
+        <div className="rounded-full bg-amber-200 p-2">
+          <Lock className="h-4 w-4" />
+        </div>
+        <div className="space-y-3">
+          <div>
+            <h3 className="text-sm font-semibold">Bid Board now owns downstream progression</h3>
+            <p className="mt-1 text-sm">{ownership.message}</p>
+          </div>
+
+          <div className="grid gap-3 md:grid-cols-2">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-wide text-amber-800">
+                Still editable in CRM
+              </p>
+              <p className="mt-1 text-sm">{ownership.canEditInCrm.join(", ")}</p>
+            </div>
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-wide text-amber-800">
+                Mirrored from Bid Board
+              </p>
+              <p className="mt-1 text-sm">{ownership.mirroredInCrm.join(", ")}</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function BidBoardReadOnlySummary({
+  ownership,
+}: {
+  ownership: NonNullable<DealDetail["bidBoardOwnership"]>;
+}) {
+  return (
+    <section className="rounded-lg border border-dashed border-slate-300 bg-slate-50 p-4 text-sm text-slate-700">
+      <p className="font-medium text-slate-900">Downstream stage controls are read-only in CRM.</p>
+      <p className="mt-1">
+        Bid Board owns stage progression, proposal status, and estimating progress after the
+        estimating handoff.
+      </p>
+      <p className="mt-2">
+        Keep using CRM for {ownership.canEditInCrm.join(", ")}.
+      </p>
+    </section>
   );
 }
 

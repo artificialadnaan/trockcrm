@@ -1,8 +1,9 @@
 import { useState, useEffect, useCallback } from "react";
 import { api } from "@/lib/api";
 import type { FileRecord } from "./use-files";
+export { getDealStageMetadata, getWorkflowRouteLabel } from "@/lib/pipeline-ownership";
 
-export type WorkflowRoute = "estimating" | "service";
+export type WorkflowRoute = "normal" | "service";
 export type DealScopingIntakeStatus = "draft" | "ready" | "activated";
 
 export interface DealScopingSectionData {
@@ -83,6 +84,9 @@ export interface Deal {
   procoreProjectId: number | null;
   procoreBidId: number | null;
   procoreLastSyncedAt: string | null;
+  isBidBoardOwned: boolean;
+  bidBoardStageSlug: string | null;
+  readOnlySyncedAt: string | null;
   lostReasonId: string | null;
   lostNotes: string | null;
   lostCompetitor: string | null;
@@ -104,6 +108,16 @@ export interface DealDetail extends Deal {
   proposalRevisionCount: number | null;
   proposalNotes: string | null;
   estimatingSubstage: string | null;
+  bidBoardOwnership?: {
+    isOwned: boolean;
+    sourceOfTruth: "crm" | "bid_board";
+    handoffStageSlug: string;
+    downstreamStagesReadOnly: boolean;
+    canEditInCrm: string[];
+    mirroredInCrm: string[];
+    reason: string;
+    message: string;
+  };
   stageHistory: Array<{
     id: string;
     dealId: string;
@@ -163,6 +177,8 @@ export interface Pagination {
   totalPages: number;
 }
 
+const DEAL_BOARD_PAGE_LIMIT = 100;
+
 export function useDeals(filters: DealFilters = {}) {
   const [deals, setDeals] = useState<Deal[]>([]);
   const [pagination, setPagination] = useState<Pagination>({ page: 1, limit: 50, total: 0, totalPages: 0 });
@@ -216,6 +232,81 @@ export function useDeals(filters: DealFilters = {}) {
   }, [fetchDeals]);
 
   return { deals, pagination, loading, error, refetch: fetchDeals };
+}
+
+export function useDealBoard(filters: DealFilters = {}) {
+  const [deals, setDeals] = useState<Deal[]>([]);
+  const [pagination, setPagination] = useState<Pagination>({
+    page: 1,
+    limit: DEAL_BOARD_PAGE_LIMIT,
+    total: 0,
+    totalPages: 0,
+  });
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchBoardDeals = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+
+    try {
+      const collected: Deal[] = [];
+      let page = 1;
+      let totalPages = 1;
+      let total = 0;
+
+      while (page <= totalPages) {
+        const params = new URLSearchParams();
+        if (filters.search) params.set("search", filters.search);
+        if (filters.stageIds?.length) params.set("stageIds", filters.stageIds.join(","));
+        if (filters.assignedRepId) params.set("assignedRepId", filters.assignedRepId);
+        if (filters.projectTypeId) params.set("projectTypeId", filters.projectTypeId);
+        if (filters.regionId) params.set("regionId", filters.regionId);
+        if (filters.source) params.set("source", filters.source);
+        if (filters.isActive === false) params.set("isActive", "false");
+        if (filters.sortBy) params.set("sortBy", filters.sortBy);
+        if (filters.sortDir) params.set("sortDir", filters.sortDir);
+        params.set("page", String(page));
+        params.set("limit", String(DEAL_BOARD_PAGE_LIMIT));
+
+        const qs = params.toString();
+        const data = await api<{ deals: Deal[]; pagination: Pagination }>(`/deals?${qs}`);
+
+        collected.push(...data.deals);
+        totalPages = data.pagination.totalPages || 1;
+        total = data.pagination.total;
+        page += 1;
+      }
+
+      setDeals(collected);
+      setPagination({
+        page: 1,
+        limit: DEAL_BOARD_PAGE_LIMIT,
+        total,
+        totalPages,
+      });
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to load deals");
+    } finally {
+      setLoading(false);
+    }
+  }, [
+    filters.search,
+    filters.stageIds?.join(","),
+    filters.assignedRepId,
+    filters.projectTypeId,
+    filters.regionId,
+    filters.source,
+    filters.isActive,
+    filters.sortBy,
+    filters.sortDir,
+  ]);
+
+  useEffect(() => {
+    fetchBoardDeals();
+  }, [fetchBoardDeals]);
+
+  return { deals, pagination, loading, error, refetch: fetchBoardDeals };
 }
 
 export function useDealDetail(dealId: string | undefined) {
@@ -286,6 +377,17 @@ export async function preflightStageCheck(dealId: string, targetStageId: string)
     requiresOverride: boolean;
     overrideType: string | null;
     blockReason: string | null;
+    bidBoardLocked?: boolean;
+    bidBoardOwnership?: {
+      isOwned: boolean;
+      sourceOfTruth: "crm" | "bid_board";
+      handoffStageSlug: string;
+      downstreamStagesReadOnly: boolean;
+      canEditInCrm: string[];
+      mirroredInCrm: string[];
+      reason: string;
+      message: string;
+    } | null;
   }>(`/deals/${dealId}/stage/preflight`, {
     method: "POST",
     json: { targetStageId },

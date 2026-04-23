@@ -10,8 +10,10 @@ import {
   integer,
   date,
   timestamp,
+  interval,
 } from "drizzle-orm/pg-core";
 import { WORKFLOW_ROUTES } from "../../types/enums.js";
+import { SALES_WORKFLOW_PIPELINE_TYPES } from "../../types/sales-workflow.js";
 import { companies } from "./companies.js";
 import { contacts } from "./contacts.js";
 import { leads } from "./leads.js";
@@ -42,6 +44,10 @@ export const estimatingSubstageEnum = pgEnum("estimating_substage", [
 // because Drizzle doesn't natively handle cross-schema references.
 
 export const workflowRouteEnum = pgEnum("workflow_route", WORKFLOW_ROUTES);
+export const dealPipelineTypeSnapshotEnum = pgEnum(
+  "deal_pipeline_type_snapshot",
+  SALES_WORKFLOW_PIPELINE_TYPES
+);
 
 export const deals = pgTable("deals", {
   id: uuid("id").primaryKey().defaultRandom(),
@@ -69,13 +75,34 @@ export const deals = pgTable("deals", {
   procoreProjectId: bigint("procore_project_id", { mode: "number" }),
   procoreBidId: bigint("procore_bid_id", { mode: "number" }),
   procoreLastSyncedAt: timestamp("procore_last_synced_at", { withTimezone: true }),
+  isBidBoardOwned: boolean("is_bid_board_owned").default(false).notNull(),
+  bidBoardStageSlug: varchar("bid_board_stage_slug", { length: 100 }),
+  bidBoardStageFamily: varchar("bid_board_stage_family", { length: 50 }),
+  bidBoardStageStatus: varchar("bid_board_stage_status", { length: 50 }),
+  bidBoardStageEnteredAt: timestamp("bid_board_stage_entered_at", { withTimezone: true }),
+  bidBoardStageExitedAt: timestamp("bid_board_stage_exited_at", { withTimezone: true }),
+  bidBoardStageDuration: interval("bid_board_stage_duration"),
+  bidBoardLossOutcome: varchar("bid_board_loss_outcome", { length: 100 }),
+  bidBoardMirrorSourceEnteredAt: timestamp("bid_board_mirror_source_entered_at", {
+    withTimezone: true,
+  }),
+  bidBoardMirrorSourceExitedAt: timestamp("bid_board_mirror_source_exited_at", {
+    withTimezone: true,
+  }),
+  pipelineTypeSnapshot: dealPipelineTypeSnapshotEnum("pipeline_type_snapshot")
+    .default("normal")
+    .notNull(),
+  regionClassification: varchar("region_classification", { length: 50 }),
+  isReadOnlyMirror: boolean("is_read_only_mirror").default(false).notNull(),
+  isReadOnlySyncDirty: boolean("is_read_only_sync_dirty").default(false).notNull(),
+  readOnlySyncedAt: timestamp("read_only_synced_at", { withTimezone: true }),
   lostReasonId: uuid("lost_reason_id"),
   lostNotes: text("lost_notes"),
   lostCompetitor: varchar("lost_competitor", { length: 255 }),
   lostAt: timestamp("lost_at", { withTimezone: true }),
   expectedCloseDate: date("expected_close_date"),
   actualCloseDate: date("actual_close_date"),
-  workflowRoute: workflowRouteEnum("workflow_route").default("estimating").notNull(),
+  workflowRoute: workflowRouteEnum("workflow_route").default("normal").notNull(),
   lastActivityAt: timestamp("last_activity_at", { withTimezone: true }),
   stageEnteredAt: timestamp("stage_entered_at", { withTimezone: true }).defaultNow().notNull(),
   isActive: boolean("is_active").default(true).notNull(),

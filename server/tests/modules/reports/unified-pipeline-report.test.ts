@@ -27,6 +27,15 @@ function createMockTenantDb(rows: any[] = []) {
   } as any;
 }
 
+function createUnifiedWorkflowMockTenantDb(overrides: Partial<Record<number, any[]>> = {}) {
+  return {
+    execute: vi.fn().mockImplementation((() => {
+      let callIndex = 0;
+      return () => Promise.resolve({ rows: overrides[callIndex++] ?? [] });
+    })()),
+  } as any;
+}
+
 function flattenSqlQuery(query: any): string {
   return (query?.queryChunks ?? [])
     .map((chunk: any) => {
@@ -44,79 +53,55 @@ function flattenSqlQuery(query: any): string {
 describe("getUnifiedWorkflowOverview", () => {
   it("returns lead pipeline summary grouped by workflow family and status", async () => {
     const { getUnifiedWorkflowOverview } = await import("../../../src/modules/reports/service.js");
-    const tenantDb = {
-      execute: vi.fn()
-        .mockResolvedValueOnce({
-          rows: [
-            { workflow_route: "estimating", validation_status: "draft", intake_count: "3" },
-            { workflow_route: "service", validation_status: "ready", intake_count: "2" },
-          ],
-        })
-        .mockResolvedValueOnce({ rows: [] })
-        .mockResolvedValueOnce({ rows: [] })
-        .mockResolvedValueOnce({ rows: [] })
-        .mockResolvedValueOnce({ rows: [] })
-        .mockResolvedValueOnce({ rows: [] }),
-    } as any;
+    const tenantDb = createUnifiedWorkflowMockTenantDb({
+      0: [
+        { workflow_route: "normal", validation_status: "draft", intake_count: "3" },
+        { workflow_route: "service", validation_status: "ready", intake_count: "2" },
+      ],
+    });
 
     const result = await getUnifiedWorkflowOverview(tenantDb);
 
     expect(result.leadPipelineSummary).toEqual([
-      { workflowRoute: "estimating", validationStatus: "draft", intakeCount: 3 },
+      { workflowRoute: "normal", validationStatus: "draft", intakeCount: 3 },
       { workflowRoute: "service", validationStatus: "ready", intakeCount: 2 },
     ]);
   });
 
   it("returns standard and service rollups separately", async () => {
     const { getUnifiedWorkflowOverview } = await import("../../../src/modules/reports/service.js");
-    const tenantDb = {
-      execute: vi.fn()
-        .mockResolvedValueOnce({ rows: [] })
-        .mockResolvedValueOnce({
-          rows: [
-            { workflow_route: "estimating", deal_count: "6", total_value: "600000", stale_deal_count: "1" },
-            { workflow_route: "service", deal_count: "4", total_value: "240000", stale_deal_count: "2" },
-          ],
-        })
-        .mockResolvedValueOnce({ rows: [] })
-        .mockResolvedValueOnce({ rows: [] })
-        .mockResolvedValueOnce({ rows: [] })
-        .mockResolvedValueOnce({ rows: [] }),
-    } as any;
+    const tenantDb = createUnifiedWorkflowMockTenantDb({
+      1: [
+        { workflow_route: "normal", deal_count: "6", total_value: "600000", stale_deal_count: "1" },
+        { workflow_route: "service", deal_count: "4", total_value: "240000", stale_deal_count: "2" },
+      ],
+    });
 
     const result = await getUnifiedWorkflowOverview(tenantDb);
 
     expect(result.standardVsServiceRollups).toEqual([
-      { workflowRoute: "estimating", dealCount: 6, totalValue: 600000, staleDealCount: 1 },
+      { workflowRoute: "normal", dealCount: 6, totalValue: 600000, staleDealCount: 1 },
       { workflowRoute: "service", dealCount: 4, totalValue: 240000, staleDealCount: 2 },
     ]);
   });
 
   it("aggregates company rollups across multiple properties and deals", async () => {
     const { getUnifiedWorkflowOverview } = await import("../../../src/modules/reports/service.js");
-    const tenantDb = {
-      execute: vi.fn()
-        .mockResolvedValueOnce({ rows: [] })
-        .mockResolvedValueOnce({ rows: [] })
-        .mockResolvedValueOnce({
-          rows: [
-            {
-              company_id: "company-1",
-              company_name: "Alpha Roofing",
-              property_count: "2",
-              deal_count: "3",
-              lead_count: "2",
-              active_deal_count: "2",
-              standard_deal_count: "2",
-              service_deal_count: "1",
-              total_value: "750000",
-            },
-          ],
-        })
-        .mockResolvedValueOnce({ rows: [] })
-        .mockResolvedValueOnce({ rows: [] })
-        .mockResolvedValueOnce({ rows: [] }),
-    } as any;
+    const tenantDb = createUnifiedWorkflowMockTenantDb({
+      2: [
+        {
+          company_id: "company-1",
+          company_name: "Alpha Roofing",
+          property_count: "2",
+          deal_count: "3",
+          lead_count: "2",
+          active_deal_count: "2",
+          standard_deal_count: "2",
+          service_deal_count: "1",
+          total_value: "750000",
+        },
+      ],
+    });
 
     const result = await getUnifiedWorkflowOverview(tenantDb);
 
@@ -137,32 +122,24 @@ describe("getUnifiedWorkflowOverview", () => {
 
   it("splits rep activity between lead-stage and deal-stage work", async () => {
     const { getUnifiedWorkflowOverview } = await import("../../../src/modules/reports/service.js");
-    const tenantDb = {
-      execute: vi.fn()
-        .mockResolvedValueOnce({ rows: [] })
-        .mockResolvedValueOnce({ rows: [] })
-        .mockResolvedValueOnce({ rows: [] })
-        .mockResolvedValueOnce({
-          rows: [
-            {
-              rep_id: "rep-1",
-              rep_name: "Jordan",
-              lead_stage_calls: "4",
-              lead_stage_emails: "3",
-              lead_stage_meetings: "1",
-              lead_stage_notes: "2",
-              deal_stage_calls: "5",
-              deal_stage_emails: "6",
-              deal_stage_meetings: "2",
-              deal_stage_notes: "1",
-              total_lead_stage_activities: "10",
-              total_deal_stage_activities: "14",
-            },
-          ],
-        })
-        .mockResolvedValueOnce({ rows: [] })
-        .mockResolvedValueOnce({ rows: [] }),
-    } as any;
+    const tenantDb = createUnifiedWorkflowMockTenantDb({
+      3: [
+        {
+          rep_id: "rep-1",
+          rep_name: "Jordan",
+          lead_stage_calls: "4",
+          lead_stage_emails: "3",
+          lead_stage_meetings: "1",
+          lead_stage_notes: "2",
+          deal_stage_calls: "5",
+          deal_stage_emails: "6",
+          deal_stage_meetings: "2",
+          deal_stage_notes: "1",
+          total_lead_stage_activities: "10",
+          total_deal_stage_activities: "14",
+        },
+      ],
+    });
 
     const result = await getUnifiedWorkflowOverview(tenantDb);
 
@@ -186,18 +163,11 @@ describe("getUnifiedWorkflowOverview", () => {
 
   it("attributes activity using activation timing instead of a hard-coded year window", async () => {
     const { getUnifiedWorkflowOverview } = await import("../../../src/modules/reports/service.js");
-    const execute = vi.fn()
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [] });
-    const tenantDb = { execute } as any;
+    const tenantDb = createUnifiedWorkflowMockTenantDb();
 
     await getUnifiedWorkflowOverview(tenantDb);
 
-    const activityQuery = execute.mock.calls[3]?.[0];
+    const activityQuery = tenantDb.execute.mock.calls[3]?.[0];
     const sqlText = flattenSqlQuery(activityQuery);
 
     expect(sqlText).toContain("dsi.activated_at");
@@ -207,41 +177,35 @@ describe("getUnifiedWorkflowOverview", () => {
 
   it("returns stale lead and stale deal outputs", async () => {
     const { getUnifiedWorkflowOverview } = await import("../../../src/modules/reports/service.js");
-    const tenantDb = {
-      execute: vi.fn()
-        .mockResolvedValueOnce({ rows: [] })
-        .mockResolvedValueOnce({ rows: [] })
-        .mockResolvedValueOnce({ rows: [] })
-        .mockResolvedValueOnce({ rows: [] })
-        .mockResolvedValueOnce({
-          rows: [
-            {
-              lead_id: "lead-1",
-              lead_name: "Palm Villas",
-              company_name: "Alpha Roofing",
-              workflow_route: "estimating",
-              validation_status: "ready",
-              age_in_days: "21",
-              stale_threshold_days: "14",
-            },
-          ],
-        })
-        .mockResolvedValueOnce({
-          rows: [
-            {
-              deal_id: "deal-1",
-              deal_number: "TR-2026-0001",
-              deal_name: "Roof Repair",
-              stage_name: "Estimating",
-              workflow_route: "estimating",
-              rep_name: "Jordan",
-              days_in_stage: "18",
-              stale_threshold_days: "14",
-              deal_value: "250000",
-            },
-          ],
-        }),
-    } as any;
+    const tenantDb = createUnifiedWorkflowMockTenantDb({
+      4: [
+        {
+          lead_id: "lead-1",
+          lead_name: "Palm Villas",
+          company_name: "Alpha Roofing",
+          workflow_route: "normal",
+          validation_status: "ready",
+          age_in_days: "21",
+          stale_threshold_days: "14",
+        },
+      ],
+      5: [
+        {
+          deal_id: "deal-1",
+          deal_number: "TR-2026-0001",
+          deal_name: "Roof Repair",
+          stage_name: "Opportunity",
+          workflow_route: "normal",
+          rep_name: "Jordan",
+          days_in_stage: "18",
+          stale_threshold_days: "14",
+          deal_value: "250000",
+          bid_board_stage_slug: "bid_sent",
+          bid_board_stage_status: "stalled",
+          region_classification: "Texas",
+        },
+      ],
+    });
 
     const result = await getUnifiedWorkflowOverview(tenantDb);
 
@@ -250,7 +214,7 @@ describe("getUnifiedWorkflowOverview", () => {
         leadId: "lead-1",
         leadName: "Palm Villas",
         companyName: "Alpha Roofing",
-        workflowRoute: "estimating",
+        workflowRoute: "normal",
         validationStatus: "ready",
         ageInDays: 21,
         staleThresholdDays: 14,
@@ -261,13 +225,35 @@ describe("getUnifiedWorkflowOverview", () => {
         dealId: "deal-1",
         dealNumber: "TR-2026-0001",
         dealName: "Roof Repair",
-        stageName: "Estimating",
-        workflowRoute: "estimating",
+        stageName: "Bid Sent",
+        workflowRoute: "normal",
         repName: "Jordan",
         daysInStage: 18,
         staleThresholdDays: 14,
         dealValue: 250000,
+        bidBoardStageSlug: "bid_sent",
+        bidBoardStageStatus: "stalled",
+        regionClassification: "Texas",
       },
     ]);
+  });
+
+  it("uses mirrored stage joins, mirrored entered-at timing, and workflow ordering in the new queries", async () => {
+    const { getUnifiedWorkflowOverview } = await import("../../../src/modules/reports/service.js");
+    const tenantDb = createUnifiedWorkflowMockTenantDb();
+
+    await getUnifiedWorkflowOverview(tenantDb);
+
+    const staleDealsQuery = flattenSqlQuery(tenantDb.execute.mock.calls[5]?.[0]).toLowerCase();
+    const progressionQuery = flattenSqlQuery(tenantDb.execute.mock.calls[6]?.[0]).toLowerCase();
+    const disqualificationQuery = flattenSqlQuery(tenantDb.execute.mock.calls[8]?.[0]).toLowerCase();
+
+    expect(staleDealsQuery).toContain("left join pipeline_stage_config mirror_psc");
+    expect(staleDealsQuery).toContain("coalesce(d.bid_board_stage_entered_at, d.stage_entered_at)");
+    expect(staleDealsQuery).toContain("coalesce(mirror_psc.stale_threshold_days, psc.stale_threshold_days)");
+    expect(progressionQuery).toContain("min(display_order)");
+    expect(progressionQuery).toContain("order by display_order asc");
+    expect(disqualificationQuery).toContain("coalesce(l.disqualification_reason, 'other')");
+    expect(disqualificationQuery).not.toContain("and l.disqualification_reason is not null");
   });
 });

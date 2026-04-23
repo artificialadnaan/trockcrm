@@ -7,6 +7,7 @@ import { isNotNull } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { pipelineStageConfig } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
+import type { WorkflowFamily } from "@trock-crm/shared/types";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -14,6 +15,7 @@ export interface ReverseMappedStage {
   stageId: string;
   stageName: string;
   displayOrder: number;
+  workflowFamily: WorkflowFamily;
   ambiguous: boolean;
 }
 
@@ -25,13 +27,19 @@ export interface ReverseMappedStage {
  * @returns Map keyed by lowercase Procore stage name
  */
 export async function buildReverseStageMap(
-  tenantDb: TenantDb
+  tenantDb: TenantDb,
+  workflowFamily: WorkflowFamily
 ): Promise<Map<string, ReverseMappedStage>> {
+  if (!workflowFamily) {
+    throw new Error("workflowFamily is required");
+  }
+
   const stages = await tenantDb
     .select({
       id: pipelineStageConfig.id,
       name: pipelineStageConfig.name,
       displayOrder: pipelineStageConfig.displayOrder,
+      workflowFamily: pipelineStageConfig.workflowFamily,
       procoreStageMapping: pipelineStageConfig.procoreStageMapping,
     })
     .from(pipelineStageConfig)
@@ -40,6 +48,10 @@ export async function buildReverseStageMap(
   const map = new Map<string, ReverseMappedStage>();
 
   for (const stage of stages) {
+    if (stage.workflowFamily !== workflowFamily) {
+      continue;
+    }
+
     const procoreStage = stage.procoreStageMapping!.toLowerCase().trim();
     if (!procoreStage) continue;
 
@@ -57,6 +69,7 @@ export async function buildReverseStageMap(
         stageId: stage.id,
         stageName: stage.name,
         displayOrder: stage.displayOrder,
+        workflowFamily: stage.workflowFamily,
         ambiguous: false,
       });
     }

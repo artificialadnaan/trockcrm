@@ -1,4 +1,4 @@
-export type WorkflowRoute = "estimating" | "service";
+export type WorkflowRoute = "normal" | "service";
 
 export interface ScopingCompletionStateEntry {
   isComplete: boolean;
@@ -50,7 +50,7 @@ export function formatScopingAttachmentLabel(value: string) {
 }
 
 export function summarizeScopingRoute(route: WorkflowRoute) {
-  return route === "service" ? "Ready for Service" : "Ready for Estimating";
+  return route === "service" ? "Ready for Service" : "Ready for Normal";
 }
 
 export function getScopingCompletionCounts(

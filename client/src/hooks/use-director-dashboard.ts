@@ -44,6 +44,10 @@ export interface DirectorDashboardData {
     repName: string;
     daysInStage: number;
     dealValue: number;
+    workflowRoute?: "normal" | "service";
+    bidBoardStageStatus?: string | null;
+    regionClassification?: string | null;
+    staleThresholdDays?: number;
   }>;
   staleLeads: Array<{
     leadId: string;
@@ -53,6 +57,29 @@ export interface DirectorDashboardData {
     stageName: string;
     repName: string;
     daysInStage: number;
+    pipelineType?: "normal" | "service";
+    locationLabel?: string | null;
+    estimatedValue?: number;
+    staleThresholdDays?: number;
+    daysPastDue?: number;
+  }>;
+  crmOwnedProgression?: Array<{
+    workflowBucket: "lead" | "opportunity";
+    workflowRoute: "normal" | "service";
+    stageName: string;
+    itemCount: number;
+    totalValue: number;
+  }>;
+  downstreamBottlenecks?: Array<{
+    dealId: string;
+    dealName: string;
+    stageName: string;
+    mirroredStageStatus: string | null;
+    workflowRoute: "normal" | "service";
+    regionClassification: string;
+    dealValue: number;
+    daysInStage: number;
+    staleThresholdDays: number;
   }>;
   ddVsPipeline: {
     ddValue: number;
@@ -108,6 +135,11 @@ export interface RepDetailData {
     stageName: string;
     repName: string;
     daysInStage: number;
+    pipelineType?: "normal" | "service";
+    locationLabel?: string | null;
+    estimatedValue?: number;
+    staleThresholdDays?: number;
+    daysPastDue?: number;
   }>;
 }
 

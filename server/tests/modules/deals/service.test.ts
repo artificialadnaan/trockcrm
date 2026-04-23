@@ -22,6 +22,7 @@ vi.mock("../../../src/db.js", () => {
 
 // We'll import after mocks are set up
 const { AppError } = await import("../../../src/middleware/error-handler.js");
+const { updateDeal } = await import("../../../src/modules/deals/service.js");
 
 describe("Deal Service", () => {
   beforeEach(() => {
@@ -342,6 +343,94 @@ describe("Deal Service", () => {
       const updates: Record<string, any> = {};
       const shouldReturnEarly = Object.keys(updates).length === 0;
       expect(shouldReturnEarly).toBe(true);
+    });
+
+    function createOwnedDealTenantDb() {
+      const existingDeal = {
+        id: "deal-1",
+        name: "Palm Villas",
+        dealNumber: "TR-2026-0001",
+        stageId: "stage-estimating",
+        assignedRepId: "rep-1",
+        primaryContactId: null,
+        sourceLeadId: "lead-1",
+        companyId: "company-1",
+        propertyId: "property-1",
+        workflowRoute: "normal",
+        migrationMode: false,
+        ddEstimate: null,
+        bidEstimate: null,
+        awardedAmount: null,
+        description: "Exterior refresh",
+        propertyAddress: "123 Palm Way",
+        propertyCity: "Dallas",
+        propertyState: "TX",
+        propertyZip: "75201",
+        projectTypeId: null,
+        regionId: null,
+        source: "referral",
+        winProbability: 50,
+        expectedCloseDate: null,
+        proposalStatus: "drafting",
+        proposalNotes: null,
+        estimatingSubstage: "building_estimate",
+        isBidBoardOwned: true,
+        bidBoardStageSlug: "estimating",
+        readOnlySyncedAt: new Date("2026-04-21T10:00:00.000Z"),
+      };
+
+      return {
+        select() {
+          return {
+            from() {
+              return {
+                where() {
+                  return {
+                    limit() {
+                      return Promise.resolve([existingDeal]);
+                    },
+                  };
+                },
+              };
+            },
+          };
+        },
+        update() {
+          throw new Error("updateDeal should reject before attempting a database write");
+        },
+      };
+    }
+
+    it("rejects estimating substage edits after Bid Board handoff", async () => {
+      await expect(
+        updateDeal(
+          createOwnedDealTenantDb() as never,
+          "deal-1",
+          { estimatingSubstage: "sent_to_client" },
+          "director",
+          "director-1"
+        )
+      ).rejects.toMatchObject<AppError>({
+        statusCode: 403,
+        code: "BID_BOARD_OWNED_FIELD_READ_ONLY",
+        message: "Estimating progress is mirrored from Bid Board after estimating handoff.",
+      });
+    });
+
+    it("rejects proposal status edits after Bid Board handoff", async () => {
+      await expect(
+        updateDeal(
+          createOwnedDealTenantDb() as never,
+          "deal-1",
+          { proposalStatus: "sent" },
+          "director",
+          "director-1"
+        )
+      ).rejects.toMatchObject<AppError>({
+        statusCode: 403,
+        code: "BID_BOARD_OWNED_FIELD_READ_ONLY",
+        message: "Proposal status is mirrored from Bid Board after estimating handoff.",
+      });
     });
   });
 });

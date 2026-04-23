@@ -17,7 +17,7 @@ import type { WorkflowRoute } from "@trock-crm/shared/types";
 import type * as schema from "@trock-crm/shared/schema";
 import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
-import { getStageById } from "../pipeline/service.js";
+import { getStageById, getStageBySlug } from "../pipeline/service.js";
 import { evaluatePostConversionEnrichment } from "./post-conversion-enrichment.js";
 
 // Type alias for the tenant-scoped Drizzle instance
@@ -91,6 +91,55 @@ export interface UpdateDealInput {
   estimatingSubstage?: string | null;
 }
 
+export const BID_BOARD_BOUNDARY_STAGE_SLUG = "estimating";
+export const VALID_PROPOSAL_STATUSES = [
+  "not_started",
+  "drafting",
+  "sent",
+  "under_review",
+  "revision_requested",
+  "accepted",
+  "signed",
+  "rejected",
+] as const;
+export const VALID_ESTIMATING_SUBSTAGES = [
+  "scope_review",
+  "site_visit",
+  "missing_info",
+  "building_estimate",
+  "under_review",
+  "sent_to_client",
+] as const;
+const VALID_PROPOSAL_STATUS_SET = new Set<string>(VALID_PROPOSAL_STATUSES);
+const VALID_ESTIMATING_SUBSTAGE_SET = new Set<string>(VALID_ESTIMATING_SUBSTAGES);
+export const BID_BOARD_CRM_EDITABLE_FIELDS = [
+  "deal details",
+  "files",
+  "activity",
+  "notes",
+] as const;
+export const BID_BOARD_MIRRORED_FIELDS = [
+  "stage progression",
+  "proposal status",
+  "estimating progress",
+  "downstream mirror metadata",
+] as const;
+export const BID_BOARD_STAGE_READ_ONLY_MESSAGE =
+  "Deal stage progression is read-only in CRM after estimating handoff. Bid Board is now the source of truth for downstream stages.";
+export const BID_BOARD_BOUNDARY_STAGE_MISSING_MESSAGE =
+  "Estimating stage configuration is required to enforce the Bid Board ownership boundary.";
+
+export interface DealBidBoardOwnershipState {
+  isOwned: boolean;
+  sourceOfTruth: "crm" | "bid_board";
+  handoffStageSlug: typeof BID_BOARD_BOUNDARY_STAGE_SLUG;
+  downstreamStagesReadOnly: boolean;
+  canEditInCrm: readonly string[];
+  mirroredInCrm: readonly string[];
+  reason: string;
+  message: string;
+}
+
 /**
  * Generate a sequential deal number: TR-{YYYY}-{NNNN}
  * Uses SELECT ... FOR UPDATE to lock the highest deal number row during the
@@ -141,8 +190,57 @@ async function validateAssignee(tenantDb: TenantDb, assigneeId: string, officeId
   }
 }
 
-function workflowFamilyForRoute(workflowRoute: WorkflowRoute) {
+export function workflowFamilyForRoute(workflowRoute: WorkflowRoute) {
   return workflowRoute === "service" ? "service_deal" : "standard_deal";
+}
+
+export function buildBidBoardOwnershipState(
+  deal: Pick<typeof deals.$inferSelect, "isBidBoardOwned">
+): DealBidBoardOwnershipState {
+  const isOwned = deal.isBidBoardOwned;
+
+  return {
+    isOwned,
+    sourceOfTruth: isOwned ? "bid_board" : "crm",
+    handoffStageSlug: BID_BOARD_BOUNDARY_STAGE_SLUG,
+    downstreamStagesReadOnly: isOwned,
+    canEditInCrm: BID_BOARD_CRM_EDITABLE_FIELDS,
+    mirroredInCrm: BID_BOARD_MIRRORED_FIELDS,
+    reason: isOwned
+      ? "Bid Board now owns downstream progression after the deal entered estimating."
+      : "CRM still owns manual stage progression before estimating handoff.",
+    message: isOwned
+      ? "Bid Board is now the source of truth once this deal entered estimating."
+      : "CRM remains the source of truth until the deal is handed off into estimating.",
+  };
+}
+
+export async function getEstimatingBoundaryStage(workflowRoute: WorkflowRoute) {
+  return getStageBySlug(BID_BOARD_BOUNDARY_STAGE_SLUG, workflowFamilyForRoute(workflowRoute));
+}
+
+export async function getRequiredEstimatingBoundaryStage(workflowRoute: WorkflowRoute) {
+  const boundaryStage = await getEstimatingBoundaryStage(workflowRoute);
+  if (!boundaryStage) {
+    throw new AppError(
+      500,
+      BID_BOARD_BOUNDARY_STAGE_MISSING_MESSAGE,
+      "BID_BOARD_BOUNDARY_STAGE_MISSING"
+    );
+  }
+
+  return boundaryStage;
+}
+
+export function isBidBoardOwnedDownstreamStage(
+  targetStage: { slug: string; displayOrder: number; isTerminal: boolean },
+  estimatingBoundary: { displayOrder: number } | null
+) {
+  return (
+    Boolean(estimatingBoundary) &&
+    targetStage.slug !== BID_BOARD_BOUNDARY_STAGE_SLUG &&
+    targetStage.displayOrder > (estimatingBoundary?.displayOrder ?? Number.POSITIVE_INFINITY)
+  );
 }
 
 async function validateDealPrimaryContact(
@@ -386,6 +484,7 @@ export async function getDealDetail(tenantDb: TenantDb, dealId: string, userRole
   return {
     ...deal,
     postConversionEnrichment: evaluatePostConversionEnrichment(deal as any, currentStage ?? { isTerminal: true }),
+    bidBoardOwnership: buildBidBoardOwnershipState(deal),
     stageHistory,
     approvals,
     changeOrders: cos,
@@ -396,7 +495,7 @@ export async function getDealDetail(tenantDb: TenantDb, dealId: string, userRole
  * Create a new deal.
  */
 export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
-  const workflowRoute = input.workflowRoute ?? "estimating";
+  const workflowRoute = input.workflowRoute ?? "normal";
   const stage = await getStageById(input.stageId, workflowFamilyForRoute(workflowRoute));
   if (!stage) {
     throw new AppError(400, "Invalid stage ID for workflow route");
@@ -565,6 +664,12 @@ export async function updateDeal(
   if (input.expectedCloseDate !== undefined) updates.expectedCloseDate = input.expectedCloseDate;
   if (input.proposalNotes !== undefined) updates.proposalNotes = input.proposalNotes;
   if (input.workflowRoute !== undefined) {
+    if (existing.sourceLeadId) {
+      throw new AppError(
+        400,
+        "workflowRoute is derived from lead routing and cannot be changed manually"
+      );
+    }
     const stage = await getStageById(existing.stageId, workflowFamilyForRoute(input.workflowRoute));
     if (!stage) {
       throw new AppError(400, "Current stage is not valid for the requested workflow route");
@@ -617,10 +722,30 @@ export async function updateDeal(
     );
   }
 
+  if (existing.isBidBoardOwned) {
+    if (input.estimatingSubstage !== undefined) {
+      throw new AppError(
+        403,
+        "Estimating progress is mirrored from Bid Board after estimating handoff.",
+        "BID_BOARD_OWNED_FIELD_READ_ONLY"
+      );
+    }
+
+    if (input.proposalStatus !== undefined) {
+      throw new AppError(
+        403,
+        "Proposal status is mirrored from Bid Board after estimating handoff.",
+        "BID_BOARD_OWNED_FIELD_READ_ONLY"
+      );
+    }
+  }
+
   // Validate and set estimating substage
   if (input.estimatingSubstage !== undefined) {
-    const VALID_SUBSTAGES = ["scope_review", "site_visit", "missing_info", "building_estimate", "under_review", "sent_to_client"];
-    if (input.estimatingSubstage !== null && !VALID_SUBSTAGES.includes(input.estimatingSubstage)) {
+    if (
+      input.estimatingSubstage !== null &&
+      !VALID_ESTIMATING_SUBSTAGE_SET.has(input.estimatingSubstage)
+    ) {
       throw new AppError(400, `Invalid estimating substage: ${input.estimatingSubstage}`);
     }
     updates.estimatingSubstage = input.estimatingSubstage;
@@ -628,8 +753,10 @@ export async function updateDeal(
 
   // Proposal status with validation, state machine enforcement, auto-timestamps, and revision counter
   if (input.proposalStatus !== undefined) {
-    const VALID_STATUSES = ["not_started", "drafting", "sent", "under_review", "revision_requested", "accepted", "signed", "rejected"];
-    if (input.proposalStatus !== null && !VALID_STATUSES.includes(input.proposalStatus)) {
+    if (
+      input.proposalStatus !== null &&
+      !VALID_PROPOSAL_STATUS_SET.has(input.proposalStatus)
+    ) {
       throw new AppError(400, `Invalid proposal status: ${input.proposalStatus}`);
     }
 

@@ -14,6 +14,12 @@ import { validateStageGate } from "./stage-gate.js";
 import type { UserRole } from "@trock-crm/shared/types";
 import { createStageTimers } from "./timer-service.js";
 import { activateDealScopingIntake, evaluateDealScopingReadiness } from "./scoping-service.js";
+import {
+  BID_BOARD_STAGE_READ_ONLY_MESSAGE,
+  getRequiredEstimatingBoundaryStage,
+  isBidBoardOwnedDownstreamStage,
+} from "./service.js";
+import { inferDealBidBoardOwnership } from "./workflow-backfill.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -107,6 +113,37 @@ export async function changeDealStage(
 
   // Step 3: Terminal stage enforcement
   const targetStage = gateResult.targetStage;
+  const inferredOwnership = inferDealBidBoardOwnership({
+    id: currentDeal[0].id,
+    stageSlug: gateResult.currentStage.slug,
+    stageEnteredAt: currentDeal[0].stageEnteredAt,
+    workflowRoute: currentDeal[0].workflowRoute,
+    pipelineTypeSnapshot: currentDeal[0].pipelineTypeSnapshot,
+    ddEstimate: currentDeal[0].ddEstimate,
+    bidEstimate: currentDeal[0].bidEstimate,
+    awardedAmount: currentDeal[0].awardedAmount,
+    sourceLeadId: currentDeal[0].sourceLeadId,
+    isBidBoardOwned: currentDeal[0].isBidBoardOwned,
+    bidBoardStageSlug: currentDeal[0].bidBoardStageSlug,
+    bidBoardStageEnteredAt: currentDeal[0].bidBoardStageEnteredAt,
+    bidBoardMirrorSourceEnteredAt: currentDeal[0].bidBoardMirrorSourceEnteredAt,
+    isReadOnlyMirror: currentDeal[0].isReadOnlyMirror,
+    readOnlySyncedAt: currentDeal[0].readOnlySyncedAt,
+  });
+  const estimatingBoundary = inferredOwnership.isBidBoardOwned
+    ? await getRequiredEstimatingBoundaryStage(currentDeal[0].workflowRoute)
+    : null;
+
+  if (
+    inferredOwnership.isBidBoardOwned &&
+    isBidBoardOwnedDownstreamStage(targetStage, estimatingBoundary)
+  ) {
+    throw new AppError(
+      403,
+      BID_BOARD_STAGE_READ_ONLY_MESSAGE,
+      "BID_BOARD_OWNED_STAGE_READ_ONLY"
+    );
+  }
 
   // Closed Lost: require lost_reason_id + lost_notes
   if (targetStage.slug === "closed_lost") {
@@ -130,6 +167,32 @@ export async function changeDealStage(
     stageId: targetStageId,
     stageEnteredAt: new Date(),
   };
+  const shouldResetBidBoardOwnership =
+    inferredOwnership.isBidBoardOwned &&
+    Boolean(estimatingBoundary) &&
+    targetStage.displayOrder < (estimatingBoundary?.displayOrder ?? Number.NEGATIVE_INFINITY);
+
+  if (shouldResetBidBoardOwnership) {
+    dealUpdates.isBidBoardOwned = false;
+    dealUpdates.bidBoardStageSlug = null;
+    dealUpdates.bidBoardStageFamily = null;
+    dealUpdates.bidBoardStageStatus = null;
+    dealUpdates.bidBoardStageEnteredAt = null;
+    dealUpdates.bidBoardStageExitedAt = null;
+    dealUpdates.bidBoardStageDuration = null;
+    dealUpdates.bidBoardLossOutcome = null;
+    dealUpdates.bidBoardMirrorSourceEnteredAt = null;
+    dealUpdates.bidBoardMirrorSourceExitedAt = null;
+    dealUpdates.isReadOnlyMirror = false;
+    dealUpdates.isReadOnlySyncDirty = false;
+    dealUpdates.readOnlySyncedAt = null;
+  }
+
+  if (targetStage.slug === "estimating") {
+    dealUpdates.isBidBoardOwned = true;
+    dealUpdates.bidBoardStageSlug = targetStage.slug;
+    dealUpdates.readOnlySyncedAt = new Date();
+  }
 
   // Always clear ALL terminal fields before setting new ones.
   // This prevents stale data when moving between terminal stages

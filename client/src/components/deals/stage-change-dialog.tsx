@@ -25,6 +25,7 @@ import {
 } from "@/hooks/use-deals";
 import { useLostReasons } from "@/hooks/use-pipeline-config";
 import { AlertTriangle, ArrowRight, ArrowLeft, Shield, Loader2 } from "lucide-react";
+import { getDealStageMetadata } from "@/hooks/use-deals";
 
 interface StageChangeDialogProps {
   deal: { id: string; name: string; stageId: string };
@@ -109,8 +110,36 @@ export function StageChangeDialog({
   };
 
   const isBlocked = preflight != null && !preflight.allowed;
+  const bidBoardOwnership = preflight?.bidBoardOwnership;
+  const isBidBoardLocked = Boolean(preflight?.bidBoardLocked);
   const isClosedLost = preflight?.targetStage.slug === "closed_lost";
   const isClosedWon = preflight?.targetStage.slug === "closed_won";
+  const currentStageMeta =
+    preflight == null
+      ? null
+      : getDealStageMetadata(
+          {
+            stageId: preflight.currentStage.id,
+            workflowRoute: "normal",
+            isBidBoardOwned: Boolean(isBidBoardLocked),
+            bidBoardStageSlug: isBidBoardLocked ? preflight.currentStage.slug : null,
+            readOnlySyncedAt: isBidBoardLocked ? new Date().toISOString() : null,
+          },
+          [preflight.currentStage, preflight.targetStage]
+        );
+  const targetStageMeta =
+    preflight == null
+      ? null
+      : getDealStageMetadata(
+          {
+            stageId: preflight.targetStage.id,
+            workflowRoute: "normal",
+            isBidBoardOwned: Boolean(isBidBoardLocked),
+            bidBoardStageSlug: isBidBoardLocked ? preflight.targetStage.slug : null,
+            readOnlySyncedAt: isBidBoardLocked ? new Date().toISOString() : null,
+          },
+          [preflight.currentStage, preflight.targetStage]
+        );
 
   // When closing as lost, the modal is NOT dismissible via overlay click or escape.
   // The user MUST fill in all required fields and submit. For other stage changes,
@@ -151,13 +180,21 @@ export function StageChangeDialog({
           <div className="space-y-4">
             {/* Stage Transition Display */}
             <div className="flex items-center gap-3 py-2">
-              <DealStageBadge stageId={preflight.currentStage.id} />
+              <DealStageBadge
+                stageId={preflight.currentStage.id}
+                readOnly={Boolean(currentStageMeta?.isReadOnlyInCrm)}
+                ownership={currentStageMeta?.sourceOfTruth}
+              />
               {preflight.isBackwardMove ? (
                 <ArrowLeft className="h-4 w-4 text-orange-500" />
               ) : (
                 <ArrowRight className="h-4 w-4 text-green-500" />
               )}
-              <DealStageBadge stageId={preflight.targetStage.id} />
+              <DealStageBadge
+                stageId={preflight.targetStage.id}
+                readOnly={Boolean(targetStageMeta?.isReadOnlyInCrm)}
+                ownership={targetStageMeta?.sourceOfTruth}
+              />
             </div>
 
             {/* Blocked State */}
@@ -166,6 +203,18 @@ export function StageChangeDialog({
                 <p className="text-sm text-red-700 font-medium">
                   {preflight.blockReason}
                 </p>
+              </div>
+            )}
+
+            {isBidBoardLocked && bidBoardOwnership && (
+              <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+                <p className="font-medium">Bid Board mirror</p>
+                <p className="mt-1 font-medium">Read-only in CRM</p>
+                <p className="mt-1">{bidBoardOwnership.message}</p>
+                <p className="mt-3 font-medium">Still editable in CRM</p>
+                <p className="mt-1">{bidBoardOwnership.canEditInCrm.join(", ")}</p>
+                <p className="mt-3 font-medium">Mirrored from Bid Board</p>
+                <p className="mt-1">{bidBoardOwnership.mirroredInCrm.join(", ")}</p>
               </div>
             )}
 
@@ -276,7 +325,9 @@ export function StageChangeDialog({
           >
             {submitting && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
             {isBlocked
-              ? "Blocked"
+              ? isBidBoardLocked
+                ? "Read-only in CRM"
+                : "Blocked"
               : isClosedLost
               ? "Close as Lost"
               : isClosedWon
