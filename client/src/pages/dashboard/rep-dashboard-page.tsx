@@ -13,7 +13,10 @@ import { changeDealStage, useDealBoard } from "@/hooks/use-deals";
 import { transitionLeadStage, useLeadBoard } from "@/hooks/use-leads";
 import { usePipelineBoardState } from "@/hooks/use-pipeline-board-state";
 import { getWorkflowRouteLabel } from "@/lib/pipeline-ownership";
+import { usePipelineStages } from "@/hooks/use-pipeline-config";
+import { buildCanonicalDealBoardColumns } from "@/lib/canonical-deal-board";
 import { toast } from "sonner";
+import { useMemo } from "react";
 import {
   ArrowUpRight,
   Briefcase,
@@ -129,6 +132,7 @@ export function RepDashboardPage() {
     error: leadBoardError,
     refetch: refetchLeadBoard,
   } = useLeadBoard("mine");
+  const { stages } = usePipelineStages();
   const { tasks: overdueTasks, refetch: refetchOverdue } = useTasks({ section: "overdue", limit: 50 });
   const { tasks: todayTasks, refetch: refetchToday } = useTasks({ section: "today", limit: 50 });
   const firstName = user?.displayName?.split(" ")[0] ?? "there";
@@ -139,6 +143,16 @@ export function RepDashboardPage() {
     refetchToday();
   };
   const visibleLeadColumns = leadBoard?.columns ?? [];
+  const canonicalDealBoard = useMemo(
+    () =>
+      dealBoard == null
+        ? null
+        : {
+            ...dealBoard,
+            columns: buildCanonicalDealBoardColumns(dealBoard.columns, stages),
+          },
+    [dealBoard, stages]
+  );
 
   const handleBoardMove = async (input: {
     activeId: string;
@@ -198,7 +212,7 @@ export function RepDashboardPage() {
           <RepDashboardBoardShell
             activeEntity={boardState.activeEntity}
             onEntityChange={boardState.setActiveEntity}
-          dealBoard={dealBoard}
+          dealBoard={canonicalDealBoard}
           leadBoard={leadBoard}
           loading={boardState.activeEntity === "deals" ? dealBoardLoading : leadBoardLoading}
           error={boardState.activeEntity === "deals" ? dealBoardError : leadBoardError}
@@ -266,7 +280,7 @@ export function RepDashboardPage() {
       <RepDashboardBoardShell
         activeEntity={boardState.activeEntity}
         onEntityChange={boardState.setActiveEntity}
-        dealBoard={dealBoard}
+        dealBoard={canonicalDealBoard}
         leadBoard={leadBoard}
         loading={boardState.activeEntity === "deals" ? dealBoardLoading : leadBoardLoading}
         error={boardState.activeEntity === "deals" ? dealBoardError : leadBoardError}

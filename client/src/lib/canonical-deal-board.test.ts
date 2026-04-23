@@ -1,0 +1,151 @@
+import { describe, expect, it } from "vitest";
+import { buildCanonicalDealBoardColumns } from "./canonical-deal-board";
+
+describe("buildCanonicalDealBoardColumns", () => {
+  it("projects legacy and mirrored deal stages into the canonical dashboard columns", () => {
+    const columns = buildCanonicalDealBoardColumns(
+      [
+        {
+          stage: {
+            id: "legacy-estimating",
+            name: "Estimating",
+            slug: "estimating",
+            color: null,
+            displayOrder: 1,
+            isActivePipeline: true,
+            isTerminal: false,
+          },
+          count: 1,
+          totalValue: 245000,
+          cards: [
+            {
+              id: "deal-1",
+              dealNumber: "TR-001",
+              name: "Legacy estimating deal",
+              stageId: "legacy-estimating",
+              pipelineDisposition: "deals",
+              workflowRoute: "normal",
+              assignedRepId: "rep-1",
+              companyId: null,
+              propertyId: null,
+              sourceLeadId: null,
+              primaryContactId: null,
+              ddEstimate: null,
+              bidEstimate: "245000",
+              awardedAmount: null,
+              changeOrderTotal: null,
+              description: null,
+              propertyAddress: null,
+              propertyCity: "Dallas",
+              propertyState: "TX",
+              propertyZip: null,
+              projectTypeId: null,
+              regionId: null,
+              source: null,
+              winProbability: null,
+              decisionMakerName: null,
+              decisionProcess: null,
+              budgetStatus: null,
+              incumbentVendor: null,
+              unitCount: null,
+              buildYear: null,
+              forecastWindow: null,
+              forecastCategory: null,
+              forecastConfidencePercent: null,
+              forecastRevenue: null,
+              forecastGrossProfit: null,
+              forecastBlockers: null,
+              nextStep: null,
+              nextStepDueAt: null,
+              nextMilestoneAt: null,
+              supportNeededType: null,
+              supportNeededNotes: null,
+              forecastUpdatedAt: null,
+              forecastUpdatedBy: null,
+              procoreProjectId: null,
+              procoreBidId: null,
+              procoreLastSyncedAt: null,
+              isBidBoardOwned: false,
+              bidBoardStageSlug: null,
+              readOnlySyncedAt: null,
+              lostReasonId: null,
+              lostNotes: null,
+              lostCompetitor: null,
+              lostAt: null,
+              expectedCloseDate: null,
+              actualCloseDate: null,
+              lastActivityAt: null,
+              stageEnteredAt: "2026-04-23T00:00:00.000Z",
+              isActive: true,
+              hubspotDealId: null,
+              createdAt: "2026-04-23T00:00:00.000Z",
+              updatedAt: "2026-04-23T00:00:00.000Z",
+            },
+          ],
+        },
+      ],
+      [
+        {
+          id: "legacy-estimating",
+          name: "Estimating",
+          slug: "estimating",
+          workflowFamily: "standard_deal",
+        },
+        {
+          id: "opportunity-stage",
+          name: "Opportunity",
+          slug: "opportunity",
+          workflowFamily: "standard_deal",
+        },
+        {
+          id: "estimate-in-progress-stage",
+          name: "Estimate in Progress",
+          slug: "estimate_in_progress",
+          workflowFamily: "standard_deal",
+        },
+        {
+          id: "estimate-under-review-stage",
+          name: "Estimate Under Review",
+          slug: "estimate_under_review",
+          workflowFamily: "standard_deal",
+        },
+        {
+          id: "estimate-sent-stage",
+          name: "Estimate Sent to Client",
+          slug: "estimate_sent_to_client",
+          workflowFamily: "standard_deal",
+        },
+        {
+          id: "sent-to-production-stage",
+          name: "Sent to Production",
+          slug: "sent_to_production",
+          workflowFamily: "standard_deal",
+          isTerminal: false,
+        },
+        {
+          id: "production-lost-stage",
+          name: "Production Lost",
+          slug: "production_lost",
+          workflowFamily: "standard_deal",
+          isTerminal: true,
+        },
+      ]
+    );
+
+    expect(columns.map((column) => column.stage.slug)).toEqual([
+      "opportunity",
+      "service_estimating",
+      "estimate_in_progress",
+      "estimate_under_review",
+      "estimate_sent_to_client",
+      "service_sent_to_production",
+      "sent_to_production",
+      "service_lost",
+      "production_lost",
+    ]);
+
+    expect(columns.find((column) => column.stage.slug === "estimate_in_progress")?.cards.map((deal) => deal.id)).toEqual([
+      "deal-1",
+    ]);
+  });
+});

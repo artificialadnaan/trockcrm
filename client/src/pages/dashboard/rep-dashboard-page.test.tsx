@@ -26,9 +26,13 @@ vi.mock("@/hooks/use-tasks", () => ({
     refetch: vi.fn(),
   }),
 }));
-vi.mock("@/lib/pipeline-ownership", () => ({
-  getWorkflowRouteLabel: (route: "normal" | "service") => (route === "service" ? "Service" : "Standard"),
-}));
+vi.mock("@/lib/pipeline-ownership", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/pipeline-ownership")>();
+  return {
+    ...actual,
+    getWorkflowRouteLabel: (route: "normal" | "service") => (route === "service" ? "Service" : "Standard"),
+  };
+});
 vi.mock("@/components/dashboard/rep-dashboard-board-shell", () => ({
   RepDashboardBoardShell: ({ activeEntity, loading, error }: { activeEntity: "deals" | "leads"; loading: boolean; error: string | null }) => (
     <div>
