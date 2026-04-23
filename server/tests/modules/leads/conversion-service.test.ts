@@ -129,8 +129,6 @@ describe("Sales workflow shared contract", () => {
       "service_estimating",
       "estimate_under_review",
       "estimate_sent_to_client",
-      "service_estimate_under_review",
-      "service_estimate_sent_to_client",
       "sent_to_production",
       "service_sent_to_production",
       "production_lost",
@@ -1140,6 +1138,114 @@ describe("Lead Service", () => {
 
     const blocked = await service.transitionLeadStage(tenantDb as never, {
       leadId: "lead-1",
+      targetStageId: "lead-stage-qualified",
+      userId: "rep-1",
+      userRole: "rep",
+      officeId: "office-1",
+    });
+
+    expect(blocked).toEqual({
+      ok: false,
+      reason: "missing_requirements",
+      targetStageId: "lead-stage-qualified",
+      resolution: "inline",
+      missing: [
+        { key: "source", label: "Lead source", resolution: "inline" },
+        { key: "projectTypeId", label: "Project type", resolution: "detail" },
+        {
+          key: "qualificationPayload.existing_customer_status",
+          label: "Existing customer status",
+          resolution: "inline",
+        },
+      ],
+    });
+  });
+
+  it("allows a projected New Lead record on a legacy stage to move into Qualified Lead", async () => {
+    const tenantDb = createFakeTenantDb({
+      leads: [
+        {
+          id: "lead-legacy",
+          companyId: "company-1",
+          propertyId: "property-1",
+          primaryContactId: null,
+          name: "Legacy contacted lead",
+          stageId: "lead-stage-contacted",
+          assignedRepId: "rep-1",
+          status: "open",
+          pipelineType: "normal",
+          projectTypeId: null,
+          qualificationPayload: {},
+          projectTypeQuestionPayload: { projectTypeId: null, answers: {} },
+          source: null,
+          description: null,
+          stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+          convertedAt: null,
+          isActive: true,
+          createdAt: new Date("2026-04-12T15:00:00.000Z"),
+          updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+        },
+      ],
+    });
+
+    const service = createLeadService({
+      getAllStages: async () => [
+        {
+          id: "lead-stage-new",
+          slug: "new_lead",
+          name: "New Lead",
+          displayOrder: 1,
+          isTerminal: false,
+        },
+        {
+          id: "lead-stage-qualified",
+          slug: "qualified_lead",
+          name: "Qualified Lead",
+          displayOrder: 2,
+          isTerminal: false,
+        },
+        {
+          id: "lead-stage-sales-validation",
+          slug: "sales_validation_stage",
+          name: "Sales Validation Stage",
+          displayOrder: 3,
+          isTerminal: false,
+        },
+      ],
+      getStageById: async (id: string) => {
+        if (id === "lead-stage-contacted") {
+          return {
+            id,
+            slug: "contacted",
+            name: "Contacted",
+            displayOrder: 1,
+            isTerminal: false,
+          };
+        }
+
+        if (id === "lead-stage-qualified") {
+          return {
+            id,
+            slug: "qualified_lead",
+            name: "Qualified Lead",
+            displayOrder: 2,
+            isTerminal: false,
+          };
+        }
+
+        return {
+          id,
+          slug: "sales_validation_stage",
+          name: "Sales Validation Stage",
+          displayOrder: 3,
+          isTerminal: false,
+        };
+      },
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+    });
+
+    const blocked = await service.transitionLeadStage(tenantDb as never, {
+      leadId: "lead-legacy",
       targetStageId: "lead-stage-qualified",
       userId: "rep-1",
       userRole: "rep",

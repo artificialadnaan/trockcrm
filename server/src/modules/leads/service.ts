@@ -220,6 +220,10 @@ const CANONICAL_LEAD_BOARD_STAGE_SLUGS = [
 
 type CanonicalLeadBoardStageSlug = (typeof CANONICAL_LEAD_BOARD_STAGE_SLUGS)[number];
 
+function resolveCanonicalLeadTransitionStageSlug(stageSlug: string | null | undefined) {
+  return resolveCanonicalLeadBoardStageSlug(stageSlug) ?? stageSlug ?? null;
+}
+
 const defaultDependencies: LeadServiceDependencies = {
   getAllStages,
   getStageById,
@@ -1176,11 +1180,21 @@ export function createLeadService(
     const orderedLeadStages = (await deps.getAllStages("lead")).filter(
       (stage) => stage.isActivePipeline !== false
     );
-    const stageIndexById = new Map(orderedLeadStages.map((stage, index) => [stage.id, index]));
-    const currentStageIndex = stageIndexById.get(currentStage.id);
-    const targetStageIndex = stageIndexById.get(targetStage.id);
+    const orderedLeadStageSlugs = [
+      ...new Set(
+        orderedLeadStages
+          .map((stage) => resolveCanonicalLeadTransitionStageSlug(stage.slug))
+          .filter((slug): slug is string => Boolean(slug))
+      ),
+    ];
+    const currentStageIndex = orderedLeadStageSlugs.indexOf(
+      resolveCanonicalLeadTransitionStageSlug(currentStage.slug) ?? ""
+    );
+    const targetStageIndex = orderedLeadStageSlugs.indexOf(
+      resolveCanonicalLeadTransitionStageSlug(targetStage.slug) ?? ""
+    );
 
-    if (currentStageIndex === undefined || targetStageIndex === undefined) {
+    if (currentStageIndex === -1 || targetStageIndex === -1) {
       throw new AppError(400, "Invalid lead stage ID");
     }
 
