@@ -528,4 +528,39 @@ describe("lead service canonical progression", () => {
 
     expect(lead.stageId).toBe(customTargetStage.id);
   });
+
+  it("allows mixed-config tenants to move from a custom lead stage into opportunity", async () => {
+    const tenantDb = createFakeTenantDb({
+      id: "lead-1",
+      companyId: "company-1",
+      propertyId: "property-1",
+      primaryContactId: null,
+      name: "Palm Villas repaint",
+      stageId: customCurrentStage.id,
+      assignedRepId: "rep-1",
+      status: "open",
+      source: "Referral",
+      description: null,
+      stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+      convertedAt: null,
+      isActive: true,
+      createdAt: new Date("2026-04-12T15:00:00.000Z"),
+      updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+    });
+    const service = createLeadService({
+      getStageById: pipelineMocks.getStageById as never,
+      getActiveProjectTypes: pipelineMocks.getActiveProjectTypes as never,
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+    });
+
+    const lead = await service.updateLead(
+      tenantDb as never,
+      "lead-1",
+      { stageId: opportunityStage.id },
+      "director",
+      "director-1"
+    );
+
+    expect(lead.stageId).toBe(opportunityStage.id);
+  });
 });
