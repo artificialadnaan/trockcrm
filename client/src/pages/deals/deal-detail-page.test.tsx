@@ -226,12 +226,26 @@ describe("DealDetailPage", () => {
 
     mocks.usePipelineStagesMock.mockReturnValue({
       stages: [
+<<<<<<< HEAD
         { id: "stage-opportunity", name: "Opportunity", slug: "opportunity", workflowFamily: "standard_deal", displayOrder: 0, isTerminal: false },
         { id: "stage-estimating", name: "Estimate in Progress", slug: "estimate_in_progress", workflowFamily: "standard_deal", displayOrder: 1, isTerminal: false },
         { id: "stage-under-review", name: "Estimate Under Review", slug: "estimate_under_review", workflowFamily: "standard_deal", displayOrder: 2, isTerminal: false },
         { id: "stage-sent", name: "Estimate Sent to Client", slug: "estimate_sent_to_client", workflowFamily: "standard_deal", displayOrder: 3, isTerminal: false },
         { id: "stage-production", name: "Sent to Production", slug: "sent_to_production", workflowFamily: "standard_deal", displayOrder: 4, isTerminal: false },
         { id: "stage-lost", name: "Production Lost", slug: "production_lost", workflowFamily: "standard_deal", displayOrder: 5, isTerminal: true },
+=======
+        { id: "stage-dd", name: "DD", slug: "dd", displayOrder: 0, isTerminal: false },
+        { id: "stage-estimating", name: "Estimating", slug: "estimating", displayOrder: 1, isTerminal: false },
+        { id: "stage-bid-sent", name: "Bid Sent", slug: "bid_sent", displayOrder: 2, isTerminal: false },
+        { id: "stage-in-production", name: "In Production", slug: "in_production", displayOrder: 3, isTerminal: false },
+        {
+          id: "stage-sent-to-production",
+          name: "Sent to Production",
+          slug: "sent_to_production",
+          displayOrder: 4,
+          isTerminal: true,
+        },
+>>>>>>> 67e7bd9 (fix: restore closeout access and terminal aggregation)
       ],
     });
 
@@ -313,6 +327,23 @@ describe("DealDetailPage", () => {
     const managedCount = (html.match(/Bid Board managed/g) ?? []).length;
 
     expect(html).toContain("Move Stage");
-    expect(managedCount).toBe(2);
+    expect(managedCount).toBe(3);
+  });
+
+  it("shows the Close-Out tab for canonical sent-to-production deals", () => {
+    mocks.useDealDetailMock.mockReturnValueOnce({
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      deal: makeDealDetail({
+        stageId: "stage-sent-to-production",
+        workflowRoute: "normal",
+        bidBoardStageSlug: "sent_to_production",
+      }),
+    });
+
+    const html = renderPage();
+
+    expect(html).toContain("Close-Out");
   });
 });

@@ -66,6 +66,13 @@ const STAGES = {
   bid_sent: makeStage({ slug: "bid_sent", displayOrder: 2 }),
   in_production: makeStage({ slug: "in_production", displayOrder: 3 }),
   close_out: makeStage({ slug: "close_out", displayOrder: 4 }),
+  sent_to_production: makeStage({ slug: "sent_to_production", displayOrder: 5, isTerminal: true, isActivePipeline: false }),
+  service_sent_to_production: makeStage({
+    slug: "service_sent_to_production",
+    displayOrder: 5,
+    isTerminal: true,
+    isActivePipeline: false,
+  }),
   closed_won: makeStage({ slug: "closed_won", displayOrder: 10, isTerminal: true, isActivePipeline: false }),
   closed_lost: makeStage({ slug: "closed_lost", displayOrder: 11, isTerminal: true, isActivePipeline: false }),
 };
@@ -794,6 +801,19 @@ describe("Stage Gate Validation", () => {
       expect((result as any).targetStage.slug).toBe("closed_lost");
     });
 
+    it("treats canonical sent_to_production as terminal", () => {
+      const result = evaluateStageGate({
+        deal: makeDeal({ stageId: STAGES.close_out.id }),
+        currentStage: STAGES.close_out,
+        targetStage: STAGES.sent_to_production,
+        userRole: "rep",
+        userId: "rep-1",
+      });
+
+      expect(result.isTerminal).toBe(true);
+      expect((result as any).targetStage.slug).toBe("sent_to_production");
+    });
+
     it("should not flag non-terminal stages as terminal", () => {
       const result = evaluateStageGate({
         deal: makeDeal({ stageId: STAGES.dd.id }),
@@ -1301,6 +1321,74 @@ describe("Scoping Attachment Hardening", () => {
         satisfied: false,
       })
     );
+  });
+});
+
+describe("Canonical Closeout Gate", () => {
+  beforeEach(() => {
+    mockedStageLookups.queue.length = 0;
+  });
+
+  it("blocks move into sent_to_production when closeout checklist is not initialized", async () => {
+    const { validateStageGate } = await import("../../../src/modules/deals/stage-gate.js");
+    const tenantDb = createHardeningTenantDb({
+      deals: [
+        {
+          id: "deal-1",
+          name: "Palm Villas",
+          stageId: STAGES.close_out.id,
+          workflowRoute: "normal",
+          assignedRepId: "rep-1",
+          projectTypeId: "pt-1",
+          propertyAddress: "123 Palm Way",
+          propertyCity: "Miami",
+          propertyState: "FL",
+          propertyZip: "33101",
+          description: "Exterior refresh",
+          estimatingSubstage: null,
+          proposalStatus: "not_started",
+          proposalRevisionCount: 0,
+          updatedAt: new Date("2026-04-15T15:00:00.000Z"),
+        },
+      ],
+      closeoutChecklistItems: [],
+    });
+
+    mockedStageLookups.queue.push(
+      {
+        id: STAGES.close_out.id,
+        name: STAGES.close_out.name,
+        slug: STAGES.close_out.slug,
+        isTerminal: STAGES.close_out.isTerminal,
+        displayOrder: STAGES.close_out.displayOrder,
+        requiredFields: [],
+        requiredDocuments: [],
+        requiredApprovals: [],
+        workflowFamily: "standard_deal",
+      },
+      {
+        id: STAGES.sent_to_production.id,
+        name: STAGES.sent_to_production.name,
+        slug: STAGES.sent_to_production.slug,
+        isTerminal: STAGES.sent_to_production.isTerminal,
+        displayOrder: STAGES.sent_to_production.displayOrder,
+        requiredFields: [],
+        requiredDocuments: [],
+        requiredApprovals: [],
+        workflowFamily: "standard_deal",
+      }
+    );
+
+    const result = await validateStageGate(
+      tenantDb as never,
+      "deal-1",
+      STAGES.sent_to_production.id,
+      "rep",
+      "rep-1"
+    );
+
+    expect(result.allowed).toBe(false);
+    expect(result.blockReason).toContain("Close-out checklist has not been initialized");
   });
 });
 
