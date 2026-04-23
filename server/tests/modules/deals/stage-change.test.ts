@@ -32,6 +32,7 @@ const { createStageTimers } = await import("../../../src/modules/deals/timer-ser
 const { changeDealStage } = await import("../../../src/modules/deals/stage-change.js");
 const pipelineService = await import("../../../src/modules/pipeline/service.js");
 const { inferDealBidBoardOwnership } = await import("../../../src/modules/deals/workflow-backfill.js");
+const { BID_BOARD_BOUNDARY_STAGE_MISSING_MESSAGE } = await import("../../../src/modules/deals/service.js");
 
 type FakeDeal = {
   id: string;
@@ -557,7 +558,7 @@ describe("changeDealStage", () => {
     ).rejects.toMatchObject<AppError>({
       statusCode: 500,
       code: "BID_BOARD_BOUNDARY_STAGE_MISSING",
-      message: "Bid Board entry stage configuration is required to enforce the downstream ownership boundary.",
+      message: BID_BOARD_BOUNDARY_STAGE_MISSING_MESSAGE,
     });
   });
 

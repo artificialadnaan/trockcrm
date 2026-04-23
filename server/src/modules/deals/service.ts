@@ -686,10 +686,14 @@ export async function updateDeal(
   }
 
   if (input.sourceLeadId !== undefined) {
+    const assignedRepId = input.assignedRepId ?? existing.assignedRepId;
+    if (!assignedRepId) {
+      throw new AppError(400, "assignedRepId is required when attaching a source lead");
+    }
     const lineage = await resolveSourceLeadLineage(tenantDb, {
       name: existing.name,
       stageId: existing.stageId,
-      assignedRepId: existing.assignedRepId,
+      assignedRepId,
       officeId,
       sourceLeadId: input.sourceLeadId,
       companyId: input.companyId ?? existing.companyId ?? undefined,

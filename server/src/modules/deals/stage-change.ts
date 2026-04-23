@@ -189,7 +189,8 @@ export async function changeDealStage(
       isBidBoardOwnedDownstreamStage(targetStage, estimatingBoundary));
   const targetIsReopenIntoCrmOwnedFlow =
     Boolean(estimatingBoundary) &&
-    targetStage.displayOrder < (estimatingBoundary?.displayOrder ?? Number.NEGATIVE_INFINITY);
+    targetStage.displayOrder < (estimatingBoundary?.displayOrder ?? Number.NEGATIVE_INFINITY) &&
+    !isEstimatingBoundaryStageSlug(targetStage.slug, currentDeal[0].workflowRoute);
 
   if (
     (inferredOwnership.isBidBoardOwned || currentIsBidBoardBoundaryOrDownstream) &&

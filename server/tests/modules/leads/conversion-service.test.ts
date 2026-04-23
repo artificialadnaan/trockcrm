@@ -950,9 +950,11 @@ describe("Lead Conversion Shared Contract", () => {
     expect(config.foreignKeys.map((fk) => fk.getName()).sort()).toEqual([
       "leads_assigned_rep_id_users_id_fk",
       "leads_company_id_companies_id_fk",
+      "leads_director_reviewed_by_users_id_fk",
       "leads_disqualified_by_users_id_fk",
       "leads_executive_decision_by_users_id_fk",
       "leads_existing_customer_resolved_by_users_id_fk",
+      "leads_forecast_updated_by_users_id_fk",
       "leads_primary_contact_id_contacts_id_fk",
       "leads_project_type_id_project_type_config_id_fk",
       "leads_property_id_properties_id_fk",

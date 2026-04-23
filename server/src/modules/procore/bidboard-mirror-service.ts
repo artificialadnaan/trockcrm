@@ -290,7 +290,12 @@ export function buildBidBoardMirrorUpdate(input: {
 
   updates.estimatingSubstage =
     canonicalTargetStageSlug &&
-    isEstimatingBoundaryCanonicalStage(canonicalTargetStageSlug, input.deal.workflowRoute)
+    ![
+      "sent_to_production",
+      "service_sent_to_production",
+      "production_lost",
+      "service_lost",
+    ].includes(canonicalTargetStageSlug)
       ? estimatingSubstage
       : null;
   if (proposalStatus) {

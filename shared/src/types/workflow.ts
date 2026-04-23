@@ -100,7 +100,7 @@ export const CANONICAL_DEAL_WORKFLOW_CONTRACTS = [
   },
   {
     slug: "estimate_in_progress",
-    label: "Estimate In Progress",
+    label: "Estimate in Progress",
     workflowRoutes: ["normal"],
     systemOfRecord: "bid_board",
     outcomeCategory: "active",
@@ -108,7 +108,7 @@ export const CANONICAL_DEAL_WORKFLOW_CONTRACTS = [
   },
   {
     slug: "service_estimating",
-    label: "Service Estimating",
+    label: "Service - Estimating",
     workflowRoutes: ["service"],
     systemOfRecord: "bid_board",
     outcomeCategory: "active",
@@ -124,7 +124,7 @@ export const CANONICAL_DEAL_WORKFLOW_CONTRACTS = [
   },
   {
     slug: "estimate_sent_to_client",
-    label: "Estimate Sent To Client",
+    label: "Estimate Sent to Client",
     workflowRoutes: WORKFLOW_ROUTES,
     systemOfRecord: "bid_board",
     outcomeCategory: "active",
@@ -132,7 +132,7 @@ export const CANONICAL_DEAL_WORKFLOW_CONTRACTS = [
   },
   {
     slug: "sent_to_production",
-    label: "Sent To Production",
+    label: "Sent to Production",
     workflowRoutes: ["normal"],
     systemOfRecord: "bid_board",
     outcomeCategory: "handed_off",
@@ -140,7 +140,7 @@ export const CANONICAL_DEAL_WORKFLOW_CONTRACTS = [
   },
   {
     slug: "service_sent_to_production",
-    label: "Service Sent To Production",
+    label: "Service - Sent to Production",
     workflowRoutes: ["service"],
     systemOfRecord: "bid_board",
     outcomeCategory: "handed_off",
@@ -156,13 +156,17 @@ export const CANONICAL_DEAL_WORKFLOW_CONTRACTS = [
   },
   {
     slug: "service_lost",
-    label: "Service Lost",
+    label: "Service - Lost",
     workflowRoutes: ["service"],
     systemOfRecord: "bid_board",
     outcomeCategory: "lost",
     isTerminal: true,
   },
 ] as const satisfies readonly CanonicalDealWorkflowContract[];
+
+export const CANONICAL_DEAL_STAGE_LABELS = Object.fromEntries(
+  CANONICAL_DEAL_WORKFLOW_CONTRACTS.map((contract) => [contract.slug, contract.label])
+) as Record<CanonicalDealStageSlug, string>;
 
 type CanonicalDealWorkflowContractRecord = (typeof CANONICAL_DEAL_WORKFLOW_CONTRACTS)[number];
 

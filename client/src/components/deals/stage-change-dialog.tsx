@@ -29,7 +29,12 @@ import { getDealStageMetadata } from "@/hooks/use-deals";
 import { toCanonicalDealStageSlug } from "@trock-crm/shared/types";
 
 interface StageChangeDialogProps {
-  deal: { id: string; name: string; stageId: string; workflowRoute?: "normal" | "service" };
+  deal: {
+    id: string;
+    name: string;
+    stageId: string;
+    workflowRoute?: "normal" | "service" | null;
+  };
   targetStageId: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;

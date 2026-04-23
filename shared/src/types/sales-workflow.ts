@@ -41,9 +41,29 @@ export const BID_BOARD_MIRRORED_STAGE_SLUGS = [
 ] as const;
 export type BidBoardMirroredStageSlug = (typeof BID_BOARD_MIRRORED_STAGE_SLUGS)[number];
 
+export const NORMAL_DEAL_STAGE_SLUGS = [
+  "opportunity",
+  "estimate_in_progress",
+  "estimate_under_review",
+  "estimate_sent_to_client",
+  "sent_to_production",
+  "production_lost",
+] as const;
+
+export const SERVICE_DEAL_STAGE_SLUGS = [
+  "opportunity",
+  "service_estimating",
+  "estimate_under_review",
+  "estimate_sent_to_client",
+  "service_sent_to_production",
+  "service_lost",
+] as const;
+
 export const SALES_WORKFLOW = {
   crmOwnedLeadStages: CRM_OWNED_LEAD_STAGE_LABELS,
   pipelineTypes: SALES_WORKFLOW_PIPELINE_TYPES,
   disqualificationReasons: SALES_WORKFLOW_DISQUALIFICATION_REASONS,
   bidBoardMirroredStages: BID_BOARD_MIRRORED_STAGE_SLUGS,
+  normalDealStages: NORMAL_DEAL_STAGE_SLUGS,
+  serviceDealStages: SERVICE_DEAL_STAGE_SLUGS,
 } as const;
