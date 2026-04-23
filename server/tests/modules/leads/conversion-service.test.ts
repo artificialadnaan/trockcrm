@@ -80,6 +80,11 @@ const tenantBidBoardStageFamilyMigrationPath = resolve(
   "../../../../migrations/0051_add_bid_board_stage_family_to_tenant_deals.sql"
 );
 const tenantBidBoardStageFamilyMigrationSql = readFileSync(tenantBidBoardStageFamilyMigrationPath, "utf8");
+const bidBoardLossOutcomeMigrationPath = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../../migrations/0052_reconcile_bid_board_loss_outcome_columns.sql"
+);
+const bidBoardLossOutcomeMigrationSql = readFileSync(bidBoardLossOutcomeMigrationPath, "utf8");
 
 function expectSqlToMatch(pattern: RegExp): void {
   expect(migrationSql).toMatch(pattern);
@@ -244,6 +249,21 @@ describe("Sales workflow shared contract", () => {
     );
     expect(tenantBidBoardStageFamilyMigrationSql).toContain(
       "ALTER TABLE %I.deals ADD COLUMN IF NOT EXISTS bid_board_stage_family varchar(50)"
+    );
+  });
+
+  it("reconciles the missing bid board loss outcome deal columns", () => {
+    expect(bidBoardLossOutcomeMigrationSql).toContain(
+      "ALTER TABLE public.deals"
+    );
+    expect(bidBoardLossOutcomeMigrationSql).toContain(
+      "ADD COLUMN IF NOT EXISTS bid_board_loss_outcome varchar(100)"
+    );
+    expect(bidBoardLossOutcomeMigrationSql).toContain(
+      "WHERE schemata.schema_name LIKE 'office_%'"
+    );
+    expect(bidBoardLossOutcomeMigrationSql).toContain(
+      "ALTER TABLE %I.deals ADD COLUMN IF NOT EXISTS bid_board_loss_outcome varchar(100)"
     );
   });
 });
