@@ -216,7 +216,7 @@ export function ContactDetailPage() {
       </div>
 
       {/* Tab Content */}
-      {activeTab === "deals" && <ContactDealsTab contactId={contact.id} />}
+      {activeTab === "deals" && <ContactDealsTab contactId={contact.id} contact={contact} />}
       {activeTab === "email" && (
         <ContactEmailTab contactId={contact.id} contactEmail={contact.email} />
       )}

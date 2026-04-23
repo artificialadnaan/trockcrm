@@ -6,10 +6,10 @@ import {
   Trash2,
   ChevronRight,
   MoreHorizontal,
+  Lock,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { RecordAssignmentCard } from "@/components/assignment/record-assignment-card";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -25,30 +25,25 @@ import { DealScopingWorkspace } from "@/components/deals/deal-scoping-workspace"
 import { DealFileTab } from "@/components/files/deal-file-tab";
 import { DealTeamTab } from "./deal-team-tab";
 import { DealEstimatesTab } from "./deal-estimates-tab";
-import { DealPaymentsTab } from "./deal-payments-tab";
 import { DealPunchListTab } from "./deal-punch-list-tab";
 import { DealCloseoutTab } from "./deal-closeout-tab";
 import { DealTimersBanner } from "./deal-timers-banner";
 import { DealProposalCard } from "./deal-proposal-card";
-import { OpportunityRoutingPanel } from "@/components/deals/opportunity-routing-panel";
+import { DealEstimatingSubstage } from "./deal-estimating-substage";
 import { LeadForm } from "@/components/leads/lead-form";
 import { LeadTimelineTab } from "@/components/leads/lead-timeline-tab";
 import { ActivityLogForm } from "@/components/activities/activity-log-form";
-import { ForecastEditor } from "@/components/shared/forecast-editor";
-import { NextStepEditor } from "@/components/shared/next-step-editor";
 import { StageChangeDialog } from "@/components/deals/stage-change-dialog";
 import { TaskCreateDialog } from "@/components/tasks/task-create-dialog";
 import { useActivities, createActivity } from "@/hooks/use-activities";
-import { useDealDetail, deleteDeal as apiDeleteDeal, updateDeal, type DealDetail } from "@/hooks/use-deals";
+import { useDealDetail, deleteDeal as apiDeleteDeal, type DealDetail } from "@/hooks/use-deals";
 import { useCompanyDetail } from "@/hooks/use-companies";
 import { usePipelineStages } from "@/hooks/use-pipeline-config";
 import { useAuth } from "@/lib/auth";
-import { useTaskAssignees } from "@/hooks/use-task-assignees";
 import { formatCurrency, bestEstimate } from "@/lib/deal-utils";
-import { buildDealDetailSummary } from "@/lib/record-detail-summary";
-import { useTasks, getTaskStatusLabel } from "@/hooks/use-tasks";
+import { getCanonicalDealStageSlugs, getDealStageMetadata } from "@/lib/pipeline-ownership";
 
-type Tab = "overview" | "lead" | "scoping" | "files" | "email" | "activity" | "timeline" | "history" | "team" | "tasks" | "payments" | "estimates" | "punch_list" | "closeout";
+type Tab = "overview" | "lead" | "scoping" | "files" | "email" | "activity" | "timeline" | "history" | "team" | "estimates" | "punch_list" | "closeout";
 
 export function DealDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -58,23 +53,46 @@ export function DealDetailPage() {
   const { deal, loading, error, refetch } = useDealDetail(id);
   const { company } = useCompanyDetail(deal?.companyId ?? undefined);
   const { stages } = usePipelineStages();
-  const { assignees: availableReps } = useTaskAssignees();
-  const { tasks: dealTasks, loading: tasksLoading } = useTasks({ dealId: id, limit: 100 });
   const [activeTab, setActiveTab] = useState<Tab>("overview");
   const [stageChangeOpen, setStageChangeOpen] = useState(false);
   const [targetStageId, setTargetStageId] = useState<string | null>(null);
   const [teamCount, setTeamCount] = useState<number | null>(null);
-  const [savingAssignment, setSavingAssignment] = useState(false);
   const currentStage = stages.find((s) => s.id === deal?.stageId);
   const isDirectorOrAdmin = user?.role === "director" || user?.role === "admin";
+  const bidBoardOwnership = deal?.bidBoardOwnership;
+  const isBidBoardOwned = Boolean(deal?.isBidBoardOwned || bidBoardOwnership?.isOwned);
+  const workflowRoute = deal?.workflowRoute ?? "normal";
+  const workflowFamily = workflowRoute === "service" ? "service_deal" : "standard_deal";
+  const currentStageMeta = deal
+    ? getDealStageMetadata(
+        {
+          stageId: deal.stageId,
+          workflowRoute,
+          isBidBoardOwned,
+          bidBoardStageSlug: deal.bidBoardStageSlug,
+          readOnlySyncedAt: deal.readOnlySyncedAt,
+        },
+        stages
+      )
+    : null;
+  const canonicalStageSlugs = deal ? getCanonicalDealStageSlugs(workflowRoute) : ["opportunity"];
+  const stageMenuStages = canonicalStageSlugs
+    .map((slug) =>
+      stages.find((stage) => stage.slug === slug && stage.workflowFamily === workflowFamily) ??
+      stages.find((stage) => stage.slug === slug)
+    )
+    .filter((stage): stage is NonNullable<typeof stage> => Boolean(stage));
+  const currentStageIndex = currentStageMeta?.slug
+    ? canonicalStageSlugs.findIndex((slug) => slug === currentStageMeta.slug)
+    : -1;
 
   // Build stage advancement options
-  const forwardStages = stages.filter(
-    (s) => s.displayOrder > (currentStage?.displayOrder ?? 0)
-  );
-  const backwardStages = stages.filter(
-    (s) => s.displayOrder < (currentStage?.displayOrder ?? 0) && !s.isTerminal
-  );
+  const forwardStages =
+    currentStageIndex >= 0 ? stageMenuStages.filter((_, index) => index > currentStageIndex) : [];
+  const backwardStages =
+    currentStageIndex >= 0 ? stageMenuStages.filter((_, index) => index < currentStageIndex) : [];
+  const readonlyForwardStages = isBidBoardOwned ? forwardStages : [];
+  const manualForwardStages = isBidBoardOwned ? [] : forwardStages;
 
   const handleStageChange = (stageId: string) => {
     setTargetStageId(stageId);
@@ -102,22 +120,21 @@ export function DealDetailPage() {
     }
   };
 
-  const currentStageSlug = currentStage?.slug ?? "";
+  const currentStageSlug = currentStageMeta?.slug ?? currentStage?.slug ?? "";
+  const isOpportunityStage = currentStageSlug === "opportunity";
   const showPunchList = ["sent_to_production", "service_sent_to_production"].includes(currentStageSlug);
-  const showCloseout = showPunchList;
+  const showCloseout = false;
 
   const tabs: { key: Tab; label: string }[] = [
     { key: "overview", label: "Overview" },
     { key: "lead", label: "Lead" },
-    { key: "scoping", label: "Scoping" },
+    { key: "scoping", label: isOpportunityStage ? "Opportunity Scope" : "Scoping" },
     { key: "files", label: "Files" },
     { key: "email", label: "Email" },
     { key: "activity", label: "Activity" },
     { key: "timeline", label: "Timeline" },
     { key: "history", label: "History" },
     { key: "team", label: teamCount != null ? `Team (${teamCount})` : "Team" },
-    { key: "tasks", label: `Tasks (${dealTasks.length})` },
-    { key: "payments", label: "Payments" },
     { key: "estimates", label: "Estimates" },
     ...(showPunchList ? [{ key: "punch_list" as Tab, label: "Punch List" }] : []),
     ...(showCloseout ? [{ key: "closeout" as Tab, label: "Close-Out" }] : []),
@@ -130,9 +147,11 @@ export function DealDetailPage() {
     const nextTab =
       requestedTab && availableTabs.includes(requestedTab as Tab)
         ? (requestedTab as Tab)
-        : "overview";
+        : isOpportunityStage
+          ? "scoping"
+          : "overview";
     setActiveTab((current) => (current === nextTab ? current : nextTab));
-  }, [availableTabs, requestedTab]);
+  }, [availableTabs, isOpportunityStage, requestedTab]);
 
   useEffect(() => {
     if (activeTab !== "overview" || requestedFocus !== "copilot") {
@@ -168,13 +187,6 @@ export function DealDetailPage() {
       </div>
     );
   }
-  const assignedRepName =
-    availableReps.find((assignee) => assignee.id === deal.assignedRepId)?.displayName ??
-    deal.assignedRepId;
-  const summary = buildDealDetailSummary(deal);
-  const contextLine = [company?.name, deal.propertyAddress, [deal.propertyCity, deal.propertyState].filter(Boolean).join(", ")]
-    .filter(Boolean)
-    .join(" • ");
   const handleTabSelect = (tab: Tab) => {
     setActiveTab(tab);
     const nextParams = new URLSearchParams(searchParams);
@@ -187,54 +199,40 @@ export function DealDetailPage() {
     setSearchParams(nextParams, { replace: true });
   };
 
-  const handleAssignmentSave = async (assignedRepId: string) => {
-    if (assignedRepId === deal.assignedRepId) return;
-    setSavingAssignment(true);
-    try {
-      await updateDeal(deal.id, { assignedRepId });
-      await refetch();
-    } finally {
-      setSavingAssignment(false);
-    }
-  };
-
   return (
-    <div className="space-y-5">
-      <section className="overflow-hidden rounded-[2rem] border border-slate-200 bg-white shadow-sm">
-        <div className="flex items-start justify-between gap-6 px-7 pb-6 pt-7">
-          <div className="space-y-4">
-            <Button
-              variant="ghost"
-              size="sm"
-              className="-ml-2 text-slate-500 hover:text-slate-900"
-              onClick={() => navigate("/deals")}
-            >
-              <ArrowLeft className="h-4 w-4 mr-1" />
-              Deals
-            </Button>
-            <div className="space-y-3">
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="rounded-md bg-slate-100 px-2 py-1 text-[10px] font-black tracking-[0.16em] text-slate-500 uppercase">
-                  {deal.dealNumber}
-                </span>
-                <DealStageBadge stageId={deal.stageId} />
-              </div>
-              <div className="space-y-2">
-                <h1 className="text-[2.5rem] leading-none font-black tracking-tight text-slate-950">{deal.name}</h1>
-                <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-sm font-semibold text-slate-600">
-                  <span>
-                    Value: <span className="font-black text-slate-950">{formatCurrency(bestEstimate(deal))}</span>
-                  </span>
-                  <span>
-                    Owner: <span className="font-black text-slate-950">{assignedRepName}</span>
-                  </span>
-                </div>
-              </div>
-              {contextLine ? <p className="max-w-3xl text-sm text-slate-500">{contextLine}</p> : null}
-            </div>
+    <div className="space-y-4">
+      {/* Header */}
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="mb-1 -ml-2"
+            onClick={() => navigate("/deals")}
+          >
+            <ArrowLeft className="h-4 w-4 mr-1" />
+            Deals
+          </Button>
+          <div className="flex items-center gap-3">
+            <h2 className="text-2xl font-bold">{deal.name}</h2>
+            <span className="text-sm text-muted-foreground font-mono">
+              {deal.dealNumber}
+            </span>
           </div>
+          <div className="flex items-center gap-3 mt-1">
+            <DealStageBadge
+              stageId={deal.stageId}
+              workflowRoute={workflowRoute}
+              bidBoardStageSlug={deal.bidBoardStageSlug}
+              ownership={isBidBoardOwned ? "bid_board" : "crm"}
+            />
+            <span className="text-lg font-semibold">
+              {formatCurrency(bestEstimate(deal))}
+            </span>
+          </div>
+        </div>
 
-          <div className="flex flex-wrap items-center justify-end gap-2">
+        <div className="flex items-center gap-2">
           {/* Stage Advancement Dropdown */}
           {!currentStage?.isTerminal && (
             <DropdownMenu>
@@ -245,7 +243,7 @@ export function DealDetailPage() {
                 </Button>}
               />
               <DropdownMenuContent align="end">
-                {forwardStages.map((s) => (
+                {manualForwardStages.map((s) => (
                   <DropdownMenuItem
                     key={s.id}
                     onClick={() => handleStageChange(s.id)}
@@ -256,6 +254,19 @@ export function DealDetailPage() {
                         Terminal
                       </Badge>
                     )}
+                  </DropdownMenuItem>
+                ))}
+                {readonlyForwardStages.map((s) => (
+                  <DropdownMenuItem
+                    key={s.id}
+                    disabled
+                  >
+                    <div className="flex w-full items-center justify-between gap-2">
+                      <span>{s.name}</span>
+                      <Badge variant="outline" className="text-xs">
+                        Bid Board managed
+                      </Badge>
+                    </div>
                   </DropdownMenuItem>
                 ))}
                 {isDirectorOrAdmin && backwardStages.length > 0 && (
@@ -279,7 +290,7 @@ export function DealDetailPage() {
           )}
 
           {/* Reopen button for terminal stages (directors only) */}
-          {currentStage?.isTerminal && isDirectorOrAdmin && (
+          {currentStage?.isTerminal && isDirectorOrAdmin && !isBidBoardOwned && (
             <DropdownMenu>
               <DropdownMenuTrigger
                 render={<Button variant="outline">Reopen Deal</Button>}
@@ -326,36 +337,30 @@ export function DealDetailPage() {
             </DropdownMenuContent>
           </DropdownMenu>
         </div>
-        </div>
-        <div className="grid gap-4 border-t border-slate-200 bg-[#f7f8fb] px-7 py-5 md:grid-cols-4">
-          <SummaryMetric label="Pipeline context" value={currentStage?.name ?? "Pipeline"} />
-          <SummaryMetric label="Stage age" value={`${summary.ageDays} days`} />
-          <SummaryMetric label="Last update" value={`${summary.freshnessDays} days ago`} />
-          <SummaryMetric label="Next action" value={summary.hasNextStep ? "Queued" : "Needs capture"} />
-        </div>
-      </section>
-
-      <OpportunityRoutingPanel
-        deal={deal}
-        currentStageSlug={currentStageSlug}
-        onUpdated={() => {
-          void refetch();
-        }}
-      />
+      </div>
 
       {/* Active Timers Banner */}
       <DealTimersBanner dealId={deal.id} />
 
+      {isBidBoardOwned && bidBoardOwnership && (
+        <BidBoardOwnershipBanner ownership={bidBoardOwnership} />
+      )}
+
+      {/* Estimating Sub-Stage Indicator */}
+      {currentStageSlug === "estimating" && !isBidBoardOwned && (
+        <DealEstimatingSubstage deal={deal} onUpdate={refetch} />
+      )}
+
       {/* Tabs */}
-      <div className="overflow-x-auto border-b border-slate-200">
-        <div className="flex min-w-max gap-2">
+      <div className="border-b">
+        <div className="flex gap-6">
           {tabs.map((tab) => (
             <button
               key={tab.key}
-              className={`rounded-t-xl px-3 py-2 text-sm font-semibold transition-colors ${
+              className={`pb-2 text-sm font-medium border-b-2 transition-colors ${
                 activeTab === tab.key
-                  ? "bg-slate-100 text-slate-950"
-                  : "text-slate-500 hover:text-slate-950"
+                  ? "border-brand-red text-foreground"
+                  : "border-transparent text-muted-foreground hover:text-foreground"
               }`}
               onClick={() => handleTabSelect(tab.key)}
             >
@@ -368,61 +373,20 @@ export function DealDetailPage() {
       {/* Tab Content */}
       {activeTab === "overview" && (
         <div className="space-y-4">
-          <RecordAssignmentCard
-            label="Assigned Rep"
-            assignedRepId={deal.assignedRepId}
-            assignedRepName={assignedRepName}
-            reps={availableReps}
-            canEdit={isDirectorOrAdmin}
-            saving={savingAssignment}
-            onSave={handleAssignmentSave}
-          />
-          {!deal.isBidBoardOwned &&
-            (currentStageSlug === "estimate_in_progress" ||
-              currentStageSlug === "service_estimating" ||
-              currentStageSlug === "estimate_under_review" ||
-              currentStageSlug === "estimate_sent_to_client" ||
-              currentStageSlug === "service_estimate_under_review" ||
-              currentStageSlug === "service_estimate_sent_to_client") && (
+          {(currentStageSlug === "estimate_in_progress" || currentStageSlug === "service_estimating") && !isBidBoardOwned && (
             <DealProposalCard deal={deal} onUpdate={refetch} />
           )}
+          {isBidBoardOwned && bidBoardOwnership && (
+            <BidBoardReadOnlySummary ownership={bidBoardOwnership} />
+          )}
           <DealOverviewTab deal={deal} />
-          <ForecastEditor
-            value={{
-              forecastWindow: deal.forecastWindow,
-              forecastCategory: deal.forecastCategory,
-              forecastConfidencePercent: deal.forecastConfidencePercent,
-              forecastRevenue: deal.forecastRevenue,
-              forecastGrossProfit: deal.forecastGrossProfit,
-              forecastBlockers: deal.forecastBlockers,
-              nextMilestoneAt: deal.nextMilestoneAt,
-            }}
-            onSave={async (payload) => {
-              await updateDeal(deal.id, payload);
-              await refetch();
-            }}
-          />
-          <NextStepEditor
-            value={{
-              nextStep: deal.nextStep,
-              nextStepDueAt: deal.nextStepDueAt,
-              supportNeededType: deal.supportNeededType,
-              supportNeededNotes: deal.supportNeededNotes,
-              decisionMakerName: deal.decisionMakerName,
-              budgetStatus: deal.budgetStatus,
-            }}
-            onSave={async (payload) => {
-              await updateDeal(deal.id, payload);
-              await refetch();
-            }}
-          />
         </div>
       )}
       {activeTab === "lead" && (
         <DealLeadTab
           deal={deal}
           companyName={company?.name ?? null}
-          isConverted={currentStageSlug !== "dd"}
+          isConverted={Boolean(deal.sourceLeadId)}
         />
       )}
       {activeTab === "scoping" && <DealScopingWorkspace deal={deal} onDealUpdated={refetch} />}
@@ -438,47 +402,6 @@ export function DealDetailPage() {
       {activeTab === "history" && <DealHistoryTab deal={deal} />}
       {activeTab === "team" && (
         <DealTeamTab dealId={deal.id} onCountChange={setTeamCount} />
-      )}
-      {activeTab === "tasks" && (
-        <div className="space-y-3 rounded-xl border bg-card p-4">
-          <div>
-            <h3 className="text-lg font-semibold">Project Tasks</h3>
-            <p className="text-sm text-muted-foreground">Tasks created from this project live here.</p>
-          </div>
-          {tasksLoading ? (
-            <p className="text-sm text-muted-foreground">Loading tasks...</p>
-          ) : dealTasks.length === 0 ? (
-            <div className="rounded-lg border border-dashed p-6 text-sm text-muted-foreground">
-              No tasks linked to this project yet.
-            </div>
-          ) : (
-            <div className="space-y-2">
-              {dealTasks.map((task) => (
-                <div key={task.id} className="rounded-lg border p-3">
-                  <div className="flex items-start justify-between gap-3">
-                    <div>
-                      <p className="font-medium">{task.title}</p>
-                      {task.description ? (
-                        <p className="mt-1 text-sm text-muted-foreground">{task.description}</p>
-                      ) : null}
-                    </div>
-                    <Badge variant="outline">{getTaskStatusLabel(task.status)}</Badge>
-                  </div>
-                  <div className="mt-2 text-xs text-muted-foreground">
-                    {task.assignedToName ? `Assigned to ${task.assignedToName}` : "Assigned"}{task.dueDate ? ` • Due ${new Date(`${task.dueDate}T00:00:00`).toLocaleDateString()}` : ""}
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
-      {activeTab === "payments" && (
-        <DealPaymentsTab
-          dealId={deal.id}
-          assignedRepId={deal.assignedRepId}
-          canEditPayments={user?.role === "admin"}
-        />
       )}
       {activeTab === "estimates" && <DealEstimatesTab dealId={deal.id} />}
       {activeTab === "punch_list" && <DealPunchListTab dealId={deal.id} />}
@@ -501,6 +424,62 @@ export function DealDetailPage() {
   );
 }
 
+function BidBoardOwnershipBanner({
+  ownership,
+}: {
+  ownership: NonNullable<DealDetail["bidBoardOwnership"]>;
+}) {
+  return (
+    <section className="rounded-xl border border-amber-300 bg-amber-50 p-4 text-amber-950">
+      <div className="flex items-start gap-3">
+        <div className="rounded-full bg-amber-200 p-2">
+          <Lock className="h-4 w-4" />
+        </div>
+        <div className="space-y-3">
+          <div>
+            <h3 className="text-sm font-semibold">Bid Board now owns downstream progression</h3>
+            <p className="mt-1 text-sm">{ownership.message}</p>
+          </div>
+
+          <div className="grid gap-3 md:grid-cols-2">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-wide text-amber-800">
+                Still editable in CRM
+              </p>
+              <p className="mt-1 text-sm">{ownership.canEditInCrm.join(", ")}</p>
+            </div>
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-wide text-amber-800">
+                Mirrored from Bid Board
+              </p>
+              <p className="mt-1 text-sm">{ownership.mirroredInCrm.join(", ")}</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function BidBoardReadOnlySummary({
+  ownership,
+}: {
+  ownership: NonNullable<DealDetail["bidBoardOwnership"]>;
+}) {
+  return (
+    <section className="rounded-lg border border-dashed border-slate-300 bg-slate-50 p-4 text-sm text-slate-700">
+      <p className="font-medium text-slate-900">Downstream stage controls are read-only in CRM.</p>
+      <p className="mt-1">
+        Bid Board owns stage progression, proposal status, and estimating progress after the
+        estimating handoff.
+      </p>
+      <p className="mt-2">
+        Keep using CRM for {ownership.canEditInCrm.join(", ")}.
+      </p>
+    </section>
+  );
+}
+
 function DealActivityPanel({ dealId }: { dealId: string }) {
   const { activities, loading, refetch } = useActivities({ dealId });
 
@@ -509,8 +488,6 @@ function DealActivityPanel({ dealId }: { dealId: string }) {
     subject: string;
     body: string;
     outcome?: string;
-    nextStep?: string;
-    nextStepDueAt?: string;
     durationMinutes?: number;
   }) => {
     await createActivity({
@@ -518,8 +495,6 @@ function DealActivityPanel({ dealId }: { dealId: string }) {
       subject: data.subject,
       body: data.body,
       outcome: data.outcome,
-      nextStep: data.nextStep,
-      nextStepDueAt: data.nextStepDueAt,
       durationMinutes: data.durationMinutes,
       dealId,
     });
@@ -552,15 +527,6 @@ function DealActivityPanel({ dealId }: { dealId: string }) {
           ))}
         </div>
       )}
-    </div>
-  );
-}
-
-function SummaryMetric({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="space-y-1">
-      <p className="text-[11px] font-black tracking-[0.18em] text-slate-500 uppercase">{label}</p>
-      <p className="text-[1.9rem] leading-none font-black tracking-tight text-slate-950">{value}</p>
     </div>
   );
 }

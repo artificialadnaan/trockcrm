@@ -1,16 +1,18 @@
 import { useNavigate } from "react-router-dom";
-import { Handshake, Trash2 } from "lucide-react";
+import { Handshake, Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { DealStageBadge } from "@/components/deals/deal-stage-badge";
+import type { Contact } from "@/hooks/use-contacts";
 import { useContactDeals, removeContactDealAssociation } from "@/hooks/use-contacts";
 
 interface ContactDealsTabProps {
   contactId: string;
+  contact: Pick<Contact, "id" | "firstName" | "lastName" | "companyId" | "companyName" | "jobTitle">;
 }
 
-export function ContactDealsTab({ contactId }: ContactDealsTabProps) {
+export function ContactDealsTab({ contactId, contact }: ContactDealsTabProps) {
   const navigate = useNavigate();
   const { associations, loading, error, refetch } = useContactDeals(contactId);
 
@@ -39,10 +41,26 @@ export function ContactDealsTab({ contactId }: ContactDealsTabProps) {
   }
 
   if (associations.length === 0) {
+    const params = new URLSearchParams();
+    if (contact.companyId) {
+      params.set("companyId", contact.companyId);
+    }
+    params.set("primaryContactId", contact.id);
+    params.set("name", contact.companyName ? `${contact.companyName} opportunity` : `${contact.firstName} ${contact.lastName} opportunity`);
+    params.set("source", "Contact relationship");
+    params.set(
+      "description",
+      [contact.jobTitle, contact.companyName].filter(Boolean).join(" · ") || "Deal seeded from contact record"
+    );
+
     return (
       <div className="text-center py-8 text-muted-foreground">
         <Handshake className="h-10 w-10 mx-auto mb-2 opacity-30" />
         <p>No deals associated with this contact.</p>
+        <Button className="mt-4" onClick={() => navigate(`/leads/new?${params.toString()}`)}>
+          <Plus className="mr-2 h-4 w-4" />
+          Create Deal
+        </Button>
       </div>
     );
   }

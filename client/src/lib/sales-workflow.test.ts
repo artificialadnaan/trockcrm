@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   BID_BOARD_MIRRORED_STAGE_SLUGS,
+  CANONICAL_DEAL_STAGE_LABELS,
   CRM_OWNED_LEAD_STAGE_SLUGS,
+  NORMAL_DEAL_STAGE_SLUGS,
   SALES_WORKFLOW_DISQUALIFICATION_REASONS,
   SALES_WORKFLOW_PIPELINE_TYPES,
+  SERVICE_DEAL_STAGE_SLUGS,
 } from "@trock-crm/shared/types";
 import * as clientSalesWorkflow from "./sales-workflow.js";
 
@@ -15,6 +18,7 @@ describe("sales workflow client contract", () => {
       SALES_WORKFLOW_DISQUALIFICATION_REASONS
     );
     expect(clientSalesWorkflow.BID_BOARD_MIRRORED_STAGE_SLUGS).toEqual(BID_BOARD_MIRRORED_STAGE_SLUGS);
+    expect(clientSalesWorkflow.CANONICAL_DEAL_STAGE_LABELS).toEqual(CANONICAL_DEAL_STAGE_LABELS);
     expect(CRM_OWNED_LEAD_STAGE_SLUGS).toEqual([
       "new_lead",
       "qualified_lead",
@@ -32,13 +36,31 @@ describe("sales workflow client contract", () => {
       "customer_declined",
       "other",
     ]);
+    expect(NORMAL_DEAL_STAGE_SLUGS).toEqual([
+      "opportunity",
+      "estimate_in_progress",
+      "estimate_under_review",
+      "estimate_sent_to_client",
+      "sent_to_production",
+      "production_lost",
+    ]);
+    expect(SERVICE_DEAL_STAGE_SLUGS).toEqual([
+      "opportunity",
+      "service_estimating",
+      "estimate_under_review",
+      "estimate_sent_to_client",
+      "service_sent_to_production",
+      "service_lost",
+    ]);
     expect(BID_BOARD_MIRRORED_STAGE_SLUGS).toEqual([
-      "estimating",
-      "bid_sent",
-      "in_production",
-      "close_out",
-      "closed_won",
-      "closed_lost",
+      "estimate_in_progress",
+      "service_estimating",
+      "estimate_under_review",
+      "estimate_sent_to_client",
+      "sent_to_production",
+      "service_sent_to_production",
+      "production_lost",
+      "service_lost",
     ]);
   });
 });

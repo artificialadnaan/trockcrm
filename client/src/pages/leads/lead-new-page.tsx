@@ -1,10 +1,25 @@
 import { ArrowLeft } from "lucide-react";
-import { useNavigate } from "react-router-dom";
+import { useMemo } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { LeadForm } from "@/components/leads/lead-form";
 
 export function LeadNewPage() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const initialValues = useMemo(
+    () => ({
+      companyId: searchParams.get("companyId") ?? "",
+      propertyId: searchParams.get("propertyId") ?? "",
+      primaryContactId: searchParams.get("primaryContactId") ?? "",
+      name: searchParams.get("name") ?? "",
+      source: searchParams.get("source") ?? "",
+      description: searchParams.get("description") ?? "",
+      projectTypeId: searchParams.get("projectTypeId") ?? "",
+      stageId: searchParams.get("stageId") ?? "",
+    }),
+    [searchParams]
+  );
 
   return (
     <div className="space-y-4">
@@ -15,7 +30,7 @@ export function LeadNewPage() {
         </Button>
         <h2 className="text-2xl font-bold">New Lead</h2>
       </div>
-      <LeadForm mode="create" />
+      <LeadForm mode="create" initialValues={initialValues} />
     </div>
   );
 }

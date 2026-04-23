@@ -68,6 +68,16 @@ type LeadSummaryFormProps = {
 
 type LeadCreateFormProps = {
   mode: "create";
+  initialValues?: Partial<{
+    companyId: string;
+    propertyId: string;
+    primaryContactId: string;
+    name: string;
+    source: string;
+    description: string;
+    projectTypeId: string;
+    stageId: string;
+  }>;
 };
 
 type LeadUpdateFormProps = {
@@ -99,16 +109,19 @@ const LEAD_QUALIFICATION_FIELD_LABELS = new Map(
   LEAD_QUALIFICATION_FIELDS.map((field) => [field.id, field.label])
 );
 
-function getEditableFormState(lead?: LeadFormLead) {
+function getEditableFormState(
+  lead?: LeadFormLead,
+  initialValues?: LeadCreateFormProps["initialValues"]
+) {
   return {
-    companyId: lead?.companyId ?? "",
-    propertyId: lead?.propertyId ?? "",
-    primaryContactId: "",
-    name: lead?.name ?? "",
-    stageId: lead?.stageId ?? "",
-    source: lead?.source ?? "",
-    description: lead?.description ?? "",
-    projectTypeId: lead?.projectTypeId ?? "",
+    companyId: lead?.companyId ?? initialValues?.companyId ?? "",
+    propertyId: lead?.propertyId ?? initialValues?.propertyId ?? "",
+    primaryContactId: initialValues?.primaryContactId ?? "",
+    name: lead?.name ?? initialValues?.name ?? "",
+    stageId: lead?.stageId ?? initialValues?.stageId ?? "",
+    source: lead?.source ?? initialValues?.source ?? "",
+    description: lead?.description ?? initialValues?.description ?? "",
+    projectTypeId: lead?.projectTypeId ?? initialValues?.projectTypeId ?? "",
     qualificationPayload: {
       existing_customer_status:
         typeof lead?.qualificationPayload?.existing_customer_status === "string"
@@ -262,16 +275,18 @@ function EditableLeadForm({
   mode,
   lead,
   onSaved,
+  initialValues,
 }: {
   mode: LeadEditableMode;
   lead?: LeadFormLead;
   onSaved?: () => void;
+  initialValues?: LeadCreateFormProps["initialValues"];
 }) {
   const navigate = useNavigate();
   const { stages } = usePipelineStages();
   const { projectTypes, hierarchy: projectTypeHierarchy } = useProjectTypes();
   const isCreate = mode === "create";
-  const [companyId, setCompanyId] = useState<string | null>(lead?.companyId ?? null);
+  const [companyId, setCompanyId] = useState<string | null>(lead?.companyId ?? initialValues?.companyId ?? null);
   const { properties } = useProperties(companyId ? { companyId, limit: 500 } : { limit: 0 });
   const { contacts } = useCompanyContacts(companyId ?? undefined);
   const leadStages = stages.filter(
@@ -281,15 +296,15 @@ function EditableLeadForm({
       ) && !stage.isTerminal
   );
 
-  const [formData, setFormData] = useState(() => getEditableFormState(lead));
+  const [formData, setFormData] = useState(() => getEditableFormState(lead, initialValues));
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [stageGateError, setStageGateError] = useState<LeadStageGateErrorState | null>(null);
 
   useEffect(() => {
-    setFormData(getEditableFormState(lead));
-    setCompanyId(lead?.companyId ?? null);
-  }, [lead]);
+    setFormData(getEditableFormState(lead, initialValues));
+    setCompanyId(lead?.companyId ?? initialValues?.companyId ?? null);
+  }, [initialValues, lead]);
 
   useEffect(() => {
     if (isCreate && !formData.stageId && leadStages.length > 0) {
@@ -308,7 +323,11 @@ function EditableLeadForm({
       propertyId:
         current.propertyId && properties.some((property) => property.id === current.propertyId)
           ? current.propertyId
-          : "",
+          : current.propertyId
+            ? ""
+            : properties.length === 1
+              ? properties[0]?.id ?? ""
+              : "",
       primaryContactId:
         current.primaryContactId && contacts.some((contact) => contact.id === current.primaryContactId)
           ? current.primaryContactId
@@ -773,7 +792,7 @@ function EditableLeadForm({
 
 export function LeadForm(props: LeadFormProps) {
   if (props.mode === "create") {
-    return <EditableLeadForm mode="create" />;
+    return <EditableLeadForm mode="create" initialValues={props.initialValues} />;
   }
 
   if (props.mode === "edit") {

@@ -1,17 +1,14 @@
 import { BID_BOARD_MIRRORED_STAGE_SLUGS, type WorkflowRoute } from "@trock-crm/shared/types";
 
 const SERVICE_ROUTE_THRESHOLD = 50000;
-const LEGACY_BID_BOARD_MIRRORED_STAGE_SLUGS = [
+const BID_BOARD_STAGE_SLUG_SET = new Set<string>([
+  ...BID_BOARD_MIRRORED_STAGE_SLUGS,
   "estimating",
   "bid_sent",
   "in_production",
   "close_out",
   "closed_won",
   "closed_lost",
-] as const;
-const BID_BOARD_STAGE_SLUG_SET = new Set<string>([
-  ...BID_BOARD_MIRRORED_STAGE_SLUGS,
-  ...LEGACY_BID_BOARD_MIRRORED_STAGE_SLUGS,
 ]);
 
 export interface LegacyDealStageHistoryEntry {
