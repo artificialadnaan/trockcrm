@@ -1,6 +1,7 @@
 import { eq, and, sql, gte, lte, inArray } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
+  CANONICAL_DEAL_STAGE_LABELS,
   auditLog,
   aiDisconnectCases,
   deals,
@@ -18,6 +19,7 @@ import {
   properties,
 } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
+import type { WorkflowRoute } from "@trock-crm/shared/types";
 import { db } from "../../db.js";
 import {
   getPipelineSummary,
@@ -65,6 +67,64 @@ function resolveMirroredStageLabel(
     return MIRRORED_DOWNSTREAM_STAGE_LABELS[
       mirroredStageSlug as keyof typeof MIRRORED_DOWNSTREAM_STAGE_LABELS
     ];
+  }
+
+  return fallbackStageName ?? "Unknown";
+}
+
+const LEGACY_NORMAL_DASHBOARD_STAGE_SLUGS = {
+  estimating: "estimate_in_progress",
+  bid_sent: "estimate_sent_to_client",
+  in_production: "sent_to_production",
+  close_out: "sent_to_production",
+  closed_won: "sent_to_production",
+  closed_lost: "production_lost",
+} as const;
+
+const LEGACY_SERVICE_DASHBOARD_STAGE_SLUGS = {
+  estimating: "service_estimating",
+  bid_sent: "estimate_sent_to_client",
+  in_production: "service_sent_to_production",
+  close_out: "service_sent_to_production",
+  closed_won: "service_sent_to_production",
+  closed_lost: "service_lost",
+  service_proposal_sent: "estimate_sent_to_client",
+  service_scheduled: "service_sent_to_production",
+  service_complete: "service_sent_to_production",
+} as const;
+
+function resolveCanonicalDealStageSlug(
+  workflowRoute: WorkflowRoute,
+  stageSlug: string | null | undefined
+): keyof typeof CANONICAL_DEAL_STAGE_LABELS | null {
+  if (!stageSlug) {
+    return null;
+  }
+
+  if (stageSlug in CANONICAL_DEAL_STAGE_LABELS) {
+    return stageSlug as keyof typeof CANONICAL_DEAL_STAGE_LABELS;
+  }
+
+  const legacyMap =
+    workflowRoute === "service"
+      ? LEGACY_SERVICE_DASHBOARD_STAGE_SLUGS
+      : LEGACY_NORMAL_DASHBOARD_STAGE_SLUGS;
+
+  return legacyMap[stageSlug as keyof typeof legacyMap] ?? null;
+}
+
+function resolveDealSnapshotStageLabel(
+  workflowRoute: WorkflowRoute,
+  stageSlug: string | null | undefined,
+  mirroredStageSlug: string | null | undefined,
+  fallbackStageName: string | null | undefined
+) {
+  const resolvedSlug =
+    resolveCanonicalDealStageSlug(workflowRoute, mirroredStageSlug) ??
+    resolveCanonicalDealStageSlug(workflowRoute, stageSlug);
+
+  if (resolvedSlug) {
+    return CANONICAL_DEAL_STAGE_LABELS[resolvedSlug];
   }
 
   return fallbackStageName ?? "Unknown";
@@ -1170,6 +1230,9 @@ export async function getRepDashboard(
         d.name AS deal_name,
         c.name AS company_name,
         p.name AS property_name,
+        psc.slug AS stage_slug,
+        COALESCE(d.bid_board_stage_slug, psc.slug) AS mirrored_stage_slug,
+        d.workflow_route,
         psc.name AS stage_name,
         COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)::numeric AS total_value,
         d.updated_at
@@ -1250,7 +1313,12 @@ export async function getRepDashboard(
       dealName: row.deal_name,
       companyName: row.company_name ?? null,
       propertyName: row.property_name ?? null,
-      stageName: row.stage_name,
+      stageName: resolveDealSnapshotStageLabel(
+        (row.workflow_route ?? "normal") as WorkflowRoute,
+        row.stage_slug,
+        row.mirrored_stage_slug,
+        row.stage_name
+      ),
       totalValue: Number(row.total_value ?? 0),
       updatedAt: toIsoOrNow(row.updated_at),
     })),

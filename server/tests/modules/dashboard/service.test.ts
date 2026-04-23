@@ -129,6 +129,9 @@ describe("Dashboard Service", () => {
             deal_name: "Deal One",
             company_name: "Birchstone",
             property_name: "North Tower",
+            stage_slug: "estimating",
+            mirrored_stage_slug: "estimating",
+            workflow_route: "normal",
             stage_name: "Estimating",
             total_value: "250000",
             updated_at: "2026-04-20T00:00:00.000Z",
@@ -146,6 +149,7 @@ describe("Dashboard Service", () => {
       expect(result.pipelineByStage).toHaveLength(1);
       expect(result.leadSnapshot).toHaveLength(1);
       expect(result.dealSnapshot).toHaveLength(1);
+      expect(result.dealSnapshot[0]?.stageName).toBe("Estimate in Progress");
       expect(result.myCleanup.total).toBe(2);
       expect(result.myCleanup.byReason).toEqual([
         { reasonCode: "missing_next_step", count: 1 },
@@ -218,7 +222,18 @@ describe("Dashboard Service", () => {
           { lead_id: "lead-1", lead_name: "Lead One", company_name: "Birchstone", property_name: "North Tower", stage_name: "Qualified Lead", days_in_stage: "5", updated_at: "2026-04-20T00:00:00.000Z" },
         ],
         [
-          { deal_id: "deal-1", deal_name: "Deal One", company_name: "Birchstone", property_name: "North Tower", stage_name: "Estimating", total_value: "250000", updated_at: "2026-04-20T00:00:00.000Z" },
+          {
+            deal_id: "deal-1",
+            deal_name: "Deal One",
+            company_name: "Birchstone",
+            property_name: "North Tower",
+            stage_slug: "estimating",
+            mirrored_stage_slug: "estimating",
+            workflow_route: "normal",
+            stage_name: "Estimating",
+            total_value: "250000",
+            updated_at: "2026-04-20T00:00:00.000Z",
+          },
         ],
         [
           { slug: "new_lead", count: "4" },
