@@ -55,13 +55,13 @@ BEGIN
 
     EXECUTE format(
       'UPDATE %I.leads
-         SET pipeline_type = COALESCE(pipeline_type, ''normal'')',
+         SET pipeline_type = COALESCE(pipeline_type, ''normal''::lead_pipeline_type)',
       schema_name
     );
 
     EXECUTE format(
       'ALTER TABLE %I.leads
-         ALTER COLUMN pipeline_type SET DEFAULT ''normal''',
+         ALTER COLUMN pipeline_type SET DEFAULT ''normal''::lead_pipeline_type',
       schema_name
     );
 
@@ -232,9 +232,9 @@ BEGIN
          SET pipeline_type_snapshot = COALESCE(
            pipeline_type_snapshot,
            CASE
-             WHEN workflow_route = ''service'' THEN ''service''
-             ELSE ''normal''
-           END
+             WHEN workflow_route = ''service'' THEN ''service''::deal_pipeline_type_snapshot
+             ELSE ''normal''::deal_pipeline_type_snapshot
+           END::deal_pipeline_type_snapshot
          )
        WHERE pipeline_type_snapshot IS NULL',
       schema_name
@@ -242,7 +242,7 @@ BEGIN
 
     EXECUTE format(
       'ALTER TABLE %I.deals
-         ALTER COLUMN pipeline_type_snapshot SET DEFAULT ''normal''',
+         ALTER COLUMN pipeline_type_snapshot SET DEFAULT ''normal''::deal_pipeline_type_snapshot',
       schema_name
     );
 

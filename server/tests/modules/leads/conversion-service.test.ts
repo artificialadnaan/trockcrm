@@ -171,10 +171,10 @@ describe("Sales workflow shared contract", () => {
       "SET pipeline_type = COALESCE("
     );
     expect(salesWorkflowRealignmentMigrationSql).toContain(
-      "pipeline_type, ''normal''"
+      "pipeline_type, ''normal''::lead_pipeline_type"
     );
     expect(salesWorkflowRealignmentMigrationSql).toContain(
-      "ALTER COLUMN pipeline_type SET DEFAULT ''normal''"
+      "ALTER COLUMN pipeline_type SET DEFAULT ''normal''::lead_pipeline_type"
     );
     expect(salesWorkflowRealignmentMigrationSql).toContain(
       "ALTER COLUMN pipeline_type SET NOT NULL"
@@ -184,7 +184,7 @@ describe("Sales workflow shared contract", () => {
     );
     expect(salesWorkflowRealignmentMigrationSql).toContain("workflow_route = ''service''");
     expect(salesWorkflowRealignmentMigrationSql).toContain(
-      "ALTER COLUMN pipeline_type_snapshot SET DEFAULT ''normal''"
+      "ALTER COLUMN pipeline_type_snapshot SET DEFAULT ''normal''::deal_pipeline_type_snapshot"
     );
     expect(salesWorkflowRealignmentMigrationSql).toContain(
       "ALTER COLUMN pipeline_type_snapshot SET NOT NULL"
