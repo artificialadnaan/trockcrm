@@ -1,19 +1,20 @@
 import { eq } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
-import { deals, leadStageHistory, leads } from "@trock-crm/shared/schema";
-import type { WorkflowRoute } from "@trock-crm/shared/types";
+import { deals, leads } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
+import { toCanonicalLeadStageSlug, type WorkflowRoute } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 import { createDeal } from "../deals/service.js";
-import { getStageById, getStageBySlug } from "../pipeline/service.js";
+import { getStageById } from "../pipeline/service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
 export interface ConvertLeadInput {
   leadId: string;
+  dealStageId: string;
   userId: string;
   userRole: string;
-  dealStageId?: string;
+  workflowRoute?: WorkflowRoute;
   assignedRepId?: string;
   primaryContactId?: string | null;
   officeId?: string;
@@ -31,14 +32,12 @@ export interface ConvertLeadInput {
 interface LeadConversionDependencies {
   createDeal: typeof createDeal;
   getStageById: typeof getStageById;
-  getStageBySlug: typeof getStageBySlug;
   now: () => Date;
 }
 
 const defaultDependencies: LeadConversionDependencies = {
   createDeal,
   getStageById,
-  getStageBySlug,
   now: () => new Date(),
 };
 
@@ -106,28 +105,42 @@ export function createLeadConversionService(
       throw new AppError(403, "You cannot reassign the successor deal");
     }
 
+    const workflowRoute = resolveWorkflowRoute(lead);
+    if (input.workflowRoute && input.workflowRoute !== workflowRoute) {
+      throw new AppError(
+        409,
+        "workflowRoute does not match the lead's derived downstream route",
+        "LEAD_CONVERSION_ROUTE_MISMATCH"
+      );
+    }
+
     const currentLeadStage = await deps.getStageById(lead.stageId, "lead");
-    if (!currentLeadStage) {
-      throw new AppError(500, "Missing current lead stage configuration");
+    if (!currentLeadStage?.slug) {
+      throw new AppError(500, "Current lead stage config is incomplete");
     }
 
-    if (currentLeadStage.slug !== "sales_validation_stage") {
-      throw new AppError(409, "Only Sales Validation Stage leads can be promoted to Opportunity");
+    const currentCanonicalStageSlug = toCanonicalLeadStageSlug(currentLeadStage.slug);
+    if (!currentCanonicalStageSlug) {
+      throw new AppError(
+        409,
+        "Lead cannot be converted from a non-canonical stage",
+        "LEAD_CONVERSION_STAGE_INVALID"
+      );
     }
 
-    const opportunityStage = await deps.getStageBySlug("opportunity", "standard_deal");
-    if (!opportunityStage) {
-      throw new AppError(500, "Missing opportunity deal stage configuration");
+    if (currentCanonicalStageSlug !== "opportunity") {
+      throw new AppError(
+        409,
+        "Only opportunity leads can be converted to deals. Move the lead through the canonical progression first.",
+        "LEAD_CONVERSION_REQUIRES_OPPORTUNITY"
+      );
     }
-
-    const transitionedToOpportunityStage = opportunityStage.id !== lead.stageId;
 
     const deal = await deps.createDeal(tenantDb, {
       name: input.name ?? lead.name,
-      stageId: input.dealStageId ?? opportunityStage.id,
-      workflowRoute: resolveWorkflowRoute(lead),
+      stageId: input.dealStageId,
+      workflowRoute,
       assignedRepId: successorAssignedRepId,
-      actorUserId: input.userId,
       officeId: input.officeId,
       primaryContactId:
         input.primaryContactId === undefined
@@ -149,22 +162,10 @@ export function createLeadConversionService(
 
     const convertedAt = deps.now();
 
-    if (transitionedToOpportunityStage) {
-      await tenantDb.insert(leadStageHistory).values({
-        leadId: lead.id,
-        fromStageId: lead.stageId,
-        toStageId: opportunityStage.id,
-        changedBy: input.userId,
-        isBackwardMove: false,
-        durationInPreviousStage: null,
-        createdAt: convertedAt,
-      });
-    }
-
     const [updatedLead] = await tenantDb
       .update(leads)
       .set({
-        stageId: transitionedToOpportunityStage ? opportunityStage.id : lead.stageId,
+        stageId: lead.stageId,
         status: "converted",
         stageEnteredAt: convertedAt,
         convertedAt,
