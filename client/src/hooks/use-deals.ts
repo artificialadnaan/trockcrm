@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { api } from "@/lib/api";
 import type { FileRecord } from "./use-files";
+import { BID_BOARD_MIRRORED_STAGE_SLUGS } from "@/lib/sales-workflow";
 
 export type WorkflowRoute = "normal" | "service";
 export type DealScopingIntakeStatus = "draft" | "ready" | "activated";
@@ -174,6 +175,34 @@ export interface Pagination {
   limit: number;
   total: number;
   totalPages: number;
+}
+
+export function getWorkflowRouteLabel(route: WorkflowRoute) {
+  return route === "service" ? "Service" : "Normal";
+}
+
+export function getDealStageMetadata(
+  deal: Pick<Deal, "stageId" | "isBidBoardOwned" | "bidBoardStageSlug" | "readOnlySyncedAt" | "workflowRoute">,
+  stages: Array<{ id: string; name: string; slug: string }>
+) {
+  const stage = stages.find((entry) => entry.id === deal.stageId) ?? null;
+  const slug = deal.bidBoardStageSlug ?? stage?.slug ?? null;
+  const isMirroredStage =
+    slug != null &&
+    BID_BOARD_MIRRORED_STAGE_SLUGS.includes(slug as (typeof BID_BOARD_MIRRORED_STAGE_SLUGS)[number]);
+  const isOpportunityStage = slug === "opportunity";
+  const isReadOnlyInCrm = isMirroredStage || Boolean(deal.isBidBoardOwned || deal.readOnlySyncedAt);
+
+  return {
+    stage,
+    slug,
+    label: stage?.name ?? "Deal",
+    isOpportunityStage,
+    isMirroredStage,
+    isReadOnlyInCrm,
+    sourceOfTruth: isReadOnlyInCrm ? ("bid_board" as const) : ("crm" as const),
+    routeLabel: getWorkflowRouteLabel(deal.workflowRoute),
+  };
 }
 
 export function useDeals(filters: DealFilters = {}) {

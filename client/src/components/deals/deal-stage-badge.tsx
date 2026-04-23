@@ -1,14 +1,18 @@
 import { Badge } from "@/components/ui/badge";
 import { usePipelineStages } from "@/hooks/use-pipeline-config";
+import { Lock } from "lucide-react";
 
 interface DealStageBadgeProps {
   stageId: string;
   className?: string;
+  readOnly?: boolean;
+  ownership?: "crm" | "bid_board";
+  showOwnership?: boolean;
 }
 
 // Fallback colors by stage slug
 const STAGE_COLORS: Record<string, string> = {
-  dd: "bg-slate-100 text-slate-700 border-slate-200",
+  opportunity: "bg-emerald-50 text-emerald-700 border-emerald-200",
   estimating: "bg-blue-100 text-blue-700 border-blue-200",
   bid_sent: "bg-indigo-100 text-indigo-700 border-indigo-200",
   in_production: "bg-amber-100 text-amber-700 border-amber-200",
@@ -17,7 +21,13 @@ const STAGE_COLORS: Record<string, string> = {
   closed_lost: "bg-red-100 text-red-700 border-red-200",
 };
 
-export function DealStageBadge({ stageId, className }: DealStageBadgeProps) {
+export function DealStageBadge({
+  stageId,
+  className,
+  readOnly = false,
+  ownership,
+  showOwnership = false,
+}: DealStageBadgeProps) {
   const { stages } = usePipelineStages();
   const stage = stages.find((s) => s.id === stageId);
 
@@ -26,10 +36,17 @@ export function DealStageBadge({ stageId, className }: DealStageBadgeProps) {
   }
 
   const colorClass = STAGE_COLORS[stage.slug] ?? "bg-gray-100 text-gray-700 border-gray-200";
+  const readOnlyClass = readOnly || ownership === "bid_board"
+    ? "border-dashed bg-slate-100 text-slate-700 border-slate-300"
+    : colorClass;
+  const label = showOwnership && (readOnly || ownership === "bid_board")
+    ? `${stage.name} Mirror`
+    : stage.name;
 
   return (
-    <Badge variant="outline" className={`${colorClass} ${className ?? ""}`}>
-      {stage.name}
+    <Badge variant="outline" className={`${readOnlyClass} ${className ?? ""}`.trim()}>
+      {(readOnly || ownership === "bid_board") && <Lock className="mr-1 h-3 w-3" />}
+      {label}
     </Badge>
   );
 }

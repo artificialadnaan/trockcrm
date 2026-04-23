@@ -6,8 +6,9 @@ import { Card, CardContent } from "@/components/ui/card";
 import { LeadForm } from "@/components/leads/lead-form";
 import { LeadStageBadge } from "@/components/leads/lead-stage-badge";
 import { LeadTimelineTab } from "@/components/leads/lead-timeline-tab";
-import { formatLeadPropertyLine, useLeadDetail } from "@/hooks/use-leads";
+import { formatLeadPropertyLine, getLeadStageMetadata, useLeadDetail } from "@/hooks/use-leads";
 import { usePipelineStages } from "@/hooks/use-pipeline-config";
+import { BID_BOARD_MIRRORED_STAGE_SLUGS } from "@/lib/sales-workflow";
 
 export function LeadDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -18,6 +19,10 @@ export function LeadDetailPage() {
   const currentStage = useMemo(
     () => stages.find((stage) => stage.id === lead?.stageId) ?? null,
     [lead?.stageId, stages]
+  );
+  const currentStageMeta = useMemo(
+    () => (lead ? getLeadStageMetadata(lead.stageId, stages) : null),
+    [lead, stages]
   );
   const isConverted = lead?.status === "converted" || Boolean(lead?.convertedDealId);
   const convertedAt = lead?.convertedAt ?? null;
@@ -45,6 +50,48 @@ export function LeadDetailPage() {
 
   const leadCompanyName = lead.companyName ?? null;
   const propertyLine = formatLeadPropertyLine(lead);
+  const currentStageSlug = currentStageMeta?.slug ?? null;
+  const isOpportunityStage = currentStageSlug === "opportunity";
+  const isBidBoardMirrorStage =
+    currentStageSlug != null &&
+    BID_BOARD_MIRRORED_STAGE_SLUGS.includes(
+      currentStageSlug as (typeof BID_BOARD_MIRRORED_STAGE_SLUGS)[number]
+    );
+
+  const secondaryAction = !isConverted
+    ? {
+        label: currentStageSlug === "sales_validation_stage" ? "Edit Sales Validation" : "Edit Lead",
+        onClick: () => navigate(`/leads/${lead.id}/edit`),
+      }
+    : lead.convertedDealId && isOpportunityStage
+      ? {
+          label: "Open Opportunity Scope",
+          onClick: () => navigate(`/deals/${lead.convertedDealId}?tab=scoping`),
+        }
+      : lead.convertedDealId
+        ? {
+            label: "Open Read-Only Deal",
+            onClick: () => navigate(`/deals/${lead.convertedDealId}`),
+          }
+        : null;
+
+  const contextTitle = isOpportunityStage
+    ? "Opportunity Scope"
+    : isBidBoardMirrorStage
+      ? "Bid Board Mirror"
+      : "Lead context";
+  const contextMessage = !isConverted
+    ? "This record is still on the lead side of the workflow. Sales Validation is the last lead checkpoint before promotion into an Opportunity."
+    : isOpportunityStage
+      ? "Opportunity is still CRM-owned before estimating handoff."
+      : isBidBoardMirrorStage
+        ? "Downstream deal state is mirrored from Bid Board and read-only in CRM after estimating starts."
+        : "This lead has already been promoted into an Opportunity. Pre-conversion history stays here, while scoping now lives in the deal record.";
+  const contextFootnote = isOpportunityStage
+    ? "Sales can still update scope, route, and qualification details in CRM at this stage."
+    : isBidBoardMirrorStage
+      ? "Use the deal record for meeting context, but do not expect manual CRM stage edits to stick downstream."
+      : null;
 
   return (
     <div className="space-y-6">
@@ -139,21 +186,20 @@ export function LeadDetailPage() {
             converted={isConverted}
           />
 
-          <Button variant="outline" onClick={() => navigate(`/leads/${lead.id}/edit`)}>
-            {currentStage?.slug === "sales_validation_stage" ? "Edit Sales Validation" : "Edit Lead"}
-          </Button>
+          {secondaryAction && (
+            <Button variant="outline" onClick={secondaryAction.onClick}>
+              {secondaryAction.label}
+            </Button>
+          )}
 
           <Card>
             <CardContent className="space-y-3 pt-4">
               <div className="flex items-center gap-2">
                 <Clock3 className="h-4 w-4 text-muted-foreground" />
-                <p className="text-sm font-medium">Lead context</p>
+                <p className="text-sm font-medium">{contextTitle}</p>
               </div>
-              <p className="text-sm text-muted-foreground">
-                {isConverted
-                  ? "This lead has already been promoted into an Opportunity. Pre-conversion history stays here, while scoping now lives in the deal record."
-                  : "This record is still on the lead side of the workflow. Sales Validation is the last lead checkpoint before promotion into an Opportunity."}
-              </p>
+              <p className="text-sm text-muted-foreground">{contextMessage}</p>
+              {contextFootnote && <p className="text-xs text-muted-foreground">{contextFootnote}</p>}
               <div className="flex items-center gap-2 text-sm text-muted-foreground">
                 <User className="h-4 w-4" />
                 <span>{lead.primaryContactId ? "Primary contact linked" : "No primary contact yet"}</span>

@@ -5,18 +5,33 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card } from "@/components/ui/card";
 import { LeadStageBadge } from "@/components/leads/lead-stage-badge";
-import { formatLeadPropertyLine, useLeads } from "@/hooks/use-leads";
+import {
+  formatLeadPropertyLine,
+  getLeadBoardStageLabel,
+  getLeadStageMetadata,
+  LEAD_BOARD_STAGE_SLUGS,
+  useLeads,
+} from "@/hooks/use-leads";
+import { usePipelineStages } from "@/hooks/use-pipeline-config";
 
 export function LeadListPage() {
   const navigate = useNavigate();
   const [search, setSearch] = useState("");
-  const [page, setPage] = useState(1);
   const { leads, loading, error } = useLeads();
+  const { stages } = usePipelineStages();
 
   const filtered = useMemo(() => {
     const query = search.trim().toLowerCase();
-    if (!query) return leads;
     return leads.filter((lead) => {
+      const stageMeta = getLeadStageMetadata(lead.stageId, stages);
+      if (!stageMeta.isBoardStage) {
+        return false;
+      }
+
+      if (!query) {
+        return true;
+      }
+
       const haystack = [
         lead.name,
         lead.companyName,
@@ -33,12 +48,17 @@ export function LeadListPage() {
         .toLowerCase();
       return haystack.includes(query);
     });
-  }, [leads, search]);
+  }, [leads, search, stages]);
 
-  const pageSize = 25;
-  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
-  const currentPage = Math.min(page, totalPages);
-  const pageItems = filtered.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+  const columns = useMemo(
+    () =>
+      LEAD_BOARD_STAGE_SLUGS.map((slug) => ({
+        slug,
+        name: getLeadBoardStageLabel(slug),
+        leads: filtered.filter((lead) => getLeadStageMetadata(lead.stageId, stages).slug === slug),
+      })),
+    [filtered, stages]
+  );
 
   return (
     <div className="space-y-4">
@@ -52,7 +72,7 @@ export function LeadListPage() {
           </div>
           <h1 className="text-3xl font-black tracking-tight text-foreground">Leads</h1>
           <p className="text-sm text-muted-foreground">
-            {filtered.length} pre-RFP lead{filtered.length !== 1 ? "s" : ""}
+            {filtered.length} CRM-owned pre-handoff lead{filtered.length !== 1 ? "s" : ""}
           </p>
         </div>
         <Button onClick={() => navigate("/leads/new")}>
@@ -68,7 +88,6 @@ export function LeadListPage() {
             value={search}
             onChange={(event) => {
               setSearch(event.target.value);
-              setPage(1);
             }}
             placeholder="Search leads, companies, or properties..."
             className="pl-9"
@@ -84,76 +103,73 @@ export function LeadListPage() {
             <div key={index} className="h-20 rounded-lg bg-muted animate-pulse" />
           ))}
         </div>
-      ) : pageItems.length === 0 ? (
+      ) : filtered.length === 0 ? (
         <div className="rounded-xl border border-dashed p-12 text-center text-muted-foreground">
           <Building2 className="mx-auto mb-3 h-10 w-10 opacity-30" />
           <p className="text-lg font-medium">No leads found</p>
           <p className="text-sm mt-1">Try a different search or start a new lead.</p>
         </div>
       ) : (
-        <div className="space-y-2">
-          {pageItems.map((lead) => {
-            const companyName = lead.companyName ?? "Unassigned";
-            const propertyLine = formatLeadPropertyLine(lead);
-
-            return (
-              <Card
-                key={lead.id}
-                className="cursor-pointer p-4 transition-colors hover:bg-muted/40"
-                onClick={() => navigate(`/leads/${lead.id}`)}
-              >
-                <div className="flex items-start justify-between gap-4">
-                  <div className="min-w-0 flex-1 space-y-2">
-                    <div className="flex flex-wrap items-center gap-2">
-                      {lead.convertedDealNumber && (
-                        <span className="font-mono text-xs text-muted-foreground">
-                          {lead.convertedDealNumber}
-                        </span>
-                      )}
-                      <LeadStageBadge stageId={lead.stageId} />
-                    </div>
-                    <h3 className="truncate text-lg font-semibold">{lead.name}</h3>
-                    <div className="flex flex-wrap items-center gap-4 text-sm text-muted-foreground">
-                      <span>{companyName}</span>
-                      {propertyLine && (
-                        <span className="flex items-center gap-1">
-                          <MapPin className="h-3.5 w-3.5" />
-                          {propertyLine}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                  <ArrowRight className="mt-1 h-4 w-4 shrink-0 text-muted-foreground" />
+        <div className="grid gap-4 xl:grid-cols-3">
+          {columns.map((column) => (
+            <section key={column.slug} className="space-y-3 rounded-2xl border bg-muted/20 p-3">
+              <div className="flex items-start justify-between gap-3 border-b pb-3">
+                <div>
+                  <p className="text-xs font-black uppercase tracking-[0.18em] text-muted-foreground">
+                    {column.name}
+                  </p>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    {column.slug === "sales_validation_stage"
+                      ? "Last CRM checkpoint before Opportunity handoff."
+                      : "CRM-owned lead work."}
+                  </p>
                 </div>
-              </Card>
-            );
-          })}
-        </div>
-      )}
+                <span className="rounded-full border bg-background px-2 py-1 text-xs font-semibold text-muted-foreground">
+                  {column.leads.length}
+                </span>
+              </div>
 
-      {totalPages > 1 && (
-        <div className="flex items-center justify-between">
-          <p className="text-sm text-muted-foreground">
-            Page {currentPage} of {totalPages}
-          </p>
-          <div className="flex gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={currentPage <= 1}
-              onClick={() => setPage((value) => Math.max(1, value - 1))}
-            >
-              Previous
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={currentPage >= totalPages}
-              onClick={() => setPage((value) => Math.min(totalPages, value + 1))}
-            >
-              Next
-            </Button>
-          </div>
+              <div className="space-y-2">
+                {column.leads.length === 0 ? (
+                  <div className="rounded-xl border border-dashed bg-background/70 px-4 py-8 text-center text-sm text-muted-foreground">
+                    No leads in this stage
+                  </div>
+                ) : (
+                  column.leads.map((lead) => {
+                    const companyName = lead.companyName ?? "Unassigned";
+                    const propertyLine = formatLeadPropertyLine(lead);
+
+                    return (
+                      <Card
+                        key={lead.id}
+                        className="cursor-pointer p-4 transition-colors hover:bg-background"
+                        onClick={() => navigate(`/leads/${lead.id}`)}
+                      >
+                        <div className="flex items-start justify-between gap-4">
+                          <div className="min-w-0 flex-1 space-y-2">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <LeadStageBadge stageId={lead.stageId} />
+                            </div>
+                            <h3 className="truncate text-lg font-semibold">{lead.name}</h3>
+                            <div className="flex flex-wrap items-center gap-4 text-sm text-muted-foreground">
+                              <span>{companyName}</span>
+                              {propertyLine && (
+                                <span className="flex items-center gap-1">
+                                  <MapPin className="h-3.5 w-3.5" />
+                                  {propertyLine}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                          <ArrowRight className="mt-1 h-4 w-4 shrink-0 text-muted-foreground" />
+                        </div>
+                      </Card>
+                    );
+                  })
+                )}
+              </div>
+            </section>
+          ))}
         </div>
       )}
     </div>
