@@ -388,6 +388,31 @@ describe("Dashboard Service", () => {
       expect(typeof result.myCleanup.total).toBe("number");
       expect(Array.isArray(result.myCleanup.byReason)).toBe(true);
     });
+
+    it("casts CRM-owned workflow routes to text before combining lead and opportunity progression", async () => {
+      const { getRepDashboard } = await import("../../../src/modules/dashboard/service.js");
+      const tenantDb = createMockTenantDb([
+        [{ count: "0" }],
+        [{ count: "0", total_value: "0" }],
+        [{ overdue: "0", today: "0" }],
+        [{ calls: "0", emails: "0", meetings: "0", notes: "0", total: "0" }],
+        [{ total: "0", on_time: "0" }],
+        [],
+        [],
+        [],
+        [],
+      ]);
+
+      await getRepDashboard(tenantDb, "user-1");
+
+      const crmOwnedProgressionQuery = tenantDb.execute.mock.calls
+        .map(([query]: [unknown]) => extractSqlText(query).toLowerCase())
+        .find((text: string) => text.includes("workflow_bucket") && text.includes("crm_owned_progression"));
+
+      expect(crmOwnedProgressionQuery).toBeTruthy();
+      expect(crmOwnedProgressionQuery).toContain("l.pipeline_type::text as workflow_route");
+      expect(crmOwnedProgressionQuery).toContain("d.workflow_route::text as workflow_route");
+    });
   });
 
   describe("getAdminDashboardSummary", () => {

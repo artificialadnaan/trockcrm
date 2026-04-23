@@ -238,7 +238,7 @@ async function getCrmOwnedProgression(
     FROM (
       SELECT
         'lead'::text AS workflow_bucket,
-        l.pipeline_type AS workflow_route,
+        l.pipeline_type::text AS workflow_route,
         psc.name AS stage_name,
         psc.display_order,
         COUNT(*)::int AS item_count,
@@ -255,7 +255,7 @@ async function getCrmOwnedProgression(
 
       SELECT
         'opportunity'::text AS workflow_bucket,
-        d.workflow_route,
+        d.workflow_route::text AS workflow_route,
         psc.name AS stage_name,
         psc.display_order,
         COUNT(*)::int AS item_count,
