@@ -1,6 +1,7 @@
 import {
   companies,
   deals,
+  leadStageHistory,
   leads,
   projectTypeConfig,
   properties,
@@ -68,6 +69,7 @@ function createFakeTenantDb(lead: FakeLeadRow) {
     projectTypes: [],
     leads: [lead],
     deals: [],
+    leadStageHistory: [] as Array<Record<string, unknown>>,
   };
 
   const resolveTableName = (table: unknown) => (table as { _: { name?: string } })?._?.name;
@@ -136,6 +138,7 @@ function createFakeTenantDb(lead: FakeLeadRow) {
   };
 
   return {
+    state,
     select(fields?: Record<string, unknown>) {
       return {
         from(table: unknown) {
@@ -156,8 +159,36 @@ function createFakeTenantDb(lead: FakeLeadRow) {
           if (table === deals || tableName === "deals") {
             return createQueryBuilder(state.deals as Array<Record<string, unknown>>, fields);
           }
+          if (table === leadStageHistory || tableName === "lead_stage_history") {
+            return createQueryBuilder(state.leadStageHistory, fields);
+          }
 
           throw new Error(`Unexpected table: ${String(tableName)}`);
+        },
+      };
+    },
+    insert(table: unknown) {
+      return {
+        values(value: Record<string, unknown>) {
+          const tableName = resolveTableName(table);
+
+          if (table === leadStageHistory || tableName === "lead_stage_history") {
+            const insertedRow = {
+              id: value.id ?? `lead-stage-history-${state.leadStageHistory.length + 1}`,
+              ...value,
+            };
+            state.leadStageHistory.push(insertedRow);
+            return {
+              returning() {
+                return Promise.resolve([insertedRow]);
+              },
+              then(onfulfilled: (value: unknown) => unknown) {
+                return Promise.resolve(insertedRow).then(onfulfilled);
+              },
+            };
+          }
+
+          throw new Error(`Unexpected insert table: ${String(tableName)}`);
         },
       };
     },
@@ -217,6 +248,22 @@ const opportunityStage = {
   isTerminal: false,
 };
 
+const customCurrentStage = {
+  id: "lead-stage-custom-current",
+  name: "Legacy Site Walk",
+  slug: "site_walk",
+  displayOrder: 5,
+  isTerminal: false,
+};
+
+const customTargetStage = {
+  id: "lead-stage-custom-target",
+  name: "Legacy Proposal Prep",
+  slug: "proposal_prep",
+  displayOrder: 6,
+  isTerminal: false,
+};
+
 beforeEach(() => {
   pipelineMocks.getStageById.mockReset();
   pipelineMocks.getActiveProjectTypes.mockReset();
@@ -239,6 +286,10 @@ beforeEach(() => {
         return salesValidationStage;
       case opportunityStage.id:
         return opportunityStage;
+      case customCurrentStage.id:
+        return customCurrentStage;
+      case customTargetStage.id:
+        return customTargetStage;
       default:
         return null;
     }
@@ -381,5 +432,100 @@ describe("lead service canonical progression", () => {
         },
       },
     });
+  });
+
+  it("records lead stage history when advancing from sales_validation to opportunity", async () => {
+    const tenantDb = createFakeTenantDb({
+      id: "lead-1",
+      companyId: "company-1",
+      propertyId: "property-1",
+      primaryContactId: null,
+      name: "Palm Villas repaint",
+      stageId: salesValidationStage.id,
+      assignedRepId: "rep-1",
+      status: "open",
+      projectTypeId: "project-type-commercial",
+      qualificationPayload: {
+        existing_customer_status: "existing",
+        estimated_value: 120000,
+        timeline_status: "this_quarter",
+      },
+      projectTypeQuestionPayload: {
+        projectTypeId: "project-type-commercial",
+        answers: {
+          project_scope: "Exterior repaint",
+          decision_maker: "Facilities director",
+          budget_status: "Approved",
+          timeline_target: "Q3 2026",
+          incumbent_vendor: "None",
+        },
+      },
+      source: "Referral",
+      description: null,
+      stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+      convertedAt: null,
+      isActive: true,
+      createdAt: new Date("2026-04-12T15:00:00.000Z"),
+      updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+    });
+    const service = createLeadService({
+      getStageById: pipelineMocks.getStageById as never,
+      getActiveProjectTypes: pipelineMocks.getActiveProjectTypes as never,
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+    });
+
+    const lead = await service.updateLead(
+      tenantDb as never,
+      "lead-1",
+      { stageId: opportunityStage.id },
+      "director",
+      "director-1"
+    );
+
+    expect(lead.stageId).toBe(opportunityStage.id);
+    expect(tenantDb.state.leadStageHistory).toEqual([
+      expect.objectContaining({
+        leadId: "lead-1",
+        fromStageId: salesValidationStage.id,
+        toStageId: opportunityStage.id,
+        changedBy: "director-1",
+        isBackwardMove: false,
+      }),
+    ]);
+  });
+
+  it("allows mixed-config tenants to move between custom lead stages without canonical invalid-stage errors", async () => {
+    const tenantDb = createFakeTenantDb({
+      id: "lead-1",
+      companyId: "company-1",
+      propertyId: "property-1",
+      primaryContactId: null,
+      name: "Palm Villas repaint",
+      stageId: customCurrentStage.id,
+      assignedRepId: "rep-1",
+      status: "open",
+      source: "Referral",
+      description: null,
+      stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+      convertedAt: null,
+      isActive: true,
+      createdAt: new Date("2026-04-12T15:00:00.000Z"),
+      updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+    });
+    const service = createLeadService({
+      getStageById: pipelineMocks.getStageById as never,
+      getActiveProjectTypes: pipelineMocks.getActiveProjectTypes as never,
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+    });
+
+    const lead = await service.updateLead(
+      tenantDb as never,
+      "lead-1",
+      { stageId: customTargetStage.id },
+      "director",
+      "director-1"
+    );
+
+    expect(lead.stageId).toBe(customTargetStage.id);
   });
 });
