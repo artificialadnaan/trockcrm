@@ -267,6 +267,36 @@ describe("Reports Service", () => {
       expect(result[0].staleThresholdDays).toBe(30);
       expect(result[0].dealValue).toBe(250000);
     });
+
+    it("uses mirrored stage joins and Bid Board timing when a mirrored downstream slug is present", async () => {
+      const { getStaleDeals } = await import("../../../src/modules/reports/service.js");
+      const tenantDb = createMockTenantDb([
+        {
+          deal_id: "d1",
+          deal_number: "TR-2026-0001",
+          deal_name: "Test Deal",
+          stage_id: "s1",
+          stage_name: "Bid Sent",
+          assigned_rep_id: "r1",
+          rep_name: "Alice",
+          stage_entered_at: "2026-01-01",
+          days_in_stage: "45",
+          stale_threshold_days: "10",
+          deal_value: "250000",
+          workflow_route: "service",
+          bid_board_stage_slug: "bid_sent",
+          bid_board_stage_status: "stalled",
+          region_classification: "Texas",
+        },
+      ]);
+
+      await getStaleDeals(tenantDb);
+
+      const queryText = extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase();
+      expect(queryText).toContain("left join pipeline_stage_config mirror_psc");
+      expect(queryText).toContain("coalesce(d.bid_board_stage_entered_at, d.stage_entered_at)");
+      expect(queryText).toContain("coalesce(mirror_psc.stale_threshold_days, psc.stale_threshold_days)");
+    });
   });
 
   describe("getRevenueByProjectType", () => {
@@ -337,7 +367,7 @@ describe("Reports Service", () => {
               deal_id: "deal-1",
               deal_number: "TR-1001",
               deal_name: "Bid Board Mirror",
-              stage_name: "Opportunity",
+              stage_name: "Estimating",
               workflow_route: "service",
               rep_name: "Avery Rep",
               days_in_stage: "22",
@@ -422,6 +452,38 @@ describe("Reports Service", () => {
       expect(mirrorQuery).toContain("bid_board_stage_status");
       expect(disqualificationQuery).toContain("disqualification_reason");
       expect(disqualificationQuery).toContain("pipeline_type");
+      const staleDealQuery = extractSqlText(tenantDb.execute.mock.calls[5][0]).toLowerCase();
+      expect(staleDealQuery).toContain("left join pipeline_stage_config mirror_psc");
+      expect(staleDealQuery).toContain("coalesce(d.bid_board_stage_entered_at, d.stage_entered_at)");
+      expect(staleDealQuery).toContain("coalesce(mirror_psc.stale_threshold_days, psc.stale_threshold_days)");
+    });
+
+    it("returns CRM-owned progression in workflow order instead of alphabetical stage order", async () => {
+      const { getUnifiedWorkflowOverview } = await import("../../../src/modules/reports/service.js");
+      const tenantDb = {
+        execute: vi.fn()
+          .mockResolvedValueOnce({ rows: [] })
+          .mockResolvedValueOnce({ rows: [] })
+          .mockResolvedValueOnce({ rows: [] })
+          .mockResolvedValueOnce({ rows: [] })
+          .mockResolvedValueOnce({ rows: [] })
+          .mockResolvedValueOnce({ rows: [] })
+          .mockResolvedValueOnce({
+            rows: [
+              { workflow_bucket: "lead", workflow_route: "normal", stage_name: "Sales Validation Stage", item_count: "1", total_value: "1000" },
+              { workflow_bucket: "lead", workflow_route: "normal", stage_name: "New Lead", item_count: "2", total_value: "2000" },
+              { workflow_bucket: "opportunity", workflow_route: "service", stage_name: "Opportunity", item_count: "3", total_value: "3000" },
+            ],
+          })
+          .mockResolvedValueOnce({ rows: [] })
+          .mockResolvedValueOnce({ rows: [] }),
+      } as any;
+
+      await getUnifiedWorkflowOverview(tenantDb);
+
+      const progressionQuery = extractSqlText(tenantDb.execute.mock.calls[6][0]).toLowerCase();
+      expect(progressionQuery).toContain("min(display_order)");
+      expect(progressionQuery).toContain("order by display_order asc");
     });
   });
 });

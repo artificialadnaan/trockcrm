@@ -400,12 +400,12 @@ export async function getStaleDeals(
       d.deal_number,
       d.name AS deal_name,
       d.stage_id,
-      psc.name AS stage_name,
+      COALESCE(mirror_psc.name, psc.name) AS stage_name,
       d.assigned_rep_id,
       u.display_name AS rep_name,
-      d.stage_entered_at,
-      EXTRACT(DAY FROM NOW() - d.stage_entered_at)::int AS days_in_stage,
-      psc.stale_threshold_days,
+      COALESCE(d.bid_board_stage_entered_at, d.stage_entered_at) AS stage_entered_at,
+      EXTRACT(DAY FROM NOW() - COALESCE(d.bid_board_stage_entered_at, d.stage_entered_at))::int AS days_in_stage,
+      COALESCE(mirror_psc.stale_threshold_days, psc.stale_threshold_days) AS stale_threshold_days,
       COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)::numeric AS deal_value,
       d.workflow_route,
       d.bid_board_stage_slug,
@@ -413,11 +413,14 @@ export async function getStaleDeals(
       d.region_classification
     FROM deals d
     JOIN pipeline_stage_config psc ON psc.id = d.stage_id
+    LEFT JOIN pipeline_stage_config mirror_psc
+      ON mirror_psc.slug = COALESCE(d.bid_board_stage_slug, psc.slug)
     JOIN users u ON u.id = d.assigned_rep_id
     WHERE d.is_active = true
       AND psc.is_terminal = false
-      AND psc.stale_threshold_days IS NOT NULL
-      AND EXTRACT(DAY FROM NOW() - d.stage_entered_at) > psc.stale_threshold_days
+      AND COALESCE(mirror_psc.stale_threshold_days, psc.stale_threshold_days) IS NOT NULL
+      AND EXTRACT(DAY FROM NOW() - COALESCE(d.bid_board_stage_entered_at, d.stage_entered_at))
+        > COALESCE(mirror_psc.stale_threshold_days, psc.stale_threshold_days)
       ${repFilter}
     ORDER BY days_in_stage DESC
   `);
@@ -428,7 +431,7 @@ export async function getStaleDeals(
     dealNumber: r.deal_number,
     dealName: r.deal_name,
     stageId: r.stage_id,
-    stageName: resolveMirroredStageLabel(r.bid_board_stage_slug, r.stage_name),
+    stageName: r.stage_name,
     assignedRepId: r.assigned_rep_id,
     repName: r.rep_name,
     stageEnteredAt: r.stage_entered_at,
@@ -1152,22 +1155,25 @@ export async function getUnifiedWorkflowOverview(
         d.id AS deal_id,
         d.deal_number,
         d.name AS deal_name,
-        psc.name AS stage_name,
+        COALESCE(mirror_psc.name, psc.name) AS stage_name,
         d.workflow_route,
         u.display_name AS rep_name,
-        EXTRACT(DAY FROM NOW() - d.stage_entered_at)::int AS days_in_stage,
-        psc.stale_threshold_days,
+        EXTRACT(DAY FROM NOW() - COALESCE(d.bid_board_stage_entered_at, d.stage_entered_at))::int AS days_in_stage,
+        COALESCE(mirror_psc.stale_threshold_days, psc.stale_threshold_days) AS stale_threshold_days,
         COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)::numeric AS deal_value,
         d.bid_board_stage_slug,
         d.bid_board_stage_status,
         d.region_classification
       FROM deals d
       JOIN pipeline_stage_config psc ON psc.id = d.stage_id
+      LEFT JOIN pipeline_stage_config mirror_psc
+        ON mirror_psc.slug = COALESCE(d.bid_board_stage_slug, psc.slug)
       JOIN users u ON u.id = d.assigned_rep_id
       WHERE d.is_active = true
         AND psc.is_terminal = false
-        AND psc.stale_threshold_days IS NOT NULL
-        AND EXTRACT(DAY FROM NOW() - d.stage_entered_at) > psc.stale_threshold_days
+        AND COALESCE(mirror_psc.stale_threshold_days, psc.stale_threshold_days) IS NOT NULL
+        AND EXTRACT(DAY FROM NOW() - COALESCE(d.bid_board_stage_entered_at, d.stage_entered_at))
+          > COALESCE(mirror_psc.stale_threshold_days, psc.stale_threshold_days)
         ${dealRepFilter}
       ORDER BY days_in_stage DESC, deal_name ASC
     `),
@@ -1176,12 +1182,14 @@ export async function getUnifiedWorkflowOverview(
         'crm_owned'::text AS workflow_bucket,
         workflow_route,
         stage_name,
+        MIN(display_order)::int AS display_order,
         SUM(item_count)::int AS item_count,
         COALESCE(SUM(total_value), 0)::numeric AS total_value
       FROM (
         SELECT
           l.pipeline_type AS workflow_route,
           psc.name AS stage_name,
+          psc.display_order,
           COUNT(*)::int AS item_count,
           COALESCE(SUM(COALESCE(l.pre_qual_value, 0)), 0)::numeric AS total_value
         FROM leads l
@@ -1197,6 +1205,7 @@ export async function getUnifiedWorkflowOverview(
         SELECT
           d.workflow_route,
           psc.name AS stage_name,
+          psc.display_order,
           COUNT(*)::int AS item_count,
           COALESCE(SUM(COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)), 0)::numeric AS total_value
         FROM deals d
@@ -1207,22 +1216,24 @@ export async function getUnifiedWorkflowOverview(
         GROUP BY d.workflow_route, psc.name, psc.display_order
       ) crm_owned_progression
       GROUP BY workflow_bucket, workflow_route, stage_name
-      ORDER BY stage_name ASC, workflow_route ASC
+      ORDER BY display_order ASC, workflow_route ASC
     `),
     tenantDb.execute(sql`
       SELECT
         COALESCE(d.bid_board_stage_slug, psc.slug) AS mirrored_stage_slug,
-        psc.name AS mirrored_stage_name,
+        COALESCE(mirror_psc.name, psc.name) AS mirrored_stage_name,
         d.bid_board_stage_status AS mirrored_stage_status,
         d.workflow_route,
         COUNT(*)::int AS deal_count,
         COALESCE(SUM(COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)), 0)::numeric AS total_value
       FROM deals d
       JOIN pipeline_stage_config psc ON psc.id = d.stage_id
+      LEFT JOIN pipeline_stage_config mirror_psc
+        ON mirror_psc.slug = COALESCE(d.bid_board_stage_slug, psc.slug)
       WHERE d.is_active = true
         AND COALESCE(d.bid_board_stage_slug, psc.slug) IN (${sql.join(MIRRORED_DOWNSTREAM_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})
         ${dealRepFilter}
-      GROUP BY COALESCE(d.bid_board_stage_slug, psc.slug), psc.name, d.bid_board_stage_status, d.workflow_route
+      GROUP BY COALESCE(d.bid_board_stage_slug, psc.slug), COALESCE(mirror_psc.name, psc.name), d.bid_board_stage_status, d.workflow_route
       ORDER BY deal_count DESC, total_value DESC, mirrored_stage_name ASC
     `),
     tenantDb.execute(sql`
@@ -1232,9 +1243,8 @@ export async function getUnifiedWorkflowOverview(
         COUNT(*)::int AS lead_count
       FROM leads l
       WHERE l.status = 'disqualified'
-        AND l.disqualification_reason IS NOT NULL
         ${options.repId ? sql`AND l.assigned_rep_id = ${options.repId}` : sql``}
-      GROUP BY l.pipeline_type, l.disqualification_reason
+      GROUP BY l.pipeline_type, COALESCE(l.disqualification_reason, 'other')
       ORDER BY lead_count DESC, disqualification_reason ASC
     `),
   ]);
@@ -1302,7 +1312,7 @@ export async function getUnifiedWorkflowOverview(
       dealId: row.deal_id,
       dealNumber: row.deal_number,
       dealName: row.deal_name,
-      stageName: resolveMirroredStageLabel(row.bid_board_stage_slug, row.stage_name),
+      stageName: row.stage_name,
       workflowRoute: row.workflow_route,
       repName: row.rep_name,
       daysInStage: Number(row.days_in_stage ?? 0),

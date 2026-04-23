@@ -75,6 +75,12 @@ describe("Dashboard Service", () => {
         [
           { stage_id: "s1", stage_name: "Estimating", stage_color: "#3B82F6", display_order: 2, deal_count: "3", total_value: "300000" },
         ],
+        // stale leads
+        [],
+        // CRM-owned progression
+        [],
+        // downstream bottlenecks
+        [],
       ]);
 
       const result = await getRepDashboard(tenantDb, "user-1");
@@ -92,6 +98,9 @@ describe("Dashboard Service", () => {
         [{ overdue: "0", today: "0" }],
         [{ calls: "0", emails: "0", meetings: "0", notes: "0", total: "0" }],
         [{ total: "0", on_time: "0" }],
+        [],
+        [],
+        [],
         [],
       ]);
 
@@ -112,6 +121,9 @@ describe("Dashboard Service", () => {
         [{ calls: "0", emails: "0", meetings: "0", notes: "0", total: "0" }],
         [{ total: "0", on_time: "0" }],
         [],
+        [],
+        [],
+        [],
       ]);
 
       await getRepDashboard(tenantDb, "user-1");
@@ -119,6 +131,31 @@ describe("Dashboard Service", () => {
       const activityQueryText = extractSqlText(tenantDb.execute.mock.calls[2][0]).toLowerCase();
       expect(activityQueryText).toContain("responsible_user_id");
       expect(activityQueryText).not.toContain("where user_id =");
+    });
+
+    it("uses workflow display order for CRM-owned progression and mirrored timing for downstream bottlenecks", async () => {
+      const { getRepDashboard } = await import("../../../src/modules/dashboard/service.js");
+      const tenantDb = createMockTenantDb([
+        [{ count: "0", total_value: "0" }],
+        [{ overdue: "0", today: "0" }],
+        [{ calls: "0", emails: "0", meetings: "0", notes: "0", total: "0" }],
+        [{ total: "0", on_time: "0" }],
+        [],
+        [],
+        [],
+        [],
+      ]);
+
+      await getRepDashboard(tenantDb, "user-1");
+
+      const progressionQueryText = extractSqlText(tenantDb.execute.mock.calls[6][0]).toLowerCase();
+      const downstreamQueryText = extractSqlText(tenantDb.execute.mock.calls[7][0]).toLowerCase();
+
+      expect(progressionQueryText).toContain("min(display_order)");
+      expect(progressionQueryText).toContain("order by display_order asc");
+      expect(downstreamQueryText).toContain("left join pipeline_stage_config mirror_psc");
+      expect(downstreamQueryText).toContain("coalesce(d.bid_board_stage_entered_at, d.stage_entered_at)");
+      expect(downstreamQueryText).toContain("coalesce(mirror_psc.stale_threshold_days, psc.stale_threshold_days, 14)");
     });
   });
 
@@ -140,6 +177,8 @@ describe("Dashboard Service", () => {
         [],
         [],
         [{ dd_value: "0", dd_count: "0", pipeline_value: "0", pipeline_count: "0" }],
+        [],
+        [],
       ]);
 
       await getDirectorDashboard(tenantDb, { from: "2026-01-01", to: "2026-12-31" });
@@ -166,6 +205,9 @@ describe("Dashboard Service", () => {
         [{ calls: "2", emails: "3", meetings: "1", notes: "0", total: "6" }],
         [{ total: "5", on_time: "4" }],
         [{ stage_id: "s1", stage_name: "Bid Sent", stage_color: "#EAB308", display_order: 3, deal_count: "1", total_value: "100000" }],
+        [],
+        [],
+        [],
       ]);
 
       const result = await getRepDashboard(tenantDb, "user-2");

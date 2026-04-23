@@ -21,28 +21,6 @@ import {
 
 type TenantDb = NodePgDatabase<typeof schema>;
 const MIRRORED_DOWNSTREAM_STAGE_SLUGS = ["estimating", "bid_sent", "in_production", "close_out"] as const;
-const MIRRORED_DOWNSTREAM_STAGE_LABELS: Record<(typeof MIRRORED_DOWNSTREAM_STAGE_SLUGS)[number], string> = {
-  estimating: "Estimating",
-  bid_sent: "Bid Sent",
-  in_production: "In Production",
-  close_out: "Close Out",
-};
-
-function resolveMirroredStageLabel(
-  mirroredStageSlug: string | null | undefined,
-  fallbackStageName: string | null | undefined
-) {
-  if (
-    mirroredStageSlug &&
-    mirroredStageSlug in MIRRORED_DOWNSTREAM_STAGE_LABELS
-  ) {
-    return MIRRORED_DOWNSTREAM_STAGE_LABELS[
-      mirroredStageSlug as keyof typeof MIRRORED_DOWNSTREAM_STAGE_LABELS
-    ];
-  }
-
-  return fallbackStageName ?? "Unknown";
-}
 
 export interface StaleLeadDashboardRow {
   leadId: string;
@@ -152,6 +130,7 @@ async function getCrmOwnedProgression(
       workflow_bucket,
       workflow_route,
       stage_name,
+      MIN(display_order)::int AS display_order,
       SUM(item_count)::int AS item_count,
       COALESCE(SUM(total_value), 0)::numeric AS total_value
     FROM (
@@ -159,6 +138,7 @@ async function getCrmOwnedProgression(
         'lead'::text AS workflow_bucket,
         l.pipeline_type AS workflow_route,
         psc.name AS stage_name,
+        psc.display_order,
         COUNT(*)::int AS item_count,
         COALESCE(SUM(COALESCE(l.pre_qual_value, 0)), 0)::numeric AS total_value
       FROM leads l
@@ -175,6 +155,7 @@ async function getCrmOwnedProgression(
         'opportunity'::text AS workflow_bucket,
         d.workflow_route,
         psc.name AS stage_name,
+        psc.display_order,
         COUNT(*)::int AS item_count,
         COALESCE(SUM(COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)), 0)::numeric AS total_value
       FROM deals d
@@ -185,7 +166,7 @@ async function getCrmOwnedProgression(
       GROUP BY d.workflow_route, psc.name, psc.display_order
     ) crm_owned_progression
     GROUP BY workflow_bucket, workflow_route, stage_name
-    ORDER BY stage_name ASC, workflow_route ASC
+    ORDER BY display_order ASC, workflow_route ASC
   `);
 
   const rows = (result as any).rows ?? result;
@@ -210,23 +191,25 @@ async function getDownstreamBottlenecks(
     SELECT
       d.id AS deal_id,
       d.name AS deal_name,
-      psc.name AS stage_name,
+      COALESCE(mirror_psc.name, psc.name) AS stage_name,
       COALESCE(d.bid_board_stage_slug, psc.slug) AS mirrored_stage_slug,
       d.bid_board_stage_status AS mirrored_stage_status,
       d.workflow_route,
       COALESCE(NULLIF(TRIM(d.region_classification), ''), TRIM(CONCAT_WS(', ', d.property_city, d.property_state)), 'Unassigned region') AS region_classification,
       COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)::numeric AS deal_value,
       EXTRACT(DAY FROM NOW() - COALESCE(d.bid_board_stage_entered_at, d.stage_entered_at))::int AS days_in_stage,
-      COALESCE(psc.stale_threshold_days, 14)::int AS stale_threshold_days
+      COALESCE(mirror_psc.stale_threshold_days, psc.stale_threshold_days, 14)::int AS stale_threshold_days
     FROM deals d
     JOIN pipeline_stage_config psc ON psc.id = d.stage_id
+    LEFT JOIN pipeline_stage_config mirror_psc
+      ON mirror_psc.slug = COALESCE(d.bid_board_stage_slug, psc.slug)
     WHERE d.is_active = true
       AND COALESCE(d.bid_board_stage_slug, psc.slug) IN (${sql.join(MIRRORED_DOWNSTREAM_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})
       ${repFilter}
     ORDER BY
       GREATEST(
         EXTRACT(DAY FROM NOW() - COALESCE(d.bid_board_stage_entered_at, d.stage_entered_at))::int
-        - COALESCE(psc.stale_threshold_days, 14),
+        - COALESCE(mirror_psc.stale_threshold_days, psc.stale_threshold_days, 14),
         0
       ) DESC,
       deal_value DESC,
@@ -238,7 +221,7 @@ async function getDownstreamBottlenecks(
   return rows.map((row: any) => ({
     dealId: row.deal_id,
     dealName: row.deal_name,
-    stageName: resolveMirroredStageLabel(row.mirrored_stage_slug, row.stage_name),
+    stageName: row.stage_name,
     mirroredStageStatus: row.mirrored_stage_status ?? null,
     workflowRoute: row.workflow_route,
     regionClassification: row.region_classification,
