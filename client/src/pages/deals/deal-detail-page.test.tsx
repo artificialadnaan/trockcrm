@@ -245,12 +245,13 @@ describe("DealDetailPage", () => {
     });
   });
 
-  it("shows Bid Board ownership messaging and removes manual stage actions after estimating handoff", () => {
+  it("shows Bid Board ownership messaging while preserving valid CRM stage controls", () => {
     const html = renderPage();
 
     expect(html).toContain("Bid Board now owns downstream progression");
     expect(html).toContain("Bid Board is now the source of truth once this deal entered estimating.");
-    expect(html).not.toContain("Move Stage");
+    expect(html).toContain("Move Stage");
+    expect(html).toContain("Bid Board managed");
   });
 
   it("explains which fields remain editable in CRM versus mirrored from Bid Board", () => {

@@ -68,6 +68,8 @@ export function DealDetailPage() {
   const backwardStages = stages.filter(
     (s) => s.displayOrder < (currentStage?.displayOrder ?? 0) && !s.isTerminal
   );
+  const readonlyForwardStages = isBidBoardOwned ? forwardStages : [];
+  const manualForwardStages = isBidBoardOwned ? [] : forwardStages;
 
   const handleStageChange = (stageId: string) => {
     setTargetStageId(stageId);
@@ -204,7 +206,7 @@ export function DealDetailPage() {
 
         <div className="flex items-center gap-2">
           {/* Stage Advancement Dropdown */}
-          {!currentStage?.isTerminal && !isBidBoardOwned && (
+          {!currentStage?.isTerminal && (
             <DropdownMenu>
               <DropdownMenuTrigger
                 render={<Button>
@@ -213,7 +215,7 @@ export function DealDetailPage() {
                 </Button>}
               />
               <DropdownMenuContent align="end">
-                {forwardStages.map((s) => (
+                {manualForwardStages.map((s) => (
                   <DropdownMenuItem
                     key={s.id}
                     onClick={() => handleStageChange(s.id)}
@@ -224,6 +226,19 @@ export function DealDetailPage() {
                         Terminal
                       </Badge>
                     )}
+                  </DropdownMenuItem>
+                ))}
+                {readonlyForwardStages.map((s) => (
+                  <DropdownMenuItem
+                    key={s.id}
+                    disabled
+                  >
+                    <div className="flex w-full items-center justify-between gap-2">
+                      <span>{s.name}</span>
+                      <Badge variant="outline" className="text-xs">
+                        Bid Board managed
+                      </Badge>
+                    </div>
                   </DropdownMenuItem>
                 ))}
                 {isDirectorOrAdmin && backwardStages.length > 0 && (
