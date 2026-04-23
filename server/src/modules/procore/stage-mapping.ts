@@ -28,8 +28,12 @@ export interface ReverseMappedStage {
  */
 export async function buildReverseStageMap(
   tenantDb: TenantDb,
-  workflowFamily?: WorkflowFamily
+  workflowFamily: WorkflowFamily
 ): Promise<Map<string, ReverseMappedStage>> {
+  if (!workflowFamily) {
+    throw new Error("workflowFamily is required");
+  }
+
   const stages = await tenantDb
     .select({
       id: pipelineStageConfig.id,
@@ -44,7 +48,7 @@ export async function buildReverseStageMap(
   const map = new Map<string, ReverseMappedStage>();
 
   for (const stage of stages) {
-    if (workflowFamily && stage.workflowFamily !== workflowFamily) {
+    if (stage.workflowFamily !== workflowFamily) {
       continue;
     }
 

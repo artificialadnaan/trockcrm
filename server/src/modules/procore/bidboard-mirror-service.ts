@@ -100,6 +100,40 @@ function durationSince(value: Date | string | null, now: Date) {
   return `${seconds} seconds`;
 }
 
+function deriveInternalStageFamily(input: {
+  stageSlug: string;
+  stageStatus: string | null;
+  proposalStatus: string | null;
+}) {
+  const reviewSignal = input.proposalStatus ?? input.stageStatus;
+
+  if (
+    input.stageSlug === "bid_sent" &&
+    (reviewSignal === "under_review" ||
+      reviewSignal === "accepted" ||
+      reviewSignal === "signed")
+  ) {
+    return "contract_review";
+  }
+
+  switch (input.stageSlug) {
+    case "estimating":
+      return "estimating";
+    case "bid_sent":
+      return "proposal";
+    case "in_production":
+      return "production";
+    case "close_out":
+      return "close_out";
+    case "closed_lost":
+      return "terminal_loss";
+    case "closed_won":
+      return "terminal_win";
+    default:
+      return "downstream";
+  }
+}
+
 function defaultStageFamilyForSlug(stageSlug: string) {
   switch (stageSlug) {
     case "estimating":
@@ -134,15 +168,20 @@ export function buildBidBoardMirrorUpdate(input: {
   }
 
   const stageStatus = normalizeOptionalText(input.payload.stageStatus);
-  const stageFamily =
-    normalizeOptionalText(input.payload.stageFamily) ??
-    defaultStageFamilyForSlug(input.targetStage.slug);
   const estimatingSubstage =
     normalizeOptionalText(input.payload.estimatingSubstage) ??
     (stageStatus && VALID_ESTIMATING_SUBSTAGE_SET.has(stageStatus) ? stageStatus : null);
   const proposalStatus =
     normalizeOptionalText(input.payload.proposalStatus) ??
     (stageStatus && VALID_PROPOSAL_STATUS_SET.has(stageStatus) ? stageStatus : null);
+  const stageFamily =
+    normalizeOptionalText(input.payload.stageFamily) ??
+    deriveInternalStageFamily({
+      stageSlug: input.targetStage.slug,
+      stageStatus,
+      proposalStatus,
+    }) ??
+    defaultStageFamilyForSlug(input.targetStage.slug);
   const stageEnteredAt = parseOptionalDate(input.payload.stageEnteredAt) ?? now;
   const stageExitedAt = parseOptionalDate(input.payload.stageExitedAt);
   const mirrorSourceEnteredAt = parseOptionalDate(input.payload.mirrorSourceEnteredAt);

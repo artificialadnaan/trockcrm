@@ -41,7 +41,6 @@ describe("bid board mirror service", () => {
       },
       payload: {
         stageSlug: "bid_sent",
-        stageFamily: "contract_review",
         stageStatus: "under_review",
         proposalStatus: "under_review",
         stageEnteredAt: "2026-04-22T14:30:00.000Z",
@@ -209,5 +208,25 @@ describe("buildReverseStageMap", () => {
       workflowFamily: "service_deal",
       ambiguous: false,
     });
+  });
+
+  it("requires callers to scope reverse mapping by workflow family", async () => {
+    const tenantDb = {
+      select() {
+        return {
+          from() {
+            return {
+              where() {
+                return Promise.resolve([]);
+              },
+            };
+          },
+        };
+      },
+    };
+
+    await expect(buildReverseStageMap(tenantDb as never, undefined as never)).rejects.toThrow(
+      "workflowFamily is required"
+    );
   });
 });
