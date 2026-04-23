@@ -329,7 +329,22 @@ export function getWorkflowFamilyForStage(
   }
 
   if (isCanonicalDealStageSlug(canonicalStageSlug)) {
-    return workflowRoute ? workflowFamilyForRoute(workflowRoute) : null;
+    const contract = CANONICAL_DEAL_WORKFLOW_CONTRACTS_BY_SLUG.get(canonicalStageSlug);
+    if (!contract) {
+      return null;
+    }
+
+    if (workflowRoute) {
+      return contractAllowsWorkflowRoute(contract, workflowRoute)
+        ? workflowFamilyForRoute(workflowRoute)
+        : null;
+    }
+
+    if (contract.workflowRoutes.length === 1) {
+      return workflowFamilyForRoute(contract.workflowRoutes[0]);
+    }
+
+    return null;
   }
 
   return null;
