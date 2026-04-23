@@ -194,7 +194,7 @@ describe("getUnifiedWorkflowOverview", () => {
           deal_id: "deal-1",
           deal_number: "TR-2026-0001",
           deal_name: "Roof Repair",
-          stage_name: "Bid Sent",
+          stage_name: "Opportunity",
           workflow_route: "normal",
           rep_name: "Jordan",
           days_in_stage: "18",

@@ -92,6 +92,29 @@ export interface UnifiedStaleDealRow {
   dealValue: number;
 }
 
+export interface UnifiedCrmOwnedProgressionRow {
+  workflowBucket: "lead" | "opportunity" | "crm_owned";
+  workflowRoute: "normal" | "service";
+  stageName: string;
+  itemCount: number;
+  totalValue: number;
+}
+
+export interface UnifiedMirroredDownstreamSummaryRow {
+  mirroredStageSlug: string;
+  mirroredStageName: string;
+  mirroredStageStatus: string | null;
+  workflowRoute: "normal" | "service";
+  dealCount: number;
+  totalValue: number;
+}
+
+export interface UnifiedReasonCodedDisqualificationRow {
+  workflowRoute: "normal" | "service";
+  disqualificationReason: string;
+  leadCount: number;
+}
+
 export interface UnifiedWorkflowOverview {
   leadPipelineSummary: UnifiedLeadPipelineSummaryRow[];
   standardVsServiceRollups: UnifiedRouteRollupRow[];
@@ -99,6 +122,9 @@ export interface UnifiedWorkflowOverview {
   repActivitySplit: UnifiedRepActivitySplitRow[];
   staleLeads: UnifiedStaleLeadRow[];
   staleDeals: UnifiedStaleDealRow[];
+  crmOwnedProgression: UnifiedCrmOwnedProgressionRow[];
+  mirroredDownstreamSummary: UnifiedMirroredDownstreamSummaryRow[];
+  reasonCodedDisqualifications: UnifiedReasonCodedDisqualificationRow[];
 }
 
 export function useSavedReports() {

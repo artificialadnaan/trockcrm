@@ -276,7 +276,7 @@ describe("Reports Service", () => {
           deal_number: "TR-2026-0001",
           deal_name: "Test Deal",
           stage_id: "s1",
-          stage_name: "Bid Sent",
+          stage_name: "Opportunity",
           assigned_rep_id: "r1",
           rep_name: "Alice",
           stage_entered_at: "2026-01-01",
@@ -290,7 +290,9 @@ describe("Reports Service", () => {
         },
       ]);
 
-      await getStaleDeals(tenantDb);
+      const result = await getStaleDeals(tenantDb);
+
+      expect(result[0].stageName).toBe("Bid Sent");
 
       const queryText = extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase();
       expect(queryText).toContain("left join pipeline_stage_config mirror_psc");
@@ -367,7 +369,7 @@ describe("Reports Service", () => {
               deal_id: "deal-1",
               deal_number: "TR-1001",
               deal_name: "Bid Board Mirror",
-              stage_name: "Estimating",
+              stage_name: "Opportunity",
               workflow_route: "service",
               rep_name: "Avery Rep",
               days_in_stage: "22",
