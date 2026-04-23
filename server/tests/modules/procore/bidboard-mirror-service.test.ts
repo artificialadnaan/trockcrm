@@ -160,6 +160,91 @@ describe("bid board mirror service", () => {
       })
     ).toThrow("Bid Board mirror stage family mismatch");
   });
+
+  it("preserves the prior mirrored stage-entered timestamp when SyncHub omits it", () => {
+    const previousStageEnteredAt = new Date("2026-04-20T12:00:00.000Z");
+
+    const result = buildBidBoardMirrorUpdate({
+      now: new Date("2026-04-22T18:00:00.000Z"),
+      deal: {
+        id: "deal-1",
+        stageId: "stage-estimating",
+        stageEnteredAt: previousStageEnteredAt,
+        workflowRoute: "normal",
+        isBidBoardOwned: true,
+        proposalStatus: "drafting",
+        estimatingSubstage: "building_estimate",
+        actualCloseDate: null,
+        lostReasonId: null,
+        lostNotes: null,
+        lostCompetitor: null,
+        lostAt: null,
+      },
+      currentStage: {
+        id: "stage-estimating",
+        slug: "estimating",
+        displayOrder: 2,
+      },
+      targetStage: {
+        id: "stage-bid-sent",
+        slug: "bid_sent",
+        name: "Bid Sent",
+        displayOrder: 3,
+        isTerminal: false,
+        workflowFamily: "standard_deal",
+      },
+      payload: {
+        stageSlug: "bid_sent",
+        stageStatus: "under_review",
+        proposalStatus: "under_review",
+      },
+    });
+
+    expect(result.updates.stageEnteredAt).toEqual(previousStageEnteredAt);
+    expect(result.updates.bidBoardStageEnteredAt).toEqual(previousStageEnteredAt);
+    expect(result.history?.durationInPreviousStage).toBeNull();
+  });
+
+  it("rejects payload stage families that do not match the internal mirror mapping", () => {
+    expect(() =>
+      buildBidBoardMirrorUpdate({
+        now: new Date("2026-04-22T18:00:00.000Z"),
+        deal: {
+          id: "deal-1",
+          stageId: "stage-estimating",
+          stageEnteredAt: new Date("2026-04-20T12:00:00.000Z"),
+          workflowRoute: "normal",
+          isBidBoardOwned: true,
+          proposalStatus: "drafting",
+          estimatingSubstage: "building_estimate",
+          actualCloseDate: null,
+          lostReasonId: null,
+          lostNotes: null,
+          lostCompetitor: null,
+          lostAt: null,
+        },
+        currentStage: {
+          id: "stage-estimating",
+          slug: "estimating",
+          displayOrder: 2,
+        },
+        targetStage: {
+          id: "stage-bid-sent",
+          slug: "bid_sent",
+          name: "Bid Sent",
+          displayOrder: 3,
+          isTerminal: false,
+          workflowFamily: "standard_deal",
+        },
+        payload: {
+          stageSlug: "bid_sent",
+          stageStatus: "under_review",
+          proposalStatus: "under_review",
+          stageFamily: "production",
+        },
+      })
+    ).toThrow("Bid Board mirror stage family mismatch");
+  });
 });
 
 describe("buildReverseStageMap", () => {

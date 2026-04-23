@@ -174,15 +174,21 @@ export function buildBidBoardMirrorUpdate(input: {
   const proposalStatus =
     normalizeOptionalText(input.payload.proposalStatus) ??
     (stageStatus && VALID_PROPOSAL_STATUS_SET.has(stageStatus) ? stageStatus : null);
-  const stageFamily =
-    normalizeOptionalText(input.payload.stageFamily) ??
+  const derivedStageFamily =
     deriveInternalStageFamily({
       stageSlug: input.targetStage.slug,
       stageStatus,
       proposalStatus,
-    }) ??
-    defaultStageFamilyForSlug(input.targetStage.slug);
-  const stageEnteredAt = parseOptionalDate(input.payload.stageEnteredAt) ?? now;
+    }) ?? defaultStageFamilyForSlug(input.targetStage.slug);
+  const payloadStageFamily = normalizeOptionalText(input.payload.stageFamily);
+  if (payloadStageFamily && payloadStageFamily !== derivedStageFamily) {
+    throw new AppError(400, "Bid Board mirror stage family mismatch");
+  }
+
+  const stageFamily = derivedStageFamily;
+  const payloadStageEnteredAt = parseOptionalDate(input.payload.stageEnteredAt);
+  const stageEnteredAt =
+    payloadStageEnteredAt ?? parseOptionalDate(input.deal.stageEnteredAt) ?? now;
   const stageExitedAt = parseOptionalDate(input.payload.stageExitedAt);
   const mirrorSourceEnteredAt = parseOptionalDate(input.payload.mirrorSourceEnteredAt);
   const mirrorSourceExitedAt = parseOptionalDate(input.payload.mirrorSourceExitedAt);
@@ -255,7 +261,9 @@ export function buildBidBoardMirrorUpdate(input: {
           toStageId: input.targetStage.id,
           isBackwardMove,
           overrideReason: BID_BOARD_MIRROR_OVERRIDE_REASON,
-          durationInPreviousStage: durationSince(input.deal.stageEnteredAt, now),
+          durationInPreviousStage: payloadStageEnteredAt
+            ? durationSince(input.deal.stageEnteredAt, payloadStageEnteredAt)
+            : null,
         }
       : null,
   };

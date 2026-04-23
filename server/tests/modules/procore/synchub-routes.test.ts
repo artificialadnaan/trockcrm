@@ -23,8 +23,20 @@ function createApp() {
   return app;
 }
 
-function createClient() {
+type ClientOptions = {
+  workflowRoute?: "normal" | "service";
+  existingDealIdByProcoreBid?: string | null;
+  existingDealIdByName?: string | null;
+  currentStageEnteredAt?: Date;
+  requestStageFamily?: string | null;
+};
+
+function createClient(options: ClientOptions = {}) {
   const queries: Array<{ sql: string; params: unknown[] | undefined }> = [];
+  const workflowRoute = options.workflowRoute ?? "normal";
+  const currentStageEnteredAt =
+    options.currentStageEnteredAt ?? new Date("2026-04-20T12:00:00.000Z");
+
   const client = {
     query: vi.fn(async (sql: string, params?: unknown[]) => {
       queries.push({ sql, params });
@@ -45,16 +57,19 @@ function createClient() {
         return { rows: [] };
       }
       if (sql.includes("SELECT id FROM office_dallas.deals WHERE procore_bid_id")) {
-        return { rows: [{ id: "deal-1" }] };
+        return { rows: options.existingDealIdByProcoreBid ? [{ id: options.existingDealIdByProcoreBid }] : [] };
+      }
+      if (sql.includes("LOWER(TRIM(name)) = LOWER(TRIM($2))")) {
+        return { rows: options.existingDealIdByName ? [{ id: options.existingDealIdByName }] : [] };
       }
       if (sql.includes("SELECT id, stage_id, stage_entered_at")) {
         return {
           rows: [
             {
-              id: "deal-1",
+              id: options.existingDealIdByProcoreBid ?? options.existingDealIdByName ?? "deal-1",
               stage_id: "stage-estimating",
-              stage_entered_at: new Date("2026-04-20T12:00:00.000Z"),
-              workflow_route: "normal",
+              stage_entered_at: currentStageEnteredAt,
+              workflow_route: workflowRoute,
               is_bid_board_owned: true,
               proposal_status: "drafting",
               estimating_substage: "building_estimate",
@@ -77,7 +92,7 @@ function createClient() {
               id: "stage-estimating",
               slug: "estimating",
               display_order: 2,
-              workflow_family: "standard_deal",
+              workflow_family: workflowRoute === "service" ? "service_deal" : "standard_deal",
             },
           ],
         };
@@ -94,7 +109,7 @@ function createClient() {
               name: "Bid Sent",
               display_order: 3,
               is_terminal: false,
-              workflow_family: "standard_deal",
+              workflow_family: workflowRoute === "service" ? "service_deal" : "standard_deal",
               required_fields: [],
               required_documents: [],
               required_approvals: [],
@@ -127,7 +142,9 @@ describe("syncHubRoutes", () => {
   });
 
   it("mirrors downstream bid board stage data through the route and derives contract review mapping internally", async () => {
-    const { client, queries } = createClient();
+    const { client, queries } = createClient({
+      existingDealIdByProcoreBid: "deal-1",
+    });
     dbMocks.connect.mockResolvedValue(client);
 
     const app = createApp();
@@ -159,5 +176,90 @@ describe("syncHubRoutes", () => {
     expect(updateQuery?.params?.[4]).toBe("under_review");
     expect(updateQuery?.params?.[14]).toBeNull();
     expect(updateQuery?.params?.[15]).toBe("under_review");
+  });
+
+  it("scopes fallback dedupe by workflow route so service and normal deals with the same name do not collide", async () => {
+    const { client, queries } = createClient({
+      workflowRoute: "service",
+      existingDealIdByProcoreBid: null,
+      existingDealIdByName: "deal-service-1",
+    });
+    dbMocks.connect.mockResolvedValue(client);
+
+    const app = createApp();
+    const response = await request(app)
+      .post("/api/integrations/synchub/opportunities")
+      .set("x-synchub-secret", "test-secret")
+      .send({
+        office_slug: "dallas",
+        bid_board_id: "bb-service-1",
+        name: "Palm Villas",
+        stage_slug: "bid_sent",
+        stage_status: "under_review",
+        proposal_status: "under_review",
+        workflow_route: "service",
+      });
+
+    expect(response.status).toBe(200);
+    const dedupeQuery = queries.find((entry) => entry.sql.includes("LOWER(TRIM(name)) = LOWER(TRIM($2))"));
+    expect(dedupeQuery?.sql).toContain("workflow_route = $3");
+    expect(dedupeQuery?.params).toEqual(["bid_board", "Palm Villas", "service"]);
+  });
+
+  it("preserves the prior mirrored stage-entered timestamp when SyncHub omits it", async () => {
+    const priorStageEnteredAt = new Date("2026-04-20T12:00:00.000Z");
+    const { client, queries } = createClient({
+      existingDealIdByProcoreBid: "deal-1",
+      currentStageEnteredAt: priorStageEnteredAt,
+    });
+    dbMocks.connect.mockResolvedValue(client);
+
+    const app = createApp();
+    const response = await request(app)
+      .post("/api/integrations/synchub/opportunities")
+      .set("x-synchub-secret", "test-secret")
+      .send({
+        office_slug: "dallas",
+        bid_board_id: "bb-1",
+        procore_bid_id: 101,
+        name: "Palm Villas",
+        stage_slug: "bid_sent",
+        stage_status: "under_review",
+        proposal_status: "under_review",
+      });
+
+    expect(response.status).toBe(200);
+    const updateQuery = queries.find((entry) => entry.sql.includes("UPDATE office_dallas.deals"));
+    expect(updateQuery?.params?.[1]).toEqual(priorStageEnteredAt);
+    expect(updateQuery?.params?.[5]).toEqual(priorStageEnteredAt);
+  });
+
+  it("rejects payload stage families that conflict with internal derivation", async () => {
+    const { client } = createClient({
+      existingDealIdByProcoreBid: "deal-1",
+    });
+    dbMocks.connect.mockResolvedValue(client);
+
+    const app = createApp();
+    const response = await request(app)
+      .post("/api/integrations/synchub/opportunities")
+      .set("x-synchub-secret", "test-secret")
+      .send({
+        office_slug: "dallas",
+        bid_board_id: "bb-1",
+        procore_bid_id: 101,
+        name: "Palm Villas",
+        stage_slug: "bid_sent",
+        stage_status: "under_review",
+        proposal_status: "under_review",
+        stage_family: "production",
+      });
+
+    expect(response.status).toBe(400);
+    expect(response.body).toMatchObject({
+      error: {
+        message: "Bid Board mirror stage family mismatch",
+      },
+    });
   });
 });

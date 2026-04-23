@@ -154,13 +154,15 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
       existingDealId = existingResult.rows[0]?.id ?? null;
     }
 
-    // Fallback dedup: match by source + exact name (catches replays without procore_bid_id)
+    // Fallback dedup: keep service/normal routes isolated even when names match.
     if (!existingDealId) {
       const nameMatchResult = await client.query(
         `SELECT id FROM ${schemaName}.deals
-         WHERE source = $1 AND LOWER(TRIM(name)) = LOWER(TRIM($2))
+         WHERE source = $1
+           AND LOWER(TRIM(name)) = LOWER(TRIM($2))
+           AND workflow_route = $3
          LIMIT 1`,
-        [source, name]
+        [source, name, workflow_route]
       );
       existingDealId = nameMatchResult.rows[0]?.id ?? null;
     }
