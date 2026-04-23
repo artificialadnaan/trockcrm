@@ -5,6 +5,7 @@ import {
   getLeadBoardStageLabel,
   getLeadStageMetadata,
   getWorkflowRouteLabel,
+  LEGACY_LEAD_BOARD_STAGE_SLUGS,
   LEAD_BOARD_STAGE_SLUGS,
 } from "./pipeline-ownership";
 
@@ -28,6 +29,27 @@ describe("pipeline ownership helpers", () => {
       "Qualified Lead",
       "Sales Validation Stage",
     ]);
+  });
+
+  it("keeps legacy lead stages renderable during the pipeline migration window", () => {
+    expect(LEGACY_LEAD_BOARD_STAGE_SLUGS).toEqual([
+      "lead_new",
+      "company_pre_qualified",
+      "scoping_in_progress",
+      "pre_qual_value_assigned",
+      "lead_go_no_go",
+      "qualified_for_opportunity",
+    ]);
+    expect(getLeadBoardStageLabel("lead_go_no_go")).toBe("Sales Validation Stage");
+
+    const metadata = getLeadStageMetadata("legacy-validation", [
+      ...stages,
+      { id: "legacy-validation", name: "Lead Go/No-Go", slug: "lead_go_no_go" },
+    ]);
+
+    expect(metadata.isBoardStage).toBe(true);
+    expect(metadata.isCrmOwnedLeadStage).toBe(false);
+    expect(metadata.label).toBe("Sales Validation Stage");
   });
 
   it("keeps opportunity out of the lead board while recognizing it as CRM-owned", () => {

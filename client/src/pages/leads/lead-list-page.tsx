@@ -13,7 +13,10 @@ import {
 } from "@/components/ui/dialog";
 import { PipelineBoard } from "@/components/pipeline/pipeline-board";
 import { transitionLeadStage, useLeadBoard } from "@/hooks/use-leads";
-import { LEAD_BOARD_STAGE_SLUGS } from "@/lib/pipeline-ownership";
+import {
+  ALL_LEAD_BOARD_STAGE_SLUGS,
+  type AnyLeadBoardStageSlug,
+} from "@/lib/pipeline-ownership";
 import { useNormalizedPipelineRoute } from "@/lib/pipeline-scope";
 
 export function buildLeadIntakePath(leadId: string, focus: "qualification" | "scoping" = "qualification") {
@@ -49,6 +52,14 @@ function buildLeadBoardSummary(
     cards: Array<{ stageEnteredAt: string }>;
   }>
 ) {
+  const qualifiedPressureSlugs = new Set([
+    "pre_qual_value_assigned",
+    "lead_go_no_go",
+    "qualified_lead",
+    "qualified_for_opportunity",
+    "sales_validation_stage",
+  ]);
+  const opportunityReadySlugs = new Set(["qualified_for_opportunity", "sales_validation_stage"]);
   const enteredAt = columns.flatMap((column) => column.cards.map((card) => card.stageEnteredAt));
   const now = Date.now();
   const averageAgeDays =
@@ -66,10 +77,10 @@ function buildLeadBoardSummary(
     liveStageCount: columns.filter((column) => column.count > 0).length,
     averageAgeDays,
     qualifiedPressureCount: columns
-      .filter((column) => ["qualified_lead", "sales_validation_stage"].includes(column.stage.slug))
+      .filter((column) => qualifiedPressureSlugs.has(column.stage.slug))
       .reduce((sum, column) => sum + column.count, 0),
     opportunityCount: columns
-      .filter((column) => column.stage.slug === "sales_validation_stage")
+      .filter((column) => opportunityReadySlugs.has(column.stage.slug))
       .reduce((sum, column) => sum + column.count, 0),
   };
 }
@@ -101,7 +112,9 @@ export function LeadListPage() {
   const filteredColumns = useMemo(
     () =>
       (board?.columns ?? [])
-        .filter((column) => LEAD_BOARD_STAGE_SLUGS.includes(column.stage.slug as (typeof LEAD_BOARD_STAGE_SLUGS)[number]))
+        .filter((column) =>
+          ALL_LEAD_BOARD_STAGE_SLUGS.includes(column.stage.slug as AnyLeadBoardStageSlug)
+        )
         .filter((column) => matchesLeadBucket(bucket, column.stage.slug)),
     [board?.columns, bucket]
   );

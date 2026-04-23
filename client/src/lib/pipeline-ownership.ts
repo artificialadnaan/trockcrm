@@ -4,7 +4,18 @@ import {
   CRM_OWNED_LEAD_STAGE_SLUGS,
 } from "./sales-workflow";
 
+export const LEGACY_LEAD_BOARD_STAGE_SLUGS = [
+  "lead_new",
+  "company_pre_qualified",
+  "scoping_in_progress",
+  "pre_qual_value_assigned",
+  "lead_go_no_go",
+  "qualified_for_opportunity",
+] as const;
+
 export type LeadBoardStageSlug = Exclude<(typeof CRM_OWNED_LEAD_STAGE_SLUGS)[number], "opportunity">;
+export type LegacyLeadBoardStageSlug = (typeof LEGACY_LEAD_BOARD_STAGE_SLUGS)[number];
+export type AnyLeadBoardStageSlug = LeadBoardStageSlug | LegacyLeadBoardStageSlug;
 
 export const LEAD_BOARD_STAGE_SLUGS: LeadBoardStageSlug[] = [
   "new_lead",
@@ -12,8 +23,26 @@ export const LEAD_BOARD_STAGE_SLUGS: LeadBoardStageSlug[] = [
   "sales_validation_stage",
 ];
 
-export function getLeadBoardStageLabel(slug: LeadBoardStageSlug) {
-  return CRM_OWNED_LEAD_STAGE_LABELS[slug];
+export const ALL_LEAD_BOARD_STAGE_SLUGS: AnyLeadBoardStageSlug[] = [
+  ...LEGACY_LEAD_BOARD_STAGE_SLUGS,
+  ...LEAD_BOARD_STAGE_SLUGS,
+];
+
+const LEGACY_LEAD_STAGE_LABELS: Record<LegacyLeadBoardStageSlug, string> = {
+  lead_new: "New Lead",
+  company_pre_qualified: "Qualified Lead",
+  scoping_in_progress: "Qualified Lead",
+  pre_qual_value_assigned: "Qualified Lead",
+  lead_go_no_go: "Sales Validation Stage",
+  qualified_for_opportunity: "Sales Validation Stage",
+};
+
+export function getLeadBoardStageLabel(slug: AnyLeadBoardStageSlug) {
+  if (slug in CRM_OWNED_LEAD_STAGE_LABELS) {
+    return CRM_OWNED_LEAD_STAGE_LABELS[slug as keyof typeof CRM_OWNED_LEAD_STAGE_LABELS];
+  }
+
+  return LEGACY_LEAD_STAGE_LABELS[slug as LegacyLeadBoardStageSlug];
 }
 
 export function getLeadStageMetadata(
@@ -25,14 +54,15 @@ export function getLeadStageMetadata(
   const isCrmOwnedLeadStage =
     slug != null &&
     CRM_OWNED_LEAD_STAGE_SLUGS.includes(slug as (typeof CRM_OWNED_LEAD_STAGE_SLUGS)[number]);
-  const isBoardStage = slug != null && LEAD_BOARD_STAGE_SLUGS.includes(slug as LeadBoardStageSlug);
+  const isBoardStage =
+    slug != null && ALL_LEAD_BOARD_STAGE_SLUGS.includes(slug as AnyLeadBoardStageSlug);
 
   return {
     stage,
     slug,
     label:
-      slug && slug in CRM_OWNED_LEAD_STAGE_LABELS
-        ? CRM_OWNED_LEAD_STAGE_LABELS[slug as keyof typeof CRM_OWNED_LEAD_STAGE_LABELS]
+      slug && ALL_LEAD_BOARD_STAGE_SLUGS.includes(slug as AnyLeadBoardStageSlug)
+        ? getLeadBoardStageLabel(slug as AnyLeadBoardStageSlug)
         : stage?.name ?? "Lead",
     isCrmOwnedLeadStage,
     isBoardStage,

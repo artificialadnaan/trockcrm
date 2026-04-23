@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
 import { LeadListPage, buildLeadIntakePath, isImmediateNextStageMove } from "./lead-list-page";
@@ -73,6 +73,8 @@ const boardColumns = [
   },
 ];
 
+const defaultBoardColumns = structuredClone(boardColumns);
+
 vi.mock("@/hooks/use-leads", () => ({
   useLeadBoard: () => ({
     board: {
@@ -100,6 +102,10 @@ function normalize(html: string) {
 }
 
 describe("LeadListPage", () => {
+  beforeEach(() => {
+    boardColumns.splice(0, boardColumns.length, ...structuredClone(defaultBoardColumns));
+  });
+
   it("builds the lead intake path for blocked moves", () => {
     expect(buildLeadIntakePath("lead-1")).toBe("/leads/lead-1?focus=qualification");
     expect(buildLeadIntakePath("lead-1", "scoping")).toBe("/leads/lead-1?focus=scoping");
@@ -145,5 +151,63 @@ describe("LeadListPage", () => {
     expect(html).toContain("Avg. stage age");
     expect(html).toContain("New Lead");
     expect(html).toContain("Sales Validation Stage");
+  });
+
+  it("renders legacy lead stages while the active pipeline config is still transitioning", () => {
+    boardColumns.splice(0, boardColumns.length, ...[
+      {
+        stage: { id: "stage-new", name: "New", slug: "lead_new" },
+        count: 1,
+        cards: [
+          {
+            id: "lead-legacy-new",
+            name: "Legacy New Lead",
+            stageId: "stage-new",
+            stageEnteredAt: "2026-04-20T10:00:00.000Z",
+            updatedAt: "2026-04-20T10:00:00.000Z",
+          },
+        ],
+      },
+      {
+        stage: { id: "stage-qualified", name: "Pre-Qual Value Assigned", slug: "pre_qual_value_assigned" },
+        count: 1,
+        cards: [
+          {
+            id: "lead-legacy-qualified",
+            name: "Legacy Qualified Lead",
+            stageId: "stage-qualified",
+            stageEnteredAt: "2026-04-20T10:00:00.000Z",
+            updatedAt: "2026-04-20T10:00:00.000Z",
+          },
+        ],
+      },
+      {
+        stage: { id: "stage-validation", name: "Qualified for Opportunity", slug: "qualified_for_opportunity" },
+        count: 1,
+        cards: [
+          {
+            id: "lead-legacy-opportunity",
+            name: "Legacy Opportunity Lead",
+            stageId: "stage-validation",
+            stageEnteredAt: "2026-04-20T10:00:00.000Z",
+            updatedAt: "2026-04-20T10:00:00.000Z",
+          },
+        ],
+      },
+    ]);
+
+    const html = normalize(
+      renderToStaticMarkup(
+        <MemoryRouter initialEntries={["/leads?scope=mine"]}>
+          <LeadListPage />
+        </MemoryRouter>
+      )
+    );
+
+    expect(html).toContain("New, Pre-Qual Value Assigned, Qualified for Opportunity");
+    expect(html).toContain("Qualified pressure");
+    expect(html).toContain(">2<");
+    expect(html).toContain("Opportunity ready");
+    expect(html).toContain(">1<");
   });
 });
