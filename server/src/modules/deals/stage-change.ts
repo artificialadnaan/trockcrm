@@ -14,6 +14,7 @@ import { validateStageGate } from "./stage-gate.js";
 import type { UserRole } from "@trock-crm/shared/types";
 import { createStageTimers } from "./timer-service.js";
 import { activateDealScopingIntake, evaluateDealScopingReadiness } from "./scoping-service.js";
+import { getEstimatingBoundaryStage, isBidBoardOwnedDownstreamStage } from "./service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -107,6 +108,18 @@ export async function changeDealStage(
 
   // Step 3: Terminal stage enforcement
   const targetStage = gateResult.targetStage;
+  const estimatingBoundary = await getEstimatingBoundaryStage(currentDeal[0].workflowRoute);
+
+  if (
+    currentDeal[0].isBidBoardOwned &&
+    isBidBoardOwnedDownstreamStage(targetStage, estimatingBoundary)
+  ) {
+    throw new AppError(
+      403,
+      "Deal stage progression is read-only in CRM after estimating handoff. Bid Board is now the source of truth for downstream stages.",
+      "BID_BOARD_OWNED_STAGE_READ_ONLY"
+    );
+  }
 
   // Closed Lost: require lost_reason_id + lost_notes
   if (targetStage.slug === "closed_lost") {
@@ -130,6 +143,12 @@ export async function changeDealStage(
     stageId: targetStageId,
     stageEnteredAt: new Date(),
   };
+
+  if (targetStage.slug === "estimating") {
+    dealUpdates.isBidBoardOwned = true;
+    dealUpdates.bidBoardStageSlug = targetStage.slug;
+    dealUpdates.readOnlySyncedAt = new Date();
+  }
 
   // Always clear ALL terminal fields before setting new ones.
   // This prevents stale data when moving between terminal stages

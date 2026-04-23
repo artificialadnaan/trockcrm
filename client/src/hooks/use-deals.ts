@@ -83,6 +83,9 @@ export interface Deal {
   procoreProjectId: number | null;
   procoreBidId: number | null;
   procoreLastSyncedAt: string | null;
+  isBidBoardOwned: boolean;
+  bidBoardStageSlug: string | null;
+  readOnlySyncedAt: string | null;
   lostReasonId: string | null;
   lostNotes: string | null;
   lostCompetitor: string | null;
@@ -104,6 +107,16 @@ export interface DealDetail extends Deal {
   proposalRevisionCount: number | null;
   proposalNotes: string | null;
   estimatingSubstage: string | null;
+  bidBoardOwnership?: {
+    isOwned: boolean;
+    sourceOfTruth: "crm" | "bid_board";
+    handoffStageSlug: string;
+    downstreamStagesReadOnly: boolean;
+    canEditInCrm: string[];
+    mirroredInCrm: string[];
+    reason: string;
+    message: string;
+  };
   stageHistory: Array<{
     id: string;
     dealId: string;
@@ -286,6 +299,16 @@ export async function preflightStageCheck(dealId: string, targetStageId: string)
     requiresOverride: boolean;
     overrideType: string | null;
     blockReason: string | null;
+    bidBoardOwnership?: {
+      isOwned: boolean;
+      sourceOfTruth: "crm" | "bid_board";
+      handoffStageSlug: string;
+      downstreamStagesReadOnly: boolean;
+      canEditInCrm: string[];
+      mirroredInCrm: string[];
+      reason: string;
+      message: string;
+    } | null;
   }>(`/deals/${dealId}/stage/preflight`, {
     method: "POST",
     json: { targetStageId },

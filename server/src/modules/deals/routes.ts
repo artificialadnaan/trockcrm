@@ -5,9 +5,12 @@ import { requireRole } from "../../middleware/rbac.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { eventBus } from "../../events/bus.js";
 import {
+  buildBidBoardOwnershipState,
   getDeals,
   getDealById,
   getDealDetail,
+  getEstimatingBoundaryStage,
+  isBidBoardOwnedDownstreamStage,
   createDeal,
   updateDeal,
   deleteDeal,
@@ -535,8 +538,24 @@ router.post("/:id/stage/preflight", async (req, res, next) => {
       req.user!.id
     );
 
+    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    const bidBoardOwnership = deal ? buildBidBoardOwnershipState(deal) : null;
+    const estimatingBoundary = deal
+      ? await getEstimatingBoundaryStage(deal.workflowRoute)
+      : null;
+    const isBidBoardLocked =
+      Boolean(deal?.isBidBoardOwned) &&
+      isBidBoardOwnedDownstreamStage(result.targetStage, estimatingBoundary);
+
     await req.commitTransaction!();
-    res.json(result);
+    res.json({
+      ...result,
+      allowed: isBidBoardLocked ? false : result.allowed,
+      blockReason: isBidBoardLocked
+        ? "Deal stage progression is read-only in CRM after estimating handoff. Bid Board is now the source of truth for downstream stages."
+        : result.blockReason,
+      bidBoardOwnership,
+    });
   } catch (err) {
     next(err);
   }

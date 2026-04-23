@@ -109,6 +109,8 @@ export function StageChangeDialog({
   };
 
   const isBlocked = preflight != null && !preflight.allowed;
+  const bidBoardOwnership = preflight?.bidBoardOwnership;
+  const isBidBoardLocked = Boolean(bidBoardOwnership?.isOwned && bidBoardOwnership.downstreamStagesReadOnly);
   const isClosedLost = preflight?.targetStage.slug === "closed_lost";
   const isClosedWon = preflight?.targetStage.slug === "closed_won";
 
@@ -166,6 +168,17 @@ export function StageChangeDialog({
                 <p className="text-sm text-red-700 font-medium">
                   {preflight.blockReason}
                 </p>
+              </div>
+            )}
+
+            {isBidBoardLocked && bidBoardOwnership && (
+              <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+                <p className="font-medium">Bid Board is the source of truth for downstream progression.</p>
+                <p className="mt-1">{bidBoardOwnership.message}</p>
+                <p className="mt-3 font-medium">Still editable in CRM</p>
+                <p className="mt-1">{bidBoardOwnership.canEditInCrm.join(", ")}</p>
+                <p className="mt-3 font-medium">Mirrored from Bid Board</p>
+                <p className="mt-1">{bidBoardOwnership.mirroredInCrm.join(", ")}</p>
               </div>
             )}
 

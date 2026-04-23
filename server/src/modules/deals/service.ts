@@ -17,7 +17,7 @@ import type { WorkflowRoute } from "@trock-crm/shared/types";
 import type * as schema from "@trock-crm/shared/schema";
 import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
-import { getStageById } from "../pipeline/service.js";
+import { getStageById, getStageBySlug } from "../pipeline/service.js";
 import { evaluatePostConversionEnrichment } from "./post-conversion-enrichment.js";
 
 // Type alias for the tenant-scoped Drizzle instance
@@ -91,6 +91,30 @@ export interface UpdateDealInput {
   estimatingSubstage?: string | null;
 }
 
+export const BID_BOARD_BOUNDARY_STAGE_SLUG = "estimating";
+export const BID_BOARD_CRM_EDITABLE_FIELDS = [
+  "deal details",
+  "files",
+  "activity",
+  "notes",
+] as const;
+export const BID_BOARD_MIRRORED_FIELDS = [
+  "stage progression",
+  "proposal status",
+  "estimating progress",
+] as const;
+
+export interface DealBidBoardOwnershipState {
+  isOwned: boolean;
+  sourceOfTruth: "crm" | "bid_board";
+  handoffStageSlug: typeof BID_BOARD_BOUNDARY_STAGE_SLUG;
+  downstreamStagesReadOnly: boolean;
+  canEditInCrm: readonly string[];
+  mirroredInCrm: readonly string[];
+  reason: string;
+  message: string;
+}
+
 /**
  * Generate a sequential deal number: TR-{YYYY}-{NNNN}
  * Uses SELECT ... FOR UPDATE to lock the highest deal number row during the
@@ -143,6 +167,45 @@ async function validateAssignee(tenantDb: TenantDb, assigneeId: string, officeId
 
 function workflowFamilyForRoute(workflowRoute: WorkflowRoute) {
   return workflowRoute === "service" ? "service_deal" : "standard_deal";
+}
+
+export function buildBidBoardOwnershipState(
+  deal: Pick<typeof deals.$inferSelect, "isBidBoardOwned">
+): DealBidBoardOwnershipState {
+  const isOwned = deal.isBidBoardOwned;
+
+  return {
+    isOwned,
+    sourceOfTruth: isOwned ? "bid_board" : "crm",
+    handoffStageSlug: BID_BOARD_BOUNDARY_STAGE_SLUG,
+    downstreamStagesReadOnly: isOwned,
+    canEditInCrm: BID_BOARD_CRM_EDITABLE_FIELDS,
+    mirroredInCrm: BID_BOARD_MIRRORED_FIELDS,
+    reason: isOwned
+      ? "Bid Board now owns downstream progression after the deal entered estimating."
+      : "CRM still owns manual stage progression before estimating handoff.",
+    message: isOwned
+      ? "Bid Board is now the source of truth once this deal entered estimating."
+      : "CRM remains the source of truth until the deal is handed off into estimating.",
+  };
+}
+
+export async function getEstimatingBoundaryStage(workflowRoute: WorkflowRoute) {
+  return getStageBySlug(BID_BOARD_BOUNDARY_STAGE_SLUG, workflowFamilyForRoute(workflowRoute));
+}
+
+export function isBidBoardOwnedDownstreamStage(
+  targetStage: { slug: string; displayOrder: number; isTerminal: boolean },
+  estimatingBoundary: { displayOrder: number } | null
+) {
+  if (!estimatingBoundary) {
+    return targetStage.slug !== BID_BOARD_BOUNDARY_STAGE_SLUG && targetStage.isTerminal;
+  }
+
+  return (
+    targetStage.slug !== BID_BOARD_BOUNDARY_STAGE_SLUG &&
+    targetStage.displayOrder > estimatingBoundary.displayOrder
+  );
 }
 
 async function validateDealPrimaryContact(
@@ -386,6 +449,7 @@ export async function getDealDetail(tenantDb: TenantDb, dealId: string, userRole
   return {
     ...deal,
     postConversionEnrichment: evaluatePostConversionEnrichment(deal as any, currentStage ?? { isTerminal: true }),
+    bidBoardOwnership: buildBidBoardOwnershipState(deal),
     stageHistory,
     approvals,
     changeOrders: cos,
@@ -621,6 +685,24 @@ export async function updateDeal(
       (updates.companyId ?? existing.companyId ?? null) as string | null,
       (updates.primaryContactId ?? existing.primaryContactId ?? null) as string | null
     );
+  }
+
+  if (existing.isBidBoardOwned) {
+    if (input.estimatingSubstage !== undefined) {
+      throw new AppError(
+        403,
+        "Estimating progress is mirrored from Bid Board after estimating handoff.",
+        "BID_BOARD_OWNED_FIELD_READ_ONLY"
+      );
+    }
+
+    if (input.proposalStatus !== undefined) {
+      throw new AppError(
+        403,
+        "Proposal status is mirrored from Bid Board after estimating handoff.",
+        "BID_BOARD_OWNED_FIELD_READ_ONLY"
+      );
+    }
   }
 
   // Validate and set estimating substage

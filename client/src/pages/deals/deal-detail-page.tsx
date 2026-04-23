@@ -6,6 +6,7 @@ import {
   Trash2,
   ChevronRight,
   MoreHorizontal,
+  Lock,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -57,6 +58,8 @@ export function DealDetailPage() {
   const [teamCount, setTeamCount] = useState<number | null>(null);
   const currentStage = stages.find((s) => s.id === deal?.stageId);
   const isDirectorOrAdmin = user?.role === "director" || user?.role === "admin";
+  const bidBoardOwnership = deal?.bidBoardOwnership;
+  const isBidBoardOwned = Boolean(deal?.isBidBoardOwned || bidBoardOwnership?.isOwned);
 
   // Build stage advancement options
   const forwardStages = stages.filter(
@@ -201,7 +204,7 @@ export function DealDetailPage() {
 
         <div className="flex items-center gap-2">
           {/* Stage Advancement Dropdown */}
-          {!currentStage?.isTerminal && (
+          {!currentStage?.isTerminal && !isBidBoardOwned && (
             <DropdownMenu>
               <DropdownMenuTrigger
                 render={<Button>
@@ -244,7 +247,7 @@ export function DealDetailPage() {
           )}
 
           {/* Reopen button for terminal stages (directors only) */}
-          {currentStage?.isTerminal && isDirectorOrAdmin && (
+          {currentStage?.isTerminal && isDirectorOrAdmin && !isBidBoardOwned && (
             <DropdownMenu>
               <DropdownMenuTrigger
                 render={<Button variant="outline">Reopen Deal</Button>}
@@ -296,8 +299,12 @@ export function DealDetailPage() {
       {/* Active Timers Banner */}
       <DealTimersBanner dealId={deal.id} />
 
+      {isBidBoardOwned && bidBoardOwnership && (
+        <BidBoardOwnershipBanner ownership={bidBoardOwnership} />
+      )}
+
       {/* Estimating Sub-Stage Indicator */}
-      {currentStageSlug === "estimating" && (
+      {currentStageSlug === "estimating" && !isBidBoardOwned && (
         <DealEstimatingSubstage deal={deal} onUpdate={refetch} />
       )}
 
@@ -323,8 +330,11 @@ export function DealDetailPage() {
       {/* Tab Content */}
       {activeTab === "overview" && (
         <div className="space-y-4">
-          {(currentStageSlug === "estimating" || currentStageSlug === "bid_sent") && (
+          {(currentStageSlug === "estimating" || currentStageSlug === "bid_sent") && !isBidBoardOwned && (
             <DealProposalCard deal={deal} onUpdate={refetch} />
+          )}
+          {isBidBoardOwned && bidBoardOwnership && (
+            <BidBoardReadOnlySummary ownership={bidBoardOwnership} />
           )}
           <DealOverviewTab deal={deal} />
         </div>
@@ -368,6 +378,62 @@ export function DealDetailPage() {
         />
       )}
     </div>
+  );
+}
+
+function BidBoardOwnershipBanner({
+  ownership,
+}: {
+  ownership: NonNullable<DealDetail["bidBoardOwnership"]>;
+}) {
+  return (
+    <section className="rounded-xl border border-amber-300 bg-amber-50 p-4 text-amber-950">
+      <div className="flex items-start gap-3">
+        <div className="rounded-full bg-amber-200 p-2">
+          <Lock className="h-4 w-4" />
+        </div>
+        <div className="space-y-3">
+          <div>
+            <h3 className="text-sm font-semibold">Bid Board now owns downstream progression</h3>
+            <p className="mt-1 text-sm">{ownership.message}</p>
+          </div>
+
+          <div className="grid gap-3 md:grid-cols-2">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-wide text-amber-800">
+                Still editable in CRM
+              </p>
+              <p className="mt-1 text-sm">{ownership.canEditInCrm.join(", ")}</p>
+            </div>
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-wide text-amber-800">
+                Mirrored from Bid Board
+              </p>
+              <p className="mt-1 text-sm">{ownership.mirroredInCrm.join(", ")}</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function BidBoardReadOnlySummary({
+  ownership,
+}: {
+  ownership: NonNullable<DealDetail["bidBoardOwnership"]>;
+}) {
+  return (
+    <section className="rounded-lg border border-dashed border-slate-300 bg-slate-50 p-4 text-sm text-slate-700">
+      <p className="font-medium text-slate-900">Downstream stage controls are read-only in CRM.</p>
+      <p className="mt-1">
+        Bid Board owns stage progression, proposal status, and estimating progress after the
+        estimating handoff.
+      </p>
+      <p className="mt-2">
+        Keep using CRM for {ownership.canEditInCrm.join(", ")}.
+      </p>
+    </section>
   );
 }
 
