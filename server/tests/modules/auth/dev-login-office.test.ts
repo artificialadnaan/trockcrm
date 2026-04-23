@@ -1,4 +1,12 @@
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const authServiceSource = readFileSync(
+  resolve(dirname(fileURLToPath(import.meta.url)), "../../../src/modules/auth/service.ts"),
+  "utf8"
+);
 
 const state = vi.hoisted(() => ({
   users: [
@@ -129,5 +137,13 @@ describe("ensureDevUserPrimaryOffice", () => {
     const updated = await ensureDevUserPrimaryOffice("user-2", "dallas");
 
     expect(updated?.officeId).toBe("office-atlanta");
+  });
+
+  it("seeds demo deals with valid workflow routes", () => {
+    expect(authServiceSource).toContain("'normal'");
+    expect(authServiceSource).not.toContain("'estimating', $12");
+    expect(authServiceSource).not.toContain("'estimating', $18");
+    expect(authServiceSource).not.toContain("'estimating', $25");
+    expect(authServiceSource).not.toContain("'estimating', $32");
   });
 });

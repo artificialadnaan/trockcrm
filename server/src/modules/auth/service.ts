@@ -397,10 +397,10 @@ export async function ensureDevDemoWorkspace(
           source, workflow_route, last_activity_at, stage_entered_at, is_active, expected_close_date, actual_close_date, lost_at, lost_notes
         )
         VALUES
-          ($1, 'TR-DEMO-001', 'Birchstone North Tower Reroof', $2, $3, $4, $5, $6, NULL, 180000, 245000, NULL, $7, $8, $9, $10, $11, 'Referral', 'estimating', $12, $13, true, $14, NULL, NULL, NULL),
-          ($15, 'TR-DEMO-002', 'Birchstone Parking Garage Waterproofing', $16, $3, $4, $5, $6, NULL, 92000, 128000, NULL, $17, $8, $9, $10, $11, 'Trade Show', 'estimating', $18, $19, true, $20, NULL, NULL, NULL),
-          ($21, 'TR-DEMO-003', 'Birchstone Interior Water Damage Repair', $22, $3, $4, $5, $6, $23, 65000, 84000, 91000, $24, $8, $9, $10, $11, 'Referral', 'estimating', $25, $26, true, $27, $28, NULL, NULL),
-          ($29, 'TR-DEMO-004', 'Birchstone East Annex Coating Bid', $30, $3, $4, $5, $6, NULL, 74000, 99000, NULL, $31, $8, $9, $10, $11, 'Outbound', 'estimating', $32, $33, false, $34, NULL, $35, 'Lost to incumbent vendor on price.')
+          ($1, 'TR-DEMO-001', 'Birchstone North Tower Reroof', $2, $3, $4, $5, $6, NULL, 180000, 245000, NULL, $7, $8, $9, $10, $11, 'Referral', 'normal', $12, $13, true, $14, NULL, NULL, NULL),
+          ($15, 'TR-DEMO-002', 'Birchstone Parking Garage Waterproofing', $16, $3, $4, $5, $6, NULL, 92000, 128000, NULL, $17, $8, $9, $10, $11, 'Trade Show', 'normal', $18, $19, true, $20, NULL, NULL, NULL),
+          ($21, 'TR-DEMO-003', 'Birchstone Interior Water Damage Repair', $22, $3, $4, $5, $6, $23, 65000, 84000, 91000, $24, $8, $9, $10, $11, 'Referral', 'normal', $25, $26, true, $27, $28, NULL, NULL),
+          ($29, 'TR-DEMO-004', 'Birchstone East Annex Coating Bid', $30, $3, $4, $5, $6, NULL, 74000, 99000, NULL, $31, $8, $9, $10, $11, 'Outbound', 'normal', $32, $33, false, $34, NULL, $35, 'Lost to incumbent vendor on price.')
         ON CONFLICT (id) DO UPDATE
         SET name = EXCLUDED.name,
             stage_id = EXCLUDED.stage_id,
