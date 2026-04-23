@@ -167,6 +167,26 @@ export async function changeDealStage(
     stageId: targetStageId,
     stageEnteredAt: new Date(),
   };
+  const shouldResetBidBoardOwnership =
+    inferredOwnership.isBidBoardOwned &&
+    Boolean(estimatingBoundary) &&
+    targetStage.displayOrder < (estimatingBoundary?.displayOrder ?? Number.NEGATIVE_INFINITY);
+
+  if (shouldResetBidBoardOwnership) {
+    dealUpdates.isBidBoardOwned = false;
+    dealUpdates.bidBoardStageSlug = null;
+    dealUpdates.bidBoardStageFamily = null;
+    dealUpdates.bidBoardStageStatus = null;
+    dealUpdates.bidBoardStageEnteredAt = null;
+    dealUpdates.bidBoardStageExitedAt = null;
+    dealUpdates.bidBoardStageDuration = null;
+    dealUpdates.bidBoardLossOutcome = null;
+    dealUpdates.bidBoardMirrorSourceEnteredAt = null;
+    dealUpdates.bidBoardMirrorSourceExitedAt = null;
+    dealUpdates.isReadOnlyMirror = false;
+    dealUpdates.isReadOnlySyncDirty = false;
+    dealUpdates.readOnlySyncedAt = null;
+  }
 
   if (targetStage.slug === "estimating") {
     dealUpdates.isBidBoardOwned = true;

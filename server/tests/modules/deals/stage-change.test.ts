@@ -31,6 +31,7 @@ const scopingService = await import("../../../src/modules/deals/scoping-service.
 const { createStageTimers } = await import("../../../src/modules/deals/timer-service.js");
 const { changeDealStage } = await import("../../../src/modules/deals/stage-change.js");
 const pipelineService = await import("../../../src/modules/pipeline/service.js");
+const { inferDealBidBoardOwnership } = await import("../../../src/modules/deals/workflow-backfill.js");
 
 type FakeDeal = {
   id: string;
@@ -356,6 +357,69 @@ describe("changeDealStage", () => {
 
     expect(tenantDb.state.deals[0]?.stageId).toBe("stage-bid-sent");
     expect(tenantDb.state.stageHistory).toHaveLength(0);
+  });
+
+  it("clears bid board ownership markers when a legitimate reopen moves back into crm-owned opportunity", async () => {
+    const tenantDb = createTenantDb({
+      stageId: "stage-closed-won",
+      isBidBoardOwned: true,
+      bidBoardStageSlug: "closed_won",
+      readOnlySyncedAt: new Date("2026-04-21T12:00:00.000Z"),
+      actualCloseDate: "2026-04-21",
+    });
+
+    vi.mocked(validateStageGate).mockResolvedValue({
+      allowed: true,
+      isBackwardMove: true,
+      requiresOverride: false,
+      targetStage: {
+        id: "stage-opportunity",
+        name: "Opportunity",
+        slug: "opportunity",
+        isTerminal: false,
+        displayOrder: 0,
+      },
+      currentStage: {
+        id: "stage-closed-won",
+        name: "Closed Won",
+        slug: "closed_won",
+        isTerminal: true,
+        displayOrder: 10,
+      },
+    } as never);
+
+    const result = await changeDealStage(tenantDb as never, {
+      dealId: "deal-1",
+      targetStageId: "stage-opportunity",
+      userId: "user-1",
+      userRole: "director",
+    });
+
+    expect(result.deal.stageId).toBe("stage-opportunity");
+    expect(result.deal.isBidBoardOwned).toBe(false);
+    expect(result.deal.bidBoardStageSlug).toBeNull();
+    expect(result.deal.readOnlySyncedAt).toBeNull();
+    expect(result.deal.actualCloseDate).toBeNull();
+
+    expect(
+      inferDealBidBoardOwnership({
+        id: result.deal.id,
+        stageSlug: "opportunity",
+        stageEnteredAt: result.deal.stageEnteredAt,
+        workflowRoute: result.deal.workflowRoute,
+        awardedAmount: result.deal.awardedAmount,
+        sourceLeadId: (result.deal as { sourceLeadId?: string | null }).sourceLeadId ?? null,
+        isBidBoardOwned: result.deal.isBidBoardOwned,
+        bidBoardStageSlug: result.deal.bidBoardStageSlug,
+        bidBoardStageEnteredAt: (result.deal as { bidBoardStageEnteredAt?: Date | null })
+          .bidBoardStageEnteredAt ?? null,
+        bidBoardMirrorSourceEnteredAt:
+          (result.deal as { bidBoardMirrorSourceEnteredAt?: Date | null })
+            .bidBoardMirrorSourceEnteredAt ?? null,
+        isReadOnlyMirror: (result.deal as { isReadOnlyMirror?: boolean }).isReadOnlyMirror ?? false,
+        readOnlySyncedAt: result.deal.readOnlySyncedAt,
+      }).ownershipModel
+    ).toBe("crm");
   });
 
   it("fails closed when the estimating boundary stage config is missing for an owned deal", async () => {
