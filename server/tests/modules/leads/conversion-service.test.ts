@@ -226,7 +226,7 @@ describe("Sales workflow shared contract", () => {
 
   it("backfills the missing bid board stage family deal column", () => {
     expect(bidBoardStageFamilyMigrationSql).toContain(
-      "ALTER TABLE public.deals"
+      "FROM information_schema.tables"
     );
     expect(bidBoardStageFamilyMigrationSql).toContain(
       "ADD COLUMN IF NOT EXISTS bid_board_stage_family varchar(50)"
