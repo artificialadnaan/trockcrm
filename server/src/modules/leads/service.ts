@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, ilike, inArray, or } from "drizzle-orm";
+import { and, asc, desc, eq, ilike, inArray, or, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
   CANONICAL_LEAD_STAGE_SLUGS,
@@ -7,6 +7,7 @@ import {
   deals,
   leadStageHistory,
   leads,
+  pipelineStageConfig,
   projectTypeConfig,
   properties,
   userOfficeAccess,
@@ -14,9 +15,11 @@ import {
 } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { toCanonicalLeadStageSlug, type WorkflowFamily } from "@trock-crm/shared/types";
+import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
-import { getActiveProjectTypes, getStageById } from "../pipeline/service.js";
+import { getActiveProjectTypes, getAllStages, getStageById } from "../pipeline/service.js";
 import { assertLeadStageTransitionAllowed } from "./stage-transition-service.js";
+import { preflightLeadStageCheck } from "./stage-gate.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -65,6 +68,13 @@ export interface UpdateLeadInput {
 }
 
 interface LeadServiceDependencies {
+  getAllStages: (workflowFamily?: WorkflowFamily) => Promise<Array<{
+    id: string;
+    slug: string;
+    displayOrder: number;
+    isTerminal: boolean;
+    isActivePipeline?: boolean;
+  }>>;
   getStageById: (id: string, workflowFamily?: WorkflowFamily) => Promise<{
     id: string;
     name?: string;
@@ -77,6 +87,7 @@ interface LeadServiceDependencies {
 }
 
 const defaultDependencies: LeadServiceDependencies = {
+  getAllStages,
   getStageById,
   getActiveProjectTypes,
   now: () => new Date(),
@@ -85,6 +96,101 @@ const defaultDependencies: LeadServiceDependencies = {
 const CANONICAL_LEAD_STAGE_INDEX = new Map(
   CANONICAL_LEAD_STAGE_SLUGS.map((stageSlug, index) => [stageSlug, index] as const)
 );
+
+interface TransitionLeadStageInput {
+  leadId: string;
+  targetStageId: string;
+  userId: string;
+  userRole: string;
+  officeId?: string;
+  inlinePatch?: Partial<UpdateLeadInput>;
+}
+
+type TransitionBlockedResult = {
+  ok: false;
+  reason: "missing_requirements";
+  targetStageId: string;
+  resolution: "inline" | "detail";
+  missing: Array<{
+    key: string;
+    label: string;
+    resolution: "inline" | "detail";
+  }>;
+};
+
+type TransitionSuccessResult = {
+  ok: true;
+  lead: Record<string, unknown>;
+};
+
+type WorkspaceScope = "mine" | "team" | "all";
+
+export interface LeadBoardInput {
+  role: string;
+  userId: string;
+  activeOfficeId: string;
+  scope: WorkspaceScope;
+  previewLimit?: number;
+}
+
+export interface LeadStagePageInput extends LeadBoardInput {
+  stageId: string;
+  page: number;
+  pageSize: number;
+  search?: string;
+  sort?: string;
+  assignedRepId?: string;
+  staleOnly?: boolean;
+  status?: string;
+  workflowRoute?: string;
+  source?: string;
+}
+
+type LeadStageRow = {
+  id: string;
+  name: string;
+  stage_id: string;
+  stage_slug: string | null;
+  assigned_rep_id: string;
+  office_id: string;
+  company_name: string | null;
+  property_city: string | null;
+  property_state: string | null;
+  source: string | null;
+  status: string;
+  last_activity_at: string | null;
+  stage_entered_at: string;
+  updated_at: string;
+};
+
+const NEW_LEAD_BOARD_STAGE_SLUGS = [
+  "contacted",
+  "lead_new",
+  "company_pre_qualified",
+  "scoping_in_progress",
+  "new_lead",
+] as const;
+
+const QUALIFIED_LEAD_BOARD_STAGE_SLUGS = [
+  "qualified_lead",
+  "pre_qual_value_assigned",
+  "director_go_no_go",
+] as const;
+
+const SALES_VALIDATION_BOARD_STAGE_SLUGS = [
+  "lead_go_no_go",
+  "qualified_for_opportunity",
+  "ready_for_opportunity",
+  "sales_validation_stage",
+] as const;
+
+const CANONICAL_LEAD_BOARD_STAGE_SLUGS = [
+  "new_lead",
+  "qualified_lead",
+  "sales_validation_stage",
+] as const;
+
+type CanonicalLeadBoardStageSlug = (typeof CANONICAL_LEAD_BOARD_STAGE_SLUGS)[number];
 
 async function resolveProjectType(
   projectTypeId: string | null | undefined,
@@ -338,6 +444,262 @@ async function validatePrimaryContact(
   if (contact.companyId !== companyId) {
     throw new AppError(400, "Primary contact does not belong to the company");
   }
+}
+
+async function listLeadStages() {
+  return db
+    .select()
+    .from(pipelineStageConfig)
+    .where(
+      and(
+        eq(pipelineStageConfig.workflowFamily, "lead"),
+        eq(pipelineStageConfig.isActivePipeline, true),
+        inArray(pipelineStageConfig.slug, [...CANONICAL_LEAD_BOARD_STAGE_SLUGS])
+      )
+    )
+    .orderBy(asc(pipelineStageConfig.displayOrder));
+}
+
+async function getDefaultConversionDealStageId() {
+  const [stage] = await db
+    .select({ id: pipelineStageConfig.id })
+    .from(pipelineStageConfig)
+    .where(
+      and(
+        eq(pipelineStageConfig.workflowFamily, "standard_deal"),
+        eq(pipelineStageConfig.isActivePipeline, true)
+      )
+    )
+    .orderBy(asc(pipelineStageConfig.displayOrder))
+    .limit(1);
+
+  return stage?.id ?? null;
+}
+
+function buildLeadWorkspaceScope(input: LeadBoardInput | LeadStagePageInput) {
+  const filters = [
+    sql`l.is_active = true`,
+    sql`u.office_id = ${input.activeOfficeId}`,
+  ];
+
+  if (input.role === "rep" || input.scope === "mine") {
+    filters.push(sql`l.assigned_rep_id = ${input.userId}`);
+  }
+
+  if ("assignedRepId" in input && input.assignedRepId) {
+    filters.push(sql`l.assigned_rep_id = ${input.assignedRepId}`);
+  }
+
+  if ("status" in input && input.status) {
+    filters.push(sql`l.status = ${input.status}`);
+  } else {
+    filters.push(sql`l.status = 'open'`);
+  }
+
+  if ("source" in input && input.source) {
+    filters.push(sql`l.source = ${input.source}`);
+  }
+
+  if ("search" in input && input.search && input.search.trim().length >= 2) {
+    const term = `%${input.search.trim()}%`;
+    filters.push(sql`(l.name ilike ${term} or c.name ilike ${term} or p.city ilike ${term} or p.state ilike ${term})`);
+  }
+
+  if ("staleOnly" in input && input.staleOnly) {
+    filters.push(sql`l.last_activity_at is null or l.last_activity_at < now() - interval '14 days'`);
+  }
+
+  return sql.join(filters, sql` and `);
+}
+
+function normalizeLeadStageSort(sort?: string) {
+  switch (sort) {
+    case "name_asc":
+      return sql`l.name asc, l.updated_at desc`;
+    case "age_desc":
+      return sql`l.stage_entered_at asc, l.updated_at desc`;
+    default:
+      return sql`l.updated_at desc, l.name asc`;
+  }
+}
+
+function mapLeadStageRow(row: LeadStageRow) {
+  return {
+    id: row.id,
+    name: row.name,
+    stageId: row.stage_id,
+    assignedRepId: row.assigned_rep_id,
+    officeId: row.office_id,
+    companyName: row.company_name,
+    propertyCity: row.property_city,
+    propertyState: row.property_state,
+    source: row.source,
+    status: row.status,
+    lastActivityAt: row.last_activity_at,
+    stageEnteredAt: row.stage_entered_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function resolveCanonicalLeadBoardStageSlug(
+  stageSlug: string | null | undefined
+): CanonicalLeadBoardStageSlug | null {
+  if (!stageSlug) {
+    return null;
+  }
+
+  if (NEW_LEAD_BOARD_STAGE_SLUGS.includes(stageSlug as (typeof NEW_LEAD_BOARD_STAGE_SLUGS)[number])) {
+    return "new_lead";
+  }
+
+  if (QUALIFIED_LEAD_BOARD_STAGE_SLUGS.includes(stageSlug as (typeof QUALIFIED_LEAD_BOARD_STAGE_SLUGS)[number])) {
+    return "qualified_lead";
+  }
+
+  if (
+    SALES_VALIDATION_BOARD_STAGE_SLUGS.includes(
+      stageSlug as (typeof SALES_VALIDATION_BOARD_STAGE_SLUGS)[number]
+    )
+  ) {
+    return "sales_validation_stage";
+  }
+
+  return null;
+}
+
+function listCanonicalBucketStageSlugs(canonicalStageSlug: string): readonly string[] {
+  switch (canonicalStageSlug) {
+    case "new_lead":
+      return NEW_LEAD_BOARD_STAGE_SLUGS;
+    case "qualified_lead":
+      return QUALIFIED_LEAD_BOARD_STAGE_SLUGS;
+    case "sales_validation_stage":
+      return SALES_VALIDATION_BOARD_STAGE_SLUGS;
+    default:
+      return [canonicalStageSlug];
+  }
+}
+
+function groupLeadBoardColumns(
+  stages: Awaited<ReturnType<typeof listLeadStages>>,
+  rows: LeadStageRow[]
+) {
+  return stages.map((stage) => {
+    const cards = rows
+      .filter((row) => resolveCanonicalLeadBoardStageSlug(row.stage_slug) === stage.slug)
+      .map(mapLeadStageRow);
+
+    return {
+      stage,
+      count: cards.length,
+      cards,
+    };
+  });
+}
+
+async function listLeadBoardWorkspace(tenantDb: TenantDb, input: LeadBoardInput) {
+  const previewLimit = Math.max(1, Math.min(12, input.previewLimit ?? 8));
+  const [stages, defaultConversionDealStageId, rowResult] = await Promise.all([
+    listLeadStages(),
+    getDefaultConversionDealStageId(),
+    tenantDb.execute(sql`
+      select
+        l.id,
+        l.name,
+        l.stage_id,
+        psc.slug as stage_slug,
+        l.assigned_rep_id,
+        u.office_id,
+        c.name as company_name,
+        p.city as property_city,
+        p.state as property_state,
+        l.source,
+        l.status,
+        l.last_activity_at,
+        l.stage_entered_at,
+        l.updated_at
+      from leads l
+      join users u on u.id = l.assigned_rep_id
+      join public.pipeline_stage_config psc on psc.id = l.stage_id
+      left join companies c on c.id = l.company_id
+      left join properties p on p.id = l.property_id
+      where ${buildLeadWorkspaceScope(input)}
+      order by l.stage_entered_at asc, l.updated_at desc
+    `),
+  ]);
+
+  return {
+    columns: groupLeadBoardColumns(stages, rowResult.rows as LeadStageRow[]).map((column) => ({
+      ...column,
+      cards: column.cards.slice(0, previewLimit),
+    })),
+    defaultConversionDealStageId,
+  };
+}
+
+async function listLeadStageWorkspacePage(tenantDb: TenantDb, input: LeadStagePageInput) {
+  const [stage] = await listLeadStages().then((stages) => stages.filter((item) => item.id === input.stageId));
+  if (!stage) {
+    throw new AppError(404, "Lead stage not found");
+  }
+  const bucketStageSlugs = listCanonicalBucketStageSlugs(stage.slug);
+
+  const page = Math.max(1, input.page || 1);
+  const pageSize = Math.max(1, Math.min(100, input.pageSize || 25));
+  const offset = (page - 1) * pageSize;
+  const scope = buildLeadWorkspaceScope(input);
+  const countResult = await tenantDb.execute(sql`
+    select count(*)::int as total
+    from leads l
+    join users u on u.id = l.assigned_rep_id
+    join public.pipeline_stage_config psc on psc.id = l.stage_id
+    left join companies c on c.id = l.company_id
+    left join properties p on p.id = l.property_id
+    where ${scope} and psc.slug in ${bucketStageSlugs}
+  `);
+  const rowResult = await tenantDb.execute(sql`
+    select
+      l.id,
+      l.name,
+      l.stage_id,
+      psc.slug as stage_slug,
+      l.assigned_rep_id,
+      u.office_id,
+      c.name as company_name,
+      p.city as property_city,
+      p.state as property_state,
+      l.source,
+      l.status,
+      l.last_activity_at,
+      l.stage_entered_at,
+      l.updated_at
+    from leads l
+    join users u on u.id = l.assigned_rep_id
+    join public.pipeline_stage_config psc on psc.id = l.stage_id
+    left join companies c on c.id = l.company_id
+    left join properties p on p.id = l.property_id
+    where ${scope} and psc.slug in ${bucketStageSlugs}
+    order by ${normalizeLeadStageSort(input.sort)}
+    limit ${pageSize}
+    offset ${offset}
+  `);
+
+  const total = Number((countResult.rows[0] as { total?: number | string } | undefined)?.total ?? 0);
+
+  return {
+    stage,
+    scope: input.scope,
+    summary: {
+      count: total,
+    },
+    pagination: {
+      page,
+      pageSize,
+      total,
+      totalPages: total === 0 ? 1 : Math.ceil(total / pageSize),
+    },
+    rows: (rowResult.rows as LeadStageRow[]).map(mapLeadStageRow),
+  };
 }
 
 export function createLeadService(
@@ -616,6 +978,49 @@ export function createLeadService(
     return lead;
   }
 
+  async function transitionLeadStage(
+    tenantDb: TenantDb,
+    input: TransitionLeadStageInput
+  ): Promise<TransitionBlockedResult | TransitionSuccessResult> {
+    const preflight = await preflightLeadStageCheck(
+      tenantDb,
+      input.leadId,
+      input.targetStageId,
+      input.userRole,
+      input.userId
+    );
+
+    if (!preflight.allowed) {
+      return {
+        ok: false,
+        reason: "missing_requirements",
+        targetStageId: input.targetStageId,
+        resolution: "detail",
+        missing: preflight.missingRequirements.effectiveChecklist.fields
+          .filter((field) => !field.satisfied)
+          .map((field) => ({
+            key: field.key,
+            label: field.label,
+            resolution: field.key.startsWith("leadScoping.") ? "detail" : "inline",
+          })),
+      };
+    }
+
+    const lead = await updateLead(
+      tenantDb,
+      input.leadId,
+      {
+        ...(input.inlinePatch ?? {}),
+        stageId: input.targetStageId,
+        officeId: input.officeId,
+      },
+      input.userRole,
+      input.userId
+    );
+
+    return { ok: true, lead };
+  }
+
   async function deleteLead(
     tenantDb: TenantDb,
     leadId: string,
@@ -639,8 +1044,11 @@ export function createLeadService(
   return {
     getLeadById,
     listLeads,
+    listLeadBoard: listLeadBoardWorkspace,
+    listLeadStagePage: listLeadStageWorkspacePage,
     createLead,
     updateLead,
+    transitionLeadStage,
     deleteLead,
   };
 }
@@ -649,6 +1057,9 @@ const liveService = createLeadService();
 
 export const getLeadById = liveService.getLeadById;
 export const listLeads = liveService.listLeads;
+export const listLeadBoard = liveService.listLeadBoard;
+export const listLeadStagePage = liveService.listLeadStagePage;
 export const createLead = liveService.createLead;
 export const updateLead = liveService.updateLead;
+export const transitionLeadStage = liveService.transitionLeadStage;
 export const deleteLead = liveService.deleteLead;

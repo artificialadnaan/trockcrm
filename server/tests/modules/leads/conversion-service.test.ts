@@ -27,12 +27,14 @@ import { createDeal, updateDeal } from "../../../src/modules/deals/service.js";
 import { createLeadService } from "../../../src/modules/leads/service.js";
 
 const pipelineMocks = vi.hoisted(() => ({
+  getAllStages: vi.fn(async () => []),
   getStageById: vi.fn(),
   getStageBySlug: vi.fn(),
   getActiveProjectTypes: vi.fn(async () => []),
 }));
 
 vi.mock("../../../src/modules/pipeline/service.js", () => ({
+  getAllStages: pipelineMocks.getAllStages,
   getStageById: pipelineMocks.getStageById,
   getStageBySlug: pipelineMocks.getStageBySlug,
   getActiveProjectTypes: pipelineMocks.getActiveProjectTypes,

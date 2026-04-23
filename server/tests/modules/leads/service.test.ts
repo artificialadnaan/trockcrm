@@ -12,11 +12,13 @@ import { createLeadService } from "../../../src/modules/leads/service.js";
 import { LeadStageTransitionError } from "../../../src/modules/leads/stage-transition-service.js";
 
 const pipelineMocks = vi.hoisted(() => ({
+  getAllStages: vi.fn(),
   getStageById: vi.fn(),
   getActiveProjectTypes: vi.fn(),
 }));
 
 vi.mock("../../../src/modules/pipeline/service.js", () => ({
+  getAllStages: pipelineMocks.getAllStages,
   getStageById: pipelineMocks.getStageById,
   getActiveProjectTypes: pipelineMocks.getActiveProjectTypes,
 }));
