@@ -52,6 +52,9 @@ export interface DealStagePageInput extends DealBoardInput {
   status?: string;
   workflowRoute?: string;
   source?: string;
+  regionId?: string;
+  updatedAfter?: string;
+  updatedBefore?: string;
 }
 
 type DealWorkspaceRow = {
@@ -324,7 +327,12 @@ async function listDealStages() {
   return db
     .select()
     .from(pipelineStageConfig)
-    .where(inArray(pipelineStageConfig.workflowFamily, ["standard_deal", "service_deal"]))
+    .where(
+      and(
+        inArray(pipelineStageConfig.workflowFamily, ["standard_deal", "service_deal"]),
+        eq(pipelineStageConfig.isActivePipeline, true)
+      )
+    )
     .orderBy(asc(pipelineStageConfig.displayOrder));
 }
 
@@ -350,6 +358,10 @@ function buildDealWorkspaceScope(input: DealBoardInput | DealStagePageInput) {
     filters.push(sql`d.workflow_route = ${input.workflowRoute}`);
   }
 
+  if ("regionId" in input && input.regionId) {
+    filters.push(sql`d.region_id = ${input.regionId}`);
+  }
+
   if ("search" in input && input.search && input.search.trim().length >= 2) {
     const term = `%${input.search.trim()}%`;
     filters.push(sql`(d.name ilike ${term} or d.deal_number ilike ${term} or d.property_city ilike ${term} or d.property_state ilike ${term})`);
@@ -357,6 +369,14 @@ function buildDealWorkspaceScope(input: DealBoardInput | DealStagePageInput) {
 
   if ("staleOnly" in input && input.staleOnly) {
     filters.push(sql`d.last_activity_at is null or d.last_activity_at < now() - interval '14 days'`);
+  }
+
+  if ("updatedAfter" in input && input.updatedAfter) {
+    filters.push(sql`d.updated_at >= ${new Date(input.updatedAfter)}`);
+  }
+
+  if ("updatedBefore" in input && input.updatedBefore) {
+    filters.push(sql`d.updated_at < ${new Date(`${input.updatedBefore}T23:59:59.999Z`)}`);
   }
 
   return sql.join(filters, sql` and `);
@@ -1199,7 +1219,12 @@ export async function getDealsForPipeline(
   const stages = await db
     .select()
     .from(pipelineStageConfig)
-    .where(inArray(pipelineStageConfig.workflowFamily, ["standard_deal", "service_deal"]))
+    .where(
+      and(
+        inArray(pipelineStageConfig.workflowFamily, ["standard_deal", "service_deal"]),
+        eq(pipelineStageConfig.isActivePipeline, true)
+      )
+    )
     .orderBy(asc(pipelineStageConfig.displayOrder));
 
   // Build deal conditions

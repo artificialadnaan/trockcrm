@@ -63,6 +63,7 @@ type LeadSummaryFormProps = {
   lead: LeadFormLead;
   converted?: boolean;
   showPrimaryAction?: boolean;
+  onSaved?: () => void;
 };
 
 type LeadCreateFormProps = {
@@ -72,6 +73,7 @@ type LeadCreateFormProps = {
 type LeadUpdateFormProps = {
   mode: "edit";
   lead: LeadFormLead;
+  onSaved?: () => void;
 };
 
 type LeadFormProps = LeadSummaryFormProps | LeadCreateFormProps | LeadUpdateFormProps;
@@ -256,7 +258,15 @@ function SummaryLeadForm({
   );
 }
 
-function EditableLeadForm({ mode, lead }: { mode: LeadEditableMode; lead?: LeadFormLead }) {
+function EditableLeadForm({
+  mode,
+  lead,
+  onSaved,
+}: {
+  mode: LeadEditableMode;
+  lead?: LeadFormLead;
+  onSaved?: () => void;
+}) {
   const navigate = useNavigate();
   const { stages } = usePipelineStages();
   const { projectTypes, hierarchy: projectTypeHierarchy } = useProjectTypes();
@@ -406,12 +416,12 @@ function EditableLeadForm({ mode, lead }: { mode: LeadEditableMode; lead?: LeadF
 
         navigate(`/leads/${result.lead.id}`);
       } else if (lead) {
-        const result = await updateLead(lead.id, {
+        await updateLead(lead.id, {
           source: formData.source.trim() || null,
           description: formData.description.trim() || null,
           ...workflowPayload,
         });
-        navigate(`/leads/${result.lead.id}`);
+        onSaved?.();
       }
     } catch (err: unknown) {
       if (isApiError(err) && err.code === "LEAD_STAGE_REQUIREMENTS_UNMET") {
@@ -769,7 +779,7 @@ export function LeadForm(props: LeadFormProps) {
   }
 
   if (props.mode === "edit") {
-    return <EditableLeadForm mode="edit" lead={props.lead} />;
+    return <EditableLeadForm mode="edit" lead={props.lead} onSaved={props.onSaved} />;
   }
 
   return <SummaryLeadForm {...props} />;

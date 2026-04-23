@@ -19,8 +19,8 @@ import {
 } from "@/lib/pipeline-ownership";
 import { useNormalizedPipelineRoute } from "@/lib/pipeline-scope";
 
-export function buildLeadIntakePath(leadId: string, focus: "qualification" | "scoping" = "qualification") {
-  return `/leads/${leadId}?focus=${focus}`;
+export function buildLeadIntakePath(leadId: string) {
+  return `/leads/${leadId}?focus=qualification`;
 }
 
 export function isImmediateNextStageMove(
@@ -95,20 +95,9 @@ export function LeadListPage() {
     leadName: string;
     targetStageName: string;
     missingLabels: string[];
-    focus: "qualification" | "scoping";
   } | null>(null);
 
   const bucket = searchParams.get("bucket");
-  const nextStageById = useMemo(
-    () =>
-      new Map(
-        (board?.columns ?? []).map((column, index, columns) => [
-          column.stage.id,
-          columns[index + 1]?.stage.id ?? null,
-        ])
-      ),
-    [board?.columns]
-  );
   const filteredColumns = useMemo(
     () =>
       (board?.columns ?? [])
@@ -117,6 +106,16 @@ export function LeadListPage() {
         )
         .filter((column) => matchesLeadBucket(bucket, column.stage.slug)),
     [board?.columns, bucket]
+  );
+  const nextStageById = useMemo(
+    () =>
+      new Map(
+        filteredColumns.map((column, index, columns) => [
+          column.stage.id,
+          columns[index + 1]?.stage.id ?? null,
+        ])
+      ),
+    [filteredColumns]
   );
   const summary = useMemo(() => buildLeadBoardSummary(filteredColumns), [filteredColumns]);
 
@@ -166,10 +165,10 @@ export function LeadListPage() {
         onOpenStage={(stageId) => navigate(`/leads/stages/${stageId}?scope=${scope}`)}
         onOpenRecord={(leadId) => navigate(`/leads/${leadId}`)}
         onMove={({ activeId, targetStageId }) => {
-          const sourceColumn = (board?.columns ?? []).find((column) =>
+          const sourceColumn = filteredColumns.find((column) =>
             column.cards.some((card) => card.id === activeId)
           );
-          const targetColumn = (board?.columns ?? []).find((column) => column.stage.id === targetStageId);
+          const targetColumn = filteredColumns.find((column) => column.stage.id === targetStageId);
           const activeLead = sourceColumn?.cards.find((card) => card.id === activeId) ?? null;
 
           if (!sourceColumn || !targetColumn || !activeLead || sourceColumn.stage.id === targetStageId) {
@@ -184,15 +183,11 @@ export function LeadListPage() {
           void transitionLeadStage(activeId, { targetStageId })
             .then(async (result) => {
               if (!result.ok) {
-                const missingKeys = result.missing.map((field) => field.key);
                 setBlockedMove({
                   leadId: activeLead.id,
                   leadName: activeLead.name,
                   targetStageName: targetColumn.stage.name,
                   missingLabels: result.missing.map((field) => field.label),
-                  focus: missingKeys.some((key) => key.startsWith("leadScoping."))
-                    ? "scoping"
-                    : "qualification",
                 });
                 return;
               }
@@ -224,7 +219,7 @@ export function LeadListPage() {
               Close
             </Button>
             {blockedMove ? (
-              <Button onClick={() => navigate(buildLeadIntakePath(blockedMove.leadId, blockedMove.focus))}>
+              <Button onClick={() => navigate(buildLeadIntakePath(blockedMove.leadId))}>
                 Open Lead Intake
                 <ArrowRight className="ml-2 h-4 w-4" />
               </Button>

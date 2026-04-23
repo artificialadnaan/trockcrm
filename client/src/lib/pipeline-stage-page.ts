@@ -6,6 +6,9 @@ export interface StagePageFilters {
   status?: string;
   workflowRoute?: string;
   source?: string;
+  regionId?: string;
+  updatedAfter?: string;
+  updatedBefore?: string;
 }
 
 export interface StagePageQuery {
@@ -40,6 +43,9 @@ export function normalizeStagePageQuery(input: Record<string, string | undefined
       status: input.status,
       workflowRoute: input.workflowRoute,
       source: input.source,
+      regionId: input.regionId,
+      updatedAfter: input.updatedAfter,
+      updatedBefore: input.updatedBefore,
     },
   };
 }

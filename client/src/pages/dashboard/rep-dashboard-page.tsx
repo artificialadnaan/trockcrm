@@ -9,11 +9,11 @@ import { formatCurrency } from "@/components/charts/chart-colors";
 import { useTasks } from "@/hooks/use-tasks";
 import { TaskSection } from "@/components/tasks/task-section";
 import { FunnelBucketRow } from "@/components/dashboard/funnel-bucket-row";
-import { MyCleanupCard } from "@/components/dashboard/my-cleanup-card";
-import { useDealBoard } from "@/hooks/use-deals";
-import { useLeadBoard } from "@/hooks/use-leads";
+import { changeDealStage, useDealBoard } from "@/hooks/use-deals";
+import { transitionLeadStage, useLeadBoard } from "@/hooks/use-leads";
 import { usePipelineBoardState } from "@/hooks/use-pipeline-board-state";
 import { getWorkflowRouteLabel } from "@/lib/pipeline-ownership";
+import { toast } from "sonner";
 import {
   ArrowUpRight,
   Briefcase,
@@ -117,8 +117,18 @@ export function RepDashboardPage() {
   const navigate = useNavigate();
   const boardState = usePipelineBoardState("deals");
   const { data, loading, error } = useRepDashboard();
-  const { board: dealBoard, loading: dealBoardLoading, error: dealBoardError } = useDealBoard("mine", true);
-  const { board: leadBoard, loading: leadBoardLoading, error: leadBoardError } = useLeadBoard("mine");
+  const {
+    board: dealBoard,
+    loading: dealBoardLoading,
+    error: dealBoardError,
+    refetch: refetchDealBoard,
+  } = useDealBoard("mine", true);
+  const {
+    board: leadBoard,
+    loading: leadBoardLoading,
+    error: leadBoardError,
+    refetch: refetchLeadBoard,
+  } = useLeadBoard("mine");
   const { tasks: overdueTasks, refetch: refetchOverdue } = useTasks({ section: "overdue", limit: 50 });
   const { tasks: todayTasks, refetch: refetchToday } = useTasks({ section: "today", limit: 50 });
   const firstName = user?.displayName?.split(" ")[0] ?? "there";
@@ -127,6 +137,54 @@ export function RepDashboardPage() {
   const refetchTasks = () => {
     refetchOverdue();
     refetchToday();
+  };
+  const visibleLeadColumns = leadBoard?.columns ?? [];
+
+  const handleBoardMove = async (input: {
+    activeId: string;
+    targetStageId: string;
+    targetStageSlug: string;
+    entity: "deal" | "lead";
+  }) => {
+    if (input.entity === "deal") {
+      try {
+        await changeDealStage(input.activeId, input.targetStageId);
+        await refetchDealBoard();
+      } catch (moveError) {
+        toast.error(moveError instanceof Error ? moveError.message : "Failed to move deal");
+      }
+      return;
+    }
+
+    const nextStageById = new Map(
+      visibleLeadColumns.map((column, index, columns) => [
+        column.stage.id,
+        columns[index + 1]?.stage.id ?? null,
+      ])
+    );
+    const sourceColumn = visibleLeadColumns.find((column) =>
+      column.cards.some((card) => card.id === input.activeId)
+    );
+
+    if (!sourceColumn) {
+      return;
+    }
+
+    if (nextStageById.get(sourceColumn.stage.id) !== input.targetStageId) {
+      toast.error("Leads can only move one stage forward at a time.");
+      return;
+    }
+
+    try {
+      const result = await transitionLeadStage(input.activeId, { targetStageId: input.targetStageId });
+      if (!result.ok) {
+        toast.error(result.missing.map((field) => field.label).join(", "));
+        return;
+      }
+      await refetchLeadBoard();
+    } catch (moveError) {
+      toast.error(moveError instanceof Error ? moveError.message : "Failed to move lead");
+    }
   };
 
   if (loading) {
@@ -140,11 +198,12 @@ export function RepDashboardPage() {
           <RepDashboardBoardShell
             activeEntity={boardState.activeEntity}
             onEntityChange={boardState.setActiveEntity}
-            dealBoard={dealBoard}
-            leadBoard={leadBoard}
-            loading={boardState.activeEntity === "deals" ? dealBoardLoading : leadBoardLoading}
-            error={boardState.activeEntity === "deals" ? dealBoardError : leadBoardError}
-          />
+          dealBoard={dealBoard}
+          leadBoard={leadBoard}
+          loading={boardState.activeEntity === "deals" ? dealBoardLoading : leadBoardLoading}
+          error={boardState.activeEntity === "deals" ? dealBoardError : leadBoardError}
+          onMove={handleBoardMove}
+        />
         </section>
         <div className="grid grid-cols-1 gap-4 xl:grid-cols-4">
           {Array.from({ length: 4 }).map((_, i) => (
@@ -211,6 +270,7 @@ export function RepDashboardPage() {
         leadBoard={leadBoard}
         loading={boardState.activeEntity === "deals" ? dealBoardLoading : leadBoardLoading}
         error={boardState.activeEntity === "deals" ? dealBoardError : leadBoardError}
+        onMove={handleBoardMove}
       />
 
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1.4fr)_minmax(320px,0.9fr)]">
@@ -281,8 +341,6 @@ export function RepDashboardPage() {
           </CardContent>
         </Card>
       </div>
-
-      <MyCleanupCard total={data.myCleanup.total} byReason={data.myCleanup.byReason} />
 
       <FunnelBucketRow buckets={data.funnelBuckets} />
 

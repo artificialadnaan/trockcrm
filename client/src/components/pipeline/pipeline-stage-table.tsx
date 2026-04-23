@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 import {
   Table,
   TableBody,
@@ -28,6 +29,8 @@ interface PipelineStageTableProps<T> {
   columns: Array<PipelineStageTableColumn<T>>;
   pagination: PipelineStagePagination;
   onPageChange: (page: number) => void;
+  onRowClick?: (row: T) => void;
+  getRowKey?: (row: T, index: number) => string;
 }
 
 export function PipelineStageTable<T>({
@@ -35,6 +38,8 @@ export function PipelineStageTable<T>({
   columns,
   pagination,
   onPageChange,
+  onRowClick,
+  getRowKey,
 }: PipelineStageTableProps<T>) {
   return (
     <div className="space-y-4">
@@ -61,7 +66,14 @@ export function PipelineStageTable<T>({
         </TableHeader>
         <TableBody>
           {rows.map((row, index) => (
-            <TableRow key={index} className="border-b border-slate-100 hover:bg-slate-50/80">
+            <TableRow
+              key={getRowKey ? getRowKey(row, index) : String(index)}
+              className={cn(
+                "border-b border-slate-100 hover:bg-slate-50/80",
+                onRowClick ? "cursor-pointer" : ""
+              )}
+              onClick={onRowClick ? () => onRowClick(row) : undefined}
+            >
               {columns.map((column) => (
                 <TableCell key={column.key} className="px-4 py-4 align-top text-sm text-slate-700">
                   {column.render(row)}

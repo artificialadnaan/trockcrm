@@ -1,4 +1,4 @@
-import { Navigate, useParams } from "react-router-dom";
+import { Navigate, useNavigate, useParams } from "react-router-dom";
 import { useLeadStagePage } from "@/hooks/use-leads";
 import { buildLeadStageSummary } from "@/lib/pipeline-stage-summary";
 import { useNormalizedStageRoute } from "@/lib/pipeline-scope";
@@ -6,6 +6,7 @@ import { PipelineStagePageHeader } from "@/components/pipeline/pipeline-stage-pa
 import { PipelineStageTable } from "@/components/pipeline/pipeline-stage-table";
 
 export function LeadStagePage() {
+  const navigate = useNavigate();
   const { stageId } = useParams();
   const route = useNormalizedStageRoute("leads", stageId!);
   const { data, loading, error } = useLeadStagePage({ stageId: stageId!, ...route.query });
@@ -68,6 +69,8 @@ export function LeadStagePage() {
         ]}
         pagination={data.pagination}
         onPageChange={route.onPageChange}
+        onRowClick={(row) => navigate(`/leads/${row.id}`)}
+        getRowKey={(row) => row.id}
       />
     </PipelineStagePageHeader>
   );

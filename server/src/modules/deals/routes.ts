@@ -144,6 +144,9 @@ function readStageInput(req: Parameters<typeof router.get>[1] extends never ? ne
     status: req.query.status as string | undefined,
     workflowRoute: req.query.workflowRoute as string | undefined,
     source: req.query.source as string | undefined,
+    regionId: req.query.regionId as string | undefined,
+    updatedAfter: req.query.updatedAfter as string | undefined,
+    updatedBefore: req.query.updatedBefore as string | undefined,
   };
 }
 

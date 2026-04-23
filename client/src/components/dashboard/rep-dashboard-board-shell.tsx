@@ -11,6 +11,12 @@ interface RepDashboardBoardShellProps {
   leadBoard: LeadBoardResponse | null;
   loading: boolean;
   error: string | null;
+  onMove?: (input: {
+    activeId: string;
+    targetStageId: string;
+    targetStageSlug: string;
+    entity: "deal" | "lead";
+  }) => void;
 }
 
 export function RepDashboardBoardShell({
@@ -20,6 +26,7 @@ export function RepDashboardBoardShell({
   leadBoard,
   loading,
   error,
+  onMove,
 }: RepDashboardBoardShellProps) {
   const navigate = useNavigate();
   const boardColumns = activeEntity === "deals" ? dealBoard?.columns ?? [] : leadBoard?.columns ?? [];
@@ -57,6 +64,11 @@ export function RepDashboardBoardShell({
           }
           onOpenRecord={(recordId) =>
             navigate(`/${activeEntity}/${recordId}`)
+          }
+          onMove={
+            onMove
+              ? (input) => onMove({ ...input, entity: activeEntity === "deals" ? "deal" : "lead" })
+              : undefined
           }
         />
       </section>

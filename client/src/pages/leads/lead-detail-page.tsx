@@ -10,7 +10,6 @@ import { LeadTimelineTab } from "@/components/leads/lead-timeline-tab";
 import { ForecastEditor } from "@/components/shared/forecast-editor";
 import { NextStepEditor } from "@/components/shared/next-step-editor";
 import { LeadQualificationPanel } from "@/components/leads/lead-qualification-panel";
-import { LeadScopingWorkspace } from "@/components/leads/lead-scoping-workspace";
 import { LeadStageChangeDialog } from "@/components/leads/lead-stage-change-dialog";
 import { LeadConvertDialog } from "@/components/leads/lead-convert-dialog";
 import { formatLeadPropertyLine, updateLead, useLeadDetail } from "@/hooks/use-leads";
@@ -42,7 +41,7 @@ export function LeadDetailPage() {
   const leadStages = useMemo(
     () =>
       stages
-        .filter((stage) => stage.workflowFamily === "lead")
+        .filter((stage) => stage.workflowFamily === "lead" && stage.isActivePipeline !== false)
         .sort((a, b) => a.displayOrder - b.displayOrder),
     [stages]
   );
@@ -85,7 +84,6 @@ export function LeadDetailPage() {
   const canConvertToOpportunity =
     currentStage?.slug === "sales_validation_stage" && !lead.convertedDealId && !isConvertedLead;
   const qualificationFocused = searchParams.get("focus") === "qualification";
-  const scopingFocused = searchParams.get("focus") === "scoping";
 
   const handleAssignmentSave = async (assignedRepId: string) => {
     if (assignedRepId === lead.assignedRepId) return;
@@ -218,6 +216,9 @@ export function LeadDetailPage() {
 
           <LeadForm
             mode={isLeadStage && !isConvertedLead ? "edit" : "summary"}
+            onSaved={() => {
+              void refetch();
+            }}
             lead={{
               id: lead.id,
               name: lead.name,
@@ -246,28 +247,20 @@ export function LeadDetailPage() {
 
           {isLeadStage && (
             <div className="space-y-3">
-              {qualificationFocused || scopingFocused ? (
+              {qualificationFocused ? (
                 <Card className="border-brand-red/30 bg-brand-red/5">
                   <CardContent className="space-y-1 pt-4">
-                    <p className="text-sm font-semibold text-foreground">
-                      {scopingFocused ? "Complete Lead Scoping Checklist" : "Complete Qualification Intake"}
-                    </p>
+                    <p className="text-sm font-semibold text-foreground">Complete Qualification Intake</p>
                     <p className="text-sm text-muted-foreground">
-                      {scopingFocused
-                        ? "Complete the lead scoping checklist below before moving this lead into Sales Validation Stage."
-                        : "Complete the qualification intake below to satisfy the current stage requirements."}
+                      Complete the qualification intake below to satisfy the current stage requirements.
                     </p>
                   </CardContent>
                 </Card>
               ) : null}
               <LeadQualificationPanel
                 leadId={lead.id}
-                onSaved={() => {
-                  void refetch();
-                }}
-              />
-              <LeadScopingWorkspace
-                leadId={lead.id}
+                projectTypeId={lead.projectTypeId}
+                projectTypeName={lead.projectType?.name ?? null}
                 onSaved={() => {
                   void refetch();
                 }}

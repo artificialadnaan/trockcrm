@@ -5,12 +5,20 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Button } from "@/components/ui/button";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { useAuth } from "@/lib/auth";
 import {
   useLeadQualification,
   updateLead,
   type LeadQualificationRecord,
 } from "@/hooks/use-leads";
+import { useProjectTypes } from "@/hooks/use-pipeline-config";
 
 function getStringValue(record: Record<string, unknown>, key: string) {
   const value = record[key];
@@ -31,12 +39,17 @@ function normalizeCurrencyInput(value: string) {
 
 export function LeadQualificationPanel({
   leadId,
+  projectTypeId,
+  projectTypeName,
   onSaved,
 }: {
   leadId: string;
+  projectTypeId?: string | null;
+  projectTypeName?: string | null;
   onSaved?: () => void;
 }) {
   const { user } = useAuth();
+  const { projectTypes } = useProjectTypes();
   const { qualification, loading, refetch } = useLeadQualification(leadId);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -44,7 +57,7 @@ export function LeadQualificationPanel({
   const [goDecision, setGoDecision] = useState<"go" | "no_go" | "">("");
   const [goDecisionNotes, setGoDecisionNotes] = useState("");
   const [qualificationData, setQualificationData] = useState<Record<string, unknown>>({});
-  const [scopingSubsetData, setScopingSubsetData] = useState<Record<string, unknown>>({});
+  const [selectedProjectTypeId, setSelectedProjectTypeId] = useState(projectTypeId ?? "");
   const canApprove = user?.role === "director" || user?.role === "admin";
 
   useEffect(() => {
@@ -53,30 +66,44 @@ export function LeadQualificationPanel({
     setGoDecision(record?.goDecision ?? "");
     setGoDecisionNotes(record?.goDecisionNotes ?? "");
     setQualificationData(record?.qualificationData ?? {});
-    setScopingSubsetData(record?.scopingSubsetData ?? {});
   }, [qualification]);
+
+  useEffect(() => {
+    setSelectedProjectTypeId(projectTypeId ?? "");
+  }, [projectTypeId]);
 
   const updateQualificationField = (key: string, value: string | boolean) => {
     setQualificationData((current) => ({ ...current, [key]: value }));
   };
 
-  const updateScopingField = (key: string, value: string) => {
-    setScopingSubsetData((current) => ({ ...current, [key]: value }));
-  };
-
   const approvalStatus =
     goDecision === "go" ? "Approved" : goDecision === "no_go" ? "Rejected" : "Pending Director/Admin Approval";
+  const selectedProjectType =
+    projectTypes.find((entry) => entry.id === selectedProjectTypeId) ??
+    (projectTypeId
+      ? {
+          id: projectTypeId,
+          name: projectTypeName ?? (getStringValue(qualificationData, "projectType") || projectTypeId),
+          slug: "",
+          parentId: null,
+          displayOrder: 0,
+          isActive: true,
+        }
+      : null);
 
   const handleSave = async () => {
     setSaving(true);
     setError(null);
     try {
       await updateLead(leadId, {
+        projectTypeId: selectedProjectTypeId || null,
         estimatedOpportunityValue: normalizeCurrencyInput(estimatedOpportunityValue) || null,
         goDecision: canApprove ? goDecision || null : undefined,
         goDecisionNotes: canApprove ? goDecisionNotes || null : undefined,
-        qualificationData,
-        scopingSubsetData,
+        qualificationData: {
+          ...qualificationData,
+          projectType: selectedProjectType?.name ?? "",
+        },
       });
       await refetch();
       onSaved?.();
@@ -176,10 +203,26 @@ export function LeadQualificationPanel({
           </div>
           <div className="space-y-2">
             <Label>Project Type</Label>
-            <Input
-              value={getStringValue(qualificationData, "projectType")}
-              onChange={(event) => updateQualificationField("projectType", event.target.value)}
-            />
+            <Select
+              value={selectedProjectTypeId || "__none__"}
+              onValueChange={(value) =>
+                setSelectedProjectTypeId(value && value !== "__none__" ? value : "")
+              }
+            >
+              <SelectTrigger>
+                <SelectValue placeholder="Select project type">
+                  {selectedProjectType?.name ?? "Select project type"}
+                </SelectValue>
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__none__">Select project type</SelectItem>
+                {projectTypes.map((projectType) => (
+                  <SelectItem key={projectType.id} value={projectType.id}>
+                    {projectType.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </div>
           <div className="space-y-2">
             <Label>Spec Package Status</Label>
@@ -250,48 +293,6 @@ export function LeadQualificationPanel({
               <option value="go">Go</option>
               <option value="no_go">No-Go</option>
             </select>
-          </div>
-          <div className="space-y-2">
-            <Label>Partial Scoping: Project Overview</Label>
-            <Input
-              value={getStringValue(scopingSubsetData, "projectOverview")}
-              onChange={(event) => updateScopingField("projectOverview", event.target.value)}
-            />
-          </div>
-          <div className="space-y-2">
-            <Label>Partial Scoping: Property Details</Label>
-            <Input
-              value={getStringValue(scopingSubsetData, "propertyDetails")}
-              onChange={(event) => updateScopingField("propertyDetails", event.target.value)}
-            />
-          </div>
-          <div className="space-y-2">
-            <Label>Partial Scoping: Scope Summary</Label>
-            <Input
-              value={getStringValue(scopingSubsetData, "scopeSummary")}
-              onChange={(event) => updateScopingField("scopeSummary", event.target.value)}
-            />
-          </div>
-          <div className="space-y-2">
-            <Label>Budget and Bid Context</Label>
-            <Input
-              value={getStringValue(scopingSubsetData, "budgetAndBidContext")}
-              onChange={(event) => updateScopingField("budgetAndBidContext", event.target.value)}
-            />
-          </div>
-          <div className="space-y-2">
-            <Label>Initial Quantities</Label>
-            <Input
-              value={getStringValue(scopingSubsetData, "initialQuantities")}
-              onChange={(event) => updateScopingField("initialQuantities", event.target.value)}
-            />
-          </div>
-          <div className="space-y-2">
-            <Label>Decision Timeline</Label>
-            <Input
-              value={getStringValue(scopingSubsetData, "decisionTimeline")}
-              onChange={(event) => updateScopingField("decisionTimeline", event.target.value)}
-            />
           </div>
         </div>
 

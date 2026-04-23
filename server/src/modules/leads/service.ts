@@ -136,6 +136,7 @@ interface LeadServiceDependencies {
     slug: string;
     displayOrder: number;
     isTerminal: boolean;
+    isActivePipeline?: boolean;
   }>>;
   getStageById: (id: string, workflowFamily?: WorkflowFamily) => Promise<{
     id: string;
@@ -1172,7 +1173,9 @@ export function createLeadService(
       throw new AppError(400, "Invalid lead stage ID");
     }
 
-    const orderedLeadStages = await deps.getAllStages("lead");
+    const orderedLeadStages = (await deps.getAllStages("lead")).filter(
+      (stage) => stage.isActivePipeline !== false
+    );
     const stageIndexById = new Map(orderedLeadStages.map((stage, index) => [stage.id, index]));
     const currentStageIndex = stageIndexById.get(currentStage.id);
     const targetStageIndex = stageIndexById.get(targetStage.id);

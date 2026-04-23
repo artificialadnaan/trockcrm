@@ -6,6 +6,8 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 const mocks = vi.hoisted(() => ({
   useDealStagePageMock: vi.fn(),
   useNormalizedStageRouteMock: vi.fn(),
+  useRegionsMock: vi.fn(),
+  useTaskAssigneesMock: vi.fn(),
 }));
 
 vi.mock("@/hooks/use-deals", () => ({
@@ -14,6 +16,30 @@ vi.mock("@/hooks/use-deals", () => ({
 
 vi.mock("@/lib/pipeline-scope", () => ({
   useNormalizedStageRoute: mocks.useNormalizedStageRouteMock,
+}));
+vi.mock("@/hooks/use-pipeline-config", () => ({
+  useRegions: mocks.useRegionsMock,
+}));
+vi.mock("@/hooks/use-task-assignees", () => ({
+  useTaskAssignees: mocks.useTaskAssigneesMock,
+}));
+vi.mock("@/lib/auth", () => ({
+  useAuth: () => ({
+    user: { role: "admin" },
+  }),
+}));
+vi.mock("@/lib/pipeline-ownership", () => ({
+  getWorkflowRouteLabel: (route: "normal" | "service") => (route === "service" ? "Service" : "Standard"),
+}));
+vi.mock("@/components/ui/input", () => ({
+  Input: (props: React.InputHTMLAttributes<HTMLInputElement>) => <input {...props} />,
+}));
+vi.mock("@/components/ui/select", () => ({
+  Select: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  SelectContent: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  SelectItem: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  SelectTrigger: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  SelectValue: ({ children }: { children?: ReactNode }) => <div>{children}</div>,
 }));
 vi.mock("@/components/pipeline/pipeline-stage-page-header", () => ({
   PipelineStagePageHeader: ({
@@ -46,6 +72,8 @@ import { DealStagePage } from "./deal-stage-page";
 
 describe("DealStagePage", () => {
   beforeEach(() => {
+    mocks.useRegionsMock.mockReturnValue({ regions: [] });
+    mocks.useTaskAssigneesMock.mockReturnValue({ assignees: [] });
     mocks.useNormalizedStageRouteMock.mockReturnValue({
       needsRedirect: false,
       redirectTo: "/deals/stages/stage-estimating?scope=team",

@@ -551,6 +551,9 @@ export function useDealStagePage(input: StagePageQuery & { stageId: string; scop
       ...(input.filters.status ? { status: input.filters.status } : {}),
       ...(input.filters.workflowRoute ? { workflowRoute: input.filters.workflowRoute } : {}),
       ...(input.filters.source ? { source: input.filters.source } : {}),
+      ...(input.filters.regionId ? { regionId: input.filters.regionId } : {}),
+      ...(input.filters.updatedAfter ? { updatedAfter: input.filters.updatedAfter } : {}),
+      ...(input.filters.updatedBefore ? { updatedBefore: input.filters.updatedBefore } : {}),
     });
 
     setLoading(true);
@@ -576,6 +579,9 @@ export function useDealStagePage(input: StagePageQuery & { stageId: string; scop
     input.filters.source,
     input.filters.staleOnly,
     input.filters.status,
+    input.filters.regionId,
+    input.filters.updatedAfter,
+    input.filters.updatedBefore,
     input.filters.workflowRoute,
     input.page,
     input.pageSize,
