@@ -217,6 +217,7 @@ export function LeadDetailPage() {
           />
 
           <LeadForm
+            mode={isLeadStage && !isConvertedLead ? "edit" : "summary"}
             lead={{
               id: lead.id,
               name: lead.name,

@@ -143,7 +143,7 @@ vi.mock("@/components/ui/card", () => ({
 }));
 
 vi.mock("@/components/leads/lead-form", () => ({
-  LeadForm: () => <div>Lead Form</div>,
+  LeadForm: ({ mode }: { mode?: string }) => <div>{mode === "edit" ? "Lead Form Edit" : "Lead Form Summary"}</div>,
 }));
 
 vi.mock("@/components/leads/lead-stage-badge", () => ({
@@ -212,6 +212,7 @@ describe("LeadDetailPage", () => {
     expect(html).toContain("Assigned Rep");
     expect(html).toContain("Lead context");
     expect(html).toContain("New Lead");
+    expect(html).toContain("Lead Form Edit");
   });
 
   it("shows converted opportunity leads with CRM stage context and linked deal access", () => {
@@ -233,6 +234,7 @@ describe("LeadDetailPage", () => {
     expect(html).toContain("Lead context");
     expect(html).toContain("This lead has already been converted, but the pre-RFP history remains available here.");
     expect(html).toContain("Open Deal");
+    expect(html).toContain("Lead Form Summary");
   });
 
   it("shows converted downstream stages with the merged lead history shell intact", () => {
