@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "@/lib/api";
-import {
-  CRM_OWNED_LEAD_STAGE_LABELS,
-  CRM_OWNED_LEAD_STAGE_SLUGS,
-} from "@/lib/sales-workflow";
+export {
+  getLeadBoardStageLabel,
+  getLeadStageMetadata,
+  LEAD_BOARD_STAGE_SLUGS,
+} from "@/lib/pipeline-ownership";
 
 export interface LeadRecord {
   id: string;
@@ -53,42 +54,6 @@ export interface LeadFilters {
   assignedRepId?: string;
   status?: "open" | "converted" | "disqualified";
   isActive?: boolean | "all";
-}
-
-export type LeadBoardStageSlug = Exclude<(typeof CRM_OWNED_LEAD_STAGE_SLUGS)[number], "opportunity">;
-
-export const LEAD_BOARD_STAGE_SLUGS: LeadBoardStageSlug[] = [
-  "new_lead",
-  "qualified_lead",
-  "sales_validation_stage",
-];
-
-export function getLeadBoardStageLabel(slug: LeadBoardStageSlug) {
-  return CRM_OWNED_LEAD_STAGE_LABELS[slug];
-}
-
-export function getLeadStageMetadata(
-  stageId: string,
-  stages: Array<{ id: string; name: string; slug: string }>
-) {
-  const stage = stages.find((entry) => entry.id === stageId) ?? null;
-  const slug = stage?.slug ?? null;
-  const isCrmOwnedLeadStage = slug != null && CRM_OWNED_LEAD_STAGE_SLUGS.includes(
-    slug as (typeof CRM_OWNED_LEAD_STAGE_SLUGS)[number]
-  );
-  const isBoardStage = slug != null && LEAD_BOARD_STAGE_SLUGS.includes(slug as LeadBoardStageSlug);
-
-  return {
-    stage,
-    slug,
-    label:
-      slug && slug in CRM_OWNED_LEAD_STAGE_LABELS
-        ? CRM_OWNED_LEAD_STAGE_LABELS[slug as keyof typeof CRM_OWNED_LEAD_STAGE_LABELS]
-        : stage?.name ?? "Lead",
-    isCrmOwnedLeadStage,
-    isBoardStage,
-    isOpportunityStage: slug === "opportunity",
-  };
 }
 
 export function formatLeadPropertyLine(lead: Pick<LeadRecord, "property">) {

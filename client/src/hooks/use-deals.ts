@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { api } from "@/lib/api";
 import type { FileRecord } from "./use-files";
-import { BID_BOARD_MIRRORED_STAGE_SLUGS } from "@/lib/sales-workflow";
+export { getDealStageMetadata, getWorkflowRouteLabel } from "@/lib/pipeline-ownership";
 
 export type WorkflowRoute = "normal" | "service";
 export type DealScopingIntakeStatus = "draft" | "ready" | "activated";
@@ -177,33 +177,7 @@ export interface Pagination {
   totalPages: number;
 }
 
-export function getWorkflowRouteLabel(route: WorkflowRoute) {
-  return route === "service" ? "Service" : "Normal";
-}
-
-export function getDealStageMetadata(
-  deal: Pick<Deal, "stageId" | "isBidBoardOwned" | "bidBoardStageSlug" | "readOnlySyncedAt" | "workflowRoute">,
-  stages: Array<{ id: string; name: string; slug: string }>
-) {
-  const stage = stages.find((entry) => entry.id === deal.stageId) ?? null;
-  const slug = deal.bidBoardStageSlug ?? stage?.slug ?? null;
-  const isMirroredStage =
-    slug != null &&
-    BID_BOARD_MIRRORED_STAGE_SLUGS.includes(slug as (typeof BID_BOARD_MIRRORED_STAGE_SLUGS)[number]);
-  const isOpportunityStage = slug === "opportunity";
-  const isReadOnlyInCrm = isMirroredStage || Boolean(deal.isBidBoardOwned || deal.readOnlySyncedAt);
-
-  return {
-    stage,
-    slug,
-    label: stage?.name ?? "Deal",
-    isOpportunityStage,
-    isMirroredStage,
-    isReadOnlyInCrm,
-    sourceOfTruth: isReadOnlyInCrm ? ("bid_board" as const) : ("crm" as const),
-    routeLabel: getWorkflowRouteLabel(deal.workflowRoute),
-  };
-}
+const DEAL_BOARD_PAGE_LIMIT = 100;
 
 export function useDeals(filters: DealFilters = {}) {
   const [deals, setDeals] = useState<Deal[]>([]);
@@ -258,6 +232,81 @@ export function useDeals(filters: DealFilters = {}) {
   }, [fetchDeals]);
 
   return { deals, pagination, loading, error, refetch: fetchDeals };
+}
+
+export function useDealBoard(filters: DealFilters = {}) {
+  const [deals, setDeals] = useState<Deal[]>([]);
+  const [pagination, setPagination] = useState<Pagination>({
+    page: 1,
+    limit: DEAL_BOARD_PAGE_LIMIT,
+    total: 0,
+    totalPages: 0,
+  });
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchBoardDeals = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+
+    try {
+      const collected: Deal[] = [];
+      let page = 1;
+      let totalPages = 1;
+      let total = 0;
+
+      while (page <= totalPages) {
+        const params = new URLSearchParams();
+        if (filters.search) params.set("search", filters.search);
+        if (filters.stageIds?.length) params.set("stageIds", filters.stageIds.join(","));
+        if (filters.assignedRepId) params.set("assignedRepId", filters.assignedRepId);
+        if (filters.projectTypeId) params.set("projectTypeId", filters.projectTypeId);
+        if (filters.regionId) params.set("regionId", filters.regionId);
+        if (filters.source) params.set("source", filters.source);
+        if (filters.isActive === false) params.set("isActive", "false");
+        if (filters.sortBy) params.set("sortBy", filters.sortBy);
+        if (filters.sortDir) params.set("sortDir", filters.sortDir);
+        params.set("page", String(page));
+        params.set("limit", String(DEAL_BOARD_PAGE_LIMIT));
+
+        const qs = params.toString();
+        const data = await api<{ deals: Deal[]; pagination: Pagination }>(`/deals?${qs}`);
+
+        collected.push(...data.deals);
+        totalPages = data.pagination.totalPages || 1;
+        total = data.pagination.total;
+        page += 1;
+      }
+
+      setDeals(collected);
+      setPagination({
+        page: 1,
+        limit: DEAL_BOARD_PAGE_LIMIT,
+        total,
+        totalPages,
+      });
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to load deals");
+    } finally {
+      setLoading(false);
+    }
+  }, [
+    filters.search,
+    filters.stageIds?.join(","),
+    filters.assignedRepId,
+    filters.projectTypeId,
+    filters.regionId,
+    filters.source,
+    filters.isActive,
+    filters.sortBy,
+    filters.sortDir,
+  ]);
+
+  useEffect(() => {
+    fetchBoardDeals();
+  }, [fetchBoardDeals]);
+
+  return { deals, pagination, loading, error, refetch: fetchBoardDeals };
 }
 
 export function useDealDetail(dealId: string | undefined) {

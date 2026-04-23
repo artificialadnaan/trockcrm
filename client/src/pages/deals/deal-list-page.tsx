@@ -10,9 +10,10 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { DealStageBadge } from "@/components/deals/deal-stage-badge";
 import { DealFilters } from "@/components/deals/deal-filters";
-import { getDealStageMetadata, getWorkflowRouteLabel, useDeals } from "@/hooks/use-deals";
+import { getDealStageMetadata, getWorkflowRouteLabel, useDealBoard } from "@/hooks/use-deals";
 import { useDealFilters } from "@/hooks/use-deal-filters";
 import { usePipelineStages, useRegions } from "@/hooks/use-pipeline-config";
+import { getDealColumnOwnership } from "@/lib/pipeline-ownership";
 import {
   formatCurrency,
   bestEstimate,
@@ -23,7 +24,11 @@ import {
 export function DealListPage() {
   const navigate = useNavigate();
   const { filters, setFilters, resetFilters } = useDealFilters();
-  const { deals, pagination, loading, error } = useDeals(filters);
+  const { deals, pagination, loading, error } = useDealBoard({
+    ...filters,
+    page: 1,
+    limit: 100,
+  });
   const { stages } = usePipelineStages();
   const { regions } = useRegions();
 
@@ -33,16 +38,7 @@ export function DealListPage() {
     .sort((left, right) => left.displayOrder - right.displayOrder)
     .map((stage) => {
       const stageDeals = deals.filter((deal) => deal.stageId === stage.id);
-      const ownership = getDealStageMetadata(
-        stageDeals[0] ?? {
-          stageId: stage.id,
-          workflowRoute: "normal",
-          isBidBoardOwned: false,
-          bidBoardStageSlug: null,
-          readOnlySyncedAt: null,
-        },
-        stages
-      );
+      const ownership = getDealColumnOwnership(stage);
 
       return {
         stage,
@@ -110,20 +106,20 @@ export function DealListPage() {
                       {column.stage.name}
                     </p>
                     <div className="mt-2 flex flex-wrap gap-2 text-xs">
-                      {column.ownership.isReadOnlyInCrm ? (
+                      {column.ownership?.tone === "mirror" ? (
                         <>
                           <span className="rounded-full border border-slate-300 bg-slate-100 px-2 py-1 font-semibold text-slate-700">
-                            Bid Board mirror
+                            {column.ownership.label}
                           </span>
                           <span className="rounded-full border border-amber-200 bg-amber-50 px-2 py-1 font-semibold text-amber-800">
-                            Read-only in CRM
+                            {column.ownership.secondaryLabel}
                           </span>
                         </>
-                      ) : (
+                      ) : column.ownership?.tone === "crm" ? (
                         <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2 py-1 font-semibold text-emerald-700">
-                          CRM editable
+                          {column.ownership.label}
                         </span>
-                      )}
+                      ) : null}
                     </div>
                   </div>
                   <span className="rounded-full border bg-background px-2 py-1 text-xs font-semibold text-muted-foreground">

@@ -5,14 +5,14 @@ import type { ReactNode } from "react";
 import { DealListPage } from "./deal-list-page";
 
 const mocks = vi.hoisted(() => ({
-  useDealsMock: vi.fn(),
+  useDealBoardMock: vi.fn(),
   useDealFiltersMock: vi.fn(),
   usePipelineStagesMock: vi.fn(),
   useRegionsMock: vi.fn(),
 }));
 
 vi.mock("@/hooks/use-deals", () => ({
-  useDeals: mocks.useDealsMock,
+  useDealBoard: mocks.useDealBoardMock,
   getDealStageMetadata: vi.fn(
     (
       deal: {
@@ -44,6 +44,18 @@ vi.mock("@/hooks/use-deals", () => ({
     }
   ),
   getWorkflowRouteLabel: vi.fn((route: "normal" | "service") => (route === "service" ? "Service" : "Normal")),
+}));
+
+vi.mock("@/lib/pipeline-ownership", () => ({
+  getDealColumnOwnership: vi.fn((stage: { slug: string }) => {
+    if (stage.slug === "opportunity") {
+      return { label: "CRM editable", tone: "crm" };
+    }
+    if (stage.slug === "estimating") {
+      return { label: "Bid Board mirror", secondaryLabel: "Read-only in CRM", tone: "mirror" };
+    }
+    return null;
+  }),
 }));
 
 vi.mock("@/hooks/use-deal-filters", () => ({
@@ -146,7 +158,7 @@ function renderPage() {
 describe("DealListPage", () => {
   beforeEach(() => {
     mocks.useDealFiltersMock.mockReset();
-    mocks.useDealsMock.mockReset();
+    mocks.useDealBoardMock.mockReset();
     mocks.usePipelineStagesMock.mockReset();
     mocks.useRegionsMock.mockReset();
 
@@ -168,7 +180,7 @@ describe("DealListPage", () => {
       loading: false,
     });
 
-    mocks.useDealsMock.mockReturnValue({
+    mocks.useDealBoardMock.mockReturnValue({
       deals: [
         makeDeal(),
         makeDeal({
@@ -193,6 +205,12 @@ describe("DealListPage", () => {
   it("distinguishes CRM-owned opportunity work from Bid Board mirrored downstream stages", () => {
     const html = renderPage();
 
+    expect(mocks.useDealBoardMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        page: 1,
+        limit: 100,
+      })
+    );
     expect(html).toContain("Opportunity");
     expect(html).toContain("CRM editable");
     expect(html).toContain("Estimating");
@@ -204,5 +222,30 @@ describe("DealListPage", () => {
     expect(html).toContain("$180,000");
     expect(html).toContain("$92,000");
     expect(html).toContain("12d in stage");
+  });
+
+  it("does not promote a single per-deal ownership state into a column-wide CRM editable label", () => {
+    mocks.useDealBoardMock.mockReturnValue({
+      deals: [
+        makeDeal({
+          id: "deal-3",
+          dealNumber: "TR-2026-0003",
+          stageId: "stage-estimating",
+          workflowRoute: "normal",
+          isBidBoardOwned: false,
+          bidBoardStageSlug: "estimating",
+          readOnlySyncedAt: null,
+        }),
+      ],
+      pagination: { page: 1, limit: 100, total: 1, totalPages: 1 },
+      loading: false,
+      error: null,
+    });
+
+    const html = renderPage();
+
+    expect(html).toContain("Estimating");
+    expect(html).toContain("Bid Board mirror");
+    expect(html).not.toContain("CRM editable");
   });
 });
