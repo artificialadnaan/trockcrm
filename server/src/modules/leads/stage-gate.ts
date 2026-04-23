@@ -29,6 +29,8 @@ type LeadSnapshot = {
   companyId: string | null;
   propertyId: string | null;
   source: string | null;
+  projectTypeId?: string | null;
+  qualificationPayload?: unknown;
 };
 
 type QualificationSnapshot = {
@@ -58,6 +60,11 @@ export interface LeadStageGateResult {
 }
 
 const LEAD_STAGE_REQUIREMENTS: Record<string, string[]> = {
+  qualified_lead: [
+    "source",
+    "projectTypeId",
+    "qualificationPayload.existing_customer_status",
+  ],
   company_pre_qualified: [
     "companyId",
     "propertyId",
@@ -114,6 +121,14 @@ function getRequirementValue(
 ) {
   if (field.startsWith("qualification.")) {
     return qualification?.qualificationData?.[field.slice("qualification.".length)];
+  }
+
+  if (field.startsWith("qualificationPayload.")) {
+    const qualificationPayload =
+      lead.qualificationPayload && typeof lead.qualificationPayload === "object"
+        ? (lead.qualificationPayload as Record<string, unknown>)
+        : null;
+    return qualificationPayload?.[field.slice("qualificationPayload.".length)];
   }
 
   if (field.startsWith("scopingSubset.")) {

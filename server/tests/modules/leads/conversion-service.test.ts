@@ -65,6 +65,11 @@ const salesWorkflowRealignmentMigrationPath = resolve(
   "../../../../migrations/0028_sales_workflow_realignment.sql"
 );
 const salesWorkflowRealignmentMigrationSql = readFileSync(salesWorkflowRealignmentMigrationPath, "utf8");
+const canonicalLeadPipelineMigrationPath = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../../migrations/0049_canonical_lead_pipeline.sql"
+);
+const canonicalLeadPipelineMigrationSql = readFileSync(canonicalLeadPipelineMigrationPath, "utf8");
 
 function expectSqlToMatch(pattern: RegExp): void {
   expect(migrationSql).toMatch(pattern);
@@ -76,6 +81,10 @@ function expectPipelineFamilySqlToMatch(pattern: RegExp): void {
 
 function expectSalesWorkflowRealignmentSqlToMatch(pattern: RegExp): void {
   expect(salesWorkflowRealignmentMigrationSql).toMatch(pattern);
+}
+
+function expectCanonicalLeadPipelineSqlToMatch(pattern: RegExp): void {
+  expect(canonicalLeadPipelineMigrationSql).toMatch(pattern);
 }
 
 describe("Sales workflow shared contract", () => {
@@ -188,6 +197,24 @@ describe("Sales workflow shared contract", () => {
     );
     expect(salesWorkflowRealignmentMigrationSql).toContain(
       "ALTER COLUMN pipeline_type_snapshot SET NOT NULL"
+    );
+  });
+
+  it("publishes the canonical lead pipeline migration contract", () => {
+    expectCanonicalLeadPipelineSqlToMatch(
+      /INSERT INTO public\.pipeline_stage_config[\s\S]*\('New Lead', 'new_lead', 1, 'lead', true, false[\s\S]*\('Qualified Lead', 'qualified_lead', 2, 'lead', true, false[\s\S]*\('Sales Validation Stage', 'sales_validation_stage', 3, 'lead', true, false/s
+    );
+    expect(canonicalLeadPipelineMigrationSql).toContain(
+      "slug IN ('contacted', 'lead_new', 'company_pre_qualified', 'scoping_in_progress', 'pre_qual_value_assigned', 'lead_go_no_go', 'qualified_for_opportunity', 'director_go_no_go', 'ready_for_opportunity')"
+    );
+    expect(canonicalLeadPipelineMigrationSql).toContain(
+      "(legacy.slug IN ('contacted', 'lead_new', 'company_pre_qualified', 'scoping_in_progress', 'new_lead') AND canonical.slug = 'new_lead')"
+    );
+    expect(canonicalLeadPipelineMigrationSql).toContain(
+      "(legacy.slug IN ('qualified_lead', 'pre_qual_value_assigned', 'director_go_no_go') AND canonical.slug = 'qualified_lead')"
+    );
+    expect(canonicalLeadPipelineMigrationSql).toContain(
+      "(legacy.slug IN ('lead_go_no_go', 'qualified_for_opportunity', 'ready_for_opportunity', 'sales_validation_stage') AND canonical.slug = 'sales_validation_stage')"
     );
   });
 });
@@ -750,14 +777,14 @@ const salesValidationLeadStage = {
   isTerminal: false,
 };
 
-const opportunityLeadStage = {
-  id: "lead-stage-opportunity",
+const opportunityDealStage = {
+  id: "deal-stage-opportunity",
   name: "Opportunity",
   slug: "opportunity",
-  displayOrder: 4,
-  workflowFamily: "lead" as const,
+  displayOrder: 1,
+  workflowFamily: "standard_deal" as const,
   isActivePipeline: true,
-  isTerminal: true,
+  isTerminal: false,
 };
 
 const dealStage = {
@@ -778,17 +805,18 @@ beforeEach(() => {
       if (id === salesValidationLeadStage.id) {
         return salesValidationLeadStage;
       }
-      if (id === opportunityLeadStage.id) {
-        return opportunityLeadStage;
-      }
       return leadStage;
+    }
+
+    if (workflowFamily === "standard_deal" && id === opportunityDealStage.id) {
+      return opportunityDealStage;
     }
 
     return dealStage;
   });
   pipelineMocks.getStageBySlug.mockImplementation(async (slug: string, workflowFamily?: string) => {
-    if (workflowFamily === "lead" && slug === "opportunity") {
-      return opportunityLeadStage;
+    if (workflowFamily === "standard_deal" && slug === "opportunity") {
+      return opportunityDealStage;
     }
 
     return null;
@@ -990,6 +1018,97 @@ describe("Lead Service", () => {
       message: "Primary contact does not belong to the company",
     });
   });
+
+  it("uses canonical requirements when moving a lead into Qualified Lead", async () => {
+    const tenantDb = createFakeTenantDb({
+      leads: [
+        {
+          id: "lead-1",
+          companyId: "company-1",
+          propertyId: "property-1",
+          primaryContactId: null,
+          name: "Palm Villas repaint",
+          stageId: "lead-stage-new",
+          assignedRepId: "rep-1",
+          status: "open",
+          pipelineType: "normal",
+          projectTypeId: null,
+          qualificationPayload: {},
+          projectTypeQuestionPayload: { projectTypeId: null, answers: {} },
+          source: null,
+          description: null,
+          stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+          convertedAt: null,
+          isActive: true,
+          createdAt: new Date("2026-04-12T15:00:00.000Z"),
+          updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+        },
+      ],
+    });
+
+    const service = createLeadService({
+      getAllStages: async () => [
+        {
+          id: "lead-stage-new",
+          slug: "new_lead",
+          name: "New Lead",
+          displayOrder: 1,
+          isTerminal: false,
+        },
+        {
+          id: "lead-stage-qualified",
+          slug: "qualified_lead",
+          name: "Qualified Lead",
+          displayOrder: 2,
+          isTerminal: false,
+        },
+      ],
+      getStageById: async (id: string) => {
+        if (id === "lead-stage-qualified") {
+          return {
+            id,
+            slug: "qualified_lead",
+            name: "Qualified Lead",
+            displayOrder: 2,
+            isTerminal: false,
+          };
+        }
+
+        return {
+          id,
+          slug: "new_lead",
+          name: "New Lead",
+          displayOrder: 1,
+          isTerminal: false,
+        };
+      },
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+    });
+
+    const blocked = await service.transitionLeadStage(tenantDb as never, {
+      leadId: "lead-1",
+      targetStageId: "lead-stage-qualified",
+      userId: "rep-1",
+      userRole: "rep",
+      officeId: "office-1",
+    });
+
+    expect(blocked).toEqual({
+      ok: false,
+      reason: "missing_requirements",
+      targetStageId: "lead-stage-qualified",
+      resolution: "inline",
+      missing: [
+        { key: "source", label: "Lead source", resolution: "inline" },
+        { key: "projectTypeId", label: "Project type", resolution: "detail" },
+        {
+          key: "qualificationPayload.existing_customer_status",
+          label: "Existing customer status",
+          resolution: "inline",
+        },
+      ],
+    });
+  });
 });
 
 describe("Lead Conversion Service", () => {
@@ -1051,13 +1170,13 @@ describe("Lead Conversion Service", () => {
     expect(result.deal.workflowRoute).toBe("normal");
     expect(result.lead.status).toBe("converted");
     expect(result.lead.convertedAt).toEqual(new Date("2026-04-15T15:00:00.000Z"));
-    expect(result.lead.stageId).toBe("lead-stage-opportunity");
+    expect(result.lead.stageId).toBe("deal-stage-opportunity");
     expect(result.lead.stageEnteredAt).toEqual(new Date("2026-04-15T15:00:00.000Z"));
     expect(tenantDb.state.leadStageHistory).toEqual([
       expect.objectContaining({
         leadId: "lead-1",
         fromStageId: "lead-stage-sales-validation",
-        toStageId: "lead-stage-opportunity",
+        toStageId: "deal-stage-opportunity",
         changedBy: "rep-1",
       }),
     ]);
@@ -1439,7 +1558,7 @@ describe("Lead Conversion Service", () => {
     expect(tenantDb.state.deals).toHaveLength(0);
   });
 
-  it("fails conversion when the opportunity lead stage is not configured", async () => {
+  it("fails conversion when the standard deal opportunity stage is not configured", async () => {
     pipelineMocks.getStageBySlug.mockResolvedValueOnce(null);
 
     const tenantDb = createFakeTenantDb({
@@ -1477,7 +1596,7 @@ describe("Lead Conversion Service", () => {
       })
     ).rejects.toMatchObject<AppError>({
       statusCode: 500,
-      message: "Missing opportunity lead stage configuration",
+      message: "Missing opportunity deal stage configuration",
     });
 
     expect(createDealSpy).not.toHaveBeenCalled();

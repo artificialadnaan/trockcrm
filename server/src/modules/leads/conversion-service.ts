@@ -115,9 +115,9 @@ export function createLeadConversionService(
       throw new AppError(409, "Only Sales Validation Stage leads can be promoted to Opportunity");
     }
 
-    const opportunityStage = await deps.getStageBySlug("opportunity", "lead");
+    const opportunityStage = await deps.getStageBySlug("opportunity", "standard_deal");
     if (!opportunityStage) {
-      throw new AppError(500, "Missing opportunity lead stage configuration");
+      throw new AppError(500, "Missing opportunity deal stage configuration");
     }
 
     const transitionedToOpportunityStage = opportunityStage.id !== lead.stageId;

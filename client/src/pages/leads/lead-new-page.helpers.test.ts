@@ -17,18 +17,26 @@ describe("lead new page helpers", () => {
   it("only allows active canonical lead workflow stages for new leads", () => {
     const stages: PipelineStage[] = [
       {
-        id: "lead-new",
-        name: "New",
-        slug: "lead_new",
+        id: "new-lead",
+        name: "New Lead",
+        slug: "new_lead",
         displayOrder: 1,
         workflowFamily: "lead",
         ...baseStage,
       },
       {
-        id: "lead-prequal",
-        name: "Company Pre-Qualified",
-        slug: "company_pre_qualified",
+        id: "qualified-lead",
+        name: "Qualified Lead",
+        slug: "qualified_lead",
         displayOrder: 2,
+        workflowFamily: "lead",
+        ...baseStage,
+      },
+      {
+        id: "sales-validation",
+        name: "Sales Validation Stage",
+        slug: "sales_validation_stage",
+        displayOrder: 3,
         workflowFamily: "lead",
         ...baseStage,
       },
@@ -41,10 +49,18 @@ describe("lead new page helpers", () => {
         ...baseStage,
       },
       {
+        id: "legacy-prequal",
+        name: "Company Pre-Qualified",
+        slug: "company_pre_qualified",
+        displayOrder: 2,
+        workflowFamily: "lead",
+        ...baseStage,
+      },
+      {
         id: "estimating",
         name: "Estimating",
         slug: "estimating",
-        displayOrder: 2,
+        displayOrder: 1,
         workflowFamily: "standard_deal",
         ...baseStage,
       },
@@ -52,25 +68,17 @@ describe("lead new page helpers", () => {
         id: "disqualified",
         name: "Disqualified",
         slug: "disqualified",
-        displayOrder: 3,
+        displayOrder: 99,
         workflowFamily: "lead",
         ...baseStage,
         isTerminal: true,
       },
-      {
-        id: "inactive-lead-stage",
-        name: "Scoping In Progress",
-        slug: "scoping_in_progress",
-        displayOrder: 3,
-        workflowFamily: "lead",
-        ...baseStage,
-        isActivePipeline: false,
-      },
     ];
 
     expect(getLeadCreationStages(stages).map((stage) => stage.id)).toEqual([
-      "lead-new",
-      "lead-prequal",
+      "new-lead",
+      "qualified-lead",
+      "sales-validation",
     ]);
   });
 

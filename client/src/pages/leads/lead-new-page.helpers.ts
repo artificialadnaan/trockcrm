@@ -1,12 +1,9 @@
 import type { PipelineStage } from "@/hooks/use-pipeline-config";
 
 const CANONICAL_LEAD_CREATION_STAGE_SLUGS = [
-  "lead_new",
-  "company_pre_qualified",
-  "scoping_in_progress",
-  "pre_qual_value_assigned",
-  "lead_go_no_go",
-  "qualified_for_opportunity",
+  "new_lead",
+  "qualified_lead",
+  "sales_validation_stage",
 ] as const;
 
 function isCanonicalLeadCreationStageSlug(

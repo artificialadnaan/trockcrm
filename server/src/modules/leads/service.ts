@@ -247,16 +247,19 @@ function coerceExistingQuestionPayload(value: unknown, projectTypeId: string | n
 }
 
 const QUALIFIED_LEAD_REQUIREMENTS = [
-  "property",
   "source",
-  "qualificationScope",
-  "qualificationBudgetAmount",
-  "qualificationCompanyFit",
+  "projectTypeId",
+  "qualificationPayload.existing_customer_status",
 ] as const;
 
 const REQUIREMENT_METADATA: Record<string, { label: string; resolution: "inline" | "detail" }> = {
   property: { label: "Linked property", resolution: "detail" },
   source: { label: "Lead source", resolution: "inline" },
+  projectTypeId: { label: "Project type", resolution: "detail" },
+  "qualificationPayload.existing_customer_status": {
+    label: "Existing customer status",
+    resolution: "inline",
+  },
   qualificationScope: { label: "Project scope / category", resolution: "inline" },
   qualificationBudgetAmount: { label: "Approximate budget / dollar amount", resolution: "inline" },
   qualificationCompanyFit: { label: "Company fit / serviceability confirmation", resolution: "inline" },
@@ -853,6 +856,7 @@ export function createLeadService(
           id: existing.id,
           stageId: existing.stageId,
           stageSlug: currentStage.slug,
+          source: input.source !== undefined ? input.source : existing.source,
           projectTypeId: effectiveProjectTypeId ?? null,
           qualificationPayload:
             input.qualificationPayload !== undefined
@@ -1135,14 +1139,17 @@ export function createLeadService(
     const legacyMissing: string[] = [];
 
     if (targetStage.slug === "qualified_lead") {
-      for (const requirement of QUALIFIED_LEAD_REQUIREMENTS) {
-        if (requirement === "property") {
-          if (!existing.propertyId || !existing.property) legacyMissing.push("property");
-          continue;
-        }
+      const qualificationPayload = normalizeQualificationPayload(
+        input.inlinePatch?.qualificationPayload !== undefined
+          ? input.inlinePatch.qualificationPayload
+          : (existing.qualificationPayload as Record<string, string | boolean | number | null> | undefined)
+      );
 
-        if (requirement === "qualificationCompanyFit") {
-          if (effectiveLead.qualificationCompanyFit !== true) legacyMissing.push("qualificationCompanyFit");
+      for (const requirement of QUALIFIED_LEAD_REQUIREMENTS) {
+        if (requirement === "qualificationPayload.existing_customer_status") {
+          if (isBlank(qualificationPayload.existing_customer_status)) {
+            legacyMissing.push("qualificationPayload.existing_customer_status");
+          }
           continue;
         }
 

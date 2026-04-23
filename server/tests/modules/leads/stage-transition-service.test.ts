@@ -2,6 +2,47 @@ import { describe, expect, it } from "vitest";
 import { validateLeadStageTransition } from "../../../src/modules/leads/stage-transition-service.js";
 
 describe("stage-transition-service", () => {
+  it("requires source, project type, and existing-customer resolution before moving into Qualified Lead", () => {
+    const result = validateLeadStageTransition({
+      lead: {
+        id: "lead-1",
+        stageId: "stage-new",
+        stageSlug: "new_lead",
+        source: null,
+        projectTypeId: null,
+        qualificationPayload: {},
+        projectTypeQuestionPayload: {
+          projectTypeId: null,
+          answers: {},
+        },
+      },
+      currentStage: {
+        id: "stage-new",
+        slug: "new_lead",
+        name: "New Lead",
+        isTerminal: false,
+        displayOrder: 1,
+      },
+      targetStage: {
+        id: "stage-qualified",
+        slug: "qualified_lead",
+        name: "Qualified Lead",
+        isTerminal: false,
+        displayOrder: 2,
+      },
+      projectTypeSlug: null,
+    });
+
+    expect(result.allowed).toBe(false);
+    expect(result.missingRequirements.prerequisiteFields).toEqual([
+      "source",
+      "projectTypeId",
+      "qualificationPayload.existing_customer_status",
+    ]);
+    expect(result.missingRequirements.qualificationFields).toEqual([]);
+    expect(result.missingRequirements.projectTypeQuestionIds).toEqual([]);
+  });
+
   it("blocks moving into opportunity when Sales Validation Stage questions are missing", () => {
     const result = validateLeadStageTransition({
       lead: {

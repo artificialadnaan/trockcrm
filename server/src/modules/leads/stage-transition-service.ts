@@ -8,6 +8,7 @@ export interface LeadStageTransitionLead {
   id: string;
   stageId: string;
   stageSlug: string | null;
+  source?: string | null;
   projectTypeId: string | null;
   qualificationPayload: Record<string, string | boolean | number | null>;
   projectTypeQuestionPayload: {
@@ -31,6 +32,7 @@ export interface LeadStageTransitionResult {
   currentStage: LeadStageTransitionStage;
   targetStage: LeadStageTransitionStage;
   missingRequirements: {
+    prerequisiteFields: string[];
     qualificationFields: string[];
     projectTypeQuestionIds: string[];
   };
@@ -63,12 +65,51 @@ function shouldValidateSalesQualificationGate(
   );
 }
 
+function listQualifiedLeadPrerequisiteFields(lead: LeadStageTransitionLead) {
+  const qualificationPayload = lead.qualificationPayload ?? {};
+  const missingFields: string[] = [];
+
+  if (!isAnsweredLeadValidationValue(lead.source)) {
+    missingFields.push("source");
+  }
+
+  if (!isAnsweredLeadValidationValue(lead.projectTypeId)) {
+    missingFields.push("projectTypeId");
+  }
+
+  if (!isAnsweredLeadValidationValue(qualificationPayload.existing_customer_status)) {
+    missingFields.push("qualificationPayload.existing_customer_status");
+  }
+
+  return missingFields;
+}
+
 export function validateLeadStageTransition(
   input: ValidateLeadStageTransitionInput
 ): LeadStageTransitionResult {
   const { lead, currentStage, targetStage, projectTypeSlug } = input;
   const qualificationPayload = lead.qualificationPayload ?? {};
   const questionAnswers = lead.projectTypeQuestionPayload?.answers ?? {};
+
+  if (targetStage.slug === "qualified_lead") {
+    const prerequisiteFields = listQualifiedLeadPrerequisiteFields(lead);
+    const allowed = prerequisiteFields.length === 0;
+
+    return {
+      allowed,
+      code: allowed ? null : "LEAD_STAGE_REQUIREMENTS_UNMET",
+      message: allowed
+        ? null
+        : "Complete the lead intake fields before moving this lead to Qualified Lead.",
+      currentStage,
+      targetStage,
+      missingRequirements: {
+        prerequisiteFields,
+        qualificationFields: [],
+        projectTypeQuestionIds: [],
+      },
+    };
+  }
 
   if (!shouldValidateSalesQualificationGate(currentStage, targetStage)) {
     return {
@@ -78,6 +119,7 @@ export function validateLeadStageTransition(
       currentStage,
       targetStage,
       missingRequirements: {
+        prerequisiteFields: [],
         qualificationFields: [],
         projectTypeQuestionIds: [],
       },
@@ -102,6 +144,7 @@ export function validateLeadStageTransition(
     currentStage,
     targetStage,
     missingRequirements: {
+      prerequisiteFields: [],
       qualificationFields,
       projectTypeQuestionIds,
     },

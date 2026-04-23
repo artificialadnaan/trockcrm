@@ -42,6 +42,9 @@ export const OPPORTUNITY_GATE_FIELD_KEYS = [
 export const LEAD_GO_NO_GO_GATE_FIELD_KEYS = ["leadScoping.completedChecklist"] as const;
 
 export const WORKFLOW_GATE_FIELD_LABELS = {
+  source: "Lead Source",
+  projectTypeId: "Project Type",
+  "qualificationPayload.existing_customer_status": "Existing Customer Status",
   estimatedOpportunityValue: "Estimated Opportunity Value",
   "qualification.projectLocation": "Project Location",
   "qualification.propertyName": "Property Name",

@@ -11,6 +11,50 @@ const currentStage = {
 };
 
 describe("Lead Stage Gate Evaluation", () => {
+  it("blocks advancement into Qualified Lead until the canonical intake fields are present", () => {
+    const result = evaluateLeadStageGate({
+      lead: {
+        id: "lead-1",
+        companyId: "company-1",
+        propertyId: "property-1",
+        source: null,
+      },
+      qualification: {
+        qualificationData: {},
+        scopingSubsetData: {},
+      },
+      leadScopingReadiness: {
+        status: "draft",
+        isReadyForGoNoGo: false,
+        completionState: {},
+        errors: { sections: {}, attachments: {} },
+      },
+      currentStage: {
+        id: "stage-new",
+        name: "New Lead",
+        slug: "new_lead",
+        displayOrder: 1,
+        isTerminal: false,
+        isActivePipeline: true,
+      },
+      targetStage: {
+        id: "stage-qualified",
+        name: "Qualified Lead",
+        slug: "qualified_lead",
+        displayOrder: 2,
+        isTerminal: false,
+        isActivePipeline: true,
+      },
+    });
+
+    expect(result.allowed).toBe(false);
+    expect(result.missingRequirements.fields).toEqual([
+      "source",
+      "projectTypeId",
+      "qualificationPayload.existing_customer_status",
+    ]);
+  });
+
   it("blocks advancement into lead_go_no_go when the full lead scoping checklist is incomplete", () => {
     const result = evaluateLeadStageGate({
       lead: {
