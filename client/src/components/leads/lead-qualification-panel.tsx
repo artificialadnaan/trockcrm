@@ -210,10 +210,8 @@ export function LeadQualificationPanel({
           <div className="space-y-2">
             <Label>Project Type</Label>
             <Select
-              value={selectedProjectTypeId || "__none__"}
-              onValueChange={(value) =>
-                setSelectedProjectTypeId(value && value !== "__none__" ? value : "")
-              }
+              value={selectedProjectTypeId || undefined}
+              onValueChange={(value) => setSelectedProjectTypeId(value ?? "")}
             >
               <SelectTrigger>
                 <SelectValue placeholder="Select project type">
@@ -221,7 +219,6 @@ export function LeadQualificationPanel({
                 </SelectValue>
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="__none__">Select project type</SelectItem>
                 {projectTypes.map((projectType) => (
                   <SelectItem key={projectType.id} value={projectType.id}>
                     {projectType.name}

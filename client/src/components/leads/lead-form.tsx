@@ -582,16 +582,13 @@ function EditableLeadForm({
                 <div className="space-y-2">
                   <Label htmlFor="projectTypeId">Project Type</Label>
                   <Select
-                    value={formData.projectTypeId || "__none__"}
-                    onValueChange={(value) =>
-                      handleFieldChange("projectTypeId", !value || value === "__none__" ? "" : value)
-                    }
+                    value={formData.projectTypeId || undefined}
+                    onValueChange={(value) => handleFieldChange("projectTypeId", value ?? "")}
                   >
                     <SelectTrigger id="projectTypeId">
                       <SelectValue placeholder="Select project type" />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="__none__">Select project type</SelectItem>
                       {projectTypeHierarchy.flatMap((parent) => [
                         <SelectItem key={parent.id} value={parent.id} className="font-medium">
                           {parent.name}
@@ -645,16 +642,13 @@ function EditableLeadForm({
               <div className="space-y-2">
                 <Label htmlFor="projectTypeId">Project Type</Label>
                 <Select
-                  value={formData.projectTypeId || "__none__"}
-                  onValueChange={(value) =>
-                    handleFieldChange("projectTypeId", !value || value === "__none__" ? "" : value)
-                  }
+                  value={formData.projectTypeId || undefined}
+                  onValueChange={(value) => handleFieldChange("projectTypeId", value ?? "")}
                 >
                   <SelectTrigger id="projectTypeId">
                     <SelectValue placeholder="Select project type" />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="__none__">Select project type</SelectItem>
                     {projectTypeHierarchy.flatMap((parent) => [
                       <SelectItem key={parent.id} value={parent.id} className="font-medium">
                         {parent.name}
