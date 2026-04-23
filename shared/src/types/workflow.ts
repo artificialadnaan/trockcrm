@@ -247,6 +247,12 @@ export function workflowFamilyForRoute(
   return workflowRoute === "service" ? "service_deal" : "standard_deal";
 }
 
+export function getCanonicalEstimatingBoundaryStageSlug(
+  workflowRoute: WorkflowRoute
+): Extract<CanonicalDealStageSlug, "estimate_in_progress" | "service_estimating"> {
+  return workflowRoute === "service" ? "service_estimating" : "estimate_in_progress";
+}
+
 export function isCanonicalLeadStageSlug(stageSlug: string): stageSlug is CanonicalLeadStageSlug {
   return CANONICAL_LEAD_STAGE_SLUG_SET.has(stageSlug);
 }
@@ -366,6 +372,16 @@ export function isBidBoardOwnedDealStage(
   return (
     canonicalStageSlug !== null &&
     BID_BOARD_OWNED_CANONICAL_DEAL_STAGE_SLUG_SET.has(canonicalStageSlug)
+  );
+}
+
+export function isCanonicalEstimatingBoundaryStage(
+  stageSlug: string,
+  workflowRoute: WorkflowRoute
+): boolean {
+  return (
+    toCanonicalDealStageSlug(stageSlug, workflowRoute) ===
+    getCanonicalEstimatingBoundaryStageSlug(workflowRoute)
   );
 }
 

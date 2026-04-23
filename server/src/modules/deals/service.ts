@@ -8,73 +8,20 @@ import {
   pipelineStageConfig,
   contacts,
   leads,
-  companies,
-  properties,
   users,
   userOfficeAccess,
   tasks,
   jobQueue,
-  dealRoutingHistory,
 } from "@trock-crm/shared/schema";
-import type { DealPipelineDisposition, WorkflowRoute } from "@trock-crm/shared/types";
+import type { WorkflowRoute } from "@trock-crm/shared/types";
 import type * as schema from "@trock-crm/shared/schema";
 import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { getStageById, getStageBySlug } from "../pipeline/service.js";
 import { evaluatePostConversionEnrichment } from "./post-conversion-enrichment.js";
-import { captureInitialForecastMilestone } from "../reports/forecast-milestones-service.js";
-import { createAssignmentTaskIfNeeded } from "../assignment-tasks/service.js";
-import { canCreateDealWithoutSourceLead } from "./direct-create-rules.js";
-import { getDealDepartmentOwnership } from "./ownership-service.js";
 
 // Type alias for the tenant-scoped Drizzle instance
 type TenantDb = NodePgDatabase<typeof schema>;
-
-type WorkspaceScope = "mine" | "team" | "all";
-
-export interface DealBoardInput {
-  role: string;
-  userId: string;
-  activeOfficeId: string;
-  scope: WorkspaceScope;
-  includeDd?: boolean;
-  previewLimit?: number;
-}
-
-export interface DealStagePageInput extends DealBoardInput {
-  stageId: string;
-  page: number;
-  pageSize: number;
-  search?: string;
-  sort?: string;
-  assignedRepId?: string;
-  staleOnly?: boolean;
-  status?: string;
-  workflowRoute?: string;
-  source?: string;
-  regionId?: string;
-  updatedAfter?: string;
-  updatedBefore?: string;
-}
-
-type DealWorkspaceRow = {
-  id: string;
-  deal_number: string;
-  name: string;
-  stage_id: string;
-  assigned_rep_id: string;
-  office_id: string;
-  workflow_route: string;
-  awarded_amount: string | null;
-  bid_estimate: string | null;
-  dd_estimate: string | null;
-  property_city: string | null;
-  property_state: string | null;
-  source: string | null;
-  last_activity_at: string | null;
-  stage_entered_at: string;
-  updated_at: string;
-};
 
 export interface DealFilters {
   search?: string;
@@ -94,14 +41,12 @@ export interface CreateDealInput {
   name: string;
   stageId: string;
   assignedRepId: string;
-  actorUserId: string;
   officeId?: string; // Active office — used to validate assignee has access
   companyId?: string;
   propertyId?: string;
   sourceLeadId?: string;
   sourceLeadWriteMode?: "direct" | "lead_conversion";
-  pipelineDisposition?: DealPipelineDisposition;
-  workflowRoute?: WorkflowRoute | null;
+  workflowRoute?: WorkflowRoute;
   migrationMode?: boolean;
   primaryContactId?: string;
   ddEstimate?: string;
@@ -126,8 +71,7 @@ export interface UpdateDealInput {
   sourceLeadId?: string | null;
   companyId?: string | null;
   propertyId?: string | null;
-  pipelineDisposition?: DealPipelineDisposition | null;
-  workflowRoute?: WorkflowRoute | null;
+  workflowRoute?: WorkflowRoute;
   migrationMode?: boolean;
   ddEstimate?: string | null;
   bidEstimate?: string | null;
@@ -142,32 +86,11 @@ export interface UpdateDealInput {
   source?: string | null;
   winProbability?: number | null;
   expectedCloseDate?: string | null;
-  decisionMakerName?: string | null;
-  decisionProcess?: string | null;
-  budgetStatus?: string | null;
-  incumbentVendor?: string | null;
-  unitCount?: number | null;
-  buildYear?: number | null;
-  forecastWindow?: "30_days" | "60_days" | "90_days" | "beyond_90" | "uncommitted" | null;
-  forecastCategory?: "commit" | "best_case" | "pipeline" | null;
-  forecastConfidencePercent?: number | null;
-  forecastRevenue?: string | null;
-  forecastGrossProfit?: string | null;
-  forecastBlockers?: string | null;
-  nextStep?: string | null;
-  nextStepDueAt?: string | null;
-  nextMilestoneAt?: string | null;
-  supportNeededType?: "leadership" | "estimating" | "operations" | "executive_team" | null;
-  supportNeededNotes?: string | null;
   proposalStatus?: string | null;
   proposalNotes?: string | null;
   estimatingSubstage?: string | null;
 }
 
-export const BID_BOARD_BOUNDARY_STAGE_SLUGS = {
-  normal: "estimate_in_progress",
-  service: "service_estimating",
-} as const;
 export const VALID_PROPOSAL_STATUSES = [
   "not_started",
   "drafting",
@@ -203,7 +126,11 @@ export const BID_BOARD_MIRRORED_FIELDS = [
 export const BID_BOARD_STAGE_READ_ONLY_MESSAGE =
   "Deal stage progression is read-only in CRM after estimating handoff. Bid Board is now the source of truth for downstream stages.";
 export const BID_BOARD_BOUNDARY_STAGE_MISSING_MESSAGE =
-  "Bid Board entry stage configuration is required to enforce the downstream ownership boundary.";
+  "Estimating stage configuration is required to enforce the Bid Board ownership boundary.";
+
+function estimatingBoundaryStageSlugForRoute(workflowRoute: WorkflowRoute) {
+  return workflowRoute === "service" ? "service_estimating" : "estimate_in_progress";
+}
 
 export interface DealBidBoardOwnershipState {
   isOwned: boolean;
@@ -214,12 +141,6 @@ export interface DealBidBoardOwnershipState {
   mirroredInCrm: readonly string[];
   reason: string;
   message: string;
-}
-
-export function getBidBoardBoundaryStageSlug(workflowRoute: WorkflowRoute) {
-  return workflowRoute === "service"
-    ? BID_BOARD_BOUNDARY_STAGE_SLUGS.service
-    : BID_BOARD_BOUNDARY_STAGE_SLUGS.normal;
 }
 
 /**
@@ -280,12 +201,11 @@ export function buildBidBoardOwnershipState(
   deal: Pick<typeof deals.$inferSelect, "isBidBoardOwned" | "workflowRoute">
 ): DealBidBoardOwnershipState {
   const isOwned = deal.isBidBoardOwned;
-  const handoffStageSlug = getBidBoardBoundaryStageSlug(deal.workflowRoute);
 
   return {
     isOwned,
     sourceOfTruth: isOwned ? "bid_board" : "crm",
-    handoffStageSlug,
+    handoffStageSlug: estimatingBoundaryStageSlugForRoute(deal.workflowRoute),
     downstreamStagesReadOnly: isOwned,
     canEditInCrm: BID_BOARD_CRM_EDITABLE_FIELDS,
     mirroredInCrm: BID_BOARD_MIRRORED_FIELDS,
@@ -299,7 +219,13 @@ export function buildBidBoardOwnershipState(
 }
 
 export async function getEstimatingBoundaryStage(workflowRoute: WorkflowRoute) {
-  return getStageBySlug(getBidBoardBoundaryStageSlug(workflowRoute), workflowFamilyForRoute(workflowRoute));
+  const workflowFamily = workflowFamilyForRoute(workflowRoute);
+  const canonicalBoundarySlug = estimatingBoundaryStageSlugForRoute(workflowRoute);
+
+  return (
+    (await getStageBySlug(canonicalBoundarySlug, workflowFamily)) ??
+    (await getStageBySlug("estimating", workflowFamily))
+  );
 }
 
 export async function getRequiredEstimatingBoundaryStage(workflowRoute: WorkflowRoute) {
@@ -319,116 +245,10 @@ export function isBidBoardOwnedDownstreamStage(
   targetStage: { slug: string; displayOrder: number; isTerminal: boolean },
   estimatingBoundary: { displayOrder: number } | null
 ) {
-  return Boolean(estimatingBoundary) &&
-    targetStage.displayOrder >= (estimatingBoundary?.displayOrder ?? Number.POSITIVE_INFINITY);
-}
-
-async function listDealStages() {
-  return db
-    .select()
-    .from(pipelineStageConfig)
-    .where(
-      and(
-        inArray(pipelineStageConfig.workflowFamily, ["standard_deal", "service_deal"]),
-        eq(pipelineStageConfig.isActivePipeline, true)
-      )
-    )
-    .orderBy(asc(pipelineStageConfig.displayOrder));
-}
-
-function buildDealWorkspaceScope(input: DealBoardInput | DealStagePageInput) {
-  const filters = [
-    sql`d.is_active = true`,
-    sql`u.office_id = ${input.activeOfficeId}`,
-  ];
-
-  if (input.role === "rep" || input.scope === "mine") {
-    filters.push(sql`d.assigned_rep_id = ${input.userId}`);
-  }
-
-  if ("assignedRepId" in input && input.assignedRepId) {
-    filters.push(sql`d.assigned_rep_id = ${input.assignedRepId}`);
-  }
-
-  if ("source" in input && input.source) {
-    filters.push(sql`d.source = ${input.source}`);
-  }
-
-  if ("workflowRoute" in input && input.workflowRoute) {
-    filters.push(sql`d.workflow_route = ${input.workflowRoute}`);
-  }
-
-  if ("regionId" in input && input.regionId) {
-    filters.push(sql`d.region_id = ${input.regionId}`);
-  }
-
-  if ("search" in input && input.search && input.search.trim().length >= 2) {
-    const term = `%${input.search.trim()}%`;
-    filters.push(sql`(d.name ilike ${term} or d.deal_number ilike ${term} or d.property_city ilike ${term} or d.property_state ilike ${term})`);
-  }
-
-  if ("staleOnly" in input && input.staleOnly) {
-    filters.push(sql`d.last_activity_at is null or d.last_activity_at < now() - interval '14 days'`);
-  }
-
-  if ("updatedAfter" in input && input.updatedAfter) {
-    filters.push(sql`d.updated_at >= ${new Date(input.updatedAfter)}`);
-  }
-
-  if ("updatedBefore" in input && input.updatedBefore) {
-    filters.push(sql`d.updated_at < ${new Date(`${input.updatedBefore}T23:59:59.999Z`)}`);
-  }
-
-  return sql.join(filters, sql` and `);
-}
-
-function normalizeDealStageSort(sort?: string) {
-  switch (sort) {
-    case "value_desc":
-      return sql`coalesce(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0) desc, d.updated_at desc`;
-    case "name_asc":
-      return sql`d.name asc, d.updated_at desc`;
-    case "age_desc":
-      return sql`d.stage_entered_at asc, d.updated_at desc`;
-    default:
-      return sql`d.updated_at desc, d.name asc`;
-  }
-}
-
-function mapDealWorkspaceRow(row: DealWorkspaceRow) {
-  return {
-    id: row.id,
-    dealNumber: row.deal_number,
-    name: row.name,
-    stageId: row.stage_id,
-    assignedRepId: row.assigned_rep_id,
-    officeId: row.office_id,
-    workflowRoute: row.workflow_route,
-    awardedAmount: row.awarded_amount,
-    bidEstimate: row.bid_estimate,
-    ddEstimate: row.dd_estimate,
-    propertyCity: row.property_city,
-    propertyState: row.property_state,
-    source: row.source,
-    lastActivityAt: row.last_activity_at,
-    stageEnteredAt: row.stage_entered_at,
-    updatedAt: row.updated_at,
-  };
-}
-
-function workflowFamilyForDisposition(
-  pipelineDisposition: DealPipelineDisposition,
-  workflowRoute: WorkflowRoute | null | undefined
-) {
-  if (pipelineDisposition === "service") {
-    return "service_deal" as const;
-  }
-
-  if (pipelineDisposition === "deals") {
-    return workflowFamilyForRoute(workflowRoute ?? "normal");
-  }
-
-  return "standard_deal" as const;
+  return (
+    Boolean(estimatingBoundary) &&
+    targetStage.displayOrder > (estimatingBoundary?.displayOrder ?? Number.POSITIVE_INFINITY)
+  );
 }
 
 async function validateDealPrimaryContact(
@@ -459,45 +279,6 @@ async function validateDealPrimaryContact(
   }
 }
 
-async function validateDealHierarchy(
-  tenantDb: TenantDb,
-  input: {
-    companyId?: string | null;
-    propertyId?: string | null;
-    primaryContactId?: string | null;
-  }
-) {
-  if (!input.companyId || !input.propertyId) {
-    throw new AppError(400, "Company and property are required");
-  }
-
-  const [company] = await tenantDb
-    .select({ id: companies.id })
-    .from(companies)
-    .where(and(eq(companies.id, input.companyId), eq(companies.isActive, true)))
-    .limit(1);
-
-  if (!company) {
-    throw new AppError(400, "Company not found");
-  }
-
-  const [property] = await tenantDb
-    .select()
-    .from(properties)
-    .where(and(eq(properties.id, input.propertyId), eq(properties.isActive, true)))
-    .limit(1);
-
-  if (!property) {
-    throw new AppError(400, "Property not found");
-  }
-
-  if (property.companyId !== input.companyId) {
-    throw new AppError(400, "Property does not belong to the company");
-  }
-
-  await validateDealPrimaryContact(tenantDb, input.companyId, input.primaryContactId);
-}
-
 async function assertSourceLeadLineageAvailable(
   tenantDb: TenantDb,
   sourceLeadId: string,
@@ -514,17 +295,9 @@ async function assertSourceLeadLineageAvailable(
   }
 }
 
-async function resolveSourceLeadLineage<
-  T extends {
-    sourceLeadId?: string | null;
-    companyId?: string | null;
-    propertyId?: string | null;
-    primaryContactId?: string | null;
-    source?: string | null;
-  },
->(
+async function resolveSourceLeadLineage(
   tenantDb: TenantDb,
-  input: T,
+  input: CreateDealInput,
   options?: { existingDealId?: string }
 ) {
   if (!input.sourceLeadId) {
@@ -695,10 +468,10 @@ export async function getDealDetail(tenantDb: TenantDb, dealId: string, userRole
 
   const currentStage = await getStageById(
     deal.stageId,
-    workflowFamilyForDisposition(deal.pipelineDisposition, deal.workflowRoute)
+    deal.workflowRoute === "service" ? "service_deal" : "standard_deal"
   );
 
-  const [stageHistory, approvals, cos, routingHistory, departmentOwnership] = await Promise.all([
+  const [stageHistory, approvals, cos] = await Promise.all([
     tenantDb
       .select()
       .from(dealStageHistory)
@@ -714,17 +487,6 @@ export async function getDealDetail(tenantDb: TenantDb, dealId: string, userRole
       .from(changeOrders)
       .where(eq(changeOrders.dealId, dealId))
       .orderBy(asc(changeOrders.coNumber)),
-    tenantDb
-      .select()
-      .from(dealRoutingHistory)
-      .where(eq(dealRoutingHistory.dealId, dealId))
-      .orderBy(desc(dealRoutingHistory.createdAt)),
-    getDealDepartmentOwnership(tenantDb, {
-      dealId,
-      stageSlug: currentStage?.slug ?? null,
-      pipelineDisposition: deal.pipelineDisposition,
-      workflowRoute: deal.workflowRoute,
-    }),
   ]);
 
   return {
@@ -734,8 +496,6 @@ export async function getDealDetail(tenantDb: TenantDb, dealId: string, userRole
     stageHistory,
     approvals,
     changeOrders: cos,
-    routingHistory,
-    departmentOwnership,
   };
 }
 
@@ -743,20 +503,8 @@ export async function getDealDetail(tenantDb: TenantDb, dealId: string, userRole
  * Create a new deal.
  */
 export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
-  const pipelineDisposition =
-    input.pipelineDisposition ??
-    (input.workflowRoute === "service" ? "service" : "deals");
   const workflowRoute = input.workflowRoute ?? "normal";
-  let stage = await getStageById(
-    input.stageId,
-    workflowFamilyForDisposition(pipelineDisposition, workflowRoute)
-  );
-  if (!stage && workflowRoute === "service") {
-    const fallbackOpportunityStage = await getStageById(input.stageId, "standard_deal");
-    if (fallbackOpportunityStage?.slug === "opportunity") {
-      stage = fallbackOpportunityStage;
-    }
-  }
+  const stage = await getStageById(input.stageId, workflowFamilyForRoute(workflowRoute));
   if (!stage) {
     throw new AppError(400, "Invalid stage ID for workflow route");
   }
@@ -766,7 +514,7 @@ export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
     throw new AppError(400, "Cannot create a deal in a terminal stage");
   }
 
-  if (!canCreateDealWithoutSourceLead(input)) {
+  if (!input.migrationMode && !input.sourceLeadId) {
     throw new AppError(400, "sourceLeadId is required unless migrationMode is true");
   }
 
@@ -780,16 +528,7 @@ export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
 
   const lineage = await resolveSourceLeadLineage(tenantDb, input);
 
-  const isDirectCreate = !input.sourceLeadId && !input.migrationMode;
-  if (isDirectCreate) {
-    await validateDealHierarchy(tenantDb, {
-      companyId: lineage.companyId,
-      propertyId: lineage.propertyId,
-      primaryContactId: lineage.primaryContactId,
-    });
-  }
-
-  if (!input.migrationMode && !isDirectCreate && (!lineage.companyId || !lineage.propertyId || !lineage.sourceLeadId)) {
+  if (!input.migrationMode && (!lineage.companyId || !lineage.propertyId || !lineage.sourceLeadId)) {
     throw new AppError(
       400,
       "Deals require source lead lineage, company, and property unless migrationMode is true"
@@ -798,9 +537,7 @@ export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
 
   // Validate the assigned rep exists, is active, and has office access
   await validateAssignee(tenantDb, input.assignedRepId, input.officeId);
-  if (!isDirectCreate) {
-    await validateDealPrimaryContact(tenantDb, lineage.companyId, lineage.primaryContactId);
-  }
+  await validateDealPrimaryContact(tenantDb, lineage.companyId, lineage.primaryContactId);
 
   const dealNumber = await generateDealNumber(tenantDb);
 
@@ -828,37 +565,11 @@ export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
       source: lineage.source,
       winProbability: input.winProbability ?? null,
       expectedCloseDate: input.expectedCloseDate ?? null,
-      pipelineDisposition,
       workflowRoute,
     })
     .returning();
 
   const newDeal = result[0];
-
-  await createAssignmentTaskIfNeeded(tenantDb, {
-    entityType: "deal",
-    entityId: newDeal.id,
-    entityName: newDeal.name,
-    previousAssignedRepId: null,
-    nextAssignedRepId: newDeal.assignedRepId,
-    actorUserId: input.actorUserId,
-    officeId: input.officeId ?? null,
-  });
-
-  await captureInitialForecastMilestone(tenantDb, {
-    deal: {
-      id: newDeal.id,
-      assignedRepId: newDeal.assignedRepId,
-      workflowRoute: newDeal.workflowRoute,
-      stageId: newDeal.stageId,
-      expectedCloseDate: newDeal.expectedCloseDate,
-      ddEstimate: newDeal.ddEstimate,
-      bidEstimate: newDeal.bidEstimate,
-      awardedAmount: newDeal.awardedAmount,
-      source: newDeal.source,
-    },
-    userId: input.assignedRepId,
-  });
 
   // Queue geocode as background job (the tenantDb connection will be released after commit)
   const { propertyAddress, propertyCity, propertyState, propertyZip, officeId } = input;
@@ -943,8 +654,6 @@ export async function updateDeal(
 
   // Build update object — only include fields that are provided
   const updates: Record<string, any> = {};
-  const nextAssignedRepId =
-    input.assignedRepId !== undefined ? input.assignedRepId : existing.assignedRepId;
   if (input.name !== undefined) updates.name = input.name;
   if (input.assignedRepId !== undefined) updates.assignedRepId = input.assignedRepId;
   if (input.primaryContactId !== undefined) updates.primaryContactId = input.primaryContactId;
@@ -961,36 +670,19 @@ export async function updateDeal(
   if (input.source !== undefined) updates.source = input.source;
   if (input.winProbability !== undefined) updates.winProbability = input.winProbability;
   if (input.expectedCloseDate !== undefined) updates.expectedCloseDate = input.expectedCloseDate;
-  if (input.decisionMakerName !== undefined) updates.decisionMakerName = input.decisionMakerName;
-  if (input.decisionProcess !== undefined) updates.decisionProcess = input.decisionProcess;
-  if (input.budgetStatus !== undefined) updates.budgetStatus = input.budgetStatus;
-  if (input.incumbentVendor !== undefined) updates.incumbentVendor = input.incumbentVendor;
-  if (input.unitCount !== undefined) updates.unitCount = input.unitCount;
-  if (input.buildYear !== undefined) updates.buildYear = input.buildYear;
-  if (input.forecastWindow !== undefined) updates.forecastWindow = input.forecastWindow;
-  if (input.forecastCategory !== undefined) updates.forecastCategory = input.forecastCategory;
-  if (input.forecastConfidencePercent !== undefined) {
-    updates.forecastConfidencePercent = input.forecastConfidencePercent;
-  }
-  if (input.forecastRevenue !== undefined) updates.forecastRevenue = input.forecastRevenue;
-  if (input.forecastGrossProfit !== undefined) updates.forecastGrossProfit = input.forecastGrossProfit;
-  if (input.forecastBlockers !== undefined) updates.forecastBlockers = input.forecastBlockers;
-  if (input.nextStep !== undefined) updates.nextStep = input.nextStep;
-  if (input.nextStepDueAt !== undefined) {
-    updates.nextStepDueAt = input.nextStepDueAt ? new Date(input.nextStepDueAt) : null;
-  }
-  if (input.nextMilestoneAt !== undefined) {
-    updates.nextMilestoneAt = input.nextMilestoneAt ? new Date(input.nextMilestoneAt) : null;
-  }
-  if (input.supportNeededType !== undefined) updates.supportNeededType = input.supportNeededType;
-  if (input.supportNeededNotes !== undefined) updates.supportNeededNotes = input.supportNeededNotes;
   if (input.proposalNotes !== undefined) updates.proposalNotes = input.proposalNotes;
   if (input.workflowRoute !== undefined) {
-    throw new AppError(400, "Use /api/deals/:id/routing-review for route changes");
-  }
-
-  if (input.pipelineDisposition !== undefined) {
-    throw new AppError(400, "Use /api/deals/:id/routing-review for route changes");
+    if (existing.sourceLeadId) {
+      throw new AppError(
+        400,
+        "workflowRoute is derived from lead routing and cannot be changed manually"
+      );
+    }
+    const stage = await getStageById(existing.stageId, workflowFamilyForRoute(input.workflowRoute));
+    if (!stage) {
+      throw new AppError(400, "Current stage is not valid for the requested workflow route");
+    }
+    updates.workflowRoute = input.workflowRoute;
   }
 
   if (input.sourceLeadId !== undefined) {
@@ -1007,7 +699,7 @@ export async function updateDeal(
           ? (existing.primaryContactId ?? undefined)
           : (input.primaryContactId ?? undefined),
       source: input.source === undefined ? (existing.source ?? undefined) : (input.source ?? undefined),
-      workflowRoute: input.workflowRoute ?? existing.workflowRoute ?? "normal",
+      workflowRoute: input.workflowRoute ?? existing.workflowRoute,
     }, {
       existingDealId: existing.id,
     });
@@ -1110,39 +802,11 @@ export async function updateDeal(
     return existing;
   }
 
-  if (
-    input.forecastWindow !== undefined ||
-    input.forecastCategory !== undefined ||
-    input.forecastConfidencePercent !== undefined ||
-    input.forecastRevenue !== undefined ||
-    input.forecastGrossProfit !== undefined ||
-    input.forecastBlockers !== undefined ||
-    input.nextMilestoneAt !== undefined
-  ) {
-    updates.forecastUpdatedAt = new Date();
-    updates.forecastUpdatedBy = userId;
-  }
-
   const result = await tenantDb
     .update(deals)
     .set(updates)
     .where(eq(deals.id, dealId))
     .returning();
-
-  if (
-    input.assignedRepId !== undefined &&
-    input.assignedRepId !== existing.assignedRepId
-  ) {
-    await createAssignmentTaskIfNeeded(tenantDb, {
-      entityType: "deal",
-      entityId: result[0].id,
-      entityName: result[0].name,
-      previousAssignedRepId: existing.assignedRepId,
-      nextAssignedRepId,
-      actorUserId: userId,
-      officeId: officeId ?? null,
-    });
-  }
 
   // Re-geocode if address changed
   const addressChanged =
@@ -1219,12 +883,7 @@ export async function getDealsForPipeline(
   const stages = await db
     .select()
     .from(pipelineStageConfig)
-    .where(
-      and(
-        inArray(pipelineStageConfig.workflowFamily, ["standard_deal", "service_deal"]),
-        eq(pipelineStageConfig.isActivePipeline, true)
-      )
-    )
+    .where(inArray(pipelineStageConfig.workflowFamily, ["standard_deal", "service_deal"]))
     .orderBy(asc(pipelineStageConfig.displayOrder));
 
   // Build deal conditions
@@ -1275,141 +934,6 @@ export async function getDealsForPipeline(
     }));
 
   return { pipelineColumns, terminalStages };
-}
-
-export async function listDealBoard(tenantDb: TenantDb, input: DealBoardInput) {
-  const previewLimit = Math.max(1, Math.min(12, input.previewLimit ?? 8));
-  const stages = await listDealStages();
-  const rowResult = await tenantDb.execute(sql`
-    select
-      d.id,
-      d.deal_number,
-      d.name,
-      d.stage_id,
-      d.assigned_rep_id,
-      u.office_id,
-      d.workflow_route,
-      d.awarded_amount,
-      d.bid_estimate,
-      d.dd_estimate,
-      d.property_city,
-      d.property_state,
-      d.source,
-      d.last_activity_at,
-      d.stage_entered_at,
-      d.updated_at
-    from deals d
-    join users u on u.id = d.assigned_rep_id
-    where ${buildDealWorkspaceScope(input)}
-    order by d.updated_at desc
-  `);
-
-  const rows = rowResult.rows as DealWorkspaceRow[];
-  const pipelineColumns = stages
-    .filter((stage) => !stage.isTerminal)
-    .filter((stage) => input.includeDd || stage.isActivePipeline)
-    .map((stage) => {
-      const dealsForStage = rows
-        .filter((row) => row.stage_id === stage.id)
-        .map(mapDealWorkspaceRow);
-
-      return {
-        stage,
-        deals: dealsForStage.slice(0, previewLimit),
-        totalValue: dealsForStage.reduce(
-          (sum, deal) => sum + Number(deal.awardedAmount ?? deal.bidEstimate ?? deal.ddEstimate ?? 0),
-          0
-        ),
-        count: dealsForStage.length,
-      };
-    });
-
-  const terminalStages = stages
-    .filter((stage) => stage.isTerminal)
-    .map((stage) => {
-      const dealsForStage = rows
-        .filter((row) => row.stage_id === stage.id)
-        .map(mapDealWorkspaceRow);
-
-      return {
-        stage,
-        deals: dealsForStage.slice(0, previewLimit),
-        count: dealsForStage.length,
-      };
-    });
-
-  return {
-    pipelineColumns,
-    terminalStages,
-    columns: pipelineColumns.map((column) => ({
-      ...column,
-      cards: column.deals,
-    })),
-  };
-}
-
-export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePageInput) {
-  const [stage] = await listDealStages().then((stages) => stages.filter((item) => item.id === input.stageId));
-  if (!stage) {
-    throw new AppError(404, "Deal stage not found");
-  }
-
-  const page = Math.max(1, input.page || 1);
-  const pageSize = Math.max(1, Math.min(100, input.pageSize || 25));
-  const offset = (page - 1) * pageSize;
-  const scope = buildDealWorkspaceScope(input);
-  const countResult = await tenantDb.execute(sql`
-    select
-      count(*)::int as total,
-      coalesce(sum(coalesce(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)), 0)::numeric as total_value
-    from deals d
-    join users u on u.id = d.assigned_rep_id
-    where ${scope} and d.stage_id = ${input.stageId}
-  `);
-  const rowResult = await tenantDb.execute(sql`
-    select
-      d.id,
-      d.deal_number,
-      d.name,
-      d.stage_id,
-      d.assigned_rep_id,
-      u.office_id,
-      d.workflow_route,
-      d.awarded_amount,
-      d.bid_estimate,
-      d.dd_estimate,
-      d.property_city,
-      d.property_state,
-      d.source,
-      d.last_activity_at,
-      d.stage_entered_at,
-      d.updated_at
-    from deals d
-    join users u on u.id = d.assigned_rep_id
-    where ${scope} and d.stage_id = ${input.stageId}
-    order by ${normalizeDealStageSort(input.sort)}
-    limit ${pageSize}
-    offset ${offset}
-  `);
-
-  const summaryRow = (countResult.rows[0] as { total?: string | number; total_value?: string | number } | undefined) ?? {};
-  const total = Number(summaryRow.total ?? 0);
-
-  return {
-    stage,
-    scope: input.scope,
-    summary: {
-      count: total,
-      totalValue: Number(summaryRow.total_value ?? 0),
-    },
-    pagination: {
-      page,
-      pageSize,
-      total,
-      totalPages: Math.ceil(total / pageSize),
-    },
-    rows: (rowResult.rows as DealWorkspaceRow[]).map(mapDealWorkspaceRow),
-  };
 }
 
 /**

@@ -70,8 +70,9 @@ export async function cancelTimer(tenantDb: TenantDb, timerId: string, dealId: s
 
 /**
  * Auto-create stage-specific timers when a deal enters certain stages.
- * - 'estimate_in_progress' / 'service_estimating'                → 14-day estimate_review timer
- * - 'estimate_sent_to_client' / 'service_estimate_sent_to_client' → 48hr proposal_response timer
+ * - estimating boundary stages → 14-day estimate_review timer
+ * - proposal sent stages       → 48hr proposal_response timer
+ * - closeout / production handoff legacy stages → 5-day final_billing timer
  */
 export async function createStageTimers(
   tenantDb: TenantDb,
@@ -99,6 +100,7 @@ function getTimerSpecForStage(
   stageSlug: string
 ): { timerType: string; label: string; durationMs: number } | null {
   switch (stageSlug) {
+    case "estimating":
     case "estimate_in_progress":
     case "service_estimating":
       return {
@@ -106,12 +108,20 @@ function getTimerSpecForStage(
         label: "Estimate Review Due",
         durationMs: 14 * 24 * 60 * 60 * 1000, // 14 days
       };
+    case "bid_sent":
     case "estimate_sent_to_client":
-    case "service_estimate_sent_to_client":
       return {
         timerType: "proposal_response",
         label: "Proposal Response Due",
         durationMs: 48 * 60 * 60 * 1000, // 48 hours
+      };
+    case "close_out":
+    case "sent_to_production":
+    case "service_sent_to_production":
+      return {
+        timerType: "final_billing",
+        label: "Final Billing Due",
+        durationMs: 5 * 24 * 60 * 60 * 1000, // 5 days
       };
     default:
       return null;

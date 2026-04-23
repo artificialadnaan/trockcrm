@@ -224,6 +224,43 @@ describe("changeDealStage", () => {
     expect(result.deal.readOnlySyncedAt).toBeInstanceOf(Date);
   });
 
+  it("marks service deals as Bid Board-owned when CRM hands them into service estimating", async () => {
+    const tenantDb = createTenantDb({
+      workflowRoute: "service",
+    });
+    vi.mocked(validateStageGate).mockResolvedValue({
+      allowed: true,
+      isBackwardMove: false,
+      requiresOverride: false,
+      targetStage: {
+        id: "stage-service-estimating",
+        name: "Service Estimating",
+        slug: "service_estimating",
+        isTerminal: false,
+        displayOrder: 1,
+      },
+      currentStage: {
+        id: "stage-dd",
+        name: "DD",
+        slug: "dd",
+        isTerminal: false,
+        displayOrder: 0,
+      },
+    } as never);
+
+    const result = await changeDealStage(tenantDb as never, {
+      dealId: "deal-1",
+      targetStageId: "stage-service-estimating",
+      userId: "user-1",
+      userRole: "director",
+    });
+
+    expect(result.deal.stageId).toBe("stage-service-estimating");
+    expect(result.deal.isBidBoardOwned).toBe(true);
+    expect(result.deal.bidBoardStageSlug).toBe("service_estimating");
+    expect(result.deal.readOnlySyncedAt).toBeInstanceOf(Date);
+  });
+
   it("blocks manual downstream stage changes after Bid Board ownership begins", async () => {
     const tenantDb = createTenantDb({
       stageId: "stage-estimating",
@@ -250,6 +287,13 @@ describe("changeDealStage", () => {
         isTerminal: false,
         displayOrder: 2,
       },
+    } as never);
+    vi.mocked(pipelineService.getStageBySlug).mockResolvedValueOnce({
+      id: "stage-estimate-in-progress",
+      name: "Estimate in Progress",
+      slug: "estimate_in_progress",
+      isTerminal: false,
+      displayOrder: 1,
     } as never);
 
     await expect(
@@ -480,7 +524,9 @@ describe("changeDealStage", () => {
       readOnlySyncedAt: new Date("2026-04-21T12:00:00.000Z"),
     });
 
-    vi.mocked(pipelineService.getStageBySlug).mockResolvedValueOnce(null as never);
+    vi.mocked(pipelineService.getStageBySlug)
+      .mockResolvedValueOnce(null as never)
+      .mockResolvedValueOnce(null as never);
     vi.mocked(validateStageGate).mockResolvedValue({
       allowed: true,
       isBackwardMove: false,

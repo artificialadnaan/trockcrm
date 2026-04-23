@@ -1681,6 +1681,60 @@ describe("Stage Gate Payload Hardening", () => {
     });
   });
 
+  it("rejects lead-family stages for deals", async () => {
+    const { validateStageGate } = await import("../../../src/modules/deals/stage-gate.js");
+    const tenantDb = createHardeningTenantDb({
+      deals: [
+        {
+          id: "deal-1",
+          name: "Palm Villas",
+          stageId: "stage-dd-normal",
+          workflowRoute: "normal",
+          assignedRepId: "rep-1",
+          projectTypeId: "pt-1",
+          propertyAddress: "123 Palm Way",
+          propertyCity: "Miami",
+          propertyState: "FL",
+          propertyZip: "33101",
+          description: "Exterior refresh",
+        },
+      ],
+    });
+
+    mockedStageLookups.queue.push(
+      {
+        id: "stage-dd-normal",
+        name: "Opportunity",
+        slug: "dd",
+        workflowFamily: "standard_deal",
+        isTerminal: false,
+        displayOrder: 0,
+        requiredFields: [],
+        requiredDocuments: [],
+        requiredApprovals: [],
+      },
+      {
+        id: "stage-qualified-lead",
+        name: "Qualified Lead",
+        slug: "qualified_lead",
+        workflowFamily: "lead",
+        isTerminal: false,
+        displayOrder: 1,
+        requiredFields: [],
+        requiredDocuments: [],
+        requiredApprovals: [],
+      }
+    );
+
+    await expect(
+      validateStageGate(tenantDb as never, "deal-1", "stage-qualified-lead", "director", "director-1")
+    ).rejects.toMatchObject({
+      statusCode: 400,
+      code: "INVALID_STAGE_FOR_WORKFLOW_ROUTE",
+      message: "Target stage is not valid for the deal workflow route.",
+    });
+  });
+
   it("rejects standard-family stages for service-route deals", async () => {
     const { validateStageGate } = await import("../../../src/modules/deals/stage-gate.js");
     const tenantDb = createHardeningTenantDb({

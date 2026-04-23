@@ -21,9 +21,47 @@ import {
   isBidBoardOwnedDownstreamStage,
 } from "./service.js";
 import { inferDealBidBoardOwnership } from "./workflow-backfill.js";
-import { captureStageDrivenForecastMilestone } from "../reports/forecast-milestones-service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
+
+function isEstimatingBoundaryStageSlug(stageSlug: string, workflowRoute: "normal" | "service") {
+  return (
+    stageSlug === "estimating" ||
+    stageSlug === (workflowRoute === "service" ? "service_estimating" : "estimate_in_progress")
+  );
+}
+
+function toCanonicalTerminalOutcomeSlug(
+  stageSlug: string,
+  workflowRoute: "normal" | "service"
+): "sent_to_production" | "service_sent_to_production" | "production_lost" | "service_lost" | null {
+  if (stageSlug === "sent_to_production" || stageSlug === "service_sent_to_production") {
+    return stageSlug;
+  }
+  if (stageSlug === "production_lost" || stageSlug === "service_lost") {
+    return stageSlug;
+  }
+  if (stageSlug === "closed_won") {
+    return workflowRoute === "service" ? "service_sent_to_production" : "sent_to_production";
+  }
+  if (stageSlug === "closed_lost") {
+    return workflowRoute === "service" ? "service_lost" : "production_lost";
+  }
+  return null;
+}
+
+function isLostOutcomeStage(stageSlug: string, workflowRoute: "normal" | "service") {
+  const canonicalOutcomeSlug = toCanonicalTerminalOutcomeSlug(stageSlug, workflowRoute);
+  return canonicalOutcomeSlug === "production_lost" || canonicalOutcomeSlug === "service_lost";
+}
+
+function isWonOutcomeStage(stageSlug: string, workflowRoute: "normal" | "service") {
+  const canonicalOutcomeSlug = toCanonicalTerminalOutcomeSlug(stageSlug, workflowRoute);
+  return (
+    canonicalOutcomeSlug === "sent_to_production" ||
+    canonicalOutcomeSlug === "service_sent_to_production"
+  );
+}
 
 export interface StageChangeInput {
   dealId: string;
@@ -143,11 +181,11 @@ export async function changeDealStage(
 
   const currentIsBidBoardBoundaryOrDownstream =
     Boolean(estimatingBoundary) &&
-    (gateResult.currentStage.slug === estimatingBoundary?.slug ||
+    (isEstimatingBoundaryStageSlug(gateResult.currentStage.slug, currentDeal[0].workflowRoute) ||
       isBidBoardOwnedDownstreamStage(gateResult.currentStage, estimatingBoundary));
   const targetIsBidBoardBoundaryOrDownstream =
     Boolean(estimatingBoundary) &&
-    (targetStage.slug === estimatingBoundary?.slug ||
+    (isEstimatingBoundaryStageSlug(targetStage.slug, currentDeal[0].workflowRoute) ||
       isBidBoardOwnedDownstreamStage(targetStage, estimatingBoundary));
   const targetIsReopenIntoCrmOwnedFlow =
     Boolean(estimatingBoundary) &&
@@ -166,7 +204,7 @@ export async function changeDealStage(
   }
 
   // Closed Lost: require lost_reason_id + lost_notes
-  if (["production_lost", "service_lost"].includes(targetStage.slug)) {
+  if (isLostOutcomeStage(targetStage.slug, currentDeal[0].workflowRoute)) {
     if (!lostReasonId) {
       throw new AppError(400, "lost_reason_id is required when closing a deal as lost");
     }
@@ -208,7 +246,7 @@ export async function changeDealStage(
     dealUpdates.readOnlySyncedAt = null;
   }
 
-  if (["estimate_in_progress", "service_estimating"].includes(targetStage.slug)) {
+  if (isEstimatingBoundaryStageSlug(targetStage.slug, currentDeal[0].workflowRoute)) {
     dealUpdates.isBidBoardOwned = true;
     dealUpdates.bidBoardStageSlug = targetStage.slug;
     dealUpdates.readOnlySyncedAt = new Date();
@@ -224,11 +262,11 @@ export async function changeDealStage(
   dealUpdates.lostAt = null;
 
   // Then set the fields specific to the target terminal stage
-  if (["sent_to_production", "service_sent_to_production"].includes(targetStage.slug)) {
+  if (isWonOutcomeStage(targetStage.slug, currentDeal[0].workflowRoute)) {
     dealUpdates.actualCloseDate = new Date().toISOString().split("T")[0]; // DATE only
   }
 
-  if (["production_lost", "service_lost"].includes(targetStage.slug)) {
+  if (isLostOutcomeStage(targetStage.slug, currentDeal[0].workflowRoute)) {
     dealUpdates.lostReasonId = lostReasonId;
     dealUpdates.lostNotes = lostNotes;
     dealUpdates.lostCompetitor = lostCompetitor ?? null;
@@ -249,23 +287,6 @@ export async function changeDealStage(
     .where(eq(deals.id, dealId))
     .returning();
   const updatedDeal = updatedDealResult[0];
-
-  await captureStageDrivenForecastMilestone(tenantDb, {
-    deal: {
-      id: updatedDeal.id,
-      assignedRepId: updatedDeal.assignedRepId,
-      workflowRoute: updatedDeal.workflowRoute,
-      ddEstimate: updatedDeal.ddEstimate,
-      bidEstimate: updatedDeal.bidEstimate,
-      awardedAmount: updatedDeal.awardedAmount,
-      stageId: updatedDeal.stageId,
-      expectedCloseDate: updatedDeal.expectedCloseDate,
-      source: updatedDeal.source,
-    },
-    currentStage: { slug: currentStage.slug },
-    targetStage: { slug: targetStage.slug },
-    userId,
-  });
 
   // Auto-dismiss pending/in-progress tasks when deal reaches a terminal stage
   if (targetStage.isTerminal) {
@@ -334,7 +355,7 @@ export async function changeDealStage(
     status: "pending",
   });
 
-  if (["estimate_in_progress", "service_estimating"].includes(targetStage.slug)) {
+  if (isEstimatingBoundaryStageSlug(targetStage.slug, updatedDeal.workflowRoute)) {
     const scopingActivation = await activateDealScopingIntake(tenantDb, dealId);
     const scopingActivatedPayload = {
       dealId,
@@ -360,7 +381,7 @@ export async function changeDealStage(
   }
 
   // Closed Won
-  if (["sent_to_production", "service_sent_to_production"].includes(targetStage.slug)) {
+  if (isWonOutcomeStage(targetStage.slug, updatedDeal.workflowRoute)) {
     const wonPayload = {
       dealId,
       dealName: updatedDeal.name,
@@ -379,7 +400,7 @@ export async function changeDealStage(
   }
 
   // Closed Lost
-  if (["production_lost", "service_lost"].includes(targetStage.slug)) {
+  if (isLostOutcomeStage(targetStage.slug, updatedDeal.workflowRoute)) {
     const lostPayload = {
       dealId,
       dealName: updatedDeal.name,

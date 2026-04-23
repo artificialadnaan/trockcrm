@@ -8,6 +8,7 @@ import {
   closeoutChecklistItems,
 } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
+import { toCanonicalDealStageSlug } from "@trock-crm/shared/types";
 import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import type { UserRole } from "@trock-crm/shared/types";
@@ -156,6 +157,13 @@ function workflowFamilyForRoute(workflowRoute: "normal" | "service") {
   return workflowRoute === "service" ? "service_deal" : "standard_deal";
 }
 
+function isEstimatingBoundaryStageSlug(stageSlug: string, workflowRoute: "normal" | "service") {
+  return (
+    stageSlug === "estimating" ||
+    stageSlug === (workflowRoute === "service" ? "service_estimating" : "estimate_in_progress")
+  );
+}
+
 /**
  * Validate whether a deal can move to the target stage.
  *
@@ -203,11 +211,7 @@ export async function validateStageGate(
 
   const requiredWorkflowFamily = workflowFamilyForRoute(deal.workflowRoute);
   const targetWorkflowFamily = (targetStage as { workflowFamily?: string | null }).workflowFamily ?? null;
-  if (
-    targetWorkflowFamily &&
-    (targetWorkflowFamily === "standard_deal" || targetWorkflowFamily === "service_deal") &&
-    targetWorkflowFamily !== requiredWorkflowFamily
-  ) {
+  if (targetWorkflowFamily === "lead" || (targetWorkflowFamily && targetWorkflowFamily !== requiredWorkflowFamily)) {
     throw new AppError(
       400,
       "Target stage is not valid for the deal workflow route.",
@@ -356,11 +360,16 @@ export async function validateStageGate(
     }
   }
 
-  // Rule 2: Sent-to-production handoff requires the close-out checklist when
-  // the legacy close-out workflow is still in use for a record.
+  const canonicalTargetStageSlug = toCanonicalDealStageSlug(
+    targetStage.slug,
+    deal.workflowRoute ?? "normal"
+  );
+
+  // Rule 2: Close-out checklist must be complete before moving from Close-Out into a won outcome.
   if (
-    ["sent_to_production", "service_sent_to_production"].includes(targetStage.slug) &&
-    ["estimate_sent_to_client", "service_estimate_sent_to_client", "close_out"].includes(currentStage.slug)
+    currentStage.slug === "close_out" &&
+    (canonicalTargetStageSlug === "sent_to_production" ||
+      canonicalTargetStageSlug === "service_sent_to_production")
   ) {
     const checklistItems = await tenantDb
       .select()
@@ -404,7 +413,7 @@ export async function validateStageGate(
     }
   }
 
-  if (["estimate_in_progress", "service_estimating"].includes(targetStage.slug)) {
+  if (isEstimatingBoundaryStageSlug(targetStage.slug, deal.workflowRoute)) {
     const scopingReadiness = await evaluateDealScopingReadiness(tenantDb, dealId);
     const scopingMissingFields = Object.entries(scopingReadiness.errors.sections).flatMap(
       ([sectionName, fieldNames]) => fieldNames.map((fieldName) => `${sectionName}.${fieldName}`)

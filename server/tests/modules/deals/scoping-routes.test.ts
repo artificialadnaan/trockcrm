@@ -1,7 +1,23 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../../src/modules/deals/service.js", () => ({
-  getDealById: vi.fn(async () => ({ id: "deal-1", assignedRepId: "user-1" })),
+  getDealById: vi.fn(async () => ({
+    id: "deal-1",
+    assignedRepId: "user-1",
+    workflowRoute: "normal",
+    stageEnteredAt: new Date("2026-04-21T12:00:00.000Z"),
+    pipelineTypeSnapshot: "normal",
+    ddEstimate: null,
+    bidEstimate: null,
+    awardedAmount: null,
+    sourceLeadId: null,
+    isBidBoardOwned: false,
+    bidBoardStageSlug: null,
+    bidBoardStageEnteredAt: null,
+    bidBoardMirrorSourceEnteredAt: null,
+    isReadOnlyMirror: false,
+    readOnlySyncedAt: null,
+  })),
   getDeals: vi.fn(),
   getDealDetail: vi.fn(),
   createDeal: vi.fn(),
@@ -9,6 +25,31 @@ vi.mock("../../../src/modules/deals/service.js", () => ({
   deleteDeal: vi.fn(),
   getDealsForPipeline: vi.fn(),
   getDealSources: vi.fn(),
+  buildBidBoardOwnershipState: vi.fn((deal) => ({
+    isOwned: deal.isBidBoardOwned,
+    sourceOfTruth: deal.isBidBoardOwned ? "bid_board" : "crm",
+    handoffStageSlug: "estimate_in_progress",
+    downstreamStagesReadOnly: deal.isBidBoardOwned,
+    canEditInCrm: ["deal details"],
+    mirroredInCrm: ["stage progression"],
+    reason: "stubbed",
+    message: "stubbed",
+  })),
+  getEstimatingBoundaryStage: vi.fn(async () => ({
+    id: "stage-estimate-in-progress",
+    slug: "estimate_in_progress",
+    displayOrder: 1,
+  })),
+  getRequiredEstimatingBoundaryStage: vi.fn(async () => ({
+    id: "stage-estimate-in-progress",
+    slug: "estimate_in_progress",
+    displayOrder: 1,
+  })),
+  isBidBoardOwnedDownstreamStage: vi.fn(
+    (stage, boundary) => Boolean(boundary) && stage.displayOrder > boundary.displayOrder
+  ),
+  BID_BOARD_STAGE_READ_ONLY_MESSAGE:
+    "Deal stage progression is read-only in CRM after estimating handoff. Bid Board is now the source of truth for downstream stages.",
 }));
 
 vi.mock("../../../src/modules/deals/stage-change.js", () => ({
@@ -31,9 +72,17 @@ vi.mock("../../../src/modules/deals/scoping-service.js", () => ({
   linkDealFileToScopingRequirement: vi.fn(),
 }));
 
+vi.mock("../../../src/modules/deals/workflow-backfill.js", () => ({
+  inferDealBidBoardOwnership: vi.fn(() => ({
+    isBidBoardOwned: false,
+  })),
+}));
+
 const { dealRoutes } = await import("../../../src/modules/deals/routes.js");
 const scopingService = await import("../../../src/modules/deals/scoping-service.js");
 const stageChange = await import("../../../src/modules/deals/stage-change.js");
+const dealService = await import("../../../src/modules/deals/service.js");
+const workflowBackfill = await import("../../../src/modules/deals/workflow-backfill.js");
 
 function findRouteHandler(method: "get" | "patch" | "post", path: string) {
   const layer = (dealRoutes as any).stack.find(
@@ -186,5 +235,80 @@ describe("Deal Scoping Routes", () => {
     });
     expect(res.statusCode).toBe(200);
     expect(res.body.activated).toBe(true);
+  });
+
+  it("keeps preflight aligned with the Bid Board boundary lock even before the ownership flag backfills", async () => {
+    const preflight = await import("../../../src/modules/deals/stage-gate.js");
+    vi.mocked(preflight.preflightStageCheck).mockResolvedValueOnce({
+      allowed: true,
+      blockReason: null,
+      currentStage: {
+        id: "stage-estimate-in-progress",
+        name: "Estimate in Progress",
+        slug: "estimate_in_progress",
+        isTerminal: false,
+        displayOrder: 1,
+      },
+      targetStage: {
+        id: "stage-estimate-in-progress-clone",
+        name: "Estimate in Progress",
+        slug: "estimate_in_progress",
+        isTerminal: false,
+        displayOrder: 1,
+      },
+    } as never);
+    vi.mocked(workflowBackfill.inferDealBidBoardOwnership).mockReturnValueOnce({
+      isBidBoardOwned: false,
+    } as never);
+
+    const { res } = await invokeRoute("post", "/:id/stage/preflight", {
+      params: { id: "deal-1" },
+      body: { targetStageId: "stage-estimate-in-progress-clone" },
+    });
+
+    expect(dealService.getEstimatingBoundaryStage).toHaveBeenCalledWith("normal");
+    expect(res.statusCode).toBe(200);
+    expect(res.body.allowed).toBe(false);
+    expect(res.body.bidBoardLocked).toBe(true);
+    expect(res.body.blockReason).toBe(
+      "Deal stage progression is read-only in CRM after estimating handoff. Bid Board is now the source of truth for downstream stages."
+    );
+  });
+
+  it("treats legacy estimating as the Bid Board boundary when canonical boundary config exists", async () => {
+    const preflight = await import("../../../src/modules/deals/stage-gate.js");
+    vi.mocked(preflight.preflightStageCheck).mockResolvedValueOnce({
+      allowed: true,
+      blockReason: null,
+      currentStage: {
+        id: "stage-estimating",
+        name: "Estimating",
+        slug: "estimating",
+        isTerminal: false,
+        displayOrder: 1,
+      },
+      targetStage: {
+        id: "stage-bid-sent",
+        name: "Estimate Sent to Client",
+        slug: "estimate_sent_to_client",
+        isTerminal: false,
+        displayOrder: 2,
+      },
+    } as never);
+    vi.mocked(workflowBackfill.inferDealBidBoardOwnership).mockReturnValueOnce({
+      isBidBoardOwned: false,
+    } as never);
+
+    const { res } = await invokeRoute("post", "/:id/stage/preflight", {
+      params: { id: "deal-1" },
+      body: { targetStageId: "stage-bid-sent" },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.allowed).toBe(false);
+    expect(res.body.bidBoardLocked).toBe(true);
+    expect(res.body.blockReason).toBe(
+      "Deal stage progression is read-only in CRM after estimating handoff. Bid Board is now the source of truth for downstream stages."
+    );
   });
 });

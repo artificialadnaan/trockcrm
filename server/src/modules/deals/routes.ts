@@ -1,23 +1,22 @@
 import { Router } from "express";
 import { and, eq, desc, isNotNull, sql } from "drizzle-orm";
-import { dealApprovals, dealPaymentEvents, deals, jobQueue } from "@trock-crm/shared/schema";
+import { dealApprovals, deals, jobQueue } from "@trock-crm/shared/schema";
 import { requireRole } from "../../middleware/rbac.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { eventBus } from "../../events/bus.js";
-import { db } from "../../db.js";
 import {
   BID_BOARD_STAGE_READ_ONLY_MESSAGE,
   buildBidBoardOwnershipState,
   getDeals,
   getDealById,
   getDealDetail,
+  getEstimatingBoundaryStage,
   getRequiredEstimatingBoundaryStage,
   isBidBoardOwnedDownstreamStage,
   createDeal,
   updateDeal,
   deleteDeal,
-  listDealBoard,
-  listDealStagePage,
+  getDealsForPipeline,
   getDealSources,
 } from "./service.js";
 import { activateServiceHandoff, changeDealStage } from "./stage-change.js";
@@ -69,85 +68,14 @@ import {
   upsertDealScopingIntake,
 } from "./scoping-service.js";
 import { inferDealBidBoardOwnership } from "./workflow-backfill.js";
-import { confirmUpload, getFileById } from "../files/service.js";
-import {
-  createEstimateSourceDocument,
-  enqueueEstimateDocumentOcrJob,
-  reprocessEstimateSourceDocument,
-} from "../estimating/document-service.js";
-import {
-  approveEstimateRecommendation,
-  listApprovedRecommendationIdsForRun,
-  promoteApprovedRecommendationsToEstimate,
-} from "../estimating/draft-estimate-service.js";
-import {
-  updateEstimatePricingRecommendationReviewState,
-} from "../estimating/workbench-service.js";
-import {
-  createManualEstimateRow,
-  updateManualEstimateRow,
-} from "../estimating/manual-row-service.js";
-import {
-  promoteManualRowToLocalCatalog,
-} from "../estimating/local-catalog-service.js";
-import {
-  answerEstimatingCopilotQuestion,
-  buildEstimatingCopilotContext,
-  getEstimatingWorkflowState,
-  listEstimateReviewEvents,
-} from "../estimating/copilot-service.js";
-import {
-  approveEstimateExtraction,
-  rejectEstimateExtraction,
-  updateEstimateExtraction,
-} from "../estimating/extraction-review-service.js";
-import {
-  approveEstimatePricingRecommendation,
-  rejectEstimatePricingRecommendation,
-  overrideEstimatePricingRecommendation,
-} from "../estimating/pricing-review-service.js";
-import {
-  rejectEstimateExtractionMatch,
-  selectEstimateExtractionMatch,
-} from "../estimating/match-review-service.js";
-import {
-  clearDealMarketOverride,
-  getDealEffectiveMarketContext,
-  listEstimateMarkets,
-  setDealMarketOverride,
-} from "../estimating/deal-market-override-service.js";
-import { applyOpportunityRoutingReview } from "./routing-service.js";
 
 const router = Router();
 
-function readBoardInput(req: Parameters<typeof router.get>[1] extends never ? never : any) {
-  return {
-    role: req.user!.role,
-    userId: req.user!.id,
-    activeOfficeId: req.user!.activeOfficeId ?? req.user!.officeId,
-    scope: (req.query.scope as "mine" | "team" | "all" | undefined) ?? "mine",
-    includeDd: req.query.includeDd === "true",
-    previewLimit: req.query.previewLimit ? Number(req.query.previewLimit) : undefined,
-  };
-}
-
-function readStageInput(req: Parameters<typeof router.get>[1] extends never ? never : any) {
-  return {
-    ...readBoardInput(req),
-    stageId: req.params.stageId,
-    page: Number(req.query.page ?? 1),
-    pageSize: Number(req.query.pageSize ?? 25),
-    search: req.query.search as string | undefined,
-    sort: req.query.sort as string | undefined,
-    assignedRepId: req.query.assignedRepId as string | undefined,
-    staleOnly: req.query.staleOnly === "true",
-    status: req.query.status as string | undefined,
-    workflowRoute: req.query.workflowRoute as string | undefined,
-    source: req.query.source as string | undefined,
-    regionId: req.query.regionId as string | undefined,
-    updatedAfter: req.query.updatedAfter as string | undefined,
-    updatedBefore: req.query.updatedBefore as string | undefined,
-  };
+function isEstimatingBoundaryStageSlug(stageSlug: string, workflowRoute: "normal" | "service") {
+  return (
+    stageSlug === "estimating" ||
+    stageSlug === (workflowRoute === "service" ? "service_estimating" : "estimate_in_progress")
+  );
 }
 
 async function queueDomainEvent(
@@ -255,17 +183,16 @@ router.get("/sources", async (req, res, next) => {
 // GET /api/deals/pipeline — deals grouped by stage for kanban
 router.get("/pipeline", async (req, res, next) => {
   try {
-    const result = await listDealBoard(req.tenantDb!, readBoardInput(req));
-    await req.commitTransaction!();
-    res.json(result);
-  } catch (err) {
-    next(err);
-  }
-});
-
-router.get("/stages/:stageId", async (req, res, next) => {
-  try {
-    const result = await listDealStagePage(req.tenantDb!, readStageInput(req));
+    const filters = {
+      assignedRepId: req.query.assignedRepId as string | undefined,
+      includeDd: req.query.includeDd === "true",
+    };
+    const result = await getDealsForPipeline(
+      req.tenantDb!,
+      req.user!.role,
+      req.user!.id,
+      filters
+    );
     await req.commitTransaction!();
     res.json(result);
   } catch (err) {
@@ -340,90 +267,6 @@ router.get("/:id/detail", async (req, res, next) => {
     if (!detail) throw new AppError(404, "Deal not found");
     await req.commitTransaction!();
     res.json({ deal: detail });
-  } catch (err) {
-    next(err);
-  }
-});
-
-// GET /api/deals/:id/payments — cash-received events for commission visibility
-router.get("/:id/payments", async (req, res, next) => {
-  try {
-    const dealId = req.params.id as string;
-    const deal = await getDealById(req.tenantDb!, dealId, req.user!.role, req.user!.id);
-    if (!deal) throw new AppError(404, "Deal not found");
-
-    const payments = await req.tenantDb!
-      .select()
-      .from(dealPaymentEvents)
-      .where(eq(dealPaymentEvents.dealId, dealId))
-      .orderBy(desc(dealPaymentEvents.paidAt));
-
-    await req.commitTransaction!();
-    res.json({ payments });
-  } catch (err) {
-    next(err);
-  }
-});
-
-// POST /api/deals/:id/payments — record a cash-received event (admin only)
-router.post("/:id/payments", requireRole("admin"), async (req, res, next) => {
-  try {
-    const dealId = req.params.id as string;
-    const deal = await getDealById(req.tenantDb!, dealId, req.user!.role, req.user!.id);
-    if (!deal) throw new AppError(404, "Deal not found");
-
-    const paidAt = new Date(String(req.body?.paidAt ?? ""));
-    if (Number.isNaN(paidAt.getTime())) {
-      throw new AppError(400, "paidAt must be a valid ISO date");
-    }
-
-    const grossRevenueAmount = Number(req.body?.grossRevenueAmount);
-    if (!Number.isFinite(grossRevenueAmount)) {
-      throw new AppError(400, "grossRevenueAmount must be a number");
-    }
-    const isCreditMemo = Boolean(req.body?.isCreditMemo ?? false);
-    if (isCreditMemo && grossRevenueAmount >= 0) {
-      throw new AppError(400, "grossRevenueAmount must be negative for credit memos");
-    }
-    if (!isCreditMemo && grossRevenueAmount < 0) {
-      throw new AppError(400, "grossRevenueAmount must be non-negative when not a credit memo");
-    }
-
-    const grossMarginRaw = req.body?.grossMarginAmount;
-    const grossMarginAmount =
-      grossMarginRaw === null || grossMarginRaw === undefined || grossMarginRaw === ""
-        ? null
-        : Number(grossMarginRaw);
-    if (grossMarginAmount !== null && !Number.isFinite(grossMarginAmount)) {
-      throw new AppError(400, "grossMarginAmount must be a number when provided");
-    }
-    if (grossMarginAmount !== null) {
-      if (isCreditMemo && grossMarginAmount >= 0) {
-        throw new AppError(400, "grossMarginAmount must be negative for credit memos");
-      }
-      if (!isCreditMemo && grossMarginAmount < 0) {
-        throw new AppError(400, "grossMarginAmount must be non-negative when not a credit memo");
-      }
-      if (Math.abs(grossMarginAmount) > Math.abs(grossRevenueAmount)) {
-        throw new AppError(400, "grossMarginAmount cannot exceed grossRevenueAmount");
-      }
-    }
-
-    const [payment] = await req.tenantDb!
-      .insert(dealPaymentEvents)
-      .values({
-        dealId,
-        recordedByUserId: req.user!.id,
-        paidAt,
-        grossRevenueAmount: String(grossRevenueAmount),
-        grossMarginAmount: grossMarginAmount === null ? null : String(grossMarginAmount),
-        isCreditMemo,
-        notes: typeof req.body?.notes === "string" ? req.body.notes : null,
-      })
-      .returning();
-
-    await req.commitTransaction!();
-    res.status(201).json({ payment });
   } catch (err) {
     next(err);
   }
@@ -581,7 +424,6 @@ router.post("/", async (req, res, next) => {
       name,
       stageId,
       assignedRepId: repId,
-      actorUserId: req.user!.id,
       officeId: req.user!.activeOfficeId,
       ...rest,
     });
@@ -595,12 +437,9 @@ router.post("/", async (req, res, next) => {
 // PATCH /api/deals/:id — update deal fields (not stage)
 router.patch("/:id", async (req, res, next) => {
   try {
-    const {
-      sourceLeadWriteMode: _sourceLeadWriteMode,
-      migrationMode: _migrationMode,
-      ...body
-    } = { ...req.body };
+    const body = { ...req.body };
     validateDealPayload(body);
+    delete body.migrationMode;
 
     // Reps cannot change assignedRepId (reassign deals)
     if (req.user!.role === "rep" && body.assignedRepId !== undefined) {
@@ -735,13 +574,32 @@ router.post("/:id/stage/preflight", async (req, res, next) => {
           isBidBoardOwned: inferredOwnership?.isBidBoardOwned ?? deal.isBidBoardOwned,
         })
       : null;
-    const estimatingBoundary =
-      deal && inferredOwnership?.isBidBoardOwned
-        ? await getRequiredEstimatingBoundaryStage(deal.workflowRoute)
-        : null;
+    let estimatingBoundary: { slug: string; displayOrder: number } | null = null;
+    let currentIsBidBoardBoundaryOrDownstream = false;
+    let targetIsBidBoardBoundaryOrDownstream = false;
+    if (deal) {
+      const workflowRoute = deal.workflowRoute;
+      estimatingBoundary = inferredOwnership?.isBidBoardOwned
+        ? await getRequiredEstimatingBoundaryStage(workflowRoute)
+        : await getEstimatingBoundaryStage(workflowRoute);
+      currentIsBidBoardBoundaryOrDownstream =
+        Boolean(estimatingBoundary) &&
+        (isEstimatingBoundaryStageSlug(result.currentStage.slug, workflowRoute) ||
+          isBidBoardOwnedDownstreamStage(result.currentStage, estimatingBoundary));
+      targetIsBidBoardBoundaryOrDownstream =
+        Boolean(estimatingBoundary) &&
+        (isEstimatingBoundaryStageSlug(result.targetStage.slug, workflowRoute) ||
+          isBidBoardOwnedDownstreamStage(result.targetStage, estimatingBoundary));
+    }
+    const targetIsReopenIntoCrmOwnedFlow =
+      Boolean(estimatingBoundary) &&
+      result.targetStage.displayOrder <
+        (estimatingBoundary?.displayOrder ?? Number.NEGATIVE_INFINITY);
     const isBidBoardLocked =
-      Boolean(inferredOwnership?.isBidBoardOwned) &&
-      isBidBoardOwnedDownstreamStage(result.targetStage, estimatingBoundary);
+      Boolean(deal) &&
+      ((Boolean(inferredOwnership?.isBidBoardOwned) || currentIsBidBoardBoundaryOrDownstream) &&
+        (currentIsBidBoardBoundaryOrDownstream || targetIsBidBoardBoundaryOrDownstream) &&
+        !targetIsReopenIntoCrmOwnedFlow);
 
     await req.commitTransaction!();
     res.json({
@@ -753,29 +611,6 @@ router.post("/:id/stage/preflight", async (req, res, next) => {
       bidBoardLocked: isBidBoardLocked,
       bidBoardOwnership,
     });
-  } catch (err) {
-    next(err);
-  }
-});
-
-// POST /api/deals/:id/routing-review
-router.post("/:id/routing-review", async (req, res, next) => {
-  try {
-    const { valueSource, amount, reason } = req.body;
-    if (!valueSource || !amount) {
-      throw new AppError(400, "valueSource and amount are required");
-    }
-
-    const result = await applyOpportunityRoutingReview(req.tenantDb!, {
-      dealId: req.params.id,
-      valueSource,
-      amount,
-      reason,
-      userId: req.user!.id,
-    });
-
-    await req.commitTransaction!();
-    res.json(result);
   } catch (err) {
     next(err);
   }
@@ -1077,507 +912,6 @@ router.get("/:id/estimates", async (req, res, next) => {
     const estimate = await getEstimate(req.tenantDb!, req.params.id);
     await req.commitTransaction!();
     res.json(estimate);
-  } catch (err) {
-    next(err);
-  }
-});
-
-// POST /api/deals/:id/estimating/documents
-router.post("/:id/estimating/documents", async (req, res, next) => {
-  try {
-    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
-    if (!deal) throw new AppError(404, "Deal not found");
-
-    let uploadedFile;
-    if (req.body.fileId) {
-      uploadedFile = await getFileById(req.tenantDb!, req.body.fileId);
-      if (!uploadedFile) {
-        throw new AppError(404, "Uploaded file not found");
-      }
-      if (uploadedFile.dealId !== req.params.id) {
-        throw new AppError(400, "Uploaded file must belong to the same deal");
-      }
-    } else if (req.body.uploadToken) {
-      uploadedFile = await confirmUpload(req.tenantDb!, req.user!.id, {
-        uploadToken: req.body.uploadToken,
-      });
-    } else {
-      throw new AppError(400, "Either uploadToken or fileId is required");
-    }
-
-    const officeId = req.user!.activeOfficeId ?? req.user!.officeId;
-    const document = await createEstimateSourceDocument({
-      tenantDb: req.tenantDb!,
-      enqueueEstimateDocumentOcr: (payload) =>
-        enqueueEstimateDocumentOcrJob(req.tenantDb!, payload),
-      input: {
-        dealId: req.params.id,
-        fileId: uploadedFile.id,
-        rootFileId: uploadedFile.parentFileId ?? uploadedFile.id,
-        filename: uploadedFile.originalFilename,
-        mimeType: uploadedFile.mimeType,
-        fileSize: uploadedFile.fileSizeBytes,
-        contentHash: uploadedFile.r2Key,
-        userId: req.user!.id,
-        officeId,
-        parseMeasurementsEnabled: req.body.parseMeasurementsEnabled,
-      },
-    });
-
-    await req.commitTransaction!();
-    res.status(201).json({ document, file: uploadedFile });
-  } catch (err) {
-    next(err);
-  }
-});
-
-router.post("/:id/estimating/documents/:documentId/reprocess", async (req, res, next) => {
-  try {
-    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
-    if (!deal) throw new AppError(404, "Deal not found");
-
-    const officeId = req.user!.activeOfficeId ?? req.user!.officeId;
-    const document = await reprocessEstimateSourceDocument({
-      tenantDb: req.tenantDb!,
-      enqueueEstimateDocumentOcr: (payload) =>
-        enqueueEstimateDocumentOcrJob(req.tenantDb!, payload),
-      input: {
-        dealId: req.params.id,
-        documentId: req.params.documentId,
-        userId: req.user!.id,
-        officeId,
-        parseProvider: req.body.parseProvider,
-        parseProfile: req.body.parseProfile,
-        parseMeasurementsEnabled: req.body.parseMeasurementsEnabled,
-      },
-    });
-
-    if (!document) {
-      throw new AppError(404, "Estimate document not found");
-    }
-
-    await req.commitTransaction!();
-    res.status(201).json({ document });
-  } catch (err) {
-    next(err);
-  }
-});
-
-router.post("/:id/estimating/pricing-recommendations/:recommendationId/approve", async (req, res, next) => {
-  try {
-    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
-    if (!deal) throw new AppError(404, "Deal not found");
-
-    const result = await approveEstimatePricingRecommendation({
-      tenantDb: req.tenantDb! as any,
-      dealId: req.params.id,
-      recommendationId: req.params.recommendationId,
-      userId: req.user!.id,
-    });
-
-    await req.commitTransaction!();
-    res.status(200).json(result);
-  } catch (err) {
-    next(err);
-  }
-});
-
-router.post(
-  "/:id/estimating/pricing-recommendations/:recommendationId/review-state",
-  async (req, res, next) => {
-    try {
-      const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
-      if (!deal) throw new AppError(404, "Deal not found");
-
-      const result = await updateEstimatePricingRecommendationReviewState({
-        tenantDb: req.tenantDb! as any,
-        dealId: req.params.id,
-        recommendationId: req.params.recommendationId,
-        userId: req.user!.id,
-        input: req.body,
-      });
-
-      await req.commitTransaction!();
-      res.status(200).json(result);
-    } catch (err) {
-      next(err);
-    }
-  }
-);
-
-router.post("/:id/estimating/promote", async (req, res, next) => {
-  try {
-    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
-    if (!deal) throw new AppError(404, "Deal not found");
-    if (!req.body.generationRunId) {
-      throw new AppError(400, "generationRunId is required");
-    }
-
-    const approvedRecommendationIds = await listApprovedRecommendationIdsForRun(
-      req.tenantDb! as any,
-      req.params.id,
-      req.body.generationRunId
-    );
-
-    if (approvedRecommendationIds.length === 0) {
-      throw new AppError(400, "At least one approved recommendation is required before promotion");
-    }
-
-    const result = await promoteApprovedRecommendationsToEstimate({
-      tenantDb: req.tenantDb! as any,
-      dealId: req.params.id,
-      generationRunId: req.body.generationRunId,
-      approvedRecommendationIds,
-    });
-
-    await req.commitTransaction!();
-    res.status(200).json(result);
-  } catch (err) {
-    next(err);
-  }
-});
-
-router.post("/:id/estimating/manual-rows", async (req, res, next) => {
-  try {
-    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
-    if (!deal) throw new AppError(404, "Deal not found");
-    const appDb = (req as any).appDb as any;
-
-    const result = await createManualEstimateRow({
-      tenantDb: req.tenantDb! as any,
-      appDb,
-      dealId: req.params.id,
-      userId: req.user!.id,
-      input: req.body,
-    });
-
-    await req.commitTransaction!();
-    res.status(200).json(result);
-  } catch (err) {
-    next(err);
-  }
-});
-
-router.patch("/:id/estimating/manual-rows/:recommendationId", async (req, res, next) => {
-  try {
-    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
-    if (!deal) throw new AppError(404, "Deal not found");
-    const appDb = (req as any).appDb as any;
-
-    const result = await updateManualEstimateRow({
-      tenantDb: req.tenantDb! as any,
-      appDb,
-      dealId: req.params.id,
-      recommendationId: req.params.recommendationId,
-      userId: req.user!.id,
-      input: req.body,
-    });
-
-    await req.commitTransaction!();
-    res.status(200).json(result);
-  } catch (err) {
-    next(err);
-  }
-});
-
-router.post(
-  "/:id/estimating/manual-rows/:recommendationId/promote-local-catalog",
-  async (req, res, next) => {
-    try {
-      const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
-      if (!deal) throw new AppError(404, "Deal not found");
-
-      const result = await promoteManualRowToLocalCatalog({
-        tenantDb: req.tenantDb! as any,
-        dealId: req.params.id,
-        recommendationId: req.params.recommendationId,
-        userId: req.user!.id,
-        input: req.body,
-      });
-
-      await req.commitTransaction!();
-      res.status(200).json(result);
-    } catch (err) {
-      next(err);
-    }
-  }
-);
-
-router.get("/:id/estimating", async (req, res, next) => {
-  try {
-    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
-    if (!deal) throw new AppError(404, "Deal not found");
-    const workflow = await getEstimatingWorkflowState(
-      req.tenantDb! as any,
-      req.params.id,
-      {
-        appDb: db as any,
-        officeId: req.user!.activeOfficeId ?? req.user!.officeId ?? null,
-      }
-    );
-    await req.commitTransaction!();
-    res.status(200).json(workflow);
-  } catch (err) {
-    next(err);
-  }
-});
-
-router.get("/:id/estimating/market-context", async (req, res, next) => {
-  try {
-    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
-    if (!deal) throw new AppError(404, "Deal not found");
-
-    const marketContext = await getDealEffectiveMarketContext(req.tenantDb! as any, req.params.id);
-    await req.commitTransaction!();
-    res.status(200).json({ marketContext });
-  } catch (err) {
-    next(err);
-  }
-});
-
-router.get("/:id/estimating/markets", async (req, res, next) => {
-  try {
-    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
-    if (!deal) throw new AppError(404, "Deal not found");
-
-    const markets = await listEstimateMarkets(req.tenantDb! as any);
-    await req.commitTransaction!();
-    res.status(200).json({ markets });
-  } catch (err) {
-    next(err);
-  }
-});
-
-router.put("/:id/estimating/market-override", async (req, res, next) => {
-  try {
-    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
-    if (!deal) throw new AppError(404, "Deal not found");
-    if (!req.body.marketId?.trim?.()) {
-      throw new AppError(400, "marketId is required");
-    }
-
-    const result = await setDealMarketOverride({
-      tenantDb: req.tenantDb! as any,
-      dealId: req.params.id,
-      marketId: req.body.marketId,
-      userId: req.user!.id,
-      officeId: req.user!.activeOfficeId ?? req.user!.officeId ?? null,
-      reason: req.body.reason ?? null,
-    });
-
-    await req.commitTransaction!();
-    res.status(200).json(result);
-  } catch (err) {
-    next(err);
-  }
-});
-
-router.delete("/:id/estimating/market-override", async (req, res, next) => {
-  try {
-    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
-    if (!deal) throw new AppError(404, "Deal not found");
-
-    const result = await clearDealMarketOverride({
-      tenantDb: req.tenantDb! as any,
-      dealId: req.params.id,
-      userId: req.user!.id,
-      officeId: req.user!.activeOfficeId ?? req.user!.officeId ?? null,
-      reason: req.body.reason ?? null,
-    });
-
-    await req.commitTransaction!();
-    res.status(200).json(result);
-  } catch (err) {
-    next(err);
-  }
-});
-
-router.patch("/:id/estimating/extractions/:extractionId", async (req, res, next) => {
-  try {
-    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
-    if (!deal) throw new AppError(404, "Deal not found");
-
-    const result = await updateEstimateExtraction({
-      tenantDb: req.tenantDb! as any,
-      dealId: req.params.id,
-      extractionId: req.params.extractionId,
-      userId: req.user!.id,
-      input: req.body,
-    });
-
-    await req.commitTransaction!();
-    res.status(200).json(result);
-  } catch (err) {
-    next(err);
-  }
-});
-
-router.post("/:id/estimating/extractions/:extractionId/approve", async (req, res, next) => {
-  try {
-    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
-    if (!deal) throw new AppError(404, "Deal not found");
-
-    const result = await approveEstimateExtraction({
-      tenantDb: req.tenantDb! as any,
-      dealId: req.params.id,
-      extractionId: req.params.extractionId,
-      userId: req.user!.id,
-    });
-
-    await req.commitTransaction!();
-    res.status(200).json(result);
-  } catch (err) {
-    next(err);
-  }
-});
-
-router.post("/:id/estimating/extractions/:extractionId/reject", async (req, res, next) => {
-  try {
-    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
-    if (!deal) throw new AppError(404, "Deal not found");
-
-    const result = await rejectEstimateExtraction({
-      tenantDb: req.tenantDb! as any,
-      dealId: req.params.id,
-      extractionId: req.params.extractionId,
-      userId: req.user!.id,
-      reason: req.body.reason ?? null,
-    });
-
-    await req.commitTransaction!();
-    res.status(200).json(result);
-  } catch (err) {
-    next(err);
-  }
-});
-
-router.post("/:id/estimating/matches/:matchId/select", async (req, res, next) => {
-  try {
-    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
-    if (!deal) throw new AppError(404, "Deal not found");
-
-    const result = await selectEstimateExtractionMatch({
-      tenantDb: req.tenantDb! as any,
-      dealId: req.params.id,
-      matchId: req.params.matchId,
-      userId: req.user!.id,
-    });
-
-    await req.commitTransaction!();
-    res.status(200).json(result);
-  } catch (err) {
-    next(err);
-  }
-});
-
-router.post("/:id/estimating/matches/:matchId/reject", async (req, res, next) => {
-  try {
-    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
-    if (!deal) throw new AppError(404, "Deal not found");
-
-    const result = await rejectEstimateExtractionMatch({
-      tenantDb: req.tenantDb! as any,
-      dealId: req.params.id,
-      matchId: req.params.matchId,
-      userId: req.user!.id,
-      reason: req.body.reason ?? null,
-    });
-
-    await req.commitTransaction!();
-    res.status(200).json(result);
-  } catch (err) {
-    next(err);
-  }
-});
-
-router.post("/:id/estimating/recommendations/:recommendationId/approve", async (req, res, next) => {
-  try {
-    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
-    if (!deal) throw new AppError(404, "Deal not found");
-
-    const result = await approveEstimatePricingRecommendation({
-      tenantDb: req.tenantDb! as any,
-      dealId: req.params.id,
-      recommendationId: req.params.recommendationId,
-      userId: req.user!.id,
-    });
-
-    await req.commitTransaction!();
-    res.status(200).json(result);
-  } catch (err) {
-    next(err);
-  }
-});
-
-router.post("/:id/estimating/pricing-recommendations/:recommendationId/reject", async (req, res, next) => {
-  try {
-    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
-    if (!deal) throw new AppError(404, "Deal not found");
-
-    const result = await rejectEstimatePricingRecommendation({
-      tenantDb: req.tenantDb! as any,
-      dealId: req.params.id,
-      recommendationId: req.params.recommendationId,
-      userId: req.user!.id,
-      reason: req.body.reason ?? null,
-    });
-
-    await req.commitTransaction!();
-    res.status(200).json(result);
-  } catch (err) {
-    next(err);
-  }
-});
-
-router.patch("/:id/estimating/pricing-recommendations/:recommendationId/override", async (req, res, next) => {
-  try {
-    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
-    if (!deal) throw new AppError(404, "Deal not found");
-
-    const result = await overrideEstimatePricingRecommendation({
-      tenantDb: req.tenantDb! as any,
-      dealId: req.params.id,
-      recommendationId: req.params.recommendationId,
-      userId: req.user!.id,
-      input: req.body,
-    });
-
-    await req.commitTransaction!();
-    res.status(200).json(result);
-  } catch (err) {
-    next(err);
-  }
-});
-
-router.get("/:id/estimating/review-log", async (req, res, next) => {
-  try {
-    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
-    if (!deal) throw new AppError(404, "Deal not found");
-    const events = await listEstimateReviewEvents(req.tenantDb! as any, req.params.id);
-    await req.commitTransaction!();
-    res.status(200).json({ events });
-  } catch (err) {
-    next(err);
-  }
-});
-
-router.post("/:id/estimating/copilot", async (req, res, next) => {
-  try {
-    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
-    if (!deal) throw new AppError(404, "Deal not found");
-    const context = await buildEstimatingCopilotContext({
-      tenantDb: req.tenantDb! as any,
-      appDb: db as any,
-      dealId: req.params.id,
-      officeId: req.user!.activeOfficeId ?? req.user!.officeId ?? null,
-      question: req.body.question,
-    });
-    const answer = await answerEstimatingCopilotQuestion({
-      question: req.body.question,
-      context,
-    });
-    await req.commitTransaction!();
-    res.status(200).json({ answer });
   } catch (err) {
     next(err);
   }
