@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import type { UserRole } from "@trock-crm/shared/types";
+import type { UserRole, WorkflowRoute } from "@trock-crm/shared/types";
 import {
   closeoutChecklistItems,
   dealApprovals,
@@ -93,7 +93,7 @@ type FakeDealRow = {
   id: string;
   name: string;
   stageId: string;
-  workflowRoute: "estimating" | "service";
+  workflowRoute: WorkflowRoute;
   assignedRepId: string;
   projectTypeId: string | null;
   propertyAddress: string | null;
@@ -128,7 +128,7 @@ type FakeDealScopingIntakeRow = {
   id: string;
   dealId: string;
   officeId: string;
-  workflowRouteSnapshot: "estimating" | "service";
+  workflowRouteSnapshot: WorkflowRoute;
   status: "draft" | "ready" | "activated";
   projectTypeId: string | null;
   sectionData: Record<string, unknown>;
@@ -172,7 +172,7 @@ function createHardeningTenantDb(initialState?: Partial<FakeTenantState>) {
         id: "deal-1",
         name: "Palm Villas",
         stageId: STAGES.dd.id,
-        workflowRoute: "estimating",
+        workflowRoute: "normal",
         assignedRepId: "rep-1",
         projectTypeId: "pt-1",
         propertyAddress: "123 Palm Way",
@@ -197,7 +197,7 @@ function createHardeningTenantDb(initialState?: Partial<FakeTenantState>) {
         id: "intake-1",
         dealId: "deal-1",
         officeId: "office-1",
-        workflowRouteSnapshot: "estimating",
+        workflowRouteSnapshot: "normal",
         status: "draft",
         projectTypeId: "pt-1",
         sectionData: {
@@ -1341,7 +1341,7 @@ describe("Stage Gate Payload Hardening", () => {
           id: "deal-1",
           name: "Palm Villas",
           stageId: STAGES.estimating.id,
-          workflowRoute: "estimating",
+          workflowRoute: "normal",
           assignedRepId: "rep-1",
           projectTypeId: "pt-1",
           propertyAddress: "123 Palm Way",
@@ -1474,7 +1474,7 @@ describe("Stage Gate Payload Hardening", () => {
           id: "deal-1",
           name: "Palm Villas",
           stageId: STAGES.estimating.id,
-          workflowRoute: "estimating",
+          workflowRoute: "normal",
           assignedRepId: "rep-1",
           projectTypeId: "pt-1",
           propertyAddress: "123 Palm Way",
@@ -1568,7 +1568,7 @@ describe("Stage Gate Payload Hardening", () => {
           id: "deal-1",
           name: "Palm Villas",
           stageId: STAGES.estimating.id,
-          workflowRoute: "estimating",
+          workflowRoute: "normal",
           assignedRepId: "rep-1",
           projectTypeId: "pt-1",
           propertyAddress: "123 Palm Way",
@@ -1644,7 +1644,7 @@ describe("Revision Routing Hardening", () => {
           id: "deal-1",
           name: "Palm Villas",
           stageId: STAGES.estimating.id,
-          workflowRoute: "estimating",
+          workflowRoute: "normal",
           assignedRepId: "rep-1",
           projectTypeId: "pt-1",
           propertyAddress: "123 Palm Way",
@@ -1698,7 +1698,7 @@ describe("Revision Routing Hardening", () => {
           id: "deal-1",
           name: "Palm Villas",
           stageId: STAGES.estimating.id,
-          workflowRoute: "estimating",
+          workflowRoute: "normal",
           assignedRepId: "rep-1",
           projectTypeId: "pt-1",
           propertyAddress: "123 Palm Way",
@@ -1742,7 +1742,7 @@ describe("Revision Routing Hardening", () => {
           id: "deal-1",
           name: "Palm Villas",
           stageId: STAGES.estimating.id,
-          workflowRoute: "estimating",
+          workflowRoute: "normal",
           assignedRepId: "rep-1",
           projectTypeId: "pt-1",
           propertyAddress: "123 Palm Way",

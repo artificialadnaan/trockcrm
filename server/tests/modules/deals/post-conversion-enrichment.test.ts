@@ -221,7 +221,7 @@ describe("getDealDetail", () => {
           propertyId: "property-1",
           sourceLeadId: "lead-1",
           source: "Referral",
-          workflowRoute: "estimating",
+          workflowRoute: "normal",
           isActive: true,
           projectTypeId: null,
           regionId: null,

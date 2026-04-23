@@ -15,7 +15,7 @@ BEGIN
   LOOP
     BEGIN
       EXECUTE format(
-        'CREATE TYPE %I.workflow_route AS ENUM (''normal'', ''service'')',
+        'CREATE TYPE %I.workflow_route AS ENUM (''estimating'', ''service'')',
         tenant_schema
       );
     EXCEPTION
@@ -23,7 +23,7 @@ BEGIN
     END;
 
     EXECUTE format(
-      'ALTER TYPE %I.workflow_route ADD VALUE IF NOT EXISTS ''normal''',
+      'ALTER TYPE %I.workflow_route ADD VALUE IF NOT EXISTS ''estimating''',
       tenant_schema
     );
     EXECUTE format(
@@ -61,7 +61,7 @@ BEGIN
     );
     EXECUTE format(
       'ALTER TABLE %I.deals
-         ALTER COLUMN workflow_route SET DEFAULT ''normal''',
+         ALTER COLUMN workflow_route SET DEFAULT ''estimating''',
       tenant_schema
     );
     EXECUTE format(
@@ -70,7 +70,7 @@ BEGIN
     );
     EXECUTE format(
       'UPDATE %I.deals
-          SET workflow_route = ''normal''
+          SET workflow_route = ''estimating''
         WHERE workflow_route IS NULL',
       tenant_schema
     );
@@ -134,7 +134,7 @@ BEGIN
               last_autosaved_at = COALESCE(last_autosaved_at, NOW()),
               created_at = COALESCE(created_at, NOW()),
               updated_at = COALESCE(updated_at, NOW()),
-              workflow_route_snapshot = COALESCE(workflow_route_snapshot, ''normal'')',
+              workflow_route_snapshot = COALESCE(workflow_route_snapshot, ''estimating'')',
       tenant_schema
     );
 
