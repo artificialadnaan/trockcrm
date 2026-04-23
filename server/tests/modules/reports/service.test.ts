@@ -292,7 +292,7 @@ describe("Reports Service", () => {
 
       const result = await getStaleDeals(tenantDb);
 
-      expect(result[0].stageName).toBe("Bid Sent");
+      expect(result[0].stageName).toBe("Estimate Sent to Client");
 
       const queryText = extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase();
       expect(queryText).toContain("left join pipeline_stage_config mirror_psc");
@@ -422,7 +422,7 @@ describe("Reports Service", () => {
       expect(result.mirroredDownstreamSummary).toEqual([
         {
           mirroredStageSlug: "estimating",
-          mirroredStageName: "Estimating",
+          mirroredStageName: "Service - Estimating",
           mirroredStageStatus: "blocked",
           workflowRoute: "service",
           dealCount: 2,
@@ -437,7 +437,7 @@ describe("Reports Service", () => {
         },
       ]);
       expect(result.staleDeals[0]).toMatchObject({
-        stageName: "Estimating",
+        stageName: "Service - Estimating",
         workflowRoute: "service",
         bidBoardStageSlug: "estimating",
         bidBoardStageStatus: "blocked",

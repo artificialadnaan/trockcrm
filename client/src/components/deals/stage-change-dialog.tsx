@@ -22,14 +22,14 @@ import { StageGateChecklist } from "./stage-gate-checklist";
 import {
   preflightStageCheck,
   changeDealStage,
-  updateDeal,
 } from "@/hooks/use-deals";
 import { useLostReasons } from "@/hooks/use-pipeline-config";
 import { AlertTriangle, ArrowRight, ArrowLeft, Shield, Loader2 } from "lucide-react";
 import { getDealStageMetadata } from "@/hooks/use-deals";
+import { toCanonicalDealStageSlug } from "@trock-crm/shared/types";
 
 interface StageChangeDialogProps {
-  deal: { id: string; name: string; stageId: string };
+  deal: { id: string; name: string; stageId: string; workflowRoute?: "normal" | "service" };
   targetStageId: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -44,6 +44,7 @@ export function StageChangeDialog({
   onSuccess,
 }: StageChangeDialogProps) {
   const { reasons } = useLostReasons();
+  const workflowRoute = deal.workflowRoute ?? "normal";
 
   const [preflight, setPreflight] = useState<Awaited<ReturnType<typeof preflightStageCheck>> | null>(null);
   const [preflightLoading, setPreflightLoading] = useState(true);
@@ -72,10 +73,14 @@ export function StageChangeDialog({
     if (!preflight) return;
     setSubmitting(true);
     setError(null);
+    const canonicalTargetStageSlug = toCanonicalDealStageSlug(preflight.targetStage.slug, workflowRoute);
+    const isLostTransition =
+      canonicalTargetStageSlug === "production_lost" ||
+      canonicalTargetStageSlug === "service_lost";
 
     try {
       // Validate lost deal fields
-      if (["production_lost", "service_lost"].includes(preflight.targetStage.slug)) {
+      if (isLostTransition) {
         if (!lostReasonId) {
           setError("Please select a reason for losing this deal.");
           setSubmitting(false);
@@ -95,29 +100,11 @@ export function StageChangeDialog({
         return;
       }
 
-      if (isBidBoardLocked && isClosedLost) {
-        await updateDeal(deal.id, {
-          lostReasonId,
-          lostNotes,
-          lostCompetitor: lostCompetitor || null,
-          migrationMode: true,
-        });
-        onSuccess();
-        onOpenChange(false);
-        return;
-      }
-
       await changeDealStage(deal.id, targetStageId, {
         overrideReason: preflight.requiresOverride ? overrideReason : undefined,
-        lostReasonId: ["production_lost", "service_lost"].includes(preflight.targetStage.slug)
-          ? lostReasonId
-          : undefined,
-        lostNotes: ["production_lost", "service_lost"].includes(preflight.targetStage.slug)
-          ? lostNotes
-          : undefined,
-        lostCompetitor: ["production_lost", "service_lost"].includes(preflight.targetStage.slug)
-          ? lostCompetitor || undefined
-          : undefined,
+        lostReasonId: isLostTransition ? lostReasonId : undefined,
+        lostNotes: isLostTransition ? lostNotes : undefined,
+        lostCompetitor: isLostTransition ? lostCompetitor || undefined : undefined,
       });
 
       onSuccess();
@@ -131,20 +118,19 @@ export function StageChangeDialog({
   const isBlocked = preflight != null && !preflight.allowed;
   const bidBoardOwnership = preflight?.bidBoardOwnership;
   const isBidBoardLocked = Boolean(preflight?.bidBoardLocked);
+  const canonicalTargetStageSlug =
+    preflight == null ? null : toCanonicalDealStageSlug(preflight.targetStage.slug, workflowRoute);
   const isClosedLost =
-    preflight != null &&
-    ["production_lost", "service_lost"].includes(preflight.targetStage.slug);
-  const isClosedWon =
-    preflight != null &&
-    ["sent_to_production", "service_sent_to_production"].includes(preflight.targetStage.slug);
-  const allowsBidBoardLossContextSave = isBidBoardLocked && isClosedLost;
+    canonicalTargetStageSlug === "production_lost" ||
+    canonicalTargetStageSlug === "service_lost";
+  const isClosedWon = preflight?.targetStage.slug === "closed_won";
   const currentStageMeta =
     preflight == null
       ? null
       : getDealStageMetadata(
           {
             stageId: preflight.currentStage.id,
-            workflowRoute: "normal",
+            workflowRoute,
             isBidBoardOwned: Boolean(isBidBoardLocked),
             bidBoardStageSlug: isBidBoardLocked ? preflight.currentStage.slug : null,
             readOnlySyncedAt: isBidBoardLocked ? new Date().toISOString() : null,
@@ -157,7 +143,7 @@ export function StageChangeDialog({
       : getDealStageMetadata(
           {
             stageId: preflight.targetStage.id,
-            workflowRoute: "normal",
+            workflowRoute,
             isBidBoardOwned: Boolean(isBidBoardLocked),
             bidBoardStageSlug: isBidBoardLocked ? preflight.targetStage.slug : null,
             readOnlySyncedAt: isBidBoardLocked ? new Date().toISOString() : null,
@@ -165,9 +151,12 @@ export function StageChangeDialog({
           [preflight.currentStage, preflight.targetStage]
         );
 
+  const shouldForceCompletion = isClosedLost && !isBidBoardLocked;
+  const handleOpenChange = shouldForceCompletion ? () => {} : onOpenChange;
+
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-[520px]" showCloseButton>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
+      <DialogContent className="sm:max-w-[520px]" showCloseButton={!shouldForceCompletion}>
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             {preflight?.isBackwardMove ? (
@@ -234,16 +223,6 @@ export function StageChangeDialog({
                 <p className="mt-1">{bidBoardOwnership.canEditInCrm.join(", ")}</p>
                 <p className="mt-3 font-medium">Mirrored from Bid Board</p>
                 <p className="mt-1">{bidBoardOwnership.mirroredInCrm.join(", ")}</p>
-              </div>
-            )}
-
-            {allowsBidBoardLossContextSave && (
-              <div className="rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm text-blue-900">
-                <p className="font-medium">Loss context can still be recorded in CRM</p>
-                <p className="mt-1">
-                  The mirrored stage will stay read-only, but you can save the loss reason,
-                  notes, and competitor here for reporting and deal context.
-                </p>
               </div>
             )}
 
@@ -341,23 +320,19 @@ export function StageChangeDialog({
         )}
 
         <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>
-            Cancel
-          </Button>
+          {!shouldForceCompletion && (
+            <Button variant="outline" onClick={() => onOpenChange(false)}>
+              Cancel
+            </Button>
+          )}
           <Button
             onClick={handleSubmit}
-            disabled={
-              (isBlocked && !allowsBidBoardLossContextSave) ||
-              preflightLoading ||
-              submitting
-            }
+            disabled={isBlocked || preflightLoading || submitting}
             variant={isClosedLost ? "destructive" : "default"}
           >
             {submitting && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
             {isBlocked
-              ? allowsBidBoardLossContextSave
-                ? "Save loss context"
-                : isBidBoardLocked
+              ? isBidBoardLocked
                 ? "Read-only in CRM"
                 : "Blocked"
               : isClosedLost

@@ -41,9 +41,35 @@ import { useCompanyDetail } from "@/hooks/use-companies";
 import { usePipelineStages } from "@/hooks/use-pipeline-config";
 import { useAuth } from "@/lib/auth";
 import { formatCurrency, bestEstimate } from "@/lib/deal-utils";
-import { getCanonicalDealStageSlugs, getDealStageMetadata } from "@/lib/pipeline-ownership";
+import { isEstimatingBoundaryStageSlug } from "@/lib/pipeline-ownership";
+import {
+  getCanonicalEstimatingBoundaryStageSlug,
+  toCanonicalDealStageSlug,
+} from "@trock-crm/shared/types";
 
 type Tab = "overview" | "lead" | "scoping" | "files" | "email" | "activity" | "timeline" | "history" | "team" | "estimates" | "punch_list" | "closeout";
+
+function isBidBoardManagedStage(
+  stage: { slug: string; displayOrder: number },
+  options: {
+    isBidBoardOwned: boolean;
+    workflowRoute: "normal" | "service";
+    handoffStageDisplayOrder: number | null;
+  }
+) {
+  if (!options.isBidBoardOwned) {
+    return false;
+  }
+
+  if (options.handoffStageDisplayOrder == null) {
+    return !isEstimatingBoundaryStageSlug(stage.slug, options.workflowRoute);
+  }
+
+  return (
+    !isEstimatingBoundaryStageSlug(stage.slug, options.workflowRoute) &&
+    stage.displayOrder > options.handoffStageDisplayOrder
+  );
+}
 
 export function DealDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -62,37 +88,34 @@ export function DealDetailPage() {
   const bidBoardOwnership = deal?.bidBoardOwnership;
   const isBidBoardOwned = Boolean(deal?.isBidBoardOwned || bidBoardOwnership?.isOwned);
   const workflowRoute = deal?.workflowRoute ?? "normal";
-  const workflowFamily = workflowRoute === "service" ? "service_deal" : "standard_deal";
-  const currentStageMeta = deal
-    ? getDealStageMetadata(
-        {
-          stageId: deal.stageId,
-          workflowRoute,
-          isBidBoardOwned,
-          bidBoardStageSlug: deal.bidBoardStageSlug,
-          readOnlySyncedAt: deal.readOnlySyncedAt,
-        },
-        stages
-      )
-    : null;
-  const canonicalStageSlugs = deal ? getCanonicalDealStageSlugs(workflowRoute) : ["opportunity"];
-  const stageMenuStages = canonicalStageSlugs
-    .map((slug) =>
-      stages.find((stage) => stage.slug === slug && stage.workflowFamily === workflowFamily) ??
-      stages.find((stage) => stage.slug === slug)
-    )
-    .filter((stage): stage is NonNullable<typeof stage> => Boolean(stage));
-  const currentStageIndex = currentStageMeta?.slug
-    ? canonicalStageSlugs.findIndex((slug) => slug === currentStageMeta.slug)
-    : -1;
+  const dealStages = stages.filter((stage) => toCanonicalDealStageSlug(stage.slug, workflowRoute) != null);
 
   // Build stage advancement options
-  const forwardStages =
-    currentStageIndex >= 0 ? stageMenuStages.filter((_, index) => index > currentStageIndex) : [];
-  const backwardStages =
-    currentStageIndex >= 0 ? stageMenuStages.filter((_, index) => index < currentStageIndex) : [];
-  const readonlyForwardStages = isBidBoardOwned ? forwardStages : [];
-  const manualForwardStages = isBidBoardOwned ? [] : forwardStages;
+  const forwardStages = dealStages.filter(
+    (s) => s.displayOrder > (currentStage?.displayOrder ?? 0)
+  );
+  const backwardStages = dealStages.filter(
+    (s) => s.displayOrder < (currentStage?.displayOrder ?? 0) && !s.isTerminal
+  );
+  const handoffStageSlug =
+    bidBoardOwnership?.handoffStageSlug ?? getCanonicalEstimatingBoundaryStageSlug(workflowRoute);
+  const handoffStage =
+    dealStages.find((s) => s.slug === handoffStageSlug) ??
+    dealStages.find((s) => isEstimatingBoundaryStageSlug(s.slug, workflowRoute));
+  const readonlyForwardStages = forwardStages.filter((stage) =>
+    isBidBoardManagedStage(stage, {
+      isBidBoardOwned,
+      workflowRoute,
+      handoffStageDisplayOrder: handoffStage?.displayOrder ?? null,
+    })
+  );
+  const manualForwardStages = forwardStages.filter((stage) =>
+    !isBidBoardManagedStage(stage, {
+      isBidBoardOwned,
+      workflowRoute,
+      handoffStageDisplayOrder: handoffStage?.displayOrder ?? null,
+    })
+  );
 
   const handleStageChange = (stageId: string) => {
     setTargetStageId(stageId);
@@ -120,10 +143,16 @@ export function DealDetailPage() {
     }
   };
 
-  const currentStageSlug = currentStageMeta?.slug ?? currentStage?.slug ?? "";
-  const isOpportunityStage = currentStageSlug === "opportunity";
-  const showPunchList = ["sent_to_production", "service_sent_to_production"].includes(currentStageSlug);
-  const showCloseout = false;
+  const currentStageSlug = currentStage?.slug ?? "";
+  const canonicalCurrentStageSlug = toCanonicalDealStageSlug(currentStageSlug, workflowRoute);
+  const isOpportunityStage = canonicalCurrentStageSlug === "opportunity";
+  const showPunchList =
+    canonicalCurrentStageSlug === "sent_to_production" ||
+    canonicalCurrentStageSlug === "service_sent_to_production";
+  const showCloseout =
+    showPunchList ||
+    currentStageSlug === "close_out" ||
+    currentStageSlug === "closed_won";
 
   const tabs: { key: Tab; label: string }[] = [
     { key: "overview", label: "Overview" },
@@ -220,12 +249,7 @@ export function DealDetailPage() {
             </span>
           </div>
           <div className="flex items-center gap-3 mt-1">
-            <DealStageBadge
-              stageId={deal.stageId}
-              workflowRoute={workflowRoute}
-              bidBoardStageSlug={deal.bidBoardStageSlug}
-              ownership={isBidBoardOwned ? "bid_board" : "crm"}
-            />
+            <DealStageBadge stageId={deal.stageId} />
             <span className="text-lg font-semibold">
               {formatCurrency(bestEstimate(deal))}
             </span>
@@ -347,7 +371,7 @@ export function DealDetailPage() {
       )}
 
       {/* Estimating Sub-Stage Indicator */}
-      {currentStageSlug === "estimating" && !isBidBoardOwned && (
+      {isEstimatingBoundaryStageSlug(currentStageSlug, workflowRoute) && !isBidBoardOwned && (
         <DealEstimatingSubstage deal={deal} onUpdate={refetch} />
       )}
 
@@ -373,7 +397,7 @@ export function DealDetailPage() {
       {/* Tab Content */}
       {activeTab === "overview" && (
         <div className="space-y-4">
-          {(currentStageSlug === "estimate_in_progress" || currentStageSlug === "service_estimating") && !isBidBoardOwned && (
+          {isEstimatingBoundaryStageSlug(currentStageSlug, workflowRoute) && !isBidBoardOwned && (
             <DealProposalCard deal={deal} onUpdate={refetch} />
           )}
           {isBidBoardOwned && bidBoardOwnership && (

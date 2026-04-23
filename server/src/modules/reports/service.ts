@@ -31,25 +31,63 @@ function defaultDateRange(from?: string, to?: string): { from: string; to: strin
 }
 
 const LEAD_STALE_THRESHOLD_DAYS = 14;
-const MIRRORED_DOWNSTREAM_STAGE_SLUGS = ["estimating", "bid_sent", "in_production", "close_out"] as const;
-const MIRRORED_DOWNSTREAM_STAGE_LABELS: Record<(typeof MIRRORED_DOWNSTREAM_STAGE_SLUGS)[number], string> = {
-  estimating: "Estimating",
-  bid_sent: "Bid Sent",
-  in_production: "In Production",
-  close_out: "Close Out",
+const CANONICAL_MIRRORED_DOWNSTREAM_STAGE_SLUGS = [
+  "estimate_in_progress",
+  "service_estimating",
+  "estimate_under_review",
+  "estimate_sent_to_client",
+  "sent_to_production",
+  "service_sent_to_production",
+  "production_lost",
+  "service_lost",
+] as const;
+const LEGACY_MIRRORED_DOWNSTREAM_STAGE_SLUGS = [
+  "estimating",
+  "bid_sent",
+  "in_production",
+  "close_out",
+  "closed_won",
+  "closed_lost",
+] as const;
+const MIRRORED_DOWNSTREAM_STAGE_SLUGS = [
+  ...CANONICAL_MIRRORED_DOWNSTREAM_STAGE_SLUGS,
+  ...LEGACY_MIRRORED_DOWNSTREAM_STAGE_SLUGS,
+] as const;
+const MIRRORED_DOWNSTREAM_STAGE_LABELS: Record<string, string> = {
+  estimate_in_progress: "Estimate in Progress",
+  service_estimating: "Service - Estimating",
+  estimate_under_review: "Estimate Under Review",
+  estimate_sent_to_client: "Estimate Sent to Client",
+  sent_to_production: "Sent to Production",
+  service_sent_to_production: "Service - Sent to Production",
+  production_lost: "Production Lost",
+  service_lost: "Service - Lost",
 };
 
 function resolveMirroredStageLabel(
   mirroredStageSlug: string | null | undefined,
-  fallbackStageName: string | null | undefined
+  fallbackStageName: string | null | undefined,
+  workflowRoute: WorkflowRoute | null | undefined
 ) {
-  if (
-    mirroredStageSlug &&
-    mirroredStageSlug in MIRRORED_DOWNSTREAM_STAGE_LABELS
-  ) {
-    return MIRRORED_DOWNSTREAM_STAGE_LABELS[
-      mirroredStageSlug as keyof typeof MIRRORED_DOWNSTREAM_STAGE_LABELS
-    ];
+  if (!mirroredStageSlug) {
+    return fallbackStageName ?? "Unknown";
+  }
+
+  if (mirroredStageSlug in MIRRORED_DOWNSTREAM_STAGE_LABELS) {
+    return MIRRORED_DOWNSTREAM_STAGE_LABELS[mirroredStageSlug];
+  }
+
+  if (mirroredStageSlug === "estimating") {
+    return workflowRoute === "service" ? "Service - Estimating" : "Estimate in Progress";
+  }
+  if (mirroredStageSlug === "bid_sent") {
+    return "Estimate Sent to Client";
+  }
+  if (["in_production", "close_out", "closed_won"].includes(mirroredStageSlug)) {
+    return workflowRoute === "service" ? "Service - Sent to Production" : "Sent to Production";
+  }
+  if (mirroredStageSlug === "closed_lost") {
+    return workflowRoute === "service" ? "Service - Lost" : "Production Lost";
   }
 
   return fallbackStageName ?? "Unknown";
@@ -715,7 +753,7 @@ export async function getStaleDeals(
     dealNumber: r.deal_number,
     dealName: r.deal_name,
     stageId: r.stage_id,
-    stageName: resolveMirroredStageLabel(r.bid_board_stage_slug, r.stage_name),
+    stageName: resolveMirroredStageLabel(r.bid_board_stage_slug, r.stage_name, r.workflow_route),
     assignedRepId: r.assigned_rep_id,
     repName: r.rep_name,
     stageEnteredAt: r.stage_entered_at,
@@ -2200,7 +2238,7 @@ export async function getUnifiedWorkflowOverview(
       dealId: row.deal_id,
       dealNumber: row.deal_number,
       dealName: row.deal_name,
-      stageName: resolveMirroredStageLabel(row.bid_board_stage_slug, row.stage_name),
+      stageName: resolveMirroredStageLabel(row.bid_board_stage_slug, row.stage_name, row.workflow_route),
       workflowRoute: row.workflow_route,
       repName: row.rep_name,
       daysInStage: Number(row.days_in_stage ?? 0),
@@ -2219,7 +2257,11 @@ export async function getUnifiedWorkflowOverview(
     })),
     mirroredDownstreamSummary: mirroredDownstreamRows.map((row: any) => ({
       mirroredStageSlug: row.mirrored_stage_slug,
-      mirroredStageName: resolveMirroredStageLabel(row.mirrored_stage_slug, row.mirrored_stage_name),
+      mirroredStageName: resolveMirroredStageLabel(
+        row.mirrored_stage_slug,
+        row.mirrored_stage_name,
+        row.workflow_route
+      ),
       mirroredStageStatus: row.mirrored_stage_status ?? null,
       workflowRoute: row.workflow_route,
       dealCount: Number(row.deal_count ?? 0),

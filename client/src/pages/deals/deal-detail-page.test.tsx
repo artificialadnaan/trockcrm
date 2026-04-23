@@ -295,4 +295,24 @@ describe("DealDetailPage", () => {
     expect(html).toContain('data-disabled="false">Estimate in Progress');
     expect(managedCount).toBe(0);
   });
+
+  it("treats legacy estimating as the handoff boundary when the server reports a canonical handoff slug", () => {
+    mocks.useDealDetailMock.mockReturnValueOnce({
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      deal: makeDealDetail({
+        bidBoardOwnership: {
+          ...makeDealDetail().bidBoardOwnership,
+          handoffStageSlug: "estimate_in_progress",
+        },
+      }),
+    });
+
+    const html = renderPage();
+    const managedCount = (html.match(/Bid Board managed/g) ?? []).length;
+
+    expect(html).toContain("Move Stage");
+    expect(managedCount).toBe(2);
+  });
 });

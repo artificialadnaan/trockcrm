@@ -16,46 +16,6 @@ export const CRM_OWNED_LEAD_STAGE_LABELS = {
 export const SALES_WORKFLOW_PIPELINE_TYPES = ["service", "normal"] as const;
 export type SalesWorkflowPipelineType = (typeof SALES_WORKFLOW_PIPELINE_TYPES)[number];
 
-export const NORMAL_DEAL_STAGE_SLUGS = [
-  "opportunity",
-  "estimate_in_progress",
-  "estimate_under_review",
-  "estimate_sent_to_client",
-  "sent_to_production",
-  "production_lost",
-] as const;
-export type NormalDealStageSlug = (typeof NORMAL_DEAL_STAGE_SLUGS)[number];
-
-export const SERVICE_DEAL_STAGE_SLUGS = [
-  "opportunity",
-  "service_estimating",
-  "estimate_under_review",
-  "estimate_sent_to_client",
-  "service_sent_to_production",
-  "service_lost",
-] as const;
-export type ServiceDealStageSlug = (typeof SERVICE_DEAL_STAGE_SLUGS)[number];
-
-export const CANONICAL_DEAL_STAGE_SLUGS = [
-  ...NORMAL_DEAL_STAGE_SLUGS,
-  "service_estimating",
-  "service_sent_to_production",
-  "service_lost",
-] as const;
-export type CanonicalDealStageSlug = (typeof CANONICAL_DEAL_STAGE_SLUGS)[number];
-
-export const CANONICAL_DEAL_STAGE_LABELS = {
-  opportunity: "Opportunity",
-  estimate_in_progress: "Estimate in Progress",
-  service_estimating: "Service - Estimating",
-  estimate_under_review: "Estimate Under Review",
-  estimate_sent_to_client: "Estimate Sent to Client",
-  sent_to_production: "Sent to Production",
-  service_sent_to_production: "Service - Sent to Production",
-  production_lost: "Production Lost",
-  service_lost: "Service - Lost",
-} as const satisfies Record<CanonicalDealStageSlug, string>;
-
 export const SALES_WORKFLOW_DISQUALIFICATION_REASONS = [
   "no_budget",
   "not_a_fit",
@@ -83,7 +43,6 @@ export type BidBoardMirroredStageSlug = (typeof BID_BOARD_MIRRORED_STAGE_SLUGS)[
 
 export const SALES_WORKFLOW = {
   crmOwnedLeadStages: CRM_OWNED_LEAD_STAGE_LABELS,
-  canonicalDealStages: CANONICAL_DEAL_STAGE_LABELS,
   pipelineTypes: SALES_WORKFLOW_PIPELINE_TYPES,
   disqualificationReasons: SALES_WORKFLOW_DISQUALIFICATION_REASONS,
   bidBoardMirroredStages: BID_BOARD_MIRRORED_STAGE_SLUGS,

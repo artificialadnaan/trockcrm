@@ -6,6 +6,7 @@ import {
   getDealStageMetadata,
   getLeadBoardStageLabel,
   getLeadStageMetadata,
+  isBidBoardMirroredStageSlug,
   getWorkflowRouteLabel,
   LEAD_BOARD_STAGE_SLUGS,
   normalizeDealStageSlug,
@@ -80,10 +81,23 @@ describe("pipeline ownership helpers", () => {
     expect(estimating.label).toBe("Service - Estimating");
   });
 
+  it("treats canonical and legacy downstream slugs as bid board mirrors during rollout", () => {
+    expect(isBidBoardMirroredStageSlug("estimate_in_progress")).toBe(true);
+    expect(isBidBoardMirroredStageSlug("service_estimating")).toBe(true);
+    expect(isBidBoardMirroredStageSlug("estimating")).toBe(true);
+    expect(isBidBoardMirroredStageSlug("bid_sent")).toBe(true);
+    expect(isBidBoardMirroredStageSlug("opportunity")).toBe(false);
+  });
+
   it("derives stable column ownership badges from stage semantics", () => {
     expect(getDealColumnOwnership({ slug: "opportunity" })).toEqual({
       label: "CRM editable",
       tone: "crm",
+    });
+    expect(getDealColumnOwnership({ slug: "estimate_in_progress" })).toEqual({
+      label: "Bid Board mirror",
+      secondaryLabel: "Read-only in CRM",
+      tone: "mirror",
     });
     expect(getDealColumnOwnership({ slug: "estimate_in_progress" })).toEqual({
       label: "Bid Board mirror",

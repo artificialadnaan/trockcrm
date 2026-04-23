@@ -1,57 +1,31 @@
-import { useMemo, useState } from "react";
-import { useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { ArrowLeft, ArrowRight, Building2, MapPin, Clock3, User, Phone } from "lucide-react";
+import { useMemo } from "react";
+import { useNavigate, useParams } from "react-router-dom";
+import { ArrowLeft, Building2, MapPin, Clock3, User, Phone } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { RecordAssignmentCard } from "@/components/assignment/record-assignment-card";
 import { LeadForm } from "@/components/leads/lead-form";
 import { LeadStageBadge } from "@/components/leads/lead-stage-badge";
 import { LeadTimelineTab } from "@/components/leads/lead-timeline-tab";
-import { ForecastEditor } from "@/components/shared/forecast-editor";
-import { NextStepEditor } from "@/components/shared/next-step-editor";
-import { LeadQualificationPanel } from "@/components/leads/lead-qualification-panel";
-import { LeadStageChangeDialog } from "@/components/leads/lead-stage-change-dialog";
-import { LeadConvertDialog } from "@/components/leads/lead-convert-dialog";
-import { formatLeadPropertyLine, updateLead, useLeadDetail } from "@/hooks/use-leads";
+import { formatLeadPropertyLine, getLeadStageMetadata, useLeadDetail } from "@/hooks/use-leads";
 import { usePipelineStages } from "@/hooks/use-pipeline-config";
-import { useAuth } from "@/lib/auth";
-import { useTaskAssignees } from "@/hooks/use-task-assignees";
-import { buildLeadDetailSummary } from "@/lib/record-detail-summary";
+import { isBidBoardMirroredStageSlug } from "@/lib/pipeline-ownership";
 
 export function LeadDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const [searchParams] = useSearchParams();
-  const { user } = useAuth();
-  const { lead, loading, error, refetch } = useLeadDetail(id);
+  const { lead, loading, error } = useLeadDetail(id);
   const { stages } = usePipelineStages();
-  const { assignees: availableReps } = useTaskAssignees();
-  const [savingAssignment, setSavingAssignment] = useState(false);
-  const [targetStageId, setTargetStageId] = useState<string | null>(null);
-  const [stageDialogOpen, setStageDialogOpen] = useState(false);
-  const [convertDialogOpen, setConvertDialogOpen] = useState(false);
 
   const currentStage = useMemo(
     () => stages.find((stage) => stage.id === lead?.stageId) ?? null,
     [lead?.stageId, stages]
   );
-  const isConvertedLead = Boolean(lead?.convertedAt || lead?.convertedDealId || lead?.status === "converted");
-  const isLeadStage = currentStage?.workflowFamily === "lead" && !isConvertedLead;
-  const convertedAt = lead?.convertedAt ?? null;
-  const leadStages = useMemo(
-    () =>
-      stages
-        .filter((stage) => stage.workflowFamily === "lead" && stage.isActivePipeline !== false)
-        .sort((a, b) => a.displayOrder - b.displayOrder),
-    [stages]
+  const currentStageMeta = useMemo(
+    () => (lead ? getLeadStageMetadata(lead.stageId, stages) : null),
+    [lead, stages]
   );
-  const nextLeadStage = useMemo(() => {
-    if (!currentStage || !isLeadStage) {
-      return null;
-    }
-
-    return leadStages.find((stage) => stage.displayOrder > currentStage.displayOrder) ?? null;
-  }, [currentStage, isLeadStage, leadStages]);
+  const isConverted = lead?.status === "converted" || Boolean(lead?.convertedDealId);
+  const convertedAt = lead?.convertedAt ?? null;
 
   if (loading) {
     return (
@@ -76,72 +50,81 @@ export function LeadDetailPage() {
 
   const leadCompanyName = lead.companyName ?? null;
   const propertyLine = formatLeadPropertyLine(lead);
-  const isDirectorOrAdmin = user?.role === "director" || user?.role === "admin";
-  const assignedRepName =
-    availableReps.find((assignee) => assignee.id === lead.assignedRepId)?.displayName ??
-    lead.assignedRepId;
-  const summary = buildLeadDetailSummary(lead);
-  const canConvertToOpportunity =
-    currentStage?.slug === "sales_validation_stage" && !lead.convertedDealId && !isConvertedLead;
-  const qualificationFocused = searchParams.get("focus") === "qualification";
+  const currentStageSlug = currentStageMeta?.slug ?? null;
+  const isOpportunityStage = currentStageSlug === "opportunity";
+  const isBidBoardMirrorStage = isBidBoardMirroredStageSlug(currentStageSlug);
 
-  const handleAssignmentSave = async (assignedRepId: string) => {
-    if (assignedRepId === lead.assignedRepId) return;
-    setSavingAssignment(true);
-    try {
-      await updateLead(lead.id, { assignedRepId });
-      await refetch();
-    } finally {
-      setSavingAssignment(false);
-    }
-  };
+  const secondaryAction = !isConverted
+    ? {
+        label: currentStageSlug === "sales_validation_stage" ? "Edit Sales Validation" : "Edit Lead",
+        onClick: () => navigate(`/leads/${lead.id}/edit`),
+      }
+    : lead.convertedDealId && isOpportunityStage
+      ? {
+          label: "Open Opportunity Scope",
+          onClick: () => navigate(`/deals/${lead.convertedDealId}?tab=scoping`),
+        }
+      : lead.convertedDealId
+        ? {
+            label: "Open Read-Only Deal",
+            onClick: () => navigate(`/deals/${lead.convertedDealId}`),
+          }
+        : null;
+
+  const contextTitle = isOpportunityStage
+    ? "Opportunity Scope"
+    : isBidBoardMirrorStage
+      ? "Bid Board Mirror"
+      : "Lead context";
+  const contextMessage = !isConverted
+    ? "This record is still on the lead side of the workflow. Sales Validation is the last lead checkpoint before promotion into an Opportunity."
+    : isOpportunityStage
+      ? "Opportunity is still CRM-owned before estimating handoff."
+      : isBidBoardMirrorStage
+        ? "Downstream deal state is mirrored from Bid Board and read-only in CRM after estimating starts."
+        : "This lead has already been promoted into an Opportunity. Pre-conversion history stays here, while scoping now lives in the deal record.";
+  const contextFootnote = isOpportunityStage
+    ? "Sales can still update scope, route, and qualification details in CRM at this stage."
+    : isBidBoardMirrorStage
+      ? "Use the deal record for meeting context, but do not expect manual CRM stage edits to stick downstream."
+      : null;
 
   return (
     <div className="space-y-6">
-      <section className="overflow-hidden rounded-[2rem] border border-slate-200 bg-white shadow-sm">
-        <div className="flex items-start justify-between gap-6 px-7 pb-6 pt-7">
-          <div className="space-y-4">
-            <Button
-              variant="ghost"
-              size="sm"
-              className="-ml-2 text-slate-500 hover:text-slate-900"
-              onClick={() => navigate("/leads")}
-            >
-              <ArrowLeft className="mr-1 h-4 w-4" />
-              Leads
-            </Button>
-            <div className="space-y-3">
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="rounded-md bg-slate-100 px-2 py-1 text-[10px] font-black tracking-[0.16em] text-slate-500 uppercase">
-                  {lead.convertedDealNumber ?? lead.id.slice(0, 8)}
-                </span>
-                <LeadStageBadge stageId={lead.stageId} converted={isConvertedLead} />
-              </div>
-              <div className="space-y-2">
-                <h1 className="text-[2.5rem] leading-none font-black tracking-tight text-slate-950">{lead.name}</h1>
-                <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-sm font-semibold text-slate-600">
-                  <span>
-                    Owner: <span className="font-black text-slate-950">{assignedRepName}</span>
-                  </span>
-                  <span>
-                    Company: <span className="font-black text-slate-950">{leadCompanyName ?? "Unassigned"}</span>
-                  </span>
-                </div>
-              </div>
-              {propertyLine ? <p className="max-w-3xl text-sm text-slate-500">{propertyLine}</p> : null}
-            </div>
-          </div>
-        </div>
-        <div className="grid gap-4 border-t border-slate-200 bg-[#f7f8fb] px-7 py-5 md:grid-cols-4">
-          <SummaryMetric label="Pipeline context" value={currentStage?.name ?? "Lead"} />
-          <SummaryMetric label="Stage age" value={`${summary.ageDays} days`} />
-          <SummaryMetric label="Last update" value={`${summary.freshnessDays} days ago`} />
-          <SummaryMetric label="Conversion status" value={summary.isConverted ? "Converted" : "Active"} />
-        </div>
-      </section>
+      <Button
+        variant="ghost"
+        size="sm"
+        className="-ml-2 text-muted-foreground hover:text-foreground"
+        onClick={() => navigate("/leads")}
+      >
+        <ArrowLeft className="mr-1 h-4 w-4" />
+        Leads
+      </Button>
 
       <div className="grid gap-6 lg:grid-cols-[1.35fr_0.9fr]">
         <div className="space-y-4">
+          <div className="space-y-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs font-mono uppercase tracking-[0.18em] text-muted-foreground">
+                {lead.convertedDealNumber ?? lead.id.slice(0, 8)}
+              </span>
+              <LeadStageBadge stageId={lead.stageId} converted={isConverted} />
+            </div>
+            <h1 className="text-4xl font-black tracking-tight text-foreground">{lead.name}</h1>
+            <div className="flex flex-wrap items-center gap-4 text-sm text-muted-foreground">
+              <span className="flex items-center gap-1">
+                <Building2 className="h-4 w-4" />
+                {leadCompanyName ?? "Unassigned company"}
+              </span>
+              {propertyLine && (
+                <span className="flex items-center gap-1">
+                  <MapPin className="h-4 w-4" />
+                  {propertyLine}
+                </span>
+              )}
+            </div>
+          </div>
+
           <div className="grid gap-4 sm:grid-cols-3">
             <Card>
               <CardContent className="pt-4">
@@ -169,67 +152,22 @@ export function LeadDetailPage() {
             </Card>
           </div>
 
-          <ForecastEditor
-            value={{
-              forecastWindow: lead.forecastWindow,
-              forecastCategory: lead.forecastCategory,
-              forecastConfidencePercent: lead.forecastConfidencePercent,
-              forecastRevenue: lead.forecastRevenue,
-              forecastGrossProfit: lead.forecastGrossProfit,
-              forecastBlockers: lead.forecastBlockers,
-              nextMilestoneAt: lead.nextMilestoneAt,
-            }}
-            onSave={async (payload) => {
-              await updateLead(lead.id, payload);
-              await refetch();
-            }}
-          />
-
-          <NextStepEditor
-            value={{
-              nextStep: lead.nextStep,
-              nextStepDueAt: lead.nextStepDueAt,
-              supportNeededType: lead.supportNeededType,
-              supportNeededNotes: lead.supportNeededNotes,
-              decisionMakerName: lead.decisionMakerName,
-              budgetStatus: lead.budgetStatus,
-            }}
-            onSave={async (payload) => {
-              await updateLead(lead.id, payload);
-              await refetch();
-            }}
-          />
-
           <LeadTimelineTab leadId={lead.id} convertedDealId={lead.convertedDealId} convertedAt={convertedAt} />
         </div>
 
         <div className="space-y-4">
-          <RecordAssignmentCard
-            label="Assigned Rep"
-            assignedRepId={lead.assignedRepId}
-            assignedRepName={assignedRepName}
-            reps={availableReps}
-            canEdit={isDirectorOrAdmin}
-            saving={savingAssignment}
-            onSave={handleAssignmentSave}
-          />
-
           <LeadForm
-            mode={isLeadStage && !isConvertedLead ? "edit" : "summary"}
-            onSaved={() => {
-              void refetch();
-            }}
-            lead={{
-              id: lead.id,
-              name: lead.name,
-              convertedDealId: lead.convertedDealId,
-              convertedDealNumber: lead.convertedDealNumber,
-              companyId: lead.companyId ?? null,
-              companyName: leadCompanyName,
-              stageId: lead.stageId,
-              propertyId: lead.propertyId,
-              propertyName: lead.property?.name ?? null,
-              propertyAddress: lead.property?.address ?? null,
+          lead={{
+            id: lead.id,
+            name: lead.name,
+            convertedDealId: lead.convertedDealId,
+            convertedDealNumber: lead.convertedDealNumber,
+            companyId: lead.companyId ?? null,
+            companyName: leadCompanyName,
+            stageId: lead.stageId,
+            propertyId: lead.propertyId,
+            propertyName: lead.property?.name ?? null,
+            propertyAddress: lead.property?.address ?? null,
               propertyCity: lead.property?.city ?? null,
               propertyState: lead.property?.state ?? null,
               propertyZip: lead.property?.zip ?? null,
@@ -241,46 +179,23 @@ export function LeadDetailPage() {
               projectTypeQuestionPayload: lead.projectTypeQuestionPayload,
               stageEnteredAt: lead.stageEnteredAt,
             }}
-            converted={isConvertedLead}
-            showPrimaryAction={false}
+            converted={isConverted}
           />
 
-          {isLeadStage && (
-            <div className="space-y-3">
-              {qualificationFocused ? (
-                <Card className="border-brand-red/30 bg-brand-red/5">
-                  <CardContent className="space-y-1 pt-4">
-                    <p className="text-sm font-semibold text-foreground">Complete Qualification Intake</p>
-                    <p className="text-sm text-muted-foreground">
-                      Complete the qualification intake below to satisfy the current stage requirements.
-                    </p>
-                  </CardContent>
-                </Card>
-              ) : null}
-              <LeadQualificationPanel
-                leadId={lead.id}
-                projectTypeId={lead.projectTypeId}
-                projectTypeName={lead.projectType?.name ?? null}
-                onSaved={() => {
-                  void refetch();
-                }}
-              />
-            </div>
+          {secondaryAction && (
+            <Button variant="outline" onClick={secondaryAction.onClick}>
+              {secondaryAction.label}
+            </Button>
           )}
 
           <Card>
             <CardContent className="space-y-3 pt-4">
               <div className="flex items-center gap-2">
                 <Clock3 className="h-4 w-4 text-muted-foreground" />
-                <p className="text-sm font-medium">Lead context</p>
+                <p className="text-sm font-medium">{contextTitle}</p>
               </div>
-              <p className="text-sm text-muted-foreground">
-                {isConvertedLead
-                  ? "This lead has already been converted, but the pre-RFP history remains available here."
-                  : isLeadStage
-                    ? "This record is still in the lead stage. Converting it moves the work into the deal pipeline."
-                    : "This lead is in a downstream workflow stage. Use the linked deal to continue opportunity work."}
-              </p>
+              <p className="text-sm text-muted-foreground">{contextMessage}</p>
+              {contextFootnote && <p className="text-xs text-muted-foreground">{contextFootnote}</p>}
               <div className="flex items-center gap-2 text-sm text-muted-foreground">
                 <User className="h-4 w-4" />
                 <span>{lead.primaryContactId ? "Primary contact linked" : "No primary contact yet"}</span>
@@ -289,64 +204,10 @@ export function LeadDetailPage() {
                 <Phone className="h-4 w-4" />
                 <span>{lead.lastActivityAt ? "Activity recorded" : "No activity yet"}</span>
               </div>
-              {isLeadStage && nextLeadStage && (
-                <Button
-                  variant="outline"
-                  className="w-full"
-                  onClick={() => {
-                    setTargetStageId(nextLeadStage.id);
-                    setStageDialogOpen(true);
-                  }}
-                >
-                  Advance to {nextLeadStage.name}
-                  <ArrowRight className="ml-2 h-4 w-4" />
-                </Button>
-              )}
-              {canConvertToOpportunity && (
-                <Button className="w-full" onClick={() => setConvertDialogOpen(true)}>
-                  Convert to Opportunity
-                  <ArrowRight className="ml-2 h-4 w-4" />
-                </Button>
-              )}
-              {lead.convertedDealId && (
-                <Button className="w-full" onClick={() => navigate(`/deals/${lead.convertedDealId}`)}>
-                  Open Deal
-                  <ArrowRight className="ml-2 h-4 w-4" />
-                </Button>
-              )}
             </CardContent>
           </Card>
         </div>
       </div>
-
-      <>
-        <LeadStageChangeDialog
-          lead={lead}
-          targetStageId={targetStageId}
-          open={stageDialogOpen}
-          onOpenChange={setStageDialogOpen}
-          onSuccess={() => {
-            setStageDialogOpen(false);
-            setTargetStageId(null);
-            void refetch();
-          }}
-        />
-        <LeadConvertDialog
-          lead={lead}
-          open={convertDialogOpen}
-          onOpenChange={setConvertDialogOpen}
-          onSuccess={(dealId) => navigate(`/deals/${dealId}`)}
-        />
-      </>
-    </div>
-  );
-}
-
-function SummaryMetric({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="space-y-1">
-      <p className="text-[11px] font-black tracking-[0.18em] text-slate-500 uppercase">{label}</p>
-      <p className="text-[1.9rem] leading-none font-black tracking-tight text-slate-950">{value}</p>
     </div>
   );
 }

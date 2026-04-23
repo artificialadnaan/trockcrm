@@ -183,7 +183,7 @@ describe("RepDashboardPage", () => {
           {
             dealId: "deal-1",
             dealName: "Dallas ISD Roof",
-            stageName: "Estimating",
+            stageName: "Service - Estimating",
             mirroredStageStatus: "blocked",
             workflowRoute: "service",
             regionClassification: "Dallas, TX",
