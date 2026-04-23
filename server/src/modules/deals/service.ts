@@ -92,6 +92,26 @@ export interface UpdateDealInput {
 }
 
 export const BID_BOARD_BOUNDARY_STAGE_SLUG = "estimating";
+export const VALID_PROPOSAL_STATUSES = [
+  "not_started",
+  "drafting",
+  "sent",
+  "under_review",
+  "revision_requested",
+  "accepted",
+  "signed",
+  "rejected",
+] as const;
+export const VALID_ESTIMATING_SUBSTAGES = [
+  "scope_review",
+  "site_visit",
+  "missing_info",
+  "building_estimate",
+  "under_review",
+  "sent_to_client",
+] as const;
+const VALID_PROPOSAL_STATUS_SET = new Set<string>(VALID_PROPOSAL_STATUSES);
+const VALID_ESTIMATING_SUBSTAGE_SET = new Set<string>(VALID_ESTIMATING_SUBSTAGES);
 export const BID_BOARD_CRM_EDITABLE_FIELDS = [
   "deal details",
   "files",
@@ -102,6 +122,7 @@ export const BID_BOARD_MIRRORED_FIELDS = [
   "stage progression",
   "proposal status",
   "estimating progress",
+  "downstream mirror metadata",
 ] as const;
 export const BID_BOARD_STAGE_READ_ONLY_MESSAGE =
   "Deal stage progression is read-only in CRM after estimating handoff. Bid Board is now the source of truth for downstream stages.";
@@ -169,7 +190,7 @@ async function validateAssignee(tenantDb: TenantDb, assigneeId: string, officeId
   }
 }
 
-function workflowFamilyForRoute(workflowRoute: WorkflowRoute) {
+export function workflowFamilyForRoute(workflowRoute: WorkflowRoute) {
   return workflowRoute === "service" ? "service_deal" : "standard_deal";
 }
 
@@ -721,8 +742,10 @@ export async function updateDeal(
 
   // Validate and set estimating substage
   if (input.estimatingSubstage !== undefined) {
-    const VALID_SUBSTAGES = ["scope_review", "site_visit", "missing_info", "building_estimate", "under_review", "sent_to_client"];
-    if (input.estimatingSubstage !== null && !VALID_SUBSTAGES.includes(input.estimatingSubstage)) {
+    if (
+      input.estimatingSubstage !== null &&
+      !VALID_ESTIMATING_SUBSTAGE_SET.has(input.estimatingSubstage)
+    ) {
       throw new AppError(400, `Invalid estimating substage: ${input.estimatingSubstage}`);
     }
     updates.estimatingSubstage = input.estimatingSubstage;
@@ -730,8 +753,10 @@ export async function updateDeal(
 
   // Proposal status with validation, state machine enforcement, auto-timestamps, and revision counter
   if (input.proposalStatus !== undefined) {
-    const VALID_STATUSES = ["not_started", "drafting", "sent", "under_review", "revision_requested", "accepted", "signed", "rejected"];
-    if (input.proposalStatus !== null && !VALID_STATUSES.includes(input.proposalStatus)) {
+    if (
+      input.proposalStatus !== null &&
+      !VALID_PROPOSAL_STATUS_SET.has(input.proposalStatus)
+    ) {
       throw new AppError(400, `Invalid proposal status: ${input.proposalStatus}`);
     }
 

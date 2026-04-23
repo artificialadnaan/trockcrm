@@ -77,10 +77,12 @@ export const deals = pgTable("deals", {
   procoreLastSyncedAt: timestamp("procore_last_synced_at", { withTimezone: true }),
   isBidBoardOwned: boolean("is_bid_board_owned").default(false).notNull(),
   bidBoardStageSlug: varchar("bid_board_stage_slug", { length: 100 }),
+  bidBoardStageFamily: varchar("bid_board_stage_family", { length: 50 }),
   bidBoardStageStatus: varchar("bid_board_stage_status", { length: 50 }),
   bidBoardStageEnteredAt: timestamp("bid_board_stage_entered_at", { withTimezone: true }),
   bidBoardStageExitedAt: timestamp("bid_board_stage_exited_at", { withTimezone: true }),
   bidBoardStageDuration: interval("bid_board_stage_duration"),
+  bidBoardLossOutcome: varchar("bid_board_loss_outcome", { length: 100 }),
   bidBoardMirrorSourceEnteredAt: timestamp("bid_board_mirror_source_entered_at", {
     withTimezone: true,
   }),
