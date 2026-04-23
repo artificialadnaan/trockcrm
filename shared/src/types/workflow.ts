@@ -36,30 +36,6 @@ export type CanonicalDealStageSlug = (typeof CANONICAL_DEAL_STAGE_SLUGS)[number]
 
 export type CanonicalWorkflowStageSlug = CanonicalLeadStageSlug | CanonicalDealStageSlug;
 
-export const CANONICAL_TERMINAL_DEAL_STAGE_SLUGS = [
-  "sent_to_production",
-  "service_sent_to_production",
-  "production_lost",
-  "service_lost",
-] as const;
-export type CanonicalTerminalDealStageSlug = (typeof CANONICAL_TERMINAL_DEAL_STAGE_SLUGS)[number];
-
-export const CRM_OWNED_CANONICAL_DEAL_STAGE_SLUGS = ["opportunity"] as const;
-export type CrmOwnedCanonicalDealStageSlug = (typeof CRM_OWNED_CANONICAL_DEAL_STAGE_SLUGS)[number];
-
-export const BID_BOARD_OWNED_CANONICAL_DEAL_STAGE_SLUGS = [
-  "estimate_in_progress",
-  "service_estimating",
-  "estimate_under_review",
-  "estimate_sent_to_client",
-  "sent_to_production",
-  "service_sent_to_production",
-  "production_lost",
-  "service_lost",
-] as const;
-export type BidBoardOwnedCanonicalDealStageSlug =
-  (typeof BID_BOARD_OWNED_CANONICAL_DEAL_STAGE_SLUGS)[number];
-
 export interface CanonicalLeadWorkflowContract {
   slug: CanonicalLeadStageSlug;
   label: string;
@@ -188,9 +164,72 @@ export const CANONICAL_DEAL_WORKFLOW_CONTRACTS = [
   },
 ] as const satisfies readonly CanonicalDealWorkflowContract[];
 
+type CanonicalDealWorkflowContractRecord = (typeof CANONICAL_DEAL_WORKFLOW_CONTRACTS)[number];
+
+export type CanonicalTerminalDealStageSlug = Extract<
+  CanonicalDealWorkflowContractRecord,
+  { isTerminal: true }
+>["slug"];
+
+export type CrmOwnedCanonicalDealStageSlug = Extract<
+  CanonicalDealWorkflowContractRecord,
+  { systemOfRecord: "crm" }
+>["slug"];
+
+export type BidBoardOwnedCanonicalDealStageSlug = Extract<
+  CanonicalDealWorkflowContractRecord,
+  { systemOfRecord: "bid_board" }
+>["slug"];
+
+export const CANONICAL_TERMINAL_DEAL_STAGE_SLUGS = CANONICAL_DEAL_WORKFLOW_CONTRACTS
+  .filter((contract) => contract.isTerminal)
+  .map((contract) => contract.slug) as readonly CanonicalTerminalDealStageSlug[];
+
+export const CRM_OWNED_CANONICAL_DEAL_STAGE_SLUGS = CANONICAL_DEAL_WORKFLOW_CONTRACTS
+  .filter((contract) => contract.systemOfRecord === "crm")
+  .map((contract) => contract.slug) as readonly CrmOwnedCanonicalDealStageSlug[];
+
+export const BID_BOARD_OWNED_CANONICAL_DEAL_STAGE_SLUGS = CANONICAL_DEAL_WORKFLOW_CONTRACTS
+  .filter((contract) => contract.systemOfRecord === "bid_board")
+  .map((contract) => contract.slug) as readonly BidBoardOwnedCanonicalDealStageSlug[];
+
+export const LEGACY_LEAD_STAGE_TO_CANONICAL_STAGE = {
+  new_lead: "new_lead",
+  qualified_lead: "qualified_lead",
+  sales_validation_stage: "sales_validation",
+  opportunity: "opportunity",
+} as const satisfies Record<string, CanonicalLeadStageSlug>;
+export type LegacyLeadStageSlug = keyof typeof LEGACY_LEAD_STAGE_TO_CANONICAL_STAGE;
+
+export const LEGACY_DEAL_STAGE_TO_CANONICAL_STAGE = {
+  normal: {
+    dd: "opportunity",
+    estimating: "estimate_in_progress",
+    bid_sent: "estimate_sent_to_client",
+    in_production: "sent_to_production",
+    close_out: "sent_to_production",
+    closed_won: "sent_to_production",
+    closed_lost: "production_lost",
+  },
+  service: {
+    dd: "opportunity",
+    estimating: "service_estimating",
+    bid_sent: "estimate_sent_to_client",
+    in_production: "service_sent_to_production",
+    close_out: "service_sent_to_production",
+    closed_won: "service_sent_to_production",
+    closed_lost: "service_lost",
+  },
+} as const satisfies Record<WorkflowRoute, Record<string, CanonicalDealStageSlug>>;
+export type LegacyDealStageSlug = keyof (typeof LEGACY_DEAL_STAGE_TO_CANONICAL_STAGE)["normal"];
+
+export type LegacyWorkflowStageSlug = LegacyLeadStageSlug | LegacyDealStageSlug;
+
 const CANONICAL_LEAD_STAGE_SLUG_SET = new Set<string>(CANONICAL_LEAD_STAGE_SLUGS);
 const CANONICAL_DEAL_STAGE_SLUG_SET = new Set<string>(CANONICAL_DEAL_STAGE_SLUGS);
 const CANONICAL_TERMINAL_DEAL_STAGE_SLUG_SET = new Set<string>(CANONICAL_TERMINAL_DEAL_STAGE_SLUGS);
+const CRM_OWNED_CANONICAL_DEAL_STAGE_SLUG_SET = new Set<string>(CRM_OWNED_CANONICAL_DEAL_STAGE_SLUGS);
+const BID_BOARD_OWNED_CANONICAL_DEAL_STAGE_SLUG_SET = new Set<string>(BID_BOARD_OWNED_CANONICAL_DEAL_STAGE_SLUGS);
 
 export function workflowFamilyForRoute(
   workflowRoute: WorkflowRoute
@@ -206,25 +245,88 @@ export function isCanonicalDealStageSlug(stageSlug: string): stageSlug is Canoni
   return CANONICAL_DEAL_STAGE_SLUG_SET.has(stageSlug);
 }
 
+export function toCanonicalLeadStageSlug(stageSlug: string): CanonicalLeadStageSlug | null {
+  if (isCanonicalLeadStageSlug(stageSlug)) {
+    return stageSlug;
+  }
+
+  return LEGACY_LEAD_STAGE_TO_CANONICAL_STAGE[stageSlug as LegacyLeadStageSlug] ?? null;
+}
+
+export function toCanonicalDealStageSlug(
+  stageSlug: string,
+  workflowRoute?: WorkflowRoute | null
+): CanonicalDealStageSlug | null {
+  if (isCanonicalDealStageSlug(stageSlug)) {
+    return stageSlug;
+  }
+
+  if (!workflowRoute) {
+    return null;
+  }
+
+  return LEGACY_DEAL_STAGE_TO_CANONICAL_STAGE[workflowRoute][stageSlug as LegacyDealStageSlug] ?? null;
+}
+
+export function toCanonicalWorkflowStageSlug(
+  stageSlug: string,
+  workflowRoute?: WorkflowRoute | null
+): CanonicalWorkflowStageSlug | null {
+  return toCanonicalLeadStageSlug(stageSlug) ?? toCanonicalDealStageSlug(stageSlug, workflowRoute);
+}
+
 export function getWorkflowFamilyForStage(
   stageSlug: string,
   workflowRoute?: WorkflowRoute | null
 ): WorkflowFamily | null {
-  if (stageSlug === "opportunity" && workflowRoute) {
+  const canonicalStageSlug = toCanonicalWorkflowStageSlug(stageSlug, workflowRoute);
+
+  if (!canonicalStageSlug) {
+    return null;
+  }
+
+  if (canonicalStageSlug === "opportunity") {
+    if (!workflowRoute) {
+      return null;
+    }
+
     return workflowFamilyForRoute(workflowRoute);
   }
 
-  if (isCanonicalLeadStageSlug(stageSlug)) {
+  if (isCanonicalLeadStageSlug(canonicalStageSlug)) {
     return "lead";
   }
 
-  if (isCanonicalDealStageSlug(stageSlug)) {
+  if (isCanonicalDealStageSlug(canonicalStageSlug)) {
     return workflowRoute ? workflowFamilyForRoute(workflowRoute) : null;
   }
 
   return null;
 }
 
-export function isTerminalWorkflowStage(stageSlug: string): stageSlug is CanonicalTerminalDealStageSlug {
-  return CANONICAL_TERMINAL_DEAL_STAGE_SLUG_SET.has(stageSlug);
+export function isCrmOwnedDealStage(
+  stageSlug: string,
+  workflowRoute?: WorkflowRoute | null
+): boolean {
+  const canonicalStageSlug = toCanonicalDealStageSlug(stageSlug, workflowRoute);
+  return canonicalStageSlug !== null && CRM_OWNED_CANONICAL_DEAL_STAGE_SLUG_SET.has(canonicalStageSlug);
+}
+
+export function isBidBoardOwnedDealStage(
+  stageSlug: string,
+  workflowRoute?: WorkflowRoute | null
+): boolean {
+  const canonicalStageSlug = toCanonicalDealStageSlug(stageSlug, workflowRoute);
+  return (
+    canonicalStageSlug !== null &&
+    BID_BOARD_OWNED_CANONICAL_DEAL_STAGE_SLUG_SET.has(canonicalStageSlug)
+  );
+}
+
+export function isTerminalWorkflowStage(
+  stageSlug: string,
+  workflowRoute?: WorkflowRoute | null
+): boolean {
+  const canonicalStageSlug = toCanonicalDealStageSlug(stageSlug, workflowRoute);
+  return canonicalStageSlug !== null && CANONICAL_TERMINAL_DEAL_STAGE_SLUG_SET.has(canonicalStageSlug);
 }
