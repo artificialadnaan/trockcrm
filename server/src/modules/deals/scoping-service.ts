@@ -4,6 +4,9 @@ import { dealScopingIntake, dealTeamMembers, deals, files, tasks, users } from "
 import type * as schema from "@trock-crm/shared/schema";
 import type { DealScopingIntakeStatus, WorkflowRoute } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
+import { getStageById } from "../pipeline/service.js";
+import { BID_BOARD_STAGE_READ_ONLY_MESSAGE } from "./service.js";
+import { inferDealBidBoardOwnership } from "./workflow-backfill.js";
 import { evaluateScopingReadiness, type DealScopingReadinessSnapshot, type DealScopingSectionData } from "./scoping-rules.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -210,6 +213,35 @@ async function getDealOrThrow(tenantDb: TenantDb, dealId: string) {
   return deal;
 }
 
+async function assertDealScopingEditable(deal: DealRow) {
+  const currentStage = await getStageById(deal.stageId);
+  const ownership = inferDealBidBoardOwnership({
+    id: deal.id,
+    stageSlug: currentStage?.slug ?? null,
+    stageEnteredAt: deal.stageEnteredAt,
+    workflowRoute: deal.workflowRoute,
+    pipelineTypeSnapshot: deal.pipelineTypeSnapshot,
+    ddEstimate: deal.ddEstimate,
+    bidEstimate: deal.bidEstimate,
+    awardedAmount: deal.awardedAmount,
+    sourceLeadId: deal.sourceLeadId,
+    isBidBoardOwned: deal.isBidBoardOwned,
+    bidBoardStageSlug: deal.bidBoardStageSlug,
+    bidBoardStageEnteredAt: deal.bidBoardStageEnteredAt,
+    bidBoardMirrorSourceEnteredAt: deal.bidBoardMirrorSourceEnteredAt,
+    isReadOnlyMirror: deal.isReadOnlyMirror,
+    readOnlySyncedAt: deal.readOnlySyncedAt,
+  });
+
+  if (!ownership.reopenInCrmEditableFlow) {
+    throw new AppError(
+      403,
+      BID_BOARD_STAGE_READ_ONLY_MESSAGE,
+      "BID_BOARD_OWNED_STAGE_READ_ONLY"
+    );
+  }
+}
+
 async function getUserOrThrow(tenantDb: TenantDb, userId: string) {
   const [user] = await tenantDb.select().from(users).where(eq(users.id, userId)).limit(1);
 
@@ -238,6 +270,8 @@ export async function getOrCreateDealScopingIntake(
   const existingIntake = await getExistingIntake(tenantDb, dealId);
 
   if (existingIntake) {
+    const deal = await getDealOrThrow(tenantDb, dealId);
+    await assertDealScopingEditable(deal);
     const readiness = await evaluateDealScopingReadiness(tenantDb, dealId);
     const refreshedIntake = (await getExistingIntake(tenantDb, dealId)) ?? existingIntake;
 
@@ -249,6 +283,7 @@ export async function getOrCreateDealScopingIntake(
   }
 
   const deal = await getDealOrThrow(tenantDb, dealId);
+  await assertDealScopingEditable(deal);
 
   return upsertDealScopingIntake(
     tenantDb,
@@ -388,6 +423,7 @@ export async function linkDealFileToScopingRequirement(
   userId: string
 ) {
   const deal = await getDealOrThrow(tenantDb, dealId);
+  await assertDealScopingEditable(deal);
   await getUserOrThrow(tenantDb, userId);
 
   const [file] = await tenantDb
@@ -477,6 +513,7 @@ export async function evaluateDealScopingReadiness(
   dealId: string
 ): Promise<DealScopingReadinessResult> {
   const deal = await getDealOrThrow(tenantDb, dealId);
+  await assertDealScopingEditable(deal);
   const existingIntake = await getExistingIntake(tenantDb, dealId);
   const attachments = await listLinkedScopingAttachments(tenantDb, dealId);
   const sectionData = buildBaseSectionData(existingIntake, deal);
@@ -515,6 +552,7 @@ export async function activateDealScopingIntake(
   dealId: string
 ): Promise<DealScopingServiceResult> {
   const deal = await getDealOrThrow(tenantDb, dealId);
+  await assertDealScopingEditable(deal);
   const existingIntake = await getExistingIntake(tenantDb, dealId);
 
   if (!existingIntake) {
@@ -561,6 +599,7 @@ export async function upsertDealScopingIntake(
     getUserOrThrow(tenantDb, userId),
     getExistingIntake(tenantDb, dealId),
   ]);
+  await assertDealScopingEditable(deal);
   const baseSectionData = buildBaseSectionData(existingIntake, deal);
   const nextSectionData = mergeSectionData(
     baseSectionData,

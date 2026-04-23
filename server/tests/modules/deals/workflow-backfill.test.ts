@@ -67,4 +67,19 @@ describe("planDealWorkflowBackfill", () => {
     expect(result.pipelineTypeSnapshot).toBe("service");
     expect(result.safetyChecks).toContain("preserve_source_lead_linkage");
   });
+
+  it("treats downstream legacy stage slugs as Bid Board-owned even when mirror metadata is absent", () => {
+    const result = planDealWorkflowBackfill({
+      id: "deal-4",
+      stageSlug: "in_production",
+      stageEnteredAt: new Date("2026-04-14T11:00:00.000Z"),
+      awardedAmount: "75000",
+    });
+
+    expect(result.ownershipModel).toBe("bid_board");
+    expect(result.isBidBoardOwned).toBe(true);
+    expect(result.reopenInCrmEditableFlow).toBe(false);
+    expect(result.mirroredStageSlug).toBe("in_production");
+    expect(result.effectiveStageEnteredAt).toEqual(new Date("2026-04-14T11:00:00.000Z"));
+  });
 });

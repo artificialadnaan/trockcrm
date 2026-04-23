@@ -312,6 +312,52 @@ describe("changeDealStage", () => {
     expect(tenantDb.state.stageHistory).toHaveLength(0);
   });
 
+  it("blocks downstream stage changes for legacy downstream deals even when the ownership flags were never backfilled", async () => {
+    const tenantDb = createTenantDb({
+      stageId: "stage-bid-sent",
+      isBidBoardOwned: false,
+      bidBoardStageSlug: null,
+      readOnlySyncedAt: null,
+    });
+
+    vi.mocked(validateStageGate).mockResolvedValue({
+      allowed: true,
+      isBackwardMove: false,
+      requiresOverride: false,
+      targetStage: {
+        id: "stage-production",
+        name: "In Production",
+        slug: "in_production",
+        isTerminal: false,
+        displayOrder: 4,
+      },
+      currentStage: {
+        id: "stage-bid-sent",
+        name: "Bid Sent",
+        slug: "bid_sent",
+        isTerminal: false,
+        displayOrder: 3,
+      },
+    } as never);
+
+    await expect(
+      changeDealStage(tenantDb as never, {
+        dealId: "deal-1",
+        targetStageId: "stage-production",
+        userId: "user-1",
+        userRole: "director",
+      })
+    ).rejects.toMatchObject<AppError>({
+      statusCode: 403,
+      code: "BID_BOARD_OWNED_STAGE_READ_ONLY",
+      message:
+        "Deal stage progression is read-only in CRM after estimating handoff. Bid Board is now the source of truth for downstream stages.",
+    });
+
+    expect(tenantDb.state.deals[0]?.stageId).toBe("stage-bid-sent");
+    expect(tenantDb.state.stageHistory).toHaveLength(0);
+  });
+
   it("fails closed when the estimating boundary stage config is missing for an owned deal", async () => {
     const tenantDb = createTenantDb({
       stageId: "stage-estimating",

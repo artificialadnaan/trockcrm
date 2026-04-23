@@ -19,6 +19,7 @@ import {
   getRequiredEstimatingBoundaryStage,
   isBidBoardOwnedDownstreamStage,
 } from "./service.js";
+import { inferDealBidBoardOwnership } from "./workflow-backfill.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -112,12 +113,29 @@ export async function changeDealStage(
 
   // Step 3: Terminal stage enforcement
   const targetStage = gateResult.targetStage;
-  const estimatingBoundary = currentDeal[0].isBidBoardOwned
+  const inferredOwnership = inferDealBidBoardOwnership({
+    id: currentDeal[0].id,
+    stageSlug: gateResult.currentStage.slug,
+    stageEnteredAt: currentDeal[0].stageEnteredAt,
+    workflowRoute: currentDeal[0].workflowRoute,
+    pipelineTypeSnapshot: currentDeal[0].pipelineTypeSnapshot,
+    ddEstimate: currentDeal[0].ddEstimate,
+    bidEstimate: currentDeal[0].bidEstimate,
+    awardedAmount: currentDeal[0].awardedAmount,
+    sourceLeadId: currentDeal[0].sourceLeadId,
+    isBidBoardOwned: currentDeal[0].isBidBoardOwned,
+    bidBoardStageSlug: currentDeal[0].bidBoardStageSlug,
+    bidBoardStageEnteredAt: currentDeal[0].bidBoardStageEnteredAt,
+    bidBoardMirrorSourceEnteredAt: currentDeal[0].bidBoardMirrorSourceEnteredAt,
+    isReadOnlyMirror: currentDeal[0].isReadOnlyMirror,
+    readOnlySyncedAt: currentDeal[0].readOnlySyncedAt,
+  });
+  const estimatingBoundary = inferredOwnership.isBidBoardOwned
     ? await getRequiredEstimatingBoundaryStage(currentDeal[0].workflowRoute)
     : null;
 
   if (
-    currentDeal[0].isBidBoardOwned &&
+    inferredOwnership.isBidBoardOwned &&
     isBidBoardOwnedDownstreamStage(targetStage, estimatingBoundary)
   ) {
     throw new AppError(

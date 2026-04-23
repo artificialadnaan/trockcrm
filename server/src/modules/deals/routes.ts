@@ -66,6 +66,7 @@ import {
   routeRevisionToEstimating,
   upsertDealScopingIntake,
 } from "./scoping-service.js";
+import { inferDealBidBoardOwnership } from "./workflow-backfill.js";
 
 const router = Router();
 
@@ -540,13 +541,37 @@ router.post("/:id/stage/preflight", async (req, res, next) => {
     );
 
     const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
-    const bidBoardOwnership = deal ? buildBidBoardOwnershipState(deal) : null;
+    const inferredOwnership = deal
+      ? inferDealBidBoardOwnership({
+          id: deal.id,
+          stageSlug: result.currentStage.slug,
+          stageEnteredAt: deal.stageEnteredAt,
+          workflowRoute: deal.workflowRoute,
+          pipelineTypeSnapshot: deal.pipelineTypeSnapshot,
+          ddEstimate: deal.ddEstimate,
+          bidEstimate: deal.bidEstimate,
+          awardedAmount: deal.awardedAmount,
+          sourceLeadId: deal.sourceLeadId,
+          isBidBoardOwned: deal.isBidBoardOwned,
+          bidBoardStageSlug: deal.bidBoardStageSlug,
+          bidBoardStageEnteredAt: deal.bidBoardStageEnteredAt,
+          bidBoardMirrorSourceEnteredAt: deal.bidBoardMirrorSourceEnteredAt,
+          isReadOnlyMirror: deal.isReadOnlyMirror,
+          readOnlySyncedAt: deal.readOnlySyncedAt,
+        })
+      : null;
+    const bidBoardOwnership = deal
+      ? buildBidBoardOwnershipState({
+          ...deal,
+          isBidBoardOwned: inferredOwnership?.isBidBoardOwned ?? deal.isBidBoardOwned,
+        })
+      : null;
     const estimatingBoundary =
-      deal?.isBidBoardOwned
+      deal && inferredOwnership?.isBidBoardOwned
         ? await getRequiredEstimatingBoundaryStage(deal.workflowRoute)
         : null;
     const isBidBoardLocked =
-      Boolean(deal?.isBidBoardOwned) &&
+      Boolean(inferredOwnership?.isBidBoardOwned) &&
       isBidBoardOwnedDownstreamStage(result.targetStage, estimatingBoundary);
 
     await req.commitTransaction!();

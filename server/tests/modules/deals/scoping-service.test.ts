@@ -12,8 +12,16 @@ import {
   linkDealFileToScopingRequirement,
   upsertDealScopingIntake,
 } from "../../../src/modules/deals/scoping-service.js";
+import { AppError } from "../../../src/middleware/error-handler.js";
+
+const pipelineMocks = vi.hoisted(() => ({
+  getStageById: vi.fn(),
+}));
 
 vi.mock("@trock-crm/shared/schema", async () => import("../../../../shared/src/schema/index.js"));
+vi.mock("../../../src/modules/pipeline/service.js", () => ({
+  getStageById: pipelineMocks.getStageById,
+}));
 
 const migrationPath = resolve(
   dirname(fileURLToPath(import.meta.url)),
@@ -64,6 +72,7 @@ function runDealScopingIntakeMigrationGuardFromSql(
 interface FakeDealRow {
   id: string;
   name: string;
+  stageId: string;
   workflowRoute: "normal" | "service";
   expectedCloseDate: string | null;
   propertyAddress: string | null;
@@ -120,12 +129,13 @@ interface FakeTenantState {
 function createFakeTenantDb(initialState?: Partial<FakeTenantState>) {
   const state: FakeTenantState = {
     deals: [
-      {
-        id: "deal-1",
-        name: "Original Deal",
-        workflowRoute: "normal",
-        expectedCloseDate: null,
-        propertyAddress: null,
+        {
+          id: "deal-1",
+          name: "Original Deal",
+          stageId: "stage-opportunity",
+          workflowRoute: "normal",
+          expectedCloseDate: null,
+          propertyAddress: null,
         propertyCity: null,
         propertyState: null,
         propertyZip: null,
@@ -326,12 +336,85 @@ describe("Scoping Service Shared Contract", () => {
 });
 
 describe("Scoping Service", () => {
-  it("seeds a new scoping intake from canonical deal data", async () => {
+  it("blocks scoping reopen/edit flows for legacy downstream Bid Board-owned stages even without mirror metadata", async () => {
+    pipelineMocks.getStageById.mockResolvedValue({
+      id: "stage-production",
+      slug: "in_production",
+      workflowFamily: "standard_deal",
+    });
+
     const tenantDb = createFakeTenantDb({
       deals: [
         {
           id: "deal-1",
           name: "Palm Villas",
+          stageId: "stage-production",
+          workflowRoute: "normal",
+          expectedCloseDate: null,
+          propertyAddress: null,
+          propertyCity: null,
+          propertyState: null,
+          propertyZip: null,
+          description: null,
+          projectTypeId: null,
+          assignedRepId: "rep-1",
+        },
+      ],
+      dealScopingIntake: [
+        {
+          id: "intake-1",
+          dealId: "deal-1",
+          officeId: "office-1",
+          workflowRouteSnapshot: "normal",
+          status: "activated",
+          projectTypeId: null,
+          sectionData: {},
+          completionState: {},
+          readinessErrors: {},
+          firstReadyAt: null,
+          activatedAt: new Date("2026-04-08T09:00:00.000Z"),
+          lastAutosavedAt: new Date("2026-04-08T09:00:00.000Z"),
+          createdBy: "user-1",
+          lastEditedBy: "user-1",
+          createdAt: new Date("2026-04-08T09:00:00.000Z"),
+          updatedAt: new Date("2026-04-08T09:00:00.000Z"),
+        },
+      ],
+    });
+
+    await expect(
+      upsertDealScopingIntake(
+        tenantDb as never,
+        "deal-1",
+        {
+          projectOverview: { propertyName: "Palm Villas Reopened" },
+        },
+        "user-1"
+      )
+    ).rejects.toMatchObject<AppError>({
+      statusCode: 403,
+      code: "BID_BOARD_OWNED_STAGE_READ_ONLY",
+      message:
+        "Deal stage progression is read-only in CRM after estimating handoff. Bid Board is now the source of truth for downstream stages.",
+    });
+
+    expect(tenantDb.state.dealScopingIntake[0]?.sectionData).toEqual({});
+    expect(tenantDb.state.deals[0]?.name).toBe("Palm Villas");
+  });
+
+  it("seeds a new scoping intake from canonical deal data", async () => {
+    pipelineMocks.getStageById.mockResolvedValue({
+      id: "stage-opportunity",
+      slug: "opportunity",
+      workflowFamily: "lead",
+    });
+
+    const tenantDb = createFakeTenantDb({
+      deals: [
+        {
+          id: "deal-1",
+          name: "Palm Villas",
+          stageId: "stage-opportunity",
           workflowRoute: "normal",
           expectedCloseDate: null,
           propertyAddress: "123 Palm Way",
@@ -361,6 +444,12 @@ describe("Scoping Service", () => {
   });
 
   it("writes deal-owned scoping fields back to canonical deal columns", async () => {
+    pipelineMocks.getStageById.mockResolvedValue({
+      id: "stage-opportunity",
+      slug: "opportunity",
+      workflowFamily: "lead",
+    });
+
     const tenantDb = createFakeTenantDb();
 
     const result = await upsertDealScopingIntake(
@@ -390,6 +479,12 @@ describe("Scoping Service", () => {
   });
 
   it("writes canonical deal fields when autosave sections arrive through sectionData", async () => {
+    pipelineMocks.getStageById.mockResolvedValue({
+      id: "stage-opportunity",
+      slug: "opportunity",
+      workflowFamily: "lead",
+    });
+
     const tenantDb = createFakeTenantDb();
 
     await upsertDealScopingIntake(
@@ -433,11 +528,18 @@ describe("Scoping Service", () => {
   });
 
   it("ignores manual workflow route overrides in the opportunity scoping workspace", async () => {
+    pipelineMocks.getStageById.mockResolvedValue({
+      id: "stage-opportunity",
+      slug: "opportunity",
+      workflowFamily: "lead",
+    });
+
     const tenantDb = createFakeTenantDb({
       deals: [
         {
           id: "deal-1",
           name: "Palm Villas",
+          stageId: "stage-opportunity",
           workflowRoute: "normal",
           expectedCloseDate: null,
           propertyAddress: "123 Palm Way",
@@ -469,6 +571,12 @@ describe("Scoping Service", () => {
   });
 
   it("stores assign percent in scoping data without deriving readiness from it", async () => {
+    pipelineMocks.getStageById.mockResolvedValue({
+      id: "stage-opportunity",
+      slug: "opportunity",
+      workflowFamily: "lead",
+    });
+
     const tenantDb = createFakeTenantDb();
 
     const result = await upsertDealScopingIntake(
@@ -497,6 +605,12 @@ describe("Scoping Service", () => {
   });
 
   it("marks intake ready only when required sections and attachments are satisfied", async () => {
+    pipelineMocks.getStageById.mockResolvedValue({
+      id: "stage-opportunity",
+      slug: "opportunity",
+      workflowFamily: "lead",
+    });
+
     const tenantDb = createFakeTenantDb({
       dealScopingIntake: [
         {
@@ -573,6 +687,12 @@ describe("Scoping Service", () => {
   });
 
   it("links an existing deal file into a scoping requirement without duplicating the file row", async () => {
+    pipelineMocks.getStageById.mockResolvedValue({
+      id: "stage-opportunity",
+      slug: "opportunity",
+      workflowFamily: "lead",
+    });
+
     const tenantDb = createFakeTenantDb({
       files: [
         {
