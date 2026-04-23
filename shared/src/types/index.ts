@@ -6,3 +6,4 @@ export * from "./sales-workflow.js";
 export * from "./lead-scoping.js";
 export * from "./sales-review.js";
 export * from "./workflow-gates.js";
+export * from "./workflow.js";

@@ -20,6 +20,7 @@ export { userLocalAuthEvents, localAuthEventTypeEnum } from "./public/user-local
 export { userCommissionSettings } from "./public/user-commission-settings.js";
 export { jobQueue, jobStatusEnum } from "./public/job-queue.js";
 export * from "../types/sales-workflow.js";
+export * from "../types/workflow.js";
 export {
   costCatalogSources,
   costCatalogSnapshotVersions,

@@ -17,20 +17,24 @@ export const DEAL_STAGES = [
 ] as const;
 export type DealStage = (typeof DEAL_STAGES)[number];
 
-export const WORKFLOW_ROUTES = ["normal", "service"] as const;
-export type WorkflowRoute = (typeof WORKFLOW_ROUTES)[number];
-
-export const SALES_WORKFLOW_ROUTES = WORKFLOW_ROUTES;
-export type SalesWorkflowRoute = WorkflowRoute;
 export const DEAL_ROUTE_VALUE_SOURCES = [
   "sales_estimated_opportunity_value",
   "procore_bidboard_estimate",
   "manual_override",
 ] as const;
 export type DealRouteValueSource = (typeof DEAL_ROUTE_VALUE_SOURCES)[number];
-
-export const WORKFLOW_FAMILIES = ["lead", "standard_deal", "service_deal"] as const;
-export type WorkflowFamily = (typeof WORKFLOW_FAMILIES)[number];
+export {
+  SALES_WORKFLOW_ROUTES,
+  WORKFLOW_FAMILIES,
+  WORKFLOW_OUTCOME_CATEGORIES,
+  WORKFLOW_ROUTES,
+  WORKFLOW_SYSTEMS_OF_RECORD,
+  type SalesWorkflowRoute,
+  type WorkflowFamily,
+  type WorkflowOutcomeCategory,
+  type WorkflowRoute,
+  type WorkflowSystemOfRecord,
+} from "./workflow.js";
 
 export const LEAD_STAGE_SLUGS = [
   "lead_new",
