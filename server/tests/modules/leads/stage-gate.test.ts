@@ -23,12 +23,6 @@ describe("Lead Stage Gate Evaluation", () => {
         qualificationData: {},
         scopingSubsetData: {},
       },
-      leadScopingReadiness: {
-        status: "draft",
-        isReadyForGoNoGo: false,
-        completionState: {},
-        errors: { sections: {}, attachments: {} },
-      },
       currentStage: {
         id: "stage-new",
         name: "New Lead",
@@ -55,7 +49,7 @@ describe("Lead Stage Gate Evaluation", () => {
     ]);
   });
 
-  it("blocks advancement into lead_go_no_go when the full lead scoping checklist is incomplete", () => {
+  it("does not require a lead-side scoping checklist to advance into the legacy go/no-go stage", () => {
     const result = evaluateLeadStageGate({
       lead: {
         id: "lead-1",
@@ -83,12 +77,6 @@ describe("Lead Stage Gate Evaluation", () => {
         },
         scopingSubsetData: {},
       },
-      leadScopingReadiness: {
-        status: "draft",
-        isReadyForGoNoGo: false,
-        completionState: {},
-        errors: { sections: {}, attachments: {} },
-      },
       currentStage,
       targetStage: {
         ...currentStage,
@@ -98,8 +86,8 @@ describe("Lead Stage Gate Evaluation", () => {
       },
     });
 
-    expect(result.allowed).toBe(false);
-    expect(result.missingRequirements.fields).toContain("leadScoping.completedChecklist");
+    expect(result.allowed).toBe(true);
+    expect(result.missingRequirements.fields).toEqual([]);
   });
 
   it("blocks qualification completion when go/no-go notes are missing", () => {
@@ -134,12 +122,6 @@ describe("Lead Stage Gate Evaluation", () => {
           propertyDetails: true,
           scopeSummary: true,
         },
-      },
-      leadScopingReadiness: {
-        status: "ready",
-        isReadyForGoNoGo: true,
-        completionState: {},
-        errors: { sections: {}, attachments: {} },
       },
       currentStage,
       targetStage: {
@@ -185,12 +167,6 @@ describe("Lead Stage Gate Evaluation", () => {
         },
         scopingSubsetData: {},
       },
-      leadScopingReadiness: {
-        status: "ready",
-        isReadyForGoNoGo: true,
-        completionState: {},
-        errors: { sections: {}, attachments: {} },
-      },
       currentStage: {
         ...currentStage,
         id: "stage-go-no-go",
@@ -234,12 +210,6 @@ describe("Lead Stage Gate Evaluation", () => {
           specPackageStatus: "Provided",
         },
         scopingSubsetData: {},
-      },
-      leadScopingReadiness: {
-        status: "draft",
-        isReadyForGoNoGo: false,
-        completionState: {},
-        errors: { sections: {}, attachments: {} },
       },
       currentStage,
       targetStage: {

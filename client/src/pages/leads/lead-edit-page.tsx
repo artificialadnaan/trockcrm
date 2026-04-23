@@ -44,6 +44,7 @@ export function LeadEditPage() {
       </div>
       <LeadForm
         mode="edit"
+        onSaved={() => navigate(`/leads/${lead.id}`)}
         lead={{
           id: lead.id,
           name: lead.name,

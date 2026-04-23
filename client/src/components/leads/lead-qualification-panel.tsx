@@ -51,12 +51,13 @@ export function LeadQualificationPanel({
   const { user } = useAuth();
   const { projectTypes } = useProjectTypes();
   const { qualification, loading, refetch } = useLeadQualification(leadId);
+  const initialRecord = qualification as LeadQualificationRecord | null;
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [estimatedOpportunityValue, setEstimatedOpportunityValue] = useState("");
-  const [goDecision, setGoDecision] = useState<"go" | "no_go" | "">("");
-  const [goDecisionNotes, setGoDecisionNotes] = useState("");
-  const [qualificationData, setQualificationData] = useState<Record<string, unknown>>({});
+  const [estimatedOpportunityValue, setEstimatedOpportunityValue] = useState(initialRecord?.estimatedOpportunityValue ?? "");
+  const [goDecision, setGoDecision] = useState<"go" | "no_go" | "">(initialRecord?.goDecision ?? "");
+  const [goDecisionNotes, setGoDecisionNotes] = useState(initialRecord?.goDecisionNotes ?? "");
+  const [qualificationData, setQualificationData] = useState<Record<string, unknown>>(initialRecord?.qualificationData ?? {});
   const [selectedProjectTypeId, setSelectedProjectTypeId] = useState(projectTypeId ?? "");
   const canApprove = user?.role === "director" || user?.role === "admin";
 
@@ -78,12 +79,17 @@ export function LeadQualificationPanel({
 
   const approvalStatus =
     goDecision === "go" ? "Approved" : goDecision === "no_go" ? "Rejected" : "Pending Director/Admin Approval";
+  const legacyProjectTypeLabel = getStringValue(qualificationData, "projectType");
   const selectedProjectType =
     projectTypes.find((entry) => entry.id === selectedProjectTypeId) ??
-    (projectTypeId
+    (selectedProjectTypeId
       ? {
-          id: projectTypeId,
-          name: projectTypeName ?? (getStringValue(qualificationData, "projectType") || projectTypeId),
+          id: selectedProjectTypeId,
+          name:
+            projectTypes.find((entry) => entry.id === selectedProjectTypeId)?.name ??
+            projectTypeName ??
+            legacyProjectTypeLabel ??
+            selectedProjectTypeId,
           slug: "",
           parentId: null,
           displayOrder: 0,
@@ -102,7 +108,7 @@ export function LeadQualificationPanel({
         goDecisionNotes: canApprove ? goDecisionNotes || null : undefined,
         qualificationData: {
           ...qualificationData,
-          projectType: selectedProjectType?.name ?? "",
+          projectType: selectedProjectType?.name ?? legacyProjectTypeLabel ?? "",
         },
       });
       await refetch();
@@ -211,7 +217,7 @@ export function LeadQualificationPanel({
             >
               <SelectTrigger>
                 <SelectValue placeholder="Select project type">
-                  {selectedProjectType?.name ?? "Select project type"}
+                  {selectedProjectType?.name ?? legacyProjectTypeLabel ?? "Select project type"}
                 </SelectValue>
               </SelectTrigger>
               <SelectContent>

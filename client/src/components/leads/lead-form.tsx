@@ -421,7 +421,11 @@ function EditableLeadForm({
           description: formData.description.trim() || null,
           ...workflowPayload,
         });
-        onSaved?.();
+        if (onSaved) {
+          onSaved();
+        } else {
+          navigate(`/leads/${lead.id}`);
+        }
       }
     } catch (err: unknown) {
       if (isApiError(err) && err.code === "LEAD_STAGE_REQUIREMENTS_UNMET") {

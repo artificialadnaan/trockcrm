@@ -39,8 +39,6 @@ export const OPPORTUNITY_GATE_FIELD_KEYS = [
   "opportunity.siteVisitCompleted",
 ] as const;
 
-export const LEAD_GO_NO_GO_GATE_FIELD_KEYS = ["leadScoping.completedChecklist"] as const;
-
 export const WORKFLOW_GATE_FIELD_LABELS = {
   source: "Lead Source",
   projectTypeId: "Project Type",
@@ -66,7 +64,6 @@ export const WORKFLOW_GATE_FIELD_LABELS = {
   "scopingSubset.budgetAndBidContext": "Scoping Subset: Budget and Bid Context",
   "scopingSubset.initialQuantities": "Scoping Subset: Initial Quantities",
   "scopingSubset.decisionTimeline": "Scoping Subset: Decision Timeline",
-  "leadScoping.completedChecklist": "Lead Scoping Checklist Completed",
   "approval.directorAdmin": "Director/Admin Approval Required",
   "opportunity.preBidMeetingCompleted": "Pre-Bid Meeting Completed",
   "opportunity.siteVisitDecision": "Site Visit Decision",
