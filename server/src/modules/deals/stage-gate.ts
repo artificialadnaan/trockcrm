@@ -152,6 +152,10 @@ function isVerifiedLinkedStageDocument(file: {
   );
 }
 
+function workflowFamilyForRoute(workflowRoute: "normal" | "service") {
+  return workflowRoute === "service" ? "service_deal" : "standard_deal";
+}
+
 /**
  * Validate whether a deal can move to the target stage.
  *
@@ -196,6 +200,20 @@ export async function validateStageGate(
 
   const currentStage = currentStageResult[0];
   const targetStage = targetStageResult[0];
+
+  const requiredWorkflowFamily = workflowFamilyForRoute(deal.workflowRoute);
+  const targetWorkflowFamily = (targetStage as { workflowFamily?: string | null }).workflowFamily ?? null;
+  if (
+    targetWorkflowFamily &&
+    (targetWorkflowFamily === "standard_deal" || targetWorkflowFamily === "service_deal") &&
+    targetWorkflowFamily !== requiredWorkflowFamily
+  ) {
+    throw new AppError(
+      400,
+      "Target stage is not valid for the deal workflow route.",
+      "INVALID_STAGE_FOR_WORKFLOW_ROUTE"
+    );
+  }
 
   // Same stage -- no-op
   if (currentStage.id === targetStage.id) {

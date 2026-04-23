@@ -32,6 +32,7 @@ interface MockStage {
   name: string;
   slug: string;
   displayOrder: number;
+  workflowFamily?: string;
   isTerminal: boolean;
   isActivePipeline: boolean;
   requiredFields: string[];
@@ -1624,6 +1625,134 @@ describe("Stage Gate Payload Hardening", () => {
     );
 
     expect(result.missingRequirements.documents).toEqual(["proposal"]);
+  });
+
+  it("rejects service-family stages for normal-route deals", async () => {
+    const { validateStageGate } = await import("../../../src/modules/deals/stage-gate.js");
+    const tenantDb = createHardeningTenantDb({
+      deals: [
+        {
+          id: "deal-1",
+          name: "Palm Villas",
+          stageId: "stage-dd-normal",
+          workflowRoute: "normal",
+          assignedRepId: "rep-1",
+          projectTypeId: "pt-1",
+          propertyAddress: "123 Palm Way",
+          propertyCity: "Miami",
+          propertyState: "FL",
+          propertyZip: "33101",
+          description: "Exterior refresh",
+        },
+      ],
+    });
+
+    mockedStageLookups.queue.push(
+      {
+        id: "stage-dd-normal",
+        name: "Opportunity",
+        slug: "dd",
+        workflowFamily: "standard_deal",
+        isTerminal: false,
+        displayOrder: 0,
+        requiredFields: [],
+        requiredDocuments: [],
+        requiredApprovals: [],
+      },
+      {
+        id: "stage-bid-sent-service",
+        name: "Bid Sent",
+        slug: "bid_sent",
+        workflowFamily: "service_deal",
+        isTerminal: false,
+        displayOrder: 2,
+        requiredFields: [],
+        requiredDocuments: [],
+        requiredApprovals: [],
+      }
+    );
+
+    await expect(
+      validateStageGate(tenantDb as never, "deal-1", "stage-bid-sent-service", "director", "director-1")
+    ).rejects.toMatchObject({
+      statusCode: 400,
+      code: "INVALID_STAGE_FOR_WORKFLOW_ROUTE",
+      message: "Target stage is not valid for the deal workflow route.",
+    });
+  });
+
+  it("rejects standard-family stages for service-route deals", async () => {
+    const { validateStageGate } = await import("../../../src/modules/deals/stage-gate.js");
+    const tenantDb = createHardeningTenantDb({
+      deals: [
+        {
+          id: "deal-1",
+          name: "Palm Villas",
+          stageId: "stage-dd-service",
+          workflowRoute: "service",
+          assignedRepId: "rep-1",
+          projectTypeId: "pt-1",
+          propertyAddress: "123 Palm Way",
+          propertyCity: "Miami",
+          propertyState: "FL",
+          propertyZip: "33101",
+          description: "Exterior refresh",
+        },
+      ],
+      dealScopingIntake: [
+        {
+          id: "intake-1",
+          dealId: "deal-1",
+          officeId: "office-1",
+          workflowRouteSnapshot: "service",
+          status: "draft",
+          projectTypeId: "pt-1",
+          sectionData: {},
+          completionState: {},
+          readinessErrors: {},
+          firstReadyAt: null,
+          activatedAt: null,
+          lastAutosavedAt: new Date("2026-04-15T15:00:00.000Z"),
+          createdBy: "user-1",
+          lastEditedBy: "user-1",
+          createdAt: new Date("2026-04-15T15:00:00.000Z"),
+          updatedAt: new Date("2026-04-15T15:00:00.000Z"),
+        },
+      ],
+    });
+
+    mockedStageLookups.queue.push(
+      {
+        id: "stage-dd-service",
+        name: "Opportunity",
+        slug: "dd",
+        workflowFamily: "service_deal",
+        isTerminal: false,
+        displayOrder: 0,
+        requiredFields: [],
+        requiredDocuments: [],
+        requiredApprovals: [],
+      },
+      {
+        id: "stage-bid-sent-normal",
+        name: "Bid Sent",
+        slug: "bid_sent",
+        workflowFamily: "standard_deal",
+        isTerminal: false,
+        displayOrder: 2,
+        requiredFields: [],
+        requiredDocuments: [],
+        requiredApprovals: [],
+      }
+    );
+
+    await expect(
+      validateStageGate(tenantDb as never, "deal-1", "stage-bid-sent-normal", "director", "director-1")
+    ).rejects.toMatchObject({
+      statusCode: 400,
+      code: "INVALID_STAGE_FOR_WORKFLOW_ROUTE",
+      message: "Target stage is not valid for the deal workflow route.",
+    });
   });
 });
 

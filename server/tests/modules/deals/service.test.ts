@@ -401,6 +401,79 @@ describe("Deal Service", () => {
       };
     }
 
+    function createMutableOwnedDealTenantDb() {
+      const existingDeal = {
+        id: "deal-1",
+        name: "Palm Villas",
+        dealNumber: "TR-2026-0001",
+        stageId: "stage-estimating",
+        assignedRepId: "rep-1",
+        primaryContactId: null,
+        sourceLeadId: "lead-1",
+        companyId: "company-1",
+        propertyId: "property-1",
+        workflowRoute: "normal",
+        migrationMode: false,
+        ddEstimate: null,
+        bidEstimate: null,
+        awardedAmount: null,
+        description: "Exterior refresh",
+        propertyAddress: "123 Palm Way",
+        propertyCity: "Dallas",
+        propertyState: "TX",
+        propertyZip: "75201",
+        projectTypeId: null,
+        regionId: null,
+        source: "referral",
+        winProbability: 50,
+        expectedCloseDate: null,
+        proposalStatus: "drafting",
+        proposalNotes: null,
+        estimatingSubstage: "building_estimate",
+        isBidBoardOwned: true,
+        bidBoardStageSlug: "estimating",
+        readOnlySyncedAt: new Date("2026-04-21T10:00:00.000Z"),
+      };
+
+      return {
+        select() {
+          return {
+            from() {
+              return {
+                where() {
+                  return {
+                    limit() {
+                      return Promise.resolve([existingDeal]);
+                    },
+                  };
+                },
+              };
+            },
+          };
+        },
+        update() {
+          return {
+            set(values: Record<string, unknown>) {
+              return {
+                where() {
+                  return {
+                    returning() {
+                      return Promise.resolve([
+                        {
+                          ...existingDeal,
+                          ...values,
+                        },
+                      ]);
+                    },
+                  };
+                },
+              };
+            },
+          };
+        },
+      };
+    }
+
     it("rejects estimating substage edits after Bid Board handoff", async () => {
       await expect(
         updateDeal(
@@ -431,6 +504,21 @@ describe("Deal Service", () => {
         code: "BID_BOARD_OWNED_FIELD_READ_ONLY",
         message: "Proposal status is mirrored from Bid Board after estimating handoff.",
       });
+    });
+
+    it("allows metadata edits after Bid Board handoff", async () => {
+      const updated = await updateDeal(
+        createMutableOwnedDealTenantDb() as never,
+        "deal-1",
+        { description: "Updated scope summary", expectedCloseDate: "2026-05-15" },
+        "director",
+        "director-1"
+      );
+
+      expect(updated.description).toBe("Updated scope summary");
+      expect(updated.expectedCloseDate).toBe("2026-05-15");
+      expect(updated.estimatingSubstage).toBe("building_estimate");
+      expect(updated.proposalStatus).toBe("drafting");
     });
   });
 });

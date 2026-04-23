@@ -270,6 +270,53 @@ describe("changeDealStage", () => {
     expect(tenantDb.state.stageHistory).toHaveLength(0);
   });
 
+  it("blocks manual stage-id mutations within Bid Board-owned estimating after handoff", async () => {
+    const tenantDb = createTenantDb({
+      stageId: "stage-estimating-service",
+      workflowRoute: "service",
+      isBidBoardOwned: true,
+      bidBoardStageSlug: "estimating",
+      readOnlySyncedAt: new Date("2026-04-21T12:00:00.000Z"),
+    });
+
+    vi.mocked(validateStageGate).mockResolvedValue({
+      allowed: true,
+      isBackwardMove: false,
+      requiresOverride: false,
+      targetStage: {
+        id: "stage-estimating-service-clone",
+        name: "Service Estimating",
+        slug: "estimating",
+        isTerminal: false,
+        displayOrder: 1,
+      },
+      currentStage: {
+        id: "stage-estimating-service",
+        name: "Service Estimating",
+        slug: "estimating",
+        isTerminal: false,
+        displayOrder: 1,
+      },
+    } as never);
+
+    await expect(
+      changeDealStage(tenantDb as never, {
+        dealId: "deal-1",
+        targetStageId: "stage-estimating-service-clone",
+        userId: "user-1",
+        userRole: "director",
+      })
+    ).rejects.toMatchObject<AppError>({
+      statusCode: 403,
+      code: "BID_BOARD_OWNED_STAGE_READ_ONLY",
+      message:
+        "Deal stage progression is read-only in CRM after estimating handoff. Bid Board is now the source of truth for downstream stages.",
+    });
+
+    expect(tenantDb.state.deals[0]?.stageId).toBe("stage-estimating-service");
+    expect(tenantDb.state.stageHistory).toHaveLength(0);
+  });
+
   it("blocks crm-authored progression deeper into downstream mirrored stages after a bid board sync", async () => {
     const tenantDb = createTenantDb({
       stageId: "stage-bid-sent",

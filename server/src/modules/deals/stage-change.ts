@@ -16,7 +16,8 @@ import { createStageTimers } from "./timer-service.js";
 import { activateDealScopingIntake, evaluateDealScopingReadiness } from "./scoping-service.js";
 import {
   BID_BOARD_STAGE_READ_ONLY_MESSAGE,
-  getRequiredEstimatingBoundaryStage,
+  BID_BOARD_BOUNDARY_STAGE_MISSING_MESSAGE,
+  getEstimatingBoundaryStage,
   isBidBoardOwnedDownstreamStage,
 } from "./service.js";
 import { inferDealBidBoardOwnership } from "./workflow-backfill.js";
@@ -131,13 +132,31 @@ export async function changeDealStage(
     isReadOnlyMirror: currentDeal[0].isReadOnlyMirror,
     readOnlySyncedAt: currentDeal[0].readOnlySyncedAt,
   });
-  const estimatingBoundary = inferredOwnership.isBidBoardOwned
-    ? await getRequiredEstimatingBoundaryStage(currentDeal[0].workflowRoute)
-    : null;
+  const estimatingBoundary = await getEstimatingBoundaryStage(currentDeal[0].workflowRoute);
+  if (inferredOwnership.isBidBoardOwned && !estimatingBoundary) {
+    throw new AppError(
+      500,
+      BID_BOARD_BOUNDARY_STAGE_MISSING_MESSAGE,
+      "BID_BOARD_BOUNDARY_STAGE_MISSING"
+    );
+  }
+
+  const currentIsBidBoardBoundaryOrDownstream =
+    Boolean(estimatingBoundary) &&
+    (gateResult.currentStage.slug === estimatingBoundary?.slug ||
+      isBidBoardOwnedDownstreamStage(gateResult.currentStage, estimatingBoundary));
+  const targetIsBidBoardBoundaryOrDownstream =
+    Boolean(estimatingBoundary) &&
+    (targetStage.slug === estimatingBoundary?.slug ||
+      isBidBoardOwnedDownstreamStage(targetStage, estimatingBoundary));
+  const targetIsReopenIntoCrmOwnedFlow =
+    Boolean(estimatingBoundary) &&
+    targetStage.displayOrder < (estimatingBoundary?.displayOrder ?? Number.NEGATIVE_INFINITY);
 
   if (
-    inferredOwnership.isBidBoardOwned &&
-    isBidBoardOwnedDownstreamStage(targetStage, estimatingBoundary)
+    (inferredOwnership.isBidBoardOwned || currentIsBidBoardBoundaryOrDownstream) &&
+    (currentIsBidBoardBoundaryOrDownstream || targetIsBidBoardBoundaryOrDownstream) &&
+    !targetIsReopenIntoCrmOwnedFlow
   ) {
     throw new AppError(
       403,
