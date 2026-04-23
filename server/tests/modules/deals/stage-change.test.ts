@@ -560,4 +560,5 @@ describe("changeDealStage", () => {
       message: "Bid Board entry stage configuration is required to enforce the downstream ownership boundary.",
     });
   });
+
 });

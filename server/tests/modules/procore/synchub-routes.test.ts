@@ -206,6 +206,32 @@ describe("syncHubRoutes", () => {
     expect(dedupeQuery?.params).toEqual(["bid_board", "Palm Villas", "service"]);
   });
 
+  it("reconciles workflow route on mirrored updates so service and normal paths stay isolated", async () => {
+    const { client, queries } = createClient({
+      workflowRoute: "normal",
+      existingDealIdByProcoreBid: "deal-1",
+    });
+    dbMocks.connect.mockResolvedValue(client);
+
+    const app = createApp();
+    const response = await request(app)
+      .post("/api/integrations/synchub/opportunities")
+      .set("x-synchub-secret", "test-secret")
+      .send({
+        office_slug: "dallas",
+        bid_board_id: "bb-1",
+        procore_bid_id: 101,
+        name: "Palm Villas",
+        stage_slug: "bid_sent",
+        workflow_route: "service",
+      });
+
+    expect(response.status).toBe(200);
+    const updateQuery = queries.find((entry) => entry.sql.includes("UPDATE office_dallas.deals"));
+    expect(updateQuery?.sql).toContain("workflow_route = $26");
+    expect(updateQuery?.params?.[25]).toBe("service");
+  });
+
   it("preserves the prior mirrored stage-entered timestamp when SyncHub omits it", async () => {
     const priorStageEnteredAt = new Date("2026-04-20T12:00:00.000Z");
     const { client, queries } = createClient({

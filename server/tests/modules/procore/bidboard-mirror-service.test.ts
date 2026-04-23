@@ -128,6 +128,55 @@ describe("bid board mirror service", () => {
     expect(result.history?.overrideReason).toBe(BID_BOARD_MIRROR_OVERRIDE_REASON);
   });
 
+  it("treats canonical sent-to-production stages as won handoff outcomes", () => {
+    const now = new Date("2026-04-23T18:00:00.000Z");
+
+    const result = buildBidBoardMirrorUpdate({
+      now,
+      deal: {
+        id: "deal-1",
+        stageId: "stage-review",
+        stageEnteredAt: new Date("2026-04-22T11:00:00.000Z"),
+        workflowRoute: "service",
+        isBidBoardOwned: true,
+        proposalStatus: "accepted",
+        estimatingSubstage: null,
+        actualCloseDate: null,
+        lostReasonId: null,
+        lostNotes: null,
+        lostCompetitor: null,
+        lostAt: null,
+      },
+      currentStage: {
+        id: "stage-review",
+        slug: "estimate_under_review",
+        displayOrder: 3,
+      },
+      targetStage: {
+        id: "stage-service-production",
+        slug: "service_sent_to_production",
+        name: "Service - Sent to Production",
+        displayOrder: 5,
+        isTerminal: true,
+        workflowFamily: "service_deal",
+      },
+      payload: {
+        stageSlug: "service_sent_to_production",
+        stageStatus: "signed",
+      },
+    });
+
+    expect(result.updates).toMatchObject({
+      stageId: "stage-service-production",
+      bidBoardStageFamily: "production",
+      actualCloseDate: "2026-04-23",
+      lostReasonId: null,
+      lostNotes: null,
+      lostCompetitor: null,
+    });
+    expect(result.updates.lostAt).toBeNull();
+  });
+
   it("rejects cross-family stage updates so service and normal routes cannot cross", () => {
     expect(() =>
       buildBidBoardMirrorUpdate({

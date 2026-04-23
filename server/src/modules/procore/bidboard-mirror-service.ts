@@ -10,6 +10,26 @@ import {
 export const BID_BOARD_MIRROR_OVERRIDE_REASON = "Bid Board mirror sync";
 const VALID_ESTIMATING_SUBSTAGE_SET = new Set<string>(VALID_ESTIMATING_SUBSTAGES);
 const VALID_PROPOSAL_STATUS_SET = new Set<string>(VALID_PROPOSAL_STATUSES);
+const LEGACY_DEAL_STAGE_TO_CANONICAL_STAGE = {
+  normal: {
+    dd: "opportunity",
+    estimating: "estimate_in_progress",
+    bid_sent: "estimate_sent_to_client",
+    in_production: "sent_to_production",
+    close_out: "sent_to_production",
+    closed_won: "sent_to_production",
+    closed_lost: "production_lost",
+  },
+  service: {
+    dd: "opportunity",
+    estimating: "service_estimating",
+    bid_sent: "estimate_sent_to_client",
+    in_production: "service_sent_to_production",
+    close_out: "service_sent_to_production",
+    closed_won: "service_sent_to_production",
+    closed_lost: "service_lost",
+  },
+} as const;
 
 type MirrorableDeal = {
   id: string;
@@ -100,15 +120,50 @@ function durationSince(value: Date | string | null, now: Date) {
   return `${seconds} seconds`;
 }
 
+function toCanonicalMirroredDealStageSlug(
+  stageSlug: string,
+  workflowRoute: WorkflowRoute
+): string | null {
+  switch (stageSlug) {
+    case "opportunity":
+    case "estimate_in_progress":
+    case "service_estimating":
+    case "estimate_under_review":
+    case "estimate_sent_to_client":
+    case "sent_to_production":
+    case "service_sent_to_production":
+    case "production_lost":
+    case "service_lost":
+      return stageSlug;
+    default:
+      return LEGACY_DEAL_STAGE_TO_CANONICAL_STAGE[workflowRoute][
+        stageSlug as keyof (typeof LEGACY_DEAL_STAGE_TO_CANONICAL_STAGE)[typeof workflowRoute]
+      ] ?? null;
+  }
+}
+
+function isEstimatingBoundaryCanonicalStage(
+  stageSlug: string,
+  workflowRoute: WorkflowRoute
+) {
+  return toCanonicalMirroredDealStageSlug(stageSlug, workflowRoute) ===
+    (workflowRoute === "service" ? "service_estimating" : "estimate_in_progress");
+}
+
 function deriveInternalStageFamily(input: {
   stageSlug: string;
   stageStatus: string | null;
   proposalStatus: string | null;
+  workflowRoute: WorkflowRoute;
 }) {
   const reviewSignal = input.proposalStatus ?? input.stageStatus;
+  const canonicalStageSlug = toCanonicalMirroredDealStageSlug(
+    input.stageSlug,
+    input.workflowRoute
+  );
 
   if (
-    input.stageSlug === "estimate_sent_to_client" &&
+    canonicalStageSlug === "estimate_sent_to_client" &&
     (reviewSignal === "under_review" ||
       reviewSignal === "accepted" ||
       reviewSignal === "signed")
@@ -116,15 +171,12 @@ function deriveInternalStageFamily(input: {
     return "contract_review";
   }
 
-  switch (input.stageSlug) {
+  switch (canonicalStageSlug) {
     case "estimate_in_progress":
     case "service_estimating":
-      return "estimating";
     case "estimate_under_review":
-    case "service_estimate_under_review":
-      return "review";
+      return "estimating";
     case "estimate_sent_to_client":
-    case "service_estimate_sent_to_client":
       return "proposal";
     case "sent_to_production":
     case "service_sent_to_production":
@@ -137,16 +189,15 @@ function deriveInternalStageFamily(input: {
   }
 }
 
-function defaultStageFamilyForSlug(stageSlug: string) {
-  switch (stageSlug) {
+function defaultStageFamilyForSlug(stageSlug: string, workflowRoute: WorkflowRoute) {
+  const canonicalStageSlug = toCanonicalMirroredDealStageSlug(stageSlug, workflowRoute);
+
+  switch (canonicalStageSlug) {
     case "estimate_in_progress":
     case "service_estimating":
-      return "estimating";
     case "estimate_under_review":
-    case "service_estimate_under_review":
-      return "review";
+      return "estimating";
     case "estimate_sent_to_client":
-    case "service_estimate_sent_to_client":
       return "proposal";
     case "sent_to_production":
     case "service_sent_to_production":
@@ -185,7 +236,8 @@ export function buildBidBoardMirrorUpdate(input: {
       stageSlug: input.targetStage.slug,
       stageStatus,
       proposalStatus,
-    }) ?? defaultStageFamilyForSlug(input.targetStage.slug);
+      workflowRoute: input.deal.workflowRoute,
+    }) ?? defaultStageFamilyForSlug(input.targetStage.slug, input.deal.workflowRoute);
   const payloadStageFamily = normalizeOptionalText(input.payload.stageFamily);
   if (payloadStageFamily && payloadStageFamily !== derivedStageFamily) {
     throw new AppError(400, "Bid Board mirror stage family mismatch");
@@ -232,17 +284,13 @@ export function buildBidBoardMirrorUpdate(input: {
     updates.proposalNotes = input.payload.proposalNotes;
   }
 
+  const canonicalTargetStageSlug =
+    toCanonicalMirroredDealStageSlug(input.targetStage.slug, input.deal.workflowRoute) ??
+    toCanonicalMirroredDealStageSlug(input.payload.stageSlug, input.deal.workflowRoute);
+
   updates.estimatingSubstage =
-    [
-      "estimate_in_progress",
-      "service_estimating",
-      "estimate_under_review",
-      "estimate_sent_to_client",
-      "service_estimate_under_review",
-      "service_estimate_sent_to_client",
-    ].includes(
-      input.targetStage.slug
-    )
+    canonicalTargetStageSlug &&
+    isEstimatingBoundaryCanonicalStage(canonicalTargetStageSlug, input.deal.workflowRoute)
       ? estimatingSubstage
       : null;
   if (proposalStatus) {
@@ -257,15 +305,15 @@ export function buildBidBoardMirrorUpdate(input: {
   updates.bidBoardLossOutcome = null;
 
   if (
-    input.targetStage.slug === "sent_to_production" ||
-    input.targetStage.slug === "service_sent_to_production"
+    canonicalTargetStageSlug === "sent_to_production" ||
+    canonicalTargetStageSlug === "service_sent_to_production"
   ) {
     updates.actualCloseDate = now.toISOString().split("T")[0] ?? null;
   }
 
   if (
-    input.targetStage.slug === "production_lost" ||
-    input.targetStage.slug === "service_lost"
+    canonicalTargetStageSlug === "production_lost" ||
+    canonicalTargetStageSlug === "service_lost"
   ) {
     updates.lostReasonId = input.payload.lostReasonId ?? null;
     updates.lostNotes = input.payload.lostNotes ?? null;

@@ -347,7 +347,9 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
              lost_at = $21,
              procore_bid_id = COALESCE($22, procore_bid_id),
              read_only_synced_at = $23,
-             updated_at = $24
+             updated_at = $24,
+             workflow_route = $26,
+             pipeline_type_snapshot = CASE WHEN $26 = 'service' THEN 'service' ELSE 'normal' END
          WHERE id = $25`,
         [
           mirrorResult.updates.stageId,
@@ -375,6 +377,7 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
           mirrorResult.updates.readOnlySyncedAt,
           mirrorResult.updates.updatedAt,
           existingDealId,
+          workflow_route,
         ]
       );
 
