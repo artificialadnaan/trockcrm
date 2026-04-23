@@ -321,7 +321,8 @@ export async function executeLockedReport(reportType: string, options: Analytics
     lost_by_reason: "/reports/lost-by-reason",
     revenue_by_project_type: "/reports/revenue-by-type",
     lead_source_roi: "/reports/lead-source-roi",
-    closed_won_summary: "/reports/closed-won-summary",
+    won_summary: "/reports/won-summary",
+    closed_won_summary: "/reports/won-summary",
     pipeline_by_rep: "/reports/pipeline-by-rep",
   };
 

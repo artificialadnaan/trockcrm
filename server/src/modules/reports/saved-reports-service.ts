@@ -273,10 +273,10 @@ export async function seedLockedReports(officeId: string) {
       },
     },
     {
-      name: "Closed-Won Summary",
+      name: "Won Deals Summary",
       entity: "deals",
       config: {
-        reportType: "closed_won_summary",
+        reportType: "won_summary",
         chart_type: "bar",
       },
     },
