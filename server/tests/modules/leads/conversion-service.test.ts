@@ -70,6 +70,11 @@ const canonicalLeadPipelineMigrationPath = resolve(
   "../../../../migrations/0049_canonical_lead_pipeline.sql"
 );
 const canonicalLeadPipelineMigrationSql = readFileSync(canonicalLeadPipelineMigrationPath, "utf8");
+const bidBoardStageFamilyMigrationPath = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../../migrations/0050_add_bid_board_stage_family.sql"
+);
+const bidBoardStageFamilyMigrationSql = readFileSync(bidBoardStageFamilyMigrationPath, "utf8");
 
 function expectSqlToMatch(pattern: RegExp): void {
   expect(migrationSql).toMatch(pattern);
@@ -151,6 +156,7 @@ describe("Sales workflow shared contract", () => {
     expect(columns.isBidBoardOwned.hasDefault).toBe(true);
     expect(columns.isBidBoardOwned.default).toBe(false);
     expect(columns.bidBoardStageSlug.name).toBe("bid_board_stage_slug");
+    expect(columns.bidBoardStageFamily.name).toBe("bid_board_stage_family");
     expect(columns.bidBoardStageStatus.name).toBe("bid_board_stage_status");
     expect(columns.bidBoardStageEnteredAt.name).toBe("bid_board_stage_entered_at");
     expect(columns.bidBoardStageExitedAt.name).toBe("bid_board_stage_exited_at");
@@ -215,6 +221,15 @@ describe("Sales workflow shared contract", () => {
     );
     expect(canonicalLeadPipelineMigrationSql).toContain(
       "(legacy.slug IN ('lead_go_no_go', 'qualified_for_opportunity', 'ready_for_opportunity', 'sales_validation_stage') AND canonical.slug = 'sales_validation_stage')"
+    );
+  });
+
+  it("backfills the missing bid board stage family deal column", () => {
+    expect(bidBoardStageFamilyMigrationSql).toContain(
+      "ALTER TABLE public.deals"
+    );
+    expect(bidBoardStageFamilyMigrationSql).toContain(
+      "ADD COLUMN IF NOT EXISTS bid_board_stage_family varchar(50)"
     );
   });
 });
