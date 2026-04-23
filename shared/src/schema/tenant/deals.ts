@@ -100,7 +100,7 @@ export const deals = pgTable("deals", {
   lostAt: timestamp("lost_at", { withTimezone: true }),
   expectedCloseDate: date("expected_close_date"),
   actualCloseDate: date("actual_close_date"),
-  workflowRoute: workflowRouteEnum("workflow_route").default("estimating").notNull(),
+  workflowRoute: workflowRouteEnum("workflow_route").default("normal").notNull(),
   lastActivityAt: timestamp("last_activity_at", { withTimezone: true }),
   stageEnteredAt: timestamp("stage_entered_at", { withTimezone: true }).defaultNow().notNull(),
   isActive: boolean("is_active").default(true).notNull(),

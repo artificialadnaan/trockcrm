@@ -396,7 +396,7 @@ export async function getDealDetail(tenantDb: TenantDb, dealId: string, userRole
  * Create a new deal.
  */
 export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
-  const workflowRoute = input.workflowRoute ?? "estimating";
+  const workflowRoute = input.workflowRoute ?? "normal";
   const stage = await getStageById(input.stageId, workflowFamilyForRoute(workflowRoute));
   if (!stage) {
     throw new AppError(400, "Invalid stage ID for workflow route");

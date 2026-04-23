@@ -390,7 +390,7 @@ interface FakeDealRow {
   propertyId: string | null;
   sourceLeadId: string | null;
   source: string | null;
-  workflowRoute: "estimating" | "service";
+  workflowRoute: "normal" | "service";
 }
 
 interface FakeUserOfficeAccessRow {
@@ -1016,7 +1016,7 @@ describe("Lead Conversion Service", () => {
         const deal = {
           id: "deal-1",
           dealNumber: "TR-2026-0001",
-          workflowRoute: input.workflowRoute ?? "estimating",
+          workflowRoute: input.workflowRoute ?? "normal",
           primaryContactId: input.primaryContactId ?? null,
           companyId: input.companyId ?? null,
           propertyId: input.propertyId ?? null,
@@ -1040,7 +1040,7 @@ describe("Lead Conversion Service", () => {
 
     expect(result.deal.id).toBe("deal-1");
     expect(result.deal.sourceLeadId).toBe("lead-1");
-    expect(result.deal.workflowRoute).toBe("estimating");
+    expect(result.deal.workflowRoute).toBe("normal");
     expect(result.lead.status).toBe("converted");
     expect(result.lead.convertedAt).toEqual(new Date("2026-04-15T15:00:00.000Z"));
     expect(result.lead.stageId).toBe("lead-stage-opportunity");
@@ -1113,7 +1113,7 @@ describe("Lead Conversion Service", () => {
       name: "normal work at or above the $50k boundary",
       pipelineType: "normal" as const,
       preQualValue: "50000",
-      expectedRoute: "estimating" as const,
+      expectedRoute: "normal" as const,
     },
   ])("maps %s into the correct downstream route", async ({ pipelineType, preQualValue, expectedRoute }) => {
     const tenantDb = createFakeTenantDb({
@@ -1145,7 +1145,7 @@ describe("Lead Conversion Service", () => {
         ({
           id: "deal-1",
           dealNumber: "TR-2026-0001",
-          workflowRoute: input.workflowRoute ?? "estimating",
+          workflowRoute: input.workflowRoute ?? "normal",
           primaryContactId: input.primaryContactId ?? null,
           companyId: input.companyId ?? null,
           propertyId: input.propertyId ?? null,
@@ -1195,7 +1195,7 @@ describe("Lead Conversion Service", () => {
         const deal = {
           id: `deal-${tenantDb.state.deals.length + 1}`,
           dealNumber: `TR-2026-000${tenantDb.state.deals.length + 1}`,
-          workflowRoute: input.workflowRoute ?? "estimating",
+          workflowRoute: input.workflowRoute ?? "normal",
           primaryContactId: input.primaryContactId ?? null,
           companyId: input.companyId ?? null,
           propertyId: input.propertyId ?? null,
@@ -1258,7 +1258,7 @@ describe("Lead Conversion Service", () => {
         const deal = {
           id: "deal-1",
           dealNumber: "TR-2026-0001",
-          workflowRoute: input.workflowRoute ?? "estimating",
+          workflowRoute: input.workflowRoute ?? "normal",
           primaryContactId: input.primaryContactId ?? null,
           companyId: input.companyId ?? null,
           propertyId: input.propertyId ?? null,
@@ -1508,7 +1508,7 @@ describe("Deal Lineage Enforcement", () => {
         stageId: "deal-stage-1",
         assignedRepId: "rep-1",
         sourceLeadId: "lead-1",
-        workflowRoute: "estimating",
+        workflowRoute: "normal",
       })
     ).rejects.toMatchObject<AppError>({
       statusCode: 400,
@@ -1552,7 +1552,7 @@ describe("Deal Lineage Enforcement", () => {
           propertyId: "property-1",
           sourceLeadId: "lead-1",
           source: "Referral",
-          workflowRoute: "estimating",
+          workflowRoute: "normal",
         },
       ],
     });
@@ -1563,7 +1563,7 @@ describe("Deal Lineage Enforcement", () => {
         stageId: "deal-stage-1",
         assignedRepId: "rep-1",
         sourceLeadId: "lead-1",
-        workflowRoute: "estimating",
+        workflowRoute: "normal",
         sourceLeadWriteMode: "lead_conversion",
       })
     ).rejects.toMatchObject<AppError>({
@@ -1605,7 +1605,7 @@ describe("Deal Lineage Enforcement", () => {
         companyId: "company-1",
         propertyId: "property-1",
         primaryContactId: "contact-2",
-        workflowRoute: "estimating",
+        workflowRoute: "normal",
       })
     ).rejects.toMatchObject<AppError>({
       statusCode: 400,
@@ -1627,7 +1627,7 @@ describe("Deal Lineage Enforcement", () => {
           propertyId: "property-1",
           sourceLeadId: null,
           source: "HubSpot",
-          workflowRoute: "estimating",
+          workflowRoute: "normal",
         },
       ],
     });
@@ -1660,7 +1660,7 @@ describe("Deal Lineage Enforcement", () => {
           propertyId: "property-1",
           sourceLeadId: null,
           source: "HubSpot",
-          workflowRoute: "estimating",
+          workflowRoute: "normal",
         },
       ],
     });
@@ -1709,7 +1709,7 @@ describe("Deal Lineage Enforcement", () => {
           propertyId: "property-1",
           sourceLeadId: "lead-1",
           source: "Referral",
-          workflowRoute: "estimating",
+          workflowRoute: "normal",
         },
         {
           id: "deal-2",
@@ -1722,7 +1722,7 @@ describe("Deal Lineage Enforcement", () => {
           propertyId: "property-1",
           sourceLeadId: null,
           source: "Referral",
-          workflowRoute: "estimating",
+          workflowRoute: "normal",
         },
       ],
     });
@@ -1775,7 +1775,7 @@ describe("Deal Lineage Enforcement", () => {
           propertyId: "property-1",
           sourceLeadId: null,
           source: "Referral",
-          workflowRoute: "estimating",
+          workflowRoute: "normal",
         },
       ],
     });

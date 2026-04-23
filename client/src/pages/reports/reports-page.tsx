@@ -261,7 +261,7 @@ function KpiCard({ label, value, indicator, badge, icon, loading }: KpiCardProps
 // Workflow Overview
 // ---------------------------------------------------------------------------
 
-function formatWorkflowRoute(route: "estimating" | "service") {
+function formatWorkflowRoute(route: "normal" | "service") {
   return route === "service" ? "Service" : "Standard";
 }
 
@@ -356,7 +356,7 @@ function WorkflowOverviewPanel({
   loading?: boolean;
 }) {
   const leadPipelineCount = data?.leadPipelineSummary.reduce((sum, row) => sum + row.intakeCount, 0) ?? 0;
-  const standardRollup = data?.standardVsServiceRollups.find((row) => row.workflowRoute === "estimating");
+  const standardRollup = data?.standardVsServiceRollups.find((row) => row.workflowRoute === "normal");
   const serviceRollup = data?.standardVsServiceRollups.find((row) => row.workflowRoute === "service");
   const companyCount = data?.companyRollups.length ?? 0;
   const staleLeadCount = data?.staleLeads.length ?? 0;

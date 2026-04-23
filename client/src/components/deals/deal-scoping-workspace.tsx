@@ -81,7 +81,7 @@ const ATTACHMENT_REQUIREMENTS: Array<{
     label: "Site photos",
     category: "photo",
     icon: Image,
-    hint: "Upload current-condition photos that estimating or service needs immediately.",
+    hint: "Upload current-condition photos that the downstream team needs immediately.",
   },
 ];
 
@@ -514,7 +514,7 @@ export function DealScopingWorkspace({
           <CardHeader>
             <CardTitle>Opportunity Scoping</CardTitle>
             <CardDescription>
-              Route is derived upstream. This workspace keeps the CRM-owned scope packet ready for estimating or service handoff.
+              Route is derived upstream. This workspace keeps the CRM-owned scope packet ready for normal or service handoff.
             </CardDescription>
           </CardHeader>
           <CardContent className="grid gap-4 md:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
@@ -588,7 +588,7 @@ export function DealScopingWorkspace({
                   onChange={(event) => updateField("projectOverview", "propertyName", event.target.value)}
                 />
               </div>
-              {workflowRoute === "estimating" && (
+              {workflowRoute === "normal" && (
                 <div className="space-y-2">
                   <Label htmlFor="bidDueDate">Bid Due Date</Label>
                   <Input

@@ -15,7 +15,7 @@ describe("scoping intake helpers", () => {
   it("formats attachment keys and route badges for the workspace", () => {
     expect(formatScopingAttachmentLabel("scope_docs")).toBe("Scope docs");
     expect(formatScopingAttachmentLabel("site_photos")).toBe("Site photos");
-    expect(summarizeScopingRoute("estimating")).toBe("Ready for Estimating");
+    expect(summarizeScopingRoute("normal")).toBe("Ready for Normal");
     expect(summarizeScopingRoute("service")).toBe("Ready for Service");
   });
 

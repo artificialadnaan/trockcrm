@@ -52,7 +52,7 @@ export interface PropertyDeal {
   dealNumber: string;
   name: string;
   stageId: string;
-  workflowRoute: "estimating" | "service";
+  workflowRoute: "normal" | "service";
   assignedRepId: string;
   companyId: string | null;
   propertyId: string | null;

@@ -683,7 +683,7 @@ export async function routeRevisionToEstimating(
     context?.previousEstimatingSubstage ?? deal.estimatingSubstage;
 
   if (
-    deal.workflowRoute !== "estimating" ||
+    deal.workflowRoute !== "normal" ||
     targetProposalStatus !== "revision_requested" ||
     routingSubstage !== "sent_to_client"
   ) {

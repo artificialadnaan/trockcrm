@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import { api } from "@/lib/api";
 import type { FileRecord } from "./use-files";
 
-export type WorkflowRoute = "estimating" | "service";
+export type WorkflowRoute = "normal" | "service";
 export type DealScopingIntakeStatus = "draft" | "ready" | "activated";
 
 export interface DealScopingSectionData {

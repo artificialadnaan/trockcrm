@@ -52,10 +52,10 @@ function resolveWorkflowRoute(lead: typeof leads.$inferSelect): WorkflowRoute {
         : Number.NaN;
 
   if (Number.isFinite(preQualValue)) {
-    return preQualValue < 50000 ? "service" : "estimating";
+    return preQualValue < 50000 ? "service" : "normal";
   }
 
-  return lead.pipelineType === "service" ? "service" : "estimating";
+  return lead.pipelineType === "service" ? "service" : "normal";
 }
 
 export function createLeadConversionService(

@@ -5,13 +5,15 @@ import { getTableColumns } from "drizzle-orm";
 import { getTableConfig } from "drizzle-orm/pg-core";
 import { DEAL_SCOPING_INTAKE_STATUSES, WORKFLOW_ROUTES } from "@trock-crm/shared/types";
 import { dealScopingIntake, deals, files, users } from "@trock-crm/shared/schema";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   evaluateDealScopingReadiness,
   getOrCreateDealScopingIntake,
   linkDealFileToScopingRequirement,
   upsertDealScopingIntake,
 } from "../../../src/modules/deals/scoping-service.js";
+
+vi.mock("@trock-crm/shared/schema", async () => import("../../../../shared/src/schema/index.js"));
 
 const migrationPath = resolve(
   dirname(fileURLToPath(import.meta.url)),
@@ -62,7 +64,7 @@ function runDealScopingIntakeMigrationGuardFromSql(
 interface FakeDealRow {
   id: string;
   name: string;
-  workflowRoute: "estimating" | "service";
+  workflowRoute: "normal" | "service";
   expectedCloseDate: string | null;
   propertyAddress: string | null;
   propertyCity: string | null;
@@ -93,7 +95,7 @@ interface FakeDealScopingIntakeRow {
   id: string;
   dealId: string;
   officeId: string;
-  workflowRouteSnapshot: "estimating" | "service";
+  workflowRouteSnapshot: "normal" | "service";
   status: "draft" | "ready" | "activated";
   projectTypeId: string | null;
   sectionData: Record<string, unknown>;
@@ -121,7 +123,7 @@ function createFakeTenantDb(initialState?: Partial<FakeTenantState>) {
       {
         id: "deal-1",
         name: "Original Deal",
-        workflowRoute: "estimating",
+        workflowRoute: "normal",
         expectedCloseDate: null,
         propertyAddress: null,
         propertyCity: null,
@@ -139,10 +141,12 @@ function createFakeTenantDb(initialState?: Partial<FakeTenantState>) {
   };
 
   function getRows(table: unknown) {
-    if (table === deals) return state.deals;
-    if (table === users) return state.users;
-    if (table === files) return state.files;
-    if (table === dealScopingIntake) return state.dealScopingIntake;
+    const tableName = (table as { _: { name?: string } })?._?.name;
+
+    if (table === deals || tableName === "deals") return state.deals;
+    if (table === users || tableName === "users") return state.users;
+    if (table === files || tableName === "files") return state.files;
+    if (table === dealScopingIntake || tableName === "deal_scoping_intake") return state.dealScopingIntake;
     throw new Error("Unexpected table in fake tenant db");
   }
 
@@ -212,7 +216,7 @@ function createFakeTenantDb(initialState?: Partial<FakeTenantState>) {
 
 describe("Scoping Service Shared Contract", () => {
   it("defines workflow routes and intake statuses", () => {
-    expect(WORKFLOW_ROUTES).toEqual(["estimating", "service"]);
+    expect(WORKFLOW_ROUTES).toEqual(["normal", "service"]);
     expect(DEAL_SCOPING_INTAKE_STATUSES).toEqual(["draft", "ready", "activated"]);
   });
 
@@ -222,7 +226,7 @@ describe("Scoping Service Shared Contract", () => {
     expect(columns.workflowRoute.name).toBe("workflow_route");
     expect(columns.workflowRoute.notNull).toBe(true);
     expect(columns.workflowRoute.hasDefault).toBe(true);
-    expect(columns.workflowRoute.default).toBe("estimating");
+    expect(columns.workflowRoute.default).toBe("normal");
   });
 
   it("defines deal scoping intake defaults, uniqueness, and foreign keys", () => {
@@ -328,7 +332,7 @@ describe("Scoping Service", () => {
         {
           id: "deal-1",
           name: "Palm Villas",
-          workflowRoute: "estimating",
+          workflowRoute: "normal",
           expectedCloseDate: null,
           propertyAddress: "123 Palm Way",
           propertyCity: "Miami",
@@ -363,7 +367,7 @@ describe("Scoping Service", () => {
       tenantDb as never,
       "deal-1",
       {
-        workflowRoute: "estimating",
+        workflowRoute: "normal",
         projectOverview: { propertyName: "Palm Villas", bidDueDate: "2026-04-30" },
         propertyDetails: { propertyAddress: "123 Palm Way" },
         scopeSummary: { summary: "Exterior refresh" },
@@ -392,7 +396,7 @@ describe("Scoping Service", () => {
       tenantDb as never,
       "deal-1",
       {
-        workflowRoute: "estimating",
+        workflowRoute: "normal",
         sectionData: {
           projectOverview: { propertyName: "Palm Villas Phase II", bidDueDate: "2026-05-15" },
           propertyDetails: {
@@ -434,7 +438,7 @@ describe("Scoping Service", () => {
         {
           id: "deal-1",
           name: "Palm Villas",
-          workflowRoute: "estimating",
+          workflowRoute: "normal",
           expectedCloseDate: null,
           propertyAddress: "123 Palm Way",
           propertyCity: "Miami",
@@ -459,8 +463,8 @@ describe("Scoping Service", () => {
       "user-1"
     );
 
-    expect(tenantDb.state.deals[0]?.workflowRoute).toBe("estimating");
-    expect(result.intake.workflowRouteSnapshot).toBe("estimating");
+    expect(tenantDb.state.deals[0]?.workflowRoute).toBe("normal");
+    expect(result.intake.workflowRouteSnapshot).toBe("normal");
     expect(result.readiness.requiredAttachmentKeys).toEqual(["scope_docs", "site_photos"]);
   });
 
@@ -499,7 +503,7 @@ describe("Scoping Service", () => {
           id: "intake-1",
           dealId: "deal-1",
           officeId: "office-1",
-          workflowRouteSnapshot: "estimating",
+          workflowRouteSnapshot: "normal",
           status: "draft",
           projectTypeId: null,
           sectionData: {},
