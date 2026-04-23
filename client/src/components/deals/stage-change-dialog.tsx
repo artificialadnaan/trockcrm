@@ -22,6 +22,7 @@ import { StageGateChecklist } from "./stage-gate-checklist";
 import {
   preflightStageCheck,
   changeDealStage,
+  updateDeal,
 } from "@/hooks/use-deals";
 import { useLostReasons } from "@/hooks/use-pipeline-config";
 import { AlertTriangle, ArrowRight, ArrowLeft, Shield, Loader2 } from "lucide-react";
@@ -94,6 +95,18 @@ export function StageChangeDialog({
         return;
       }
 
+      if (isBidBoardLocked && isClosedLost) {
+        await updateDeal(deal.id, {
+          lostReasonId,
+          lostNotes,
+          lostCompetitor: lostCompetitor || null,
+          migrationMode: true,
+        });
+        onSuccess();
+        onOpenChange(false);
+        return;
+      }
+
       await changeDealStage(deal.id, targetStageId, {
         overrideReason: preflight.requiresOverride ? overrideReason : undefined,
         lostReasonId: ["production_lost", "service_lost"].includes(preflight.targetStage.slug)
@@ -124,6 +137,7 @@ export function StageChangeDialog({
   const isClosedWon =
     preflight != null &&
     ["sent_to_production", "service_sent_to_production"].includes(preflight.targetStage.slug);
+  const allowsBidBoardLossContextSave = isBidBoardLocked && isClosedLost;
   const currentStageMeta =
     preflight == null
       ? null
@@ -151,14 +165,9 @@ export function StageChangeDialog({
           [preflight.currentStage, preflight.targetStage]
         );
 
-  // When closing as lost, the modal is NOT dismissible via overlay click or escape.
-  // The user MUST fill in all required fields and submit. For other stage changes,
-  // normal dismiss behavior applies.
-  const handleOpenChange = isClosedLost ? () => {} : onOpenChange;
-
   return (
-    <Dialog open={open} onOpenChange={handleOpenChange}>
-      <DialogContent className="sm:max-w-[520px]" showCloseButton={!isClosedLost}>
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-[520px]" showCloseButton>
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             {preflight?.isBackwardMove ? (
@@ -225,6 +234,16 @@ export function StageChangeDialog({
                 <p className="mt-1">{bidBoardOwnership.canEditInCrm.join(", ")}</p>
                 <p className="mt-3 font-medium">Mirrored from Bid Board</p>
                 <p className="mt-1">{bidBoardOwnership.mirroredInCrm.join(", ")}</p>
+              </div>
+            )}
+
+            {allowsBidBoardLossContextSave && (
+              <div className="rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm text-blue-900">
+                <p className="font-medium">Loss context can still be recorded in CRM</p>
+                <p className="mt-1">
+                  The mirrored stage will stay read-only, but you can save the loss reason,
+                  notes, and competitor here for reporting and deal context.
+                </p>
               </div>
             )}
 
@@ -322,20 +341,23 @@ export function StageChangeDialog({
         )}
 
         <DialogFooter>
-          {/* Cancel button is hidden for Closed Lost -- modal is only dismissible by submitting */}
-          {!isClosedLost && (
-            <Button variant="outline" onClick={() => onOpenChange(false)}>
-              Cancel
-            </Button>
-          )}
+          <Button variant="outline" onClick={() => onOpenChange(false)}>
+            Cancel
+          </Button>
           <Button
             onClick={handleSubmit}
-            disabled={isBlocked || preflightLoading || submitting}
+            disabled={
+              (isBlocked && !allowsBidBoardLossContextSave) ||
+              preflightLoading ||
+              submitting
+            }
             variant={isClosedLost ? "destructive" : "default"}
           >
             {submitting && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
             {isBlocked
-              ? isBidBoardLocked
+              ? allowsBidBoardLossContextSave
+                ? "Save loss context"
+                : isBidBoardLocked
                 ? "Read-only in CRM"
                 : "Blocked"
               : isClosedLost
