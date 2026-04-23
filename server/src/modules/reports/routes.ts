@@ -259,8 +259,7 @@ router.get("/follow-up-compliance", async (req, res, next) => {
   }
 });
 
-// GET /api/reports/dd-vs-pipeline
-router.get("/dd-vs-pipeline", async (req, res, next) => {
+async function handleOpportunityVsPipeline(req: any, res: any, next: any) {
   try {
     const data = await getDdVsPipeline(req.tenantDb!);
     await req.commitTransaction!();
@@ -268,10 +267,15 @@ router.get("/dd-vs-pipeline", async (req, res, next) => {
   } catch (err) {
     next(err);
   }
-});
+}
 
-// GET /api/reports/closed-won-summary?from=2026-01-01&to=2026-12-31
-router.get("/closed-won-summary", requireDirector, async (req, res, next) => {
+// GET /api/reports/opportunity-vs-pipeline
+router.get("/opportunity-vs-pipeline", handleOpportunityVsPipeline);
+
+// Legacy alias
+router.get("/dd-vs-pipeline", handleOpportunityVsPipeline);
+
+async function handleWonSummary(req: any, res: any, next: any) {
   try {
     const data = await getClosedWonSummary(req.tenantDb!, {
       from: req.query.from as string | undefined,
@@ -282,7 +286,13 @@ router.get("/closed-won-summary", requireDirector, async (req, res, next) => {
   } catch (err) {
     next(err);
   }
-});
+}
+
+// GET /api/reports/won-summary?from=2026-01-01&to=2026-12-31
+router.get("/won-summary", requireDirector, handleWonSummary);
+
+// Legacy alias
+router.get("/closed-won-summary", requireDirector, handleWonSummary);
 
 // GET /api/reports/pipeline-by-rep?repId=uuid
 router.get("/pipeline-by-rep", requireDirector, async (req, res, next) => {

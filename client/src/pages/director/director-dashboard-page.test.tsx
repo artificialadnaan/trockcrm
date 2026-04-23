@@ -7,76 +7,54 @@ import { DirectorDashboardPage } from "./director-dashboard-page";
 const mocks = vi.hoisted(() => ({
   useDirectorDashboardMock: vi.fn(),
   useRepPerformanceMock: vi.fn(),
-  usePipelineBoardStateMock: vi.fn(),
-  useDealBoardMock: vi.fn(),
-  useLeadBoardMock: vi.fn(),
 }));
 
 vi.mock("@/hooks/use-director-dashboard", () => ({
   useDirectorDashboard: mocks.useDirectorDashboardMock,
   presetToDateRange: () => ({ from: "2026-01-01", to: "2026-12-31" }),
 }));
+
 vi.mock("@/hooks/use-rep-performance", () => ({
   useRepPerformance: mocks.useRepPerformanceMock,
 }));
-vi.mock("@/hooks/use-pipeline-board-state", () => ({ usePipelineBoardState: mocks.usePipelineBoardStateMock }));
-vi.mock("@/hooks/use-deals", () => ({ useDealBoard: mocks.useDealBoardMock }));
-vi.mock("@/hooks/use-leads", () => ({ useLeadBoard: mocks.useLeadBoardMock }));
-vi.mock("@/lib/pipeline-ownership", () => ({
-  getWorkflowRouteLabel: (route: "normal" | "service") => (route === "service" ? "Service" : "Standard"),
+
+vi.mock("@/components/ai/director-blind-spot-list", () => ({
+  DirectorBlindSpotList: () => <div>Blind Spots</div>,
 }));
-vi.mock("@/components/dashboard/director-dashboard-shell", () => ({
-  DirectorDashboardShell: ({ boardEntity, loading, error }: { boardEntity: "deals" | "leads"; loading: boolean; error: string | null }) => (
-    <div>
-      <h2>Team Pipeline Console</h2>
-      <div aria-pressed={boardEntity === "leads"}>Leads</div>
-      <div>{loading ? "Board loading" : "Board ready"}</div>
-      {error ? <div>{error}</div> : null}
-    </div>
+
+vi.mock("@/components/charts/pipeline-bar-chart", () => ({
+  PipelineBarChart: ({ data }: { data: Array<{ stageName: string }> }) => (
+    <div>{data.map((row) => row.stageName).join(", ")}</div>
   ),
 }));
-vi.mock("@/components/ai/director-blind-spot-list", () => ({
-  DirectorBlindSpotList: () => <div>Blind spots</div>,
-}));
-vi.mock("@/components/charts/pipeline-bar-chart", () => ({
-  PipelineBarChart: () => <div>Pipeline chart</div>,
-}));
-vi.mock("@/components/charts/win-rate-trend-chart", () => ({
-  WinRateTrendChart: () => <div>Win rate chart</div>,
-}));
+
 vi.mock("@/components/charts/chart-colors", () => ({
   formatCurrency: (value: number) => `$${value.toLocaleString()}`,
 }));
-vi.mock("@/components/dashboard/dashboard-kpi-band", () => ({
-  DashboardKpiBand: ({ items }: { items: Array<{ label: string }> }) => <div>{items.map((item) => item.label).join(", ")}</div>,
+
+vi.mock("@/components/charts/win-rate-trend-chart", () => ({
+  WinRateTrendChart: () => <div>Win Trend</div>,
 }));
-vi.mock("@/components/dashboard/funnel-bucket-row", () => ({
-  FunnelBucketRow: ({ buckets }: { buckets: Array<{ label: string }> }) => <div>{buckets.map((bucket) => bucket.label).join(", ")}</div>,
+
+vi.mock("@/components/dashboard/activity-by-rep-card", () => ({
+  ActivityByRepCard: () => <div>Activity by Rep</div>,
 }));
-vi.mock("@/components/dashboard/director-funnel-table", () => ({
-  DirectorFunnelTable: () => <div>Funnel table</div>,
+
+vi.mock("@/lib/pipeline-ownership", () => ({
+  getWorkflowRouteLabel: (route: "normal" | "service") => (route === "service" ? "Service" : "Normal"),
 }));
-vi.mock("@/components/dashboard/director-activity-summary", () => ({
-  DirectorActivitySummary: () => <div>Activity summary</div>,
-}));
-vi.mock("@/components/dashboard/director-alert-panel", () => ({
-  DirectorAlertPanel: () => <div>Alert panel</div>,
-}));
-vi.mock("@/components/dashboard/director-rep-workspace", () => ({
-  DirectorRepWorkspace: ({ repCards }: { repCards: Array<{ repName: string }> }) => <div>{repCards.map((rep) => rep.repName).join(", ")}</div>,
-}));
+
 vi.mock("@/lib/director-dashboard-actions", () => ({
-  DIRECTOR_DASHBOARD_ACTIONS: [
-    { key: "reports", label: "Reports", title: "Open reports", to: "/reports" },
-    { key: "alerts", label: "Alerts", title: "Open alerts", to: "/alerts" },
-  ],
+  DIRECTOR_DASHBOARD_ACTIONS: [],
 }));
+
 vi.mock("@/lib/stale-lead-dashboard", () => ({
   buildStaleLeadAlertSummary: () => ({
     title: "North Campus",
     detail: "16d stale - Avery Rep - Qualified Lead",
   }),
 }));
+
 vi.mock("@/components/ui/card", () => ({
   Card: ({ children }: { children: ReactNode }) => <div>{children}</div>,
   CardHeader: ({ children }: { children: ReactNode }) => <div>{children}</div>,
@@ -84,23 +62,31 @@ vi.mock("@/components/ui/card", () => ({
   CardContent: ({ children }: { children: ReactNode }) => <div>{children}</div>,
 }));
 
+function normalize(html: string) {
+  return html.replace(/\s+/g, " ").trim();
+}
+
 describe("DirectorDashboardPage", () => {
   beforeEach(() => {
-    mocks.usePipelineBoardStateMock.mockReturnValue({
-      activeEntity: "leads",
-      setActiveEntity: vi.fn(),
+    mocks.useRepPerformanceMock.mockReturnValue({
+      data: { reps: [], periodLabel: { current: "Current", previous: "Previous" } },
+      loading: false,
     });
     mocks.useDirectorDashboardMock.mockReturnValue({
       loading: false,
       error: null,
       data: {
-        officeFunnelBuckets: [
-          { key: "lead", label: "Leads", count: 4, totalValue: null, route: "/leads", bucket: "lead" },
-        ],
-        repFunnelRows: [],
-        repCommissionRows: [],
-        repCards: [{ repId: "rep-1", repName: "Alex Rep", activeDeals: 2, pipelineValue: 500000, winRate: 45, activityScore: 80, staleDeals: 1, staleLeads: 0 }],
-        pipelineByStage: [],
+        repCards: [{
+          repId: "rep-1",
+          repName: "Avery Rep",
+          activeDeals: 6,
+          pipelineValue: 910000,
+          winRate: 67,
+          activityScore: 49,
+          staleDeals: 1,
+          staleLeads: 2,
+        }],
+        pipelineByStage: [{ stageId: "opportunity", stageName: "Opportunity", stageColor: null, dealCount: 3, totalValue: 450000 }],
         winRateTrend: [],
         activityByRep: [],
         staleDeals: [{
@@ -129,7 +115,22 @@ describe("DirectorDashboardPage", () => {
           estimatedValue: 92000,
           staleThresholdDays: 14,
         }],
-        ddVsPipeline: { ddValue: 100000, ddCount: 2, pipelineValue: 500000, pipelineCount: 8, totalValue: 600000, totalCount: 10 },
+        opportunityVsPipeline: {
+          opportunityValue: 300000,
+          opportunityCount: 2,
+          pipelineValue: 610000,
+          pipelineCount: 4,
+          totalValue: 910000,
+          totalCount: 6,
+        },
+        ddVsPipeline: {
+          ddValue: 300000,
+          ddCount: 2,
+          pipelineValue: 610000,
+          pipelineCount: 4,
+          totalValue: 910000,
+          totalCount: 6,
+        },
         crmOwnedProgression: [
           { workflowBucket: "lead", workflowRoute: "normal", stageName: "Qualified Lead", itemCount: 2, totalValue: 125000 },
           { workflowBucket: "opportunity", workflowRoute: "service", stageName: "Opportunity", itemCount: 3, totalValue: 450000 },
@@ -147,45 +148,25 @@ describe("DirectorDashboardPage", () => {
         }],
       },
     });
-    mocks.useRepPerformanceMock.mockReturnValue({
-      loading: false,
-      data: {
-        periodLabel: { current: "This month", previous: "Last month" },
-        reps: [],
-      },
-    });
-    mocks.useDealBoardMock.mockReturnValue({ board: { columns: [] }, loading: false, error: null });
-    mocks.useLeadBoardMock.mockReturnValue({ board: { columns: [], defaultConversionDealStageId: null }, loading: false, error: null });
   });
 
-  it("keeps the board console while restoring the director workspace sections", () => {
-    const html = renderToStaticMarkup(
-      <MemoryRouter>
-        <DirectorDashboardPage />
-      </MemoryRouter>
+  it("renders CRM-owned and mirrored downstream review panels with service path and bottleneck context", () => {
+    const html = normalize(
+      renderToStaticMarkup(
+        <MemoryRouter>
+          <DirectorDashboardPage />
+        </MemoryRouter>
+      )
     );
 
-    expect(html).toContain("Team Pipeline Console");
-    expect(html).toContain("Director Dashboard");
-    expect(html).toContain("Funnel distribution by rep");
-    expect(html).toContain("Performance trends");
-    expect(html).toContain("Reports");
-  });
-
-  it("keeps the team board shell visible while summary analytics are still loading", () => {
-    mocks.useDirectorDashboardMock.mockReturnValue({
-      loading: true,
-      error: null,
-      data: null,
-    });
-
-    const html = renderToStaticMarkup(
-      <MemoryRouter>
-        <DirectorDashboardPage />
-      </MemoryRouter>
-    );
-
-    expect(html).toContain("Team Pipeline Console");
-    expect(html).toContain("aria-label=\"Primary workspace\"");
+    expect(html).toContain("CRM-Owned Progression");
+    expect(html).toContain("Qualified Lead");
+    expect(html).toContain("Service path");
+    expect(html).toContain("Bid Board Bottlenecks");
+    expect(html).toContain("Dallas ISD Roof");
+    expect(html).toContain("blocked");
+    expect(html).toContain("Dallas, TX");
+    expect(html).toContain("$275,000");
+    expect(html).toContain("22d / 14d target");
   });
 });

@@ -93,6 +93,14 @@ export interface DirectorDashboardData {
     daysInStage: number;
     staleThresholdDays: number;
   }>;
+  opportunityVsPipeline?: {
+    opportunityValue: number;
+    opportunityCount: number;
+    pipelineValue: number;
+    pipelineCount: number;
+    totalValue: number;
+    totalCount: number;
+  };
   ddVsPipeline: {
     ddValue: number;
     ddCount: number;
