@@ -230,6 +230,16 @@ const CANONICAL_DEAL_STAGE_SLUG_SET = new Set<string>(CANONICAL_DEAL_STAGE_SLUGS
 const CANONICAL_TERMINAL_DEAL_STAGE_SLUG_SET = new Set<string>(CANONICAL_TERMINAL_DEAL_STAGE_SLUGS);
 const CRM_OWNED_CANONICAL_DEAL_STAGE_SLUG_SET = new Set<string>(CRM_OWNED_CANONICAL_DEAL_STAGE_SLUGS);
 const BID_BOARD_OWNED_CANONICAL_DEAL_STAGE_SLUG_SET = new Set<string>(BID_BOARD_OWNED_CANONICAL_DEAL_STAGE_SLUGS);
+const CANONICAL_DEAL_WORKFLOW_CONTRACTS_BY_SLUG = new Map(
+  CANONICAL_DEAL_WORKFLOW_CONTRACTS.map((contract) => [contract.slug, contract] as const)
+);
+
+function contractAllowsWorkflowRoute(
+  contract: CanonicalDealWorkflowContractRecord,
+  workflowRoute: WorkflowRoute
+): boolean {
+  return (contract.workflowRoutes as readonly WorkflowRoute[]).includes(workflowRoute);
+}
 
 export function workflowFamilyForRoute(
   workflowRoute: WorkflowRoute
@@ -258,6 +268,15 @@ export function toCanonicalDealStageSlug(
   workflowRoute?: WorkflowRoute | null
 ): CanonicalDealStageSlug | null {
   if (isCanonicalDealStageSlug(stageSlug)) {
+    const contract = CANONICAL_DEAL_WORKFLOW_CONTRACTS_BY_SLUG.get(stageSlug);
+    if (!contract) {
+      return null;
+    }
+
+    if (workflowRoute && !contractAllowsWorkflowRoute(contract, workflowRoute)) {
+      return null;
+    }
+
     return stageSlug;
   }
 
@@ -265,7 +284,19 @@ export function toCanonicalDealStageSlug(
     return null;
   }
 
-  return LEGACY_DEAL_STAGE_TO_CANONICAL_STAGE[workflowRoute][stageSlug as LegacyDealStageSlug] ?? null;
+  const canonicalStageSlug =
+    LEGACY_DEAL_STAGE_TO_CANONICAL_STAGE[workflowRoute][stageSlug as LegacyDealStageSlug] ?? null;
+
+  if (!canonicalStageSlug) {
+    return null;
+  }
+
+  const contract = CANONICAL_DEAL_WORKFLOW_CONTRACTS_BY_SLUG.get(canonicalStageSlug);
+  if (!contract || !contractAllowsWorkflowRoute(contract, workflowRoute)) {
+    return null;
+  }
+
+  return canonicalStageSlug;
 }
 
 export function toCanonicalWorkflowStageSlug(
