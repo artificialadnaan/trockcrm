@@ -201,15 +201,36 @@ export async function ensureDevDemoWorkspace(
         FROM public.pipeline_stage_config
         WHERE slug = ANY($1)
       `,
-      [["contacted", "estimating", "in_production", "closed_won", "closed_lost"]]
+      [[
+        "contacted",
+        "estimate_in_progress",
+        "estimating",
+        "sent_to_production",
+        "service_sent_to_production",
+        "in_production",
+        "production_lost",
+        "service_lost",
+        "closed_won",
+        "closed_lost",
+      ]]
     );
 
     const stageBySlug = new Map(stageResult.rows.map((row) => [row.slug, row.id]));
     const contactedStageId = stageBySlug.get("contacted");
-    const estimatingStageId = stageBySlug.get("estimating");
-    const productionStageId = stageBySlug.get("in_production");
-    const closedWonStageId = stageBySlug.get("closed_won");
-    const closedLostStageId = stageBySlug.get("closed_lost");
+    const estimatingStageId =
+      stageBySlug.get("estimate_in_progress") ?? stageBySlug.get("estimating");
+    const productionStageId =
+      stageBySlug.get("sent_to_production") ??
+      stageBySlug.get("service_sent_to_production") ??
+      stageBySlug.get("in_production");
+    const closedWonStageId =
+      stageBySlug.get("sent_to_production") ??
+      stageBySlug.get("service_sent_to_production") ??
+      stageBySlug.get("closed_won");
+    const closedLostStageId =
+      stageBySlug.get("production_lost") ??
+      stageBySlug.get("service_lost") ??
+      stageBySlug.get("closed_lost");
 
     if (!contactedStageId || !estimatingStageId || !productionStageId || !closedWonStageId || !closedLostStageId) {
       await client.query("ROLLBACK");

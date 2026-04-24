@@ -128,7 +128,9 @@ export function StageChangeDialog({
   const isClosedLost =
     canonicalTargetStageSlug === "production_lost" ||
     canonicalTargetStageSlug === "service_lost";
-  const isClosedWon = preflight?.targetStage.slug === "closed_won";
+  const isClosedWon =
+    canonicalTargetStageSlug === "sent_to_production" ||
+    canonicalTargetStageSlug === "service_sent_to_production";
   const currentStageMeta =
     preflight == null
       ? null

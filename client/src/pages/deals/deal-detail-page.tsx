@@ -149,10 +149,7 @@ export function DealDetailPage() {
   const showPunchList =
     canonicalCurrentStageSlug === "sent_to_production" ||
     canonicalCurrentStageSlug === "service_sent_to_production";
-  const showCloseout =
-    showPunchList ||
-    currentStageSlug === "close_out" ||
-    currentStageSlug === "closed_won";
+  const showCloseout = showPunchList || currentStageSlug === "close_out";
 
   const tabs: { key: Tab; label: string }[] = [
     { key: "overview", label: "Overview" },
