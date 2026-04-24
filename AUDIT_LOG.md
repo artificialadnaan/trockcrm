@@ -1,6 +1,6 @@
 ## Running Summary
-- Iteration count: 11
-- Total tests generated: 22
+- Iteration count: 12
+- Total tests generated: 23
 - Pass/fail count per iteration:
   - Iteration 1: passed after deploy verification
   - Iteration 7: passed after clean-worktree API deploy verification
@@ -8,6 +8,7 @@
   - Iteration 9: passed after clean-worktree API + Frontend deploy verification
   - Iteration 10: reports / director / admin audit suite green against the live `73345c4` deploy
   - Iteration 11: companies / properties audit suite green locally against production; frontend deploy pending
+  - Iteration 12: notification stream CORP fix verified locally; API + frontend deploy pending
 - Issues fixed vs deferred:
   - Fixed: 12
   - Deferred: 0
@@ -211,15 +212,15 @@ Deploy status: SUCCESS
 Verification: local `npx vitest run --config vitest.config.ts server/tests/modules/reports/analytics-cycle.test.ts`, `npx vitest run --config vitest.config.ts client/src/components/reports/analytics-sections.test.tsx`, `npm run typecheck --workspace=server`, and `npm run typecheck --workspace=client`; confirmed passing on prod via `/reports` and `tests/audit/reports-director-admin.spec.ts`
 Status: fixed
 
-Issue #13 — Notification bootstrap logs abort noise during route-level reloads
-Route/Component: topbar notification center, `useNotificationStream`, `useNotifications`, `useUnreadCount`
+Issue #13 — Notification stream is blocked on the production frontend by cross-origin resource policy
+Route/Component: topbar notification center, `/api/notifications/stream`, `useNotificationStream`, notification SSE route
 Severity: medium
 Environment: production (Railway)
 Discovered: iteration 11, companies / properties production audit
-Symptom: direct route-level reloads across app pages can emit `TypeError: Failed to fetch` from notification bootstrap requests while the page is unloading, even though the route itself is healthy.
-Root cause: notification hooks issue unread-count / notification-list fetches without route-cleanup abort handling, and the stream bootstrap logs transient abort failures directly to the console.
-Fix: added abort-aware notification hook handling, a shared ignorable-abort classifier, and regression tests for the notification bootstrap path; also extracted shared Playwright audit helpers and added `tests/audit/companies-properties.spec.ts` for this route family.
+Symptom: rep pages intermittently or consistently log notification stream failures during production Playwright runs, with the browser reporting the EventSource connection as blocked by cross-origin policy.
+Root cause: the notification SSE route inherits Helmet's default `Cross-Origin-Resource-Policy: same-origin`, which blocks the cross-origin Railway frontend from consuming the credentialed EventSource stream even though CORS headers are otherwise present.
+Fix: added abort-aware notification hook handling and regression tests on the client side, then added a server route regression test and overrode the SSE route to emit `Cross-Origin-Resource-Policy: cross-origin`.
 Deployed: pending
 Deploy status: pending
-Verification: local `npx vitest run --config vitest.config.ts client/src/hooks/use-notifications.test.ts`, `npm run typecheck --workspace=client`, and `npx playwright test tests/audit/companies-properties.spec.ts --config=playwright.audit.config.ts --reporter=list`
+Verification: local `npx vitest run --config vitest.config.ts client/src/hooks/use-notifications.test.ts`, `npx vitest run --config vitest.config.ts server/tests/modules/notifications/routes.test.ts`, `npm run typecheck --workspace=client`, `npm run typecheck --workspace=server`, and post-deploy Playwright reruns pending
 Status: in progress

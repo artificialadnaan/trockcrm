@@ -22,6 +22,9 @@ router.get("/stream", authMiddleware, (req, res) => {
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
+  // The production frontend lives on a different Railway origin and consumes this
+  // endpoint via a credentialed EventSource connection.
+  res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
   res.setHeader("X-Accel-Buffering", "no"); // Disable nginx buffering on Railway
   res.flushHeaders();
 
