@@ -50,7 +50,7 @@ describe("forecast milestone helpers", () => {
     expect(deriveForecastAmount({ awardedAmount: null, bidEstimate: null, ddEstimate: "90000" })).toBe(90000);
   });
 
-  it("captures dd, estimating, and closed_won milestones only once", async () => {
+  it("captures opportunity, estimating-family, and production-handoff milestones only once", async () => {
     const { captureStageDrivenForecastMilestone } = await import("../../../src/modules/reports/forecast-milestones-service.js");
     const tenantDb = createMockTenantDb([[], []]);
 
@@ -67,11 +67,52 @@ describe("forecast milestone helpers", () => {
         source: "Trade Show",
       },
       currentStage: { slug: "lead" },
-      targetStage: { slug: "dd" },
+      targetStage: { slug: "opportunity" },
       userId: "user-1",
     });
 
     expect(tenantDb.execute).toHaveBeenCalledTimes(2);
+  });
+
+  it("treats canonical estimating and sent-to-production stages as milestone captures", async () => {
+    const { captureStageDrivenForecastMilestone } = await import("../../../src/modules/reports/forecast-milestones-service.js");
+    const tenantDb = createMockTenantDb([[], [], [], []]);
+
+    await captureStageDrivenForecastMilestone(tenantDb, {
+      deal: {
+        id: "deal-1",
+        assignedRepId: "rep-1",
+        workflowRoute: "normal",
+        ddEstimate: "100000",
+        bidEstimate: "120000",
+        awardedAmount: "130000",
+        stageId: "stage-opportunity",
+        expectedCloseDate: "2026-05-01",
+        source: "Trade Show",
+      },
+      currentStage: { slug: "opportunity" },
+      targetStage: { slug: "estimate_in_progress" },
+      userId: "user-1",
+    });
+
+    await captureStageDrivenForecastMilestone(tenantDb, {
+      deal: {
+        id: "deal-1",
+        assignedRepId: "rep-1",
+        workflowRoute: "normal",
+        ddEstimate: "100000",
+        bidEstimate: "120000",
+        awardedAmount: "130000",
+        stageId: "stage-estimating",
+        expectedCloseDate: "2026-05-01",
+        source: "Trade Show",
+      },
+      currentStage: { slug: "estimate_sent_to_client" },
+      targetStage: { slug: "sent_to_production" },
+      userId: "user-1",
+    });
+
+    expect(tenantDb.execute).toHaveBeenCalledTimes(4);
   });
 
   it("builds initial and closed_won backfill rows from safe sources", async () => {

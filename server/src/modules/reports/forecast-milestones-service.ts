@@ -7,6 +7,26 @@ type TenantDb = NodePgDatabase<typeof schema>;
 type ForecastMilestoneKey = "initial" | "qualified" | "estimating" | "closed_won";
 type CaptureSource = "live" | "audit_backfill";
 
+const QUALIFIED_STAGE_SLUGS = new Set([
+  "dd",
+  "opportunity",
+]);
+
+const ESTIMATING_STAGE_SLUGS = new Set([
+  "estimating",
+  "estimate_in_progress",
+  "service_estimating",
+  "estimate_under_review",
+  "estimate_sent_to_client",
+  "bid_sent",
+]);
+
+const WON_STAGE_SLUGS = new Set([
+  "closed_won",
+  "sent_to_production",
+  "service_sent_to_production",
+]);
+
 interface ForecastSnapshot {
   assignedRepId: string | null;
   workflowRoute: string | null;
@@ -258,9 +278,9 @@ function milestoneKeyForTransition(
     return null;
   }
 
-  if (targetStageSlug === "dd") return "qualified";
-  if (targetStageSlug === "estimating") return "estimating";
-  if (targetStageSlug === "closed_won") return "closed_won";
+  if (WON_STAGE_SLUGS.has(targetStageSlug)) return "closed_won";
+  if (ESTIMATING_STAGE_SLUGS.has(targetStageSlug)) return "estimating";
+  if (QUALIFIED_STAGE_SLUGS.has(targetStageSlug)) return "qualified";
   return null;
 }
 

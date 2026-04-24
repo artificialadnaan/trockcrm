@@ -38,14 +38,10 @@ interface TerminalStageInfo {
 
 export function summarizeTerminalStageCounts(terminalStages: TerminalStageInfo[]) {
   const won = terminalStages
-    .filter((ts) =>
-      ["sent_to_production", "service_sent_to_production", "closed_won"].includes(ts.stage.slug)
-    )
+    .filter((ts) => ["sent_to_production", "service_sent_to_production"].includes(ts.stage.slug))
     .reduce((sum, ts) => sum + ts.count, 0);
   const lost = terminalStages
-    .filter((ts) =>
-      ["production_lost", "service_lost", "closed_lost", "lost"].includes(ts.stage.slug)
-    )
+    .filter((ts) => ["production_lost", "service_lost"].includes(ts.stage.slug))
     .reduce((sum, ts) => sum + ts.count, 0);
 
   return { won, lost };
@@ -178,9 +174,7 @@ function DroppableColumn({
   const isCloseOut = false;
   const isInProduction =
     slug === "sent_to_production" ||
-    slug === "service_sent_to_production" ||
-    slug === "in_production" ||
-    slug === "construction";
+    slug === "service_sent_to_production";
   const isFirstColumn = index === 0;
 
   return (
