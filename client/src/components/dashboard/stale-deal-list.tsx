@@ -2,7 +2,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency } from "@/components/charts/chart-colors";
 import { AlertTriangle } from "lucide-react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link } from "react-router-dom";
 
 interface StaleDeal {
   dealId: string;
@@ -19,8 +19,6 @@ interface StaleDealListProps {
 }
 
 export function StaleDealList({ deals }: StaleDealListProps) {
-  const navigate = useNavigate();
-
   if (deals.length === 0) {
     return (
       <Card>
@@ -41,15 +39,17 @@ export function StaleDealList({ deals }: StaleDealListProps) {
 
   return (
     <Card>
-      <CardHeader
-        className="cursor-pointer hover:bg-slate-50 transition-colors rounded-t-lg"
-        onClick={() => navigate("/deals?filter=stale")}
-      >
-        <CardTitle className="flex items-center gap-2">
-          <AlertTriangle className="h-4 w-4 text-amber-500" />
-          Stale Deal Watchlist
-          <Badge variant="secondary" className="ml-auto">{deals.length}</Badge>
-        </CardTitle>
+      <CardHeader className="rounded-t-lg p-0">
+        <Link
+          to="/reports#stale-deals"
+          className="flex items-center gap-2 rounded-t-lg px-6 py-4 hover:bg-slate-50 transition-colors"
+        >
+          <CardTitle className="flex flex-1 items-center gap-2">
+            <AlertTriangle className="h-4 w-4 text-amber-500" />
+            Stale Deal Watchlist
+          </CardTitle>
+          <Badge variant="secondary">{deals.length}</Badge>
+        </Link>
       </CardHeader>
       <CardContent>
         <div className="space-y-2">

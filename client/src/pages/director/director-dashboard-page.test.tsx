@@ -169,4 +169,17 @@ describe("DirectorDashboardPage", () => {
     expect(html).toContain("$275,000");
     expect(html).toContain("22d / 14d target");
   });
+
+  it("routes stale deal drilldowns to the reports stale deals section", () => {
+    const html = normalize(
+      renderToStaticMarkup(
+        <MemoryRouter>
+          <DirectorDashboardPage />
+        </MemoryRouter>
+      )
+    );
+
+    expect(html).toContain('href="/reports#stale-deals"');
+    expect(html).not.toContain('href="/deals?filter=stale"');
+  });
 });

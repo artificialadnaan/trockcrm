@@ -305,12 +305,14 @@ interface WorkflowTableColumn<T> {
 }
 
 function WorkflowTableSection<T extends object>({
+  sectionId,
   title,
   subtitle,
   rows,
   columns,
   emptyMessage,
 }: {
+  sectionId?: string;
   title: string;
   subtitle: string;
   rows: T[];
@@ -318,7 +320,7 @@ function WorkflowTableSection<T extends object>({
   emptyMessage: string;
 }) {
   return (
-    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+    <div id={sectionId} className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
       <div className="px-6 py-5 border-b border-slate-100">
         <h2 className="text-lg font-bold text-slate-900">{title}</h2>
         <p className="text-xs text-slate-400 mt-0.5">{subtitle}</p>
@@ -555,6 +557,7 @@ function WorkflowOverviewPanel({
         />
 
         <WorkflowTableSection
+          sectionId="stale-deals"
           title="Stale Deals"
           subtitle="Active deals that have exceeded their stage threshold."
           rows={data?.staleDeals ?? []}

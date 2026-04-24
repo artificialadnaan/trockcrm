@@ -17,6 +17,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { useNavigate } from "react-router-dom";
 import { DealStageBadge } from "./deal-stage-badge";
 import { StageGateChecklist } from "./stage-gate-checklist";
 import {
@@ -27,6 +28,49 @@ import { useLostReasons } from "@/hooks/use-pipeline-config";
 import { AlertTriangle, ArrowRight, ArrowLeft, Shield, Loader2 } from "lucide-react";
 import { getDealStageMetadata } from "@/hooks/use-deals";
 import { toCanonicalDealStageSlug } from "@trock-crm/shared/types";
+
+interface StageRequirementState {
+  fields: string[];
+  documents: string[];
+  approvals: string[];
+}
+
+interface StageRequirementAction {
+  label: string;
+  to: string;
+}
+
+export function getStageRequirementAction(
+  dealId: string,
+  missingRequirements: StageRequirementState | null | undefined
+): StageRequirementAction | null {
+  if (!missingRequirements) {
+    return null;
+  }
+
+  if (missingRequirements.fields.some((field) => field.includes("."))) {
+    return {
+      label: "Open Scoping Workspace",
+      to: `/deals/${dealId}?tab=scoping`,
+    };
+  }
+
+  if (missingRequirements.documents.length > 0) {
+    return {
+      label: "Open Files",
+      to: `/deals/${dealId}?tab=files`,
+    };
+  }
+
+  if (missingRequirements.fields.length > 0) {
+    return {
+      label: "Open Overview",
+      to: `/deals/${dealId}?tab=overview`,
+    };
+  }
+
+  return null;
+}
 
 interface StageChangeDialogProps {
   deal: {
@@ -50,6 +94,7 @@ export function StageChangeDialog({
 }: StageChangeDialogProps) {
   const { reasons } = useLostReasons();
   const workflowRoute = deal.workflowRoute ?? "normal";
+  const navigate = useNavigate();
 
   const [preflight, setPreflight] = useState<Awaited<ReturnType<typeof preflightStageCheck>> | null>(null);
   const [preflightLoading, setPreflightLoading] = useState(true);
@@ -160,6 +205,7 @@ export function StageChangeDialog({
 
   const shouldForceCompletion = isClosedLost && !isBidBoardLocked;
   const handleOpenChange = shouldForceCompletion ? () => {} : onOpenChange;
+  const requirementAction = getStageRequirementAction(deal.id, preflight?.missingRequirements);
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
@@ -214,10 +260,24 @@ export function StageChangeDialog({
 
             {/* Blocked State */}
             {isBlocked && (
-              <div className="p-3 bg-red-50 border border-red-200 rounded-lg">
+              <div className="space-y-3 rounded-lg border border-red-200 bg-red-50 p-3">
                 <p className="text-sm text-red-700 font-medium">
                   {preflight.blockReason}
                 </p>
+                {requirementAction && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="border-red-200 bg-white text-red-700 hover:bg-red-100 hover:text-red-800"
+                    onClick={() => {
+                      onOpenChange(false);
+                      navigate(requirementAction.to);
+                    }}
+                  >
+                    {requirementAction.label}
+                  </Button>
+                )}
               </div>
             )}
 

@@ -462,7 +462,7 @@ export function DirectorDashboardPage() {
               <div className="mt-4 space-y-1">
                 {data.staleDeals.length > 0 && (
                   <Link
-                    to="/deals?filter=stale"
+                    to="/reports#stale-deals"
                     className="flex items-center gap-1 text-[10px] font-semibold text-gray-400 hover:text-white transition-colors"
                   >
                     View all {data.staleDeals.length} stale deals
