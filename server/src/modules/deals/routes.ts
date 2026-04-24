@@ -29,6 +29,7 @@ import {
   updateTeamMember,
   removeTeamMember,
 } from "./team-service.js";
+import { listUsers } from "../admin/users-service.js";
 import {
   getEstimate,
   createSection,
@@ -884,6 +885,34 @@ router.get("/:id/team", async (req, res, next) => {
     const members = await getTeamMembers(req.tenantDb!, req.params.id);
     await req.commitTransaction!();
     res.json({ members });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/deals/:id/team/assignable-users
+router.get("/:id/team/assignable-users", async (req, res, next) => {
+  try {
+    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+
+    const officeId = req.user!.activeOfficeId ?? req.user!.officeId;
+    const rows = (await listUsers(officeId)) as Array<{
+      id: string;
+      displayName: string;
+      email: string;
+      isActive: boolean;
+    }>;
+    const users = rows
+      .filter((user) => user.isActive)
+      .map((user) => ({
+        id: user.id,
+        displayName: user.displayName,
+        email: user.email,
+      }));
+
+    await req.commitTransaction!();
+    res.json({ users });
   } catch (err) {
     next(err);
   }

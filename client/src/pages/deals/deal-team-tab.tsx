@@ -50,6 +50,22 @@ interface AdminUser {
   email: string;
 }
 
+function getSelectedUserLabel(
+  users: AdminUser[],
+  userId: string,
+  loadingUsers: boolean
+) {
+  if (loadingUsers) {
+    return "Loading...";
+  }
+
+  if (!userId) {
+    return "Select user";
+  }
+
+  return users.find((user) => user.id === userId)?.displayName ?? "Select user";
+}
+
 const ROLE_LABELS: Record<TeamRole, string> = {
   superintendent: "Superintendent",
   estimator: "Estimator",
@@ -234,11 +250,11 @@ function AddMemberDialog({
   useEffect(() => {
     if (!open) return;
     setLoadingUsers(true);
-    api<{ users: AdminUser[] }>("/admin/users")
+    api<{ users: AdminUser[] }>(`/deals/${dealId}/team/assignable-users`)
       .then((data) => setUsers(data.users))
       .catch(() => toast.error("Failed to load users"))
       .finally(() => setLoadingUsers(false));
-  }, [open]);
+  }, [dealId, open]);
 
   const handleSubmit = async () => {
     if (!userId || !role) {
@@ -283,7 +299,9 @@ function AddMemberDialog({
             <label id="team-user-label" htmlFor="team-user-select" className="text-sm font-medium">User</label>
             <Select value={userId} onValueChange={(v) => setUserId(v ?? "")} disabled={loadingUsers}>
               <SelectTrigger id="team-user-select" aria-labelledby="team-user-label">
-                <SelectValue placeholder={loadingUsers ? "Loading..." : "Select user"} />
+                <SelectValue placeholder={loadingUsers ? "Loading..." : "Select user"}>
+                  {getSelectedUserLabel(users, userId, loadingUsers)}
+                </SelectValue>
               </SelectTrigger>
               <SelectContent>
                 {users.map((u) => (

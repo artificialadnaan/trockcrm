@@ -131,3 +131,16 @@ Deployed: pending
 Deploy status: pending
 Verification: local `npx vitest run --config vitest.config.ts client/src/pages/deals/deal-detail-page.test.tsx` and `npm run typecheck --workspace=client`
 Status: in progress
+
+Issue #8 — Sales rep team-member picker depends on an admin-only user directory
+Route/Component: `/deals/:id?tab=team`, `DealTeamTab`, `AddMemberDialog`
+Severity: high
+Environment: production (Railway)
+Discovered: iteration 3, live production audit of assignment flow
+Symptom: opening `Add Team Member` as a sales rep triggers `GET /api/admin/users => 403`, so the UI picker cannot load selectable users even though `POST /api/deals/:id/team` succeeds.
+Root cause: the dialog hard-coded the admin user directory instead of a deal-scoped assignable-user source.
+Fix: added `GET /api/deals/:id/team/assignable-users` and repointed the dialog to it; also made the closed select render an explicit display label instead of relying on async option hydration.
+Deployed: pending
+Deploy status: pending
+Verification: local `npm run typecheck --workspace=server` and `npm run typecheck --workspace=client`
+Status: in progress
