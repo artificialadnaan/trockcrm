@@ -145,6 +145,25 @@ function getReadinessTone(status: DealScopingReadiness["status"]) {
   return "bg-amber-50 text-amber-700 border-amber-200";
 }
 
+function getProjectTypeLabel(
+  projectTypes: Array<{ id: string; name: string }>,
+  projectTypeId: string | null
+) {
+  if (!projectTypeId) {
+    return "Unassigned";
+  }
+
+  return projectTypes.find((type) => type.id === projectTypeId)?.name ?? "Unassigned";
+}
+
+function getSelectDisplayLabel(
+  value: string,
+  options: Record<string, string>,
+  fallback: string
+) {
+  return options[value] ?? fallback;
+}
+
 function getDefaultAttachmentRequirementKeys(route: WorkflowRoute) {
   return route === "service" ? ["site_photos"] : ["scope_docs", "site_photos"];
 }
@@ -212,6 +231,25 @@ export function DealScopingWorkspace({
   const lastSavedFingerprintRef = useRef("");
   const hydrationCompleteRef = useRef(false);
   const activeWorkflowRoute: WorkflowRoute = deal.workflowRoute ?? "normal";
+  const projectTypeLabel = getProjectTypeLabel(projectTypes, projectTypeId);
+  const preBidMeetingLabel = getSelectDisplayLabel(
+    getSectionValue(sectionData, "opportunity", "preBidMeetingCompleted"),
+    { yes: "Completed" },
+    "Pending"
+  );
+  const siteVisitDecisionLabel = getSelectDisplayLabel(
+    getSectionValue(sectionData, "opportunity", "siteVisitDecision"),
+    {
+      required: "Site Visit Required",
+      not_required: "No Site Visit Required",
+    },
+    "Pending"
+  );
+  const siteVisitCompletedLabel = getSelectDisplayLabel(
+    getSectionValue(sectionData, "opportunity", "siteVisitCompleted"),
+    { completed: "Completed" },
+    "Pending"
+  );
 
   const loadIntake = async () => {
     setLoading(true);
@@ -510,7 +548,7 @@ export function DealScopingWorkspace({
                 onValueChange={(value) => setProjectTypeId(value === "__none__" ? null : value)}
               >
                 <SelectTrigger id="projectTypeId">
-                  <SelectValue placeholder="Select project type" />
+                  <SelectValue>{projectTypeLabel}</SelectValue>
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="__none__">Unassigned</SelectItem>
@@ -574,7 +612,7 @@ export function DealScopingWorkspace({
                 }
               >
                 <SelectTrigger id="preBidMeetingCompleted">
-                  <SelectValue placeholder="Select status" />
+                  <SelectValue>{preBidMeetingLabel}</SelectValue>
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="__unset__">Pending</SelectItem>
@@ -596,7 +634,7 @@ export function DealScopingWorkspace({
                 }
               >
                 <SelectTrigger id="siteVisitDecision">
-                  <SelectValue placeholder="Select decision" />
+                  <SelectValue>{siteVisitDecisionLabel}</SelectValue>
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="__unset__">Pending</SelectItem>
@@ -619,7 +657,7 @@ export function DealScopingWorkspace({
                 }
               >
                 <SelectTrigger id="siteVisitCompleted">
-                  <SelectValue placeholder="Select completion state" />
+                  <SelectValue>{siteVisitCompletedLabel}</SelectValue>
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="__unset__">Pending</SelectItem>

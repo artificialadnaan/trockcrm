@@ -41,7 +41,12 @@ import { useCompanyDetail } from "@/hooks/use-companies";
 import { usePipelineStages } from "@/hooks/use-pipeline-config";
 import { useAuth } from "@/lib/auth";
 import { formatCurrency, bestEstimate } from "@/lib/deal-utils";
-import { isEstimatingBoundaryStageSlug } from "@/lib/pipeline-ownership";
+import {
+  getCanonicalDealStageSlugs,
+  getDealStageLabelBySlug,
+  isEstimatingBoundaryStageSlug,
+  normalizeDealStageSlug,
+} from "@/lib/pipeline-ownership";
 import {
   getCanonicalEstimatingBoundaryStageSlug,
   toCanonicalDealStageSlug,
@@ -89,19 +94,58 @@ export function DealDetailPage() {
   const isBidBoardOwned = Boolean(deal?.isBidBoardOwned || bidBoardOwnership?.isOwned);
   const workflowRoute = deal?.workflowRoute ?? "normal";
   const dealStages = stages.filter((stage) => toCanonicalDealStageSlug(stage.slug, workflowRoute) != null);
+  const canonicalStageSlugs = getCanonicalDealStageSlugs(workflowRoute) as string[];
+  const canonicalStageOrder = new Map(
+    canonicalStageSlugs.map((slug, index) => [slug, index] as const)
+  );
+  const canonicalOrderedStages = canonicalStageSlugs
+    .map((slug) => {
+      const exactFamilyMatch = dealStages.find(
+        (stage) =>
+          stage.slug === slug &&
+          (workflowRoute === "service"
+            ? stage.workflowFamily === "service_deal"
+            : stage.workflowFamily === "standard_deal")
+      );
+      const normalizedMatch =
+        exactFamilyMatch ??
+        dealStages.find((stage) => normalizeDealStageSlug(stage.slug, workflowRoute) === slug);
+
+      if (!normalizedMatch) {
+        return null;
+      }
+
+      return {
+        ...normalizedMatch,
+        slug,
+        name: getDealStageLabelBySlug(slug as Parameters<typeof getDealStageLabelBySlug>[0]),
+      };
+    })
+    .filter((stage): stage is NonNullable<typeof stage> => stage != null);
 
   // Build stage advancement options
-  const forwardStages = dealStages.filter(
-    (s) => s.displayOrder > (currentStage?.displayOrder ?? 0)
-  );
-  const backwardStages = dealStages.filter(
-    (s) => s.displayOrder < (currentStage?.displayOrder ?? 0) && !s.isTerminal
-  );
+  const canonicalCurrentStageSlug =
+    currentStage == null ? null : toCanonicalDealStageSlug(currentStage.slug, workflowRoute);
+  const currentCanonicalIndex =
+    canonicalCurrentStageSlug == null ? -1 : (canonicalStageOrder.get(canonicalCurrentStageSlug) ?? -1);
+  const forwardStages =
+    currentCanonicalIndex === -1
+      ? []
+      : canonicalOrderedStages.filter(
+          (stage) => (canonicalStageOrder.get(stage.slug) ?? -1) > currentCanonicalIndex
+        );
+  const backwardStages =
+    currentCanonicalIndex <= 0
+      ? []
+      : canonicalOrderedStages.filter((stage) => {
+          const stageIndex = canonicalStageOrder.get(stage.slug) ?? -1;
+          return stageIndex > -1 && stageIndex < currentCanonicalIndex && !stage.isTerminal;
+        });
   const handoffStageSlug =
     bidBoardOwnership?.handoffStageSlug ?? getCanonicalEstimatingBoundaryStageSlug(workflowRoute);
   const handoffStage =
-    dealStages.find((s) => s.slug === handoffStageSlug) ??
-    dealStages.find((s) => isEstimatingBoundaryStageSlug(s.slug, workflowRoute));
+    canonicalOrderedStages.find((s) => s.slug === handoffStageSlug) ??
+    canonicalOrderedStages.find((s) => isEstimatingBoundaryStageSlug(s.slug, workflowRoute));
   const readonlyForwardStages = forwardStages.filter((stage) =>
     isBidBoardManagedStage(stage, {
       isBidBoardOwned,
@@ -144,7 +188,6 @@ export function DealDetailPage() {
   };
 
   const currentStageSlug = currentStage?.slug ?? "";
-  const canonicalCurrentStageSlug = toCanonicalDealStageSlug(currentStageSlug, workflowRoute);
   const isOpportunityStage = canonicalCurrentStageSlug === "opportunity";
   const showPunchList =
     canonicalCurrentStageSlug === "sent_to_production" ||

@@ -296,6 +296,44 @@ describe("DealDetailPage", () => {
     expect(managedCount).toBe(0);
   });
 
+  it("hides legacy stage labels from the move-stage menu when mixed stage config still exists", () => {
+    mocks.usePipelineStagesMock.mockReturnValueOnce({
+      stages: [
+        { id: "stage-opportunity", name: "Opportunity", slug: "opportunity", workflowFamily: "standard_deal", displayOrder: 0, isTerminal: false },
+        { id: "legacy-estimating", name: "Estimating", slug: "estimating", workflowFamily: "standard_deal", displayOrder: 1, isTerminal: false },
+        { id: "legacy-bid-sent", name: "Bid Sent", slug: "bid_sent", workflowFamily: "standard_deal", displayOrder: 2, isTerminal: false },
+        { id: "legacy-production", name: "In Production", slug: "in_production", workflowFamily: "standard_deal", displayOrder: 3, isTerminal: false },
+        { id: "legacy-won", name: "Closed Won", slug: "closed_won", workflowFamily: "standard_deal", displayOrder: 4, isTerminal: false },
+        { id: "legacy-lost", name: "Closed Lost", slug: "closed_lost", workflowFamily: "standard_deal", displayOrder: 5, isTerminal: true },
+        { id: "stage-under-review", name: "Estimate Under Review", slug: "estimate_under_review", workflowFamily: "standard_deal", displayOrder: 6, isTerminal: false },
+        { id: "stage-sent", name: "Estimate Sent to Client", slug: "estimate_sent_to_client", workflowFamily: "standard_deal", displayOrder: 7, isTerminal: false },
+        { id: "stage-production", name: "Sent to Production", slug: "sent_to_production", workflowFamily: "standard_deal", displayOrder: 8, isTerminal: false },
+        { id: "stage-lost", name: "Production Lost", slug: "production_lost", workflowFamily: "standard_deal", displayOrder: 9, isTerminal: true },
+      ],
+    });
+    mocks.useDealDetailMock.mockReturnValueOnce({
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      deal: makeDealDetail({
+        stageId: "stage-opportunity",
+        isBidBoardOwned: false,
+        bidBoardStageSlug: null,
+        readOnlySyncedAt: null,
+        bidBoardOwnership: null,
+      }),
+    });
+
+    const html = renderPage();
+
+    expect(html).toContain("Estimate in Progress");
+    expect(html).toContain("Estimate Under Review");
+    expect(html).not.toContain("Bid Sent");
+    expect(html).not.toContain("Closed Won");
+    expect(html).not.toContain("Closed Lost");
+    expect(html).not.toContain("In Production");
+  });
+
   it("treats legacy estimating as the handoff boundary when the server reports a canonical handoff slug", () => {
     mocks.useDealDetailMock.mockReturnValueOnce({
       loading: false,
