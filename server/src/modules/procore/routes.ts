@@ -24,6 +24,12 @@ import {
 } from "../tasks/service.js";
 
 const router = Router();
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function isUuid(value: string) {
+  return UUID_PATTERN.test(value);
+}
 
 async function assertAssignableUserForOffice(assignedTo: string, officeId: string) {
   const user = await getUserById(assignedTo);
@@ -275,6 +281,10 @@ router.get("/my-projects", async (req, res, next) => {
 // GET /api/procore/my-projects/:id — single deal-backed project for the project detail shell
 router.get("/my-projects/:id", async (req, res, next) => {
   try {
+    if (!isUuid(req.params.id)) {
+      throw new AppError(404, "Project not found");
+    }
+
     const userId = req.user!.id;
     const role = req.user!.role;
     const params = role === "rep" ? [req.params.id, userId] : [req.params.id];

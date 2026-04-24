@@ -59,6 +59,9 @@ function createRepTestApp() {
 }
 
 describe("procore routes", () => {
+  const dealId = "11111111-1111-4111-8111-111111111111";
+  const otherDealId = "22222222-2222-4222-8222-222222222222";
+
   beforeEach(() => {
     vi.clearAllMocks();
   });
@@ -67,7 +70,7 @@ describe("procore routes", () => {
     queryMock.mockResolvedValueOnce({
       rows: [
         {
-          id: "deal-123",
+          id: dealId,
           deal_number: "TR-1001",
           name: "Birchstone North Tower",
           procore_project_id: 999,
@@ -79,22 +82,30 @@ describe("procore routes", () => {
       ],
     });
 
-    const response = await request(createTestApp()).get("/api/procore/my-projects/deal-123");
+    const response = await request(createTestApp()).get(`/api/procore/my-projects/${dealId}`);
 
     expect(response.status).toBe(200);
     expect(response.body.project.name).toBe("Birchstone North Tower");
     expect(queryMock).toHaveBeenCalledWith(
       expect.stringContaining("WHERE d.procore_project_id IS NOT NULL"),
-      ["deal-123"],
+      [dealId],
     );
   });
 
   it("returns 404 when the project is missing", async () => {
     queryMock.mockResolvedValueOnce({ rows: [] });
 
-    const response = await request(createTestApp()).get("/api/procore/my-projects/deal-missing");
+    const response = await request(createTestApp()).get(`/api/procore/my-projects/${dealId}`);
 
     expect(response.status).toBe(404);
+  });
+
+  it("returns 404 before querying when the project id is not a uuid", async () => {
+    const response = await request(createTestApp()).get("/api/procore/my-projects/not-a-uuid");
+
+    expect(response.status).toBe(404);
+    expect(response.body).toEqual({ error: { message: "Project not found", code: undefined } });
+    expect(queryMock).not.toHaveBeenCalled();
   });
 
   it("allows a rep to fetch only their own project-backed deal", async () => {
@@ -102,7 +113,7 @@ describe("procore routes", () => {
       .mockResolvedValueOnce({
         rows: [
           {
-            id: "deal-123",
+            id: dealId,
             deal_number: "TR-1001",
             name: "Birchstone North Tower",
             procore_project_id: 999,
@@ -116,21 +127,21 @@ describe("procore routes", () => {
       .mockResolvedValueOnce({ rows: [] });
 
     const app = createRepTestApp();
-    const ownResponse = await request(app).get("/api/procore/my-projects/deal-123");
-    const unrelatedResponse = await request(app).get("/api/procore/my-projects/deal-999");
+    const ownResponse = await request(app).get(`/api/procore/my-projects/${dealId}`);
+    const unrelatedResponse = await request(app).get(`/api/procore/my-projects/${otherDealId}`);
 
     expect(ownResponse.status).toBe(200);
-    expect(ownResponse.body.project.id).toBe("deal-123");
+    expect(ownResponse.body.project.id).toBe(dealId);
     expect(unrelatedResponse.status).toBe(404);
     expect(queryMock).toHaveBeenNthCalledWith(
       1,
       expect.stringContaining("AND d.assigned_rep_id = $2"),
-      ["deal-123", "rep-1"],
+      [dealId, "rep-1"],
     );
     expect(queryMock).toHaveBeenNthCalledWith(
       2,
       expect.stringContaining("AND d.assigned_rep_id = $2"),
-      ["deal-999", "rep-1"],
+      [otherDealId, "rep-1"],
     );
   });
 });
