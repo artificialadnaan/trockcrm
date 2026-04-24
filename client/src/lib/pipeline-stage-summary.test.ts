@@ -10,7 +10,7 @@ describe("buildDealStageSummary", () => {
     const data: DealStagePageResponse = {
       stage: { id: "stage-est", name: "Estimating", slug: "estimating" },
       scope: "team",
-      summary: { count: 3, totalValue: 245000 },
+      summary: { count: 3, totalValue: 245000, averageDaysInStage: 3 },
       pagination: { page: 1, pageSize: 25, total: 3, totalPages: 1 },
       rows: [
         {
