@@ -119,6 +119,15 @@ vi.mock("@/components/companies/company-selector", () => ({
   CompanySelector: () => <div>Company Selector</div>,
 }));
 
+vi.mock("@/components/properties/property-selector", () => ({
+  PropertySelector: () => (
+    <div>
+      <span>Property Selector</span>
+      <span>Add New Property</span>
+    </div>
+  ),
+}));
+
 vi.mock("./lead-stage-badge", () => ({
   LeadStageBadge: () => <span>Stage Badge</span>,
 }));
@@ -200,7 +209,7 @@ describe("LeadForm", () => {
     expect(html).not.toContain('data-select-value="__undefined__"');
   });
 
-  it("renders human labels for selected create-mode property, contact, stage, and project type values", () => {
+  it("uses the shared property selector and keeps the remaining create-mode labels human-readable", () => {
     const html = renderToStaticMarkup(
       <MemoryRouter>
         <LeadForm
@@ -219,7 +228,8 @@ describe("LeadForm", () => {
       </MemoryRouter>
     );
 
-    expect(html).toContain('<span data-select-label="true">Palm Villas</span>');
+    expect(html).toContain("Property Selector");
+    expect(html).toContain("Add New Property");
     expect(html).toContain('<span data-select-label="true">Ada Lovelace</span>');
     expect(html).toContain('<span data-select-label="true">New Lead</span>');
     expect(html).toContain('<span data-select-label="true">Multifamily</span>');

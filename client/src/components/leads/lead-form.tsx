@@ -17,6 +17,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { CompanySelector } from "@/components/companies/company-selector";
+import { PropertySelector } from "@/components/properties/property-selector";
 import { LeadStageBadge } from "./lead-stage-badge";
 import { useCompanyContacts } from "@/hooks/use-companies";
 import { createLead, updateLead } from "@/hooks/use-leads";
@@ -336,16 +337,6 @@ function EditableLeadForm({
   }, [companyId, contacts, isCreate, properties]);
 
   const selectedProjectType = projectTypes.find((entry) => entry.id === formData.projectTypeId) ?? null;
-  const propertySelectItems = useMemo(
-    () => [
-      { value: "__none__", label: "Select property" },
-      ...properties.map((property) => ({
-        value: property.id,
-        label: formatPropertyLabel(property),
-      })),
-    ],
-    [properties]
-  );
   const primaryContactSelectItems = useMemo(
     () => [
       { value: "__none__", label: "Optional" },
@@ -556,25 +547,12 @@ function EditableLeadForm({
               <div className="grid gap-4 sm:grid-cols-2">
                 <div className="space-y-2">
                   <Label htmlFor="propertyId">Property</Label>
-                  <Select
-                    items={propertySelectItems}
-                    value={formData.propertyId || "__none__"}
-                    onValueChange={(value) =>
-                      handleFieldChange("propertyId", !value || value === "__none__" ? "" : value)
-                    }
-                  >
-                    <SelectTrigger id="propertyId">
-                      <SelectValue placeholder="Select property" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="__none__">Select property</SelectItem>
-                      {properties.map((property) => (
-                        <SelectItem key={property.id} value={property.id}>
-                          {formatPropertyLabel(property)}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                  <PropertySelector
+                    companyId={companyId}
+                    value={formData.propertyId || null}
+                    onChange={(propertyId) => handleFieldChange("propertyId", propertyId)}
+                    required
+                  />
                 </div>
 
                 <div className="space-y-2">
