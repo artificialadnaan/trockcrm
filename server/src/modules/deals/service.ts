@@ -330,8 +330,16 @@ export async function getRequiredEstimatingBoundaryStage(workflowRoute: Workflow
 
 export function isBidBoardOwnedDownstreamStage(
   targetStage: { slug: string; displayOrder: number; isTerminal: boolean },
-  estimatingBoundary: { displayOrder: number } | null
+  estimatingBoundary: { displayOrder: number } | null,
+  workflowRoute: WorkflowRoute
 ) {
+  if (
+    targetStage.slug === "estimating" ||
+    targetStage.slug === estimatingBoundaryStageSlugForRoute(workflowRoute)
+  ) {
+    return false;
+  }
+
   return (
     Boolean(estimatingBoundary) &&
     targetStage.displayOrder > (estimatingBoundary?.displayOrder ?? Number.POSITIVE_INFINITY)

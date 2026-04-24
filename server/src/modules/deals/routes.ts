@@ -628,10 +628,10 @@ router.post("/:id/stage/preflight", async (req, res, next) => {
       currentIsBidBoardBoundaryOrDownstream =
         Boolean(estimatingBoundary) &&
         (isEstimatingBoundaryStageSlug(result.currentStage.slug, workflowRoute) ||
-          isBidBoardOwnedDownstreamStage(result.currentStage, estimatingBoundary));
+          isBidBoardOwnedDownstreamStage(result.currentStage, estimatingBoundary, workflowRoute));
       targetIsBidBoardDownstream =
         Boolean(estimatingBoundary) &&
-        isBidBoardOwnedDownstreamStage(result.targetStage, estimatingBoundary);
+        isBidBoardOwnedDownstreamStage(result.targetStage, estimatingBoundary, workflowRoute);
     }
     const targetIsReopenIntoCrmOwnedFlow =
       Boolean(estimatingBoundary) &&

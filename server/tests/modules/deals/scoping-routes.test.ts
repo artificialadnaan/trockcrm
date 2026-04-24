@@ -292,7 +292,7 @@ describe("Deal Scoping Routes", () => {
         name: "Estimate in Progress",
         slug: "estimate_in_progress",
         isTerminal: false,
-        displayOrder: 1,
+        displayOrder: 2,
       },
     } as never);
     vi.mocked(workflowBackfill.inferDealBidBoardOwnership).mockReturnValueOnce({

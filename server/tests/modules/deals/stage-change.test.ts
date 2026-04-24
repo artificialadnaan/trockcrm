@@ -369,6 +369,13 @@ describe("changeDealStage", () => {
       bidBoardStageSlug: null,
       readOnlySyncedAt: null,
     });
+    vi.mocked(pipelineService.getStageBySlug).mockResolvedValueOnce({
+      id: "stage-estimating-boundary",
+      name: "Estimate in Progress",
+      slug: "estimate_in_progress",
+      isTerminal: false,
+      displayOrder: 1,
+    } as never);
 
     vi.mocked(validateStageGate).mockResolvedValue({
       allowed: true,

@@ -182,10 +182,14 @@ export async function changeDealStage(
   const currentIsBidBoardBoundaryOrDownstream =
     Boolean(estimatingBoundary) &&
     (isEstimatingBoundaryStageSlug(gateResult.currentStage.slug, currentDeal[0].workflowRoute) ||
-      isBidBoardOwnedDownstreamStage(gateResult.currentStage, estimatingBoundary));
+      isBidBoardOwnedDownstreamStage(
+        gateResult.currentStage,
+        estimatingBoundary,
+        currentDeal[0].workflowRoute
+      ));
   const targetIsBidBoardDownstream =
     Boolean(estimatingBoundary) &&
-    isBidBoardOwnedDownstreamStage(targetStage, estimatingBoundary);
+    isBidBoardOwnedDownstreamStage(targetStage, estimatingBoundary, currentDeal[0].workflowRoute);
   const targetIsReopenIntoCrmOwnedFlow =
     Boolean(estimatingBoundary) &&
     targetStage.displayOrder < (estimatingBoundary?.displayOrder ?? Number.NEGATIVE_INFINITY) &&
