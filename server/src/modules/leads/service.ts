@@ -868,6 +868,7 @@ export function createLeadService(
           id: existing.id,
           stageId: existing.stageId,
           stageSlug: normalizeStageSlugForTransitionValidation(currentStage.slug),
+          source: input.source !== undefined ? input.source : existing.source,
           projectTypeId: effectiveProjectTypeId ?? null,
           qualificationPayload:
             input.qualificationPayload !== undefined
