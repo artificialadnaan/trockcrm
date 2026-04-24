@@ -234,6 +234,16 @@ export async function changeDealStage(
     Boolean(estimatingBoundary) &&
     targetStage.displayOrder < (estimatingBoundary?.displayOrder ?? Number.NEGATIVE_INFINITY);
 
+  let scopingActivation:
+    | Awaited<ReturnType<typeof activateDealScopingIntake>>
+    | null = null;
+  if (isEstimatingBoundaryStageSlug(targetStage.slug, currentDeal[0].workflowRoute)) {
+    // Activate the scoping record while CRM still owns the deal. The ownership
+    // boundary flips as part of this same transaction, but the activation path
+    // intentionally remains editable only on the CRM-owned side.
+    scopingActivation = await activateDealScopingIntake(tenantDb, dealId);
+  }
+
   if (shouldResetBidBoardOwnership) {
     dealUpdates.isBidBoardOwned = false;
     dealUpdates.bidBoardStageSlug = null;
@@ -360,14 +370,13 @@ export async function changeDealStage(
   });
 
   if (isEstimatingBoundaryStageSlug(targetStage.slug, updatedDeal.workflowRoute)) {
-    const scopingActivation = await activateDealScopingIntake(tenantDb, dealId);
     const scopingActivatedPayload = {
       dealId,
       dealName: updatedDeal.name,
       dealNumber: updatedDeal.dealNumber,
       workflowRoute: updatedDeal.workflowRoute,
       activatedBy: userId,
-      scopingStatus: scopingActivation.readiness.status,
+      scopingStatus: scopingActivation?.readiness.status ?? "ready",
     };
     eventsToEmit.push({
       name: "scoping_intake.activated",

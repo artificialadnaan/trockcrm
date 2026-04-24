@@ -408,6 +408,57 @@ describe("changeDealStage", () => {
     expect(tenantDb.state.stageHistory).toHaveLength(1);
   });
 
+  it("activates scoping intake before the estimating handoff marks the deal as Bid Board-owned", async () => {
+    const tenantDb = createTenantDb({
+      stageId: "stage-opportunity",
+      isBidBoardOwned: false,
+      bidBoardStageSlug: null,
+      readOnlySyncedAt: null,
+    });
+    vi.mocked(pipelineService.getStageBySlug).mockResolvedValueOnce({
+      id: "stage-estimating-boundary",
+      name: "Estimate in Progress",
+      slug: "estimate_in_progress",
+      isTerminal: false,
+      displayOrder: 1,
+    } as never);
+    vi.mocked(validateStageGate).mockResolvedValue({
+      allowed: true,
+      isBackwardMove: false,
+      requiresOverride: false,
+      targetStage: {
+        id: "stage-estimating",
+        name: "Estimate in Progress",
+        slug: "estimate_in_progress",
+        isTerminal: false,
+        displayOrder: 2,
+      },
+      currentStage: {
+        id: "stage-opportunity",
+        name: "Opportunity",
+        slug: "opportunity",
+        isTerminal: false,
+        displayOrder: 1,
+      },
+    } as never);
+    vi.mocked(scopingService.activateDealScopingIntake).mockImplementation(async () => {
+      expect(tenantDb.state.deals[0]?.isBidBoardOwned).toBe(false);
+      return {
+        readiness: { status: "ready" },
+      } as never;
+    });
+
+    const result = await changeDealStage(tenantDb as never, {
+      dealId: "deal-1",
+      targetStageId: "stage-estimating",
+      userId: "user-1",
+      userRole: "director",
+    });
+
+    expect(result.deal.isBidBoardOwned).toBe(true);
+    expect(scopingService.activateDealScopingIntake).toHaveBeenCalledWith(tenantDb, "deal-1");
+  });
+
   it("blocks crm-authored progression deeper into downstream mirrored stages after a bid board sync", async () => {
     const tenantDb = createTenantDb({
       stageId: "stage-bid-sent",
