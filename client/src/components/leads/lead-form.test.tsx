@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
@@ -5,6 +6,27 @@ import { LeadForm } from "./lead-form";
 
 const projectTypes = [{ id: "type-1", name: "Multifamily", slug: "multifamily" }];
 const projectTypeHierarchy = [{ id: "type-1", name: "Multifamily", children: [] as Array<{ id: string; name: string }> }];
+const properties = [
+  {
+    id: "property-1",
+    companyId: "company-1",
+    companyName: "Acme",
+    name: "Palm Villas",
+    address: "123 Main",
+    city: "Dallas",
+    state: "TX",
+    zip: "75001",
+    notes: null,
+    isActive: true,
+    createdAt: "2026-04-22T00:00:00.000Z",
+    updatedAt: "2026-04-22T00:00:00.000Z",
+    leadCount: 0,
+    dealCount: 0,
+    convertedDealCount: 0,
+    lastActivityAt: null,
+  },
+];
+const contacts = [{ id: "contact-1", firstName: "Ada", lastName: "Lovelace" }];
 
 vi.mock("@/hooks/use-pipeline-config", () => ({
   usePipelineStages: () => ({
@@ -25,14 +47,14 @@ vi.mock("@/hooks/use-pipeline-config", () => ({
 
 vi.mock("@/hooks/use-properties", () => ({
   useProperties: () => ({
-    properties: [],
+    properties,
   }),
-  formatPropertyLabel: () => "Property",
+  formatPropertyLabel: () => "Palm Villas",
 }));
 
 vi.mock("@/hooks/use-companies", () => ({
   useCompanyContacts: () => ({
-    contacts: [],
+    contacts,
   }),
 }));
 
@@ -67,7 +89,9 @@ vi.mock("@/components/ui/select", () => ({
     <div data-select-value={value ?? "__undefined__"}>{children}</div>
   ),
   SelectTrigger: ({ children, id }: { children: React.ReactNode; id?: string }) => <div id={id}>{children}</div>,
-  SelectValue: ({ placeholder }: { placeholder?: string }) => <span>{placeholder}</span>,
+  SelectValue: ({ children, placeholder }: { children?: ReactNode; placeholder?: string }) => (
+    <span data-select-label="true">{children ?? placeholder}</span>
+  ),
   SelectContent: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
   SelectItem: ({ children, value }: { children: React.ReactNode; value: string }) => (
     <div data-value={value}>{children}</div>
@@ -156,6 +180,66 @@ describe("LeadForm", () => {
     );
 
     expect(html).toContain('data-select-value="__none__"');
+    expect(html).not.toContain('data-select-value="__undefined__"');
+  });
+
+  it("renders human labels for selected create-mode property, contact, stage, and project type values", () => {
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <LeadForm
+          mode="create"
+          initialValues={{
+            companyId: "company-1",
+            propertyId: "property-1",
+            primaryContactId: "contact-1",
+            name: "Lead One",
+            source: "Referral",
+            description: "",
+            projectTypeId: "type-1",
+            stageId: "stage-new",
+          }}
+        />
+      </MemoryRouter>
+    );
+
+    expect(html).toContain('<span data-select-label="true">Palm Villas</span>');
+    expect(html).toContain('<span data-select-label="true">Ada Lovelace</span>');
+    expect(html).toContain('<span data-select-label="true">New Lead</span>');
+    expect(html).toContain('<span data-select-label="true">Multifamily</span>');
+  });
+
+  it("renders the selected project type label in edit mode instead of the raw id", () => {
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <LeadForm
+          mode="edit"
+          lead={{
+            id: "lead-1",
+            name: "Lead One",
+            convertedDealId: null,
+            convertedDealNumber: null,
+            companyId: "company-1",
+            companyName: "Acme",
+            stageId: "stage-new",
+            propertyId: "property-1",
+            propertyName: "Palm Villas",
+            propertyAddress: "123 Main",
+            propertyCity: "Dallas",
+            propertyState: "TX",
+            propertyZip: "75001",
+            source: "Referral",
+            description: "",
+            projectTypeId: "type-1",
+            projectType: null,
+            qualificationPayload: {},
+            projectTypeQuestionPayload: { projectTypeId: "type-1", answers: {} },
+            stageEnteredAt: "2026-04-22T00:00:00.000Z",
+          }}
+        />
+      </MemoryRouter>
+    );
+
+    expect(html).toContain("Multifamily");
     expect(html).not.toContain('data-select-value="__undefined__"');
   });
 });

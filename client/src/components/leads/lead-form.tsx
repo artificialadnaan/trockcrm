@@ -105,6 +105,20 @@ interface LeadStageGateErrorState {
   };
 }
 
+function getSelectedOptionLabel<T extends { id: string }>(
+  options: T[],
+  selectedId: string | null | undefined,
+  fallbackLabel: string,
+  getLabel: (option: T) => string
+) {
+  if (!selectedId) {
+    return fallbackLabel;
+  }
+
+  const selectedOption = options.find((option) => option.id === selectedId);
+  return selectedOption ? getLabel(selectedOption) : fallbackLabel;
+}
+
 const LEAD_QUALIFICATION_FIELD_LABELS = new Map(
   LEAD_QUALIFICATION_FIELDS.map((field) => [field.id, field.label])
 );
@@ -336,7 +350,31 @@ function EditableLeadForm({
   }, [companyId, contacts, isCreate, properties]);
 
   const selectedProjectType = projectTypes.find((entry) => entry.id === formData.projectTypeId) ?? null;
+  const selectedPropertyLabel = getSelectedOptionLabel(
+    properties,
+    formData.propertyId,
+    "Select property",
+    (property) => formatPropertyLabel(property)
+  );
+  const selectedPrimaryContactLabel = getSelectedOptionLabel(
+    contacts,
+    formData.primaryContactId,
+    "Optional",
+    (contact) => `${contact.firstName} ${contact.lastName}`.trim()
+  );
+  const selectedStageLabel = getSelectedOptionLabel(
+    leadStages,
+    formData.stageId,
+    "Select stage",
+    (stage) => stage.name
+  );
   const existingLeadProjectTypeSlug = lead?.projectType?.slug ?? null;
+  const selectedProjectTypeLabel = getSelectedOptionLabel(
+    projectTypes,
+    formData.projectTypeId,
+    lead?.projectType?.name ?? "Select project type",
+    (projectType) => projectType.name
+  );
   const questionSet = useMemo(
     () => getValidationQuestionSetForProjectType(selectedProjectType?.slug ?? existingLeadProjectTypeSlug),
     [existingLeadProjectTypeSlug, selectedProjectType?.slug]
@@ -523,7 +561,7 @@ function EditableLeadForm({
                     }
                   >
                     <SelectTrigger id="propertyId">
-                      <SelectValue placeholder="Select property" />
+                      <SelectValue placeholder="Select property">{selectedPropertyLabel}</SelectValue>
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="__none__">Select property</SelectItem>
@@ -545,7 +583,7 @@ function EditableLeadForm({
                     }
                   >
                     <SelectTrigger id="primaryContactId">
-                      <SelectValue placeholder="Optional" />
+                      <SelectValue placeholder="Optional">{selectedPrimaryContactLabel}</SelectValue>
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="__none__">No primary contact</SelectItem>
@@ -574,7 +612,7 @@ function EditableLeadForm({
                   <Label htmlFor="stageId">Initial Stage</Label>
                   <Select value={formData.stageId} onValueChange={(value) => handleFieldChange("stageId", value ?? "")}>
                     <SelectTrigger id="stageId">
-                      <SelectValue placeholder="Select stage" />
+                      <SelectValue placeholder="Select stage">{selectedStageLabel}</SelectValue>
                     </SelectTrigger>
                     <SelectContent>
                       {leadStages.map((stage) => (
@@ -607,7 +645,7 @@ function EditableLeadForm({
                     }
                   >
                     <SelectTrigger id="projectTypeId">
-                      <SelectValue placeholder="Select project type" />
+                      <SelectValue placeholder="Select project type">{selectedProjectTypeLabel}</SelectValue>
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="__none__">Select project type</SelectItem>
@@ -670,7 +708,7 @@ function EditableLeadForm({
                   }
                 >
                   <SelectTrigger id="projectTypeId">
-                    <SelectValue placeholder="Select project type" />
+                    <SelectValue placeholder="Select project type">{selectedProjectTypeLabel}</SelectValue>
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="__none__">Select project type</SelectItem>
