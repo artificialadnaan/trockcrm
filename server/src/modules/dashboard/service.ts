@@ -1244,6 +1244,7 @@ export async function getRepDashboard(
         l.name AS lead_name,
         c.name AS company_name,
         p.name AS property_name,
+        psc.slug AS stage_slug,
         psc.name AS stage_name,
         EXTRACT(DAY FROM NOW() - l.stage_entered_at)::int AS days_in_stage,
         l.updated_at
