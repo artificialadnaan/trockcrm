@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import * as React from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
@@ -84,14 +84,31 @@ vi.mock("@/components/ui/label", () => ({
   ),
 }));
 
+const SelectContext = React.createContext<{
+  items?: Array<{ value: string | null; label?: React.ReactNode }>;
+  value?: string;
+}>({});
+
 vi.mock("@/components/ui/select", () => ({
-  Select: ({ children, value }: { children: React.ReactNode; value?: string }) => (
-    <div data-select-value={value ?? "__undefined__"}>{children}</div>
+  Select: ({
+    children,
+    items,
+    value,
+  }: {
+    children: React.ReactNode;
+    items?: Array<{ value: string | null; label?: React.ReactNode }>;
+    value?: string;
+  }) => (
+    <SelectContext.Provider value={{ items, value }}>
+      <div data-select-value={value ?? "__undefined__"}>{children}</div>
+    </SelectContext.Provider>
   ),
   SelectTrigger: ({ children, id }: { children: React.ReactNode; id?: string }) => <div id={id}>{children}</div>,
-  SelectValue: ({ children, placeholder }: { children?: ReactNode; placeholder?: string }) => (
-    <span data-select-label="true">{children ?? placeholder}</span>
-  ),
+  SelectValue: ({ placeholder }: { placeholder?: string }) => {
+    const { items, value } = React.useContext(SelectContext);
+    const label = items?.find((item) => item.value === (value ?? null))?.label ?? placeholder;
+    return <span data-select-label="true">{label}</span>;
+  },
   SelectContent: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
   SelectItem: ({ children, value }: { children: React.ReactNode; value: string }) => (
     <div data-value={value}>{children}</div>

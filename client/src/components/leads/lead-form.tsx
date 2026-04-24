@@ -105,20 +105,6 @@ interface LeadStageGateErrorState {
   };
 }
 
-function getSelectedOptionLabel<T extends { id: string }>(
-  options: T[],
-  selectedId: string | null | undefined,
-  fallbackLabel: string,
-  getLabel: (option: T) => string
-) {
-  if (!selectedId) {
-    return fallbackLabel;
-  }
-
-  const selectedOption = options.find((option) => option.id === selectedId);
-  return selectedOption ? getLabel(selectedOption) : fallbackLabel;
-}
-
 const LEAD_QUALIFICATION_FIELD_LABELS = new Map(
   LEAD_QUALIFICATION_FIELDS.map((field) => [field.id, field.label])
 );
@@ -350,30 +336,46 @@ function EditableLeadForm({
   }, [companyId, contacts, isCreate, properties]);
 
   const selectedProjectType = projectTypes.find((entry) => entry.id === formData.projectTypeId) ?? null;
-  const selectedPropertyLabel = getSelectedOptionLabel(
-    properties,
-    formData.propertyId,
-    "Select property",
-    (property) => formatPropertyLabel(property)
+  const propertySelectItems = useMemo(
+    () => [
+      { value: "__none__", label: "Select property" },
+      ...properties.map((property) => ({
+        value: property.id,
+        label: formatPropertyLabel(property),
+      })),
+    ],
+    [properties]
   );
-  const selectedPrimaryContactLabel = getSelectedOptionLabel(
-    contacts,
-    formData.primaryContactId,
-    "Optional",
-    (contact) => `${contact.firstName} ${contact.lastName}`.trim()
+  const primaryContactSelectItems = useMemo(
+    () => [
+      { value: "__none__", label: "Optional" },
+      ...contacts.map((contact) => ({
+        value: contact.id,
+        label: `${contact.firstName} ${contact.lastName}`.trim(),
+      })),
+    ],
+    [contacts]
   );
-  const selectedStageLabel = getSelectedOptionLabel(
-    leadStages,
-    formData.stageId,
-    "Select stage",
-    (stage) => stage.name
+  const stageSelectItems = useMemo(
+    () => leadStages.map((stage) => ({ value: stage.id, label: stage.name })),
+    [leadStages]
   );
   const existingLeadProjectTypeSlug = lead?.projectType?.slug ?? null;
-  const selectedProjectTypeLabel = getSelectedOptionLabel(
-    projectTypes,
-    formData.projectTypeId,
-    lead?.projectType?.name ?? "Select project type",
-    (projectType) => projectType.name
+  const projectTypeSelectItems = useMemo(
+    () => [
+      {
+        value: "__none__",
+        label: lead?.projectType?.name ?? "Select project type",
+      },
+      ...projectTypeHierarchy.flatMap((parent) => [
+        { value: parent.id, label: parent.name },
+        ...parent.children.map((child) => ({
+          value: child.id,
+          label: child.name,
+        })),
+      ]),
+    ],
+    [lead?.projectType?.name, projectTypeHierarchy]
   );
   const questionSet = useMemo(
     () => getValidationQuestionSetForProjectType(selectedProjectType?.slug ?? existingLeadProjectTypeSlug),
@@ -555,13 +557,14 @@ function EditableLeadForm({
                 <div className="space-y-2">
                   <Label htmlFor="propertyId">Property</Label>
                   <Select
+                    items={propertySelectItems}
                     value={formData.propertyId || "__none__"}
                     onValueChange={(value) =>
                       handleFieldChange("propertyId", !value || value === "__none__" ? "" : value)
                     }
                   >
                     <SelectTrigger id="propertyId">
-                      <SelectValue placeholder="Select property">{selectedPropertyLabel}</SelectValue>
+                      <SelectValue placeholder="Select property" />
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="__none__">Select property</SelectItem>
@@ -577,13 +580,14 @@ function EditableLeadForm({
                 <div className="space-y-2">
                   <Label htmlFor="primaryContactId">Primary Contact</Label>
                   <Select
+                    items={primaryContactSelectItems}
                     value={formData.primaryContactId || "__none__"}
                     onValueChange={(value) =>
                       handleFieldChange("primaryContactId", !value || value === "__none__" ? "" : value)
                     }
                   >
                     <SelectTrigger id="primaryContactId">
-                      <SelectValue placeholder="Optional">{selectedPrimaryContactLabel}</SelectValue>
+                      <SelectValue placeholder="Optional" />
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="__none__">No primary contact</SelectItem>
@@ -610,9 +614,13 @@ function EditableLeadForm({
 
                 <div className="space-y-2">
                   <Label htmlFor="stageId">Initial Stage</Label>
-                  <Select value={formData.stageId} onValueChange={(value) => handleFieldChange("stageId", value ?? "")}>
+                  <Select
+                    items={stageSelectItems}
+                    value={formData.stageId}
+                    onValueChange={(value) => handleFieldChange("stageId", value ?? "")}
+                  >
                     <SelectTrigger id="stageId">
-                      <SelectValue placeholder="Select stage">{selectedStageLabel}</SelectValue>
+                      <SelectValue placeholder="Select stage" />
                     </SelectTrigger>
                     <SelectContent>
                       {leadStages.map((stage) => (
@@ -639,13 +647,14 @@ function EditableLeadForm({
                 <div className="space-y-2">
                   <Label htmlFor="projectTypeId">Project Type</Label>
                   <Select
+                    items={projectTypeSelectItems}
                     value={formData.projectTypeId || "__none__"}
                     onValueChange={(value) =>
                       handleFieldChange("projectTypeId", !value || value === "__none__" ? "" : value)
                     }
                   >
                     <SelectTrigger id="projectTypeId">
-                      <SelectValue placeholder="Select project type">{selectedProjectTypeLabel}</SelectValue>
+                      <SelectValue placeholder="Select project type" />
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="__none__">Select project type</SelectItem>
@@ -702,13 +711,14 @@ function EditableLeadForm({
               <div className="space-y-2">
                 <Label htmlFor="projectTypeId">Project Type</Label>
                 <Select
+                  items={projectTypeSelectItems}
                   value={formData.projectTypeId || "__none__"}
                   onValueChange={(value) =>
                     handleFieldChange("projectTypeId", !value || value === "__none__" ? "" : value)
                   }
                 >
                   <SelectTrigger id="projectTypeId">
-                    <SelectValue placeholder="Select project type">{selectedProjectTypeLabel}</SelectValue>
+                    <SelectValue placeholder="Select project type" />
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="__none__">Select project type</SelectItem>
