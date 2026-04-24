@@ -31,6 +31,11 @@ function isUuid(value: string) {
   return UUID_PATTERN.test(value);
 }
 
+router.use((_req, res, next) => {
+  res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+  next();
+});
+
 async function assertAssignableUserForOffice(assignedTo: string, officeId: string) {
   const user = await getUserById(assignedTo);
   if (!user || !user.isActive) {

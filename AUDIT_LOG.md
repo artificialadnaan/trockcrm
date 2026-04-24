@@ -1,5 +1,5 @@
 ## Running Summary
-- Iteration count: 15
+- Iteration count: 16
 - Total tests generated: 24
 - Pass/fail count per iteration:
   - Iteration 1: passed after deploy verification
@@ -12,6 +12,7 @@
   - Iteration 13: notification unread-count CORP fix verified locally; API deploy pending
   - Iteration 14: email / tasks / files / projects suite green locally except for a real invalid-project-id server bug; API + frontend deploy pending
   - Iteration 15: stale lead creation stage ids normalized locally; API + frontend deploy pending
+  - Iteration 16: project routes fixed for Railway cross-origin consumption and lead-to-opportunity progression audit expanded; deploy pending
 - Issues fixed vs deferred:
   - Fixed: 12
   - Deferred: 0
@@ -252,4 +253,17 @@ Fix: centralize canonical lead-creation stage selection in shared helpers and no
 Deployed: pending
 Deploy status: pending
 Verification: local `npx vitest run --config vitest.config.ts client/src/pages/leads/lead-new-page.helpers.test.ts` and production lead-create rerun pending
+Status: in progress
+
+Issue #16 — Procore project routes are CORP-blocked from the Railway frontend even when the API responds correctly
+Route/Component: `/projects`, `/projects/:id`, `/api/procore/my-projects*`, `server/src/modules/procore/routes.ts`
+Severity: high
+Environment: production (Railway)
+Discovered: iteration 16, `tests/audit/email-tasks-files-projects.spec.ts`
+Symptom: the projects pages log `Failed to load projects: TypeError: Failed to fetch`, while direct authenticated API calls return valid `200` / `404` JSON responses.
+Root cause: the Procore router still inherited Helmet's default `Cross-Origin-Resource-Policy: same-origin`, so the cross-origin Railway frontend was blocked from consuming those otherwise valid responses.
+Fix: mark the Procore router responses as `Cross-Origin-Resource-Policy: cross-origin` and add a regression test for the project list/detail routes.
+Deployed: pending
+Deploy status: pending
+Verification: local `npx vitest run --config vitest.config.ts server/tests/modules/procore/routes.test.ts` and production rerun pending
 Status: in progress

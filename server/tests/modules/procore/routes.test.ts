@@ -86,10 +86,20 @@ describe("procore routes", () => {
 
     expect(response.status).toBe(200);
     expect(response.body.project.name).toBe("Birchstone North Tower");
+    expect(response.headers["cross-origin-resource-policy"]).toBe("cross-origin");
     expect(queryMock).toHaveBeenCalledWith(
       expect.stringContaining("WHERE d.procore_project_id IS NOT NULL"),
       [dealId],
     );
+  });
+
+  it("marks the project list route as cross-origin consumable for the Railway frontend", async () => {
+    queryMock.mockResolvedValueOnce({ rows: [] });
+
+    const response = await request(createRepTestApp()).get("/api/procore/my-projects");
+
+    expect(response.status).toBe(200);
+    expect(response.headers["cross-origin-resource-policy"]).toBe("cross-origin");
   });
 
   it("returns 404 when the project is missing", async () => {
