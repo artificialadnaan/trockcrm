@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import type { ReactNode } from "react";
-import { DealDetailPage } from "./deal-detail-page";
+import { DealDetailPage, DealScopingReadOnlyPanel } from "./deal-detail-page";
 
 const mocks = vi.hoisted(() => ({
   useDealDetailMock: vi.fn(),
@@ -194,7 +194,7 @@ function makeDealDetail(overrides: Record<string, unknown> = {}) {
     readOnlySyncedAt: "2026-04-21T10:00:00.000Z",
     bidBoardOwnership: {
       isOwned: true,
-      sourceOfTruth: "bid_board",
+      sourceOfTruth: "bid_board" as const,
       handoffStageSlug: "estimate_in_progress",
       downstreamStagesReadOnly: true,
       canEditInCrm: ["deal details", "files", "activity", "notes"],
@@ -369,5 +369,20 @@ describe("DealDetailPage", () => {
     const html = renderPage();
 
     expect(html).toContain("Close-Out");
+  });
+
+  it("renders a read-only scoping panel with clear alternate CRM actions after estimating handoff", () => {
+    const html = renderToStaticMarkup(
+      <DealScopingReadOnlyPanel
+        ownership={makeDealDetail().bidBoardOwnership}
+        onOpenTab={() => undefined}
+      />
+    );
+
+    expect(html).toContain("Opportunity scope is now read-only in CRM");
+    expect(html).toContain("Open Overview");
+    expect(html).toContain("Open Files");
+    expect(html).toContain("Open Activity");
+    expect(html).toContain("Open Team");
   });
 });

@@ -8,6 +8,7 @@ export default defineConfig({
   },
   resolve: {
     alias: {
+      "@": path.resolve(__dirname, "./client/src"),
       "@trock-crm/shared/types": path.resolve(__dirname, "./shared/src/types/index.ts"),
     },
   },

@@ -118,3 +118,16 @@ Deployed: pending
 Deploy status: pending
 Verification: local tests `client/src/components/leads/lead-form.test.tsx`
 Status: in progress
+
+Issue #7 — Successful estimating handoff leaves the UI on a forbidden CRM scoping endpoint
+Route/Component: `/deals/:id?tab=scoping`, `DealDetailPage`, `DealScopingWorkspace`
+Severity: high
+Environment: production (Railway)
+Discovered: iteration 3, live lead -> opportunity -> estimating audit
+Symptom: after a successful `Opportunity -> Estimate in Progress` handoff, the deal changes stages correctly but the page logs two `403` console errors from `GET /api/deals/:id/scoping-intake`.
+Root cause: the detail page kept rendering the editable scoping workspace while the deal was already Bid Board-owned, so the client continued calling a CRM-only endpoint that is supposed to be blocked after handoff.
+Fix: render a dedicated read-only scoping panel for Bid Board-owned deals instead of mounting `DealScopingWorkspace`; add a shared `@` alias to `vitest.config.ts` so this client path is testable in the worktree.
+Deployed: pending
+Deploy status: pending
+Verification: local `npx vitest run --config vitest.config.ts client/src/pages/deals/deal-detail-page.test.tsx` and `npm run typecheck --workspace=client`
+Status: in progress

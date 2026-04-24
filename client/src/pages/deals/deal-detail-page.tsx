@@ -453,7 +453,15 @@ export function DealDetailPage() {
           isConverted={Boolean(deal.sourceLeadId)}
         />
       )}
-      {activeTab === "scoping" && <DealScopingWorkspace deal={deal} onDealUpdated={refetch} />}
+      {activeTab === "scoping" &&
+        (isBidBoardOwned && bidBoardOwnership ? (
+          <DealScopingReadOnlyPanel
+            ownership={bidBoardOwnership}
+            onOpenTab={handleTabSelect}
+          />
+        ) : (
+          <DealScopingWorkspace deal={deal} onDealUpdated={refetch} />
+        ))}
       {activeTab === "files" && <DealFileTab dealId={deal.id} />}
       {activeTab === "email" && <DealEmailTab dealId={deal.id} />}
       {activeTab === "activity" && <DealActivityPanel dealId={deal.id} />}
@@ -541,6 +549,64 @@ function BidBoardReadOnlySummary({
         Keep using CRM for {ownership.canEditInCrm.join(", ")}.
       </p>
     </section>
+  );
+}
+
+export function DealScopingReadOnlyPanel({
+  ownership,
+  onOpenTab,
+}: {
+  ownership: NonNullable<DealDetail["bidBoardOwnership"]>;
+  onOpenTab: (tab: Tab) => void;
+}) {
+  return (
+    <div className="space-y-4">
+      <section className="rounded-xl border border-amber-300 bg-amber-50 p-4 text-amber-950">
+        <div className="flex items-start gap-3">
+          <div className="rounded-full bg-amber-200 p-2">
+            <Lock className="h-4 w-4" />
+          </div>
+          <div className="space-y-3">
+            <div>
+              <h3 className="text-sm font-semibold">Opportunity scope is now read-only in CRM</h3>
+              <p className="mt-1 text-sm">{ownership.message}</p>
+            </div>
+
+            <div className="grid gap-3 md:grid-cols-2">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-wide text-amber-800">
+                  Keep working in CRM
+                </p>
+                <p className="mt-1 text-sm">{ownership.canEditInCrm.join(", ")}</p>
+              </div>
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-wide text-amber-800">
+                  Mirrored from Bid Board
+                </p>
+                <p className="mt-1 text-sm">{ownership.mirroredInCrm.join(", ")}</p>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap gap-2">
+              <Button variant="outline" size="sm" onClick={() => onOpenTab("overview")}>
+                Open Overview
+              </Button>
+              <Button variant="outline" size="sm" onClick={() => onOpenTab("files")}>
+                Open Files
+              </Button>
+              <Button variant="outline" size="sm" onClick={() => onOpenTab("activity")}>
+                Open Activity
+              </Button>
+              <Button variant="outline" size="sm" onClick={() => onOpenTab("team")}>
+                Open Team
+              </Button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <BidBoardReadOnlySummary ownership={ownership} />
+    </div>
   );
 }
 
