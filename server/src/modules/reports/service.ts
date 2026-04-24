@@ -1034,6 +1034,14 @@ export interface DataMiningOverview {
   dormantCompanies: DataMiningDormantCompanyRow[];
 }
 
+function isValidUntouchedContactRow(row: DataMiningUntouchedContactRow): boolean {
+  return Boolean(row.contactId && row.contactName);
+}
+
+function isValidDormantCompanyRow(row: DataMiningDormantCompanyRow): boolean {
+  return Boolean(row.companyId && row.companyName);
+}
+
 export async function getDataMiningOverview(
   tenantDb: TenantDb,
   options: AnalyticsFilterInput = {}
@@ -1302,6 +1310,24 @@ export async function getDataMiningOverview(
 
   const untouchedSummary = untouchedSummaryRows[0] ?? {};
   const dormantSummary = dormantSummaryRows[0] ?? {};
+  const untouchedContacts = untouchedContactRows
+    .map((row: any) => ({
+      contactId: row.contact_id,
+      contactName: row.contact_name,
+      companyName: row.company_name,
+      daysSinceTouch: Number(row.days_since_touch ?? 0),
+      lastTouchedAt: row.last_touch_at ?? null,
+    }))
+    .filter(isValidUntouchedContactRow);
+  const dormantCompanies = dormantCompanyRows
+    .map((row: any) => ({
+      companyId: row.company_id,
+      companyName: row.company_name,
+      daysSinceActivity: Number(row.days_since_activity ?? 0),
+      lastActivityAt: row.last_touch_at ?? null,
+      activeDealCount: Number(row.active_deal_count ?? 0),
+    }))
+    .filter(isValidDormantCompanyRow);
 
   return {
     summary: {
@@ -1310,20 +1336,8 @@ export async function getDataMiningOverview(
       untouchedContact90Count: Number(untouchedSummary.untouched_contact_90_count ?? 0),
       dormantCompany90Count: Number(dormantSummary.dormant_company_90_count ?? 0),
     },
-    untouchedContacts: untouchedContactRows.map((row: any) => ({
-      contactId: row.contact_id,
-      contactName: row.contact_name,
-      companyName: row.company_name,
-      daysSinceTouch: Number(row.days_since_touch ?? 0),
-      lastTouchedAt: row.last_touch_at ?? null,
-    })),
-    dormantCompanies: dormantCompanyRows.map((row: any) => ({
-      companyId: row.company_id,
-      companyName: row.company_name,
-      daysSinceActivity: Number(row.days_since_activity ?? 0),
-      lastActivityAt: row.last_touch_at ?? null,
-      activeDealCount: Number(row.active_deal_count ?? 0),
-    })),
+    untouchedContacts,
+    dormantCompanies,
   };
 }
 

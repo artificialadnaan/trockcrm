@@ -68,6 +68,9 @@ export function DataMiningSection({
     );
   }
 
+  const untouchedContacts = data.untouchedContacts.filter((row) => Boolean(row.contactId && row.contactName));
+  const dormantCompanies = data.dormantCompanies.filter((row) => Boolean(row.companyId && row.companyName));
+
   return (
     <section className="space-y-6">
       <div className="space-y-2">
@@ -121,10 +124,10 @@ export function DataMiningSection({
                 </tr>
               </thead>
               <tbody className="text-sm text-slate-700">
-                {data.untouchedContacts.length === 0 ? (
+                {untouchedContacts.length === 0 ? (
                   <EmptyTable columns={4} message="No untouched contacts found." />
                 ) : (
-                  data.untouchedContacts.map((row) => (
+                  untouchedContacts.map((row) => (
                     <tr key={row.contactId} className="border-b border-slate-50 last:border-b-0">
                       <td className="px-4 py-4 font-medium text-slate-900">{row.contactName}</td>
                       <td className="px-4 py-4">{row.companyName}</td>
@@ -154,10 +157,10 @@ export function DataMiningSection({
                 </tr>
               </thead>
               <tbody className="text-sm text-slate-700">
-                {data.dormantCompanies.length === 0 ? (
+                {dormantCompanies.length === 0 ? (
                   <EmptyTable columns={4} message="No dormant companies found." />
                 ) : (
-                  data.dormantCompanies.map((row) => (
+                  dormantCompanies.map((row) => (
                     <tr key={row.companyId} className="border-b border-slate-50 last:border-b-0">
                       <td className="px-4 py-4 font-medium text-slate-900">{row.companyName}</td>
                       <td className="px-4 py-4 text-right tabular-nums">{row.daysSinceActivity}</td>

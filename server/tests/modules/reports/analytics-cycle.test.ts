@@ -335,6 +335,33 @@ describe("analytics cycle shared filters", () => {
     });
   });
 
+  it("drops malformed untouched-contact placeholder rows before returning report data", async () => {
+    const { getDataMiningOverview } = await import("../../../src/modules/reports/service.js");
+    const tenantDb = createMockTenantDb([
+      [{ untouched_contact_30_count: "0", untouched_contact_60_count: "0", untouched_contact_90_count: "0" }],
+      [
+        {
+          contact_id: null,
+          contact_name: null,
+          company_name: null,
+          last_touch_at: null,
+          days_since_touch: "0",
+        },
+      ],
+      [{ dormant_company_90_count: "0" }],
+      [],
+    ]);
+
+    const result = await getDataMiningOverview(tenantDb, {
+      from: "2026-01-01",
+      to: "2026-12-31",
+      officeId: "office-1",
+    });
+
+    expect(result.untouchedContacts).toEqual([]);
+    expect(result.dormantCompanies).toEqual([]);
+  });
+
   it("returns office-scoped regional and rep ownership rollups without replacing cross-office reporting", async () => {
     const { getRegionalOwnershipOverview } = await import("../../../src/modules/reports/service.js");
     const tenantDb = {

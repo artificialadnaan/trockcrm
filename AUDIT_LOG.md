@@ -193,3 +193,16 @@ Deployed: pending current iteration follow-up commit
 Deploy status: pending
 Verification: local `npx vitest run --config vitest.config.ts server/tests/modules/reports/service.test.ts server/tests/modules/reports/analytics-cycle.test.ts` and `npm run typecheck --workspace=server`
 Status: fixed locally, pending deploy
+
+Issue #12 — Data-mining untouched contacts can emit placeholder rows with missing ids
+Route/Component: `/reports`, `/api/reports/data-mining`, `DataMiningSection`, `getDataMiningOverview`
+Severity: medium
+Environment: production (Railway)
+Discovered: iteration 8, fresh post-deploy `/reports` browser verification
+Symptom: the data-mining table renders a blank untouched-contact row and logs a React `Each child in a list should have a unique "key" prop` warning.
+Root cause: malformed placeholder rows with null `contact_id` / `contact_name` were mapped straight through by the report service, and the table renderer trusted every row to have a stable key.
+Fix: filter malformed untouched-contact and dormant-company rows in `getDataMiningOverview`, and defensively collapse invalid rows to the table empty state in `DataMiningSection`.
+Deployed: pending current iteration commit
+Deploy status: pending
+Verification: local `npx vitest run --config vitest.config.ts server/tests/modules/reports/analytics-cycle.test.ts`, `npx vitest run --config vitest.config.ts client/src/components/reports/analytics-sections.test.tsx`, `npm run typecheck --workspace=server`, and `npm run typecheck --workspace=client`
+Status: fixed locally, pending deploy

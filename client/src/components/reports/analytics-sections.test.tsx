@@ -228,6 +228,35 @@ describe("analytics reporting sections", () => {
     expect(html).toContain("Acme Roofing");
   });
 
+  it("falls back to the untouched-contact empty state when rows are missing stable ids", () => {
+    const html = renderToStaticMarkup(
+      <DataMiningSection
+        loading={false}
+        data={{
+          summary: {
+            untouchedContact30Count: 0,
+            untouchedContact60Count: 0,
+            untouchedContact90Count: 0,
+            dormantCompany90Count: 0,
+          },
+          untouchedContacts: [
+            {
+              contactId: "",
+              contactName: "",
+              companyName: "",
+              daysSinceTouch: 0,
+              lastTouchedAt: null,
+            },
+          ],
+          dormantCompanies: [],
+        }}
+      />
+    );
+
+    expect(html).toContain("No untouched contacts found.");
+    expect(html).not.toContain("<td class=\"px-4 py-4 font-medium text-slate-900\"></td>");
+  });
+
   it("renders an empty data mining state when data has not loaded", () => {
     const html = renderToStaticMarkup(<DataMiningSection loading={false} data={null} />);
     expect(html).toContain("No data-mining records found for the selected filters.");
