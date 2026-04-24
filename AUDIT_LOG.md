@@ -1,6 +1,6 @@
 ## Running Summary
-- Iteration count: 12
-- Total tests generated: 23
+- Iteration count: 13
+- Total tests generated: 24
 - Pass/fail count per iteration:
   - Iteration 1: passed after deploy verification
   - Iteration 7: passed after clean-worktree API deploy verification
@@ -9,6 +9,7 @@
   - Iteration 10: reports / director / admin audit suite green against the live `73345c4` deploy
   - Iteration 11: companies / properties audit suite green locally against production; frontend deploy pending
   - Iteration 12: notification stream CORP fix verified locally; API + frontend deploy pending
+  - Iteration 13: notification unread-count CORP fix verified locally; API deploy pending
 - Issues fixed vs deferred:
   - Fixed: 12
   - Deferred: 0
@@ -212,14 +213,14 @@ Deploy status: SUCCESS
 Verification: local `npx vitest run --config vitest.config.ts server/tests/modules/reports/analytics-cycle.test.ts`, `npx vitest run --config vitest.config.ts client/src/components/reports/analytics-sections.test.tsx`, `npm run typecheck --workspace=server`, and `npm run typecheck --workspace=client`; confirmed passing on prod via `/reports` and `tests/audit/reports-director-admin.spec.ts`
 Status: fixed
 
-Issue #13 — Notification stream is blocked on the production frontend by cross-origin resource policy
-Route/Component: topbar notification center, `/api/notifications/stream`, `useNotificationStream`, notification SSE route
+Issue #13 — Notification endpoints are blocked on the production frontend by cross-origin resource policy
+Route/Component: topbar notification center, `/api/notifications/unread-count`, `/api/notifications/stream`, `useNotificationStream`, notification routes
 Severity: medium
 Environment: production (Railway)
 Discovered: iteration 11, companies / properties production audit
-Symptom: rep pages intermittently or consistently log notification stream failures during production Playwright runs, with the browser reporting the EventSource connection as blocked by cross-origin policy.
-Root cause: the notification SSE route inherits Helmet's default `Cross-Origin-Resource-Policy: same-origin`, which blocks the cross-origin Railway frontend from consuming the credentialed EventSource stream even though CORS headers are otherwise present.
-Fix: added abort-aware notification hook handling and regression tests on the client side, then added a server route regression test and overrode the SSE route to emit `Cross-Origin-Resource-Policy: cross-origin`.
+Symptom: rep/admin pages intermittently or consistently log notification unread-count and stream failures during production Playwright runs, with the browser reporting the requests as blocked by cross-origin policy.
+Root cause: notification routes inherit Helmet's default `Cross-Origin-Resource-Policy: same-origin`, which is too strict for the cross-origin Railway frontend even though the API also emits the expected CORS headers.
+Fix: added abort-aware notification hook handling and regression tests on the client side, then added server route regression tests and overrode both the SSE stream route and tenant notification CRUD router to emit `Cross-Origin-Resource-Policy: cross-origin`.
 Deployed: pending
 Deploy status: pending
 Verification: local `npx vitest run --config vitest.config.ts client/src/hooks/use-notifications.test.ts`, `npx vitest run --config vitest.config.ts server/tests/modules/notifications/routes.test.ts`, `npm run typecheck --workspace=client`, `npm run typecheck --workspace=server`, and post-deploy Playwright reruns pending

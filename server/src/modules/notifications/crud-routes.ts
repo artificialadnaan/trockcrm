@@ -9,6 +9,13 @@ import {
 
 const router = Router();
 
+router.use((_req, res, next) => {
+  // Notification APIs are consumed by the production frontend from a sibling
+  // Railway origin, so Helmet's default same-origin CORP is too strict here.
+  res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+  next();
+});
+
 // GET /api/notifications/list -- get notifications for current user
 router.get("/list", async (req, res, next) => {
   try {
