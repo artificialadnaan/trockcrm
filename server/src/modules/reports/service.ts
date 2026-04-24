@@ -2109,7 +2109,7 @@ export async function getUnifiedWorkflowOverview(
     tenantDb.execute(sql`
       SELECT
         COALESCE(d.bid_board_stage_slug, psc.slug) AS mirrored_stage_slug,
-        psc.name AS mirrored_stage_name,
+        COALESCE(mirror_psc.name, psc.name) AS mirrored_stage_name,
         d.bid_board_stage_status AS mirrored_stage_status,
         d.workflow_route,
         COUNT(*)::int AS deal_count,

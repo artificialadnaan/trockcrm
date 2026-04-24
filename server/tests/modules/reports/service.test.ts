@@ -454,6 +454,7 @@ describe("Reports Service", () => {
       expect(progressionQuery).toContain("d.workflow_route::text");
       expect(mirrorQuery).toContain("bid_board_stage_slug");
       expect(mirrorQuery).toContain("bid_board_stage_status");
+      expect(mirrorQuery).toContain("coalesce(mirror_psc.name, psc.name) as mirrored_stage_name");
       expect(disqualificationQuery).toContain("disqualification_reason");
       expect(disqualificationQuery).toContain("pipeline_type");
       const staleDealQuery = extractSqlText(tenantDb.execute.mock.calls[5][0]).toLowerCase();

@@ -170,3 +170,26 @@ Deployed: pending current iteration commit
 Deploy status: pending
 Verification: local `npx vitest run --config vitest.config.ts server/tests/modules/reports/service.test.ts` and `npm run typecheck --workspace=server`
 Status: fixed locally, pending deploy
+
+Deploy Failure #1 — Manual Railway API deploy picked the stale root checkout instead of the clean audit worktree
+Iteration: 7
+Commit: `4673169`
+Failure type: build error
+Railway log excerpt: `src/schema/index.ts(15,38): error TS2307: Cannot find module './public/hubspot-owner-mappings.js'`
+Root cause: `railway up` from the worktree still resolved the dirty root checkout as the archive root, and the root checkout was missing `shared/src/schema/public/hubspot-owner-mappings.ts`.
+Fix: re-ran the deployment with `railway up . --path-as-root -s API -c` so Railway archived the clean worktree itself.
+Recovery commit: `4673169`
+Final deploy status: SUCCESS
+
+Issue #11 — Workflow overview mirrored-stage rollup groups by a coalesced label but selects the raw stage name
+Route/Component: `/reports`, `/api/reports/workflow-overview`, `getUnifiedWorkflowOverview`
+Severity: high
+Environment: production (Railway)
+Discovered: iteration 7, post-deploy production recheck
+Symptom: after fixing the first workflow-overview error, the endpoint still returned `500` with `column "psc.name" must appear in the GROUP BY clause`.
+Root cause: the mirrored downstream summary grouped by `COALESCE(mirror_psc.name, psc.name)` but still selected `psc.name AS mirrored_stage_name`.
+Fix: changed the select list to `COALESCE(mirror_psc.name, psc.name) AS mirrored_stage_name` and added a regression assertion to the report service test.
+Deployed: pending current iteration follow-up commit
+Deploy status: pending
+Verification: local `npx vitest run --config vitest.config.ts server/tests/modules/reports/service.test.ts server/tests/modules/reports/analytics-cycle.test.ts` and `npm run typecheck --workspace=server`
+Status: fixed locally, pending deploy
