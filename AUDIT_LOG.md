@@ -1,14 +1,17 @@
 ## Running Summary
-- Iteration count: 2
-- Total tests generated: 3
+- Iteration count: 10
+- Total tests generated: 19
 - Pass/fail count per iteration:
   - Iteration 1: passed after deploy verification
-  - Iteration 2: in progress
+  - Iteration 7: passed after clean-worktree API deploy verification
+  - Iteration 8: passed after clean-worktree API deploy verification
+  - Iteration 9: passed after clean-worktree API + Frontend deploy verification
+  - Iteration 10: reports / director / admin audit suite green against the live `73345c4` deploy
 - Issues fixed vs deferred:
-  - Fixed: 3
+  - Fixed: 12
   - Deferred: 0
-- Deploy failures encountered and recovered: 0
-- Last successful Railway deploy SHA + timestamp: `10043d5` / 2026-04-24 09:59 CDT
+- Deploy failures encountered and recovered: 1
+- Last successful Railway deploy SHA + timestamp: `73345c4` / 2026-04-24 16:02 CDT
 
 ## Setup
 - Production URL: `https://frontend-production-bcab.up.railway.app`
@@ -153,10 +156,10 @@ Discovered: iteration 7, live director production audit
 Symptom: `/reports` renders `Internal server error`, and the browser logs `500` failures for `/api/reports/data-mining`.
 Root cause: the first two `data-mining` queries reference `office_company_context` from `office_office_activity_scope` before `office_company_context` is declared in the `WITH` chain, which fails on PostgreSQL in production.
 Fix: inserted `officeCompanyContext` before `officeOfficeActivityScope` in both untouched-contact queries and tightened the report test to assert the CTE declaration order.
-Deployed: pending current iteration commit
-Deploy status: pending
-Verification: local `npx vitest run --config vitest.config.ts server/tests/modules/reports/analytics-cycle.test.ts`
-Status: fixed locally, pending deploy
+Deployed: `5e51ed5` + Railway API deploy `606bb965-feec-4d72-90ff-0eaa95948358` + 2026-04-24 15:00 CDT
+Deploy status: SUCCESS
+Verification: local `npx vitest run --config vitest.config.ts server/tests/modules/reports/analytics-cycle.test.ts`; confirmed passing on prod via `/reports` and `/api/reports/data-mining`
+Status: fixed
 
 Issue #10 — Workflow overview 500s because a UNION mixes enum types without a cast
 Route/Component: `/reports`, `/api/reports/workflow-overview`, `getUnifiedWorkflowOverview`
@@ -166,10 +169,10 @@ Discovered: iteration 7, live director production audit
 Symptom: `/reports` renders `Internal server error`, and the browser logs `500` failures for `/api/reports/workflow-overview`.
 Root cause: the CRM-owned progression query unions `leads.pipeline_type` with `deals.workflow_route`; PostgreSQL cannot implicitly union `lead_pipeline_type` and `workflow_route`.
 Fix: cast both union branches to `text` for the shared `workflow_route` projection and added a regression test that pins the cast in the generated SQL.
-Deployed: pending current iteration commit
-Deploy status: pending
-Verification: local `npx vitest run --config vitest.config.ts server/tests/modules/reports/service.test.ts` and `npm run typecheck --workspace=server`
-Status: fixed locally, pending deploy
+Deployed: `5e51ed5` + Railway API deploy `606bb965-feec-4d72-90ff-0eaa95948358` + 2026-04-24 15:00 CDT
+Deploy status: SUCCESS
+Verification: local `npx vitest run --config vitest.config.ts server/tests/modules/reports/service.test.ts` and `npm run typecheck --workspace=server`; confirmed passing on prod via `/reports` and `/api/reports/workflow-overview`
+Status: fixed
 
 Deploy Failure #1 — Manual Railway API deploy picked the stale root checkout instead of the clean audit worktree
 Iteration: 7
@@ -189,10 +192,10 @@ Discovered: iteration 7, post-deploy production recheck
 Symptom: after fixing the first workflow-overview error, the endpoint still returned `500` with `column "psc.name" must appear in the GROUP BY clause`.
 Root cause: the mirrored downstream summary grouped by `COALESCE(mirror_psc.name, psc.name)` but still selected `psc.name AS mirrored_stage_name`.
 Fix: changed the select list to `COALESCE(mirror_psc.name, psc.name) AS mirrored_stage_name` and added a regression assertion to the report service test.
-Deployed: pending current iteration follow-up commit
-Deploy status: pending
-Verification: local `npx vitest run --config vitest.config.ts server/tests/modules/reports/service.test.ts server/tests/modules/reports/analytics-cycle.test.ts` and `npm run typecheck --workspace=server`
-Status: fixed locally, pending deploy
+Deployed: `5e51ed5` + Railway API deploy `606bb965-feec-4d72-90ff-0eaa95948358` + 2026-04-24 15:00 CDT
+Deploy status: SUCCESS
+Verification: local `npx vitest run --config vitest.config.ts server/tests/modules/reports/service.test.ts server/tests/modules/reports/analytics-cycle.test.ts` and `npm run typecheck --workspace=server`; confirmed passing on prod via `/reports`
+Status: fixed
 
 Issue #12 — Data-mining untouched contacts can emit placeholder rows with missing ids
 Route/Component: `/reports`, `/api/reports/data-mining`, `DataMiningSection`, `getDataMiningOverview`
@@ -202,7 +205,7 @@ Discovered: iteration 8, fresh post-deploy `/reports` browser verification
 Symptom: the data-mining table renders a blank untouched-contact row and logs a React `Each child in a list should have a unique "key" prop` warning.
 Root cause: malformed placeholder rows with null `contact_id` / `contact_name` were mapped straight through by the report service, and the table renderer trusted every row to have a stable key.
 Fix: filter malformed untouched-contact and dormant-company rows in `getDataMiningOverview`, and defensively collapse invalid rows to the table empty state in `DataMiningSection`.
-Deployed: pending current iteration commit
-Deploy status: pending
-Verification: local `npx vitest run --config vitest.config.ts server/tests/modules/reports/analytics-cycle.test.ts`, `npx vitest run --config vitest.config.ts client/src/components/reports/analytics-sections.test.tsx`, `npm run typecheck --workspace=server`, and `npm run typecheck --workspace=client`
-Status: fixed locally, pending deploy
+Deployed: `73345c4` + Railway API deploy `3f585d6b-96b1-43b1-9f2c-cb36a57a36f2` + Railway Frontend deploy `1d468986-4cfe-4280-be65-32701f323d78` + 2026-04-24 16:02 CDT
+Deploy status: SUCCESS
+Verification: local `npx vitest run --config vitest.config.ts server/tests/modules/reports/analytics-cycle.test.ts`, `npx vitest run --config vitest.config.ts client/src/components/reports/analytics-sections.test.tsx`, `npm run typecheck --workspace=server`, and `npm run typecheck --workspace=client`; confirmed passing on prod via `/reports` and `tests/audit/reports-director-admin.spec.ts`
+Status: fixed
