@@ -13,27 +13,57 @@ export interface Notification {
   createdAt: string;
 }
 
+export function isIgnorableNotificationError(error: unknown) {
+  if (error instanceof DOMException && error.name === "AbortError") {
+    return true;
+  }
+
+  if (error instanceof TypeError && error.message === "Failed to fetch") {
+    return true;
+  }
+
+  if (error instanceof Error) {
+    const combined = `${error.name} ${error.message}`.toLowerCase();
+    return combined.includes("abort");
+  }
+
+  return false;
+}
+
 export function useNotifications(limit: number = 20) {
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const fetchNotifications = useCallback(async () => {
-    setLoading(true);
-    try {
-      const data = await api<{ notifications: Notification[] }>(
-        `/notifications/list?limit=${limit}`
-      );
-      setNotifications(data.notifications);
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to load notifications");
-    } finally {
-      setLoading(false);
-    }
-  }, [limit]);
+  const fetchNotifications = useCallback(
+    async (signal?: AbortSignal) => {
+      setLoading(true);
+      try {
+        const data = await api<{ notifications: Notification[] }>(`/notifications/list?limit=${limit}`, {
+          signal,
+        });
+        setNotifications(data.notifications);
+      } catch (err: unknown) {
+        if (isIgnorableNotificationError(err)) {
+          return;
+        }
+        setError(err instanceof Error ? err.message : "Failed to load notifications");
+      } finally {
+        if (!signal?.aborted) {
+          setLoading(false);
+        }
+      }
+    },
+    [limit]
+  );
 
   useEffect(() => {
-    fetchNotifications();
+    const controller = new AbortController();
+    void fetchNotifications(controller.signal);
+
+    return () => {
+      controller.abort();
+    };
   }, [fetchNotifications]);
 
   return { notifications, loading, error, refetch: fetchNotifications };
@@ -42,17 +72,25 @@ export function useNotifications(limit: number = 20) {
 export function useUnreadCount() {
   const [count, setCount] = useState(0);
 
-  const fetchCount = useCallback(async () => {
+  const fetchCount = useCallback(async (signal?: AbortSignal) => {
     try {
-      const data = await api<{ count: number }>("/notifications/unread-count");
+      const data = await api<{ count: number }>("/notifications/unread-count", { signal });
       setCount(data.count);
     } catch (err) {
+      if (isIgnorableNotificationError(err)) {
+        return;
+      }
       console.error("Failed to load unread count:", err);
     }
   }, []);
 
   useEffect(() => {
-    fetchCount();
+    const controller = new AbortController();
+    void fetchCount(controller.signal);
+
+    return () => {
+      controller.abort();
+    };
   }, [fetchCount]);
 
   return { count, refetch: fetchCount };
@@ -69,9 +107,20 @@ export function useNotificationStream() {
 
   // Fetch initial unread count
   useEffect(() => {
-    api<{ count: number }>("/notifications/unread-count")
+    const controller = new AbortController();
+
+    api<{ count: number }>("/notifications/unread-count", { signal: controller.signal })
       .then((data) => setUnreadCount(data.count))
-      .catch(console.error);
+      .catch((err) => {
+        if (isIgnorableNotificationError(err)) {
+          return;
+        }
+        console.error(err);
+      });
+
+    return () => {
+      controller.abort();
+    };
   }, []);
 
   // Connect to SSE stream

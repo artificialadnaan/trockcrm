@@ -1,12 +1,13 @@
 ## Running Summary
-- Iteration count: 10
-- Total tests generated: 19
+- Iteration count: 11
+- Total tests generated: 22
 - Pass/fail count per iteration:
   - Iteration 1: passed after deploy verification
   - Iteration 7: passed after clean-worktree API deploy verification
   - Iteration 8: passed after clean-worktree API deploy verification
   - Iteration 9: passed after clean-worktree API + Frontend deploy verification
   - Iteration 10: reports / director / admin audit suite green against the live `73345c4` deploy
+  - Iteration 11: companies / properties audit suite green locally against production; frontend deploy pending
 - Issues fixed vs deferred:
   - Fixed: 12
   - Deferred: 0
@@ -209,3 +210,16 @@ Deployed: `73345c4` + Railway API deploy `3f585d6b-96b1-43b1-9f2c-cb36a57a36f2` 
 Deploy status: SUCCESS
 Verification: local `npx vitest run --config vitest.config.ts server/tests/modules/reports/analytics-cycle.test.ts`, `npx vitest run --config vitest.config.ts client/src/components/reports/analytics-sections.test.tsx`, `npm run typecheck --workspace=server`, and `npm run typecheck --workspace=client`; confirmed passing on prod via `/reports` and `tests/audit/reports-director-admin.spec.ts`
 Status: fixed
+
+Issue #13 — Notification bootstrap logs abort noise during route-level reloads
+Route/Component: topbar notification center, `useNotificationStream`, `useNotifications`, `useUnreadCount`
+Severity: medium
+Environment: production (Railway)
+Discovered: iteration 11, companies / properties production audit
+Symptom: direct route-level reloads across app pages can emit `TypeError: Failed to fetch` from notification bootstrap requests while the page is unloading, even though the route itself is healthy.
+Root cause: notification hooks issue unread-count / notification-list fetches without route-cleanup abort handling, and the stream bootstrap logs transient abort failures directly to the console.
+Fix: added abort-aware notification hook handling, a shared ignorable-abort classifier, and regression tests for the notification bootstrap path; also extracted shared Playwright audit helpers and added `tests/audit/companies-properties.spec.ts` for this route family.
+Deployed: pending
+Deploy status: pending
+Verification: local `npx vitest run --config vitest.config.ts client/src/hooks/use-notifications.test.ts`, `npm run typecheck --workspace=client`, and `npx playwright test tests/audit/companies-properties.spec.ts --config=playwright.audit.config.ts --reporter=list`
+Status: in progress
