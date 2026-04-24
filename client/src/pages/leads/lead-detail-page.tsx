@@ -5,18 +5,20 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { LeadForm } from "@/components/leads/lead-form";
 import { LeadConvertDialog } from "@/components/leads/lead-convert-dialog";
+import { LeadStageChangeDialog } from "@/components/leads/lead-stage-change-dialog";
 import { LeadStageBadge } from "@/components/leads/lead-stage-badge";
 import { LeadTimelineTab } from "@/components/leads/lead-timeline-tab";
 import { formatLeadPropertyLine, getLeadStageMetadata, useLeadDetail } from "@/hooks/use-leads";
 import { usePipelineStages } from "@/hooks/use-pipeline-config";
-import { isBidBoardMirroredStageSlug } from "@/lib/pipeline-ownership";
+import { LEAD_BOARD_STAGE_SLUGS, isBidBoardMirroredStageSlug } from "@/lib/pipeline-ownership";
 
 export function LeadDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const { lead, loading, error } = useLeadDetail(id);
+  const { lead, loading, error, refetch } = useLeadDetail(id);
   const { stages } = usePipelineStages();
   const [isConvertDialogOpen, setIsConvertDialogOpen] = useState(false);
+  const [isStageDialogOpen, setIsStageDialogOpen] = useState(false);
 
   const currentStage = useMemo(
     () => stages.find((stage) => stage.id === lead?.stageId) ?? null,
@@ -26,6 +28,14 @@ export function LeadDetailPage() {
     () => (lead ? getLeadStageMetadata(lead.stageId, stages) : null),
     [lead, stages]
   );
+  const nextLeadStage = useMemo(() => {
+    const orderedLeadStages = LEAD_BOARD_STAGE_SLUGS.map((slug) =>
+      stages.find((stage) => stage.slug === slug)
+    ).filter((stage): stage is NonNullable<typeof stage> => stage != null);
+    const currentIndex = orderedLeadStages.findIndex((stage) => stage.id === lead?.stageId);
+    if (currentIndex === -1) return null;
+    return orderedLeadStages[currentIndex + 1] ?? null;
+  }, [lead?.stageId, stages]);
   const isConverted = lead?.status === "converted" || Boolean(lead?.convertedDealId);
   const convertedAt = lead?.convertedAt ?? null;
 
@@ -58,6 +68,7 @@ export function LeadDetailPage() {
   const canConvertToOpportunity =
     !isConverted &&
     (currentStageSlug === "sales_validation_stage" || currentStageSlug === "opportunity");
+  const canAdvanceLeadStage = !isConverted && nextLeadStage != null;
 
   const secondaryAction = !isConverted
     ? {
@@ -196,6 +207,26 @@ export function LeadDetailPage() {
                 open={isConvertDialogOpen}
                 onOpenChange={setIsConvertDialogOpen}
                 onSuccess={(dealId) => navigate(`/deals/${dealId}?tab=scoping`)}
+              />
+            </>
+          ) : null}
+
+          {canAdvanceLeadStage ? (
+            <>
+              <Button variant="secondary" onClick={() => setIsStageDialogOpen(true)}>
+                Move to {nextLeadStage.name}
+              </Button>
+              <LeadStageChangeDialog
+                lead={lead}
+                targetStageId={nextLeadStage.id}
+                targetStageName={nextLeadStage.name}
+                open={isStageDialogOpen}
+                onOpenChange={setIsStageDialogOpen}
+                onEditLead={() => navigate(`/leads/${lead.id}/edit`)}
+                onSuccess={() => {
+                  setIsStageDialogOpen(false);
+                  void refetch();
+                }}
               />
             </>
           ) : null}

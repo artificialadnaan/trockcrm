@@ -10,25 +10,35 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { StageGateChecklist } from "@/components/deals/stage-gate-checklist";
-import { preflightLeadStageCheck, updateLead, type LeadRecord, type LeadStageGateResult } from "@/hooks/use-leads";
+import {
+  preflightLeadStageCheck,
+  transitionLeadStage,
+  type LeadRecord,
+  type LeadStageGateResult,
+} from "@/hooks/use-leads";
 
 export function LeadStageChangeDialog({
   lead,
   targetStageId,
+  targetStageName,
   open,
   onOpenChange,
+  onEditLead,
   onSuccess,
 }: {
   lead: LeadRecord;
   targetStageId: string | null;
+  targetStageName?: string | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  onEditLead?: () => void;
   onSuccess: () => void;
 }) {
   const [preflight, setPreflight] = useState<LeadStageGateResult | null>(null);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [runtimeMissingLabels, setRuntimeMissingLabels] = useState<string[]>([]);
 
   useEffect(() => {
     if (!open || !targetStageId) {
@@ -37,6 +47,7 @@ export function LeadStageChangeDialog({
 
     setLoading(true);
     setError(null);
+    setRuntimeMissingLabels([]);
     preflightLeadStageCheck(lead.id, targetStageId)
       .then((result) => setPreflight(result))
       .catch((err) => setError(err instanceof Error ? err.message : "Preflight failed"))
@@ -51,7 +62,12 @@ export function LeadStageChangeDialog({
     setSubmitting(true);
     setError(null);
     try {
-      await updateLead(lead.id, { stageId: targetStageId });
+      const result = await transitionLeadStage(lead.id, { targetStageId });
+      if (!result.ok) {
+        setRuntimeMissingLabels(result.missing.map((field) => field.label));
+        setError(`Complete the missing fields before moving this lead to ${targetStageName ?? "the next stage"}.`);
+        return;
+      }
       onSuccess();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to update lead stage");
@@ -68,7 +84,10 @@ export function LeadStageChangeDialog({
             <ArrowRight className="h-5 w-5 text-brand-red" />
             Advance Lead Stage
           </DialogTitle>
-          <DialogDescription>{lead.name}</DialogDescription>
+          <DialogDescription>
+            {lead.name}
+            {targetStageName ? ` → ${targetStageName}` : ""}
+          </DialogDescription>
         </DialogHeader>
 
         {loading ? (
@@ -97,11 +116,25 @@ export function LeadStageChangeDialog({
                 },
               }}
             />
+            {runtimeMissingLabels.length > 0 ? (
+              <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-700">
+                <div className="flex items-center gap-2 font-medium">
+                  <AlertTriangle className="h-4 w-4" />
+                  Complete required fields
+                </div>
+                <p className="mt-1">{runtimeMissingLabels.join(", ")}</p>
+              </div>
+            ) : null}
             {error && <p className="text-sm text-red-600">{error}</p>}
           </div>
         ) : null}
 
         <DialogFooter showCloseButton>
+          {onEditLead && (!preflight?.allowed || runtimeMissingLabels.length > 0) ? (
+            <Button variant="outline" onClick={onEditLead}>
+              Edit Lead
+            </Button>
+          ) : null}
           <Button
             onClick={handleSubmit}
             disabled={!preflight?.allowed || submitting}

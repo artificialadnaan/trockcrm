@@ -5,9 +5,10 @@ import { LeadDetailPage } from "./lead-detail-page";
 
 const stages = [
   { id: "stage-new", name: "New Lead", slug: "new_lead", workflowFamily: "lead", displayOrder: 0 },
-  { id: "stage-validation", name: "Sales Validation Stage", slug: "sales_validation_stage", workflowFamily: "lead", displayOrder: 1 },
-  { id: "stage-opportunity", name: "Opportunity", slug: "opportunity", workflowFamily: "lead", displayOrder: 2 },
-  { id: "stage-estimating", name: "Estimating", slug: "estimating", workflowFamily: "standard_deal", displayOrder: 3 },
+  { id: "stage-qualified", name: "Qualified Lead", slug: "qualified_lead", workflowFamily: "lead", displayOrder: 1 },
+  { id: "stage-validation", name: "Sales Validation Stage", slug: "sales_validation_stage", workflowFamily: "lead", displayOrder: 2 },
+  { id: "stage-opportunity", name: "Opportunity", slug: "opportunity", workflowFamily: "lead", displayOrder: 3 },
+  { id: "stage-estimating", name: "Estimating", slug: "estimating", workflowFamily: "standard_deal", displayOrder: 4 },
 ];
 
 let lead: Record<string, any> = {
@@ -208,6 +209,7 @@ describe("LeadDetailPage", () => {
     expect(html).toContain("Lead context");
     expect(html).toContain("New Lead");
     expect(html).not.toContain("Convert to Opportunity");
+    expect(html).toContain("Move to Qualified Lead");
   });
 
   it("shows converted opportunity leads with CRM stage context and linked deal access", () => {
@@ -257,5 +259,18 @@ describe("LeadDetailPage", () => {
 
     expect(html).toContain("Convert to Opportunity");
     expect(html).toContain("Edit Sales Validation");
+  });
+
+  it("offers the next stage move before sales validation", () => {
+    lead = {
+      ...lead,
+      stageId: "stage-qualified",
+      status: "open",
+    };
+
+    const html = renderLeadDetail();
+
+    expect(html).toContain("Move to Sales Validation Stage");
+    expect(html).not.toContain("Convert to Opportunity");
   });
 });
