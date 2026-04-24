@@ -128,11 +128,11 @@ export function createLeadConversionService(
       );
     }
 
-    if (currentCanonicalStageSlug !== "opportunity") {
+    if (currentCanonicalStageSlug !== "sales_validation" && currentCanonicalStageSlug !== "opportunity") {
       throw new AppError(
         409,
-        "Only opportunity leads can be converted to deals. Move the lead through the canonical progression first.",
-        "LEAD_CONVERSION_REQUIRES_OPPORTUNITY"
+        "Only Sales Validation leads can be converted to deals. Move the lead through the canonical progression first.",
+        "LEAD_CONVERSION_REQUIRES_SALES_VALIDATION"
       );
     }
 

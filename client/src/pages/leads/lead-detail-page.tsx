@@ -1,9 +1,10 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { ArrowLeft, Building2, MapPin, Clock3, User, Phone } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { LeadForm } from "@/components/leads/lead-form";
+import { LeadConvertDialog } from "@/components/leads/lead-convert-dialog";
 import { LeadStageBadge } from "@/components/leads/lead-stage-badge";
 import { LeadTimelineTab } from "@/components/leads/lead-timeline-tab";
 import { formatLeadPropertyLine, getLeadStageMetadata, useLeadDetail } from "@/hooks/use-leads";
@@ -15,6 +16,7 @@ export function LeadDetailPage() {
   const navigate = useNavigate();
   const { lead, loading, error } = useLeadDetail(id);
   const { stages } = usePipelineStages();
+  const [isConvertDialogOpen, setIsConvertDialogOpen] = useState(false);
 
   const currentStage = useMemo(
     () => stages.find((stage) => stage.id === lead?.stageId) ?? null,
@@ -53,6 +55,9 @@ export function LeadDetailPage() {
   const currentStageSlug = currentStageMeta?.slug ?? null;
   const isOpportunityStage = currentStageSlug === "opportunity";
   const isBidBoardMirrorStage = isBidBoardMirroredStageSlug(currentStageSlug);
+  const canConvertToOpportunity =
+    !isConverted &&
+    (currentStageSlug === "sales_validation_stage" || currentStageSlug === "opportunity");
 
   const secondaryAction = !isConverted
     ? {
@@ -157,6 +162,7 @@ export function LeadDetailPage() {
 
         <div className="space-y-4">
           <LeadForm
+            showPrimaryAction={false}
           lead={{
             id: lead.id,
             name: lead.name,
@@ -181,6 +187,18 @@ export function LeadDetailPage() {
             }}
             converted={isConverted}
           />
+
+          {canConvertToOpportunity ? (
+            <>
+              <Button onClick={() => setIsConvertDialogOpen(true)}>Convert to Opportunity</Button>
+              <LeadConvertDialog
+                lead={lead}
+                open={isConvertDialogOpen}
+                onOpenChange={setIsConvertDialogOpen}
+                onSuccess={(dealId) => navigate(`/deals/${dealId}?tab=scoping`)}
+              />
+            </>
+          ) : null}
 
           {secondaryAction && (
             <Button variant="outline" onClick={secondaryAction.onClick}>

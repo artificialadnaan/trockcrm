@@ -1158,7 +1158,7 @@ describe("Lead Conversion Service", () => {
           propertyId: "property-1",
           primaryContactId: null,
           name: "Palm Villas repaint",
-          stageId: "lead-stage-opportunity",
+          stageId: "lead-stage-sales-validation",
           assignedRepId: "rep-1",
           status: "open",
           pipelineType: "normal",
@@ -1207,7 +1207,7 @@ describe("Lead Conversion Service", () => {
     expect(result.deal.workflowRoute).toBe("normal");
     expect(result.lead.status).toBe("converted");
     expect(result.lead.convertedAt).toEqual(new Date("2026-04-15T15:00:00.000Z"));
-    expect(result.lead.stageId).toBe("lead-stage-opportunity");
+    expect(result.lead.stageId).toBe("lead-stage-sales-validation");
     expect(result.lead.stageEnteredAt).toEqual(new Date("2026-04-15T15:00:00.000Z"));
     expect(tenantDb.state.deals).toHaveLength(1);
   });
@@ -1220,10 +1220,6 @@ describe("Lead Conversion Service", () => {
     {
       name: "qualified leads",
       stageId: "lead-stage-qualified",
-    },
-    {
-      name: "sales validation leads",
-      stageId: "lead-stage-sales-validation",
     },
   ])("rejects converting $name before opportunity", async ({ stageId }) => {
     const tenantDb = createFakeTenantDb({
@@ -1264,8 +1260,9 @@ describe("Lead Conversion Service", () => {
       })
     ).rejects.toMatchObject<AppError>({
       statusCode: 409,
-      message: "Only opportunity leads can be converted to deals. Move the lead through the canonical progression first.",
-      code: "LEAD_CONVERSION_REQUIRES_OPPORTUNITY",
+      message:
+        "Only Sales Validation leads can be converted to deals. Move the lead through the canonical progression first.",
+      code: "LEAD_CONVERSION_REQUIRES_SALES_VALIDATION",
     });
 
     expect(createDealSpy).not.toHaveBeenCalled();

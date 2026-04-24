@@ -203,16 +203,11 @@ describe("LeadDetailPage", () => {
     const html = renderLeadDetail();
 
     expect(html).toContain("Alpha Roofing Follow-Up");
-    expect(html).toContain("Pipeline context");
-    expect(html).toContain("Stage age");
-    expect(html).toContain("Last update");
-    expect(html).toContain("Conversion status");
     expect(html).toContain("Alpha Roofing");
     expect(html).toContain("123 Main St");
-    expect(html).toContain("Assigned Rep");
     expect(html).toContain("Lead context");
     expect(html).toContain("New Lead");
-    expect(html).toContain("Lead Form Edit");
+    expect(html).not.toContain("Convert to Opportunity");
   });
 
   it("shows converted opportunity leads with CRM stage context and linked deal access", () => {
@@ -227,13 +222,8 @@ describe("LeadDetailPage", () => {
 
     const html = renderLeadDetail();
 
-    expect(html).toContain("Pipeline context");
     expect(html).toContain("Opportunity");
-    expect(html).toContain("Conversion status");
-    expect(html).toContain("Converted");
-    expect(html).toContain("Lead context");
-    expect(html).toContain("This lead has already been converted, but the pre-RFP history remains available here.");
-    expect(html).toContain("Open Deal");
+    expect(html).toContain("Opportunity Scope");
     expect(html).toContain("Lead Form Summary");
   });
 
@@ -249,12 +239,23 @@ describe("LeadDetailPage", () => {
 
     const html = renderLeadDetail();
 
-    expect(html).toContain("Pipeline context");
     expect(html).toContain("Estimating");
-    expect(html).toContain("Conversion status");
-    expect(html).toContain("Converted");
-    expect(html).toContain("Lead context");
-    expect(html).toContain("This lead has already been converted, but the pre-RFP history remains available here.");
-    expect(html).toContain("Open Deal");
+    expect(html).toContain("Bid Board Mirror");
+  });
+
+  it("offers conversion only when the lead reaches sales validation", () => {
+    lead = {
+      ...lead,
+      stageId: "stage-validation",
+      status: "open",
+      convertedAt: null,
+      convertedDealId: null,
+      convertedDealNumber: null,
+    };
+
+    const html = renderLeadDetail();
+
+    expect(html).toContain("Convert to Opportunity");
+    expect(html).toContain("Edit Sales Validation");
   });
 });

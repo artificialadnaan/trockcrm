@@ -63,7 +63,9 @@ vi.mock("@/components/ui/label", () => ({
 }));
 
 vi.mock("@/components/ui/select", () => ({
-  Select: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+  Select: ({ children, value }: { children: React.ReactNode; value?: string }) => (
+    <div data-select-value={value ?? "__undefined__"}>{children}</div>
+  ),
   SelectTrigger: ({ children, id }: { children: React.ReactNode; id?: string }) => <div id={id}>{children}</div>,
   SelectValue: ({ placeholder }: { placeholder?: string }) => <span>{placeholder}</span>,
   SelectContent: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
@@ -120,5 +122,40 @@ describe("LeadForm", () => {
     expect(html).toContain("Source");
     expect(html).toContain("Project Type");
     expect(html).toContain("Sales Validation Fields");
+  });
+
+  it("keeps project type selects controlled when no project type has been chosen yet", () => {
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <LeadForm
+          mode="edit"
+          lead={{
+            id: "lead-1",
+            name: "Lead One",
+            convertedDealId: null,
+            convertedDealNumber: null,
+            companyId: "company-1",
+            companyName: "Acme",
+            stageId: "stage-new",
+            propertyId: "property-1",
+            propertyName: "Property",
+            propertyAddress: "123 Main",
+            propertyCity: "Dallas",
+            propertyState: "TX",
+            propertyZip: "75001",
+            source: "",
+            description: "",
+            projectTypeId: null,
+            projectType: null,
+            qualificationPayload: {},
+            projectTypeQuestionPayload: { projectTypeId: null, answers: {} },
+            stageEnteredAt: "2026-04-22T00:00:00.000Z",
+          }}
+        />
+      </MemoryRouter>
+    );
+
+    expect(html).toContain('data-select-value="__none__"');
+    expect(html).not.toContain('data-select-value="__undefined__"');
   });
 });
