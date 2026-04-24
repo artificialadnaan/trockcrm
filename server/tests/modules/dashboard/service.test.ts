@@ -118,7 +118,8 @@ describe("Dashboard Service", () => {
             lead_name: "Lead One",
             company_name: "Birchstone",
             property_name: "North Tower",
-            stage_name: "Discovery",
+            stage_slug: "contacted",
+            stage_name: "Contacted",
             days_in_stage: "5",
             updated_at: "2026-04-20T00:00:00.000Z",
           },
@@ -129,10 +130,10 @@ describe("Dashboard Service", () => {
             deal_name: "Deal One",
             company_name: "Birchstone",
             property_name: "North Tower",
-            stage_slug: "estimating",
-            mirrored_stage_slug: "estimating",
+            stage_slug: "due_diligence",
+            mirrored_stage_slug: "due_diligence",
             workflow_route: "normal",
-            stage_name: "Estimating",
+            stage_name: "Due Diligence",
             total_value: "250000",
             updated_at: "2026-04-20T00:00:00.000Z",
           },
@@ -148,8 +149,9 @@ describe("Dashboard Service", () => {
       expect(result.followUpCompliance.complianceRate).toBe(90);
       expect(result.pipelineByStage).toHaveLength(1);
       expect(result.leadSnapshot).toHaveLength(1);
+      expect(result.leadSnapshot[0]?.stageName).toBe("New Lead");
       expect(result.dealSnapshot).toHaveLength(1);
-      expect(result.dealSnapshot[0]?.stageName).toBe("Estimate in Progress");
+      expect(result.dealSnapshot[0]?.stageName).toBe("Opportunity");
       expect(result.myCleanup.total).toBe(2);
       expect(result.myCleanup.byReason).toEqual([
         { reasonCode: "missing_next_step", count: 1 },

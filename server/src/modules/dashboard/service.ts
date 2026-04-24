@@ -71,7 +71,54 @@ function resolveMirroredStageLabel(
   return fallbackStageName ?? "Unknown";
 }
 
+const NEW_LEAD_BOARD_STAGE_SLUGS = [
+  "contacted",
+  "lead_new",
+  "company_pre_qualified",
+  "scoping_in_progress",
+  "new_lead",
+] as const;
+
+const QUALIFIED_LEAD_BOARD_STAGE_SLUGS = [
+  "qualified_lead",
+  "pre_qual_value_assigned",
+  "director_go_no_go",
+] as const;
+
+const SALES_VALIDATION_BOARD_STAGE_SLUGS = [
+  "lead_go_no_go",
+  "qualified_for_opportunity",
+  "ready_for_opportunity",
+  "sales_validation_stage",
+] as const;
+
+function resolveLeadSnapshotStageLabel(stageSlug: string | null | undefined, fallbackStageName: string | null | undefined) {
+  if (!stageSlug) {
+    return fallbackStageName ?? "Unknown";
+  }
+
+  if (NEW_LEAD_BOARD_STAGE_SLUGS.includes(stageSlug as (typeof NEW_LEAD_BOARD_STAGE_SLUGS)[number])) {
+    return "New Lead";
+  }
+
+  if (QUALIFIED_LEAD_BOARD_STAGE_SLUGS.includes(stageSlug as (typeof QUALIFIED_LEAD_BOARD_STAGE_SLUGS)[number])) {
+    return "Qualified Lead";
+  }
+
+  if (
+    SALES_VALIDATION_BOARD_STAGE_SLUGS.includes(
+      stageSlug as (typeof SALES_VALIDATION_BOARD_STAGE_SLUGS)[number]
+    )
+  ) {
+    return "Sales Validation Stage";
+  }
+
+  return fallbackStageName ?? "Unknown";
+}
+
 const LEGACY_NORMAL_DASHBOARD_STAGE_SLUGS = {
+  dd: "opportunity",
+  due_diligence: "opportunity",
   estimating: "estimate_in_progress",
   bid_sent: "estimate_sent_to_client",
   in_production: "sent_to_production",
@@ -81,6 +128,8 @@ const LEGACY_NORMAL_DASHBOARD_STAGE_SLUGS = {
 } as const;
 
 const LEGACY_SERVICE_DASHBOARD_STAGE_SLUGS = {
+  dd: "opportunity",
+  due_diligence: "opportunity",
   estimating: "service_estimating",
   bid_sent: "estimate_sent_to_client",
   in_production: "service_sent_to_production",
@@ -1290,7 +1339,7 @@ export async function getRepDashboard(
       leadName: row.lead_name,
       companyName: row.company_name ?? null,
       propertyName: row.property_name ?? null,
-      stageName: row.stage_name,
+      stageName: resolveLeadSnapshotStageLabel(row.stage_slug, row.stage_name),
       daysInStage: Number(row.days_in_stage ?? 0),
       updatedAt: toIsoOrNow(row.updated_at),
     })),
