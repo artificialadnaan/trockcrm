@@ -21,6 +21,37 @@ export interface PipelineBoardProps {
   onMove?: (input: { activeId: string; targetStageId: string; targetStageSlug: string }) => void;
 }
 
+export function resolvePipelineBoardMove(
+  columns: PipelineBoardColumnData[],
+  event: Pick<DragEndEvent, "active" | "over">
+) {
+  if (!event.over) return null;
+
+  const activeId =
+    String(event.active.data.current?.record?.id ?? event.active.id ?? "").trim();
+  const rawTargetStageId =
+    String(
+      event.over.data.current?.stageId ??
+        event.over.data.current?.column?.stage?.id ??
+        event.over.id ??
+        ""
+    ).trim();
+
+  if (!activeId || !rawTargetStageId) return null;
+
+  const targetColumn =
+    columns.find((column) => column.stage.id === rawTargetStageId) ??
+    columns.find((column) => column.stage.slug === rawTargetStageId);
+
+  if (!targetColumn) return null;
+
+  return {
+    activeId,
+    targetStageId: targetColumn.stage.id,
+    targetStageSlug: targetColumn.stage.slug,
+  };
+}
+
 export function PipelineBoard({
   entity,
   columns,
@@ -52,17 +83,12 @@ export function PipelineBoard({
 
   const handleDragEnd = (event: DragEndEvent) => {
     setActiveRecordId(null);
-    if (!onMove || !event.over) return;
+    if (!onMove) return;
 
-    const record = event.active.data.current?.record as { id: string } | undefined;
-    const targetColumn = columns.find((column) => column.stage.id === event.over?.id);
-    if (!record || !targetColumn) return;
+    const move = resolvePipelineBoardMove(columns, event);
+    if (!move) return;
 
-    onMove({
-      activeId: record.id,
-      targetStageId: targetColumn.stage.id,
-      targetStageSlug: targetColumn.stage.slug,
-    });
+    onMove(move);
   };
 
   return (

@@ -36,7 +36,13 @@ export function PipelineBoardColumn({
   onOpenRecord,
   activeRecordId = null,
 }: PipelineBoardColumnProps) {
-  const { isOver, setNodeRef } = useDroppable({ id: column.stage.id });
+  const { isOver, setNodeRef } = useDroppable({
+    id: column.stage.id,
+    data: {
+      stageId: column.stage.id,
+      stageSlug: column.stage.slug,
+    },
+  });
   const accent = resolveStageAccent(column.stage, entity);
   const primaryMetric =
     entity === "deal" ? formatBoardCompactCurrency(column.totalValue ?? 0) : `${column.count} active`;

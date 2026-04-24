@@ -5,7 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const boardColumns = [
   {
-    stage: { id: "stage-new", name: "New", slug: "lead_new" },
+    stage: { id: "stage-new", name: "New Lead", slug: "new_lead" },
     count: 1,
     cards: [
       {
@@ -18,7 +18,7 @@ const boardColumns = [
     ],
   },
   {
-    stage: { id: "stage-prequal", name: "Company Pre-Qualified", slug: "company_pre_qualified" },
+    stage: { id: "stage-prequal", name: "Qualified Lead", slug: "qualified_lead" },
     count: 0,
     cards: [],
   },
@@ -377,11 +377,11 @@ describe("LeadListPage move handling", () => {
   it("shows the blocked-move modal from the structured stage-transition response", async () => {
     vi.mocked(preflightLeadStageCheck).mockResolvedValue({
       allowed: true,
-      currentStage: { id: "stage-new", name: "New", slug: "lead_new" },
+      currentStage: { id: "stage-new", name: "New Lead", slug: "new_lead" },
       targetStage: {
         id: "stage-prequal",
-        name: "Company Pre-Qualified",
-        slug: "company_pre_qualified",
+        name: "Qualified Lead",
+        slug: "qualified_lead",
       },
       missingRequirements: { fields: [], effectiveChecklist: { fields: [] } },
     });
@@ -407,7 +407,7 @@ describe("LeadListPage move handling", () => {
       capturedOnMove?.({
         activeId: "lead-1",
         targetStageId: "stage-prequal",
-        targetStageSlug: "company_pre_qualified",
+        targetStageSlug: "qualified_lead",
       });
       await flushEffects();
     });

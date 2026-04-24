@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
-import { PipelineBoard } from "./pipeline-board";
+import { PipelineBoard, resolvePipelineBoardMove } from "./pipeline-board";
 
 const columns = [
   {
@@ -41,7 +41,51 @@ describe("PipelineBoard", () => {
     expect(html).toContain("TR-2026-0001");
     expect(html).toContain("$245K");
     expect(html).toContain("Dallas");
-    expect(html).toContain("2d in stage");
+    expect(html).toContain("4d in stage");
     expect(html).toContain("View all 12");
+  });
+
+  it("resolves drag moves from explicit stage metadata", () => {
+    const move = resolvePipelineBoardMove(
+      columns,
+      {
+        active: {
+          id: "deal-1",
+          data: { current: { record: { id: "deal-1" } } },
+        },
+        over: {
+          id: "stage-estimating",
+          data: { current: { stageId: "stage-estimating", stageSlug: "estimating" } },
+        },
+      } as any
+    );
+
+    expect(move).toEqual({
+      activeId: "deal-1",
+      targetStageId: "stage-estimating",
+      targetStageSlug: "estimating",
+    });
+  });
+
+  it("falls back to active and over ids when drag payload metadata is missing", () => {
+    const move = resolvePipelineBoardMove(
+      columns,
+      {
+        active: {
+          id: "deal-1",
+          data: { current: undefined },
+        },
+        over: {
+          id: "stage-estimating",
+          data: { current: undefined },
+        },
+      } as any
+    );
+
+    expect(move).toEqual({
+      activeId: "deal-1",
+      targetStageId: "stage-estimating",
+      targetStageSlug: "estimating",
+    });
   });
 });
