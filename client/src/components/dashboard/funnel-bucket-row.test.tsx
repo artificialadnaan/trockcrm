@@ -17,7 +17,6 @@ describe("FunnelBucketRow", () => {
               { key: "lead", label: "Leads", count: 4, totalValue: null, route: "/leads", bucket: "lead" },
               { key: "qualified_lead", label: "Qualified Leads", count: 2, totalValue: null, route: "/leads", bucket: "qualified_lead" },
               { key: "opportunity", label: "Opportunities", count: 3, totalValue: null, route: "/leads", bucket: "opportunity" },
-              { key: "due_diligence", label: "Due Diligence", count: 5, totalValue: 120000, route: "/deals", bucket: "due_diligence" },
               { key: "estimating", label: "Estimating", count: 6, totalValue: 300000, route: "/deals", bucket: "estimating" },
             ]}
           />
@@ -27,7 +26,6 @@ describe("FunnelBucketRow", () => {
 
     expect(html.indexOf("Leads")).toBeLessThan(html.indexOf("Qualified Leads"));
     expect(html.indexOf("Qualified Leads")).toBeLessThan(html.indexOf("Opportunities"));
-    expect(html).toContain("$120K");
     expect(html).toContain("$300K");
   });
 });

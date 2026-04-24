@@ -18,7 +18,6 @@ type GlobalCommissionRow = {
   leads: number;
   qualifiedLeads: number;
   opportunities: number;
-  dueDiligence: number;
   estimating: number;
   calls: number;
   emails: number;
@@ -106,7 +105,7 @@ export function GlobalCommissionsPage() {
                   <th className="px-3 py-2 text-right">Active Deals</th>
                   <th className="px-3 py-2 text-right">Pipeline</th>
                   <th className="px-3 py-2 text-right">L / Q / O</th>
-                  <th className="px-3 py-2 text-right">DD / Est</th>
+                  <th className="px-3 py-2 text-right">Estimating</th>
                   <th className="px-3 py-2 text-right">Calls / Emails / Meetings</th>
                   <th className="px-3 py-2 text-right">Activities</th>
                   <th className="px-3 py-2 text-right">New Mix</th>
@@ -126,9 +125,7 @@ export function GlobalCommissionsPage() {
                     <td className="px-3 py-2 text-right">
                       {row.leads} / {row.qualifiedLeads} / {row.opportunities}
                     </td>
-                    <td className="px-3 py-2 text-right">
-                      {row.dueDiligence} / {row.estimating}
-                    </td>
+                    <td className="px-3 py-2 text-right">{row.estimating}</td>
                     <td className="px-3 py-2 text-right">
                       {row.calls} / {row.emails} / {row.meetings}
                     </td>

@@ -12,12 +12,12 @@ export interface MyCleanupSummary {
 }
 
 export interface FunnelBucketSummary {
-  key: "lead" | "qualified_lead" | "opportunity" | "due_diligence" | "estimating";
+  key: "lead" | "qualified_lead" | "opportunity" | "estimating";
   label: string;
   count: number;
   totalValue: number | null;
   route: "/leads" | "/deals";
-  bucket: "lead" | "qualified_lead" | "opportunity" | "due_diligence" | "estimating";
+  bucket: "lead" | "qualified_lead" | "opportunity" | "estimating";
 }
 
 export interface RepDashboardData {

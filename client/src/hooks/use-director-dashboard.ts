@@ -117,7 +117,6 @@ export interface DirectorRepFunnelRow {
   leads: number;
   qualifiedLeads: number;
   opportunities: number;
-  dueDiligence: number;
   estimating: number;
 }
 
@@ -135,7 +134,6 @@ export interface DirectorCommissionWorkspaceData {
     leads: number;
     qualifiedLeads: number;
     opportunities: number;
-    dueDiligence: number;
     estimating: number;
     calls: number;
     emails: number;

@@ -130,12 +130,12 @@ function resolveDealSnapshotStageLabel(
 }
 
 export interface FunnelBucketSummary {
-  key: "lead" | "qualified_lead" | "opportunity" | "due_diligence" | "estimating";
+  key: "lead" | "qualified_lead" | "opportunity" | "estimating";
   label: string;
   count: number;
   totalValue: number | null;
   route: "/leads" | "/deals";
-  bucket: "lead" | "qualified_lead" | "opportunity" | "due_diligence" | "estimating";
+  bucket: "lead" | "qualified_lead" | "opportunity" | "estimating";
 }
 
 export interface DirectorRepFunnelRow {
@@ -144,7 +144,6 @@ export interface DirectorRepFunnelRow {
   leads: number;
   qualifiedLeads: number;
   opportunities: number;
-  dueDiligence: number;
   estimating: number;
 }
 
@@ -465,14 +464,6 @@ function buildFunnelBuckets(leadRows: any[], dealRows: any[]): FunnelBucketSumma
       bucket: "opportunity",
     },
     {
-      key: "due_diligence",
-      label: "Due Diligence",
-      count: dealCounts.get("dd") ?? 0,
-      totalValue: dealValues.get("dd") ?? 0,
-      route: "/deals",
-      bucket: "due_diligence",
-    },
-    {
       key: "estimating",
       label: "Bid Board Pipeline",
       count: ESTIMATING_PROGRESS_STAGE_SLUGS.reduce((sum, slug) => sum + (dealCounts.get(slug) ?? 0), 0),
@@ -506,7 +497,7 @@ async function getRepFunnelBuckets(tenantDb: TenantDb, repId: string): Promise<F
       JOIN pipeline_stage_config psc ON psc.id = d.stage_id
       WHERE d.is_active = true
         AND d.assigned_rep_id = ${repId}
-        AND psc.slug IN ('dd', ${sql.join(ESTIMATING_PROGRESS_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})
+        AND psc.slug IN (${sql.join(ESTIMATING_PROGRESS_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})
       GROUP BY psc.slug
     `),
   ]);
@@ -539,7 +530,7 @@ async function getDirectorFunnelSummary(
       FROM deals d
       JOIN pipeline_stage_config psc ON psc.id = d.stage_id
       WHERE d.is_active = true
-        AND psc.slug IN ('dd', ${sql.join(ESTIMATING_PROGRESS_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})
+        AND psc.slug IN (${sql.join(ESTIMATING_PROGRESS_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})
       GROUP BY psc.slug
     `),
     tenantDb.execute(sql`
@@ -565,14 +556,13 @@ async function getDirectorFunnelSummary(
       deal_counts AS (
         SELECT
           d.assigned_rep_id AS rep_id,
-          COUNT(*) FILTER (WHERE psc.slug = 'dd')::int AS due_diligence,
           COUNT(*) FILTER (
             WHERE psc.slug IN (${sql.join(ESTIMATING_PROGRESS_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})
           )::int AS estimating
         FROM deals d
         JOIN pipeline_stage_config psc ON psc.id = d.stage_id
         WHERE d.is_active = true
-          AND psc.slug IN ('dd', ${sql.join(ESTIMATING_PROGRESS_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})
+          AND psc.slug IN (${sql.join(ESTIMATING_PROGRESS_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})
         GROUP BY d.assigned_rep_id
       )
       SELECT
@@ -581,7 +571,6 @@ async function getDirectorFunnelSummary(
         COALESCE(lc.leads, 0)::int AS leads,
         COALESCE(lc.qualified_leads, 0)::int AS qualified_leads,
         COALESCE(lc.opportunities, 0)::int AS opportunities,
-        COALESCE(dc.due_diligence, 0)::int AS due_diligence,
         COALESCE(dc.estimating, 0)::int AS estimating
       FROM users u
       LEFT JOIN lead_counts lc ON lc.rep_id = u.id
@@ -593,7 +582,6 @@ async function getDirectorFunnelSummary(
           COALESCE(lc.leads, 0) +
           COALESCE(lc.qualified_leads, 0) +
           COALESCE(lc.opportunities, 0) +
-          COALESCE(dc.due_diligence, 0) +
           COALESCE(dc.estimating, 0)
         ) DESC,
         u.display_name ASC
@@ -608,11 +596,10 @@ async function getDirectorFunnelSummary(
     leads: Number(row.leads ?? 0),
     qualifiedLeads: Number(row.qualified_leads ?? 0),
     opportunities: Number(row.opportunities ?? 0),
-    dueDiligence: Number(row.due_diligence ?? 0),
     estimating: Number(row.estimating ?? 0),
   })).sort((a: DirectorRepFunnelRow, b: DirectorRepFunnelRow) => {
-    const totalA = a.leads + a.qualifiedLeads + a.opportunities + a.dueDiligence + a.estimating;
-    const totalB = b.leads + b.qualifiedLeads + b.opportunities + b.dueDiligence + b.estimating;
+    const totalA = a.leads + a.qualifiedLeads + a.opportunities + a.estimating;
+    const totalB = b.leads + b.qualifiedLeads + b.opportunities + b.estimating;
     if (totalB !== totalA) return totalB - totalA;
     return a.repName.localeCompare(b.repName);
   });
@@ -1404,7 +1391,6 @@ export interface DirectorCommissionWorkspaceRow {
   leads: number;
   qualifiedLeads: number;
   opportunities: number;
-  dueDiligence: number;
   estimating: number;
   calls: number;
   emails: number;
@@ -1479,7 +1465,6 @@ export async function getDirectorCommissionWorkspace(
       leads: funnel?.leads ?? 0,
       qualifiedLeads: funnel?.qualifiedLeads ?? 0,
       opportunities: funnel?.opportunities ?? 0,
-      dueDiligence: funnel?.dueDiligence ?? 0,
       estimating: funnel?.estimating ?? 0,
       calls: activity?.calls ?? 0,
       emails: activity?.emails ?? 0,

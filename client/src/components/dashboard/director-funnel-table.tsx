@@ -19,9 +19,6 @@ export function DirectorFunnelTable({ rows }: { rows: DirectorRepFunnelRow[] }) 
               Opportunities
             </th>
             <th className="px-4 py-3 text-right text-[10px] font-bold uppercase tracking-widest text-gray-500">
-              Due Diligence
-            </th>
-            <th className="px-5 py-3 text-right text-[10px] font-bold uppercase tracking-widest text-gray-500">
               Bid Board Pipeline
             </th>
           </tr>
@@ -33,7 +30,6 @@ export function DirectorFunnelTable({ rows }: { rows: DirectorRepFunnelRow[] }) 
               <td className="px-4 py-3 text-right">{row.leads}</td>
               <td className="px-4 py-3 text-right">{row.qualifiedLeads}</td>
               <td className="px-4 py-3 text-right">{row.opportunities}</td>
-              <td className="px-4 py-3 text-right">{row.dueDiligence}</td>
               <td className="px-5 py-3 text-right">{row.estimating}</td>
             </tr>
           ))}

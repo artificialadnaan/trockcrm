@@ -101,7 +101,6 @@ describe("RepDashboardPage", () => {
           { key: "lead", label: "Leads", count: 4, totalValue: null, route: "/leads", bucket: "lead" },
           { key: "qualified_lead", label: "Qualified Leads", count: 2, totalValue: null, route: "/leads", bucket: "qualified_lead" },
           { key: "opportunity", label: "Opportunities", count: 3, totalValue: null, route: "/leads", bucket: "opportunity" },
-          { key: "due_diligence", label: "Due Diligence", count: 5, totalValue: 120000, route: "/deals", bucket: "due_diligence" },
           { key: "estimating", label: "Bid Board Pipeline", count: 6, totalValue: 300000, route: "/deals", bucket: "estimating" },
         ],
         commissionSummary: {

@@ -715,7 +715,6 @@ router.get(
               leads: row.leads,
               qualifiedLeads: row.qualifiedLeads,
               opportunities: row.opportunities,
-              dueDiligence: row.dueDiligence,
               estimating: row.estimating,
               calls: row.calls,
               emails: row.emails,
@@ -749,7 +748,6 @@ router.get(
         leads: number;
         qualifiedLeads: number;
         opportunities: number;
-        dueDiligence: number;
         estimating: number;
         calls: number;
         emails: number;

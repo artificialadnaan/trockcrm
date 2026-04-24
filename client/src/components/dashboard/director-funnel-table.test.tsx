@@ -12,7 +12,7 @@ describe("DirectorFunnelTable", () => {
       renderToStaticMarkup(
         <DirectorFunnelTable
           rows={[
-            { repId: "rep-1", repName: "Alex Rep", leads: 3, qualifiedLeads: 1, opportunities: 1, dueDiligence: 2, estimating: 2 },
+            { repId: "rep-1", repName: "Alex Rep", leads: 3, qualifiedLeads: 1, opportunities: 1, estimating: 2 },
           ]}
         />
       )
@@ -20,7 +20,6 @@ describe("DirectorFunnelTable", () => {
 
     expect(html).toContain("Representative");
     expect(html).toContain("Qualified Leads");
-    expect(html).toContain("Due Diligence");
     expect(html).toContain("Bid Board Pipeline");
     expect(html).toContain("Alex Rep");
   });

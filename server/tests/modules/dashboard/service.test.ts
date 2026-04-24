@@ -241,7 +241,6 @@ describe("Dashboard Service", () => {
           { slug: "sales_validation_stage", count: "3" },
         ],
         [
-          { slug: "dd", count: "3", total_value: "120000" },
           { slug: "estimate_in_progress", count: "2", total_value: "70000" },
           { slug: "estimate_sent_to_client", count: "1", total_value: "50000" },
         ],
@@ -253,7 +252,6 @@ describe("Dashboard Service", () => {
         { key: "lead", label: "Leads", count: 4, totalValue: null, route: "/leads", bucket: "lead" },
         { key: "qualified_lead", label: "Qualified Leads", count: 2, totalValue: null, route: "/leads", bucket: "qualified_lead" },
         { key: "opportunity", label: "Opportunities", count: 3, totalValue: null, route: "/leads", bucket: "opportunity" },
-        { key: "due_diligence", label: "Due Diligence", count: 3, totalValue: 120000, route: "/deals", bucket: "due_diligence" },
         { key: "estimating", label: "Bid Board Pipeline", count: 3, totalValue: 120000, route: "/deals", bucket: "estimating" },
       ]);
     });
@@ -319,7 +317,6 @@ describe("Dashboard Service", () => {
           ) {
             return Promise.resolve({
               rows: [
-                { slug: "dd", count: "2", total_value: "60000" },
                 { slug: "estimate_in_progress", count: "1", total_value: "40000" },
                 { slug: "estimate_sent_to_client", count: "2", total_value: "90000" },
               ],
@@ -329,8 +326,8 @@ describe("Dashboard Service", () => {
           if (text.includes("with lead_counts as") && text.includes("qualified_leads")) {
             return Promise.resolve({
               rows: [
-                { rep_id: "rep-2", rep_name: "Alex Rep", leads: "2", qualified_leads: "1", opportunities: "1", due_diligence: "1", estimating: "1" },
-                { rep_id: "rep-1", rep_name: "Blair Rep", leads: "3", qualified_leads: "2", opportunities: "0", due_diligence: "2", estimating: "1" },
+                { rep_id: "rep-2", rep_name: "Alex Rep", leads: "2", qualified_leads: "1", opportunities: "1", estimating: "1" },
+                { rep_id: "rep-1", rep_name: "Blair Rep", leads: "3", qualified_leads: "2", opportunities: "0", estimating: "1" },
               ],
             });
           }
@@ -345,7 +342,6 @@ describe("Dashboard Service", () => {
         { key: "lead", label: "Leads", count: 5, totalValue: null, route: "/leads", bucket: "lead" },
         { key: "qualified_lead", label: "Qualified Leads", count: 3, totalValue: null, route: "/leads", bucket: "qualified_lead" },
         { key: "opportunity", label: "Opportunities", count: 2, totalValue: null, route: "/leads", bucket: "opportunity" },
-        { key: "due_diligence", label: "Due Diligence", count: 2, totalValue: 60000, route: "/deals", bucket: "due_diligence" },
         { key: "estimating", label: "Bid Board Pipeline", count: 3, totalValue: 130000, route: "/deals", bucket: "estimating" },
       ]);
       expect(result.repFunnelRows.map((row) => row.repName)).toEqual(["Blair Rep", "Alex Rep"]);
