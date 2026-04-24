@@ -278,10 +278,6 @@ router.post("/:id/convert", async (req, res, next) => {
       officeId: _ignoredOfficeId,
       ...rest
     } = body;
-    if (!dealStageId) {
-      throw new AppError(400, "dealStageId is required");
-    }
-
     if (req.user!.role === "rep" && body.assignedRepId !== undefined) {
       delete rest.assignedRepId;
     }

@@ -5,13 +5,13 @@ import type * as schema from "@trock-crm/shared/schema";
 import { toCanonicalLeadStageSlug, type WorkflowRoute } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 import { createDeal } from "../deals/service.js";
-import { getStageById } from "../pipeline/service.js";
+import { getStageById, getStageBySlug } from "../pipeline/service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
 export interface ConvertLeadInput {
   leadId: string;
-  dealStageId: string;
+  dealStageId?: string;
   userId: string;
   userRole: string;
   workflowRoute?: WorkflowRoute;
@@ -32,14 +32,20 @@ export interface ConvertLeadInput {
 interface LeadConversionDependencies {
   createDeal: typeof createDeal;
   getStageById: typeof getStageById;
+  getStageBySlug: typeof getStageBySlug;
   now: () => Date;
 }
 
 const defaultDependencies: LeadConversionDependencies = {
   createDeal,
   getStageById,
+  getStageBySlug,
   now: () => new Date(),
 };
+
+function workflowFamilyForRoute(workflowRoute: WorkflowRoute) {
+  return workflowRoute === "service" ? "service_deal" : "standard_deal";
+}
 
 function resolveWorkflowRoute(lead: typeof leads.$inferSelect): WorkflowRoute {
   const preQualValue =
@@ -136,9 +142,19 @@ export function createLeadConversionService(
       );
     }
 
+    const resolvedDealStageId =
+      input.dealStageId ??
+      (
+        await deps.getStageBySlug("opportunity", workflowFamilyForRoute(workflowRoute))
+      )?.id;
+
+    if (!resolvedDealStageId) {
+      throw new AppError(500, "Canonical opportunity stage config is incomplete");
+    }
+
     const deal = await deps.createDeal(tenantDb, {
       name: input.name ?? lead.name,
-      stageId: input.dealStageId,
+      stageId: resolvedDealStageId,
       workflowRoute,
       assignedRepId: successorAssignedRepId,
       officeId: input.officeId,

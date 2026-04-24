@@ -880,8 +880,8 @@ const opportunityLeadStage = {
 
 const dealStage = {
   id: "deal-stage-1",
-  name: "Qualified",
-  slug: "qualified",
+  name: "Opportunity",
+  slug: "opportunity",
   displayOrder: 1,
   workflowFamily: "standard_deal" as const,
   isActivePipeline: true,
@@ -910,6 +910,17 @@ beforeEach(() => {
   pipelineMocks.getStageBySlug.mockImplementation(async (slug: string, workflowFamily?: string) => {
     if (workflowFamily === "lead" && slug === "opportunity") {
       return opportunityLeadStage;
+    }
+
+    if (
+      slug === "opportunity" &&
+      (workflowFamily === "standard_deal" || workflowFamily === "service_deal")
+    ) {
+      return {
+        ...dealStage,
+        id: workflowFamily === "service_deal" ? "deal-stage-service-opportunity" : dealStage.id,
+        workflowFamily,
+      };
     }
 
     return null;
@@ -1210,6 +1221,64 @@ describe("Lead Conversion Service", () => {
     expect(result.lead.stageId).toBe("lead-stage-sales-validation");
     expect(result.lead.stageEnteredAt).toEqual(new Date("2026-04-15T15:00:00.000Z"));
     expect(tenantDb.state.deals).toHaveLength(1);
+  });
+
+  it("defaults conversion into the canonical opportunity deal stage when dealStageId is omitted", async () => {
+    const tenantDb = createFakeTenantDb({
+      leads: [
+        {
+          id: "lead-1",
+          companyId: "company-1",
+          propertyId: "property-1",
+          primaryContactId: null,
+          name: "Palm Villas repaint",
+          stageId: "lead-stage-sales-validation",
+          assignedRepId: "rep-1",
+          status: "open",
+          pipelineType: "service",
+          preQualValue: "25000",
+          source: "Referral",
+          description: "Property manager requested pre-bid walk",
+          stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+          convertedAt: null,
+          isActive: true,
+          createdAt: new Date("2026-04-12T15:00:00.000Z"),
+          updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+        },
+      ],
+    });
+    const service = createLeadConversionService({
+      getStageById: pipelineMocks.getStageById as never,
+      getStageBySlug: pipelineMocks.getStageBySlug as never,
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+      createDeal: async (_tenantDb, input) => {
+        const deal = {
+          id: "deal-1",
+          dealNumber: "TR-2026-0001",
+          workflowRoute: input.workflowRoute ?? "normal",
+          primaryContactId: input.primaryContactId ?? null,
+          companyId: input.companyId ?? null,
+          propertyId: input.propertyId ?? null,
+          sourceLeadId: input.sourceLeadId ?? null,
+          source: input.source ?? null,
+          assignedRepId: input.assignedRepId,
+          stageId: input.stageId,
+          name: input.name,
+        };
+        tenantDb.state.deals.push(deal);
+        return deal as never;
+      },
+    });
+
+    const result = await service.convertLead(tenantDb as never, {
+      leadId: "lead-1",
+      userRole: "rep",
+      userId: "rep-1",
+    });
+
+    expect(result.deal.workflowRoute).toBe("service");
+    expect(result.deal.stageId).toBe("deal-stage-service-opportunity");
+    expect(pipelineMocks.getStageBySlug).toHaveBeenCalledWith("opportunity", "service_deal");
   });
 
   it.each([
