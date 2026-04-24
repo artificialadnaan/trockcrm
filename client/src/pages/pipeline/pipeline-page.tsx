@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   DndContext,
   DragOverlay,
@@ -161,11 +161,13 @@ function DroppableColumn({
   index,
   showDd,
   activeDealId,
+  onOpenStage,
 }: {
   column: PipelineColumn;
   index: number;
   showDd: boolean;
   activeDealId: string | null;
+  onOpenStage: (stageId: string) => void;
 }) {
   const { isOver, setNodeRef } = useDroppable({ id: column.stage.id });
   const accent = getAccentColor(index);
@@ -191,9 +193,13 @@ function DroppableColumn({
         style={{ borderBottomColor: accent }}
       >
         <div className="flex items-center justify-between mb-1">
-          <span className="text-xs font-black uppercase tracking-widest text-gray-500">
+          <button
+            type="button"
+            className="text-left text-xs font-black uppercase tracking-widest text-gray-500 hover:text-gray-900"
+            onClick={() => onOpenStage(column.stage.id)}
+          >
             {column.stage.name}
-          </span>
+          </button>
           <span
             className="text-xs font-bold px-1.5 py-0.5 rounded-sm text-white"
             style={{ backgroundColor: accent }}
@@ -237,11 +243,12 @@ function DroppableColumn({
 
 export function PipelinePage() {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [columns, setColumns] = useState<PipelineColumn[]>([]);
   const [terminalStages, setTerminalStages] = useState<TerminalStageInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [showDd, setShowDd] = useState(false);
+  const [showDd, setShowDd] = useState(searchParams.get("showDd") === "1");
   const [activeDeal, setActiveDeal] = useState<Deal | null>(null);
   const [stageChangeOpen, setStageChangeOpen] = useState(false);
   const [pendingMove, setPendingMove] = useState<{ deal: Deal; targetStageId: string } | null>(null);
@@ -273,6 +280,10 @@ export function PipelinePage() {
   useEffect(() => {
     fetchPipeline();
   }, [fetchPipeline]);
+
+  useEffect(() => {
+    setShowDd(searchParams.get("showDd") === "1");
+  }, [searchParams]);
 
   const handleDragStart = (event: DragStartEvent) => {
     const deal = event.active.data.current?.deal as Deal;
@@ -382,7 +393,12 @@ export function PipelinePage() {
           <div className="flex items-center gap-2">
             <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Show DD</span>
             <button
-              onClick={() => setShowDd(!showDd)}
+              onClick={() => {
+                const next = new URLSearchParams(searchParams);
+                if (showDd) next.delete("showDd");
+                else next.set("showDd", "1");
+                setSearchParams(next);
+              }}
               className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors focus:outline-none ${
                 showDd ? "bg-brand-red" : "bg-gray-200"
               }`}
@@ -424,6 +440,7 @@ export function PipelinePage() {
                 index={index}
                 showDd={showDd}
                 activeDealId={activeDeal?.id ?? null}
+                onOpenStage={(stageId) => navigate(`/deals/stages/${stageId}`)}
               />
             ))}
           </div>

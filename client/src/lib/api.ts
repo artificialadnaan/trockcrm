@@ -83,10 +83,29 @@ export async function api<T = any>(path: string, options: ApiOptions = {}): Prom
     credentials: "include",
   });
 
+  async function parseJsonResponse() {
+    if (res.status === 204) {
+      return undefined as T;
+    }
+
+    const contentType = res.headers.get("content-type")?.toLowerCase() ?? "";
+    if (!contentType.includes("application/json")) {
+      const body = await res.text().catch(() => "");
+      const preview = body.slice(0, 120).replace(/\s+/g, " ").trim();
+      throw new Error(
+        `Expected JSON from ${path} but received ${contentType || "unknown content type"}${
+          preview ? ` (${preview})` : ""
+        }`
+      );
+    }
+
+    return res.json();
+  }
+
   if (!res.ok) {
-    const error = await res.json().catch(() => ({ error: { message: "Request failed" } }));
+    const error = await parseJsonResponse().catch(() => ({ error: { message: "Request failed" } }));
     throw new ApiError(res.status, error.error);
   }
 
-  return res.json();
+  return parseJsonResponse();
 }

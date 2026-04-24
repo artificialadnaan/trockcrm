@@ -9,6 +9,8 @@ export interface StagePageFilters {
   regionId?: string;
   updatedAfter?: string;
   updatedBefore?: string;
+  minAgeDays?: string;
+  maxAgeDays?: string;
 }
 
 export interface StagePageQuery {
@@ -46,6 +48,8 @@ export function normalizeStagePageQuery(input: Record<string, string | undefined
       regionId: input.regionId,
       updatedAfter: input.updatedAfter,
       updatedBefore: input.updatedBefore,
+      minAgeDays: input.minAgeDays,
+      maxAgeDays: input.maxAgeDays,
     },
   };
 }

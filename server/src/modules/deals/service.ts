@@ -132,6 +132,50 @@ function estimatingBoundaryStageSlugForRoute(workflowRoute: WorkflowRoute) {
   return workflowRoute === "service" ? "service_estimating" : "estimate_in_progress";
 }
 
+type WorkspaceScope = "mine" | "team" | "all";
+
+export interface DealBoardInput {
+  role: string;
+  userId: string;
+  activeOfficeId: string;
+  scope: WorkspaceScope;
+  includeDd?: boolean;
+}
+
+export interface DealStagePageInput extends DealBoardInput {
+  stageId: string;
+  page: number;
+  pageSize: number;
+  search?: string;
+  assignedRepId?: string;
+  regionId?: string;
+  workflowRoute?: string;
+  updatedFrom?: string;
+  updatedTo?: string;
+  minAgeDays?: number;
+  maxAgeDays?: number;
+}
+
+type DealStageWorkspaceRow = {
+  id: string;
+  deal_number: string;
+  name: string;
+  stage_id: string;
+  workflow_route: WorkflowRoute;
+  assigned_rep_id: string;
+  assigned_rep_name: string;
+  region_id: string | null;
+  source: string | null;
+  property_city: string | null;
+  property_state: string | null;
+  updated_at: string;
+  stage_entered_at: string;
+  awarded_amount: string | null;
+  bid_estimate: string | null;
+  dd_estimate: string | null;
+  days_in_stage: number;
+};
+
 export interface DealBidBoardOwnershipState {
   isOwned: boolean;
   sourceOfTruth: "crm" | "bid_board";
@@ -195,6 +239,49 @@ async function validateAssignee(tenantDb: TenantDb, assigneeId: string, officeId
 
 export function workflowFamilyForRoute(workflowRoute: WorkflowRoute) {
   return workflowRoute === "service" ? "service_deal" : "standard_deal";
+}
+
+async function listDealStages() {
+  return db
+    .select()
+    .from(pipelineStageConfig)
+    .where(inArray(pipelineStageConfig.workflowFamily, ["standard_deal", "service_deal"]))
+    .orderBy(asc(pipelineStageConfig.displayOrder));
+}
+
+function buildDealWorkspaceScope(input: DealBoardInput | DealStagePageInput) {
+  const filters = [
+    sql`d.is_active = true`,
+    sql`u.office_id = ${input.activeOfficeId}`,
+  ];
+
+  if (input.scope === "mine") {
+    filters.push(sql`d.assigned_rep_id = ${input.userId}`);
+  }
+
+  return sql.join(filters, sql` and `);
+}
+
+function mapDealStageWorkspaceRow(row: DealStageWorkspaceRow) {
+  return {
+    id: row.id,
+    dealNumber: row.deal_number,
+    name: row.name,
+    stageId: row.stage_id,
+    workflowRoute: row.workflow_route,
+    assignedRepId: row.assigned_rep_id,
+    assignedRepName: row.assigned_rep_name,
+    regionId: row.region_id,
+    source: row.source,
+    propertyCity: row.property_city,
+    propertyState: row.property_state,
+    updatedAt: row.updated_at,
+    stageEnteredAt: row.stage_entered_at,
+    daysInStage: Number(row.days_in_stage ?? 0),
+    awardedAmount: row.awarded_amount,
+    bidEstimate: row.bid_estimate,
+    ddEstimate: row.dd_estimate,
+  };
 }
 
 export function buildBidBoardOwnershipState(
@@ -938,6 +1025,110 @@ export async function getDealsForPipeline(
     }));
 
   return { pipelineColumns, terminalStages };
+}
+
+export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePageInput) {
+  const [stage] = await listDealStages().then((stages) => stages.filter((item) => item.id === input.stageId));
+  if (!stage) throw new AppError(404, "Deal stage not found");
+
+  const page = Math.max(1, input.page || 1);
+  const pageSize = Math.max(1, Math.min(100, input.pageSize || 25));
+  const offset = (page - 1) * pageSize;
+  const scope = buildDealWorkspaceScope(input);
+
+  const conditions = [
+    scope,
+    sql`d.stage_id = ${input.stageId}`,
+  ];
+
+  if (input.search?.trim()) {
+    const searchTerm = `%${input.search.trim()}%`;
+    conditions.push(sql`(d.name ilike ${searchTerm} or d.deal_number ilike ${searchTerm})`);
+  }
+  if (input.assignedRepId) {
+    conditions.push(sql`d.assigned_rep_id = ${input.assignedRepId}`);
+  }
+  if (input.regionId) {
+    conditions.push(sql`d.region_id = ${input.regionId}`);
+  }
+  if (input.workflowRoute === "normal" || input.workflowRoute === "service") {
+    conditions.push(sql`d.workflow_route = ${input.workflowRoute}`);
+  }
+  if (input.updatedFrom) {
+    conditions.push(sql`d.updated_at::date >= ${input.updatedFrom}::date`);
+  }
+  if (input.updatedTo) {
+    conditions.push(sql`d.updated_at::date <= ${input.updatedTo}::date`);
+  }
+  if (typeof input.minAgeDays === "number" && Number.isFinite(input.minAgeDays)) {
+    conditions.push(sql`extract(day from now() - d.stage_entered_at) >= ${input.minAgeDays}`);
+  }
+  if (typeof input.maxAgeDays === "number" && Number.isFinite(input.maxAgeDays)) {
+    conditions.push(sql`extract(day from now() - d.stage_entered_at) <= ${input.maxAgeDays}`);
+  }
+
+  const where = sql.join(conditions, sql` and `);
+
+  const countResult = await tenantDb.execute(sql`
+    select
+      count(*)::int as total,
+      coalesce(sum(coalesce(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)), 0)::numeric as total_value,
+      round(avg(extract(day from now() - d.stage_entered_at)))::int as average_days_in_stage
+    from deals d
+    join users u on u.id = d.assigned_rep_id
+    where ${where}
+  `);
+
+  const rowResult = await tenantDb.execute(sql`
+    select
+      d.id,
+      d.deal_number,
+      d.name,
+      d.stage_id,
+      d.workflow_route,
+      d.assigned_rep_id,
+      u.display_name as assigned_rep_name,
+      d.region_id,
+      d.source,
+      d.property_city,
+      d.property_state,
+      d.updated_at,
+      d.stage_entered_at,
+      d.awarded_amount,
+      d.bid_estimate,
+      d.dd_estimate,
+      extract(day from now() - d.stage_entered_at)::int as days_in_stage
+    from deals d
+    join users u on u.id = d.assigned_rep_id
+    where ${where}
+    order by d.stage_entered_at asc, d.updated_at desc
+    limit ${pageSize}
+    offset ${offset}
+  `);
+
+  const summaryRow =
+    (countResult.rows[0] as
+      | { total?: string | number; total_value?: string | number; average_days_in_stage?: string | number | null }
+      | undefined) ?? {};
+  const total = Number(summaryRow.total ?? 0);
+
+  return {
+    stage,
+    scope: input.scope,
+    summary: {
+      count: total,
+      totalValue: Number(summaryRow.total_value ?? 0),
+      averageDaysInStage:
+        summaryRow.average_days_in_stage == null ? null : Number(summaryRow.average_days_in_stage),
+    },
+    pagination: {
+      page,
+      pageSize,
+      total,
+      totalPages: Math.max(1, Math.ceil(total / pageSize)),
+    },
+    rows: (rowResult.rows as DealStageWorkspaceRow[]).map(mapDealStageWorkspaceRow),
+  };
 }
 
 /**

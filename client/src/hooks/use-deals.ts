@@ -257,14 +257,19 @@ export interface DealBoardResponse {
 export interface DealStagePageResponse {
   stage: DealBoardColumn["stage"];
   scope: "mine" | "team" | "all";
-  summary: { count: number; totalValue: number };
+  summary: { count: number; totalValue: number; averageDaysInStage: number | null };
   pagination: {
     page: number;
     pageSize: number;
     total: number;
     totalPages: number;
   };
-  rows: Deal[];
+  rows: Array<
+    Deal & {
+      assignedRepName?: string;
+      daysInStage?: number;
+    }
+  >;
 }
 
 interface DealBoardApiColumn extends Omit<DealBoardColumn, "cards"> {
@@ -554,6 +559,8 @@ export function useDealStagePage(input: StagePageQuery & { stageId: string; scop
       ...(input.filters.regionId ? { regionId: input.filters.regionId } : {}),
       ...(input.filters.updatedAfter ? { updatedAfter: input.filters.updatedAfter } : {}),
       ...(input.filters.updatedBefore ? { updatedBefore: input.filters.updatedBefore } : {}),
+      ...(input.filters.minAgeDays ? { minAgeDays: input.filters.minAgeDays } : {}),
+      ...(input.filters.maxAgeDays ? { maxAgeDays: input.filters.maxAgeDays } : {}),
     });
 
     setLoading(true);
@@ -582,6 +589,8 @@ export function useDealStagePage(input: StagePageQuery & { stageId: string; scop
     input.filters.regionId,
     input.filters.updatedAfter,
     input.filters.updatedBefore,
+    input.filters.minAgeDays,
+    input.filters.maxAgeDays,
     input.filters.workflowRoute,
     input.page,
     input.pageSize,

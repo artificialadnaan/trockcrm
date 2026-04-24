@@ -17,6 +17,7 @@ import {
   updateDeal,
   deleteDeal,
   getDealsForPipeline,
+  listDealStagePage,
   getDealSources,
 } from "./service.js";
 import { activateServiceHandoff, changeDealStage } from "./stage-change.js";
@@ -76,6 +77,38 @@ function isEstimatingBoundaryStageSlug(stageSlug: string, workflowRoute: "normal
     stageSlug === "estimating" ||
     stageSlug === (workflowRoute === "service" ? "service_estimating" : "estimate_in_progress")
   );
+}
+
+function readBoardInput(req: Parameters<typeof router.get>[1] extends never ? never : any) {
+  return {
+    role: req.user!.role,
+    userId: req.user!.id,
+    activeOfficeId: req.user!.activeOfficeId ?? req.user!.officeId,
+    scope: (req.query.scope as "mine" | "team" | "all" | undefined) ?? "mine",
+    includeDd: req.query.includeDd === "true",
+  };
+}
+
+function readStageInput(req: Parameters<typeof router.get>[1] extends never ? never : any) {
+  const parseNumber = (value: unknown) => {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  };
+
+  return {
+    ...readBoardInput(req),
+    stageId: req.params.stageId,
+    page: parseNumber(req.query.page) ?? 1,
+    pageSize: parseNumber(req.query.pageSize) ?? 25,
+    search: req.query.search as string | undefined,
+    assignedRepId: req.query.assignedRepId as string | undefined,
+    regionId: req.query.regionId as string | undefined,
+    workflowRoute: req.query.workflowRoute as string | undefined,
+    updatedFrom: (req.query.updatedAfter as string | undefined) ?? (req.query.updatedFrom as string | undefined),
+    updatedTo: (req.query.updatedBefore as string | undefined) ?? (req.query.updatedTo as string | undefined),
+    minAgeDays: parseNumber(req.query.minAgeDays),
+    maxAgeDays: parseNumber(req.query.maxAgeDays),
+  };
 }
 
 async function queueDomainEvent(
@@ -193,6 +226,16 @@ router.get("/pipeline", async (req, res, next) => {
       req.user!.id,
       filters
     );
+    await req.commitTransaction!();
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/stages/:stageId", async (req, res, next) => {
+  try {
+    const result = await listDealStagePage(req.tenantDb!, readStageInput(req));
     await req.commitTransaction!();
     res.json(result);
   } catch (err) {

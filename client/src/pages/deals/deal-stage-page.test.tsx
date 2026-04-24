@@ -94,14 +94,16 @@ describe("DealStagePage", () => {
       error: null,
       data: {
         stage: { id: "stage-estimating", name: "Estimating", slug: "estimating" },
-        summary: { count: 1, totalValue: 15000 },
+        summary: { count: 1, totalValue: 15000, averageDaysInStage: 4 },
         pagination: { page: 1, pageSize: 25, total: 1, totalPages: 1 },
         rows: [
           {
             id: "deal-1",
             name: "North Campus",
             dealNumber: "TR-2026-0001",
-            workflowRoute: "estimating",
+            workflowRoute: "normal",
+            assignedRepName: "Alex Rep",
+            daysInStage: 4,
             updatedAt: "2026-04-21T10:00:00.000Z",
           },
         ],

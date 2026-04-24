@@ -242,7 +242,7 @@ export function DirectorDashboardPage() {
         {/* Opportunity Pipeline */}
         <div
           className="group relative bg-white rounded-xl border border-gray-200 border-b-4 border-b-blue-200 hover:border-b-blue-600 shadow-sm p-5 cursor-pointer transition-all overflow-hidden"
-          onClick={() => navigate("/deals?stage=opportunity")}
+          onClick={() => navigate("/pipeline?showDd=1")}
         >
           <div className="absolute top-3 right-3 opacity-0 group-hover:opacity-10 transition-opacity">
             <TrendingUp className="h-16 w-16 text-gray-800" />

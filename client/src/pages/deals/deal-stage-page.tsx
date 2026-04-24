@@ -54,11 +54,14 @@ export function DealStagePage() {
         <>
           <SummaryMetric label="Records in stage" value={String(summary.totalCount)} />
           <SummaryMetric label="Stage value" value={formatCompactValue(summary.totalValue)} />
-          <SummaryMetric label="Avg. visible age" value={`${summary.averageAgeDays} days`} />
+          <SummaryMetric
+            label="Avg. visible age"
+            value={`${data.summary.averageDaysInStage ?? summary.averageAgeDays} days`}
+          />
         </>
       }
     >
-      <div className="grid gap-3 rounded-[1.5rem] border border-slate-200 bg-white/90 p-4 md:grid-cols-2 xl:grid-cols-5">
+      <div className="grid gap-3 rounded-[1.5rem] border border-slate-200 bg-white/90 p-4 md:grid-cols-2 xl:grid-cols-7">
         <div className="space-y-2">
           <label className="text-[11px] font-black tracking-[0.16em] text-slate-500 uppercase">Search</label>
           <Input
@@ -123,6 +126,26 @@ export function DealStagePage() {
             onChange={(event) => updateFilter("updatedBefore", event.target.value)}
           />
         </div>
+        <div className="space-y-2">
+          <label className="text-[11px] font-black tracking-[0.16em] text-slate-500 uppercase">Min age</label>
+          <Input
+            type="number"
+            min="0"
+            value={searchParams.get("minAgeDays") ?? ""}
+            onChange={(event) => updateFilter("minAgeDays", event.target.value)}
+            placeholder="Days"
+          />
+        </div>
+        <div className="space-y-2">
+          <label className="text-[11px] font-black tracking-[0.16em] text-slate-500 uppercase">Max age</label>
+          <Input
+            type="number"
+            min="0"
+            value={searchParams.get("maxAgeDays") ?? ""}
+            onChange={(event) => updateFilter("maxAgeDays", event.target.value)}
+            placeholder="Days"
+          />
+        </div>
       </div>
 
       <PipelineStageTable
@@ -150,6 +173,11 @@ export function DealStagePage() {
             ),
           },
           {
+            key: "assignedRepName",
+            header: "Sales rep",
+            render: (row) => row.assignedRepName || "--",
+          },
+          {
             key: "workflowRoute",
             header: "Workflow",
             render: (row) => (
@@ -157,6 +185,11 @@ export function DealStagePage() {
                 {row.workflowRoute ? getWorkflowRouteLabel(row.workflowRoute) : "--"}
               </span>
             ),
+          },
+          {
+            key: "daysInStage",
+            header: "Age",
+            render: (row) => `${row.daysInStage ?? "--"}${row.daysInStage == null ? "" : "d"}`,
           },
           {
             key: "updatedAt",
