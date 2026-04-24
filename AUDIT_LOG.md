@@ -1,5 +1,5 @@
 ## Running Summary
-- Iteration count: 13
+- Iteration count: 15
 - Total tests generated: 24
 - Pass/fail count per iteration:
   - Iteration 1: passed after deploy verification
@@ -10,6 +10,8 @@
   - Iteration 11: companies / properties audit suite green locally against production; frontend deploy pending
   - Iteration 12: notification stream CORP fix verified locally; API + frontend deploy pending
   - Iteration 13: notification unread-count CORP fix verified locally; API deploy pending
+  - Iteration 14: email / tasks / files / projects suite green locally except for a real invalid-project-id server bug; API + frontend deploy pending
+  - Iteration 15: stale lead creation stage ids normalized locally; API + frontend deploy pending
 - Issues fixed vs deferred:
   - Fixed: 12
   - Deferred: 0
@@ -224,4 +226,30 @@ Fix: added abort-aware notification hook handling and regression tests on the cl
 Deployed: pending
 Deploy status: pending
 Verification: local `npx vitest run --config vitest.config.ts client/src/hooks/use-notifications.test.ts`, `npx vitest run --config vitest.config.ts server/tests/modules/notifications/routes.test.ts`, `npm run typecheck --workspace=client`, `npm run typecheck --workspace=server`, and post-deploy Playwright reruns pending
+Status: in progress
+
+Issue #14 — Project detail invalid-id route throws a backend 500 instead of a not-found state
+Route/Component: `/projects/:id`, `/api/procore/my-projects/:id`, `server/src/modules/procore/routes.ts`
+Severity: medium
+Environment: production (Railway)
+Discovered: iteration 14, `tests/audit/email-tasks-files-projects.spec.ts`
+Symptom: visiting `/projects/non-existent-audit-project` renders `Internal server error`, and the API returns `500`.
+Root cause: the project route queried a UUID-backed `deals.id` column with an unchecked string route param, so PostgreSQL threw `invalid input syntax for type uuid`.
+Fix: reject non-UUID route params up front with `AppError(404, "Project not found")` and add a regression test proving the database query is skipped for invalid ids.
+Deployed: pending
+Deploy status: pending
+Verification: local `npx vitest run --config vitest.config.ts server/tests/modules/procore/routes.test.ts` and production rerun pending
+Status: in progress
+
+Issue #15 — New lead creation trusts stale stage ids from the URL and submits invalid pipeline stages
+Route/Component: `/leads/new`, `LeadForm`, `lead-new-page.helpers.ts`
+Severity: high
+Environment: production (Railway)
+Discovered: iteration 15, user report + code trace
+Symptom: creating a lead can fail with `Invalid lead stage ID`.
+Root cause: the create form only auto-selected a default stage when `stageId` was blank; stale or legacy `?stageId=` query params bypassed that guard and were submitted directly to the API.
+Fix: centralize canonical lead-creation stage selection in shared helpers and normalize any invalid selected stage id to the first valid canonical lead stage before submit.
+Deployed: pending
+Deploy status: pending
+Verification: local `npx vitest run --config vitest.config.ts client/src/pages/leads/lead-new-page.helpers.test.ts` and production lead-create rerun pending
 Status: in progress

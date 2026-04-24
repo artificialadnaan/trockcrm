@@ -25,7 +25,10 @@ import { usePipelineStages, useProjectTypes } from "@/hooks/use-pipeline-config"
 import { formatPropertyLabel, useProperties } from "@/hooks/use-properties";
 import { isApiError } from "@/lib/api";
 import { getValidationQuestionSetForProjectType } from "@/lib/validation-question-sets";
-import { CRM_OWNED_LEAD_STAGE_SLUGS } from "@/lib/sales-workflow";
+import {
+  getLeadCreationStages,
+  getNormalizedLeadCreationStageId,
+} from "@/pages/leads/lead-new-page.helpers";
 
 type LeadAnswerValue = string | boolean | number | null;
 
@@ -290,12 +293,7 @@ function EditableLeadForm({
   const [companyId, setCompanyId] = useState<string | null>(lead?.companyId ?? initialValues?.companyId ?? null);
   const { properties } = useProperties(companyId ? { companyId, limit: 500 } : { limit: 0 });
   const { contacts } = useCompanyContacts(companyId ?? undefined);
-  const leadStages = stages.filter(
-    (stage) =>
-      CRM_OWNED_LEAD_STAGE_SLUGS.includes(
-        stage.slug as (typeof CRM_OWNED_LEAD_STAGE_SLUGS)[number]
-      ) && !stage.isTerminal
-  );
+  const leadStages = getLeadCreationStages(stages);
 
   const [formData, setFormData] = useState(() => getEditableFormState(lead, initialValues));
   const [submitting, setSubmitting] = useState(false);
@@ -308,9 +306,16 @@ function EditableLeadForm({
   }, [initialValues, lead]);
 
   useEffect(() => {
-    if (isCreate && !formData.stageId && leadStages.length > 0) {
-      setFormData((current) => ({ ...current, stageId: leadStages[0].id }));
+    if (!isCreate) {
+      return;
     }
+
+    const normalizedStageId = getNormalizedLeadCreationStageId(leadStages, formData.stageId);
+    if (!normalizedStageId || normalizedStageId === formData.stageId) {
+      return;
+    }
+
+    setFormData((current) => ({ ...current, stageId: normalizedStageId }));
   }, [formData.stageId, isCreate, leadStages]);
 
   useEffect(() => {

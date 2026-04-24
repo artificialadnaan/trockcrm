@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { PipelineStage } from "@/hooks/use-pipeline-config";
-import { getLeadCreationStages, getSelectedOptionLabel } from "./lead-new-page.helpers";
+import {
+  getLeadCreationStages,
+  getNormalizedLeadCreationStageId,
+  getSelectedOptionLabel,
+} from "./lead-new-page.helpers";
 
 const baseStage: Omit<PipelineStage, "id" | "name" | "slug" | "displayOrder" | "workflowFamily"> = {
   isActivePipeline: true,
@@ -95,5 +99,52 @@ describe("lead new page helpers", () => {
     ).toBe("Qualified");
 
     expect(getSelectedOptionLabel([], "missing", "Select lead stage")).toBe("Select lead stage");
+  });
+
+  it("keeps a selected stage when it is still valid for lead creation", () => {
+    const stages: PipelineStage[] = [
+      {
+        id: "new-lead",
+        name: "New Lead",
+        slug: "new_lead",
+        displayOrder: 1,
+        workflowFamily: "lead",
+        ...baseStage,
+      },
+      {
+        id: "qualified-lead",
+        name: "Qualified Lead",
+        slug: "qualified_lead",
+        displayOrder: 2,
+        workflowFamily: "lead",
+        ...baseStage,
+      },
+    ];
+
+    expect(getNormalizedLeadCreationStageId(stages, "qualified-lead")).toBe("qualified-lead");
+  });
+
+  it("falls back to the first canonical stage when the selected stage id is stale", () => {
+    const stages: PipelineStage[] = [
+      {
+        id: "new-lead",
+        name: "New Lead",
+        slug: "new_lead",
+        displayOrder: 1,
+        workflowFamily: "lead",
+        ...baseStage,
+      },
+      {
+        id: "qualified-lead",
+        name: "Qualified Lead",
+        slug: "qualified_lead",
+        displayOrder: 2,
+        workflowFamily: "lead",
+        ...baseStage,
+      },
+    ];
+
+    expect(getNormalizedLeadCreationStageId(stages, "legacy-contacted")).toBe("new-lead");
+    expect(getNormalizedLeadCreationStageId(stages, "")).toBe("new-lead");
   });
 });

@@ -32,6 +32,19 @@ export function getLeadCreationStages(stages: PipelineStage[]) {
     });
 }
 
+export function getNormalizedLeadCreationStageId(stages: PipelineStage[], selectedId: string) {
+  const creationStages = getLeadCreationStages(stages);
+  if (creationStages.length === 0) {
+    return "";
+  }
+
+  if (selectedId && creationStages.some((stage) => stage.id === selectedId)) {
+    return selectedId;
+  }
+
+  return creationStages[0]!.id;
+}
+
 export function getSelectedOptionLabel<T extends { id: string; name: string }>(
   options: T[],
   selectedId: string,
