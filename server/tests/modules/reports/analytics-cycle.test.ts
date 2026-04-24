@@ -241,10 +241,22 @@ describe("analytics cycle shared filters", () => {
 
     const firstQueryText = extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase();
     const secondQueryText = extractSqlText(tenantDb.execute.mock.calls[1][0]).toLowerCase();
+    const thirdQueryText = extractSqlText(tenantDb.execute.mock.calls[2][0]).toLowerCase();
+    const firstCompanyContextIndex = firstQueryText.indexOf("office_company_context as");
+    const firstOfficeActivityIndex = firstQueryText.indexOf("office_office_activity_scope as");
+    const secondCompanyContextIndex = secondQueryText.indexOf("office_company_context as");
+    const secondOfficeActivityIndex = secondQueryText.indexOf("office_office_activity_scope as");
+
     expect(firstQueryText).toContain("from contacts c");
     expect(firstQueryText).toContain("office_deals as");
     expect(firstQueryText).toContain("office_contact_context");
-    expect(secondQueryText).toContain("office_company_context");
+    expect(thirdQueryText).toContain("office_company_context");
+    expect(firstCompanyContextIndex).toBeGreaterThanOrEqual(0);
+    expect(firstOfficeActivityIndex).toBeGreaterThanOrEqual(0);
+    expect(firstCompanyContextIndex).toBeLessThan(firstOfficeActivityIndex);
+    expect(secondCompanyContextIndex).toBeGreaterThanOrEqual(0);
+    expect(secondOfficeActivityIndex).toBeGreaterThanOrEqual(0);
+    expect(secondCompanyContextIndex).toBeLessThan(secondOfficeActivityIndex);
     expect(firstQueryText).not.toContain("workflow_overview");
     expect(firstQueryText).not.toContain("stale_deals");
 

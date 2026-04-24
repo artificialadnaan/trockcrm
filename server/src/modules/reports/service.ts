@@ -1128,6 +1128,7 @@ export async function getDataMiningOverview(
       WITH
       ${officeDealContext},
       ${officeContactContext},
+      ${officeCompanyContext},
       ${officeContactActivityScope},
       ${officeOfficeActivityScope},
       contact_activity AS (
@@ -1205,6 +1206,7 @@ export async function getDataMiningOverview(
       WITH
       ${officeDealContext},
       ${officeContactContext},
+      ${officeCompanyContext},
       ${officeContactActivityScope},
       ${officeOfficeActivityScope},
       contact_activity AS (
@@ -2073,7 +2075,7 @@ export async function getUnifiedWorkflowOverview(
         COALESCE(SUM(total_value), 0)::numeric AS total_value
       FROM (
         SELECT
-          l.pipeline_type AS workflow_route,
+          l.pipeline_type::text AS workflow_route,
           psc.name AS stage_name,
           psc.display_order,
           COUNT(*)::int AS item_count,
@@ -2089,7 +2091,7 @@ export async function getUnifiedWorkflowOverview(
         UNION ALL
 
         SELECT
-          d.workflow_route,
+          d.workflow_route::text AS workflow_route,
           psc.name AS stage_name,
           psc.display_order,
           COUNT(*)::int AS item_count,

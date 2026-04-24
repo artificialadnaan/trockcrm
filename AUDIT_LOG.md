@@ -144,3 +144,29 @@ Deployed: pending
 Deploy status: pending
 Verification: local `npm run typecheck --workspace=server` and `npm run typecheck --workspace=client`
 Status: in progress
+
+Issue #9 — Reports overview 500s because data-mining CTEs are declared in the wrong order
+Route/Component: `/reports`, `/api/reports/data-mining`, `getDataMiningOverview`
+Severity: high
+Environment: production (Railway)
+Discovered: iteration 7, live director production audit
+Symptom: `/reports` renders `Internal server error`, and the browser logs `500` failures for `/api/reports/data-mining`.
+Root cause: the first two `data-mining` queries reference `office_company_context` from `office_office_activity_scope` before `office_company_context` is declared in the `WITH` chain, which fails on PostgreSQL in production.
+Fix: inserted `officeCompanyContext` before `officeOfficeActivityScope` in both untouched-contact queries and tightened the report test to assert the CTE declaration order.
+Deployed: pending current iteration commit
+Deploy status: pending
+Verification: local `npx vitest run --config vitest.config.ts server/tests/modules/reports/analytics-cycle.test.ts`
+Status: fixed locally, pending deploy
+
+Issue #10 — Workflow overview 500s because a UNION mixes enum types without a cast
+Route/Component: `/reports`, `/api/reports/workflow-overview`, `getUnifiedWorkflowOverview`
+Severity: high
+Environment: production (Railway)
+Discovered: iteration 7, live director production audit
+Symptom: `/reports` renders `Internal server error`, and the browser logs `500` failures for `/api/reports/workflow-overview`.
+Root cause: the CRM-owned progression query unions `leads.pipeline_type` with `deals.workflow_route`; PostgreSQL cannot implicitly union `lead_pipeline_type` and `workflow_route`.
+Fix: cast both union branches to `text` for the shared `workflow_route` projection and added a regression test that pins the cast in the generated SQL.
+Deployed: pending current iteration commit
+Deploy status: pending
+Verification: local `npx vitest run --config vitest.config.ts server/tests/modules/reports/service.test.ts` and `npm run typecheck --workspace=server`
+Status: fixed locally, pending deploy

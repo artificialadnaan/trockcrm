@@ -450,6 +450,8 @@ describe("Reports Service", () => {
 
       expect(progressionQuery).toContain("workflow_bucket");
       expect(progressionQuery).toContain("opportunity");
+      expect(progressionQuery).toContain("l.pipeline_type::text");
+      expect(progressionQuery).toContain("d.workflow_route::text");
       expect(mirrorQuery).toContain("bid_board_stage_slug");
       expect(mirrorQuery).toContain("bid_board_stage_status");
       expect(disqualificationQuery).toContain("disqualification_reason");
