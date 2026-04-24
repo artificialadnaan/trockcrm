@@ -24,9 +24,17 @@ import { useTaskAssignees } from "@/hooks/use-task-assignees";
 interface DealFormProps {
   deal?: Deal; // If provided, we're editing; otherwise creating
   onSuccess?: (deal: Deal) => void;
+  initialValues?: Partial<{
+    name: string;
+    companyId: string;
+    propertyId: string;
+    description: string;
+    projectTypeId: string;
+    source: string;
+  }>;
 }
 
-export function DealForm({ deal, onSuccess }: DealFormProps) {
+export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
   const navigate = useNavigate();
   const { user } = useAuth();
   const { stages } = usePipelineStages();
@@ -43,12 +51,12 @@ export function DealForm({ deal, onSuccess }: DealFormProps) {
   const assigneeOptions = assignees.map((assignee) => ({ id: assignee.id, name: assignee.displayName }));
 
   const [formData, setFormData] = useState({
-    name: deal?.name ?? "",
+    name: deal?.name ?? initialValues?.name ?? "",
     stageId: deal?.stageId ?? "",
     assignedRepId: deal?.assignedRepId ?? (user?.role === "rep" ? user.id : ""),
-    companyId: deal?.companyId ?? "",
-    propertyId: deal?.propertyId ?? "",
-    description: deal?.description ?? "",
+    companyId: deal?.companyId ?? initialValues?.companyId ?? "",
+    propertyId: deal?.propertyId ?? initialValues?.propertyId ?? "",
+    description: deal?.description ?? initialValues?.description ?? "",
     ddEstimate: deal?.ddEstimate ?? "",
     bidEstimate: deal?.bidEstimate ?? "",
     awardedAmount: deal?.awardedAmount ?? "",
@@ -56,9 +64,9 @@ export function DealForm({ deal, onSuccess }: DealFormProps) {
     propertyCity: deal?.propertyCity ?? "",
     propertyState: deal?.propertyState ?? "",
     propertyZip: deal?.propertyZip ?? "",
-    projectTypeId: deal?.projectTypeId ?? "",
+    projectTypeId: deal?.projectTypeId ?? initialValues?.projectTypeId ?? "",
     regionId: deal?.regionId ?? "",
-    source: deal?.source ?? "",
+    source: deal?.source ?? initialValues?.source ?? "",
     winProbability: deal?.winProbability?.toString() ?? "",
     expectedCloseDate: deal?.expectedCloseDate ?? "",
   });

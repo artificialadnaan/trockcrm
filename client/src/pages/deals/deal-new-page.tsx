@@ -1,10 +1,24 @@
 import { ArrowLeft } from "lucide-react";
-import { useNavigate } from "react-router-dom";
+import { useMemo } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { DealForm } from "@/components/deals/deal-form";
 
 export function DealNewPage() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const initialValues = useMemo(
+    () => ({
+      companyId: searchParams.get("companyId") ?? "",
+      propertyId: searchParams.get("propertyId") ?? "",
+      primaryContactId: searchParams.get("primaryContactId") ?? "",
+      name: searchParams.get("name") ?? "",
+      source: searchParams.get("source") ?? "",
+      description: searchParams.get("description") ?? "",
+      projectTypeId: searchParams.get("projectTypeId") ?? "",
+    }),
+    [searchParams]
+  );
 
   return (
     <div className="space-y-4">
@@ -20,7 +34,7 @@ export function DealNewPage() {
         </Button>
         <h2 className="text-2xl font-bold">New Deal</h2>
       </div>
-      <DealForm />
+      <DealForm initialValues={initialValues} />
     </div>
   );
 }
