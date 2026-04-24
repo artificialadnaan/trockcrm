@@ -619,7 +619,7 @@ router.post("/:id/stage/preflight", async (req, res, next) => {
       : null;
     let estimatingBoundary: { slug: string; displayOrder: number } | null = null;
     let currentIsBidBoardBoundaryOrDownstream = false;
-    let targetIsBidBoardBoundaryOrDownstream = false;
+    let targetIsBidBoardDownstream = false;
     if (deal) {
       const workflowRoute = deal.workflowRoute;
       estimatingBoundary = inferredOwnership?.isBidBoardOwned
@@ -629,10 +629,9 @@ router.post("/:id/stage/preflight", async (req, res, next) => {
         Boolean(estimatingBoundary) &&
         (isEstimatingBoundaryStageSlug(result.currentStage.slug, workflowRoute) ||
           isBidBoardOwnedDownstreamStage(result.currentStage, estimatingBoundary));
-      targetIsBidBoardBoundaryOrDownstream =
+      targetIsBidBoardDownstream =
         Boolean(estimatingBoundary) &&
-        (isEstimatingBoundaryStageSlug(result.targetStage.slug, workflowRoute) ||
-          isBidBoardOwnedDownstreamStage(result.targetStage, estimatingBoundary));
+        isBidBoardOwnedDownstreamStage(result.targetStage, estimatingBoundary);
     }
     const targetIsReopenIntoCrmOwnedFlow =
       Boolean(estimatingBoundary) &&
@@ -641,7 +640,7 @@ router.post("/:id/stage/preflight", async (req, res, next) => {
     const isBidBoardLocked =
       Boolean(deal) &&
       ((Boolean(inferredOwnership?.isBidBoardOwned) || currentIsBidBoardBoundaryOrDownstream) &&
-        (currentIsBidBoardBoundaryOrDownstream || targetIsBidBoardBoundaryOrDownstream) &&
+        (currentIsBidBoardBoundaryOrDownstream || targetIsBidBoardDownstream) &&
         !targetIsReopenIntoCrmOwnedFlow);
 
     await req.commitTransaction!();

@@ -275,6 +275,41 @@ describe("Deal Scoping Routes", () => {
     );
   });
 
+  it("allows the CRM-owned handoff move into estimate in progress", async () => {
+    const preflight = await import("../../../src/modules/deals/stage-gate.js");
+    vi.mocked(preflight.preflightStageCheck).mockResolvedValueOnce({
+      allowed: true,
+      blockReason: null,
+      currentStage: {
+        id: "stage-opportunity",
+        name: "Opportunity",
+        slug: "opportunity",
+        isTerminal: false,
+        displayOrder: 0,
+      },
+      targetStage: {
+        id: "stage-estimate-in-progress",
+        name: "Estimate in Progress",
+        slug: "estimate_in_progress",
+        isTerminal: false,
+        displayOrder: 1,
+      },
+    } as never);
+    vi.mocked(workflowBackfill.inferDealBidBoardOwnership).mockReturnValueOnce({
+      isBidBoardOwned: false,
+    } as never);
+
+    const { res } = await invokeRoute("post", "/:id/stage/preflight", {
+      params: { id: "deal-1" },
+      body: { targetStageId: "stage-estimate-in-progress" },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.allowed).toBe(true);
+    expect(res.body.bidBoardLocked).toBe(false);
+    expect(res.body.blockReason).toBeNull();
+  });
+
   it("treats legacy estimating as the Bid Board boundary when canonical boundary config exists", async () => {
     const preflight = await import("../../../src/modules/deals/stage-gate.js");
     vi.mocked(preflight.preflightStageCheck).mockResolvedValueOnce({
