@@ -183,10 +183,9 @@ export async function changeDealStage(
     Boolean(estimatingBoundary) &&
     (isEstimatingBoundaryStageSlug(gateResult.currentStage.slug, currentDeal[0].workflowRoute) ||
       isBidBoardOwnedDownstreamStage(gateResult.currentStage, estimatingBoundary));
-  const targetIsBidBoardBoundaryOrDownstream =
+  const targetIsBidBoardDownstream =
     Boolean(estimatingBoundary) &&
-    (isEstimatingBoundaryStageSlug(targetStage.slug, currentDeal[0].workflowRoute) ||
-      isBidBoardOwnedDownstreamStage(targetStage, estimatingBoundary));
+    isBidBoardOwnedDownstreamStage(targetStage, estimatingBoundary);
   const targetIsReopenIntoCrmOwnedFlow =
     Boolean(estimatingBoundary) &&
     targetStage.displayOrder < (estimatingBoundary?.displayOrder ?? Number.NEGATIVE_INFINITY) &&
@@ -194,7 +193,7 @@ export async function changeDealStage(
 
   if (
     (inferredOwnership.isBidBoardOwned || currentIsBidBoardBoundaryOrDownstream) &&
-    (currentIsBidBoardBoundaryOrDownstream || targetIsBidBoardBoundaryOrDownstream) &&
+    (currentIsBidBoardBoundaryOrDownstream || targetIsBidBoardDownstream) &&
     !targetIsReopenIntoCrmOwnedFlow
   ) {
     throw new AppError(

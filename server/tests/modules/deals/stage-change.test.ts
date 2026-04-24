@@ -362,6 +362,45 @@ describe("changeDealStage", () => {
     expect(tenantDb.state.stageHistory).toHaveLength(0);
   });
 
+  it("allows the CRM-authored handoff move into estimate in progress", async () => {
+    const tenantDb = createTenantDb({
+      stageId: "stage-opportunity",
+      isBidBoardOwned: false,
+      bidBoardStageSlug: null,
+      readOnlySyncedAt: null,
+    });
+
+    vi.mocked(validateStageGate).mockResolvedValue({
+      allowed: true,
+      isBackwardMove: false,
+      requiresOverride: false,
+      targetStage: {
+        id: "stage-estimating",
+        name: "Estimate in Progress",
+        slug: "estimate_in_progress",
+        isTerminal: false,
+        displayOrder: 2,
+      },
+      currentStage: {
+        id: "stage-opportunity",
+        name: "Opportunity",
+        slug: "opportunity",
+        isTerminal: false,
+        displayOrder: 1,
+      },
+    } as never);
+
+    const result = await changeDealStage(tenantDb as never, {
+      dealId: "deal-1",
+      targetStageId: "stage-estimating",
+      userId: "user-1",
+      userRole: "director",
+    });
+
+    expect(result.deal.stageId).toBe("stage-estimating");
+    expect(tenantDb.state.stageHistory).toHaveLength(1);
+  });
+
   it("blocks crm-authored progression deeper into downstream mirrored stages after a bid board sync", async () => {
     const tenantDb = createTenantDb({
       stageId: "stage-bid-sent",
