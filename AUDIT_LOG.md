@@ -1,5 +1,5 @@
 ## Running Summary
-- Iteration count: 20
+- Iteration count: 21
 - Total tests generated: 24
 - Pass/fail count per iteration:
   - Iteration 1: passed after deploy verification
@@ -17,6 +17,7 @@
   - Iteration 18: lead-stage race deployed to production; fresh frontend asset hash verified; project-route family rerun clean; lead/deal progression timeout traced to a stale test locator, not a product regression
   - Iteration 19: full-inventory pass exposed intermittent notification edge `502` responses without CORS headers; notification routes hardened as explicitly private/non-cacheable and email/files audit selectors tightened before redeploy
   - Iteration 20: notification center now defers the live SSE stream and list fetch until the bell is opened, leaving unread-count available on page load while removing the remaining background stream flake from unrelated route families
+  - Iteration 21: notification center now lazy-loads unread count too, so unrelated route families no longer perform any notification network traffic until the bell is opened
 - Issues fixed vs deferred:
   - Fixed: 16
   - Deferred: 0

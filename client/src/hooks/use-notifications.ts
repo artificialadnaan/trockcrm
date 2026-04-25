@@ -112,6 +112,10 @@ export function useNotificationStream(enabled: boolean = true) {
 
   // Fetch initial unread count
   useEffect(() => {
+    if (!enabled) {
+      return;
+    }
+
     const controller = new AbortController();
 
     api<{ count: number }>("/notifications/unread-count", { signal: controller.signal })
@@ -126,7 +130,7 @@ export function useNotificationStream(enabled: boolean = true) {
     return () => {
       controller.abort();
     };
-  }, []);
+  }, [enabled]);
 
   // Connect to SSE stream
   useEffect(() => {

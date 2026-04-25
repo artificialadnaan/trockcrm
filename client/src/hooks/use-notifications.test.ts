@@ -241,7 +241,7 @@ describe("useNotificationStream", () => {
   });
 
   it("does not open an EventSource connection until explicitly enabled", async () => {
-    apiMock.mockResolvedValueOnce({ count: 0 });
+    apiMock.mockResolvedValue({ count: 0 });
     const eventSourceSpy = vi.spyOn(globalThis, "EventSource");
 
     const root = await renderHook(false);
@@ -250,6 +250,7 @@ describe("useNotificationStream", () => {
       await flushEffects();
     });
 
+    expect(apiMock).not.toHaveBeenCalled();
     expect(eventSourceSpy).not.toHaveBeenCalled();
 
     await act(async () => {
