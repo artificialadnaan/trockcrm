@@ -469,6 +469,52 @@ export type LeadTransitionResult =
       missing: LeadTransitionMissingRequirement[];
     };
 
+function normalizeBlockedLeadTransitionPayload(
+  payload: unknown,
+  targetStageId: string
+): LeadTransitionResult | null {
+  if (!payload || typeof payload !== "object") {
+    return null;
+  }
+
+  if ((payload as { reason?: string }).reason === "missing_requirements") {
+    return payload as LeadTransitionResult;
+  }
+
+  const errorPayload = (payload as {
+    error?: {
+      code?: string;
+      missingRequirements?: {
+        prerequisiteFields?: string[];
+        qualificationFields?: string[];
+        projectTypeQuestionIds?: string[];
+      };
+    };
+  }).error;
+
+  if (errorPayload?.code !== "LEAD_STAGE_REQUIREMENTS_UNMET") {
+    return null;
+  }
+
+  const requirementKeys = [
+    ...(errorPayload.missingRequirements?.prerequisiteFields ?? []),
+    ...(errorPayload.missingRequirements?.qualificationFields ?? []),
+    ...(errorPayload.missingRequirements?.projectTypeQuestionIds ?? []),
+  ];
+
+  return {
+    ok: false,
+    reason: "missing_requirements",
+    targetStageId,
+    resolution: "detail",
+    missing: requirementKeys.map((key) => ({
+      key,
+      label: key,
+      resolution: "detail",
+    })),
+  };
+}
+
 export type LeadTransitionInlinePatch = Partial<
   Pick<
     LeadRecord,
@@ -504,13 +550,9 @@ export async function transitionLeadStage(
   });
 
   const payload = await response.json().catch(() => null);
-  if (
-    payload &&
-    (response.status === 409 ||
-      (typeof payload === "object" &&
-        (payload as { reason?: string }).reason === "missing_requirements"))
-  ) {
-    return payload as LeadTransitionResult;
+  const blockedMove = normalizeBlockedLeadTransitionPayload(payload, input.targetStageId);
+  if (blockedMove) {
+    return blockedMove;
   }
 
   if (!response.ok) {
