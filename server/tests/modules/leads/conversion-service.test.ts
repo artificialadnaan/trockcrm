@@ -1737,6 +1737,123 @@ describe("Lead Conversion Service", () => {
     });
   });
 
+  it("still converts successfully when the required questionnaire answers are attached", async () => {
+    process.env.ENABLE_LEAD_EDIT_V2 = "true";
+
+    const tenantDb = createFakeTenantDb({
+      leads: [
+        {
+          id: "lead-1",
+          companyId: "company-1",
+          propertyId: "property-1",
+          primaryContactId: null,
+          name: "Palm Villas repaint",
+          stageId: "lead-stage-sales-validation",
+          assignedRepId: "rep-1",
+          status: "open",
+          pipelineType: "normal",
+          projectTypeId: "project-type-multifamily",
+          qualificationPayload: {
+            existing_customer_status: "existing",
+            estimated_value: 85000,
+            timeline_status: "Q3 2026",
+          },
+          source: "Referral",
+          description: "Property manager requested pre-bid walk",
+          stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+          convertedAt: null,
+          isActive: true,
+          createdAt: new Date("2026-04-12T15:00:00.000Z"),
+          updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+        } as any,
+      ],
+      leadQuestionNodes: [
+        {
+          id: "question-bid-due-date",
+          projectTypeId: null,
+          parentNodeId: null,
+          parentOptionValue: null,
+          nodeType: "question",
+          key: "bid_due_date",
+          label: "Bid Due Date",
+          prompt: null,
+          inputType: "date",
+          options: [],
+          isRequired: true,
+          displayOrder: 1,
+          isActive: true,
+        },
+        {
+          id: "question-budget",
+          projectTypeId: null,
+          parentNodeId: null,
+          parentOptionValue: null,
+          nodeType: "question",
+          key: "budget",
+          label: "Budget",
+          prompt: null,
+          inputType: "currency",
+          options: [],
+          isRequired: true,
+          displayOrder: 2,
+          isActive: true,
+        },
+      ],
+      leadQuestionAnswers: [
+        {
+          id: "answer-bid-due-date",
+          leadId: "lead-1",
+          questionId: "question-bid-due-date",
+          valueJson: "2026-05-01",
+          updatedBy: "rep-1",
+          createdAt: new Date("2026-04-12T15:00:00.000Z"),
+          updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+        },
+        {
+          id: "answer-budget",
+          leadId: "lead-1",
+          questionId: "question-budget",
+          valueJson: 85000,
+          updatedBy: "rep-1",
+          createdAt: new Date("2026-04-12T15:00:00.000Z"),
+          updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+        },
+      ],
+    });
+
+    const service = createLeadConversionService({
+      getStageById: pipelineMocks.getStageById as never,
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+      createDeal: async (_tenantDb, input) => {
+        const deal = {
+          id: "deal-1",
+          dealNumber: "TR-2026-0001",
+          workflowRoute: input.workflowRoute ?? "normal",
+          primaryContactId: input.primaryContactId ?? null,
+          companyId: input.companyId ?? null,
+          propertyId: input.propertyId ?? null,
+          sourceLeadId: input.sourceLeadId ?? null,
+          source: input.source ?? null,
+          assignedRepId: input.assignedRepId,
+          stageId: input.stageId,
+          name: input.name,
+        };
+        tenantDb.state.deals.push(deal);
+        return deal as never;
+      },
+    });
+
+    const result = await service.convertLead(tenantDb as never, {
+      leadId: "lead-1",
+      dealStageId: "deal-stage-1",
+      userRole: "rep",
+      userId: "rep-1",
+    });
+
+    expect(result.deal.id).toBe("deal-1");
+    expect(result.lead.status).toBe("converted");
+  });
+
   it("defaults conversion into the canonical opportunity deal stage when dealStageId is omitted", async () => {
     const tenantDb = createFakeTenantDb({
       leads: [

@@ -1,150 +1,59 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
+import type { ReactNode } from "react";
 import { LeadDetailPage } from "./lead-detail-page";
 
-const stages = [
-  { id: "stage-new", name: "New Lead", slug: "new_lead", workflowFamily: "lead", displayOrder: 0 },
-  { id: "stage-qualified", name: "Qualified Lead", slug: "qualified_lead", workflowFamily: "lead", displayOrder: 1 },
-  { id: "stage-validation", name: "Sales Validation Stage", slug: "sales_validation_stage", workflowFamily: "lead", displayOrder: 2 },
-  { id: "stage-opportunity", name: "Opportunity", slug: "opportunity", workflowFamily: "lead", displayOrder: 3 },
-  { id: "stage-estimating", name: "Estimating", slug: "estimating", workflowFamily: "standard_deal", displayOrder: 4 },
-];
-
-let lead: Record<string, any> = {
-  id: "lead-1",
-  name: "Alpha Roofing Follow-Up",
-  stageId: "stage-new",
-  companyId: "company-1",
-  propertyId: "property-1",
-  primaryContactId: "contact-1",
-  assignedRepId: "rep-1",
-  companyName: "Alpha Roofing",
-  property: {
-    id: "property-1",
-    name: "Dallas HQ",
-    address: "123 Main St",
-    city: "Dallas",
-    state: "TX",
-    zip: "75201",
-  },
-  source: "trade show",
-  description: "Initial pre-RFP lead.",
-  stageEnteredAt: "2026-04-10T10:00:00.000Z",
-  convertedAt: null,
-  convertedDealId: null,
-  convertedDealNumber: null,
-  updatedAt: "2026-04-11T10:00:00.000Z",
-  lastActivityAt: "2026-04-11T10:00:00.000Z",
-  forecastWindow: null,
-  forecastCategory: null,
-  forecastConfidencePercent: null,
-  forecastRevenue: null,
-  forecastGrossProfit: null,
-  forecastBlockers: null,
-  nextMilestoneAt: null,
-  nextStep: null,
-  nextStepDueAt: null,
-  supportNeededType: null,
-  supportNeededNotes: null,
-  decisionMakerName: null,
-  budgetStatus: null,
-  qualificationPayload: {},
-  projectTypeQuestionPayload: { projectTypeId: null, answers: {} },
-  projectTypeId: null,
-  projectType: null,
-  status: "open",
-};
-let currentUserRole: "director" | "admin" | "rep" = "director";
+const mocks = vi.hoisted(() => ({
+  useLeadDetailMock: vi.fn(),
+  usePipelineStagesMock: vi.fn(),
+}));
 
 vi.mock("@/hooks/use-leads", () => ({
-  useLeadDetail: vi.fn(() => ({
-    lead,
-    loading: false,
-    error: null,
-    refetch: vi.fn(),
-  })),
-  useLeadQualification: vi.fn(() => ({
-    qualification: null,
-    loading: false,
-    error: null,
-    refetch: vi.fn(),
-  })),
-  useLeadScoping: vi.fn(() => ({
-    intake: null,
-    readiness: {
-      status: "draft",
-      isReadyForGoNoGo: false,
-      completionState: {},
-      errors: { sections: {}, attachments: {} },
-    },
-    loading: false,
-    error: null,
-    refetch: vi.fn(),
-  })),
-  formatLeadPropertyLine: vi.fn((currentLead: typeof lead) =>
-    [
-      currentLead.property?.address,
-      [currentLead.property?.city, currentLead.property?.state].filter(Boolean).join(", "),
-      currentLead.property?.zip,
-    ]
-      .filter(Boolean)
-      .join(" ")
-  ),
-  updateLead: vi.fn(),
-  preflightLeadStageCheck: vi.fn(),
-  convertLeadToOpportunity: vi.fn(),
-  updateLeadScoping: vi.fn(),
-  getLeadStageMetadata: vi.fn((stageId: string, currentStages: typeof stages) => {
-    const stage = currentStages.find((entry) => entry.id === stageId) ?? null;
-    return { stage, slug: stage?.slug ?? null };
+  useLeadDetail: mocks.useLeadDetailMock,
+  getLeadStageMetadata: vi.fn((stageId: string, stages: Array<{ id: string; name: string; slug: string }>) => {
+    const stage = stages.find((entry) => entry.id === stageId) ?? null;
+    const slug = stage?.slug ?? null;
+    return {
+      stage,
+      slug,
+      label: stage?.name ?? "Lead",
+      isCrmOwnedLeadStage: ["new_lead", "qualified_lead", "sales_validation_stage", "opportunity"].includes(slug ?? ""),
+      isBoardStage: ["new_lead", "qualified_lead", "sales_validation_stage"].includes(slug ?? ""),
+      isOpportunityStage: slug === "opportunity",
+    };
   }),
+  formatLeadPropertyLine: vi.fn(
+    (lead: {
+      property?: { address?: string | null; city?: string | null; state?: string | null; zip?: string | null } | null;
+    }) =>
+      [lead.property?.address, [lead.property?.city, lead.property?.state].filter(Boolean).join(", "), lead.property?.zip]
+        .filter(Boolean)
+        .join(" ")
+  ),
 }));
 
 vi.mock("@/hooks/use-pipeline-config", () => ({
-  usePipelineStages: vi.fn(() => ({
-    stages,
-  })),
+  usePipelineStages: mocks.usePipelineStagesMock,
 }));
 
-vi.mock("@/lib/auth", () => ({
-  useAuth: vi.fn(() => ({
-    user: {
-      id: currentUserRole === "rep" ? "rep-1" : "director-1",
-      displayName: currentUserRole === "rep" ? "Riley Rep" : "Dana Director",
-      role: currentUserRole,
-      officeId: "office-1",
-    },
-  })),
-}));
-
-vi.mock("@/hooks/use-task-assignees", () => ({
-  useTaskAssignees: vi.fn(() => ({
-    assignees: [{ id: "rep-1", displayName: "Rep One" }],
-    loading: false,
-    error: null,
-  })),
-}));
-
-vi.mock("@/lib/record-detail-summary", () => ({
-  buildLeadDetailSummary: () => ({
-    ageDays: 5,
-    freshnessDays: 1,
-    isConverted: Boolean(lead.convertedAt || lead.convertedDealId || lead.status === "converted"),
-  }),
-}));
-
-vi.mock("@/components/ui/button", () => ({
-  Button: ({ children }: { children: React.ReactNode }) => <button>{children}</button>,
-}));
-
-vi.mock("@/components/ui/card", () => ({
-  Card: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
-  CardContent: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+vi.mock("@/lib/sales-workflow", () => ({
+  BID_BOARD_MIRRORED_STAGE_SLUGS: [
+    "estimating",
+    "bid_sent",
+    "in_production",
+    "close_out",
+    "closed_won",
+    "closed_lost",
+  ],
 }));
 
 vi.mock("@/components/leads/lead-form", () => ({
-  LeadForm: ({ mode }: { mode?: string }) => <div>{mode === "edit" ? "Lead Form Edit" : "Lead Form Summary"}</div>,
+  LeadForm: () => <div>Lead Form</div>,
+}));
+
+vi.mock("@/components/leads/lead-timeline-tab", () => ({
+  LeadTimelineTab: () => <div>Lead Timeline</div>,
 }));
 
 vi.mock("@/components/leads/lead-questionnaire-editor", () => ({
@@ -155,127 +64,144 @@ vi.mock("@/components/leads/lead-stage-badge", () => ({
   LeadStageBadge: ({ stageId }: { stageId: string }) => <span>{stageId}</span>,
 }));
 
-vi.mock("@/components/leads/lead-timeline-tab", () => ({
-  LeadTimelineTab: () => <div>Lead Timeline</div>,
+vi.mock("@/components/ui/button", () => ({
+  Button: ({ children }: { children: ReactNode }) => <button>{children}</button>,
 }));
 
-vi.mock("@/components/assignment/record-assignment-card", () => ({
-  RecordAssignmentCard: ({ label }: { label: string }) => <div>{label}</div>,
-}));
-vi.mock("@/components/shared/forecast-editor", () => ({
-  ForecastEditor: () => <div>Forecast Editor</div>,
-}));
-vi.mock("@/components/shared/next-step-editor", () => ({
-  NextStepEditor: () => <div>Next Step Editor</div>,
-}));
-vi.mock("@/components/leads/lead-qualification-panel", () => ({
-  LeadQualificationPanel: () => <div>Qualification Panel</div>,
-}));
-vi.mock("@/components/leads/lead-scoping-workspace", () => ({
-  LeadScopingWorkspace: () => <div>Scoping Workspace</div>,
-}));
-vi.mock("@/components/leads/lead-stage-change-dialog", () => ({
-  LeadStageChangeDialog: () => null,
-}));
-vi.mock("@/components/leads/lead-convert-dialog", () => ({
-  LeadConvertDialog: () => null,
+vi.mock("@/components/ui/card", () => ({
+  Card: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  CardContent: ({ children }: { children: ReactNode }) => <div>{children}</div>,
 }));
 
-function renderLeadDetail(initialEntry = "/leads/lead-1") {
-  return renderToStaticMarkup(
-    <MemoryRouter initialEntries={[initialEntry]}>
-      <Routes>
-        <Route path="/leads/:id" element={<LeadDetailPage />} />
-      </Routes>
-    </MemoryRouter>
+function makeLead(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "lead-1",
+    companyId: "company-1",
+    propertyId: "property-1",
+    primaryContactId: "contact-1",
+    name: "Alpha Roofing Follow-Up",
+    stageId: "stage-sales-validation",
+    assignedRepId: "rep-1",
+    status: "open",
+    source: "trade show",
+    description: "Initial pre-RFP lead.",
+    projectTypeId: "project-type-1",
+    projectType: {
+      id: "project-type-1",
+      name: "Re-Roof",
+      slug: "re_roof",
+    },
+    qualificationPayload: {},
+    projectTypeQuestionPayload: {
+      projectTypeId: "project-type-1",
+      answers: {},
+    },
+    lastActivityAt: "2026-04-11T10:00:00.000Z",
+    stageEnteredAt: "2026-04-10T10:00:00.000Z",
+    convertedAt: null,
+    isActive: true,
+    createdAt: "2026-04-10T09:00:00.000Z",
+    updatedAt: "2026-04-11T10:00:00.000Z",
+    companyName: "Alpha Roofing",
+    property: {
+      id: "property-1",
+      name: "Dallas HQ",
+      address: "123 Main St",
+      city: "Dallas",
+      state: "TX",
+      zip: "75201",
+    },
+    convertedDealId: null,
+    convertedDealNumber: null,
+    ...overrides,
+  };
+}
+
+function normalize(html: string) {
+  return html.replace(/\s+/g, " ").trim();
+}
+
+function renderLeadDetail() {
+  return normalize(
+    renderToStaticMarkup(
+      <MemoryRouter initialEntries={["/leads/lead-1"]}>
+        <Routes>
+          <Route path="/leads/:id" element={<LeadDetailPage />} />
+        </Routes>
+      </MemoryRouter>
+    )
   );
 }
 
 describe("LeadDetailPage", () => {
   beforeEach(() => {
-    currentUserRole = "director";
-    lead = {
-      ...lead,
-      stageId: "stage-new",
-      convertedAt: null,
-      convertedDealId: null,
-      convertedDealNumber: null,
-      status: "open",
-    };
+    mocks.usePipelineStagesMock.mockReset();
+    mocks.useLeadDetailMock.mockReset();
+
+    mocks.usePipelineStagesMock.mockReturnValue({
+      stages: [
+        { id: "stage-sales-validation", name: "Sales Validation Stage", slug: "sales_validation_stage" },
+        { id: "stage-opportunity", name: "Opportunity", slug: "opportunity" },
+        { id: "stage-estimating", name: "Estimating", slug: "estimating" },
+      ],
+    });
+
+    mocks.useLeadDetailMock.mockReturnValue({
+      lead: makeLead(),
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
   });
 
-  it("renders the lead detail surface with assignment and context", () => {
-    const html = renderLeadDetail();
-
-    expect(html).toContain("Alpha Roofing Follow-Up");
-    expect(html).toContain("Alpha Roofing");
-    expect(html).toContain("123 Main St");
-    expect(html).toContain("Lead context");
-    expect(html).toContain("New Lead");
-    expect(html).not.toContain("Convert to Opportunity");
-    expect(html).toContain("Move to Qualified Lead");
-  });
-
-  it("shows converted opportunity leads with CRM stage context and linked deal access", () => {
-    lead = {
-      ...lead,
-      stageId: "stage-opportunity",
-      status: "converted",
-      convertedAt: "2026-04-11T09:00:00.000Z",
-      convertedDealId: "deal-1",
-      convertedDealNumber: "TR-1001",
-    };
+  it("keeps opportunity scoping editable in CRM before the estimating handoff", () => {
+    mocks.useLeadDetailMock.mockReturnValue({
+      lead: makeLead({
+        stageId: "stage-opportunity",
+        status: "converted",
+        convertedAt: "2026-04-11T09:00:00.000Z",
+        convertedDealId: "deal-1",
+        convertedDealNumber: "TR-1001",
+      }),
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
 
     const html = renderLeadDetail();
 
-    expect(html).toContain("Opportunity");
+    expect(html).toContain("Opportunity is still CRM-owned before estimating handoff.");
+    expect(html).toContain("Open Opportunity Scope");
     expect(html).toContain("Opportunity Scope");
-    expect(html).toContain("Lead Form Summary");
   });
 
-  it("shows converted downstream stages with the merged lead history shell intact", () => {
-    lead = {
-      ...lead,
-      stageId: "stage-estimating",
-      status: "converted",
-      convertedAt: "2026-04-11T09:00:00.000Z",
-      convertedDealId: "deal-1",
-      convertedDealNumber: "TR-1001",
-    };
-
+  it("keeps the legacy read-only summary path when the questionnaire payload is absent", () => {
     const html = renderLeadDetail();
 
-    expect(html).toContain("Estimating");
-    expect(html).toContain("Bid Board Mirror");
-  });
-
-  it("offers conversion only when the lead reaches sales validation", () => {
-    lead = {
-      ...lead,
-      stageId: "stage-validation",
-      status: "open",
-      convertedAt: null,
-      convertedDealId: null,
-      convertedDealNumber: null,
-    };
-
-    const html = renderLeadDetail();
-
-    expect(html).toContain("Convert to Opportunity");
+    expect(html).toContain("Lead Form");
     expect(html).toContain("Edit Sales Validation");
+    expect(html).not.toContain("Lead Questionnaire Editor");
   });
 
-  it("offers the next stage move before sales validation", () => {
-    lead = {
-      ...lead,
-      stageId: "stage-qualified",
-      status: "open",
-    };
+  it("shows mirrored downstream deal states as read-only after handoff", () => {
+    mocks.useLeadDetailMock.mockReturnValue({
+      lead: makeLead({
+        stageId: "stage-estimating",
+        status: "converted",
+        convertedAt: "2026-04-11T09:00:00.000Z",
+        convertedDealId: "deal-1",
+        convertedDealNumber: "TR-1001",
+      }),
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
 
     const html = renderLeadDetail();
 
-    expect(html).toContain("Move to Sales Validation Stage");
-    expect(html).not.toContain("Convert to Opportunity");
+    expect(html).toContain("Bid Board Mirror");
+    expect(html).toContain("Downstream deal state is mirrored from Bid Board and read-only in CRM after estimating starts.");
+    expect(html).toContain("Open Read-Only Deal");
   });
 
   it("treats hidden leads as read-only and suppresses the editable surface CTA", () => {
