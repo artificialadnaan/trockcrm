@@ -20,7 +20,7 @@ import {
   SALES_WORKFLOW_PIPELINE_TYPES,
 } from "../../../../shared/src/types/sales-workflow.js";
 import { LEAD_STATUSES } from "../../helpers/worktree-shared-contracts.js";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppError } from "../../../src/middleware/error-handler.js";
 import { createLeadConversionService } from "../../../src/modules/leads/conversion-service.js";
 import { createDeal, updateDeal } from "../../../src/modules/deals/service.js";
@@ -523,6 +523,51 @@ interface FakeLeadStageHistoryRow {
   createdAt: Date;
 }
 
+interface FakeLeadQuestionAnswerRow {
+  id: string;
+  leadId: string;
+  questionId: string;
+  valueJson: unknown;
+  updatedBy?: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+interface FakeLeadQuestionAnswerHistoryRow {
+  id: string;
+  leadId: string;
+  questionId: string;
+  oldValueJson: unknown;
+  newValueJson: unknown;
+  changedBy?: string | null;
+  changedAt: Date;
+}
+
+interface FakeLeadQuestionNodeRow {
+  id: string;
+  projectTypeId: string | null;
+  parentNodeId: string | null;
+  parentOptionValue: string | null;
+  nodeType: string;
+  key: string;
+  label: string;
+  prompt: string | null;
+  inputType: string | null;
+  options: string[];
+  isRequired: boolean;
+  displayOrder: number;
+  isActive: boolean;
+}
+
+interface FakeProjectTypeRow {
+  id: string;
+  name: string;
+  slug: string;
+  parentId: string | null;
+  displayOrder: number;
+  isActive: boolean;
+}
+
 interface FakeTenantState {
   companies: FakeCompanyRow[];
   properties: FakePropertyRow[];
@@ -532,6 +577,10 @@ interface FakeTenantState {
   leads: FakeLeadRow[];
   deals: FakeDealRow[];
   leadStageHistory: FakeLeadStageHistoryRow[];
+  leadQuestionAnswers: FakeLeadQuestionAnswerRow[];
+  leadQuestionAnswerHistory: FakeLeadQuestionAnswerHistoryRow[];
+  leadQuestionNodes: FakeLeadQuestionNodeRow[];
+  projectTypes: FakeProjectTypeRow[];
 }
 
 function createFakeTenantDb(initialState?: Partial<FakeTenantState>) {
@@ -586,6 +635,19 @@ function createFakeTenantDb(initialState?: Partial<FakeTenantState>) {
     leads: [],
     deals: [],
     leadStageHistory: [],
+    leadQuestionAnswers: [],
+    leadQuestionAnswerHistory: [],
+    leadQuestionNodes: [],
+    projectTypes: [
+      {
+        id: "project-type-multifamily",
+        name: "Multifamily",
+        slug: "multifamily",
+        parentId: null,
+        displayOrder: 1,
+        isActive: true,
+      },
+    ],
     ...initialState,
   };
 
@@ -601,6 +663,10 @@ function createFakeTenantDb(initialState?: Partial<FakeTenantState>) {
     if (table === leads || tableName === "leads") return state.leads;
     if (table === deals || tableName === "deals") return state.deals;
     if (table === leadStageHistory || tableName === "lead_stage_history") return state.leadStageHistory;
+    if (tableName === "project_type_config") return state.projectTypes;
+    if (tableName === "lead_question_answers") return state.leadQuestionAnswers;
+    if (tableName === "lead_question_answer_history") return state.leadQuestionAnswerHistory;
+    if (tableName === "lead_question_nodes") return state.leadQuestionNodes;
     if ("slug" in candidate && "category" in candidate && "website" in candidate) return state.companies;
     if ("lat" in candidate && "lng" in candidate && "companyId" in candidate) return state.properties;
     if ("companyId" in candidate && "firstName" in candidate && "lastName" in candidate) return state.contacts;
@@ -609,6 +675,10 @@ function createFakeTenantDb(initialState?: Partial<FakeTenantState>) {
     if ("convertedAt" in candidate && "stageEnteredAt" in candidate && "assignedRepId" in candidate) return state.leads;
     if ("dealNumber" in candidate && "workflowRoute" in candidate && "sourceLeadId" in candidate) return state.deals;
     if ("leadId" in candidate && "changedBy" in candidate && "toStageId" in candidate) return state.leadStageHistory;
+    if ("leadId" in candidate && "questionId" in candidate && "valueJson" in candidate) return state.leadQuestionAnswers;
+    if ("leadId" in candidate && "questionId" in candidate && "oldValueJson" in candidate) return state.leadQuestionAnswerHistory;
+    if ("questionKey" in candidate && "nodeType" in candidate) return state.leadQuestionNodes;
+    if ("parentId" in candidate && "displayOrder" in candidate && "isActive" in candidate) return state.projectTypes;
     throw new Error("Unexpected table in fake tenant db");
   }
 
@@ -927,6 +997,10 @@ beforeEach(() => {
   });
 });
 
+afterEach(() => {
+  delete process.env.ENABLE_LEAD_EDIT_V2;
+});
+
 describe("Lead Conversion Shared Contract", () => {
   it("defines the lead lifecycle statuses used during conversion", () => {
     expect(LEAD_STATUSES).toEqual(["open", "converted", "disqualified"]);
@@ -1157,6 +1231,342 @@ describe("Lead Service", () => {
       message: "Primary contact does not belong to the company",
     });
   });
+
+  it("blocks entering Sales Validation Stage when v2 questionnaire answers are incomplete", async () => {
+    process.env.ENABLE_LEAD_EDIT_V2 = "true";
+
+    const tenantDb = createFakeTenantDb({
+      leads: [
+        {
+          id: "lead-1",
+          companyId: "company-1",
+          propertyId: "property-1",
+          primaryContactId: "contact-1",
+          name: "Palm Villas repaint",
+          stageId: "lead-stage-1",
+          assignedRepId: "rep-1",
+          status: "open",
+          source: "Referral",
+          description: null,
+          stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+          convertedAt: null,
+          isActive: true,
+          createdAt: new Date("2026-04-12T15:00:00.000Z"),
+          updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+          projectTypeId: "project-type-multifamily",
+          qualificationPayload: {
+            existing_customer_status: "existing",
+            estimated_value: 120000,
+            timeline_status: "Q3 2026",
+          },
+        } as any,
+      ],
+      leadQuestionNodes: [
+        {
+          id: "question-bid-due-date",
+          projectTypeId: null,
+          parentNodeId: null,
+          parentOptionValue: null,
+          nodeType: "question",
+          key: "bid_due_date",
+          label: "Bid Due Date",
+          prompt: null,
+          inputType: "date",
+          options: [],
+          isRequired: true,
+          displayOrder: 1,
+          isActive: true,
+        },
+        {
+          id: "question-budget",
+          projectTypeId: null,
+          parentNodeId: null,
+          parentOptionValue: null,
+          nodeType: "question",
+          key: "budget",
+          label: "Budget",
+          prompt: null,
+          inputType: "currency",
+          options: [],
+          isRequired: true,
+          displayOrder: 2,
+          isActive: true,
+        },
+      ],
+    });
+    const service = createLeadService({
+      getStageById: pipelineMocks.getStageById as never,
+      getActiveProjectTypes: async () => [
+        {
+          id: "project-type-multifamily",
+          name: "Multifamily",
+          slug: "multifamily",
+          parentId: null,
+          displayOrder: 1,
+          isActive: true,
+        },
+      ],
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+    });
+
+    await expect(
+      service.updateLead(
+        tenantDb as never,
+        "lead-1",
+        {
+          stageId: "lead-stage-sales-validation",
+          projectTypeId: "project-type-multifamily",
+          leadQuestionAnswers: {
+            bid_due_date: "2026-05-01",
+          },
+        } as any,
+        "rep",
+        "rep-1"
+      )
+    ).rejects.toMatchObject({
+      code: "LEAD_STAGE_REQUIREMENTS_UNMET",
+      result: expect.objectContaining({
+        targetStage: expect.objectContaining({ slug: "sales_validation_stage" }),
+        missingRequirements: expect.objectContaining({
+          projectTypeQuestionIds: expect.arrayContaining(["budget"]),
+        }),
+      }),
+    });
+  });
+
+  it("ignores parent-gated child questions when the parent is unanswered or false during Sales Validation gating", async () => {
+    process.env.ENABLE_LEAD_EDIT_V2 = "true";
+
+    const buildTenantDb = (insuranceClaimValue?: boolean) =>
+      createFakeTenantDb({
+        leads: [
+          {
+            id: "lead-1",
+            companyId: "company-1",
+            propertyId: "property-1",
+            primaryContactId: "contact-1",
+            name: "Palm Villas restoration",
+            stageId: "lead-stage-1",
+            assignedRepId: "rep-1",
+            status: "open",
+            source: "Referral",
+            description: null,
+            stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+            convertedAt: null,
+            isActive: true,
+            createdAt: new Date("2026-04-12T15:00:00.000Z"),
+            updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+            projectTypeId: "project-type-restoration",
+            qualificationPayload: {
+              existing_customer_status: "existing",
+              estimated_value: 120000,
+              timeline_status: "Q3 2026",
+            },
+          } as any,
+        ],
+        leadQuestionNodes: [
+          {
+            id: "question-budget",
+            projectTypeId: null,
+            parentNodeId: null,
+            parentOptionValue: null,
+            nodeType: "question",
+            key: "budget",
+            label: "Budget",
+            prompt: null,
+            inputType: "currency",
+            options: [],
+            isRequired: true,
+            displayOrder: 1,
+            isActive: true,
+          },
+          {
+            id: "question-insurance-claim",
+            projectTypeId: "project-type-restoration",
+            parentNodeId: null,
+            parentOptionValue: null,
+            nodeType: "question",
+            key: "insurance_claim",
+            label: "Insurance Claim",
+            prompt: null,
+            inputType: "boolean",
+            options: ["true", "false"],
+            isRequired: true,
+            displayOrder: 2,
+            isActive: true,
+          },
+          {
+            id: "question-xactimate",
+            projectTypeId: "project-type-restoration",
+            parentNodeId: "question-insurance-claim",
+            parentOptionValue: "true",
+            nodeType: "question",
+            key: "xactimate",
+            label: "Xactimate?",
+            prompt: null,
+            inputType: "boolean",
+            options: ["true", "false"],
+            isRequired: true,
+            displayOrder: 3,
+            isActive: true,
+          },
+        ],
+      });
+
+    const service = createLeadService({
+      getStageById: pipelineMocks.getStageById as never,
+      getActiveProjectTypes: async () => [
+        {
+          id: "project-type-restoration",
+          name: "Restoration",
+          slug: "restoration",
+          parentId: null,
+          displayOrder: 1,
+          isActive: true,
+        },
+      ],
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+    });
+
+    await expect(
+      service.updateLead(
+        buildTenantDb(undefined) as never,
+        "lead-1",
+        {
+          stageId: "lead-stage-sales-validation",
+          projectTypeId: "project-type-restoration",
+          leadQuestionAnswers: {},
+        } as any,
+        "rep",
+        "rep-1"
+      )
+    ).rejects.toMatchObject({
+      code: "LEAD_STAGE_REQUIREMENTS_UNMET",
+      result: expect.objectContaining({
+        targetStage: expect.objectContaining({ slug: "sales_validation_stage" }),
+        missingRequirements: expect.objectContaining({
+          projectTypeQuestionIds: expect.arrayContaining(["insurance_claim"]),
+        }),
+      }),
+    });
+
+    await expect(
+      service.updateLead(
+        buildTenantDb(false) as never,
+        "lead-1",
+        {
+          stageId: "lead-stage-sales-validation",
+          projectTypeId: "project-type-restoration",
+          leadQuestionAnswers: {
+            insurance_claim: false,
+          },
+        } as any,
+        "rep",
+        "rep-1"
+      )
+    ).rejects.toMatchObject({
+      code: "LEAD_STAGE_REQUIREMENTS_UNMET",
+      result: expect.objectContaining({
+        targetStage: expect.objectContaining({ slug: "sales_validation_stage" }),
+        missingRequirements: expect.objectContaining({
+          projectTypeQuestionIds: expect.arrayContaining(["budget"]),
+        }),
+      }),
+    });
+
+    await expect(
+      service.updateLead(
+        buildTenantDb(false) as never,
+        "lead-1",
+        {
+          stageId: "lead-stage-sales-validation",
+          projectTypeId: "project-type-restoration",
+          leadQuestionAnswers: {
+            insurance_claim: false,
+          },
+        } as any,
+        "rep",
+        "rep-1"
+      )
+    ).rejects.not.toMatchObject({
+      result: expect.objectContaining({
+        missingRequirements: expect.objectContaining({
+          projectTypeQuestionIds: expect.arrayContaining(["xactimate"]),
+        }),
+      }),
+    });
+  });
+
+  it("records questionnaire answer history for converted leads without ticking lead.updatedAt", async () => {
+    process.env.ENABLE_LEAD_EDIT_V2 = "true";
+
+    const originalUpdatedAt = new Date("2026-04-12T15:00:00.000Z");
+    const tenantDb = createFakeTenantDb({
+      leads: [
+        {
+          id: "lead-1",
+          companyId: "company-1",
+          propertyId: "property-1",
+          primaryContactId: "contact-1",
+          name: "Palm Villas repaint",
+          stageId: "lead-stage-opportunity",
+          assignedRepId: "rep-1",
+          status: "converted",
+          source: "Referral",
+          description: null,
+          stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+          convertedAt: new Date("2026-04-13T15:00:00.000Z"),
+          isActive: false,
+          createdAt: new Date("2026-04-12T15:00:00.000Z"),
+          updatedAt: originalUpdatedAt,
+        } as any,
+      ],
+      leadQuestionNodes: [
+        {
+          id: "question-bid-due-date",
+          projectTypeId: null,
+          parentNodeId: null,
+          parentOptionValue: null,
+          nodeType: "question",
+          key: "bid_due_date",
+          label: "Bid Due Date",
+          prompt: null,
+          inputType: "date",
+          options: [],
+          isRequired: true,
+          displayOrder: 1,
+          isActive: true,
+        },
+      ],
+    });
+
+    const service = createLeadService({
+      getStageById: pipelineMocks.getStageById as never,
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+    });
+
+    const result = await service.updateLead(
+      tenantDb as never,
+      "lead-1",
+      {
+        leadQuestionAnswers: {
+          bid_due_date: "2026-05-01",
+        },
+      } as any,
+      "director",
+      "director-1"
+    );
+
+    expect(result.updatedAt).toEqual(originalUpdatedAt);
+    expect(tenantDb.state.leadQuestionAnswers).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          leadId: "lead-1",
+        }),
+      ])
+    );
+    expect(tenantDb.state.leadQuestionAnswerHistory).toHaveLength(1);
+  });
 });
 
 describe("Lead Conversion Service", () => {
@@ -1223,7 +1633,166 @@ describe("Lead Conversion Service", () => {
     expect(tenantDb.state.deals).toHaveLength(1);
   });
 
+  it("revalidates questionnaire completeness during conversion when v2 is enabled", async () => {
+    process.env.ENABLE_LEAD_EDIT_V2 = "true";
+
+    const tenantDb = createFakeTenantDb({
+      leads: [
+        {
+          id: "lead-1",
+          companyId: "company-1",
+          propertyId: "property-1",
+          primaryContactId: null,
+          name: "Palm Villas repaint",
+          stageId: "lead-stage-sales-validation",
+          assignedRepId: "rep-1",
+          status: "open",
+          pipelineType: "normal",
+          projectTypeId: "project-type-multifamily",
+          qualificationPayload: {
+            existing_customer_status: "existing",
+            estimated_value: 85000,
+            timeline_status: "Q3 2026",
+          },
+          source: "Referral",
+          description: "Property manager requested pre-bid walk",
+          stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+          convertedAt: null,
+          isActive: true,
+          createdAt: new Date("2026-04-12T15:00:00.000Z"),
+          updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+        } as any,
+      ],
+      leadQuestionNodes: [
+        {
+          id: "question-bid-due-date",
+          projectTypeId: null,
+          parentNodeId: null,
+          parentOptionValue: null,
+          nodeType: "question",
+          key: "bid_due_date",
+          label: "Bid Due Date",
+          prompt: null,
+          inputType: "date",
+          options: [],
+          isRequired: true,
+          displayOrder: 1,
+          isActive: true,
+        },
+        {
+          id: "question-budget",
+          projectTypeId: null,
+          parentNodeId: null,
+          parentOptionValue: null,
+          nodeType: "question",
+          key: "budget",
+          label: "Budget",
+          prompt: null,
+          inputType: "currency",
+          options: [],
+          isRequired: true,
+          displayOrder: 2,
+          isActive: true,
+        },
+      ],
+    });
+
+    const service = createLeadConversionService({
+      getStageById: pipelineMocks.getStageById as never,
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+      createDeal: async (_tenantDb, input) => {
+        const deal = {
+          id: "deal-1",
+          dealNumber: "TR-2026-0001",
+          workflowRoute: input.workflowRoute ?? "normal",
+          primaryContactId: input.primaryContactId ?? null,
+          companyId: input.companyId ?? null,
+          propertyId: input.propertyId ?? null,
+          sourceLeadId: input.sourceLeadId ?? null,
+          source: input.source ?? null,
+          assignedRepId: input.assignedRepId,
+          stageId: input.stageId,
+          name: input.name,
+        };
+        tenantDb.state.deals.push(deal);
+        return deal as never;
+      },
+    });
+
+    await expect(
+      service.convertLead(tenantDb as never, {
+        leadId: "lead-1",
+        dealStageId: "deal-stage-1",
+        userRole: "rep",
+        userId: "rep-1",
+      })
+    ).rejects.toMatchObject({
+      code: "LEAD_STAGE_REQUIREMENTS_UNMET",
+      result: expect.objectContaining({
+        currentStage: expect.objectContaining({ slug: "sales_validation_stage" }),
+        targetStage: expect.objectContaining({ slug: "opportunity" }),
+      }),
+    });
+  });
+
   it("defaults conversion into the canonical opportunity deal stage when dealStageId is omitted", async () => {
+    const tenantDb = createFakeTenantDb({
+      leads: [
+        {
+          id: "lead-1",
+          companyId: "company-1",
+          propertyId: "property-1",
+          primaryContactId: null,
+          name: "Palm Villas repaint",
+          stageId: "lead-stage-sales-validation",
+          assignedRepId: "rep-1",
+          status: "open",
+          pipelineType: "service",
+          preQualValue: "25000",
+          source: "Referral",
+          description: "Property manager requested pre-bid walk",
+          stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+          convertedAt: null,
+          isActive: true,
+          createdAt: new Date("2026-04-12T15:00:00.000Z"),
+          updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+        },
+      ],
+    });
+    const service = createLeadConversionService({
+      getStageById: pipelineMocks.getStageById as never,
+      getStageBySlug: pipelineMocks.getStageBySlug as never,
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+      createDeal: async (_tenantDb, input) => {
+        const deal = {
+          id: "deal-1",
+          dealNumber: "TR-2026-0001",
+          workflowRoute: input.workflowRoute ?? "normal",
+          primaryContactId: input.primaryContactId ?? null,
+          companyId: input.companyId ?? null,
+          propertyId: input.propertyId ?? null,
+          sourceLeadId: input.sourceLeadId ?? null,
+          source: input.source ?? null,
+          assignedRepId: input.assignedRepId,
+          stageId: input.stageId,
+          name: input.name,
+        };
+        tenantDb.state.deals.push(deal);
+        return deal as never;
+      },
+    });
+
+    const result = await service.convertLead(tenantDb as never, {
+      leadId: "lead-1",
+      userRole: "rep",
+      userId: "rep-1",
+    });
+
+    expect(result.deal.stageId).toBe("deal-stage-service-opportunity");
+    expect(result.deal.workflowRoute).toBe("service");
+  });
+
+  it("only promotes a lead into Opportunity from Sales Validation Stage", async () => {
     const tenantDb = createFakeTenantDb({
       leads: [
         {

@@ -273,4 +273,21 @@ describe("LeadDetailPage", () => {
     expect(html).toContain("Move to Sales Validation Stage");
     expect(html).not.toContain("Convert to Opportunity");
   });
+
+  it("treats hidden leads as read-only and suppresses the editable surface CTA", () => {
+    mocks.useLeadDetailMock.mockReturnValue({
+      lead: makeLead({
+        isActive: false,
+        status: "open",
+      }),
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const html = renderLeadDetail();
+
+    expect(html).toContain("Hidden lead records are read-only.");
+    expect(html).not.toContain("Edit Lead");
+  });
 });
