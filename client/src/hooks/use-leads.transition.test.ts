@@ -34,12 +34,12 @@ describe("transitionLeadStage", () => {
       ok: false,
       reason: "missing_requirements",
       targetStageId: "stage-qualified-lead",
-      resolution: "detail",
+      resolution: "inline",
       missing: [
         {
           key: "qualificationPayload.existing_customer_status",
           label: "qualificationPayload.existing_customer_status",
-          resolution: "detail",
+          resolution: "inline",
         },
       ],
     });

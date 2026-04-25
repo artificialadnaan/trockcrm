@@ -506,11 +506,11 @@ function normalizeBlockedLeadTransitionPayload(
     ok: false,
     reason: "missing_requirements",
     targetStageId,
-    resolution: "detail",
+    resolution: "inline",
     missing: requirementKeys.map((key) => ({
       key,
       label: key,
-      resolution: "detail",
+      resolution: "inline",
     })),
   };
 }
