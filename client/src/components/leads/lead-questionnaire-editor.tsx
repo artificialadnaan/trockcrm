@@ -110,7 +110,7 @@ function getQuestionInputType(node: NonNullable<LeadRecord["leadQuestionnaire"]>
 export function LeadQuestionnaireEditor({ lead, onCancel, onSaved }: LeadQuestionnaireEditorProps) {
   const questionnaire = lead.leadQuestionnaire;
   const { stages } = usePipelineStages();
-  const { hierarchy: projectTypeHierarchy } = useProjectTypes();
+  const { projectTypes, hierarchy: projectTypeHierarchy } = useProjectTypes();
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [stageGateError, setStageGateError] = useState<StageGateErrorState | null>(null);
@@ -206,9 +206,12 @@ export function LeadQuestionnaireEditor({ lead, onCancel, onSaved }: LeadQuestio
   const selectedStageLabel =
     editableLeadStages.find((stage) => stage.id === formData.stageId)?.name ?? "Select stage";
   const selectedProjectTypeLabel =
+    projectTypes.find((entry) => entry.id === formData.projectTypeId)?.name ??
     projectTypeHierarchy
       .flatMap((parent) => [parent, ...parent.children])
-      .find((entry) => entry.id === formData.projectTypeId)?.name ?? "Select project type";
+      .find((entry) => entry.id === formData.projectTypeId)?.name ??
+    lead.projectType?.name ??
+    "Select project type";
 
   if (!questionnaire && !questionnaireTemplate) {
     return null;

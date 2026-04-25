@@ -534,6 +534,8 @@ function EditableLeadForm({
     (stagesLoading ? "Loading stages..." : "Select stage");
   const selectedProjectTypeLabel =
     projectTypeSelectItems.find((item) => item.value === (formData.projectTypeId || "__none__"))?.label ??
+    selectedProjectType?.name ??
+    lead?.projectType?.name ??
     "Select project type";
   const gateQuestionSet = useMemo(
     () => getLeadValidationQuestionSetForProjectType(selectedProjectType?.slug ?? existingLeadProjectTypeSlug),
