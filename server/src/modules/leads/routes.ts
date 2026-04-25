@@ -245,6 +245,18 @@ router.post("/:id/stage-transition", async (req, res, next) => {
     await req.commitTransaction!();
     res.status(result.ok ? 200 : 409).json(result);
   } catch (err) {
+    if (err instanceof LeadStageTransitionError) {
+      res.status(err.statusCode).json({
+        error: {
+          message: err.message,
+          code: err.code,
+          missingRequirements: err.result.missingRequirements,
+          currentStage: err.result.currentStage,
+          targetStage: err.result.targetStage,
+        },
+      });
+      return;
+    }
     next(err);
   }
 });

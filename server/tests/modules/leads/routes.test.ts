@@ -59,9 +59,9 @@ function findRouteHandler(routes: unknown, method: "post", path: string) {
   return routeLayer.handle as (req: any, res: any, next: (err?: unknown) => void) => unknown;
 }
 
-async function invokeLeadRoute(body: Record<string, unknown>) {
-  const leadRoutes = await loadLeadRoutes();
-  const handler = findRouteHandler(leadRoutes, "post", "/:id/stage-transition");
+async function invokeLeadRoute(body: Record<string, unknown>, leadRoutes?: unknown) {
+  const routes = leadRoutes ?? (await loadLeadRoutes());
+  const handler = findRouteHandler(routes, "post", "/:id/stage-transition");
   const req = {
     params: { id: "lead-1" },
     body,
@@ -132,6 +132,69 @@ describe("lead stage transition route", () => {
         { key: "source", label: "Lead source", resolution: "inline" },
         { key: "qualificationScope", label: "Project scope / category", resolution: "inline" },
       ],
+    });
+  });
+
+  it("serializes LeadStageTransitionError from POST /api/leads/:id/stage-transition as a 409", async () => {
+    const leadRoutes = await loadLeadRoutes();
+    const { LeadStageTransitionError } = await import(
+      "../../../src/modules/leads/stage-transition-service.js"
+    );
+
+    serviceMocks.transitionLeadStage.mockRejectedValueOnce(
+      new LeadStageTransitionError({
+        allowed: false,
+        code: "LEAD_STAGE_REQUIREMENTS_UNMET",
+        message: "Complete the lead intake fields before moving this lead to Qualified Lead.",
+        currentStage: {
+          id: "stage-new-lead",
+          name: "New Lead",
+          slug: "new_lead",
+          isTerminal: false,
+          displayOrder: 10,
+        },
+        targetStage: {
+          id: "stage-qualified-lead",
+          name: "Qualified Lead",
+          slug: "qualified_lead",
+          isTerminal: false,
+          displayOrder: 20,
+        },
+        missingRequirements: {
+          prerequisiteFields: ["qualificationPayload.existing_customer_status"],
+          qualificationFields: [],
+          projectTypeQuestionIds: [],
+        },
+      })
+    );
+
+    const { res } = await invokeLeadRoute({ targetStageId: "stage-qualified-lead" }, leadRoutes);
+
+    expect(res.statusCode).toBe(409);
+    expect(res.body).toEqual({
+      error: {
+        message: "Complete the lead intake fields before moving this lead to Qualified Lead.",
+        code: "LEAD_STAGE_REQUIREMENTS_UNMET",
+        missingRequirements: {
+          prerequisiteFields: ["qualificationPayload.existing_customer_status"],
+          qualificationFields: [],
+          projectTypeQuestionIds: [],
+        },
+        currentStage: {
+          id: "stage-new-lead",
+          name: "New Lead",
+          slug: "new_lead",
+          isTerminal: false,
+          displayOrder: 10,
+        },
+        targetStage: {
+          id: "stage-qualified-lead",
+          name: "Qualified Lead",
+          slug: "qualified_lead",
+          isTerminal: false,
+          displayOrder: 20,
+        },
+      },
     });
   });
 });
