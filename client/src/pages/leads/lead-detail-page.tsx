@@ -8,6 +8,7 @@ import { LeadConvertDialog } from "@/components/leads/lead-convert-dialog";
 import { LeadStageChangeDialog } from "@/components/leads/lead-stage-change-dialog";
 import { LeadStageBadge } from "@/components/leads/lead-stage-badge";
 import { LeadTimelineTab } from "@/components/leads/lead-timeline-tab";
+import { LeadQuestionnaireEditor } from "@/components/leads/lead-questionnaire-editor";
 import { formatLeadPropertyLine, getLeadStageMetadata, useLeadDetail } from "@/hooks/use-leads";
 import { usePipelineStages } from "@/hooks/use-pipeline-config";
 import { LEAD_BOARD_STAGE_SLUGS, isBidBoardMirroredStageSlug } from "@/lib/pipeline-ownership";
@@ -19,6 +20,7 @@ export function LeadDetailPage() {
   const { stages } = usePipelineStages();
   const [isConvertDialogOpen, setIsConvertDialogOpen] = useState(false);
   const [isStageDialogOpen, setIsStageDialogOpen] = useState(false);
+  const [isEditing, setIsEditing] = useState(false);
 
   const currentStage = useMemo(
     () => stages.find((stage) => stage.id === lead?.stageId) ?? null,
@@ -70,11 +72,16 @@ export function LeadDetailPage() {
     (currentStageSlug === "sales_validation_stage" || currentStageSlug === "opportunity");
   const canAdvanceLeadStage = !isConverted && nextLeadStage != null;
 
-  const secondaryAction = !isConverted
-    ? {
-        label: currentStageSlug === "sales_validation_stage" ? "Edit Sales Validation" : "Edit Lead",
-        onClick: () => navigate(`/leads/${lead.id}/edit`),
-      }
+  const isLeadEditV2 = Boolean(lead.leadQuestionnaire);
+  const isHiddenReadOnly = !lead.isActive && lead.status !== "converted";
+
+  const secondaryAction = isHiddenReadOnly
+    ? null
+    : !isConverted
+      ? {
+          label: currentStageSlug === "sales_validation_stage" ? "Edit Sales Validation" : "Edit Lead",
+          onClick: () => (isLeadEditV2 ? setIsEditing(true) : navigate(`/leads/${lead.id}/edit`)),
+        }
     : lead.convertedDealId && isOpportunityStage
       ? {
           label: "Open Opportunity Scope",
@@ -172,34 +179,51 @@ export function LeadDetailPage() {
         </div>
 
         <div className="space-y-4">
-          <LeadForm
-            showPrimaryAction={false}
-          lead={{
-            id: lead.id,
-            name: lead.name,
-            convertedDealId: lead.convertedDealId,
-            convertedDealNumber: lead.convertedDealNumber,
-            companyId: lead.companyId ?? null,
-            companyName: leadCompanyName,
-            stageId: lead.stageId,
-            propertyId: lead.propertyId,
-            propertyName: lead.property?.name ?? null,
-            propertyAddress: lead.property?.address ?? null,
-              propertyCity: lead.property?.city ?? null,
-              propertyState: lead.property?.state ?? null,
-              propertyZip: lead.property?.zip ?? null,
-              source: lead.source,
-              description: lead.description,
-              projectTypeId: lead.projectTypeId,
-              projectType: lead.projectType,
-              qualificationPayload: lead.qualificationPayload,
-              projectTypeQuestionPayload: lead.projectTypeQuestionPayload,
-              stageEnteredAt: lead.stageEnteredAt,
-            }}
-            converted={isConverted}
-          />
+          {isHiddenReadOnly && (
+            <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+              Hidden lead records are read-only.
+            </div>
+          )}
 
-          {canConvertToOpportunity ? (
+          {isEditing && isLeadEditV2 ? (
+            <LeadQuestionnaireEditor
+              lead={lead}
+              onCancel={() => setIsEditing(false)}
+              onSaved={async () => {
+                await refetch();
+                setIsEditing(false);
+              }}
+            />
+          ) : (
+            <LeadForm
+              lead={{
+                id: lead.id,
+                name: lead.name,
+                convertedDealId: lead.convertedDealId,
+                convertedDealNumber: lead.convertedDealNumber,
+                companyId: lead.companyId ?? null,
+                companyName: leadCompanyName,
+                stageId: lead.stageId,
+                propertyId: lead.propertyId,
+                propertyName: lead.property?.name ?? null,
+                propertyAddress: lead.property?.address ?? null,
+                propertyCity: lead.property?.city ?? null,
+                propertyState: lead.property?.state ?? null,
+                propertyZip: lead.property?.zip ?? null,
+                source: lead.source,
+                description: lead.description,
+                projectTypeId: lead.projectTypeId,
+                projectType: lead.projectType,
+                qualificationPayload: lead.qualificationPayload,
+                projectTypeQuestionPayload: lead.projectTypeQuestionPayload,
+                stageEnteredAt: lead.stageEnteredAt,
+              }}
+              showPrimaryAction={false}
+              converted={isConverted}
+            />
+          )}
+
+          {!isEditing && canConvertToOpportunity ? (
             <>
               <Button onClick={() => setIsConvertDialogOpen(true)}>Convert to Opportunity</Button>
               <LeadConvertDialog
@@ -211,7 +235,7 @@ export function LeadDetailPage() {
             </>
           ) : null}
 
-          {canAdvanceLeadStage ? (
+          {!isEditing && canAdvanceLeadStage ? (
             <>
               <Button variant="secondary" onClick={() => setIsStageDialogOpen(true)}>
                 Move to {nextLeadStage.name}
@@ -222,7 +246,9 @@ export function LeadDetailPage() {
                 targetStageName={nextLeadStage.name}
                 open={isStageDialogOpen}
                 onOpenChange={setIsStageDialogOpen}
-                onEditLead={() => navigate(`/leads/${lead.id}/edit`)}
+                onEditLead={() =>
+                  isLeadEditV2 ? setIsEditing(true) : navigate(`/leads/${lead.id}/edit`)
+                }
                 onSuccess={() => {
                   setIsStageDialogOpen(false);
                   void refetch();

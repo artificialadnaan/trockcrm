@@ -147,6 +147,10 @@ vi.mock("@/components/leads/lead-form", () => ({
   LeadForm: ({ mode }: { mode?: string }) => <div>{mode === "edit" ? "Lead Form Edit" : "Lead Form Summary"}</div>,
 }));
 
+vi.mock("@/components/leads/lead-questionnaire-editor", () => ({
+  LeadQuestionnaireEditor: () => <div>Lead Questionnaire Editor</div>,
+}));
+
 vi.mock("@/components/leads/lead-stage-badge", () => ({
   LeadStageBadge: ({ stageId }: { stageId: string }) => <span>{stageId}</span>,
 }));

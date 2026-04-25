@@ -60,14 +60,16 @@ export async function listQuestionnaireNodes(
   tenantDb: TenantDb,
   projectTypeId: string | null
 ): Promise<QuestionnaireNode[]> {
+  return (await listAllQuestionnaireNodes(tenantDb)).filter(
+    (row) => row.projectTypeId == null || (projectTypeId != null && row.projectTypeId === projectTypeId)
+  );
+}
+
+export async function listAllQuestionnaireNodes(tenantDb: TenantDb): Promise<QuestionnaireNode[]> {
   const rows = await tenantDb.select().from(projectTypeQuestionNodes);
 
   return rows
-    .filter(
-      (row) =>
-        row.isActive &&
-        (row.projectTypeId == null || (projectTypeId != null && row.projectTypeId === projectTypeId))
-    )
+    .filter((row) => row.isActive)
     .sort((left, right) => left.displayOrder - right.displayOrder);
 }
 
@@ -103,14 +105,16 @@ export async function getLeadQuestionnaireSnapshot(
     projectTypeId: string | null;
   }
 ) {
-  const [nodes, answers] = await Promise.all([
+  const [nodes, allNodes, answers] = await Promise.all([
     listQuestionnaireNodes(tenantDb, input.projectTypeId),
+    listAllQuestionnaireNodes(tenantDb),
     listLeadQuestionAnswers(tenantDb, input.leadId),
   ]);
 
   return {
     projectTypeId: input.projectTypeId,
     nodes,
+    allNodes,
     answers,
   };
 }
