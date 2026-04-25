@@ -1059,6 +1059,7 @@ export function createLeadService(
             id: existing.id,
             stageId: existing.stageId,
             stageSlug: currentStage.slug,
+            source: input.source !== undefined ? input.source : existing.source,
             projectTypeId: effectiveProjectTypeId ?? null,
             qualificationPayload: effectiveQualificationPayload,
             projectTypeQuestionPayload:

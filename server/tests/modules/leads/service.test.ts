@@ -544,6 +544,56 @@ describe("lead service canonical progression", () => {
     ]);
   });
 
+  it("allows moving into Qualified Lead when source, project type, and existing customer status were already saved", async () => {
+    const tenantDb = createFakeTenantDb({
+      id: "lead-1",
+      companyId: "company-1",
+      propertyId: "property-1",
+      primaryContactId: null,
+      name: "Palm Villas repaint",
+      stageId: newLeadStage.id,
+      assignedRepId: "rep-1",
+      status: "open",
+      projectTypeId: "project-type-commercial",
+      qualificationPayload: {
+        existing_customer_status: "existing",
+      },
+      projectTypeQuestionPayload: {
+        projectTypeId: "project-type-commercial",
+        answers: {},
+      },
+      source: "Referral",
+      description: null,
+      stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+      convertedAt: null,
+      isActive: true,
+      createdAt: new Date("2026-04-12T15:00:00.000Z"),
+      updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+    });
+    const service = createLeadService({
+      getStageById: pipelineMocks.getStageById as never,
+      getActiveProjectTypes: pipelineMocks.getActiveProjectTypes as never,
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+    });
+
+    const lead = await service.updateLead(
+      tenantDb as never,
+      "lead-1",
+      { stageId: qualifiedLeadStage.id },
+      "director",
+      "director-1"
+    );
+
+    expect(lead.stageId).toBe(qualifiedLeadStage.id);
+    expect(tenantDb.state.leadStageHistory).toEqual([
+      expect.objectContaining({
+        leadId: "lead-1",
+        fromStageId: newLeadStage.id,
+        toStageId: qualifiedLeadStage.id,
+      }),
+    ]);
+  });
+
   it("allows mixed-config tenants to move between custom lead stages without canonical invalid-stage errors", async () => {
     const tenantDb = createFakeTenantDb({
       id: "lead-1",
