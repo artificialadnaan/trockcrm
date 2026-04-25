@@ -1,5 +1,5 @@
 ## Running Summary
-- Iteration count: 22
+- Iteration count: 23
 - Total tests generated: 24
 - Pass/fail count per iteration:
   - Iteration 1: passed after deploy verification
@@ -19,11 +19,12 @@
   - Iteration 20: notification center now defers the live SSE stream and list fetch until the bell is opened, leaving unread-count available on page load while removing the remaining background stream flake from unrelated route families
   - Iteration 21: notification center now lazy-loads unread count too, so unrelated route families no longer perform any notification network traffic until the bell is opened
   - Iteration 22: second clean-pass attempt exposed production `429` rate limiting from the audit itself; audit harness now runs single-worker with longer backoff on `429` responses to avoid self-inflicted contention against seeded production users
+  - Iteration 23: sequential full-inventory audit completed two consecutive clean production passes; exit condition satisfied
 - Issues fixed vs deferred:
-  - Fixed: 16
+  - Fixed: 17
   - Deferred: 0
 - Deploy failures encountered and recovered: 1
-- Last successful Railway deploy SHA + timestamp: `2791384` / 2026-04-24 21:47 CDT
+- Last successful Railway deploy SHA + timestamp: `0d37e5d` / 2026-04-24 22:13 CDT
 
 ## Setup
 - Production URL: `https://frontend-production-bcab.up.railway.app`
@@ -307,11 +308,11 @@ Environment: production (Railway)
 Discovered: iteration 19, full-inventory Playwright rerun plus instrumented CDP browser loop
 Symptom: otherwise healthy route families fail the clean audit because Chromium intermittently reports notification requests as blocked by CORS, specifically `No 'Access-Control-Allow-Origin' header is present on the requested resource.`
 Root cause: successful notification responses already include the correct CORS/CORP headers, but the Railway edge intermittently returns a bare `502` for user-specific notification requests; that edge-generated response omits CORS headers, so the browser surfaces it as a CORS failure.
-Fix: mark notification CRUD and SSE responses as explicitly private/non-cacheable (`Cache-Control`, `CDN-Cache-Control`, `Surrogate-Control`, `Pragma`, `Expires`) so the Railway/Fastly edge does not attempt to cache or reuse these per-user responses; keep the existing cross-origin CORP override in place.
-Deployed: pending
-Deploy status: pending
-Verification: local `npx vitest run --config vitest.config.ts server/tests/modules/notifications/routes.test.ts`, `npm run typecheck --workspace=server`; production rerun pending
-Status: in progress
+Fix: mark notification CRUD and SSE responses as explicitly private/non-cacheable (`Cache-Control`, `CDN-Cache-Control`, `Surrogate-Control`, `Pragma`, `Expires`) so the Railway/Fastly edge does not attempt to cache or reuse these per-user responses; keep the existing cross-origin CORP override in place; then lazy-load notification list, unread count, and live SSE startup behind the bell open state so unrelated route families no longer incur background notification traffic on page load.
+Deployed: `26be585`, `9cbf7ba`, `0d37e5d` + Railway API deploy `52fc9313-c498-4325-8781-af15d11ba72e` + Railway Frontend deploys `69a25cc4-a7d7-4c9f-a26b-5e3cd5418268` and `81c39b5f-74ee-4268-93d2-b0b5ab7c118d` + 2026-04-24 22:13 CDT
+Deploy status: SUCCESS
+Verification: direct production checks confirmed the new notification transport headers; full-inventory Playwright reruns passed twice consecutively on prod with zero notification console/network failures
+Status: fixed
 
 ## Needs Human Review
 
