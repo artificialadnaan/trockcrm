@@ -156,6 +156,41 @@ export interface LeadRecord {
   };
 }
 
+export interface LeadQuestionnaireSnapshot {
+  projectTypeId: string | null;
+  nodes: Array<{
+    id: string;
+    projectTypeId: string | null;
+    parentNodeId: string | null;
+    parentOptionValue: string | null;
+    nodeType: string;
+    key: string;
+    label: string;
+    prompt: string | null;
+    inputType: string | null;
+    options: unknown;
+    isRequired: boolean;
+    displayOrder: number;
+    isActive: boolean;
+  }>;
+  allNodes: Array<{
+    id: string;
+    projectTypeId: string | null;
+    parentNodeId: string | null;
+    parentOptionValue: string | null;
+    nodeType: string;
+    key: string;
+    label: string;
+    prompt: string | null;
+    inputType: string | null;
+    options: unknown;
+    isRequired: boolean;
+    displayOrder: number;
+    isActive: boolean;
+  }>;
+  answers: Record<string, string | boolean | number | null>;
+}
+
 export interface LeadFilters {
   search?: string;
   companyId?: string;
@@ -291,6 +326,37 @@ export function useLeadDetail(leadId: string | undefined) {
   }, [fetchLead]);
 
   return { lead, loading, error, refetch: fetchLead };
+}
+
+export function useLeadQuestionnaireTemplate(projectTypeId: string | null | undefined) {
+  const [questionnaire, setQuestionnaire] = useState<LeadQuestionnaireSnapshot | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  const fetchQuestionnaire = useCallback(async () => {
+    const params = new URLSearchParams();
+    if (projectTypeId) {
+      params.set("projectTypeId", projectTypeId);
+    }
+
+    setLoading(true);
+    try {
+      const data = await api<{
+        enabled: boolean;
+        questionnaire: LeadQuestionnaireSnapshot | null;
+      }>(`/leads/questionnaire-template${params.toString() ? `?${params.toString()}` : ""}`);
+      setQuestionnaire(data.enabled ? data.questionnaire : null);
+    } catch {
+      setQuestionnaire(null);
+    } finally {
+      setLoading(false);
+    }
+  }, [projectTypeId]);
+
+  useEffect(() => {
+    fetchQuestionnaire();
+  }, [fetchQuestionnaire]);
+
+  return { questionnaire, loading, refetch: fetchQuestionnaire };
 }
 
 export function useLeadQualification(leadId: string | undefined) {

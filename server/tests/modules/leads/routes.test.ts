@@ -11,6 +11,7 @@ const serviceMocks = vi.hoisted(() => ({
 
 const questionnaireMocks = vi.hoisted(() => ({
   getLeadQuestionnaireSnapshot: vi.fn(),
+  getQuestionnaireTemplateSnapshot: vi.fn(),
   isLeadEditV2Enabled: vi.fn(),
 }));
 
@@ -29,6 +30,7 @@ vi.mock("../../../src/modules/leads/conversion-service.js", () => ({
 
 vi.mock("../../../src/modules/leads/questionnaire-service.js", () => ({
   getLeadQuestionnaireSnapshot: questionnaireMocks.getLeadQuestionnaireSnapshot,
+  getQuestionnaireTemplateSnapshot: questionnaireMocks.getQuestionnaireTemplateSnapshot,
   isLeadEditV2Enabled: questionnaireMocks.isLeadEditV2Enabled,
 }));
 
@@ -50,6 +52,7 @@ async function loadLeadRoutes() {
 
   vi.doMock("../../../src/modules/leads/questionnaire-service.js", () => ({
     getLeadQuestionnaireSnapshot: questionnaireMocks.getLeadQuestionnaireSnapshot,
+    getQuestionnaireTemplateSnapshot: questionnaireMocks.getQuestionnaireTemplateSnapshot,
     isLeadEditV2Enabled: questionnaireMocks.isLeadEditV2Enabled,
   }));
 
@@ -151,6 +154,39 @@ async function invokeLeadDetailRoute(leadRoutes?: unknown) {
       allNodes: [],
       answers: {},
     };
+  });
+
+  await handler(req, res, next);
+  return { req, res, next };
+}
+
+async function invokeQuestionnaireTemplateRoute(projectTypeId = "project-type-1", leadRoutes?: unknown) {
+  const routes = leadRoutes ?? (await loadLeadRoutes());
+  const handler = findRouteHandler(routes, "get", "/questionnaire-template");
+  const req = {
+    query: { projectTypeId },
+    tenantDb: {},
+    user: {
+      id: "rep-1",
+      role: "rep",
+      activeOfficeId: "office-1",
+    },
+    commitTransaction: vi.fn(async () => {}),
+  } as any;
+  const res = {
+    statusCode: 200,
+    body: undefined as any,
+    status(code: number) {
+      this.statusCode = code;
+      return this;
+    },
+    json(payload: any) {
+      this.body = payload;
+      return this;
+    },
+  } as any;
+  const next = vi.fn((err?: unknown) => {
+    if (err) throw err;
   });
 
   await handler(req, res, next);
@@ -293,6 +329,55 @@ describe("lead stage transition route", () => {
           allNodes: [],
           answers: {},
         },
+      },
+    });
+  });
+
+  it("returns the questionnaire template for create mode when lead edit v2 is enabled", async () => {
+    const leadRoutes = await loadLeadRoutes();
+    questionnaireMocks.isLeadEditV2Enabled.mockReturnValue(true);
+    questionnaireMocks.getQuestionnaireTemplateSnapshot.mockResolvedValueOnce({
+      projectTypeId: "project-type-1",
+      nodes: [
+        {
+          id: "node-1",
+          projectTypeId: null,
+          parentNodeId: null,
+          parentOptionValue: null,
+          nodeType: "question",
+          key: "bid_due_date",
+          label: "Bid Due Date",
+          prompt: null,
+          inputType: "date",
+          options: [],
+          isRequired: true,
+          displayOrder: 10,
+          isActive: true,
+        },
+      ],
+      allNodes: [],
+      answers: {},
+    });
+
+    const { req, res } = await invokeQuestionnaireTemplateRoute("project-type-1", leadRoutes);
+
+    expect(questionnaireMocks.getQuestionnaireTemplateSnapshot).toHaveBeenCalledWith(
+      req.tenantDb,
+      "project-type-1"
+    );
+    expect(req.commitTransaction).toHaveBeenCalledTimes(1);
+    expect(res.body).toEqual({
+      enabled: true,
+      questionnaire: {
+        projectTypeId: "project-type-1",
+        nodes: [
+          expect.objectContaining({
+            key: "bid_due_date",
+            label: "Bid Due Date",
+          }),
+        ],
+        allNodes: [],
+        answers: {},
       },
     });
   });

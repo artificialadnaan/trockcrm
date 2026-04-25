@@ -119,6 +119,23 @@ export async function getLeadQuestionnaireSnapshot(
   };
 }
 
+export async function getQuestionnaireTemplateSnapshot(
+  tenantDb: TenantDb,
+  projectTypeId: string | null
+) {
+  const [nodes, allNodes] = await Promise.all([
+    listQuestionnaireNodes(tenantDb, projectTypeId),
+    listAllQuestionnaireNodes(tenantDb),
+  ]);
+
+  return {
+    projectTypeId,
+    nodes,
+    allNodes,
+    answers: {},
+  };
+}
+
 function isNodeVisible(
   node: QuestionnaireNode,
   nodeById: Map<string, QuestionnaireNode>,

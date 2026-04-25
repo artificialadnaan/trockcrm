@@ -17,6 +17,7 @@ import { getLeadQualificationByLeadId } from "./qualification-service.js";
 import { getLeadScopingSnapshot, upsertLeadScopingIntake } from "./scoping-service.js";
 import {
   getLeadQuestionnaireSnapshot,
+  getQuestionnaireTemplateSnapshot,
   isLeadEditV2Enabled,
 } from "./questionnaire-service.js";
 
@@ -91,6 +92,26 @@ router.get("/stages/:stageId", async (req, res, next) => {
     const stagePage = await listLeadStagePage(req.tenantDb!, readStageInput(req));
     await req.commitTransaction!();
     res.json(stagePage);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/questionnaire-template", async (req, res, next) => {
+  try {
+    if (!isLeadEditV2Enabled()) {
+      await req.commitTransaction!();
+      res.json({ enabled: false, questionnaire: null });
+      return;
+    }
+
+    const projectTypeId =
+      typeof req.query.projectTypeId === "string" && req.query.projectTypeId.trim().length > 0
+        ? req.query.projectTypeId
+        : null;
+    const questionnaire = await getQuestionnaireTemplateSnapshot(req.tenantDb!, projectTypeId);
+    await req.commitTransaction!();
+    res.json({ enabled: true, questionnaire });
   } catch (err) {
     next(err);
   }

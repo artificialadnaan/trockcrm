@@ -27,6 +27,14 @@ const properties = [
   },
 ];
 const contacts = [{ id: "contact-1", firstName: "Ada", lastName: "Lovelace" }];
+const leadHookMocks = vi.hoisted(() => ({
+  createLead: vi.fn(),
+  updateLead: vi.fn(),
+  useLeadQuestionnaireTemplate: vi.fn(() => ({
+    questionnaire: null,
+    loading: false,
+  })),
+}));
 
 vi.mock("@/hooks/use-pipeline-config", () => ({
   usePipelineStages: () => ({
@@ -61,8 +69,9 @@ vi.mock("@/hooks/use-companies", () => ({
 }));
 
 vi.mock("@/hooks/use-leads", () => ({
-  createLead: vi.fn(),
-  updateLead: vi.fn(),
+  createLead: leadHookMocks.createLead,
+  updateLead: leadHookMocks.updateLead,
+  useLeadQuestionnaireTemplate: leadHookMocks.useLeadQuestionnaireTemplate,
 }));
 
 vi.mock("@/components/ui/button", () => ({
@@ -162,6 +171,10 @@ vi.mock("./lead-stage-badge", () => ({
 describe("LeadForm", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    leadHookMocks.useLeadQuestionnaireTemplate.mockReturnValue({
+      questionnaire: null,
+      loading: false,
+    });
   });
 
   it("renders source as an editable field in edit mode so New Lead gate requirements can be satisfied", () => {
@@ -295,5 +308,54 @@ describe("LeadForm", () => {
 
     expect(html).toContain("Multifamily");
     expect(html).not.toContain('data-select-value="__undefined__"');
+  });
+
+  it("renders table-backed questionnaire nodes in create mode when the v2 template is available", () => {
+    leadHookMocks.useLeadQuestionnaireTemplate.mockReturnValue({
+      questionnaire: {
+        projectTypeId: "type-1",
+        nodes: [
+          {
+            id: "node-1",
+            projectTypeId: null,
+            parentNodeId: null,
+            parentOptionValue: null,
+            nodeType: "question",
+            key: "bid_due_date",
+            label: "Bid Due Date",
+            prompt: null,
+            inputType: "date",
+            options: [],
+            isRequired: true,
+            displayOrder: 10,
+            isActive: true,
+          },
+        ],
+        allNodes: [],
+        answers: {},
+      },
+      loading: false,
+    });
+
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <LeadForm
+          mode="create"
+          initialValues={{
+            companyId: "company-1",
+            propertyId: "property-1",
+            primaryContactId: "contact-1",
+            name: "Lead One",
+            source: "Referral",
+            description: "",
+            projectTypeId: "type-1",
+            stageId: "stage-new",
+          }}
+        />
+      </MemoryRouter>
+    );
+
+    expect(html).toContain("Bid Due Date");
+    expect(html).not.toContain("Project Scope");
   });
 });

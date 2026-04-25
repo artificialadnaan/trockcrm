@@ -20,7 +20,12 @@ import { CompanySelector } from "@/components/companies/company-selector";
 import { PropertySelector } from "@/components/properties/property-selector";
 import { LeadStageBadge } from "./lead-stage-badge";
 import { useCompanyContacts } from "@/hooks/use-companies";
-import { createLead, updateLead } from "@/hooks/use-leads";
+import {
+  createLead,
+  updateLead,
+  useLeadQuestionnaireTemplate,
+  type LeadQuestionnaireSnapshot,
+} from "@/hooks/use-leads";
 import { usePipelineStages, useProjectTypes } from "@/hooks/use-pipeline-config";
 import { formatPropertyLabel, useProperties } from "@/hooks/use-properties";
 import { isApiError } from "@/lib/api";
@@ -160,6 +165,87 @@ function renderAnswerValue(value: LeadAnswerValue | undefined) {
   return String(value);
 }
 
+function isVisibleQuestionNode(
+  nodeId: string,
+  nodeById: Map<string, LeadQuestionnaireSnapshot["allNodes"][number]>,
+  answers: Record<string, LeadAnswerValue>,
+  visibleCache: Map<string, boolean>
+) {
+  const cached = visibleCache.get(nodeId);
+  if (cached !== undefined) {
+    return cached;
+  }
+
+  const node = nodeById.get(nodeId);
+  if (!node) {
+    visibleCache.set(nodeId, false);
+    return false;
+  }
+
+  if (!node.parentNodeId) {
+    visibleCache.set(nodeId, true);
+    return true;
+  }
+
+  if (!isVisibleQuestionNode(node.parentNodeId, nodeById, answers, visibleCache)) {
+    visibleCache.set(nodeId, false);
+    return false;
+  }
+
+  const parent = nodeById.get(node.parentNodeId);
+  if (!parent) {
+    visibleCache.set(nodeId, false);
+    return false;
+  }
+
+  const parentAnswer = answers[parent.key];
+  const visible =
+    node.parentOptionValue != null
+      ? String(parentAnswer ?? "") === node.parentOptionValue
+      : typeof parentAnswer === "string"
+        ? parentAnswer.trim().length > 0
+        : Boolean(parentAnswer);
+
+  visibleCache.set(nodeId, visible);
+  return visible;
+}
+
+function getQuestionInputType(node: LeadQuestionnaireSnapshot["allNodes"][number]) {
+  if (node.inputType === "textarea") return "textarea";
+  if (node.inputType === "boolean") return "boolean";
+  if (node.inputType === "date") return "date";
+  if (node.inputType === "currency" || node.inputType === "number") return "number";
+  if (Array.isArray(node.options) && node.options.length > 0) return "select";
+  return "text";
+}
+
+function normalizeQuestionOptions(options: unknown) {
+  if (!Array.isArray(options)) {
+    return [];
+  }
+
+  return options
+    .map((option) => {
+      if (typeof option === "string") {
+        return { value: option, label: option };
+      }
+      if (
+        option &&
+        typeof option === "object" &&
+        "value" in option &&
+        typeof (option as { value?: unknown }).value === "string"
+      ) {
+        const typedOption = option as { value: string; label?: unknown };
+        return {
+          value: typedOption.value,
+          label: typeof typedOption.label === "string" ? typedOption.label : typedOption.value,
+        };
+      }
+      return null;
+    })
+    .filter((option): option is { value: string; label: string } => option != null);
+}
+
 function SummaryLeadForm({
   lead,
   converted = false,
@@ -296,6 +382,9 @@ function EditableLeadForm({
   const leadStages = getLeadCreationStages(stages);
 
   const [formData, setFormData] = useState(() => getEditableFormState(lead, initialValues));
+  const { questionnaire: questionnaireTemplate } = useLeadQuestionnaireTemplate(
+    isCreate ? (formData.projectTypeId || null) : null
+  );
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [stageGateError, setStageGateError] = useState<LeadStageGateErrorState | null>(null);
@@ -377,6 +466,38 @@ function EditableLeadForm({
     () => getValidationQuestionSetForProjectType(selectedProjectType?.slug ?? existingLeadProjectTypeSlug),
     [existingLeadProjectTypeSlug, selectedProjectType?.slug]
   );
+  const questionnaireTemplateNodes = useMemo(
+    () =>
+      questionnaireTemplate
+        ? questionnaireTemplate.allNodes.length > 0
+          ? questionnaireTemplate.allNodes
+          : questionnaireTemplate.nodes
+        : [],
+    [questionnaireTemplate]
+  );
+  const v2QuestionNodes = useMemo(
+    () =>
+      questionnaireTemplateNodes.filter(
+        (node) =>
+          node.nodeType === "question" &&
+          (node.projectTypeId == null || node.projectTypeId === (formData.projectTypeId || null))
+      ),
+    [formData.projectTypeId, questionnaireTemplateNodes]
+  );
+  const v2NodeById = useMemo(
+    () => new Map(questionnaireTemplateNodes.map((node) => [node.id, node])),
+    [questionnaireTemplateNodes]
+  );
+  const v2VisibleQuestionNodes = useMemo(() => {
+    const visibleCache = new Map<string, boolean>();
+
+    return v2QuestionNodes
+      .filter((node) =>
+        isVisibleQuestionNode(node.id, v2NodeById, formData.projectTypeQuestionAnswers, visibleCache)
+      )
+      .sort((left, right) => left.displayOrder - right.displayOrder);
+  }, [formData.projectTypeQuestionAnswers, v2NodeById, v2QuestionNodes]);
+  const useV2Questionnaire = isCreate && Boolean(questionnaireTemplate);
   const gateQuestionSet = useMemo(
     () => getLeadValidationQuestionSetForProjectType(selectedProjectType?.slug ?? existingLeadProjectTypeSlug),
     [existingLeadProjectTypeSlug, selectedProjectType?.slug]
@@ -455,21 +576,27 @@ function EditableLeadForm({
               : Number(formData.qualificationPayload.estimated_value),
           timeline_status: formData.qualificationPayload.timeline_status.trim() || null,
         },
-        projectTypeQuestionPayload: {
-          projectTypeId: formData.projectTypeId || null,
-          answers: Object.fromEntries(
-            questionSet.questions.map((question) => [
-              question.id,
-              formData.projectTypeQuestionAnswers[question.id] ?? null,
-            ])
-          ),
-        },
-        leadQuestionAnswers: Object.fromEntries(
-          questionSet.questions.map((question) => [
-            question.id,
-            formData.projectTypeQuestionAnswers[question.id] ?? null,
-          ])
-        ),
+        projectTypeQuestionPayload: useV2Questionnaire
+          ? undefined
+          : {
+              projectTypeId: formData.projectTypeId || null,
+              answers: Object.fromEntries(
+                questionSet.questions.map((question) => [
+                  question.id,
+                  formData.projectTypeQuestionAnswers[question.id] ?? null,
+                ])
+              ),
+            },
+        leadQuestionAnswers: useV2Questionnaire
+          ? Object.fromEntries(
+              v2QuestionNodes.map((node) => [node.key, formData.projectTypeQuestionAnswers[node.key] ?? null])
+            )
+          : Object.fromEntries(
+              questionSet.questions.map((question) => [
+                question.id,
+                formData.projectTypeQuestionAnswers[question.id] ?? null,
+              ])
+            ),
       };
 
       if (isCreate) {
@@ -771,10 +898,97 @@ function EditableLeadForm({
 
       <Card>
         <CardHeader>
-          <CardTitle>{questionSet.title}</CardTitle>
+          <CardTitle>{useV2Questionnaire ? "Project Intake Questions" : questionSet.title}</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
-          {questionSet.questions.map((question) => {
+          {useV2Questionnaire
+            ? v2VisibleQuestionNodes.map((node) => {
+                const currentValue = formData.projectTypeQuestionAnswers[node.key];
+                const inputType = getQuestionInputType(node);
+                const options = normalizeQuestionOptions(node.options);
+
+                return (
+                  <div key={node.id} className="space-y-2">
+                    <Label htmlFor={node.key}>{node.label}</Label>
+                    {node.prompt ? <p className="text-sm text-muted-foreground">{node.prompt}</p> : null}
+                    {inputType === "textarea" ? (
+                      <textarea
+                        id={node.key}
+                        className="flex min-h-[80px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                        value={typeof currentValue === "string" ? currentValue : ""}
+                        onChange={(event) => handleQuestionAnswerChange(node.key, inputType, event.target.value)}
+                      />
+                    ) : inputType === "boolean" ? (
+                      <Select
+                        value={typeof currentValue === "boolean" ? String(currentValue) : "__unanswered__"}
+                        onValueChange={(value) =>
+                          handleQuestionAnswerChange(
+                            node.key,
+                            inputType,
+                            !value || value === "__unanswered__" ? "" : value
+                          )
+                        }
+                      >
+                        <SelectTrigger id={node.key}>
+                          <SelectValue placeholder="Select" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="__unanswered__">Unanswered</SelectItem>
+                          <SelectItem value="true">Yes</SelectItem>
+                          <SelectItem value="false">No</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    ) : inputType === "select" ? (
+                      <Select
+                        items={[
+                          { value: "__unanswered__", label: "Select" },
+                          ...options.map((option) => ({ value: option.value, label: option.label })),
+                        ]}
+                        value={typeof currentValue === "string" && currentValue ? currentValue : "__unanswered__"}
+                        onValueChange={(value) =>
+                          handleQuestionAnswerChange(
+                            node.key,
+                            "text",
+                            !value || value === "__unanswered__" ? "" : value
+                          )
+                        }
+                      >
+                        <SelectTrigger id={node.key}>
+                          <SelectValue placeholder="Select" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="__unanswered__">Select</SelectItem>
+                          {options.map((option) => (
+                            <SelectItem key={option.value} value={option.value}>
+                              {option.label}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    ) : (
+                      <Input
+                        id={node.key}
+                        type={inputType === "number" ? "number" : inputType === "date" ? "date" : "text"}
+                        value={
+                          typeof currentValue === "number"
+                            ? String(currentValue)
+                            : typeof currentValue === "string"
+                              ? currentValue
+                              : ""
+                        }
+                        onChange={(event) =>
+                          handleQuestionAnswerChange(
+                            node.key,
+                            inputType === "date" ? "text" : inputType,
+                            event.target.value
+                          )
+                        }
+                      />
+                    )}
+                  </div>
+                );
+              })
+            : questionSet.questions.map((question) => {
             const currentValue = formData.projectTypeQuestionAnswers[question.id];
             return (
               <div key={question.id} className="space-y-2">
