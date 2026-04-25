@@ -8,6 +8,7 @@ const baseURL =
 export default defineConfig({
   testDir: "./tests/audit",
   timeout: 60_000,
+  workers: 1,
   expect: {
     timeout: 10_000,
   },

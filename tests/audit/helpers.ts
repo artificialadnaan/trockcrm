@@ -34,7 +34,7 @@ export async function fetchJsonWithRetry<T>(
 ) {
   let lastResponse: import("@playwright/test").APIResponse | null = null;
 
-  for (let attempt = 1; attempt <= 3; attempt += 1) {
+  for (let attempt = 1; attempt <= 5; attempt += 1) {
     lastResponse = await request.fetch(url, init);
     if (lastResponse.ok()) {
       return (await lastResponse.json()) as T;
@@ -42,7 +42,8 @@ export async function fetchJsonWithRetry<T>(
     if (lastResponse.status() !== 429 && lastResponse.status() < 500) {
       break;
     }
-    await wait(300 * attempt);
+    const backoffMs = lastResponse.status() === 429 ? 1_500 * attempt : 300 * attempt;
+    await wait(backoffMs);
   }
 
   expect(

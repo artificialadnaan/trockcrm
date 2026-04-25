@@ -1,5 +1,5 @@
 ## Running Summary
-- Iteration count: 21
+- Iteration count: 22
 - Total tests generated: 24
 - Pass/fail count per iteration:
   - Iteration 1: passed after deploy verification
@@ -18,6 +18,7 @@
   - Iteration 19: full-inventory pass exposed intermittent notification edge `502` responses without CORS headers; notification routes hardened as explicitly private/non-cacheable and email/files audit selectors tightened before redeploy
   - Iteration 20: notification center now defers the live SSE stream and list fetch until the bell is opened, leaving unread-count available on page load while removing the remaining background stream flake from unrelated route families
   - Iteration 21: notification center now lazy-loads unread count too, so unrelated route families no longer perform any notification network traffic until the bell is opened
+  - Iteration 22: second clean-pass attempt exposed production `429` rate limiting from the audit itself; audit harness now runs single-worker with longer backoff on `429` responses to avoid self-inflicted contention against seeded production users
 - Issues fixed vs deferred:
   - Fixed: 16
   - Deferred: 0
