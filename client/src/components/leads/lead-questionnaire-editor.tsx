@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type { LeadRecord } from "@/hooks/use-leads";
-import { updateLead } from "@/hooks/use-leads";
+import { updateLead, useLeadQuestionnaireTemplate } from "@/hooks/use-leads";
 import { usePipelineStages, useProjectTypes } from "@/hooks/use-pipeline-config";
 import { isApiError } from "@/lib/api";
 import { CRM_OWNED_LEAD_STAGE_SLUGS } from "@/lib/sales-workflow";
@@ -164,16 +164,27 @@ export function LeadQuestionnaireEditor({ lead, onCancel, onSaved }: LeadQuestio
     setStageGateError(null);
   }, [lead]);
 
+  const { questionnaire: questionnaireTemplate } = useLeadQuestionnaireTemplate(
+    formData.projectTypeId || lead.projectTypeId || null
+  );
+
   const isConverted = lead.status === "converted" || Boolean(lead.convertedDealId);
-  const availableNodes = questionnaire?.allNodes ?? questionnaire?.nodes ?? [];
+  const availableNodes = useMemo(() => {
+    if (questionnaireTemplate) {
+      return questionnaireTemplate.nodes.length > 0
+        ? questionnaireTemplate.nodes
+        : questionnaireTemplate.allNodes;
+    }
+
+    if (questionnaire) {
+      return questionnaire.nodes.length > 0 ? questionnaire.nodes : questionnaire.allNodes;
+    }
+
+    return [];
+  }, [questionnaire, questionnaireTemplate]);
   const scopedNodes = useMemo(
-    () =>
-      availableNodes.filter(
-        (node) =>
-          node.nodeType === "question" &&
-          (node.projectTypeId == null || node.projectTypeId === (formData.projectTypeId || null))
-      ),
-    [availableNodes, formData.projectTypeId]
+    () => availableNodes.filter((node) => node.nodeType === "question"),
+    [availableNodes]
   );
   const nodeById = useMemo(() => new Map(availableNodes.map((node) => [node.id, node])), [availableNodes]);
   const visibleNodes = useMemo(() => {
@@ -192,8 +203,14 @@ export function LeadQuestionnaireEditor({ lead, onCancel, onSaved }: LeadQuestio
       ),
     [stages]
   );
+  const selectedStageLabel =
+    editableLeadStages.find((stage) => stage.id === formData.stageId)?.name ?? "Select stage";
+  const selectedProjectTypeLabel =
+    projectTypeHierarchy
+      .flatMap((parent) => [parent, ...parent.children])
+      .find((entry) => entry.id === formData.projectTypeId)?.name ?? "Select project type";
 
-  if (!questionnaire) {
+  if (!questionnaire && !questionnaireTemplate) {
     return null;
   }
 
@@ -295,7 +312,7 @@ export function LeadQuestionnaireEditor({ lead, onCancel, onSaved }: LeadQuestio
                     }
                   >
                     <SelectTrigger id="lead-stage">
-                      <SelectValue placeholder="Select stage" />
+                      <SelectValue>{selectedStageLabel}</SelectValue>
                     </SelectTrigger>
                     <SelectContent>
                       {editableLeadStages.map((stage) => (
@@ -329,7 +346,7 @@ export function LeadQuestionnaireEditor({ lead, onCancel, onSaved }: LeadQuestio
                     }
                   >
                     <SelectTrigger id="lead-project-type">
-                      <SelectValue placeholder="Select project type" />
+                      <SelectValue>{selectedProjectTypeLabel}</SelectValue>
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="__none__">Select project type</SelectItem>

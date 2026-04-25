@@ -140,9 +140,10 @@ vi.mock("@/components/ui/select", () => ({
     </SelectContext.Provider>
   ),
   SelectTrigger: ({ children, id }: { children: React.ReactNode; id?: string }) => <div id={id}>{children}</div>,
-  SelectValue: ({ placeholder }: { placeholder?: string }) => {
+  SelectValue: ({ children, placeholder }: { children?: React.ReactNode; placeholder?: string }) => {
     const { items, value } = React.useContext(SelectContext);
-    const label = items?.find((item) => item.value === (value ?? null))?.label ?? placeholder;
+    const label =
+      children ?? items?.find((item) => item.value === (value ?? null))?.label ?? placeholder;
     return <span data-select-label="true">{label}</span>;
   },
   SelectContent: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
@@ -357,5 +358,64 @@ describe("LeadForm", () => {
 
     expect(html).toContain("Bid Due Date");
     expect(html).not.toContain("Project Scope");
+  });
+
+  it("renders table-backed questionnaire answers in the summary rail when the v2 snapshot is present", () => {
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <LeadForm
+          lead={{
+            id: "lead-1",
+            name: "Lead One",
+            convertedDealId: null,
+            convertedDealNumber: null,
+            companyId: "company-1",
+            companyName: "Acme",
+            stageId: "stage-new",
+            propertyId: "property-1",
+            propertyName: "Palm Villas",
+            propertyAddress: "123 Main",
+            propertyCity: "Dallas",
+            propertyState: "TX",
+            propertyZip: "75001",
+            source: "Referral",
+            description: "",
+            projectTypeId: "type-1",
+            projectType: null,
+            qualificationPayload: {},
+            projectTypeQuestionPayload: { projectTypeId: "type-1", answers: {} },
+            leadQuestionnaire: {
+              projectTypeId: "type-1",
+              nodes: [
+                {
+                  id: "node-1",
+                  projectTypeId: null,
+                  parentNodeId: null,
+                  parentOptionValue: null,
+                  nodeType: "question",
+                  key: "bid_due_date",
+                  label: "Bid Due Date",
+                  prompt: null,
+                  inputType: "date",
+                  options: [],
+                  isRequired: true,
+                  displayOrder: 10,
+                  isActive: true,
+                },
+              ],
+              allNodes: [],
+              answers: {
+                bid_due_date: "2026-05-01",
+              },
+            } as any,
+            stageEnteredAt: "2026-04-22T00:00:00.000Z",
+          }}
+        />
+      </MemoryRouter>
+    );
+
+    expect(html).toContain("Project Intake Questions");
+    expect(html).toContain("Bid Due Date");
+    expect(html).toContain("2026-05-01");
   });
 });

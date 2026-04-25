@@ -124,7 +124,7 @@ export function LeadDetailPage() {
         Leads
       </Button>
 
-      <div className="grid gap-6 lg:grid-cols-[1.35fr_0.9fr]">
+      <div className="grid gap-6 lg:grid-cols-[minmax(0,1.35fr)_minmax(320px,0.9fr)]">
         <div className="space-y-4">
           <div className="space-y-3">
             <div className="flex flex-wrap items-center gap-2">
@@ -175,16 +175,6 @@ export function LeadDetailPage() {
             </Card>
           </div>
 
-          <LeadTimelineTab leadId={lead.id} convertedDealId={lead.convertedDealId} convertedAt={convertedAt} />
-        </div>
-
-        <div className="space-y-4">
-          {isHiddenReadOnly && (
-            <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
-              Hidden lead records are read-only.
-            </div>
-          )}
-
           {isEditing && isLeadEditV2 ? (
             <LeadQuestionnaireEditor
               lead={lead}
@@ -195,33 +185,48 @@ export function LeadDetailPage() {
               }}
             />
           ) : (
-            <LeadForm
-              lead={{
-                id: lead.id,
-                name: lead.name,
-                convertedDealId: lead.convertedDealId,
-                convertedDealNumber: lead.convertedDealNumber,
-                companyId: lead.companyId ?? null,
-                companyName: leadCompanyName,
-                stageId: lead.stageId,
-                propertyId: lead.propertyId,
-                propertyName: lead.property?.name ?? null,
-                propertyAddress: lead.property?.address ?? null,
-                propertyCity: lead.property?.city ?? null,
-                propertyState: lead.property?.state ?? null,
-                propertyZip: lead.property?.zip ?? null,
-                source: lead.source,
-                description: lead.description,
-                projectTypeId: lead.projectTypeId,
-                projectType: lead.projectType,
-                qualificationPayload: lead.qualificationPayload,
-                projectTypeQuestionPayload: lead.projectTypeQuestionPayload,
-                stageEnteredAt: lead.stageEnteredAt,
-              }}
-              showPrimaryAction={false}
-              converted={isConverted}
+            <LeadTimelineTab
+              leadId={lead.id}
+              convertedDealId={lead.convertedDealId}
+              convertedAt={convertedAt}
             />
           )}
+        </div>
+
+        <div className="space-y-4">
+          {isHiddenReadOnly && (
+            <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+              Hidden lead records are read-only.
+            </div>
+          )}
+
+          <LeadForm
+            lead={{
+              id: lead.id,
+              name: lead.name,
+              convertedDealId: lead.convertedDealId,
+              convertedDealNumber: lead.convertedDealNumber,
+              companyId: lead.companyId ?? null,
+              companyName: leadCompanyName,
+              stageId: lead.stageId,
+              propertyId: lead.propertyId,
+              propertyName: lead.property?.name ?? null,
+              propertyAddress: lead.property?.address ?? null,
+              propertyCity: lead.property?.city ?? null,
+              propertyState: lead.property?.state ?? null,
+              propertyZip: lead.property?.zip ?? null,
+              source: lead.source,
+              description: lead.description,
+              projectTypeId: lead.projectTypeId,
+              projectType: lead.projectType,
+              qualificationPayload: lead.qualificationPayload,
+              projectTypeQuestionPayload: lead.projectTypeQuestionPayload,
+              leadQuestionnaire: lead.leadQuestionnaire ?? null,
+              stageEnteredAt: lead.stageEnteredAt,
+            }}
+            showPrimaryAction={false}
+            converted={isConverted}
+          />
 
           {!isEditing && canConvertToOpportunity ? (
             <>
@@ -257,7 +262,7 @@ export function LeadDetailPage() {
             </>
           ) : null}
 
-          {secondaryAction && (
+          {!isEditing && secondaryAction && (
             <Button variant="outline" onClick={secondaryAction.onClick}>
               {secondaryAction.label}
             </Button>

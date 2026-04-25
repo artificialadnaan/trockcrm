@@ -64,6 +64,7 @@ export interface LeadFormLead {
     projectTypeId: string | null;
     answers: Record<string, LeadAnswerValue>;
   };
+  leadQuestionnaire?: LeadQuestionnaireSnapshot | null;
   stageEnteredAt: string;
 }
 
@@ -145,10 +146,9 @@ function getEditableFormState(
           ? lead.qualificationPayload.timeline_status
           : "",
     } as Record<string, string>,
-    projectTypeQuestionAnswers: { ...(lead?.projectTypeQuestionPayload?.answers ?? {}) } as Record<
-      string,
-      LeadAnswerValue
-    >,
+    projectTypeQuestionAnswers: {
+      ...(lead?.leadQuestionnaire?.answers ?? lead?.projectTypeQuestionPayload?.answers ?? {}),
+    } as Record<string, LeadAnswerValue>,
   };
 }
 
@@ -260,6 +260,30 @@ function SummaryLeadForm({
   const projectType =
     lead.projectType ?? projectTypes.find((entry) => entry.id === lead.projectTypeId) ?? null;
   const questionSet = getValidationQuestionSetForProjectType(projectType?.slug ?? null);
+  const questionnaireNodes = useMemo(
+    () =>
+      lead.leadQuestionnaire
+        ? lead.leadQuestionnaire.nodes.length > 0
+          ? lead.leadQuestionnaire.nodes
+          : lead.leadQuestionnaire.allNodes
+        : [],
+    [lead.leadQuestionnaire]
+  );
+  const questionnaireNodeById = useMemo(
+    () => new Map(questionnaireNodes.map((node) => [node.id, node])),
+    [questionnaireNodes]
+  );
+  const visibleQuestionnaireNodes = useMemo(() => {
+    const visibleCache = new Map<string, boolean>();
+
+    return questionnaireNodes
+      .filter((node) => node.nodeType === "question")
+      .filter((node) =>
+        isVisibleQuestionNode(node.id, questionnaireNodeById, lead.leadQuestionnaire?.answers ?? {}, visibleCache)
+      )
+      .sort((left, right) => left.displayOrder - right.displayOrder);
+  }, [lead.leadQuestionnaire?.answers, questionnaireNodeById, questionnaireNodes]);
+  const showV2SummaryQuestions = visibleQuestionnaireNodes.length > 0;
 
   return (
     <Card className="overflow-hidden border-slate-200 shadow-sm">
@@ -322,17 +346,26 @@ function SummaryLeadForm({
           </div>
           <div className="space-y-2">
             <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-              {questionSet.title}
+              {showV2SummaryQuestions ? "Project Intake Questions" : questionSet.title}
             </p>
             <div className="grid gap-3 text-sm">
-              {questionSet.questions.map((question) => (
-                <div key={question.id}>
-                  <p className="text-muted-foreground">{question.label}</p>
-                  <p className="font-medium">
-                    {renderAnswerValue(lead.projectTypeQuestionPayload?.answers?.[question.id])}
-                  </p>
-                </div>
-              ))}
+              {showV2SummaryQuestions
+                ? visibleQuestionnaireNodes.map((node) => (
+                    <div key={node.id}>
+                      <p className="text-muted-foreground">{node.label}</p>
+                      <p className="font-medium">
+                        {renderAnswerValue(lead.leadQuestionnaire?.answers?.[node.key])}
+                      </p>
+                    </div>
+                  ))
+                : questionSet.questions.map((question) => (
+                    <div key={question.id}>
+                      <p className="text-muted-foreground">{question.label}</p>
+                      <p className="font-medium">
+                        {renderAnswerValue(lead.projectTypeQuestionPayload?.answers?.[question.id])}
+                      </p>
+                    </div>
+                  ))}
             </div>
           </div>
         </div>
@@ -469,20 +502,15 @@ function EditableLeadForm({
   const questionnaireTemplateNodes = useMemo(
     () =>
       questionnaireTemplate
-        ? questionnaireTemplate.allNodes.length > 0
-          ? questionnaireTemplate.allNodes
-          : questionnaireTemplate.nodes
+        ? questionnaireTemplate.nodes.length > 0
+          ? questionnaireTemplate.nodes
+          : questionnaireTemplate.allNodes
         : [],
     [questionnaireTemplate]
   );
   const v2QuestionNodes = useMemo(
-    () =>
-      questionnaireTemplateNodes.filter(
-        (node) =>
-          node.nodeType === "question" &&
-          (node.projectTypeId == null || node.projectTypeId === (formData.projectTypeId || null))
-      ),
-    [formData.projectTypeId, questionnaireTemplateNodes]
+    () => questionnaireTemplateNodes.filter((node) => node.nodeType === "question"),
+    [questionnaireTemplateNodes]
   );
   const v2NodeById = useMemo(
     () => new Map(questionnaireTemplateNodes.map((node) => [node.id, node])),
@@ -497,7 +525,16 @@ function EditableLeadForm({
       )
       .sort((left, right) => left.displayOrder - right.displayOrder);
   }, [formData.projectTypeQuestionAnswers, v2NodeById, v2QuestionNodes]);
-  const useV2Questionnaire = isCreate && Boolean(questionnaireTemplate);
+  const useV2Questionnaire = isCreate && questionnaireTemplateNodes.length > 0;
+  const selectedPrimaryContactLabel =
+    primaryContactSelectItems.find((item) => item.value === (formData.primaryContactId || "__none__"))?.label ??
+    "Optional";
+  const selectedStageLabel =
+    stageSelectItems.find((item) => item.value === formData.stageId)?.label ??
+    (stagesLoading ? "Loading stages..." : "Select stage");
+  const selectedProjectTypeLabel =
+    projectTypeSelectItems.find((item) => item.value === (formData.projectTypeId || "__none__"))?.label ??
+    "Select project type";
   const gateQuestionSet = useMemo(
     () => getLeadValidationQuestionSetForProjectType(selectedProjectType?.slug ?? existingLeadProjectTypeSlug),
     [existingLeadProjectTypeSlug, selectedProjectType?.slug]
@@ -712,7 +749,7 @@ function EditableLeadForm({
                     }
                   >
                     <SelectTrigger id="primaryContactId">
-                      <SelectValue placeholder="Optional" />
+                      <SelectValue>{selectedPrimaryContactLabel}</SelectValue>
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="__none__">No primary contact</SelectItem>
@@ -746,7 +783,7 @@ function EditableLeadForm({
                     disabled={stagesLoading}
                   >
                     <SelectTrigger id="stageId">
-                      <SelectValue placeholder={stagesLoading ? "Loading stages..." : "Select stage"} />
+                      <SelectValue>{selectedStageLabel}</SelectValue>
                     </SelectTrigger>
                     <SelectContent>
                       {leadStages.map((stage) => (
@@ -780,7 +817,7 @@ function EditableLeadForm({
                     }
                   >
                     <SelectTrigger id="projectTypeId">
-                      <SelectValue placeholder="Select project type" />
+                      <SelectValue>{selectedProjectTypeLabel}</SelectValue>
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="__none__">Select project type</SelectItem>
@@ -844,7 +881,7 @@ function EditableLeadForm({
                   }
                 >
                   <SelectTrigger id="projectTypeId">
-                    <SelectValue placeholder="Select project type" />
+                    <SelectValue>{selectedProjectTypeLabel}</SelectValue>
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="__none__">Select project type</SelectItem>

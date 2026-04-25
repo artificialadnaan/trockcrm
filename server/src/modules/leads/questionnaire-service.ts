@@ -2,6 +2,7 @@ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
   leadQuestionAnswerHistory,
   leadQuestionAnswers,
+  projectTypeConfig,
   projectTypeQuestionNodes,
 } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
@@ -56,12 +57,37 @@ function valuesEqual(left: unknown, right: unknown) {
   return JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
 }
 
+async function resolveProjectTypeLineageIds(tenantDb: TenantDb, projectTypeId: string | null) {
+  if (!projectTypeId) {
+    return [];
+  }
+
+  const rows = await tenantDb.select().from(projectTypeConfig);
+  const parentById = new Map(rows.map((row) => [row.id, row.parentId]));
+  const lineageIds: string[] = [];
+  const visited = new Set<string>();
+
+  let currentId: string | null = projectTypeId;
+  while (currentId && !visited.has(currentId)) {
+    lineageIds.push(currentId);
+    visited.add(currentId);
+    currentId = parentById.get(currentId) ?? null;
+  }
+
+  return lineageIds;
+}
+
 export async function listQuestionnaireNodes(
   tenantDb: TenantDb,
   projectTypeId: string | null
 ): Promise<QuestionnaireNode[]> {
-  return (await listAllQuestionnaireNodes(tenantDb)).filter(
-    (row) => row.projectTypeId == null || (projectTypeId != null && row.projectTypeId === projectTypeId)
+  const [allNodes, projectTypeLineageIds] = await Promise.all([
+    listAllQuestionnaireNodes(tenantDb),
+    resolveProjectTypeLineageIds(tenantDb, projectTypeId),
+  ]);
+
+  return allNodes.filter(
+    (row) => row.projectTypeId == null || projectTypeLineageIds.includes(row.projectTypeId)
   );
 }
 
