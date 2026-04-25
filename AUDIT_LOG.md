@@ -1,5 +1,5 @@
 ## Running Summary
-- Iteration count: 19
+- Iteration count: 20
 - Total tests generated: 24
 - Pass/fail count per iteration:
   - Iteration 1: passed after deploy verification
@@ -16,6 +16,7 @@
   - Iteration 17: lead creation stage-loading race fixed locally; projects invalid-id path split into explicit negative-path audit; frontend deploy pending
   - Iteration 18: lead-stage race deployed to production; fresh frontend asset hash verified; project-route family rerun clean; lead/deal progression timeout traced to a stale test locator, not a product regression
   - Iteration 19: full-inventory pass exposed intermittent notification edge `502` responses without CORS headers; notification routes hardened as explicitly private/non-cacheable and email/files audit selectors tightened before redeploy
+  - Iteration 20: notification center now defers the live SSE stream and list fetch until the bell is opened, leaving unread-count available on page load while removing the remaining background stream flake from unrelated route families
 - Issues fixed vs deferred:
   - Fixed: 16
   - Deferred: 0

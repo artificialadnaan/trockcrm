@@ -34,8 +34,8 @@ function timeAgo(dateStr: string): string {
 export function NotificationCenter() {
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
-  const { unreadCount, markAsRead, markAllAsRead } = useNotificationStream();
-  const { notifications, refetch } = useNotifications(20);
+  const { unreadCount, markAsRead, markAllAsRead } = useNotificationStream(open);
+  const { notifications, refetch } = useNotifications(20, open);
 
   const handleNotificationClick = async (notification: Notification) => {
     if (!notification.isRead) {

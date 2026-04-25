@@ -30,7 +30,7 @@ export function isIgnorableNotificationError(error: unknown) {
   return false;
 }
 
-export function useNotifications(limit: number = 20) {
+export function useNotifications(limit: number = 20, enabled: boolean = true) {
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -58,13 +58,18 @@ export function useNotifications(limit: number = 20) {
   );
 
   useEffect(() => {
+    if (!enabled) {
+      setLoading(false);
+      return;
+    }
+
     const controller = new AbortController();
     void fetchNotifications(controller.signal);
 
     return () => {
       controller.abort();
     };
-  }, [fetchNotifications]);
+  }, [enabled, fetchNotifications]);
 
   return { notifications, loading, error, refetch: fetchNotifications };
 }
@@ -100,7 +105,7 @@ export function useUnreadCount() {
  * Subscribe to SSE notification stream.
  * Returns the unread count and auto-updates on new notifications.
  */
-export function useNotificationStream() {
+export function useNotificationStream(enabled: boolean = true) {
   const [unreadCount, setUnreadCount] = useState(0);
   const [latestNotification, setLatestNotification] = useState<Notification | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
@@ -125,6 +130,12 @@ export function useNotificationStream() {
 
   // Connect to SSE stream
   useEffect(() => {
+    if (!enabled) {
+      eventSourceRef.current?.close();
+      eventSourceRef.current = null;
+      return;
+    }
+
     const apiBase = resolveApiBase(
       (import.meta as any).env ?? {},
       typeof window !== "undefined" ? window.location : undefined
@@ -163,7 +174,7 @@ export function useNotificationStream() {
       es.close();
       eventSourceRef.current = null;
     };
-  }, []);
+  }, [enabled]);
 
   const markAsRead = useCallback(async (notificationId: string) => {
     await api(`/notifications/${notificationId}/read`, { method: "POST" });

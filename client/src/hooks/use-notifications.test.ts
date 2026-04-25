@@ -162,19 +162,19 @@ function flushEffects() {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
-function HookProbe() {
-  useNotificationStream();
+function HookProbe({ enabled = true }: { enabled?: boolean }) {
+  useNotificationStream(enabled);
   return null;
 }
 
-async function renderHook() {
+async function renderHook(enabled: boolean = true) {
   const { document } = installFakeDom();
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container as unknown as Element);
 
   await act(async () => {
-    root.render(createElement(HookProbe));
+    root.render(createElement(HookProbe, { enabled }));
     await flushEffects();
   });
 
@@ -238,5 +238,25 @@ describe("useNotificationStream", () => {
     });
 
     consoleErrorSpy.mockRestore();
+  });
+
+  it("does not open an EventSource connection until explicitly enabled", async () => {
+    apiMock.mockResolvedValueOnce({ count: 0 });
+    const eventSourceSpy = vi.spyOn(globalThis, "EventSource");
+
+    const root = await renderHook(false);
+
+    await act(async () => {
+      await flushEffects();
+    });
+
+    expect(eventSourceSpy).not.toHaveBeenCalled();
+
+    await act(async () => {
+      root.unmount();
+      await flushEffects();
+    });
+
+    eventSourceSpy.mockRestore();
   });
 });
