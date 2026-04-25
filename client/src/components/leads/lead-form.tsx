@@ -287,7 +287,7 @@ function EditableLeadForm({
   initialValues?: LeadCreateFormProps["initialValues"];
 }) {
   const navigate = useNavigate();
-  const { stages } = usePipelineStages();
+  const { stages, loading: stagesLoading } = usePipelineStages();
   const { projectTypes, hierarchy: projectTypeHierarchy } = useProjectTypes();
   const isCreate = mode === "create";
   const [companyId, setCompanyId] = useState<string | null>(lead?.companyId ?? initialValues?.companyId ?? null);
@@ -426,7 +426,16 @@ function EditableLeadForm({
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
 
-    if (!formData.companyId || !formData.propertyId || !formData.name.trim() || !formData.stageId) {
+    const effectiveStageId = isCreate
+      ? getNormalizedLeadCreationStageId(leadStages, formData.stageId)
+      : formData.stageId;
+
+    if (isCreate && stagesLoading) {
+      setError("Initial stage is still loading. Try again in a moment.");
+      return;
+    }
+
+    if (!formData.companyId || !formData.propertyId || !formData.name.trim() || !effectiveStageId) {
       setError("Company, property, lead name, and initial stage are required.");
       return;
     }
@@ -463,7 +472,7 @@ function EditableLeadForm({
           propertyId: formData.propertyId,
           primaryContactId: formData.primaryContactId || null,
           name: formData.name.trim(),
-          stageId: formData.stageId,
+          stageId: effectiveStageId,
           source: formData.source.trim() || null,
           description: formData.description.trim() || null,
           ...workflowPayload,
@@ -601,9 +610,10 @@ function EditableLeadForm({
                     items={stageSelectItems}
                     value={formData.stageId}
                     onValueChange={(value) => handleFieldChange("stageId", value ?? "")}
+                    disabled={stagesLoading}
                   >
                     <SelectTrigger id="stageId">
-                      <SelectValue placeholder="Select stage" />
+                      <SelectValue placeholder={stagesLoading ? "Loading stages..." : "Select stage"} />
                     </SelectTrigger>
                     <SelectContent>
                       {leadStages.map((stage) => (
@@ -816,8 +826,14 @@ function EditableLeadForm({
       </Card>
 
       <div className="flex gap-2">
-        <Button type="submit" disabled={submitting}>
-          {submitting ? "Saving..." : isCreate ? "Create Lead" : "Save Qualification"}
+        <Button type="submit" disabled={submitting || (isCreate && stagesLoading)}>
+          {submitting
+            ? "Saving..."
+            : isCreate && stagesLoading
+              ? "Loading stages..."
+              : isCreate
+                ? "Create Lead"
+                : "Save Qualification"}
         </Button>
         <Button type="button" variant="outline" onClick={() => navigate(isCreate ? "/leads" : `/leads/${lead?.id}`)}>
           Cancel

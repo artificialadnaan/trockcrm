@@ -245,7 +245,7 @@ test.describe.serial("email / tasks / files / projects production audit", () => 
     issues.assertClean();
   });
 
-  test("rep can load the empty projects surfaces without console or network failures", async ({ page }) => {
+  test("rep can load the empty projects list without console or network failures", async ({ page }) => {
     const issues = createIssueCollectors(page);
 
     await loginWithRole(page, "rep");
@@ -254,9 +254,13 @@ test.describe.serial("email / tasks / files / projects production audit", () => 
     await expect(page.getByRole("heading", { name: "Procore Projects", exact: true })).toBeVisible();
     await expect(page.getByText("No Procore-linked projects found", { exact: true })).toBeVisible();
 
+    issues.assertClean();
+  });
+
+  test("rep sees the project not found state for an invalid project id", async ({ page }) => {
+    await loginWithRole(page, "rep");
+
     await page.goto("/projects/non-existent-audit-project", { waitUntil: "domcontentloaded" });
     await expect(page.getByText("Project not found", { exact: true })).toBeVisible();
-
-    issues.assertClean();
   });
 });

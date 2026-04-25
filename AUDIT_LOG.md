@@ -1,5 +1,5 @@
 ## Running Summary
-- Iteration count: 16
+- Iteration count: 17
 - Total tests generated: 24
 - Pass/fail count per iteration:
   - Iteration 1: passed after deploy verification
@@ -13,6 +13,7 @@
   - Iteration 14: email / tasks / files / projects suite green locally except for a real invalid-project-id server bug; API + frontend deploy pending
   - Iteration 15: stale lead creation stage ids normalized locally; API + frontend deploy pending
   - Iteration 16: project routes fixed for Railway cross-origin consumption and lead-to-opportunity progression audit expanded; deploy pending
+  - Iteration 17: lead creation stage-loading race fixed locally; projects invalid-id path split into explicit negative-path audit; frontend deploy pending
 - Issues fixed vs deferred:
   - Fixed: 12
   - Deferred: 0
@@ -267,3 +268,37 @@ Deployed: pending
 Deploy status: pending
 Verification: local `npx vitest run --config vitest.config.ts server/tests/modules/procore/routes.test.ts` and production rerun pending
 Status: in progress
+
+Issue #17 — Lead creation can race pipeline-stage loading and still submit a stale stage id
+Route/Component: `/leads/new`, `LeadForm`, `POST /api/leads`
+Severity: high
+Environment: production (Railway)
+Discovered: iteration 17, instrumented production lead-create repro
+Symptom: creating a lead from a stale `?stageId=` link can still return `500`, even after the earlier normalization work.
+Root cause: the create form normalized stale stage ids in a `useEffect`, but `Create Lead` could still be clicked before pipeline stages finished loading and before that effect applied the replacement stage id.
+Fix: derive the effective stage id again inside `handleSubmit`, block submission while stages are still loading, and disable the stage select / submit button until the canonical creation stages are ready.
+Deployed: pending
+Deploy status: pending
+Verification: direct production repro hit `POST /api/leads -> 500` with `invalid input syntax for type uuid: \"legacy-contacted\"`; frontend deploy and rerun pending
+Status: in progress
+
+Issue #18 — Browser 404 console noise on the project invalid-id audit comes from the deliberate negative-path API call, not a missing asset
+Route/Component: `/projects/non-existent-audit-project`, `ProjectDetailPage`, `useProjectDetail`
+Severity: low
+Environment: production (Railway)
+Discovered: iteration 17, instrumented Playwright browser repro
+Symptom: the browser console shows two `Failed to load resource: the server responded with a status of 404 ()` lines during the invalid-project audit.
+Root cause: both lines are the intentional `GET /api/procore/my-projects/non-existent-audit-project` negative-path call made by `ProjectDetailPage`; Chromium logs that `404` fetch at the console level even though the UI correctly renders `Project not found`.
+Fix: split the invalid-project scenario into its own explicit negative-path test so the clean project-list test only enforces zero unexpected console/network errors.
+Deployed: pending
+Deploy status: pending
+Verification: instrumented browser run captured the exact `404 https://api-production-ad218.up.railway.app/api/procore/my-projects/non-existent-audit-project` response twice and no unknown asset URL
+Status: in progress
+
+## Needs Human Review
+
+- Railway frontend stale-bundle / asset propagation drift
+  - Symptom: after successful pushes and deploys, the Railway frontend has repeatedly continued serving an older asset bundle until a forced frontend redeploy or a later propagation event.
+  - Why it matters: this audit has hit false negatives where production browser checks were running against stale frontend code even though `main` and the API were already updated.
+  - Evidence: multiple audit iterations required explicit frontend redeploys or asset-hash checks before the new client code was observable; this is infrastructure/deployment behavior, not an app-level feature bug.
+  - Requested follow-up: investigate Railway frontend build propagation, CDN/cache invalidation, and whether automatic deploy hooks are reliably targeting the intended frontend service revision.
