@@ -103,8 +103,9 @@ router.get("/:id", async (req, res, next) => {
     if (!lead) {
       throw new AppError(404, "Lead not found");
     }
-    await req.commitTransaction!();
+
     if (!isLeadEditV2Enabled()) {
+      await req.commitTransaction!();
       res.json({ lead });
       return;
     }
@@ -113,6 +114,7 @@ router.get("/:id", async (req, res, next) => {
       leadId: lead.id,
       projectTypeId: lead.projectTypeId ?? null,
     });
+    await req.commitTransaction!();
     res.json({
       lead: {
         ...lead,

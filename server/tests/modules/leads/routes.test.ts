@@ -9,6 +9,11 @@ const serviceMocks = vi.hoisted(() => ({
   updateLead: vi.fn(),
 }));
 
+const questionnaireMocks = vi.hoisted(() => ({
+  getLeadQuestionnaireSnapshot: vi.fn(),
+  isLeadEditV2Enabled: vi.fn(),
+}));
+
 vi.mock("../../../src/modules/leads/service.js", () => ({
   createLead: serviceMocks.createLead,
   deleteLead: serviceMocks.deleteLead,
@@ -20,6 +25,11 @@ vi.mock("../../../src/modules/leads/service.js", () => ({
 
 vi.mock("../../../src/modules/leads/conversion-service.js", () => ({
   convertLead: vi.fn(),
+}));
+
+vi.mock("../../../src/modules/leads/questionnaire-service.js", () => ({
+  getLeadQuestionnaireSnapshot: questionnaireMocks.getLeadQuestionnaireSnapshot,
+  isLeadEditV2Enabled: questionnaireMocks.isLeadEditV2Enabled,
 }));
 
 async function loadLeadRoutes() {
@@ -38,11 +48,16 @@ async function loadLeadRoutes() {
     convertLead: vi.fn(),
   }));
 
+  vi.doMock("../../../src/modules/leads/questionnaire-service.js", () => ({
+    getLeadQuestionnaireSnapshot: questionnaireMocks.getLeadQuestionnaireSnapshot,
+    isLeadEditV2Enabled: questionnaireMocks.isLeadEditV2Enabled,
+  }));
+
   const { leadRoutes } = await import("../../../src/modules/leads/routes.js");
   return leadRoutes;
 }
 
-function findRouteHandler(routes: unknown, method: "post", path: string) {
+function findRouteHandler(routes: unknown, method: "get" | "post", path: string) {
   const layer = (routes as any).stack.find(
     (entry: any) => entry.route?.path === path && entry.route?.methods?.[method]
   );
@@ -93,9 +108,59 @@ async function invokeLeadRoute(body: Record<string, unknown>, leadRoutes?: unkno
   return { req, res, next };
 }
 
+async function invokeLeadDetailRoute(leadRoutes?: unknown) {
+  const routes = leadRoutes ?? (await loadLeadRoutes());
+  const handler = findRouteHandler(routes, "get", "/:id");
+  let committed = false;
+  const req = {
+    params: { id: "lead-1" },
+    tenantDb: {},
+    user: {
+      id: "rep-1",
+      role: "rep",
+      activeOfficeId: "office-1",
+    },
+    commitTransaction: vi.fn(async () => {
+      committed = true;
+    }),
+  } as any;
+  const res = {
+    statusCode: 200,
+    body: undefined as any,
+    status(code: number) {
+      this.statusCode = code;
+      return this;
+    },
+    json(payload: any) {
+      this.body = payload;
+      return this;
+    },
+  } as any;
+  const next = vi.fn((err?: unknown) => {
+    if (err) throw err;
+  });
+
+  questionnaireMocks.getLeadQuestionnaireSnapshot.mockImplementation(async () => {
+    if (committed) {
+      throw new Error("questionnaire fetched after commit");
+    }
+
+    return {
+      projectTypeId: "project-type-1",
+      nodes: [],
+      allNodes: [],
+      answers: {},
+    };
+  });
+
+  await handler(req, res, next);
+  return { req, res, next };
+}
+
 describe("lead stage transition route", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    questionnaireMocks.isLeadEditV2Enabled.mockReturnValue(false);
   });
 
   it("returns the structured blocked-move payload from POST /api/leads/:id/stage-transition", async () => {
@@ -193,6 +258,40 @@ describe("lead stage transition route", () => {
           slug: "qualified_lead",
           isTerminal: false,
           displayOrder: 20,
+        },
+      },
+    });
+  });
+
+  it("loads questionnaire data before commit when lead edit v2 is enabled", async () => {
+    const leadRoutes = await loadLeadRoutes();
+    questionnaireMocks.isLeadEditV2Enabled.mockReturnValue(true);
+    serviceMocks.getLeadById.mockResolvedValueOnce({
+      id: "lead-1",
+      name: "Lead One",
+      stageId: "stage-1",
+      projectTypeId: "project-type-1",
+    });
+
+    const { req, res } = await invokeLeadDetailRoute(leadRoutes);
+
+    expect(serviceMocks.getLeadById).toHaveBeenCalledWith(req.tenantDb, "lead-1", "rep", "rep-1");
+    expect(questionnaireMocks.getLeadQuestionnaireSnapshot).toHaveBeenCalledWith(req.tenantDb, {
+      leadId: "lead-1",
+      projectTypeId: "project-type-1",
+    });
+    expect(req.commitTransaction).toHaveBeenCalledTimes(1);
+    expect(res.body).toEqual({
+      lead: {
+        id: "lead-1",
+        name: "Lead One",
+        stageId: "stage-1",
+        projectTypeId: "project-type-1",
+        leadQuestionnaire: {
+          projectTypeId: "project-type-1",
+          nodes: [],
+          allNodes: [],
+          answers: {},
         },
       },
     });
