@@ -15,6 +15,10 @@ import { convertLead } from "./conversion-service.js";
 import { preflightLeadStageCheck } from "./stage-gate.js";
 import { getLeadQualificationByLeadId } from "./qualification-service.js";
 import { getLeadScopingSnapshot, upsertLeadScopingIntake } from "./scoping-service.js";
+import {
+  getLeadQuestionnaireSnapshot,
+  isLeadEditV2Enabled,
+} from "./questionnaire-service.js";
 
 const router = Router();
 
@@ -100,7 +104,21 @@ router.get("/:id", async (req, res, next) => {
       throw new AppError(404, "Lead not found");
     }
     await req.commitTransaction!();
-    res.json({ lead });
+    if (!isLeadEditV2Enabled()) {
+      res.json({ lead });
+      return;
+    }
+
+    const questionnaire = await getLeadQuestionnaireSnapshot(req.tenantDb!, {
+      leadId: lead.id,
+      projectTypeId: lead.projectTypeId ?? null,
+    });
+    res.json({
+      lead: {
+        ...lead,
+        leadQuestionnaire: questionnaire,
+      },
+    });
   } catch (err) {
     next(err);
   }
@@ -294,6 +312,18 @@ router.post("/:id/convert", async (req, res, next) => {
     await req.commitTransaction!();
     res.status(201).json(result);
   } catch (err) {
+    if (err instanceof LeadStageTransitionError) {
+      res.status(err.statusCode).json({
+        error: {
+          message: err.message,
+          code: err.code,
+          missingRequirements: err.result.missingRequirements,
+          currentStage: err.result.currentStage,
+          targetStage: err.result.targetStage,
+        },
+      });
+      return;
+    }
     next(err);
   }
 });

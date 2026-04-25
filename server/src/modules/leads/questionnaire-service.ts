@@ -96,6 +96,25 @@ export async function listLeadQuestionAnswers(
   }, {});
 }
 
+export async function getLeadQuestionnaireSnapshot(
+  tenantDb: TenantDb,
+  input: {
+    leadId: string;
+    projectTypeId: string | null;
+  }
+) {
+  const [nodes, answers] = await Promise.all([
+    listQuestionnaireNodes(tenantDb, input.projectTypeId),
+    listLeadQuestionAnswers(tenantDb, input.leadId),
+  ]);
+
+  return {
+    projectTypeId: input.projectTypeId,
+    nodes,
+    answers,
+  };
+}
+
 function isNodeVisible(
   node: QuestionnaireNode,
   nodeById: Map<string, QuestionnaireNode>,
