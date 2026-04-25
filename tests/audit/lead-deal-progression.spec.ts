@@ -39,6 +39,15 @@ type DealTeamMember = {
   role: string;
 };
 
+type LeadQuestionnaireNode = {
+  id: string;
+  nodeType: string;
+  key: string;
+  label: string;
+  inputType: string | null;
+  options: unknown;
+};
+
 async function loadAuditBundle() {
   const apiRequest = await createRoleApiContext("rep");
 
@@ -134,13 +143,73 @@ async function removeDealTeamMember(dealId: string, memberId: string) {
   }
 }
 
-async function fillLeadQuestionnaire(page: import("@playwright/test").Page, projectTypeSlug: string) {
+async function fillLeadQuestionnaire(
+  page: import("@playwright/test").Page,
+  projectType: AuditProjectType
+) {
   await page.getByLabel("Source").fill("AUDIT_TEST referral");
   await page.getByLabel("Existing Customer Status").fill("Repeat customer");
   await page.getByLabel("Estimated Value").fill("125000");
   await page.getByLabel("Timeline Status").fill("Q3 2026");
 
-  const questionSet = getLeadValidationQuestionSetForProjectType(projectTypeSlug);
+  const apiRequest = await createRoleApiContext("rep");
+  try {
+    const templateResponse = await fetchJsonWithRetry<{
+      enabled: boolean;
+      questionnaire: {
+        nodes: LeadQuestionnaireNode[];
+      } | null;
+    }>(
+      apiRequest,
+      `${apiBaseURL}/api/leads/questionnaire-template?projectTypeId=${projectType.id}`
+    );
+
+    if (templateResponse.enabled && templateResponse.questionnaire) {
+      for (const node of templateResponse.questionnaire.nodes.filter((entry) => entry.nodeType === "question")) {
+        const locator = page.getByLabel(node.label);
+        if ((await locator.count()) === 0) {
+          continue;
+        }
+
+        if (node.inputType === "boolean") {
+          await locator.click();
+          await page.getByRole("option", { name: "Yes", exact: true }).click();
+          continue;
+        }
+
+        if (Array.isArray(node.options) && node.options.length > 0) {
+          const option = node.options[0];
+          const optionLabel =
+            typeof option === "string"
+              ? option
+              : option && typeof option === "object" && "label" in option
+                ? String((option as { label: unknown }).label)
+                : option && typeof option === "object" && "value" in option
+                  ? String((option as { value: unknown }).value)
+                  : null;
+          if (optionLabel) {
+            await locator.click();
+            await page.getByRole("option", { name: optionLabel, exact: true }).click();
+          }
+          continue;
+        }
+
+        const value =
+          node.inputType === "number" || node.inputType === "currency"
+            ? "1"
+            : node.inputType === "date"
+              ? "2026-05-01"
+              : `AUDIT_TEST ${node.label}`;
+
+        await locator.fill(value);
+      }
+      return;
+    }
+  } finally {
+    await apiRequest.dispose();
+  }
+
+  const questionSet = getLeadValidationQuestionSetForProjectType(projectType.slug);
   for (const question of questionSet.questions) {
     if (question.input === "boolean") {
       await page.getByLabel(question.label).click();
@@ -190,7 +259,7 @@ test.describe.serial("lead to opportunity progression production audit", () => {
       await expect(page.getByRole("heading", { name: "New Lead", exact: true })).toBeVisible();
       await expect(page.getByLabel("Initial Stage")).toContainText("New Lead");
 
-      await fillLeadQuestionnaire(page, auditBundle.projectType.slug);
+      await fillLeadQuestionnaire(page, auditBundle.projectType);
       await page.getByRole("button", { name: "Create Lead", exact: true }).click();
 
       await page.waitForURL(/\/leads\/[^/?#]+$/);
