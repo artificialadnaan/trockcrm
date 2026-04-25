@@ -120,6 +120,40 @@ export interface LeadRecord {
   } | null;
   convertedDealId: string | null;
   convertedDealNumber: string | null;
+  leadQuestionnaire?: {
+    projectTypeId: string | null;
+    nodes: Array<{
+      id: string;
+      projectTypeId: string | null;
+      parentNodeId: string | null;
+      parentOptionValue: string | null;
+      nodeType: string;
+      key: string;
+      label: string;
+      prompt: string | null;
+      inputType: string | null;
+      options: unknown;
+      isRequired: boolean;
+      displayOrder: number;
+      isActive: boolean;
+    }>;
+    allNodes: Array<{
+      id: string;
+      projectTypeId: string | null;
+      parentNodeId: string | null;
+      parentOptionValue: string | null;
+      nodeType: string;
+      key: string;
+      label: string;
+      prompt: string | null;
+      inputType: string | null;
+      options: unknown;
+      isRequired: boolean;
+      displayOrder: number;
+      isActive: boolean;
+    }>;
+    answers: Record<string, string | boolean | number | null>;
+  };
 }
 
 export interface LeadFilters {
@@ -341,6 +375,7 @@ export async function createLead(input: {
     projectTypeId: string | null;
     answers: Record<string, string | boolean | number | null>;
   };
+  leadQuestionAnswers?: Record<string, string | boolean | number | null>;
 }) {
   return api<{ lead: LeadRecord }>("/leads", {
     method: "POST",
@@ -394,6 +429,7 @@ type LeadUpdatePayload = Partial<
     scopingSubsetData: Record<string, unknown>;
     disqualificationReason: string | null;
     disqualificationNotes: string | null;
+    leadQuestionAnswers: Record<string, string | boolean | number | null>;
   }
 >;
 
