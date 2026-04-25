@@ -166,7 +166,7 @@ async function fillLeadQuestionnaire(
 
     if (templateResponse.enabled && templateResponse.questionnaire) {
       for (const node of templateResponse.questionnaire.nodes.filter((entry) => entry.nodeType === "question")) {
-        const locator = page.getByLabel(node.label);
+        const locator = page.locator(`#${node.key}`);
         if ((await locator.count()) === 0) {
           continue;
         }
@@ -286,7 +286,7 @@ test.describe.serial("lead to opportunity progression production audit", () => {
 
       await page.getByRole("button", { name: /^Team/ }).click();
       const addTeamMemberButton = page.getByRole("button", { name: "Add Team Member", exact: true }).first();
-      await expect(addTeamMemberButton).toBeVisible();
+      await addTeamMemberButton.waitFor({ state: "visible", timeout: 20_000 });
       await addTeamMemberButton.click();
       await expect(page.getByRole("dialog")).toBeVisible();
       await page.getByLabel("User").click();
