@@ -333,7 +333,7 @@ describe("LeadForm", () => {
         ],
         allNodes: [],
         answers: {},
-      },
+      } as any,
       loading: false,
     });
 
