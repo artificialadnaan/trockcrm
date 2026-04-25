@@ -115,6 +115,7 @@ export function createLeadConversionService(
         displayOrder: opportunityStage.displayOrder ?? 0,
       },
       missingRequirements: {
+        prerequisiteFields: [],
         qualificationFields,
         projectTypeQuestionIds,
       },

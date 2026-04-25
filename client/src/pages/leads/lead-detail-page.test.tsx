@@ -38,6 +38,12 @@ vi.mock("@/hooks/use-pipeline-config", () => ({
 }));
 
 vi.mock("@/lib/sales-workflow", () => ({
+  CRM_OWNED_LEAD_STAGE_SLUGS: [
+    "new_lead",
+    "qualified_lead",
+    "sales_validation_stage",
+    "opportunity",
+  ],
   BID_BOARD_MIRRORED_STAGE_SLUGS: [
     "estimating",
     "bid_sent",

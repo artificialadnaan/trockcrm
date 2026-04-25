@@ -425,6 +425,7 @@ function createLeadQuestionGateError(input: {
     currentStage: input.currentStage,
     targetStage: input.targetStage,
     missingRequirements: {
+      prerequisiteFields: [],
       qualificationFields: input.qualificationFields,
       projectTypeQuestionIds: input.projectTypeQuestionIds,
     },
