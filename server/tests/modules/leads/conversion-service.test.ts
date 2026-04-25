@@ -666,7 +666,9 @@ function createFakeTenantDb(initialState?: Partial<FakeTenantState>) {
     if (tableName === "project_type_config") return state.projectTypes;
     if (tableName === "lead_question_answers") return state.leadQuestionAnswers;
     if (tableName === "lead_question_answer_history") return state.leadQuestionAnswerHistory;
-    if (tableName === "lead_question_nodes") return state.leadQuestionNodes;
+    if (tableName === "lead_question_nodes" || tableName === "project_type_question_nodes") {
+      return state.leadQuestionNodes;
+    }
     if ("slug" in candidate && "category" in candidate && "website" in candidate) return state.companies;
     if ("lat" in candidate && "lng" in candidate && "companyId" in candidate) return state.properties;
     if ("companyId" in candidate && "firstName" in candidate && "lastName" in candidate) return state.contacts;
@@ -677,7 +679,7 @@ function createFakeTenantDb(initialState?: Partial<FakeTenantState>) {
     if ("leadId" in candidate && "changedBy" in candidate && "toStageId" in candidate) return state.leadStageHistory;
     if ("leadId" in candidate && "questionId" in candidate && "valueJson" in candidate) return state.leadQuestionAnswers;
     if ("leadId" in candidate && "questionId" in candidate && "oldValueJson" in candidate) return state.leadQuestionAnswerHistory;
-    if ("questionKey" in candidate && "nodeType" in candidate) return state.leadQuestionNodes;
+    if ("key" in candidate && "nodeType" in candidate) return state.leadQuestionNodes;
     if ("parentId" in candidate && "displayOrder" in candidate && "isActive" in candidate) return state.projectTypes;
     throw new Error("Unexpected table in fake tenant db");
   }

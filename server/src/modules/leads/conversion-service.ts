@@ -6,6 +6,14 @@ import { toCanonicalLeadStageSlug, type WorkflowRoute } from "@trock-crm/shared/
 import { AppError } from "../../middleware/error-handler.js";
 import { createDeal } from "../deals/service.js";
 import { getStageById, getStageBySlug } from "../pipeline/service.js";
+import {
+  isAnsweredQuestionValue,
+  isLeadEditV2Enabled,
+  listLeadQuestionAnswers,
+  listMissingRequiredQuestionKeys,
+  listQuestionnaireNodes,
+} from "./questionnaire-service.js";
+import { LeadStageTransitionError } from "./stage-transition-service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -66,6 +74,52 @@ export function createLeadConversionService(
   dependencies: Partial<LeadConversionDependencies> = {}
 ) {
   const deps = { ...defaultDependencies, ...dependencies };
+
+  async function assertConversionQuestionnaireGate(
+    tenantDb: TenantDb,
+    lead: typeof leads.$inferSelect,
+    currentLeadStage: NonNullable<Awaited<ReturnType<typeof getStageById>>>,
+    opportunityStage: NonNullable<Awaited<ReturnType<typeof getStageBySlug>>>
+  ) {
+    const qualificationFields = ["existing_customer_status", "estimated_value", "timeline_status"].filter(
+      (fieldId) =>
+        !isAnsweredQuestionValue(
+          (lead.qualificationPayload as Record<string, string | boolean | number | null> | null)?.[fieldId]
+        )
+    );
+    const questionAnswers = await listLeadQuestionAnswers(tenantDb, lead.id);
+    const nodes = await listQuestionnaireNodes(tenantDb, lead.projectTypeId ?? null);
+    const projectTypeQuestionIds = listMissingRequiredQuestionKeys(nodes, questionAnswers);
+
+    if (qualificationFields.length === 0 && projectTypeQuestionIds.length === 0) {
+      return;
+    }
+
+    throw new LeadStageTransitionError({
+      allowed: false,
+      code: "LEAD_STAGE_REQUIREMENTS_UNMET",
+      message:
+        "Complete the Sales Validation qualification fields and required project questions before converting this lead.",
+      currentStage: {
+        id: currentLeadStage.id,
+        slug: currentLeadStage.slug ?? "sales_validation_stage",
+        name: currentLeadStage.name ?? "Sales Validation Stage",
+        isTerminal: currentLeadStage.isTerminal,
+        displayOrder: currentLeadStage.displayOrder ?? 0,
+      },
+      targetStage: {
+        id: opportunityStage.id,
+        slug: opportunityStage.slug ?? "opportunity",
+        name: opportunityStage.name ?? "Opportunity",
+        isTerminal: opportunityStage.isTerminal,
+        displayOrder: opportunityStage.displayOrder ?? 0,
+      },
+      missingRequirements: {
+        qualificationFields,
+        projectTypeQuestionIds,
+      },
+    });
+  }
 
   async function convertLead(tenantDb: TenantDb, input: ConvertLeadInput) {
     const leadRowResult = await tenantDb
@@ -142,14 +196,18 @@ export function createLeadConversionService(
       );
     }
 
-    const resolvedDealStageId =
-      input.dealStageId ??
-      (
-        await deps.getStageBySlug("opportunity", workflowFamilyForRoute(workflowRoute))
-      )?.id;
+    const opportunityStage = await deps.getStageBySlug(
+      "opportunity",
+      workflowFamilyForRoute(workflowRoute)
+    );
+    const resolvedDealStageId = input.dealStageId ?? opportunityStage?.id;
 
-    if (!resolvedDealStageId) {
+    if (!resolvedDealStageId || !opportunityStage) {
       throw new AppError(500, "Canonical opportunity stage config is incomplete");
+    }
+
+    if (isLeadEditV2Enabled()) {
+      await assertConversionQuestionnaireGate(tenantDb, lead, currentLeadStage, opportunityStage);
     }
 
     const deal = await deps.createDeal(tenantDb, {

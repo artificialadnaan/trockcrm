@@ -6,6 +6,7 @@ import {
   contacts,
   deals,
   leadStageHistory,
+  leadQuestionAnswers,
   leads,
   pipelineStageConfig,
   projectTypeConfig,
@@ -18,8 +19,16 @@ import { toCanonicalLeadStageSlug, type WorkflowFamily } from "@trock-crm/shared
 import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { getActiveProjectTypes, getAllStages, getStageById } from "../pipeline/service.js";
-import { assertLeadStageTransitionAllowed } from "./stage-transition-service.js";
+import { assertLeadStageTransitionAllowed, LeadStageTransitionError } from "./stage-transition-service.js";
 import { preflightLeadStageCheck } from "./stage-gate.js";
+import {
+  isAnsweredQuestionValue,
+  isLeadEditV2Enabled,
+  listLeadQuestionAnswers,
+  listMissingRequiredQuestionKeys,
+  listQuestionnaireNodes,
+  upsertLeadQuestionAnswerSet,
+} from "./questionnaire-service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -48,6 +57,7 @@ export interface CreateLeadInput {
     projectTypeId: string | null;
     answers: Record<string, string | boolean | number | null>;
   };
+  leadQuestionAnswers?: Record<string, string | boolean | number | null>;
 }
 
 export interface UpdateLeadInput {
@@ -64,6 +74,7 @@ export interface UpdateLeadInput {
     projectTypeId: string | null;
     answers: Record<string, string | boolean | number | null>;
   };
+  leadQuestionAnswers?: Record<string, string | boolean | number | null>;
   status?: "open" | "disqualified";
 }
 
@@ -355,6 +366,24 @@ async function decorateLeads(
       .map((deal) => [deal.sourceLeadId as string, { id: deal.id, dealNumber: deal.dealNumber }])
   );
 
+  const v2Enabled = isLeadEditV2Enabled();
+  const leadQuestionAnswerRows =
+    v2Enabled && leadIds.length > 0
+      ? await tenantDb.select().from(leadQuestionAnswers)
+      : [];
+  const questionNodes =
+    v2Enabled && leadQuestionAnswerRows.length > 0
+      ? await tenantDb.select().from(projectTypeConfig)
+      : [];
+  void questionNodes;
+  const answerRowsByLeadId = new Map<string, Array<(typeof leadQuestionAnswers.$inferSelect)>>();
+
+  for (const row of leadQuestionAnswerRows) {
+    const rowsForLead = answerRowsByLeadId.get(row.leadId) ?? [];
+    rowsForLead.push(row);
+    answerRowsByLeadId.set(row.leadId, rowsForLead);
+  }
+
   return rows.map((lead) => ({
     ...lead,
     companyName: companyMap.get(lead.companyId) ?? null,
@@ -362,7 +391,90 @@ async function decorateLeads(
     projectType: lead.projectTypeId ? projectTypeMap.get(lead.projectTypeId) ?? null : null,
     convertedDealId: convertedDealMap.get(lead.id)?.id ?? null,
     convertedDealNumber: convertedDealMap.get(lead.id)?.dealNumber ?? null,
+    leadQuestionAnswers: v2Enabled
+      ? Object.fromEntries(
+          (answerRowsByLeadId.get(lead.id) ?? []).map((row) => [row.questionId, row.valueJson ?? null])
+        )
+      : undefined,
   }));
+}
+
+function createLeadQuestionGateError(input: {
+  currentStage: {
+    id: string;
+    slug: string;
+    name: string;
+    isTerminal: boolean;
+    displayOrder: number;
+  };
+  targetStage: {
+    id: string;
+    slug: string;
+    name: string;
+    isTerminal: boolean;
+    displayOrder: number;
+  };
+  qualificationFields: string[];
+  projectTypeQuestionIds: string[];
+}) {
+  return new LeadStageTransitionError({
+    allowed: false,
+    code: "LEAD_STAGE_REQUIREMENTS_UNMET",
+    message:
+      "Complete the Sales Validation qualification fields and required project questions before moving this lead forward.",
+    currentStage: input.currentStage,
+    targetStage: input.targetStage,
+    missingRequirements: {
+      qualificationFields: input.qualificationFields,
+      projectTypeQuestionIds: input.projectTypeQuestionIds,
+    },
+  });
+}
+
+async function assertLeadQuestionGateAllowed(
+  tenantDb: TenantDb,
+  input: {
+    leadId: string;
+    projectTypeId: string | null;
+    qualificationPayload: Record<string, string | boolean | number | null>;
+    leadQuestionAnswers: Record<string, string | boolean | number | null>;
+    currentStage: {
+      id: string;
+      slug: string;
+      name: string;
+      isTerminal: boolean;
+      displayOrder: number;
+    };
+    targetStage: {
+      id: string;
+      slug: string;
+      name: string;
+      isTerminal: boolean;
+      displayOrder: number;
+    };
+  }
+) {
+  const currentStoredAnswers = await listLeadQuestionAnswers(tenantDb, input.leadId);
+  const mergedAnswers = {
+    ...currentStoredAnswers,
+    ...input.leadQuestionAnswers,
+  };
+  const nodes = await listQuestionnaireNodes(tenantDb, input.projectTypeId);
+  const qualificationFields = ["existing_customer_status", "estimated_value", "timeline_status"].filter(
+    (fieldId) => !isAnsweredQuestionValue(input.qualificationPayload[fieldId])
+  );
+  const projectTypeQuestionIds = listMissingRequiredQuestionKeys(nodes, mergedAnswers);
+
+  if (qualificationFields.length === 0 && projectTypeQuestionIds.length === 0) {
+    return;
+  }
+
+  throw createLeadQuestionGateError({
+    currentStage: input.currentStage,
+    targetStage: input.targetStage,
+    qualificationFields,
+    projectTypeQuestionIds,
+  });
 }
 
 async function validateAssignee(tenantDb: TenantDb, assigneeId: string, officeId?: string): Promise<void> {
@@ -786,6 +898,7 @@ export function createLeadService(
     await resolveProjectType(input.projectTypeId ?? null, deps.getActiveProjectTypes);
 
     const now = deps.now();
+    const v2Enabled = isLeadEditV2Enabled();
     const [lead] = await tenantDb
       .insert(leads)
       .values({
@@ -799,17 +912,26 @@ export function createLeadService(
         source: input.source ?? null,
         description: input.description ?? null,
         projectTypeId: input.projectTypeId ?? null,
-        qualificationPayload: normalizeQualificationPayload(input.qualificationPayload),
-        projectTypeQuestionPayload: normalizeProjectTypeQuestionPayload(
-          input.projectTypeId ?? null,
-          input.projectTypeQuestionPayload
-        ),
+        qualificationPayload: v2Enabled ? {} : normalizeQualificationPayload(input.qualificationPayload),
+        projectTypeQuestionPayload: v2Enabled
+          ? { projectTypeId: input.projectTypeId ?? null, answers: {} }
+          : normalizeProjectTypeQuestionPayload(input.projectTypeId ?? null, input.projectTypeQuestionPayload),
         stageEnteredAt: now,
         isActive: true,
         createdAt: now,
         updatedAt: now,
       })
       .returning();
+
+    if (v2Enabled && input.leadQuestionAnswers && Object.keys(input.leadQuestionAnswers).length > 0) {
+      await upsertLeadQuestionAnswerSet(tenantDb, {
+        leadId: lead.id,
+        projectTypeId: input.projectTypeId ?? null,
+        changedBy: input.assignedRepId,
+        answers: input.leadQuestionAnswers,
+        changedAt: now,
+      });
+    }
 
     return lead;
   }
@@ -830,6 +952,35 @@ export function createLeadService(
       throw new AppError(403, "You can only edit your own leads");
     }
 
+    const v2Enabled = isLeadEditV2Enabled();
+    const isConvertedLead = existing.status === "converted";
+
+    if (!existing.isActive && !isConvertedLead) {
+      throw new AppError(409, "Hidden lead records are read-only");
+    }
+
+    if (isConvertedLead) {
+      const nonAnswerKeys = Object.keys(input).filter(
+        (key) => key !== "leadQuestionAnswers" && key !== "officeId"
+      );
+
+      if (nonAnswerKeys.length > 0) {
+        throw new AppError(409, "Converted leads only allow questionnaire answer updates");
+      }
+
+      if (v2Enabled && input.leadQuestionAnswers) {
+        await upsertLeadQuestionAnswerSet(tenantDb, {
+          leadId,
+          projectTypeId: existing.projectTypeId ?? null,
+          changedBy: userId,
+          answers: input.leadQuestionAnswers,
+          changedAt: deps.now(),
+        });
+      }
+
+      return existing;
+    }
+
     const updates: Record<string, unknown> = {};
     const effectiveProjectTypeId =
       input.projectTypeId !== undefined ? input.projectTypeId : existing.projectTypeId;
@@ -845,6 +996,13 @@ export function createLeadService(
         }
       | null = null;
     let stageChangedAt: Date | null = null;
+    const effectiveQualificationPayload =
+      input.qualificationPayload !== undefined
+        ? normalizeQualificationPayload(input.qualificationPayload)
+        : normalizeQualificationPayload(
+            existing.qualificationPayload as Record<string, string | boolean | number | null>
+          );
+    const effectiveLeadQuestionAnswers = input.leadQuestionAnswers ?? {};
 
     if (input.stageId !== undefined) {
       const stage = await deps.getStageById(input.stageId, "lead");
@@ -862,47 +1020,62 @@ export function createLeadService(
 
       assertCanonicalLeadProgression(currentStage.slug, stage.slug);
 
-      const projectType = await resolveProjectType(effectiveProjectTypeId ?? null, deps.getActiveProjectTypes);
-      assertLeadStageTransitionAllowed({
-        lead: {
-          id: existing.id,
-          stageId: existing.stageId,
-          stageSlug: normalizeStageSlugForTransitionValidation(currentStage.slug),
-          source: input.source !== undefined ? input.source : existing.source,
-          projectTypeId: effectiveProjectTypeId ?? null,
-          qualificationPayload:
-            input.qualificationPayload !== undefined
-              ? normalizeQualificationPayload(input.qualificationPayload)
-              : normalizeQualificationPayload(
-                  existing.qualificationPayload as Record<string, string | boolean | number | null>
-                ),
-          projectTypeQuestionPayload:
-            input.projectTypeQuestionPayload !== undefined || input.projectTypeId !== undefined
-              ? normalizeProjectTypeQuestionPayload(
-                  effectiveProjectTypeId ?? null,
-                  input.projectTypeQuestionPayload
-                )
-              : coerceExistingQuestionPayload(
+      const currentStageInput = {
+        id: currentStage.id,
+        slug: normalizeStageSlugForTransitionValidation(currentStage.slug),
+        name: currentStage.name,
+        isTerminal: currentStage.isTerminal,
+        displayOrder: currentStage.displayOrder,
+      };
+      const targetStageInput = {
+        id: stage.id,
+        slug: normalizeStageSlugForTransitionValidation(stage.slug),
+        name: stage.name,
+        isTerminal: stage.isTerminal,
+        displayOrder: stage.displayOrder,
+      };
+
+      if (v2Enabled) {
+        const enteringSalesValidation =
+          stage.slug === "sales_validation_stage" && currentStage.slug !== "sales_validation_stage";
+        const advancingBeyondSalesValidation =
+          currentStage.slug === "sales_validation_stage" && stage.displayOrder > currentStage.displayOrder;
+
+        if (enteringSalesValidation || advancingBeyondSalesValidation) {
+          await assertLeadQuestionGateAllowed(tenantDb, {
+            leadId: existing.id,
+            projectTypeId: effectiveProjectTypeId ?? null,
+            qualificationPayload: effectiveQualificationPayload,
+            leadQuestionAnswers: effectiveLeadQuestionAnswers,
+            currentStage: currentStageInput,
+            targetStage: targetStageInput,
+          });
+        }
+      } else {
+        const projectType = await resolveProjectType(effectiveProjectTypeId ?? null, deps.getActiveProjectTypes);
+        assertLeadStageTransitionAllowed({
+          lead: {
+            id: existing.id,
+            stageId: existing.stageId,
+            stageSlug: currentStage.slug,
+            projectTypeId: effectiveProjectTypeId ?? null,
+            qualificationPayload: effectiveQualificationPayload,
+            projectTypeQuestionPayload:
+              input.projectTypeQuestionPayload !== undefined || input.projectTypeId !== undefined
+                ? normalizeProjectTypeQuestionPayload(
+                    effectiveProjectTypeId ?? null,
+                    input.projectTypeQuestionPayload
+                  )
+                : coerceExistingQuestionPayload(
                   existing.projectTypeQuestionPayload,
                   effectiveProjectTypeId ?? null
                 ),
-        },
-        currentStage: {
-          id: currentStage.id,
-          slug: normalizeStageSlugForTransitionValidation(currentStage.slug),
-          name: currentStage.name,
-          isTerminal: currentStage.isTerminal,
-          displayOrder: currentStage.displayOrder,
-        },
-        targetStage: {
-          id: stage.id,
-          slug: normalizeStageSlugForTransitionValidation(stage.slug),
-          name: stage.name,
-          isTerminal: stage.isTerminal,
-          displayOrder: stage.displayOrder,
-        },
-        projectTypeSlug: projectType?.slug ?? null,
-      });
+          },
+          currentStage: currentStageInput,
+          targetStage: targetStageInput,
+          projectTypeSlug: projectType?.slug ?? null,
+        });
+      }
 
       updates.stageId = input.stageId;
       stageChangedAt = deps.now();
@@ -941,10 +1114,10 @@ export function createLeadService(
     if (input.name !== undefined) updates.name = input.name;
     if (input.source !== undefined) updates.source = input.source;
     if (input.description !== undefined) updates.description = input.description;
-    if (input.qualificationPayload !== undefined) {
+    if (!v2Enabled && input.qualificationPayload !== undefined) {
       updates.qualificationPayload = normalizeQualificationPayload(input.qualificationPayload);
     }
-    if (input.projectTypeQuestionPayload !== undefined || input.projectTypeId !== undefined) {
+    if (!v2Enabled && (input.projectTypeQuestionPayload !== undefined || input.projectTypeId !== undefined)) {
       updates.projectTypeQuestionPayload = normalizeProjectTypeQuestionPayload(
         effectiveProjectTypeId ?? null,
         input.projectTypeQuestionPayload
@@ -964,7 +1137,8 @@ export function createLeadService(
       return existing;
     }
 
-    updates.updatedAt = stageChangedAt ?? deps.now();
+    const updateTime = stageChangedAt ?? deps.now();
+    updates.updatedAt = updateTime;
 
     const [lead] = await tenantDb
       .update(leads)
@@ -974,6 +1148,16 @@ export function createLeadService(
 
     if (stageChangeAuditRecord) {
       await tenantDb.insert(leadStageHistory).values(stageChangeAuditRecord);
+    }
+
+    if (v2Enabled && input.leadQuestionAnswers && Object.keys(input.leadQuestionAnswers).length > 0) {
+      await upsertLeadQuestionAnswerSet(tenantDb, {
+        leadId,
+        projectTypeId: effectiveProjectTypeId ?? null,
+        changedBy: userId,
+        answers: input.leadQuestionAnswers,
+        changedAt: updateTime,
+      });
     }
 
     return lead;
