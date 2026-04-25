@@ -1,4 +1,4 @@
-import { Router } from "express";
+import { type Response, Router } from "express";
 import { authMiddleware } from "../../middleware/auth.js";
 import {
   registerSseConnection,
@@ -9,8 +9,22 @@ import {
 
 const router = Router();
 
+function applyNotificationTransportHeaders(res: Response) {
+  // These responses are per-user and consumed cross-origin by the Railway frontend.
+  // Mark them non-cacheable so Railway/Fastly never attempts to reuse or buffer them
+  // across users or requests, which can surface edge-generated 502s without CORS headers.
+  res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+  res.setHeader("Cache-Control", "private, no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0, s-maxage=0, no-transform");
+  res.setHeader("CDN-Cache-Control", "private, no-store");
+  res.setHeader("Surrogate-Control", "no-store");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Expires", "0");
+}
+
 // SSE notification stream
 router.get("/stream", authMiddleware, (req, res) => {
+  applyNotificationTransportHeaders(res);
+
   // Check global connection limit BEFORE sending headers
   if (!canAdmitSseConnection()) {
     res.status(503).json({ error: { message: "Too many SSE connections" } });
@@ -20,11 +34,7 @@ router.get("/stream", authMiddleware, (req, res) => {
   // Preserve headers already set by global middleware such as CORS.
   res.status(200);
   res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
-  // The production frontend lives on a different Railway origin and consumes this
-  // endpoint via a credentialed EventSource connection.
-  res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
   res.setHeader("X-Accel-Buffering", "no"); // Disable nginx buffering on Railway
   res.flushHeaders();
 

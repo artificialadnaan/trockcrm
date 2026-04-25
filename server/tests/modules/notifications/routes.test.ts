@@ -99,6 +99,8 @@ describe("notification stream route", () => {
       "https://frontend-production-bcab.up.railway.app"
     );
     expect(response.headers["cross-origin-resource-policy"]).toBe("cross-origin");
+    expect(response.headers["cache-control"]).toContain("no-store");
+    expect(response.headers["surrogate-control"]).toBe("no-store");
   });
 
   it("marks unread-count responses as cross-origin embeddable for the production frontend", async () => {
@@ -113,5 +115,7 @@ describe("notification stream route", () => {
       "https://frontend-production-bcab.up.railway.app"
     );
     expect(response.headers["cross-origin-resource-policy"]).toBe("cross-origin");
+    expect(response.headers["cache-control"]).toContain("no-store");
+    expect(response.headers["surrogate-control"]).toBe("no-store");
   });
 });

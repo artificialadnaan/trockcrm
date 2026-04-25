@@ -10,9 +10,15 @@ import {
 const router = Router();
 
 router.use((_req, res, next) => {
-  // Notification APIs are consumed by the production frontend from a sibling
-  // Railway origin, so Helmet's default same-origin CORP is too strict here.
+  // Notification APIs are per-user and consumed by the production frontend from a
+  // sibling Railway origin, so Helmet's default same-origin CORP is too strict and
+  // CDN/proxy caches must be bypassed completely.
   res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+  res.setHeader("Cache-Control", "private, no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0, s-maxage=0, no-transform");
+  res.setHeader("CDN-Cache-Control", "private, no-store");
+  res.setHeader("Surrogate-Control", "no-store");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Expires", "0");
   next();
 });
 

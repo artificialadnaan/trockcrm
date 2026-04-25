@@ -191,7 +191,11 @@ test.describe.serial("email / tasks / files / projects production audit", () => 
       await dialog.locator('input[type="date"]').fill(dueDate);
 
       await dialog.getByRole("combobox").nth(1).click();
-      await page.getByRole("option", { name: `${auditDeal.dealNumber} - ${auditDeal.name}` }).click();
+      const taskDealOption = page.getByRole("option", {
+        name: new RegExp(`${auditDeal.dealNumber}.*${auditDeal.name}`),
+      });
+      await expect(taskDealOption).toBeVisible();
+      await taskDealOption.click();
 
       await dialog.getByRole("button", { name: "Create Task", exact: true }).click();
       await expect(dialog).not.toBeVisible();
@@ -221,7 +225,11 @@ test.describe.serial("email / tasks / files / projects production audit", () => 
     await page.getByRole("button", { name: "Upload File", exact: true }).click();
 
     await page.getByRole("combobox").nth(1).click();
-    await page.getByRole("option", { name: `${auditDeal.dealNumber} — ${auditDeal.name}` }).click();
+    const fileDealOption = page.getByRole("option", {
+      name: new RegExp(`${auditDeal.dealNumber}.*${auditDeal.name}`),
+    });
+    await expect(fileDealOption).toBeVisible();
+    await fileDealOption.click();
 
     await page.locator('input[type="file"]').setInputFiles({
       name: filename,

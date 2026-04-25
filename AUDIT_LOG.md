@@ -1,5 +1,5 @@
 ## Running Summary
-- Iteration count: 18
+- Iteration count: 19
 - Total tests generated: 24
 - Pass/fail count per iteration:
   - Iteration 1: passed after deploy verification
@@ -15,6 +15,7 @@
   - Iteration 16: project routes fixed for Railway cross-origin consumption and lead-to-opportunity progression audit expanded; deploy pending
   - Iteration 17: lead creation stage-loading race fixed locally; projects invalid-id path split into explicit negative-path audit; frontend deploy pending
   - Iteration 18: lead-stage race deployed to production; fresh frontend asset hash verified; project-route family rerun clean; lead/deal progression timeout traced to a stale test locator, not a product regression
+  - Iteration 19: full-inventory pass exposed intermittent notification edge `502` responses without CORS headers; notification routes hardened as explicitly private/non-cacheable and email/files audit selectors tightened before redeploy
 - Issues fixed vs deferred:
   - Fixed: 16
   - Deferred: 0
@@ -295,6 +296,19 @@ Deployed: n/a (test-only audit split)
 Deploy status: n/a
 Verification: instrumented browser run captured the exact `404 https://api-production-ad218.up.railway.app/api/procore/my-projects/non-existent-audit-project` response twice and no unknown asset URL; clean project-list rerun passed with the invalid-id path isolated into its own negative-path test
 Status: fixed
+
+Issue #19 — Notification endpoints intermittently receive a Railway edge `502` without CORS headers during production page loads
+Route/Component: topbar notification center, `/api/notifications/unread-count`, `/api/notifications/stream`
+Severity: high
+Environment: production (Railway)
+Discovered: iteration 19, full-inventory Playwright rerun plus instrumented CDP browser loop
+Symptom: otherwise healthy route families fail the clean audit because Chromium intermittently reports notification requests as blocked by CORS, specifically `No 'Access-Control-Allow-Origin' header is present on the requested resource.`
+Root cause: successful notification responses already include the correct CORS/CORP headers, but the Railway edge intermittently returns a bare `502` for user-specific notification requests; that edge-generated response omits CORS headers, so the browser surfaces it as a CORS failure.
+Fix: mark notification CRUD and SSE responses as explicitly private/non-cacheable (`Cache-Control`, `CDN-Cache-Control`, `Surrogate-Control`, `Pragma`, `Expires`) so the Railway/Fastly edge does not attempt to cache or reuse these per-user responses; keep the existing cross-origin CORP override in place.
+Deployed: pending
+Deploy status: pending
+Verification: local `npx vitest run --config vitest.config.ts server/tests/modules/notifications/routes.test.ts`, `npm run typecheck --workspace=server`; production rerun pending
+Status: in progress
 
 ## Needs Human Review
 
