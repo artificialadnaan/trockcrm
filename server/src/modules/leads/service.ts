@@ -900,6 +900,15 @@ export function createLeadService(
 
     const now = deps.now();
     const v2Enabled = isLeadEditV2Enabled();
+    const normalizedQualificationPayload = normalizeQualificationPayload(input.qualificationPayload);
+    const normalizedProjectTypeQuestionPayload = normalizeProjectTypeQuestionPayload(
+      input.projectTypeId ?? null,
+      input.projectTypeQuestionPayload
+    );
+    const leadQuestionAnswerInput =
+      input.leadQuestionAnswers ??
+      normalizedProjectTypeQuestionPayload.answers ??
+      {};
     const [lead] = await tenantDb
       .insert(leads)
       .values({
@@ -913,10 +922,10 @@ export function createLeadService(
         source: input.source ?? null,
         description: input.description ?? null,
         projectTypeId: input.projectTypeId ?? null,
-        qualificationPayload: v2Enabled ? {} : normalizeQualificationPayload(input.qualificationPayload),
+        qualificationPayload: normalizedQualificationPayload,
         projectTypeQuestionPayload: v2Enabled
           ? { projectTypeId: input.projectTypeId ?? null, answers: {} }
-          : normalizeProjectTypeQuestionPayload(input.projectTypeId ?? null, input.projectTypeQuestionPayload),
+          : normalizedProjectTypeQuestionPayload,
         stageEnteredAt: now,
         isActive: true,
         createdAt: now,
@@ -924,12 +933,12 @@ export function createLeadService(
       })
       .returning();
 
-    if (v2Enabled && input.leadQuestionAnswers && Object.keys(input.leadQuestionAnswers).length > 0) {
+    if (v2Enabled && Object.keys(leadQuestionAnswerInput).length > 0) {
       await upsertLeadQuestionAnswerSet(tenantDb, {
         leadId: lead.id,
         projectTypeId: input.projectTypeId ?? null,
         changedBy: input.assignedRepId,
-        answers: input.leadQuestionAnswers,
+        answers: leadQuestionAnswerInput,
         changedAt: now,
       });
     }

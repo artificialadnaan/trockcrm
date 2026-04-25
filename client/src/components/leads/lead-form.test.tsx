@@ -35,6 +35,8 @@ vi.mock("@/hooks/use-pipeline-config", () => ({
         id: "stage-new",
         name: "New Lead",
         slug: "new_lead",
+        workflowFamily: "lead",
+        isActivePipeline: true,
         isTerminal: false,
       },
     ],
@@ -89,6 +91,31 @@ const SelectContext = React.createContext<{
   value?: string;
 }>({});
 
+function collectSelectItems(
+  children: React.ReactNode,
+  acc: Array<{ value: string | null; label?: React.ReactNode }> = []
+): Array<{ value: string | null; label?: React.ReactNode }> {
+  React.Children.forEach(children, (child) => {
+    if (!React.isValidElement(child)) {
+      return;
+    }
+
+    const childProps = child.props as { value?: string | null; children?: React.ReactNode };
+    if (Object.prototype.hasOwnProperty.call(childProps, "value")) {
+      acc.push({
+        value: childProps.value ?? null,
+        label: childProps.children,
+      });
+    }
+
+    if (childProps.children) {
+      collectSelectItems(childProps.children, acc);
+    }
+  });
+
+  return acc;
+}
+
 vi.mock("@/components/ui/select", () => ({
   Select: ({
     children,
@@ -99,7 +126,7 @@ vi.mock("@/components/ui/select", () => ({
     items?: Array<{ value: string | null; label?: React.ReactNode }>;
     value?: string;
   }) => (
-    <SelectContext.Provider value={{ items, value }}>
+    <SelectContext.Provider value={{ items: items ?? collectSelectItems(children), value }}>
       <div data-select-value={value ?? "__undefined__"}>{children}</div>
     </SelectContext.Provider>
   ),

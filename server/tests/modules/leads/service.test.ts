@@ -2,9 +2,12 @@ import {
   companies,
   deals,
   leadStageHistory,
+  leadQuestionAnswerHistory,
+  leadQuestionAnswers,
   leads,
   projectTypeConfig,
   properties,
+  users,
 } from "@trock-crm/shared/schema";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AppError } from "../../../src/middleware/error-handler.js";
@@ -72,6 +75,8 @@ function createFakeTenantDb(lead: FakeLeadRow) {
     leads: [lead],
     deals: [],
     leadStageHistory: [] as Array<Record<string, unknown>>,
+    leadQuestionAnswers: [] as Array<Record<string, unknown>>,
+    leadQuestionAnswerHistory: [] as Array<Record<string, unknown>>,
   };
 
   const resolveTableName = (table: unknown) => (table as { _: { name?: string } })?._?.name;
@@ -164,6 +169,12 @@ function createFakeTenantDb(lead: FakeLeadRow) {
           if (table === leadStageHistory || tableName === "lead_stage_history") {
             return createQueryBuilder(state.leadStageHistory, fields);
           }
+          if (table === leadQuestionAnswers || tableName === "lead_question_answers") {
+            return createQueryBuilder(state.leadQuestionAnswers, fields);
+          }
+          if (table === leadQuestionAnswerHistory || tableName === "lead_question_answer_history") {
+            return createQueryBuilder(state.leadQuestionAnswerHistory, fields);
+          }
 
           throw new Error(`Unexpected table: ${String(tableName)}`);
         },
@@ -183,6 +194,55 @@ function createFakeTenantDb(lead: FakeLeadRow) {
             return {
               returning() {
                 return Promise.resolve([insertedRow]);
+              },
+              then(onfulfilled: (value: unknown) => unknown) {
+                return Promise.resolve(insertedRow).then(onfulfilled);
+              },
+            };
+          }
+
+          if (table === leads || tableName === "leads") {
+            const insertedRow = {
+              id: value.id ?? `lead-${state.leads.length + 1}`,
+              convertedAt: null,
+              ...value,
+            };
+            state.leads.push(insertedRow as FakeLeadRow);
+            return {
+              returning() {
+                return Promise.resolve([{ ...insertedRow }]);
+              },
+              then(onfulfilled: (value: unknown) => unknown) {
+                return Promise.resolve(insertedRow).then(onfulfilled);
+              },
+            };
+          }
+
+          if (table === leadQuestionAnswers || tableName === "lead_question_answers") {
+            const insertedRow = {
+              id: value.id ?? `lead-question-answer-${state.leadQuestionAnswers.length + 1}`,
+              ...value,
+            };
+            state.leadQuestionAnswers.push(insertedRow);
+            return {
+              returning() {
+                return Promise.resolve([{ ...insertedRow }]);
+              },
+              then(onfulfilled: (value: unknown) => unknown) {
+                return Promise.resolve(insertedRow).then(onfulfilled);
+              },
+            };
+          }
+
+          if (table === leadQuestionAnswerHistory || tableName === "lead_question_answer_history") {
+            const insertedRow = {
+              id: value.id ?? `lead-question-history-${state.leadQuestionAnswerHistory.length + 1}`,
+              ...value,
+            };
+            state.leadQuestionAnswerHistory.push(insertedRow);
+            return {
+              returning() {
+                return Promise.resolve([{ ...insertedRow }]);
               },
               then(onfulfilled: (value: unknown) => unknown) {
                 return Promise.resolve(insertedRow).then(onfulfilled);
@@ -345,6 +405,102 @@ describe("lead service canonical progression", () => {
         isBackwardMove: false,
       }),
     ]);
+  });
+
+  it("preserves qualification payload when creating a lead with lead edit v2 enabled", async () => {
+    const previousFlag = process.env.ENABLE_LEAD_EDIT_V2;
+    process.env.ENABLE_LEAD_EDIT_V2 = "true";
+
+    const insertedLeads: Array<Record<string, unknown>> = [];
+    const tenantDb = {
+      select() {
+        return {
+          from(table: unknown) {
+            const rows =
+              table === companies
+                ? [{ id: "company-1", isActive: true }]
+                : table === properties
+                  ? [{ id: "property-1", companyId: "company-1", isActive: true }]
+                  : table === users
+                    ? [{ id: "rep-1", isActive: true, officeId: "office-1" }]
+                    : [];
+
+            return {
+              where() {
+                return this;
+              },
+              limit() {
+                return this;
+              },
+              then(onfulfilled: (value: unknown[]) => unknown) {
+                return Promise.resolve(rows.map((row) => ({ ...row }))).then(onfulfilled);
+              },
+            };
+          },
+        };
+      },
+      insert(table: unknown) {
+        if (table !== leads) {
+          throw new Error(`Unexpected insert table: ${String((table as { _: { name?: string } })?._?.name)}`);
+        }
+
+        return {
+          values(value: Record<string, unknown>) {
+            const insertedRow = {
+              id: "lead-created",
+              convertedAt: null,
+              ...value,
+            };
+            insertedLeads.push(insertedRow);
+            return {
+              returning() {
+                return Promise.resolve([{ ...insertedRow }]);
+              },
+            };
+          },
+        };
+      },
+    };
+    const service = createLeadService({
+      getStageById: pipelineMocks.getStageById as never,
+      getActiveProjectTypes: pipelineMocks.getActiveProjectTypes as never,
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+    });
+
+    try {
+      const lead = await service.createLead(tenantDb as never, {
+        companyId: "company-1",
+        propertyId: "property-1",
+        stageId: newLeadStage.id,
+        assignedRepId: "rep-1",
+        officeId: "office-1",
+        name: "Created Lead",
+        source: "Referral",
+        projectTypeId: "project-type-commercial",
+        qualificationPayload: {
+          existing_customer_status: "existing",
+          estimated_value: 125000,
+          timeline_status: "Q3 2026",
+        },
+      });
+
+      expect(lead.qualificationPayload).toEqual({
+        existing_customer_status: "existing",
+        estimated_value: 125000,
+        timeline_status: "Q3 2026",
+      });
+      expect(insertedLeads[0]?.qualificationPayload).toEqual({
+        existing_customer_status: "existing",
+        estimated_value: 125000,
+        timeline_status: "Q3 2026",
+      });
+    } finally {
+      if (previousFlag === undefined) {
+        delete process.env.ENABLE_LEAD_EDIT_V2;
+      } else {
+        process.env.ENABLE_LEAD_EDIT_V2 = previousFlag;
+      }
+    }
   });
 
   it("rejects skipping directly from new_lead to opportunity", async () => {

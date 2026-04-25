@@ -464,6 +464,12 @@ function EditableLeadForm({
             ])
           ),
         },
+        leadQuestionAnswers: Object.fromEntries(
+          questionSet.questions.map((question) => [
+            question.id,
+            formData.projectTypeQuestionAnswers[question.id] ?? null,
+          ])
+        ),
       };
 
       if (isCreate) {
