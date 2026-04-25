@@ -243,8 +243,12 @@ test.describe.serial("lead to opportunity progression production audit", () => {
       await page.goto(`/deals/${dealId}`, { waitUntil: "domcontentloaded" });
       await page.getByRole("button", { name: "Move Stage", exact: true }).click();
       await page.getByRole("menuitem", { name: /Estimate in Progress/ }).click();
-      await expect(page.getByText(/Open Scoping Workspace/, { exact: false })).toBeVisible();
-      await page.getByRole("link", { name: "Open Scoping Workspace", exact: true }).click();
+      const openScopingWorkspaceButton = page.getByRole("button", {
+        name: "Open Scoping Workspace",
+        exact: true,
+      });
+      await expect(openScopingWorkspaceButton).toBeVisible();
+      await openScopingWorkspaceButton.click();
       await expect(page).toHaveURL(new RegExp(`/deals/${dealId}\\?tab=scoping$`));
 
       await page.getByRole("button", { name: "Estimates", exact: true }).click();

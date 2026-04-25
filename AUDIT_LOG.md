@@ -1,5 +1,5 @@
 ## Running Summary
-- Iteration count: 17
+- Iteration count: 18
 - Total tests generated: 24
 - Pass/fail count per iteration:
   - Iteration 1: passed after deploy verification
@@ -14,11 +14,12 @@
   - Iteration 15: stale lead creation stage ids normalized locally; API + frontend deploy pending
   - Iteration 16: project routes fixed for Railway cross-origin consumption and lead-to-opportunity progression audit expanded; deploy pending
   - Iteration 17: lead creation stage-loading race fixed locally; projects invalid-id path split into explicit negative-path audit; frontend deploy pending
+  - Iteration 18: lead-stage race deployed to production; fresh frontend asset hash verified; project-route family rerun clean; lead/deal progression timeout traced to a stale test locator, not a product regression
 - Issues fixed vs deferred:
-  - Fixed: 12
+  - Fixed: 16
   - Deferred: 0
 - Deploy failures encountered and recovered: 1
-- Last successful Railway deploy SHA + timestamp: `73345c4` / 2026-04-24 16:02 CDT
+- Last successful Railway deploy SHA + timestamp: `2791384` / 2026-04-24 21:47 CDT
 
 ## Setup
 - Production URL: `https://frontend-production-bcab.up.railway.app`
@@ -238,10 +239,10 @@ Discovered: iteration 14, `tests/audit/email-tasks-files-projects.spec.ts`
 Symptom: visiting `/projects/non-existent-audit-project` renders `Internal server error`, and the API returns `500`.
 Root cause: the project route queried a UUID-backed `deals.id` column with an unchecked string route param, so PostgreSQL threw `invalid input syntax for type uuid`.
 Fix: reject non-UUID route params up front with `AppError(404, "Project not found")` and add a regression test proving the database query is skipped for invalid ids.
-Deployed: pending
-Deploy status: pending
-Verification: local `npx vitest run --config vitest.config.ts server/tests/modules/procore/routes.test.ts` and production rerun pending
-Status: in progress
+Deployed: `7f2f096` + Railway API deploy `bca81010-369b-40f8-8b6e-9b52b468df98` + 2026-04-24 21:03 CDT
+Deploy status: SUCCESS
+Verification: direct production `/api/procore/my-projects/non-existent-audit-project` now returns `404 Project not found`; rerun of `tests/audit/email-tasks-files-projects.spec.ts` renders the correct not-found state on prod
+Status: fixed
 
 Issue #15 — New lead creation trusts stale stage ids from the URL and submits invalid pipeline stages
 Route/Component: `/leads/new`, `LeadForm`, `lead-new-page.helpers.ts`
@@ -251,10 +252,10 @@ Discovered: iteration 15, user report + code trace
 Symptom: creating a lead can fail with `Invalid lead stage ID`.
 Root cause: the create form only auto-selected a default stage when `stageId` was blank; stale or legacy `?stageId=` query params bypassed that guard and were submitted directly to the API.
 Fix: centralize canonical lead-creation stage selection in shared helpers and normalize any invalid selected stage id to the first valid canonical lead stage before submit.
-Deployed: pending
-Deploy status: pending
-Verification: local `npx vitest run --config vitest.config.ts client/src/pages/leads/lead-new-page.helpers.test.ts` and production lead-create rerun pending
-Status: in progress
+Deployed: `121009b`, `2791384` + Railway Frontend deploy `adb27dd1-71c9-44e6-baa3-2e71fe60726e` + 2026-04-24 21:47 CDT
+Deploy status: SUCCESS
+Verification: production lead-create flow from stale `?stageId=legacy-contacted` now normalizes to `New Lead` and proceeds into the lead-to-opportunity audit path
+Status: fixed
 
 Issue #16 — Procore project routes are CORP-blocked from the Railway frontend even when the API responds correctly
 Route/Component: `/projects`, `/projects/:id`, `/api/procore/my-projects*`, `server/src/modules/procore/routes.ts`
@@ -264,10 +265,10 @@ Discovered: iteration 16, `tests/audit/email-tasks-files-projects.spec.ts`
 Symptom: the projects pages log `Failed to load projects: TypeError: Failed to fetch`, while direct authenticated API calls return valid `200` / `404` JSON responses.
 Root cause: the Procore router still inherited Helmet's default `Cross-Origin-Resource-Policy: same-origin`, so the cross-origin Railway frontend was blocked from consuming those otherwise valid responses.
 Fix: mark the Procore router responses as `Cross-Origin-Resource-Policy: cross-origin` and add a regression test for the project list/detail routes.
-Deployed: pending
-Deploy status: pending
-Verification: local `npx vitest run --config vitest.config.ts server/tests/modules/procore/routes.test.ts` and production rerun pending
-Status: in progress
+Deployed: `7f2f096` + Railway API deploy `bca81010-369b-40f8-8b6e-9b52b468df98` + 2026-04-24 21:03 CDT
+Deploy status: SUCCESS
+Verification: direct production `/api/procore/my-projects*` responses emit `Cross-Origin-Resource-Policy: cross-origin`; `tests/audit/email-tasks-files-projects.spec.ts` now passes cleanly on the live frontend
+Status: fixed
 
 Issue #17 — Lead creation can race pipeline-stage loading and still submit a stale stage id
 Route/Component: `/leads/new`, `LeadForm`, `POST /api/leads`
@@ -277,10 +278,10 @@ Discovered: iteration 17, instrumented production lead-create repro
 Symptom: creating a lead from a stale `?stageId=` link can still return `500`, even after the earlier normalization work.
 Root cause: the create form normalized stale stage ids in a `useEffect`, but `Create Lead` could still be clicked before pipeline stages finished loading and before that effect applied the replacement stage id.
 Fix: derive the effective stage id again inside `handleSubmit`, block submission while stages are still loading, and disable the stage select / submit button until the canonical creation stages are ready.
-Deployed: pending
-Deploy status: pending
-Verification: direct production repro hit `POST /api/leads -> 500` with `invalid input syntax for type uuid: \"legacy-contacted\"`; frontend deploy and rerun pending
-Status: in progress
+Deployed: `2791384` + Railway Frontend deploy `adb27dd1-71c9-44e6-baa3-2e71fe60726e` + 2026-04-24 21:47 CDT
+Deploy status: SUCCESS
+Verification: production rerun reaches the deal stage-blocker dialog after creating and converting the stale-stage lead, proving `POST /api/leads` no longer fails on `legacy-contacted`
+Status: fixed
 
 Issue #18 — Browser 404 console noise on the project invalid-id audit comes from the deliberate negative-path API call, not a missing asset
 Route/Component: `/projects/non-existent-audit-project`, `ProjectDetailPage`, `useProjectDetail`
@@ -290,10 +291,10 @@ Discovered: iteration 17, instrumented Playwright browser repro
 Symptom: the browser console shows two `Failed to load resource: the server responded with a status of 404 ()` lines during the invalid-project audit.
 Root cause: both lines are the intentional `GET /api/procore/my-projects/non-existent-audit-project` negative-path call made by `ProjectDetailPage`; Chromium logs that `404` fetch at the console level even though the UI correctly renders `Project not found`.
 Fix: split the invalid-project scenario into its own explicit negative-path test so the clean project-list test only enforces zero unexpected console/network errors.
-Deployed: pending
-Deploy status: pending
-Verification: instrumented browser run captured the exact `404 https://api-production-ad218.up.railway.app/api/procore/my-projects/non-existent-audit-project` response twice and no unknown asset URL
-Status: in progress
+Deployed: n/a (test-only audit split)
+Deploy status: n/a
+Verification: instrumented browser run captured the exact `404 https://api-production-ad218.up.railway.app/api/procore/my-projects/non-existent-audit-project` response twice and no unknown asset URL; clean project-list rerun passed with the invalid-id path isolated into its own negative-path test
+Status: fixed
 
 ## Needs Human Review
 
