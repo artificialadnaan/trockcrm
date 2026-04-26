@@ -56,6 +56,7 @@ vi.mock("@/lib/sales-workflow", () => ({
 
 vi.mock("@/components/leads/lead-form", () => ({
   LeadForm: () => <div>Lead Form</div>,
+  LeadQuestionnaireSummary: () => <div>Lead Questionnaire Summary</div>,
 }));
 
 vi.mock("@/components/leads/lead-timeline-tab", () => ({

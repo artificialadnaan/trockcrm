@@ -360,7 +360,7 @@ describe("LeadForm", () => {
     expect(html).not.toContain("Project Scope");
   });
 
-  it("renders table-backed questionnaire answers in the summary rail when the v2 snapshot is present", () => {
+  it("keeps table-backed questionnaire answers out of the summary rail when the v2 snapshot is present", () => {
     const html = renderToStaticMarkup(
       <MemoryRouter>
         <LeadForm
@@ -414,8 +414,9 @@ describe("LeadForm", () => {
       </MemoryRouter>
     );
 
-    expect(html).toContain("Project Intake Questions");
-    expect(html).toContain("Bid Due Date");
-    expect(html).toContain("2026-05-01");
+    expect(html).toContain("Lead Summary");
+    expect(html).not.toContain("Project Questions");
+    expect(html).not.toContain("Bid Due Date");
+    expect(html).not.toContain("2026-05-01");
   });
 });

@@ -423,6 +423,23 @@ Status: fixed
 
 ## Needs Human Review
 
+- COMPANY_VERIFICATION_EMAIL temporary routing
+  - Symptom: company-verification emails for the lead questionnaire/customer-status workflow are intentionally routed to `adnaan.iqbal@gmail.com` in dev, staging, and production.
+  - Why it matters: this keeps all system-generated verification emails under operator review before actual T Rock recipients are wired in, but it must be changed before rollout to real end users.
+  - Evidence: Phase 3 implementation uses `COMPANY_VERIFICATION_EMAIL` with `adnaan.iqbal@gmail.com` as the canonical default for this feature.
+  - Requested follow-up: update `COMPANY_VERIFICATION_EMAIL` to the real CFO/verification recipient when the workflow is approved for actual T Rock user routing.
+
+## Lead Detail UX Friction Sweep
+
+- Fixed: canonicalized questionnaire naming to `Project Questions` on the lead detail/read-only and edit surfaces.
+- Fixed: moved read-only Project Questions out of the right rail and into the main lead-detail work column.
+- Fixed: changed Source from free text to controlled category selection with required `Source detail` for `Other`.
+- Fixed: made Existing Customer Status read-only on edit surfaces and backed it with server-computed state.
+- Fixed: normalized boolean display to Yes/No/Unanswered while preserving boolean JSON storage.
+- Fixed: normalized object-shaped select options so `Closed / Open Air` renders selectable options.
+- Fixed: added a deal-detail `View Source Lead` CTA so deal-stage users can reach the converted lead questionnaire edit affordance.
+- Deferred: broader copy cleanup for non-questionnaire lead/deal stage labels should be reviewed after this feature ships to avoid expanding the current rollout.
+
 - Railway frontend stale-bundle / asset propagation drift
   - Symptom: after successful pushes and deploys, the Railway frontend has repeatedly continued serving an older asset bundle until a forced frontend redeploy or a later propagation event.
   - Why it matters: this audit has hit false negatives where production browser checks were running against stale frontend code even though `main` and the API were already updated.
