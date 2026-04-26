@@ -670,29 +670,38 @@ function DealLeadTab({
   companyName: string | null;
   isConverted: boolean;
 }) {
+  const navigate = useNavigate();
+
   return (
     <div className="grid gap-4 lg:grid-cols-[0.95fr_1.05fr]">
-      <LeadForm
-        lead={{
-          id: deal.sourceLeadId ?? deal.id,
-          name: deal.name,
-          convertedDealId: isConverted ? deal.id : null,
-          convertedDealNumber: isConverted ? deal.dealNumber : null,
-          companyId: deal.companyId,
-          companyName,
-          stageId: deal.stageId,
-          propertyId: deal.propertyId,
-          propertyName: null,
-          propertyAddress: deal.propertyAddress,
-          propertyCity: deal.propertyCity,
-          propertyState: deal.propertyState,
-          propertyZip: deal.propertyZip,
-          source: deal.source,
-          description: deal.description,
-          stageEnteredAt: deal.stageEnteredAt,
-        }}
-        converted={isConverted}
-      />
+      <div className="space-y-3">
+        {deal.sourceLeadId ? (
+          <Button variant="outline" onClick={() => navigate(`/leads/${deal.sourceLeadId}`)}>
+            View Source Lead
+          </Button>
+        ) : null}
+        <LeadForm
+          lead={{
+            id: deal.sourceLeadId ?? deal.id,
+            name: deal.name,
+            convertedDealId: isConverted ? deal.id : null,
+            convertedDealNumber: isConverted ? deal.dealNumber : null,
+            companyId: deal.companyId,
+            companyName,
+            stageId: deal.stageId,
+            propertyId: deal.propertyId,
+            propertyName: null,
+            propertyAddress: deal.propertyAddress,
+            propertyCity: deal.propertyCity,
+            propertyState: deal.propertyState,
+            propertyZip: deal.propertyZip,
+            source: deal.source,
+            description: deal.description,
+            stageEnteredAt: deal.stageEnteredAt,
+          }}
+          converted={isConverted}
+        />
+      </div>
 
       <LeadTimelineTab
         leadId={deal.sourceLeadId ?? deal.id}

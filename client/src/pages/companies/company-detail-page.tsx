@@ -27,7 +27,7 @@ import {
 } from "@/components/ui/dialog";
 import { DealStageBadge } from "@/components/deals/deal-stage-badge";
 import { LeadStageBadge } from "@/components/leads/lead-stage-badge";
-import { useCompanyDetail, useCompanyContacts, useCompanyDeals } from "@/hooks/use-companies";
+import { useCompanyDetail, useCompanyContacts, useCompanyDeals, verifyCompany } from "@/hooks/use-companies";
 import { useLeads } from "@/hooks/use-leads";
 import { usePipelineStages } from "@/hooks/use-pipeline-config";
 import { formatPhone } from "@/lib/contact-utils";
@@ -141,6 +141,7 @@ export function CompanyDetailPage() {
   const [activeTab, setActiveTab] = useState<Tab>("contacts");
   const [addContactOpen, setAddContactOpen] = useState(false);
   const [contactsKey, setContactsKey] = useState(0);
+  const [verifyingCompany, setVerifyingCompany] = useState(false);
 
   if (loading) {
     return (
@@ -258,6 +259,25 @@ export function CompanyDetailPage() {
               <UserPlus className="h-4 w-4 mr-2" />
               Add Contact
             </Button>
+            {company.companyVerificationStatus === "pending" ? (
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={verifyingCompany}
+                className="border-amber-300 text-amber-700 hover:bg-amber-50"
+                onClick={async () => {
+                  setVerifyingCompany(true);
+                  try {
+                    await verifyCompany(company.id);
+                    await refetchCompany();
+                  } finally {
+                    setVerifyingCompany(false);
+                  }
+                }}
+              >
+                {verifyingCompany ? "Verifying..." : "Verify Company"}
+              </Button>
+            ) : null}
           </div>
         </div>
 

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
+import { LEAD_SOURCE_CATEGORIES, type LeadSourceCategory } from "@trock-crm/shared/types";
 import type { LeadRecord } from "@/hooks/use-leads";
 import { updateLead, useLeadQuestionnaireTemplate } from "@/hooks/use-leads";
 import { usePipelineStages, useProjectTypes } from "@/hooks/use-pipeline-config";
@@ -16,6 +17,10 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  normalizeQuestionOptions,
+  questionnaireRevealMatches,
+} from "./questionnaire-display";
 
 type LeadAnswerValue = string | boolean | number | null;
 
@@ -73,12 +78,7 @@ function isVisibleQuestion(
   }
 
   const parentAnswer = answers[parent.key];
-  const visible =
-    node.parentOptionValue != null
-      ? String(parentAnswer ?? "") === node.parentOptionValue
-      : typeof parentAnswer === "string"
-        ? parentAnswer.trim().length > 0
-        : Boolean(parentAnswer);
+  const visible = questionnaireRevealMatches(parentAnswer, node.parentOptionValue);
 
   visibleCache.set(nodeId, visible);
   return visible;
@@ -130,6 +130,25 @@ function QuestionLabel({
   );
 }
 
+function getInitialSourceState(lead: LeadRecord) {
+  if (lead.sourceCategory) {
+    return {
+      sourceCategory: lead.sourceCategory,
+      sourceDetail: lead.sourceDetail ?? "",
+    };
+  }
+
+  const source = lead.source?.trim() ?? "";
+  const strictMatch = LEAD_SOURCE_CATEGORIES.find(
+    (category) => category.toLowerCase() === source.toLowerCase()
+  );
+
+  return {
+    sourceCategory: strictMatch ?? (source ? "Other" : ""),
+    sourceDetail: strictMatch ? "" : source,
+  };
+}
+
 export function LeadQuestionnaireEditor({ lead, onCancel, onSaved }: LeadQuestionnaireEditorProps) {
   const questionnaire = lead.leadQuestionnaire;
   const { stages } = usePipelineStages();
@@ -137,9 +156,12 @@ export function LeadQuestionnaireEditor({ lead, onCancel, onSaved }: LeadQuestio
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [stageGateError, setStageGateError] = useState<StageGateErrorState | null>(null);
+  const initialSourceState = getInitialSourceState(lead);
   const [formData, setFormData] = useState(() => ({
     name: lead.name,
     source: lead.source ?? "",
+    sourceCategory: initialSourceState.sourceCategory,
+    sourceDetail: initialSourceState.sourceDetail,
     description: lead.description ?? "",
     stageId: lead.stageId,
     projectTypeId: lead.projectTypeId ?? "",
@@ -161,9 +183,12 @@ export function LeadQuestionnaireEditor({ lead, onCancel, onSaved }: LeadQuestio
   }));
 
   useEffect(() => {
+    const nextSourceState = getInitialSourceState(lead);
     setFormData({
       name: lead.name,
       source: lead.source ?? "",
+      sourceCategory: nextSourceState.sourceCategory,
+      sourceDetail: nextSourceState.sourceDetail,
       description: lead.description ?? "",
       stageId: lead.stageId,
       projectTypeId: lead.projectTypeId ?? "",
@@ -262,11 +287,32 @@ export function LeadQuestionnaireEditor({ lead, onCancel, onSaved }: LeadQuestio
     }));
   };
 
+  const handleSourceCategoryChange = (value: string | null) => {
+    setFormData((current) => ({
+      ...current,
+      sourceCategory: !value || value === "__none__" ? "" : value,
+      sourceDetail: value === "Other" ? current.sourceDetail : "",
+    }));
+  };
+
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
     setSubmitting(true);
     setError(null);
     setStageGateError(null);
+
+    if (!isConverted) {
+      if (!formData.sourceCategory) {
+        setSubmitting(false);
+        setError("Source is required.");
+        return;
+      }
+      if (formData.sourceCategory === "Other" && !formData.sourceDetail.trim()) {
+        setSubmitting(false);
+        setError("Source detail is required when Source is Other.");
+        return;
+      }
+    }
 
     try {
       const leadQuestionAnswers = Object.fromEntries(
@@ -277,12 +323,13 @@ export function LeadQuestionnaireEditor({ lead, onCancel, onSaved }: LeadQuestio
         ? { leadQuestionAnswers }
         : {
             name: formData.name.trim(),
-            source: formData.source.trim() || null,
+            sourceCategory: formData.sourceCategory as LeadSourceCategory,
+            sourceDetail: formData.sourceDetail.trim() || null,
             description: formData.description.trim() || null,
             stageId: formData.stageId,
             projectTypeId: formData.projectTypeId || null,
             qualificationPayload: {
-              existing_customer_status: formData.qualificationPayload.existing_customer_status.trim() || null,
+              existing_customer_status: null,
               estimated_value:
                 formData.qualificationPayload.estimated_value.trim() === ""
                   ? null
@@ -379,12 +426,25 @@ export function LeadQuestionnaireEditor({ lead, onCancel, onSaved }: LeadQuestio
 
               <div className="grid gap-4 sm:grid-cols-2">
                 <div className="space-y-2">
-                  <Label htmlFor="lead-source">Source</Label>
-                  <Input
-                    id="lead-source"
-                    value={formData.source}
-                    onChange={(event) => setFormData((current) => ({ ...current, source: event.target.value }))}
-                  />
+                  <QuestionLabel htmlFor="lead-source" required>
+                    Source
+                  </QuestionLabel>
+                  <Select
+                    value={formData.sourceCategory || "__none__"}
+                    onValueChange={handleSourceCategoryChange}
+                  >
+                    <SelectTrigger id="lead-source">
+                      <SelectValue placeholder="Select source" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__none__">Select source</SelectItem>
+                      {LEAD_SOURCE_CATEGORIES.map((category) => (
+                        <SelectItem key={category} value={category}>
+                          {category}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="lead-project-type">Project Type</Label>
@@ -416,6 +476,20 @@ export function LeadQuestionnaireEditor({ lead, onCancel, onSaved }: LeadQuestio
                   </Select>
                 </div>
               </div>
+              {formData.sourceCategory === "Other" ? (
+                <div className="space-y-2">
+                  <QuestionLabel htmlFor="lead-source-detail" required>
+                    Source detail
+                  </QuestionLabel>
+                  <Input
+                    id="lead-source-detail"
+                    value={formData.sourceDetail}
+                    onChange={(event) =>
+                      setFormData((current) => ({ ...current, sourceDetail: event.target.value }))
+                    }
+                  />
+                </div>
+              ) : null}
 
               <div className="space-y-2">
                 <Label htmlFor="lead-description">Description</Label>
@@ -429,20 +503,10 @@ export function LeadQuestionnaireEditor({ lead, onCancel, onSaved }: LeadQuestio
 
               <div className="grid gap-4 sm:grid-cols-3">
                 <div className="space-y-2">
-                  <Label htmlFor="existing-customer-status">Existing Customer Status</Label>
-                  <Input
-                    id="existing-customer-status"
-                    value={formData.qualificationPayload.existing_customer_status}
-                    onChange={(event) =>
-                      setFormData((current) => ({
-                        ...current,
-                        qualificationPayload: {
-                          ...current.qualificationPayload,
-                          existing_customer_status: event.target.value,
-                        },
-                      }))
-                    }
-                  />
+                  <Label>Existing Customer Status</Label>
+                  <div className="rounded-md border bg-muted/30 px-3 py-2 text-sm font-medium">
+                    {lead.existingCustomerStatus ?? "Computed on save"}
+                  </div>
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="estimated-value">Estimated Value</Label>
@@ -492,7 +556,7 @@ export function LeadQuestionnaireEditor({ lead, onCancel, onSaved }: LeadQuestio
             const inputType = getQuestionInputType(node);
             const currentValue = formData.leadQuestionAnswers[node.key];
             const depth = getDepth(node.id, nodeById);
-            const options = Array.isArray(node.options) ? node.options.filter((option) => typeof option === "string") as string[] : [];
+            const options = normalizeQuestionOptions(node.options);
 
             return (
               <div key={node.id} className="space-y-2 rounded-md border p-3" style={{ marginLeft: depth * 16 }}>
@@ -539,8 +603,8 @@ export function LeadQuestionnaireEditor({ lead, onCancel, onSaved }: LeadQuestio
                     <SelectContent>
                       <SelectItem value="__unanswered__">Unanswered</SelectItem>
                       {options.map((option) => (
-                        <SelectItem key={option} value={option}>
-                          {option}
+                        <SelectItem key={option.value} value={option.value}>
+                          {option.label}
                         </SelectItem>
                       ))}
                     </SelectContent>

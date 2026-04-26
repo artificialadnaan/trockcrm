@@ -8,6 +8,8 @@ import { Label } from "@/components/ui/label";
 import type { LeadQualificationFieldId } from "@trock-crm/shared/types";
 import {
   getLeadValidationQuestionSetForProjectType,
+  LEAD_SOURCE_CATEGORIES,
+  type LeadSourceCategory,
   LEAD_QUALIFICATION_FIELDS,
 } from "@trock-crm/shared/types";
 import {
@@ -35,6 +37,11 @@ import {
   getLeadCreationStages,
   getNormalizedLeadCreationStageId,
 } from "@/pages/leads/lead-new-page.helpers";
+import {
+  formatQuestionAnswerValue,
+  normalizeQuestionOptions,
+  questionnaireRevealMatches,
+} from "./questionnaire-display";
 
 type LeadAnswerValue = string | boolean | number | null;
 
@@ -53,6 +60,9 @@ export interface LeadFormLead {
   propertyState: string | null;
   propertyZip: string | null;
   source: string | null;
+  sourceCategory?: LeadSourceCategory | null;
+  sourceDetail?: string | null;
+  existingCustomerStatus?: "Existing" | "New" | null;
   description: string | null;
   projectTypeId?: string | null;
   projectType?: {
@@ -119,11 +129,43 @@ interface LeadStageGateErrorState {
 const LEAD_QUALIFICATION_FIELD_LABELS = new Map(
   LEAD_QUALIFICATION_FIELDS.map((field) => [field.id, field.label])
 );
+const EDITABLE_QUALIFICATION_FIELDS = LEAD_QUALIFICATION_FIELDS.filter(
+  (field) => field.id !== "existing_customer_status"
+);
+
+function normalizeLeadSourceForForm(lead?: LeadFormLead, initialSource?: string) {
+  const category = lead?.sourceCategory ?? null;
+  if (category) {
+    return {
+      sourceCategory: category,
+      sourceDetail: lead?.sourceDetail ?? "",
+    };
+  }
+
+  const source = lead?.source ?? initialSource ?? "";
+  const strictMatch = LEAD_SOURCE_CATEGORIES.find(
+    (item) => item.toLowerCase() === source.trim().toLowerCase()
+  );
+
+  if (strictMatch) {
+    return {
+      sourceCategory: strictMatch,
+      sourceDetail: "",
+    };
+  }
+
+  return {
+    sourceCategory: source.trim() ? "Other" : "",
+    sourceDetail: source.trim(),
+  };
+}
 
 function getEditableFormState(
   lead?: LeadFormLead,
   initialValues?: LeadCreateFormProps["initialValues"]
 ) {
+  const sourceState = normalizeLeadSourceForForm(lead, initialValues?.source);
+
   return {
     companyId: lead?.companyId ?? initialValues?.companyId ?? "",
     propertyId: lead?.propertyId ?? initialValues?.propertyId ?? "",
@@ -131,6 +173,8 @@ function getEditableFormState(
     name: lead?.name ?? initialValues?.name ?? "",
     stageId: lead?.stageId ?? initialValues?.stageId ?? "",
     source: lead?.source ?? initialValues?.source ?? "",
+    sourceCategory: sourceState.sourceCategory,
+    sourceDetail: sourceState.sourceDetail,
     description: lead?.description ?? initialValues?.description ?? "",
     projectTypeId: lead?.projectTypeId ?? initialValues?.projectTypeId ?? "",
     qualificationPayload: {
@@ -154,16 +198,8 @@ function getEditableFormState(
 }
 
 function renderAnswerValue(value: LeadAnswerValue | undefined) {
-  if (value == null) {
-    return "--";
-  }
-  if (typeof value === "boolean") {
-    return value ? "Yes" : "No";
-  }
-  if (typeof value === "string") {
-    return value.trim() || "--";
-  }
-  return String(value);
+  const formatted = formatQuestionAnswerValue(value);
+  return formatted === "Unanswered" ? "--" : formatted;
 }
 
 function isVisibleQuestionNode(
@@ -200,12 +236,7 @@ function isVisibleQuestionNode(
   }
 
   const parentAnswer = answers[parent.key];
-  const visible =
-    node.parentOptionValue != null
-      ? String(parentAnswer ?? "") === node.parentOptionValue
-      : typeof parentAnswer === "string"
-        ? parentAnswer.trim().length > 0
-        : Boolean(parentAnswer);
+  const visible = questionnaireRevealMatches(parentAnswer, node.parentOptionValue);
 
   visibleCache.set(nodeId, visible);
   return visible;
@@ -248,33 +279,6 @@ function QuestionLabel({
   );
 }
 
-function normalizeQuestionOptions(options: unknown) {
-  if (!Array.isArray(options)) {
-    return [];
-  }
-
-  return options
-    .map((option) => {
-      if (typeof option === "string") {
-        return { value: option, label: option };
-      }
-      if (
-        option &&
-        typeof option === "object" &&
-        "value" in option &&
-        typeof (option as { value?: unknown }).value === "string"
-      ) {
-        const typedOption = option as { value: string; label?: unknown };
-        return {
-          value: typedOption.value,
-          label: typeof typedOption.label === "string" ? typedOption.label : typedOption.value,
-        };
-      }
-      return null;
-    })
-    .filter((option): option is { value: string; label: string } => option != null);
-}
-
 function SummaryLeadForm({
   lead,
   converted = false,
@@ -288,31 +292,10 @@ function SummaryLeadForm({
       .join(" ") || lead.propertyName || "--";
   const projectType =
     lead.projectType ?? projectTypes.find((entry) => entry.id === lead.projectTypeId) ?? null;
-  const questionSet = getValidationQuestionSetForProjectType(projectType?.slug ?? null);
-  const questionnaireNodes = useMemo(
-    () =>
-      lead.leadQuestionnaire
-        ? lead.leadQuestionnaire.nodes.length > 0
-          ? lead.leadQuestionnaire.nodes
-          : lead.leadQuestionnaire.allNodes
-        : [],
-    [lead.leadQuestionnaire]
-  );
-  const questionnaireNodeById = useMemo(
-    () => new Map(questionnaireNodes.map((node) => [node.id, node])),
-    [questionnaireNodes]
-  );
-  const visibleQuestionnaireNodes = useMemo(() => {
-    const visibleCache = new Map<string, boolean>();
-
-    return questionnaireNodes
-      .filter((node) => node.nodeType === "question")
-      .filter((node) =>
-        isVisibleQuestionNode(node.id, questionnaireNodeById, lead.leadQuestionnaire?.answers ?? {}, visibleCache)
-      )
-      .sort((left, right) => left.displayOrder - right.displayOrder);
-  }, [lead.leadQuestionnaire?.answers, questionnaireNodeById, questionnaireNodes]);
-  const showV2SummaryQuestions = visibleQuestionnaireNodes.length > 0;
+  const displaySource =
+    lead.sourceCategory === "Other"
+      ? lead.sourceDetail || lead.source || "Other"
+      : lead.sourceCategory ?? lead.source ?? "--";
 
   return (
     <Card className="overflow-hidden border-slate-200 shadow-sm">
@@ -344,7 +327,7 @@ function SummaryLeadForm({
           </div>
           <div>
             <p className="text-muted-foreground">Source</p>
-            <p className="font-medium">{lead.source ?? "--"}</p>
+            <p className="font-medium">{displaySource}</p>
           </div>
         </div>
 
@@ -362,42 +345,6 @@ function SummaryLeadForm({
         {lead.description ? (
           <p className="whitespace-pre-wrap text-sm text-muted-foreground">{lead.description}</p>
         ) : null}
-
-        <div className="space-y-3 rounded-lg border p-3">
-          <p className="text-sm font-medium">Sales Validation</p>
-          <div className="grid gap-3 text-sm sm:grid-cols-2">
-            {LEAD_QUALIFICATION_FIELDS.map((field: { id: LeadQualificationFieldId; label: string }) => (
-              <div key={field.id}>
-                <p className="text-muted-foreground">{field.label}</p>
-                <p className="font-medium">{renderAnswerValue(lead.qualificationPayload?.[field.id])}</p>
-              </div>
-            ))}
-          </div>
-          <div className="space-y-2">
-            <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-              {showV2SummaryQuestions ? "Project Intake Questions" : questionSet.title}
-            </p>
-            <div className="grid gap-3 text-sm">
-              {showV2SummaryQuestions
-                ? visibleQuestionnaireNodes.map((node) => (
-                    <div key={node.id}>
-                      <p className="text-muted-foreground">{node.label}</p>
-                      <p className="font-medium">
-                        {renderAnswerValue(lead.leadQuestionnaire?.answers?.[node.key])}
-                      </p>
-                    </div>
-                  ))
-                : questionSet.questions.map((question) => (
-                    <div key={question.id}>
-                      <p className="text-muted-foreground">{question.label}</p>
-                      <p className="font-medium">
-                        {renderAnswerValue(lead.projectTypeQuestionPayload?.answers?.[question.id])}
-                      </p>
-                    </div>
-                  ))}
-            </div>
-          </div>
-        </div>
 
         <div className="flex flex-wrap gap-2">
           {showPrimaryAction ? (
@@ -418,6 +365,86 @@ function SummaryLeadForm({
         <p className="text-xs text-muted-foreground">
           This lead surface is backed by the pre-RFP lead record and preserves its activity history through conversion.
         </p>
+      </CardContent>
+    </Card>
+  );
+}
+
+export function LeadQuestionnaireSummary({ lead }: { lead: LeadFormLead }) {
+  const { projectTypes } = useProjectTypes();
+  const projectType =
+    lead.projectType ?? projectTypes.find((entry) => entry.id === lead.projectTypeId) ?? null;
+  const questionSet = getValidationQuestionSetForProjectType(projectType?.slug ?? null);
+  const questionnaireNodes = useMemo(
+    () =>
+      lead.leadQuestionnaire
+        ? lead.leadQuestionnaire.nodes.length > 0
+          ? lead.leadQuestionnaire.nodes
+          : lead.leadQuestionnaire.allNodes
+        : [],
+    [lead.leadQuestionnaire]
+  );
+  const questionnaireNodeById = useMemo(
+    () => new Map(questionnaireNodes.map((node) => [node.id, node])),
+    [questionnaireNodes]
+  );
+  const visibleQuestionnaireNodes = useMemo(() => {
+    const visibleCache = new Map<string, boolean>();
+
+    return questionnaireNodes
+      .filter((node) => node.nodeType === "question")
+      .filter((node) =>
+        isVisibleQuestionNode(node.id, questionnaireNodeById, lead.leadQuestionnaire?.answers ?? {}, visibleCache)
+      )
+      .sort((left, right) => left.displayOrder - right.displayOrder);
+  }, [lead.leadQuestionnaire?.answers, questionnaireNodeById, questionnaireNodes]);
+  const showV2SummaryQuestions = visibleQuestionnaireNodes.length > 0;
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Project Questions</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-5">
+        <div className="grid gap-3 text-sm sm:grid-cols-3">
+          <div>
+            <p className="text-muted-foreground">Existing Customer Status</p>
+            <p className="font-medium">
+              {lead.existingCustomerStatus ?? renderAnswerValue(lead.qualificationPayload?.existing_customer_status)}
+            </p>
+          </div>
+          {EDITABLE_QUALIFICATION_FIELDS.map((field: { id: LeadQualificationFieldId; label: string }) => (
+            <div key={field.id}>
+              <p className="text-muted-foreground">{field.label}</p>
+              <p className="font-medium">{renderAnswerValue(lead.qualificationPayload?.[field.id])}</p>
+            </div>
+          ))}
+        </div>
+
+        <div className="space-y-2">
+          <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+            {showV2SummaryQuestions ? "Project Questions" : questionSet.title}
+          </p>
+          <div className="grid gap-3 text-sm sm:grid-cols-2">
+            {showV2SummaryQuestions
+              ? visibleQuestionnaireNodes.map((node) => (
+                  <div key={node.id} className="rounded-md border p-3 transition-all duration-150">
+                    <p className="text-muted-foreground">{node.label}</p>
+                    <p className="font-medium">
+                      {renderAnswerValue(lead.leadQuestionnaire?.answers?.[node.key])}
+                    </p>
+                  </div>
+                ))
+              : questionSet.questions.map((question) => (
+                  <div key={question.id} className="rounded-md border p-3">
+                    <p className="text-muted-foreground">{question.label}</p>
+                    <p className="font-medium">
+                      {renderAnswerValue(lead.projectTypeQuestionPayload?.answers?.[question.id])}
+                    </p>
+                  </div>
+                ))}
+          </div>
+        </div>
       </CardContent>
     </Card>
   );
@@ -589,6 +616,14 @@ function EditableLeadForm({
     }));
   };
 
+  const handleSourceCategoryChange = (value: string | null) => {
+    setFormData((current) => ({
+      ...current,
+      sourceCategory: !value || value === "__none__" ? "" : value,
+      sourceDetail: value === "Other" ? current.sourceDetail : "",
+    }));
+  };
+
   const handleQuestionAnswerChange = (
     questionId: string,
     input: "text" | "textarea" | "number" | "boolean",
@@ -629,6 +664,16 @@ function EditableLeadForm({
       return;
     }
 
+    if (!formData.sourceCategory) {
+      setError("Source is required.");
+      return;
+    }
+
+    if (formData.sourceCategory === "Other" && !formData.sourceDetail.trim()) {
+      setError("Source detail is required when Source is Other.");
+      return;
+    }
+
     if (isCreate && useV2Questionnaire) {
       const missingRequiredQuestions = v2VisibleQuestionNodes
         .filter((node) => node.isRequired && !isAnsweredQuestionValue(formData.projectTypeQuestionAnswers[node.key]))
@@ -648,7 +693,7 @@ function EditableLeadForm({
       const workflowPayload = {
         projectTypeId: formData.projectTypeId || null,
         qualificationPayload: {
-          existing_customer_status: formData.qualificationPayload.existing_customer_status.trim() || null,
+          existing_customer_status: null,
           estimated_value:
             formData.qualificationPayload.estimated_value.trim() === ""
               ? null
@@ -686,6 +731,8 @@ function EditableLeadForm({
           name: formData.name.trim(),
           stageId: effectiveStageId,
           source: formData.source.trim() || null,
+          sourceCategory: formData.sourceCategory as LeadSourceCategory,
+          sourceDetail: formData.sourceDetail.trim() || null,
           description: formData.description.trim() || null,
           ...workflowPayload,
         });
@@ -694,6 +741,8 @@ function EditableLeadForm({
       } else if (lead) {
         await updateLead(lead.id, {
           source: formData.source.trim() || null,
+          sourceCategory: formData.sourceCategory as LeadSourceCategory,
+          sourceDetail: formData.sourceDetail.trim() || null,
           description: formData.description.trim() || null,
           ...workflowPayload,
         });
@@ -840,13 +889,25 @@ function EditableLeadForm({
 
               <div className="grid gap-4 sm:grid-cols-2">
                 <div className="space-y-2">
-                  <Label htmlFor="source">Source</Label>
-                  <Input
-                    id="source"
-                    value={formData.source}
-                    onChange={(event) => handleFieldChange("source", event.target.value)}
-                    placeholder="Referral, inbound, repeat customer..."
-                  />
+                  <QuestionLabel htmlFor="sourceCategory" required>
+                    Source
+                  </QuestionLabel>
+                  <Select
+                    value={formData.sourceCategory || "__none__"}
+                    onValueChange={handleSourceCategoryChange}
+                  >
+                    <SelectTrigger id="sourceCategory">
+                      <SelectValue placeholder="Select source" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__none__">Select source</SelectItem>
+                      {LEAD_SOURCE_CATEGORIES.map((category) => (
+                        <SelectItem key={category} value={category}>
+                          {category}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
                 </div>
 
                 <div className="space-y-2">
@@ -877,6 +938,19 @@ function EditableLeadForm({
                   </Select>
                 </div>
               </div>
+              {formData.sourceCategory === "Other" ? (
+                <div className="space-y-2">
+                  <QuestionLabel htmlFor="sourceDetail" required>
+                    Source detail
+                  </QuestionLabel>
+                  <Input
+                    id="sourceDetail"
+                    value={formData.sourceDetail}
+                    onChange={(event) => handleFieldChange("sourceDetail", event.target.value)}
+                    placeholder="Describe the source"
+                  />
+                </div>
+              ) : null}
 
               <div className="space-y-2">
                 <Label htmlFor="description">Description</Label>
@@ -941,14 +1015,39 @@ function EditableLeadForm({
                 </Select>
               </div>
               <div className="space-y-2">
-                <Label htmlFor="source">Source</Label>
-                <Input
-                  id="source"
-                  value={formData.source}
-                  onChange={(event) => handleFieldChange("source", event.target.value)}
-                  placeholder="Referral, inbound, repeat customer..."
-                />
+                <QuestionLabel htmlFor="sourceCategory" required>
+                  Source
+                </QuestionLabel>
+                <Select
+                  value={formData.sourceCategory || "__none__"}
+                  onValueChange={handleSourceCategoryChange}
+                >
+                  <SelectTrigger id="sourceCategory">
+                    <SelectValue placeholder="Select source" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="__none__">Select source</SelectItem>
+                    {LEAD_SOURCE_CATEGORIES.map((category) => (
+                      <SelectItem key={category} value={category}>
+                        {category}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
+              {formData.sourceCategory === "Other" ? (
+                <div className="space-y-2">
+                  <QuestionLabel htmlFor="sourceDetail" required>
+                    Source detail
+                  </QuestionLabel>
+                  <Input
+                    id="sourceDetail"
+                    value={formData.sourceDetail}
+                    onChange={(event) => handleFieldChange("sourceDetail", event.target.value)}
+                    placeholder="Describe the source"
+                  />
+                </div>
+              ) : null}
             </div>
           )}
         </CardContent>
@@ -959,7 +1058,13 @@ function EditableLeadForm({
           <CardTitle>Sales Validation Fields</CardTitle>
         </CardHeader>
         <CardContent className="grid gap-4 sm:grid-cols-3">
-          {LEAD_QUALIFICATION_FIELDS.map(
+          <div className="space-y-2">
+            <Label>Existing Customer Status</Label>
+            <div className="rounded-md border bg-muted/30 px-3 py-2 text-sm font-medium">
+              {lead?.existingCustomerStatus ?? "Computed on save"}
+            </div>
+          </div>
+          {EDITABLE_QUALIFICATION_FIELDS.map(
             (field: { id: LeadQualificationFieldId; label: string; input: string }) => (
               <div key={field.id} className="space-y-2">
                 <Label htmlFor={field.id}>{field.label}</Label>

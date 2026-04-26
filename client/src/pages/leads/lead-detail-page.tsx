@@ -3,7 +3,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { ArrowLeft, Building2, MapPin, Clock3, User, Phone } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { LeadForm } from "@/components/leads/lead-form";
+import { LeadForm, LeadQuestionnaireSummary } from "@/components/leads/lead-form";
 import { LeadConvertDialog } from "@/components/leads/lead-convert-dialog";
 import { LeadStageChangeDialog } from "@/components/leads/lead-stage-change-dialog";
 import { LeadStageBadge } from "@/components/leads/lead-stage-badge";
@@ -190,11 +190,41 @@ export function LeadDetailPage() {
               }}
             />
           ) : (
-            <LeadTimelineTab
-              leadId={lead.id}
-              convertedDealId={lead.convertedDealId}
-              convertedAt={convertedAt}
-            />
+            <>
+              <LeadTimelineTab
+                leadId={lead.id}
+                convertedDealId={lead.convertedDealId}
+                convertedAt={convertedAt}
+              />
+              <LeadQuestionnaireSummary
+                lead={{
+                  id: lead.id,
+                  name: lead.name,
+                  convertedDealId: lead.convertedDealId,
+                  convertedDealNumber: lead.convertedDealNumber,
+                  companyId: lead.companyId ?? null,
+                  companyName: leadCompanyName,
+                  stageId: lead.stageId,
+                  propertyId: lead.propertyId,
+                  propertyName: lead.property?.name ?? null,
+                  propertyAddress: lead.property?.address ?? null,
+                  propertyCity: lead.property?.city ?? null,
+                  propertyState: lead.property?.state ?? null,
+                  propertyZip: lead.property?.zip ?? null,
+                  source: lead.source,
+                  sourceCategory: lead.sourceCategory,
+                  sourceDetail: lead.sourceDetail,
+                  existingCustomerStatus: lead.existingCustomerStatus,
+                  description: lead.description,
+                  projectTypeId: lead.projectTypeId,
+                  projectType: lead.projectType,
+                  qualificationPayload: lead.qualificationPayload,
+                  projectTypeQuestionPayload: lead.projectTypeQuestionPayload,
+                  leadQuestionnaire: lead.leadQuestionnaire ?? null,
+                  stageEnteredAt: lead.stageEnteredAt,
+                }}
+              />
+            </>
           )}
         </div>
 
@@ -221,6 +251,9 @@ export function LeadDetailPage() {
               propertyState: lead.property?.state ?? null,
               propertyZip: lead.property?.zip ?? null,
               source: lead.source,
+              sourceCategory: lead.sourceCategory,
+              sourceDetail: lead.sourceDetail,
+              existingCustomerStatus: lead.existingCustomerStatus,
               description: lead.description,
               projectTypeId: lead.projectTypeId,
               projectType: lead.projectType,
