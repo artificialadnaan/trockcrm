@@ -469,7 +469,9 @@ async function assertLeadQuestionGateAllowed(
     ...input.leadQuestionAnswers,
   };
   const nodes = await listQuestionnaireNodes(tenantDb, input.projectTypeId);
-  const existingCustomerStatus = await computeExistingCustomerStatus(tenantDb, input.companyId);
+  const existingCustomerStatus = await computeExistingCustomerStatus(tenantDb, input.companyId, new Date(), {
+    excludeLeadId: input.leadId,
+  });
   const qualificationFields = ["estimated_value", "timeline_status"].filter(
     (fieldId) => !isAnsweredQuestionValue(input.qualificationPayload[fieldId])
   );
@@ -850,7 +852,9 @@ export function createLeadService(
       return null;
     }
 
-    const existingCustomerStatus = await computeExistingCustomerStatus(tenantDb, lead.companyId);
+    const existingCustomerStatus = await computeExistingCustomerStatus(tenantDb, lead.companyId, new Date(), {
+      excludeLeadId: lead.id,
+    });
     return {
       ...decoratedLead,
       existingCustomerStatus: existingCustomerStatus.status,

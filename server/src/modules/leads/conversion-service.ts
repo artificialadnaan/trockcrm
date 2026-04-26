@@ -82,7 +82,9 @@ export function createLeadConversionService(
     currentLeadStage: NonNullable<Awaited<ReturnType<typeof getStageById>>>,
     opportunityStage: NonNullable<Awaited<ReturnType<typeof getStageBySlug>>>
   ) {
-    const existingCustomerStatus = await computeExistingCustomerStatus(tenantDb, lead.companyId);
+    const existingCustomerStatus = await computeExistingCustomerStatus(tenantDb, lead.companyId, new Date(), {
+      excludeLeadId: lead.id,
+    });
     const qualificationFields = ["estimated_value", "timeline_status"].filter(
       (fieldId) =>
         !isAnsweredQuestionValue(

@@ -261,7 +261,9 @@ export async function validateLeadStageGate(
   }
 
   const computedExistingCustomerStatus = lead.companyId
-    ? await computeExistingCustomerStatus(tenantDb, lead.companyId)
+    ? await computeExistingCustomerStatus(tenantDb, lead.companyId, new Date(), {
+        excludeLeadId: lead.id,
+      })
     : null;
   const qualificationPayload =
     lead.qualificationPayload && typeof lead.qualificationPayload === "object"
