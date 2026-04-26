@@ -7,6 +7,7 @@ export {
 } from "@/lib/pipeline-ownership";
 import type { StagePageQuery } from "@/lib/pipeline-stage-page";
 import type { LeadScopingReadiness, LeadScopingSectionData } from "../../../shared/src/types/lead-scoping.js";
+import type { LeadSourceCategory } from "../../../shared/src/types/enums.js";
 
 export interface LeadQualificationRecord {
   id: string;
@@ -67,6 +68,9 @@ export interface LeadRecord {
   assignedRepId: string;
   status: "open" | "converted" | "disqualified";
   source: string | null;
+  sourceCategory: LeadSourceCategory | null;
+  sourceDetail: string | null;
+  existingCustomerStatus?: "Existing" | "New" | null;
   description: string | null;
   projectTypeId: string | null;
   projectType: {
@@ -434,6 +438,8 @@ export async function createLead(input: {
   primaryContactId?: string | null;
   name: string;
   source?: string | null;
+  sourceCategory?: LeadSourceCategory | null;
+  sourceDetail?: string | null;
   description?: string | null;
   projectTypeId?: string | null;
   qualificationPayload?: Record<string, string | boolean | number | null>;
@@ -457,6 +463,8 @@ type LeadUpdatePayload = Partial<
     | "primaryContactId"
     | "name"
     | "source"
+    | "sourceCategory"
+    | "sourceDetail"
     | "description"
     | "status"
     | "decisionMakerName"
