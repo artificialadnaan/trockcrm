@@ -358,9 +358,9 @@ Route/Component: `tests/audit/companies-properties.spec.ts`, company files tab
 Severity: low
 Environment: production (Railway)
 Discovered: second full audit run after cascade pass
-Symptom: the company/property audit flaked on strict-mode violation because `page.getByText(/·/)` matched three file metadata rows.
-Root cause: test bug. The audit only needed to prove either the empty file state or at least one file metadata row was visible, but the combined locator stayed strict across multiple matching rows.
-Fix: count file metadata rows first and assert visibility on `.first()` when rows exist; otherwise assert the empty state.
+Symptom: the company/property audit flaked first on strict-mode violation because `page.getByText(/·/)` matched three file metadata rows, then on a premature empty-state assertion while file rows were still loading.
+Root cause: test bug. The audit only needed to prove either the empty file state or at least one file metadata row was visible, but it did not wait for the tab content to settle before choosing which assertion to run.
+Fix: poll until either file metadata rows or the empty state exist, then assert `.first()` metadata row visibility when rows exist; otherwise assert the empty state.
 Deployed: n/a (test-only)
 Deploy status: n/a
 Verification: full audit rerun pending

@@ -167,10 +167,14 @@ test.describe.serial("companies / properties production audit", () => {
 
     await page.getByRole("button", { name: "Files", exact: true }).click();
     const fileMetadataRows = page.getByText(/·/);
+    const emptyFilesState = page.getByText("No files found across associated deals.", { exact: true });
+    await expect
+      .poll(async () => (await fileMetadataRows.count()) + (await emptyFilesState.count()))
+      .toBeGreaterThan(0);
     if ((await fileMetadataRows.count()) > 0) {
       await expect(fileMetadataRows.first()).toBeVisible();
     } else {
-      await expect(page.getByText("No files found across associated deals.", { exact: true })).toBeVisible();
+      await expect(emptyFilesState).toBeVisible();
     }
 
     await page.getByRole("button", { name: "Emails", exact: true }).click();
