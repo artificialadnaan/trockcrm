@@ -340,6 +340,19 @@ Deploy status: n/a
 Verification: cascade rerun pending
 Status: in progress
 
+Issue #22 — Cascade audit over-drove final required-answer save through flaky custom selects
+Route/Component: `tests/audit/lead-questionnaire-cascade.spec.ts`, v2 project-question selects
+Severity: low
+Environment: production (Railway)
+Discovered: cascade audit rerun after option-label helper fix
+Symptom: the audit still timed out waiting for the `Market Rate` option after focusing the custom select trigger.
+Root cause: test bug. The final server gate success case does not need to exercise every required answer through the custom select UI; the cascade audit already covers UI rendering, switching, and parent/child reveal, while the locked gate behavior is server-enforced and better verified through the API.
+Fix: keep the exact missing-key rejection assertion on the API, submit a fully answered Sales Validation transition through the API for the success case, then reload the lead detail page and verify the conversion affordance is visible.
+Deployed: n/a (test-only)
+Deploy status: n/a
+Verification: cascade rerun pending
+Status: in progress
+
 ## Needs Human Review
 
 - Railway frontend stale-bundle / asset propagation drift

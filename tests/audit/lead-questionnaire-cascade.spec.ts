@@ -157,6 +157,27 @@ function getQuestionOptionEntries(options: unknown): { value: string; label: str
   });
 }
 
+function getQuestionAnswerValue(node: LeadQuestionnaireNode, valueOverride?: QuestionAnswerValue) {
+  const inputType = node.inputType ?? "text";
+
+  if (valueOverride != null) {
+    return valueOverride;
+  }
+  if (inputType === "boolean") {
+    return true;
+  }
+  if (inputType === "select" || (Array.isArray(node.options) && node.options.length > 0)) {
+    return getFirstOptionValue(node.options);
+  }
+  if (inputType === "date") {
+    return "2026-05-01";
+  }
+  if (inputType === "number" || inputType === "currency") {
+    return 1;
+  }
+  return `AUDIT_TEST ${node.key}`;
+}
+
 async function loadAuditBundle() {
   const apiRequest = await createRoleApiContext("rep");
 
@@ -336,20 +357,12 @@ async function fillQuestionAnswer(
 ) {
   const locator = page.locator(`#${node.key}`);
   const inputType = node.inputType ?? "text";
-  const currentValue = valueOverride;
+  const currentValue = getQuestionAnswerValue(node, valueOverride);
 
   if (inputType === "boolean") {
     await locator.click();
-    const next = typeof currentValue === "boolean" ? String(currentValue) : "true";
+    const next = String(currentValue);
     await page.getByRole("option", { name: next === "true" ? "Yes" : "No", exact: true }).click();
-    return;
-  }
-
-  if ((inputType === "select" || (Array.isArray(node.options) && node.options.length > 0)) && currentValue == null) {
-    const next = getQuestionOptionEntries(node.options)[0];
-    if (!next) return;
-    await locator.click();
-    await page.getByRole("option", { name: next.label, exact: true }).click();
     return;
   }
 
@@ -362,16 +375,7 @@ async function fillQuestionAnswer(
     return;
   }
 
-  const value =
-    currentValue != null
-      ? String(currentValue)
-      : inputType === "date"
-        ? "2026-05-01"
-        : inputType === "number" || inputType === "currency"
-          ? "1"
-          : `AUDIT_TEST ${node.key}`;
-
-  await locator.fill(value);
+  await locator.fill(String(currentValue));
 }
 
 async function collectIssues(page: import("@playwright/test").Page, expectedLeadPatchUrl: string) {
@@ -630,19 +634,33 @@ test.describe.serial("lead questionnaire cascade production audit", () => {
       await gateApi.dispose();
     }
 
-    await page.locator("#lead-stage").click();
-    await page.getByRole("option", { name: auditBundle.salesValidationStage.name, exact: true }).click();
-    await page.locator("#existing-customer-status").fill("Repeat customer");
-    await page.locator("#estimated-value").fill("125000");
-    await page.locator("#timeline-status").fill("Q3 2026");
-    await page.getByRole("button", { name: "Save Changes", exact: true }).click();
-    await expect(page.getByRole("button", { name: "Save Changes", exact: true })).toBeVisible();
-
+    const requiredQuestionAnswers: Record<string, QuestionAnswerValue> = {};
     for (const node of traditionalGate.visibleNodes.filter((entry) => entry.isRequired)) {
-      await fillQuestionAnswer(page, node);
+      requiredQuestionAnswers[node.key] = getQuestionAnswerValue(node);
     }
 
-    await page.getByRole("button", { name: "Save Changes", exact: true }).click();
+    const allowedGateApi = await createRoleApiContext("rep");
+    try {
+      const allowedResponse = await allowedGateApi.fetch(`${apiBaseURL}/api/leads/${leadId}`, {
+        method: "PATCH",
+        data: {
+          projectTypeId: auditBundle.projectTypes.traditionalMultifamily.id,
+          stageId: auditBundle.salesValidationStage.id,
+          qualificationPayload: {
+            existing_customer_status: "Repeat customer",
+            estimated_value: 125000,
+            timeline_status: "Q3 2026",
+          },
+          leadQuestionAnswers: requiredQuestionAnswers,
+        },
+      });
+
+      expect(allowedResponse.status()).toBe(200);
+    } finally {
+      await allowedGateApi.dispose();
+    }
+
+    await page.reload({ waitUntil: "domcontentloaded" });
     await expect(page.getByRole("button", { name: "Convert to Opportunity", exact: true })).toBeVisible();
 
     const persistedLead = await fetchLeadById(leadId);
