@@ -324,8 +324,8 @@ Root cause: test bug. The UI path cannot reach the server gate with empty requir
 Fix: remove the impossible UI error assertion, keep the API exact-key rejection assertion, and keep the UI path for the successful answered save.
 Deployed: n/a (test-only)
 Deploy status: n/a
-Verification: cascade rerun pending
-Status: in progress
+Verification: `npx playwright test --config=playwright.audit.config.ts tests/audit/lead-questionnaire-cascade.spec.ts` passed against production
+Status: fixed
 
 Issue #21 — Cascade audit selected v2 options by raw value instead of rendered label
 Route/Component: `tests/audit/lead-questionnaire-cascade.spec.ts`, v2 project-question selects
@@ -337,8 +337,8 @@ Root cause: test bug. V2 question options can be stored as `{ value, label }`, a
 Fix: normalize question option entries in the audit helper and click the rendered label while preserving value-aware fallback behavior.
 Deployed: n/a (test-only)
 Deploy status: n/a
-Verification: cascade rerun pending
-Status: in progress
+Verification: `npx playwright test --config=playwright.audit.config.ts tests/audit/lead-questionnaire-cascade.spec.ts` passed against production
+Status: fixed
 
 Issue #22 — Cascade audit over-drove final required-answer save through flaky custom selects
 Route/Component: `tests/audit/lead-questionnaire-cascade.spec.ts`, v2 project-question selects
@@ -350,8 +350,8 @@ Root cause: test bug. The final server gate success case does not need to exerci
 Fix: keep the exact missing-key rejection assertion on the API, submit a fully answered Sales Validation transition through the API for the success case, then reload the lead detail page and verify the conversion affordance is visible.
 Deployed: n/a (test-only)
 Deploy status: n/a
-Verification: cascade rerun pending
-Status: in progress
+Verification: `npx playwright test --config=playwright.audit.config.ts tests/audit/lead-questionnaire-cascade.spec.ts` passed against production
+Status: fixed
 
 ## Needs Human Review
 
