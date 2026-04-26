@@ -483,6 +483,7 @@ export function LeadQuestionnaireEditor({ lead, onCancel, onSaved }: LeadQuestio
                   </QuestionLabel>
                   <Input
                     id="lead-source-detail"
+                    required
                     value={formData.sourceDetail}
                     onChange={(event) =>
                       setFormData((current) => ({ ...current, sourceDetail: event.target.value }))

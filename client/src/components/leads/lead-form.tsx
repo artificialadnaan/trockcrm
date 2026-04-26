@@ -945,6 +945,7 @@ function EditableLeadForm({
                   </QuestionLabel>
                   <Input
                     id="sourceDetail"
+                    required
                     value={formData.sourceDetail}
                     onChange={(event) => handleFieldChange("sourceDetail", event.target.value)}
                     placeholder="Describe the source"
@@ -1042,6 +1043,7 @@ function EditableLeadForm({
                   </QuestionLabel>
                   <Input
                     id="sourceDetail"
+                    required
                     value={formData.sourceDetail}
                     onChange={(event) => handleFieldChange("sourceDetail", event.target.value)}
                     placeholder="Describe the source"
