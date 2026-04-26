@@ -363,8 +363,8 @@ Root cause: test bug. The audit only needed to prove either the empty file state
 Fix: poll until either file metadata rows or the empty state exist, then assert `.first()` metadata row visibility when rows exist; otherwise assert the empty state.
 Deployed: n/a (test-only)
 Deploy status: n/a
-Verification: full audit rerun pending
-Status: in progress
+Verification: two consecutive `npx playwright test --config=playwright.audit.config.ts` runs passed 29/29 against production with no retries after this fix
+Status: fixed
 
 Issue #24 — Lead progression audit made an extra team-members API poll that could hit production rate limits
 Route/Component: `tests/audit/lead-deal-progression.spec.ts`, deal team assignment audit
@@ -376,8 +376,21 @@ Root cause: test harness/infra contention. The UI already verified the created e
 Fix: remove the redundant API poll and rely on the visible post-add team row plus normal deal cleanup.
 Deployed: n/a (test-only)
 Deploy status: n/a
-Verification: full audit rerun pending
-Status: in progress
+Verification: two consecutive `npx playwright test --config=playwright.audit.config.ts` runs passed 29/29 against production with no retries after this fix
+Status: fixed
+
+## Lead Questionnaire V2 Continuation Summary
+- Iterations in this continuation: 10 production audit/deploy checks, including targeted cascade runs, full-suite runs, and reruns after test-harness fixes.
+- Issues fixed in this continuation:
+  - Product: 1 (`0055_require_restoration_xactimate.sql`, deployed by `3182132b-f24a-440a-810c-64c3c5021f06`)
+  - Test/harness: 6 (Issues #20-#24 plus the committed cascade spec itself)
+  - Infra/deploy: 1 (Railway worktree snapshot packaging, resolved with `railway deployment up . --path-as-root`)
+- Latest production deploy: Railway API deployment `3182132b-f24a-440a-810c-64c3c5021f06`, image digest `sha256:49d4e4ddde3e1db52e7a2066d18ece8064f0d0f5c3ef25d9cbf853ebc8177a18`, status SUCCESS.
+- Latest verified frontend asset: `/assets/index-B_t_LSQL.js`; this did not change because `a1f3483` was migration-only, and the successful Docker deploy still rebuilt and served the same committed frontend bundle.
+- Clean-run evidence:
+  - Full audit run 1: `npx playwright test --config=playwright.audit.config.ts` => 29 passed in 52.7s.
+  - Full audit run 2: `npx playwright test --config=playwright.audit.config.ts` => 29 passed in 52.7s.
+- Insurance Claim -> Xactimate required-on-reveal: verified passing in production by `tests/audit/lead-questionnaire-cascade.spec.ts`; the test confirms Xactimate is revealed and marked required when Insurance Claim is true, hidden when false, excluded from missing keys when hidden, and included in the live template/gate behavior when revealed.
 
 ## Needs Human Review
 
