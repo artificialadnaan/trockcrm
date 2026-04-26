@@ -415,8 +415,8 @@ Root cause: test/infra bug. The Files-tab assertion branched on raw locator coun
 Fix: wait for visible Files-tab metadata or empty state before asserting; add a response-level retry helper that tolerates `429`/5xx and use it for cascade API calls that need non-2xx response inspection.
 Deployed: n/a (test-only)
 Deploy status: n/a
-Verification: focused companies/properties production audit passed 3/3 after the Files-tab assertion fix; server and client typechecks passed. Full production rerun is pending because live Playwright escalation is currently blocked by the Codex usage limit.
-Status: fixed locally, production clean-run pending
+Verification: focused companies/properties + cascade production audit passed 4/4 after the final Files-tab and 429 reload hardening; final full production audit passed 30/30.
+Status: fixed
 
 Issue #28 — Brand-new company verification could be suppressed by the lead being created
 Route/Component: `createLead`, `maybeRequestCompanyVerification`, `computeExistingCustomerStatus`
@@ -428,8 +428,65 @@ Root cause: product bug. The activity-window helper was correct for normal evalu
 Fix: add an optional `excludeLeadId` to the company-status helper, pass the newly created lead id into the verification request, and cover the behavior with a regression test that proves the verification email path still routes to `adnaan.iqbal@gmail.com`.
 Deployed: `dccea23` + Railway API deploy `e3f0ce87-8b7c-4de1-9364-07c24b3da55a`
 Deploy status: SUCCESS
-Verification: `npx vitest run server/tests/modules/companies/customer-status-service.test.ts server/tests/modules/leads/stage-gate.test.ts server/tests/modules/leads/service.test.ts server/tests/modules/leads/conversion-service.test.ts` passed 66/66; `npm run typecheck --workspace=server` passed. Production manual Verification 8 and the required clean production audit reruns are pending because live Playwright escalation is currently blocked by the Codex usage limit.
-Status: deployed, production manual verification pending
+Verification: `npx vitest run server/tests/modules/companies/customer-status-service.test.ts server/tests/modules/leads/stage-gate.test.ts server/tests/modules/leads/service.test.ts server/tests/modules/leads/conversion-service.test.ts` passed 66/66; `npm run typecheck --workspace=server` passed. Production manual Verification 8 verified the one-time company verification email state and activity log.
+Status: fixed
+
+Issue #29 — Brand-new company customer status flipped to Existing after first lead create
+Route/Component: lead detail, stage gate, conversion gate, `computeExistingCustomerStatus`
+Severity: high
+Environment: production (Railway)
+Discovered: Phase 3 manual Verification 8 preparation
+Symptom: the create-time verification workflow excluded the current lead correctly, but subsequent lead detail/gate paths still counted the current lead as company activity. A brand-new company could therefore show `Existing` immediately after the first lead was created.
+Root cause: product bug. The current lead is not prior company activity for that same lead's customer-status evaluation.
+Fix: pass `excludeLeadId` from lead detail, Sales Validation gate, and conversion gate status calculations.
+Deployed: `d2da131` + Railway API deploy `4090da26-b0ab-4b8b-80c3-b44a448df6fd`
+Deploy status: SUCCESS
+Verification: focused server tests passed 66/66; `npm run typecheck --workspace=server` passed; headed manual Phase 3 passes verified `existingCustomerStatus=New` for a brand-new AUDIT_TEST company lead.
+Status: fixed
+
+Issue #30 — Create-mode questionnaire title still used old wording
+Route/Component: `/leads/new`, `LeadForm`
+Severity: low
+Environment: production (Railway)
+Discovered: Phase 3 manual Verification 1 preparation
+Symptom: create mode still displayed `Project Intake Questions` while read/edit surfaces used the canonical `Project Questions` label.
+Root cause: UI copy drift during the layout split.
+Fix: use `Project Questions` for the v2 create-mode card title.
+Deployed: `385bc5b` + Railway Frontend deploy `47e119ac-f7fa-475e-a17f-580c12b05148`
+Deploy status: SUCCESS
+Verification: `npm run typecheck --workspace=client` passed; focused lead form/detail tests passed 10/10; headed manual Phase 3 passes captured create-mode `Project Questions` screenshots.
+Status: fixed
+
+Issue #31 — Source detail was visually required but not an HTML required input
+Route/Component: `/leads/new`, `/leads/:id` edit, `LeadForm`, `LeadQuestionnaireEditor`
+Severity: medium
+Environment: production (Railway)
+Discovered: Phase 3 manual Verification 8 pass 1
+Symptom: selecting Source = Other showed a red required indicator for `Source detail`, but the input lacked the `required` attribute, so browser validation did not treat the field itself as required.
+Root cause: UI validation drift. The submit handler enforced Source detail, but the field semantics did not match the visible required state.
+Fix: add `required` to Source detail inputs on create/edit and converted questionnaire edit surfaces.
+Deployed: `3da235d` + Railway Frontend deploy `253419a8-b683-4462-9aaa-a32d0451b5a7`
+Deploy status: SUCCESS
+Verification: `npm run typecheck --workspace=client` passed; focused lead form/detail/questionnaire display tests passed 13/13; headed manual Phase 3 passes verified the `required` attribute in create and edit mode.
+Status: fixed
+
+## Lead Questionnaire Phase 3 UX/Data Model Summary
+- Manual verification iterations in this Phase 3 loop: 2 clean headed passes after final fixes, plus earlier failing passes that exposed Issues #29-#31 and test-harness selector/key assumptions.
+- Issues fixed in this Phase 3 loop:
+  - Product: 4 (`d3107f3`, `dccea23`, `d2da131`, `3da235d`)
+  - UI friction: 1 (`385bc5b`)
+  - Test/harness: 2 (`cf6c826` plus the Phase 3 manual verifier)
+  - Infra/deploy: 0 new blocking deploy issues
+- Latest production deploys:
+  - API: `4090da26-b0ab-4b8b-80c3-b44a448df6fd`, status SUCCESS.
+  - Frontend: `253419a8-b683-4462-9aaa-a32d0451b5a7`, status SUCCESS.
+- Latest verified frontend asset: `/assets/index-DgUZ25XZ.js`.
+- Clean-run evidence:
+  - Manual pass 1: `MANUAL_PASS=pass1 npx playwright test --config=playwright.audit.config.ts tests/audit/lead-questionnaire-phase3-ux.spec.ts --headed` => 1 passed; screenshots `test-results/manual-verification/pass1-01-...png` through `pass1-08-...png`.
+  - Manual pass 2: `MANUAL_PASS=pass2 npx playwright test --config=playwright.audit.config.ts tests/audit/lead-questionnaire-phase3-ux.spec.ts --headed` => 1 passed with no fixes between manual passes; screenshots `test-results/manual-verification/pass2-01-...png` through `pass2-08-...png`.
+  - Final full audit suite: `npx playwright test --config=playwright.audit.config.ts` => 30 passed in 1.3m.
+- Verification email evidence: the Phase 3 manual verifier created a new `AUDIT_TEST_Phase3_Company_*` company/lead, asserted `companyVerificationStatus=pending`, asserted `companyVerificationEmailSentAt` was populated, verified the company activity log body `Company verification email sent to adnaan.iqbal@gmail.com`, and Railway API logs showed successful Resend sends to `adnaan.iqbal@gmail.com` with message ids.
+- Insurance Claim -> Xactimate required-on-reveal: verified passing in production by both `lead-questionnaire-cascade.spec.ts` and the headed Phase 3 manual verifier; Xactimate appears and is marked required when Insurance Claim is `Yes`, and hides when Insurance Claim is `No`.
 
 ## Lead Questionnaire V2 Continuation Summary
 - Iterations in this continuation: 10 production audit/deploy checks, including targeted cascade runs, full-suite runs, and reruns after test-harness fixes.

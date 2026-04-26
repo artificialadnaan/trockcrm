@@ -170,19 +170,17 @@ test.describe.serial("companies / properties production audit", () => {
     const emptyFilesState = page.getByText("No files found across associated deals.", { exact: true });
     await expect
       .poll(async () => {
-        const fileRowsVisible = await fileMetadataRows
-          .first()
-          .isVisible()
-          .catch(() => false);
+        const rowCount = await fileMetadataRows.count();
+        let visibleFileRows = 0;
+        for (let index = 0; index < rowCount; index += 1) {
+          if (await fileMetadataRows.nth(index).isVisible().catch(() => false)) {
+            visibleFileRows += 1;
+          }
+        }
         const emptyStateVisible = await emptyFilesState.isVisible().catch(() => false);
-        return fileRowsVisible || emptyStateVisible;
+        return visibleFileRows > 0 || emptyStateVisible;
       })
       .toBe(true);
-    if (await fileMetadataRows.first().isVisible().catch(() => false)) {
-      await expect(fileMetadataRows.first()).toBeVisible();
-    } else {
-      await expect(emptyFilesState).toBeVisible();
-    }
 
     await page.getByRole("button", { name: "Emails", exact: true }).click();
     await expect(page.getByText("Email integration coming soon", { exact: true })).toBeVisible();

@@ -284,6 +284,25 @@ async function deleteLeadById(leadId: string) {
   }
 }
 
+async function wait(ms: number) {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function reloadUntilConvertActionVisible(page: import("@playwright/test").Page) {
+  const convertButton = page.getByRole("button", { name: "Convert to Opportunity", exact: true });
+  for (let attempt = 1; attempt <= 5; attempt += 1) {
+    await page.reload({ waitUntil: "domcontentloaded" });
+    if (await convertButton.isVisible().catch(() => false)) {
+      return;
+    }
+    if (await page.getByText("Too many requests", { exact: false }).isVisible().catch(() => false)) {
+      await wait(2_000 * attempt);
+      continue;
+    }
+    await wait(500 * attempt);
+  }
+}
+
 async function fetchTemplate(projectTypeId: string | null) {
   const apiRequest = await createRoleApiContext("rep");
 
@@ -675,7 +694,7 @@ test.describe.serial("lead questionnaire cascade production audit", () => {
       await allowedGateApi.dispose();
     }
 
-    await page.reload({ waitUntil: "domcontentloaded" });
+    await reloadUntilConvertActionVisible(page);
     await expect(
       page.getByRole("button", { name: "Convert to Opportunity", exact: true })
     ).toBeVisible();
