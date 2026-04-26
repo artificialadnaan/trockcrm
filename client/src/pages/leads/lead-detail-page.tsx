@@ -82,6 +82,11 @@ export function LeadDetailPage() {
           label: currentStageSlug === "sales_validation_stage" ? "Edit Sales Validation" : "Edit Lead",
           onClick: () => (isLeadEditV2 ? setIsEditing(true) : navigate(`/leads/${lead.id}/edit`)),
         }
+    : isLeadEditV2
+      ? {
+          label: "Edit Lead Questionnaire",
+          onClick: () => setIsEditing(true),
+        }
     : lead.convertedDealId && isOpportunityStage
       ? {
           label: "Open Opportunity Scope",

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import type { ReactNode } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -217,6 +218,34 @@ function getQuestionInputType(node: LeadQuestionnaireSnapshot["allNodes"][number
   if (node.inputType === "currency" || node.inputType === "number") return "number";
   if (Array.isArray(node.options) && node.options.length > 0) return "select";
   return "text";
+}
+
+function isAnsweredQuestionValue(value: LeadAnswerValue | undefined) {
+  if (value == null) return false;
+  if (typeof value === "string") return value.trim().length > 0;
+  return true;
+}
+
+function QuestionLabel({
+  htmlFor,
+  children,
+  required = false,
+}: {
+  htmlFor: string;
+  children: ReactNode;
+  required?: boolean;
+}) {
+  return (
+    <Label htmlFor={htmlFor}>
+      {children}
+      {required ? (
+        <span className="text-red-600" aria-hidden="true">
+          {" "}
+          *
+        </span>
+      ) : null}
+    </Label>
+  );
 }
 
 function normalizeQuestionOptions(options: unknown) {
@@ -600,6 +629,17 @@ function EditableLeadForm({
       return;
     }
 
+    if (isCreate && useV2Questionnaire) {
+      const missingRequiredQuestions = v2VisibleQuestionNodes
+        .filter((node) => node.isRequired && !isAnsweredQuestionValue(formData.projectTypeQuestionAnswers[node.key]))
+        .map((node) => node.label);
+
+      if (missingRequiredQuestions.length > 0) {
+        setError(`Answer required project intake questions: ${missingRequiredQuestions.join(", ")}`);
+        return;
+      }
+    }
+
     setSubmitting(true);
     setError(null);
     setStageGateError(null);
@@ -714,7 +754,7 @@ function EditableLeadForm({
               ) : null}
               {stageGateError.missingRequirements?.projectTypeQuestionIds?.length ? (
                 <p className="mt-1 text-xs text-amber-800">
-                  Missing Top 5 answers:{" "}
+                  Missing required project questions:{" "}
                   {stageGateError.missingRequirements.projectTypeQuestionIds
                     .map((questionId) => gateQuestionLabels.get(questionId) ?? questionId)
                     .join(", ")}
@@ -948,7 +988,9 @@ function EditableLeadForm({
 
                 return (
                   <div key={node.id} className="space-y-2">
-                    <Label htmlFor={node.key}>{node.label}</Label>
+                    <QuestionLabel htmlFor={node.key} required={node.isRequired}>
+                      {node.label}
+                    </QuestionLabel>
                     {node.prompt ? <p className="text-sm text-muted-foreground">{node.prompt}</p> : null}
                     {inputType === "textarea" ? (
                       <textarea

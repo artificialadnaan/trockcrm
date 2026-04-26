@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import type { ReactNode } from "react";
 import type { LeadRecord } from "@/hooks/use-leads";
 import { updateLead, useLeadQuestionnaireTemplate } from "@/hooks/use-leads";
 import { usePipelineStages, useProjectTypes } from "@/hooks/use-pipeline-config";
@@ -107,6 +108,28 @@ function getQuestionInputType(node: NonNullable<LeadRecord["leadQuestionnaire"]>
   return "text";
 }
 
+function QuestionLabel({
+  htmlFor,
+  children,
+  required = false,
+}: {
+  htmlFor: string;
+  children: ReactNode;
+  required?: boolean;
+}) {
+  return (
+    <Label htmlFor={htmlFor}>
+      {children}
+      {required ? (
+        <span className="text-red-600" aria-hidden="true">
+          {" "}
+          *
+        </span>
+      ) : null}
+    </Label>
+  );
+}
+
 export function LeadQuestionnaireEditor({ lead, onCancel, onSaved }: LeadQuestionnaireEditorProps) {
   const questionnaire = lead.leadQuestionnaire;
   const { stages } = usePipelineStages();
@@ -187,6 +210,18 @@ export function LeadQuestionnaireEditor({ lead, onCancel, onSaved }: LeadQuestio
     [availableNodes]
   );
   const nodeById = useMemo(() => new Map(availableNodes.map((node) => [node.id, node])), [availableNodes]);
+  const gateQuestionLabels = useMemo(
+    () =>
+      new Map(
+        availableNodes
+          .filter((node) => node.nodeType === "question")
+          .flatMap((node) => [
+            [node.key, node.label] as const,
+            [node.id, node.label] as const,
+          ])
+      ),
+    [availableNodes]
+  );
   const visibleNodes = useMemo(() => {
     const visibleCache = new Map<string, boolean>();
 
@@ -292,6 +327,20 @@ export function LeadQuestionnaireEditor({ lead, onCancel, onSaved }: LeadQuestio
                   {stageGateError.currentStage.name} → {stageGateError.targetStage.name}
                 </p>
               )}
+              {stageGateError.missingRequirements?.qualificationFields?.length ? (
+                <p className="mt-2 text-xs text-amber-800">
+                  Missing qualification fields:{" "}
+                  {stageGateError.missingRequirements.qualificationFields.join(", ")}
+                </p>
+              ) : null}
+              {stageGateError.missingRequirements?.projectTypeQuestionIds?.length ? (
+                <p className="mt-1 text-xs text-amber-800">
+                  Missing required project questions:{" "}
+                  {stageGateError.missingRequirements.projectTypeQuestionIds
+                    .map((questionId) => gateQuestionLabels.get(questionId) ?? questionId)
+                    .join(", ")}
+                </p>
+              ) : null}
             </div>
           )}
 
@@ -447,10 +496,9 @@ export function LeadQuestionnaireEditor({ lead, onCancel, onSaved }: LeadQuestio
 
             return (
               <div key={node.id} className="space-y-2 rounded-md border p-3" style={{ marginLeft: depth * 16 }}>
-                <Label htmlFor={node.key}>
+                <QuestionLabel htmlFor={node.key} required={node.isRequired}>
                   {node.label}
-                  {node.isRequired ? " *" : ""}
-                </Label>
+                </QuestionLabel>
                 {node.prompt && <p className="text-sm text-muted-foreground">{node.prompt}</p>}
                 {inputType === "textarea" ? (
                   <textarea
