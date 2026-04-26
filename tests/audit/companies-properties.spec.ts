@@ -169,9 +169,16 @@ test.describe.serial("companies / properties production audit", () => {
     const fileMetadataRows = page.getByText(/·/);
     const emptyFilesState = page.getByText("No files found across associated deals.", { exact: true });
     await expect
-      .poll(async () => (await fileMetadataRows.count()) + (await emptyFilesState.count()))
-      .toBeGreaterThan(0);
-    if ((await fileMetadataRows.count()) > 0) {
+      .poll(async () => {
+        const fileRowsVisible = await fileMetadataRows
+          .first()
+          .isVisible()
+          .catch(() => false);
+        const emptyStateVisible = await emptyFilesState.isVisible().catch(() => false);
+        return fileRowsVisible || emptyStateVisible;
+      })
+      .toBe(true);
+    if (await fileMetadataRows.first().isVisible().catch(() => false)) {
       await expect(fileMetadataRows.first()).toBeVisible();
     } else {
       await expect(emptyFilesState).toBeVisible();

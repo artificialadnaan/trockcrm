@@ -4,6 +4,7 @@ import {
   apiBaseURL,
   createRoleApiContext,
   fetchJsonWithRetry,
+  fetchResponseWithRetry,
   loginWithRole,
 } from "./helpers";
 
@@ -275,7 +276,9 @@ async function createAuditLead(bundle: AuditBundle) {
 async function deleteLeadById(leadId: string) {
   const apiRequest = await createRoleApiContext("rep");
   try {
-    await apiRequest.fetch(`${apiBaseURL}/api/leads/${leadId}`, { method: "DELETE" });
+    await fetchResponseWithRetry(apiRequest, `${apiBaseURL}/api/leads/${leadId}`, {
+      method: "DELETE",
+    });
   } finally {
     await apiRequest.dispose();
   }
@@ -316,7 +319,7 @@ async function promoteLeadToQualified(bundle: AuditBundle, leadId: string, proje
   const apiRequest = await createRoleApiContext("rep");
 
   try {
-    const response = await apiRequest.fetch(`${apiBaseURL}/api/leads/${leadId}`, {
+    const response = await fetchResponseWithRetry(apiRequest, `${apiBaseURL}/api/leads/${leadId}`, {
       method: "PATCH",
       data: {
         stageId: bundle.qualifiedLeadStage.id,
@@ -571,21 +574,25 @@ test.describe.serial("lead questionnaire cascade production audit", () => {
 
     const hiddenChildGateApi = await createRoleApiContext("rep");
     try {
-      const hiddenChildResponse = await hiddenChildGateApi.fetch(`${apiBaseURL}/api/leads/${leadId}`, {
-        method: "PATCH",
-        data: {
-          projectTypeId: auditBundle.projectTypes.restoration.id,
-          stageId: auditBundle.salesValidationStage.id,
-          qualificationPayload: {
-            existing_customer_status: "Repeat customer",
-            estimated_value: 125000,
-            timeline_status: "Q3 2026",
+      const hiddenChildResponse = await fetchResponseWithRetry(
+        hiddenChildGateApi,
+        `${apiBaseURL}/api/leads/${leadId}`,
+        {
+          method: "PATCH",
+          data: {
+            projectTypeId: auditBundle.projectTypes.restoration.id,
+            stageId: auditBundle.salesValidationStage.id,
+            qualificationPayload: {
+              existing_customer_status: "Repeat customer",
+              estimated_value: 125000,
+              timeline_status: "Q3 2026",
+            },
+            leadQuestionAnswers: {
+              insurance_claim: false,
+            },
           },
-          leadQuestionAnswers: {
-            insurance_claim: false,
-          },
-        },
-      });
+        }
+      );
 
       expect(hiddenChildResponse.status()).toBe(409);
       const hiddenChildPayload = await hiddenChildResponse.json();
@@ -611,18 +618,22 @@ test.describe.serial("lead questionnaire cascade production audit", () => {
 
     const gateApi = await createRoleApiContext("rep");
     try {
-      const blockedResponse = await gateApi.fetch(`${apiBaseURL}/api/leads/${leadId}`, {
-        method: "PATCH",
-        data: {
-          projectTypeId: auditBundle.projectTypes.traditionalMultifamily.id,
-          stageId: auditBundle.salesValidationStage.id,
-          qualificationPayload: {
-            existing_customer_status: "Repeat customer",
-            estimated_value: 125000,
-            timeline_status: "Q3 2026",
+      const blockedResponse = await fetchResponseWithRetry(
+        gateApi,
+        `${apiBaseURL}/api/leads/${leadId}`,
+        {
+          method: "PATCH",
+          data: {
+            projectTypeId: auditBundle.projectTypes.traditionalMultifamily.id,
+            stageId: auditBundle.salesValidationStage.id,
+            qualificationPayload: {
+              existing_customer_status: "Repeat customer",
+              estimated_value: 125000,
+              timeline_status: "Q3 2026",
+            },
           },
-        },
-      });
+        }
+      );
 
       expect(blockedResponse.status()).toBe(409);
       const blockedPayload = await blockedResponse.json();
@@ -641,19 +652,23 @@ test.describe.serial("lead questionnaire cascade production audit", () => {
 
     const allowedGateApi = await createRoleApiContext("rep");
     try {
-      const allowedResponse = await allowedGateApi.fetch(`${apiBaseURL}/api/leads/${leadId}`, {
-        method: "PATCH",
-        data: {
-          projectTypeId: auditBundle.projectTypes.traditionalMultifamily.id,
-          stageId: auditBundle.salesValidationStage.id,
-          qualificationPayload: {
-            existing_customer_status: "Repeat customer",
-            estimated_value: 125000,
-            timeline_status: "Q3 2026",
+      const allowedResponse = await fetchResponseWithRetry(
+        allowedGateApi,
+        `${apiBaseURL}/api/leads/${leadId}`,
+        {
+          method: "PATCH",
+          data: {
+            projectTypeId: auditBundle.projectTypes.traditionalMultifamily.id,
+            stageId: auditBundle.salesValidationStage.id,
+            qualificationPayload: {
+              existing_customer_status: "Repeat customer",
+              estimated_value: 125000,
+              timeline_status: "Q3 2026",
+            },
+            leadQuestionAnswers: requiredQuestionAnswers,
           },
-          leadQuestionAnswers: requiredQuestionAnswers,
-        },
-      });
+        }
+      );
 
       expect(allowedResponse.status()).toBe(200);
     } finally {
@@ -661,7 +676,9 @@ test.describe.serial("lead questionnaire cascade production audit", () => {
     }
 
     await page.reload({ waitUntil: "domcontentloaded" });
-    await expect(page.getByRole("button", { name: "Convert to Opportunity", exact: true })).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Convert to Opportunity", exact: true })
+    ).toBeVisible();
 
     const persistedLead = await fetchLeadById(leadId);
     expect(persistedLead.stageId).toBe(auditBundle.salesValidationStage.id);
