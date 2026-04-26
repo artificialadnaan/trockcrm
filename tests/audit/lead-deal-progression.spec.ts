@@ -114,8 +114,8 @@ async function fillLeadQuestionnaire(
   page: import("@playwright/test").Page,
   projectType: AuditProjectType
 ) {
-  await page.getByLabel("Source").fill("AUDIT_TEST referral");
-  await page.getByLabel("Existing Customer Status").fill("Repeat customer");
+  await page.getByLabel("Source").click();
+  await page.getByRole("option", { name: "Referral" }).click();
   await page.getByLabel("Estimated Value").fill("125000");
   await page.getByLabel("Timeline Status").fill("Q3 2026");
 
