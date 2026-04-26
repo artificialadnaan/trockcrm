@@ -986,6 +986,7 @@ export function createLeadService(
           leadName: lead.name,
           userId: input.assignedRepId,
           now,
+          excludeLeadId: lead.id,
         });
       }
     }

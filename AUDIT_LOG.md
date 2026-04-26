@@ -392,6 +392,45 @@ Deploy status: SUCCESS
 Verification: two consecutive headed Playwright manual passes completed all 7 verification groups with screenshots in `test-results/manual-verification/`; direct API/container DB verification confirmed a post-conversion `poc` edit preserved `leads.updated_at` and wrote `office_dallas.lead_question_answer_history`; final full audit suite passed 29/29.
 Status: fixed
 
+Issue #26 — Sales Validation gate still checked legacy `source` after canonical source migration
+Route/Component: `/api/leads/:id`, `server/src/modules/leads/stage-gate.ts`, lead progression audit
+Severity: high
+Environment: production (Railway)
+Discovered: full production audit after Phase 3 source-category deployment
+Symptom: the lead progression audit created a lead using the new controlled `source_category`, but the server gate rejected the Sales Validation transition with missing `source`.
+Root cause: product bug. The source model intentionally preserves legacy `leads.source` for backward compatibility, but `source_category` is the canonical v2 write path. The stage-gate requirement resolver still read only `source`.
+Fix: resolve the `source` stage-gate requirement from `lead.sourceCategory ?? lead.source`, preserving legacy rows while accepting canonical v2 writes.
+Deployed: `d3107f3` + Railway API deploy `3ae33ccf-cf40-4e7f-9e3f-6111f08eecf6`
+Deploy status: SUCCESS
+Verification: `npm run typecheck --workspace=server` passed; focused server tests passed; first full production audit after deploy passed 29/29.
+Status: fixed
+
+Issue #27 — Production audit assertions were brittle under Files-tab settling and API 429s
+Route/Component: `tests/audit/companies-properties.spec.ts`, `tests/audit/lead-questionnaire-cascade.spec.ts`, `tests/audit/helpers.ts`
+Severity: medium
+Environment: production (Railway)
+Discovered: required second full audit run after Issue #26 deploy
+Symptom: the company Files-tab audit failed on first attempt while visible file metadata rows were present, then the cascade audit hit production `429` responses on direct API calls that bypassed retry handling.
+Root cause: test/infra bug. The Files-tab assertion branched on raw locator counts while the tab content was still settling, and the cascade spec used direct `APIRequestContext.fetch()` for expected `409`/`200` responses instead of the shared production retry helper.
+Fix: wait for visible Files-tab metadata or empty state before asserting; add a response-level retry helper that tolerates `429`/5xx and use it for cascade API calls that need non-2xx response inspection.
+Deployed: n/a (test-only)
+Deploy status: n/a
+Verification: focused companies/properties production audit passed 3/3 after the Files-tab assertion fix; server and client typechecks passed. Full production rerun is pending because live Playwright escalation is currently blocked by the Codex usage limit.
+Status: fixed locally, production clean-run pending
+
+Issue #28 — Brand-new company verification could be suppressed by the lead being created
+Route/Component: `createLead`, `maybeRequestCompanyVerification`, `computeExistingCustomerStatus`
+Severity: high
+Environment: local diagnosis after Phase 3 implementation; production verification pending
+Discovered: Phase 3 Verification 8 code-path inspection before live manual loop
+Symptom: a brand-new company could be classified as `Existing` during lead create because `createLead()` inserted the lead before computing recent company activity, so the just-created lead counted as recent activity.
+Root cause: product bug. The activity-window helper was correct for normal evaluation, but the lead-create workflow needed to exclude the current lead when deciding whether the company had prior 12-month activity.
+Fix: add an optional `excludeLeadId` to the company-status helper, pass the newly created lead id into the verification request, and cover the behavior with a regression test that proves the verification email path still routes to `adnaan.iqbal@gmail.com`.
+Deployed: pending
+Deploy status: pending
+Verification: `npx vitest run server/tests/modules/companies/customer-status-service.test.ts server/tests/modules/leads/stage-gate.test.ts server/tests/modules/leads/service.test.ts server/tests/modules/leads/conversion-service.test.ts` passed 66/66; `npm run typecheck --workspace=server` passed. Production deploy/manual Verification 8 is pending because live Playwright/Railway escalation is currently blocked by the Codex usage limit.
+Status: fixed locally, deploy pending
+
 ## Lead Questionnaire V2 Continuation Summary
 - Iterations in this continuation: 10 production audit/deploy checks, including targeted cascade runs, full-suite runs, and reruns after test-harness fixes.
 - Issues fixed in this continuation:

@@ -16,7 +16,8 @@ export function getCompanyVerificationRecipient() {
 export async function computeExistingCustomerStatus(
   tenantDb: Partial<Pick<TenantDb, "execute">>,
   companyId: string,
-  now = new Date()
+  now = new Date(),
+  options: { excludeLeadId?: string | null } = {}
 ): Promise<{ status: ExistingCustomerStatus; hasRecentActivity: boolean }> {
   if (typeof tenantDb.execute !== "function") {
     return {
@@ -27,6 +28,9 @@ export async function computeExistingCustomerStatus(
 
   const windowStart = new Date(now);
   windowStart.setFullYear(windowStart.getFullYear() - 1);
+  const excludeLeadPredicate = options.excludeLeadId
+    ? sql`AND leads.id <> ${options.excludeLeadId}`
+    : sql``;
 
   const result = await tenantDb.execute(sql`
     SELECT EXISTS (
@@ -34,6 +38,7 @@ export async function computeExistingCustomerStatus(
       FROM leads
       WHERE company_id = ${companyId}
         AND (created_at >= ${windowStart} OR updated_at >= ${windowStart})
+        ${excludeLeadPredicate}
       UNION ALL
       SELECT 1
       FROM deals
@@ -111,10 +116,13 @@ export async function maybeRequestCompanyVerification(
     leadName: string;
     userId: string;
     now?: Date;
+    excludeLeadId?: string | null;
   }
 ) {
   const now = input.now ?? new Date();
-  const computed = await computeExistingCustomerStatus(tenantDb, input.companyId, now);
+  const computed = await computeExistingCustomerStatus(tenantDb, input.companyId, now, {
+    excludeLeadId: input.excludeLeadId,
+  });
   const [company] = await tenantDb
     .select()
     .from(companies)
