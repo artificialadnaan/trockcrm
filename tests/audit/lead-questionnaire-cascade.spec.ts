@@ -131,23 +131,30 @@ function getVisibleQuestionNodes(
 }
 
 function getFirstOptionValue(options: unknown): string | null {
-  if (!Array.isArray(options) || options.length === 0) {
-    return null;
+  return getQuestionOptionEntries(options)[0]?.value ?? null;
+}
+
+function getQuestionOptionEntries(options: unknown): { value: string; label: string }[] {
+  if (!Array.isArray(options)) {
+    return [];
   }
 
-  const first = options[0];
-  if (typeof first === "string") {
-    return first;
-  }
-  if (first && typeof first === "object" && "value" in first) {
-    const value = (first as { value?: unknown }).value;
-    return typeof value === "string" ? value : null;
-  }
-  if (first && typeof first === "object" && "label" in first) {
-    const label = (first as { label?: unknown }).label;
-    return typeof label === "string" ? label : null;
-  }
-  return null;
+  return options.flatMap((option) => {
+    if (typeof option === "string") {
+      return [{ value: option, label: option }];
+    }
+    if (option && typeof option === "object" && "value" in option) {
+      const value = (option as { value?: unknown }).value;
+      if (typeof value !== "string") return [];
+      const label = (option as { label?: unknown }).label;
+      return [{ value, label: typeof label === "string" ? label : value }];
+    }
+    if (option && typeof option === "object" && "label" in option) {
+      const label = (option as { label?: unknown }).label;
+      return typeof label === "string" ? [{ value: label, label }] : [];
+    }
+    return [];
+  });
 }
 
 async function loadAuditBundle() {
@@ -339,16 +346,19 @@ async function fillQuestionAnswer(
   }
 
   if ((inputType === "select" || (Array.isArray(node.options) && node.options.length > 0)) && currentValue == null) {
-    const next = getFirstOptionValue(node.options);
+    const next = getQuestionOptionEntries(node.options)[0];
     if (!next) return;
     await locator.click();
-    await page.getByRole("option", { name: next, exact: true }).click();
+    await page.getByRole("option", { name: next.label, exact: true }).click();
     return;
   }
 
   if (inputType === "select" || (Array.isArray(node.options) && node.options.length > 0)) {
+    const next = getQuestionOptionEntries(node.options).find(
+      (option) => option.value === String(currentValue) || option.label === String(currentValue)
+    );
     await locator.click();
-    await page.getByRole("option", { name: String(currentValue), exact: true }).click();
+    await page.getByRole("option", { name: next?.label ?? String(currentValue), exact: true }).click();
     return;
   }
 

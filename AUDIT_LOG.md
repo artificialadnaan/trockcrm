@@ -327,6 +327,19 @@ Deploy status: n/a
 Verification: cascade rerun pending
 Status: in progress
 
+Issue #21 — Cascade audit selected v2 options by raw value instead of rendered label
+Route/Component: `tests/audit/lead-questionnaire-cascade.spec.ts`, v2 project-question selects
+Severity: low
+Environment: production (Railway)
+Discovered: cascade audit rerun after test-only gate assertion fix
+Symptom: the audit timed out looking for an option named `market_rate` while filling required project questions.
+Root cause: test bug. V2 question options can be stored as `{ value, label }`, and the UI renders the human label while persisting the raw value.
+Fix: normalize question option entries in the audit helper and click the rendered label while preserving value-aware fallback behavior.
+Deployed: n/a (test-only)
+Deploy status: n/a
+Verification: cascade rerun pending
+Status: in progress
+
 ## Needs Human Review
 
 - Railway frontend stale-bundle / asset propagation drift
