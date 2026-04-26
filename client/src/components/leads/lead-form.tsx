@@ -1082,7 +1082,7 @@ function EditableLeadForm({
 
       <Card>
         <CardHeader>
-          <CardTitle>{useV2Questionnaire ? "Project Intake Questions" : questionSet.title}</CardTitle>
+          <CardTitle>{useV2Questionnaire ? "Project Questions" : questionSet.title}</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
           {useV2Questionnaire
