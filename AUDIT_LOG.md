@@ -314,6 +314,19 @@ Deploy status: SUCCESS
 Verification: direct production checks confirmed the new notification transport headers; full-inventory Playwright reruns passed twice consecutively on prod with zero notification console/network failures
 Status: fixed
 
+Issue #20 — Cascade audit asserted the wrong lead gate UI copy
+Route/Component: `tests/audit/lead-questionnaire-cascade.spec.ts`, `LeadForm`
+Severity: low
+Environment: production (Railway)
+Discovered: lead questionnaire cascade audit rerun after deployment `3182132b-f24a-440a-810c-64c3c5021f06`
+Symptom: the cascade audit failed waiting for `Missing question keys:` even though the server-side `PATCH /api/leads/:id` assertion had already verified `409 LEAD_STAGE_REQUIREMENTS_UNMET` and the expected missing question keys.
+Root cause: test bug. The current lead form renders the stage-gate detail under the existing `Missing Top 5 answers:` copy and falls back to question keys for v2 ids; it does not render the test-only `Missing question keys:` phrase.
+Fix: update the audit assertion to match the live gate copy while keeping the API-level exact key assertion as the source of truth.
+Deployed: n/a (test-only)
+Deploy status: n/a
+Verification: cascade rerun pending
+Status: in progress
+
 ## Needs Human Review
 
 - Railway frontend stale-bundle / asset propagation drift

@@ -627,7 +627,7 @@ test.describe.serial("lead questionnaire cascade production audit", () => {
     await page.locator("#timeline-status").fill("Q3 2026");
     await page.getByRole("button", { name: "Save Changes", exact: true }).click();
 
-    await expect(page.getByText("Missing question keys:", { exact: false })).toBeVisible();
+    await expect(page.getByText("Missing Top 5 answers:", { exact: false })).toBeVisible();
     for (const key of traditionalRequiredVisibleKeys) {
       await expect(page.getByText(key, { exact: true })).toBeVisible();
     }
