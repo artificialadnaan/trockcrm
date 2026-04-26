@@ -14,10 +14,17 @@ export function getCompanyVerificationRecipient() {
 }
 
 export async function computeExistingCustomerStatus(
-  tenantDb: Pick<TenantDb, "execute">,
+  tenantDb: Partial<Pick<TenantDb, "execute">>,
   companyId: string,
   now = new Date()
 ): Promise<{ status: ExistingCustomerStatus; hasRecentActivity: boolean }> {
+  if (typeof tenantDb.execute !== "function") {
+    return {
+      status: "New",
+      hasRecentActivity: false,
+    };
+  }
+
   const windowStart = new Date(now);
   windowStart.setFullYear(windowStart.getFullYear() - 1);
 
@@ -53,9 +60,10 @@ export async function computeExistingCustomerStatus(
     ) AS has_activity
   `);
 
-  const rows =
-    (result as { rows?: Array<{ has_activity?: boolean }> }).rows ??
-    (result as unknown as Array<{ has_activity?: boolean }>);
+  const rows = result
+    ? ((result as { rows?: Array<{ has_activity?: boolean }> }).rows ??
+      (result as unknown as Array<{ has_activity?: boolean }>))
+    : [];
   const hasRecentActivity = Boolean(rows[0]?.has_activity);
 
   return {
@@ -134,6 +142,10 @@ export async function maybeRequestCompanyVerification(
       companyVerificationEmailSentAt: company.companyVerificationEmailSentAt,
     })
   ) {
+    return computed;
+  }
+
+  if (typeof tenantDb.update !== "function") {
     return computed;
   }
 

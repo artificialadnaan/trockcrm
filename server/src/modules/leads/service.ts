@@ -845,7 +845,16 @@ export function createLeadService(
       throw new AppError(403, "You can only view your own leads");
     }
 
-    return (await decorateLeads(tenantDb, [lead]))[0] ?? null;
+    const decoratedLead = (await decorateLeads(tenantDb, [lead]))[0] ?? null;
+    if (!decoratedLead) {
+      return null;
+    }
+
+    const existingCustomerStatus = await computeExistingCustomerStatus(tenantDb, lead.companyId);
+    return {
+      ...decoratedLead,
+      existingCustomerStatus: existingCustomerStatus.status,
+    };
   }
 
   async function listLeads(
