@@ -321,3 +321,9 @@ Status: fixed
   - Why it matters: this audit has hit false negatives where production browser checks were running against stale frontend code even though `main` and the API were already updated.
   - Evidence: multiple audit iterations required explicit frontend redeploys or asset-hash checks before the new client code was observable; this is infrastructure/deployment behavior, not an app-level feature bug.
   - Requested follow-up: investigate Railway frontend build propagation, CDN/cache invalidation, and whether automatic deploy hooks are reliably targeting the intended frontend service revision.
+
+- Railway CLI snapshot mismatch from git worktree
+  - Symptom: deployment `c99889bf-812a-4fa0-a7c9-e790b490c9fe` uploaded a stale snapshot that ran the wrong `@trock-crm/shared` build script (`tsc` instead of `tsc -b --force`) and failed on `hubspot-owner-mappings` imports even though the file was tracked at `HEAD` and present on `origin/main`.
+  - Why it matters: a normal `railway deployment up` from `.worktrees/lead-edit-v2` can package the primary checkout instead of the intended isolated worktree, producing misleading build failures that look like source regressions.
+  - Evidence: local `npm run build --workspace=shared`, raw `tsc`, server build, and client build all passed; the failed Railway logs showed the old script and snapshot hash, while `railway deployment up . --path-as-root` built the current worktree and completed migration `0055_require_restoration_xactimate.sql`.
+  - Requested follow-up: investigate whether this is a Railway CLI bug, transient infra issue, or local upload-state behavior. If it recurs, escalate it from infra noise to a real deploy-system bug. Local Docker is not installed in this environment, which limited Linux-vs-macOS build parity checks during triage.
