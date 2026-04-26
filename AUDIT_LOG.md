@@ -353,6 +353,32 @@ Deploy status: n/a
 Verification: `npx playwright test --config=playwright.audit.config.ts tests/audit/lead-questionnaire-cascade.spec.ts` passed against production
 Status: fixed
 
+Issue #23 — Company files audit used a strict locator that matched multiple file metadata rows
+Route/Component: `tests/audit/companies-properties.spec.ts`, company files tab
+Severity: low
+Environment: production (Railway)
+Discovered: second full audit run after cascade pass
+Symptom: the company/property audit flaked on strict-mode violation because `page.getByText(/·/)` matched three file metadata rows.
+Root cause: test bug. The audit only needed to prove either the empty file state or at least one file metadata row was visible, but the combined locator stayed strict across multiple matching rows.
+Fix: count file metadata rows first and assert visibility on `.first()` when rows exist; otherwise assert the empty state.
+Deployed: n/a (test-only)
+Deploy status: n/a
+Verification: full audit rerun pending
+Status: in progress
+
+Issue #24 — Lead progression audit made an extra team-members API poll that could hit production rate limits
+Route/Component: `tests/audit/lead-deal-progression.spec.ts`, deal team assignment audit
+Severity: medium
+Environment: production (Railway)
+Discovered: second full audit run after cascade pass
+Symptom: the audit flaked on `GET /api/deals/:id/team` returning `429` after adding a team member, then recovered on retry.
+Root cause: test harness/infra contention. The UI already verified the created estimator row, and the extra API poll added another production request against the rate-limited seeded audit user path.
+Fix: remove the redundant API poll and rely on the visible post-add team row plus normal deal cleanup.
+Deployed: n/a (test-only)
+Deploy status: n/a
+Verification: full audit rerun pending
+Status: in progress
+
 ## Needs Human Review
 
 - Railway frontend stale-bundle / asset propagation drift

@@ -166,9 +166,12 @@ test.describe.serial("companies / properties production audit", () => {
     }
 
     await page.getByRole("button", { name: "Files", exact: true }).click();
-    await expect(
-      page.getByText("No files found across associated deals.", { exact: true }).or(page.getByText(/·/))
-    ).toBeVisible();
+    const fileMetadataRows = page.getByText(/·/);
+    if ((await fileMetadataRows.count()) > 0) {
+      await expect(fileMetadataRows.first()).toBeVisible();
+    } else {
+      await expect(page.getByText("No files found across associated deals.", { exact: true })).toBeVisible();
+    }
 
     await page.getByRole("button", { name: "Emails", exact: true }).click();
     await expect(page.getByText("Email integration coming soon", { exact: true })).toBeVisible();

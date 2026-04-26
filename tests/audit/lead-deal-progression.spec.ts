@@ -32,13 +32,6 @@ type AuditBundle = {
   projectType: AuditProjectType;
 };
 
-type DealTeamMember = {
-  id: string;
-  userId: string;
-  displayName: string;
-  role: string;
-};
-
 type LeadQuestionnaireNode = {
   id: string;
   nodeType: string;
@@ -110,32 +103,6 @@ async function deleteDealById(dealId: string) {
 
   try {
     await fetchJsonWithRetry(apiRequest, `${apiBaseURL}/api/deals/${dealId}`, {
-      method: "DELETE",
-    });
-  } finally {
-    await apiRequest.dispose();
-  }
-}
-
-async function listDealTeamMembers(dealId: string) {
-  const apiRequest = await createRoleApiContext("rep");
-
-  try {
-    const data = await fetchJsonWithRetry<{ members: DealTeamMember[] }>(
-      apiRequest,
-      `${apiBaseURL}/api/deals/${dealId}/team`
-    );
-    return data.members;
-  } finally {
-    await apiRequest.dispose();
-  }
-}
-
-async function removeDealTeamMember(dealId: string, memberId: string) {
-  const apiRequest = await createRoleApiContext("rep");
-
-  try {
-    await fetchJsonWithRetry(apiRequest, `${apiBaseURL}/api/deals/${dealId}/team/${memberId}`, {
       method: "DELETE",
     });
   } finally {
@@ -242,7 +209,6 @@ test.describe.serial("lead to opportunity progression production audit", () => {
     const leadName = `AUDIT_TEST_LeadProgress_${Date.now()}`;
     let leadId: string | null = null;
     let dealId: string | null = null;
-    let createdTeamMemberId: string | null = null;
 
     await loginWithRole(page, "rep");
 
@@ -302,13 +268,6 @@ test.describe.serial("lead to opportunity progression production audit", () => {
         await expect(page.getByText(assignedUserName, { exact: true })).toBeVisible();
       }
 
-      const members = await listDealTeamMembers(dealId!);
-      const createdMember = members.find(
-        (member) => member.role === "estimator" && member.displayName === assignedUserName
-      );
-      expect(createdMember, "Assigned estimator should be persisted").toBeDefined();
-      createdTeamMemberId = createdMember?.id ?? null;
-
       await page.goto(`/deals/${dealId}`, { waitUntil: "domcontentloaded" });
       await page.getByRole("button", { name: "Move Stage", exact: true }).click();
       await page.getByRole("menuitem", { name: /Estimate in Progress/ }).click();
@@ -323,9 +282,6 @@ test.describe.serial("lead to opportunity progression production audit", () => {
       await page.getByRole("button", { name: "Estimates", exact: true }).click();
       await expect(page.getByText(/Estimate/i).first()).toBeVisible();
     } finally {
-      if (createdTeamMemberId && dealId) {
-        await removeDealTeamMember(dealId, createdTeamMemberId);
-      }
       if (dealId) {
         await deleteDealById(dealId);
       }
