@@ -8,6 +8,7 @@ import {
 } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 import { getStageById } from "../pipeline/service.js";
+import { computeExistingCustomerStatus } from "../companies/customer-status-service.js";
 import { getLeadQualificationByLeadId } from "./qualification-service.js";
 
 type TenantDb = NodePgDatabase<any>;
@@ -254,8 +255,26 @@ export async function validateLeadStageGate(
     throw new AppError(400, "Invalid lead stage ID");
   }
 
+  const computedExistingCustomerStatus = lead.companyId
+    ? await computeExistingCustomerStatus(tenantDb, lead.companyId)
+    : null;
+  const qualificationPayload =
+    lead.qualificationPayload && typeof lead.qualificationPayload === "object"
+      ? {
+          ...(lead.qualificationPayload as Record<string, unknown>),
+          existing_customer_status:
+            computedExistingCustomerStatus?.status ??
+            (lead.qualificationPayload as Record<string, unknown>).existing_customer_status,
+        }
+      : {
+          existing_customer_status: computedExistingCustomerStatus?.status ?? null,
+        };
+
   return evaluateLeadStageGate({
-    lead,
+    lead: {
+      ...lead,
+      qualificationPayload,
+    },
     qualification: normalizeQualificationSnapshot(
       qualification as Record<string, unknown> | null
     ),

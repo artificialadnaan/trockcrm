@@ -29,6 +29,9 @@ import {
   listQuestionnaireNodes,
   upsertLeadQuestionAnswerSet,
 } from "./questionnaire-service.js";
+import { computeExistingCustomerStatus, maybeRequestCompanyVerification } from "../companies/customer-status-service.js";
+import { resolveLeadSourceForWrite } from "./source-control.js";
+import type { LeadSourceCategory } from "@trock-crm/shared/types";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -50,6 +53,8 @@ export interface CreateLeadInput {
   primaryContactId?: string;
   name: string;
   source?: string;
+  sourceCategory?: LeadSourceCategory | null;
+  sourceDetail?: string | null;
   description?: string;
   projectTypeId?: string | null;
   qualificationPayload?: Record<string, string | boolean | number | null>;
@@ -67,6 +72,8 @@ export interface UpdateLeadInput {
   primaryContactId?: string | null;
   name?: string;
   source?: string | null;
+  sourceCategory?: LeadSourceCategory | null;
+  sourceDetail?: string | null;
   description?: string | null;
   projectTypeId?: string | null;
   qualificationPayload?: Record<string, string | boolean | number | null>;
@@ -436,6 +443,7 @@ async function assertLeadQuestionGateAllowed(
   tenantDb: TenantDb,
   input: {
     leadId: string;
+    companyId: string;
     projectTypeId: string | null;
     qualificationPayload: Record<string, string | boolean | number | null>;
     leadQuestionAnswers: Record<string, string | boolean | number | null>;
@@ -461,9 +469,13 @@ async function assertLeadQuestionGateAllowed(
     ...input.leadQuestionAnswers,
   };
   const nodes = await listQuestionnaireNodes(tenantDb, input.projectTypeId);
-  const qualificationFields = ["existing_customer_status", "estimated_value", "timeline_status"].filter(
+  const existingCustomerStatus = await computeExistingCustomerStatus(tenantDb, input.companyId);
+  const qualificationFields = ["estimated_value", "timeline_status"].filter(
     (fieldId) => !isAnsweredQuestionValue(input.qualificationPayload[fieldId])
   );
+  if (!isAnsweredQuestionValue(existingCustomerStatus.status)) {
+    qualificationFields.unshift("existing_customer_status");
+  }
   const projectTypeQuestionIds = listMissingRequiredQuestionKeys(nodes, mergedAnswers);
 
   if (qualificationFields.length === 0 && projectTypeQuestionIds.length === 0) {
@@ -900,6 +912,11 @@ export function createLeadService(
 
     const now = deps.now();
     const v2Enabled = isLeadEditV2Enabled();
+    const sourceWrite = resolveLeadSourceForWrite({
+      source: input.source,
+      sourceCategory: input.sourceCategory,
+      sourceDetail: input.sourceDetail,
+    });
     const normalizedQualificationPayload = normalizeQualificationPayload(input.qualificationPayload);
     const normalizedProjectTypeQuestionPayload = normalizeProjectTypeQuestionPayload(
       input.projectTypeId ?? null,
@@ -919,7 +936,9 @@ export function createLeadService(
         stageId: input.stageId,
         assignedRepId: input.assignedRepId,
         status: "open",
-        source: input.source ?? null,
+        source: v2Enabled ? null : input.source ?? null,
+        sourceCategory: sourceWrite.sourceCategory,
+        sourceDetail: sourceWrite.sourceDetail,
         description: input.description ?? null,
         projectTypeId: input.projectTypeId ?? null,
         qualificationPayload: normalizedQualificationPayload,
@@ -941,6 +960,25 @@ export function createLeadService(
         answers: leadQuestionAnswerInput,
         changedAt: now,
       });
+    }
+
+    if (v2Enabled) {
+      const [company] = await tenantDb
+        .select({ id: companies.id, name: companies.name })
+        .from(companies)
+        .where(eq(companies.id, input.companyId))
+        .limit(1);
+
+      if (company) {
+        await maybeRequestCompanyVerification(tenantDb, {
+          companyId: company.id,
+          companyName: company.name,
+          leadId: lead.id,
+          leadName: lead.name,
+          userId: input.assignedRepId,
+          now,
+        });
+      }
     }
 
     return lead;
@@ -1054,6 +1092,7 @@ export function createLeadService(
         if (enteringSalesValidation || advancingBeyondSalesValidation) {
           await assertLeadQuestionGateAllowed(tenantDb, {
             leadId: existing.id,
+            companyId: existing.companyId,
             projectTypeId: effectiveProjectTypeId ?? null,
             qualificationPayload: effectiveQualificationPayload,
             leadQuestionAnswers: effectiveLeadQuestionAnswers,
@@ -1123,7 +1162,16 @@ export function createLeadService(
     }
 
     if (input.name !== undefined) updates.name = input.name;
-    if (input.source !== undefined) updates.source = input.source;
+    if (input.sourceCategory !== undefined || input.sourceDetail !== undefined) {
+      const sourceWrite = resolveLeadSourceForWrite({
+        sourceCategory: input.sourceCategory,
+        sourceDetail: input.sourceDetail,
+      });
+      updates.sourceCategory = sourceWrite.sourceCategory;
+      updates.sourceDetail = sourceWrite.sourceDetail;
+    } else if (!v2Enabled && input.source !== undefined) {
+      updates.source = input.source;
+    }
     if (input.description !== undefined) updates.description = input.description;
     if (!v2Enabled && input.qualificationPayload !== undefined) {
       updates.qualificationPayload = normalizeQualificationPayload(input.qualificationPayload);

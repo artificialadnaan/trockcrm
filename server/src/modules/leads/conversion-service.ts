@@ -14,6 +14,7 @@ import {
   listQuestionnaireNodes,
 } from "./questionnaire-service.js";
 import { LeadStageTransitionError } from "./stage-transition-service.js";
+import { computeExistingCustomerStatus } from "../companies/customer-status-service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -81,12 +82,16 @@ export function createLeadConversionService(
     currentLeadStage: NonNullable<Awaited<ReturnType<typeof getStageById>>>,
     opportunityStage: NonNullable<Awaited<ReturnType<typeof getStageBySlug>>>
   ) {
-    const qualificationFields = ["existing_customer_status", "estimated_value", "timeline_status"].filter(
+    const existingCustomerStatus = await computeExistingCustomerStatus(tenantDb, lead.companyId);
+    const qualificationFields = ["estimated_value", "timeline_status"].filter(
       (fieldId) =>
         !isAnsweredQuestionValue(
           (lead.qualificationPayload as Record<string, string | boolean | number | null> | null)?.[fieldId]
         )
     );
+    if (!isAnsweredQuestionValue(existingCustomerStatus.status)) {
+      qualificationFields.unshift("existing_customer_status");
+    }
     const questionAnswers = await listLeadQuestionAnswers(tenantDb, lead.id);
     const nodes = await listQuestionnaireNodes(tenantDb, lead.projectTypeId ?? null);
     const projectTypeQuestionIds = listMissingRequiredQuestionKeys(nodes, questionAnswers);
