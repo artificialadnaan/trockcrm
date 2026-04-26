@@ -379,6 +379,19 @@ Deploy status: n/a
 Verification: two consecutive `npx playwright test --config=playwright.audit.config.ts` runs passed 29/29 against production with no retries after this fix
 Status: fixed
 
+Issue #25 — Manual lead questionnaire audit found human-UX gaps not covered by the cascade spec
+Route/Component: `/leads/new`, `/leads/:id`, converted lead source surface, `LeadForm`, `LeadQuestionnaireEditor`, `LeadDetailPage`, `project_type_question_nodes`
+Severity: high
+Environment: production (Railway)
+Discovered: headed Playwright manual verification against `frontend-production-bcab.up.railway.app`
+Symptom: the v2 questionnaire was machine-correct but still rough in rep-facing flows: create-mode required labels did not visibly show required indicators, blank required-question create needed a clear block/warning, converted source leads did not expose a post-conversion questionnaire edit affordance, and the live v2 seed lacked the requested Traditional Multifamily cascade groups for roofing, exterior paint, parking lot, balconies, water intrusion, windows/doors, unit upgrades, corridors, and lighting.
+Root cause: product gap. The earlier automated cascade spec focused on dynamic template correctness and server gates, but it did not cover all human-facing create/edit/post-conversion affordances or the expanded multifamily cascade inventory.
+Fix: add visible required indicators and create-mode missing-required blocking for v2 questions; surface missing project-question labels in stage-gate errors; add an answer-only `Edit Lead Questionnaire` action for converted leads; add idempotent migration `0056_seed_multifamily_cascade_questions.sql` for the expanded Traditional Multifamily cascades.
+Deployed: `1f69883` + Railway API deploy `b1c23f0f-5b8a-42c1-83af-cbb22eebd0d4` + Railway Frontend deploy `f407f38e-7e33-4b2d-aa97-687bf3aeee96`
+Deploy status: SUCCESS
+Verification: two consecutive headed Playwright manual passes completed all 7 verification groups with screenshots in `test-results/manual-verification/`; direct API/container DB verification confirmed a post-conversion `poc` edit preserved `leads.updated_at` and wrote `office_dallas.lead_question_answer_history`; final full audit suite passed 29/29.
+Status: fixed
+
 ## Lead Questionnaire V2 Continuation Summary
 - Iterations in this continuation: 10 production audit/deploy checks, including targeted cascade runs, full-suite runs, and reruns after test-harness fixes.
 - Issues fixed in this continuation:
@@ -391,6 +404,22 @@ Status: fixed
   - Full audit run 1: `npx playwright test --config=playwright.audit.config.ts` => 29 passed in 52.7s.
   - Full audit run 2: `npx playwright test --config=playwright.audit.config.ts` => 29 passed in 52.7s.
 - Insurance Claim -> Xactimate required-on-reveal: verified passing in production by `tests/audit/lead-questionnaire-cascade.spec.ts`; the test confirms Xactimate is revealed and marked required when Insurance Claim is true, hidden when false, excluded from missing keys when hidden, and included in the live template/gate behavior when revealed.
+
+## Lead Questionnaire Manual Verification Summary
+- Manual verification iterations in this continuation: 5 headed Playwright passes after deploying `1f69883`; first passes exposed script wait/locator issues and the product gaps recorded in Issue #25, then two final passes completed cleanly with no fixes between them.
+- Issues fixed in this continuation:
+  - Product: 1 bundled UX/seed issue (`1f69883`, Issue #25)
+  - Test/harness: 4 manual-verifier corrections (stable label locators, canonical lead-stage setup, converted deal overview tab targeting, load-state waits)
+  - Infra/deploy: 0 new issues; frontend required an explicit fresh deploy because the public frontend URL initially still served `/assets/index-B_t_LSQL.js` after the API deploy.
+- Latest production deploys:
+  - API: `b1c23f0f-5b8a-42c1-83af-cbb22eebd0d4`, image digest `sha256:4da3c4c663e1131fb45944daff5f96461f76d5af7fa6e2f4cc9f9d656a285217`, status SUCCESS.
+  - Frontend: `f407f38e-7e33-4b2d-aa97-687bf3aeee96`, image digest `sha256:c8097a167d134a1805330b85e50f4230735f8c2b40d5b536a96ba0f0b24a44b2`, status SUCCESS.
+- Latest verified frontend asset: `/assets/index-DrT9eikq.js`.
+- Clean-run evidence:
+  - Manual pass 1: all 7 verification groups passed; report `test-results/manual-verification/manual-verification-report.json`; screenshots `01-...` through `44-...`.
+  - Manual pass 2: all 7 verification groups passed again with no fixes between runs; same report path refreshed with the second pass.
+  - Full audit suite: `npx playwright test --config=playwright.audit.config.ts` => 29 passed in 59.5s.
+- Insurance Claim -> Xactimate required-on-reveal: verified passing in production in both manual passes and the final 29-test suite; Xactimate is visible and marked required when Insurance Claim is true, hidden when false, and the server gate excludes it while hidden.
 
 ## Needs Human Review
 
