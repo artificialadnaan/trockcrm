@@ -426,10 +426,10 @@ Discovered: Phase 3 Verification 8 code-path inspection before live manual loop
 Symptom: a brand-new company could be classified as `Existing` during lead create because `createLead()` inserted the lead before computing recent company activity, so the just-created lead counted as recent activity.
 Root cause: product bug. The activity-window helper was correct for normal evaluation, but the lead-create workflow needed to exclude the current lead when deciding whether the company had prior 12-month activity.
 Fix: add an optional `excludeLeadId` to the company-status helper, pass the newly created lead id into the verification request, and cover the behavior with a regression test that proves the verification email path still routes to `adnaan.iqbal@gmail.com`.
-Deployed: pending
-Deploy status: pending
-Verification: `npx vitest run server/tests/modules/companies/customer-status-service.test.ts server/tests/modules/leads/stage-gate.test.ts server/tests/modules/leads/service.test.ts server/tests/modules/leads/conversion-service.test.ts` passed 66/66; `npm run typecheck --workspace=server` passed. Production deploy/manual Verification 8 is pending because live Playwright/Railway escalation is currently blocked by the Codex usage limit.
-Status: fixed locally, deploy pending
+Deployed: `dccea23` + Railway API deploy `e3f0ce87-8b7c-4de1-9364-07c24b3da55a`
+Deploy status: SUCCESS
+Verification: `npx vitest run server/tests/modules/companies/customer-status-service.test.ts server/tests/modules/leads/stage-gate.test.ts server/tests/modules/leads/service.test.ts server/tests/modules/leads/conversion-service.test.ts` passed 66/66; `npm run typecheck --workspace=server` passed. Production manual Verification 8 and the required clean production audit reruns are pending because live Playwright escalation is currently blocked by the Codex usage limit.
+Status: deployed, production manual verification pending
 
 ## Lead Questionnaire V2 Continuation Summary
 - Iterations in this continuation: 10 production audit/deploy checks, including targeted cascade runs, full-suite runs, and reruns after test-harness fixes.
