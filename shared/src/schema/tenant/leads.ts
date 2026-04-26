@@ -14,6 +14,7 @@ import {
 import {
   FORECAST_CATEGORIES,
   FORECAST_WINDOWS,
+  LEAD_SOURCE_CATEGORIES,
   LEAD_STATUSES,
   SUPPORT_NEEDED_TYPES,
 } from "../../types/enums.js";
@@ -28,6 +29,7 @@ import { projectTypeConfig } from "../public/project-type-config.js";
 import { properties } from "./properties.js";
 
 export const leadStatusEnum = pgEnum("lead_status", LEAD_STATUSES);
+export const leadSourceCategoryEnum = pgEnum("lead_source_category", LEAD_SOURCE_CATEGORIES);
 export const leadPipelineTypeEnum = pgEnum("lead_pipeline_type", SALES_WORKFLOW_PIPELINE_TYPES);
 export const leadDisqualificationReasonEnum = pgEnum(
   "lead_disqualification_reason",
@@ -50,6 +52,8 @@ export const leads = pgTable(
     pipelineType: leadPipelineTypeEnum("pipeline_type").default("normal").notNull(),
     status: leadStatusEnum("status").default("open").notNull(),
     source: varchar("source", { length: 100 }),
+    sourceCategory: leadSourceCategoryEnum("source_category"),
+    sourceDetail: text("source_detail"),
     hubspotOwnerId: varchar("hubspot_owner_id", { length: 64 }),
     hubspotOwnerEmail: varchar("hubspot_owner_email", { length: 320 }),
     ownershipSyncedAt: timestamp("ownership_synced_at", { withTimezone: true }),
