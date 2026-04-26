@@ -49,6 +49,45 @@ describe("Lead Stage Gate Evaluation", () => {
     ]);
   });
 
+  it("treats sourceCategory as satisfying the lead source gate", () => {
+    const result = evaluateLeadStageGate({
+      lead: {
+        id: "lead-1",
+        companyId: "company-1",
+        propertyId: "property-1",
+        source: null,
+        sourceCategory: "Referral",
+        projectTypeId: "type-1",
+        qualificationPayload: {
+          existing_customer_status: "Existing",
+        },
+      },
+      qualification: {
+        qualificationData: {},
+        scopingSubsetData: {},
+      },
+      currentStage: {
+        id: "stage-new",
+        name: "New Lead",
+        slug: "new_lead",
+        displayOrder: 1,
+        isTerminal: false,
+        isActivePipeline: true,
+      },
+      targetStage: {
+        id: "stage-qualified",
+        name: "Qualified Lead",
+        slug: "qualified_lead",
+        displayOrder: 2,
+        isTerminal: false,
+        isActivePipeline: true,
+      },
+    });
+
+    expect(result.allowed).toBe(true);
+    expect(result.missingRequirements.fields).toEqual([]);
+  });
+
   it("does not require a lead-side scoping checklist to advance into the legacy go/no-go stage", () => {
     const result = evaluateLeadStageGate({
       lead: {

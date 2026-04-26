@@ -27,6 +27,7 @@ type LeadSnapshot = {
   companyId: string | null;
   propertyId: string | null;
   source: string | null;
+  sourceCategory?: string | null;
   projectTypeId?: string | null;
   qualificationPayload?: unknown;
 };
@@ -141,6 +142,10 @@ function getRequirementValue(
 
   if (field === "goDecisionNotes") {
     return qualification?.goDecisionNotes;
+  }
+
+  if (field === "source") {
+    return lead.sourceCategory ?? lead.source;
   }
 
   return lead[field as keyof LeadSnapshot];
