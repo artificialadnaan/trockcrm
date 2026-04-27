@@ -228,6 +228,39 @@ function buildSeedSectionDataFromResolvedDeal(resolvedDeal: ResolvedDealView): D
   return sectionData;
 }
 
+function removeKeys(value: unknown, keys: string[]) {
+  if (!isPlainRecord(value)) {
+    return {};
+  }
+
+  const next = { ...value };
+  for (const key of keys) {
+    delete next[key];
+  }
+  return next;
+}
+
+function stripLineageOwnedScopingFields(
+  sectionData: DealScopingSectionData,
+  resolvedDeal: ResolvedDealView
+): DealScopingSectionData {
+  if (!resolvedDeal.sourceLead) {
+    return sectionData;
+  }
+
+  const next: DealScopingSectionData = { ...sectionData };
+  next.projectOverview = removeKeys(next.projectOverview, ["propertyName", "bidDueDate"]);
+  next.propertyDetails = removeKeys(next.propertyDetails, [
+    "propertyAddress",
+    "propertyCity",
+    "propertyState",
+    "propertyZip",
+  ]);
+  next.scopeSummary = removeKeys(next.scopeSummary, ["summary"]);
+
+  return next;
+}
+
 function resolveScopingWorkspaceRoute(resolvedDeal: ResolvedDealView): WorkflowRoute {
   return resolvedDeal.resolved.workflowRoute;
 }
@@ -238,7 +271,7 @@ function buildBaseSectionData(
 ): DealScopingSectionData {
   return mergeSectionData(
     buildSeedSectionDataFromResolvedDeal(resolvedDeal),
-    toSectionData(existingIntake?.sectionData)
+    stripLineageOwnedScopingFields(toSectionData(existingIntake?.sectionData), resolvedDeal)
   );
 }
 
@@ -657,9 +690,13 @@ export async function upsertDealScopingIntake(
   const deal = resolvedDeal.deal;
   await assertDealScopingEditable(deal);
   const baseSectionData = buildBaseSectionData(existingIntake, resolvedDeal);
+  const sectionPatch = stripLineageOwnedScopingFields(
+    extractSectionPatch(sanitizedPatch),
+    resolvedDeal
+  );
   const nextSectionData = mergeSectionData(
     baseSectionData,
-    extractSectionPatch(sanitizedPatch)
+    sectionPatch
   );
   const dealUpdates = buildDealWritebackPatch(sanitizedPatch, nextSectionData);
 
@@ -676,7 +713,9 @@ export async function upsertDealScopingIntake(
 
   const nextRoute = resolveScopingWorkspaceRoute(resolvedDeal);
   const projectTypeId =
-    sanitizedPatch.projectTypeId === undefined
+    resolvedDeal.sourceLead
+      ? resolvedDeal.resolved.projectTypeId ?? null
+      : sanitizedPatch.projectTypeId === undefined
       ? existingIntake?.projectTypeId ?? resolvedDeal.resolved.projectTypeId ?? null
       : sanitizedPatch.projectTypeId;
   const attachments = await listLinkedScopingAttachments(tenantDb, dealId);

@@ -126,13 +126,52 @@ function mergeSectionData(
   return next;
 }
 
-function buildWorkspaceSectionData(
+function omitSectionKeys(value: unknown, keys: string[]) {
+  if (!isRecord(value)) {
+    return {};
+  }
+
+  const next = { ...value };
+  for (const key of keys) {
+    delete next[key];
+  }
+  return next;
+}
+
+export function stripLineageOwnedWorkspaceFields(
+  sectionData: Record<string, unknown>,
+  hasSourceLead: boolean
+) {
+  if (!hasSourceLead) {
+    return sectionData;
+  }
+
+  return {
+    ...sectionData,
+    projectOverview: omitSectionKeys(sectionData.projectOverview, ["propertyName", "bidDueDate"]),
+    propertyDetails: omitSectionKeys(sectionData.propertyDetails, [
+      "propertyAddress",
+      "propertyCity",
+      "propertyState",
+      "propertyZip",
+    ]),
+    scopeSummary: omitSectionKeys(sectionData.scopeSummary, ["summary"]),
+  };
+}
+
+export function buildWorkspaceSectionData(
   deal: DealDetail,
   intake?: DealScopingIntake | null,
   resolved?: DealResolvedFields | null
 ) {
   const seed = resolved ? buildScopingSeedFromResolvedFields(resolved) : buildScopingSeedFromDeal(deal);
-  return mergeSectionData(seed, isRecord(intake?.sectionData) ? intake!.sectionData as Record<string, unknown> : {});
+  const intakeSectionData = isRecord(intake?.sectionData)
+    ? intake!.sectionData as Record<string, unknown>
+    : {};
+  return mergeSectionData(
+    seed,
+    stripLineageOwnedWorkspaceFields(intakeSectionData, Boolean(deal.sourceLeadId))
+  );
 }
 
 function getSectionValue(
@@ -171,6 +210,57 @@ function getSelectDisplayLabel(
   fallback: string
 ) {
   return options[value] ?? fallback;
+}
+
+export function buildLineageResolvedPatch(input: {
+  hasSourceLead: boolean;
+  projectTypeId: string | null;
+  sectionData: Record<string, unknown>;
+  resolvedFields: DealResolvedFields | null;
+}) {
+  if (!input.hasSourceLead || !input.resolvedFields) {
+    return {};
+  }
+
+  const patch: Record<string, unknown> = {};
+  const bidDueDate = getSectionValue(input.sectionData, "projectOverview", "bidDueDate");
+  const summary = getSectionValue(input.sectionData, "scopeSummary", "summary");
+  const currentBidDueDate =
+    typeof input.resolvedFields.bidDueDate === "string" ? input.resolvedFields.bidDueDate : "";
+  const currentSummary = input.resolvedFields.description ?? "";
+
+  if (input.projectTypeId !== input.resolvedFields.projectTypeId) {
+    patch.projectTypeId = input.projectTypeId;
+  }
+
+  if (bidDueDate !== currentBidDueDate) {
+    patch.bidDueDate = bidDueDate;
+  }
+
+  if (summary !== currentSummary) {
+    patch.description = summary;
+  }
+
+  return patch;
+}
+
+export function buildScopingAutosavePatch(input: {
+  hasSourceLead: boolean;
+  projectTypeId: string | null;
+  sectionData: Record<string, unknown>;
+}) {
+  if (!input.hasSourceLead) {
+    return {
+      projectTypeId: input.projectTypeId,
+      sectionData: input.sectionData,
+    };
+  }
+
+  return {
+    sectionData: {
+      opportunity: isRecord(input.sectionData.opportunity) ? input.sectionData.opportunity : {},
+    },
+  };
 }
 
 function getDefaultAttachmentRequirementKeys(route: WorkflowRoute) {
@@ -243,6 +333,7 @@ export function DealScopingWorkspace({
   const activeWorkflowRoute: WorkflowRoute = resolvedFields?.workflowRoute ?? deal.workflowRoute ?? "normal";
   const activeCompanyId = resolvedFields?.companyId ?? deal.companyId;
   const activePropertyId = resolvedFields?.propertyId ?? deal.propertyId;
+  const hasSourceLead = Boolean(deal.sourceLeadId);
   const projectTypeLabel = getProjectTypeLabel(projectTypes, projectTypeId);
   const preBidMeetingLabel = getSelectDisplayLabel(
     getSectionValue(sectionData, "opportunity", "preBidMeetingCompleted"),
@@ -273,9 +364,12 @@ export function DealScopingWorkspace({
       setReadiness(normalizeWorkspaceReadiness(result.readiness, activeWorkflowRoute));
       setResolvedFields(result.resolved);
       setSectionData(nextSectionData);
-      setProjectTypeId(result.intake.projectTypeId ?? result.resolved.projectTypeId ?? deal.projectTypeId);
+      const nextProjectTypeId = hasSourceLead
+        ? result.resolved.projectTypeId ?? null
+        : result.intake.projectTypeId ?? result.resolved.projectTypeId ?? deal.projectTypeId;
+      setProjectTypeId(nextProjectTypeId);
       lastSavedFingerprintRef.current = JSON.stringify({
-        projectTypeId: result.intake.projectTypeId ?? result.resolved.projectTypeId ?? deal.projectTypeId,
+        projectTypeId: nextProjectTypeId,
         sectionData: nextSectionData,
       });
       hydrationCompleteRef.current = true;
@@ -305,10 +399,24 @@ export function DealScopingWorkspace({
     const timeoutId = window.setTimeout(async () => {
       setSaveState("saving");
       try {
-        const result = await patchDealScopingIntake(deal.id, {
+        const resolvedPatch = buildLineageResolvedPatch({
+          hasSourceLead,
           projectTypeId,
           sectionData,
+          resolvedFields,
         });
+        if (Object.keys(resolvedPatch).length > 0) {
+          await patchResolvedDealFields(deal.id, resolvedPatch);
+        }
+
+        const result = await patchDealScopingIntake(
+          deal.id,
+          buildScopingAutosavePatch({
+            hasSourceLead,
+            projectTypeId,
+            sectionData,
+          })
+        );
         const nextSectionData = buildWorkspaceSectionData(deal, result.intake, result.resolved);
         setIntake(result.intake);
         setReadiness(normalizeWorkspaceReadiness(result.readiness, activeWorkflowRoute));
@@ -327,7 +435,7 @@ export function DealScopingWorkspace({
     }, 400);
 
     return () => window.clearTimeout(timeoutId);
-  }, [activeWorkflowRoute, deal, deal.id, projectTypeId, sectionData]);
+  }, [activeWorkflowRoute, deal, deal.id, hasSourceLead, projectTypeId, resolvedFields, sectionData]);
 
   const completionCounts = getScopingCompletionCounts(readiness?.completionState);
   const attachmentRequirements = readiness?.attachmentRequirements ?? [];

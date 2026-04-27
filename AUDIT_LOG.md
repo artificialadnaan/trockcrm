@@ -532,6 +532,18 @@ Going forward in this Phase 3 loop, every commit that touches server or frontend
   - Full audit suite: `npx playwright test --config=playwright.audit.config.ts` => 29 passed in 59.5s.
 - Insurance Claim -> Xactimate required-on-reveal: verified passing in production in both manual passes and the final 29-test suite; Xactimate is visible and marked required when Insurance Claim is true, hidden when false, and the server gate excludes it while hidden.
 
+## Opportunity Scoping Friction Sweep
+
+- Fixed: converted-deal scoping autosave now routes lead-owned field edits (`Project Type`, `Bid Due Date`, `Scope Summary`/description) through the resolved-fields endpoint instead of letting scoping-intake data shadow the source lead.
+- Fixed: stale scoping-intake snapshots for converted deals no longer override resolved source-lead values when the workspace hydrates.
+- Verified in code review: `Workflow Route` is read-only on the scoping workspace and remains derived from the lead/workflow route rather than manually edited in the opportunity form.
+- Verified in code review: property name/address are rendered as read-only lineage data, with changes routed through the linked Property selector.
+- Deferred: the fixed-position `Saving...`/`Saved` badge may need visual tuning after rep feedback on smaller screens; leave it until manual verification shows actual overlap.
+
+## Future Considerations
+
+- Lead detail uses whole-page Save/Cancel while opportunity scoping uses autosave. This inconsistency is intentional for v1 because leads are captured as a form and opportunities are refined iteratively. Revisit once both surfaces have production rep feedback.
+
 ## Needs Human Review
 
 - COMPANY_VERIFICATION_EMAIL temporary routing
