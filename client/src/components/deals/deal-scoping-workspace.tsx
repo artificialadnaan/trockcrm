@@ -319,16 +319,15 @@ export function DealScopingWorkspace({
           sectionData: nextSectionData,
         });
         setSaveState("saved");
-        onDealUpdated();
         window.setTimeout(() => setSaveState("idle"), 1200);
       } catch (err) {
         setSaveState("error");
         setError(err instanceof Error ? err.message : "Autosave failed");
       }
-    }, 700);
+    }, 400);
 
     return () => window.clearTimeout(timeoutId);
-  }, [activeWorkflowRoute, deal, deal.id, onDealUpdated, projectTypeId, sectionData]);
+  }, [activeWorkflowRoute, deal, deal.id, projectTypeId, sectionData]);
 
   const completionCounts = getScopingCompletionCounts(readiness?.completionState);
   const attachmentRequirements = readiness?.attachmentRequirements ?? [];
@@ -481,6 +480,12 @@ export function DealScopingWorkspace({
 
   return (
     <div className="grid gap-4 lg:grid-cols-[260px_minmax(0,1fr)]">
+      <div className="fixed right-4 top-4 z-40 rounded-full border bg-background px-3 py-1 text-xs font-medium shadow-sm">
+        {saveState === "saving" && "Saving..."}
+        {saveState === "saved" && "Saved"}
+        {saveState === "error" && "Save failed"}
+        {saveState === "idle" && "Saved"}
+      </div>
       <div className="space-y-4 lg:sticky lg:top-4 lg:self-start">
         <Card size="sm">
           <CardHeader>
