@@ -58,6 +58,7 @@ describe("deal lineage resolver field ownership", () => {
   it("keeps the field ownership map explicit for every resolver-supported field", () => {
     expect(DEAL_FIELD_OWNERSHIP).toMatchObject({
       projectTypeId: "lead",
+      companyId: "lead",
       sourceCategory: "lead",
       sourceDetail: "lead",
       propertyId: "lead",

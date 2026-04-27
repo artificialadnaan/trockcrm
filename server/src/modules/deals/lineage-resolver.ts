@@ -21,6 +21,7 @@ export type DealFieldOwnership =
 
 export type ResolvedDealField =
   | "projectTypeId"
+  | "companyId"
   | "sourceCategory"
   | "sourceDetail"
   | "propertyId"
@@ -41,6 +42,7 @@ export type ResolvedDealField =
 
 export const DEAL_FIELD_OWNERSHIP: Record<ResolvedDealField, DealFieldOwnership> = {
   projectTypeId: "lead",
+  companyId: "lead",
   sourceCategory: "lead",
   sourceDetail: "lead",
   propertyId: "lead",
@@ -80,6 +82,7 @@ export interface ResolvedDealView {
   answersByKey: Record<string, unknown>;
   resolved: {
     projectTypeId: string | null;
+    companyId: string | null;
     sourceCategory: string | null;
     sourceDetail: string | null;
     legacySource: string | null;
@@ -215,6 +218,7 @@ export async function getResolvedDeal(
     answersByKey,
     resolved: {
       projectTypeId: sourceLead?.projectTypeId ?? deal.projectTypeId ?? null,
+      companyId: sourceLead?.companyId ?? deal.companyId ?? null,
       sourceCategory: sourceLead?.sourceCategory ?? null,
       sourceDetail: sourceLead?.sourceDetail ?? null,
       legacySource: sourceLead?.source ?? deal.source ?? null,
