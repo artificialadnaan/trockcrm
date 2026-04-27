@@ -1921,6 +1921,11 @@ export async function getUnifiedWorkflowOverview(
   const leadRepFilter = options.repId
     ? sql`AND (dsi.created_by = ${options.repId} OR dsi.last_edited_by = ${options.repId})`
     : sql``;
+  // leadAssignedRepFilter for queries on `leads l` (no dsi join);
+  // leadRepFilter for queries that join deal_scoping_intake.
+  const leadAssignedRepFilter = options.repId
+    ? sql`AND l.assigned_rep_id = ${options.repId}`
+    : sql``;
   const dealRepFilter = options.repId
     ? sql`AND d.assigned_rep_id = ${options.repId}`
     : sql``;
@@ -2099,7 +2104,7 @@ export async function getUnifiedWorkflowOverview(
         WHERE l.is_active = true
           AND l.status = 'open'
           AND psc.workflow_family = 'lead'
-          ${leadRepFilter}
+          ${leadAssignedRepFilter}
         GROUP BY l.pipeline_type, psc.name, psc.display_order
 
         UNION ALL
