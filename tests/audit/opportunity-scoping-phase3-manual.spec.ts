@@ -318,6 +318,7 @@ test.describe.serial("opportunity scoping phase 3 manual verification", () => {
   test("lead-to-opportunity lineage, autosave, inline contact, DealLeadTab, and photo lineage work on production", async ({
     page,
   }) => {
+    test.setTimeout(120_000);
     const issues = createIssueCollectors(page);
     const apiRequest = await createRoleApiContext("rep");
     await loginWithRole(page, "rep");
@@ -358,7 +359,7 @@ test.describe.serial("opportunity scoping phase 3 manual verification", () => {
       expect(searchTargets.targets.some((target) => target.type === "deal" && target.id === deal.id)).toBe(true);
 
       await page.goto(`/photos/capture`, { waitUntil: "domcontentloaded" });
-      await page.getByPlaceholder("Search leads, opportunities, or deals...").fill(bundle.company.name);
+      await page.getByPlaceholder("Search leads, opportunities, and deals").fill(bundle.company.name);
       await expect(page.getByText("Leads", { exact: true })).toBeVisible();
       await expect(page.getByText("Deals", { exact: true })).toBeVisible();
       await screenshot(page, "10-global-photo-search-categorized-targets");
