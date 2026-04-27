@@ -8,3 +8,4 @@ tests/audit/.env
 .superpowers/
 .worktrees/
 .omc/
+*.tsbuildinfo
