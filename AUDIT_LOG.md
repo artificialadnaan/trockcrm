@@ -488,6 +488,21 @@ Status: fixed
 - Verification email evidence: the Phase 3 manual verifier created a new `AUDIT_TEST_Phase3_Company_*` company/lead, asserted `companyVerificationStatus=pending`, asserted `companyVerificationEmailSentAt` was populated, verified the company activity log body `Company verification email sent to adnaan.iqbal@gmail.com`, and Railway API logs showed successful Resend sends to `adnaan.iqbal@gmail.com` with message ids.
 - Insurance Claim -> Xactimate required-on-reveal: verified passing in production by both `lead-questionnaire-cascade.spec.ts` and the headed Phase 3 manual verifier; Xactimate appears and is marked required when Insurance Claim is `Yes`, and hides when Insurance Claim is `No`.
 
+## Audit Process Correction
+
+Commits `8f89ad3` (`feat: add deal lineage resolver`) and `7bca45e` (`fix: use lineage resolver for deal stage gates`) were committed but not deployed before their commit-boundary production audits were run. The earlier 30/30 audit passes for those boundaries tested the previous production deploys (`4090da26-b0ab-4b8b-80c3-b44a448df6fd` API and `253419a8-b683-4462-9aaa-a32d0451b5a7` Frontend), not the new commits.
+
+Correction: deployed `7bca45e` to the API with `railway deployment up . --path-as-root`.
+
+- Corrected API deploy: `759f93b5-ed33-4f7c-ac94-cc5cfba17a90`
+- Deploy created: `2026-04-27T02:41:23.368Z`
+- Deploy status: SUCCESS
+- Deploy message: `fix: use lineage resolver for deal stage gates`
+- Image digest: `sha256:2475f79ffafde021b48e518331378f23dc706dbfc7f58a9372723a982fb61508`
+- Corrected verification: `npx playwright test --config=playwright.audit.config.ts` => 30 passed in 1.3m against the freshly deployed API.
+
+Going forward in this Phase 3 loop, every commit that touches server or frontend code must be deployed with `railway deployment up . --path-as-root` before the commit-boundary production audit runs. Production audit results are not accepted as verification for a commit until that commit is live.
+
 ## Lead Questionnaire V2 Continuation Summary
 - Iterations in this continuation: 10 production audit/deploy checks, including targeted cascade runs, full-suite runs, and reruns after test-harness fixes.
 - Issues fixed in this continuation:
