@@ -3,10 +3,19 @@ import type { ReactNode } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import type { LeadQualificationFieldId } from "@trock-crm/shared/types";
 import {
+  CONTACT_CATEGORIES,
   getLeadValidationQuestionSetForProjectType,
   LEAD_SOURCE_CATEGORIES,
   type LeadSourceCategory,
@@ -23,6 +32,7 @@ import { CompanySelector } from "@/components/companies/company-selector";
 import { PropertySelector } from "@/components/properties/property-selector";
 import { LeadStageBadge } from "./lead-stage-badge";
 import { useCompanyContacts } from "@/hooks/use-companies";
+import { createContact } from "@/hooks/use-contacts";
 import {
   createLead,
   updateLead,
@@ -31,6 +41,7 @@ import {
 } from "@/hooks/use-leads";
 import { usePipelineStages, useProjectTypes } from "@/hooks/use-pipeline-config";
 import { formatPropertyLabel, useProperties } from "@/hooks/use-properties";
+import { CATEGORY_LABELS } from "@/lib/contact-utils";
 import { isApiError } from "@/lib/api";
 import { getValidationQuestionSetForProjectType } from "@/lib/validation-question-sets";
 import {
@@ -467,7 +478,7 @@ function EditableLeadForm({
   const isCreate = mode === "create";
   const [companyId, setCompanyId] = useState<string | null>(lead?.companyId ?? initialValues?.companyId ?? null);
   const { properties } = useProperties(companyId ? { companyId, limit: 500 } : { limit: 0 });
-  const { contacts } = useCompanyContacts(companyId ?? undefined);
+  const { contacts, refetch: refetchContacts } = useCompanyContacts(companyId ?? undefined);
   const leadStages = getLeadCreationStages(stages);
 
   const [formData, setFormData] = useState(() => getEditableFormState(lead, initialValues));
@@ -475,6 +486,17 @@ function EditableLeadForm({
     isCreate ? (formData.projectTypeId || null) : null
   );
   const [submitting, setSubmitting] = useState(false);
+  const [contactDialogOpen, setContactDialogOpen] = useState(false);
+  const [contactSubmitting, setContactSubmitting] = useState(false);
+  const [contactError, setContactError] = useState<string | null>(null);
+  const [newContact, setNewContact] = useState({
+    firstName: "",
+    lastName: "",
+    email: "",
+    phone: "",
+    jobTitle: "",
+    category: "client",
+  });
   const [error, setError] = useState<string | null>(null);
   const [stageGateError, setStageGateError] = useState<LeadStageGateErrorState | null>(null);
 
@@ -604,6 +626,61 @@ function EditableLeadForm({
 
   const handleFieldChange = (field: keyof typeof formData, value: string) => {
     setFormData((current) => ({ ...current, [field]: value }));
+  };
+
+  const resetNewContact = () => {
+    setNewContact({
+      firstName: "",
+      lastName: "",
+      email: "",
+      phone: "",
+      jobTitle: "",
+      category: "client",
+    });
+    setContactError(null);
+  };
+
+  const handleCreatePrimaryContact = async () => {
+    if (!companyId) {
+      setContactError("Select a company before adding a contact.");
+      return;
+    }
+    if (!newContact.firstName.trim() || !newContact.lastName.trim()) {
+      setContactError("First name and last name are required.");
+      return;
+    }
+    if (newContact.email.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(newContact.email.trim())) {
+      setContactError("Enter a valid email address.");
+      return;
+    }
+
+    setContactSubmitting(true);
+    setContactError(null);
+    try {
+      const result = await createContact({
+        firstName: newContact.firstName.trim(),
+        lastName: newContact.lastName.trim(),
+        email: newContact.email.trim() || null,
+        phone: newContact.phone.trim() || null,
+        jobTitle: newContact.jobTitle.trim() || null,
+        category: newContact.category,
+        companyId,
+        skipDedupCheck: true,
+      });
+
+      if (!result.contact) {
+        throw new Error("Contact was not created.");
+      }
+
+      await refetchContacts();
+      handleFieldChange("primaryContactId", result.contact.id);
+      setContactDialogOpen(false);
+      resetNewContact();
+    } catch (err) {
+      setContactError(err instanceof Error ? err.message : "Failed to create contact.");
+    } finally {
+      setContactSubmitting(false);
+    }
   };
 
   const handleQualificationChange = (fieldId: string, value: string) => {
@@ -851,8 +928,128 @@ function EditableLeadForm({
                       ))}
                     </SelectContent>
                   </Select>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={!companyId}
+                    onClick={() => {
+                      resetNewContact();
+                      setContactDialogOpen(true);
+                    }}
+                  >
+                    + Add new contact
+                  </Button>
                 </div>
               </div>
+
+              <Dialog open={contactDialogOpen} onOpenChange={setContactDialogOpen}>
+                <DialogContent>
+                  <DialogHeader>
+                    <DialogTitle>Add Primary Contact</DialogTitle>
+                    <DialogDescription>Create a contact for the selected company.</DialogDescription>
+                  </DialogHeader>
+                  {contactError ? (
+                    <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                      {contactError}
+                    </div>
+                  ) : null}
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <div className="space-y-2">
+                      <QuestionLabel htmlFor="newContactFirstName" required>
+                        First Name
+                      </QuestionLabel>
+                      <Input
+                        id="newContactFirstName"
+                        value={newContact.firstName}
+                        onChange={(event) =>
+                          setNewContact((current) => ({ ...current, firstName: event.target.value }))
+                        }
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <QuestionLabel htmlFor="newContactLastName" required>
+                        Last Name
+                      </QuestionLabel>
+                      <Input
+                        id="newContactLastName"
+                        value={newContact.lastName}
+                        onChange={(event) =>
+                          setNewContact((current) => ({ ...current, lastName: event.target.value }))
+                        }
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="newContactEmail">Email</Label>
+                      <Input
+                        id="newContactEmail"
+                        type="email"
+                        value={newContact.email}
+                        onChange={(event) =>
+                          setNewContact((current) => ({ ...current, email: event.target.value }))
+                        }
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="newContactPhone">Phone</Label>
+                      <Input
+                        id="newContactPhone"
+                        value={newContact.phone}
+                        onChange={(event) =>
+                          setNewContact((current) => ({ ...current, phone: event.target.value }))
+                        }
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="newContactTitle">Title</Label>
+                      <Input
+                        id="newContactTitle"
+                        value={newContact.jobTitle}
+                        onChange={(event) =>
+                          setNewContact((current) => ({ ...current, jobTitle: event.target.value }))
+                        }
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <QuestionLabel htmlFor="newContactCategory" required>
+                        Category
+                      </QuestionLabel>
+                      <Select
+                        value={newContact.category}
+                        onValueChange={(value) =>
+                          setNewContact((current) => ({ ...current, category: value || "client" }))
+                        }
+                      >
+                        <SelectTrigger id="newContactCategory">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {CONTACT_CATEGORIES.map((category) => (
+                            <SelectItem key={category} value={category}>
+                              {CATEGORY_LABELS[category] ?? category}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </div>
+                  <DialogFooter>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={() => {
+                        setContactDialogOpen(false);
+                        resetNewContact();
+                      }}
+                    >
+                      Cancel
+                    </Button>
+                    <Button type="button" disabled={contactSubmitting} onClick={handleCreatePrimaryContact}>
+                      {contactSubmitting ? "Saving..." : "Save Contact"}
+                    </Button>
+                  </DialogFooter>
+                </DialogContent>
+              </Dialog>
 
               <div className="grid gap-4 sm:grid-cols-2">
                 <div className="space-y-2">
