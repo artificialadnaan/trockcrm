@@ -4,6 +4,7 @@ import {
   buildLineageResolvedPatch,
   buildScopingAutosavePatch,
   buildWorkspaceSectionData,
+  canAutosaveScopingWorkspace,
   stripLineageOwnedWorkspaceFields,
 } from "./deal-scoping-workspace";
 import type {
@@ -192,5 +193,28 @@ describe("DealScopingWorkspace lineage routing helpers", () => {
         opportunity: { siteVisitDecision: "not_required" },
       },
     });
+  });
+
+  it("waits for resolved lineage fields before autosaving converted deals", () => {
+    expect(
+      canAutosaveScopingWorkspace({
+        hasSourceLead: true,
+        resolvedFields: null,
+      })
+    ).toBe(false);
+
+    expect(
+      canAutosaveScopingWorkspace({
+        hasSourceLead: true,
+        resolvedFields: makeResolved(),
+      })
+    ).toBe(true);
+
+    expect(
+      canAutosaveScopingWorkspace({
+        hasSourceLead: false,
+        resolvedFields: null,
+      })
+    ).toBe(true);
   });
 });

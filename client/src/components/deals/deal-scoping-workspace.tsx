@@ -263,6 +263,13 @@ export function buildScopingAutosavePatch(input: {
   };
 }
 
+export function canAutosaveScopingWorkspace(input: {
+  hasSourceLead: boolean;
+  resolvedFields: DealResolvedFields | null;
+}) {
+  return !input.hasSourceLead || Boolean(input.resolvedFields);
+}
+
 function getDefaultAttachmentRequirementKeys(route: WorkflowRoute) {
   return route === "service" ? ["site_photos"] : ["scope_docs", "site_photos"];
 }
@@ -388,6 +395,10 @@ export function DealScopingWorkspace({
 
   useEffect(() => {
     if (!hydrationCompleteRef.current) {
+      return;
+    }
+
+    if (!canAutosaveScopingWorkspace({ hasSourceLead, resolvedFields })) {
       return;
     }
 
