@@ -18,7 +18,7 @@ import type * as schema from "@trock-crm/shared/schema";
 import { toCanonicalLeadStageSlug, type WorkflowFamily } from "@trock-crm/shared/types";
 import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
-import { getActiveProjectTypes, getAllStages, getStageById } from "../pipeline/service.js";
+import { getActiveProjectTypes, getAllStages, getStageById, getStageBySlug } from "../pipeline/service.js";
 import { assertLeadStageTransitionAllowed, LeadStageTransitionError } from "./stage-transition-service.js";
 import { preflightLeadStageCheck } from "./stage-gate.js";
 import {
@@ -29,7 +29,8 @@ import {
   listQuestionnaireNodes,
   upsertLeadQuestionAnswerSet,
 } from "./questionnaire-service.js";
-import { computeExistingCustomerStatus, maybeRequestCompanyVerification } from "../companies/customer-status-service.js";
+import { computeExistingCustomerStatus } from "../companies/customer-status-service.js";
+import { companyNeedsVerification } from "./verification-service.js";
 import { resolveLeadSourceForWrite } from "./source-control.js";
 import type { LeadSourceCategory } from "@trock-crm/shared/types";
 
@@ -100,6 +101,13 @@ interface LeadServiceDependencies {
     displayOrder?: number;
     isTerminal: boolean;
   } | null>;
+  getStageBySlug: (slug: string, workflowFamily?: WorkflowFamily) => Promise<{
+    id: string;
+    name?: string;
+    slug?: string;
+    displayOrder?: number;
+    isTerminal: boolean;
+  } | null>;
   getActiveProjectTypes: typeof getActiveProjectTypes;
   now: () => Date;
 }
@@ -107,6 +115,7 @@ interface LeadServiceDependencies {
 const defaultDependencies: LeadServiceDependencies = {
   getAllStages,
   getStageById,
+  getStageBySlug,
   getActiveProjectTypes,
   now: () => new Date(),
 };
@@ -939,6 +948,38 @@ export function createLeadService(
       input.leadQuestionAnswers ??
       normalizedProjectTypeQuestionPayload.answers ??
       {};
+
+    // Verification + auto-promotion (v2 only — gate retained because
+    // ENABLE_LEAD_EDIT_V2 still controls broader V2 questionnaire semantics).
+    // Decision is made BEFORE insert so the lead row carries its final stage
+    // and verification_status without a follow-up update round-trip.
+    //
+    // TODO(PR2): When the email + tokenized approval flow lands, the recipient
+    // lookup in customer-status-service.ts:getCompanyVerificationRecipient()
+    // (currently a hardcoded fallback to adnaan.iqbal@gmail.com) is replaced
+    // with companies.assignedApproverUserId → users.email, and the email-send
+    // call site reattaches at the "needsVerification" branch below.
+    let resolvedStageId = input.stageId;
+    let verificationStatus: "not_required" | "pending" = "not_required";
+    let verificationRequiredReason: string | null = null;
+    let qualifiedStageForHistory: { id: string } | null = null;
+
+    if (v2Enabled) {
+      const decision = await companyNeedsVerification(tenantDb, input.companyId, { now });
+
+      if (decision.needsVerification) {
+        verificationStatus = "pending";
+        verificationRequiredReason = decision.reason;
+      } else {
+        const qualifiedStage = await deps.getStageBySlug("qualified_lead", "lead");
+        if (!qualifiedStage) {
+          throw new AppError(500, "Canonical 'qualified_lead' stage is not configured");
+        }
+        resolvedStageId = qualifiedStage.id;
+        qualifiedStageForHistory = qualifiedStage;
+      }
+    }
+
     const [lead] = await tenantDb
       .insert(leads)
       .values({
@@ -946,7 +987,7 @@ export function createLeadService(
         propertyId: input.propertyId,
         primaryContactId: input.primaryContactId ?? null,
         name: input.name,
-        stageId: input.stageId,
+        stageId: resolvedStageId,
         assignedRepId: input.assignedRepId,
         status: "open",
         source: v2Enabled ? null : input.source ?? null,
@@ -958,6 +999,8 @@ export function createLeadService(
         projectTypeQuestionPayload: v2Enabled
           ? { projectTypeId: input.projectTypeId ?? null, answers: {} }
           : normalizedProjectTypeQuestionPayload,
+        verificationStatus,
+        verificationRequiredReason,
         stageEnteredAt: now,
         isActive: true,
         createdAt: now,
@@ -975,24 +1018,19 @@ export function createLeadService(
       });
     }
 
-    if (v2Enabled) {
-      const [company] = await tenantDb
-        .select({ id: companies.id, name: companies.name })
-        .from(companies)
-        .where(eq(companies.id, input.companyId))
-        .limit(1);
-
-      if (company) {
-        await maybeRequestCompanyVerification(tenantDb, {
-          companyId: company.id,
-          companyName: company.name,
-          leadId: lead.id,
-          leadName: lead.name,
-          userId: input.assignedRepId,
-          now,
-          excludeLeadId: lead.id,
-        });
-      }
+    // Auto-promotion: lead was inserted directly into qualified_lead, but
+    // the request-asserted entry stage was new_lead (assertLeadStartsInEntryStage).
+    // Record the synthetic stage transition so the timeline shows the move.
+    if (qualifiedStageForHistory && qualifiedStageForHistory.id !== input.stageId) {
+      await tenantDb.insert(leadStageHistory).values({
+        leadId: lead.id,
+        fromStageId: input.stageId,
+        toStageId: qualifiedStageForHistory.id,
+        changedBy: input.assignedRepId,
+        isBackwardMove: false,
+        durationInPreviousStage: null,
+        createdAt: now,
+      });
     }
 
     return lead;

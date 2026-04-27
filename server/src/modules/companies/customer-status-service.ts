@@ -3,12 +3,14 @@ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { companies } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import type { CompanyVerificationStatus } from "@trock-crm/shared/types";
-import { sendSystemEmail } from "../../lib/resend-client.js";
 import { createActivity } from "../activities/service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 export type ExistingCustomerStatus = "Existing" | "New";
 
+// TODO(PR2): consumed here when email flow is rebuilt.
+// Recipient routing will switch from this hardcoded fallback to a per-company
+// lookup via companies.assigned_approver_user_id → users.email.
 export function getCompanyVerificationRecipient() {
   return process.env.COMPANY_VERIFICATION_EMAIL?.trim() || "adnaan.iqbal@gmail.com";
 }
@@ -89,6 +91,8 @@ export function shouldRequestCompanyVerification(input: {
   );
 }
 
+// TODO(PR2): consumed here when email flow is rebuilt.
+// PR2 will replace this with a tokenized approval link instead of plain anchors.
 export function buildCompanyVerificationEmail(input: {
   companyId: string;
   companyName: string;
@@ -105,86 +109,6 @@ export function buildCompanyVerificationEmail(input: {
       <p><a href="/leads/${input.leadId}">Open source lead</a></p>
     `,
   };
-}
-
-export async function maybeRequestCompanyVerification(
-  tenantDb: TenantDb,
-  input: {
-    companyId: string;
-    companyName: string;
-    leadId: string;
-    leadName: string;
-    userId: string;
-    now?: Date;
-    excludeLeadId?: string | null;
-  }
-) {
-  const now = input.now ?? new Date();
-  const computed = await computeExistingCustomerStatus(tenantDb, input.companyId, now, {
-    excludeLeadId: input.excludeLeadId,
-  });
-  const [company] = await tenantDb
-    .select()
-    .from(companies)
-    .where(eq(companies.id, input.companyId))
-    .limit(1);
-
-  if (!company) {
-    return computed;
-  }
-
-  if (computed.status === "Existing") {
-    if (company.companyVerificationStatus !== "not_required") {
-      await tenantDb
-        .update(companies)
-        .set({ companyVerificationStatus: "not_required", updatedAt: now })
-        .where(eq(companies.id, input.companyId));
-    }
-    return computed;
-  }
-
-  if (
-    !shouldRequestCompanyVerification({
-      computedStatus: computed.status,
-      companyVerificationStatus: company.companyVerificationStatus,
-      companyVerificationEmailSentAt: company.companyVerificationEmailSentAt,
-    })
-  ) {
-    return computed;
-  }
-
-  if (typeof tenantDb.update !== "function") {
-    return computed;
-  }
-
-  const recipient = getCompanyVerificationRecipient();
-  const email = buildCompanyVerificationEmail(input);
-  const sent = await sendSystemEmail(recipient, email.subject, email.html);
-
-  await tenantDb
-    .update(companies)
-    .set({
-      companyVerificationStatus: "pending",
-      companyVerificationRequestedAt: company.companyVerificationRequestedAt ?? now,
-      companyVerificationEmailSentAt: sent ? now : company.companyVerificationEmailSentAt,
-      updatedAt: now,
-    })
-    .where(eq(companies.id, input.companyId));
-
-  await createActivity(tenantDb, {
-    type: "email",
-    responsibleUserId: input.userId,
-    performedByUserId: input.userId,
-    sourceEntityType: "company",
-    sourceEntityId: input.companyId,
-    companyId: input.companyId,
-    leadId: input.leadId,
-    subject: email.subject,
-    body: `Company verification email sent to ${recipient}.`,
-    occurredAt: now.toISOString(),
-  });
-
-  return computed;
 }
 
 export async function markCompanyVerified(

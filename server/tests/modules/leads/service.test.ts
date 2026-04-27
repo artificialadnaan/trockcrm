@@ -17,12 +17,14 @@ import { LeadStageTransitionError } from "../../../src/modules/leads/stage-trans
 const pipelineMocks = vi.hoisted(() => ({
   getAllStages: vi.fn(),
   getStageById: vi.fn(),
+  getStageBySlug: vi.fn(),
   getActiveProjectTypes: vi.fn(),
 }));
 
 vi.mock("../../../src/modules/pipeline/service.js", () => ({
   getAllStages: pipelineMocks.getAllStages,
   getStageById: pipelineMocks.getStageById,
+  getStageBySlug: pipelineMocks.getStageBySlug,
   getActiveProjectTypes: pipelineMocks.getActiveProjectTypes,
 }));
 
@@ -500,6 +502,173 @@ describe("lead service canonical progression", () => {
       } else {
         process.env.ENABLE_LEAD_EDIT_V2 = previousFlag;
       }
+    }
+  });
+
+  it("auto-promotes a new lead to qualified_lead when the company has recent activity", async () => {
+    const previousFlag = process.env.ENABLE_LEAD_EDIT_V2;
+    process.env.ENABLE_LEAD_EDIT_V2 = "true";
+
+    const insertedLeads: Array<Record<string, unknown>> = [];
+    const insertedHistory: Array<Record<string, unknown>> = [];
+    const tenantDb = {
+      execute: vi.fn(async () => ({
+        rows: [{ last_activity_at: new Date("2026-04-01T00:00:00.000Z") }], // 26 days ago
+      })),
+      select() {
+        return {
+          from(table: unknown) {
+            const rows =
+              table === companies
+                ? [{ id: "company-1", isActive: true }]
+                : table === properties
+                  ? [{ id: "property-1", companyId: "company-1", isActive: true }]
+                  : table === users
+                    ? [{ id: "rep-1", isActive: true, officeId: "office-1" }]
+                    : [];
+            return {
+              where() { return this; },
+              limit() { return this; },
+              then(onfulfilled: (value: unknown[]) => unknown) {
+                return Promise.resolve(rows.map((row) => ({ ...row }))).then(onfulfilled);
+              },
+            };
+          },
+        };
+      },
+      insert(table: unknown) {
+        return {
+          values(value: Record<string, unknown>) {
+            if (table === leads) {
+              const insertedRow = { id: "lead-created", convertedAt: null, ...value };
+              insertedLeads.push(insertedRow);
+              return { returning: () => Promise.resolve([{ ...insertedRow }]) };
+            }
+            if (table === leadStageHistory) {
+              insertedHistory.push(value);
+              return { returning: () => Promise.resolve([{ id: "lsh-1", ...value }]) };
+            }
+            throw new Error(`Unexpected insert table: ${String((table as { _: { name?: string } })?._?.name)}`);
+          },
+        };
+      },
+    };
+
+    const getStageBySlugMock = vi.fn(async (slug: string) =>
+      slug === "qualified_lead" ? qualifiedLeadStage : null
+    );
+    const service = createLeadService({
+      getStageById: pipelineMocks.getStageById as never,
+      getStageBySlug: getStageBySlugMock as never,
+      getActiveProjectTypes: pipelineMocks.getActiveProjectTypes as never,
+      now: () => new Date("2026-04-27T12:00:00.000Z"),
+    });
+
+    try {
+      const lead = await service.createLead(tenantDb as never, {
+        companyId: "company-1",
+        propertyId: "property-1",
+        stageId: newLeadStage.id,
+        assignedRepId: "rep-1",
+        officeId: "office-1",
+        name: "Active-customer Lead",
+        source: "Referral",
+        projectTypeId: "project-type-commercial",
+        qualificationPayload: {},
+      });
+
+      expect(lead.stageId).toBe(qualifiedLeadStage.id);
+      expect(lead.verificationStatus).toBe("not_required");
+      expect(lead.verificationRequiredReason).toBeNull();
+      expect(insertedHistory).toHaveLength(1);
+      expect(insertedHistory[0]).toMatchObject({
+        leadId: "lead-created",
+        fromStageId: newLeadStage.id,
+        toStageId: qualifiedLeadStage.id,
+        isBackwardMove: false,
+      });
+    } finally {
+      if (previousFlag === undefined) delete process.env.ENABLE_LEAD_EDIT_V2;
+      else process.env.ENABLE_LEAD_EDIT_V2 = previousFlag;
+    }
+  });
+
+  it("flags a new lead as pending verification when the company has no recent activity", async () => {
+    const previousFlag = process.env.ENABLE_LEAD_EDIT_V2;
+    process.env.ENABLE_LEAD_EDIT_V2 = "true";
+
+    const insertedLeads: Array<Record<string, unknown>> = [];
+    const insertedHistory: Array<Record<string, unknown>> = [];
+    const tenantDb = {
+      execute: vi.fn(async () => ({ rows: [{ last_activity_at: null }] })),
+      select() {
+        return {
+          from(table: unknown) {
+            const rows =
+              table === companies
+                ? [{ id: "company-1", isActive: true }]
+                : table === properties
+                  ? [{ id: "property-1", companyId: "company-1", isActive: true }]
+                  : table === users
+                    ? [{ id: "rep-1", isActive: true, officeId: "office-1" }]
+                    : [];
+            return {
+              where() { return this; },
+              limit() { return this; },
+              then(onfulfilled: (value: unknown[]) => unknown) {
+                return Promise.resolve(rows.map((row) => ({ ...row }))).then(onfulfilled);
+              },
+            };
+          },
+        };
+      },
+      insert(table: unknown) {
+        return {
+          values(value: Record<string, unknown>) {
+            if (table === leads) {
+              const insertedRow = { id: "lead-created", convertedAt: null, ...value };
+              insertedLeads.push(insertedRow);
+              return { returning: () => Promise.resolve([{ ...insertedRow }]) };
+            }
+            if (table === leadStageHistory) {
+              insertedHistory.push(value);
+              return { returning: () => Promise.resolve([{ id: "lsh-1", ...value }]) };
+            }
+            throw new Error(`Unexpected insert table: ${String((table as { _: { name?: string } })?._?.name)}`);
+          },
+        };
+      },
+    };
+
+    const getStageBySlugMock = vi.fn(async () => qualifiedLeadStage);
+    const service = createLeadService({
+      getStageById: pipelineMocks.getStageById as never,
+      getStageBySlug: getStageBySlugMock as never,
+      getActiveProjectTypes: pipelineMocks.getActiveProjectTypes as never,
+      now: () => new Date("2026-04-27T12:00:00.000Z"),
+    });
+
+    try {
+      const lead = await service.createLead(tenantDb as never, {
+        companyId: "company-1",
+        propertyId: "property-1",
+        stageId: newLeadStage.id,
+        assignedRepId: "rep-1",
+        officeId: "office-1",
+        name: "Brand-new Company Lead",
+        source: "Data Mine",
+        projectTypeId: "project-type-commercial",
+        qualificationPayload: {},
+      });
+
+      expect(lead.stageId).toBe(newLeadStage.id);
+      expect(lead.verificationStatus).toBe("pending");
+      expect(lead.verificationRequiredReason).toBe("new_company");
+      expect(insertedHistory).toHaveLength(0);
+      expect(getStageBySlugMock).not.toHaveBeenCalled();
+    } finally {
+      if (previousFlag === undefined) delete process.env.ENABLE_LEAD_EDIT_V2;
+      else process.env.ENABLE_LEAD_EDIT_V2 = previousFlag;
     }
   });
 

@@ -16,6 +16,7 @@ import {
   FORECAST_WINDOWS,
   LEAD_SOURCE_CATEGORIES,
   LEAD_STATUSES,
+  LEAD_VERIFICATION_STATUSES,
   SUPPORT_NEEDED_TYPES,
 } from "../../types/enums.js";
 import {
@@ -38,6 +39,10 @@ export const leadDisqualificationReasonEnum = pgEnum(
 export const forecastWindowEnum = pgEnum("forecast_window", FORECAST_WINDOWS);
 export const forecastCategoryEnum = pgEnum("forecast_category", FORECAST_CATEGORIES);
 export const supportNeededTypeEnum = pgEnum("support_needed_type", SUPPORT_NEEDED_TYPES);
+export const leadVerificationStatusEnum = pgEnum(
+  "lead_verification_status",
+  LEAD_VERIFICATION_STATUSES
+);
 
 export const leads = pgTable(
   "leads",
@@ -105,6 +110,10 @@ export const leads = pgTable(
     directorReviewedBy: uuid("director_reviewed_by").references(() => users.id),
     directorReviewReason: text("director_review_reason"),
     lastActivityAt: timestamp("last_activity_at", { withTimezone: true }),
+    verificationStatus: leadVerificationStatusEnum("verification_status")
+      .default("not_required")
+      .notNull(),
+    verificationRequiredReason: text("verification_required_reason"),
     stageEnteredAt: timestamp("stage_entered_at", { withTimezone: true }).defaultNow().notNull(),
     convertedAt: timestamp("converted_at", { withTimezone: true }),
     isActive: boolean("is_active").default(true).notNull(),
