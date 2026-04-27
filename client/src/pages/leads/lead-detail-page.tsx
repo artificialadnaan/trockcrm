@@ -261,9 +261,14 @@ export function LeadDetailPage() {
               projectTypeQuestionPayload: lead.projectTypeQuestionPayload,
               leadQuestionnaire: lead.leadQuestionnaire ?? null,
               stageEnteredAt: lead.stageEnteredAt,
+              verificationStatus: lead.verificationStatus,
+              verificationRequiredReason: lead.verificationRequiredReason,
             }}
             showPrimaryAction={false}
             converted={isConverted}
+            onSaved={() => {
+              void refetch();
+            }}
           />
 
           {!isEditing && canConvertToOpportunity ? (

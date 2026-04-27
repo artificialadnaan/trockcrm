@@ -20,6 +20,7 @@ import {
   getQuestionnaireTemplateSnapshot,
   isLeadEditV2Enabled,
 } from "./questionnaire-service.js";
+import { markLeadVerified } from "./verification-service.js";
 
 const router = Router();
 
@@ -230,6 +231,32 @@ router.post("/", async (req, res, next) => {
 
     await req.commitTransaction!();
     res.status(201).json({ lead });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/leads/:id/verify-manual
+// TODO(PR2): Replace with email + tokenized approval flow.
+// Temporary admin scaffolding: marks a pending lead as verified and auto-promotes
+// to Qualified Lead. The PR2 public-approval endpoint will supersede this.
+router.post("/:id/verify-manual", async (req, res, next) => {
+  try {
+    if (req.user!.role !== "admin") {
+      throw new AppError(403, "Only admins can manually verify leads");
+    }
+
+    const updated = await markLeadVerified(req.tenantDb!, {
+      leadId: req.params.id,
+      userId: req.user!.id,
+    });
+
+    if (!updated) {
+      throw new AppError(409, "Lead is not pending verification");
+    }
+
+    await req.commitTransaction!();
+    res.json({ lead: updated });
   } catch (err) {
     next(err);
   }

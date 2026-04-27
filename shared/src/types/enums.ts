@@ -86,6 +86,21 @@ export type LeadSourceCategory = (typeof LEAD_SOURCE_CATEGORIES)[number];
 export const COMPANY_VERIFICATION_STATUSES = ["pending", "verified", "not_required"] as const;
 export type CompanyVerificationStatus = (typeof COMPANY_VERIFICATION_STATUSES)[number];
 
+export const LEAD_VERIFICATION_STATUSES = [
+  "not_required",
+  "pending",
+  "approved",
+  "rejected",
+] as const;
+export type LeadVerificationStatus = (typeof LEAD_VERIFICATION_STATUSES)[number];
+
+export const LEAD_VERIFICATION_REQUIRED_REASONS = [
+  "new_company",
+  "dormant_company",
+  "active_company",
+] as const;
+export type LeadVerificationRequiredReason = (typeof LEAD_VERIFICATION_REQUIRED_REASONS)[number];
+
 export const FORECAST_WINDOWS = [
   "30_days",
   "60_days",
