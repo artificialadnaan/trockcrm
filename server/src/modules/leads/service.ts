@@ -1225,7 +1225,7 @@ export function createLeadService(
       updates.source = input.source;
     }
     if (input.description !== undefined) updates.description = input.description;
-    if (!v2Enabled && input.qualificationPayload !== undefined) {
+    if (input.qualificationPayload !== undefined) {
       updates.qualificationPayload = normalizeQualificationPayload(input.qualificationPayload);
     }
     if (!v2Enabled && (input.projectTypeQuestionPayload !== undefined || input.projectTypeId !== undefined)) {

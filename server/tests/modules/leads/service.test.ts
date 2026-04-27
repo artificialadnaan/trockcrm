@@ -505,6 +505,77 @@ describe("lead service canonical progression", () => {
     }
   });
 
+  it("persists qualification payload updates when lead edit v2 is enabled", async () => {
+    const previousFlag = process.env.ENABLE_LEAD_EDIT_V2;
+    process.env.ENABLE_LEAD_EDIT_V2 = "true";
+
+    const tenantDb = createFakeTenantDb({
+      id: "lead-1",
+      companyId: "company-1",
+      propertyId: "property-1",
+      primaryContactId: null,
+      name: "Palm Villas repaint",
+      stageId: newLeadStage.id,
+      assignedRepId: "rep-1",
+      status: "open",
+      projectTypeId: "project-type-commercial",
+      qualificationPayload: {
+        existing_customer_status: "existing",
+        estimated_value: 50000,
+        timeline_status: "Q1 2026",
+      },
+      projectTypeQuestionPayload: {
+        projectTypeId: "project-type-commercial",
+        answers: {},
+      },
+      source: "Referral",
+      description: null,
+      stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+      convertedAt: null,
+      isActive: true,
+      createdAt: new Date("2026-04-12T15:00:00.000Z"),
+      updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+    });
+    const service = createLeadService({
+      getStageById: pipelineMocks.getStageById as never,
+      getActiveProjectTypes: pipelineMocks.getActiveProjectTypes as never,
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+    });
+
+    try {
+      const lead = await service.updateLead(
+        tenantDb as never,
+        "lead-1",
+        {
+          qualificationPayload: {
+            existing_customer_status: "existing",
+            estimated_value: 175000,
+            timeline_status: "2026-09-15",
+          },
+        },
+        "director",
+        "director-1"
+      );
+
+      expect(lead.qualificationPayload).toEqual({
+        existing_customer_status: "existing",
+        estimated_value: 175000,
+        timeline_status: "2026-09-15",
+      });
+      expect(tenantDb.state.leads[0]?.qualificationPayload).toEqual({
+        existing_customer_status: "existing",
+        estimated_value: 175000,
+        timeline_status: "2026-09-15",
+      });
+    } finally {
+      if (previousFlag === undefined) {
+        delete process.env.ENABLE_LEAD_EDIT_V2;
+      } else {
+        process.env.ENABLE_LEAD_EDIT_V2 = previousFlag;
+      }
+    }
+  });
+
   it("auto-promotes a new lead to qualified_lead when the company has recent activity", async () => {
     const previousFlag = process.env.ENABLE_LEAD_EDIT_V2;
     process.env.ENABLE_LEAD_EDIT_V2 = "true";
