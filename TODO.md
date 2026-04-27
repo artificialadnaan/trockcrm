@@ -19,6 +19,10 @@ Items flagged but not addressed in their originating commit. Pick one when scope
 
 - **SyncHub activity-push endpoint must NOT touch qualificationPayload or other lead fields directly.** Write to the `activities` table only. If SyncHub ever needs to update lead fields, that's a separate endpoint going through the same validation as the form. Flag locked in 2026-04-27 batch — verify Commit 9 implementation respects this before merging.
 
+## Deals service
+
+- **Wrap setDealContractSignedDate writes in db.transaction().** `server/src/modules/deals/service.ts` — SELECT → UPDATE → audit_log INSERT currently relies on the route's commitTransaction boundary. With Commit 6 adding a 4th write (commission INSERT) to this flow, partial failures become expensive (a deal could be marked contract-signed without a corresponding commission row, or vice versa). Move the entire flow inside an explicit `db.transaction()` so the four writes commit or roll back together. Surfaced during 2026-04-27 CRM fixes batch Commit 5 review.
+
 ## Verification email flow
 
 - **Race condition on multi-lead-per-company verification email.** `server/src/modules/leads/service.ts` ~line 1023-1067. If two createLead calls race against the same brand-new company, both can read `companyVerificationStatus=null` and both send emails before either commits. Human-paced lead creation won't hit this; future API/batch imports might. Fix: advisory lock on companyId around the verification-email block, or move the email-send into a post-commit hook. Surfaced during 2026-04-27 CRM fixes batch Commit 4.
