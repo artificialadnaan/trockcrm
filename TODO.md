@@ -18,3 +18,9 @@ Items flagged but not addressed in their originating commit. Pick one when scope
 ## Bid Board funnel (Commit 9 reminder)
 
 - **SyncHub activity-push endpoint must NOT touch qualificationPayload or other lead fields directly.** Write to the `activities` table only. If SyncHub ever needs to update lead fields, that's a separate endpoint going through the same validation as the form. Flag locked in 2026-04-27 batch — verify Commit 9 implementation respects this before merging.
+
+## Verification email flow
+
+- **Race condition on multi-lead-per-company verification email.** `server/src/modules/leads/service.ts` ~line 1023-1067. If two createLead calls race against the same brand-new company, both can read `companyVerificationStatus=null` and both send emails before either commits. Human-paced lead creation won't hit this; future API/batch imports might. Fix: advisory lock on companyId around the verification-email block, or move the email-send into a post-commit hook. Surfaced during 2026-04-27 CRM fixes batch Commit 4.
+- **Rejected companies cannot trigger fresh verification flow.** Once `companyVerificationStatus='rejected'`, the `alreadyRequested` guard in createLead skips the verification email forever for new leads against that company. May or may not be intentional — confirm with Takashi during workflow review. If intentional: document. If not: add an admin "reset verification" action to clear the rejected state. Surfaced during 2026-04-27 CRM fixes batch Commit 4.
+- **Tokenized magic links for company verification email CTAs.** Currently the Approve/Reject buttons in the verification email point at frontend URLs that prompt session login + confirm before POST. Out-of-app one-click approval (without login) requires a token store, expiry policy, single-use enforcement. Bigger workstream — defer until requested. Surfaced during 2026-04-27 CRM fixes batch Commit 4.
