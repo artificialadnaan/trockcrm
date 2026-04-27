@@ -8,6 +8,7 @@ import { getStageById } from "../pipeline/service.js";
 import { BID_BOARD_STAGE_READ_ONLY_MESSAGE } from "./service.js";
 import { inferDealBidBoardOwnership } from "./workflow-backfill.js";
 import { evaluateScopingReadiness, type DealScopingReadinessSnapshot, type DealScopingSectionData } from "./scoping-rules.js";
+import { getResolvedDeal, type ResolvedDealView } from "./lineage-resolver.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -23,6 +24,7 @@ export interface DealScopingServiceResult {
   intake: DealScopingIntakeRow;
   readiness: DealScopingReadinessResult;
   previousStatus: DealScopingIntakeStatus | null;
+  resolved: ResolvedDealView["resolved"];
 }
 
 export interface LinkScopingFileInput {
@@ -192,16 +194,50 @@ function buildSeedSectionDataFromDeal(deal: DealRow): DealScopingSectionData {
   return sectionData;
 }
 
-function resolveScopingWorkspaceRoute(deal: DealRow): WorkflowRoute {
-  return deal.workflowRoute;
+function buildSeedSectionDataFromResolvedDeal(resolvedDeal: ResolvedDealView): DealScopingSectionData {
+  const sectionData: DealScopingSectionData = {};
+  const { resolved } = resolvedDeal;
+
+  if (resolved.propertyName || resolved.bidDueDate) {
+    sectionData.projectOverview = {
+      propertyName: resolved.propertyName,
+      bidDueDate: typeof resolved.bidDueDate === "string" ? resolved.bidDueDate : "",
+    };
+  }
+
+  if (
+    resolved.propertyAddress ||
+    resolved.propertyCity ||
+    resolved.propertyState ||
+    resolved.propertyZip
+  ) {
+    sectionData.propertyDetails = {
+      propertyAddress: resolved.propertyAddress,
+      propertyCity: resolved.propertyCity,
+      propertyState: resolved.propertyState,
+      propertyZip: resolved.propertyZip,
+    };
+  }
+
+  if (resolved.description) {
+    sectionData.scopeSummary = {
+      summary: resolved.description,
+    };
+  }
+
+  return sectionData;
+}
+
+function resolveScopingWorkspaceRoute(resolvedDeal: ResolvedDealView): WorkflowRoute {
+  return resolvedDeal.resolved.workflowRoute;
 }
 
 function buildBaseSectionData(
   existingIntake: DealScopingIntakeRow | null,
-  deal: DealRow
+  resolvedDeal: ResolvedDealView
 ): DealScopingSectionData {
   return mergeSectionData(
-    buildSeedSectionDataFromDeal(deal),
+    buildSeedSectionDataFromResolvedDeal(resolvedDeal),
     toSectionData(existingIntake?.sectionData)
   );
 }
@@ -273,7 +309,8 @@ export async function getOrCreateDealScopingIntake(
   const existingIntake = await getExistingIntake(tenantDb, dealId);
 
   if (existingIntake) {
-    const deal = await getDealOrThrow(tenantDb, dealId);
+    const resolvedDeal = await getResolvedDeal(tenantDb, dealId);
+    const deal = resolvedDeal.deal;
     await assertDealScopingEditable(deal);
     const readiness = await evaluateDealScopingReadiness(tenantDb, dealId);
     const refreshedIntake = (await getExistingIntake(tenantDb, dealId)) ?? existingIntake;
@@ -282,18 +319,20 @@ export async function getOrCreateDealScopingIntake(
       intake: refreshedIntake,
       readiness,
       previousStatus: existingIntake.status as DealScopingIntakeStatus,
+      resolved: resolvedDeal.resolved,
     };
   }
 
-  const deal = await getDealOrThrow(tenantDb, dealId);
+  const resolvedDeal = await getResolvedDeal(tenantDb, dealId);
+  const deal = resolvedDeal.deal;
   await assertDealScopingEditable(deal);
 
   return upsertDealScopingIntake(
     tenantDb,
     dealId,
     {
-      projectTypeId: deal.projectTypeId,
-      sectionData: buildSeedSectionDataFromDeal(deal),
+      projectTypeId: resolvedDeal.resolved.projectTypeId,
+      sectionData: buildSeedSectionDataFromResolvedDeal(resolvedDeal),
     },
     userId
   );
@@ -521,13 +560,14 @@ export async function evaluateDealScopingReadiness(
   tenantDb: TenantDb,
   dealId: string
 ): Promise<DealScopingReadinessResult> {
-  const deal = await getDealOrThrow(tenantDb, dealId);
+  const resolvedDeal = await getResolvedDeal(tenantDb, dealId);
+  const deal = resolvedDeal.deal;
   await assertDealScopingEditable(deal);
   const existingIntake = await getExistingIntake(tenantDb, dealId);
   const attachments = await listLinkedScopingAttachments(tenantDb, dealId);
-  const sectionData = buildBaseSectionData(existingIntake, deal);
-  const projectTypeId = existingIntake?.projectTypeId ?? deal.projectTypeId ?? null;
-  const workflowRoute = resolveScopingWorkflowRoute(deal.workflowRoute);
+  const sectionData = buildBaseSectionData(existingIntake, resolvedDeal);
+  const projectTypeId = existingIntake?.projectTypeId ?? resolvedDeal.resolved.projectTypeId ?? null;
+  const workflowRoute = resolveScopingWorkflowRoute(resolvedDeal.resolved.workflowRoute);
   const readiness = buildScopingReadiness({
     currentStatus: (existingIntake?.status ?? "draft") as DealScopingIntakeStatus,
     workflowRoute,
@@ -537,13 +577,13 @@ export async function evaluateDealScopingReadiness(
   });
 
   if (existingIntake) {
-    const user = await getUserOrThrow(tenantDb, existingIntake.lastEditedBy);
-    await persistReadinessIfNeeded(
-      tenantDb,
-      existingIntake,
+      const user = await getUserOrThrow(tenantDb, existingIntake.lastEditedBy);
+      await persistReadinessIfNeeded(
+        tenantDb,
+        existingIntake,
       createIntakePayload({
         existingIntake,
-        deal,
+          deal,
         userId: existingIntake.lastEditedBy,
         editorOfficeId: user.officeId,
         route: workflowRoute,
@@ -596,6 +636,7 @@ export async function activateDealScopingIntake(
     intake: savedIntake,
     readiness: { ...readiness, status: "activated" },
     previousStatus: existingIntake.status as DealScopingIntakeStatus,
+    resolved: (await getResolvedDeal(tenantDb, dealId)).resolved,
   };
 }
 
@@ -605,22 +646,22 @@ export async function upsertDealScopingIntake(
   patch: DealScopingPatch,
   userId: string
 ): Promise<DealScopingServiceResult> {
-  if (patch.workflowRoute !== undefined) {
-    throw new AppError(400, "Use /api/deals/:id/routing-review for route changes");
-  }
+  const sanitizedPatch = { ...patch };
+  delete sanitizedPatch.workflowRoute;
 
-  const [deal, editor, existingIntake] = await Promise.all([
-    getDealOrThrow(tenantDb, dealId),
+  const [resolvedDeal, editor, existingIntake] = await Promise.all([
+    getResolvedDeal(tenantDb, dealId),
     getUserOrThrow(tenantDb, userId),
     getExistingIntake(tenantDb, dealId),
   ]);
+  const deal = resolvedDeal.deal;
   await assertDealScopingEditable(deal);
-  const baseSectionData = buildBaseSectionData(existingIntake, deal);
+  const baseSectionData = buildBaseSectionData(existingIntake, resolvedDeal);
   const nextSectionData = mergeSectionData(
     baseSectionData,
-    extractSectionPatch(patch)
+    extractSectionPatch(sanitizedPatch)
   );
-  const dealUpdates = buildDealWritebackPatch(patch, nextSectionData);
+  const dealUpdates = buildDealWritebackPatch(sanitizedPatch, nextSectionData);
 
   if (Object.keys(dealUpdates).length > 0) {
     await tenantDb
@@ -633,11 +674,11 @@ export async function upsertDealScopingIntake(
       .returning();
   }
 
-  const nextRoute = resolveScopingWorkspaceRoute(deal);
+  const nextRoute = resolveScopingWorkspaceRoute(resolvedDeal);
   const projectTypeId =
-    patch.projectTypeId === undefined
-      ? existingIntake?.projectTypeId ?? deal.projectTypeId ?? null
-      : patch.projectTypeId;
+    sanitizedPatch.projectTypeId === undefined
+      ? existingIntake?.projectTypeId ?? resolvedDeal.resolved.projectTypeId ?? null
+      : sanitizedPatch.projectTypeId;
   const attachments = await listLinkedScopingAttachments(tenantDb, dealId);
   const readiness = buildScopingReadiness({
     currentStatus: (existingIntake?.status ?? "draft") as DealScopingIntakeStatus,
@@ -683,6 +724,7 @@ export async function upsertDealScopingIntake(
     intake: savedIntake,
     readiness,
     previousStatus: existingIntake?.status as DealScopingIntakeStatus | null ?? null,
+    resolved: (await getResolvedDeal(tenantDb, dealId)).resolved,
   };
 }
 

@@ -33,16 +33,20 @@ import {
   activateServiceHandoff,
   getDealScopingIntake,
   type DealDetail,
+  type DealResolvedFields,
   type DealScopingAttachmentRequirement,
   type DealScopingIntake,
   type DealScopingReadiness,
   linkExistingScopingAttachment,
   patchDealScopingIntake,
+  patchResolvedDealFields,
   type WorkflowRoute,
 } from "@/hooks/use-deals";
 import { type FileRecord, uploadFile, useFiles } from "@/hooks/use-files";
 import { useProjectTypes } from "@/hooks/use-pipeline-config";
+import { PropertySelector } from "@/components/properties/property-selector";
 import {
+  buildScopingSeedFromResolvedFields,
   buildScopingSeedFromDeal,
   formatScopingAttachmentLabel,
   formatScopingFieldLabel,
@@ -122,8 +126,13 @@ function mergeSectionData(
   return next;
 }
 
-function buildWorkspaceSectionData(deal: DealDetail, intake?: DealScopingIntake | null) {
-  return mergeSectionData(buildScopingSeedFromDeal(deal), isRecord(intake?.sectionData) ? intake!.sectionData as Record<string, unknown> : {});
+function buildWorkspaceSectionData(
+  deal: DealDetail,
+  intake?: DealScopingIntake | null,
+  resolved?: DealResolvedFields | null
+) {
+  const seed = resolved ? buildScopingSeedFromResolvedFields(resolved) : buildScopingSeedFromDeal(deal);
+  return mergeSectionData(seed, isRecord(intake?.sectionData) ? intake!.sectionData as Record<string, unknown> : {});
 }
 
 function getSectionValue(
@@ -221,6 +230,7 @@ export function DealScopingWorkspace({
 
   const [intake, setIntake] = useState<DealScopingIntake | null>(null);
   const [readiness, setReadiness] = useState<DealScopingReadiness | null>(null);
+  const [resolvedFields, setResolvedFields] = useState<DealResolvedFields | null>(null);
   const [sectionData, setSectionData] = useState<Record<string, unknown>>({});
   const [projectTypeId, setProjectTypeId] = useState<string | null>(deal.projectTypeId);
   const [loading, setLoading] = useState(true);
@@ -230,7 +240,9 @@ export function DealScopingWorkspace({
   const [activatingService, setActivatingService] = useState(false);
   const lastSavedFingerprintRef = useRef("");
   const hydrationCompleteRef = useRef(false);
-  const activeWorkflowRoute: WorkflowRoute = deal.workflowRoute ?? "normal";
+  const activeWorkflowRoute: WorkflowRoute = resolvedFields?.workflowRoute ?? deal.workflowRoute ?? "normal";
+  const activeCompanyId = resolvedFields?.companyId ?? deal.companyId;
+  const activePropertyId = resolvedFields?.propertyId ?? deal.propertyId;
   const projectTypeLabel = getProjectTypeLabel(projectTypes, projectTypeId);
   const preBidMeetingLabel = getSelectDisplayLabel(
     getSectionValue(sectionData, "opportunity", "preBidMeetingCompleted"),
@@ -256,13 +268,14 @@ export function DealScopingWorkspace({
     setError(null);
     try {
       const result = await getDealScopingIntake(deal.id);
-      const nextSectionData = buildWorkspaceSectionData(deal, result.intake);
+      const nextSectionData = buildWorkspaceSectionData(deal, result.intake, result.resolved);
       setIntake(result.intake);
       setReadiness(normalizeWorkspaceReadiness(result.readiness, activeWorkflowRoute));
+      setResolvedFields(result.resolved);
       setSectionData(nextSectionData);
-      setProjectTypeId(result.intake.projectTypeId ?? deal.projectTypeId);
+      setProjectTypeId(result.intake.projectTypeId ?? result.resolved.projectTypeId ?? deal.projectTypeId);
       lastSavedFingerprintRef.current = JSON.stringify({
-        projectTypeId: result.intake.projectTypeId ?? deal.projectTypeId,
+        projectTypeId: result.intake.projectTypeId ?? result.resolved.projectTypeId ?? deal.projectTypeId,
         sectionData: nextSectionData,
       });
       hydrationCompleteRef.current = true;
@@ -296,9 +309,10 @@ export function DealScopingWorkspace({
           projectTypeId,
           sectionData,
         });
-        const nextSectionData = buildWorkspaceSectionData(deal, result.intake);
+        const nextSectionData = buildWorkspaceSectionData(deal, result.intake, result.resolved);
         setIntake(result.intake);
         setReadiness(normalizeWorkspaceReadiness(result.readiness, activeWorkflowRoute));
+        setResolvedFields(result.resolved);
         setSectionData(nextSectionData);
         lastSavedFingerprintRef.current = JSON.stringify({
           projectTypeId,
@@ -388,6 +402,23 @@ export function DealScopingWorkspace({
       toast.success(`Linked file to ${formatScopingAttachmentLabel(requirementKey)}.`);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to link file");
+    }
+  };
+
+  const handlePropertyChange = async (propertyId: string) => {
+    setSaveState("saving");
+    try {
+      const result = await patchResolvedDealFields(deal.id, { propertyId });
+      const nextResolved = result.resolved.resolved;
+      setResolvedFields(nextResolved);
+      setSectionData((current) =>
+        mergeSectionData(current, buildScopingSeedFromResolvedFields(nextResolved))
+      );
+      setSaveState("saved");
+      window.setTimeout(() => setSaveState("idle"), 1200);
+    } catch (err) {
+      setSaveState("error");
+      setError(err instanceof Error ? err.message : "Failed to change property");
     }
   };
 
@@ -571,11 +602,12 @@ export function DealScopingWorkspace({
           <CardContent className="grid gap-4 md:grid-cols-2">
             <div className="space-y-2">
               <Label htmlFor="propertyName">Property Name</Label>
-              <Input
+              <div
                 id="propertyName"
-                value={getSectionValue(sectionData, "projectOverview", "propertyName")}
-                onChange={(event) => updateField("projectOverview", "propertyName", event.target.value)}
-              />
+                className="flex h-10 items-center rounded-md border bg-muted/40 px-3 text-sm text-muted-foreground"
+              >
+                {getSectionValue(sectionData, "projectOverview", "propertyName") || "Unassigned"}
+              </div>
             </div>
             {activeWorkflowRoute === "normal" && (
               <div className="space-y-2">
@@ -688,39 +720,31 @@ export function DealScopingWorkspace({
         <Card>
           <CardHeader>
             <CardTitle>Property Details</CardTitle>
-            <CardDescription>Keep the intake address synced with the deal so downstream teams do not re-enter it.</CardDescription>
+            <CardDescription>Property identity comes from the linked lead/property record.</CardDescription>
           </CardHeader>
           <CardContent className="grid gap-4 md:grid-cols-2">
-            <div className="space-y-2 md:col-span-2">
-              <Label htmlFor="propertyAddress">Property Address</Label>
-              <Input
-                id="propertyAddress"
-                value={getSectionValue(sectionData, "propertyDetails", "propertyAddress")}
-                onChange={(event) => updateField("propertyDetails", "propertyAddress", event.target.value)}
-              />
+            <div className="space-y-2">
+              <Label>Linked Property</Label>
+              <div className="rounded-md border bg-muted/40 px-3 py-2 text-sm">
+                <div className="font-medium text-foreground">
+                  {getSectionValue(sectionData, "projectOverview", "propertyName") || "Unassigned"}
+                </div>
+                <div className="text-muted-foreground">
+                  {[
+                    getSectionValue(sectionData, "propertyDetails", "propertyAddress"),
+                    getSectionValue(sectionData, "propertyDetails", "propertyCity"),
+                    getSectionValue(sectionData, "propertyDetails", "propertyState"),
+                    getSectionValue(sectionData, "propertyDetails", "propertyZip"),
+                  ].filter(Boolean).join(", ") || "No address on property record"}
+                </div>
+              </div>
             </div>
             <div className="space-y-2">
-              <Label htmlFor="propertyCity">City</Label>
-              <Input
-                id="propertyCity"
-                value={getSectionValue(sectionData, "propertyDetails", "propertyCity")}
-                onChange={(event) => updateField("propertyDetails", "propertyCity", event.target.value)}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="propertyState">State</Label>
-              <Input
-                id="propertyState"
-                value={getSectionValue(sectionData, "propertyDetails", "propertyState")}
-                onChange={(event) => updateField("propertyDetails", "propertyState", event.target.value)}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="propertyZip">Zip</Label>
-              <Input
-                id="propertyZip"
-                value={getSectionValue(sectionData, "propertyDetails", "propertyZip")}
-                onChange={(event) => updateField("propertyDetails", "propertyZip", event.target.value)}
+              <Label>Change Property</Label>
+              <PropertySelector
+                companyId={activeCompanyId}
+                value={activePropertyId}
+                onChange={handlePropertyChange}
               />
             </div>
           </CardContent>

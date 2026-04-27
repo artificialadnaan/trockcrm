@@ -38,6 +38,25 @@ export interface DealScopingReadiness {
   attachmentRequirements: DealScopingAttachmentRequirement[];
 }
 
+export interface DealResolvedFields {
+  projectTypeId: string | null;
+  companyId: string | null;
+  sourceCategory: string | null;
+  sourceDetail: string | null;
+  legacySource: string | null;
+  propertyId: string | null;
+  propertyName: string | null;
+  propertyAddress: string | null;
+  propertyCity: string | null;
+  propertyState: string | null;
+  propertyZip: string | null;
+  primaryContactId: string | null;
+  assignedRepId: string | null;
+  workflowRoute: WorkflowRoute;
+  description: string | null;
+  bidDueDate: string | boolean | number | null;
+}
+
 export interface DealScopingIntake {
   id: string;
   dealId: string;
@@ -472,7 +491,7 @@ export async function deleteDeal(dealId: string) {
 }
 
 export async function getDealScopingIntake(dealId: string) {
-  return api<{ intake: DealScopingIntake; readiness: DealScopingReadiness }>(
+  return api<{ intake: DealScopingIntake; readiness: DealScopingReadiness; resolved: DealResolvedFields }>(
     `/deals/${dealId}/scoping-intake`
   );
 }
@@ -486,10 +505,20 @@ export async function patchDealScopingIntake(
   }> &
     Record<string, unknown>
 ) {
-  return api<{ intake: DealScopingIntake; readiness: DealScopingReadiness }>(
+  return api<{ intake: DealScopingIntake; readiness: DealScopingReadiness; resolved: DealResolvedFields }>(
     `/deals/${dealId}/scoping-intake`,
     { method: "PATCH", json: input }
   );
+}
+
+export async function patchResolvedDealFields(
+  dealId: string,
+  input: Partial<Record<keyof DealResolvedFields | "preBidMeetingCompleted" | "siteVisitDecision" | "siteVisitCompleted" | "estimatorConsultationNotes", unknown>>
+) {
+  return api<{ resolved: { resolved: DealResolvedFields } }>(`/deals/${dealId}/resolved-fields`, {
+    method: "PATCH",
+    json: input,
+  });
 }
 
 export async function applyOpportunityRoutingReview(

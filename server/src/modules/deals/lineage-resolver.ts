@@ -1,6 +1,7 @@
 import { eq } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
+  dealScopingIntake,
   deals,
   leadQuestionAnswers,
   leads,
@@ -10,6 +11,10 @@ import {
 import type * as schema from "@trock-crm/shared/schema";
 import type { WorkflowRoute } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
+import {
+  upsertLeadQuestionAnswerSet,
+  type LeadQuestionAnswerValue,
+} from "../leads/questionnaire-service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -100,6 +105,8 @@ export interface ResolvedDealView {
   };
   ownership: typeof DEAL_FIELD_OWNERSHIP;
 }
+
+export type ResolvedDealFieldPatch = Partial<Record<ResolvedDealField, unknown>>;
 
 const DEAL_COMPATIBILITY_SNAPSHOT_FIELDS = new Set<ResolvedDealField>([
   "projectTypeId",
@@ -251,4 +258,222 @@ export async function getDealField(
   if (field === "estimatorConsultationNotes") return null;
 
   return resolvedDeal.resolved[field as keyof ResolvedDealView["resolved"]] ?? null;
+}
+
+function normalizeOptionalText(value: unknown) {
+  if (value == null) return null;
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
+function mergeRecord(currentValue: unknown, incomingValue: Record<string, unknown>) {
+  return {
+    ...(typeof currentValue === "object" && currentValue !== null && !Array.isArray(currentValue)
+      ? currentValue as Record<string, unknown>
+      : {}),
+    ...incomingValue,
+  };
+}
+
+function scopingFieldLocation(field: ResolvedDealField) {
+  if (field === "preBidMeetingCompleted") {
+    return { section: "opportunity", key: "preBidMeetingCompleted" };
+  }
+  if (field === "siteVisitDecision") {
+    return { section: "opportunity", key: "siteVisitDecision" };
+  }
+  if (field === "siteVisitCompleted") {
+    return { section: "opportunity", key: "siteVisitCompleted" };
+  }
+  if (field === "estimatorConsultationNotes") {
+    return { section: "opportunity", key: "estimatorConsultationNotes" };
+  }
+  return null;
+}
+
+async function getPropertySnapshot(tenantDb: TenantDb, propertyId: string | null) {
+  if (!propertyId) return null;
+  const [property] = await tenantDb
+    .select()
+    .from(properties)
+    .where(eq(properties.id, propertyId))
+    .limit(1);
+  return property ?? null;
+}
+
+async function writeScopingFields(input: {
+  tenantDb: TenantDb;
+  resolvedDeal: ResolvedDealView;
+  values: Array<[ResolvedDealField, unknown]>;
+  userId: string;
+  officeId: string;
+  now: Date;
+}) {
+  if (input.values.length === 0) return;
+
+  const [existingIntake] = await input.tenantDb
+    .select()
+    .from(dealScopingIntake)
+    .where(eq(dealScopingIntake.dealId, input.resolvedDeal.deal.id))
+    .limit(1);
+
+  const sectionData =
+    typeof existingIntake?.sectionData === "object" &&
+    existingIntake.sectionData !== null &&
+    !Array.isArray(existingIntake.sectionData)
+      ? { ...existingIntake.sectionData as Record<string, unknown> }
+      : {};
+
+  for (const [field, value] of input.values) {
+    const location = scopingFieldLocation(field);
+    if (!location) continue;
+    sectionData[location.section] = mergeRecord(sectionData[location.section], {
+      [location.key]: value,
+    });
+  }
+
+  if (existingIntake) {
+    await input.tenantDb
+      .update(dealScopingIntake)
+      .set({
+        sectionData,
+        lastEditedBy: input.userId,
+        lastAutosavedAt: input.now,
+        updatedAt: input.now,
+      })
+      .where(eq(dealScopingIntake.id, existingIntake.id));
+    return;
+  }
+
+  await input.tenantDb.insert(dealScopingIntake).values({
+    dealId: input.resolvedDeal.deal.id,
+    officeId: input.officeId,
+    workflowRouteSnapshot: input.resolvedDeal.resolved.workflowRoute,
+    status: "draft",
+    projectTypeId: input.resolvedDeal.resolved.projectTypeId,
+    sectionData,
+    completionState: {},
+    readinessErrors: {},
+    firstReadyAt: null,
+    activatedAt: null,
+    lastAutosavedAt: input.now,
+    createdBy: input.userId,
+    lastEditedBy: input.userId,
+    createdAt: input.now,
+    updatedAt: input.now,
+  });
+}
+
+export async function writeResolvedDealFields(
+  tenantDb: TenantDb,
+  dealId: string,
+  patch: ResolvedDealFieldPatch,
+  input: { userId: string; officeId: string; now?: Date }
+) {
+  const resolvedDeal = await getResolvedDeal(tenantDb, dealId);
+  const now = input.now ?? new Date();
+  const sourceLead = resolvedDeal.sourceLead;
+  const leadUpdates: Record<string, unknown> = {};
+  const dealUpdates: Record<string, unknown> = {};
+  const scopingValues: Array<[ResolvedDealField, unknown]> = [];
+  const questionAnswers: Record<string, LeadQuestionAnswerValue> = {};
+
+  for (const [rawField, value] of Object.entries(patch)) {
+    const field = rawField as ResolvedDealField;
+    const writePlan = planDealFieldWrite({ field, hasSourceLead: Boolean(sourceLead) });
+
+    if (writePlan.target === "deal_scoping") {
+      scopingValues.push([field, value]);
+      continue;
+    }
+
+    if (writePlan.target === "source_lead_questionnaire") {
+      if (field === "bidDueDate") {
+        questionAnswers.bid_due_date = normalizeOptionalText(value);
+      }
+      continue;
+    }
+
+    if (field === "propertyId") {
+      const propertyId = normalizeOptionalText(value);
+      const property = await getPropertySnapshot(tenantDb, propertyId);
+      if (sourceLead) {
+        leadUpdates.propertyId = propertyId;
+      }
+      dealUpdates.propertyId = propertyId;
+      dealUpdates.name = property?.name ?? resolvedDeal.deal.name;
+      dealUpdates.propertyAddress = property?.address ?? null;
+      dealUpdates.propertyCity = property?.city ?? null;
+      dealUpdates.propertyState = property?.state ?? null;
+      dealUpdates.propertyZip = property?.zip ?? null;
+      continue;
+    }
+
+    if (sourceLead && writePlan.target === "source_lead") {
+      if (field === "projectTypeId") leadUpdates.projectTypeId = normalizeOptionalText(value);
+      if (field === "sourceCategory") leadUpdates.sourceCategory = normalizeOptionalText(value);
+      if (field === "sourceDetail") leadUpdates.sourceDetail = normalizeOptionalText(value);
+      if (field === "primaryContactId") leadUpdates.primaryContactId = normalizeOptionalText(value);
+      if (field === "assignedRepId") leadUpdates.assignedRepId = normalizeOptionalText(value);
+      if (field === "workflowRoute") leadUpdates.pipelineType = value === "service" ? "service" : "normal";
+      if (field === "description") leadUpdates.description = normalizeOptionalText(value);
+
+      if (writePlan.compatibilityWriteThrough) {
+        if (field === "projectTypeId") dealUpdates.projectTypeId = normalizeOptionalText(value);
+        if (field === "primaryContactId") dealUpdates.primaryContactId = normalizeOptionalText(value);
+        if (field === "assignedRepId") dealUpdates.assignedRepId = normalizeOptionalText(value);
+        if (field === "workflowRoute") dealUpdates.workflowRoute = value === "service" ? "service" : "normal";
+        if (field === "description") dealUpdates.description = normalizeOptionalText(value);
+      }
+      continue;
+    }
+
+    if (writePlan.target === "deal") {
+      if (field === "projectTypeId") dealUpdates.projectTypeId = normalizeOptionalText(value);
+      if (field === "primaryContactId") dealUpdates.primaryContactId = normalizeOptionalText(value);
+      if (field === "assignedRepId") dealUpdates.assignedRepId = normalizeOptionalText(value);
+      if (field === "workflowRoute") dealUpdates.workflowRoute = value === "service" ? "service" : "normal";
+      if (field === "description") dealUpdates.description = normalizeOptionalText(value);
+    }
+  }
+
+  if (sourceLead && Object.keys(leadUpdates).length > 0) {
+    await tenantDb
+      .update(leads)
+      .set({
+        ...leadUpdates,
+        updatedAt: now,
+      })
+      .where(eq(leads.id, sourceLead.id));
+  }
+
+  if (sourceLead && Object.keys(questionAnswers).length > 0) {
+    await upsertLeadQuestionAnswerSet(tenantDb, {
+      leadId: sourceLead.id,
+      projectTypeId: sourceLead.projectTypeId ?? null,
+      changedBy: input.userId,
+      answers: questionAnswers,
+      changedAt: now,
+    });
+  }
+
+  if (Object.keys(dealUpdates).length > 0) {
+    await tenantDb
+      .update(deals)
+      .set({
+        ...dealUpdates,
+        updatedAt: now,
+      })
+      .where(eq(deals.id, resolvedDeal.deal.id));
+  }
+
+  await writeScopingFields({
+    tenantDb,
+    resolvedDeal,
+    values: scopingValues,
+    userId: input.userId,
+    officeId: input.officeId,
+    now,
+  });
+
+  return getResolvedDeal(tenantDb, dealId);
 }

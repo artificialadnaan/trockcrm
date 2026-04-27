@@ -646,6 +646,7 @@ describe("Scoping Service", () => {
       "deal-1",
       {
         projectOverview: { propertyName: "Palm Villas", bidDueDate: "2026-04-30" },
+        opportunity: { preBidMeetingCompleted: "yes", siteVisitDecision: "not_required" },
         propertyDetails: { propertyAddress: "123 Palm Way" },
         scopeSummary: { summary: "Exterior refresh" },
       },
