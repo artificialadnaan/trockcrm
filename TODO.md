@@ -23,6 +23,14 @@ Items flagged but not addressed in their originating commit. Pick one when scope
 
 - **Wrap setDealContractSignedDate writes in db.transaction().** `server/src/modules/deals/service.ts` — SELECT → UPDATE → audit_log INSERT currently relies on the route's commitTransaction boundary. With Commit 6 adding a 4th write (commission INSERT) to this flow, partial failures become expensive (a deal could be marked contract-signed without a corresponding commission row, or vice versa). Move the entire flow inside an explicit `db.transaction()` so the four writes commit or roll back together. Surfaced during 2026-04-27 CRM fixes batch Commit 5 review.
 
+## Production cutover checklist
+
+- **Rotate Postgres password before T Rock production cutover.** Credential `syTYKTHBn...` has been printed to stdout multiple times during the 2026-04-27 CRM fixes batch (shell history, Railway variable reads, conversation logs). Rotation is a dashboard-only action: Postgres service → Variables tab → regenerate `POSTGRES_PASSWORD`. Verify all dependent services reference `DATABASE_URL` via `${{Postgres.DATABASE_URL}}` reference variables (not static copies) before rotating, or they will lose DB access. Re-run `grep -rn "syTYKTHBn" .` after rotation to confirm cleanup.
+
+## Commissions table FK delete policy
+
+- **0062 deal_signed_commissions: review FK delete behavior at production cutover (audit/legal).** Probe of applied schema (2026-04-27): `deal_id → tenant.deals(id)` is **ON DELETE CASCADE** (a hard-deleted deal wipes its booked-commission audit row — likely undesired for audit/legal); `rep_user_id → public.users(id)` and `created_by → public.users(id)` are **NO ACTION** (deleting a user with commissions will be blocked, which preserves history but breaks any user-cleanup flow). Decide at cutover: does deal hard-delete need RESTRICT or SET NULL on the commission row? Does rep_user_id need SET NULL to allow user soft-delete + rename-to-tombstone? Surfaced during 2026-04-27 CRM fixes batch Commit 6 / migration 0062 apply.
+
 ## Verification email flow
 
 - **Race condition on multi-lead-per-company verification email.** `server/src/modules/leads/service.ts` ~line 1023-1067. If two createLead calls race against the same brand-new company, both can read `companyVerificationStatus=null` and both send emails before either commits. Human-paced lead creation won't hit this; future API/batch imports might. Fix: advisory lock on companyId around the verification-email block, or move the email-send into a post-commit hook. Surfaced during 2026-04-27 CRM fixes batch Commit 4.
