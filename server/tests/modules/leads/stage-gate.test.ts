@@ -332,6 +332,51 @@ describe("Lead Stage Gate Evaluation", () => {
     expect(roofAgeRow?.label).toBe("Roof Age Years");
   });
 
+  it("blocks advancing past sales_validation when company verification is pending", () => {
+    const result = evaluateLeadStageGate({
+      lead: {
+        id: "lead-1",
+        companyId: "company-1",
+        propertyId: "property-1",
+        source: "Referral",
+        sourceCategory: "Referral",
+        projectTypeId: "type-1",
+        qualificationPayload: {
+          existing_customer_status: "Existing",
+        },
+      },
+      qualification: {
+        qualificationData: {},
+        scopingSubsetData: {},
+      },
+      currentStage: {
+        id: "stage-sales-validation",
+        name: "Sales Validation",
+        slug: "sales_validation_stage",
+        displayOrder: 3,
+        isTerminal: false,
+        isActivePipeline: true,
+      },
+      targetStage: {
+        id: "stage-opportunity",
+        name: "Opportunity",
+        slug: "opportunity",
+        displayOrder: 4,
+        isTerminal: false,
+        isActivePipeline: true,
+      },
+      companyVerificationPending: true,
+    });
+
+    expect(result.allowed).toBe(false);
+    expect(result.missingRequirements.fields).toContain("company.verification_pending");
+    const row = result.missingRequirements.effectiveChecklist.fields.find(
+      (f) => f.key === "company.verification_pending"
+    );
+    expect(row?.label).toBe("Company verification (pending approver review)");
+    expect(row?.satisfied).toBe(false);
+  });
+
   it("returns allowed when V2 questionnaire gate has no missing items and V1 fields are satisfied", () => {
     const result = evaluateLeadStageGate({
       lead: {

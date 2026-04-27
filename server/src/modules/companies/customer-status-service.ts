@@ -1,6 +1,6 @@
-import { eq, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
-import { companies } from "@trock-crm/shared/schema";
+import { companies, users } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import type { CompanyVerificationStatus } from "@trock-crm/shared/types";
 import { createActivity } from "../activities/service.js";
@@ -8,11 +8,46 @@ import { createActivity } from "../activities/service.js";
 type TenantDb = NodePgDatabase<typeof schema>;
 export type ExistingCustomerStatus = "Existing" | "New";
 
-// TODO(PR2): consumed here when email flow is rebuilt.
-// Recipient routing will switch from this hardcoded fallback to a per-company
-// lookup via companies.assigned_approver_user_id → users.email.
-export function getCompanyVerificationRecipient() {
-  return process.env.COMPANY_VERIFICATION_EMAIL?.trim() || "adnaan.iqbal@gmail.com";
+/**
+ * Resolve the recipient list for a company verification email.
+ *
+ * Order of precedence:
+ *   1. The single user identified by companies.assignedApproverUserId, if set
+ *      and active.
+ *   2. All active users with role admin or director.
+ *   3. The legacy COMPANY_VERIFICATION_EMAIL env var as a hardcoded last
+ *      resort, so tenants with no admin/director users yet still receive a
+ *      notification instead of silently dropping it.
+ *
+ * The EMAIL_OVERRIDE_RECIPIENT layer in resend-client overrides whatever this
+ * returns when set, so dev/staging stays safe.
+ */
+export async function getActiveAdminDirectorEmails(
+  tenantDb: TenantDb,
+  options: { assignedApproverUserId?: string | null } = {}
+): Promise<string[]> {
+  if (options.assignedApproverUserId) {
+    const [approver] = await tenantDb
+      .select({ email: users.email, isActive: users.isActive })
+      .from(users)
+      .where(eq(users.id, options.assignedApproverUserId))
+      .limit(1);
+    if (approver?.isActive && approver.email) {
+      return [approver.email];
+    }
+  }
+
+  const adminDirectorUsers = await tenantDb
+    .select({ email: users.email })
+    .from(users)
+    .where(and(inArray(users.role, ["admin", "director"]), eq(users.isActive, true)));
+  const emails = adminDirectorUsers.map((u) => u.email).filter((e): e is string => Boolean(e));
+  if (emails.length > 0) {
+    return emails;
+  }
+
+  const fallback = process.env.COMPANY_VERIFICATION_EMAIL?.trim();
+  return fallback ? [fallback] : [];
 }
 
 export async function computeExistingCustomerStatus(
@@ -91,22 +126,36 @@ export function shouldRequestCompanyVerification(input: {
   );
 }
 
-// TODO(PR2): consumed here when email flow is rebuilt.
-// PR2 will replace this with a tokenized approval link instead of plain anchors.
+/**
+ * Build the verification email body. CTAs are frontend URLs that prompt the
+ * recipient to confirm and POST to /api/companies/:id/verify or /reject after
+ * normal session auth — no tokenized magic links yet (deferred to a future
+ * PR3 if/when we want out-of-app one-click approval).
+ */
 export function buildCompanyVerificationEmail(input: {
   companyId: string;
   companyName: string;
   leadId: string;
   leadName: string;
+  frontendUrl?: string;
 }) {
+  const baseUrl = (input.frontendUrl ?? process.env.FRONTEND_URL ?? "").replace(/\/$/, "");
+  const companyUrl = `${baseUrl}/companies/${input.companyId}`;
+  const verifyUrl = `${baseUrl}/companies/${input.companyId}?action=verify`;
+  const rejectUrl = `${baseUrl}/companies/${input.companyId}?action=reject`;
+  const leadUrl = `${baseUrl}/leads/${input.leadId}`;
+
   return {
     subject: `Company verification needed: ${input.companyName}`,
     html: `
-      <p>A new company needs to be verified before sales validation.</p>
-      <p><strong>Company:</strong> ${input.companyName}</p>
-      <p><strong>Lead:</strong> ${input.leadName}</p>
-      <p><a href="/companies/${input.companyId}">Open company</a></p>
-      <p><a href="/leads/${input.leadId}">Open source lead</a></p>
+      <p>A new company needs to be verified before this lead can advance.</p>
+      <p><strong>Company:</strong> <a href="${companyUrl}">${input.companyName}</a></p>
+      <p><strong>Source lead:</strong> <a href="${leadUrl}">${input.leadName}</a></p>
+      <p style="margin-top:24px;">
+        <a href="${verifyUrl}" style="display:inline-block;padding:10px 18px;background:#16a34a;color:#fff;text-decoration:none;border-radius:6px;font-weight:600;margin-right:8px;">Approve</a>
+        <a href="${rejectUrl}" style="display:inline-block;padding:10px 18px;background:#dc2626;color:#fff;text-decoration:none;border-radius:6px;font-weight:600;">Reject</a>
+      </p>
+      <p style="color:#64748b;font-size:12px;margin-top:24px;">You'll be asked to sign in if you aren't already.</p>
     `,
   };
 }
@@ -141,6 +190,45 @@ export async function markCompanyVerified(
       companyId: input.companyId,
       subject: "Company verified",
       body: "Company verification marked complete.",
+      occurredAt: now.toISOString(),
+    });
+  }
+
+  return company ?? null;
+}
+
+export async function markCompanyRejected(
+  tenantDb: TenantDb,
+  input: {
+    companyId: string;
+    userId: string;
+    reason?: string | null;
+    now?: Date;
+  }
+) {
+  const now = input.now ?? new Date();
+  const [company] = await tenantDb
+    .update(companies)
+    .set({
+      companyVerificationStatus: "rejected",
+      companyVerificationRejectedAt: now,
+      companyVerificationRejectedBy: input.userId,
+      updatedAt: now,
+    })
+    .where(eq(companies.id, input.companyId))
+    .returning();
+
+  if (company) {
+    const reasonSuffix = input.reason?.trim() ? ` Reason: ${input.reason.trim()}` : "";
+    await createActivity(tenantDb, {
+      type: "note",
+      responsibleUserId: input.userId,
+      performedByUserId: input.userId,
+      sourceEntityType: "company",
+      sourceEntityId: input.companyId,
+      companyId: input.companyId,
+      subject: "Company verification rejected",
+      body: `Company verification was rejected.${reasonSuffix}`,
       occurredAt: now.toISOString(),
     });
   }

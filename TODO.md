@@ -10,3 +10,11 @@ Items flagged but not addressed in their originating commit. Pick one when scope
 ## Tests
 
 - **Align test fixtures with prod stage slugs.** `server/tests/modules/leads/service.test.ts` around line 299 uses bare `sales_validation` slug instead of `sales_validation_stage`. V2 gate likely never fires in those fixtures. Not a regression — pre-dates this batch — but worth aligning test fixtures with prod slugs for accurate coverage. Surfaced during 2026-04-27 CRM fixes batch slug verification.
+
+## Validation
+
+- **Server-side rejection of non-ISO timeline_status on lead PATCH.** Currently normalization is client-only by design (avoids silent rewrite of existing legacy rows). But any non-form write path — API direct, scripts, future mobile, integrations, Bid Board writeback (Commit 9 of 2026-04-27 batch) — bypasses validation. Fix: add server-side reject (NOT rewrite) on PATCH when `qualificationPayload.timeline_status` is non-blank and not YYYY-MM-DD. Returns 422 with clear field error. Existing legacy rows continue to read fine. Surfaced during 2026-04-27 CRM fixes batch.
+
+## Bid Board funnel (Commit 9 reminder)
+
+- **SyncHub activity-push endpoint must NOT touch qualificationPayload or other lead fields directly.** Write to the `activities` table only. If SyncHub ever needs to update lead fields, that's a separate endpoint going through the same validation as the form. Flag locked in 2026-04-27 batch — verify Commit 9 implementation respects this before merging.

@@ -1,6 +1,6 @@
 import { eq } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
-import { leads } from "@trock-crm/shared/schema";
+import { companies, leads } from "@trock-crm/shared/schema";
 import {
   LEAD_COMPANY_PREQUAL_FIELD_KEYS,
   LEAD_VALUE_ASSIGNMENT_FIELD_KEYS,
@@ -199,6 +199,9 @@ function questionnaireFieldKey(rawKey: string): string {
 function questionnaireFieldLabel(key: string): string {
   const known = WORKFLOW_GATE_FIELD_LABELS[key as keyof typeof WORKFLOW_GATE_FIELD_LABELS];
   if (known) return known;
+  if (key === "company.verification_pending") {
+    return "Company verification (pending approver review)";
+  }
   if (key.startsWith("question.")) {
     return key
       .slice("question.".length)
@@ -221,6 +224,7 @@ export function evaluateLeadStageGate(input: {
   targetStage: LeadStageRecord;
   userRole?: string;
   questionnaireGate?: LeadQuestionGateMissing | null;
+  companyVerificationPending?: boolean;
 }): LeadStageGateResult {
   const requiredFields = LEAD_STAGE_REQUIREMENTS[input.targetStage.slug] ?? [];
   const missingFields = requiredFields.filter(
@@ -245,10 +249,15 @@ export function evaluateLeadStageGate(input: {
       ]
     : [];
 
+  const companyVerificationKeys = input.companyVerificationPending
+    ? ["company.verification_pending"]
+    : [];
+
   const effectiveMissingFields = [
     ...missingFields,
     ...(blockedByApprovalRole ? ["approval.directorAdmin"] : []),
     ...questionnaireMissingKeys,
+    ...companyVerificationKeys,
   ];
 
   // Render every checked item — missing AND satisfied — so the checklist UI
@@ -257,6 +266,7 @@ export function evaluateLeadStageGate(input: {
     ...requiredFields,
     ...(blockedByApprovalRole ? ["approval.directorAdmin"] : []),
     ...questionnaireMissingKeys,
+    ...companyVerificationKeys,
   ];
   const seen = new Set<string>();
   const dedupedChecklistKeys = checklistKeys.filter((key) => {
@@ -354,6 +364,25 @@ export async function validateLeadStageGate(
     });
   }
 
+  // Block advancement past sales_validation while the linked company's
+  // verification is still pending. Belt-and-suspenders for legacy leads
+  // that got into sales_validation before PR1's verificationStatus gate
+  // existed; new leads are already blocked at the qualified_lead boundary
+  // by lead-level verificationStatus.
+  const advancingPastSalesValidation =
+    currentStage.slug === "sales_validation_stage" &&
+    (targetStage.displayOrder ?? 0) > (currentStage.displayOrder ?? 0);
+
+  let companyVerificationPending = false;
+  if (advancingPastSalesValidation && lead.companyId) {
+    const [companyRow] = await tenantDb
+      .select({ status: companies.companyVerificationStatus })
+      .from(companies)
+      .where(eq(companies.id, lead.companyId))
+      .limit(1);
+    companyVerificationPending = companyRow?.status === "pending";
+  }
+
   return evaluateLeadStageGate({
     lead: {
       ...lead,
@@ -366,6 +395,7 @@ export async function validateLeadStageGate(
     targetStage,
     userRole,
     questionnaireGate,
+    companyVerificationPending,
   });
 }
 
