@@ -1021,7 +1021,9 @@ function EditableLeadForm({
                         }
                       >
                         <SelectTrigger id="newContactCategory">
-                          <SelectValue />
+                          <SelectValue>
+                            {CATEGORY_LABELS[newContact.category] ?? newContact.category}
+                          </SelectValue>
                         </SelectTrigger>
                         <SelectContent>
                           {CONTACT_CATEGORIES.map((category) => (

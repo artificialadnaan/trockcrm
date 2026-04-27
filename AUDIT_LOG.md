@@ -536,6 +536,7 @@ Going forward in this Phase 3 loop, every commit that touches server or frontend
 
 - Fixed: converted-deal scoping autosave now routes lead-owned field edits (`Project Type`, `Bid Due Date`, `Scope Summary`/description) through the resolved-fields endpoint instead of letting scoping-intake data shadow the source lead.
 - Fixed: stale scoping-intake snapshots for converted deals no longer override resolved source-lead values when the workspace hydrates.
+- Fixed: inline primary-contact creation now displays the default contact category as `Client` instead of the raw enum value `client`.
 - Verified in code review: `Workflow Route` is read-only on the scoping workspace and remains derived from the lead/workflow route rather than manually edited in the opportunity form.
 - Verified in code review: property name/address are rendered as read-only lineage data, with changes routed through the linked Property selector.
 - Deferred: the fixed-position `Saving...`/`Saved` badge may need visual tuning after rep feedback on smaller screens; leave it until manual verification shows actual overlap.
