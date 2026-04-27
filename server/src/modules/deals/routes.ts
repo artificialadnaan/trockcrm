@@ -19,6 +19,7 @@ import {
   getDealsForPipeline,
   listDealStagePage,
   getDealSources,
+  setDealContractSignedDate,
 } from "./service.js";
 import { activateServiceHandoff, changeDealStage } from "./stage-change.js";
 import { preflightStageCheck } from "./stage-gate.js";
@@ -492,6 +493,35 @@ router.post("/", async (req, res, next) => {
     next(err);
   }
 });
+
+// PATCH /api/deals/:id/contract-signed-date — set or clear contract signed date
+// Admin/director only. Audit log row written on every transition.
+router.patch(
+  "/:id/contract-signed-date",
+  requireRole("admin", "director"),
+  async (req, res, next) => {
+    try {
+      const raw = req.body?.date;
+      let date: string | null = null;
+      if (raw == null || raw === "") {
+        date = null;
+      } else if (typeof raw === "string" && /^\d{4}-\d{2}-\d{2}$/.test(raw.trim())) {
+        date = raw.trim();
+      } else {
+        throw new AppError(422, "date must be YYYY-MM-DD or null");
+      }
+      const deal = await setDealContractSignedDate(
+        req.tenantDb!,
+        req.params.id as string,
+        date,
+        req.user!.id
+      );
+      if (!deal) throw new AppError(404, "Deal not found");
+      await req.commitTransaction!();
+      res.json({ deal });
+    } catch (err) { next(err); }
+  }
+);
 
 // PATCH /api/deals/:id — update deal fields (not stage)
 router.patch("/:id", async (req, res, next) => {

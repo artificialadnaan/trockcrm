@@ -29,6 +29,7 @@ import { DealPunchListTab } from "./deal-punch-list-tab";
 import { DealCloseoutTab } from "./deal-closeout-tab";
 import { DealTimersBanner } from "./deal-timers-banner";
 import { DealProposalCard } from "./deal-proposal-card";
+import { DealContractSignedCard } from "./deal-contract-signed-card";
 import { DealEstimatingSubstage } from "./deal-estimating-substage";
 import { LeadForm } from "@/components/leads/lead-form";
 import { LeadTimelineTab } from "@/components/leads/lead-timeline-tab";
@@ -438,6 +439,13 @@ export function DealDetailPage() {
         <div className="space-y-4">
           {isEstimatingBoundaryStageSlug(currentStageSlug, workflowRoute) && !isBidBoardOwned && (
             <DealProposalCard deal={deal} onUpdate={refetch} />
+          )}
+          {!isBidBoardOwned && (
+            <DealContractSignedCard
+              deal={deal}
+              canEdit={isDirectorOrAdmin}
+              onUpdate={refetch}
+            />
           )}
           {isBidBoardOwned && bidBoardOwnership && (
             <BidBoardReadOnlySummary ownership={bidBoardOwnership} />

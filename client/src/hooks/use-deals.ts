@@ -148,6 +148,7 @@ export interface Deal {
   lostAt: string | null;
   expectedCloseDate: string | null;
   actualCloseDate: string | null;
+  contractSignedDate: string | null;
   lastActivityAt: string | null;
   stageEnteredAt: string;
   isActive: boolean;
