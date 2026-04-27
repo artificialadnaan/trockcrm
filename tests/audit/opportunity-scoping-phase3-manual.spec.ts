@@ -45,6 +45,7 @@ type Bundle = {
   property: Property;
   projectType: ProjectType;
   newLeadStage: Stage;
+  qualifiedLeadStage: Stage;
   salesValidationStage: Stage;
 };
 
@@ -197,11 +198,13 @@ async function createBundle(): Promise<Bundle> {
       (item) => item.slug === "traditional_multifamily"
     );
     const newLeadStage = stagesData.stages.find((item) => item.slug === "new_lead");
+    const qualifiedLeadStage = stagesData.stages.find((item) => item.slug === "qualified_lead");
     const salesValidationStage = stagesData.stages.find(
       (item) => item.slug === "sales_validation_stage"
     );
     expect(projectType).toBeDefined();
     expect(newLeadStage).toBeDefined();
+    expect(qualifiedLeadStage).toBeDefined();
     expect(salesValidationStage).toBeDefined();
 
     return {
@@ -209,6 +212,7 @@ async function createBundle(): Promise<Bundle> {
       property: propertyData.property,
       projectType: projectType!,
       newLeadStage: newLeadStage!,
+      qualifiedLeadStage: qualifiedLeadStage!,
       salesValidationStage: salesValidationStage!,
     };
   } finally {
@@ -216,7 +220,7 @@ async function createBundle(): Promise<Bundle> {
   }
 }
 
-async function createConvertibleLead(bundle: Bundle) {
+async function createConvertibleLead(bundle: Bundle, cleanup: { leadIds: string[]; dealIds: string[] }) {
   const answers = await buildRequiredAnswers(bundle.projectType.id);
   const apiRequest = await createRoleApiContext("rep");
   try {
@@ -231,6 +235,18 @@ async function createConvertibleLead(bundle: Bundle) {
         sourceCategory: "Referral",
         projectTypeId: bundle.projectType.id,
         description: "AUDIT_TEST original lead description",
+        qualificationPayload: {
+          estimated_value: 125000,
+          timeline_status: "Q3 2026",
+        },
+        leadQuestionAnswers: answers,
+      },
+    });
+    cleanup.leadIds.push(created.lead.id);
+    await fetchJsonWithRetry(apiRequest, `${apiBaseURL}/api/leads/${created.lead.id}`, {
+      method: "PATCH",
+      data: {
+        stageId: bundle.qualifiedLeadStage.id,
         qualificationPayload: {
           estimated_value: 125000,
           timeline_status: "Q3 2026",
@@ -264,6 +280,7 @@ async function createConvertibleLead(bundle: Bundle) {
       `${apiBaseURL}/api/leads/${created.lead.id}/convert`,
       { method: "POST", data: {} }
     );
+    cleanup.dealIds.push(converted.deal.id);
     return { lead: converted.lead, deal: converted.deal };
   } finally {
     await apiRequest.dispose();
@@ -331,9 +348,7 @@ test.describe.serial("opportunity scoping phase 3 manual verification", () => {
       expect(createdContact?.category).toBe("client");
       await screenshot(page, "09-inline-contact-created-with-company-and-category");
 
-      const { lead, deal } = await createConvertibleLead(bundle);
-      cleanup.leadIds.push(lead.id);
-      cleanup.dealIds.push(deal.id);
+      const { lead, deal } = await createConvertibleLead(bundle, cleanup);
 
       const searchTargets = await fetchJsonWithRetry<{ targets: Array<{ id: string; type: string; name: string }> }>(
         apiRequest,
