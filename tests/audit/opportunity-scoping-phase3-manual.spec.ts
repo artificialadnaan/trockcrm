@@ -369,7 +369,7 @@ test.describe.serial("opportunity scoping phase 3 manual verification", () => {
       await expect(page.locator("#workflowRoute")).toContainText("Standard");
       await expect(page.locator("#projectTypeId")).toContainText(bundle.projectType.name);
       await expect(page.locator("#propertyName")).toContainText(bundle.property.name);
-      await expect(page.getByText("100 Audit Way", { exact: false })).toBeVisible();
+      await expect(page.getByText("100 Audit Way", { exact: false }).first()).toBeVisible();
       await screenshot(page, "11-field-lineage-populates-opportunity-scoping");
 
       let parentDealFetches = 0;
@@ -381,11 +381,23 @@ test.describe.serial("opportunity scoping phase 3 manual verification", () => {
           parentDealFetches += 1;
         }
       });
+      const summarySave = page.waitForResponse(
+        (response) =>
+          response.url() === `${apiBaseURL}/api/deals/${deal.id}/resolved-fields` &&
+          response.request().method() === "PATCH" &&
+          response.ok()
+      );
       await page.locator("#scopeSummary").fill("AUDIT_TEST updated from opportunity scoping autosave");
-      await expect(page.getByText("Saving...", { exact: true })).toBeVisible();
+      await summarySave;
       await expect(page.getByText("Saved", { exact: true }).first()).toBeVisible({ timeout: 10_000 });
+      const bidDueDateSave = page.waitForResponse(
+        (response) =>
+          response.url() === `${apiBaseURL}/api/deals/${deal.id}/resolved-fields` &&
+          response.request().method() === "PATCH" &&
+          response.ok()
+      );
       await page.locator("#bidDueDate").fill("2026-07-15");
-      await expect(page.getByText("Saving...", { exact: true })).toBeVisible();
+      await bidDueDateSave;
       await expect(page.getByText("Saved", { exact: true }).first()).toBeVisible({ timeout: 10_000 });
       await expect
         .poll(async () => {
