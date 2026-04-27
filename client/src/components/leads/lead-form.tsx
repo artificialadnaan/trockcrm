@@ -42,7 +42,8 @@ import {
 import { usePipelineStages, useProjectTypes } from "@/hooks/use-pipeline-config";
 import { formatPropertyLabel, useProperties } from "@/hooks/use-properties";
 import { CATEGORY_LABELS } from "@/lib/contact-utils";
-import { isApiError } from "@/lib/api";
+import { api, isApiError } from "@/lib/api";
+import { useAuth } from "@/lib/auth";
 import { getValidationQuestionSetForProjectType } from "@/lib/validation-question-sets";
 import {
   getLeadCreationStages,
@@ -88,6 +89,8 @@ export interface LeadFormLead {
   };
   leadQuestionnaire?: LeadQuestionnaireSnapshot | null;
   stageEnteredAt: string;
+  verificationStatus?: "not_required" | "pending" | "approved" | "rejected";
+  verificationRequiredReason?: "new_company" | "dormant_company" | "active_company" | null;
 }
 
 type LeadSummaryFormProps = {
@@ -290,13 +293,24 @@ function QuestionLabel({
   );
 }
 
+const VERIFICATION_LABELS: Record<NonNullable<LeadFormLead["verificationStatus"]>, string> = {
+  not_required: "Not required",
+  pending: "Pending",
+  approved: "Approved",
+  rejected: "Rejected",
+};
+
 function SummaryLeadForm({
   lead,
   converted = false,
   showPrimaryAction = true,
+  onSaved,
 }: LeadSummaryFormProps) {
   const navigate = useNavigate();
   const { projectTypes } = useProjectTypes();
+  const { user } = useAuth();
+  const [isVerifying, setIsVerifying] = useState(false);
+  const [verifyError, setVerifyError] = useState<string | null>(null);
   const propertyLabel =
     [lead.propertyAddress, [lead.propertyCity, lead.propertyState].filter(Boolean).join(", "), lead.propertyZip]
       .filter(Boolean)
@@ -307,6 +321,24 @@ function SummaryLeadForm({
     lead.sourceCategory === "Other"
       ? lead.sourceDetail || lead.source || "Other"
       : lead.sourceCategory ?? lead.source ?? "--";
+  const verificationStatus = lead.verificationStatus ?? "not_required";
+  const verificationLabel = VERIFICATION_LABELS[verificationStatus];
+  const showAdminVerifyButton =
+    !converted && verificationStatus === "pending" && user?.role === "admin";
+
+  // TODO(PR2): Replace with email + tokenized approval flow.
+  async function handleManualVerify() {
+    setIsVerifying(true);
+    setVerifyError(null);
+    try {
+      await api(`/leads/${lead.id}/verify-manual`, { method: "POST" });
+      onSaved?.();
+    } catch (err) {
+      setVerifyError(isApiError(err) ? err.message : "Could not mark lead as verified.");
+    } finally {
+      setIsVerifying(false);
+    }
+  }
 
   return (
     <Card className="overflow-hidden border-slate-200 shadow-sm">
@@ -340,6 +372,10 @@ function SummaryLeadForm({
             <p className="text-muted-foreground">Source</p>
             <p className="font-medium">{displaySource}</p>
           </div>
+          <div>
+            <p className="text-muted-foreground">Verification</p>
+            <p className="font-medium">{verificationLabel}</p>
+          </div>
         </div>
 
         <div className="rounded-lg border border-slate-200 bg-[#f7f8fb] p-3 text-sm">
@@ -371,7 +407,17 @@ function SummaryLeadForm({
               View Company
             </Button>
           ) : null}
+          {showAdminVerifyButton ? (
+            // TODO(PR2): Replace with email + tokenized approval flow.
+            <Button variant="secondary" disabled={isVerifying} onClick={handleManualVerify}>
+              {isVerifying ? "Marking…" : "Mark as Verified"}
+            </Button>
+          ) : null}
         </div>
+
+        {verifyError ? (
+          <p className="text-xs text-red-600" role="alert">{verifyError}</p>
+        ) : null}
 
         <p className="text-xs text-muted-foreground">
           This lead surface is backed by the pre-RFP lead record and preserves its activity history through conversion.

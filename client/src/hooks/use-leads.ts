@@ -108,6 +108,8 @@ export interface LeadRecord {
   forecastUpdatedAt: string | null;
   forecastUpdatedBy: string | null;
   lastActivityAt: string | null;
+  verificationStatus: "not_required" | "pending" | "approved" | "rejected";
+  verificationRequiredReason: "new_company" | "dormant_company" | "active_company" | null;
   stageEnteredAt: string;
   convertedAt: string | null;
   isActive: boolean;
