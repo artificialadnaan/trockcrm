@@ -12,14 +12,17 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { DateField } from "@/components/ui/date-field";
 import { Label } from "@/components/ui/label";
 import type { LeadQualificationFieldId } from "@trock-crm/shared/types";
 import {
   CONTACT_CATEGORIES,
   getLeadValidationQuestionSetForProjectType,
+  isLegacyTimelineStatusValue,
   LEAD_SOURCE_CATEGORIES,
   type LeadSourceCategory,
   LEAD_QUALIFICATION_FIELDS,
+  normalizeTimelineStatusForSave,
 } from "@trock-crm/shared/types";
 import {
   Select,
@@ -797,6 +800,13 @@ function EditableLeadForm({
       return;
     }
 
+    if (isLegacyTimelineStatusValue(formData.qualificationPayload.timeline_status)) {
+      setError(
+        `Timeline Status holds a legacy value ("${formData.qualificationPayload.timeline_status.trim()}"). Pick a real date before saving.`
+      );
+      return;
+    }
+
     if (isCreate && useV2Questionnaire) {
       const missingRequiredQuestions = v2VisibleQuestionNodes
         .filter((node) => node.isRequired && !isAnsweredQuestionValue(formData.projectTypeQuestionAnswers[node.key]))
@@ -821,7 +831,7 @@ function EditableLeadForm({
             formData.qualificationPayload.estimated_value.trim() === ""
               ? null
               : Number(formData.qualificationPayload.estimated_value),
-          timeline_status: formData.qualificationPayload.timeline_status.trim() || null,
+          timeline_status: normalizeTimelineStatusForSave(formData.qualificationPayload.timeline_status),
         },
         projectTypeQuestionPayload: useV2Questionnaire
           ? undefined
@@ -1312,17 +1322,35 @@ function EditableLeadForm({
             </div>
           </div>
           {EDITABLE_QUALIFICATION_FIELDS.map(
-            (field: { id: LeadQualificationFieldId; label: string; input: string }) => (
-              <div key={field.id} className="space-y-2">
-                <Label htmlFor={field.id}>{field.label}</Label>
-                <Input
-                  id={field.id}
-                  type={field.input === "number" ? "number" : "text"}
-                  value={formData.qualificationPayload[field.id] ?? ""}
-                  onChange={(event) => handleQualificationChange(field.id, event.target.value)}
-                />
-              </div>
-            )
+            (field: { id: LeadQualificationFieldId; label: string; input: string }) => {
+              const currentValue = formData.qualificationPayload[field.id] ?? "";
+              const showLegacyHint =
+                field.id === "timeline_status" && isLegacyTimelineStatusValue(currentValue);
+              return (
+                <div key={field.id} className="space-y-2">
+                  <Label htmlFor={field.id}>{field.label}</Label>
+                  {field.input === "date" ? (
+                    <DateField
+                      id={field.id}
+                      value={currentValue}
+                      onChange={(value) => handleQualificationChange(field.id, value)}
+                    />
+                  ) : (
+                    <Input
+                      id={field.id}
+                      type={field.input === "number" ? "number" : "text"}
+                      value={currentValue}
+                      onChange={(event) => handleQualificationChange(field.id, event.target.value)}
+                    />
+                  )}
+                  {showLegacyHint ? (
+                    <p className="text-xs text-amber-700">
+                      Legacy value: <span className="font-medium">"{currentValue}"</span>. Pick a date to update.
+                    </p>
+                  ) : null}
+                </div>
+              );
+            }
           )}
         </CardContent>
       </Card>

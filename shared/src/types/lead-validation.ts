@@ -123,11 +123,56 @@ export const LEAD_QUALIFICATION_FIELDS = [
   {
     id: "timeline_status",
     label: "Timeline Status",
-    input: "text",
+    input: "date",
   },
 ] as const;
 
 export type LeadQualificationFieldId = (typeof LEAD_QUALIFICATION_FIELDS)[number]["id"];
+
+const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * True for empty / null / whitespace-only.
+ */
+export function isBlankTimelineStatusValue(value: unknown): boolean {
+  if (value == null) return true;
+  if (typeof value !== "string") return false;
+  return value.trim().length === 0;
+}
+
+/**
+ * True for already-normalized YYYY-MM-DD strings (after trimming).
+ */
+export function isValidIsoDate(value: unknown): value is string {
+  return typeof value === "string" && ISO_DATE_PATTERN.test(value.trim());
+}
+
+/**
+ * True for non-empty values that are not normalizable (e.g. "Q1 2026",
+ * "next quarter"). Used by the form to surface a "legacy value" hint
+ * and block submit until the user picks a real date.
+ */
+export function isLegacyTimelineStatusValue(value: unknown): boolean {
+  if (isBlankTimelineStatusValue(value)) return false;
+  return !isValidIsoDate(value);
+}
+
+/**
+ * Normalize a timeline_status field for persistence.
+ *   - blank / whitespace → null
+ *   - already-normalized YYYY-MM-DD → returned trimmed
+ *   - whitespace-padded YYYY-MM-DD → returned trimmed
+ *   - anything else (legacy text, partial dates, alternate formats) → null
+ *
+ * Idempotent. Caller should treat a non-blank input that returns null as a
+ * validation failure that requires the user to pick a real date.
+ */
+export function normalizeTimelineStatusForSave(value: unknown): string | null {
+  if (isBlankTimelineStatusValue(value)) return null;
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return ISO_DATE_PATTERN.test(trimmed) ? trimmed : null;
+}
 
 export function getLeadValidationQuestionSetForProjectType(
   projectTypeSlug: string | null | undefined
