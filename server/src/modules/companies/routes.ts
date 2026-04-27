@@ -10,6 +10,7 @@ import {
   searchCompanies,
 } from "./service.js";
 import { AppError } from "../../middleware/error-handler.js";
+import { markCompanyVerified } from "./customer-status-service.js";
 
 const router = Router();
 
@@ -66,6 +67,23 @@ router.post("/", async (req, res, next) => {
 router.patch("/:id", async (req, res, next) => {
   try {
     const company = await updateCompany(req.tenantDb!, req.params.id, req.body);
+    if (!company) throw new AppError(404, "Company not found");
+    await req.commitTransaction!();
+    res.json({ company });
+  } catch (err) { next(err); }
+});
+
+// POST /companies/:id/verify
+router.post("/:id/verify", async (req, res, next) => {
+  try {
+    if (req.user!.role !== "admin" && req.user!.role !== "director") {
+      throw new AppError(403, "Only directors and admins can verify companies");
+    }
+
+    const company = await markCompanyVerified(req.tenantDb!, {
+      companyId: req.params.id,
+      userId: req.user!.id,
+    });
     if (!company) throw new AppError(404, "Company not found");
     await req.commitTransaction!();
     res.json({ company });

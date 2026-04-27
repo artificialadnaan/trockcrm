@@ -13,6 +13,7 @@ import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import type { UserRole } from "@trock-crm/shared/types";
 import { evaluateDealScopingReadiness } from "./scoping-service.js";
+import { getResolvedDeal, type ResolvedDealView } from "./lineage-resolver.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -137,6 +138,18 @@ function hasNonEmptyText(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
 }
 
+function getRequiredFieldValue(
+  deal: typeof deals.$inferSelect,
+  resolvedDeal: ResolvedDealView,
+  field: string
+) {
+  if (Object.prototype.hasOwnProperty.call(resolvedDeal.resolved, field)) {
+    return resolvedDeal.resolved[field as keyof ResolvedDealView["resolved"]];
+  }
+
+  return (deal as Record<string, unknown>)[field];
+}
+
 function isVerifiedLinkedStageDocument(file: {
   category: unknown;
   intakeRequirementKey: unknown;
@@ -177,19 +190,12 @@ export async function validateStageGate(
   userRole: UserRole,
   userId: string
 ): Promise<StageGateResult> {
-  // Fetch current deal
-  const dealResult = await tenantDb
-    .select()
-    .from(deals)
-    .where(eq(deals.id, dealId))
-    .limit(1);
-  if (dealResult.length === 0) {
-    throw new AppError(404, "Deal not found");
-  }
-  const deal = dealResult[0];
+  const resolvedDeal = await getResolvedDeal(tenantDb, dealId);
+  const deal = resolvedDeal.deal;
+  const resolved = resolvedDeal.resolved;
 
   // Reps can only modify their own deals
-  if (userRole === "rep" && deal.assignedRepId !== userId) {
+  if (userRole === "rep" && resolved.assignedRepId !== userId) {
     throw new AppError(403, "You can only modify your own deals");
   }
 
@@ -209,7 +215,7 @@ export async function validateStageGate(
   const currentStage = currentStageResult[0];
   const targetStage = targetStageResult[0];
 
-  const requiredWorkflowFamily = workflowFamilyForRoute(deal.workflowRoute);
+  const requiredWorkflowFamily = workflowFamilyForRoute(resolved.workflowRoute);
   const targetWorkflowFamily = (targetStage as { workflowFamily?: string | null }).workflowFamily ?? null;
   if (targetWorkflowFamily === "lead" || (targetWorkflowFamily && targetWorkflowFamily !== requiredWorkflowFamily)) {
     throw new AppError(
@@ -259,7 +265,7 @@ export async function validateStageGate(
   const requiredFields = (targetStage.requiredFields as string[]) ?? [];
   const missingFields: string[] = [];
   for (const field of requiredFields) {
-    const value = (deal as any)[field];
+    const value = getRequiredFieldValue(deal, resolvedDeal, field);
     if (value == null || value === "") {
       missingFields.push(field);
     }
@@ -362,7 +368,7 @@ export async function validateStageGate(
 
   const canonicalTargetStageSlug = toCanonicalDealStageSlug(
     targetStage.slug,
-    deal.workflowRoute ?? "normal"
+    resolved.workflowRoute ?? "normal"
   );
 
   // Rule 2: Close-out checklist must be complete before moving from Close-Out into a won outcome.
@@ -413,7 +419,7 @@ export async function validateStageGate(
     }
   }
 
-  if (isEstimatingBoundaryStageSlug(targetStage.slug, deal.workflowRoute)) {
+  if (isEstimatingBoundaryStageSlug(targetStage.slug, resolved.workflowRoute)) {
     const scopingReadiness = await evaluateDealScopingReadiness(tenantDb, dealId);
     const scopingMissingFields = Object.entries(scopingReadiness.errors.sections).flatMap(
       ([sectionName, fieldNames]) => fieldNames.map((fieldName) => `${sectionName}.${fieldName}`)

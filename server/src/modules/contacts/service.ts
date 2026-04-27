@@ -31,6 +31,7 @@ export interface CreateContactInput {
   phone?: string | null;
   mobile?: string | null;
   companyName?: string | null;
+  companyId?: string | null;
   jobTitle?: string | null;
   category: string;
   address?: string | null;
@@ -388,6 +389,7 @@ export async function createContact(
         phone: input.phone?.trim() || null,
         mobile: input.mobile?.trim() || null,
         companyName: input.companyName?.trim() || null,
+        companyId: input.companyId ?? null,
         jobTitle: input.jobTitle?.trim() || null,
         category: input.category as any,
         address: input.address?.trim() || null,

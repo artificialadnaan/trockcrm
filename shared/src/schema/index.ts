@@ -5,6 +5,7 @@ export { userOfficeAccess } from "./public/user-office-access.js";
 export { pipelineStageConfig, workflowFamilyEnum } from "./public/pipeline-stage-config.js";
 export { lostDealReasons } from "./public/lost-deal-reasons.js";
 export { projectTypeConfig } from "./public/project-type-config.js";
+export { projectTypeQuestionNodes } from "./public/project-type-question-nodes.js";
 export { regionConfig } from "./public/region-config.js";
 export { savedReports, reportVisibilityEnum, reportEntityEnum } from "./public/saved-reports.js";
 export { procoreSyncControls, procoreSyncModeEnum } from "./public/procore-sync-controls.js";
@@ -71,6 +72,8 @@ export {
   leadDisqualificationReasonEnum,
 } from "./tenant/leads.js";
 export { leadStageHistory } from "./tenant/lead-stage-history.js";
+export { leadQuestionAnswers } from "./tenant/lead-question-answers.js";
+export { leadQuestionAnswerHistory } from "./tenant/lead-question-answer-history.js";
 export { duplicateQueue, duplicateMatchTypeEnum, duplicateStatusEnum } from "./tenant/duplicate-queue.js";
 export { emails, emailDirectionEnum } from "./tenant/emails.js";
 export { emailThreadBindings } from "./tenant/email-thread-bindings.js";

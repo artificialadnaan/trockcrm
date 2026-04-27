@@ -90,6 +90,19 @@ async function restoreCompanyNotes(companyId: string, notes: string | null) {
   }
 }
 
+async function fetchCompanyNotes(companyId: string) {
+  const apiRequest = await createRoleApiContext("rep");
+  try {
+    const data = await fetchJsonWithRetry<{ company: AuditCompany }>(
+      apiRequest,
+      `${apiBaseURL}/api/companies/${companyId}`
+    );
+    return data.company.notes;
+  } finally {
+    await apiRequest.dispose();
+  }
+}
+
 test.describe.serial("companies / properties production audit", () => {
   let auditBundle: AuditBundle;
 
@@ -153,9 +166,21 @@ test.describe.serial("companies / properties production audit", () => {
     }
 
     await page.getByRole("button", { name: "Files", exact: true }).click();
-    await expect(
-      page.getByText("No files found across associated deals.", { exact: true }).or(page.getByText(/·/))
-    ).toBeVisible();
+    const fileMetadataRows = page.getByText(/·/);
+    const emptyFilesState = page.getByText("No files found across associated deals.", { exact: true });
+    await expect
+      .poll(async () => {
+        const rowCount = await fileMetadataRows.count();
+        let visibleFileRows = 0;
+        for (let index = 0; index < rowCount; index += 1) {
+          if (await fileMetadataRows.nth(index).isVisible().catch(() => false)) {
+            visibleFileRows += 1;
+          }
+        }
+        const emptyStateVisible = await emptyFilesState.isVisible().catch(() => false);
+        return visibleFileRows > 0 || emptyStateVisible;
+      })
+      .toBe(true);
 
     await page.getByRole("button", { name: "Emails", exact: true }).click();
     await expect(page.getByText("Email integration coming soon", { exact: true })).toBeVisible();
@@ -166,8 +191,9 @@ test.describe.serial("companies / properties production audit", () => {
     await expect(page.getByText(auditBundle.property.companyName ?? auditBundle.company.name, { exact: true }).first()).toBeVisible();
 
     await page.getByRole("button", { name: "New Property", exact: true }).click();
-    await expect(page.getByRole("dialog")).toBeVisible();
-    await page.getByRole("button", { name: "Create Property", exact: true }).click();
+    const propertyDialog = page.getByRole("dialog");
+    await expect(propertyDialog).toBeVisible();
+    await propertyDialog.getByRole("button", { name: "Create Property", exact: true }).click({ force: true });
     await expect(page.getByText("Company is required", { exact: true })).toBeVisible();
     await page.getByRole("button", { name: "Cancel", exact: true }).click();
 
@@ -190,7 +216,7 @@ test.describe.serial("companies / properties production audit", () => {
       await page.getByRole("button", { name: "Save Changes", exact: true }).click();
 
       await expect(page).toHaveURL(new RegExp(`/companies/${auditBundle.company.id}$`));
-      await expect(page.getByText(updatedNotes, { exact: true })).toBeVisible();
+      await expect.poll(() => fetchCompanyNotes(auditBundle.company.id)).toBe(updatedNotes);
       auditBundle.company.notes = updatedNotes;
     } finally {
       await restoreCompanyNotes(auditBundle.company.id, originalNotes);

@@ -27,6 +27,14 @@ const properties = [
   },
 ];
 const contacts = [{ id: "contact-1", firstName: "Ada", lastName: "Lovelace" }];
+const leadHookMocks = vi.hoisted(() => ({
+  createLead: vi.fn(),
+  updateLead: vi.fn(),
+  useLeadQuestionnaireTemplate: vi.fn(() => ({
+    questionnaire: null,
+    loading: false,
+  })),
+}));
 
 vi.mock("@/hooks/use-pipeline-config", () => ({
   usePipelineStages: () => ({
@@ -35,6 +43,8 @@ vi.mock("@/hooks/use-pipeline-config", () => ({
         id: "stage-new",
         name: "New Lead",
         slug: "new_lead",
+        workflowFamily: "lead",
+        isActivePipeline: true,
         isTerminal: false,
       },
     ],
@@ -59,8 +69,9 @@ vi.mock("@/hooks/use-companies", () => ({
 }));
 
 vi.mock("@/hooks/use-leads", () => ({
-  createLead: vi.fn(),
-  updateLead: vi.fn(),
+  createLead: leadHookMocks.createLead,
+  updateLead: leadHookMocks.updateLead,
+  useLeadQuestionnaireTemplate: leadHookMocks.useLeadQuestionnaireTemplate,
 }));
 
 vi.mock("@/components/ui/button", () => ({
@@ -89,6 +100,31 @@ const SelectContext = React.createContext<{
   value?: string;
 }>({});
 
+function collectSelectItems(
+  children: React.ReactNode,
+  acc: Array<{ value: string | null; label?: React.ReactNode }> = []
+): Array<{ value: string | null; label?: React.ReactNode }> {
+  React.Children.forEach(children, (child) => {
+    if (!React.isValidElement(child)) {
+      return;
+    }
+
+    const childProps = child.props as { value?: string | null; children?: React.ReactNode };
+    if (Object.prototype.hasOwnProperty.call(childProps, "value")) {
+      acc.push({
+        value: childProps.value ?? null,
+        label: childProps.children,
+      });
+    }
+
+    if (childProps.children) {
+      collectSelectItems(childProps.children, acc);
+    }
+  });
+
+  return acc;
+}
+
 vi.mock("@/components/ui/select", () => ({
   Select: ({
     children,
@@ -99,14 +135,15 @@ vi.mock("@/components/ui/select", () => ({
     items?: Array<{ value: string | null; label?: React.ReactNode }>;
     value?: string;
   }) => (
-    <SelectContext.Provider value={{ items, value }}>
+    <SelectContext.Provider value={{ items: items ?? collectSelectItems(children), value }}>
       <div data-select-value={value ?? "__undefined__"}>{children}</div>
     </SelectContext.Provider>
   ),
   SelectTrigger: ({ children, id }: { children: React.ReactNode; id?: string }) => <div id={id}>{children}</div>,
-  SelectValue: ({ placeholder }: { placeholder?: string }) => {
+  SelectValue: ({ children, placeholder }: { children?: React.ReactNode; placeholder?: string }) => {
     const { items, value } = React.useContext(SelectContext);
-    const label = items?.find((item) => item.value === (value ?? null))?.label ?? placeholder;
+    const label =
+      children ?? items?.find((item) => item.value === (value ?? null))?.label ?? placeholder;
     return <span data-select-label="true">{label}</span>;
   },
   SelectContent: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
@@ -135,6 +172,10 @@ vi.mock("./lead-stage-badge", () => ({
 describe("LeadForm", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    leadHookMocks.useLeadQuestionnaireTemplate.mockReturnValue({
+      questionnaire: null,
+      loading: false,
+    });
   });
 
   it("renders source as an editable field in edit mode so New Lead gate requirements can be satisfied", () => {
@@ -268,5 +309,114 @@ describe("LeadForm", () => {
 
     expect(html).toContain("Multifamily");
     expect(html).not.toContain('data-select-value="__undefined__"');
+  });
+
+  it("renders table-backed questionnaire nodes in create mode when the v2 template is available", () => {
+    leadHookMocks.useLeadQuestionnaireTemplate.mockReturnValue({
+      questionnaire: {
+        projectTypeId: "type-1",
+        nodes: [
+          {
+            id: "node-1",
+            projectTypeId: null,
+            parentNodeId: null,
+            parentOptionValue: null,
+            nodeType: "question",
+            key: "bid_due_date",
+            label: "Bid Due Date",
+            prompt: null,
+            inputType: "date",
+            options: [],
+            isRequired: true,
+            displayOrder: 10,
+            isActive: true,
+          },
+        ],
+        allNodes: [],
+        answers: {},
+      } as any,
+      loading: false,
+    });
+
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <LeadForm
+          mode="create"
+          initialValues={{
+            companyId: "company-1",
+            propertyId: "property-1",
+            primaryContactId: "contact-1",
+            name: "Lead One",
+            source: "Referral",
+            description: "",
+            projectTypeId: "type-1",
+            stageId: "stage-new",
+          }}
+        />
+      </MemoryRouter>
+    );
+
+    expect(html).toContain("Bid Due Date");
+    expect(html).not.toContain("Project Scope");
+  });
+
+  it("keeps table-backed questionnaire answers out of the summary rail when the v2 snapshot is present", () => {
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <LeadForm
+          lead={{
+            id: "lead-1",
+            name: "Lead One",
+            convertedDealId: null,
+            convertedDealNumber: null,
+            companyId: "company-1",
+            companyName: "Acme",
+            stageId: "stage-new",
+            propertyId: "property-1",
+            propertyName: "Palm Villas",
+            propertyAddress: "123 Main",
+            propertyCity: "Dallas",
+            propertyState: "TX",
+            propertyZip: "75001",
+            source: "Referral",
+            description: "",
+            projectTypeId: "type-1",
+            projectType: null,
+            qualificationPayload: {},
+            projectTypeQuestionPayload: { projectTypeId: "type-1", answers: {} },
+            leadQuestionnaire: {
+              projectTypeId: "type-1",
+              nodes: [
+                {
+                  id: "node-1",
+                  projectTypeId: null,
+                  parentNodeId: null,
+                  parentOptionValue: null,
+                  nodeType: "question",
+                  key: "bid_due_date",
+                  label: "Bid Due Date",
+                  prompt: null,
+                  inputType: "date",
+                  options: [],
+                  isRequired: true,
+                  displayOrder: 10,
+                  isActive: true,
+                },
+              ],
+              allNodes: [],
+              answers: {
+                bid_due_date: "2026-05-01",
+              },
+            } as any,
+            stageEnteredAt: "2026-04-22T00:00:00.000Z",
+          }}
+        />
+      </MemoryRouter>
+    );
+
+    expect(html).toContain("Lead Summary");
+    expect(html).not.toContain("Project Questions");
+    expect(html).not.toContain("Bid Due Date");
+    expect(html).not.toContain("2026-05-01");
   });
 });

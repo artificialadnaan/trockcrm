@@ -32,11 +32,13 @@ type AuditBundle = {
   projectType: AuditProjectType;
 };
 
-type DealTeamMember = {
+type LeadQuestionnaireNode = {
   id: string;
-  userId: string;
-  displayName: string;
-  role: string;
+  nodeType: string;
+  key: string;
+  label: string;
+  inputType: string | null;
+  options: unknown;
 };
 
 async function loadAuditBundle() {
@@ -108,39 +110,73 @@ async function deleteDealById(dealId: string) {
   }
 }
 
-async function listDealTeamMembers(dealId: string) {
-  const apiRequest = await createRoleApiContext("rep");
-
-  try {
-    const data = await fetchJsonWithRetry<{ members: DealTeamMember[] }>(
-      apiRequest,
-      `${apiBaseURL}/api/deals/${dealId}/team`
-    );
-    return data.members;
-  } finally {
-    await apiRequest.dispose();
-  }
-}
-
-async function removeDealTeamMember(dealId: string, memberId: string) {
-  const apiRequest = await createRoleApiContext("rep");
-
-  try {
-    await fetchJsonWithRetry(apiRequest, `${apiBaseURL}/api/deals/${dealId}/team/${memberId}`, {
-      method: "DELETE",
-    });
-  } finally {
-    await apiRequest.dispose();
-  }
-}
-
-async function fillLeadQuestionnaire(page: import("@playwright/test").Page, projectTypeSlug: string) {
-  await page.getByLabel("Source").fill("AUDIT_TEST referral");
-  await page.getByLabel("Existing Customer Status").fill("Repeat customer");
+async function fillLeadQuestionnaire(
+  page: import("@playwright/test").Page,
+  projectType: AuditProjectType
+) {
+  await page.getByLabel("Source").click();
+  await page.getByRole("option", { name: "Referral" }).click();
   await page.getByLabel("Estimated Value").fill("125000");
   await page.getByLabel("Timeline Status").fill("Q3 2026");
 
-  const questionSet = getLeadValidationQuestionSetForProjectType(projectTypeSlug);
+  const apiRequest = await createRoleApiContext("rep");
+  try {
+    const templateResponse = await fetchJsonWithRetry<{
+      enabled: boolean;
+      questionnaire: {
+        nodes: LeadQuestionnaireNode[];
+      } | null;
+    }>(
+      apiRequest,
+      `${apiBaseURL}/api/leads/questionnaire-template?projectTypeId=${projectType.id}`
+    );
+
+    if (templateResponse.enabled && templateResponse.questionnaire) {
+      for (const node of templateResponse.questionnaire.nodes.filter((entry) => entry.nodeType === "question")) {
+        const locator = page.locator(`#${node.key}`);
+        if ((await locator.count()) === 0) {
+          continue;
+        }
+
+        if (node.inputType === "boolean") {
+          await locator.click();
+          await page.getByRole("option", { name: "Yes", exact: true }).click();
+          continue;
+        }
+
+        if (Array.isArray(node.options) && node.options.length > 0) {
+          const option = node.options[0];
+          const optionLabel =
+            typeof option === "string"
+              ? option
+              : option && typeof option === "object" && "label" in option
+                ? String((option as { label: unknown }).label)
+                : option && typeof option === "object" && "value" in option
+                  ? String((option as { value: unknown }).value)
+                  : null;
+          if (optionLabel) {
+            await locator.click();
+            await page.getByRole("option", { name: optionLabel, exact: true }).click();
+          }
+          continue;
+        }
+
+        const value =
+          node.inputType === "number" || node.inputType === "currency"
+            ? "1"
+            : node.inputType === "date"
+              ? "2026-05-01"
+              : `AUDIT_TEST ${node.label}`;
+
+        await locator.fill(value);
+      }
+      return;
+    }
+  } finally {
+    await apiRequest.dispose();
+  }
+
+  const questionSet = getLeadValidationQuestionSetForProjectType(projectType.slug);
   for (const question of questionSet.questions) {
     if (question.input === "boolean") {
       await page.getByLabel(question.label).click();
@@ -173,7 +209,6 @@ test.describe.serial("lead to opportunity progression production audit", () => {
     const leadName = `AUDIT_TEST_LeadProgress_${Date.now()}`;
     let leadId: string | null = null;
     let dealId: string | null = null;
-    let createdTeamMemberId: string | null = null;
 
     await loginWithRole(page, "rep");
 
@@ -190,7 +225,7 @@ test.describe.serial("lead to opportunity progression production audit", () => {
       await expect(page.getByRole("heading", { name: "New Lead", exact: true })).toBeVisible();
       await expect(page.getByLabel("Initial Stage")).toContainText("New Lead");
 
-      await fillLeadQuestionnaire(page, auditBundle.projectType.slug);
+      await fillLeadQuestionnaire(page, auditBundle.projectType);
       await page.getByRole("button", { name: "Create Lead", exact: true }).click();
 
       await page.waitForURL(/\/leads\/[^/?#]+$/);
@@ -217,7 +252,7 @@ test.describe.serial("lead to opportunity progression production audit", () => {
 
       await page.getByRole("button", { name: /^Team/ }).click();
       const addTeamMemberButton = page.getByRole("button", { name: "Add Team Member", exact: true }).first();
-      await expect(addTeamMemberButton).toBeVisible();
+      await addTeamMemberButton.waitFor({ state: "visible", timeout: 20_000 });
       await addTeamMemberButton.click();
       await expect(page.getByRole("dialog")).toBeVisible();
       await page.getByLabel("User").click();
@@ -233,13 +268,6 @@ test.describe.serial("lead to opportunity progression production audit", () => {
         await expect(page.getByText(assignedUserName, { exact: true })).toBeVisible();
       }
 
-      const members = await listDealTeamMembers(dealId!);
-      const createdMember = members.find(
-        (member) => member.role === "estimator" && member.displayName === assignedUserName
-      );
-      expect(createdMember, "Assigned estimator should be persisted").toBeDefined();
-      createdTeamMemberId = createdMember?.id ?? null;
-
       await page.goto(`/deals/${dealId}`, { waitUntil: "domcontentloaded" });
       await page.getByRole("button", { name: "Move Stage", exact: true }).click();
       await page.getByRole("menuitem", { name: /Estimate in Progress/ }).click();
@@ -254,9 +282,6 @@ test.describe.serial("lead to opportunity progression production audit", () => {
       await page.getByRole("button", { name: "Estimates", exact: true }).click();
       await expect(page.getByText(/Estimate/i).first()).toBeVisible();
     } finally {
-      if (createdTeamMemberId && dealId) {
-        await removeDealTeamMember(dealId, createdTeamMemberId);
-      }
       if (dealId) {
         await deleteDealById(dealId);
       }

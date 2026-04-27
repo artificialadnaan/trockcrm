@@ -19,8 +19,10 @@ import {
   getTagSuggestions,
   getDealFolderTree,
   getDealPhotoTimeline,
+  searchPhotoUploadTargets,
 } from "./service.js";
 import { getDealById } from "../deals/service.js";
+import { getLeadById } from "../leads/service.js";
 import { getPhotoFeed, getNewPhotoCount, getProjectPhotoStats } from "./feed-service.js";
 
 const router = Router();
@@ -35,6 +37,7 @@ router.post("/upload-url", async (req, res, next) => {
       category,
       subcategory,
       dealId,
+      leadId,
       contactId,
       procoreProjectId,
       changeOrderId,
@@ -55,6 +58,10 @@ router.post("/upload-url", async (req, res, next) => {
       const deal = await getDealById(req.tenantDb!, dealId, req.user!.role, req.user!.id);
       if (!deal) throw new AppError(404, "Deal not found or access denied.");
     }
+    if (leadId) {
+      const lead = await getLeadById(req.tenantDb!, leadId, req.user!.role, req.user!.id);
+      if (!lead) throw new AppError(404, "Lead not found or access denied.");
+    }
 
     const result = await requestUploadUrl(
       req.tenantDb!,
@@ -67,6 +74,7 @@ router.post("/upload-url", async (req, res, next) => {
         category: category as FileCategory,
         subcategory,
         dealId,
+        leadId,
         contactId,
         procoreProjectId: procoreProjectId ? Number(procoreProjectId) : undefined,
         changeOrderId,
@@ -91,6 +99,7 @@ router.post("/upload-direct", express.raw({ type: "*/*", limit: "50mb" }), async
     const category = req.headers["x-file-category"] as string;
     const subcategory = req.headers["x-file-subcategory"] as string | undefined;
     const dealId = req.headers["x-deal-id"] as string | undefined;
+    const leadId = req.headers["x-lead-id"] as string | undefined;
     const contactId = req.headers["x-contact-id"] as string | undefined;
     const description = req.headers["x-file-description"] as string | undefined;
     const tagsRaw = req.headers["x-file-tags"] as string | undefined;
@@ -114,6 +123,10 @@ router.post("/upload-direct", express.raw({ type: "*/*", limit: "50mb" }), async
       const deal = await getDealById(req.tenantDb!, dealId, req.user!.role, req.user!.id);
       if (!deal) throw new AppError(404, "Deal not found or access denied.");
     }
+    if (leadId) {
+      const lead = await getLeadById(req.tenantDb!, leadId, req.user!.role, req.user!.id);
+      if (!lead) throw new AppError(404, "Lead not found or access denied.");
+    }
 
     // Reuse the presign logic to generate filenames, r2Key, folderPath
     const result = await requestUploadUrl(
@@ -127,6 +140,7 @@ router.post("/upload-direct", express.raw({ type: "*/*", limit: "50mb" }), async
         category: category as FileCategory,
         subcategory: subcategory || undefined,
         dealId,
+        leadId,
         contactId,
         description,
         tags,
@@ -152,6 +166,7 @@ router.post("/upload-direct", express.raw({ type: "*/*", limit: "50mb" }), async
       r2Key: file.r2Key,
       mimeType: file.mimeType,
       dealId: file.dealId,
+      leadId: file.leadId,
       contactId: file.contactId,
       category: file.category,
       uploadedBy: req.user!.id,
@@ -194,6 +209,7 @@ router.post("/confirm-upload", async (req, res, next) => {
       r2Key: file.r2Key,
       mimeType: file.mimeType,
       dealId: file.dealId,
+      leadId: file.leadId,
       contactId: file.contactId,
       category: file.category,
       uploadedBy: req.user!.id,
@@ -215,6 +231,7 @@ router.post("/confirm-upload", async (req, res, next) => {
           r2Key: file.r2Key,
           mimeType: file.mimeType,
           dealId: file.dealId,
+          leadId: file.leadId,
           contactId: file.contactId,
           category: file.category,
           uploadedBy: req.user!.id,
@@ -280,8 +297,8 @@ router.get("/", async (req, res, next) => {
     // Fix 6: For reps, require a dealId or contactId filter.
     // Without it, reps would see all office files. Directors/admins see all.
     const isRep = req.user!.role === "rep";
-    if (isRep && !req.query.dealId && !req.query.contactId) {
-      throw new AppError(400, "dealId or contactId filter is required.");
+    if (isRep && !req.query.dealId && !req.query.leadId && !req.query.contactId) {
+      throw new AppError(400, "leadId, dealId, or contactId filter is required.");
     }
 
     // Fix 4: Reps CAN query by contactId without additional access checks.
@@ -293,9 +310,14 @@ router.get("/", async (req, res, next) => {
       const deal = await getDealById(req.tenantDb!, req.query.dealId as string, req.user!.role, req.user!.id);
       if (!deal) throw new AppError(403, "Access denied: you do not have access to this deal's files.");
     }
+    if (isRep && req.query.leadId) {
+      const lead = await getLeadById(req.tenantDb!, req.query.leadId as string, req.user!.role, req.user!.id);
+      if (!lead) throw new AppError(403, "Access denied: you do not have access to this lead's files.");
+    }
 
     const filters = {
       dealId: req.query.dealId as string | undefined,
+      leadId: req.query.leadId as string | undefined,
       contactId: req.query.contactId as string | undefined,
       procoreProjectId: req.query.procoreProjectId
         ? Number(req.query.procoreProjectId)
@@ -417,6 +439,20 @@ router.get("/photos/feed/count", async (req, res, next) => {
   }
 });
 
+// GET /api/files/photo-targets/search — searchable upload targets for field photos
+router.get("/photo-targets/search", async (req, res, next) => {
+  try {
+    const result = await searchPhotoUploadTargets(req.tenantDb!, {
+      search: req.query.search as string | undefined,
+      limit: req.query.limit ? parseInt(req.query.limit as string, 10) : undefined,
+    });
+    await req.commitTransaction!();
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
 // GET /api/files/:id — single file metadata
 router.get("/:id", async (req, res, next) => {
   try {
@@ -428,6 +464,9 @@ router.get("/:id", async (req, res, next) => {
     if (file.dealId) {
       const deal = await getDealById(req.tenantDb!, file.dealId, req.user!.role, req.user!.id);
       if (!deal) throw new AppError(403, "Access denied: you do not have access to this deal's files.");
+    } else if (file.leadId) {
+      const lead = await getLeadById(req.tenantDb!, file.leadId, req.user!.role, req.user!.id);
+      if (!lead) throw new AppError(403, "Access denied: you do not have access to this lead's files.");
     }
 
     await req.commitTransaction!();
@@ -447,6 +486,9 @@ router.get("/:id/download", async (req, res, next) => {
     if (file.dealId) {
       const deal = await getDealById(req.tenantDb!, file.dealId, req.user!.role, req.user!.id);
       if (!deal) throw new AppError(403, "Access denied: you do not have access to this deal's files.");
+    } else if (file.leadId) {
+      const lead = await getLeadById(req.tenantDb!, file.leadId, req.user!.role, req.user!.id);
+      if (!lead) throw new AppError(403, "Access denied: you do not have access to this lead's files.");
     }
 
     // External files (CompanyCam etc.) — return the CDN URL directly
@@ -473,6 +515,9 @@ router.get("/:id/versions", async (req, res, next) => {
     if (file.dealId) {
       const deal = await getDealById(req.tenantDb!, file.dealId, req.user!.role, req.user!.id);
       if (!deal) throw new AppError(403, "Access denied: you do not have access to this deal's files.");
+    } else if (file.leadId) {
+      const lead = await getLeadById(req.tenantDb!, file.leadId, req.user!.role, req.user!.id);
+      if (!lead) throw new AppError(403, "Access denied: you do not have access to this lead's files.");
     }
 
     const versions = await getFileVersions(req.tenantDb!, req.params.id);
@@ -493,6 +538,9 @@ router.patch("/:id", async (req, res, next) => {
     if (existing.dealId) {
       const deal = await getDealById(req.tenantDb!, existing.dealId, req.user!.role, req.user!.id);
       if (!deal) throw new AppError(403, "Access denied: you do not have access to this deal's files.");
+    } else if (existing.leadId) {
+      const lead = await getLeadById(req.tenantDb!, existing.leadId, req.user!.role, req.user!.id);
+      if (!lead) throw new AppError(403, "Access denied: you do not have access to this lead's files.");
     } else if (req.user!.role === "rep" && existing.uploadedBy !== req.user!.id) {
       // Fix 8: Non-deal files (e.g. contact files) — reps can only modify files they uploaded
       throw new AppError(403, "You can only modify files you uploaded");
@@ -532,6 +580,13 @@ router.delete("/:id", async (req, res, next) => {
 
       if (!isAdminOrDirector && !isUploader) {
         throw new AppError(403, "Only admins, directors, or the original uploader can delete deal files.");
+      }
+    } else if (existing.leadId) {
+      const lead = await getLeadById(req.tenantDb!, existing.leadId, req.user!.role, req.user!.id);
+      if (!lead) throw new AppError(403, "Access denied: you do not have access to this lead's files.");
+
+      if (!isAdminOrDirector && !isUploader) {
+        throw new AppError(403, "Only admins, directors, or the original uploader can delete lead files.");
       }
     } else if (req.user!.role === "rep" && !isUploader) {
       // Fix 8: Non-deal files — reps can only delete files they uploaded

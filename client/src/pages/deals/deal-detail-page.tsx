@@ -37,7 +37,7 @@ import { StageChangeDialog } from "@/components/deals/stage-change-dialog";
 import { TaskCreateDialog } from "@/components/tasks/task-create-dialog";
 import { useActivities, createActivity } from "@/hooks/use-activities";
 import { useDealDetail, deleteDeal as apiDeleteDeal, type DealDetail } from "@/hooks/use-deals";
-import { useCompanyDetail } from "@/hooks/use-companies";
+import { useLeadDetail } from "@/hooks/use-leads";
 import { usePipelineStages } from "@/hooks/use-pipeline-config";
 import { useAuth } from "@/lib/auth";
 import { formatCurrency, bestEstimate } from "@/lib/deal-utils";
@@ -82,7 +82,6 @@ export function DealDetailPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const { user } = useAuth();
   const { deal, loading, error, refetch } = useDealDetail(id);
-  const { company } = useCompanyDetail(deal?.companyId ?? undefined);
   const { stages } = usePipelineStages();
   const [activeTab, setActiveTab] = useState<Tab>("overview");
   const [stageChangeOpen, setStageChangeOpen] = useState(false);
@@ -449,7 +448,6 @@ export function DealDetailPage() {
       {activeTab === "lead" && (
         <DealLeadTab
           deal={deal}
-          companyName={company?.name ?? null}
           isConverted={Boolean(deal.sourceLeadId)}
         />
       )}
@@ -663,36 +661,61 @@ function DealActivityPanel({ dealId }: { dealId: string }) {
 
 function DealLeadTab({
   deal,
-  companyName,
   isConverted,
 }: {
   deal: DealDetail;
-  companyName: string | null;
   isConverted: boolean;
 }) {
+  const navigate = useNavigate();
+  const { lead, loading, error } = useLeadDetail(deal.sourceLeadId ?? undefined);
+
+  if (!deal.sourceLeadId) {
+    return (
+      <div className="rounded-lg border bg-muted/30 p-6">
+        <h3 className="text-sm font-semibold">No Source Lead</h3>
+        <p className="mt-2 text-sm text-muted-foreground">
+          This legacy deal was not converted from a lead, so there is no lead record to show here.
+        </p>
+      </div>
+    );
+  }
+
+  if (loading) {
+    return <div className="h-72 animate-pulse rounded-lg bg-muted" />;
+  }
+
+  if (error || !lead) {
+    return (
+      <div className="rounded-lg border bg-muted/30 p-6">
+        <h3 className="text-sm font-semibold">Source Lead Unavailable</h3>
+        <p className="mt-2 text-sm text-muted-foreground">
+          {error ?? "The source lead could not be loaded."}
+        </p>
+        <Button className="mt-4" variant="outline" onClick={() => navigate(`/leads/${deal.sourceLeadId}`)}>
+          Open Source Lead
+        </Button>
+      </div>
+    );
+  }
+
   return (
     <div className="grid gap-4 lg:grid-cols-[0.95fr_1.05fr]">
-      <LeadForm
-        lead={{
-          id: deal.sourceLeadId ?? deal.id,
-          name: deal.name,
-          convertedDealId: isConverted ? deal.id : null,
-          convertedDealNumber: isConverted ? deal.dealNumber : null,
-          companyId: deal.companyId,
-          companyName,
-          stageId: deal.stageId,
-          propertyId: deal.propertyId,
-          propertyName: null,
-          propertyAddress: deal.propertyAddress,
-          propertyCity: deal.propertyCity,
-          propertyState: deal.propertyState,
-          propertyZip: deal.propertyZip,
-          source: deal.source,
-          description: deal.description,
-          stageEnteredAt: deal.stageEnteredAt,
-        }}
-        converted={isConverted}
-      />
+      <div className="space-y-3">
+        <Button variant="outline" onClick={() => navigate(`/leads/${deal.sourceLeadId}`)}>
+          View Source Lead
+        </Button>
+        <LeadForm
+          lead={{
+            ...lead,
+            propertyName: lead.property?.name ?? null,
+            propertyAddress: lead.property?.address ?? null,
+            propertyCity: lead.property?.city ?? null,
+            propertyState: lead.property?.state ?? null,
+            propertyZip: lead.property?.zip ?? null,
+          }}
+          converted={isConverted}
+        />
+      </div>
 
       <LeadTimelineTab
         leadId={deal.sourceLeadId ?? deal.id}

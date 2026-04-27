@@ -12,6 +12,11 @@ export interface Company {
   phone: string | null;
   website: string | null;
   notes: string | null;
+  companyVerificationStatus: "pending" | "verified" | "not_required" | null;
+  companyVerificationRequestedAt: string | null;
+  companyVerificationEmailSentAt: string | null;
+  companyVerifiedAt: string | null;
+  companyVerifiedBy: string | null;
   contactCount: number;
   dealCount: number;
   createdAt: string;
@@ -215,6 +220,10 @@ export async function createCompany(input: {
 
 export async function updateCompany(companyId: string, input: Partial<Company>) {
   return api<{ company: Company }>(`/companies/${companyId}`, { method: "PATCH", json: input });
+}
+
+export async function verifyCompany(companyId: string) {
+  return api<{ company: Company }>(`/companies/${companyId}/verify`, { method: "POST" });
 }
 
 export async function searchCompanies(query: string) {

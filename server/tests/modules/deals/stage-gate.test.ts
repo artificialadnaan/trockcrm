@@ -113,6 +113,39 @@ type FakeDealRow = {
   proposalStatus?: string | null;
   proposalRevisionCount?: number | null;
   updatedAt?: Date;
+  sourceLeadId?: string | null;
+  companyId?: string | null;
+  propertyId?: string | null;
+  primaryContactId?: string | null;
+  source?: string | null;
+};
+
+type FakeLeadRow = {
+  id: string;
+  companyId: string;
+  propertyId: string;
+  primaryContactId: string | null;
+  assignedRepId: string;
+  pipelineType: WorkflowRoute;
+  projectTypeId: string | null;
+  source: string | null;
+  sourceCategory?: string | null;
+  sourceDetail?: string | null;
+  description: string | null;
+};
+
+type FakePropertyRow = {
+  id: string;
+  name: string;
+  address: string | null;
+  city: string | null;
+  state: string | null;
+  zip: string | null;
+};
+
+type FakeLeadQuestionAnswerRow = {
+  key: string;
+  valueJson: unknown;
 };
 
 type FakeUserRow = {
@@ -163,6 +196,9 @@ type FakeDealTeamMemberRow = {
 
 type FakeTenantState = {
   deals: FakeDealRow[];
+  leads: FakeLeadRow[];
+  properties: FakePropertyRow[];
+  leadQuestionAnswers: FakeLeadQuestionAnswerRow[];
   users: FakeUserRow[];
   files: FakeFileRow[];
   dealScopingIntake: FakeDealScopingIntakeRow[];
@@ -194,6 +230,9 @@ function createHardeningTenantDb(initialState?: Partial<FakeTenantState>) {
         updatedAt: now,
       },
     ],
+    leads: [],
+    properties: [],
+    leadQuestionAnswers: [],
     users: [
       { id: "user-1", officeId: "office-1" },
       { id: "rep-1", officeId: "office-1" },
@@ -234,6 +273,9 @@ function createHardeningTenantDb(initialState?: Partial<FakeTenantState>) {
   function getRows(table: unknown) {
     const tableName = String((table as Record<PropertyKey, unknown> | undefined)?.[Symbol.for("drizzle:Name")] ?? "");
     if (tableName === "deals") return state.deals;
+    if (tableName === "leads") return state.leads;
+    if (tableName === "properties") return state.properties;
+    if (tableName === "lead_question_answers") return state.leadQuestionAnswers;
     if (tableName === "users") return state.users;
     if (tableName === "files") return state.files;
     if (tableName === "deal_scoping_intake") return state.dealScopingIntake;
@@ -258,6 +300,13 @@ function createHardeningTenantDb(initialState?: Partial<FakeTenantState>) {
                 },
                 then(onfulfilled: (value: unknown[]) => unknown) {
                   return Promise.resolve(rows).then(onfulfilled);
+                },
+              };
+            },
+            innerJoin() {
+              return {
+                where() {
+                  return Promise.resolve(rows);
                 },
               };
             },
@@ -1531,6 +1580,91 @@ describe("Stage Gate Payload Hardening", () => {
         }),
       })
     );
+  });
+
+  it("uses source lead lineage values for stage required fields on converted deals", async () => {
+    const { validateStageGate } = await import("../../../src/modules/deals/stage-gate.js");
+    const tenantDb = createHardeningTenantDb({
+      deals: [
+        {
+          id: "deal-1",
+          name: "Stale Deal Snapshot",
+          stageId: STAGES.estimating.id,
+          workflowRoute: "normal",
+          assignedRepId: "stale-rep",
+          projectTypeId: null,
+          propertyAddress: null,
+          propertyCity: null,
+          propertyState: null,
+          propertyZip: null,
+          description: null,
+          sourceLeadId: "lead-1",
+        },
+      ],
+      leads: [
+        {
+          id: "lead-1",
+          companyId: "company-1",
+          propertyId: "property-1",
+          primaryContactId: "contact-1",
+          assignedRepId: "rep-1",
+          pipelineType: "normal",
+          projectTypeId: "pt-from-lead",
+          source: null,
+          sourceCategory: "Referral",
+          sourceDetail: null,
+          description: "Current source lead scope",
+        },
+      ],
+      properties: [
+        {
+          id: "property-1",
+          name: "Lead Property",
+          address: "456 Lineage Ave",
+          city: "Dallas",
+          state: "TX",
+          zip: "75201",
+        },
+      ],
+    });
+
+    mockedStageLookups.queue.push(
+      {
+        id: STAGES.estimating.id,
+        name: STAGES.estimating.name,
+        slug: STAGES.estimating.slug,
+        isTerminal: STAGES.estimating.isTerminal,
+        displayOrder: STAGES.estimating.displayOrder,
+        requiredFields: [],
+        requiredDocuments: [],
+        requiredApprovals: [],
+      },
+      {
+        id: STAGES.bid_sent.id,
+        name: STAGES.bid_sent.name,
+        slug: STAGES.bid_sent.slug,
+        isTerminal: STAGES.bid_sent.isTerminal,
+        displayOrder: STAGES.bid_sent.displayOrder,
+        requiredFields: ["projectTypeId", "propertyAddress", "description"],
+        requiredDocuments: [],
+        requiredApprovals: [],
+      }
+    );
+
+    const result = await validateStageGate(
+      tenantDb as never,
+      "deal-1",
+      STAGES.bid_sent.id,
+      "rep",
+      "rep-1"
+    );
+
+    expect(result.missingRequirements.fields).toEqual([]);
+    expect(result.effectiveChecklist.fields).toEqual([
+      expect.objectContaining({ key: "projectTypeId", satisfied: true }),
+      expect.objectContaining({ key: "propertyAddress", satisfied: true }),
+      expect.objectContaining({ key: "description", satisfied: true }),
+    ]);
   });
 
   it("does not satisfy stage document requirements with unverified linked files", async () => {

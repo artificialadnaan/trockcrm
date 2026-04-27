@@ -15,6 +15,11 @@ import { convertLead } from "./conversion-service.js";
 import { preflightLeadStageCheck } from "./stage-gate.js";
 import { getLeadQualificationByLeadId } from "./qualification-service.js";
 import { getLeadScopingSnapshot, upsertLeadScopingIntake } from "./scoping-service.js";
+import {
+  getLeadQuestionnaireSnapshot,
+  getQuestionnaireTemplateSnapshot,
+  isLeadEditV2Enabled,
+} from "./questionnaire-service.js";
 
 const router = Router();
 
@@ -92,6 +97,26 @@ router.get("/stages/:stageId", async (req, res, next) => {
   }
 });
 
+router.get("/questionnaire-template", async (req, res, next) => {
+  try {
+    if (!isLeadEditV2Enabled()) {
+      await req.commitTransaction!();
+      res.json({ enabled: false, questionnaire: null });
+      return;
+    }
+
+    const projectTypeId =
+      typeof req.query.projectTypeId === "string" && req.query.projectTypeId.trim().length > 0
+        ? req.query.projectTypeId
+        : null;
+    const questionnaire = await getQuestionnaireTemplateSnapshot(req.tenantDb!, projectTypeId);
+    await req.commitTransaction!();
+    res.json({ enabled: true, questionnaire });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // GET /api/leads/:id
 router.get("/:id", async (req, res, next) => {
   try {
@@ -99,8 +124,24 @@ router.get("/:id", async (req, res, next) => {
     if (!lead) {
       throw new AppError(404, "Lead not found");
     }
+
+    if (!isLeadEditV2Enabled()) {
+      await req.commitTransaction!();
+      res.json({ lead });
+      return;
+    }
+
+    const questionnaire = await getLeadQuestionnaireSnapshot(req.tenantDb!, {
+      leadId: lead.id,
+      projectTypeId: lead.projectTypeId ?? null,
+    });
     await req.commitTransaction!();
-    res.json({ lead });
+    res.json({
+      lead: {
+        ...lead,
+        leadQuestionnaire: questionnaire,
+      },
+    });
   } catch (err) {
     next(err);
   }
@@ -227,6 +268,18 @@ router.post("/:id/stage-transition", async (req, res, next) => {
     await req.commitTransaction!();
     res.status(result.ok ? 200 : 409).json(result);
   } catch (err) {
+    if (err instanceof LeadStageTransitionError) {
+      res.status(err.statusCode).json({
+        error: {
+          message: err.message,
+          code: err.code,
+          missingRequirements: err.result.missingRequirements,
+          currentStage: err.result.currentStage,
+          targetStage: err.result.targetStage,
+        },
+      });
+      return;
+    }
     next(err);
   }
 });
@@ -294,6 +347,18 @@ router.post("/:id/convert", async (req, res, next) => {
     await req.commitTransaction!();
     res.status(201).json(result);
   } catch (err) {
+    if (err instanceof LeadStageTransitionError) {
+      res.status(err.statusCode).json({
+        error: {
+          message: err.message,
+          code: err.code,
+          missingRequirements: err.result.missingRequirements,
+          currentStage: err.result.currentStage,
+          targetStage: err.result.targetStage,
+        },
+      });
+      return;
+    }
     next(err);
   }
 });

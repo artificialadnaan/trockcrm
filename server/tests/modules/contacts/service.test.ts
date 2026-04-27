@@ -1,4 +1,7 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
+import { createContact } from "../../../src/modules/contacts/service.js";
+
+vi.mock("@trock-crm/shared/schema", async () => import("../../../../shared/src/schema/index.js"));
 
 /**
  * Unit tests for the contact service.
@@ -157,6 +160,46 @@ describe("Contact Service", () => {
       const nameScore = nameSimilarity * 40;
       // No company or phone match
       expect(nameScore).toBeLessThan(40);
+    });
+  });
+
+  describe("createContact", () => {
+    it("persists the company id when creating a contact", async () => {
+      const insertedRows: Array<Record<string, unknown>> = [];
+      const tenantDb = {
+        insert() {
+          return {
+            values(row: Record<string, unknown>) {
+              insertedRows.push(row);
+              return {
+                returning: async () => [{ id: "contact-1", ...row }],
+              };
+            },
+          };
+        },
+      };
+
+      const result = await createContact(
+        tenantDb as never,
+        {
+          firstName: "Ada",
+          lastName: "Lovelace",
+          email: "Ada@Example.com",
+          phone: "555-0101",
+          companyId: "company-1",
+          category: "client",
+        },
+        true
+      );
+
+      expect(insertedRows[0]).toMatchObject({
+        firstName: "Ada",
+        lastName: "Lovelace",
+        email: "ada@example.com",
+        companyId: "company-1",
+        category: "client",
+      });
+      expect(result.contact.companyId).toBe("company-1");
     });
   });
 });

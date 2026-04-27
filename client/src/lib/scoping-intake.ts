@@ -102,3 +102,36 @@ export function buildScopingSeedFromDeal(deal: {
     attachments: {},
   };
 }
+
+export function buildScopingSeedFromResolvedFields(resolved: {
+  propertyName: string | null;
+  propertyAddress: string | null;
+  propertyCity: string | null;
+  propertyState: string | null;
+  propertyZip: string | null;
+  description: string | null;
+  bidDueDate: string | boolean | number | null;
+}) {
+  return {
+    projectOverview: {
+      propertyName: resolved.propertyName ?? "",
+      bidDueDate: typeof resolved.bidDueDate === "string" ? resolved.bidDueDate : "",
+    },
+    propertyDetails: {
+      propertyAddress: resolved.propertyAddress ?? "",
+      propertyCity: resolved.propertyCity ?? "",
+      propertyState: resolved.propertyState ?? "",
+      propertyZip: resolved.propertyZip ?? "",
+    },
+    scopeSummary: {
+      summary: resolved.description ?? "",
+    },
+    opportunity: {
+      preBidMeetingCompleted: "",
+      estimatorConsultationNotes: "",
+      siteVisitDecision: "",
+      siteVisitCompleted: "",
+    },
+    attachments: {},
+  };
+}

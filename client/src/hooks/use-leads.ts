@@ -7,6 +7,7 @@ export {
 } from "@/lib/pipeline-ownership";
 import type { StagePageQuery } from "@/lib/pipeline-stage-page";
 import type { LeadScopingReadiness, LeadScopingSectionData } from "../../../shared/src/types/lead-scoping.js";
+import type { LeadSourceCategory } from "../../../shared/src/types/enums.js";
 
 export interface LeadQualificationRecord {
   id: string;
@@ -67,6 +68,9 @@ export interface LeadRecord {
   assignedRepId: string;
   status: "open" | "converted" | "disqualified";
   source: string | null;
+  sourceCategory: LeadSourceCategory | null;
+  sourceDetail: string | null;
+  existingCustomerStatus?: "Existing" | "New" | null;
   description: string | null;
   projectTypeId: string | null;
   projectType: {
@@ -120,6 +124,75 @@ export interface LeadRecord {
   } | null;
   convertedDealId: string | null;
   convertedDealNumber: string | null;
+  leadQuestionnaire?: {
+    projectTypeId: string | null;
+    nodes: Array<{
+      id: string;
+      projectTypeId: string | null;
+      parentNodeId: string | null;
+      parentOptionValue: string | null;
+      nodeType: string;
+      key: string;
+      label: string;
+      prompt: string | null;
+      inputType: string | null;
+      options: unknown;
+      isRequired: boolean;
+      displayOrder: number;
+      isActive: boolean;
+    }>;
+    allNodes: Array<{
+      id: string;
+      projectTypeId: string | null;
+      parentNodeId: string | null;
+      parentOptionValue: string | null;
+      nodeType: string;
+      key: string;
+      label: string;
+      prompt: string | null;
+      inputType: string | null;
+      options: unknown;
+      isRequired: boolean;
+      displayOrder: number;
+      isActive: boolean;
+    }>;
+    answers: Record<string, string | boolean | number | null>;
+  };
+}
+
+export interface LeadQuestionnaireSnapshot {
+  projectTypeId: string | null;
+  nodes: Array<{
+    id: string;
+    projectTypeId: string | null;
+    parentNodeId: string | null;
+    parentOptionValue: string | null;
+    nodeType: string;
+    key: string;
+    label: string;
+    prompt: string | null;
+    inputType: string | null;
+    options: unknown;
+    isRequired: boolean;
+    displayOrder: number;
+    isActive: boolean;
+  }>;
+  allNodes: Array<{
+    id: string;
+    projectTypeId: string | null;
+    parentNodeId: string | null;
+    parentOptionValue: string | null;
+    nodeType: string;
+    key: string;
+    label: string;
+    prompt: string | null;
+    inputType: string | null;
+    options: unknown;
+    isRequired: boolean;
+    displayOrder: number;
+    isActive: boolean;
+  }>;
+  answers: Record<string, string | boolean | number | null>;
 }
 
 export interface LeadFilters {
@@ -259,6 +332,37 @@ export function useLeadDetail(leadId: string | undefined) {
   return { lead, loading, error, refetch: fetchLead };
 }
 
+export function useLeadQuestionnaireTemplate(projectTypeId: string | null | undefined) {
+  const [questionnaire, setQuestionnaire] = useState<LeadQuestionnaireSnapshot | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  const fetchQuestionnaire = useCallback(async () => {
+    const params = new URLSearchParams();
+    if (projectTypeId) {
+      params.set("projectTypeId", projectTypeId);
+    }
+
+    setLoading(true);
+    try {
+      const data = await api<{
+        enabled: boolean;
+        questionnaire: LeadQuestionnaireSnapshot | null;
+      }>(`/leads/questionnaire-template${params.toString() ? `?${params.toString()}` : ""}`);
+      setQuestionnaire(data.enabled ? data.questionnaire : null);
+    } catch {
+      setQuestionnaire(null);
+    } finally {
+      setLoading(false);
+    }
+  }, [projectTypeId]);
+
+  useEffect(() => {
+    fetchQuestionnaire();
+  }, [fetchQuestionnaire]);
+
+  return { questionnaire, loading, refetch: fetchQuestionnaire };
+}
+
 export function useLeadQualification(leadId: string | undefined) {
   const [qualification, setQualification] = useState<LeadQualificationRecord | null>(null);
   const [loading, setLoading] = useState(true);
@@ -334,6 +438,8 @@ export async function createLead(input: {
   primaryContactId?: string | null;
   name: string;
   source?: string | null;
+  sourceCategory?: LeadSourceCategory | null;
+  sourceDetail?: string | null;
   description?: string | null;
   projectTypeId?: string | null;
   qualificationPayload?: Record<string, string | boolean | number | null>;
@@ -341,6 +447,7 @@ export async function createLead(input: {
     projectTypeId: string | null;
     answers: Record<string, string | boolean | number | null>;
   };
+  leadQuestionAnswers?: Record<string, string | boolean | number | null>;
 }) {
   return api<{ lead: LeadRecord }>("/leads", {
     method: "POST",
@@ -356,6 +463,8 @@ type LeadUpdatePayload = Partial<
     | "primaryContactId"
     | "name"
     | "source"
+    | "sourceCategory"
+    | "sourceDetail"
     | "description"
     | "status"
     | "decisionMakerName"
@@ -394,6 +503,7 @@ type LeadUpdatePayload = Partial<
     scopingSubsetData: Record<string, unknown>;
     disqualificationReason: string | null;
     disqualificationNotes: string | null;
+    leadQuestionAnswers: Record<string, string | boolean | number | null>;
   }
 >;
 
@@ -433,6 +543,52 @@ export type LeadTransitionResult =
       missing: LeadTransitionMissingRequirement[];
     };
 
+function normalizeBlockedLeadTransitionPayload(
+  payload: unknown,
+  targetStageId: string
+): LeadTransitionResult | null {
+  if (!payload || typeof payload !== "object") {
+    return null;
+  }
+
+  if ((payload as { reason?: string }).reason === "missing_requirements") {
+    return payload as LeadTransitionResult;
+  }
+
+  const errorPayload = (payload as {
+    error?: {
+      code?: string;
+      missingRequirements?: {
+        prerequisiteFields?: string[];
+        qualificationFields?: string[];
+        projectTypeQuestionIds?: string[];
+      };
+    };
+  }).error;
+
+  if (errorPayload?.code !== "LEAD_STAGE_REQUIREMENTS_UNMET") {
+    return null;
+  }
+
+  const requirementKeys = [
+    ...(errorPayload.missingRequirements?.prerequisiteFields ?? []),
+    ...(errorPayload.missingRequirements?.qualificationFields ?? []),
+    ...(errorPayload.missingRequirements?.projectTypeQuestionIds ?? []),
+  ];
+
+  return {
+    ok: false,
+    reason: "missing_requirements",
+    targetStageId,
+    resolution: "inline",
+    missing: requirementKeys.map((key) => ({
+      key,
+      label: key,
+      resolution: "inline",
+    })),
+  };
+}
+
 export type LeadTransitionInlinePatch = Partial<
   Pick<
     LeadRecord,
@@ -468,13 +624,9 @@ export async function transitionLeadStage(
   });
 
   const payload = await response.json().catch(() => null);
-  if (
-    payload &&
-    (response.status === 409 ||
-      (typeof payload === "object" &&
-        (payload as { reason?: string }).reason === "missing_requirements"))
-  ) {
-    return payload as LeadTransitionResult;
+  const blockedMove = normalizeBlockedLeadTransitionPayload(payload, input.targetStageId);
+  if (blockedMove) {
+    return blockedMove;
   }
 
   if (!response.ok) {

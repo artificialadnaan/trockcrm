@@ -72,6 +72,20 @@ export type ContactCategory = (typeof CONTACT_CATEGORIES)[number];
 export const LEAD_STATUSES = ["open", "converted", "disqualified"] as const;
 export type LeadStatus = (typeof LEAD_STATUSES)[number];
 
+export const LEAD_SOURCE_CATEGORIES = [
+  "Data Mine",
+  "Referral",
+  "Existing",
+  "Campaign",
+  "Trade Show",
+  "Sales Prospecting",
+  "Other",
+] as const;
+export type LeadSourceCategory = (typeof LEAD_SOURCE_CATEGORIES)[number];
+
+export const COMPANY_VERIFICATION_STATUSES = ["pending", "verified", "not_required"] as const;
+export type CompanyVerificationStatus = (typeof COMPANY_VERIFICATION_STATUSES)[number];
+
 export const FORECAST_WINDOWS = [
   "30_days",
   "60_days",

@@ -69,6 +69,7 @@ import {
   routeRevisionToEstimating,
   upsertDealScopingIntake,
 } from "./scoping-service.js";
+import { writeResolvedDealFields } from "./lineage-resolver.js";
 import { inferDealBidBoardOwnership } from "./workflow-backfill.js";
 
 const router = Router();
@@ -363,6 +364,20 @@ router.patch("/:id/scoping-intake", async (req, res, next) => {
       userId: req.user!.id,
     });
     res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// PATCH /api/deals/:id/resolved-fields — write lineage-routed deal fields
+router.patch("/:id/resolved-fields", async (req, res, next) => {
+  try {
+    const resolved = await writeResolvedDealFields(req.tenantDb!, req.params.id, req.body ?? {}, {
+      userId: req.user!.id,
+      officeId: req.user!.activeOfficeId ?? req.user!.officeId,
+    });
+    await req.commitTransaction!();
+    res.json({ resolved });
   } catch (err) {
     next(err);
   }

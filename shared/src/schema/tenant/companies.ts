@@ -6,8 +6,15 @@ import {
   boolean,
   timestamp,
   index,
+  pgEnum,
 } from "drizzle-orm/pg-core";
 import { contactCategoryEnum } from "./contacts.js";
+import { COMPANY_VERIFICATION_STATUSES } from "../../types/enums.js";
+
+export const companyVerificationStatusEnum = pgEnum(
+  "company_verification_status",
+  COMPANY_VERIFICATION_STATUSES
+);
 
 export const companies = pgTable(
   "companies",
@@ -23,6 +30,11 @@ export const companies = pgTable(
     phone: varchar("phone", { length: 20 }),
     website: varchar("website", { length: 500 }),
     notes: text("notes"),
+    companyVerificationStatus: companyVerificationStatusEnum("company_verification_status"),
+    companyVerificationRequestedAt: timestamp("company_verification_requested_at", { withTimezone: true }),
+    companyVerificationEmailSentAt: timestamp("company_verification_email_sent_at", { withTimezone: true }),
+    companyVerifiedAt: timestamp("company_verified_at", { withTimezone: true }),
+    companyVerifiedBy: uuid("company_verified_by"),
     isActive: boolean("is_active").default(true).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
@@ -30,5 +42,6 @@ export const companies = pgTable(
   (table) => [
     index("companies_name_idx").on(table.name),
     index("companies_category_idx").on(table.category),
+    index("companies_verification_status_idx").on(table.companyVerificationStatus),
   ]
 );

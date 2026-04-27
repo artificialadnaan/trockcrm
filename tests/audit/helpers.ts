@@ -32,25 +32,38 @@ export async function fetchJsonWithRetry<T>(
   url: string,
   init?: Parameters<import("@playwright/test").APIRequestContext["fetch"]>[1]
 ) {
+  const lastResponse = await fetchResponseWithRetry(request, url, init);
+
+  expect(
+    lastResponse.ok(),
+    `${init?.method ?? "GET"} ${url} failed with ${lastResponse.status()}`
+  ).toBeTruthy();
+  return (await lastResponse.json()) as T;
+}
+
+export async function fetchResponseWithRetry(
+  request: import("@playwright/test").APIRequestContext,
+  url: string,
+  init?: Parameters<import("@playwright/test").APIRequestContext["fetch"]>[1]
+) {
   let lastResponse: import("@playwright/test").APIResponse | null = null;
 
-  for (let attempt = 1; attempt <= 5; attempt += 1) {
+  for (let attempt = 1; attempt <= 8; attempt += 1) {
     lastResponse = await request.fetch(url, init);
     if (lastResponse.ok()) {
-      return (await lastResponse.json()) as T;
+      return lastResponse;
     }
     if (lastResponse.status() !== 429 && lastResponse.status() < 500) {
       break;
     }
-    const backoffMs = lastResponse.status() === 429 ? 1_500 * attempt : 300 * attempt;
+    const retryAfterSeconds = Number(lastResponse.headers()["retry-after"] ?? "0");
+    const retryAfterMs = Number.isFinite(retryAfterSeconds) ? retryAfterSeconds * 1_000 : 0;
+    const backoffMs =
+      lastResponse.status() === 429 ? Math.max(retryAfterMs, 2_000 * attempt) : 300 * attempt;
     await wait(backoffMs);
   }
 
-  expect(
-    lastResponse?.ok(),
-    `${init?.method ?? "GET"} ${url} failed with ${lastResponse?.status()}`
-  ).toBeTruthy();
-  return (await lastResponse!.json()) as T;
+  return lastResponse!;
 }
 
 async function getRoleCookies(role: string) {
