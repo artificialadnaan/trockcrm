@@ -27,6 +27,8 @@ import {
   TrendingUp,
   CalendarClock,
   DollarSign,
+  FileSignature,
+  FilePen,
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -420,6 +422,23 @@ export function RepDashboardPage() {
             )}
           </CardContent>
         </Card>
+      </div>
+
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <StatCard
+          title="Contracts Signed YTD"
+          value={data.contractsSignedYtd.count}
+          subtitle={formatCurrency(data.contractsSignedYtd.totalValue)}
+          icon={<FileSignature className="h-5 w-5" />}
+          className="border-indigo-200 bg-indigo-50/70"
+        />
+        <StatCard
+          title="Contracts Signed MTD"
+          value={data.contractsSignedMtd.count}
+          subtitle={formatCurrency(data.contractsSignedMtd.totalValue)}
+          icon={<FilePen className="h-5 w-5" />}
+          className="border-indigo-200 bg-indigo-50/70"
+        />
       </div>
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-6">

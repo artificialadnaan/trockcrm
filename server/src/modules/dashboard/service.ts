@@ -1089,6 +1089,8 @@ export interface RepDashboardData {
   commissionSummary: RepCommissionSummary;
   commissionDeals: RepCommissionDealEarning[];
   activeDeals: { count: number; totalValue: number };
+  contractsSignedYtd: { count: number; totalValue: number };
+  contractsSignedMtd: { count: number; totalValue: number };
   tasksToday: { overdue: number; today: number };
   activityThisWeek: { calls: number; emails: number; meetings: number; notes: number; total: number };
   followUpCompliance: { total: number; onTime: number; complianceRate: number };
@@ -1140,9 +1142,11 @@ export async function getRepDashboard(
   weekAgo.setDate(weekAgo.getDate() - 7);
   const weekAgoStr = weekAgo.toISOString();
 
-  const year = new Date().getFullYear();
+  const now = new Date();
+  const year = now.getFullYear();
   const yearStart = `${year}-01-01`;
   const yearEnd = `${year}-12-31`;
+  const monthStart = `${year}-${String(now.getMonth() + 1).padStart(2, "0")}-01`;
 
   const [
     activeLeadResult,
@@ -1159,6 +1163,7 @@ export async function getRepDashboard(
     funnelBuckets,
     myCleanupResult,
     commissionData,
+    contractsSignedResult,
   ] = await Promise.all([
     tenantDb.execute(sql`
       SELECT COUNT(*)::int AS count
@@ -1285,6 +1290,24 @@ export async function getRepDashboard(
     getRepFunnelBuckets(tenantDb, userId),
     getMyCleanupQueue(tenantDb, userId),
     getRepCommissionSummary(tenantDb, userId),
+
+    // Contracts signed YTD + MTD for this rep. Strict semantics: we count
+    // signed contracts (contract_signed_date IS NOT NULL) and sum awarded_amount
+    // only — a deal signed without an awarded_amount contributes to count but
+    // not to totalValue, intentionally surfacing data-quality issues rather
+    // than blending in bid/dd estimates. The today guard rejects future-dated
+    // contract_signed_date so misplaced future dates don't pollute either window.
+    tenantDb.execute(sql`
+      SELECT
+        COUNT(*) FILTER (WHERE contract_signed_date >= ${yearStart}::date)::int AS ytd_count,
+        COALESCE(SUM(awarded_amount) FILTER (WHERE contract_signed_date >= ${yearStart}::date), 0)::numeric AS ytd_value,
+        COUNT(*) FILTER (WHERE contract_signed_date >= ${monthStart}::date)::int AS mtd_count,
+        COALESCE(SUM(awarded_amount) FILTER (WHERE contract_signed_date >= ${monthStart}::date), 0)::numeric AS mtd_value
+      FROM deals
+      WHERE assigned_rep_id = ${userId}
+        AND contract_signed_date IS NOT NULL
+        AND contract_signed_date <= ${today}::date
+    `),
   ]);
 
   const alRows = (activeLeadResult as any).rows ?? activeLeadResult;
@@ -1294,6 +1317,7 @@ export async function getRepDashboard(
   const plRows = (pipelineResult as any).rows ?? pipelineResult;
   const lsRows = (leadSnapshotResult as any).rows ?? leadSnapshotResult;
   const dsRows = (dealSnapshotResult as any).rows ?? dealSnapshotResult;
+  const csRows = (contractsSignedResult as any).rows ?? contractsSignedResult;
   const staleLeadAverage = staleLeadResult.length > 0
     ? Math.round(staleLeadResult.reduce((sum, lead) => sum + lead.daysInStage, 0) / staleLeadResult.length)
     : null;
@@ -1308,6 +1332,14 @@ export async function getRepDashboard(
     activeDeals: {
       count: Number(adRows[0]?.count ?? 0),
       totalValue: Number(adRows[0]?.total_value ?? 0),
+    },
+    contractsSignedYtd: {
+      count: Number(csRows[0]?.ytd_count ?? 0),
+      totalValue: Number(csRows[0]?.ytd_value ?? 0),
+    },
+    contractsSignedMtd: {
+      count: Number(csRows[0]?.mtd_count ?? 0),
+      totalValue: Number(csRows[0]?.mtd_value ?? 0),
     },
     tasksToday: {
       overdue: Number(tcRows[0]?.overdue ?? 0),

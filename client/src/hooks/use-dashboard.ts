@@ -56,6 +56,8 @@ export interface RepDashboardData {
     lastPaidAt: string | null;
   }>;
   activeDeals: { count: number; totalValue: number };
+  contractsSignedYtd: { count: number; totalValue: number };
+  contractsSignedMtd: { count: number; totalValue: number };
   tasksToday: { overdue: number; today: number };
   activityThisWeek: {
     calls: number;
@@ -154,6 +156,8 @@ const DEFAULT_REP_DASHBOARD_DATA: RepDashboardData = {
   },
   commissionDeals: [],
   activeDeals: { count: 0, totalValue: 0 },
+  contractsSignedYtd: { count: 0, totalValue: 0 },
+  contractsSignedMtd: { count: 0, totalValue: 0 },
   tasksToday: { overdue: 0, today: 0 },
   activityThisWeek: { calls: 0, emails: 0, meetings: 0, notes: 0, total: 0 },
   followUpCompliance: { total: 0, onTime: 0, complianceRate: 0 },
@@ -190,6 +194,14 @@ function normalizeRepDashboardData(data: Partial<RepDashboardData> | null | unde
     activeDeals: {
       ...DEFAULT_REP_DASHBOARD_DATA.activeDeals,
       ...(data?.activeDeals ?? {}),
+    },
+    contractsSignedYtd: {
+      ...DEFAULT_REP_DASHBOARD_DATA.contractsSignedYtd,
+      ...(data?.contractsSignedYtd ?? {}),
+    },
+    contractsSignedMtd: {
+      ...DEFAULT_REP_DASHBOARD_DATA.contractsSignedMtd,
+      ...(data?.contractsSignedMtd ?? {}),
     },
     tasksToday: {
       ...DEFAULT_REP_DASHBOARD_DATA.tasksToday,

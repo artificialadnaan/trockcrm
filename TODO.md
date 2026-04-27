@@ -40,6 +40,19 @@ These 5 tests fail on `origin/main` as of 2026-04-27. Pre-existed since merge co
 
 Provenance: pre-existed since merge commit `e7259ee`, before 2026-04-27 batch was forked, verified during rebase verification on 2026-04-27.
 
+## Test infrastructure debt
+
+- **Playwright spec for Commit 7 cards (`client/e2e/dashboard-contracts-signed-cards.spec.ts`) authored and reviewed but could not be run during Commit 7** — local Postgres infrastructure for the existing `webServer` config is not documented in the repo and was not stood up. Investigated: `.env.example` (documents `DATABASE_URL=postgresql://postgres:postgres@localhost:5432/trock_crm` but no `.env` exists in repo and port 5432 not listening); `README.md` and `scripts/README.md` (no Playwright/local-DB setup section); `package.json` scripts across all workspaces (no db/setup/migrate-dev script that would bootstrap a local DB); commit `c49640a` "test: add playwright workflow coverage" (the single commit that introduced Playwright — touched only spec/config/source, no setup docs added); no `docker-compose.yml`, `Makefile`, or `justfile`; no `playwright install`-time DB seeding hook. Spec passes visual review (4-test design with TZ-aligned `todayIso()`, fail-loud property assertion, MTD ⊆ YTD invariants, mobile viewport, admin smoke). To run: either document the existing local-DB convention (the pipeline-workflow-alignment spec must have run somehow), stand up a docker-compose for Postgres + migrations + dev-users seed, or wire `railway run --service=Postgres` into the test command (latter would require either a separate test tenant on Railway or extreme caution against polluting prod). Manual smoke check still required for Commit 7 before any T Rock demo. Surfaced 2026-04-27.
+- **Playwright dependency version mismatch:** root `package.json` pins `@playwright/test ^1.59.1` and `playwright ^1.59.1`; `client/package.json` pins `@playwright/test ^1.54.2`. Unify to a single version when next touching Playwright wiring. Surfaced 2026-04-27.
+
+## Dashboard test coverage gaps
+
+- **YTD/MTD contracts-signed cards (Commit 7).** `server/src/modules/dashboard/service.ts` FILTER-aggregate query is unit-tested via SQL-string inspection (strict semantics + future-date guard) and mock-return shape. Date-window correctness (current-month boundary, prior-year exclusion) is NOT automated — verified manually only. A future real-DB test infrastructure pass should add: (a) rep with signed contracts in current month confirms MTD ⊆ YTD with matching counts/values, (b) rep with signed contracts in prior year only confirms YTD count excludes them and MTD count is 0. Same gap exists across all dashboard `service.test.ts` mock-only tests — real-DB infra would unblock this category broadly.
+
+## Environmental quirks
+
+- **Claude Code `Edit` tool returns "Edit operation failed" reminders for successful edits in some cases.** Verified during Commit 7 that edits land correctly despite the reminder; recommended verification = grep + typecheck after every Edit call. Surfaced 2026-04-27.
+
 ## Commissions table FK delete policy
 
 - **0062 deal_signed_commissions: review FK delete behavior at production cutover (audit/legal).** Probe of applied schema (2026-04-27): `deal_id → tenant.deals(id)` is **ON DELETE CASCADE** (a hard-deleted deal wipes its booked-commission audit row — likely undesired for audit/legal); `rep_user_id → public.users(id)` and `created_by → public.users(id)` are **NO ACTION** (deleting a user with commissions will be blocked, which preserves history but breaks any user-cleanup flow). Decide at cutover: does deal hard-delete need RESTRICT or SET NULL on the commission row? Does rep_user_id need SET NULL to allow user soft-delete + rename-to-tombstone? Surfaced during 2026-04-27 CRM fixes batch Commit 6 / migration 0062 apply.
