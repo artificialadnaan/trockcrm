@@ -22,11 +22,8 @@ import { getActiveProjectTypes, getAllStages, getStageById, getStageBySlug } fro
 import { assertLeadStageTransitionAllowed, LeadStageTransitionError } from "./stage-transition-service.js";
 import { preflightLeadStageCheck } from "./stage-gate.js";
 import {
-  isAnsweredQuestionValue,
+  evaluateLeadQuestionGate,
   isLeadEditV2Enabled,
-  listLeadQuestionAnswers,
-  listMissingRequiredQuestionKeys,
-  listQuestionnaireNodes,
   upsertLeadQuestionAnswerSet,
 } from "./questionnaire-service.js";
 import { computeExistingCustomerStatus } from "../companies/customer-status-service.js";
@@ -472,22 +469,16 @@ async function assertLeadQuestionGateAllowed(
     };
   }
 ) {
-  const currentStoredAnswers = await listLeadQuestionAnswers(tenantDb, input.leadId);
-  const mergedAnswers = {
-    ...currentStoredAnswers,
-    ...input.leadQuestionAnswers,
-  };
-  const nodes = await listQuestionnaireNodes(tenantDb, input.projectTypeId);
   const existingCustomerStatus = await computeExistingCustomerStatus(tenantDb, input.companyId, new Date(), {
     excludeLeadId: input.leadId,
   });
-  const qualificationFields = ["estimated_value", "timeline_status"].filter(
-    (fieldId) => !isAnsweredQuestionValue(input.qualificationPayload[fieldId])
-  );
-  if (!isAnsweredQuestionValue(existingCustomerStatus.status)) {
-    qualificationFields.unshift("existing_customer_status");
-  }
-  const projectTypeQuestionIds = listMissingRequiredQuestionKeys(nodes, mergedAnswers);
+  const { qualificationFields, projectTypeQuestionIds } = await evaluateLeadQuestionGate(tenantDb, {
+    leadId: input.leadId,
+    projectTypeId: input.projectTypeId,
+    qualificationPayload: input.qualificationPayload,
+    leadQuestionAnswers: input.leadQuestionAnswers,
+    existingCustomerStatus: existingCustomerStatus.status,
+  });
 
   if (qualificationFields.length === 0 && projectTypeQuestionIds.length === 0) {
     return;
