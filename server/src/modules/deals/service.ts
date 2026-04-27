@@ -18,6 +18,7 @@ import type * as schema from "@trock-crm/shared/schema";
 import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { writeAuditLog } from "../../lib/audit-log.js";
+import { calculateCommissionForDeal } from "../commissions/service.js";
 import { getStageById, getStageBySlug } from "../pipeline/service.js";
 import { evaluatePostConversionEnrichment } from "./post-conversion-enrichment.js";
 
@@ -1156,9 +1157,14 @@ export async function getDealSources(tenantDb: TenantDb) {
 /**
  * Set or clear contract_signed_date on a deal. Writes an audit_log row when
  * the value actually changes. No-op (and no audit row) when the requested
- * value matches the current value. Commission calculation hooks the
- * null→date transition externally; this function is intentionally
- * commission-unaware so it can be called from any context safely.
+ * value matches the current value.
+ *
+ * On a null→date transition (and ONLY then), also calculates the booked
+ * commission for the assigned rep via calculateCommissionForDeal. The
+ * deal update + audit insert + commission calculation all run inside a
+ * single db.transaction() so a partial failure rolls back cleanly — a
+ * deal can't be marked contract-signed without its commission row, and
+ * the commission can't exist without the date.
  *
  * Caller is responsible for the RBAC gate. The route exposing this
  * function uses requireRole("admin", "director").
@@ -1169,34 +1175,48 @@ export async function setDealContractSignedDate(
   contractSignedDate: string | null,
   userId: string
 ): Promise<typeof deals.$inferSelect | null> {
-  const [existing] = await tenantDb
-    .select()
-    .from(deals)
-    .where(eq(deals.id, dealId))
-    .limit(1);
-  if (!existing) return null;
+  return tenantDb.transaction(async (tx) => {
+    const [existing] = await tx
+      .select()
+      .from(deals)
+      .where(eq(deals.id, dealId))
+      .limit(1);
+    if (!existing) return null;
 
-  const oldValue = existing.contractSignedDate ?? null;
-  const newValue = contractSignedDate ?? null;
-  if (oldValue === newValue) {
-    return existing;
-  }
+    const oldValue = existing.contractSignedDate ?? null;
+    const newValue = contractSignedDate ?? null;
+    if (oldValue === newValue) {
+      return existing;
+    }
 
-  const now = new Date();
-  const [updated] = await tenantDb
-    .update(deals)
-    .set({ contractSignedDate: newValue, updatedAt: now })
-    .where(eq(deals.id, dealId))
-    .returning();
+    const now = new Date();
+    const [updated] = await tx
+      .update(deals)
+      .set({ contractSignedDate: newValue, updatedAt: now })
+      .where(eq(deals.id, dealId))
+      .returning();
 
-  if (updated) {
-    await writeAuditLog(tenantDb, {
+    if (!updated) return null;
+
+    await writeAuditLog(tx, {
       tableName: "deals",
       recordId: dealId,
       action: "update",
       changedBy: userId,
       changes: { contractSignedDate: { from: oldValue, to: newValue } },
     });
-  }
-  return updated ?? null;
+
+    // Commission fires only on null → date. Edits and clears do not
+    // recalculate (per Decision 5; recalc-on-edit is a TODO follow-up).
+    const isInitialSign = oldValue == null && newValue != null;
+    if (isInitialSign) {
+      await calculateCommissionForDeal(tx, {
+        dealId,
+        contractSignedDate: newValue,
+        triggeredByUserId: userId,
+      });
+    }
+
+    return updated;
+  });
 }
