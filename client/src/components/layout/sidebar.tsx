@@ -32,7 +32,6 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Separator } from "@/components/ui/separator";
 
 type Role = "admin" | "director" | "rep";
 
@@ -237,9 +236,10 @@ export function Sidebar() {
         ))}
 
         {visibleDirectorItems.length > 0 && (
-          <>
-            <Separator className="my-3 bg-slate-700" />
-            <p className="px-3 text-xs text-slate-500 uppercase tracking-wider">Director</p>
+          <div className="mt-4 pt-3 border-t border-slate-700/70 space-y-1">
+            <p className="px-3 mb-1 text-[10px] font-semibold text-slate-500 uppercase tracking-[0.18em]">
+              Director
+            </p>
             {visibleDirectorItems.map((item) => (
               <NavLink
                 key={getNavItemKey(item)}
@@ -250,13 +250,14 @@ export function Sidebar() {
                 {item.label}
               </NavLink>
             ))}
-          </>
+          </div>
         )}
 
         {visibleAdminGroups.length > 0 && (
-          <>
-            <Separator className="my-3 bg-slate-700" />
-            <p className="px-3 text-xs text-slate-500 uppercase tracking-wider">Admin</p>
+          <div className="mt-4 pt-3 border-t border-slate-700/70 space-y-1">
+            <p className="px-3 mb-1 text-[10px] font-semibold text-slate-500 uppercase tracking-[0.18em]">
+              Admin
+            </p>
             {visibleAdminGroups.map((group) => (
               <div key={group.id} className="space-y-1">
                 <button
@@ -282,13 +283,14 @@ export function Sidebar() {
                 ) : null}
               </div>
             ))}
-          </>
+          </div>
         )}
 
         {visibleHelpItems.length > 0 && (
-          <>
-            <Separator className="my-3 bg-slate-700" />
-            <p className="px-3 text-xs text-slate-500 uppercase tracking-wider">Help</p>
+          <div className="mt-4 pt-3 border-t border-slate-700/70 space-y-1">
+            <p className="px-3 mb-1 text-[10px] font-semibold text-slate-500 uppercase tracking-[0.18em]">
+              Help
+            </p>
             {visibleHelpItems.map((item) => (
               <NavLink
                 key={getNavItemKey(item)}
@@ -299,7 +301,7 @@ export function Sidebar() {
                 {item.label}
               </NavLink>
             ))}
-          </>
+          </div>
         )}
       </nav>
 
