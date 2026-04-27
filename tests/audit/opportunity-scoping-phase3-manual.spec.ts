@@ -423,12 +423,22 @@ test.describe.serial("opportunity scoping phase 3 manual verification", () => {
       await screenshot(page, "13-deal-lead-tab-renders-source-lead");
 
       await page.getByRole("button", { name: "Files", exact: true }).click();
-      await expect(page.getByText(/AUDIT_TEST_lead_photo_/)).toBeVisible();
-      const files = await fetchJsonWithRetry<{ files: Array<{ originalFilename: string; leadId: string | null }> }>(
+      const files = await fetchJsonWithRetry<{
+        files: Array<{
+          displayName: string;
+          fileExtension: string;
+          originalFilename: string;
+          leadId: string | null;
+        }>;
+      }>(
         apiRequest,
         `${apiBaseURL}/api/files?dealId=${deal.id}&limit=25`
       );
-      expect(files.files.some((file) => file.leadId === lead.id && file.originalFilename.startsWith("AUDIT_TEST_lead_photo_"))).toBe(true);
+      const leadPhoto = files.files.find(
+        (file) => file.leadId === lead.id && file.originalFilename.startsWith("AUDIT_TEST_lead_photo_")
+      );
+      expect(leadPhoto).toBeDefined();
+      await expect(page.getByText(`${leadPhoto!.displayName}${leadPhoto!.fileExtension}`, { exact: true })).toBeVisible();
       await screenshot(page, "14-lead-photo-visible-on-deal-files-tab");
 
       issues.assertClean();
