@@ -1,6 +1,6 @@
-import { eq, and, desc, asc, ilike, sql, or, arrayContains } from "drizzle-orm";
+import { eq, and, desc, asc, ilike, sql, or, arrayContains, type SQL } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
-import { files, deals } from "@trock-crm/shared/schema";
+import { companies, deals, files, leads, pipelineStageConfig } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import type { FileCategory } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
@@ -38,6 +38,7 @@ interface PendingUpload {
   category: FileCategory;
   subcategory?: string;
   dealId?: string;
+  leadId?: string;
   contactId?: string;
   procoreProjectId?: number;
   changeOrderId?: string;
@@ -77,6 +78,8 @@ export interface RequestUploadInput {
   subcategory?: string;
   /** Target deal ID (at least one association required) */
   dealId?: string;
+  /** Target lead ID; lead files follow converted deals through sourceLeadId lineage */
+  leadId?: string;
   /** Target contact ID */
   contactId?: string;
   /** Target Procore project ID */
@@ -100,6 +103,7 @@ export interface ConfirmUploadInput {
 
 export interface FileFilters {
   dealId?: string;
+  leadId?: string;
   contactId?: string;
   procoreProjectId?: number;
   changeOrderId?: string;
@@ -121,6 +125,16 @@ export interface UpdateFileInput {
   category?: FileCategory;
   subcategory?: string | null;
   folderPath?: string | null;
+}
+
+export interface PhotoUploadTarget {
+  id: string;
+  type: "lead" | "opportunity" | "deal";
+  name: string;
+  recordNumber: string | null;
+  stageName: string | null;
+  companyName: string | null;
+  lastUpdatedAt: Date;
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -164,13 +178,33 @@ function validateMimeMatchesExtension(mimeType: string, extension: string): void
  */
 function validateAssociations(input: {
   dealId?: string;
+  leadId?: string;
   contactId?: string;
   procoreProjectId?: number;
   changeOrderId?: string;
 }): void {
-  if (!input.dealId && !input.contactId && !input.procoreProjectId && !input.changeOrderId) {
-    throw new AppError(400, "File must be associated with at least one entity (deal, contact, Procore project, or change order).");
+  if (!input.dealId && !input.leadId && !input.contactId && !input.procoreProjectId && !input.changeOrderId) {
+    throw new AppError(400, "File must be associated with at least one entity (lead, deal, contact, Procore project, or change order).");
   }
+}
+
+async function getDealLineageLeadId(tenantDb: TenantDb, dealId: string): Promise<string | null> {
+  const [deal] = await tenantDb
+    .select({ sourceLeadId: deals.sourceLeadId })
+    .from(deals)
+    .where(eq(deals.id, dealId))
+    .limit(1);
+
+  return deal?.sourceLeadId ?? null;
+}
+
+async function buildDealFileScopeCondition(tenantDb: TenantDb, dealId: string): Promise<SQL> {
+  const sourceLeadId = await getDealLineageLeadId(tenantDb, dealId);
+  if (!sourceLeadId) {
+    return eq(files.dealId, dealId);
+  }
+
+  return or(eq(files.dealId, dealId), eq(files.leadId, sourceLeadId))!;
 }
 
 /**
@@ -261,6 +295,7 @@ function buildR2Key(
   input: {
     dealNumber?: string;
     dealId?: string;
+    leadId?: string;
     contactId?: string;
     procoreProjectId?: number;
     changeOrderId?: string;
@@ -272,6 +307,9 @@ function buildR2Key(
 
   if (input.dealNumber) {
     return `office_${officeSlug}/deals/${input.dealNumber}/${segment}/${input.systemFilename}`;
+  }
+  if (input.leadId) {
+    return `office_${officeSlug}/leads/${input.leadId}/${segment}/${input.systemFilename}`;
   }
   if (input.contactId) {
     return `office_${officeSlug}/contacts/${input.contactId}/${segment}/${input.systemFilename}`;
@@ -366,6 +404,7 @@ export async function requestUploadUrl(
   const baseR2Key = buildR2Key(officeSlug, {
     dealNumber,
     dealId: input.dealId,
+    leadId: input.leadId,
     contactId: input.contactId,
     procoreProjectId: input.procoreProjectId,
     changeOrderId: input.changeOrderId,
@@ -401,6 +440,7 @@ export async function requestUploadUrl(
     category: input.category,
     subcategory: input.subcategory,
     dealId: input.dealId,
+    leadId: input.leadId,
     contactId: input.contactId,
     procoreProjectId: input.procoreProjectId,
     changeOrderId: input.changeOrderId,
@@ -476,6 +516,7 @@ export async function confirmUpload(
       r2Key: pending.r2Key,
       r2Bucket: bucketName,
       dealId: pending.dealId ?? null,
+      leadId: pending.leadId ?? null,
       contactId: pending.contactId ?? null,
       procoreProjectId: pending.procoreProjectId ?? null,
       changeOrderId: pending.changeOrderId ?? null,
@@ -588,14 +629,15 @@ export async function getFiles(tenantDb: TenantDb, filters: FileFilters) {
   const limit = filters.limit ?? 50;
   const offset = (page - 1) * limit;
 
-  const conditions: ReturnType<typeof eq>[] = [eq(files.isActive, true)];
+  const conditions: SQL[] = [eq(files.isActive, true)];
 
   // Fix 11: Only show latest versions — exclude files that have a newer version
   conditions.push(
     sql`NOT EXISTS (SELECT 1 FROM files f2 WHERE f2.parent_file_id = files.id AND f2.is_active = true)` as any
   );
 
-  if (filters.dealId) conditions.push(eq(files.dealId, filters.dealId));
+  if (filters.dealId) conditions.push(await buildDealFileScopeCondition(tenantDb, filters.dealId));
+  if (filters.leadId) conditions.push(eq(files.leadId, filters.leadId));
   if (filters.contactId) conditions.push(eq(files.contactId, filters.contactId));
   if (filters.procoreProjectId) conditions.push(eq(files.procoreProjectId, filters.procoreProjectId));
   if (filters.changeOrderId) conditions.push(eq(files.changeOrderId, filters.changeOrderId));
@@ -656,6 +698,92 @@ export async function getFiles(tenantDb: TenantDb, filters: FileFilters) {
     files: fileRows,
     pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
   };
+}
+
+export async function searchPhotoUploadTargets(
+  tenantDb: TenantDb,
+  input: { search?: string; limit?: number }
+): Promise<{ targets: PhotoUploadTarget[] }> {
+  const limit = Math.min(Math.max(input.limit ?? 30, 1), 60);
+  const trimmed = input.search?.trim() ?? "";
+  const term = `%${trimmed}%`;
+
+  const leadConditions: SQL[] = [];
+  const dealConditions: SQL[] = [];
+  if (trimmed.length > 0) {
+    leadConditions.push(
+      or(
+        ilike(leads.name, term),
+        ilike(companies.name, term),
+        ilike(pipelineStageConfig.name, term)
+      )!
+    );
+    dealConditions.push(
+      or(
+        ilike(deals.name, term),
+        ilike(deals.dealNumber, term),
+        ilike(companies.name, term),
+        ilike(pipelineStageConfig.name, term)
+      )!
+    );
+  }
+
+  const [leadRows, dealRows] = await Promise.all([
+    tenantDb
+      .select({
+        id: leads.id,
+        name: leads.name,
+        stageName: pipelineStageConfig.name,
+        companyName: companies.name,
+        lastUpdatedAt: leads.updatedAt,
+      })
+      .from(leads)
+      .leftJoin(companies, eq(companies.id, leads.companyId))
+      .leftJoin(pipelineStageConfig, eq(pipelineStageConfig.id, leads.stageId))
+      .where(leadConditions.length > 0 ? and(...leadConditions) : sql`true`)
+      .orderBy(desc(leads.updatedAt))
+      .limit(limit),
+    tenantDb
+      .select({
+        id: deals.id,
+        name: deals.name,
+        dealNumber: deals.dealNumber,
+        pipelineDisposition: deals.pipelineDisposition,
+        stageName: pipelineStageConfig.name,
+        companyName: companies.name,
+        lastUpdatedAt: deals.updatedAt,
+      })
+      .from(deals)
+      .leftJoin(companies, eq(companies.id, deals.companyId))
+      .leftJoin(pipelineStageConfig, eq(pipelineStageConfig.id, deals.stageId))
+      .where(dealConditions.length > 0 ? and(...dealConditions) : sql`true`)
+      .orderBy(desc(deals.updatedAt))
+      .limit(limit),
+  ]);
+
+  const targets: PhotoUploadTarget[] = [
+    ...leadRows.map((row) => ({
+      id: row.id,
+      type: "lead" as const,
+      name: row.name,
+      recordNumber: null,
+      stageName: row.stageName ?? null,
+      companyName: row.companyName ?? null,
+      lastUpdatedAt: row.lastUpdatedAt,
+    })),
+    ...dealRows.map((row) => ({
+      id: row.id,
+      type: row.pipelineDisposition === "opportunity" ? ("opportunity" as const) : ("deal" as const),
+      name: row.name,
+      recordNumber: row.dealNumber,
+      stageName: row.stageName ?? null,
+      companyName: row.companyName ?? null,
+      lastUpdatedAt: row.lastUpdatedAt,
+    })),
+  ];
+
+  targets.sort((left, right) => right.lastUpdatedAt.getTime() - left.lastUpdatedAt.getTime());
+  return { targets: targets.slice(0, limit) };
 }
 
 /**
@@ -778,8 +906,8 @@ export async function getTagSuggestions(
   tenantDb: TenantDb,
   dealId?: string
 ): Promise<string[]> {
-  const conditions: ReturnType<typeof eq>[] = [eq(files.isActive, true)];
-  if (dealId) conditions.push(eq(files.dealId, dealId));
+  const conditions: SQL[] = [eq(files.isActive, true)];
+  if (dealId) conditions.push(await buildDealFileScopeCondition(tenantDb, dealId));
 
   const result = await tenantDb
     .select({ tags: files.tags })
@@ -818,7 +946,7 @@ export async function getDealFolderTree(
       count: sql<number>`count(*)`,
     })
     .from(files)
-    .where(and(eq(files.dealId, dealId), eq(files.isActive, true)))
+    .where(and(await buildDealFileScopeCondition(tenantDb, dealId), eq(files.isActive, true)))
     .groupBy(files.folderPath);
 
   const countMap = new Map<string | null, number>();
@@ -890,7 +1018,7 @@ export async function getDealPhotoTimeline(
 
   // Fix 6: Only show latest versions — exclude photos that have a newer version
   const conditions = and(
-    eq(files.dealId, dealId),
+    await buildDealFileScopeCondition(tenantDb, dealId),
     eq(files.category, "photo"),
     eq(files.isActive, true),
     sql`NOT EXISTS (SELECT 1 FROM files f2 WHERE f2.parent_file_id = files.id AND f2.is_active = true)`

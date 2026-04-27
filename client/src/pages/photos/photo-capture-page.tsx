@@ -1,8 +1,7 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useMemo } from "react";
 import { Link } from "react-router-dom";
 import {
   Camera,
-  MapPin,
   CheckCircle,
   ArrowLeft,
   Upload,
@@ -10,12 +9,11 @@ import {
   Loader2,
   ImageIcon,
   Plus,
-  Trash2,
+  Search,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { useNearbyDeals } from "@/hooks/use-nearby-deals";
-import { uploadFile } from "@/hooks/use-files";
+import { searchPhotoUploadTargets, uploadFile, type PhotoUploadTarget } from "@/hooks/use-files";
 
 const SUBCATEGORIES = [
   "Progress",
@@ -38,10 +36,19 @@ interface QueuedPhoto {
   progress: number;
 }
 
-export function PhotoCapturePage() {
-  const { deals, autoSelectedDeal, gpsError, loading: gpsLoading } = useNearbyDeals();
+export function groupPhotoUploadTargets(targets: PhotoUploadTarget[]) {
+  return {
+    lead: targets.filter((target) => target.type === "lead"),
+    opportunity: targets.filter((target) => target.type === "opportunity"),
+    deal: targets.filter((target) => target.type === "deal"),
+  };
+}
 
-  const [selectedDealId, setSelectedDealId] = useState<string>("");
+export function PhotoCapturePage() {
+  const [targetSearch, setTargetSearch] = useState("");
+  const [targetResults, setTargetResults] = useState<PhotoUploadTarget[]>([]);
+  const [targetLoading, setTargetLoading] = useState(false);
+  const [selectedTarget, setSelectedTarget] = useState<PhotoUploadTarget | null>(null);
   const [selectedSubcategory, setSelectedSubcategory] = useState<Subcategory | null>(null);
   const [queue, setQueue] = useState<QueuedPhoto[]>([]);
   const [uploading, setUploading] = useState(false);
@@ -51,12 +58,28 @@ export function PhotoCapturePage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const blobUrlsRef = useRef<string[]>([]);
 
-  // Auto-select nearest deal
   useEffect(() => {
-    if (autoSelectedDeal && !selectedDealId) {
-      setSelectedDealId(autoSelectedDeal.id);
-    }
-  }, [autoSelectedDeal, selectedDealId]);
+    let cancelled = false;
+    setTargetLoading(true);
+    const timer = setTimeout(() => {
+      searchPhotoUploadTargets(targetSearch, 30)
+        .then((targets) => {
+          if (!cancelled) setTargetResults(targets);
+        })
+        .catch((err) => {
+          console.error("Failed to search photo targets:", err);
+          if (!cancelled) setTargetResults([]);
+        })
+        .finally(() => {
+          if (!cancelled) setTargetLoading(false);
+        });
+    }, 250);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [targetSearch]);
 
   // Clean up all tracked blob URLs on unmount
   useEffect(() => {
@@ -110,7 +133,7 @@ export function PhotoCapturePage() {
   }
 
   async function handleUploadAll() {
-    if (!selectedDealId || queue.length === 0) return;
+    if (!selectedTarget || queue.length === 0) return;
 
     setUploading(true);
     const pending = queue.filter((p) => p.status === "pending" || p.status === "error");
@@ -127,7 +150,8 @@ export function PhotoCapturePage() {
           file: photo.file,
           category: "photo",
           subcategory: selectedSubcategory?.toLowerCase() || undefined,
-          dealId: selectedDealId,
+          dealId: selectedTarget.type === "lead" ? undefined : selectedTarget.id,
+          leadId: selectedTarget.type === "lead" ? selectedTarget.id : undefined,
           description: photo.note || undefined,
           tags: ["field-capture"],
           onProgress: (pct) => {
@@ -171,7 +195,11 @@ export function PhotoCapturePage() {
   // ─── Derived ──────────────────────────────────────────────────────────
 
   const pendingCount = queue.filter((p) => p.status === "pending" || p.status === "error").length;
-  const canUpload = pendingCount > 0 && !!selectedDealId && !uploading;
+  const canUpload = pendingCount > 0 && !!selectedTarget && !uploading;
+  const groupedTargets = useMemo(
+    () => groupPhotoUploadTargets(targetResults),
+    [targetResults]
+  );
 
   return (
     <div className="fixed inset-0 flex flex-col bg-[#111] text-white">
@@ -197,37 +225,82 @@ export function PhotoCapturePage() {
             <label className="text-xs font-medium text-white/50 uppercase tracking-wider">
               Project
             </label>
-            <div className="flex items-center gap-2 text-xs text-white/40">
-              {gpsLoading ? (
-                <>
-                  <Loader2 className="h-3 w-3 animate-spin" />
-                  <span>Detecting location...</span>
-                </>
-              ) : gpsError ? (
-                <>
-                  <MapPin className="h-3 w-3 text-amber-400" />
-                  <span className="text-amber-400">GPS unavailable — showing all projects</span>
-                </>
-              ) : autoSelectedDeal ? (
-                <>
-                  <MapPin className="h-3 w-3 text-emerald-400" />
-                  <span className="text-emerald-400">Nearest auto-selected</span>
-                </>
-              ) : null}
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-white/40" />
+              <Input
+                value={targetSearch}
+                onChange={(event) => setTargetSearch(event.target.value)}
+                placeholder="Search leads, opportunities, and deals"
+                className="h-11 border-white/20 bg-white/5 pl-9 text-white placeholder:text-white/30 focus-visible:ring-[#CC0000]/50"
+              />
             </div>
-            <select
-              value={selectedDealId}
-              onChange={(e) => setSelectedDealId(e.target.value)}
-              className="w-full rounded-lg border border-white/20 bg-white/5 px-3 py-3 text-sm text-white appearance-none focus:outline-none focus:ring-2 focus:ring-[#CC0000]/50 focus:border-[#CC0000]"
-            >
-              <option value="" className="bg-[#222] text-white">Select a project...</option>
-              {deals.map((deal) => (
-                <option key={deal.id} value={deal.id} className="bg-[#222] text-white">
-                  {deal.name}
-                  {deal.distance >= 0 ? ` — ${deal.distance.toFixed(1)} mi` : ""}
-                </option>
-              ))}
-            </select>
+            {selectedTarget ? (
+              <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-3 py-2">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-semibold text-emerald-100">{selectedTarget.name}</p>
+                    <p className="mt-0.5 truncate text-xs text-emerald-200/70">
+                      {selectedTarget.recordNumber ? `${selectedTarget.recordNumber} · ` : ""}
+                      {selectedTarget.stageName ?? "No stage"}
+                      {selectedTarget.companyName ? ` · ${selectedTarget.companyName}` : ""}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedTarget(null)}
+                    className="shrink-0 rounded-full p-1 text-emerald-100/70 hover:bg-white/10 hover:text-white"
+                    aria-label="Clear selected project"
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="max-h-72 overflow-y-auto rounded-xl border border-white/10 bg-white/[0.03]">
+                {targetLoading ? (
+                  <div className="flex items-center gap-2 px-3 py-4 text-sm text-white/50">
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    Searching
+                  </div>
+                ) : targetResults.length === 0 ? (
+                  <p className="px-3 py-4 text-sm text-white/50">No matching records</p>
+                ) : (
+                  ([
+                    ["lead", "Leads", groupedTargets.lead],
+                    ["opportunity", "Opportunities", groupedTargets.opportunity],
+                    ["deal", "Deals", groupedTargets.deal],
+                  ] as const).map(([, label, targets]) =>
+                    targets.length > 0 ? (
+                      <div key={label} className="border-b border-white/10 last:border-b-0">
+                        <p className="px-3 pb-1 pt-3 text-[10px] font-bold uppercase tracking-widest text-white/40">
+                          {label}
+                        </p>
+                        {targets.map((target) => (
+                          <button
+                            key={`${target.type}-${target.id}`}
+                            type="button"
+                            onClick={() => {
+                              setSelectedTarget(target);
+                              setTargetSearch(target.name);
+                            }}
+                            className="w-full px-3 py-2 text-left transition-colors hover:bg-white/10"
+                          >
+                            <p className="truncate text-sm font-medium text-white">{target.name}</p>
+                            <p className="mt-0.5 truncate text-xs text-white/45">
+                              {target.recordNumber ? `${target.recordNumber} · ` : ""}
+                              {target.stageName ?? "No stage"}
+                              {target.companyName ? ` · ${target.companyName}` : ""}
+                              {" · "}
+                              {new Date(target.lastUpdatedAt).toLocaleDateString()}
+                            </p>
+                          </button>
+                        ))}
+                      </div>
+                    ) : null
+                  )
+                )}
+              </div>
+            )}
           </div>
 
           {/* Subcategory Quick Tags */}
@@ -268,21 +341,21 @@ export function PhotoCapturePage() {
             <button
               type="button"
               onClick={() => fileInputRef.current?.click()}
-              disabled={!selectedDealId}
+              disabled={!selectedTarget}
               className={`relative flex items-center justify-center rounded-full h-24 w-24 transition-all ${
-                selectedDealId
+                selectedTarget
                   ? "bg-gradient-to-br from-[#CC0000] to-[#880000] shadow-lg shadow-[#CC0000]/25 active:scale-95"
                   : "bg-white/10 cursor-not-allowed"
               }`}
             >
               {queue.length > 0 ? (
-                <Plus className={`h-10 w-10 ${selectedDealId ? "text-white" : "text-white/30"}`} />
+                <Plus className={`h-10 w-10 ${selectedTarget ? "text-white" : "text-white/30"}`} />
               ) : (
-                <Camera className={`h-10 w-10 ${selectedDealId ? "text-white" : "text-white/30"}`} />
+                <Camera className={`h-10 w-10 ${selectedTarget ? "text-white" : "text-white/30"}`} />
               )}
             </button>
             <p className="text-sm text-white/40 mt-3">
-              {!selectedDealId
+              {!selectedTarget
                 ? "Select a project to start"
                 : queue.length > 0
                 ? "Tap to add more photos"
@@ -420,9 +493,9 @@ export function PhotoCapturePage() {
                 <ImageIcon className="h-4 w-4" />
                 <span>{sessionCount} uploaded this session</span>
               </div>
-              {selectedDealId && (
+              {selectedTarget && (
                 <p className="text-xs text-white/30 truncate max-w-[180px]">
-                  {deals.find((d) => d.id === selectedDealId)?.name}
+                  {selectedTarget.name}
                 </p>
               )}
             </div>

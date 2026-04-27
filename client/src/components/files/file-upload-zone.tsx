@@ -15,6 +15,7 @@ interface FileUploadZoneProps {
   category: FileCategory;
   subcategory?: string;
   dealId?: string;
+  leadId?: string;
   contactId?: string;
   tags?: string[];
   onUploadComplete?: () => void;
@@ -35,6 +36,7 @@ export function FileUploadZone({
   category,
   subcategory,
   dealId,
+  leadId,
   contactId,
   tags,
   onUploadComplete,
@@ -106,6 +108,7 @@ export function FileUploadZone({
             category,
             subcategory,
             dealId,
+            leadId,
             contactId,
             tags,
             onProgress: (percent) => {
@@ -145,7 +148,7 @@ export function FileUploadZone({
         onUploadComplete?.();
       }
     },
-    [category, subcategory, dealId, contactId, tags, onUploadComplete, dealNumber]
+    [category, subcategory, dealId, leadId, contactId, tags, onUploadComplete, dealNumber]
   );
 
   const handleDrop = useCallback(

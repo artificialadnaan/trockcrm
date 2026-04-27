@@ -19,6 +19,7 @@ export interface FileRecord {
   r2Key: string;
   r2Bucket: string;
   dealId: string | null;
+  leadId: string | null;
   intakeSection?: string | null;
   intakeRequirementKey?: string | null;
   intakeSource?: string | null;
@@ -40,6 +41,7 @@ export interface FileRecord {
 
 export interface FileFilters {
   dealId?: string;
+  leadId?: string;
   contactId?: string;
   category?: FileCategory;
   folderPath?: string;
@@ -64,6 +66,16 @@ export interface FolderNode {
   category: FileCategory;
   count: number;
   subfolders: Array<{ name: string; path: string; count: number }>;
+}
+
+export interface PhotoUploadTarget {
+  id: string;
+  type: "lead" | "opportunity" | "deal";
+  name: string;
+  recordNumber: string | null;
+  stageName: string | null;
+  companyName: string | null;
+  lastUpdatedAt: string;
 }
 
 // ─── Hooks ───────────────────────────────────────────────────────────────────
@@ -99,6 +111,7 @@ export function useFiles(filters: FileFilters = {}, options?: { enabled?: boolea
     try {
       const params = new URLSearchParams();
       if (filters.dealId) params.set("dealId", filters.dealId);
+      if (filters.leadId) params.set("leadId", filters.leadId);
       if (filters.contactId) params.set("contactId", filters.contactId);
       if (filters.category) params.set("category", filters.category);
       if (filters.folderPath) params.set("folderPath", filters.folderPath);
@@ -123,6 +136,7 @@ export function useFiles(filters: FileFilters = {}, options?: { enabled?: boolea
   }, [
     enabled,
     filters.dealId,
+    filters.leadId,
     filters.contactId,
     filters.category,
     filters.folderPath,
@@ -268,6 +282,7 @@ export interface UploadFileInput {
   category: FileCategory;
   subcategory?: string;
   dealId?: string;
+  leadId?: string;
   contactId?: string;
   procoreProjectId?: number;
   changeOrderId?: string;
@@ -287,6 +302,7 @@ export async function uploadFile(input: UploadFileInput): Promise<FileRecord> {
     category,
     subcategory,
     dealId,
+    leadId,
     contactId,
     description,
     tags,
@@ -309,6 +325,7 @@ export async function uploadFile(input: UploadFileInput): Promise<FileRecord> {
     xhr.setRequestHeader("X-File-Category", category);
     if (subcategory) xhr.setRequestHeader("X-File-Subcategory", subcategory);
     if (dealId) xhr.setRequestHeader("X-Deal-Id", dealId);
+    if (leadId) xhr.setRequestHeader("X-Lead-Id", leadId);
     if (contactId) xhr.setRequestHeader("X-Contact-Id", contactId);
     if (description) xhr.setRequestHeader("X-File-Description", description);
     if (tags && tags.length > 0) xhr.setRequestHeader("X-File-Tags", tags.join(","));
@@ -343,6 +360,14 @@ export async function uploadFile(input: UploadFileInput): Promise<FileRecord> {
     xhr.onerror = () => reject(new Error("Upload failed: network error"));
     xhr.send(file);
   });
+}
+
+export async function searchPhotoUploadTargets(search: string, limit = 30): Promise<PhotoUploadTarget[]> {
+  const params = new URLSearchParams();
+  if (search.trim()) params.set("search", search.trim());
+  params.set("limit", String(limit));
+  const data = await api<{ targets: PhotoUploadTarget[] }>(`/files/photo-targets/search?${params.toString()}`);
+  return data.targets;
 }
 
 /**
