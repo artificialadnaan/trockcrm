@@ -486,6 +486,7 @@ router.post("/", async (req, res, next) => {
       name,
       stageId,
       assignedRepId: repId,
+      actorUserId: req.user!.id,
       officeId: req.user!.activeOfficeId,
       ...rest,
     });
@@ -531,11 +532,6 @@ router.patch("/:id", async (req, res, next) => {
     const body = { ...req.body };
     validateDealPayload(body);
     delete body.migrationMode;
-
-    // Reps cannot change assignedRepId (reassign deals)
-    if (req.user!.role === "rep" && body.assignedRepId !== undefined) {
-      delete body.assignedRepId;
-    }
 
     const priorDeal =
       body.proposalStatus === "revision_requested"

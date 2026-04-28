@@ -450,7 +450,7 @@ export function DealDetailPage() {
           {isBidBoardOwned && bidBoardOwnership && (
             <BidBoardReadOnlySummary ownership={bidBoardOwnership} />
           )}
-          <DealOverviewTab deal={deal} />
+          <DealOverviewTab deal={deal} onDealUpdated={refetch} />
         </div>
       )}
       {activeTab === "lead" && (

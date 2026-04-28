@@ -100,6 +100,7 @@ export interface Deal {
   pipelineDisposition: DealPipelineDisposition;
   workflowRoute: WorkflowRoute | null;
   assignedRepId: string;
+  assignedRepName?: string | null;
   companyId: string | null;
   propertyId: string | null;
   sourceLeadId: string | null;

@@ -6,7 +6,7 @@ interface User {
   id: string;
   email: string;
   displayName: string;
-  role: "admin" | "director" | "rep";
+  role: "admin" | "director" | "sales_manager" | "rep";
   officeId: string;
   activeOfficeId?: string;
   mustChangePassword?: boolean;

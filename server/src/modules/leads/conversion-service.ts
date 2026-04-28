@@ -223,6 +223,7 @@ export function createLeadConversionService(
       stageId: resolvedDealStageId,
       workflowRoute,
       assignedRepId: successorAssignedRepId,
+      actorUserId: input.userId,
       officeId: input.officeId,
       primaryContactId:
         input.primaryContactId === undefined

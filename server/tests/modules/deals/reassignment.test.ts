@@ -10,6 +10,7 @@ const { createAssignmentTaskIfNeeded } = await import(
 const { updateDeal } = await import("../../../src/modules/deals/service.js");
 
 function createDealDb() {
+  const insertedValues: unknown[] = [];
   const queue: unknown[] = [
     [
       {
@@ -65,7 +66,14 @@ function createDealDb() {
     })),
   }));
 
-  return { select, update };
+  const insert = vi.fn(() => ({
+    values: vi.fn(async (value: unknown) => {
+      insertedValues.push(value);
+      return [];
+    }),
+  }));
+
+  return { select, update, insert, insertedValues };
 }
 
 describe("deal reassignment tasking", () => {
@@ -96,6 +104,33 @@ describe("deal reassignment tasking", () => {
         nextAssignedRepId: "rep-new",
         actorUserId: "director-1",
       })
+    );
+    expect(tenantDb.insertedValues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          tableName: "deal_history",
+          recordId: "deal-1",
+          changedBy: "director-1",
+          changes: {
+            assignedRepId: { from: "rep-old", to: "rep-new" },
+          },
+          fullRow: expect.objectContaining({
+            oldRepId: "rep-old",
+            newRepId: "rep-new",
+            changedBy: "director-1",
+          }),
+        }),
+        expect.objectContaining({
+          jobType: "domain_event",
+          payload: expect.objectContaining({
+            eventName: "deal.assignment.changed",
+            oldRepId: "rep-old",
+            newRepId: "rep-new",
+            changedBy: "director-1",
+            propagationChannel: "synchub_bid_board",
+          }),
+        }),
+      ])
     );
   });
 });
