@@ -92,11 +92,14 @@ export function PipelineBoard({
   };
 
   return (
-    <DndContext sensors={sensors} onDragStart={handleDragStart} onDragEnd={handleDragEnd}>
-      <div className="overflow-x-auto rounded-[2rem] border border-slate-200/80 bg-[#eef2f6] px-4 py-5 shadow-sm">
+    <DndContext sensors={sensors} autoScroll onDragStart={handleDragStart} onDragEnd={handleDragEnd}>
+      <div
+        className="h-[calc(100vh-var(--pipeline-board-header-offset,12rem))] overflow-x-auto rounded-[2rem] border border-slate-200/80 bg-[#eef2f6] px-4 py-5 shadow-sm touch-pan-x"
+        style={{ height: "calc(100vh - var(--pipeline-board-header-offset, 12rem))" }}
+      >
         <div
           className={cn(
-            "flex min-w-max gap-4 pb-2",
+            "flex h-full min-w-max gap-4 pb-2",
             columns.length <= 4 ? "justify-between" : ""
           )}
         >

@@ -15,6 +15,7 @@ import {
   isBidBoardOwnedDownstreamStage,
   createDeal,
   updateDeal,
+  startProposalDraft,
   deleteDeal,
   getDealsForPipeline,
   listDealStagePage,
@@ -176,6 +177,10 @@ function emitLocalDealEvents(
       console.error(`[Deals] Failed to emit local event ${event.name}:`, eventErr);
     }
   }
+}
+
+function isProposalDraftingEnabled() {
+  return process.env.PROPOSAL_DRAFTING_ENABLED === "true";
 }
 
 // GET /api/deals — list deals (paginated, filtered, sorted)
@@ -486,6 +491,7 @@ router.post("/", async (req, res, next) => {
       name,
       stageId,
       assignedRepId: repId,
+      actorUserId: req.user!.id,
       officeId: req.user!.activeOfficeId,
       ...rest,
     });
@@ -525,17 +531,32 @@ router.patch(
   }
 );
 
+// POST /api/deals/:id/proposal-draft - create a draft proposal handoff
+router.post("/:id/proposal-draft", async (req, res, next) => {
+  try {
+    if (!isProposalDraftingEnabled()) {
+      throw new AppError(404, "Proposal drafting is not enabled");
+    }
+
+    const deal = await startProposalDraft(
+      req.tenantDb!,
+      req.params.id,
+      req.user!.role,
+      req.user!.id
+    );
+    await req.commitTransaction!();
+    res.status(201).json({ deal });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // PATCH /api/deals/:id — update deal fields (not stage)
 router.patch("/:id", async (req, res, next) => {
   try {
     const body = { ...req.body };
     validateDealPayload(body);
     delete body.migrationMode;
-
-    // Reps cannot change assignedRepId (reassign deals)
-    if (req.user!.role === "rep" && body.assignedRepId !== undefined) {
-      delete body.assignedRepId;
-    }
 
     const priorDeal =
       body.proposalStatus === "revision_requested"

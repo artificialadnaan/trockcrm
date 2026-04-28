@@ -57,6 +57,7 @@ export interface CreateLeadInput {
   propertyId: string;
   stageId: string;
   assignedRepId: string;
+  salesRepId?: string | null;
   officeId?: string;
   primaryContactId?: string;
   name: string;
@@ -78,6 +79,7 @@ export interface CreateLeadInput {
 export interface UpdateLeadInput {
   stageId?: string;
   assignedRepId?: string;
+  salesRepId?: string | null;
   officeId?: string;
   primaryContactId?: string | null;
   name?: string;
@@ -550,6 +552,19 @@ async function validateAssignee(tenantDb: TenantDb, assigneeId: string, officeId
   }
 }
 
+async function validateOptionalUserId(
+  tenantDb: TenantDb,
+  userId: unknown,
+  fieldName: string,
+  officeId?: string
+) {
+  if (userId === undefined || userId === null) return;
+  if (typeof userId !== "string" || !userId.trim()) {
+    throw new AppError(400, `${fieldName} must be a valid user id or null`);
+  }
+  await validateAssignee(tenantDb, userId, officeId);
+}
+
 async function validateLeadHierarchy(
   tenantDb: TenantDb,
   input: Pick<CreateLeadInput, "companyId" | "propertyId" | "primaryContactId">
@@ -953,6 +968,7 @@ export function createLeadService(
 
     await validateLeadHierarchy(tenantDb, input);
     await validateAssignee(tenantDb, input.assignedRepId, input.officeId);
+    await validateOptionalUserId(tenantDb, input.salesRepId, "salesRepId", input.officeId);
     await resolveProjectType(input.projectTypeId ?? null, deps.getActiveProjectTypes);
     const officeCode = assertValidOfficeCode(input.officeCode);
     const projectType = assertValidProjectType(input.projectType);
@@ -1014,6 +1030,7 @@ export function createLeadService(
         name: input.name,
         stageId: resolvedStageId,
         assignedRepId: input.assignedRepId,
+        salesRepId: input.salesRepId ?? null,
         status: "open",
         source: v2Enabled ? null : input.source ?? null,
         sourceCategory: sourceWrite.sourceCategory,
@@ -1279,6 +1296,11 @@ export function createLeadService(
     if (input.assignedRepId !== undefined) {
       await validateAssignee(tenantDb, input.assignedRepId, input.officeId);
       updates.assignedRepId = input.assignedRepId;
+    }
+
+    if (input.salesRepId !== undefined) {
+      await validateOptionalUserId(tenantDb, input.salesRepId, "salesRepId", input.officeId);
+      updates.salesRepId = input.salesRepId;
     }
 
     if (input.primaryContactId !== undefined) {

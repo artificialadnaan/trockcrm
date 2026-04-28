@@ -1,13 +1,9 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { Plus, Trash2, ChevronDown, ChevronRight, Calculator } from "lucide-react";
+import { Plus, Trash2, ChevronDown, ChevronRight, Calculator, FileDown } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { api } from "@/lib/api";
-import {
-  EstimatingWorkflowShell,
-  type EstimatingWorkflowState,
-} from "@/components/estimating/estimating-workflow-shell";
 
 interface EstimateItem {
   id: string;
@@ -36,55 +32,23 @@ const fmt = (value: string | number) =>
 
 interface DealEstimatesTabProps {
   dealId: string;
+  proposalMode?: boolean;
 }
 
-export function DealEstimatesTab({ dealId }: DealEstimatesTabProps) {
+export function DealEstimatesTab({ dealId, proposalMode = false }: DealEstimatesTabProps) {
   const [sections, setSections] = useState<EstimateSection[]>([]);
-  const [workflow, setWorkflow] = useState<EstimatingWorkflowState>({
-    documents: [],
-    extractionRows: [],
-    matchRows: [],
-    pricingRows: [],
-    reviewEvents: [],
-    summary: {
-      documents: { total: 0, queued: 0, failed: 0 },
-      extractions: {
-        total: 0,
-        pending: 0,
-        approved: 0,
-        rejected: 0,
-        unmatched: 0,
-      },
-      matches: { total: 0, suggested: 0, selected: 0, rejected: 0 },
-      pricing: {
-        total: 0,
-        pending: 0,
-        approved: 0,
-        overridden: 0,
-        rejected: 0,
-        readyToPromote: 0,
-      },
-    },
-    promotionReadiness: {
-      canPromote: false,
-      generationRunIds: [],
-    },
-  });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   const [addingSection, setAddingSection] = useState(false);
   const [newSectionName, setNewSectionName] = useState("");
+  const [taxRate, setTaxRate] = useState("0");
 
   const fetchEstimates = useCallback(async () => {
     setLoading(true);
     try {
-      const [estimateData, workflowData] = await Promise.all([
-        api<{ sections: EstimateSection[] }>(`/deals/${dealId}/estimates`),
-        api<EstimatingWorkflowState>(`/deals/${dealId}/estimating`),
-      ]);
+      const estimateData = await api<{ sections: EstimateSection[] }>(`/deals/${dealId}/estimates`);
       setSections(estimateData.sections);
-      setWorkflow(workflowData);
       setError(null);
     } catch (err: unknown) {
       toast.error(err instanceof Error ? err.message : "Failed to load estimates");
@@ -102,6 +66,7 @@ export function DealEstimatesTab({ dealId }: DealEstimatesTabProps) {
     (sum, s) => sum + (parseFloat(s.subtotal) || 0),
     0
   );
+  const totals = calculateEstimateTotals(sections, taxRate);
 
   const toggleCollapse = (sectionId: string) => {
     setCollapsed((prev) => ({ ...prev, [sectionId]: !prev[sectionId] }));
@@ -120,6 +85,14 @@ export function DealEstimatesTab({ dealId }: DealEstimatesTabProps) {
       fetchEstimates();
     } catch (err: unknown) {
       toast.error(err instanceof Error ? err.message : "Failed to create section");
+    }
+  };
+
+  const handleExportPdf = () => {
+    try {
+      exportEstimatePdf({ dealId, sections, taxRate });
+    } catch (err: unknown) {
+      toast.error(err instanceof Error ? err.message : "Failed to export PDF");
     }
   };
 
@@ -162,17 +135,43 @@ export function DealEstimatesTab({ dealId }: DealEstimatesTabProps) {
 
   return (
     <div className="space-y-4">
-      <EstimatingWorkflowShell
-        dealId={dealId}
-        workflow={workflow}
-        onRefresh={fetchEstimates}
-        copilotEnabled
-      />
+      <div className="flex flex-wrap items-end justify-between gap-3 rounded-lg border bg-background p-4">
+        <div>
+          <h3 className="text-sm font-semibold">{proposalMode ? "Proposal Draft" : "Estimate"}</h3>
+          <p className="text-sm text-muted-foreground">
+            {proposalMode
+              ? "Use estimate line items as the starting point for the client proposal."
+              : "Build line items, review tax, and export a client-ready PDF."}
+          </p>
+        </div>
+        <div className="flex flex-wrap items-end gap-2">
+          <label className="space-y-1 text-xs font-medium text-muted-foreground">
+            Tax rate %
+            <Input
+              value={taxRate}
+              onChange={(event) => setTaxRate(event.target.value)}
+              inputMode="decimal"
+              className="h-8 w-24 text-right"
+              aria-label="Tax rate percent"
+            />
+          </label>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleExportPdf}
+            disabled={sections.length === 0}
+          >
+            <FileDown className="h-4 w-4 mr-1" />
+            Export PDF
+          </Button>
+        </div>
+      </div>
       {sections.length === 0 && !addingSection ? (
         <div className="text-center py-12 border rounded-lg bg-muted/20">
           <Calculator className="h-8 w-8 text-muted-foreground mx-auto mb-3" />
+          <h4 className="text-sm font-semibold text-foreground">No estimate line items yet</h4>
           <p className="text-sm text-muted-foreground mb-3">
-            No estimates yet. Add a section to get started.
+            Add a section, then enter quantities and unit prices to build the estimate.
           </p>
           <Button size="sm" onClick={() => setAddingSection(true)}>
             <Plus className="h-4 w-4 mr-1" />
@@ -235,10 +234,20 @@ export function DealEstimatesTab({ dealId }: DealEstimatesTabProps) {
           )}
 
           {sections.length > 0 && (
-            <div className="flex items-center justify-end border-t pt-4">
-              <div className="text-right">
-                <p className="text-sm text-muted-foreground">Grand Total</p>
-                <p className="text-2xl font-bold">{fmt(grandTotal)}</p>
+            <div className="flex justify-end border-t pt-4">
+              <div className="w-full max-w-xs space-y-2 text-sm">
+                <div className="flex items-center justify-between">
+                  <span className="text-muted-foreground">Subtotal</span>
+                  <span className="font-medium">{fmt(grandTotal)}</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-muted-foreground">Tax ({totals.taxRatePercent.toFixed(2)}%)</span>
+                  <span className="font-medium">{fmt(totals.taxAmount)}</span>
+                </div>
+                <div className="flex items-center justify-between border-t pt-2">
+                  <span className="text-sm font-semibold">Grand Total</span>
+                  <span className="text-2xl font-bold">{fmt(totals.total)}</span>
+                </div>
               </div>
             </div>
           )}
@@ -326,7 +335,6 @@ function SectionBlock({
 
   return (
     <div className="border rounded-lg overflow-hidden">
-      {/* Section header */}
       <div className="flex items-center gap-2 px-4 py-3 bg-muted/30 border-b">
         <button
           onClick={onToggle}
@@ -377,7 +385,6 @@ function SectionBlock({
         </button>
       </div>
 
-      {/* Items table */}
       {!collapsed && (
         <div className="overflow-x-auto">
           {section.items.length > 0 && (
@@ -416,7 +423,6 @@ function SectionBlock({
             </table>
           )}
 
-          {/* Add item row */}
           {addingItem ? (
             <div className="px-4 py-3 border-t bg-muted/10 flex items-center gap-2 flex-wrap">
               <Input
@@ -478,6 +484,119 @@ function SectionBlock({
       )}
     </div>
   );
+}
+
+export function calculateEstimateTotals(sections: EstimateSection[], taxRateInput: string | number) {
+  const subtotal = sections.reduce((sum, section) => sum + (parseFloat(section.subtotal) || 0), 0);
+  const taxRatePercent =
+    typeof taxRateInput === "number" ? taxRateInput : parseFloat(taxRateInput.replace("%", ""));
+  const normalizedTaxRate = Number.isFinite(taxRatePercent) ? Math.max(0, taxRatePercent) : 0;
+  const taxAmount = subtotal * (normalizedTaxRate / 100);
+
+  return {
+    subtotal,
+    taxRatePercent: normalizedTaxRate,
+    taxAmount,
+    total: subtotal + taxAmount,
+  };
+}
+
+export function buildEstimatePdfHtml({
+  dealId,
+  sections,
+  taxRate,
+}: {
+  dealId: string;
+  sections: EstimateSection[];
+  taxRate: string | number;
+}) {
+  const totals = calculateEstimateTotals(sections, taxRate);
+  const rows = sections
+    .map(
+      (section) => `
+        <h2>${escapeHtml(section.name)}</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Description</th>
+              <th>Qty</th>
+              <th>Unit</th>
+              <th>Unit Price</th>
+              <th>Total</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${section.items
+              .map(
+                (item) => `
+                  <tr>
+                    <td>${escapeHtml(item.description)}</td>
+                    <td>${escapeHtml(item.quantity)}</td>
+                    <td>${escapeHtml(item.unit)}</td>
+                    <td>${fmt(item.unitPrice)}</td>
+                    <td>${fmt(item.totalPrice)}</td>
+                  </tr>
+                `
+              )
+              .join("")}
+          </tbody>
+        </table>
+        <p class="section-total">Section subtotal: ${fmt(section.subtotal)}</p>
+      `
+    )
+    .join("");
+
+  return `<!doctype html>
+    <html>
+      <head>
+        <title>Estimate ${escapeHtml(dealId)}</title>
+        <style>
+          body { font-family: Arial, sans-serif; color: #0f172a; margin: 32px; }
+          h1 { font-size: 24px; margin-bottom: 4px; }
+          h2 { font-size: 16px; margin: 28px 0 8px; }
+          table { width: 100%; border-collapse: collapse; }
+          th, td { border-bottom: 1px solid #e2e8f0; padding: 8px; text-align: left; font-size: 12px; }
+          th:nth-child(n+2), td:nth-child(n+2) { text-align: right; }
+          .section-total, .totals { text-align: right; font-weight: 700; }
+          .totals { margin-top: 24px; line-height: 1.8; }
+        </style>
+      </head>
+      <body>
+        <h1>Estimate</h1>
+        <p>Deal ${escapeHtml(dealId)}</p>
+        ${rows}
+        <div class="totals">
+          <div>Subtotal: ${fmt(totals.subtotal)}</div>
+          <div>Tax (${totals.taxRatePercent.toFixed(2)}%): ${fmt(totals.taxAmount)}</div>
+          <div>Grand Total: ${fmt(totals.total)}</div>
+        </div>
+      </body>
+    </html>`;
+}
+
+export function exportEstimatePdf(input: {
+  dealId: string;
+  sections: EstimateSection[];
+  taxRate: string | number;
+}) {
+  if (input.sections.length === 0) throw new Error("Add at least one section before exporting");
+  const printWindow = window.open("", "_blank", "noopener,noreferrer");
+  if (!printWindow) throw new Error("Enable popups to export the estimate PDF");
+
+  printWindow.document.open();
+  printWindow.document.write(buildEstimatePdfHtml(input));
+  printWindow.document.close();
+  printWindow.focus();
+  printWindow.print();
+}
+
+function escapeHtml(value: string | number | null | undefined) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 function ItemRow({

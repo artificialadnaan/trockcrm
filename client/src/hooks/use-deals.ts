@@ -100,6 +100,7 @@ export interface Deal {
   pipelineDisposition: DealPipelineDisposition;
   workflowRoute: WorkflowRoute | null;
   assignedRepId: string;
+  assignedRepName?: string | null;
   companyId: string | null;
   propertyId: string | null;
   sourceLeadId: string | null;
@@ -163,6 +164,7 @@ export interface Deal {
 
 export interface DealDetail extends Deal {
   proposalStatus: string | null;
+  proposalDraftStartedAt: string | null;
   proposalSentAt: string | null;
   proposalAcceptedAt: string | null;
   proposalRevisionCount: number | null;

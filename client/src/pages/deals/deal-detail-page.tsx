@@ -268,6 +268,15 @@ export function DealDetailPage() {
     setSearchParams(nextParams, { replace: true });
   };
 
+  const handleOpenProposalEditor = () => {
+    setActiveTab("estimates");
+    const nextParams = new URLSearchParams(searchParams);
+    nextParams.set("tab", "estimates");
+    nextParams.set("mode", "proposal");
+    nextParams.delete("focus");
+    setSearchParams(nextParams, { replace: true });
+  };
+
   return (
     <div className="space-y-4">
       {/* Header */}
@@ -438,7 +447,11 @@ export function DealDetailPage() {
       {activeTab === "overview" && (
         <div className="space-y-4">
           {isEstimatingBoundaryStageSlug(currentStageSlug, workflowRoute) && !isBidBoardOwned && (
-            <DealProposalCard deal={deal} onUpdate={refetch} />
+            <DealProposalCard
+              deal={deal}
+              onUpdate={refetch}
+              onOpenProposalEditor={handleOpenProposalEditor}
+            />
           )}
           {!isBidBoardOwned && (
             <DealContractSignedCard
@@ -450,7 +463,7 @@ export function DealDetailPage() {
           {isBidBoardOwned && bidBoardOwnership && (
             <BidBoardReadOnlySummary ownership={bidBoardOwnership} />
           )}
-          <DealOverviewTab deal={deal} />
+          <DealOverviewTab deal={deal} onDealUpdated={refetch} />
         </div>
       )}
       {activeTab === "lead" && (
@@ -481,7 +494,12 @@ export function DealDetailPage() {
       {activeTab === "team" && (
         <DealTeamTab dealId={deal.id} onCountChange={setTeamCount} />
       )}
-      {activeTab === "estimates" && <DealEstimatesTab dealId={deal.id} />}
+      {activeTab === "estimates" && (
+        <DealEstimatesTab
+          dealId={deal.id}
+          proposalMode={searchParams.get("mode") === "proposal"}
+        />
+      )}
       {activeTab === "punch_list" && <DealPunchListTab dealId={deal.id} />}
       {activeTab === "closeout" && <DealCloseoutTab dealId={deal.id} />}
 

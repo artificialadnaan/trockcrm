@@ -9,9 +9,12 @@ import type { DealDetail } from "@/hooks/use-deals";
 import { PROPOSAL_STATUS_COLORS } from "@/lib/status-colors";
 import { formatShortDate } from "@/lib/deal-utils";
 
+// TODO proposal drafting deferred pieces: templates, version history, e-sign.
 interface DealProposalCardProps {
   deal: DealDetail;
   onUpdate: () => void;
+  onOpenProposalEditor?: () => void;
+  proposalDraftingEnabled?: boolean;
 }
 
 type ProposalStatus =
@@ -46,7 +49,26 @@ const HELPER_TEXT: Record<ProposalStatus, string> = {
   rejected: "Proposal was not accepted.",
 };
 
-export function DealProposalCard({ deal, onUpdate }: DealProposalCardProps) {
+type ProposalActionButton = {
+  label: string;
+  status: ProposalStatus;
+  variant?: "default" | "outline" | "destructive";
+  action?: "start_draft" | "status";
+};
+
+export function resolveProposalDraftingEnabled(
+  env: Record<string, string | boolean | undefined> =
+    ((import.meta as unknown as { env?: Record<string, string | boolean | undefined> }).env ?? {})
+) {
+  return env.PROPOSAL_DRAFTING_ENABLED === true || env.PROPOSAL_DRAFTING_ENABLED === "true";
+}
+
+export function DealProposalCard({
+  deal,
+  onUpdate,
+  onOpenProposalEditor,
+  proposalDraftingEnabled = resolveProposalDraftingEnabled(),
+}: DealProposalCardProps) {
   const [loading, setLoading] = useState(false);
 
   const status = (deal.proposalStatus ?? "not_started") as ProposalStatus;
@@ -67,10 +89,30 @@ export function DealProposalCard({ deal, onUpdate }: DealProposalCardProps) {
     }
   };
 
-  const actionButtons: Array<{ label: string; status: ProposalStatus; variant?: "default" | "outline" | "destructive" }> = (() => {
+  const startDrafting = async () => {
+    if (!proposalDraftingEnabled) {
+      return;
+    }
+
+    setLoading(true);
+    try {
+      await api(`/deals/${deal.id}/proposal-draft`, {
+        method: "POST",
+      });
+      toast.success("Proposal draft started");
+      onUpdate();
+      onOpenProposalEditor?.();
+    } catch (err: unknown) {
+      toast.error(err instanceof Error ? err.message : "Failed to start proposal draft");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const actionButtons: ProposalActionButton[] = (() => {
     switch (status) {
       case "not_started":
-        return [{ label: "Start Drafting", status: "drafting" }];
+        return [{ label: "Start Drafting", status: "drafting", action: "start_draft" }];
       case "drafting":
         return [{ label: "Mark as Sent", status: "sent" }];
       case "sent":
@@ -130,7 +172,14 @@ export function DealProposalCard({ deal, onUpdate }: DealProposalCardProps) {
                 size="sm"
                 variant={btn.variant ?? "default"}
                 disabled={loading}
-                onClick={() => updateStatus(btn.status)}
+                title={btn.action === "start_draft" && !proposalDraftingEnabled ? "Coming soon" : undefined}
+                onClick={() => {
+                  if (btn.action === "start_draft") {
+                    void startDrafting();
+                    return;
+                  }
+                  void updateStatus(btn.status);
+                }}
               >
                 {btn.label}
               </Button>

@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -6,9 +7,12 @@ import { useNavigate } from "react-router-dom";
 import { DealCopilotPanel } from "@/components/ai/deal-copilot-panel";
 import { DealEstimatesCard } from "./deal-estimates-card";
 import { DealStageBadge } from "./deal-stage-badge";
+import { RecordAssignmentCard } from "@/components/assignment/record-assignment-card";
 import { formatDate, daysInStage, winProbabilityColor, formatCurrency } from "@/lib/deal-utils";
 import { useProjectTypes, useRegions } from "@/hooks/use-pipeline-config";
-import type { DealDetail } from "@/hooks/use-deals";
+import { updateDeal, type DealDetail } from "@/hooks/use-deals";
+import { useTaskAssignees } from "@/hooks/use-task-assignees";
+import { useAuth } from "@/lib/auth";
 import {
   MapPin,
   Calendar,
@@ -19,15 +23,47 @@ import {
 
 interface DealOverviewTabProps {
   deal: DealDetail;
+  onDealUpdated?: () => void;
 }
 
-export function DealOverviewTab({ deal }: DealOverviewTabProps) {
+export function DealOverviewTab({ deal, onDealUpdated }: DealOverviewTabProps) {
   const navigate = useNavigate();
+  const { user } = useAuth();
+  const { assignees } = useTaskAssignees();
   const { projectTypes } = useProjectTypes();
   const { regions } = useRegions();
+  const [assignmentSaving, setAssignmentSaving] = useState(false);
+  const [assignmentError, setAssignmentError] = useState<string | null>(null);
 
   const projectType = projectTypes.find((t) => t.id === deal.projectTypeId);
   const region = regions.find((r) => r.id === deal.regionId);
+  const assignedRepName =
+    deal.assignedRepName ??
+    assignees.find((assignee) => assignee.id === deal.assignedRepId)?.displayName ??
+    null;
+  const canEditAssignment =
+    Boolean(user) &&
+    (user?.role === "admin" ||
+      user?.role === "director" ||
+      user?.role === "sales_manager" ||
+      (user?.role === "rep" && deal.assignedRepId === user.id));
+
+  async function handleAssignmentSave(nextRepId: string) {
+    if (!nextRepId || nextRepId === deal.assignedRepId) {
+      return;
+    }
+
+    setAssignmentSaving(true);
+    setAssignmentError(null);
+    try {
+      await updateDeal(deal.id, { assignedRepId: nextRepId });
+      onDealUpdated?.();
+    } catch (err) {
+      setAssignmentError(err instanceof Error ? err.message : "Could not update sales rep.");
+    } finally {
+      setAssignmentSaving(false);
+    }
+  }
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
@@ -233,6 +269,19 @@ export function DealOverviewTab({ deal }: DealOverviewTabProps) {
       {/* Right Column: Estimates + Quick Info */}
       <div className="space-y-4">
         <DealCopilotPanel dealId={deal.id} panelId="deal-ai-copilot" />
+
+        <RecordAssignmentCard
+          label="Sales Rep"
+          assignedRepId={deal.assignedRepId}
+          assignedRepName={assignedRepName}
+          reps={assignees}
+          canEdit={canEditAssignment}
+          saving={assignmentSaving}
+          onSave={handleAssignmentSave}
+        />
+        {assignmentError ? (
+          <p className="text-xs text-red-600" role="alert">{assignmentError}</p>
+        ) : null}
 
         <DealEstimatesCard deal={deal} />
 

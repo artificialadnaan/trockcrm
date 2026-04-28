@@ -41,8 +41,43 @@ describe("PipelineBoard", () => {
     expect(html).toContain("TR-2026-0001");
     expect(html).toContain("$245K");
     expect(html).toContain("Dallas");
-    expect(html).toContain("4d in stage");
+    expect(html).toContain("8d in stage");
     expect(html).toContain("View all 12");
+  });
+
+  it("uses fixed-height scroll regions and virtualizes oversized columns", () => {
+    const oversizedColumns = [
+      {
+        ...columns[0],
+        count: 205,
+        cards: Array.from({ length: 205 }, (_, index) => ({
+          id: `deal-${index + 1}`,
+          name: `Deal ${String(index + 1).padStart(3, "0")}`,
+          stageId: "stage-estimating",
+          stageEnteredAt: "2026-04-20T10:00:00.000Z",
+          updatedAt: "2026-04-21T10:00:00.000Z",
+        })),
+      },
+    ];
+
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <PipelineBoard
+          entity="deal"
+          columns={oversizedColumns}
+          loading={false}
+          onOpenStage={() => undefined}
+          onOpenRecord={() => undefined}
+        />
+      </MemoryRouter>
+    );
+
+    expect(html).toContain("calc(100vh - var(--pipeline-board-header-offset, 12rem))");
+    expect(html).toContain("overflow-x-auto");
+    expect(html).toContain("overflow-y-auto");
+    expect(html).toContain('data-virtualized-card-count="205"');
+    expect(html).toContain("Deal 001");
+    expect(html).not.toContain("Deal 205");
   });
 
   it("resolves drag moves from explicit stage metadata", () => {

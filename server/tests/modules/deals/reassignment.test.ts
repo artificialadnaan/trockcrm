@@ -7,9 +7,10 @@ vi.mock("../../../src/modules/assignment-tasks/service.js", () => ({
 const { createAssignmentTaskIfNeeded } = await import(
   "../../../src/modules/assignment-tasks/service.js"
 );
-const { updateDeal } = await import("../../../src/modules/deals/service.js");
+const { startProposalDraft, updateDeal } = await import("../../../src/modules/deals/service.js");
 
 function createDealDb() {
+  const insertedValues: unknown[] = [];
   const queue: unknown[] = [
     [
       {
@@ -65,7 +66,14 @@ function createDealDb() {
     })),
   }));
 
-  return { select, update };
+  const insert = vi.fn(() => ({
+    values: vi.fn(async (value: unknown) => {
+      insertedValues.push(value);
+      return [];
+    }),
+  }));
+
+  return { select, update, insert, insertedValues };
 }
 
 describe("deal reassignment tasking", () => {
@@ -97,5 +105,122 @@ describe("deal reassignment tasking", () => {
         actorUserId: "director-1",
       })
     );
+    expect(tenantDb.insertedValues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          tableName: "deal_history",
+          recordId: "deal-1",
+          changedBy: "director-1",
+          changes: {
+            assignedRepId: { from: "rep-old", to: "rep-new" },
+          },
+          fullRow: expect.objectContaining({
+            oldRepId: "rep-old",
+            newRepId: "rep-new",
+            changedBy: "director-1",
+          }),
+        }),
+        expect.objectContaining({
+          jobType: "domain_event",
+          payload: expect.objectContaining({
+            eventName: "deal.assignment.changed",
+            oldRepId: "rep-old",
+            newRepId: "rep-new",
+            changedBy: "director-1",
+            propagationChannel: "synchub_bid_board",
+          }),
+        }),
+      ])
+    );
+  });
+});
+
+describe("proposal draft backend wiring", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("stamps proposalDraftStartedAt and writes a draft audit row", async () => {
+    const startedAt = new Date("2026-04-28T15:00:00.000Z");
+    const insertedValues: unknown[] = [];
+    const existingDeal = {
+      id: "deal-1",
+      name: "Hill Place Interior Upgrade",
+      assignedRepId: "rep-1",
+      sourceLeadId: "lead-1",
+      companyId: "company-1",
+      propertyId: "property-1",
+      primaryContactId: null,
+      stageId: "stage-estimating",
+      workflowRoute: "normal",
+      isBidBoardOwned: false,
+      proposalStatus: "not_started",
+      proposalDraftStartedAt: null,
+      createdAt: new Date("2026-04-01T00:00:00.000Z"),
+      updatedAt: new Date("2026-04-20T00:00:00.000Z"),
+    };
+    const tenantDb = {
+      select: vi.fn(() => ({
+        from: vi.fn(() => ({
+          where: vi.fn(() => ({
+            limit: vi.fn(async () => [existingDeal]),
+          })),
+        })),
+      })),
+      update: vi.fn(() => ({
+        set: vi.fn((values: Record<string, unknown>) => {
+          expect(values).toMatchObject({
+            proposalStatus: "drafting",
+            proposalDraftStartedAt: expect.any(Date),
+          });
+          return {
+            where: vi.fn(() => ({
+              returning: vi.fn(async () => [
+                {
+                  ...existingDeal,
+                  ...values,
+                  proposalDraftStartedAt: startedAt,
+                },
+              ]),
+            })),
+          };
+        }),
+      })),
+      insert: vi.fn(() => ({
+        values: vi.fn(async (value: unknown) => {
+          insertedValues.push(value);
+          return [];
+        }),
+      })),
+    };
+
+    const deal = await startProposalDraft(
+      tenantDb as any,
+      "deal-1",
+      "director",
+      "director-1"
+    );
+
+    expect(deal.proposalStatus).toBe("drafting");
+    expect(deal.proposalDraftStartedAt).toEqual(startedAt);
+    expect(insertedValues).toEqual([
+      expect.objectContaining({
+        tableName: "proposal_drafts",
+        recordId: "deal-1",
+        action: "insert",
+        changedBy: "director-1",
+        changes: expect.objectContaining({
+          proposalDraftStartedAt: {
+            from: null,
+            to: expect.any(String),
+          },
+        }),
+        fullRow: expect.objectContaining({
+          dealId: "deal-1",
+          status: "draft",
+          createdBy: "director-1",
+        }),
+      }),
+    ]);
   });
 });

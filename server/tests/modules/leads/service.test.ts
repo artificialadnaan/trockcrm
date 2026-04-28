@@ -39,6 +39,7 @@ type FakeLeadRow = {
   name: string;
   stageId: string;
   assignedRepId: string;
+  salesRepId?: string | null;
   status: "open" | "converted" | "disqualified";
   officeCode?: string | null;
   projectTypeId?: string | null;
@@ -477,6 +478,7 @@ describe("lead service canonical progression", () => {
         propertyId: "property-1",
         stageId: newLeadStage.id,
         assignedRepId: "rep-1",
+        salesRepId: "rep-1",
         officeId: "office-1",
         name: "Created Lead",
         source: "Referral",
@@ -500,6 +502,8 @@ describe("lead service canonical progression", () => {
         estimated_value: 125000,
         timeline_status: "Q3 2026",
       });
+      expect(lead.salesRepId).toBe("rep-1");
+      expect(insertedLeads[0]?.salesRepId).toBe("rep-1");
     } finally {
       if (previousFlag === undefined) {
         delete process.env.ENABLE_LEAD_EDIT_V2;
@@ -689,6 +693,45 @@ describe("lead service canonical progression", () => {
         process.env.ENABLE_LEAD_EDIT_V2 = previousFlag;
       }
     }
+  });
+
+  it("persists nullable salesRepId updates separately from assignedRepId", async () => {
+    const tenantDb = createFakeTenantDb({
+      id: "lead-1",
+      companyId: "company-1",
+      propertyId: "property-1",
+      primaryContactId: null,
+      name: "Palm Villas repaint",
+      stageId: newLeadStage.id,
+      assignedRepId: "rep-1",
+      salesRepId: "rep-1",
+      status: "open",
+      projectTypeId: "project-type-commercial",
+      qualificationPayload: {},
+      source: "Referral",
+      description: null,
+      stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+      convertedAt: null,
+      isActive: true,
+      createdAt: new Date("2026-04-12T15:00:00.000Z"),
+      updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+    });
+    const service = createLeadService({
+      getStageById: pipelineMocks.getStageById as never,
+      getActiveProjectTypes: pipelineMocks.getActiveProjectTypes as never,
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+    });
+
+    const lead = await service.updateLead(
+      tenantDb as never,
+      "lead-1",
+      { salesRepId: null },
+      "director",
+      "director-1"
+    );
+
+    expect(lead.salesRepId).toBeNull();
+    expect(lead.assignedRepId).toBe("rep-1");
   });
 
   it("auto-promotes a new lead to qualified_lead when the company has recent activity", async () => {

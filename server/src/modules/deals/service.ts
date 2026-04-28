@@ -22,6 +22,7 @@ import { writeAuditLog } from "../../lib/audit-log.js";
 import { calculateCommissionForDeal } from "../commissions/service.js";
 import { getStageById, getStageBySlug } from "../pipeline/service.js";
 import { evaluatePostConversionEnrichment } from "./post-conversion-enrichment.js";
+import { createAssignmentTaskIfNeeded } from "../assignment-tasks/service.js";
 import { buildIntendedProjectNumber, generateDealNumberForProject } from "../../services/projectNumber.js";
 import { isProjectTypeValue, normalizeProjectType } from "@trock-crm/shared/types";
 
@@ -49,6 +50,7 @@ export interface CreateDealInput {
   name: string;
   stageId: string;
   assignedRepId: string;
+  actorUserId?: string;
   officeId?: string; // Active office — used to validate assignee has access
   companyId?: string;
   propertyId?: string;
@@ -706,6 +708,18 @@ export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
     }).catch((err) => console.error("[Deals] Failed to queue geocode job:", err));
   }
 
+  if (input.actorUserId) {
+    await createAssignmentTaskIfNeeded(tenantDb, {
+      entityType: "deal",
+      entityId: newDeal.id,
+      entityName: newDeal.name,
+      previousAssignedRepId: null,
+      nextAssignedRepId: newDeal.assignedRepId,
+      actorUserId: input.actorUserId,
+      officeId: input.officeId ?? null,
+    });
+  }
+
   return newDeal;
 }
 
@@ -802,7 +816,15 @@ export async function updateDeal(
   }
 
   if (input.name !== undefined) updates.name = input.name;
-  if (input.assignedRepId !== undefined) updates.assignedRepId = input.assignedRepId;
+  const assignedRepChanged =
+    input.assignedRepId !== undefined && input.assignedRepId !== existing.assignedRepId;
+  if (input.assignedRepId !== undefined) {
+    updates.assignedRepId = input.assignedRepId;
+    if (assignedRepChanged) {
+      updates.ownershipSyncStatus = "manual_reassign";
+      updates.unassignedReasonCode = null;
+    }
+  }
   if (input.primaryContactId !== undefined) updates.primaryContactId = input.primaryContactId;
   if (input.ddEstimate !== undefined) updates.ddEstimate = input.ddEstimate;
   if (input.bidEstimate !== undefined) updates.bidEstimate = input.bidEstimate;
@@ -960,6 +982,8 @@ export async function updateDeal(
     .where(eq(deals.id, dealId))
     .returning();
 
+  const updatedDeal = result[0];
+
   if (
     projectTypeChange &&
     projectTypeChange.newValue !== null &&
@@ -972,6 +996,58 @@ export async function updateDeal(
       newValue: projectTypeChange.newValue,
       changedBy: userId,
       changedAt: new Date(),
+    });
+  }
+
+  if (assignedRepChanged && updatedDeal) {
+    const changedAt = new Date();
+    await writeAuditLog(tenantDb, {
+      tableName: "deal_history",
+      recordId: dealId,
+      action: "update",
+      changedBy: userId,
+      changes: {
+        assignedRepId: {
+          from: existing.assignedRepId,
+          to: input.assignedRepId ?? null,
+        },
+      },
+      fullRow: {
+        oldRepId: existing.assignedRepId,
+        newRepId: input.assignedRepId ?? null,
+        changedBy: userId,
+        changedAt: changedAt.toISOString(),
+      },
+    });
+
+    await createAssignmentTaskIfNeeded(tenantDb, {
+      entityType: "deal",
+      entityId: dealId,
+      entityName: updatedDeal.name,
+      previousAssignedRepId: existing.assignedRepId ?? null,
+      nextAssignedRepId: input.assignedRepId ?? null,
+      actorUserId: userId,
+      officeId: officeId ?? null,
+      now: changedAt,
+    });
+
+    await tenantDb.insert(jobQueue).values({
+      jobType: "domain_event",
+      payload: {
+        eventName: "deal.assignment.changed",
+        dealId,
+        dealName: updatedDeal.name,
+        dealNumber: updatedDeal.dealNumber,
+        oldRepId: existing.assignedRepId ?? null,
+        newRepId: input.assignedRepId ?? null,
+        changedBy: userId,
+        changedAt: changedAt.toISOString(),
+        source: "crm_deal_card",
+        propagationChannel: "synchub_bid_board",
+      },
+      officeId: officeId ?? null,
+      status: "pending",
+      runAfter: changedAt,
     });
   }
 
@@ -999,7 +1075,72 @@ export async function updateDeal(
     }
   }
 
-  return result[0];
+  return updatedDeal;
+}
+
+export async function startProposalDraft(
+  tenantDb: TenantDb,
+  dealId: string,
+  userRole: string,
+  userId: string
+) {
+  const existing = await getDealById(tenantDb, dealId, userRole, userId);
+  if (!existing) {
+    throw new AppError(404, "Deal not found");
+  }
+
+  if (userRole === "rep" && existing.assignedRepId !== userId) {
+    throw new AppError(403, "You can only edit your own deals");
+  }
+
+  if (existing.isBidBoardOwned) {
+    throw new AppError(
+      403,
+      "Proposal status is mirrored from Bid Board after estimating handoff.",
+      "BID_BOARD_OWNED_FIELD_READ_ONLY"
+    );
+  }
+
+  const currentStatus = existing.proposalStatus ?? "not_started";
+  if (currentStatus !== "not_started" && currentStatus !== "drafting") {
+    throw new AppError(400, `Cannot start proposal draft from '${currentStatus}'`);
+  }
+
+  const startedAt = existing.proposalDraftStartedAt ?? new Date();
+  const [updatedDeal] = await tenantDb
+    .update(deals)
+    .set({
+      proposalStatus: "drafting",
+      proposalDraftStartedAt: startedAt,
+      updatedAt: new Date(),
+    })
+    .where(eq(deals.id, dealId))
+    .returning();
+
+  await writeAuditLog(tenantDb, {
+    tableName: "proposal_drafts",
+    recordId: dealId,
+    action: "insert",
+    changedBy: userId,
+    changes: {
+      proposalStatus: {
+        from: existing.proposalStatus ?? "not_started",
+        to: "drafting",
+      },
+      proposalDraftStartedAt: {
+        from: existing.proposalDraftStartedAt ?? null,
+        to: startedAt.toISOString(),
+      },
+    },
+    fullRow: {
+      dealId,
+      status: "draft",
+      startedAt: startedAt.toISOString(),
+      createdBy: userId,
+    },
+  });
+
+  return updatedDeal;
 }
 
 /**
