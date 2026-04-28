@@ -148,6 +148,7 @@ export const deals = pgTable("deals", {
   expectedCloseDate: date("expected_close_date"),
   actualCloseDate: date("actual_close_date"),
   contractSignedDate: date("contract_signed_date"),
+  lastSyncedFromHubspotAt: timestamp("last_synced_from_hubspot_at", { withTimezone: true }),
   workflowRoute: workflowRouteEnum("workflow_route").default("normal").notNull(),
   pipelineDisposition: dealPipelineDispositionEnum("pipeline_disposition")
     .default("deals")
