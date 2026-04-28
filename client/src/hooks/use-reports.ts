@@ -30,6 +30,36 @@ export interface ReportConfig {
   includeDd?: boolean;
 }
 
+export type ReportBuilderDimension =
+  | "stage"
+  | "rep"
+  | "region"
+  | "source"
+  | "deal_type"
+  | "month"
+  | "week"
+  | "age_in_stage_bucket";
+
+export type ReportBuilderMeasure =
+  | "deal_count"
+  | "total_value"
+  | "avg_value"
+  | "win_rate"
+  | "avg_cycle_time"
+  | "avg_age_in_stage";
+
+export interface ReportBuilderRequest {
+  dimensions: ReportBuilderDimension[];
+  measures: ReportBuilderMeasure[];
+  filters: Record<string, unknown>;
+  dateField: "created_at" | "updated_at" | "expected_close_date" | "actual_close_date" | "contract_signed_date";
+}
+
+export interface ReportBuilderResult {
+  columns: Array<{ key: string; label: string; kind: "dimension" | "measure" }>;
+  rows: Record<string, unknown>[];
+}
+
 export interface AnalyticsQueryOptions {
   from?: string;
   to?: string;
@@ -519,5 +549,12 @@ export async function executeCustomReport(
   return api<{ rows: Record<string, any>[]; total: number }>("/reports/execute", {
     method: "POST",
     json: { config, ...pagination },
+  });
+}
+
+export async function runReportBuilder(input: ReportBuilderRequest) {
+  return api<{ data: ReportBuilderResult }>("/reports/run", {
+    method: "POST",
+    json: input,
   });
 }
