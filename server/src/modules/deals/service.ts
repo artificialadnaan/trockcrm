@@ -2,6 +2,7 @@ import { eq, and, desc, asc, ilike, inArray, sql, or, isNull, not, gte, lte } fr
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
   deals,
+  dealHistory,
   dealStageHistory,
   dealApprovals,
   changeOrders,
@@ -21,6 +22,8 @@ import { writeAuditLog } from "../../lib/audit-log.js";
 import { calculateCommissionForDeal } from "../commissions/service.js";
 import { getStageById, getStageBySlug } from "../pipeline/service.js";
 import { evaluatePostConversionEnrichment } from "./post-conversion-enrichment.js";
+import { buildIntendedProjectNumber } from "../../services/projectNumber.js";
+import { isProjectTypeValue, normalizeProjectType } from "@trock-crm/shared/types";
 
 // Type alias for the tenant-scoped Drizzle instance
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -62,6 +65,7 @@ export interface CreateDealInput {
   propertyCity?: string;
   propertyState?: string;
   propertyZip?: string;
+  projectType?: string;
   projectTypeId?: string;
   regionId?: string;
   source?: string;
@@ -86,6 +90,7 @@ export interface UpdateDealInput {
   propertyCity?: string | null;
   propertyState?: string | null;
   propertyZip?: string | null;
+  projectType?: string | null;
   projectTypeId?: string | null;
   regionId?: string | null;
   source?: string | null;
@@ -132,6 +137,27 @@ export const BID_BOARD_STAGE_READ_ONLY_MESSAGE =
   "Deal stage progression is read-only in CRM after estimating handoff. Bid Board is now the source of truth for downstream stages.";
 export const BID_BOARD_BOUNDARY_STAGE_MISSING_MESSAGE =
   "Estimating stage configuration is required to enforce the Bid Board ownership boundary.";
+
+function assertValidProjectType(value: string | null | undefined): string {
+  const normalized = normalizeProjectType(String(value ?? ""));
+  if (!normalized || !isProjectTypeValue(normalized)) {
+    throw new AppError(400, `Invalid project type: ${value ?? ""}`.trim());
+  }
+
+  return normalized;
+}
+
+function resolveIntendedProjectNumber(
+  issuedProjectNumber: string | null | undefined,
+  projectType: string
+): string | null {
+  const intended = buildIntendedProjectNumber(issuedProjectNumber, projectType);
+  if (!intended || intended === issuedProjectNumber) {
+    return null;
+  }
+
+  return intended;
+}
 
 function estimatingBoundaryStageSlugForRoute(workflowRoute: WorkflowRoute) {
   return workflowRoute === "service" ? "service_estimating" : "estimate_in_progress";
@@ -670,6 +696,7 @@ export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
       propertyCity: input.propertyCity ?? null,
       propertyState: input.propertyState ?? null,
       propertyZip: input.propertyZip ?? null,
+      projectType: input.projectType ? assertValidProjectType(input.projectType) : null,
       projectTypeId: input.projectTypeId ?? null,
       regionId: input.regionId ?? null,
       source: lineage.source,
@@ -764,6 +791,30 @@ export async function updateDeal(
 
   // Build update object — only include fields that are provided
   const updates: Record<string, any> = {};
+  const projectTypeChange =
+    input.projectType !== undefined
+      ? {
+          oldValue: existing.projectType ?? null,
+          newValue: input.projectType === null ? null : assertValidProjectType(input.projectType),
+        }
+      : null;
+
+  if (projectTypeChange) {
+    if (userRole !== "admin") {
+      throw new AppError(403, "Only admins can edit project type after Opportunity");
+    }
+    if (projectTypeChange.newValue === null) {
+      throw new AppError(400, "projectType cannot be cleared after Opportunity");
+    }
+    if (projectTypeChange.newValue !== projectTypeChange.oldValue) {
+      updates.projectType = projectTypeChange.newValue;
+      updates.intendedProjectNumber = resolveIntendedProjectNumber(
+        existing.bidBoardProjectNumber,
+        projectTypeChange.newValue
+      );
+    }
+  }
+
   if (input.name !== undefined) updates.name = input.name;
   if (input.assignedRepId !== undefined) updates.assignedRepId = input.assignedRepId;
   if (input.primaryContactId !== undefined) updates.primaryContactId = input.primaryContactId;
@@ -921,6 +972,21 @@ export async function updateDeal(
     .set(updates)
     .where(eq(deals.id, dealId))
     .returning();
+
+  if (
+    projectTypeChange &&
+    projectTypeChange.newValue !== null &&
+    projectTypeChange.newValue !== projectTypeChange.oldValue
+  ) {
+    await tenantDb.insert(dealHistory).values({
+      dealId,
+      fieldName: "project_type",
+      oldValue: projectTypeChange.oldValue,
+      newValue: projectTypeChange.newValue,
+      changedBy: userId,
+      changedAt: new Date(),
+    });
+  }
 
   // Re-geocode if address changed
   const addressChanged =

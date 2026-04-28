@@ -15,7 +15,12 @@ import {
   users,
 } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
-import { toCanonicalLeadStageSlug, type WorkflowFamily } from "@trock-crm/shared/types";
+import {
+  isProjectTypeValue,
+  normalizeProjectType,
+  toCanonicalLeadStageSlug,
+  type WorkflowFamily,
+} from "@trock-crm/shared/types";
 import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { getActiveProjectTypes, getAllStages, getStageById, getStageBySlug } from "../pipeline/service.js";
@@ -59,6 +64,7 @@ export interface CreateLeadInput {
   sourceCategory?: LeadSourceCategory | null;
   sourceDetail?: string | null;
   description?: string;
+  projectType: string;
   projectTypeId?: string | null;
   qualificationPayload?: Record<string, string | boolean | number | null>;
   projectTypeQuestionPayload?: {
@@ -78,6 +84,7 @@ export interface UpdateLeadInput {
   sourceCategory?: LeadSourceCategory | null;
   sourceDetail?: string | null;
   description?: string | null;
+  projectType?: string | null;
   projectTypeId?: string | null;
   qualificationPayload?: Record<string, string | boolean | number | null>;
   projectTypeQuestionPayload?: {
@@ -237,6 +244,15 @@ async function resolveProjectType(
   }
 
   return projectType;
+}
+
+function assertValidProjectType(value: string | null | undefined): string {
+  const normalized = normalizeProjectType(String(value ?? ""));
+  if (!normalized || !isProjectTypeValue(normalized)) {
+    throw new AppError(400, `Invalid project type: ${value ?? ""}`.trim());
+  }
+
+  return normalized;
 }
 
 function normalizeQualificationPayload(
@@ -927,6 +943,7 @@ export function createLeadService(
     await validateLeadHierarchy(tenantDb, input);
     await validateAssignee(tenantDb, input.assignedRepId, input.officeId);
     await resolveProjectType(input.projectTypeId ?? null, deps.getActiveProjectTypes);
+    const projectType = assertValidProjectType(input.projectType);
 
     const now = deps.now();
     const v2Enabled = isLeadEditV2Enabled();
@@ -990,6 +1007,7 @@ export function createLeadService(
         sourceCategory: sourceWrite.sourceCategory,
         sourceDetail: sourceWrite.sourceDetail,
         description: input.description ?? null,
+        projectType,
         projectTypeId: input.projectTypeId ?? null,
         qualificationPayload: normalizedQualificationPayload,
         projectTypeQuestionPayload: v2Enabled
@@ -1260,6 +1278,10 @@ export function createLeadService(
     if (input.projectTypeId !== undefined) {
       await resolveProjectType(input.projectTypeId, deps.getActiveProjectTypes);
       updates.projectTypeId = input.projectTypeId;
+    }
+
+    if (input.projectType !== undefined) {
+      updates.projectType = input.projectType === null ? null : assertValidProjectType(input.projectType);
     }
 
     if (input.name !== undefined) updates.name = input.name;

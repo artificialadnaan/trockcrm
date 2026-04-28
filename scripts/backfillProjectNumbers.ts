@@ -13,6 +13,7 @@ type Candidate = {
   id: string;
   name: string;
   workflow_route: "normal" | "service";
+  project_type: string | null;
   bid_board_office: string | null;
   region_classification: string | null;
   property_state: string | null;
@@ -62,7 +63,10 @@ function nextProjectNumber(candidate: Candidate, existing: Set<string>): string 
     officeCode: resolveOfficeCode(
       candidate.bid_board_office ?? candidate.region_classification ?? candidate.property_state
     ),
-    projectTypeCode: resolveProjectTypeCode({ workflowRoute: candidate.workflow_route }),
+    projectTypeCode: resolveProjectTypeCode({
+      projectType: candidate.project_type,
+      workflowRoute: candidate.workflow_route,
+    }),
     createdAt,
     suffix,
   });
@@ -88,6 +92,7 @@ async function main() {
         `SELECT d.id,
                 d.name,
                 d.workflow_route,
+                d.project_type,
                 d.bid_board_office,
                 d.region_classification,
                 d.property_state,

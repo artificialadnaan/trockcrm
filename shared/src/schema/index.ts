@@ -46,6 +46,7 @@ export {
 export { dealScopingIntake, dealScopingIntakeStatusEnum } from "./tenant/deal-scoping-intake.js";
 export { leadScopingIntake, leadScopingIntakeStatusEnum } from "./tenant/lead-scoping-intake.js";
 export { dealStageHistory } from "./tenant/deal-stage-history.js";
+export { dealHistory } from "./tenant/deal-history.js";
 export {
   dealForecastMilestones,
   forecastMilestoneKeyEnum,

@@ -443,6 +443,7 @@ export async function createLead(input: {
   sourceCategory?: LeadSourceCategory | null;
   sourceDetail?: string | null;
   description?: string | null;
+  projectType?: string;
   projectTypeId?: string | null;
   qualificationPayload?: Record<string, string | boolean | number | null>;
   projectTypeQuestionPayload?: {

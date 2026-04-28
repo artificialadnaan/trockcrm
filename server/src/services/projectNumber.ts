@@ -1,10 +1,16 @@
 import { sql } from "drizzle-orm";
+import {
+  PROJECT_TYPE_CODE_BY_VALUE,
+  isProjectTypeValue,
+  normalizeProjectType,
+} from "@trock-crm/shared/types";
 
 type WorkflowRoute = "normal" | "service";
 
 export interface ProjectNumberDealInput {
   id: string;
   workflowRoute?: WorkflowRoute | null;
+  projectType?: string | null;
   bidBoardProjectNumber?: string | null;
   bidBoardOffice?: string | null;
   regionClassification?: string | null;
@@ -43,12 +49,33 @@ export function resolveOfficeCode(location: string | null | undefined): "DFW" | 
 
 export function resolveProjectTypeCode(input: {
   projectTypes?: string | null;
+  projectType?: string | null;
   workflowRoute?: WorkflowRoute | null;
 }): string {
+  const projectType = String(input.projectType ?? "").trim();
+  if (projectType) {
+    const normalized = normalizeProjectType(projectType);
+    if (isProjectTypeValue(normalized)) return PROJECT_TYPE_CODE_BY_VALUE[normalized];
+  }
+
   const explicit = String(input.projectTypes ?? "").trim();
   if (/^[1-9]$/.test(explicit)) return explicit;
   if (input.workflowRoute === "service") return "4";
   return "9";
+}
+
+export function buildIntendedProjectNumber(
+  currentProjectNumber: string | null | undefined,
+  projectType: string
+): string | null {
+  const normalized = normalizeProjectType(projectType);
+  if (!isProjectTypeValue(normalized)) return null;
+
+  const match = String(currentProjectNumber ?? "").match(/^([A-Z]{2,4})-[1-9]-(\d{5})-([a-z]+)$/i);
+  if (!match) return null;
+
+  const [, officeCode, julianDate, suffix] = match;
+  return `${officeCode.toUpperCase()}-${PROJECT_TYPE_CODE_BY_VALUE[normalized]}-${julianDate}-${suffix.toLowerCase()}`;
 }
 
 export function getNextSuffix(existingSuffix: string | null | undefined): string {
@@ -120,7 +147,10 @@ export async function generateProjectNumberForDeal(
   const officeCode = resolveOfficeCode(
     deal.bidBoardOffice ?? deal.regionClassification ?? deal.propertyState
   );
-  const projectTypeCode = resolveProjectTypeCode({ workflowRoute: deal.workflowRoute ?? "normal" });
+  const projectTypeCode = resolveProjectTypeCode({
+    projectType: deal.projectType,
+    workflowRoute: deal.workflowRoute ?? "normal",
+  });
 
   return buildProjectNumber({ officeCode, projectTypeCode, createdAt, suffix });
 }

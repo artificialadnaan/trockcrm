@@ -69,6 +69,7 @@ export const leads = pgTable(
     existingCustomerResolution: varchar("existing_customer_resolution", { length: 50 }),
     existingCustomerResolvedAt: timestamp("existing_customer_resolved_at", { withTimezone: true }),
     existingCustomerResolvedBy: uuid("existing_customer_resolved_by").references(() => users.id),
+    projectType: text("project_type"),
     projectTypeId: uuid("project_type_id").references(() => projectTypeConfig.id),
     qualificationPayload: jsonb("qualification_payload").default({}).notNull(),
     projectTypeQuestionPayload: jsonb("project_type_question_payload").default({}).notNull(),

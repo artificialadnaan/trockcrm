@@ -77,6 +77,7 @@ export const deals = pgTable("deals", {
   propertyCity: varchar("property_city", { length: 255 }),
   propertyState: varchar("property_state", { length: 2 }),
   propertyZip: varchar("property_zip", { length: 10 }),
+  projectType: text("project_type"),
   projectTypeId: uuid("project_type_id"),
   regionId: uuid("region_id"),
   source: varchar("source", { length: 100 }),
@@ -123,6 +124,7 @@ export const deals = pgTable("deals", {
   bidBoardCustomerName: text("bid_board_customer_name"),
   bidBoardCustomerContactRaw: text("bid_board_customer_contact_raw"),
   bidBoardProjectNumber: text("bid_board_project_number"),
+  intendedProjectNumber: text("intended_project_number"),
   bidBoardMirrorSourceEnteredAt: timestamp("bid_board_mirror_source_entered_at", {
     withTimezone: true,
   }),
