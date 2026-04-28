@@ -29,6 +29,13 @@ vi.mock("../../../src/modules/pipeline/service.js", () => ({
     workflowFamily: "standard_deal",
   })),
   getStageBySlug: vi.fn(async () => null),
+  resolveActiveProjectTypeValue: vi.fn(async (value: string) =>
+    value
+      .trim()
+      .toLowerCase()
+      .replace(/[-_]+/g, " ")
+      .replace(/\s+/g, " "),
+  ),
 }));
 
 // We'll import after mocks are set up

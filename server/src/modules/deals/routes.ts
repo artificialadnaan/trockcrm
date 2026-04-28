@@ -22,6 +22,7 @@ import {
   getDealSources,
   setDealContractSignedDate,
 } from "./service.js";
+import { toJsonSafe } from "../../lib/json-safe.js";
 import { activateServiceHandoff, changeDealStage } from "./stage-change.js";
 import { preflightStageCheck } from "./stage-gate.js";
 import { getContactsForDeal } from "../contacts/association-service.js";
@@ -307,7 +308,7 @@ router.get("/:id", async (req, res, next) => {
     const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
     if (!deal) throw new AppError(404, "Deal not found");
     await req.commitTransaction!();
-    res.json({ deal });
+    res.json(toJsonSafe({ deal }));
   } catch (err) {
     next(err);
   }
@@ -319,7 +320,7 @@ router.get("/:id/detail", async (req, res, next) => {
     const detail = await getDealDetail(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
     if (!detail) throw new AppError(404, "Deal not found");
     await req.commitTransaction!();
-    res.json({ deal: detail });
+    res.json(toJsonSafe({ deal: detail }));
   } catch (err) {
     next(err);
   }

@@ -20,11 +20,10 @@ import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { writeAuditLog } from "../../lib/audit-log.js";
 import { calculateCommissionForDeal } from "../commissions/service.js";
-import { getStageById, getStageBySlug } from "../pipeline/service.js";
+import { getStageById, getStageBySlug, resolveActiveProjectTypeValue } from "../pipeline/service.js";
 import { evaluatePostConversionEnrichment } from "./post-conversion-enrichment.js";
 import { createAssignmentTaskIfNeeded } from "../assignment-tasks/service.js";
 import { buildIntendedProjectNumber, generateDealNumberForProject } from "../../services/projectNumber.js";
-import { isProjectTypeValue, normalizeProjectType } from "@trock-crm/shared/types";
 
 // Type alias for the tenant-scoped Drizzle instance
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -141,9 +140,9 @@ export const BID_BOARD_STAGE_READ_ONLY_MESSAGE =
 export const BID_BOARD_BOUNDARY_STAGE_MISSING_MESSAGE =
   "Estimating stage configuration is required to enforce the Bid Board ownership boundary.";
 
-function assertValidProjectType(value: string | null | undefined): string {
-  const normalized = normalizeProjectType(String(value ?? ""));
-  if (!normalized || !isProjectTypeValue(normalized)) {
+async function assertValidProjectType(value: string | null | undefined): Promise<string> {
+  const normalized = await resolveActiveProjectTypeValue(value);
+  if (!normalized) {
     throw new AppError(400, `Invalid project type: ${value ?? ""}`.trim());
   }
 
@@ -652,7 +651,7 @@ export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
   await validateDealPrimaryContact(tenantDb, lineage.companyId, lineage.primaryContactId);
 
   const officeCode = assertValidOfficeCode(input.officeCode);
-  const projectType = input.projectType ? assertValidProjectType(input.projectType) : null;
+  const projectType = input.projectType ? await assertValidProjectType(input.projectType) : null;
   const createdAt = new Date();
   const dealNumber = await generateDealNumberForProject(tenantDb, {
     id: "new",
@@ -795,7 +794,7 @@ export async function updateDeal(
     input.projectType !== undefined
       ? {
           oldValue: existing.projectType ?? null,
-          newValue: input.projectType === null ? null : assertValidProjectType(input.projectType),
+          newValue: input.projectType === null ? null : await assertValidProjectType(input.projectType),
         }
       : null;
 

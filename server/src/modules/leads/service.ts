@@ -16,8 +16,6 @@ import {
 } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import {
-  isProjectTypeValue,
-  normalizeProjectType,
   toCanonicalLeadStageSlug,
   type WorkflowFamily,
 } from "@trock-crm/shared/types";
@@ -250,13 +248,27 @@ async function resolveProjectType(
   return projectType;
 }
 
-function assertValidProjectType(value: string | null | undefined): string {
-  const normalized = normalizeProjectType(String(value ?? ""));
-  if (!normalized || !isProjectTypeValue(normalized)) {
+async function assertValidProjectType(
+  value: string | null | undefined,
+  getProjectTypes: typeof getActiveProjectTypes
+): Promise<string> {
+  const normalized = String(value ?? "").trim().toLowerCase().replace(/[-_]+/g, " ").replace(/\s+/g, " ");
+  if (!normalized) {
     throw new AppError(400, `Invalid project type: ${value ?? ""}`.trim());
   }
 
-  return normalized;
+  const projectTypes = await getProjectTypes();
+  const match = projectTypes.find((projectType) => {
+    const name = projectType.name.trim().toLowerCase().replace(/[-_]+/g, " ").replace(/\s+/g, " ");
+    const slug = projectType.slug.trim().toLowerCase().replace(/[-_]+/g, " ").replace(/\s+/g, " ");
+    return name === normalized || slug === normalized;
+  });
+
+  if (!match) {
+    throw new AppError(400, `Invalid project type: ${value ?? ""}`.trim());
+  }
+
+  return match.name.trim().toLowerCase().replace(/[-_]+/g, " ").replace(/\s+/g, " ");
 }
 
 function assertValidOfficeCode(value: string | null | undefined): "dfw" | "atl" {
@@ -971,7 +983,7 @@ export function createLeadService(
     await validateOptionalUserId(tenantDb, input.salesRepId, "salesRepId", input.officeId);
     await resolveProjectType(input.projectTypeId ?? null, deps.getActiveProjectTypes);
     const officeCode = assertValidOfficeCode(input.officeCode);
-    const projectType = assertValidProjectType(input.projectType);
+    const projectType = await assertValidProjectType(input.projectType, deps.getActiveProjectTypes);
 
     const now = deps.now();
     const v2Enabled = isLeadEditV2Enabled();
@@ -1316,7 +1328,8 @@ export function createLeadService(
     }
 
     if (input.projectType !== undefined) {
-      updates.projectType = input.projectType === null ? null : assertValidProjectType(input.projectType);
+      updates.projectType =
+        input.projectType === null ? null : await assertValidProjectType(input.projectType, deps.getActiveProjectTypes);
     }
 
     if (input.officeCode !== undefined) {

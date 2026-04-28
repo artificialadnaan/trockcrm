@@ -38,6 +38,7 @@ import { LeadStageBadge } from "./lead-stage-badge";
 import { useCompanyContacts } from "@/hooks/use-companies";
 import { createContact } from "@/hooks/use-contacts";
 import { useTaskAssignees } from "@/hooks/use-task-assignees";
+import { useSalesReps } from "@/hooks/use-sales-reps";
 import {
   createLead,
   updateLead,
@@ -319,6 +320,7 @@ function SummaryLeadForm({
   const { projectTypes } = useProjectTypes();
   const { user } = useAuth();
   const { assignees } = useTaskAssignees();
+  const { salesReps } = useSalesReps();
   const [isVerifying, setIsVerifying] = useState(false);
   const [verifyError, setVerifyError] = useState<string | null>(null);
   const [assignmentSaving, setAssignmentSaving] = useState(false);
@@ -340,6 +342,7 @@ function SummaryLeadForm({
   const assignedRepId = lead.assignedRepId ?? lead.salesRepId ?? "";
   const assignedRepName =
     lead.assignedRepName ??
+    salesReps.find((rep) => rep.id === assignedRepId)?.displayName ??
     assignees.find((assignee) => assignee.id === assignedRepId)?.displayName ??
     null;
   const canEditAssignment =
@@ -432,7 +435,7 @@ function SummaryLeadForm({
           label="Sales Rep"
           assignedRepId={assignedRepId}
           assignedRepName={assignedRepName}
-          reps={assignees}
+          reps={salesReps.length > 0 ? salesReps : assignees}
           canEdit={canEditAssignment}
           saving={assignmentSaving}
           onSave={handleAssignmentSave}

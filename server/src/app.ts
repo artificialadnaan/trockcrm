@@ -40,6 +40,7 @@ import { adminRoutes } from "./modules/admin/routes.js";
 import { companycamRoutes } from "./modules/companycam/routes.js";
 import { aiCopilotRoutes } from "./modules/ai-copilot/routes.js";
 import { salesReviewRoutes } from "./modules/sales-review/routes.js";
+import { userRoutes } from "./modules/users/routes.js";
 import { getAllowedCorsOrigins } from "./modules/auth/http-config.js";
 
 export function createApp() {
@@ -123,6 +124,7 @@ export function createApp() {
   tenantRouter.use("/email", emailRoutes);
   tenantRouter.use("/files", fileRoutes);
   tenantRouter.use("/tasks", taskRoutes);
+  tenantRouter.use("/users", userRoutes);
   tenantRouter.use("/activities", activityRoutes);
   tenantRouter.use("/notifications", notificationCrudRoutes);
   tenantRouter.use("/reports", reportRoutes);

@@ -71,6 +71,24 @@ export async function getActiveProjectTypes() {
     .orderBy(asc(projectTypeConfig.displayOrder));
 }
 
+function normalizeProjectTypeCandidate(value: string) {
+  return value.trim().toLowerCase().replace(/[-_]+/g, " ").replace(/\s+/g, " ");
+}
+
+export async function resolveActiveProjectTypeValue(value: string | null | undefined) {
+  const normalized = normalizeProjectTypeCandidate(String(value ?? ""));
+  if (!normalized) return null;
+
+  const projectTypes = await getActiveProjectTypes();
+  const match = projectTypes.find(
+    (projectType) =>
+      normalizeProjectTypeCandidate(projectType.name) === normalized ||
+      normalizeProjectTypeCandidate(projectType.slug) === normalized
+  );
+
+  return match ? normalizeProjectTypeCandidate(match.name) : null;
+}
+
 export async function getActiveRegions() {
   return db
     .select()
