@@ -54,6 +54,7 @@ export const leads = pgTable(
     name: varchar("name", { length: 500 }).notNull(),
     stageId: uuid("stage_id").notNull(),
     assignedRepId: uuid("assigned_rep_id").references(() => users.id).notNull(),
+    salesRepId: uuid("sales_rep_id").references(() => users.id),
     pipelineType: leadPipelineTypeEnum("pipeline_type").default("normal").notNull(),
     status: leadStatusEnum("status").default("open").notNull(),
     source: varchar("source", { length: 100 }),
