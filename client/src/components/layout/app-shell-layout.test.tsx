@@ -13,6 +13,8 @@ const dashboardState = vi.hoisted(() => ({
     activeLeads: { count: 4 },
     staleLeads: { count: 1 },
     activeDeals: { count: 3, totalValue: 123456 },
+    contractsSignedYtd: { count: 0, totalValue: 0 },
+    contractsSignedMtd: { count: 0, totalValue: 0 },
     tasksToday: { overdue: 1, today: 2 },
     activityThisWeek: { total: 7, calls: 2, emails: 3, meetings: 1, notes: 1 },
     followUpCompliance: { complianceRate: 85, onTime: 6, total: 7 },
