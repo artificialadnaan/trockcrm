@@ -9,3 +9,5 @@ tests/audit/.env
 .worktrees/
 .omc/
 *.tsbuildinfo
+test-results/
+.playwright-cli/
