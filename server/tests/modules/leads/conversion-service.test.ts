@@ -71,6 +71,11 @@ const uiDomainSchemaFieldsMigrationPath = resolve(
   "../../../../migrations/0066_ui_domain_schema_fields.sql"
 );
 const uiDomainSchemaFieldsMigrationSql = readFileSync(uiDomainSchemaFieldsMigrationPath, "utf8");
+const projectTypeMigrationPath = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../../migrations/0067_project_type_and_intended_number.sql"
+);
+const projectTypeMigrationSql = readFileSync(projectTypeMigrationPath, "utf8");
 
 function expectSqlToMatch(pattern: RegExp): void {
   expect(migrationSql).toMatch(pattern);
@@ -1123,12 +1128,6 @@ describe("Lead Conversion Shared Contract", () => {
       "ADD COLUMN IF NOT EXISTS sales_rep_id uuid"
     );
     expect(uiDomainSchemaFieldsMigrationSql).toContain(
-      "ADD COLUMN IF NOT EXISTS project_type text"
-    );
-    expect(uiDomainSchemaFieldsMigrationSql).toContain(
-      "CONSTRAINT leads_project_type_allowlist_chk"
-    );
-    expect(uiDomainSchemaFieldsMigrationSql).toContain(
       "CONSTRAINT leads_sales_rep_id_users_id_fk"
     );
     expect(uiDomainSchemaFieldsMigrationSql).toContain(
@@ -1138,10 +1137,22 @@ describe("Lead Conversion Shared Contract", () => {
     expect(uiDomainSchemaFieldsMigrationSql).toContain(
       "ADD COLUMN IF NOT EXISTS proposal_draft_started_at timestamptz"
     );
-    expect(uiDomainSchemaFieldsMigrationSql).toContain(
+    expect(uiDomainSchemaFieldsMigrationSql).not.toContain("project_type text");
+    expect(uiDomainSchemaFieldsMigrationSql).not.toContain("intended_project_number text");
+    expect(uiDomainSchemaFieldsMigrationSql).not.toContain("CREATE TABLE IF NOT EXISTS %I.deal_history");
+  });
+
+  it("adds project type and intended project number fields through migration 0067", () => {
+    expect(projectTypeMigrationSql).toContain(
+      "ADD COLUMN IF NOT EXISTS project_type text"
+    );
+    expect(projectTypeMigrationSql).toContain(
+      "CONSTRAINT leads_project_type_allowlist_chk"
+    );
+    expect(projectTypeMigrationSql).toContain(
       "ADD COLUMN IF NOT EXISTS intended_project_number text"
     );
-    expect(uiDomainSchemaFieldsMigrationSql).toContain("CREATE TABLE IF NOT EXISTS %I.deal_history");
+    expect(projectTypeMigrationSql).toContain("CREATE TABLE IF NOT EXISTS %I.deal_history");
   });
 
   it("creates the properties, leads, and lineage migration contract", () => {
