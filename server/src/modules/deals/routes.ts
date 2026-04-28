@@ -190,6 +190,8 @@ router.get("/", async (req, res, next) => {
       projectTypeId: req.query.projectTypeId as string | undefined,
       regionId: req.query.regionId as string | undefined,
       source: req.query.source as string | undefined,
+      contractSignedFrom: req.query.contractSignedFrom as string | undefined,
+      contractSignedTo: req.query.contractSignedTo as string | undefined,
       isActive: req.query.isActive === "false" ? false : true,
       sortBy: req.query.sortBy as any,
       sortDir: req.query.sortDir as "asc" | "desc" | undefined,

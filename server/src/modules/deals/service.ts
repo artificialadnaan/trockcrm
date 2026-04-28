@@ -1,4 +1,4 @@
-import { eq, and, desc, asc, ilike, inArray, sql, or, isNull, not } from "drizzle-orm";
+import { eq, and, desc, asc, ilike, inArray, sql, or, isNull, not, gte, lte } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
   deals,
@@ -33,7 +33,10 @@ export interface DealFilters {
   regionId?: string;
   source?: string;
   isActive?: boolean;
-  sortBy?: "name" | "created_at" | "updated_at" | "awarded_amount" | "stage_entered_at" | "expected_close_date";
+  // Inclusive YYYY-MM-DD bounds against deals.contract_signed_date.
+  contractSignedFrom?: string;
+  contractSignedTo?: string;
+  sortBy?: "name" | "created_at" | "updated_at" | "awarded_amount" | "stage_entered_at" | "expected_close_date" | "contract_signed_date";
   sortDir?: "asc" | "desc";
   page?: number;
   limit?: number;
@@ -481,6 +484,15 @@ export async function getDeals(tenantDb: TenantDb, filters: DealFilters, userRol
     conditions.push(eq(deals.source, filters.source));
   }
 
+  // Inclusive contract_signed_date range. Used by the rep dashboard
+  // YTD/MTD click-through to surface the deals contributing to each card.
+  if (filters.contractSignedFrom) {
+    conditions.push(gte(deals.contractSignedDate, filters.contractSignedFrom));
+  }
+  if (filters.contractSignedTo) {
+    conditions.push(lte(deals.contractSignedDate, filters.contractSignedTo));
+  }
+
   // Search across name, deal_number, description, property_address
   if (filters.search && filters.search.trim().length >= 2) {
     const searchTerm = `%${filters.search.trim()}%`;
@@ -504,6 +516,7 @@ export async function getDeals(tenantDb: TenantDb, filters: DealFilters, userRol
       case "awarded_amount": return deals.awardedAmount;
       case "stage_entered_at": return deals.stageEnteredAt;
       case "expected_close_date": return deals.expectedCloseDate;
+      case "contract_signed_date": return deals.contractSignedDate;
       default: return deals.updatedAt;
     }
   })();

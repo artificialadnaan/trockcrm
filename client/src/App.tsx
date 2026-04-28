@@ -61,6 +61,9 @@ import { Toaster } from "@/components/ui/sonner";
 const HomeDashboardPage = lazy(() =>
   import("@/pages/dashboard/home-dashboard-page").then((module) => ({ default: module.HomeDashboardPage }))
 );
+const ContractsSignedPage = lazy(() =>
+  import("@/pages/dashboard/contracts-signed-page").then((module) => ({ default: module.ContractsSignedPage }))
+);
 const DealListPage = lazy(() =>
   import("@/pages/deals/deal-list-page").then((module) => ({ default: module.DealListPage }))
 );
@@ -126,6 +129,7 @@ export function App() {
             <Route path="/photos/capture" element={<PhotoCapturePage />} />
             <Route element={<AppShell />}>
               <Route path="/" element={<HomeDashboardPage />} />
+              <Route path="/dashboard/contracts-signed" element={<ContractsSignedPage />} />
               <Route path="/deals" element={<DealListPage />} />
               <Route path="/deals/board" element={<BoardAliasRedirect entity="deals" />} />
               <Route path="/deals/stages/:stageId" element={<DealStagePage />} />

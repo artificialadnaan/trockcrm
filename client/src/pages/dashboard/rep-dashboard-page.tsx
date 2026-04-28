@@ -292,6 +292,7 @@ export function RepDashboardPage() {
           subtitle={formatCurrency(data.contractsSignedYtd.totalValue)}
           icon={<FileSignature className="h-5 w-5" />}
           className="border-indigo-200 bg-indigo-50/70"
+          onClick={() => navigate("/dashboard/contracts-signed?period=ytd")}
         />
         <StatCard
           title="Contracts Signed MTD"
@@ -299,6 +300,7 @@ export function RepDashboardPage() {
           subtitle={formatCurrency(data.contractsSignedMtd.totalValue)}
           icon={<FilePen className="h-5 w-5" />}
           className="border-indigo-200 bg-indigo-50/70"
+          onClick={() => navigate("/dashboard/contracts-signed?period=mtd")}
         />
       </div>
 

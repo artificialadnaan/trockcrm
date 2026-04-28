@@ -237,6 +237,8 @@ export interface DealFilters {
   regionId?: string;
   source?: string;
   isActive?: boolean;
+  contractSignedFrom?: string;
+  contractSignedTo?: string;
   sortBy?: string;
   sortDir?: "asc" | "desc";
   page?: number;
@@ -340,6 +342,8 @@ export function useDeals(filters: DealFilters = {}) {
       if (filters.projectTypeId) params.set("projectTypeId", filters.projectTypeId);
       if (filters.regionId) params.set("regionId", filters.regionId);
       if (filters.source) params.set("source", filters.source);
+      if (filters.contractSignedFrom) params.set("contractSignedFrom", filters.contractSignedFrom);
+      if (filters.contractSignedTo) params.set("contractSignedTo", filters.contractSignedTo);
       if (filters.isActive === false) params.set("isActive", "false");
       if (filters.sortBy) params.set("sortBy", filters.sortBy);
       if (filters.sortDir) params.set("sortDir", filters.sortDir);
@@ -364,6 +368,8 @@ export function useDeals(filters: DealFilters = {}) {
     filters.projectTypeId,
     filters.regionId,
     filters.source,
+    filters.contractSignedFrom,
+    filters.contractSignedTo,
     filters.isActive,
     filters.sortBy,
     filters.sortDir,
