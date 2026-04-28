@@ -33,9 +33,11 @@ import {
 } from "@/components/ui/select";
 import { CompanySelector } from "@/components/companies/company-selector";
 import { PropertySelector } from "@/components/properties/property-selector";
+import { RecordAssignmentCard } from "@/components/assignment/record-assignment-card";
 import { LeadStageBadge } from "./lead-stage-badge";
 import { useCompanyContacts } from "@/hooks/use-companies";
 import { createContact } from "@/hooks/use-contacts";
+import { useTaskAssignees } from "@/hooks/use-task-assignees";
 import {
   createLead,
   updateLead,
@@ -65,6 +67,9 @@ export interface LeadFormLead {
   name: string;
   convertedDealId: string | null;
   convertedDealNumber: string | null;
+  assignedRepId?: string | null;
+  salesRepId?: string | null;
+  assignedRepName?: string | null;
   companyId: string | null;
   companyName: string | null;
   stageId: string;
@@ -189,6 +194,7 @@ function getEditableFormState(
     primaryContactId: initialValues?.primaryContactId ?? "",
     name: lead?.name ?? initialValues?.name ?? "",
     stageId: lead?.stageId ?? initialValues?.stageId ?? "",
+    assignedRepId: lead?.assignedRepId ?? lead?.salesRepId ?? "",
     source: lead?.source ?? initialValues?.source ?? "",
     sourceCategory: sourceState.sourceCategory,
     sourceDetail: sourceState.sourceDetail,
@@ -312,8 +318,11 @@ function SummaryLeadForm({
   const navigate = useNavigate();
   const { projectTypes } = useProjectTypes();
   const { user } = useAuth();
+  const { assignees } = useTaskAssignees();
   const [isVerifying, setIsVerifying] = useState(false);
   const [verifyError, setVerifyError] = useState<string | null>(null);
+  const [assignmentSaving, setAssignmentSaving] = useState(false);
+  const [assignmentError, setAssignmentError] = useState<string | null>(null);
   const propertyLabel =
     [lead.propertyAddress, [lead.propertyCity, lead.propertyState].filter(Boolean).join(", "), lead.propertyZip]
       .filter(Boolean)
@@ -328,6 +337,33 @@ function SummaryLeadForm({
   const verificationLabel = VERIFICATION_LABELS[verificationStatus];
   const showAdminVerifyButton =
     !converted && verificationStatus === "pending" && user?.role === "admin";
+  const assignedRepId = lead.assignedRepId ?? lead.salesRepId ?? "";
+  const assignedRepName =
+    lead.assignedRepName ??
+    assignees.find((assignee) => assignee.id === assignedRepId)?.displayName ??
+    null;
+  const canEditAssignment =
+    Boolean(user) &&
+    (user?.role === "admin" ||
+      user?.role === "director" ||
+      (user?.role === "rep" && assignedRepId === user.id));
+
+  async function handleAssignmentSave(nextRepId: string) {
+    if (!nextRepId || nextRepId === assignedRepId) {
+      return;
+    }
+
+    setAssignmentSaving(true);
+    setAssignmentError(null);
+    try {
+      await updateLead(lead.id, { assignedRepId: nextRepId, salesRepId: nextRepId });
+      onSaved?.();
+    } catch (err) {
+      setAssignmentError(err instanceof Error ? err.message : "Could not update sales rep.");
+    } finally {
+      setAssignmentSaving(false);
+    }
+  }
 
   // TODO(PR2): Replace with email + tokenized approval flow.
   async function handleManualVerify() {
@@ -391,6 +427,19 @@ function SummaryLeadForm({
             <p className="font-medium">{propertyLabel || "--"}</p>
           )}
         </div>
+
+        <RecordAssignmentCard
+          label="Sales Rep"
+          assignedRepId={assignedRepId}
+          assignedRepName={assignedRepName}
+          reps={assignees}
+          canEdit={canEditAssignment}
+          saving={assignmentSaving}
+          onSave={handleAssignmentSave}
+        />
+        {assignmentError ? (
+          <p className="text-xs text-red-600" role="alert">{assignmentError}</p>
+        ) : null}
 
         {lead.description ? (
           <p className="whitespace-pre-wrap text-sm text-muted-foreground">{lead.description}</p>
@@ -522,6 +571,8 @@ function EditableLeadForm({
   initialValues?: LeadCreateFormProps["initialValues"];
 }) {
   const navigate = useNavigate();
+  const { user } = useAuth();
+  const { assignees } = useTaskAssignees();
   const { stages, loading: stagesLoading } = usePipelineStages();
   const { projectTypes, hierarchy: projectTypeHierarchy } = useProjectTypes();
   const isCreate = mode === "create";
@@ -553,6 +604,16 @@ function EditableLeadForm({
     setFormData(getEditableFormState(lead, initialValues));
     setCompanyId(lead?.companyId ?? initialValues?.companyId ?? null);
   }, [initialValues, lead]);
+
+  useEffect(() => {
+    if (!isCreate || user?.role !== "rep") {
+      return;
+    }
+
+    setFormData((current) =>
+      current.assignedRepId ? current : { ...current, assignedRepId: user.id }
+    );
+  }, [isCreate, user?.id, user?.role]);
 
   useEffect(() => {
     if (!isCreate) {
@@ -604,6 +665,10 @@ function EditableLeadForm({
   const stageSelectItems = useMemo(
     () => leadStages.map((stage) => ({ value: stage.id, label: stage.name })),
     [leadStages]
+  );
+  const repSelectItems = useMemo(
+    () => assignees.map((assignee) => ({ value: assignee.id, label: assignee.displayName })),
+    [assignees]
   );
   const existingLeadProjectTypeSlug = lead?.projectType?.slug ?? null;
   const projectTypeSelectItems = useMemo(
@@ -659,6 +724,9 @@ function EditableLeadForm({
   const selectedStageLabel =
     stageSelectItems.find((item) => item.value === formData.stageId)?.label ??
     (stagesLoading ? "Loading stages..." : "Select stage");
+  const selectedRepLabel =
+    repSelectItems.find((item) => item.value === formData.assignedRepId)?.label ??
+    (user?.role === "rep" ? user.displayName : "Select sales rep");
   const selectedProjectTypeLabel =
     projectTypeSelectItems.find((item) => item.value === (formData.projectTypeId || "__none__"))?.label ??
     selectedProjectType?.name ??
@@ -795,6 +863,11 @@ function EditableLeadForm({
       return;
     }
 
+    if (!formData.assignedRepId) {
+      setError("Sales rep is required.");
+      return;
+    }
+
     if (formData.sourceCategory === "Other" && !formData.sourceDetail.trim()) {
       setError("Source detail is required when Source is Other.");
       return;
@@ -863,6 +936,8 @@ function EditableLeadForm({
           primaryContactId: formData.primaryContactId || null,
           name: formData.name.trim(),
           stageId: effectiveStageId,
+          assignedRepId: formData.assignedRepId,
+          salesRepId: formData.assignedRepId,
           source: formData.source.trim() || null,
           sourceCategory: formData.sourceCategory as LeadSourceCategory,
           sourceDetail: formData.sourceDetail.trim() || null,
@@ -874,6 +949,8 @@ function EditableLeadForm({
       } else if (lead) {
         await updateLead(lead.id, {
           source: formData.source.trim() || null,
+          assignedRepId: formData.assignedRepId,
+          salesRepId: formData.assignedRepId,
           sourceCategory: formData.sourceCategory as LeadSourceCategory,
           sourceDetail: formData.sourceDetail.trim() || null,
           description: formData.description.trim() || null,
@@ -1140,6 +1217,29 @@ function EditableLeadForm({
                     </SelectContent>
                   </Select>
                 </div>
+              </div>
+
+              <div className="space-y-2">
+                <QuestionLabel htmlFor="assignedRepId" required>
+                  Sales Rep
+                </QuestionLabel>
+                <Select
+                  items={repSelectItems}
+                  value={formData.assignedRepId}
+                  onValueChange={(value) => handleFieldChange("assignedRepId", value ?? "")}
+                  disabled={user?.role === "rep"}
+                >
+                  <SelectTrigger id="assignedRepId">
+                    <SelectValue>{selectedRepLabel}</SelectValue>
+                  </SelectTrigger>
+                  <SelectContent>
+                    {assignees.map((assignee) => (
+                      <SelectItem key={assignee.id} value={assignee.id}>
+                        {assignee.displayName}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
 
               <div className="grid gap-4 sm:grid-cols-2">

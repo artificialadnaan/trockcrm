@@ -212,12 +212,12 @@ router.patch("/:id/scoping", async (req, res, next) => {
 // POST /api/leads
 router.post("/", async (req, res, next) => {
   try {
-    const { companyId, propertyId, stageId, assignedRepId, name, ...rest } = req.body;
+    const { companyId, propertyId, stageId, assignedRepId, salesRepId, name, ...rest } = req.body;
     if (!companyId || !propertyId || !stageId || !name) {
       throw new AppError(400, "companyId, propertyId, stageId, and name are required");
     }
 
-    const repId = req.user!.role === "rep" ? req.user!.id : (assignedRepId || req.user!.id);
+    const repId = req.user!.role === "rep" ? req.user!.id : (assignedRepId || salesRepId || req.user!.id);
 
     const lead = await createLead(req.tenantDb!, {
       companyId,
@@ -315,6 +315,11 @@ router.post("/:id/stage-transition", async (req, res, next) => {
 router.patch("/:id", async (req, res, next) => {
   try {
     const body = { ...req.body };
+    if (body.salesRepId !== undefined && body.assignedRepId === undefined) {
+      body.assignedRepId = body.salesRepId;
+    }
+    delete body.salesRepId;
+
     if (req.user!.role === "rep" && body.assignedRepId !== undefined) {
       delete body.assignedRepId;
     }
@@ -358,6 +363,11 @@ router.post("/:id/convert", async (req, res, next) => {
       officeId: _ignoredOfficeId,
       ...rest
     } = body;
+    if (rest.salesRepId !== undefined && rest.assignedRepId === undefined) {
+      rest.assignedRepId = rest.salesRepId;
+    }
+    delete rest.salesRepId;
+
     if (req.user!.role === "rep" && body.assignedRepId !== undefined) {
       delete rest.assignedRepId;
     }

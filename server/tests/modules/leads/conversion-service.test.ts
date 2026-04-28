@@ -1053,6 +1053,8 @@ describe("Lead Conversion Shared Contract", () => {
     expect(columns.salesRepId.name).toBe("sales_rep_id");
     expect(columns.salesRepId.notNull).toBe(false);
     expect(columns.assignedRepId.notNull).toBe(true);
+    expect(columns.salesRepId.name).toBe("sales_rep_id");
+    expect(columns.salesRepId.notNull).toBe(false);
     expect(columns.stageId.notNull).toBe(true);
     expect(columns.status.hasDefault).toBe(true);
     expect(columns.status.default).toBe("open");

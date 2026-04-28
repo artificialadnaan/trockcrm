@@ -66,6 +66,8 @@ export interface LeadRecord {
   name: string;
   stageId: string;
   assignedRepId: string;
+  salesRepId?: string | null;
+  assignedRepName?: string | null;
   status: "open" | "converted" | "disqualified";
   source: string | null;
   sourceCategory: LeadSourceCategory | null;
@@ -222,6 +224,7 @@ export interface LeadBoardCard {
   name: string;
   stageId: string;
   assignedRepId?: string;
+  salesRepId?: string | null;
   officeId?: string;
   companyName?: string | null;
   propertyCity?: string | null;
@@ -438,6 +441,7 @@ export async function createLead(input: {
   propertyId: string;
   stageId: string;
   assignedRepId?: string;
+  salesRepId?: string | null;
   primaryContactId?: string | null;
   name: string;
   source?: string | null;
@@ -465,6 +469,7 @@ type LeadUpdatePayload = Partial<
     LeadRecord,
     | "stageId"
     | "assignedRepId"
+    | "salesRepId"
     | "primaryContactId"
     | "name"
     | "source"

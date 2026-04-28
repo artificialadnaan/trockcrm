@@ -35,6 +35,15 @@ const leadHookMocks = vi.hoisted(() => ({
     loading: false,
   })),
 }));
+const authMocks = vi.hoisted(() => ({
+  user: {
+    id: "rep-1",
+    email: "rep@example.com",
+    displayName: "Rep One",
+    role: "rep" as "admin" | "director" | "rep",
+    officeId: "office-1",
+  },
+}));
 
 vi.mock("@/hooks/use-pipeline-config", () => ({
   usePipelineStages: () => ({
@@ -72,6 +81,30 @@ vi.mock("@/hooks/use-leads", () => ({
   createLead: leadHookMocks.createLead,
   updateLead: leadHookMocks.updateLead,
   useLeadQuestionnaireTemplate: leadHookMocks.useLeadQuestionnaireTemplate,
+}));
+
+vi.mock("@/hooks/use-task-assignees", () => ({
+  useTaskAssignees: () => ({
+    assignees: [
+      { id: "rep-1", displayName: "Rep One" },
+      { id: "rep-2", displayName: "Rep Two" },
+    ],
+    loading: false,
+    error: null,
+    refetch: vi.fn(),
+  }),
+}));
+
+vi.mock("@/lib/auth", () => ({
+  useAuth: () => ({
+    user: authMocks.user,
+    loading: false,
+    login: vi.fn(),
+    localLogin: vi.fn(),
+    changePassword: vi.fn(),
+    logout: vi.fn(),
+    refreshUser: vi.fn(),
+  }),
 }));
 
 vi.mock("@/components/ui/button", () => ({
@@ -172,6 +205,9 @@ vi.mock("./lead-stage-badge", () => ({
 describe("LeadForm", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    authMocks.user.role = "rep";
+    authMocks.user.id = "rep-1";
+    authMocks.user.displayName = "Rep One";
     leadHookMocks.useLeadQuestionnaireTemplate.mockReturnValue({
       questionnaire: null,
       loading: false,
@@ -271,9 +307,49 @@ describe("LeadForm", () => {
 
     expect(html).toContain("Property Selector");
     expect(html).toContain("Add New Property");
+    expect(html).toContain("Sales Rep");
+    expect(html).toContain('<span data-select-label="true">Rep One</span>');
     expect(html).toContain('<span data-select-label="true">Ada Lovelace</span>');
     expect(html).toContain('<span data-select-label="true">New Lead</span>');
     expect(html).toContain('<span data-select-label="true">Multifamily</span>');
+  });
+
+  it("renders editable sales rep assignment on the lead summary card", () => {
+    authMocks.user.role = "admin";
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <LeadForm
+          lead={{
+            id: "lead-1",
+            name: "Lead One",
+            convertedDealId: null,
+            convertedDealNumber: null,
+            companyId: "company-1",
+            companyName: "Acme",
+            stageId: "stage-new",
+            propertyId: "property-1",
+            propertyName: "Palm Villas",
+            propertyAddress: "123 Main",
+            propertyCity: "Dallas",
+            propertyState: "TX",
+            propertyZip: "75001",
+            source: "Referral",
+            description: "",
+            projectTypeId: "type-1",
+            projectType: null,
+            assignedRepId: "rep-2",
+            assignedRepName: "Rep Two",
+            qualificationPayload: {},
+            projectTypeQuestionPayload: { projectTypeId: "type-1", answers: {} },
+            stageEnteredAt: "2026-04-22T00:00:00.000Z",
+          }}
+        />
+      </MemoryRouter>
+    );
+
+    expect(html).toContain("Sales Rep");
+    expect(html).toContain("Rep Two");
+    expect(html).toContain("Save Assignment");
   });
 
   it("renders the selected project type label in edit mode instead of the raw id", () => {
