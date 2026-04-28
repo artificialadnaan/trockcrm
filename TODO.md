@@ -2,6 +2,12 @@
 
 Items flagged but not addressed in their originating commit. Pick one when scope and risk allow.
 
+## Deferred — Backfill + Secret Rotation
+
+1. Run `scripts/refixDealNumbers.ts` against prod to convert old `TR-YYYY-NNNN` deal numbers to the new `dfw-3-11826-aa` format. Blocked locally by Railway internal-only `DATABASE_URL`. Two paths: enable Postgres public networking in the Railway dashboard, or use `railway ssh` into the API service and run from there.
+2. Rotate production secrets exposed in chat 2026-04-28: `ANTHROPIC_API_KEY`, `AZURE_CLIENT_SECRET`, `BID_BOARD_SYNC_SECRET`, `COMPANYCAM_API_KEY`, `DATABASE_URL` (Postgres password), `ENCRYPTION_KEY` (audit usage first — may invalidate encrypted data at rest), `HUBSPOT_PRIVATE_APP_TOKEN`, `JWT_SECRET` (will log out all users), `PROCORE_CLIENT_SECRET`, `R2_ACCESS_KEY_ID` + `R2_SECRET_ACCESS_KEY`, `RESEND_API_KEY`.
+3. Old leads default to `officeCode='dfw'` as a placeholder. Audit imported leads and correct any that should be `atl`.
+
 ## Lead service
 
 - **v1-client posting `source` alone gets silently dropped under v2.** `server/src/modules/leads/service.ts` — line ~1224, `else if (!v2Enabled && input.source !== undefined)`. Symptom mirrors the qualificationPayload bug (Commit 1) but lower stakes — only triggers if a stale browser bundle posts `source` instead of `sourceCategory`/`sourceDetail`. Fix path: either accept `source` as a legacy alias and route it through `resolveLeadSourceForWrite`, or have the API reject the legacy field with a clear error so old bundles fail loud instead of silent. Surfaced during 2026-04-27 CRM fixes batch.
