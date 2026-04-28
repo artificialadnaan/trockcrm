@@ -24,6 +24,7 @@ import { LeadNewPage } from "@/pages/leads/lead-new-page";
 import { PropertyListPage } from "@/pages/properties/property-list-page";
 import { PropertyDetailPage } from "@/pages/properties/property-detail-page";
 import { MergeQueuePage } from "@/pages/admin/merge-queue-page";
+import { DirectoryMergeQueuePage } from "@/pages/admin/directory-merge-queue-page";
 import { EmailInboxPage } from "@/pages/email/email-inbox-page";
 import { TaskListPage } from "@/pages/tasks/task-list-page";
 import { FilesPage } from "@/pages/files/files-page";
@@ -288,6 +289,14 @@ export function App() {
                 element={(
                   <RequireRole allowedRoles={["admin", "director"]}>
                     <MergeQueuePage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/admin/directory-merge-queue"
+                element={(
+                  <RequireRole allowedRoles={["admin", "director"]}>
+                    <DirectoryMergeQueuePage />
                   </RequireRole>
                 )}
               />

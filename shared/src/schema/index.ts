@@ -77,6 +77,12 @@ export { leadStageHistory } from "./tenant/lead-stage-history.js";
 export { leadQuestionAnswers } from "./tenant/lead-question-answers.js";
 export { leadQuestionAnswerHistory } from "./tenant/lead-question-answer-history.js";
 export { duplicateQueue, duplicateMatchTypeEnum, duplicateStatusEnum } from "./tenant/duplicate-queue.js";
+export {
+  directoryMergeAudit,
+  directoryMergeQueue,
+  directoryEntityTypeEnum,
+  directoryMergeStatusEnum,
+} from "./tenant/directory-merge-queue.js";
 export { emails, emailDirectionEnum } from "./tenant/emails.js";
 export { emailThreadBindings } from "./tenant/email-thread-bindings.js";
 export { activities, activityTypeEnum, activitySourceEntityEnum } from "./tenant/activities.js";
