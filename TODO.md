@@ -18,6 +18,7 @@ Items flagged but not addressed in their originating commit. Pick one when scope
 ## Bid Board funnel (Commit 9 reminder)
 
 - **SyncHub activity-push endpoint must NOT touch qualificationPayload or other lead fields directly.** Write to the `activities` table only. If SyncHub ever needs to update lead fields, that's a separate endpoint going through the same validation as the form. Flag locked in 2026-04-27 batch — verify Commit 9 implementation respects this before merging.
+- **Bid Board ingestion match-rate baseline (post-bootstrap).** ~54 out of 423 Excel rows match against 264 bootstrapped `bid_board_project_number` values. The 264 bootstrapped deals span historical active+archived deal lifetimes; the 423 Excel rows are this week's active set only. Match rate equilibrium will depend on what overlap exists between historical bootstrapped deals and rotating active project sets. Watch for: drift in match rate over time (declining = deals aging out of active without new ones being bootstrapped); orphan count (122 today — should stay flat or shrink, growing means SyncHub state and CRM state are diverging). Surfaced 2026-04-28.
 
 ## Deals service
 
