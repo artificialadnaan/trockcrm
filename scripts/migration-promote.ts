@@ -18,6 +18,14 @@ import { companies } from "../shared/src/schema/index.js";
 import { pipelineStageConfig } from "../shared/src/schema/public/pipeline-stage-config.js";
 import { users } from "../shared/src/schema/public/users.js";
 import { buildPropertyKey } from "../server/src/modules/migration/property-key.js";
+import {
+  buildProjectNumber,
+  generateJulianDate,
+  getNextSuffix,
+  parseProjectNumberSuffix,
+  resolveOfficeCode,
+  resolveProjectTypeCode,
+} from "../server/src/services/projectNumber.js";
 
 const OFFICE_SLUG = process.env.OFFICE_SLUG;
 if (!OFFICE_SLUG && process.argv[1]?.includes("migration-promote.ts")) {
@@ -49,6 +57,51 @@ function slugifyCompanyName(input: string): string {
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .slice(0, 70);
+}
+
+async function nextDealNumber(client: pg.PoolClient, input: {
+  officeCode: string;
+  projectType: string | null;
+  workflowRoute?: "normal" | "service";
+  createdAt: Date;
+}) {
+  const julianDate = generateJulianDate(input.createdAt);
+  const { rows } = await client.query<{ deal_number: string | null }>(
+    `SELECT deal_number
+       FROM deals
+      WHERE deal_number LIKE $1
+      ORDER BY deal_number DESC`,
+    [`%-%-${julianDate}-%`]
+  );
+  const highestSuffix =
+    rows
+      .map((row) => parseProjectNumberSuffix(row.deal_number, julianDate))
+      .filter((value): value is string => Boolean(value))
+      .sort((left, right) => right.localeCompare(left))[0] ?? null;
+  await client.query(
+    `INSERT INTO public.deal_number_daily_sequences (day_key, last_suffix)
+     VALUES ($1, $2)
+     ON CONFLICT (day_key) DO NOTHING`,
+    [julianDate, highestSuffix ?? ""]
+  );
+  const sequenceResult = await client.query<{ last_suffix: string }>(
+    `SELECT last_suffix
+       FROM public.deal_number_daily_sequences
+      WHERE day_key = $1
+      FOR UPDATE`,
+    [julianDate]
+  );
+  const suffix = getNextSuffix(sequenceResult.rows[0]?.last_suffix || highestSuffix);
+
+  return buildProjectNumber({
+    officeCode: resolveOfficeCode(input.officeCode),
+    projectTypeCode: resolveProjectTypeCode({
+      projectType: input.projectType,
+      workflowRoute: input.workflowRoute ?? "normal",
+    }),
+    createdAt: input.createdAt,
+    suffix,
+  });
 }
 
 export function resolvePropertyPromotionTargets(
@@ -275,11 +328,6 @@ async function main() {
     let promotedLeadCount = 0;
     let promotedDealCount = 0;
 
-    const countResult = await client.query(
-      `SELECT COALESCE(MAX(REGEXP_REPLACE(deal_number, '[^0-9]', '', 'g')::int), 0) AS max_num FROM deals`
-    );
-    let dealCounter = Number(countResult.rows[0]?.max_num ?? 0);
-    const year = new Date().getFullYear();
     const ddStageId = stageBySlug.get("dd");
     if (!ddStageId) {
       throw new Error("Missing dd stage configuration");
@@ -299,8 +347,13 @@ async function main() {
         continue;
       }
 
-      dealCounter++;
-      const dealNumber = `TR-${year}-${String(dealCounter).padStart(4, "0")}`;
+      const createdAt = new Date();
+      const dealNumber = await nextDealNumber(client, {
+        officeCode: OFFICE_SLUG ?? "dallas",
+        projectType: null,
+        workflowRoute: "normal",
+        createdAt,
+      });
       const raw = lead.rawData as any;
       const properties = raw?.properties ?? {};
       const propertyKey = buildPropertyKey({
@@ -317,9 +370,9 @@ async function main() {
         `INSERT INTO deals (
           deal_number, name, stage_id, assigned_rep_id, company_id,
           dd_estimate, awarded_amount, expected_close_date, source,
-          hubspot_deal_id, bid_board_project_number, property_address, property_city, property_state, property_zip,
+          hubspot_deal_id, bid_board_project_number, property_address, property_city, property_state, property_zip, office_code,
           is_active, stage_entered_at, created_at, updated_at
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,true,NOW(),NOW(),NOW())
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,true,NOW(),$17,$17)
         ON CONFLICT (hubspot_deal_id) WHERE hubspot_deal_id IS NOT NULL DO UPDATE SET
           updated_at = NOW()
         RETURNING id`,
@@ -334,10 +387,13 @@ async function main() {
           lead.mappedCloseDate ?? null,
           lead.mappedSourceStage ?? "HubSpot",
           lead.hubspotLeadId,
+          null,
           properties.address ?? null,
           properties.city ?? null,
           properties.state ?? null,
           properties.zip ?? null,
+          resolveOfficeCode(OFFICE_SLUG),
+          createdAt,
         ]
       );
 
@@ -393,15 +449,20 @@ async function main() {
         continue;
       }
 
-      dealCounter++;
-      const dealNumber = `TR-${year}-${String(dealCounter).padStart(4, "0")}`;
+      const createdAt = new Date();
+      const dealNumber = await nextDealNumber(client, {
+        officeCode: OFFICE_SLUG ?? "dallas",
+        projectType: null,
+        workflowRoute: "normal",
+        createdAt,
+      });
       const insertResult = await client.query(
         `INSERT INTO deals (
           deal_number, name, stage_id, assigned_rep_id, company_id,
           bid_estimate, awarded_amount, expected_close_date, source,
-          hubspot_deal_id, bid_board_project_number, property_address, property_city, property_state, property_zip,
+          hubspot_deal_id, bid_board_project_number, property_address, property_city, property_state, property_zip, office_code,
           is_active, stage_entered_at, created_at, updated_at
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,true,NOW(),NOW(),NOW())
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,true,NOW(),$17,$17)
         ON CONFLICT (hubspot_deal_id) WHERE hubspot_deal_id IS NOT NULL DO UPDATE SET
           updated_at = NOW()
         RETURNING id`,
@@ -416,11 +477,13 @@ async function main() {
           d.mappedCloseDate ?? null,
           d.mappedSource ?? "HubSpot",
           d.hubspotDealId,
-          d.mappedProjectNumber ?? null,
+          null,
           properties.address ?? null,
           properties.city ?? null,
           properties.state ?? null,
           properties.zip ?? null,
+          resolveOfficeCode(OFFICE_SLUG),
+          createdAt,
         ]
       );
 

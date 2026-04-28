@@ -10,16 +10,13 @@ type WorkflowRoute = "normal" | "service";
 export interface ProjectNumberDealInput {
   id: string;
   workflowRoute?: WorkflowRoute | null;
+  officeCode?: string | null;
   projectType?: string | null;
-  bidBoardProjectNumber?: string | null;
-  bidBoardOffice?: string | null;
-  regionClassification?: string | null;
-  propertyState?: string | null;
   createdAt?: Date | string | null;
 }
 
 export interface ProjectNumberBuildInput {
-  officeCode: "DFW" | "ATL";
+  officeCode: "DFW" | "ATL" | "dfw" | "atl";
   projectTypeCode: string;
   createdAt: Date;
   suffix: string;
@@ -41,10 +38,10 @@ export function generateJulianDate(createDate: Date): string {
   return `${String(dayOfYear).padStart(3, "0")}${String(year).slice(-2)}`;
 }
 
-export function resolveOfficeCode(location: string | null | undefined): "DFW" | "ATL" {
+export function resolveOfficeCode(location: string | null | undefined): "dfw" | "atl" {
   const normalized = String(location ?? "").trim().toUpperCase();
-  if (normalized.includes("ATL") || normalized.includes("ATLANTA")) return "ATL";
-  return "DFW";
+  if (normalized === "ATL" || normalized.includes("ATLANTA")) return "atl";
+  return "dfw";
 }
 
 export function resolveProjectTypeCode(input: {
@@ -75,7 +72,7 @@ export function buildIntendedProjectNumber(
   if (!match) return null;
 
   const [, officeCode, julianDate, suffix] = match;
-  return `${officeCode.toUpperCase()}-${PROJECT_TYPE_CODE_BY_VALUE[normalized]}-${julianDate}-${suffix.toLowerCase()}`;
+  return `${officeCode.toLowerCase()}-${PROJECT_TYPE_CODE_BY_VALUE[normalized]}-${julianDate}-${suffix.toLowerCase()}`;
 }
 
 export function getNextSuffix(existingSuffix: string | null | undefined): string {
@@ -94,59 +91,82 @@ export function getNextSuffix(existingSuffix: string | null | undefined): string
 }
 
 export function buildProjectNumber(input: ProjectNumberBuildInput): string {
-  return `${input.officeCode}-${input.projectTypeCode}-${generateJulianDate(input.createdAt)}-${input.suffix}`;
+  return `${input.officeCode.toLowerCase()}-${input.projectTypeCode}-${generateJulianDate(input.createdAt)}-${input.suffix}`;
 }
 
-export function shouldAssignProjectNumberForStageChange(input: {
-  currentStageSlug: string;
-  targetStageSlug: string;
-  existingProjectNumber?: string | null;
-}): boolean {
-  return (
-    input.targetStageSlug === "opportunity" &&
-    input.currentStageSlug !== "opportunity" &&
-    !input.existingProjectNumber
-  );
-}
-
-function parseSuffix(projectNumber: string | null | undefined, julianDate: string): string | null {
-  const match = String(projectNumber ?? "").match(new RegExp(`^[A-Z]{2,4}-[1-9]-${julianDate}-([a-z]+)$`, "i"));
+export function parseProjectNumberSuffix(projectNumber: string | null | undefined, julianDate: string): string | null {
+  const match = String(projectNumber ?? "").match(new RegExp(`^[a-z]{3}-[1-9]-${julianDate}-([a-z]+)$`, "i"));
   return match?.[1]?.toLowerCase() ?? null;
 }
 
 function newestSuffix(projectNumbers: Array<string | null | undefined>, julianDate: string): string | null {
   return projectNumbers
-    .map((value) => parseSuffix(value, julianDate))
+    .map((value) => parseProjectNumberSuffix(value, julianDate))
     .filter((value): value is string => Boolean(value))
     .sort((left, right) => right.localeCompare(left))[0] ?? null;
 }
 
 async function findHighestSuffixForDate(
-  tenantDb: { execute: (query: any) => Promise<{ rows?: Array<{ bid_board_project_number?: string | null }> } | Array<{ bid_board_project_number?: string | null }>> },
+  tenantDb: {
+    execute: (query: any) => Promise<{ rows?: Array<{ deal_number?: string | null }> } | Array<{ deal_number?: string | null }>>;
+  },
   julianDate: string
 ): Promise<string | null> {
   const pattern = `%-%-${julianDate}-%`;
   const result = await tenantDb.execute(sql`
-    SELECT bid_board_project_number
+    SELECT deal_number
       FROM deals
-     WHERE bid_board_project_number LIKE ${pattern}
-     ORDER BY bid_board_project_number DESC
+     WHERE deal_number LIKE ${pattern}
+     ORDER BY deal_number DESC
   `);
   const rows = Array.isArray(result) ? result : result.rows ?? [];
-  return newestSuffix(rows.map((row) => row.bid_board_project_number), julianDate);
+  return newestSuffix(rows.map((row) => row.deal_number), julianDate);
 }
 
-export async function generateProjectNumberForDeal(
-  tenantDb: { execute: (query: any) => Promise<{ rows?: Array<{ bid_board_project_number?: string | null }> } | Array<{ bid_board_project_number?: string | null }>> },
+async function reserveDailySuffix(
+  tenantDb: {
+    execute: (query: any) => Promise<{ rows?: Array<{ last_suffix?: string | null }> } | Array<{ last_suffix?: string | null }>>;
+  },
+  julianDate: string,
+  fallbackHighestSuffix: string | null
+): Promise<string> {
+  await tenantDb.execute(sql`
+    INSERT INTO public.deal_number_daily_sequences (day_key, last_suffix)
+    VALUES (${julianDate}, ${fallbackHighestSuffix ?? ""})
+    ON CONFLICT (day_key) DO NOTHING
+  `);
+  const locked = await tenantDb.execute(sql`
+    SELECT last_suffix
+      FROM public.deal_number_daily_sequences
+     WHERE day_key = ${julianDate}
+     FOR UPDATE
+  `);
+  const rows = Array.isArray(locked) ? locked : locked.rows ?? [];
+  const nextSuffix = getNextSuffix(rows[0]?.last_suffix || fallbackHighestSuffix);
+  await tenantDb.execute(sql`
+    UPDATE public.deal_number_daily_sequences
+       SET last_suffix = ${nextSuffix},
+           updated_at = NOW()
+     WHERE day_key = ${julianDate}
+  `);
+  return nextSuffix;
+}
+
+export async function generateDealNumberForProject(
+  tenantDb: {
+    execute: (query: any) => Promise<{ rows?: Array<{ deal_number?: string | null; last_suffix?: string | null }> } | Array<{ deal_number?: string | null; last_suffix?: string | null }>>;
+  },
   deal: ProjectNumberDealInput,
   now = new Date()
 ): Promise<string> {
   const createdAt = deal.createdAt ? new Date(deal.createdAt) : now;
   const julianDate = generateJulianDate(createdAt);
-  const suffix = getNextSuffix(await findHighestSuffixForDate(tenantDb, julianDate));
-  const officeCode = resolveOfficeCode(
-    deal.bidBoardOffice ?? deal.regionClassification ?? deal.propertyState
+  const suffix = await reserveDailySuffix(
+    tenantDb,
+    julianDate,
+    await findHighestSuffixForDate(tenantDb, julianDate)
   );
+  const officeCode = resolveOfficeCode(deal.officeCode);
   const projectTypeCode = resolveProjectTypeCode({
     projectType: deal.projectType,
     workflowRoute: deal.workflowRoute ?? "normal",

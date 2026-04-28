@@ -66,6 +66,7 @@ export const leads = pgTable(
     ownershipSyncStatus: varchar("ownership_sync_status", { length: 32 }),
     unassignedReasonCode: varchar("unassigned_reason_code", { length: 64 }),
     description: text("description"),
+    officeCode: text("office_code").notNull(),
     existingCustomerResolution: varchar("existing_customer_resolution", { length: 50 }),
     existingCustomerResolvedAt: timestamp("existing_customer_resolved_at", { withTimezone: true }),
     existingCustomerResolvedBy: uuid("existing_customer_resolved_by").references(() => users.id),

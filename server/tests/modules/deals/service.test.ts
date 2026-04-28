@@ -20,9 +20,20 @@ vi.mock("../../../src/db.js", () => {
   };
 });
 
+vi.mock("../../../src/modules/pipeline/service.js", () => ({
+  getStageById: vi.fn(async () => ({
+    id: "stage-dd",
+    slug: "dd",
+    isTerminal: false,
+    displayOrder: 1,
+    workflowFamily: "standard_deal",
+  })),
+  getStageBySlug: vi.fn(async () => null),
+}));
+
 // We'll import after mocks are set up
 const { AppError } = await import("../../../src/middleware/error-handler.js");
-const { updateDeal } = await import("../../../src/modules/deals/service.js");
+const { createDeal, updateDeal } = await import("../../../src/modules/deals/service.js");
 
 describe("Deal Service", () => {
   beforeEach(() => {
@@ -30,69 +41,95 @@ describe("Deal Service", () => {
   });
 
   describe("Deal Number Generation Pattern", () => {
-    it("should produce deal numbers matching TR-YYYY-NNNN format", () => {
-      // The deal number format is TR-{YYYY}-{NNNN}
-      const year = new Date().getFullYear();
-      const prefix = `TR-${year}-`;
-
-      // Test the format regex
-      const dealNumber = `${prefix}0001`;
-      expect(dealNumber).toMatch(/^TR-\d{4}-\d{4}$/);
+    it("should produce deal numbers matching the office-type-julian-suffix format", () => {
+      const dealNumber = "dfw-3-11826-aa";
+      expect(dealNumber).toMatch(/^(dfw|atl)-[1-9]-\d{5}-[a-z]+$/);
     });
 
-    it("should pad sequence numbers to 4 digits", () => {
-      const year = new Date().getFullYear();
+    it("should roll suffixes after z within the daily sequence", () => {
       const testCases = [
-        { seq: 1, expected: `TR-${year}-0001` },
-        { seq: 9, expected: `TR-${year}-0009` },
-        { seq: 42, expected: `TR-${year}-0042` },
-        { seq: 100, expected: `TR-${year}-0100` },
-        { seq: 9999, expected: `TR-${year}-9999` },
+        { last: null, expected: "aa" },
+        { last: "aa", expected: "ab" },
+        { last: "az", expected: "ba" },
+        { last: "ba", expected: "bb" },
       ];
 
       for (const tc of testCases) {
-        const result = `TR-${year}-${String(tc.seq).padStart(4, "0")}`;
+        const chars = tc.last ? tc.last.split("") : [];
+        let result = "aa";
+        if (tc.last) {
+          let index = chars.length - 1;
+          while (index >= 0) {
+            if (chars[index] < "z") {
+              chars[index] = String.fromCharCode(chars[index].charCodeAt(0) + 1);
+              result = chars.join("");
+              break;
+            }
+            chars[index] = "a";
+            index -= 1;
+          }
+        }
         expect(result).toBe(tc.expected);
       }
     });
 
-    it("should correctly parse sequence from existing deal number", () => {
-      const year = new Date().getFullYear();
-      const prefix = `TR-${year}-`;
-      const lastNumber = `TR-${year}-0042`;
+    it("direct deal creation assigns the new dealNumber format and does not set bidBoardProjectNumber", async () => {
+      const state = {
+        insertedDeal: null as Record<string, unknown> | null,
+        executeCalls: 0,
+      };
+      const tenantDb = {
+        select() {
+          return {
+            from() {
+              return {
+                where() {
+                  return {
+                    limit() {
+                      return Promise.resolve([{ id: "rep-1", isActive: true, officeId: "office-1" }]);
+                    },
+                  };
+                },
+              };
+            },
+          };
+        },
+        execute() {
+          state.executeCalls += 1;
+          if (state.executeCalls === 1) return Promise.resolve({ rows: [{ deal_number: "dfw-3-11826-aa" }] });
+          if (state.executeCalls === 3) return Promise.resolve({ rows: [{ last_suffix: "aa" }] });
+          return Promise.resolve({ rows: [] });
+        },
+        insert() {
+          return {
+            values(values: Record<string, unknown>) {
+              state.insertedDeal = {
+                id: "deal-1",
+                bidBoardProjectNumber: null,
+                ...values,
+              };
+              return {
+                returning() {
+                  return Promise.resolve([state.insertedDeal]);
+                },
+              };
+            },
+          };
+        },
+      };
 
-      const seqPart = lastNumber.replace(prefix, "");
-      const parsed = parseInt(seqPart, 10);
+      const deal = await createDeal(tenantDb as never, {
+        name: "Direct Deal",
+        stageId: "stage-dd",
+        assignedRepId: "rep-1",
+        officeId: "office-1",
+        migrationMode: true,
+        officeCode: "dfw",
+        projectType: "roofing",
+      });
 
-      expect(parsed).toBe(42);
-      expect(parsed + 1).toBe(43);
-    });
-
-    it("should handle non-numeric sequence gracefully", () => {
-      const year = new Date().getFullYear();
-      const prefix = `TR-${year}-`;
-      const badNumber = `TR-${year}-xxxx`;
-
-      const seqPart = badNumber.replace(prefix, "");
-      const parsed = parseInt(seqPart, 10);
-
-      expect(isNaN(parsed)).toBe(true);
-      // When NaN, the generator should default to 1
-      const nextSeq = isNaN(parsed) ? 1 : parsed + 1;
-      expect(nextSeq).toBe(1);
-    });
-
-    it("should start at 0001 when no existing deals for the year", () => {
-      // When result.length === 0, nextSeq should be 1
-      const resultLength = 0;
-      let nextSeq = 1;
-      if (resultLength > 0) {
-        nextSeq = 999; // Should not reach this
-      }
-
-      const year = new Date().getFullYear();
-      const dealNumber = `TR-${year}-${String(nextSeq).padStart(4, "0")}`;
-      expect(dealNumber).toBe(`TR-${year}-0001`);
+      expect(deal.dealNumber).toMatch(/^dfw-3-\d{5}-ab$/);
+      expect(deal.bidBoardProjectNumber).toBeNull();
     });
   });
 
@@ -351,7 +388,7 @@ describe("Deal Service", () => {
         deal: {
           id: "deal-1",
           name: "Palm Villas",
-          dealNumber: "TR-2026-0001",
+          dealNumber: "dfw-3-10626-aa",
           stageId: "stage-opportunity",
           assignedRepId: "rep-1",
           primaryContactId: null,
@@ -374,7 +411,7 @@ describe("Deal Service", () => {
           source: "referral",
           winProbability: 50,
           expectedCloseDate: null,
-          bidBoardProjectNumber: "DFW-3-10626-aa",
+          bidBoardProjectNumber: null,
           intendedProjectNumber: null,
           proposalStatus: "drafting",
           proposalNotes: null,
@@ -468,9 +505,9 @@ describe("Deal Service", () => {
         "admin-1"
       );
 
-      expect(updated.bidBoardProjectNumber).toBe("DFW-3-10626-aa");
+      expect(updated.dealNumber).toBe("dfw-3-10626-aa");
       expect(updated.projectType).toBe("service");
-      expect(updated.intendedProjectNumber).toBe("DFW-4-10626-aa");
+      expect(updated.intendedProjectNumber).toBe("dfw-4-10626-aa");
       expect(tenantDb.state.dealHistory).toEqual([
         expect.objectContaining({
           dealId: "deal-1",
@@ -484,7 +521,7 @@ describe("Deal Service", () => {
 
     it("clears intendedProjectNumber when admin changes project type back to the issued number type", async () => {
       const tenantDb = createProjectTypeTenantDb("service");
-      tenantDb.state.deal.intendedProjectNumber = "DFW-4-10626-aa";
+      tenantDb.state.deal.intendedProjectNumber = "dfw-4-10626-aa";
 
       const updated = await updateDeal(
         tenantDb as never,
@@ -494,7 +531,7 @@ describe("Deal Service", () => {
         "admin-1"
       );
 
-      expect(updated.bidBoardProjectNumber).toBe("DFW-3-10626-aa");
+      expect(updated.dealNumber).toBe("dfw-3-10626-aa");
       expect(updated.projectType).toBe("roofing");
       expect(updated.intendedProjectNumber).toBeNull();
       expect(tenantDb.state.dealHistory).toHaveLength(1);
