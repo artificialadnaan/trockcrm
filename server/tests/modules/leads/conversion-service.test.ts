@@ -216,6 +216,8 @@ type RouteServiceMocks = {
 };
 
 type LeadRouteServiceMocks = {
+  createLead: ReturnType<typeof vi.fn>;
+  updateLead: ReturnType<typeof vi.fn>;
   convertLead: ReturnType<typeof vi.fn>;
 };
 
@@ -282,6 +284,8 @@ async function loadLeadRoutesWithServiceMocks() {
   vi.resetModules();
 
   const leadRouteServiceMocks: LeadRouteServiceMocks = {
+    createLead: vi.fn(),
+    updateLead: vi.fn(),
     convertLead: vi.fn(),
   };
 
@@ -292,11 +296,11 @@ async function loadLeadRoutesWithServiceMocks() {
 
     return {
       ...actual,
-      createLead: vi.fn(),
+      createLead: leadRouteServiceMocks.createLead,
       deleteLead: vi.fn(),
       getLeadById: vi.fn(),
       listLeads: vi.fn(),
-      updateLead: vi.fn(),
+      updateLead: leadRouteServiceMocks.updateLead,
     };
   });
 
@@ -414,7 +418,7 @@ async function invokeLeadRoute({
 }: {
   leadRoutes: unknown;
   method: "post" | "patch";
-  path: "/:id/convert" | "/:id";
+  path: "/" | "/:id/convert" | "/:id";
   params?: Record<string, string>;
   body?: Record<string, unknown>;
   userRole?: "admin" | "director" | "rep";
@@ -1736,6 +1740,57 @@ describe("Lead Conversion Service", () => {
     expect(tenantDb.state.deals).toHaveLength(1);
   });
 
+  it("copies lead salesRepId to the successor deal when no override is provided", async () => {
+    const tenantDb = createFakeTenantDb({
+      leads: [
+        {
+          id: "lead-1",
+          companyId: "company-1",
+          propertyId: "property-1",
+          primaryContactId: null,
+          name: "Palm Villas repaint",
+          stageId: "lead-stage-sales-validation",
+          assignedRepId: "rep-assigned",
+          salesRepId: "rep-sales",
+          status: "open",
+          pipelineType: "normal",
+          source: "Referral",
+          description: "Property manager requested pre-bid walk",
+          stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+          convertedAt: null,
+          isActive: true,
+          createdAt: new Date("2026-04-12T15:00:00.000Z"),
+          updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+        } as any,
+      ],
+    });
+    const service = createLeadConversionService({
+      getStageById: pipelineMocks.getStageById as never,
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+      createDeal: async (_tenantDb, input) => {
+        const deal = {
+          id: "deal-1",
+          dealNumber: "TR-2026-0001",
+          assignedRepId: input.assignedRepId,
+          sourceLeadId: input.sourceLeadId,
+          stageId: input.stageId,
+          name: input.name,
+        };
+        tenantDb.state.deals.push(deal);
+        return deal as never;
+      },
+    });
+
+    const result = await service.convertLead(tenantDb as never, {
+      leadId: "lead-1",
+      dealStageId: "deal-stage-1",
+      userRole: "director",
+      userId: "director-1",
+    });
+
+    expect(result.deal.assignedRepId).toBe("rep-sales");
+  });
+
   it("revalidates questionnaire completeness during conversion when v2 is enabled", async () => {
     process.env.ENABLE_LEAD_EDIT_V2 = "true";
 
@@ -2933,6 +2988,60 @@ describe("Public Deal Route Guardrails", () => {
 });
 
 describe("Lead Route Guardrails", () => {
+  it("passes salesRepId through lead creation", async () => {
+    const { leadRoutes, leadRouteServiceMocks } = await loadLeadRoutesWithServiceMocks();
+    leadRouteServiceMocks.createLead.mockResolvedValueOnce({ id: "lead-1" });
+
+    await invokeLeadRoute({
+      leadRoutes,
+      method: "post",
+      path: "/",
+      body: {
+        companyId: "company-1",
+        propertyId: "property-1",
+        stageId: "stage-1",
+        name: "Created Lead",
+        salesRepId: "rep-2",
+      },
+      userRole: "director",
+    });
+
+    expect(leadRouteServiceMocks.createLead).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        assignedRepId: "rep-2",
+        salesRepId: "rep-2",
+      })
+    );
+  });
+
+  it("passes nullable salesRepId through lead updates without clearing assignedRepId", async () => {
+    const { leadRoutes, leadRouteServiceMocks } = await loadLeadRoutesWithServiceMocks();
+    leadRouteServiceMocks.updateLead.mockResolvedValueOnce({ id: "lead-1" });
+
+    await invokeLeadRoute({
+      leadRoutes,
+      method: "patch",
+      path: "/:id",
+      params: { id: "lead-1" },
+      body: {
+        salesRepId: null,
+      },
+      userRole: "director",
+    });
+
+    expect(leadRouteServiceMocks.updateLead).toHaveBeenCalledWith(
+      expect.anything(),
+      "lead-1",
+      expect.objectContaining({
+        salesRepId: null,
+      }),
+      "director",
+      "director-1"
+    );
+    expect(leadRouteServiceMocks.updateLead.mock.calls[0]?.[2]).not.toHaveProperty("assignedRepId");
+  });
+
   it("does not let request body fields override trusted conversion context", async () => {
     const { leadRoutes, leadRouteServiceMocks } = await loadLeadRoutesWithServiceMocks();
     leadRouteServiceMocks.convertLead.mockResolvedValueOnce({
@@ -2967,5 +3076,33 @@ describe("Lead Route Guardrails", () => {
       })
     );
     expect(leadRouteServiceMocks.convertLead.mock.calls[0]?.[1]).not.toHaveProperty("assignedRepId");
+  });
+
+  it("accepts salesRepId as conversion successor rep input", async () => {
+    const { leadRoutes, leadRouteServiceMocks } = await loadLeadRoutesWithServiceMocks();
+    leadRouteServiceMocks.convertLead.mockResolvedValueOnce({
+      lead: { id: "lead-1" },
+      deal: { id: "deal-1" },
+    });
+
+    await invokeLeadRoute({
+      leadRoutes,
+      method: "post",
+      path: "/:id/convert",
+      params: { id: "lead-1" },
+      body: {
+        dealStageId: "deal-stage-1",
+        salesRepId: "rep-2",
+      },
+      userRole: "director",
+    });
+
+    expect(leadRouteServiceMocks.convertLead).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        leadId: "lead-1",
+        assignedRepId: "rep-2",
+      })
+    );
   });
 });

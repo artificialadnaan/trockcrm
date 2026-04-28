@@ -218,12 +218,14 @@ router.post("/", async (req, res, next) => {
     }
 
     const repId = req.user!.role === "rep" ? req.user!.id : (assignedRepId || salesRepId || req.user!.id);
+    const leadSalesRepId = salesRepId === undefined ? repId : salesRepId;
 
     const lead = await createLead(req.tenantDb!, {
       companyId,
       propertyId,
       stageId,
       assignedRepId: repId,
+      salesRepId: leadSalesRepId,
       officeId: req.user!.activeOfficeId,
       name,
       ...rest,
@@ -315,10 +317,9 @@ router.post("/:id/stage-transition", async (req, res, next) => {
 router.patch("/:id", async (req, res, next) => {
   try {
     const body = { ...req.body };
-    if (body.salesRepId !== undefined && body.assignedRepId === undefined) {
+    if (body.salesRepId !== undefined && body.salesRepId !== null && body.assignedRepId === undefined) {
       body.assignedRepId = body.salesRepId;
     }
-    delete body.salesRepId;
 
     if (req.user!.role === "rep" && body.assignedRepId !== undefined) {
       delete body.assignedRepId;
@@ -363,7 +364,7 @@ router.post("/:id/convert", async (req, res, next) => {
       officeId: _ignoredOfficeId,
       ...rest
     } = body;
-    if (rest.salesRepId !== undefined && rest.assignedRepId === undefined) {
+    if (rest.salesRepId !== undefined && rest.salesRepId !== null && rest.assignedRepId === undefined) {
       rest.assignedRepId = rest.salesRepId;
     }
     delete rest.salesRepId;

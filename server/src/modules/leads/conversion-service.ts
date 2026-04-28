@@ -168,7 +168,7 @@ export function createLeadConversionService(
       throw new AppError(409, "Lead has already been converted");
     }
 
-    const successorAssignedRepId = input.assignedRepId ?? lead.assignedRepId;
+    const successorAssignedRepId = input.assignedRepId ?? lead.salesRepId ?? lead.assignedRepId;
     if (input.userRole === "rep" && successorAssignedRepId !== lead.assignedRepId) {
       throw new AppError(403, "You cannot reassign the successor deal");
     }
