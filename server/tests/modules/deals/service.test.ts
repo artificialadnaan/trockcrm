@@ -345,6 +345,161 @@ describe("Deal Service", () => {
       expect(shouldReturnEarly).toBe(true);
     });
 
+    function createProjectTypeTenantDb(initialProjectType = "roofing") {
+      const state = {
+        dealHistory: [] as Array<Record<string, unknown>>,
+        deal: {
+          id: "deal-1",
+          name: "Palm Villas",
+          dealNumber: "TR-2026-0001",
+          stageId: "stage-opportunity",
+          assignedRepId: "rep-1",
+          primaryContactId: null,
+          sourceLeadId: "lead-1",
+          companyId: "company-1",
+          propertyId: "property-1",
+          workflowRoute: "normal",
+          migrationMode: false,
+          ddEstimate: null,
+          bidEstimate: null,
+          awardedAmount: null,
+          description: "Exterior refresh",
+          propertyAddress: "123 Palm Way",
+          propertyCity: "Dallas",
+          propertyState: "TX",
+          propertyZip: "75201",
+          projectTypeId: null,
+          projectType: initialProjectType,
+          regionId: null,
+          source: "referral",
+          winProbability: 50,
+          expectedCloseDate: null,
+          bidBoardProjectNumber: "DFW-3-10626-aa",
+          intendedProjectNumber: null,
+          proposalStatus: "drafting",
+          proposalNotes: null,
+          estimatingSubstage: "building_estimate",
+          isBidBoardOwned: false,
+          bidBoardStageSlug: null,
+          readOnlySyncedAt: null,
+        },
+      };
+
+      return {
+        state,
+        select() {
+          return {
+            from() {
+              return {
+                where() {
+                  return {
+                    limit() {
+                      return Promise.resolve([{ ...state.deal }]);
+                    },
+                  };
+                },
+              };
+            },
+          };
+        },
+        update() {
+          return {
+            set(values: Record<string, unknown>) {
+              return {
+                where() {
+                  return {
+                    returning() {
+                      Object.assign(state.deal, values);
+                      return Promise.resolve([{ ...state.deal }]);
+                    },
+                  };
+                },
+              };
+            },
+          };
+        },
+        insert(table: unknown) {
+          const tableName = (table as { _: { name?: string } })?._?.name;
+          if (tableName !== undefined && tableName !== "deal_history") {
+            throw new Error(`Unexpected insert table: ${String(tableName)}`);
+          }
+
+          return {
+            values(value: Record<string, unknown>) {
+              const inserted = { id: `deal-history-${state.dealHistory.length + 1}`, ...value };
+              state.dealHistory.push(inserted);
+              return {
+                returning() {
+                  return Promise.resolve([{ ...inserted }]);
+                },
+                then(onfulfilled: (value: unknown) => unknown) {
+                  return Promise.resolve(inserted).then(onfulfilled);
+                },
+              };
+            },
+          };
+        },
+      };
+    }
+
+    it("rejects non-admin project type PATCH payloads on deals", async () => {
+      await expect(
+        updateDeal(
+          createProjectTypeTenantDb() as never,
+          "deal-1",
+          { projectType: "service" },
+          "director",
+          "director-1"
+        )
+      ).rejects.toMatchObject<AppError>({
+        statusCode: 403,
+        message: "Only admins can edit project type after Opportunity",
+      });
+    });
+
+    it("keeps the issued project number and records intendedProjectNumber for admin project type changes", async () => {
+      const tenantDb = createProjectTypeTenantDb();
+
+      const updated = await updateDeal(
+        tenantDb as never,
+        "deal-1",
+        { projectType: "service" },
+        "admin",
+        "admin-1"
+      );
+
+      expect(updated.bidBoardProjectNumber).toBe("DFW-3-10626-aa");
+      expect(updated.projectType).toBe("service");
+      expect(updated.intendedProjectNumber).toBe("DFW-4-10626-aa");
+      expect(tenantDb.state.dealHistory).toEqual([
+        expect.objectContaining({
+          dealId: "deal-1",
+          fieldName: "project_type",
+          oldValue: "roofing",
+          newValue: "service",
+          changedBy: "admin-1",
+        }),
+      ]);
+    });
+
+    it("clears intendedProjectNumber when admin changes project type back to the issued number type", async () => {
+      const tenantDb = createProjectTypeTenantDb("service");
+      tenantDb.state.deal.intendedProjectNumber = "DFW-4-10626-aa";
+
+      const updated = await updateDeal(
+        tenantDb as never,
+        "deal-1",
+        { projectType: "roofing" },
+        "admin",
+        "admin-1"
+      );
+
+      expect(updated.bidBoardProjectNumber).toBe("DFW-3-10626-aa");
+      expect(updated.projectType).toBe("roofing");
+      expect(updated.intendedProjectNumber).toBeNull();
+      expect(tenantDb.state.dealHistory).toHaveLength(1);
+    });
+
     function createOwnedDealTenantDb() {
       const existingDeal = {
         id: "deal-1",

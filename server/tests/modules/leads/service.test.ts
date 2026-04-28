@@ -41,6 +41,7 @@ type FakeLeadRow = {
   assignedRepId: string;
   status: "open" | "converted" | "disqualified";
   projectTypeId?: string | null;
+  projectType?: string | null;
   qualificationPayload?: Record<string, string | boolean | number | null>;
   projectTypeQuestionPayload?: {
     projectTypeId: string | null;
@@ -478,6 +479,7 @@ describe("lead service canonical progression", () => {
         officeId: "office-1",
         name: "Created Lead",
         source: "Referral",
+        projectType: "commercial",
         projectTypeId: "project-type-commercial",
         qualificationPayload: {
           existing_customer_status: "existing",
@@ -503,6 +505,61 @@ describe("lead service canonical progression", () => {
         process.env.ENABLE_LEAD_EDIT_V2 = previousFlag;
       }
     }
+  });
+
+  it("rejects unknown project type when creating a lead", async () => {
+    const tenantDb = {
+      select() {
+        return {
+          from(table: unknown) {
+            const rows =
+              table === companies
+                ? [{ id: "company-1", isActive: true }]
+                : table === properties
+                  ? [{ id: "property-1", companyId: "company-1", isActive: true }]
+                  : table === users
+                    ? [{ id: "rep-1", isActive: true, officeId: "office-1" }]
+                    : [];
+
+            return {
+              where() {
+                return this;
+              },
+              limit() {
+                return this;
+              },
+              then(onfulfilled: (value: unknown[]) => unknown) {
+                return Promise.resolve(rows.map((row) => ({ ...row }))).then(onfulfilled);
+              },
+            };
+          },
+        };
+      },
+      insert() {
+        throw new Error("Lead insert should not run when projectType is invalid");
+      },
+    };
+    const service = createLeadService({
+      getStageById: pipelineMocks.getStageById as never,
+      getActiveProjectTypes: pipelineMocks.getActiveProjectTypes as never,
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+    });
+
+    await expect(
+      service.createLead(tenantDb as never, {
+        companyId: "company-1",
+        propertyId: "property-1",
+        stageId: newLeadStage.id,
+        assignedRepId: "rep-1",
+        officeId: "office-1",
+        name: "Created Lead",
+        source: "Referral",
+        projectType: "casino",
+      })
+    ).rejects.toMatchObject<AppError>({
+      statusCode: 400,
+      message: "Invalid project type: casino",
+    });
   });
 
   it("persists qualification payload updates when lead edit v2 is enabled", async () => {
@@ -644,6 +701,7 @@ describe("lead service canonical progression", () => {
         officeId: "office-1",
         name: "Active-customer Lead",
         source: "Referral",
+        projectType: "commercial",
         projectTypeId: "project-type-commercial",
         qualificationPayload: {},
       });
@@ -728,6 +786,7 @@ describe("lead service canonical progression", () => {
         officeId: "office-1",
         name: "Brand-new Company Lead",
         source: "Data Mine",
+        projectType: "commercial",
         projectTypeId: "project-type-commercial",
         qualificationPayload: {},
       });

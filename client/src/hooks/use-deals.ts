@@ -113,7 +113,10 @@ export interface Deal {
   propertyCity: string | null;
   propertyState: string | null;
   propertyZip: string | null;
+  projectType?: string | null;
   projectTypeId: string | null;
+  bidBoardProjectNumber?: string | null;
+  intendedProjectNumber?: string | null;
   regionId: string | null;
   source: string | null;
   winProbability: number | null;

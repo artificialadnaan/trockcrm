@@ -7,6 +7,7 @@ import {
   companies,
   contacts,
   deals,
+  dealHistory,
   leadStageHistory,
   leads,
   properties,
@@ -1035,6 +1036,8 @@ describe("Lead Conversion Shared Contract", () => {
     expect(columns.companyId.notNull).toBe(true);
     expect(columns.propertyId.name).toBe("property_id");
     expect(columns.propertyId.notNull).toBe(true);
+    expect(columns.projectType.name).toBe("project_type");
+    expect(columns.projectType.notNull).toBe(false);
     expect(columns.salesRepId.name).toBe("sales_rep_id");
     expect(columns.salesRepId.notNull).toBe(false);
     expect(columns.assignedRepId.notNull).toBe(true);
@@ -1082,6 +1085,10 @@ describe("Lead Conversion Shared Contract", () => {
     expect(columns.sourceLeadId.name).toBe("source_lead_id");
     expect(columns.sourceLeadId.notNull).toBe(false);
     expect(columns.sourceLeadId.isUnique).toBe(true);
+    expect(columns.projectType.name).toBe("project_type");
+    expect(columns.projectType.notNull).toBe(false);
+    expect(columns.intendedProjectNumber.name).toBe("intended_project_number");
+    expect(columns.intendedProjectNumber.notNull).toBe(false);
     expect(columns.proposalDraftStartedAt.name).toBe("proposal_draft_started_at");
     expect(columns.proposalDraftStartedAt.notNull).toBe(false);
     expect(config.foreignKeys.map((fk) => fk.getName())).toEqual(
@@ -1094,9 +1101,32 @@ describe("Lead Conversion Shared Contract", () => {
     );
   });
 
+  it("tracks deal project type changes in deal_history", () => {
+    const columns = getTableColumns(dealHistory);
+    const config = getTableConfig(dealHistory);
+
+    expect(columns.dealId.name).toBe("deal_id");
+    expect(columns.fieldName.name).toBe("field_name");
+    expect(columns.oldValue.name).toBe("old_value");
+    expect(columns.newValue.name).toBe("new_value");
+    expect(columns.changedBy.name).toBe("changed_by");
+    expect(columns.changedAt.name).toBe("changed_at");
+    expect(columns.changedAt.notNull).toBe(true);
+    expect(config.foreignKeys.map((fk) => fk.getName()).sort()).toEqual([
+      "deal_history_changed_by_users_id_fk",
+      "deal_history_deal_id_deals_id_fk",
+    ]);
+  });
+
   it("adds the UI-domain lead and deal fields through migration 0066", () => {
     expect(uiDomainSchemaFieldsMigrationSql).toContain(
       "ADD COLUMN IF NOT EXISTS sales_rep_id uuid"
+    );
+    expect(uiDomainSchemaFieldsMigrationSql).toContain(
+      "ADD COLUMN IF NOT EXISTS project_type text"
+    );
+    expect(uiDomainSchemaFieldsMigrationSql).toContain(
+      "CONSTRAINT leads_project_type_allowlist_chk"
     );
     expect(uiDomainSchemaFieldsMigrationSql).toContain(
       "CONSTRAINT leads_sales_rep_id_users_id_fk"
@@ -1108,6 +1138,10 @@ describe("Lead Conversion Shared Contract", () => {
     expect(uiDomainSchemaFieldsMigrationSql).toContain(
       "ADD COLUMN IF NOT EXISTS proposal_draft_started_at timestamptz"
     );
+    expect(uiDomainSchemaFieldsMigrationSql).toContain(
+      "ADD COLUMN IF NOT EXISTS intended_project_number text"
+    );
+    expect(uiDomainSchemaFieldsMigrationSql).toContain("CREATE TABLE IF NOT EXISTS %I.deal_history");
   });
 
   it("creates the properties, leads, and lineage migration contract", () => {
@@ -1153,6 +1187,7 @@ describe("Lead Service", () => {
       assignedRepId: "rep-1",
       name: "Palm Villas repaint",
       source: "Referral",
+      projectType: "commercial",
       description: "Property manager requested pre-bid walk",
     });
 
@@ -1191,6 +1226,7 @@ describe("Lead Service", () => {
         stageId: stage.id,
         assignedRepId: "rep-1",
         name: "Palm Villas repaint",
+        projectType: "commercial",
       })
     ).rejects.toMatchObject<AppError>({
       statusCode: 400,
