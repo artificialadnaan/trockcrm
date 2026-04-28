@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { api } from "@/lib/api";
+import type { ActivityRange } from "@trock-crm/shared/types";
 
 export interface CleanupReasonSummary {
   reasonCode: string;
@@ -56,6 +57,8 @@ export interface RepDashboardData {
     lastPaidAt: string | null;
   }>;
   activeDeals: { count: number; totalValue: number };
+  contractsSignedYtd: { count: number; totalValue: number };
+  contractsSignedMtd: { count: number; totalValue: number };
   tasksToday: { overdue: number; today: number };
   activityThisWeek: {
     calls: number;
@@ -154,6 +157,8 @@ const DEFAULT_REP_DASHBOARD_DATA: RepDashboardData = {
   },
   commissionDeals: [],
   activeDeals: { count: 0, totalValue: 0 },
+  contractsSignedYtd: { count: 0, totalValue: 0 },
+  contractsSignedMtd: { count: 0, totalValue: 0 },
   tasksToday: { overdue: 0, today: 0 },
   activityThisWeek: { calls: 0, emails: 0, meetings: 0, notes: 0, total: 0 },
   followUpCompliance: { total: 0, onTime: 0, complianceRate: 0 },
@@ -191,6 +196,14 @@ function normalizeRepDashboardData(data: Partial<RepDashboardData> | null | unde
       ...DEFAULT_REP_DASHBOARD_DATA.activeDeals,
       ...(data?.activeDeals ?? {}),
     },
+    contractsSignedYtd: {
+      ...DEFAULT_REP_DASHBOARD_DATA.contractsSignedYtd,
+      ...(data?.contractsSignedYtd ?? {}),
+    },
+    contractsSignedMtd: {
+      ...DEFAULT_REP_DASHBOARD_DATA.contractsSignedMtd,
+      ...(data?.contractsSignedMtd ?? {}),
+    },
     tasksToday: {
       ...DEFAULT_REP_DASHBOARD_DATA.tasksToday,
       ...(data?.tasksToday ?? {}),
@@ -221,7 +234,8 @@ function normalizeRepDashboardData(data: Partial<RepDashboardData> | null | unde
   };
 }
 
-export function useRepDashboard() {
+export function useRepDashboard(options: { range?: ActivityRange } = {}) {
+  const { range } = options;
   const [data, setData] = useState<RepDashboardData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -230,14 +244,15 @@ export function useRepDashboard() {
     setLoading(true);
     setError(null);
     try {
-      const res = await api<{ data: RepDashboardData }>("/dashboard/rep");
+      const qs = range ? `?range=${encodeURIComponent(range)}` : "";
+      const res = await api<{ data: RepDashboardData }>(`/dashboard/rep${qs}`);
       setData(normalizeRepDashboardData(res.data));
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to load dashboard");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [range]);
 
   useEffect(() => {
     fetch();

@@ -62,7 +62,7 @@ describe("dashboard routes", () => {
 
     expect(response.status).toBe(200);
     expect(getRepDashboardMock).toHaveBeenCalledOnce();
-    expect(getRepDashboardMock).toHaveBeenCalledWith(expect.anything(), "rep-1");
+    expect(getRepDashboardMock).toHaveBeenCalledWith(expect.anything(), "rep-1", { range: undefined });
     expect(commitTransactionMock).toHaveBeenCalledOnce();
     expect(response.body).toEqual({
       data: {

@@ -18,7 +18,12 @@ import {
   properties,
 } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
-import { CANONICAL_DEAL_STAGE_LABELS, type WorkflowRoute } from "@trock-crm/shared/types";
+import {
+  CANONICAL_DEAL_STAGE_LABELS,
+  DEFAULT_ACTIVITY_RANGE,
+  type ActivityRange,
+  type WorkflowRoute,
+} from "@trock-crm/shared/types";
 import { db } from "../../db.js";
 import {
   getPipelineSummary,
@@ -1089,7 +1094,17 @@ export interface RepDashboardData {
   commissionSummary: RepCommissionSummary;
   commissionDeals: RepCommissionDealEarning[];
   activeDeals: { count: number; totalValue: number };
+  contractsSignedYtd: { count: number; totalValue: number };
+  contractsSignedMtd: { count: number; totalValue: number };
   tasksToday: { overdue: number; today: number };
+  /**
+   * Activity counts by type within the range passed to getRepDashboard
+   * (`week` | `month` | `ytd`). Field name is legacy: when the range is
+   * non-week the contents are month/YTD totals despite the "ThisWeek"
+   * label. Preserved for compatibility with getRepDetail and
+   * director-rep-detail.tsx; a coordinated rename to `activitySummary`
+   * is tracked under "Naming debt" in TODO.md.
+   */
   activityThisWeek: { calls: number; emails: number; meetings: number; notes: number; total: number };
   followUpCompliance: { total: number; onTime: number; complianceRate: number };
   pipelineByStage: Array<{
@@ -1133,16 +1148,40 @@ export interface RepDashboardData {
  */
 export async function getRepDashboard(
   tenantDb: TenantDb,
-  userId: string
+  userId: string,
+  options: { range?: ActivityRange } = {}
 ): Promise<RepDashboardData> {
   const today = new Date().toLocaleDateString("en-CA", { timeZone: "America/Chicago" }); // YYYY-MM-DD in CT
-  const weekAgo = new Date();
-  weekAgo.setDate(weekAgo.getDate() - 7);
-  const weekAgoStr = weekAgo.toISOString();
 
-  const year = new Date().getFullYear();
+  const now = new Date();
+  const year = now.getFullYear();
   const yearStart = `${year}-01-01`;
   const yearEnd = `${year}-12-31`;
+  const monthStart = `${year}-${String(now.getMonth() + 1).padStart(2, "0")}-01`;
+
+  // Activity range start as a YYYY-MM-DD string. SQL applies AT TIME ZONE
+  // 'America/Chicago' to anchor it to CT midnight (DST-aware via Postgres,
+  // never wrong regardless of process TZ). Unknown range values silently
+  // fall back to the default — matches house-style query-param handling.
+  const range: ActivityRange = (
+    options.range && (["week", "month", "ytd"] as const).includes(options.range as never)
+      ? options.range
+      : DEFAULT_ACTIVITY_RANGE
+  ) as ActivityRange;
+  let activityRangeStartDate: string;
+  if (range === "month") {
+    activityRangeStartDate = `${today.slice(0, 7)}-01`;
+  } else if (range === "ytd") {
+    activityRangeStartDate = `${today.slice(0, 4)}-01-01`;
+  } else {
+    // week — calendar-aligned 7-day window in CT. Slightly different from
+    // the prior sliding-millisecond-window: the start anchors to midnight
+    // CT 7 days ago, so the bucket doesn't drift through the day. Subtle
+    // change, but more honest as a "Week" label.
+    const [y, m, d] = today.split("-").map(Number);
+    const ref = new Date(Date.UTC(y!, m! - 1, d!) - 7 * 24 * 60 * 60 * 1000);
+    activityRangeStartDate = `${ref.getUTCFullYear()}-${String(ref.getUTCMonth() + 1).padStart(2, "0")}-${String(ref.getUTCDate()).padStart(2, "0")}`;
+  }
 
   const [
     activeLeadResult,
@@ -1159,6 +1198,7 @@ export async function getRepDashboard(
     funnelBuckets,
     myCleanupResult,
     commissionData,
+    contractsSignedResult,
   ] = await Promise.all([
     tenantDb.execute(sql`
       SELECT COUNT(*)::int AS count
@@ -1197,7 +1237,7 @@ export async function getRepDashboard(
       WHERE assigned_to = ${userId}
     `),
 
-    // 3. Activity this week by type
+    // 3. Activity by type within the selected range (week | month | ytd)
     tenantDb.execute(sql`
       SELECT
         COUNT(*) FILTER (WHERE type = 'call')::int AS calls,
@@ -1207,7 +1247,7 @@ export async function getRepDashboard(
         COUNT(*)::int AS total
       FROM activities
       WHERE responsible_user_id = ${userId}
-        AND occurred_at >= ${weekAgoStr}::timestamptz
+        AND occurred_at >= (${activityRangeStartDate}::date AT TIME ZONE 'America/Chicago')
     `),
 
     // 4. Follow-up compliance YTD
@@ -1285,6 +1325,24 @@ export async function getRepDashboard(
     getRepFunnelBuckets(tenantDb, userId),
     getMyCleanupQueue(tenantDb, userId),
     getRepCommissionSummary(tenantDb, userId),
+
+    // Contracts signed YTD + MTD for this rep. Strict semantics: we count
+    // signed contracts (contract_signed_date IS NOT NULL) and sum awarded_amount
+    // only — a deal signed without an awarded_amount contributes to count but
+    // not to totalValue, intentionally surfacing data-quality issues rather
+    // than blending in bid/dd estimates. The today guard rejects future-dated
+    // contract_signed_date so misplaced future dates don't pollute either window.
+    tenantDb.execute(sql`
+      SELECT
+        COUNT(*) FILTER (WHERE contract_signed_date >= ${yearStart}::date)::int AS ytd_count,
+        COALESCE(SUM(awarded_amount) FILTER (WHERE contract_signed_date >= ${yearStart}::date), 0)::numeric AS ytd_value,
+        COUNT(*) FILTER (WHERE contract_signed_date >= ${monthStart}::date)::int AS mtd_count,
+        COALESCE(SUM(awarded_amount) FILTER (WHERE contract_signed_date >= ${monthStart}::date), 0)::numeric AS mtd_value
+      FROM deals
+      WHERE assigned_rep_id = ${userId}
+        AND contract_signed_date IS NOT NULL
+        AND contract_signed_date <= ${today}::date
+    `),
   ]);
 
   const alRows = (activeLeadResult as any).rows ?? activeLeadResult;
@@ -1294,6 +1352,7 @@ export async function getRepDashboard(
   const plRows = (pipelineResult as any).rows ?? pipelineResult;
   const lsRows = (leadSnapshotResult as any).rows ?? leadSnapshotResult;
   const dsRows = (dealSnapshotResult as any).rows ?? dealSnapshotResult;
+  const csRows = (contractsSignedResult as any).rows ?? contractsSignedResult;
   const staleLeadAverage = staleLeadResult.length > 0
     ? Math.round(staleLeadResult.reduce((sum, lead) => sum + lead.daysInStage, 0) / staleLeadResult.length)
     : null;
@@ -1309,10 +1368,20 @@ export async function getRepDashboard(
       count: Number(adRows[0]?.count ?? 0),
       totalValue: Number(adRows[0]?.total_value ?? 0),
     },
+    contractsSignedYtd: {
+      count: Number(csRows[0]?.ytd_count ?? 0),
+      totalValue: Number(csRows[0]?.ytd_value ?? 0),
+    },
+    contractsSignedMtd: {
+      count: Number(csRows[0]?.mtd_count ?? 0),
+      totalValue: Number(csRows[0]?.mtd_value ?? 0),
+    },
     tasksToday: {
       overdue: Number(tcRows[0]?.overdue ?? 0),
       today: Number(tcRows[0]?.today ?? 0),
     },
+    // Field name legacy — see RepDashboardData declaration above.
+    // Contents reflect the `range` parameter, not necessarily a week.
     activityThisWeek: {
       calls: Number(acRows[0]?.calls ?? 0),
       emails: Number(acRows[0]?.emails ?? 0),

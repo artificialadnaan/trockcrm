@@ -10,7 +10,7 @@ import {
   searchCompanies,
 } from "./service.js";
 import { AppError } from "../../middleware/error-handler.js";
-import { markCompanyVerified } from "./customer-status-service.js";
+import { markCompanyRejected, markCompanyVerified } from "./customer-status-service.js";
 
 const router = Router();
 
@@ -83,6 +83,25 @@ router.post("/:id/verify", async (req, res, next) => {
     const company = await markCompanyVerified(req.tenantDb!, {
       companyId: req.params.id,
       userId: req.user!.id,
+    });
+    if (!company) throw new AppError(404, "Company not found");
+    await req.commitTransaction!();
+    res.json({ company });
+  } catch (err) { next(err); }
+});
+
+// POST /companies/:id/reject
+router.post("/:id/reject", async (req, res, next) => {
+  try {
+    if (req.user!.role !== "admin" && req.user!.role !== "director") {
+      throw new AppError(403, "Only directors and admins can reject company verification");
+    }
+
+    const reason = typeof req.body?.reason === "string" ? req.body.reason : null;
+    const company = await markCompanyRejected(req.tenantDb!, {
+      companyId: req.params.id,
+      userId: req.user!.id,
+      reason,
     });
     if (!company) throw new AppError(404, "Company not found");
     await req.commitTransaction!();

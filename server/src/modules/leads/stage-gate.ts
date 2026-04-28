@@ -1,6 +1,6 @@
 import { eq } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
-import { leads } from "@trock-crm/shared/schema";
+import { companies, leads } from "@trock-crm/shared/schema";
 import {
   LEAD_COMPANY_PREQUAL_FIELD_KEYS,
   LEAD_VALUE_ASSIGNMENT_FIELD_KEYS,
@@ -10,6 +10,12 @@ import { AppError } from "../../middleware/error-handler.js";
 import { getStageById } from "../pipeline/service.js";
 import { computeExistingCustomerStatus } from "../companies/customer-status-service.js";
 import { getLeadQualificationByLeadId } from "./qualification-service.js";
+import {
+  evaluateLeadQuestionGate,
+  isLeadEditV2Enabled,
+  type LeadQuestionGateMissing,
+  type LeadQuestionAnswerValue,
+} from "./questionnaire-service.js";
 
 type TenantDb = NodePgDatabase<any>;
 
@@ -183,12 +189,42 @@ function normalizeQualificationSnapshot(
   };
 }
 
+function questionnaireFieldKey(rawKey: string): string {
+  if (rawKey === "estimated_value" || rawKey === "timeline_status" || rawKey === "existing_customer_status") {
+    return `qualificationPayload.${rawKey}`;
+  }
+  return `question.${rawKey}`;
+}
+
+function questionnaireFieldLabel(key: string): string {
+  const known = WORKFLOW_GATE_FIELD_LABELS[key as keyof typeof WORKFLOW_GATE_FIELD_LABELS];
+  if (known) return known;
+  if (key === "company.verification_pending") {
+    return "Company verification (pending approver review)";
+  }
+  if (key.startsWith("question.")) {
+    return key
+      .slice("question.".length)
+      .replace(/_/g, " ")
+      .replace(/\b\w/g, (c) => c.toUpperCase());
+  }
+  if (key.startsWith("qualificationPayload.")) {
+    return key
+      .slice("qualificationPayload.".length)
+      .replace(/_/g, " ")
+      .replace(/\b\w/g, (c) => c.toUpperCase());
+  }
+  return getFieldLabel(key);
+}
+
 export function evaluateLeadStageGate(input: {
   lead: LeadSnapshot;
   qualification: QualificationSnapshot;
   currentStage: LeadStageRecord;
   targetStage: LeadStageRecord;
   userRole?: string;
+  questionnaireGate?: LeadQuestionGateMissing | null;
+  companyVerificationPending?: boolean;
 }): LeadStageGateResult {
   const requiredFields = LEAD_STAGE_REQUIREMENTS[input.targetStage.slug] ?? [];
   const missingFields = requiredFields.filter(
@@ -205,9 +241,39 @@ export function evaluateLeadStageGate(input: {
     input.targetStage.slug === "qualified_for_opportunity" &&
     input.userRole !== "director" &&
     input.userRole !== "admin";
-  const effectiveMissingFields = blockedByApprovalRole
-    ? [...missingFields, "approval.directorAdmin"]
-    : missingFields;
+
+  const questionnaireMissingKeys: string[] = input.questionnaireGate
+    ? [
+        ...input.questionnaireGate.qualificationFields.map(questionnaireFieldKey),
+        ...input.questionnaireGate.projectTypeQuestionIds.map(questionnaireFieldKey),
+      ]
+    : [];
+
+  const companyVerificationKeys = input.companyVerificationPending
+    ? ["company.verification_pending"]
+    : [];
+
+  const effectiveMissingFields = [
+    ...missingFields,
+    ...(blockedByApprovalRole ? ["approval.directorAdmin"] : []),
+    ...questionnaireMissingKeys,
+    ...companyVerificationKeys,
+  ];
+
+  // Render every checked item — missing AND satisfied — so the checklist UI
+  // can paint a complete picture instead of only listing missing items.
+  const checklistKeys = [
+    ...requiredFields,
+    ...(blockedByApprovalRole ? ["approval.directorAdmin"] : []),
+    ...questionnaireMissingKeys,
+    ...companyVerificationKeys,
+  ];
+  const seen = new Set<string>();
+  const dedupedChecklistKeys = checklistKeys.filter((key) => {
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 
   return {
     allowed: effectiveMissingFields.length === 0,
@@ -216,9 +282,9 @@ export function evaluateLeadStageGate(input: {
     missingRequirements: {
       fields: effectiveMissingFields,
       effectiveChecklist: {
-        fields: [...requiredFields, ...(blockedByApprovalRole ? ["approval.directorAdmin"] : [])].map((field) => ({
+        fields: dedupedChecklistKeys.map((field) => ({
           key: field,
-          label: getFieldLabel(field),
+          label: questionnaireFieldLabel(field),
           satisfied: !effectiveMissingFields.includes(field),
           source: "stage" as const,
         })),
@@ -277,6 +343,46 @@ export async function validateLeadStageGate(
           existing_customer_status: computedExistingCustomerStatus?.status ?? null,
         };
 
+  // Mirror the runtime V2 gate condition so preflight surfaces the same
+  // missing items the actual move would, eliminating the "preflight green +
+  // runtime red" contradiction in the modal.
+  const v2GateApplies =
+    isLeadEditV2Enabled() &&
+    (
+      (targetStage.slug === "sales_validation_stage" && currentStage.slug !== "sales_validation_stage") ||
+      (currentStage.slug === "sales_validation_stage" &&
+        (targetStage.displayOrder ?? 0) > (currentStage.displayOrder ?? 0))
+    );
+
+  let questionnaireGate: LeadQuestionGateMissing | null = null;
+  if (v2GateApplies && lead.companyId) {
+    questionnaireGate = await evaluateLeadQuestionGate(tenantDb, {
+      leadId: lead.id,
+      projectTypeId: lead.projectTypeId ?? null,
+      qualificationPayload: qualificationPayload as Record<string, LeadQuestionAnswerValue>,
+      existingCustomerStatus: computedExistingCustomerStatus?.status ?? null,
+    });
+  }
+
+  // Block advancement past sales_validation while the linked company's
+  // verification is still pending. Belt-and-suspenders for legacy leads
+  // that got into sales_validation before PR1's verificationStatus gate
+  // existed; new leads are already blocked at the qualified_lead boundary
+  // by lead-level verificationStatus.
+  const advancingPastSalesValidation =
+    currentStage.slug === "sales_validation_stage" &&
+    (targetStage.displayOrder ?? 0) > (currentStage.displayOrder ?? 0);
+
+  let companyVerificationPending = false;
+  if (advancingPastSalesValidation && lead.companyId) {
+    const [companyRow] = await tenantDb
+      .select({ status: companies.companyVerificationStatus })
+      .from(companies)
+      .where(eq(companies.id, lead.companyId))
+      .limit(1);
+    companyVerificationPending = companyRow?.status === "pending";
+  }
+
   return evaluateLeadStageGate({
     lead: {
       ...lead,
@@ -288,6 +394,8 @@ export async function validateLeadStageGate(
     currentStage,
     targetStage,
     userRole,
+    questionnaireGate,
+    companyVerificationPending,
   });
 }
 

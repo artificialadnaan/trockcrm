@@ -16,7 +16,13 @@ import { getWorkflowRouteLabel } from "@/lib/pipeline-ownership";
 import { usePipelineStages } from "@/hooks/use-pipeline-config";
 import { buildCanonicalDealBoardColumns } from "@/lib/canonical-deal-board";
 import { toast } from "sonner";
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
+import { ActivityRangeSelect } from "@/components/dashboard/activity-range-select";
+import {
+  ACTIVITY_RANGE_LABELS,
+  DEFAULT_ACTIVITY_RANGE,
+  type ActivityRange,
+} from "@trock-crm/shared/types";
 import {
   ArrowUpRight,
   Briefcase,
@@ -25,8 +31,9 @@ import {
   Activity,
   Target,
   TrendingUp,
-  CalendarClock,
   DollarSign,
+  FileSignature,
+  FilePen,
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -119,7 +126,8 @@ export function RepDashboardPage() {
   const { user } = useAuth();
   const navigate = useNavigate();
   const boardState = usePipelineBoardState("deals");
-  const { data, loading, error } = useRepDashboard();
+  const [activityRange, setActivityRange] = useState<ActivityRange>(DEFAULT_ACTIVITY_RANGE);
+  const { data, loading, error } = useRepDashboard({ range: activityRange });
   const {
     board: dealBoard,
     loading: dealBoardLoading,
@@ -422,6 +430,23 @@ export function RepDashboardPage() {
         </Card>
       </div>
 
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <StatCard
+          title="Contracts Signed YTD"
+          value={data.contractsSignedYtd.count}
+          subtitle={formatCurrency(data.contractsSignedYtd.totalValue)}
+          icon={<FileSignature className="h-5 w-5" />}
+          className="border-indigo-200 bg-indigo-50/70"
+        />
+        <StatCard
+          title="Contracts Signed MTD"
+          value={data.contractsSignedMtd.count}
+          subtitle={formatCurrency(data.contractsSignedMtd.totalValue)}
+          icon={<FilePen className="h-5 w-5" />}
+          className="border-indigo-200 bg-indigo-50/70"
+        />
+      </div>
+
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-6">
         <StatCard
           title="Active Leads"
@@ -452,7 +477,7 @@ export function RepDashboardPage() {
           onClick={() => navigate("/tasks")}
         />
         <StatCard
-          title="Activity This Week"
+          title="Activity"
           value={data.activityThisWeek.total}
           subtitle={`${data.activityThisWeek.calls} calls, ${data.activityThisWeek.emails} emails`}
           icon={<Activity className="h-5 w-5" />}
@@ -557,9 +582,13 @@ export function RepDashboardPage() {
                   <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-500">
                     Activity Mix
                   </p>
-                  <CardTitle className="mt-2 text-lg">This Week</CardTitle>
+                  <CardTitle className="mt-2 text-lg">{ACTIVITY_RANGE_LABELS[activityRange]}</CardTitle>
                 </div>
-                <CalendarClock className="h-5 w-5 text-slate-400" />
+                <ActivityRangeSelect
+                  value={activityRange}
+                  onChange={setActivityRange}
+                  className="h-8 w-[140px] text-xs"
+                />
               </div>
             </CardHeader>
             <CardContent>

@@ -22,14 +22,16 @@ import { getActiveProjectTypes, getAllStages, getStageById, getStageBySlug } fro
 import { assertLeadStageTransitionAllowed, LeadStageTransitionError } from "./stage-transition-service.js";
 import { preflightLeadStageCheck } from "./stage-gate.js";
 import {
-  isAnsweredQuestionValue,
+  evaluateLeadQuestionGate,
   isLeadEditV2Enabled,
-  listLeadQuestionAnswers,
-  listMissingRequiredQuestionKeys,
-  listQuestionnaireNodes,
   upsertLeadQuestionAnswerSet,
 } from "./questionnaire-service.js";
-import { computeExistingCustomerStatus } from "../companies/customer-status-service.js";
+import {
+  buildCompanyVerificationEmail,
+  computeExistingCustomerStatus,
+  getActiveAdminDirectorEmails,
+} from "../companies/customer-status-service.js";
+import { sendSystemEmail } from "../../lib/resend-client.js";
 import { companyNeedsVerification } from "./verification-service.js";
 import { resolveLeadSourceForWrite } from "./source-control.js";
 import type { LeadSourceCategory } from "@trock-crm/shared/types";
@@ -472,22 +474,16 @@ async function assertLeadQuestionGateAllowed(
     };
   }
 ) {
-  const currentStoredAnswers = await listLeadQuestionAnswers(tenantDb, input.leadId);
-  const mergedAnswers = {
-    ...currentStoredAnswers,
-    ...input.leadQuestionAnswers,
-  };
-  const nodes = await listQuestionnaireNodes(tenantDb, input.projectTypeId);
   const existingCustomerStatus = await computeExistingCustomerStatus(tenantDb, input.companyId, new Date(), {
     excludeLeadId: input.leadId,
   });
-  const qualificationFields = ["estimated_value", "timeline_status"].filter(
-    (fieldId) => !isAnsweredQuestionValue(input.qualificationPayload[fieldId])
-  );
-  if (!isAnsweredQuestionValue(existingCustomerStatus.status)) {
-    qualificationFields.unshift("existing_customer_status");
-  }
-  const projectTypeQuestionIds = listMissingRequiredQuestionKeys(nodes, mergedAnswers);
+  const { qualificationFields, projectTypeQuestionIds } = await evaluateLeadQuestionGate(tenantDb, {
+    leadId: input.leadId,
+    projectTypeId: input.projectTypeId,
+    qualificationPayload: input.qualificationPayload,
+    leadQuestionAnswers: input.leadQuestionAnswers,
+    existingCustomerStatus: existingCustomerStatus.status,
+  });
 
   if (qualificationFields.length === 0 && projectTypeQuestionIds.length === 0) {
     return;
@@ -1018,6 +1014,59 @@ export function createLeadService(
       });
     }
 
+    // Verification email + company-side state. Fires only when this lead's
+    // creation determined the company needs verification (PR1's existing
+    // gate). Idempotent at the company level: if a prior lead already
+    // requested verification for this company, the company row already has
+    // companyVerificationStatus='pending' and we skip the email so we don't
+    // spam approvers across multiple new leads against the same company.
+    if (verificationStatus === "pending") {
+      const [companyRow] = await tenantDb
+        .select({
+          id: companies.id,
+          name: companies.name,
+          verificationStatus: companies.companyVerificationStatus,
+          emailSentAt: companies.companyVerificationEmailSentAt,
+          assignedApproverUserId: companies.assignedApproverUserId,
+        })
+        .from(companies)
+        .where(eq(companies.id, input.companyId))
+        .limit(1);
+
+      const alreadyRequested =
+        companyRow?.verificationStatus != null && companyRow?.emailSentAt != null;
+
+      if (companyRow && !alreadyRequested) {
+        const recipients = await getActiveAdminDirectorEmails(tenantDb, {
+          assignedApproverUserId: companyRow.assignedApproverUserId,
+        });
+
+        if (recipients.length > 0) {
+          const { subject, html } = buildCompanyVerificationEmail({
+            companyId: companyRow.id,
+            companyName: companyRow.name,
+            leadId: lead.id,
+            leadName: input.name,
+          });
+          const sent = await sendSystemEmail(recipients, subject, html);
+          await tenantDb
+            .update(companies)
+            .set({
+              companyVerificationStatus: companyRow.verificationStatus ?? "pending",
+              companyVerificationRequestedAt:
+                companyRow.verificationStatus == null ? now : undefined,
+              companyVerificationEmailSentAt: sent ? now : undefined,
+              updatedAt: now,
+            })
+            .where(eq(companies.id, companyRow.id));
+        } else {
+          console.warn(
+            `[leads.createLead] company ${companyRow.id} needs verification but no recipients resolved (no assigned approver, no active admin/director, no env fallback)`
+          );
+        }
+      }
+    }
+
     // Auto-promotion: lead was inserted directly into qualified_lead, but
     // the request-asserted entry stage was new_lead (assertLeadStartsInEntryStage).
     // Record the synthetic stage transition so the timeline shows the move.
@@ -1225,7 +1274,7 @@ export function createLeadService(
       updates.source = input.source;
     }
     if (input.description !== undefined) updates.description = input.description;
-    if (!v2Enabled && input.qualificationPayload !== undefined) {
+    if (input.qualificationPayload !== undefined) {
       updates.qualificationPayload = normalizeQualificationPayload(input.qualificationPayload);
     }
     if (!v2Enabled && (input.projectTypeQuestionPayload !== undefined || input.projectTypeId !== undefined)) {

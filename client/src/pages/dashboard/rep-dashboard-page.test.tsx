@@ -124,6 +124,8 @@ describe("RepDashboardPage", () => {
           potentialCommission: 1200,
         },
         activeDeals: { count: 6, totalValue: 300000 },
+        contractsSignedYtd: { count: 0, totalValue: 0 },
+        contractsSignedMtd: { count: 0, totalValue: 0 },
         tasksToday: { overdue: 1, today: 2 },
         activityThisWeek: { calls: 1, emails: 2, meetings: 3, notes: 4, total: 10 },
         followUpCompliance: { total: 5, onTime: 4, complianceRate: 80 },

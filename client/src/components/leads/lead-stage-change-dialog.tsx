@@ -38,7 +38,6 @@ export function LeadStageChangeDialog({
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [runtimeMissingLabels, setRuntimeMissingLabels] = useState<string[]>([]);
 
   useEffect(() => {
     if (!open || !targetStageId) {
@@ -47,7 +46,6 @@ export function LeadStageChangeDialog({
 
     setLoading(true);
     setError(null);
-    setRuntimeMissingLabels([]);
     preflightLeadStageCheck(lead.id, targetStageId)
       .then((result) => setPreflight(result))
       .catch((err) => setError(err instanceof Error ? err.message : "Preflight failed"))
@@ -64,8 +62,14 @@ export function LeadStageChangeDialog({
     try {
       const result = await transitionLeadStage(lead.id, { targetStageId });
       if (!result.ok) {
-        setRuntimeMissingLabels(result.missing.map((field) => field.label));
-        setError(`Complete the missing fields before moving this lead to ${targetStageName ?? "the next stage"}.`);
+        // Preflight should have caught any missing fields. If runtime still
+        // rejects (race condition with concurrent edits), refresh preflight so
+        // the checklist reflects current state and surface a generic error.
+        const refreshed = await preflightLeadStageCheck(lead.id, targetStageId).catch(() => null);
+        if (refreshed) {
+          setPreflight(refreshed);
+        }
+        setError(`Required fields changed since this dialog opened. Review the checklist and try again.`);
         return;
       }
       onSuccess();
@@ -96,14 +100,14 @@ export function LeadStageChangeDialog({
           </div>
         ) : preflight ? (
           <div className="space-y-4">
-            {!preflight.allowed && (
+            {!preflight.allowed && preflight.blockReason ? (
               <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-700">
                 <div className="flex items-center gap-2 font-medium">
                   <AlertTriangle className="h-4 w-4" />
-                  {preflight.blockReason ?? "Lead stage change blocked"}
+                  {preflight.blockReason}
                 </div>
               </div>
-            )}
+            ) : null}
             <StageGateChecklist
               missingRequirements={{
                 fields: preflight.missingRequirements.fields,
@@ -116,21 +120,12 @@ export function LeadStageChangeDialog({
                 },
               }}
             />
-            {runtimeMissingLabels.length > 0 ? (
-              <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-700">
-                <div className="flex items-center gap-2 font-medium">
-                  <AlertTriangle className="h-4 w-4" />
-                  Complete required fields
-                </div>
-                <p className="mt-1">{runtimeMissingLabels.join(", ")}</p>
-              </div>
-            ) : null}
             {error && <p className="text-sm text-red-600">{error}</p>}
           </div>
         ) : null}
 
         <DialogFooter showCloseButton>
-          {onEditLead && (!preflight?.allowed || runtimeMissingLabels.length > 0) ? (
+          {onEditLead && !preflight?.allowed ? (
             <Button variant="outline" onClick={onEditLead}>
               Edit Lead
             </Button>

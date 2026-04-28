@@ -213,6 +213,45 @@ export function listMissingRequiredQuestionKeys(
     .map((node) => node.key);
 }
 
+export interface LeadQuestionGateMissing {
+  qualificationFields: string[];
+  projectTypeQuestionIds: string[];
+}
+
+/**
+ * Pure evaluation of the V2 lead question gate. Returns the missing items.
+ * Caller must compute existingCustomerStatus and pass it in.
+ */
+export async function evaluateLeadQuestionGate(
+  tenantDb: TenantDb,
+  input: {
+    leadId: string;
+    projectTypeId: string | null;
+    qualificationPayload: Record<string, LeadQuestionAnswerValue>;
+    leadQuestionAnswers?: Record<string, LeadQuestionAnswerValue>;
+    existingCustomerStatus: string | null;
+  }
+): Promise<LeadQuestionGateMissing> {
+  const [storedAnswers, nodes] = await Promise.all([
+    listLeadQuestionAnswers(tenantDb, input.leadId),
+    listQuestionnaireNodes(tenantDb, input.projectTypeId),
+  ]);
+  const mergedAnswers = {
+    ...storedAnswers,
+    ...(input.leadQuestionAnswers ?? {}),
+  };
+  const qualificationFields = ["estimated_value", "timeline_status"].filter(
+    (fieldId) => !isAnsweredQuestionValue(input.qualificationPayload[fieldId])
+  );
+  if (!isAnsweredQuestionValue(input.existingCustomerStatus)) {
+    qualificationFields.unshift("existing_customer_status");
+  }
+  return {
+    qualificationFields,
+    projectTypeQuestionIds: listMissingRequiredQuestionKeys(nodes, mergedAnswers),
+  };
+}
+
 export async function upsertLeadQuestionAnswerSet(
   tenantDb: TenantDb,
   input: {

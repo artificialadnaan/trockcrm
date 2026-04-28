@@ -73,7 +73,7 @@ describe("buildCanonicalDealBoardColumns", () => {
               lostCompetitor: null,
               lostAt: null,
               expectedCloseDate: null,
-              actualCloseDate: null,
+              actualCloseDate: null, contractSignedDate: null,
               lastActivityAt: null,
               stageEnteredAt: "2026-04-23T00:00:00.000Z",
               isActive: true,

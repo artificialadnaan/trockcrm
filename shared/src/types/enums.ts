@@ -83,7 +83,7 @@ export const LEAD_SOURCE_CATEGORIES = [
 ] as const;
 export type LeadSourceCategory = (typeof LEAD_SOURCE_CATEGORIES)[number];
 
-export const COMPANY_VERIFICATION_STATUSES = ["pending", "verified", "not_required"] as const;
+export const COMPANY_VERIFICATION_STATUSES = ["pending", "verified", "rejected", "not_required"] as const;
 export type CompanyVerificationStatus = (typeof COMPANY_VERIFICATION_STATUSES)[number];
 
 export const LEAD_VERIFICATION_STATUSES = [

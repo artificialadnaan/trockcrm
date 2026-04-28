@@ -53,6 +53,7 @@ export {
 } from "./tenant/deal-forecast-milestones.js";
 export { changeOrders, changeOrderStatusEnum } from "./tenant/change-orders.js";
 export { dealPaymentEvents } from "./tenant/deal-payment-events.js";
+export { dealSignedCommissions } from "./tenant/deal-signed-commissions.js";
 export { dealApprovals, approvalStatusEnum } from "./tenant/deal-approvals.js";
 export {
   estimateMarkets,

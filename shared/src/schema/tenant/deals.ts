@@ -135,6 +135,7 @@ export const deals = pgTable("deals", {
   lostAt: timestamp("lost_at", { withTimezone: true }),
   expectedCloseDate: date("expected_close_date"),
   actualCloseDate: date("actual_close_date"),
+  contractSignedDate: date("contract_signed_date"),
   workflowRoute: workflowRouteEnum("workflow_route").default("normal").notNull(),
   pipelineDisposition: dealPipelineDispositionEnum("pipeline_disposition")
     .default("deals")
