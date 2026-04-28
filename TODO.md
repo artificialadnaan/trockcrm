@@ -54,6 +54,10 @@ Provenance: pre-existed since merge commit `e7259ee`, before 2026-04-27 batch wa
 
 - **Claude Code `Edit` tool returns "Edit operation failed" reminders for successful edits in some cases.** Verified during Commit 7 that edits land correctly despite the reminder; recommended verification = grep + typecheck after every Edit call. Surfaced 2026-04-27.
 
+## Naming debt
+
+- **Field `activityThisWeek` on dashboard responses (`getRepDashboard` + `getRepDetail`) misleads when range parameter is non-week.** Preserved during Commit 8 of the 2026-04-27 batch to avoid expanding scope to `director-rep-detail.tsx`. Future rename to `activitySummary` should touch: `server/src/modules/dashboard/service.ts` (interface + return), `server/src/modules/dashboard/routes.ts`, ~7 sites in `client/src/pages/director/director-rep-detail.tsx`, `client/src/hooks/use-director-dashboard.ts` (interface), `client/src/hooks/use-dashboard.ts` (interface + DEFAULT + normalizer), `client/src/pages/dashboard/rep-dashboard-page.tsx` (~6 sites), and 2 test fixture files (`app-shell-layout.test.tsx`, `rep-dashboard-page.test.tsx`). ~30 references across ~10 files. Coordinate with whoever owns the director page next.
+
 ## Commissions table FK delete policy
 
 - **0062 deal_signed_commissions: review FK delete behavior at production cutover (audit/legal).** Probe of applied schema (2026-04-27): `deal_id → tenant.deals(id)` is **ON DELETE CASCADE** (a hard-deleted deal wipes its booked-commission audit row — likely undesired for audit/legal); `rep_user_id → public.users(id)` and `created_by → public.users(id)` are **NO ACTION** (deleting a user with commissions will be blocked, which preserves history but breaks any user-cleanup flow). Decide at cutover: does deal hard-delete need RESTRICT or SET NULL on the commission row? Does rep_user_id need SET NULL to allow user soft-delete + rename-to-tombstone? Surfaced during 2026-04-27 CRM fixes batch Commit 6 / migration 0062 apply.

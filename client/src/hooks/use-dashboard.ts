@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { api } from "@/lib/api";
+import type { ActivityRange } from "@trock-crm/shared/types";
 
 export interface CleanupReasonSummary {
   reasonCode: string;
@@ -233,7 +234,8 @@ function normalizeRepDashboardData(data: Partial<RepDashboardData> | null | unde
   };
 }
 
-export function useRepDashboard() {
+export function useRepDashboard(options: { range?: ActivityRange } = {}) {
+  const { range } = options;
   const [data, setData] = useState<RepDashboardData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -242,14 +244,15 @@ export function useRepDashboard() {
     setLoading(true);
     setError(null);
     try {
-      const res = await api<{ data: RepDashboardData }>("/dashboard/rep");
+      const qs = range ? `?range=${encodeURIComponent(range)}` : "";
+      const res = await api<{ data: RepDashboardData }>(`/dashboard/rep${qs}`);
       setData(normalizeRepDashboardData(res.data));
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to load dashboard");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [range]);
 
   useEffect(() => {
     fetch();
