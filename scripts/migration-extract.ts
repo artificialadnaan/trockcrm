@@ -345,6 +345,7 @@ async function main() {
           mappedAmount: mappedDeal.mappedAmount != null ? String(mappedDeal.mappedAmount) : null,
           mappedCloseDate: mappedDeal.mappedCloseDate ? mappedDeal.mappedCloseDate : null,
           mappedSource: mappedDeal.mappedSource,
+          mappedProjectNumber: mappedDeal.mappedProjectNumber,
           validationStatus: "pending",
           validationErrors: [],
           validationWarnings: [],

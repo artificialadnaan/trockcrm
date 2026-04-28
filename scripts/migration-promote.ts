@@ -317,9 +317,9 @@ async function main() {
         `INSERT INTO deals (
           deal_number, name, stage_id, assigned_rep_id, company_id,
           dd_estimate, awarded_amount, expected_close_date, source,
-          hubspot_deal_id, property_address, property_city, property_state, property_zip,
+          hubspot_deal_id, bid_board_project_number, property_address, property_city, property_state, property_zip,
           is_active, stage_entered_at, created_at, updated_at
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,true,NOW(),NOW(),NOW())
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,true,NOW(),NOW(),NOW())
         ON CONFLICT (hubspot_deal_id) WHERE hubspot_deal_id IS NOT NULL DO UPDATE SET
           updated_at = NOW()
         RETURNING id`,
@@ -399,9 +399,9 @@ async function main() {
         `INSERT INTO deals (
           deal_number, name, stage_id, assigned_rep_id, company_id,
           bid_estimate, awarded_amount, expected_close_date, source,
-          hubspot_deal_id, property_address, property_city, property_state, property_zip,
+          hubspot_deal_id, bid_board_project_number, property_address, property_city, property_state, property_zip,
           is_active, stage_entered_at, created_at, updated_at
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,true,NOW(),NOW(),NOW())
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,true,NOW(),NOW(),NOW())
         ON CONFLICT (hubspot_deal_id) WHERE hubspot_deal_id IS NOT NULL DO UPDATE SET
           updated_at = NOW()
         RETURNING id`,
@@ -416,6 +416,7 @@ async function main() {
           d.mappedCloseDate ?? null,
           d.mappedSource ?? "HubSpot",
           d.hubspotDealId,
+          d.mappedProjectNumber ?? null,
           properties.address ?? null,
           properties.city ?? null,
           properties.state ?? null,

@@ -24,6 +24,7 @@ export const stagedDeals = migrationSchema.table("staged_deals", {
   mappedAmount: numeric("mapped_amount", { precision: 14, scale: 2 }),
   mappedCloseDate: date("mapped_close_date"),
   mappedSource: varchar("mapped_source", { length: 100 }),
+  mappedProjectNumber: varchar("mapped_project_number", { length: 100 }),
   validationStatus: varchar("validation_status", { length: 50 }).default("pending").notNull(),
   validationErrors: jsonb("validation_errors").default([]).notNull(),
   validationWarnings: jsonb("validation_warnings").default([]).notNull(),
