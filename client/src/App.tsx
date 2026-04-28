@@ -161,7 +161,7 @@ export function App() {
               <Route
                 path="/commissions"
                 element={(
-                  <RequireRole allowedRoles={["rep"]}>
+                  <RequireRole allowedRoles={["admin", "director", "rep"]}>
                     <RepCommissionsPage />
                   </RequireRole>
                 )}
