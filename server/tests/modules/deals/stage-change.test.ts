@@ -45,6 +45,7 @@ type FakeDeal = {
   isBidBoardOwned: boolean;
   bidBoardStageSlug: string | null;
   readOnlySyncedAt: Date | null;
+  bidBoardProjectNumber: string | null;
   actualCloseDate: string | null;
   lostReasonId: string | null;
   lostNotes: string | null;
@@ -69,6 +70,7 @@ function createTenantDb(overrides?: Partial<FakeDeal>) {
         isBidBoardOwned: false,
         bidBoardStageSlug: null,
         readOnlySyncedAt: null,
+        bidBoardProjectNumber: null,
         actualCloseDate: null,
         lostReasonId: null,
         lostNotes: null,
@@ -176,7 +178,7 @@ function createTenantDb(overrides?: Partial<FakeDeal>) {
       };
     },
     execute() {
-      return Promise.resolve([]);
+      return Promise.resolve({ rows: [] });
     },
   };
 }
@@ -223,6 +225,40 @@ describe("changeDealStage", () => {
     expect(result.deal.isBidBoardOwned).toBe(true);
     expect(result.deal.bidBoardStageSlug).toBe("estimate_in_progress");
     expect(result.deal.readOnlySyncedAt).toBeInstanceOf(Date);
+  });
+
+  it("assigns a SyncHub-format project number on first entry to Opportunity", async () => {
+    vi.setSystemTime(new Date("2026-04-16T15:00:00.000Z"));
+    const tenantDb = createTenantDb();
+    vi.mocked(validateStageGate).mockResolvedValue({
+      allowed: true,
+      isBackwardMove: false,
+      requiresOverride: false,
+      targetStage: {
+        id: "stage-opportunity",
+        name: "Opportunity",
+        slug: "opportunity",
+        isTerminal: false,
+        displayOrder: 1,
+      },
+      currentStage: {
+        id: "stage-sales-validation",
+        name: "Sales Validation Stage",
+        slug: "sales_validation_stage",
+        isTerminal: false,
+        displayOrder: 0,
+      },
+    } as never);
+
+    const result = await changeDealStage(tenantDb as never, {
+      dealId: "deal-1",
+      targetStageId: "stage-opportunity",
+      userId: "user-1",
+      userRole: "director",
+    });
+
+    expect(result.deal.bidBoardProjectNumber).toBe("DFW-9-10626-aa");
+    vi.useRealTimers();
   });
 
   it("marks service deals as Bid Board-owned when CRM hands them into service estimating", async () => {

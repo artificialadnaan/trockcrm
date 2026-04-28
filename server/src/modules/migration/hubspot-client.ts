@@ -40,6 +40,7 @@ export interface HubSpotDeal {
     state?: string;
     zip?: string;
     description?: string;
+    project_number?: string;
     hs_lastmodifieddate?: string;
     createdate?: string;
   };

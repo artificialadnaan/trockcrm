@@ -29,6 +29,10 @@ import { getAuditLog, getAuditLogTables } from "./audit-service.js";
 import { getAdminDataScrubOverview } from "./admin-reporting-service.js";
 import { getDirectorCommissionWorkspace } from "../dashboard/service.js";
 import { startCatalogSync } from "../procore/sync-service.js";
+import {
+  listDirectoryMergeQueue,
+  resolveDirectoryMergeQueueEntry,
+} from "../../services/directoryDedup.js";
 
 const router = Router();
 router.use(authMiddleware);
@@ -237,6 +241,47 @@ router.post("/admin/ownership-sync/apply", requireAdmin, async (_req: Request, r
   try {
     const result = await runOwnershipSync({ dryRun: false });
     return res.json(result);
+  } catch (err) {
+    return next(err);
+  }
+});
+
+router.get("/admin/directory-merge-queue", tenantMiddleware, requireDirector, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const entries = await listDirectoryMergeQueue(req.tenantDb!, req.query.status as string | undefined);
+    await req.commitTransaction!();
+    return res.json({ entries });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+router.post("/admin/directory-merge-queue/:id/merge", tenantMiddleware, requireDirector, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const result = await resolveDirectoryMergeQueueEntry(
+      req.tenantDb!,
+      req.params.id as string,
+      "merge",
+      req.user!.id,
+      req.body?.winnerId
+    );
+    await req.commitTransaction!();
+    return res.json({ result });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+router.post("/admin/directory-merge-queue/:id/dismiss", tenantMiddleware, requireDirector, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const result = await resolveDirectoryMergeQueueEntry(
+      req.tenantDb!,
+      req.params.id as string,
+      "dismiss",
+      req.user!.id
+    );
+    await req.commitTransaction!();
+    return res.json({ result });
   } catch (err) {
     return next(err);
   }

@@ -65,6 +65,11 @@ const salesWorkflowRealignmentMigrationPath = resolve(
   "../../../../migrations/0028_sales_workflow_realignment.sql"
 );
 const salesWorkflowRealignmentMigrationSql = readFileSync(salesWorkflowRealignmentMigrationPath, "utf8");
+const uiDomainSchemaFieldsMigrationPath = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../../migrations/0066_ui_domain_schema_fields.sql"
+);
+const uiDomainSchemaFieldsMigrationSql = readFileSync(uiDomainSchemaFieldsMigrationPath, "utf8");
 
 function expectSqlToMatch(pattern: RegExp): void {
   expect(migrationSql).toMatch(pattern);
@@ -1030,6 +1035,8 @@ describe("Lead Conversion Shared Contract", () => {
     expect(columns.companyId.notNull).toBe(true);
     expect(columns.propertyId.name).toBe("property_id");
     expect(columns.propertyId.notNull).toBe(true);
+    expect(columns.salesRepId.name).toBe("sales_rep_id");
+    expect(columns.salesRepId.notNull).toBe(false);
     expect(columns.assignedRepId.notNull).toBe(true);
     expect(columns.stageId.notNull).toBe(true);
     expect(columns.status.hasDefault).toBe(true);
@@ -1047,6 +1054,7 @@ describe("Lead Conversion Shared Contract", () => {
       "leads_primary_contact_id_contacts_id_fk",
       "leads_project_type_id_project_type_config_id_fk",
       "leads_property_id_properties_id_fk",
+      "leads_sales_rep_id_users_id_fk",
     ]);
   });
 
@@ -1074,6 +1082,8 @@ describe("Lead Conversion Shared Contract", () => {
     expect(columns.sourceLeadId.name).toBe("source_lead_id");
     expect(columns.sourceLeadId.notNull).toBe(false);
     expect(columns.sourceLeadId.isUnique).toBe(true);
+    expect(columns.proposalDraftStartedAt.name).toBe("proposal_draft_started_at");
+    expect(columns.proposalDraftStartedAt.notNull).toBe(false);
     expect(config.foreignKeys.map((fk) => fk.getName())).toEqual(
       expect.arrayContaining([
         "deals_company_id_companies_id_fk",
@@ -1081,6 +1091,22 @@ describe("Lead Conversion Shared Contract", () => {
         "deals_property_id_properties_id_fk",
         "deals_source_lead_id_leads_id_fk",
       ])
+    );
+  });
+
+  it("adds the UI-domain lead and deal fields through migration 0066", () => {
+    expect(uiDomainSchemaFieldsMigrationSql).toContain(
+      "ADD COLUMN IF NOT EXISTS sales_rep_id uuid"
+    );
+    expect(uiDomainSchemaFieldsMigrationSql).toContain(
+      "CONSTRAINT leads_sales_rep_id_users_id_fk"
+    );
+    expect(uiDomainSchemaFieldsMigrationSql).toContain(
+      "REFERENCES public.users(id)"
+    );
+    expect(uiDomainSchemaFieldsMigrationSql).toContain("ON DELETE SET NULL");
+    expect(uiDomainSchemaFieldsMigrationSql).toContain(
+      "ADD COLUMN IF NOT EXISTS proposal_draft_started_at timestamptz"
     );
   });
 

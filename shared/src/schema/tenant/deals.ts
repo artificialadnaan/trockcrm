@@ -162,6 +162,7 @@ export const deals = pgTable("deals", {
   propertyLng: numeric("property_lng", { precision: 10, scale: 7 }),
   estimatingSubstage: estimatingSubstageEnum("estimating_substage"),
   proposalStatus: proposalStatusEnum("proposal_status").default("not_started"),
+  proposalDraftStartedAt: timestamp("proposal_draft_started_at", { withTimezone: true }),
   proposalSentAt: timestamp("proposal_sent_at", { withTimezone: true }),
   proposalAcceptedAt: timestamp("proposal_accepted_at", { withTimezone: true }),
   proposalRevisionCount: integer("proposal_revision_count").default(0),

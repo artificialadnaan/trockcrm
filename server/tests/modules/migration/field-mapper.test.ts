@@ -68,6 +68,21 @@ describe("mapDeal", () => {
     expect(result.mappedSource).toBe("Referral");
   });
 
+  it("preserves an existing HubSpot project number", () => {
+    const result = mapDeal(
+      {
+        ...baseDeal,
+        properties: {
+          ...baseDeal.properties,
+          project_number: "DFW-4-10626-ac",
+        },
+      },
+      ownerMap
+    );
+
+    expect(result.mappedProjectNumber).toBe("DFW-4-10626-ac");
+  });
+
   it("sets null for missing amount", () => {
     const deal = { ...baseDeal, properties: { ...baseDeal.properties, amount: "" } };
     const result = mapDeal(deal, ownerMap);

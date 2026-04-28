@@ -70,6 +70,7 @@ export interface MappedDeal {
   mappedAmount: number | null;
   mappedCloseDate: string | null;
   mappedSource: string | null;
+  mappedProjectNumber: string | null;
 }
 
 export function mapDeal(
@@ -105,6 +106,7 @@ export function mapDeal(
     mappedAmount,
     mappedCloseDate,
     mappedSource: p.lead_source?.trim() || "HubSpot",
+    mappedProjectNumber: p.project_number?.trim() || null,
   };
 }
 

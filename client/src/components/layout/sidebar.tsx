@@ -82,6 +82,7 @@ const adminGroups: AdminGroup[] = [
       { to: "/admin/interventions", icon: ClipboardCheck, label: "Interventions", roles: ["admin", "director"] },
       { to: "/admin/intervention-analytics", icon: BarChart3, label: "Intervention Analytics", roles: ["admin", "director"] },
       { to: "/admin/merge-queue", icon: GitMerge, label: "Merge Queue", roles: ["admin", "director"] },
+      { to: "/admin/directory-merge-queue", icon: Building2, label: "Directory Merge Queue", roles: ["admin", "director"] },
     ],
   },
   {
