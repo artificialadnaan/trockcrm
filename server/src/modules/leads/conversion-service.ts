@@ -237,6 +237,7 @@ export function createLeadConversionService(
       ddEstimate: input.ddEstimate,
       bidEstimate: input.bidEstimate,
       awardedAmount: input.awardedAmount,
+      officeCode: lead.officeCode ?? "dfw",
       projectType: lead.projectType ?? undefined,
       projectTypeId: input.projectTypeId,
       regionId: input.regionId,

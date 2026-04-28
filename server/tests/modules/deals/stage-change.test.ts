@@ -227,7 +227,7 @@ describe("changeDealStage", () => {
     expect(result.deal.readOnlySyncedAt).toBeInstanceOf(Date);
   });
 
-  it("assigns a SyncHub-format project number on first entry to Opportunity", async () => {
+  it("does not generate Bid Board project numbers on entry to Opportunity", async () => {
     vi.setSystemTime(new Date("2026-04-16T15:00:00.000Z"));
     const tenantDb = createTenantDb();
     vi.mocked(validateStageGate).mockResolvedValue({
@@ -257,7 +257,7 @@ describe("changeDealStage", () => {
       userRole: "director",
     });
 
-    expect(result.deal.bidBoardProjectNumber).toBe("DFW-9-10626-aa");
+    expect(result.deal.bidBoardProjectNumber).toBeNull();
     vi.useRealTimers();
   });
 

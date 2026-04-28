@@ -22,7 +22,7 @@ import { writeAuditLog } from "../../lib/audit-log.js";
 import { calculateCommissionForDeal } from "../commissions/service.js";
 import { getStageById, getStageBySlug } from "../pipeline/service.js";
 import { evaluatePostConversionEnrichment } from "./post-conversion-enrichment.js";
-import { buildIntendedProjectNumber } from "../../services/projectNumber.js";
+import { buildIntendedProjectNumber, generateDealNumberForProject } from "../../services/projectNumber.js";
 import { isProjectTypeValue, normalizeProjectType } from "@trock-crm/shared/types";
 
 // Type alias for the tenant-scoped Drizzle instance
@@ -65,6 +65,7 @@ export interface CreateDealInput {
   propertyCity?: string;
   propertyState?: string;
   propertyZip?: string;
+  officeCode: string;
   projectType?: string;
   projectTypeId?: string;
   regionId?: string;
@@ -147,6 +148,15 @@ function assertValidProjectType(value: string | null | undefined): string {
   return normalized;
 }
 
+function assertValidOfficeCode(value: string | null | undefined): "dfw" | "atl" {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  if (normalized !== "dfw" && normalized !== "atl") {
+    throw new AppError(400, "officeCode must be 'dfw' or 'atl'");
+  }
+
+  return normalized;
+}
+
 function resolveIntendedProjectNumber(
   issuedProjectNumber: string | null | undefined,
   projectType: string
@@ -216,42 +226,6 @@ export interface DealBidBoardOwnershipState {
   mirroredInCrm: readonly string[];
   reason: string;
   message: string;
-}
-
-/**
- * Generate a sequential deal number: TR-{YYYY}-{NNNN}
- * Uses SELECT ... FOR UPDATE to lock the highest deal number row during the
- * transaction, preventing concurrent collisions from parallel inserts.
- */
-async function generateDealNumber(tenantDb: TenantDb): Promise<string> {
-  const year = new Date().getFullYear();
-  const prefix = `TR-${year}-`;
-
-  // Advisory lock on the year prefix to prevent concurrent collisions.
-  // FOR UPDATE only locks existing rows — this also protects the empty-year case.
-  await tenantDb.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${prefix}))`);
-
-  // Lock the highest deal number row for this year using FOR UPDATE.
-  // This prevents concurrent transactions from reading the same max value.
-  const result = await tenantDb
-    .select({ dealNumber: deals.dealNumber })
-    .from(deals)
-    .where(ilike(deals.dealNumber, `${prefix}%`))
-    .orderBy(desc(deals.dealNumber))
-    .limit(1)
-    .for("update");
-
-  let nextSeq = 1;
-  if (result.length > 0) {
-    const lastNum = result[0].dealNumber;
-    const seqPart = lastNum.replace(prefix, "");
-    const parsed = parseInt(seqPart, 10);
-    if (!isNaN(parsed)) {
-      nextSeq = parsed + 1;
-    }
-  }
-
-  return `${prefix}${String(nextSeq).padStart(4, "0")}`;
 }
 
 /**
@@ -675,7 +649,16 @@ export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
   await validateAssignee(tenantDb, input.assignedRepId, input.officeId);
   await validateDealPrimaryContact(tenantDb, lineage.companyId, lineage.primaryContactId);
 
-  const dealNumber = await generateDealNumber(tenantDb);
+  const officeCode = assertValidOfficeCode(input.officeCode);
+  const projectType = input.projectType ? assertValidProjectType(input.projectType) : null;
+  const createdAt = new Date();
+  const dealNumber = await generateDealNumberForProject(tenantDb, {
+    id: "new",
+    officeCode,
+    projectType,
+    workflowRoute,
+    createdAt,
+  });
 
   const result = await tenantDb
     .insert(deals)
@@ -696,13 +679,16 @@ export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
       propertyCity: input.propertyCity ?? null,
       propertyState: input.propertyState ?? null,
       propertyZip: input.propertyZip ?? null,
-      projectType: input.projectType ? assertValidProjectType(input.projectType) : null,
+      officeCode,
+      projectType,
       projectTypeId: input.projectTypeId ?? null,
       regionId: input.regionId ?? null,
       source: lineage.source,
       winProbability: input.winProbability ?? null,
       expectedCloseDate: input.expectedCloseDate ?? null,
       workflowRoute,
+      createdAt,
+      updatedAt: createdAt,
     })
     .returning();
 
@@ -809,7 +795,7 @@ export async function updateDeal(
     if (projectTypeChange.newValue !== projectTypeChange.oldValue) {
       updates.projectType = projectTypeChange.newValue;
       updates.intendedProjectNumber = resolveIntendedProjectNumber(
-        existing.bidBoardProjectNumber,
+        existing.dealNumber,
         projectTypeChange.newValue
       );
     }
@@ -856,6 +842,7 @@ export async function updateDeal(
       stageId: existing.stageId,
       assignedRepId,
       officeId,
+      officeCode: existing.officeCode ?? "dfw",
       sourceLeadId: input.sourceLeadId,
       companyId: input.companyId ?? existing.companyId ?? undefined,
       propertyId: input.propertyId ?? existing.propertyId ?? undefined,

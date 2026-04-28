@@ -76,6 +76,11 @@ const projectTypeMigrationPath = resolve(
   "../../../../migrations/0067_project_type_and_intended_number.sql"
 );
 const projectTypeMigrationSql = readFileSync(projectTypeMigrationPath, "utf8");
+const officeCodeMigrationPath = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../../migrations/0068_office_code_and_dealnumber_fix.sql"
+);
+const officeCodeMigrationSql = readFileSync(officeCodeMigrationPath, "utf8");
 
 function expectSqlToMatch(pattern: RegExp): void {
   expect(migrationSql).toMatch(pattern);
@@ -1043,6 +1048,8 @@ describe("Lead Conversion Shared Contract", () => {
     expect(columns.propertyId.notNull).toBe(true);
     expect(columns.projectType.name).toBe("project_type");
     expect(columns.projectType.notNull).toBe(false);
+    expect(columns.officeCode.name).toBe("office_code");
+    expect(columns.officeCode.notNull).toBe(true);
     expect(columns.salesRepId.name).toBe("sales_rep_id");
     expect(columns.salesRepId.notNull).toBe(false);
     expect(columns.assignedRepId.notNull).toBe(true);
@@ -1094,6 +1101,8 @@ describe("Lead Conversion Shared Contract", () => {
     expect(columns.projectType.notNull).toBe(false);
     expect(columns.intendedProjectNumber.name).toBe("intended_project_number");
     expect(columns.intendedProjectNumber.notNull).toBe(false);
+    expect(columns.officeCode.name).toBe("office_code");
+    expect(columns.officeCode.notNull).toBe(false);
     expect(columns.proposalDraftStartedAt.name).toBe("proposal_draft_started_at");
     expect(columns.proposalDraftStartedAt.notNull).toBe(false);
     expect(config.foreignKeys.map((fk) => fk.getName())).toEqual(
@@ -1155,6 +1164,16 @@ describe("Lead Conversion Shared Contract", () => {
     expect(projectTypeMigrationSql).toContain("CREATE TABLE IF NOT EXISTS %I.deal_history");
   });
 
+  it("adds office code fields through migration 0068", () => {
+    expect(officeCodeMigrationSql).toContain("ADD COLUMN IF NOT EXISTS office_code text");
+    expect(officeCodeMigrationSql).toContain("SET office_code = ''dfw''");
+    expect(officeCodeMigrationSql).toContain("CONSTRAINT leads_office_code_allowlist_chk");
+    expect(officeCodeMigrationSql).toContain("CONSTRAINT deals_office_code_allowlist_chk");
+    expect(officeCodeMigrationSql).toContain("CHECK (office_code IN (''dfw'', ''atl''))");
+    expect(officeCodeMigrationSql).toContain("CREATE TABLE IF NOT EXISTS public.deal_number_daily_sequences");
+    expect(officeCodeMigrationSql).toContain("day_key text PRIMARY KEY");
+  });
+
   it("creates the properties, leads, and lineage migration contract", () => {
     expectSqlToMatch(
       /CREATE TABLE IF NOT EXISTS %I\.properties\s*\(\s*id UUID PRIMARY KEY DEFAULT gen_random_uuid\(\),\s*company_id UUID NOT NULL REFERENCES %I\.companies\(id\),\s*name VARCHAR\(500\) NOT NULL,/s
@@ -1198,6 +1217,7 @@ describe("Lead Service", () => {
       assignedRepId: "rep-1",
       name: "Palm Villas repaint",
       source: "Referral",
+      officeCode: "dfw",
       projectType: "commercial",
       description: "Property manager requested pre-bid walk",
     });
@@ -1237,6 +1257,7 @@ describe("Lead Service", () => {
         stageId: stage.id,
         assignedRepId: "rep-1",
         name: "Palm Villas repaint",
+        officeCode: "dfw",
         projectType: "commercial",
       })
     ).rejects.toMatchObject<AppError>({
@@ -1658,6 +1679,8 @@ describe("Lead Conversion Service", () => {
           assignedRepId: "rep-1",
           status: "open",
           pipelineType: "normal",
+          officeCode: "dfw",
+          projectType: "roofing",
           preQualValue: "85000",
           source: "Referral",
           description: "Property manager requested pre-bid walk",
@@ -1675,8 +1698,9 @@ describe("Lead Conversion Service", () => {
       createDeal: async (_tenantDb, input) => {
         const deal = {
           id: "deal-1",
-          dealNumber: "TR-2026-0001",
+          dealNumber: "dfw-3-10526-aa",
           workflowRoute: input.workflowRoute ?? "normal",
+          officeCode: input.officeCode,
           primaryContactId: input.primaryContactId ?? null,
           companyId: input.companyId ?? null,
           propertyId: input.propertyId ?? null,
@@ -1699,6 +1723,8 @@ describe("Lead Conversion Service", () => {
     });
 
     expect(result.deal.id).toBe("deal-1");
+    expect(result.deal.dealNumber).toMatch(/^dfw-3-\d{5}-[a-z]+$/);
+    expect(result.deal.officeCode).toBe("dfw");
     expect(result.deal.sourceLeadId).toBe("lead-1");
     expect(result.deal.workflowRoute).toBe("normal");
     expect(result.lead.status).toBe("converted");

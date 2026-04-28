@@ -4,10 +4,19 @@
 
 import { Router } from "express";
 import type { Request, Response, NextFunction } from "express";
+import type { PoolClient } from "pg";
 import { pool } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { buildBidBoardMirrorUpdate } from "./bidboard-mirror-service.js";
 import { workflowFamilyForRoute } from "../deals/service.js";
+import {
+  buildProjectNumber,
+  generateJulianDate,
+  getNextSuffix,
+  parseProjectNumberSuffix,
+  resolveOfficeCode,
+  resolveProjectTypeCode,
+} from "../../services/projectNumber.js";
 
 const router = Router();
 
@@ -21,6 +30,48 @@ function validateSchemaName(name: string): string {
     throw new AppError(400, "Invalid schema name");
   }
   return name;
+}
+
+async function reserveDealNumberSuffix(
+  client: PoolClient,
+  schemaName: string,
+  julianDate: string
+): Promise<string> {
+  const existingResult = await client.query<{ deal_number: string | null }>(
+    `SELECT deal_number
+       FROM ${schemaName}.deals
+      WHERE deal_number LIKE $1
+      ORDER BY deal_number DESC`,
+    [`%-%-${julianDate}-%`]
+  );
+  const fallbackHighestSuffix =
+    existingResult.rows
+      .map((row) => parseProjectNumberSuffix(row.deal_number, julianDate))
+      .filter((value): value is string => Boolean(value))
+      .sort((left, right) => right.localeCompare(left))[0] ?? null;
+
+  await client.query(
+    `INSERT INTO public.deal_number_daily_sequences (day_key, last_suffix)
+     VALUES ($1, $2)
+     ON CONFLICT (day_key) DO NOTHING`,
+    [julianDate, fallbackHighestSuffix ?? ""]
+  );
+  const sequenceResult = await client.query<{ last_suffix: string }>(
+    `SELECT last_suffix
+       FROM public.deal_number_daily_sequences
+      WHERE day_key = $1
+      FOR UPDATE`,
+    [julianDate]
+  );
+  const suffix = getNextSuffix(sequenceResult.rows[0]?.last_suffix || fallbackHighestSuffix);
+  await client.query(
+    `UPDATE public.deal_number_daily_sequences
+        SET last_suffix = $2,
+            updated_at = NOW()
+      WHERE day_key = $1`,
+    [julianDate, suffix]
+  );
+  return suffix;
 }
 
 // SyncHub shared-secret auth middleware
@@ -447,27 +498,21 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
       },
     });
 
-    // Generate deal number: TR-{YYYY}-{NNNN}
-    const year = new Date().getFullYear();
-    const prefix = `TR-${year}-`;
-    await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [prefix]);
-    const maxResult = await client.query(
-      `SELECT deal_number FROM ${schemaName}.deals
-       WHERE deal_number LIKE $1 ORDER BY deal_number DESC LIMIT 1 FOR UPDATE`,
-      [`${prefix}%`]
-    );
-    let nextSeq = 1;
-    if (maxResult.rows.length > 0) {
-      const parsed = parseInt(maxResult.rows[0].deal_number.replace(prefix, ""), 10);
-      if (!isNaN(parsed)) nextSeq = parsed + 1;
-    }
-    const dealNumber = `${prefix}${String(nextSeq).padStart(4, "0")}`;
+    const officeCode = resolveOfficeCode(office_slug);
+    const createdAt = new Date();
+    const julianDate = generateJulianDate(createdAt);
+    const dealNumber = buildProjectNumber({
+      officeCode,
+      projectTypeCode: resolveProjectTypeCode({ workflowRoute: workflow_route }),
+      createdAt,
+      suffix: await reserveDealNumberSuffix(client, schemaName, julianDate),
+    });
 
     // Insert new deal
     const insertResult = await client.query(
       `INSERT INTO ${schemaName}.deals
        (deal_number, name, stage_id, assigned_rep_id, procore_bid_id,
-        property_address, property_city, property_state, property_zip,
+        property_address, property_city, property_state, property_zip, office_code,
         dd_estimate, bid_estimate, awarded_amount, source, is_active,
         workflow_route, pipeline_type_snapshot, is_bid_board_owned,
        bid_board_stage_slug, bid_board_stage_family, bid_board_stage_status,
@@ -476,15 +521,15 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
         read_only_synced_at, stage_entered_at, estimating_substage, proposal_status, proposal_notes,
         actual_close_date, lost_reason_id, lost_notes, lost_competitor, lost_at,
         created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, true, $14,
-               CASE WHEN $14 = 'service' THEN 'service' ELSE 'normal' END,
-               true, $15, $16, $17, $18, $19,
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, true, $15,
+               CASE WHEN $15 = 'service' THEN 'service' ELSE 'normal' END,
+               true, $16, $17, $18, $19, $20,
                CASE
-                 WHEN $18::timestamptz IS NOT NULL AND $19::timestamptz IS NOT NULL THEN $19::timestamptz - $18::timestamptz
+                 WHEN $19::timestamptz IS NOT NULL AND $20::timestamptz IS NOT NULL THEN $20::timestamptz - $19::timestamptz
                  ELSE NULL
                END,
-               $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32,
-               NOW(), NOW())
+               $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33,
+               $34, $35)
        RETURNING id`,
       [
         dealNumber,
@@ -496,6 +541,7 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
         property_city ?? null,
         property_state ?? null,
         property_zip ?? null,
+        officeCode,
         mirrorResult.updates.ddEstimate ?? null,
         mirrorResult.updates.bidEstimate ?? null,
         mirrorResult.updates.awardedAmount ?? null,
@@ -519,6 +565,8 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
         mirrorResult.updates.lostNotes ?? null,
         mirrorResult.updates.lostCompetitor ?? null,
         mirrorResult.updates.lostAt ?? null,
+        createdAt,
+        createdAt,
       ]
     );
 

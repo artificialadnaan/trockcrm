@@ -21,10 +21,6 @@ import {
   isBidBoardOwnedDownstreamStage,
 } from "./service.js";
 import { inferDealBidBoardOwnership } from "./workflow-backfill.js";
-import {
-  generateProjectNumberForDeal,
-  shouldAssignProjectNumberForStageChange,
-} from "../../services/projectNumber.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -233,15 +229,6 @@ export async function changeDealStage(
     stageId: targetStageId,
     stageEnteredAt: new Date(),
   };
-  if (
-    shouldAssignProjectNumberForStageChange({
-      currentStageSlug: currentStage.slug,
-      targetStageSlug: targetStage.slug,
-      existingProjectNumber: currentDeal[0].bidBoardProjectNumber,
-    })
-  ) {
-    dealUpdates.bidBoardProjectNumber = await generateProjectNumberForDeal(tenantDb, currentDeal[0]);
-  }
   const shouldResetBidBoardOwnership =
     inferredOwnership.isBidBoardOwned &&
     Boolean(estimatingBoundary) &&

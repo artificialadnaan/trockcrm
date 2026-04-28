@@ -40,6 +40,7 @@ type FakeLeadRow = {
   stageId: string;
   assignedRepId: string;
   status: "open" | "converted" | "disqualified";
+  officeCode?: string | null;
   projectTypeId?: string | null;
   projectType?: string | null;
   qualificationPayload?: Record<string, string | boolean | number | null>;
@@ -479,6 +480,7 @@ describe("lead service canonical progression", () => {
         officeId: "office-1",
         name: "Created Lead",
         source: "Referral",
+        officeCode: "dfw",
         projectType: "commercial",
         projectTypeId: "project-type-commercial",
         qualificationPayload: {
@@ -554,11 +556,67 @@ describe("lead service canonical progression", () => {
         officeId: "office-1",
         name: "Created Lead",
         source: "Referral",
+        officeCode: "dfw",
         projectType: "casino",
       })
     ).rejects.toMatchObject<AppError>({
       statusCode: 400,
       message: "Invalid project type: casino",
+    });
+  });
+
+  it("rejects missing office code when creating a lead", async () => {
+    const tenantDb = {
+      select() {
+        return {
+          from(table: unknown) {
+            const rows =
+              table === companies
+                ? [{ id: "company-1", isActive: true }]
+                : table === properties
+                  ? [{ id: "property-1", companyId: "company-1", isActive: true }]
+                  : table === users
+                    ? [{ id: "rep-1", isActive: true, officeId: "office-1" }]
+                    : [];
+
+            return {
+              where() {
+                return this;
+              },
+              limit() {
+                return this;
+              },
+              then(onfulfilled: (value: unknown[]) => unknown) {
+                return Promise.resolve(rows.map((row) => ({ ...row }))).then(onfulfilled);
+              },
+            };
+          },
+        };
+      },
+      insert() {
+        throw new Error("Lead insert should not run when officeCode is missing");
+      },
+    };
+    const service = createLeadService({
+      getStageById: pipelineMocks.getStageById as never,
+      getActiveProjectTypes: pipelineMocks.getActiveProjectTypes as never,
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+    });
+
+    await expect(
+      service.createLead(tenantDb as never, {
+        companyId: "company-1",
+        propertyId: "property-1",
+        stageId: newLeadStage.id,
+        assignedRepId: "rep-1",
+        officeId: "office-1",
+        name: "Created Lead",
+        source: "Referral",
+        projectType: "commercial",
+      } as never)
+    ).rejects.toMatchObject<AppError>({
+      statusCode: 400,
+      message: "officeCode must be 'dfw' or 'atl'",
     });
   });
 
@@ -701,6 +759,7 @@ describe("lead service canonical progression", () => {
         officeId: "office-1",
         name: "Active-customer Lead",
         source: "Referral",
+        officeCode: "dfw",
         projectType: "commercial",
         projectTypeId: "project-type-commercial",
         qualificationPayload: {},
@@ -786,6 +845,7 @@ describe("lead service canonical progression", () => {
         officeId: "office-1",
         name: "Brand-new Company Lead",
         source: "Data Mine",
+        officeCode: "dfw",
         projectType: "commercial",
         projectTypeId: "project-type-commercial",
         qualificationPayload: {},

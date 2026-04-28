@@ -77,6 +77,7 @@ export const deals = pgTable("deals", {
   propertyCity: varchar("property_city", { length: 255 }),
   propertyState: varchar("property_state", { length: 2 }),
   propertyZip: varchar("property_zip", { length: 10 }),
+  officeCode: text("office_code"),
   projectType: text("project_type"),
   projectTypeId: uuid("project_type_id"),
   regionId: uuid("region_id"),

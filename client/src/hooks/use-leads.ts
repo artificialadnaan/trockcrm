@@ -72,6 +72,7 @@ export interface LeadRecord {
   sourceDetail: string | null;
   existingCustomerStatus?: "Existing" | "New" | null;
   description: string | null;
+  officeCode?: string | null;
   projectTypeId: string | null;
   projectType: {
     id: string;
@@ -443,6 +444,7 @@ export async function createLead(input: {
   sourceCategory?: LeadSourceCategory | null;
   sourceDetail?: string | null;
   description?: string | null;
+  officeCode?: string;
   projectType?: string;
   projectTypeId?: string | null;
   qualificationPayload?: Record<string, string | boolean | number | null>;
