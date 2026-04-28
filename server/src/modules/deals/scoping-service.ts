@@ -5,7 +5,7 @@ import type * as schema from "@trock-crm/shared/schema";
 import type { DealScopingIntakeStatus, WorkflowRoute } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 import { getStageById } from "../pipeline/service.js";
-import { BID_BOARD_STAGE_READ_ONLY_MESSAGE } from "./service.js";
+import { applyProjectTypeChange, BID_BOARD_STAGE_READ_ONLY_MESSAGE } from "./service.js";
 import { inferDealBidBoardOwnership } from "./workflow-backfill.js";
 import { evaluateScopingReadiness, type DealScopingReadinessSnapshot, type DealScopingSectionData } from "./scoping-rules.js";
 import { getResolvedDeal, type ResolvedDealView } from "./lineage-resolver.js";
@@ -699,6 +699,15 @@ export async function upsertDealScopingIntake(
     sectionPatch
   );
   const dealUpdates = buildDealWritebackPatch(sanitizedPatch, nextSectionData);
+  if (!resolvedDeal.sourceLead && sanitizedPatch.projectTypeId !== undefined) {
+    Object.assign(
+      dealUpdates,
+      await applyProjectTypeChange(tenantDb, deal, sanitizedPatch.projectTypeId, {
+        id: userId,
+        role: editor.role,
+      })
+    );
+  }
 
   if (Object.keys(dealUpdates).length > 0) {
     await tenantDb

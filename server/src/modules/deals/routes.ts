@@ -384,6 +384,7 @@ router.patch("/:id/resolved-fields", async (req, res, next) => {
     const resolved = await writeResolvedDealFields(req.tenantDb!, req.params.id, req.body ?? {}, {
       userId: req.user!.id,
       officeId: req.user!.activeOfficeId ?? req.user!.officeId,
+      role: req.user!.role,
     });
     await req.commitTransaction!();
     res.json({ resolved });

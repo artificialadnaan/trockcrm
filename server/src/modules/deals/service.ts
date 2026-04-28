@@ -20,13 +20,14 @@ import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { writeAuditLog } from "../../lib/audit-log.js";
 import { calculateCommissionForDeal } from "../commissions/service.js";
-import { getStageById, getStageBySlug, resolveActiveProjectTypeValue } from "../pipeline/service.js";
+import { getActiveProjectTypes, getStageById, getStageBySlug, resolveActiveProjectTypeValue } from "../pipeline/service.js";
 import { evaluatePostConversionEnrichment } from "./post-conversion-enrichment.js";
 import { createAssignmentTaskIfNeeded } from "../assignment-tasks/service.js";
-import { buildIntendedProjectNumber, generateDealNumberForProject } from "../../services/projectNumber.js";
+import { generateDealNumberForProject } from "../../services/projectNumber.js";
 
 // Type alias for the tenant-scoped Drizzle instance
 type TenantDb = NodePgDatabase<typeof schema>;
+type DealRow = typeof deals.$inferSelect;
 
 export interface DealFilters {
   search?: string;
@@ -158,16 +159,123 @@ function assertValidOfficeCode(value: string | null | undefined): "dfw" | "atl" 
   return normalized;
 }
 
-function resolveIntendedProjectNumber(
+function resolveIntendedProjectNumberFromCode(
   issuedProjectNumber: string | null | undefined,
-  projectType: string
+  projectTypeCode: string
 ): string | null {
-  const intended = buildIntendedProjectNumber(issuedProjectNumber, projectType);
-  if (!intended || intended === issuedProjectNumber) {
+  const match = String(issuedProjectNumber ?? "").match(/^([A-Z]{2,4})-[1-9]-(\d{5})-([a-z]+)$/i);
+  if (!match || !/^[1-9]$/.test(projectTypeCode)) {
     return null;
   }
 
-  return intended;
+  const [, officeCode, julianDate, suffix] = match;
+  const intended = `${officeCode.toLowerCase()}-${projectTypeCode}-${julianDate}-${suffix.toLowerCase()}`;
+  return intended === issuedProjectNumber ? null : intended;
+}
+
+async function isAtOrBeyondOpportunity(stageId: string | null | undefined) {
+  if (!stageId) return true;
+
+  const [stage, opportunity] = await Promise.all([
+    getStageById(stageId),
+    getStageBySlug("opportunity", "standard_deal"),
+  ]);
+
+  if (!stage || !opportunity) {
+    return true;
+  }
+
+  if (stage.workflowFamily !== opportunity.workflowFamily) {
+    return stage.workflowFamily !== "lead";
+  }
+
+  return stage.displayOrder >= opportunity.displayOrder;
+}
+
+async function resolveProjectTypeConfigById(projectTypeId: string | null | undefined) {
+  if (!projectTypeId) return null;
+  const projectTypes = await getActiveProjectTypes();
+  return projectTypes.find((projectType) => projectType.id === projectTypeId) ?? null;
+}
+
+async function resolveProjectTypeConfigByValue(value: string | null | undefined) {
+  const normalized = await resolveActiveProjectTypeValue(value);
+  if (!normalized) return null;
+
+  const projectTypes = await getActiveProjectTypes();
+  return (
+    projectTypes.find((projectType) => {
+      const name = projectType.name.trim().toLowerCase().replace(/[-_]+/g, " ").replace(/\s+/g, " ");
+      const slug = projectType.slug.trim().toLowerCase().replace(/[-_]+/g, " ").replace(/\s+/g, " ");
+      return name === normalized || slug === normalized;
+    }) ?? null
+  );
+}
+
+export async function applyProjectTypeChange(
+  tenantDb: TenantDb,
+  deal: Pick<
+    DealRow,
+    "id" | "dealNumber" | "stageId" | "projectTypeId" | "projectType" | "intendedProjectNumber"
+  >,
+  newProjectTypeId: string | null,
+  actor: { id: string; role: string },
+  options: { projectTypeValue?: string | null } = {}
+) {
+  if (await isAtOrBeyondOpportunity(deal.stageId)) {
+    if (actor.role !== "admin") {
+      throw new AppError(403, "Only admins can edit project type after Opportunity");
+    }
+    if (!newProjectTypeId && options.projectTypeValue === undefined) {
+      throw new AppError(400, "projectType cannot be cleared after Opportunity");
+    }
+  }
+
+  const projectType = options.projectTypeValue
+    ? await resolveProjectTypeConfigByValue(options.projectTypeValue)
+    : await resolveProjectTypeConfigById(newProjectTypeId);
+
+  if (!projectType) {
+    throw new AppError(400, "Invalid project type");
+  }
+
+  const nextProjectTypeId = projectType.id;
+  const nextProjectTypeValue = projectType.name.trim().toLowerCase().replace(/[-_]+/g, " ").replace(/\s+/g, " ");
+  const nextIntendedProjectNumber = resolveIntendedProjectNumberFromCode(
+    deal.dealNumber,
+    projectType.code ?? ""
+  );
+
+  if (
+    nextProjectTypeId === (deal.projectTypeId ?? null) &&
+    nextProjectTypeValue === (deal.projectType ?? null) &&
+    nextIntendedProjectNumber === (deal.intendedProjectNumber ?? null)
+  ) {
+    return {};
+  }
+
+  await tenantDb.insert(dealHistory).values({
+    dealId: deal.id,
+    fieldName: "project_type",
+    oldValue: JSON.stringify({
+      oldProjectTypeId: deal.projectTypeId ?? null,
+      oldProjectType: deal.projectType ?? null,
+      oldIntendedProjectNumber: deal.intendedProjectNumber ?? null,
+    }),
+    newValue: JSON.stringify({
+      newProjectTypeId: nextProjectTypeId,
+      newProjectType: nextProjectTypeValue,
+      newIntendedProjectNumber: nextIntendedProjectNumber,
+    }),
+    changedBy: actor.id,
+    changedAt: new Date(),
+  });
+
+  return {
+    projectTypeId: nextProjectTypeId,
+    projectType: nextProjectTypeValue,
+    intendedProjectNumber: nextIntendedProjectNumber,
+  };
 }
 
 function estimatingBoundaryStageSlugForRoute(workflowRoute: WorkflowRoute) {
@@ -799,17 +907,19 @@ export async function updateDeal(
       : null;
 
   if (projectTypeChange) {
-    if (userRole !== "admin") {
-      throw new AppError(403, "Only admins can edit project type after Opportunity");
-    }
     if (projectTypeChange.newValue === null) {
       throw new AppError(400, "projectType cannot be cleared after Opportunity");
     }
     if (projectTypeChange.newValue !== projectTypeChange.oldValue) {
-      updates.projectType = projectTypeChange.newValue;
-      updates.intendedProjectNumber = resolveIntendedProjectNumber(
-        existing.dealNumber,
-        projectTypeChange.newValue
+      Object.assign(
+        updates,
+        await applyProjectTypeChange(
+          tenantDb,
+          existing,
+          existing.projectTypeId ?? null,
+          { id: userId, role: userRole },
+          { projectTypeValue: projectTypeChange.newValue }
+        )
       );
     }
   }
@@ -982,21 +1092,6 @@ export async function updateDeal(
     .returning();
 
   const updatedDeal = result[0];
-
-  if (
-    projectTypeChange &&
-    projectTypeChange.newValue !== null &&
-    projectTypeChange.newValue !== projectTypeChange.oldValue
-  ) {
-    await tenantDb.insert(dealHistory).values({
-      dealId,
-      fieldName: "project_type",
-      oldValue: projectTypeChange.oldValue,
-      newValue: projectTypeChange.newValue,
-      changedBy: userId,
-      changedAt: new Date(),
-    });
-  }
 
   if (assignedRepChanged && updatedDeal) {
     const changedAt = new Date();

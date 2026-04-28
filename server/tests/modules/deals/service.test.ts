@@ -22,13 +22,24 @@ vi.mock("../../../src/db.js", () => {
 
 vi.mock("../../../src/modules/pipeline/service.js", () => ({
   getStageById: vi.fn(async () => ({
-    id: "stage-dd",
-    slug: "dd",
+    id: "stage-opportunity",
+    slug: "opportunity",
     isTerminal: false,
     displayOrder: 1,
     workflowFamily: "standard_deal",
   })),
-  getStageBySlug: vi.fn(async () => null),
+  getStageBySlug: vi.fn(async () => ({
+    id: "stage-opportunity",
+    slug: "opportunity",
+    isTerminal: false,
+    displayOrder: 1,
+    workflowFamily: "standard_deal",
+  })),
+  getActiveProjectTypes: vi.fn(async () => [
+    { id: "type-1", name: "Exterior Renovation", slug: "exterior-renovation", code: "1" },
+    { id: "type-3", name: "Roofing", slug: "roofing", code: "3" },
+    { id: "type-4", name: "Service", slug: "service", code: "4" },
+  ]),
   resolveActiveProjectTypeValue: vi.fn(async (value: string) =>
     value
       .trim()
@@ -519,8 +530,16 @@ describe("Deal Service", () => {
         expect.objectContaining({
           dealId: "deal-1",
           fieldName: "project_type",
-          oldValue: "roofing",
-          newValue: "service",
+          oldValue: JSON.stringify({
+            oldProjectTypeId: null,
+            oldProjectType: "roofing",
+            oldIntendedProjectNumber: null,
+          }),
+          newValue: JSON.stringify({
+            newProjectTypeId: "type-4",
+            newProjectType: "service",
+            newIntendedProjectNumber: "dfw-4-10626-aa",
+          }),
           changedBy: "admin-1",
         }),
       ]);

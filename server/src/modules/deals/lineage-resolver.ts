@@ -11,6 +11,7 @@ import {
 import type * as schema from "@trock-crm/shared/schema";
 import type { WorkflowRoute } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
+import { applyProjectTypeChange } from "./service.js";
 import {
   upsertLeadQuestionAnswerSet,
   type LeadQuestionAnswerValue,
@@ -367,7 +368,7 @@ export async function writeResolvedDealFields(
   tenantDb: TenantDb,
   dealId: string,
   patch: ResolvedDealFieldPatch,
-  input: { userId: string; officeId: string; now?: Date }
+  input: { userId: string; officeId: string; role: string; now?: Date }
 ) {
   const resolvedDeal = await getResolvedDeal(tenantDb, dealId);
   const now = input.now ?? new Date();
@@ -409,7 +410,17 @@ export async function writeResolvedDealFields(
     }
 
     if (sourceLead && writePlan.target === "source_lead") {
-      if (field === "projectTypeId") leadUpdates.projectTypeId = normalizeOptionalText(value);
+      if (field === "projectTypeId") {
+        const nextProjectTypeId = normalizeOptionalText(value);
+        leadUpdates.projectTypeId = nextProjectTypeId;
+        Object.assign(
+          dealUpdates,
+          await applyProjectTypeChange(tenantDb, resolvedDeal.deal, nextProjectTypeId, {
+            id: input.userId,
+            role: input.role,
+          })
+        );
+      }
       if (field === "sourceCategory") leadUpdates.sourceCategory = normalizeOptionalText(value);
       if (field === "sourceDetail") leadUpdates.sourceDetail = normalizeOptionalText(value);
       if (field === "primaryContactId") leadUpdates.primaryContactId = normalizeOptionalText(value);
@@ -418,7 +429,6 @@ export async function writeResolvedDealFields(
       if (field === "description") leadUpdates.description = normalizeOptionalText(value);
 
       if (writePlan.compatibilityWriteThrough) {
-        if (field === "projectTypeId") dealUpdates.projectTypeId = normalizeOptionalText(value);
         if (field === "primaryContactId") dealUpdates.primaryContactId = normalizeOptionalText(value);
         if (field === "assignedRepId") dealUpdates.assignedRepId = normalizeOptionalText(value);
         if (field === "workflowRoute") dealUpdates.workflowRoute = value === "service" ? "service" : "normal";
@@ -428,7 +438,15 @@ export async function writeResolvedDealFields(
     }
 
     if (writePlan.target === "deal") {
-      if (field === "projectTypeId") dealUpdates.projectTypeId = normalizeOptionalText(value);
+      if (field === "projectTypeId") {
+        Object.assign(
+          dealUpdates,
+          await applyProjectTypeChange(tenantDb, resolvedDeal.deal, normalizeOptionalText(value), {
+            id: input.userId,
+            role: input.role,
+          })
+        );
+      }
       if (field === "primaryContactId") dealUpdates.primaryContactId = normalizeOptionalText(value);
       if (field === "assignedRepId") dealUpdates.assignedRepId = normalizeOptionalText(value);
       if (field === "workflowRoute") dealUpdates.workflowRoute = value === "service" ? "service" : "normal";
