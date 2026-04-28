@@ -12,6 +12,7 @@ import { formatDate, daysInStage, winProbabilityColor, formatCurrency } from "@/
 import { useProjectTypes, useRegions } from "@/hooks/use-pipeline-config";
 import { updateDeal, type DealDetail } from "@/hooks/use-deals";
 import { useTaskAssignees } from "@/hooks/use-task-assignees";
+import { useSalesReps } from "@/hooks/use-sales-reps";
 import { useAuth } from "@/lib/auth";
 import {
   MapPin,
@@ -30,6 +31,7 @@ export function DealOverviewTab({ deal, onDealUpdated }: DealOverviewTabProps) {
   const navigate = useNavigate();
   const { user } = useAuth();
   const { assignees } = useTaskAssignees();
+  const { salesReps } = useSalesReps();
   const { projectTypes } = useProjectTypes();
   const { regions } = useRegions();
   const [assignmentSaving, setAssignmentSaving] = useState(false);
@@ -39,6 +41,7 @@ export function DealOverviewTab({ deal, onDealUpdated }: DealOverviewTabProps) {
   const region = regions.find((r) => r.id === deal.regionId);
   const assignedRepName =
     deal.assignedRepName ??
+    salesReps.find((assignee) => assignee.id === deal.assignedRepId)?.displayName ??
     assignees.find((assignee) => assignee.id === deal.assignedRepId)?.displayName ??
     null;
   const canEditAssignment =
@@ -274,7 +277,7 @@ export function DealOverviewTab({ deal, onDealUpdated }: DealOverviewTabProps) {
           label="Sales Rep"
           assignedRepId={deal.assignedRepId}
           assignedRepName={assignedRepName}
-          reps={assignees}
+          reps={salesReps.length > 0 ? salesReps : assignees}
           canEdit={canEditAssignment}
           saving={assignmentSaving}
           onSave={handleAssignmentSave}

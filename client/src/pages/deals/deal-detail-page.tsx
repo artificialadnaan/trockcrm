@@ -259,12 +259,8 @@ export function DealDetailPage() {
   const handleTabSelect = (tab: Tab) => {
     setActiveTab(tab);
     const nextParams = new URLSearchParams(searchParams);
-    if (tab === "overview") {
-      nextParams.delete("tab");
-    } else {
-      nextParams.set("tab", tab);
-      nextParams.delete("focus");
-    }
+    nextParams.set("tab", tab);
+    nextParams.delete("focus");
     setSearchParams(nextParams, { replace: true });
   };
 

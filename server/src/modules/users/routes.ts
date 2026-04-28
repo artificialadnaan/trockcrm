@@ -1,0 +1,43 @@
+import { Router } from "express";
+import { AppError } from "../../middleware/error-handler.js";
+import { getAccessibleOffices } from "../auth/service.js";
+import { listUsers } from "../admin/users-service.js";
+
+const router = Router();
+
+router.get("/sales-reps", async (req, res, next) => {
+  try {
+    if (req.user!.role === "rep") {
+      await req.commitTransaction!();
+      res.json({ users: [{ id: req.user!.id, displayName: req.user!.displayName }] });
+      return;
+    }
+
+    const requestedOfficeId = req.headers["x-office-id"] as string | undefined;
+    const officeId = requestedOfficeId ?? req.user!.activeOfficeId ?? req.user!.officeId;
+    const accessibleOffices = await getAccessibleOffices(
+      req.user!.id,
+      req.user!.role,
+      req.user!.activeOfficeId ?? req.user!.officeId
+    );
+
+    if (requestedOfficeId && !accessibleOffices.some((office) => office.id === requestedOfficeId)) {
+      throw new AppError(403, "Requested office is not accessible");
+    }
+
+    const rows = (await listUsers(officeId)) as Array<{
+      id: string;
+      displayName: string;
+      isActive: boolean;
+    }>;
+    res.json({
+      users: rows
+        .filter((user) => user.isActive)
+        .map((user) => ({ id: user.id, displayName: user.displayName })),
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+export { router as userRoutes };
