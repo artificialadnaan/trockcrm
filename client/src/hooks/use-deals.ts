@@ -164,6 +164,7 @@ export interface Deal {
 
 export interface DealDetail extends Deal {
   proposalStatus: string | null;
+  proposalDraftStartedAt: string | null;
   proposalSentAt: string | null;
   proposalAcceptedAt: string | null;
   proposalRevisionCount: number | null;

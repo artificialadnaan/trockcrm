@@ -32,9 +32,10 @@ const fmt = (value: string | number) =>
 
 interface DealEstimatesTabProps {
   dealId: string;
+  proposalMode?: boolean;
 }
 
-export function DealEstimatesTab({ dealId }: DealEstimatesTabProps) {
+export function DealEstimatesTab({ dealId, proposalMode = false }: DealEstimatesTabProps) {
   const [sections, setSections] = useState<EstimateSection[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -136,9 +137,11 @@ export function DealEstimatesTab({ dealId }: DealEstimatesTabProps) {
     <div className="space-y-4">
       <div className="flex flex-wrap items-end justify-between gap-3 rounded-lg border bg-background p-4">
         <div>
-          <h3 className="text-sm font-semibold">Estimate</h3>
+          <h3 className="text-sm font-semibold">{proposalMode ? "Proposal Draft" : "Estimate"}</h3>
           <p className="text-sm text-muted-foreground">
-            Build line items, review tax, and export a client-ready PDF.
+            {proposalMode
+              ? "Use estimate line items as the starting point for the client proposal."
+              : "Build line items, review tax, and export a client-ready PDF."}
           </p>
         </div>
         <div className="flex flex-wrap items-end gap-2">

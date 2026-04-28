@@ -1078,6 +1078,71 @@ export async function updateDeal(
   return updatedDeal;
 }
 
+export async function startProposalDraft(
+  tenantDb: TenantDb,
+  dealId: string,
+  userRole: string,
+  userId: string
+) {
+  const existing = await getDealById(tenantDb, dealId, userRole, userId);
+  if (!existing) {
+    throw new AppError(404, "Deal not found");
+  }
+
+  if (userRole === "rep" && existing.assignedRepId !== userId) {
+    throw new AppError(403, "You can only edit your own deals");
+  }
+
+  if (existing.isBidBoardOwned) {
+    throw new AppError(
+      403,
+      "Proposal status is mirrored from Bid Board after estimating handoff.",
+      "BID_BOARD_OWNED_FIELD_READ_ONLY"
+    );
+  }
+
+  const currentStatus = existing.proposalStatus ?? "not_started";
+  if (currentStatus !== "not_started" && currentStatus !== "drafting") {
+    throw new AppError(400, `Cannot start proposal draft from '${currentStatus}'`);
+  }
+
+  const startedAt = existing.proposalDraftStartedAt ?? new Date();
+  const [updatedDeal] = await tenantDb
+    .update(deals)
+    .set({
+      proposalStatus: "drafting",
+      proposalDraftStartedAt: startedAt,
+      updatedAt: new Date(),
+    })
+    .where(eq(deals.id, dealId))
+    .returning();
+
+  await writeAuditLog(tenantDb, {
+    tableName: "proposal_drafts",
+    recordId: dealId,
+    action: "insert",
+    changedBy: userId,
+    changes: {
+      proposalStatus: {
+        from: existing.proposalStatus ?? "not_started",
+        to: "drafting",
+      },
+      proposalDraftStartedAt: {
+        from: existing.proposalDraftStartedAt ?? null,
+        to: startedAt.toISOString(),
+      },
+    },
+    fullRow: {
+      dealId,
+      status: "draft",
+      startedAt: startedAt.toISOString(),
+      createdBy: userId,
+    },
+  });
+
+  return updatedDeal;
+}
+
 /**
  * Soft-delete a deal.
  * Only directors/admins can delete. Reps cannot.
