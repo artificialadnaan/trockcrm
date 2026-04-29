@@ -6,6 +6,7 @@ vi.mock("@aws-sdk/client-s3", () => ({
     send: vi.fn(),
   })),
   PutObjectCommand: vi.fn(),
+  PutBucketCorsCommand: vi.fn(),
   GetObjectCommand: vi.fn(),
   DeleteObjectCommand: vi.fn(),
   HeadObjectCommand: vi.fn(),
@@ -72,6 +73,31 @@ describe("R2 Client", () => {
         "../../src/modules/files/file-constants.js"
       );
       expect(PRESIGNED_URL_EXPIRY_SECONDS).toBe(15 * 60); // 900 seconds
+    });
+  });
+
+  describe("R2 CORS origins", () => {
+    it("uses comma-separated R2_ALLOWED_ORIGINS when configured", async () => {
+      const { getAllowedR2CorsOrigins } = await import("../../src/lib/r2-client.js");
+
+      expect(getAllowedR2CorsOrigins({
+        R2_ALLOWED_ORIGINS: "https://crm.trockconstruction.com, https://api-production-ad218.up.railway.app, https://crm.trockconstruction.com",
+      } as NodeJS.ProcessEnv)).toEqual([
+        "https://crm.trockconstruction.com",
+        "https://api-production-ad218.up.railway.app",
+      ]);
+    });
+
+    it("falls back to the legacy frontend and local origins when unset", async () => {
+      const { getAllowedR2CorsOrigins } = await import("../../src/lib/r2-client.js");
+
+      expect(getAllowedR2CorsOrigins({
+        FRONTEND_URL: "https://frontend-production-bcab.up.railway.app",
+      } as NodeJS.ProcessEnv)).toEqual([
+        "https://frontend-production-bcab.up.railway.app",
+        "http://localhost:5173",
+        "http://localhost:3000",
+      ]);
     });
   });
 });
