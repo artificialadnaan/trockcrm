@@ -17,6 +17,10 @@ export interface OrgChartUser {
   role: string;
   officeCode: string;
   manager: string | null;
+  status?: "active" | "inactive";
+  flags?: string[];
+  notes?: string;
+  mergeSources?: string[];
 }
 
 export interface DbUser {
@@ -51,6 +55,26 @@ export interface UserCleanupPlan {
     deals: number;
     leads: number;
     tasks: number;
+  }>;
+  mergePlan: Array<{
+    sourceEmail: string;
+    sourceDisplayName: string;
+    targetEmail: string;
+    targetExists: boolean;
+    targetWillBeCreated: boolean;
+    deals: number;
+    leads: number;
+    tasks: number;
+    afterMergeAction: "soft_delete_source";
+  }>;
+  inactiveReviewUsers: Array<{
+    email: string;
+    displayName: string;
+    existsInDb: boolean;
+    isActive: boolean | null;
+    managerEmail: string | null;
+    notes: string | null;
+    flags: string[];
   }>;
 }
 
@@ -87,7 +111,7 @@ export function detectEmailConventionCollisions(orgUsers: OrgChartUser[]) {
 
 export function inferCrmRole(orgRole: string): CrmRole {
   const role = orgRole.toLowerCase();
-  if (role === "ceo" || role === "cfo") return "admin";
+  if (role === "ceo" || role === "cfo" || role.includes("founder") || role.includes("super admin")) return "admin";
   if (role.includes("vp") || role.includes("director")) return "director";
   return "rep";
 }
@@ -127,13 +151,35 @@ export function buildUserCleanupPlan(args: {
   dbUsers: DbUser[];
   ownershipCountsByUserId?: Map<string, OwnershipCounts>;
 }): UserCleanupPlan {
-  const orgByEmail = new Map(args.orgUsers.map((user) => [normalizeEmail(user.email), { ...user, email: normalizeEmail(user.email), manager: user.manager ? normalizeEmail(user.manager) : null }]));
+  const orgByEmail = new Map(args.orgUsers.map((user) => [normalizeEmail(user.email), {
+    ...user,
+    email: normalizeEmail(user.email),
+    manager: user.manager ? normalizeEmail(user.manager) : null,
+    status: user.status ?? "active",
+    flags: user.flags ?? [],
+    notes: user.notes ?? null,
+    mergeSources: (user.mergeSources ?? []).map(normalizeEmail),
+  }]));
   const dbByEmail = new Map(args.dbUsers.map((user) => [normalizeEmail(user.email), { ...user, email: normalizeEmail(user.email) }]));
   const dbById = new Map(args.dbUsers.map((user) => [user.id, { ...user, email: normalizeEmail(user.email) }]));
   const ownershipCountsByUserId = args.ownershipCountsByUserId ?? new Map<string, OwnershipCounts>();
 
+  const mergeSourceEmails = new Set<string>();
+  for (const orgUser of orgByEmail.values()) {
+    for (const sourceEmail of orgUser.mergeSources ?? []) mergeSourceEmails.add(sourceEmail);
+  }
+
+  const inactiveOrgEmails = new Set(
+    [...orgByEmail.values()]
+      .filter((user) => user.status === "inactive")
+      .map((user) => user.email)
+  );
+
   const wouldSoftDelete = args.dbUsers
-    .filter((user) => user.isActive && !orgByEmail.has(normalizeEmail(user.email)))
+    .filter((user) => {
+      const email = normalizeEmail(user.email);
+      return user.isActive && !orgByEmail.has(email) && !mergeSourceEmails.has(email) && !inactiveOrgEmails.has(email);
+    })
     .map((user) => ({ ...user, email: normalizeEmail(user.email), managerEmail: managerEmailForDbUser(user, dbById) }))
     .sort((a, b) => a.email.localeCompare(b.email));
 
@@ -143,6 +189,10 @@ export function buildUserCleanupPlan(args: {
       ...user,
       email: normalizeEmail(user.email),
       manager: user.manager ? normalizeEmail(user.manager) : null,
+      status: user.status ?? "active",
+      flags: user.flags ?? [],
+      notes: user.notes ?? null,
+      mergeSources: (user.mergeSources ?? []).map(normalizeEmail),
       crmRole: inferCrmRole(user.role),
       officeSlug: resolveOfficeSlug(user.officeCode),
     }))
@@ -201,7 +251,42 @@ export function buildUserCleanupPlan(args: {
     };
   });
 
-  return { wouldSoftDelete, wouldCreate, managerMismatches, reassignmentPlan };
+  const mergePlan = [...orgByEmail.values()]
+    .flatMap((targetUser) => (targetUser.mergeSources ?? []).map((sourceEmail) => {
+      const source = dbByEmail.get(sourceEmail);
+      const target = dbByEmail.get(targetUser.email);
+      const counts = source ? ownershipCountsByUserId.get(source.id) ?? { deals: 0, leads: 0, tasks: 0 } : { deals: 0, leads: 0, tasks: 0 };
+      return {
+        sourceEmail,
+        sourceDisplayName: source?.displayName ?? "MISSING_SOURCE_USER",
+        targetEmail: targetUser.email,
+        targetExists: Boolean(target),
+        targetWillBeCreated: !target,
+        deals: counts.deals,
+        leads: counts.leads,
+        tasks: counts.tasks,
+        afterMergeAction: "soft_delete_source" as const,
+      };
+    }))
+    .sort((a, b) => a.sourceEmail.localeCompare(b.sourceEmail));
+
+  const inactiveReviewUsers = [...orgByEmail.values()]
+    .filter((user) => user.status === "inactive")
+    .map((user) => {
+      const dbUser = dbByEmail.get(user.email);
+      return {
+        email: user.email,
+        displayName: dbUser?.displayName ?? user.name,
+        existsInDb: Boolean(dbUser),
+        isActive: dbUser?.isActive ?? null,
+        managerEmail: user.manager ?? null,
+        notes: user.notes ?? null,
+        flags: user.flags ?? [],
+      };
+    })
+    .sort((a, b) => a.email.localeCompare(b.email));
+
+  return { wouldSoftDelete, wouldCreate, managerMismatches, reassignmentPlan, mergePlan, inactiveReviewUsers };
 }
 
 function loadOrgChart(): OrgChartUser[] {
@@ -222,6 +307,10 @@ function loadOrgChart(): OrgChartUser[] {
       role: row.role.trim(),
       officeCode: row.officeCode.trim().toLowerCase(),
       manager: row.manager ? normalizeEmail(row.manager) : null,
+      status: row.status === "inactive" ? "inactive" : "active",
+      flags: Array.isArray(row.flags) ? row.flags.map(String) : [],
+      notes: typeof row.notes === "string" ? row.notes : undefined,
+      mergeSources: Array.isArray(row.mergeSources) ? row.mergeSources.map((value: unknown) => normalizeEmail(String(value))) : [],
     };
   });
 }
@@ -337,13 +426,19 @@ export function renderDryRun(plan: UserCleanupPlan, collisions: ReturnType<typeo
   lines.push(formatRows(plan.wouldSoftDelete, (row) => `  - ${row.displayName} <${row.email}> role=${row.role} office=${row.officeSlug ?? "unknown"} manager=${row.managerEmail ?? "null"}`));
   lines.push("");
   lines.push(`Users in org chart not in DB → would create (${plan.wouldCreate.length}):`);
-  lines.push(formatRows(plan.wouldCreate, (row) => `  - ${row.name} <${row.email}> orgRole="${row.role}" crmRole=${row.crmRole} office=${row.officeSlug} manager=${row.manager ?? "null"}`));
+  lines.push(formatRows(plan.wouldCreate, (row) => `  - ${row.name} <${row.email}> orgRole="${row.role}" crmRole=${row.crmRole} office=${row.officeSlug} manager=${row.manager ?? "null"} status=${row.status ?? "active"}${row.flags?.length ? ` flags=${row.flags.join(",")}` : ""}`));
+  lines.push("");
+  lines.push(`Inactive / needs-review users → would keep discoverable (${plan.inactiveReviewUsers.length}):`);
+  lines.push(formatRows(plan.inactiveReviewUsers, (row) => `  - ${row.displayName} <${row.email}> existsInDb=${row.existsInDb} isActive=${row.isActive} manager=${row.managerEmail ?? "null"}${row.flags.length ? ` flags=${row.flags.join(",")}` : ""}${row.notes ? ` note="${row.notes}"` : ""}`));
   lines.push("");
   lines.push(`Manager mismatches → would update (${plan.managerMismatches.length}):`);
   lines.push(formatRows(plan.managerMismatches, (row) => `  - ${row.email}: ${row.currentManagerEmail ?? "null"} -> ${row.nextManagerEmail ?? "null"} [${row.status}]`));
   lines.push("");
   lines.push("Owned-record reassignment plan for soft-deleted users:");
   lines.push(formatRows(plan.reassignmentPlan, (row) => `  - ${row.displayName} <${row.email}> -> ${row.reassignToEmail ?? "UNRESOLVED"}; deals=${row.deals}, leads=${row.leads}, tasks=${row.tasks}`));
+  lines.push("");
+  lines.push(`Merge plan → reassign ownership then soft-delete source (${plan.mergePlan.length}):`);
+  lines.push(formatRows(plan.mergePlan, (row) => `  - ${row.sourceDisplayName} <${row.sourceEmail}> -> ${row.targetEmail}; targetExists=${row.targetExists}, targetWillBeCreated=${row.targetWillBeCreated}; deals=${row.deals}, leads=${row.leads}, tasks=${row.tasks}; after=${row.afterMergeAction}`));
   return lines.join("\n");
 }
 
@@ -360,7 +455,12 @@ async function main() {
   try {
     const dbUsers = await fetchDbUsers(client);
     const initialPlan = buildUserCleanupPlan({ orgUsers, dbUsers });
-    const ownershipCounts = await fetchOwnershipCounts(client, initialPlan.wouldSoftDelete.map((user) => user.id));
+    const dbByEmail = new Map(dbUsers.map((user) => [normalizeEmail(user.email), user]));
+    const mergeSourceIds = initialPlan.mergePlan
+      .map((row) => dbByEmail.get(row.sourceEmail)?.id)
+      .filter((id): id is string => Boolean(id));
+    const ownershipUserIds = [...new Set([...initialPlan.wouldSoftDelete.map((user) => user.id), ...mergeSourceIds])];
+    const ownershipCounts = await fetchOwnershipCounts(client, ownershipUserIds);
     const plan = buildUserCleanupPlan({ orgUsers, dbUsers, ownershipCountsByUserId: ownershipCounts });
     console.log(renderDryRun(plan, collisions));
   } finally {
