@@ -158,8 +158,6 @@ async function main() {
         bidBoardProjectNumber: row.bid_board_project_number,
       })),
     ];
-    writeAuditCsv(auditPath, auditRows);
-
     console.log("IMPORTED DEAL NORMALIZATION DRY RUN");
     console.log(`apply=${apply}`);
     console.log(`auditCsv=${auditPath}`);
@@ -193,6 +191,24 @@ async function main() {
              AND p.current_project_type_id IS NULL
            RETURNING d.id, d.deal_number
         `);
+        auditRows.push(
+          ...result.rows.map((row) => {
+            const planned = plan.rows.find((planRow) => planRow.id === row.id);
+            return {
+              timestamp: new Date().toISOString(),
+              action: "update",
+              dealId: row.id,
+              dealNumber: row.deal_number,
+              name: planned?.name ?? "",
+              reason: "normalize_project_type_from_bid_board_project_number",
+              currentProjectType: planned?.current_project_type ?? null,
+              currentProjectTypeId: planned?.current_project_type_id ?? null,
+              nextProjectType: planned?.next_project_type ?? null,
+              nextProjectTypeId: planned?.next_project_type_id ?? null,
+              bidBoardProjectNumber: planned?.bid_board_project_number ?? null,
+            };
+          })
+        );
         await client.query("COMMIT");
         console.log(`APPLIED rows=${result.rowCount}`);
       } catch (error) {
@@ -200,6 +216,8 @@ async function main() {
         throw error;
       }
     }
+
+    writeAuditCsv(auditPath, auditRows);
   } finally {
     await client.end();
   }
