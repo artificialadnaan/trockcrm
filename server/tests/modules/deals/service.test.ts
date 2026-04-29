@@ -724,6 +724,22 @@ describe("Deal Service", () => {
       });
     });
 
+    it("rejects estimate amount edits after Bid Board handoff", async () => {
+      await expect(
+        updateDeal(
+          createOwnedDealTenantDb() as never,
+          "deal-1",
+          { bidEstimate: "125000.00" },
+          "director",
+          "director-1"
+        )
+      ).rejects.toMatchObject<AppError>({
+        statusCode: 403,
+        code: "BID_BOARD_OWNED_FIELD_READ_ONLY",
+        message: "Bid estimate is mirrored from Bid Board after estimating handoff.",
+      });
+    });
+
     it("allows metadata edits after Bid Board handoff", async () => {
       const updated = await updateDeal(
         createMutableOwnedDealTenantDb() as never,
