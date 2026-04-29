@@ -17,6 +17,10 @@ import { createActivity } from "../activities/service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 export type CallRecordingEntityType = "deal" | "lead" | "company" | "contact";
+export type CallRecordingViewer = {
+  role: "admin" | "director" | "rep" | "construction";
+  userId: string;
+};
 
 export const MAX_CALL_RECORDING_SIZE_BYTES = 200 * 1024 * 1024;
 export const ALLOWED_CALL_RECORDING_MIME_TYPES = new Set([
@@ -200,11 +204,13 @@ export async function confirmUpload(
 export async function listForEntity(
   tenantDb: TenantDb,
   entityType: string,
-  entityId: string
+  entityId: string,
+  viewer: CallRecordingViewer
 ) {
   assertEntityType(entityType);
+  if (viewer.role === "construction") return [];
 
-  return tenantDb
+  const rows = await tenantDb
     .select({
       id: callRecordings.id,
       entityType: callRecordings.entityType,
@@ -230,9 +236,23 @@ export async function listForEntity(
       sql`${callRecordings.fileSizeBytes} > 0`
     ))
     .orderBy(desc(callRecordings.callDate), desc(callRecordings.uploadedAt));
+
+  if (viewer.role === "rep") {
+    return rows.filter((recording) => recording.uploadedBy === viewer.userId);
+  }
+
+  return rows;
 }
 
-export async function getPlaybackUrl(tenantDb: TenantDb, recordingId: string) {
+export async function getPlaybackUrl(
+  tenantDb: TenantDb,
+  recordingId: string,
+  viewer: CallRecordingViewer
+) {
+  if (viewer.role === "construction") {
+    throw new AppError(403, "Call recordings are not available for this role.");
+  }
+
   const [recording] = await tenantDb
     .select()
     .from(callRecordings)
@@ -240,6 +260,9 @@ export async function getPlaybackUrl(tenantDb: TenantDb, recordingId: string) {
     .limit(1);
 
   if (!recording || recording.fileSizeBytes <= 0) {
+    throw new AppError(404, "Call recording not found.");
+  }
+  if (viewer.role === "rep" && recording.uploadedBy !== viewer.userId) {
     throw new AppError(404, "Call recording not found.");
   }
 

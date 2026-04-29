@@ -51,6 +51,7 @@ export function RecordingList({
   const [playbackUrl, setPlaybackUrl] = useState<string | null>(null);
 
   const load = useCallback(async () => {
+    if (user?.role === "construction") return;
     setLoading(true);
     try {
       const result = await api<{ recordings: CallRecording[] }>(
@@ -62,11 +63,12 @@ export function RecordingList({
     } finally {
       setLoading(false);
     }
-  }, [entityId, entityType]);
+  }, [entityId, entityType, user?.role]);
 
   useEffect(() => {
+    if (user?.role === "construction") return;
     void load();
-  }, [load]);
+  }, [load, user?.role]);
 
   const play = async (recordingId: string) => {
     if (playingId === recordingId) {
@@ -94,6 +96,8 @@ export function RecordingList({
       toast.error(err instanceof Error ? err.message : "Unable to delete call recording");
     }
   };
+
+  if (user?.role === "construction") return null;
 
   return (
     <section className="space-y-3">

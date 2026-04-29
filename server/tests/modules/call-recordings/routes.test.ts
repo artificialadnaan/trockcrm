@@ -47,6 +47,30 @@ vi.mock("../../../src/modules/contacts/service.js", () => ({
 
 const { callRecordingRoutes } = await import("../../../src/modules/call-recordings/routes.js");
 
+type TestRole = "admin" | "director" | "rep" | "construction";
+
+function testUser(role: TestRole, id = `${role}-1`) {
+  return {
+    id,
+    role,
+    officeId: "office-1",
+    activeOfficeId: "office-1",
+  };
+}
+
+const ownRecording = { id: "own", uploadedBy: "rep-1" };
+const otherRecording = { id: "other", uploadedBy: "admin-1" };
+
+function mockListForCurrentUser() {
+  serviceMocks.listForEntity.mockImplementation(async (_tenantDb, _entityType, _entityId, viewer) => {
+    if (viewer.role === "construction") return [];
+    if (viewer.role === "rep") {
+      return [ownRecording, otherRecording].filter((recording) => recording.uploadedBy === viewer.userId);
+    }
+    return [ownRecording, otherRecording];
+  });
+}
+
 function findRouteHandler(method: "get" | "post" | "delete", routePath: string) {
   const layer = (callRecordingRoutes as any).stack.find(
     (entry: any) => entry.route?.path === routePath && entry.route?.methods?.[method]
@@ -97,7 +121,7 @@ describe("call recording routes", () => {
 
   it("rejects non-admin upload-url requests", async () => {
     const { nextError } = await invokeRoute("post", "/upload-url", {
-      user: { id: "rep-1", role: "rep", officeId: "office-1", activeOfficeId: "office-1" },
+      user: testUser("rep"),
       body: { entityType: "deal", entityId: "deal-1", filename: "call.m4a", mimeType: "audio/m4a" },
     });
 
@@ -105,26 +129,86 @@ describe("call recording routes", () => {
     expect(serviceMocks.createUploadUrl).not.toHaveBeenCalled();
   });
 
-  it("allows non-admin users to list and play recordings", async () => {
-    serviceMocks.listForEntity.mockResolvedValue([{ id: "rec-1" }]);
-    serviceMocks.getPlaybackUrl.mockResolvedValue({ playbackUrl: "https://example.test/play" });
+  it("lets reps list only their own recordings", async () => {
+    mockListForCurrentUser();
 
     const list = await invokeRoute("get", "/", {
-      user: { id: "rep-1", role: "rep", officeId: "office-1", activeOfficeId: "office-1" },
+      user: testUser("rep", "rep-1"),
       query: { entityType: "deal", entityId: "deal-1" },
     });
+
+    expect(list.res.statusCode).toBe(200);
+    expect(list.res.body.recordings).toEqual([ownRecording]);
+    expect(serviceMocks.listForEntity).toHaveBeenCalledWith(
+      expect.anything(),
+      "deal",
+      "deal-1",
+      { role: "rep", userId: "rep-1" }
+    );
+  });
+
+  it("returns an empty list for reps with no uploaded recordings on the entity", async () => {
+    mockListForCurrentUser();
+
+    const list = await invokeRoute("get", "/", {
+      user: testUser("rep", "rep-2"),
+      query: { entityType: "deal", entityId: "deal-1" },
+    });
+
+    expect(list.res.statusCode).toBe(200);
+    expect(list.res.body.recordings).toEqual([]);
+  });
+
+  it("lets directors list all recordings", async () => {
+    mockListForCurrentUser();
+
+    const list = await invokeRoute("get", "/", {
+      user: testUser("director"),
+      query: { entityType: "deal", entityId: "deal-1" },
+    });
+
+    expect(list.res.statusCode).toBe(200);
+    expect(list.res.body.recordings).toEqual([ownRecording, otherRecording]);
+  });
+
+  it("lets admins list all recordings", async () => {
+    mockListForCurrentUser();
+
+    const list = await invokeRoute("get", "/", {
+      user: testUser("admin"),
+      query: { entityType: "deal", entityId: "deal-1" },
+    });
+
+    expect(list.res.statusCode).toBe(200);
+    expect(list.res.body.recordings).toEqual([ownRecording, otherRecording]);
+  });
+
+  it("returns an empty list for construction users", async () => {
+    mockListForCurrentUser();
+
+    const list = await invokeRoute("get", "/", {
+      user: testUser("construction"),
+      query: { entityType: "deal", entityId: "deal-1" },
+    });
+
+    expect(list.res.statusCode).toBe(200);
+    expect(list.res.body.recordings).toEqual([]);
+  });
+
+  it("allows non-admin users to play recordings", async () => {
+    serviceMocks.getPlaybackUrl.mockResolvedValue({ playbackUrl: "https://example.test/play" });
+
     const playback = await invokeRoute("get", "/:id/playback", {
-      user: { id: "rep-1", role: "rep", officeId: "office-1", activeOfficeId: "office-1" },
+      user: testUser("rep"),
       params: { id: "rec-1" },
     });
 
-    expect(list.res.body.recordings).toEqual([{ id: "rec-1" }]);
     expect(playback.res.body.playbackUrl).toBe("https://example.test/play");
   });
 
   it("rejects non-admin deletes", async () => {
     const { nextError } = await invokeRoute("delete", "/:id", {
-      user: { id: "rep-1", role: "rep", officeId: "office-1", activeOfficeId: "office-1" },
+      user: testUser("rep"),
       params: { id: "rec-1" },
     });
 
@@ -134,7 +218,7 @@ describe("call recording routes", () => {
 
   it("rejects non-admin upload confirmations", async () => {
     const { nextError } = await invokeRoute("post", "/:id/confirm", {
-      user: { id: "rep-1", role: "rep", officeId: "office-1", activeOfficeId: "office-1" },
+      user: testUser("rep"),
       params: { id: "rec-1" },
       body: { fileSizeBytes: 100, durationSeconds: 10 },
     });
