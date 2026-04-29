@@ -21,7 +21,24 @@ const {
   isAllowedCallRecordingMimeType,
   buildCallRecordingR2Key,
   createUploadUrl,
+  listForEntity,
 } = await import("../../../src/modules/call-recordings/service.js");
+
+function createListTenantDb(rows: Array<Record<string, unknown>>) {
+  const orderBy = vi.fn(async () => rows);
+  const where = vi.fn(() => ({ orderBy }));
+  const leftJoin = vi.fn(() => ({ where }));
+  const from = vi.fn(() => ({ leftJoin }));
+  return {
+    db: {
+      select: vi.fn(() => ({ from })),
+    } as any,
+    orderBy,
+    where,
+    leftJoin,
+    from,
+  };
+}
 
 describe("call recordings service", () => {
   beforeEach(() => {
@@ -78,5 +95,34 @@ describe("call recordings service", () => {
       title: "Kickoff",
       transcriptionStatus: "none",
     }));
+  });
+
+  it("lists all entity recordings for admins and directors", async () => {
+    const rows = [
+      { id: "rec-admin", uploadedBy: "admin-1" },
+      { id: "rec-rep", uploadedBy: "rep-1" },
+    ];
+    const tenant = createListTenantDb(rows);
+
+    await expect(listForEntity(tenant.db, "deal", "deal-1", { role: "admin", userId: "admin-1" })).resolves.toEqual(rows);
+    await expect(listForEntity(tenant.db, "deal", "deal-1", { role: "director", userId: "director-1" })).resolves.toEqual(rows);
+  });
+
+  it("lists only the rep's own entity recordings", async () => {
+    const tenant = createListTenantDb([
+      { id: "own", uploadedBy: "rep-1" },
+      { id: "other", uploadedBy: "admin-1" },
+    ]);
+
+    await expect(listForEntity(tenant.db, "deal", "deal-1", { role: "rep", userId: "rep-1" })).resolves.toEqual([
+      { id: "own", uploadedBy: "rep-1" },
+    ]);
+  });
+
+  it("returns no recordings for construction users without querying", async () => {
+    const tenant = createListTenantDb([{ id: "other", uploadedBy: "admin-1" }]);
+
+    await expect(listForEntity(tenant.db, "deal", "deal-1", { role: "construction", userId: "construction-1" })).resolves.toEqual([]);
+    expect(tenant.db.select).not.toHaveBeenCalled();
   });
 });

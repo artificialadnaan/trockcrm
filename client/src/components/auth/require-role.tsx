@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 import { Navigate } from "react-router-dom";
 import { useAuth } from "@/lib/auth";
 
-type Role = "admin" | "director" | "sales_manager" | "rep";
+type Role = "admin" | "director" | "sales_manager" | "rep" | "construction";
 
 interface RequireRoleProps {
   allowedRoles: readonly Role[];

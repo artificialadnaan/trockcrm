@@ -91,7 +91,10 @@ router.get("/", async (req, res, next) => {
       throw new AppError(400, "entityType and entityId are required.");
     }
     await assertEntityReadable(req, entityType, entityId);
-    const recordings = await listForEntity(req.tenantDb!, entityType, entityId);
+    const recordings = await listForEntity(req.tenantDb!, entityType, entityId, {
+      role: req.user!.role,
+      userId: req.user!.id,
+    });
     await req.commitTransaction!();
     res.json({ recordings });
   } catch (err) {
@@ -101,7 +104,10 @@ router.get("/", async (req, res, next) => {
 
 router.get("/:id/playback", async (req, res, next) => {
   try {
-    const result = await getPlaybackUrl(req.tenantDb!, req.params.id);
+    const result = await getPlaybackUrl(req.tenantDb!, req.params.id, {
+      role: req.user!.role,
+      userId: req.user!.id,
+    });
     await req.commitTransaction!();
     res.json(result);
   } catch (err) {

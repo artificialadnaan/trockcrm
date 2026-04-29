@@ -33,7 +33,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
-type Role = "admin" | "director" | "sales_manager" | "rep";
+type Role = "admin" | "director" | "sales_manager" | "rep" | "construction";
 
 export type NavItem = {
   to: string;
