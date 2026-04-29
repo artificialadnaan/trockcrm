@@ -50,6 +50,7 @@ export const tasks = pgTable(
     remindAt: timestamp("remind_at", { withTimezone: true }),
     completedAt: timestamp("completed_at", { withTimezone: true }),
     isOverdue: boolean("is_overdue").default(false).notNull(),
+    isTestData: boolean("is_test_data").default(false).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },

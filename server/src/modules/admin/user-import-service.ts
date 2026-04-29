@@ -35,7 +35,7 @@ interface ImportServiceUser {
   id: string;
   email: string;
   displayName: string;
-  role: "admin" | "director" | "rep";
+  role: "admin" | "director" | "rep" | "construction";
   officeId: string;
   isActive: boolean;
 }

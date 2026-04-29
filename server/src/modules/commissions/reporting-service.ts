@@ -139,6 +139,7 @@ export async function getCommissionPotential(
     JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
     LEFT JOIN ${userCommissionSettings} cs ON cs.user_id = d.assigned_rep_id AND cs.is_active = true
     WHERE d.is_active = true
+      AND COALESCE(d.is_test_data, false) = false
       AND psc.is_terminal = false
       ${repSql(filters)}
       ${stageSql(filters)}
@@ -173,7 +174,8 @@ export async function getCommissionEarned(
     FROM ${dealSignedCommissions} dsc
     JOIN ${deals} d ON d.id = dsc.deal_id
     JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
-    WHERE psc.display_order >= (
+    WHERE COALESCE(d.is_test_data, false) = false
+      AND psc.display_order >= (
         SELECT COALESCE(MIN(display_order), 0)
         FROM ${pipelineStageConfig}
         WHERE slug IN ('contract_signed', 'sent_to_production', 'service_contract_signed', 'service_sent_to_production')
@@ -210,7 +212,8 @@ export async function getCommissionEarned(
     JOIN ${users} u ON u.id = dsc.rep_user_id
     JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
     LEFT JOIN ${dealPaymentEvents} pe ON pe.deal_id = d.id
-    WHERE psc.display_order >= (
+    WHERE COALESCE(d.is_test_data, false) = false
+      AND psc.display_order >= (
         SELECT COALESCE(MIN(display_order), 0)
         FROM ${pipelineStageConfig}
         WHERE slug IN ('contract_signed', 'sent_to_production', 'service_contract_signed', 'service_sent_to_production')
@@ -263,7 +266,8 @@ export async function getCommissionSummary(
       FROM ${dealSignedCommissions} dsc
       JOIN ${deals} d ON d.id = dsc.deal_id
       JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
-      WHERE psc.display_order >= (
+      WHERE COALESCE(d.is_test_data, false) = false
+      AND psc.display_order >= (
           SELECT COALESCE(MIN(display_order), 0)
           FROM ${pipelineStageConfig}
           WHERE slug IN ('contract_signed', 'sent_to_production', 'service_contract_signed', 'service_sent_to_production')
@@ -286,6 +290,7 @@ export async function getCommissionSummary(
       JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
       LEFT JOIN ${userCommissionSettings} cs ON cs.user_id = d.assigned_rep_id AND cs.is_active = true
       WHERE d.is_active = true
+        AND COALESCE(d.is_test_data, false) = false
         AND psc.is_terminal = false
         ${repSql(filters)}
         ${stageSql(filters)}
@@ -299,6 +304,7 @@ export async function getCommissionSummary(
       JOIN ${deals} d ON d.id = pe.deal_id
       JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
       WHERE pe.paid_at >= DATE_TRUNC('year', CURRENT_DATE)
+        AND COALESCE(d.is_test_data, false) = false
         ${repSql(filters)}
         ${stageSql(filters)}
     )

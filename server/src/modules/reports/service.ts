@@ -187,6 +187,7 @@ export interface ForecastVarianceOverview {
 
 function buildForecastVarianceFilterSql(filters: NormalizedAnalyticsFilters) {
   const clauses = [
+    sql`COALESCE(d.is_test_data, false) = false`,
     sql`cw.captured_at >= ${filters.from}::timestamptz`,
     sql`cw.captured_at < (${filters.to}::date + INTERVAL '1 day')::timestamptz`,
   ];
@@ -457,6 +458,7 @@ export async function getPipelineSummary(
       ), 0)::numeric AS total_value
     FROM deals d
     WHERE d.is_active = true
+      AND COALESCE(d.is_test_data, false) = false
       AND d.stage_id IN (${sql.join(stageIds.map(id => sql`${id}`), sql`, `)})
       ${repFilter}
     GROUP BY d.stage_id
@@ -522,6 +524,7 @@ export async function getWeightedPipelineForecast(
     FROM deals d
     JOIN pipeline_stage_config psc ON psc.id = d.stage_id
     WHERE d.is_active = true
+      AND COALESCE(d.is_test_data, false) = false
       AND psc.is_terminal = false
       AND d.expected_close_date IS NOT NULL
       AND d.expected_close_date >= ${from}::date
@@ -576,7 +579,8 @@ export async function getWinLossRatioByRep(
     FROM deals d
     JOIN pipeline_stage_config psc ON psc.id = d.stage_id
     JOIN users u ON u.id = d.assigned_rep_id
-    WHERE psc.is_terminal = true
+    WHERE COALESCE(d.is_test_data, false) = false
+      AND psc.is_terminal = true
       AND COALESCE(d.actual_close_date, d.lost_at, d.updated_at)
           >= ${from}::timestamptz
       AND COALESCE(d.actual_close_date, d.lost_at, d.updated_at)
@@ -766,6 +770,7 @@ export async function getStaleDeals(
       ON mirror_psc.slug = COALESCE(d.bid_board_stage_slug, psc.slug)
     JOIN users u ON u.id = d.assigned_rep_id
     WHERE d.is_active = true
+      AND COALESCE(d.is_test_data, false) = false
       AND psc.is_terminal = false
       AND COALESCE(mirror_psc.stale_threshold_days, psc.stale_threshold_days) IS NOT NULL
       AND EXTRACT(DAY FROM NOW() - COALESCE(d.bid_board_stage_entered_at, d.stage_entered_at))
@@ -827,7 +832,8 @@ export async function getLostDealsByReason(
     FROM deals d
     LEFT JOIN lost_deal_reasons ldr ON ldr.id = d.lost_reason_id
     JOIN pipeline_stage_config psc ON psc.id = d.stage_id
-    WHERE psc.slug IN (${sqlSlugList(LOST_OUTCOME_STAGE_SLUGS)})
+    WHERE COALESCE(d.is_test_data, false) = false
+      AND psc.slug IN (${sqlSlugList(LOST_OUTCOME_STAGE_SLUGS)})
       AND d.lost_at >= ${from}::timestamptz
       AND d.lost_at <= (${to}::date + INTERVAL '1 day')::timestamptz
     GROUP BY d.lost_reason_id, ldr.label
@@ -842,7 +848,8 @@ export async function getLostDealsByReason(
       COUNT(*)::int AS count
     FROM deals d
     JOIN pipeline_stage_config psc ON psc.id = d.stage_id
-    WHERE psc.slug IN (${sqlSlugList(LOST_OUTCOME_STAGE_SLUGS)})
+    WHERE COALESCE(d.is_test_data, false) = false
+      AND psc.slug IN (${sqlSlugList(LOST_OUTCOME_STAGE_SLUGS)})
       AND d.lost_at >= ${from}::timestamptz
       AND d.lost_at <= (${to}::date + INTERVAL '1 day')::timestamptz
     GROUP BY d.lost_reason_id, competitor
@@ -901,7 +908,8 @@ export async function getRevenueByProjectType(
     FROM deals d
     LEFT JOIN project_type_config ptc ON ptc.id = d.project_type_id
     JOIN pipeline_stage_config psc ON psc.id = d.stage_id
-    WHERE psc.slug IN (${sqlSlugList(WON_OUTCOME_STAGE_SLUGS)})
+    WHERE COALESCE(d.is_test_data, false) = false
+      AND psc.slug IN (${sqlSlugList(WON_OUTCOME_STAGE_SLUGS)})
       AND d.actual_close_date >= ${from}::date
       AND d.actual_close_date <= ${to}::date
     GROUP BY d.project_type_id, ptc.name
@@ -971,7 +979,8 @@ export async function getLeadSourceROI(
     FROM deals d
     LEFT JOIN deal_scoping_intake dsi ON dsi.deal_id = d.id
     JOIN pipeline_stage_config psc ON psc.id = d.stage_id
-    WHERE d.created_at >= ${filters.from}::timestamptz
+    WHERE COALESCE(d.is_test_data, false) = false
+      AND d.created_at >= ${filters.from}::timestamptz
       AND d.created_at <= (${filters.to}::date + INTERVAL '1 day')::timestamptz
       ${officeFilter}
       ${regionFilter}
@@ -1060,7 +1069,7 @@ export async function getDataMiningOverview(
       FROM deals d
       LEFT JOIN deal_scoping_intake dsi ON dsi.deal_id = d.id
       JOIN pipeline_stage_config psc ON psc.id = d.stage_id
-      WHERE TRUE
+      WHERE COALESCE(d.is_test_data, false) = false
         ${filters.officeId ? sql`AND dsi.office_id = ${filters.officeId}` : sql``}
         ${filters.regionId ? sql`AND d.region_id = ${filters.regionId}` : sql``}
         ${filters.repId ? sql`AND d.assigned_rep_id = ${filters.repId}` : sql``}
@@ -1408,6 +1417,7 @@ export async function getRegionalOwnershipOverview(
         ) FILTER (WHERE d.is_active = true AND NOT psc.is_terminal), 0)::numeric AS pipeline_value,
         COUNT(*) FILTER (
           WHERE d.is_active = true
+      AND COALESCE(d.is_test_data, false) = false
             AND NOT psc.is_terminal
             AND psc.stale_threshold_days IS NOT NULL
             AND EXTRACT(DAY FROM NOW() - d.stage_entered_at) > psc.stale_threshold_days
@@ -1416,7 +1426,7 @@ export async function getRegionalOwnershipOverview(
       LEFT JOIN deal_scoping_intake dsi ON dsi.deal_id = d.id
       LEFT JOIN region_config rc ON rc.id = d.region_id
       JOIN pipeline_stage_config psc ON psc.id = d.stage_id
-      WHERE TRUE
+      WHERE COALESCE(d.is_test_data, false) = false
         ${dateFilter}
         ${officeFilter}
         ${regionFilter}
@@ -1435,6 +1445,7 @@ export async function getRegionalOwnershipOverview(
         ) FILTER (WHERE d.is_active = true AND NOT psc.is_terminal), 0)::numeric AS pipeline_value,
         COUNT(*) FILTER (
           WHERE d.is_active = true
+      AND COALESCE(d.is_test_data, false) = false
             AND NOT psc.is_terminal
             AND psc.stale_threshold_days IS NOT NULL
             AND EXTRACT(DAY FROM NOW() - d.stage_entered_at) > psc.stale_threshold_days
@@ -1443,7 +1454,7 @@ export async function getRegionalOwnershipOverview(
       LEFT JOIN deal_scoping_intake dsi ON dsi.deal_id = d.id
       LEFT JOIN users u ON u.id = d.assigned_rep_id
       LEFT JOIN pipeline_stage_config psc ON psc.id = d.stage_id
-      WHERE TRUE
+      WHERE COALESCE(d.is_test_data, false) = false
         ${dateFilter}
         ${officeFilter}
         ${regionFilter}
@@ -1461,7 +1472,7 @@ export async function getRegionalOwnershipOverview(
       JOIN deals d ON d.id = a.deal_id
       LEFT JOIN deal_scoping_intake dsi ON dsi.deal_id = d.id
       LEFT JOIN users u ON u.id = d.assigned_rep_id
-      WHERE TRUE
+      WHERE COALESCE(d.is_test_data, false) = false
         ${dateFilter}
         ${officeFilter}
         ${regionFilter}
@@ -1476,7 +1487,7 @@ export async function getRegionalOwnershipOverview(
         SELECT 'missing_assigned_rep' AS gap_type
         FROM deals d
         LEFT JOIN deal_scoping_intake dsi ON dsi.deal_id = d.id
-        WHERE TRUE
+        WHERE COALESCE(d.is_test_data, false) = false
           ${dateFilter}
           ${officeFilter}
           ${sourceFilter}
@@ -1485,7 +1496,7 @@ export async function getRegionalOwnershipOverview(
         SELECT 'missing_region' AS gap_type
         FROM deals d
         LEFT JOIN deal_scoping_intake dsi ON dsi.deal_id = d.id
-        WHERE TRUE
+        WHERE COALESCE(d.is_test_data, false) = false
           ${dateFilter}
           ${officeFilter}
           ${repFilter}
@@ -1556,7 +1567,8 @@ export async function getFollowUpCompliance(
           AND (t.completed_at::date <= t.due_date OR t.due_date IS NULL)
       )::int AS on_time
     FROM tasks t
-    WHERE t.assigned_to = ${repId}
+    WHERE COALESCE(t.is_test_data, false) = false
+      AND t.assigned_to = ${repId}
       AND t.type = 'follow_up'
       AND t.created_at >= ${from}::timestamptz
       AND t.created_at <= (${to}::date + INTERVAL '1 day')::timestamptz
@@ -1607,6 +1619,7 @@ export async function getDdVsPipeline(
     FROM deals d
     JOIN pipeline_stage_config psc ON psc.id = d.stage_id
     WHERE d.is_active = true
+      AND COALESCE(d.is_test_data, false) = false
   `);
 
   const rows = (result as any).rows ?? result;
@@ -1676,7 +1689,8 @@ export async function getClosedWonSummary(
         ), 0)::numeric AS avg_cycle_time_days
       FROM deals d
       JOIN pipeline_stage_config psc ON psc.id = d.stage_id
-      WHERE psc.slug IN (${sqlSlugList(WON_OUTCOME_STAGE_SLUGS)})
+      WHERE COALESCE(d.is_test_data, false) = false
+        AND psc.slug IN (${sqlSlugList(WON_OUTCOME_STAGE_SLUGS)})
         AND d.actual_close_date >= ${from}::date
         AND d.actual_close_date <= ${to}::date
     `),
@@ -1691,7 +1705,8 @@ export async function getClosedWonSummary(
       FROM deals d
       JOIN pipeline_stage_config psc ON psc.id = d.stage_id
       JOIN users u ON u.id = d.assigned_rep_id
-      WHERE psc.slug IN (${sqlSlugList(WON_OUTCOME_STAGE_SLUGS)})
+      WHERE COALESCE(d.is_test_data, false) = false
+        AND psc.slug IN (${sqlSlugList(WON_OUTCOME_STAGE_SLUGS)})
         AND d.actual_close_date >= ${from}::date
         AND d.actual_close_date <= ${to}::date
       GROUP BY d.assigned_rep_id, u.display_name
@@ -1708,7 +1723,8 @@ export async function getClosedWonSummary(
       FROM deals d
       LEFT JOIN project_type_config ptc ON ptc.id = d.project_type_id
       JOIN pipeline_stage_config psc ON psc.id = d.stage_id
-      WHERE psc.slug IN (${sqlSlugList(WON_OUTCOME_STAGE_SLUGS)})
+      WHERE COALESCE(d.is_test_data, false) = false
+        AND psc.slug IN (${sqlSlugList(WON_OUTCOME_STAGE_SLUGS)})
         AND d.actual_close_date >= ${from}::date
         AND d.actual_close_date <= ${to}::date
       GROUP BY d.project_type_id, ptc.name
@@ -1784,6 +1800,7 @@ export async function getPipelineByRep(
     JOIN pipeline_stage_config psc ON psc.id = d.stage_id
     JOIN users u ON u.id = d.assigned_rep_id
     WHERE d.is_active = true
+      AND COALESCE(d.is_test_data, false) = false
       AND psc.is_terminal = false
       ${repFilter}
     GROUP BY d.assigned_rep_id, u.display_name, d.stage_id, psc.name, psc.display_order
@@ -1964,13 +1981,15 @@ export async function getUnifiedWorkflowOverview(
         ) FILTER (WHERE d.is_active = true AND NOT psc.is_terminal), 0)::numeric AS total_value,
         COUNT(*) FILTER (
           WHERE d.is_active = true
+      AND COALESCE(d.is_test_data, false) = false
             AND NOT psc.is_terminal
             AND psc.stale_threshold_days IS NOT NULL
             AND EXTRACT(DAY FROM NOW() - d.stage_entered_at) > psc.stale_threshold_days
         )::int AS stale_deal_count
       FROM deals d
       JOIN pipeline_stage_config psc ON psc.id = d.stage_id
-      WHERE d.workflow_route IN ('normal', 'service')
+      WHERE COALESCE(d.is_test_data, false) = false
+        AND d.workflow_route IN ('normal', 'service')
         ${dealRepFilter}
       GROUP BY d.workflow_route
       ORDER BY d.workflow_route ASC
@@ -2000,7 +2019,7 @@ export async function getUnifiedWorkflowOverview(
       LEFT JOIN companies c ON c.id = d.company_id
       LEFT JOIN deal_scoping_intake dsi ON dsi.deal_id = d.id
       JOIN pipeline_stage_config psc ON psc.id = d.stage_id
-      WHERE TRUE
+      WHERE COALESCE(d.is_test_data, false) = false
         ${dealRepFilter}
       GROUP BY d.company_id, c.name
       ORDER BY total_value DESC, company_name ASC
@@ -2077,6 +2096,7 @@ export async function getUnifiedWorkflowOverview(
         ON mirror_psc.slug = COALESCE(d.bid_board_stage_slug, psc.slug)
       JOIN users u ON u.id = d.assigned_rep_id
       WHERE d.is_active = true
+      AND COALESCE(d.is_test_data, false) = false
         AND psc.is_terminal = false
         AND COALESCE(mirror_psc.stale_threshold_days, psc.stale_threshold_days) IS NOT NULL
         AND EXTRACT(DAY FROM NOW() - COALESCE(d.bid_board_stage_entered_at, d.stage_entered_at))
@@ -2102,6 +2122,7 @@ export async function getUnifiedWorkflowOverview(
         FROM leads l
         JOIN pipeline_stage_config psc ON psc.id = l.stage_id
         WHERE l.is_active = true
+          AND COALESCE(l.is_test_data, false) = false
           AND l.status = 'open'
           AND psc.workflow_family = 'lead'
           ${leadAssignedRepFilter}
@@ -2118,6 +2139,7 @@ export async function getUnifiedWorkflowOverview(
         FROM deals d
         JOIN pipeline_stage_config psc ON psc.id = d.stage_id
         WHERE d.is_active = true
+      AND COALESCE(d.is_test_data, false) = false
           AND psc.slug = 'opportunity'
           ${dealRepFilter}
         GROUP BY d.workflow_route, psc.name, psc.display_order
@@ -2138,6 +2160,7 @@ export async function getUnifiedWorkflowOverview(
       LEFT JOIN pipeline_stage_config mirror_psc
         ON mirror_psc.slug = COALESCE(d.bid_board_stage_slug, psc.slug)
       WHERE d.is_active = true
+      AND COALESCE(d.is_test_data, false) = false
         AND COALESCE(d.bid_board_stage_slug, psc.slug) IN (${sql.join(MIRRORED_DOWNSTREAM_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})
         ${dealRepFilter}
       GROUP BY COALESCE(d.bid_board_stage_slug, psc.slug), COALESCE(mirror_psc.name, psc.name), d.bid_board_stage_status, d.workflow_route
@@ -2149,7 +2172,8 @@ export async function getUnifiedWorkflowOverview(
         COALESCE(l.disqualification_reason, 'other') AS disqualification_reason,
         COUNT(*)::int AS lead_count
       FROM leads l
-      WHERE l.status = 'disqualified'
+      WHERE COALESCE(l.is_test_data, false) = false
+        AND l.status = 'disqualified'
         ${options.repId ? sql`AND l.assigned_rep_id = ${options.repId}` : sql``}
       GROUP BY l.pipeline_type, COALESCE(l.disqualification_reason, 'other')
       ORDER BY lead_count DESC, disqualification_reason ASC

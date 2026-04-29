@@ -40,6 +40,7 @@ export const contacts = pgTable(
     hubspotContactId: varchar("hubspot_contact_id", { length: 50 }),
     sourceRefs: jsonb("source_refs").$type<Record<string, unknown>>().default({}).notNull(),
     normalizedPhone: varchar("normalized_phone", { length: 20 }),
+    isTestData: boolean("is_test_data").default(false).notNull(),
     isActive: boolean("is_active").default(true).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
