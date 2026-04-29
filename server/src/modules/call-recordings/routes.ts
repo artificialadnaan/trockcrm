@@ -8,6 +8,7 @@ import {
   confirmUpload,
   createUploadUrl,
   getPlaybackUrl,
+  getTranscript,
   listForEntity,
   softDelete,
   type CallRecordingEntityType,
@@ -94,6 +95,8 @@ router.get("/", async (req, res, next) => {
     const recordings = await listForEntity(req.tenantDb!, entityType, entityId, {
       role: req.user!.role,
       userId: req.user!.id,
+    }, {
+      search: typeof req.query.search === "string" ? req.query.search : undefined,
     });
     await req.commitTransaction!();
     res.json({ recordings });
@@ -105,6 +108,19 @@ router.get("/", async (req, res, next) => {
 router.get("/:id/playback", async (req, res, next) => {
   try {
     const result = await getPlaybackUrl(req.tenantDb!, req.params.id, {
+      role: req.user!.role,
+      userId: req.user!.id,
+    });
+    await req.commitTransaction!();
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/:id/transcript", async (req, res, next) => {
+  try {
+    const result = await getTranscript(req.tenantDb!, req.params.id, {
       role: req.user!.role,
       userId: req.user!.id,
     });

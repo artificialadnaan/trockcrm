@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { and, desc, eq, isNull, lt, sql } from "drizzle-orm";
+import { and, desc, eq, ilike, isNull, lt, or, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { callRecordings, users } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
@@ -178,6 +178,8 @@ export async function confirmUpload(
         ? Math.round(input.durationSeconds)
         : null,
       uploadedAt: new Date(),
+      transcriptionStatus: "pending",
+      transcriptionError: null,
     })
     .where(eq(callRecordings.id, recordingId))
     .returning();
@@ -205,10 +207,12 @@ export async function listForEntity(
   tenantDb: TenantDb,
   entityType: string,
   entityId: string,
-  viewer: CallRecordingViewer
+  viewer: CallRecordingViewer,
+  options: { search?: string } = {}
 ) {
   assertEntityType(entityType);
   if (viewer.role === "construction") return [];
+  const search = options.search?.trim();
 
   const rows = await tenantDb
     .select({
@@ -226,6 +230,8 @@ export async function listForEntity(
       uploadedBy: callRecordings.uploadedBy,
       uploadedByName: users.displayName,
       transcriptionStatus: callRecordings.transcriptionStatus,
+      transcriptionError: callRecordings.transcriptionError,
+      transcriptSummary: callRecordings.transcriptSummary,
     })
     .from(callRecordings)
     .leftJoin(users, eq(users.id, callRecordings.uploadedBy))
@@ -233,7 +239,13 @@ export async function listForEntity(
       eq(callRecordings.entityType, entityType),
       eq(callRecordings.entityId, entityId),
       isNull(callRecordings.deletedAt),
-      sql`${callRecordings.fileSizeBytes} > 0`
+      sql`${callRecordings.fileSizeBytes} > 0`,
+      search
+        ? or(
+            ilike(callRecordings.transcriptText, `%${search}%`),
+            ilike(callRecordings.transcriptSummary, `%${search}%`)
+          )
+        : undefined
     ))
     .orderBy(desc(callRecordings.callDate), desc(callRecordings.uploadedAt));
 
@@ -242,6 +254,43 @@ export async function listForEntity(
   }
 
   return rows;
+}
+
+export async function getTranscript(
+  tenantDb: TenantDb,
+  recordingId: string,
+  viewer: CallRecordingViewer
+) {
+  if (viewer.role === "construction") {
+    throw new AppError(403, "Call recordings are not available for this role.");
+  }
+
+  const [recording] = await tenantDb
+    .select({
+      uploadedBy: callRecordings.uploadedBy,
+      fileSizeBytes: callRecordings.fileSizeBytes,
+      transcriptSummary: callRecordings.transcriptSummary,
+      transcriptText: callRecordings.transcriptText,
+      transcriptionStatus: callRecordings.transcriptionStatus,
+      transcriptionError: callRecordings.transcriptionError,
+    })
+    .from(callRecordings)
+    .where(and(eq(callRecordings.id, recordingId), isNull(callRecordings.deletedAt)))
+    .limit(1);
+
+  if (!recording || recording.fileSizeBytes <= 0) {
+    throw new AppError(404, "Call recording not found.");
+  }
+  if (viewer.role === "rep" && recording.uploadedBy !== viewer.userId) {
+    throw new AppError(404, "Call recording not found.");
+  }
+
+  return {
+    summary: recording.transcriptSummary,
+    fullText: recording.transcriptText,
+    status: recording.transcriptionStatus,
+    error: recording.transcriptionError,
+  };
 }
 
 export async function getPlaybackUrl(

@@ -21,6 +21,8 @@ const {
   isAllowedCallRecordingMimeType,
   buildCallRecordingR2Key,
   createUploadUrl,
+  confirmUpload,
+  getTranscript,
   listForEntity,
 } = await import("../../../src/modules/call-recordings/service.js");
 
@@ -97,6 +99,37 @@ describe("call recordings service", () => {
     }));
   });
 
+  it("queues transcription when an upload is confirmed", async () => {
+    const recording = {
+      id: "rec-1",
+      uploadedBy: "admin-1",
+      r2Key: "call-recordings/office-1/rec-1.wav",
+      title: "Kickoff",
+      originalFilename: "call.wav",
+      entityType: "deal",
+      entityId: "deal-1",
+      callDate: new Date("2026-04-29T14:00:00.000Z"),
+    };
+    const returning = vi.fn(async () => [{ ...recording, fileSizeBytes: 44, durationSeconds: 1 }]);
+    const whereUpdate = vi.fn(() => ({ returning }));
+    const set = vi.fn(() => ({ where: whereUpdate }));
+    const whereSelect = vi.fn(() => ({ limit: vi.fn(async () => [recording]) }));
+    const tenantDb = {
+      select: vi.fn(() => ({ from: vi.fn(() => ({ where: whereSelect })) })),
+      update: vi.fn(() => ({ set })),
+      insert: vi.fn(() => ({ values: vi.fn(() => ({ returning: vi.fn(async () => [{ id: "activity-1" }]) })) })),
+    } as any;
+
+    await confirmUpload(tenantDb, "rec-1", { fileSizeBytes: 44, durationSeconds: 1, userId: "admin-1" });
+
+    expect(set).toHaveBeenCalledWith(expect.objectContaining({
+      fileSizeBytes: 44,
+      durationSeconds: 1,
+      transcriptionStatus: "pending",
+      transcriptionError: null,
+    }));
+  });
+
   it("lists all entity recordings for admins and directors", async () => {
     const rows = [
       { id: "rec-admin", uploadedBy: "admin-1" },
@@ -124,5 +157,46 @@ describe("call recordings service", () => {
 
     await expect(listForEntity(tenant.db, "deal", "deal-1", { role: "construction", userId: "construction-1" })).resolves.toEqual([]);
     expect(tenant.db.select).not.toHaveBeenCalled();
+  });
+
+  it("returns transcript content for an admin-visible recording", async () => {
+    const where = vi.fn(() => ({ limit: vi.fn(async () => [{
+      id: "rec-1",
+      uploadedBy: "admin-1",
+      fileSizeBytes: 44,
+      transcriptSummary: "Summary",
+      transcriptText: "Transcript",
+      transcriptionStatus: "complete",
+      transcriptionError: null,
+    }]) }));
+    const tenantDb = {
+      select: vi.fn(() => ({ from: vi.fn(() => ({ where })) })),
+    } as any;
+
+    await expect(getTranscript(tenantDb, "rec-1", { role: "admin", userId: "admin-1" })).resolves.toEqual({
+      summary: "Summary",
+      fullText: "Transcript",
+      status: "complete",
+      error: null,
+    });
+  });
+
+  it("hides transcript content from reps who did not upload the recording", async () => {
+    const where = vi.fn(() => ({ limit: vi.fn(async () => [{
+      id: "rec-1",
+      uploadedBy: "admin-1",
+      fileSizeBytes: 44,
+      transcriptSummary: "Summary",
+      transcriptText: "Transcript",
+      transcriptionStatus: "complete",
+      transcriptionError: null,
+    }]) }));
+    const tenantDb = {
+      select: vi.fn(() => ({ from: vi.fn(() => ({ where })) })),
+    } as any;
+
+    await expect(getTranscript(tenantDb, "rec-1", { role: "rep", userId: "rep-1" })).rejects.toMatchObject({
+      statusCode: 404,
+    });
   });
 });

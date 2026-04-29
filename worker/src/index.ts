@@ -20,8 +20,13 @@ import { runAiDisconnectEscalationScan } from "./jobs/ai-disconnect-escalation.j
 import { runAiDisconnectAdminTaskGeneration } from "./jobs/ai-disconnect-admin-tasks.js";
 import { runAiInterventionManagerAlerts } from "./jobs/ai-intervention-manager-alerts.js";
 import { runCallRecordingCleanup } from "./jobs/call-recording-cleanup.js";
+import { runCallRecordingTranscription } from "./jobs/call-recording-transcribe.js";
 
 const POLL_INTERVAL_MS = 2000; // Poll job queue every 2 seconds
+const CALL_RECORDING_TRANSCRIPTION_INTERVAL_MS = parseInt(
+  process.env.CALL_RECORDING_TRANSCRIPTION_INTERVAL_MS || "60000",
+  10
+);
 
 async function main() {
   console.log("[Worker] Starting T Rock CRM Worker...");
@@ -44,6 +49,15 @@ async function main() {
   // Start job queue polling
   setInterval(pollJobs, POLL_INTERVAL_MS);
   console.log(`[Worker] Polling job queue every ${POLL_INTERVAL_MS}ms`);
+
+  setInterval(async () => {
+    try {
+      await runCallRecordingTranscription();
+    } catch (err) {
+      console.error("[Worker:call-recordings] Transcription poll failed:", err);
+    }
+  }, CALL_RECORDING_TRANSCRIPTION_INTERVAL_MS);
+  console.log(`[Worker] Call recording transcription poll every ${CALL_RECORDING_TRANSCRIPTION_INTERVAL_MS}ms`);
 
   // Stale deal scan: daily at 6:00 AM CT
   cron.schedule("0 6 * * *", async () => {
