@@ -4,7 +4,8 @@
     "email": "ashaw@trockgc.com",
     "role": "CEO",
     "officeCode": "dfw",
-    "manager": null
+    "manager": null,
+    "crmRole": "admin"
   },
   {
     "name": "Takashi Yamashita",
@@ -25,77 +26,88 @@
     "email": "bburns@trockgc.com",
     "role": "Sr. Project Manager",
     "officeCode": "dfw",
-    "manager": "jhelms@trockgc.com"
+    "manager": "jhelms@trockgc.com",
+    "crmRole": "construction"
   },
   {
     "name": "Adam Winters",
     "email": "awinters@trockgc.com",
     "role": "Project Manager",
     "officeCode": "dfw",
-    "manager": "jhelms@trockgc.com"
+    "manager": "jhelms@trockgc.com",
+    "crmRole": "construction"
   },
   {
     "name": "Adam Sherwood",
     "email": "asherwood@trockgc.com",
     "role": "Project Manager",
     "officeCode": "dfw",
-    "manager": "jhelms@trockgc.com"
+    "manager": "jhelms@trockgc.com",
+    "crmRole": "construction"
   },
   {
     "name": "Corey McShane",
     "email": "cmcshane@trockgc.com",
     "role": "Superintendent",
     "officeCode": "dfw",
-    "manager": "bburns@trockgc.com"
+    "manager": "bburns@trockgc.com",
+    "crmRole": "construction"
   },
   {
     "name": "Kevin Posey",
     "email": "kposey@trockgc.com",
     "role": "Superintendent",
     "officeCode": "dfw",
-    "manager": "bburns@trockgc.com"
+    "manager": "bburns@trockgc.com",
+    "crmRole": "construction"
   },
   {
     "name": "Steve Posey",
     "email": "sposey@trockgc.com",
     "role": "Superintendent",
     "officeCode": "dfw",
-    "manager": "bburns@trockgc.com"
+    "manager": "bburns@trockgc.com",
+    "crmRole": "construction"
   },
   {
     "name": "Tristan Mitchell",
     "email": "tmitchell@trockgc.com",
     "role": "Superintendent",
     "officeCode": "dfw",
-    "manager": "awinters@trockgc.com"
+    "manager": "awinters@trockgc.com",
+    "crmRole": "construction"
   },
   {
     "name": "Nick Cheatham",
     "email": "ncheatham@trockgc.com",
     "role": "Superintendent",
     "officeCode": "dfw",
-    "manager": "awinters@trockgc.com"
+    "manager": "awinters@trockgc.com",
+    "crmRole": "construction"
   },
   {
     "name": "Donnie Johnson",
     "email": "djohnson@trockgc.com",
     "role": "Superintendent",
     "officeCode": "dfw",
-    "manager": "asherwood@trockgc.com"
+    "manager": "asherwood@trockgc.com",
+    "crmRole": "construction"
   },
   {
     "name": "Brett Bell",
     "email": "bbell@trockgc.com",
     "role": "Superintendent",
     "officeCode": "dfw",
-    "manager": "asherwood@trockgc.com"
+    "manager": "asherwood@trockgc.com",
+    "crmRole": "construction"
   },
   {
     "name": "Nick Reyes",
     "email": "nreyes@trockgc.com",
     "role": "Superintendent",
     "officeCode": "dfw",
-    "manager": "asherwood@trockgc.com"
+    "manager": "asherwood@trockgc.com",
+    "crmRole": "construction"
   },
   {
     "name": "Tim Mitchell",
@@ -116,14 +128,16 @@
     "email": "cburling@trockgc.com",
     "role": "Senior Service Super",
     "officeCode": "dfw",
-    "manager": "tmitchell2@trockgc.com"
+    "manager": "tmitchell2@trockgc.com",
+    "crmRole": "construction"
   },
   {
     "name": "Andrew Green",
     "email": "agreen@trockgc.com",
     "role": "Service Super",
     "officeCode": "dfw",
-    "manager": "cburling@trockgc.com"
+    "manager": "cburling@trockgc.com",
+    "crmRole": "construction"
   },
   {
     "name": "Sidney Gibson",
@@ -137,14 +151,16 @@
     "email": "ewilliams@trockgc.com",
     "role": "Estimator",
     "officeCode": "dfw",
-    "manager": "sgibson@trockgc.com"
+    "manager": "sgibson@trockgc.com",
+    "crmRole": "rep"
   },
   {
     "name": "Alex Koch",
     "email": "akoch@trockgc.com",
     "role": "Estimator",
     "officeCode": "dfw",
-    "manager": "sgibson@trockgc.com"
+    "manager": "sgibson@trockgc.com",
+    "crmRole": "rep"
   },
   {
     "name": "Derek Barr",
@@ -205,7 +221,8 @@
     "flags": [
       "needs_review"
     ],
-    "notes": "not in org chart, has HubSpot View-Only Seat"
+    "notes": "not in org chart, has HubSpot View-Only Seat",
+    "crmRole": "director"
   },
   {
     "name": "Adnaan Iqbal",
@@ -216,6 +233,7 @@
     "flags": [
       "external_founder"
     ],
-    "notes": "out-of-band founder/admin: not on T Rock org chart, full access"
+    "notes": "out-of-band founder/admin: not on T Rock org chart, full access",
+    "crmRole": "admin"
   }
 ]

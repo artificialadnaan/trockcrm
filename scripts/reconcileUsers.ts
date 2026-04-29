@@ -9,7 +9,7 @@ dotenv.config({ path: path.join(path.dirname(fileURLToPath(import.meta.url)), ".
 const ACTIVE_TASK_STATUSES = ["pending", "scheduled", "in_progress", "waiting_on", "blocked"];
 const ORG_CHART_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), "../docs/org-chart.json");
 
-type CrmRole = "admin" | "director" | "rep";
+type CrmRole = "admin" | "director" | "rep" | "construction";
 
 export interface OrgChartUser {
   name: string;
@@ -17,6 +17,7 @@ export interface OrgChartUser {
   role: string;
   officeCode: string;
   manager: string | null;
+  crmRole?: CrmRole;
   status?: "active" | "inactive";
   flags?: string[];
   notes?: string;
@@ -47,6 +48,12 @@ export interface UserCleanupPlan {
     currentManagerEmail: string | null;
     nextManagerEmail: string | null;
     status: "would_update" | "blocked_user_missing" | "blocked_manager_missing";
+  }>;
+  roleMismatches: Array<{
+    email: string;
+    currentRole: CrmRole;
+    nextRole: CrmRole;
+    status: "would_update";
   }>;
   reassignmentPlan: Array<{
     email: string;
@@ -112,8 +119,13 @@ export function detectEmailConventionCollisions(orgUsers: OrgChartUser[]) {
 export function inferCrmRole(orgRole: string): CrmRole {
   const role = orgRole.toLowerCase();
   if (role === "ceo" || role === "cfo" || role.includes("founder") || role.includes("super admin")) return "admin";
+  if (role.includes("project manager") || role.includes("superintendent") || role.includes("service super")) return "construction";
   if (role.includes("vp") || role.includes("director")) return "director";
   return "rep";
+}
+
+function resolveCrmRole(user: Pick<OrgChartUser, "role" | "crmRole">): CrmRole {
+  return user.crmRole ?? inferCrmRole(user.role);
 }
 
 export function resolveOfficeSlug(officeCode: string): string {
@@ -158,6 +170,7 @@ export function buildUserCleanupPlan(args: {
     status: user.status ?? "active",
     flags: user.flags ?? [],
     notes: user.notes ?? null,
+    crmRole: resolveCrmRole(user),
     mergeSources: (user.mergeSources ?? []).map(normalizeEmail),
   }]));
   const dbByEmail = new Map(args.dbUsers.map((user) => [normalizeEmail(user.email), { ...user, email: normalizeEmail(user.email) }]));
@@ -193,7 +206,7 @@ export function buildUserCleanupPlan(args: {
       flags: user.flags ?? [],
       notes: user.notes ?? null,
       mergeSources: (user.mergeSources ?? []).map(normalizeEmail),
-      crmRole: inferCrmRole(user.role),
+      crmRole: resolveCrmRole(user),
       officeSlug: resolveOfficeSlug(user.officeCode),
     }))
     .sort((a, b) => a.email.localeCompare(b.email));
@@ -237,6 +250,22 @@ export function buildUserCleanupPlan(args: {
     }
   }
   managerMismatches.sort((a, b) => a.email.localeCompare(b.email));
+
+  const roleMismatches: UserCleanupPlan["roleMismatches"] = [];
+  for (const orgUser of orgByEmail.values()) {
+    const dbUser = dbByEmail.get(orgUser.email);
+    if (!dbUser) continue;
+    const nextRole = orgUser.crmRole ?? inferCrmRole(orgUser.role);
+    if (dbUser.role !== nextRole) {
+      roleMismatches.push({
+        email: orgUser.email,
+        currentRole: dbUser.role,
+        nextRole,
+        status: "would_update",
+      });
+    }
+  }
+  roleMismatches.sort((a, b) => a.email.localeCompare(b.email));
 
   const reassignmentPlan = wouldSoftDelete.map((user) => {
     const counts = ownershipCountsByUserId.get(user.id) ?? { deals: 0, leads: 0, tasks: 0 };
@@ -286,7 +315,7 @@ export function buildUserCleanupPlan(args: {
     })
     .sort((a, b) => a.email.localeCompare(b.email));
 
-  return { wouldSoftDelete, wouldCreate, managerMismatches, reassignmentPlan, mergePlan, inactiveReviewUsers };
+  return { wouldSoftDelete, wouldCreate, managerMismatches, roleMismatches, reassignmentPlan, mergePlan, inactiveReviewUsers };
 }
 
 function loadOrgChart(): OrgChartUser[] {
@@ -307,6 +336,7 @@ function loadOrgChart(): OrgChartUser[] {
       role: row.role.trim(),
       officeCode: row.officeCode.trim().toLowerCase(),
       manager: row.manager ? normalizeEmail(row.manager) : null,
+      crmRole: typeof row.crmRole === "string" ? row.crmRole : undefined,
       status: row.status === "inactive" ? "inactive" : "active",
       flags: Array.isArray(row.flags) ? row.flags.map(String) : [],
       notes: typeof row.notes === "string" ? row.notes : undefined,
@@ -433,6 +463,9 @@ export function renderDryRun(plan: UserCleanupPlan, collisions: ReturnType<typeo
   lines.push("");
   lines.push(`Manager mismatches → would update (${plan.managerMismatches.length}):`);
   lines.push(formatRows(plan.managerMismatches, (row) => `  - ${row.email}: ${row.currentManagerEmail ?? "null"} -> ${row.nextManagerEmail ?? "null"} [${row.status}]`));
+  lines.push("");
+  lines.push(`Role updates planned (${plan.roleMismatches.length}):`);
+  lines.push(formatRows(plan.roleMismatches, (row) => `  - ${row.email}: ${row.currentRole ?? "null"} -> ${row.nextRole} [${row.status}]`));
   lines.push("");
   lines.push("Owned-record reassignment plan for soft-deleted users:");
   lines.push(formatRows(plan.reassignmentPlan, (row) => `  - ${row.displayName} <${row.email}> -> ${row.reassignToEmail ?? "UNRESOLVED"}; deals=${row.deals}, leads=${row.leads}, tasks=${row.tasks}`));

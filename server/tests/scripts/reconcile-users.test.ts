@@ -14,7 +14,9 @@ describe("user reconciliation planning", () => {
     expect(inferCrmRole("Founder / Super Admin")).toBe("admin");
     expect(inferCrmRole("Director of Sales")).toBe("director");
     expect(inferCrmRole("VP of Construction")).toBe("director");
-    expect(inferCrmRole("Project Manager")).toBe("rep");
+    expect(inferCrmRole("Project Manager")).toBe("construction");
+    expect(inferCrmRole("Superintendent")).toBe("construction");
+    expect(inferCrmRole("Service Super")).toBe("construction");
     expect(resolveOfficeSlug("dfw")).toBe("dallas");
   });
 
@@ -66,6 +68,24 @@ describe("user reconciliation planning", () => {
         leads: 1,
         tasks: 3,
       },
+    ]);
+  });
+
+  it("plans role updates for existing users whose DB role differs from the org chart role", () => {
+    const plan = buildUserCleanupPlan({
+      orgUsers: [
+        { name: "Adam Shaw", email: "ashaw@trockgc.com", role: "CEO", crmRole: "admin", officeCode: "dfw", manager: null },
+        { name: "Adam Winters", email: "awinters@trockgc.com", role: "Project Manager", crmRole: "construction", officeCode: "dfw", manager: "ashaw@trockgc.com" },
+      ],
+      dbUsers: [
+        { id: "u-adam", email: "ashaw@trockgc.com", displayName: "Adam Shaw", role: "rep", officeSlug: "dallas", reportsTo: null, isActive: true },
+        { id: "u-winters", email: "awinters@trockgc.com", displayName: "Adam Winters", role: "rep", officeSlug: "dallas", reportsTo: "u-adam", isActive: true },
+      ],
+    });
+
+    expect(plan.roleMismatches).toEqual([
+      { email: "ashaw@trockgc.com", currentRole: "rep", nextRole: "admin", status: "would_update" },
+      { email: "awinters@trockgc.com", currentRole: "rep", nextRole: "construction", status: "would_update" },
     ]);
   });
 
