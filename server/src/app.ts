@@ -44,11 +44,12 @@ import { aiCopilotRoutes } from "./modules/ai-copilot/routes.js";
 import { salesReviewRoutes } from "./modules/sales-review/routes.js";
 import { userRoutes } from "./modules/users/routes.js";
 import { getAllowedCorsOrigins } from "./modules/auth/http-config.js";
+import { getSecurityOptions } from "./middleware/security.js";
 
 export function createApp() {
   const app = express();
 
-  app.use(helmet());
+  app.use(helmet(getSecurityOptions(process.env)));
 
   if (process.env.NODE_ENV === "production" || process.env.TRUST_PROXY === "true") {
     app.set("trust proxy", 1);
