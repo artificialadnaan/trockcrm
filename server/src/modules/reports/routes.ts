@@ -32,6 +32,7 @@ import {
   deleteSavedReport,
   seedLockedReports,
 } from "./saved-reports-service.js";
+import { runReportBuilder } from "./report-builder-service.js";
 
 const router = Router();
 
@@ -368,6 +369,24 @@ router.post("/execute", async (req, res, next) => {
   }
 });
 
+// POST /api/reports/run -- aggregate report-builder query
+router.post("/run", async (req, res, next) => {
+  try {
+    const data = await runReportBuilder(req.tenantDb!, {
+      dimensions: Array.isArray(req.body.dimensions) ? req.body.dimensions : [],
+      measures: Array.isArray(req.body.measures) ? req.body.measures : [],
+      filters: req.body.filters && typeof req.body.filters === "object" ? req.body.filters : {},
+      dateField: typeof req.body.dateField === "string" ? req.body.dateField : "created_at",
+      role: req.user!.role,
+      userId: req.user!.id,
+    });
+    await req.commitTransaction!();
+    res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // -------------------------------------------------------------------------
 // Saved reports CRUD
 // -------------------------------------------------------------------------
@@ -408,6 +427,9 @@ router.post("/saved", async (req, res, next) => {
     const { name, entity, config, visibility } = req.body;
     if (!name || !entity || !config) {
       throw new AppError(400, "name, entity, and config are required");
+    }
+    if (visibility === "company" && req.user!.role !== "admin") {
+      throw new AppError(403, "Only admins can save org-wide reports");
     }
 
     const report = await createSavedReport({

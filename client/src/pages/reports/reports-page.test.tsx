@@ -1,66 +1,40 @@
+import type { ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
-import { MemoryRouter } from "react-router-dom";
-import type { ReactNode } from "react";
 import { ReportsPage } from "./reports-page";
 
 const mocks = vi.hoisted(() => ({
   useSavedReportsMock: vi.fn(),
-  useUnifiedWorkflowOverviewMock: vi.fn(),
+  runReportBuilderMock: vi.fn(),
+  createSavedReportMock: vi.fn(),
+}));
+
+vi.mock("@/lib/auth", () => ({
+  useAuth: () => ({ user: { id: "admin-1", role: "admin", displayName: "Admin" } }),
 }));
 
 vi.mock("@/hooks/use-reports", () => ({
   useSavedReports: mocks.useSavedReportsMock,
-  useUnifiedWorkflowOverview: mocks.useUnifiedWorkflowOverviewMock,
-  executeLockedReport: vi.fn(),
-  executeCustomReport: vi.fn(),
-  createSavedReport: vi.fn(),
-  deleteSavedReport: vi.fn(),
+  runReportBuilder: mocks.runReportBuilderMock,
+  createSavedReport: mocks.createSavedReportMock,
 }));
 
-vi.mock("@/components/charts/report-chart", () => ({
-  ReportChart: () => <div>Report Chart</div>,
-}));
-
-vi.mock("@/components/ui/button", () => ({
-  Button: ({ children }: { children: ReactNode }) => <button>{children}</button>,
-}));
-
-vi.mock("@/components/ui/badge", () => ({
-  Badge: ({ children }: { children: ReactNode }) => <span>{children}</span>,
-}));
-
-vi.mock("@/components/ui/input", () => ({
-  Input: () => <input />,
-}));
-
-vi.mock("@/components/ui/select", () => ({
-  Select: ({ children }: { children: ReactNode }) => <div>{children}</div>,
-  SelectContent: ({ children }: { children: ReactNode }) => <div>{children}</div>,
-  SelectItem: ({ children }: { children: ReactNode }) => <div>{children}</div>,
-  SelectTrigger: ({ children }: { children: ReactNode }) => <div>{children}</div>,
-  SelectValue: () => <div />,
-}));
-
-vi.mock("@/components/ui/dialog", () => ({
-  Dialog: ({ children }: { children: ReactNode }) => <div>{children}</div>,
-  DialogContent: ({ children }: { children: ReactNode }) => <div>{children}</div>,
-  DialogHeader: ({ children }: { children: ReactNode }) => <div>{children}</div>,
-  DialogTitle: ({ children }: { children: ReactNode }) => <div>{children}</div>,
-  DialogFooter: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+vi.mock("recharts", () => ({
+  ResponsiveContainer: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  BarChart: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  Bar: () => <div>Bar</div>,
+  LineChart: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  Line: () => <div>Line</div>,
+  XAxis: () => null,
+  YAxis: () => null,
+  CartesianGrid: () => null,
+  Tooltip: () => null,
+  Legend: () => null,
 }));
 
 vi.mock("@/lib/report-export", () => ({
-  buildPrintableReportHtml: vi.fn(),
-  buildReportExportFilename: vi.fn(),
   downloadTextFile: vi.fn(),
-  normalizeReportRows: vi.fn(() => []),
-  openPrintableReportWindow: vi.fn(),
-  serializeRowsToCsv: vi.fn(),
-}));
-
-vi.mock("@/lib/report-actions", () => ({
-  getScheduleReportActionConfig: vi.fn(() => ({ label: "Schedule", href: "/reports/schedule" })),
+  serializeRowsToCsv: vi.fn(() => "csv"),
 }));
 
 function normalize(html: string) {
@@ -70,66 +44,48 @@ function normalize(html: string) {
 describe("ReportsPage", () => {
   beforeEach(() => {
     mocks.useSavedReportsMock.mockReturnValue({
-      reports: [],
-      loading: false,
-      refetch: vi.fn(),
-    });
-    mocks.useUnifiedWorkflowOverviewMock.mockReturnValue({
-      data: {
-        leadPipelineSummary: [],
-        standardVsServiceRollups: [],
-        companyRollups: [],
-        repActivitySplit: [],
-        staleLeads: [],
-        staleDeals: [],
-        crmOwnedProgression: [
-          {
-            workflowBucket: "lead",
-            workflowRoute: "normal",
-            stageName: "New Lead",
-            itemCount: 2,
-            totalValue: 125000,
+      reports: [
+        {
+          id: "saved-1",
+          name: "Saved Pipeline View",
+          config: {
+            builderRequest: {
+              dimensions: ["stage"],
+              measures: ["deal_count"],
+              filters: {},
+              dateField: "created_at",
+            },
           },
-        ],
-        mirroredDownstreamSummary: [
-          {
-            mirroredStageSlug: "estimating",
-            mirroredStageName: "Estimating",
-            mirroredStageStatus: "blocked",
-            workflowRoute: "service",
-            dealCount: 2,
-            totalValue: 275000,
-          },
-        ],
-        reasonCodedDisqualifications: [
-          {
-            workflowRoute: "normal",
-            disqualificationReason: "other",
-            leadCount: 1,
-          },
-        ],
-      },
+          isLocked: false,
+        },
+      ],
       loading: false,
       error: null,
       refetch: vi.fn(),
     });
+    mocks.runReportBuilderMock.mockResolvedValue({
+      data: {
+        columns: [
+          { key: "stage", label: "Stage", kind: "dimension" },
+          { key: "deal_count", label: "Deal Count", kind: "measure" },
+        ],
+        rows: [{ stage: "Contract Signed", deal_count: 3 }],
+      },
+    });
   });
 
-  it("renders the expanded unified workflow sections from the workflow overview payload", () => {
-    const html = normalize(
-      renderToStaticMarkup(
-        <MemoryRouter>
-          <ReportsPage />
-        </MemoryRouter>
-      )
-    );
+  it("renders the rebuilt report builder and quick reports", () => {
+    const html = normalize(renderToStaticMarkup(<ReportsPage />));
 
-    expect(html).toContain("CRM-Owned Progression");
-    expect(html).toContain("Mirrored Downstream Summary");
-    expect(html).toContain("Reason-Coded Disqualifications");
-    expect(html).toContain("New Lead");
-    expect(html).toContain("Estimating");
-    expect(html).toContain("Blocked");
-    expect(html).toContain("Other");
+    expect(html).toContain("Reports");
+    expect(html).toContain("Report Builder");
+    expect(html).toContain("Saved Views");
+    expect(html).toContain("MTD Pipeline");
+    expect(html).toContain("YTD Closed Won");
+    expect(html).toContain("This Week&#x27;s Activity");
+    expect(html).toContain("Dimensions");
+    expect(html).toContain("Measures");
+    expect(html).toContain("CSV Export");
+    expect(html).not.toContain("MTD/YTD");
   });
 });

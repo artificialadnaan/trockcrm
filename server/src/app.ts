@@ -26,6 +26,7 @@ import { activityRoutes } from "./modules/activities/routes.js";
 import { notificationCrudRoutes } from "./modules/notifications/crud-routes.js";
 import { reportRoutes } from "./modules/reports/routes.js";
 import { dashboardRoutes } from "./modules/dashboard/routes.js";
+import { commissionRoutes } from "./modules/commissions/routes.js";
 import { initSsePush } from "./modules/notifications/sse-manager.js";
 import { procoreRoutes } from "./modules/procore/routes.js";
 import { procoreWebhookRoutes } from "./modules/procore/webhook-routes.js";
@@ -128,6 +129,7 @@ export function createApp() {
   tenantRouter.use("/activities", activityRoutes);
   tenantRouter.use("/notifications", notificationCrudRoutes);
   tenantRouter.use("/reports", reportRoutes);
+  tenantRouter.use("/commissions", commissionRoutes);
   tenantRouter.use("/sales-review", salesReviewRoutes);
   tenantRouter.use("/dashboard", dashboardRoutes);
   tenantRouter.use("/procore", procoreRoutes);
