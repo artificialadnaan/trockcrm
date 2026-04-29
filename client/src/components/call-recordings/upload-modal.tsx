@@ -27,17 +27,30 @@ const ALLOWED_AUDIO_TYPES = new Set([
 ]);
 
 function getAudioDuration(file: File): Promise<number | null> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const audio = document.createElement("audio");
     const url = URL.createObjectURL(file);
+    let settled = false;
+    const cleanup = () => {
+      URL.revokeObjectURL(url);
+      window.clearTimeout(timer);
+    };
+    const settle = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      callback();
+    };
+    const timer = window.setTimeout(() => {
+      settle(() => reject(new Error("Timed out while reading audio metadata.")));
+    }, 5000);
+
     audio.preload = "metadata";
     audio.onloadedmetadata = () => {
-      URL.revokeObjectURL(url);
-      resolve(Number.isFinite(audio.duration) ? Math.round(audio.duration) : null);
+      settle(() => resolve(Number.isFinite(audio.duration) ? Math.round(audio.duration) : null));
     };
     audio.onerror = () => {
-      URL.revokeObjectURL(url);
-      resolve(null);
+      settle(() => reject(new Error("Could not read audio metadata.")));
     };
     audio.src = url;
   });
@@ -65,6 +78,11 @@ function putFile(uploadUrl: string, file: File, onProgress: (progress: number) =
     xhr.ontimeout = () => reject(new Error("Upload timed out. Try again from a stronger connection."));
     xhr.send(file);
   });
+}
+
+function errorMessage(prefix: string, err: unknown) {
+  const detail = err instanceof Error ? err.message : "Unknown error";
+  return `${prefix}: ${detail}`;
 }
 
 export function UploadRecordingModal({
@@ -116,32 +134,57 @@ export function UploadRecordingModal({
     setSubmitting(true);
     setError(null);
     try {
-      const upload = await api<{
+      let upload: {
         uploadUrl: string;
         recordingId: string;
         recording_id?: string;
-      }>("/call-recordings/upload-url", {
-        method: "POST",
-        json: {
-          entityType,
-          entityId,
-          filename: file.name,
-          mimeType: file.type,
-          title: title || undefined,
-          notes: notes || undefined,
-          callDate: callDate ? new Date(callDate).toISOString() : undefined,
-        },
-      });
+      };
+      try {
+        upload = await api<typeof upload>("/call-recordings/upload-url", {
+          method: "POST",
+          json: {
+            entityType,
+            entityId,
+            filename: file.name,
+            mimeType: file.type,
+            title: title || undefined,
+            notes: notes || undefined,
+            callDate: callDate ? new Date(callDate).toISOString() : undefined,
+          },
+        });
+      } catch (err) {
+        throw new Error(errorMessage("Failed to get upload URL", err));
+      }
 
-      await putFile(upload.uploadUrl, file, setProgress);
-      const durationSeconds = await getAudioDuration(file);
-      await api(`/call-recordings/${upload.recordingId ?? upload.recording_id}/confirm`, {
-        method: "POST",
-        json: {
-          fileSizeBytes: file.size,
-          durationSeconds,
-        },
-      });
+      try {
+        await putFile(upload.uploadUrl, file, setProgress);
+      } catch (err) {
+        throw new Error(errorMessage("Failed to upload to storage", err));
+      }
+
+      let durationSeconds: number | null = null;
+      try {
+        durationSeconds = await getAudioDuration(file);
+      } catch (err) {
+        console.warn("Failed to compute file metadata for call recording upload.", err);
+      }
+
+      const recordingId = upload.recordingId ?? upload.recording_id;
+      if (!recordingId) {
+        throw new Error("Uploaded but failed to confirm in CRM: missing recording ID.");
+      }
+
+      try {
+        await api(`/call-recordings/${recordingId}/confirm`, {
+          method: "POST",
+          json: {
+            fileSizeBytes: file.size,
+            durationSeconds,
+          },
+        });
+      } catch (err) {
+        throw new Error(errorMessage("Uploaded but failed to confirm in CRM", err));
+      }
 
       toast.success("Call recording uploaded");
       reset();

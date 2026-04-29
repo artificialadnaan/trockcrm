@@ -40,6 +40,7 @@ export async function runCallRecordingCleanup() {
 
   let deletedRecords = 0;
   let deletedObjects = 0;
+  let abandonedRecords = 0;
 
   for (const office of offices.rows) {
     const schemaName = `office_${office.slug}`;
@@ -50,11 +51,19 @@ export async function runCallRecordingCleanup() {
     );
     if (schemaExists.rowCount === 0) continue;
 
-    const expired = await pool.query<{ id: string; r2_key: string }>(
-      `SELECT id, r2_key FROM ${quotedSchema}.call_recordings WHERE expires_at < now()`
+    const expired = await pool.query<{ id: string; r2_key: string; cleanup_reason: "expired" | "abandoned" }>(
+      `SELECT id, r2_key, 'expired' AS cleanup_reason
+       FROM ${quotedSchema}.call_recordings
+       WHERE expires_at < now()
+       UNION ALL
+       SELECT id, r2_key, 'abandoned' AS cleanup_reason
+       FROM ${quotedSchema}.call_recordings
+       WHERE file_size_bytes = 0
+         AND uploaded_at < now() - interval '1 hour'`
     );
 
     for (const row of expired.rows) {
+      if (row.cleanup_reason === "abandoned") abandonedRecords += 1;
       if (await deleteR2Object(row.r2_key)) {
         deletedObjects += 1;
       }
@@ -62,12 +71,14 @@ export async function runCallRecordingCleanup() {
 
     if ((expired.rowCount ?? 0) > 0) {
       await pool.query(
-        `DELETE FROM ${quotedSchema}.call_recordings WHERE expires_at < now()`
+        `DELETE FROM ${quotedSchema}.call_recordings
+         WHERE expires_at < now()
+            OR (file_size_bytes = 0 AND uploaded_at < now() - interval '1 hour')`
       );
       deletedRecords += expired.rowCount ?? 0;
     }
   }
 
-  console.log(`[Worker:call-recordings] Cleanup deleted ${deletedRecords} records and ${deletedObjects} R2 objects`);
-  return { deletedRecords, deletedObjects };
+  console.log(`[Worker:call-recordings] Cleanup deleted ${deletedRecords} records (${abandonedRecords} abandoned uploads) and ${deletedObjects} R2 objects`);
+  return { deletedRecords, deletedObjects, abandonedRecords };
 }
