@@ -11,6 +11,12 @@ import { PRESIGNED_URL_EXPIRY_SECONDS } from "../modules/files/file-constants.js
 
 let _client: S3Client | null = null;
 
+const LEGACY_R2_CORS_ALLOWED_ORIGINS = [
+  "https://frontend-production-bcab.up.railway.app",
+  "http://localhost:5173",
+  "http://localhost:3000",
+];
+
 function getR2Config() {
   const accountId = process.env.R2_ACCOUNT_ID;
   const accessKeyId = process.env.R2_ACCESS_KEY_ID;
@@ -57,6 +63,22 @@ function getClient(): S3Client {
 
 function getBucket(): string {
   return getR2Config().bucketName;
+}
+
+export function getAllowedR2CorsOrigins(env: NodeJS.ProcessEnv = process.env): string[] {
+  const configured = env.R2_ALLOWED_ORIGINS?.split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+
+  if (configured?.length) {
+    return Array.from(new Set(configured));
+  }
+
+  const frontendUrl = env.FRONTEND_URL?.trim();
+  return Array.from(new Set([
+    ...(frontendUrl ? [frontendUrl] : []),
+    ...LEGACY_R2_CORS_ALLOWED_ORIGINS,
+  ]));
 }
 
 /**
