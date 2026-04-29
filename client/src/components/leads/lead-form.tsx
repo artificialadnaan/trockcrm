@@ -945,6 +945,8 @@ function EditableLeadForm({
           sourceCategory: formData.sourceCategory as LeadSourceCategory,
           sourceDetail: formData.sourceDetail.trim() || null,
           description: formData.description.trim() || null,
+          // TODO: replace with Office picker (dfw/atl) — demo hotfix
+          officeCode: "dfw",
           ...workflowPayload,
         });
 

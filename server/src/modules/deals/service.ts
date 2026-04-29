@@ -28,6 +28,7 @@ import { generateDealNumberForProject } from "../../services/projectNumber.js";
 // Type alias for the tenant-scoped Drizzle instance
 type TenantDb = NodePgDatabase<typeof schema>;
 type DealRow = typeof deals.$inferSelect;
+type PipelineStageRow = typeof pipelineStageConfig.$inferSelect;
 
 export interface DealFilters {
   search?: string;
@@ -731,7 +732,11 @@ export async function getDealDetail(tenantDb: TenantDb, dealId: string, userRole
  */
 export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
   const workflowRoute = input.workflowRoute ?? "normal";
-  const stage = await getStageById(input.stageId, workflowFamilyForRoute(workflowRoute));
+  let stage: PipelineStageRow | null = await getStageById(input.stageId, workflowFamilyForRoute(workflowRoute));
+  if (!stage && workflowRoute === "service") {
+    const neutralOpportunityStage = await getStageById(input.stageId, "standard_deal");
+    stage = neutralOpportunityStage?.slug === "opportunity" ? neutralOpportunityStage : null;
+  }
   if (!stage) {
     throw new AppError(400, "Invalid stage ID for workflow route");
   }

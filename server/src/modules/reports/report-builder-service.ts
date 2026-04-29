@@ -155,6 +155,10 @@ function listFilter(value: unknown): string[] {
   return [];
 }
 
+function textArrayFilter(values: string[]) {
+  return sql`ARRAY[${sql.join(values.map((value) => sql`${value}`), sql`, `)}]::text[]`;
+}
+
 function buildFilters(input: ReportBuilderInput, dateFieldSql: ReturnType<typeof sql>) {
   const filters = input.filters ?? {};
   const clauses: ReturnType<typeof sql>[] = [sql`COALESCE(d.is_test_data, false) = false`];
@@ -162,16 +166,16 @@ function buildFilters(input: ReportBuilderInput, dateFieldSql: ReturnType<typeof
   if (repId) clauses.push(sql`d.assigned_rep_id = ${repId}`);
 
   const stages = listFilter(filters.stage);
-  if (stages.length > 0) clauses.push(sql`psc.slug = ANY(${stages})`);
+  if (stages.length > 0) clauses.push(sql`psc.slug = ANY(${textArrayFilter(stages)})`);
 
   const sources = listFilter(filters.source);
-  if (sources.length > 0) clauses.push(sql`d.source = ANY(${sources})`);
+  if (sources.length > 0) clauses.push(sql`d.source = ANY(${textArrayFilter(sources)})`);
 
   const regions = listFilter(filters.region);
-  if (regions.length > 0) clauses.push(sql`COALESCE(d.region_classification, d.region_id::text) = ANY(${regions})`);
+  if (regions.length > 0) clauses.push(sql`COALESCE(d.region_classification, d.region_id::text) = ANY(${textArrayFilter(regions)})`);
 
   const dealTypes = listFilter(filters.deal_type);
-  if (dealTypes.length > 0) clauses.push(sql`COALESCE(d.pipeline_type_snapshot::text, d.workflow_route::text) = ANY(${dealTypes})`);
+  if (dealTypes.length > 0) clauses.push(sql`COALESCE(d.pipeline_type_snapshot::text, d.workflow_route::text) = ANY(${textArrayFilter(dealTypes)})`);
 
   if (typeof filters.from === "string" && filters.from) clauses.push(sql`${dateFieldSql} >= ${filters.from}`);
   if (typeof filters.to === "string" && filters.to) clauses.push(sql`${dateFieldSql} <= ${filters.to}`);

@@ -204,10 +204,13 @@ export function createLeadConversionService(
       );
     }
 
-    const opportunityStage = await deps.getStageBySlug(
+    const workflowOpportunityStage = await deps.getStageBySlug(
       "opportunity",
       workflowFamilyForRoute(workflowRoute)
     );
+    const opportunityStage =
+      workflowOpportunityStage ??
+      (workflowRoute === "service" ? await deps.getStageBySlug("opportunity", "standard_deal") : null);
     const resolvedDealStageId = input.dealStageId ?? opportunityStage?.id;
 
     if (!resolvedDealStageId || !opportunityStage) {
