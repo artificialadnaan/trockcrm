@@ -21,6 +21,7 @@ import { contactRoutes } from "./modules/contacts/routes.js";
 import { leadRoutes } from "./modules/leads/routes.js";
 import { emailRoutes } from "./modules/email/routes.js";
 import { fileRoutes } from "./modules/files/routes.js";
+import { callRecordingRoutes } from "./modules/call-recordings/routes.js";
 import { taskRoutes } from "./modules/tasks/routes.js";
 import { activityRoutes } from "./modules/activities/routes.js";
 import { notificationCrudRoutes } from "./modules/notifications/crud-routes.js";
@@ -124,6 +125,7 @@ export function createApp() {
   tenantRouter.use("/leads", leadRoutes);
   tenantRouter.use("/email", emailRoutes);
   tenantRouter.use("/files", fileRoutes);
+  tenantRouter.use("/call-recordings", callRecordingRoutes);
   tenantRouter.use("/tasks", taskRoutes);
   tenantRouter.use("/users", userRoutes);
   tenantRouter.use("/activities", activityRoutes);

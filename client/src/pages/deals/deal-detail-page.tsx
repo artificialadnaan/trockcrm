@@ -19,6 +19,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { DealStageBadge } from "@/components/deals/deal-stage-badge";
 import { DealEmailTab } from "@/components/email/deal-email-tab";
+import { RecordingList } from "@/components/call-recordings/recording-list";
 import { DealOverviewTab } from "@/components/deals/deal-overview-tab";
 import { DealHistoryTab } from "@/components/deals/deal-history-tab";
 import { DealTimelineTab } from "@/components/deals/deal-timeline-tab";
@@ -705,6 +706,7 @@ function DealActivityPanel({ dealId }: { dealId: string }) {
 
   return (
     <div className="space-y-4">
+      <RecordingList entityType="deal" entityId={dealId} />
       <ActivityLogForm onSubmit={handleLogActivity} />
       {loading ? (
         <div className="h-32 bg-muted animate-pulse rounded" />
