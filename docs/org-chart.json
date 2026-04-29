@@ -1,0 +1,191 @@
+[
+  {
+    "name": "Adam Shaw",
+    "email": "ashaw@trockgc.com",
+    "role": "CEO",
+    "officeCode": "dfw",
+    "manager": null
+  },
+  {
+    "name": "Takashi Yamashita",
+    "email": "tyamashita@trockgc.com",
+    "role": "CFO",
+    "officeCode": "dfw",
+    "manager": "ashaw@trockgc.com"
+  },
+  {
+    "name": "James Helms",
+    "email": "jhelms@trockgc.com",
+    "role": "VP of Construction",
+    "officeCode": "dfw",
+    "manager": "ashaw@trockgc.com"
+  },
+  {
+    "name": "Brock Burns",
+    "email": "bburns@trockgc.com",
+    "role": "Sr. Project Manager",
+    "officeCode": "dfw",
+    "manager": "jhelms@trockgc.com"
+  },
+  {
+    "name": "Adam Winters",
+    "email": "awinters@trockgc.com",
+    "role": "Project Manager",
+    "officeCode": "dfw",
+    "manager": "jhelms@trockgc.com"
+  },
+  {
+    "name": "Adam Sherwood",
+    "email": "asherwood@trockgc.com",
+    "role": "Project Manager",
+    "officeCode": "dfw",
+    "manager": "jhelms@trockgc.com"
+  },
+  {
+    "name": "Corey McShane",
+    "email": "cmcshane@trockgc.com",
+    "role": "Superintendent",
+    "officeCode": "dfw",
+    "manager": "bburns@trockgc.com"
+  },
+  {
+    "name": "Kevin Posey",
+    "email": "kposey@trockgc.com",
+    "role": "Superintendent",
+    "officeCode": "dfw",
+    "manager": "bburns@trockgc.com"
+  },
+  {
+    "name": "Steve Posey",
+    "email": "sposey@trockgc.com",
+    "role": "Superintendent",
+    "officeCode": "dfw",
+    "manager": "bburns@trockgc.com"
+  },
+  {
+    "name": "Tristan Mitchell",
+    "email": "tmitchell@trockgc.com",
+    "role": "Superintendent",
+    "officeCode": "dfw",
+    "manager": "awinters@trockgc.com"
+  },
+  {
+    "name": "Nick Cheatham",
+    "email": "ncheatham@trockgc.com",
+    "role": "Superintendent",
+    "officeCode": "dfw",
+    "manager": "awinters@trockgc.com"
+  },
+  {
+    "name": "Donnie Johnson",
+    "email": "djohnson@trockgc.com",
+    "role": "Superintendent",
+    "officeCode": "dfw",
+    "manager": "asherwood@trockgc.com"
+  },
+  {
+    "name": "Brett Bell",
+    "email": "bbell@trockgc.com",
+    "role": "Superintendent",
+    "officeCode": "dfw",
+    "manager": "asherwood@trockgc.com"
+  },
+  {
+    "name": "Nick Reyes",
+    "email": "nreyes@trockgc.com",
+    "role": "Superintendent",
+    "officeCode": "dfw",
+    "manager": "asherwood@trockgc.com"
+  },
+  {
+    "name": "Tim Mitchell",
+    "email": "tmitchell2@trockgc.com",
+    "role": "VP Client Services",
+    "officeCode": "dfw",
+    "manager": "ashaw@trockgc.com"
+  },
+  {
+    "name": "Colby Burling",
+    "email": "cburling@trockgc.com",
+    "role": "Senior Service Super",
+    "officeCode": "dfw",
+    "manager": "tmitchell2@trockgc.com"
+  },
+  {
+    "name": "Andrew Green",
+    "email": "agreen@trockgc.com",
+    "role": "Service Super",
+    "officeCode": "dfw",
+    "manager": "cburling@trockgc.com"
+  },
+  {
+    "name": "Sidney Gibson",
+    "email": "sgibson@trockgc.com",
+    "role": "Director of Estimating",
+    "officeCode": "dfw",
+    "manager": "jhelms@trockgc.com"
+  },
+  {
+    "name": "Eric Williams",
+    "email": "ewilliams@trockgc.com",
+    "role": "Estimator",
+    "officeCode": "dfw",
+    "manager": "sgibson@trockgc.com"
+  },
+  {
+    "name": "Alex Koch",
+    "email": "akoch@trockgc.com",
+    "role": "Estimator",
+    "officeCode": "dfw",
+    "manager": "sgibson@trockgc.com"
+  },
+  {
+    "name": "Derek Barr",
+    "email": "dbarr@trockgc.com",
+    "role": "Director of Sales",
+    "officeCode": "dfw",
+    "manager": "ashaw@trockgc.com"
+  },
+  {
+    "name": "Kaleb Marshall",
+    "email": "kmarshall@trockgc.com",
+    "role": "Director of BD",
+    "officeCode": "dfw",
+    "manager": "ashaw@trockgc.com"
+  },
+  {
+    "name": "Edward McCarty",
+    "email": "emccarty@trockgc.com",
+    "role": "National Account Manager",
+    "officeCode": "dfw",
+    "manager": "dbarr@trockgc.com"
+  },
+  {
+    "name": "Chris Higingbotham",
+    "email": "chigingbotham@trockgc.com",
+    "role": "National Account Manager",
+    "officeCode": "dfw",
+    "manager": "dbarr@trockgc.com"
+  },
+  {
+    "name": "Kevin Scott",
+    "email": "kscott@trockgc.com",
+    "role": "National Account Manager",
+    "officeCode": "dfw",
+    "manager": "dbarr@trockgc.com"
+  },
+  {
+    "name": "Kristy Scheidegger",
+    "email": "kscheidegger@trockgc.com",
+    "role": "Revenue Accountant & HR",
+    "officeCode": "dfw",
+    "manager": "tyamashita@trockgc.com"
+  },
+  {
+    "name": "Stephanie Bohen",
+    "email": "sbohen@trockgc.com",
+    "role": "Payable Accountant",
+    "officeCode": "dfw",
+    "manager": "tyamashita@trockgc.com"
+  }
+]
