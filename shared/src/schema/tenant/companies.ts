@@ -40,6 +40,7 @@ export const companies = pgTable(
     companyVerificationRejectedAt: timestamp("company_verification_rejected_at", { withTimezone: true }),
     companyVerificationRejectedBy: uuid("company_verification_rejected_by"),
     assignedApproverUserId: uuid("assigned_approver_user_id"),
+    isTestData: boolean("is_test_data").default(false).notNull(),
     isActive: boolean("is_active").default(true).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),

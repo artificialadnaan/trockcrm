@@ -10,6 +10,11 @@ const ACTIVE_TASK_STATUSES = ["pending", "scheduled", "in_progress", "waiting_on
 const ORG_CHART_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), "../docs/org-chart.json");
 const MIGRATION_0070 = "0070_add_construction_user_role.sql";
 const MIGRATIONS_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "../migrations");
+export const TEST_USERS_ALLOWLIST = new Set([
+  "admin@trock.dev",
+  "director@trock.dev",
+  "rep@trock.dev",
+]);
 
 type CrmRole = "admin" | "director" | "rep" | "construction";
 
@@ -193,7 +198,11 @@ export function buildUserCleanupPlan(args: {
   const wouldSoftDelete = args.dbUsers
     .filter((user) => {
       const email = normalizeEmail(user.email);
-      return user.isActive && !orgByEmail.has(email) && !mergeSourceEmails.has(email) && !inactiveOrgEmails.has(email);
+      return user.isActive
+        && !TEST_USERS_ALLOWLIST.has(email)
+        && !orgByEmail.has(email)
+        && !mergeSourceEmails.has(email)
+        && !inactiveOrgEmails.has(email);
     })
     .map((user) => ({ ...user, email: normalizeEmail(user.email), managerEmail: managerEmailForDbUser(user, dbById) }))
     .sort((a, b) => a.email.localeCompare(b.email));

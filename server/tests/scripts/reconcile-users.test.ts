@@ -161,4 +161,21 @@ describe("user reconciliation planning", () => {
       },
     ]);
   });
+
+  it("never soft-deletes the allowlisted test login users even when they are not in the org chart", () => {
+    const plan = buildUserCleanupPlan({
+      orgUsers: [
+        { name: "Adam Shaw", email: "ashaw@trockgc.com", role: "CEO", officeCode: "dfw", manager: null },
+      ],
+      dbUsers: [
+        { id: "u-adam", email: "ashaw@trockgc.com", displayName: "Adam Shaw", role: "admin", officeSlug: "dallas", reportsTo: null, isActive: true },
+        { id: "u-admin", email: "admin@trock.dev", displayName: "Admin User", role: "admin", officeSlug: "dallas", reportsTo: null, isActive: true },
+        { id: "u-director", email: "director@trock.dev", displayName: "Director User", role: "director", officeSlug: "dallas", reportsTo: null, isActive: true },
+        { id: "u-rep", email: "rep@trock.dev", displayName: "Sales Rep", role: "rep", officeSlug: "dallas", reportsTo: null, isActive: true },
+        { id: "u-random", email: "random@trock.dev", displayName: "Random User", role: "rep", officeSlug: "dallas", reportsTo: null, isActive: true },
+      ],
+    });
+
+    expect(plan.wouldSoftDelete.map((row: any) => row.email)).toEqual(["random@trock.dev"]);
+  });
 });

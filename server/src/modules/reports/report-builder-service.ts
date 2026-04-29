@@ -157,7 +157,7 @@ function listFilter(value: unknown): string[] {
 
 function buildFilters(input: ReportBuilderInput, dateFieldSql: ReturnType<typeof sql>) {
   const filters = input.filters ?? {};
-  const clauses: ReturnType<typeof sql>[] = [];
+  const clauses: ReturnType<typeof sql>[] = [sql`COALESCE(d.is_test_data, false) = false`];
   const repId = effectiveReportRepId(input);
   if (repId) clauses.push(sql`d.assigned_rep_id = ${repId}`);
 

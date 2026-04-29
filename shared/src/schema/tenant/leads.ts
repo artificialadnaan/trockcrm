@@ -119,6 +119,7 @@ export const leads = pgTable(
     verificationRequiredReason: text("verification_required_reason"),
     stageEnteredAt: timestamp("stage_entered_at", { withTimezone: true }).defaultNow().notNull(),
     convertedAt: timestamp("converted_at", { withTimezone: true }),
+    isTestData: boolean("is_test_data").default(false).notNull(),
     isActive: boolean("is_active").default(true).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),

@@ -170,6 +170,7 @@ export const deals = pgTable("deals", {
   proposalAcceptedAt: timestamp("proposal_accepted_at", { withTimezone: true }),
   proposalRevisionCount: integer("proposal_revision_count").default(0),
   proposalNotes: text("proposal_notes"),
+  isTestData: boolean("is_test_data").default(false).notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 });
