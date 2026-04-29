@@ -9,11 +9,15 @@ describe("auth http config", () => {
   it("includes the configured custom frontend and Railway frontend service origins", () => {
     expect(
       getAllowedCorsOrigins({
-        FRONTEND_URL: "https://crm.trockconstruction.com",
+        CORS_ALLOWED_ORIGINS: "https://crm.trockconstruction.com, https://trockcrm.com, https://crm.trockconstruction.com",
+        FRONTEND_URL: "https://frontend-production-bcab.up.railway.app",
+        RAILWAY_PUBLIC_DOMAIN: "trockcrm.com",
+        RAILWAY_STATIC_URL: "trockcrm.com",
         RAILWAY_SERVICE_FRONTEND_URL: "frontend-production-bcab.up.railway.app",
       })
     ).toEqual([
       "https://crm.trockconstruction.com",
+      "https://trockcrm.com",
       "https://frontend-production-bcab.up.railway.app",
       "http://localhost:5173",
       "http://localhost:3000",
