@@ -14,7 +14,7 @@ import {
 import { usePipelineStages, useProjectTypes, useRegions } from "@/hooks/use-pipeline-config";
 import { createDeal, updateDeal } from "@/hooks/use-deals";
 import type { Deal } from "@/hooks/use-deals";
-import { Loader2 } from "lucide-react";
+import { Loader2, Lock } from "lucide-react";
 import { getDefaultDealStageId, getNewDealStages, getSelectedOptionLabel } from "./deal-form.helpers";
 import { CompanySelector } from "@/components/companies/company-selector";
 import { PropertySelector } from "@/components/properties/property-selector";
@@ -43,6 +43,7 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
   const { assignees, loading: assigneesLoading } = useTaskAssignees();
 
   const isEdit = !!deal;
+  const isBidBoardOwned = Boolean(deal?.isBidBoardOwned);
   const activeStages = getNewDealStages(stages);
   const projectTypeOptions = projectTypeHierarchy.flatMap((parent) => [
     { id: parent.id, name: parent.name },
@@ -173,9 +174,6 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
         companyId: formData.companyId,
         propertyId: formData.propertyId,
         description: formData.description.trim() || null,
-        ddEstimate: formData.ddEstimate || null,
-        bidEstimate: formData.bidEstimate || null,
-        awardedAmount: formData.awardedAmount || null,
         propertyAddress: formData.propertyAddress.trim() || null,
         propertyCity: formData.propertyCity.trim() || null,
         propertyState: formData.propertyState.trim() || null,
@@ -186,6 +184,12 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
         winProbability: formData.winProbability ? parseInt(formData.winProbability, 10) : null,
         expectedCloseDate: formData.expectedCloseDate || null,
       };
+
+      if (!isBidBoardOwned) {
+        payload.ddEstimate = formData.ddEstimate || null;
+        payload.bidEstimate = formData.bidEstimate || null;
+        payload.awardedAmount = formData.awardedAmount || null;
+      }
 
       let result: Deal;
       if (isEdit) {
@@ -419,7 +423,12 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
         <CardContent>
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             <div className="space-y-2">
-              <Label htmlFor="ddEstimate">DD Estimate ($)</Label>
+              <FieldLockLabel
+                htmlFor="ddEstimate"
+                label="DD Estimate ($)"
+                locked={isBidBoardOwned}
+                message="DD estimate is mirrored from Bid Board after estimating handoff."
+              />
               <Input
                 id="ddEstimate"
                 type="number"
@@ -427,12 +436,18 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
                 min="0"
                 placeholder="0.00"
                 value={formData.ddEstimate}
+                disabled={isBidBoardOwned}
                 onChange={(e) => handleChange("ddEstimate", e.target.value)}
               />
               {fieldErrors.ddEstimate && <p className="text-xs text-red-600">{fieldErrors.ddEstimate}</p>}
             </div>
             <div className="space-y-2">
-              <Label htmlFor="bidEstimate">Bid Estimate ($)</Label>
+              <FieldLockLabel
+                htmlFor="bidEstimate"
+                label="Bid Estimate ($)"
+                locked={isBidBoardOwned}
+                message="Bid estimate is mirrored from Bid Board after estimating handoff."
+              />
               <Input
                 id="bidEstimate"
                 type="number"
@@ -440,12 +455,18 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
                 min="0"
                 placeholder="0.00"
                 value={formData.bidEstimate}
+                disabled={isBidBoardOwned}
                 onChange={(e) => handleChange("bidEstimate", e.target.value)}
               />
               {fieldErrors.bidEstimate && <p className="text-xs text-red-600">{fieldErrors.bidEstimate}</p>}
             </div>
             <div className="space-y-2">
-              <Label htmlFor="awardedAmount">Awarded Amount ($)</Label>
+              <FieldLockLabel
+                htmlFor="awardedAmount"
+                label="Awarded Amount ($)"
+                locked={isBidBoardOwned}
+                message="Awarded amount is mirrored from Bid Board after estimating handoff."
+              />
               <Input
                 id="awardedAmount"
                 type="number"
@@ -453,6 +474,7 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
                 min="0"
                 placeholder="0.00"
                 value={formData.awardedAmount}
+                disabled={isBidBoardOwned}
                 onChange={(e) => handleChange("awardedAmount", e.target.value)}
               />
               {fieldErrors.awardedAmount && <p className="text-xs text-red-600">{fieldErrors.awardedAmount}</p>}
@@ -534,5 +556,31 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
         </Button>
       </div>
     </form>
+  );
+}
+
+function FieldLockLabel({
+  htmlFor,
+  label,
+  locked,
+  message,
+}: {
+  htmlFor: string;
+  label: string;
+  locked: boolean;
+  message: string;
+}) {
+  return (
+    <Label htmlFor={htmlFor} className="inline-flex items-center gap-1.5">
+      {label}
+      {locked ? (
+        <span aria-label={message} title={message}>
+          <Lock
+            className="h-3.5 w-3.5 text-amber-600"
+            aria-hidden="true"
+          />
+        </span>
+      ) : null}
+    </Label>
   );
 }

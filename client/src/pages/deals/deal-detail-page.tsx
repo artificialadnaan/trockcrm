@@ -54,6 +54,20 @@ import {
   toCanonicalDealStageSlug,
 } from "@trock-crm/shared/types";
 
+function bidBoardSyncTimeAgo(date: string | null | undefined) {
+  if (!date) return "unknown";
+  const syncedAt = new Date(date).getTime();
+  if (!Number.isFinite(syncedAt)) return "unknown";
+  const seconds = Math.max(0, Math.floor((Date.now() - syncedAt) / 1000));
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return minutes === 1 ? "1 minute ago" : `${minutes} minutes ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return hours === 1 ? "1 hour ago" : `${hours} hours ago`;
+  const days = Math.floor(hours / 24);
+  return days === 1 ? "1 day ago" : `${days} days ago`;
+}
+
 type Tab = "overview" | "lead" | "scoping" | "files" | "email" | "activity" | "timeline" | "history" | "team" | "estimates" | "punch_list" | "closeout";
 
 function isBidBoardManagedStage(
@@ -426,7 +440,11 @@ export function DealDetailPage() {
       <DealTimersBanner dealId={deal.id} />
 
       {isBidBoardOwned && bidBoardOwnership && (
-        <BidBoardOwnershipBanner ownership={bidBoardOwnership} />
+        <BidBoardOwnershipBanner
+          ownership={bidBoardOwnership}
+          readOnlySyncedAt={deal.readOnlySyncedAt}
+          onRefresh={refetch}
+        />
       )}
 
       {/* Estimating Sub-Stage Indicator */}
@@ -532,8 +550,12 @@ export function DealDetailPage() {
 
 function BidBoardOwnershipBanner({
   ownership,
+  readOnlySyncedAt,
+  onRefresh,
 }: {
   ownership: NonNullable<DealDetail["bidBoardOwnership"]>;
+  readOnlySyncedAt: string | null;
+  onRefresh: () => void;
 }) {
   return (
     <section className="rounded-xl border border-amber-300 bg-amber-50 p-4 text-amber-950">
@@ -545,6 +567,22 @@ function BidBoardOwnershipBanner({
           <div>
             <h3 className="text-sm font-semibold">Bid Board now owns downstream progression</h3>
             <p className="mt-1 text-sm">{ownership.message}</p>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2 text-sm">
+            <span className="font-medium">
+              Synced from Bid Board {bidBoardSyncTimeAgo(readOnlySyncedAt)}
+            </span>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-7 border-amber-400 bg-white/70 px-2 text-xs text-amber-950 hover:bg-white"
+              onClick={onRefresh}
+            >
+              Refresh
+              <span className="sr-only"> Bid Board sync status</span>
+            </Button>
           </div>
 
           <div className="grid gap-3 md:grid-cols-2">

@@ -134,12 +134,20 @@ export const BID_BOARD_MIRRORED_FIELDS = [
   "stage progression",
   "proposal status",
   "estimating progress",
+  "estimate amounts",
   "downstream mirror metadata",
 ] as const;
 export const BID_BOARD_STAGE_READ_ONLY_MESSAGE =
   "Deal stage progression is read-only in CRM after estimating handoff. Bid Board is now the source of truth for downstream stages.";
 export const BID_BOARD_BOUNDARY_STAGE_MISSING_MESSAGE =
   "Estimating stage configuration is required to enforce the Bid Board ownership boundary.";
+const BID_BOARD_OWNED_UPDATE_FIELD_LABELS: Partial<Record<keyof UpdateDealInput, string>> = {
+  ddEstimate: "DD estimate",
+  bidEstimate: "Bid estimate",
+  awardedAmount: "Awarded amount",
+  estimatingSubstage: "Estimating progress",
+  proposalStatus: "Proposal status",
+};
 
 async function assertValidProjectType(value: string | null | undefined): Promise<string> {
   const normalized = await resolveActiveProjectTypeValue(value);
@@ -1014,20 +1022,22 @@ export async function updateDeal(
   }
 
   if (existing.isBidBoardOwned) {
-    if (input.estimatingSubstage !== undefined) {
+    for (const [field, label] of Object.entries(BID_BOARD_OWNED_UPDATE_FIELD_LABELS) as Array<
+      [keyof UpdateDealInput, string]
+    >) {
+      if (input[field] !== undefined) {
+        const message =
+          field === "estimatingSubstage"
+            ? "Estimating progress is mirrored from Bid Board after estimating handoff."
+            : field === "proposalStatus"
+              ? "Proposal status is mirrored from Bid Board after estimating handoff."
+              : `${label} is mirrored from Bid Board after estimating handoff.`;
       throw new AppError(
         403,
-        "Estimating progress is mirrored from Bid Board after estimating handoff.",
+          message,
         "BID_BOARD_OWNED_FIELD_READ_ONLY"
       );
-    }
-
-    if (input.proposalStatus !== undefined) {
-      throw new AppError(
-        403,
-        "Proposal status is mirrored from Bid Board after estimating handoff.",
-        "BID_BOARD_OWNED_FIELD_READ_ONLY"
-      );
+      }
     }
   }
 
