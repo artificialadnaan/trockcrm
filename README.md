@@ -33,3 +33,14 @@ See `docs/superpowers/plans/` for active implementation plans.
 ### Call recording transcription env
 
 The worker uses `OPENAI_API_KEY` for Whisper transcription and `ANTHROPIC_API_KEY` for Claude call summaries. Optional guardrails live in `.env.example`: `CALL_RECORDING_TRANSCRIPTION_INTERVAL_MS`, `CALL_RECORDING_TRANSCRIPTION_DAILY_CAP_USD`, and the per-model cost estimate variables used for logging/cap checks.
+
+### R2 browser upload CSP env
+
+Call recording uploads and playback use presigned R2 URLs in the browser. `R2_CSP_DOMAIN` can override the derived R2 CSP host source; when unset, the API derives `https://*.{R2_ACCOUNT_ID}.r2.cloudflarestorage.com`. Add extra API origins to `CSP_CONNECT_SRC` as a comma-separated list.
+
+Production entry points currently allowed by R2 CORS, API CORS, and CSP are:
+- `https://trockcrm.com`
+- `https://crm.trockconstruction.com`
+- `https://frontend-production-bcab.up.railway.app`
+
+Prefer `https://trockcrm.com` as the canonical public entry point and keep the others as compatibility origins until redirects are configured.

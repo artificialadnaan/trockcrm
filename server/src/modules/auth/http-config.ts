@@ -1,5 +1,8 @@
 type EnvInput = {
+  CORS_ALLOWED_ORIGINS?: string | undefined;
   FRONTEND_URL?: string | undefined;
+  RAILWAY_PUBLIC_DOMAIN?: string | undefined;
+  RAILWAY_STATIC_URL?: string | undefined;
   RAILWAY_SERVICE_FRONTEND_URL?: string | undefined;
   NODE_ENV?: string | undefined;
   AZURE_CLIENT_ID?: string | undefined;
@@ -16,7 +19,10 @@ function normalizeOrigin(value: string | undefined): string | null {
 
 export function getAllowedCorsOrigins(env: EnvInput): string[] {
   const origins = [
+    ...((env.CORS_ALLOWED_ORIGINS ?? "").split(",").map(normalizeOrigin)),
     normalizeOrigin(env.FRONTEND_URL),
+    normalizeOrigin(env.RAILWAY_PUBLIC_DOMAIN),
+    normalizeOrigin(env.RAILWAY_STATIC_URL),
     normalizeOrigin(env.RAILWAY_SERVICE_FRONTEND_URL),
     "http://localhost:5173",
     "http://localhost:3000",
