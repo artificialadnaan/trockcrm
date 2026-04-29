@@ -8,6 +8,8 @@ dotenv.config({ path: path.join(path.dirname(fileURLToPath(import.meta.url)), ".
 
 const ACTIVE_TASK_STATUSES = ["pending", "scheduled", "in_progress", "waiting_on", "blocked"];
 const ORG_CHART_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), "../docs/org-chart.json");
+const MIGRATION_0070 = "0070_add_construction_user_role.sql";
+const MIGRATIONS_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "../migrations");
 
 type CrmRole = "admin" | "director" | "rep" | "construction";
 
@@ -475,17 +477,277 @@ export function renderDryRun(plan: UserCleanupPlan, collisions: ReturnType<typeo
   return lines.join("\n");
 }
 
+
+interface AuditRow {
+  timestamp: string;
+  step: string;
+  action: string;
+  entityType: string;
+  entityId: string;
+  email: string;
+  before: string;
+  after: string;
+  details: string;
+}
+
+function nowIso(): string {
+  return new Date().toISOString();
+}
+
+function csvEscape(value: unknown): string {
+  const raw = String(value ?? "");
+  if (!/[",\n]/.test(raw)) return raw;
+  return `"${raw.replace(/"/g, '""')}"`;
+}
+
+function writeAuditCsv(pathname: string, rows: AuditRow[]) {
+  const header = ["timestamp", "step", "action", "entityType", "entityId", "email", "before", "after", "details"];
+  const lines = [header.join(",")];
+  for (const row of rows) {
+    lines.push(header.map((key) => csvEscape(row[key as keyof AuditRow])).join(","));
+  }
+  fs.writeFileSync(pathname, `${lines.join("\n")}\n`);
+}
+
+async function ensureMigration0070(client: pg.Client, auditRows: AuditRow[]) {
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS public._migrations (
+      id SERIAL PRIMARY KEY,
+      name VARCHAR(255) UNIQUE NOT NULL,
+      executed_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  const existing = await client.query("SELECT id FROM public._migrations WHERE name = $1", [MIGRATION_0070]);
+  const before = await client.query("select enumlabel from pg_enum join pg_type on pg_enum.enumtypid=pg_type.oid where typname='user_role' and enumlabel='construction'");
+  const sqlText = fs.readFileSync(path.join(MIGRATIONS_DIR, MIGRATION_0070), "utf8");
+  await client.query(sqlText);
+  if (existing.rowCount === 0) {
+    await client.query("INSERT INTO public._migrations (name) VALUES ($1) ON CONFLICT (name) DO NOTHING", [MIGRATION_0070]);
+  }
+  const after = await client.query("select enumlabel from pg_enum join pg_type on pg_enum.enumtypid=pg_type.oid where typname='user_role' and enumlabel='construction'");
+  auditRows.push({
+    timestamp: nowIso(),
+    step: "1",
+    action: existing.rowCount ? "migration_confirmed" : "migration_applied",
+    entityType: "migration",
+    entityId: MIGRATION_0070,
+    email: "",
+    before: String(before.rowCount ?? 0),
+    after: String(after.rowCount ?? 0),
+    details: "ALTER TYPE user_role ADD VALUE IF NOT EXISTS construction",
+  });
+}
+
+async function getOfficeIdBySlug(client: pg.Client, slug: string): Promise<string> {
+  const result = await client.query("SELECT id FROM public.offices WHERE slug = $1 AND is_active = true", [slug]);
+  const id = result.rows[0]?.id;
+  if (!id) throw new Error(`Missing active office slug ${slug}`);
+  return id;
+}
+
+function notificationPrefsPatch(extra: Record<string, unknown>) {
+  return JSON.stringify({ userCleanup: extra });
+}
+
+async function createMissingUsers(client: pg.Client, orgUsers: OrgChartUser[], auditRows: AuditRow[]) {
+  const dbUsers = await fetchDbUsers(client);
+  const plan = buildUserCleanupPlan({ orgUsers, dbUsers });
+  for (const user of plan.wouldCreate) {
+    const officeId = await getOfficeIdBySlug(client, user.officeSlug);
+    const inserted = await client.query(
+      `INSERT INTO public.users (email, display_name, role, office_id, is_active, notification_prefs, updated_at)
+       VALUES ($1, $2, $3::user_role, $4, $5, COALESCE($6::jsonb, '{}'::jsonb), NOW())
+       RETURNING id, email, role, is_active`,
+      [user.email, user.name, user.crmRole, officeId, user.status !== "inactive", notificationPrefsPatch({ flags: user.flags ?? [], notes: user.notes ?? null, source: "org_chart_cleanup" })]
+    );
+    auditRows.push({
+      timestamp: nowIso(),
+      step: "2",
+      action: "create_user",
+      entityType: "user",
+      entityId: inserted.rows[0].id,
+      email: user.email,
+      before: "missing",
+      after: `${inserted.rows[0].role};active=${inserted.rows[0].is_active}`,
+      details: `name=${user.name};office=${user.officeSlug};manager=${user.manager ?? "null"}`,
+    });
+  }
+}
+
+function validateSchemaName(schemaName: string): string {
+  if (!/^office_[a-z0-9_]+$/.test(schemaName)) throw new Error(`Invalid schema name ${schemaName}`);
+  return schemaName;
+}
+
+async function tenantSchemas(client: pg.Client): Promise<string[]> {
+  const slugs = await fetchOfficeSlugs(client);
+  return slugs.map((slug) => validateSchemaName(`office_${slug}`));
+}
+
+async function reassignOwnerRecords(client: pg.Client, fromUserId: string, toUserId: string, email: string, step: string, auditRows: AuditRow[]) {
+  for (const schemaName of await tenantSchemas(client)) {
+    const deals = await client.query(
+      `UPDATE ${schemaName}.deals SET assigned_rep_id = $2, updated_at = NOW() WHERE assigned_rep_id = $1 AND is_active = true RETURNING id, deal_number`,
+      [fromUserId, toUserId]
+    );
+    for (const row of deals.rows) auditRows.push({ timestamp: nowIso(), step, action: "reassign_deal", entityType: `${schemaName}.deal`, entityId: row.id, email, before: fromUserId, after: toUserId, details: row.deal_number ?? "" });
+
+    const leads = await client.query(
+      `UPDATE ${schemaName}.leads SET assigned_rep_id = $2, updated_at = NOW() WHERE assigned_rep_id = $1 AND is_active = true RETURNING id, name`,
+      [fromUserId, toUserId]
+    );
+    for (const row of leads.rows) auditRows.push({ timestamp: nowIso(), step, action: "reassign_lead", entityType: `${schemaName}.lead`, entityId: row.id, email, before: fromUserId, after: toUserId, details: row.name ?? "" });
+
+    const tasks = await client.query(
+      `UPDATE ${schemaName}.tasks SET assigned_to = $2, updated_at = NOW() WHERE assigned_to = $1 RETURNING id, title, status`,
+      [fromUserId, toUserId]
+    );
+    for (const row of tasks.rows) auditRows.push({ timestamp: nowIso(), step, action: "reassign_task", entityType: `${schemaName}.task`, entityId: row.id, email, before: fromUserId, after: toUserId, details: `${row.status}:${row.title ?? ""}` });
+  }
+}
+
+async function applyMergePlan(client: pg.Client, orgUsers: OrgChartUser[], auditRows: AuditRow[]) {
+  const dbUsers = await fetchDbUsers(client);
+  const dbByEmail = new Map(dbUsers.map((user) => [user.email, user]));
+  const plan = buildUserCleanupPlan({ orgUsers, dbUsers, ownershipCountsByUserId: await fetchOwnershipCounts(client, dbUsers.map((user) => user.id)) });
+  for (const row of plan.mergePlan) {
+    const source = dbByEmail.get(row.sourceEmail);
+    const target = dbByEmail.get(row.targetEmail);
+    if (!source) throw new Error(`Merge source missing: ${row.sourceEmail}`);
+    if (!target) throw new Error(`Merge target missing: ${row.targetEmail}`);
+    await client.query("BEGIN");
+    try {
+      await reassignOwnerRecords(client, source.id, target.id, source.email, "3", auditRows);
+      const updated = await client.query(
+        `UPDATE public.users
+            SET is_active = false,
+                notification_prefs = COALESCE(notification_prefs, '{}'::jsonb) || $2::jsonb,
+                updated_at = NOW()
+          WHERE id = $1
+          RETURNING id, email, is_active`,
+        [source.id, notificationPrefsPatch({ mergedInto: target.email, source: "org_chart_cleanup" })]
+      );
+      auditRows.push({ timestamp: nowIso(), step: "3", action: "soft_delete_merge_source", entityType: "user", entityId: source.id, email: source.email, before: "active", after: String(updated.rows[0]?.is_active), details: `mergedInto=${target.email}` });
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    }
+  }
+}
+
+async function applyRoleUpdates(client: pg.Client, orgUsers: OrgChartUser[], auditRows: AuditRow[]) {
+  const plan = buildUserCleanupPlan({ orgUsers, dbUsers: await fetchDbUsers(client) });
+  for (const row of plan.roleMismatches) {
+    const updated = await client.query(
+      `UPDATE public.users SET role = $2::user_role, updated_at = NOW() WHERE lower(email) = lower($1) RETURNING id, email, role`,
+      [row.email, row.nextRole]
+    );
+    auditRows.push({ timestamp: nowIso(), step: "4", action: "update_role", entityType: "user", entityId: updated.rows[0]?.id ?? "", email: row.email, before: row.currentRole, after: row.nextRole, details: row.status });
+  }
+}
+
+async function applyManagerUpdates(client: pg.Client, orgUsers: OrgChartUser[], auditRows: AuditRow[]) {
+  const plan = buildUserCleanupPlan({ orgUsers, dbUsers: await fetchDbUsers(client) });
+  const dbUsers = await fetchDbUsers(client);
+  const dbByEmail = new Map(dbUsers.map((user) => [user.email, user]));
+  for (const row of plan.managerMismatches) {
+    const user = dbByEmail.get(row.email);
+    const manager = row.nextManagerEmail ? dbByEmail.get(row.nextManagerEmail) : null;
+    if (!user || (row.nextManagerEmail && !manager)) {
+      auditRows.push({ timestamp: nowIso(), step: "5", action: "skip_manager_update", entityType: "user", entityId: user?.id ?? "", email: row.email, before: row.currentManagerEmail ?? "null", after: row.nextManagerEmail ?? "null", details: row.status });
+      continue;
+    }
+    const updated = await client.query(
+      `UPDATE public.users SET reports_to = $2, updated_at = NOW() WHERE id = $1 RETURNING id, email, reports_to`,
+      [user.id, manager?.id ?? null]
+    );
+    auditRows.push({ timestamp: nowIso(), step: "5", action: "update_manager", entityType: "user", entityId: updated.rows[0].id, email: row.email, before: row.currentManagerEmail ?? "null", after: row.nextManagerEmail ?? "null", details: "" });
+  }
+}
+
+async function applySoftDeleteReassignments(client: pg.Client, orgUsers: OrgChartUser[], auditRows: AuditRow[]) {
+  const dbUsers = await fetchDbUsers(client);
+  const dbByEmail = new Map(dbUsers.map((user) => [user.email, user]));
+  const fallback = dbByEmail.get("ashaw@trockgc.com");
+  if (!fallback?.isActive) throw new Error("Fallback owner ashaw@trockgc.com does not exist or is inactive");
+  const initialPlan = buildUserCleanupPlan({ orgUsers, dbUsers });
+  const plan = buildUserCleanupPlan({ orgUsers, dbUsers, ownershipCountsByUserId: await fetchOwnershipCounts(client, initialPlan.wouldSoftDelete.map((user) => user.id)) });
+  for (const user of plan.wouldSoftDelete) {
+    await reassignOwnerRecords(client, user.id, fallback.id, user.email, "6", auditRows);
+  }
+}
+
+async function applySoftDeletes(client: pg.Client, orgUsers: OrgChartUser[], auditRows: AuditRow[]) {
+  const dbUsers = await fetchDbUsers(client);
+  const plan = buildUserCleanupPlan({ orgUsers, dbUsers });
+  for (const user of plan.wouldSoftDelete) {
+    const updated = await client.query(
+      `UPDATE public.users
+          SET is_active = false,
+              notification_prefs = COALESCE(notification_prefs, '{}'::jsonb) || $2::jsonb,
+              updated_at = NOW()
+        WHERE id = $1
+        RETURNING id, email, is_active`,
+      [user.id, notificationPrefsPatch({ softDeletedBy: "org_chart_cleanup" })]
+    );
+    auditRows.push({ timestamp: nowIso(), step: "7", action: "soft_delete_user", entityType: "user", entityId: user.id, email: user.email, before: "active", after: String(updated.rows[0]?.is_active), details: "not_in_org_chart" });
+  }
+}
+
+async function applyInactiveReviewUsers(client: pg.Client, orgUsers: OrgChartUser[], auditRows: AuditRow[]) {
+  const inactiveUsers = orgUsers.filter((user) => user.status === "inactive");
+  const dbUsers = await fetchDbUsers(client);
+  const dbByEmail = new Map(dbUsers.map((user) => [user.email, user]));
+  for (const orgUser of inactiveUsers) {
+    const user = dbByEmail.get(normalizeEmail(orgUser.email));
+    if (!user) continue;
+    const manager = orgUser.manager ? dbByEmail.get(normalizeEmail(orgUser.manager)) : null;
+    const updated = await client.query(
+      `UPDATE public.users
+          SET is_active = false,
+              role = $2::user_role,
+              reports_to = $3,
+              notification_prefs = COALESCE(notification_prefs, '{}'::jsonb) || $4::jsonb,
+              updated_at = NOW()
+        WHERE id = $1
+        RETURNING id, email, role, is_active`,
+      [user.id, resolveCrmRole(orgUser), manager?.id ?? null, notificationPrefsPatch({ flags: orgUser.flags ?? [], notes: orgUser.notes ?? null, inactiveReason: "needs_review" })]
+    );
+    auditRows.push({ timestamp: nowIso(), step: "8", action: "mark_inactive_review", entityType: "user", entityId: user.id, email: user.email, before: `${user.role};active=${user.isActive}`, after: `${updated.rows[0].role};active=${updated.rows[0].is_active}`, details: orgUser.notes ?? "" });
+  }
+}
+
+async function applyUserCleanup(client: pg.Client, orgUsers: OrgChartUser[], auditPath: string) {
+  const auditRows: AuditRow[] = [];
+  await ensureMigration0070(client, auditRows);
+  await createMissingUsers(client, orgUsers, auditRows);
+  await applyMergePlan(client, orgUsers, auditRows);
+  await applyRoleUpdates(client, orgUsers, auditRows);
+  await applyManagerUpdates(client, orgUsers, auditRows);
+  await applySoftDeleteReassignments(client, orgUsers, auditRows);
+  await applySoftDeletes(client, orgUsers, auditRows);
+  await applyInactiveReviewUsers(client, orgUsers, auditRows);
+  writeAuditCsv(auditPath, auditRows);
+  return auditRows;
+}
+
 async function main() {
   const apply = process.argv.includes("--apply");
-  if (apply) {
-    throw new Error("--apply is intentionally blocked until dry-run output is approved in the workflow.");
-  }
+  const auditPathArg = process.argv.find((arg) => arg.startsWith("--audit-file="));
+  const auditPath = auditPathArg?.split("=").slice(1).join("=") || `/tmp/user-cleanup-${new Date().toISOString().replace(/[-:T.Z]/g, "").slice(0, 14)}.csv`;
 
   const orgUsers = loadOrgChart();
   const collisions = detectEmailConventionCollisions(orgUsers);
   const client = new pg.Client({ connectionString: connectionString() });
   await client.connect();
   try {
+    if (apply) {
+      const auditRows = await applyUserCleanup(client, orgUsers, auditPath);
+      console.log(`APPLY COMPLETE auditCsv=${auditPath} rows=${auditRows.length}`);
+      return;
+    }
+
     const dbUsers = await fetchDbUsers(client);
     const initialPlan = buildUserCleanupPlan({ orgUsers, dbUsers });
     const dbByEmail = new Map(dbUsers.map((user) => [normalizeEmail(user.email), user]));
