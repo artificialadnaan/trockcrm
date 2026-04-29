@@ -33,6 +33,7 @@ import { usePipelineStages } from "@/hooks/use-pipeline-config";
 import { formatPhone } from "@/lib/contact-utils";
 import { ContactForm } from "@/components/contacts/contact-form";
 import { CompanyCopilotPanel } from "@/components/ai/company-copilot-panel";
+import { RecordingList } from "@/components/call-recordings/recording-list";
 import { api } from "@/lib/api";
 import { formatPropertyLabel, useProperties } from "@/hooks/use-properties";
 import type { Activity } from "@/hooks/use-activities";
@@ -129,7 +130,7 @@ function exportCompanyCSV(
 
 // --- Types ---
 
-type Tab = "contacts" | "portfolio" | "deals" | "files" | "emails";
+type Tab = "contacts" | "portfolio" | "deals" | "files" | "emails" | "recordings";
 
 // --- Main Component ---
 
@@ -182,6 +183,7 @@ export function CompanyDetailPage() {
     { key: "deals", label: "Deals", icon: <Handshake className="h-4 w-4" /> },
     { key: "files", label: "Files", icon: <FileText className="h-4 w-4" /> },
     { key: "emails", label: "Emails", icon: <Mail className="h-4 w-4" /> },
+    { key: "recordings", label: "Recordings", icon: <Phone className="h-4 w-4" /> },
   ];
 
   return (
@@ -434,6 +436,7 @@ export function CompanyDetailPage() {
           {activeTab === "deals" && <CompanyDealsTab companyId={company.id} />}
           {activeTab === "files" && <CompanyFilesTab companyId={company.id} />}
           {activeTab === "emails" && <CompanyEmailsTab />}
+          {activeTab === "recordings" && <RecordingList entityType="company" entityId={company.id} />}
         </div>
       </div>
 

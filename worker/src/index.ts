@@ -19,6 +19,7 @@ import { runAiDisconnectDigest } from "./jobs/ai-disconnect-digest.js";
 import { runAiDisconnectEscalationScan } from "./jobs/ai-disconnect-escalation.js";
 import { runAiDisconnectAdminTaskGeneration } from "./jobs/ai-disconnect-admin-tasks.js";
 import { runAiInterventionManagerAlerts } from "./jobs/ai-intervention-manager-alerts.js";
+import { runCallRecordingCleanup } from "./jobs/call-recording-cleanup.js";
 
 const POLL_INTERVAL_MS = 2000; // Poll job queue every 2 seconds
 
@@ -131,6 +132,17 @@ async function main() {
     }
   }, { timezone: "America/Chicago" });
   console.log("[Worker] Cron scheduled: bid deadline countdown at 6:30 AM CT daily");
+
+  // Call recording retention cleanup: daily at 3:30 AM CT
+  cron.schedule("30 3 * * *", async () => {
+    console.log("[Worker:cron] Running call recording cleanup...");
+    try {
+      await runCallRecordingCleanup();
+    } catch (err) {
+      console.error("[Worker:cron] Call recording cleanup failed:", err);
+    }
+  }, { timezone: "America/Chicago" });
+  console.log("[Worker] Cron scheduled: call recording cleanup at 3:30 AM CT daily");
 
   // Procore sync poll: every 15 minutes
   cron.schedule("*/15 * * * *", async () => {

@@ -26,11 +26,12 @@ import { ContactDealsTab } from "@/components/contacts/contact-deals-tab";
 import { ContactActivityTab } from "@/components/contacts/contact-activity-tab";
 import { ContactEmailTab } from "@/components/email/contact-email-tab";
 import { ContactFileTab } from "@/components/files/contact-file-tab";
+import { RecordingList } from "@/components/call-recordings/recording-list";
 import { useContactDetail, deleteContact as apiDeleteContact } from "@/hooks/use-contacts";
 import { useAuth } from "@/lib/auth";
 import { fullName, formatPhone, contactLocation } from "@/lib/contact-utils";
 
-type Tab = "deals" | "email" | "activity" | "files";
+type Tab = "deals" | "email" | "activity" | "files" | "recordings";
 
 export function ContactDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -76,6 +77,7 @@ export function ContactDetailPage() {
     { key: "email", label: "Email" },
     { key: "activity", label: "Activity" },
     { key: "files", label: "Files" },
+    { key: "recordings", label: "Recordings" },
   ];
 
   return (
@@ -222,6 +224,7 @@ export function ContactDetailPage() {
       )}
       {activeTab === "activity" && <ContactActivityTab contactId={contact.id} />}
       {activeTab === "files" && <ContactFileTab contactId={contact.id} />}
+      {activeTab === "recordings" && <RecordingList entityType="contact" entityId={contact.id} />}
     </div>
   );
 }

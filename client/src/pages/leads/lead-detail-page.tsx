@@ -9,6 +9,7 @@ import { LeadStageChangeDialog } from "@/components/leads/lead-stage-change-dial
 import { LeadStageBadge } from "@/components/leads/lead-stage-badge";
 import { LeadTimelineTab } from "@/components/leads/lead-timeline-tab";
 import { LeadQuestionnaireEditor } from "@/components/leads/lead-questionnaire-editor";
+import { RecordingList } from "@/components/call-recordings/recording-list";
 import { formatLeadPropertyLine, getLeadStageMetadata, useLeadDetail } from "@/hooks/use-leads";
 import { usePipelineStages } from "@/hooks/use-pipeline-config";
 import { LEAD_BOARD_STAGE_SLUGS, isBidBoardMirroredStageSlug } from "@/lib/pipeline-ownership";
@@ -196,6 +197,7 @@ export function LeadDetailPage() {
                 convertedDealId={lead.convertedDealId}
                 convertedAt={convertedAt}
               />
+              <RecordingList entityType="lead" entityId={lead.id} />
               <LeadQuestionnaireSummary
                 lead={{
                   id: lead.id,

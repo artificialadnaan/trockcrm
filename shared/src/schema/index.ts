@@ -88,6 +88,7 @@ export { emails, emailDirectionEnum } from "./tenant/emails.js";
 export { emailThreadBindings } from "./tenant/email-thread-bindings.js";
 export { activities, activityTypeEnum, activitySourceEntityEnum } from "./tenant/activities.js";
 export { files, fileCategoryEnum } from "./tenant/files.js";
+export { callRecordings } from "./tenant/call-recordings.js";
 export {
   estimateSourceDocuments,
   estimateDocumentParseRuns,
