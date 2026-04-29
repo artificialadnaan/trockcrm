@@ -31,6 +31,7 @@ export const callRecordings = pgTable(
     expiresAt: timestamp("expires_at", { withTimezone: true }),
     deletedAt: timestamp("deleted_at", { withTimezone: true }),
     transcriptionStatus: text("transcription_status").default("none").notNull(),
+    transcriptionError: text("transcription_error"),
     transcriptText: text("transcript_text"),
     transcriptSummary: text("transcript_summary"),
   },

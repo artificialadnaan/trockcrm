@@ -5,6 +5,7 @@ const serviceMocks = vi.hoisted(() => ({
   confirmUpload: vi.fn(),
   listForEntity: vi.fn(),
   getPlaybackUrl: vi.fn(),
+  getTranscript: vi.fn(),
   softDelete: vi.fn(),
 }));
 
@@ -25,6 +26,7 @@ vi.mock("../../../src/modules/call-recordings/service.js", async () => {
     confirmUpload: serviceMocks.confirmUpload,
     listForEntity: serviceMocks.listForEntity,
     getPlaybackUrl: serviceMocks.getPlaybackUrl,
+    getTranscript: serviceMocks.getTranscript,
     softDelete: serviceMocks.softDelete,
   };
 });
@@ -143,7 +145,25 @@ describe("call recording routes", () => {
       expect.anything(),
       "deal",
       "deal-1",
-      { role: "rep", userId: "rep-1" }
+      { role: "rep", userId: "rep-1" },
+      { search: undefined }
+    );
+  });
+
+  it("passes transcript search to the list service", async () => {
+    mockListForCurrentUser();
+
+    await invokeRoute("get", "/", {
+      user: testUser("admin"),
+      query: { entityType: "deal", entityId: "deal-1", search: "roof scope" },
+    });
+
+    expect(serviceMocks.listForEntity).toHaveBeenCalledWith(
+      expect.anything(),
+      "deal",
+      "deal-1",
+      { role: "admin", userId: "admin-1" },
+      { search: "roof scope" }
     );
   });
 
@@ -204,6 +224,33 @@ describe("call recording routes", () => {
     });
 
     expect(playback.res.body.playbackUrl).toBe("https://example.test/play");
+  });
+
+  it("returns transcripts through the same recording visibility service", async () => {
+    serviceMocks.getTranscript.mockResolvedValue({
+      summary: "Discussed next steps.",
+      fullText: "Full call text",
+      status: "complete",
+      error: null,
+    });
+
+    const transcript = await invokeRoute("get", "/:id/transcript", {
+      user: testUser("rep", "rep-1"),
+      params: { id: "rec-1" },
+    });
+
+    expect(transcript.res.statusCode).toBe(200);
+    expect(transcript.res.body).toEqual({
+      summary: "Discussed next steps.",
+      fullText: "Full call text",
+      status: "complete",
+      error: null,
+    });
+    expect(serviceMocks.getTranscript).toHaveBeenCalledWith(
+      expect.anything(),
+      "rec-1",
+      { role: "rep", userId: "rep-1" }
+    );
   });
 
   it("rejects non-admin deletes", async () => {

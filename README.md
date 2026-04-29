@@ -29,3 +29,7 @@ npm run db:migrate      # Apply migrations (tsx server/src/migrations/runner.ts)
 ```
 
 See `docs/superpowers/plans/` for active implementation plans.
+
+### Call recording transcription env
+
+The worker uses `OPENAI_API_KEY` for Whisper transcription and `ANTHROPIC_API_KEY` for Claude call summaries. Optional guardrails live in `.env.example`: `CALL_RECORDING_TRANSCRIPTION_INTERVAL_MS`, `CALL_RECORDING_TRANSCRIPTION_DAILY_CAP_USD`, and the per-model cost estimate variables used for logging/cap checks.

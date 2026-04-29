@@ -36,13 +36,23 @@ test("admin uploads, plays, and deletes a call recording from a deal", async ({ 
   let uploaded = false;
   let confirmed = false;
   let deleted = false;
+  let transcriptPolls = 0;
 
   await page.route("**/api/deals/deal-call-recordings/detail", (route) => route.fulfill({ json: { deal } }));
   await page.route("**/api/deals/deal-call-recordings/team", (route) => route.fulfill({ json: { members: [] } }));
   await page.route("**/api/activities?dealId=deal-call-recordings**", (route) => route.fulfill({ json: { activities: [], pagination: { total: 0 } } }));
-  await page.route("**/api/call-recordings?entityType=deal&entityId=deal-call-recordings", (route) =>
-    route.fulfill({ json: { recordings } })
-  );
+  await page.route("**/api/call-recordings?entityType=deal&entityId=deal-call-recordings**", (route) => {
+    transcriptPolls += 1;
+    if (recordings[0] && confirmed && transcriptPolls > 2) {
+      recordings[0] = {
+        ...recordings[0],
+        transcriptionStatus: "complete",
+        transcriptionError: null,
+        transcriptSummary: "The customer discussed roof scope and committed to sending photos. Next step is follow-up after receipt.",
+      };
+    }
+    return route.fulfill({ json: { recordings } });
+  });
   await page.route("**/api/call-recordings/upload-url", async (route) => {
     await route.request().postDataJSON();
     await route.fulfill({
@@ -69,11 +79,24 @@ test("admin uploads, plays, and deletes a call recording from a deal", async ({ 
       uploadedByName: "Admin User",
       durationSeconds: 1,
       fileSizeBytes: 44,
+      transcriptionStatus: "pending",
+      transcriptionError: null,
+      transcriptSummary: null,
     }];
     await route.fulfill({ json: { recording: recordings[0] } });
   });
   await page.route("**/api/call-recordings/rec-1/playback", (route) =>
     route.fulfill({ json: { playbackUrl: "/api/mock-r2/rec-1-playback.wav", expiresIn: 3600 } })
+  );
+  await page.route("**/api/call-recordings/rec-1/transcript", (route) =>
+    route.fulfill({
+      json: {
+        status: "complete",
+        summary: "The customer discussed roof scope and committed to sending photos. Next step is follow-up after receipt.",
+        fullText: "Customer: We need the roof scope finalized. Rep: Please send photos and we will follow up.",
+        error: null,
+      },
+    })
   );
   await page.route("**/api/mock-r2/rec-1-playback.wav", (route) =>
     route.fulfill({ status: 200, contentType: "audio/wav", body: Buffer.from("RIFF$\0\0\0WAVEfmt ") })
@@ -99,6 +122,11 @@ test("admin uploads, plays, and deletes a call recording from a deal", async ({ 
   await expect(page.getByText("Kickoff Call")).toBeVisible();
   expect(uploaded).toBe(true);
   expect(confirmed).toBe(true);
+  await expect(page.getByText("Transcribed")).toBeVisible({ timeout: 60000 });
+  await page.getByText("Transcribed").click();
+  await expect(page.getByText("The customer discussed roof scope")).toBeVisible();
+  await page.getByRole("button", { name: "Show full transcript" }).click();
+  await expect(page.getByText("Customer: We need the roof scope finalized.")).toBeVisible();
 
   await page.getByRole("button", { name: "Play" }).click();
   await expect(page.locator("audio")).toBeVisible();
