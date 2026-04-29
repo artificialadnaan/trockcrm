@@ -528,7 +528,7 @@ export async function patchResolvedDealFields(
   dealId: string,
   input: Partial<Record<keyof DealResolvedFields | "preBidMeetingCompleted" | "siteVisitDecision" | "siteVisitCompleted" | "estimatorConsultationNotes", unknown>>
 ) {
-  return api<{ resolved: { resolved: DealResolvedFields } }>(`/deals/${dealId}/resolved-fields`, {
+  return api<{ resolved: { deal?: DealDetail; resolved: DealResolvedFields } }>(`/deals/${dealId}/resolved-fields`, {
     method: "PATCH",
     json: input,
   });

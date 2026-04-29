@@ -5,6 +5,7 @@ import {
   Clock3,
   FileText,
   Image,
+  Info,
   Loader2,
   Upload,
   Wrench,
@@ -43,7 +44,8 @@ import {
   type WorkflowRoute,
 } from "@/hooks/use-deals";
 import { type FileRecord, uploadFile, useFiles } from "@/hooks/use-files";
-import { useProjectTypes } from "@/hooks/use-pipeline-config";
+import { usePipelineStages, useProjectTypes, type PipelineStage } from "@/hooks/use-pipeline-config";
+import { useAuth } from "@/lib/auth";
 import { PropertySelector } from "@/components/properties/property-selector";
 import {
   buildScopingSeedFromResolvedFields,
@@ -204,6 +206,23 @@ function getProjectTypeLabel(
   return projectTypes.find((type) => type.id === projectTypeId)?.name ?? "Unassigned";
 }
 
+function isOpportunityOrLater(stageId: string | null | undefined, stages: PipelineStage[]) {
+  const stage = stages.find((entry) => entry.id === stageId);
+  const opportunity = stages.find(
+    (entry) => entry.slug === "opportunity" && entry.workflowFamily === "standard_deal"
+  );
+
+  if (!stage || !opportunity) {
+    return true;
+  }
+
+  if (stage.workflowFamily !== opportunity.workflowFamily) {
+    return stage.workflowFamily !== "lead";
+  }
+
+  return stage.displayOrder >= opportunity.displayOrder;
+}
+
 function getSelectDisplayLabel(
   value: string,
   options: Record<string, string>,
@@ -319,7 +338,9 @@ export function DealScopingWorkspace({
   deal: DealDetail;
   onDealUpdated: () => void;
 }) {
+  const { user } = useAuth();
   const { projectTypes } = useProjectTypes();
+  const { stages } = usePipelineStages();
   const { files, refetch: refetchFiles } = useFiles({
     dealId: deal.id,
     limit: 50,
@@ -330,6 +351,9 @@ export function DealScopingWorkspace({
   const [resolvedFields, setResolvedFields] = useState<DealResolvedFields | null>(null);
   const [sectionData, setSectionData] = useState<Record<string, unknown>>({});
   const [projectTypeId, setProjectTypeId] = useState<string | null>(deal.projectTypeId);
+  const [intendedProjectNumber, setIntendedProjectNumber] = useState<string | null>(
+    deal.intendedProjectNumber ?? null
+  );
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
@@ -342,6 +366,7 @@ export function DealScopingWorkspace({
   const activePropertyId = resolvedFields?.propertyId ?? deal.propertyId;
   const hasSourceLead = Boolean(deal.sourceLeadId);
   const projectTypeLabel = getProjectTypeLabel(projectTypes, projectTypeId);
+  const projectTypeLocked = user?.role !== "admin" && isOpportunityOrLater(deal.stageId, stages);
   const preBidMeetingLabel = getSelectDisplayLabel(
     getSectionValue(sectionData, "opportunity", "preBidMeetingCompleted"),
     { yes: "Completed" },
@@ -417,7 +442,10 @@ export function DealScopingWorkspace({
           resolvedFields,
         });
         if (Object.keys(resolvedPatch).length > 0) {
-          await patchResolvedDealFields(deal.id, resolvedPatch);
+          const resolvedResult = await patchResolvedDealFields(deal.id, resolvedPatch);
+          if ("projectTypeId" in resolvedPatch) {
+            setIntendedProjectNumber(resolvedResult.resolved.deal?.intendedProjectNumber ?? null);
+          }
         }
 
         const result = await patchDealScopingIntake(
@@ -701,6 +729,7 @@ export function DealScopingWorkspace({
               <Select
                 value={projectTypeId ?? "__none__"}
                 onValueChange={(value) => setProjectTypeId(value === "__none__" ? null : value)}
+                disabled={projectTypeLocked}
               >
                 <SelectTrigger id="projectTypeId">
                   <SelectValue>{projectTypeLabel}</SelectValue>
@@ -714,6 +743,19 @@ export function DealScopingWorkspace({
                   ))}
                 </SelectContent>
               </Select>
+              {intendedProjectNumber ? (
+                <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                  <span className="font-mono">Intended: {intendedProjectNumber}</span>
+                  <Info
+                    className="h-3.5 w-3.5"
+                    aria-label="The deal number stays fixed because downstream systems (SyncHub, Procore, Bid Board) reference it. The intended number reflects the current project type."
+                  >
+                    <title>
+                      The deal number stays fixed because downstream systems (SyncHub, Procore, Bid Board) reference it. The intended number reflects the current project type.
+                    </title>
+                  </Info>
+                </div>
+              ) : null}
             </div>
           </CardContent>
         </Card>

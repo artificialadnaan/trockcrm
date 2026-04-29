@@ -4,8 +4,8 @@ import { fileURLToPath } from "node:url";
 import { getTableColumns } from "drizzle-orm";
 import { getTableConfig } from "drizzle-orm/pg-core";
 import { DEAL_SCOPING_INTAKE_STATUSES, WORKFLOW_ROUTES } from "@trock-crm/shared/types";
-import { dealScopingIntake, deals, files, users } from "@trock-crm/shared/schema";
-import { describe, expect, it, vi } from "vitest";
+import { dealHistory, dealScopingIntake, deals, files, users } from "@trock-crm/shared/schema";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   evaluateDealScopingReadiness,
   getOrCreateDealScopingIntake,
@@ -16,11 +16,15 @@ import { AppError } from "../../../src/middleware/error-handler.js";
 
 const pipelineMocks = vi.hoisted(() => ({
   getStageById: vi.fn(),
+  getStageBySlug: vi.fn(),
+  getActiveProjectTypes: vi.fn(),
 }));
 
 vi.mock("@trock-crm/shared/schema", async () => import("../../../../shared/src/schema/index.js"));
 vi.mock("../../../src/modules/pipeline/service.js", () => ({
   getStageById: pipelineMocks.getStageById,
+  getStageBySlug: pipelineMocks.getStageBySlug,
+  getActiveProjectTypes: pipelineMocks.getActiveProjectTypes,
 }));
 
 const migrationPath = resolve(
@@ -87,6 +91,7 @@ interface FakeDealRow {
 interface FakeUserRow {
   id: string;
   officeId: string;
+  role?: string;
 }
 
 interface FakeFileRow {
@@ -124,6 +129,7 @@ interface FakeTenantState {
   users: FakeUserRow[];
   files: FakeFileRow[];
   dealScopingIntake: FakeDealScopingIntakeRow[];
+  dealHistory: Array<Record<string, unknown>>;
 }
 
 function createFakeTenantDb(initialState?: Partial<FakeTenantState>) {
@@ -147,6 +153,7 @@ function createFakeTenantDb(initialState?: Partial<FakeTenantState>) {
     users: [{ id: "user-1", officeId: "office-1" }],
     files: [],
     dealScopingIntake: [],
+    dealHistory: [],
     ...initialState,
   };
 
@@ -157,6 +164,7 @@ function createFakeTenantDb(initialState?: Partial<FakeTenantState>) {
     if (table === users || tableName === "users") return state.users;
     if (table === files || tableName === "files") return state.files;
     if (table === dealScopingIntake || tableName === "deal_scoping_intake") return state.dealScopingIntake;
+    if (table === dealHistory || tableName === "deal_history") return state.dealHistory;
     throw new Error("Unexpected table in fake tenant db");
   }
 
@@ -336,6 +344,18 @@ describe("Scoping Service Shared Contract", () => {
 });
 
 describe("Scoping Service", () => {
+  beforeEach(() => {
+    pipelineMocks.getStageBySlug.mockResolvedValue({
+      id: "stage-opportunity",
+      slug: "opportunity",
+      displayOrder: 1,
+      workflowFamily: "standard_deal",
+    });
+    pipelineMocks.getActiveProjectTypes.mockResolvedValue([
+      { id: "project-type-1", name: "Roofing", slug: "roofing", code: "3" },
+    ]);
+  });
+
   it("blocks scoping reopen/edit flows for legacy downstream Bid Board-owned stages even without mirror metadata", async () => {
     pipelineMocks.getStageById.mockResolvedValue({
       id: "stage-production",

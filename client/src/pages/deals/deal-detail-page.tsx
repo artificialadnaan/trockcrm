@@ -5,6 +5,7 @@ import {
   Edit,
   Trash2,
   ChevronRight,
+  Info,
   MoreHorizontal,
   Lock,
 } from "lucide-react";
@@ -293,6 +294,19 @@ export function DealDetailPage() {
               {deal.dealNumber}
             </span>
           </div>
+          {deal.intendedProjectNumber ? (
+            <div className="mt-1 flex items-center gap-1.5 text-sm text-muted-foreground">
+              <span className="font-mono">Intended: {deal.intendedProjectNumber}</span>
+              <Info
+                className="h-3.5 w-3.5"
+                aria-label="The deal number stays fixed because downstream systems (SyncHub, Procore, Bid Board) reference it. The intended number reflects the current project type."
+              >
+                <title>
+                  The deal number stays fixed because downstream systems (SyncHub, Procore, Bid Board) reference it. The intended number reflects the current project type.
+                </title>
+              </Info>
+            </div>
+          ) : null}
           <div className="flex items-center gap-3 mt-1">
             <DealStageBadge stageId={deal.stageId} />
             <span className="text-lg font-semibold">
