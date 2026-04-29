@@ -102,7 +102,14 @@
     "email": "tmitchell2@trockgc.com",
     "role": "VP Client Services",
     "officeCode": "dfw",
-    "manager": "ashaw@trockgc.com"
+    "manager": "ashaw@trockgc.com",
+    "flags": [
+      "email_collision_verified"
+    ],
+    "notes": "Use tmitchell2@trockgc.com; legacy tmitchell@trockcontracting.com is stale and should merge into this user.",
+    "mergeSources": [
+      "tmitchell@trockcontracting.com"
+    ]
   },
   {
     "name": "Colby Burling",
@@ -187,5 +194,28 @@
     "role": "Payable Accountant",
     "officeCode": "dfw",
     "manager": "tyamashita@trockgc.com"
+  },
+  {
+    "name": "Jenn Whitby",
+    "email": "jwhitby@trockcontracting.com",
+    "role": "Director",
+    "officeCode": "dfw",
+    "manager": "ashaw@trockgc.com",
+    "status": "inactive",
+    "flags": [
+      "needs_review"
+    ],
+    "notes": "not in org chart, has HubSpot View-Only Seat"
+  },
+  {
+    "name": "Adnaan Iqbal",
+    "email": "adnaan.iqbal@gmail.com",
+    "role": "Founder / Super Admin",
+    "officeCode": "dfw",
+    "manager": null,
+    "flags": [
+      "external_founder"
+    ],
+    "notes": "out-of-band founder/admin: not on T Rock org chart, full access"
   }
 ]
