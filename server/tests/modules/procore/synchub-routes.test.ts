@@ -30,6 +30,7 @@ type ClientOptions = {
   currentStageEnteredAt?: Date;
   requestStageFamily?: string | null;
   targetStageSlug?: string;
+  targetStageWorkflowFamily?: "standard_deal" | "service_deal";
 };
 
 function createClient(options: ClientOptions = {}) {
@@ -102,15 +103,18 @@ function createClient(options: ClientOptions = {}) {
         sql.includes("FROM public.pipeline_stage_config") &&
         sql.includes("WHERE slug = $1 AND workflow_family = $2")
       ) {
+        const targetSlug = options.targetStageSlug ?? "bid_sent";
+        const targetWorkflowFamily =
+          options.targetStageWorkflowFamily ?? (workflowRoute === "service" ? "service_deal" : "standard_deal");
         return {
           rows: [
             {
-              id: options.targetStageSlug === "opportunity" ? "stage-opportunity" : "stage-bid-sent",
-              slug: options.targetStageSlug ?? "bid_sent",
-              name: options.targetStageSlug === "opportunity" ? "Opportunity" : "Bid Sent",
+              id: `stage-${targetSlug}`,
+              slug: targetSlug,
+              name: targetSlug === "opportunity" ? "Opportunity" : targetSlug,
               display_order: 3,
-              is_terminal: false,
-              workflow_family: workflowRoute === "service" ? "service_deal" : "standard_deal",
+              is_terminal: targetSlug === "won" || targetSlug === "lost",
+              workflow_family: targetWorkflowFamily,
               required_fields: [],
               required_documents: [],
               required_approvals: [],
@@ -174,7 +178,7 @@ describe("syncHubRoutes", () => {
 
     const updateQuery = queries.find((entry) => entry.sql.includes("UPDATE office_dallas.deals"));
     expect(updateQuery).toBeTruthy();
-    expect(updateQuery?.params?.[3]).toBe("contract_review");
+    expect(updateQuery?.params?.[3]).toBe("proposal");
     expect(updateQuery?.params?.[4]).toBe("under_review");
     expect(updateQuery?.params?.[14]).toBe("under_review");
     expect(updateQuery?.params?.[15]).toBe("under_review");
@@ -318,5 +322,69 @@ describe("syncHubRoutes", () => {
     expect(jobPayloads).not.toContainEqual(
       expect.objectContaining({ eventName: "deal.opportunity.entered" })
     );
+  });
+
+  it("accepts new canonical Bid Board labels by normalizing to canonical slugs before stage lookup", async () => {
+    const { client, queries } = createClient({
+      existingDealIdByProcoreBid: "deal-1",
+      targetStageSlug: "estimate_under_review",
+      targetStageWorkflowFamily: "standard_deal",
+    });
+    dbMocks.connect.mockResolvedValue(client);
+
+    const app = createApp();
+    const response = await request(app)
+      .post("/api/integrations/synchub/opportunities")
+      .set("x-synchub-secret", "test-secret")
+      .send({
+        office_slug: "dallas",
+        bid_board_id: "bb-1",
+        procore_bid_id: 101,
+        name: "Palm Villas",
+        stage_slug: "Estimate Under Review",
+      });
+
+    expect(response.status).toBe(200);
+    const targetStageLookup = queries.find(
+      (entry) => entry.sql.includes("FROM public.pipeline_stage_config") &&
+        entry.sql.includes("WHERE slug = $1 AND workflow_family = $2")
+    );
+    expect(targetStageLookup?.params).toEqual(["estimate_under_review", "standard_deal"]);
+    const updateQuery = queries.find((entry) => entry.sql.includes("UPDATE office_dallas.deals"));
+    expect(updateQuery?.params?.[2]).toBe("estimate_under_review");
+    expect(updateQuery?.params?.[3]).toBe("estimating");
+  });
+
+  it("accepts cutover aliases with dash variants by normalizing before stage lookup", async () => {
+    const { client, queries } = createClient({
+      workflowRoute: "service",
+      existingDealIdByProcoreBid: "deal-1",
+      targetStageSlug: "service_estimating",
+      targetStageWorkflowFamily: "service_deal",
+    });
+    dbMocks.connect.mockResolvedValue(client);
+
+    const app = createApp();
+    const response = await request(app)
+      .post("/api/integrations/synchub/opportunities")
+      .set("x-synchub-secret", "test-secret")
+      .send({
+        office_slug: "dallas",
+        bid_board_id: "bb-1",
+        procore_bid_id: 101,
+        name: "Palm Villas",
+        workflow_route: "service",
+        stage_slug: "Service — Estimating",
+      });
+
+    expect(response.status).toBe(200);
+    const targetStageLookup = queries.find(
+      (entry) => entry.sql.includes("FROM public.pipeline_stage_config") &&
+        entry.sql.includes("WHERE slug = $1 AND workflow_family = $2")
+    );
+    expect(targetStageLookup?.params).toEqual(["service_estimating", "service_deal"]);
+    const updateQuery = queries.find((entry) => entry.sql.includes("UPDATE office_dallas.deals"));
+    expect(updateQuery?.params?.[2]).toBe("service_estimating");
+    expect(updateQuery?.params?.[3]).toBe("estimating");
   });
 });

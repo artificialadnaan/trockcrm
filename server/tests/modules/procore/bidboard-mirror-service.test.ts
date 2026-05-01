@@ -54,7 +54,7 @@ describe("bid board mirror service", () => {
       stageId: "stage-estimate-sent",
       isBidBoardOwned: true,
       bidBoardStageSlug: "estimate_sent_to_client",
-      bidBoardStageFamily: "contract_review",
+      bidBoardStageFamily: "proposal",
       bidBoardStageStatus: "under_review",
       proposalStatus: "under_review",
       estimatingSubstage: "under_review",
@@ -264,6 +264,144 @@ describe("bid board mirror service", () => {
       actualCloseDate: null,
       lostAt: null,
     });
+    expect(result.updates).not.toHaveProperty("contractSignedAt");
+    expect(result.updates).not.toHaveProperty("contractSignedDate");
+  });
+
+  it.each([
+    ["estimating", "Estimating", "estimating"],
+    ["service_estimating", "Service Estimating", "estimating"],
+    ["estimate_under_review", "Estimate Under Review", "estimating"],
+    ["estimate_sent_to_client", "Estimate Sent to Client", "proposal"],
+    ["contract", "Contract", "contract"],
+    ["won", "Won", "terminal_won"],
+    ["lost", "Lost", "terminal_loss"],
+  ])("accepts canonical Bid Board stage slug %s with family %s", (stageSlug, label, expectedFamily) => {
+    const result = buildBidBoardMirrorUpdate({
+      now: new Date("2026-04-23T18:00:00.000Z"),
+      deal: {
+        id: "deal-1",
+        stageId: "stage-current",
+        stageEnteredAt: null,
+        workflowRoute: stageSlug === "service_estimating" ? "service" : "normal",
+        isBidBoardOwned: true,
+        proposalStatus: null,
+        estimatingSubstage: null,
+        actualCloseDate: null,
+        lostReasonId: null,
+        lostNotes: null,
+        lostCompetitor: null,
+        lostAt: null,
+      },
+      targetStage: {
+        id: `stage-${stageSlug}`,
+        slug: stageSlug,
+        name: label,
+        displayOrder: 3,
+        isTerminal: stageSlug === "won" || stageSlug === "lost",
+        workflowFamily: stageSlug === "service_estimating" ? "service_deal" : "standard_deal",
+      },
+      payload: {
+        stageSlug,
+      },
+    });
+
+    expect(result.updates.bidBoardStageSlug).toBe(stageSlug);
+    expect(result.updates.bidBoardStageFamily).toBe(expectedFamily);
+  });
+
+  it.each([
+    ["Estimating", "estimating", "estimating", "normal"],
+    ["Service Estimating", "service_estimating", "estimating", "service"],
+    ["Estimate Under Review", "estimate_under_review", "estimating", "normal"],
+    ["Estimate Sent to Client", "estimate_sent_to_client", "proposal", "normal"],
+    ["Contract", "contract", "contract", "normal"],
+    ["Won", "won", "terminal_won", "normal"],
+    ["Lost", "lost", "terminal_loss", "normal"],
+  ] as const)("accepts canonical Bid Board stage label %s as %s", (label, canonicalSlug, expectedFamily, workflowRoute) => {
+    const result = buildBidBoardMirrorUpdate({
+      now: new Date("2026-04-23T18:00:00.000Z"),
+      deal: {
+        id: "deal-1",
+        stageId: "stage-current",
+        stageEnteredAt: null,
+        workflowRoute,
+        isBidBoardOwned: true,
+        proposalStatus: null,
+        estimatingSubstage: null,
+        actualCloseDate: null,
+        lostReasonId: null,
+        lostNotes: null,
+        lostCompetitor: null,
+        lostAt: null,
+      },
+      targetStage: {
+        id: `stage-${canonicalSlug}`,
+        slug: canonicalSlug,
+        name: canonicalSlug,
+        displayOrder: 3,
+        isTerminal: canonicalSlug === "won" || canonicalSlug === "lost",
+        workflowFamily: canonicalSlug === "service_estimating" ? "service_deal" : "standard_deal",
+      },
+      payload: {
+        stageSlug: label,
+      },
+    });
+
+    expect(result.updates.bidBoardStageSlug).toBe(canonicalSlug);
+    expect(result.updates.bidBoardStageFamily).toBe(expectedFamily);
+  });
+
+  it.each([
+    ["Estimating", "estimating", "estimating", "normal"],
+    ["Service Estimating", "service_estimating", "estimating", "service"],
+    ["Service - Estimating", "service_estimating", "estimating", "service"],
+    ["Service — Estimating", "service_estimating", "estimating", "service"],
+    ["Estimate in Progress", "estimating", "estimating", "normal"],
+    ["Internal Review", "estimate_under_review", "estimating", "normal"],
+    ["Proposal Sent", "estimate_sent_to_client", "proposal", "normal"],
+    ["Sent to Production", "won", "terminal_won", "normal"],
+    ["Service Sent to Production", "won", "terminal_won", "service"],
+    ["Service - Sent to Production", "won", "terminal_won", "service"],
+    ["Closed Won", "won", "terminal_won", "normal"],
+    ["Service - Won", "won", "terminal_won", "service"],
+    ["Production Lost", "lost", "terminal_loss", "normal"],
+    ["Service Lost", "lost", "terminal_loss", "service"],
+    ["Service - Lost", "lost", "terminal_loss", "service"],
+    ["Closed Lost", "lost", "terminal_loss", "normal"],
+    ["Deal Canceled", "lost", "terminal_loss", "normal"],
+  ] as const)("accepts cutover alias %s as canonical %s", (alias, canonicalSlug, expectedFamily, workflowRoute) => {
+    const result = buildBidBoardMirrorUpdate({
+      now: new Date("2026-04-23T18:00:00.000Z"),
+      deal: {
+        id: "deal-1",
+        stageId: "stage-current",
+        stageEnteredAt: null,
+        workflowRoute,
+        isBidBoardOwned: true,
+        proposalStatus: null,
+        estimatingSubstage: null,
+        actualCloseDate: null,
+        lostReasonId: null,
+        lostNotes: null,
+        lostCompetitor: null,
+        lostAt: null,
+      },
+      targetStage: {
+        id: `stage-${canonicalSlug}`,
+        slug: canonicalSlug,
+        name: canonicalSlug,
+        displayOrder: 3,
+        isTerminal: canonicalSlug === "won" || canonicalSlug === "lost",
+        workflowFamily: canonicalSlug === "service_estimating" ? "service_deal" : "standard_deal",
+      },
+      payload: {
+        stageSlug: alias,
+      },
+    });
+
+    expect(result.updates.bidBoardStageSlug).toBe(canonicalSlug);
+    expect(result.updates.bidBoardStageFamily).toBe(expectedFamily);
   });
 
   it("rejects cross-family stage updates so service and normal routes cannot cross", () => {
