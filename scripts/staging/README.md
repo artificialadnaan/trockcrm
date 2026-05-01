@@ -16,7 +16,9 @@ Run `railway login` once in an interactive terminal to populate `~/.railway/conf
 
 Create an account or workspace token from Railway account settings. Railway's API docs explain token types at <https://docs.railway.com/reference/integrations>. Use `RAILWAY_API_TOKEN` for account/workspace tokens; do not use `RAILWAY_TOKEN` for GraphQL Bearer auth because project tokens require a different header.
 
-Both auth methods are currently required: Railway CLI commands use `~/.railway/config.json`, while direct GraphQL operations use `RAILWAY_API_TOKEN`. The create script intentionally runs Railway CLI invocations with `RAILWAY_API_TOKEN=''` so the CLI does not prefer the API token over browser-login auth state.
+Both auth methods are currently required: Railway CLI commands use `~/.railway/config.json`, while direct GraphQL operations use `RAILWAY_API_TOKEN`. The create script intentionally runs Railway CLI invocations with `env -u RAILWAY_API_TOKEN` so the CLI does not prefer the API token over browser-login auth state.
+
+Setting `RAILWAY_API_TOKEN` to an empty string is not equivalent to unsetting it. Railway CLI rejects empty-string tokens as unauthorized. Use `env -u RAILWAY_API_TOKEN` to actually remove the variable for the subcommand.
 
 Defaults:
 
