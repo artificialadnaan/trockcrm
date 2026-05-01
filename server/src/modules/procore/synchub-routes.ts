@@ -253,6 +253,14 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
       }
 
       const targetStage = targetStageResult.rows[0];
+      const suppressOpportunityRfpEvent =
+        targetStage.slug === "opportunity" || stage_slug === "opportunity";
+      if (suppressOpportunityRfpEvent) {
+        // Bid Board mirror updates are not CRM-authored stage changes. PR 4
+        // intentionally suppresses deal.opportunity.entered here even if a
+        // payload carries the Opportunity slug during cutover or replay.
+        console.info("[SyncHub] Suppressed deal.opportunity.entered for Bid Board mirror update");
+      }
       const currentStage = currentStageResult.rows[0] ?? null;
       const mirrorResult = buildBidBoardMirrorUpdate({
         now: new Date(),

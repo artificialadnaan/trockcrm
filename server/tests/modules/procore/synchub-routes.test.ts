@@ -29,6 +29,7 @@ type ClientOptions = {
   existingDealIdByName?: string | null;
   currentStageEnteredAt?: Date;
   requestStageFamily?: string | null;
+  targetStageSlug?: string;
 };
 
 function createClient(options: ClientOptions = {}) {
@@ -104,9 +105,9 @@ function createClient(options: ClientOptions = {}) {
         return {
           rows: [
             {
-              id: "stage-bid-sent",
-              slug: "bid_sent",
-              name: "Bid Sent",
+              id: options.targetStageSlug === "opportunity" ? "stage-opportunity" : "stage-bid-sent",
+              slug: options.targetStageSlug ?? "bid_sent",
+              name: options.targetStageSlug === "opportunity" ? "Opportunity" : "Bid Sent",
               display_order: 3,
               is_terminal: false,
               workflow_family: workflowRoute === "service" ? "service_deal" : "standard_deal",
@@ -139,6 +140,7 @@ describe("syncHubRoutes", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     process.env.SYNCHUB_INTEGRATION_SECRET = "test-secret";
+    delete process.env.ENABLE_OPPORTUNITY_RFP_EVENT;
   });
 
   it("mirrors downstream bid board stage data through the route and derives contract review mapping internally", async () => {
@@ -174,7 +176,7 @@ describe("syncHubRoutes", () => {
     expect(updateQuery).toBeTruthy();
     expect(updateQuery?.params?.[3]).toBe("contract_review");
     expect(updateQuery?.params?.[4]).toBe("under_review");
-    expect(updateQuery?.params?.[14]).toBeNull();
+    expect(updateQuery?.params?.[14]).toBe("under_review");
     expect(updateQuery?.params?.[15]).toBe("under_review");
   });
 
@@ -287,5 +289,34 @@ describe("syncHubRoutes", () => {
         message: "Bid Board mirror stage family mismatch",
       },
     });
+  });
+
+  it("does not emit deal.opportunity.entered from Bid Board mirror update paths", async () => {
+    process.env.ENABLE_OPPORTUNITY_RFP_EVENT = "true";
+    const { client, queries } = createClient({
+      existingDealIdByProcoreBid: "deal-1",
+      targetStageSlug: "opportunity",
+    });
+    dbMocks.connect.mockResolvedValue(client);
+
+    const app = createApp();
+    const response = await request(app)
+      .post("/api/integrations/synchub/opportunities")
+      .set("x-synchub-secret", "test-secret")
+      .send({
+        office_slug: "dallas",
+        bid_board_id: "bb-1",
+        procore_bid_id: 101,
+        name: "Palm Villas",
+        stage_slug: "opportunity",
+      });
+
+    expect(response.status).toBe(200);
+    const jobPayloads = queries
+      .filter((entry) => entry.sql.includes("INSERT INTO public.job_queue"))
+      .map((entry) => JSON.parse(entry.params?.[0] as string) as { eventName?: string });
+    expect(jobPayloads).not.toContainEqual(
+      expect.objectContaining({ eventName: "deal.opportunity.entered" })
+    );
   });
 });
