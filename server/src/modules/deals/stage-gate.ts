@@ -170,6 +170,32 @@ function workflowFamilyForRoute(workflowRoute: "normal" | "service") {
   return workflowRoute === "service" ? "service_deal" : "standard_deal";
 }
 
+const SHARED_CANONICAL_DEAL_STAGE_SLUGS = new Set([
+  "estimate_under_review",
+  "estimate_sent_to_client",
+  "contract",
+  "won",
+  "lost",
+]);
+
+function isStageValidForWorkflowRoute(
+  stage: { slug?: string | null; workflowFamily?: string | null },
+  workflowRoute: "normal" | "service"
+) {
+  const workflowFamily = stage.workflowFamily ?? null;
+  if (workflowFamily === "lead") return false;
+
+  const requiredWorkflowFamily = workflowFamilyForRoute(workflowRoute);
+  if (!workflowFamily || workflowFamily === requiredWorkflowFamily) return true;
+
+  return (
+    workflowRoute === "service" &&
+    workflowFamily === "standard_deal" &&
+    typeof stage.slug === "string" &&
+    SHARED_CANONICAL_DEAL_STAGE_SLUGS.has(stage.slug)
+  );
+}
+
 function isEstimatingBoundaryStageSlug(stageSlug: string, workflowRoute: "normal" | "service") {
   return (
     stageSlug === "estimating" ||
@@ -215,9 +241,7 @@ export async function validateStageGate(
   const currentStage = currentStageResult[0];
   const targetStage = targetStageResult[0];
 
-  const requiredWorkflowFamily = workflowFamilyForRoute(resolved.workflowRoute);
-  const targetWorkflowFamily = (targetStage as { workflowFamily?: string | null }).workflowFamily ?? null;
-  if (targetWorkflowFamily === "lead" || (targetWorkflowFamily && targetWorkflowFamily !== requiredWorkflowFamily)) {
+  if (!isStageValidForWorkflowRoute(targetStage, resolved.workflowRoute)) {
     throw new AppError(
       400,
       "Target stage is not valid for the deal workflow route.",

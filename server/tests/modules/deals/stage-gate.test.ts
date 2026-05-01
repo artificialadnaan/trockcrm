@@ -2030,6 +2030,228 @@ describe("Stage Gate Payload Hardening", () => {
       message: "Target stage is not valid for the deal workflow route.",
     });
   });
+
+  it.each([
+    "estimate_under_review",
+    "estimate_sent_to_client",
+    "contract",
+    "won",
+    "lost",
+  ])("allows service-route deals to transition into shared canonical stage %s", async (targetSlug) => {
+    const { validateStageGate } = await import("../../../src/modules/deals/stage-gate.js");
+    const targetStage = makeStage({
+      slug: targetSlug,
+      displayOrder: 4,
+      isTerminal: targetSlug === "won" || targetSlug === "lost",
+    });
+    const tenantDb = createHardeningTenantDb({
+      deals: [
+        {
+          id: "deal-1",
+          name: "Palm Villas",
+          stageId: "stage-service-estimating",
+          workflowRoute: "service",
+          assignedRepId: "rep-1",
+          projectTypeId: "pt-1",
+          propertyAddress: "123 Palm Way",
+          propertyCity: "Miami",
+          propertyState: "FL",
+          propertyZip: "33101",
+          description: "Exterior refresh",
+        },
+      ],
+    });
+
+    mockedStageLookups.queue.push(
+      {
+        id: "stage-service-estimating",
+        name: "Service Estimating",
+        slug: "service_estimating",
+        workflowFamily: "service_deal",
+        isTerminal: false,
+        displayOrder: 1,
+        requiredFields: [],
+        requiredDocuments: [],
+        requiredApprovals: [],
+      },
+      {
+        id: targetStage.id,
+        name: targetStage.name,
+        slug: targetStage.slug,
+        workflowFamily: "standard_deal",
+        isTerminal: targetStage.isTerminal,
+        displayOrder: targetStage.displayOrder,
+        requiredFields: [],
+        requiredDocuments: [],
+        requiredApprovals: [],
+      }
+    );
+
+    const result = await validateStageGate(
+      tenantDb as never,
+      "deal-1",
+      targetStage.id,
+      "director",
+      "director-1"
+    );
+
+    expect(result.allowed).toBe(true);
+    expect(result.targetStage.slug).toBe(targetSlug);
+  });
+
+  it("allows service-route deals to remain on shared canonical estimate_under_review", async () => {
+    const { validateStageGate } = await import("../../../src/modules/deals/stage-gate.js");
+    const tenantDb = createHardeningTenantDb({
+      deals: [
+        {
+          id: "deal-1",
+          name: "Palm Villas",
+          stageId: "stage-estimate-under-review",
+          workflowRoute: "service",
+          assignedRepId: "rep-1",
+          projectTypeId: "pt-1",
+          propertyAddress: "123 Palm Way",
+          propertyCity: "Miami",
+          propertyState: "FL",
+          propertyZip: "33101",
+          description: "Exterior refresh",
+        },
+      ],
+    });
+
+    const sharedStage = {
+      id: "stage-estimate-under-review",
+      name: "Estimate Under Review",
+      slug: "estimate_under_review",
+      workflowFamily: "standard_deal",
+      isTerminal: false,
+      displayOrder: 2,
+      requiredFields: [],
+      requiredDocuments: [],
+      requiredApprovals: [],
+    };
+    mockedStageLookups.queue.push(sharedStage, sharedStage);
+
+    const result = await validateStageGate(
+      tenantDb as never,
+      "deal-1",
+      "stage-estimate-under-review",
+      "director",
+      "director-1"
+    );
+
+    expect(result.allowed).toBe(true);
+    expect(result.currentStage.slug).toBe("estimate_under_review");
+    expect(result.targetStage.slug).toBe("estimate_under_review");
+  });
+
+  it("continues rejecting normal-only estimating for service-route deals", async () => {
+    const { validateStageGate } = await import("../../../src/modules/deals/stage-gate.js");
+    const tenantDb = createHardeningTenantDb({
+      deals: [
+        {
+          id: "deal-1",
+          name: "Palm Villas",
+          stageId: "stage-service-estimating",
+          workflowRoute: "service",
+          assignedRepId: "rep-1",
+          projectTypeId: "pt-1",
+          propertyAddress: "123 Palm Way",
+          propertyCity: "Miami",
+          propertyState: "FL",
+          propertyZip: "33101",
+          description: "Exterior refresh",
+        },
+      ],
+    });
+
+    mockedStageLookups.queue.push(
+      {
+        id: "stage-service-estimating",
+        name: "Service Estimating",
+        slug: "service_estimating",
+        workflowFamily: "service_deal",
+        isTerminal: false,
+        displayOrder: 1,
+        requiredFields: [],
+        requiredDocuments: [],
+        requiredApprovals: [],
+      },
+      {
+        id: "stage-estimating",
+        name: "Estimating",
+        slug: "estimating",
+        workflowFamily: "standard_deal",
+        isTerminal: false,
+        displayOrder: 1,
+        requiredFields: [],
+        requiredDocuments: [],
+        requiredApprovals: [],
+      }
+    );
+
+    await expect(
+      validateStageGate(tenantDb as never, "deal-1", "stage-estimating", "director", "director-1")
+    ).rejects.toMatchObject({
+      statusCode: 400,
+      code: "INVALID_STAGE_FOR_WORKFLOW_ROUTE",
+      message: "Target stage is not valid for the deal workflow route.",
+    });
+  });
+
+  it("continues rejecting service_estimating for normal-route deals", async () => {
+    const { validateStageGate } = await import("../../../src/modules/deals/stage-gate.js");
+    const tenantDb = createHardeningTenantDb({
+      deals: [
+        {
+          id: "deal-1",
+          name: "Palm Villas",
+          stageId: "stage-estimating",
+          workflowRoute: "normal",
+          assignedRepId: "rep-1",
+          projectTypeId: "pt-1",
+          propertyAddress: "123 Palm Way",
+          propertyCity: "Miami",
+          propertyState: "FL",
+          propertyZip: "33101",
+          description: "Exterior refresh",
+        },
+      ],
+    });
+
+    mockedStageLookups.queue.push(
+      {
+        id: "stage-estimating",
+        name: "Estimating",
+        slug: "estimating",
+        workflowFamily: "standard_deal",
+        isTerminal: false,
+        displayOrder: 1,
+        requiredFields: [],
+        requiredDocuments: [],
+        requiredApprovals: [],
+      },
+      {
+        id: "stage-service-estimating",
+        name: "Service Estimating",
+        slug: "service_estimating",
+        workflowFamily: "service_deal",
+        isTerminal: false,
+        displayOrder: 1,
+        requiredFields: [],
+        requiredDocuments: [],
+        requiredApprovals: [],
+      }
+    );
+
+    await expect(
+      validateStageGate(tenantDb as never, "deal-1", "stage-service-estimating", "director", "director-1")
+    ).rejects.toMatchObject({
+      statusCode: 400,
+      code: "INVALID_STAGE_FOR_WORKFLOW_ROUTE",
+      message: "Target stage is not valid for the deal workflow route.",
+    });
+  });
 });
 
 describe("Revision Routing Hardening", () => {

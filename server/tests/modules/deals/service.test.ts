@@ -51,11 +51,19 @@ vi.mock("../../../src/modules/pipeline/service.js", () => ({
 
 // We'll import after mocks are set up
 const { AppError } = await import("../../../src/middleware/error-handler.js");
+const pipelineService = await import("../../../src/modules/pipeline/service.js");
 const { createDeal, updateDeal } = await import("../../../src/modules/deals/service.js");
 
 describe("Deal Service", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    vi.mocked(pipelineService.getStageById).mockResolvedValue({
+      id: "stage-opportunity",
+      slug: "opportunity",
+      isTerminal: false,
+      displayOrder: 1,
+      workflowFamily: "standard_deal",
+    } as never);
   });
 
   describe("Deal Number Generation Pattern", () => {
@@ -289,6 +297,139 @@ describe("Deal Service", () => {
     it("should be an instance of Error", () => {
       const err = new AppError(500, "Server error");
       expect(err).toBeInstanceOf(Error);
+    });
+  });
+
+  describe("Workflow stage family validation", () => {
+    function createDealCreationTenantDb() {
+      const state = {
+        executeCalls: 0,
+        insertedDeal: null as Record<string, unknown> | null,
+      };
+
+      return {
+        state,
+        select() {
+          return {
+            from() {
+              return {
+                where() {
+                  return {
+                    limit() {
+                      return Promise.resolve([{ id: "rep-1", isActive: true, officeId: "office-1" }]);
+                    },
+                  };
+                },
+              };
+            },
+          };
+        },
+        execute() {
+          state.executeCalls += 1;
+          if (state.executeCalls === 1) return Promise.resolve({ rows: [{ deal_number: "dfw-4-11826-aa" }] });
+          if (state.executeCalls === 3) return Promise.resolve({ rows: [{ last_suffix: "aa" }] });
+          return Promise.resolve({ rows: [] });
+        },
+        insert() {
+          return {
+            values(values: Record<string, unknown>) {
+              state.insertedDeal = {
+                id: "deal-1",
+                bidBoardProjectNumber: null,
+                ...values,
+              };
+              return {
+                returning() {
+                  return Promise.resolve([state.insertedDeal]);
+                },
+              };
+            },
+          };
+        },
+      };
+    }
+
+    it.each([
+      "estimate_under_review",
+      "estimate_sent_to_client",
+      "contract",
+    ])("allows service-route deals to be created on shared canonical stage %s", async (slug) => {
+      const getStageById = vi.mocked(pipelineService.getStageById);
+      getStageById
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce({
+          id: `stage-${slug}`,
+          slug,
+          isTerminal: false,
+          displayOrder: 2,
+          workflowFamily: "standard_deal",
+        } as never);
+
+      const deal = await createDeal(createDealCreationTenantDb() as never, {
+        name: "Service Shared Stage Deal",
+        stageId: `stage-${slug}`,
+        assignedRepId: "rep-1",
+        officeId: "office-1",
+        migrationMode: true,
+        officeCode: "dfw",
+        workflowRoute: "service",
+        projectType: "service",
+      });
+
+      expect(deal.stageId).toBe(`stage-${slug}`);
+      expect(deal.workflowRoute).toBe("service");
+      expect(getStageById).toHaveBeenNthCalledWith(1, `stage-${slug}`, "service_deal");
+      expect(getStageById).toHaveBeenNthCalledWith(2, `stage-${slug}`, "standard_deal");
+    });
+
+    it("continues rejecting normal-only estimating for service-route deals", async () => {
+      const getStageById = vi.mocked(pipelineService.getStageById);
+      getStageById
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce({
+          id: "stage-estimating",
+          slug: "estimating",
+          isTerminal: false,
+          displayOrder: 1,
+          workflowFamily: "standard_deal",
+        } as never);
+
+      await expect(
+        createDeal(createDealCreationTenantDb() as never, {
+          name: "Service Bad Stage Deal",
+          stageId: "stage-estimating",
+          assignedRepId: "rep-1",
+          officeId: "office-1",
+          migrationMode: true,
+          officeCode: "dfw",
+          workflowRoute: "service",
+          projectType: "service",
+        })
+      ).rejects.toMatchObject<AppError>({
+        statusCode: 400,
+        message: "Invalid stage ID for workflow route",
+      });
+    });
+
+    it("continues rejecting service_estimating for normal-route deals", async () => {
+      const getStageById = vi.mocked(pipelineService.getStageById);
+      getStageById.mockResolvedValueOnce(null);
+
+      await expect(
+        createDeal(createDealCreationTenantDb() as never, {
+          name: "Normal Bad Stage Deal",
+          stageId: "stage-service-estimating",
+          assignedRepId: "rep-1",
+          officeId: "office-1",
+          migrationMode: true,
+          officeCode: "dfw",
+          workflowRoute: "normal",
+          projectType: "roofing",
+        })
+      ).rejects.toMatchObject<AppError>({
+        statusCode: 400,
+        message: "Invalid stage ID for workflow route",
+      });
     });
   });
 

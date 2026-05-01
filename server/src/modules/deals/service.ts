@@ -364,6 +364,31 @@ export function workflowFamilyForRoute(workflowRoute: WorkflowRoute) {
   return workflowRoute === "service" ? "service_deal" : "standard_deal";
 }
 
+const SHARED_CANONICAL_DEAL_STAGE_SLUGS = new Set([
+  "estimate_under_review",
+  "estimate_sent_to_client",
+  "contract",
+  "won",
+  "lost",
+]);
+
+function isServiceRouteStandardFamilyStage(stage: PipelineStageRow | null | undefined) {
+  return (
+    stage?.workflowFamily === "standard_deal" &&
+    (stage.slug === "opportunity" || SHARED_CANONICAL_DEAL_STAGE_SLUGS.has(stage.slug))
+  );
+}
+
+async function getStageByIdForWorkflowRoute(stageId: string, workflowRoute: WorkflowRoute) {
+  const stage = await getStageById(stageId, workflowFamilyForRoute(workflowRoute));
+  if (stage) return stage;
+
+  if (workflowRoute !== "service") return null;
+
+  const standardStage = await getStageById(stageId, "standard_deal");
+  return isServiceRouteStandardFamilyStage(standardStage) ? standardStage : null;
+}
+
 async function listDealStages() {
   return db
     .select()
@@ -694,10 +719,7 @@ export async function getDealDetail(tenantDb: TenantDb, dealId: string, userRole
   const deal = await getDealById(tenantDb, dealId, userRole, userId);
   if (!deal) return null;
 
-  const currentStage = await getStageById(
-    deal.stageId,
-    deal.workflowRoute === "service" ? "service_deal" : "standard_deal"
-  );
+  const currentStage = await getStageByIdForWorkflowRoute(deal.stageId, deal.workflowRoute);
 
   const [stageHistory, approvals, cos] = await Promise.all([
     tenantDb
@@ -732,11 +754,7 @@ export async function getDealDetail(tenantDb: TenantDb, dealId: string, userRole
  */
 export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
   const workflowRoute = input.workflowRoute ?? "normal";
-  let stage: PipelineStageRow | null = await getStageById(input.stageId, workflowFamilyForRoute(workflowRoute));
-  if (!stage && workflowRoute === "service") {
-    const neutralOpportunityStage = await getStageById(input.stageId, "standard_deal");
-    stage = neutralOpportunityStage?.slug === "opportunity" ? neutralOpportunityStage : null;
-  }
+  const stage = await getStageByIdForWorkflowRoute(input.stageId, workflowRoute);
   if (!stage) {
     throw new AppError(400, "Invalid stage ID for workflow route");
   }
@@ -969,7 +987,7 @@ export async function updateDeal(
         "workflowRoute is derived from lead routing and cannot be changed manually"
       );
     }
-    const stage = await getStageById(existing.stageId, workflowFamilyForRoute(input.workflowRoute));
+    const stage = await getStageByIdForWorkflowRoute(existing.stageId, input.workflowRoute);
     if (!stage) {
       throw new AppError(400, "Current stage is not valid for the requested workflow route");
     }
