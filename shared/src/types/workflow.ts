@@ -239,7 +239,7 @@ export const LEGACY_DEAL_STAGE_TO_CANONICAL_STAGE = {
   service: {
     dd: "opportunity",
     estimating: "service_estimating",
-    estimate_in_progress: "estimating",
+    estimate_in_progress: "service_estimating",
     bid_sent: "estimate_sent_to_client",
     service_estimate_under_review: "estimate_under_review",
     service_estimate_sent_to_client: "estimate_sent_to_client",
@@ -310,6 +310,10 @@ export function toCanonicalDealStageSlug(
   workflowRoute?: WorkflowRoute | null
 ): DealStageSlugWithHistoricalAliases | null {
   if (isCanonicalDealStageSlug(stageSlug)) {
+    if (workflowRoute === "service" && stageSlug === "estimating") {
+      return "service_estimating";
+    }
+
     const contract = CANONICAL_DEAL_WORKFLOW_CONTRACTS_BY_SLUG.get(stageSlug);
     if (!contract) {
       return null;
