@@ -89,13 +89,12 @@ async function seedUsers(client: pg.Client): Promise<SeedContext["users"]> {
 async function loadStageIds(client: pg.Client) {
   const rows = await client.query(`SELECT slug, id FROM public.pipeline_stage_config WHERE slug = ANY($1::text[])`, [[
     "new_lead", "qualified_lead", "sales_validation_stage",
-    "opportunity", "estimate_sent_to_client", "sent_to_production", "contract_signed",
+    "opportunity", "estimate_sent_to_client", "contract",
   ]]);
   const stages = Object.fromEntries(rows.rows.map((row) => [row.slug, row.id])) as Record<string, string>;
-  for (const required of ["new_lead", "qualified_lead", "sales_validation_stage", "opportunity", "estimate_sent_to_client", "sent_to_production"]) {
+  for (const required of ["new_lead", "qualified_lead", "sales_validation_stage", "opportunity", "estimate_sent_to_client", "contract"]) {
     if (!stages[required]) throw new Error(`Missing pipeline stage ${required}`);
   }
-  stages.contract_signed = stages.contract_signed ?? stages.sent_to_production;
   return stages;
 }
 
@@ -212,14 +211,14 @@ async function seedWork(client: pg.Client, ctx: SeedContext) {
   const directorLeadStages = ["new_lead", "qualified_lead", "sales_validation_stage", "new_lead", "qualified_lead"];
   const directorLeadStatuses = ["open", "open", "open", "disqualified", "open"] as const;
   for (let i = 0; i < 5; i++) await insertLead(client, ctx, "director@trock.dev", i, directorLeadStages[i], directorLeadStatuses[i]);
-  for (const [i, stage] of ["opportunity", "estimate_sent_to_client", "contract_signed"].entries()) await insertDeal(client, ctx, "director@trock.dev", i, stage, { contractSigned: stage === "contract_signed" });
+  for (const [i, stage] of ["opportunity", "estimate_sent_to_client", "contract"].entries()) await insertDeal(client, ctx, "director@trock.dev", i, stage, { contractSigned: stage === "contract" });
   for (let i = 0; i < 10; i++) await insertTask(client, ctx, "director@trock.dev", i);
 
   const repLeadStages = ["new_lead", "new_lead", "qualified_lead", "sales_validation_stage", "qualified_lead", "new_lead", "sales_validation_stage", "qualified_lead"];
   const repLeadStatuses = ["open", "open", "open", "open", "disqualified", "open", "converted", "open"] as const;
   for (let i = 0; i < 8; i++) await insertLead(client, ctx, "rep@trock.dev", i + 5, repLeadStages[i], repLeadStatuses[i]);
-  const repDealStages = ["opportunity", "opportunity", "estimate_sent_to_client", "contract_signed", "estimate_sent_to_client"];
-  for (let i = 0; i < 5; i++) await insertDeal(client, ctx, "rep@trock.dev", i + 3, repDealStages[i], { validProjectNumber: i < 2, contractSigned: repDealStages[i] === "contract_signed" });
+  const repDealStages = ["opportunity", "opportunity", "estimate_sent_to_client", "contract", "estimate_sent_to_client"];
+  for (let i = 0; i < 5; i++) await insertDeal(client, ctx, "rep@trock.dev", i + 3, repDealStages[i], { validProjectNumber: i < 2, contractSigned: repDealStages[i] === "contract" });
   for (let i = 0; i < 15; i++) await insertTask(client, ctx, "rep@trock.dev", i);
 
   await insertLead(client, ctx, "admin@trock.dev", 13, "new_lead", "open");
