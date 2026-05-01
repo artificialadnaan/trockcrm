@@ -103,9 +103,19 @@ function createClient(options: ClientOptions = {}) {
         sql.includes("FROM public.pipeline_stage_config") &&
         sql.includes("WHERE slug = $1")
       ) {
-        const targetSlug = options.targetStageSlug ?? "bid_sent";
-        const targetWorkflowFamily =
-          options.targetStageWorkflowFamily ?? (params?.[1] as "standard_deal" | "service_deal" | undefined) ?? (workflowRoute === "service" ? "service_deal" : "standard_deal");
+        const targetSlug = (params?.[0] as string | undefined) ?? options.targetStageSlug ?? "bid_sent";
+        const requestedWorkflowFamily =
+          (params?.[1] as "standard_deal" | "service_deal" | undefined) ??
+          (workflowRoute === "service" ? "service_deal" : "standard_deal");
+        const rowWorkflowFamily = options.targetStageWorkflowFamily ?? requestedWorkflowFamily;
+        const sharedFallbackSlugs = params?.[2] as readonly string[] | undefined;
+        if (
+          requestedWorkflowFamily === "service_deal" &&
+          targetSlug !== "service_estimating" &&
+          !sharedFallbackSlugs?.includes(targetSlug)
+        ) {
+          return { rows: [] };
+        }
         return {
           rows: [
             {
@@ -114,7 +124,7 @@ function createClient(options: ClientOptions = {}) {
               name: targetSlug === "opportunity" ? "Opportunity" : targetSlug,
               display_order: 3,
               is_terminal: targetSlug === "won" || targetSlug === "lost",
-              workflow_family: targetWorkflowFamily,
+              workflow_family: rowWorkflowFamily,
               required_fields: [],
               required_documents: [],
               required_approvals: [],
@@ -477,5 +487,96 @@ describe("syncHubRoutes", () => {
     expect(targetStageLookup?.params?.slice(0, 2)).toEqual(["service_estimating", "service_deal"]);
     const updateQuery = queries.find((entry) => entry.sql.includes("UPDATE office_dallas.deals"));
     expect(updateQuery?.params?.[2]).toBe("service_estimating");
+  });
+
+  it("resolves service deal updates with opportunity through the shared standard-family fallback", async () => {
+    const { client, queries } = createClient({
+      workflowRoute: "service",
+      existingDealIdByProcoreBid: "deal-service-opp",
+      targetStageSlug: "opportunity",
+      targetStageWorkflowFamily: "standard_deal",
+    });
+    dbMocks.connect.mockResolvedValue(client);
+
+    const app = createApp();
+    const response = await request(app)
+      .post("/api/integrations/synchub/opportunities")
+      .set("x-synchub-secret", "test-secret")
+      .send({
+        office_slug: "dallas",
+        bid_board_id: "bb-service-opp",
+        procore_bid_id: 104,
+        name: "Palm Villas",
+        stage_slug: "opportunity",
+      });
+
+    expect(response.status).toBe(200);
+    const targetStageLookup = queries.find(
+      (entry) => entry.sql.includes("FROM public.pipeline_stage_config") &&
+        entry.sql.includes("WHERE slug = $1")
+    );
+    expect(targetStageLookup?.params?.[0]).toBe("opportunity");
+    expect(targetStageLookup?.params?.[1]).toBe("service_deal");
+    expect(targetStageLookup?.params?.[2]).toContain("opportunity");
+  });
+
+  it("normalizes dd to opportunity for service deal updates and uses the shared fallback", async () => {
+    const { client, queries } = createClient({
+      workflowRoute: "service",
+      existingDealIdByProcoreBid: "deal-service-dd",
+      targetStageSlug: "opportunity",
+      targetStageWorkflowFamily: "standard_deal",
+    });
+    dbMocks.connect.mockResolvedValue(client);
+
+    const app = createApp();
+    const response = await request(app)
+      .post("/api/integrations/synchub/opportunities")
+      .set("x-synchub-secret", "test-secret")
+      .send({
+        office_slug: "dallas",
+        bid_board_id: "bb-service-dd",
+        procore_bid_id: 105,
+        name: "Palm Villas",
+        stage_slug: "dd",
+      });
+
+    expect(response.status).toBe(200);
+    const targetStageLookup = queries.find(
+      (entry) => entry.sql.includes("FROM public.pipeline_stage_config") &&
+        entry.sql.includes("WHERE slug = $1")
+    );
+    expect(targetStageLookup?.params?.[0]).toBe("opportunity");
+    expect(targetStageLookup?.params?.[1]).toBe("service_deal");
+    expect(targetStageLookup?.params?.[2]).toContain("opportunity");
+  });
+
+  it("preserves normal deal opportunity lookup as standard_deal", async () => {
+    const { client, queries } = createClient({
+      workflowRoute: "normal",
+      existingDealIdByProcoreBid: "deal-normal-opp",
+      targetStageSlug: "opportunity",
+      targetStageWorkflowFamily: "standard_deal",
+    });
+    dbMocks.connect.mockResolvedValue(client);
+
+    const app = createApp();
+    const response = await request(app)
+      .post("/api/integrations/synchub/opportunities")
+      .set("x-synchub-secret", "test-secret")
+      .send({
+        office_slug: "dallas",
+        bid_board_id: "bb-normal-opp",
+        procore_bid_id: 106,
+        name: "Palm Villas",
+        stage_slug: "opportunity",
+      });
+
+    expect(response.status).toBe(200);
+    const targetStageLookup = queries.find(
+      (entry) => entry.sql.includes("FROM public.pipeline_stage_config") &&
+        entry.sql.includes("WHERE slug = $1")
+    );
+    expect(targetStageLookup?.params?.slice(0, 2)).toEqual(["opportunity", "standard_deal"]);
   });
 });

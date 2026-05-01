@@ -55,6 +55,7 @@ const ROUTE_SPECIFIC_MIRRORED_STAGE_SLUGS = {
 } as const;
 
 const SHARED_MIRRORED_STAGE_SLUGS = new Set([
+  "opportunity",
   "estimate_under_review",
   "estimate_sent_to_client",
   "contract",

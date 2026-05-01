@@ -171,6 +171,9 @@ function workflowFamilyForRoute(workflowRoute: "normal" | "service") {
 }
 
 const SHARED_CANONICAL_DEAL_STAGE_SLUGS = new Set([
+  // opportunity is standard_deal-family but valid for service deals as the
+  // CRM-side RFP approval trigger before Bid Board-owned progression.
+  "opportunity",
   "estimate_under_review",
   "estimate_sent_to_client",
   "contract",
