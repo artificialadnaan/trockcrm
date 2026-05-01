@@ -14,7 +14,7 @@ describe("bid board mirror service", () => {
       now,
       deal: {
         id: "deal-1",
-        stageId: "stage-estimate-in-progress",
+        stageId: "stage-estimating",
         stageEnteredAt: new Date("2026-04-20T12:00:00.000Z"),
         workflowRoute: "normal",
         isBidBoardOwned: true,
@@ -27,8 +27,8 @@ describe("bid board mirror service", () => {
         lostAt: null,
       },
       currentStage: {
-        id: "stage-estimate-in-progress",
-        slug: "estimate_in_progress",
+        id: "stage-estimating",
+        slug: "estimating",
         displayOrder: 2,
       },
       targetStage: {
@@ -64,7 +64,7 @@ describe("bid board mirror service", () => {
       new Date("2026-04-22T14:25:00.000Z")
     );
     expect(result.history).toMatchObject({
-      fromStageId: "stage-estimate-in-progress",
+      fromStageId: "stage-estimating",
       toStageId: "stage-estimate-sent",
       isBackwardMove: false,
       overrideReason: BID_BOARD_MIRROR_OVERRIDE_REASON,
@@ -78,7 +78,7 @@ describe("bid board mirror service", () => {
       now,
       deal: {
         id: "deal-1",
-        stageId: "stage-production",
+        stageId: "stage-won",
         stageEnteredAt: new Date("2026-04-21T11:00:00.000Z"),
         workflowRoute: "normal",
         isBidBoardOwned: true,
@@ -96,15 +96,15 @@ describe("bid board mirror service", () => {
         displayOrder: 4,
       },
       targetStage: {
-        id: "stage-production-lost",
-        slug: "production_lost",
-        name: "Production Lost",
+        id: "stage-lost",
+        slug: "lost",
+        name: "Lost",
         displayOrder: 7,
         isTerminal: true,
         workflowFamily: "standard_deal",
       },
       payload: {
-        stageSlug: "production_lost",
+        stageSlug: "lost",
         stageFamily: "terminal_loss",
         stageStatus: "lost_to_competitor",
         lossOutcome: "lost_to_competitor",
@@ -116,7 +116,7 @@ describe("bid board mirror service", () => {
 
     expect(result.bypassStageGate).toBe(true);
     expect(result.updates).toMatchObject({
-      stageId: "stage-production-lost",
+      stageId: "stage-lost",
       bidBoardStageFamily: "terminal_loss",
       bidBoardLossOutcome: "lost_to_competitor",
       lostReasonId: "reason-1",
@@ -128,7 +128,7 @@ describe("bid board mirror service", () => {
     expect(result.history?.overrideReason).toBe(BID_BOARD_MIRROR_OVERRIDE_REASON);
   });
 
-  it("treats canonical sent-to-production stages as won handoff outcomes", () => {
+  it("treats canonical won as the shared terminal win outcome", () => {
     const now = new Date("2026-04-23T18:00:00.000Z");
 
     const result = buildBidBoardMirrorUpdate({
@@ -153,7 +153,54 @@ describe("bid board mirror service", () => {
         displayOrder: 3,
       },
       targetStage: {
-        id: "stage-service-production",
+        id: "stage-won",
+        slug: "won",
+        name: "Won",
+        displayOrder: 5,
+        isTerminal: true,
+        workflowFamily: "standard_deal",
+      },
+      payload: {
+        stageSlug: "won",
+        stageStatus: "signed",
+      },
+    });
+
+    expect(result.updates).toMatchObject({
+      stageId: "stage-won",
+      bidBoardStageFamily: "terminal_won",
+      actualCloseDate: "2026-04-23",
+      lostReasonId: null,
+      lostNotes: null,
+      lostCompetitor: null,
+    });
+    expect(result.updates.lostAt).toBeNull();
+  });
+
+  it("accepts historical terminal aliases while storing shared canonical mirror slugs", () => {
+    const result = buildBidBoardMirrorUpdate({
+      now: new Date("2026-04-23T18:00:00.000Z"),
+      deal: {
+        id: "deal-1",
+        stageId: "stage-review",
+        stageEnteredAt: new Date("2026-04-22T11:00:00.000Z"),
+        workflowRoute: "service",
+        isBidBoardOwned: true,
+        proposalStatus: "accepted",
+        estimatingSubstage: null,
+        actualCloseDate: null,
+        lostReasonId: null,
+        lostNotes: null,
+        lostCompetitor: null,
+        lostAt: null,
+      },
+      currentStage: {
+        id: "stage-review",
+        slug: "estimate_under_review",
+        displayOrder: 3,
+      },
+      targetStage: {
+        id: "stage-won",
         slug: "service_sent_to_production",
         name: "Service - Sent to Production",
         displayOrder: 5,
@@ -162,19 +209,61 @@ describe("bid board mirror service", () => {
       },
       payload: {
         stageSlug: "service_sent_to_production",
-        stageStatus: "signed",
+        stageFamily: "production",
       },
     });
 
     expect(result.updates).toMatchObject({
-      stageId: "stage-service-production",
-      bidBoardStageFamily: "production",
+      stageId: "stage-won",
+      bidBoardStageSlug: "won",
+      bidBoardStageFamily: "terminal_won",
       actualCloseDate: "2026-04-23",
-      lostReasonId: null,
-      lostNotes: null,
-      lostCompetitor: null,
     });
-    expect(result.updates.lostAt).toBeNull();
+  });
+
+  it("accepts new contract stage without treating it as won or lost", () => {
+    const result = buildBidBoardMirrorUpdate({
+      now: new Date("2026-04-23T18:00:00.000Z"),
+      deal: {
+        id: "deal-1",
+        stageId: "stage-sent",
+        stageEnteredAt: new Date("2026-04-22T11:00:00.000Z"),
+        workflowRoute: "normal",
+        isBidBoardOwned: true,
+        proposalStatus: "accepted",
+        estimatingSubstage: null,
+        actualCloseDate: null,
+        lostReasonId: null,
+        lostNotes: null,
+        lostCompetitor: null,
+        lostAt: null,
+      },
+      currentStage: {
+        id: "stage-sent",
+        slug: "estimate_sent_to_client",
+        displayOrder: 4,
+      },
+      targetStage: {
+        id: "stage-contract",
+        slug: "contract",
+        name: "Contract",
+        displayOrder: 5,
+        isTerminal: false,
+        workflowFamily: "standard_deal",
+      },
+      payload: {
+        stageSlug: "contract",
+        stageFamily: "contract",
+      },
+    });
+
+    expect(result.updates).toMatchObject({
+      stageId: "stage-contract",
+      bidBoardStageSlug: "contract",
+      bidBoardStageFamily: "contract",
+      actualCloseDate: null,
+      lostAt: null,
+    });
   });
 
   it("rejects cross-family stage updates so service and normal routes cannot cross", () => {
@@ -197,14 +286,14 @@ describe("bid board mirror service", () => {
         },
         targetStage: {
           id: "stage-standard-production",
-          slug: "sent_to_production",
-          name: "Sent to Production",
+          slug: "estimating",
+          name: "Estimating",
           displayOrder: 4,
           isTerminal: false,
           workflowFamily: "standard_deal",
         },
         payload: {
-          stageSlug: "sent_to_production",
+          stageSlug: "estimating",
         },
       })
     ).toThrow("Bid Board mirror stage family mismatch");
@@ -217,7 +306,7 @@ describe("bid board mirror service", () => {
       now: new Date("2026-04-22T18:00:00.000Z"),
       deal: {
         id: "deal-1",
-        stageId: "stage-estimate-in-progress",
+        stageId: "stage-estimating",
         stageEnteredAt: previousStageEnteredAt,
         workflowRoute: "normal",
         isBidBoardOwned: true,
@@ -230,8 +319,8 @@ describe("bid board mirror service", () => {
         lostAt: null,
       },
       currentStage: {
-        id: "stage-estimate-in-progress",
-        slug: "estimate_in_progress",
+        id: "stage-estimating",
+        slug: "estimating",
         displayOrder: 2,
       },
       targetStage: {
@@ -260,7 +349,7 @@ describe("bid board mirror service", () => {
         now: new Date("2026-04-22T18:00:00.000Z"),
         deal: {
           id: "deal-1",
-          stageId: "stage-estimate-in-progress",
+          stageId: "stage-estimating",
           stageEnteredAt: new Date("2026-04-20T12:00:00.000Z"),
           workflowRoute: "normal",
           isBidBoardOwned: true,
@@ -273,8 +362,8 @@ describe("bid board mirror service", () => {
           lostAt: null,
         },
         currentStage: {
-          id: "stage-estimate-in-progress",
-          slug: "estimate_in_progress",
+          id: "stage-estimating",
+          slug: "estimating",
           displayOrder: 2,
         },
         targetStage: {

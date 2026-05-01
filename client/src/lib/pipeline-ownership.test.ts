@@ -17,14 +17,13 @@ const stages = [
   { id: "stage-qualified", name: "Qualified Lead", slug: "qualified_lead" },
   { id: "stage-sales-validation", name: "Sales Validation Stage", slug: "sales_validation_stage" },
   { id: "stage-opportunity", name: "Opportunity", slug: "opportunity" },
-  { id: "stage-estimating", name: "Estimate in Progress", slug: "estimate_in_progress" },
-  { id: "stage-service-estimating", name: "Service - Estimating", slug: "service_estimating" },
+  { id: "stage-estimating", name: "Estimating", slug: "estimating" },
+  { id: "stage-service-estimating", name: "Service Estimating", slug: "service_estimating" },
   { id: "stage-under-review", name: "Estimate Under Review", slug: "estimate_under_review" },
   { id: "stage-sent", name: "Estimate Sent to Client", slug: "estimate_sent_to_client" },
-  { id: "stage-production", name: "Sent to Production", slug: "sent_to_production" },
-  { id: "stage-service-production", name: "Service - Sent to Production", slug: "service_sent_to_production" },
-  { id: "stage-lost", name: "Production Lost", slug: "production_lost" },
-  { id: "stage-service-lost", name: "Service - Lost", slug: "service_lost" },
+  { id: "stage-contract", name: "Contract", slug: "contract" },
+  { id: "stage-won", name: "Won", slug: "won" },
+  { id: "stage-lost", name: "Lost", slug: "lost" },
 ];
 
 describe("pipeline ownership helpers", () => {
@@ -78,14 +77,17 @@ describe("pipeline ownership helpers", () => {
     expect(estimating.isReadOnlyInCrm).toBe(true);
     expect(estimating.sourceOfTruth).toBe("bid_board");
     expect(estimating.routeLabel).toBe("Service");
-    expect(estimating.label).toBe("Service - Estimating");
+    expect(estimating.label).toBe("Service Estimating");
   });
 
   it("treats canonical and legacy downstream slugs as bid board mirrors during rollout", () => {
-    expect(isBidBoardMirroredStageSlug("estimate_in_progress")).toBe(true);
-    expect(isBidBoardMirroredStageSlug("service_estimating")).toBe(true);
     expect(isBidBoardMirroredStageSlug("estimating")).toBe(true);
+    expect(isBidBoardMirroredStageSlug("service_estimating")).toBe(true);
+    expect(isBidBoardMirroredStageSlug("estimate_in_progress")).toBe(true);
     expect(isBidBoardMirroredStageSlug("bid_sent")).toBe(true);
+    expect(isBidBoardMirroredStageSlug("sent_to_production")).toBe(true);
+    expect(isBidBoardMirroredStageSlug("service_sent_to_production")).toBe(true);
+    expect(isBidBoardMirroredStageSlug("service_estimate_under_review")).toBe(true);
     expect(isBidBoardMirroredStageSlug("opportunity")).toBe(false);
   });
 
@@ -94,7 +96,7 @@ describe("pipeline ownership helpers", () => {
       label: "CRM editable",
       tone: "crm",
     });
-    expect(getDealColumnOwnership({ slug: "estimate_in_progress" })).toEqual({
+    expect(getDealColumnOwnership({ slug: "estimating" })).toEqual({
       label: "Bid Board mirror",
       secondaryLabel: "Read-only in CRM",
       tone: "mirror",
@@ -109,30 +111,37 @@ describe("pipeline ownership helpers", () => {
   });
 
   it("normalizes legacy stage slugs into the canonical mirrored workflow", () => {
-    expect(normalizeDealStageSlug("estimating", "normal")).toBe("estimate_in_progress");
+    expect(normalizeDealStageSlug("estimate_in_progress", "normal")).toBe("estimating");
     expect(normalizeDealStageSlug("bid_sent", "normal")).toBe("estimate_sent_to_client");
-    expect(normalizeDealStageSlug("closed_lost", "normal")).toBe("production_lost");
-    expect(normalizeDealStageSlug("service_complete", "service")).toBe("service_sent_to_production");
-    expect(normalizeDealStageSlug("closed_lost", "service")).toBe("service_lost");
+    expect(normalizeDealStageSlug("closed_lost", "normal")).toBe("lost");
+    expect(normalizeDealStageSlug("service_complete", "service")).toBe("won");
+    expect(normalizeDealStageSlug("service_sent_to_production", "service")).toBe("won");
+    expect(normalizeDealStageSlug("service_estimate_under_review", "service")).toBe(
+      "estimate_under_review"
+    );
+    expect(normalizeDealStageSlug("closed_lost", "service")).toBe("lost");
   });
 
   it("exposes the canonical route-specific stage order and labels", () => {
     expect(getCanonicalDealStageSlugs("normal")).toEqual([
       "opportunity",
-      "estimate_in_progress",
+      "estimating",
       "estimate_under_review",
       "estimate_sent_to_client",
-      "sent_to_production",
-      "production_lost",
+      "contract",
+      "won",
+      "lost",
     ]);
     expect(getCanonicalDealStageSlugs("service")).toEqual([
       "opportunity",
       "service_estimating",
       "estimate_under_review",
       "estimate_sent_to_client",
-      "service_sent_to_production",
-      "service_lost",
+      "contract",
+      "won",
+      "lost",
     ]);
     expect(getDealStageLabelBySlug("estimate_sent_to_client")).toBe("Estimate Sent to Client");
+    expect(getDealStageLabelBySlug("won")).toBe("Won");
   });
 });

@@ -2,27 +2,52 @@ import type { WorkflowRoute } from "@trock-crm/shared/types";
 
 const SERVICE_ROUTE_THRESHOLD = 50000;
 const CANONICAL_BID_BOARD_MIRRORED_STAGE_SLUGS = [
-  "estimate_in_progress",
+  "estimating",
   "service_estimating",
   "estimate_under_review",
   "estimate_sent_to_client",
+  "contract",
+  "won",
+  "lost",
+] as const;
+const LEGACY_BID_BOARD_MIRRORED_STAGE_SLUGS = [
+  "estimate_in_progress",
+  "bid_sent",
+  "in_production",
+  "close_out",
   "sent_to_production",
   "service_sent_to_production",
   "production_lost",
   "service_lost",
-] as const;
-const LEGACY_BID_BOARD_MIRRORED_STAGE_SLUGS = [
-  "estimating",
-  "bid_sent",
-  "in_production",
-  "close_out",
+  "contract_signed",
+  "service_contract_signed",
   "closed_won",
   "closed_lost",
+  "service_estimate_under_review",
+  "service_estimate_sent_to_client",
+  "service_complete",
 ] as const;
 const BID_BOARD_STAGE_SLUG_SET = new Set<string>([
   ...CANONICAL_BID_BOARD_MIRRORED_STAGE_SLUGS,
   ...LEGACY_BID_BOARD_MIRRORED_STAGE_SLUGS,
 ]);
+const HISTORICAL_BID_BOARD_STAGE_ALIASES = {
+  estimate_in_progress: "estimating",
+  bid_sent: "estimate_sent_to_client",
+  service_estimate_under_review: "estimate_under_review",
+  service_estimate_sent_to_client: "estimate_sent_to_client",
+  contract_signed: "contract",
+  service_contract_signed: "contract",
+  in_production: "won",
+  close_out: "won",
+  sent_to_production: "won",
+  service_sent_to_production: "won",
+  service_complete: "won",
+  closed_won: "won",
+  production_lost: "lost",
+  service_lost: "lost",
+  closed_lost: "lost",
+} as const satisfies Record<(typeof LEGACY_BID_BOARD_MIRRORED_STAGE_SLUGS)[number], string>;
 
 export interface LegacyDealStageHistoryEntry {
   fromStageId: string | null;
@@ -98,7 +123,15 @@ function parseDate(value: Date | string | null | undefined): Date | null {
 }
 
 function normalizeMirroredStageSlug(stageSlug: string | null | undefined) {
-  return stageSlug && BID_BOARD_STAGE_SLUG_SET.has(stageSlug) ? stageSlug : null;
+  if (!stageSlug || !BID_BOARD_STAGE_SLUG_SET.has(stageSlug)) {
+    return null;
+  }
+
+  return (
+    HISTORICAL_BID_BOARD_STAGE_ALIASES[
+      stageSlug as keyof typeof HISTORICAL_BID_BOARD_STAGE_ALIASES
+    ] ?? stageSlug
+  );
 }
 
 function resolvePipelineTypeSnapshot(input: PlanDealWorkflowBackfillInput): WorkflowRoute {

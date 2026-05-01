@@ -4,16 +4,24 @@ export type UserRole = (typeof USER_ROLES)[number];
 export const DEAL_STAGES = [
   "dd",
   "opportunity",
+  "estimating",
   "estimate_in_progress",
   "service_estimating",
   "estimate_under_review",
   "estimate_sent_to_client",
   "service_estimate_under_review",
   "service_estimate_sent_to_client",
+  "contract",
+  "won",
+  "lost",
+  "contract_signed",
+  "service_contract_signed",
   "sent_to_production",
   "service_sent_to_production",
   "production_lost",
   "service_lost",
+  "closed_won",
+  "closed_lost",
 ] as const;
 export type DealStage = (typeof DEAL_STAGES)[number];
 

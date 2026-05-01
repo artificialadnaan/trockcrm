@@ -117,14 +117,13 @@ describe("Sales workflow shared contract", () => {
       "other",
     ]);
     expect(BID_BOARD_MIRRORED_STAGE_SLUGS).toEqual([
-      "estimate_in_progress",
+      "estimating",
       "service_estimating",
       "estimate_under_review",
       "estimate_sent_to_client",
-      "sent_to_production",
-      "service_sent_to_production",
-      "production_lost",
-      "service_lost",
+      "contract",
+      "won",
+      "lost",
     ]);
   });
 
