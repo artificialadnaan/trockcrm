@@ -91,7 +91,7 @@ function commissionRepSql(filters: CommissionReportFilters) {
 function dateSql(filters: CommissionReportFilters, field: "commission" | "payment") {
   const column =
     field === "commission"
-      ? sql`dsc.contract_signed_date_at_signing`
+      ? earnedRecognitionDateSql()
       : sql`pe.paid_at::date`;
 
   return sql`
@@ -106,9 +106,18 @@ function stageSql(filters: CommissionReportFilters) {
   return sql`AND psc.slug = ANY(${stages})`;
 }
 
+function earnedStageSql() {
+  return sql`AND psc.slug IN ('won', 'sent_to_production', 'service_sent_to_production', 'closed_won')`;
+}
+
+function earnedRecognitionDateSql() {
+  return sql`COALESCE(d.actual_close_date, d.stage_entered_at::date, dsc.contract_signed_date_at_signing)`;
+}
+
 export function describeCommissionFormula(): string {
   return [
-    "Booked earned commission is stored in deal_signed_commissions when a deal receives contract_signed_date.",
+    "Booked commission is stored in deal_signed_commissions when a deal receives contract_signed_at.",
+    "Earned commission reports include booked rows only after the deal reaches Won or a historical won alias.",
     "The source value resolves in this order: awarded_amount, then bid_estimate, then dd_estimate.",
     "Booked amount = source_value_amount * user_commission_settings.commission_rate, rounded to cents.",
     "Potential pipeline uses active non-terminal deal value plus change orders, multiplied by the rep estimated margin rate and commission rate.",
@@ -168,23 +177,19 @@ export async function getCommissionEarned(
 ): Promise<{ months: CommissionEarnedMonth[]; deals: CommissionDealRow[] }> {
   const monthResult = await tenantDb.execute(sql`
     SELECT
-      TO_CHAR(DATE_TRUNC('month', dsc.contract_signed_date_at_signing), 'YYYY-MM') AS month,
+      TO_CHAR(DATE_TRUNC('month', ${earnedRecognitionDateSql()}), 'YYYY-MM') AS month,
       COALESCE(SUM(dsc.amount), 0)::numeric AS earned_commission,
       COUNT(DISTINCT dsc.deal_id)::int AS deal_count
     FROM ${dealSignedCommissions} dsc
     JOIN ${deals} d ON d.id = dsc.deal_id
     JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
     WHERE COALESCE(d.is_test_data, false) = false
-      AND psc.display_order >= (
-        SELECT COALESCE(MIN(display_order), 0)
-        FROM ${pipelineStageConfig}
-        WHERE slug IN ('contract_signed', 'sent_to_production', 'service_contract_signed', 'service_sent_to_production')
-      )
+      ${earnedStageSql()}
       ${commissionRepSql(filters)}
       ${dateSql(filters, "commission")}
       ${stageSql(filters)}
-    GROUP BY DATE_TRUNC('month', dsc.contract_signed_date_at_signing)
-    ORDER BY DATE_TRUNC('month', dsc.contract_signed_date_at_signing) ASC
+    GROUP BY DATE_TRUNC('month', ${earnedRecognitionDateSql()})
+    ORDER BY DATE_TRUNC('month', ${earnedRecognitionDateSql()}) ASC
   `);
 
   const dealsResult = await tenantDb.execute(sql`
@@ -213,16 +218,12 @@ export async function getCommissionEarned(
     JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
     LEFT JOIN ${dealPaymentEvents} pe ON pe.deal_id = d.id
     WHERE COALESCE(d.is_test_data, false) = false
-      AND psc.display_order >= (
-        SELECT COALESCE(MIN(display_order), 0)
-        FROM ${pipelineStageConfig}
-        WHERE slug IN ('contract_signed', 'sent_to_production', 'service_contract_signed', 'service_sent_to_production')
-      )
+      ${earnedStageSql()}
       ${commissionRepSql(filters)}
       ${dateSql(filters, "commission")}
       ${stageSql(filters)}
     GROUP BY d.id, d.deal_number, d.name, u.id, u.display_name, psc.name, psc.slug, dsc.source_value_amount, dsc.applied_rate, dsc.amount, dsc.contract_signed_date_at_signing
-    ORDER BY dsc.contract_signed_date_at_signing DESC, d.name ASC
+    ORDER BY ${earnedRecognitionDateSql()} DESC, d.name ASC
   `);
 
   const monthRows = (monthResult as any).rows ?? monthResult;
@@ -258,20 +259,16 @@ export async function getCommissionSummary(
     WITH earned AS (
       SELECT
         COALESCE(SUM(dsc.amount) FILTER (
-          WHERE dsc.contract_signed_date_at_signing >= DATE_TRUNC('month', CURRENT_DATE)
+          WHERE ${earnedRecognitionDateSql()} >= DATE_TRUNC('month', CURRENT_DATE)
         ), 0)::numeric AS earned_mtd,
         COALESCE(SUM(dsc.amount) FILTER (
-          WHERE dsc.contract_signed_date_at_signing >= DATE_TRUNC('year', CURRENT_DATE)
+          WHERE ${earnedRecognitionDateSql()} >= DATE_TRUNC('year', CURRENT_DATE)
         ), 0)::numeric AS earned_ytd
       FROM ${dealSignedCommissions} dsc
       JOIN ${deals} d ON d.id = dsc.deal_id
       JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
       WHERE COALESCE(d.is_test_data, false) = false
-      AND psc.display_order >= (
-          SELECT COALESCE(MIN(display_order), 0)
-          FROM ${pipelineStageConfig}
-          WHERE slug IN ('contract_signed', 'sent_to_production', 'service_contract_signed', 'service_sent_to_production')
-        )
+        ${earnedStageSql()}
         ${commissionRepSql(filters)}
         ${dateSql(filters, "commission")}
         ${stageSql(filters)}

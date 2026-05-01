@@ -38,8 +38,8 @@ describe("commission reporting service", () => {
       [
         {
           stage_id: "stage-1",
-          stage_name: "Contract Signed",
-          stage_slug: "contract_signed",
+          stage_name: "Contract",
+          stage_slug: "contract",
           display_order: 40,
           deal_count: "2",
           total_deal_value: "300000.00",
@@ -58,7 +58,7 @@ describe("commission reporting service", () => {
           rep_id: "rep-1",
           rep_name: "Rep One",
           stage_name: "Contract Signed",
-          stage_slug: "contract_signed",
+          stage_slug: "won",
           source_value_amount: "100000.00",
           applied_rate: "0.075000",
           earned_commission: "7500.00",
@@ -96,7 +96,7 @@ describe("commission reporting service", () => {
       repId: "rep-2",
       from: "2026-01-01",
       to: "2026-12-31",
-      stages: ["contract_signed"],
+      stages: ["won"],
     };
 
     const potential = await getCommissionPotential(tenantDb, filters);
@@ -105,7 +105,7 @@ describe("commission reporting service", () => {
 
     expect(potential.stageGroups[0]).toMatchObject({
       stageId: "stage-1",
-      stageName: "Contract Signed",
+      stageName: "Contract",
       dealCount: 2,
       totalDealValue: 300000,
       potentialCommission: 22500,
@@ -138,5 +138,25 @@ describe("commission reporting service", () => {
     const queryText = extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase();
     expect(effectiveCommissionRepId(filters)).toBe("rep-self");
     expect(queryText).toContain("d.assigned_rep_id =");
+  });
+
+  it("recognizes earned commissions only for won and historical won stages", async () => {
+    const { getCommissionEarned, getCommissionSummary } = await import("../../../src/modules/commissions/reporting-service.js");
+    const tenantDb = createMockTenantDb([[], [], [{ earned_mtd: "0", earned_ytd: "0", potential_pipeline: "0", paid_ytd: "0" }]]);
+    const filters = {
+      role: "admin",
+      userId: "admin-1",
+      from: "2026-01-01",
+      to: "2026-12-31",
+      stages: [],
+    } as const;
+
+    await getCommissionEarned(tenantDb, filters);
+    await getCommissionSummary(tenantDb, filters);
+
+    const sqlText = tenantDb.execute.mock.calls.map((call: any[]) => extractSqlText(call[0]).toLowerCase()).join("\n");
+    expect(sqlText).toContain("psc.slug in ('won', 'sent_to_production', 'service_sent_to_production', 'closed_won')");
+    expect(sqlText).not.toContain("display_order >=");
+    expect(sqlText).not.toContain("service_contract_signed");
   });
 });

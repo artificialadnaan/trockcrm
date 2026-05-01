@@ -22,6 +22,7 @@ const ESTIMATING_STAGE_SLUGS = new Set([
 ]);
 
 const WON_STAGE_SLUGS = new Set([
+  "won",
   "closed_won",
   "sent_to_production",
   "service_sent_to_production",

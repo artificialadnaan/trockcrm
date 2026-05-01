@@ -30,20 +30,26 @@ function defaultDateRange(from?: string, to?: string): { from: string; to: strin
 
 const LEAD_STALE_THRESHOLD_DAYS = 14;
 const CANONICAL_MIRRORED_DOWNSTREAM_STAGE_SLUGS = [
-  "estimate_in_progress",
+  "estimating",
   "service_estimating",
   "estimate_under_review",
   "estimate_sent_to_client",
-  "sent_to_production",
-  "service_sent_to_production",
-  "production_lost",
-  "service_lost",
+  "contract",
+  "won",
+  "lost",
 ] as const;
 const LEGACY_MIRRORED_DOWNSTREAM_STAGE_SLUGS = [
+  "estimate_in_progress",
+  "service_estimate_under_review",
+  "service_estimate_sent_to_client",
   "estimating",
   "bid_sent",
   "in_production",
   "close_out",
+  "sent_to_production",
+  "service_sent_to_production",
+  "production_lost",
+  "service_lost",
   "closed_won",
   "closed_lost",
 ] as const;
@@ -52,24 +58,34 @@ const MIRRORED_DOWNSTREAM_STAGE_SLUGS = [
   ...LEGACY_MIRRORED_DOWNSTREAM_STAGE_SLUGS,
 ] as const;
 const WON_OUTCOME_STAGE_SLUGS = [
+  "won",
   "sent_to_production",
   "service_sent_to_production",
   "closed_won",
 ] as const;
 const LOST_OUTCOME_STAGE_SLUGS = [
+  "lost",
   "production_lost",
   "service_lost",
   "closed_lost",
 ] as const;
 const MIRRORED_DOWNSTREAM_STAGE_LABELS: Record<string, string> = {
-  estimate_in_progress: "Estimate in Progress",
-  service_estimating: "Service - Estimating",
+  estimating: "Estimating",
+  estimate_in_progress: "Estimating",
+  service_estimating: "Service Estimating",
   estimate_under_review: "Estimate Under Review",
+  service_estimate_under_review: "Estimate Under Review",
   estimate_sent_to_client: "Estimate Sent to Client",
-  sent_to_production: "Sent to Production",
-  service_sent_to_production: "Service - Sent to Production",
-  production_lost: "Production Lost",
-  service_lost: "Service - Lost",
+  service_estimate_sent_to_client: "Estimate Sent to Client",
+  contract: "Contract",
+  won: "Won",
+  sent_to_production: "Won",
+  service_sent_to_production: "Won",
+  closed_won: "Won",
+  lost: "Lost",
+  production_lost: "Lost",
+  service_lost: "Lost",
+  closed_lost: "Lost",
 };
 
 function resolveMirroredStageLabel(
@@ -86,16 +102,16 @@ function resolveMirroredStageLabel(
   }
 
   if (mirroredStageSlug === "estimating") {
-    return workflowRoute === "service" ? "Service - Estimating" : "Estimate in Progress";
+    return workflowRoute === "service" ? "Service Estimating" : "Estimating";
   }
   if (mirroredStageSlug === "bid_sent") {
     return "Estimate Sent to Client";
   }
   if (["in_production", "close_out", "closed_won"].includes(mirroredStageSlug)) {
-    return workflowRoute === "service" ? "Service - Sent to Production" : "Sent to Production";
+    return "Won";
   }
   if (mirroredStageSlug === "closed_lost") {
-    return workflowRoute === "service" ? "Service - Lost" : "Production Lost";
+    return "Lost";
   }
 
   return fallbackStageName ?? "Unknown";

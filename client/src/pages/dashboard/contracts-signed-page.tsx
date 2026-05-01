@@ -32,7 +32,7 @@ function getChicagoDateParts(): { today: string; yearStart: string; monthStart: 
   };
 }
 
-function formatSignedDate(value: string | null): string {
+function formatSignedDate(value: string | null | undefined): string {
   if (!value) return "—";
   return new Intl.DateTimeFormat("en-US", {
     month: "short",
@@ -162,7 +162,7 @@ export function ContractsSignedPage() {
                   </div>
                   <p className="mt-1 truncate text-sm text-slate-600">{buildPropertyLine(deal)}</p>
                   <p className="mt-1 text-xs text-slate-500">
-                    Signed {formatSignedDate(deal.contractSignedDate)}
+                    Signed {formatSignedDate((deal as Deal & { contractSignedAt?: string | null }).contractSignedAt ?? deal.contractSignedDate)}
                   </p>
                 </div>
                 <div className="shrink-0 text-right">

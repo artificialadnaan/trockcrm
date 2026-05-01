@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { eq, and, desc, asc, ilike, inArray, sql, or, isNull, not, gte, lte } from "drizzle-orm";
+import { eq, and, desc, asc, ilike, inArray, sql, or, isNull, not } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
   deals,
@@ -35,6 +35,7 @@ import { isContractSignedHandoffEnabled } from "../../config/feature-flags.js";
 type TenantDb = NodePgDatabase<typeof schema>;
 type DealRow = typeof deals.$inferSelect;
 type PipelineStageRow = typeof pipelineStageConfig.$inferSelect;
+const contractSignedDateForReporting = sql`COALESCE(contract_signed_at::date, contract_signed_date)`;
 
 export interface DealFilters {
   search?: string;
@@ -44,7 +45,8 @@ export interface DealFilters {
   regionId?: string;
   source?: string;
   isActive?: boolean;
-  // Inclusive YYYY-MM-DD bounds against deals.contract_signed_date.
+  // Inclusive YYYY-MM-DD bounds against deals.contract_signed_at::date, with
+  // deals.contract_signed_date as a transition fallback.
   contractSignedFrom?: string;
   contractSignedTo?: string;
   sortBy?: "name" | "created_at" | "updated_at" | "awarded_amount" | "stage_entered_at" | "expected_close_date" | "contract_signed_date";
@@ -371,6 +373,9 @@ export function workflowFamilyForRoute(workflowRoute: WorkflowRoute) {
 }
 
 const SHARED_CANONICAL_DEAL_STAGE_SLUGS = new Set([
+  // opportunity is standard_deal-family but valid for service deals as the
+  // CRM-side RFP approval trigger before Bid Board-owned progression.
+  "opportunity",
   "estimate_under_review",
   "estimate_sent_to_client",
   "contract",
@@ -381,7 +386,7 @@ const SHARED_CANONICAL_DEAL_STAGE_SLUGS = new Set([
 function isServiceRouteStandardFamilyStage(stage: PipelineStageRow | null | undefined) {
   return (
     stage?.workflowFamily === "standard_deal" &&
-    (stage.slug === "opportunity" || SHARED_CANONICAL_DEAL_STAGE_SLUGS.has(stage.slug))
+    SHARED_CANONICAL_DEAL_STAGE_SLUGS.has(stage.slug)
   );
 }
 
@@ -633,13 +638,13 @@ export async function getDeals(tenantDb: TenantDb, filters: DealFilters, userRol
     conditions.push(eq(deals.source, filters.source));
   }
 
-  // Inclusive contract_signed_date range. Used by the rep dashboard
-  // YTD/MTD click-through to surface the deals contributing to each card.
+  // Inclusive signed-contract range. Used by the rep dashboard YTD/MTD
+  // click-through to surface the deals contributing to each card.
   if (filters.contractSignedFrom) {
-    conditions.push(gte(deals.contractSignedDate, filters.contractSignedFrom));
+    conditions.push(sql`${contractSignedDateForReporting} >= ${filters.contractSignedFrom}::date`);
   }
   if (filters.contractSignedTo) {
-    conditions.push(lte(deals.contractSignedDate, filters.contractSignedTo));
+    conditions.push(sql`${contractSignedDateForReporting} <= ${filters.contractSignedTo}::date`);
   }
 
   // Search across name, deal_number, description, property_address
@@ -665,7 +670,7 @@ export async function getDeals(tenantDb: TenantDb, filters: DealFilters, userRol
       case "awarded_amount": return deals.awardedAmount;
       case "stage_entered_at": return deals.stageEnteredAt;
       case "expected_close_date": return deals.expectedCloseDate;
-      case "contract_signed_date": return deals.contractSignedDate;
+      case "contract_signed_date": return contractSignedDateForReporting;
       default: return deals.updatedAt;
     }
   })();

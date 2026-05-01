@@ -37,11 +37,13 @@ interface TerminalStageInfo {
 }
 
 export function summarizeTerminalStageCounts(terminalStages: TerminalStageInfo[]) {
+  const wonStageSlugs = ["won", "sent_to_production", "service_sent_to_production", "closed_won"];
+  const lostStageSlugs = ["lost", "production_lost", "service_lost", "closed_lost"];
   const won = terminalStages
-    .filter((ts) => ["sent_to_production", "service_sent_to_production"].includes(ts.stage.slug))
+    .filter((ts) => wonStageSlugs.includes(ts.stage.slug))
     .reduce((sum, ts) => sum + ts.count, 0);
   const lost = terminalStages
-    .filter((ts) => ["production_lost", "service_lost"].includes(ts.stage.slug))
+    .filter((ts) => lostStageSlugs.includes(ts.stage.slug))
     .reduce((sum, ts) => sum + ts.count, 0);
 
   return { won, lost };

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getStageRequirementAction } from "./stage-change-dialog";
+import { getStageChangeDialogSemantics, getStageRequirementAction } from "./stage-change-dialog";
 
 describe("getStageRequirementAction", () => {
   it("routes scoping field blockers to the scoping workspace", () => {
@@ -49,5 +49,28 @@ describe("getStageRequirementAction", () => {
         approvals: ["director"],
       })
     ).toBeNull();
+  });
+});
+
+describe("getStageChangeDialogSemantics", () => {
+  it("treats won and lost as canonical terminal transitions", () => {
+    expect(getStageChangeDialogSemantics("won")).toMatchObject({
+      isClosedWon: true,
+      isClosedLost: false,
+      shouldForceCompletion: false,
+    });
+    expect(getStageChangeDialogSemantics("lost")).toMatchObject({
+      isClosedWon: false,
+      isClosedLost: true,
+      shouldForceCompletion: true,
+    });
+  });
+
+  it("keeps historical terminal aliases working", () => {
+    expect(getStageChangeDialogSemantics("sent_to_production")).toMatchObject({ isClosedWon: true });
+    expect(getStageChangeDialogSemantics("service_lost")).toMatchObject({
+      isClosedLost: true,
+      shouldForceCompletion: true,
+    });
   });
 });

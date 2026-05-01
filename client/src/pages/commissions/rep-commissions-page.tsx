@@ -195,7 +195,7 @@ export function RepCommissionsPage() {
       <PageHeader
         eyebrow="Sales"
         title="Commissions"
-        description="Booked commission, potential pipeline, and contributing signed deals."
+        description="Booked-at-signing commission, earned-at-won commission, potential pipeline, and contributing deals."
       />
 
       {error ? (
@@ -277,7 +277,7 @@ export function RepCommissionsPage() {
 
         <div className="rounded-lg border border-slate-200 bg-white p-5">
           <h2 className="text-base font-semibold text-slate-900">Earned per Month</h2>
-          <p className="mt-1 text-xs text-slate-500">Last 12 months from booked signed commissions.</p>
+          <p className="mt-1 text-xs text-slate-500">Booked commission rows recognized when the deal reaches Won.</p>
           <div className="mt-4 h-72">
             <ResponsiveContainer width="100%" height="100%">
               <LineChart data={months}>

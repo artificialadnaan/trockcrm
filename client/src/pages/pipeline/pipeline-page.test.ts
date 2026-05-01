@@ -2,8 +2,13 @@ import { describe, expect, it } from "vitest";
 import { summarizeTerminalStageCounts } from "./pipeline-page";
 
 describe("summarizeTerminalStageCounts", () => {
-  it("aggregates both service and normal terminal outcomes", () => {
+  it("aggregates canonical and historical terminal outcomes", () => {
     const summary = summarizeTerminalStageCounts([
+      {
+        stage: { id: "won", name: "Won", slug: "won" },
+        deals: [],
+        count: 7,
+      },
       {
         stage: { id: "won-normal", name: "Sent to Production", slug: "sent_to_production" },
         deals: [],
@@ -28,8 +33,13 @@ describe("summarizeTerminalStageCounts", () => {
         deals: [],
         count: 4,
       },
+      {
+        stage: { id: "lost", name: "Lost", slug: "lost" },
+        deals: [],
+        count: 6,
+      },
     ]);
 
-    expect(summary).toEqual({ won: 5, lost: 5 });
+    expect(summary).toEqual({ won: 12, lost: 11 });
   });
 });

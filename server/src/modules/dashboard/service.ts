@@ -39,25 +39,23 @@ import { getMigrationSummary } from "../migration/service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 const ESTIMATING_PROGRESS_STAGE_SLUGS = [
-  "estimate_in_progress",
+  "estimating",
   "service_estimating",
   "estimate_under_review",
-  "service_estimate_under_review",
   "estimate_sent_to_client",
-  "service_estimate_sent_to_client",
+  "contract",
 ] as const;
-const WON_STAGE_SLUGS = ["sent_to_production", "service_sent_to_production"] as const;
-const LOST_STAGE_SLUGS = ["production_lost", "service_lost"] as const;
-const LEGACY_WON_STAGE_SLUGS = ["closed_won"] as const;
-const LEGACY_LOST_STAGE_SLUGS = ["closed_lost"] as const;
+const WON_STAGE_SLUGS = ["won"] as const;
+const LOST_STAGE_SLUGS = ["lost"] as const;
+const LEGACY_WON_STAGE_SLUGS = ["sent_to_production", "service_sent_to_production", "closed_won"] as const;
+const LEGACY_LOST_STAGE_SLUGS = ["production_lost", "service_lost", "closed_lost"] as const;
 const MIRRORED_DOWNSTREAM_STAGE_SLUGS = ESTIMATING_PROGRESS_STAGE_SLUGS;
 const MIRRORED_DOWNSTREAM_STAGE_LABELS: Record<(typeof MIRRORED_DOWNSTREAM_STAGE_SLUGS)[number], string> = {
-  estimate_in_progress: "Estimate in Progress",
-  service_estimating: "Service - Estimating",
+  estimating: "Estimating",
+  service_estimating: "Service Estimating",
   estimate_under_review: "Estimate Under Review",
-  service_estimate_under_review: "Estimate Under Review",
   estimate_sent_to_client: "Estimate Sent to Client",
-  service_estimate_sent_to_client: "Estimate Sent to Client",
+  contract: "Contract",
 };
 
 function resolveMirroredStageLabel(
@@ -124,26 +122,36 @@ function resolveLeadSnapshotStageLabel(stageSlug: string | null | undefined, fal
 const LEGACY_NORMAL_DASHBOARD_STAGE_SLUGS = {
   dd: "opportunity",
   due_diligence: "opportunity",
-  estimating: "estimate_in_progress",
+  estimating: "estimating",
+  estimate_in_progress: "estimating",
   bid_sent: "estimate_sent_to_client",
-  in_production: "sent_to_production",
-  close_out: "sent_to_production",
-  closed_won: "sent_to_production",
-  closed_lost: "production_lost",
+  in_production: "won",
+  close_out: "won",
+  closed_won: "won",
+  closed_lost: "lost",
+  sent_to_production: "won",
+  service_sent_to_production: "won",
+  production_lost: "lost",
+  service_lost: "lost",
 } as const;
 
 const LEGACY_SERVICE_DASHBOARD_STAGE_SLUGS = {
   dd: "opportunity",
   due_diligence: "opportunity",
   estimating: "service_estimating",
+  estimate_in_progress: "service_estimating",
   bid_sent: "estimate_sent_to_client",
-  in_production: "service_sent_to_production",
-  close_out: "service_sent_to_production",
-  closed_won: "service_sent_to_production",
-  closed_lost: "service_lost",
+  in_production: "won",
+  close_out: "won",
+  closed_won: "won",
+  closed_lost: "lost",
   service_proposal_sent: "estimate_sent_to_client",
-  service_scheduled: "service_sent_to_production",
-  service_complete: "service_sent_to_production",
+  service_scheduled: "won",
+  service_complete: "won",
+  sent_to_production: "won",
+  service_sent_to_production: "won",
+  production_lost: "lost",
+  service_lost: "lost",
 } as const;
 
 function resolveCanonicalDealStageSlug(
@@ -1327,21 +1335,22 @@ export async function getRepDashboard(
     getRepCommissionSummary(tenantDb, userId),
 
     // Contracts signed YTD + MTD for this rep. Strict semantics: we count
-    // signed contracts (contract_signed_date IS NOT NULL) and sum awarded_amount
-    // only — a deal signed without an awarded_amount contributes to count but
-    // not to totalValue, intentionally surfacing data-quality issues rather
-    // than blending in bid/dd estimates. The today guard rejects future-dated
-    // contract_signed_date so misplaced future dates don't pollute either window.
+    // signed contracts (contract_signed_at, falling back to contract_signed_date)
+    // and sum awarded_amount only — a deal signed without an awarded_amount
+    // contributes to count but not to totalValue, intentionally surfacing
+    // data-quality issues rather than blending in bid/dd estimates. The today
+    // guard rejects future-dated signing dates so misplaced future dates don't
+    // pollute either window.
     tenantDb.execute(sql`
       SELECT
-        COUNT(*) FILTER (WHERE contract_signed_date >= ${yearStart}::date)::int AS ytd_count,
-        COALESCE(SUM(awarded_amount) FILTER (WHERE contract_signed_date >= ${yearStart}::date), 0)::numeric AS ytd_value,
-        COUNT(*) FILTER (WHERE contract_signed_date >= ${monthStart}::date)::int AS mtd_count,
-        COALESCE(SUM(awarded_amount) FILTER (WHERE contract_signed_date >= ${monthStart}::date), 0)::numeric AS mtd_value
+        COUNT(*) FILTER (WHERE COALESCE(contract_signed_at::date, contract_signed_date) >= ${yearStart}::date)::int AS ytd_count,
+        COALESCE(SUM(awarded_amount) FILTER (WHERE COALESCE(contract_signed_at::date, contract_signed_date) >= ${yearStart}::date), 0)::numeric AS ytd_value,
+        COUNT(*) FILTER (WHERE COALESCE(contract_signed_at::date, contract_signed_date) >= ${monthStart}::date)::int AS mtd_count,
+        COALESCE(SUM(awarded_amount) FILTER (WHERE COALESCE(contract_signed_at::date, contract_signed_date) >= ${monthStart}::date), 0)::numeric AS mtd_value
       FROM deals
       WHERE assigned_rep_id = ${userId}
-        AND contract_signed_date IS NOT NULL
-        AND contract_signed_date <= ${today}::date
+        AND (contract_signed_at IS NOT NULL OR contract_signed_date IS NOT NULL)
+        AND COALESCE(contract_signed_at::date, contract_signed_date) <= ${today}::date
     `),
   ]);
 

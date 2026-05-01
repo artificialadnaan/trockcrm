@@ -85,6 +85,28 @@ interface StageChangeDialogProps {
   onSuccess: () => void;
 }
 
+export function getStageChangeDialogSemantics(
+  canonicalTargetStageSlug: string | null,
+  isBidBoardLocked = false
+) {
+  const isClosedLost =
+    canonicalTargetStageSlug === "lost" ||
+    canonicalTargetStageSlug === "production_lost" ||
+    canonicalTargetStageSlug === "service_lost" ||
+    canonicalTargetStageSlug === "closed_lost";
+  const isClosedWon =
+    canonicalTargetStageSlug === "won" ||
+    canonicalTargetStageSlug === "sent_to_production" ||
+    canonicalTargetStageSlug === "service_sent_to_production" ||
+    canonicalTargetStageSlug === "closed_won";
+
+  return {
+    isClosedLost,
+    isClosedWon,
+    shouldForceCompletion: isClosedLost && !isBidBoardLocked,
+  };
+}
+
 export function StageChangeDialog({
   deal,
   targetStageId,
@@ -124,9 +146,7 @@ export function StageChangeDialog({
     setSubmitting(true);
     setError(null);
     const canonicalTargetStageSlug = toCanonicalDealStageSlug(preflight.targetStage.slug, workflowRoute);
-    const isLostTransition =
-      canonicalTargetStageSlug === "production_lost" ||
-      canonicalTargetStageSlug === "service_lost";
+    const { isClosedLost: isLostTransition } = getStageChangeDialogSemantics(canonicalTargetStageSlug);
 
     try {
       // Validate lost deal fields
@@ -170,12 +190,8 @@ export function StageChangeDialog({
   const isBidBoardLocked = Boolean(preflight?.bidBoardLocked);
   const canonicalTargetStageSlug =
     preflight == null ? null : toCanonicalDealStageSlug(preflight.targetStage.slug, workflowRoute);
-  const isClosedLost =
-    canonicalTargetStageSlug === "production_lost" ||
-    canonicalTargetStageSlug === "service_lost";
-  const isClosedWon =
-    canonicalTargetStageSlug === "sent_to_production" ||
-    canonicalTargetStageSlug === "service_sent_to_production";
+  const { isClosedLost, isClosedWon, shouldForceCompletion } =
+    getStageChangeDialogSemantics(canonicalTargetStageSlug, isBidBoardLocked);
   const currentStageMeta =
     preflight == null
       ? null
@@ -203,7 +219,6 @@ export function StageChangeDialog({
           [preflight.currentStage, preflight.targetStage]
         );
 
-  const shouldForceCompletion = isClosedLost && !isBidBoardLocked;
   const handleOpenChange = shouldForceCompletion ? () => {} : onOpenChange;
   const requirementAction = getStageRequirementAction(deal.id, preflight?.missingRequirements);
 

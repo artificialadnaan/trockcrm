@@ -52,7 +52,7 @@ export interface ReportBuilderRequest {
   dimensions: ReportBuilderDimension[];
   measures: ReportBuilderMeasure[];
   filters: Record<string, unknown>;
-  dateField: "created_at" | "updated_at" | "expected_close_date" | "actual_close_date" | "contract_signed_date";
+  dateField: "created_at" | "updated_at" | "expected_close_date" | "actual_close_date" | "contract_signed_at" | "contract_signed_date";
 }
 
 export interface ReportBuilderResult {

@@ -3,9 +3,9 @@ export function isOpportunityRfpEventEnabled(env: NodeJS.ProcessEnv = process.en
 }
 
 export function isContractSignedHandoffEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  return env.ENABLE_CONTRACT_SIGNED_HANDOFF === "true";
+  return env.ENABLE_CONTRACT_SIGNED_HANDOFF !== "false";
 }
 
 export function isContractStageSelectionEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  return env.ENABLE_CONTRACT_STAGE_SELECTION === "true";
+  return env.ENABLE_CONTRACT_STAGE_SELECTION !== "false";
 }
