@@ -2,6 +2,12 @@ import { useCallback, useMemo, useState } from "react";
 import { useDroppable } from "@dnd-kit/core";
 import { Button } from "@/components/ui/button";
 import { formatCurrencyCompact } from "@/lib/deal-utils";
+import {
+  daysAgo,
+  getTerminalDateFilterLabel,
+  isTerminalOutcomeSlug,
+  type TerminalDateFilter,
+} from "@/lib/pipeline-terminal-filters";
 import { cn } from "@/lib/utils";
 import { PipelineRecordCard, type PipelineRecordCardData } from "./pipeline-record-card";
 
@@ -33,6 +39,8 @@ interface PipelineBoardColumnProps {
   onOpenStage: (stageId: string) => void;
   onOpenRecord: (recordId: string) => void;
   activeRecordId?: string | null;
+  terminalFilter?: TerminalDateFilter;
+  onTerminalFilterChange?: (filter: TerminalDateFilter) => void;
 }
 
 export function PipelineBoardColumn({
@@ -41,6 +49,8 @@ export function PipelineBoardColumn({
   onOpenStage,
   onOpenRecord,
   activeRecordId = null,
+  terminalFilter,
+  onTerminalFilterChange,
 }: PipelineBoardColumnProps) {
   const { isOver, setNodeRef } = useDroppable({
     id: column.stage.id,
@@ -52,6 +62,12 @@ export function PipelineBoardColumn({
   const accent = resolveStageAccent(column.stage, entity);
   const primaryMetric =
     entity === "deal" ? formatBoardCompactCurrency(column.totalValue ?? 0) : `${column.count} active`;
+  const showTerminalFilter =
+    entity === "deal" &&
+    isTerminalOutcomeSlug(column.stage.slug) &&
+    terminalFilter &&
+    onTerminalFilterChange;
+  const terminalLabel = terminalFilter ? getTerminalDateFilterLabel(terminalFilter) : null;
 
   return (
     <section
@@ -71,6 +87,7 @@ export function PipelineBoardColumn({
             onClick={() => onOpenStage(column.stage.id)}
           >
             {column.stage.name}
+            {terminalLabel ? <span className="ml-1 text-slate-400">· {terminalLabel}</span> : null}
           </Button>
           <span
             className="rounded-full px-2.5 py-0.5 text-[11px] font-bold text-white shadow-sm"
@@ -79,6 +96,53 @@ export function PipelineBoardColumn({
             {column.count}
           </span>
         </div>
+        {showTerminalFilter ? (
+          <div className="flex items-center gap-1">
+            <select
+              aria-label={`${column.stage.name} date filter`}
+              className="h-7 rounded-full border border-slate-200 bg-white px-2 text-[11px] font-bold text-slate-600"
+              value={terminalFilter.preset}
+              onChange={(event) => {
+                const value = event.target.value as TerminalDateFilter["preset"];
+                onTerminalFilterChange(
+                  value === "custom"
+                    ? { preset: "custom", customStart: daysAgo(30) }
+                    : { preset: value }
+                );
+              }}
+            >
+              <option value="30">30d</option>
+              <option value="60">60d</option>
+              <option value="90">90d</option>
+              <option value="custom">Custom</option>
+            </select>
+            {terminalFilter.preset === "custom" ? (
+              <>
+                <input
+                  aria-label={`${column.stage.name} start date`}
+                  type="date"
+                  className="h-7 min-w-0 flex-1 rounded-full border border-slate-200 bg-white px-2 text-[11px] font-medium text-slate-600"
+                  value={terminalFilter.customStart}
+                  onChange={(event) =>
+                    onTerminalFilterChange({ ...terminalFilter, customStart: event.target.value })
+                  }
+                />
+                <input
+                  aria-label={`${column.stage.name} end date`}
+                  type="date"
+                  className="h-7 min-w-0 flex-1 rounded-full border border-slate-200 bg-white px-2 text-[11px] font-medium text-slate-600"
+                  value={terminalFilter.customEnd ?? ""}
+                  onChange={(event) =>
+                    onTerminalFilterChange({
+                      ...terminalFilter,
+                      customEnd: event.target.value || undefined,
+                    })
+                  }
+                />
+              </>
+            ) : null}
+          </div>
+        ) : null}
         <div className="flex items-end justify-between gap-3">
           <div>
             <p className="text-[2rem] leading-none font-black tracking-tight text-slate-950">{primaryMetric}</p>

@@ -10,11 +10,21 @@ import { formatCurrencyCompact } from "@/lib/deal-utils";
 import { buildDealBoardSummary } from "@/lib/pipeline-board-summary";
 import { buildCanonicalDealBoardColumns } from "@/lib/canonical-deal-board";
 import { useNormalizedPipelineRoute } from "@/lib/pipeline-scope";
+import {
+  readTerminalDateFilter,
+  writeTerminalDateFilter,
+  type TerminalDateFilter,
+  type TerminalOutcome,
+} from "@/lib/pipeline-terminal-filters";
 
 export function DealListPage() {
   const navigate = useNavigate();
   const { allowedScope: scope, needsRedirect, redirectTo } = useNormalizedPipelineRoute("deals");
-  const { board, loading, refetch: refetchBoard } = useDealBoard(scope, true);
+  const [terminalDateFilters, setTerminalDateFilters] = useState<Record<TerminalOutcome, TerminalDateFilter>>(() => ({
+    won: readTerminalDateFilter("won"),
+    lost: readTerminalDateFilter("lost"),
+  }));
+  const { board, loading, refetch: refetchBoard } = useDealBoard(scope, true, terminalDateFilters);
   const { stages } = usePipelineStages();
   const summary = buildDealBoardSummary(board);
   const [pendingMove, setPendingMove] = useState<{ dealId: string; targetStageId: string } | null>(null);
@@ -26,6 +36,10 @@ export function DealListPage() {
 
   const selectedDeal =
     columns.flatMap((column) => column.cards).find((deal) => deal.id === pendingMove?.dealId) ?? null;
+  const updateTerminalDateFilter = (outcome: TerminalOutcome, filter: TerminalDateFilter) => {
+    writeTerminalDateFilter(outcome, filter);
+    setTerminalDateFilters((current) => ({ ...current, [outcome]: filter }));
+  };
 
   if (needsRedirect) return <Navigate to={redirectTo} replace />;
 
@@ -77,6 +91,8 @@ export function DealListPage() {
           setPendingMove({ dealId: activeId, targetStageId });
           setStageChangeOpen(true);
         }}
+        terminalDateFilters={terminalDateFilters}
+        onTerminalDateFilterChange={updateTerminalDateFilter}
       />
 
       {selectedDeal && pendingMove ? (

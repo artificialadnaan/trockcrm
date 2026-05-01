@@ -3,9 +3,9 @@ import {
   buildPipelineRequestPath,
   getTerminalDateFilterLabel,
   readTerminalDateFilter,
-  summarizeTerminalStageCounts,
   writeTerminalDateFilter,
-} from "./pipeline-page";
+} from "@/lib/pipeline-terminal-filters";
+import { summarizeTerminalStageCounts } from "./pipeline-page";
 
 afterEach(() => {
   vi.useRealTimers();
