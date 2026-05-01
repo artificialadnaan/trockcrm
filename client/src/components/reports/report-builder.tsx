@@ -55,7 +55,7 @@ const QUICK_REPORTS: Array<{ id: string; name: string; request: ReportBuilderReq
     request: {
       dimensions: ["month", "rep"],
       measures: ["deal_count", "total_value", "win_rate", "avg_cycle_time"],
-      filters: { from: `${new Date().getFullYear()}-01-01`, stage: ["sent_to_production", "service_sent_to_production", "closed_won"] },
+      filters: { from: `${new Date().getFullYear()}-01-01`, stage: ["won", "sent_to_production", "service_sent_to_production", "closed_won"] },
       dateField: "actual_close_date",
     },
   },
@@ -220,7 +220,7 @@ export function ReportBuilder({ savedReports, onSaved }: ReportBuilderProps) {
             <option value="updated_at">Updated</option>
             <option value="expected_close_date">Expected Close</option>
             <option value="actual_close_date">Actual Close</option>
-            <option value="contract_signed_date">Contract Signed</option>
+            <option value="contract_signed_at">Contract Signed</option>
           </select>
           <Input
             type="date"

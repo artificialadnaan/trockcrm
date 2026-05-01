@@ -32,13 +32,17 @@ function getChicagoDateParts(): { today: string; yearStart: string; monthStart: 
   };
 }
 
-function formatSignedDate(value: string | null): string {
+export function formatSignedDate(value: string | null | undefined): string {
   if (!value) return "—";
+  const isTimestamp = value.includes("T") || value.includes("Z");
+  const date = isTimestamp ? new Date(value) : new Date(`${value}T12:00:00`);
+
   return new Intl.DateTimeFormat("en-US", {
     month: "short",
     day: "numeric",
     year: "numeric",
-  }).format(new Date(`${value}T12:00:00`));
+    timeZone: isTimestamp ? "UTC" : undefined,
+  }).format(date);
 }
 
 function buildPropertyLine(deal: Deal): string {
@@ -162,7 +166,7 @@ export function ContractsSignedPage() {
                   </div>
                   <p className="mt-1 truncate text-sm text-slate-600">{buildPropertyLine(deal)}</p>
                   <p className="mt-1 text-xs text-slate-500">
-                    Signed {formatSignedDate(deal.contractSignedDate)}
+                    Signed {formatSignedDate((deal as Deal & { contractSignedAt?: string | null }).contractSignedAt ?? deal.contractSignedDate)}
                   </p>
                 </div>
                 <div className="shrink-0 text-right">

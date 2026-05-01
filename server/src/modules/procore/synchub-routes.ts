@@ -24,6 +24,10 @@ const router = Router();
 type WorkflowRoute = "normal" | "service";
 
 const SHARED_CANONICAL_DEAL_STAGE_SLUGS = [
+  // opportunity is a CRM-only stage seeded as standard_deal family but applies
+  // to both normal and service routes; service deals legitimately enter
+  // Opportunity for RFP approval.
+  "opportunity",
   "estimate_under_review",
   "estimate_sent_to_client",
   "contract",

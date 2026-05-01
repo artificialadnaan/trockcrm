@@ -77,15 +77,15 @@ function extractSqlText(value: unknown): string {
 
 // Find a tenantDb.execute() call by SQL content match. Robust to changes in
 // the order of queries inside getRepDashboard's Promise.all — relies on the
-// `contract_signed_date` column reference, which is unique to the new query.
+// `contract_signed_at` column reference, which is unique to the PR 7 query.
 function findContractsSignedSql(executeMock: any): string {
   const allSqlTexts: string[] = executeMock.mock.calls.map((c: any[]) =>
     extractSqlText(c[0]).toLowerCase()
   );
-  const match = allSqlTexts.find((s) => s.includes("contract_signed_date"));
+  const match = allSqlTexts.find((s) => s.includes("contract_signed_at"));
   if (!match) {
     throw new Error(
-      "No tenantDb.execute call matched contract_signed_date — Commit 7 query is missing or the column was renamed"
+      "No tenantDb.execute call matched contract_signed_at — PR 7 query is missing or the column was renamed"
     );
   }
   return match;
@@ -177,23 +177,24 @@ describe("getRepDashboard contracts-signed YTD/MTD cards (Commit 7)", () => {
 
     const sql = findContractsSignedSql(tenantDb.execute);
 
-    // POSITIVE: the upper-bound clause is present.
-    expect(sql).toContain("contract_signed_date <=");
+    // POSITIVE: the upper-bound clause is present on the timestamp/date fallback expression.
+    expect(sql).toMatch(/coalesce\(.*contract_signed_at.*::date.*contract_signed_date.*\)\s*<=/s);
     // POSITIVE: the bound has a `::date` cast (we bind today as a YYYY-MM-DD
     // string and cast it to ::date in the query — the cast matters because
     // a missing one would treat the bound as text and silently break sort
     // order on some Postgres versions). extractSqlText inlines the parameter
     // value so we match against the rendered shape `<= <something>::date`.
-    expect(sql).toMatch(/contract_signed_date\s*<=\s*\S+::date/);
+    expect(sql).toMatch(/coalesce\(.*contract_signed_at.*::date.*contract_signed_date.*\)\s*<=\s*\S+::date/s);
 
     // POSITIVE: NULL filter is present so we don't try to compare NULL <= date.
+    expect(sql).toContain("contract_signed_at is not null");
     expect(sql).toContain("contract_signed_date is not null");
 
     // NEGATIVE: a missing upper bound would let future-dated rows leak into
     // both windows. If a future refactor drops the <= clause this assertion
     // (combined with the POSITIVE one above) catches it.
-    const lowerBoundOnly = /contract_signed_date\s*>=/.test(sql);
-    const upperBoundPresent = /contract_signed_date\s*<=/.test(sql);
+    const lowerBoundOnly = /coalesce\(.*contract_signed_at.*::date.*contract_signed_date.*\)\s*>=/s.test(sql);
+    const upperBoundPresent = /coalesce\(.*contract_signed_at.*::date.*contract_signed_date.*\)\s*<=/s.test(sql);
     expect(lowerBoundOnly).toBe(true);
     expect(upperBoundPresent).toBe(true);
   });

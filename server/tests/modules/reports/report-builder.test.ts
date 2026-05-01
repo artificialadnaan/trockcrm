@@ -100,4 +100,30 @@ describe("runReportBuilder", () => {
     expect(effectiveReportRepId(input)).toBe("rep-self");
     expect(extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase()).toContain("d.assigned_rep_id =");
   });
+
+  it("uses won/lost canonical slugs plus historical aliases for win rate", async () => {
+    const { runReportBuilder } = await import("../../../src/modules/reports/report-builder-service.js");
+    const tenantDb = createMockTenantDb([]);
+
+    await runReportBuilder(tenantDb, {
+      dimensions: ["month"],
+      measures: ["win_rate"],
+      filters: { from: "2026-01-01", to: "2026-12-31" },
+      dateField: "contract_signed_at",
+      role: "admin",
+      userId: "admin-1",
+    });
+
+    const queryText = extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase();
+    expect(queryText).toContain("contract_signed_at");
+    expect(queryText).toContain("contract_signed_date");
+    expect(queryText).toContain("'won'");
+    expect(queryText).toContain("'lost'");
+    expect(queryText).toContain("'sent_to_production'");
+    expect(queryText).toContain("'service_sent_to_production'");
+    expect(queryText).toContain("'closed_won'");
+    expect(queryText).toContain("'production_lost'");
+    expect(queryText).toContain("'service_lost'");
+    expect(queryText).toContain("'closed_lost'");
+  });
 });

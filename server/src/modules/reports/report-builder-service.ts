@@ -25,7 +25,13 @@ export type ReportMeasure =
   | "avg_cycle_time"
   | "avg_age_in_stage";
 
-export type ReportDateField = "created_at" | "updated_at" | "expected_close_date" | "actual_close_date" | "contract_signed_date";
+export type ReportDateField =
+  | "created_at"
+  | "updated_at"
+  | "expected_close_date"
+  | "actual_close_date"
+  | "contract_signed_at"
+  | "contract_signed_date";
 
 export interface ReportBuilderInput {
   dimensions: string[];
@@ -72,7 +78,8 @@ const DATE_FIELDS: Record<ReportDateField, ReturnType<typeof sql>> = {
   updated_at: sql`d.updated_at::date`,
   expected_close_date: sql`d.expected_close_date`,
   actual_close_date: sql`d.actual_close_date`,
-  contract_signed_date: sql`d.contract_signed_date`,
+  contract_signed_at: sql`COALESCE(d.contract_signed_at::date, d.contract_signed_date)`,
+  contract_signed_date: sql`COALESCE(d.contract_signed_at::date, d.contract_signed_date)`,
 };
 
 function dealValueSql() {
@@ -120,8 +127,8 @@ function measureSql(measure: ReportMeasure) {
     case "win_rate":
       return sql`
         COALESCE(
-          COUNT(*) FILTER (WHERE psc.slug IN ('sent_to_production', 'service_sent_to_production', 'closed_won'))::numeric
-          / NULLIF(COUNT(*) FILTER (WHERE psc.is_terminal = true OR psc.slug IN ('sent_to_production', 'service_sent_to_production', 'closed_won', 'production_lost', 'service_lost', 'closed_lost')), 0)
+          COUNT(*) FILTER (WHERE psc.slug IN ('won', 'sent_to_production', 'service_sent_to_production', 'closed_won'))::numeric
+          / NULLIF(COUNT(*) FILTER (WHERE psc.slug IN ('won', 'lost', 'sent_to_production', 'service_sent_to_production', 'closed_won', 'production_lost', 'service_lost', 'closed_lost')), 0)
           * 100,
           0
         )::numeric

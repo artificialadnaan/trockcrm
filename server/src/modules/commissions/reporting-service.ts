@@ -91,7 +91,7 @@ function commissionRepSql(filters: CommissionReportFilters) {
 function dateSql(filters: CommissionReportFilters, field: "commission" | "payment") {
   const column =
     field === "commission"
-      ? sql`dsc.contract_signed_date_at_signing`
+      ? earnedSignedDateSql()
       : sql`pe.paid_at::date`;
 
   return sql`
@@ -106,12 +106,34 @@ function stageSql(filters: CommissionReportFilters) {
   return sql`AND psc.slug = ANY(${stages})`;
 }
 
+function potentialStageSql() {
+  return sql`AND psc.slug IN ('opportunity', 'estimating', 'service_estimating', 'estimate_under_review', 'estimate_sent_to_client')`;
+}
+
+function unsignedDealSql() {
+  return sql`AND d.contract_signed_at IS NULL AND d.contract_signed_date IS NULL`;
+}
+
+function notLostStageSql() {
+  return sql`AND psc.slug NOT IN ('lost', 'production_lost', 'service_lost', 'closed_lost')`;
+}
+
+function signedDealSql() {
+  return sql`AND COALESCE(d.contract_signed_at::date, d.contract_signed_date, dsc.contract_signed_date_at_signing) IS NOT NULL`;
+}
+
+function earnedSignedDateSql() {
+  return sql`COALESCE(d.contract_signed_at::date, d.contract_signed_date, dsc.contract_signed_date_at_signing)`;
+}
+
 export function describeCommissionFormula(): string {
   return [
-    "Booked earned commission is stored in deal_signed_commissions when a deal receives contract_signed_date.",
+    "Potential commission includes unsigned active deals in Opportunity, Estimating, Estimate Under Review, or Estimate Sent to Client.",
+    "Earned commission is recognized when contract_signed_at is set, with contract_signed_date as the historical compatibility fallback.",
+    "Won deals remain earned after handoff; Lost deals are excluded from potential and earned commission totals.",
     "The source value resolves in this order: awarded_amount, then bid_estimate, then dd_estimate.",
-    "Booked amount = source_value_amount * user_commission_settings.commission_rate, rounded to cents.",
-    "Potential pipeline uses active non-terminal deal value plus change orders, multiplied by the rep estimated margin rate and commission rate.",
+    "Commission amount = source_value_amount * user_commission_settings.commission_rate, rounded to cents.",
+    "Potential pipeline uses active pre-Contract deal value plus change orders, multiplied by the rep estimated margin rate and commission rate.",
   ].join(" ");
 }
 
@@ -140,7 +162,8 @@ export async function getCommissionPotential(
     LEFT JOIN ${userCommissionSettings} cs ON cs.user_id = d.assigned_rep_id AND cs.is_active = true
     WHERE d.is_active = true
       AND COALESCE(d.is_test_data, false) = false
-      AND psc.is_terminal = false
+      ${potentialStageSql()}
+      ${unsignedDealSql()}
       ${repSql(filters)}
       ${stageSql(filters)}
     GROUP BY psc.id, psc.name, psc.slug, psc.display_order
@@ -168,23 +191,20 @@ export async function getCommissionEarned(
 ): Promise<{ months: CommissionEarnedMonth[]; deals: CommissionDealRow[] }> {
   const monthResult = await tenantDb.execute(sql`
     SELECT
-      TO_CHAR(DATE_TRUNC('month', dsc.contract_signed_date_at_signing), 'YYYY-MM') AS month,
+      TO_CHAR(DATE_TRUNC('month', ${earnedSignedDateSql()}), 'YYYY-MM') AS month,
       COALESCE(SUM(dsc.amount), 0)::numeric AS earned_commission,
       COUNT(DISTINCT dsc.deal_id)::int AS deal_count
     FROM ${dealSignedCommissions} dsc
     JOIN ${deals} d ON d.id = dsc.deal_id
     JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
     WHERE COALESCE(d.is_test_data, false) = false
-      AND psc.display_order >= (
-        SELECT COALESCE(MIN(display_order), 0)
-        FROM ${pipelineStageConfig}
-        WHERE slug IN ('contract_signed', 'sent_to_production', 'service_contract_signed', 'service_sent_to_production')
-      )
+      ${signedDealSql()}
+      ${notLostStageSql()}
       ${commissionRepSql(filters)}
       ${dateSql(filters, "commission")}
       ${stageSql(filters)}
-    GROUP BY DATE_TRUNC('month', dsc.contract_signed_date_at_signing)
-    ORDER BY DATE_TRUNC('month', dsc.contract_signed_date_at_signing) ASC
+    GROUP BY DATE_TRUNC('month', ${earnedSignedDateSql()})
+    ORDER BY DATE_TRUNC('month', ${earnedSignedDateSql()}) ASC
   `);
 
   const dealsResult = await tenantDb.execute(sql`
@@ -213,16 +233,13 @@ export async function getCommissionEarned(
     JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
     LEFT JOIN ${dealPaymentEvents} pe ON pe.deal_id = d.id
     WHERE COALESCE(d.is_test_data, false) = false
-      AND psc.display_order >= (
-        SELECT COALESCE(MIN(display_order), 0)
-        FROM ${pipelineStageConfig}
-        WHERE slug IN ('contract_signed', 'sent_to_production', 'service_contract_signed', 'service_sent_to_production')
-      )
+      ${signedDealSql()}
+      ${notLostStageSql()}
       ${commissionRepSql(filters)}
       ${dateSql(filters, "commission")}
       ${stageSql(filters)}
     GROUP BY d.id, d.deal_number, d.name, u.id, u.display_name, psc.name, psc.slug, dsc.source_value_amount, dsc.applied_rate, dsc.amount, dsc.contract_signed_date_at_signing
-    ORDER BY dsc.contract_signed_date_at_signing DESC, d.name ASC
+    ORDER BY ${earnedSignedDateSql()} DESC, d.name ASC
   `);
 
   const monthRows = (monthResult as any).rows ?? monthResult;
@@ -258,20 +275,17 @@ export async function getCommissionSummary(
     WITH earned AS (
       SELECT
         COALESCE(SUM(dsc.amount) FILTER (
-          WHERE dsc.contract_signed_date_at_signing >= DATE_TRUNC('month', CURRENT_DATE)
+          WHERE ${earnedSignedDateSql()} >= DATE_TRUNC('month', CURRENT_DATE)
         ), 0)::numeric AS earned_mtd,
         COALESCE(SUM(dsc.amount) FILTER (
-          WHERE dsc.contract_signed_date_at_signing >= DATE_TRUNC('year', CURRENT_DATE)
+          WHERE ${earnedSignedDateSql()} >= DATE_TRUNC('year', CURRENT_DATE)
         ), 0)::numeric AS earned_ytd
       FROM ${dealSignedCommissions} dsc
       JOIN ${deals} d ON d.id = dsc.deal_id
       JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
       WHERE COALESCE(d.is_test_data, false) = false
-      AND psc.display_order >= (
-          SELECT COALESCE(MIN(display_order), 0)
-          FROM ${pipelineStageConfig}
-          WHERE slug IN ('contract_signed', 'sent_to_production', 'service_contract_signed', 'service_sent_to_production')
-        )
+        ${signedDealSql()}
+        ${notLostStageSql()}
         ${commissionRepSql(filters)}
         ${dateSql(filters, "commission")}
         ${stageSql(filters)}
@@ -291,7 +305,8 @@ export async function getCommissionSummary(
       LEFT JOIN ${userCommissionSettings} cs ON cs.user_id = d.assigned_rep_id AND cs.is_active = true
       WHERE d.is_active = true
         AND COALESCE(d.is_test_data, false) = false
-        AND psc.is_terminal = false
+        ${potentialStageSql()}
+        ${unsignedDealSql()}
         ${repSql(filters)}
         ${stageSql(filters)}
     ),

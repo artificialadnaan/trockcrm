@@ -1,13 +1,13 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 
 // Verify that the contractSignedFrom/contractSignedTo filters added to
-// getDeals materialize as bounded contract_signed_date conditions in the
+// getDeals materialize as bounded signed-contract conditions in the
 // generated SQL. Mirrors the SQL-string-assertion pattern established by
 // dashboard-rep-ytd-mtd.test.ts (the dashboard YTD/MTD card query).
 //
 // Strict positive AND negative assertions:
 //   - When set, the SQL contains both a >= bound and a <= bound on
-//     contract_signed_date, plus the rep scoping condition.
+//     contract_signed_at with contract_signed_date fallback, plus the rep scoping condition.
 //   - When NOT set, neither bound appears in the SQL.
 
 vi.mock("../src/db.js", () => ({
@@ -57,12 +57,12 @@ function createTenantDbCapturingWhere() {
   };
 }
 
-describe("getDeals — contract_signed_date filter (rep dashboard YTD/MTD click-through)", () => {
+describe("getDeals — signed-contract filter (rep dashboard YTD/MTD click-through)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  it("emits >= and <= bounds on contract_signed_date plus rep scoping when both set", async () => {
+  it("emits >= and <= bounds on contract_signed_at date fallback plus rep scoping when both set", async () => {
     const { db, capturedWheres } = createTenantDbCapturingWhere();
     const { getDeals } = await import("../src/modules/deals/service.js");
 
@@ -83,14 +83,14 @@ describe("getDeals — contract_signed_date filter (rep dashboard YTD/MTD click-
     expect(capturedWheres.length).toBeGreaterThan(0);
     const sql = capturedWheres.map(extractSqlText).join("\n");
 
-    expect(sql).toMatch(/contract_signed_date.*>=/);
-    expect(sql).toMatch(/contract_signed_date.*<=/);
+    expect(sql).toMatch(/coalesce\(.*contract_signed_at.*::date.*contract_signed_date.*\).*>=/is);
+    expect(sql).toMatch(/coalesce\(.*contract_signed_at.*::date.*contract_signed_date.*\).*<=/is);
     expect(sql).toContain("assigned_rep_id");
     // is_active default still applied
     expect(sql).toContain("is_active");
   });
 
-  it("omits contract_signed_date bounds entirely when filter not set", async () => {
+  it("omits signed-contract bounds entirely when filter not set", async () => {
     const { db, capturedWheres } = createTenantDbCapturingWhere();
     const { getDeals } = await import("../src/modules/deals/service.js");
 
@@ -104,6 +104,7 @@ describe("getDeals — contract_signed_date filter (rep dashboard YTD/MTD click-
     expect(capturedWheres.length).toBeGreaterThan(0);
     const sql = capturedWheres.map(extractSqlText).join("\n");
 
+    expect(sql).not.toContain("contract_signed_at");
     expect(sql).not.toContain("contract_signed_date");
   });
 });
