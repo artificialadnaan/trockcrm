@@ -1,5 +1,6 @@
 export const DOMAIN_EVENTS = {
   DEAL_STAGE_CHANGED: "deal.stage.changed",
+  DEAL_OPPORTUNITY_ENTERED: "deal.opportunity.entered",
   DEAL_WON: "deal.won",
   DEAL_LOST: "deal.lost",
   CONTACT_CREATED: "contact.created",
@@ -20,6 +21,23 @@ export const DOMAIN_EVENTS = {
 } as const;
 
 export type DomainEventName = (typeof DOMAIN_EVENTS)[keyof typeof DOMAIN_EVENTS];
+
+export interface DealOpportunityEnteredEventPayload {
+  eventName: typeof DOMAIN_EVENTS.DEAL_OPPORTUNITY_ENTERED;
+  eventId: string;
+  idempotencyKey: string;
+  dealId: string;
+  dealNumber: string;
+  dealName: string;
+  officeId: string | null;
+  workflowRoute: "normal" | "service";
+  fromStageId: string;
+  toStageId: string;
+  toStageSlug: "opportunity";
+  enteredAt: Date;
+  requestedBy: string;
+  source: "crm_stage_change";
+}
 
 export interface DomainEvent<T = unknown> {
   name: DomainEventName;

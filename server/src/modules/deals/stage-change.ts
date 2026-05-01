@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { eq, and, desc, sql, inArray } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
@@ -10,8 +11,9 @@ import {
 import type * as schema from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
 import { DOMAIN_EVENTS } from "../../events/types.js";
+import { isOpportunityRfpEventEnabled } from "../../config/feature-flags.js";
 import { validateStageGate } from "./stage-gate.js";
-import type { UserRole } from "@trock-crm/shared/types";
+import type { DealOpportunityEnteredEventPayload, UserRole } from "@trock-crm/shared/types";
 import { createStageTimers } from "./timer-service.js";
 import { activateDealScopingIntake, evaluateDealScopingReadiness } from "./scoping-service.js";
 import {
@@ -68,6 +70,7 @@ export interface StageChangeInput {
   targetStageId: string;
   userId: string;
   userRole: UserRole;
+  officeId?: string;
   overrideReason?: string;
   lostReasonId?: string;
   lostNotes?: string;
@@ -110,7 +113,7 @@ export async function changeDealStage(
   tenantDb: TenantDb,
   input: StageChangeInput
 ): Promise<StageChangeResult> {
-  const { dealId, targetStageId, userId, userRole, overrideReason, lostReasonId, lostNotes, lostCompetitor } = input;
+  const { dealId, targetStageId, userId, userRole, officeId, overrideReason, lostReasonId, lostNotes, lostCompetitor } = input;
 
   // Lock the deal row FOR UPDATE to prevent concurrent stage changes.
   const currentDeal = await tenantDb
@@ -229,6 +232,18 @@ export async function changeDealStage(
     stageId: targetStageId,
     stageEnteredAt: new Date(),
   };
+  const shouldEmitOpportunityEntered =
+    isOpportunityRfpEventEnabled() &&
+    targetStage.slug === "opportunity" &&
+    currentStage.slug !== "opportunity" &&
+    currentDeal[0].rfpApprovalRequestedAt == null;
+  const opportunityEventId = shouldEmitOpportunityEntered ? randomUUID() : null;
+
+  if (shouldEmitOpportunityEntered) {
+    dealUpdates.rfpApprovalRequestedAt = dealUpdates.stageEnteredAt;
+    dealUpdates.rfpApprovalRequestEventId = opportunityEventId;
+    dealUpdates.rfpApprovalRequestedBy = userId;
+  }
   const shouldResetBidBoardOwnership =
     inferredOwnership.isBidBoardOwned &&
     Boolean(estimatingBoundary) &&
@@ -368,6 +383,36 @@ export async function changeDealStage(
     payload: { eventName: "deal.stage.changed", ...stageChangedPayload },
     status: "pending",
   });
+
+  if (shouldEmitOpportunityEntered && opportunityEventId) {
+    const opportunityPayload = {
+      eventName: DOMAIN_EVENTS.DEAL_OPPORTUNITY_ENTERED,
+      eventId: opportunityEventId,
+      idempotencyKey: `deal:${dealId}:rfp_approval:lifetime`,
+      dealId,
+      dealNumber: updatedDeal.dealNumber,
+      dealName: updatedDeal.name,
+      officeId: officeId ?? null,
+      workflowRoute: updatedDeal.workflowRoute,
+      fromStageId: currentStage.id,
+      toStageId: targetStage.id,
+      toStageSlug: "opportunity",
+      enteredAt: dealUpdates.stageEnteredAt,
+      requestedBy: userId,
+      source: "crm_stage_change",
+    } satisfies DealOpportunityEnteredEventPayload;
+    eventsToEmit.push({
+      name: DOMAIN_EVENTS.DEAL_OPPORTUNITY_ENTERED,
+      payload: opportunityPayload,
+    });
+    eventsEmitted.push(DOMAIN_EVENTS.DEAL_OPPORTUNITY_ENTERED);
+    await tenantDb.insert(jobQueue).values({
+      jobType: "domain_event",
+      payload: opportunityPayload,
+      officeId: officeId ?? null,
+      status: "pending",
+    });
+  }
 
   if (isEstimatingBoundaryStageSlug(targetStage.slug, updatedDeal.workflowRoute)) {
     const scopingActivatedPayload = {

@@ -612,6 +612,7 @@ router.post("/:id/stage", async (req, res, next) => {
       targetStageId,
       userId: req.user!.id,
       userRole: req.user!.role,
+      officeId: req.user!.activeOfficeId ?? req.user!.officeId,
       overrideReason,
       lostReasonId,
       lostNotes,

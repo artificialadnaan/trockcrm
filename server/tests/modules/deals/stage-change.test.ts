@@ -52,6 +52,9 @@ type FakeDeal = {
   lostCompetitor: string | null;
   lostAt: Date | null;
   awardedAmount: string | null;
+  rfpApprovalRequestedAt: Date | null;
+  rfpApprovalRequestEventId: string | null;
+  rfpApprovalRequestedBy: string | null;
 };
 
 type FakeTenantDb = ReturnType<typeof createTenantDb>;
@@ -77,6 +80,9 @@ function createTenantDb(overrides?: Partial<FakeDeal>) {
         lostCompetitor: null,
         lostAt: null,
         awardedAmount: null,
+        rfpApprovalRequestedAt: null,
+        rfpApprovalRequestEventId: null,
+        rfpApprovalRequestedBy: null,
         ...overrides,
       },
     ] as FakeDeal[],
@@ -186,6 +192,7 @@ function createTenantDb(overrides?: Partial<FakeDeal>) {
 describe("changeDealStage", () => {
   beforeEach(() => {
     vi.resetAllMocks();
+    delete process.env.ENABLE_OPPORTUNITY_RFP_EVENT;
     vi.mocked(scopingService.activateDealScopingIntake).mockResolvedValue({
       readiness: { status: "ready" },
     } as never);
@@ -259,6 +266,185 @@ describe("changeDealStage", () => {
 
     expect(result.deal.bidBoardProjectNumber).toBeNull();
     vi.useRealTimers();
+  });
+
+  it("emits deal.opportunity.entered once when the feature flag is enabled and CRM enters Opportunity", async () => {
+    process.env.ENABLE_OPPORTUNITY_RFP_EVENT = "true";
+    vi.setSystemTime(new Date("2026-05-01T18:00:00.000Z"));
+    const tenantDb = createTenantDb({
+      stageId: "stage-sales-validation",
+    });
+    vi.mocked(validateStageGate).mockResolvedValue({
+      allowed: true,
+      isBackwardMove: false,
+      requiresOverride: false,
+      targetStage: {
+        id: "stage-opportunity",
+        name: "Opportunity",
+        slug: "opportunity",
+        isTerminal: false,
+        displayOrder: 1,
+      },
+      currentStage: {
+        id: "stage-sales-validation",
+        name: "Sales Validation",
+        slug: "sales_validation",
+        isTerminal: false,
+        displayOrder: 0,
+      },
+    } as never);
+
+    const result = await changeDealStage(tenantDb as never, {
+      dealId: "deal-1",
+      targetStageId: "stage-opportunity",
+      userId: "user-1",
+      userRole: "director",
+      officeId: "office-1",
+    });
+
+    expect(result.eventsEmitted).toContain("deal.opportunity.entered");
+    expect(result.deal.rfpApprovalRequestedAt).toEqual(new Date("2026-05-01T18:00:00.000Z"));
+    expect(result.deal.rfpApprovalRequestEventId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+    );
+    expect(result.deal.rfpApprovalRequestedBy).toBe("user-1");
+
+    const opportunityJobs = tenantDb.state.jobs.filter(
+      (job) => (job.payload as { eventName?: string }).eventName === "deal.opportunity.entered"
+    );
+    expect(opportunityJobs).toHaveLength(1);
+    expect(opportunityJobs[0]?.payload).toMatchObject({
+      eventName: "deal.opportunity.entered",
+      idempotencyKey: "deal:deal-1:rfp_approval:lifetime",
+      dealId: "deal-1",
+      dealNumber: "TR-2026-0001",
+      dealName: "Palm Villas",
+      officeId: "office-1",
+      workflowRoute: "normal",
+      fromStageId: "stage-sales-validation",
+      toStageId: "stage-opportunity",
+      toStageSlug: "opportunity",
+      requestedBy: "user-1",
+      source: "crm_stage_change",
+    });
+    expect(opportunityJobs[0]?.officeId).toBe("office-1");
+    vi.useRealTimers();
+  });
+
+  it("suppresses deal.opportunity.entered after the lifetime request marker is set", async () => {
+    process.env.ENABLE_OPPORTUNITY_RFP_EVENT = "true";
+    const tenantDb = createTenantDb({
+      rfpApprovalRequestedAt: new Date("2026-04-30T18:00:00.000Z"),
+      rfpApprovalRequestEventId: "11111111-1111-4111-8111-111111111111",
+      rfpApprovalRequestedBy: "user-previous",
+    });
+    vi.mocked(validateStageGate).mockResolvedValue({
+      allowed: true,
+      isBackwardMove: true,
+      requiresOverride: false,
+      targetStage: {
+        id: "stage-opportunity",
+        name: "Opportunity",
+        slug: "opportunity",
+        isTerminal: false,
+        displayOrder: 1,
+      },
+      currentStage: {
+        id: "stage-estimating",
+        name: "Estimating",
+        slug: "estimating",
+        isTerminal: false,
+        displayOrder: 2,
+      },
+    } as never);
+
+    const result = await changeDealStage(tenantDb as never, {
+      dealId: "deal-1",
+      targetStageId: "stage-opportunity",
+      userId: "user-1",
+      userRole: "director",
+      officeId: "office-1",
+    });
+
+    expect(result.eventsEmitted).not.toContain("deal.opportunity.entered");
+    expect(result.deal.rfpApprovalRequestedAt).toEqual(new Date("2026-04-30T18:00:00.000Z"));
+    expect(result.deal.rfpApprovalRequestEventId).toBe("11111111-1111-4111-8111-111111111111");
+    expect(result.deal.rfpApprovalRequestedBy).toBe("user-previous");
+    expect(
+      tenantDb.state.jobs.filter(
+        (job) => (job.payload as { eventName?: string }).eventName === "deal.opportunity.entered"
+      )
+    ).toHaveLength(0);
+  });
+
+  it("does not emit deal.opportunity.entered when the feature flag is disabled", async () => {
+    const tenantDb = createTenantDb();
+    vi.mocked(validateStageGate).mockResolvedValue({
+      allowed: true,
+      isBackwardMove: false,
+      requiresOverride: false,
+      targetStage: {
+        id: "stage-opportunity",
+        name: "Opportunity",
+        slug: "opportunity",
+        isTerminal: false,
+        displayOrder: 1,
+      },
+      currentStage: {
+        id: "stage-sales-validation",
+        name: "Sales Validation",
+        slug: "sales_validation",
+        isTerminal: false,
+        displayOrder: 0,
+      },
+    } as never);
+
+    const result = await changeDealStage(tenantDb as never, {
+      dealId: "deal-1",
+      targetStageId: "stage-opportunity",
+      userId: "user-1",
+      userRole: "director",
+      officeId: "office-1",
+    });
+
+    expect(result.eventsEmitted).not.toContain("deal.opportunity.entered");
+    expect(result.deal.rfpApprovalRequestedAt).toBeNull();
+    expect(result.deal.rfpApprovalRequestEventId).toBeNull();
+    expect(result.deal.rfpApprovalRequestedBy).toBeNull();
+  });
+
+  it("does not emit deal.opportunity.entered for non-Opportunity stage changes", async () => {
+    process.env.ENABLE_OPPORTUNITY_RFP_EVENT = "true";
+    const tenantDb = createTenantDb();
+    vi.mocked(validateStageGate).mockResolvedValue({
+      allowed: true,
+      isBackwardMove: false,
+      requiresOverride: false,
+      targetStage: {
+        id: "stage-sales-validation",
+        name: "Sales Validation",
+        slug: "sales_validation",
+        isTerminal: false,
+        displayOrder: 0,
+      },
+      currentStage: {
+        id: "stage-opportunity",
+        name: "Opportunity",
+        slug: "opportunity",
+        isTerminal: false,
+        displayOrder: 1,
+      },
+    } as never);
+
+    const result = await changeDealStage(tenantDb as never, {
+      dealId: "deal-1",
+      targetStageId: "stage-sales-validation",
+      userId: "user-1",
+      userRole: "director",
+      officeId: "office-1",
+    });
+
+    expect(result.eventsEmitted).not.toContain("deal.opportunity.entered");
   });
 
   it("marks service deals as Bid Board-owned when CRM hands them into service estimating", async () => {
