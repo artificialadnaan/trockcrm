@@ -11,3 +11,4 @@ tests/audit/.env
 *.tsbuildinfo
 test-results/
 .playwright-cli/
+tmp/staging-dumps/*.env

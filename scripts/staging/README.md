@@ -7,9 +7,12 @@ The scripts do not run migrations automatically. They only create and tear down 
 ## Prerequisites
 
 - Railway CLI authenticated with access to the `T Rock CRM` project.
+- `RAILWAY_API_TOKEN` set to an account or workspace token for GraphQL API calls.
 - `pg_dump`, `pg_restore`, and `pg_isready` installed locally.
 - Node.js available locally.
 - Production Railway Postgres backups enabled before any production-affecting migration work.
+
+Create an account or workspace token from Railway account settings. Railway's API docs explain token types at <https://docs.railway.com/reference/integrations>. Use `RAILWAY_API_TOKEN` for account/workspace tokens; do not use `RAILWAY_TOKEN` for GraphQL Bearer auth because project tokens require a different header.
 
 Defaults:
 
@@ -23,6 +26,7 @@ Override with:
 export RAILWAY_PROJECT_ID='<project-id>'
 export RAILWAY_ENVIRONMENT_ID='<environment-id>'
 export PRODUCTION_DB_SERVICE='Postgres'
+export RAILWAY_API_TOKEN='<account-or-workspace-token>'
 ```
 
 ## Create an Ephemeral Database
@@ -46,14 +50,21 @@ The script will:
 3. Provision a new Railway Postgres service named `staging-ephemeral-YYYYMMDD-HHMM`.
 4. Wait for the new database URL and connection readiness.
 5. Restore the production dump into the ephemeral database.
-6. Print an `export DATABASE_URL='...'` command for local verification.
+6. Write the ephemeral `DATABASE_URL` export line to a restricted env file under `tmp/staging-dumps/`.
+7. Print a redacted host/port/database summary and a `source <path>` instruction.
 
 ## Run Migration Verification Against the Ephemeral Database
 
-After the create script prints the ephemeral database URL, export it in the same shell:
+After the create script finishes, it prints an env file path like:
 
 ```bash
-export DATABASE_URL='<ephemeral-database-public-url>'
+tmp/staging-dumps/ephemeral-20260501-1730.env
+```
+
+Load it in the same shell:
+
+```bash
+source tmp/staging-dumps/ephemeral-20260501-1730.env
 ```
 
 Then run the migration and verification commands for the PR under test. For PR 1:
@@ -93,6 +104,14 @@ The actual service cost is higher because the Postgres container also consumes C
 ## Safety Notes
 
 - Never point `DATABASE_URL` at production for migration rehearsals.
-- Use the printed ephemeral `DATABASE_URL` only in the local shell running verification.
 - Do not leave `staging-ephemeral-*` services running after the PR verification gate is complete.
 - Do not use this workflow as a long-lived staging environment.
+
+## Security
+
+Ephemeral staging databases contain a full restore of production data. Treat the dump file, generated env file, and ephemeral Railway service as sensitive production data.
+
+- The create script writes credentials to `tmp/staging-dumps/ephemeral-*.env` with file mode `600`.
+- `tmp/staging-dumps/*.env` is gitignored and must not be copied into tickets, PR comments, chat, or logs.
+- Tear down each ephemeral database promptly after verification, ideally within 4 hours of creation.
+- Delete stale dump/env files from local machines once the verification record no longer needs them.
