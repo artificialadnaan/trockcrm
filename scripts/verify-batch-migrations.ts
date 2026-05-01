@@ -5,6 +5,7 @@ const MIGRATIONS = [
   "0060_company_verification_rejected.sql",
   "0061_deal_contract_signed_date.sql",
   "0062_deal_signed_commissions.sql",
+  "0063_contract_signed_at_and_rfp_opportunity_event.sql",
 ];
 
 (async () => {
@@ -73,6 +74,41 @@ const MIGRATIONS = [
       );
       console.log(
         `  0062: deal_signed_commissions table: ${dscTable.length === 1 ? "present ✓" : "MISSING ✗"}`
+      );
+
+      // 0063: contract/RFP event columns and indexes should exist
+      const { rows: eventColumns } = await client.query(
+        `SELECT column_name FROM information_schema.columns
+         WHERE table_schema = $1
+           AND table_name = 'deals'
+           AND column_name IN (
+             'contract_signed_at',
+             'rfp_approval_requested_at',
+             'rfp_approval_request_event_id',
+             'rfp_approval_requested_by'
+           )
+         ORDER BY column_name`,
+        [schema]
+      );
+      console.log(
+        `  0063: deals contract/RFP event columns: ${eventColumns.length}/4 present` +
+          (eventColumns.length === 4 ? " ✓" : " ✗")
+      );
+
+      const { rows: eventIndexes } = await client.query(
+        `SELECT indexname FROM pg_indexes
+         WHERE schemaname = $1
+           AND tablename = 'deals'
+           AND indexname IN (
+             'deals_contract_signed_at_idx',
+             'deals_rfp_approval_requested_at_idx'
+           )
+         ORDER BY indexname`,
+        [schema]
+      );
+      console.log(
+        `  0063: deals contract/RFP event indexes: ${eventIndexes.length}/2 present` +
+          (eventIndexes.length === 2 ? " ✓" : " ✗")
       );
     }
   } catch (err) {

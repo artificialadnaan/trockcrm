@@ -151,6 +151,10 @@ export const deals = pgTable("deals", {
   expectedCloseDate: date("expected_close_date"),
   actualCloseDate: date("actual_close_date"),
   contractSignedDate: date("contract_signed_date"),
+  contractSignedAt: timestamp("contract_signed_at", { withTimezone: true }),
+  rfpApprovalRequestedAt: timestamp("rfp_approval_requested_at", { withTimezone: true }),
+  rfpApprovalRequestEventId: uuid("rfp_approval_request_event_id"),
+  rfpApprovalRequestedBy: uuid("rfp_approval_requested_by"),
   lastSyncedFromHubspotAt: timestamp("last_synced_from_hubspot_at", { withTimezone: true }),
   workflowRoute: workflowRouteEnum("workflow_route").default("normal").notNull(),
   pipelineDisposition: dealPipelineDispositionEnum("pipeline_disposition")
