@@ -140,6 +140,48 @@ describe("commission reporting service", () => {
     expect(queryText).toContain("d.assigned_rep_id =");
   });
 
+  it("includes legacy estimating aliases in potential commission during migration", async () => {
+    const { getCommissionPotential } = await import("../../../src/modules/commissions/reporting-service.js");
+    const tenantDb = createMockTenantDb([
+      [
+        {
+          stage_id: "legacy-stage-1",
+          stage_name: "Estimate in Progress",
+          stage_slug: "estimate_in_progress",
+          display_order: 30,
+          deal_count: "1",
+          total_deal_value: "100000.00",
+          potential_commission: "7500.00",
+        },
+        {
+          stage_id: "legacy-stage-2",
+          stage_name: "Service Estimate Under Review",
+          stage_slug: "service_estimate_under_review",
+          display_order: 35,
+          deal_count: "1",
+          total_deal_value: "200000.00",
+          potential_commission: "15000.00",
+        },
+      ],
+    ]);
+
+    const potential = await getCommissionPotential(tenantDb, {
+      role: "admin",
+      userId: "admin-1",
+      stages: [],
+    });
+
+    const queryText = extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase();
+    expect(queryText).toContain("'estimate_in_progress'");
+    expect(queryText).toContain("'service_estimate_under_review'");
+    expect(queryText).toContain("'service_estimate_sent_to_client'");
+    expect(potential.stageGroups.map((row) => row.stageSlug)).toEqual([
+      "estimate_in_progress",
+      "service_estimate_under_review",
+    ]);
+    expect(potential.stageGroups.reduce((sum, row) => sum + row.potentialCommission, 0)).toBe(22500);
+  });
+
   it("uses pre-Contract unsigned deals for potential and signed non-lost deals for earned", async () => {
     const { getCommissionEarned, getCommissionSummary } = await import("../../../src/modules/commissions/reporting-service.js");
     const tenantDb = createMockTenantDb([[], [], [{ earned_mtd: "0", earned_ytd: "0", potential_pipeline: "0", paid_ytd: "0" }]]);
@@ -160,6 +202,9 @@ describe("commission reporting service", () => {
     expect(sqlText).toContain("'service_estimating'");
     expect(sqlText).toContain("'estimate_under_review'");
     expect(sqlText).toContain("'estimate_sent_to_client'");
+    expect(sqlText).toContain("'estimate_in_progress'");
+    expect(sqlText).toContain("'service_estimate_under_review'");
+    expect(sqlText).toContain("'service_estimate_sent_to_client'");
     expect(sqlText).toContain("contract_signed_at is null");
     expect(sqlText).toContain("contract_signed_date is null");
     expect(sqlText).toContain("coalesce(d.contract_signed_at::date, d.contract_signed_date, dsc.contract_signed_date_at_signing) is not null");
