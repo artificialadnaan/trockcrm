@@ -1,10 +1,13 @@
 import type { PipelineStage } from "@/hooks/use-pipeline-config";
+import { isSelectableDealStageSlug } from "@/lib/pipeline-ownership";
 
 export function getNewDealStages(stages: PipelineStage[]) {
   return stages.filter(
     (stage) =>
+      stage.isActivePipeline &&
       stage.workflowFamily === "standard_deal" &&
-      !stage.isTerminal,
+      !stage.isTerminal &&
+      isSelectableDealStageSlug(stage.slug),
   );
 }
 

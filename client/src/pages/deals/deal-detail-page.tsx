@@ -48,6 +48,7 @@ import {
   getCanonicalDealStageSlugs,
   getDealStageLabelBySlug,
   isEstimatingBoundaryStageSlug,
+  isSelectableDealStageSlug,
   normalizeDealStageSlug,
 } from "@/lib/pipeline-ownership";
 import {
@@ -109,7 +110,12 @@ export function DealDetailPage() {
   const bidBoardOwnership = deal?.bidBoardOwnership;
   const isBidBoardOwned = Boolean(deal?.isBidBoardOwned || bidBoardOwnership?.isOwned);
   const workflowRoute = deal?.workflowRoute ?? "normal";
-  const dealStages = stages.filter((stage) => toCanonicalDealStageSlug(stage.slug, workflowRoute) != null);
+  const dealStages = stages.filter(
+    (stage) =>
+      stage.isActivePipeline !== false &&
+      isSelectableDealStageSlug(stage.slug) &&
+      toCanonicalDealStageSlug(stage.slug, workflowRoute) != null
+  );
   const canonicalStageSlugs = getCanonicalDealStageSlugs(workflowRoute) as string[];
   const canonicalStageOrder = new Map(
     canonicalStageSlugs.map((slug, index) => [slug, index] as const)
@@ -206,8 +212,9 @@ export function DealDetailPage() {
   const currentStageSlug = currentStage?.slug ?? "";
   const isOpportunityStage = canonicalCurrentStageSlug === "opportunity";
   const showPunchList =
-    canonicalCurrentStageSlug === "sent_to_production" ||
-    canonicalCurrentStageSlug === "service_sent_to_production";
+    canonicalCurrentStageSlug === "won" ||
+    currentStageSlug === "sent_to_production" ||
+    currentStageSlug === "service_sent_to_production";
   const showCloseout = showPunchList || currentStageSlug === "close_out";
 
   const tabs: { key: Tab; label: string }[] = [
@@ -394,7 +401,7 @@ export function DealDetailPage() {
                 render={<Button variant="outline">Reopen Deal</Button>}
               />
               <DropdownMenuContent align="end">
-                {stages
+                {dealStages
                   .filter((s) => !s.isTerminal)
                   .map((s) => (
                     <DropdownMenuItem

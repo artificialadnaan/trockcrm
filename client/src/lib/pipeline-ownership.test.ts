@@ -1,12 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
   getCanonicalDealStageSlugs,
+  getDealBoardStageSlugs,
   getDealStageLabelBySlug,
   getDealColumnOwnership,
   getDealStageMetadata,
   getLeadBoardStageLabel,
   getLeadStageMetadata,
   isBidBoardMirroredStageSlug,
+  isHistoricalDealStageAliasSlug,
+  isSelectableDealStageSlug,
   getWorkflowRouteLabel,
   LEAD_BOARD_STAGE_SLUGS,
   normalizeDealStageSlug,
@@ -153,5 +156,48 @@ describe("pipeline ownership helpers", () => {
     ]);
     expect(getDealStageLabelBySlug("estimate_sent_to_client")).toBe("Estimate Sent to Client");
     expect(getDealStageLabelBySlug("won")).toBe("Won");
+  });
+
+  it("exposes the final active board order with service estimating as a selectable column", () => {
+    expect(getDealBoardStageSlugs()).toEqual([
+      "opportunity",
+      "estimating",
+      "service_estimating",
+      "estimate_under_review",
+      "estimate_sent_to_client",
+      "contract",
+      "won",
+      "lost",
+    ]);
+  });
+
+  it("keeps historical aliases renderable but not selectable", () => {
+    expect(isHistoricalDealStageAliasSlug("sent_to_production")).toBe(true);
+    expect(isHistoricalDealStageAliasSlug("service_estimate_sent_to_client")).toBe(true);
+    expect(isSelectableDealStageSlug("sent_to_production")).toBe(false);
+    expect(isSelectableDealStageSlug("estimate_in_progress")).toBe(false);
+    expect(isSelectableDealStageSlug("won")).toBe(true);
+
+    const historical = getDealStageMetadata(
+      {
+        stageId: "stage-sent-to-production",
+        workflowRoute: "normal",
+        isBidBoardOwned: false,
+        bidBoardStageSlug: null,
+        readOnlySyncedAt: null,
+      },
+      [
+        ...stages,
+        {
+          id: "stage-sent-to-production",
+          name: "Sent to Production",
+          slug: "sent_to_production",
+        },
+      ]
+    );
+
+    expect(historical.slug).toBe("won");
+    expect(historical.label).toBe("Sent to Production");
+    expect(historical.isMirroredStage).toBe(true);
   });
 });

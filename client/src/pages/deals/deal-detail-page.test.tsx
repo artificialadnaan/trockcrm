@@ -227,11 +227,16 @@ describe("DealDetailPage", () => {
     mocks.usePipelineStagesMock.mockReturnValue({
       stages: [
         { id: "stage-opportunity", name: "Opportunity", slug: "opportunity", workflowFamily: "standard_deal", displayOrder: 0, isTerminal: false },
-        { id: "stage-estimating", name: "Estimate in Progress", slug: "estimate_in_progress", workflowFamily: "standard_deal", displayOrder: 1, isTerminal: false },
+        { id: "stage-estimating", name: "Estimating", slug: "estimating", workflowFamily: "standard_deal", displayOrder: 1, isTerminal: false },
+        { id: "stage-service-estimating", name: "Service Estimating", slug: "service_estimating", workflowFamily: "service_deal", displayOrder: 2, isTerminal: false },
         { id: "stage-under-review", name: "Estimate Under Review", slug: "estimate_under_review", workflowFamily: "standard_deal", displayOrder: 2, isTerminal: false },
         { id: "stage-sent", name: "Estimate Sent to Client", slug: "estimate_sent_to_client", workflowFamily: "standard_deal", displayOrder: 3, isTerminal: false },
-        { id: "stage-production", name: "Sent to Production", slug: "sent_to_production", workflowFamily: "standard_deal", displayOrder: 4, isTerminal: false },
-        { id: "stage-lost", name: "Production Lost", slug: "production_lost", workflowFamily: "standard_deal", displayOrder: 5, isTerminal: true },
+        { id: "stage-contract", name: "Contract", slug: "contract", workflowFamily: "standard_deal", displayOrder: 4, isTerminal: false },
+        { id: "stage-won", name: "Won", slug: "won", workflowFamily: "standard_deal", displayOrder: 5, isTerminal: true },
+        { id: "stage-lost", name: "Lost", slug: "lost", workflowFamily: "standard_deal", displayOrder: 6, isTerminal: true },
+        { id: "historical-estimate-in-progress", name: "Estimate in Progress", slug: "estimate_in_progress", workflowFamily: "standard_deal", displayOrder: 7, isTerminal: false, isActivePipeline: false },
+        { id: "historical-sent-to-production", name: "Sent to Production", slug: "sent_to_production", workflowFamily: "standard_deal", displayOrder: 8, isTerminal: true, isActivePipeline: false },
+        { id: "historical-production-lost", name: "Production Lost", slug: "production_lost", workflowFamily: "standard_deal", displayOrder: 9, isTerminal: true, isActivePipeline: false },
       ],
     });
 
@@ -292,7 +297,7 @@ describe("DealDetailPage", () => {
     const managedCount = (html.match(/Bid Board managed/g) ?? []).length;
 
     expect(html).toContain("Move Stage");
-    expect(html).toContain('data-disabled="false">Estimate in Progress');
+    expect(html).toContain('data-disabled="false">Estimating');
     expect(managedCount).toBe(0);
   });
 
@@ -301,14 +306,18 @@ describe("DealDetailPage", () => {
       stages: [
         { id: "stage-opportunity", name: "Opportunity", slug: "opportunity", workflowFamily: "standard_deal", displayOrder: 0, isTerminal: false },
         { id: "legacy-estimating", name: "Estimating", slug: "estimating", workflowFamily: "standard_deal", displayOrder: 1, isTerminal: false },
-        { id: "legacy-bid-sent", name: "Bid Sent", slug: "bid_sent", workflowFamily: "standard_deal", displayOrder: 2, isTerminal: false },
-        { id: "legacy-production", name: "In Production", slug: "in_production", workflowFamily: "standard_deal", displayOrder: 3, isTerminal: false },
-        { id: "legacy-won", name: "Closed Won", slug: "closed_won", workflowFamily: "standard_deal", displayOrder: 4, isTerminal: false },
-        { id: "legacy-lost", name: "Closed Lost", slug: "closed_lost", workflowFamily: "standard_deal", displayOrder: 5, isTerminal: true },
+        { id: "stage-service-estimating", name: "Service Estimating", slug: "service_estimating", workflowFamily: "service_deal", displayOrder: 2, isTerminal: false },
         { id: "stage-under-review", name: "Estimate Under Review", slug: "estimate_under_review", workflowFamily: "standard_deal", displayOrder: 6, isTerminal: false },
         { id: "stage-sent", name: "Estimate Sent to Client", slug: "estimate_sent_to_client", workflowFamily: "standard_deal", displayOrder: 7, isTerminal: false },
-        { id: "stage-production", name: "Sent to Production", slug: "sent_to_production", workflowFamily: "standard_deal", displayOrder: 8, isTerminal: false },
-        { id: "stage-lost", name: "Production Lost", slug: "production_lost", workflowFamily: "standard_deal", displayOrder: 9, isTerminal: true },
+        { id: "stage-contract", name: "Contract", slug: "contract", workflowFamily: "standard_deal", displayOrder: 8, isTerminal: false },
+        { id: "stage-won", name: "Won", slug: "won", workflowFamily: "standard_deal", displayOrder: 9, isTerminal: true },
+        { id: "stage-lost", name: "Lost", slug: "lost", workflowFamily: "standard_deal", displayOrder: 10, isTerminal: true },
+        { id: "legacy-estimate-in-progress", name: "Estimate in Progress", slug: "estimate_in_progress", workflowFamily: "standard_deal", displayOrder: 11, isTerminal: false, isActivePipeline: false },
+        { id: "legacy-bid-sent", name: "Bid Sent", slug: "bid_sent", workflowFamily: "standard_deal", displayOrder: 12, isTerminal: false, isActivePipeline: false },
+        { id: "legacy-production", name: "In Production", slug: "in_production", workflowFamily: "standard_deal", displayOrder: 13, isTerminal: false, isActivePipeline: false },
+        { id: "legacy-won", name: "Closed Won", slug: "closed_won", workflowFamily: "standard_deal", displayOrder: 14, isTerminal: true, isActivePipeline: false },
+        { id: "legacy-sent-to-production", name: "Sent to Production", slug: "sent_to_production", workflowFamily: "standard_deal", displayOrder: 15, isTerminal: true, isActivePipeline: false },
+        { id: "legacy-lost", name: "Closed Lost", slug: "closed_lost", workflowFamily: "standard_deal", displayOrder: 16, isTerminal: true, isActivePipeline: false },
       ],
     });
     mocks.useDealDetailMock.mockReturnValueOnce({
@@ -326,12 +335,14 @@ describe("DealDetailPage", () => {
 
     const html = renderPage();
 
-    expect(html).toContain("Estimate in Progress");
+    expect(html).toContain("Estimating");
     expect(html).toContain("Estimate Under Review");
+    expect(html).toContain("Contract");
     expect(html).not.toContain("Bid Sent");
     expect(html).not.toContain("Closed Won");
     expect(html).not.toContain("Closed Lost");
     expect(html).not.toContain("In Production");
+    expect(html).not.toContain("Sent to Production");
   });
 
   it("treats legacy estimating as the handoff boundary when the server reports a canonical handoff slug", () => {
@@ -351,7 +362,7 @@ describe("DealDetailPage", () => {
     const managedCount = (html.match(/Bid Board managed/g) ?? []).length;
 
     expect(html).toContain("Move Stage");
-    expect(managedCount).toBe(4);
+    expect(managedCount).toBe(5);
   });
 
   it("shows the Close-Out tab for canonical sent-to-production deals", () => {
@@ -360,7 +371,7 @@ describe("DealDetailPage", () => {
       error: null,
       refetch: vi.fn(),
       deal: makeDealDetail({
-        stageId: "stage-production",
+        stageId: "historical-sent-to-production",
         workflowRoute: "normal",
         bidBoardStageSlug: "sent_to_production",
       }),
