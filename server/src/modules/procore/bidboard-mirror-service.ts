@@ -62,6 +62,30 @@ const SHARED_MIRRORED_STAGE_SLUGS = new Set([
   "lost",
 ]);
 
+const BID_BOARD_STAGE_INPUT_ALIASES = new Map<string, string>([
+  ["estimating", "estimating"],
+  ["service estimating", "service_estimating"],
+  ["estimate under review", "estimate_under_review"],
+  ["estimate sent to client", "estimate_sent_to_client"],
+  ["contract", "contract"],
+  ["won", "won"],
+  ["lost", "lost"],
+  ["opportunity", "opportunity"],
+  ["dd", "opportunity"],
+  ["bid sent", "estimate_sent_to_client"],
+  ["estimate in progress", "estimating"],
+  ["internal review", "estimate_under_review"],
+  ["proposal sent", "estimate_sent_to_client"],
+  ["sent to production", "won"],
+  ["service sent to production", "won"],
+  ["closed won", "won"],
+  ["service won", "won"],
+  ["production lost", "lost"],
+  ["service lost", "lost"],
+  ["closed lost", "lost"],
+  ["deal canceled", "lost"],
+]);
+
 type MirrorableDeal = {
   id: string;
   stageId: string;
@@ -128,6 +152,29 @@ function normalizeOptionalText(value: string | null | undefined) {
   return normalized.length > 0 ? normalized : null;
 }
 
+function normalizeBidBoardStageLookupKey(value: string) {
+  return value
+    .trim()
+    .replace(/[\u2013\u2014]/g, "-")
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .toLowerCase();
+}
+
+export function normalizeBidBoardStageSlug(
+  value: string,
+  workflowRoute: WorkflowRoute
+): string | null {
+  const normalizedKey = normalizeBidBoardStageLookupKey(value);
+  const mapped = BID_BOARD_STAGE_INPUT_ALIASES.get(normalizedKey);
+
+  if (mapped === "estimating" && workflowRoute === "service") {
+    return "service_estimating";
+  }
+
+  return mapped ?? null;
+}
+
 function parseOptionalDate(value: Date | string | null | undefined) {
   if (!value) {
     return null;
@@ -155,6 +202,9 @@ function toCanonicalMirroredDealStageSlug(
   stageSlug: string,
   workflowRoute: WorkflowRoute
 ): string | null {
+  const normalizedStageSlug = normalizeBidBoardStageSlug(stageSlug, workflowRoute);
+  if (normalizedStageSlug) return normalizedStageSlug;
+
   switch (stageSlug) {
     case "opportunity":
       return stageSlug;
@@ -212,20 +262,10 @@ function deriveInternalStageFamily(input: {
   proposalStatus: string | null;
   workflowRoute: WorkflowRoute;
 }) {
-  const reviewSignal = input.proposalStatus ?? input.stageStatus;
   const canonicalStageSlug = toCanonicalMirroredDealStageSlug(
     input.stageSlug,
     input.workflowRoute
   );
-
-  if (
-    canonicalStageSlug === "estimate_sent_to_client" &&
-    (reviewSignal === "under_review" ||
-      reviewSignal === "accepted" ||
-      reviewSignal === "signed")
-  ) {
-    return "contract_review";
-  }
 
   switch (canonicalStageSlug) {
     case "estimating":

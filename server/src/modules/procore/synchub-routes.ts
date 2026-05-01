@@ -7,8 +7,10 @@ import type { Request, Response, NextFunction } from "express";
 import type { PoolClient } from "pg";
 import { pool } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
-import { buildBidBoardMirrorUpdate } from "./bidboard-mirror-service.js";
-import { workflowFamilyForRoute } from "../deals/service.js";
+import {
+  buildBidBoardMirrorUpdate,
+  normalizeBidBoardStageSlug,
+} from "./bidboard-mirror-service.js";
 import {
   buildProjectNumber,
   generateJulianDate,
@@ -120,6 +122,8 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
       procore_bid_id,
       name,
       stage_slug,
+      stage_label,
+      stage_name,
       stage_status,
       stage_family,
       estimating_substage,
@@ -145,7 +149,8 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
       workflow_route = "normal",
     } = req.body;
 
-    if (!office_slug || !bid_board_id || !name || !stage_slug) {
+    const rawStageInput = stage_slug ?? stage_label ?? stage_name;
+    if (!office_slug || !bid_board_id || !name || !rawStageInput) {
       throw new AppError(400, "office_slug, bid_board_id, name, and stage_slug are required");
     }
 
@@ -157,6 +162,12 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
     if (workflow_route !== "normal" && workflow_route !== "service") {
       throw new AppError(400, "workflow_route must be 'normal' or 'service'");
     }
+    const normalizedRequestStageSlug = normalizeBidBoardStageSlug(String(rawStageInput), workflow_route);
+    if (!normalizedRequestStageSlug) {
+      throw new AppError(400, `Unknown Bid Board stage: ${rawStageInput}`);
+    }
+    const targetWorkflowFamily =
+      normalizedRequestStageSlug === "service_estimating" ? "service_deal" : "standard_deal";
 
     // Resolve office
     const officeResult = await client.query(
@@ -229,7 +240,8 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
         [existingDealId]
       );
       const currentDeal = currentDealResult.rows[0];
-      const workflowFamily = workflowFamilyForRoute(currentDeal.workflow_route);
+      const targetLookupWorkflowFamily =
+        normalizedRequestStageSlug === "service_estimating" ? "service_deal" : "standard_deal";
       const [currentStageResult, targetStageResult] = await Promise.all([
         client.query(
           `SELECT id, slug, display_order, workflow_family
@@ -242,19 +254,19 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
           `SELECT id, slug, name, display_order, is_terminal, workflow_family,
                   required_fields, required_documents, required_approvals
              FROM public.pipeline_stage_config
-            WHERE slug = $1 AND workflow_family = $2
+           WHERE slug = $1 AND workflow_family = $2
             LIMIT 1`,
-          [stage_slug, workflowFamily]
+          [normalizedRequestStageSlug, targetLookupWorkflowFamily]
         ),
       ]);
 
       if (targetStageResult.rows.length === 0) {
-        throw new AppError(400, `Unknown stage slug for ${workflowFamily}: ${stage_slug}`);
+        throw new AppError(400, `Unknown stage slug for ${targetLookupWorkflowFamily}: ${normalizedRequestStageSlug}`);
       }
 
       const targetStage = targetStageResult.rows[0];
       const suppressOpportunityRfpEvent =
-        targetStage.slug === "opportunity" || stage_slug === "opportunity";
+        targetStage.slug === "opportunity" || normalizedRequestStageSlug === "opportunity";
       if (suppressOpportunityRfpEvent) {
         // Bid Board mirror updates are not CRM-authored stage changes. PR 4
         // intentionally suppresses deal.opportunity.entered here even if a
@@ -294,7 +306,7 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
           workflowFamily: targetStage.workflow_family,
         },
         payload: {
-          stageSlug: stage_slug,
+          stageSlug: normalizedRequestStageSlug,
           stageStatus: stage_status,
           stageFamily: stage_family,
           estimatingSubstage: estimating_substage,
@@ -443,22 +455,21 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
       await client.query("COMMIT");
       console.log(
         `[SyncHub] Updated existing deal ${existingDealId} from Bid Board push` +
-        (mirrorResult.stageChanged ? ` (stage changed to ${stage_slug})` : "")
+        (mirrorResult.stageChanged ? ` (stage changed to ${normalizedRequestStageSlug})` : "")
       );
       res.json({ status: "updated", deal_id: existingDealId, stage_changed: mirrorResult.stageChanged });
       return;
     }
 
-    const workflowFamily = workflowFamilyForRoute(workflow_route);
     const stageResult = await client.query(
       `SELECT id, slug, name, display_order, is_terminal, workflow_family
          FROM public.pipeline_stage_config
         WHERE slug = $1 AND workflow_family = $2
         LIMIT 1`,
-      [stage_slug, workflowFamily]
+      [normalizedRequestStageSlug, targetWorkflowFamily]
     );
     if (stageResult.rows.length === 0) {
-      throw new AppError(400, `Unknown stage slug for ${workflowFamily}: ${stage_slug}`);
+      throw new AppError(400, `Unknown stage slug for ${targetWorkflowFamily}: ${normalizedRequestStageSlug}`);
     }
     const targetStage = stageResult.rows[0];
     const mirrorResult = buildBidBoardMirrorUpdate({
@@ -486,7 +497,7 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
         workflowFamily: targetStage.workflow_family,
       },
       payload: {
-        stageSlug: stage_slug,
+        stageSlug: normalizedRequestStageSlug,
         stageStatus: stage_status,
         stageFamily: stage_family,
         estimatingSubstage: estimating_substage,
