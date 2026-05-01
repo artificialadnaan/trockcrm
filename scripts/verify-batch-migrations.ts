@@ -6,6 +6,31 @@ const MIGRATIONS = [
   "0061_deal_contract_signed_date.sql",
   "0062_deal_signed_commissions.sql",
   "0063_contract_signed_at_and_rfp_opportunity_event.sql",
+  "0064_bidboard_stage_v2_seed.sql",
+  "0065_bidboard_stage_v2_active_deal_backfill.sql",
+];
+
+const STAGE_V2_ACTIVE_SLUGS = [
+  "opportunity",
+  "estimating",
+  "service_estimating",
+  "estimate_under_review",
+  "estimate_sent_to_client",
+  "contract",
+  "won",
+  "lost",
+];
+
+const STAGE_V2_INACTIVE_ALIAS_SLUGS = [
+  "estimate_in_progress",
+  "service_estimate_under_review",
+  "service_estimate_sent_to_client",
+  "sent_to_production",
+  "service_sent_to_production",
+  "production_lost",
+  "service_lost",
+  "closed_won",
+  "closed_lost",
 ];
 
 (async () => {
@@ -17,6 +42,7 @@ const MIGRATIONS = [
   const client = new pg.Client({ connectionString: url });
   try {
     await client.connect();
+    let hasFailure = false;
 
     console.log("=== Migration tracking rows ===");
     const { rows: tracking } = await client.query(
@@ -34,6 +60,58 @@ const MIGRATIONS = [
       console.error(`MISSING tracking rows: ${missing.join(", ")}`);
       process.exit(1);
     }
+
+    console.log("\n=== Public stage seed checks ===");
+    const { rows: activeStageRows } = await client.query(
+      `SELECT slug
+       FROM public.pipeline_stage_config
+       WHERE slug = ANY($1::text[])
+         AND is_active_pipeline = true
+         AND (
+           (slug IN ('won', 'lost') AND is_terminal = true)
+           OR (slug NOT IN ('won', 'lost') AND is_terminal = false)
+         )
+       ORDER BY slug`,
+      [STAGE_V2_ACTIVE_SLUGS]
+    );
+    const activeStageCount = activeStageRows.length;
+    const activeStagePass = activeStageCount === STAGE_V2_ACTIVE_SLUGS.length;
+    hasFailure ||= !activeStagePass;
+    console.log(
+      `  0064: stage-v2 active rows: ${activeStageCount}/${STAGE_V2_ACTIVE_SLUGS.length} present + active` +
+        (activeStagePass ? " ✓" : " ✗")
+    );
+
+    const { rows: inactiveAliasRows } = await client.query(
+      `SELECT slug
+       FROM public.pipeline_stage_config
+       WHERE slug = ANY($1::text[])
+         AND is_active_pipeline = false
+         AND (
+           (slug IN (
+             'sent_to_production',
+             'service_sent_to_production',
+             'production_lost',
+             'service_lost',
+             'closed_won',
+             'closed_lost'
+           ) AND is_terminal = true)
+           OR (slug IN (
+             'estimate_in_progress',
+             'service_estimate_under_review',
+             'service_estimate_sent_to_client'
+           ) AND is_terminal = false)
+         )
+       ORDER BY slug`,
+      [STAGE_V2_INACTIVE_ALIAS_SLUGS]
+    );
+    const inactiveAliasCount = inactiveAliasRows.length;
+    const inactiveAliasPass = inactiveAliasCount === STAGE_V2_INACTIVE_ALIAS_SLUGS.length;
+    hasFailure ||= !inactiveAliasPass;
+    console.log(
+      `  0064: old stage aliases inactive: ${inactiveAliasCount}/${STAGE_V2_INACTIVE_ALIAS_SLUGS.length} present + inactive` +
+        (inactiveAliasPass ? " ✓" : " ✗")
+    );
 
     console.log("\n=== Per-tenant column/table existence checks ===");
     for (const schema of TENANTS) {
@@ -53,6 +131,7 @@ const MIGRATIONS = [
         `  0060: companies.company_verification_rejected_{at,by} columns: ${rejColumns.length}/2 present` +
           (rejColumns.length === 2 ? " ✓" : " ✗")
       );
+      hasFailure ||= rejColumns.length !== 2;
 
       // 0061: deals.contract_signed_date column should exist
       const { rows: csdColumn } = await client.query(
@@ -65,6 +144,7 @@ const MIGRATIONS = [
       console.log(
         `  0061: deals.contract_signed_date column: ${csdColumn.length === 1 ? "present ✓" : "MISSING ✗"}`
       );
+      hasFailure ||= csdColumn.length !== 1;
 
       // 0062: deal_signed_commissions table should exist
       const { rows: dscTable } = await client.query(
@@ -75,6 +155,7 @@ const MIGRATIONS = [
       console.log(
         `  0062: deal_signed_commissions table: ${dscTable.length === 1 ? "present ✓" : "MISSING ✗"}`
       );
+      hasFailure ||= dscTable.length !== 1;
 
       // 0063: contract/RFP event columns and indexes should exist
       const { rows: eventColumns } = await client.query(
@@ -94,6 +175,7 @@ const MIGRATIONS = [
         `  0063: deals contract/RFP event columns: ${eventColumns.length}/4 present` +
           (eventColumns.length === 4 ? " ✓" : " ✗")
       );
+      hasFailure ||= eventColumns.length !== 4;
 
       const { rows: eventIndexes } = await client.query(
         `SELECT indexname FROM pg_indexes
@@ -110,6 +192,44 @@ const MIGRATIONS = [
         `  0063: deals contract/RFP event indexes: ${eventIndexes.length}/2 present` +
           (eventIndexes.length === 2 ? " ✓" : " ✗")
       );
+      hasFailure ||= eventIndexes.length !== 2;
+
+      const { rows: activeLegacyStageDeals } = await client.query(
+        `SELECT COUNT(*)::int AS count
+         FROM ${schema}.deals AS d
+         JOIN public.pipeline_stage_config AS psc
+           ON psc.id = d.stage_id
+         WHERE COALESCE(d.is_active, true) = true
+           AND psc.slug = ANY($1::text[])`,
+        [STAGE_V2_INACTIVE_ALIAS_SLUGS]
+      );
+      const activeLegacyStageDealCount = activeLegacyStageDeals[0]?.count ?? 0;
+      const activeLegacyStageDealPass = activeLegacyStageDealCount === 0;
+      hasFailure ||= !activeLegacyStageDealPass;
+      console.log(
+        `  0065: active deals remaining on old stage slugs: ${activeLegacyStageDealCount}` +
+          (activeLegacyStageDealPass ? " ✓" : " ✗")
+      );
+
+      const { rows: activeLegacyMirrorDeals } = await client.query(
+        `SELECT COUNT(*)::int AS count
+         FROM ${schema}.deals AS d
+         WHERE COALESCE(d.is_active, true) = true
+           AND d.bid_board_stage_slug = ANY($1::text[])`,
+        [STAGE_V2_INACTIVE_ALIAS_SLUGS]
+      );
+      const activeLegacyMirrorDealCount = activeLegacyMirrorDeals[0]?.count ?? 0;
+      const activeLegacyMirrorDealPass = activeLegacyMirrorDealCount === 0;
+      hasFailure ||= !activeLegacyMirrorDealPass;
+      console.log(
+        `  0065: active deals with old bid_board_stage_slug aliases: ${activeLegacyMirrorDealCount}` +
+          (activeLegacyMirrorDealPass ? " ✓" : " ✗")
+      );
+    }
+
+    if (hasFailure) {
+      console.error("\nOne or more migration verification checks failed.");
+      process.exit(1);
     }
   } catch (err) {
     console.error("FAIL:", err instanceof Error ? err.message : String(err));
