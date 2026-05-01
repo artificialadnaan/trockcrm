@@ -21,6 +21,15 @@ import {
 } from "../../services/projectNumber.js";
 
 const router = Router();
+type WorkflowRoute = "normal" | "service";
+
+const SHARED_CANONICAL_DEAL_STAGE_SLUGS = [
+  "estimate_under_review",
+  "estimate_sent_to_client",
+  "contract",
+  "won",
+  "lost",
+] as const;
 
 /**
  * Defense-in-depth validator for schema names used in dynamic SQL.
@@ -32,6 +41,15 @@ function validateSchemaName(name: string): string {
     throw new AppError(400, "Invalid schema name");
   }
   return name;
+}
+
+function workflowFamilyForRoute(workflowRoute: WorkflowRoute) {
+  return workflowRoute === "service" ? "service_deal" : "standard_deal";
+}
+
+function targetWorkflowFamilyForStage(stageSlug: string, workflowRoute: WorkflowRoute) {
+  if (stageSlug === "service_estimating") return "service_deal";
+  return workflowFamilyForRoute(workflowRoute);
 }
 
 async function reserveDealNumberSuffix(
@@ -162,13 +180,6 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
     if (workflow_route !== "normal" && workflow_route !== "service") {
       throw new AppError(400, "workflow_route must be 'normal' or 'service'");
     }
-    const normalizedRequestStageSlug = normalizeBidBoardStageSlug(String(rawStageInput), workflow_route);
-    if (!normalizedRequestStageSlug) {
-      throw new AppError(400, `Unknown Bid Board stage: ${rawStageInput}`);
-    }
-    const targetWorkflowFamily =
-      normalizedRequestStageSlug === "service_estimating" ? "service_deal" : "standard_deal";
-
     // Resolve office
     const officeResult = await client.query(
       "SELECT id FROM public.offices WHERE slug = $1 AND is_active = true LIMIT 1",
@@ -240,8 +251,19 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
         [existingDealId]
       );
       const currentDeal = currentDealResult.rows[0];
-      const targetLookupWorkflowFamily =
-        normalizedRequestStageSlug === "service_estimating" ? "service_deal" : "standard_deal";
+      const effectiveWorkflowRoute: WorkflowRoute =
+        currentDeal.workflow_route === "service" ? "service" : "normal";
+      const normalizedRequestStageSlug = normalizeBidBoardStageSlug(
+        String(rawStageInput),
+        effectiveWorkflowRoute
+      );
+      if (!normalizedRequestStageSlug) {
+        throw new AppError(400, `Unknown Bid Board stage: ${rawStageInput}`);
+      }
+      const targetLookupWorkflowFamily = targetWorkflowFamilyForStage(
+        normalizedRequestStageSlug,
+        effectiveWorkflowRoute
+      );
       const [currentStageResult, targetStageResult] = await Promise.all([
         client.query(
           `SELECT id, slug, display_order, workflow_family
@@ -254,9 +276,18 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
           `SELECT id, slug, name, display_order, is_terminal, workflow_family,
                   required_fields, required_documents, required_approvals
              FROM public.pipeline_stage_config
-           WHERE slug = $1 AND workflow_family = $2
+            WHERE slug = $1
+              AND (
+                workflow_family = $2
+                OR (
+                  $2 = 'service_deal'
+                  AND workflow_family = 'standard_deal'
+                  AND slug = ANY($3::text[])
+                )
+              )
+            ORDER BY CASE WHEN workflow_family = $2 THEN 0 ELSE 1 END
             LIMIT 1`,
-          [normalizedRequestStageSlug, targetLookupWorkflowFamily]
+          [normalizedRequestStageSlug, targetLookupWorkflowFamily, SHARED_CANONICAL_DEAL_STAGE_SLUGS]
         ),
       ]);
 
@@ -280,7 +311,7 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
           id: currentDeal.id,
           stageId: currentDeal.stage_id,
           stageEnteredAt: currentDeal.stage_entered_at,
-          workflowRoute: currentDeal.workflow_route,
+          workflowRoute: effectiveWorkflowRoute,
           isBidBoardOwned: currentDeal.is_bid_board_owned,
           proposalStatus: currentDeal.proposal_status,
           estimatingSubstage: currentDeal.estimating_substage,
@@ -448,7 +479,7 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
           mirrorResult.updates.readOnlySyncedAt,
           mirrorResult.updates.updatedAt,
           existingDealId,
-          workflow_route,
+          effectiveWorkflowRoute,
         ]
       );
 
@@ -461,12 +492,27 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
       return;
     }
 
+    const normalizedRequestStageSlug = normalizeBidBoardStageSlug(String(rawStageInput), workflow_route);
+    if (!normalizedRequestStageSlug) {
+      throw new AppError(400, `Unknown Bid Board stage: ${rawStageInput}`);
+    }
+    const targetWorkflowFamily = targetWorkflowFamilyForStage(normalizedRequestStageSlug, workflow_route);
+
     const stageResult = await client.query(
       `SELECT id, slug, name, display_order, is_terminal, workflow_family
          FROM public.pipeline_stage_config
-        WHERE slug = $1 AND workflow_family = $2
+        WHERE slug = $1
+          AND (
+            workflow_family = $2
+            OR (
+              $2 = 'service_deal'
+              AND workflow_family = 'standard_deal'
+              AND slug = ANY($3::text[])
+            )
+          )
+        ORDER BY CASE WHEN workflow_family = $2 THEN 0 ELSE 1 END
         LIMIT 1`,
-      [normalizedRequestStageSlug, targetWorkflowFamily]
+      [normalizedRequestStageSlug, targetWorkflowFamily, SHARED_CANONICAL_DEAL_STAGE_SLUGS]
     );
     if (stageResult.rows.length === 0) {
       throw new AppError(400, `Unknown stage slug for ${targetWorkflowFamily}: ${normalizedRequestStageSlug}`);
