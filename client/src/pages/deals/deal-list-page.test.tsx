@@ -129,8 +129,19 @@ vi.mock("@/components/deals/deal-stage-badge", () => ({
 }));
 
 vi.mock("@/components/pipeline/pipeline-board", () => ({
-  PipelineBoard: ({ columns }: { columns: Array<{ stage: { name: string }; count: number }> }) => (
-    <div>{columns.map((column) => `${column.stage.name}:${column.count}`).join(" | ")}</div>
+  PipelineBoard: ({
+    columns,
+    terminalDateFilters,
+  }: {
+    columns: Array<{ stage: { name: string }; count: number }>;
+    terminalDateFilters?: { won: { preset: string }; lost: { preset: string } };
+  }) => (
+    <div>
+      {columns.map((column) => `${column.stage.name}:${column.count}`).join(" | ")}
+      {terminalDateFilters
+        ? ` | won filter:${terminalDateFilters.won.preset} | lost filter:${terminalDateFilters.lost.preset}`
+        : null}
+    </div>
   ),
 }));
 
@@ -295,8 +306,11 @@ describe("DealListPage", () => {
 
     expect(mocks.useDealBoardMock).toHaveBeenCalledWith(
       "all",
-      true
+      true,
+      { won: { preset: "30" }, lost: { preset: "30" } }
     );
+    expect(html).toContain("won filter:30");
+    expect(html).toContain("lost filter:30");
     expect(html).toContain("Opportunity");
     expect(html).toContain("Estimating");
     expect(html).toContain("Service Estimating");

@@ -22,6 +22,21 @@ const columns = [
   },
 ];
 
+const terminalColumns = [
+  {
+    stage: { id: "stage-won", name: "Won", slug: "won" },
+    count: 3,
+    totalValue: 125000,
+    cards: [],
+  },
+  {
+    stage: { id: "stage-lost", name: "Lost", slug: "lost" },
+    count: 1,
+    totalValue: 25000,
+    cards: [],
+  },
+];
+
 describe("PipelineBoard", () => {
   it("renders stage headers and cards", () => {
     const html = renderToStaticMarkup(
@@ -41,8 +56,36 @@ describe("PipelineBoard", () => {
     expect(html).toContain("TR-2026-0001");
     expect(html).toContain("$245K");
     expect(html).toContain("Dallas");
-    expect(html).toContain("8d in stage");
+    expect(html).toContain("11d in stage");
     expect(html).toContain("View all 12");
+  });
+
+  it("renders terminal date filter controls for deal Won and Lost columns", () => {
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <PipelineBoard
+          entity="deal"
+          columns={terminalColumns}
+          loading={false}
+          onOpenStage={() => undefined}
+          onOpenRecord={() => undefined}
+          terminalDateFilters={{
+            won: { preset: "30" },
+            lost: { preset: "custom", customStart: "2026-04-01", customEnd: "2026-04-30" },
+          }}
+          onTerminalDateFilterChange={() => undefined}
+        />
+      </MemoryRouter>
+    );
+
+    expect(html).toContain("Won");
+    expect(html).toContain("Lost");
+    expect(html).toContain("· 30d");
+    expect(html).toContain("· custom");
+    expect(html).toContain('aria-label="Won date filter"');
+    expect(html).toContain('aria-label="Lost date filter"');
+    expect(html).toContain('aria-label="Lost start date"');
+    expect(html).toContain("2026-04-01");
   });
 
   it("uses fixed-height scroll regions and virtualizes oversized columns", () => {

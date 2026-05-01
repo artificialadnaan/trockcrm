@@ -14,6 +14,16 @@ import { Plus, GripVertical } from "lucide-react";
 import { StageChangeDialog } from "@/components/deals/stage-change-dialog";
 import { api } from "@/lib/api";
 import { formatCurrencyCompact, bestEstimate, daysInStage } from "@/lib/deal-utils";
+import {
+  buildPipelineRequestPath,
+  daysAgo,
+  getTerminalDateFilterLabel,
+  isTerminalOutcomeSlug,
+  readTerminalDateFilter,
+  writeTerminalDateFilter,
+  type TerminalDateFilter,
+  type TerminalOutcome,
+} from "@/lib/pipeline-terminal-filters";
 import type { Deal } from "@/hooks/use-deals";
 
 interface PipelineColumn {
@@ -35,89 +45,6 @@ interface TerminalStageInfo {
   stage: { id: string; name: string; slug: string };
   deals: Deal[];
   count: number;
-}
-
-type TerminalOutcome = "won" | "lost";
-type TerminalDateFilter =
-  | { preset: "30" | "60" | "90"; customStart?: undefined; customEnd?: undefined }
-  | { preset: "custom"; customStart: string; customEnd?: string };
-
-const TERMINAL_FILTER_STORAGE_KEYS: Record<TerminalOutcome, string> = {
-  won: "pipeline_terminal_filter_won",
-  lost: "pipeline_terminal_filter_lost",
-};
-const DEFAULT_TERMINAL_DATE_FILTER: TerminalDateFilter = { preset: "30" };
-
-function isTerminalOutcomeSlug(slug: string): slug is TerminalOutcome {
-  return slug === "won" || slug === "lost";
-}
-
-function formatDateParam(date: Date) {
-  return date.toISOString().split("T")[0];
-}
-
-function daysAgo(days: number, now = new Date()) {
-  const date = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
-  date.setUTCDate(date.getUTCDate() - days);
-  return formatDateParam(date);
-}
-
-export function readTerminalDateFilter(outcome: TerminalOutcome): TerminalDateFilter {
-  if (typeof window === "undefined") return DEFAULT_TERMINAL_DATE_FILTER;
-  const raw = window.localStorage.getItem(TERMINAL_FILTER_STORAGE_KEYS[outcome]);
-  if (!raw) return DEFAULT_TERMINAL_DATE_FILTER;
-
-  try {
-    const parsed = JSON.parse(raw) as Partial<TerminalDateFilter>;
-    if (parsed.preset === "30" || parsed.preset === "60" || parsed.preset === "90") {
-      return { preset: parsed.preset };
-    }
-    if (parsed.preset === "custom" && typeof parsed.customStart === "string" && parsed.customStart) {
-      return {
-        preset: "custom",
-        customStart: parsed.customStart,
-        customEnd: typeof parsed.customEnd === "string" ? parsed.customEnd : undefined,
-      };
-    }
-  } catch {
-    return DEFAULT_TERMINAL_DATE_FILTER;
-  }
-
-  return DEFAULT_TERMINAL_DATE_FILTER;
-}
-
-export function writeTerminalDateFilter(outcome: TerminalOutcome, filter: TerminalDateFilter) {
-  if (typeof window === "undefined") return;
-  window.localStorage.setItem(TERMINAL_FILTER_STORAGE_KEYS[outcome], JSON.stringify(filter));
-}
-
-export function getTerminalDateFilterLabel(filter: TerminalDateFilter) {
-  return filter.preset === "custom" ? "custom" : `${filter.preset}d`;
-}
-
-function appendTerminalDateParams(
-  params: URLSearchParams,
-  outcome: TerminalOutcome,
-  filter: TerminalDateFilter
-) {
-  const prefix = outcome;
-  if (filter.preset === "custom") {
-    params.set(`${prefix}_since`, filter.customStart);
-    if (filter.customEnd) params.set(`${prefix}_until`, filter.customEnd);
-    return;
-  }
-
-  params.set(`${prefix}_since`, daysAgo(Number(filter.preset)));
-}
-
-export function buildPipelineRequestPath(
-  showDd: boolean,
-  filters: Record<TerminalOutcome, TerminalDateFilter>
-) {
-  const params = new URLSearchParams({ includeDd: String(showDd) });
-  appendTerminalDateParams(params, "won", filters.won);
-  appendTerminalDateParams(params, "lost", filters.lost);
-  return `/deals/pipeline?${params.toString()}`;
 }
 
 export function summarizeTerminalStageCounts(terminalStages: TerminalStageInfo[]) {

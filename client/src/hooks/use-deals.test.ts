@@ -2,6 +2,7 @@ import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "@/lib/api";
+import type { TerminalDateFilter, TerminalOutcome } from "@/lib/pipeline-terminal-filters";
 import { normalizeDealBoardResponse, useDealBoard } from "./use-deals";
 
 vi.mock("@/lib/api", () => ({
@@ -133,9 +134,10 @@ function flushEffects() {
 }
 
 let latestResult: ReturnType<typeof useDealBoard> | null = null;
+let hookTerminalDateFilters: Record<TerminalOutcome, TerminalDateFilter> | undefined;
 
 function HookProbe() {
-  latestResult = useDealBoard("mine", false);
+  latestResult = useDealBoard("mine", false, hookTerminalDateFilters);
   return null;
 }
 
@@ -165,6 +167,7 @@ async function waitForIdle() {
 describe("normalizeDealBoardResponse", () => {
   beforeEach(() => {
     latestResult = null;
+    hookTerminalDateFilters = undefined;
     vi.clearAllMocks();
   });
 
@@ -343,6 +346,37 @@ describe("normalizeDealBoardResponse", () => {
     expect((manualRefetchError as Error).message).toBe("Deal board failed");
     await waitForIdle();
     expect(latestResult?.error).toBe("Deal board failed");
+
+    await act(async () => {
+      root.unmount();
+      await flushEffects();
+    });
+    vi.unstubAllGlobals();
+  });
+
+  it("adds terminal date filters to the board request when provided", async () => {
+    const apiMock = vi.mocked(api);
+    apiMock.mockResolvedValueOnce({
+      pipelineColumns: [],
+      terminalStages: [],
+    });
+    hookTerminalDateFilters = {
+      won: { preset: "60" },
+      lost: { preset: "custom", customStart: "2026-04-01", customEnd: "2026-04-30" },
+    };
+
+    const root = await renderHook();
+    await waitForIdle();
+
+    expect(apiMock).toHaveBeenCalledTimes(1);
+    const requestPath = String(apiMock.mock.calls[0]?.[0]);
+    expect(requestPath).toContain("/deals/pipeline?");
+    expect(requestPath).toContain("scope=mine");
+    expect(requestPath).toContain("includeDd=false");
+    expect(requestPath).toContain("previewLimit=8");
+    expect(requestPath).toMatch(/won_since=\d{4}-\d{2}-\d{2}/);
+    expect(requestPath).toContain("lost_since=2026-04-01");
+    expect(requestPath).toContain("lost_until=2026-04-30");
 
     await act(async () => {
       root.unmount();

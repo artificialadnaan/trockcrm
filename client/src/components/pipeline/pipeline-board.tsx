@@ -10,6 +10,11 @@ import {
 } from "@dnd-kit/core";
 import { PipelineBoardColumn, type PipelineBoardColumnData } from "./pipeline-board-column";
 import { PipelineRecordCard } from "./pipeline-record-card";
+import {
+  isTerminalOutcomeSlug,
+  type TerminalDateFilter,
+  type TerminalOutcome,
+} from "@/lib/pipeline-terminal-filters";
 import { cn } from "@/lib/utils";
 
 export interface PipelineBoardProps {
@@ -19,6 +24,8 @@ export interface PipelineBoardProps {
   onOpenStage: (stageId: string) => void;
   onOpenRecord: (recordId: string) => void;
   onMove?: (input: { activeId: string; targetStageId: string; targetStageSlug: string }) => void;
+  terminalDateFilters?: Record<TerminalOutcome, TerminalDateFilter>;
+  onTerminalDateFilterChange?: (outcome: TerminalOutcome, filter: TerminalDateFilter) => void;
 }
 
 export function resolvePipelineBoardMove(
@@ -59,6 +66,8 @@ export function PipelineBoard({
   onOpenStage,
   onOpenRecord,
   onMove,
+  terminalDateFilters,
+  onTerminalDateFilterChange,
 }: PipelineBoardProps) {
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 8 } }));
   const [activeRecordId, setActiveRecordId] = useState<string | null>(null);
@@ -103,16 +112,26 @@ export function PipelineBoard({
             columns.length <= 4 ? "justify-between" : ""
           )}
         >
-        {columns.map((column) => (
-          <PipelineBoardColumn
-            key={column.stage.id}
-            entity={entity}
-            column={column}
-            onOpenStage={onOpenStage}
-            onOpenRecord={onOpenRecord}
-            activeRecordId={activeRecordId}
-          />
-        ))}
+        {columns.map((column) => {
+          const terminalOutcome = isTerminalOutcomeSlug(column.stage.slug) ? column.stage.slug : null;
+
+          return (
+            <PipelineBoardColumn
+              key={column.stage.id}
+              entity={entity}
+              column={column}
+              onOpenStage={onOpenStage}
+              onOpenRecord={onOpenRecord}
+              activeRecordId={activeRecordId}
+              terminalFilter={terminalOutcome ? terminalDateFilters?.[terminalOutcome] : undefined}
+              onTerminalFilterChange={
+                terminalOutcome && onTerminalDateFilterChange
+                  ? (filter) => onTerminalDateFilterChange(terminalOutcome, filter)
+                  : undefined
+              }
+            />
+          );
+        })}
         </div>
       </div>
       <DragOverlay>

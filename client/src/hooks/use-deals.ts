@@ -1,5 +1,10 @@
 import { useState, useEffect, useCallback } from "react";
 import { api } from "@/lib/api";
+import {
+  appendPipelineTerminalDateParams,
+  type TerminalDateFilter,
+  type TerminalOutcome,
+} from "@/lib/pipeline-terminal-filters";
 import type { FileRecord } from "./use-files";
 export { getDealStageMetadata, getWorkflowRouteLabel } from "@/lib/pipeline-ownership";
 import type { StagePageQuery } from "@/lib/pipeline-stage-page";
@@ -552,7 +557,11 @@ export async function getDealScopingReadiness(dealId: string) {
   return api<{ readiness: DealScopingReadiness }>(`/deals/${dealId}/scoping-intake/readiness`);
 }
 
-export function useDealBoard(scope: "mine" | "team" | "all", includeDd: boolean) {
+export function useDealBoard(
+  scope: "mine" | "team" | "all",
+  includeDd: boolean,
+  terminalDateFilters?: Record<TerminalOutcome, TerminalDateFilter>
+) {
   const [board, setBoard] = useState<DealBoardResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -560,7 +569,15 @@ export function useDealBoard(scope: "mine" | "team" | "all", includeDd: boolean)
   const refetch = useCallback(() => {
     setLoading(true);
     setError(null);
-    return api<DealBoardApiResponse>(`/deals/pipeline?scope=${scope}&includeDd=${includeDd}&previewLimit=8`)
+    const params = new URLSearchParams({
+      scope,
+      includeDd: String(includeDd),
+      previewLimit: "8",
+    });
+    if (terminalDateFilters) {
+      appendPipelineTerminalDateParams(params, terminalDateFilters);
+    }
+    return api<DealBoardApiResponse>(`/deals/pipeline?${params.toString()}`)
       .then((result) => {
         const normalized = normalizeDealBoardResponse(result);
         setBoard(normalized);
@@ -571,7 +588,7 @@ export function useDealBoard(scope: "mine" | "team" | "all", includeDd: boolean)
         throw err;
       })
       .finally(() => setLoading(false));
-  }, [includeDd, scope]);
+  }, [includeDd, scope, terminalDateFilters]);
 
   useEffect(() => {
     void refetch().catch(() => undefined);
