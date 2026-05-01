@@ -85,7 +85,7 @@ railway_vars_kv() {
   local service="$1"
   (
     cd "$RAILWAY_WORKDIR"
-    railway variable list \
+    RAILWAY_API_TOKEN='' railway variable list \
       --environment "$ENVIRONMENT_ID" \
       --service "$service" \
       --kv
@@ -156,7 +156,7 @@ echo
 echo "Linking Railway project in temporary workdir ${RAILWAY_WORKDIR}..."
 (
   cd "$RAILWAY_WORKDIR"
-  railway link \
+  RAILWAY_API_TOKEN='' railway link \
     --project "$PROJECT_ID" \
     --environment "$ENVIRONMENT_ID" \
     --service "$PRODUCTION_DB_SERVICE" \
@@ -178,7 +178,7 @@ echo
 echo "Provisioning Railway Postgres service ${SERVICE_NAME}..."
 ADD_JSON="$(
   cd "$RAILWAY_WORKDIR"
-  railway add \
+  RAILWAY_API_TOKEN='' railway add \
     --database postgres \
     --service "$SERVICE_NAME" \
     --json
