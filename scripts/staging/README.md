@@ -6,13 +6,17 @@ The scripts do not run migrations automatically. They only create and tear down 
 
 ## Prerequisites
 
-- Railway CLI authenticated with access to the `T Rock CRM` project.
+- Railway CLI authenticated with access to the `T Rock CRM` project via `railway login`.
 - `RAILWAY_API_TOKEN` set to an account or workspace token for GraphQL API calls.
 - `pg_dump`, `pg_restore`, and `pg_isready` installed locally.
 - Node.js available locally.
 - Production Railway Postgres backups enabled before any production-affecting migration work.
 
+Run `railway login` once in an interactive terminal to populate `~/.railway/config.json`. The create script uses Railway CLI commands for linking, variable lookup, and provisioning; those commands use browser-login auth state.
+
 Create an account or workspace token from Railway account settings. Railway's API docs explain token types at <https://docs.railway.com/reference/integrations>. Use `RAILWAY_API_TOKEN` for account/workspace tokens; do not use `RAILWAY_TOKEN` for GraphQL Bearer auth because project tokens require a different header.
+
+Both auth methods are currently required: Railway CLI commands use `~/.railway/config.json`, while direct GraphQL operations use `RAILWAY_API_TOKEN`. The create script intentionally runs Railway CLI invocations with `RAILWAY_API_TOKEN=''` so the CLI does not prefer the API token over browser-login auth state.
 
 Defaults:
 
