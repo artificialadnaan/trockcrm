@@ -30,24 +30,24 @@ export type SalesWorkflowDisqualificationReason =
   (typeof SALES_WORKFLOW_DISQUALIFICATION_REASONS)[number];
 
 export const BID_BOARD_MIRRORED_STAGE_SLUGS = [
-  "estimate_in_progress",
+  "estimating",
   "service_estimating",
   "estimate_under_review",
   "estimate_sent_to_client",
-  "sent_to_production",
-  "service_sent_to_production",
-  "production_lost",
-  "service_lost",
+  "contract",
+  "won",
+  "lost",
 ] as const;
 export type BidBoardMirroredStageSlug = (typeof BID_BOARD_MIRRORED_STAGE_SLUGS)[number];
 
 export const NORMAL_DEAL_STAGE_SLUGS = [
   "opportunity",
-  "estimate_in_progress",
+  "estimating",
   "estimate_under_review",
   "estimate_sent_to_client",
-  "sent_to_production",
-  "production_lost",
+  "contract",
+  "won",
+  "lost",
 ] as const;
 
 export const SERVICE_DEAL_STAGE_SLUGS = [
@@ -55,8 +55,9 @@ export const SERVICE_DEAL_STAGE_SLUGS = [
   "service_estimating",
   "estimate_under_review",
   "estimate_sent_to_client",
-  "service_sent_to_production",
-  "service_lost",
+  "contract",
+  "won",
+  "lost",
 ] as const;
 
 export const SALES_WORKFLOW = {

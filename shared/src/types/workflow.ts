@@ -23,14 +23,13 @@ export type CanonicalLeadStageSlug = (typeof CANONICAL_LEAD_STAGE_SLUGS)[number]
 
 export const CANONICAL_DEAL_STAGE_SLUGS = [
   "opportunity",
-  "estimate_in_progress",
+  "estimating",
   "service_estimating",
   "estimate_under_review",
   "estimate_sent_to_client",
-  "sent_to_production",
-  "service_sent_to_production",
-  "production_lost",
-  "service_lost",
+  "contract",
+  "won",
+  "lost",
 ] as const;
 export type CanonicalDealStageSlug = (typeof CANONICAL_DEAL_STAGE_SLUGS)[number];
 
@@ -99,8 +98,8 @@ export const CANONICAL_DEAL_WORKFLOW_CONTRACTS = [
     isTerminal: false,
   },
   {
-    slug: "estimate_in_progress",
-    label: "Estimate in Progress",
+    slug: "estimating",
+    label: "Estimating",
     workflowRoutes: ["normal"],
     systemOfRecord: "bid_board",
     outcomeCategory: "active",
@@ -108,7 +107,7 @@ export const CANONICAL_DEAL_WORKFLOW_CONTRACTS = [
   },
   {
     slug: "service_estimating",
-    label: "Service - Estimating",
+    label: "Service Estimating",
     workflowRoutes: ["service"],
     systemOfRecord: "bid_board",
     outcomeCategory: "active",
@@ -131,42 +130,55 @@ export const CANONICAL_DEAL_WORKFLOW_CONTRACTS = [
     isTerminal: false,
   },
   {
-    slug: "sent_to_production",
-    label: "Sent to Production",
-    workflowRoutes: ["normal"],
+    slug: "contract",
+    label: "Contract",
+    workflowRoutes: WORKFLOW_ROUTES,
     systemOfRecord: "bid_board",
-    outcomeCategory: "handed_off",
+    outcomeCategory: "active",
+    isTerminal: false,
+  },
+  {
+    slug: "won",
+    label: "Won",
+    workflowRoutes: WORKFLOW_ROUTES,
+    systemOfRecord: "bid_board",
+    outcomeCategory: "won",
     isTerminal: true,
   },
   {
-    slug: "service_sent_to_production",
-    label: "Service - Sent to Production",
-    workflowRoutes: ["service"],
-    systemOfRecord: "bid_board",
-    outcomeCategory: "handed_off",
-    isTerminal: true,
-  },
-  {
-    slug: "production_lost",
-    label: "Production Lost",
-    workflowRoutes: ["normal"],
-    systemOfRecord: "bid_board",
-    outcomeCategory: "lost",
-    isTerminal: true,
-  },
-  {
-    slug: "service_lost",
-    label: "Service - Lost",
-    workflowRoutes: ["service"],
+    slug: "lost",
+    label: "Lost",
+    workflowRoutes: WORKFLOW_ROUTES,
     systemOfRecord: "bid_board",
     outcomeCategory: "lost",
     isTerminal: true,
   },
 ] as const satisfies readonly CanonicalDealWorkflowContract[];
 
-export const CANONICAL_DEAL_STAGE_LABELS = Object.fromEntries(
-  CANONICAL_DEAL_WORKFLOW_CONTRACTS.map((contract) => [contract.slug, contract.label])
-) as Record<CanonicalDealStageSlug, string>;
+export const HISTORICAL_DEAL_STAGE_ALIAS_LABELS = {
+  estimate_in_progress: "Estimating",
+  service_estimate_under_review: "Estimate Under Review",
+  service_estimate_sent_to_client: "Estimate Sent to Client",
+  contract_signed: "Contract",
+  service_contract_signed: "Contract",
+  sent_to_production: "Won",
+  service_sent_to_production: "Won",
+  production_lost: "Lost",
+  service_lost: "Lost",
+  closed_won: "Won",
+  closed_lost: "Lost",
+} as const;
+export type HistoricalDealStageAliasSlug = keyof typeof HISTORICAL_DEAL_STAGE_ALIAS_LABELS;
+
+export const CANONICAL_DEAL_STAGE_LABELS = {
+  ...(Object.fromEntries(
+    CANONICAL_DEAL_WORKFLOW_CONTRACTS.map((contract) => [contract.slug, contract.label])
+  ) as Record<CanonicalDealStageSlug, string>),
+  ...HISTORICAL_DEAL_STAGE_ALIAS_LABELS,
+} as const satisfies Record<CanonicalDealStageSlug | HistoricalDealStageAliasSlug, string>;
+export type DealStageSlugWithHistoricalAliases =
+  | CanonicalDealStageSlug
+  | HistoricalDealStageAliasSlug;
 
 type CanonicalDealWorkflowContractRecord = (typeof CANONICAL_DEAL_WORKFLOW_CONTRACTS)[number];
 
@@ -208,24 +220,44 @@ export type LegacyLeadStageSlug = keyof typeof LEGACY_LEAD_STAGE_TO_CANONICAL_ST
 export const LEGACY_DEAL_STAGE_TO_CANONICAL_STAGE = {
   normal: {
     dd: "opportunity",
-    estimating: "estimate_in_progress",
+    estimating: "estimating",
+    estimate_in_progress: "estimating",
     bid_sent: "estimate_sent_to_client",
-    in_production: "sent_to_production",
-    close_out: "sent_to_production",
-    closed_won: "sent_to_production",
-    closed_lost: "production_lost",
+    service_estimate_under_review: "estimate_under_review",
+    service_estimate_sent_to_client: "estimate_sent_to_client",
+    contract_signed: "contract",
+    service_contract_signed: "contract",
+    in_production: "won",
+    close_out: "won",
+    sent_to_production: "won",
+    service_sent_to_production: "won",
+    closed_won: "won",
+    production_lost: "lost",
+    service_lost: "lost",
+    closed_lost: "lost",
   },
   service: {
     dd: "opportunity",
     estimating: "service_estimating",
+    estimate_in_progress: "estimating",
     bid_sent: "estimate_sent_to_client",
-    in_production: "service_sent_to_production",
-    close_out: "service_sent_to_production",
-    closed_won: "service_sent_to_production",
-    closed_lost: "service_lost",
+    service_estimate_under_review: "estimate_under_review",
+    service_estimate_sent_to_client: "estimate_sent_to_client",
+    contract_signed: "contract",
+    service_contract_signed: "contract",
+    in_production: "won",
+    close_out: "won",
+    sent_to_production: "won",
+    service_sent_to_production: "won",
+    closed_won: "won",
+    production_lost: "lost",
+    service_lost: "lost",
+    closed_lost: "lost",
   },
 } as const satisfies Record<WorkflowRoute, Record<string, CanonicalDealStageSlug>>;
-export type LegacyDealStageSlug = keyof (typeof LEGACY_DEAL_STAGE_TO_CANONICAL_STAGE)["normal"];
+export type LegacyDealStageSlug =
+  | keyof (typeof LEGACY_DEAL_STAGE_TO_CANONICAL_STAGE)["normal"]
+  | keyof (typeof LEGACY_DEAL_STAGE_TO_CANONICAL_STAGE)["service"];
 
 export type LegacyWorkflowStageSlug = LegacyLeadStageSlug | LegacyDealStageSlug;
 
@@ -253,8 +285,8 @@ export function workflowFamilyForRoute(
 
 export function getCanonicalEstimatingBoundaryStageSlug(
   workflowRoute: WorkflowRoute
-): Extract<CanonicalDealStageSlug, "estimate_in_progress" | "service_estimating"> {
-  return workflowRoute === "service" ? "service_estimating" : "estimate_in_progress";
+): Extract<CanonicalDealStageSlug, "estimating" | "service_estimating"> {
+  return workflowRoute === "service" ? "service_estimating" : "estimating";
 }
 
 export function isCanonicalLeadStageSlug(stageSlug: string): stageSlug is CanonicalLeadStageSlug {
@@ -276,7 +308,7 @@ export function toCanonicalLeadStageSlug(stageSlug: string): CanonicalLeadStageS
 export function toCanonicalDealStageSlug(
   stageSlug: string,
   workflowRoute?: WorkflowRoute | null
-): CanonicalDealStageSlug | null {
+): DealStageSlugWithHistoricalAliases | null {
   if (isCanonicalDealStageSlug(stageSlug)) {
     const contract = CANONICAL_DEAL_WORKFLOW_CONTRACTS_BY_SLUG.get(stageSlug);
     if (!contract) {
@@ -312,7 +344,7 @@ export function toCanonicalDealStageSlug(
 export function toCanonicalWorkflowStageSlug(
   stageSlug: string,
   workflowRoute?: WorkflowRoute | null
-): CanonicalWorkflowStageSlug | null {
+): CanonicalLeadStageSlug | DealStageSlugWithHistoricalAliases | null {
   return toCanonicalLeadStageSlug(stageSlug) ?? toCanonicalDealStageSlug(stageSlug, workflowRoute);
 }
 

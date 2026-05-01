@@ -38,29 +38,30 @@ describe("sales workflow client contract", () => {
     ]);
     expect(NORMAL_DEAL_STAGE_SLUGS).toEqual([
       "opportunity",
-      "estimate_in_progress",
+      "estimating",
       "estimate_under_review",
       "estimate_sent_to_client",
-      "sent_to_production",
-      "production_lost",
+      "contract",
+      "won",
+      "lost",
     ]);
     expect(SERVICE_DEAL_STAGE_SLUGS).toEqual([
       "opportunity",
       "service_estimating",
       "estimate_under_review",
       "estimate_sent_to_client",
-      "service_sent_to_production",
-      "service_lost",
+      "contract",
+      "won",
+      "lost",
     ]);
     expect(BID_BOARD_MIRRORED_STAGE_SLUGS).toEqual([
-      "estimate_in_progress",
+      "estimating",
       "service_estimating",
       "estimate_under_review",
       "estimate_sent_to_client",
-      "sent_to_production",
-      "service_sent_to_production",
-      "production_lost",
-      "service_lost",
+      "contract",
+      "won",
+      "lost",
     ]);
   });
 });

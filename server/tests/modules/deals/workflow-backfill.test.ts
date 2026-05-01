@@ -25,7 +25,7 @@ describe("planDealWorkflowBackfill", () => {
     expect(result.ownershipModel).toBe("bid_board");
     expect(result.isBidBoardOwned).toBe(true);
     expect(result.reopenInCrmEditableFlow).toBe(false);
-    expect(result.mirroredStageSlug).toBe("bid_sent");
+    expect(result.mirroredStageSlug).toBe("estimate_sent_to_client");
     expect(result.effectiveStageEnteredAt).toEqual(new Date("2026-04-12T10:15:00.000Z"));
     expect(result.pipelineTypeSnapshot).toBe("normal");
     expect(result.sourceLinkage).toEqual({
@@ -79,7 +79,24 @@ describe("planDealWorkflowBackfill", () => {
     expect(result.ownershipModel).toBe("bid_board");
     expect(result.isBidBoardOwned).toBe(true);
     expect(result.reopenInCrmEditableFlow).toBe(false);
-    expect(result.mirroredStageSlug).toBe("in_production");
+    expect(result.mirroredStageSlug).toBe("won");
     expect(result.effectiveStageEnteredAt).toEqual(new Date("2026-04-14T11:00:00.000Z"));
+  });
+
+  it("normalizes inactive historical terminal aliases to shared won/lost canonical slugs", () => {
+    expect(
+      planDealWorkflowBackfill({
+        id: "deal-5",
+        stageSlug: "service_sent_to_production",
+        workflowRoute: "service",
+      }).mirroredStageSlug
+    ).toBe("won");
+    expect(
+      planDealWorkflowBackfill({
+        id: "deal-6",
+        stageSlug: "production_lost",
+        workflowRoute: "normal",
+      }).mirroredStageSlug
+    ).toBe("lost");
   });
 });

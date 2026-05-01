@@ -7,12 +7,21 @@ import {
 } from "./sales-workflow";
 
 const LEGACY_BID_BOARD_MIRRORED_STAGE_SLUGS = [
-  "estimating",
+  "estimate_in_progress",
   "bid_sent",
   "in_production",
   "close_out",
+  "sent_to_production",
+  "service_sent_to_production",
+  "production_lost",
+  "service_lost",
+  "contract_signed",
+  "service_contract_signed",
   "closed_won",
   "closed_lost",
+  "service_estimate_under_review",
+  "service_estimate_sent_to_client",
+  "service_complete",
 ] as const;
 
 export type LeadBoardStageSlug = Exclude<(typeof CRM_OWNED_LEAD_STAGE_SLUGS)[number], "opportunity">;
@@ -73,7 +82,8 @@ export function isEstimatingBoundaryStageSlug(
   const normalizedRoute = normalizeWorkflowRoute(workflowRoute);
   return (
     stageSlug === "estimating" ||
-    stageSlug === (normalizedRoute === "service" ? "service_estimating" : "estimate_in_progress")
+    stageSlug === "estimate_in_progress" ||
+    stageSlug === (normalizedRoute === "service" ? "service_estimating" : "estimating")
   );
 }
 
@@ -96,32 +106,39 @@ export function normalizeDealStageSlug(
 ): CanonicalDealBoardStageSlug | null {
   if (!stageSlug) return null;
 
-  const normalizedRoute = normalizeWorkflowRoute(workflowRoute);
-
   switch (stageSlug) {
     case "opportunity":
-      return "opportunity";
+    case "estimating":
+    case "contract":
+    case "won":
+    case "lost":
+      return stageSlug;
     case "estimate_in_progress":
+      return "estimating";
     case "service_estimating":
     case "estimate_under_review":
     case "estimate_sent_to_client":
-    case "sent_to_production":
-    case "service_sent_to_production":
-    case "production_lost":
-    case "service_lost":
       return stageSlug;
-    case "estimating":
-      return normalizedRoute === "service" ? "service_estimating" : "estimate_in_progress";
     case "bid_sent":
       return "estimate_sent_to_client";
+    case "service_estimate_under_review":
+      return "estimate_under_review";
+    case "service_estimate_sent_to_client":
+      return "estimate_sent_to_client";
+    case "contract_signed":
+    case "service_contract_signed":
+      return "contract";
+    case "sent_to_production":
+    case "service_sent_to_production":
     case "in_production":
     case "close_out":
     case "closed_won":
-      return normalizedRoute === "service" ? "service_sent_to_production" : "sent_to_production";
-    case "closed_lost":
-      return normalizedRoute === "service" ? "service_lost" : "production_lost";
     case "service_complete":
-      return "service_sent_to_production";
+      return "won";
+    case "production_lost":
+    case "service_lost":
+    case "closed_lost":
+      return "lost";
     default:
       return null;
   }
@@ -141,22 +158,20 @@ export function getDealStageLabelBySlug(slug: CanonicalDealBoardStageSlug) {
   switch (slug) {
     case "opportunity":
       return "Opportunity";
-    case "estimate_in_progress":
-      return "Estimate in Progress";
+    case "estimating":
+      return "Estimating";
     case "service_estimating":
-      return "Service - Estimating";
+      return "Service Estimating";
     case "estimate_under_review":
       return "Estimate Under Review";
     case "estimate_sent_to_client":
       return "Estimate Sent to Client";
-    case "sent_to_production":
-      return "Sent to Production";
-    case "service_sent_to_production":
-      return "Service - Sent to Production";
-    case "production_lost":
-      return "Production Lost";
-    case "service_lost":
-      return "Service - Lost";
+    case "contract":
+      return "Contract";
+    case "won":
+      return "Won";
+    case "lost":
+      return "Lost";
   }
 }
 

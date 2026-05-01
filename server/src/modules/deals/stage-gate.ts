@@ -374,8 +374,7 @@ export async function validateStageGate(
   // Rule 2: Close-out checklist must be complete before moving from Close-Out into a won outcome.
   if (
     currentStage.slug === "close_out" &&
-    (canonicalTargetStageSlug === "sent_to_production" ||
-      canonicalTargetStageSlug === "service_sent_to_production")
+    canonicalTargetStageSlug === "won"
   ) {
     const checklistItems = await tenantDb
       .select()
