@@ -26,14 +26,11 @@ if ! command -v node >/dev/null 2>&1; then
 fi
 
 node - "$PROJECT_ID" "$ENVIRONMENT_ID" "$SERVICE_NAME" <<'NODE'
-const fs = require('fs');
-
 const [projectId, environmentId, serviceName] = process.argv.slice(2);
-const configPath = `${process.env.HOME}/.railway/config.json`;
-const token = process.env.RAILWAY_TOKEN || JSON.parse(fs.readFileSync(configPath, 'utf8')).user?.token;
+const token = process.env.RAILWAY_API_TOKEN;
 
 if (!token) {
-  console.error('Missing Railway token. Run railway login or set RAILWAY_TOKEN.');
+  console.error('Missing RAILWAY_API_TOKEN. Railway GraphQL Bearer auth requires an account or workspace API token.');
   process.exit(1);
 }
 
@@ -48,7 +45,15 @@ async function graphql(query, variables) {
     },
     body: JSON.stringify({ query, variables }),
   });
-  const payload = await response.json();
+
+  const body = await response.text();
+  let payload;
+  try {
+    payload = JSON.parse(body);
+  } catch {
+    throw new Error(`Railway GraphQL returned HTTP ${response.status} with non-JSON response body.`);
+  }
+
   if (payload.errors?.length) {
     throw new Error(JSON.stringify(payload.errors, null, 2));
   }
