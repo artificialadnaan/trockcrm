@@ -16,20 +16,24 @@ vi.mock("@/hooks/use-deals", () => ({
 vi.mock("@/lib/pipeline-ownership", () => ({
   getDealBoardStageSlugs: vi.fn(() => [
     "opportunity",
-    "estimate_in_progress",
+    "estimating",
+    "service_estimating",
     "estimate_under_review",
     "estimate_sent_to_client",
-    "sent_to_production",
-    "production_lost",
+    "contract",
+    "won",
+    "lost",
   ]),
   getDealStageLabelBySlug: vi.fn((slug: string) => {
     const labels: Record<string, string> = {
       opportunity: "Opportunity",
-      estimate_in_progress: "Estimate in Progress",
+      estimating: "Estimating",
+      service_estimating: "Service Estimating",
       estimate_under_review: "Estimate Under Review",
       estimate_sent_to_client: "Estimate Sent to Client",
-      sent_to_production: "Sent to Production",
-      production_lost: "Production Lost",
+      contract: "Contract",
+      won: "Won",
+      lost: "Lost",
     };
     return labels[slug] ?? slug;
   }),
@@ -37,7 +41,7 @@ vi.mock("@/lib/pipeline-ownership", () => ({
     if (stage.slug === "opportunity") {
       return { label: "CRM editable", tone: "crm" };
     }
-    if (stage.slug === "estimate_in_progress") {
+    if (stage.slug === "estimating" || stage.slug === "service_estimating") {
       return { label: "Bid Board mirror", secondaryLabel: "Read-only in CRM", tone: "mirror" };
     }
     return null;
@@ -54,16 +58,28 @@ vi.mock("@/lib/pipeline-ownership", () => ({
       stages: Array<{ id: string; name: string; slug: string }>
     ) => {
       const stage = stages.find((entry) => entry.id === deal.stageId) ?? null;
-      const slug = deal.bidBoardStageSlug ?? stage?.slug ?? null;
+      const rawSlug = deal.bidBoardStageSlug ?? stage?.slug ?? null;
+      const map: Record<string, string> = {
+        estimate_in_progress: "estimating",
+        bid_sent: "estimate_sent_to_client",
+        in_production: "won",
+        close_out: "won",
+        closed_won: "won",
+        sent_to_production: "won",
+        service_sent_to_production: "won",
+        closed_lost: "lost",
+        production_lost: "lost",
+        service_lost: "lost",
+      };
+      const slug = rawSlug == null ? null : (map[rawSlug] ?? rawSlug);
       const isMirroredStage = [
-        "estimate_in_progress",
+        "estimating",
         "service_estimating",
         "estimate_under_review",
         "estimate_sent_to_client",
-        "sent_to_production",
-        "service_sent_to_production",
-        "production_lost",
-        "service_lost",
+        "contract",
+        "won",
+        "lost",
       ].includes(slug ?? "");
       const isReadOnlyInCrm = isMirroredStage || Boolean(deal.isBidBoardOwned || deal.readOnlySyncedAt);
 
@@ -81,12 +97,16 @@ vi.mock("@/lib/pipeline-ownership", () => ({
   ),
   normalizeDealStageSlug: vi.fn((slug: string) => {
     const map: Record<string, string> = {
-      estimating: "estimate_in_progress",
+      estimate_in_progress: "estimating",
       bid_sent: "estimate_sent_to_client",
-      in_production: "sent_to_production",
-      close_out: "sent_to_production",
-      closed_won: "sent_to_production",
-      closed_lost: "production_lost",
+      in_production: "won",
+      close_out: "won",
+      closed_won: "won",
+      sent_to_production: "won",
+      service_sent_to_production: "won",
+      closed_lost: "lost",
+      production_lost: "lost",
+      service_lost: "lost",
     };
     return map[slug] ?? slug;
   }),
@@ -214,8 +234,8 @@ describe("DealListPage", () => {
         },
         {
           id: "stage-estimating",
-          name: "Estimate in Progress",
-          slug: "estimate_in_progress",
+          name: "Estimating",
+          slug: "estimating",
           workflowFamily: "standard_deal",
           displayOrder: 2,
           isActivePipeline: true,
@@ -223,7 +243,7 @@ describe("DealListPage", () => {
         },
         {
           id: "stage-service-estimating",
-          name: "Service - Estimating",
+          name: "Service Estimating",
           slug: "service_estimating",
           workflowFamily: "service_deal",
           displayOrder: 2,
@@ -243,7 +263,7 @@ describe("DealListPage", () => {
             cards: [makeDeal()],
           },
           {
-            stage: { id: "stage-estimating", name: "Estimate in Progress", slug: "estimate_in_progress" },
+            stage: { id: "stage-service-estimating", name: "Service Estimating", slug: "service_estimating" },
             count: 1,
             totalValue: 92000,
             cards: [
@@ -278,7 +298,8 @@ describe("DealListPage", () => {
       true
     );
     expect(html).toContain("Opportunity");
-    expect(html).toContain("Estimate in Progress");
+    expect(html).toContain("Estimating");
+    expect(html).toContain("Service Estimating");
     expect(html).toContain("Active deals");
     expect(html).toContain("Avg. stage age");
     expect(html).toContain("Live stages");
@@ -316,6 +337,6 @@ describe("DealListPage", () => {
     const html = renderPage();
 
     expect(html).toContain("Opportunity");
-    expect(html).toContain("Estimate in Progress");
+    expect(html).toContain("Estimating");
   });
 });

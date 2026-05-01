@@ -11,11 +11,21 @@ import {
 } from "@/components/ui/select";
 import { usePipelineStages, useProjectTypes, useRegions } from "@/hooks/use-pipeline-config";
 import type { DealFilters as DealFilterValues } from "@/hooks/use-deals";
+import { isSelectableDealStageSlug } from "@/lib/pipeline-ownership";
 
 interface DealFiltersProps {
   filters: DealFilterValues;
   onFilterChange: (update: Partial<DealFilterValues>) => void;
   onReset: () => void;
+}
+
+type StageFilterOption = {
+  slug: string;
+  isActivePipeline?: boolean | null;
+};
+
+export function getSelectableDealFilterStages<T extends StageFilterOption>(stages: T[]) {
+  return stages.filter((s) => s.isActivePipeline !== false && isSelectableDealStageSlug(s.slug));
 }
 
 export function DealFilters({ filters, onFilterChange, onReset }: DealFiltersProps) {
@@ -24,8 +34,9 @@ export function DealFilters({ filters, onFilterChange, onReset }: DealFiltersPro
   const { regions } = useRegions();
   const [showAdvanced, setShowAdvanced] = useState(false);
 
-  const activeStages = stages.filter((s) => !s.isTerminal);
-  const terminalStages = stages.filter((s) => s.isTerminal);
+  const selectableStages = getSelectableDealFilterStages(stages);
+  const activeStages = selectableStages.filter((s) => !s.isTerminal);
+  const terminalStages = selectableStages.filter((s) => s.isTerminal);
 
   const activeFilterCount = [
     filters.stageIds?.length ? 1 : 0,

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { buildCanonicalDealBoardColumns } from "./canonical-deal-board";
 
 describe("buildCanonicalDealBoardColumns", () => {
-  it("projects legacy and mirrored deal stages into the canonical dashboard columns", () => {
+  it("projects legacy and mirrored deal stages into the final canonical dashboard columns", () => {
     const columns = buildCanonicalDealBoardColumns(
       [
         {
@@ -102,6 +102,14 @@ describe("buildCanonicalDealBoardColumns", () => {
           name: "Estimate in Progress",
           slug: "estimate_in_progress",
           workflowFamily: "standard_deal",
+          isActivePipeline: false,
+        },
+        {
+          id: "service-estimating-stage",
+          name: "Service Estimating",
+          slug: "service_estimating",
+          workflowFamily: "service_deal",
+          isActivePipeline: true,
         },
         {
           id: "estimate-under-review-stage",
@@ -121,6 +129,7 @@ describe("buildCanonicalDealBoardColumns", () => {
           slug: "sent_to_production",
           workflowFamily: "standard_deal",
           isTerminal: false,
+          isActivePipeline: false,
         },
         {
           id: "production-lost-stage",
@@ -134,18 +143,19 @@ describe("buildCanonicalDealBoardColumns", () => {
 
     expect(columns.map((column) => column.stage.slug)).toEqual([
       "opportunity",
+      "estimating",
       "service_estimating",
-      "estimate_in_progress",
       "estimate_under_review",
       "estimate_sent_to_client",
-      "service_sent_to_production",
-      "sent_to_production",
-      "service_lost",
-      "production_lost",
+      "contract",
+      "won",
+      "lost",
     ]);
 
-    expect(columns.find((column) => column.stage.slug === "estimate_in_progress")?.cards.map((deal) => deal.id)).toEqual([
+    expect(columns.find((column) => column.stage.slug === "estimating")?.cards.map((deal) => deal.id)).toEqual([
       "deal-1",
     ]);
+    expect(columns.find((column) => column.stage.slug === "estimate_in_progress")).toBeUndefined();
+    expect(columns.find((column) => column.stage.slug === "sent_to_production")).toBeUndefined();
   });
 });

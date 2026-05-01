@@ -39,6 +39,19 @@ type CanonicalDealBoardStageSlug =
   | (typeof NORMAL_DEAL_STAGE_SLUGS)[number]
   | (typeof SERVICE_DEAL_STAGE_SLUGS)[number];
 
+// Active CRM/Bid Board stage order for selectable UI surfaces. Historical aliases
+// stay in the resolver above, but do not appear as new transition targets.
+export const DEAL_BOARD_STAGE_SLUGS = [
+  "opportunity",
+  "estimating",
+  "service_estimating",
+  "estimate_under_review",
+  "estimate_sent_to_client",
+  "contract",
+  "won",
+  "lost",
+] as const satisfies readonly CanonicalDealBoardStageSlug[];
+
 export function getLeadBoardStageLabel(slug: LeadBoardStageSlug) {
   return CRM_OWNED_LEAD_STAGE_LABELS[slug];
 }
@@ -151,7 +164,19 @@ export function getCanonicalDealStageSlugs(workflowRoute: WorkflowRouteLike) {
 }
 
 export function getDealBoardStageSlugs() {
-  return [...NORMAL_DEAL_STAGE_SLUGS];
+  return [...DEAL_BOARD_STAGE_SLUGS];
+}
+
+export function isHistoricalDealStageAliasSlug(stageSlug: string | null | undefined) {
+  if (!stageSlug) return false;
+  return LEGACY_BID_BOARD_MIRRORED_STAGE_SLUGS.includes(
+    stageSlug as (typeof LEGACY_BID_BOARD_MIRRORED_STAGE_SLUGS)[number]
+  );
+}
+
+export function isSelectableDealStageSlug(stageSlug: string | null | undefined) {
+  if (!stageSlug) return false;
+  return DEAL_BOARD_STAGE_SLUGS.includes(stageSlug as (typeof DEAL_BOARD_STAGE_SLUGS)[number]);
 }
 
 export function getDealStageLabelBySlug(slug: CanonicalDealBoardStageSlug) {
@@ -191,6 +216,8 @@ export function getDealStageMetadata(
     normalizeDealStageSlug(stage?.slug ?? null, deal.workflowRoute) ??
     stage?.slug ??
     null;
+  const historicalStageLabel =
+    isHistoricalDealStageAliasSlug(stage?.slug ?? null) ? (stage?.name ?? null) : null;
   const isMirroredStage = isBidBoardMirroredStageSlug(slug);
   const isOpportunityStage = slug === "opportunity";
   const isReadOnlyInCrm = isMirroredStage || Boolean(deal.isBidBoardOwned || deal.readOnlySyncedAt);
@@ -199,9 +226,10 @@ export function getDealStageMetadata(
     stage,
     slug,
     label:
-      slug != null && normalizeDealStageSlug(slug, deal.workflowRoute)
+      historicalStageLabel ??
+      (slug != null && normalizeDealStageSlug(slug, deal.workflowRoute)
         ? getDealStageLabelBySlug(normalizeDealStageSlug(slug, deal.workflowRoute)!)
-        : stage?.name ?? "Deal",
+        : stage?.name ?? "Deal"),
     isOpportunityStage,
     isMirroredStage,
     isReadOnlyInCrm,
